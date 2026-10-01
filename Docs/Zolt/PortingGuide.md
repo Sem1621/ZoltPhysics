@@ -185,12 +185,16 @@ alike: `push_back` → `append`, `pop_back` → `pop`, `size()` → `.len` / `.i
 
 ### Reference counting
 
-`RefTarget<T>` / `Ref<T>` / `RefConst<T>` keep Jolt's intrusive reference count, but without RAII:
-- the target embeds `ref_count: std.atomic.Value(u32)` and provides `addRef()` / `release()`
-  with the same memory orders as Jolt (`.monotonic` for add, `.release`/`.acq_rel` for release);
-- a `Ref<T>` member becomes `*T` (or `?*T`), and the owning struct calls `addRef()` when storing
-  it and `release()` in `deinit`. Document ownership in the field's doc comment;
-- `RefConst<T>` becomes `*const T`; `release` on a const pointer uses `@constCast` internally.
+`RefTarget<T>` / `Ref<T>` / `RefConst<T>` keep Jolt's intrusive reference count, but without RAII
+(implemented in `Core/Reference.zig`):
+- the target embeds `ref_count: RefCount` and declares `addRef()` / `release()`; `release()`
+  destroys the object when `self.ref_count.release()` returns true (see the example at the top of
+  `Core/Reference.zig`). Memory orders are Jolt's (`.monotonic` add, `.acq_rel` release);
+- a `Ref<T>` / `RefConst<T>` member becomes `Ref(T)` / `RefConst(T)`: `init(ptr)` / `set(ptr)` add a
+  reference like the C++ constructor / assignment, and the owner calls `deinit()` where the C++
+  destructor would run. Raw pointers stay raw (`*T`) where Jolt uses raw pointers;
+- `new Foo(...)` assigned to a `Ref` becomes `Foo.create(allocator, ...)` (refcount 0) followed by
+  `Ref(Foo).init(ptr)`; the object keeps its allocator to destroy itself.
 
 ### Strings, I/O and logging
 
