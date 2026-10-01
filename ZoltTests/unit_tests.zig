@@ -11,7 +11,9 @@ test {
     _ = @import("Core/HashCombineTest.zig");
 
     // Math
+    _ = @import("Math/Mat44Tests.zig");
     _ = @import("Math/MathTests.zig");
+    _ = @import("Math/QuatTests.zig");
     _ = @import("Math/TrigonometryTests.zig");
     _ = @import("Math/UVec4Tests.zig");
     _ = @import("Math/Vec3Tests.zig");

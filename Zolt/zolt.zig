@@ -21,6 +21,8 @@ pub const Float2 = @import("Math/Float2.zig").Float2;
 pub const Float3 = @import("Math/Float3.zig").Float3;
 pub const VertexList = @import("Math/Float3.zig").VertexList;
 pub const Float4 = @import("Math/Float4.zig").Float4;
+pub const Mat44 = @import("Math/Mat44.zig").Mat44;
+pub const Quat = @import("Math/Quat.zig").Quat;
 pub const UVec4 = @import("Math/UVec4.zig").UVec4;
 pub const Vec3 = @import("Math/Vec3.zig").Vec3;
 pub const Vec4 = @import("Math/Vec4.zig").Vec4;
@@ -34,7 +36,9 @@ const source_files = .{
     @import("Math/Float2.zig"),
     @import("Math/Float3.zig"),
     @import("Math/Float4.zig"),
+    @import("Math/Mat44.zig"),
     @import("Math/Math.zig"),
+    @import("Math/Quat.zig"),
     @import("Math/Swizzle.zig"),
     @import("Math/Trigonometry.zig"),
     @import("Math/UVec4.zig"),
