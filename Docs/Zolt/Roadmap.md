@@ -15,6 +15,11 @@ files whose dependencies are already ported.
   port reproduces Jolt bit for bit, never during.
 - **Tests are the spec.** Each phase ports the matching `UnitTests/` files. A file is
   `complete` only when its tests pass in single and double precision.
+- **Parity with the C++ library at every step.** `zig build parity` compiles `Jolt/` with Zig's
+  C++ compiler and compares Zolt with it bit for bit (`ZoltParity/`). Each phase extends it: math
+  functions, then geometry (GJK/EPA results), collision queries, and finally full simulation steps
+  (state hash per step), so a divergence is caught where it is introduced instead of in the final
+  determinism hashes.
 - **Determinism is the acceptance test.** Jolt's CI publishes the hashes that a
   `CROSS_PLATFORM_DETERMINISTIC` build produces for 5 PerformanceTest scenes
   (`.github/workflows/determinism_check.yml`). Reproducing them proves the port is exact:
@@ -41,7 +46,8 @@ files whose dependencies are already ported.
 
 ### Phase 0: Infrastructure ✅
 `build.zig` (options `double_precision`, `object_layer_bits`), module layout, porting guide,
-`tools/strip_isa.py`, `tools/port_status.py`, `tools/install_zig.sh`, CI, SessionStart hook.
+`tools/strip_isa.py`, `tools/port_status.py`, `tools/tidy_registry.py`, `tools/install_zig.sh`,
+CI, SessionStart hook, and the parity harness (`zig build parity`, `ZoltParity/`).
 
 ### Phase 1: Math (`Jolt/Math`, `UnitTests/Math`)
 Vec3, Vec4, UVec4, Float2/3/4, Swizzle, Math, Trigonometry, Quat, Mat44, DVec3, Double3, DMat44,
@@ -138,6 +144,8 @@ The port tracks Jolt **v5.6.1 at commit `5830c34`**. To pick up upstream changes
    re-port the corresponding Zig files (`Progress.md` shows the mapping).
 3. Update the tracked commit here and in `CLAUDE.md`, and the expected hashes in the table above
    from the new `determinism_check.yml`.
+4. Run `python3 tools/gen_jolt_sources.py` (the C++ file list of the parity build) and
+   `zig build parity`: the parity tests show which Zig code no longer matches the new C++.
 
 ## Session checklist (for Claude)
 

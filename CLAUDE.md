@@ -11,6 +11,7 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 | `UnitTests/`         | C++ unit tests (reference for `ZoltTests/`)                           |
 | `Zolt/`              | The Zig port, mirrors `Jolt/` file by file. Module root: `Zolt/zolt.zig` |
 | `ZoltTests/`         | Port of `UnitTests/`, root: `ZoltTests/unit_tests.zig`                |
+| `ZoltParity/`        | Bit-for-bit comparison of Zolt with the C++ library (`zig build parity`) |
 | `Docs/Zolt/`         | Porting docs: **read `PortingGuide.md` before writing any Zig code**  |
 | `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`)                    |
 
@@ -21,7 +22,8 @@ zig build test                              # all tests (library inline tests + 
 zig build test -Ddouble_precision=true      # same with JPH_DOUBLE_PRECISION semantics
 zig build test -Dtest-filter=TestVec3Cross  # run matching tests only
 zig build check                             # compile only (fast)
-zig fmt Zolt ZoltTests build.zig            # format (CI checks this)
+zig build parity                            # compare with the C++ Jolt library bit for bit (first build ~4 min)
+zig fmt Zolt ZoltTests ZoltParity build.zig # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
 python3 tools/port_status.py --write        # regenerate Docs/Zolt/Progress.md
 python3 tools/port_status.py --next         # what can be ported now (dependencies done)
@@ -44,9 +46,10 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   `EFoo::Bar` → `Foo.bar`. Operators become methods (`add`, `sub`, `mul`, `mulScalar`, `eql`, ...).
 - Keep Jolt's doc comments and implementation comments.
 - Explicit `std.mem.Allocator` everywhere, no globals. Blocking sync primitives need `std.Io`.
-- Port the matching Jolt unit tests with the same names and values.
-- Before finishing: `zig build test`, `zig build test -Ddouble_precision=true`,
-  `zig fmt --check Zolt ZoltTests build.zig`, `python3 tools/port_status.py --write`.
+- Port the matching Jolt unit tests with the same names and values, and add parity tests
+  (`ZoltParity/`) for every function that computes numbers.
+- Before finishing: `zig build test`, `zig build test -Ddouble_precision=true`, `zig build parity`,
+  `zig fmt --check Zolt ZoltTests ZoltParity build.zig`, `python3 tools/port_status.py --write`.
 
 ## Plan and status
 

@@ -6,6 +6,7 @@ on:
     paths:
       - 'Zolt/**'
       - 'ZoltTests/**'
+      - 'ZoltParity/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -15,6 +16,7 @@ on:
     paths:
       - 'Zolt/**'
       - 'ZoltTests/**'
+      - 'ZoltParity/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -37,7 +39,7 @@ jobs:
       with:
         version: ${{ env.ZIG_VERSION }}
     - name: Check formatting
-      run: zig fmt --check Zolt ZoltTests build.zig build.zig.zon
+      run: zig fmt --check Zolt ZoltTests ZoltParity build.zig build.zig.zon
     - name: Check that Docs/Zolt/Progress.md is up to date and the port headers are valid
       run: python3 tools/port_status.py --check
 
@@ -69,3 +71,20 @@ jobs:
         version: ${{ env.ZIG_VERSION }}
     - name: Test
       run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}
+
+  parity:
+    runs-on: ubuntu-latest
+    name: Parity with C++ Jolt double_precision=${{ matrix.double_precision }}
+    strategy:
+      fail-fast: false
+      matrix:
+        double_precision: [ false, true ]
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Compare with the C++ library
+      run: zig build parity --summary all -Doptimize=ReleaseSafe -Ddouble_precision=${{ matrix.double_precision }}

@@ -51,8 +51,11 @@ Contents:
    `tools/port_status.py` reads these headers to generate `Progress.md`.
 4. Register the file in `source_files` in `Zolt/zolt.zig` and re-export its public types there.
 5. Port the matching tests from `UnitTests/` into `ZoltTests/` (see [Tests](#10-tests)).
-6. Run `zig build test` (and `zig build test -Ddouble_precision=true` if the file touches
-   `Real` / `RVec3`), `zig fmt Zolt ZoltTests build.zig`, then `python3 tools/port_status.py --write`.
+6. Add parity tests (see [Tests](#10-tests)): every ported function that computes numbers gets
+   compared bit for bit with the C++ library on many inputs.
+7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build parity` (also with
+   `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig fmt Zolt ZoltTests ZoltParity build.zig`,
+   then `python3 tools/port_status.py --write`.
 
 ## 3. Layout and naming
 
@@ -374,6 +377,15 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface:
   checks with a comment `// Not ported: relies on ExpectAssert`.
 - Small tests of Zolt-specific code (helpers that have no Jolt counterpart) go inline in the
   source file as `test` blocks.
+- **Parity tests** (`ZoltParity/`, run with `zig build parity`) are the proof of exactness.
+  `build.zig` compiles the C++ library from `Jolt/` with Zig's C++ compiler in the configuration
+  Zolt follows (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `-ffp-contract=off`, same precision and layer
+  bits) and links it into `ZoltParity/parity.zig`. For each ported function: add a C ABI wrapper in
+  `ZoltParity/JoltReference.cpp`, then call both implementations on ~100k generated inputs (random
+  values mixed with special values) and require identical bits (NaN payloads excepted). A parity
+  mismatch is always a porting bug: Jolt guarantees that its SIMD paths match its scalar fallback
+  in this mode. Higher level code (collision queries, simulation steps) is compared the same way,
+  e.g. by hashing body state after N steps on both sides.
 - `Zolt/zolt.zig` references every public declaration of every registered file, so all
   non-generic functions are type checked even without a test. Generic functions need a test.
 
