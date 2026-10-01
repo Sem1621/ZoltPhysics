@@ -1,6 +1,4 @@
 //! Port of: UnitTests/Math/MathTests.cpp
-//! Status: partial
-//! Missing: TestFindRoot (needs Jolt/Math/FindRoot.h, which has no Zolt port yet)
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -81,8 +79,49 @@ test "TestIsPowerOf2" {
 }
 
 test "TestFindRoot" {
-    // Not ported yet: depends on Jolt/Math/FindRoot.h, which has no Zolt port yet
-    return error.SkipZigTest;
+    {
+        // Quadratic, 2 solutions
+        const r = zolt.findRoot(f32, 2.0, 8.0, 6.0);
+        try expectEqual(@as(i32, 2), r.num_roots);
+        try expect(r.x1 == -3.0);
+        try expect(r.x2 == -1.0);
+    }
+
+    {
+        // Quadratic without b term, 2 solutions
+        const r = zolt.findRoot(f32, 2.0, 0.0, -8.0);
+        try expectEqual(@as(i32, 2), r.num_roots);
+        try expect(r.x1 == -2.0);
+        try expect(r.x2 == 2.0);
+    }
+
+    {
+        // Quadratic without solution
+        const r = zolt.findRoot(f32, 2.0, 1.0, 8.0);
+        try expectEqual(@as(i32, 0), r.num_roots);
+    }
+
+    {
+        // Linear
+        const r = zolt.findRoot(f32, 0.0, 8.0, 4.0);
+        try expectEqual(@as(i32, 1), r.num_roots);
+        try expect(r.x1 == -0.5);
+        try expect(r.x2 == -0.5);
+    }
+
+    {
+        // Constant
+        const r = zolt.findRoot(f32, 0.0, 0.0, 0.0);
+        try expectEqual(@as(i32, 1), r.num_roots);
+        try expect(r.x1 == 0.0);
+        try expect(r.x2 == 0.0);
+    }
+
+    {
+        // Constant, no solution
+        const r = zolt.findRoot(f32, 0.0, 0.0, 1.0);
+        try expectEqual(@as(i32, 0), r.num_roots);
+    }
 }
 
 test "TestDifferenceOfProducts" {

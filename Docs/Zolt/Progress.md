@@ -6,7 +6,7 @@ Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. P
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).
 
-**Library: 9.7%** of 86868 lines in scope · **Unit tests: 14.1%** of 18321 lines
+**Library: 11.7%** of 86868 lines in scope · **Unit tests: 20.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -17,7 +17,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
 | `Jolt/Core` | 19% | 9 | 1 | 0 | 30 | 15 | 7518 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
-| `Jolt/Math` | 75% | 19 | 0 | 0 | 4 | 1 | 9290 |
+| `Jolt/Math` | 95% | 21 | 0 | 0 | 2 | 1 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
 | `Jolt/Physics` | 0% | 0 | 0 | 0 | 13 | 0 | 5053 |
 | `Jolt/Physics/Body` | 0% | 0 | 0 | 0 | 18 | 0 | 5146 |
@@ -185,7 +185,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>Jolt/Math — 75%</summary>
+<details><summary>Jolt/Math — 95%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -201,11 +201,11 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Float4.h` | 34 | ✅ complete | `Zolt/Math/Float4.zig` |
 | `GaussianElimination.h` | 88 | ✅ complete | `Zolt/Math/GaussianElimination.zig` |
 | `HalfFloat.h` | 173 | ✅ complete | `Zolt/Math/HalfFloat.zig` |
-| `Mat44.h`, `Mat44.inl` | 1198 | ❌ todo |  |
+| `Mat44.h`, `Mat44.inl` | 1198 | ✅ complete | `Zolt/Math/Mat44.zig` |
 | `Math.h` | 259 | ✅ complete | `Zolt/Math/Math.zig` |
 | `MathTypes.h` | 27 | ➖ n/a | forward declarations and argument type aliases |
 | `Matrix.h` | 219 | ✅ complete | `Zolt/Math/Matrix.zig` |
-| `Quat.h`, `Quat.inl` | 592 | ❌ todo |  |
+| `Quat.h`, `Quat.inl` | 592 | ✅ complete | `Zolt/Math/Quat.zig` |
 | `Real.h` | 32 | ❌ todo |  |
 | `Swizzle.h` | 15 | ✅ complete | `Zolt/Math/Swizzle.zig` |
 | `Trigonometry.h` | 66 | ✅ complete | `Zolt/Math/Trigonometry.zig` |
@@ -549,7 +549,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 349 |
 | `UnitTests/Core` | 23% | 4 | 0 | 0 | 7 | 2 | 1021 |
 | `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 854 |
-| `UnitTests/Math` | 59% | 8 | 1 | 1 | 4 | 0 | 3683 |
+| `UnitTests/Math` | 88% | 11 | 1 | 0 | 2 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 220 |
 | `UnitTests/Physics` | 0% | 0 | 0 | 0 | 33 | 0 | 11009 |
 
@@ -610,7 +610,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>UnitTests/Math — 59%</summary>
+<details><summary>UnitTests/Math — 88%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -619,10 +619,10 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `DVec3Tests.cpp` | 279 | ✅ complete | `ZoltTests/Math/DVec3Tests.zig` |
 | `EigenValueSymmetricTests.cpp` | 48 | ❌ todo |  |
 | `HalfFloatTests.cpp` | 82 | ✅ complete | `ZoltTests/Math/HalfFloatTests.zig` |
-| `Mat44Tests.cpp` | 464 | ❌ todo |  |
-| `MathTests.cpp` | 142 | ⚪ stub | `ZoltTests/Math/MathTests.zig` |
+| `Mat44Tests.cpp` | 464 | ✅ complete | `ZoltTests/Math/Mat44Tests.zig` |
+| `MathTests.cpp` | 142 | ✅ complete | `ZoltTests/Math/MathTests.zig` |
 | `MatrixTests.cpp` | 100 | ✅ complete | `ZoltTests/Math/MatrixTests.zig` |
-| `QuatTests.cpp` | 491 | ❌ todo |  |
+| `QuatTests.cpp` | 491 | ✅ complete | `ZoltTests/Math/QuatTests.zig` |
 | `TrigonometryTests.cpp` | 24 | ✅ complete | `ZoltTests/Math/TrigonometryTests.zig` |
 | `UVec4Tests.cpp` | 527 | ✅ complete | `ZoltTests/Math/UVec4Tests.zig` |
 | `Vec3Tests.cpp` | 398 | 🟡 partial | `ZoltTests/Math/Vec3Tests.zig` |
