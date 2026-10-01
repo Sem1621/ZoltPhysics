@@ -12,6 +12,8 @@ test {
     _ = @import("Core/HashCombineTest.zig");
     _ = @import("Core/InsertionSortTest.zig");
     _ = @import("Core/QuickSortTest.zig");
+    _ = @import("Core/UnorderedMapTest.zig");
+    _ = @import("Core/UnorderedSetTest.zig");
 
     // Math
     _ = @import("Math/BVec16Tests.zig");

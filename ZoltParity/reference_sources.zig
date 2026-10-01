@@ -2,5 +2,6 @@
 //! Compiled into the reference library by `zig build parity`. Keep sorted (merged with git's union driver).
 
 pub const files = [_][]const u8{
+    "Core/ContainersReference.cpp",
     "Math/MathReference.cpp",
 };

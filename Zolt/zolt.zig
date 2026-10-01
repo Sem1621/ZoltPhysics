@@ -16,8 +16,12 @@ pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
 pub const HashCombine = @import("Core/HashCombine.zig");
+pub const HashTable = @import("Core/HashTable.zig").HashTable;
+pub const HashTableOptions = @import("Core/HashTable.zig").HashTableOptions;
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const Mt19937 = @import("Core/Mt19937.zig");
+pub const IDToObjectMap = @import("Core/ObjectToIDMap.zig").IDToObjectMap;
+pub const ObjectToIDMap = @import("Core/ObjectToIDMap.zig").ObjectToIDMap;
 pub const prefetchL1 = @import("Core/Prefetch.zig").prefetchL1;
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
 pub const Ref = @import("Core/Reference.zig").Ref;
@@ -25,6 +29,10 @@ pub const RefConst = @import("Core/Reference.zig").RefConst;
 pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const UnorderedMap = @import("Core/UnorderedMap.zig").UnorderedMap;
+pub const UnorderedMapDetail = @import("Core/UnorderedMap.zig").UnorderedMapDetail;
+pub const UnorderedSet = @import("Core/UnorderedSet.zig").UnorderedSet;
+pub const UnorderedSetDetail = @import("Core/UnorderedSet.zig").UnorderedSetDetail;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
@@ -66,12 +74,16 @@ const source_files = .{
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
     @import("Core/HashCombine.zig"),
+    @import("Core/HashTable.zig"),
     @import("Core/InsertionSort.zig"),
     @import("Core/Mt19937.zig"),
+    @import("Core/ObjectToIDMap.zig"),
     @import("Core/Prefetch.zig"),
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/UnorderedMap.zig"),
+    @import("Core/UnorderedSet.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),

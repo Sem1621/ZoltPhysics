@@ -11,6 +11,7 @@
 //! Run: zig build parity [-Ddouble_precision=true] [-Dtest-filter=Vec4]
 
 test {
+    _ = @import("Core/ContainersParity.zig");
     _ = @import("Math/MathParity.zig");
     _ = @import("ParityFramework.zig");
 }
