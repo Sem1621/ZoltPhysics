@@ -1,5 +1,5 @@
-// Reference implementation for the parity tests (`zig build parity`): thin C ABI wrappers around the
-// C++ Jolt library. ZoltParity/parity.zig calls these and checks that Zolt produces the same bits.
+// Reference implementation for the Jolt/Math parity tests (`zig build parity`): thin C ABI wrappers around the
+// C++ Jolt library. ZoltParity/Math/MathParity.zig calls these and checks that Zolt produces the same bits.
 //
 // Conventions: vectors are passed as float arrays (3 or 4 components), quaternions as 4 floats (x, y, z, w),
 // matrices as 16 floats in column major order. DVec3 is passed as 3 doubles, DMat44 as 12 floats (the 3 rotation

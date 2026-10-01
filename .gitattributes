@@ -24,3 +24,5 @@ gradlew text eol=lf
 # Registries of the Zig port: parallel ports only append lines, so keep both sides when merging
 Zolt/zolt.zig merge=union
 ZoltTests/unit_tests.zig merge=union
+ZoltParity/parity.zig merge=union
+ZoltParity/reference_sources.zig merge=union

@@ -414,12 +414,17 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
 - **Parity tests** (`ZoltParity/`, run with `zig build parity`) are the proof of exactness.
   `build.zig` compiles the C++ library from `Jolt/` with Zig's C++ compiler in the configuration
   Zolt follows (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `-ffp-contract=off`, same precision and layer
-  bits) and links it into `ZoltParity/parity.zig`. For each ported function: add a C ABI wrapper in
-  `ZoltParity/JoltReference.cpp`, then call both implementations on ~100k generated inputs (random
-  values mixed with special values) and require identical bits (NaN payloads excepted). A parity
-  mismatch is always a porting bug: Jolt guarantees that its SIMD paths match its scalar fallback
-  in this mode. Higher level code (collision queries, simulation steps) is compared the same way,
-  e.g. by hashing body state after N steps on both sides.
+  bits, CPU pinned to x86-64-v3) and links it into the parity test binary. Layout mirrors `Zolt/`:
+  `ZoltParity/<Dir>/<Dir>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Dir>Reference.cpp` the
+  C ABI wrappers around Jolt; shared helpers (input generator, bit comparison, `Checker`) are in
+  `ZoltParity/ParityFramework.zig`. Register test files in `ZoltParity/parity.zig` and .cpp files in
+  `ZoltParity/reference_sources.zig`. For each ported function, call both implementations on ~100k
+  generated inputs (random values mixed with special values) and require identical bits (NaN
+  payloads excepted). For containers and algorithms with an observable order (hash table iteration,
+  sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
+  unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
+  queries, simulation steps) is compared the same way, e.g. by hashing body state after N steps.
+
 - `Zolt/zolt.zig` references every public declaration of every registered file, so all
   non-generic functions are type checked even without a test. Generic functions need a test.
 

@@ -15,6 +15,7 @@
 //!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
 const std = @import("std");
 const jolt_sources = @import("ZoltParity/jolt_sources.zig");
+const parity_reference_sources = @import("ZoltParity/reference_sources.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -126,7 +127,7 @@ pub fn build(b: *std.Build) void {
     });
     jolt_cpp.root_module.addIncludePath(b.path("."));
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("Jolt"), .files = &jolt_sources.files, .flags = cpp_flags.items });
-    jolt_cpp.root_module.addCSourceFile(.{ .file = b.path("ZoltParity/JoltReference.cpp"), .flags = cpp_flags.items });
+    jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.files, .flags = cpp_flags.items });
 
     const parity_tests = b.addTest(.{
         .name = "zolt-parity",

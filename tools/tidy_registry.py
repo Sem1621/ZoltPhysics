@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Sort and deduplicate the registry lists of the port.
 
-`Zolt/zolt.zig` (re-exports and `source_files`) and `ZoltTests/unit_tests.zig` (test imports) are
-the only files that parallel ports both modify. Git merges them with the `union` driver (see
+`Zolt/zolt.zig` (re-exports and `source_files`), `ZoltTests/unit_tests.zig` (test imports),
+`ZoltParity/parity.zig` (parity test imports) and `ZoltParity/reference_sources.zig` (C++ wrapper files)
+are the only files that parallel ports both modify. Git merges them with the `union` driver (see
 .gitattributes), which keeps every added line but can duplicate lines and break the ordering.
 Run this after merging branches:
 
@@ -18,13 +19,13 @@ import re
 import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-FILES = ["Zolt/zolt.zig", "ZoltTests/unit_tests.zig"]
-REGISTRY_LINE = re.compile(r'^\s*(pub const \w+ = )?(_ = )?@import\("([^"]+)"\)')
+FILES = ["Zolt/zolt.zig", "ZoltTests/unit_tests.zig", "ZoltParity/parity.zig", "ZoltParity/reference_sources.zig"]
+REGISTRY_LINE = re.compile(r'^\s*(?:(?:pub const \w+ = )?(?:_ = )?@import\("([^"]+)"\)|"([^"]+\.cpp)",)')
 
 
 def sort_key(line):
     m = REGISTRY_LINE.match(line)
-    return (m.group(3).lower(), line.strip().lower())
+    return ((m.group(1) or m.group(2)).lower(), line.strip().lower())
 
 
 def tidy(source):
