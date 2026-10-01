@@ -12,6 +12,24 @@ const zolt = @import("zolt");
 /// (UnitTestRandom, std::mt19937 in Jolt)
 pub const UnitTestRandom = zolt.Mt19937;
 
+/// std::uniform_real_distribution<float>(a, b) on UnitTestRandom, reproducing libstdc++
+/// (generate_canonical<float, 24> takes a single 32 bit draw), so random sequences match the C++ tests.
+pub const UniformFloatDistribution = struct {
+    a: f32,
+    b: f32,
+
+    pub fn init(a: f32, b: f32) UniformFloatDistribution {
+        return .{ .a = a, .b = b };
+    }
+
+    pub fn next(self: UniformFloatDistribution, random: *UnitTestRandom) f32 {
+        var canonical = @as(f32, @floatFromInt(random.next() - UnitTestRandom.min_value)) / 4294967296.0;
+        if (canonical >= 1.0)
+            canonical = std.math.nextAfter(f32, 1.0, 0.0);
+        return canonical * (self.b - self.a) + self.a;
+    }
+};
+
 pub const expect = std.testing.expect;
 pub const expectEqual = std.testing.expectEqual;
 

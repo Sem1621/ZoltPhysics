@@ -15,24 +15,7 @@ const Quat = zolt.Quat;
 const Vec3 = zolt.Vec3;
 const Vec4 = zolt.Vec4;
 
-/// std::uniform_real_distribution<float> as implemented by libstdc++: generate_canonical<float, 24> uses a single
-/// 32 bit sample divided by 2^32 (clamped to stay below 1) and maps it to [a, b) with canonical * (b - a) + a.
-/// The C++ standard does not fully specify this distribution, so the checks that use it are all approximate.
-const UniformFloatDistribution = struct {
-    a: f32,
-    b: f32,
-
-    fn init(a: f32, b: f32) UniformFloatDistribution {
-        return .{ .a = a, .b = b };
-    }
-
-    fn next(self: UniformFloatDistribution, random: *fw.UnitTestRandom) f32 {
-        var canonical = @as(f32, @floatFromInt(random.next() - fw.UnitTestRandom.min_value)) / 4294967296.0;
-        if (canonical >= 1.0)
-            canonical = std.math.nextAfter(f32, 1.0, 0.0);
-        return canonical * (self.b - self.a) + self.a;
-    }
-};
+const UniformFloatDistribution = fw.UniformFloatDistribution;
 
 fn newRandom() fw.UnitTestRandom {
     return fw.UnitTestRandom.init(fw.UnitTestRandom.default_seed);

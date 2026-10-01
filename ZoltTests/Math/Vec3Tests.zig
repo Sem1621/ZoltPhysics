@@ -12,10 +12,9 @@ const UVec4 = zolt.UVec4;
 const Vec3 = zolt.Vec3;
 const Vec4 = zolt.Vec4;
 
-/// Replacement for std::uniform_real_distribution<float>(min, max) on UnitTestRandom. The exact
-/// values differ from the C++ test, which is fine since only the tested property matters.
+/// std::uniform_real_distribution<float>(min, max) on UnitTestRandom
 fn uniformFloat(random: *fw.UnitTestRandom, min: f32, max: f32) f32 {
-    return min + (max - min) * @as(f32, @floatFromInt(random.next())) / @as(f32, @floatFromInt(std.math.maxInt(u32)));
+    return fw.UniformFloatDistribution.init(min, max).next(random);
 }
 
 test "TestVec3ConstructComponents" {

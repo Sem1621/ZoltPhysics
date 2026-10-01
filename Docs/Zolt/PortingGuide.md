@@ -331,7 +331,9 @@ results are reproducible as long as the code follows these rules:
    `a.mul(b).add(c).mul(d)`. Watch C++ precedence and left-to-right evaluation in long chains.
 2. **No FMA.** Never use `@mulAdd`; `sFusedMultiplyAdd` / `DifferenceOfProducts` are plain
    `a * b + c` / `a * b - c * d` in deterministic mode.
-3. **Negation is `0 - x`**, which maps -0 to +0 (`Vec3.negate()` does this).
+3. **Vector negation is `0 - x`**, which maps -0 to +0 (`Vec3`/`Vec4`/`DVec3` `negate()`, Jolt's
+   `operator-()` in deterministic mode). Scalar negation in the C++ (`-a * b`, `-s`) is a real sign
+   flip: keep it as `-x` in Zig.
 4. **Horizontal sums** use the deterministic order: Vec4 `(x + y) + (z + w)`, Vec3 `(x + y) + (z + 0)`.
 5. **Trigonometry**: always `Math/Trigonometry.zig` / `Vec4.sinCos` etc., never `std.math.sin`.
    `@sqrt` is fine (IEEE correctly rounded everywhere).
@@ -422,6 +424,18 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `explicit operator Vec3()`         | `DVec3.toVec3()`                       | conversion operator                     |
 | `DVec3 + Vec3`, `DVec3 - Vec3`     | `addVec3`, `subVec3`                   | overloads                               |
 | `BVec16(uint64, uint64)`           | `BVec16.fromUint64(v0, v1)`            | overload                                |
+| `Quat(const Float4 &)` / `Quat(Vec4Arg)` | `Quat.fromFloat4` / `Quat.fromVec4` | overloads                               |
+| `Quat::GetAxisAngle(outAxis, outAngle)` | `getAxisAngle() AxisAngle{ .axis, .angle }` | out parameters                   |
+| `Quat::GetSwingTwist(outSwing, outTwist)` | `getSwingTwist() SwingTwist{ .swing, .twist }` | out parameters             |
+| `Quat::LERP` / `SLERP`             | `lerp` / `slerp`                       | naming                                  |
+| `Quat * Vec3`                      | `mulVec3`                              | operator                                |
+| `Mat44(Vec4, Vec4, Vec4, Vec3)` / `Mat44(Type x4)` | `Mat44.fromColumnsTranslation` / `Mat44.fromTypes` | overloads           |
+| `Mat44::sRotation(axis, angle)` / `sRotation(QuatArg)` | `rotation` / `rotationQuat`  | overloads                               |
+| `Mat44::sScale(float)` / `sScale(Vec3Arg)` | `scale` / `scaleVec3`          | overloads                               |
+| `Mat44::Multiply3x3(Vec3Arg)` / `Multiply3x3(Mat44Arg)` | `multiply3x3` / `multiply3x3Mat44` | overloads               |
+| `Mat44::Decompose(outScale)`       | `decompose() Decomposition{ .rotation_translation, .scale }` | out parameter     |
+| `JPH_EL(r, c)` (macro)             | private `el(comptime r, comptime c)`   | macro                                   |
+| duplicate `TEST_CASE` names in one file | second one gets a `2` suffix (`TestMat44Scale2`) | Zig rejects duplicate test names |
 | `HalfFloatConversion::FromFloat<ROUND_TO_NEAREST>(v)` | `half_float.fromFloat(.round_to_nearest, v)` (file re-exported as `zolt.half_float`) | namespace + template |
 | `HALF_FLT_MAX` etc.                | `half_float.half_flt_max` etc.         | constants                               |
 | `FLT_MIN`, `FLT_MAX`, `FLT_EPSILON`| `math.flt_min`, `math.flt_max`, `math.flt_epsilon` |                             |
