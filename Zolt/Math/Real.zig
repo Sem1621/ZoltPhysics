@@ -41,3 +41,11 @@ test "Real types follow double_precision" {
     try std.testing.expect(RMat44.identity().toMat44().eql(Mat44.identity()));
     try std.testing.expectEqual(@sizeOf(Real) * 3, @sizeOf(Real3));
 }
+
+test "RVec3 / RMat44 spelling is the same in both precisions" {
+    const m = RMat44.identity().preTranslatedRVec3(RVec3.init(1, 2, 3));
+    const p = m.mulRVec3(RVec3.init(1, 1, 1)).addVec3(Vec3.init(1, 0, 0)).subVec3(Vec3.init(0, 1, 0));
+    try std.testing.expect(p.eql(RVec3.init(3, 2, 4)));
+    try std.testing.expect(m.postTranslatedRVec3(RVec3.zero()).getTranslation().eql(RVec3.init(1, 2, 3)));
+    try std.testing.expect(m.multiply3x3RVec3(RVec3.init(1, 2, 3)).eql(RVec3.init(1, 2, 3)));
+}

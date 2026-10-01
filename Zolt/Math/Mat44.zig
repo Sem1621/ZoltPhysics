@@ -267,6 +267,9 @@ pub const Mat44 = extern struct {
         return Vec3.fromVec4(self.col[0].mul(v.splatX()).add(self.col[1].mul(v.splatY())).add(self.col[2].mul(v.splatZ())).add(self.col[3]));
     }
 
+    /// `RMat44 * RVec3`: same as `mulVec3`, the spelling that works in single and double precision (see DMat44.mulRVec3)
+    pub const mulRVec3 = mulVec3;
+
     /// Multiply vector by matrix (operator * (Vec4Arg))
     pub fn mulVec4(self: Mat44, v: Vec4) Vec4 {
         // Per component: col[0][r] * v.x + col[1][r] * v.y + col[2][r] * v.z + col[3][r] * v.w
@@ -278,6 +281,9 @@ pub const Mat44 = extern struct {
         // Per component: col[0][r] * v.x + col[1][r] * v.y + col[2][r] * v.z
         return Vec3.fromVec4(self.col[0].mul(v.splatX()).add(self.col[1].mul(v.splatY())).add(self.col[2].mul(v.splatZ())));
     }
+
+    /// Same as `multiply3x3` (RVec3 spelling, see DMat44.multiply3x3RVec3)
+    pub const multiply3x3RVec3 = multiply3x3;
 
     /// Multiply vector by only 3x3 part of the transpose of the matrix (\f$result = this^T \: v\f$)
     pub fn multiply3x3Transposed(self: Mat44, v: Vec3) Vec3 {
@@ -670,6 +676,12 @@ pub const Mat44 = extern struct {
     pub fn postTranslated(self: Mat44, translation_value: Vec3) Mat44 {
         return init(self.col[0], self.col[1], self.col[2], Vec4.fromVec3W(self.getTranslation().add(translation_value), 1));
     }
+
+    /// Same as `preTranslated` (RVec3 spelling, see DMat44.preTranslatedRVec3)
+    pub const preTranslatedRVec3 = preTranslated;
+
+    /// Same as `postTranslated` (RVec3 spelling, see DMat44.postTranslatedRVec3)
+    pub const postTranslatedRVec3 = postTranslated;
 
     /// Scale a matrix: result = this * Mat44.scaleVec3(scale_value)
     pub fn preScaled(self: Mat44, scale_value: Vec3) Mat44 {

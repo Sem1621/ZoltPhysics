@@ -341,7 +341,8 @@ pub const DVec3 = extern struct {
 
     /// Return the absolute value of each of the components
     pub fn abs(self: DVec3) DVec3 {
-        return .{ .value = @abs(self.value) };
+        // Like Jolt's SSE/AVX path: max(0 - v, v), which keeps -0 as -0 (the scalar fallback, NEON and AVX512 return +0)
+        return max(self.negate(), self);
     }
 
     /// Reciprocal vector (1 / value) for each of the components

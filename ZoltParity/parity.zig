@@ -33,6 +33,8 @@ const jolt = struct {
     extern fn jolt_vec4_length(v: *const [4]f32) f32;
     extern fn jolt_vec4_reduce_min(v: *const [4]f32) f32;
     extern fn jolt_vec4_reduce_max(v: *const [4]f32) f32;
+    extern fn jolt_vec4_abs(v: *const [4]f32, out: *[4]f32) void;
+    extern fn jolt_vec3_abs(v: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec4_compress_unit_vector(v: *const [4]f32) u32;
     extern fn jolt_vec4_decompress_unit_vector(value: u32, out: *[4]f32) void;
     extern fn jolt_vec3_normalized(v: *const [3]f32, out: *[3]f32) void;
@@ -577,6 +579,8 @@ test "Vec4 normalized / dot / length / reduce" {
     var length: Checker = .{ .name = "Vec4.length" };
     var reduce_min: Checker = .{ .name = "Vec4.reduceMin" };
     var reduce_max: Checker = .{ .name = "Vec4.reduceMax" };
+    var abs4: Checker = .{ .name = "Vec4.abs" };
+    var abs3: Checker = .{ .name = "Vec3.abs" };
     for (0..iterations) |_| {
         const a = rng.nonZero(4, -1000, 1000);
         const b = rng.array(4, -1000, 1000);
@@ -587,8 +591,14 @@ test "Vec4 normalized / dot / length / reduce" {
         length.check(a, vec4(a).length(), jolt.jolt_vec4_length(&a));
         reduce_min.check(b, vec4(b).reduceMin(), jolt.jolt_vec4_reduce_min(&b));
         reduce_max.check(b, vec4(b).reduceMax(), jolt.jolt_vec4_reduce_max(&b));
+        jolt.jolt_vec4_abs(&b, &expected);
+        abs4.check(b, arr4(vec4(b).abs()), expected);
+        const b3 = [3]f32{ b[0], b[1], b[2] };
+        var expected3: [3]f32 = undefined;
+        jolt.jolt_vec3_abs(&b3, &expected3);
+        abs3.check(b3, arr3(vec3(b3).abs()), expected3);
     }
-    try finishAll(&.{ &normalized, &dot, &length, &reduce_min, &reduce_max });
+    try finishAll(&.{ &normalized, &dot, &length, &reduce_min, &reduce_max, &abs4, &abs3 });
 }
 
 test "Vec4 compress / decompress unit vector" {

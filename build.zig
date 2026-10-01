@@ -104,11 +104,20 @@ pub fn build(b: *std.Build) void {
     if (double_precision) cpp_flags.append(b.allocator, "-DJPH_DOUBLE_PRECISION") catch @panic("OOM");
     cpp_flags.append(b.allocator, b.fmt("-DJPH_OBJECT_LAYER_BITS={d}", .{object_layer_bits})) catch @panic("OOM");
 
+    // On x86_64 the reference is pinned to x86-64-v3 (SSE4.2/AVX/AVX2/F16C/LZCNT/TZCNT, no AVX-512), which
+    // matches the default ISA options of Jolt's CMake build, so parity results don't depend on the host CPU.
+    const reference_target = if (target.result.cpu.arch == .x86_64) b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = target.result.os.tag,
+        .abi = target.result.abi,
+        .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 },
+    }) else target;
+
     const jolt_cpp = b.addLibrary(.{
         .name = "jolt-cpp",
         .linkage = .static,
         .root_module = b.createModule(.{
-            .target = target,
+            .target = reference_target,
             // The reference is always optimized: results don't depend on it and it keeps the step fast
             .optimize = .ReleaseFast,
             .link_libcpp = true,

@@ -53,6 +53,8 @@ float jolt_vec4_dot(const float *inA, const float *inB) { return Load4(inA).Dot(
 float jolt_vec4_length(const float *inV)			{ return Load4(inV).Length(); }
 float jolt_vec4_reduce_min(const float *inV)		{ return Load4(inV).ReduceMin(); }
 float jolt_vec4_reduce_max(const float *inV)		{ return Load4(inV).ReduceMax(); }
+void jolt_vec4_abs(const float *inV, float *outV)	{ Store4(Load4(inV).Abs(), outV); }
+void jolt_vec3_abs(const float *inV, float *outV)	{ Store3(Load3(inV).Abs(), outV); }
 uint32 jolt_vec4_compress_unit_vector(const float *inV) { return Load4(inV).CompressUnitVector(); }
 void jolt_vec4_decompress_unit_vector(uint32 inValue, float *outV) { Store4(Vec4::sDecompressUnitVector(inValue), outV); }
 

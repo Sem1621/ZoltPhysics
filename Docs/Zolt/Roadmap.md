@@ -49,13 +49,17 @@ files whose dependencies are already ported.
 `tools/strip_isa.py`, `tools/port_status.py`, `tools/tidy_registry.py`, `tools/install_zig.sh`,
 CI, SessionStart hook, and the parity harness (`zig build parity`, `ZoltParity/`).
 
-### Phase 1: Math (`Jolt/Math`, `UnitTests/Math`)
+### Phase 1: Math (`Jolt/Math`, `UnitTests/Math`) ✅
 Vec3, Vec4, UVec4, Float2/3/4, Swizzle, Math, Trigonometry, Quat, Mat44, DVec3, Double3, DMat44,
 Real, BVec16, HalfFloat, Vector, Matrix, DynMatrix, GaussianElimination, EigenValueSymmetric,
 FindRoot. Plus `Core/HashCombine` and `Core/Mt19937` (std::mt19937 replacement).
-**Milestone M1:** all of `UnitTests/Math` passes in both precisions.
+**Milestone M1:** all of `UnitTests/Math` passes in both precisions. ✅ Reached: every Math
+function also has parity tests against the C++ library (bit exact, both precisions).
 
-### Phase 2: Core (`Jolt/Core`, `UnitTests/Core`)
+### Phase 2: Core (`Jolt/Core`, `UnitTests/Core`) — in progress
+Done: HashCombine, Mt19937, QuickSort, InsertionSort, BinaryHeap, StaticArray, Reference, Color,
+Atomics, Prefetch. Next: HashTable/UnorderedMap/UnorderedSet (needs BVec16, done), TempAllocator,
+FixedSizeFreeList, LockFreeHashMap, the JobSystem family, StringTools, LinearCurve, streams.
 Containers and utilities the physics code depends on:
 - Containers: StaticArray, HashTable + UnorderedMap/UnorderedSet (Jolt's own, for deterministic
   iteration order), BinaryHeap, FixedSizeFreeList, LockFreeHashMap, ByteBuffer, StridedPtr,

@@ -145,6 +145,13 @@ Inside the library always import by relative path, never through `zolt.zig`.
 | `size_t`                             | `usize`                                     |
 | `float` / `double`                   | `f32` / `f64`                               |
 | `Real`, `RVec3`, `RMat44`            | `Real`, `RVec3`, `RMat44` from `Math/Real.zig` (switch on `-Ddouble_precision`) |
+
+Code that uses `RVec3` / `RMat44` must compile in both precisions, but the mixed-type overloads
+have different names (`DMat44 * DVec3` is `mulDVec3`, `Mat44 * Vec3` is `mulVec3`). Use the
+precision independent spellings, which exist on both types: `RMat44.mulRVec3`,
+`multiply3x3RVec3`, `preTranslatedRVec3`, `postTranslatedRVec3`, and `RVec3.addVec3` /
+`subVec3` for `RVec3 +/- Vec3`. Add new ones the same way (a `pub const xRVec3 = ...;` alias on
+both types) when porting code needs them.
 | `nullptr`                            | `null` (with `?*T`)                         |
 
 ### Value types and layout
@@ -354,8 +361,13 @@ results are reproducible as long as the code follows these rules:
     its scalar fallback. There Zolt follows the SSE path, which is what `zig build parity` compares
     against (and what Jolt computes on x86, usually also on ARM). Known cases: `Mat44::Inversed` (SSE,
     NEON and RVV share an algorithm that differs from the fallback), `Mat44::sCrossProduct` (SSE4.1
-    negates with `0 - v`, the fallback with `-x`). Differences that only show with AVX512 on NaN input
-    (`Vec3/DVec3::GetSign` return NaN) are not followed; the parity tests skip NaN there.
+    negates with `0 - v`, the fallback with `-x`), `Vec3/Vec4/DVec3::Abs` (SSE/AVX compute
+    `max(0 - v, v)`, which keeps -0, while the fallback, NEON and AVX512 return +0). Jolt's ISA paths
+    sometimes disagree with each other on -0 / NaN only; the determinism hashes are identical across
+    platforms, so these cases don't affect simulation results. The parity reference is pinned to
+    x86-64-v3 (SSE4.2/AVX2, Jolt's default CMake ISA set, no AVX512) so that it is the same on every
+    machine. Differences that only show with AVX512 on NaN input (`Vec3/DVec3::GetSign` return NaN)
+    are not followed; the parity tests skip NaN there.
 
 ## 9. Threading
 

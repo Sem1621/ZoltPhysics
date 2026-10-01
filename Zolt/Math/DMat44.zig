@@ -159,6 +159,9 @@ pub const DMat44 = extern struct {
         return DVec3.fromType(self.col3.value + c[0] * splat(v.value[0]) + c[1] * splat(v.value[1]) + c[2] * splat(v.value[2]));
     }
 
+    /// `RMat44 * RVec3`: same as `mulDVec3`, the spelling that works in single and double precision (see Mat44.mulRVec3)
+    pub const mulRVec3 = mulDVec3;
+
     /// Multiply vector by only 3x3 part of the matrix (Multiply3x3(Vec3Arg))
     pub fn multiply3x3(self: DMat44, v: Vec3) Vec3 {
         return self.getRotation().multiply3x3(v);
@@ -170,6 +173,9 @@ pub const DMat44 = extern struct {
         const c = self.columnsAsDouble();
         return DVec3.fromType(c[0] * splat(v.value[0]) + c[1] * splat(v.value[1]) + c[2] * splat(v.value[2]));
     }
+
+    /// Same as `multiply3x3DVec3` (RVec3 spelling, see Mat44.multiply3x3RVec3)
+    pub const multiply3x3RVec3 = multiply3x3DVec3;
 
     /// Multiply vector by only 3x3 part of the transpose of the matrix (\f$result = this^T \: v\f$)
     pub fn multiply3x3Transposed(self: DMat44, v: Vec3) Vec3 {
@@ -206,6 +212,12 @@ pub const DMat44 = extern struct {
     pub fn postTranslatedDVec3(self: DMat44, translation_value: DVec3) DMat44 {
         return init(self.col[0], self.col[1], self.col[2], self.getTranslation().add(translation_value));
     }
+
+    /// Same as `preTranslatedDVec3` (RVec3 spelling, see Mat44.preTranslatedRVec3)
+    pub const preTranslatedRVec3 = preTranslatedDVec3;
+
+    /// Same as `postTranslatedDVec3` (RVec3 spelling, see Mat44.postTranslatedRVec3)
+    pub const postTranslatedRVec3 = postTranslatedDVec3;
 
     /// Access to the columns
     pub fn getAxisX(self: DMat44) Vec3 {

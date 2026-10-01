@@ -264,6 +264,12 @@ pub const Vec3 = extern struct {
         return .{ .value = self.value - other.value };
     }
 
+    /// Same as `add`. Exists so that `RVec3 + Vec3` is written `addVec3` in single and double precision (see DVec3.addVec3)
+    pub const addVec3 = add;
+
+    /// Same as `sub`. Exists so that `RVec3 - Vec3` is written `subVec3` in single and double precision (see DVec3.subVec3)
+    pub const subVec3 = sub;
+
     /// Divide (component wise) (operator /)
     pub fn div(self: Vec3, other: Vec3) Vec3 {
         return .{ .value = self.value / other.value };
@@ -308,7 +314,8 @@ pub const Vec3 = extern struct {
 
     /// Return the absolute value of each of the components
     pub fn abs(self: Vec3) Vec3 {
-        return .{ .value = @abs(self.value) };
+        // Like Jolt's SSE/AVX path: max(0 - v, v), which keeps -0 as -0 (the scalar fallback, NEON and AVX512 return +0)
+        return max(self.negate(), self);
     }
 
     /// Reciprocal vector (1 / value) for each of the components
