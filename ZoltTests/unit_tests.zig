@@ -14,6 +14,9 @@ test {
     _ = @import("Core/QuickSortTest.zig");
 
     // Math
+    _ = @import("Math/BVec16Tests.zig");
+    _ = @import("Math/DVec3Tests.zig");
+    _ = @import("Math/HalfFloatTests.zig");
     _ = @import("Math/MathTests.zig");
     _ = @import("Math/MatrixTests.zig");
     _ = @import("Math/TrigonometryTests.zig");
