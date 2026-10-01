@@ -160,6 +160,9 @@ Inside the library always import by relative path, never through `zolt.zig`.
   for values; `T.create(allocator, ...) !*T` with `destroy()` for heap objects.
 - `TempAllocator` is ported as its own type (it is a stack allocator with LIFO semantics), and
   additionally exposes a `std.mem.Allocator` interface for use with std containers.
+- `JPH_STACK_ALLOC(n)` (alloca): use a fixed size array when `n` is comptime known, otherwise a
+  fixed stack buffer with an asserted upper bound (see `Math/GaussianElimination.zig`), or the
+  `TempAllocator` when the size is unbounded. Zig has no alloca.
 - Allocation failure is an error (`error.OutOfMemory`), never ignored. Where Jolt returns a
   `Result<T>` or an error string, return `!T` with a specific error set; keep Jolt's message text
   in a doc comment or log it with `std.log`.
@@ -303,6 +306,7 @@ pub const ContactListener = struct {
 | `template <int N> void f()`                 | `fn f(comptime n: i32) void` (or `comptime_int`)            |
 | `Swizzle<SWIZZLE_Y, SWIZZLE_X, ...>()`      | `.swizzle(.y, .x, ...)` (comptime enum parameters)          |
 | `JPH_ASSERT(x)` / `JPH_ASSERT(x, "msg")`    | `std.debug.assert(x)` (keep the message as a comment)       |
+| `JPH_ASSERT(false)` on a path that release builds can reach and handle (e.g. "too many iterations", then `return false`) | `if (Core.enable_asserts) @panic("msg");` followed by the release behavior: `assert(false)` is undefined behavior in ReleaseFast |
 | `JPH_IF_ENABLE_ASSERTS(x)`                  | `if (Core.enable_asserts) { x }`                            |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
@@ -407,4 +411,10 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `HashBytes(data, size, seed)`      | `hashBytes(data)` / `hashBytesSeeded(data, seed)` | default argument            |
 | `std::mt19937`                     | `Mt19937`                              | std type, see Core/Mt19937.zig          |
 | `JPH_PI`                           | `math.pi`                              |                                         |
+| `Matrix<R, C>` / `Vector<R>` template params | `Matrix(r, c).row_count` / `.col_count`, `Vector(n).row_count` | comptime decls usable by generic code |
+| `Matrix::operator()(row, col)` (also Mat44, DynMatrix) | `get(row, col)` / `set(row, col, v)` | operator overload            |
+| `Matrix::GetColumn` (non-const reference) | `getColumnPtr(i)`                 | reference return                        |
+| copy constructor of an allocating type (`DynMatrix(const DynMatrix &)`) | `clone() !T` | needs the allocator            |
+| `FindRoot(a, b, c, outX1, outX2) -> int` | `findRoot(T, a, b, c) FindRootResult(T){ num_roots, x1, x2 }` | out parameters      |
+| `JPH_EVS_ROTATE` (macro)           | private fn `evsRotate`                 | macro                                   |
 | `FLT_MIN`, `FLT_MAX`, `FLT_EPSILON`| `math.flt_min`, `math.flt_max`, `math.flt_epsilon` |                             |
