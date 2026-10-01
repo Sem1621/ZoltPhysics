@@ -9,6 +9,7 @@ test {
 
     // Core
     _ = @import("Core/BinaryHeapTest.zig");
+    _ = @import("Core/FPFlushDenormalsTest.zig");
     _ = @import("Core/HashCombineTest.zig");
     _ = @import("Core/InsertionSortTest.zig");
     _ = @import("Core/QuickSortTest.zig");

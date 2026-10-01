@@ -15,6 +15,8 @@ pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
 pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
+pub const FPControlWord = @import("Core/FPControlWord.zig").FPControlWord;
+pub const FPFlushDenormals = @import("Core/FPFlushDenormals.zig").FPFlushDenormals;
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const Mt19937 = @import("Core/Mt19937.zig");
@@ -32,6 +34,7 @@ pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
 pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
 pub const toLower = @import("Core/StringTools.zig").toLower;
 pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
+pub const getProcessorTickCount = @import("Core/TickCounter.zig").getProcessorTickCount;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
@@ -72,6 +75,8 @@ const source_files = .{
     @import("Core/BinaryHeap.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
+    @import("Core/FPControlWord.zig"),
+    @import("Core/FPFlushDenormals.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/InsertionSort.zig"),
     @import("Core/Mt19937.zig"),
@@ -80,6 +85,7 @@ const source_files = .{
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
     @import("Core/StringTools.zig"),
+    @import("Core/TickCounter.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),
