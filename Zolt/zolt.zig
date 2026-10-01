@@ -8,6 +8,8 @@
 
 const std = @import("std");
 
+pub const getConfigurationString = @import("ConfigurationString.zig").getConfigurationString;
+
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
@@ -19,6 +21,7 @@ pub const FPControlWord = @import("Core/FPControlWord.zig").FPControlWord;
 pub const FPFlushDenormals = @import("Core/FPFlushDenormals.zig").FPFlushDenormals;
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
+pub const LinearCurve = @import("Core/LinearCurve.zig").LinearCurve;
 pub const Mt19937 = @import("Core/Mt19937.zig");
 pub const prefetchL1 = @import("Core/Prefetch.zig").prefetchL1;
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
@@ -75,6 +78,7 @@ pub const Vector = @import("Math/Vector.zig").Vector;
 /// Every source file of the module. Used by the test below to make sure that all of them are
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
+    @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
     @import("Core/Color.zig"),
@@ -83,6 +87,7 @@ const source_files = .{
     @import("Core/FPFlushDenormals.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/InsertionSort.zig"),
+    @import("Core/LinearCurve.zig"),
     @import("Core/Mt19937.zig"),
     @import("Core/Prefetch.zig"),
     @import("Core/QuickSort.zig"),
