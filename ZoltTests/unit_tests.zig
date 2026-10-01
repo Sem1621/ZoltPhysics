@@ -15,8 +15,10 @@ test {
 
     // Math
     _ = @import("Math/MathTests.zig");
+    _ = @import("Math/MatrixTests.zig");
     _ = @import("Math/TrigonometryTests.zig");
     _ = @import("Math/UVec4Tests.zig");
     _ = @import("Math/Vec3Tests.zig");
     _ = @import("Math/Vec4Tests.zig");
+    _ = @import("Math/VectorTests.zig");
 }
