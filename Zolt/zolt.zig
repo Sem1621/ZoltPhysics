@@ -25,6 +25,13 @@ pub const RefConst = @import("Core/Reference.zig").RefConst;
 pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const convertToString = @import("Core/StringTools.zig").convertToString;
+pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
+pub const stringFormat = @import("Core/StringTools.zig").stringFormat;
+pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
+pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
+pub const toLower = @import("Core/StringTools.zig").toLower;
+pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
@@ -72,6 +79,7 @@ const source_files = .{
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/StringTools.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),
