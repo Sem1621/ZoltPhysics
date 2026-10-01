@@ -19,6 +19,9 @@ test {
     _ = @import("Math/HalfFloatTests.zig");
     _ = @import("Math/MathTests.zig");
     _ = @import("Math/MatrixTests.zig");
+    _ = @import("Math/Mat44Tests.zig");
+    _ = @import("Math/MathTests.zig");
+    _ = @import("Math/QuatTests.zig");
     _ = @import("Math/TrigonometryTests.zig");
     _ = @import("Math/UVec4Tests.zig");
     _ = @import("Math/Vec3Tests.zig");
