@@ -1,11 +1,11 @@
 //! Port of: UnitTests/Math/Vec3Tests.cpp
-//! Status: partial
-//! Missing: DVec3 checks in TestDifferenceOfProducts (DVec3 is not ported yet)
+//! Status: complete
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
 
+const DVec3 = zolt.DVec3;
 const Float3 = zolt.Float3;
 const Float4 = zolt.Float4;
 const UVec4 = zolt.UVec4;
@@ -438,9 +438,8 @@ test "TestDifferenceOfProducts" {
     const c = Vec3.init(41563.4, 41563.401, 41563.402);
     const d = Vec3.init(-24871.969, -24871.970, -24871.971);
     const result = Vec3.differenceOfProducts(a, b, c, d);
-    // TODO: needs DVec3
-    // DVec3 expected = DVec3(a) * DVec3(b) - DVec3(c) * DVec3(d);
-    // CHECK(expected == DVec3(-75.165603637695312, 103.16904449462891, 36.836944580078125));
+    const expected = DVec3.fromVec3(a).mul(DVec3.fromVec3(b)).sub(DVec3.fromVec3(c).mul(DVec3.fromVec3(d)));
+    try fw.expect(expected.eql(DVec3.init(-75.165603637695312, 103.16904449462891, 36.836944580078125)));
     // JPH_USE_FMADD is never defined in Zolt (FMA is not used, see PortingGuide section 8), so only the #else branch applies:
     // CHECK(result == Vec3(expected));
     try fw.expect(result.eql(Vec3.init(-128.0, 64.0, 0.0))); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.

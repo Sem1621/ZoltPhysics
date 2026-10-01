@@ -6,7 +6,7 @@ Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. P
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).
 
-**Library: 11.7%** of 86868 lines in scope · **Unit tests: 20.0%** of 18321 lines
+**Library: 12.3%** of 86868 lines in scope · **Unit tests: 22.4%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -17,7 +17,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
 | `Jolt/Core` | 19% | 9 | 1 | 0 | 30 | 15 | 7518 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
-| `Jolt/Math` | 95% | 21 | 0 | 0 | 2 | 1 | 9290 |
+| `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
 | `Jolt/Physics` | 0% | 0 | 0 | 0 | 13 | 0 | 5053 |
 | `Jolt/Physics/Body` | 0% | 0 | 0 | 0 | 18 | 0 | 5146 |
@@ -185,12 +185,12 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>Jolt/Math — 95%</summary>
+<details><summary>Jolt/Math — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `BVec16.h`, `BVec16.inl` | 234 | ✅ complete | `Zolt/Math/BVec16.zig` |
-| `DMat44.h`, `DMat44.inl` | 471 | ❌ todo |  |
+| `DMat44.h`, `DMat44.inl` | 471 | ✅ complete | `Zolt/Math/DMat44.zig` |
 | `DVec3.h`, `DVec3.inl` | 1407 | ✅ complete | `Zolt/Math/DVec3.zig` |
 | `Double3.h` | 36 | ✅ complete | `Zolt/Math/Double3.zig` |
 | `DynMatrix.h` | 24 | ✅ complete | `Zolt/Math/DynMatrix.zig` |
@@ -206,7 +206,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `MathTypes.h` | 27 | ➖ n/a | forward declarations and argument type aliases |
 | `Matrix.h` | 219 | ✅ complete | `Zolt/Math/Matrix.zig` |
 | `Quat.h`, `Quat.inl` | 592 | ✅ complete | `Zolt/Math/Quat.zig` |
-| `Real.h` | 32 | ❌ todo |  |
+| `Real.h` | 32 | ✅ complete | `Zolt/Math/Real.zig` |
 | `Swizzle.h` | 15 | ✅ complete | `Zolt/Math/Swizzle.zig` |
 | `Trigonometry.h` | 66 | ✅ complete | `Zolt/Math/Trigonometry.zig` |
 | `UVec4.h`, `UVec4.inl` | 998 | ✅ complete | `Zolt/Math/UVec4.zig` |
@@ -549,7 +549,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 349 |
 | `UnitTests/Core` | 23% | 4 | 0 | 0 | 7 | 2 | 1021 |
 | `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 854 |
-| `UnitTests/Math` | 88% | 11 | 1 | 0 | 2 | 0 | 3683 |
+| `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 220 |
 | `UnitTests/Physics` | 0% | 0 | 0 | 0 | 33 | 0 | 11009 |
 
@@ -610,14 +610,14 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>UnitTests/Math — 88%</summary>
+<details><summary>UnitTests/Math — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `BVec16Tests.cpp` | 75 | ✅ complete | `ZoltTests/Math/BVec16Tests.zig` |
-| `DMat44Tests.cpp` | 197 | ❌ todo |  |
+| `DMat44Tests.cpp` | 197 | ✅ complete | `ZoltTests/Math/DMat44Tests.zig` |
 | `DVec3Tests.cpp` | 279 | ✅ complete | `ZoltTests/Math/DVec3Tests.zig` |
-| `EigenValueSymmetricTests.cpp` | 48 | ❌ todo |  |
+| `EigenValueSymmetricTests.cpp` | 48 | ✅ complete | `ZoltTests/Math/EigenValueSymmetricTests.zig` |
 | `HalfFloatTests.cpp` | 82 | ✅ complete | `ZoltTests/Math/HalfFloatTests.zig` |
 | `Mat44Tests.cpp` | 464 | ✅ complete | `ZoltTests/Math/Mat44Tests.zig` |
 | `MathTests.cpp` | 142 | ✅ complete | `ZoltTests/Math/MathTests.zig` |
@@ -625,7 +625,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `QuatTests.cpp` | 491 | ✅ complete | `ZoltTests/Math/QuatTests.zig` |
 | `TrigonometryTests.cpp` | 24 | ✅ complete | `ZoltTests/Math/TrigonometryTests.zig` |
 | `UVec4Tests.cpp` | 527 | ✅ complete | `ZoltTests/Math/UVec4Tests.zig` |
-| `Vec3Tests.cpp` | 398 | 🟡 partial | `ZoltTests/Math/Vec3Tests.zig` |
+| `Vec3Tests.cpp` | 398 | ✅ complete | `ZoltTests/Math/Vec3Tests.zig` |
 | `Vec4Tests.cpp` | 765 | ✅ complete | `ZoltTests/Math/Vec4Tests.zig` |
 | `VectorTests.cpp` | 91 | ✅ complete | `ZoltTests/Math/VectorTests.zig` |
 

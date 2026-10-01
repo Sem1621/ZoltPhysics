@@ -39,7 +39,8 @@ Contents:
    ```sh
    python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl
    ```
-   The portable fallback (`#else` of `JPH_USE_SSE` / `JPH_USE_NEON` / ...) defines the semantics.
+   The portable fallback (`#else` of `JPH_USE_SSE` / `JPH_USE_NEON` / ...) defines the semantics
+   (except in the rare places where it differs from the SSE path, see section 8 rule 11).
    Express it with `@Vector` operations rather than lane-by-lane loops.
 3. Merge `X.h` + `X.inl` + `X.cpp` into `Zolt/<same dir>/X.zig`, starting with the header:
    ```zig
@@ -346,6 +347,12 @@ results are reproducible as long as the code follows these rules:
    by zero) is **not** ported. Vec3 keeps W == Z regardless, so its padding lane is always defined.
 10. Wherever Jolt uses `std::mt19937`, use `Core/Mt19937.zig` (bit identical sequence). Never use
     `std.Random` for anything that affects simulation results.
+11. **SIMD path vs scalar fallback.** In a few places Jolt's SSE path does not produce the same bits as
+    its scalar fallback. There Zolt follows the SSE path, which is what `zig build parity` compares
+    against (and what Jolt computes on x86, usually also on ARM). Known cases: `Mat44::Inversed` (SSE,
+    NEON and RVV share an algorithm that differs from the fallback), `Mat44::sCrossProduct` (SSE4.1
+    negates with `0 - v`, the fallback with `-x`). Differences that only show with AVX512 on NaN input
+    (`Vec3/DVec3::GetSign` return NaN) are not followed; the parity tests skip NaN there.
 
 ## 9. Threading
 
@@ -439,3 +446,11 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `HalfFloatConversion::FromFloat<ROUND_TO_NEAREST>(v)` | `half_float.fromFloat(.round_to_nearest, v)` (file re-exported as `zolt.half_float`) | namespace + template |
 | `HALF_FLT_MAX` etc.                | `half_float.half_flt_max` etc.         | constants                               |
 | `FLT_MIN`, `FLT_MAX`, `FLT_EPSILON`| `math.flt_min`, `math.flt_max`, `math.flt_epsilon` |                             |
+| `explicit DMat44(Mat44Arg)` / `DMat44(Mat44Arg inRot, DVec3Arg inT)` / `DMat44(Type x3, DTypeArg)` | `DMat44.fromMat44` / `fromMat44Translation` / `fromTypes` | overloads |
+| `DMat44::sRotation(QuatArg)` / `sScale(Vec3Arg)` | `rotationQuat` / `scaleVec3` (same names as Mat44, so `RMat44` code works in both precisions) | overloads |
+| `DMat44 * DMat44` / `DMat44 * Mat44` | `mul` / `mulMat44`                   | operator overloads                      |
+| `DMat44 * Vec3` / `DMat44 * DVec3` | `mulVec3` / `mulDVec3` (both return DVec3) | operator overloads                 |
+| `DMat44::Multiply3x3(DVec3Arg)`, `PreTranslated(DVec3Arg)`, `PostTranslated(DVec3Arg)` | `multiply3x3DVec3`, `preTranslatedDVec3`, `postTranslatedDVec3` (the `Vec3Arg` overloads keep Mat44's names) | overloads |
+| `DMat44::Decompose(outScale)`      | `decompose() Decomposition{ .rotation_translation, .scale }` | out parameter     |
+| `JPH_RVECTOR_ALIGNMENT`            | `rvector_alignment` (`Math/Real.zig`)  | macro constant                          |
+| `operator ""_r` (`JPH::literals`)  | not ported: a float literal coerces to `Real` | Zig has no user-defined literals |

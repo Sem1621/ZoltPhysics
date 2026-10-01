@@ -28,6 +28,7 @@ pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
+pub const DMat44 = @import("Math/DMat44.zig").DMat44;
 pub const Double3 = @import("Math/Double3.zig").Double3;
 pub const DVec3 = @import("Math/DVec3.zig").DVec3;
 pub const DynMatrix = @import("Math/DynMatrix.zig").DynMatrix;
@@ -45,6 +46,11 @@ pub const Mat44 = @import("Math/Mat44.zig").Mat44;
 pub const math = @import("Math/Math.zig");
 pub const Matrix = @import("Math/Matrix.zig").Matrix;
 pub const Quat = @import("Math/Quat.zig").Quat;
+pub const Real = @import("Math/Real.zig").Real;
+pub const Real3 = @import("Math/Real.zig").Real3;
+pub const RMat44 = @import("Math/Real.zig").RMat44;
+pub const RVec3 = @import("Math/Real.zig").RVec3;
+pub const rvector_alignment = @import("Math/Real.zig").rvector_alignment;
 pub const Swizzle = @import("Math/Swizzle.zig").Swizzle;
 pub const trigonometry = @import("Math/Trigonometry.zig");
 pub const UVec4 = @import("Math/UVec4.zig").UVec4;
@@ -67,6 +73,7 @@ const source_files = .{
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
     @import("Math/BVec16.zig"),
+    @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),
     @import("Math/DVec3.zig"),
     @import("Math/DynMatrix.zig"),
@@ -81,6 +88,7 @@ const source_files = .{
     @import("Math/Math.zig"),
     @import("Math/Matrix.zig"),
     @import("Math/Quat.zig"),
+    @import("Math/Real.zig"),
     @import("Math/Swizzle.zig"),
     @import("Math/Trigonometry.zig"),
     @import("Math/UVec4.zig"),

@@ -15,7 +15,9 @@ test {
 
     // Math
     _ = @import("Math/BVec16Tests.zig");
+    _ = @import("Math/DMat44Tests.zig");
     _ = @import("Math/DVec3Tests.zig");
+    _ = @import("Math/EigenValueSymmetricTests.zig");
     _ = @import("Math/HalfFloatTests.zig");
     _ = @import("Math/Mat44Tests.zig");
     _ = @import("Math/MathTests.zig");

@@ -170,10 +170,14 @@ pub const Mat44 = extern struct {
         const y = v.getY();
         const z = v.getZ();
 
+        // Jolt's SSE4.1 path negates with 0 - v (a zero stays +0), its scalar fallback with -x (a zero becomes -0).
+        // Zolt follows the SSE4.1 path, which is the reference of the parity tests (results only differ in the sign of zero).
+        const min_v = v.negate();
+
         return init(
-            Vec4.init(0, z, -y, 0),
-            Vec4.init(-z, 0, x, 0),
-            Vec4.init(y, -x, 0, 0),
+            Vec4.init(0, z, min_v.getY(), 0),
+            Vec4.init(min_v.getZ(), 0, x, 0),
+            Vec4.init(y, min_v.getX(), 0, 0),
             Vec4.init(0, 0, 0, 1),
         );
     }
@@ -438,51 +442,84 @@ pub const Mat44 = extern struct {
     }
 
     /// Inverse 4x4 matrix
+    ///
+    /// Zolt ports the algorithm of Jolt's SSE path (which its NEON and RVV paths reproduce exactly), not the
+    /// scalar fallback: the fallback calculates the cofactors in a different order and divides by the determinant
+    /// instead of multiplying by its reciprocal, so it doesn't produce the same bits as Jolt on x86 / ARM / RISC-V RVV.
     pub fn inversed(self: Mat44) Mat44 {
-        const m00 = self.el(0, 0);
-        const m10 = self.el(1, 0);
-        const m20 = self.el(2, 0);
-        const m30 = self.el(3, 0);
-        const m01 = self.el(0, 1);
-        const m11 = self.el(1, 1);
-        const m21 = self.el(2, 1);
-        const m31 = self.el(3, 1);
-        const m02 = self.el(0, 2);
-        const m12 = self.el(1, 2);
-        const m22 = self.el(2, 2);
-        const m32 = self.el(3, 2);
-        const m03 = self.el(0, 3);
-        const m13 = self.el(1, 3);
-        const m23 = self.el(2, 3);
-        const m33 = self.el(3, 3);
+        // Algorithm from: http://download.intel.com/design/PentiumIII/sml/24504301.pdf
+        // Streaming SIMD Extensions - Inverse of 4x4 Matrix
+        // Adapted to load data using _mm_shuffle_ps instead of loading from memory
+        // Replaced _mm_rcp_ps with _mm_div_ps for better accuracy
+        const c = self.col;
 
-        const m10211120 = m10 * m21 - m11 * m20;
-        const m10221220 = m10 * m22 - m12 * m20;
-        const m10231320 = m10 * m23 - m13 * m20;
-        const m10311130 = m10 * m31 - m11 * m30;
-        const m10321230 = m10 * m32 - m12 * m30;
-        const m10331330 = m10 * m33 - m13 * m30;
-        const m11221221 = m11 * m22 - m12 * m21;
-        const m11231321 = m11 * m23 - m13 * m21;
-        const m11321231 = m11 * m32 - m12 * m31;
-        const m11331331 = m11 * m33 - m13 * m31;
-        const m12231322 = m12 * m23 - m13 * m22;
-        const m12331332 = m12 * m33 - m13 * m32;
-        const m20312130 = m20 * m31 - m21 * m30;
-        const m20322230 = m20 * m32 - m22 * m30;
-        const m20332330 = m20 * m33 - m23 * m30;
-        const m21322231 = m21 * m32 - m22 * m31;
-        const m21332331 = m21 * m33 - m23 * m31;
-        const m22332332 = m22 * m33 - m23 * m32;
+        var tmp1 = shuffle4(c[0].value, c[1].value, 0, 1, 0, 1);
+        var row1 = shuffle4(c[2].value, c[3].value, 0, 1, 0, 1);
+        const row0 = shuffle4(tmp1, row1, 0, 2, 0, 2);
+        row1 = shuffle4(row1, tmp1, 1, 3, 1, 3);
+        tmp1 = shuffle4(c[0].value, c[1].value, 2, 3, 2, 3);
+        var row3 = shuffle4(c[2].value, c[3].value, 2, 3, 2, 3);
+        var row2 = shuffle4(tmp1, row3, 0, 2, 0, 2);
+        row3 = shuffle4(row3, tmp1, 1, 3, 1, 3);
 
-        const col0 = Vec4.init(m11 * m22332332 - m12 * m21332331 + m13 * m21322231, -m10 * m22332332 + m12 * m20332330 - m13 * m20322230, m10 * m21332331 - m11 * m20332330 + m13 * m20312130, -m10 * m21322231 + m11 * m20322230 - m12 * m20312130);
-        const col1 = Vec4.init(-m01 * m22332332 + m02 * m21332331 - m03 * m21322231, m00 * m22332332 - m02 * m20332330 + m03 * m20322230, -m00 * m21332331 + m01 * m20332330 - m03 * m20312130, m00 * m21322231 - m01 * m20322230 + m02 * m20312130);
-        const col2 = Vec4.init(m01 * m12331332 - m02 * m11331331 + m03 * m11321231, -m00 * m12331332 + m02 * m10331330 - m03 * m10321230, m00 * m11331331 - m01 * m10331330 + m03 * m10311130, -m00 * m11321231 + m01 * m10321230 - m02 * m10311130);
-        const col3 = Vec4.init(-m01 * m12231322 + m02 * m11231321 - m03 * m11221221, m00 * m12231322 - m02 * m10231320 + m03 * m10221220, -m00 * m11231321 + m01 * m10231320 - m03 * m10211120, m00 * m11221221 - m01 * m10221220 + m02 * m10211120);
+        tmp1 = row2 * row3;
+        tmp1 = shuffle4(tmp1, tmp1, 1, 0, 3, 2);
+        var minor0 = row1 * tmp1;
+        var minor1 = row0 * tmp1;
+        tmp1 = shuffle4(tmp1, tmp1, 2, 3, 0, 1);
+        minor0 = row1 * tmp1 - minor0;
+        minor1 = row0 * tmp1 - minor1;
+        minor1 = shuffle4(minor1, minor1, 2, 3, 0, 1);
 
-        const det = m00 * col0.getX() + m01 * col0.getY() + m02 * col0.getZ() + m03 * col0.getW();
+        tmp1 = row1 * row2;
+        tmp1 = shuffle4(tmp1, tmp1, 1, 0, 3, 2);
+        minor0 = row3 * tmp1 + minor0;
+        var minor3 = row0 * tmp1;
+        tmp1 = shuffle4(tmp1, tmp1, 2, 3, 0, 1);
+        minor0 = minor0 - row3 * tmp1;
+        minor3 = row0 * tmp1 - minor3;
+        minor3 = shuffle4(minor3, minor3, 2, 3, 0, 1);
 
-        return init(col0.divScalar(det), col1.divScalar(det), col2.divScalar(det), col3.divScalar(det));
+        tmp1 = shuffle4(row1, row1, 2, 3, 0, 1) * row3;
+        tmp1 = shuffle4(tmp1, tmp1, 1, 0, 3, 2);
+        row2 = shuffle4(row2, row2, 2, 3, 0, 1);
+        minor0 = row2 * tmp1 + minor0;
+        var minor2 = row0 * tmp1;
+        tmp1 = shuffle4(tmp1, tmp1, 2, 3, 0, 1);
+        minor0 = minor0 - row2 * tmp1;
+        minor2 = row0 * tmp1 - minor2;
+        minor2 = shuffle4(minor2, minor2, 2, 3, 0, 1);
+
+        tmp1 = row0 * row1;
+        tmp1 = shuffle4(tmp1, tmp1, 1, 0, 3, 2);
+        minor2 = row3 * tmp1 + minor2;
+        minor3 = row2 * tmp1 - minor3;
+        tmp1 = shuffle4(tmp1, tmp1, 2, 3, 0, 1);
+        minor2 = row3 * tmp1 - minor2;
+        minor3 = minor3 - row2 * tmp1;
+
+        tmp1 = row0 * row3;
+        tmp1 = shuffle4(tmp1, tmp1, 1, 0, 3, 2);
+        minor1 = minor1 - row2 * tmp1;
+        minor2 = row1 * tmp1 + minor2;
+        tmp1 = shuffle4(tmp1, tmp1, 2, 3, 0, 1);
+        minor1 = row2 * tmp1 + minor1;
+        minor2 = minor2 - row1 * tmp1;
+
+        tmp1 = row0 * row2;
+        tmp1 = shuffle4(tmp1, tmp1, 1, 0, 3, 2);
+        minor1 = row3 * tmp1 + minor1;
+        minor3 = minor3 - row1 * tmp1;
+        tmp1 = shuffle4(tmp1, tmp1, 2, 3, 0, 1);
+        minor1 = minor1 - row3 * tmp1;
+        minor3 = row1 * tmp1 + minor3;
+
+        // Determinant, summed as (x + y) + (z + w) (Jolt changed the order of the original code to match its ARM code and make the result cross platform deterministic)
+        const det4 = row0 * minor0;
+        const det = (det4[0] + det4[1]) + (det4[2] + det4[3]);
+        const inv_det: Type = @splat(1.0 / det);
+
+        return fromTypes(inv_det * minor0, inv_det * minor1, inv_det * minor2, inv_det * minor3);
     }
 
     /// Inverse 4x4 matrix when it only contains rotation and translation
@@ -706,5 +743,10 @@ pub const Mat44 = extern struct {
     /// Element at row r, column c with comptime indices (JPH_EL(r, c))
     fn el(self: Mat44, comptime r: usize, comptime c: usize) f32 {
         return self.col[c].value[r];
+    }
+
+    /// _mm_shuffle_ps(a, b, _MM_SHUFFLE(b1, b0, a1, a0)): returns [a[a0], a[a1], b[b0], b[b1]]
+    fn shuffle4(a: Type, b: Type, comptime a0: i32, comptime a1: i32, comptime b0: i32, comptime b1: i32) Type {
+        return @shuffle(f32, a, b, @Vector(4, i32){ a0, a1, ~b0, ~b1 });
     }
 };
