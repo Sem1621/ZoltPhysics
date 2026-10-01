@@ -9,6 +9,8 @@
 const std = @import("std");
 
 // Core
+pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
+pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
 pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
 pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
 pub const Color = @import("Core/Color.zig").Color;
@@ -16,6 +18,7 @@ pub const Core = @import("Core/Core.zig");
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const Mt19937 = @import("Core/Mt19937.zig");
+pub const prefetchL1 = @import("Core/Prefetch.zig").prefetchL1;
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
 pub const Ref = @import("Core/Reference.zig").Ref;
 pub const RefConst = @import("Core/Reference.zig").RefConst;
@@ -38,12 +41,14 @@ pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 /// Every source file of the module. Used by the test below to make sure that all of them are
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
+    @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/InsertionSort.zig"),
     @import("Core/Mt19937.zig"),
+    @import("Core/Prefetch.zig"),
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),

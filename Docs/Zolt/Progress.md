@@ -15,7 +15,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 320 |
 | `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
-| `Jolt/Core` | 18% | 7 | 1 | 0 | 32 | 15 | 7518 |
+| `Jolt/Core` | 19% | 9 | 1 | 0 | 30 | 15 | 7518 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
 | `Jolt/Math` | 48% | 9 | 0 | 0 | 14 | 1 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
@@ -93,13 +93,13 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>Jolt/Core — 18%</summary>
+<details><summary>Jolt/Core — 19%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ARMNeon.h` | 283 | ➖ n/a | NEON intrinsic helpers, Zolt uses @Vector |
 | `Array.h` | 580 | ➖ n/a | std.ArrayList |
-| `Atomics.h` | 37 | ❌ todo |  |
+| `Atomics.h` | 37 | ✅ complete | `Zolt/Core/Atomics.zig` |
 | `BinaryHeap.h` | 77 | ✅ complete | `Zolt/Core/BinaryHeap.zig` |
 | `ByteBuffer.h` | 59 | ❌ todo |  |
 | `Color.cpp`, `Color.h` | 110 | ✅ complete | `Zolt/Core/Color.zig` |
@@ -126,7 +126,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `MutexArray.h` | 77 | ❌ todo |  |
 | `NonCopyable.h` | 14 | ➖ n/a | Zig has no copy constructors |
 | `ObjectToIDMap.h` | 13 | ❌ todo |  |
-| `Prefetch.h` | 16 | ❌ todo |  |
+| `Prefetch.h` | 16 | ✅ complete | `Zolt/Core/Prefetch.zig` |
 | `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ❌ todo |  |
 | `QuickSort.h` | 109 | ✅ complete | `Zolt/Core/QuickSort.zig` |
 | `RISCVVector.h` | 88 | ➖ n/a | RVV intrinsic helpers, Zolt uses @Vector |
