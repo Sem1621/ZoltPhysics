@@ -371,16 +371,31 @@ results are reproducible as long as the code follows these rules:
 
 ## 9. Threading
 
-Zig 0.16 moved blocking synchronization into the `std.Io` interface:
-- `std::mutex` → `std.Io.Mutex` (`lock(io)` / `unlock(io)`); `std::condition_variable` →
-  `std.Io.Condition`; `Semaphore` → `std.Io.Semaphore`. Types that lock therefore need an
-  `io: std.Io`, passed at `init` (like an allocator) and stored.
+Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread.Mutex`,
+`Condition`, `Semaphore`, `ResetEvent`, `Pool` and `WaitGroup` no longer exist):
+- **Where `io` comes from.** A type that blocks (locks, waits) gets an `io: std.Io` in `init`, next to
+  the allocator, and stores it, e.g. `JobSystemThreadPool.init(allocator, io, ...)`. Applications get
+  it from `std.process.Init` (`init.io`) or `std.Io.Threaded`; tests use `std.testing.io`.
+- **Small sync primitives take `io` per call** instead of storing it, because they are embedded in many
+  other structs (Jolt's `Mutex` is a member of BodyManager, MutexArray, ...): `mutex.lock(io)`,
+  `mutex.unlock(io)`, `mutex.tryLock()`.
+- **Physics code is not cancelable.** Use the `*Uncancelable` variants of `std.Io` primitives
+  (`lockUncancelable`, `waitUncancelable`) so that lock/wait functions keep Jolt's signatures
+  (no error union). Expose `Cancelable` errors only where Jolt itself has a failure path.
+- Mapping: `std::mutex` / Jolt `Mutex` → Zolt `Core/Mutex.zig` `Mutex` over `std.Io.Mutex`;
+  `std::shared_mutex` / Jolt `SharedMutex` → over `std.Io.RwLock`; `std::condition_variable` →
+  `std.Io.Condition`; Jolt `Semaphore` (counting, `Acquire(n)` / `Release(n)`) → port of
+  `Core/Semaphore.zig` on top of `std.Io.Mutex` + `std.Io.Condition` or atomics + `std.Io` futex
+  (`io.futexWait` / `io.futexWake`), keeping Jolt's fast path (atomic counter, only block when needed).
 - `std::atomic<T>` → `std.atomic.Value(T)`; memory orders: `relaxed` → `.monotonic`,
-  `acquire`/`release`/`acq_rel`/`seq_cst` map 1:1.
-- `std::thread` → `std.Thread.spawn`; cache line padding → `std.atomic.cache_line`.
+  `acquire`/`release`/`acq_rel`/`seq_cst` map 1:1. Zig has no standalone fence (`@fence` is gone):
+  where Jolt uses `atomic_thread_fence`, strengthen the adjacent atomic operation instead and comment why.
+- `std::thread` → `std.Thread.spawn(.{}, func, .{args})` + `join()`; `std::this_thread::yield()` →
+  `std.Thread.yield()`; cache line padding → `align(std.atomic.cache_line)` / `Core.cache_line_size`.
 - `JobSystem` is interface pattern B; `JobSystemThreadPool` is built on `std.Thread` + `std.Io`
   primitives. Multithreaded results must be identical to single threaded ones (Jolt guarantees
   this, so the port must keep the same barriers and sorting of results).
+- Debug-only lock checking in Jolt (`JPH_ENABLE_ASSERTS` lock tracking) maps to `Core.enable_asserts`.
 
 ## 10. Tests
 

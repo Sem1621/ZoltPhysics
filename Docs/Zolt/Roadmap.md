@@ -58,21 +58,18 @@ function also has parity tests against the C++ library (bit exact, both precisio
 
 ### Phase 2: Core (`Jolt/Core`, `UnitTests/Core`) — in progress
 Done: HashCombine, Mt19937, QuickSort, InsertionSort, BinaryHeap, StaticArray, Reference, Color,
-Atomics, Prefetch. Next: HashTable/UnorderedMap/UnorderedSet (needs BVec16, done), TempAllocator,
-FixedSizeFreeList, LockFreeHashMap, the JobSystem family, StringTools, LinearCurve, streams.
-Containers and utilities the physics code depends on:
-- Containers: StaticArray, HashTable + UnorderedMap/UnorderedSet (Jolt's own, for deterministic
-  iteration order), BinaryHeap, FixedSizeFreeList, LockFreeHashMap, ByteBuffer, StridedPtr,
-  ObjectToIDMap.
-- Algorithms: QuickSort, InsertionSort (Jolt's own, std sorts are not guaranteed identical for equal keys).
-- Memory: TempAllocator (TempAllocatorImpl, TempAllocatorMalloc), STLTempAllocator / STLLocalAllocator
-  equivalents as `std.mem.Allocator` adapters.
-- Reference counting: Reference.h (RefTarget/Ref/RefConst, see the guide).
-- Threading: Atomics, Mutex, MutexArray, Semaphore, JobSystem, JobSystemWithBarrier,
-  JobSystemThreadPool, JobSystemSingleThreaded (std.Thread + std.Io primitives).
-- Misc: Color, StringTools, LinearCurve, TickCounter, Factory/RTTI (minimal, grows with ObjectStream),
-  StreamIn/StreamOut/StreamUtils/StreamWrapper (over std.Io.Reader/Writer), FPControlWord,
-  FPFlushDenormals, Profiler (no-op).
+Atomics, Prefetch. Remaining, in five groups:
+- Containers: HashTable, UnorderedMap, UnorderedSet, ObjectToIDMap (Jolt's own, for deterministic
+  iteration order; parity tests compare iteration order with the C++).
+- Concurrency: Mutex, MutexArray, Semaphore, FixedSizeFreeList, LockFreeHashMap.
+- Job system: JobSystem, JobSystemWithBarrier, JobSystemThreadPool, JobSystemSingleThreaded
+  (std.Thread + std.Io primitives, see the guide's Threading section).
+- Memory: TempAllocator (TempAllocatorImpl, TempAllocatorMalloc), STLTempAllocator,
+  STLLocalAllocator (as `std.mem.Allocator` adapters), ByteBuffer, StridedPtr.
+- Misc: StringTools, TickCounter, FPControlWord, FPFlushDenormals, StreamIn/StreamOut/StreamWrapper
+  (over std.Io.Reader/Writer), LinearCurve, ConfigurationString.
+Deferred: Profiler (developer tooling, compiled out in the Distribution configuration), RTTI, Factory
+and StreamUtils (serialization support, ported with ObjectStream in Phase 8).
 **Milestone M2:** `UnitTests/Core` passes, including JobSystemTest.
 
 ### Phase 3: Geometry (`Jolt/Geometry`, `Jolt/AABBTree`, `Jolt/TriangleSplitter`)
