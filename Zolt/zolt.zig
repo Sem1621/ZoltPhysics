@@ -15,15 +15,25 @@ pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
 pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
+pub const FixedSizeFreeList = @import("Core/FixedSizeFreeList.zig").FixedSizeFreeList;
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
+pub const LFHMAllocator = @import("Core/LockFreeHashMap.zig").LFHMAllocator;
+pub const LFHMAllocatorContext = @import("Core/LockFreeHashMap.zig").LFHMAllocatorContext;
+pub const LockFreeHashMap = @import("Core/LockFreeHashMap.zig").LockFreeHashMap;
 pub const Mt19937 = @import("Core/Mt19937.zig");
+pub const Mutex = @import("Core/Mutex.zig").Mutex;
+pub const MutexBase = @import("Core/Mutex.zig").MutexBase;
+pub const SharedMutex = @import("Core/Mutex.zig").SharedMutex;
+pub const SharedMutexBase = @import("Core/Mutex.zig").SharedMutexBase;
+pub const MutexArray = @import("Core/MutexArray.zig").MutexArray;
 pub const prefetchL1 = @import("Core/Prefetch.zig").prefetchL1;
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
 pub const Ref = @import("Core/Reference.zig").Ref;
 pub const RefConst = @import("Core/Reference.zig").RefConst;
 pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
+pub const Semaphore = @import("Core/Semaphore.zig").Semaphore;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
 
 // Math
@@ -65,12 +75,17 @@ const source_files = .{
     @import("Core/BinaryHeap.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
+    @import("Core/FixedSizeFreeList.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/InsertionSort.zig"),
+    @import("Core/LockFreeHashMap.zig"),
     @import("Core/Mt19937.zig"),
+    @import("Core/Mutex.zig"),
+    @import("Core/MutexArray.zig"),
     @import("Core/Prefetch.zig"),
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
+    @import("Core/Semaphore.zig"),
     @import("Core/StaticArray.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
