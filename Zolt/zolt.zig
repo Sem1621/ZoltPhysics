@@ -27,6 +27,10 @@ pub const RefConst = @import("Core/Reference.zig").RefConst;
 pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const StreamIn = @import("Core/StreamIn.zig").StreamIn;
+pub const StreamOut = @import("Core/StreamOut.zig").StreamOut;
+pub const StreamInWrapper = @import("Core/StreamWrapper.zig").StreamInWrapper;
+pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
 pub const convertToString = @import("Core/StringTools.zig").convertToString;
 pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
 pub const stringFormat = @import("Core/StringTools.zig").stringFormat;
@@ -84,6 +88,9 @@ const source_files = .{
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/StreamIn.zig"),
+    @import("Core/StreamOut.zig"),
+    @import("Core/StreamWrapper.zig"),
     @import("Core/StringTools.zig"),
     @import("Core/TickCounter.zig"),
     @import("Math/BVec16.zig"),
