@@ -14,3 +14,6 @@
 *.dxil
 *.metallib
 /Assets/*.hair
+**/zig-out
+**/zig-pkg
+.zig-cache
