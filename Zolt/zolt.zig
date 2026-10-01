@@ -27,24 +27,24 @@ pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
 
 // Math
-pub const half_float = @import("Math/HalfFloat.zig");
-pub const math = @import("Math/Math.zig");
-pub const trigonometry = @import("Math/Trigonometry.zig");
-pub const Swizzle = @import("Math/Swizzle.zig").Swizzle;
+pub const BVec16 = @import("Math/BVec16.zig").BVec16;
+pub const Double3 = @import("Math/Double3.zig").Double3;
+pub const DVec3 = @import("Math/DVec3.zig").DVec3;
 pub const DynMatrix = @import("Math/DynMatrix.zig").DynMatrix;
 pub const eigenValueSymmetric = @import("Math/EigenValueSymmetric.zig").eigenValueSymmetric;
 pub const findRoot = @import("Math/FindRoot.zig").findRoot;
 pub const FindRootResult = @import("Math/FindRoot.zig").FindRootResult;
-pub const BVec16 = @import("Math/BVec16.zig").BVec16;
-pub const Double3 = @import("Math/Double3.zig").Double3;
-pub const DVec3 = @import("Math/DVec3.zig").DVec3;
 pub const Float2 = @import("Math/Float2.zig").Float2;
 pub const Float3 = @import("Math/Float3.zig").Float3;
 pub const VertexList = @import("Math/Float3.zig").VertexList;
 pub const Float4 = @import("Math/Float4.zig").Float4;
 pub const gaussianElimination = @import("Math/GaussianElimination.zig").gaussianElimination;
-pub const Matrix = @import("Math/Matrix.zig").Matrix;
+pub const half_float = @import("Math/HalfFloat.zig");
 pub const HalfFloat = @import("Math/HalfFloat.zig").HalfFloat;
+pub const math = @import("Math/Math.zig");
+pub const Matrix = @import("Math/Matrix.zig").Matrix;
+pub const Swizzle = @import("Math/Swizzle.zig").Swizzle;
+pub const trigonometry = @import("Math/Trigonometry.zig");
 pub const UVec4 = @import("Math/UVec4.zig").UVec4;
 pub const Vec3 = @import("Math/Vec3.zig").Vec3;
 pub const Vec4 = @import("Math/Vec4.zig").Vec4;
@@ -64,6 +64,9 @@ const source_files = .{
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Math/BVec16.zig"),
+    @import("Math/Double3.zig"),
+    @import("Math/DVec3.zig"),
     @import("Math/DynMatrix.zig"),
     @import("Math/EigenValueSymmetric.zig"),
     @import("Math/FindRoot.zig"),
@@ -71,12 +74,6 @@ const source_files = .{
     @import("Math/Float3.zig"),
     @import("Math/Float4.zig"),
     @import("Math/GaussianElimination.zig"),
-    @import("Math/BVec16.zig"),
-    @import("Math/Double3.zig"),
-    @import("Math/DVec3.zig"),
-    @import("Math/Float2.zig"),
-    @import("Math/Float3.zig"),
-    @import("Math/Float4.zig"),
     @import("Math/HalfFloat.zig"),
     @import("Math/Math.zig"),
     @import("Math/Matrix.zig"),

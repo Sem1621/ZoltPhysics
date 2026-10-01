@@ -31,8 +31,11 @@ files whose dependencies are already ported.
   in body ID order, plus the scene's own `UpdateHash`, see `PerformanceTest/PerformanceTest.cpp`.
   The scenes run with the `-q=LinearCast` (or `-q=Discrete` for CharacterVirtual) motion quality.
 - **Parallel work.** Independent subtrees (e.g. shapes vs. constraints) can be ported in parallel
-  in separate git worktrees; the registry files `Zolt/zolt.zig` and `ZoltTests/unit_tests.zig`
-  are the only expected merge conflicts (keep their lists sorted to make them trivial).
+  in separate git worktrees (one branch per worker, based on the current port branch). The
+  registry files `Zolt/zolt.zig` and `ZoltTests/unit_tests.zig` are the only shared files; git
+  merges them with the `union` driver (`.gitattributes`), after which `python3 tools/tidy_registry.py`
+  removes duplicates and restores the sort order. Workers must never "fix" shared code they don't
+  own; they report the problem instead.
 
 ## Phases
 

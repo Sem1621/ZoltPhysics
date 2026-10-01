@@ -24,6 +24,8 @@ zig build check                             # compile only (fast)
 zig fmt Zolt ZoltTests build.zig            # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
 python3 tools/port_status.py --write        # regenerate Docs/Zolt/Progress.md
+python3 tools/port_status.py --next         # what can be ported now (dependencies done)
+python3 tools/tidy_registry.py              # sort/dedupe registry files after merging branches
 ```
 
 If `zig` is missing (fresh cloud container), the SessionStart hook installs it; manually:

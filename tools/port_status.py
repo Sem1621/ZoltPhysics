@@ -20,6 +20,7 @@ import argparse
 import os
 import re
 import signal
+import subprocess
 import sys
 from collections import defaultdict
 
@@ -362,7 +363,8 @@ def main():
         stale = not os.path.exists(PROGRESS_MD) or open(PROGRESS_MD, encoding="utf-8").read() != markdown
         if stale:
             print("Docs/Zolt/Progress.md is stale, run: python3 tools/port_status.py --write", file=sys.stderr)
-        if stale or lint:
+        untidy = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "tidy_registry.py"), "--check"]).returncode != 0
+        if stale or lint or untidy:
             sys.exit(1)
 
 

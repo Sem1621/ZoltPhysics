@@ -417,4 +417,11 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | copy constructor of an allocating type (`DynMatrix(const DynMatrix &)`) | `clone() !T` | needs the allocator            |
 | `FindRoot(a, b, c, outX1, outX2) -> int` | `findRoot(T, a, b, c) FindRootResult(T){ num_roots, x1, x2 }` | out parameters      |
 | `JPH_EVS_ROTATE` (macro)           | private fn `evsRotate`                 | macro                                   |
+| `DVec3::cTrue` / `cFalse`          | `DVec3.true_value` / `DVec3.false_value` | keywords                              |
+| `DVec3(Vec3Arg)` / `DVec3(Vec4Arg)` / `DVec3(const Double3 &)` / `DVec3(TypeArg)` | `fromVec3` / `fromVec4` / `fromDouble3` / `fromType` (`fromType` sets W = Z) | overloads |
+| `explicit operator Vec3()`         | `DVec3.toVec3()`                       | conversion operator                     |
+| `DVec3 + Vec3`, `DVec3 - Vec3`     | `addVec3`, `subVec3`                   | overloads                               |
+| `BVec16(uint64, uint64)`           | `BVec16.fromUint64(v0, v1)`            | overload                                |
+| `HalfFloatConversion::FromFloat<ROUND_TO_NEAREST>(v)` | `half_float.fromFloat(.round_to_nearest, v)` (file re-exported as `zolt.half_float`) | namespace + template |
+| `HALF_FLT_MAX` etc.                | `half_float.half_flt_max` etc.         | constants                               |
 | `FLT_MIN`, `FLT_MAX`, `FLT_EPSILON`| `math.flt_min`, `math.flt_max`, `math.flt_epsilon` |                             |
