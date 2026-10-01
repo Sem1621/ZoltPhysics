@@ -10,7 +10,8 @@
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
 //!   -Dobject_layer_bits=16|32   JPH_OBJECT_LAYER_BITS
 //!   -Dtest-filter=<substring>   Only run tests whose name contains the substring (repeatable)
-//!   -Duse_llvm=true|false       Force the LLVM backend on/off (Debug defaults to the self-hosted backend on x86_64)
+//!   -Duse_llvm=true|false       Use the LLVM backend (default: true). Zig 0.16's self-hosted x86_64 backend,
+//!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -20,7 +21,9 @@ pub fn build(b: *std.Build) void {
     const double_precision = b.option(bool, "double_precision", "Use f64 for world space positions (JPH_DOUBLE_PRECISION)") orelse false;
     const object_layer_bits = b.option(u8, "object_layer_bits", "Number of bits in ObjectLayer, 16 or 32 (JPH_OBJECT_LAYER_BITS)") orelse 16;
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
-    const use_llvm = b.option(bool, "use_llvm", "Force the LLVM backend on or off");
+    // Zig 0.16's self-hosted x86_64 backend (the default for Debug builds) miscompiles some vector operations
+    // (e.g. @bitCast of @Vector(4, bool)), so default to LLVM. Use -Duse_llvm=false for faster Debug compiles.
+    const use_llvm = b.option(bool, "use_llvm", "Use the LLVM backend (default true, the self-hosted backend miscompiles some @Vector code)") orelse true;
 
     if (object_layer_bits != 16 and object_layer_bits != 32) {
         std.debug.panic("object_layer_bits must be 16 or 32, got {d}", .{object_layer_bits});

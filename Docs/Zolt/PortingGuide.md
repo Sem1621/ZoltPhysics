@@ -382,8 +382,10 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface:
 - `std.io` is now `std.Io` (`std.Io.Writer`, `std.Io.Reader`); format methods are printed with `{f}`.
 - `main` receives `std.process.Init` (`init.gpa`, `init.io`, `init.arena`).
 - `usingnamespace` and `async` are gone. `std.BoundedArray` is gone.
-- Debug builds on x86_64 use the self-hosted backend. If you suspect a codegen issue
-  (especially with `@Vector`), compare with `zig build test -Duse_llvm=true`.
+- Zig 0.16's self-hosted x86_64 backend (Zig's default for Debug builds) miscompiles some `@Vector`
+  code, e.g. `@bitCast(@Vector(4, bool))` to `u4` returns garbage. `build.zig` therefore defaults to
+  LLVM (`-Duse_llvm=false` opts out for faster Debug compiles). Avoid bitcasting bool vectors to
+  integers; build masks with shifts instead (see `UVec4.getTrues`).
 - Integer arithmetic that wraps on purpose (hashes, counters) must use `+%`, `-%`, `*%`;
   plain operators are overflow-checked in Debug/ReleaseSafe.
 - `std.math.nan(f32)` is a quiet NaN like `numeric_limits<float>::quiet_NaN()`.

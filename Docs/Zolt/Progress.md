@@ -6,7 +6,7 @@ Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. P
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).
 
-**Library: 6.6%** of 86868 lines in scope · **Unit tests: 3.4%** of 18321 lines
+**Library: 6.7%** of 86868 lines in scope · **Unit tests: 3.4%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -15,7 +15,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 320 |
 | `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
-| `Jolt/Core` | 17% | 6 | 1 | 0 | 33 | 15 | 7518 |
+| `Jolt/Core` | 18% | 7 | 1 | 0 | 32 | 15 | 7518 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
 | `Jolt/Math` | 48% | 9 | 0 | 0 | 14 | 1 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
@@ -93,7 +93,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>Jolt/Core — 17%</summary>
+<details><summary>Jolt/Core — 18%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -102,7 +102,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Atomics.h` | 37 | ❌ todo |  |
 | `BinaryHeap.h` | 77 | ✅ complete | `Zolt/Core/BinaryHeap.zig` |
 | `ByteBuffer.h` | 59 | ❌ todo |  |
-| `Color.cpp`, `Color.h` | 110 | ❌ todo |  |
+| `Color.cpp`, `Color.h` | 110 | ✅ complete | `Zolt/Core/Color.zig` |
 | `Core.h` | 666 | 🟡 partial | `Zolt/Core/Core.zig` |
 | `FPControlWord.h` | 113 | ❌ todo |  |
 | `FPException.h` | 61 | ➖ n/a | Zolt never enables floating point exceptions |

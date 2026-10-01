@@ -254,8 +254,9 @@ pub const UVec4 = extern struct {
 
     /// Store if X is true in bit 0, Y in bit 1, Z in bit 2 and W in bit 3 (true is when highest bit of component is set)
     pub fn getTrues(self: UVec4) u32 {
-        const bits: u4 = @bitCast(self.toBools());
-        return bits;
+        // Note: not implemented as @bitCast(@Vector(4, bool)) -> u4, the Zig 0.16 self-hosted x86_64 backend miscompiles that
+        const v = self.value >> @splat(31);
+        return v[0] | (v[1] << 1) | (v[2] << 2) | (v[3] << 3);
     }
 
     /// Shift all components by count bits to the left (filling with zeros from the left)

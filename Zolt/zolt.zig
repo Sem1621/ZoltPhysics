@@ -11,6 +11,7 @@ const std = @import("std");
 // Core
 pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
 pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
+pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
@@ -38,6 +39,7 @@ pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
     @import("Core/BinaryHeap.zig"),
+    @import("Core/Color.zig"),
     @import("Core/Core.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/InsertionSort.zig"),
