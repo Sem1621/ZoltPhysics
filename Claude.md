@@ -1,1 +1,0 @@
-this project is for porting the jolt physics engine from c++ to zig 0.16.

@@ -16,3 +16,11 @@ gradlew text eol=lf
 *.tga binary
 *.bof binary
 *.bin binary
+
+# Zig sources always use LF (zig fmt output), also on Windows
+*.zig text eol=lf
+*.zon text eol=lf
+
+# Registries of the Zig port: parallel ports only append lines, so keep both sides when merging
+Zolt/zolt.zig merge=union
+ZoltTests/unit_tests.zig merge=union
