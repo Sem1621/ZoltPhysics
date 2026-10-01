@@ -17,13 +17,20 @@ pub const Mt19937 = @import("Core/Mt19937.zig");
 pub const math = @import("Math/Math.zig");
 pub const trigonometry = @import("Math/Trigonometry.zig");
 pub const Swizzle = @import("Math/Swizzle.zig").Swizzle;
+pub const DynMatrix = @import("Math/DynMatrix.zig").DynMatrix;
+pub const eigenValueSymmetric = @import("Math/EigenValueSymmetric.zig").eigenValueSymmetric;
+pub const findRoot = @import("Math/FindRoot.zig").findRoot;
+pub const FindRootResult = @import("Math/FindRoot.zig").FindRootResult;
 pub const Float2 = @import("Math/Float2.zig").Float2;
 pub const Float3 = @import("Math/Float3.zig").Float3;
 pub const VertexList = @import("Math/Float3.zig").VertexList;
 pub const Float4 = @import("Math/Float4.zig").Float4;
+pub const gaussianElimination = @import("Math/GaussianElimination.zig").gaussianElimination;
+pub const Matrix = @import("Math/Matrix.zig").Matrix;
 pub const UVec4 = @import("Math/UVec4.zig").UVec4;
 pub const Vec3 = @import("Math/Vec3.zig").Vec3;
 pub const Vec4 = @import("Math/Vec4.zig").Vec4;
+pub const Vector = @import("Math/Vector.zig").Vector;
 
 /// Every source file of the module. Used by the test below to make sure that all of them are
 /// compiled and that their inline tests run. Add new files here when porting them.
@@ -31,15 +38,21 @@ const source_files = .{
     @import("Core/Core.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/Mt19937.zig"),
+    @import("Math/DynMatrix.zig"),
+    @import("Math/EigenValueSymmetric.zig"),
+    @import("Math/FindRoot.zig"),
     @import("Math/Float2.zig"),
     @import("Math/Float3.zig"),
     @import("Math/Float4.zig"),
+    @import("Math/GaussianElimination.zig"),
     @import("Math/Math.zig"),
+    @import("Math/Matrix.zig"),
     @import("Math/Swizzle.zig"),
     @import("Math/Trigonometry.zig"),
     @import("Math/UVec4.zig"),
     @import("Math/Vec3.zig"),
     @import("Math/Vec4.zig"),
+    @import("Math/Vector.zig"),
 };
 
 test {
