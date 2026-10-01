@@ -8,7 +8,10 @@ test {
     _ = @import("UnitTestFramework.zig");
 
     // Core
+    _ = @import("Core/BinaryHeapTest.zig");
     _ = @import("Core/HashCombineTest.zig");
+    _ = @import("Core/InsertionSortTest.zig");
+    _ = @import("Core/QuickSortTest.zig");
 
     // Math
     _ = @import("Math/MathTests.zig");

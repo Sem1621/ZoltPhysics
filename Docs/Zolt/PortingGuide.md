@@ -198,34 +198,45 @@ Use one of two patterns. Both keep Jolt's ability to add user-defined subclasses
 **A. Class hierarchies with data in the base class** (`Shape`, `ConvexShape`, `Constraint`,
 `ShapeSettings`, `BroadPhase`, ...): the base struct holds a `vtable: *const VTable` plus its
 data; each derived struct embeds its parent as the first field named `base`; downcasting uses
-`@fieldParentPtr`.
+`@fieldParentPtr` (one step per level of the hierarchy).
 ```zig
 pub const Shape = struct {
     pub const VTable = struct {
         getLocalBounds: *const fn (self: *const Shape) AABox,
-        destroy: *const fn (self: *Shape) void,
         // ... one entry per C++ virtual function, in declaration order
     };
     vtable: *const VTable,
     ref_count: std.atomic.Value(u32) = .init(0),
     user_data: u64 = 0,
-    shape_type: ShapeType,
-    sub_type: ShapeSubType,
 
     pub fn getLocalBounds(self: *const Shape) AABox {
         return self.vtable.getLocalBounds(self);
     }
 };
 
-pub const BoxShape = struct {
-    base: ConvexShape, // ConvexShape in turn has `base: Shape`
-    half_extent: Vec3,
-    convex_radius: f32,
+pub const ConvexShape = struct {
+    base: Shape,
+    density: f32 = 1000,
+};
 
-    const vtable: Shape.VTable = .{ .getLocalBounds = getLocalBoundsImpl, ... };
+pub const BoxShape = struct {
+    base: ConvexShape,
+    half_extent: Vec3,
+
+    const vtable: Shape.VTable = .{ .getLocalBounds = getLocalBoundsImpl };
+
+    pub fn init(half_extent: Vec3) BoxShape {
+        return .{ .base = .{ .base = .{ .vtable = &vtable } }, .half_extent = half_extent };
+    }
+
+    /// Downcast (static_cast<const BoxShape *>(shape) in C++)
+    pub fn fromShape(shape: *const Shape) *const BoxShape {
+        const convex: *const ConvexShape = @alignCast(@fieldParentPtr("base", shape));
+        return @alignCast(@fieldParentPtr("base", convex));
+    }
 
     fn getLocalBoundsImpl(shape: *const Shape) AABox {
-        const self: *const BoxShape = @alignCast(@fieldParentPtr("base", @as(*const ConvexShape, @alignCast(@fieldParentPtr("base", shape)))));
+        const self = fromShape(shape);
         return .{ .min = self.half_extent.negate(), .max = self.half_extent };
     }
 };
@@ -236,21 +247,39 @@ that derived vtables can reference. Jolt's switch-on-subtype dispatch tables (e.
 
 **B. Pure interfaces / listeners** (`ContactListener`, `BodyActivationListener`,
 `BroadPhaseLayerInterface`, `ObjectLayerPairFilter`, `JobSystem`, ...): a type-erased fat pointer
-like `std.mem.Allocator`:
+like `std.mem.Allocator`, with a vtable generated at comptime from any implementation type.
+Optional virtuals (with an empty/default C++ body) are nullable entries, so implementations only
+declare the callbacks they need:
 ```zig
 pub const ContactListener = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+
     pub const VTable = struct {
-        onContactValidate: ?*const fn (ptr: *anyopaque, ...) ValidateResult = null, // null = Jolt's default implementation
-        onContactAdded: ?*const fn (ptr: *anyopaque, ...) void = null,
+        onContactAdded: ?*const fn (ptr: *anyopaque, body1: *const Body, body2: *const Body) void = null, // null = Jolt's default (empty) implementation
     };
-    /// Build a ContactListener from any `*T` that declares some of the methods (comptime-generated vtable)
-    pub fn init(impl: anytype) ContactListener { ... }
+
+    /// Wrap any `*T` that declares some of the callbacks
+    pub fn init(impl: anytype) ContactListener {
+        const T = @typeInfo(@TypeOf(impl)).pointer.child;
+        const gen = struct {
+            // Thunks need their own names: Zig forbids shadowing `onContactAdded` of the outer struct
+            fn onContactAddedThunk(ptr: *anyopaque, body1: *const Body, body2: *const Body) void {
+                const self: *T = @ptrCast(@alignCast(ptr));
+                self.onContactAdded(body1, body2);
+            }
+            const vtable: VTable = .{
+                .onContactAdded = if (@hasDecl(T, "onContactAdded")) onContactAddedThunk else null,
+            };
+        };
+        return .{ .ptr = impl, .vtable = &gen.vtable };
+    }
+
+    pub fn onContactAdded(self: ContactListener, body1: *const Body, body2: *const Body) void {
+        if (self.vtable.onContactAdded) |f| f(self.ptr, body1, body2);
+    }
 };
 ```
-Optional virtuals (with an empty/default C++ body) are nullable entries so implementations only
-write the callbacks they need.
 
 **Visitors / templated callbacks** (`template <class Visitor> void Walk(Visitor &)`) become
 `anytype` parameters, which keeps static dispatch like the C++.

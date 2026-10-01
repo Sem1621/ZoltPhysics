@@ -9,9 +9,13 @@
 const std = @import("std");
 
 // Core
+pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
+pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
 pub const Core = @import("Core/Core.zig");
 pub const HashCombine = @import("Core/HashCombine.zig");
+pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const Mt19937 = @import("Core/Mt19937.zig");
+pub const quickSort = @import("Core/QuickSort.zig").quickSort;
 
 // Math
 pub const math = @import("Math/Math.zig");
@@ -28,9 +32,12 @@ pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 /// Every source file of the module. Used by the test below to make sure that all of them are
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
+    @import("Core/BinaryHeap.zig"),
     @import("Core/Core.zig"),
     @import("Core/HashCombine.zig"),
+    @import("Core/InsertionSort.zig"),
     @import("Core/Mt19937.zig"),
+    @import("Core/QuickSort.zig"),
     @import("Math/Float2.zig"),
     @import("Math/Float3.zig"),
     @import("Math/Float4.zig"),

@@ -6,7 +6,7 @@ Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. P
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).
 
-**Library: 5.7%** of 86868 lines in scope · **Unit tests: 2.4%** of 18321 lines
+**Library: 6.0%** of 86868 lines in scope · **Unit tests: 3.4%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -15,7 +15,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 320 |
 | `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
-| `Jolt/Core` | 7% | 1 | 1 | 0 | 38 | 15 | 7518 |
+| `Jolt/Core` | 10% | 4 | 1 | 0 | 35 | 15 | 7518 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
 | `Jolt/Math` | 48% | 9 | 0 | 0 | 14 | 1 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
@@ -93,14 +93,14 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>Jolt/Core — 7%</summary>
+<details><summary>Jolt/Core — 10%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ARMNeon.h` | 283 | ➖ n/a | NEON intrinsic helpers, Zolt uses @Vector |
 | `Array.h` | 580 | ➖ n/a | std.ArrayList |
 | `Atomics.h` | 37 | ❌ todo |  |
-| `BinaryHeap.h` | 77 | ❌ todo |  |
+| `BinaryHeap.h` | 77 | ✅ complete | `Zolt/Core/BinaryHeap.zig` |
 | `ByteBuffer.h` | 59 | ❌ todo |  |
 | `Color.cpp`, `Color.h` | 110 | ❌ todo |  |
 | `Core.h` | 666 | 🟡 partial | `Zolt/Core/Core.zig` |
@@ -112,7 +112,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `HashCombine.h` | 208 | ✅ complete | `Zolt/Core/HashCombine.zig` |
 | `HashTable.h` | 738 | ❌ todo |  |
 | `IncludeWindows.h` | 27 | ➖ n/a | Windows headers |
-| `InsertionSort.h` | 50 | ❌ todo |  |
+| `InsertionSort.h` | 50 | ✅ complete | `Zolt/Core/InsertionSort.zig` |
 | `IssueReporting.cpp`, `IssueReporting.h` | 44 | ➖ n/a | std.debug.assert and std.log |
 | `JobSystem.h`, `JobSystem.inl` | 302 | ❌ todo |  |
 | `JobSystemSingleThreaded.cpp`, `JobSystemSingleThreaded.h` | 98 | ❌ todo |  |
@@ -128,7 +128,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `ObjectToIDMap.h` | 13 | ❌ todo |  |
 | `Prefetch.h` | 16 | ❌ todo |  |
 | `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ❌ todo |  |
-| `QuickSort.h` | 109 | ❌ todo |  |
+| `QuickSort.h` | 109 | ✅ complete | `Zolt/Core/QuickSort.zig` |
 | `RISCVVector.h` | 88 | ➖ n/a | RVV intrinsic helpers, Zolt uses @Vector |
 | `RTTI.cpp`, `RTTI.h` | 494 | ❌ todo |  |
 | `Reference.h` | 205 | ❌ todo |  |
@@ -547,7 +547,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 |-----------|---------:|---:|---:|---:|---:|---:|----------:|
 | `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 349 |
-| `UnitTests/Core` | 4% | 1 | 0 | 0 | 10 | 2 | 1021 |
+| `UnitTests/Core` | 23% | 4 | 0 | 0 | 7 | 2 | 1021 |
 | `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 854 |
 | `UnitTests/Math` | 6% | 1 | 0 | 4 | 9 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 220 |
@@ -576,18 +576,18 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>UnitTests/Core — 4%</summary>
+<details><summary>UnitTests/Core — 23%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ArrayTest.cpp` | 616 | ➖ n/a | tests Jolt's Array, Zolt uses std.ArrayList |
-| `BinaryHeapTest.cpp` | 41 | ❌ todo |  |
+| `BinaryHeapTest.cpp` | 41 | ✅ complete | `ZoltTests/Core/BinaryHeapTest.zig` |
 | `FPFlushDenormalsTest.cpp` | 35 | ❌ todo |  |
 | `HashCombineTest.cpp` | 42 | ✅ complete | `ZoltTests/Core/HashCombineTest.zig` |
-| `InsertionSortTest.cpp` | 75 | ❌ todo |  |
+| `InsertionSortTest.cpp` | 75 | ✅ complete | `ZoltTests/Core/InsertionSortTest.zig` |
 | `JobSystemTest.cpp` | 72 | ❌ todo |  |
 | `LinearCurveTest.cpp` | 48 | ❌ todo |  |
-| `QuickSortTest.cpp` | 75 | ❌ todo |  |
+| `QuickSortTest.cpp` | 75 | ✅ complete | `ZoltTests/Core/QuickSortTest.zig` |
 | `STLLocalAllocatorTest.cpp` | 180 | ❌ todo |  |
 | `ScopeExitTest.cpp` | 42 | ➖ n/a | tests ScopeExit, Zig has `defer` |
 | `StringToolsTest.cpp` | 80 | ❌ todo |  |
