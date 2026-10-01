@@ -1,0 +1,71 @@
+name: Zolt (Zig port)
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'Zolt/**'
+      - 'ZoltTests/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'tools/**'
+      - 'Docs/Zolt/**'
+      - '.github/workflows/zolt.yml'
+  pull_request:
+    paths:
+      - 'Zolt/**'
+      - 'ZoltTests/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'tools/**'
+      - 'Docs/Zolt/**'
+      - '.github/workflows/zolt.yml'
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Format and port status
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Check formatting
+      run: zig fmt --check Zolt ZoltTests build.zig build.zig.zon
+    - name: Check that Docs/Zolt/Progress.md is up to date and the port headers are valid
+      run: python3 tools/port_status.py --check
+
+  test:
+    runs-on: ${{ matrix.os }}
+    name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        optimize: [ Debug ]
+        double_precision: [ false, true ]
+        include:
+          - os: ubuntu-latest
+            optimize: ReleaseFast
+            double_precision: false
+          - os: ubuntu-latest
+            optimize: ReleaseFast
+            double_precision: true
+          - os: ubuntu-latest
+            optimize: ReleaseSafe
+            double_precision: false
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Test
+      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}
