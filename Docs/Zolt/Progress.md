@@ -6,7 +6,7 @@ Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. P
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).
 
-**Library: 6.0%** of 86868 lines in scope · **Unit tests: 3.4%** of 18321 lines
+**Library: 6.3%** of 86868 lines in scope · **Unit tests: 3.4%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -15,7 +15,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 320 |
 | `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
-| `Jolt/Core` | 10% | 4 | 1 | 0 | 35 | 15 | 7518 |
+| `Jolt/Core` | 14% | 5 | 1 | 0 | 34 | 15 | 7518 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
 | `Jolt/Math` | 48% | 9 | 0 | 0 | 14 | 1 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
@@ -93,7 +93,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>Jolt/Core — 10%</summary>
+<details><summary>Jolt/Core — 14%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -139,7 +139,7 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `STLTempAllocator.h` | 62 | ❌ todo |  |
 | `ScopeExit.h` | 38 | ➖ n/a | Zig `defer` |
 | `Semaphore.cpp`, `Semaphore.h` | 169 | ❌ todo |  |
-| `StaticArray.h` | 271 | ❌ todo |  |
+| `StaticArray.h` | 271 | ✅ complete | `Zolt/Core/StaticArray.zig` |
 | `StreamIn.h` | 103 | ❌ todo |  |
 | `StreamOut.h` | 82 | ❌ todo |  |
 | `StreamUtils.h` | 140 | ❌ todo |  |

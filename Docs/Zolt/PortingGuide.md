@@ -175,6 +175,13 @@ Inside the library always import by relative path, never through `zolt.zig`.
 | `String`, `string_view`          | `[]const u8` (owned strings: `[]u8` + allocator)                      |
 | `std::pair<A, B>`                | named struct                                                          |
 | `std::function`                  | function pointer + `*anyopaque` context, or a comptime `anytype` callback when the call site is static |
+| iterator pairs `(inBegin, inEnd)` | a slice; comparators follow std.sort: `context` + `lessThan(context, a, b)` (see `Core/QuickSort.zig`) |
+
+Container methods use the std.ArrayList names, for `std.ArrayList` and Zolt's own containers
+alike: `push_back` → `append`, `pop_back` → `pop`, `size()` → `.len` / `.items.len`,
+`empty()` → `len == 0` / `isEmpty()`, `erase(it)` → `orderedRemove(i)`, `reserve` →
+`ensureTotalCapacity`, `clear` → `clearRetainingCapacity` (ArrayList) / `clear` (StaticArray),
+`back()` → `getLast()` (ArrayList) / `back()` (StaticArray), `begin()`/`end()`/`data()` → `.items` / `slice()`.
 
 ### Reference counting
 

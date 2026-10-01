@@ -16,6 +16,7 @@ pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const Mt19937 = @import("Core/Mt19937.zig");
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
+pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
 
 // Math
 pub const math = @import("Math/Math.zig");
@@ -38,6 +39,7 @@ const source_files = .{
     @import("Core/InsertionSort.zig"),
     @import("Core/Mt19937.zig"),
     @import("Core/QuickSort.zig"),
+    @import("Core/StaticArray.zig"),
     @import("Math/Float2.zig"),
     @import("Math/Float3.zig"),
     @import("Math/Float4.zig"),
