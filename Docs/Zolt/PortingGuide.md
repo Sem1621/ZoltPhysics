@@ -552,3 +552,13 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | copy / move constructor, `operator=` (copy / move) of `HashTable` / `UnorderedMap` | `clone(allocator)` / `move()`, `assign(allocator, &other)` / `assignMove(allocator, &other)` (copies are bitwise) | needs the allocator |
 | `std::pair<const Key, Value>` (`first` / `second`) in `UnorderedMap` | `KeyValue{ .key, .value }` | named struct                     |
 | `StreamUtils::ObjectToIDMap<T>` / `IDToObjectMap<T>` | `zolt.ObjectToIDMap(T)` / `zolt.IDToObjectMap(T)` | namespace flattened                |
+| `TempAllocator::Allocate(inSize) -> void *` | `allocate(size) Error!?Block` (null for size 0, `error.OutOfMemory` where Jolt aborts) | error union instead of abort |
+| `STLTempAllocator<T>`              | `STLTempAllocator` (untyped), containers use `.allocator()` (a `std.mem.Allocator`) | std.mem.Allocator counts bytes |
+| `STLLocalAllocator(const STLLocalAllocator<T2, N> &)` | `STLLocalAllocator(T, N).fromOther(other)` | converting constructor  |
+| `STLLocalAllocator::is_local`      | `isLocal`                              | STL style snake_case name               |
+| `ByteBuffer::Align`                | `alignTo`                              | `align` is a keyword                    |
+| `ByteBuffer::Allocate<T>(inSize = 1)` | `allocate(allocator, T, .{ .size = n }) ![]T` | default argument, returns a slice |
+| `ByteBuffer::Get<T>` (non-const)   | `getMut(T, position)`                  | const overload                          |
+| `StridedPtr<const T>`              | `StridedPtrConst(T)`                   | Zig types have no const qualifier       |
+| `StridedPtr` `++p` / `--p` / `p++` / `p--` | `increment` / `decrement` / `postIncrement` / `postDecrement` | operators |
+| `StridedPtr` `p - q` / `*p`, `p->` / `p[i]` | `distance` / `deref` / `at` (pointers) | operators                         |

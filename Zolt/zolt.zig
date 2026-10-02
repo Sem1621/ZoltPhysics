@@ -15,6 +15,8 @@ pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
 pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
 pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
+pub const ByteBuffer = @import("Core/ByteBuffer.zig").ByteBuffer;
+pub const ByteBufferVector = @import("Core/ByteBuffer.zig").ByteBufferVector;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
 pub const FixedSizeFreeList = @import("Core/FixedSizeFreeList.zig").FixedSizeFreeList;
@@ -49,10 +51,14 @@ pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const Semaphore = @import("Core/Semaphore.zig").Semaphore;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const STLLocalAllocator = @import("Core/STLLocalAllocator.zig").STLLocalAllocator;
+pub const STLTempAllocator = @import("Core/STLTempAllocator.zig").STLTempAllocator;
 pub const StreamIn = @import("Core/StreamIn.zig").StreamIn;
 pub const StreamOut = @import("Core/StreamOut.zig").StreamOut;
 pub const StreamInWrapper = @import("Core/StreamWrapper.zig").StreamInWrapper;
 pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
+pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
+pub const StridedPtrConst = @import("Core/StridedPtr.zig").StridedPtrConst;
 pub const convertToString = @import("Core/StringTools.zig").convertToString;
 pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
 pub const stringFormat = @import("Core/StringTools.zig").stringFormat;
@@ -60,6 +66,10 @@ pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
 pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
 pub const toLower = @import("Core/StringTools.zig").toLower;
 pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
+pub const TempAllocator = @import("Core/TempAllocator.zig").TempAllocator;
+pub const TempAllocatorImpl = @import("Core/TempAllocator.zig").TempAllocatorImpl;
+pub const TempAllocatorImplWithMallocFallback = @import("Core/TempAllocator.zig").TempAllocatorImplWithMallocFallback;
+pub const TempAllocatorMalloc = @import("Core/TempAllocator.zig").TempAllocatorMalloc;
 pub const getProcessorTickCount = @import("Core/TickCounter.zig").getProcessorTickCount;
 pub const UnorderedMap = @import("Core/UnorderedMap.zig").UnorderedMap;
 pub const UnorderedMapDetail = @import("Core/UnorderedMap.zig").UnorderedMapDetail;
@@ -104,6 +114,7 @@ const source_files = .{
     @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
+    @import("Core/ByteBuffer.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
     @import("Core/FixedSizeFreeList.zig"),
@@ -127,10 +138,14 @@ const source_files = .{
     @import("Core/Reference.zig"),
     @import("Core/Semaphore.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/STLLocalAllocator.zig"),
+    @import("Core/STLTempAllocator.zig"),
     @import("Core/StreamIn.zig"),
     @import("Core/StreamOut.zig"),
     @import("Core/StreamWrapper.zig"),
+    @import("Core/StridedPtr.zig"),
     @import("Core/StringTools.zig"),
+    @import("Core/TempAllocator.zig"),
     @import("Core/TickCounter.zig"),
     @import("Core/UnorderedMap.zig"),
     @import("Core/UnorderedSet.zig"),

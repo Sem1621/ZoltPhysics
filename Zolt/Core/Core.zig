@@ -28,6 +28,12 @@ pub const vector_alignment = 16;
 /// Alignment of DVec3 / DMat44 (JPH_DVECTOR_ALIGNMENT)
 pub const dvector_alignment = 32;
 
+/// Default memory allocation alignment (JPH_DEFAULT_ALLOCATE_ALIGNMENT, which is
+/// `__STDCPP_DEFAULT_NEW_ALIGNMENT__` = 16 on the 64 bit platforms Jolt supports). Zolt allocates through
+/// `std.mem.Allocator`, which always takes an explicit alignment, so this only feeds the
+/// `needs_aligned_allocate` constants that are kept for reference.
+pub const default_allocate_alignment = 16;
+
 /// True when asserts are evaluated (JPH_ENABLE_ASSERTS). In Zig this follows the optimize mode:
 /// enabled in Debug and ReleaseSafe. Use it to guard code that only exists to feed asserts
 /// (the equivalent of JPH_IF_ENABLE_ASSERTS).

@@ -15,6 +15,7 @@ test {
     _ = @import("Core/JobSystemTest.zig");
     _ = @import("Core/LinearCurveTest.zig");
     _ = @import("Core/QuickSortTest.zig");
+    _ = @import("Core/STLLocalAllocatorTest.zig");
     _ = @import("Core/StringToolsTest.zig");
     _ = @import("Core/UnorderedMapTest.zig");
     _ = @import("Core/UnorderedSetTest.zig");
