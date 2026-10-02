@@ -527,6 +527,7 @@ test "ClosestPoint tetrahedron" {
     var on_tetrahedron: Checker = .{ .name = "ClosestPoint.getClosestPointOnTetrahedron" };
     var on_tetrahedron_d: Checker = .{ .name = "ClosestPoint.getClosestPointOnTetrahedron(must_include_d)" };
 
+    const eps = zolt.math.flt_epsilon;
     const hand_picked = [_][4]P{
         .{ .{ -1, -1, -1 }, .{ 3, -1, -1 }, .{ -1, 3, -1 }, .{ -1, -1, 3 } },
         .{ .{ -1, -1, 1 }, .{ 3, -1, 1 }, .{ -1, 3, 1 }, .{ -1, -1, 5 } },
@@ -537,6 +538,10 @@ test "ClosestPoint tetrahedron" {
         .{ .{ 1, 1, 1 }, .{ 1, 1, 1 }, .{ 2, 1, 1 }, .{ 1, 2, 1 } },
         .{ .{ 1, 0, 0 }, .{ 2, 0, 0 }, .{ 3, 0, 0 }, .{ 4, 0, 0 } },
         .{ .{ -1, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 } },
+        // Exactly on the slop thresholds: signp * signd == -FLT_EPSILON in originOutsideOfPlane, signp == -FLT_EPSILON / FLT_EPSILON in originOutsideOfTetrahedronPlanes
+        .{ .{ 0, 0, eps }, .{ 1, 0, eps }, .{ 0, 1, eps }, .{ 0, 0, eps - 1 } },
+        .{ .{ 0, 0, -eps }, .{ 1, 0, -eps }, .{ 0, 1, -eps }, .{ 0, 0, 1 } },
+        .{ .{ 0, 0, -eps }, .{ 0, 1, -eps }, .{ 1, 0, -eps }, .{ 0, 0, 1 } },
     };
     for (hand_picked) |t| {
         // All even permutations and the odd ones (inverted winding)
