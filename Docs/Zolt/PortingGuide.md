@@ -461,6 +461,11 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
   unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
   queries, simulation steps) is compared the same way, e.g. by hashing body state after N steps.
+- Do not pass `bool` parameters across the C ABI in parity wrappers, use `int`: declare the
+  parameter `int inFoo` in the .cpp (use it as `inFoo != 0`) and `foo: c_int` in the `extern fn`
+  (pass `@intFromBool(foo)`). Zig 0.16 (LLVM backend) does not always zero-extend runtime `bool`
+  arguments, so the clang-compiled callee can receive 0xFE for `false` and read it as `true`.
+  `bool` return values and `bool` fields or out parameters behind a pointer are fine.
 
 - `Zolt/zolt.zig` references every public declaration of every registered file, so all
   non-generic functions are type checked even without a test. Generic functions need a test.

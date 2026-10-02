@@ -39,7 +39,7 @@ const jolt = struct {
     extern fn jolt_lfhm_create(variant: c_int, object_store_size: u32, max_buckets: u32, block_sizes: [*]const u32, num_contexts: u32) *anyopaque;
     extern fn jolt_lfhm_destroy(map: *anyopaque) void;
     extern fn jolt_lfhm_set_num_buckets(map: *anyopaque, num_buckets: u32) void;
-    extern fn jolt_lfhm_clear(map: *anyopaque, clear_allocator: bool) void;
+    extern fn jolt_lfhm_clear(map: *anyopaque, clear_allocator: c_int) void;
     extern fn jolt_lfhm_reset_contexts(map: *anyopaque) void;
     extern fn jolt_lfhm_insert(map: *anyopaque, context: u32, key: u64, value: u64, extra_bytes: c_int) u32;
     extern fn jolt_lfhm_find(map: *anyopaque, key: u64, out_value: *u64) u32;
@@ -275,7 +275,7 @@ fn runHashMapParity(comptime T: type, config: HashMapConfig, checker: *Checker) 
                 for (config.block_sizes, 0..) |block_size, i|
                     contexts[i] = .init(&lfhm_allocator, block_size);
             }
-            jolt.jolt_lfhm_clear(jolt_map, clear_allocator);
+            jolt.jolt_lfhm_clear(jolt_map, @intFromBool(clear_allocator));
 
             // Sometimes change the number of buckets (only allowed when the map is empty)
             if (clear_allocator and rng.next() % 2 == 0) {
@@ -323,7 +323,7 @@ fn runHashMapParity(comptime T: type, config: HashMapConfig, checker: *Checker) 
         return;
     map.clear();
     lfhm_allocator.clear();
-    jolt.jolt_lfhm_clear(jolt_map, true);
+    jolt.jolt_lfhm_clear(jolt_map, @intFromBool(true));
     if (!try compareHashMapContents(T, &map, jolt_map, keys, values, handles, .{ config, operation + 1 }, checker))
         return;
     for (0..config.key_range) |i| {
