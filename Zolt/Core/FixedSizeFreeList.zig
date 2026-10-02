@@ -12,6 +12,10 @@
 //! - `mNumObjectsAllocated` is a plain uint32 in Jolt that `ConstructObject` reads without holding the page mutex (a
 //!   benign race on x86). Zig's memory model makes that undefined behavior, so it is an atomic that is loaded with
 //!   acquire and stored with release (plain loads/stores on x86), which also publishes the new page pointer.
+//! - Jolt aligns `mPageMutex` to a cache line and relies on the declaration order to put it and the atomics that follow
+//!   it (written by every construct / destruct) on other cache lines than the constants that `Get()` reads. Zig
+//!   reorders the fields of a struct, so these members are grouped in `free_list: FreeListState`, a struct that is
+//!   aligned to and occupies whole cache lines (`list.free_list.page_mutex` etc., checked at comptime).
 //!
 //! The page layout, the object index encoding (page = index >> page_shift, slot = index & object_mask), the free list
 //! (LIFO, batches are pushed as a whole) and the order in which never used objects are handed out are identical to
@@ -99,25 +103,45 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
         /// Allocator for the page table and the pages
         allocator: std.mem.Allocator = undefined,
 
-        /// Io used to lock page_mutex
+        /// Io used to lock free_list.page_mutex
         io: std.Io = undefined,
 
-        /// Mutex that is used to allocate a new page if the storage runs out
-        /// This variable is aligned to the cache line to prevent false sharing with
-        /// the constants used to index into the list via `get()`.
-        page_mutex: Mutex align(Core.cache_line_size) = .{},
+        /// mPageMutex and the members that follow it in Jolt (see the top of this file)
+        free_list: FreeListState = .{},
 
-        /// Number of objects that we currently have in the free list / new pages (only when Core.enable_asserts)
-        num_free_objects: if (Core.enable_asserts) std.atomic.Value(u32) else void = if (Core.enable_asserts) .init(0) else {},
+        /// Members of the free list that are modified when objects are constructed / destructed.
+        /// The struct is aligned to and occupies whole cache lines, so no other field of the free list shares a cache line with it.
+        const FreeListState = struct {
+            /// Mutex that is used to allocate a new page if the storage runs out
+            /// This variable is aligned to the cache line to prevent false sharing with
+            /// the constants used to index into the list via `get()`.
+            page_mutex: Mutex align(Core.cache_line_size) = .{},
 
-        /// Simple counter that makes the first free object pointer update with every CAS so that we don't suffer from the ABA problem
-        allocation_tag: std.atomic.Value(u32) = .init(0),
+            /// Number of objects that we currently have in the free list / new pages (only when Core.enable_asserts)
+            num_free_objects: if (Core.enable_asserts) std.atomic.Value(u32) else void = if (Core.enable_asserts) .init(0) else {},
 
-        /// Index of first free object, the first 32 bits of an object are used to point to the next free object
-        first_free_object_and_tag: std.atomic.Value(u64) = .init(0),
+            /// Simple counter that makes the first free object pointer update with every CAS so that we don't suffer from the ABA problem
+            allocation_tag: std.atomic.Value(u32) = .init(0),
 
-        /// The first free object to use when the free list is empty (may need to allocate a new page)
-        first_free_object_in_new_page: std.atomic.Value(u32) = .init(0),
+            /// Index of first free object, the first 32 bits of an object are used to point to the next free object
+            first_free_object_and_tag: std.atomic.Value(u64) = .init(0),
+
+            /// The first free object to use when the free list is empty (may need to allocate a new page)
+            first_free_object_in_new_page: std.atomic.Value(u32) = .init(0),
+        };
+
+        comptime {
+            // The fields read by get() and the fields written by construct / destruct must be on different cache lines
+            std.debug.assert(@alignOf(FreeListState) == Core.cache_line_size and @sizeOf(FreeListState) % Core.cache_line_size == 0);
+            const first_hot_line = @offsetOf(Self, "free_list") / Core.cache_line_size;
+            const end_hot_line = first_hot_line + @sizeOf(FreeListState) / Core.cache_line_size;
+            for ([_][]const u8{ "page_size", "page_shift", "object_mask", "num_pages", "num_objects_allocated", "pages" }) |name| {
+                const first_line = @offsetOf(Self, name) / Core.cache_line_size;
+                const last_line = (@offsetOf(Self, name) + @sizeOf(@FieldType(Self, name)) - 1) / Core.cache_line_size;
+                if (last_line >= first_hot_line and first_line < end_hot_line)
+                    @compileError("FixedSizeFreeList: " ++ name ++ " shares a cache line with the free list state");
+            }
+        }
 
         /// A free list that has not been initialized (default constructor), deinit does nothing
         pub const empty: Self = .{};
@@ -140,20 +164,25 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
                 .page_shift = math.countTrailingZeros(page_size),
                 .object_mask = page_size - 1,
                 .num_pages = num_pages,
-                .num_free_objects = if (Core.enable_asserts) .init(num_pages *% page_size) else {},
                 .pages = pages.ptr,
                 .allocator = allocator,
                 .io = io,
 
                 // We didn't yet use any objects of any page
                 .num_objects_allocated = .init(0),
-                .first_free_object_in_new_page = .init(0),
 
-                // Start with 1 as the first tag
-                .allocation_tag = .init(1),
+                .free_list = .{
+                    .num_free_objects = if (Core.enable_asserts) .init(num_pages *% page_size) else {},
 
-                // Set first free object (with tag 0)
-                .first_free_object_and_tag = .init(invalid_object_index),
+                    // We didn't yet use any objects of any page
+                    .first_free_object_in_new_page = .init(0),
+
+                    // Start with 1 as the first tag
+                    .allocation_tag = .init(1),
+
+                    // Set first free object (with tag 0)
+                    .first_free_object_and_tag = .init(invalid_object_index),
+                },
             };
         }
 
@@ -162,7 +191,7 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
             // Check if we got our Init call
             if (self.pages) |pages| {
                 // Ensure everything is freed before the freelist is destructed
-                if (Core.enable_asserts) std.debug.assert(self.num_free_objects.load(.monotonic) == self.num_pages *% self.page_size);
+                if (Core.enable_asserts) std.debug.assert(self.free_list.num_free_objects.load(.monotonic) == self.num_pages *% self.page_size);
 
                 // Free memory for pages
                 const num_pages = self.num_objects_allocated.load(.monotonic) / self.page_size;
@@ -189,15 +218,15 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
         pub fn constructObject(self: *Self, object: Object) error{OutOfMemory}!u32 {
             while (true) {
                 // Get first object from the linked list
-                const first_free_object_and_tag = self.first_free_object_and_tag.load(.acquire);
+                const first_free_object_and_tag = self.free_list.first_free_object_and_tag.load(.acquire);
                 var first_free: u32 = @truncate(first_free_object_and_tag);
                 if (first_free == invalid_object_index) {
                     // The free list is empty, we take an object from the page that has never been used before
-                    first_free = self.first_free_object_in_new_page.fetchAdd(1, .monotonic);
+                    first_free = self.free_list.first_free_object_in_new_page.fetchAdd(1, .monotonic);
                     if (first_free >= self.num_objects_allocated.load(.acquire)) {
                         // Allocate new page
-                        self.page_mutex.lock(self.io);
-                        defer self.page_mutex.unlock(self.io);
+                        self.free_list.page_mutex.lock(self.io);
+                        defer self.free_list.page_mutex.unlock(self.io);
                         while (first_free >= self.num_objects_allocated.load(.monotonic)) {
                             const num_objects_allocated = self.num_objects_allocated.load(.monotonic);
                             const next_page = num_objects_allocated / self.page_size;
@@ -210,7 +239,7 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
                     }
 
                     // Allocation successful
-                    if (Core.enable_asserts) _ = self.num_free_objects.fetchSub(1, .monotonic);
+                    if (Core.enable_asserts) _ = self.free_list.num_free_objects.fetchSub(1, .monotonic);
                     const storage = self.getStorage(first_free);
                     storage.object = object;
                     storage.next_free_object.store(first_free, .release);
@@ -220,12 +249,12 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
                     const new_first_free = self.getStorage(first_free).next_free_object.load(.acquire);
 
                     // Construct a new first free object tag
-                    const new_first_free_object_and_tag = @as(u64, new_first_free) + (@as(u64, self.allocation_tag.fetchAdd(1, .monotonic)) << 32);
+                    const new_first_free_object_and_tag = @as(u64, new_first_free) + (@as(u64, self.free_list.allocation_tag.fetchAdd(1, .monotonic)) << 32);
 
                     // Compare and swap
-                    if (self.first_free_object_and_tag.cmpxchgWeak(first_free_object_and_tag, new_first_free_object_and_tag, .release, .monotonic) == null) {
+                    if (self.free_list.first_free_object_and_tag.cmpxchgWeak(first_free_object_and_tag, new_first_free_object_and_tag, .release, .monotonic) == null) {
                         // Allocation successful
-                        if (Core.enable_asserts) _ = self.num_free_objects.fetchSub(1, .monotonic);
+                        if (Core.enable_asserts) _ = self.free_list.num_free_objects.fetchSub(1, .monotonic);
                         const storage = self.getStorage(first_free);
                         storage.object = object;
                         storage.next_free_object.store(first_free, .release);
@@ -246,19 +275,19 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
             // Add to object free list
             while (true) {
                 // Get first object from the list
-                const first_free_object_and_tag = self.first_free_object_and_tag.load(.acquire);
+                const first_free_object_and_tag = self.free_list.first_free_object_and_tag.load(.acquire);
                 const first_free: u32 = @truncate(first_free_object_and_tag);
 
                 // Make it the next pointer of the last object in the batch that is to be freed
                 storage.next_free_object.store(first_free, .release);
 
                 // Construct a new first free object tag
-                const new_first_free_object_and_tag = @as(u64, object_index) + (@as(u64, self.allocation_tag.fetchAdd(1, .monotonic)) << 32);
+                const new_first_free_object_and_tag = @as(u64, object_index) + (@as(u64, self.free_list.allocation_tag.fetchAdd(1, .monotonic)) << 32);
 
                 // Compare and swap
-                if (self.first_free_object_and_tag.cmpxchgWeak(first_free_object_and_tag, new_first_free_object_and_tag, .release, .monotonic) == null) {
+                if (self.free_list.first_free_object_and_tag.cmpxchgWeak(first_free_object_and_tag, new_first_free_object_and_tag, .release, .monotonic) == null) {
                     // Free successful
-                    if (Core.enable_asserts) _ = self.num_free_objects.fetchAdd(1, .monotonic);
+                    if (Core.enable_asserts) _ = self.free_list.num_free_objects.fetchAdd(1, .monotonic);
                     return;
                 }
             }
@@ -311,19 +340,19 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
                 const storage = self.getStorage(batch.last_object_index);
                 while (true) {
                     // Get first object from the list
-                    const first_free_object_and_tag = self.first_free_object_and_tag.load(.acquire);
+                    const first_free_object_and_tag = self.free_list.first_free_object_and_tag.load(.acquire);
                     const first_free: u32 = @truncate(first_free_object_and_tag);
 
                     // Make it the next pointer of the last object in the batch that is to be freed
                     storage.next_free_object.store(first_free, .release);
 
                     // Construct a new first free object tag
-                    const new_first_free_object_and_tag = @as(u64, batch.first_object_index) + (@as(u64, self.allocation_tag.fetchAdd(1, .monotonic)) << 32);
+                    const new_first_free_object_and_tag = @as(u64, batch.first_object_index) + (@as(u64, self.free_list.allocation_tag.fetchAdd(1, .monotonic)) << 32);
 
                     // Compare and swap
-                    if (self.first_free_object_and_tag.cmpxchgWeak(first_free_object_and_tag, new_first_free_object_and_tag, .release, .monotonic) == null) {
+                    if (self.free_list.first_free_object_and_tag.cmpxchgWeak(first_free_object_and_tag, new_first_free_object_and_tag, .release, .monotonic) == null) {
                         // Free successful
-                        if (Core.enable_asserts) _ = self.num_free_objects.fetchAdd(batch.num_objects, .monotonic);
+                        if (Core.enable_asserts) _ = self.free_list.num_free_objects.fetchAdd(batch.num_objects, .monotonic);
 
                         // Mark the batch as freed
                         if (Core.enable_asserts) batch.num_objects = 0xffffffff;
@@ -401,7 +430,7 @@ test "FixedSizeFreeList single threaded" {
     var all: List.Batch = .{};
     for (0..12) |i| list.addObjectToBatch(&all, @intCast(i));
     list.destructObjectBatch(&all);
-    if (Core.enable_asserts) try std.testing.expectEqual(@as(u32, 12), list.num_free_objects.load(.monotonic));
+    if (Core.enable_asserts) try std.testing.expectEqual(@as(u32, 12), list.free_list.num_free_objects.load(.monotonic));
 }
 
 test "FixedSizeFreeList calls deinit as destructor" {
@@ -634,7 +663,7 @@ fn stressFixedSizeFreeList(max_objects: u32, page_size: u32, max_live_per_thread
         try std.testing.expect(context.in_use[reserved_index].swap(false, .monotonic));
     context.list.destructObjectBatch(&reserved);
     for (context.in_use) |*in_use| try std.testing.expect(!in_use.load(.monotonic));
-    if (Core.enable_asserts) try std.testing.expectEqual(max_objects, context.list.num_free_objects.load(.monotonic));
+    if (Core.enable_asserts) try std.testing.expectEqual(max_objects, context.list.free_list.num_free_objects.load(.monotonic));
 
     // All objects are free again: max_objects distinct objects can be constructed, then the list is full
     var batch: List.Batch = .{};

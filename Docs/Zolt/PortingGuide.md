@@ -383,7 +383,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   (`lockUncancelable`, `waitUncancelable`) so that lock/wait functions keep Jolt's signatures
   (no error union). Expose `Cancelable` errors only where Jolt itself has a failure path.
 - Mapping: `std::mutex` / Jolt `Mutex` → Zolt `Core/Mutex.zig` `Mutex` over `std.Io.Mutex`;
-  `std::shared_mutex` / Jolt `SharedMutex` → over `std.Io.RwLock`; `std::condition_variable` →
+  `std::shared_mutex` / Jolt `SharedMutex` → `Core/Mutex.zig` `SharedMutex` over `SharedMutexBase`
+  (a copy of `std.Io.RwLock` with a fixed `tryLock`). Do not use `std.Io.RwLock` directly: its
+  `tryLock` in Zig 0.16 can succeed while a reader holds the lock; `std::condition_variable` →
   `std.Io.Condition`; Jolt `Semaphore` (counting, `Acquire(n)` / `Release(n)`) → port of
   `Core/Semaphore.zig` on top of `std.Io.Mutex` + `std.Io.Condition` or atomics + `std.Io` futex
   (`io.futexWait` / `io.futexWake`), keeping Jolt's fast path (atomic counter, only block when needed).
@@ -392,6 +394,11 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   where Jolt uses `atomic_thread_fence`, strengthen the adjacent atomic operation instead and comment why.
 - `std::thread` → `std.Thread.spawn(.{}, func, .{args})` + `join()`; `std::this_thread::yield()` →
   `std.Thread.yield()`; cache line padding → `align(std.atomic.cache_line)` / `Core.cache_line_size`.
+  Zig reorders the fields of a (non-extern) struct, so `alignas(JPH_CACHE_LINE_SIZE)` on one member
+  does not keep the members declared before it off its cache line. When Jolt uses it to separate
+  groups of members (false sharing), put the group in a nested struct whose first field is
+  `align(Core.cache_line_size)` (it then occupies whole cache lines) and check the offsets at comptime,
+  see `FixedSizeFreeList.free_list`.
 - `JobSystem` is interface pattern B; `JobSystemThreadPool` is built on `std.Thread` + `std.Io`
   primitives. Multithreaded results must be identical to single threaded ones (Jolt guarantees
   this, so the port must keep the same barriers and sorting of results).
@@ -498,3 +505,11 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `DMat44::Decompose(outScale)`      | `decompose() Decomposition{ .rotation_translation, .scale }` | out parameter     |
 | `JPH_RVECTOR_ALIGNMENT`            | `rvector_alignment` (`Math/Real.zig`)  | macro constant                          |
 | `operator ""_r` (`JPH::literals`)  | not ported: a float literal coerces to `Real` | Zig has no user-defined literals |
+| `FixedSizeFreeList()` + `Init(inMaxObjects, inPageSize)` | `init(allocator, io, max_objects, page_size)` | constructor + Init; pages are allocated (and the page mutex locked) in `constructObject` |
+| `FixedSizeFreeList::DestructObject(Object *)` | `destructObjectPtr(object)` (`destructObject(index)` keeps the name) | overload |
+| `FixedSizeFreeList` `mPageMutex`, `mNumFreeObjects`, `mAllocationTag`, `mFirstFreeObjectAndTag`, `mFirstFreeObjectInNewPage` | `free_list.page_mutex`, ... | grouped in a cache line aligned struct (field reordering) |
+| `LockFreeHashMap::KeyValue::GetValue() const` | `getValueConst()` (`getValue()` returns `*Value`) | const overload |
+| `LockFreeHashMap::Iterator` `operator*` / `operator++` | `get()` / `advance()`, plus `next() ?*KeyValue` for `while (it.next()) \|kv\|` | operators |
+| `LFHMAllocatorContext::Allocate(inSize, inAlignment, outWriteOffset) -> bool` | `allocate(size, alignment) ?u32` | out parameter |
+| `mAllocator` (`LFHMAllocator &` in `LFHMAllocatorContext` / `LockFreeHashMap`) | `lfhm_allocator` | `allocator` is the `std.mem.Allocator` |
+| `LockFreeHashMap(LFHMAllocator &)` + `Init(inMaxBuckets)` | `init(allocator, &lfhm_allocator, max_buckets)` | constructor + Init |

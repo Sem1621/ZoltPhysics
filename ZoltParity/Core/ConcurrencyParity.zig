@@ -167,7 +167,8 @@ fn runFreeListParity(config: FreeListConfig, checker: *Checker) !void {
     live.clearRetainingCapacity();
 
     // Construct until the list is full, both must hand out all objects in the same order
-    for (0..config.max_objects + 2) |_| {
+    // (the capacity is max_objects rounded up to whole pages, the last 2 constructs fail)
+    for (0..std.mem.alignForward(u32, config.max_objects, config.page_size) + 2) |_| {
         const index = try list.constructObject(.init(operation));
         const jolt_index = jolt.jolt_fsfl_construct(jolt_list, operation);
         checker.check(.{ config, operation, FreeListOperation.refill }, index, jolt_index);
