@@ -20,6 +20,9 @@ test {
     _ = @import("Core/UnorderedMapTest.zig");
     _ = @import("Core/UnorderedSetTest.zig");
 
+    // Geometry
+    _ = @import("Geometry/ClosestPointTests.zig");
+
     // Math
     _ = @import("Math/BVec16Tests.zig");
     _ = @import("Math/DMat44Tests.zig");
