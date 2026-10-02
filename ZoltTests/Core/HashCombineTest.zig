@@ -14,9 +14,13 @@ test "TestHashString" {
 }
 
 test "TestHashStruct" {
-    // Hash<const char *>, Hash<std::string_view> and Hash<String> all map to hashing the characters
-    const char_test: []const u8 = "This is a test";
+    // Hash<const char *> is hash([*:0]const u8)
+    const char_test: [*:0]const u8 = "This is a test";
     try fw.expectEqual(@as(u64, 2733878766136413408), HashCombine.hash(char_test));
+
+    // Hash<std::string_view> and Hash<String> are hash([]const u8)
+    const str_view_test: []const u8 = "This is a test";
+    try fw.expectEqual(@as(u64, 2733878766136413408), HashCombine.hash(str_view_test));
 
     try fw.expectEqual(@as(u64, 2733878766136413408), HashCombine.hash("This is a test"));
 }

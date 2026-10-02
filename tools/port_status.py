@@ -29,11 +29,16 @@ PROGRESS_MD = os.path.join(ROOT, "Docs", "Zolt", "Progress.md")
 CPP_EXTENSIONS = (".h", ".inl", ".cpp")
 STATUSES = ("complete", "partial", "stub")
 
-# Directories that are intentionally out of scope for now (see Docs/Zolt/Roadmap.md)
+# Directories and files that are intentionally postponed (see Docs/Zolt/Roadmap.md). They are listed
+# with status "deferred" and do not count towards the progress percentage until a Zig file ports them.
 DEFERRED = {
     "Jolt/Compute": "GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only",
     "Jolt/Shaders": "GPU shaders for Jolt/Compute",
     "Jolt/Renderer": "debug renderer interface, ported with the debug renderer phase",
+    "Jolt/Core/Profiler": "developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration",
+    "Jolt/Core/RTTI": "serialization support, ported with ObjectStream (Phase 8)",
+    "Jolt/Core/Factory": "serialization support, ported with ObjectStream (Phase 8)",
+    "Jolt/Core/StreamUtils": "serialization support, ported with ObjectStream (Phase 8)",
 }
 
 
@@ -181,6 +186,8 @@ def collect():
             status = unit_status(files)
             if status == "todo" and unit in NOT_APPLICABLE:
                 status = "n/a"
+            elif status == "todo" and deferred_reason(unit):
+                status = "deferred"
             rows.append({"unit": unit, "files": files, "lines": lines, "status": status, "zig": zig})
         return rows
 
@@ -205,12 +212,18 @@ def group_key(unit):
 
 
 WEIGHT = {"complete": 1.0, "partial": 0.5, "stub": 0.1, "todo": 0.0}
-ICON = {"complete": "✅", "partial": "🟡", "stub": "⚪", "todo": "❌", "n/a": "➖"}
+ICON = {"complete": "✅", "partial": "🟡", "stub": "⚪", "todo": "❌", "n/a": "➖", "deferred": "⏸"}
 
 
 def counted(rows):
     """Rows that count towards the progress percentage"""
-    return [r for r in rows if r["status"] != "n/a"]
+    return [r for r in rows if r["status"] not in ("n/a", "deferred")]
+
+
+def group_deferred_reason(items):
+    """Reason when every unit of a group is deferred (e.g. a whole directory), else None"""
+    reasons = [deferred_reason(r["unit"]) for r in items]
+    return reasons[0] if all(reasons) and all(r["status"] == "deferred" for r in items) else None
 
 
 def summarize(rows):
@@ -238,7 +251,8 @@ def render_markdown(lib_rows, test_rows):
     out.append("")
     out.append("Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. Percentages are")
     out.append("weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files")
-    out.append("that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).")
+    out.append("that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files")
+    out.append("that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.")
     out.append("")
 
     in_scope = [r for r in counted(lib_rows) if not deferred_reason(r["unit"])]
@@ -253,17 +267,17 @@ def render_markdown(lib_rows, test_rows):
     for title, rows in (("Library (Jolt/ → Zolt/)", lib_rows), ("Unit tests (UnitTests/ → ZoltTests/)", test_rows)):
         out.append(f"## {title}")
         out.append("")
-        out.append("| Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | C++ lines |")
-        out.append("|-----------|---------:|---:|---:|---:|---:|---:|----------:|")
+        out.append("| Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |")
+        out.append("|-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|")
         summary = summarize(rows)
         for group, items, g_total, g_done, counts in summary:
-            reason = deferred_reason(items[0]["unit"])
+            reason = group_deferred_reason(items)
             progress = "deferred" if reason else f"{percent(g_done, g_total):.0f}%"
             out.append(f"| `{group}` | {progress} | {counts['complete']} | {counts['partial']} | "
-                       f"{counts['stub']} | {counts['todo']} | {counts['n/a']} | {g_total} |")
+                       f"{counts['stub']} | {counts['todo']} | {counts['n/a']} | {counts['deferred']} | {g_total} |")
         out.append("")
         for group, items, g_total, g_done, counts in summary:
-            reason = deferred_reason(items[0]["unit"])
+            reason = group_deferred_reason(items)
             label = f"{group} — deferred: {reason}" if reason else f"{group} — {percent(g_done, g_total):.0f}%"
             out.append(f"<details><summary>{label}</summary>")
             out.append("")
@@ -274,6 +288,8 @@ def render_markdown(lib_rows, test_rows):
                 zig = ", ".join(f"`{z}`" for z in r["zig"])
                 if r["status"] == "n/a":
                     zig = NOT_APPLICABLE[r["unit"]]
+                elif r["status"] == "deferred":
+                    zig = deferred_reason(r["unit"])
                 out.append(f"| {cpp} | {r['lines']} | {ICON[r['status']]} {r['status']} | {zig} |")
             out.append("")
             out.append("</details>")
@@ -312,7 +328,7 @@ def print_next(lib_rows):
     deps = unit_dependencies(lib_rows)
     ready, blocked = [], []
     for unit, unit_status_value in sorted(status.items()):
-        if unit_status_value != "todo" or deferred_reason(unit):
+        if unit_status_value != "todo":
             continue
         # Dependencies on deferred units (e.g. the debug renderer) don't block: that code is skipped for now
         missing = sorted(d for d in deps[unit]
@@ -346,10 +362,10 @@ def main():
     for title, rows in (("Library", lib_rows), ("Unit tests", test_rows)):
         print(f"{title}:")
         for group, items, total, done, counts in summarize(rows):
-            reason = deferred_reason(items[0]["unit"])
+            reason = group_deferred_reason(items)
             progress = "deferred" if reason else f"{percent(done, total):5.1f}%"
             print(f"  {group:<32} {progress:>8}  ({counts['complete']} complete, {counts['partial']} partial, "
-                  f"{counts['stub']} stub, {counts['todo']} todo, {counts['n/a']} n/a, {total} lines)")
+                  f"{counts['stub']} stub, {counts['todo']} todo, {counts['n/a']} n/a, {counts['deferred']} deferred, {total} lines)")
     for message in lint:
         print(f"lint: {message}", file=sys.stderr)
 

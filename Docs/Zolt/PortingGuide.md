@@ -169,6 +169,10 @@ both types) when porting code needs them.
   disappear.
 - Construction/destruction: `T.init(...) T` / `T.init(allocator, ...) !T` with `deinit(self: *T)`
   for values; `T.create(allocator, ...) !*T` with `destroy()` for heap objects.
+- Types that hand out pointers to themselves during construction (worker threads, jobs that store
+  the job system) cannot be returned by value. They have a default constructed `pub const empty`
+  and initialize in place: `var pool: JobSystemThreadPool = .empty; try pool.init(allocator, io, ...)`
+  (Jolt's default constructor + `Init`). Document that they must not be moved after `init`.
 - `TempAllocator` is ported as its own type (it is a stack allocator with LIFO semantics), and
   additionally exposes a `std.mem.Allocator` interface for use with std containers.
 - `JPH_STACK_ALLOC(n)` (alloca): use a fixed size array when `n` is comptime known, otherwise a
@@ -184,18 +188,28 @@ both types) when porting code needs them.
 |----------------------------------|-----------------------------------------------------------------------|
 | `Array<T>`                       | `std.ArrayList(T)` (unmanaged in 0.16: pass the allocator to every mutating call) |
 | `StaticArray<T, N>`              | port of `Core/StaticArray.h` (std has no BoundedArray anymore)        |
-| `UnorderedMap`, `UnorderedSet`, `HashTable` | port of Jolt's `Core/HashTable.h` when iteration order can affect results, otherwise `std.HashMapUnmanaged` |
+| `UnorderedMap`, `UnorderedSet`, `HashTable` | port of Jolt's `Core/HashTable.h` when iteration order can affect results, otherwise `std.HashMapUnmanaged`: `UnorderedMap(Key, Value, .{})`, `UnorderedSet(Key, .{})`, the `Hash` / `KeyEqual` template arguments become `HashTableOptions(Key){ .hash, .key_equal }` |
 | `QuickSort`, `InsertionSort`     | ports of `Core/QuickSort.h` / `Core/InsertionSort.h` (std::sort / std.sort orders differ, which breaks determinism for equal keys) |
 | `String`, `string_view`          | `[]const u8` (owned strings: `[]u8` + allocator)                      |
 | `std::pair<A, B>`                | named struct                                                          |
-| `std::function`                  | function pointer + `*anyopaque` context, or a comptime `anytype` callback when the call site is static |
+| `std::function`                  | function pointer + `*anyopaque` context, or a comptime `anytype` callback when the call site is static. When the function is stored (a job's function, a thread init/exit callback): an inline closure like `JobSystem.JobFunction` / `JobSystemThreadPool.InitExitFunction`. `JobFunction.init(comptime function, args_tuple)` stores a copy of the arguments (at most 4 words and at most `usize` aligned, checked at compile time; capture larger or more aligned data by pointer) and never allocates. A lambda capture becomes the tuple: by reference → a pointer, by value → a copy (`[&values, i] { ... }` → `.init(f, .{ &values, i })`) |
 | iterator pairs `(inBegin, inEnd)` | a slice; comparators follow std.sort: `context` + `lessThan(context, a, b)` (see `Core/QuickSort.zig`) |
 
-Container methods use the std.ArrayList names, for `std.ArrayList` and Zolt's own containers
-alike: `push_back` → `append`, `pop_back` → `pop`, `size()` → `.len` / `.items.len`,
-`empty()` → `len == 0` / `isEmpty()`, `erase(it)` → `orderedRemove(i)`, `reserve` →
-`ensureTotalCapacity`, `clear` → `clearRetainingCapacity` (ArrayList) / `clear` (StaticArray),
-`back()` → `getLast()` (ArrayList) / `back()` (StaticArray), `begin()`/`end()`/`data()` → `.items` / `slice()`.
+Container methods use the std.ArrayList names, for `std.ArrayList` and Zolt's own array-like
+containers alike (the hash containers are below): `push_back` → `append`, `pop_back` → `pop`,
+`size()` → `.len` / `.items.len`, `empty()` → `len == 0` / `isEmpty()`, `erase(it)` →
+`orderedRemove(i)`, `reserve` → `ensureTotalCapacity`, `clear` → `clearRetainingCapacity`
+(ArrayList) / `clear` (StaticArray), `back()` → `getLast()` (ArrayList) / `back()` (StaticArray), `begin()`/`end()`/`data()` → `.items` / `slice()`.
+
+The hash containers (`HashTable`, `UnorderedMap`, `UnorderedSet`, see `Core/HashTable.zig`) follow the std hash
+map names instead: `size()` → `count()`, `empty()` → `isEmpty()`, `reserve` → `ensureTotalCapacity`,
+**`clear()` → `clearAndFree(allocator)`** (Jolt's `clear` frees the buckets; do not use `clearRetainingCapacity`
+for it: the bucket count decides where elements land and therefore the iteration order),
+`ClearAndKeepMemory()` → `clearRetainingCapacity()`, `operator[]` → `getOrPutValue(allocator, key, default)`,
+`try_emplace` → `tryEmplace`, const `find` → `find` (`?*const KeyValue`, null is `end()`), non-const `find` →
+`findPtr`, `erase(it)` → `eraseByPtr(ptr)`, `it.mIndex` → `indexOf(ptr)`, `begin()`/`end()` loops →
+`iterator()` / `constIterator()` with `next()`, `std::pair` `first` / `second` → `KeyValue{ .key, .value }`.
+Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicated by the caller.
 
 ### Reference counting
 
@@ -214,7 +228,16 @@ alike: `push_back` → `append`, `pop_back` → `pop`, `size()` → `.len` / `.i
 
 - `Trace(fmt, ...)` → `std.log.scoped(.zolt).info/warn(...)`; applications control output via
   `std_options.logFn`.
-- `StreamIn` / `StreamOut` are ported as interfaces over `*std.Io.Reader` / `*std.Io.Writer`.
+- `StreamIn` / `StreamOut` are interfaces (pattern B, `Core/StreamIn.zig` / `Core/StreamOut.zig`);
+  `StreamInWrapper` / `StreamOutWrapper` adapt a `*std.Io.Reader` / `*std.Io.Writer` (flush the
+  writer yourself). The `Read`/`Write` overloads become one `read(&value)` / `write(value)` that
+  dispatches at comptime (Vec3 = 12 bytes, DVec3 = 24, DMat44 = 72, everything else raw bytes,
+  which must be trivially copyable: extern/packed structs, no pointers, checked at compile time).
+  Reads keep the in/out parameter, because a validating `StateRecorder` compares with the current
+  value. Arrays and strings: `readArray` / `readString` / `readArrayWith` and `writeArray` /
+  `writeString` / `writeArrayWith`.
+- Jolt's `String` results (`ConvertToString`, `StringFormat`, ...) become owned `[]u8` returned
+  from a function that takes the allocator. `StringFormat` takes a Zig format string, not printf.
 
 ## 6. Polymorphism (virtual functions)
 
@@ -306,6 +329,11 @@ pub const ContactListener = struct {
 };
 ```
 
+Exception: a pure interface whose identity is its address uses pattern A (the implementation embeds
+`base: Iface`, which holds the vtable, and hands out `*Iface`), because a fat pointer does not fit in
+the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keeps its barrier in a
+`std.atomic.Value(usize)`), implemented by `JobSystemWithBarrier.BarrierImpl`.
+
 **Visitors / templated callbacks** (`template <class Visitor> void Walk(Visitor &)`) become
 `anytype` parameters, which keeps static dispatch like the C++.
 
@@ -322,6 +350,8 @@ pub const ContactListener = struct {
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
 | `#ifdef JPH_DEBUG_RENDERER`                 | not ported yet: leave `// TODO(debug_renderer): ...` where code is skipped |
+| developer debug switches that are commented out in Jolt (`JPH_GJK_DEBUG`, `JPH_EPA_PENETRATION_DEPTH_DEBUG`, `JPH_EPA_CONVEX_BUILDER_DRAW`, `JPH_EPA_CONVEX_BUILDER_VALIDATE`, `JPH_CONVEX_BUILDER_DEBUG`, `JPH_CONVEX_BUILDER_DUMP_SHAPE`, `JPH_CONVEX_BUILDER_2D_DEBUG`, ...) | not ported: list them in a `//! Not ported: ...` header line. They do not affect the Status (a file without them is `complete`) |
+| `#ifdef JPH_CPU_BIG_ENDIAN`                 | `if (builtin.cpu.arch.endian() == .big)` (comptime); port both branches |
 | `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped for now (a profiler may come later)                 |
 | `JPH_DET_LOG(...)`                          | port when the determinism log is needed for debugging       |
 | `JPH_NAMESPACE_BEGIN/END`, `JPH_EXPORT`, `JPH_SUPPRESS_WARNINGS*` | dropped                               |
@@ -371,16 +401,38 @@ results are reproducible as long as the code follows these rules:
 
 ## 9. Threading
 
-Zig 0.16 moved blocking synchronization into the `std.Io` interface:
-- `std::mutex` → `std.Io.Mutex` (`lock(io)` / `unlock(io)`); `std::condition_variable` →
-  `std.Io.Condition`; `Semaphore` → `std.Io.Semaphore`. Types that lock therefore need an
-  `io: std.Io`, passed at `init` (like an allocator) and stored.
+Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread.Mutex`,
+`Condition`, `Semaphore`, `ResetEvent`, `Pool` and `WaitGroup` no longer exist):
+- **Where `io` comes from.** A type that blocks (locks, waits) gets an `io: std.Io` in `init`, next to
+  the allocator, and stores it, e.g. `pool.init(allocator, io, ...)` for `JobSystemThreadPool`. Applications get
+  it from `std.process.Init` (`init.io`) or `std.Io.Threaded`; tests use `std.testing.io`.
+- **Small sync primitives take `io` per call** instead of storing it, because they are embedded in many
+  other structs (Jolt's `Mutex` is a member of BodyManager, MutexArray, ...): `mutex.lock(io)`,
+  `mutex.unlock(io)`, `mutex.tryLock()`.
+- **Physics code is not cancelable.** Use the `*Uncancelable` variants of `std.Io` primitives
+  (`lockUncancelable`, `waitUncancelable`) so that lock/wait functions keep Jolt's signatures
+  (no error union). Expose `Cancelable` errors only where Jolt itself has a failure path.
+- Mapping: `std::mutex` / Jolt `Mutex` → Zolt `Core/Mutex.zig` `Mutex` over `std.Io.Mutex`;
+  `std::shared_mutex` / Jolt `SharedMutex` → `Core/Mutex.zig` `SharedMutex` over `SharedMutexBase`
+  (a copy of `std.Io.RwLock` with a fixed `tryLock`). Do not use `std.Io.RwLock` directly: its
+  `tryLock` in Zig 0.16 can succeed while a reader holds the lock; `std::condition_variable` →
+  `std.Io.Condition`; Jolt `Semaphore` (counting, `Acquire(n)` / `Release(n)`) → port of
+  `Core/Semaphore.zig` on top of `std.Io.Mutex` + `std.Io.Condition` or atomics + `std.Io` futex
+  (`io.futexWait` / `io.futexWake`), keeping Jolt's fast path (atomic counter, only block when needed).
 - `std::atomic<T>` → `std.atomic.Value(T)`; memory orders: `relaxed` → `.monotonic`,
-  `acquire`/`release`/`acq_rel`/`seq_cst` map 1:1.
-- `std::thread` → `std.Thread.spawn`; cache line padding → `std.atomic.cache_line`.
+  `acquire`/`release`/`acq_rel`/`seq_cst` map 1:1. Zig has no standalone fence (`@fence` is gone):
+  where Jolt uses `atomic_thread_fence`, strengthen the adjacent atomic operation instead and comment why.
+- `std::thread` → `std.Thread.spawn(.{}, func, .{args})` + `join()`; `std::this_thread::yield()` →
+  `std.Thread.yield()`; cache line padding → `align(std.atomic.cache_line)` / `Core.cache_line_size`.
+  Zig reorders the fields of a (non-extern) struct, so `alignas(JPH_CACHE_LINE_SIZE)` on one member
+  does not keep the members declared before it off its cache line. When Jolt uses it to separate
+  groups of members (false sharing), put the group in a nested struct whose first field is
+  `align(Core.cache_line_size)` (it then occupies whole cache lines) and check the offsets at comptime,
+  see `FixedSizeFreeList.free_list`.
 - `JobSystem` is interface pattern B; `JobSystemThreadPool` is built on `std.Thread` + `std.Io`
   primitives. Multithreaded results must be identical to single threaded ones (Jolt guarantees
   this, so the port must keep the same barriers and sorting of results).
+- Debug-only lock checking in Jolt (`JPH_ENABLE_ASSERTS` lock tracking) maps to `Core.enable_asserts`.
 
 ## 10. Tests
 
@@ -399,12 +451,22 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface:
 - **Parity tests** (`ZoltParity/`, run with `zig build parity`) are the proof of exactness.
   `build.zig` compiles the C++ library from `Jolt/` with Zig's C++ compiler in the configuration
   Zolt follows (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `-ffp-contract=off`, same precision and layer
-  bits) and links it into `ZoltParity/parity.zig`. For each ported function: add a C ABI wrapper in
-  `ZoltParity/JoltReference.cpp`, then call both implementations on ~100k generated inputs (random
-  values mixed with special values) and require identical bits (NaN payloads excepted). A parity
-  mismatch is always a porting bug: Jolt guarantees that its SIMD paths match its scalar fallback
-  in this mode. Higher level code (collision queries, simulation steps) is compared the same way,
-  e.g. by hashing body state after N steps on both sides.
+  bits, CPU pinned to x86-64-v3) and links it into the parity test binary. Layout mirrors `Zolt/`:
+  `ZoltParity/<Dir>/<Dir>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Dir>Reference.cpp` the
+  C ABI wrappers around Jolt; shared helpers (input generator, bit comparison, `Checker`) are in
+  `ZoltParity/ParityFramework.zig`. Register test files in `ZoltParity/parity.zig` and .cpp files in
+  `ZoltParity/reference_sources.zig`. For each ported function, call both implementations on ~100k
+  generated inputs (random values mixed with special values) and require identical bits (NaN
+  payloads excepted). For containers and algorithms with an observable order (hash table iteration,
+  sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
+  unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
+  queries, simulation steps) is compared the same way, e.g. by hashing body state after N steps.
+- Do not pass `bool` parameters across the C ABI in parity wrappers, use `int`: declare the
+  parameter `int inFoo` in the .cpp (use it as `inFoo != 0`) and `foo: c_int` in the `extern fn`
+  (pass `@intFromBool(foo)`). Zig 0.16 (LLVM backend) does not always zero-extend runtime `bool`
+  arguments, so the clang-compiled callee can receive 0xFE for `false` and read it as `true`.
+  `bool` return values and `bool` fields or out parameters behind a pointer are fine.
+
 - `Zolt/zolt.zig` references every public declaration of every registered file, so all
   non-generic functions are type checked even without a test. Generic functions need a test.
 
@@ -478,3 +540,49 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `DMat44::Decompose(outScale)`      | `decompose() Decomposition{ .rotation_translation, .scale }` | out parameter     |
 | `JPH_RVECTOR_ALIGNMENT`            | `rvector_alignment` (`Math/Real.zig`)  | macro constant                          |
 | `operator ""_r` (`JPH::literals`)  | not ported: a float literal coerces to `Real` | Zig has no user-defined literals |
+| `FixedSizeFreeList()` + `Init(inMaxObjects, inPageSize)` | `init(allocator, io, max_objects, page_size)` | constructor + Init; pages are allocated (and the page mutex locked) in `constructObject` |
+| `FixedSizeFreeList::DestructObject(Object *)` | `destructObjectPtr(object)` (`destructObject(index)` keeps the name) | overload |
+| `FixedSizeFreeList` `mPageMutex`, `mNumFreeObjects`, `mAllocationTag`, `mFirstFreeObjectAndTag`, `mFirstFreeObjectInNewPage` | `free_list.page_mutex`, ... | grouped in a cache line aligned struct (field reordering) |
+| `LockFreeHashMap::KeyValue::GetValue() const` | `getValueConst()` (`getValue()` returns `*Value`) | const overload |
+| `LockFreeHashMap::Iterator` `operator*` / `operator++` | `get()` / `advance()`, plus `next() ?*KeyValue` for `while (it.next()) \|kv\|` | operators |
+| `LFHMAllocatorContext::Allocate(inSize, inAlignment, outWriteOffset) -> bool` | `allocate(size, alignment) ?u32` | out parameter |
+| `mAllocator` (`LFHMAllocator &` in `LFHMAllocatorContext` / `LockFreeHashMap`) | `lfhm_allocator` | `allocator` is the `std.mem.Allocator` |
+| `LockFreeHashMap(LFHMAllocator &)` + `Init(inMaxBuckets)` | `init(allocator, &lfhm_allocator, max_buckets)` | constructor + Init |
+| `JobSystemThreadPool()` + `Init(inMaxJobs, inMaxBarriers, inNumThreads)` | `var pool: JobSystemThreadPool = .empty;` + `try pool.init(allocator, io, max_jobs, max_barriers, .{ .num_threads = n })` | constructor + Init, in place (the threads keep a pointer to the pool) |
+| `JobSystemWithBarrier(inMaxBarriers)` / `JobSystemSingleThreaded(inMaxJobs)` (or constructor + `Init`) | `init(allocator, io, max_barriers)` / `init(allocator, io, max_jobs)` | constructor + Init |
+| `JobHandle` copy constructor / copy assignment | `clone()` / `set(&other)` (a plain assignment moves, `deinit()` is the destructor) | no copy constructors |
+| `JobHandle::sRemoveDependencies(const JobHandle *, uint)` / `sRemoveDependencies(StaticArray<JobHandle, N> &)` | `removeDependencies(slice, .{})` / `removeDependenciesStaticArray(&array, .{})` | overloads |
+| `JobSystem::JobFunction` / `JobSystemThreadPool::InitExitFunction` (`std::function`) | `JobFunction.init(f, .{ args })` / `InitExitFunction.init(f, .{ args })` (calls `f(args..., thread_index)`), invoked with `call()` | closure (see the containers table) |
+| `Job::mReferenceCount`             | `ref_count: RefCount`                  | same as RefTarget (reference counting)  |
+| `JobSystemWithBarrier::BarrierImpl` `mJobReadIndex` / `mJobWriteIndex`, `mNumToAcquire` | `read_state.job_read_index` / `write_state.job_write_index`, `write_state.num_to_acquire` | grouped in cache line aligned structs (field reordering) |
+| `JobSystemThreadPool::mTail`       | `tail_state.tail`                      | cache line aligned struct (field reordering) |
+| `HashTable<..., Hash, KeyEqual>`, `UnorderedMap<Key, Value, Hash, KeyEqual>`, `UnorderedSet<Key, Hash, KeyEqual>` | `HashTable(Key, KeyValue, Detail, options)`, `UnorderedMap(Key, Value, options)`, `UnorderedSet(Key, options)` with `options: HashTableOptions(Key)` (`.{}` = `Hash<Key>` / `std::equal_to`) | functor template parameters |
+| `HashTable::clear()` / `ClearAndKeepMemory()` | `clearAndFree(allocator)` / `clearRetainingCapacity()` | std names; `clear` frees the buckets (iteration order depends on the bucket count) |
+| `HashTable::size()` / `empty()` / `reserve(n)` | `count()` / `isEmpty()` / `ensureTotalCapacity(allocator, n)` | std hash map names |
+| `UnorderedMap::operator[](key)`    | `getOrPutValue(allocator, key, default_value)` | operator, `Value()` has no generic Zig equivalent |
+| `UnorderedMap::try_emplace(key, args...)` | `tryEmplace(allocator, key, value)` | variadic constructor arguments |
+| `find(key)` (non-const / const)    | `findPtr(key) ?*KeyValue` / `find(key) ?*const KeyValue` (null is `end()`) | overload on const |
+| `HashTable::erase(const_iterator)` / `erase(key)` | `eraseByPtr(ptr)` / `erase(key)` | overload            |
+| `HashTable` iterator `mIndex`      | `indexOf(ptr)`                         | iterators are element pointers          |
+| `HashTable::begin()` / `end()`     | `iterator()` / `constIterator()` + `next()` (null at the end) | iterators              |
+| copy / move constructor, `operator=` (copy / move) of `HashTable` / `UnorderedMap` | `clone(allocator)` / `move()`, `assign(allocator, &other)` / `assignMove(allocator, &other)` (copies are bitwise) | needs the allocator |
+| `std::pair<const Key, Value>` (`first` / `second`) in `UnorderedMap` | `KeyValue{ .key, .value }` | named struct                     |
+| `StreamUtils::ObjectToIDMap<T>` / `IDToObjectMap<T>` | `zolt.ObjectToIDMap(T)` / `zolt.IDToObjectMap(T)` | namespace flattened                |
+| `TempAllocator::Allocate(inSize) -> void *` | `allocate(size) Error!?Block` (null for size 0, `error.OutOfMemory` where Jolt aborts) | error union instead of abort |
+| `STLTempAllocator<T>`              | `STLTempAllocator` (untyped), containers use `.allocator()` (a `std.mem.Allocator`) | std.mem.Allocator counts bytes |
+| `STLLocalAllocator(const STLLocalAllocator<T2, N> &)` | `STLLocalAllocator(T, N).fromOther(other)` | converting constructor  |
+| `STLLocalAllocator::is_local`      | `isLocal`                              | STL style snake_case name               |
+| `ByteBuffer::Align`                | `alignTo`                              | `align` is a keyword                    |
+| `ByteBuffer::Allocate<T>(inSize = 1)` | `allocate(allocator, T, .{ .size = n }) ![]T` | default argument, returns a slice |
+| `ByteBuffer::Get<T>` (non-const)   | `getMut(T, position)`                  | const overload                          |
+| `StridedPtr<const T>`              | `StridedPtrConst(T)`                   | Zig types have no const qualifier       |
+| `StridedPtr` `++p` / `--p` / `p++` / `p--` | `increment` / `decrement` / `postIncrement` / `postDecrement` | operators |
+| `StridedPtr` `p - q` / `*p`, `p->` / `p[i]` | `distance` / `deref` / `at` (pointers) | operators                         |
+| `StreamIn::Read(T &)` / `StreamOut::Write(const T &)` overloads | `read(&value)` / `write(value)` (comptime dispatch) | overloads                   |
+| `StreamIn::Read(Array<T> &)` / `Read(String &)` / `Read(Array<T> &, F)` | `readArray(T, allocator, &list)` / `readString(allocator, &string)` / `readArrayWith(T, allocator, &list, context, readElement)` | overloads, need the allocator |
+| `StreamOut::Write(Array<T>)` / `Write(String)` / `Write(Array<T>, F)` | `writeArray(T, items)` / `writeString(string)` / `writeArrayWith(T, items, context, writeElement)` | overloads |
+| `ReadBytes(void *, size_t)` / `WriteBytes(const void *, size_t)` | `readBytes([]u8)` / `writeBytes([]const u8)` | pointer + size become a slice |
+| `StreamInWrapper(istream &)` / `StreamOutWrapper(ostream &)` | `StreamInWrapper.init(*std.Io.Reader).streamIn()` / `StreamOutWrapper.init(*std.Io.Writer).streamOut()` | std streams become std.Io |
+| `StringToVector(str, out, delim = ",", clear = true)` / `VectorToString(v, out, delim = ",")` | `stringToVector(allocator, str, &list, .{ .delimiter, .clear_vector })` / `vectorToString(allocator, v, .{ .delimiter }) ![]u8` | default arguments, out parameter |
+| `FPControlWord<Value, Mask>` (RAII) | `const cw = FPControlWord(value, mask).init(); defer cw.deinit();` | RAII                                 |
+| `LinearCurve` copy constructor     | `clone(allocator)`                     | allocating type                         |

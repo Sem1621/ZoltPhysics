@@ -4,40 +4,41 @@
 
 Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. Percentages are
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
-that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script).
+that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
+that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 12.3%** of 86868 lines in scope · **Unit tests: 22.4%** of 18321 lines
+**Library: 17.5%** of 85257 lines in scope · **Unit tests: 26.7%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
-| Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | C++ lines |
-|-----------|---------:|---:|---:|---:|---:|---:|----------:|
-| `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 320 |
-| `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 1295 |
-| `Jolt/Compute` | deferred | 0 | 0 | 0 | 32 | 0 | 3657 |
-| `Jolt/Core` | 19% | 9 | 1 | 0 | 30 | 15 | 7518 |
-| `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 6307 |
-| `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 9290 |
-| `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 2841 |
-| `Jolt/Physics` | 0% | 0 | 0 | 0 | 13 | 0 | 5053 |
-| `Jolt/Physics/Body` | 0% | 0 | 0 | 0 | 18 | 0 | 5146 |
-| `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 0% | 0 | 0 | 0 | 76 | 0 | 21948 |
-| `Jolt/Physics/Constraints` | 0% | 0 | 0 | 0 | 35 | 0 | 12068 |
-| `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 2287 |
-| `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 861 |
-| `Jolt/Physics/SoftBody` | 0% | 0 | 0 | 0 | 8 | 0 | 3880 |
-| `Jolt/Physics/Vehicle` | 0% | 0 | 0 | 0 | 12 | 0 | 3942 |
-| `Jolt/Renderer` | deferred | 0 | 0 | 0 | 4 | 0 | 1754 |
-| `Jolt/Shaders` | deferred | 0 | 0 | 0 | 31 | 0 | 915 |
-| `Jolt/Skeleton` | 0% | 0 | 0 | 0 | 4 | 0 | 780 |
-| `Jolt/TriangleSplitter` | 0% | 0 | 0 | 0 | 3 | 0 | 335 |
+| Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
+|-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
+| `Jolt` | 36% | 1 | 0 | 0 | 1 | 1 | 0 | 320 |
+| `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 1295 |
+| `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
+| `Jolt/Core` | 94% | 36 | 2 | 0 | 0 | 13 | 4 | 5907 |
+| `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 0 | 6307 |
+| `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
+| `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
+| `Jolt/Physics` | 0% | 0 | 0 | 0 | 13 | 0 | 0 | 5053 |
+| `Jolt/Physics/Body` | 0% | 0 | 0 | 0 | 18 | 0 | 0 | 5146 |
+| `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
+| `Jolt/Physics/Collision` | 0% | 0 | 0 | 0 | 76 | 0 | 0 | 21948 |
+| `Jolt/Physics/Constraints` | 0% | 0 | 0 | 0 | 35 | 0 | 0 | 12068 |
+| `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
+| `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
+| `Jolt/Physics/SoftBody` | 0% | 0 | 0 | 0 | 8 | 0 | 0 | 3880 |
+| `Jolt/Physics/Vehicle` | 0% | 0 | 0 | 0 | 12 | 0 | 0 | 3942 |
+| `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
+| `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
+| `Jolt/Skeleton` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 780 |
+| `Jolt/TriangleSplitter` | 0% | 0 | 0 | 0 | 3 | 0 | 0 | 335 |
 
-<details><summary>Jolt — 0%</summary>
+<details><summary>Jolt — 36%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ConfigurationString.h` | 114 | ❌ todo |  |
+| `ConfigurationString.h` | 114 | ✅ complete | `Zolt/ConfigurationString.zig` |
 | `Jolt.h` | 15 | ➖ n/a | umbrella header, the module root is Zolt/zolt.zig |
 | `RegisterTypes.cpp`, `RegisterTypes.h` | 206 | ❌ todo |  |
 
@@ -58,42 +59,42 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ComputeBufferCPU.cpp`, `ComputeBufferCPU.h` | 51 | ❌ todo |  |
-| `ComputeQueueCPU.cpp`, `ComputeQueueCPU.h` | 111 | ❌ todo |  |
-| `ComputeShaderCPU.h` | 30 | ❌ todo |  |
-| `ComputeSystemCPU.cpp`, `ComputeSystemCPU.h` | 82 | ❌ todo |  |
-| `HLSLToCPP.h` | 419 | ❌ todo |  |
-| `ShaderWrapper.h` | 20 | ❌ todo |  |
-| `WrapShaderBegin.h` | 57 | ❌ todo |  |
-| `WrapShaderBindings.h` | 32 | ❌ todo |  |
-| `WrapShaderEnd.h` | 51 | ❌ todo |  |
-| `ComputeBuffer.h` | 55 | ❌ todo |  |
-| `ComputeQueue.h` | 65 | ❌ todo |  |
-| `ComputeShader.h` | 32 | ❌ todo |  |
-| `ComputeSystem.cpp`, `ComputeSystem.h` | 64 | ❌ todo |  |
-| `ComputeBufferDX12.cpp`, `ComputeBufferDX12.h` | 171 | ❌ todo |  |
-| `ComputeQueueDX12.cpp`, `ComputeQueueDX12.h` | 221 | ❌ todo |  |
-| `ComputeShaderDX12.h` | 41 | ❌ todo |  |
-| `ComputeSystemDX12.cpp`, `ComputeSystemDX12.h` | 247 | ❌ todo |  |
-| `ComputeSystemDX12Impl.cpp`, `ComputeSystemDX12Impl.h` | 153 | ❌ todo |  |
-| `IncludeDX12.h` | 39 | ❌ todo |  |
-| `ComputeBufferMTL.h` | 26 | ❌ todo |  |
-| `ComputeQueueMTL.h` | 36 | ❌ todo |  |
-| `ComputeShaderMTL.h` | 27 | ❌ todo |  |
-| `ComputeSystemMTL.h` | 28 | ❌ todo |  |
-| `ComputeSystemMTLImpl.h` | 19 | ❌ todo |  |
-| `BufferVK.h` | 35 | ❌ todo |  |
-| `ComputeBufferVK.cpp`, `ComputeBufferVK.h` | 150 | ❌ todo |  |
-| `ComputeQueueVK.cpp`, `ComputeQueueVK.h` | 294 | ❌ todo |  |
-| `ComputeShaderVK.cpp`, `ComputeShaderVK.h` | 242 | ❌ todo |  |
-| `ComputeSystemVK.cpp`, `ComputeSystemVK.h` | 222 | ❌ todo |  |
-| `ComputeSystemVKImpl.cpp`, `ComputeSystemVKImpl.h` | 403 | ❌ todo |  |
-| `ComputeSystemVKWithAllocator.cpp`, `ComputeSystemVKWithAllocator.h` | 204 | ❌ todo |  |
-| `IncludeVK.h` | 30 | ❌ todo |  |
+| `ComputeBufferCPU.cpp`, `ComputeBufferCPU.h` | 51 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeQueueCPU.cpp`, `ComputeQueueCPU.h` | 111 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeShaderCPU.h` | 30 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemCPU.cpp`, `ComputeSystemCPU.h` | 82 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `HLSLToCPP.h` | 419 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ShaderWrapper.h` | 20 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `WrapShaderBegin.h` | 57 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `WrapShaderBindings.h` | 32 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `WrapShaderEnd.h` | 51 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeBuffer.h` | 55 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeQueue.h` | 65 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeShader.h` | 32 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystem.cpp`, `ComputeSystem.h` | 64 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeBufferDX12.cpp`, `ComputeBufferDX12.h` | 171 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeQueueDX12.cpp`, `ComputeQueueDX12.h` | 221 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeShaderDX12.h` | 41 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemDX12.cpp`, `ComputeSystemDX12.h` | 247 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemDX12Impl.cpp`, `ComputeSystemDX12Impl.h` | 153 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `IncludeDX12.h` | 39 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeBufferMTL.h` | 26 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeQueueMTL.h` | 36 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeShaderMTL.h` | 27 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemMTL.h` | 28 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemMTLImpl.h` | 19 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `BufferVK.h` | 35 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeBufferVK.cpp`, `ComputeBufferVK.h` | 150 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeQueueVK.cpp`, `ComputeQueueVK.h` | 294 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeShaderVK.cpp`, `ComputeShaderVK.h` | 242 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemVK.cpp`, `ComputeSystemVK.h` | 222 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemVKImpl.cpp`, `ComputeSystemVKImpl.h` | 403 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeSystemVKWithAllocator.cpp`, `ComputeSystemVKWithAllocator.h` | 204 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `IncludeVK.h` | 30 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
 
 </details>
 
-<details><summary>Jolt/Core — 19%</summary>
+<details><summary>Jolt/Core — 94%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -101,57 +102,57 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 | `Array.h` | 580 | ➖ n/a | std.ArrayList |
 | `Atomics.h` | 37 | ✅ complete | `Zolt/Core/Atomics.zig` |
 | `BinaryHeap.h` | 77 | ✅ complete | `Zolt/Core/BinaryHeap.zig` |
-| `ByteBuffer.h` | 59 | ❌ todo |  |
+| `ByteBuffer.h` | 59 | ✅ complete | `Zolt/Core/ByteBuffer.zig` |
 | `Color.cpp`, `Color.h` | 110 | ✅ complete | `Zolt/Core/Color.zig` |
 | `Core.h` | 666 | 🟡 partial | `Zolt/Core/Core.zig` |
-| `FPControlWord.h` | 113 | ❌ todo |  |
+| `FPControlWord.h` | 113 | ✅ complete | `Zolt/Core/FPControlWord.zig` |
 | `FPException.h` | 61 | ➖ n/a | Zolt never enables floating point exceptions |
-| `FPFlushDenormals.h` | 27 | ❌ todo |  |
-| `Factory.cpp`, `Factory.h` | 110 | ❌ todo |  |
-| `FixedSizeFreeList.h`, `FixedSizeFreeList.inl` | 275 | ❌ todo |  |
+| `FPFlushDenormals.h` | 27 | ✅ complete | `Zolt/Core/FPFlushDenormals.zig` |
+| `Factory.cpp`, `Factory.h` | 110 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
+| `FixedSizeFreeList.h`, `FixedSizeFreeList.inl` | 275 | ✅ complete | `Zolt/Core/FixedSizeFreeList.zig` |
 | `HashCombine.h` | 208 | ✅ complete | `Zolt/Core/HashCombine.zig` |
-| `HashTable.h` | 738 | ❌ todo |  |
+| `HashTable.h` | 738 | ✅ complete | `Zolt/Core/HashTable.zig` |
 | `IncludeWindows.h` | 27 | ➖ n/a | Windows headers |
 | `InsertionSort.h` | 50 | ✅ complete | `Zolt/Core/InsertionSort.zig` |
 | `IssueReporting.cpp`, `IssueReporting.h` | 44 | ➖ n/a | std.debug.assert and std.log |
-| `JobSystem.h`, `JobSystem.inl` | 302 | ❌ todo |  |
-| `JobSystemSingleThreaded.cpp`, `JobSystemSingleThreaded.h` | 98 | ❌ todo |  |
-| `JobSystemThreadPool.cpp`, `JobSystemThreadPool.h` | 359 | ❌ todo |  |
-| `JobSystemWithBarrier.cpp`, `JobSystemWithBarrier.h` | 259 | ❌ todo |  |
+| `JobSystem.h`, `JobSystem.inl` | 302 | ✅ complete | `Zolt/Core/JobSystem.zig` |
+| `JobSystemSingleThreaded.cpp`, `JobSystemSingleThreaded.h` | 98 | ✅ complete | `Zolt/Core/JobSystemSingleThreaded.zig` |
+| `JobSystemThreadPool.cpp`, `JobSystemThreadPool.h` | 359 | ✅ complete | `Zolt/Core/JobSystemThreadPool.zig` |
+| `JobSystemWithBarrier.cpp`, `JobSystemWithBarrier.h` | 259 | ✅ complete | `Zolt/Core/JobSystemWithBarrier.zig` |
 | `LSANSuppressions.h` | 15 | ➖ n/a | sanitizer configuration |
-| `LinearCurve.cpp`, `LinearCurve.h` | 88 | ❌ todo |  |
-| `LockFreeHashMap.h`, `LockFreeHashMap.inl` | 454 | ❌ todo |  |
+| `LinearCurve.cpp`, `LinearCurve.h` | 88 | 🟡 partial | `Zolt/Core/LinearCurve.zig` |
+| `LockFreeHashMap.h`, `LockFreeHashMap.inl` | 454 | ✅ complete | `Zolt/Core/LockFreeHashMap.zig` |
 | `Memory.cpp`, `Memory.h` | 138 | ➖ n/a | global allocation hooks, Zolt passes std.mem.Allocator explicitly |
-| `Mutex.h` | 183 | ❌ todo |  |
-| `MutexArray.h` | 77 | ❌ todo |  |
+| `Mutex.h` | 183 | ✅ complete | `Zolt/Core/Mutex.zig` |
+| `MutexArray.h` | 77 | ✅ complete | `Zolt/Core/MutexArray.zig` |
 | `NonCopyable.h` | 14 | ➖ n/a | Zig has no copy constructors |
-| `ObjectToIDMap.h` | 13 | ❌ todo |  |
+| `ObjectToIDMap.h` | 13 | ✅ complete | `Zolt/Core/ObjectToIDMap.zig` |
 | `Prefetch.h` | 16 | ✅ complete | `Zolt/Core/Prefetch.zig` |
-| `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ❌ todo |  |
+| `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ⏸ deferred | developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration |
 | `QuickSort.h` | 109 | ✅ complete | `Zolt/Core/QuickSort.zig` |
 | `RISCVVector.h` | 88 | ➖ n/a | RVV intrinsic helpers, Zolt uses @Vector |
-| `RTTI.cpp`, `RTTI.h` | 494 | ❌ todo |  |
+| `RTTI.cpp`, `RTTI.h` | 494 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
 | `Reference.h` | 205 | ✅ complete | `Zolt/Core/Reference.zig` |
 | `Result.h` | 134 | ➖ n/a | Zig error unions |
 | `STLAlignedAllocator.h` | 56 | ➖ n/a | STL allocator adapter, Zolt uses std.mem.Allocator |
 | `STLAllocator.h` | 98 | ➖ n/a | STL allocator adapter, Zolt uses std.mem.Allocator |
-| `STLLocalAllocator.h` | 139 | ❌ todo |  |
-| `STLTempAllocator.h` | 62 | ❌ todo |  |
+| `STLLocalAllocator.h` | 139 | ✅ complete | `Zolt/Core/STLLocalAllocator.zig` |
+| `STLTempAllocator.h` | 62 | ✅ complete | `Zolt/Core/STLTempAllocator.zig` |
 | `ScopeExit.h` | 38 | ➖ n/a | Zig `defer` |
-| `Semaphore.cpp`, `Semaphore.h` | 169 | ❌ todo |  |
+| `Semaphore.cpp`, `Semaphore.h` | 169 | ✅ complete | `Zolt/Core/Semaphore.zig` |
 | `StaticArray.h` | 271 | ✅ complete | `Zolt/Core/StaticArray.zig` |
-| `StreamIn.h` | 103 | ❌ todo |  |
-| `StreamOut.h` | 82 | ❌ todo |  |
-| `StreamUtils.h` | 140 | ❌ todo |  |
-| `StreamWrapper.h` | 39 | ❌ todo |  |
-| `StridedPtr.h` | 50 | ❌ todo |  |
-| `StringTools.cpp`, `StringTools.h` | 107 | ❌ todo |  |
-| `TempAllocator.h` | 181 | ❌ todo |  |
-| `TickCounter.cpp`, `TickCounter.h` | 65 | ❌ todo |  |
-| `UnorderedMap.h` | 69 | ❌ todo |  |
-| `UnorderedMapFwd.h` | 10 | ➖ n/a | forward declarations |
-| `UnorderedSet.h` | 27 | ❌ todo |  |
-| `UnorderedSetFwd.h` | 10 | ➖ n/a | forward declarations |
+| `StreamIn.h` | 103 | ✅ complete | `Zolt/Core/StreamIn.zig` |
+| `StreamOut.h` | 82 | ✅ complete | `Zolt/Core/StreamOut.zig` |
+| `StreamUtils.h` | 140 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
+| `StreamWrapper.h` | 39 | ✅ complete | `Zolt/Core/StreamWrapper.zig` |
+| `StridedPtr.h` | 50 | ✅ complete | `Zolt/Core/StridedPtr.zig` |
+| `StringTools.cpp`, `StringTools.h` | 107 | ✅ complete | `Zolt/Core/StringTools.zig` |
+| `TempAllocator.h` | 181 | ✅ complete | `Zolt/Core/TempAllocator.zig` |
+| `TickCounter.cpp`, `TickCounter.h` | 65 | ✅ complete | `Zolt/Core/TickCounter.zig` |
+| `UnorderedMap.h` | 69 | ✅ complete | `Zolt/Core/UnorderedMap.zig` |
+| `UnorderedMapFwd.h` | 10 | ✅ complete | `Zolt/Core/UnorderedMap.zig` |
+| `UnorderedSet.h` | 27 | ✅ complete | `Zolt/Core/UnorderedSet.zig` |
+| `UnorderedSetFwd.h` | 10 | ✅ complete | `Zolt/Core/UnorderedSet.zig` |
 
 </details>
 
@@ -475,10 +476,10 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `DebugRenderer.cpp`, `DebugRenderer.h` | 1219 | ❌ todo |  |
-| `DebugRendererPlayback.cpp`, `DebugRendererPlayback.h` | 169 | ❌ todo |  |
-| `DebugRendererRecorder.cpp`, `DebugRendererRecorder.h` | 229 | ❌ todo |  |
-| `DebugRendererSimple.cpp`, `DebugRendererSimple.h` | 137 | ❌ todo |  |
+| `DebugRenderer.cpp`, `DebugRenderer.h` | 1219 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
+| `DebugRendererPlayback.cpp`, `DebugRendererPlayback.h` | 169 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
+| `DebugRendererRecorder.cpp`, `DebugRendererRecorder.h` | 229 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
+| `DebugRendererSimple.cpp`, `DebugRendererSimple.h` | 137 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
 
 </details>
 
@@ -486,37 +487,37 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `HairApplyDeltaTransformBindings.h` | 12 | ❌ todo |  |
-| `HairApplyGlobalPose.h` | 17 | ❌ todo |  |
-| `HairApplyGlobalPoseBindings.h` | 14 | ❌ todo |  |
-| `HairCalculateCollisionPlanesBindings.h` | 11 | ❌ todo |  |
-| `HairCalculateRenderPositions.h` | 15 | ❌ todo |  |
-| `HairCalculateRenderPositionsBindings.h` | 13 | ❌ todo |  |
-| `HairCommon.h` | 46 | ❌ todo |  |
-| `HairGridAccumulateBindings.h` | 10 | ❌ todo |  |
-| `HairGridClearBindings.h` | 7 | ❌ todo |  |
-| `HairGridNormalizeBindings.h` | 7 | ❌ todo |  |
-| `HairIntegrate.h` | 73 | ❌ todo |  |
-| `HairIntegrateBindings.h` | 15 | ❌ todo |  |
-| `HairSkinRootsBindings.h` | 20 | ❌ todo |  |
-| `HairSkinVerticesBindings.h` | 10 | ❌ todo |  |
-| `HairStructs.h` | 102 | ❌ todo |  |
-| `HairTeleportBindings.h` | 10 | ❌ todo |  |
-| `HairUpdateRootsBindings.h` | 10 | ❌ todo |  |
-| `HairUpdateStrandsBindings.h` | 15 | ❌ todo |  |
-| `HairUpdateVelocity.h` | 54 | ❌ todo |  |
-| `HairUpdateVelocityBindings.h` | 18 | ❌ todo |  |
-| `HairUpdateVelocityIntegrateBindings.h` | 19 | ❌ todo |  |
-| `HairWrapper.cpp`, `HairWrapper.h` | 127 | ❌ todo |  |
-| `ShaderCore.h` | 68 | ❌ todo |  |
-| `ShaderMat44.h` | 11 | ❌ todo |  |
-| `ShaderMath.h` | 14 | ❌ todo |  |
-| `ShaderPlane.h` | 15 | ❌ todo |  |
-| `ShaderQuat.h` | 103 | ❌ todo |  |
-| `ShaderVec3.h` | 23 | ❌ todo |  |
-| `TestCompute2Bindings.h` | 21 | ❌ todo |  |
-| `TestComputeBindings.h` | 17 | ❌ todo |  |
-| `TestComputeWrapper.cpp` | 18 | ❌ todo |  |
+| `HairApplyDeltaTransformBindings.h` | 12 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairApplyGlobalPose.h` | 17 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairApplyGlobalPoseBindings.h` | 14 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairCalculateCollisionPlanesBindings.h` | 11 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairCalculateRenderPositions.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairCalculateRenderPositionsBindings.h` | 13 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairCommon.h` | 46 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairGridAccumulateBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairGridClearBindings.h` | 7 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairGridNormalizeBindings.h` | 7 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairIntegrate.h` | 73 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairIntegrateBindings.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairSkinRootsBindings.h` | 20 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairSkinVerticesBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairStructs.h` | 102 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairTeleportBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairUpdateRootsBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairUpdateStrandsBindings.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairUpdateVelocity.h` | 54 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairUpdateVelocityBindings.h` | 18 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairUpdateVelocityIntegrateBindings.h` | 19 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairWrapper.cpp`, `HairWrapper.h` | 127 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `ShaderCore.h` | 68 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `ShaderMat44.h` | 11 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `ShaderMath.h` | 14 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `ShaderPlane.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `ShaderQuat.h` | 103 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `ShaderVec3.h` | 23 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `TestCompute2Bindings.h` | 21 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `TestComputeBindings.h` | 17 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `TestComputeWrapper.cpp` | 18 | ⏸ deferred | GPU shaders for Jolt/Compute |
 
 </details>
 
@@ -543,15 +544,15 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 ## Unit tests (UnitTests/ → ZoltTests/)
 
-| Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | C++ lines |
-|-----------|---------:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 1185 |
-| `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 349 |
-| `UnitTests/Core` | 23% | 4 | 0 | 0 | 7 | 2 | 1021 |
-| `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 854 |
-| `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 3683 |
-| `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 220 |
-| `UnitTests/Physics` | 0% | 0 | 0 | 0 | 33 | 0 | 11009 |
+| Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
+|-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
+| `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 0 | 1185 |
+| `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
+| `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
+| `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 0 | 854 |
+| `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
+| `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
+| `UnitTests/Physics` | 0% | 0 | 0 | 0 | 33 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 16%</summary>
 
@@ -576,23 +577,23 @@ that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the 
 
 </details>
 
-<details><summary>UnitTests/Core — 23%</summary>
+<details><summary>UnitTests/Core — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ArrayTest.cpp` | 616 | ➖ n/a | tests Jolt's Array, Zolt uses std.ArrayList |
 | `BinaryHeapTest.cpp` | 41 | ✅ complete | `ZoltTests/Core/BinaryHeapTest.zig` |
-| `FPFlushDenormalsTest.cpp` | 35 | ❌ todo |  |
+| `FPFlushDenormalsTest.cpp` | 35 | ✅ complete | `ZoltTests/Core/FPFlushDenormalsTest.zig` |
 | `HashCombineTest.cpp` | 42 | ✅ complete | `ZoltTests/Core/HashCombineTest.zig` |
 | `InsertionSortTest.cpp` | 75 | ✅ complete | `ZoltTests/Core/InsertionSortTest.zig` |
-| `JobSystemTest.cpp` | 72 | ❌ todo |  |
-| `LinearCurveTest.cpp` | 48 | ❌ todo |  |
+| `JobSystemTest.cpp` | 72 | ✅ complete | `ZoltTests/Core/JobSystemTest.zig` |
+| `LinearCurveTest.cpp` | 48 | ✅ complete | `ZoltTests/Core/LinearCurveTest.zig` |
 | `QuickSortTest.cpp` | 75 | ✅ complete | `ZoltTests/Core/QuickSortTest.zig` |
-| `STLLocalAllocatorTest.cpp` | 180 | ❌ todo |  |
+| `STLLocalAllocatorTest.cpp` | 180 | ✅ complete | `ZoltTests/Core/STLLocalAllocatorTest.zig` |
 | `ScopeExitTest.cpp` | 42 | ➖ n/a | tests ScopeExit, Zig has `defer` |
-| `StringToolsTest.cpp` | 80 | ❌ todo |  |
-| `UnorderedMapTest.cpp` | 104 | ❌ todo |  |
-| `UnorderedSetTest.cpp` | 269 | ❌ todo |  |
+| `StringToolsTest.cpp` | 80 | ✅ complete | `ZoltTests/Core/StringToolsTest.zig` |
+| `UnorderedMapTest.cpp` | 104 | ✅ complete | `ZoltTests/Core/UnorderedMapTest.zig` |
+| `UnorderedSetTest.cpp` | 269 | ✅ complete | `ZoltTests/Core/UnorderedSetTest.zig` |
 
 </details>
 
