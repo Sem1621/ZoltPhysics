@@ -359,12 +359,10 @@ pub const DVec3 = extern struct {
 
     /// Dot product
     pub fn dot(self: DVec3, other: DVec3) f64 {
-        const a = self.value;
-        const b = other.value;
-        var result: f64 = 0.0;
-        inline for (0..3) |i|
-            result += a[i] * b[i];
-        return result;
+        // Summed as (x + y) + z like Jolt's SSE, AVX and NEON paths. The scalar fallback (and RVV) start from 0.0,
+        // which turns a dot product of -0 (all products -0) into +0.
+        const m = self.value * other.value;
+        return (m[0] + m[1]) + m[2];
     }
 
     /// Squared length of vector
