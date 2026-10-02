@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 25.1%** of 85257 lines in scope · **Unit tests: 29.6%** of 18321 lines
+**Library: 26.8%** of 85257 lines in scope · **Unit tests: 30.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -17,7 +17,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
 | `Jolt/Core` | 94% | 36 | 2 | 0 | 0 | 13 | 4 | 5907 |
-| `Jolt/Geometry` | 77% | 22 | 0 | 0 | 1 | 0 | 0 | 6307 |
+| `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 0% | 0 | 0 | 0 | 13 | 0 | 0 | 5053 |
@@ -156,7 +156,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Geometry — 77%</summary>
+<details><summary>Jolt/Geometry — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -164,7 +164,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `AABox4.h` | 184 | ✅ complete | `Zolt/Geometry/AABox4.zig` |
 | `ClipPoly.h` | 169 | ✅ complete | `Zolt/Geometry/ClipPoly.zig` |
 | `ClosestPoint.h` | 448 | ✅ complete | `Zolt/Geometry/ClosestPoint.zig` |
-| `ConvexHullBuilder.cpp`, `ConvexHullBuilder.h` | 1453 | ❌ todo |  |
+| `ConvexHullBuilder.cpp`, `ConvexHullBuilder.h` | 1453 | ✅ complete | `Zolt/Geometry/ConvexHullBuilder.zig` |
 | `ConvexHullBuilder2D.cpp`, `ConvexHullBuilder2D.h` | 360 | ✅ complete | `Zolt/Geometry/ConvexHullBuilder2D.zig` |
 | `ConvexSupport.h` | 160 | ✅ complete | `Zolt/Geometry/ConvexSupport.zig` |
 | `EPAConvexHullBuilder.h` | 716 | ✅ complete | `Zolt/Geometry/EPAConvexHullBuilder.zig` |
@@ -549,7 +549,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
-| `UnitTests/Geometry` | 62% | 5 | 1 | 0 | 1 | 0 | 0 | 854 |
+| `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
 | `UnitTests/Physics` | 0% | 0 | 0 | 0 | 33 | 0 | 0 | 11009 |
@@ -597,12 +597,12 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Geometry — 62%</summary>
+<details><summary>UnitTests/Geometry — 88%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ClosestPointTests.cpp` | 88 | ✅ complete | `ZoltTests/Geometry/ClosestPointTests.zig` |
-| `ConvexHullBuilderTest.cpp` | 220 | ❌ todo |  |
+| `ConvexHullBuilderTest.cpp` | 220 | ✅ complete | `ZoltTests/Geometry/ConvexHullBuilderTest.zig` |
 | `EPATests.cpp` | 189 | ✅ complete | `ZoltTests/Geometry/EPATests.zig` |
 | `EllipseTest.cpp` | 29 | ✅ complete | `ZoltTests/Geometry/EllipseTest.zig` |
 | `GJKTests.cpp` | 209 | 🟡 partial | `ZoltTests/Geometry/GJKTests.zig` |

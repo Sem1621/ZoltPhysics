@@ -22,6 +22,7 @@ test {
 
     // Geometry
     _ = @import("Geometry/ClosestPointTests.zig");
+    _ = @import("Geometry/ConvexHullBuilderTest.zig");
     _ = @import("Geometry/EllipseTest.zig");
     _ = @import("Geometry/EPATests.zig");
     _ = @import("Geometry/GJKTests.zig");

@@ -102,6 +102,7 @@ pub const clipPolyVsEdge = @import("Geometry/ClipPoly.zig").clipPolyVsEdge;
 pub const clipPolyVsPlane = @import("Geometry/ClipPoly.zig").clipPolyVsPlane;
 pub const clipPolyVsPoly = @import("Geometry/ClipPoly.zig").clipPolyVsPoly;
 pub const ClosestPoint = @import("Geometry/ClosestPoint.zig");
+pub const ConvexHullBuilder = @import("Geometry/ConvexHullBuilder.zig").ConvexHullBuilder;
 pub const ConvexHullBuilder2D = @import("Geometry/ConvexHullBuilder2D.zig").ConvexHullBuilder2D;
 pub const AddConvexRadius = @import("Geometry/ConvexSupport.zig").AddConvexRadius;
 pub const MinkowskiDifference = @import("Geometry/ConvexSupport.zig").MinkowskiDifference;
@@ -230,6 +231,7 @@ const source_files = .{
     @import("Geometry/AABox4.zig"),
     @import("Geometry/ClipPoly.zig"),
     @import("Geometry/ClosestPoint.zig"),
+    @import("Geometry/ConvexHullBuilder.zig"),
     @import("Geometry/ConvexHullBuilder2D.zig"),
     @import("Geometry/ConvexSupport.zig"),
     @import("Geometry/Ellipse.zig"),
