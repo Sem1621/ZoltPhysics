@@ -2,6 +2,7 @@
 //! Compiled into the reference library by `zig build parity`. Keep sorted (merged with git's union driver).
 
 pub const files = [_][]const u8{
+    "AABBTree/AABBTreeReference.cpp",
     "Core/ConcurrencyReference.cpp",
     "Core/ContainersReference.cpp",
     "Core/CoreReference.cpp",
