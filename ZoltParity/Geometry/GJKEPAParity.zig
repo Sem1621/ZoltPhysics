@@ -1382,7 +1382,7 @@ test "EPAConvexHullBuilder" {
     for (0..iterations / 20) |_| {
         const count = 4 + gen.index(if (gen.oneIn(4)) EPAConvexHullBuilder.max_points - 3 else 40);
         const pts = points[0..count];
-        switch (gen.next() % 9) {
+        switch (gen.next() % 10) {
             // Points on a sphere around the origin (like EPA on spheres)
             0, 1 => for (pts) |*p| {
                 p.* = gen.unit();
@@ -1415,6 +1415,24 @@ test "EPAConvexHullBuilder" {
                         3 => .{ 0, 0, if (gen.oneIn(2)) 1 else -1 },
                         else => .{ if (gen.oneIn(2)) gen.grid(3) * 0.5 else gen.rng.float(-1.5, 1.5), if (gen.oneIn(2)) gen.grid(3) * 0.5 else gen.rng.float(-1.5, 1.5), gen.rng.float(-noise, noise) },
                     };
+                }
+            },
+            // Like the previous case but in a tilted plane: the vertices are rounded off the plane, so the (nearly) coplanar
+            // triangles disagree on which side of them a new point in the plane is (islands in findEdge)
+            7 => {
+                const n = gen.unit();
+                const e1 = gen.unit();
+                const e2: P = .{ n[1] * e1[2] - n[2] * e1[1], n[2] * e1[0] - n[0] * e1[2], n[0] * e1[1] - n[1] * e1[0] };
+                const noise = gen.pick(f32, &.{ 0, 1.0e-7 });
+                for (pts, 0..) |*p, i| {
+                    const uv: [2]f32 = switch (i) {
+                        0 => .{ -2, -2 },
+                        1 => .{ 2, -2 },
+                        2 => .{ 0, 2 },
+                        3 => .{ 0, 0 },
+                        else => .{ gen.rng.float(-1.5, 1.5), gen.rng.float(-1.5, 1.5) },
+                    };
+                    p.* = add(add(mulS(e1, uv[0]), mulS(e2, uv[1])), mulS(n, if (i == 3) 1 else gen.rng.float(-noise, noise)));
                 }
             },
             else => for (pts) |*p| {
