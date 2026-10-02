@@ -103,6 +103,9 @@ pub const PolygonConvexSupport = @import("Geometry/ConvexSupport.zig").PolygonCo
 pub const TransformedConvexObject = @import("Geometry/ConvexSupport.zig").TransformedConvexObject;
 pub const TriangleConvexSupport = @import("Geometry/ConvexSupport.zig").TriangleConvexSupport;
 pub const Ellipse = @import("Geometry/Ellipse.zig").Ellipse;
+pub const EPAConvexHullBuilder = @import("Geometry/EPAConvexHullBuilder.zig").EPAConvexHullBuilder;
+pub const EPAPenetrationDepth = @import("Geometry/EPAPenetrationDepth.zig").EPAPenetrationDepth;
+pub const GJKClosestPoint = @import("Geometry/GJKClosestPoint.zig").GJKClosestPoint;
 pub const IndexedTriangle = @import("Geometry/IndexedTriangle.zig").IndexedTriangle;
 pub const IndexedTriangleList = @import("Geometry/IndexedTriangle.zig").IndexedTriangleList;
 pub const IndexedTriangleNoMaterial = @import("Geometry/IndexedTriangle.zig").IndexedTriangleNoMaterial;
@@ -214,6 +217,9 @@ const source_files = .{
     @import("Geometry/ConvexHullBuilder2D.zig"),
     @import("Geometry/ConvexSupport.zig"),
     @import("Geometry/Ellipse.zig"),
+    @import("Geometry/EPAConvexHullBuilder.zig"),
+    @import("Geometry/EPAPenetrationDepth.zig"),
+    @import("Geometry/GJKClosestPoint.zig"),
     @import("Geometry/IndexedTriangle.zig"),
     @import("Geometry/Indexify.zig"),
     @import("Geometry/MortonCode.zig"),
