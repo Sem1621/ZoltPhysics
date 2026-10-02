@@ -11,6 +11,7 @@
 //! Run: zig build parity [-Ddouble_precision=true] [-Dtest-filter=Vec4]
 
 test {
+    _ = @import("AABBTree/AABBTreeParity.zig");
     _ = @import("Core/ConcurrencyParity.zig");
     _ = @import("Core/ContainersParity.zig");
     _ = @import("Core/CoreParity.zig");

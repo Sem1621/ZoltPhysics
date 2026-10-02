@@ -7,14 +7,14 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 23.2%** of 85257 lines in scope · **Unit tests: 29.6%** of 18321 lines
+**Library: 25.1%** of 85257 lines in scope · **Unit tests: 29.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
 | `Jolt` | 36% | 1 | 0 | 0 | 1 | 1 | 0 | 320 |
-| `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 1295 |
+| `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
 | `Jolt/Core` | 94% | 36 | 2 | 0 | 0 | 13 | 4 | 5907 |
 | `Jolt/Geometry` | 77% | 22 | 0 | 0 | 1 | 0 | 0 | 6307 |
@@ -32,7 +32,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
 | `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
 | `Jolt/Skeleton` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 780 |
-| `Jolt/TriangleSplitter` | 0% | 0 | 0 | 0 | 3 | 0 | 0 | 335 |
+| `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
 
 <details><summary>Jolt — 36%</summary>
 
@@ -44,14 +44,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/AABBTree — 0%</summary>
+<details><summary>Jolt/AABBTree — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `AABBTreeBuilder.cpp`, `AABBTreeBuilder.h` | 300 | ❌ todo |  |
-| `AABBTreeToBuffer.h` | 251 | ❌ todo |  |
-| `NodeCodecQuadTreeHalfFloat.h` | 275 | ❌ todo |  |
-| `TriangleCodecIndexed8BitPackSOA4Flags.h` | 469 | ❌ todo |  |
+| `AABBTreeBuilder.cpp`, `AABBTreeBuilder.h` | 300 | ✅ complete | `Zolt/AABBTree/AABBTreeBuilder.zig` |
+| `AABBTreeToBuffer.h` | 251 | ✅ complete | `Zolt/AABBTree/AABBTreeToBuffer.zig` |
+| `NodeCodecQuadTreeHalfFloat.h` | 275 | ✅ complete | `Zolt/AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig` |
+| `TriangleCodecIndexed8BitPackSOA4Flags.h` | 469 | ✅ complete | `Zolt/AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig` |
 
 </details>
 
@@ -532,13 +532,13 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/TriangleSplitter — 0%</summary>
+<details><summary>Jolt/TriangleSplitter — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `TriangleSplitter.cpp`, `TriangleSplitter.h` | 126 | ❌ todo |  |
-| `TriangleSplitterBinning.cpp`, `TriangleSplitterBinning.h` | 155 | ❌ todo |  |
-| `TriangleSplitterMean.cpp`, `TriangleSplitterMean.h` | 54 | ❌ todo |  |
+| `TriangleSplitter.cpp`, `TriangleSplitter.h` | 126 | ✅ complete | `Zolt/TriangleSplitter/TriangleSplitter.zig` |
+| `TriangleSplitterBinning.cpp`, `TriangleSplitterBinning.h` | 155 | ✅ complete | `Zolt/TriangleSplitter/TriangleSplitterBinning.zig` |
+| `TriangleSplitterMean.cpp`, `TriangleSplitterMean.h` | 54 | ✅ complete | `Zolt/TriangleSplitter/TriangleSplitterMean.zig` |
 
 </details>
 

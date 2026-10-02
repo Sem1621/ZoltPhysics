@@ -10,6 +10,13 @@ const std = @import("std");
 
 pub const getConfigurationString = @import("ConfigurationString.zig").getConfigurationString;
 
+// AABBTree
+pub const AABBTreeBuilder = @import("AABBTree/AABBTreeBuilder.zig").AABBTreeBuilder;
+pub const AABBTreeBuilderStats = @import("AABBTree/AABBTreeBuilder.zig").AABBTreeBuilderStats;
+pub const AABBTreeToBuffer = @import("AABBTree/AABBTreeToBuffer.zig").AABBTreeToBuffer;
+pub const NodeCodecQuadTreeHalfFloat = @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig").NodeCodecQuadTreeHalfFloat;
+pub const TriangleCodecIndexed8BitPackSOA4Flags = @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig").TriangleCodecIndexed8BitPackSOA4Flags;
+
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
@@ -169,9 +176,18 @@ pub const Vec3 = @import("Math/Vec3.zig").Vec3;
 pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 pub const Vector = @import("Math/Vector.zig").Vector;
 
+// TriangleSplitter
+pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
+pub const TriangleSplitterBinning = @import("TriangleSplitter/TriangleSplitterBinning.zig").TriangleSplitterBinning;
+pub const TriangleSplitterMean = @import("TriangleSplitter/TriangleSplitterMean.zig").TriangleSplitterMean;
+
 /// Every source file of the module. Used by the test below to make sure that all of them are
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
+    @import("AABBTree/AABBTreeBuilder.zig"),
+    @import("AABBTree/AABBTreeToBuffer.zig"),
+    @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig"),
+    @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig"),
     @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
@@ -256,6 +272,9 @@ const source_files = .{
     @import("Math/Vec3.zig"),
     @import("Math/Vec4.zig"),
     @import("Math/Vector.zig"),
+    @import("TriangleSplitter/TriangleSplitter.zig"),
+    @import("TriangleSplitter/TriangleSplitterBinning.zig"),
+    @import("TriangleSplitter/TriangleSplitterMean.zig"),
 };
 
 test {
