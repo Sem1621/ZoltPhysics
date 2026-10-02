@@ -87,11 +87,18 @@ Notes for later phases:
   `FixedSizeFreeList.constructObject`, `JobSystem.createJob`), so physics code that uses them returns an
   error union.
 
-### Phase 3: Geometry (`Jolt/Geometry`, `Jolt/AABBTree`, `Jolt/TriangleSplitter`)
-AABox, OrientedBox, Plane, Sphere, Triangle, IndexedTriangle, Indexify, Ellipse, ClosestPoint,
-ConvexSupport, GJKClosestPoint, EPAPenetrationDepth (+ EPAConvexHullBuilder), RayAABox,
-RayTriangle, RaySphere, RayCapsule, RayCylinder, ConvexHullBuilder (+2D), MortonCode, AABox4,
-then AABBTree builder and TriangleSplitter (used by MeshShape).
+### Phase 3: Geometry (`Jolt/Geometry`, `Jolt/AABBTree`, `Jolt/TriangleSplitter`) — in progress
+Five groups, in dependency order:
+- Primitives: Triangle, IndexedTriangle, Plane, AABox, Sphere, OrientedBox, AABox4, ClipPoly,
+  MortonCode, Indexify, Ellipse.
+- Queries: ClosestPoint, RayAABox, RayTriangle, RaySphere, RayCylinder, RayCapsule, ConvexSupport,
+  ConvexHullBuilder2D.
+- GJK / EPA: GJKClosestPoint, EPAConvexHullBuilder, EPAPenetrationDepth (needs primitives + queries).
+- ConvexHullBuilder (needs queries).
+- AABB tree: TriangleSplitter (+ Binning, Mean), AABBTreeBuilder, AABBTreeToBuffer,
+  NodeCodecQuadTreeHalfFloat, TriangleCodecIndexed8BitPackSOA4Flags (used by MeshShape; needs
+  primitives + queries). Parity compares the tree buffers byte for byte.
+`GJKTests` stays partial until Phase 4: its `TestGJKRay*Shape` cases need the convex shapes.
 **Milestone M3:** `UnitTests/Geometry` passes.
 
 ### Phase 4: Collision (`Jolt/Physics/Collision`)

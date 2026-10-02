@@ -350,6 +350,8 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
 | `#ifdef JPH_DEBUG_RENDERER`                 | not ported yet: leave `// TODO(debug_renderer): ...` where code is skipped |
+| developer debug switches that are commented out in Jolt (`JPH_GJK_DEBUG`, `JPH_EPA_PENETRATION_DEPTH_DEBUG`, `JPH_EPA_CONVEX_BUILDER_DRAW`, `JPH_EPA_CONVEX_BUILDER_VALIDATE`, `JPH_CONVEX_BUILDER_DEBUG`, `JPH_CONVEX_BUILDER_DUMP_SHAPE`, `JPH_CONVEX_BUILDER_2D_DEBUG`, ...) | not ported: list them in a `//! Not ported: ...` header line. They do not affect the Status (a file without them is `complete`) |
+| `#ifdef JPH_CPU_BIG_ENDIAN`                 | `if (builtin.cpu.arch.endian() == .big)` (comptime); port both branches |
 | `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped for now (a profiler may come later)                 |
 | `JPH_DET_LOG(...)`                          | port when the determinism log is needed for debugging       |
 | `JPH_NAMESPACE_BEGIN/END`, `JPH_EXPORT`, `JPH_SUPPRESS_WARNINGS*` | dropped                               |
