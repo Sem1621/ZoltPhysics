@@ -753,7 +753,7 @@ test "RaySphere / RayCylinder / RayCapsule" {
 
 /// Number of support points and faces that jolt_convex_support computes
 const num_supports = 13;
-const num_faces = 5;
+const num_faces = 6;
 
 const ConvexSupportResult = struct {
     supports: [num_supports][3]f32,
@@ -762,16 +762,15 @@ const ConvexSupportResult = struct {
 };
 
 /// Store a face in the result (unused entries stay zero)
-fn storeFace(face: *const StaticArray(Vec3, 32), out_vertices: *[32][3]f32, out_count: *i32) void {
+fn storeFace(face: []const Vec3, out_vertices: *[32][3]f32, out_count: *i32) void {
     out_count.* = @intCast(face.len);
-    for (face.constSlice(), 0..) |v, i|
+    for (face, 0..) |v, i|
         out_vertices[i] = arr3(v);
 }
 
 /// The Zolt version of jolt_convex_support
 fn convexSupport(transform: Mat44, point_in: P, triangle_in: [9]f32, polygon_in: []const P, radius: f32, direction: Vec3) !ConvexSupportResult {
-    const Polygon = zolt.PolygonConvexSupport(std.ArrayList(Vec3));
-    const PolygonFace = zolt.PolygonConvexSupport(StaticArray(Vec3, 32));
+    const Polygon = zolt.PolygonConvexSupport;
     const Triangle = zolt.TriangleConvexSupport;
     const Point = zolt.PointConvexSupport;
 
@@ -781,11 +780,11 @@ fn convexSupport(transform: Mat44, point_in: P, triangle_in: [9]f32, polygon_in:
     defer polygon_vertices.deinit(std.testing.allocator);
     for (polygon_in) |v|
         try polygon_vertices.append(std.testing.allocator, vec3(v));
-    const polygon = Polygon.init(&polygon_vertices);
+    const polygon = Polygon.init(polygon_vertices.items);
     var polygon_face_vertices: StaticArray(Vec3, 32) = .empty;
     for (polygon_in) |v|
         polygon_face_vertices.append(vec3(v));
-    const polygon_face = PolygonFace.init(&polygon_face_vertices);
+    const polygon_face = Polygon.init(polygon_face_vertices.constSlice());
 
     const add_radius_triangle = zolt.AddConvexRadius(Triangle).init(&triangle, radius);
     const add_radius_polygon = zolt.AddConvexRadius(Polygon).init(&polygon, radius);
@@ -799,7 +798,7 @@ fn convexSupport(transform: Mat44, point_in: P, triangle_in: [9]f32, polygon_in:
     const transformed_point = zolt.TransformedConvexObject(Point).init(transform, &point);
     const gjk_cast_like = zolt.MinkowskiDifference(Polygon, @TypeOf(transformed_triangle)).init(&polygon, &transformed_triangle);
     const transformed_polygon = zolt.TransformedConvexObject(Polygon).init(transform, &polygon);
-    const transformed_polygon_face = zolt.TransformedConvexObject(PolygonFace).init(transform, &polygon_face);
+    const transformed_polygon_face = zolt.TransformedConvexObject(Polygon).init(transform, &polygon_face);
 
     const supports = [num_supports]Vec3{
         point.getSupport(direction),
@@ -821,15 +820,24 @@ fn convexSupport(transform: Mat44, point_in: P, triangle_in: [9]f32, polygon_in:
     for (supports, &result.supports) |s, *out|
         out.* = arr3(s);
 
-    var faces = [_]StaticArray(Vec3, 32){.empty} ** num_faces;
-    triangle.getSupportingFace(direction, &faces[0]);
-    polygon.getSupportingFace(direction, &faces[1]);
-    transformed_triangle.getSupportingFace(direction, &faces[2]);
+    var faces = [_]StaticArray(Vec3, 32){.empty} ** (num_faces - 1);
+    try triangle.getSupportingFace(direction, &faces[0]);
+    try polygon.getSupportingFace(direction, &faces[1]);
+    try transformed_triangle.getSupportingFace(direction, &faces[2]);
     faces[3].append(vec3(point_in)); // Vertices that are already in the array get transformed too
-    transformed_polygon.getSupportingFace(direction, &faces[3]);
-    transformed_polygon_face.getSupportingFace(direction, &faces[4]);
+    try transformed_polygon.getSupportingFace(direction, &faces[3]);
+    try transformed_polygon_face.getSupportingFace(direction, &faces[4]);
     for (&faces, 0..) |*face, i|
-        storeFace(face, &result.faces[i], &result.face_counts[i]);
+        storeFace(face.constSlice(), &result.faces[i], &result.face_counts[i]);
+
+    // The last face goes into a VertexArrayList (Array<Vec3> in Jolt) and accumulates: every call transforms all vertices again
+    var face_list: std.ArrayList(Vec3) = .empty;
+    defer face_list.deinit(std.testing.allocator);
+    const face_list_array = zolt.VertexArrayList.init(std.testing.allocator, &face_list);
+    try face_list.append(std.testing.allocator, vec3(point_in));
+    try transformed_triangle.getSupportingFace(direction, face_list_array);
+    try transformed_triangle.getSupportingFace(direction, face_list_array);
+    storeFace(face_list.items, &result.faces[num_faces - 1], &result.face_counts[num_faces - 1]);
     return result;
 }
 

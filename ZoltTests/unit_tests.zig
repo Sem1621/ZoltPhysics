@@ -22,6 +22,7 @@ test {
 
     // Geometry
     _ = @import("Geometry/ClosestPointTests.zig");
+    _ = @import("Geometry/RayAABoxTests.zig");
 
     // Math
     _ = @import("Math/BVec16Tests.zig");

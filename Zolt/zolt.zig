@@ -100,6 +100,8 @@ pub const RaySphereMinMax = @import("Geometry/RaySphere.zig").RaySphereMinMax;
 pub const raySphereMinMax = @import("Geometry/RaySphere.zig").raySphereMinMax;
 pub const rayTriangle = @import("Geometry/RayTriangle.zig").rayTriangle;
 pub const rayTriangle4 = @import("Geometry/RayTriangle.zig").rayTriangle4;
+pub const VertexArray = @import("Geometry/VertexArray.zig");
+pub const VertexArrayList = @import("Geometry/VertexArray.zig").VertexArrayList;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
@@ -182,6 +184,7 @@ const source_files = .{
     @import("Geometry/RayCylinder.zig"),
     @import("Geometry/RaySphere.zig"),
     @import("Geometry/RayTriangle.zig"),
+    @import("Geometry/VertexArray.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),

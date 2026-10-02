@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 19.3%** of 85257 lines in scope · **Unit tests: 27.2%** of 18321 lines
+**Library: 19.3%** of 85257 lines in scope · **Unit tests: 27.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -549,7 +549,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
-| `UnitTests/Geometry` | 10% | 1 | 0 | 0 | 6 | 0 | 0 | 854 |
+| `UnitTests/Geometry` | 19% | 2 | 0 | 0 | 5 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
 | `UnitTests/Physics` | 0% | 0 | 0 | 0 | 33 | 0 | 0 | 11009 |
@@ -597,7 +597,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Geometry — 10%</summary>
+<details><summary>UnitTests/Geometry — 19%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -607,7 +607,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `EllipseTest.cpp` | 29 | ❌ todo |  |
 | `GJKTests.cpp` | 209 | ❌ todo |  |
 | `PlaneTests.cpp` | 42 | ❌ todo |  |
-| `RayAABoxTests.cpp` | 77 | ❌ todo |  |
+| `RayAABoxTests.cpp` | 77 | ✅ complete | `ZoltTests/Geometry/RayAABoxTests.zig` |
 
 </details>
 

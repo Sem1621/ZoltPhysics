@@ -30,9 +30,10 @@ using Face = StaticArray<Vec3, 32>;
 
 // Number of support points and faces that jolt_convex_support computes, must match ConvexSupportResult in QueriesParity.zig
 static constexpr int cNumSupports = 13;
-static constexpr int cNumFaces = 5;
+static constexpr int cNumFaces = 6;
 
-static void StoreFace(const Face &inFace, float *outVertices, int &outCount)
+template <class VERTEX_ARRAY>
+static void StoreFace(const VERTEX_ARRAY &inFace, float *outVertices, int &outCount)
 {
 	outCount = int(inFace.size());
 	for (int i = 0; i < outCount; ++i)
@@ -216,15 +217,22 @@ void jolt_convex_support(const float *inTransform, const float *inPoint, const f
 	for (int i = 0; i < cNumSupports; ++i)
 		Store3(supports[i], outSupports + 3 * i);
 
-	Face faces[cNumFaces];
+	Face faces[cNumFaces - 1];
 	triangle.GetSupportingFace(direction, faces[0]);
 	polygon.GetSupportingFace(direction, faces[1]);
 	transformed_triangle.GetSupportingFace(direction, faces[2]);
 	faces[3].push_back(Load3(inPoint)); // Vertices that are already in the array get transformed too
 	transformed_polygon.GetSupportingFace(direction, faces[3]);
 	transformed_polygon_face.GetSupportingFace(direction, faces[4]);
-	for (int i = 0; i < cNumFaces; ++i)
+	for (int i = 0; i < cNumFaces - 1; ++i)
 		StoreFace(faces[i], outFaces + 32 * 3 * i, outFaceCounts[i]);
+
+	// The last face goes into an Array<Vec3> (VertexArrayList in Zolt) and accumulates: every call transforms all vertices again
+	Array<Vec3> face_list;
+	face_list.push_back(Load3(inPoint));
+	transformed_triangle.GetSupportingFace(direction, face_list);
+	transformed_triangle.GetSupportingFace(direction, face_list);
+	StoreFace(face_list, outFaces + 32 * 3 * (cNumFaces - 1), outFaceCounts[cNumFaces - 1]);
 }
 
 // Geometry/ConvexHullBuilder2D.h: returns the result code, outEdges must have room for inCount entries
