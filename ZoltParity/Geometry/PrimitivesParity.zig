@@ -621,9 +621,15 @@ test "Plane" {
         from_point_and_normal.check(.{ point, normal }, arrPlane(Plane.fromPointAndNormal(vec3(point), vec3(normal))), expected4);
 
         const range: f64 = if (rng.chance(2)) 100.0 else 1.0e7;
-        const dpoint = rng.doubleArray(3, -range, range);
-        jolt.jolt_plane_from_point_and_normal_dvec3(&dpoint, &normal, &expected4);
-        from_point_and_normal_dvec3.check(.{ dpoint, normal }, arrPlane(Plane.fromPointAndNormalDVec3(dvec3(dpoint), vec3(normal))), expected4);
+        var dpoint = rng.doubleArray(3, -range, range);
+        var dnormal = normal;
+        if (rng.chance(10)) {
+            // Plane through the origin: with a normal without positive components all products in the dot product are -0
+            dpoint = .{ 0, 0, 0 };
+            if (rng.chance(2)) dnormal = .{ -@abs(normal[0]), -@abs(normal[1]), -0.0 };
+        }
+        jolt.jolt_plane_from_point_and_normal_dvec3(&dpoint, &dnormal, &expected4);
+        from_point_and_normal_dvec3.check(.{ dpoint, dnormal }, arrPlane(Plane.fromPointAndNormalDVec3(dvec3(dpoint), vec3(dnormal))), expected4);
 
         const v1 = rng.array(3, -100, 100);
         const v2 = rng.array(3, -100, 100);

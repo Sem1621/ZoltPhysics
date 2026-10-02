@@ -1038,6 +1038,18 @@ test "DVec3 arithmetic / normalized / length / dot / cross" {
         jolt.jolt_dvec3_normalized(&a, &expected);
         normalized.check(a, arrD3(dvec3(a).normalized()), expected);
     }
+
+    // Dot products where all products are -0 (Jolt's SIMD paths sum (x + y) + z, which keeps the -0)
+    const zero_products = [_][2][3]f64{
+        .{ .{ 0, 0, 0 }, .{ -1, -2, -0.0 } },
+        .{ .{ -0.0, 0, -0.0 }, .{ 1, -2, 3 } },
+        .{ .{ -0.0, -0.0, -0.0 }, .{ 0, 0, 0 } },
+        .{ .{ 0, 0, 0 }, .{ 0, 0, 0 } },
+        .{ .{ 1.0e-300, -1.0e-300, 0 }, .{ -1.0e-300, 1.0e-300, -1 } },
+    };
+    for (zero_products) |c|
+        dot.check(c, dvec3(c[0]).dot(dvec3(c[1])), jolt.jolt_dvec3_dot(&c[0], &c[1]));
+
     try finishAll(&.{ &add, &sub, &mul, &div, &add_vec3, &sub_vec3, &mul_scalar, &div_scalar, &negate, &abs, &reciprocal, &sqrt, &get_sign, &min, &max, &cross, &dot, &length_sq, &length, &normalized });
 }
 
