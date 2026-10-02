@@ -5,15 +5,13 @@ const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
 
 const flt_max = zolt.math.flt_max;
+const AABox = zolt.AABox;
 const rayAABox = zolt.rayAABox;
 const RayInvDirection = zolt.RayInvDirection;
 const Vec3 = zolt.Vec3;
 
 test "TestRayAABox" {
-    // Jolt: AABox box(Vec3::sReplicate(-1.0f), Vec3::sOne()). The test only uses the bounds of the box
-    // (box.mMin, box.mMax), so it holds them in a plain struct here.
-    // TODO(Geometry merge): use `const box = AABox.init(Vec3.replicate(-1.0), Vec3.one());`
-    const box = .{ .min = Vec3.replicate(-1.0), .max = Vec3.one() };
+    const box = AABox.init(Vec3.replicate(-1.0), Vec3.one());
 
     for (0..3) |axis_index| {
         const axis: u32 = @intCast(axis_index);
