@@ -38,6 +38,7 @@ const jolt = struct {
     extern fn jolt_vec4_compress_unit_vector(v: *const [4]f32) u32;
     extern fn jolt_vec4_decompress_unit_vector(value: u32, out: *[4]f32) void;
     extern fn jolt_vec4_to_int(v: *const [4]f32, out: *[4]u32) void;
+    extern fn jolt_uvec4_to_float(v: *const [4]u32, out: *[4]f32) void;
     extern fn jolt_vec3_normalized(v: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec3_cross(a: *const [3]f32, b: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec3_dot(a: *const [3]f32, b: *const [3]f32) f32;
@@ -586,6 +587,20 @@ test "Vec4 / Vec3 toInt (NaN, infinity, out of range)" {
         to_int3.check(v3, [3]u32{ r3.getX(), r3.getY(), r3.getZ() }, expected3);
     }
     try finishAll(&.{ &to_int4, &to_int3 });
+}
+
+test "UVec4 toFloat (full u32 range, Jolt's SSE path converts as signed int)" {
+    var rng: Rng = .{};
+    var to_float: Checker = .{ .name = "UVec4.toFloat" };
+    const edge = [_]u32{ 0, 1, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0xffff_ffff, 0x00ff_ffff, 0x0100_0001, 0xc000_0000 };
+    for (0..iterations) |i| {
+        var v: [4]u32 = undefined;
+        for (&v, 0..) |*c, k| c.* = if (i < edge.len) edge[(i + k) % edge.len] else rng.next();
+        var expected: [4]f32 = undefined;
+        jolt.jolt_uvec4_to_float(&v, &expected);
+        to_float.check(v, arr4(UVec4.init(v[0], v[1], v[2], v[3]).toFloat()), expected);
+    }
+    try finishAll(&.{&to_float});
 }
 
 test "Vec3 normalized / cross / dot / length / perpendicular" {

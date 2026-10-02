@@ -29,10 +29,10 @@ const jolt = struct {
     extern fn jolt_closest_point_bary_line(a: *const P, b: *const P, out_uv: *[2]f32) bool;
     extern fn jolt_closest_point_bary_triangle(a: *const P, b: *const P, c: *const P, out_uvw: *[3]f32) bool;
     extern fn jolt_closest_point_on_line(a: *const P, b: *const P, out_point: *P) u32;
-    extern fn jolt_closest_point_on_triangle(a: *const P, b: *const P, c: *const P, must_include_c: bool, out_point: *P) u32;
+    extern fn jolt_closest_point_on_triangle(a: *const P, b: *const P, c: *const P, must_include_c: c_int, out_point: *P) u32;
     extern fn jolt_origin_outside_of_plane(a: *const P, b: *const P, c: *const P, d: *const P) bool;
     extern fn jolt_origin_outside_of_tetrahedron_planes(a: *const P, b: *const P, c: *const P, d: *const P, out_mask: *[4]u32) void;
-    extern fn jolt_closest_point_on_tetrahedron(a: *const P, b: *const P, c: *const P, d: *const P, must_include_d: bool, out_point: *P) u32;
+    extern fn jolt_closest_point_on_tetrahedron(a: *const P, b: *const P, c: *const P, d: *const P, must_include_d: c_int, out_point: *P) u32;
 
     extern fn jolt_ray_inv_direction(direction: *const P, out_inv_direction: *[4]f32, out_is_parallel: *[4]u32) void;
     extern fn jolt_ray_aabox(origin: *const P, direction: *const P, min: *const P, max: *const P) f32;
@@ -451,9 +451,9 @@ fn checkTriangle(t: [3]P, bary_line: *Checker, bary_triangle: *Checker, on_line:
     on_line.check(.{ t[0], t[1] }, PointAndSet.fromZolt(ClosestPoint.getClosestPointOnLine(a, b)), .{ .point = point, .set = set });
 
     // GetClosestPointOnTriangle<false / true>
-    set = jolt.jolt_closest_point_on_triangle(&t[0], &t[1], &t[2], false, &point);
+    set = jolt.jolt_closest_point_on_triangle(&t[0], &t[1], &t[2], 0, &point);
     on_triangle.check(t, PointAndSet.fromZolt(ClosestPoint.getClosestPointOnTriangle(a, b, c, .{})), .{ .point = point, .set = set });
-    set = jolt.jolt_closest_point_on_triangle(&t[0], &t[1], &t[2], true, &point);
+    set = jolt.jolt_closest_point_on_triangle(&t[0], &t[1], &t[2], 1, &point);
     on_triangle_c.check(t, PointAndSet.fromZolt(ClosestPoint.getClosestPointOnTriangle(a, b, c, .{ .must_include_c = true })), .{ .point = point, .set = set });
 }
 
@@ -514,9 +514,9 @@ fn checkTetrahedron(t: [4]P, outside_plane: *Checker, outside_planes: *Checker, 
 
     // GetClosestPointOnTetrahedron<false / true>
     var point: P = undefined;
-    var set = jolt.jolt_closest_point_on_tetrahedron(&t[0], &t[1], &t[2], &t[3], false, &point);
+    var set = jolt.jolt_closest_point_on_tetrahedron(&t[0], &t[1], &t[2], &t[3], 0, &point);
     on_tetrahedron.check(t, PointAndSet.fromZolt(ClosestPoint.getClosestPointOnTetrahedron(a, b, c, d, .{})), .{ .point = point, .set = set });
-    set = jolt.jolt_closest_point_on_tetrahedron(&t[0], &t[1], &t[2], &t[3], true, &point);
+    set = jolt.jolt_closest_point_on_tetrahedron(&t[0], &t[1], &t[2], &t[3], 1, &point);
     on_tetrahedron_d.check(t, PointAndSet.fromZolt(ClosestPoint.getClosestPointOnTetrahedron(a, b, c, d, .{ .must_include_d = true })), .{ .point = point, .set = set });
 }
 

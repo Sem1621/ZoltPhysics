@@ -58,6 +58,7 @@ void jolt_vec3_abs(const float *inV, float *outV)	{ Store3(Load3(inV).Abs(), out
 uint32 jolt_vec4_compress_unit_vector(const float *inV) { return Load4(inV).CompressUnitVector(); }
 void jolt_vec4_decompress_unit_vector(uint32 inValue, float *outV) { Store4(Vec4::sDecompressUnitVector(inValue), outV); }
 void jolt_vec4_to_int(const float *inV, uint32 *outV) { Load4(inV).ToInt().StoreInt4(outV); }
+void jolt_uvec4_to_float(const uint32 *inV, float *outV) { Store4(UVec4::sLoadInt4(inV).ToFloat(), outV); }
 
 // Math/Vec3.h
 void jolt_vec3_normalized(const float *inV, float *outV) { Store3(Load3(inV).Normalized(), outV); }

@@ -133,7 +133,7 @@ const jolt = struct {
     extern fn jolt_convert_to_string_uint64(value: u64, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_to_lower(chars: [*]const u8, size: u32, out: [*]u8, capacity: u32) u32;
     extern fn jolt_string_replace(chars: [*]const u8, size: u32, search: [*]const u8, search_size: u32, replace: [*]const u8, replace_size: u32, out: [*]u8, capacity: u32) u32;
-    extern fn jolt_string_to_vector(chars: [*]const u8, size: u32, delimiter: [*]const u8, delimiter_size: u32, clear_vector: bool, num_initial: u32, lengths: [*]u32, max_strings: u32, out: [*]u8, capacity: u32) u32;
+    extern fn jolt_string_to_vector(chars: [*]const u8, size: u32, delimiter: [*]const u8, delimiter_size: u32, clear_vector: c_int, num_initial: u32, lengths: [*]u32, max_strings: u32, out: [*]u8, capacity: u32) u32;
     extern fn jolt_vector_to_string(lengths: [*]const u32, num_strings: u32, chars: [*]const u8, delimiter: [*]const u8, delimiter_size: u32, out: [*]u8, capacity: u32) u32;
 };
 
@@ -1090,7 +1090,7 @@ test "StringToVector / VectorToString" {
         }
         for (0..num_initial) |_| try vector.append(allocator, try allocator.dupe(u8, "x"));
         try zolt.stringToVector(allocator, string, &vector, .{ .delimiter = delimiter, .clear_vector = clear_vector });
-        const count = jolt.jolt_string_to_vector(string.ptr, @intCast(string.len), delimiter.ptr, @intCast(delimiter.len), clear_vector, num_initial, &lengths, lengths.len, &chars, chars.len);
+        const count = jolt.jolt_string_to_vector(string.ptr, @intCast(string.len), delimiter.ptr, @intCast(delimiter.len), @intFromBool(clear_vector), num_initial, &lengths, lengths.len, &chars, chars.len);
         const input = .{ .iteration = iteration, .string = string, .delimiter = delimiter, .clear_vector = clear_vector, .num_initial = num_initial };
         if (vector.items.len != count) {
             to_vector_checker.check(input, vector.items.len, count);

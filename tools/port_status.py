@@ -168,6 +168,19 @@ def collect():
                     cpp_status[cpp] = status or "complete"
                     cpp_zig[cpp] = zig_file
 
+    # Zig 0.16 (LLVM) can pass a runtime bool to a C function with garbage in bits 1..7, which the C++ side
+    # reads as true: the parity C ABI must take integers instead (see the guide's Tests section)
+    extern_bool = re.compile(r"\bextern fn \w+\([^)]*:\s*bool\s*[,)]")
+    for dirpath, _, filenames in os.walk(os.path.join(ROOT, "ZoltParity")):
+        for name in sorted(filenames):
+            if name.endswith(".zig"):
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as f:
+                    for line_no, line in enumerate(f, 1):
+                        if extern_bool.search(line):
+                            rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+                            lint.append(f"{rel}:{line_no}: bool parameter in an extern fn, pass c_int instead")
+
     def unit_status(files):
         statuses = [cpp_status.get(f) for f in files]
         if all(s == "complete" for s in statuses):

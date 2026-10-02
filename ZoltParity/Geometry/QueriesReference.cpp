@@ -61,10 +61,10 @@ uint32 jolt_closest_point_on_line(const float *inA, const float *inB, float *out
 	return set;
 }
 
-uint32 jolt_closest_point_on_triangle(const float *inA, const float *inB, const float *inC, bool inMustIncludeC, float *outPoint)
+uint32 jolt_closest_point_on_triangle(const float *inA, const float *inB, const float *inC, int inMustIncludeC, float *outPoint)
 {
 	uint32 set = 0xdeadbeef;
-	Vec3 p = inMustIncludeC?
+	Vec3 p = inMustIncludeC != 0?
 		ClosestPoint::GetClosestPointOnTriangle<true>(Load3(inA), Load3(inB), Load3(inC), set) :
 		ClosestPoint::GetClosestPointOnTriangle<false>(Load3(inA), Load3(inB), Load3(inC), set);
 	Store3(p, outPoint);
@@ -81,10 +81,10 @@ void jolt_origin_outside_of_tetrahedron_planes(const float *inA, const float *in
 	StoreU4(ClosestPoint::OriginOutsideOfTetrahedronPlanes(Load3(inA), Load3(inB), Load3(inC), Load3(inD)), outMask);
 }
 
-uint32 jolt_closest_point_on_tetrahedron(const float *inA, const float *inB, const float *inC, const float *inD, bool inMustIncludeD, float *outPoint)
+uint32 jolt_closest_point_on_tetrahedron(const float *inA, const float *inB, const float *inC, const float *inD, int inMustIncludeD, float *outPoint)
 {
 	uint32 set = 0xdeadbeef;
-	Vec3 p = inMustIncludeD?
+	Vec3 p = inMustIncludeD != 0?
 		ClosestPoint::GetClosestPointOnTetrahedron<true>(Load3(inA), Load3(inB), Load3(inC), Load3(inD), set) :
 		ClosestPoint::GetClosestPointOnTetrahedron<false>(Load3(inA), Load3(inB), Load3(inC), Load3(inD), set);
 	Store3(p, outPoint);

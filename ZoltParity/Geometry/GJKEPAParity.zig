@@ -717,7 +717,7 @@ test "GJKClosestPoint.intersects" {
         hits[@intFromBool(actual.result)] += 1;
     }
 
-    std.debug.print("GJKClosestPoint.intersects: {d} separated, {d} intersecting\n", .{ hits[0], hits[1] });
+    errdefer std.debug.print("GJKClosestPoint.intersects: {d} separated, {d} intersecting\n", .{ hits[0], hits[1] });
     try std.testing.expect(hits[0] > iterations / 10 and hits[1] > iterations / 10);
     try checker.finish();
 }
@@ -785,7 +785,7 @@ test "GJKClosestPoint.getClosestPoints" {
         } else counts[3] += 1;
     }
 
-    std.debug.print("GJKClosestPoint.getClosestPoints: {d} beyond max distance, {d} full simplex, {d} within tolerance, {d} separated\n", .{ counts[0], counts[1], counts[2], counts[3] });
+    errdefer std.debug.print("GJKClosestPoint.getClosestPoints: {d} beyond max distance, {d} full simplex, {d} within tolerance, {d} separated\n", .{ counts[0], counts[1], counts[2], counts[3] });
     for (counts) |c| try std.testing.expect(c > iterations / 50);
     try checker.finish();
 }
@@ -873,7 +873,7 @@ test "GJKClosestPoint.castRay" {
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
-    std.debug.print("GJKClosestPoint.castRay: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
+    errdefer std.debug.print("GJKClosestPoint.castRay: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
     for (counts) |c| try std.testing.expect(c > iterations / 50);
     try checker.finish();
 }
@@ -944,7 +944,7 @@ test "GJKClosestPoint.castShape" {
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
-    std.debug.print("GJKClosestPoint.castShape: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
+    errdefer std.debug.print("GJKClosestPoint.castShape: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
     for (counts) |c| try std.testing.expect(c > iterations / 100);
     try checker.finish();
 }
@@ -1012,7 +1012,7 @@ test "GJKClosestPoint.castShapeWithConvexRadius" {
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
-    std.debug.print("GJKClosestPoint.castShapeWithConvexRadius: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
+    errdefer std.debug.print("GJKClosestPoint.castShapeWithConvexRadius: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
     for (counts) |c| try std.testing.expect(c > iterations / 100);
     try checker.finish();
 }
@@ -1110,7 +1110,7 @@ test "EPAPenetrationDepth steps" {
             epa_counts[simplex_size][@intCast(actual.epa_result)] += 1;
     }
 
-    std.debug.print("EPAPenetrationDepth steps: status {any}, EPA result (false, true) per GJK simplex size {any}\n", .{ status_counts, epa_counts });
+    errdefer std.debug.print("EPAPenetrationDepth steps: status {any}, EPA result (false, true) per GJK simplex size {any}\n", .{ status_counts, epa_counts });
     for (status_counts) |c| try std.testing.expect(c > iterations / 100);
     for (epa_counts[1..]) |c| try std.testing.expect(c[0] + c[1] > 0);
     try checker.finish();
@@ -1177,7 +1177,7 @@ test "EPAPenetrationDepth.getPenetrationDepth" {
         counts[@intFromBool(actual.result)] += 1;
     }
 
-    std.debug.print("EPAPenetrationDepth.getPenetrationDepth: {d} not colliding, {d} colliding\n", .{ counts[0], counts[1] });
+    errdefer std.debug.print("EPAPenetrationDepth.getPenetrationDepth: {d} not colliding, {d} colliding\n", .{ counts[0], counts[1] });
     for (counts) |c| try std.testing.expect(c > iterations / 100);
     try checker.finish();
 }
@@ -1248,7 +1248,7 @@ test "EPAPenetrationDepth.castShape" {
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
-    std.debug.print("EPAPenetrationDepth.castShape: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
+    errdefer std.debug.print("EPAPenetrationDepth.castShape: {d} misses, {d} hits at 0, {d} hits\n", .{ counts[0], counts[1], counts[2] });
     for (counts) |c| try std.testing.expect(c > iterations / 100);
     try checker.finish();
 }
@@ -1461,7 +1461,7 @@ test "EPAConvexHullBuilder" {
         }
     }
 
-    std.debug.print("EPAConvexHullBuilder: {d} records, {d} failed addPoint\n", .{ total_records, add_point_failures });
+    errdefer std.debug.print("EPAConvexHullBuilder: {d} records, {d} failed addPoint\n", .{ total_records, add_point_failures });
     try std.testing.expect(add_point_failures > 0);
     try checker.finish();
 }

@@ -482,11 +482,11 @@ uint32 jolt_string_replace(const char *inChars, uint32 inSize, const char *inSea
 
 // Splits inChars, appending to a vector that initially holds inNumInitial copies of "x" (cleared first if inClearVector).
 // Returns the number of strings, outLengths / outChars receive the lengths and the concatenated characters.
-uint32 jolt_string_to_vector(const char *inChars, uint32 inSize, const char *inDelimiter, uint32 inDelimiterSize, bool inClearVector, uint32 inNumInitial, uint32 *outLengths, uint32 inMaxStrings, char *outChars, uint32 inCapacity)
+uint32 jolt_string_to_vector(const char *inChars, uint32 inSize, const char *inDelimiter, uint32 inDelimiterSize, int inClearVector, uint32 inNumInitial, uint32 *outLengths, uint32 inMaxStrings, char *outChars, uint32 inCapacity)
 {
 	EnsureAllocator();
 	Array<String> vector(inNumInitial, String("x"));
-	StringToVector(string_view(inChars, inSize), vector, string_view(inDelimiter, inDelimiterSize), inClearVector);
+	StringToVector(string_view(inChars, inSize), vector, string_view(inDelimiter, inDelimiterSize), inClearVector != 0);
 	uint32 num_chars = 0;
 	for (size_t i = 0; i < vector.size() && i < inMaxStrings; ++i)
 	{

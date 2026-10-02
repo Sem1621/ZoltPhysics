@@ -87,19 +87,28 @@ Notes for later phases:
   `FixedSizeFreeList.constructObject`, `JobSystem.createJob`), so physics code that uses them returns an
   error union.
 
-### Phase 3: Geometry (`Jolt/Geometry`, `Jolt/AABBTree`, `Jolt/TriangleSplitter`) — in progress
+### Phase 3: Geometry (`Jolt/Geometry`, `Jolt/AABBTree`, `Jolt/TriangleSplitter`) ✅
 Five groups, in dependency order:
 - Primitives: Triangle, IndexedTriangle, Plane, AABox, Sphere, OrientedBox, AABox4, ClipPoly,
   MortonCode, Indexify, Ellipse.
 - Queries: ClosestPoint, RayAABox, RayTriangle, RaySphere, RayCylinder, RayCapsule, ConvexSupport,
   ConvexHullBuilder2D.
-- GJK / EPA: GJKClosestPoint, EPAConvexHullBuilder, EPAPenetrationDepth (needs primitives + queries).
-- ConvexHullBuilder (needs queries).
+- GJK / EPA: GJKClosestPoint, EPAConvexHullBuilder, EPAPenetrationDepth.
+- ConvexHullBuilder.
 - AABB tree: TriangleSplitter (+ Binning, Mean), AABBTreeBuilder, AABBTreeToBuffer,
-  NodeCodecQuadTreeHalfFloat, TriangleCodecIndexed8BitPackSOA4Flags (used by MeshShape; needs
-  primitives + queries). Parity compares the tree buffers byte for byte.
-`GJKTests` stays partial until Phase 4: its `TestGJKRay*Shape` cases need the convex shapes.
-**Milestone M3:** `UnitTests/Geometry` passes.
+  NodeCodecQuadTreeHalfFloat, TriangleCodecIndexed8BitPackSOA4Flags (used by MeshShape).
+**Milestone M3:** `UnitTests/Geometry` passes. ✅ Reached, except the four `TestGJKRay*Shape` cases of
+`GJKTests`, which need the convex shapes and are ported with Phase 4. Every Geometry function has parity
+tests against the C++ library (bit exact, both precisions), including GJK/EPA results on separated,
+touching and penetrating pairs, the complete face lists of the 3D hull builder and the AABB tree buffers
+byte for byte.
+
+Notes for later phases:
+- `SortReverseAndStore` / `CountAndSortTrues` (`Physics/Collision/SortReverseAndStore.h`) have private
+  copies in the AABB tree tests; replace them with the real port in Phase 4.
+- Jolt asserts on some degenerate inputs that its release build tolerates (EPA near-zero vectors,
+  near-degenerate hulls, empty meshes). Zolt panics on them with asserts enabled, like an assert-enabled
+  Jolt build, and matches Jolt's release behavior in ReleaseFast (guide section 7).
 
 ### Phase 4: Collision (`Jolt/Physics/Collision`)
 1. Basics: ObjectLayer, BroadPhaseLayer, SubShapeID, PhysicsMaterial, GroupFilter(s),

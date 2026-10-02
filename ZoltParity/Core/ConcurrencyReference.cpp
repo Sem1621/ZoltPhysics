@@ -188,7 +188,7 @@ void *jolt_lfhm_create(int inVariant, uint32 inObjectStoreSize, uint32 inMaxBuck
 }
 void jolt_lfhm_destroy(void *inMap)						{ delete static_cast<HashMapBase *>(inMap); }
 void jolt_lfhm_set_num_buckets(void *inMap, uint32 inNumBuckets) { static_cast<HashMapBase *>(inMap)->SetNumBuckets(inNumBuckets); }
-void jolt_lfhm_clear(void *inMap, bool inClearAllocator) { static_cast<HashMapBase *>(inMap)->Clear(inClearAllocator); }
+void jolt_lfhm_clear(void *inMap, int inClearAllocator) { static_cast<HashMapBase *>(inMap)->Clear(inClearAllocator != 0); }
 void jolt_lfhm_reset_contexts(void *inMap)				{ static_cast<HashMapBase *>(inMap)->ResetContexts(); }
 uint32 jolt_lfhm_insert(void *inMap, uint32 inContext, uint64 inKey, uint64 inValue, int inExtraBytes) { return static_cast<HashMapBase *>(inMap)->Insert(inContext, inKey, inValue, inExtraBytes); }
 uint32 jolt_lfhm_find(void *inMap, uint64 inKey, uint64 *outValue) { return static_cast<HashMapBase *>(inMap)->Find(inKey, outValue); }

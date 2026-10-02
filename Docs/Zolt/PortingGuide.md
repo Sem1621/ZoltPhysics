@@ -84,7 +84,7 @@ Inside the library always import by relative path, never through `zolt.zig`.
 | member variable `mFoo`                | snake_case, drop `m`                  | `mLinearVelocity` → `linear_velocity`         |
 | static member variable `sFoo`         | snake_case `pub var`                  | `sDrawConstraints` → `draw_constraints`       |
 | constant `cFoo` / `constexpr`         | snake_case `const`                    | `cLargeFloat` → `large_float`                 |
-| parameter `inFoo`, `outFoo`, `ioFoo`  | snake_case, drop prefix               | `inVelocity` → `velocity`                     |
+| parameter `inFoo`, `outFoo`, `ioFoo`  | snake_case, drop prefix (output containers that stay parameters keep `out_`: `out_vertices`; `io_` may stay when the plain name clashes with a local) | `inVelocity` → `velocity`                     |
 | macro constant `JPH_FOO`              | snake_case `const`                    | `JPH_PI` → `math.pi`                          |
 | type alias `using Foo = Bar`          | `pub const Foo = Bar;`                |                                               |
 
@@ -224,6 +224,22 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
 - `new Foo(...)` assigned to a `Ref` becomes `Foo.create(allocator, ...)` (refcount 0) followed by
   `Ref(Foo).init(ptr)`; the object keeps its allocator to destroy itself.
 
+### Geometry conventions
+
+- **Vertex arrays.** Jolt's `VERTEX_ARRAY` template parameter (a `StaticArray<Vec3, N>` or an
+  `Array<Vec3>` that a function appends to) becomes `out_vertices: anytype`, accessed through
+  `Geometry/VertexArray.zig`: pass a `*StaticArray(Vec3, N)` (no allocator, the error set is empty) or a
+  `VertexArrayList{ .allocator, .list }` for an `std.ArrayList(Vec3)`. Such functions return
+  `VertexArray.Error(@TypeOf(out_vertices))!void`; read-only arrays are plain `[]const Vec3` slices.
+- **Convex objects** (GJK / EPA): any type with `getSupport(self, direction: Vec3) Vec3` and optionally
+  `getSupportingFace(self, direction, out_vertices)`, passed by pointer as `anytype`. The wrappers of
+  `Geometry/ConvexSupport.zig` (`TransformedConvexObject(T)`, `AddConvexRadius(T)`,
+  `MinkowskiDifference(A, B)`, ...) store `*const` pointers like Jolt's const references, so the
+  wrapped objects must outlive them.
+- Types that are written into buffers or passed to C++ as raw memory (`IndexedTriangle`, the AABB tree
+  codec headers, EPA's triangle blocks) are `extern struct`s in C++ field order with a comptime size
+  check.
+
 ### Strings, I/O and logging
 
 - `Trace(fmt, ...)` → `std.log.scoped(.zolt).info/warn(...)`; applications control output via
@@ -346,6 +362,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `Swizzle<SWIZZLE_Y, SWIZZLE_X, ...>()`      | `.swizzle(.y, .x, ...)` (comptime enum parameters)          |
 | `JPH_ASSERT(x)` / `JPH_ASSERT(x, "msg")`    | `std.debug.assert(x)` (keep the message as a comment)       |
 | `JPH_ASSERT(false)` on a path that release builds can reach and handle (e.g. "too many iterations", then `return false`) | `if (Core.enable_asserts) @panic("msg");` followed by the release behavior: `assert(false)` is undefined behavior in ReleaseFast |
+| `JPH_ASSERT(cond)` that valid or degenerate input can violate, after which Jolt's release build just continues (e.g. near-zero vectors in EPA, degenerate hulls, an empty mesh) | `if (Core.enable_asserts) std.debug.assert(cond);` so that ReleaseFast keeps Jolt's release behavior instead of undefined behavior; comment why |
 | `JPH_IF_ENABLE_ASSERTS(x)`                  | `if (Core.enable_asserts) { x }`                            |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
@@ -392,7 +409,11 @@ results are reproducible as long as the code follows these rules:
     against (and what Jolt computes on x86, usually also on ARM). Known cases: `Mat44::Inversed` (SSE,
     NEON and RVV share an algorithm that differs from the fallback), `Mat44::sCrossProduct` (SSE4.1
     negates with `0 - v`, the fallback with `-x`), `Vec3/Vec4/DVec3::Abs` (SSE/AVX compute
-    `max(0 - v, v)`, which keeps -0, while the fallback, NEON and AVX512 return +0). Jolt's ISA paths
+    `max(0 - v, v)`, which keeps -0, while the fallback, NEON and AVX512 return +0), `DVec3::Dot`
+    (SSE/AVX/NEON sum `(x + y) + z`, the fallback `((0 + x) + y) + z`, which loses -0),
+    `UVec4::ToFloat` (SSE converts as signed int, NEON and the fallback as unsigned) and
+    `Vec3/Vec4::ToInt` (`_mm_cvttps_epi32` gives `0x80000000` for NaN and out of range values, where
+    Zig's `@intFromFloat` would be safety-checked / undefined: `Vec4.toInt` emulates it). Jolt's ISA paths
     sometimes disagree with each other on -0 / NaN only; the determinism hashes are identical across
     platforms, so these cases don't affect simulation results. The parity reference is pinned to
     x86-64-v3 (SSE4.2/AVX2, Jolt's default CMake ISA set, no AVX512) so that it is the same on every
@@ -452,8 +473,8 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   `build.zig` compiles the C++ library from `Jolt/` with Zig's C++ compiler in the configuration
   Zolt follows (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `-ffp-contract=off`, same precision and layer
   bits, CPU pinned to x86-64-v3) and links it into the parity test binary. Layout mirrors `Zolt/`:
-  `ZoltParity/<Dir>/<Dir>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Dir>Reference.cpp` the
-  C ABI wrappers around Jolt; shared helpers (input generator, bit comparison, `Checker`) are in
+  `ZoltParity/<Dir>/<Name>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Name>Reference.cpp` the
+  C ABI wrappers around Jolt (one pair per ported area, e.g. `Geometry/QueriesParity.zig`); shared helpers (input generator, bit comparison, `Checker`) are in
   `ZoltParity/ParityFramework.zig`. Register test files in `ZoltParity/parity.zig` and .cpp files in
   `ZoltParity/reference_sources.zig`. For each ported function, call both implementations on ~100k
   generated inputs (random values mixed with special values) and require identical bits (NaN
@@ -461,6 +482,18 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
   unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
   queries, simulation steps) is compared the same way, e.g. by hashing body state after N steps.
+- Parity inputs must reach every branch (degenerate, touching, parallel, coplanar, empty, full,
+  iteration limits) and compare every output, including values Jolt writes only on some paths
+  (pre-fill both sides with the same sentinel). Prove that a new parity test bites: break one
+  operation in the Zig code (swap operands, `<` → `<=`, reassociate a sum), check that the test
+  fails, revert.
+- **C ABI of the wrappers:** never pass a `bool` argument from Zig to C++. Zig 0.16 (LLVM) can pass a
+  runtime bool with garbage in bits 1..7, which optimized C++ reads as `true`. Use `c_int` (or `u32`)
+  on both sides and convert with `@intFromBool` / `!= 0`; `tools/port_status.py --check` rejects
+  `bool` parameters in `extern fn` declarations under `ZoltParity/`. Bools returned by C++ or
+  written through a `bool *` are fine (C++ always writes 0 or 1). The same applies to a future C API.
+- A test that passes must not print to stderr: Zig 0.16 marks the build step as failed when a test
+  writes to stderr. Print diagnostics only on failure.
 
 - `Zolt/zolt.zig` references every public declaration of every registered file, so all
   non-generic functions are type checked even without a test. Generic functions need a test.
@@ -581,3 +614,29 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `StringToVector(str, out, delim = ",", clear = true)` / `VectorToString(v, out, delim = ",")` | `stringToVector(allocator, str, &list, .{ .delimiter, .clear_vector })` / `vectorToString(allocator, v, .{ .delimiter }) ![]u8` | default arguments, out parameter |
 | `FPControlWord<Value, Mask>` (RAII) | `const cw = FPControlWord(value, mask).init(); defer cw.deinit();` | RAII                                 |
 | `LinearCurve` copy constructor     | `clone(allocator)`                     | allocating type                         |
+| `AABox()` / `AABox(min, max)` / `AABox(DVec3, DVec3)` / `AABox(center, radius)` | `AABox.empty` / `init(min, max)` / `fromDVec3` (`fromRVec3`) / `fromCenterAndRadius` | constructor overloads |
+| `AABox::Encapsulate(AABox / Vec3 / Triangle / VertexList + IndexedTriangle)` | `encapsulate` / `encapsulateVec3` / `encapsulateTriangle` / `encapsulateIndexedTriangle` | overloads; the unsuffixed name takes the own type |
+| `AABox::Contains` / `Overlaps` / `Translate` / `Transformed` overloads | `contains`, `containsVec3`, `containsDVec3`; `overlaps`, `overlapsPlane`; `translate`, `translateDVec3`; `transformed`, `transformedDMat44` (+ `RVec3` / `RMat44` aliases) | overloads |
+| `Plane(Vec4)` / `Plane(normal, constant)` / `sFromPointAndNormal(DVec3, Vec3)` / `sIntersectPlanes(.., outPoint) -> bool` | `fromVec4` / `init` / `fromPointAndNormalDVec3` / `intersectPlanes(..) ?Vec3` | overloads, out parameter |
+| `Sphere::Overlaps(AABox)`, `OrientedBox::Overlaps(AABox, eps = 1e-6)` | `overlapsAABox`, `overlapsAABox(box, .{ .epsilon })` | overload, default argument |
+| `Triangle(v1, v2, v3, mat = 0, user = 0)`, `IndexedTriangle(i1, i2, i3, mat, user = 0)` | `init(v1, v2, v3, .{ .material_index, .user_data })` | default arguments |
+| `IndexedTriangle` used as `IndexedTriangleNoMaterial &` | `toNoMaterial()` | no inheritance (IndexedTriangle is flat) |
+| `AABox4Scale(.., 6 out bounds)`, `AABox4VsBox` overloads, `AABox4...` | `aabox4Scale(..) AABox4Bounds`, `aabox4VsBox` / `aabox4VsOrientedBox` / `aabox4VsOrientedBoxMat44`, `aabox4...` | out parameters, overloads |
+| `ClipPolyVsPlane/Poly/Edge/AABox<VERTEX_ARRAY>` | `clipPolyVs*(polygon: []const Vec3, .., out_vertices: anytype)` | see Geometry conventions |
+| `Indexify(.., inWeldDistance = 1e-4f)` / `Deindexify` | `indexify(allocator, triangles, &out_vertices, &out_triangles, .{ .vertex_weld_distance })` / `deindexify(allocator, ..)` | default argument, allocator |
+| `ClosestPoint::GetBaryCentricCoordinates(a, b, outU, outV) -> bool` / `(a, b, c, outU, outV, outW)` | `getBaryCentricCoordinates(a, b) BaryCentricLine` / `getBaryCentricCoordinatesTriangle(a, b, c) BaryCentricTriangle` (`.valid`) | overload, out parameters |
+| `GetClosestPointOnLine/Triangle/Tetrahedron(.., outSet)`, `<MustIncludeC>` | `getClosestPointOn*(..) PointAndSet{ .point, .set }`, `.{ .must_include_c = true }` | out parameter, defaulted template flag |
+| `RayAABox(.., outMin, outMax)` / `RayAABoxHits(origin, direction, ..)` / `RaySphere(.., outMin, outMax) -> int` / `RayCylinder(origin, dir, radius)` | `rayAABoxMinMax` / `rayAABoxHitsDirection` / `raySphereMinMax(..) RaySphereMinMax` / `rayInfiniteCylinder` | overloads, out parameters |
+| `TransformedConvexObject(transform, obj)` etc. (CTAD) | `TransformedConvexObject(T).init(transform, &obj)`, `AddConvexRadius(T).init(&obj, r)`, `MinkowskiDifference(A, B).init(&a, &b)` | references become pointers |
+| `ConvexHullBuilder2D(positions)` + `Initialize(.., outEdges)` / `ConvexHullBuilder(positions)` + `Initialize(max, tol, outError)` | `init(allocator, positions)` + `initialize(..) !Result`; `initialize(max, tol) !InitializeResult{ .result, .error_message }` | constructor + Init, out parameter |
+| `ConvexHullBuilder::GetCenterOfMassAndVolume` / `DetermineMaxError` (out parameters) | `getCenterOfMassAndVolume() CenterOfMassAndVolume` / `determineMaxError() MaxError` | out parameters |
+| `GJKClosestPoint::CastShape(.., radiusA, radiusB, ..)` | `castShapeWithConvexRadius` | overload |
+| `GetClosestPointsSimplex(outY, outP, outQ, outNumPoints)` | `getClosestPointsSimplex(out_y, out_p, out_q) u32` | out parameter becomes the return value |
+| GJK/EPA in/out values (`ioV`, `ioLambda`, `outPointA`, ...) | stay pointer parameters (`v`, `io_lambda`, `point_a`, ...) | Jolt writes them only on some paths and callers rely on the old values |
+| `EPAPenetrationDepth::EStatus` / `ConvexHullBuilder::EResult` | `Status` / `Result` (snake_case values) | enum naming |
+| `EPAConvexHullBuilder::Points::GetSizeRef()` | `&points.len` (`Points = StaticArray(Vec3, max_points)`) | no methods can be added to an existing type |
+| `TriangleSplitter::Split(.., outLeft, outRight) -> bool` | `split(triangles) ?SplitResult` | out parameters |
+| `TriangleSplitterBinning(.., minBins = 8, maxBins = 128, perBin = 6)`, `AABBTreeBuilder(splitter, maxPerLeaf = 16)` | `init(allocator, .., .{ .min_num_bins, .. })`, `init(splitter, .{ .max_triangles_per_leaf })` | default arguments |
+| `AABBTreeToBuffer<TriangleCodec, NodeCodec>::Convert(.., outError) -> bool` | `AABBTreeToBuffer(T, N).convert(allocator, ..) Error!void` + `errorMessage(err)` (Jolt's text) | error strings become error sets |
+| codec `DecodingContext::Unpack` / `GetTriangle` / `TestRay` / `sGetFlags` overloads | `unpackWithFlags`, `getTriangle(..) TriangleVertices`, `testRay(..) TestRayResult`, `getFlags` / `getTriangleFlags` | overloads, out parameters |
+| `WalkTree` visitor `VisitNodes` / `VisitTriangles` / `ShouldAbort` / `ShouldVisitNode` | `visitNodes` / `visitTriangles` / `shouldAbort` / `shouldVisitNode` on an `anytype` visitor pointer | template visitor |
