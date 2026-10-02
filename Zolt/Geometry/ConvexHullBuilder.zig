@@ -1569,9 +1569,11 @@ fn buildHullAllocations(allocator: std.mem.Allocator, positions: []const Vec3, m
 }
 
 test "ConvexHullBuilder allocation failures" {
-    // Points on a sphere with interior and nearly coplanar points: needs face merges, coplanar points and conflict lists
-    var positions: [24]Vec3 = undefined;
-    for (&positions, 0..) |*p, i| {
+    // Every allocation failure must be reported without leaking memory
+
+    // Points on a sphere with interior points and a flat top: conflict lists, face merges, max vertices
+    var sphere: [24]Vec3 = undefined;
+    for (&sphere, 0..) |*p, i| {
         const f: f32 = @floatFromInt(i);
         const sc = Vec4.init(0.7 * f, 1.3 * f, 0, 0).sinCos();
         const dir = Vec3.init(sc.sin.getX() * sc.cos.getY(), sc.sin.getX() * sc.sin.getY(), sc.cos.getX());
@@ -1579,10 +1581,21 @@ test "ConvexHullBuilder allocation failures" {
         p.* = dir.mulScalar(radius);
         if (i % 7 == 0) p.setZ(1.0); // Flat top
     }
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildHullAllocations, .{ sphere[0..], std.math.maxInt(i32) });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildHullAllocations, .{ sphere[0..], 10 });
 
-    // Every allocation failure must be reported without leaking memory
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildHullAllocations, .{ positions[0..], std.math.maxInt(i32) });
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildHullAllocations, .{ positions[0..], 10 });
+    // Thin slabs on an integer grid: the coplanar list and all the edge removal paths of removeInvalidEdges (an
+    // interior edge, two edges connecting to the same face and faces that are left with two edges)
+    const slab1 = [_]Vec3{
+        Vec3.init(0, -1, 0.001), Vec3.init(-1, -1, 0.001), Vec3.init(-2, -2, -0.001), Vec3.init(-1, 2, -0.001),
+        Vec3.init(-1, -2, 0),    Vec3.init(1, 2, -0.001),  Vec3.init(1, 0, 0.001),    Vec3.init(-1, -2, 0.001),
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildHullAllocations, .{ slab1[0..], std.math.maxInt(i32) });
+    const slab2 = [_]Vec3{
+        Vec3.init(2, 2, -0.001), Vec3.init(2, 1, 0.001),   Vec3.init(0, -2, 0),     Vec3.init(-1, 0, -0.001), Vec3.init(-1, -2, 0),
+        Vec3.init(1, -1, 0),     Vec3.init(2, -1, -0.001), Vec3.init(-1, 2, 0.001), Vec3.init(1, 2, 0.001),   Vec3.init(-2, 2, -0.001),
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildHullAllocations, .{ slab2[0..], std.math.maxInt(i32) });
 
     // The 2D fallback
     var flat: [20]Vec3 = undefined;
