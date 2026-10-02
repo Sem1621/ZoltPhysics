@@ -1365,6 +1365,120 @@ test "ClipPoly" {
     try finishAll(&.{ &vs_plane, &vs_plane_list, &vs_poly, &vs_poly_list, &vs_edge, &vs_edge_list, &vs_aabox, &vs_aabox_list });
 }
 
+/// Run all 4 ClipPoly functions on one input with both vertex array types and compare with Jolt
+const ClipCheckers = struct {
+    vs_plane: Checker = .{ .name = "clipPolyVsPlane (edge cases)" },
+    vs_poly: Checker = .{ .name = "clipPolyVsPoly (edge cases)" },
+    vs_edge: Checker = .{ .name = "clipPolyVsEdge (edge cases)" },
+    vs_aabox: Checker = .{ .name = "clipPolyVsAABox (edge cases)" },
+
+    fn check(self: *ClipCheckers, polygon_arr: []const [3]f32, origin: [3]f32, normal: [3]f32, clipping_arr: []const [3]f32, edge1: [3]f32, edge2: [3]f32, box: [6]f32) !void {
+        const allocator = std.testing.allocator;
+        var list: std.ArrayList(Vec3) = .empty;
+        defer list.deinit(allocator);
+        const list_out = VertexArrayList.init(allocator, &list);
+        var out: StaticArray(Vec3, max_clip_vertices) = .empty;
+        var expected: ClipResult = .{ .count = 0, .vertices = @splat(.{ 0, 0, 0 }) };
+
+        var polygon_buffer: [16]Vec3 = undefined;
+        for (polygon_arr, 0..) |p, i| polygon_buffer[i] = vec3(p);
+        const polygon = polygon_buffer[0..polygon_arr.len];
+        var clipping_buffer: [16]Vec3 = undefined;
+        for (clipping_arr, 0..) |p, i| clipping_buffer[i] = vec3(p);
+        const clipping = clipping_buffer[0..clipping_arr.len];
+        const n: u32 = @intCast(polygon.len);
+
+        expected.count = jolt.jolt_clip_poly_vs_plane(polygon_arr.ptr, n, &origin, &normal, &expected.vertices, max_clip_vertices);
+        try zolt.clipPolyVsPlane(polygon, vec3(origin), vec3(normal), &out);
+        self.vs_plane.check(.{ polygon_arr, origin, normal }, ClipResult.fromSlice(out.constSlice()), expected);
+        try zolt.clipPolyVsPlane(polygon, vec3(origin), vec3(normal), list_out);
+        self.vs_plane.check(.{ polygon_arr, origin, normal }, ClipResult.fromSlice(list.items), expected);
+
+        if (clipping.len >= 3) {
+            expected.vertices = @splat(.{ 0, 0, 0 });
+            expected.count = jolt.jolt_clip_poly_vs_poly(polygon_arr.ptr, n, clipping_arr.ptr, @intCast(clipping.len), &normal, &expected.vertices, max_clip_vertices);
+            out.clear();
+            try zolt.clipPolyVsPoly(polygon, clipping, vec3(normal), &out);
+            self.vs_poly.check(.{ polygon_arr, clipping_arr, normal }, ClipResult.fromSlice(out.constSlice()), expected);
+            list.clearRetainingCapacity();
+            try zolt.clipPolyVsPoly(polygon, clipping, vec3(normal), list_out);
+            self.vs_poly.check(.{ polygon_arr, clipping_arr, normal }, ClipResult.fromSlice(list.items), expected);
+        }
+
+        if (polygon.len >= 3) {
+            expected.vertices = @splat(.{ 0, 0, 0 });
+            expected.count = jolt.jolt_clip_poly_vs_edge(polygon_arr.ptr, n, &edge1, &edge2, &normal, &expected.vertices, max_clip_vertices);
+            out.clear();
+            try zolt.clipPolyVsEdge(polygon, vec3(edge1), vec3(edge2), vec3(normal), &out);
+            self.vs_edge.check(.{ polygon_arr, edge1, edge2, normal }, ClipResult.fromSlice(out.constSlice()), expected);
+            list.clearRetainingCapacity();
+            try zolt.clipPolyVsEdge(polygon, vec3(edge1), vec3(edge2), vec3(normal), list_out);
+            self.vs_edge.check(.{ polygon_arr, edge1, edge2, normal }, ClipResult.fromSlice(list.items), expected);
+        }
+
+        expected.vertices = @splat(.{ 0, 0, 0 });
+        expected.count = jolt.jolt_clip_poly_vs_aabox(polygon_arr.ptr, n, &box, &expected.vertices, max_clip_vertices);
+        out.clear();
+        try zolt.clipPolyVsAABox(polygon, aabox(box), &out);
+        self.vs_aabox.check(.{ polygon_arr, box }, ClipResult.fromSlice(out.constSlice()), expected);
+        list.clearRetainingCapacity();
+        try zolt.clipPolyVsAABox(polygon, aabox(box), list_out);
+        self.vs_aabox.check(.{ polygon_arr, box }, ClipResult.fromSlice(list.items), expected);
+    }
+
+    fn finish(self: *const ClipCheckers) !void {
+        try finishAll(&.{ &self.vs_plane, &self.vs_poly, &self.vs_edge, &self.vs_aabox });
+    }
+};
+
+test "ClipPoly hand-picked edge cases" {
+    var checkers: ClipCheckers = .{};
+
+    // Edges parallel to the clipping plane (denominator 0) with end points on different sides of the plane because of
+    // rounding: Jolt treats the second point as being on the same side as the first one (found with a random search,
+    // the plane has normal (1, -1, 0) through the first point, the edge goes from the second to the third point)
+    const parallel_cases = [_][3][3]f32{
+        .{ .{ 9.236356e-1, -4.5387924e-2, 0 }, .{ -5.369221e-1, -1.5059457e0, 0 }, .{ -5.272088e-1, -1.4962324e0, 0 } },
+        .{ .{ 7.526839e-2, -1.5538788e-1, 0 }, .{ 3.710432e-1, 1.4038692e-1, 0 }, .{ 4.0600947e-1, 1.7535318e-1, 0 } },
+        .{ .{ 7.8029394e-1, 6.8244445e-1, 0 }, .{ -2.5463623e-1, -3.5248575e-1, 0 }, .{ -2.7002493e-1, -3.6787444e-1, 0 } },
+        .{ .{ 3.4772217e-1, 2.446835e-1, 0 }, .{ -1.590519e-1, -2.620906e-1, 0 }, .{ -1.1919971e-1, -2.222384e-1, 0 } },
+        .{ .{ 3.2579386e-1, 2.8055155e-1, 0 }, .{ -8.852186e-1, -9.30461e-1, 0 }, .{ -9.0594083e-1, -9.511832e-1, 0 } },
+    };
+    for (parallel_cases) |c| {
+        const normal = Vec3.init(1, -1, 0);
+        const o = vec3(c[0]);
+        const e1 = vec3(c[1]);
+        const e2 = vec3(c[2]);
+
+        // The case takes the 'edge is parallel to plane' branch of ClipPolyVsPlane
+        try std.testing.expect((o.sub(e1).dot(normal) < 0) != (o.sub(e2).dot(normal) < 0));
+        try std.testing.expect(e2.sub(e1).dot(normal) == 0);
+
+        // Triangles with the parallel edge in both directions and the third vertex on either side, and the segment itself
+        for (0..5) |k| {
+            const far = arr3(e1.add(Vec3.init(if (k % 2 == 0) 3 else -3, 0, 1)));
+            const triangle: [3][3]f32 = if (k < 2) .{ c[1], c[2], far } else .{ c[2], c[1], far };
+            const polygon: []const [3]f32 = if (k == 4) triangle[0..2] else &triangle;
+            const n = if (k % 2 == 0) arr3(normal) else arr3(normal.negate());
+            // Edge from the plane origin in direction (-1, -1, 0): with clipping edge normal (0, 0, 1) its edge normal is (1, -1, 0)
+            const edge2 = arr3(o.add(Vec3.init(-1, -1, 0)));
+            try checkers.check(polygon, c[0], n, &.{ c[0], edge2, far }, c[0], edge2, .{ c[0][0] - 1, c[0][1] - 1, -1, c[0][0], c[0][1], 1 });
+            try checkers.check(polygon, c[0], .{ 0, 0, 1 }, &.{ c[0], edge2, far }, c[0], edge2, .{ c[0][0] - 1, c[0][1] - 1, -1, c[0][0], c[0][1], 1 });
+        }
+    }
+
+    // Polygon in the clipping plane, on a box face, a zero normal and a degenerate edge
+    const square = [_][3]f32{ .{ -1, -1, 0 }, .{ 1, -1, 0 }, .{ 1, 1, 0 }, .{ -1, 1, 0 } };
+    const big_square = [_][3]f32{ .{ -2, -2, 0 }, .{ 2, -2, 0 }, .{ 2, 2, 0 }, .{ -2, 2, 0 } };
+    try checkers.check(&square, .{ 0, 0, 0 }, .{ 0, 0, 1 }, &big_square, .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ -1, -1, 0, 1, 1, 1 });
+    try checkers.check(&square, .{ 0, 0, 0 }, .{ 0, 0, -1 }, &square, .{ 1, 1, 0 }, .{ 1, 1, 0 }, .{ -1, -1, -1, 1, 1, 0 });
+    try checkers.check(&square, .{ 1, 0, 0 }, .{ 0, 0, 0 }, &square, .{ 1, -1, 0 }, .{ 1, 1, 0 }, .{ -1, -1, -1, 1, 1, 1 });
+    try checkers.check(&square, .{ 1, 0, 0 }, .{ -1, 0, 0 }, &.{ .{ 0, 0, 0 }, .{ 0, 0, 0 }, .{ 0, 0, 0 } }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 1, -1, -1, 2, 1, 1 });
+    try checkers.check(square[0..2], .{ 0, 0, 0 }, .{ 1, 0, 0 }, &big_square, .{ 0, 0, 0 }, .{ 0, 1, 0 }, .{ -0.5, -2, -2, 0.5, 2, 2 });
+
+    try checkers.finish();
+}
+
 test "MortonCode" {
     var rng: Rng = .{};
     var expand_bits: Checker = .{ .name = "MortonCode.expandBits" };
