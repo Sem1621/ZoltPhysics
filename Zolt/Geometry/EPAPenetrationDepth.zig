@@ -459,3 +459,49 @@ pub const EPAPenetrationDepth = struct {
         return true;
     }
 };
+
+const AABox = @import("AABox.zig").AABox;
+const PointConvexSupport = ConvexSupport.PointConvexSupport;
+
+test "EPAPenetrationDepth getPenetrationDepthStepGJK" {
+    // Two points with a convex radius of 1 are spheres
+    const a: PointConvexSupport = .{ .point = Vec3.zero() };
+    var epa: EPAPenetrationDepth = .{};
+    var v = Vec3.init(1, 0, 0);
+    const invalid = Vec3.init(-999, -999, -999);
+    var point_a = invalid;
+    var point_b = invalid;
+
+    // Not colliding
+    const far: PointConvexSupport = .{ .point = Vec3.init(3, 0, 0) };
+    try std.testing.expectEqual(EPAPenetrationDepth.Status.not_colliding, epa.getPenetrationDepthStepGJK(&a, 1.0, &far, 1.0, 1.0e-4, &v, &point_a, &point_b));
+
+    // Colliding within the convex radius: the points are moved onto the spheres
+    const near: PointConvexSupport = .{ .point = Vec3.init(1.5, 0, 0) };
+    v = Vec3.init(1, 0, 0);
+    try std.testing.expectEqual(EPAPenetrationDepth.Status.colliding, epa.getPenetrationDepthStepGJK(&a, 1.0, &near, 1.0, 1.0e-4, &v, &point_a, &point_b));
+    try std.testing.expect(point_a.isClose(Vec3.init(1, 0, 0), .{}));
+    try std.testing.expect(point_b.isClose(Vec3.init(0.5, 0, 0), .{}));
+
+    // The points coincide: only EPA can tell the penetration depth
+    v = Vec3.init(1, 0, 0);
+    try std.testing.expectEqual(EPAPenetrationDepth.Status.indeterminate, epa.getPenetrationDepthStepGJK(&a, 1.0, &a, 1.0, 1.0e-4, &v, &point_a, &point_b));
+}
+
+test "EPAPenetrationDepth getPenetrationDepthStepEPA" {
+    // Two overlapping boxes, without convex radius: the GJK step can't determine the penetration
+    const a = AABox.init(Vec3.init(-1, -1, -1), Vec3.init(1, 1, 1));
+    const b = AABox.init(Vec3.init(0.5, -0.8, -0.9), Vec3.init(2.5, 0.7, 0.6));
+    var epa: EPAPenetrationDepth = .{};
+    var v = Vec3.init(1, 0, 0);
+    var point_a: Vec3 = undefined;
+    var point_b: Vec3 = undefined;
+    try std.testing.expectEqual(EPAPenetrationDepth.Status.indeterminate, epa.getPenetrationDepthStepGJK(&a, 0.0, &b, 0.0, 1.0e-4, &v, &point_a, &point_b));
+    try std.testing.expect(epa.getPenetrationDepthStepEPA(&a, &b, 1.0e-4, &v, &point_a, &point_b));
+
+    // B needs to move 0.5 along +X to get out of collision
+    try std.testing.expect(v.normalized().isClose(Vec3.init(1, 0, 0), .{ .max_dist_sq = 1.0e-6 }));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), v.length(), 1.0e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), point_a.getX(), 1.0e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), point_b.getX(), 1.0e-4);
+}

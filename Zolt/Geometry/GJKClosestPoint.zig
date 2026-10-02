@@ -739,3 +739,100 @@ pub const GJKClosestPoint = struct {
         return true;
     }
 };
+
+const Sphere = @import("Sphere.zig").Sphere;
+const AABox = @import("AABox.zig").AABox;
+const PointConvexSupport = ConvexSupport.PointConvexSupport;
+
+test "GJKClosestPoint getClosestPoints / getClosestPointsSimplex" {
+    // Two separated boxes: the closest points are on the facing faces
+    const a = AABox.init(Vec3.init(-1, -1, -1), Vec3.init(1, 1, 1));
+    const b = AABox.init(Vec3.init(3, -0.5, -0.5), Vec3.init(4, 0.5, 0.5));
+    var gjk: GJKClosestPoint = .{};
+    var v = Vec3.init(1, 0, 0);
+    var point_a: Vec3 = undefined;
+    var point_b: Vec3 = undefined;
+    const dist_sq = gjk.getClosestPoints(&a, &b, 1.0e-4, math.large_float, &v, &point_a, &point_b);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), dist_sq, 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), point_a.getX(), 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), point_b.getX(), 1.0e-5);
+    try std.testing.expect(v.isClose(Vec3.init(2, 0, 0), .{ .max_dist_sq = 1.0e-8 })); // From A to B, length is the distance
+
+    // The simplex: y = p - q for every point
+    var y: [4]Vec3 = undefined;
+    var p: [4]Vec3 = undefined;
+    var q: [4]Vec3 = undefined;
+    const num_points = gjk.getClosestPointsSimplex(&y, &p, &q);
+    try std.testing.expect(num_points >= 1 and num_points <= 3);
+    for (y[0..num_points], p[0..num_points], q[0..num_points]) |yi, pi, qi|
+        try std.testing.expect(yi.eql(pi.sub(qi)));
+
+    // Further away than the max distance
+    v = Vec3.init(1, 0, 0);
+    try std.testing.expectEqual(math.flt_max, gjk.getClosestPoints(&a, &b, 1.0e-4, 1.0, &v, &point_a, &point_b));
+
+    // Overlapping: the origin is in the simplex
+    const c = AABox.init(Vec3.init(0.5, -0.5, -0.5), Vec3.init(1.5, 0.5, 0.5));
+    v = Vec3.init(1, 0, 0);
+    try std.testing.expectEqual(@as(f32, 0.0), gjk.getClosestPoints(&a, &c, 1.0e-4, math.large_float, &v, &point_a, &point_b));
+    try std.testing.expect(v.eql(Vec3.zero()));
+}
+
+test "GJKClosestPoint castShape" {
+    const sphere = Sphere.init(Vec3.zero(), 1.0);
+    var gjk: GJKClosestPoint = .{};
+
+    // Hit: the spheres touch after moving 8 of the 20 units
+    var lambda: f32 = 1.0 + math.flt_epsilon;
+    try std.testing.expect(gjk.castShape(Mat44.translation(Vec3.init(-10, 0, 0)), Vec3.init(20, 0, 0), 1.0e-4, &sphere, &sphere, &lambda));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), lambda, 1.0e-4);
+
+    // Miss: passing by
+    lambda = 1.0 + math.flt_epsilon;
+    try std.testing.expect(!gjk.castShape(Mat44.translation(Vec3.init(-10, 2.1, 0)), Vec3.init(20, 0, 0), 1.0e-4, &sphere, &sphere, &lambda));
+    try std.testing.expectEqual(1.0 + math.flt_epsilon, lambda);
+
+    // Miss: not far enough
+    lambda = 0.3;
+    try std.testing.expect(!gjk.castShape(Mat44.translation(Vec3.init(-10, 0, 0)), Vec3.init(20, 0, 0), 1.0e-4, &sphere, &sphere, &lambda));
+}
+
+test "GJKClosestPoint castShapeWithConvexRadius" {
+    // Two points with a convex radius of 1 are spheres
+    const point_a: PointConvexSupport = .{ .point = Vec3.zero() };
+    const point_b: PointConvexSupport = .{ .point = Vec3.zero() };
+    var gjk: GJKClosestPoint = .{};
+    var lambda: f32 = 1.0 + math.flt_epsilon;
+    const invalid = Vec3.init(-999, -999, -999);
+    var contact_a = invalid;
+    var contact_b = invalid;
+    var separating_axis = invalid;
+    try std.testing.expect(gjk.castShapeWithConvexRadius(Mat44.translation(Vec3.init(-10, 0, 0)), Vec3.init(20, 0, 0), 1.0e-4, &point_a, &point_b, 1.0, 1.0, &lambda, &contact_a, &contact_b, &separating_axis));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), lambda, 1.0e-4);
+    try std.testing.expect(contact_a.isClose(Vec3.init(-1, 0, 0), .{ .max_dist_sq = 1.0e-6 }));
+    try std.testing.expect(contact_b.isClose(Vec3.init(-1, 0, 0), .{ .max_dist_sq = 1.0e-6 }));
+    try std.testing.expect(separating_axis.normalized().isClose(Vec3.init(1, 0, 0), .{ .max_dist_sq = 1.0e-6 }));
+
+    // On a miss nothing is written
+    lambda = 1.0 + math.flt_epsilon;
+    contact_a = invalid;
+    contact_b = invalid;
+    separating_axis = invalid;
+    try std.testing.expect(!gjk.castShapeWithConvexRadius(Mat44.translation(Vec3.init(-10, 2.5, 0)), Vec3.init(20, 0, 0), 1.0e-4, &point_a, &point_b, 1.0, 1.0, &lambda, &contact_a, &contact_b, &separating_axis));
+    try std.testing.expectEqual(1.0 + math.flt_epsilon, lambda);
+    try std.testing.expect(contact_a.eql(invalid) and contact_b.eql(invalid) and separating_axis.eql(invalid));
+}
+
+test "GJKClosestPoint castRay" {
+    // Ray through a box, starting outside and inside
+    const box = AABox.init(Vec3.init(-1, -1, -1), Vec3.init(1, 1, 1));
+    var gjk: GJKClosestPoint = .{};
+    var lambda: f32 = 1.0;
+    try std.testing.expect(gjk.castRay(Vec3.init(-5, 0, 0), Vec3.init(10, 0, 0), 1.0e-4, &box, &lambda));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), lambda, 1.0e-4);
+    lambda = 1.0;
+    try std.testing.expect(gjk.castRay(Vec3.zero(), Vec3.init(10, 0, 0), 1.0e-4, &box, &lambda));
+    try std.testing.expectEqual(@as(f32, 0.0), lambda);
+    lambda = 1.0;
+    try std.testing.expect(!gjk.castRay(Vec3.init(-5, 2, 0), Vec3.init(10, 0, 0), 1.0e-4, &box, &lambda));
+}

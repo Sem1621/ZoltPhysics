@@ -594,3 +594,108 @@ pub const EPAConvexHullBuilder = struct {
         return out_edges.len >= 3;
     }
 };
+
+test "EPAConvexHullBuilder.Triangle" {
+    const positions = [_]Vec3{ Vec3.init(1, 0, -1), Vec3.init(0, 1, -1), Vec3.init(-1, -1, -1), Vec3.init(0, 0, 1) };
+    var t: EPAConvexHullBuilder.Triangle = undefined;
+    t.init(0, 1, 2, &positions);
+    try std.testing.expectEqual(@as(u32, 0), t.edge[0].start_idx);
+    try std.testing.expectEqual(@as(u32, 2), t.getNextEdge(1).start_idx);
+    try std.testing.expect(t.edge[0].neighbour_triangle == null);
+    try std.testing.expect(t.centroid.isClose(Vec3.init(0, 0, -1), .{}));
+
+    // Counter clockwise seen from above: the normal points up, towards the origin
+    try std.testing.expect(t.normal.getZ() > 0);
+    try std.testing.expect(t.isFacingOrigin());
+    try std.testing.expect(t.isFacing(Vec3.zero()));
+    try std.testing.expect(!t.isFacing(Vec3.init(0, 0, -2)));
+
+    // The origin projects into the interior at distance 1, the distance is negative because the origin is in front
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), t.closest_len_sq, 1.0e-6);
+    try std.testing.expect(t.closest_point_interior);
+    try std.testing.expect(!t.removed and !t.in_queue);
+
+    // Opposite winding
+    t.init(0, 2, 1, &positions);
+    try std.testing.expect(t.normal.getZ() < 0);
+    try std.testing.expect(!t.isFacingOrigin());
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), t.closest_len_sq, 1.0e-6);
+
+    // Degenerate triangle: no closest point
+    const line = [_]Vec3{ Vec3.init(0, 0, 0), Vec3.init(1, 0, 0), Vec3.init(2, 0, 0) };
+    t.init(0, 1, 2, &line);
+    try std.testing.expectEqual(math.flt_max, t.closest_len_sq);
+    try std.testing.expect(!t.closest_point_interior);
+}
+
+test "EPAConvexHullBuilder hull around the origin" {
+    // Tetrahedron around the origin
+    var points: EPAConvexHullBuilder.Points = .empty;
+    points.append(Vec3.init(1, 0, -1));
+    points.append(Vec3.init(0, 1, -1));
+    points.append(Vec3.init(-1, -1, -1));
+    points.append(Vec3.init(0, 0, 2));
+
+    var hull = EPAConvexHullBuilder.init(&points);
+    hull.initialize(0, 1, 2);
+    try std.testing.expect(hull.hasNextTriangle());
+
+    // The new point is in front of the triangle that faces it
+    const facing = hull.findFacingTriangle(points.get(3));
+    const t = facing.triangle.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), facing.best_dist_sq, 1.0e-5);
+    try std.testing.expect(t.normal.getZ() > 0);
+    var new_triangles: EPAConvexHullBuilder.NewTriangles = .empty;
+    try std.testing.expect(hull.addPoint(t, 3, math.flt_max, &new_triangles));
+    try std.testing.expectEqual(@as(u32, 3), new_triangles.len);
+    try std.testing.expect(t.removed);
+
+    // Every new triangle is linked to 3 neighbours
+    for (new_triangles.constSlice()) |nt| {
+        for (nt.edge) |e|
+            try std.testing.expect(e.neighbour_triangle != null);
+    }
+
+    // The queue returns the triangles sorted on distance to the origin, removed triangles are freed
+    var prev_closest_len_sq: f32 = -math.flt_max;
+    var num_live: u32 = 0;
+    while (hull.hasNextTriangle()) {
+        const peek = hull.peekClosestTriangleInQueue();
+        const pt = hull.popClosestTriangleFromQueue();
+        try std.testing.expect(peek == pt);
+        try std.testing.expect(pt.in_queue);
+        if (pt.removed) {
+            hull.freeTriangle(pt);
+        } else {
+            try std.testing.expect(pt.closest_len_sq >= prev_closest_len_sq);
+            prev_closest_len_sq = pt.closest_len_sq;
+            num_live += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 4), num_live);
+
+    // No triangles left in the queue, so nothing is facing
+    try std.testing.expect(hull.findFacingTriangle(Vec3.init(0, 0, 10)).triangle == null);
+}
+
+test "EPAConvexHullBuilder.TriangleFactory" {
+    const positions = [_]Vec3{ Vec3.init(1, 0, 0), Vec3.init(0, 1, 0), Vec3.init(0, 0, 1) };
+    var factory: EPAConvexHullBuilder.TriangleFactory = .{};
+
+    // The buffer runs full
+    var first: ?*EPAConvexHullBuilder.Triangle = null;
+    for (0..EPAConvexHullBuilder.max_triangles) |_| {
+        const t = factory.createTriangle(0, 1, 2, &positions).?;
+        if (first == null) first = t;
+    }
+    try std.testing.expect(factory.createTriangle(0, 1, 2, &positions) == null);
+
+    // A freed triangle is reused
+    factory.freeTriangle(first.?);
+    try std.testing.expect(factory.createTriangle(0, 1, 2, &positions).? == first.?);
+    try std.testing.expect(factory.createTriangle(0, 1, 2, &positions) == null);
+
+    // Clear returns all triangles
+    factory.clear();
+    try std.testing.expect(factory.createTriangle(0, 1, 2, &positions) != null);
+}
