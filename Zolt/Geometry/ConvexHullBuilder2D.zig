@@ -77,7 +77,8 @@ pub const ConvexHullBuilder2D = struct {
     num_edges: i32 = 0,
 
     /// Constructor
-    /// @param positions Positions used to make the hull. Uses X and Y component of Vec3 only! Must outlive the builder.
+    /// @param positions Positions used to make the hull. Uses X and Y component of Vec3 only! Must outlive the builder
+    /// (Jolt keeps a `const Positions &`, pass `list.items` for a `Positions` list).
     pub fn init(allocator: std.mem.Allocator, positions: []const Vec3) ConvexHullBuilder2D {
         return .{ .allocator = allocator, .positions = positions };
     }
