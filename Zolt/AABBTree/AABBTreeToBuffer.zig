@@ -403,6 +403,7 @@ const CollectVisitor = struct {
     user_data: std.ArrayList(u32) = .empty,
     block_ids: std.ArrayList(u32) = .empty,
     num_nodes: u32 = 0,
+    decode_mismatch: bool = false,
 
     fn deinit(self: *CollectVisitor) void {
         self.triangles.deinit(self.allocator);
@@ -430,8 +431,8 @@ const CollectVisitor = struct {
         ctx.unpackWithFlags(triangles, num_triangles, &vertices, &flags);
         for (0..num_triangles) |i| {
             const t = ctx.getTriangle(triangles, @intCast(i));
-            std.debug.assert(t.v1.eql(vertices[3 * i]) and t.v2.eql(vertices[3 * i + 1]) and t.v3.eql(vertices[3 * i + 2]));
-            std.debug.assert(flags[i] == TestTriangleCodec.DecodingContext.getTriangleFlags(triangles, @intCast(i)));
+            if (!t.v1.eql(vertices[3 * i]) or !t.v2.eql(vertices[3 * i + 1]) or !t.v3.eql(vertices[3 * i + 2]) or flags[i] != TestTriangleCodec.DecodingContext.getTriangleFlags(triangles, @intCast(i)))
+                self.decode_mismatch = true;
             self.triangles.append(self.allocator, .{ vertices[3 * i], vertices[3 * i + 1], vertices[3 * i + 2] }) catch @panic("OOM");
             self.flags.append(self.allocator, flags[i]) catch @panic("OOM");
             self.user_data.append(self.allocator, ctx.getUserData(triangles, @intCast(i))) catch @panic("OOM");
@@ -514,6 +515,8 @@ fn checkBuffer(allocator: std.mem.Allocator, buffer: *const TestBuffer, mesh: *c
     node_ctx.walkTree(buffer_start, &triangle_ctx, &collect);
     try std.testing.expect(node_ctx.isDoneWalking());
     try std.testing.expectEqual(mesh.triangles.items.len, collect.triangles.items.len);
+    try std.testing.expect(!collect.decode_mismatch); // getTriangle / getTriangleFlags give the same as unpack / getFlags
+    try std.testing.expect(collect.num_nodes > 0 or mesh.triangles.items.len <= 8);
 
     // Block IDs fit in the number of bits in the header
     const block_id_bits = TestNodeCodec.DecodingContext.triangleBlockIDBits(buffer.getNodeHeader());
@@ -615,13 +618,16 @@ test "AABBTreeToBuffer root leaf and abort" {
     try std.testing.expectEqual(@as(u32, 8), header.root_properties >> TestNodeCodec.triangle_count_shift);
     try std.testing.expectEqual(@as(u32, (TestBuffer.header_size + TestBuffer.triangle_header_size) >> 2), header.root_properties & TestNodeCodec.offset_mask);
 
-    // A visitor that aborts after the first triangle block, then continue walking
-    const AbortVisitor = struct {
-        num_blocks: u32 = 0,
-        abort: bool = true,
+    // A visitor that collects at most `budget` triangles per walk and aborts when a triangle block doesn't fit, the
+    // next walk continues with that block (like MeshShape::GetTrianglesNext)
+    const BudgetVisitor = struct {
+        budget: u32,
+        num_found: u32 = 0,
+        total_found: u32 = 0,
+        should_abort: bool = false,
 
         pub fn shouldAbort(self: *const @This()) bool {
-            return self.abort and self.num_blocks > 0;
+            return self.should_abort;
         }
 
         pub fn shouldVisitNode(_: *const @This(), _: i32) bool {
@@ -632,8 +638,13 @@ test "AABBTreeToBuffer root leaf and abort" {
             return 4;
         }
 
-        pub fn visitTriangles(self: *@This(), _: *const TestTriangleCodec.DecodingContext, _: *const anyopaque, _: u32, _: u32) void {
-            self.num_blocks += 1;
+        pub fn visitTriangles(self: *@This(), _: *const TestTriangleCodec.DecodingContext, _: *const anyopaque, num_triangles: u32, _: u32) void {
+            if (self.num_found + num_triangles > self.budget) {
+                self.should_abort = true;
+                return;
+            }
+            self.num_found += num_triangles;
+            self.total_found += num_triangles;
         }
     };
 
@@ -644,18 +655,23 @@ test "AABBTreeToBuffer root leaf and abort" {
     var buffer2 = try buildAndConvert(allocator, &mesh2, binning.splitter(), 2, false);
     defer buffer2.deinit(allocator);
     const triangle_ctx: TestTriangleCodec.DecodingContext = .init(buffer2.getTriangleHeader());
-    var visitor: AbortVisitor = .{};
-    var ctx: TestNodeCodec.DecodingContext = .init(buffer2.getNodeHeader());
-    ctx.walkTree(buffer2.tree.vector.items.ptr, &triangle_ctx, &visitor);
-    try std.testing.expectEqual(@as(u32, 1), visitor.num_blocks);
-    try std.testing.expect(!ctx.isDoneWalking());
 
-    // Continue: the walk resumes where it stopped, so the first block isn't visited twice
-    visitor.abort = false;
-    ctx.top -= 1;
-    ctx.walkTree(buffer2.tree.vector.items.ptr, &triangle_ctx, &visitor);
-    try std.testing.expect(ctx.isDoneWalking());
-    try std.testing.expect(visitor.num_blocks >= 16);
+    // A budget of 3 triangles: the walk aborts every time it finds a second block of 2 triangles
+    var visitor: BudgetVisitor = .{ .budget = 3 };
+    var ctx: TestNodeCodec.DecodingContext = .init(buffer2.getNodeHeader());
+    var num_walks: u32 = 0;
+    while (true) {
+        visitor.num_found = 0;
+        visitor.should_abort = false;
+        ctx.walkTree(buffer2.tree.vector.items.ptr, &triangle_ctx, &visitor);
+        num_walks += 1;
+        try std.testing.expect(visitor.num_found > 0 and visitor.num_found <= 3);
+        if (ctx.isDoneWalking())
+            break;
+        try std.testing.expect(visitor.should_abort);
+    }
+    try std.testing.expectEqual(@as(u32, 32), visitor.total_found);
+    try std.testing.expectEqual(@as(u32, 16), num_walks);
 }
 
 test "AABBTreeToBuffer errors" {
