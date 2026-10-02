@@ -76,6 +76,31 @@ pub const UnorderedMapDetail = @import("Core/UnorderedMap.zig").UnorderedMapDeta
 pub const UnorderedSet = @import("Core/UnorderedSet.zig").UnorderedSet;
 pub const UnorderedSetDetail = @import("Core/UnorderedSet.zig").UnorderedSetDetail;
 
+// Geometry
+pub const ClosestPoint = @import("Geometry/ClosestPoint.zig");
+pub const ConvexHullBuilder2D = @import("Geometry/ConvexHullBuilder2D.zig").ConvexHullBuilder2D;
+pub const AddConvexRadius = @import("Geometry/ConvexSupport.zig").AddConvexRadius;
+pub const MinkowskiDifference = @import("Geometry/ConvexSupport.zig").MinkowskiDifference;
+pub const PointConvexSupport = @import("Geometry/ConvexSupport.zig").PointConvexSupport;
+pub const PolygonConvexSupport = @import("Geometry/ConvexSupport.zig").PolygonConvexSupport;
+pub const TransformedConvexObject = @import("Geometry/ConvexSupport.zig").TransformedConvexObject;
+pub const TriangleConvexSupport = @import("Geometry/ConvexSupport.zig").TriangleConvexSupport;
+pub const rayAABox = @import("Geometry/RayAABox.zig").rayAABox;
+pub const rayAABox4 = @import("Geometry/RayAABox.zig").rayAABox4;
+pub const rayAABoxHits = @import("Geometry/RayAABox.zig").rayAABoxHits;
+pub const rayAABoxHitsDirection = @import("Geometry/RayAABox.zig").rayAABoxHitsDirection;
+pub const RayAABoxMinMax = @import("Geometry/RayAABox.zig").RayAABoxMinMax;
+pub const rayAABoxMinMax = @import("Geometry/RayAABox.zig").rayAABoxMinMax;
+pub const RayInvDirection = @import("Geometry/RayAABox.zig").RayInvDirection;
+pub const rayCapsule = @import("Geometry/RayCapsule.zig").rayCapsule;
+pub const rayCylinder = @import("Geometry/RayCylinder.zig").rayCylinder;
+pub const rayInfiniteCylinder = @import("Geometry/RayCylinder.zig").rayInfiniteCylinder;
+pub const raySphere = @import("Geometry/RaySphere.zig").raySphere;
+pub const RaySphereMinMax = @import("Geometry/RaySphere.zig").RaySphereMinMax;
+pub const raySphereMinMax = @import("Geometry/RaySphere.zig").raySphereMinMax;
+pub const rayTriangle = @import("Geometry/RayTriangle.zig").rayTriangle;
+pub const rayTriangle4 = @import("Geometry/RayTriangle.zig").rayTriangle4;
+
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
 pub const DMat44 = @import("Math/DMat44.zig").DMat44;
@@ -149,6 +174,14 @@ const source_files = .{
     @import("Core/TickCounter.zig"),
     @import("Core/UnorderedMap.zig"),
     @import("Core/UnorderedSet.zig"),
+    @import("Geometry/ClosestPoint.zig"),
+    @import("Geometry/ConvexHullBuilder2D.zig"),
+    @import("Geometry/ConvexSupport.zig"),
+    @import("Geometry/RayAABox.zig"),
+    @import("Geometry/RayCapsule.zig"),
+    @import("Geometry/RayCylinder.zig"),
+    @import("Geometry/RaySphere.zig"),
+    @import("Geometry/RayTriangle.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),
