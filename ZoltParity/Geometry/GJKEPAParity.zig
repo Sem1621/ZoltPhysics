@@ -492,7 +492,26 @@ const Gen = struct {
                 return if (self.oneIn(2)) .{ a, b } else .{ b, a };
             },
             // Plain objects without wrappers
-            8, 9 => return .{ self.baseShape(s), self.baseShape(s) },
+            8 => return .{ self.baseShape(s), self.baseShape(s) },
+            // Curved objects (spheres, rounded points / boxes) nearly touching along a random direction
+            9 => {
+                const u = self.unit();
+                const r1 = self.rng.float(0.1, 1.5);
+                const r2 = self.rng.float(0.1, 1.5);
+                const gap = self.pick(f32, &.{ 0, 1.0e-6, -1.0e-6, 1.0e-4, -1.0e-4, 1.0e-2 });
+                const c = self.vec(-1, 1);
+                var a = ShapeDesc.sphere(mulS(c, s), r1 * s);
+                var b = ShapeDesc.sphere(mulS(add(c, mulS(u, r1 + r2 + gap)), s), r2 * s);
+                if (self.oneIn(2)) {
+                    // Rounded point / box instead of a sphere
+                    a = if (self.oneIn(2)) ShapeDesc.point(mulS(c, s)) else ShapeDesc.box(mulS(c, s), mulS(c, s));
+                    a.mode = 1;
+                    a.radius = r1 * s;
+                }
+                if (self.oneIn(3)) b.transform = storeMat44(Mat44.rotationTranslation(Quat.rotation(vec3(self.unit()), self.rng.float(-4, 4)), Vec3.zero()));
+                if (self.oneIn(3)) b.mode = 2;
+                return .{ a, b };
+            },
             // Random
             else => return .{ self.shape(s), self.shape(s) },
         }
@@ -558,6 +577,96 @@ const Gen = struct {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Hand picked inputs
+
+/// A hand picked pair of convex objects. `huge` pairs overflow to infinity inside GJK: Jolt handles that in GJK, but
+/// the EPA cast would continue with an empty simplex (which Jolt asserts on), so they are not used for it.
+const EdgePair = struct {
+    a: ShapeDesc,
+    b: ShapeDesc,
+    huge: bool = false,
+};
+
+fn withRadius(desc: ShapeDesc, radius: f32) ShapeDesc {
+    var d = desc;
+    d.mode = 1;
+    d.radius = radius;
+    return d;
+}
+
+fn withTransform(desc: ShapeDesc, m: Mat44) ShapeDesc {
+    var d = desc;
+    d.mode = 2;
+    d.transform = storeMat44(m);
+    return d;
+}
+
+/// Identical / coincident / exactly touching objects, degenerate objects, huge and tiny coordinates
+const edge_pairs = blk: {
+    @setEvalBranchQuota(100_000);
+    const point = ShapeDesc.point;
+    const sphere = ShapeDesc.sphere;
+    const box = ShapeDesc.box;
+    const triangle = ShapeDesc.triangle;
+    const polygon = ShapeDesc.polygon;
+    const unit_box = box(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const square = [_]P{ .{ -1, -1, 0 }, .{ 1, -1, 0 }, .{ 1, 1, 0 }, .{ -1, 1, 0 } };
+    break :blk [_]EdgePair{
+        // Coincident points
+        .{ .a = point(.{ 0, 0, 0 }), .b = point(.{ 0, 0, 0 }) },
+        .{ .a = point(.{ 1, 2, 3 }), .b = point(.{ 1, 2, 3 }) },
+        .{ .a = point(.{ 0, 0, 0 }), .b = point(.{ 1.0e-30, 0, 0 }) },
+        .{ .a = point(.{ 0, 0, 0 }), .b = point(.{ 1, 0, 0 }) },
+        // Zero radius spheres
+        .{ .a = sphere(.{ 0, 0, 0 }, 0), .b = sphere(.{ 0, 0, 0 }, 0) },
+        .{ .a = sphere(.{ 0, 0, 0 }, 0), .b = sphere(.{ 0, 1, 0 }, 0) },
+        // Spheres: touching exactly, overlapping, identical, concentric
+        .{ .a = sphere(.{ 0, 0, 0 }, 1), .b = sphere(.{ 2, 0, 0 }, 1) },
+        .{ .a = sphere(.{ 0, 0, 0 }, 1), .b = sphere(.{ 0, 0, 3 }, 2) },
+        .{ .a = sphere(.{ 0, 0, 0 }, 1), .b = sphere(.{ 1, 0, 0 }, 1) },
+        .{ .a = sphere(.{ 1, 2, 3 }, 2), .b = sphere(.{ 1, 2, 3 }, 2) },
+        .{ .a = sphere(.{ 1, 2, 3 }, 2), .b = sphere(.{ 1, 2, 3 }, 0.5) },
+        // Boxes sharing a face, an edge, a vertex; identical; nested; flat and point boxes
+        .{ .a = unit_box, .b = box(.{ 1, 0, 0 }, .{ 2, 1, 1 }) },
+        .{ .a = unit_box, .b = box(.{ 1, 1, 0 }, .{ 2, 2, 1 }) },
+        .{ .a = unit_box, .b = box(.{ 1, 1, 1 }, .{ 2, 2, 2 }) },
+        .{ .a = unit_box, .b = box(.{ 0, 0, 0 }, .{ 1, 1, 1 }) },
+        .{ .a = box(.{ -2, -2, -2 }, .{ 2, 2, 2 }), .b = unit_box },
+        .{ .a = box(.{ 0, 0, 0 }, .{ 1, 1, 0 }), .b = box(.{ 0, 0, 0 }, .{ 1, 1, 0 }) },
+        .{ .a = box(.{ 0, 0, 0 }, .{ 0, 0, 0 }), .b = box(.{ 0, 0, 0 }, .{ 0, 0, 0 }) },
+        .{ .a = unit_box, .b = point(.{ 1, 0.5, 0.5 }) },
+        .{ .a = unit_box, .b = point(.{ 1, 1, 1 }) },
+        .{ .a = unit_box, .b = point(.{ 0.5, 0.5, 0.5 }) },
+        // Triangles: in the plane of a box face, identical coplanar, colinear, coincident vertices
+        .{ .a = box(.{ -1, -1, -1 }, .{ 1, 1, 1 }), .b = triangle(.{ -2, -2, 1 }, .{ 2, -2, 1 }, .{ 0, 2, 1 }) },
+        .{ .a = triangle(.{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }), .b = triangle(.{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }) },
+        .{ .a = triangle(.{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 2, 0, 0 }), .b = point(.{ 1, 0, 0 }) },
+        .{ .a = triangle(.{ 0, 0, 0 }, .{ 0, 0, 0 }, .{ 0, 0, 0 }), .b = sphere(.{ 0, 0, 0 }, 1) },
+        // Polygons: single vertex, planar square against a box face, duplicated vertices
+        .{ .a = polygon(&.{.{ 0, 0, 0 }}), .b = point(.{ 0, 0, 0 }) },
+        .{ .a = polygon(&square), .b = box(.{ -1, -1, -2 }, .{ 1, 1, 0 }) },
+        .{ .a = polygon(&square), .b = polygon(&square) },
+        .{ .a = polygon(&(square ++ square)), .b = sphere(.{ 0, 0, 1 }, 1) },
+        // Rounded and transformed objects
+        .{ .a = withRadius(point(.{ 0, 0, 0 }), 1), .b = withRadius(point(.{ 2, 0, 0 }), 1) },
+        .{ .a = withRadius(unit_box, 0.5), .b = withRadius(box(.{ 2, 0, 0 }, .{ 3, 1, 1 }), 0.5) },
+        .{ .a = withTransform(unit_box, Mat44.rotationZ(0.25 * math.pi)), .b = withTransform(unit_box, Mat44.translation(Vec3.init(1.5, 0, 0))) },
+        // Tiny
+        .{ .a = sphere(.{ 0, 0, 0 }, 1.0e-20), .b = sphere(.{ 1.0e-20, 0, 0 }, 1.0e-20) },
+        .{ .a = box(.{ 0, 0, 0 }, .{ 1.0e-20, 1.0e-20, 1.0e-20 }), .b = point(.{ 1.0e-20, 0, 0 }) },
+        // Huge
+        .{ .a = sphere(.{ 0, 0, 0 }, 1), .b = sphere(.{ 1.0e20, 0, 0 }, 1), .huge = true },
+        .{ .a = point(.{ 1.0e20, 0, 0 }), .b = point(.{ -1.0e20, 0, 0 }), .huge = true },
+        .{ .a = sphere(.{ 1.0e20, 0, 0 }, 1), .b = sphere(.{ 1.0e20, 0, 0 }, 1), .huge = true },
+        .{ .a = sphere(.{ 0, 0, 0 }, 1.0e18), .b = sphere(.{ 0, 0, 1.0e18 }, 1.0e18), .huge = true },
+        .{ .a = box(.{ -1.0e19, -1.0e19, -1.0e19 }, .{ 1.0e19, 1.0e19, 1.0e19 }), .b = point(.{ 0, 0, 0 }), .huge = true },
+    };
+};
+
+/// Initial separating axes for the hand picked inputs
+const edge_vs = [_]P{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 1, 1, 1 } };
+
+// ---------------------------------------------------------------------------------------------------------------------
 // GJKClosestPoint
 
 const IntersectsResult = struct {
@@ -575,23 +684,36 @@ fn zoltIntersects(a_desc: *const ShapeDesc, b_desc: *const ShapeDesc, tolerance:
     return .{ .result = result, .v = arr3(v), .simplex = storeSimplex(&gjk, .y) };
 }
 
+fn checkIntersects(checker: *Checker, a: *const ShapeDesc, b: *const ShapeDesc, tolerance: f32, v: P) IntersectsResult {
+    var expected = std.mem.zeroes(IntersectsResult);
+    expected.v = v;
+    expected.result = jolt.jolt_gjk_intersects(a, b, tolerance, &expected.v, &expected.simplex);
+    expected.simplex = masked(expected.simplex, .y);
+
+    const actual = zoltIntersects(a, b, tolerance, v);
+    checker.check(.{ a.*, b.*, tolerance, v }, actual, expected);
+    return actual;
+}
+
 test "GJKClosestPoint.intersects" {
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "GJKClosestPoint.intersects" };
     var hits: [2]u32 = .{ 0, 0 };
 
+    for (edge_pairs) |pair| {
+        for (edge_vs) |v| {
+            for ([_]f32{ 0, 1.0e-4 }) |tolerance| {
+                _ = checkIntersects(&checker, &pair.a, &pair.b, tolerance, v);
+                _ = checkIntersects(&checker, &pair.b, &pair.a, tolerance, v);
+            }
+        }
+    }
+
     for (0..iterations) |_| {
         const pair = gen.pair();
         const tolerance = gen.tolerance();
         const v = gen.initialV(&pair[0], &pair[1]);
-
-        var expected = std.mem.zeroes(IntersectsResult);
-        expected.v = v;
-        expected.result = jolt.jolt_gjk_intersects(&pair[0], &pair[1], tolerance, &expected.v, &expected.simplex);
-        expected.simplex = masked(expected.simplex, .y);
-
-        const actual = zoltIntersects(&pair[0], &pair[1], tolerance, v);
-        checker.check(.{ pair, tolerance, v }, actual, expected);
+        const actual = checkIntersects(&checker, &pair[0], &pair[1], tolerance, v);
         hits[@intFromBool(actual.result)] += 1;
     }
 
@@ -619,27 +741,42 @@ fn zoltGetClosestPoints(a_desc: *const ShapeDesc, b_desc: *const ShapeDesc, tole
     return .{ .dist_sq = dist_sq, .v = arr3(v), .point_a = arr3(point_a), .point_b = arr3(point_b), .simplex = storeSimplex(&gjk, .ypq) };
 }
 
+fn checkGetClosestPoints(checker: *Checker, a: *const ShapeDesc, b: *const ShapeDesc, tolerance: f32, max_dist_sq: f32, v: P) ClosestPointsResult {
+    var expected = std.mem.zeroes(ClosestPointsResult);
+    expected.v = v;
+    expected.point_a = sentinel_p;
+    expected.point_b = sentinel_p;
+    expected.dist_sq = jolt.jolt_gjk_get_closest_points(a, b, tolerance, max_dist_sq, &expected.v, &expected.point_a, &expected.point_b, &expected.simplex);
+    expected.simplex = masked(expected.simplex, .ypq);
+
+    const actual = zoltGetClosestPoints(a, b, tolerance, max_dist_sq, v);
+    checker.check(.{ a.*, b.*, tolerance, max_dist_sq, v }, actual, expected);
+    return actual;
+}
+
 test "GJKClosestPoint.getClosestPoints" {
     var gen: Gen = .{ .rng = .{ .state = 0x9e3779b9 } };
     var checker: Checker = .{ .name = "GJKClosestPoint.getClosestPoints" };
     // Coverage: FLT_MAX (further than max distance), 0 with a full simplex, 0 with a smaller simplex, positive distance
     var counts: [4]u32 = @splat(0);
 
+    for (edge_pairs) |pair| {
+        for (edge_vs) |v| {
+            for ([_]f32{ 0, 1.0e-4 }) |tolerance| {
+                for ([_]f32{ math.flt_max, std.math.inf(f32), 1 }) |max_dist_sq| {
+                    _ = checkGetClosestPoints(&checker, &pair.a, &pair.b, tolerance, max_dist_sq, v);
+                    _ = checkGetClosestPoints(&checker, &pair.b, &pair.a, tolerance, max_dist_sq, v);
+                }
+            }
+        }
+    }
+
     for (0..iterations) |_| {
         const pair = gen.pair();
         const tolerance = gen.tolerance();
         const max_dist_sq = gen.pick(f32, &.{ math.flt_max, math.large_float, std.math.inf(f32), 0, 1.0e-4, 0.25, 1, 4 });
         const v = gen.initialV(&pair[0], &pair[1]);
-
-        var expected = std.mem.zeroes(ClosestPointsResult);
-        expected.v = v;
-        expected.point_a = sentinel_p;
-        expected.point_b = sentinel_p;
-        expected.dist_sq = jolt.jolt_gjk_get_closest_points(&pair[0], &pair[1], tolerance, max_dist_sq, &expected.v, &expected.point_a, &expected.point_b, &expected.simplex);
-        expected.simplex = masked(expected.simplex, .ypq);
-
-        const actual = zoltGetClosestPoints(&pair[0], &pair[1], tolerance, max_dist_sq, v);
-        checker.check(.{ pair, tolerance, max_dist_sq, v }, actual, expected);
+        const actual = checkGetClosestPoints(&checker, &pair[0], &pair[1], tolerance, max_dist_sq, v);
 
         if (actual.dist_sq == math.flt_max) {
             counts[0] += 1;
@@ -667,11 +804,45 @@ fn zoltCastRay(origin: P, direction: P, tolerance: f32, a_desc: *const ShapeDesc
     return .{ .result = result, .lambda = lambda, .simplex = storeSimplex(&gjk, .yp) };
 }
 
+fn checkCastRay(checker: *Checker, origin: P, direction: P, tolerance: f32, a: *const ShapeDesc, lambda: f32) CastResult {
+    var expected = std.mem.zeroes(CastResult);
+    expected.lambda = lambda;
+    expected.result = jolt.jolt_gjk_cast_ray(&origin, &direction, tolerance, a, &expected.lambda, &expected.simplex);
+    expected.simplex = masked(expected.simplex, .yp);
+
+    const actual = zoltCastRay(origin, direction, tolerance, a, lambda);
+    checker.check(.{ origin, direction, tolerance, a.*, lambda }, actual, expected);
+    return actual;
+}
+
+/// Origins and directions of the hand picked rays: towards the objects, along them, zero length, from far away
+const edge_rays = [_][2]P{
+    .{ .{ -3, 0, 0 }, .{ 6, 0, 0 } },
+    .{ .{ -3, 0.5, 0.5 }, .{ 6, 0, 0 } },
+    .{ .{ 0, 0, 0 }, .{ 0, 0, 0 } },
+    .{ .{ 0, 0, 0 }, .{ 1, 1, 1 } },
+    .{ .{ 3, 3, 3 }, .{ -1, -1, -1 } },
+    .{ .{ -3, 1, 1 }, .{ 6, 0, 0 } },
+    .{ .{ 1.0e20, 0, 0 }, .{ -2.0e20, 0, 0 } },
+    .{ .{ 0, 0, -1.0e-20 }, .{ 0, 0, 1.0e-20 } },
+};
+
 test "GJKClosestPoint.castRay" {
     var gen: Gen = .{ .rng = .{ .state = 0x2545f491 } };
     var checker: Checker = .{ .name = "GJKClosestPoint.castRay" };
     // Coverage: miss, hit at lambda 0 (start inside), hit at lambda > 0
     var counts: [3]u32 = @splat(0);
+
+    for (edge_pairs) |pair| {
+        for (edge_rays) |ray| {
+            for ([_]f32{ 1.0 + math.flt_epsilon, std.math.inf(f32) }) |lambda| {
+                for ([_]f32{ 0, 1.0e-4 }) |tolerance| {
+                    _ = checkCastRay(&checker, ray[0], ray[1], tolerance, &pair.a, lambda);
+                    _ = checkCastRay(&checker, ray[0], ray[1], tolerance, &pair.b, lambda);
+                }
+            }
+        }
+    }
 
     for (0..iterations) |_| {
         const s: f32 = if (gen.oneIn(6)) gen.scale() else 1;
@@ -698,14 +869,7 @@ test "GJKClosestPoint.castRay" {
             else => sub(mulS(gen.vec(-1, 1), s), origin),
         };
 
-        var expected = std.mem.zeroes(CastResult);
-        expected.lambda = lambda;
-        expected.result = jolt.jolt_gjk_cast_ray(&origin, &direction, tolerance, &a, &expected.lambda, &expected.simplex);
-        expected.simplex = masked(expected.simplex, .yp);
-
-        const actual = zoltCastRay(origin, direction, tolerance, &a, lambda);
-        checker.check(.{ origin, direction, tolerance, a, lambda }, actual, expected);
-
+        const actual = checkCastRay(&checker, origin, direction, tolerance, &a, lambda);
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
@@ -723,6 +887,17 @@ fn zoltCastShape(start: [16]f32, direction: P, tolerance: f32, a_desc: *const Sh
     return .{ .result = result, .lambda = lambda, .simplex = storeSimplex(&gjk, .yp) };
 }
 
+fn checkCastShape(checker: *Checker, start: [16]f32, direction: P, tolerance: f32, a: *const ShapeDesc, b: *const ShapeDesc, lambda: f32) CastResult {
+    var expected = std.mem.zeroes(CastResult);
+    expected.lambda = lambda;
+    expected.result = jolt.jolt_gjk_cast_shape(&start, &direction, tolerance, a, b, &expected.lambda, &expected.simplex);
+    expected.simplex = masked(expected.simplex, .yp);
+
+    const actual = zoltCastShape(start, direction, tolerance, a, b, lambda);
+    checker.check(.{ a.*, b.*, start, direction, tolerance, lambda }, actual, expected);
+    return actual;
+}
+
 /// Cast direction for a shape cast from start towards B
 fn castDirection(gen: *Gen, start: [16]f32, b: *const ShapeDesc) P {
     const translation: P = start[12..15].*;
@@ -732,10 +907,32 @@ fn castDirection(gen: *Gen, start: [16]f32, b: *const ShapeDesc) P {
     };
 }
 
+/// Start transforms and directions of the hand picked shape casts
+const edge_casts = blk: {
+    @setEvalBranchQuota(100_000);
+    break :blk [_]struct { start: [16]f32, direction: P }{
+        .{ .start = identity_transform, .direction = .{ 0, 0, 0 } },
+        .{ .start = identity_transform, .direction = .{ 1, 0, 0 } },
+        .{ .start = storeMat44(Mat44.translation(Vec3.init(-4, 0, 0))), .direction = .{ 8, 0, 0 } },
+        .{ .start = storeMat44(Mat44.translation(Vec3.init(-4, 0.5, 0.5))), .direction = .{ 8, 0, 0 } },
+        .{ .start = storeMat44(Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.5 * math.pi), Vec3.init(0, 4, 0))), .direction = .{ 0, -8, 0 } },
+        .{ .start = storeMat44(Mat44.translation(Vec3.init(-1.0e20, 0, 0))), .direction = .{ 2.0e20, 0, 0 } },
+    };
+};
+
 test "GJKClosestPoint.castShape" {
     var gen: Gen = .{ .rng = .{ .state = 0x6a09e667 } };
     var checker: Checker = .{ .name = "GJKClosestPoint.castShape" };
     var counts: [3]u32 = @splat(0);
+
+    for (edge_pairs) |pair| {
+        for (edge_casts) |cast| {
+            for ([_]f32{ 1.0 + math.flt_epsilon, std.math.inf(f32) }) |lambda| {
+                _ = checkCastShape(&checker, cast.start, cast.direction, 1.0e-4, &pair.a, &pair.b, lambda);
+                _ = checkCastShape(&checker, cast.start, cast.direction, 0, &pair.b, &pair.a, lambda);
+            }
+        }
+    }
 
     for (0..iterations / 2) |_| {
         const pair = gen.pair();
@@ -743,15 +940,7 @@ test "GJKClosestPoint.castShape" {
         const direction = castDirection(&gen, start, &pair[1]);
         const tolerance = gen.tolerance();
         const lambda = gen.lambda();
-
-        var expected = std.mem.zeroes(CastResult);
-        expected.lambda = lambda;
-        expected.result = jolt.jolt_gjk_cast_shape(&start, &direction, tolerance, &pair[0], &pair[1], &expected.lambda, &expected.simplex);
-        expected.simplex = masked(expected.simplex, .yp);
-
-        const actual = zoltCastShape(start, direction, tolerance, &pair[0], &pair[1], lambda);
-        checker.check(.{ pair, start, direction, tolerance, lambda }, actual, expected);
-
+        const actual = checkCastShape(&checker, start, direction, tolerance, &pair[0], &pair[1], lambda);
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
@@ -781,10 +970,35 @@ fn zoltCastShapeWithConvexRadius(start: [16]f32, direction: P, tolerance: f32, a
     return .{ .result = result, .lambda = lambda, .point_a = arr3(point_a), .point_b = arr3(point_b), .separating_axis = arr3(separating_axis), .simplex = storeSimplex(&gjk, .ypq) };
 }
 
+fn checkCastShapeWithConvexRadius(checker: *Checker, start: [16]f32, direction: P, tolerance: f32, a: *const ShapeDesc, b: *const ShapeDesc, convex_radius_a: f32, convex_radius_b: f32, lambda: f32) CastRadiusResult {
+    var expected = std.mem.zeroes(CastRadiusResult);
+    expected.lambda = lambda;
+    expected.point_a = sentinel_p;
+    expected.point_b = sentinel_p;
+    expected.separating_axis = sentinel_p;
+    expected.result = jolt.jolt_gjk_cast_shape_radius(&start, &direction, tolerance, a, b, convex_radius_a, convex_radius_b, &expected.lambda, &expected.point_a, &expected.point_b, &expected.separating_axis, &expected.simplex);
+    expected.simplex = masked(expected.simplex, .ypq);
+
+    const actual = zoltCastShapeWithConvexRadius(start, direction, tolerance, a, b, convex_radius_a, convex_radius_b, lambda);
+    checker.check(.{ a.*, b.*, start, direction, tolerance, lambda, convex_radius_a, convex_radius_b }, actual, expected);
+    return actual;
+}
+
 test "GJKClosestPoint.castShapeWithConvexRadius" {
     var gen: Gen = .{ .rng = .{ .state = 0xbb67ae85 } };
     var checker: Checker = .{ .name = "GJKClosestPoint.castShapeWithConvexRadius" };
     var counts: [3]u32 = @splat(0);
+
+    for (edge_pairs) |pair| {
+        for (edge_casts) |cast| {
+            for ([_]f32{ 1.0 + math.flt_epsilon, std.math.inf(f32) }) |lambda| {
+                for ([_][2]f32{ .{ 0, 0 }, .{ 0.1, 0 }, .{ 0.05, 0.5 } }) |radius| {
+                    _ = checkCastShapeWithConvexRadius(&checker, cast.start, cast.direction, 1.0e-4, &pair.a, &pair.b, radius[0], radius[1], lambda);
+                    _ = checkCastShapeWithConvexRadius(&checker, cast.start, cast.direction, 0, &pair.b, &pair.a, radius[0], radius[1], lambda);
+                }
+            }
+        }
+    }
 
     for (0..iterations / 2) |_| {
         const pair = gen.pair();
@@ -794,18 +1008,7 @@ test "GJKClosestPoint.castShapeWithConvexRadius" {
         const lambda = gen.lambda();
         const convex_radius_a = gen.convexRadius();
         const convex_radius_b = gen.convexRadius();
-
-        var expected = std.mem.zeroes(CastRadiusResult);
-        expected.lambda = lambda;
-        expected.point_a = sentinel_p;
-        expected.point_b = sentinel_p;
-        expected.separating_axis = sentinel_p;
-        expected.result = jolt.jolt_gjk_cast_shape_radius(&start, &direction, tolerance, &pair[0], &pair[1], convex_radius_a, convex_radius_b, &expected.lambda, &expected.point_a, &expected.point_b, &expected.separating_axis, &expected.simplex);
-        expected.simplex = masked(expected.simplex, .ypq);
-
-        const actual = zoltCastShapeWithConvexRadius(start, direction, tolerance, &pair[0], &pair[1], convex_radius_a, convex_radius_b, lambda);
-        checker.check(.{ pair, start, direction, tolerance, lambda, convex_radius_a, convex_radius_b }, actual, expected);
-
+        const actual = checkCastShapeWithConvexRadius(&checker, start, direction, tolerance, &pair[0], &pair[1], convex_radius_a, convex_radius_b, lambda);
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
@@ -859,12 +1062,38 @@ fn zoltEPASteps(a_desc: *const ShapeDesc, convex_radius_a: f32, b_desc: *const S
     return result;
 }
 
+fn checkEPASteps(checker: *Checker, a: *const ShapeDesc, convex_radius_a: f32, b: *const ShapeDesc, convex_radius_b: f32, include_mode: c_int, collision_tolerance: f32, penetration_tolerance: f32, v: P, out_simplex_size: *u32) EPAStepsResult {
+    var expected: EPAStepsResult = undefined;
+    expected.v = v;
+    expected.point_a = sentinel_p;
+    expected.point_b = sentinel_p;
+    var epa_result: c_int = undefined;
+    expected.status = jolt.jolt_epa_penetration_depth_steps(a, convex_radius_a, b, convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, &expected.v, &expected.point_a, &expected.point_b, &expected.gjk_v, &expected.gjk_point_a, &expected.gjk_point_b, &epa_result);
+    expected.epa_result = epa_result;
+
+    const actual = zoltEPASteps(a, convex_radius_a, b, convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, v, out_simplex_size);
+    checker.check(.{ a.*, b.*, convex_radius_a, convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, v }, actual, expected);
+    return actual;
+}
+
 test "EPAPenetrationDepth steps" {
     var gen: Gen = .{ .rng = .{ .state = 0x3c6ef372 } };
     var checker: Checker = .{ .name = "EPAPenetrationDepth steps" };
     // Coverage: GJK status (not colliding, colliding, indeterminate), EPA result per simplex size of the GJK step (1 .. 4)
     var status_counts: [3]u32 = @splat(0);
     var epa_counts: [5][2]u32 = @splat(.{ 0, 0 });
+
+    var simplex_size: u32 = 0;
+    for (edge_pairs) |pair| {
+        for ([_]P{ .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 1, 1, 1 } }) |v| {
+            for ([_][2]f32{ .{ 0, 0 }, .{ 0.1, 0 }, .{ 0.05, 0.5 } }) |radius| {
+                for ([_]c_int{ 0, 1 }) |include_mode| {
+                    _ = checkEPASteps(&checker, &pair.a, radius[0], &pair.b, radius[1], include_mode, 1.0e-4, math.flt_epsilon, v, &simplex_size);
+                    _ = checkEPASteps(&checker, &pair.b, radius[0], &pair.a, radius[1], include_mode, 1.0e-3, 1.0e-3, v, &simplex_size);
+                }
+            }
+        }
+    }
 
     for (0..iterations / 2) |_| {
         const pair = gen.pair();
@@ -874,18 +1103,7 @@ test "EPAPenetrationDepth steps" {
         const collision_tolerance = gen.pick(f32, &.{ 1.0e-4, 1.0e-4, 1.0e-3, 1.0e-2 });
         const penetration_tolerance = gen.penetrationTolerance();
         const v = gen.initialVNonZero(&pair[0], &pair[1]);
-
-        var expected: EPAStepsResult = undefined;
-        expected.v = v;
-        expected.point_a = sentinel_p;
-        expected.point_b = sentinel_p;
-        var epa_result: c_int = undefined;
-        expected.status = jolt.jolt_epa_penetration_depth_steps(&pair[0], convex_radius_a, &pair[1], convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, &expected.v, &expected.point_a, &expected.point_b, &expected.gjk_v, &expected.gjk_point_a, &expected.gjk_point_b, &epa_result);
-        expected.epa_result = epa_result;
-
-        var simplex_size: u32 = 0;
-        const actual = zoltEPASteps(&pair[0], convex_radius_a, &pair[1], convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, v, &simplex_size);
-        checker.check(.{ pair, convex_radius_a, convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, v }, actual, expected);
+        const actual = checkEPASteps(&checker, &pair[0], convex_radius_a, &pair[1], convex_radius_b, include_mode, collision_tolerance, penetration_tolerance, v, &simplex_size);
 
         status_counts[@intCast(actual.status)] += 1;
         if (actual.epa_result >= 0)
@@ -921,10 +1139,31 @@ fn zoltGetPenetrationDepth(a_desc: *const ShapeDesc, convex_radius_a: f32, b_des
     return .{ .result = result, .v = arr3(v), .point_a = arr3(point_a), .point_b = arr3(point_b) };
 }
 
+fn checkGetPenetrationDepth(checker: *Checker, a: *const ShapeDesc, convex_radius_a: f32, b: *const ShapeDesc, convex_radius_b: f32, include_mode: c_int, collision_tolerance_sq: f32, penetration_tolerance: f32, v: P) PenetrationDepthResult {
+    var expected: PenetrationDepthResult = undefined;
+    expected.v = v;
+    expected.point_a = sentinel_p;
+    expected.point_b = sentinel_p;
+    expected.result = jolt.jolt_epa_get_penetration_depth(a, convex_radius_a, b, convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, &expected.v, &expected.point_a, &expected.point_b);
+
+    const actual = zoltGetPenetrationDepth(a, convex_radius_a, b, convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, v);
+    checker.check(.{ a.*, b.*, convex_radius_a, convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, v }, actual, expected);
+    return actual;
+}
+
 test "EPAPenetrationDepth.getPenetrationDepth" {
     var gen: Gen = .{ .rng = .{ .state = 0xa54ff53a } };
     var checker: Checker = .{ .name = "EPAPenetrationDepth.getPenetrationDepth" };
     var counts: [2]u32 = @splat(0);
+
+    for (edge_pairs) |pair| {
+        for ([_][2]f32{ .{ 0, 0 }, .{ 0.1, 0 }, .{ 0.05, 0.5 } }) |radius| {
+            for ([_]c_int{ 0, 1 }) |include_mode| {
+                _ = checkGetPenetrationDepth(&checker, &pair.a, radius[0], &pair.b, radius[1], include_mode, 1.0e-8, math.flt_epsilon, .{ 1, 0, 0 });
+                _ = checkGetPenetrationDepth(&checker, &pair.b, radius[0], &pair.a, radius[1], include_mode, 1.0e-4, 1.0e-3, .{ 0, 1, 0 });
+            }
+        }
+    }
 
     for (0..iterations / 4) |_| {
         const pair = gen.pair();
@@ -934,16 +1173,7 @@ test "EPAPenetrationDepth.getPenetrationDepth" {
         const collision_tolerance_sq = gen.pick(f32, &.{ 1.0e-8, 1.0e-4, 1.0e-2 });
         const penetration_tolerance = gen.penetrationTolerance();
         const v = gen.initialVNonZero(&pair[0], &pair[1]);
-
-        var expected: PenetrationDepthResult = undefined;
-        expected.v = v;
-        expected.point_a = sentinel_p;
-        expected.point_b = sentinel_p;
-        expected.result = jolt.jolt_epa_get_penetration_depth(&pair[0], convex_radius_a, &pair[1], convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, &expected.v, &expected.point_a, &expected.point_b);
-
-        const actual = zoltGetPenetrationDepth(&pair[0], convex_radius_a, &pair[1], convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, v);
-        checker.check(.{ pair, convex_radius_a, convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, v }, actual, expected);
-
+        const actual = checkGetPenetrationDepth(&checker, &pair[0], convex_radius_a, &pair[1], convex_radius_b, include_mode, collision_tolerance_sq, penetration_tolerance, v);
         counts[@intFromBool(actual.result)] += 1;
     }
 
@@ -972,10 +1202,37 @@ fn zoltEPACastShape(start: [16]f32, direction: P, collision_tolerance: f32, pene
     return .{ .result = result, .lambda = lambda, .point_a = arr3(point_a), .point_b = arr3(point_b), .contact_normal = arr3(contact_normal) };
 }
 
+fn checkEPACastShape(checker: *Checker, start: [16]f32, direction: P, collision_tolerance: f32, penetration_tolerance: f32, a: *const ShapeDesc, b: *const ShapeDesc, convex_radius_a: f32, convex_radius_b: f32, return_deepest_point: bool, lambda: f32) EPACastResult {
+    var expected: EPACastResult = undefined;
+    expected.lambda = lambda;
+    expected.point_a = sentinel_p;
+    expected.point_b = sentinel_p;
+    expected.contact_normal = sentinel_p;
+    // (bool parameters are passed as int: a Zig bool argument was not received correctly by the C++ code)
+    expected.result = jolt.jolt_epa_cast_shape(&start, &direction, collision_tolerance, penetration_tolerance, a, b, convex_radius_a, convex_radius_b, @intFromBool(return_deepest_point), &expected.lambda, &expected.point_a, &expected.point_b, &expected.contact_normal);
+
+    const actual = zoltEPACastShape(start, direction, collision_tolerance, penetration_tolerance, a, b, convex_radius_a, convex_radius_b, return_deepest_point, lambda);
+    checker.check(.{ a.*, b.*, start, direction, collision_tolerance, penetration_tolerance, lambda, convex_radius_a, convex_radius_b, return_deepest_point }, actual, expected);
+    return actual;
+}
+
 test "EPAPenetrationDepth.castShape" {
     var gen: Gen = .{ .rng = .{ .state = 0x510e527f } };
     var checker: Checker = .{ .name = "EPAPenetrationDepth.castShape" };
     var counts: [3]u32 = @splat(0);
+
+    for (edge_pairs) |pair| {
+        if (pair.huge) continue;
+        for (edge_casts) |cast| {
+            if (cast.start[12] < -1.0e10) continue; // Huge
+            for ([_][2]f32{ .{ 0, 0 }, .{ 0.1, 0 }, .{ 0.05, 0.5 } }) |radius| {
+                for ([_]bool{ false, true }) |return_deepest_point| {
+                    _ = checkEPACastShape(&checker, cast.start, cast.direction, 1.0e-4, math.flt_epsilon, &pair.a, &pair.b, radius[0], radius[1], return_deepest_point, 1.0 + math.flt_epsilon);
+                    _ = checkEPACastShape(&checker, cast.start, cast.direction, 1.0e-3, 1.0e-3, &pair.b, &pair.a, radius[0], radius[1], return_deepest_point, std.math.inf(f32));
+                }
+            }
+        }
+    }
 
     for (0..iterations / 2) |_| {
         const pair = gen.pair();
@@ -987,17 +1244,7 @@ test "EPAPenetrationDepth.castShape" {
         const convex_radius_a = gen.convexRadius();
         const convex_radius_b = gen.convexRadius();
         const return_deepest_point = !gen.oneIn(4);
-
-        var expected: EPACastResult = undefined;
-        expected.lambda = lambda;
-        expected.point_a = sentinel_p;
-        expected.point_b = sentinel_p;
-        expected.contact_normal = sentinel_p;
-        expected.result = jolt.jolt_epa_cast_shape(&start, &direction, collision_tolerance, penetration_tolerance, &pair[0], &pair[1], convex_radius_a, convex_radius_b, @intFromBool(return_deepest_point), &expected.lambda, &expected.point_a, &expected.point_b, &expected.contact_normal);
-
-        const actual = zoltEPACastShape(start, direction, collision_tolerance, penetration_tolerance, &pair[0], &pair[1], convex_radius_a, convex_radius_b, return_deepest_point, lambda);
-        checker.check(.{ pair, start, direction, collision_tolerance, penetration_tolerance, lambda, convex_radius_a, convex_radius_b, return_deepest_point }, actual, expected);
-
+        const actual = checkEPACastShape(&checker, start, direction, collision_tolerance, penetration_tolerance, &pair[0], &pair[1], convex_radius_a, convex_radius_b, return_deepest_point, lambda);
         counts[if (!actual.result) 0 else if (actual.lambda == 0) 1 else 2] += 1;
     }
 
@@ -1135,7 +1382,7 @@ test "EPAConvexHullBuilder" {
     for (0..iterations / 20) |_| {
         const count = 4 + gen.index(if (gen.oneIn(4)) EPAConvexHullBuilder.max_points - 3 else 40);
         const pts = points[0..count];
-        switch (gen.next() % 8) {
+        switch (gen.next() % 9) {
             // Points on a sphere around the origin (like EPA on spheres)
             0, 1 => for (pts) |*p| {
                 p.* = gen.unit();
@@ -1156,6 +1403,19 @@ test "EPAConvexHullBuilder" {
             // Nearly flat
             5 => for (pts) |*p| {
                 p.* = .{ gen.float(-1, 1), gen.float(-1, 1), gen.rng.float(-1.0e-4, 1.0e-4) };
+            },
+            // A tetrahedron, then points (nearly) in the plane of one of its faces (coplanar triangles, islands in findEdge)
+            6 => {
+                const noise = gen.pick(f32, &.{ 0, 1.0e-7, 1.0e-6, 1.0e-5 });
+                for (pts, 0..) |*p, i| {
+                    p.* = switch (i) {
+                        0 => .{ -2, -2, 0 },
+                        1 => .{ 2, -2, 0 },
+                        2 => .{ 0, 2, 0 },
+                        3 => .{ 0, 0, if (gen.oneIn(2)) 1 else -1 },
+                        else => .{ if (gen.oneIn(2)) gen.grid(3) * 0.5 else gen.rng.float(-1.5, 1.5), if (gen.oneIn(2)) gen.grid(3) * 0.5 else gen.rng.float(-1.5, 1.5), gen.rng.float(-noise, noise) },
+                    };
+                }
             },
             else => for (pts) |*p| {
                 p.* = gen.vec(-1, 1);
