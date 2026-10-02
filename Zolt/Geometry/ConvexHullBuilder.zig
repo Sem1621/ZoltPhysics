@@ -272,6 +272,13 @@ pub const ConvexHullBuilder = struct {
 
     /// Takes all positions as provided by the constructor and use them to build a hull
     /// Any points that are closer to the hull than tolerance will be discarded
+    ///
+    /// Nearly degenerate point clouds (e.g. nearly colinear points or tiny clusters with a small tolerance) can violate
+    /// three of Jolt's asserts: `edges.size() >= 3` in AddPoint (all faces face the new point, the result is then
+    /// `too_few_faces`), `IsFacing` in FindEdge (a face no longer faces a point of its conflict list after its plane was
+    /// recalculated) and `normal_len > 0` in DetermineMaxError (a face with a zero normal survived). A Jolt build without
+    /// asserts continues and Zolt follows it bit for bit, so these three are only checked when `Core.enable_asserts`
+    /// (a plain `std.debug.assert` would be undefined behavior in ReleaseFast). With asserts enabled Zolt panics like Jolt.
     /// @param max_vertices Max vertices to allow in the hull. Specify std.math.maxInt(i32) (INT_MAX) if there is no limit.
     /// @param tolerance Max distance that a point is allowed to be outside of the hull
     /// @return Status code that reports if the hull was created or not and the error message when building fails
@@ -701,7 +708,7 @@ pub const ConvexHullBuilder = struct {
             for (self.faces.items) |f| {
                 // Check if point is on or in front of plane
                 const normal_len = f.normal.length();
-                assert(normal_len > 0.0);
+                if (Core.enable_asserts) assert(normal_len > 0.0); // Reachable with degenerate input, see `initialize`
                 const plane_dist = f.normal.dot(v.sub(f.centroid)) / normal_len;
                 if (plane_dist > -coplanar_slop_factor * coplanar_distance) {
                     // Check distance to the edges of this face
@@ -861,7 +868,7 @@ pub const ConvexHullBuilder = struct {
         var edges: FullEdges = .empty;
         defer edges.deinit(self.allocator);
         try self.findEdge(facing_face, pos, &edges);
-        assert(edges.items.len >= 3);
+        if (Core.enable_asserts) assert(edges.items.len >= 3); // Reachable with degenerate input, see `initialize`
 
         // Create new faces
         try out_new_faces.ensureTotalCapacity(self.allocator, edges.items.len);
@@ -1021,7 +1028,7 @@ pub const ConvexHullBuilder = struct {
         assert(out_edges.items.len == 0);
 
         // Should start with a facing face
-        assert(facing_face.isFacing(vertex));
+        if (Core.enable_asserts) assert(facing_face.isFacing(vertex)); // Reachable with degenerate input, see `initialize`
 
         // Flag as removed
         facing_face.removed = true;
