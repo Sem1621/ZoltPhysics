@@ -13,6 +13,8 @@ pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
 pub const binaryHeapPop = @import("Core/BinaryHeap.zig").binaryHeapPop;
 pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
+pub const ByteBuffer = @import("Core/ByteBuffer.zig").ByteBuffer;
+pub const ByteBufferVector = @import("Core/ByteBuffer.zig").ByteBufferVector;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
 pub const HashCombine = @import("Core/HashCombine.zig");
@@ -25,6 +27,14 @@ pub const RefConst = @import("Core/Reference.zig").RefConst;
 pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const STLLocalAllocator = @import("Core/STLLocalAllocator.zig").STLLocalAllocator;
+pub const STLTempAllocator = @import("Core/STLTempAllocator.zig").STLTempAllocator;
+pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
+pub const StridedPtrConst = @import("Core/StridedPtr.zig").StridedPtrConst;
+pub const TempAllocator = @import("Core/TempAllocator.zig").TempAllocator;
+pub const TempAllocatorImpl = @import("Core/TempAllocator.zig").TempAllocatorImpl;
+pub const TempAllocatorImplWithMallocFallback = @import("Core/TempAllocator.zig").TempAllocatorImplWithMallocFallback;
+pub const TempAllocatorMalloc = @import("Core/TempAllocator.zig").TempAllocatorMalloc;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
@@ -63,6 +73,7 @@ pub const Vector = @import("Math/Vector.zig").Vector;
 const source_files = .{
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
+    @import("Core/ByteBuffer.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
     @import("Core/HashCombine.zig"),
@@ -72,6 +83,10 @@ const source_files = .{
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/STLLocalAllocator.zig"),
+    @import("Core/STLTempAllocator.zig"),
+    @import("Core/StridedPtr.zig"),
+    @import("Core/TempAllocator.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),
