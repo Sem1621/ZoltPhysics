@@ -32,6 +32,7 @@ const Color = @import("Color.zig").Color;
 const FixedSizeFreeList = @import("FixedSizeFreeList.zig").FixedSizeFreeList;
 const JobSystem = @import("JobSystem.zig").JobSystem;
 const JobSystemWithBarrier = @import("JobSystemWithBarrier.zig").JobSystemWithBarrier;
+const sleepUncancelable = @import("JobSystemWithBarrier.zig").sleepUncancelable;
 const Semaphore = @import("Semaphore.zig").Semaphore;
 const math = @import("../Math/Math.zig");
 
@@ -458,15 +459,6 @@ pub const JobSystemThreadPool = struct {
     }
 };
 
-/// std::this_thread::sleep_for, not cancelable (see "Threading" in the porting guide)
-fn sleepUncancelable(io: std.Io, duration: std.Io.Duration) void {
-    const old_cancel_protection = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(old_cancel_protection);
-    io.sleep(duration, .awake) catch |err| switch (err) {
-        error.Canceled => unreachable, // Cancelation is blocked
-    };
-}
-
 fn incrementCounter(counter: *std.atomic.Value(u32)) void {
     _ = counter.fetchAdd(1, .monotonic);
 }
@@ -606,7 +598,8 @@ test "JobSystemThreadPool jobs creating jobs" {
     defer pool.deinit();
 
     // Each job creates two jobs until max_depth is reached (a binary tree of 2^max_depth - 1 jobs), the new jobs are added
-    // to the barrier while it is being waited on
+    // to the barrier while it is being waited on. They are created with a dependency that is removed after adding them,
+    // so that they cannot finish before addJobs has returned (see the note in JobSystemWithBarrier.zig).
     const Context = struct {
         job_system: JobSystem,
         barrier: *Barrier,
@@ -619,8 +612,9 @@ test "JobSystemThreadPool jobs creating jobs" {
             if (depth + 1 < max_depth) {
                 var children: [2]JobHandle = undefined;
                 for (&children) |*child|
-                    child.* = self.job_system.createJob("Child", Color.green, .init(run, .{ self, depth + 1 }), .{}) catch @panic("out of memory");
+                    child.* = self.job_system.createJob("Child", Color.green, .init(run, .{ self, depth + 1 }), .{ .num_dependencies = 1 }) catch @panic("out of memory");
                 self.barrier.addJobs(&children);
+                JobHandle.removeDependencies(&children, .{});
                 for (&children) |*child| child.deinit();
             }
         }

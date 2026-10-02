@@ -169,6 +169,10 @@ both types) when porting code needs them.
   disappear.
 - Construction/destruction: `T.init(...) T` / `T.init(allocator, ...) !T` with `deinit(self: *T)`
   for values; `T.create(allocator, ...) !*T` with `destroy()` for heap objects.
+- Types that hand out pointers to themselves during construction (worker threads, jobs that store
+  the job system) cannot be returned by value. They have a default constructed `pub const empty`
+  and initialize in place: `var pool: JobSystemThreadPool = .empty; try pool.init(allocator, io, ...)`
+  (Jolt's default constructor + `Init`). Document that they must not be moved after `init`.
 - `TempAllocator` is ported as its own type (it is a stack allocator with LIFO semantics), and
   additionally exposes a `std.mem.Allocator` interface for use with std containers.
 - `JPH_STACK_ALLOC(n)` (alloca): use a fixed size array when `n` is comptime known, otherwise a
@@ -188,7 +192,7 @@ both types) when porting code needs them.
 | `QuickSort`, `InsertionSort`     | ports of `Core/QuickSort.h` / `Core/InsertionSort.h` (std::sort / std.sort orders differ, which breaks determinism for equal keys) |
 | `String`, `string_view`          | `[]const u8` (owned strings: `[]u8` + allocator)                      |
 | `std::pair<A, B>`                | named struct                                                          |
-| `std::function`                  | function pointer + `*anyopaque` context, or a comptime `anytype` callback when the call site is static |
+| `std::function`                  | function pointer + `*anyopaque` context, or a comptime `anytype` callback when the call site is static. When the function is stored (a job's function, a thread init/exit callback): an inline closure like `JobSystem.JobFunction` / `JobSystemThreadPool.InitExitFunction`. `JobFunction.init(comptime function, args_tuple)` stores a copy of the arguments (at most 4 words and at most `usize` aligned, checked at compile time; capture larger or more aligned data by pointer) and never allocates. A lambda capture becomes the tuple: by reference → a pointer, by value → a copy (`[&values, i] { ... }` → `.init(f, .{ &values, i })`) |
 | iterator pairs `(inBegin, inEnd)` | a slice; comparators follow std.sort: `context` + `lessThan(context, a, b)` (see `Core/QuickSort.zig`) |
 
 Container methods use the std.ArrayList names, for `std.ArrayList` and Zolt's own containers
@@ -306,6 +310,11 @@ pub const ContactListener = struct {
 };
 ```
 
+Exception: a pure interface whose identity is its address uses pattern A (the implementation embeds
+`base: Iface`, which holds the vtable, and hands out `*Iface`), because a fat pointer does not fit in
+the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keeps its barrier in a
+`std.atomic.Value(usize)`), implemented by `JobSystemWithBarrier.BarrierImpl`.
+
 **Visitors / templated callbacks** (`template <class Visitor> void Walk(Visitor &)`) become
 `anytype` parameters, which keeps static dispatch like the C++.
 
@@ -374,7 +383,7 @@ results are reproducible as long as the code follows these rules:
 Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread.Mutex`,
 `Condition`, `Semaphore`, `ResetEvent`, `Pool` and `WaitGroup` no longer exist):
 - **Where `io` comes from.** A type that blocks (locks, waits) gets an `io: std.Io` in `init`, next to
-  the allocator, and stores it, e.g. `JobSystemThreadPool.init(allocator, io, ...)`. Applications get
+  the allocator, and stores it, e.g. `pool.init(allocator, io, ...)` for `JobSystemThreadPool`. Applications get
   it from `std.process.Init` (`init.io`) or `std.Io.Threaded`; tests use `std.testing.io`.
 - **Small sync primitives take `io` per call** instead of storing it, because they are embedded in many
   other structs (Jolt's `Mutex` is a member of BodyManager, MutexArray, ...): `mutex.lock(io)`,
@@ -513,3 +522,11 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `LFHMAllocatorContext::Allocate(inSize, inAlignment, outWriteOffset) -> bool` | `allocate(size, alignment) ?u32` | out parameter |
 | `mAllocator` (`LFHMAllocator &` in `LFHMAllocatorContext` / `LockFreeHashMap`) | `lfhm_allocator` | `allocator` is the `std.mem.Allocator` |
 | `LockFreeHashMap(LFHMAllocator &)` + `Init(inMaxBuckets)` | `init(allocator, &lfhm_allocator, max_buckets)` | constructor + Init |
+| `JobSystemThreadPool()` + `Init(inMaxJobs, inMaxBarriers, inNumThreads)` | `var pool: JobSystemThreadPool = .empty;` + `try pool.init(allocator, io, max_jobs, max_barriers, .{ .num_threads = n })` | constructor + Init, in place (the threads keep a pointer to the pool) |
+| `JobSystemWithBarrier(inMaxBarriers)` / `JobSystemSingleThreaded(inMaxJobs)` (or constructor + `Init`) | `init(allocator, io, max_barriers)` / `init(allocator, io, max_jobs)` | constructor + Init |
+| `JobHandle` copy constructor / copy assignment | `clone()` / `set(&other)` (a plain assignment moves, `deinit()` is the destructor) | no copy constructors |
+| `JobHandle::sRemoveDependencies(const JobHandle *, uint)` / `sRemoveDependencies(StaticArray<JobHandle, N> &)` | `removeDependencies(slice, .{})` / `removeDependenciesStaticArray(&array, .{})` | overloads |
+| `JobSystem::JobFunction` / `JobSystemThreadPool::InitExitFunction` (`std::function`) | `JobFunction.init(f, .{ args })` / `InitExitFunction.init(f, .{ args })` (calls `f(args..., thread_index)`), invoked with `call()` | closure (see the containers table) |
+| `Job::mReferenceCount`             | `ref_count: RefCount`                  | same as RefTarget (reference counting)  |
+| `JobSystemWithBarrier::BarrierImpl` `mJobReadIndex` / `mJobWriteIndex`, `mNumToAcquire` | `read_state.job_read_index` / `write_state.job_write_index`, `write_state.num_to_acquire` | grouped in cache line aligned structs (field reordering) |
+| `JobSystemThreadPool::mTail`       | `tail_state.tail`                      | cache line aligned struct (field reordering) |

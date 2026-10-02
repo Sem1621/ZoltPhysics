@@ -13,6 +13,13 @@
 //! - Jolt aligns mJobReadIndex and mJobWriteIndex to cache lines (mNumToAcquire shares the cache line of
 //!   mJobWriteIndex). Zig reorders struct fields, so they are grouped in cache line aligned structs that occupy whole
 //!   cache lines: `read_state.job_read_index`, `write_state.job_write_index` and `write_state.num_to_acquire`.
+//!
+//! Note (inherited from Jolt): a job that is added to a barrier while another thread waits on it must not be able to
+//! finish before addJob / addJobs has returned, unless another job in the barrier (besides the one calling addJob)
+//! stays pending until then. addJob sets the barrier on the job before it increments num_to_acquire, so a job that
+//! finishes in between releases the semaphore before it is counted, and wait() can return while jobs are still
+//! running. Create such jobs with a dependency and remove it after adding them (PhysicsSystem guarantees this through
+//! jobs that depend on each other).
 
 const std = @import("std");
 const Core = @import("Core.zig");
@@ -325,8 +332,8 @@ pub const JobSystemWithBarrier = struct {
     };
 };
 
-/// std::this_thread::sleep_for, not cancelable (see "Threading" in the porting guide)
-fn sleepUncancelable(io: std.Io, duration: std.Io.Duration) void {
+/// std::this_thread::sleep_for, not cancelable (see "Threading" in the porting guide). Also used by JobSystemThreadPool.
+pub fn sleepUncancelable(io: std.Io, duration: std.Io.Duration) void {
     const old_cancel_protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(old_cancel_protection);
     io.sleep(duration, .awake) catch |err| switch (err) {
