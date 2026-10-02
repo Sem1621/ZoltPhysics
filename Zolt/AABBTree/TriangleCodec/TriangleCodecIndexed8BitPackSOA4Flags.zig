@@ -199,7 +199,9 @@ pub const TriangleCodecIndexed8BitPackSOA4Flags = struct {
         /// Output vertices as an index into the original vertex list (vertices), sorted according to occurrence
         vertices: std.ArrayList(u32) = .empty,
         /// Maps from the original mesh vertex index (vertices) to the index in our output vertices (self.vertices)
-        vertex_map: std.ArrayList(u32) = .empty,
+        vertex_map: VertexMap = .empty,
+
+        const VertexMap = std.ArrayList(u32);
 
         /// Construct the encoding context
         pub fn init(allocator: std.mem.Allocator, vertices: []const Float3) std.mem.Allocator.Error!EncodingContext {
