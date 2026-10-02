@@ -369,5 +369,6 @@ def main():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # Allow piping into head
+    if hasattr(signal, "SIGPIPE"):  # POSIX only
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # Allow piping into head
     main()
