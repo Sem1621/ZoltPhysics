@@ -302,7 +302,8 @@ fn checkHeapSequences(
 
     const ops_per_sequence = 1000;
     for (0..iterations / ops_per_sequence) |sequence| {
-        const key_range = [_]u32{ 1, 2, 4, 16, 1000 }[sequence % 5];
+        const key_ranges_heap = [_]u32{ 1, 2, 4, 16, 1000 };
+        const key_range = key_ranges_heap[sequence % key_ranges_heap.len];
         var len: u32 = 0;
         var next_index: u32 = 0;
         for (0..ops_per_sequence) |op| {
@@ -412,10 +413,10 @@ test "HashCombine.hash64 and Hash<T>" {
     }
 
     // -0 and +0 hash the same
-    float_checker.check(-0.0, HashCombine.hash(@as(f32, -0.0)), jolt.jolt_hash_float(-0.0));
-    float_checker.check(-0.0, HashCombine.hash(@as(f32, -0.0)), jolt.jolt_hash_float(0.0));
-    double_checker.check(-0.0, HashCombine.hash(@as(f64, -0.0)), jolt.jolt_hash_double(-0.0));
-    double_checker.check(-0.0, HashCombine.hash(@as(f64, -0.0)), jolt.jolt_hash_double(0.0));
+    float_checker.check(@as(f32, -0.0), HashCombine.hash(@as(f32, -0.0)), jolt.jolt_hash_float(-0.0));
+    float_checker.check(@as(f32, -0.0), HashCombine.hash(@as(f32, -0.0)), jolt.jolt_hash_float(0.0));
+    double_checker.check(@as(f64, -0.0), HashCombine.hash(@as(f64, -0.0)), jolt.jolt_hash_double(-0.0));
+    double_checker.check(@as(f64, -0.0), HashCombine.hash(@as(f64, -0.0)), jolt.jolt_hash_double(0.0));
 
     try finishAll(&.{ &hash64_checker, &float_checker, &double_checker, &int_checker, &uint32_checker, &uint64_checker, &char_checker });
 }
@@ -501,9 +502,9 @@ test "Mt19937 vs std::mt19937" {
 
     // Default constructed
     jolt.jolt_mt19937_default(&expected, count);
-    var random = zolt.Mt19937.init(zolt.Mt19937.default_seed);
+    var default_random = zolt.Mt19937.init(zolt.Mt19937.default_seed);
     for (expected, 0..) |e, i|
-        checker.check(.{ .seed = zolt.Mt19937.default_seed, .index = i }, random.next(), e);
+        checker.check(.{ .seed = zolt.Mt19937.default_seed, .index = i }, default_random.next(), e);
 
     try checker.finish();
 }
@@ -533,11 +534,13 @@ fn makeCurve(points: []const [2]f32) !LinearCurve {
     return curve;
 }
 
+const special_x = [_]f32{ 0.0, -0.0, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32), 1.0e30, -1.0e30 };
+
 /// X values to sample: around the curve's range, exactly at the points, and special values
 fn sampleX(rng: *Rng, points: []const [2]f32) f32 {
     return switch (rng.next() % 8) {
         0 => if (points.len > 0) points[rng.next() % points.len][0] else 0.0,
-        1 => ([_]f32{ 0.0, -0.0, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32), 1.0e30, -1.0e30 })[rng.next() % 7],
+        1 => special_x[rng.next() % special_x.len],
         else => rng.float(-12, 12),
     };
 }
