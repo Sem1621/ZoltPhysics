@@ -17,6 +17,8 @@ pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
 pub const FixedSizeFreeList = @import("Core/FixedSizeFreeList.zig").FixedSizeFreeList;
 pub const HashCombine = @import("Core/HashCombine.zig");
+pub const HashTable = @import("Core/HashTable.zig").HashTable;
+pub const HashTableOptions = @import("Core/HashTable.zig").HashTableOptions;
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const JobHandle = @import("Core/JobSystem.zig").JobSystem.JobHandle;
 pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
@@ -32,6 +34,8 @@ pub const MutexBase = @import("Core/Mutex.zig").MutexBase;
 pub const SharedMutex = @import("Core/Mutex.zig").SharedMutex;
 pub const SharedMutexBase = @import("Core/Mutex.zig").SharedMutexBase;
 pub const MutexArray = @import("Core/MutexArray.zig").MutexArray;
+pub const IDToObjectMap = @import("Core/ObjectToIDMap.zig").IDToObjectMap;
+pub const ObjectToIDMap = @import("Core/ObjectToIDMap.zig").ObjectToIDMap;
 pub const prefetchL1 = @import("Core/Prefetch.zig").prefetchL1;
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
 pub const Ref = @import("Core/Reference.zig").Ref;
@@ -40,6 +44,10 @@ pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const Semaphore = @import("Core/Semaphore.zig").Semaphore;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const UnorderedMap = @import("Core/UnorderedMap.zig").UnorderedMap;
+pub const UnorderedMapDetail = @import("Core/UnorderedMap.zig").UnorderedMapDetail;
+pub const UnorderedSet = @import("Core/UnorderedSet.zig").UnorderedSet;
+pub const UnorderedSetDetail = @import("Core/UnorderedSet.zig").UnorderedSetDetail;
 
 // Math
 pub const BVec16 = @import("Math/BVec16.zig").BVec16;
@@ -82,6 +90,7 @@ const source_files = .{
     @import("Core/Core.zig"),
     @import("Core/FixedSizeFreeList.zig"),
     @import("Core/HashCombine.zig"),
+    @import("Core/HashTable.zig"),
     @import("Core/InsertionSort.zig"),
     @import("Core/JobSystem.zig"),
     @import("Core/JobSystemSingleThreaded.zig"),
@@ -91,11 +100,14 @@ const source_files = .{
     @import("Core/Mt19937.zig"),
     @import("Core/Mutex.zig"),
     @import("Core/MutexArray.zig"),
+    @import("Core/ObjectToIDMap.zig"),
     @import("Core/Prefetch.zig"),
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/Semaphore.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/UnorderedMap.zig"),
+    @import("Core/UnorderedSet.zig"),
     @import("Math/BVec16.zig"),
     @import("Math/DMat44.zig"),
     @import("Math/Double3.zig"),

@@ -188,18 +188,28 @@ both types) when porting code needs them.
 |----------------------------------|-----------------------------------------------------------------------|
 | `Array<T>`                       | `std.ArrayList(T)` (unmanaged in 0.16: pass the allocator to every mutating call) |
 | `StaticArray<T, N>`              | port of `Core/StaticArray.h` (std has no BoundedArray anymore)        |
-| `UnorderedMap`, `UnorderedSet`, `HashTable` | port of Jolt's `Core/HashTable.h` when iteration order can affect results, otherwise `std.HashMapUnmanaged` |
+| `UnorderedMap`, `UnorderedSet`, `HashTable` | port of Jolt's `Core/HashTable.h` when iteration order can affect results, otherwise `std.HashMapUnmanaged`: `UnorderedMap(Key, Value, .{})`, `UnorderedSet(Key, .{})`, the `Hash` / `KeyEqual` template arguments become `HashTableOptions(Key){ .hash, .key_equal }` |
 | `QuickSort`, `InsertionSort`     | ports of `Core/QuickSort.h` / `Core/InsertionSort.h` (std::sort / std.sort orders differ, which breaks determinism for equal keys) |
 | `String`, `string_view`          | `[]const u8` (owned strings: `[]u8` + allocator)                      |
 | `std::pair<A, B>`                | named struct                                                          |
 | `std::function`                  | function pointer + `*anyopaque` context, or a comptime `anytype` callback when the call site is static. When the function is stored (a job's function, a thread init/exit callback): an inline closure like `JobSystem.JobFunction` / `JobSystemThreadPool.InitExitFunction`. `JobFunction.init(comptime function, args_tuple)` stores a copy of the arguments (at most 4 words and at most `usize` aligned, checked at compile time; capture larger or more aligned data by pointer) and never allocates. A lambda capture becomes the tuple: by reference → a pointer, by value → a copy (`[&values, i] { ... }` → `.init(f, .{ &values, i })`) |
 | iterator pairs `(inBegin, inEnd)` | a slice; comparators follow std.sort: `context` + `lessThan(context, a, b)` (see `Core/QuickSort.zig`) |
 
-Container methods use the std.ArrayList names, for `std.ArrayList` and Zolt's own containers
-alike: `push_back` → `append`, `pop_back` → `pop`, `size()` → `.len` / `.items.len`,
-`empty()` → `len == 0` / `isEmpty()`, `erase(it)` → `orderedRemove(i)`, `reserve` →
-`ensureTotalCapacity`, `clear` → `clearRetainingCapacity` (ArrayList) / `clear` (StaticArray),
-`back()` → `getLast()` (ArrayList) / `back()` (StaticArray), `begin()`/`end()`/`data()` → `.items` / `slice()`.
+Container methods use the std.ArrayList names, for `std.ArrayList` and Zolt's own array-like
+containers alike (the hash containers are below): `push_back` → `append`, `pop_back` → `pop`,
+`size()` → `.len` / `.items.len`, `empty()` → `len == 0` / `isEmpty()`, `erase(it)` →
+`orderedRemove(i)`, `reserve` → `ensureTotalCapacity`, `clear` → `clearRetainingCapacity`
+(ArrayList) / `clear` (StaticArray), `back()` → `getLast()` (ArrayList) / `back()` (StaticArray), `begin()`/`end()`/`data()` → `.items` / `slice()`.
+
+The hash containers (`HashTable`, `UnorderedMap`, `UnorderedSet`, see `Core/HashTable.zig`) follow the std hash
+map names instead: `size()` → `count()`, `empty()` → `isEmpty()`, `reserve` → `ensureTotalCapacity`,
+**`clear()` → `clearAndFree(allocator)`** (Jolt's `clear` frees the buckets; do not use `clearRetainingCapacity`
+for it: the bucket count decides where elements land and therefore the iteration order),
+`ClearAndKeepMemory()` → `clearRetainingCapacity()`, `operator[]` → `getOrPutValue(allocator, key, default)`,
+`try_emplace` → `tryEmplace`, const `find` → `find` (`?*const KeyValue`, null is `end()`), non-const `find` →
+`findPtr`, `erase(it)` → `eraseByPtr(ptr)`, `it.mIndex` → `indexOf(ptr)`, `begin()`/`end()` loops →
+`iterator()` / `constIterator()` with `next()`, `std::pair` `first` / `second` → `KeyValue{ .key, .value }`.
+Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicated by the caller.
 
 ### Reference counting
 
@@ -530,3 +540,15 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `Job::mReferenceCount`             | `ref_count: RefCount`                  | same as RefTarget (reference counting)  |
 | `JobSystemWithBarrier::BarrierImpl` `mJobReadIndex` / `mJobWriteIndex`, `mNumToAcquire` | `read_state.job_read_index` / `write_state.job_write_index`, `write_state.num_to_acquire` | grouped in cache line aligned structs (field reordering) |
 | `JobSystemThreadPool::mTail`       | `tail_state.tail`                      | cache line aligned struct (field reordering) |
+| `HashTable<..., Hash, KeyEqual>`, `UnorderedMap<Key, Value, Hash, KeyEqual>`, `UnorderedSet<Key, Hash, KeyEqual>` | `HashTable(Key, KeyValue, Detail, options)`, `UnorderedMap(Key, Value, options)`, `UnorderedSet(Key, options)` with `options: HashTableOptions(Key)` (`.{}` = `Hash<Key>` / `std::equal_to`) | functor template parameters |
+| `HashTable::clear()` / `ClearAndKeepMemory()` | `clearAndFree(allocator)` / `clearRetainingCapacity()` | std names; `clear` frees the buckets (iteration order depends on the bucket count) |
+| `HashTable::size()` / `empty()` / `reserve(n)` | `count()` / `isEmpty()` / `ensureTotalCapacity(allocator, n)` | std hash map names |
+| `UnorderedMap::operator[](key)`    | `getOrPutValue(allocator, key, default_value)` | operator, `Value()` has no generic Zig equivalent |
+| `UnorderedMap::try_emplace(key, args...)` | `tryEmplace(allocator, key, value)` | variadic constructor arguments |
+| `find(key)` (non-const / const)    | `findPtr(key) ?*KeyValue` / `find(key) ?*const KeyValue` (null is `end()`) | overload on const |
+| `HashTable::erase(const_iterator)` / `erase(key)` | `eraseByPtr(ptr)` / `erase(key)` | overload            |
+| `HashTable` iterator `mIndex`      | `indexOf(ptr)`                         | iterators are element pointers          |
+| `HashTable::begin()` / `end()`     | `iterator()` / `constIterator()` + `next()` (null at the end) | iterators              |
+| copy / move constructor, `operator=` (copy / move) of `HashTable` / `UnorderedMap` | `clone(allocator)` / `move()`, `assign(allocator, &other)` / `assignMove(allocator, &other)` (copies are bitwise) | needs the allocator |
+| `std::pair<const Key, Value>` (`first` / `second`) in `UnorderedMap` | `KeyValue{ .key, .value }` | named struct                     |
+| `StreamUtils::ObjectToIDMap<T>` / `IDToObjectMap<T>` | `zolt.ObjectToIDMap(T)` / `zolt.IDToObjectMap(T)` | namespace flattened                |

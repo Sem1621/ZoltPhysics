@@ -3,5 +3,6 @@
 
 pub const files = [_][]const u8{
     "Core/ConcurrencyReference.cpp",
+    "Core/ContainersReference.cpp",
     "Math/MathReference.cpp",
 };

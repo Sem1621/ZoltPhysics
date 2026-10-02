@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 15.1%** of 85237 lines in scope · **Unit tests: 22.8%** of 18321 lines
+**Library: 16.1%** of 85257 lines in scope · **Unit tests: 24.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -16,7 +16,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 61% | 18 | 1 | 0 | 17 | 15 | 4 | 5887 |
+| `Jolt/Core` | 75% | 24 | 1 | 0 | 13 | 13 | 4 | 5907 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
@@ -94,7 +94,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Core — 61%</summary>
+<details><summary>Jolt/Core — 75%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -111,7 +111,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Factory.cpp`, `Factory.h` | 110 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
 | `FixedSizeFreeList.h`, `FixedSizeFreeList.inl` | 275 | ✅ complete | `Zolt/Core/FixedSizeFreeList.zig` |
 | `HashCombine.h` | 208 | ✅ complete | `Zolt/Core/HashCombine.zig` |
-| `HashTable.h` | 738 | ❌ todo |  |
+| `HashTable.h` | 738 | ✅ complete | `Zolt/Core/HashTable.zig` |
 | `IncludeWindows.h` | 27 | ➖ n/a | Windows headers |
 | `InsertionSort.h` | 50 | ✅ complete | `Zolt/Core/InsertionSort.zig` |
 | `IssueReporting.cpp`, `IssueReporting.h` | 44 | ➖ n/a | std.debug.assert and std.log |
@@ -126,7 +126,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Mutex.h` | 183 | ✅ complete | `Zolt/Core/Mutex.zig` |
 | `MutexArray.h` | 77 | ✅ complete | `Zolt/Core/MutexArray.zig` |
 | `NonCopyable.h` | 14 | ➖ n/a | Zig has no copy constructors |
-| `ObjectToIDMap.h` | 13 | ❌ todo |  |
+| `ObjectToIDMap.h` | 13 | ✅ complete | `Zolt/Core/ObjectToIDMap.zig` |
 | `Prefetch.h` | 16 | ✅ complete | `Zolt/Core/Prefetch.zig` |
 | `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ⏸ deferred | developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration |
 | `QuickSort.h` | 109 | ✅ complete | `Zolt/Core/QuickSort.zig` |
@@ -149,10 +149,10 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `StringTools.cpp`, `StringTools.h` | 107 | ❌ todo |  |
 | `TempAllocator.h` | 181 | ❌ todo |  |
 | `TickCounter.cpp`, `TickCounter.h` | 65 | ❌ todo |  |
-| `UnorderedMap.h` | 69 | ❌ todo |  |
-| `UnorderedMapFwd.h` | 10 | ➖ n/a | forward declarations |
-| `UnorderedSet.h` | 27 | ❌ todo |  |
-| `UnorderedSetFwd.h` | 10 | ➖ n/a | forward declarations |
+| `UnorderedMap.h` | 69 | ✅ complete | `Zolt/Core/UnorderedMap.zig` |
+| `UnorderedMapFwd.h` | 10 | ✅ complete | `Zolt/Core/UnorderedMap.zig` |
+| `UnorderedSet.h` | 27 | ✅ complete | `Zolt/Core/UnorderedSet.zig` |
+| `UnorderedSetFwd.h` | 10 | ✅ complete | `Zolt/Core/UnorderedSet.zig` |
 
 </details>
 
@@ -548,7 +548,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
 | `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
-| `UnitTests/Core` | 30% | 5 | 0 | 0 | 6 | 2 | 0 | 1021 |
+| `UnitTests/Core` | 66% | 7 | 0 | 0 | 4 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
@@ -577,7 +577,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Core — 30%</summary>
+<details><summary>UnitTests/Core — 66%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -592,8 +592,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `STLLocalAllocatorTest.cpp` | 180 | ❌ todo |  |
 | `ScopeExitTest.cpp` | 42 | ➖ n/a | tests ScopeExit, Zig has `defer` |
 | `StringToolsTest.cpp` | 80 | ❌ todo |  |
-| `UnorderedMapTest.cpp` | 104 | ❌ todo |  |
-| `UnorderedSetTest.cpp` | 269 | ❌ todo |  |
+| `UnorderedMapTest.cpp` | 104 | ✅ complete | `ZoltTests/Core/UnorderedMapTest.zig` |
+| `UnorderedSetTest.cpp` | 269 | ✅ complete | `ZoltTests/Core/UnorderedSetTest.zig` |
 
 </details>
 
