@@ -32,7 +32,9 @@ pub fn stringFormat(allocator: Allocator, comptime fmt: []const u8, args: anytyp
 /// - floats like printf("%g") (std::ostream's default precision of 6 significant digits), f32 is converted
 ///   to f64 first like the C++ stream does
 /// - strings (`[]const u8`, string literals) as is
-/// - types with a `format` method (the Zolt version of `operator <<`) through `{f}`
+/// - types with a `format` method (the Zolt version of `operator <<`) through `{f}`, so they print whatever that
+///   method writes. Note that the Math types (Vec3, Vec4, Mat44, ...) print their components with `{d}` (shortest
+///   round trip) and not like std::ostream (e.g. 1e+10 / 1.23457e+08), use `writeFloatGeneral` for that.
 ///
 /// Unlike C++ (where uint8 is an unsigned char), u8 / i8 are printed as numbers. Caller owns the returned memory.
 pub fn convertToString(allocator: Allocator, value: anytype) Allocator.Error![]u8 {
@@ -148,7 +150,9 @@ fn roundToSignificantDigits(value: f64) RoundedDecimal {
 
 /// Write a double like printf("%g", value) does: `default_float_precision` significant digits, fixed notation
 /// when the exponent is in [-4, precision), scientific notation otherwise, trailing zeros removed.
-fn writeFloatGeneral(writer: *Writer, value: f64) Writer.Error!void {
+/// This is how `std::ostream << value` prints a float or double, `format` methods can use it to print like the
+/// C++ `operator <<`.
+pub fn writeFloatGeneral(writer: *Writer, value: f64) Writer.Error!void {
     const precision = default_float_precision;
 
     if (std.math.isNan(value))

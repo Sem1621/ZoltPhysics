@@ -184,6 +184,7 @@ void jolt_binary_heap_pop_less_equal(SortElem *ioItems, uint32 inCount)
 uint64 jolt_hash_bytes(const void *inData, uint32 inSize, uint64 inSeed)	{ return HashBytes(inData, inSize, inSeed); }
 uint64 jolt_hash_bytes_default_seed(const void *inData, uint32 inSize)	{ return HashBytes(inData, inSize); }
 uint64 jolt_hash_string(const char *inString)							{ return HashString(inString); }
+uint64 jolt_hash_string_seeded(const char *inString, uint64 inSeed)		{ return HashString(inString, inSeed); }
 uint64 jolt_hash_c_string(const char *inString)							{ return Hash<const char *> { } (inString); }
 uint64 jolt_hash_string_view(const char *inData, uint32 inSize)			{ return Hash<std::string_view> { } (std::string_view(inData, inSize)); }
 uint64 jolt_hash64(uint64 inValue)										{ return Hash64(inValue); }

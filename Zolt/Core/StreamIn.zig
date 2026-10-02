@@ -129,7 +129,7 @@ pub const StreamIn = struct {
                 comptime checkTriviallyCopyable(T);
                 self.readBytes(std.mem.sliceAsBytes(list.items));
             }
-        } else list.clearRetainingCapacity();
+        } else clear(T, allocator, list);
     }
 
     /// Read a string from the binary stream (reads the number of characters and then the characters).
@@ -153,6 +153,9 @@ pub const StreamIn = struct {
     /// Read a vector of primitives from the binary stream using a custom function to read the elements
     /// (Read(Array<T> &, const F &inReadElement)). `readElement(context, stream, element)` reads one element, it can
     /// allocate (e.g. a LinearCurve member), pass the allocator through the context.
+    /// Like Array<T>::resize / clear, new elements are default constructed (see `defaultConstruct`) and elements that
+    /// are removed are destructed with `allocator` (see `destruct`), so T must not hold resources in fields that are
+    /// not default constructed or destructed that way.
     pub fn readArrayWith(
         self: StreamIn,
         comptime T: type,
@@ -167,7 +170,7 @@ pub const StreamIn = struct {
             try resize(T, allocator, list, len);
             for (list.items) |*item|
                 try readElement(context, self, item);
-        } else list.clearRetainingCapacity();
+        } else clear(T, allocator, list);
     }
 };
 
@@ -179,25 +182,102 @@ fn DestinationType(comptime P: type) type {
     return info.pointer.child;
 }
 
-/// Resize `list` to `len` elements (Array<T>::resize). Like Jolt's Array, new elements are default constructed
-/// when T has a default constructor (in Zig: a struct whose fields all have default values) and left undefined otherwise.
+/// Resize `list` to `len` elements (Array<T>::resize): the elements that are removed are destructed, new elements
+/// are default constructed
 fn resize(comptime T: type, allocator: Allocator, list: *std.ArrayList(T), len: u32) Allocator.Error!void {
+    if (comptime hasDestructor(T))
+        if (len < list.items.len)
+            for (list.items[len..]) |*item|
+                destruct(T, allocator, item);
     const old_len = list.items.len;
     try list.resize(allocator, len);
-    if (comptime hasDefaultValue(T))
-        for (list.items[@min(old_len, len)..]) |*item| {
-            item.* = .{};
-        };
+    if (comptime hasDefaultConstructor(T))
+        for (list.items[@min(old_len, len)..]) |*item|
+            defaultConstruct(T, item);
 }
 
-/// True when `T{}` is valid (a struct with default values for all fields)
-fn hasDefaultValue(comptime T: type) bool {
+/// Destruct all elements and set the length to zero (Array<T>::clear)
+fn clear(comptime T: type, allocator: Allocator, list: *std.ArrayList(T)) void {
+    if (comptime hasDestructor(T))
+        for (list.items) |*item|
+            destruct(T, allocator, item);
+    list.clearRetainingCapacity();
+}
+
+/// True when `T` declares `pub const empty: T` (std.ArrayList, std.HashMapUnmanaged, StaticArray, ...), the Zig
+/// equivalent of a default constructed container
+fn hasEmptyValue(comptime T: type) bool {
+    return @hasDecl(T, "empty") and @TypeOf(T.empty) == T;
+}
+
+/// The Zolt equivalent of `!std::is_trivially_constructible<T>()`: true when `defaultConstruct` initializes
+/// something in T
+fn hasDefaultConstructor(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct" => |s| for (s.fields) |field| {
-            if (field.default_value_ptr == null) break false;
-        } else true,
+        .@"struct" => |s| hasEmptyValue(T) or for (s.fields) |field| {
+            if (!field.is_comptime and (field.default_value_ptr != null or (s.layout != .@"packed" and hasDefaultConstructor(field.type))))
+                break true;
+        } else false,
+        .array => |a| hasDefaultConstructor(a.child),
         else => false,
     };
+}
+
+/// Default construct an element like `new (element) T` in Array<T>::resize: a type that declares `empty` is set to
+/// it, otherwise fields with a default value get that value and struct / array fields are default constructed
+/// recursively (like the members of a C++ class). Everything else (trivially constructible) is left undefined.
+fn defaultConstruct(comptime T: type, element: *T) void {
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| if (comptime hasEmptyValue(T)) {
+            element.* = T.empty;
+        } else inline for (s.fields) |field| {
+            if (comptime field.is_comptime) continue;
+            if (comptime field.default_value_ptr != null)
+                @field(element, field.name) = comptime field.defaultValue().?
+            else if (comptime s.layout != .@"packed" and hasDefaultConstructor(field.type))
+                defaultConstruct(field.type, &@field(element, field.name));
+        },
+        .array => |a| if (comptime hasDefaultConstructor(a.child)) {
+            for (element) |*item|
+                defaultConstruct(a.child, item);
+        },
+        else => {},
+    }
+}
+
+/// True when `destruct` does something for T (the C++ type has a non-trivial destructor)
+fn hasDestructor(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |s| @hasDecl(T, "deinit") or (s.layout != .@"packed" and for (s.fields) |field| {
+            if (!field.is_comptime and hasDestructor(field.type))
+                break true;
+        } else false),
+        .array => |a| hasDestructor(a.child),
+        else => false,
+    };
+}
+
+/// Destruct an element that is removed from the array, like the `element->~T()` call in Array<T>::destruct: calls
+/// `deinit()` or `deinit(allocator)` when T declares it (the Zolt destructor, see the porting guide), otherwise
+/// destructs the struct / array fields recursively (like an implicit C++ destructor)
+fn destruct(comptime T: type, allocator: Allocator, element: *T) void {
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| if (comptime @hasDecl(T, "deinit")) {
+            switch (@typeInfo(@TypeOf(T.deinit)).@"fn".params.len) {
+                1 => element.deinit(),
+                2 => element.deinit(allocator),
+                else => @compileError("StreamIn: " ++ @typeName(T) ++ ".deinit must take no arguments or an allocator"),
+            }
+        } else inline for (s.fields) |field| {
+            if (comptime !field.is_comptime and s.layout != .@"packed" and hasDestructor(field.type))
+                destruct(field.type, allocator, &@field(element, field.name));
+        },
+        .array => |a| if (comptime hasDestructor(a.child)) {
+            for (element) |*item|
+                destruct(a.child, allocator, item);
+        },
+        else => {},
+    }
 }
 
 /// Reads from a byte slice, for the tests
@@ -350,7 +430,7 @@ test "StreamIn reads the same bytes as Jolt" {
         try std.testing.expectEqual(@as(usize, 0), string.len);
     }
 
-    // Custom element function, new elements are default constructed when the type has default values
+    // Custom element function, new elements are default constructed
     {
         const Pair = struct { a: u8 = 7, b: u8 = 8 };
         const pair_bytes = [_]u8{ 2, 0, 0, 0, 1, 2, 3 };
@@ -368,5 +448,92 @@ test "StreamIn reads the same bytes as Jolt" {
         try std.testing.expectEqual(@as(usize, 2), list.items.len);
         try std.testing.expectEqual(Pair{ .a = 12, .b = 1 }, list.items[0]);
         try std.testing.expectEqual(Pair{ .a = 17, .b = 3 }, list.items[1]); // a was not read
+    }
+}
+
+test "StreamIn default constructs new array elements and destructs removed ones like Array<T>" {
+    const allocator = std.testing.allocator;
+    const LinearCurve = @import("LinearCurve.zig").LinearCurve;
+
+    // Counts how often it was destructed
+    const Counted = struct {
+        counter: ?*u32 = null,
+
+        pub fn deinit(self: *@This()) void {
+            if (self.counter) |counter|
+                counter.* += 1;
+        }
+    };
+
+    // Mixed default and trivially constructible fields, like `RefConst<Shape> mShape; uint32 mUserData;` in a C++ class
+    const Element = struct {
+        owner: ?*u32 = null,
+        user_data: u32,
+        nested: struct { a: u8 = 5, b: u8 },
+        points: std.ArrayList(u8),
+        counted: [2]Counted,
+        curve: LinearCurve,
+    };
+
+    const readUserData = struct {
+        fn readElement(_: void, s: StreamIn, element: *Element) Allocator.Error!void {
+            s.read(&element.user_data);
+        }
+    }.readElement;
+
+    var counter: u32 = 0;
+    var list: std.ArrayList(Element) = .empty;
+    defer {
+        for (list.items) |*element| {
+            element.points.deinit(allocator);
+            element.curve.deinit(allocator);
+        }
+        list.deinit(allocator);
+    }
+
+    // New elements are default constructed, even when not all fields have a default value
+    {
+        const bytes = std.mem.toBytes(@as(u32, 3)) ++ std.mem.toBytes([3]u32{ 10, 11, 12 });
+        var impl: TestStream = .{ .bytes = &bytes };
+        try StreamIn.init(&impl).readArrayWith(Element, allocator, &list, {}, readUserData);
+        try std.testing.expect(!impl.isEOF());
+        try std.testing.expectEqual(@as(usize, 3), list.items.len);
+        for (list.items, 10..) |element, user_data| {
+            try std.testing.expectEqual(@as(?*u32, null), element.owner);
+            try std.testing.expectEqual(@as(u32, @intCast(user_data)), element.user_data);
+            try std.testing.expectEqual(@as(u8, 5), element.nested.a);
+            try std.testing.expectEqual(@as(usize, 0), element.points.items.len);
+            try std.testing.expectEqual(@as(?*u32, null), element.counted[0].counter);
+            try std.testing.expectEqual(@as(?*u32, null), element.counted[1].counter);
+            try std.testing.expectEqual(@as(usize, 0), element.curve.points.items.len);
+        }
+    }
+
+    // Give all elements resources
+    for (list.items) |*element| {
+        try element.points.append(allocator, 1);
+        try element.curve.addPoint(allocator, 1.0, 2.0);
+        element.counted = .{ .{ .counter = &counter }, .{ .counter = &counter } };
+    }
+
+    // Shrinking destructs the elements that are removed (the testing allocator reports leaks otherwise)
+    {
+        const bytes = std.mem.toBytes(@as(u32, 1)) ++ std.mem.toBytes(@as(u32, 20));
+        var impl: TestStream = .{ .bytes = &bytes };
+        try StreamIn.init(&impl).readArrayWith(Element, allocator, &list, {}, readUserData);
+        try std.testing.expect(!impl.isEOF());
+        try std.testing.expectEqual(@as(usize, 1), list.items.len);
+        try std.testing.expectEqual(@as(u32, 20), list.items[0].user_data);
+        try std.testing.expectEqual(@as(usize, 1), list.items[0].curve.points.items.len);
+        try std.testing.expectEqual(@as(u32, 4), counter);
+    }
+
+    // Clearing on a failed read destructs all elements
+    {
+        var impl: TestStream = .{ .bytes = &.{} };
+        try StreamIn.init(&impl).readArrayWith(Element, allocator, &list, {}, readUserData);
+        try std.testing.expect(impl.isEOF());
+        try std.testing.expectEqual(@as(usize, 0), list.items.len);
+        try std.testing.expectEqual(@as(u32, 6), counter);
     }
 }

@@ -101,6 +101,7 @@ const jolt = struct {
     extern fn jolt_hash_bytes(data: [*]const u8, size: u32, seed: u64) u64;
     extern fn jolt_hash_bytes_default_seed(data: [*]const u8, size: u32) u64;
     extern fn jolt_hash_string(string: [*:0]const u8) u64;
+    extern fn jolt_hash_string_seeded(string: [*:0]const u8, seed: u64) u64;
     extern fn jolt_hash_c_string(string: [*:0]const u8) u64;
     extern fn jolt_hash_string_view(data: [*]const u8, size: u32) u64;
     extern fn jolt_hash_string_jolt_string(data: [*]const u8, size: u32) u64;
@@ -361,6 +362,7 @@ test "HashCombine.hashBytes" {
 test "HashCombine.hashString" {
     var rng: Rng = .{};
     var string_checker: Checker = .{ .name = "HashString" };
+    var seeded_string_checker: Checker = .{ .name = "HashString (seed)" };
     var c_string_checker: Checker = .{ .name = "Hash<const char *>" };
     var view_checker: Checker = .{ .name = "Hash<string_view>" };
     var jolt_string_checker: Checker = .{ .name = "Hash<String>" };
@@ -368,21 +370,23 @@ test "HashCombine.hashString" {
     for (0..iterations) |_| {
         const len = rng.intRange(usize, 0, bytes.len - 1);
 
-        // HashString / Hash<const char *> stop at the terminating zero and convert `char` to uint64. char is signed on
-        // x86 and unsigned on ARM, so Jolt's result for characters >= 0x80 depends on the platform (Zolt follows
-        // unsigned char, like HashBytes). Only 7-bit characters are compared.
-        for (bytes[0..len]) |*b| b.* = @intCast(rng.intRange(u32, 1, 127));
+        // HashString / Hash<const char *> stop at the terminating zero and convert `char` to uint64, which sign extends
+        // characters >= 0x80 where char is signed (Zolt uses c_char like the C++ compiler). All non-zero characters
+        // are compared.
+        for (bytes[0..len]) |*b| b.* = @intCast(rng.intRange(u32, 1, 255));
         bytes[len] = 0;
         const c_string: [*:0]const u8 = @ptrCast(&bytes);
+        const seed = next64(&rng);
         string_checker.check(len, HashCombine.hashString(bytes[0..len]), jolt.jolt_hash_string(c_string));
-        c_string_checker.check(len, HashCombine.hash(bytes[0..len]), jolt.jolt_hash_c_string(c_string));
+        seeded_string_checker.check(.{ .len = len, .seed = seed }, HashCombine.hashStringSeeded(bytes[0..len], seed), jolt.jolt_hash_string_seeded(c_string, seed));
+        c_string_checker.check(len, HashCombine.hash(c_string), jolt.jolt_hash_c_string(c_string));
 
         // string_view / String hash all bytes, including zeros and bytes >= 0x80
         for (bytes[0..len]) |*b| b.* = @truncate(rng.next());
         view_checker.check(len, HashCombine.hash(@as([]const u8, bytes[0..len])), jolt.jolt_hash_string_view(&bytes, @intCast(len)));
         jolt_string_checker.check(len, HashCombine.hash(@as([]const u8, bytes[0..len])), jolt.jolt_hash_string_jolt_string(&bytes, @intCast(len)));
     }
-    try finishAll(&.{ &string_checker, &c_string_checker, &view_checker, &jolt_string_checker });
+    try finishAll(&.{ &string_checker, &seeded_string_checker, &c_string_checker, &view_checker, &jolt_string_checker });
 }
 
 test "HashCombine.hash64 and Hash<T>" {
