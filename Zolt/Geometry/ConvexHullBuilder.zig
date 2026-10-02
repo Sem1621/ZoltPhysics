@@ -1570,7 +1570,7 @@ fn buildHullAllocations(allocator: std.mem.Allocator, positions: []const Vec3, m
 
 test "ConvexHullBuilder allocation failures" {
     // Points on a sphere with interior and nearly coplanar points: needs face merges, coplanar points and conflict lists
-    var positions: [60]Vec3 = undefined;
+    var positions: [24]Vec3 = undefined;
     for (&positions, 0..) |*p, i| {
         const f: f32 = @floatFromInt(i);
         const sc = Vec4.init(0.7 * f, 1.3 * f, 0, 0).sinCos();

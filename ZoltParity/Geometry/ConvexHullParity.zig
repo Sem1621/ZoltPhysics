@@ -194,6 +194,8 @@ const Stats = struct {
     leftover_conflicts: usize = 0,
     zero_normals: usize = 0,
     skipped_clouds: usize = 0,
+    /// Initializations that started with a coplanar list left over from an earlier max_vertices_reached return
+    stale_coplanar: usize = 0,
 };
 
 /// True if no face of the hull has a zero normal (precondition of determineMaxError)
@@ -230,6 +232,7 @@ fn checkHull(ctx: *Context, cloud: usize, positions: []const Vec3, params: []con
 
     for (params) |p| {
         ctx.stats.clouds += 1;
+        if (zolt_builder.coplanar_list.items.len > 0) ctx.stats.stale_coplanar += 1;
 
         // Initialize
         var expected = std.mem.zeroes(Summary);
@@ -687,11 +690,11 @@ test "ConvexHullBuilder" {
     // The inputs must reach every result code and the interesting paths
     // (Debug: 5566 hulls, results { 3889, 814, 129, 69, 665 }, 800 2D hulls, 98407 faces (max 1794), 49661 leftover
     // conflict points, 9 hulls with zero normals, 7 skipped clouds)
-    var covered = stats.two_d > 0 and stats.leftover_conflicts > 0 and stats.max_faces > 1000;
+    var covered = stats.two_d > 0 and stats.leftover_conflicts > 0 and stats.max_faces > 1000 and stats.stale_coplanar > 0;
     for (stats.results) |r|
         covered = covered and r > 0;
     if (!covered) {
-        std.debug.print("ConvexHullBuilder parity: the inputs don't cover everything: {d} hulls, results {any}, {d} 2D hulls, {d} faces (max {d}), {d} leftover conflict points, {d} hulls with zero normals, {d} skipped clouds\n", .{ stats.clouds, stats.results, stats.two_d, stats.faces, stats.max_faces, stats.leftover_conflicts, stats.zero_normals, stats.skipped_clouds });
+        std.debug.print("ConvexHullBuilder parity: the inputs don't cover everything: {d} hulls, results {any}, {d} 2D hulls, {d} faces (max {d}), {d} leftover conflict points, {d} hulls with zero normals, {d} skipped clouds, {d} stale coplanar lists\n", .{ stats.clouds, stats.results, stats.two_d, stats.faces, stats.max_faces, stats.leftover_conflicts, stats.zero_normals, stats.skipped_clouds, stats.stale_coplanar });
         return error.TestUnexpectedResult;
     }
 
