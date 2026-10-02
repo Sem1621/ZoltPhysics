@@ -13,6 +13,7 @@
 test {
     _ = @import("Core/ConcurrencyParity.zig");
     _ = @import("Core/ContainersParity.zig");
+    _ = @import("Core/CoreParity.zig");
     _ = @import("Math/MathParity.zig");
     _ = @import("ParityFramework.zig");
 }

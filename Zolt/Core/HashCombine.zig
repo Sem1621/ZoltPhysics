@@ -26,9 +26,23 @@ pub fn hashBytes(data: []const u8) u64 {
     return hashBytesSeeded(data, fnv1a_seed);
 }
 
-/// Calculate the FNV-1a hash of a string (HashString). Gives the same result as `hashBytes` over the same characters.
+/// Calculate the FNV-1a hash of `str` (HashString).
+/// See: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+/// Jolt converts each `char` to uint64, so like in C++ characters >= 0x80 are sign extended where char is signed
+/// (x86, Windows / macOS ARM64) and the result only equals `hashBytes` for 7-bit characters there. Jolt stops at the
+/// terminating zero, Zolt hashes all characters of the slice.
+pub fn hashStringSeeded(str: []const u8, seed: u64) u64 {
+    var h = seed;
+    for (str) |c| {
+        h ^= @as(u64, @bitCast(@as(i64, @as(c_char, @bitCast(c))))); // uint64(*c)
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+/// FNV-1a hash of a string with the default seed (HashString)
 pub fn hashString(str: []const u8) u64 {
-    return hashBytes(str);
+    return hashStringSeeded(str, fnv1a_seed);
 }
 
 /// A 64 bit hash function by Thomas Wang, Jan 1997
@@ -49,7 +63,8 @@ pub fn hash64(value: u64) u64 {
 ///
 /// - floats: -0 is hashed as +0, then FNV-1a over the bytes
 /// - integers, bools, enums and pointers: FNV-1a over the bytes (JPH_DEFINE_TRIVIAL_HASH / Hash<T *>)
-/// - `[]const u8` / string literals: FNV-1a over the characters (Hash<const char *> / Hash<String>)
+/// - `[]const u8` / string literals: FNV-1a over the bytes (Hash<String> / Hash<std::string_view>)
+/// - `[*:0]const u8`: `hashString` (Hash<const char *>)
 /// - anything with a `getHash()` method: that method (Hash<T> primary template)
 pub fn hash(value: anytype) u64 {
     const T = @TypeOf(value);
@@ -68,6 +83,7 @@ pub fn hash(value: anytype) u64 {
                 .array => |arr| if (arr.child == u8) return hashBytes(value),
                 else => {},
             };
+            if (ptr.size == .many and ptr.child == u8 and ptr.sentinel() == @as(u8, 0)) return hashString(std.mem.span(value));
             if (ptr.size == .slice) @compileError("hash: only []const u8 slices can be hashed, got " ++ @typeName(T));
             return hashBytes(std.mem.asBytes(&value)); // Hash<T *>: hash the pointer value itself
         },
@@ -121,4 +137,18 @@ pub fn hashCombineArgs(values: anytype) u64 {
 test "hash -0 and +0 equally" {
     try std.testing.expectEqual(hash(@as(f32, 0.0)), hash(@as(f32, -0.0)));
     try std.testing.expectEqual(hash(@as(f64, 0.0)), hash(@as(f64, -0.0)));
+}
+
+test "hashString converts char to uint64 like Jolt" {
+    // uint64(char(0x80)) sign extends where char is signed
+    const char_0x80: u64 = if (@typeInfo(c_char).int.signedness == .signed) 0xffffffffffffff80 else 0x80;
+    try std.testing.expectEqual((fnv1a_seed ^ char_0x80) *% 0x100000001b3, hashString("\x80"));
+
+    // 7-bit characters hash like hashBytes
+    try std.testing.expectEqual(hashBytes("This is a test"), hashString("This is a test"));
+    try std.testing.expectEqual(hashBytesSeeded("This is a test", 1234), hashStringSeeded("This is a test", 1234));
+
+    // Hash<const char *>
+    const c_string: [*:0]const u8 = "This is a test";
+    try std.testing.expectEqual(hashString("This is a test"), hash(c_string));
 }

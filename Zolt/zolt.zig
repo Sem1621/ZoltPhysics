@@ -8,6 +8,8 @@
 
 const std = @import("std");
 
+pub const getConfigurationString = @import("ConfigurationString.zig").getConfigurationString;
+
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
@@ -16,6 +18,8 @@ pub const binaryHeapPush = @import("Core/BinaryHeap.zig").binaryHeapPush;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
 pub const FixedSizeFreeList = @import("Core/FixedSizeFreeList.zig").FixedSizeFreeList;
+pub const FPControlWord = @import("Core/FPControlWord.zig").FPControlWord;
+pub const FPFlushDenormals = @import("Core/FPFlushDenormals.zig").FPFlushDenormals;
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const HashTable = @import("Core/HashTable.zig").HashTable;
 pub const HashTableOptions = @import("Core/HashTable.zig").HashTableOptions;
@@ -25,6 +29,7 @@ pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
 pub const JobSystemSingleThreaded = @import("Core/JobSystemSingleThreaded.zig").JobSystemSingleThreaded;
 pub const JobSystemThreadPool = @import("Core/JobSystemThreadPool.zig").JobSystemThreadPool;
 pub const JobSystemWithBarrier = @import("Core/JobSystemWithBarrier.zig").JobSystemWithBarrier;
+pub const LinearCurve = @import("Core/LinearCurve.zig").LinearCurve;
 pub const LFHMAllocator = @import("Core/LockFreeHashMap.zig").LFHMAllocator;
 pub const LFHMAllocatorContext = @import("Core/LockFreeHashMap.zig").LFHMAllocatorContext;
 pub const LockFreeHashMap = @import("Core/LockFreeHashMap.zig").LockFreeHashMap;
@@ -44,6 +49,18 @@ pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const Semaphore = @import("Core/Semaphore.zig").Semaphore;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
+pub const StreamIn = @import("Core/StreamIn.zig").StreamIn;
+pub const StreamOut = @import("Core/StreamOut.zig").StreamOut;
+pub const StreamInWrapper = @import("Core/StreamWrapper.zig").StreamInWrapper;
+pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
+pub const convertToString = @import("Core/StringTools.zig").convertToString;
+pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
+pub const stringFormat = @import("Core/StringTools.zig").stringFormat;
+pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
+pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
+pub const toLower = @import("Core/StringTools.zig").toLower;
+pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
+pub const getProcessorTickCount = @import("Core/TickCounter.zig").getProcessorTickCount;
 pub const UnorderedMap = @import("Core/UnorderedMap.zig").UnorderedMap;
 pub const UnorderedMapDetail = @import("Core/UnorderedMap.zig").UnorderedMapDetail;
 pub const UnorderedSet = @import("Core/UnorderedSet.zig").UnorderedSet;
@@ -84,11 +101,14 @@ pub const Vector = @import("Math/Vector.zig").Vector;
 /// Every source file of the module. Used by the test below to make sure that all of them are
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
+    @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
     @import("Core/FixedSizeFreeList.zig"),
+    @import("Core/FPControlWord.zig"),
+    @import("Core/FPFlushDenormals.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/HashTable.zig"),
     @import("Core/InsertionSort.zig"),
@@ -96,6 +116,7 @@ const source_files = .{
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),
     @import("Core/JobSystemWithBarrier.zig"),
+    @import("Core/LinearCurve.zig"),
     @import("Core/LockFreeHashMap.zig"),
     @import("Core/Mt19937.zig"),
     @import("Core/Mutex.zig"),
@@ -106,6 +127,11 @@ const source_files = .{
     @import("Core/Reference.zig"),
     @import("Core/Semaphore.zig"),
     @import("Core/StaticArray.zig"),
+    @import("Core/StreamIn.zig"),
+    @import("Core/StreamOut.zig"),
+    @import("Core/StreamWrapper.zig"),
+    @import("Core/StringTools.zig"),
+    @import("Core/TickCounter.zig"),
     @import("Core/UnorderedMap.zig"),
     @import("Core/UnorderedSet.zig"),
     @import("Math/BVec16.zig"),

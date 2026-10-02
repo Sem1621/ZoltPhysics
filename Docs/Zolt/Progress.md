@@ -7,16 +7,16 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 16.1%** of 85257 lines in scope · **Unit tests: 24.8%** of 18321 lines
+**Library: 16.9%** of 85257 lines in scope · **Unit tests: 25.7%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `Jolt` | 0% | 0 | 0 | 0 | 2 | 1 | 0 | 320 |
+| `Jolt` | 36% | 1 | 0 | 0 | 1 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 75% | 24 | 1 | 0 | 13 | 13 | 4 | 5907 |
+| `Jolt/Core` | 85% | 31 | 2 | 0 | 5 | 13 | 4 | 5907 |
 | `Jolt/Geometry` | 0% | 0 | 0 | 0 | 23 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
@@ -34,11 +34,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Skeleton` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 0% | 0 | 0 | 0 | 3 | 0 | 0 | 335 |
 
-<details><summary>Jolt — 0%</summary>
+<details><summary>Jolt — 36%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ConfigurationString.h` | 114 | ❌ todo |  |
+| `ConfigurationString.h` | 114 | ✅ complete | `Zolt/ConfigurationString.zig` |
 | `Jolt.h` | 15 | ➖ n/a | umbrella header, the module root is Zolt/zolt.zig |
 | `RegisterTypes.cpp`, `RegisterTypes.h` | 206 | ❌ todo |  |
 
@@ -94,7 +94,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Core — 75%</summary>
+<details><summary>Jolt/Core — 85%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -105,9 +105,9 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ByteBuffer.h` | 59 | ❌ todo |  |
 | `Color.cpp`, `Color.h` | 110 | ✅ complete | `Zolt/Core/Color.zig` |
 | `Core.h` | 666 | 🟡 partial | `Zolt/Core/Core.zig` |
-| `FPControlWord.h` | 113 | ❌ todo |  |
+| `FPControlWord.h` | 113 | ✅ complete | `Zolt/Core/FPControlWord.zig` |
 | `FPException.h` | 61 | ➖ n/a | Zolt never enables floating point exceptions |
-| `FPFlushDenormals.h` | 27 | ❌ todo |  |
+| `FPFlushDenormals.h` | 27 | ✅ complete | `Zolt/Core/FPFlushDenormals.zig` |
 | `Factory.cpp`, `Factory.h` | 110 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
 | `FixedSizeFreeList.h`, `FixedSizeFreeList.inl` | 275 | ✅ complete | `Zolt/Core/FixedSizeFreeList.zig` |
 | `HashCombine.h` | 208 | ✅ complete | `Zolt/Core/HashCombine.zig` |
@@ -120,7 +120,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `JobSystemThreadPool.cpp`, `JobSystemThreadPool.h` | 359 | ✅ complete | `Zolt/Core/JobSystemThreadPool.zig` |
 | `JobSystemWithBarrier.cpp`, `JobSystemWithBarrier.h` | 259 | ✅ complete | `Zolt/Core/JobSystemWithBarrier.zig` |
 | `LSANSuppressions.h` | 15 | ➖ n/a | sanitizer configuration |
-| `LinearCurve.cpp`, `LinearCurve.h` | 88 | ❌ todo |  |
+| `LinearCurve.cpp`, `LinearCurve.h` | 88 | 🟡 partial | `Zolt/Core/LinearCurve.zig` |
 | `LockFreeHashMap.h`, `LockFreeHashMap.inl` | 454 | ✅ complete | `Zolt/Core/LockFreeHashMap.zig` |
 | `Memory.cpp`, `Memory.h` | 138 | ➖ n/a | global allocation hooks, Zolt passes std.mem.Allocator explicitly |
 | `Mutex.h` | 183 | ✅ complete | `Zolt/Core/Mutex.zig` |
@@ -141,14 +141,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ScopeExit.h` | 38 | ➖ n/a | Zig `defer` |
 | `Semaphore.cpp`, `Semaphore.h` | 169 | ✅ complete | `Zolt/Core/Semaphore.zig` |
 | `StaticArray.h` | 271 | ✅ complete | `Zolt/Core/StaticArray.zig` |
-| `StreamIn.h` | 103 | ❌ todo |  |
-| `StreamOut.h` | 82 | ❌ todo |  |
+| `StreamIn.h` | 103 | ✅ complete | `Zolt/Core/StreamIn.zig` |
+| `StreamOut.h` | 82 | ✅ complete | `Zolt/Core/StreamOut.zig` |
 | `StreamUtils.h` | 140 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
-| `StreamWrapper.h` | 39 | ❌ todo |  |
+| `StreamWrapper.h` | 39 | ✅ complete | `Zolt/Core/StreamWrapper.zig` |
 | `StridedPtr.h` | 50 | ❌ todo |  |
-| `StringTools.cpp`, `StringTools.h` | 107 | ❌ todo |  |
+| `StringTools.cpp`, `StringTools.h` | 107 | ✅ complete | `Zolt/Core/StringTools.zig` |
 | `TempAllocator.h` | 181 | ❌ todo |  |
-| `TickCounter.cpp`, `TickCounter.h` | 65 | ❌ todo |  |
+| `TickCounter.cpp`, `TickCounter.h` | 65 | ✅ complete | `Zolt/Core/TickCounter.zig` |
 | `UnorderedMap.h` | 69 | ✅ complete | `Zolt/Core/UnorderedMap.zig` |
 | `UnorderedMapFwd.h` | 10 | ✅ complete | `Zolt/Core/UnorderedMap.zig` |
 | `UnorderedSet.h` | 27 | ✅ complete | `Zolt/Core/UnorderedSet.zig` |
@@ -548,7 +548,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
 | `UnitTests` | 16% | 0 | 1 | 0 | 6 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
-| `UnitTests/Core` | 66% | 7 | 0 | 0 | 4 | 2 | 0 | 1021 |
+| `UnitTests/Core` | 82% | 10 | 0 | 0 | 1 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 0% | 0 | 0 | 0 | 7 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
@@ -577,21 +577,21 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Core — 66%</summary>
+<details><summary>UnitTests/Core — 82%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ArrayTest.cpp` | 616 | ➖ n/a | tests Jolt's Array, Zolt uses std.ArrayList |
 | `BinaryHeapTest.cpp` | 41 | ✅ complete | `ZoltTests/Core/BinaryHeapTest.zig` |
-| `FPFlushDenormalsTest.cpp` | 35 | ❌ todo |  |
+| `FPFlushDenormalsTest.cpp` | 35 | ✅ complete | `ZoltTests/Core/FPFlushDenormalsTest.zig` |
 | `HashCombineTest.cpp` | 42 | ✅ complete | `ZoltTests/Core/HashCombineTest.zig` |
 | `InsertionSortTest.cpp` | 75 | ✅ complete | `ZoltTests/Core/InsertionSortTest.zig` |
 | `JobSystemTest.cpp` | 72 | ✅ complete | `ZoltTests/Core/JobSystemTest.zig` |
-| `LinearCurveTest.cpp` | 48 | ❌ todo |  |
+| `LinearCurveTest.cpp` | 48 | ✅ complete | `ZoltTests/Core/LinearCurveTest.zig` |
 | `QuickSortTest.cpp` | 75 | ✅ complete | `ZoltTests/Core/QuickSortTest.zig` |
 | `STLLocalAllocatorTest.cpp` | 180 | ❌ todo |  |
 | `ScopeExitTest.cpp` | 42 | ➖ n/a | tests ScopeExit, Zig has `defer` |
-| `StringToolsTest.cpp` | 80 | ❌ todo |  |
+| `StringToolsTest.cpp` | 80 | ✅ complete | `ZoltTests/Core/StringToolsTest.zig` |
 | `UnorderedMapTest.cpp` | 104 | ✅ complete | `ZoltTests/Core/UnorderedMapTest.zig` |
 | `UnorderedSetTest.cpp` | 269 | ✅ complete | `ZoltTests/Core/UnorderedSetTest.zig` |
 
