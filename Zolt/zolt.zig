@@ -13,6 +13,9 @@ pub const getConfigurationString = @import("ConfigurationString.zig").getConfigu
 // AABBTree
 pub const AABBTreeBuilder = @import("AABBTree/AABBTreeBuilder.zig").AABBTreeBuilder;
 pub const AABBTreeBuilderStats = @import("AABBTree/AABBTreeBuilder.zig").AABBTreeBuilderStats;
+pub const AABBTreeToBuffer = @import("AABBTree/AABBTreeToBuffer.zig").AABBTreeToBuffer;
+pub const NodeCodecQuadTreeHalfFloat = @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig").NodeCodecQuadTreeHalfFloat;
+pub const TriangleCodecIndexed8BitPackSOA4Flags = @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig").TriangleCodecIndexed8BitPackSOA4Flags;
 
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
@@ -179,6 +182,9 @@ pub const TriangleSplitterMean = @import("TriangleSplitter/TriangleSplitterMean.
 /// compiled and that their inline tests run. Add new files here when porting them.
 const source_files = .{
     @import("AABBTree/AABBTreeBuilder.zig"),
+    @import("AABBTree/AABBTreeToBuffer.zig"),
+    @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig"),
+    @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig"),
     @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
