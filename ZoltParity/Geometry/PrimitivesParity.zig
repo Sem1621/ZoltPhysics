@@ -1548,7 +1548,8 @@ test "Indexify / Deindexify" {
         // Pool of base vertices
         var pool_size = 3 + rng.index(pool.len - 2);
         var weld: f32 = undefined;
-        switch (rng.next() % 8) {
+        var exact_grid = false;
+        switch (rng.next() % 9) {
             0, 1 => {
                 // On a grid with spacing 0.5: exact duplicates, vertices exactly on the split planes
                 for (pool[0..pool_size]) |*p|
@@ -1574,6 +1575,17 @@ test "Indexify / Deindexify" {
                         p.* = Vec3.init(1, 2, 3).add(dir.mulScalar(weld * std.math.ldexp(@as(f32, 3), @intCast(i - 16))));
                 }
             },
+            4 => {
+                // On a grid with spacing 0.25 and a weld distance that is a multiple of half the spacing: split values and
+                // distances to the split plane are exact, so vertices end up at exactly split_value +/- weld, which tests the
+                // comparisons that partition the vertices (the brute force search welds a vertex to the first partner it
+                // finds, so the partitioning changes the result). Many vertices are within the weld distance of the split
+                // plane and go to both halves, so the number of triangles is kept small and the vertices are not perturbed.
+                exact_grid = true;
+                for (pool[0..pool_size]) |*p|
+                    p.* = Vec3.init(@floatFromInt(rng.next() % 8), @floatFromInt(rng.next() % 8), @floatFromInt(rng.next() % 2)).mulScalar(0.25);
+                weld = ([_]f32{ 0.125, 0.25, 0.5 })[rng.index(3)];
+            },
             else => {
                 // Random
                 for (pool[0..pool_size]) |*p|
@@ -1583,8 +1595,8 @@ test "Indexify / Deindexify" {
         }
 
         // Triangles: 3 vertices from the pool, each copy perturbed a little (near duplicates), some degenerate
-        const num_triangles = 1 + rng.index(if (rng.chance(4)) 300 else 30);
-        const perturbation: f32 = switch (rng.next() % 5) {
+        const num_triangles = 1 + rng.index(if (!exact_grid and rng.chance(4)) 300 else 30);
+        const perturbation: f32 = if (exact_grid) 0 else switch (rng.next() % 5) {
             0 => 0,
             1 => 1.0e-6,
             2 => 1.0e-5,

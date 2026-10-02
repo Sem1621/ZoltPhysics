@@ -82,6 +82,7 @@ pub const AABox4Bounds = @import("Geometry/AABox4.zig").AABox4Bounds;
 pub const aabox4DistanceSqToPoint = @import("Geometry/AABox4.zig").aabox4DistanceSqToPoint;
 pub const aabox4DistanceSqToPointVec3 = @import("Geometry/AABox4.zig").aabox4DistanceSqToPointVec3;
 pub const aabox4EnlargeWithExtent = @import("Geometry/AABox4.zig").aabox4EnlargeWithExtent;
+pub const AABox4OrientedBoxOptions = @import("Geometry/AABox4.zig").AABox4OrientedBoxOptions;
 pub const aabox4Scale = @import("Geometry/AABox4.zig").aabox4Scale;
 pub const aabox4VsBox = @import("Geometry/AABox4.zig").aabox4VsBox;
 pub const aabox4VsOrientedBox = @import("Geometry/AABox4.zig").aabox4VsOrientedBox;

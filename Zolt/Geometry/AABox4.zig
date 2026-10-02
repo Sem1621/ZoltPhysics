@@ -28,7 +28,7 @@ pub const AABox4Bounds = struct {
 };
 
 /// Optional arguments of the oriented box tests
-pub const OrientedBoxOptions = struct { epsilon: f32 = 1.0e-6 };
+pub const AABox4OrientedBoxOptions = struct { epsilon: f32 = 1.0e-6 };
 
 /// Test if 4 bounding boxes overlap with 1 bounding box, splat 1 box (AABox4VsBox(const AABox &, ...))
 pub fn aabox4VsBox(box1: AABox, box2_min_x: Vec4, box2_min_y: Vec4, box2_min_z: Vec4, box2_max_x: Vec4, box2_max_y: Vec4, box2_max_z: Vec4) UVec4 {
@@ -106,7 +106,7 @@ pub fn aabox4VsPoint(point: Vec3, box_min_x: Vec4, box_min_y: Vec4, box_min_z: V
 }
 
 /// Test if 4 bounding boxes overlap with an oriented box (AABox4VsBox(Mat44Arg, Vec3Arg, ..., float inEpsilon = 1.0e-6f))
-pub fn aabox4VsOrientedBoxMat44(orientation: Mat44, half_extents: Vec3, box_min_x: Vec4, box_min_y: Vec4, box_min_z: Vec4, box_max_x: Vec4, box_max_y: Vec4, box_max_z: Vec4, opts: OrientedBoxOptions) UVec4 {
+pub fn aabox4VsOrientedBoxMat44(orientation: Mat44, half_extents: Vec3, box_min_x: Vec4, box_min_y: Vec4, box_min_z: Vec4, box_max_x: Vec4, box_max_y: Vec4, box_max_z: Vec4, opts: AABox4OrientedBoxOptions) UVec4 {
     // Taken from: Real Time Collision Detection - Christer Ericson
     // Chapter 4.4.1, page 103-105.
     // Note that the code is swapped around: A is the aabox and B is the oriented box (this saves us from having to invert the orientation of the oriented box)
@@ -216,7 +216,7 @@ pub fn aabox4VsOrientedBoxMat44(orientation: Mat44, half_extents: Vec3, box_min_
 }
 
 /// Convenience function that tests 4 AABoxes vs OrientedBox (AABox4VsBox(const OrientedBox &, ..., float inEpsilon = 1.0e-6f))
-pub fn aabox4VsOrientedBox(box: OrientedBox, box_min_x: Vec4, box_min_y: Vec4, box_min_z: Vec4, box_max_x: Vec4, box_max_y: Vec4, box_max_z: Vec4, opts: OrientedBoxOptions) UVec4 {
+pub fn aabox4VsOrientedBox(box: OrientedBox, box_min_x: Vec4, box_min_y: Vec4, box_min_z: Vec4, box_max_x: Vec4, box_max_y: Vec4, box_max_z: Vec4, opts: AABox4OrientedBoxOptions) UVec4 {
     return aabox4VsOrientedBoxMat44(box.orientation, box.half_extents, box_min_x, box_min_y, box_min_z, box_max_x, box_max_y, box_max_z, opts);
 }
 
