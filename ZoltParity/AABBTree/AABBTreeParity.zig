@@ -20,6 +20,9 @@
 //! splitter's minimum size), huge coordinates (beyond the half float range of the node bounds), unshared vertices,
 //! and meshes that make Convert fail (too many triangles per leaf, material indices that don't fit in 8 bits, too
 //! many vertices in the root leaf). Both splitters, random binning options, leaf sizes and with / without user data.
+//! Separate tests cover the empty mesh, ValidationContext::IsDegenerate on meshes with NaN / infinite vertices and
+//! bounds that overflow (validation only, such meshes trip Jolt's asserts when building the tree), and centroids
+//! that overflow to infinity (NaN bin numbers in TriangleSplitterBinning).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -48,6 +51,7 @@ const jolt = struct {
     extern fn jolt_aabb_splitter_run(input: *const Input, leaf_size: u32, out_stream: [*]u32, capacity: u32) u32;
     extern fn jolt_aabb_tree_build(input: *const Input, num_query_nodes: u32, cost_traversal: f32, cost_leaf: f32, out_stream: [*]u32, capacity: u32) u32;
     extern fn jolt_aabb_tree_convert(input: *const Input, out_stream: [*]u32, capacity: u32) u32;
+    extern fn jolt_aabb_validate(input: *const Input, out_stream: [*]u32, capacity: u32) u32;
     extern fn jolt_aabb_tree_walk(input: *const Input, rays: [*]const f32, num_rays: u32, boxes: [*]const f32, max_triangles: [*]const u32, num_boxes: u32, out_stream: [*]u32, capacity: u32) u32;
 };
 
@@ -314,6 +318,7 @@ const Tree = struct {
         var stats: AABBTreeBuilderStats = .{};
         self.root = try self.builder.build(allocator, &stats);
         self.buffer = .empty;
+        errdefer self.buffer.deinit(allocator);
         self.result = self.buffer.convert(allocator, self.builder.getTriangles(), self.builder.getNodes(), input.vertices[0..input.num_vertices], self.root, input.store_user_data != 0);
         if (self.result) |_| {} else |err| if (err == error.OutOfMemory) return error.OutOfMemory;
     }
@@ -325,16 +330,21 @@ const Tree = struct {
     }
 };
 
-fn zoltConvert(allocator: std.mem.Allocator, input: *const Input, s: *Stream) !void {
-    var tree: Tree = undefined;
-    try tree.init(allocator, input);
-    defer tree.deinit(allocator);
-
+/// Adds ValidationContext.isDegenerate for every triangle of the mesh to the stream
+fn zoltValidate(input: *const Input, s: *Stream) void {
     const vertices = input.vertices[0..input.num_vertices];
     const triangles = input.triangles[0..input.num_triangles];
     const validation: TriangleCodec.ValidationContext = .init(triangles, vertices);
     for (triangles) |t|
         s.add(@intFromBool(validation.isDegenerate(t)));
+}
+
+fn zoltConvert(allocator: std.mem.Allocator, input: *const Input, s: *Stream) !void {
+    var tree: Tree = undefined;
+    try tree.init(allocator, input);
+    defer tree.deinit(allocator);
+
+    zoltValidate(input, s);
 
     tree.result catch |err| {
         s.add(0);
@@ -974,6 +984,80 @@ const StreamChecker = struct {
     }
 };
 
+/// Runs the splitter on both sides and compares the streams. Returns the C++ stream (owned by the caller).
+fn compareSplitter(allocator: std.mem.Allocator, input: *const Input, leaf_size: u32, checker: *StreamChecker, description: []const u8, case_index: usize) ![]u32 {
+    var s: Stream = .{ .allocator = allocator };
+    defer s.deinit();
+    try zoltSplitterRun(allocator, input, leaf_size, &s);
+    const Ctx = struct { input: *const Input, leaf_size: u32 };
+    const j = try joltStream(allocator, Ctx{ .input = input, .leaf_size = leaf_size }, struct {
+        fn f(c: Ctx, out: [*]u32, capacity: u32) u32 {
+            return jolt.jolt_aabb_splitter_run(c.input, c.leaf_size, out, capacity);
+        }
+    }.f);
+    checker.check(description, case_index, s.values.items, j);
+    return j;
+}
+
+/// Builds the tree on both sides and compares the streams. Returns the C++ stream (owned by the caller).
+fn compareBuild(allocator: std.mem.Allocator, input: *const Input, cost_traversal: f32, cost_leaf: f32, checker: *StreamChecker, description: []const u8, case_index: usize) ![]u32 {
+    var s: Stream = .{ .allocator = allocator };
+    defer s.deinit();
+    try zoltBuild(allocator, input, cost_traversal, cost_leaf, &s);
+    const Ctx = struct { input: *const Input, cost_traversal: f32, cost_leaf: f32 };
+    const j = try joltStream(allocator, Ctx{ .input = input, .cost_traversal = cost_traversal, .cost_leaf = cost_leaf }, struct {
+        fn f(c: Ctx, out: [*]u32, capacity: u32) u32 {
+            return jolt.jolt_aabb_tree_build(c.input, num_query_nodes, c.cost_traversal, c.cost_leaf, out, capacity);
+        }
+    }.f);
+    checker.check(description, case_index, s.values.items, j);
+    return j;
+}
+
+/// Builds and converts the tree on both sides and compares the streams. Returns the C++ stream (owned by the caller).
+fn compareConvert(allocator: std.mem.Allocator, input: *const Input, checker: *StreamChecker, description: []const u8, case_index: usize) ![]u32 {
+    var s: Stream = .{ .allocator = allocator };
+    defer s.deinit();
+    try zoltConvert(allocator, input, &s);
+    const j = try joltStream(allocator, input, struct {
+        fn f(c: *const Input, out: [*]u32, capacity: u32) u32 {
+            return jolt.jolt_aabb_tree_convert(c, out, capacity);
+        }
+    }.f);
+    checker.check(description, case_index, s.values.items, j);
+    return j;
+}
+
+/// Builds, converts and walks the tree on both sides and compares the streams. Returns the C++ stream (owned by the
+/// caller).
+fn compareWalk(allocator: std.mem.Allocator, input: *const Input, rays: []const [7]f32, boxes: []const [6]f32, budgets: []const u32, checker: *StreamChecker, description: []const u8, case_index: usize) ![]u32 {
+    var s: Stream = .{ .allocator = allocator };
+    defer s.deinit();
+    try zoltWalk(allocator, input, rays, boxes, budgets, &s);
+    const Ctx = struct { input: *const Input, rays: []const [7]f32, boxes: []const [6]f32, budgets: []const u32 };
+    const j = try joltStream(allocator, Ctx{ .input = input, .rays = rays, .boxes = boxes, .budgets = budgets }, struct {
+        fn f(c: Ctx, out: [*]u32, capacity: u32) u32 {
+            return jolt.jolt_aabb_tree_walk(c.input, @ptrCast(c.rays.ptr), @intCast(c.rays.len), @ptrCast(c.boxes.ptr), c.budgets.ptr, @intCast(c.boxes.len), out, capacity);
+        }
+    }.f);
+    checker.check(description, case_index, s.values.items, j);
+    return j;
+}
+
+/// Runs only the ValidationContext on both sides (no tree) and compares the streams
+fn compareValidate(allocator: std.mem.Allocator, input: *const Input, checker: *StreamChecker, description: []const u8, case_index: usize) !void {
+    var s: Stream = .{ .allocator = allocator };
+    defer s.deinit();
+    zoltValidate(input, &s);
+    const j = try joltStream(allocator, input, struct {
+        fn f(c: *const Input, out: [*]u32, capacity: u32) u32 {
+            return jolt.jolt_aabb_validate(c, out, capacity);
+        }
+    }.f);
+    defer allocator.free(j);
+    checker.check(description, case_index, s.values.items, j);
+}
+
 fn finishAll(checkers: []const *const StreamChecker) !void {
     var failed = false;
     for (checkers) |checker|
@@ -1068,17 +1152,8 @@ test "AABBTree / TriangleSplitter" {
             // Splitter
             {
                 const leaf_size = @min(max_triangles_per_leaf, 8);
-                var s: Stream = .{ .allocator = allocator };
-                defer s.deinit();
-                try zoltSplitterRun(allocator, &input, leaf_size, &s);
-                const Ctx = struct { input: *const Input, leaf_size: u32 };
-                const j = try joltStream(allocator, Ctx{ .input = &input, .leaf_size = leaf_size }, struct {
-                    fn f(c: Ctx, out: [*]u32, capacity: u32) u32 {
-                        return jolt.jolt_aabb_splitter_run(c.input, c.leaf_size, out, capacity);
-                    }
-                }.f);
+                const j = try compareSplitter(allocator, &input, leaf_size, &splitter_checker, description, case_index);
                 defer allocator.free(j);
-                splitter_checker.check(description, case_index, s.values.items, j);
 
                 // Count failed splits (index 2 + name length + 3 is the first success flag, stride 7)
                 const name_len = j[0];
@@ -1091,32 +1166,15 @@ test "AABBTree / TriangleSplitter" {
             {
                 const cost_traversal = gen.float(0.1, 3.0);
                 const cost_leaf = gen.float(0.1, 3.0);
-                var s: Stream = .{ .allocator = allocator };
-                defer s.deinit();
-                try zoltBuild(allocator, &input, cost_traversal, cost_leaf, &s);
-                const Ctx = struct { input: *const Input, cost_traversal: f32, cost_leaf: f32 };
-                const j = try joltStream(allocator, Ctx{ .input = &input, .cost_traversal = cost_traversal, .cost_leaf = cost_leaf }, struct {
-                    fn f(c: Ctx, out: [*]u32, capacity: u32) u32 {
-                        return jolt.jolt_aabb_tree_build(c.input, num_query_nodes, c.cost_traversal, c.cost_leaf, out, capacity);
-                    }
-                }.f);
+                const j = try compareBuild(allocator, &input, cost_traversal, cost_leaf, &build_checker, description, case_index);
                 defer allocator.free(j);
-                build_checker.check(description, case_index, s.values.items, j);
                 if (nt <= max_triangles_per_leaf) coverage.root_leaf += 1;
             }
 
             // Convert
             {
-                var s: Stream = .{ .allocator = allocator };
-                defer s.deinit();
-                try zoltConvert(allocator, &input, &s);
-                const j = try joltStream(allocator, &input, struct {
-                    fn f(c: *const Input, out: [*]u32, capacity: u32) u32 {
-                        return jolt.jolt_aabb_tree_convert(c, out, capacity);
-                    }
-                }.f);
+                const j = try compareConvert(allocator, &input, &convert_checker, description, case_index);
                 defer allocator.free(j);
-                convert_checker.check(description, case_index, s.values.items, j);
 
                 if (j[nt] == 1) {
                     coverage.convert_ok += 1;
@@ -1132,17 +1190,8 @@ test "AABBTree / TriangleSplitter" {
 
             // Walk
             {
-                var s: Stream = .{ .allocator = allocator };
-                defer s.deinit();
-                try zoltWalk(allocator, &input, rays.items, boxes.items, budgets.items, &s);
-                const Ctx = struct { input: *const Input, rays: []const [7]f32, boxes: []const [6]f32, budgets: []const u32 };
-                const j = try joltStream(allocator, Ctx{ .input = &input, .rays = rays.items, .boxes = boxes.items, .budgets = budgets.items }, struct {
-                    fn f(c: Ctx, out: [*]u32, capacity: u32) u32 {
-                        return jolt.jolt_aabb_tree_walk(c.input, @ptrCast(c.rays.ptr), @intCast(c.rays.len), @ptrCast(c.boxes.ptr), c.budgets.ptr, @intCast(c.boxes.len), out, capacity);
-                    }
-                }.f);
+                const j = try compareWalk(allocator, &input, rays.items, boxes.items, budgets.items, &walk_checker, description, case_index);
                 defer allocator.free(j);
-                walk_checker.check(description, case_index, s.values.items, j);
 
                 if (j.len > 0) {
                     coverage.rays += rays.items.len;
@@ -1193,32 +1242,158 @@ test "AABBTree / TriangleSplitter empty mesh" {
     const allocator = std.testing.allocator;
     const vertices = [_]Float3{.init(0, 0, 0)};
     const triangles = [_]IndexedTriangle{.init(0, 0, 0, .{})};
+    var build_checker: StreamChecker = .{ .name = "AABBTreeBuilder build (empty)" };
+    var split_checker: StreamChecker = .{ .name = "TriangleSplitter split (empty)" };
+    var convert_checker: StreamChecker = .{ .name = "AABBTreeToBuffer convert (empty)" };
     for (0..2) |splitter_type| {
         // No triangles (pointers to valid memory, the count is zero)
         const input: Input = .{ .vertices = &vertices, .num_vertices = 1, .triangles = &triangles, .num_triangles = 0, .splitter_type = @intCast(splitter_type), .min_num_bins = 8, .max_num_bins = 128, .num_triangles_per_bin = 6, .max_triangles_per_leaf = 4, .store_user_data = 0 };
-        var checker: StreamChecker = .{ .name = "AABBTreeBuilder build (empty)" };
-        var s: Stream = .{ .allocator = allocator };
-        defer s.deinit();
-        try zoltBuild(allocator, &input, 1.0, 1.0, &s);
-        const j = try joltStream(allocator, &input, struct {
-            fn f(c: *const Input, out: [*]u32, capacity: u32) u32 {
-                return jolt.jolt_aabb_tree_build(c, num_query_nodes, 1.0, 1.0, out, capacity);
-            }
-        }.f);
-        defer allocator.free(j);
-        checker.check("empty", splitter_type, s.values.items, j);
+        allocator.free(try compareBuild(allocator, &input, 1.0, 1.0, &build_checker, "empty", splitter_type));
+        allocator.free(try compareSplitter(allocator, &input, 1, &split_checker, "empty", splitter_type));
 
-        var split_checker: StreamChecker = .{ .name = "TriangleSplitter split (empty)" };
-        var s2: Stream = .{ .allocator = allocator };
-        defer s2.deinit();
-        try zoltSplitterRun(allocator, &input, 1, &s2);
-        const j2 = try joltStream(allocator, &input, struct {
-            fn f(c: *const Input, out: [*]u32, capacity: u32) u32 {
-                return jolt.jolt_aabb_splitter_run(c, 1, out, capacity);
-            }
-        }.f);
-        defer allocator.free(j2);
-        split_checker.check("empty", splitter_type, s2.values.items, j2);
-        try finishAll(&.{ &checker, &split_checker });
+        // Converting the empty tree packs a triangle block header without blocks. Jolt asserts in Pack
+        // (inNumTriangles > 0) and its release build continues, so Zolt's ReleaseFast / ReleaseSmall builds must
+        // produce the same buffer (with asserts enabled Zolt panics there like Jolt's debug build)
+        if (!zolt.Core.enable_asserts) {
+            var s: Stream = .{ .allocator = allocator };
+            defer s.deinit();
+            try zoltConvert(allocator, &input, &s);
+            const j = try joltStream(allocator, &input, struct {
+                fn f(c: *const Input, out: [*]u32, capacity: u32) u32 {
+                    return jolt.jolt_aabb_tree_convert(c, out, capacity);
+                }
+            }.f);
+            defer allocator.free(j);
+
+            // Without vertices Finalize returns early and the TriangleHeader stays uninitialized on both sides, don't
+            // compare it (stream: success, size, then the bytes: node header, triangle header, ...)
+            const first = 2 + Buffer.header_size / 4;
+            const count = Buffer.triangle_header_size / 4;
+            for ([_][]u32{ s.values.items, j }) |values|
+                if (values.len >= first + count) @memset(values[first..][0..count], 0);
+            convert_checker.check("empty", splitter_type, s.values.items, j);
+        }
     }
+    try finishAll(&.{ &build_checker, &split_checker, &convert_checker });
+}
+
+test "AABBTree / ValidationContext NaN, infinite and overflowing vertices" {
+    // ValidationContext::IsDegenerate quantizes with Vec3::ToInt, which gives 0x80000000 (_mm_cvttps_epi32) for NaN:
+    // NaN vertices, and bounds whose size overflows to infinity (the compress scale becomes 0 and inf * 0 = NaN)
+    const allocator = std.testing.allocator;
+    var gen: Gen = .{};
+    var checker: StreamChecker = .{ .name = "ValidationContext isDegenerate (non-finite)" };
+    const nan = std.math.nan(f32);
+    const inf = std.math.inf(f32);
+    const flt_max = zolt.math.flt_max;
+
+    // Hand picked meshes
+    const vertices = [_]Float3{ .init(0, 0, 0), .init(1, 0, 0), .init(0, 1, 0), .init(nan, 0, 0), .init(0, inf, -inf), .init(-3.0e38, 0, 0), .init(3.0e38, 1, 0), .init(0, 0, nan) };
+    const triangle_sets = [_][2][3]u32{
+        .{ .{ 0, 1, 2 }, .{ 0, 1, 3 } },
+        .{ .{ 3, 1, 2 }, .{ 0, 1, 2 } },
+        .{ .{ 5, 6, 2 }, .{ 0, 1, 2 } },
+        .{ .{ 4, 1, 2 }, .{ 0, 1, 2 } },
+        .{ .{ 3, 7, 2 }, .{ 0, 7, 3 } },
+        .{ .{ 5, 6, 3 }, .{ 4, 0, 1 } },
+    };
+    for (triangle_sets, 0..) |set, case_index| {
+        var triangles: [2]IndexedTriangle = undefined;
+        for (&triangles, set) |*t, idx| t.* = .init(idx[0], idx[1], idx[2], .{});
+        const input: Input = .{ .vertices = &vertices, .num_vertices = vertices.len, .triangles = &triangles, .num_triangles = triangles.len, .splitter_type = 0, .min_num_bins = 8, .max_num_bins = 128, .num_triangles_per_bin = 6, .max_triangles_per_leaf = 4, .store_user_data = 0 };
+        try compareValidate(allocator, &input, &checker, "hand picked", case_index);
+    }
+
+    // Random meshes with some special vertex components
+    const special = [_]f32{ nan, -nan, inf, -inf, flt_max, -flt_max, 3.0e38, -3.0e38, 2.0e38, 1.0e38, -1.0e38 };
+    for (0..500) |mesh_index| {
+        var mesh: Mesh = .{};
+        defer mesh.deinit(allocator);
+        const size = gen.pick(f32, &.{ 1.0, 100.0, 1.0e30, 1.0e38 });
+        for (0..gen.range(3, 40)) |_| {
+            var v = gen.vec(-size, size);
+            if (gen.oneIn(5)) v[gen.index(3)] = gen.pick(f32, &special);
+            try mesh.addVertex(allocator, v);
+        }
+        try mesh.addRandomTriangles(allocator, &gen, gen.range(1, 60));
+        const input: Input = .{ .vertices = mesh.vertices.items.ptr, .num_vertices = @intCast(mesh.vertices.items.len), .triangles = mesh.triangles.items.ptr, .num_triangles = @intCast(mesh.triangles.items.len), .splitter_type = 0, .min_num_bins = 8, .max_num_bins = 128, .num_triangles_per_bin = 6, .max_triangles_per_leaf = 4, .store_user_data = 0 };
+        try compareValidate(allocator, &input, &checker, "random", triangle_sets.len + mesh_index);
+    }
+    try checker.finish();
+}
+
+test "AABBTree / TriangleSplitter centroids that overflow to infinity" {
+    // Triangles whose 3 vertices have the same huge coordinate have a centroid of +inf on that axis (the sum
+    // overflows), so the centroid bounds have an infinite size and TriangleSplitterBinning computes the bin number
+    // inf / inf = NaN, which Vec3::ToInt turns into 0x80000000 (then clamped to the last bin). Only positive huge
+    // values: a -inf centroid makes the bin boundaries NaN and the split value NaN, which trips the asserts of
+    // TriangleSplitter::SplitInternal in Jolt and in Zolt.
+    const allocator = std.testing.allocator;
+    var gen: Gen = .{};
+    var splitter_checker: StreamChecker = .{ .name = "TriangleSplitter split (overflow)" };
+    var build_checker: StreamChecker = .{ .name = "AABBTreeBuilder build (overflow)" };
+    var convert_checker: StreamChecker = .{ .name = "AABBTreeToBuffer convert (overflow)" };
+    var walk_checker: StreamChecker = .{ .name = "NodeCodec WalkTree / TriangleCodec decode (overflow)" };
+    var num_converted: usize = 0;
+
+    for (0..60) |mesh_index| {
+        var mesh: Mesh = .{};
+        defer mesh.deinit(allocator);
+        for (0..gen.range(3, 60)) |_| try mesh.addVertex(allocator, gen.vec(-10, 10));
+        try mesh.addRandomTriangles(allocator, &gen, gen.range(2, 150));
+
+        // Triangles that are far away on one axis, with the same coordinate for all 3 vertices (so that their bounds
+        // stay finite and their surface area doesn't make every split cost infinite)
+        const big = gen.pick(f32, &.{ 1.2e38, 2.0e38, 3.0e38, zolt.math.flt_max });
+        for (0..gen.range(1, 30)) |_| {
+            const axis = gen.index(3);
+            const first: u32 = @intCast(mesh.vertices.items.len);
+            for (0..3) |_| {
+                var v = gen.vec(-10, 10);
+                v[axis] = big;
+                try mesh.addVertex(allocator, v);
+            }
+            try mesh.addTriangle(allocator, &gen, first, first + 1, first + 2);
+        }
+        if (gen.oneIn(2)) mesh.shuffle(&gen);
+        const nt: u32 = @intCast(mesh.triangles.items.len);
+
+        var rays: std.ArrayList([7]f32) = .empty;
+        defer rays.deinit(allocator);
+        try generateRays(allocator, &gen, &mesh, &rays);
+        var boxes: std.ArrayList([6]f32) = .empty;
+        defer boxes.deinit(allocator);
+        var budgets: std.ArrayList(u32) = .empty;
+        defer budgets.deinit(allocator);
+        try generateBoxes(allocator, &gen, &mesh, &boxes, &budgets);
+
+        for (0..2) |splitter_type| {
+            const max_triangles_per_leaf = gen.pick(u32, &.{ 1, 2, 4, 8 });
+            const input: Input = .{
+                .vertices = mesh.vertices.items.ptr,
+                .num_vertices = @intCast(mesh.vertices.items.len),
+                .triangles = mesh.triangles.items.ptr,
+                .num_triangles = nt,
+                .splitter_type = @intCast(splitter_type),
+                .min_num_bins = 8,
+                .max_num_bins = gen.pick(u32, &.{ 8, 16, 128 }),
+                .num_triangles_per_bin = gen.range(1, 6),
+                .max_triangles_per_leaf = max_triangles_per_leaf,
+                .store_user_data = @intFromBool(gen.oneIn(2)),
+            };
+            const case_index = 2 * mesh_index + splitter_type;
+            var description_buffer: [128]u8 = undefined;
+            const description = try std.fmt.bufPrint(&description_buffer, "{d} triangles, {s}, huge coordinate {e}, leaf {d}", .{ nt, if (splitter_type == 0) "binning" else "mean", big, max_triangles_per_leaf });
+
+            allocator.free(try compareSplitter(allocator, &input, max_triangles_per_leaf, &splitter_checker, description, case_index));
+            allocator.free(try compareBuild(allocator, &input, 1.0, 1.0, &build_checker, description, case_index));
+            const j = try compareConvert(allocator, &input, &convert_checker, description, case_index);
+            num_converted += @intFromBool(j[nt] == 1);
+            allocator.free(j);
+            allocator.free(try compareWalk(allocator, &input, rays.items, boxes.items, budgets.items, &walk_checker, description, case_index));
+        }
+    }
+
+    try finishAll(&.{ &splitter_checker, &build_checker, &convert_checker, &walk_checker });
+    try std.testing.expect(num_converted > 0);
 }

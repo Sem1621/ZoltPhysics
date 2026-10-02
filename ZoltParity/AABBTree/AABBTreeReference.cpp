@@ -179,6 +179,14 @@ struct Tree
 	const char *			mError = nullptr;
 };
 
+// Adds ValidationContext::IsDegenerate for every triangle of the mesh to the stream
+static void AddValidation(const Mesh &inMesh, Stream &ioStream)
+{
+	TriangleCodec::ValidationContext validation(inMesh.mTriangles, inMesh.mVertices);
+	for (const IndexedTriangle &t : inMesh.mTriangles)
+		ioStream.Add(validation.IsDegenerate(t)? 1 : 0);
+}
+
 // Visits all nodes and decodes all triangles
 struct AllVisitor
 {
@@ -484,9 +492,7 @@ uint32 jolt_aabb_tree_convert(const ParityInput *inInput, uint32 *outStream, uin
 	Stream stream(outStream, inCapacity);
 	Tree tree(*inInput);
 
-	TriangleCodec::ValidationContext validation(tree.mMesh.mTriangles, tree.mMesh.mVertices);
-	for (const IndexedTriangle &t : tree.mMesh.mTriangles)
-		stream.Add(validation.IsDegenerate(t)? 1 : 0);
+	AddValidation(tree.mMesh, stream);
 
 	stream.Add(tree.mSuccess? 1 : 0);
 	if (!tree.mSuccess)
@@ -511,6 +517,18 @@ uint32 jolt_aabb_tree_convert(const ParityInput *inInput, uint32 *outStream, uin
 	stream.Add(uint32(reinterpret_cast<const uint8 *>(tree.mBuffer.GetTriangleHeader()) - start));
 	stream.Add(uint32(reinterpret_cast<const uint8 *>(tree.mBuffer.GetRoot()) - start));
 
+	return stream.GetSize();
+}
+
+// Only ValidationContext::IsDegenerate for every triangle, without building a tree (meshes with NaN vertices trip
+// the asserts of the splitters and AABBTreeToBuffer, in Jolt and in Zolt). Stream: IsDegenerate per triangle.
+uint32 jolt_aabb_validate(const ParityInput *inInput, uint32 *outStream, uint32 inCapacity)
+{
+	EnsureAllocator();
+
+	Stream stream(outStream, inCapacity);
+	Mesh mesh(*inInput);
+	AddValidation(mesh, stream);
 	return stream.GetSize();
 }
 

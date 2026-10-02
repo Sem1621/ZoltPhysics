@@ -384,11 +384,10 @@ pub const Vec3 = extern struct {
         out.* = .{ .x = self.value[0], .y = self.value[1], .z = self.value[2] };
     }
 
-    /// Convert each component from a float to an int (truncating, like _mm_cvttps_epi32), W is the same as Z.
-    /// Components must be in the range of an i32, this is safety checked in Debug and ReleaseSafe.
+    /// Convert each component from a float to an int (truncating), W is the same as Z.
+    /// Follows Jolt's SSE path (_mm_cvttps_epi32): NaN and components outside the range of an i32 give 0x80000000.
     pub fn toInt(self: Vec3) UVec4 {
-        const as_int: @Vector(4, i32) = @intFromFloat(self.value);
-        return .{ .value = @bitCast(as_int) };
+        return Vec4.fromVec3(self).toInt();
     }
 
     /// Reinterpret Vec3 as a UVec4 (doesn't change the bits), W is the same as Z

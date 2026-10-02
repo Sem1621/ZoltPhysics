@@ -37,6 +37,7 @@ const jolt = struct {
     extern fn jolt_vec3_abs(v: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec4_compress_unit_vector(v: *const [4]f32) u32;
     extern fn jolt_vec4_decompress_unit_vector(value: u32, out: *[4]f32) void;
+    extern fn jolt_vec4_to_int(v: *const [4]f32, out: *[4]u32) void;
     extern fn jolt_vec3_normalized(v: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec3_cross(a: *const [3]f32, b: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec3_dot(a: *const [3]f32, b: *const [3]f32) f32;
@@ -45,6 +46,7 @@ const jolt = struct {
     extern fn jolt_vec3_unit_spherical(theta: f32, phi: f32, out: *[3]f32) void;
     extern fn jolt_vec3_compress_unit_vector(v: *const [3]f32) u32;
     extern fn jolt_vec3_decompress_unit_vector(value: u32, out: *[3]f32) void;
+    extern fn jolt_vec3_to_int(v: *const [3]f32, out: *[3]u32) void;
 
     extern fn jolt_quat_rotation(axis: *const [3]f32, angle: f32, out: *[4]f32) void;
     extern fn jolt_quat_mul(a: *const [4]f32, b: *const [4]f32, out: *[4]f32) void;
@@ -556,6 +558,34 @@ test "Vec4 compress / decompress unit vector" {
         decompress.check(value, arr4(Vec4.decompressUnitVector(value)), expected);
     }
     try finishAll(&.{ &compress, &decompress });
+}
+
+/// Inputs of toInt that are not in the range of an i32 or close to its limits
+const to_int_special_values = [_]f32{ std.math.nan(f32), -std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), zolt.math.flt_max, -zolt.math.flt_max, 3.0e38, -3.0e38, 3.0e9, -3.0e9, 2147483648.0, -2147483648.0, 2147483520.0, -2147483904.0, 4294967296.0, 1.0e10, -1.0e10, -0.0, -0.5, -0.9999999, -1.0, -1.5, 0.9999999, 65535.5, 1.0e-30 };
+
+test "Vec4 / Vec3 toInt (NaN, infinity, out of range)" {
+    var rng: Rng = .{};
+    var to_int4: Checker = .{ .name = "Vec4.toInt" };
+    var to_int3: Checker = .{ .name = "Vec3.toInt" };
+    for (0..iterations) |_| {
+        var v: [4]f32 = undefined;
+        for (&v) |*c| {
+            c.* = switch (rng.next() % 3) {
+                0 => to_int_special_values[rng.next() % to_int_special_values.len],
+                1 => rng.float(-5.0e9, 5.0e9),
+                else => rng.float(-100, 100),
+            };
+        }
+        var expected: [4]u32 = undefined;
+        jolt.jolt_vec4_to_int(&v, &expected);
+        to_int4.check(v, @as([4]u32, vec4(v).toInt().value), expected);
+        const v3 = [3]f32{ v[0], v[1], v[2] };
+        var expected3: [3]u32 = undefined;
+        jolt.jolt_vec3_to_int(&v3, &expected3);
+        const r3 = vec3(v3).toInt();
+        to_int3.check(v3, [3]u32{ r3.getX(), r3.getY(), r3.getZ() }, expected3);
+    }
+    try finishAll(&.{ &to_int4, &to_int3 });
 }
 
 test "Vec3 normalized / cross / dot / length / perpendicular" {

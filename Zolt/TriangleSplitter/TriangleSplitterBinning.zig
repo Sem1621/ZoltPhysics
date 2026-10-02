@@ -3,8 +3,6 @@
 //!
 //! Derived splitter of `TriangleSplitter` (polymorphism pattern A): pass `&splitter.base` (or `splitter.splitter()`)
 //! where Jolt passes a `TriangleSplitter &`. The constructor's default arguments are the options struct of `init`.
-//! Zolt's `Vec3.toInt` requires the bin numbers to be in the range of an i32 (safety checked), so the centroids
-//! must be finite, like the meshes Jolt supports.
 
 const std = @import("std");
 const math = @import("../Math/Math.zig");

@@ -563,7 +563,7 @@ fn checkBuffer(allocator: std.mem.Allocator, buffer: *const TestBuffer, mesh: *c
 
         var brute_force: f32 = math.flt_max;
         for (collect.triangles.items) |t|
-            brute_force = @min(brute_force, rayTriangle(origin, direction, t[0], t[1], t[2]));
+            brute_force = math.min(brute_force, rayTriangle(origin, direction, t[0], t[1], t[2]));
         if (brute_force == math.flt_max) {
             try std.testing.expectEqual(math.flt_max, ray.fraction);
         } else {
@@ -617,6 +617,14 @@ test "AABBTreeToBuffer root leaf and abort" {
     const header = buffer.getNodeHeader();
     try std.testing.expectEqual(@as(u32, 8), header.root_properties >> TestNodeCodec.triangle_count_shift);
     try std.testing.expectEqual(@as(u32, (TestBuffer.header_size + TestBuffer.triangle_header_size) >> 2), header.root_properties & TestNodeCodec.offset_mask);
+
+    // Take ownership of the resulting data (like MeshShape does with mTree.swap(buffer.GetBuffer()))
+    const size = buffer.getBuffer().vector.items.len;
+    var tree: ByteBuffer = .empty;
+    defer tree.deinit(allocator);
+    std.mem.swap(ByteBuffer, &tree, buffer.getBufferMut());
+    try std.testing.expectEqual(size, tree.vector.items.len);
+    try std.testing.expectEqual(@as(usize, 0), buffer.getBuffer().vector.items.len);
 
     // A visitor that collects at most `budget` triangles per walk and aborts when a triangle block doesn't fit, the
     // next walk continues with that block (like MeshShape::GetTrianglesNext)

@@ -17,8 +17,6 @@
 //!   `getFlags` and `sGetFlags(start, index)` is `getTriangleFlags`. `TestRay(..., outClosestTriangleIndex)` returns
 //!   `TestRayResult{ .closest, .closest_triangle_index }` and `GetTriangle(..., outV1, outV2, outV3)` returns
 //!   `TriangleVertices{ .v1, .v2, .v3 }`.
-//! - Zolt's `Vec3.toInt` requires the quantized coordinates to be in the range of an i32 (safety checked), so the
-//!   vertices must be finite and the bounds of the mesh must not overflow, like the meshes Jolt supports.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -275,7 +273,8 @@ pub const TriangleCodecIndexed8BitPackSOA4Flags = struct {
         /// Returns the start of the triangle block in the buffer, or an error.
         pub fn pack(self: *EncodingContext, allocator: std.mem.Allocator, triangles: []const IndexedTriangle, store_user_data: bool, buffer: *ByteBuffer) (Error || std.mem.Allocator.Error)!usize {
             const num_triangles: u32 = @intCast(triangles.len);
-            std.debug.assert(num_triangles > 0);
+            if (Core.enable_asserts) // Reachable when converting an empty tree, release builds continue like Jolt does (a header without blocks)
+                std.debug.assert(num_triangles > 0);
 
             // Determine position of triangles start
             const triangle_block_start = buffer.vector.items.len;
