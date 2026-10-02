@@ -320,6 +320,16 @@ test "StreamIn reads the same bytes as Jolt" {
         try std.testing.expectEqual(DVec3.Type{ 7, 8, 9, 9 }, dlist.items[0].value);
         try std.testing.expect(!stream.isEOF());
     }
+    {
+        const array_bytes = std.mem.toBytes(@as(u32, 1)) ++ std.mem.toBytes([12]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }) ++ std.mem.toBytes([3]f64{ 13, 14, 15 });
+        impl = .{ .bytes = &array_bytes };
+        var list: std.ArrayList(DMat44) = .empty;
+        defer list.deinit(allocator);
+        try stream.readArray(DMat44, allocator, &list);
+        try std.testing.expectEqual(@as(usize, 1), list.items.len);
+        try std.testing.expect(list.items[0].eql(DMat44.init(Vec4.init(1, 2, 3, 4), Vec4.init(5, 6, 7, 8), Vec4.init(9, 10, 11, 12), DVec3.init(13, 14, 15))));
+        try std.testing.expect(!stream.isEOF());
+    }
 
     // Strings
     {

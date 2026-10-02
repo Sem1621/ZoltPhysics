@@ -72,7 +72,8 @@ fn writeValue(writer: *Writer, value: anytype) Writer.Error!void {
 /// Number of significant digits that std::ostream uses for floating point numbers by default
 const default_float_precision = 6;
 
-/// Integer type that is wide enough to hold any finite double multiplied by a power of 10 that brings it in the range [1, 10^17]
+/// Integer type that holds the numerator and denominator of any finite double scaled to `default_float_precision`
+/// digits before the decimal point (at most 2^53 * 10^329 resp. 2^1074, see roundToSignificantDigits)
 const BigInt = u1280;
 
 /// A positive finite double rounded to `default_float_precision` significant digits: `digits * 10^(exponent - precision + 1)`
@@ -341,6 +342,7 @@ test "convertToString formats like std::ostream" {
     try expectConverted("0", false);
     try expectConverted("hello", "hello");
     try expectConverted("hello", @as([]const u8, "hello"));
+    try expectConverted("hello", @as([*:0]const u8, "hello"));
     try expectConverted("200", @as(u8, 200));
     const E = enum(u8) { a = 3, b = 7 };
     try expectConverted("7", E.b);
