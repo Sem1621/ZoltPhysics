@@ -18,6 +18,11 @@ pub const Core = @import("Core/Core.zig");
 pub const FixedSizeFreeList = @import("Core/FixedSizeFreeList.zig").FixedSizeFreeList;
 pub const HashCombine = @import("Core/HashCombine.zig");
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
+pub const JobHandle = @import("Core/JobSystem.zig").JobSystem.JobHandle;
+pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
+pub const JobSystemSingleThreaded = @import("Core/JobSystemSingleThreaded.zig").JobSystemSingleThreaded;
+pub const JobSystemThreadPool = @import("Core/JobSystemThreadPool.zig").JobSystemThreadPool;
+pub const JobSystemWithBarrier = @import("Core/JobSystemWithBarrier.zig").JobSystemWithBarrier;
 pub const LFHMAllocator = @import("Core/LockFreeHashMap.zig").LFHMAllocator;
 pub const LFHMAllocatorContext = @import("Core/LockFreeHashMap.zig").LFHMAllocatorContext;
 pub const LockFreeHashMap = @import("Core/LockFreeHashMap.zig").LockFreeHashMap;
@@ -78,6 +83,10 @@ const source_files = .{
     @import("Core/FixedSizeFreeList.zig"),
     @import("Core/HashCombine.zig"),
     @import("Core/InsertionSort.zig"),
+    @import("Core/JobSystem.zig"),
+    @import("Core/JobSystemSingleThreaded.zig"),
+    @import("Core/JobSystemThreadPool.zig"),
+    @import("Core/JobSystemWithBarrier.zig"),
     @import("Core/LockFreeHashMap.zig"),
     @import("Core/Mt19937.zig"),
     @import("Core/Mutex.zig"),
