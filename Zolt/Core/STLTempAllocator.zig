@@ -51,7 +51,10 @@ pub const STLTempAllocator = struct {
 
     /// Allocators are not-stateless, assume if allocator address matches that the allocators are the same
     pub fn eql(self: STLTempAllocator, other: STLTempAllocator) bool {
-        return self.temp_allocator.ptr == other.temp_allocator.ptr;
+        // Jolt compares the addresses of the TempAllocator objects. In Zolt the identity of a TempAllocator is
+        // ptr + vtable: an implementation can share its address with a nested one (the TempAllocatorImpl inside
+        // a TempAllocatorImplWithMallocFallback), only the vtable tells them apart.
+        return self.temp_allocator.ptr == other.temp_allocator.ptr and self.temp_allocator.vtable == other.temp_allocator.vtable;
     }
 
     /// Get our temp allocator
@@ -184,6 +187,14 @@ test "STLTempAllocator on TempAllocatorImplWithMallocFallback" {
     var fallback = try TempAllocatorImplWithMallocFallback.init(std.testing.allocator, @intCast(2 * a16));
     defer fallback.deinit();
     const gpa = fallback.tempAllocator().allocator();
+
+    // The nested TempAllocatorImpl is a different allocator, even if it is at the same address
+    const stl = STLTempAllocator.init(fallback.tempAllocator());
+    const stl_nested = STLTempAllocator.init(fallback.allocator.tempAllocator());
+    try std.testing.expect(stl.eql(STLTempAllocator.init(fallback.tempAllocator())));
+    try std.testing.expect(stl_nested.eql(STLTempAllocator.init(fallback.allocator.tempAllocator())));
+    try std.testing.expect(!stl.eql(stl_nested));
+    try std.testing.expect(!stl_nested.eql(stl));
 
     const a = try gpa.alloc(u8, 2 * a16); // Fills the fixed block
     try std.testing.expect(fallback.allocator.ownsMemory(a.ptr));

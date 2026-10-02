@@ -498,3 +498,13 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `DMat44::Decompose(outScale)`      | `decompose() Decomposition{ .rotation_translation, .scale }` | out parameter     |
 | `JPH_RVECTOR_ALIGNMENT`            | `rvector_alignment` (`Math/Real.zig`)  | macro constant                          |
 | `operator ""_r` (`JPH::literals`)  | not ported: a float literal coerces to `Real` | Zig has no user-defined literals |
+| `TempAllocator::Allocate(inSize) -> void *` | `allocate(size) Error!?Block` (null for size 0, `error.OutOfMemory` where Jolt aborts) | error union instead of abort |
+| `STLTempAllocator<T>`              | `STLTempAllocator` (untyped), containers use `.allocator()` (a `std.mem.Allocator`) | std.mem.Allocator counts bytes |
+| `STLLocalAllocator(const STLLocalAllocator<T2, N> &)` | `STLLocalAllocator(T, N).fromOther(other)` | converting constructor  |
+| `STLLocalAllocator::is_local`      | `isLocal`                              | STL style snake_case name               |
+| `ByteBuffer::Align`                | `alignTo`                              | `align` is a keyword                    |
+| `ByteBuffer::Allocate<T>(inSize = 1)` | `allocate(allocator, T, .{ .size = n }) ![]T` | default argument, returns a slice |
+| `ByteBuffer::Get<T>` (non-const)   | `getMut(T, position)`                  | const overload                          |
+| `StridedPtr<const T>`              | `StridedPtrConst(T)`                   | Zig types have no const qualifier       |
+| `StridedPtr` `++p` / `--p` / `p++` / `p--` | `increment` / `decrement` / `postIncrement` / `postDecrement` | operators |
+| `StridedPtr` `p - q` / `*p`, `p->` / `p[i]` | `distance` / `deref` / `at` (pointers) | operators                         |
