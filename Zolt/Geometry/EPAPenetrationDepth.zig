@@ -149,14 +149,14 @@ pub const EPAPenetrationDepth = struct {
     /// @param a_including_convex_radius Object A with convex radius
     /// @param b_including_convex_radius Object B with convex radius
     /// @param tolerance A factor that determines the accuracy of the result. If the change of the squared distance is less than tolerance * current_penetration_depth^2 the algorithm will terminate. Should be bigger or equal to FLT_EPSILON.
-    /// @param out_v Direction to move B out of collision along the shortest path (magnitude is meaningless)
+    /// @param v Direction to move B out of collision along the shortest path (magnitude is meaningless)
     /// @param point_a Position on A that has the least amount of penetration
     /// @param point_b Position on B that has the least amount of penetration
     /// Use |point_b - point_a| to get the distance of penetration
     ///
     /// @return False if the objects don't collide, in this case point_a / point_b are invalid.
     /// True if the objects penetrate
-    pub fn getPenetrationDepthStepEPA(self: *EPAPenetrationDepth, a_including_convex_radius: anytype, b_including_convex_radius: anytype, tolerance: f32, out_v: *Vec3, point_a: *Vec3, point_b: *Vec3) bool {
+    pub fn getPenetrationDepthStepEPA(self: *EPAPenetrationDepth, a_including_convex_radius: anytype, b_including_convex_radius: anytype, tolerance: f32, v: *Vec3, point_a: *Vec3, point_b: *Vec3) bool {
         _ = ConvexObject(@TypeOf(a_including_convex_radius));
         _ = ConvexObject(@TypeOf(b_including_convex_radius));
 
@@ -364,15 +364,15 @@ pub const EPAPenetrationDepth = struct {
 
         // Calculate penetration by getting the vector from the origin to the closest point on the triangle:
         // distance = (centroid - origin) . normal / |normal|, closest = origin + distance * normal / |normal|
-        out_v.* = l.normal.mulScalar(l.centroid.dot(l.normal) / l.normal.lengthSq());
+        v.* = l.normal.mulScalar(l.centroid.dot(l.normal) / l.normal.lengthSq());
 
         // If penetration is near zero, treat this as a non collision since we cannot find a good normal
-        if (out_v.isNearZero(.{}))
+        if (v.isNearZero(.{}))
             return false;
 
         // Check if we have to flip the sign of the penetration depth
         if (flip_v_sign)
-            out_v.* = out_v.negate();
+            v.* = v.negate();
 
         // Use the barycentric coordinates for the closest point to the origin to find the contact points on A and B
         const p0 = support_points.p[l.edge[0].start_idx];
