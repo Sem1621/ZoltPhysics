@@ -23,8 +23,9 @@ const ConvexSupport = @import("ConvexSupport.zig");
 const TransformedConvexObject = ConvexSupport.TransformedConvexObject;
 const MinkowskiDifference = ConvexSupport.MinkowskiDifference;
 
-/// Type of the convex object that `Ptr` points to. GJK takes its convex objects by pointer (Jolt's `const A &`).
-fn ConvexObject(comptime Ptr: type) type {
+/// Type of the convex object that `Ptr` points to. GJK and EPA take their convex objects by pointer (Jolt's
+/// `const A &`), this gives a compile error for anything else.
+pub fn ConvexObject(comptime Ptr: type) type {
     const info = @typeInfo(Ptr);
     if (info != .pointer or info.pointer.size != .one)
         @compileError("expected a pointer to a convex object, got " ++ @typeName(Ptr));

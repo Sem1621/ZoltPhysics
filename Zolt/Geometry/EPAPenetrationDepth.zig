@@ -14,16 +14,10 @@ const Vec3 = @import("../Math/Vec3.zig").Vec3;
 const ConvexSupport = @import("ConvexSupport.zig");
 const AddConvexRadius = ConvexSupport.AddConvexRadius;
 const TransformedConvexObject = ConvexSupport.TransformedConvexObject;
-const GJKClosestPoint = @import("GJKClosestPoint.zig").GJKClosestPoint;
+const GJKClosestPointFile = @import("GJKClosestPoint.zig");
+const GJKClosestPoint = GJKClosestPointFile.GJKClosestPoint;
+const ConvexObject = GJKClosestPointFile.ConvexObject;
 const EPAConvexHullBuilder = @import("EPAConvexHullBuilder.zig").EPAConvexHullBuilder;
-
-/// Type of the convex object that `Ptr` points to (the convex objects are passed by pointer, Jolt's `const A &`).
-fn ConvexObject(comptime Ptr: type) type {
-    const info = @typeInfo(Ptr);
-    if (info != .pointer or info.pointer.size != .one)
-        @compileError("expected a pointer to a convex object, got " ++ @typeName(Ptr));
-    return info.pointer.child;
-}
 
 /// Implementation of Expanding Polytope Algorithm as described in:
 ///
@@ -123,7 +117,8 @@ pub const EPAPenetrationDepth = struct {
         // Note that if the assert below triggers, it is very likely that you have a MeshShape that contains a degenerate triangle (e.g. a sliver).
         // Go up a couple of levels in the call stack to see if we're indeed testing a triangle and if it is degenerate.
         // If this is the case then fix the triangles you supply to the MeshShape.
-        std.debug.assert(!v.isNearZero(.{}));
+        // (Only evaluated when asserts are enabled: degenerate input can violate it, and Jolt continues in release builds.)
+        if (Core.enable_asserts) std.debug.assert(!v.isNearZero(.{}));
 
         // Get closest points
         const combined_radius = convex_radius_a + convex_radius_b;
@@ -161,7 +156,8 @@ pub const EPAPenetrationDepth = struct {
         _ = ConvexObject(@TypeOf(b_including_convex_radius));
 
         // Check that the tolerance makes sense (smaller value than this will just result in needless iterations)
-        std.debug.assert(tolerance >= math.flt_epsilon);
+        // (Only evaluated when asserts are enabled: Jolt continues in release builds with a smaller tolerance.)
+        if (Core.enable_asserts) std.debug.assert(tolerance >= math.flt_epsilon);
 
         // Fetch the simplex from GJK algorithm
         var support_points: SupportPoints = .{};
