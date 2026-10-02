@@ -78,6 +78,7 @@ pub const UnorderedSetDetail = @import("Core/UnorderedSet.zig").UnorderedSetDeta
 
 // Geometry
 pub const ClosestPoint = @import("Geometry/ClosestPoint.zig");
+pub const ConvexHullBuilder = @import("Geometry/ConvexHullBuilder.zig").ConvexHullBuilder;
 pub const ConvexHullBuilder2D = @import("Geometry/ConvexHullBuilder2D.zig").ConvexHullBuilder2D;
 pub const AddConvexRadius = @import("Geometry/ConvexSupport.zig").AddConvexRadius;
 pub const MinkowskiDifference = @import("Geometry/ConvexSupport.zig").MinkowskiDifference;
@@ -177,6 +178,7 @@ const source_files = .{
     @import("Core/UnorderedMap.zig"),
     @import("Core/UnorderedSet.zig"),
     @import("Geometry/ClosestPoint.zig"),
+    @import("Geometry/ConvexHullBuilder.zig"),
     @import("Geometry/ConvexHullBuilder2D.zig"),
     @import("Geometry/ConvexSupport.zig"),
     @import("Geometry/RayAABox.zig"),
