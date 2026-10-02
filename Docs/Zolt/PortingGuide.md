@@ -228,7 +228,16 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
 
 - `Trace(fmt, ...)` → `std.log.scoped(.zolt).info/warn(...)`; applications control output via
   `std_options.logFn`.
-- `StreamIn` / `StreamOut` are ported as interfaces over `*std.Io.Reader` / `*std.Io.Writer`.
+- `StreamIn` / `StreamOut` are interfaces (pattern B, `Core/StreamIn.zig` / `Core/StreamOut.zig`);
+  `StreamInWrapper` / `StreamOutWrapper` adapt a `*std.Io.Reader` / `*std.Io.Writer` (flush the
+  writer yourself). The `Read`/`Write` overloads become one `read(&value)` / `write(value)` that
+  dispatches at comptime (Vec3 = 12 bytes, DVec3 = 24, DMat44 = 72, everything else raw bytes,
+  which must be trivially copyable: extern/packed structs, no pointers, checked at compile time).
+  Reads keep the in/out parameter, because a validating `StateRecorder` compares with the current
+  value. Arrays and strings: `readArray` / `readString` / `readArrayWith` and `writeArray` /
+  `writeString` / `writeArrayWith`.
+- Jolt's `String` results (`ConvertToString`, `StringFormat`, ...) become owned `[]u8` returned
+  from a function that takes the allocator. `StringFormat` takes a Zig format string, not printf.
 
 ## 6. Polymorphism (virtual functions)
 
@@ -562,3 +571,11 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `StridedPtr<const T>`              | `StridedPtrConst(T)`                   | Zig types have no const qualifier       |
 | `StridedPtr` `++p` / `--p` / `p++` / `p--` | `increment` / `decrement` / `postIncrement` / `postDecrement` | operators |
 | `StridedPtr` `p - q` / `*p`, `p->` / `p[i]` | `distance` / `deref` / `at` (pointers) | operators                         |
+| `StreamIn::Read(T &)` / `StreamOut::Write(const T &)` overloads | `read(&value)` / `write(value)` (comptime dispatch) | overloads                   |
+| `StreamIn::Read(Array<T> &)` / `Read(String &)` / `Read(Array<T> &, F)` | `readArray(T, allocator, &list)` / `readString(allocator, &string)` / `readArrayWith(T, allocator, &list, context, readElement)` | overloads, need the allocator |
+| `StreamOut::Write(Array<T>)` / `Write(String)` / `Write(Array<T>, F)` | `writeArray(T, items)` / `writeString(string)` / `writeArrayWith(T, items, context, writeElement)` | overloads |
+| `ReadBytes(void *, size_t)` / `WriteBytes(const void *, size_t)` | `readBytes([]u8)` / `writeBytes([]const u8)` | pointer + size become a slice |
+| `StreamInWrapper(istream &)` / `StreamOutWrapper(ostream &)` | `StreamInWrapper.init(*std.Io.Reader).streamIn()` / `StreamOutWrapper.init(*std.Io.Writer).streamOut()` | std streams become std.Io |
+| `StringToVector(str, out, delim = ",", clear = true)` / `VectorToString(v, out, delim = ",")` | `stringToVector(allocator, str, &list, .{ .delimiter, .clear_vector })` / `vectorToString(allocator, v, .{ .delimiter }) ![]u8` | default arguments, out parameter |
+| `FPControlWord<Value, Mask>` (RAII) | `const cw = FPControlWord(value, mask).init(); defer cw.deinit();` | RAII                                 |
+| `LinearCurve` copy constructor     | `clone(allocator)`                     | allocating type                         |

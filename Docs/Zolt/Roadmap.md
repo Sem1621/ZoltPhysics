@@ -37,7 +37,8 @@ files whose dependencies are already ported.
   The scenes run with the `-q=LinearCast` (or `-q=Discrete` for CharacterVirtual) motion quality.
 - **Parallel work.** Independent subtrees (e.g. shapes vs. constraints) can be ported in parallel
   in separate git worktrees (one branch per worker, based on the current port branch). The
-  registry files `Zolt/zolt.zig` and `ZoltTests/unit_tests.zig` are the only shared files; git
+  registry files (`Zolt/zolt.zig`, `ZoltTests/unit_tests.zig`, `ZoltParity/parity.zig`,
+  `ZoltParity/reference_sources.zig`) are the only shared files; git
   merges them with the `union` driver (`.gitattributes`), after which `python3 tools/tidy_registry.py`
   removes duplicates and restores the sort order. Workers must never "fix" shared code they don't
   own; they report the problem instead.
@@ -56,21 +57,35 @@ FindRoot. Plus `Core/HashCombine` and `Core/Mt19937` (std::mt19937 replacement).
 **Milestone M1:** all of `UnitTests/Math` passes in both precisions. ✅ Reached: every Math
 function also has parity tests against the C++ library (bit exact, both precisions).
 
-### Phase 2: Core (`Jolt/Core`, `UnitTests/Core`) — in progress
-Done: HashCombine, Mt19937, QuickSort, InsertionSort, BinaryHeap, StaticArray, Reference, Color,
-Atomics, Prefetch. Remaining, in five groups:
+### Phase 2: Core (`Jolt/Core`, `UnitTests/Core`) ✅
+HashCombine, Mt19937, QuickSort, InsertionSort, BinaryHeap, StaticArray, Reference, Color, Atomics,
+Prefetch, plus five groups ported in parallel:
 - Containers: HashTable, UnorderedMap, UnorderedSet, ObjectToIDMap (Jolt's own, for deterministic
-  iteration order; parity tests compare iteration order with the C++).
-- Concurrency: Mutex, MutexArray, Semaphore, FixedSizeFreeList, LockFreeHashMap.
+  iteration order; parity tests compare bucket indices and iteration order with the C++).
+- Concurrency: Mutex/SharedMutex, MutexArray, Semaphore, FixedSizeFreeList, LockFreeHashMap
+  (parity tests compare free list indices, hash map handles and iteration order).
 - Job system: JobSystem, JobSystemWithBarrier, JobSystemThreadPool, JobSystemSingleThreaded
   (std.Thread + std.Io primitives, see the guide's Threading section).
-- Memory: TempAllocator (TempAllocatorImpl, TempAllocatorMalloc), STLTempAllocator,
-  STLLocalAllocator (as `std.mem.Allocator` adapters), ByteBuffer, StridedPtr.
+- Memory: TempAllocator (TempAllocatorImpl, TempAllocatorMalloc, TempAllocatorImplWithMallocFallback),
+  STLTempAllocator, STLLocalAllocator (as `std.mem.Allocator` adapters), ByteBuffer, StridedPtr.
 - Misc: StringTools, TickCounter, FPControlWord, FPFlushDenormals, StreamIn/StreamOut/StreamWrapper
   (over std.Io.Reader/Writer), LinearCurve, ConfigurationString.
-Deferred: Profiler (developer tooling, compiled out in the Distribution configuration), RTTI, Factory
-and StreamUtils (serialization support, ported with ObjectStream in Phase 8).
-**Milestone M2:** `UnitTests/Core` passes, including JobSystemTest.
+Partial: `Core.zig` (only what ported code needs) and LinearCurve (its ObjectStream serialization comes
+with Phase 8). Deferred: Profiler (developer tooling, compiled out in the Distribution configuration),
+RTTI, Factory and StreamUtils (serialization support, ported with ObjectStream in Phase 8).
+**Milestone M2:** `UnitTests/Core` passes, including JobSystemTest. ✅ Reached: all of `UnitTests/Core`
+passes in both precisions. Parity tests against the C++ library cover the sorts, BinaryHeap, the hashes,
+Mt19937, the hash containers, FixedSizeFreeList, LockFreeHashMap, MutexArray, Semaphore, the streams,
+LinearCurve and StringTools (TempAllocator offsets are tested against values derived from the C++).
+
+Notes for later phases:
+- `LockFreeHashMap` stores `KeyValue` as an extern struct (the value must be the last field, followed by
+  the extra bytes, and handles are byte offsets as in Jolt), so its key and value types must be extern
+  compatible: `BodyPair`, `SubShapeIDPair` and the cached manifold types of the ContactConstraintManager
+  have to be `extern struct`s.
+- Out of memory is `error.OutOfMemory` where Jolt aborts or does not check (`TempAllocator.allocate`,
+  `FixedSizeFreeList.constructObject`, `JobSystem.createJob`), so physics code that uses them returns an
+  error union.
 
 ### Phase 3: Geometry (`Jolt/Geometry`, `Jolt/AABBTree`, `Jolt/TriangleSplitter`)
 AABox, OrientedBox, Plane, Sphere, Triangle, IndexedTriangle, Indexify, Ellipse, ClosestPoint,

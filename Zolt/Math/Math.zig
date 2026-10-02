@@ -112,7 +112,12 @@ pub fn alignUp(v: anytype, alignment: u64) @TypeOf(v) {
     if (@typeInfo(T) == .pointer) {
         return @ptrFromInt((@intFromPtr(v) + alignment - 1) & ~(alignment - 1));
     } else {
-        return @intCast((@as(u64, @intCast(v)) + alignment - 1) & ~(alignment - 1));
+        // T((uint64(inV) + inAlignment - 1) & ~(inAlignment - 1)): both C++ conversions wrap, so a value
+        // that does not fit in T after rounding up truncates instead of panicking
+        const signed = @typeInfo(T).int.signedness == .signed;
+        const v64: u64 = if (signed) @bitCast(@as(i64, v)) else v;
+        const result = (v64 +% (alignment - 1)) & ~(alignment - 1);
+        return if (signed) @truncate(@as(i64, @bitCast(result))) else @truncate(result);
     }
 }
 
@@ -145,6 +150,8 @@ pub fn getNextPowerOf2(value: u32) u32 {
 
 test "alignUp / isAligned" {
     try std.testing.expectEqual(@as(u32, 16), alignUp(@as(u32, 9), 16));
+    try std.testing.expectEqual(@as(u32, 0), alignUp(@as(u32, 0xffff_fff9), 16)); // Truncates like the C++ conversion
+    try std.testing.expectEqual(@as(i32, -16), alignUp(@as(i32, -20), 16));
     try std.testing.expect(isAligned(@as(usize, 32), 16));
     try std.testing.expect(!isAligned(@as(usize, 33), 16));
 }
