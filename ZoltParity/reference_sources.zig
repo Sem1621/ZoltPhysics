@@ -6,5 +6,6 @@ pub const files = [_][]const u8{
     "Core/ContainersReference.cpp",
     "Core/CoreReference.cpp",
     "Geometry/PrimitivesReference.cpp",
+    "Geometry/QueriesReference.cpp",
     "Math/MathReference.cpp",
 };

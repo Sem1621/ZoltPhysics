@@ -21,8 +21,10 @@ test {
     _ = @import("Core/UnorderedSetTest.zig");
 
     // Geometry
+    _ = @import("Geometry/ClosestPointTests.zig");
     _ = @import("Geometry/EllipseTest.zig");
     _ = @import("Geometry/PlaneTests.zig");
+    _ = @import("Geometry/RayAABoxTests.zig");
 
     // Math
     _ = @import("Math/BVec16Tests.zig");
