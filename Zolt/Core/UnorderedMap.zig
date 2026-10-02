@@ -90,7 +90,7 @@ pub fn UnorderedMap(comptime Key: type, comptime Value: type, comptime options: 
 
         // Methods of the HashTable base class
 
-        /// Copy constructor
+        /// Copy constructor. Zolt: key value pairs are copied bitwise, values that own memory must be duplicated by the caller.
         pub fn clone(self: *const Self, allocator: Allocator) Allocator.Error!Self {
             return .{ .base = try self.base.clone(allocator) };
         }
@@ -100,7 +100,7 @@ pub fn UnorderedMap(comptime Key: type, comptime Value: type, comptime options: 
             return .{ .base = self.base.move() };
         }
 
-        /// Assignment operator
+        /// Assignment operator. Zolt: key value pairs are copied bitwise, values that own memory must be duplicated by the caller.
         pub fn assign(self: *Self, allocator: Allocator, other: *const Self) Allocator.Error!void {
             try self.base.assign(allocator, &other.base);
         }

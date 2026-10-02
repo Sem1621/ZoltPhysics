@@ -12,6 +12,9 @@
 //! - Unmanaged allocation: every function that may allocate takes the allocator, free the table
 //!   with `deinit(allocator)`. Zig has no destructors: elements that own memory must be deinitialized
 //!   by the caller before `deinit` / `clearAndFree` / `clearRetainingCapacity` / `erase`.
+//!   `clone` / `assign` (copy constructor / assignment operator) copy the elements bitwise (shallow): when elements
+//!   own memory (e.g. an `std.ArrayList` value) the copy shares it with the original, so the caller must duplicate
+//!   those values in the copy (or not copy such tables).
 //! - Iterators become pointers to the element (`find` returns `?*const KeyValue`, null is `end()`)
 //!   and iterator structs with `next()` (`begin()` / `end()` loops). `next()` combines the C++ iterator
 //!   operators (`++`, `*`, `->`, `==`, `IsValid`) and visits the elements in the same (bucket) order.
@@ -251,7 +254,7 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
             const other_data = other.data.?;
             for (0..self.max_size) |index|
                 if ((control[index] & bucket_used) != 0) {
-                    data[index] = other_data[index];
+                    data[index] = other_data[index]; // Zolt: a bitwise copy, Zig has no copy constructors
                 };
             self.size = other.size;
         }
@@ -409,7 +412,7 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
 
                     // Update control byte
                     self.setControlValue(index, control);
-                    self.size += 1;
+                    self.size +%= 1; // Wraps like the C++ uint32, see eraseByPtr
 
                     // Return index to newly allocated bucket
                     return .{ .inserted = true, .index = index };
@@ -420,7 +423,7 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
             }
         }
 
-        /// Copy constructor
+        /// Copy constructor. Zolt: elements are copied bitwise, elements that own memory must be duplicated by the caller.
         pub fn clone(self: *const Self, allocator: Allocator) Allocator.Error!Self {
             var result: Self = .empty;
             try result.copyTable(allocator, self);
@@ -434,7 +437,7 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
             return result;
         }
 
-        /// Assignment operator
+        /// Assignment operator. Zolt: elements are copied bitwise, elements that own memory must be duplicated by the caller.
         pub fn assign(self: *Self, allocator: Allocator, other: *const Self) Allocator.Error!void {
             if (self != other) {
                 self.clearAndFree(allocator);
@@ -652,7 +655,10 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
                 self.load_left +%= 1;
 
             // Decrease size
-            self.size -= 1;
+            // Zolt: wraps like the C++ uint32. A copy keeps the max load as load left (see copyTable), so
+            // clearRetainingCapacity on a copy sets the size to 0 without resetting the control bytes, the iterator
+            // still visits the old elements and erasing one of them makes the size wrap around.
+            self.size -%= 1;
         }
 
         /// Erase an element by key, returns the number of elements erased (0 or 1)
@@ -873,6 +879,34 @@ test "HashTable allocation failure leaves the table unchanged" {
     try std.testing.expectEqual(16, table.bucketCount());
     for (0..14) |i|
         try std.testing.expect(table.find(@intCast(i)) != null);
+}
+
+test "HashTable size wraps around like the C++ uint32" {
+    const allocator = std.testing.allocator;
+    const Table = HashTable(u32, u32, TestSetDetail, .{});
+
+    var table: Table = .empty;
+    defer table.deinit(allocator);
+    for (0..4) |i|
+        _ = try table.insert(allocator, @intCast(i));
+
+    // The copy keeps the max load as load left, so clearRetainingCapacity doesn't reset its control bytes
+    var copy = try table.clone(allocator);
+    defer copy.deinit(allocator);
+    copy.clearRetainingCapacity();
+    try std.testing.expectEqual(0, copy.count());
+
+    // The iterator still visits the old elements, erasing one makes the size wrap around
+    var it = copy.iterator();
+    const stale = it.next().?;
+    const stale_key = stale.*;
+    copy.eraseByPtr(stale);
+    try std.testing.expectEqual(0xffffffff, copy.count());
+    try std.testing.expect(copy.find(stale_key) == null);
+
+    // Inserting a new element wraps it back
+    try std.testing.expect((try copy.insert(allocator, 100)).inserted);
+    try std.testing.expectEqual(0, copy.count());
 }
 
 test "HashTable keys with getHash / eql and keys that need custom functions" {

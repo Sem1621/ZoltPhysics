@@ -30,6 +30,7 @@ enum EOp : uint8
 	OpCopySnapshot,			// snapshot of a copy of the container (the copy is discarded)
 	OpSnapshot,				// snapshot: size, bucket_count, empty, then index, key [, value] per element in iteration order, then snapshot_end
 	OpCopyReplace,			// replace the container by a copy of itself (copy constructor + swap)
+	OpEraseFirst,			// erase(begin()):					not_found (empty iteration) or index of the erased element
 };
 
 constexpr uint64 cNotFound = ~uint64(0);
@@ -198,6 +199,19 @@ uint32 RunScript(const uint8 *inOps, const uint64 *inKeys, const uint64 *inValue
 			{
 				Container copy(container);
 				container.swap(copy);
+				break;
+			}
+
+		case OpEraseFirst:
+			{
+				typename Container::const_iterator it = container.cbegin();
+				if (it == container.cend())
+					output.Add(cNotFound);
+				else
+				{
+					output.Add(it.mIndex);
+					container.erase(it);
+				}
 				break;
 			}
 

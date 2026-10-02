@@ -36,6 +36,7 @@ const Op = enum(u8) {
     copy_snapshot, // snapshot of a copy of the container (the copy is discarded)
     snapshot, // size, bucket_count, empty, then index, key [, value] per element in iteration order, then snapshot_end
     copy_replace, // replace the container by a copy of itself (copy constructor + swap)
+    erase_first, // erase(begin()): not_found (empty iteration) or index of the erased element
 };
 
 const not_found: u64 = ~@as(u64, 0);
@@ -261,6 +262,36 @@ const ScriptGenerator = struct {
         for (0..100) |_|
             try self.addInsert(self.randomIndex(1000));
         try self.add(.snapshot, 0);
+
+        // ClearAndKeepMemory on a copy: the load left of the copy is the max load, so the control bytes are not reset
+        // and iterating still visits the old elements while the size is 0. Erasing one of them makes the size wrap
+        // around (find doesn't see them because the table is empty, so erase the first element in iteration order).
+        try self.add(.clear, 0);
+        try self.reserve(56);
+        const first_stale = add_counter;
+        for (0..4) |_| {
+            try self.add(.insert, add_counter);
+            add_counter += 1;
+        }
+        try self.add(.copy_replace, 0);
+        try self.add(.clear_and_keep_memory, 0);
+        try self.add(.snapshot, 0);
+        try self.add(.find, first_stale);
+        try self.add(.erase_first, 0);
+        try self.add(.snapshot, 0);
+        for (first_stale..add_counter) |stale|
+            try self.add(.find, stale); // The size is no longer 0: finds the remaining old elements
+        try self.add(.insert, first_stale + 1); // Wraps the size back to 0 when this is a new element
+        try self.add(.snapshot, 0);
+        try self.add(.insert, add_counter);
+        add_counter += 1;
+        try self.add(.snapshot, 0);
+        for (0..3) |_|
+            try self.add(.erase_first, 0);
+        try self.add(.snapshot, 0);
+        try self.add(.clear, 0);
+        try self.add(.erase_first, 0); // No buckets: nothing to erase
+        try self.add(.snapshot, 0);
     }
 };
 
@@ -330,6 +361,15 @@ fn runZolt(comptime Container: type, comptime Key: type, comptime Value: type, c
                 var copy = try container.clone(allocator);
                 defer copy.deinit(allocator);
                 container.swap(&copy);
+            },
+            .erase_first => {
+                var it = container.constIterator();
+                if (it.next()) |element| {
+                    try out.append(allocator, container.indexOf(element));
+                    container.eraseByPtr(element);
+                } else {
+                    try out.append(allocator, not_found);
+                }
             },
         }
     }
