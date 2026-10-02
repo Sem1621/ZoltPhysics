@@ -14,6 +14,7 @@ test {
     _ = @import("Core/ConcurrencyParity.zig");
     _ = @import("Core/ContainersParity.zig");
     _ = @import("Core/CoreParity.zig");
+    _ = @import("Geometry/GJKEPAParity.zig");
     _ = @import("Geometry/PrimitivesParity.zig");
     _ = @import("Geometry/QueriesParity.zig");
     _ = @import("Math/MathParity.zig");
