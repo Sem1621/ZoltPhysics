@@ -3,8 +3,11 @@
 //!
 //! Jolt's `template <class VERTEX_ARRAY>` functions: the input polygons (`const VERTEX_ARRAY &`) are slices, the
 //! output polygon is a vertex array (`*StaticArray(Vec3, N)` or `VertexArrayList`, see VertexArray.zig). Temporary
-//! polygons have the same type as the output polygon. The output must not alias the clipping polygon.
-//! The functions return `VertexArray.Error(@TypeOf(out))!void`, which is an empty error set for a StaticArray.
+//! polygons have the same type as the output polygon. Like in Jolt, the polygon to clip may be the output polygon in
+//! `clipPolyVsPoly` / `clipPolyVsAABox` (they only write the output after the last read of the input), but the
+//! clipping polygon must not be.
+//! The functions return `VertexArray.Error(@TypeOf(out))!void`, which is an empty error set for a StaticArray, so
+//! `try` never fails for it (and also compiles in a function that does not return an error union).
 
 const std = @import("std");
 const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
@@ -225,6 +228,16 @@ test "clipPolyVsPoly" {
     try clipPolyVsPoly(&triangle, &square, Vec3.init(0, 0, 1), VertexArray.VertexArrayList.init(allocator, &list));
     try std.testing.expectEqualSlices(Vec3, out.constSlice(), list.items);
 
+    // The output can be the polygon to clip (like in Jolt)
+    var in_place: StaticArray(Vec3, 16) = .fromSlice(&triangle);
+    try clipPolyVsPoly(in_place.constSlice(), &square, Vec3.init(0, 0, 1), &in_place);
+    try std.testing.expectEqualSlices(Vec3, out.constSlice(), in_place.constSlice());
+    var in_place_list: std.ArrayList(Vec3) = .empty;
+    defer in_place_list.deinit(allocator);
+    try in_place_list.appendSlice(allocator, &triangle);
+    try clipPolyVsPoly(in_place_list.items, &square, Vec3.init(0, 0, 1), VertexArray.VertexArrayList.init(allocator, &in_place_list));
+    try std.testing.expectEqualSlices(Vec3, out.constSlice(), in_place_list.items);
+
     // No overlap: empty result
     const far_triangle = [_]Vec3{ .init(10, 10, 0), .init(11, 10, 0), .init(10, 11, 0) };
     try clipPolyVsPoly(&far_triangle, &square, Vec3.init(0, 0, 1), &out);
@@ -263,6 +276,11 @@ test "clipPolyVsAABox" {
     defer list.deinit(allocator);
     try clipPolyVsAABox(&triangle, box, VertexArray.VertexArrayList.init(allocator, &list));
     try std.testing.expectEqualSlices(Vec3, out.constSlice(), list.items);
+
+    // The output can be the polygon to clip (like in Jolt)
+    var in_place: StaticArray(Vec3, 16) = .fromSlice(&triangle);
+    try clipPolyVsAABox(in_place.constSlice(), box, &in_place);
+    try std.testing.expectEqualSlices(Vec3, out.constSlice(), in_place.constSlice());
 
     // Outside the box: empty result
     try clipPolyVsAABox(&triangle, AABox.init(Vec3.init(5, 5, 5), Vec3.init(6, 6, 6)), &out);
