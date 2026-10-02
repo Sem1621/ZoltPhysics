@@ -1571,7 +1571,7 @@ fn buildHullAllocations(allocator: std.mem.Allocator, positions: []const Vec3, m
 test "ConvexHullBuilder allocation failures" {
     // Every allocation failure must be reported without leaking memory
 
-    // Points on a sphere with interior points and a flat top: conflict lists, face merges, max vertices
+    // Points on a sphere with interior points: conflict lists, the max vertices limit
     var sphere: [24]Vec3 = undefined;
     for (&sphere, 0..) |*p, i| {
         const f: f32 = @floatFromInt(i);
