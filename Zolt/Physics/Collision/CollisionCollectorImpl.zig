@@ -388,3 +388,280 @@ pub fn AnyHitCollisionCollector(comptime CollectorType: type) type {
         }
     };
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests
+
+const testing = std.testing;
+const RefConst = @import("../../Core/Reference.zig").RefConst;
+const RefCount = @import("../../Core/Reference.zig").RefCount;
+const Quat = @import("../../Math/Quat.zig").Quat;
+const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const RVec3 = @import("../../Math/Real.zig").RVec3;
+const BodyID = @import("../Body/BodyID.zig").BodyID;
+const RayCastResult = @import("CastResult.zig").RayCastResult;
+const CollideShapeResult = @import("CollideShape.zig").CollideShapeResult;
+const ShapeFile = @import("Shape/Shape.zig");
+const Shape = ShapeFile.Shape;
+const CastRayCollector = ShapeFile.CastRayCollector;
+const CollideShapeCollector = ShapeFile.CollideShapeCollector;
+const TransformedShapeCollector = ShapeFile.TransformedShapeCollector;
+const TransformedShape = @import("TransformedShape.zig").TransformedShape;
+const TestBoxShape = @import("Shape/TestShapes.zig").TestBoxShape;
+
+fn rayHit(body: u32, fraction: f32) RayCastResult {
+    return .{ .body_id = .init(body), .fraction = fraction, .sub_shape_id2 = .{ .value = body } };
+}
+
+test "AllHitCollisionCollector: collects, sorts, resets" {
+    const allocator = testing.allocator;
+
+    var collector = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer collector.deinit();
+    try testing.expect(!collector.hadHit());
+    const fractions = [_]f32{ 0.5, 0.25, 0.75, 0.25, 0.0 };
+    for (fractions, 0..) |f, i| collector.base.addHit(&rayHit(@intCast(i), f));
+    try collector.checkError();
+    try testing.expect(collector.hadHit());
+    try testing.expectEqual(@as(usize, 5), collector.hits.items.len);
+    try testing.expectEqual(CastRayCollector.Traits.initial_early_out_fraction, collector.base.getEarlyOutFraction()); // AllHit never lowers it
+
+    collector.sort();
+    var previous: f32 = -1.0;
+    for (collector.hits.items) |h| {
+        try testing.expect(h.fraction >= previous);
+        previous = h.fraction;
+    }
+    try testing.expectEqual(@as(u32, 4), collector.hits.items[0].body_id.getIndex());
+
+    // Reset (virtual): clears the hits and the early out fraction
+    collector.base.forceEarlyOut();
+    collector.base.reset();
+    try testing.expect(!collector.hadHit());
+    try testing.expectEqual(CastRayCollector.Traits.initial_early_out_fraction, collector.base.getEarlyOutFraction());
+}
+
+test "ClosestHitCollisionCollector: keeps the closest hit and lowers the early out fraction" {
+    var collector = ClosestHitCollisionCollector(CastRayCollector).init();
+    defer collector.deinit();
+    collector.base.addHit(&rayHit(1, 0.5));
+    collector.base.addHit(&rayHit(2, 0.75)); // Further: in Jolt the query would not report it, the collector ignores it
+    collector.base.addHit(&rayHit(3, 0.25));
+    try testing.expect(collector.hadHit());
+    try testing.expectEqual(@as(u32, 3), collector.hit.body_id.getIndex());
+    try testing.expectEqual(@as(f32, 0.25), collector.base.getEarlyOutFraction());
+
+    collector.base.reset();
+    try testing.expect(!collector.hadHit());
+    try testing.expectEqual(CastRayCollector.Traits.initial_early_out_fraction, collector.base.getEarlyOutFraction());
+    collector.base.addHit(&rayHit(4, 0.9)); // The first hit after a reset is always taken
+    try testing.expectEqual(@as(u32, 4), collector.hit.body_id.getIndex());
+
+    // Collide shape results order on -penetration depth
+    var deepest = ClosestHitCollisionCollector(CollideShapeCollector).init();
+    defer deepest.deinit();
+    for ([_]f32{ 0.1, 0.3, 0.2 }) |depth| deepest.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), depth, .empty, .empty, .invalid));
+    try testing.expectEqual(@as(f32, 0.3), deepest.hit.penetration_depth);
+    try testing.expectEqual(@as(f32, -0.3), deepest.base.getEarlyOutFraction());
+}
+
+test "ClosestHitPerBodyCollisionCollector: one hit per body, the early out fraction is restored per body" {
+    const allocator = testing.allocator;
+
+    var collector = ClosestHitPerBodyCollisionCollector(CastRayCollector).init(allocator);
+    defer collector.deinit();
+    const bodies = [_]Body{ .{ .id = .init(1) }, .{ .id = .init(2) }, .{ .id = .init(3) } };
+    const hits = [_][]const f32{ &.{ 0.5, 0.3, 0.4 }, &.{}, &.{0.8} };
+    for (&bodies, hits) |*body, body_hits| {
+        collector.base.onBody(body);
+        for (body_hits) |f| collector.base.addHit(&rayHit(body.id.getIndex(), f));
+        collector.base.onBodyEnd();
+        try testing.expectEqual(CastRayCollector.Traits.initial_early_out_fraction, collector.base.getEarlyOutFraction());
+    }
+    try collector.checkError();
+    try testing.expectEqual(@as(usize, 2), collector.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.3), collector.hits.items[0].fraction);
+    try testing.expectEqual(@as(f32, 0.8), collector.hits.items[1].fraction);
+
+    // Within a body the early out fraction follows the closest hit
+    collector.base.onBody(&bodies[0]);
+    collector.base.addHit(&rayHit(1, 0.6));
+    try testing.expectEqual(@as(f32, 0.6), collector.base.getEarlyOutFraction());
+    collector.base.addHit(&rayHit(1, 0.1));
+    try testing.expectEqual(@as(f32, 0.1), collector.base.getEarlyOutFraction());
+    collector.base.onBodyEnd();
+    try testing.expectEqual(@as(usize, 3), collector.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.1), collector.hits.items[2].fraction);
+
+    collector.sort();
+    try testing.expectEqual(@as(f32, 0.1), collector.hits.items[0].fraction);
+    try testing.expectEqual(@as(f32, 0.8), collector.hits.items[2].fraction);
+
+    collector.base.reset();
+    try testing.expect(!collector.hadHit());
+}
+
+test "AnyHitCollisionCollector: stops at the first hit" {
+    var collector = AnyHitCollisionCollector(CastRayCollector).init();
+    defer collector.deinit();
+    try testing.expect(!collector.base.shouldEarlyOut());
+    collector.base.addHit(&rayHit(5, 0.5));
+    try testing.expect(collector.hadHit() and collector.base.shouldEarlyOut());
+    try testing.expectEqual(@as(u32, 5), collector.hit.body_id.getIndex());
+    collector.base.reset();
+    try testing.expect(!collector.hadHit() and !collector.base.shouldEarlyOut());
+}
+
+test "Collectors of results that hold references (TransformedShape) clone and release them" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const box = try TestBoxShape.create(allocator, Vec3.one(), .{});
+    var box_ref = RefConst(Shape).init(box.asShape());
+    defer box_ref.deinit();
+    const shape = box.asShape();
+
+    var near = TransformedShape.init(RVec3.zero(), Quat.identity(), shape, .init(1), .{});
+    defer near.deinit();
+    var far = TransformedShape.init(RVec3.zero(), Quat.identity(), shape, .init(2), .{});
+    defer far.deinit();
+    try testing.expectEqual(@as(u32, 3), shape.getRefCount());
+
+    {
+        var all = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+        defer all.deinit();
+        all.base.addHit(&near);
+        all.base.addHit(&far);
+        try all.checkError();
+        try testing.expectEqual(@as(u32, 5), shape.getRefCount());
+        all.base.reset();
+        try testing.expectEqual(@as(u32, 3), shape.getRefCount());
+        all.base.addHit(&near);
+    }
+    try testing.expectEqual(@as(u32, 3), shape.getRefCount());
+
+    {
+        // TransformedShape.getEarlyOutFraction does not exist: the closest / per body collectors store the first hit
+        var any = AnyHitCollisionCollector(TransformedShapeCollector).init();
+        defer any.deinit();
+        any.base.addHit(&near);
+        try testing.expectEqual(@as(u32, 4), shape.getRefCount());
+        try expect(any.hit.body_id.eql(.init(1)));
+        any.base.reset();
+        try testing.expectEqual(@as(u32, 3), shape.getRefCount());
+        any.base.addHit(&far);
+    }
+    try testing.expectEqual(@as(u32, 3), shape.getRefCount());
+}
+
+test "Collectors: out of memory in addHit is latched, forces an early out and is reported by checkError" {
+    const allocator = testing.allocator;
+
+    // The latch keeps the first error until it was observed
+    var latch: AllocationErrorLatch = .{};
+    try latch.check();
+    latch.set(error.OutOfMemory);
+    latch.set(error.OutOfMemory);
+    try testing.expectError(error.OutOfMemory, latch.check());
+    latch.clear();
+    try latch.check();
+
+    // AllHit: the hit is dropped, the collector forces an early out
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    var all = AllHitCollisionCollector(CastRayCollector).init(failing.allocator());
+    defer all.deinit();
+    all.base.addHit(&rayHit(1, 0.5)); // Allocates the array (capacity for more than one hit)
+    try all.checkError();
+    var i: u32 = 0;
+    while (!all.base.shouldEarlyOut()) : (i += 1) all.base.addHit(&rayHit(2 + i, 0.5));
+    try testing.expectError(error.OutOfMemory, all.checkError());
+    try testing.expect(all.hits.items.len >= 1);
+    all.base.reset(); // The error was observed: reset clears it
+    try all.checkError();
+    try testing.expect(!all.base.shouldEarlyOut());
+
+    // ClosestHitPerBody: the forced early out survives onBodyEnd (had_hit stays false)
+    var failing2 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var per_body = ClosestHitPerBodyCollisionCollector(CastRayCollector).init(failing2.allocator());
+    defer per_body.deinit();
+    const body: Body = .{ .id = .init(3) };
+    per_body.base.onBody(&body);
+    per_body.base.addHit(&rayHit(3, 0.5));
+    per_body.base.onBodyEnd();
+    try testing.expect(per_body.base.shouldEarlyOut());
+    try testing.expect(!per_body.hadHit());
+    try testing.expectError(error.OutOfMemory, per_body.checkError());
+
+    // A collector of references releases the reference of a hit it could not store
+    const box = try TestBoxShape.create(allocator, Vec3.one(), .{});
+    var box_ref = RefConst(Shape).init(box.asShape());
+    defer box_ref.deinit();
+    var ts = TransformedShape.init(RVec3.zero(), Quat.identity(), box.asShape(), .init(1), .{});
+    defer ts.deinit();
+    var failing3 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var shapes = AllHitCollisionCollector(TransformedShapeCollector).init(failing3.allocator());
+    defer shapes.deinit();
+    shapes.base.addHit(&ts);
+    try testing.expectError(error.OutOfMemory, shapes.checkError());
+    try testing.expectEqual(@as(u32, 2), box.asShape().getRefCount());
+}
+
+test "Collectors: a class derived from ClosestHitPerBody inherits its overrides (initDerived)" {
+    const allocator = testing.allocator;
+
+    // Jolt's UnitTests derive from ClosestHitPerBodyCollisionCollector (CastShapeTests.cpp): the vtable is the one of
+    // the derived class, the overrides of the parent (onBody / onBodyEnd / reset) are inherited
+    const MyCollector = struct {
+        pub const overrides = .{.addHit};
+
+        base: ClosestHitPerBodyCollisionCollector(CastRayCollector),
+        num_add_hit: u32 = 0,
+
+        fn init(a: Allocator) @This() {
+            return .{ .base = .initDerived(@This(), a) };
+        }
+
+        pub fn addHit(self: *@This(), result: *const RayCastResult) void {
+            self.num_add_hit += 1;
+            self.base.addHit(result); // C++ ClosestHitPerBodyCollisionCollector::AddHit(inResult)
+        }
+    };
+
+    var collector = MyCollector.init(allocator);
+    defer collector.base.deinit();
+    const root: *CastRayCollector = &collector.base.base;
+    const body: Body = .{ .id = .init(1) };
+    root.onBody(&body);
+    root.addHit(&rayHit(1, 0.5));
+    root.addHit(&rayHit(1, 0.25));
+    root.onBodyEnd();
+    try collector.base.checkError();
+    try testing.expectEqual(@as(u32, 2), collector.num_add_hit);
+    try testing.expectEqual(@as(usize, 1), collector.base.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.25), collector.base.hits.items[0].fraction);
+    try testing.expectEqual(CastRayCollector.Traits.initial_early_out_fraction, root.getEarlyOutFraction()); // Inherited onBodyEnd
+
+    // The derived AllHit / ClosestHit / AnyHit constructors
+    const DerivedAll = struct {
+        pub const overrides = .{};
+        base: AllHitCollisionCollector(CastRayCollector),
+    };
+    var derived_all: DerivedAll = .{ .base = .initDerived(DerivedAll, allocator) };
+    defer derived_all.base.deinit();
+    derived_all.base.base.addHit(&rayHit(1, 0.5));
+    try testing.expectEqual(@as(usize, 1), derived_all.base.hits.items.len);
+    const DerivedClosest = struct {
+        pub const overrides = .{};
+        base: ClosestHitCollisionCollector(CastRayCollector),
+    };
+    var derived_closest: DerivedClosest = .{ .base = .initDerived(DerivedClosest) };
+    derived_closest.base.base.addHit(&rayHit(1, 0.5));
+    try testing.expect(derived_closest.base.hadHit());
+    const DerivedAny = struct {
+        pub const overrides = .{};
+        base: AnyHitCollisionCollector(CastRayCollector),
+    };
+    var derived_any: DerivedAny = .{ .base = .initDerived(DerivedAny) };
+    derived_any.base.base.addHit(&rayHit(1, 0.5));
+    try testing.expect(derived_any.base.hadHit());
+}
