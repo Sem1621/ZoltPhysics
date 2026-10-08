@@ -2,7 +2,8 @@
 //! (sGetObjectLayer / sGetGroup / sGetMask / ShouldCollide), ObjectLayerPairFilterTable, BroadPhaseLayerInterfaceTable,
 //! BroadPhaseLayerInterfaceMask + ObjectVsBroadPhaseLayerFilterMask, ObjectVsBroadPhaseLayerFilterTable (built from
 //! the tables and from the masks), GroupFilterTable (IsCollisionEnabled of every pair) + CollisionGroup (CanCollide
-//! and operator == of every pair of random groups), the binary state of CollisionGroup and GroupFilterTable (save,
+//! and operator == of every pair of random groups with table filters and a user filter that is not symmetric, which
+//! shows the order of the arguments), the binary state of CollisionGroup and GroupFilterTable (save,
 //! copy, restore from intact, truncated and corrupted streams, RTTI hashes), ContactManifold::SwapShapes and the world
 //! space contact points, the ContactSettings defaults / ValidateResult values and ActiveEdges::IsEdgeActive /
 //! FixNormal. Zolt and the C++ Jolt library run on the same inputs and must produce identical bits (identical
@@ -13,7 +14,9 @@
 //! self pairs), with empty, single and larger tables. The active edge inputs mix random vectors with coplanar and
 //! opposite normals, normals at exactly cos(179 degrees) and at the threshold angle (ties of the strict comparisons),
 //! edges along the cross product of the normals (convex / concave / zero), degenerate triangles and contact points at
-//! vertices, on edges and around the barycentric epsilons.
+//! vertices, on edges and around the barycentric epsilons. FixNormal also gets normals within a few ulps of its
+//! cos(1 degree) threshold and contact points whose barycentric coordinate is exactly 1.0e-4 or 1 - 1.0e-4 (ties of
+//! the strict comparisons, the generator checks that they are hit).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -536,6 +539,20 @@ fn createGroupFilterTable(n: u32, ops: []const u32) !*GroupFilterTable {
     return table;
 }
 
+/// A user group filter that is not symmetric (canCollide(g1, g2) != canCollide(g2, g1)), so CollisionGroup.canCollide
+/// must pass the groups in the right order. Must match OrderedGroupFilter in FiltersReference.cpp.
+const OrderedGroupFilter = struct {
+    pub const overrides = .{.canCollide};
+    pub const rtti_name = "OrderedGroupFilter";
+
+    base: GroupFilter,
+
+    pub fn canCollide(self: *const OrderedGroupFilter, group1: *const CollisionGroup, group2: *const CollisionGroup) bool {
+        _ = self;
+        return group1.getSubGroupID() < group2.getSubGroupID();
+    }
+};
+
 test "GroupFilterTable / CollisionGroup parity" {
     var gen: Gen = .{ .rng = .{ .state = 0x67727073 } };
     var enabled: Checker = .{ .name = "GroupFilterTable.isCollisionEnabled" };
@@ -550,13 +567,13 @@ test "GroupFilterTable / CollisionGroup parity" {
         var ops_b: [max_ops * 3]u32 = undefined;
         const num_ops_b = subGroupOps(&gen, nb, &ops_b);
 
-        // Random groups: a filter (none, A or B), a group ID (few values to get equal ones, the invalid group) and a sub
-        // group ID that is valid for the filter (a group with a filter that has less than 2 sub groups only uses sub
-        // group 0, the table is then never accessed, like Jolt requires)
+        // Random groups: a filter (none, A, B or the ordered user filter), a group ID (few values to get equal ones, the
+        // invalid group) and a sub group ID that is valid for the filter (a group with a table filter that has less
+        // than 2 sub groups only uses sub group 0, the table is then never accessed, like Jolt requires)
         const num_groups = 1 + gen.below(max_groups);
         var groups: [max_groups * 3]u32 = undefined;
         for (0..num_groups) |i| {
-            const filter = gen.below(3);
+            const filter = gen.below(4);
             groups[3 * i] = filter;
             groups[3 * i + 1] = switch (gen.next() % 6) {
                 0 => CollisionGroup.invalid_group,
@@ -568,7 +585,7 @@ test "GroupFilterTable / CollisionGroup parity" {
                 2 => nb,
                 else => 0,
             };
-            groups[3 * i + 2] = if (filter == 0) switch (gen.next() % 4) {
+            groups[3 * i + 2] = if (filter == 0 or filter == 3) switch (gen.next() % 4) {
                 0 => CollisionGroup.invalid_sub_group,
                 1 => gen.next(),
                 else => gen.below(4),
@@ -598,11 +615,16 @@ test "GroupFilterTable / CollisionGroup parity" {
         };
         enabled.check(.{ na, nb, num_ops_a, num_ops_b }, z_enabled, j_enabled);
 
+        var ordered: OrderedGroupFilter = .{ .base = .init(OrderedGroupFilter, std.testing.allocator) };
+        ordered.base.setEmbedded();
+        defer ordered.base.deinit();
+
         var collision_groups: [max_groups]CollisionGroup = undefined;
         for (0..num_groups) |i| {
             const filter: ?*const GroupFilter = switch (groups[3 * i]) {
                 1 => a.asGroupFilter(),
                 2 => b.asGroupFilter(),
+                3 => &ordered.base,
                 else => null,
             };
             collision_groups[i] = .init(filter, groups[3 * i + 1], groups[3 * i + 2]);
@@ -836,13 +858,46 @@ fn rotate(v: Vec3, axis: Vec3, angle: f32) Vec3 {
     return zolt.Quat.rotation(axis, angle).mulVec3(v);
 }
 
+/// Runs FixNormal with Zolt and Jolt on the same inputs and compares the results
+fn checkFixNormal(checker: *Checker, v0: Vec3, v1: Vec3, v2: Vec3, triangle_normal: Vec3, active_edges: u8, point: Vec3, normal: Vec3, movement: Vec3) void {
+    const pv0 = arr3(v0);
+    const pv1 = arr3(v1);
+    const pv2 = arr3(v2);
+    const ptn = arr3(triangle_normal);
+    const pp = arr3(point);
+    const pn = arr3(normal);
+    const pm = arr3(movement);
+    var j: P = undefined;
+    jolt.jolt_fix_normal(&pv0, &pv1, &pv2, &ptn, active_edges, &pp, &pn, &pm, &j);
+    const z = arr3(ActiveEdges.fixNormal(v0, v1, v2, triangle_normal, active_edges, point, normal, movement));
+    checker.check(.{ pv0, pv1, pv2, ptn, active_edges, pp, pn, pm }, z, j);
+}
+
+/// Places the local coordinates `c` (first leg, height, second leg) in 3D: coordinate i goes to axis `axes[i]`,
+/// multiplied by `signs[i]` (+1 or -1, exact)
+fn embed(c: [3]f32, axes: [3]usize, signs: [3]f32) Vec3 {
+    var out: [3]f32 = undefined;
+    for (0..3) |i| out[axes[i]] = signs[i] * c[i];
+    return Vec3.init(out[0], out[1], out[2]);
+}
+
 test "ActiveEdges parity" {
     var gen: Gen = .{ .rng = .{ .state = 0x65646765 } };
     var is_edge_active: Checker = .{ .name = "ActiveEdges.isEdgeActive" };
     var fix_normal: Checker = .{ .name = "ActiveEdges.fixNormal" };
+    var fix_normal_threshold: Checker = .{ .name = "ActiveEdges.fixNormal (normals at the cos(1 degree) threshold)" };
+    var fix_normal_bary: Checker = .{ .name = "ActiveEdges.fixNormal (barycentric coordinate at the epsilons)" };
 
     const cos_179: f32 = -0.999848;
     const one_degree: f32 = 0.017453292;
+    const threshold_angle: f32 = 0.017435349; // acos(0.999848), the cos(1 degree) threshold of FixNormal
+    const epsilon: f32 = 1.0e-4;
+    const one_minus_epsilon: f32 = 1.0 - epsilon;
+
+    // Number of generated inputs that hit what they aim at (computed with Zolt in the generator)
+    var threshold_ties: usize = 0; // dot == 0.999848 * normal_length * triangle_normal_length
+    var threshold_regrouped: usize = 0; // dot > 0.999848 * normal_length * triangle_normal_length != dot > 0.999848 * (normal_length * triangle_normal_length)
+    var bary_ties: usize = 0; // The barycentric coordinate is exactly epsilon / one_minus_epsilon
 
     for (0..iterations) |_| {
         // IsEdgeActive
@@ -956,19 +1011,96 @@ test "ActiveEdges parity" {
                 if (active_edges == 0b111) active_edges = 0b1000;
             }
 
-            const pv0 = arr3(v0);
-            const pv1 = arr3(v1);
-            const pv2 = arr3(v2);
-            const ptn = arr3(triangle_normal);
-            const pp = arr3(point);
-            const pn = arr3(normal);
-            const pm = arr3(movement);
-            var j: P = undefined;
-            jolt.jolt_fix_normal(&pv0, &pv1, &pv2, &ptn, active_edges, &pp, &pn, &pm, &j);
-            const z = arr3(ActiveEdges.fixNormal(v0, v1, v2, triangle_normal, active_edges, point, normal, movement));
-            fix_normal.check(.{ pv0, pv1, pv2, ptn, active_edges, pp, pn, pm }, z, j);
+            checkFixNormal(&fix_normal, v0, v1, v2, triangle_normal, active_edges, point, normal, movement);
+        }
+
+        // FixNormal at the cos(1 degree) threshold: the angle between the normals is acos(0.999848) give or take a few
+        // ulps, so the dot product lands on 0.999848 * normal_length * triangle_normal_length (a tie of the strict
+        // comparison), next to it, or between it and 0.999848 * (normal_length * triangle_normal_length) (which a
+        // regrouped product would use). The contact point is inside the triangle and there is no movement, so a normal
+        // that is not parallel gives the triangle normal.
+        {
+            const triangle_normal = gen.unitVec().mulScalar(if (gen.oneIn(4)) 1.0 else gen.plain(0.01, 10));
+            var axis = triangle_normal.cross(gen.unitVec());
+            while (axis.lengthSq() < 1.0e-2 * triangle_normal.lengthSq()) axis = triangle_normal.cross(gen.unitVec());
+            const angle = threshold_angle + gen.plain(-8.0e-6, 8.0e-6);
+            const normal = rotate(triangle_normal, axis.normalized(), angle).mulScalar(if (gen.oneIn(4)) 1.0 else gen.plain(0.01, 10));
+            const v0 = gen.plainVec(-10, 10);
+            const v1 = gen.plainVec(-10, 10);
+            const v2 = gen.plainVec(-10, 10);
+            const point = v0.add(v1).add(v2).mulScalar(1.0 / 3.0);
+            const active_edges: u8 = @intCast(1 + gen.index(6));
+            checkFixNormal(&fix_normal_threshold, v0, v1, v2, triangle_normal, active_edges, point, normal, Vec3.zero());
+
+            const dot = triangle_normal.dot(normal);
+            const normal_length = normal.length();
+            const triangle_normal_length = triangle_normal.length();
+            const threshold = 0.999848 * normal_length * triangle_normal_length;
+            if (dot == threshold) threshold_ties += 1;
+            if ((dot > threshold) != (dot > 0.999848 * (normal_length * triangle_normal_length))) threshold_regrouped += 1;
+        }
+
+        // FixNormal with a barycentric coordinate of the contact point exactly at epsilon or one_minus_epsilon (ties of
+        // the strict comparisons). Relative to the contact point, a right triangle P, Q, R with the right angle at
+        // P = (-k * s, -o * short), Q = P + (10000 * s, 0) and R = P + (0, short) (s and short powers of 2, short >= 4 * s)
+        // keeps GetBaryCentricCoordinates exact up to its final divisions: the weight of Q is k / 10000 (k = 1 or 9999,
+        // which rounds to exactly epsilon / one_minus_epsilon) and the weight of R is o (a short dyadic number). P is v0
+        // (the d00 <= d22 branch, the tie is v or w) or v2 (the other branch, the tie is u or v). Exact transformations
+        // vary the input: a translation on the grid of the coordinates, the height of the plane and of the contact
+        // point, axis permutations and mirroring.
+        {
+            const k: f32 = if (gen.oneIn(2)) 1.0 else 9999.0;
+            // The weight of R: inside the triangle for epsilon, small for one_minus_epsilon (P gets the rest)
+            const o: f32 = if (k == 1.0) @as(f32, @floatFromInt(1 + gen.below(14))) / 16.0 else ([_]f32{ 0.0, 0x1p-17, 0x1p-15, 0x1p-14 })[gen.index(4)];
+            const s = std.math.ldexp(@as(f32, 1.0), @as(i32, @intCast(gen.below(13))) - 6);
+            const short = s * std.math.ldexp(@as(f32, 1.0), @as(i32, @intCast(gen.below(3))) + 2);
+            const t1 = @as(f32, @floatFromInt(gen.rng.intRange(i32, -8, 8))) * 1024.0 * s;
+            const t2 = @as(f32, @floatFromInt(gen.rng.intRange(i32, -8, 8))) * short;
+            const height = gen.plain(-10, 10);
+            const point_height = if (gen.oneIn(2)) height else gen.plain(-10, 10);
+            const axes = ([_][3]usize{ .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 }, .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 } })[gen.index(6)];
+            var signs: [3]f32 = undefined;
+            for (&signs) |*sign| sign.* = if (gen.oneIn(2)) 1.0 else -1.0;
+            const p = [3]f32{ t1 - k * s, height, t2 - o * short };
+            const vp = embed(p, axes, signs);
+            const vq = embed(.{ p[0] + 10000.0 * s, height, p[2] }, axes, signs);
+            const vr = embed(.{ p[0], height, p[2] + short }, axes, signs);
+            const point = embed(.{ t1, point_height, t2 }, axes, signs);
+            const roles = gen.index(4);
+            const triangle: [3]Vec3 = switch (roles) {
+                0 => .{ vp, vq, vr }, // v = k / 10000, w = o
+                1 => .{ vp, vr, vq }, // v = o, w = k / 10000
+                2 => .{ vq, vr, vp }, // u = k / 10000, v = o
+                else => .{ vr, vq, vp }, // u = o, v = k / 10000
+            };
+            const v0 = triangle[0];
+            const v1 = triangle[1];
+            const v2 = triangle[2];
+            const triangle_normal = if (gen.oneIn(2)) v1.sub(v0).cross(v2.sub(v0)) else gen.unitVec();
+            const normal = if (gen.oneIn(2)) gen.unitVec() else gen.plainVec(-2, 2);
+            const active_edges: u8 = @intCast(1 + gen.index(6));
+            checkFixNormal(&fix_normal_bary, v0, v1, v2, triangle_normal, active_edges, point, normal, Vec3.zero());
+
+            const bary = zolt.ClosestPoint.getBaryCentricCoordinatesTriangle(v0.sub(point), v1.sub(point), v2.sub(point));
+            const weights = [3]f32{ bary.u, bary.v, bary.w };
+            const q_index: usize = switch (roles) {
+                0, 3 => 1,
+                1 => 2,
+                else => 0,
+            };
+            const r_index: usize = switch (roles) {
+                0 => 2,
+                1, 2 => 1,
+                else => 0,
+            };
+            if (weights[q_index] == (if (k == 1.0) epsilon else one_minus_epsilon) and weights[r_index] == o) bary_ties += 1;
         }
     }
 
-    try finishAll(&.{ &is_edge_active, &fix_normal });
+    try finishAll(&.{ &is_edge_active, &fix_normal, &fix_normal_threshold, &fix_normal_bary });
+
+    // The generator hits the ties it aims at
+    try std.testing.expectEqual(iterations, bary_ties);
+    try std.testing.expect(threshold_ties >= iterations / 100);
+    try std.testing.expect(threshold_regrouped >= iterations / 1000);
 }

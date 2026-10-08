@@ -275,8 +275,19 @@ void jolt_object_vs_broad_phase_layer_filter_table(int inFromMasks, uint32 inNum
 	}
 }
 
+// A user group filter that is not symmetric (CanCollide(g1, g2) != CanCollide(g2, g1)), so CollisionGroup::CanCollide
+// must pass the groups in the right order. Must match OrderedGroupFilter in FiltersParity.zig.
+class OrderedGroupFilter : public GroupFilter
+{
+public:
+	virtual bool		CanCollide(const CollisionGroup &inGroup1, const CollisionGroup &inGroup2) const override
+	{
+		return inGroup1.GetSubGroupID() < inGroup2.GetSubGroupID();
+	}
+};
+
 // Physics/Collision/GroupFilterTable.h + CollisionGroup.h: two group filter tables A and B, then for groups described by
-// triples (filter: 0 = none, 1 = A, 2 = B; group ID; sub group ID):
+// triples (filter: 0 = none, 1 = A, 2 = B, 3 = OrderedGroupFilter; group ID; sub group ID):
 // - outEnabledA / outEnabledB: IsCollisionEnabled(i, j) for i != j (row major, 0 on the diagonal)
 // - outCanCollide: CollisionGroup::CanCollide of every pair of groups (row major)
 // - outEqual: CollisionGroup::operator == of every pair of groups (row major)
@@ -287,6 +298,7 @@ void jolt_collision_groups(uint32 inNumSubGroupsA, const uint32 *inOpsA, uint32 
 	ConfigureGroupFilterTable(*a, inOpsA, inNumOpsA);
 	Ref<GroupFilterTable> b = new GroupFilterTable(inNumSubGroupsB);
 	ConfigureGroupFilterTable(*b, inOpsB, inNumOpsB);
+	Ref<OrderedGroupFilter> ordered = new OrderedGroupFilter;
 
 	for (uint32 i = 0; i < inNumSubGroupsA; ++i)
 		for (uint32 j = 0; j < inNumSubGroupsA; ++j)
@@ -299,7 +311,13 @@ void jolt_collision_groups(uint32 inNumSubGroupsA, const uint32 *inOpsA, uint32 
 	for (uint32 i = 0; i < inNumGroups; ++i)
 	{
 		const uint32 *g = inGroups + 3 * i;
-		const GroupFilter *filter = g[0] == 1? a.GetPtr() : (g[0] == 2? b.GetPtr() : nullptr);
+		const GroupFilter *filter = nullptr;
+		if (g[0] == 1)
+			filter = a.GetPtr();
+		else if (g[0] == 2)
+			filter = b.GetPtr();
+		else if (g[0] == 3)
+			filter = ordered.GetPtr();
 		groups.push_back(CollisionGroup(filter, g[1], g[2]));
 	}
 	for (uint32 i = 0; i < inNumGroups; ++i)

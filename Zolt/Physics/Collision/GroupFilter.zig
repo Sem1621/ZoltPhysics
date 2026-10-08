@@ -5,11 +5,11 @@
 //! the atomic reference count and the allocator that frees the object (and the memory it owns).
 //!
 //! - GroupFilter is abstract (`CanCollide` is pure virtual), so it keeps the bodies of its other virtual functions in
-//!   `impl`. A derived filter embeds `base: GroupFilter = .init(@This(), allocator)` (the protected base class
-//!   constructor), lists its `overrides` and declares `pub const rtti_name` (JPH_RTTI). `new X(...)` is
-//!   `X.create(allocator, ...)` (reference count 0, put it in a `Ref` / `RefConst`), the last `release()` destroys it
-//!   through the vtable. A filter on the stack or embedded in another object calls `setEmbedded()` before references
-//!   are taken and `deinit()` at the end.
+//!   `impl`. A derived filter has a field `base: GroupFilter` and its constructor sets `.base = .init(@This(),
+//!   allocator)` (the protected base class constructor). It lists its `overrides` and declares `pub const rtti_name`
+//!   (JPH_RTTI). `new X(...)` is `X.create(allocator, ...)` (reference count 0, put it in a `Ref` / `RefConst`), the
+//!   last `release()` destroys it through the vtable. A filter on the stack or embedded in another object calls
+//!   `setEmbedded()` before references are taken and `deinit()` at the end.
 //! - SaveBinaryState writes Jolt's RTTI hash of the class name (`rtti_name` is a vtable data entry).
 //!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in the comptime list `group_filter_types`
 //!   (the Factory of Phase 8 replaces it). Restoring allocates, so it returns `Allocator.Error!GroupFilterResult`;
@@ -19,6 +19,12 @@
 //!   type".
 //! - The copy constructor and copy assignment of the C++ base class (protected, they do not copy the reference
 //!   count) are part of the derived classes' copy functions, e.g. `GroupFilterTable.clone`.
+//! - Foundation note: in Jolt an application registers its own GroupFilter classes with the Factory, and
+//!   sRestoreFromBinaryState restores them too. Zolt has no such hook yet, so a user filter can be saved but restoring
+//!   it gives "Failed to create instance of type". RegisterTypes.zig and the `zolt_user_types` module (D4) come with
+//!   the second foundation step; when they are merged, `group_filter_types` becomes `RegisterTypes.group_filter_types`
+//!   = `.{GroupFilterTable}` ++ the optional `group_filter_types` of the user types module (like `material_types`, D8),
+//!   with a test that restores a user filter registered through that module.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -61,6 +67,7 @@ pub const GroupFilter = struct {
 
     /// Group filter classes that restoreFromBinaryState can create (Factory::sInstance until Phase 8). Each one declares
     /// `rtti_name` and `createDefault(allocator) Allocator.Error!*T` (its default constructor on the heap).
+    /// Only Jolt's classes for now, user classes come with RegisterTypes (see the foundation note in the file comment).
     pub const group_filter_types = .{GroupFilterTable};
 
     /// Constructor (protected in Jolt), called by derived classes with their most derived type
@@ -258,6 +265,50 @@ test "GroupFilter: a user group filter, the base class implementations" {
     embedded_group.deinit();
     embedded.base.deinit();
     try std.testing.expectEqual(@as(u32, 2), destructed);
+}
+
+test "GroupFilter: CollisionGroup.canCollide passes the group with the filter first" {
+    const expect = std.testing.expect;
+
+    // A user filter that is not symmetric, it records the order of the groups it gets
+    const OrderFilter = struct {
+        pub const overrides = .{.canCollide};
+        pub const rtti_name = "OrderFilter";
+
+        base: GroupFilter,
+        last_call: *[2]?*const CollisionGroup,
+
+        pub fn canCollide(self: *const @This(), group1: *const CollisionGroup, group2: *const CollisionGroup) bool {
+            self.last_call.* = .{ group1, group2 };
+            return group1.getSubGroupID() < group2.getSubGroupID();
+        }
+    };
+
+    var last_call: [2]?*const CollisionGroup = .{ null, null };
+    var filter: OrderFilter = .{ .base = .init(OrderFilter, std.testing.allocator), .last_call = &last_call };
+    filter.base.setEmbedded();
+    defer filter.base.deinit();
+
+    var with_filter = CollisionGroup.init(&filter.base, 0, 1);
+    defer with_filter.deinit();
+    var other_with_filter = CollisionGroup.init(&filter.base, 0, 3);
+    defer other_with_filter.deinit();
+    var no_filter = CollisionGroup.init(null, 0, 2);
+    defer no_filter.deinit();
+
+    // The filter of this group: CanCollide(*this, inOther)
+    try expect(with_filter.canCollide(&no_filter)); // 1 < 2
+    try expect(last_call[0].? == &with_filter and last_call[1].? == &no_filter);
+    try expect(!other_with_filter.canCollide(&with_filter)); // 3 < 1
+    try expect(last_call[0].? == &other_with_filter and last_call[1].? == &with_filter);
+    try expect(with_filter.canCollide(&other_with_filter)); // 1 < 3
+    try expect(last_call[0].? == &with_filter and last_call[1].? == &other_with_filter);
+
+    // This group has no filter, the filter of the other group: CanCollide(inOther, *this)
+    try expect(no_filter.canCollide(&with_filter)); // 1 < 2
+    try expect(last_call[0].? == &with_filter and last_call[1].? == &no_filter);
+    try expect(!no_filter.canCollide(&other_with_filter)); // 3 < 2
+    try expect(last_call[0].? == &other_with_filter and last_call[1].? == &no_filter);
 }
 
 test "GroupFilter: restore errors" {
