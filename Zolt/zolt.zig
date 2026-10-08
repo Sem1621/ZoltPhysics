@@ -203,6 +203,10 @@ pub const CollidePointResult = @import("Physics/Collision/CollidePointResult.zig
 pub const CollideSettingsBase = @import("Physics/Collision/CollideShape.zig").CollideSettingsBase;
 pub const CollideShapeResult = @import("Physics/Collision/CollideShape.zig").CollideShapeResult;
 pub const CollideShapeSettings = @import("Physics/Collision/CollideShape.zig").CollideShapeSettings;
+pub const CollisionGroup = @import("Physics/Collision/CollisionGroup.zig").CollisionGroup;
+pub const GroupFilter = @import("Physics/Collision/GroupFilter.zig").GroupFilter;
+pub const GroupFilterResult = @import("Physics/Collision/GroupFilter.zig").GroupFilter.GroupFilterResult;
+pub const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").GroupFilterTable;
 pub const DefaultObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").DefaultObjectLayerFilter;
 pub const object_layer_invalid = @import("Physics/Collision/ObjectLayer.zig").object_layer_invalid;
 pub const ObjectLayer = @import("Physics/Collision/ObjectLayer.zig").ObjectLayer;
@@ -336,6 +340,9 @@ const source_files = .{
     @import("Physics/Collision/CollectFacesMode.zig"),
     @import("Physics/Collision/CollidePointResult.zig"),
     @import("Physics/Collision/CollideShape.zig"),
+    @import("Physics/Collision/CollisionGroup.zig"),
+    @import("Physics/Collision/GroupFilter.zig"),
+    @import("Physics/Collision/GroupFilterTable.zig"),
     @import("Physics/Collision/ObjectLayer.zig"),
     @import("Physics/Collision/PhysicsMaterial.zig"),
     @import("Physics/Collision/PhysicsMaterialSimple.zig"),
