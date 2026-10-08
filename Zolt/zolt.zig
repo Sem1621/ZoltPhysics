@@ -186,6 +186,42 @@ pub const Vector = @import("Math/Vector.zig").Vector;
 pub const Body = @import("Physics/Body/Body.zig").Body;
 pub const BodyID = @import("Physics/Body/BodyID.zig").BodyID;
 pub const MassProperties = @import("Physics/Body/MassProperties.zig").MassProperties;
+pub const AABoxCast = @import("Physics/Collision/AABoxCast.zig").AABoxCast;
+pub const ActiveEdgeMode = @import("Physics/Collision/ActiveEdgeMode.zig").ActiveEdgeMode;
+pub const BackFaceMode = @import("Physics/Collision/BackFaceMode.zig").BackFaceMode;
+pub const broad_phase_layer_invalid = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").broad_phase_layer_invalid;
+pub const BroadPhaseLayer = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
+pub const BroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayerFilter;
+pub const BroadPhaseLayerInterface = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayerInterface;
+pub const DefaultBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").DefaultBroadPhaseLayerFilter;
+pub const ObjectVsBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").ObjectVsBroadPhaseLayerFilter;
+pub const SpecifiedBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").SpecifiedBroadPhaseLayerFilter;
+pub const BroadPhaseCastResult = @import("Physics/Collision/CastResult.zig").BroadPhaseCastResult;
+pub const RayCastResult = @import("Physics/Collision/CastResult.zig").RayCastResult;
+pub const CollectFacesMode = @import("Physics/Collision/CollectFacesMode.zig").CollectFacesMode;
+pub const CollidePointResult = @import("Physics/Collision/CollidePointResult.zig").CollidePointResult;
+pub const CollideSettingsBase = @import("Physics/Collision/CollideShape.zig").CollideSettingsBase;
+pub const CollideShapeResult = @import("Physics/Collision/CollideShape.zig").CollideShapeResult;
+pub const CollideShapeSettings = @import("Physics/Collision/CollideShape.zig").CollideShapeSettings;
+pub const DefaultObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").DefaultObjectLayerFilter;
+pub const object_layer_invalid = @import("Physics/Collision/ObjectLayer.zig").object_layer_invalid;
+pub const ObjectLayer = @import("Physics/Collision/ObjectLayer.zig").ObjectLayer;
+pub const ObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").ObjectLayerFilter;
+pub const ObjectLayerPairFilter = @import("Physics/Collision/ObjectLayer.zig").ObjectLayerPairFilter;
+pub const SpecifiedObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").SpecifiedObjectLayerFilter;
+pub const PhysicsMaterial = @import("Physics/Collision/PhysicsMaterial.zig").PhysicsMaterial;
+pub const PhysicsMaterialList = @import("Physics/Collision/PhysicsMaterial.zig").PhysicsMaterialList;
+pub const PhysicsMaterialSimple = @import("Physics/Collision/PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+pub const RayCast = @import("Physics/Collision/RayCast.zig").RayCast;
+pub const RayCastKind = @import("Physics/Collision/RayCast.zig").RayCastKind;
+pub const RayCastSettings = @import("Physics/Collision/RayCast.zig").RayCastSettings;
+pub const RayCastT = @import("Physics/Collision/RayCast.zig").RayCastT;
+pub const RRayCast = @import("Physics/Collision/RayCast.zig").RRayCast;
+pub const SubShapeID = @import("Physics/Collision/Shape/SubShapeID.zig").SubShapeID;
+pub const SubShapeIDCreator = @import("Physics/Collision/Shape/SubShapeID.zig").SubShapeIDCreator;
+pub const SubShapeIDPair = @import("Physics/Collision/Shape/SubShapeIDPair.zig").SubShapeIDPair;
+pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig").countAndSortTrues;
+pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 pub const physics_settings = @import("Physics/PhysicsSettings.zig");
 pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
 
@@ -292,6 +328,21 @@ const source_files = .{
     @import("Physics/Body/Body.zig"),
     @import("Physics/Body/BodyID.zig"),
     @import("Physics/Body/MassProperties.zig"),
+    @import("Physics/Collision/AABoxCast.zig"),
+    @import("Physics/Collision/ActiveEdgeMode.zig"),
+    @import("Physics/Collision/BackFaceMode.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig"),
+    @import("Physics/Collision/CastResult.zig"),
+    @import("Physics/Collision/CollectFacesMode.zig"),
+    @import("Physics/Collision/CollidePointResult.zig"),
+    @import("Physics/Collision/CollideShape.zig"),
+    @import("Physics/Collision/ObjectLayer.zig"),
+    @import("Physics/Collision/PhysicsMaterial.zig"),
+    @import("Physics/Collision/PhysicsMaterialSimple.zig"),
+    @import("Physics/Collision/RayCast.zig"),
+    @import("Physics/Collision/Shape/SubShapeID.zig"),
+    @import("Physics/Collision/Shape/SubShapeIDPair.zig"),
+    @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/PhysicsSettings.zig"),
     @import("TriangleSplitter/TriangleSplitter.zig"),
     @import("TriangleSplitter/TriangleSplitterBinning.zig"),
