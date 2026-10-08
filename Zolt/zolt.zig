@@ -182,6 +182,13 @@ pub const Vec3 = @import("Math/Vec3.zig").Vec3;
 pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 pub const Vector = @import("Math/Vector.zig").Vector;
 
+// Physics
+pub const Body = @import("Physics/Body/Body.zig").Body;
+pub const BodyID = @import("Physics/Body/BodyID.zig").BodyID;
+pub const MassProperties = @import("Physics/Body/MassProperties.zig").MassProperties;
+pub const physics_settings = @import("Physics/PhysicsSettings.zig");
+pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
+
 // TriangleSplitter
 pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
 pub const TriangleSplitterBinning = @import("TriangleSplitter/TriangleSplitterBinning.zig").TriangleSplitterBinning;
@@ -282,6 +289,10 @@ const source_files = .{
     @import("Math/Vec3.zig"),
     @import("Math/Vec4.zig"),
     @import("Math/Vector.zig"),
+    @import("Physics/Body/Body.zig"),
+    @import("Physics/Body/BodyID.zig"),
+    @import("Physics/Body/MassProperties.zig"),
+    @import("Physics/PhysicsSettings.zig"),
     @import("TriangleSplitter/TriangleSplitter.zig"),
     @import("TriangleSplitter/TriangleSplitterBinning.zig"),
     @import("TriangleSplitter/TriangleSplitterMean.zig"),
