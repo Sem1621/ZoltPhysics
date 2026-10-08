@@ -95,10 +95,16 @@ HEADER_ADDITION = re.compile(r"^//!\s*Zolt addition")
 TEST_DECL = re.compile(r"^\s*test\s+\"", re.MULTILINE)
 
 
+# Architecture prototypes (e.g. Docs/Zolt/CollisionArchitecture.md): reduced copies of future ports that are
+# compiled and tested, but are not ports themselves and must not count towards the progress
+PROTOTYPE_DIRS = ("ZoltTests/Prototype",)
+
+
 def read_zig_headers(base_dir):
     """{zig_file: (ported_cpp_files, status)} for every .zig file under base_dir"""
     result = {}
-    for dirpath, _, filenames in os.walk(os.path.join(ROOT, base_dir)):
+    for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, base_dir)):
+        dirnames[:] = [d for d in dirnames if rel(os.path.join(dirpath, d)) not in PROTOTYPE_DIRS]
         for name in sorted(filenames):
             if not name.endswith(".zig"):
                 continue
