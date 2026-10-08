@@ -57,7 +57,6 @@ NOT_APPLICABLE = {
     "Jolt/Core/NonCopyable": "Zig has no copy constructors",
     "Jolt/Core/ScopeExit": "Zig `defer`",
     "Jolt/Core/IssueReporting": "std.debug.assert and std.log",
-    "Jolt/Core/Result": "Zig error unions",
     "Jolt/Core/Array": "std.ArrayList",
     "Jolt/Core/UnorderedMapFwd": "forward declarations",
     "Jolt/Core/UnorderedSetFwd": "forward declarations",

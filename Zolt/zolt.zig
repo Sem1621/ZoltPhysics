@@ -50,12 +50,16 @@ pub const SharedMutexBase = @import("Core/Mutex.zig").SharedMutexBase;
 pub const MutexArray = @import("Core/MutexArray.zig").MutexArray;
 pub const IDToObjectMap = @import("Core/ObjectToIDMap.zig").IDToObjectMap;
 pub const ObjectToIDMap = @import("Core/ObjectToIDMap.zig").ObjectToIDMap;
+pub const PlacementBuffer = @import("Core/PlacementBuffer.zig").PlacementBuffer;
+pub const PlacementBufferOptions = @import("Core/PlacementBuffer.zig").Options;
 pub const prefetchL1 = @import("Core/Prefetch.zig").prefetchL1;
 pub const quickSort = @import("Core/QuickSort.zig").quickSort;
 pub const Ref = @import("Core/Reference.zig").Ref;
 pub const RefConst = @import("Core/Reference.zig").RefConst;
 pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
+pub const ErrorString = @import("Core/Result.zig").ErrorString;
+pub const Result = @import("Core/Result.zig").Result;
 pub const Semaphore = @import("Core/Semaphore.zig").Semaphore;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
 pub const STLLocalAllocator = @import("Core/STLLocalAllocator.zig").STLLocalAllocator;
@@ -82,6 +86,7 @@ pub const UnorderedMap = @import("Core/UnorderedMap.zig").UnorderedMap;
 pub const UnorderedMapDetail = @import("Core/UnorderedMap.zig").UnorderedMapDetail;
 pub const UnorderedSet = @import("Core/UnorderedSet.zig").UnorderedSet;
 pub const UnorderedSetDetail = @import("Core/UnorderedSet.zig").UnorderedSetDetail;
+pub const virtual = @import("Core/Virtual.zig");
 
 // Geometry
 pub const AABox = @import("Geometry/AABox.zig").AABox;
@@ -211,9 +216,11 @@ const source_files = .{
     @import("Core/Mutex.zig"),
     @import("Core/MutexArray.zig"),
     @import("Core/ObjectToIDMap.zig"),
+    @import("Core/PlacementBuffer.zig"),
     @import("Core/Prefetch.zig"),
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
+    @import("Core/Result.zig"),
     @import("Core/Semaphore.zig"),
     @import("Core/StaticArray.zig"),
     @import("Core/STLLocalAllocator.zig"),
@@ -227,6 +234,7 @@ const source_files = .{
     @import("Core/TickCounter.zig"),
     @import("Core/UnorderedMap.zig"),
     @import("Core/UnorderedSet.zig"),
+    @import("Core/Virtual.zig"),
     @import("Geometry/AABox.zig"),
     @import("Geometry/AABox4.zig"),
     @import("Geometry/ClipPoly.zig"),
