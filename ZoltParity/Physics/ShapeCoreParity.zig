@@ -231,7 +231,8 @@ const Gen = struct {
     /// A random unit quaternion, sometimes a rotation of a multiple of 90 degrees around an axis
     fn rotation(self: *Gen) [4]f32 {
         if (self.oneIn(4)) {
-            const axis = [_]Vec3{ Vec3.axisX(), Vec3.axisY(), Vec3.axisZ() }[self.index(3)];
+            const axes = [_]Vec3{ Vec3.axisX(), Vec3.axisY(), Vec3.axisZ() };
+            const axis = axes[self.index(3)];
             const angle = @as(f32, @floatFromInt(self.index(4))) * 0.5 * zolt.math.pi;
             return arr4(Quat.rotation(axis, angle).getXYZW());
         }
@@ -492,7 +493,6 @@ test "ShapeCore parity: GetTrianglesContextVertexList / GetTrianglesContextMulti
         }
         checker.check(.{ num_triangles, max }, calls, jolt_calls);
         if (calls != jolt_calls) continue;
-        checker.check(.{ num_triangles, max }, zolt_counts[0..@intCast(calls)].*.len, jolt_counts[0..@intCast(jolt_calls)].*.len);
         for (0..@intCast(calls)) |i| checker.check(.{ num_triangles, max, i }, zolt_counts[i], jolt_counts[i]);
         for (0..out) |i| checker.check(.{ num_triangles, max, i, position, rotation, scale }, zolt_vertices[i], jolt_vertices[i]);
 

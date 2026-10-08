@@ -13,6 +13,7 @@
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/StreamWrapper.h>
 #include <Jolt/RegisterTypes.h>
+#include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Collision/CollisionDispatch.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -22,8 +23,8 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/TransformedShape.h>
-#include <Jolt/Physics/Collision/Shape/GetTrianglesContext.h>
 #include <Jolt/Physics/Collision/Shape/ScaleHelpers.h>
+#include <Jolt/Physics/Collision/Shape/GetTrianglesContext.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
@@ -454,7 +455,7 @@ uint32 jolt_save_with_children(int inNumShapes, const float *inHalfExtents, cons
 	for (int s = 0; s < inNumShapes; ++s)
 		for (int c = 0; c < 2; ++c)
 			if (inChildren[2 * s + c] >= 0)
-				shapes[s]->mChildren.push_back(shapes[inChildren[2 * s + c]]);
+				shapes[s]->mChildren.push_back(RefConst<Shape>(shapes[inChildren[2 * s + c]].GetPtr()));
 	std::ostringstream stream;
 	StreamOutWrapper wrapper(stream);
 	Shape::ShapeToIDMap shape_map;
@@ -465,6 +466,8 @@ uint32 jolt_save_with_children(int inNumShapes, const float *inHalfExtents, cons
 		s->mChildren.clear();
 	return CopyBytes(stream.str(), outBytes, inCapacity);
 }
+
+} // extern "C"
 
 // The collectors on a synthetic hit sequence: inKinds selects the collector (0 AllHit, 1 ClosestHit, 2 ClosestHitPerBody,
 // 3 AnyHit) and inResultType the collector type (0 CastRay: fractions, 1 CollideShape: penetration depths, 2 CastShape:
@@ -537,6 +540,9 @@ static int sCollect(int inKind, int inNumHits, const uint32 *inBodies, MakeResul
 		}
 	}
 }
+
+extern "C"
+{
 
 int jolt_collector(int inKind, int inResultType, int inNumHits, const uint32 *inBodies, const float *inFractions, const float *inDepths, float *outEarlyOut, Hit *outHits)
 {
