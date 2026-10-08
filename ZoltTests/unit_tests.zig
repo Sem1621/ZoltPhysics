@@ -5,6 +5,7 @@
 //! Add new test files to the list below (keep it sorted by path).
 
 test {
+    _ = @import("Layers.zig");
     _ = @import("UnitTestFramework.zig");
 
     // Core
@@ -46,6 +47,9 @@ test {
     _ = @import("Math/VectorTests.zig");
 
     // Physics
+    _ = @import("Physics/CollisionGroupTests.zig");
+    _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
+    _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
 
     // Prototypes (architecture decisions, see Docs/Zolt/CollisionArchitecture.md)
