@@ -196,6 +196,10 @@ pub const BroadPhaseLayerInterface = @import("Physics/Collision/BroadPhase/Broad
 pub const DefaultBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").DefaultBroadPhaseLayerFilter;
 pub const ObjectVsBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").ObjectVsBroadPhaseLayerFilter;
 pub const SpecifiedBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").SpecifiedBroadPhaseLayerFilter;
+pub const BroadPhaseLayerInterfaceMask = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig").BroadPhaseLayerInterfaceMask;
+pub const BroadPhaseLayerInterfaceTable = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+pub const ObjectVsBroadPhaseLayerFilterMask = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig").ObjectVsBroadPhaseLayerFilterMask;
+pub const ObjectVsBroadPhaseLayerFilterTable = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
 pub const BroadPhaseCastResult = @import("Physics/Collision/CastResult.zig").BroadPhaseCastResult;
 pub const RayCastResult = @import("Physics/Collision/CastResult.zig").RayCastResult;
 pub const CollectFacesMode = @import("Physics/Collision/CollectFacesMode.zig").CollectFacesMode;
@@ -213,6 +217,8 @@ pub const ObjectLayer = @import("Physics/Collision/ObjectLayer.zig").ObjectLayer
 pub const ObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").ObjectLayerFilter;
 pub const ObjectLayerPairFilter = @import("Physics/Collision/ObjectLayer.zig").ObjectLayerPairFilter;
 pub const SpecifiedObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").SpecifiedObjectLayerFilter;
+pub const ObjectLayerPairFilterMask = @import("Physics/Collision/ObjectLayerPairFilterMask.zig").ObjectLayerPairFilterMask;
+pub const ObjectLayerPairFilterTable = @import("Physics/Collision/ObjectLayerPairFilterTable.zig").ObjectLayerPairFilterTable;
 pub const PhysicsMaterial = @import("Physics/Collision/PhysicsMaterial.zig").PhysicsMaterial;
 pub const PhysicsMaterialList = @import("Physics/Collision/PhysicsMaterial.zig").PhysicsMaterialList;
 pub const PhysicsMaterialSimple = @import("Physics/Collision/PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
@@ -336,6 +342,10 @@ const source_files = .{
     @import("Physics/Collision/ActiveEdgeMode.zig"),
     @import("Physics/Collision/BackFaceMode.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig"),
+    @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig"),
+    @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig"),
     @import("Physics/Collision/CastResult.zig"),
     @import("Physics/Collision/CollectFacesMode.zig"),
     @import("Physics/Collision/CollidePointResult.zig"),
@@ -344,6 +354,8 @@ const source_files = .{
     @import("Physics/Collision/GroupFilter.zig"),
     @import("Physics/Collision/GroupFilterTable.zig"),
     @import("Physics/Collision/ObjectLayer.zig"),
+    @import("Physics/Collision/ObjectLayerPairFilterMask.zig"),
+    @import("Physics/Collision/ObjectLayerPairFilterTable.zig"),
     @import("Physics/Collision/PhysicsMaterial.zig"),
     @import("Physics/Collision/PhysicsMaterialSimple.zig"),
     @import("Physics/Collision/RayCast.zig"),
