@@ -299,6 +299,9 @@ pub const SoftBodyShape = @import("Physics/SoftBody/SoftBodyShape.zig").SoftBody
 // RegisterTypes
 pub const RegisterTypes = @import("RegisterTypes.zig");
 
+/// Test shapes of the inline tests of the shape core, registered through `zolt_user_types` by build.zig (only in test builds)
+pub const test_shapes = if (@import("builtin").is_test) @import("Physics/Collision/Shape/TestShapes.zig") else struct {};
+
 // TriangleSplitter
 pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
 pub const TriangleSplitterBinning = @import("TriangleSplitter/TriangleSplitterBinning.zig").TriangleSplitterBinning;
@@ -443,6 +446,7 @@ const source_files = .{
     @import("Physics/Collision/Shape/SubShapeIDPair.zig"),
     @import("Physics/Collision/Shape/TaperedCapsuleShape.zig"),
     @import("Physics/Collision/Shape/TaperedCylinderShape.zig"),
+    @import("Physics/Collision/Shape/TestShapes.zig"),
     @import("Physics/Collision/Shape/TriangleShape.zig"),
     @import("Physics/Collision/ShapeCast.zig"),
     @import("Physics/Collision/ShapeFilter.zig"),

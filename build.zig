@@ -72,10 +72,34 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    // Inline tests that live next to the code inside Zolt/
+    // Inline tests that live next to the code inside Zolt/. They run on their own instance of the library module whose
+    // `zolt_user_types` registers the test shapes of the shape core (Zolt/Physics/Collision/Shape/TestShapes.zig) and
+    // a test material type through the user hook, exactly like an application would (a module import cycle). The
+    // library, the unit tests and the parity tests use the default (empty) module.
+    const test_user_types_module = b.createModule(.{
+        .root_source_file = b.addWriteFiles().add("zolt_user_types.zig",
+            \\//! `zolt_user_types` of the inline tests: the test shapes and the test material of Zolt (only declared in tests).
+            \\const test_shapes = @import("zolt").test_shapes;
+            \\pub const registrations = test_shapes.registrations;
+            \\pub const material_types = test_shapes.material_types;
+            \\
+        ),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zolt_for_tests = b.createModule(.{
+        .root_source_file = b.path("Zolt/zolt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zolt_options", .module = options_module },
+            .{ .name = "zolt_user_types", .module = test_user_types_module },
+        },
+    });
+    test_user_types_module.addImport("zolt", zolt_for_tests);
     const lib_tests = b.addTest(.{
         .name = "zolt-tests",
-        .root_module = zolt,
+        .root_module = zolt_for_tests,
         .filters = test_filters,
         .use_llvm = use_llvm,
     });
