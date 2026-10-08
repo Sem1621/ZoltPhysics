@@ -461,11 +461,11 @@ test "ObjectVsBroadPhaseLayerFilterTable parity" {
         from_tables.check(.{ n, m, num_pair_ops, num_map_ops }, z, j);
     }
 
-    // Built from a BroadPhaseLayerInterfaceMask and an ObjectLayerPairFilterMask (the object layers 0 .. n - 1, with 16
-    // bit layers the layers above 255 have mask bits)
-    const max_mask_layers = 700;
+    // Built from a BroadPhaseLayerInterfaceMask and an ObjectLayerPairFilterMask (the object layers 0 .. n - 1: only
+    // layers above the group bits have mask bits, 255 with 16 bit layers)
+    const max_mask_layers = 1300;
     for (0..40) |_| {
-        const n = gen.below(max_mask_layers + 1);
+        const n = if (gen.oneIn(4)) gen.below(max_mask_layers + 1) else max_mask_layers - gen.below(400);
         const m = 1 + gen.below(max_broad_phase_layers);
         var bp_ops: [max_ops * 3]u32 = undefined;
         const num_bp_ops = broadPhaseMaskOps(&gen, m, &bp_ops);
