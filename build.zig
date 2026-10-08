@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) void {
     // Inline tests that live next to the code inside Zolt/. They run on their own instance of the library module whose
     // `zolt_user_types` registers the test shapes of the shape core (Zolt/Physics/Collision/Shape/TestShapes.zig) and
     // a test material type through the user hook, exactly like an application would (a module import cycle). The
-    // library, the unit tests and the parity tests use the default (empty) module.
+    // library and the unit tests use the default (empty) module, the parity tests have their own (see below).
     const test_user_types_module = b.createModule(.{
         .root_source_file = b.addWriteFiles().add("zolt_user_types.zig",
             \\//! `zolt_user_types` of the inline tests: the test shapes and the test material of Zolt (only declared in tests).
@@ -168,6 +168,26 @@ pub fn build(b: *std.Build) void {
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("Jolt"), .files = &jolt_sources.files, .flags = cpp_flags.items });
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.files, .flags = cpp_flags.items });
 
+    // The parity tests run on their own instance of the library module too: its `zolt_user_types` registers the collide
+    // / cast functions of the parity test shape (ZoltParity/Physics/ShapeCoreUserTypes.zig), which the C++ reference
+    // registers as well, so the dispatch tables, the reversed functions and the TransformedShape entry points are
+    // compared through the user hook. The parity tests import that module as "parity_user_types".
+    const parity_user_types_module = b.createModule(.{
+        .root_source_file = b.path("ZoltParity/Physics/ShapeCoreUserTypes.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zolt_for_parity = b.createModule(.{
+        .root_source_file = b.path("Zolt/zolt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zolt_options", .module = options_module },
+            .{ .name = "zolt_user_types", .module = parity_user_types_module },
+        },
+    });
+    parity_user_types_module.addImport("zolt", zolt_for_parity);
+
     const parity_tests = b.addTest(.{
         .name = "zolt-parity",
         .root_module = b.createModule(.{
@@ -175,7 +195,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zolt", .module = zolt },
+                .{ .name = "zolt", .module = zolt_for_parity },
+                .{ .name = "parity_user_types", .module = parity_user_types_module },
             },
         }),
         .filters = test_filters,

@@ -1,6 +1,7 @@
 //! Port of: Jolt/Physics/Collision/Shape/Shape.h, Jolt/Physics/Collision/Shape/Shape.cpp
 //! Status: partial
-//! Missing: scaleShape (needs ScaledShape / StaticCompoundShape, Wave A/B)
+//! Missing: scaleShape (needs ScaledShape (Wave A) and StaticCompoundShape (Wave B): ported together with
+//!   StaticCompoundShape, which then sets this file's status to complete)
 //!
 //! Architecture (Docs/Zolt/CollisionArchitecture.md):
 //! - D1 `Shape` is the root of pattern A: `vtable`, the atomic `ref_count`, the `allocator` that frees the shape and its
@@ -1077,7 +1078,7 @@ pub const Shape = struct {
 
         pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) void {
             _ = self;
-            std.debug.assert(materials.len == 0);
+            if (Core.enable_asserts) std.debug.assert(materials.len == 0); // A corrupt stream can violate this, Jolt's release build ignores the materials
         }
 
         pub fn saveSubShapeState(self: *const Shape, allocator: Allocator, out_sub_shapes: *ShapeList) Allocator.Error!void {
@@ -1087,7 +1088,7 @@ pub const Shape = struct {
 
         pub fn restoreSubShapeState(self: *Shape, sub_shapes: []const ShapeRefC) void {
             _ = self;
-            std.debug.assert(sub_shapes.len == 0);
+            if (Core.enable_asserts) std.debug.assert(sub_shapes.len == 0); // A corrupt stream can violate this, Jolt's release build ignores the sub shapes
         }
 
         pub fn getStatsRecursive(self: *const Shape, allocator: Allocator, visited_shapes: *VisitedShapes) Allocator.Error!Stats {

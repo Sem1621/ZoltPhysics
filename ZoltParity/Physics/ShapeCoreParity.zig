@@ -2,13 +2,21 @@
 //! MultiVertexList and the vertex list helpers, ShapeCast / RShapeCast / ShapeCastResult, TransformedShape and the
 //! default implementations of Shape (with a test shape that derives from Shape directly, the same class on both sides),
 //! the collision collectors on synthetic hit sequences (early out fractions, the sort order with ties, ClosestHitPerBody),
-//! the binary state of a shape graph (Shape::SaveWithChildren) and the contents of the CollisionDispatch /
-//! ShapeFunctions tables. Zolt and the C++ Jolt library run on the same inputs and must produce identical bits. C ABI
-//! wrappers: ZoltParity/Physics/ShapeCoreReference.cpp. See ZoltParity/parity.zig for how parity tests work.
+//! the binary state of a shape graph (Shape::SaveWithChildren), CollisionDispatch (collide / cast in world and local
+//! space, the reversed functions) and the TransformedShape queries that go through it (CollideShape, CastShape,
+//! GetTrianglesStart, GetSupportingFace, CollectTransformedShapes, CollidePoint through Shape::sCollidePointUsingRayCast)
+//! and the contents of the CollisionDispatch / ShapeFunctions tables. Zolt and the C++ Jolt library run on the same
+//! inputs and must produce identical bits. C ABI wrappers: ZoltParity/Physics/ShapeCoreReference.cpp. See
+//! ZoltParity/parity.zig for how parity tests work.
+//!
+//! The test shape and the collide / cast functions registered for it (User1 / User2, with reversed entries) are in
+//! ShapeCoreUserTypes.zig, the `zolt_user_types` module of the parity build; the C++ reference registers the same
+//! functions. They record what they receive, so the transforms, shape casts and sub shape IDs computed by the entry
+//! points are compared, not only the results.
 //!
 //! The dispatch table test registers, on the C++ side, the classes of Jolt's RegisterTypes order whose Zolt port
-//! registers something (a stub registers nothing), so it compares Jolt's final table restricted to the ported classes
-//! and covers more of the table with every shape that is ported.
+//! registers something (a stub registers nothing) and then the parity user registrations, so it compares Jolt's final
+//! table restricted to the ported classes and covers more of the table with every shape that is ported.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -22,7 +30,6 @@ const AABox = zolt.AABox;
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
 const AnyHitCollisionCollector = zolt.AnyHitCollisionCollector;
 const Body = zolt.Body;
-const BodyID = zolt.BodyID;
 const CastRayCollector = zolt.CastRayCollector;
 const CastShapeCollector = zolt.CastShapeCollector;
 const ClosestHitCollisionCollector = zolt.ClosestHitCollisionCollector;
@@ -30,7 +37,7 @@ const ClosestHitPerBodyCollisionCollector = zolt.ClosestHitPerBodyCollisionColle
 const CollidePointCollector = zolt.CollidePointCollector;
 const CollideShapeCollector = zolt.CollideShapeCollector;
 const CollideShapeResult = zolt.CollideShapeResult;
-const CollideSoftBodyVertexIterator = zolt.CollideSoftBodyVertexIterator;
+const CollideShapeSettings = zolt.CollideShapeSettings;
 const CollisionDispatch = zolt.CollisionDispatch;
 const Color = zolt.Color;
 const Core = zolt.Core;
@@ -38,34 +45,26 @@ const DMat44 = zolt.DMat44;
 const Float3 = zolt.Float3;
 const GetTrianglesContextMultiVertexList = zolt.GetTrianglesContextMultiVertexList;
 const GetTrianglesContextVertexList = zolt.GetTrianglesContextVertexList;
-const MassProperties = zolt.MassProperties;
 const Mat44 = zolt.Mat44;
 const PhysicsMaterial = zolt.PhysicsMaterial;
-const PhysicsMaterialList = zolt.PhysicsMaterialList;
 const PhysicsMaterialSimple = zolt.PhysicsMaterialSimple;
-const Plane = zolt.Plane;
 const Quat = zolt.Quat;
-const RayCast = zolt.RayCast;
 const RayCastResult = zolt.RayCastResult;
-const RayCastSettings = zolt.RayCastSettings;
 const Real = zolt.Real;
 const Ref = zolt.Ref;
 const RefConst = zolt.RefConst;
 const RegisterTypes = zolt.RegisterTypes;
 const RMat44 = zolt.RMat44;
-const RRayCast = zolt.RRayCast;
 const RShapeCast = zolt.RShapeCast;
 const RVec3 = zolt.RVec3;
 const ScaleHelpers = zolt.ScaleHelpers;
 const Shape = zolt.Shape;
 const ShapeCast = zolt.ShapeCast;
 const ShapeCastResult = zolt.ShapeCastResult;
+const ShapeCastSettings = zolt.ShapeCastSettings;
 const ShapeFilter = zolt.ShapeFilter;
-const ShapeList = zolt.ShapeList;
 const ShapeSubType = zolt.ShapeSubType;
-const StaticArray = zolt.StaticArray;
 const StreamOutWrapper = zolt.StreamOutWrapper;
-const SubShapeID = zolt.SubShapeID;
 const SubShapeIDCreator = zolt.SubShapeIDCreator;
 const TransformedShape = zolt.TransformedShape;
 const TransformedShapeCollector = zolt.TransformedShapeCollector;
@@ -87,6 +86,7 @@ const jolt = struct {
     extern fn jolt_transformed_shape(half_extent: *const P, center_of_mass: *const P, uniform_scale: c_int, position: *const R3, rotation: *const [4]f32, scale: *const P, sub_shape_id: u32, sub_shape_id_bits: u32, world_columns: *const [12]f32, world_translation: *const R3, shape_transform: *const [16]f32, ray_origin: *const R3, ray_direction: *const P, point: *const R3, out_matrix_columns: *[36]f32, out_matrix_translations: *[9]Real, out_ts: *[5]TS, out_vectors: *[19]f32) void;
     extern fn jolt_save_with_children(num_shapes: c_int, half_extents: [*]const f32, user_data: [*]const u64, children: [*]const c_int, materials: [*]const c_int, num_materials: c_int, material_colors: [*]const u32, roots: [*]const c_int, num_roots: c_int, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_collector(kind: c_int, result_type: c_int, num_hits: c_int, bodies: [*]const u32, fractions: [*]const f32, depths: [*]const f32, out_early_out: [*]f32, out_hits: [*]Hit) c_int;
+    extern fn jolt_dispatch_queries(input: *const DispatchInput, output: *DispatchOutput) void;
     extern fn jolt_dispatch_tables(mask: u32, out_collide: *[num_sub_shape_types * num_sub_shape_types]c_int, out_cast: *[num_sub_shape_types * num_sub_shape_types]c_int, out_construct: *[num_sub_shape_types]c_int, out_color: *[num_sub_shape_types]u32) void;
 };
 
@@ -118,6 +118,74 @@ const TS = extern struct {
             .sub_shape_id_bits = ts.sub_shape_id_creator.getNumBitsWritten(),
         };
     }
+};
+
+/// Inputs of the dispatch / TransformedShape query test, must match DispatchInput in ShapeCoreReference.cpp
+const DispatchInput = extern struct {
+    /// Shape A and B: half extent, center of mass, sub type (0: User1, 1: User2)
+    half_extents: [2]P,
+    centers_of_mass: [2]P,
+    sub_types: [2]u32,
+    /// Penetration depths (collide) / fractions (cast) of the 2 hits that the registered functions add
+    hit_values: [2]f32,
+    /// CollisionDispatch: scales and center of mass transforms of A and B (cast: A starts at transforms[0]), sub shape ID
+    /// creators (ID, bits), cast direction
+    scales: [2]P,
+    transforms: [2][16]f32,
+    creators: [2][2]u32,
+    direction: P,
+    /// TransformedShape of B (body 7, sub shape ID creator creators[1])
+    position: R3,
+    rotation: [4]f32,
+    ts_scale: P,
+    /// RMat44 of A for TransformedShape::CollideShape, start of the RShapeCast of A for TransformedShape::CastShape
+    query_columns: [12]f32,
+    query_translation: R3,
+    base_offset: R3,
+    /// World space box of CollectTransformedShapes / GetTrianglesStart
+    box: [6]f32,
+    /// GetSupportingFace: the sub shape ID pushed on the creator of the TransformedShape (value, bits), the direction
+    face_id: [2]u32,
+    face_direction: P,
+    /// CollidePoint through Shape::sCollidePointUsingRayCast: world space point, number of hits of the ray
+    point: R3,
+    num_ray_hits: u32,
+};
+
+/// A collide / cast hit of a ClosestHitCollisionCollector, must match HitOut in ShapeCoreReference.cpp
+const HitOut = extern struct {
+    had_hit: u32,
+    contact1: P,
+    contact2: P,
+    axis: P,
+    depth: f32,
+    fraction: f32,
+    back_face: u32,
+    ids: [2]u32,
+    body_id: u32,
+    face_counts: [2]u32,
+    faces: [2][3]P,
+    early_out: f32,
+};
+
+/// Results of the dispatch / TransformedShape query test, must match DispatchOutput in ShapeCoreReference.cpp
+const DispatchOutput = extern struct {
+    /// 0: CollisionDispatch::sCollideShapeVsShape(A, B), 1: TransformedShape(B)::CollideShape(A)
+    collide: [2]CollideRecord,
+    collide_hits: [2]HitOut,
+    /// 0: sCastShapeVsShapeWorldSpace(A, B), 1: sCastShapeVsShapeLocalSpace(A, B), 2: TransformedShape(B)::CastShape(A)
+    cast: [3]CastRecord,
+    cast_hits: [3]HitOut,
+    /// GetTrianglesStart, GetSupportingFace, CollectTransformedShapes and the ray of sCollidePointUsingRayCast
+    queries: QueryRecord,
+    face_count: u32,
+    face: [3]P,
+    collect_count: u32,
+    /// CollidePoint: local point, ray, number of hits, sub shape ID and body ID of the first hit
+    point: P,
+    ray: [2]P,
+    point_hits: u32,
+    point_ids: [2]u32,
 };
 
 /// A stored collector hit in the format of the C ABI, must match Hit in ShapeCoreReference.cpp
@@ -270,139 +338,13 @@ const Gen = struct {
     }
 };
 
-/// A shape that derives from Shape directly (User1), must match ParityShape in ShapeCoreReference.cpp
-const ParityShape = struct {
-    pub const shape_sub_type: ShapeSubType = .user1;
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .saveSubShapeState, .getStats, .getVolume, .makeScaleValid };
-
-    /// What TransformedShape passed to the shape (const queries: the state lives behind a pointer, Rule M)
-    const Record = struct {
-        last_ray: RayCast = .init(Vec3.zero(), Vec3.zero()),
-        last_point: Vec3 = Vec3.zero(),
-    };
-
-    base: Shape,
-    half_extent: Vec3,
-    center_of_mass: Vec3,
-    uniform_scale: bool,
-    material: RefConst(PhysicsMaterial) = .empty,
-    children: std.ArrayList(RefConst(Shape)) = .empty,
-    record: *Record,
-
-    fn init(allocator: Allocator, half_extent: Vec3, center_of_mass: Vec3, uniform_scale: bool, record: *Record) ParityShape {
-        return .{ .base = .init(Shape.vtableFor(ParityShape), allocator, .user1, .user1), .half_extent = half_extent, .center_of_mass = center_of_mass, .uniform_scale = uniform_scale, .record = record };
-    }
-
-    pub fn destruct(self: *ParityShape) void {
-        self.material.deinit();
-        for (self.children.items) |*c| c.deinit();
-        self.children.deinit(self.base.allocator);
-    }
-
-    fn asShape(self: *const ParityShape) *const Shape {
-        return &self.base;
-    }
-
-    pub fn getCenterOfMass(self: *const ParityShape) Vec3 {
-        return self.center_of_mass;
-    }
-
-    pub fn getLocalBounds(self: *const ParityShape) AABox {
-        return .init(self.half_extent.negate(), self.half_extent);
-    }
-
-    pub fn getSubShapeIDBitsRecursive(self: *const ParityShape) u32 {
-        _ = self;
-        return 0;
-    }
-
-    pub fn getInnerRadius(self: *const ParityShape) f32 {
-        return self.half_extent.reduceMin();
-    }
-
-    pub fn getMassProperties(self: *const ParityShape) MassProperties {
-        _ = self;
-        return .{};
-    }
-
-    pub fn getMaterial(self: *const ParityShape, sub_shape_id: SubShapeID) *const PhysicsMaterial {
-        _ = sub_shape_id;
-        return self.material.get() orelse PhysicsMaterial.default;
-    }
-
-    pub fn getSurfaceNormal(self: *const ParityShape, sub_shape_id: SubShapeID, local_surface_position: Vec3) Vec3 {
-        _ = .{ self, sub_shape_id };
-        return local_surface_position.normalizedOr(Vec3.axisY());
-    }
-
-    pub fn getSubmergedVolume(self: *const ParityShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
-        return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
-    }
-
-    pub fn castRay(self: *const ParityShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
-        self.record.last_ray = ray;
-        hit.fraction = 0.5;
-        hit.sub_shape_id2 = sub_shape_id_creator.getID();
-        return true;
-    }
-
-    pub fn castRayCollector(self: *const ParityShape, ray: RayCast, ray_cast_settings: *const RayCastSettings, sub_shape_id_creator: SubShapeIDCreator, collector: *CastRayCollector, shape_filter: *const ShapeFilter) void {
-        _ = .{ ray_cast_settings, sub_shape_id_creator, collector, shape_filter };
-        self.record.last_ray = ray;
-    }
-
-    pub fn collidePoint(self: *const ParityShape, point: Vec3, sub_shape_id_creator: SubShapeIDCreator, collector: *CollidePointCollector, shape_filter: *const ShapeFilter) void {
-        _ = .{ sub_shape_id_creator, collector, shape_filter };
-        self.record.last_point = point;
-    }
-
-    pub fn collideSoftBodyVertices(self: *const ParityShape, center_of_mass_transform: Mat44, scale: Vec3, vertices: *const CollideSoftBodyVertexIterator, num_vertices: u32, colliding_shape_index: i32) void {
-        _ = .{ self, center_of_mass_transform, scale, vertices, num_vertices, colliding_shape_index };
-    }
-
-    pub fn getTrianglesStart(self: *const ParityShape, context: *Shape.GetTrianglesContext, box: AABox, position_com: Vec3, rotation: Quat, scale: Vec3) void {
-        _ = .{ self, context, box, position_com, rotation, scale };
-    }
-
-    pub fn getTrianglesNext(self: *const ParityShape, context: *Shape.GetTrianglesContext, max_triangles_requested: u32, out_triangle_vertices: []Float3, out_materials: ?[]*const PhysicsMaterial) u32 {
-        _ = .{ self, context, max_triangles_requested, out_triangle_vertices, out_materials };
-        return 0;
-    }
-
-    pub fn saveBinaryState(self: *const ParityShape, stream: zolt.StreamOut) void {
-        Shape.impl.saveBinaryState(&self.base, stream);
-        stream.write(self.half_extent);
-        stream.write(self.center_of_mass);
-    }
-
-    pub fn saveMaterialState(self: *const ParityShape, allocator: Allocator, out_materials: *PhysicsMaterialList) Allocator.Error!void {
-        for (out_materials.items) |*m| m.deinit();
-        out_materials.clearRetainingCapacity();
-        try out_materials.ensureUnusedCapacity(allocator, 1);
-        out_materials.appendAssumeCapacity(self.material.clone());
-    }
-
-    pub fn saveSubShapeState(self: *const ParityShape, allocator: Allocator, out_sub_shapes: *ShapeList) Allocator.Error!void {
-        try out_sub_shapes.ensureUnusedCapacity(allocator, self.children.items.len);
-        for (self.children.items) |c| out_sub_shapes.appendAssumeCapacity(c.clone());
-    }
-
-    pub fn getStats(self: *const ParityShape) Shape.Stats {
-        _ = self;
-        return .init(@sizeOf(ParityShape), 0);
-    }
-
-    pub fn getVolume(self: *const ParityShape) f32 {
-        _ = self;
-        return 1.0;
-    }
-
-    pub fn makeScaleValid(self: *const ParityShape, scale: Vec3) Vec3 {
-        const s = Shape.impl.makeScaleValid(self.asShape(), scale);
-        return if (self.uniform_scale) ScaleHelpers.makeUniformScale(s) else s;
-    }
-};
+/// The parity test shape (User1 / User2) and its registered collide / cast functions (the zolt_user_types module of the
+/// parity build, see build.zig)
+const parity_user_types = @import("parity_user_types");
+const ParityShape = parity_user_types.ParityShape;
+const CollideRecord = parity_user_types.CollideRecord;
+const CastRecord = parity_user_types.CastRecord;
+const QueryRecord = parity_user_types.QueryRecord;
 
 test "ShapeCore parity: ScaleHelpers" {
     var gen: Gen = .{};
@@ -543,7 +485,7 @@ test "ShapeCore parity: ShapeCast / RShapeCast" {
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "ShapeCast" };
     var r_checker: Checker = .{ .name = "RShapeCast" };
-    var record: ParityShape.Record = .{};
+    var record: parity_user_types.Record = .{};
     for (0..iterations / 4) |_| {
         const half_extent = gen.plainVec(0.1, 3);
         const center_of_mass = gen.vec(-2, 2);
@@ -644,7 +586,7 @@ test "ShapeCore parity: TransformedShape and the default implementations of Shap
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "TransformedShape" };
-    var record: ParityShape.Record = .{};
+    var record: parity_user_types.Record = .{};
     for (0..iterations / 4) |_| {
         const half_extent = gen.plainVec(0.1, 3);
         const center_of_mass = gen.vec(-2, 2);
@@ -724,11 +666,209 @@ test "ShapeCore parity: TransformedShape and the default implementations of Shap
     try checker.finish();
 }
 
+fn hitOut(had_hit: bool, r: *const CollideShapeResult, fraction: f32, back_face: bool, early_out: f32) HitOut {
+    var out = std.mem.zeroes(HitOut);
+    out.early_out = early_out;
+    if (!had_hit) return out;
+    out.had_hit = 1;
+    out.contact1 = arr3(r.contact_point_on1);
+    out.contact2 = arr3(r.contact_point_on2);
+    out.axis = arr3(r.penetration_axis);
+    out.depth = r.penetration_depth;
+    out.fraction = fraction;
+    out.back_face = @intFromBool(back_face);
+    out.ids = .{ r.sub_shape_id1.getValue(), r.sub_shape_id2.getValue() };
+    out.body_id = r.body_id2.getIndexAndSequenceNumber();
+    out.face_counts = .{ r.shape1_face.len, r.shape2_face.len };
+    for (r.shape1_face.constSlice()[0..@min(r.shape1_face.len, 3)], 0..) |v, i| out.faces[0][i] = arr3(v);
+    for (r.shape2_face.constSlice()[0..@min(r.shape2_face.len, 3)], 0..) |v, i| out.faces[1][i] = arr3(v);
+    return out;
+}
+
+fn collideHitOut(c: *const ClosestHitCollisionCollector(CollideShapeCollector)) HitOut {
+    return hitOut(c.hadHit(), &c.hit, 0.0, false, c.base.getEarlyOutFraction());
+}
+
+fn castHitOut(c: *const ClosestHitCollisionCollector(CastShapeCollector)) HitOut {
+    return hitOut(c.hadHit(), &c.hit.base, c.hit.fraction, c.hit.is_back_face_hit, c.base.getEarlyOutFraction());
+}
+
+/// A rotation for the dispatch test: random, or (half of the time) a rotation of the cube's symmetry group whose matrix
+/// is an exact signed permutation (quaternion components 0 / +-0.5 / +-1). Products with exact zeros make the sign of
+/// zero results depend on the order of the operations (e.g. -(M * d) versus M * (-d)), which bit for bit checks see.
+fn dispatchRotation(gen: *Gen) [4]f32 {
+    if (gen.oneIn(2)) return gen.rotation();
+    if (gen.oneIn(3)) {
+        var q: [4]f32 = .{ 0, 0, 0, 0 };
+        q[gen.index(4)] = if (gen.oneIn(2)) 1.0 else -1.0;
+        return q;
+    }
+    var q: [4]f32 = undefined;
+    for (&q) |*c| c.* = if (gen.oneIn(2)) 0.5 else -0.5;
+    return q;
+}
+
+/// A vector for the dispatch test: random, or (a third of the time) components from {0, -0, +-5}
+fn dispatchVec(gen: *Gen, min: f32, max: f32) P {
+    if (!gen.oneIn(3)) return gen.vec(min, max);
+    const values = [_]f32{ 0.0, -0.0, 5.0, -5.0 };
+    return .{ values[gen.index(4)], values[gen.index(4)], values[gen.index(4)] };
+}
+
+/// A rotation + translation matrix (the transforms that the dispatch functions expect)
+fn rotationTranslation(gen: *Gen) [16]f32 {
+    return arr16(Mat44.rotationTranslation(quat(dispatchRotation(gen)), vec3(dispatchVec(gen, -10, 10))));
+}
+
+/// Run the dispatch / TransformedShape queries of jolt_dispatch_queries in Zolt
+fn dispatchQueries(allocator: Allocator, in: *const DispatchInput) !DispatchOutput {
+    var out = std.mem.zeroes(DispatchOutput);
+    var record: parity_user_types.Record = .{ .hit_values = in.hit_values };
+    const sub_types = [2]ShapeSubType{ if (in.sub_types[0] == 0) .user1 else .user2, if (in.sub_types[1] == 0) .user1 else .user2 };
+    var a = ParityShape.initSubType(allocator, sub_types[0], vec3(in.half_extents[0]), vec3(in.centers_of_mass[0]), false, &record);
+    a.base.setEmbedded();
+    defer a.base.deinit();
+    var b = ParityShape.initSubType(allocator, sub_types[1], vec3(in.half_extents[1]), vec3(in.centers_of_mass[1]), false, &record);
+    b.base.setEmbedded();
+    defer b.base.deinit();
+    const creator0 = SubShapeIDCreator.pushID(.{}, in.creators[0][0], in.creators[0][1]);
+    const creator1 = SubShapeIDCreator.pushID(.{}, in.creators[1][0], in.creators[1][1]);
+    const scale0 = vec3(in.scales[0]);
+    const scale1 = vec3(in.scales[1]);
+    const transform0 = mat44(in.transforms[0]);
+    const transform1 = mat44(in.transforms[1]);
+    const direction = vec3(in.direction);
+    const collide_settings: CollideShapeSettings = .{};
+    const cast_settings: ShapeCastSettings = .{};
+    const filter: ShapeFilter = .{};
+
+    // CollisionDispatch::sCollideShapeVsShape (User1 vs User2 goes through sReversedCollideShape)
+    var collide0 = ClosestHitCollisionCollector(CollideShapeCollector).init();
+    defer collide0.deinit();
+    CollisionDispatch.collideShapeVsShape(a.asShape(), b.asShape(), scale0, scale1, transform0, transform1, creator0, creator1, &collide_settings, &collide0.base, &filter);
+    out.collide[0] = record.collide;
+    out.collide_hits[0] = collideHitOut(&collide0);
+
+    // TransformedShape of B
+    var ts = TransformedShape.init(rvec3(in.position), quat(in.rotation), b.asShape(), .init(7), .{ .sub_shape_id_creator = creator1 });
+    defer ts.deinit();
+    ts.setShapeScale(vec3(in.ts_scale));
+    const query = rmat44(in.query_columns, in.query_translation);
+    const base_offset = rvec3(in.base_offset);
+
+    record.collide = std.mem.zeroes(CollideRecord);
+    var collide1 = ClosestHitCollisionCollector(CollideShapeCollector).init();
+    defer collide1.deinit();
+    ts.collideShape(a.asShape(), scale0, query, &collide_settings, base_offset, &collide1.base, .{});
+    out.collide[1] = record.collide;
+    out.collide_hits[1] = collideHitOut(&collide1);
+
+    // CollisionDispatch::sCastShapeVsShapeWorldSpace / LocalSpace (User1 vs User2 goes through sReversedCastShape)
+    const cast = ShapeCast.init(a.asShape(), scale0, transform0, direction);
+    var cast0 = ClosestHitCollisionCollector(CastShapeCollector).init();
+    defer cast0.deinit();
+    CollisionDispatch.castShapeVsShapeWorldSpace(&cast, &cast_settings, b.asShape(), scale1, &filter, transform1, creator0, creator1, &cast0.base);
+    out.cast[0] = record.cast;
+    out.cast_hits[0] = castHitOut(&cast0);
+
+    record.cast = std.mem.zeroes(CastRecord);
+    var cast1 = ClosestHitCollisionCollector(CastShapeCollector).init();
+    defer cast1.deinit();
+    CollisionDispatch.castShapeVsShapeLocalSpace(&cast, &cast_settings, b.asShape(), scale1, &filter, transform1, creator0, creator1, &cast1.base);
+    out.cast[1] = record.cast;
+    out.cast_hits[1] = castHitOut(&cast1);
+
+    record.cast = std.mem.zeroes(CastRecord);
+    const r_cast = RShapeCast.init(a.asShape(), scale0, query, direction);
+    var cast2 = ClosestHitCollisionCollector(CastShapeCollector).init();
+    defer cast2.deinit();
+    ts.castShape(&r_cast, &cast_settings, base_offset, &cast2.base, .{});
+    out.cast[2] = record.cast;
+    out.cast_hits[2] = castHitOut(&cast2);
+
+    // TransformedShape::GetTrianglesStart, GetSupportingFace, CollectTransformedShapes
+    const box: AABox = .init(vec3(in.box[0..3].*), vec3(in.box[3..6].*));
+    var context: Shape.GetTrianglesContext = .{};
+    ts.getTrianglesStart(&context, box, base_offset);
+    var face: Shape.SupportingFace = .empty;
+    ts.getSupportingFace(creator1.pushID(in.face_id[0], in.face_id[1]).getID(), vec3(in.face_direction), base_offset, &face);
+    out.face_count = face.len;
+    for (face.constSlice()[0..@min(face.len, 3)], 0..) |v, i| out.face[i] = arr3(v);
+    var collect_collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+    defer collect_collector.deinit();
+    ts.collectTransformedShapes(box, &collect_collector.base, .{});
+    try collect_collector.checkError();
+    out.collect_count = @intCast(collect_collector.hits.items.len);
+
+    // TransformedShape::CollidePoint through Shape::sCollidePointUsingRayCast
+    record.point_using_ray_cast = true;
+    record.num_ray_hits = in.num_ray_hits;
+    var point_collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer point_collector.deinit();
+    ts.collidePoint(rvec3(in.point), &point_collector.base, .{});
+    try point_collector.checkError();
+    out.point = arr3(record.last_point);
+    out.ray = .{ arr3(record.last_ray.origin), arr3(record.last_ray.direction) };
+    out.point_hits = @intCast(point_collector.hits.items.len);
+    if (point_collector.hits.items.len > 0) {
+        const hit = point_collector.hits.items[0];
+        out.point_ids = .{ hit.sub_shape_id2.getValue(), hit.body_id.getIndexAndSequenceNumber() };
+    }
+    out.queries = record.queries;
+    return out;
+}
+
+test "ShapeCore parity: CollisionDispatch (reversed functions) and the TransformedShape queries through registered functions" {
+    const allocator = std.testing.allocator;
+    var gen: Gen = .{};
+    var checker: Checker = .{ .name = "CollisionDispatch / TransformedShape queries" };
+    for (0..iterations / 10) |_| {
+        var in = std.mem.zeroes(DispatchInput);
+        for (0..2) |i| {
+            in.half_extents[i] = gen.plainVec(0.1, 3);
+            in.centers_of_mass[i] = gen.vec(-2, 2);
+            in.sub_types[i] = @intCast(gen.index(2));
+            in.scales[i] = gen.scale();
+            in.transforms[i] = rotationTranslation(&gen);
+            const bits: u32 = @intCast(1 + gen.index(8));
+            in.creators[i] = .{ gen.next() & ((@as(u32, 1) << @intCast(bits)) - 1), bits };
+        }
+        // Depths / fractions: ties and zeros (penetrating casts) included
+        for (&in.hit_values) |*v| v.* = if (gen.oneIn(4)) 0.0 else if (gen.oneIn(3)) @as(f32, @floatFromInt(gen.index(4))) / 4.0 else gen.plain(0, 1);
+        in.direction = dispatchVec(&gen, -10, 10);
+        in.position = gen.realVec(-10, 10);
+        in.rotation = dispatchRotation(&gen);
+        in.ts_scale = gen.scale();
+        const query = rotationTranslation(&gen);
+        @memcpy(&in.query_columns, query[0..12]);
+        in.query_translation = gen.realVec(-10, 10);
+        in.base_offset = if (gen.oneIn(4)) .{ 0, 0, 0 } else if (gen.oneIn(3)) in.position else gen.realVec(-10, 10);
+        const center = gen.vec(-20, 20);
+        const extent = gen.plainVec(0, 10);
+        in.box = .{ center[0] - extent[0], center[1] - extent[1], center[2] - extent[2], center[0] + extent[0], center[1] + extent[1], center[2] + extent[2] };
+        const face_bits: u32 = @intCast(gen.index(4));
+        in.face_id = .{ gen.next() & ((@as(u32, 1) << @intCast(face_bits)) - 1), face_bits };
+        in.face_direction = dispatchVec(&gen, -1, 1);
+        // The point is close to the shape (inside its bounds about half of the time)
+        const local_point = vec3(gen.vec(-3, 3));
+        var point_ts = TransformedShape.init(rvec3(in.position), quat(in.rotation), null, .invalid, .{});
+        point_ts.setShapeScale(vec3(in.ts_scale));
+        in.point = arrR3(point_ts.getCenterOfMassTransform().mulVec3(vec3(in.ts_scale).mul(local_point)));
+        in.num_ray_hits = @intCast(gen.index(4));
+
+        var jolt_out: DispatchOutput = undefined;
+        jolt.jolt_dispatch_queries(&in, &jolt_out);
+        const zolt_out = try dispatchQueries(allocator, &in);
+        checker.check(.{in}, zolt_out, jolt_out);
+    }
+    try checker.finish();
+}
+
 test "ShapeCore parity: SaveWithChildren of a shape graph" {
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "SaveWithChildren" };
-    var record: ParityShape.Record = .{};
+    var record: parity_user_types.Record = .{};
     var jolt_bytes: [8192]u8 = undefined;
     var zolt_bytes: [8192]u8 = undefined;
     for (0..iterations / 50) |_| {
@@ -976,7 +1116,9 @@ test "ShapeCore parity: CollisionDispatch and ShapeFunctions tables (Jolt's Regi
     inline for (RegisterTypes.registration_order, 0..) |T, k| {
         if (registersSomething(T)) mask |= @as(u32, 1) << k;
     }
-    try std.testing.expectEqual(@as(usize, 0), RegisterTypes.user_registrations.len);
+    // The parity build registers the functions of the parity shapes (ShapeCoreUserTypes.zig), jolt_dispatch_tables too
+    try std.testing.expectEqual(@as(usize, 1), RegisterTypes.user_registrations.len);
+    try std.testing.expect(RegisterTypes.user_registrations[0] == parity_user_types.ParityShapeRegistration);
 
     var jolt_collide: [num_sub_shape_types * num_sub_shape_types]c_int = undefined;
     var jolt_cast: [num_sub_shape_types * num_sub_shape_types]c_int = undefined;

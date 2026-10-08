@@ -1,9 +1,11 @@
 // Reference implementation for the shape core parity tests (`zig build parity`): thin C ABI wrappers around the C++ Jolt
 // library for ScaleHelpers, GetTrianglesContextVertexList / MultiVertexList and their vertex list helpers, ShapeCast /
 // RShapeCast / ShapeCastResult, TransformedShape and the default implementations of Shape (with a test shape that
-// derives from Shape directly, like ShapeCoreParity.zig), the collision collectors on synthetic hit sequences, the
-// binary state of a shape graph (Shape::SaveWithChildren) and the contents of the CollisionDispatch / ShapeFunctions
-// tables. ZoltParity/Physics/ShapeCoreParity.zig calls these and checks that Zolt produces the same bits.
+// derives from Shape directly, like ShapeCoreUserTypes.zig), the collision collectors on synthetic hit sequences, the
+// binary state of a shape graph (Shape::SaveWithChildren), CollisionDispatch and the TransformedShape queries through
+// collide / cast functions registered for the test shape (like the parity build's zolt_user_types module) and the
+// contents of the CollisionDispatch / ShapeFunctions tables. ZoltParity/Physics/ShapeCoreParity.zig calls these and
+// checks that Zolt produces the same bits.
 //
 // Conventions: vectors are passed as float arrays (3 or 4 components), quaternions as 4 floats (x, y, z, w), Mat44 as
 // 16 floats in column major order, RVec3 as 3 Reals (double with JPH_DOUBLE_PRECISION), RMat44 as 3 columns of 4 floats
@@ -51,6 +53,8 @@
 
 using namespace JPH;
 
+static void RegisterParityShapes();
+
 static void EnsureFactory()
 {
 	RegisterDefaultAllocator();
@@ -58,6 +62,15 @@ static void EnsureFactory()
 	{
 		Factory::sInstance = new Factory();
 		RegisterTypes();
+	}
+
+	// The user registrations of the parity build, after RegisterTypes (which another reference file may have run: it
+	// does not touch the User1 / User2 pairs, so this stays valid if it runs again)
+	static bool sParityShapesRegistered = false;
+	if (!sParityShapesRegistered)
+	{
+		RegisterParityShapes();
+		sParityShapesRegistered = true;
 	}
 }
 
@@ -90,13 +103,71 @@ static uint32 CopyBytes(const std::string &inString, uint8 *outBytes, uint32 inC
 	return size;
 }
 
-// A shape that derives from Shape directly (User1), must match ParityShape in ShapeCoreParity.zig: a box around its
-// center of mass, an optional uniform scale requirement, children and a material for the binary state of a graph, and
-// it records the local ray / point that TransformedShape passes to it
+static void StoreCreator(const SubShapeIDCreator &inCreator, uint32 *outID)	{ outID[0] = inCreator.GetID().GetValue(); outID[1] = inCreator.GetNumBitsWritten(); }
+
+// What a registered collide function received, must match CollideRecord in ShapeCoreUserTypes.zig
+struct CollideRecord
+{
+	uint32					mCalls;
+	uint32					mSubTypes[2];
+	float					mScales[2][3];
+	float					mTransforms[2][16];
+	uint32					mIDs[2][2];
+	float					mEarlyOut[2];
+};
+
+// What a registered cast function received, must match CastRecord in ShapeCoreUserTypes.zig
+struct CastRecord
+{
+	uint32					mCalls;
+	uint32					mSubTypes[2];
+	float					mStart[16];
+	float					mDirection[3];
+	float					mCastScale[3];
+	float					mBounds[6];
+	float					mScale[3];
+	float					mTransform2[16];
+	uint32					mIDs[2][2];
+	float					mEarlyOut[2];
+};
+
+// What the overrides of ParityShape received from the TransformedShape queries, must match QueryRecord in
+// ShapeCoreUserTypes.zig
+struct QueryRecord
+{
+	float					mTrianglesBox[6];
+	float					mTrianglesPosition[3];
+	float					mTrianglesRotation[4];
+	float					mTrianglesScale[3];
+	uint32					mFaceID;
+	float					mFaceDirection[3];
+	float					mFaceScale[3];
+	float					mFaceTransform[16];
+	float					mCollectBox[6];
+	uint32					mRayCalls;
+	uint32					mRayBackFaceModes[2];
+};
+
+// The state of a parity test that the shapes point to, like Record in ShapeCoreUserTypes.zig
+struct Record
+{
+	RayCast					mLastRay { Vec3::sZero(), Vec3::sZero() };
+	Vec3					mLastPoint = Vec3::sZero();
+	float					mHitValues[2] = { 0.0f, 0.0f };
+	bool					mPointUsingRayCast = false;
+	uint32					mNumRayHits = 0;
+	CollideRecord			mCollide { };
+	CastRecord				mCast { };
+	QueryRecord				mQueries { };
+};
+
+// A shape that derives from Shape directly (User1 or User2), must match ParityShape in ShapeCoreUserTypes.zig: a box
+// around its center of mass, an optional uniform scale requirement, children and a material for the binary state of a
+// graph, and it records what the queries pass to it in its Record
 class ParityShape final : public Shape
 {
 public:
-							ParityShape(Vec3Arg inHalfExtent, Vec3Arg inCenterOfMass, bool inUniformScale) : Shape(EShapeType::User1, EShapeSubType::User1), mHalfExtent(inHalfExtent), mCenterOfMass(inCenterOfMass), mUniformScale(inUniformScale) { }
+							ParityShape(Vec3Arg inHalfExtent, Vec3Arg inCenterOfMass, bool inUniformScale, Record *inRecord = nullptr, EShapeSubType inSubType = EShapeSubType::User1) : Shape(EShapeType::User1, inSubType), mHalfExtent(inHalfExtent), mCenterOfMass(inCenterOfMass), mUniformScale(inUniformScale), mRecord(inRecord != nullptr? inRecord : &mOwnRecord) { }
 
 	virtual Vec3			GetCenterOfMass() const override									{ return mCenterOfMass; }
 	virtual AABox			GetLocalBounds() const override										{ return AABox(-mHalfExtent, mHalfExtent); }
@@ -106,15 +177,62 @@ public:
 	virtual const PhysicsMaterial *GetMaterial(const SubShapeID &inSubShapeID) const override	{ return mMaterial != nullptr? mMaterial.GetPtr() : PhysicsMaterial::sDefault.GetPtr(); }
 	virtual Vec3			GetSurfaceNormal(const SubShapeID &inSubShapeID, Vec3Arg inLocalSurfacePosition) const override { return inLocalSurfacePosition.NormalizedOr(Vec3::sAxisY()); }
 	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy) const override { outTotalVolume = outSubmergedVolume = 0.0f; outCenterOfBuoyancy = Vec3::sZero(); }
-	virtual bool			CastRay(const RayCast &inRay, const SubShapeIDCreator &inSubShapeIDCreator, RayCastResult &ioHit) const override { mLastRay = inRay; ioHit.mFraction = 0.5f; ioHit.mSubShapeID2 = inSubShapeIDCreator.GetID(); return true; }
-	virtual void			CastRay(const RayCast &inRay, const RayCastSettings &inRayCastSettings, const SubShapeIDCreator &inSubShapeIDCreator, CastRayCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override { mLastRay = inRay; }
-	virtual void			CollidePoint(Vec3Arg inPoint, const SubShapeIDCreator &inSubShapeIDCreator, CollidePointCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override { mLastPoint = inPoint; }
+	virtual bool			CastRay(const RayCast &inRay, const SubShapeIDCreator &inSubShapeIDCreator, RayCastResult &ioHit) const override { mRecord->mLastRay = inRay; ioHit.mFraction = 0.5f; ioHit.mSubShapeID2 = inSubShapeIDCreator.GetID(); return true; }
 	virtual void			CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const CollideSoftBodyVertexIterator &inVertices, uint inNumVertices, int inCollidingShapeIndex) const override { }
-	virtual void			GetTrianglesStart(GetTrianglesContext &ioContext, const AABox &inBox, Vec3Arg inPositionCOM, QuatArg inRotation, Vec3Arg inScale) const override { }
 	virtual int				GetTrianglesNext(GetTrianglesContext &ioContext, int inMaxTrianglesRequested, Float3 *outTriangleVertices, const PhysicsMaterial **outMaterials = nullptr) const override { return 0; }
 	virtual Stats			GetStats() const override											{ return Stats(sizeof(*this), 0); }
 	virtual float			GetVolume() const override											{ return 1.0f; }
 	virtual Vec3			MakeScaleValid(Vec3Arg inScale) const override						{ Vec3 scale = Shape::MakeScaleValid(inScale); return mUniformScale? ScaleHelpers::MakeUniformScale(scale) : scale; }
+
+	virtual void			GetSupportingFace(const SubShapeID &inSubShapeID, Vec3Arg inDirection, Vec3Arg inScale, Mat44Arg inCenterOfMassTransform, SupportingFace &outVertices) const override
+	{
+		QueryRecord &r = mRecord->mQueries;
+		r.mFaceID = inSubShapeID.GetValue();
+		Store3(inDirection, r.mFaceDirection);
+		Store3(inScale, r.mFaceScale);
+		StoreMat44(inCenterOfMassTransform, r.mFaceTransform);
+		outVertices.push_back(inCenterOfMassTransform * (inScale * mHalfExtent));
+		outVertices.push_back(inCenterOfMassTransform * inDirection);
+	}
+
+	virtual void			CastRay(const RayCast &inRay, const RayCastSettings &inRayCastSettings, const SubShapeIDCreator &inSubShapeIDCreator, CastRayCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override
+	{
+		Record &record = *mRecord;
+		record.mLastRay = inRay;
+		++record.mQueries.mRayCalls;
+		record.mQueries.mRayBackFaceModes[0] = inRayCastSettings.mBackFaceModeTriangles == EBackFaceMode::CollideWithBackFaces? 1 : 0;
+		record.mQueries.mRayBackFaceModes[1] = inRayCastSettings.mBackFaceModeConvex == EBackFaceMode::CollideWithBackFaces? 1 : 0;
+		for (uint32 i = 0; i < record.mNumRayHits; ++i)
+		{
+			RayCastResult hit;
+			hit.mBodyID = TransformedShape::sGetBodyID(ioCollector.GetContext());
+			hit.mFraction = 0.25f * float(i);
+			hit.mSubShapeID2 = inSubShapeIDCreator.PushID(i, 2).GetID();
+			ioCollector.AddHit(hit);
+		}
+	}
+
+	virtual void			CollidePoint(Vec3Arg inPoint, const SubShapeIDCreator &inSubShapeIDCreator, CollidePointCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override
+	{
+		mRecord->mLastPoint = inPoint;
+		if (mRecord->mPointUsingRayCast)
+			sCollidePointUsingRayCast(*this, inPoint, inSubShapeIDCreator, ioCollector, inShapeFilter);
+	}
+
+	virtual void			CollectTransformedShapes(const AABox &inBox, Vec3Arg inPositionCOM, QuatArg inRotation, Vec3Arg inScale, const SubShapeIDCreator &inSubShapeIDCreator, TransformedShapeCollector &ioCollector, const ShapeFilter &inShapeFilter) const override
+	{
+		StoreAABox(inBox, mRecord->mQueries.mCollectBox);
+		Shape::CollectTransformedShapes(inBox, inPositionCOM, inRotation, inScale, inSubShapeIDCreator, ioCollector, inShapeFilter);
+	}
+
+	virtual void			GetTrianglesStart(GetTrianglesContext &ioContext, const AABox &inBox, Vec3Arg inPositionCOM, QuatArg inRotation, Vec3Arg inScale) const override
+	{
+		QueryRecord &r = mRecord->mQueries;
+		StoreAABox(inBox, r.mTrianglesBox);
+		Store3(inPositionCOM, r.mTrianglesPosition);
+		StoreQuat(inRotation, r.mTrianglesRotation);
+		Store3(inScale, r.mTrianglesScale);
+	}
 
 	virtual void			SaveBinaryState(StreamOut &inStream) const override
 	{
@@ -131,9 +249,103 @@ public:
 	bool					mUniformScale;
 	RefConst<PhysicsMaterial> mMaterial;
 	Array<RefConst<Shape>>	mChildren;
-	mutable RayCast			mLastRay { Vec3::sZero(), Vec3::sZero() };
-	mutable Vec3			mLastPoint = Vec3::sZero();
+	Record *				mRecord;
+	mutable Record			mOwnRecord;
 };
+
+// 0 for User1, 1 for User2 (the sub types of ParityShape)
+static uint32 sSubTypeIndex(const Shape *inShape)
+{
+	return inShape->GetSubType() == EShapeSubType::User2? 1 : 0;
+}
+
+// Collide function of the parity shapes, must match collideParity in ShapeCoreUserTypes.zig: records its inputs, adds 2
+// hits (when they pass the early out fraction) with contact points, axis and faces computed from the inputs
+static void sCollideParity(const Shape *inShape1, const Shape *inShape2, Vec3Arg inScale1, Vec3Arg inScale2, Mat44Arg inCenterOfMassTransform1, Mat44Arg inCenterOfMassTransform2, const SubShapeIDCreator &inSubShapeIDCreator1, const SubShapeIDCreator &inSubShapeIDCreator2, const CollideShapeSettings &inCollideShapeSettings, CollideShapeCollector &ioCollector, const ShapeFilter &inShapeFilter)
+{
+	const ParityShape *p1 = static_cast<const ParityShape *>(inShape1);
+	const ParityShape *p2 = static_cast<const ParityShape *>(inShape2);
+	Record &record = *p1->mRecord;
+	CollideRecord &r = record.mCollide;
+	++r.mCalls;
+	r.mSubTypes[0] = sSubTypeIndex(inShape1);
+	r.mSubTypes[1] = sSubTypeIndex(inShape2);
+	Store3(inScale1, r.mScales[0]);
+	Store3(inScale2, r.mScales[1]);
+	StoreMat44(inCenterOfMassTransform1, r.mTransforms[0]);
+	StoreMat44(inCenterOfMassTransform2, r.mTransforms[1]);
+	StoreCreator(inSubShapeIDCreator1, r.mIDs[0]);
+	StoreCreator(inSubShapeIDCreator2, r.mIDs[1]);
+
+	for (int i = 0; i < 2; ++i)
+	{
+		float depth = record.mHitValues[i];
+		if (-depth < ioCollector.GetEarlyOutFraction())
+		{
+			Vec3 contact1 = inCenterOfMassTransform1.GetTranslation();
+			Vec3 contact2 = inCenterOfMassTransform2 * (inScale2 * p2->mHalfExtent);
+			CollideShapeResult result(contact1, contact2, contact2 - contact1, depth, inSubShapeIDCreator1.GetID(), inSubShapeIDCreator2.GetID(), TransformedShape::sGetBodyID(ioCollector.GetContext()));
+			result.mShape1Face.push_back(inCenterOfMassTransform1 * (inScale1 * p1->mHalfExtent));
+			result.mShape1Face.push_back(inCenterOfMassTransform1 * (inScale1 * -p1->mHalfExtent));
+			result.mShape2Face.push_back(inCenterOfMassTransform2 * (inScale2 * p2->mCenterOfMass));
+			ioCollector.AddHit(result);
+		}
+		r.mEarlyOut[i] = ioCollector.GetEarlyOutFraction();
+	}
+}
+
+// Cast function of the parity shapes, must match castParity in ShapeCoreUserTypes.zig: records its inputs, adds 2 hits
+// (when they pass the early out fraction) with contact points, axis and faces computed from the inputs
+static void sCastParity(const ShapeCast &inShapeCast, const ShapeCastSettings &inShapeCastSettings, const Shape *inShape, Vec3Arg inScale, const ShapeFilter &inShapeFilter, Mat44Arg inCenterOfMassTransform2, const SubShapeIDCreator &inSubShapeIDCreator1, const SubShapeIDCreator &inSubShapeIDCreator2, CastShapeCollector &ioCollector)
+{
+	const ParityShape *p1 = static_cast<const ParityShape *>(inShapeCast.mShape);
+	const ParityShape *p2 = static_cast<const ParityShape *>(inShape);
+	Record &record = *p1->mRecord;
+	CastRecord &r = record.mCast;
+	++r.mCalls;
+	r.mSubTypes[0] = sSubTypeIndex(inShapeCast.mShape);
+	r.mSubTypes[1] = sSubTypeIndex(inShape);
+	StoreMat44(inShapeCast.mCenterOfMassStart, r.mStart);
+	Store3(inShapeCast.mDirection, r.mDirection);
+	Store3(inShapeCast.mScale, r.mCastScale);
+	StoreAABox(inShapeCast.mShapeWorldBounds, r.mBounds);
+	Store3(inScale, r.mScale);
+	StoreMat44(inCenterOfMassTransform2, r.mTransform2);
+	StoreCreator(inSubShapeIDCreator1, r.mIDs[0]);
+	StoreCreator(inSubShapeIDCreator2, r.mIDs[1]);
+
+	for (int i = 0; i < 2; ++i)
+	{
+		float fraction = record.mHitValues[i];
+		if (fraction < ioCollector.GetEarlyOutFraction())
+		{
+			Vec3 contact1 = inCenterOfMassTransform2 * inShapeCast.GetPointOnRay(fraction);
+			Vec3 contact2 = inCenterOfMassTransform2 * (inShapeCast.mCenterOfMassStart.GetTranslation() + inScale * p2->mHalfExtent);
+			ShapeCastResult result(fraction, contact1, contact2, inCenterOfMassTransform2.Multiply3x3(inShapeCast.mDirection), i == 1, inSubShapeIDCreator1.GetID(), inSubShapeIDCreator2.GetID(), TransformedShape::sGetBodyID(ioCollector.GetContext()));
+			result.mShape1Face.push_back(contact1);
+			result.mShape1Face.push_back(Vec3::sReplicate(-0.0f)); // Its reversed copy -0 - fraction * world direction shows the sign of zero components of the world direction
+			result.mShape2Face.push_back(inCenterOfMassTransform2 * p2->mCenterOfMass);
+			result.mShape2Face.push_back(contact2);
+			ioCollector.AddHit(result);
+		}
+		r.mEarlyOut[i] = ioCollector.GetEarlyOutFraction();
+	}
+}
+
+// Registration of the parity shape functions, must match ParityShapeRegistration in ShapeCoreUserTypes.zig (the user
+// registrations run after RegisterTypes, like Zolt's zolt_user_types registrations)
+static void RegisterParityShapes()
+{
+	for (EShapeSubType s : { EShapeSubType::User1, EShapeSubType::User2 })
+	{
+		CollisionDispatch::sRegisterCollideShape(s, EShapeSubType::User1, sCollideParity);
+		CollisionDispatch::sRegisterCastShape(s, EShapeSubType::User1, sCastParity);
+	}
+	CollisionDispatch::sRegisterCollideShape(EShapeSubType::User2, EShapeSubType::User2, sCollideParity);
+	CollisionDispatch::sRegisterCastShape(EShapeSubType::User2, EShapeSubType::User2, sCastParity);
+	CollisionDispatch::sRegisterCollideShape(EShapeSubType::User1, EShapeSubType::User2, CollisionDispatch::sReversedCollideShape);
+	CollisionDispatch::sRegisterCastShape(EShapeSubType::User1, EShapeSubType::User2, CollisionDispatch::sReversedCastShape);
+}
 
 // TransformedShape in the format of the C ABI, must match TS in ShapeCoreParity.zig
 struct TS
@@ -409,12 +621,12 @@ void jolt_transformed_shape(const float *inHalfExtent, const float *inCenterOfMa
 
 	RayCastResult hit;
 	ts.CastRay(RRayCast(LoadR3(inRayOrigin), Load3(inRayDirection)), hit);
-	Store3(shape.mLastRay.mOrigin, outVectors + 9);
-	Store3(shape.mLastRay.mDirection, outVectors + 12);
+	Store3(shape.mRecord->mLastRay.mOrigin, outVectors + 9);
+	Store3(shape.mRecord->mLastRay.mDirection, outVectors + 12);
 	outVectors[15] = hit.mFraction;
 	AnyHitCollisionCollector<CollidePointCollector> point_collector;
 	ts.CollidePoint(LoadR3(inPoint), point_collector);
-	Store3(shape.mLastPoint, outVectors + 16);
+	Store3(shape.mRecord->mLastPoint, outVectors + 16);
 
 	TransformedShape set1 = ts;
 	set1.SetWorldTransform(LoadR3(inPosition), LoadQuat(inRotation), Load3(inScale));
@@ -432,6 +644,196 @@ void jolt_transformed_shape(const float *inHalfExtent, const float *inCenterOfMa
 	TSCollector collect_collector;
 	ts.CollectTransformedShapes(AABox::sBiggest(), collect_collector);
 	StoreTS(collect_collector.mHits[0], outTS + 4);
+}
+
+// Inputs of the dispatch / TransformedShape query test, must match DispatchInput in ShapeCoreParity.zig
+struct DispatchInput
+{
+	float					mHalfExtents[2][3];
+	float					mCentersOfMass[2][3];
+	uint32					mSubTypes[2];
+	float					mHitValues[2];
+	float					mScales[2][3];
+	float					mTransforms[2][16];
+	uint32					mCreators[2][2];
+	float					mDirection[3];
+	Real					mPosition[3];
+	float					mRotation[4];
+	float					mTSScale[3];
+	float					mQueryColumns[12];
+	Real					mQueryTranslation[3];
+	Real					mBaseOffset[3];
+	float					mBox[6];
+	uint32					mFaceID[2];
+	float					mFaceDirection[3];
+	Real					mPoint[3];
+	uint32					mNumRayHits;
+};
+
+// A collide / cast hit of a ClosestHitCollisionCollector, must match HitOut in ShapeCoreParity.zig
+struct HitOut
+{
+	uint32					mHadHit;
+	float					mContact1[3];
+	float					mContact2[3];
+	float					mAxis[3];
+	float					mDepth;
+	float					mFraction;
+	uint32					mBackFace;
+	uint32					mIDs[2];
+	uint32					mBodyID;
+	uint32					mFaceCounts[2];
+	float					mFaces[2][3][3];
+	float					mEarlyOut;
+};
+
+// Results of the dispatch / TransformedShape query test, must match DispatchOutput in ShapeCoreParity.zig
+struct DispatchOutput
+{
+	CollideRecord			mCollide[2];
+	HitOut					mCollideHits[2];
+	CastRecord				mCast[3];
+	HitOut					mCastHits[3];
+	QueryRecord				mQueries;
+	uint32					mFaceCount;
+	float					mFace[3][3];
+	uint32					mCollectCount;
+	float					mPoint[3];
+	float					mRay[2][3];
+	uint32					mPointHits;
+	uint32					mPointIDs[2];
+};
+
+static void StoreHit(bool inHadHit, const CollideShapeResult &inResult, float inFraction, bool inBackFace, float inEarlyOut, HitOut &outHit)
+{
+	memset(&outHit, 0, sizeof(outHit));
+	outHit.mEarlyOut = inEarlyOut;
+	if (!inHadHit)
+		return;
+	outHit.mHadHit = 1;
+	Store3(inResult.mContactPointOn1, outHit.mContact1);
+	Store3(inResult.mContactPointOn2, outHit.mContact2);
+	Store3(inResult.mPenetrationAxis, outHit.mAxis);
+	outHit.mDepth = inResult.mPenetrationDepth;
+	outHit.mFraction = inFraction;
+	outHit.mBackFace = inBackFace? 1 : 0;
+	outHit.mIDs[0] = inResult.mSubShapeID1.GetValue();
+	outHit.mIDs[1] = inResult.mSubShapeID2.GetValue();
+	outHit.mBodyID = inResult.mBodyID2.GetIndexAndSequenceNumber();
+	outHit.mFaceCounts[0] = uint32(inResult.mShape1Face.size());
+	outHit.mFaceCounts[1] = uint32(inResult.mShape2Face.size());
+	for (uint i = 0; i < min(uint(inResult.mShape1Face.size()), 3u); ++i)
+		Store3(inResult.mShape1Face[i], outHit.mFaces[0][i]);
+	for (uint i = 0; i < min(uint(inResult.mShape2Face.size()), 3u); ++i)
+		Store3(inResult.mShape2Face[i], outHit.mFaces[1][i]);
+}
+
+static void StoreCollideHit(const ClosestHitCollisionCollector<CollideShapeCollector> &inCollector, HitOut &outHit)
+{
+	StoreHit(inCollector.HadHit(), inCollector.mHit, 0.0f, false, inCollector.GetEarlyOutFraction(), outHit);
+}
+
+static void StoreCastHit(const ClosestHitCollisionCollector<CastShapeCollector> &inCollector, HitOut &outHit)
+{
+	StoreHit(inCollector.HadHit(), inCollector.mHit, inCollector.mHit.mFraction, inCollector.mHit.mIsBackFaceHit, inCollector.GetEarlyOutFraction(), outHit);
+}
+
+// CollisionDispatch and the TransformedShape queries with two ParityShapes A and B (User1 / User2, the registered
+// functions of RegisterParityShapes, User1 vs User2 through the reversed functions), like dispatchQueries in
+// ShapeCoreParity.zig: sCollideShapeVsShape(A, B), TransformedShape(B)::CollideShape(A), sCastShapeVsShapeWorldSpace /
+// LocalSpace(A, B), TransformedShape(B)::CastShape(A), GetTrianglesStart, GetSupportingFace, CollectTransformedShapes
+// and CollidePoint through Shape::sCollidePointUsingRayCast
+void jolt_dispatch_queries(const DispatchInput *inInput, DispatchOutput *outOutput)
+{
+	EnsureFactory();
+	const DispatchInput &in = *inInput;
+	DispatchOutput &out = *outOutput;
+	memset(&out, 0, sizeof(out));
+
+	Record record;
+	record.mHitValues[0] = in.mHitValues[0];
+	record.mHitValues[1] = in.mHitValues[1];
+	ParityShape a(Load3(in.mHalfExtents[0]), Load3(in.mCentersOfMass[0]), false, &record, in.mSubTypes[0] == 0? EShapeSubType::User1 : EShapeSubType::User2);
+	a.SetEmbedded();
+	ParityShape b(Load3(in.mHalfExtents[1]), Load3(in.mCentersOfMass[1]), false, &record, in.mSubTypes[1] == 0? EShapeSubType::User1 : EShapeSubType::User2);
+	b.SetEmbedded();
+	SubShapeIDCreator creator0 = SubShapeIDCreator().PushID(in.mCreators[0][0], in.mCreators[0][1]);
+	SubShapeIDCreator creator1 = SubShapeIDCreator().PushID(in.mCreators[1][0], in.mCreators[1][1]);
+	Vec3 scale0 = Load3(in.mScales[0]);
+	Vec3 scale1 = Load3(in.mScales[1]);
+	Mat44 transform0 = LoadMat44(in.mTransforms[0]);
+	Mat44 transform1 = LoadMat44(in.mTransforms[1]);
+	Vec3 direction = Load3(in.mDirection);
+	CollideShapeSettings collide_settings;
+	ShapeCastSettings cast_settings;
+	ShapeFilter filter;
+
+	// CollisionDispatch::sCollideShapeVsShape (User1 vs User2 goes through sReversedCollideShape)
+	ClosestHitCollisionCollector<CollideShapeCollector> collide0;
+	CollisionDispatch::sCollideShapeVsShape(&a, &b, scale0, scale1, transform0, transform1, creator0, creator1, collide_settings, collide0, filter);
+	out.mCollide[0] = record.mCollide;
+	StoreCollideHit(collide0, out.mCollideHits[0]);
+
+	// TransformedShape of B
+	TransformedShape ts(LoadR3(in.mPosition), LoadQuat(in.mRotation), &b, BodyID(7), creator1);
+	ts.SetShapeScale(Load3(in.mTSScale));
+	RMat44 query = LoadRMat44(in.mQueryColumns, in.mQueryTranslation);
+	RVec3 base_offset = LoadR3(in.mBaseOffset);
+
+	record.mCollide = CollideRecord();
+	ClosestHitCollisionCollector<CollideShapeCollector> collide1;
+	ts.CollideShape(&a, scale0, query, collide_settings, base_offset, collide1);
+	out.mCollide[1] = record.mCollide;
+	StoreCollideHit(collide1, out.mCollideHits[1]);
+
+	// CollisionDispatch::sCastShapeVsShapeWorldSpace / LocalSpace (User1 vs User2 goes through sReversedCastShape)
+	ShapeCast cast(&a, scale0, transform0, direction);
+	ClosestHitCollisionCollector<CastShapeCollector> cast0;
+	CollisionDispatch::sCastShapeVsShapeWorldSpace(cast, cast_settings, &b, scale1, filter, transform1, creator0, creator1, cast0);
+	out.mCast[0] = record.mCast;
+	StoreCastHit(cast0, out.mCastHits[0]);
+
+	record.mCast = CastRecord();
+	ClosestHitCollisionCollector<CastShapeCollector> cast1;
+	CollisionDispatch::sCastShapeVsShapeLocalSpace(cast, cast_settings, &b, scale1, filter, transform1, creator0, creator1, cast1);
+	out.mCast[1] = record.mCast;
+	StoreCastHit(cast1, out.mCastHits[1]);
+
+	record.mCast = CastRecord();
+	RShapeCast r_cast(&a, scale0, query, direction);
+	ClosestHitCollisionCollector<CastShapeCollector> cast2;
+	ts.CastShape(r_cast, cast_settings, base_offset, cast2);
+	out.mCast[2] = record.mCast;
+	StoreCastHit(cast2, out.mCastHits[2]);
+
+	// TransformedShape::GetTrianglesStart, GetSupportingFace, CollectTransformedShapes
+	AABox box(Load3(in.mBox), Load3(in.mBox + 3));
+	Shape::GetTrianglesContext context;
+	ts.GetTrianglesStart(context, box, base_offset);
+	Shape::SupportingFace face;
+	ts.GetSupportingFace(creator1.PushID(in.mFaceID[0], in.mFaceID[1]).GetID(), Load3(in.mFaceDirection), base_offset, face);
+	out.mFaceCount = uint32(face.size());
+	for (uint i = 0; i < min(uint(face.size()), 3u); ++i)
+		Store3(face[i], out.mFace[i]);
+	TSCollector collect;
+	ts.CollectTransformedShapes(box, collect);
+	out.mCollectCount = uint32(collect.mHits.size());
+
+	// TransformedShape::CollidePoint through Shape::sCollidePointUsingRayCast
+	record.mPointUsingRayCast = true;
+	record.mNumRayHits = in.mNumRayHits;
+	AllHitCollisionCollector<CollidePointCollector> point_collector;
+	ts.CollidePoint(LoadR3(in.mPoint), point_collector);
+	Store3(record.mLastPoint, out.mPoint);
+	Store3(record.mLastRay.mOrigin, out.mRay[0]);
+	Store3(record.mLastRay.mDirection, out.mRay[1]);
+	out.mPointHits = uint32(point_collector.mHits.size());
+	if (!point_collector.mHits.empty())
+	{
+		out.mPointIDs[0] = point_collector.mHits[0].mSubShapeID2.GetValue();
+		out.mPointIDs[1] = point_collector.mHits[0].mBodyID.GetIndexAndSequenceNumber();
+	}
+	out.mQueries = record.mQueries;
 }
 
 // Shape::SaveWithChildren of a graph of ParityShapes. inChildren[i] holds the indices of the children of shape i (-1:
@@ -608,6 +1010,9 @@ void jolt_dispatch_tables(uint32 inMask, int *outCollide, int *outCast, int *out
 	for (uint k = 0; k < uint(sizeof(order) / sizeof(order[0])); ++k)
 		if (inMask & (1u << k))
 			order[k]();
+
+	// The user registrations of the parity build (Zolt's RegisterTypes.user_registrations)
+	RegisterParityShapes();
 
 	// Map the functions to names
 	Array<CollisionDispatch::CollideShape> collide_names;

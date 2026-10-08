@@ -3,8 +3,9 @@
 //!
 //! Only used by the inline tests: `zolt.test_shapes` is this file in test builds (`builtin.is_test`), and build.zig
 //! gives the inline tests a `zolt_user_types` module that registers `registrations` and `material_types` of this file
-//! through the D4 user hook (Docs/Zolt/CollisionArchitecture.md), exactly like an application. The library, the unit
-//! tests and the parity tests use the default (empty) user types module.
+//! through the D4 user hook (Docs/Zolt/CollisionArchitecture.md), exactly like an application. The library and the
+//! unit tests use the default (empty) user types module, the parity tests their own
+//! (ZoltParity/Physics/ShapeCoreUserTypes.zig).
 //!
 //! The shapes derive from Shape directly (the concrete Jolt shapes are stubs while the shape core is ported) and
 //! implement the virtual functions in a simple, deterministic way, so that the tests can exercise every Shape

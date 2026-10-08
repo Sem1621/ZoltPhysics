@@ -15,7 +15,10 @@
 //!   possible, and the owner calls `try collector.checkError()` after the query. In safe builds `reset()` /
 //!   `deinit()` assert that a recorded error was observed through `checkError()`, so a forgotten check fails loudly
 //!   in tests. For ClosestHitPerBody, `had_hit` stays false when storing the first hit of a body fails, so `onBodyEnd`
-//!   does not restore the early out fraction and the query stops.
+//!   does not restore the early out fraction and the query stops. Once an error is recorded, `addHit` of AllHit and
+//!   ClosestHitPerBody ignores further hits until `reset`: queries can add several hits without checking
+//!   ShouldEarlyOut in between (e.g. InternalEdgeRemovingCollector::Flush), and ClosestHitPerBody would otherwise
+//!   treat the next hit of the same body as its first one and raise the forced early out fraction again.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -120,6 +123,10 @@ pub fn AllHitCollisionCollector(comptime CollectorType: type) type {
 
         // See: CollectorType::AddHit
         pub fn addHit(self: *Self, result: *const ResultType) void {
+            // Hits after an allocation failure are dropped, the query is stopping (D6)
+            if (self.alloc_error.err != null)
+                return;
+
             var hit = copyResult(ResultType, result);
             self.hits.append(self.allocator, hit) catch |err| {
                 releaseResult(ResultType, &hit);
@@ -270,6 +277,11 @@ pub fn ClosestHitPerBodyCollisionCollector(comptime CollectorType: type) type {
 
         // See: CollectorType::AddHit
         pub fn addHit(self: *Self, result: *const ResultType) void {
+            // Hits after an allocation failure are dropped (D6): with `had_hit` false the next hit of the same body would
+            // be taken as its first hit and raise the forced early out fraction again
+            if (self.alloc_error.err != null)
+                return;
+
             const early_out = result.getEarlyOutFraction();
             if (!self.had_hit or early_out < self.base.getEarlyOutFraction()) {
                 // Update early out fraction to avoid spending work on collecting further hits for this body
@@ -591,6 +603,36 @@ test "Collectors: out of memory in addHit is latched, forces an early out and is
     try testing.expect(per_body.base.shouldEarlyOut());
     try testing.expect(!per_body.hadHit());
     try testing.expectError(error.OutOfMemory, per_body.checkError());
+
+    // ClosestHitPerBody: more hits of the same body after the failure (no ShouldEarlyOut check in between, like
+    // InternalEdgeRemovingCollector::Flush) are dropped, the forced early out and the error stay
+    var failing4 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var per_body2 = ClosestHitPerBodyCollisionCollector(CollideShapeCollector).init(failing4.allocator());
+    defer per_body2.deinit();
+    per_body2.base.onBody(&body);
+    per_body2.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), 0.5, .empty, .empty, .init(3)));
+    try testing.expect(per_body2.base.shouldEarlyOut());
+    per_body2.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), 0.25, .empty, .empty, .init(3)));
+    per_body2.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), 0.75, .empty, .empty, .init(3)));
+    try testing.expect(per_body2.base.shouldEarlyOut());
+    try testing.expectEqual(-math.flt_max, per_body2.base.getEarlyOutFraction());
+    per_body2.base.onBodyEnd();
+    try testing.expect(per_body2.base.shouldEarlyOut());
+    try testing.expect(!per_body2.hadHit());
+    try testing.expectError(error.OutOfMemory, per_body2.checkError());
+    per_body2.base.reset(); // Clears the error: the collector accepts hits again
+    try testing.expect(!per_body2.base.shouldEarlyOut());
+
+    // AllHit: hits after the failure are dropped even if the array could store them now
+    var failing5 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var all2 = AllHitCollisionCollector(CastRayCollector).init(failing5.allocator());
+    defer all2.deinit();
+    all2.base.addHit(&rayHit(1, 0.5));
+    failing5.fail_index = std.math.maxInt(usize); // Allocations succeed again
+    all2.base.addHit(&rayHit(2, 0.25));
+    try testing.expectEqual(@as(usize, 0), all2.hits.items.len);
+    try testing.expect(all2.base.shouldEarlyOut());
+    try testing.expectError(error.OutOfMemory, all2.checkError());
 
     // A collector of references releases the reference of a hit it could not store
     const box = try TestBoxShape.create(allocator, Vec3.one(), .{});
