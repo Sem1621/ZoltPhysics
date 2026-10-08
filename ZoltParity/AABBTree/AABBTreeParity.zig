@@ -31,9 +31,11 @@ const fw = @import("../ParityFramework.zig");
 const AABBTreeBuilder = zolt.AABBTreeBuilder;
 const AABBTreeBuilderStats = zolt.AABBTreeBuilderStats;
 const AABox = zolt.AABox;
+const countAndSortTrues = zolt.countAndSortTrues;
 const Float3 = zolt.Float3;
 const IndexedTriangle = zolt.IndexedTriangle;
 const RayInvDirection = zolt.RayInvDirection;
+const sortReverseAndStore = zolt.sortReverseAndStore;
 const TriangleSplitter = zolt.TriangleSplitter;
 const TriangleSplitterBinning = zolt.TriangleSplitterBinning;
 const TriangleSplitterMean = zolt.TriangleSplitterMean;
@@ -421,38 +423,6 @@ const AllVisitor = struct {
         }
     }
 };
-
-/// Port of SortReverseAndStore (Physics/Collision/SortReverseAndStore.h, not ported yet)
-fn sortReverseAndStore(values_in: Vec4, max_value: f32, identifiers: *UVec4, out_values: []f32) i32 {
-    // Sort so that highest values are first (we want to first process closer hits and we process stack top to bottom)
-    var values = values_in;
-    Vec4.sort4Reverse(&values, identifiers);
-
-    // Count how many results are less than the max value
-    const closer = Vec4.less(values, Vec4.replicate(max_value));
-    const num_results = closer.countTrues();
-
-    // Shift the values so that only the ones that are less than max are kept
-    values = values.reinterpretAsInt().shiftComponents4Minus(num_results).reinterpretAsFloat();
-    identifiers.* = identifiers.shiftComponents4Minus(num_results);
-
-    // Store the values
-    out_values[0] = values.getX();
-    out_values[1] = values.getY();
-    out_values[2] = values.getZ();
-    out_values[3] = values.getW();
-
-    return @intCast(num_results);
-}
-
-/// Port of CountAndSortTrues (Physics/Collision/SortReverseAndStore.h, not ported yet)
-fn countAndSortTrues(value: UVec4, identifiers: *UVec4) i32 {
-    // Sort the hits
-    identifiers.* = UVec4.sort4True(value, identifiers.*);
-
-    // Return the amount of hits
-    return @intCast(value.countTrues());
-}
 
 /// Casts a ray (like MeshShape::CastRay)
 const RayVisitor = struct {
