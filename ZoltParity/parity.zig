@@ -22,4 +22,5 @@ test {
     _ = @import("Math/MathParity.zig");
     _ = @import("ParityFramework.zig");
     _ = @import("Physics/BasicsParity.zig");
+    _ = @import("Physics/FiltersParity.zig");
 }
