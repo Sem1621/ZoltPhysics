@@ -188,6 +188,7 @@ pub const BodyID = @import("Physics/Body/BodyID.zig").BodyID;
 pub const MassProperties = @import("Physics/Body/MassProperties.zig").MassProperties;
 pub const AABoxCast = @import("Physics/Collision/AABoxCast.zig").AABoxCast;
 pub const ActiveEdgeMode = @import("Physics/Collision/ActiveEdgeMode.zig").ActiveEdgeMode;
+pub const ActiveEdges = @import("Physics/Collision/ActiveEdges.zig");
 pub const BackFaceMode = @import("Physics/Collision/BackFaceMode.zig").BackFaceMode;
 pub const broad_phase_layer_invalid = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").broad_phase_layer_invalid;
 pub const BroadPhaseLayer = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
@@ -208,6 +209,11 @@ pub const CollideSettingsBase = @import("Physics/Collision/CollideShape.zig").Co
 pub const CollideShapeResult = @import("Physics/Collision/CollideShape.zig").CollideShapeResult;
 pub const CollideShapeSettings = @import("Physics/Collision/CollideShape.zig").CollideShapeSettings;
 pub const CollisionGroup = @import("Physics/Collision/CollisionGroup.zig").CollisionGroup;
+pub const ContactListener = @import("Physics/Collision/ContactListener.zig").ContactListener;
+pub const ContactManifold = @import("Physics/Collision/ContactListener.zig").ContactManifold;
+pub const ContactPoints = @import("Physics/Collision/ContactListener.zig").ContactPoints;
+pub const ContactSettings = @import("Physics/Collision/ContactListener.zig").ContactSettings;
+pub const ValidateResult = @import("Physics/Collision/ContactListener.zig").ValidateResult;
 pub const GroupFilter = @import("Physics/Collision/GroupFilter.zig").GroupFilter;
 pub const GroupFilterResult = @import("Physics/Collision/GroupFilter.zig").GroupFilter.GroupFilterResult;
 pub const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").GroupFilterTable;
@@ -340,6 +346,7 @@ const source_files = .{
     @import("Physics/Body/MassProperties.zig"),
     @import("Physics/Collision/AABoxCast.zig"),
     @import("Physics/Collision/ActiveEdgeMode.zig"),
+    @import("Physics/Collision/ActiveEdges.zig"),
     @import("Physics/Collision/BackFaceMode.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig"),
@@ -351,6 +358,7 @@ const source_files = .{
     @import("Physics/Collision/CollidePointResult.zig"),
     @import("Physics/Collision/CollideShape.zig"),
     @import("Physics/Collision/CollisionGroup.zig"),
+    @import("Physics/Collision/ContactListener.zig"),
     @import("Physics/Collision/GroupFilter.zig"),
     @import("Physics/Collision/GroupFilterTable.zig"),
     @import("Physics/Collision/ObjectLayer.zig"),
