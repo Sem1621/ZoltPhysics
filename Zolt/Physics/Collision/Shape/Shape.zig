@@ -1209,3 +1209,602 @@ fn restoreObjectArray(comptime T: type, allocator: Allocator, stream: StreamIn, 
     result.set({});
     return result;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (the test shapes of TestShapes.zig are registered as User1..User3 through zolt_user_types in the inline tests)
+
+const testing = std.testing;
+const TestShapes = @import("TestShapes.zig");
+const TestBoxShape = TestShapes.TestBoxShape;
+const TestSphereShape = TestShapes.TestSphereShape;
+const TestCompoundShape = TestShapes.TestCompoundShape;
+const TestMaterial = TestShapes.TestMaterial;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const BodyID = @import("../../Body/BodyID.zig").BodyID;
+const math = @import("../../../Math/Math.zig");
+
+/// A filter that rejects one sub shape ID (and counts the calls through a pointer, Rule M)
+const RejectFilter = struct {
+    pub const overrides = .{.shouldCollide};
+
+    base: ShapeFilter = .init(@This()),
+    rejected: SubShapeID,
+    calls: *u32,
+
+    pub fn shouldCollide(self: *const RejectFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = shape2;
+        self.calls.* += 1;
+        return !sub_shape_id_of_shape2.eql(self.rejected);
+    }
+};
+
+fn saveToBuffer(shape: *const Shape, buffer: []u8) []const u8 {
+    var writer: std.Io.Writer = .fixed(buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    shape.saveBinaryState(out.streamOut());
+    return writer.buffered();
+}
+
+fn restoreFromBuffer(allocator: Allocator, bytes: []const u8) Allocator.Error!ShapeResult {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    return Shape.restoreFromBinaryState(allocator, in.streamIn());
+}
+
+test "Shape: sub shape types, sets and names" {
+    try testing.expectEqual(@as(u32, 34), num_sub_shape_types);
+    try testing.expectEqualStrings("Sphere", sub_shape_type_names[@intFromEnum(ShapeSubType.sphere)]);
+    try testing.expectEqualStrings("UserConvex8", sub_shape_type_names[@intFromEnum(ShapeSubType.user_convex8)]);
+    try testing.expectEqualStrings("Empty", sub_shape_type_names[@intFromEnum(ShapeSubType.empty)]);
+    try testing.expectEqual(@as(usize, 16), convex_sub_shape_types.len);
+    try testing.expectEqual(ShapeSubType.tapered_cylinder, convex_sub_shape_types[7]);
+    try testing.expectEqualSlices(ShapeSubType, &.{ .static_compound, .mutable_compound }, &compound_sub_shape_types);
+    try testing.expectEqualSlices(ShapeSubType, &.{ .rotated_translated, .scaled, .offset_center_of_mass }, &decorator_sub_shape_types);
+    try testing.expectEqual(@as(u8, 11), @intFromEnum(ShapeType.empty));
+    try testing.expectEqual(@as(u8, 33), @intFromEnum(ShapeSubType.empty));
+}
+
+test "Shape: virtual dispatch and the default implementations (box)" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const material = try TestMaterial.create(allocator, 5);
+    var material_ref = RefConst(PhysicsMaterial).init(&material.base);
+    defer material_ref.deinit();
+
+    var record: TestShapes.SoftBodyRecord = .{};
+    var box = TestBoxShape.init(allocator, Vec3.init(1, 2, 3), .{ .center_of_mass = Vec3.init(0.5, 0, 0), .material = &material.base });
+    box.soft_body_record = &record;
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    const shape = box.asShape();
+
+    // Type, checked casts and user data
+    try expect(shape.getType() == .user1 and shape.getSubType() == .user1);
+    try expect(shape.isKindOf(TestBoxShape) and shape.isKindOf(Shape) and !shape.isKindOf(TestSphereShape));
+    try expect(shape.cast(TestBoxShape) == &box);
+    try expect(box.asShapeMut().castMut(TestBoxShape) == &box);
+    box.asShapeMut().setUserData(77);
+    try testing.expectEqual(@as(u64, 77), shape.getUserData());
+    try testing.expectEqual(@as(u32, 2), material.base.getRefCount()); // material_ref + box
+
+    // Overridden and default (Shape.impl) virtual functions
+    try expect(!shape.mustBeStatic());
+    try expect(shape.getCenterOfMass().eql(Vec3.init(0.5, 0, 0)));
+    try expect(shape.getLocalBounds().eql(.init(Vec3.init(-1, -2, -3), Vec3.init(1, 2, 3))));
+    try testing.expectEqual(@as(u32, 0), shape.getSubShapeIDBitsRecursive());
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.3), Vec3.init(4, 5, 6));
+    const scale = Vec3.init(2, 1, -1);
+    try expect(shape.getWorldSpaceBounds(transform, scale).eql(shape.getLocalBounds().scaled(scale).transformed(transform)));
+    var bounds_d = shape.getWorldSpaceBounds(transform.getRotation(), scale);
+    bounds_d.translateDVec3(DMat44.fromMat44(transform).getTranslation());
+    try expect(shape.getWorldSpaceBoundsDMat44(.fromMat44(transform), scale).eql(bounds_d));
+    try expect(shape.getWorldSpaceBoundsRMat44(if (Core.double_precision) .fromMat44(transform) else transform, scale).isValid());
+    try testing.expectEqual(@as(f32, 1.0), shape.getInnerRadius());
+    try testing.expectEqual(@as(f32, 48000.0), shape.getMassProperties().mass);
+    const leaf = shape.getLeafShape(.{ .value = 5 });
+    try expect(leaf.shape == shape and leaf.remainder.getValue() == 5);
+    try expect(shape.getMaterial(.empty) == &material.base);
+    try expect(shape.getSurfaceNormal(.empty, Vec3.init(0.1, 1.9, 0.2)).eql(Vec3.axisY()));
+    var face: Shape.SupportingFace = .empty;
+    shape.getSupportingFace(.empty, Vec3.axisX(), Vec3.one(), Mat44.translation(Vec3.init(10, 0, 0)), &face);
+    try testing.expectEqual(@as(u32, 4), face.len);
+    try testing.expectEqual(@as(u64, 77), shape.getSubShapeUserData(.{ .value = 3 }));
+
+    var sub_ts = shape.getSubShapeTransformedShape(.{ .value = 3 }, Vec3.init(1, 2, 3), Quat.identity(), scale);
+    defer sub_ts.transformed_shape.deinit();
+    try expect(sub_ts.remainder.isEmpty());
+    try expect(sub_ts.transformed_shape.shape.get() == shape);
+    try expect(sub_ts.transformed_shape.shape_position_com.eql(RVec3.init(1, 2, 3)));
+    try expect(sub_ts.transformed_shape.getShapeScale().eql(scale));
+    try expect(sub_ts.transformed_shape.body_id.isInvalid() and sub_ts.transformed_shape.sub_shape_id_creator.getID().isEmpty());
+
+    const below = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), -1.0));
+    try testing.expectEqual(@as(f32, 48.0), below.total_volume);
+    try testing.expectEqual(@as(f32, 48.0), below.submerged_volume);
+    const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 1.0));
+    try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
+
+    // Ray casts, both versions
+    var hit: RayCastResult = .{};
+    try expect(shape.castRay(.init(Vec3.init(-4, 0, 0), Vec3.init(8, 0, 0)), .{}, &hit));
+    try testing.expectEqual(@as(f32, 0.375), hit.fraction);
+    try expect(!shape.castRay(.init(Vec3.init(-4, 0, 0), Vec3.init(8, 0, 0)), .{}, &hit)); // Not closer
+    var settings: RayCastSettings = .{};
+    settings.setBackFaceMode(.collide_with_back_faces);
+    var ray_hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer ray_hits.deinit();
+    shape.castRayCollector(.init(Vec3.init(-4, 0, 0), Vec3.init(8, 0, 0)), &settings, .{}, &ray_hits.base, &.{});
+    try ray_hits.checkError();
+    try testing.expectEqual(@as(usize, 2), ray_hits.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.625), ray_hits.hits.items[1].fraction);
+
+    // Collide point and soft body vertices
+    var point_hits = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer point_hits.deinit();
+    shape.collidePoint(Vec3.init(0.5, 1, 2), .{}, &point_hits.base, &.{});
+    shape.collidePoint(Vec3.init(1.5, 1, 2), .{}, &point_hits.base, &.{});
+    try point_hits.checkError();
+    try testing.expectEqual(@as(usize, 1), point_hits.hits.items.len);
+    const vertices: CollideSoftBodyVertexIterator = .{};
+    shape.collideSoftBodyVertices(Mat44.identity(), Vec3.one(), &vertices, 12, 3);
+    try testing.expectEqual(@as(u32, 1), record.calls);
+    try testing.expectEqual(@as(u32, 12), record.num_vertices);
+    try testing.expectEqual(@as(i32, 3), record.colliding_shape_index);
+
+    // collectTransformedShapes (default): filter, context body ID, sub shape ID creator, scale
+    {
+        var collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+        defer collector.deinit();
+        const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(42), .{});
+        collector.base.setContext(&context);
+        const creator = SubShapeIDCreator.pushID(.{}, 1, 2);
+        shape.collectTransformedShapes(AABox.biggest(), Vec3.init(1, 1, 1), Quat.identity(), scale, creator, &collector.base, &.{});
+        var calls: u32 = 0;
+        const reject: RejectFilter = .{ .rejected = creator.getID(), .calls = &calls };
+        shape.collectTransformedShapes(AABox.biggest(), Vec3.init(1, 1, 1), Quat.identity(), scale, creator, &collector.base, &reject.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(u32, 1), calls);
+        try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
+        const ts = &collector.hits.items[0];
+        try expect(ts.shape.get() == shape and ts.body_id.eql(.init(42)) and ts.sub_shape_id_creator.getID().eql(creator.getID()));
+        try expect(ts.getShapeScale().eql(scale));
+        try testing.expectEqual(RefCount.embedded + 2, shape.getRefCount()); // Held by the collector and sub_ts
+    }
+    try testing.expectEqual(RefCount.embedded + 1, shape.getRefCount());
+
+    // transformShape (default): the transform is decomposed, the scale made valid
+    {
+        var collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+        defer collector.deinit();
+        const t = Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.5), Vec3.init(1, 2, 3)).mul(Mat44.scaleVec3(Vec3.init(2, 0, 3)));
+        shape.transformShape(t, &collector.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
+        const decomposed = t.decompose();
+        const ts = &collector.hits.items[0];
+        try expect(ts.shape_position_com.eql(RVec3.fromVec3(decomposed.rotation_translation.getTranslation())));
+        try expect(ts.getShapeScale().eql(ScaleHelpers.makeNonZeroScale(decomposed.scale)));
+        try testing.expectEqual(ScaleHelpers.min_scale, ts.getShapeScale().getY());
+        try expect(ts.getShapeScale().eql(ScaleHelpers.makeNonZeroScale(decomposed.scale)));
+        try expect(ts.body_id.isInvalid());
+    }
+
+    // Triangles (GetTrianglesContextVertexList in the placement buffer)
+    {
+        var context: Shape.GetTrianglesContext = .{};
+        shape.getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+        var triangle_vertices: [3 * Shape.get_triangles_min_triangles_requested]Float3 = undefined;
+        var materials: [Shape.get_triangles_min_triangles_requested]*const PhysicsMaterial = undefined;
+        try testing.expectEqual(@as(u32, 12), shape.getTrianglesNext(&context, Shape.get_triangles_min_triangles_requested, &triangle_vertices, &materials));
+        try expect(materials[11] == &material.base);
+        try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, Shape.get_triangles_min_triangles_requested, &triangle_vertices, null));
+    }
+
+    // Stats, volume and scale
+    try testing.expectEqual(@as(u32, 12), shape.getStats().num_triangles);
+    var visited: Shape.VisitedShapes = .empty;
+    defer visited.deinit(allocator);
+    try testing.expectEqual(@as(usize, @sizeOf(TestBoxShape)), (try shape.getStatsRecursive(allocator, &visited)).size_bytes);
+    try testing.expectEqual(@as(usize, 0), (try shape.getStatsRecursive(allocator, &visited)).size_bytes); // Already visited
+    try testing.expectEqual(@as(f32, 48.0), shape.getVolume());
+    try expect(shape.isValidScale(Vec3.init(1, -2, 3)) and !shape.isValidScale(Vec3.init(1, 0, 3)));
+    try expect(shape.makeScaleValid(Vec3.init(0, -2, 3)).eql(Vec3.init(ScaleHelpers.min_scale, -2, 3)));
+}
+
+test "Shape: overrides of the sphere and the compound, collidePointUsingRayCast" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const sphere = try TestSphereShape.create(allocator, 2.0);
+    const box = try TestBoxShape.create(allocator, Vec3.one(), .{});
+    box.base.user_data = 11;
+    const compound = try TestCompoundShape.create(allocator, sphere.asShape(), Vec3.init(-5, 0, 0), box.asShape(), Vec3.init(5, 0, 0));
+    compound.must_be_static = true;
+    var compound_ref = RefConst(Shape).init(compound.asShape());
+    defer compound_ref.deinit();
+    const shape = compound.asShape();
+
+    // Sphere: uniform scales only, no supporting face (default implementation), collide point through ray casts
+    try expect(sphere.asShape().isValidScale(Vec3.replicate(-2.0)) and !sphere.asShape().isValidScale(Vec3.init(1, 2, 3)));
+    try expect(sphere.asShape().makeScaleValid(Vec3.init(1, -2, 3)).eql(Vec3.init(2, -2, 2)));
+    var face: Shape.SupportingFace = .empty;
+    sphere.asShape().getSupportingFace(.empty, Vec3.axisX(), Vec3.one(), Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 0), face.len);
+    try expect(sphere.asShape().getCenterOfMass().eql(Vec3.zero())); // Default implementation
+    {
+        var hits = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer hits.deinit();
+        const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(9), .{});
+        hits.base.setContext(&context);
+        const creator = SubShapeIDCreator.pushID(.{}, 1, 1);
+        Shape.collidePointUsingRayCast(sphere.asShape(), Vec3.init(0.5, 0.5, 0), creator, &hits.base, &.{}); // Inside: 1 hit (back face)
+        Shape.collidePointUsingRayCast(sphere.asShape(), Vec3.init(1.9, 1.9, 0), creator, &hits.base, &.{}); // In the bounds, outside the sphere: 0 or 2 hits
+        Shape.collidePointUsingRayCast(sphere.asShape(), Vec3.init(3, 0, 0), creator, &hits.base, &.{}); // Outside the bounds
+        sphere.asShape().collidePoint(Vec3.init(0, -1.5, 0.5), .{}, &hits.base, &.{});
+        try hits.checkError();
+        try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+        try expect(hits.hits.items[0].body_id.eql(.init(9)) and hits.hits.items[0].sub_shape_id2.eql(creator.getID()));
+    }
+
+    // Compound: sub shape IDs lead to the children
+    try expect(shape.mustBeStatic());
+    try testing.expectEqual(@as(u32, 1), shape.getSubShapeIDBitsRecursive());
+    try testing.expectEqual(@as(f32, 1.0), shape.getInnerRadius());
+    const id_box = SubShapeIDCreator.pushID(.{}, 1, 1).getID();
+    const id_sphere = SubShapeIDCreator.pushID(.{}, 0, 1).getID();
+    try expect(shape.getLeafShape(id_box).shape == box.asShape());
+    try expect(shape.getLeafShape(id_sphere).shape == sphere.asShape());
+    try testing.expectEqual(@as(u64, 11), shape.getSubShapeUserData(id_box));
+    try expect(shape.getMaterial(id_box) == PhysicsMaterial.default);
+    try expect(shape.getSurfaceNormal(id_box, Vec3.init(6, 0.1, 0.2)).eql(Vec3.axisX()));
+    var sub_ts = shape.getSubShapeTransformedShape(id_box, Vec3.init(1, 0, 0), Quat.identity(), Vec3.replicate(2));
+    defer sub_ts.transformed_shape.deinit();
+    try expect(sub_ts.transformed_shape.shape.get() == box.asShape());
+    try expect(sub_ts.transformed_shape.shape_position_com.eql(RVec3.init(11, 0, 0)));
+    const volume = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), -10.0));
+    try testing.expectEqual(sphere.asShape().getVolume() + 8.0, volume.total_volume);
+    var hit: RayCastResult = .{};
+    try expect(shape.castRay(.init(Vec3.init(10, 0, 0), Vec3.init(-20, 0, 0)), .{}, &hit));
+    try expect(hit.sub_shape_id2.eql(id_box));
+
+    // getStatsRecursive: own stats plus the children, a shared shape is counted once
+    var visited: Shape.VisitedShapes = .empty;
+    defer visited.deinit(allocator);
+    const stats = try shape.getStatsRecursive(allocator, &visited);
+    try testing.expectEqual(@as(usize, @sizeOf(TestCompoundShape) + @sizeOf(TestSphereShape) + @sizeOf(TestBoxShape)), stats.size_bytes);
+    try testing.expectEqual(@as(u32, 12), stats.num_triangles);
+    try testing.expectEqual(@as(u32, 3), visited.count());
+}
+
+test "ShapeSettings: cached results, Jolt's error texts and child errors" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    // Invalid settings: the error is cached
+    var bad = TestShapes.TestBoxShapeSettings.init(allocator, Vec3.init(1, 0, 1), null);
+    defer bad.deinit();
+    {
+        var r1 = try bad.asShapeSettings().createShape(allocator);
+        defer r1.deinit();
+        try testing.expectEqualStrings("Invalid half extent", r1.getError());
+        try expect(bad.base.cached_result.hasError());
+    }
+
+    // Change the settings: clearCachedResult builds a new shape, later calls return the cached one
+    bad.half_extent = Vec3.init(1, 2, 3);
+    bad.asShapeSettings().clearCachedResult();
+    bad.asShapeSettings().user_data = 123;
+    {
+        var r1 = try bad.asShapeSettings().createShape(allocator);
+        defer r1.deinit();
+        var r2 = try bad.createShape(allocator); // Static call on the concrete settings
+        defer r2.deinit();
+        try expect(r1.isValid() and r1.getPtr() == r2.getPtr());
+        try testing.expectEqual(@as(u32, 3), r1.getPtr().?.getRefCount()); // Cache + r1 + r2
+        try testing.expectEqual(@as(u64, 123), r1.getPtr().?.getUserData());
+        try expect(r1.getPtr().?.cast(TestBoxShape).half_extent.eql(Vec3.init(1, 2, 3)));
+    }
+
+    // A child error is forwarded (C++ outResult = child_result); heap child settings are released with the parent
+    const child_ok = try TestShapes.TestBoxShapeSettings.create(allocator, Vec3.one(), null);
+    const child_bad = try TestShapes.TestBoxShapeSettings.create(allocator, Vec3.init(-1, 1, 1), null);
+    var compound = TestShapes.TestCompoundShapeSettings.init(allocator, child_ok.asShapeSettings(), Vec3.zero(), child_bad.asShapeSettings(), Vec3.zero());
+    defer compound.deinit();
+    var result = try compound.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    try testing.expectEqualStrings("Invalid half extent", result.getError());
+    try testing.expectEqual(@as(u32, 1), child_ok.base.getRefCount());
+
+    // Embedded settings referenced by heap settings
+    var embedded = TestShapes.TestBoxShapeSettings.init(allocator, Vec3.one(), null);
+    embedded.asShapeSettings().setEmbedded();
+    defer embedded.deinit();
+    {
+        var heap_compound = try allocator.create(TestShapes.TestCompoundShapeSettings);
+        heap_compound.* = .init(allocator, embedded.asShapeSettings(), Vec3.zero(), embedded.asShapeSettings(), Vec3.init(3, 0, 0));
+        var heap_ref = Ref(ShapeSettings).init(heap_compound.asShapeSettings());
+        defer heap_ref.deinit();
+        var r = try heap_ref.get().?.createShape(allocator);
+        defer r.deinit();
+        const c = r.getPtr().?.cast(TestCompoundShape);
+        try expect(c.children[0].shape.get() == c.children[1].shape.get()); // The cached child shape is shared
+    }
+}
+
+/// Calls through a function pointer so that the optimizer cannot see the write (Rule M regression test)
+noinline fn createThroughVTable(settings: *ShapeSettings, allocator: Allocator) Allocator.Error!ShapeResult {
+    return settings.createShape(allocator);
+}
+
+test "ShapeSettings: Rule M, the cache is written through a mutable receiver" {
+    const allocator = testing.allocator;
+
+    var settings = TestShapes.TestBoxShapeSettings.init(allocator, Vec3.one(), null);
+    defer settings.deinit();
+    var result = try createThroughVTable(settings.asShapeSettings(), allocator);
+    defer result.deinit();
+    try testing.expect(settings.base.cached_result.isValid());
+    try testing.expect(settings.base.cached_result.getPtr() == result.getPtr());
+}
+
+test "ShapeSettings: out of memory during creation is returned, not cached" {
+    const allocator = testing.allocator;
+
+    const child0 = try TestShapes.TestBoxShapeSettings.create(allocator, Vec3.one(), null);
+    const child1 = try TestShapes.TestBoxShapeSettings.create(allocator, Vec3.replicate(2), null);
+    var compound = TestShapes.TestCompoundShapeSettings.init(allocator, child0.asShapeSettings(), Vec3.zero(), child1.asShapeSettings(), Vec3.init(5, 0, 0));
+    defer compound.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var result = compound.asShapeSettings().createShape(failing.allocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(compound.base.cached_result.isEmpty());
+            // The child settings cached their shapes (allocated with this iteration's allocator before the failure)
+            child0.asShapeSettings().clearCachedResult();
+            child1.asShapeSettings().clearCachedResult();
+            continue;
+        };
+        try testing.expect(result.isValid());
+        try testing.expectEqual(@as(usize, 3), fail_index); // The compound and its two children
+        result.deinit();
+        child0.asShapeSettings().clearCachedResult();
+        child1.asShapeSettings().clearCachedResult();
+        compound.asShapeSettings().clearCachedResult();
+        break;
+    }
+}
+
+test "Shape: binary state, restoreFromBinaryState and Jolt's error texts" {
+    const allocator = testing.allocator;
+    var buffer: [4096]u8 = undefined;
+
+    var box = try TestBoxShape.create(allocator, Vec3.init(1, 2, 3), .{ .center_of_mass = Vec3.init(0, 1, 0) });
+    box.asShapeMut().setUserData(42);
+    var box_ref = RefConst(Shape).init(box.asShape());
+    defer box_ref.deinit();
+    const saved = saveToBuffer(box.asShape(), &buffer);
+    try testing.expectEqual(@as(usize, 1 + 8 + 12 + 12), saved.len); // Sub type, user data, half extent, center of mass
+    {
+        var result = try restoreFromBuffer(allocator, saved);
+        defer result.deinit();
+        const restored = result.getPtr().?.cast(TestBoxShape);
+        try testing.expect(restored.half_extent.eql(Vec3.init(1, 2, 3)) and restored.center_of_mass.eql(Vec3.init(0, 1, 0)));
+        try testing.expectEqual(@as(u64, 42), restored.asShape().getUserData());
+        try testing.expectEqual(@as(u32, 1), restored.asShape().getRefCount());
+    }
+
+    // Errors: truncated data, empty stream, invalid sub type values, a type without constructor
+    for ([_][]const u8{ saved[0 .. saved.len - 1], saved[0..1] }) |bytes| {
+        var result = try restoreFromBuffer(allocator, bytes);
+        defer result.deinit();
+        try testing.expectEqualStrings("Failed to restore shape", result.getError());
+    }
+    for ([_][]const u8{ &.{}, &.{200}, &.{@intFromEnum(ShapeSubType.mesh)} }) |bytes| {
+        var result = try restoreFromBuffer(allocator, bytes);
+        defer result.deinit();
+        try testing.expectEqualStrings("Failed to read type id", result.getError());
+    }
+
+    // Out of memory while constructing the shape
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, restoreFromBuffer(failing.allocator(), saved));
+}
+
+/// saveWithChildren of the shapes into `buffer`, returns the written bytes
+fn saveGraph(allocator: Allocator, shapes: []const *const Shape, buffer: []u8, shape_map: *Shape.ShapeToIDMap, material_map: *Shape.MaterialToIDMap) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    for (shapes) |s| try s.saveWithChildren(allocator, out.streamOut(), shape_map, material_map);
+    return writer.buffered();
+}
+
+/// The restored state of the graph saved by "Shape: saveWithChildren / restoreWithChildren"
+fn checkRestoredGraph(c1: *const Shape, c2: *const Shape) !void {
+    const expect = testing.expect;
+    const compound1 = c1.cast(TestCompoundShape);
+    const compound2 = c2.cast(TestCompoundShape);
+    try expect(compound1.children[1].position.eql(Vec3.init(3, 0, 0)));
+    try expect(compound1.must_be_static);
+    // The shared box is restored once and shared again
+    try expect(compound1.children[0].shape.get() == compound2.children[1].shape.get());
+    const shared_box = compound1.children[0].shape.get().?.cast(TestBoxShape);
+    try expect(shared_box.half_extent.eql(Vec3.init(1, 2, 3)));
+    const material = shared_box.material.get().?;
+    try testing.expectEqualStrings("TestMaterial", material.getDebugName());
+    try testing.expectEqual(@as(u32, 7), virtual.downcast(TestMaterial, material).value);
+    // The second box uses a PhysicsMaterialSimple, the sphere has no materials, the third box none (null)
+    try testing.expectEqualStrings("Wood", compound1.children[1].shape.get().?.cast(TestBoxShape).material.get().?.getDebugName());
+    try expect(compound2.children[0].shape.get().?.cast(TestBoxShape).material.get() == null);
+}
+
+test "Shape: saveWithChildren / restoreWithChildren of a shape graph with shared children and materials" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const test_material = try TestMaterial.create(allocator, 7);
+    var test_material_ref = RefConst(PhysicsMaterial).init(&test_material.base);
+    defer test_material_ref.deinit();
+    const wood = try PhysicsMaterialSimple.create(allocator, "Wood", Color.orange);
+    var wood_ref = RefConst(PhysicsMaterial).init(wood.material());
+    defer wood_ref.deinit();
+
+    const shared_box = try TestBoxShape.create(allocator, Vec3.init(1, 2, 3), .{ .material = &test_material.base });
+    const wood_box = try TestBoxShape.create(allocator, Vec3.one(), .{ .material = wood.material() });
+    const plain_box = try TestBoxShape.create(allocator, Vec3.one(), .{});
+    const compound1 = try TestCompoundShape.create(allocator, shared_box.asShape(), Vec3.zero(), wood_box.asShape(), Vec3.init(3, 0, 0));
+    compound1.must_be_static = true;
+    var compound1_ref = RefConst(Shape).init(compound1.asShape());
+    defer compound1_ref.deinit();
+    const compound2 = try TestCompoundShape.create(allocator, plain_box.asShape(), Vec3.zero(), shared_box.asShape(), Vec3.init(-3, 0, 0));
+    var compound2_ref = RefConst(Shape).init(compound2.asShape());
+    defer compound2_ref.deinit();
+
+    // Save both compounds into one stream with shared maps: the shared box and the material are written once
+    var buffer: [4096]u8 = undefined;
+    var shape_map: Shape.ShapeToIDMap = .empty;
+    defer shape_map.deinit(allocator);
+    var material_map: Shape.MaterialToIDMap = .empty;
+    defer material_map.deinit(allocator);
+    const bytes = try saveGraph(allocator, &.{ compound1.asShape(), compound2.asShape() }, &buffer, &shape_map, &material_map);
+    try testing.expectEqual(@as(u32, 5), shape_map.count());
+    try testing.expectEqual(@as(u32, 2), material_map.count());
+
+    // Restore with shared maps
+    var reader: std.Io.Reader = .fixed(bytes);
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var id_to_shape: Shape.IDToShapeMap = .empty;
+    defer {
+        for (id_to_shape.items) |*s| s.deinit();
+        id_to_shape.deinit(allocator);
+    }
+    var id_to_material: Shape.IDToMaterialMap = .empty;
+    defer {
+        for (id_to_material.items) |*m| m.deinit();
+        id_to_material.deinit(allocator);
+    }
+    var r1 = try Shape.restoreWithChildren(allocator, in.streamIn(), &id_to_shape, &id_to_material);
+    defer r1.deinit();
+    var r2 = try Shape.restoreWithChildren(allocator, in.streamIn(), &id_to_shape, &id_to_material);
+    defer r2.deinit();
+    try expect(r1.isValid() and r2.isValid());
+    try testing.expectEqual(@as(usize, 5), id_to_shape.items.len);
+    try testing.expectEqual(@as(usize, 2), id_to_material.items.len);
+    try checkRestoredGraph(r1.getPtr().?, r2.getPtr().?);
+
+    // Reading past the end: Jolt's error text
+    var r3 = try Shape.restoreWithChildren(allocator, in.streamIn(), &id_to_shape, &id_to_material);
+    defer r3.deinit();
+    try testing.expectEqualStrings("Failed to read shape id", r3.getError());
+
+    // A null shape ID gives a valid null result
+    var null_reader: std.Io.Reader = .fixed(&.{ 0xff, 0xff, 0xff, 0xff });
+    var null_in = StreamWrapper.StreamInWrapper.init(&null_reader);
+    var r4 = try Shape.restoreWithChildren(allocator, null_in.streamIn(), &id_to_shape, &id_to_material);
+    defer r4.deinit();
+    try expect(r4.isValid() and r4.getPtr() == null);
+
+    // Truncated streams fail with one of Jolt's texts at every length, nothing leaks. (Material IDs are read without an
+    // EOF check like in Jolt: a missing ID is a null material, the next read of the second shape then fails.)
+    for (0..bytes.len) |len| {
+        var truncated_reader: std.Io.Reader = .fixed(bytes[0..len]);
+        var truncated_in = StreamWrapper.StreamInWrapper.init(&truncated_reader);
+        var shapes: Shape.IDToShapeMap = .empty;
+        defer {
+            for (shapes.items) |*s| s.deinit();
+            shapes.deinit(allocator);
+        }
+        var materials: Shape.IDToMaterialMap = .empty;
+        defer {
+            for (materials.items) |*m| m.deinit();
+            materials.deinit(allocator);
+        }
+        var first = try Shape.restoreWithChildren(allocator, truncated_in.streamIn(), &shapes, &materials);
+        defer first.deinit();
+        var second = try Shape.restoreWithChildren(allocator, truncated_in.streamIn(), &shapes, &materials);
+        defer second.deinit();
+        try expect(first.hasError() or second.hasError());
+    }
+
+    // Out of memory at every allocation of the restore is returned, nothing leaks
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+        var oom_reader: std.Io.Reader = .fixed(bytes);
+        var oom_in = StreamWrapper.StreamInWrapper.init(&oom_reader);
+        var shapes: Shape.IDToShapeMap = .empty;
+        defer {
+            for (shapes.items) |*s| s.deinit();
+            shapes.deinit(a);
+        }
+        var materials: Shape.IDToMaterialMap = .empty;
+        defer {
+            for (materials.items) |*m| m.deinit();
+            materials.deinit(a);
+        }
+        var r = Shape.restoreWithChildren(a, oom_in.streamIn(), &shapes, &materials) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer r.deinit();
+        try expect(r.isValid() and !failing.has_induced_failure);
+        break;
+    }
+    try expect(fail_index > 5);
+
+    // Out of memory while saving
+    fail_index = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+        var shapes: Shape.ShapeToIDMap = .empty;
+        defer shapes.deinit(a);
+        var materials: Shape.MaterialToIDMap = .empty;
+        defer materials.deinit(a);
+        _ = saveGraph(a, &.{compound1.asShape()}, &buffer, &shapes, &materials) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        break;
+    }
+    try expect(fail_index > 2);
+}
+
+test "Shape: release destroys heap shapes through the vtable, embedded shapes are not freed" {
+    const allocator = testing.allocator;
+
+    // Heap shape: the last release runs the destructor chain (releases the material) and frees it (leak checked)
+    const material = try TestMaterial.create(allocator, 1);
+    var material_ref = RefConst(PhysicsMaterial).init(&material.base);
+    defer material_ref.deinit();
+    const box = try TestBoxShape.create(allocator, Vec3.one(), .{ .material = &material.base });
+    var ref = RefConst(Shape).init(box.asShape());
+    try testing.expectEqual(@as(u32, 2), material.base.getRefCount());
+    ref.deinit();
+    try testing.expectEqual(@as(u32, 1), material.base.getRefCount());
+
+    // A heap shape that was never referenced can be destroyed directly
+    const unreferenced = try TestSphereShape.create(allocator, 1.0);
+    unreferenced.asShapeMut().destroy();
+
+    // Embedded
+    var sphere = TestSphereShape.init(allocator, 1.0);
+    sphere.asShape().setEmbedded();
+    var sphere_ref = RefConst(Shape).init(sphere.asShape());
+    try testing.expectEqual(@as(u32, 1 + RefCount.embedded), sphere.asShape().getRefCount());
+    sphere_ref.deinit();
+    sphere.asShapeMut().deinit();
+
+    // ShapeFunctions of the registry construct registered shapes (the test shapes are registered as User1..3)
+    const construct = ShapeFunctions.get(.user2).construct.?;
+    var constructed = Ref(Shape).init(try construct(allocator));
+    defer constructed.deinit();
+    try testing.expect(constructed.get().?.isKindOf(TestSphereShape));
+    try testing.expect(ShapeFunctions.get(.user2).color.eql(Color.red));
+}

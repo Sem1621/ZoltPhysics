@@ -23,6 +23,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Color = @import("../../../Core/Color.zig").Color;
+const Ref = @import("../../../Core/Reference.zig").Ref;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -58,6 +59,8 @@ const CollideSoftBodyVertexIterator = @import("../CollideSoftBodyVertexIterator.
 const ShapeFile = @import("Shape.zig");
 const Shape = ShapeFile.Shape;
 const ShapeFunctions = ShapeFile.ShapeFunctions;
+const ShapeResult = ShapeFile.ShapeResult;
+const ShapeSettings = ShapeFile.ShapeSettings;
 const ShapeSubType = ShapeFile.ShapeSubType;
 const ShapeList = ShapeFile.ShapeList;
 const ShapeRefC = ShapeFile.ShapeRefC;
@@ -151,6 +154,79 @@ pub const half_unit_sphere_bottom: StaticArray(Vec3, 48) = blk: {
     break :blk vertices;
 };
 
+/// Settings of TestBoxShape (a settings class with a material reference)
+pub const TestBoxShapeSettings = struct {
+    pub const overrides = .{.createShape};
+
+    base: ShapeSettings,
+    half_extent: Vec3 = Vec3.one(),
+    material: RefConst(PhysicsMaterial) = .empty,
+
+    /// Constructor
+    pub fn init(allocator: Allocator, half_extent: Vec3, material: ?*const PhysicsMaterial) TestBoxShapeSettings {
+        return .{ .base = .init(ShapeSettings.vtableFor(TestBoxShapeSettings), allocator), .half_extent = half_extent, .material = .init(material) };
+    }
+
+    /// new TestBoxShapeSettings(...): reference count 0
+    pub fn create(allocator: Allocator, half_extent: Vec3, material: ?*const PhysicsMaterial) Allocator.Error!*TestBoxShapeSettings {
+        const self = try allocator.create(TestBoxShapeSettings);
+        self.* = .init(allocator, half_extent, material);
+        return self;
+    }
+
+    pub fn destruct(self: *TestBoxShapeSettings) void {
+        self.material.deinit();
+    }
+
+    pub fn asShapeSettings(self: *TestBoxShapeSettings) *ShapeSettings {
+        return &self.base;
+    }
+
+    /// Destructor of settings that are not on the heap
+    pub fn deinit(self: *TestBoxShapeSettings) void {
+        self.base.deinit();
+    }
+
+    pub fn createShape(self: *TestBoxShapeSettings, allocator: Allocator) Allocator.Error!ShapeResult {
+        return ShapeSettings.createCached(TestBoxShape, self, allocator);
+    }
+};
+
+/// Settings of TestCompoundShape: holds child settings (Ref(ShapeSettings), creating a child writes its cache)
+pub const TestCompoundShapeSettings = struct {
+    pub const overrides = .{.createShape};
+
+    pub const ChildSettings = struct {
+        settings: Ref(ShapeSettings) = .empty,
+        position: Vec3 = Vec3.zero(),
+    };
+
+    base: ShapeSettings,
+    children: [2]ChildSettings = .{ .{}, .{} },
+
+    /// Constructor, adds a reference to the child settings
+    pub fn init(allocator: Allocator, child0: *ShapeSettings, position0: Vec3, child1: *ShapeSettings, position1: Vec3) TestCompoundShapeSettings {
+        return .{ .base = .init(ShapeSettings.vtableFor(TestCompoundShapeSettings), allocator), .children = .{ .{ .settings = .init(child0), .position = position0 }, .{ .settings = .init(child1), .position = position1 } } };
+    }
+
+    pub fn destruct(self: *TestCompoundShapeSettings) void {
+        for (&self.children) |*c| c.settings.deinit();
+    }
+
+    pub fn asShapeSettings(self: *TestCompoundShapeSettings) *ShapeSettings {
+        return &self.base;
+    }
+
+    /// Destructor of settings that are not on the heap
+    pub fn deinit(self: *TestCompoundShapeSettings) void {
+        self.base.deinit();
+    }
+
+    pub fn createShape(self: *TestCompoundShapeSettings, allocator: Allocator) Allocator.Error!ShapeResult {
+        return ShapeSettings.createCached(TestCompoundShape, self, allocator);
+    }
+};
+
 /// A box around its center of mass (User1)
 pub const TestBoxShape = struct {
     pub const shape_sub_type: ShapeSubType = .user1;
@@ -174,6 +250,21 @@ pub const TestBoxShape = struct {
         self.center_of_mass = opts.center_of_mass;
         self.material = .init(opts.material);
         return self;
+    }
+
+    /// Constructor from settings (in place, run by ShapeSettings.createCached)
+    pub fn initFromSettings(self: *TestBoxShape, settings: *const TestBoxShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
+        _ = allocator;
+        self.base.initFromSettings(&settings.base);
+
+        if (Vec3.lessOrEqual(settings.half_extent, Vec3.zero()).testAnyXYZTrue()) {
+            result.setError("Invalid half extent");
+            return;
+        }
+        self.half_extent = settings.half_extent;
+        self.material.set(settings.material.get());
+
+        result.set(.init(self.asShapeMut()));
     }
 
     /// new TestBoxShape(...): reference count 0
@@ -504,6 +595,24 @@ pub const TestCompoundShape = struct {
     /// Default constructor (used by restoreFromBinaryState)
     pub fn initDefault(allocator: Allocator) TestCompoundShape {
         return .{ .base = .init(Shape.vtableFor(TestCompoundShape), allocator, .user3, shape_sub_type) };
+    }
+
+    /// Constructor from settings (in place, run by ShapeSettings.createCached): creates the children, a child error is
+    /// forwarded (C++ `outResult = child_result`)
+    pub fn initFromSettings(self: *TestCompoundShape, settings: *const TestCompoundShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
+        self.base.initFromSettings(&settings.base);
+
+        for (&self.children, &settings.children) |*c, *s| {
+            var child_result = try s.settings.get().?.createShape(allocator);
+            defer child_result.deinit();
+            if (child_result.hasError()) {
+                result.assign(&child_result);
+                return;
+            }
+            c.* = .{ .shape = .init(child_result.getPtr()), .position = s.position };
+        }
+
+        result.set(.init(self.asShapeMut()));
     }
 
     /// new TestCompoundShape(...): reference count 0, adds a reference to the children
