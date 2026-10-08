@@ -110,24 +110,38 @@ Notes for later phases:
   near-degenerate hulls, empty meshes). Zolt panics on them with asserts enabled, like an assert-enabled
   Jolt build, and matches Jolt's release behavior in ReleaseFast (guide section 7).
 
-### Phase 4: Collision (`Jolt/Physics/Collision`)
-1. Basics: ObjectLayer, BroadPhaseLayer, SubShapeID, PhysicsMaterial, GroupFilter(s),
-   CollisionCollector(s), ShapeFilter, BackFaceMode, ActiveEdgeMode, CollectFacesMode,
-   ContactListener types, CastResult, CollidePointResult, RayCast, ShapeCast, AABoxCast.
-2. Shape base + convex shapes: Shape, ConvexShape, SphereShape, BoxShape, CapsuleShape,
-   TaperedCapsuleShape, CylinderShape, TaperedCylinderShape, ConvexHullShape, TriangleShape,
-   PlaneShape, EmptyShape (vtable pattern A from the guide).
-3. Collision algorithms: CollisionDispatch, CollideConvexVsTriangles, CollideSphereVsTriangles,
-   CastConvexVsTriangles, CastSphereVsTriangles, ManifoldBetweenTwoFaces, ActiveEdges,
-   InternalEdgeRemovingCollector, TransformedShape, NarrowPhaseQuery, EstimateCollisionResponse.
-4. Composite shapes: DecoratedShape, RotatedTranslatedShape, ScaledShape,
-   OffsetCenterOfMassShape, CompoundShape, StaticCompoundShape, MutableCompoundShape,
-   MeshShape, HeightFieldShape.
-5. Broad phase: BroadPhase, QuadTree, BroadPhaseQuadTree, BroadPhaseBruteForce.
-**Milestone M4:** shape and collision unit tests (`UnitTests/Physics/*Shape*`, `CollideShapeTests`,
-`RayShapeTests`, `CastShapeTests`, `ConvexVsTrianglesTest`, `BroadPhaseTests`, ...) pass.
+### Phase 4: Collision (`Jolt/Physics/Collision`) — in progress
+Architecture: [CollisionArchitecture.md](CollisionArchitecture.md) (decided by three competing compiled
+prototypes, two judges and a synthesis). Port order:
+1. Foundation F1: `Core/Virtual.zig`, `Core/PlacementBuffer.zig`, `Core/Result.zig`, BodyID,
+   MassProperties, a `Body` stub, PhysicsSettings, ObjectLayer, BroadPhaseLayer, the mode enums,
+   SubShapeID(Pair), RayCast, AABoxCast, CastResult, CollidePointResult, CollideShape, ShapeCast,
+   SortReverseAndStore, CollisionCollector(Impl), ShapeFilter, SimShapeFilter, PhysicsMaterial(Simple).
+2. Foundation F2: Shape (+ ShapeSettings, ShapeFunctions), ConvexShape, DecoratedShape, CompoundShape,
+   CompoundShapeVisitors, ScaleHelpers, GetTrianglesContext, CollisionDispatch, TransformedShape,
+   RegisterTypes with a stub for every shape.
+3. Wave A (parallel): the convex shapes (Sphere, Box, Capsule, TaperedCapsule, Cylinder,
+   TaperedCylinder, ConvexHull + PolyhedronSubmergedVolumeCalculator, Plane, Empty), the decorated
+   shapes (Scaled, RotatedTranslated, OffsetCenterOfMass), the triangle algorithms (ActiveEdges,
+   ManifoldBetweenTwoFaces, Collide/Cast Convex/Sphere VsTriangles, CollideShapeVsShapePerLeaf,
+   InternalEdgeRemovingCollector), filters and groups (GroupFilter(Table), CollisionGroup,
+   ObjectLayerPairFilter*, BroadPhaseLayerInterface*, ObjectVsBroadPhaseLayerFilter*) and the
+   ContactListener types.
+4. Wave B: TriangleShape, StaticCompoundShape, MutableCompoundShape, MeshShape, HeightFieldShape.
+The broad phase, NarrowPhaseQuery and EstimateCollisionResponse need `BodyManager` and move to Phase 5.
+Most `UnitTests/Physics` files mix pure shape cases with cases that need `PhysicsTestContext`
+(a `PhysicsSystem`): Phase 4 ports the pure cases and marks the files partial; parity tests against the
+C++ library carry most of the verification.
+**Milestone M4:** every collision function has bit exact parity tests, and the shape-only cases of
+`ShapeTests`, `RayShapeTests`, `CollideShapeTests`, `CastShapeTests`, `ConvexVsTrianglesTest`,
+`CollidePointTests`, `SubShapeIDTest`, `CollisionGroupTests`, `ObjectLayerPairFilter*Tests`,
+`HeightFieldShapeTests`, `MutableCompoundShapeTests`, `OffsetCenterOfMassShapeTests`,
+`TaperedCylinderShapeTests`, `TransformedShapeTests`, `ShapeFilterTests` and `ActiveEdgesTests` pass.
 
 ### Phase 5: Bodies and simulation (`Jolt/Physics`, `Jolt/Physics/Body`, `Jolt/Physics/Constraints` core)
+BroadPhase, BroadPhaseQuery, QuadTree, BroadPhaseQuadTree, BroadPhaseBruteForce, NarrowPhaseQuery,
+EstimateCollisionResponse, SimShapeFilterWrapper (moved from Phase 4), then the remaining
+`PhysicsTestContext` cases of the Phase 4 test files.
 MotionType, MotionQuality, AllowedDOFs, BodyID, MassProperties, MotionProperties, Body,
 BodyCreationSettings, BodyManager, BodyLock*, BodyInterface, BodyFilter, PhysicsSettings,
 ContactConstraintManager, ConstraintPart/*, CalculateSolverSteps, ConstraintManager, IslandBuilder,

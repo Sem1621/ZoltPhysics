@@ -714,11 +714,12 @@ Variants:
   single-sub-shape case.
 - `MeshShape` and `HeightFieldShape`, which need the triangle algorithms and the AABB tree.
 
-**Wave C:**
-- `BroadPhase`, `QuadTree`, `BroadPhaseQuadTree`, `BroadPhaseBruteForce`, `NarrowPhaseQuery`,
-  `NarrowPhaseStats` and `EstimateCollisionResponse`, using minimal Body / BodyManager stubs
-  until Phase 5.
-- The remaining tests for milestone M4.
+**Phase 5, not Phase 4:** `BroadPhase`, `BroadPhaseQuery`, `QuadTree`, `BroadPhaseQuadTree`,
+`BroadPhaseBruteForce`, `NarrowPhaseQuery`, `EstimateCollisionResponse` and `SimShapeFilterWrapper`
+depend on `Body` / `BodyManager` and are ported with them instead of against stubs.
+`ManifoldBetweenTwoFaces.cpp` includes `ContactConstraintManager.h` only for its debug draw flags
+(`sDrawContactPoint...`, behind `JPH_DEBUG_RENDERER`), so it belongs in Wave A. `ContactListener`
+needs only the `Body` pointer type from the F1 stub.
 
 ## 6. Judges' critical flaws and how this design resolves them
 
