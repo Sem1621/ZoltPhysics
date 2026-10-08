@@ -21,4 +21,5 @@ test {
     _ = @import("Geometry/QueriesParity.zig");
     _ = @import("Math/MathParity.zig");
     _ = @import("ParityFramework.zig");
+    _ = @import("Physics/BasicsParity.zig");
 }

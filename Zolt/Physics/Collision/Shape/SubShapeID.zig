@@ -83,12 +83,18 @@ pub const SubShapeID = extern struct {
 
     /// Adds an id at a particular position in the chain
     /// (this should really only be called by the SubShapeIDCreator)
+    ///
+    /// Jolt shifts a Type by inFirstBit, which is 32 when 0 bits are pushed after the ID is full (e.g. a compound
+    /// with a single sub shape at the end of a deep hierarchy). That shift is undefined in C++ (x86 masks the shift
+    /// count, so nothing changes). Zolt shifts in BiggerType and truncates: the same result for every first bit
+    /// below 32, and no change for 0 bits at bit 32 (the mask and the value are 0).
     fn pushID(self: *SubShapeID, value: Type, first_bit: u32, bits: u32) void {
         // First clear the bits
-        self.value &= ~(@as(Type, @truncate((@as(BiggerType, 1) << @intCast(bits)) - 1)) << @intCast(first_bit));
+        const mask: Type = @truncate((@as(BiggerType, 1) << @intCast(bits)) - 1);
+        self.value &= ~@as(Type, @truncate(@as(BiggerType, mask) << @intCast(first_bit)));
 
         // Then set them to the new value
-        self.value |= value << @intCast(first_bit);
+        self.value |= @as(Type, @truncate(@as(BiggerType, value) << @intCast(first_bit)));
     }
 };
 
@@ -143,4 +149,9 @@ test "SubShapeID: push and pop" {
     const z = id.popID(0);
     try std.testing.expectEqual(@as(u32, 0), z.id);
     try std.testing.expectEqual(@as(u32, 42), z.remainder.getValue());
+
+    // Pushing 0 bits when all 32 bits are used changes nothing
+    const full = (SubShapeIDCreator{}).pushID(0xabcdef01, 32).pushID(0, 0);
+    try std.testing.expectEqual(@as(u32, 0xabcdef01), full.getID().getValue());
+    try std.testing.expectEqual(@as(u32, 32), full.getNumBitsWritten());
 }
