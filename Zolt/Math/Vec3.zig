@@ -6,6 +6,7 @@
 //! so W never holds garbage, and divisions never divide by an uninitialized lane.
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const math = @import("Math.zig");
 const HashCombine = @import("../Core/HashCombine.zig");
 const Swizzle = @import("Swizzle.zig").Swizzle;
@@ -38,6 +39,23 @@ pub const Vec3 = extern struct {
     /// Load 3 floats from memory (explicit Vec3(const Float3 &))
     pub fn fromFloat3(v: Float3) Vec3 {
         return init(v.x, v.y, v.z);
+    }
+
+    /// `RVec3(inV)` with a Vec3 argument in single precision, where RVec3 is Vec3: a copy (DVec3.fromVec3 in double
+    /// precision). Like Mat44.toMat44, this only exists when not compiling with double precision, so that
+    /// `RVec3.fromVec3(v)` is spelled the same in both precisions.
+    pub const fromVec3 = if (Core.double_precision) {} else fromVec3SinglePrecision;
+
+    /// `Vec3(inV)` with an RVec3 argument in single precision, where RVec3 is Vec3: a copy (DVec3.toVec3 in double
+    /// precision). Only exists when not compiling with double precision, so that `r.toVec3()` works in both precisions.
+    pub const toVec3 = if (Core.double_precision) {} else toVec3SinglePrecision;
+
+    fn fromVec3SinglePrecision(v: Vec3) Vec3 {
+        return v;
+    }
+
+    fn toVec3SinglePrecision(self: Vec3) Vec3 {
+        return self;
     }
 
     /// Vector with all zeros

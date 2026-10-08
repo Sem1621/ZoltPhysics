@@ -38,6 +38,20 @@ pub fn build(b: *std.Build) void {
     options.addOption(u8, "object_layer_bits", object_layer_bits);
     const options_module = options.createModule();
 
+    // User shape registrations, default material and material types (Zolt/RegisterTypes.zig): an empty module by
+    // default. An application replaces it with `zolt_module.addImport("zolt_user_types", my_module)`, where
+    // `my_module` may declare `registrations`, `default_material` and `material_types` (and import "zolt" itself).
+    const user_types_source = b.addWriteFiles().add("zolt_user_types.zig",
+        \\//! Default (empty) `zolt_user_types` module: no user shapes, Jolt's default material, no user material types.
+        \\pub const registrations = .{};
+        \\
+    );
+    const user_types_module = b.createModule(.{
+        .root_source_file = user_types_source,
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The library module. Consumers use it via `b.dependency("ZoltPhysics", ...).module("zolt")`.
     const zolt = b.addModule("zolt", .{
         .root_source_file = b.path("Zolt/zolt.zig"),
@@ -45,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zolt_options", .module = options_module },
+            .{ .name = "zolt_user_types", .module = user_types_module },
         },
     });
 

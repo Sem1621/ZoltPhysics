@@ -18,10 +18,9 @@
 //!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in the comptime list `material_types` (the
 //!   Factory of Phase 8 replaces it). Restoring allocates, so it returns `Allocator.Error!PhysicsMaterialResult`;
 //!   Jolt's errors ("Failed to read type hash", ...) are values in the result.
-//! - Foundation note: RegisterTypes.zig (and the `zolt_user_types` module, with which an application can replace the
-//!   default material and add material types) is created in the second foundation step. Until then `default` and
-//!   `material_types` are declared here; that step redirects them to `RegisterTypes.default_material` and
-//!   `RegisterTypes.material_types` (D8).
+//! - `default` and `material_types` come from RegisterTypes.zig (`RegisterTypes.default_material` /
+//!   `RegisterTypes.material_types`), where the `zolt_user_types` module can replace the default material and add
+//!   material types (D4, D8).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -35,6 +34,7 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const virtual = @import("../../Core/Virtual.zig");
 const PhysicsMaterialSimple = @import("PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const RegisterTypes = @import("../../RegisterTypes.zig");
 
 /// This structure describes the surface of (part of) a shape. You should inherit from it to define additional
 /// information that is interesting for the simulation. The 2 materials involved in a contact could be used
@@ -72,11 +72,11 @@ pub const PhysicsMaterial = struct {
     is_static: bool = false,
 
     /// Default material that is used when a shape has no materials defined (PhysicsMaterial::sDefault)
-    pub const default: *const PhysicsMaterial = &PhysicsMaterialSimple.default_material.base;
+    pub const default: *const PhysicsMaterial = RegisterTypes.default_material;
 
     /// Material classes that restoreFromBinaryState can create (Factory::sInstance until Phase 8). Each one declares
     /// `rtti_name` and `createDefault(allocator) Allocator.Error!*T` (its default constructor on the heap).
-    pub const material_types = .{ PhysicsMaterial, PhysicsMaterialSimple };
+    pub const material_types = RegisterTypes.material_types;
 
     pub const PhysicsMaterialResult = Result(Ref(PhysicsMaterial));
 

@@ -203,6 +203,22 @@ pub const CollidePointResult = @import("Physics/Collision/CollidePointResult.zig
 pub const CollideSettingsBase = @import("Physics/Collision/CollideShape.zig").CollideSettingsBase;
 pub const CollideShapeResult = @import("Physics/Collision/CollideShape.zig").CollideShapeResult;
 pub const CollideShapeSettings = @import("Physics/Collision/CollideShape.zig").CollideShapeSettings;
+pub const CollideSoftBodyVertexIterator = @import("Physics/Collision/CollideSoftBodyVertexIterator.zig").CollideSoftBodyVertexIterator;
+pub const CollisionCollector = @import("Physics/Collision/CollisionCollector.zig").CollisionCollector;
+pub const CollisionCollectorTraitsCastRay = @import("Physics/Collision/CollisionCollector.zig").CollisionCollectorTraitsCastRay;
+pub const CollisionCollectorTraitsCastShape = @import("Physics/Collision/CollisionCollector.zig").CollisionCollectorTraitsCastShape;
+pub const CollisionCollectorTraitsCollidePoint = @import("Physics/Collision/CollisionCollector.zig").CollisionCollectorTraitsCollidePoint;
+pub const CollisionCollectorTraitsCollideShape = @import("Physics/Collision/CollisionCollector.zig").CollisionCollectorTraitsCollideShape;
+pub const AllHitCollisionCollector = @import("Physics/Collision/CollisionCollectorImpl.zig").AllHitCollisionCollector;
+pub const AllocationErrorLatch = @import("Physics/Collision/CollisionCollectorImpl.zig").AllocationErrorLatch;
+pub const AnyHitCollisionCollector = @import("Physics/Collision/CollisionCollectorImpl.zig").AnyHitCollisionCollector;
+pub const ClosestHitCollisionCollector = @import("Physics/Collision/CollisionCollectorImpl.zig").ClosestHitCollisionCollector;
+pub const ClosestHitPerBodyCollisionCollector = @import("Physics/Collision/CollisionCollectorImpl.zig").ClosestHitPerBodyCollisionCollector;
+pub const CollisionDispatch = @import("Physics/Collision/CollisionDispatch.zig");
+pub const NarrowPhaseStat = @import("Physics/Collision/NarrowPhaseStats.zig").NarrowPhaseStat;
+pub const track_narrowphase_stats = @import("Physics/Collision/NarrowPhaseStats.zig").track_narrowphase_stats;
+pub const TrackNarrowPhaseCollector = @import("Physics/Collision/NarrowPhaseStats.zig").TrackNarrowPhaseCollector;
+pub const TrackNarrowPhaseStat = @import("Physics/Collision/NarrowPhaseStats.zig").TrackNarrowPhaseStat;
 pub const DefaultObjectLayerFilter = @import("Physics/Collision/ObjectLayer.zig").DefaultObjectLayerFilter;
 pub const object_layer_invalid = @import("Physics/Collision/ObjectLayer.zig").object_layer_invalid;
 pub const ObjectLayer = @import("Physics/Collision/ObjectLayer.zig").ObjectLayer;
@@ -217,13 +233,71 @@ pub const RayCastKind = @import("Physics/Collision/RayCast.zig").RayCastKind;
 pub const RayCastSettings = @import("Physics/Collision/RayCast.zig").RayCastSettings;
 pub const RayCastT = @import("Physics/Collision/RayCast.zig").RayCastT;
 pub const RRayCast = @import("Physics/Collision/RayCast.zig").RRayCast;
+pub const BoxShape = @import("Physics/Collision/Shape/BoxShape.zig").BoxShape;
+pub const CapsuleShape = @import("Physics/Collision/Shape/CapsuleShape.zig").CapsuleShape;
+pub const CompoundShape = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShape;
+pub const ConvexHullShape = @import("Physics/Collision/Shape/ConvexHullShape.zig").ConvexHullShape;
+pub const ConvexShape = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShape;
+pub const CylinderShape = @import("Physics/Collision/Shape/CylinderShape.zig").CylinderShape;
+pub const DecoratedShape = @import("Physics/Collision/Shape/DecoratedShape.zig").DecoratedShape;
+pub const EmptyShape = @import("Physics/Collision/Shape/EmptyShape.zig").EmptyShape;
+pub const GetTrianglesContextMultiVertexList = @import("Physics/Collision/Shape/GetTrianglesContext.zig").GetTrianglesContextMultiVertexList;
+pub const GetTrianglesContextVertexList = @import("Physics/Collision/Shape/GetTrianglesContext.zig").GetTrianglesContextVertexList;
+pub const HeightFieldShape = @import("Physics/Collision/Shape/HeightFieldShape.zig").HeightFieldShape;
+pub const MeshShape = @import("Physics/Collision/Shape/MeshShape.zig").MeshShape;
+pub const MutableCompoundShape = @import("Physics/Collision/Shape/MutableCompoundShape.zig").MutableCompoundShape;
+pub const OffsetCenterOfMassShape = @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig").OffsetCenterOfMassShape;
+pub const PlaneShape = @import("Physics/Collision/Shape/PlaneShape.zig").PlaneShape;
+pub const RotatedTranslatedShape = @import("Physics/Collision/Shape/RotatedTranslatedShape.zig").RotatedTranslatedShape;
+pub const ScaledShape = @import("Physics/Collision/Shape/ScaledShape.zig").ScaledShape;
+pub const ScaleHelpers = @import("Physics/Collision/Shape/ScaleHelpers.zig");
+pub const all_sub_shape_types = @import("Physics/Collision/Shape/Shape.zig").all_sub_shape_types;
+pub const CastRayCollector = @import("Physics/Collision/Shape/Shape.zig").CastRayCollector;
+pub const CastShapeCollector = @import("Physics/Collision/Shape/Shape.zig").CastShapeCollector;
+pub const CollidePointCollector = @import("Physics/Collision/Shape/Shape.zig").CollidePointCollector;
+pub const CollideShapeCollector = @import("Physics/Collision/Shape/Shape.zig").CollideShapeCollector;
+pub const compound_sub_shape_types = @import("Physics/Collision/Shape/Shape.zig").compound_sub_shape_types;
+pub const convex_sub_shape_types = @import("Physics/Collision/Shape/Shape.zig").convex_sub_shape_types;
+pub const decorator_sub_shape_types = @import("Physics/Collision/Shape/Shape.zig").decorator_sub_shape_types;
+pub const num_sub_shape_types = @import("Physics/Collision/Shape/Shape.zig").num_sub_shape_types;
+pub const PhysicsMaterialRefC = @import("Physics/Collision/Shape/Shape.zig").PhysicsMaterialRefC;
+pub const Shape = @import("Physics/Collision/Shape/Shape.zig").Shape;
+pub const ShapeFunctions = @import("Physics/Collision/Shape/Shape.zig").ShapeFunctions;
+pub const ShapeList = @import("Physics/Collision/Shape/Shape.zig").ShapeList;
+pub const ShapeRefC = @import("Physics/Collision/Shape/Shape.zig").ShapeRefC;
+pub const ShapeResult = @import("Physics/Collision/Shape/Shape.zig").ShapeResult;
+pub const ShapeSettings = @import("Physics/Collision/Shape/Shape.zig").ShapeSettings;
+pub const ShapeSubType = @import("Physics/Collision/Shape/Shape.zig").ShapeSubType;
+pub const ShapeType = @import("Physics/Collision/Shape/Shape.zig").ShapeType;
+pub const sub_shape_type_names = @import("Physics/Collision/Shape/Shape.zig").sub_shape_type_names;
+pub const TransformedShapeCollector = @import("Physics/Collision/Shape/Shape.zig").TransformedShapeCollector;
+pub const SphereShape = @import("Physics/Collision/Shape/SphereShape.zig").SphereShape;
+pub const StaticCompoundShape = @import("Physics/Collision/Shape/StaticCompoundShape.zig").StaticCompoundShape;
 pub const SubShapeID = @import("Physics/Collision/Shape/SubShapeID.zig").SubShapeID;
 pub const SubShapeIDCreator = @import("Physics/Collision/Shape/SubShapeID.zig").SubShapeIDCreator;
 pub const SubShapeIDPair = @import("Physics/Collision/Shape/SubShapeIDPair.zig").SubShapeIDPair;
+pub const TaperedCapsuleShape = @import("Physics/Collision/Shape/TaperedCapsuleShape.zig").TaperedCapsuleShape;
+pub const TaperedCylinderShape = @import("Physics/Collision/Shape/TaperedCylinderShape.zig").TaperedCylinderShape;
+pub const TriangleShape = @import("Physics/Collision/Shape/TriangleShape.zig").TriangleShape;
+pub const RShapeCast = @import("Physics/Collision/ShapeCast.zig").RShapeCast;
+pub const ShapeCast = @import("Physics/Collision/ShapeCast.zig").ShapeCast;
+pub const ShapeCastKind = @import("Physics/Collision/ShapeCast.zig").ShapeCastKind;
+pub const ShapeCastResult = @import("Physics/Collision/ShapeCast.zig").ShapeCastResult;
+pub const ShapeCastSettings = @import("Physics/Collision/ShapeCast.zig").ShapeCastSettings;
+pub const ShapeCastT = @import("Physics/Collision/ShapeCast.zig").ShapeCastT;
+pub const ReversedShapeFilter = @import("Physics/Collision/ShapeFilter.zig").ReversedShapeFilter;
+pub const ShapeFilter = @import("Physics/Collision/ShapeFilter.zig").ShapeFilter;
+pub const SimShapeFilter = @import("Physics/Collision/SimShapeFilter.zig").SimShapeFilter;
 pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig").countAndSortTrues;
 pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
+pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
 pub const physics_settings = @import("Physics/PhysicsSettings.zig");
 pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
+
+pub const SoftBodyShape = @import("Physics/SoftBody/SoftBodyShape.zig").SoftBodyShape;
+
+// RegisterTypes
+pub const RegisterTypes = @import("RegisterTypes.zig");
 
 // TriangleSplitter
 pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
@@ -336,14 +410,48 @@ const source_files = .{
     @import("Physics/Collision/CollectFacesMode.zig"),
     @import("Physics/Collision/CollidePointResult.zig"),
     @import("Physics/Collision/CollideShape.zig"),
+    @import("Physics/Collision/CollideSoftBodyVertexIterator.zig"),
+    @import("Physics/Collision/CollisionCollector.zig"),
+    @import("Physics/Collision/CollisionCollectorImpl.zig"),
+    @import("Physics/Collision/CollisionDispatch.zig"),
+    @import("Physics/Collision/NarrowPhaseStats.zig"),
     @import("Physics/Collision/ObjectLayer.zig"),
     @import("Physics/Collision/PhysicsMaterial.zig"),
     @import("Physics/Collision/PhysicsMaterialSimple.zig"),
     @import("Physics/Collision/RayCast.zig"),
+    @import("Physics/Collision/Shape/BoxShape.zig"),
+    @import("Physics/Collision/Shape/CapsuleShape.zig"),
+    @import("Physics/Collision/Shape/CompoundShape.zig"),
+    @import("Physics/Collision/Shape/ConvexHullShape.zig"),
+    @import("Physics/Collision/Shape/ConvexShape.zig"),
+    @import("Physics/Collision/Shape/CylinderShape.zig"),
+    @import("Physics/Collision/Shape/DecoratedShape.zig"),
+    @import("Physics/Collision/Shape/EmptyShape.zig"),
+    @import("Physics/Collision/Shape/GetTrianglesContext.zig"),
+    @import("Physics/Collision/Shape/HeightFieldShape.zig"),
+    @import("Physics/Collision/Shape/MeshShape.zig"),
+    @import("Physics/Collision/Shape/MutableCompoundShape.zig"),
+    @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig"),
+    @import("Physics/Collision/Shape/PlaneShape.zig"),
+    @import("Physics/Collision/Shape/RotatedTranslatedShape.zig"),
+    @import("Physics/Collision/Shape/ScaledShape.zig"),
+    @import("Physics/Collision/Shape/ScaleHelpers.zig"),
+    @import("Physics/Collision/Shape/Shape.zig"),
+    @import("Physics/Collision/Shape/SphereShape.zig"),
+    @import("Physics/Collision/Shape/StaticCompoundShape.zig"),
     @import("Physics/Collision/Shape/SubShapeID.zig"),
     @import("Physics/Collision/Shape/SubShapeIDPair.zig"),
+    @import("Physics/Collision/Shape/TaperedCapsuleShape.zig"),
+    @import("Physics/Collision/Shape/TaperedCylinderShape.zig"),
+    @import("Physics/Collision/Shape/TriangleShape.zig"),
+    @import("Physics/Collision/ShapeCast.zig"),
+    @import("Physics/Collision/ShapeFilter.zig"),
+    @import("Physics/Collision/SimShapeFilter.zig"),
     @import("Physics/Collision/SortReverseAndStore.zig"),
+    @import("Physics/Collision/TransformedShape.zig"),
     @import("Physics/PhysicsSettings.zig"),
+    @import("Physics/SoftBody/SoftBodyShape.zig"),
+    @import("RegisterTypes.zig"),
     @import("TriangleSplitter/TriangleSplitter.zig"),
     @import("TriangleSplitter/TriangleSplitterBinning.zig"),
     @import("TriangleSplitter/TriangleSplitterMean.zig"),
