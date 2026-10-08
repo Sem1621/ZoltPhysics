@@ -411,7 +411,8 @@ test "MassProperties parity" {
 
         // Rotate. Mat44::Multiply3x3(Mat44) and Multiply3x3RightTransposed assert that W of the first 3 columns is 0: the
         // rotation gets W = 0, the 3x3 part can be anything. An infinite inertia makes W of the intermediate product NaN
-        // (0 * inf), Jolt's assert fires on that too, so builds with asserts skip those inputs.
+        // (0 * inf), Jolt's assert fires on that too, so builds with asserts skip those inputs (only the ReleaseFast
+        // parity run, which CI does too, compares them).
         if (!Core.enable_asserts or isFinite3x3(mp.inertia)) {
             var rotation = gen.matrix();
             for (0..3) |c| rotation[4 * c + 3] = 0.0;
@@ -513,8 +514,9 @@ test "MassProperties.decomposePrincipalMomentsOfInertia parity" {
 
         // Jolt checks the decomposition with asserts (JPH_ENABLE_ASSERTS, enabled in Zolt's safe builds) that ill
         // conditioned and rank deficient tensors violate. Skip the inputs for which Jolt's own asserts would fire,
-        // decided on Jolt's result: Zolt computes the same bits, so it would assert on exactly these. Optimized builds
-        // (no asserts) compare every input.
+        // decided on Jolt's result: Zolt computes the same bits, so it would assert on exactly these. Builds without
+        // asserts compare every input: the failing decompositions (ok == 0, the outputs keep the sentinels) and the
+        // degenerate tensors are only covered by the ReleaseFast parity run (part of the CI parity matrix).
         if (Core.enable_asserts and wouldAssert(mp, j.ok, j.rotation, j.diagonal)) {
             num_skipped += 1;
             continue;
@@ -942,7 +944,7 @@ fn zoltRestoreMaterial(bytes: []const u8) !MaterialRestore {
         r.valid = 1;
         r.hash = material.getRTTIHash();
         r.color = material.getDebugColor().getUInt32();
-        break :blk std.mem.sliceTo(material.getDebugName(), 0); // Jolt returns mDebugName.c_str(), which ends at the first 0 byte
+        break :blk material.getDebugName(); // Names with 0 bytes: Jolt returns mDebugName.c_str(), which ends at the first one
     } else result.getError();
     r.text_length = @intCast(text.len);
     @memcpy(r.text[0..@min(text.len, r.text.len)], text[0..@min(text.len, r.text.len)]);

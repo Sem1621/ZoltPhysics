@@ -74,10 +74,14 @@ jobs:
 
   parity:
     runs-on: ubuntu-latest
-    name: Parity with C++ Jolt double_precision=${{ matrix.double_precision }}
+    name: Parity with C++ Jolt ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }}
     strategy:
       fail-fast: false
       matrix:
+        # ReleaseSafe checks Zolt's asserts. ReleaseFast has no asserts, so it also compares the inputs for which
+        # Jolt's own asserts would fire (failing / degenerate decompositions, non-finite inertia, ...), which the
+        # parity tests skip in builds with asserts.
+        optimize: [ ReleaseSafe, ReleaseFast ]
         double_precision: [ false, true ]
     steps:
     - name: Checkout Code
@@ -87,4 +91,4 @@ jobs:
       with:
         version: ${{ env.ZIG_VERSION }}
     - name: Compare with the C++ library
-      run: zig build parity --summary all -Doptimize=ReleaseSafe -Ddouble_precision=${{ matrix.double_precision }}
+      run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}

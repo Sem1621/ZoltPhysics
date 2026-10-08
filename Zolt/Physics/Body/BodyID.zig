@@ -101,8 +101,12 @@ test "BodyID" {
     try std.testing.expect(id.eql(BodyID.init(id.getIndexAndSequenceNumber())));
     try std.testing.expect(!id.eql(.invalid));
 
-    // The sequence number shares bits with the broadphase bit (0xff << 23 sets bit 31)
-    try std.testing.expectEqual(@as(u8, 0xff), BodyID.fromIndexAndSequenceNumber(5, 0xff).getSequenceNumber());
+    // The maximum sequence number fills bits 23..30 and leaves the broadphase bit (bit 31) clear
+    const max_sequence = BodyID.fromIndexAndSequenceNumber(BodyID.max_body_index, BodyID.max_sequence_number);
+    try std.testing.expectEqual(BodyID.max_sequence_number, max_sequence.getSequenceNumber());
+    try std.testing.expectEqual(BodyID.max_body_index, max_sequence.getIndex());
+    try std.testing.expectEqual(@as(u32, 0), max_sequence.getIndexAndSequenceNumber() & BodyID.broad_phase_bit);
+    try std.testing.expect(!max_sequence.isInvalid());
 
     try std.testing.expect(BodyID.init(1).lessThan(.init(2)));
     try std.testing.expect(!BodyID.init(2).lessThan(.init(2)));

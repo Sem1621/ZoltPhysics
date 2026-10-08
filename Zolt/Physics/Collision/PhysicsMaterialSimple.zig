@@ -9,6 +9,22 @@
 //! `PhysicsMaterialSimple(inName, inColor)` is `init(allocator, name, color)` (on the stack or as a member:
 //! `base.setEmbedded()` before taking references, `base.deinit()` at the end) / `create(allocator, name, color)`
 //! (`new`, reference count 0).
+//!
+//! The class is not final: a material that derives from it (Jolt's FrictionPerTriangleTest::MyMaterial) builds its
+//! base with `initDerived(@This(), allocator, name, color)` / `initDefaultDerived(@This(), allocator)`, so the vtable
+//! (overrides, destructor chain and the size that `destroy` frees) is the one of the most derived class:
+//!
+//! ```zig
+//! const MyMaterial = struct {
+//!     pub const overrides = .{};
+//!     pub const rtti_name = PhysicsMaterialSimple.rtti_name; // No JPH_RTTI of its own
+//!     base: PhysicsMaterialSimple,
+//!     friction: f32,
+//!     restitution: f32,
+//! };
+//! const m = try allocator.create(MyMaterial);
+//! m.* = .{ .base = try .initDerived(MyMaterial, allocator, "Slippery", Color.red), .friction = 0.1, .restitution = 0 };
+//! ```
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -38,7 +54,12 @@ pub const PhysicsMaterialSimple = struct {
 
     /// Constructor (PhysicsMaterialSimple())
     pub fn initDefault(allocator: Allocator) PhysicsMaterialSimple {
-        return .{ .base = .init(PhysicsMaterialSimple, allocator) };
+        return initDefaultDerived(PhysicsMaterialSimple, allocator);
+    }
+
+    /// Constructor (PhysicsMaterialSimple()) for classes that derive from this material (T is the most derived class)
+    pub fn initDefaultDerived(comptime T: type, allocator: Allocator) PhysicsMaterialSimple {
+        return .{ .base = .init(T, allocator) };
     }
 
     /// new PhysicsMaterialSimple() (used by PhysicsMaterial.restoreFromBinaryState)
@@ -50,7 +71,13 @@ pub const PhysicsMaterialSimple = struct {
 
     /// Constructor (PhysicsMaterialSimple(inName, inColor)), copies the name
     pub fn init(allocator: Allocator, name: []const u8, color: Color) Allocator.Error!PhysicsMaterialSimple {
-        return .{ .base = .init(PhysicsMaterialSimple, allocator), .debug_name = try allocator.dupe(u8, name), .debug_color = color };
+        return initDerived(PhysicsMaterialSimple, allocator, name, color);
+    }
+
+    /// Constructor (PhysicsMaterialSimple(inName, inColor)) for classes that derive from this material (T is the most
+    /// derived class), copies the name
+    pub fn initDerived(comptime T: type, allocator: Allocator, name: []const u8, color: Color) Allocator.Error!PhysicsMaterialSimple {
+        return .{ .base = .init(T, allocator), .debug_name = try allocator.dupe(u8, name), .debug_color = color };
     }
 
     /// new PhysicsMaterialSimple(inName, inColor): reference count 0, put it in a Ref / RefConst
@@ -84,7 +111,8 @@ pub const PhysicsMaterialSimple = struct {
 
     // Properties
     pub fn getDebugName(self: *const PhysicsMaterialSimple) []const u8 {
-        return self.debug_name;
+        // Jolt returns mDebugName.c_str(): a name with an embedded 0 byte ends there
+        return std.mem.sliceTo(self.debug_name, 0);
     }
 
     pub fn getDebugColor(self: *const PhysicsMaterialSimple) Color {
@@ -112,6 +140,7 @@ pub const PhysicsMaterialSimple = struct {
 };
 
 const RefConst = @import("../../Core/Reference.zig").RefConst;
+const virtual = @import("../../Core/Virtual.zig");
 const StreamInWrapper = @import("../../Core/StreamWrapper.zig").StreamInWrapper;
 const StreamOutWrapper = @import("../../Core/StreamWrapper.zig").StreamOutWrapper;
 
@@ -160,6 +189,97 @@ test "PhysicsMaterialSimple: owned name, binary state" {
     try std.testing.expectEqualStrings("", default.getDebugName());
     try expect(default.getDebugColor().eql(Color.grey));
     try std.testing.expect(PhysicsMaterialSimple.default_material.base.is_static);
+}
+
+test "PhysicsMaterialSimple: name with an embedded 0 byte" {
+    const allocator = std.testing.allocator;
+
+    // getDebugName is Jolt's mDebugName.c_str(): it ends at the first 0 byte, the binary state has the whole name
+    const material = try PhysicsMaterialSimple.create(allocator, "Ice\x00cold", Color.cyan);
+    var ref = RefConst(PhysicsMaterial).init(material.material());
+    defer ref.deinit();
+    try std.testing.expectEqualStrings("Ice", material.material().getDebugName());
+    try std.testing.expectEqual(@as(usize, 8), material.debug_name.len);
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamOutWrapper.init(&writer);
+    material.material().saveBinaryState(out.streamOut());
+    try std.testing.expectEqual(@as(usize, 4 + 4 + 8 + 4), writer.end);
+    try std.testing.expectEqualSlices(u8, "Ice\x00cold", writer.buffered()[8..16]);
+}
+
+test "PhysicsMaterialSimple: derived material" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+
+    // Jolt's FrictionPerTriangleTest::MyMaterial: adds data, overrides nothing and has no JPH_RTTI of its own
+    const MyMaterial = struct {
+        pub const overrides = .{};
+        pub const rtti_name = PhysicsMaterialSimple.rtti_name;
+
+        base: PhysicsMaterialSimple,
+        friction: f32,
+        restitution: f32,
+
+        fn create(a: Allocator, name: []const u8, color: Color, friction: f32, restitution: f32) Allocator.Error!*@This() {
+            const self = try a.create(@This());
+            errdefer a.destroy(self);
+            self.* = .{ .base = try .initDerived(@This(), a, name, color), .friction = friction, .restitution = restitution };
+            return self;
+        }
+    };
+
+    const name = try allocator.dupe(u8, "Slippery");
+    const slippery = try MyMaterial.create(allocator, name, Color.red, 0.1, 0.25);
+    allocator.free(name);
+    var slippery_ref = RefConst(PhysicsMaterial).init(&slippery.base.base);
+    defer slippery_ref.deinit(); // Destroys a MyMaterial (the size of MyMaterial is freed, the name too)
+    try expect(slippery.base.base.vtable == PhysicsMaterial.vtableFor(MyMaterial));
+    try std.testing.expectEqualStrings("Slippery", slippery_ref.get().?.getDebugName());
+    try expect(slippery_ref.get().?.getDebugColor().eql(Color.red));
+    try std.testing.expectEqual(PhysicsMaterial.rttiHash("PhysicsMaterialSimple"), slippery_ref.get().?.getRTTIHash());
+    const my_material: *const MyMaterial = virtual.downcast(MyMaterial, slippery_ref.get().?);
+    try std.testing.expectEqual(@as(f32, 0.1), my_material.friction);
+    try std.testing.expectEqual(@as(f32, 0.25), my_material.restitution);
+
+    // A derived class with overrides and a destructor of its own: both destructors run, derived first
+    const Tinted = struct {
+        pub const overrides = .{.getDebugColor};
+        pub const rtti_name = "Tinted";
+
+        base: PhysicsMaterialSimple,
+        tag: []u8,
+        destructed: *u32,
+
+        pub fn getDebugColor(self: *const @This()) Color {
+            _ = self;
+            return Color.green;
+        }
+
+        pub fn destruct(self: *@This()) void {
+            self.base.base.allocator.free(self.tag);
+            self.destructed.* += 1;
+        }
+    };
+
+    var destructed: u32 = 0;
+    const tinted = try allocator.create(Tinted);
+    tinted.* = .{ .base = try .initDerived(Tinted, allocator, "Tinted", Color.red), .tag = try allocator.dupe(u8, "tag"), .destructed = &destructed };
+    var tinted_ref = RefConst(PhysicsMaterial).init(&tinted.base.base);
+    try std.testing.expectEqualStrings("Tinted", tinted_ref.get().?.getDebugName());
+    try expect(tinted_ref.get().?.getDebugColor().eql(Color.green));
+    try std.testing.expectEqual(PhysicsMaterial.rttiHash("Tinted"), tinted_ref.get().?.getRTTIHash());
+    tinted_ref.deinit();
+    try std.testing.expectEqual(@as(u32, 1), destructed);
+
+    // The default constructor of a derived material, on the stack
+    var stack: Tinted = .{ .base = .initDefaultDerived(Tinted, allocator), .tag = try allocator.dupe(u8, "stack"), .destructed = &destructed };
+    stack.base.base.setEmbedded();
+    try std.testing.expectEqualStrings("", stack.base.base.getDebugName());
+    try expect(stack.base.base.getDebugColor().eql(Color.green));
+    stack.base.base.deinit();
+    try std.testing.expectEqual(@as(u32, 2), destructed);
 }
 
 test "PhysicsMaterialSimple: out of memory" {
