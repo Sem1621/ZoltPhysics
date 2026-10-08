@@ -1378,19 +1378,26 @@ test "Shape: virtual dispatch and the default implementations (box)" {
 
     // transformShape (default): the transform is decomposed, the scale made valid
     {
+        var sphere = TestSphereShape.init(allocator, 1.0);
+        sphere.asShape().setEmbedded();
+        defer sphere.asShapeMut().deinit(); // After the collector released its reference
         var collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
         defer collector.deinit();
-        const t = Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.5), Vec3.init(1, 2, 3)).mul(Mat44.scaleVec3(Vec3.init(2, 0, 3)));
+        const t = Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.5), Vec3.init(1, 2, 3)).mul(Mat44.scaleVec3(Vec3.init(2, 0.5, 3)));
         shape.transformShape(t, &collector.base);
         try collector.checkError();
         try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
         const decomposed = t.decompose();
         const ts = &collector.hits.items[0];
         try expect(ts.shape_position_com.eql(RVec3.fromVec3(decomposed.rotation_translation.getTranslation())));
-        try expect(ts.getShapeScale().eql(ScaleHelpers.makeNonZeroScale(decomposed.scale)));
-        try testing.expectEqual(ScaleHelpers.min_scale, ts.getShapeScale().getY());
+        try expect(ts.shape_rotation.eql(decomposed.rotation_translation.getQuaternion()));
         try expect(ts.getShapeScale().eql(ScaleHelpers.makeNonZeroScale(decomposed.scale)));
         try expect(ts.body_id.isInvalid());
+
+        // A shape that only supports uniform scales makes the decomposed scale uniform (TestSphereShape.makeScaleValid)
+        sphere.asShape().transformShape(Mat44.scaleVec3(Vec3.init(1, 2, 3)), &collector.base);
+        try collector.checkError();
+        try expect(collector.hits.items[1].getShapeScale().isClose(Vec3.replicate(2), .{}));
     }
 
     // Triangles (GetTrianglesContextVertexList in the placement buffer)
