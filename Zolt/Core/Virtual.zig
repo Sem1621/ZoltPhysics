@@ -52,9 +52,9 @@
 //! | wrong return type                               | `X.foo (in the vtable of X) must return f32`                   |
 //! | `*T` receiver on a const virtual                | `UserConvexShape.getVolume (in the vtable of UserConvexShape): the virtual function is const, the first parameter must be *const UserConvexShape` |
 //! | top-level virtual name in an abstract class     | `ConvexShape.getVolume has the name of a virtual function: an abstract class keeps its implementation in ConvexShape.impl (a top-level function would be called statically)` |
-//! | neither `overrides` nor `impl`                  | `X must declare `pub const overrides = .{ ... }` (the virtual functions it overrides, C++ `override`)` |
-//! | both `overrides` and `impl`                     | `X declares both `overrides` (concrete class) and `impl` (abstract class)` |
-//! | data entry not declared (e.g. `rtti_name`)      | `X must declare `pub const rtti_name`` |
+//! | neither `overrides` nor `impl`                  | ``X must declare `pub const overrides = .{ ... }` (the virtual functions it overrides, C++ `override`)`` |
+//! | both `overrides` and `impl`                     | ``X declares both `overrides` (concrete class) and `impl` (abstract class)`` |
+//! | data entry not declared (e.g. `rtti_name`)      | ``X must declare `pub const rtti_name` `` |
 //! | virtual function with more than 12 parameters   | `virtual functions with more than 12 parameters (including self) are not supported, add a thunk to Virtual.zig` |
 //! | `downcast` to a type that does not derive       | `X does not derive from Y`                                     |
 //! | `checkPrefix` field mismatch                    | `Derived.field does not match the base field Base.field`       |
