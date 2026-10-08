@@ -108,3 +108,54 @@ pub const ReversedShapeFilter = struct {
         return self.filter.shouldCollidePair(shape2, sub_shape_id_of_shape2, shape1, sub_shape_id_of_shape1);
     }
 };
+
+test "ShapeFilter: default accepts everything, derived filters, ReversedShapeFilter" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const TestShapes = @import("Shape/TestShapes.zig");
+    const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+
+    var box = TestShapes.TestBoxShape.init(allocator, Vec3.one(), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    var sphere = TestShapes.TestSphereShape.init(allocator, 1.0);
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    const id1: SubShapeID = .{ .value = 1 };
+    const id2: SubShapeID = .{ .value = 2 };
+
+    // The base class (Jolt's `{ }` default argument)
+    const default_filter: ShapeFilter = .{};
+    try testing.expect(default_filter.shouldCollide(box.asShape(), id1));
+    try testing.expect(default_filter.shouldCollidePair(box.asShape(), id1, sphere.asShape(), id2));
+    try testing.expect(default_filter.body_id2.isInvalid());
+
+    // A filter that only accepts pairs where shape 1 is the box with ID 1 (and remembers the last pair, Rule M: through a pointer)
+    const PairFilter = struct {
+        pub const overrides = .{.shouldCollidePair};
+
+        base: ShapeFilter = .init(@This()),
+        box: *const Shape,
+        last_id2: *SubShapeID,
+
+        pub fn shouldCollidePair(self: *const @This(), shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = shape2;
+            self.last_id2.* = sub_shape_id_of_shape2;
+            return shape1 == self.box and sub_shape_id_of_shape1.getValue() == 1;
+        }
+    };
+    var last_id2: SubShapeID = .empty;
+    var filter: PairFilter = .{ .box = box.asShape(), .last_id2 = &last_id2 };
+    filter.base.body_id2 = .init(12);
+    try testing.expect(filter.base.shouldCollide(box.asShape(), id1)); // Not overridden: the base class accepts
+    try testing.expect(filter.base.shouldCollidePair(box.asShape(), id1, sphere.asShape(), id2));
+    try testing.expect(!filter.base.shouldCollidePair(sphere.asShape(), id2, box.asShape(), id1));
+
+    // The reversed filter swaps shape 1 and shape 2 and copies body_id2
+    const reversed: ReversedShapeFilter = .init(&filter.base);
+    try testing.expect(reversed.base.body_id2.eql(.init(12)));
+    try testing.expect(reversed.base.shouldCollidePair(sphere.asShape(), id2, box.asShape(), id1));
+    try testing.expect(last_id2.eql(id2));
+    try testing.expect(!reversed.base.shouldCollidePair(box.asShape(), id1, sphere.asShape(), id2));
+    try testing.expect(reversed.base.shouldCollide(box.asShape(), id1)); // Forwarded to the base class version
+}

@@ -11,7 +11,6 @@
 //!   set. Shapes that build their vertex list in a static initializer call them at compile time.
 
 const std = @import("std");
-const Core = @import("../../../Core/Core.zig");
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const VertexArray = @import("../../../Geometry/VertexArray.zig");
 const math = @import("../../../Math/Math.zig");
@@ -238,3 +237,95 @@ pub const GetTrianglesContextMultiVertexList = struct {
         return @intCast(total_num_triangles);
     }
 };
+
+test "GetTrianglesContextVertexList: transform, blocks, inside out and materials" {
+    const testing = std.testing;
+    const expect = testing.expect;
+    const VertexArrayList = VertexArray.VertexArrayList;
+    const allocator = testing.allocator;
+
+    // 70 triangles in a list
+    var list: std.ArrayList(Vec3) = .empty;
+    defer list.deinit(allocator);
+    for (0..70) |i| {
+        const f: f32 = @floatFromInt(i);
+        try list.appendSlice(allocator, &.{ Vec3.init(f, 0, 0), Vec3.init(f, 1, 0), Vec3.init(f, 0, 1) });
+    }
+
+    const material = PhysicsMaterial.default;
+    var context: Shape.GetTrianglesContext = .{};
+    context.emplace(GetTrianglesContextVertexList).* = .init(Vec3.init(1, 2, 3), Quat.identity(), Vec3.init(1, 1, -1), Mat44.scale(2.0), list.items, material);
+    const ctx = context.get(GetTrianglesContextVertexList);
+    try expect(ctx.is_inside_out);
+
+    var vertices: [3 * 32]Float3 = undefined;
+    var materials: [32]*const PhysicsMaterial = undefined;
+    try testing.expectEqual(@as(u32, 32), ctx.getTrianglesNext(32, &vertices, &materials));
+    try testing.expectEqual(@as(u32, 32), ctx.getTrianglesNext(32, &vertices, &materials));
+    try testing.expectEqual(@as(u32, 6), ctx.getTrianglesNext(32, &vertices, null));
+    try testing.expectEqual(@as(u32, 0), ctx.getTrianglesNext(32, &vertices, &materials));
+    try expect(materials[31] == material);
+
+    // The last triangle (69): local_to_world = translate(1, 2, 3) * scale(1, 1, -1) * scale(2), flipped winding
+    const last = vertices[3 * 5 ..][0..3];
+    try expect(Vec3.fromFloat3(last[0]).eql(Vec3.init(139, 2, 3)));
+    try expect(Vec3.fromFloat3(last[1]).eql(Vec3.init(139, 2, 1))); // v[2]
+    try expect(Vec3.fromFloat3(last[2]).eql(Vec3.init(139, 4, 3))); // v[1]
+
+    // The sphere helpers produce the same bits at compile time as at runtime (shapes build their tables at comptime)
+    const comptime_sphere = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var v: StaticArray(Vec3, 384) = .empty;
+        GetTrianglesContextVertexList.createHalfUnitSphereTop(&v, 2) catch unreachable;
+        GetTrianglesContextVertexList.createHalfUnitSphereBottom(&v, 2) catch unreachable;
+        break :blk v;
+    };
+    var runtime_sphere: std.ArrayList(Vec3) = .empty;
+    defer runtime_sphere.deinit(allocator);
+    var level: u32 = 2;
+    _ = &level;
+    try GetTrianglesContextVertexList.createHalfUnitSphereTop(VertexArrayList{ .allocator = allocator, .list = &runtime_sphere }, level);
+    try GetTrianglesContextVertexList.createHalfUnitSphereBottom(VertexArrayList{ .allocator = allocator, .list = &runtime_sphere }, level);
+    try testing.expectEqual(@as(usize, 384), runtime_sphere.items.len);
+    try expect(std.mem.eql(u8, std.mem.sliceAsBytes(runtime_sphere.items), std.mem.sliceAsBytes(comptime_sphere.constSlice())));
+
+    // Open cylinder: 4 * 2^level quads, top at y = 1, bottom at y = -1
+    var cylinder: StaticArray(Vec3, 96) = .empty;
+    try GetTrianglesContextVertexList.createUnitOpenCylinder(&cylinder, 2);
+    try testing.expectEqual(@as(u32, 96), cylinder.len);
+    try expect(cylinder.get(0).eql(Vec3.init(0, 1, 1)) and cylinder.get(1).eql(Vec3.init(0, -1, 1)));
+    for (cylinder.constSlice()) |v| try expect(@abs(v.getY()) == 1.0 and @abs(v.getX() * v.getX() + v.getZ() * v.getZ() - 1.0) < 1.0e-6);
+}
+
+test "GetTrianglesContextMultiVertexList: parts are returned in order, blocks can span parts" {
+    const testing = std.testing;
+    const expect = testing.expect;
+
+    var part1: [3 * 20]Vec3 = undefined;
+    var part2: [3 * 40]Vec3 = undefined;
+    for (&part1, 0..) |*v, i| v.* = Vec3.init(@floatFromInt(i / 3), 0, 0);
+    for (&part2, 0..) |*v, i| v.* = Vec3.init(@floatFromInt(i / 3), @floatFromInt(i % 3), 1);
+
+    var context: Shape.GetTrianglesContext = .{};
+    const ctx = context.emplace(GetTrianglesContextMultiVertexList);
+    ctx.* = .init(false, PhysicsMaterial.default);
+    ctx.addPart(Mat44.identity(), &part1);
+    ctx.addPart(Mat44.translation(Vec3.init(0, 0, 10)), &part2);
+
+    var vertices: [3 * 32]Float3 = undefined;
+    var materials: [32]*const PhysicsMaterial = undefined;
+    try testing.expectEqual(@as(u32, 32), ctx.getTrianglesNext(32, &vertices, &materials)); // 20 + 12
+    try expect(Vec3.fromFloat3(vertices[3 * 20]).eql(Vec3.init(0, 0, 11)));
+    try testing.expectEqual(@as(u32, 28), ctx.getTrianglesNext(32, &vertices, &materials));
+    try expect(Vec3.fromFloat3(vertices[3 * 27 + 2]).eql(Vec3.init(39, 2, 11)));
+    try testing.expectEqual(@as(u32, 0), ctx.getTrianglesNext(32, &vertices, null));
+    try expect(materials[0] == PhysicsMaterial.default);
+
+    // Inside out: the winding of every triangle is flipped
+    var flipped_context: Shape.GetTrianglesContext = .{};
+    const flipped = flipped_context.emplace(GetTrianglesContextMultiVertexList);
+    flipped.* = .init(true, PhysicsMaterial.default);
+    flipped.addPart(Mat44.identity(), part2[0..6]);
+    try testing.expectEqual(@as(u32, 2), flipped.getTrianglesNext(32, &vertices, null));
+    try expect(Vec3.fromFloat3(vertices[1]).eql(part2[2]) and Vec3.fromFloat3(vertices[2]).eql(part2[1]));
+}

@@ -97,3 +97,45 @@ pub const default_material: *const PhysicsMaterial = if (@hasDecl(user_types, "d
 /// The material classes that PhysicsMaterial.restoreFromBinaryState can create (the material part of the Factory
 /// registration, until the Factory of Phase 8): Jolt's PhysicsMaterial and PhysicsMaterialSimple plus the user's
 pub const material_types = .{ PhysicsMaterial, PhysicsMaterialSimple } ++ (if (@hasDecl(user_types, "material_types")) user_types.material_types else .{});
+
+test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
+    const std = @import("std");
+    const testing = std.testing;
+    const CollisionDispatch = @import("Physics/Collision/CollisionDispatch.zig");
+    const ShapeFunctions = @import("Physics/Collision/Shape/Shape.zig").ShapeFunctions;
+    const TestShapes = @import("Physics/Collision/Shape/TestShapes.zig");
+
+    // RegisterTypesInternal's order
+    const expected = [_][]const u8{ "CompoundShape", "ConvexShape", "MutableCompoundShape", "StaticCompoundShape", "TriangleShape", "PlaneShape", "SphereShape", "BoxShape", "CapsuleShape", "TaperedCapsuleShape", "CylinderShape", "TaperedCylinderShape", "MeshShape", "ConvexHullShape", "HeightFieldShape", "SoftBodyShape", "RotatedTranslatedShape", "OffsetCenterOfMassShape", "ScaledShape", "EmptyShape" };
+    try testing.expectEqual(expected.len, registration_order.len);
+    inline for (registration_order, expected) |T, name| {
+        const full = @typeName(T);
+        try testing.expect(std.mem.endsWith(u8, full, "." ++ name) or std.mem.eql(u8, full, name));
+    }
+
+    // The inline tests register their test shapes through zolt_user_types (see build.zig), after Jolt's registrations
+    try testing.expectEqual(@as(usize, 1), user_registrations.len);
+    try testing.expect(user_registrations[0] == TestShapes.TestShapeRegistration);
+    const rebuilt = comptime Registry.build(registration_order ++ user_registrations);
+    try testing.expect(std.meta.eql(rebuilt, registry));
+    try testing.expect(registry.getCollideShape(.user1, .user1) == &TestShapes.collideBoxVsBox);
+    try testing.expect(ShapeFunctions.get(.user1).construct != null);
+
+    // A later registration overrides the earlier ones, like a user registration overrides Jolt's
+    const Override = struct {
+        pub fn register(comptime r: *Registry) void {
+            r.registerCollideShape(.user1, .user1, CollisionDispatch.reversedCollideShape);
+            r.shapeFunctions(.user1).construct = null;
+        }
+    };
+    const overridden = comptime Registry.build(registration_order ++ user_registrations ++ .{Override});
+    try testing.expect(overridden.getCollideShape(.user1, .user1) == &CollisionDispatch.reversedCollideShape);
+    try testing.expect(overridden.shape_functions[@intFromEnum(@import("Physics/Collision/Shape/Shape.zig").ShapeSubType.user1)].construct == null);
+
+    // The default material is Jolt's (the tests do not replace it), user material types are added to Jolt's
+    try testing.expect(default_material == &PhysicsMaterialSimple.default_material.base);
+    try testing.expect(PhysicsMaterial.default == default_material);
+    try testing.expectEqualStrings("Default", default_material.getDebugName());
+    try testing.expectEqual(@as(usize, 3), material_types.len);
+    try testing.expect(material_types[0] == PhysicsMaterial and material_types[1] == PhysicsMaterialSimple and material_types[2] == TestShapes.TestMaterial);
+}

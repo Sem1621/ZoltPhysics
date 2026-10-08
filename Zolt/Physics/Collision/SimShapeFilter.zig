@@ -62,3 +62,40 @@ pub const SimShapeFilter = struct {
         }
     };
 };
+
+test "SimShapeFilter: default accepts everything, a derived filter" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const TestShapes = @import("Shape/TestShapes.zig");
+    const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+
+    var box = TestShapes.TestBoxShape.init(allocator, Vec3.one(), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    const body1: Body = .{ .id = .init(1) };
+    const body2: Body = .{ .id = .init(2) };
+
+    const default_filter: SimShapeFilter = .{};
+    try testing.expect(default_filter.shouldCollide(&body1, box.asShape(), .empty, &body2, box.asShape(), .empty));
+
+    // Rejects collisions between bodies with the same user data; counts calls through a pointer (called from several threads in Jolt)
+    const UserDataFilter = struct {
+        pub const overrides = .{.shouldCollide};
+
+        base: SimShapeFilter = .init(@This()),
+        calls: *std.atomic.Value(u32),
+
+        pub fn shouldCollide(self: *const @This(), b1: *const Body, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, b2: *const Body, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ shape1, sub_shape_id_of_shape1, shape2, sub_shape_id_of_shape2 };
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return b1.getUserData() != b2.getUserData();
+        }
+    };
+    var calls: std.atomic.Value(u32) = .init(0);
+    const filter: UserDataFilter = .{ .calls = &calls };
+    var body3: Body = .{ .id = .init(3) };
+    body3.setUserData(5);
+    try testing.expect(!filter.base.shouldCollide(&body1, box.asShape(), .empty, &body2, box.asShape(), .empty));
+    try testing.expect(filter.base.shouldCollide(&body1, box.asShape(), .empty, &body3, box.asShape(), .empty));
+    try testing.expectEqual(@as(u32, 2), calls.load(.monotonic));
+}

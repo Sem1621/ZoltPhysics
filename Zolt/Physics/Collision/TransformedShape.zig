@@ -389,3 +389,267 @@ pub const TransformedShape = struct {
         return if (ts) |t| t.body_id else .invalid;
     }
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (the test shapes of Shape/TestShapes.zig are registered as User1..User3 through zolt_user_types in the inline tests)
+
+const testing = std.testing;
+const Allocator = std.mem.Allocator;
+const math = @import("../../Math/Math.zig");
+const RefCount = @import("../../Core/Reference.zig").RefCount;
+const TestShapes = @import("Shape/TestShapes.zig");
+const CollisionCollectorImpl = @import("CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const ClosestHitCollisionCollector = CollisionCollectorImpl.ClosestHitCollisionCollector;
+
+fn rvec3(x: f32, y: f32, z: f32) RVec3 {
+    return RVec3.init(x, y, z);
+}
+
+/// Remembers the body ID that the entry point wrote into the filter (C++ `mutable mBodyID2`, Rule M) and counts calls
+const RecordingFilter = struct {
+    pub const overrides = .{ .shouldCollide, .shouldCollidePair };
+
+    base: ShapeFilter = .init(@This()),
+    seen_body_id: *BodyID,
+    accept: bool = true,
+
+    pub fn shouldCollide(self: *const RecordingFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = .{ shape2, sub_shape_id_of_shape2 };
+        self.seen_body_id.* = self.base.body_id2;
+        return self.accept;
+    }
+
+    pub fn shouldCollidePair(self: *const RecordingFilter, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = .{ shape1, sub_shape_id_of_shape1, shape2, sub_shape_id_of_shape2 };
+        self.seen_body_id.* = self.base.body_id2;
+        return self.accept;
+    }
+};
+
+/// Calls through a function pointer so that the optimizer cannot see the write of body_id2 (Rule M regression test)
+noinline fn castRayThroughPointer(ts: *const TransformedShape, ray: RRayCast, collector: *CastRayCollector, filter: *ShapeFilter) void {
+    ts.castRayCollector(ray, &.{}, collector, .{ .shape_filter = filter });
+}
+
+test "TransformedShape: value semantics, references, transforms" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const box = try TestShapes.TestBoxShape.create(allocator, Vec3.init(1, 2, 3), .{ .center_of_mass = Vec3.init(1, 0, 0) });
+    var box_ref = RefConst(Shape).init(box.asShape());
+    defer box_ref.deinit();
+    const shape = box.asShape();
+
+    // init adds a reference, clone is the copy constructor, deinit releases
+    const rotation = Quat.rotation(Vec3.axisZ(), 0.5 * math.pi);
+    var ts = TransformedShape.init(rvec3(10, 0, 0), rotation, shape, .init(7), .{ .sub_shape_id_creator = SubShapeIDCreator.pushID(.{}, 1, 2) });
+    defer ts.deinit();
+    try testing.expectEqual(@as(u32, 2), shape.getRefCount());
+    var copy = ts.clone();
+    try testing.expectEqual(@as(u32, 3), shape.getRefCount());
+    copy.deinit();
+    try testing.expectEqual(@as(u32, 2), shape.getRefCount());
+    const empty: TransformedShape = .{};
+    try expect(empty.shape.get() == null and empty.body_id.isInvalid() and empty.getShapeScale().eql(Vec3.one()));
+    try expect(TransformedShape.getBodyID(&ts).eql(.init(7)) and TransformedShape.getBodyID(null).isInvalid());
+
+    // Scale and transforms
+    ts.setShapeScale(Vec3.init(2, 2, 2));
+    try expect(ts.getShapeScale().eql(Vec3.replicate(2)));
+    try expect(ts.getCenterOfMassTransform().eql(RMat44.rotationTranslation(rotation, rvec3(10, 0, 0))));
+    try expect(ts.getInverseCenterOfMassTransform().eql(RMat44.inverseRotationTranslation(rotation, rvec3(10, 0, 0))));
+
+    // World transform round trip (the center of mass offset is scaled and rotated)
+    ts.setWorldTransform(rvec3(1, 2, 3), Quat.identity(), Vec3.init(2, 3, 4));
+    try expect(ts.shape_position_com.eql(rvec3(3, 2, 3)));
+    try expect(ts.getWorldTransform().getTranslation().eql(rvec3(1, 2, 3)));
+    const world = RMat44.rotationTranslation(rotation, rvec3(-5, 6, 7)).preScaled(Vec3.init(1, 2, 3));
+    ts.setWorldTransformRMat44(world);
+    try expect(ts.getWorldTransform().isClose(world, .{ .max_dist_sq = 1.0e-10 }));
+    try expect(ts.getShapeScale().isClose(Vec3.init(1, 2, 3), .{ .max_dist_sq = 1.0e-10 }));
+
+    // World space bounds (the RMat44 overload of Shape::GetWorldSpaceBounds), empty without a shape
+    try expect(ts.getWorldSpaceBounds().eql(shape.getWorldSpaceBoundsRMat44(ts.getCenterOfMassTransform(), ts.getShapeScale())));
+    try expect(empty.getWorldSpaceBounds().eql(AABox.empty));
+
+    // Sub shape IDs relative to the shape: the part of sub_shape_id_creator is removed
+    const full_id = ts.sub_shape_id_creator.getID();
+    try expect(ts.makeSubShapeIDRelativeToShape(full_id).isEmpty());
+    try testing.expectEqual(@as(u64, 0), ts.getSubShapeUserData(full_id));
+    try expect(ts.getMaterial(full_id) == PhysicsMaterial.default);
+
+    // Surface normal and supporting face in world space
+    ts.setWorldTransform(rvec3(0, 0, 0), rotation, Vec3.one());
+    const normal = ts.getWorldSpaceSurfaceNormal(full_id, ts.shape_position_com.addVec3(rotation.mulVec3(Vec3.init(1.0, 0.1, 0.1))));
+    try expect(normal.isClose(Vec3.axisY(), .{ .max_dist_sq = 1.0e-10 }));
+    var face: Shape.SupportingFace = .empty;
+    ts.getSupportingFace(full_id, Vec3.axisY(), rvec3(0, 0, 0), &face);
+    try testing.expectEqual(@as(u32, 4), face.len);
+
+    // Direct child of a compound
+    const compound = try TestShapes.TestCompoundShape.create(allocator, shape, Vec3.init(-2, 0, 0), shape, Vec3.init(2, 0, 0));
+    var compound_ts = TransformedShape.init(rvec3(100, 0, 0), Quat.identity(), compound.asShape(), .init(3), .{});
+    defer compound_ts.deinit();
+    var child = compound_ts.getSubShapeTransformedShape(SubShapeIDCreator.pushID(.{}, 1, 1).getID());
+    defer child.transformed_shape.deinit();
+    try expect(child.transformed_shape.shape.get() == shape);
+    try expect(child.transformed_shape.shape_position_com.eql(rvec3(102, 0, 0)));
+    try expect(child.remainder.isEmpty());
+}
+
+test "TransformedShape: queries set the context and the filter's body ID, scale and transform the inputs" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const box = try TestShapes.TestBoxShape.create(allocator, Vec3.one(), .{});
+    var box_ref = RefConst(Shape).init(box.asShape());
+    defer box_ref.deinit();
+    var ts = TransformedShape.init(rvec3(10, 0, 0), Quat.identity(), box.asShape(), .init(5), .{ .sub_shape_id_creator = SubShapeIDCreator.pushID(.{}, 1, 1) });
+    defer ts.deinit();
+    ts.setShapeScale(Vec3.replicate(2));
+
+    // Closest hit: world space ray, body ID on the hit
+    var hit: RayCastResult = .{};
+    try expect(ts.castRay(.init(rvec3(6, 0, 0), Vec3.init(8, 0, 0)), &hit));
+    try testing.expectEqual(@as(f32, 0.25), hit.fraction);
+    try expect(hit.body_id.eql(.init(5)) and hit.sub_shape_id2.eql(ts.sub_shape_id_creator.getID()));
+    const empty: TransformedShape = .{};
+    try expect(!empty.castRay(.init(rvec3(6, 0, 0), Vec3.init(8, 0, 0)), &hit));
+
+    // Collector version: context and the filter's body_id2 (written through a mutable pointer, Rule M)
+    var seen: BodyID = .invalid;
+    var filter: RecordingFilter = .{ .seen_body_id = &seen };
+    var all_hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer all_hits.deinit();
+    castRayThroughPointer(&ts, .init(rvec3(6, 0, 0), Vec3.init(8, 0, 0)), &all_hits.base, &filter.base);
+    try all_hits.checkError();
+    try expect(seen.eql(.init(5)) and filter.base.body_id2.eql(.init(5)));
+    try expect(all_hits.base.getContext() == &ts);
+    try testing.expectEqual(@as(usize, 1), all_hits.hits.items.len);
+    try expect(all_hits.hits.items[0].body_id.eql(.init(5)));
+    ts.castRayCollector(.init(rvec3(6, 0, 0), Vec3.init(8, 0, 0)), &.{}, &all_hits.base, .{}); // Default filter
+    try testing.expectEqual(@as(usize, 2), all_hits.hits.items.len);
+
+    // Collide point
+    var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer points.deinit();
+    seen = .invalid;
+    ts.collidePoint(rvec3(11.5, 0, 0), &points.base, .{ .shape_filter = &filter.base });
+    ts.collidePoint(rvec3(12.5, 0, 0), &points.base, .{});
+    try points.checkError();
+    try testing.expectEqual(@as(usize, 1), points.hits.items.len);
+    try expect(points.hits.items[0].body_id.eql(.init(5)) and seen.eql(.init(5)));
+
+    // Collide shape through the dispatch table (box vs box), relative to a base offset
+    var sphere = TestShapes.TestSphereShape.init(allocator, 0.5);
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    var collide_hits = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+    defer collide_hits.deinit();
+    seen = .invalid;
+    ts.collideShape(sphere.asShape(), Vec3.one(), RMat44.translation(rvec3(12.25, 0, 0)), &.{}, rvec3(10, 0, 0), &collide_hits.base, .{ .shape_filter = &filter.base });
+    try collide_hits.checkError();
+    try testing.expectEqual(@as(usize, 1), collide_hits.hits.items.len);
+    const c = &collide_hits.hits.items[0];
+    try expect(c.contact_point_on2.isClose(Vec3.init(2, 0, 0), .{ .max_dist_sq = 1.0e-10 })); // Relative to the base offset
+    try testing.expectEqual(@as(f32, 0.25), c.penetration_depth);
+    try expect(c.body_id2.eql(.init(5)) and seen.eql(.init(5)));
+    try expect(c.sub_shape_id2.eql(ts.sub_shape_id_creator.getID()));
+    filter.accept = false; // A rejecting filter stops the dispatch
+    ts.collideShape(sphere.asShape(), Vec3.one(), RMat44.translation(rvec3(12.25, 0, 0)), &.{}, rvec3(10, 0, 0), &collide_hits.base, .{ .shape_filter = &filter.base });
+    try testing.expectEqual(@as(usize, 1), collide_hits.hits.items.len);
+    filter.accept = true;
+
+    // Cast shape through the dispatch table (sphere vs box)
+    var cast_hits = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+    defer cast_hits.deinit();
+    const cast = RShapeCast.init(sphere.asShape(), Vec3.one(), RMat44.translation(rvec3(4, 0, 0)), Vec3.init(8, 0, 0));
+    ts.castShape(&cast, &.{}, rvec3(10, 0, 0), &cast_hits.base, .{});
+    try cast_hits.checkError();
+    try testing.expectEqual(@as(usize, 1), cast_hits.hits.items.len);
+    try expect(@abs(cast_hits.hits.items[0].fraction - 0.4375) < 1.0e-6);
+    try expect(cast_hits.hits.items[0].base.body_id2.eql(.init(5)));
+    try expect(cast_hits.hits.items[0].base.contact_point_on2.isClose(Vec3.init(-2, 0, 0), .{ .max_dist_sq = 1.0e-10 }));
+}
+
+test "TransformedShape: collectTransformedShapes adds the center of mass position, getTriangles" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const sphere = try TestShapes.TestSphereShape.create(allocator, 1.0);
+    const box = try TestShapes.TestBoxShape.create(allocator, Vec3.one(), .{});
+    const compound = try TestShapes.TestCompoundShape.create(allocator, sphere.asShape(), Vec3.init(-2, 0, 0), box.asShape(), Vec3.init(2, 0, 0));
+    var compound_ref = RefConst(Shape).init(compound.asShape());
+    defer compound_ref.deinit();
+    var ts = TransformedShape.init(rvec3(100, 0, 0), Quat.identity(), compound.asShape(), .init(9), .{});
+    defer ts.deinit();
+
+    {
+        var leaves = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+        defer leaves.deinit();
+        ts.collectTransformedShapes(.init(Vec3.replicate(-1000), Vec3.replicate(1000)), &leaves.base, .{});
+        try leaves.checkError();
+        try testing.expectEqual(@as(usize, 2), leaves.hits.items.len);
+        try expect(leaves.hits.items[0].shape.get() == sphere.asShape() and leaves.hits.items[1].shape.get() == box.asShape());
+        try expect(leaves.hits.items[0].shape_position_com.eql(rvec3(98, 0, 0)));
+        try expect(leaves.hits.items[1].shape_position_com.eql(rvec3(102, 0, 0)));
+        try expect(leaves.hits.items[1].body_id.eql(.init(9)));
+        try expect(leaves.hits.items[1].sub_shape_id_creator.getID().eql(SubShapeIDCreator.pushID(.{}, 1, 1).getID()));
+        try testing.expectEqual(@as(u32, 2), box.asShape().getRefCount()); // The compound + the clone stored by the collector
+    }
+    try testing.expectEqual(@as(u32, 1), box.asShape().getRefCount());
+
+    // An any hit collector stops after the first leaf (the wrapper follows the early out fraction)
+    var first = CollisionCollectorImpl.AnyHitCollisionCollector(TransformedShapeCollector).init();
+    defer first.deinit();
+    ts.collectTransformedShapes(.init(Vec3.replicate(-1000), Vec3.replicate(1000)), &first.base, .{});
+    try expect(first.hadHit() and first.hit.shape.get() == sphere.asShape());
+
+    // Triangles relative to a base offset
+    var box_ts = TransformedShape.init(rvec3(50, 0, 0), Quat.identity(), box.asShape(), .invalid, .{});
+    defer box_ts.deinit();
+    var context: TransformedShape.GetTrianglesContext = .{};
+    box_ts.getTrianglesStart(&context, .init(Vec3.replicate(-1000), Vec3.replicate(1000)), rvec3(49, 0, 0));
+    var vertices: [3 * Shape.get_triangles_min_triangles_requested]Float3 = undefined;
+    try testing.expectEqual(@as(u32, 12), box_ts.getTrianglesNext(&context, Shape.get_triangles_min_triangles_requested, &vertices, null));
+    for (vertices[0..36]) |v| try expect(v.x == 0.0 or v.x == 2.0);
+    const empty: TransformedShape = .{};
+    try testing.expectEqual(@as(u32, 0), empty.getTrianglesNext(&context, Shape.get_triangles_min_triangles_requested, &vertices, null));
+}
+
+test "TransformedShape: concurrent queries on a shared shape" {
+    const allocator = testing.allocator;
+
+    const sphere = try TestShapes.TestSphereShape.create(allocator, 1.5);
+    const box = try TestShapes.TestBoxShape.create(allocator, Vec3.init(1, 2, 0.5), .{});
+    const compound = try TestShapes.TestCompoundShape.create(allocator, sphere.asShape(), Vec3.init(-2, 1, 0), box.asShape(), Vec3.init(2, 0, 0));
+    var compound_ref = RefConst(Shape).init(compound.asShape());
+    defer compound_ref.deinit();
+
+    const Worker = struct {
+        fn run(shape: *const Shape, out_sum: *f32) void {
+            var ts = TransformedShape.init(rvec3(0, 0, 0), Quat.identity(), shape, .init(1), .{});
+            defer ts.deinit();
+            var sum: f32 = 0;
+            var i: u32 = 0;
+            while (i < 500) : (i += 1) {
+                const y = @as(f32, @floatFromInt(i % 50)) * 0.1 - 2.5;
+                var hit: RayCastResult = .{};
+                if (ts.castRay(.init(rvec3(-10, y, 0), Vec3.init(20, 0.1, 0)), &hit))
+                    sum += hit.fraction;
+            }
+            out_sum.* = sum;
+        }
+    };
+
+    var expected: f32 = 0;
+    Worker.run(compound.asShape(), &expected);
+    try testing.expect(expected > 0);
+    var sums: [4]f32 = @splat(0);
+    var threads: [4]std.Thread = undefined;
+    for (&threads, &sums) |*t, *s| t.* = try std.Thread.spawn(.{}, Worker.run, .{ compound.asShape(), s });
+    for (threads) |t| t.join();
+    for (sums) |s| try testing.expectEqual(expected, s);
+    try testing.expectEqual(@as(u32, 1), compound.asShape().getRefCount());
+}

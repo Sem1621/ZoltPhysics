@@ -230,3 +230,94 @@ pub const ShapeCastResult = struct {
         return result;
     }
 };
+
+test "ShapeCast / RShapeCast: construction, bounds, transforms and conversions" {
+    const testing = std.testing;
+    const expect = testing.expect;
+    const allocator = testing.allocator;
+    const TestShapes = @import("Shape/TestShapes.zig");
+    const Quat = @import("../../Math/Quat.zig").Quat;
+    const DMat44 = @import("../../Math/DMat44.zig").DMat44;
+
+    var box = TestShapes.TestBoxShape.init(allocator, Vec3.init(1, 2, 3), .{ .center_of_mass = Vec3.init(1, 0, 0) });
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    const shape = box.asShape();
+
+    const start = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.25), Vec3.init(1, 2, 3));
+    const scale = Vec3.init(2, 1, 1);
+    const cast = ShapeCast.init(shape, scale, start, Vec3.init(0, 0, 10));
+    try expect(cast.shape == shape and cast.scale.eql(scale) and cast.center_of_mass_start.eql(start));
+    try expect(cast.shape_world_bounds.eql(shape.getWorldSpaceBounds(start, scale)));
+    try expect(cast.getPointOnRay(0.5).eql(start.getTranslation().add(Vec3.init(0, 0, 5))));
+
+    // From a world transform: the center of mass is applied in local space
+    const from_world = ShapeCast.fromWorldTransform(shape, scale, start, Vec3.init(0, 0, 10));
+    try expect(from_world.center_of_mass_start.eql(start.preTranslated(Vec3.init(1, 0, 0))));
+
+    // Post transformed / translated recompute the bounds
+    const t = Mat44.rotationTranslation(Quat.rotation(Vec3.axisX(), 0.5), Vec3.init(-1, 0, 4));
+    const transformed = cast.postTransformed(t);
+    try expect(transformed.center_of_mass_start.eql(t.mul(start)));
+    try expect(transformed.direction.eql(t.multiply3x3(cast.direction)));
+    try expect(transformed.shape_world_bounds.eql(shape.getWorldSpaceBounds(t.mul(start), scale)));
+    const translated = cast.postTranslated(Vec3.init(5, 0, 0));
+    try expect(translated.center_of_mass_start.eql(start.postTranslated(Vec3.init(5, 0, 0))));
+
+    // RShapeCast: the bounds use the RMat44 overload of GetWorldSpaceBounds, explicit conversions both ways
+    const r_cast = RShapeCast.fromShapeCast(&cast);
+    try expect(r_cast.shape_world_bounds.eql(cast.shape_world_bounds));
+    const back = r_cast.toShapeCast();
+    try expect(back.center_of_mass_start.eql(cast.center_of_mass_start) and back.direction.eql(cast.direction));
+    const r_start = RMat44.rotationTranslation(Quat.identity(), RVec3.init(100, 0, 0));
+    const r_cast2 = RShapeCast.init(shape, Vec3.one(), r_start, Vec3.init(1, 0, 0));
+    try expect(r_cast2.shape_world_bounds.eql(shape.getWorldSpaceBoundsRMat44(r_start, Vec3.one())));
+    try expect(r_cast2.getPointOnRay(1.0).eql(RVec3.init(101, 0, 0)));
+    try expect(r_cast2.postTranslated(RVec3.init(-100, 0, 0)).center_of_mass_start.getTranslation().eql(RVec3.zero()));
+    const r_from_world = RShapeCast.fromWorldTransform(shape, Vec3.one(), r_start, Vec3.init(1, 0, 0));
+    try expect(r_from_world.center_of_mass_start.getTranslation().eql(RVec3.init(101, 0, 0)));
+    try expect(@TypeOf(ShapeCast.fromShapeCast) == void and @TypeOf(ShapeCast.toShapeCast) == void);
+    if (Core.double_precision) {
+        try expect(@TypeOf(RShapeCast.postTransformed) == void); // Jolt's RShapeCast::PostTransformed does not compile with DMat44
+        _ = DMat44;
+    } else {
+        try expect(r_cast.postTransformed(t).center_of_mass_start.eql(transformed.center_of_mass_start));
+    }
+    try expect(ShapeCast != RShapeCast);
+}
+
+test "ShapeCastSettings and ShapeCastResult" {
+    const testing = std.testing;
+    const expect = testing.expect;
+
+    var settings: ShapeCastSettings = .{};
+    try expect(settings.back_face_mode_triangles == .ignore_back_faces and settings.back_face_mode_convex == .ignore_back_faces);
+    try expect(!settings.use_shrunken_shape_and_convex_radius and !settings.return_deepest_point);
+    try testing.expectEqual(@as(f32, 0.0), settings.extra_convex_radius);
+    try testing.expectEqual(PhysicsSettings.default_collision_tolerance, settings.collision_tolerance);
+    settings.setBackFaceMode(.collide_with_back_faces);
+    try expect(settings.back_face_mode_triangles == .collide_with_back_faces and settings.back_face_mode_convex == .collide_with_back_faces);
+
+    // The penetration depth is the distance between the contact points; deeper hits at fraction 0 go first
+    var result = ShapeCastResult.init(0.5, Vec3.init(1, 0, 0), Vec3.init(1, 3, 4), Vec3.axisY(), true, .{ .value = 1 }, .{ .value = 2 }, .init(3));
+    try testing.expectEqual(@as(f32, 5.0), result.base.penetration_depth);
+    try testing.expectEqual(@as(f32, 0.5), result.getEarlyOutFraction());
+    result.fraction = 0.0;
+    try testing.expectEqual(@as(f32, -5.0), result.getEarlyOutFraction());
+    result.fraction = 0.5;
+
+    // Reversed: contact points and faces are shifted by fraction * direction, IDs and faces swapped
+    result.base.shape1_face.append(Vec3.init(1, 1, 1));
+    result.base.shape2_face.append(Vec3.init(2, 2, 2));
+    result.base.shape2_face.append(Vec3.init(3, 3, 3));
+    const reversed = result.reversed(Vec3.init(2, 0, 0));
+    try expect(reversed.base.contact_point_on1.eql(Vec3.init(0, 3, 4)) and reversed.base.contact_point_on2.eql(Vec3.init(0, 0, 0)));
+    try expect(reversed.base.penetration_axis.eql(Vec3.axisY().negate()));
+    try testing.expectEqual(result.base.penetration_depth, reversed.base.penetration_depth);
+    try expect(reversed.base.sub_shape_id1.getValue() == 2 and reversed.base.sub_shape_id2.getValue() == 1);
+    try expect(reversed.base.body_id2.eql(.init(3)) and reversed.is_back_face_hit and reversed.fraction == 0.5);
+    try testing.expectEqual(@as(u32, 2), reversed.base.shape1_face.len);
+    try expect(reversed.base.shape1_face.get(1).eql(Vec3.init(2, 3, 3)));
+    try testing.expectEqual(@as(u32, 1), reversed.base.shape2_face.len);
+    try expect(reversed.base.shape2_face.get(0).eql(Vec3.init(0, 1, 1)));
+}
