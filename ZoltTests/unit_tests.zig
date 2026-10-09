@@ -5,6 +5,7 @@
 //! Add new test files to the list below (keep it sorted by path).
 
 test {
+    _ = @import("Layers.zig");
     _ = @import("UnitTestFramework.zig");
 
     // Core
@@ -49,6 +50,9 @@ test {
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
+    _ = @import("Physics/CollisionGroupTests.zig");
+    _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
+    _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
