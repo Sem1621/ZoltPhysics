@@ -1059,8 +1059,8 @@ test "Convex parity: CollideSoftBodyVertices" {
         var positions: [n * 3]f32 = undefined;
         var inv_masses: [n]f32 = undefined;
         var penetrations: [n]f32 = undefined;
-        var planes: [n * 4]f32 = @splat(0);
-        var indices: [n]c_int = @splat(-1);
+        const planes: [n * 4]f32 = @splat(0);
+        const indices: [n]c_int = @splat(-1);
         for (0..n) |v| {
             positions[3 * v ..][0..3].* = arr3(mat44(transform).mulVec3(vec3(gen.vec(-extent, extent))));
             if (gen.oneIn(8)) positions[3 * v ..][0..3].* = arr3(mat44(transform).getTranslation()); // At the center

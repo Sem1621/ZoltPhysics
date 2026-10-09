@@ -196,9 +196,9 @@ Ref<Shape> CreateShape(const ShapeDesc &inDesc, String *outError = nullptr)
 
 	default:
 		{
-			Ref<ParityConvexShape> shape = new ParityConvexShape(Load3(inDesc.mHalfExtent), inDesc.mConvexRadius);
+			ParityConvexShape *shape = new ParityConvexShape(Load3(inDesc.mHalfExtent), inDesc.mConvexRadius);
 			shape->SetDensity(inDesc.mDensity);
-			return shape;
+			return Ref<Shape>(shape);
 		}
 	}
 
