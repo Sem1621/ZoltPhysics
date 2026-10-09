@@ -487,7 +487,8 @@ pub const ConvexShape = struct {
         pub fn saveMaterialState(self: *const ConvexShape, allocator: Allocator, out_materials: *PhysicsMaterialList) Allocator.Error!void {
             for (out_materials.items) |*m| m.deinit();
             out_materials.clearRetainingCapacity();
-            try out_materials.append(allocator, self.material.clone());
+            try out_materials.ensureUnusedCapacity(allocator, 1); // Allocate before taking the reference (out of memory leaves the list empty)
+            out_materials.appendAssumeCapacity(self.material.clone());
         }
 
         // See Shape::RestoreMaterialState
@@ -720,3 +721,562 @@ pub const ConvexShape = struct {
         }
     }
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (SphereShape.zig and BoxShape.zig test the analytic overrides, these tests the parts of ConvexShape that the
+// concrete shapes inherit; TestConvexBox only provides a support function, so it uses every ConvexShape fallback)
+
+const testing = std.testing;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const Color = @import("../../../Core/Color.zig").Color;
+const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const MassProperties = @import("../../Body/MassProperties.zig").MassProperties;
+const BackFaceMode = @import("../BackFaceMode.zig").BackFaceMode;
+const CollisionDispatch = @import("../CollisionDispatch.zig");
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const ClosestHitCollisionCollector = CollisionCollectorImpl.ClosestHitCollisionCollector;
+const CollideSoftBodyVertexIterator = @import("../CollideSoftBodyVertexIterator.zig").CollideSoftBodyVertexIterator;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const RegisterTypes = @import("../../../RegisterTypes.zig");
+const SphereShape = @import("SphereShape.zig").SphereShape;
+const BoxShapeFile = @import("BoxShape.zig");
+const BoxShape = BoxShapeFile.BoxShape;
+const BoxShapeSettings = BoxShapeFile.BoxShapeSettings;
+
+/// A convex shape (UserConvex1) that only provides a support function: a box with a convex radius whose support
+/// functions are those of BoxShape. CastRay, CollidePoint, GetTrianglesStart / Next and GetSubmergedVolume are
+/// ConvexShape's (GJK based) versions.
+const TestConvexBox = struct {
+    pub const shape_sub_type: ShapeSubType = .user_convex1;
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .getStats, .getVolume };
+
+    base: ConvexShape,
+    half_extent: Vec3,
+    convex_radius: f32,
+
+    fn init(allocator: Allocator, half_extent: Vec3, convex_radius: f32, material: ?*const PhysicsMaterial) TestConvexBox {
+        return .{ .base = .init(TestConvexBox, allocator, shape_sub_type, material), .half_extent = half_extent, .convex_radius = convex_radius };
+    }
+
+    fn asShape(self: *const TestConvexBox) *const Shape {
+        return &self.base.base;
+    }
+
+    fn asShapeMut(self: *TestConvexBox) *Shape {
+        return &self.base.base;
+    }
+
+    pub fn getLocalBounds(self: *const TestConvexBox) AABox {
+        return .init(self.half_extent.negate(), self.half_extent);
+    }
+
+    pub fn getInnerRadius(self: *const TestConvexBox) f32 {
+        return self.half_extent.reduceMin();
+    }
+
+    pub fn getMassProperties(self: *const TestConvexBox) MassProperties {
+        var p: MassProperties = .{};
+        p.setMassAndInertiaOfSolidBox(self.half_extent.mulScalar(2.0), self.base.getDensity());
+        return p;
+    }
+
+    pub fn getSurfaceNormal(self: *const TestConvexBox, sub_shape_id: SubShapeID, local_surface_position: Vec3) Vec3 {
+        _ = .{ self, sub_shape_id };
+        return local_surface_position.normalizedOr(Vec3.axisY());
+    }
+
+    pub fn getSupportingFace(self: *const TestConvexBox, sub_shape_id: SubShapeID, direction: Vec3, scale: Vec3, center_of_mass_transform: Mat44, out_vertices: *Shape.SupportingFace) void {
+        _ = sub_shape_id;
+        const scaled_half_extent = scale.abs().mul(self.half_extent);
+        AABox.init(scaled_half_extent.negate(), scaled_half_extent).getSupportingFace(direction, out_vertices) catch unreachable;
+        for (out_vertices.slice()) |*v|
+            v.* = center_of_mass_transform.mulVec3(v.*);
+    }
+
+    pub fn getSupportFunction(self: *const TestConvexBox, mode: ConvexShape.SupportMode, buffer: *ConvexShape.SupportBuffer, scale: Vec3) *const ConvexShape.Support {
+        const scaled_half_extent = scale.abs().mul(self.half_extent);
+        const support = buffer.emplace(BoxSupport);
+        switch (mode) {
+            .include_convex_radius, .default => support.* = .init(.init(scaled_half_extent.negate(), scaled_half_extent), 0.0),
+            .exclude_convex_radius => {
+                const convex_radius = ScaleHelpers.scaleConvexRadius(self.convex_radius, scale);
+                const reduced_half_extent = scaled_half_extent.sub(Vec3.replicate(convex_radius));
+                support.* = .init(.init(reduced_half_extent.negate(), reduced_half_extent), convex_radius);
+            },
+        }
+        return &support.base;
+    }
+
+    pub fn collideSoftBodyVertices(self: *const TestConvexBox, center_of_mass_transform: Mat44, scale: Vec3, vertices: *const CollideSoftBodyVertexIterator, num_vertices: u32, colliding_shape_index: i32) void {
+        _ = .{ self, center_of_mass_transform, scale, vertices, num_vertices, colliding_shape_index };
+    }
+
+    pub fn getStats(self: *const TestConvexBox) Shape.Stats {
+        _ = self;
+        return .init(@sizeOf(TestConvexBox), 0);
+    }
+
+    pub fn getVolume(self: *const TestConvexBox) f32 {
+        return self.getLocalBounds().getVolume();
+    }
+
+    const BoxSupport = struct {
+        pub const overrides = .{ .getSupport, .getConvexRadius };
+
+        base: ConvexShape.Support,
+        box: AABox,
+        convex_radius: f32,
+
+        fn init(box: AABox, convex_radius: f32) BoxSupport {
+            return .{ .base = .init(BoxSupport), .box = box, .convex_radius = convex_radius };
+        }
+
+        pub fn getSupport(self: *const BoxSupport, direction: Vec3) Vec3 {
+            return self.box.getSupport(direction);
+        }
+
+        pub fn getConvexRadius(self: *const BoxSupport) f32 {
+            return self.convex_radius;
+        }
+    };
+};
+
+/// A filter that rejects everything and counts the calls (state behind a pointer, Rule M)
+const RejectAllFilter = struct {
+    pub const overrides = .{.shouldCollide};
+
+    base: ShapeFilter = .init(@This()),
+    calls: *u32,
+
+    pub fn shouldCollide(self: *const RejectAllFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = .{ shape2, sub_shape_id_of_shape2 };
+        self.calls.* += 1;
+        return false;
+    }
+};
+
+test "ConvexShape: the unit sphere table is Jolt's static initializer, built at compile time" {
+    var verts: StaticArray(Vec3, 384) = .empty;
+    try GetTrianglesContextVertexList.createHalfUnitSphereTop(&verts, 2);
+    try GetTrianglesContextVertexList.createHalfUnitSphereBottom(&verts, 2);
+    try testing.expectEqual(@as(u32, 384), verts.len);
+    try testing.expectEqual(verts.len, ConvexShape.unit_sphere_triangles.len);
+    for (verts.constSlice(), ConvexShape.unit_sphere_triangles.constSlice()) |runtime, table| {
+        try testing.expectEqual(@as(u128, @bitCast(runtime.value)), @as(u128, @bitCast(table.value)));
+        try testing.expectApproxEqAbs(@as(f32, 1.0), table.length(), 1.0e-6);
+    }
+}
+
+test "ConvexShape: registration of every convex pair" {
+    const r = &RegisterTypes.registry;
+    const collide = r.getCollideShape(.sphere, .sphere);
+    const cast = r.getCastShape(.sphere, .sphere);
+    try testing.expect(collide != &CollisionDispatch.collideUnsupported and cast != &CollisionDispatch.castUnsupported);
+    try testing.expect(collide == &ConvexShape.collideConvexVsConvex and cast == &ConvexShape.castConvexVsConvex);
+    for (ShapeFile.convex_sub_shape_types) |s1| {
+        for (ShapeFile.convex_sub_shape_types) |s2| {
+            // Later registrations (TriangleShape, Wave B) specialize the pairs with a triangle
+            if (s1 == .triangle or s2 == .triangle) continue;
+            try testing.expect(r.getCollideShape(s1, s2) == collide);
+            try testing.expect(r.getCastShape(s1, s2) == cast);
+        }
+    }
+
+    // Non convex pairs are untouched
+    try testing.expect(r.getCollideShape(.sphere, .user1) != collide);
+    try testing.expect(r.getCastShape(.empty, .box) != cast);
+}
+
+test "ConvexShape: init, settings, material, density and the non virtual accessors" {
+    const allocator = testing.allocator;
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Rock", Color.grey);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+
+    // A shape without material uses the default material
+    var shape = TestConvexBox.init(allocator, Vec3.init(1, 2, 3), 0.1, null);
+    shape.asShape().setEmbedded();
+    defer shape.asShapeMut().deinit();
+    try testing.expect(shape.base.getConvexMaterial() == PhysicsMaterial.default);
+    try testing.expect(shape.asShape().getMaterial(.empty) == PhysicsMaterial.default);
+    try testing.expectEqual(@as(f32, 1000.0), shape.base.getDensity());
+    try testing.expectEqual(ShapeType.convex, shape.asShape().getType());
+    try testing.expectEqual(ShapeSubType.user_convex1, shape.asShape().getSubType());
+    try testing.expect(shape.asShape().isKindOf(ConvexShape) and shape.asShape().cast(ConvexShape) == &shape.base);
+    try testing.expect(shape.base.asShape() == shape.asShape());
+    try testing.expectEqual(@as(u32, 0), shape.asShape().getSubShapeIDBitsRecursive());
+
+    // Setters (before the shape is shared)
+    shape.base.setMaterial(material.material());
+    shape.base.setDensity(500.0);
+    try testing.expect(shape.asShape().getMaterial(.empty) == material.material());
+    try testing.expectEqual(@as(u32, 2), material.material().getRefCount());
+    try testing.expectEqual(@as(f32, 500.0), shape.base.getDensity());
+    try testing.expectEqual(@as(f32, 500.0 * 48.0), shape.asShape().getMassProperties().mass);
+
+    // ConvexShapeSettings: material and density are passed to the shape, the material is released with the settings
+    var settings = BoxShapeSettings.init(allocator, Vec3.init(1, 2, 3), .{ .material = material.material() });
+    defer settings.deinit();
+    settings.base.setDensity(250.0);
+    try testing.expectEqual(@as(u32, 3), material.material().getRefCount());
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const box = result.getPtr().?.cast(BoxShape);
+    try testing.expect(box.base.getConvexMaterial() == material.material());
+    try testing.expectEqual(@as(f32, 250.0), box.base.getDensity());
+    try testing.expectEqual(@as(u32, 4), material.material().getRefCount());
+}
+
+test "ConvexShape: CastRay and CollidePoint fallbacks (GJK) agree with the analytic box" {
+    const allocator = testing.allocator;
+
+    const half_extent = Vec3.init(1, 2, 3);
+    var gjk_box = TestConvexBox.init(allocator, half_extent, 0.1, null);
+    gjk_box.asShape().setEmbedded();
+    defer gjk_box.asShapeMut().deinit();
+    var box = BoxShape.init(allocator, half_extent, .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    const rays = [_]RayCast{
+        .init(Vec3.init(-5, 0.5, 0.25), Vec3.init(10, 0, 0)), // Through the box
+        .init(Vec3.init(0.2, 7, -0.5), Vec3.init(0, -10, 0.1)), // Through the box, Y
+        .init(Vec3.init(0, 0, 0), Vec3.init(3, 1, 0)), // Starts inside
+        .init(Vec3.init(-5, 5, 0), Vec3.init(10, 0, 0)), // Misses
+        .init(Vec3.init(-5, 0, 0), Vec3.init(2, 0, 0)), // Too short
+    };
+    const expected_hits = [_]bool{ true, true, true, false, false };
+    for (rays, expected_hits) |ray, expected_hit| {
+        var gjk_hit: RayCastResult = .{};
+        var box_hit: RayCastResult = .{};
+        const creator = SubShapeIDCreator.pushID(.{}, 3, 2);
+        try testing.expectEqual(expected_hit, gjk_box.asShape().castRay(ray, creator, &gjk_hit));
+        try testing.expectEqual(expected_hit, box.asShape().castRay(ray, creator, &box_hit));
+        if (expected_hit) {
+            try testing.expectApproxEqAbs(box_hit.fraction, gjk_hit.fraction, 1.0e-4);
+            try testing.expect(gjk_hit.sub_shape_id2.eql(creator.getID()));
+        }
+
+        // Collector versions, with back faces and treating convex shapes as solid or not
+        for ([_]bool{ false, true }) |solid| {
+            for ([_]BackFaceMode{ .ignore_back_faces, .collide_with_back_faces }) |mode| {
+                var settings: RayCastSettings = .{};
+                settings.back_face_mode_convex = mode;
+                settings.treat_convex_as_solid = solid;
+                var gjk_hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+                defer gjk_hits.deinit();
+                var box_hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+                defer box_hits.deinit();
+                const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(5), .{});
+                gjk_hits.base.setContext(&context);
+                gjk_box.asShape().castRayCollector(ray, &settings, creator, &gjk_hits.base, &.{});
+                box.asShape().castRayCollector(ray, &settings, creator, &box_hits.base, &.{});
+                try gjk_hits.checkError();
+                try box_hits.checkError();
+                try testing.expectEqual(box_hits.hits.items.len, gjk_hits.hits.items.len);
+                for (gjk_hits.hits.items, box_hits.hits.items) |g, b| {
+                    try testing.expectApproxEqAbs(b.fraction, g.fraction, 1.0e-4);
+                    try testing.expect(g.body_id.eql(.init(5)) and g.sub_shape_id2.eql(creator.getID()));
+                }
+            }
+        }
+    }
+
+    // A rejecting filter stops the query before the shape is tested
+    var calls: u32 = 0;
+    const reject: RejectAllFilter = .{ .calls = &calls };
+    var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer hits.deinit();
+    gjk_box.asShape().castRayCollector(rays[0], &.{}, .{}, &hits.base, &reject.base);
+    var point_hits = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer point_hits.deinit();
+    gjk_box.asShape().collidePoint(Vec3.zero(), .{}, &point_hits.base, &reject.base);
+    try testing.expectEqual(@as(u32, 2), calls);
+    try testing.expectEqual(@as(usize, 0), hits.hits.items.len + point_hits.hits.items.len);
+
+    // An early out fraction that is closer than the hit
+    var closest = ClosestHitCollisionCollector(CastRayCollector).init();
+    defer closest.deinit();
+    closest.base.updateEarlyOutFraction(0.1);
+    gjk_box.asShape().castRayCollector(rays[0], &.{}, .{}, &closest.base, &.{});
+    try testing.expect(!closest.hadHit());
+
+    // CollidePoint: inside, near a corner, outside the bounds
+    const points = [_]Vec3{ Vec3.zero(), Vec3.init(0.9, -1.9, 2.9), Vec3.init(1.1, 0, 0), Vec3.init(0, 0, -3.5) };
+    for (points) |p| {
+        var gjk_points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer gjk_points.deinit();
+        var box_points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer box_points.deinit();
+        gjk_box.asShape().collidePoint(p, SubShapeIDCreator.pushID(.{}, 1, 1), &gjk_points.base, &.{});
+        box.asShape().collidePoint(p, .{}, &box_points.base, &.{});
+        try gjk_points.checkError();
+        try box_points.checkError();
+        try testing.expectEqual(box_points.hits.items.len, gjk_points.hits.items.len);
+        if (gjk_points.hits.items.len == 1)
+            try testing.expect(gjk_points.hits.items[0].sub_shape_id2.eql(SubShapeIDCreator.pushID(.{}, 1, 1).getID()));
+    }
+}
+
+test "ConvexShape: GetTrianglesStart / Next (support points of the unit sphere directions, inside out scales flip)" {
+    const allocator = testing.allocator;
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var shape = TestConvexBox.init(allocator, Vec3.init(1, 2, 3), 0.0, material.material());
+    shape.asShape().setEmbedded();
+    defer shape.asShapeMut().deinit();
+
+    const position = Vec3.init(10, 20, 30);
+    const rotation = Quat.rotation(Vec3.axisZ(), 0.25 * math.pi);
+    for ([_]Vec3{ Vec3.init(1, 2, 3), Vec3.init(-1, 2, 3) }) |scale| {
+        var context: Shape.GetTrianglesContext = .{};
+        shape.asShape().getTrianglesStart(&context, AABox.biggest(), position, rotation, scale);
+        var vertices: [3 * 40]Float3 = undefined;
+        var materials: [40]*const PhysicsMaterial = undefined;
+        const local_to_world = Mat44.rotationTranslation(rotation, position).mul(Mat44.scaleVec3(scale));
+        var total: u32 = 0;
+        while (true) {
+            const n = shape.asShape().getTrianglesNext(&context, 40, &vertices, &materials);
+            if (n == 0) break;
+            try testing.expect(n <= 40);
+            for (0..n) |t| {
+                try testing.expect(materials[t] == material.material());
+                const dirs = ConvexShape.unit_sphere_triangles.constSlice()[3 * (total + t) ..][0..3];
+                const order: [3]usize = if (scale.getX() < 0.0) .{ 0, 2, 1 } else .{ 0, 1, 2 };
+                for (0..3) |k| {
+                    const expected = local_to_world.mulVec3(shape.getLocalBounds().getSupport(dirs[order[k]]));
+                    try testing.expect(Vec3.fromFloat3(vertices[3 * t + k]).eql(expected));
+                }
+            }
+            total += n;
+        }
+        try testing.expectEqual(@as(u32, 128), total);
+    }
+}
+
+test "ConvexShape: GetSubmergedVolume of the bounding box" {
+    const allocator = testing.allocator;
+
+    var shape = TestConvexBox.init(allocator, Vec3.init(1, 2, 3), 0.0, null);
+    shape.asShape().setEmbedded();
+    defer shape.asShapeMut().deinit();
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.3), Vec3.init(1, 2, 3));
+    const scale = Vec3.init(1, -1, 2);
+
+    const above = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, -10, 0), Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 8.0 * 1.0 * 2.0 * 6.0), above.total_volume);
+    try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
+    try testing.expect(above.center_of_buoyancy.eql(Vec3.zero()));
+
+    const below = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 10, 0), Vec3.axisY()));
+    try testing.expectEqual(below.total_volume, below.submerged_volume);
+    try testing.expect(below.center_of_buoyancy.eql(transform.getTranslation()));
+
+    // The plane through the center of mass cuts the box in half
+    const half = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(1, 2, 3), Vec3.axisY()));
+    try testing.expectApproxEqAbs(0.5 * half.total_volume, half.submerged_volume, 1.0e-4);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), half.center_of_buoyancy.getY(), 1.0e-5);
+}
+
+test "ConvexShape: binary state and material state" {
+    const allocator = testing.allocator;
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+    var shape = TestConvexBox.init(allocator, Vec3.init(1, 2, 3), 0.0, material.material());
+    shape.asShape().setEmbedded();
+    defer shape.asShapeMut().deinit();
+    shape.base.setDensity(123.0);
+    shape.asShapeMut().setUserData(77);
+
+    // Sub type, user data, density
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    shape.asShape().saveBinaryState(out.streamOut());
+    try testing.expectEqual(@as(usize, 1 + 8 + 4), writer.buffered().len);
+
+    var restored = TestConvexBox.init(allocator, Vec3.init(1, 2, 3), 0.0, null);
+    restored.asShape().setEmbedded();
+    defer restored.asShapeMut().deinit();
+    var reader: std.Io.Reader = .fixed(writer.buffered()[1..]); // The sub type is read by restoreFromBinaryState
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try restored.asShapeMut().restoreBinaryState(in.streamIn());
+    try testing.expectEqual(@as(f32, 123.0), restored.base.getDensity());
+    try testing.expectEqual(@as(u64, 77), restored.asShape().getUserData());
+
+    // Material state: SaveMaterialState clears the list and stores the material
+    var materials: PhysicsMaterialList = .empty;
+    defer {
+        for (materials.items) |*m| m.deinit();
+        materials.deinit(allocator);
+    }
+    try materials.append(allocator, .init(PhysicsMaterial.default));
+    try shape.asShape().saveMaterialState(allocator, &materials);
+    try testing.expectEqual(@as(usize, 1), materials.items.len);
+    try testing.expect(materials.items[0].get() == material.material());
+    restored.asShapeMut().restoreMaterialState(materials.items);
+    try testing.expect(restored.base.getConvexMaterial() == material.material());
+
+    // Out of memory while saving the material state
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var empty: PhysicsMaterialList = .empty;
+    try testing.expectError(error.OutOfMemory, shape.asShape().saveMaterialState(failing.allocator(), &empty));
+}
+
+test "ConvexShape: collide convex vs convex (GJK, EPA, max separation distance, early out, faces)" {
+    const allocator = testing.allocator;
+
+    var sphere1 = SphereShape.init(allocator, 1.0, .{});
+    sphere1.asShape().setEmbedded();
+    defer sphere1.asShapeMut().deinit();
+    var sphere2 = SphereShape.init(allocator, 0.5, .{});
+    sphere2.asShape().setEmbedded();
+    defer sphere2.asShapeMut().deinit();
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    var gjk_box = TestConvexBox.init(allocator, Vec3.init(1, 2, 3), 0.05, null);
+    gjk_box.asShape().setEmbedded();
+    defer gjk_box.asShapeMut().deinit();
+
+    // Sphere vs sphere (GJK on the cores): penetration 0.25 along +X
+    {
+        var collector = ClosestHitCollisionCollector(CollideShapeCollector).init();
+        defer collector.deinit();
+        const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(3), .{});
+        collector.base.setContext(&context);
+        const creator1 = SubShapeIDCreator.pushID(.{}, 1, 2);
+        const creator2 = SubShapeIDCreator.pushID(.{}, 2, 2);
+        CollisionDispatch.collideShapeVsShape(sphere1.asShape(), sphere2.asShape(), Vec3.one(), Vec3.one(), Mat44.translation(Vec3.init(1, 2, 3)), Mat44.translation(Vec3.init(2.25, 2, 3)), creator1, creator2, &.{}, &collector.base, &.{});
+        try testing.expect(collector.hadHit());
+        const hit = &collector.hit;
+        try testing.expectApproxEqAbs(@as(f32, 0.25), hit.penetration_depth, 1.0e-5);
+        try testing.expect(hit.contact_point_on1.isClose(Vec3.init(2, 2, 3), .{ .max_dist_sq = 1.0e-10 }));
+        try testing.expect(hit.contact_point_on2.isClose(Vec3.init(1.75, 2, 3), .{ .max_dist_sq = 1.0e-10 }));
+        try testing.expect(hit.penetration_axis.normalized().isClose(Vec3.axisX(), .{ .max_dist_sq = 1.0e-10 }));
+        try testing.expect(hit.sub_shape_id1.eql(creator1.getID()) and hit.sub_shape_id2.eql(creator2.getID()));
+        try testing.expect(hit.body_id2.eql(.init(3)));
+        try testing.expectEqual(@as(u32, 0), hit.shape1_face.len + hit.shape2_face.len); // No faces requested
+    }
+
+    // Separated spheres: no hit, unless the max separation distance covers the gap (negative penetration)
+    for ([_]f32{ 0.0, 0.2 }) |max_separation| {
+        var settings: CollideShapeSettings = .{};
+        settings.max_separation_distance = max_separation;
+        var collector = ClosestHitCollisionCollector(CollideShapeCollector).init();
+        defer collector.deinit();
+        CollisionDispatch.collideShapeVsShape(sphere1.asShape(), sphere2.asShape(), Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.translation(Vec3.init(1.6, 0, 0)), .{}, .{}, &settings, &collector.base, &.{});
+        try testing.expectEqual(max_separation > 0.0, collector.hadHit());
+        if (collector.hadHit()) try testing.expectApproxEqAbs(@as(f32, -0.1), collector.hit.penetration_depth, 1.0e-5);
+    }
+
+    // Deep penetration of the shrunken cores: EPA, the analytic box and the GJK box agree, faces are collected
+    var depths: [2]f32 = undefined;
+    for ([_]*const Shape{ box.asShape(), gjk_box.asShape() }, &depths) |target, *depth| {
+        var settings: CollideShapeSettings = .{};
+        settings.collect_faces_mode = .collect_faces;
+        var collector = ClosestHitCollisionCollector(CollideShapeCollector).init();
+        defer collector.deinit();
+        const transform2 = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.1), Vec3.init(0.5, 0.25, 0));
+        CollisionDispatch.collideShapeVsShape(box.asShape(), target, Vec3.one(), Vec3.init(0.5, 0.5, 0.5), Mat44.identity(), transform2, .{}, .{}, &settings, &collector.base, &.{});
+        try testing.expect(collector.hadHit());
+        try testing.expect(collector.hit.penetration_depth > 1.0);
+        try testing.expectEqual(@as(u32, 4), collector.hit.shape1_face.len);
+        try testing.expectEqual(@as(u32, 4), collector.hit.shape2_face.len);
+        depth.* = collector.hit.penetration_depth;
+    }
+    try testing.expectApproxEqAbs(depths[0], depths[1], 1.0e-3);
+
+    // The collector's early out fraction rejects hits that are less deep
+    {
+        var collector = ClosestHitCollisionCollector(CollideShapeCollector).init();
+        defer collector.deinit();
+        collector.base.updateEarlyOutFraction(-0.5); // Only accept a penetration deeper than 0.5
+        CollisionDispatch.collideShapeVsShape(sphere1.asShape(), sphere2.asShape(), Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.translation(Vec3.init(1.25, 0, 0)), .{}, .{}, &.{}, &collector.base, &.{});
+        try testing.expect(!collector.hadHit());
+    }
+
+    // Bounding boxes that do not overlap: early out before GJK
+    {
+        var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer collector.deinit();
+        CollisionDispatch.collideShapeVsShape(box.asShape(), sphere1.asShape(), Vec3.one(), Vec3.replicate(2.0), Mat44.identity(), Mat44.translation(Vec3.init(0, 0, 6)), .{}, .{}, &.{}, &collector.base, &.{});
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
+    }
+}
+
+test "ConvexShape: cast convex vs convex (fraction, back faces, deepest point, faces, shrunken shapes)" {
+    const allocator = testing.allocator;
+
+    var sphere = SphereShape.init(allocator, 0.5, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    const box_transform = Mat44.translation(Vec3.init(10, 0, 0));
+
+    // Sphere moving +X into the box: hits at x = 9 - 0.5
+    for ([_]bool{ false, true }) |shrunken| {
+        var settings: ShapeCastSettings = .{};
+        settings.use_shrunken_shape_and_convex_radius = shrunken;
+        settings.collect_faces_mode = .collect_faces;
+        const cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(0, 0.5, 0)), Vec3.init(10, 0, 0));
+        var collector = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+        defer collector.deinit();
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast, &settings, box.asShape(), Vec3.one(), &.{}, box_transform, .{}, .{}, &collector.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
+        const hit = &collector.hits.items[0];
+        try testing.expectApproxEqAbs(@as(f32, 0.85), hit.fraction, 1.0e-4);
+        try testing.expect(hit.base.contact_point_on2.isClose(Vec3.init(9, 0.5, 0), .{ .max_dist_sq = 1.0e-6 }));
+        try testing.expect(!hit.is_back_face_hit);
+        try testing.expectEqual(@as(u32, 0), hit.base.shape1_face.len); // A sphere has no faces
+        try testing.expectEqual(@as(u32, 4), hit.base.shape2_face.len);
+    }
+
+    // Moving away from the box while touching it: back facing, only reported with CollideWithBackFaces
+    for ([_]BackFaceMode{ .ignore_back_faces, .collide_with_back_faces }) |mode| {
+        var settings: ShapeCastSettings = .{};
+        settings.back_face_mode_convex = mode;
+        settings.return_deepest_point = true;
+        const cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(8.75, 0, 0)), Vec3.init(-5, 0, 0));
+        var collector = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+        defer collector.deinit();
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast, &settings, box.asShape(), Vec3.one(), &.{}, box_transform, .{}, .{}, &collector.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, if (mode == .collide_with_back_faces) 1 else 0), collector.hits.items.len);
+        if (collector.hits.items.len == 1) {
+            try testing.expectEqual(@as(f32, 0.0), collector.hits.items[0].fraction);
+            try testing.expectApproxEqAbs(@as(f32, 0.25), collector.hits.items[0].base.penetration_depth, 1.0e-4);
+        }
+    }
+
+    // A hit at fraction 0 that is less deep than the collector's early out is rejected
+    {
+        var settings: ShapeCastSettings = .{};
+        settings.return_deepest_point = true;
+        const cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(8.75, 0, 0)), Vec3.init(1, 0, 0));
+        var collector = ClosestHitCollisionCollector(CastShapeCollector).init();
+        defer collector.deinit();
+        collector.base.updateEarlyOutFraction(-1.0);
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast, &settings, box.asShape(), Vec3.one(), &.{}, box_transform, .{}, .{}, &collector.base);
+        try testing.expect(!collector.hadHit());
+    }
+
+    // Missing the box
+    {
+        const cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(0, 5, 0)), Vec3.init(10, 0, 0));
+        var collector = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+        defer collector.deinit();
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast, &.{}, box.asShape(), Vec3.one(), &.{}, box_transform, .{}, .{}, &collector.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
+    }
+}

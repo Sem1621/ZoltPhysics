@@ -443,3 +443,285 @@ pub const BoxShape = struct {
         }
     };
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (Jolt's own box tests are in ZoltTests/Physics, the bit exact comparison with Jolt in
+// ZoltParity/Physics/ConvexParity.zig)
+
+const testing = std.testing;
+const Ref = @import("../../../Core/Reference.zig").Ref;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+
+test "BoxShape: settings, Jolt's error texts, convex radius and out of memory (the settings part of TestBoxShape)" {
+    const allocator = testing.allocator;
+
+    {
+        // Check half extents must be positive
+        var box_settings = BoxShapeSettings.init(allocator, Vec3.init(-1, 1, 1), .{});
+        defer box_settings.deinit();
+        var result = try box_settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings("Invalid half extent", result.getError());
+    }
+
+    {
+        // Check convex radius must be positive
+        var box_settings = BoxShapeSettings.init(allocator, Vec3.replicate(1.0), .{ .convex_radius = -1.0 });
+        defer box_settings.deinit();
+        var result = try box_settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings("Invalid convex radius", result.getError());
+    }
+
+    {
+        // Create zero sized box
+        var box_settings = BoxShapeSettings.init(allocator, Vec3.zero(), .{ .convex_radius = 1.0 });
+        defer box_settings.deinit();
+        var result = try box_settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        const box = result.getPtr().?.cast(BoxShape);
+
+        // Create another box by using a different constructor
+        var box2 = try BoxShape.create(allocator, Vec3.zero(), .{ .convex_radius = 1.0 });
+        var box2_ref = Ref(Shape).init(box2.asShapeMut());
+        defer box2_ref.deinit();
+
+        // Check convex radius is adjusted to zero
+        try testing.expectEqual(@as(f32, 0.0), box.getConvexRadius());
+        try testing.expectEqual(@as(f32, 0.0), box2.getConvexRadius());
+    }
+
+    // Defaults: the default convex radius, the default constructor has a zero box
+    var defaults = BoxShapeSettings.init(allocator, Vec3.one(), .{});
+    defer defaults.deinit();
+    try testing.expectEqual(PhysicsSettings.default_convex_radius, defaults.convex_radius);
+    var empty = BoxShapeSettings.initDefault(allocator);
+    defer empty.deinit();
+    try testing.expect(empty.half_extent.eql(Vec3.zero()) and empty.convex_radius == 0.0);
+
+    // Heap settings with a material
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    const settings = try BoxShapeSettings.create(allocator, Vec3.init(1, 2, 3), .{ .convex_radius = 0.1, .material = material.material() });
+    var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+    defer settings_ref.deinit();
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    const box = result.getPtr().?.cast(BoxShape);
+    try testing.expect(box.getHalfExtent().eql(Vec3.init(1, 2, 3)));
+    try testing.expectEqual(@as(f32, 0.1), box.getConvexRadius());
+    try testing.expect(box.asShape().getMaterial(.empty) == material.material());
+
+    // Out of memory while creating the shape is returned and not cached
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var oom_settings = BoxShapeSettings.init(allocator, Vec3.one(), .{});
+        defer oom_settings.deinit();
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var r = oom_settings.asShapeSettings().createShape(failing.allocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(oom_settings.base.base.cached_result.isEmpty());
+            continue;
+        };
+        defer r.deinit();
+        try testing.expect(r.isValid());
+        try testing.expectEqual(@as(usize, 1), fail_index); // Only the shape is allocated
+        break;
+    }
+}
+
+test "BoxShape: bounds, inner radius, mass properties, volume, stats, surface normal, supporting face" {
+    const allocator = testing.allocator;
+
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    const shape = box.asShape();
+
+    try testing.expect(shape.getLocalBounds().eql(.init(Vec3.init(-1, -2, -3), Vec3.init(1, 2, 3))));
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisX(), 0.3), Vec3.init(1, 2, 3));
+    try testing.expect(shape.getWorldSpaceBounds(transform, Vec3.init(2, -1, 1)).eql(shape.getLocalBounds().scaled(Vec3.init(2, -1, 1)).transformed(transform))); // Shape's version
+    try testing.expectEqual(@as(f32, 1.0), shape.getInnerRadius());
+    try testing.expectEqual(@as(f32, 48.0), shape.getVolume());
+    try testing.expectEqual(@as(usize, @sizeOf(BoxShape)), shape.getStats().size_bytes);
+    try testing.expectEqual(@as(u32, 12), shape.getStats().num_triangles);
+    try testing.expect(shape.isValidScale(Vec3.init(1, -2, 3)) and !shape.isValidScale(Vec3.init(1, 0, 3))); // Any non zero scale
+
+    const p = shape.getMassProperties();
+    try testing.expectEqual(@as(f32, 48000.0), p.mass);
+    try testing.expectApproxEqRel(@as(f32, 48000.0 / 12.0 * (16.0 + 36.0)), p.inertia.get(0, 0), 1.0e-6);
+
+    // Surface normals: the closest face
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.9, 0.5, 0.5)).eql(Vec3.axisX()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.1, -1.95, 0.5)).eql(Vec3.axisY().negate()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, 0, 3)).eql(Vec3.axisZ()));
+
+    // Supporting face: scaled, transformed to world space
+    var face: Shape.SupportingFace = .empty;
+    shape.getSupportingFace(.empty, Vec3.axisX(), Vec3.init(-2, 1, 1), Mat44.translation(Vec3.init(10, 0, 0)), &face);
+    try testing.expectEqual(@as(u32, 4), face.len);
+    for (face.constSlice()) |v| try testing.expectEqual(@as(f32, 8.0), v.getX()); // The face at -X of the scaled box faces +X the most
+}
+
+test "BoxShape: support functions" {
+    const allocator = testing.allocator;
+
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{ .convex_radius = 0.5 });
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const scale = Vec3.init(-2, 1, 1);
+
+    // Include convex radius and default: the full scaled box, no convex radius
+    for ([_]ConvexShape.SupportMode{ .include_convex_radius, .default }) |mode| {
+        const support = box.base.getSupportFunction(mode, &buffer, scale);
+        try testing.expectEqual(@as(f32, 0.0), support.getConvexRadius());
+        try testing.expect(support.getSupport(Vec3.init(1, -1, 1)).eql(Vec3.init(2, -2, 3)));
+    }
+
+    // Exclude convex radius: shrunk by the scaled convex radius (limited to cDefaultConvexRadius)
+    const support = box.base.getSupportFunction(.exclude_convex_radius, &buffer, scale);
+    try testing.expectEqual(PhysicsSettings.default_convex_radius, support.getConvexRadius());
+    const reduced = Vec3.init(2, 2, 3).sub(Vec3.replicate(PhysicsSettings.default_convex_radius));
+    try testing.expect(support.getSupport(Vec3.init(1, -1, 1)).eql(Vec3.init(reduced.getX(), -reduced.getY(), reduced.getZ())));
+}
+
+test "BoxShape: ray casts, collide point, filters and the collector context" {
+    const allocator = testing.allocator;
+
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    const shape = box.asShape();
+    const creator = SubShapeIDCreator.pushID(.{}, 2, 3);
+
+    // Single hit
+    var hit: RayCastResult = .{};
+    try testing.expect(shape.castRay(.init(Vec3.init(-2, 0, 0), Vec3.init(4, 0, 0)), creator, &hit));
+    try testing.expectEqual(@as(f32, 0.25), hit.fraction);
+    try testing.expect(hit.sub_shape_id2.eql(creator.getID()));
+    try testing.expect(!shape.castRay(.init(Vec3.init(-2, 5, 0), Vec3.init(4, 0, 0)), creator, &hit));
+    try testing.expect(shape.castRay(.init(Vec3.zero(), Vec3.init(4, 0, 0)), creator, &hit)); // Starts inside
+    try testing.expectEqual(@as(f32, 0.0), hit.fraction);
+
+    // Collector: front and back face hits
+    var settings: RayCastSettings = .{};
+    settings.setBackFaceMode(.collide_with_back_faces);
+    var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer hits.deinit();
+    const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(8), .{});
+    hits.base.setContext(&context);
+    shape.castRayCollector(.init(Vec3.init(-2, 0, 0), Vec3.init(4, 0, 0)), &settings, creator, &hits.base, &.{});
+    try hits.checkError();
+    try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.25), hits.hits.items[0].fraction);
+    try testing.expectEqual(@as(f32, 0.75), hits.hits.items[1].fraction);
+    try testing.expect(hits.hits.items[0].body_id.eql(.init(8)));
+
+    // Collide point (the surface counts as inside)
+    var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer points.deinit();
+    shape.collidePoint(Vec3.init(1, -2, 3), creator, &points.base, &.{});
+    shape.collidePoint(Vec3.init(1.01, 0, 0), creator, &points.base, &.{});
+    try points.checkError();
+    try testing.expectEqual(@as(usize, 1), points.hits.items.len);
+    try testing.expect(points.hits.items[0].sub_shape_id2.eql(creator.getID()));
+}
+
+test "BoxShape: CollideSoftBodyVertices" {
+    const allocator = testing.allocator;
+
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.5 * math.pi), Vec3.init(10, 0, 0));
+    var positions = [_]Vec3{ transform.mulVec3(Vec3.init(0.5, 0.1, 0.2)), transform.mulVec3(Vec3.init(3, 0, 0)), transform.mulVec3(Vec3.init(0, 0, 0)) };
+    var inv_masses = [_]f32{ 1, 1, 0 };
+    var planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** 3;
+    var penetrations = [_]f32{-math.flt_max} ** 3;
+    var indices = [_]i32{-1} ** 3;
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    box.asShape().collideSoftBodyVertices(transform, Vec3.one(), &vertices, 3, 4);
+
+    // Inside: the closest face is +X (0.5 away)
+    try testing.expectApproxEqAbs(@as(f32, 0.5), penetrations[0], 1.0e-6);
+    try testing.expectEqual(@as(i32, 4), indices[0]);
+    try testing.expect(planes[0].getNormal().isClose(transform.multiply3x3(Vec3.axisX()), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectApproxEqAbs(@as(f32, 0.0), planes[0].signedDistance(transform.mulVec3(Vec3.init(1, 0, 0))), 1.0e-5);
+
+    // Outside: negative penetration, normal from the closest point
+    try testing.expectApproxEqAbs(@as(f32, -2.0), penetrations[1], 1.0e-5);
+    try testing.expect(planes[1].getNormal().isClose(transform.multiply3x3(Vec3.axisX()), .{ .max_dist_sq = 1.0e-10 }));
+
+    // Infinite mass: skipped
+    try testing.expectEqual(-math.flt_max, penetrations[2]);
+    try testing.expectEqual(@as(i32, -1), indices[2]);
+}
+
+test "BoxShape: GetTrianglesStart / Next, GetSubmergedVolume" {
+    const allocator = testing.allocator;
+
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    // 12 triangles on the faces of the scaled box, inside out scales flip the winding
+    for ([_]Vec3{ Vec3.one(), Vec3.init(1, -1, 1) }) |scale| {
+        var context: Shape.GetTrianglesContext = .{};
+        box.asShape().getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), scale);
+        var vertices: [3 * 32]Float3 = undefined;
+        try testing.expectEqual(@as(u32, 12), box.asShape().getTrianglesNext(&context, 32, &vertices, null));
+        const flipped_order = [_]usize{ 0, 2, 1 };
+        for (vertices[0..36], 0..) |v, i| {
+            const index = if (scale.getY() < 0.0) i / 3 * 3 + flipped_order[i % 3] else i;
+            const expected = unit_box_triangles[index].mul(Vec3.init(1, 2, 3)).mul(scale);
+            try testing.expect(Vec3.fromFloat3(v).eql(expected));
+        }
+        try testing.expectEqual(@as(u32, 0), box.asShape().getTrianglesNext(&context, 32, &vertices, null));
+    }
+
+    // GetSubmergedVolume is ConvexShape's
+    const half = box.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 48.0), half.total_volume);
+    try testing.expectApproxEqAbs(@as(f32, 24.0), half.submerged_volume, 1.0e-5);
+}
+
+test "BoxShape: binary state, restoreFromBinaryState and the registration" {
+    const allocator = testing.allocator;
+
+    var box = BoxShape.init(allocator, Vec3.init(1, 2, 3), .{ .convex_radius = 0.25 });
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    box.base.setDensity(321.0);
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    box.asShape().saveBinaryState(out.streamOut());
+    try testing.expectEqual(@as(usize, 1 + 8 + 4 + 12 + 4), writer.buffered().len); // Sub type, user data, density, half extent, convex radius
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var result = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer result.deinit();
+    const restored = result.getPtr().?.cast(BoxShape);
+    try testing.expect(restored.getHalfExtent().eql(Vec3.init(1, 2, 3)));
+    try testing.expectEqual(@as(f32, 0.25), restored.getConvexRadius());
+    try testing.expectEqual(@as(f32, 321.0), restored.base.getDensity());
+
+    // Truncated: Jolt's error text
+    var short_reader: std.Io.Reader = .fixed(writer.buffered()[0 .. writer.buffered().len - 1]);
+    var short_in = StreamWrapper.StreamInWrapper.init(&short_reader);
+    var short_result = try Shape.restoreFromBinaryState(allocator, short_in.streamIn());
+    defer short_result.deinit();
+    try testing.expectEqualStrings("Failed to restore shape", short_result.getError());
+
+    // ShapeFunctions
+    try testing.expect(ShapeFunctions.get(.box).construct != null);
+    try testing.expect(ShapeFunctions.get(.box).color.eql(Color.green));
+}
