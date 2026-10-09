@@ -236,10 +236,12 @@ pub const RRayCast = @import("Physics/Collision/RayCast.zig").RRayCast;
 pub const BoxShape = @import("Physics/Collision/Shape/BoxShape.zig").BoxShape;
 pub const CapsuleShape = @import("Physics/Collision/Shape/CapsuleShape.zig").CapsuleShape;
 pub const CompoundShape = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShape;
+pub const CompoundShapeSettings = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShapeSettings;
 pub const ConvexHullShape = @import("Physics/Collision/Shape/ConvexHullShape.zig").ConvexHullShape;
 pub const ConvexShape = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShape;
 pub const CylinderShape = @import("Physics/Collision/Shape/CylinderShape.zig").CylinderShape;
 pub const DecoratedShape = @import("Physics/Collision/Shape/DecoratedShape.zig").DecoratedShape;
+pub const DecoratedShapeSettings = @import("Physics/Collision/Shape/DecoratedShape.zig").DecoratedShapeSettings;
 pub const EmptyShape = @import("Physics/Collision/Shape/EmptyShape.zig").EmptyShape;
 pub const GetTrianglesContextMultiVertexList = @import("Physics/Collision/Shape/GetTrianglesContext.zig").GetTrianglesContextMultiVertexList;
 pub const GetTrianglesContextVertexList = @import("Physics/Collision/Shape/GetTrianglesContext.zig").GetTrianglesContextVertexList;
@@ -425,6 +427,7 @@ const source_files = .{
     @import("Physics/Collision/Shape/BoxShape.zig"),
     @import("Physics/Collision/Shape/CapsuleShape.zig"),
     @import("Physics/Collision/Shape/CompoundShape.zig"),
+    @import("Physics/Collision/Shape/CompoundShapeVisitors.zig"),
     @import("Physics/Collision/Shape/ConvexHullShape.zig"),
     @import("Physics/Collision/Shape/ConvexShape.zig"),
     @import("Physics/Collision/Shape/CylinderShape.zig"),
