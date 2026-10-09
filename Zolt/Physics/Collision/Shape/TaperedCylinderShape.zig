@@ -809,3 +809,452 @@ fn calculateSideNormal(normal_xz: Vec3, top: f32, bottom: f32, top_radius: f32, 
     const tan_alpha = (bottom_radius - top_radius) / (top - bottom);
     return Vec3.init(normal_xz.getX(), tan_alpha, normal_xz.getZ()).normalized();
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (Jolt's own tapered cylinder tests are in ZoltTests/Physics/TaperedCylinderShapeTests.zig, the bit exact
+// comparison with Jolt in ZoltParity/Physics/CylindersParity.zig)
+
+const testing = std.testing;
+const RefConst = @import("../../../Core/Reference.zig").RefConst;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const CastRayCollector = ShapeFile.CastRayCollector;
+const RayCast = @import("../RayCast.zig").RayCast;
+const RayCastResult = @import("../CastResult.zig").RayCastResult;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const RegisterTypes = @import("../../../RegisterTypes.zig");
+
+/// Create a shape from tapered cylinder settings (the caller releases the reference)
+fn createTestShape(half_height: f32, top_radius: f32, bottom_radius: f32, convex_radius: f32) !RefConst(Shape) {
+    var settings = TaperedCylinderShapeSettings.init(testing.allocator, half_height, top_radius, bottom_radius, .{ .convex_radius = convex_radius });
+    defer settings.deinit();
+    var result = try settings.asShapeSettings().createShape(testing.allocator);
+    defer result.deinit();
+    return .init(result.getPtr().?);
+}
+
+test "TaperedCylinderShape: settings, Jolt's error texts, convex radius (the settings part of TestTaperedCylinderShape)" {
+    const allocator = testing.allocator;
+
+    const Case = struct { half_height: f32, top_radius: f32, bottom_radius: f32, convex_radius: f32, error_text: []const u8 };
+    for ([_]Case{
+        .{ .half_height = -1.0, .top_radius = 1.0, .bottom_radius = 0.1, .convex_radius = 1.0, .error_text = "Invalid height" }, // Check half height must be positive
+        .{ .half_height = 0.0, .top_radius = 1.0, .bottom_radius = 0.1, .convex_radius = 1.0, .error_text = "Invalid height" }, // Zero height is invalid too
+        .{ .half_height = 1.0, .top_radius = -1.0, .bottom_radius = 0.1, .convex_radius = 1.0, .error_text = "Invalid top radius" }, // Check top radius must be positive
+        .{ .half_height = 1.0, .top_radius = 1.0, .bottom_radius = -0.1, .convex_radius = 1.0, .error_text = "Invalid bottom radius" }, // Check bottom radius must be positive
+        .{ .half_height = 1.0, .top_radius = 1.0, .bottom_radius = 0.1, .convex_radius = -1.0, .error_text = "Invalid convex radius" }, // Check convex radius must be positive
+        .{ .half_height = -1.0, .top_radius = -1.0, .bottom_radius = 0.1, .convex_radius = -1.0, .error_text = "Invalid top radius" }, // The radii are checked first
+        // Equal radii: the CylinderShape checks (the height may be zero)
+        .{ .half_height = -1.0, .top_radius = 0.5, .bottom_radius = 0.5, .convex_radius = 0.1, .error_text = "Invalid height" },
+        .{ .half_height = 1.0, .top_radius = -0.5, .bottom_radius = -0.5, .convex_radius = 0.1, .error_text = "Invalid radius" },
+        .{ .half_height = 1.0, .top_radius = 0.5, .bottom_radius = 0.5, .convex_radius = -0.1, .error_text = "Invalid convex radius" },
+    }) |c| {
+        var settings = TaperedCylinderShapeSettings.init(allocator, c.half_height, c.top_radius, c.bottom_radius, .{ .convex_radius = c.convex_radius });
+        defer settings.deinit();
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings(c.error_text, result.getError());
+    }
+
+    {
+        // Create zero sized cylinder
+        var cylinder_ref = try createTestShape(1.0e-12, 0.0, 1.0e-12, 1.0); // Top != bottom or else we'll be creating a CylinderShape instead
+        defer cylinder_ref.deinit();
+        const cylinder = cylinder_ref.get().?.cast(TaperedCylinderShape);
+
+        // Check convex radius is adjusted to zero
+        try testing.expectEqual(@as(f32, 0.0), cylinder.getConvexRadius());
+    }
+
+    // Defaults
+    var defaults = TaperedCylinderShapeSettings.init(allocator, 1.0, 1.0, 0.5, .{});
+    defer defaults.deinit();
+    try testing.expectEqual(PhysicsSettings.default_convex_radius, defaults.convex_radius);
+    var empty = TaperedCylinderShapeSettings.initDefault(allocator);
+    defer empty.deinit();
+    try testing.expect(empty.half_height == 0.0 and empty.top_radius == 0.0 and empty.bottom_radius == 0.0 and empty.convex_radius == 0.0);
+    var empty_result = try empty.asShapeSettings().createShape(allocator);
+    defer empty_result.deinit();
+    try testing.expect(empty_result.isValid()); // Equal radii: a zero sized CylinderShape
+    try testing.expectEqual(ShapeSubType.cylinder, empty_result.getPtr().?.getSubType());
+
+    // Heap settings with a material, density and user data, the result is cached
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    const settings = try TaperedCylinderShapeSettings.create(allocator, 2.0, 0.5, 1.5, .{ .convex_radius = 0.1, .material = material.material() });
+    var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+    defer settings_ref.deinit();
+    settings.base.setDensity(250.0);
+    settings.asShapeSettings().user_data = 42;
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    const cylinder = result.getPtr().?.cast(TaperedCylinderShape);
+    try testing.expectEqual(@as(f32, 0.5), cylinder.getTopRadius());
+    try testing.expectEqual(@as(f32, 1.5), cylinder.getBottomRadius());
+    try testing.expectEqual(@as(f32, 0.1), cylinder.getConvexRadius());
+    try testing.expectApproxEqAbs(@as(f32, 2.0), cylinder.getHalfHeight(), 1.0e-6);
+    try testing.expectEqual(@as(f32, 250.0), cylinder.base.getDensity());
+    try testing.expectEqual(@as(u64, 42), cylinder.asShape().getUserData());
+    try testing.expect(cylinder.asShape().getMaterial(.empty) == material.material());
+    var again = try settings.createShape(allocator);
+    defer again.deinit();
+    try testing.expect(again.getPtr() == result.getPtr());
+}
+
+test "TaperedCylinderShape: equal radii create a CylinderShape (density and user data are not passed on, as in Jolt)" {
+    const allocator = testing.allocator;
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+
+    var settings = TaperedCylinderShapeSettings.init(allocator, 1.5, 0.5, 0.5, .{ .convex_radius = 0.2, .material = material.material() });
+    defer settings.deinit();
+    settings.base.setDensity(250.0);
+    settings.asShapeSettings().user_data = 42;
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const cylinder = result.getPtr().?.cast(CylinderShape);
+    try testing.expectEqual(@as(f32, 1.5), cylinder.getHalfHeight());
+    try testing.expectEqual(@as(f32, 0.5), cylinder.getRadius());
+    try testing.expectEqual(@as(f32, 0.2), cylinder.getConvexRadius());
+    try testing.expect(cylinder.asShape().getMaterial(.empty) == material.material());
+    try testing.expectEqual(@as(f32, 1000.0), cylinder.base.getDensity()); // A default constructed CylinderShapeSettings
+    try testing.expectEqual(@as(u64, 0), cylinder.asShape().getUserData());
+
+    // The result is cached
+    var again = try settings.asShapeSettings().createShape(allocator);
+    defer again.deinit();
+    try testing.expect(again.getPtr() == result.getPtr());
+
+    // A zero height cylinder is valid (the CylinderShape check is `< 0`)
+    var flat = try createTestShape(0.0, 1.0, 1.0, 0.0);
+    defer flat.deinit();
+    try testing.expectEqual(ShapeSubType.cylinder, flat.get().?.getSubType());
+}
+
+test "TaperedCylinderShape: out of memory in both branches of createShape is returned and not cached" {
+    const allocator = testing.allocator;
+
+    for ([_]f32{ 0.5, 1.0 }) |bottom_radius| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+            var oom_settings = TaperedCylinderShapeSettings.init(allocator, 1.0, 1.0, bottom_radius, .{ .material = material.material() });
+            defer oom_settings.deinit();
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            var r = oom_settings.asShapeSettings().createShape(failing.allocator()) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expect(oom_settings.base.base.cached_result.isEmpty());
+                try testing.expectEqual(@as(u32, 1), material.material().getRefCount()); // The local CylinderShapeSettings released its reference
+                continue;
+            };
+            defer r.deinit();
+            try testing.expect(r.isValid());
+            try testing.expectEqual(if (bottom_radius == 1.0) ShapeSubType.cylinder else ShapeSubType.tapered_cylinder, r.getPtr().?.getSubType());
+            try testing.expectEqual(@as(usize, 1), fail_index); // Only the shape is allocated
+            break;
+        }
+    }
+}
+
+test "TaperedCylinderShape: center of mass, bounds, inner radius, volume, mass properties, stats, surface normal" {
+    var shape_ref = try createTestShape(1.0, 1.0, 0.5, 0.05);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const cylinder = shape.cast(TaperedCylinderShape);
+
+    // com = h * (3 tr^2 + 2 br tr + br^2) / (4 (tr^2 + br tr + br^2)) with h = 2, tr = 1, br = 0.5
+    const com: f32 = 2.0 * 4.25 / 7.0;
+    try testing.expectApproxEqAbs(2.0 - com, cylinder.top, 1.0e-6);
+    try testing.expectApproxEqAbs(-com, cylinder.bottom, 1.0e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), cylinder.getHalfHeight(), 1.0e-6);
+    try testing.expect(shape.getCenterOfMass().isClose(Vec3.init(0, com - 1.0, 0), .{ .max_dist_sq = 1.0e-12 }));
+    try testing.expect(shape.getLocalBounds().eql(.init(Vec3.init(-1, cylinder.bottom, -1), Vec3.init(1, cylinder.top, 1))));
+    try testing.expectEqual(@as(f32, 0.5), shape.getInnerRadius());
+    try testing.expectApproxEqRel(@as(f32, std.math.pi / 3.0 * 2.0 * 1.75), shape.getVolume(), 1.0e-6);
+    try testing.expectEqual(@as(usize, @sizeOf(TaperedCylinderShape)), shape.getStats().size_bytes);
+    try testing.expectEqual(@as(u32, 0), shape.getStats().num_triangles);
+    const p = shape.getMassProperties();
+    try testing.expectApproxEqRel(shape.getVolume() * 1000.0, p.mass, 1.0e-6);
+    try testing.expectEqual(p.inertia.get(0, 0), p.inertia.get(2, 2));
+    try testing.expect(p.inertia.get(1, 1) > 0.0 and p.inertia.get(0, 1) == 0.0);
+
+    // Surface normals: top, bottom and the sloped side (the top is wider, so the side faces down)
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.1, cylinder.top, 0.1)).eql(Vec3.init(0, 1, 0)));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.1, cylinder.bottom, 0.1)).eql(Vec3.init(0, -1, 0)));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.7, 0, 0)).isClose(Vec3.init(1, -0.25, 0).normalized(), .{ .max_dist_sq = 1.0e-12 }));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, 0, 0)).isClose(Vec3.init(1, -0.25, 0).normalized(), .{ .max_dist_sq = 1.0e-12 })); // On the axis: X
+}
+
+test "TaperedCylinderShape: valid scales (the tapered cylinder part of Jolt's TestIsValidScale)" {
+    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
+    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
+
+    var tapered_cylinder_ref = try createTestShape(0.5, 2.0, 3.0, PhysicsSettings.default_convex_radius);
+    defer tapered_cylinder_ref.deinit();
+    const tapered_cylinder = tapered_cylinder_ref.get().?;
+    try testing.expect(!tapered_cylinder.isValidScale(Vec3.zero()));
+    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(0, 1, 0)));
+    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(1, 0, 1)));
+    try testing.expect(tapered_cylinder.isValidScale(Vec3.init(2, 2, 2)));
+    try testing.expect(tapered_cylinder.isValidScale(Vec3.init(-1, 1, -1)));
+    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(2, 1, 1)));
+    try testing.expect(tapered_cylinder.isValidScale(Vec3.init(1, 2, 1)));
+    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(1, 1, 2)));
+    try testing.expect(tapered_cylinder.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
+    try testing.expect(tapered_cylinder.makeScaleValid(Vec3.init(-1.0e-10, 1, 1.0e-10)).eql(Vec3.init(-ScaleHelpers.min_scale, 1, ScaleHelpers.min_scale)));
+    try testing.expect(tapered_cylinder.makeScaleValid(Vec3.init(2, 5, -4)).eql(Vec3.init(3, 5, -3)));
+}
+
+test "TaperedCylinderShape: support functions, a negative Y scale flips top and bottom" {
+    var shape_ref = try createTestShape(1.0, 1.0, 0.5, 0.25);
+    defer shape_ref.deinit();
+    const cylinder = shape_ref.get().?.cast(TaperedCylinderShape);
+    const top = cylinder.top;
+    const bottom = cylinder.bottom;
+
+    var buffer: ConvexShape.SupportBuffer = .{};
+
+    // Include convex radius and default: the full shape, no convex radius
+    for ([_]ConvexShape.SupportMode{ .include_convex_radius, .default }) |mode| {
+        const support = cylinder.base.getSupportFunction(mode, &buffer, Vec3.one());
+        try testing.expectEqual(@as(f32, 0.0), support.getConvexRadius());
+        try testing.expect(support.getSupport(Vec3.init(1, 1, 0)).eql(Vec3.init(1, top, 0)));
+        try testing.expect(support.getSupport(Vec3.init(0, 0, -1)).eql(Vec3.init(0, top, -1))); // The wider top wins
+        try testing.expect(support.getSupport(Vec3.init(0, -1, 0)).eql(Vec3.init(0, bottom, 0)));
+        try testing.expect(support.getSupport(Vec3.zero()).eql(Vec3.init(0, bottom, 0)));
+    }
+
+    // Flipped: the wide end is at the bottom
+    const flipped = cylinder.base.getSupportFunction(.default, &buffer, Vec3.init(-1, -1, 1));
+    try testing.expect(flipped.getSupport(Vec3.init(1, -1, 0)).eql(Vec3.init(1, -top, 0)));
+    try testing.expect(flipped.getSupport(Vec3.init(0, 1, 0)).eql(Vec3.init(0, -bottom, 0)));
+
+    // Exclude convex radius: shrunk by the scaled convex radius
+    const support = cylinder.base.getSupportFunction(.exclude_convex_radius, &buffer, Vec3.init(2, 1, 2));
+    try testing.expectEqual(@as(f32, 0.25), support.getConvexRadius()); // min(1, 2) * 0.25
+    try testing.expect(support.getSupport(Vec3.init(1, 1, 0)).eql(Vec3.init(2 - 0.25, top - 0.25, 0)));
+    try testing.expect(support.getSupport(Vec3.init(1, -10, 0)).eql(Vec3.init(1 - 0.25, bottom + 0.25, 0)));
+}
+
+test "TaperedCylinderShape: supporting faces (side, top, bottom, skipped caps of a cone)" {
+    var shape_ref = try createTestShape(1.0, 1.0, 0.5, 0.0);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const cylinder = shape.cast(TaperedCylinderShape);
+    const transform = Mat44.translation(Vec3.init(10, 0, 0));
+
+    // Side: the 2 support points of the side opposite to the direction
+    var face: Shape.SupportingFace = .empty;
+    shape.getSupportingFace(.empty, Vec3.init(-1, 0, 0), Vec3.one(), transform, &face);
+    try testing.expectEqual(@as(u32, 2), face.len);
+    try testing.expect(face.get(0).eql(Vec3.init(11, cylinder.top, 0)));
+    try testing.expect(face.get(1).eql(Vec3.init(10.5, cylinder.bottom, 0)));
+
+    // Top (direction down) and bottom (direction up, vertices in reverse order)
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(0, -1, 0), Vec3.one(), Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 8), face.len);
+    try testing.expect(face.get(0).eql(Vec3.init(0, cylinder.top, 1)));
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(0, 1, 0), Vec3.one(), Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 8), face.len);
+    try testing.expect(face.get(0).isClose(Vec3.init(-0.5 * 0.707106769, cylinder.bottom, 0.5 * 0.707106769), .{ .max_dist_sq = 1.0e-12 }));
+
+    // A cone has no top face
+    var cone_ref = try createTestShape(1.0, 0.0, 0.5, 0.0);
+    defer cone_ref.deinit();
+    face.clear();
+    cone_ref.get().?.getSupportingFace(.empty, Vec3.init(0, -1, 0), Vec3.one(), Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 0), face.len);
+    cone_ref.get().?.getSupportingFace(.empty, Vec3.init(0, 1, 0), Vec3.one(), Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 8), face.len);
+}
+
+test "TaperedCylinderShape: ray casts (TestTaperedCylinderShapeRay, ConvexShape's GJK fallback) and collide point" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTestShape(4, 1, 3, PhysicsSettings.default_convex_radius);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const com = shape.getCenterOfMass();
+
+    for ([_][2]Vec3{
+        // Ray through origin
+        .{ Vec3.init(-2, 0, 0), Vec3.init(2, 0, 0) },
+        .{ Vec3.init(0, -4, 0), Vec3.init(0, 4, 0) },
+        .{ Vec3.init(0, 0, -2), Vec3.init(0, 0, 2) },
+        // Ray halfway to the top
+        .{ Vec3.init(-1.5, 2, 0), Vec3.init(1.5, 2, 0) },
+        .{ Vec3.init(0, 2, -1.5), Vec3.init(0, 2, 1.5) },
+        // Ray halfway to the bottom
+        .{ Vec3.init(-2.5, -2, 0), Vec3.init(2.5, -2, 0) },
+        .{ Vec3.init(0, -2, -2.5), Vec3.init(0, -2, 2.5) },
+    }) |ends| {
+        // From outside to the first end point (in the space the shape was created in)
+        const origin = ends[0].sub(ends[1].sub(ends[0]));
+        const direction = ends[1].sub(origin);
+        var hit: RayCastResult = .{};
+        try testing.expect(shape.castRay(RayCast.init(origin.sub(com), direction), .{}, &hit));
+        try testing.expect(origin.add(direction.mulScalar(hit.fraction)).isClose(ends[0], .{ .max_dist_sq = 1.0e-4 }));
+    }
+
+    // Collide point: within height and radius
+    var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer points.deinit();
+    const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(3), .{});
+    points.base.setContext(&context);
+    shape.collidePoint(Vec3.init(1.9, 0, 0).sub(com), .{}, &points.base, &.{});
+    shape.collidePoint(Vec3.init(2.1, 0, 0).sub(com), .{}, &points.base, &.{});
+    shape.collidePoint(Vec3.init(0, 4.1, 0).sub(com), .{}, &points.base, &.{});
+    try points.checkError();
+    try testing.expectEqual(@as(usize, 1), points.hits.items.len);
+    try testing.expect(points.hits.items[0].body_id.eql(.init(3)));
+}
+
+test "TaperedCylinderShape: CollideSoftBodyVertices (every region)" {
+    var shape_ref = try createTestShape(1.0, 1.0, 2.0, 0.0);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const cylinder = shape.cast(TaperedCylinderShape);
+    const t = cylinder.top;
+    const b = cylinder.bottom;
+    const side_normal = Vec3.init(1, 0.5, 0).normalized();
+
+    const Case = struct { position: Vec3, normal: Vec3, penetration: f32 };
+    const cases = [_]Case{
+        .{ .position = Vec3.init(0, t + 1, 0), .normal = Vec3.init(0, 1, 0), .penetration = -1.0 }, // Region A
+        .{ .position = Vec3.init(3, t + 3, 0), .normal = Vec3.init(2, 3, 0).normalized(), .penetration = -@sqrt(@as(f32, 13.0)) }, // Region B
+        .{ .position = Vec3.init(2.5, 0, 0), .normal = side_normal, .penetration = -side_normal.dot(Vec3.init(1.5, -t, 0)) }, // Region C
+        .{ .position = Vec3.init(4, b - 1, 0), .normal = Vec3.init(2, -1, 0).normalized(), .penetration = -@sqrt(@as(f32, 5.0)) }, // Region D
+        .{ .position = Vec3.init(0, b - 1, 0), .normal = Vec3.init(0, -1, 0), .penetration = -1.0 }, // Region E
+        .{ .position = Vec3.init(1.5, 0, 0), .normal = side_normal, .penetration = side_normal.dot(Vec3.init(-0.5, t, 0)) }, // Inside, side closest
+        .{ .position = Vec3.init(0, t - 0.1, 0), .normal = Vec3.init(0, 1, 0), .penetration = 0.1 }, // Inside, top closest
+        .{ .position = Vec3.init(0, b + 0.1, 0), .normal = Vec3.init(0, -1, 0), .penetration = 0.1 }, // Inside, bottom closest
+    };
+
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisX(), 0.5 * math.pi), Vec3.init(0, 0, 5));
+    var positions: [cases.len]Vec3 = undefined;
+    for (cases, 0..) |c, i| positions[i] = transform.mulVec3(c.position);
+    var inv_masses = [_]f32{1} ** cases.len;
+    var planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** cases.len;
+    var penetrations = [_]f32{-math.flt_max} ** cases.len;
+    var indices = [_]i32{-1} ** cases.len;
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    shape.collideSoftBodyVertices(transform, Vec3.one(), &vertices, cases.len, 2);
+
+    for (cases, 0..) |c, i| {
+        errdefer std.debug.print("case {}\n", .{i});
+        try testing.expectApproxEqAbs(c.penetration, penetrations[i], 1.0e-5);
+        try testing.expectEqual(@as(i32, 2), indices[i]);
+        try testing.expect(planes[i].getNormal().isClose(transform.multiply3x3(c.normal), .{ .max_dist_sq = 1.0e-10 }));
+    }
+}
+
+test "TaperedCylinderShape: GetTrianglesStart / Next (caps skipped when their radius is too small)" {
+    const Case = struct { top_radius: f32, bottom_radius: f32, scale: Vec3, num_triangles: u32 };
+    for ([_]Case{
+        .{ .top_radius = 1.0, .bottom_radius = 0.5, .scale = Vec3.one(), .num_triangles = 6 + 6 + 16 },
+        .{ .top_radius = 1.0, .bottom_radius = 0.5, .scale = Vec3.init(-1, 2, 1), .num_triangles = 6 + 6 + 16 }, // Inside out: flipped in X
+        .{ .top_radius = 0.0, .bottom_radius = 0.5, .scale = Vec3.one(), .num_triangles = 6 + 16 }, // Cone, no top cap
+        .{ .top_radius = 1.0, .bottom_radius = 0.5e-3, .scale = Vec3.one(), .num_triangles = 6 + 16 }, // No bottom cap
+    }) |c| {
+        var shape_ref = try createTestShape(1.0, c.top_radius, c.bottom_radius, 0.0);
+        defer shape_ref.deinit();
+        const shape = shape_ref.get().?;
+        const cylinder = shape.cast(TaperedCylinderShape);
+
+        var context: Shape.GetTrianglesContext = .{};
+        const position = Vec3.init(1, 2, 3);
+        shape.getTrianglesStart(&context, AABox.biggest(), position, Quat.identity(), c.scale);
+        var vertices: [3 * 32]Float3 = undefined;
+        var materials: [32]*const PhysicsMaterial = undefined;
+        try testing.expectEqual(c.num_triangles, shape.getTrianglesNext(&context, 32, &vertices, &materials));
+        try testing.expect(materials[c.num_triangles - 1] == PhysicsMaterial.default);
+        try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, 32, &vertices, null));
+
+        // Every triangle faces outwards (the scale is never inside out)
+        const abs_scale = Vec3.init(1, c.scale.getY(), 1);
+        for (0..c.num_triangles) |i| {
+            const v0 = Vec3.fromFloat3(vertices[3 * i + 0]).sub(position);
+            const v1 = Vec3.fromFloat3(vertices[3 * i + 1]).sub(position);
+            const v2 = Vec3.fromFloat3(vertices[3 * i + 2]).sub(position);
+            const normal = v1.sub(v0).cross(v2.sub(v0));
+            const center = v0.add(v1).add(v2).divScalar(3.0).sub(Vec3.init(0, 0.5 * (cylinder.top + cylinder.bottom), 0).mul(abs_scale));
+            if (normal.lengthSq() > 1.0e-12) // The side triangles of a cone that touch the tip have no area
+                try testing.expect(normal.dot(center) > 0.0);
+        }
+    }
+}
+
+test "TaperedCylinderShape: GetSubmergedVolume (ConvexShape's)" {
+    var shape_ref = try createTestShape(1.0, 1.0, 0.5, 0.0);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const cylinder = shape.cast(TaperedCylinderShape);
+    // The bounding box (half extent 1), centered around the center of mass
+    try testing.expectApproxEqAbs(@as(f32, 2.0), cylinder.top - cylinder.bottom, 1.0e-6);
+    const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.init(0, -1.1, 0), Vec3.axisY()));
+    try testing.expectApproxEqAbs(@as(f32, 8.0), above.total_volume, 1.0e-5);
+    try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
+    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    try testing.expectApproxEqAbs(@as(f32, 4.0), half.submerged_volume, 1.0e-5);
+}
+
+test "TaperedCylinderShape: binary state, restoreFromBinaryState and the registration" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTestShape(1.0, 0.75, 0.5, 0.25);
+    defer shape_ref.deinit();
+    const cylinder = shape_ref.get().?.cast(TaperedCylinderShape);
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    cylinder.asShape().saveBinaryState(out.streamOut());
+    try testing.expectEqual(@as(usize, 1 + 8 + 4 + 5 * 4), writer.buffered().len); // Sub type, user data, density, top, bottom, top radius, bottom radius, convex radius
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var result = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer result.deinit();
+    const restored = result.getPtr().?.cast(TaperedCylinderShape);
+    try testing.expectEqual(cylinder.top, restored.top);
+    try testing.expectEqual(cylinder.bottom, restored.bottom);
+    try testing.expectEqual(@as(f32, 0.75), restored.getTopRadius());
+    try testing.expectEqual(@as(f32, 0.5), restored.getBottomRadius());
+    try testing.expectEqual(@as(f32, 0.25), restored.getConvexRadius());
+
+    // Truncated: Jolt's error text
+    var short_reader: std.Io.Reader = .fixed(writer.buffered()[0 .. writer.buffered().len - 1]);
+    var short_in = StreamWrapper.StreamInWrapper.init(&short_reader);
+    var short_result = try Shape.restoreFromBinaryState(allocator, short_in.streamIn());
+    defer short_result.deinit();
+    try testing.expectEqualStrings("Failed to restore shape", short_result.getError());
+
+    // ShapeFunctions
+    const functions = ShapeFunctions.get(.tapered_cylinder);
+    try testing.expect(functions.construct != null);
+    try testing.expect(functions.color.eql(Color.green));
+    try testing.expect(RegisterTypes.registry.shape_functions[@intFromEnum(ShapeSubType.tapered_cylinder)].construct == functions.construct);
+}
+
+test "TaperedCylinderShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, TaperedCylinderShapeSettings.create(failing.allocator(), 1.0, 1.0, 0.5, .{}));
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.tapered_cylinder).construct.?(failing.allocator()));
+
+    // Restore: the shape is the only allocation
+    var shape_ref = try createTestShape(1.0, 0.75, 0.5, 0.25);
+    defer shape_ref.deinit();
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    shape_ref.get().?.saveBinaryState(out.streamOut());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+}

@@ -56,4 +56,5 @@ test {
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
+    _ = @import("Physics/TaperedCylinderShapeTests.zig");
 }

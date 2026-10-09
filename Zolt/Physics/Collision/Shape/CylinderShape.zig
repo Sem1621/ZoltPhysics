@@ -541,3 +541,450 @@ pub const CylinderShape = struct {
         }
     };
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (Jolt's own cylinder tests are in ZoltTests/Physics, the bit exact comparison with Jolt in
+// ZoltParity/Physics/CylindersParity.zig)
+
+const testing = std.testing;
+const RefConst = @import("../../../Core/Reference.zig").RefConst;
+const Ref = @import("../../../Core/Reference.zig").Ref;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const CastRayCollector = ShapeFile.CastRayCollector;
+const RayCastSettings = @import("../RayCast.zig").RayCastSettings;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const RegisterTypes = @import("../../../RegisterTypes.zig");
+
+test "CylinderShape: the unit cylinder table is Jolt's static initializer, built at compile time" {
+    const runtime = buildUnitCylinderTriangles();
+    try testing.expectEqual(@as(u32, 96), runtime.len);
+    try testing.expectEqual(runtime.len, unit_cylinder_triangles.len);
+    for (runtime.constSlice(), unit_cylinder_triangles.constSlice()) |r, t|
+        try testing.expectEqual(@as(u128, @bitCast(r.value)), @as(u128, @bitCast(t.value)));
+
+    // The first triangle is the top cap, the bottom vertices have +0 where the top face has -0 (-0 + 0 = +0)
+    try testing.expect(unit_cylinder_triangles.get(0).eql(Vec3.init(0, 1, 0)));
+    try testing.expect(unit_cylinder_triangles.get(1).eql(cylinder_top_face[0]));
+    try testing.expect(std.math.signbit(cylinder_top_face[4].getX()));
+    try testing.expect(std.math.signbit(unit_cylinder_triangles.get(4 * 12 + 1).getX())); // t1 of i = 4
+    try testing.expect(!std.math.signbit(unit_cylinder_triangles.get(4 * 12 + 5).getX())); // b1 of i = 4
+}
+
+test "CylinderShape: settings, Jolt's error texts, convex radius and out of memory (the settings part of TestCylinderShape)" {
+    const allocator = testing.allocator;
+
+    const Case = struct { half_height: f32, radius: f32, convex_radius: f32, error_text: []const u8 };
+    for ([_]Case{
+        .{ .half_height = -1.0, .radius = 1.0, .convex_radius = 1.0, .error_text = "Invalid height" }, // Check half height must be positive
+        .{ .half_height = 1.0, .radius = -1.0, .convex_radius = 1.0, .error_text = "Invalid radius" }, // Check radius must be positive
+        .{ .half_height = 1.0, .radius = 1.0, .convex_radius = -1.0, .error_text = "Invalid convex radius" }, // Check convex radius must be positive
+        .{ .half_height = -1.0, .radius = -1.0, .convex_radius = -1.0, .error_text = "Invalid height" }, // The first check wins
+    }) |c| {
+        var settings = CylinderShapeSettings.init(allocator, c.half_height, c.radius, .{ .convex_radius = c.convex_radius });
+        defer settings.deinit();
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings(c.error_text, result.getError());
+    }
+
+    {
+        // Create zero sized cylinder
+        var settings = CylinderShapeSettings.init(allocator, 0.0, 0.0, .{ .convex_radius = 1.0 });
+        defer settings.deinit();
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        const cylinder = result.getPtr().?.cast(CylinderShape);
+
+        // Create another cylinder by using a different constructor
+        var cylinder2_ref = RefConst(Shape).init((try CylinderShape.create(allocator, 0.0, 0.0, .{ .convex_radius = 1.0 })).asShape());
+        defer cylinder2_ref.deinit();
+        const cylinder2 = cylinder2_ref.get().?.cast(CylinderShape);
+
+        // Check convex radius is adjusted to zero
+        try testing.expectEqual(@as(f32, 0.0), cylinder.getConvexRadius());
+        try testing.expectEqual(@as(f32, 0.0), cylinder2.getConvexRadius());
+    }
+
+    // Defaults: the default convex radius, the default constructor has a zero cylinder
+    var defaults = CylinderShapeSettings.init(allocator, 1.0, 1.0, .{});
+    defer defaults.deinit();
+    try testing.expectEqual(PhysicsSettings.default_convex_radius, defaults.convex_radius);
+    var empty = CylinderShapeSettings.initDefault(allocator);
+    defer empty.deinit();
+    try testing.expect(empty.half_height == 0.0 and empty.radius == 0.0 and empty.convex_radius == 0.0);
+
+    // Heap settings with a material, density and user data
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    const settings = try CylinderShapeSettings.create(allocator, 2.0, 0.5, .{ .convex_radius = 0.1, .material = material.material() });
+    var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+    defer settings_ref.deinit();
+    settings.base.setDensity(250.0);
+    settings.asShapeSettings().user_data = 42;
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    const cylinder = result.getPtr().?.cast(CylinderShape);
+    try testing.expectEqual(@as(f32, 2.0), cylinder.getHalfHeight());
+    try testing.expectEqual(@as(f32, 0.5), cylinder.getRadius());
+    try testing.expectEqual(@as(f32, 0.1), cylinder.getConvexRadius());
+    try testing.expectEqual(@as(f32, 250.0), cylinder.base.getDensity());
+    try testing.expectEqual(@as(u64, 42), cylinder.asShape().getUserData());
+    try testing.expect(cylinder.asShape().getMaterial(.empty) == material.material());
+
+    // The convex radius is limited by the half height and the radius
+    var thin = CylinderShape.init(allocator, 0.02, 1.0, .{ .convex_radius = 0.05 });
+    thin.asShape().setEmbedded();
+    defer thin.asShapeMut().deinit();
+    try testing.expectEqual(@as(f32, 0.02), thin.getConvexRadius());
+
+    // Out of memory while creating the shape is returned and not cached
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var oom_settings = CylinderShapeSettings.init(allocator, 1.0, 1.0, .{});
+        defer oom_settings.deinit();
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var r = oom_settings.asShapeSettings().createShape(failing.allocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(oom_settings.base.base.cached_result.isEmpty());
+            continue;
+        };
+        defer r.deinit();
+        try testing.expect(r.isValid());
+        try testing.expectEqual(@as(usize, 1), fail_index); // Only the shape is allocated
+        break;
+    }
+}
+
+test "CylinderShape: bounds, inner radius, mass properties, volume, stats, surface normal" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 2.0, 0.5, .{});
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+    const shape = cylinder.asShape();
+
+    try testing.expect(shape.getLocalBounds().eql(.init(Vec3.init(-0.5, -2, -0.5), Vec3.init(0.5, 2, 0.5))));
+    try testing.expect(shape.getCenterOfMass().eql(Vec3.zero()));
+    try testing.expectEqual(@as(f32, 0.5), shape.getInnerRadius());
+    try testing.expectApproxEqRel(@as(f32, std.math.pi), shape.getVolume(), 1.0e-6); // 2 * pi * 2 * 0.25
+    try testing.expectEqual(@as(usize, @sizeOf(CylinderShape)), shape.getStats().size_bytes);
+    try testing.expectEqual(@as(u32, 0), shape.getStats().num_triangles);
+
+    // Mass and inertia of a solid cylinder (https://en.wikipedia.org/wiki/List_of_moments_of_inertia)
+    const p = shape.getMassProperties();
+    const mass = std.math.pi * 0.25 * 4.0 * 1000.0;
+    try testing.expectApproxEqRel(@as(f32, mass), p.mass, 1.0e-6);
+    try testing.expectApproxEqRel(@as(f32, 0.5 * mass * 0.25), p.inertia.get(1, 1), 1.0e-6);
+    try testing.expectApproxEqRel(@as(f32, mass * (3.0 * 0.25 + 16.0) / 12.0), p.inertia.get(0, 0), 1.0e-6);
+    try testing.expectEqual(p.inertia.get(0, 0), p.inertia.get(2, 2));
+    try testing.expectEqual(@as(f32, 0.0), p.inertia.get(0, 1));
+
+    // Surface normals: the closest surface
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.5, 0.3, 0)).eql(Vec3.axisX()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, -1, -0.49)).eql(Vec3.init(0, 0, -1)));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.1, 1.99, 0.1)).eql(Vec3.axisY()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.1, -1.99, 0.1)).eql(Vec3.axisY().negate()));
+}
+
+test "CylinderShape: supporting faces (side, top, bottom, aligned with the direction)" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 2.0, 0.5, .{});
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+    const shape = cylinder.asShape();
+    const scale = Vec3.init(-2, 0.5, 2);
+    const transform = Mat44.translation(Vec3.init(10, 0, 0));
+
+    // Side: 2 vertices on the side opposite to the direction (scaled radius 1, scaled half height 1)
+    var face: Shape.SupportingFace = .empty;
+    shape.getSupportingFace(.empty, Vec3.init(1, 0.1, 0), scale, transform, &face);
+    try testing.expectEqual(@as(u32, 2), face.len);
+    try testing.expect(face.get(0).eql(Vec3.init(9, 1, 0)));
+    try testing.expect(face.get(1).eql(Vec3.init(9, -1, 0)));
+
+    // Bottom (direction up): 8 vertices on the bottom cap
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(0, 1, 0), scale, Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 8), face.len);
+    for (face.constSlice()) |v| {
+        try testing.expectEqual(@as(f32, -1.0), v.getY());
+        try testing.expectApproxEqAbs(@as(f32, 1.0), Vec3.init(v.getX(), 0, v.getZ()).length(), 1.0e-6);
+    }
+
+    // Top (direction down)
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(0, -1, 0), scale, Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 8), face.len);
+    for (face.constSlice()) |v| try testing.expectEqual(@as(f32, 1.0), v.getY());
+
+    // More than 5 degrees from vertical: one vertex points towards the direction in the XZ plane
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(0.3, -1, 0.4), scale, Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 8), face.len);
+    var found = false;
+    for (face.constSlice()) |v| found = found or v.isClose(Vec3.init(0.6, 1, 0.8), .{ .max_dist_sq = 1.0e-10 });
+    try testing.expect(found);
+
+    // Less than 5 degrees from vertical: the face is not rotated
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(0.03, -1, 0.04), scale, Mat44.identity(), &face);
+    try testing.expect(face.get(0).isClose(Vec3.init(0, 1, 1), .{ .max_dist_sq = 1.0e-10 }));
+}
+
+test "CylinderShape: valid scales (the cylinder part of Jolt's TestIsValidScale)" {
+    const allocator = testing.allocator;
+
+    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
+    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
+
+    var cylinder_ref = Ref(Shape).init((try CylinderShape.create(allocator, 0.5, 2.0, .{})).asShapeMut());
+    defer cylinder_ref.deinit();
+    const cylinder = cylinder_ref.get().?;
+    try testing.expect(!cylinder.isValidScale(Vec3.zero()));
+    try testing.expect(!cylinder.isValidScale(Vec3.init(0, 1, 0)));
+    try testing.expect(!cylinder.isValidScale(Vec3.init(1, 0, 1)));
+    try testing.expect(cylinder.isValidScale(Vec3.init(2, 2, 2)));
+    try testing.expect(cylinder.isValidScale(Vec3.init(-1, 1, -1)));
+    try testing.expect(!cylinder.isValidScale(Vec3.init(2, 1, 1)));
+    try testing.expect(cylinder.isValidScale(Vec3.init(1, 2, 1)));
+    try testing.expect(!cylinder.isValidScale(Vec3.init(1, 1, 2)));
+    try testing.expect(cylinder.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
+    try testing.expect(cylinder.makeScaleValid(Vec3.init(-1.0e-10, 1, 1.0e-10)).eql(Vec3.init(-ScaleHelpers.min_scale, 1, ScaleHelpers.min_scale)));
+    try testing.expect(cylinder.makeScaleValid(Vec3.init(2, 5, -4)).eql(Vec3.init(3, 5, -3)));
+}
+
+test "CylinderShape: support functions" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 2.0, 1.0, .{ .convex_radius = 0.5 });
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const scale = Vec3.init(-2, 0.5, 2);
+
+    // Include convex radius and default: the full scaled cylinder, no convex radius
+    for ([_]ConvexShape.SupportMode{ .include_convex_radius, .default }) |mode| {
+        const support = cylinder.base.getSupportFunction(mode, &buffer, scale);
+        try testing.expectEqual(@as(f32, 0.0), support.getConvexRadius());
+        try testing.expect(support.getSupport(Vec3.init(3, -1, 4)).isClose(Vec3.init(1.2, -1, 1.6), .{ .max_dist_sq = 1.0e-12 }));
+        try testing.expect(support.getSupport(Vec3.init(0, -1, 0)).eql(Vec3.init(0, -1, 0)));
+        try testing.expect(support.getSupport(Vec3.zero()).eql(Vec3.init(0, 1, 0))); // Sign(0) = 1
+    }
+
+    // Exclude convex radius: shrunk by the scaled convex radius (limited to cDefaultConvexRadius)
+    const r = PhysicsSettings.default_convex_radius;
+    const support = cylinder.base.getSupportFunction(.exclude_convex_radius, &buffer, scale);
+    try testing.expectEqual(r, support.getConvexRadius());
+    try testing.expect(support.getSupport(Vec3.init(1, 1, 0)).eql(Vec3.init(2 - r, 1 - r, 0)));
+}
+
+test "CylinderShape: ray casts (TestCylinderShapeRay), collide point (TestCollidePointVsCylinder) and filters" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 4, 2, .{});
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+    const shape = cylinder.asShape();
+    const creator = SubShapeIDCreator.pushID(.{}, 2, 3);
+
+    // Rays through the cylinder from outside (the analytic CastRay)
+    for ([_][2]Vec3{
+        .{ Vec3.init(-2, 0, 0), Vec3.init(2, 0, 0) },
+        .{ Vec3.init(0, -4, 0), Vec3.init(0, 4, 0) },
+        .{ Vec3.init(0, 0, -2), Vec3.init(0, 0, 2) },
+    }) |ends| {
+        const origin = ends[0].mulScalar(2);
+        const direction = ends[1].sub(origin);
+        var hit: RayCastResult = .{};
+        try testing.expect(shape.castRay(.init(origin, direction), creator, &hit));
+        try testing.expect(origin.add(direction.mulScalar(hit.fraction)).isClose(ends[0], .{ .max_dist_sq = 1.0e-10 }));
+        try testing.expect(hit.sub_shape_id2.eql(creator.getID()));
+    }
+    var miss: RayCastResult = .{};
+    try testing.expect(!shape.castRay(.init(Vec3.init(-4, 5, 0), Vec3.init(8, 0, 0)), creator, &miss));
+    try testing.expect(shape.castRay(.init(Vec3.zero(), Vec3.init(8, 0, 0)), creator, &miss)); // Starts inside
+    try testing.expectEqual(@as(f32, 0.0), miss.fraction);
+
+    // The collector version is ConvexShape's and uses the analytic CastRay: front and back face
+    var settings: RayCastSettings = .{};
+    settings.setBackFaceMode(.collide_with_back_faces);
+    var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer hits.deinit();
+    const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(5), .{});
+    hits.base.setContext(&context);
+    shape.castRayCollector(.init(Vec3.init(-4, 0, 0), Vec3.init(8, 0, 0)), &settings, creator, &hits.base, &.{});
+    try hits.checkError();
+    try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.25), hits.hits.items[0].fraction);
+    try testing.expectApproxEqAbs(@as(f32, 0.75), hits.hits.items[1].fraction, 1.0e-6); // Inverted ray of ConvexShape's fallback
+    try testing.expect(hits.hits.items[0].body_id.eql(.init(5)) and hits.hits.items[1].body_id.eql(.init(5)));
+
+    // TestCollidePointVsCylinder
+    const half_height: f32 = 0.2;
+    const radius: f32 = 0.1;
+    var small = CylinderShape.init(allocator, half_height, radius, .{});
+    small.asShape().setEmbedded();
+    defer small.asShapeMut().deinit();
+    const xy_and_zero_probes = [_]Vec3{ Vec3.zero(), Vec3.init(1, 0, 0), Vec3.init(-1, 0, 0), Vec3.init(0, 0, 1), Vec3.init(0, 0, -1) };
+    var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer points.deinit();
+    for (xy_and_zero_probes) |probe| {
+        // Top and bottom hits
+        for ([_]f32{ half_height, -half_height }) |y| {
+            points.reset();
+            small.asShape().collidePoint(probe.mulScalar(radius).add(Vec3.init(0, y, 0)).mulScalar(0.99), creator, &points.base, &.{});
+            try testing.expectEqual(@as(usize, 1), points.hits.items.len);
+        }
+    }
+    // Misses just outside the faces of the bounding box
+    const cube_probes = [_]Vec3{ Vec3.init(-1, 0, 0), Vec3.init(1, 0, 0), Vec3.init(0, -1, 0), Vec3.init(0, 1, 0), Vec3.init(0, 0, -1), Vec3.init(0, 0, 1) };
+    for (cube_probes) |probe| {
+        points.reset();
+        small.asShape().collidePoint(Vec3.init(radius, half_height, radius).mulScalar(1.01).mul(probe), creator, &points.base, &.{});
+        try testing.expectEqual(@as(usize, 0), points.hits.items.len);
+    }
+    try points.checkError();
+
+    // The shape filter is tested first
+    const RejectAll = struct {
+        pub const overrides = .{.shouldCollide};
+        base: ShapeFilter = .init(@This()),
+        pub fn shouldCollide(self: *const @This(), shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ self, shape2, sub_shape_id_of_shape2 };
+            return false;
+        }
+    };
+    const reject: RejectAll = .{};
+    points.reset();
+    small.asShape().collidePoint(Vec3.zero(), creator, &points.base, &reject.base);
+    try testing.expectEqual(@as(usize, 0), points.hits.items.len);
+}
+
+test "CylinderShape: CollideSoftBodyVertices" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 2.0, 1.0, .{});
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.5 * math.pi), Vec3.init(10, 0, 0));
+    var positions = [_]Vec3{
+        transform.mulVec3(Vec3.init(0.8, 0.5, 0)), // Inside, closest to the side
+        transform.mulVec3(Vec3.init(0, 1.9, 0)), // Inside, closest to the top
+        transform.mulVec3(Vec3.init(0, -3, 0)), // Outside below the bottom
+        transform.mulVec3(Vec3.init(4, 5, 0)), // Outside the height and the radius: the closest point is the rim
+        transform.mulVec3(Vec3.init(0, 0, 0)), // Infinite mass
+    };
+    var inv_masses = [_]f32{ 1, 1, 1, 1, 0 };
+    var planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** 5;
+    var penetrations = [_]f32{-math.flt_max} ** 5;
+    var indices = [_]i32{-1} ** 5;
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    cylinder.asShape().collideSoftBodyVertices(transform, Vec3.one(), &vertices, 5, 6);
+
+    try testing.expectApproxEqAbs(@as(f32, 0.2), penetrations[0], 1.0e-5);
+    try testing.expectEqual(@as(i32, 6), indices[0]);
+    try testing.expect(planes[0].getNormal().isClose(transform.multiply3x3(Vec3.axisX()), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectApproxEqAbs(@as(f32, 0.1), penetrations[1], 1.0e-5);
+    try testing.expect(planes[1].getNormal().isClose(transform.multiply3x3(Vec3.axisY()), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectApproxEqAbs(@as(f32, -1.0), penetrations[2], 1.0e-5);
+    try testing.expect(planes[2].getNormal().isClose(transform.multiply3x3(Vec3.axisY().negate()), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectApproxEqAbs(-@sqrt(@as(f32, 18.0)), penetrations[3], 1.0e-5); // The closest point is the rim at (1, 2, 0)
+    try testing.expect(planes[3].getNormal().isClose(transform.multiply3x3(Vec3.init(1, 1, 0).normalized()), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectEqual(-math.flt_max, penetrations[4]);
+    try testing.expectEqual(@as(i32, -1), indices[4]);
+}
+
+test "CylinderShape: GetTrianglesStart / Next, GetSubmergedVolume" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 2.0, 0.5, .{});
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+
+    // 32 triangles of the scaled cylinder, inside out scales flip the winding
+    for ([_]Vec3{ Vec3.one(), Vec3.init(1, -1, 1) }) |scale| {
+        var context: Shape.GetTrianglesContext = .{};
+        cylinder.asShape().getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), scale);
+        var vertices: [3 * 32]Float3 = undefined;
+        var materials: [32]*const PhysicsMaterial = undefined;
+        try testing.expectEqual(@as(u32, 32), cylinder.asShape().getTrianglesNext(&context, 32, &vertices, &materials));
+        const flipped_order = [_]usize{ 0, 2, 1 };
+        for (vertices, 0..) |v, i| {
+            const index = if (scale.getY() < 0.0) i / 3 * 3 + flipped_order[i % 3] else i;
+            const expected = unit_cylinder_triangles.get(@intCast(index)).mul(Vec3.init(0.5, 2, 0.5)).mul(scale);
+            try testing.expect(Vec3.fromFloat3(v).eql(expected));
+        }
+        try testing.expect(materials[31] == PhysicsMaterial.default);
+        try testing.expectEqual(@as(u32, 0), cylinder.asShape().getTrianglesNext(&context, 32, &vertices, null));
+    }
+
+    // GetSubmergedVolume is ConvexShape's (bounding box based)
+    const half = cylinder.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 4.0), half.total_volume);
+    try testing.expectApproxEqAbs(@as(f32, 2.0), half.submerged_volume, 1.0e-5);
+}
+
+test "CylinderShape: binary state, restoreFromBinaryState and the registration" {
+    const allocator = testing.allocator;
+
+    var cylinder = CylinderShape.init(allocator, 2.0, 0.5, .{ .convex_radius = 0.25 });
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+    cylinder.base.setDensity(321.0);
+    cylinder.asShapeMut().setUserData(7);
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    cylinder.asShape().saveBinaryState(out.streamOut());
+    try testing.expectEqual(@as(usize, 1 + 8 + 4 + 4 + 4 + 4), writer.buffered().len); // Sub type, user data, density, half height, radius, convex radius
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var result = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer result.deinit();
+    const restored = result.getPtr().?.cast(CylinderShape);
+    try testing.expectEqual(@as(f32, 2.0), restored.getHalfHeight());
+    try testing.expectEqual(@as(f32, 0.5), restored.getRadius());
+    try testing.expectEqual(@as(f32, 0.25), restored.getConvexRadius());
+    try testing.expectEqual(@as(f32, 321.0), restored.base.getDensity());
+    try testing.expectEqual(@as(u64, 7), restored.asShape().getUserData());
+
+    // Truncated: Jolt's error text
+    var short_reader: std.Io.Reader = .fixed(writer.buffered()[0 .. writer.buffered().len - 1]);
+    var short_in = StreamWrapper.StreamInWrapper.init(&short_reader);
+    var short_result = try Shape.restoreFromBinaryState(allocator, short_in.streamIn());
+    defer short_result.deinit();
+    try testing.expectEqualStrings("Failed to restore shape", short_result.getError());
+
+    // ShapeFunctions
+    const functions = ShapeFunctions.get(.cylinder);
+    try testing.expect(functions.construct != null);
+    try testing.expect(functions.color.eql(Color.green));
+    try testing.expect(RegisterTypes.registry.shape_functions[@intFromEnum(ShapeSubType.cylinder)].construct == functions.construct);
+}
+
+test "CylinderShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, CylinderShape.create(failing.allocator(), 1.0, 1.0, .{}));
+    try testing.expectError(error.OutOfMemory, CylinderShapeSettings.create(failing.allocator(), 1.0, 1.0, .{}));
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.cylinder).construct.?(failing.allocator()));
+
+    // Restore: the shape is the only allocation
+    var cylinder = CylinderShape.init(allocator, 1.0, 1.0, .{});
+    cylinder.asShape().setEmbedded();
+    defer cylinder.asShapeMut().deinit();
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    cylinder.asShape().saveBinaryState(out.streamOut());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+}
