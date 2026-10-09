@@ -28,4 +28,5 @@ test {
     _ = @import("Physics/ConvexParity.zig");
     _ = @import("Physics/FiltersParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
+    _ = @import("Physics/TrianglesParity.zig");
 }
