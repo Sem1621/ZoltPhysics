@@ -725,3 +725,23 @@ test "BoxShape: binary state, restoreFromBinaryState and the registration" {
     try testing.expect(ShapeFunctions.get(.box).construct != null);
     try testing.expect(ShapeFunctions.get(.box).color.eql(Color.green));
 }
+
+test "BoxShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, BoxShape.create(failing.allocator(), Vec3.one(), .{}));
+    try testing.expectError(error.OutOfMemory, BoxShapeSettings.create(failing.allocator(), Vec3.one(), .{}));
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.box).construct.?(failing.allocator()));
+
+    // Restore: the shape is the only allocation
+    var box = BoxShape.init(allocator, Vec3.one(), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    box.asShape().saveBinaryState(out.streamOut());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+}

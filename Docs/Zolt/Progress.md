@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 32.2%** of 85391 lines in scope · **Unit tests: 31.1%** of 18321 lines
+**Library: 33.9%** of 85391 lines in scope · **Unit tests: 37.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -23,7 +23,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics` | 2% | 1 | 0 | 0 | 12 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 7% | 2 | 0 | 1 | 15 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 17% | 25 | 1 | 21 | 29 | 0 | 0 | 21948 |
+| `Jolt/Physics/Collision` | 24% | 29 | 2 | 17 | 28 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 0% | 0 | 0 | 0 | 35 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
@@ -294,7 +294,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Collision — 17%</summary>
+<details><summary>Jolt/Physics/Collision — 24%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -320,7 +320,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `CollidePointResult.h` | 18 | ✅ complete | `Zolt/Physics/Collision/CollidePointResult.zig` |
 | `CollideShape.h` | 88 | ✅ complete | `Zolt/Physics/Collision/CollideShape.zig` |
 | `CollideShapeVsShapePerLeaf.h` | 80 | ❌ todo |  |
-| `CollideSoftBodyVertexIterator.h` | 93 | ⚪ stub | `Zolt/Physics/Collision/CollideSoftBodyVertexIterator.zig` |
+| `CollideSoftBodyVertexIterator.h` | 93 | 🟡 partial | `Zolt/Physics/Collision/CollideSoftBodyVertexIterator.zig` |
 | `CollideSoftBodyVerticesVsTriangles.h` | 90 | ❌ todo |  |
 | `CollideSphereVsTriangles.cpp`, `CollideSphereVsTriangles.h` | 144 | ❌ todo |  |
 | `CollisionCollector.h` | 83 | ✅ complete | `Zolt/Physics/Collision/CollisionCollector.zig` |
@@ -341,12 +341,12 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `PhysicsMaterial.cpp`, `PhysicsMaterial.h` | 68 | ✅ complete | `Zolt/Physics/Collision/PhysicsMaterial.zig` |
 | `PhysicsMaterialSimple.cpp`, `PhysicsMaterialSimple.h` | 55 | ✅ complete | `Zolt/Physics/Collision/PhysicsMaterialSimple.zig` |
 | `RayCast.h` | 68 | ✅ complete | `Zolt/Physics/Collision/RayCast.zig` |
-| `BoxShape.cpp`, `BoxShape.h` | 352 | ⚪ stub | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
+| `BoxShape.cpp`, `BoxShape.h` | 352 | ✅ complete | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
 | `CapsuleShape.cpp`, `CapsuleShape.h` | 451 | ⚪ stub | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
 | `CompoundShape.cpp`, `CompoundShape.h` | 638 | ⚪ stub | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
 | `CompoundShapeVisitors.h` | 394 | ❌ todo |  |
 | `ConvexHullShape.cpp`, `ConvexHullShape.h` | 1285 | ⚪ stub | `Zolt/Physics/Collision/Shape/ConvexHullShape.zig` |
-| `ConvexShape.cpp`, `ConvexShape.h` | 585 | ⚪ stub | `Zolt/Physics/Collision/Shape/ConvexShape.zig` |
+| `ConvexShape.cpp`, `ConvexShape.h` | 585 | ✅ complete | `Zolt/Physics/Collision/Shape/ConvexShape.zig` |
 | `CylinderShape.cpp`, `CylinderShape.h` | 439 | ⚪ stub | `Zolt/Physics/Collision/Shape/CylinderShape.zig` |
 | `DecoratedShape.cpp`, `DecoratedShape.h` | 128 | ⚪ stub | `Zolt/Physics/Collision/Shape/DecoratedShape.zig` |
 | `EmptyShape.cpp`, `EmptyShape.h` | 114 | ⚪ stub | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
@@ -356,12 +356,12 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `MutableCompoundShape.cpp`, `MutableCompoundShape.h` | 618 | ⚪ stub | `Zolt/Physics/Collision/Shape/MutableCompoundShape.zig` |
 | `OffsetCenterOfMassShape.cpp`, `OffsetCenterOfMassShape.h` | 271 | ⚪ stub | `Zolt/Physics/Collision/Shape/OffsetCenterOfMassShape.zig` |
 | `PlaneShape.cpp`, `PlaneShape.h` | 548 | ⚪ stub | `Zolt/Physics/Collision/Shape/PlaneShape.zig` |
-| `PolyhedronSubmergedVolumeCalculator.h` | 270 | ❌ todo |  |
+| `PolyhedronSubmergedVolumeCalculator.h` | 270 | ✅ complete | `Zolt/Physics/Collision/Shape/PolyhedronSubmergedVolumeCalculator.zig` |
 | `RotatedTranslatedShape.cpp`, `RotatedTranslatedShape.h` | 376 | ⚪ stub | `Zolt/Physics/Collision/Shape/RotatedTranslatedShape.zig` |
 | `ScaleHelpers.h` | 64 | ✅ complete | `Zolt/Physics/Collision/Shape/ScaleHelpers.zig` |
 | `ScaledShape.cpp`, `ScaledShape.h` | 292 | ⚪ stub | `Zolt/Physics/Collision/Shape/ScaledShape.zig` |
 | `Shape.cpp`, `Shape.h` | 646 | 🟡 partial | `Zolt/Physics/Collision/Shape/Shape.zig` |
-| `SphereShape.cpp`, `SphereShape.h` | 377 | ⚪ stub | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
+| `SphereShape.cpp`, `SphereShape.h` | 377 | ✅ complete | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
 | `StaticCompoundShape.cpp`, `StaticCompoundShape.h` | 662 | ⚪ stub | `Zolt/Physics/Collision/Shape/StaticCompoundShape.zig` |
 | `SubShapeID.h` | 113 | ✅ complete | `Zolt/Physics/Collision/Shape/SubShapeID.zig` |
 | `SubShapeIDPair.h` | 49 | ✅ complete | `Zolt/Physics/Collision/Shape/SubShapeIDPair.zig` |
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 1% | 1 | 0 | 0 | 32 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 11% | 1 | 4 | 1 | 27 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 16%</summary>
 
@@ -640,16 +640,16 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 1%</summary>
+<details><summary>UnitTests/Physics — 11%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ActiveEdgesTests.cpp` | 317 | ❌ todo |  |
 | `BroadPhaseTests.cpp` | 100 | ❌ todo |  |
-| `CastShapeTests.cpp` | 543 | ❌ todo |  |
+| `CastShapeTests.cpp` | 543 | ⚪ stub | `ZoltTests/Physics/CastShapeTests.zig` |
 | `CharacterVirtualTests.cpp` | 763 | ❌ todo |  |
-| `CollidePointTests.cpp` | 361 | ❌ todo |  |
-| `CollideShapeTests.cpp` | 471 | ❌ todo |  |
+| `CollidePointTests.cpp` | 361 | 🟡 partial | `ZoltTests/Physics/CollidePointTests.zig` |
+| `CollideShapeTests.cpp` | 471 | 🟡 partial | `ZoltTests/Physics/CollideShapeTests.zig` |
 | `CollisionGroupTests.cpp` | 74 | ❌ todo |  |
 | `ContactListenerTests.cpp` | 607 | ❌ todo |  |
 | `ConvexVsTrianglesTest.cpp` | 346 | ❌ todo |  |
@@ -666,10 +666,10 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `PhysicsDeterminismTests.cpp` | 165 | ❌ todo |  |
 | `PhysicsStepListenerTests.cpp` | 117 | ❌ todo |  |
 | `PhysicsTests.cpp` | 2030 | ❌ todo |  |
-| `RayShapeTests.cpp` | 491 | ❌ todo |  |
+| `RayShapeTests.cpp` | 491 | 🟡 partial | `ZoltTests/Physics/RayShapeTests.zig` |
 | `SensorTests.cpp` | 622 | ❌ todo |  |
 | `ShapeFilterTests.cpp` | 80 | ❌ todo |  |
-| `ShapeTests.cpp` | 950 | ❌ todo |  |
+| `ShapeTests.cpp` | 950 | 🟡 partial | `ZoltTests/Physics/ShapeTests.zig` |
 | `SixDOFConstraintTests.cpp` | 158 | ❌ todo |  |
 | `SliderConstraintTests.cpp` | 488 | ❌ todo |  |
 | `SoftBodyTests.cpp` | 222 | ❌ todo |  |

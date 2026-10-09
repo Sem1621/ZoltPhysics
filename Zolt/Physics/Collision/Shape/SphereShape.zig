@@ -757,3 +757,23 @@ test "SphereShape: binary state, restoreFromBinaryState and the registration" {
     try testing.expect(functions.color.eql(Color.green));
     try testing.expect(RegisterTypes.registry.shape_functions[@intFromEnum(ShapeSubType.sphere)].construct == functions.construct);
 }
+
+test "SphereShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, SphereShape.create(failing.allocator(), 1.0, .{}));
+    try testing.expectError(error.OutOfMemory, SphereShapeSettings.create(failing.allocator(), 1.0, .{}));
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.sphere).construct.?(failing.allocator()));
+
+    // Restore: the shape is the only allocation
+    var sphere = SphereShape.init(allocator, 1.25, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    sphere.asShape().saveBinaryState(out.streamOut());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+}

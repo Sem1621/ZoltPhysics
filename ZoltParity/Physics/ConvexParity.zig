@@ -70,18 +70,18 @@ const math = zolt.math;
 
 /// The C++ reference functions, see ConvexReference.cpp
 const jolt = struct {
-    extern fn jolt_convex_unit_sphere(out_vertices: *[384 * 3]f32) void;
-    extern fn jolt_convex_settings(desc: *const ShapeDesc, out_error: *[128]u8) c_int;
-    extern fn jolt_convex_properties(desc: *const ShapeDesc, input: *const PropertiesInput, output: *PropertiesOutput) void;
-    extern fn jolt_convex_support(desc: *const ShapeDesc, mode: c_int, scale: *const P, directions: [*]const f32, num_directions: c_int, out_points: [*]f32) f32;
-    extern fn jolt_convex_cast_ray(desc: *const ShapeDesc, input: *const RayInput, output: *RayOutput) void;
-    extern fn jolt_convex_collide_point(desc: *const ShapeDesc, point: *const P, creator: *const [2]u32, body_id: u32, out_ids: *[2]u32) u32;
-    extern fn jolt_convex_collide(input: *const CollideInput, output: *HitsOutput) void;
-    extern fn jolt_convex_cast(input: *const CastInput, output: *HitsOutput) void;
-    extern fn jolt_convex_submerged_volume(desc: *const ShapeDesc, transform: *const [16]f32, scale: *const P, plane: *const [4]f32, out_values: *[5]f32) void;
-    extern fn jolt_convex_triangles(desc: *const ShapeDesc, position: *const P, rotation: *const [4]f32, scale: *const P, max_triangles_requested: c_int, out_counts: *[64]c_int, out_vertices: *[max_vertices * 3]f32, out_default_material: *[max_vertices / 3]c_int) c_int;
-    extern fn jolt_convex_binary_state(desc: *const ShapeDesc, user_data: u64, out_bytes: [*]u8, capacity: u32, out_restored_bytes: [*]u8, out_restored_size: *u32) u32;
-    extern fn jolt_convex_soft_body(desc: *const ShapeDesc, transform: *const [16]f32, scale: *const P, num_vertices: c_int, positions: [*]const f32, inv_masses: [*]const f32, io_penetrations: [*]f32, io_planes: [*]f32, io_indices: [*]c_int, colliding_shape_index: c_int) void;
+    extern fn jolt_convex_shape_unit_sphere(out_vertices: *[384 * 3]f32) void;
+    extern fn jolt_convex_shape_settings(desc: *const ShapeDesc, out_error: *[128]u8) c_int;
+    extern fn jolt_convex_shape_properties(desc: *const ShapeDesc, input: *const PropertiesInput, output: *PropertiesOutput) void;
+    extern fn jolt_convex_shape_support(desc: *const ShapeDesc, mode: c_int, scale: *const P, directions: [*]const f32, num_directions: c_int, out_points: [*]f32) f32;
+    extern fn jolt_convex_shape_cast_ray(desc: *const ShapeDesc, input: *const RayInput, output: *RayOutput) void;
+    extern fn jolt_convex_shape_collide_point(desc: *const ShapeDesc, point: *const P, creator: *const [2]u32, body_id: u32, out_ids: *[2]u32) u32;
+    extern fn jolt_convex_shape_collide(input: *const CollideInput, output: *HitsOutput) void;
+    extern fn jolt_convex_shape_cast(input: *const CastInput, output: *HitsOutput) void;
+    extern fn jolt_convex_shape_submerged_volume(desc: *const ShapeDesc, transform: *const [16]f32, scale: *const P, plane: *const [4]f32, out_values: *[5]f32) void;
+    extern fn jolt_convex_shape_triangles(desc: *const ShapeDesc, position: *const P, rotation: *const [4]f32, scale: *const P, max_triangles_requested: c_int, out_counts: *[64]c_int, out_vertices: *[max_vertices * 3]f32, out_default_material: *[max_vertices / 3]c_int) c_int;
+    extern fn jolt_convex_shape_binary_state(desc: *const ShapeDesc, user_data: u64, out_bytes: [*]u8, capacity: u32, out_restored_bytes: [*]u8, out_restored_size: *u32) u32;
+    extern fn jolt_convex_shape_soft_body(desc: *const ShapeDesc, transform: *const [16]f32, scale: *const P, num_vertices: c_int, positions: [*]const f32, inv_masses: [*]const f32, io_penetrations: [*]f32, io_planes: [*]f32, io_indices: [*]c_int, colliding_shape_index: c_int) void;
 };
 
 /// Number of random inputs per test
@@ -728,7 +728,7 @@ fn extentOf(desc: ShapeDesc) f32 {
 
 test "Convex parity: ConvexShape::sUnitSphereTriangles" {
     var jolt_vertices: [384 * 3]f32 = undefined;
-    jolt.jolt_convex_unit_sphere(&jolt_vertices);
+    jolt.jolt_convex_shape_unit_sphere(&jolt_vertices);
     var zolt_vertices: [384 * 3]f32 = undefined;
     for (ConvexShape.unit_sphere_triangles.constSlice(), 0..) |v, i| zolt_vertices[3 * i ..][0..3].* = arr3(v);
     var checker: Checker = .{ .name = "unit sphere triangles" };
@@ -746,7 +746,7 @@ test "Convex parity: settings and Jolt's error texts" {
         desc.half_extent = gen.vec(-0.5, 2);
         desc.convex_radius = gen.float(-0.5, 1);
         var jolt_error: [128]u8 = undefined;
-        const jolt_valid = jolt.jolt_convex_settings(&desc, &jolt_error);
+        const jolt_valid = jolt.jolt_convex_shape_settings(&desc, &jolt_error);
         var zolt_error: [128]u8 = @splat(0);
         var shape = try createShape(allocator, desc, &zolt_error);
         const zolt_valid: c_int = @intFromBool(shape != null);
@@ -773,7 +773,7 @@ test "Convex parity: bounds, mass properties, volume, scales, surface normal, su
         if (desc.kind != 0 and gen.oneIn(2)) input.scale = gen.anyScale();
 
         var jolt_output = std.mem.zeroes(PropertiesOutput);
-        jolt.jolt_convex_properties(&desc, &input, &jolt_output);
+        jolt.jolt_convex_shape_properties(&desc, &input, &jolt_output);
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();
         const zolt_output = zoltProperties(shape.get().?, &input);
@@ -788,7 +788,7 @@ test "Convex parity: bounds, mass properties, volume, scales, surface normal, su
             // valid scale for the other values
             const s = shape.get().?;
             var jolt_any = std.mem.zeroes(PropertiesOutput);
-            jolt.jolt_convex_properties(&desc, &jolt_scale_input, &jolt_any);
+            jolt.jolt_convex_shape_properties(&desc, &jolt_scale_input, &jolt_any);
             checker.check(.{ desc, any_scale }, .{ @as(c_int, @intFromBool(s.isValidScale(vec3(any_scale)))), arr3(s.makeScaleValid(vec3(any_scale))) }, .{ jolt_any.is_valid_scale, jolt_any.scale_valid });
         }
     }
@@ -809,7 +809,7 @@ test "Convex parity: support functions of every mode" {
         const convex = shape.get().?.cast(ConvexShape);
         for ([_]ConvexShape.SupportMode{ .exclude_convex_radius, .include_convex_radius, .default }) |mode| {
             var jolt_points: [8 * 3]f32 = @splat(0);
-            const jolt_radius = jolt.jolt_convex_support(&desc, @intFromEnum(mode), &scale, &directions, 8, &jolt_points);
+            const jolt_radius = jolt.jolt_convex_shape_support(&desc, @intFromEnum(mode), &scale, &directions, 8, &jolt_points);
             var buffer: ConvexShape.SupportBuffer = .{};
             const support = convex.getSupportFunction(mode, &buffer, vec3(scale));
             var zolt_points: [8 * 3]f32 = @splat(0);
@@ -849,7 +849,7 @@ test "Convex parity: CastRay (single hit and collectors) and CollidePoint" {
             input.direction = arr3(vec3(target).sub(vec3(input.origin)).mulScalar(gen.plain(0.5, 3)));
         }
         var jolt_output = std.mem.zeroes(RayOutput);
-        jolt.jolt_convex_cast_ray(&desc, &input, &jolt_output);
+        jolt.jolt_convex_shape_cast_ray(&desc, &input, &jolt_output);
         const zolt_output = try zoltCastRay(allocator, shape.get().?, &input);
         rays.check(.{ desc, input }, zolt_output, jolt_output);
 
@@ -857,7 +857,7 @@ test "Convex parity: CastRay (single hit and collectors) and CollidePoint" {
         var point = gen.vec(-1.5 * extent, 1.5 * extent);
         if (gen.oneIn(5)) point[gen.index(3)] = if (desc.kind == 0) desc.radius else desc.half_extent[gen.index(3)];
         var jolt_ids: [2]u32 = undefined;
-        const jolt_count = jolt.jolt_convex_collide_point(&desc, &point, &input.creator, input.body_id, &jolt_ids);
+        const jolt_count = jolt.jolt_convex_shape_collide_point(&desc, &point, &input.creator, input.body_id, &jolt_ids);
         var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
         defer collector.deinit();
         const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(input.body_id), .{});
@@ -918,7 +918,7 @@ test "Convex parity: collide convex vs convex through CollisionDispatch" {
             input.transform2 = arr16(Mat44.translation(vec3(t)));
         }
         var jolt_output = std.mem.zeroes(HitsOutput);
-        jolt.jolt_convex_collide(&input, &jolt_output);
+        jolt.jolt_convex_shape_collide(&input, &jolt_output);
         const zolt_output = try zoltCollide(allocator, &input);
         num_hits += zolt_output.num_hits;
         checker.check(.{input}, zolt_output, jolt_output);
@@ -968,7 +968,7 @@ test "Convex parity: cast convex vs convex through CollisionDispatch (world spac
             .body_id = gen.next() & 0x7fffff,
         };
         var jolt_output = std.mem.zeroes(HitsOutput);
-        jolt.jolt_convex_cast(&input, &jolt_output);
+        jolt.jolt_convex_shape_cast(&input, &jolt_output);
         const zolt_output = try zoltCast(allocator, &input);
         num_hits += zolt_output.num_hits;
         checker.check(.{input}, zolt_output, jolt_output);
@@ -988,7 +988,7 @@ test "Convex parity: GetSubmergedVolume" {
         const normal = vec3(gen.direction(1)).normalizedOr(Vec3.axisY());
         const plane = arr4(Plane.fromPointAndNormal(vec3(gen.vec(-5, 5)), normal).normal_and_constant);
         var jolt_values: [5]f32 = undefined;
-        jolt.jolt_convex_submerged_volume(&desc, &transform, &scale, &plane, &jolt_values);
+        jolt.jolt_convex_shape_submerged_volume(&desc, &transform, &scale, &plane, &jolt_values);
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();
         const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)));
@@ -1012,7 +1012,7 @@ test "Convex parity: GetTrianglesStart / Next" {
         var jolt_counts: [64]c_int = @splat(0);
         var jolt_vertices: [max_vertices * 3]f32 = @splat(0);
         var jolt_default: [max_vertices / 3]c_int = @splat(0);
-        const jolt_calls = jolt.jolt_convex_triangles(&desc, &position, &rotation, &scale, max_requested, &jolt_counts, &jolt_vertices, &jolt_default);
+        const jolt_calls = jolt.jolt_convex_shape_triangles(&desc, &position, &rotation, &scale, max_requested, &jolt_counts, &jolt_vertices, &jolt_default);
 
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();
@@ -1070,7 +1070,7 @@ test "Convex parity: CollideSoftBodyVertices" {
         var jolt_penetrations = penetrations;
         var jolt_planes = planes;
         var jolt_indices = indices;
-        jolt.jolt_convex_soft_body(&desc, &transform, &scale, n, &positions, &inv_masses, &jolt_penetrations, &jolt_planes, &jolt_indices, 3);
+        jolt.jolt_convex_shape_soft_body(&desc, &transform, &scale, n, &positions, &inv_masses, &jolt_penetrations, &jolt_planes, &jolt_indices, 3);
 
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();
@@ -1105,7 +1105,7 @@ test "Convex parity: binary state" {
         var jolt_bytes: [64]u8 = @splat(0);
         var jolt_restored: [64]u8 = @splat(0);
         var jolt_restored_size: u32 = 0;
-        const jolt_size = jolt.jolt_convex_binary_state(&desc, user_data, &jolt_bytes, 64, &jolt_restored, &jolt_restored_size);
+        const jolt_size = jolt.jolt_convex_shape_binary_state(&desc, user_data, &jolt_bytes, 64, &jolt_restored, &jolt_restored_size);
 
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();

@@ -353,7 +353,7 @@ void StoreCollideHit(const CollideShapeResult &inResult, HitOutput &outHit)
 extern "C" {
 
 // ConvexShape::sUnitSphereTriangles (384 vertices)
-void jolt_convex_unit_sphere(float *outVertices)
+void jolt_convex_shape_unit_sphere(float *outVertices)
 {
 	EnsureFactory();
 	const StaticArray<Vec3, 384> &triangles = ExposeConvexShape::sGetUnitSphereTriangles();
@@ -362,7 +362,7 @@ void jolt_convex_unit_sphere(float *outVertices)
 }
 
 // Create the shape from its settings: returns 1 if valid, otherwise 0 and the error text in outError (128 bytes, 0 terminated)
-int jolt_convex_settings(const ShapeDesc *inDesc, char *outError)
+int jolt_convex_shape_settings(const ShapeDesc *inDesc, char *outError)
 {
 	EnsureFactory();
 	memset(outError, 0, 128);
@@ -375,7 +375,7 @@ int jolt_convex_settings(const ShapeDesc *inDesc, char *outError)
 }
 
 // Bounds, mass properties, volume, scales, surface normal and supporting face
-void jolt_convex_properties(const ShapeDesc *inDesc, const PropertiesInput *inInput, PropertiesOutput *outOutput)
+void jolt_convex_shape_properties(const ShapeDesc *inDesc, const PropertiesInput *inInput, PropertiesOutput *outOutput)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -402,7 +402,7 @@ void jolt_convex_properties(const ShapeDesc *inDesc, const PropertiesInput *inIn
 }
 
 // GetSupportFunction(inMode) and GetSupport for inNumDirections directions
-float jolt_convex_support(const ShapeDesc *inDesc, int inMode, const float *inScale, const float *inDirections, int inNumDirections, float *outPoints)
+float jolt_convex_shape_support(const ShapeDesc *inDesc, int inMode, const float *inScale, const float *inDirections, int inNumDirections, float *outPoints)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -414,7 +414,7 @@ float jolt_convex_support(const ShapeDesc *inDesc, int inMode, const float *inSc
 }
 
 // CastRay (the single hit version) and CastRay with a collector
-void jolt_convex_cast_ray(const ShapeDesc *inDesc, const RayInput *inInput, RayOutput *outOutput)
+void jolt_convex_shape_cast_ray(const ShapeDesc *inDesc, const RayInput *inInput, RayOutput *outOutput)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -479,7 +479,7 @@ void jolt_convex_cast_ray(const ShapeDesc *inDesc, const RayInput *inInput, RayO
 }
 
 // CollidePoint: number of hits, body ID and sub shape ID of the last hit
-uint32 jolt_convex_collide_point(const ShapeDesc *inDesc, const float *inPoint, const uint32 *inCreator, uint32 inBodyID, uint32 *outIDs)
+uint32 jolt_convex_shape_collide_point(const ShapeDesc *inDesc, const float *inPoint, const uint32 *inCreator, uint32 inBodyID, uint32 *outIDs)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -497,7 +497,7 @@ uint32 jolt_convex_collide_point(const ShapeDesc *inDesc, const float *inPoint, 
 }
 
 // CollisionDispatch::sCollideShapeVsShape (all hits in order)
-void jolt_convex_collide(const CollideInput *inInput, HitsOutput *outOutput)
+void jolt_convex_shape_collide(const CollideInput *inInput, HitsOutput *outOutput)
 {
 	EnsureFactory();
 	Ref<Shape> shape1 = CreateShape(inInput->mShape1);
@@ -525,7 +525,7 @@ void jolt_convex_collide(const CollideInput *inInput, HitsOutput *outOutput)
 }
 
 // CollisionDispatch::sCastShapeVsShapeWorldSpace (all hits in order)
-void jolt_convex_cast(const CastInput *inInput, HitsOutput *outOutput)
+void jolt_convex_shape_cast(const CastInput *inInput, HitsOutput *outOutput)
 {
 	EnsureFactory();
 	Ref<Shape> shape1 = CreateShape(inInput->mShape1);
@@ -557,7 +557,7 @@ void jolt_convex_cast(const CastInput *inInput, HitsOutput *outOutput)
 }
 
 // GetSubmergedVolume: total volume, submerged volume, center of buoyancy
-void jolt_convex_submerged_volume(const ShapeDesc *inDesc, const float *inTransform, const float *inScale, const float *inPlane, float *outValues)
+void jolt_convex_shape_submerged_volume(const ShapeDesc *inDesc, const float *inTransform, const float *inScale, const float *inPlane, float *outValues)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -572,7 +572,7 @@ void jolt_convex_submerged_volume(const ShapeDesc *inDesc, const float *inTransf
 // GetTrianglesStart, then GetTrianglesNext with inMaxTrianglesRequested until it returns 0: the counts per call (at most
 // 64 calls), the vertices (at most 384) and a flag per triangle (1 if the material is the default material), returns the
 // number of calls
-int jolt_convex_triangles(const ShapeDesc *inDesc, const float *inPosition, const float *inRotation, const float *inScale, int inMaxTrianglesRequested, int *outCounts, float *outVertices, int *outDefaultMaterial)
+int jolt_convex_shape_triangles(const ShapeDesc *inDesc, const float *inPosition, const float *inRotation, const float *inScale, int inMaxTrianglesRequested, int *outCounts, float *outVertices, int *outDefaultMaterial)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -601,7 +601,7 @@ int jolt_convex_triangles(const ShapeDesc *inDesc, const float *inPosition, cons
 
 // SaveBinaryState (with user data inUserData), then sRestoreFromBinaryState of those bytes and SaveBinaryState of the
 // restored shape (outRestoredSize = 0 when the restore fails). Returns the number of bytes.
-uint32 jolt_convex_binary_state(const ShapeDesc *inDesc, uint64 inUserData, uint8 *outBytes, uint32 inCapacity, uint8 *outRestoredBytes, uint32 *outRestoredSize)
+uint32 jolt_convex_shape_binary_state(const ShapeDesc *inDesc, uint64 inUserData, uint8 *outBytes, uint32 inCapacity, uint8 *outRestoredBytes, uint32 *outRestoredSize)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -633,7 +633,7 @@ uint32 jolt_convex_binary_state(const ShapeDesc *inDesc, uint64 inUserData, uint
 
 // CollideSoftBodyVertices on inNumVertices vertices (positions as 3 floats, ioPenetrations in / out), outPlanes 4 floats
 // per vertex, ioIndices in / out
-void jolt_convex_soft_body(const ShapeDesc *inDesc, const float *inTransform, const float *inScale, int inNumVertices, const float *inPositions, const float *inInvMasses, float *ioPenetrations, float *ioPlanes, int *ioIndices, int inCollidingShapeIndex)
+void jolt_convex_shape_soft_body(const ShapeDesc *inDesc, const float *inTransform, const float *inScale, int inNumVertices, const float *inPositions, const float *inInvMasses, float *ioPenetrations, float *ioPlanes, int *ioIndices, int inCollidingShapeIndex)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
