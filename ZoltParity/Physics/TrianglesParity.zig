@@ -1301,6 +1301,11 @@ fn genRecorded(gen: *Gen) RecordedHitsInput {
                 // Not part of the mesh
                 face = .{ gen.plainVec(-5, 5), gen.plainVec(-5, 5), gen.plainVec(-5, 5), Vec3.zero() };
             },
+            7, 8 => {
+                // A quad with a duplicated vertex: a zero length edge (the degenerate case of Flush)
+                face_count = 4;
+                face[3] = if (gen.oneIn(2)) face[2] else face[0];
+            },
             else => {},
         }
         h.face2_count = face_count;
