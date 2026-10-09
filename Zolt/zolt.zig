@@ -255,6 +255,7 @@ pub const CapsuleShape = @import("Physics/Collision/Shape/CapsuleShape.zig").Cap
 pub const CompoundShape = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShape;
 pub const CompoundShapeSettings = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShapeSettings;
 pub const ConvexHullShape = @import("Physics/Collision/Shape/ConvexHullShape.zig").ConvexHullShape;
+pub const ConvexHullShapeSettings = @import("Physics/Collision/Shape/ConvexHullShape.zig").ConvexHullShapeSettings;
 pub const ConvexShape = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShape;
 pub const ConvexShapeSettings = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShapeSettings;
 pub const CylinderShape = @import("Physics/Collision/Shape/CylinderShape.zig").CylinderShape;
