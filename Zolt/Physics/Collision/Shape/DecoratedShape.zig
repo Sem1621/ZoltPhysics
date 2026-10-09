@@ -457,13 +457,19 @@ test "DecoratedShape: construction from settings, Jolt's error texts and referen
     const allocator = testing.allocator;
     const expect = testing.expect;
 
-    // No inner shape
+    // No inner shape (the default constructor and the constructors with null)
     {
-        var settings = TestDecoratedShapeSettings.init(allocator, null);
-        defer settings.deinit();
-        var result = try settings.asShapeSettings().createShape(allocator);
-        defer result.deinit();
-        try testing.expectEqualStrings("Inner shape is null!", result.getError());
+        var default_settings: TestDecoratedShapeSettings = .{ .base = .initDefault(TestDecoratedShapeSettings, allocator) };
+        defer default_settings.deinit();
+        var null_settings = TestDecoratedShapeSettings.init(allocator, null);
+        defer null_settings.deinit();
+        var null_ptr_settings = TestDecoratedShapeSettings.initPtr(allocator, null);
+        defer null_ptr_settings.deinit();
+        for ([_]*TestDecoratedShapeSettings{ &default_settings, &null_settings, &null_ptr_settings }) |settings| {
+            var result = try settings.asShapeSettings().createShape(allocator);
+            defer result.deinit();
+            try testing.expectEqualStrings("Inner shape is null!", result.getError());
+        }
     }
 
     // The child error is forwarded

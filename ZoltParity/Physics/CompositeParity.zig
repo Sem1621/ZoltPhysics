@@ -1759,7 +1759,7 @@ const Gen = struct {
         return if (remainder_bits == 0) creator.getID().getValue() else creator.pushID(@intCast(self.next() & ((@as(u32, 1) << @intCast(remainder_bits)) - 1)), remainder_bits).getID().getValue();
     }
 
-    fn creator(self: *Gen) [2]u32 {
+    fn randomCreator(self: *Gen) [2]u32 {
         const bits: u32 = @intCast(self.index(9));
         const id: u32 = if (bits == 0) 0 else self.next() & ((@as(u32, 1) << @intCast(bits)) - 1);
         return .{ id, bits };
@@ -1781,6 +1781,34 @@ fn validScale(gen: *Gen, desc: *const CompoundDesc) P {
     return s;
 }
 
+/// Counts how often the inputs reached each case, so that a test cannot pass by comparing only trivial results
+fn Coverage(comptime names: []const []const u8) type {
+    return struct {
+        counts: [names.len]usize = @splat(0),
+
+        fn hit(self: *@This(), comptime name: []const u8, condition: bool) void {
+            inline for (names, 0..) |n, i| {
+                if (comptime std.mem.eql(u8, n, name)) {
+                    if (condition) self.counts[i] += 1;
+                    return;
+                }
+            }
+            @compileError("unknown coverage case " ++ name);
+        }
+
+        fn expectAll(self: *const @This()) !void {
+            var missing = false;
+            for (names, self.counts) |n, c| {
+                if (c == 0) {
+                    std.debug.print("coverage: no input reached '{s}'\n", .{n});
+                    missing = true;
+                }
+            }
+            if (missing) return error.TestCoverage;
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Tests
 
@@ -1788,6 +1816,7 @@ test "Composite parity: CompoundShape::SubShape (SetTransform, compressed positi
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "SubShape" };
+    var coverage: Coverage(&.{ "identity", "rotated", "valid scale", "invalid scale" }) = .{};
     for (0..fw.iterations / 2) |_| {
         var input: SubShapeInput = .{
             .child_center_of_mass = if (gen.oneIn(4)) .{ 0, 0, 0 } else gen.vec(-2, 2),
@@ -1805,8 +1834,13 @@ test "Composite parity: CompoundShape::SubShape (SetTransform, compressed positi
         var zolt_out: SubShapeOutput = undefined;
         try zoltSubShape(allocator, &input, &zolt_out);
         checker.check(input, zolt_out, jolt_out);
+        coverage.hit("identity", zolt_out.is_rotation_identity != 0);
+        coverage.hit("rotated", zolt_out.is_rotation_identity == 0);
+        coverage.hit("valid scale", std.mem.indexOfScalar(u32, &zolt_out.valid, 1) != null);
+        coverage.hit("invalid scale", std.mem.indexOfScalar(u32, &zolt_out.valid, 0) != null);
     }
     try checker.finish();
+    try coverage.expectAll();
 }
 
 test "Composite parity: compound construction and the overrides of CompoundShape, binary state, the queries through the visitors" {
@@ -1816,6 +1850,7 @@ test "Composite parity: compound construction and the overrides of CompoundShape
     var query_checker: Checker = .{ .name = "compound queries" };
     var visitor_checker: Checker = .{ .name = "compound visitor queries" };
     var log_checker: Checker = .{ .name = "compound call log" };
+    var coverage: Coverage(&.{ "valid", "empty", "error", "more than 10", "mass", "must be static", "from settings", "identity rotation", "invalid test scale", "invalid raw id", "valid raw id", "submerged", "ray hit", "ray miss", "ray hits", "point hits", "collected some", "intersecting", "intersecting oriented", "log" }) = .{};
     const jolt_out = try allocator.create(CompoundOutput);
     defer allocator.destroy(jolt_out);
     const zolt_out = try allocator.create(CompoundOutput);
@@ -1837,7 +1872,7 @@ test "Composite parity: compound construction and the overrides of CompoundShape
             .surface = arr3(Vec3.init(gen.plain(-1, 1), gen.plain(0.1, 1), gen.plain(-1, 1)).normalized()) ++ [1]f32{gen.float(-5, 5)},
             .ray_origin = gen.vec(-10, 10),
             .ray_direction = gen.vec(-20, 20),
-            .creator = gen.creator(),
+            .creator = gen.randomCreator(),
             .hit_fraction = if (gen.oneIn(3)) 1.0 + math.flt_epsilon else gen.plain(0, 1),
             .back_faces = @intFromBool(gen.oneIn(2)),
             .collector_kind = @intCast(gen.index(3)),
@@ -1859,14 +1894,38 @@ test "Composite parity: compound construction and the overrides of CompoundShape
         query_checker.check(input, .{ zolt_out.world_bounds, zolt_out.scale_valid, zolt_out.made_valid, zolt_out.raw_id_valid, zolt_out.id_valid, zolt_out.index, zolt_out.remainder, zolt_out.leaf_child, zolt_out.leaf_remainder, zolt_out.user_data, zolt_out.material_is_default, zolt_out.sub_ts, zolt_out.sub_ts_remainder, zolt_out.normal, zolt_out.face_count, zolt_out.face, zolt_out.submerged, zolt_out.num_transformed, zolt_out.transformed }, .{ jolt_out.world_bounds, jolt_out.scale_valid, jolt_out.made_valid, jolt_out.raw_id_valid, jolt_out.id_valid, jolt_out.index, jolt_out.remainder, jolt_out.leaf_child, jolt_out.leaf_remainder, jolt_out.user_data, jolt_out.material_is_default, jolt_out.sub_ts, jolt_out.sub_ts_remainder, jolt_out.normal, jolt_out.face_count, jolt_out.face, jolt_out.submerged, jolt_out.num_transformed, jolt_out.transformed });
         visitor_checker.check(input, .{ zolt_out.ray_hit, zolt_out.ray_fraction, zolt_out.ray_id, zolt_out.num_ray_hits, zolt_out.ray_hit_fractions, zolt_out.ray_hit_ids, zolt_out.num_point_hits, zolt_out.point_hit_ids, zolt_out.num_collected, zolt_out.collected, zolt_out.num_intersecting, zolt_out.intersecting }, .{ jolt_out.ray_hit, jolt_out.ray_fraction, jolt_out.ray_id, jolt_out.num_ray_hits, jolt_out.ray_hit_fractions, jolt_out.ray_hit_ids, jolt_out.num_point_hits, jolt_out.point_hit_ids, jolt_out.num_collected, jolt_out.collected, jolt_out.num_intersecting, jolt_out.intersecting });
         log_checker.check(input, zolt_out.log, jolt_out.log);
+
+        const z = zolt_out;
+        coverage.hit("valid", z.state.valid != 0 and z.state.num_sub_shapes > 0);
+        coverage.hit("empty", z.state.valid != 0 and z.state.num_sub_shapes == 0);
+        coverage.hit("error", z.state.valid == 0);
+        coverage.hit("more than 10", z.state.num_sub_shapes > 10);
+        coverage.hit("mass", z.state.mass > 0);
+        coverage.hit("must be static", z.state.must_be_static != 0);
+        coverage.hit("from settings", z.state.sub_shapes[0].child >= 100);
+        coverage.hit("identity rotation", z.state.sub_shapes[0].is_rotation_identity != 0);
+        coverage.hit("invalid test scale", z.scale_valid[0] == 0 and z.state.valid != 0);
+        coverage.hit("invalid raw id", z.raw_id_valid[0] == 0 and z.state.valid != 0);
+        coverage.hit("valid raw id", z.raw_id_valid[1] != 0);
+        coverage.hit("submerged", z.submerged[1] > 0 and z.submerged[1] < z.submerged[0]);
+        coverage.hit("ray hit", z.ray_hit != 0);
+        coverage.hit("ray miss", z.ray_hit == 0 and z.state.num_sub_shapes > 0);
+        coverage.hit("ray hits", z.num_ray_hits > 1);
+        coverage.hit("point hits", z.num_point_hits > 0);
+        coverage.hit("collected some", z.num_collected > 0 and z.num_collected < z.state.num_sub_shapes);
+        coverage.hit("intersecting", z.num_intersecting[0] > 0 and z.num_intersecting[0] < z.state.num_sub_shapes);
+        coverage.hit("intersecting oriented", z.num_intersecting[1] > 0 and z.num_intersecting[1] < z.state.num_sub_shapes);
+        coverage.hit("log", z.log.count > 20);
     }
     try finishAll(&.{ &state_checker, &query_checker, &visitor_checker, &log_checker });
+    try coverage.expectAll();
 }
 
 test "Composite parity: TestBounds of every visitor" {
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "visitor TestBounds" };
+    var coverage: Coverage(&.{ "ray enters", "point inside", "cast enters", "collect overlaps", "collect separate", "compound vs shape overlaps", "shape vs compound separate", "aabox overlaps", "oriented box overlaps", "oriented box separate" }) = .{};
     for (0..fw.iterations / 2) |_| {
         var bounds: [24]f32 = undefined;
         for (0..4) |lane| {
@@ -1901,14 +1960,26 @@ test "Composite parity: TestBounds of every visitor" {
         var zolt_out: BoundsOutput = undefined;
         try zoltTestBounds(allocator, &input, &zolt_out);
         checker.check(input, zolt_out, jolt_out);
+        coverage.hit("ray enters", zolt_out.ray[0] < 1.0);
+        coverage.hit("point inside", zolt_out.point[0] != 0);
+        coverage.hit("cast enters", zolt_out.cast[0] < 1.0);
+        coverage.hit("collect overlaps", zolt_out.collect[0] != 0);
+        coverage.hit("collect separate", zolt_out.collect[1] == 0);
+        coverage.hit("compound vs shape overlaps", zolt_out.compound_vs_shape[0] != 0);
+        coverage.hit("shape vs compound separate", zolt_out.shape_vs_compound[0] == 0);
+        coverage.hit("aabox overlaps", zolt_out.aabox[0] != 0);
+        coverage.hit("oriented box overlaps", zolt_out.oriented_box[0] != 0);
+        coverage.hit("oriented box separate", zolt_out.oriented_box[0] == 0);
     }
     try checker.finish();
+    try coverage.expectAll();
 }
 
 test "Composite parity: the visitors that dispatch (collide compound vs shape, shape vs compound, cast shape vs compound, CompoundShape::sCastCompoundVsShape)" {
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "dispatching visitors" };
+    var coverage: Coverage(&.{ "compound vs shape", "shape vs compound", "cast shape vs compound", "cast compound vs shape", "compound vs shape rejected", "cast rejected by the bounds", "early out" }) = .{};
     const jolt_out = try allocator.create(VisitorOutput);
     defer allocator.destroy(jolt_out);
     const zolt_out = try allocator.create(VisitorOutput);
@@ -1931,7 +2002,7 @@ test "Composite parity: the visitors that dispatch (collide compound vs shape, s
         input.transform2 = gen.rotationTranslation();
         input.scale1 = validScale(&gen, &desc);
         input.scale2 = gen.scale();
-        input.creators = .{ gen.creator(), gen.creator() };
+        input.creators = .{ gen.randomCreator(), gen.randomCreator() };
         input.max_separation = if (gen.oneIn(2)) 0.0 else gen.plain(0, 20);
         input.collector_kind = @intCast(gen.index(3));
         input.cast_start = gen.rotationTranslation();
@@ -1940,14 +2011,23 @@ test "Composite parity: the visitors that dispatch (collide compound vs shape, s
         jolt.jolt_composite_visitors(&input, jolt_out);
         try zoltVisitors(allocator, &input, zolt_out);
         checker.check(input, zolt_out.*, jolt_out.*);
+        coverage.hit("compound vs shape", zolt_out.num_hits[0] > 1);
+        coverage.hit("shape vs compound", zolt_out.num_hits[1] > 1);
+        coverage.hit("cast shape vs compound", zolt_out.num_hits[2] > 1);
+        coverage.hit("cast compound vs shape", zolt_out.num_hits[3] > 1);
+        coverage.hit("compound vs shape rejected", zolt_out.num_hits[0] == 0 and zolt_out.collide[0].calls == 0);
+        coverage.hit("cast rejected by the bounds", zolt_out.cast[0].calls < input.num_sub_shapes);
+        coverage.hit("early out", input.collector_kind == any_hit and zolt_out.num_hits[3] == 1);
     }
     try checker.finish();
+    try coverage.expectAll();
 }
 
 test "Composite parity: DecoratedShape (construction errors, the overrides, binary and sub shape state)" {
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "DecoratedShape" };
+    var coverage: Coverage(&.{ "valid", "null inner shape", "child error", "invalid scale", "calls" }) = .{};
     for (0..iterations) |_| {
         const input: DecoratedInput = .{
             .child = gen.childDesc(),
@@ -1965,6 +2045,12 @@ test "Composite parity: DecoratedShape (construction errors, the overrides, bina
         var zolt_out: DecoratedOutput = undefined;
         try zoltDecorated(allocator, &input, &zolt_out);
         checker.check(input, zolt_out, jolt_out);
+        coverage.hit("valid", zolt_out.valid != 0);
+        coverage.hit("null inner shape", std.mem.startsWith(u8, &zolt_out.@"error", "Inner shape is null!"));
+        coverage.hit("child error", std.mem.startsWith(u8, &zolt_out.@"error", "Invalid half extent"));
+        coverage.hit("invalid scale", zolt_out.valid != 0 and zolt_out.scale_valid[0] == 0);
+        coverage.hit("calls", zolt_out.num_calls == 2);
     }
     try checker.finish();
+    try coverage.expectAll();
 }

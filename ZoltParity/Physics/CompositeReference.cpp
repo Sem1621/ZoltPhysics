@@ -22,6 +22,7 @@
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/StreamWrapper.h>
+#include <Jolt/Core/UnorderedSet.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Geometry/OrientedBox.h>
 #include <Jolt/Geometry/RayAABox.h>
@@ -30,6 +31,8 @@
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollidePointResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollideSoftBodyVertexIterator.h>
+#include <Jolt/Physics/Collision/PhysicsMaterial.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/TransformedShape.h>
@@ -1369,7 +1372,7 @@ void jolt_composite_compound(const CompoundDesc *inDesc, const CompoundQueries *
 		std::stringstream in_data(bytes.substr(1)); // Shape::sRestoreFromBinaryState reads the sub type
 		StreamInWrapper stream_in(in_data);
 		restored->RestoreBinaryStatePublic(stream_in);
-		Shape::ShapeList sub_shapes;
+		ShapeList sub_shapes;
 		compound.SaveSubShapeState(sub_shapes);
 		restored->RestoreSubShapeState(sub_shapes.data(), (uint)sub_shapes.size());
 		StoreState(*restored, outOutput->mRestored);
@@ -1610,7 +1613,7 @@ void jolt_composite_decorated(const DecoratedInput *inInput, DecoratedOutput *ou
 	}
 	Shape::VisitedShapes visited;
 	outOutput->mNumTriangles = shape.GetStatsRecursive(visited).mNumTriangles;
-	Shape::ShapeList sub_shapes;
+	ShapeList sub_shapes;
 	shape.SaveSubShapeState(sub_shapes);
 	outOutput->mNumSubShapes = (uint32)sub_shapes.size();
 	outOutput->mSubShapeChild = sub_shapes.empty()? 0xffffffff : ChildIndex(sub_shapes[0]);
