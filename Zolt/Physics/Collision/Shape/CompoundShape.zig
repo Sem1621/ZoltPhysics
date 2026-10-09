@@ -197,7 +197,7 @@ pub const CompoundShape = struct {
         // 3 padding bytes left
 
         comptime {
-            if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(SubShape) == 40); // Compiler added unexpected padding
+            std.debug.assert(@sizeOf(SubShape) == if (@sizeOf(usize) == 8) 40 else 36); // Compiler added unexpected padding
         }
 
         /// Copy (the copy constructor), adds a reference to the shape
@@ -1494,6 +1494,42 @@ test "CompoundShape: the overrides of Shape pass the calls on to the sub shapes"
         try expect(above.center_of_buoyancy.eql(Vec3.zero()));
     }
 
+    // A nested compound (the test compound is sub shape 1 of an outer compound)
+    {
+        var outer = LinearCompoundShapeSettings.init(allocator);
+        defer outer.deinit();
+        try outer.base.addShapePtr(Vec3.init(0, -10, 0), Quat.identity(), tc.sphere.asShape(), .{});
+        try outer.base.addShapePtr(Vec3.zero(), Quat.identity(), shape, .{});
+        var r = try outer.asShapeSettings().createShape(allocator);
+        defer r.deinit();
+        const nested = r.getPtr().?;
+        const oc = nested.cast(CompoundShape);
+
+        // getSubShapeUserData passes the remainder on: box_a (sub shape 0 of the inner compound), not the sub shape that
+        // the full ID would select in the inner compound (box_b, user data 0)
+        try testing.expectEqual(@as(u64, 11), nested.getSubShapeUserData(SubShapeIDCreator.pushID(.{}, 1, 1).pushID(0, 2).getID()));
+        try testing.expectEqual(@as(u64, 0), nested.getSubShapeUserData(SubShapeIDCreator.pushID(.{}, 1, 1).pushID(1, 2).getID()));
+
+        // getSubmergedVolume: the surface goes through the center of mass of the inner compound, so that child is
+        // partially submerged and its center of buoyancy is weighted by its submerged volume (not its total volume)
+        const surface = Plane.fromPointAndNormal(oc.getSubShape(1).getPositionCOM(), Vec3.axisY());
+        const v = nested.getSubmergedVolume(Mat44.identity(), Vec3.one(), surface);
+        var expected_submerged: f32 = 0.0;
+        var expected_center = Vec3.zero();
+        var total_weighted_center = Vec3.zero();
+        for (oc.getSubShapes()) |*s| {
+            const child = s.shape.get().?.getSubmergedVolume(s.getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface);
+            expected_submerged += child.submerged_volume;
+            expected_center = expected_center.add(child.center_of_buoyancy.mulScalar(child.submerged_volume));
+            total_weighted_center = total_weighted_center.add(child.center_of_buoyancy.mulScalar(child.total_volume));
+        }
+        const inner = shape.getSubmergedVolume(oc.getSubShape(1).getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface);
+        try expect(inner.submerged_volume > 0.0 and inner.submerged_volume < inner.total_volume);
+        try testing.expectEqual(expected_submerged, v.submerged_volume);
+        try expect(v.center_of_buoyancy.eql(expected_center.divScalar(expected_submerged)));
+        try expect(!v.center_of_buoyancy.isClose(total_weighted_center.divScalar(expected_submerged), .{ .max_dist_sq = 1.0e-2 }));
+    }
+
     // collideSoftBodyVertices: every child (box_a records its calls)
     {
         var record: TestShapes.SoftBodyRecord = .{};
@@ -1829,6 +1865,24 @@ test "CompoundShape: binary state and sub shape state" {
     }
 }
 
+/// A filter that rejects one sub shape ID (as shape 2, or as either shape of a pair)
+const RejectIDFilter = struct {
+    pub const overrides = .{ .shouldCollide, .shouldCollidePair };
+
+    base: ShapeFilter = .init(@This()),
+    reject: SubShapeID,
+
+    pub fn shouldCollide(self: *const RejectIDFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = shape2;
+        return !sub_shape_id_of_shape2.eql(self.reject);
+    }
+
+    pub fn shouldCollidePair(self: *const RejectIDFilter, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = .{ shape1, shape2 };
+        return !sub_shape_id_of_shape1.eql(self.reject) and !sub_shape_id_of_shape2.eql(self.reject);
+    }
+};
+
 test "CompoundShape visitors: ray casts, collide point, collect transformed shapes, intersecting sub shapes" {
     const allocator = testing.allocator;
     const expect = testing.expect;
@@ -1881,6 +1935,14 @@ test "CompoundShape visitors: ray casts, collide point, collect transformed shap
         shape.castRayCollector(ray, &settings, .{}, &collector.base, &reject_all.base);
         try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
 
+        // A filter that rejects sub shape 1 (box_b) only: the visitor passes the filter on to the sub shapes
+        const reject_box_b: RejectIDFilter = .{ .reject = id2(1) };
+        collector.reset();
+        shape.castRayCollector(ray, &settings, .{}, &collector.base, &reject_box_b.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 2), collector.hits.items.len); // The front and back face of box_a
+        for (collector.hits.items) |*h| try expect(h.sub_shape_id2.eql(id2(0)));
+
         // An any hit collector stops after the first hit
         var any = AnyHitCollisionCollector(CastRayCollector).init();
         defer any.deinit();
@@ -1898,6 +1960,12 @@ test "CompoundShape visitors: ray casts, collide point, collect transformed shap
         try collector.checkError();
         try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
         try expect(collector.hits.items[0].sub_shape_id2.eql(c.getSubShapeIDFromIndex(1, parent).getID()));
+
+        // The filter reaches the sub shape (box_b rejected, the compound itself accepted)
+        collector.reset();
+        const reject_box_b: RejectIDFilter = .{ .reject = c.getSubShapeIDFromIndex(1, parent).getID() };
+        shape.collidePoint(c.getSubShape(1).getPositionCOM().add(Vec3.init(0.9, 0, 0)), parent, &collector.base, &reject_box_b.base);
+        try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
     }
 
     // Collect transformed shapes: every sub shape in the box, with the transform of the sub shape
@@ -1917,6 +1985,14 @@ test "CompoundShape visitors: ray casts, collide point, collect transformed shap
             try expect(ts.shape_rotation.eql(rotation.mul(s.getRotation())));
             try expect(ts.getShapeScale().eql(scale));
         }
+
+        // The filter reaches the sub shapes: every sub shape except box_b (sub shape 1)
+        collector.reset();
+        const reject_box_b: RejectIDFilter = .{ .reject = id2(1) };
+        shape.collectTransformedShapes(AABox.biggest(), position, rotation, scale, .{}, &collector.base, &reject_box_b.base);
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 3), collector.hits.items.len);
+        for (collector.hits.items) |*ts| try expect(ts.shape.get() != tc.box_b.asShape());
 
         // A small world space box around box_a (sub shape 0) only
         collector.reset();
@@ -1972,6 +2048,13 @@ test "CompoundShape visitors: collide compound vs shape, shape vs compound, cast
         try expect(collector.hits.items[1].sub_shape_id1.eql(c.getSubShapeIDFromIndex(2, parent).getID()));
         try expect(collector.hits.items[0].sub_shape_id2.isEmpty());
 
+        // The filter reaches CollisionDispatch: rejecting the pair with box_a leaves the box from settings
+        collector.reset();
+        const reject_box_a: RejectIDFilter = .{ .reject = c.getSubShapeIDFromIndex(0, parent).getID() };
+        LinearCompoundShape.collideCompoundVsShape(shape, probe.asShape(), Vec3.one(), Vec3.one(), Mat44.identity(), probe_transform, parent, .{}, &settings, &collector.base, &reject_box_a.base);
+        try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
+        try expect(collector.hits.items[0].sub_shape_id1.eql(c.getSubShapeIDFromIndex(2, parent).getID()));
+
         // With the probe far away nothing collides (the bounds test rejects every sub shape)
         collector.reset();
         LinearCompoundShape.collideCompoundVsShape(shape, probe.asShape(), Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.translation(Vec3.replicate(50)), .{}, .{}, &settings, &collector.base, &.{});
@@ -1993,6 +2076,13 @@ test "CompoundShape visitors: collide compound vs shape, shape vs compound, cast
         try testing.expectEqual(@as(usize, 2), collector.hits.items.len);
         try expect(collector.hits.items[0].sub_shape_id2.eql(c.getSubShapeIDFromIndex(0, parent).getID()));
         try expect(collector.hits.items[1].sub_shape_id2.eql(c.getSubShapeIDFromIndex(2, parent).getID()));
+
+        // The filter reaches CollisionDispatch: rejecting the pair with the box from settings leaves box_a
+        collector.reset();
+        const reject_box_c: RejectIDFilter = .{ .reject = c.getSubShapeIDFromIndex(2, parent).getID() };
+        LinearCompoundShape.collideShapeVsCompound(probe.asShape(), shape, Vec3.one(), Vec3.one(), probe_transform, Mat44.identity(), .{}, parent, &settings, &collector.base, &reject_box_c.base);
+        try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
+        try expect(collector.hits.items[0].sub_shape_id2.eql(c.getSubShapeIDFromIndex(0, parent).getID()));
 
         var any = AnyHitCollisionCollector(CollideShapeCollector).init();
         defer any.deinit();
@@ -2016,6 +2106,12 @@ test "CompoundShape visitors: collide compound vs shape, shape vs compound, cast
         const h = &collector.hits.items[0];
         try expect(h.base.sub_shape_id2.eql(c.getSubShapeIDFromIndex(1, parent).getID()));
         try testing.expectApproxEqAbs(@as(f32, (5.0 - 0.5 - 0.25) / 10.0), h.fraction, 1.0e-5); // box_b is rotated: its X half extent 0.5 is along Z
+
+        // The filter reaches CollisionDispatch: rejecting box_b leaves nothing
+        collector.reset();
+        const reject_box_b: RejectIDFilter = .{ .reject = c.getSubShapeIDFromIndex(1, parent).getID() };
+        LinearCompoundShape.castShapeVsCompound(&shape_cast, &cast_settings, shape, Vec3.one(), &reject_box_b.base, Mat44.identity(), .{}, parent, &collector.base);
+        try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
     }
 
     // Cast the compound (spheres) against a box: castCompoundVsShape
@@ -2040,6 +2136,12 @@ test "CompoundShape visitors: collide compound vs shape, shape vs compound, cast
         try testing.expectEqual(@as(usize, 1), collector.hits.items.len); // Only the sphere at z = 3 is in line with the box
         try expect(collector.hits.items[0].base.sub_shape_id1.eql(sc.getSubShapeIDFromIndex(2, parent).getID()));
         try testing.expectApproxEqAbs((10.0 - 1.0 - 0.25 - sc.getSubShape(2).getPositionCOM().getZ()) / 20.0, collector.hits.items[0].fraction, 1.0e-5);
+
+        // The filter reaches CollisionDispatch: rejecting the sphere at z = 3 leaves nothing
+        collector.reset();
+        const reject_sphere: RejectIDFilter = .{ .reject = sc.getSubShapeIDFromIndex(2, parent).getID() };
+        CompoundShape.castCompoundVsShape(&shape_cast, &cast_settings, probe.asShape(), Vec3.one(), &reject_sphere.base, target_transform, parent, .{}, &collector.base);
+        try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
 
         // An any hit collector stops after the first sub shape that hits
         var all_in_line = LinearCompoundShapeSettings.init(allocator);

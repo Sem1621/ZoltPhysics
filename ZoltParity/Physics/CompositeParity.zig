@@ -17,6 +17,11 @@
 //! parity shape of the shape core tests (ParityShape of ShapeCoreUserTypes.zig, User1, registered in the parity build
 //! with collide / cast functions that record their inputs and compute hits from them); the C++ reference uses a copy of
 //! it and of its functions that it installs for (User1, User1) during the call.
+//!
+//! The queries that take a ShapeFilter (the collector ray cast, collide point, collect transformed shapes and the four
+//! dispatching paths) run with ParityShapeFilter (or the default filter): it rejects one sub shape ID and records every
+//! call it receives in a FilterLog, so the tests check that the visitors pass the filter on to the sub shapes and to
+//! CollisionDispatch with the right shapes and sub shape IDs.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -123,6 +128,32 @@ const CallLog = extern struct {
     calls: [max_calls]CallRecord,
 };
 
+/// The filter of a query
+const FilterDesc = extern struct {
+    /// 0: the default filter (`&.{}`), otherwise ParityShapeFilter
+    enabled: u32,
+    /// The sub shape ID that ParityShapeFilter rejects
+    reject_id: u32,
+};
+
+/// A call that ParityShapeFilter received
+const FilterCall = extern struct {
+    /// childIndex of shape 1 / shape 2 (shape 1 is 0xffffffff for the overload without it)
+    shapes: [2]u32,
+    /// Sub shape ID of shape 1 / shape 2 (0 for shape 1 of the overload without it)
+    ids: [2]u32,
+    accepted: u32,
+};
+
+const max_filter_calls = 128;
+
+/// The calls that ParityShapeFilter received (all records after `count` are zero)
+const FilterLog = extern struct {
+    count: u32,
+    rejected: u32,
+    calls: [max_filter_calls]FilterCall,
+};
+
 /// A child shape of the composite parity tests
 const ChildDesc = extern struct {
     half_extent: P,
@@ -208,6 +239,7 @@ const CompoundQueries = extern struct {
     box: [6]f32,
     oriented_box: [19]f32,
     max_indices: u32,
+    filter: FilterDesc,
 };
 
 const CompoundOutput = extern struct {
@@ -247,6 +279,7 @@ const CompoundOutput = extern struct {
     num_intersecting: [2]u32,
     intersecting: [2][16]u32,
     log: CallLog,
+    filter_log: FilterLog,
 };
 
 const BoundsInput = extern struct {
@@ -334,6 +367,7 @@ const VisitorInput = extern struct {
     collector_kind: u32,
     cast_start: [16]f32,
     cast_direction: P,
+    filter: FilterDesc,
 };
 
 const HitOut = extern struct {
@@ -353,6 +387,7 @@ const VisitorOutput = extern struct {
     hits: [4][16]HitOut,
     collide: [2]CollideRecord,
     cast: [2]CastRecord,
+    filter_log: FilterLog,
 };
 
 const DecoratedInput = extern struct {
@@ -485,7 +520,7 @@ fn putCreator(r: *CallRecord, c: SubShapeIDCreator) void {
 /// A box around its center of mass that records the calls it receives (User3)
 const CompositeChild = struct {
     pub const shape_sub_type: ShapeSubType = .user3;
-    pub const overrides = .{ .mustBeStatic, .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .isValidScale, .makeScaleValid };
+    pub const overrides = .{ .mustBeStatic, .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSubShapeUserData, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .isValidScale, .makeScaleValid };
 
     base: Shape,
     half_extent: Vec3 = Vec3.one(),
@@ -600,6 +635,11 @@ const CompositeChild = struct {
         return PhysicsMaterial.default;
     }
 
+    /// Depends on the sub shape ID, so the tests see which ID a compound / decorator passes on
+    pub fn getSubShapeUserData(self: *const CompositeChild, sub_shape_id: SubShapeID) u64 {
+        return self.base.getUserData() ^ sub_shape_id.getValue();
+    }
+
     pub fn getSurfaceNormal(self: *const CompositeChild, sub_shape_id: SubShapeID, local_surface_position: Vec3) Vec3 {
         const r = self.newRecord(.surface_normal);
         r.ids[0] = sub_shape_id.getValue();
@@ -626,10 +666,15 @@ const CompositeChild = struct {
         const total_volume = self.getVolume() * @abs(scale.getX() * scale.getY() * scale.getZ());
         const center = center_of_mass_transform.getTranslation();
         const distance = surface.signedDistance(center);
+
+        // Partially submerged: the fraction of the unscaled height below the surface (as if the box stands upright), the
+        // center of buoyancy moves down along the surface normal as the fraction gets smaller
+        const fraction = math.clamp(0.5 - distance / (2.0 * self.half_extent.getY()), 0.0, 1.0);
+        r.values[23] = fraction;
         return .{
             .total_volume = total_volume,
-            .submerged_volume = if (distance < 0.0) total_volume else 0.0,
-            .center_of_buoyancy = if (distance < 0.0) center else Vec3.zero(),
+            .submerged_volume = fraction * total_volume,
+            .center_of_buoyancy = center.sub(surface.getNormal().mulScalar((1.0 - fraction) * self.half_extent.getY())),
         };
     }
 
@@ -744,6 +789,49 @@ fn childIndex(shape: ?*const Shape) u32 {
     if (s.getSubType() == .user3) return s.cast(CompositeChild).index;
     return 0xfffffffe;
 }
+
+/// A filter that rejects one sub shape ID (as shape 2, or as either shape of a pair) and records its calls (the log is
+/// behind a pointer: the queries take the filter as `*const ShapeFilter`, Rule M)
+const ParityShapeFilter = struct {
+    pub const overrides = .{ .shouldCollide, .shouldCollidePair };
+
+    base: ShapeFilter = .init(@This()),
+    reject_id: u32,
+    log: *FilterLog,
+    /// The ParityShape children (index i) and the other shape (index 99) of the visitor test, the indices that C++'s
+    /// ChildIndex gives its MirrorParityShape (ParityShape has no index)
+    parity_children: []const *const Shape = &.{},
+    parity_other: ?*const Shape = null,
+
+    /// childIndex, extended to the ParityShape shapes of the visitor test
+    fn shapeIndex(self: *const ParityShapeFilter, shape: *const Shape) u32 {
+        if (shape.getSubType() == .user1) {
+            if (shape == self.parity_other) return 99;
+            for (self.parity_children, 0..) |child, i| {
+                if (child == shape) return @intCast(i);
+            }
+        }
+        return childIndex(shape);
+    }
+
+    pub fn shouldCollide(self: *const ParityShapeFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        return self.record(0xffffffff, 0, self.shapeIndex(shape2), sub_shape_id_of_shape2.getValue(), sub_shape_id_of_shape2.getValue() != self.reject_id);
+    }
+
+    pub fn shouldCollidePair(self: *const ParityShapeFilter, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        return self.record(self.shapeIndex(shape1), sub_shape_id_of_shape1.getValue(), self.shapeIndex(shape2), sub_shape_id_of_shape2.getValue(), sub_shape_id_of_shape1.getValue() != self.reject_id and sub_shape_id_of_shape2.getValue() != self.reject_id);
+    }
+
+    fn record(self: *const ParityShapeFilter, shape1: u32, id1: u32, shape2: u32, id2: u32, accepted: bool) bool {
+        const log = self.log;
+        if (log.count < max_filter_calls)
+            log.calls[log.count] = .{ .shapes = .{ shape1, shape2 }, .ids = .{ id1, id2 }, .accepted = @intFromBool(accepted) };
+        log.count += 1;
+        if (!accepted)
+            log.rejected += 1;
+        return accepted;
+    }
+};
 
 /// Settings of ParityCompoundShape
 const ParityCompoundShapeSettings = struct {
@@ -946,7 +1034,7 @@ const ParityDecoratedShape = struct {
     }
 
     fn inner(self: *const ParityDecoratedShape) *const Shape {
-        return self.base.getInnerShape();
+        return self.base.getInnerShape().?;
     }
 
     pub fn getLocalBounds(self: *const ParityDecoratedShape) AABox {
@@ -1229,7 +1317,10 @@ fn zoltCompound(allocator: Allocator, desc: *const CompoundDesc, q: *const Compo
         for (collector.hits.items[0..out.num_transformed], 0..) |*ts, i| out.transformed[i] = storeTS(ts);
     }
 
-    // Queries through the visitors
+    // Queries through the visitors (the ones that take a filter with ParityShapeFilter or the default filter)
+    const default_filter: ShapeFilter = .{};
+    const parity_filter: ParityShapeFilter = .{ .reject_id = q.filter.reject_id, .log = &out.filter_log };
+    const filter: *const ShapeFilter = if (q.filter.enabled != 0) &parity_filter.base else &default_filter;
     const creator = loadCreator(q.creator);
     const ray = RayCast.init(vec3(q.ray_origin), vec3(q.ray_direction));
     {
@@ -1248,32 +1339,34 @@ fn zoltCompound(allocator: Allocator, desc: *const CompoundDesc, q: *const Compo
             ray: RayCast,
             settings: *const RayCastSettings,
             creator: SubShapeIDCreator,
+            filter: *const ShapeFilter,
             out: *CompoundOutput,
             fn query(self: @This(), collector: *CastRayCollector) void {
-                self.shape.castRayCollector(self.ray, self.settings, self.creator, collector, &.{});
+                self.shape.castRayCollector(self.ray, self.settings, self.creator, collector, self.filter);
             }
             fn store(self: @This(), hit: *const RayCastResult, index: u32) void {
                 self.out.ray_hit_fractions[index] = hit.fraction;
                 self.out.ray_hit_ids[index] = hit.sub_shape_id2.getValue();
             }
-        }{ .shape = shape, .ray = ray, .settings = &settings, .creator = creator, .out = out });
+        }{ .shape = shape, .ray = ray, .settings = &settings, .creator = creator, .filter = filter, .out = out });
     }
     out.num_point_hits = try collectHits(CollidePointCollector, allocator, q.collector_kind, 16, struct {
         shape: *const Shape,
         point: Vec3,
         creator: SubShapeIDCreator,
+        filter: *const ShapeFilter,
         out: *CompoundOutput,
         fn query(self: @This(), collector: *CollidePointCollector) void {
-            self.shape.collidePoint(self.point, self.creator, collector, &.{});
+            self.shape.collidePoint(self.point, self.creator, collector, self.filter);
         }
         fn store(self: @This(), hit: *const CollidePointResult, index: u32) void {
             self.out.point_hit_ids[index] = hit.sub_shape_id2.getValue();
         }
-    }{ .shape = shape, .point = vec3(q.point), .creator = creator, .out = out });
+    }{ .shape = shape, .point = vec3(q.point), .creator = creator, .filter = filter, .out = out });
     {
         var collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
         defer collector.deinit();
-        shape.collectTransformedShapes(aabox(q.box), position, rotation, scale, creator, &collector.base, &.{});
+        shape.collectTransformedShapes(aabox(q.box), position, rotation, scale, creator, &collector.base, filter);
         try collector.checkError();
         out.num_collected = @min(16, @as(u32, @intCast(collector.hits.items.len)));
         for (collector.hits.items[0..out.num_collected], 0..) |*ts, i| out.collected[i] = storeTS(ts);
@@ -1425,6 +1518,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
     const settings = try ParityCompoundShapeSettings.create(allocator);
     var settings_ref = Ref(ShapeSettings).init(&settings.base.base);
     defer settings_ref.deinit();
+    var children: [16]*const Shape = undefined;
     for (0..input.num_sub_shapes) |i| {
         const c = input.children[i];
         const child = try allocator.create(ParityShape);
@@ -1433,6 +1527,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
             child.base.destroy();
             return err;
         };
+        children[i] = &child.base;
     }
     var result = try settings.base.base.createShape(allocator);
     defer result.deinit();
@@ -1442,6 +1537,10 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
     var other_ref = RefConst(Shape).init(&other_shape.base);
     defer other_ref.deinit();
     const other = &other_shape.base;
+
+    const default_filter: ShapeFilter = .{};
+    const parity_filter: ParityShapeFilter = .{ .reject_id = input.filter.reject_id, .log = &out.filter_log, .parity_children = children[0..input.num_sub_shapes], .parity_other = other };
+    const filter: *const ShapeFilter = if (input.filter.enabled != 0) &parity_filter.base else &default_filter;
 
     const Context = struct {
         compound: *const Shape,
@@ -1456,6 +1555,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
         cast_settings: *const ShapeCastSettings,
         other_cast: *const ShapeCast,
         compound_cast: *const ShapeCast,
+        filter: *const ShapeFilter,
         hits: *[16]HitOut,
     };
     var collide_settings: CollideShapeSettings = .{};
@@ -1476,6 +1576,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
         .cast_settings = &cast_settings,
         .other_cast = &other_cast,
         .compound_cast = &compound_cast,
+        .filter = filter,
         .hits = &out.hits[0],
     };
 
@@ -1483,7 +1584,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
         c: *const Context,
         fn query(self: @This(), collector: *CollideShapeCollector) void {
             const c = self.c;
-            ParityCompoundShape.collideCompoundVsShape(c.compound, c.other, c.scale1, c.scale2, c.transform1, c.transform2, c.creator1, c.creator2, c.collide_settings, collector, &.{});
+            ParityCompoundShape.collideCompoundVsShape(c.compound, c.other, c.scale1, c.scale2, c.transform1, c.transform2, c.creator1, c.creator2, c.collide_settings, collector, c.filter);
         }
         fn store(self: @This(), hit: *const CollideShapeResult, index: u32) void {
             self.c.hits[index] = storeCollideHit(hit);
@@ -1497,7 +1598,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
         c: *const Context,
         fn query(self: @This(), collector: *CollideShapeCollector) void {
             const c = self.c;
-            ParityCompoundShape.collideShapeVsCompound(c.other, c.compound, c.scale2, c.scale1, c.transform2, c.transform1, c.creator2, c.creator1, c.collide_settings, collector, &.{});
+            ParityCompoundShape.collideShapeVsCompound(c.other, c.compound, c.scale2, c.scale1, c.transform2, c.transform1, c.creator2, c.creator1, c.collide_settings, collector, c.filter);
         }
         fn store(self: @This(), hit: *const CollideShapeResult, index: u32) void {
             self.c.hits[index] = storeCollideHit(hit);
@@ -1510,7 +1611,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
         c: *const Context,
         fn query(self: @This(), collector: *CastShapeCollector) void {
             const c = self.c;
-            ParityCompoundShape.castShapeVsCompound(c.other_cast, c.cast_settings, c.compound, c.scale1, &.{}, c.transform1, c.creator2, c.creator1, collector);
+            ParityCompoundShape.castShapeVsCompound(c.other_cast, c.cast_settings, c.compound, c.scale1, c.filter, c.transform1, c.creator2, c.creator1, collector);
         }
         fn store(self: @This(), hit: *const ShapeCastResult, index: u32) void {
             self.c.hits[index] = storeCastHit(hit);
@@ -1524,7 +1625,7 @@ fn zoltVisitors(allocator: Allocator, input: *const VisitorInput, out: *VisitorO
         c: *const Context,
         fn query(self: @This(), collector: *CastShapeCollector) void {
             const c = self.c;
-            CompoundShape.castCompoundVsShape(c.compound_cast, c.cast_settings, c.other, c.scale2, &.{}, c.transform2, c.creator1, c.creator2, collector);
+            CompoundShape.castCompoundVsShape(c.compound_cast, c.cast_settings, c.other, c.scale2, c.filter, c.transform2, c.creator1, c.creator2, collector);
         }
         fn store(self: @This(), hit: *const ShapeCastResult, index: u32) void {
             self.c.hits[index] = storeCastHit(hit);
@@ -1764,6 +1865,18 @@ const Gen = struct {
         const id: u32 = if (bits == 0) 0 else self.next() & ((@as(u32, 1) << @intCast(bits)) - 1);
         return .{ id, bits };
     }
+
+    /// The filter of the queries on a compound with `num_sub_shapes` sub shapes and sub shape ID creator `creator`:
+    /// mostly ParityShapeFilter, that mostly rejects the ID of one of the sub shapes, sometimes the ID of the compound
+    /// itself or a random ID
+    fn filterDesc(self: *Gen, creator: [2]u32, num_sub_shapes: u32) FilterDesc {
+        const c = loadCreator(creator);
+        const reject_id = if (num_sub_shapes > 0 and !self.oneIn(5)) blk: {
+            const bits: u32 = 32 - @clz(num_sub_shapes - 1);
+            break :blk c.pushID(@intCast(self.index(num_sub_shapes)), bits).getID().getValue();
+        } else if (self.oneIn(2)) c.getID().getValue() else self.next();
+        return .{ .enabled = @intFromBool(!self.oneIn(4)), .reject_id = reject_id };
+    }
 };
 
 /// A scale that IsValidScale accepts for every sub shape of the compound (so that the queries don't hit Jolt's asserts):
@@ -1850,7 +1963,7 @@ test "Composite parity: compound construction and the overrides of CompoundShape
     var query_checker: Checker = .{ .name = "compound queries" };
     var visitor_checker: Checker = .{ .name = "compound visitor queries" };
     var log_checker: Checker = .{ .name = "compound call log" };
-    var coverage: Coverage(&.{ "valid", "empty", "error", "more than 10", "mass", "must be static", "from settings", "identity rotation", "invalid test scale", "invalid raw id", "valid raw id", "submerged", "ray hit", "ray miss", "ray hits", "point hits", "collected some", "intersecting", "intersecting oriented", "log" }) = .{};
+    var coverage: Coverage(&.{ "valid", "empty", "error", "more than 10", "mass", "must be static", "from settings", "identity rotation", "invalid test scale", "invalid raw id", "valid raw id", "submerged", "partially submerged child", "ray hit", "ray miss", "ray hits", "point hits", "collected some", "intersecting", "intersecting oriented", "log", "filtered sub shape", "filtered compound" }) = .{};
     const jolt_out = try allocator.create(CompoundOutput);
     defer allocator.destroy(jolt_out);
     const zolt_out = try allocator.create(CompoundOutput);
@@ -1880,7 +1993,9 @@ test "Composite parity: compound construction and the overrides of CompoundShape
             .box = gen.box(8),
             .oriented_box = gen.orientedBox(),
             .max_indices = @intCast(gen.index(17)),
+            .filter = undefined,
         };
+        queries.filter = gen.filterDesc(queries.creator, desc.num_sub_shapes);
         if (gen.oneIn(4)) queries.ray_origin = .{ 0, 0, 0 };
         if (desc.num_sub_shapes > 0) {
             for (&queries.ids) |*id| id.* = gen.subShapeID(desc.num_sub_shapes);
@@ -1892,7 +2007,7 @@ test "Composite parity: compound construction and the overrides of CompoundShape
         const input = .{ desc, queries };
         state_checker.check(input, .{ zolt_out.state, zolt_out.restored, zolt_out.num_bytes, zolt_out.bytes }, .{ jolt_out.state, jolt_out.restored, jolt_out.num_bytes, jolt_out.bytes });
         query_checker.check(input, .{ zolt_out.world_bounds, zolt_out.scale_valid, zolt_out.made_valid, zolt_out.raw_id_valid, zolt_out.id_valid, zolt_out.index, zolt_out.remainder, zolt_out.leaf_child, zolt_out.leaf_remainder, zolt_out.user_data, zolt_out.material_is_default, zolt_out.sub_ts, zolt_out.sub_ts_remainder, zolt_out.normal, zolt_out.face_count, zolt_out.face, zolt_out.submerged, zolt_out.num_transformed, zolt_out.transformed }, .{ jolt_out.world_bounds, jolt_out.scale_valid, jolt_out.made_valid, jolt_out.raw_id_valid, jolt_out.id_valid, jolt_out.index, jolt_out.remainder, jolt_out.leaf_child, jolt_out.leaf_remainder, jolt_out.user_data, jolt_out.material_is_default, jolt_out.sub_ts, jolt_out.sub_ts_remainder, jolt_out.normal, jolt_out.face_count, jolt_out.face, jolt_out.submerged, jolt_out.num_transformed, jolt_out.transformed });
-        visitor_checker.check(input, .{ zolt_out.ray_hit, zolt_out.ray_fraction, zolt_out.ray_id, zolt_out.num_ray_hits, zolt_out.ray_hit_fractions, zolt_out.ray_hit_ids, zolt_out.num_point_hits, zolt_out.point_hit_ids, zolt_out.num_collected, zolt_out.collected, zolt_out.num_intersecting, zolt_out.intersecting }, .{ jolt_out.ray_hit, jolt_out.ray_fraction, jolt_out.ray_id, jolt_out.num_ray_hits, jolt_out.ray_hit_fractions, jolt_out.ray_hit_ids, jolt_out.num_point_hits, jolt_out.point_hit_ids, jolt_out.num_collected, jolt_out.collected, jolt_out.num_intersecting, jolt_out.intersecting });
+        visitor_checker.check(input, .{ zolt_out.ray_hit, zolt_out.ray_fraction, zolt_out.ray_id, zolt_out.num_ray_hits, zolt_out.ray_hit_fractions, zolt_out.ray_hit_ids, zolt_out.num_point_hits, zolt_out.point_hit_ids, zolt_out.num_collected, zolt_out.collected, zolt_out.num_intersecting, zolt_out.intersecting, zolt_out.filter_log }, .{ jolt_out.ray_hit, jolt_out.ray_fraction, jolt_out.ray_id, jolt_out.num_ray_hits, jolt_out.ray_hit_fractions, jolt_out.ray_hit_ids, jolt_out.num_point_hits, jolt_out.point_hit_ids, jolt_out.num_collected, jolt_out.collected, jolt_out.num_intersecting, jolt_out.intersecting, jolt_out.filter_log });
         log_checker.check(input, zolt_out.log, jolt_out.log);
 
         const z = zolt_out;
@@ -1908,6 +2023,8 @@ test "Composite parity: compound construction and the overrides of CompoundShape
         coverage.hit("invalid raw id", z.raw_id_valid[0] == 0 and z.state.valid != 0);
         coverage.hit("valid raw id", z.raw_id_valid[1] != 0);
         coverage.hit("submerged", z.submerged[1] > 0 and z.submerged[1] < z.submerged[0]);
+        for (z.log.calls[0..@min(z.log.count, max_calls)]) |*call|
+            coverage.hit("partially submerged child", call.kind == @intFromEnum(Call.submerged_volume) and call.values[23] > 0.0 and call.values[23] < 1.0);
         coverage.hit("ray hit", z.ray_hit != 0);
         coverage.hit("ray miss", z.ray_hit == 0 and z.state.num_sub_shapes > 0);
         coverage.hit("ray hits", z.num_ray_hits > 1);
@@ -1916,6 +2033,10 @@ test "Composite parity: compound construction and the overrides of CompoundShape
         coverage.hit("intersecting", z.num_intersecting[0] > 0 and z.num_intersecting[0] < z.state.num_sub_shapes);
         coverage.hit("intersecting oriented", z.num_intersecting[1] > 0 and z.num_intersecting[1] < z.state.num_sub_shapes);
         coverage.hit("log", z.log.count > 20);
+        for (z.filter_log.calls[0..@min(z.filter_log.count, max_filter_calls)]) |*call| {
+            coverage.hit("filtered sub shape", call.accepted == 0 and call.shapes[1] != 0xfffffffe);
+            coverage.hit("filtered compound", call.accepted == 0 and call.shapes[1] == 0xfffffffe);
+        }
     }
     try finishAll(&.{ &state_checker, &query_checker, &visitor_checker, &log_checker });
     try coverage.expectAll();
@@ -1979,7 +2100,7 @@ test "Composite parity: the visitors that dispatch (collide compound vs shape, s
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var checker: Checker = .{ .name = "dispatching visitors" };
-    var coverage: Coverage(&.{ "compound vs shape", "shape vs compound", "cast shape vs compound", "cast compound vs shape", "compound vs shape rejected", "cast rejected by the bounds", "early out" }) = .{};
+    var coverage: Coverage(&.{ "compound vs shape", "shape vs compound", "cast shape vs compound", "cast compound vs shape", "compound vs shape rejected", "cast rejected by the bounds", "early out", "filtered sub shape as shape 1", "filtered sub shape as shape 2", "filtered other shape" }) = .{};
     const jolt_out = try allocator.create(VisitorOutput);
     defer allocator.destroy(jolt_out);
     const zolt_out = try allocator.create(VisitorOutput);
@@ -2007,6 +2128,8 @@ test "Composite parity: the visitors that dispatch (collide compound vs shape, s
         input.collector_kind = @intCast(gen.index(3));
         input.cast_start = gen.rotationTranslation();
         input.cast_direction = gen.vec(-20, 20);
+        input.filter = gen.filterDesc(input.creators[0], input.num_sub_shapes);
+        if (gen.oneIn(10)) input.filter.reject_id = loadCreator(input.creators[1]).getID().getValue(); // Rejects the other shape
 
         jolt.jolt_composite_visitors(&input, jolt_out);
         try zoltVisitors(allocator, &input, zolt_out);
@@ -2018,6 +2141,12 @@ test "Composite parity: the visitors that dispatch (collide compound vs shape, s
         coverage.hit("compound vs shape rejected", zolt_out.num_hits[0] == 0 and zolt_out.collide[0].calls == 0);
         coverage.hit("cast rejected by the bounds", zolt_out.cast[0].calls < input.num_sub_shapes);
         coverage.hit("early out", input.collector_kind == any_hit and zolt_out.num_hits[3] == 1);
+        for (zolt_out.filter_log.calls[0..@min(zolt_out.filter_log.count, max_filter_calls)]) |*call| {
+            const one_side_rejected = call.accepted == 0 and call.ids[0] != call.ids[1]; // By the ID of one of the shapes
+            coverage.hit("filtered sub shape as shape 1", one_side_rejected and call.shapes[1] == 99 and call.ids[0] == input.filter.reject_id);
+            coverage.hit("filtered sub shape as shape 2", one_side_rejected and call.shapes[0] == 99 and call.ids[1] == input.filter.reject_id);
+            coverage.hit("filtered other shape", one_side_rejected and ((call.shapes[0] == 99 and call.ids[0] == input.filter.reject_id) or (call.shapes[1] == 99 and call.ids[1] == input.filter.reject_id)));
+        }
     }
     try checker.finish();
     try coverage.expectAll();

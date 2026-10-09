@@ -134,47 +134,47 @@ pub const DecoratedShape = struct {
         return &self.base;
     }
 
-    /// Access to the decorated inner shape (set by every constructor that is used to create a usable shape, and by
-    /// restoreSubShapeState after a restore)
-    pub fn getInnerShape(self: *const DecoratedShape) *const Shape {
-        return self.inner_shape.get().?;
+    /// Access to the decorated inner shape (null for a shape constructed with `init(T, allocator, sub_type, null)`,
+    /// Jolt's `DecoratedShape(EShapeSubType)` constructor, until restoreSubShapeState sets it)
+    pub fn getInnerShape(self: *const DecoratedShape) ?*const Shape {
+        return self.inner_shape.get();
     }
 
     /// DecoratedShape's implementations of Shape's virtual functions (C++ `DecoratedShape::Foo`)
     pub const impl = struct {
         // See Shape::MustBeStatic
         pub fn mustBeStatic(self: *const DecoratedShape) bool {
-            return self.getInnerShape().mustBeStatic();
+            return self.getInnerShape().?.mustBeStatic();
         }
 
         // See Shape::GetCenterOfMass
         pub fn getCenterOfMass(self: *const DecoratedShape) Vec3 {
-            return self.getInnerShape().getCenterOfMass();
+            return self.getInnerShape().?.getCenterOfMass();
         }
 
         // See Shape::GetSubShapeIDBitsRecursive
         pub fn getSubShapeIDBitsRecursive(self: *const DecoratedShape) u32 {
-            return self.getInnerShape().getSubShapeIDBitsRecursive();
+            return self.getInnerShape().?.getSubShapeIDBitsRecursive();
         }
 
         // See Shape::GetLeafShape
         pub fn getLeafShape(self: *const DecoratedShape, sub_shape_id: SubShapeID) Shape.LeafShape {
-            return self.getInnerShape().getLeafShape(sub_shape_id);
+            return self.getInnerShape().?.getLeafShape(sub_shape_id);
         }
 
         // See Shape::GetMaterial
         pub fn getMaterial(self: *const DecoratedShape, sub_shape_id: SubShapeID) *const PhysicsMaterial {
-            return self.getInnerShape().getMaterial(sub_shape_id);
+            return self.getInnerShape().?.getMaterial(sub_shape_id);
         }
 
         // See Shape::GetSupportingFace
         pub fn getSupportingFace(self: *const DecoratedShape, sub_shape_id: SubShapeID, direction: Vec3, scale: Vec3, center_of_mass_transform: Mat44, out_vertices: *Shape.SupportingFace) void {
-            self.getInnerShape().getSupportingFace(sub_shape_id, direction, scale, center_of_mass_transform, out_vertices);
+            self.getInnerShape().?.getSupportingFace(sub_shape_id, direction, scale, center_of_mass_transform, out_vertices);
         }
 
         // See Shape::GetSubShapeUserData
         pub fn getSubShapeUserData(self: *const DecoratedShape, sub_shape_id: SubShapeID) u64 {
-            return self.getInnerShape().getSubShapeUserData(sub_shape_id);
+            return self.getInnerShape().?.getSubShapeUserData(sub_shape_id);
         }
 
         // See Shape::SaveSubShapeState
@@ -198,7 +198,7 @@ pub const DecoratedShape = struct {
             var stats = try Shape.impl.getStatsRecursive(&self.base, allocator, visited_shapes);
 
             // Add child stats
-            const child_stats = try self.getInnerShape().getStatsRecursive(allocator, visited_shapes);
+            const child_stats = try self.getInnerShape().?.getStatsRecursive(allocator, visited_shapes);
             stats.size_bytes +%= child_stats.size_bytes;
             stats.num_triangles +%= child_stats.num_triangles;
 
@@ -207,12 +207,12 @@ pub const DecoratedShape = struct {
 
         // See Shape::IsValidScale
         pub fn isValidScale(self: *const DecoratedShape, scale: Vec3) bool {
-            return self.getInnerShape().isValidScale(scale);
+            return self.getInnerShape().?.isValidScale(scale);
         }
 
         // See Shape::MakeScaleValid
         pub fn makeScaleValid(self: *const DecoratedShape, scale: Vec3) Vec3 {
-            return self.getInnerShape().makeScaleValid(scale);
+            return self.getInnerShape().?.makeScaleValid(scale);
         }
     };
 };
@@ -322,7 +322,7 @@ const TestDecoratedShape = struct {
     }
 
     fn inner(self: *const TestDecoratedShape) *const Shape {
-        return self.base.getInnerShape();
+        return self.base.getInnerShape().?;
     }
 
     pub fn getLocalBounds(self: *const TestDecoratedShape) AABox {
@@ -506,7 +506,7 @@ test "DecoratedShape: construction from settings, Jolt's error texts and referen
         defer result.deinit();
         const shape = result.getPtr().?;
         try testing.expectEqual(@as(u64, 99), shape.getUserData());
-        const inner = shape.cast(DecoratedShape).getInnerShape();
+        const inner = shape.cast(DecoratedShape).getInnerShape().?;
         try expect(inner == child.base.cached_result.getPtr().?);
         try testing.expectEqual(@as(u32, 2), inner.getRefCount()); // Child cache + decorated shape
         try expect(inner.cast(TestBoxShape).half_extent.eql(Vec3.init(1, 2, 3)));
@@ -617,7 +617,7 @@ test "DecoratedShape: binary state, sub shape state and stats" {
         try restored.asShapeMut().restoreBinaryState(in.streamIn());
     }
     try testing.expectEqual(@as(u64, 1234), restored.asShape().getUserData());
-    try expect(restored.base.inner_shape.get() == null);
+    try expect(restored.base.getInnerShape() == null);
     restored.asShapeMut().restoreSubShapeState(sub_shapes.items);
     try expect(restored.base.getInnerShape() == box.asShape());
     try testing.expectEqual(@as(u32, 4), box.asShape().getRefCount());

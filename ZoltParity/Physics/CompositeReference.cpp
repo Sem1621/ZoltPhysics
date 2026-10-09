@@ -14,6 +14,11 @@
 // ShapeCoreReference.cpp, so this file has its own copy of it and of its collide / cast functions (MirrorParityShape),
 // which it installs in the dispatch table for (User1, User1) during the call and restores afterwards.
 //
+// The queries that take a ShapeFilter (the collector ray cast, collide point, collect transformed shapes and the four
+// dispatching paths) run with ParityShapeFilter (or the default filter): it rejects one sub shape ID and records every
+// call it receives in a FilterLog, so the tests check that the visitors pass the filter on to the sub shapes and to
+// CollisionDispatch with the right shapes and sub shape IDs.
+//
 // Conventions: vectors are passed as float arrays (3 or 4 components), quaternions as 4 floats (x, y, z, w), Mat44 as
 // 16 floats in column major order, RVec3 as 3 Reals. Booleans are passed as int / uint32 (never bool, see the porting
 // guide). Everything except the C ABI is in an anonymous namespace (the shape core reference has classes with the same
@@ -206,6 +211,9 @@ public:
 		return PhysicsMaterial::sDefault;
 	}
 
+	// Depends on the sub shape ID, so the tests see which ID a compound / decorator passes on
+	virtual uint64			GetSubShapeUserData(const SubShapeID &inSubShapeID) const override		{ return GetUserData() ^ inSubShapeID.GetValue(); }
+
 	virtual Vec3			GetSurfaceNormal(const SubShapeID &inSubShapeID, Vec3Arg inLocalSurfacePosition) const override
 	{
 		CallRecord &r = NewCall(CallSurfaceNormal, mIndex);
@@ -235,8 +243,13 @@ public:
 		outTotalVolume = GetVolume() * std::abs(inScale.GetX() * inScale.GetY() * inScale.GetZ());
 		Vec3 center = inCenterOfMassTransform.GetTranslation();
 		float distance = inSurface.SignedDistance(center);
-		outSubmergedVolume = distance < 0.0f? outTotalVolume : 0.0f;
-		outCenterOfBuoyancy = distance < 0.0f? center : Vec3::sZero();
+
+		// Partially submerged: the fraction of the unscaled height below the surface (as if the box stands upright), the
+		// center of buoyancy moves down along the surface normal as the fraction gets smaller
+		float fraction = Clamp(0.5f - distance / (2.0f * mHalfExtent.GetY()), 0.0f, 1.0f);
+		r.mValues[23] = fraction;
+		outSubmergedVolume = fraction * outTotalVolume;
+		outCenterOfBuoyancy = center - ((1.0f - fraction) * mHalfExtent.GetY()) * inSurface.GetNormal();
 	}
 
 	virtual bool			CastRay(const RayCast &inRay, const SubShapeIDCreator &inSubShapeIDCreator, RayCastResult &ioHit) const override
@@ -809,6 +822,72 @@ private:
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
+// ParityShapeFilter, must match ParityShapeFilter in CompositeParity.zig
+
+// The filter of a query, must match FilterDesc in CompositeParity.zig
+struct FilterDesc
+{
+	uint32					mEnabled;			///< 0: the default filter ({ }), otherwise ParityShapeFilter
+	uint32					mRejectID;			///< The sub shape ID that ParityShapeFilter rejects
+};
+
+// A call that ParityShapeFilter received, must match FilterCall in CompositeParity.zig
+struct FilterCall
+{
+	uint32					mShapes[2];			///< ChildIndex of shape 1 / shape 2 (shape 1 is 0xffffffff for the overload without it)
+	uint32					mIDs[2];			///< Sub shape ID of shape 1 / shape 2 (0 for shape 1 of the overload without it)
+	uint32					mAccepted;
+};
+
+constexpr uint32 cMaxFilterCalls = 128;
+
+// The calls that ParityShapeFilter received (the records after the count are zero)
+struct FilterLog
+{
+	uint32					mCount;
+	uint32					mRejected;
+	FilterCall				mCalls[cMaxFilterCalls];
+};
+
+// A filter that rejects one sub shape ID (as shape 2, or as either shape of a pair) and records its calls
+class ParityShapeFilter final : public ShapeFilter
+{
+public:
+							ParityShapeFilter(uint32 inRejectID, FilterLog &ioLog) : mRejectID(inRejectID), mLog(ioLog) { }
+
+	virtual bool			ShouldCollide(const Shape *inShape2, const SubShapeID &inSubShapeIDOfShape2) const override
+	{
+		return Record(0xffffffff, 0, ChildIndex(inShape2), inSubShapeIDOfShape2.GetValue(), inSubShapeIDOfShape2.GetValue() != mRejectID);
+	}
+
+	virtual bool			ShouldCollide(const Shape *inShape1, const SubShapeID &inSubShapeIDOfShape1, const Shape *inShape2, const SubShapeID &inSubShapeIDOfShape2) const override
+	{
+		return Record(ChildIndex(inShape1), inSubShapeIDOfShape1.GetValue(), ChildIndex(inShape2), inSubShapeIDOfShape2.GetValue(), inSubShapeIDOfShape1.GetValue() != mRejectID && inSubShapeIDOfShape2.GetValue() != mRejectID);
+	}
+
+private:
+	bool					Record(uint32 inShape1, uint32 inID1, uint32 inShape2, uint32 inID2, bool inAccepted) const
+	{
+		if (mLog.mCount < cMaxFilterCalls)
+		{
+			FilterCall &c = mLog.mCalls[mLog.mCount];
+			c.mShapes[0] = inShape1;
+			c.mShapes[1] = inShape2;
+			c.mIDs[0] = inID1;
+			c.mIDs[1] = inID2;
+			c.mAccepted = inAccepted? 1 : 0;
+		}
+		++mLog.mCount;
+		if (!inAccepted)
+			++mLog.mRejected;
+		return inAccepted;
+	}
+
+	uint32					mRejectID;
+	FilterLog &				mLog;
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The C ABI structures, must match the extern structs in CompositeParity.zig
 
 // A sub shape of a compound description
@@ -903,6 +982,7 @@ struct CompoundQueries
 	float					mBox[6];
 	float					mOrientedBox[19];
 	uint32					mMaxIndices;
+	FilterDesc				mFilter;
 };
 
 struct CompoundOutput
@@ -943,6 +1023,7 @@ struct CompoundOutput
 	uint32					mNumIntersecting[2];
 	uint32					mIntersecting[2][16];
 	CallLog					mLog;
+	FilterLog				mFilterLog;
 };
 
 // Collects the transformed shapes (copies, like Zolt's AllHitCollisionCollector)
@@ -1206,6 +1287,7 @@ struct VisitorInput
 	uint32					mCollectorKind;
 	float					mCastStart[16];
 	float					mCastDirection[3];
+	FilterDesc				mFilter;
 };
 
 // A collide / cast hit
@@ -1230,6 +1312,7 @@ struct VisitorOutput
 	HitOut					mHits[4][16];
 	CollideRecord			mCollide[2];
 	CastRecord				mCast[2];
+	FilterLog				mFilterLog;
 };
 
 void StoreFaces(const CollideShapeResult &inResult, HitOut &outHit)
@@ -1440,7 +1523,10 @@ void jolt_composite_compound(const CompoundDesc *inDesc, const CompoundQueries *
 			StoreTS(collector.mHits[i], outOutput->mTransformed[i]);
 	}
 
-	// Queries through the visitors
+	// Queries through the visitors (the ones that take a filter with ParityShapeFilter or the default filter)
+	ShapeFilter default_filter;
+	ParityShapeFilter parity_filter(q.mFilter.mRejectID, outOutput->mFilterLog);
+	const ShapeFilter &filter = q.mFilter.mEnabled != 0? static_cast<const ShapeFilter &>(parity_filter) : default_filter;
 	SubShapeIDCreator creator = LoadCreator(q.mCreator);
 	RayCast ray(Load3(q.mRayOrigin), Load3(q.mRayDirection));
 	{
@@ -1455,15 +1541,15 @@ void jolt_composite_compound(const CompoundDesc *inDesc, const CompoundQueries *
 		if (q.mBackFaces != 0)
 			settings.SetBackFaceMode(EBackFaceMode::CollideWithBackFaces);
 		outOutput->mNumRayHits = CollectHits<CastRayCollector>(q.mCollectorKind, 32,
-			[&](CastRayCollector &ioCollector) { compound.CastRay(ray, settings, creator, ioCollector); },
+			[&](CastRayCollector &ioCollector) { compound.CastRay(ray, settings, creator, ioCollector, filter); },
 			[&](const RayCastResult &inHit, uint32 inIndex) { outOutput->mRayHitFractions[inIndex] = inHit.mFraction; outOutput->mRayHitIDs[inIndex] = inHit.mSubShapeID2.GetValue(); });
 	}
 	outOutput->mNumPointHits = CollectHits<CollidePointCollector>(q.mCollectorKind, 16,
-		[&](CollidePointCollector &ioCollector) { compound.CollidePoint(Load3(q.mPoint), creator, ioCollector); },
+		[&](CollidePointCollector &ioCollector) { compound.CollidePoint(Load3(q.mPoint), creator, ioCollector, filter); },
 		[&](const CollidePointResult &inHit, uint32 inIndex) { outOutput->mPointHitIDs[inIndex] = inHit.mSubShapeID2.GetValue(); });
 	{
 		TSCollector collector;
-		compound.CollectTransformedShapes(LoadAABox(q.mBox), position, rotation, scale, creator, collector, { });
+		compound.CollectTransformedShapes(LoadAABox(q.mBox), position, rotation, scale, creator, collector, filter);
 		outOutput->mNumCollected = min<uint32>(16, (uint32)collector.mHits.size());
 		for (uint32 i = 0; i < outOutput->mNumCollected; ++i)
 			StoreTS(collector.mHits[i], outOutput->mCollected[i]);
@@ -1532,21 +1618,24 @@ void jolt_composite_visitors(const VisitorInput *inInput, VisitorOutput *outOutp
 	CollideShapeSettings collide_settings;
 	collide_settings.mMaxSeparationDistance = inInput->mMaxSeparation;
 	ShapeCastSettings cast_settings;
+	ShapeFilter default_filter;
+	ParityShapeFilter parity_filter(inInput->mFilter.mRejectID, outOutput->mFilterLog);
+	const ShapeFilter &filter = inInput->mFilter.mEnabled != 0? static_cast<const ShapeFilter &>(parity_filter) : default_filter;
 
 	outOutput->mNumHits[0] = CollectHits<CollideShapeCollector>(inInput->mCollectorKind, 16,
-		[&](CollideShapeCollector &ioCollector) { ParityCompoundShape::sCollideCompoundVsShape(compound, other, scale1, scale2, transform1, transform2, creator1, creator2, collide_settings, ioCollector, { }); },
+		[&](CollideShapeCollector &ioCollector) { ParityCompoundShape::sCollideCompoundVsShape(compound, other, scale1, scale2, transform1, transform2, creator1, creator2, collide_settings, ioCollector, filter); },
 		[&](const CollideShapeResult &inHit, uint32 inIndex) { StoreCollideHit(inHit, outOutput->mHits[0][inIndex]); });
 	outOutput->mCollide[0] = record.mCollide;
 	record.mCollide = CollideRecord { };
 
 	outOutput->mNumHits[1] = CollectHits<CollideShapeCollector>(inInput->mCollectorKind, 16,
-		[&](CollideShapeCollector &ioCollector) { ParityCompoundShape::sCollideShapeVsCompound(other, compound, scale2, scale1, transform2, transform1, creator2, creator1, collide_settings, ioCollector, { }); },
+		[&](CollideShapeCollector &ioCollector) { ParityCompoundShape::sCollideShapeVsCompound(other, compound, scale2, scale1, transform2, transform1, creator2, creator1, collide_settings, ioCollector, filter); },
 		[&](const CollideShapeResult &inHit, uint32 inIndex) { StoreCollideHit(inHit, outOutput->mHits[1][inIndex]); });
 	outOutput->mCollide[1] = record.mCollide;
 
 	ShapeCast other_cast(other, scale2, LoadMat44(inInput->mCastStart), Load3(inInput->mCastDirection));
 	outOutput->mNumHits[2] = CollectHits<CastShapeCollector>(inInput->mCollectorKind, 16,
-		[&](CastShapeCollector &ioCollector) { ParityCompoundShape::sCastShapeVsCompound(other_cast, cast_settings, compound, scale1, { }, transform1, creator2, creator1, ioCollector); },
+		[&](CastShapeCollector &ioCollector) { ParityCompoundShape::sCastShapeVsCompound(other_cast, cast_settings, compound, scale1, filter, transform1, creator2, creator1, ioCollector); },
 		[&](const ShapeCastResult &inHit, uint32 inIndex) { StoreCastHit(inHit, outOutput->mHits[2][inIndex]); });
 	outOutput->mCast[0] = record.mCast;
 	record.mCast = CastRecord { };
@@ -1554,7 +1643,7 @@ void jolt_composite_visitors(const VisitorInput *inInput, VisitorOutput *outOutp
 	ShapeCast compound_cast(compound, scale1, LoadMat44(inInput->mCastStart), Load3(inInput->mCastDirection));
 	CollisionDispatch::CastShape cast_compound_vs_shape = Get(CastCompoundVsShapeTag());
 	outOutput->mNumHits[3] = CollectHits<CastShapeCollector>(inInput->mCollectorKind, 16,
-		[&](CastShapeCollector &ioCollector) { cast_compound_vs_shape(compound_cast, cast_settings, other, scale2, { }, transform2, creator1, creator2, ioCollector); },
+		[&](CastShapeCollector &ioCollector) { cast_compound_vs_shape(compound_cast, cast_settings, other, scale2, filter, transform2, creator1, creator2, ioCollector); },
 		[&](const ShapeCastResult &inHit, uint32 inIndex) { StoreCastHit(inHit, outOutput->mHits[3][inIndex]); });
 	outOutput->mCast[1] = record.mCast;
 }
