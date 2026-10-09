@@ -1,20 +1,15 @@
 # Collision architecture (Phase 4)
 
 This is the binding design for porting `Jolt/Physics/Collision`. Every decision (D1..D14) is
-written as an instruction for porters, and every code example is taken from the prototype in
-`ZoltTests/Prototype/` (run it with `zig build test -Dtest-filter=Prototype`). The prototype
-mirrors the final layout: `ZoltTests/Prototype/X/Y.zig` becomes `Zolt/X/Y.zig` in the foundation
-step (section 5). `SphereShape.zig` is the reference shape. Read `PortingGuide.md` first: this
-document only adds to it, and section 7 lists the guide changes it requires.
-
-The design combines three proposals: Design 1 (fidelity first), Design 2 (Zig idiom and safety)
-and Design 3 (performance and determinism). It also fixes every critical flaw the judges found
-(section 6).
-
-**Prototype status.** 15 tests in `CollisionPrototype.zig`, plus the tests in `Virtual.zig` and
-`Result.zig`, all with leak checking through `std.testing.allocator`. They pass in Debug,
-ReleaseSafe, ReleaseFast, `-Duse_llvm=false` and `-Ddouble_precision=true`. The negative compile
-checks in the D1 table were each run and then reverted.
+written as an instruction for porters. It was decided with three competing compiled prototypes
+(fidelity first, Zig idiom and safety first, performance and determinism first), two judges and a
+synthesis; the synthesized prototype is in commit `6fc77e5` (`ZoltTests/Prototype/`) and was removed
+after the foundation port. The real files are now the reference: `Zolt/Core/Virtual.zig`,
+`Zolt/Core/PlacementBuffer.zig`, `Zolt/Core/Result.zig`, `Zolt/Physics/Collision/Shape/Shape.zig`,
+`ConvexShape.zig`, `SphereShape.zig` / `BoxShape.zig` (the reference shapes), `DecoratedShape.zig`,
+`CompoundShape.zig`, `CompoundShapeVisitors.zig`, `CollisionDispatch.zig`, `CollisionCollectorImpl.zig`,
+`TransformedShape.zig` and `Zolt/RegisterTypes.zig`. Read `PortingGuide.md` first: this document only
+adds to it. Section 9 lists what the foundation port settled beyond the original design.
 
 ## 0. The four rules every porter must know
 
@@ -547,7 +542,7 @@ order (size asserted: 64 bytes, or 96 with double precision).
 
 ## 2. Porter template: a concrete shape file
 
-Copy `ZoltTests/Prototype/Physics/Collision/Shape/SphereShape.zig` (complete and commented).
+Copy `Zolt/Physics/Collision/Shape/SphereShape.zig` or `BoxShape.zig` (complete ports that follow this template).
 Skeleton:
 
 ```zig
@@ -691,8 +686,7 @@ Variants:
   order, including `SoftBodyShape`, whose file belongs to Phase 9.
 - The `zolt_user_types` module in `build.zig` and the guide updates (section 7).
 - `tools/port_status.py`: remove `Jolt/Core/Result` from `NOT_APPLICABLE`.
-  `tools/port_status.py` already skips `ZoltTests/Prototype`; delete the prototype once F2 is
-  merged.
+  (Done: the foundation is merged and the prototype removed.)
 
 **Wave A** (parallel, one file per worker):
 - Convex shapes, each including its support classes: `SphereShape`, `BoxShape`, `CapsuleShape`,
@@ -773,3 +767,33 @@ needs only the `Body` pointer type from the F1 stub.
   written through it.
 - A lint (grep in CI) for `@constCast` writes and for non-pub functions with virtual names
   would complement the compile-time checks.
+
+## 9. Settled during the foundation port
+
+- **Foundation steps actually used:** F1 (infrastructure and basic types), shape core (Shape,
+  collectors, filters, dispatch, TransformedShape, RegisterTypes with a stub per shape), filters, and
+  the abstract bases in their own steps (ConvexShape with SphereShape and BoxShape; DecoratedShape,
+  CompoundShape and CompoundShapeVisitors). Wave A and B start from the merged foundation.
+- **Holding a concrete shape.** Concrete shapes have no `addRef`/`release` of their own: Jolt's
+  `RefConst<SphereShape>` is `RefConst(Shape)` plus `shape.cast(SphereShape)`.
+- **GetTrianglesNext** counts (`max_triangles_requested`, the returned count) are `u32` (Jolt `int`).
+- **Allocating `save*` functions** (`saveMaterialState`, `saveSubShapeState`, `getStatsRecursive`)
+  take an allocator and return `Allocator.Error`; reserve capacity before cloning a reference into a
+  list (`ensureUnusedCapacity` + `appendAssumeCapacity`) so out of memory never leaks a reference.
+- **Compound visitors.** Walkers take `visitor: anytype` and call `shouldAbort`, `testBounds` (Vec4
+  distances for the ray and cast visitors, UVec4 masks for the others) and `visitShape`. Jolt's
+  derived visitors (`struct Visitor : public CastRayVisitor`) embed the base visitor as `base` and
+  forward the protocol (`CompoundShapeVisitors.zig` header).
+- **Registered types from the user module** (`zolt_user_types`): `registrations`, `default_material`,
+  `material_types` and `group_filter_types` (`RegisterTypes.zig`).
+- **Test-only shapes.** `Zolt/Physics/Collision/Shape/TestShapes.zig` (only compiled in tests) registers
+  User1..3 test shapes and a test material for the library's inline tests; the parity build has its
+  own user types module (`ZoltParity/Physics/ShapeCoreUserTypes.zig`). Wave A/B parity tests use the
+  real shapes instead of adding user shapes.
+- **Parity C++ wrappers** that need shapes create the Factory and call `RegisterTypes()` once per
+  binary through the guard `if (Factory::sInstance == nullptr)` (see `BasicsReference.cpp`).
+- **Shared test helpers:** `ZoltTests/Layers.zig` (port of `UnitTests/Layers.h`).
+- **`CollideSoftBodyVertexIterator`** has the operations shapes need for `CollideSoftBodyVertices`
+  (Status: partial until SoftBody, Phase 9).
+- **NarrowPhaseStats** follow Jolt's default (`JPH_TRACK_NARROWPHASE_STATS` off): a comptime switch.
+

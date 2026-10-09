@@ -56,7 +56,4 @@ test {
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
-
-    // Prototypes (architecture decisions, see Docs/Zolt/CollisionArchitecture.md)
-    _ = @import("Prototype/CollisionPrototype.zig");
 }

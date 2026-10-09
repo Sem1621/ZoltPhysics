@@ -18,7 +18,8 @@
 //!   - `registrations`: a tuple of types with `pub fn register(comptime r: *zolt.CollisionDispatch.Registry) void`,
 //!     run after Jolt's registrations (so they override them);
 //!   - `default_material: *const zolt.PhysicsMaterial` (a static material, see PhysicsMaterial.initStatic);
-//!   - `material_types`: a tuple of material classes that PhysicsMaterial.restoreFromBinaryState can create.
+//!   - `material_types`: a tuple of material classes that PhysicsMaterial.restoreFromBinaryState can create;
+//!   - `group_filter_types`: a tuple of GroupFilter classes that GroupFilter.restoreFromBinaryState can create.
 //!
 //! Not needed in Zolt: RegisterTypesInternal / UnregisterTypes (nothing to register or unregister at runtime) and
 //! VerifyJoltVersionID (Zig compiles the library together with the application, so the ABI cannot mismatch).
@@ -27,6 +28,7 @@
 
 const PhysicsMaterial = @import("Physics/Collision/PhysicsMaterial.zig").PhysicsMaterial;
 const PhysicsMaterialSimple = @import("Physics/Collision/PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").GroupFilterTable;
 const Registry = @import("Physics/Collision/CollisionDispatch.zig").Registry;
 const BoxShape = @import("Physics/Collision/Shape/BoxShape.zig").BoxShape;
 const CapsuleShape = @import("Physics/Collision/Shape/CapsuleShape.zig").CapsuleShape;
@@ -97,6 +99,10 @@ pub const default_material: *const PhysicsMaterial = if (@hasDecl(user_types, "d
 /// The material classes that PhysicsMaterial.restoreFromBinaryState can create (the material part of the Factory
 /// registration, until the Factory of Phase 8): Jolt's PhysicsMaterial and PhysicsMaterialSimple plus the user's
 pub const material_types = .{ PhysicsMaterial, PhysicsMaterialSimple } ++ (if (@hasDecl(user_types, "material_types")) user_types.material_types else .{});
+
+/// The GroupFilter classes that GroupFilter.restoreFromBinaryState can create (the group filter part of the Factory
+/// registration, until the Factory of Phase 8): Jolt's GroupFilterTable plus the user's
+pub const group_filter_types = .{GroupFilterTable} ++ (if (@hasDecl(user_types, "group_filter_types")) user_types.group_filter_types else .{});
 
 test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
     const std = @import("std");

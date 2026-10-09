@@ -180,7 +180,26 @@ both types) when porting code needs them.
   `TempAllocator` when the size is unbounded. Zig has no alloca.
 - Allocation failure is an error (`error.OutOfMemory`), never ignored. Where Jolt returns a
   `Result<T>` or an error string, return `!T` with a specific error set; keep Jolt's message text
-  in a doc comment or log it with `std.log`.
+  in a doc comment or log it with `std.log`. **Exception:** Jolt's cached and copied results
+  (`ShapeResult`, `PhysicsMaterialResult`, `GroupFilterResult`, ...) stay values of
+  `Core/Result.zig`'s `Result(T)` with Jolt's exact error texts (tests compare them); only
+  allocation failure is a Zig error, and it is never cached.
+- Placement new into a caller-owned buffer (`SupportBuffer`, `GetTrianglesContext`) uses
+  `Core/PlacementBuffer.zig`: `emplace(T)` checks size and alignment at compile time and the object is
+  initialized in place (no copy of large objects, self-referencing objects work).
+- Tables that Jolt builds in static initializers (the unit sphere triangles, the box triangles, the
+  collision dispatch tables) are comptime constants with the same bits.
+
+### Rule M: no writes through `*const`
+
+Zig marks every `*const T` parameter `readonly` for LLVM, also at calls through vtable function
+pointers, and optimized builds really drop writes made through a pointer obtained from it with
+`@constCast`. A C++ `mutable` member or `const_cast` write therefore becomes a mutable receiver
+(`ShapeSettings.createShape(self: *ShapeSettings, ...)` writes its cache), a mutable pointer passed
+separately (`opts.shape_filter: ?*ShapeFilter` at the query entry points that set `body_id2`), or
+state behind a pointer field. The only exceptions are the `RefCount` atomics (`addRef` / `release`
+through `*const`) and `release()` destroying the object after its last reference. Every Phase 4+ test
+suite also runs with `-Doptimize=ReleaseFast`, where such bugs show.
 
 ### Containers
 
@@ -222,7 +241,16 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
   reference like the C++ constructor / assignment, and the owner calls `deinit()` where the C++
   destructor would run. Raw pointers stay raw (`*T`) where Jolt uses raw pointers;
 - `new Foo(...)` assigned to a `Ref` becomes `Foo.create(allocator, ...)` (refcount 0) followed by
-  `Ref(Foo).init(ptr)`; the object keeps its allocator to destroy itself.
+  `Ref(Foo).init(ptr)`; the object keeps its allocator to destroy itself. Pattern A roots
+  (`Shape`, `ShapeSettings`, `PhysicsMaterial`, `GroupFilter`) store `ref_count` and the
+  `allocator` in the root; `release()` calls the generated `destroy` (the `destruct` chain, derived
+  first, then the free with the root's allocator);
+- an object on the stack or embedded in another object is `init(...)` + `setEmbedded()` (before
+  references are taken) + `deinit()` (asserts that no references are left);
+- read-only constants that Jolt keeps in a global (`PhysicsMaterial::sDefault`) are comptime constants
+  with `is_static = true`: they are never reference counted, so nothing mutable is global;
+- a concrete class has no `addRef` / `release` of its own: Jolt's `RefConst<SphereShape>` is
+  `RefConst(Shape)` plus the checked `shape.cast(SphereShape)`.
 
 ### Geometry conventions
 
@@ -259,55 +287,26 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
 
 Use one of two patterns. Both keep Jolt's ability to add user-defined subclasses.
 
-**A. Class hierarchies with data in the base class** (`Shape`, `ConvexShape`, `Constraint`,
-`ShapeSettings`, `BroadPhase`, ...): the base struct holds a `vtable: *const VTable` plus its
-data; each derived struct embeds its parent as the first field named `base`; downcasting uses
-`@fieldParentPtr` (one step per level of the hierarchy).
-```zig
-pub const Shape = struct {
-    pub const VTable = struct {
-        getLocalBounds: *const fn (self: *const Shape) AABox,
-        // ... one entry per C++ virtual function, in declaration order
-    };
-    vtable: *const VTable,
-    ref_count: std.atomic.Value(u32) = .init(0),
-    user_data: u64 = 0,
-
-    pub fn getLocalBounds(self: *const Shape) AABox {
-        return self.vtable.getLocalBounds(self);
-    }
-};
-
-pub const ConvexShape = struct {
-    base: Shape,
-    density: f32 = 1000,
-};
-
-pub const BoxShape = struct {
-    base: ConvexShape,
-    half_extent: Vec3,
-
-    const vtable: Shape.VTable = .{ .getLocalBounds = getLocalBoundsImpl };
-
-    pub fn init(half_extent: Vec3) BoxShape {
-        return .{ .base = .{ .base = .{ .vtable = &vtable } }, .half_extent = half_extent };
-    }
-
-    /// Downcast (static_cast<const BoxShape *>(shape) in C++)
-    pub fn fromShape(shape: *const Shape) *const BoxShape {
-        const convex: *const ConvexShape = @alignCast(@fieldParentPtr("base", shape));
-        return @alignCast(@fieldParentPtr("base", convex));
-    }
-
-    fn getLocalBoundsImpl(shape: *const Shape) AABox {
-        const self = fromShape(shape);
-        return .{ .min = self.half_extent.negate(), .max = self.half_extent };
-    }
-};
-```
-Virtuals with a default implementation in the base: the base exposes the default as a `pub fn`
-that derived vtables can reference. Jolt's switch-on-subtype dispatch tables (e.g.
-`CollisionDispatch`) are ported as tables, exactly like the C++.
+**A. Class hierarchies with data in the base class** (`Shape`, `ConvexShape`, `ShapeSettings`,
+`CollisionCollector`, `ShapeFilter`, `PhysicsMaterial`, `GroupFilter`, `Constraint`, `BroadPhase`,
+...): the root holds `vtable: *const VTable` plus its data; each derived struct embeds its parent as
+the field `base` (one level per C++ class). The machinery is `Core/Virtual.zig` (imported as
+`virtual`); the complete rules and examples are in
+[CollisionArchitecture.md](CollisionArchitecture.md) (D1, D2), in short:
+- a class that adds virtual functions has a `VTable` whose first field is its parent's vtable
+  (`ConvexShape.VTable { base: Shape.VTable, getSupportFunction }`); the constructor of the
+  introducing class builds the table of the most derived type with `virtual.make` /
+  `virtual.vtablePtr(VTable, T)`;
+- a concrete class lists its C++ `override`s in `pub const overrides = .{ .castRay, ... }` (top-level
+  `pub fn`s); an abstract class keeps the bodies of its virtual functions in `pub const impl = struct
+  { ... }`. A missing pure virtual, an unlisted, private or misspelled override and a wrong signature
+  are compile errors; overrides of a concrete parent are inherited like in C++;
+- a virtual call is the dispatcher of the introducing class (`shape.castRay(...)`); C++ `Base::Foo()`
+  is `Base.impl.foo(&self.base, ...)` (abstract base) or `self.base.foo(...)` (concrete base); a
+  static `self.foo()` only in `final` classes;
+- `deinit` (destructor chain over each level's `destruct`) and `destroy` (`delete this`) are
+  generated entries; per-class constants (`rtti_name`) are data entries;
+- casts: `virtual.upcast` / `virtual.downcast`, and checked casts such as `shape.cast(SphereShape)`.
 
 **B. Pure interfaces / listeners** (`ContactListener`, `BodyActivationListener`,
 `BroadPhaseLayerInterface`, `ObjectLayerPairFilter`, `JobSystem`, ...): a type-erased fat pointer
@@ -640,3 +639,21 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `AABBTreeToBuffer<TriangleCodec, NodeCodec>::Convert(.., outError) -> bool` | `AABBTreeToBuffer(T, N).convert(allocator, ..) Error!void` + `errorMessage(err)` (Jolt's text) | error strings become error sets |
 | codec `DecodingContext::Unpack` / `GetTriangle` / `TestRay` / `sGetFlags` overloads | `unpackWithFlags`, `getTriangle(..) TriangleVertices`, `testRay(..) TestRayResult`, `getFlags` / `getTriangleFlags` | overloads, out parameters |
 | `WalkTree` visitor `VisitNodes` / `VisitTriangles` / `ShouldAbort` / `ShouldVisitNode` | `visitNodes` / `visitTriangles` / `shouldAbort` / `shouldVisitNode` on an `anytype` visitor pointer | template visitor |
+| `BodyID(id, sequence)` / `operator<` / `operator>` / `JPH_MAKE_HASHABLE` | `BodyID.fromIndexAndSequenceNumber` / `lessThan` / `greaterThan` / `getHash()` | constructor overload, operators |
+| `SubShapeID()` / `PopID(bits, outRemainder)` | `.empty` / `popID(bits) PopResult{ .id, .remainder }` | default constructor, out parameter |
+| `RayCast` / `RRayCast` (CRTP), `RRayCast(const RayCast &)` / `explicit operator RayCast()` | `RayCastT(Vec, Mat, kind)`; distinct types in both precisions; `fromRayCast` / `toRayCast` (same for `ShapeCast` / `RShapeCast`) | templates, conversions |
+| `cObjectLayerInvalid`, `cBroadPhaseLayerInvalid`, `PhysicsSettings.h` constants | `object_layer_invalid`, `broad_phase_layer_invalid`, `zolt.physics_settings.default_collision_tolerance`, ... | constants |
+| `MassProperties::DecomposePrincipalMomentsOfInertia(outRotation, outDiagonal) -> bool` | `decomposePrincipalMomentsOfInertia() ?PrincipalMomentsOfInertia` | out parameters |
+| `PhysicsMaterial::sDefault`, `sRestoreFromBinaryState(stream)`, `GetRTTI()->GetHash()` | `PhysicsMaterial.default` (static constant), `restoreFromBinaryState(allocator, stream) !PhysicsMaterialResult`, `getRTTIHash()` | global, RTTI |
+| `Result<T>` copy / assign / move, `SetError(StringFormat(...))` | `clone()` / `assign(&other)` / `assignMove(other)`, `setErrorFmt(fmt, args)` | copy semantics |
+| `Shape::CastRay(ray, settings, creator, collector, filter)` (collector overload) | `castRayCollector` (also on `TransformedShape`) | overload |
+| `Shape::GetLeafShape` / `GetSubShapeTransformedShape` / `GetSubmergedVolume` out parameters | returned `LeafShape`, `SubShapeTransformedShape`, `SubmergedVolume` structs | out parameters |
+| `Shape::sRestoreFromBinaryState` / `sRestoreWithChildren`, `GetWorldSpaceBounds(DMat44)` | `restoreFromBinaryState(allocator, stream)` / `restoreWithChildren`, `getWorldSpaceBoundsDMat44` | static, overload |
+| `CollisionDispatch::sCollideShapeVsShape` / `sCastShapeVsShape*` / `sRegister*` | `collideShapeVsShape` / `castShapeVsShape*` / comptime `Registry.registerCollideShape` ... in each type's `register(comptime r)` | global tables become a comptime registry |
+| `ConvexShape::GetMaterial()` (non-virtual), `ESupportMode` | `getConvexMaterial()`, `SupportMode` | clashes with the virtual `getMaterial(sub_shape_id)` |
+| `XShapeSettings(args, convexRadius = .., material = nullptr)` | `init(allocator, args, .{ .convex_radius, .material })` / `create(...)`; shapes add `initDefault` / `initFromSettings` | default arguments, constructors |
+| `CompoundShapeSettings::AddShape(pos, rot, const ShapeSettings * / const Shape *, userData = 0)` | `addShape(pos, rot, ?*ShapeSettings, .{ .user_data })` / `addShapePtr(pos, rot, ?*const Shape, .{ .user_data })` | overloads |
+| `CompoundShape::GetIntersectingSubShapes(AABox / OrientedBox, uint *, int)` / `GetSubShapeIndexFromID(id, outRemainder)` | `getIntersectingSubShapes(box, []u32) u32` / `getIntersectingSubShapesOrientedBox` / `getSubShapeIndexFromID(id) SubShapeIndex` | overloads, out parameter |
+| `CollisionGroup::sInvalid` / copy / `operator==`, `GroupFilterTable(numSubGroups = 0)` | `CollisionGroup.invalid` / `clone()` / `eql`, `GroupFilterTable.init(allocator, .{ .num_sub_groups })` | value type with a reference, default argument |
+| `ContactListener` virtual callbacks, `ValidateResult::AcceptAllContactsForThisBodyPair` | pattern B `ContactListener.init(&impl)` with optional callbacks, `ValidateResult.accept_all_contacts_for_this_body_pair` | interface |
+| `PolyhedronSubmergedVolumeCalculator(transform, const Vec3 *, stride, count, surface, buffer)` | `init(transform, StridedPtrConst(Vec3), num_points, surface, []Point)` | pointer + stride, buffer slice |

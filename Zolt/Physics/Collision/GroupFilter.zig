@@ -19,12 +19,9 @@
 //!   type".
 //! - The copy constructor and copy assignment of the C++ base class (protected, they do not copy the reference
 //!   count) are part of the derived classes' copy functions, e.g. `GroupFilterTable.clone`.
-//! - Foundation note: in Jolt an application registers its own GroupFilter classes with the Factory, and
-//!   sRestoreFromBinaryState restores them too. Zolt has no such hook yet, so a user filter can be saved but restoring
-//!   it gives "Failed to create instance of type". RegisterTypes.zig and the `zolt_user_types` module (D4) come with
-//!   the second foundation step; when they are merged, `group_filter_types` becomes `RegisterTypes.group_filter_types`
-//!   = `.{GroupFilterTable}` ++ the optional `group_filter_types` of the user types module (like `material_types`, D8),
-//!   with a test that restores a user filter registered through that module.
+//! - The classes that restoreFromBinaryState can create come from RegisterTypes.zig (`RegisterTypes.group_filter_types`
+//!   = Jolt's GroupFilterTable plus the optional `group_filter_types` of the `zolt_user_types` module, D4), like the
+//!   material classes (D8). In Jolt an application registers its own GroupFilter classes with the Factory instead.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -36,7 +33,7 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const virtual = @import("../../Core/Virtual.zig");
 const CollisionGroup = @import("CollisionGroup.zig").CollisionGroup;
-const GroupFilterTable = @import("GroupFilterTable.zig").GroupFilterTable;
+const RegisterTypes = @import("../../RegisterTypes.zig");
 
 /// Abstract class that checks if two CollisionGroups collide
 pub const GroupFilter = struct {
@@ -67,8 +64,8 @@ pub const GroupFilter = struct {
 
     /// Group filter classes that restoreFromBinaryState can create (Factory::sInstance until Phase 8). Each one declares
     /// `rtti_name` and `createDefault(allocator) Allocator.Error!*T` (its default constructor on the heap).
-    /// Only Jolt's classes for now, user classes come with RegisterTypes (see the foundation note in the file comment).
-    pub const group_filter_types = .{GroupFilterTable};
+    /// Jolt's GroupFilterTable plus the user's (RegisterTypes.group_filter_types, see the file comment).
+    pub const group_filter_types = RegisterTypes.group_filter_types;
 
     /// Constructor (protected in Jolt), called by derived classes with their most derived type
     pub fn init(comptime T: type, allocator: Allocator) GroupFilter {
