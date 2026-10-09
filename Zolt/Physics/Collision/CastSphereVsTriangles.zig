@@ -353,3 +353,21 @@ test "CastSphereVsTriangles: interior, edge and vertex hits, initial overlap, ba
     away_caster.cast(v0, v1, v2, 0b111, .{});
     try testing.expectEqual(@as(usize, 0), hits.hits.items.len);
 }
+
+// The values of Jolt's TestCastSphereVsDegenerateTriangle (CastShapeTests): a sphere cast must not hit a degenerate
+// triangle (https://github.com/jrouwe/JoltPhysics/issues/886)
+test "CastSphereVsTriangles: no hit on a degenerate triangle" {
+    const allocator = testing.allocator;
+
+    var hits = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+    defer hits.deinit();
+    var sphere = SphereShape.init(allocator, 0.2, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    const shape_cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(14.8314590, 8.19055080, -4.30825043)), Vec3.init(-0.0988006592, 5.96046448e-08, 0.000732421875));
+    const settings: ShapeCastSettings = .{};
+    var caster = CastSphereVsTriangles.init(&shape_cast, &settings, Vec3.one(), Mat44.identity(), .{}, &hits.base);
+    caster.cast(Vec3.init(14.5536213, 10.5973721, -0.00600051880), Vec3.init(14.5536213, 10.5969315, -3.18638134), Vec3.init(14.5536213, 10.5969315, -5.18637228), 0b111, .empty);
+    try hits.checkError();
+    try testing.expect(!hits.hadHit());
+}

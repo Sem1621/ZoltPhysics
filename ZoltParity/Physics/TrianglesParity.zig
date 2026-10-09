@@ -1010,6 +1010,99 @@ fn genCollide(gen: *Gen) CollideTrianglesInput {
     return input;
 }
 
+/// Number of hand picked collide inputs (see touchingCollide)
+const num_touching_collide_cases = 24;
+
+/// Hand picked edge cases: a sphere / box exactly touching a triangle with a face, an edge or a vertex, without
+/// rotations or scales so that the contact is exact, with and without a max separation distance, with all edges active
+/// and inactive
+fn touchingCollide(input: *CollideTrianglesInput, case: usize) void {
+    input.scale1 = .{ 1, 1, 1 };
+    input.scale2 = .{ 1, 1, 1 };
+    input.transform1 = arr16(Mat44.identity());
+    input.transform2 = arr16(Mat44.identity());
+    input.internal_edge_removal = 0;
+    input.collector = 0;
+    input.early_out = math.flt_max;
+    input.max_separation_distance = if (case % 2 == 0) 0.0 else 0.25;
+    const shape_kind = (case / 2) % 4; // Sphere (sphere collider), sphere (convex collider), box with / without convex radius
+    input.use_sphere_collider = @intFromBool(shape_kind == 0);
+    input.shape1 = switch (shape_kind) {
+        0, 1 => .{ .kind = 0, .radius = 0.5 },
+        2 => .{ .kind = 1, .half_extent = .{ 0.5, 0.5, 0.5 }, .convex_radius = 0.05 },
+        else => .{ .kind = 1, .half_extent = .{ 0.5, 0.5, 0.5 }, .convex_radius = 0.0 },
+    };
+    const triangle: [3]Vec3 = switch (case / 8) {
+        0 => .{ Vec3.init(-2, -0.5, -2), Vec3.init(-2, -0.5, 2), Vec3.init(2, -0.5, 0) }, // Face at y = -0.5
+        1 => .{ Vec3.init(-1, -0.5, 0), Vec3.init(0, -2, 0), Vec3.init(1, -0.5, 0) }, // Edge at y = -0.5
+        else => .{ Vec3.init(0, -0.5, 0), Vec3.init(-1, -2, 0.5), Vec3.init(1, -2, 0.5) }, // Vertex at y = -0.5
+    };
+    input.num_triangles = 2;
+    for (0..2) |t|
+        input.triangles[t] = .{ .v = arr3(triangle[0]) ++ arr3(triangle[1]) ++ arr3(triangle[2]), .active_edges = if (t == 0) 0b111 else 0b000, .sub_shape_id2 = @intCast(t) };
+}
+
+/// Number of hand picked cast inputs (see specialCast)
+const num_special_cast_cases = 28;
+
+/// Hand picked edge cases: casts that graze a triangle at exactly the radius, hit it at an exact fraction, start
+/// touching it, move in its plane towards a vertex, and Jolt's TestCastSphereVsDegenerateTriangle
+fn specialCast(input: *CastTrianglesInput, case: usize) void {
+    input.scale1 = .{ 1, 1, 1 };
+    input.scale2 = .{ 1, 1, 1 };
+    input.transform2 = arr16(Mat44.identity());
+    input.collector = 0;
+    input.early_out = 2.0;
+    input.extra_convex_radius = 0.0;
+    const shape_kind = case % 4; // Sphere (sphere caster), sphere (convex caster), box with / without convex radius
+    input.use_sphere_caster = @intFromBool(shape_kind == 0);
+    input.shape1 = switch (shape_kind) {
+        0, 1 => .{ .kind = 0, .radius = 0.5 },
+        2 => .{ .kind = 1, .half_extent = .{ 0.5, 0.5, 0.5 }, .convex_radius = 0.05 },
+        else => .{ .kind = 1, .half_extent = .{ 0.5, 0.5, 0.5 }, .convex_radius = 0.0 },
+    };
+    var triangle: [3]Vec3 = .{ Vec3.init(-2, 0, -2), Vec3.init(-2, 0, 2), Vec3.init(2, 0, 0) };
+    var start = Vec3.zero();
+    var direction = Vec3.zero();
+    switch (case / 4) {
+        0 => { // Grazing along the face at exactly the radius
+            start = Vec3.init(0, 0.5, 0);
+            direction = Vec3.init(4, 0, 0);
+        },
+        1 => { // Hits the face at fraction 0.5
+            start = Vec3.init(0, 1.5, 0);
+            direction = Vec3.init(0, -2, 0);
+        },
+        2 => { // Starts touching the face, moves into it
+            start = Vec3.init(0, 0.5, 0);
+            direction = Vec3.init(0, -1, 0);
+        },
+        3 => { // Grazing over the whole triangle, from outside to outside
+            start = Vec3.init(-4, 0.5, 0);
+            direction = Vec3.init(8, 0, 0);
+        },
+        4 => { // In the plane of the triangle towards the vertex at (2, 0, 0)
+            start = Vec3.init(4, 0, 0);
+            direction = Vec3.init(-2, 0, 0);
+        },
+        5 => { // Parallel to an edge, at exactly the radius
+            start = Vec3.init(-2.5, 0, -3);
+            direction = Vec3.init(0, 0, 6);
+        },
+        else => { // TestCastSphereVsDegenerateTriangle (https://github.com/jrouwe/JoltPhysics/issues/886)
+            if (shape_kind <= 1) input.shape1.radius = 0.2;
+            start = Vec3.init(14.8314590, 8.19055080, -4.30825043);
+            direction = Vec3.init(-0.0988006592, 5.96046448e-08, 0.000732421875);
+            triangle = .{ Vec3.init(14.5536213, 10.5973721, -0.00600051880), Vec3.init(14.5536213, 10.5969315, -3.18638134), Vec3.init(14.5536213, 10.5969315, -5.18637228) };
+        },
+    }
+    input.start = arr16(Mat44.translation(start));
+    input.direction = arr3(direction);
+    input.num_triangles = 2;
+    for (0..2) |t|
+        input.triangles[t] = .{ .v = arr3(triangle[0]) ++ arr3(triangle[1]) ++ arr3(triangle[2]), .active_edges = if (t == 0) 0b111 else 0b000, .sub_shape_id2 = @intCast(t) };
+}
+
 fn genCast(gen: *Gen) CastTrianglesInput {
     var input = std.mem.zeroes(CastTrianglesInput);
     const use_sphere = gen.oneIn(2);
@@ -1346,8 +1439,9 @@ test "Triangles parity: CollideConvexVsTriangles / CollideSphereVsTriangles (als
     var checker: Checker = .{ .name = "collide triangles" };
     var num_hits: usize = 0;
     var num_triangles: usize = 0;
-    for (0..triangle_iterations) |_| {
-        const input = genCollide(&gen);
+    for (0..triangle_iterations) |i| {
+        var input = genCollide(&gen);
+        if (i < num_touching_collide_cases) touchingCollide(&input, i);
         var jolt_output = std.mem.zeroes(HitsOutput);
         jolt.jolt_triangles_collide(&input, &jolt_output);
         const zolt_output = try zoltCollide(allocator, &input);
@@ -1365,8 +1459,9 @@ test "Triangles parity: CastConvexVsTriangles / CastSphereVsTriangles" {
     var checker: Checker = .{ .name = "cast triangles" };
     var num_hits: usize = 0;
     var num_triangles: usize = 0;
-    for (0..triangle_iterations) |_| {
-        const input = genCast(&gen);
+    for (0..triangle_iterations) |i| {
+        var input = genCast(&gen);
+        if (i < num_special_cast_cases) specialCast(&input, i);
         var jolt_output = std.mem.zeroes(HitsOutput);
         jolt.jolt_triangles_cast(&input, &jolt_output);
         const zolt_output = try zoltCast(allocator, &input);
