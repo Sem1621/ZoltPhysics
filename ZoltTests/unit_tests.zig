@@ -51,6 +51,7 @@ test {
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
     _ = @import("Physics/CollisionGroupTests.zig");
+    _ = @import("Physics/ConvexVsTrianglesTest.zig");
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
