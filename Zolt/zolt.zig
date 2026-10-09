@@ -234,10 +234,12 @@ pub const RayCastSettings = @import("Physics/Collision/RayCast.zig").RayCastSett
 pub const RayCastT = @import("Physics/Collision/RayCast.zig").RayCastT;
 pub const RRayCast = @import("Physics/Collision/RayCast.zig").RRayCast;
 pub const BoxShape = @import("Physics/Collision/Shape/BoxShape.zig").BoxShape;
+pub const BoxShapeSettings = @import("Physics/Collision/Shape/BoxShape.zig").BoxShapeSettings;
 pub const CapsuleShape = @import("Physics/Collision/Shape/CapsuleShape.zig").CapsuleShape;
 pub const CompoundShape = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShape;
 pub const ConvexHullShape = @import("Physics/Collision/Shape/ConvexHullShape.zig").ConvexHullShape;
 pub const ConvexShape = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShape;
+pub const ConvexShapeSettings = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShapeSettings;
 pub const CylinderShape = @import("Physics/Collision/Shape/CylinderShape.zig").CylinderShape;
 pub const DecoratedShape = @import("Physics/Collision/Shape/DecoratedShape.zig").DecoratedShape;
 pub const EmptyShape = @import("Physics/Collision/Shape/EmptyShape.zig").EmptyShape;
@@ -248,6 +250,7 @@ pub const MeshShape = @import("Physics/Collision/Shape/MeshShape.zig").MeshShape
 pub const MutableCompoundShape = @import("Physics/Collision/Shape/MutableCompoundShape.zig").MutableCompoundShape;
 pub const OffsetCenterOfMassShape = @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig").OffsetCenterOfMassShape;
 pub const PlaneShape = @import("Physics/Collision/Shape/PlaneShape.zig").PlaneShape;
+pub const PolyhedronSubmergedVolumeCalculator = @import("Physics/Collision/Shape/PolyhedronSubmergedVolumeCalculator.zig").PolyhedronSubmergedVolumeCalculator;
 pub const RotatedTranslatedShape = @import("Physics/Collision/Shape/RotatedTranslatedShape.zig").RotatedTranslatedShape;
 pub const ScaledShape = @import("Physics/Collision/Shape/ScaledShape.zig").ScaledShape;
 pub const ScaleHelpers = @import("Physics/Collision/Shape/ScaleHelpers.zig");
@@ -272,6 +275,7 @@ pub const ShapeType = @import("Physics/Collision/Shape/Shape.zig").ShapeType;
 pub const sub_shape_type_names = @import("Physics/Collision/Shape/Shape.zig").sub_shape_type_names;
 pub const TransformedShapeCollector = @import("Physics/Collision/Shape/Shape.zig").TransformedShapeCollector;
 pub const SphereShape = @import("Physics/Collision/Shape/SphereShape.zig").SphereShape;
+pub const SphereShapeSettings = @import("Physics/Collision/Shape/SphereShape.zig").SphereShapeSettings;
 pub const StaticCompoundShape = @import("Physics/Collision/Shape/StaticCompoundShape.zig").StaticCompoundShape;
 pub const SubShapeID = @import("Physics/Collision/Shape/SubShapeID.zig").SubShapeID;
 pub const SubShapeIDCreator = @import("Physics/Collision/Shape/SubShapeID.zig").SubShapeIDCreator;
@@ -436,6 +440,7 @@ const source_files = .{
     @import("Physics/Collision/Shape/MutableCompoundShape.zig"),
     @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig"),
     @import("Physics/Collision/Shape/PlaneShape.zig"),
+    @import("Physics/Collision/Shape/PolyhedronSubmergedVolumeCalculator.zig"),
     @import("Physics/Collision/Shape/RotatedTranslatedShape.zig"),
     @import("Physics/Collision/Shape/ScaledShape.zig"),
     @import("Physics/Collision/Shape/ScaleHelpers.zig"),
