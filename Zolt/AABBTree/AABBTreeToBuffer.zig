@@ -326,7 +326,7 @@ pub fn AABBTreeToBuffer(comptime TriangleCodec: type, comptime NodeCodec: type) 
 const math = @import("../Math/Math.zig");
 const UVec4 = @import("../Math/UVec4.zig").UVec4;
 const Vec4 = @import("../Math/Vec4.zig").Vec4;
-const Float4 = @import("../Math/Float4.zig").Float4;
+const sortReverseAndStore = @import("../Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 const RayInvDirection = @import("../Geometry/RayAABox.zig").RayInvDirection;
 const rayAABox4 = @import("../Geometry/RayAABox.zig").rayAABox4;
 const rayTriangle = @import("../Geometry/RayTriangle.zig").rayTriangle;
@@ -372,28 +372,6 @@ const TestMesh = struct {
         self.triangles.deinit(allocator);
     }
 };
-
-/// Port of SortReverseAndStore (Physics/Collision/SortReverseAndStore.h, not ported yet), used by the ray cast visitor
-fn sortReverseAndStore(values_in: Vec4, max_value: f32, identifiers: *UVec4, out_values: *[4]f32) i32 {
-    // Sort so that highest values are first (we want to first process closer hits and we process stack top to bottom)
-    var values = values_in;
-    Vec4.sort4Reverse(&values, identifiers);
-
-    // Count how many results are less than the max value
-    const closer = Vec4.less(values, Vec4.replicate(max_value));
-    const num_results = closer.countTrues();
-
-    // Shift the values so that only the ones that are less than max are kept
-    values = values.reinterpretAsInt().shiftComponents4Minus(num_results).reinterpretAsFloat();
-    identifiers.* = identifiers.shiftComponents4Minus(num_results);
-
-    // Store the values
-    var f: Float4 = undefined;
-    values.storeFloat4(&f);
-    out_values.* = .{ f.x, f.y, f.z, f.w };
-
-    return @intCast(num_results);
-}
 
 /// Visitor that visits every node and collects the triangles (like MeshShape::GetTrianglesNext)
 const CollectVisitor = struct {

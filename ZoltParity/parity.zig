@@ -7,6 +7,8 @@
 //! Layout, mirroring Zolt/: `ZoltParity/<Dir>/<Dir>Parity.zig` (tests) + `ZoltParity/<Dir>/<Dir>Reference.cpp`
 //! (C ABI wrappers around Jolt). Shared helpers are in `ParityFramework.zig`. Register new test files below and
 //! new .cpp files in `reference_sources.zig` (both lists are merged with git's union driver, keep them sorted).
+//! `Physics/ShapeCoreUserTypes.zig` is not a test file: it is the `zolt_user_types` module of the parity build's own
+//! `zolt` instance (user shape registrations, see build.zig), imported by the tests as "parity_user_types".
 //!
 //! Run: zig build parity [-Ddouble_precision=true] [-Dtest-filter=Vec4]
 
@@ -21,4 +23,7 @@ test {
     _ = @import("Geometry/QueriesParity.zig");
     _ = @import("Math/MathParity.zig");
     _ = @import("ParityFramework.zig");
+    _ = @import("Physics/BasicsParity.zig");
+    _ = @import("Physics/ConvexParity.zig");
+    _ = @import("Physics/ShapeCoreParity.zig");
 }

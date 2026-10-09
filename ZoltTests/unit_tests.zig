@@ -45,6 +45,14 @@ test {
     _ = @import("Math/Vec4Tests.zig");
     _ = @import("Math/VectorTests.zig");
 
+    // Physics
+    _ = @import("Physics/CastShapeTests.zig");
+    _ = @import("Physics/CollidePointTests.zig");
+    _ = @import("Physics/CollideShapeTests.zig");
+    _ = @import("Physics/RayShapeTests.zig");
+    _ = @import("Physics/ShapeTests.zig");
+    _ = @import("Physics/SubShapeIDTest.zig");
+
     // Prototypes (architecture decisions, see Docs/Zolt/CollisionArchitecture.md)
     _ = @import("Prototype/CollisionPrototype.zig");
 }
