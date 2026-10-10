@@ -506,7 +506,7 @@ pub const PlaneShape = struct {
     }
 
     // See Shape::RestoreMaterialState
-    pub fn restoreMaterialState(self: *PlaneShape, materials: []const PhysicsMaterialRefC) void {
+    pub fn restoreMaterialState(self: *PlaneShape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
         if (Core.enable_asserts) std.debug.assert(materials.len == 1); // A corrupt stream can violate this
         self.material.set(materials[0].get());
     }
@@ -1255,7 +1255,7 @@ test "PlaneShape: binary state, material state, restoreFromBinaryState, saveWith
     try plane.asShape().saveMaterialState(allocator, &materials);
     try testing.expectEqual(@as(usize, 1), materials.items.len);
     try testing.expect(materials.items[0].get() == material.material());
-    result.getPtr().?.restoreMaterialState(materials.items);
+    try result.getPtr().?.restoreMaterialState(materials.items);
     try testing.expect(restored.getPlaneMaterial() == material.material());
 
     // Without a material the list holds a null reference
