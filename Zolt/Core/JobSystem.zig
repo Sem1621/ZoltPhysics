@@ -27,6 +27,8 @@
 //!   JPH_STACK_ALLOC (alloca, sized by the number of handles). When more jobs become ready than the buffer holds, they
 //!   are queued in batches of `JobHandle.max_jobs_per_batch` (in the same order); the physics code never removes
 //!   dependencies from more than 32 handles at once (PhysicsUpdateContext::cMaxConcurrency).
+//! - Zolt test helper (no C++ counterpart): `FailingJobSystem` fails the n-th `createJob` of a wrapped job system, for
+//!   the createJob sweeps of the tests (Docs/Zolt/SimulationArchitecture.md D12).
 
 const std = @import("std");
 const Color = @import("Color.zig").Color;
@@ -561,6 +563,92 @@ pub const JobSystem = struct {
 // `using JobHandle = JobSystem::JobHandle;` is the re-export `zolt.JobHandle` in zolt.zig: a file level alias would
 // make the references to `JobHandle` inside `JobSystem` ambiguous.
 
+/// Zolt test helper (no C++ counterpart): a job system that fails its n-th `createJob` with error.OutOfMemory and
+/// forwards everything else to the job system it wraps, which creates, runs and frees the jobs.
+///
+/// It drives the createJob sweeps of the tests (Docs/Zolt/SimulationArchitecture.md D12): run the code once with the
+/// default `fail_index` to count the jobs (`num_created`), then once for every index from 0 to that count. A failure
+/// while the job graph is built must change nothing (the start gate, D4), a failure to spawn a job from inside a job
+/// must not change the results (D5):
+/// ```zig
+/// var counting: FailingJobSystem = .init(thread_pool.jobSystem(), .{});
+/// _ = try system.update(delta_time, 1, temp_allocator, counting.jobSystem());
+/// for (0..counting.num_created.load(.monotonic)) |fail_index| {
+///     var failing: FailingJobSystem = .init(thread_pool.jobSystem(), .{ .fail_index = @intCast(fail_index) });
+///     ... system.update(delta_time, 1, temp_allocator, failing.jobSystem()) ...
+/// }
+/// ```
+/// Every call of `createJob` counts, from any thread: exactly call number `fail_index` (counting from 0) fails, the
+/// calls after it succeed again. The order of the calls that jobs make on several threads is not deterministic, so a
+/// sweep checks results that do not depend on which job failed.
+pub const FailingJobSystem = struct {
+    /// The job system that does the work (the jobs belong to it)
+    inner: JobSystem,
+
+    /// Index of the call to `createJob` that fails (maxInt: none fails)
+    fail_index: u32 = std.math.maxInt(u32),
+
+    /// Number of calls to `createJob` so far, including the failed one (jobs call it from several threads)
+    num_created: std.atomic.Value(u32) = .init(0),
+
+    /// True after the call at `fail_index` failed
+    has_induced_failure: std.atomic.Value(bool) = .init(false),
+
+    /// Wrap `inner`, `opts.fail_index` is the index of the call to `createJob` that fails
+    pub fn init(inner: JobSystem, opts: struct { fail_index: u32 = std.math.maxInt(u32) }) FailingJobSystem {
+        return .{ .inner = inner, .fail_index = opts.fail_index };
+    }
+
+    /// The JobSystem interface of this job system. `self` must stay at the same address while it is in use.
+    pub fn jobSystem(self: *FailingJobSystem) JobSystem {
+        return .init(self);
+    }
+
+    /// See: JobSystem
+    pub fn getMaxConcurrency(self: *const FailingJobSystem) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    /// See: JobSystem. Fails with error.OutOfMemory when this is call number `fail_index`.
+    pub fn createJob(self: *FailingJobSystem, job_name: []const u8, color: Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        if (self.num_created.fetchAdd(1, .monotonic) == self.fail_index) {
+            self.has_induced_failure.store(true, .monotonic);
+            return error.OutOfMemory;
+        }
+        return self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+    }
+
+    /// See: JobSystem
+    pub fn createBarrier(self: *FailingJobSystem) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    /// See: JobSystem
+    pub fn destroyBarrier(self: *FailingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    /// See: JobSystem
+    pub fn waitForJobs(self: *FailingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    /// See: JobSystem. The jobs belong to `inner`, so they queue themselves there and this is not called by them.
+    pub fn queueJob(self: *FailingJobSystem, job: *JobSystem.Job) void {
+        self.inner.queueJob(job);
+    }
+
+    /// See: JobSystem (not called by the jobs, see queueJob)
+    pub fn queueJobs(self: *FailingJobSystem, jobs: []const *JobSystem.Job) void {
+        self.inner.queueJobs(jobs);
+    }
+
+    /// See: JobSystem (not called by the jobs, see queueJob)
+    pub fn freeJob(self: *FailingJobSystem, job: *JobSystem.Job) void {
+        self.inner.freeJob(job);
+    }
+};
+
 /// A minimal job system for the tests below: queued jobs are stored in a list and executed by waitForJobs, jobs are
 /// allocated with the allocator.
 const TestJobSystem = struct {
@@ -874,4 +962,123 @@ test "JobHandle removeDependencies" {
     try std.testing.expect(multi.isDone());
     try std.testing.expectEqual(@as(u32, 1000), order.getLast());
     try std.testing.expectEqual(@as(u32, 4), test_system.num_queue_jobs_calls);
+}
+
+/// A job graph like the physics update (Docs/Zolt/SimulationArchitecture.md D4, D5): `num_roots` root jobs are created
+/// behind a start gate (1 dependency, removed after the graph is built), each root spawns a child job from inside the
+/// job and adds it to the barrier. A failure while building changes nothing, a failed spawn is not an error: the root
+/// does the child's work itself.
+const SpawnGraph = struct {
+    const num_roots = 8;
+    const JobHandle = JobSystem.JobHandle;
+
+    job_system: JobSystem,
+    barrier: *JobSystem.Barrier = undefined,
+    work: [2 * num_roots]std.atomic.Value(u32) = @splat(.init(0)),
+    num_spawn_failures: std.atomic.Value(u32) = .init(0),
+
+    fn rootJob(self: *SpawnGraph, i: usize) void {
+        if (self.job_system.createJob("Child", Color.blue, .init(childJob, .{ self, num_roots + i }), .{})) |handle| {
+            var child = handle;
+            defer child.deinit();
+            self.barrier.addJob(&child);
+        } else |_| {
+            // Not an error: the running job does the work of the job it could not create
+            _ = self.num_spawn_failures.fetchAdd(1, .monotonic);
+            childJob(self, num_roots + i);
+        }
+        childJob(self, i);
+    }
+
+    fn childJob(self: *SpawnGraph, i: usize) void {
+        _ = self.work[i].fetchAdd(1, .monotonic);
+    }
+
+    /// Build the graph (no job runs while building), then open the start gate and wait
+    fn run(self: *SpawnGraph) error{OutOfMemory}!void {
+        var roots: [num_roots]JobHandle = @splat(.empty);
+        defer for (&roots) |*root| root.deinit(); // On error the jobs that were created are freed without running
+        for (&roots, 0..) |*root, i|
+            root.* = try self.job_system.createJob("Root", Color.red, .init(rootJob, .{ self, i }), .{ .num_dependencies = 1 });
+
+        self.barrier = self.job_system.createBarrier().?;
+        defer self.job_system.destroyBarrier(self.barrier);
+        self.barrier.addJobs(&roots);
+        JobHandle.removeDependencies(&roots, .{}); // Open the start gate
+        self.job_system.waitForJobs(self.barrier);
+    }
+
+    /// Fail every createJob of the graph in turn
+    fn sweep(inner: JobSystem) !void {
+        // Count the jobs, nothing fails by default
+        var counting: FailingJobSystem = .init(inner, .{});
+        try std.testing.expectEqual(inner.getMaxConcurrency(), counting.jobSystem().getMaxConcurrency());
+        var reference: SpawnGraph = .{ .job_system = counting.jobSystem() };
+        try reference.run();
+        const num_jobs = counting.num_created.load(.monotonic);
+        try std.testing.expectEqual(@as(u32, 2 * num_roots), num_jobs);
+        try std.testing.expect(!counting.has_induced_failure.load(.monotonic));
+        for (&reference.work) |*work| try std.testing.expectEqual(@as(u32, 1), work.load(.monotonic));
+
+        for (0..num_jobs + 2) |fail_index| {
+            var failing: FailingJobSystem = .init(inner, .{ .fail_index = @intCast(fail_index) });
+            var graph: SpawnGraph = .{ .job_system = failing.jobSystem() };
+            if (graph.run()) {
+                // Spawn failures (or none): the same work was done
+                try std.testing.expect(fail_index >= num_roots);
+                try std.testing.expectEqual(@as(u32, if (fail_index < num_jobs) 1 else 0), graph.num_spawn_failures.load(.monotonic));
+                for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 1), work.load(.monotonic));
+            } else |err| {
+                // Failure while building the graph: no job ran
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(fail_index < num_roots);
+                for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 0), work.load(.monotonic));
+            }
+            try std.testing.expectEqual(fail_index < num_jobs, failing.has_induced_failure.load(.monotonic));
+            try std.testing.expectEqual(if (fail_index < num_roots) @as(u32, @intCast(fail_index + 1)) else num_jobs, failing.num_created.load(.monotonic)); // A failed build stops creating jobs
+        }
+    }
+};
+
+test "FailingJobSystem fails exactly the n-th createJob" {
+    var test_system: TestJobSystem = .{ .allocator = std.testing.allocator };
+    defer test_system.deinit();
+    try SpawnGraph.sweep(test_system.jobSystem());
+    try std.testing.expectEqual(test_system.num_created, test_system.num_freed); // Every job was freed, also after a failure
+
+    // Only the n-th call fails, the calls after it succeed again; the jobs belong to the wrapped job system
+    var failing: FailingJobSystem = .init(test_system.jobSystem(), .{ .fail_index = 1 });
+    const job_system = failing.jobSystem();
+    var value: u32 = 0;
+    const Context = struct {
+        fn increment(v: *u32) void {
+            v.* += 1;
+        }
+    };
+    var first = try job_system.createJob("First", Color.red, .init(Context.increment, .{&value}), .{ .num_dependencies = 1 });
+    defer first.deinit();
+    try std.testing.expectError(error.OutOfMemory, job_system.createJob("Second", Color.red, .init(Context.increment, .{&value}), .{}));
+    var third = try job_system.createJob("Third", Color.red, .init(Context.increment, .{&value}), .{});
+    defer third.deinit();
+    try std.testing.expectEqual(test_system.jobSystem().ptr, first.getPtr().?.getJobSystem().ptr);
+    try std.testing.expectEqual(@as(u32, 3), failing.num_created.load(.monotonic));
+    try std.testing.expect(failing.has_induced_failure.load(.monotonic));
+    first.removeDependency(.{}); // Queues the job in the wrapped job system
+    const barrier = job_system.createBarrier().?;
+    barrier.addJob(&first);
+    barrier.addJob(&third);
+    job_system.waitForJobs(barrier);
+    job_system.destroyBarrier(barrier);
+    try std.testing.expectEqual(@as(u32, 2), value);
+    try std.testing.expect(first.isDone() and third.isDone());
+}
+
+test "FailingJobSystem with jobs spawning jobs on several threads" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const JobSystemThreadPool = @import("JobSystemThreadPool.zig").JobSystemThreadPool;
+
+    var pool: JobSystemThreadPool = .empty;
+    try pool.init(std.testing.allocator, std.testing.io, 256, 4, .{ .num_threads = 3 });
+    defer pool.deinit();
+    for (0..10) |_| try SpawnGraph.sweep(pool.jobSystem());
 }

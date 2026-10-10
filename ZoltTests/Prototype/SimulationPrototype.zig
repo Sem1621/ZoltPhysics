@@ -665,23 +665,9 @@ test "SimulationPrototype state recorder save, restore, validation and filter" {
     try expect(partial.getData().len < after2.getData().len);
 }
 
-/// TempAllocator that fails its n-th allocation (counts all calls; temp allocations are serialized by the job graph)
-const FailingTempAllocator = struct {
-    inner: *TempAllocatorImpl,
-    fail_index: u32 = std.math.maxInt(u32),
-    num_allocations: u32 = 0,
-
-    pub fn allocate(self: *FailingTempAllocator, size: u32) TempAllocator.Error!?TempAllocator.Block {
-        defer self.num_allocations += 1;
-        if (self.num_allocations == self.fail_index)
-            return error.OutOfMemory;
-        return self.inner.allocate(size);
-    }
-
-    pub fn free(self: *FailingTempAllocator, address: ?*anyopaque, size: u32) void {
-        self.inner.free(address, size);
-    }
-};
+/// TempAllocator that fails its n-th allocation (counts all calls; temp allocations are serialized by the job graph).
+/// Moved to the library in F1 (Zolt/Core/TempAllocator.zig).
+const FailingTempAllocator = zolt.FailingTempAllocator;
 
 /// Restore `snapshot`, run one update with enough memory and compare with `reference`
 fn expectRecovery(scene: *Scene, snapshot: *StateRecorderImpl, reference: *const StateRecorderImpl, temp: *TempAllocatorImpl, job_system: JobSystem) !void {
@@ -722,7 +708,7 @@ fn outOfTempMemory(kind: JobSystemKind) !void {
 
     // Reference: one update with enough memory, counting the temp allocations (5 while building, the rest in jobs:
     // island builder, CCD buffers, the sorted CCD bodies, the next step's contact links)
-    var counting: FailingTempAllocator = .{ .inner = &temp };
+    var counting: FailingTempAllocator = .{ .inner = temp.tempAllocator() };
     _ = try scene.system.update(delta_time, collision_steps, TempAllocator.init(&counting), jobs.jobSystem());
     var reference = StateRecorderImpl.init(allocator);
     defer reference.deinit();
@@ -735,7 +721,7 @@ fn outOfTempMemory(kind: JobSystemKind) !void {
         snapshot.rewind();
         try expect(try scene.system.restoreState(snapshot.recorder()));
 
-        var failing: FailingTempAllocator = .{ .inner = &temp, .fail_index = @intCast(fail_index) };
+        var failing: FailingTempAllocator = .{ .inner = temp.tempAllocator(), .fail_index = @intCast(fail_index) };
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, TempAllocator.init(&failing), jobs.jobSystem()));
         try expect(temp.isEmpty()); // LIFO: every block was freed at Jolt's positions, also after skipped jobs
 
@@ -756,45 +742,9 @@ test "SimulationPrototype out of temp memory at every allocation, multi threaded
     try outOfTempMemory(.{ .thread_pool = 3 });
 }
 
-/// A job system that fails its n-th createJob (wraps another job system; jobs belong to the inner job system)
-const FailingJobSystem = struct {
-    inner: JobSystem,
-    fail_index: u32 = std.math.maxInt(u32),
-    num_created: std.atomic.Value(u32) = .init(0),
-    failed: std.atomic.Value(bool) = .init(false),
-
-    pub fn jobSystem(self: *FailingJobSystem) JobSystem {
-        return .init(self);
-    }
-    pub fn getMaxConcurrency(self: *const FailingJobSystem) i32 {
-        return self.inner.getMaxConcurrency();
-    }
-    pub fn createJob(self: *FailingJobSystem, job_name: []const u8, color: Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobHandle {
-        if (self.num_created.fetchAdd(1, .monotonic) == self.fail_index) {
-            self.failed.store(true, .monotonic);
-            return error.OutOfMemory;
-        }
-        return self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
-    }
-    pub fn createBarrier(self: *FailingJobSystem) ?*JobSystem.Barrier {
-        return self.inner.createBarrier();
-    }
-    pub fn destroyBarrier(self: *FailingJobSystem, barrier: *JobSystem.Barrier) void {
-        self.inner.destroyBarrier(barrier);
-    }
-    pub fn waitForJobs(self: *FailingJobSystem, barrier: *JobSystem.Barrier) void {
-        self.inner.waitForJobs(barrier);
-    }
-    pub fn queueJob(self: *FailingJobSystem, job: *JobSystem.Job) void {
-        self.inner.vtable.queueJob(self.inner.ptr, job);
-    }
-    pub fn queueJobs(self: *FailingJobSystem, jobs: []const *JobSystem.Job) void {
-        self.inner.vtable.queueJobs(self.inner.ptr, jobs);
-    }
-    pub fn freeJob(self: *FailingJobSystem, job: *JobSystem.Job) void {
-        self.inner.vtable.freeJob(self.inner.ptr, job);
-    }
-};
+/// A job system that fails its n-th createJob (wraps another job system; jobs belong to the inner job system).
+/// Moved to the library in F1 (Zolt/Core/JobSystem.zig).
+const FailingJobSystem = zolt.FailingJobSystem;
 
 fn failingCreateJob(kind: JobSystemKind, layout: Layout) !void {
     const allocator = std.testing.allocator;
@@ -834,7 +784,7 @@ fn failingCreateJob(kind: JobSystemKind, layout: Layout) !void {
         var failing: FailingJobSystem = .{ .inner = jobs.jobSystem(), .fail_index = @intCast(fail_index) };
         if (scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem())) |errors| {
             try expect(errors.isNone());
-            if (failing.failed.load(.monotonic)) num_spawn_failures += 1;
+            if (failing.has_induced_failure.load(.monotonic)) num_spawn_failures += 1;
             try expectState(scene, &reference);
         } else |err| {
             try expectEqual(error.OutOfMemory, err);
