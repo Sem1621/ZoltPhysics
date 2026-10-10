@@ -3,6 +3,9 @@
 //! Missing: TestCollideShapeSphere, TestCollideShapeSphereVsBox (entirely NarrowPhaseQuery::CollideShape against bodies in
 //!   a PhysicsTestContext, need PhysicsTestContext / NarrowPhaseQuery, Phase 5; sCompareCollideShapeResultSphere is
 //!   only used by TestCollideShapeSphere)
+//!
+//! One check of TestTriangleVsBoxLargeSeparationDistance is not portable (not a Phase 5 item): in the no hit branch Jolt
+//! reads the uninitialized mHit of a collector that had no hit (see the comment there).
 
 const std = @import("std");
 const zolt = @import("zolt");

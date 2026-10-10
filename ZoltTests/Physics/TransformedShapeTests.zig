@@ -61,7 +61,7 @@ test "TestTransformedShape" {
     // position of the body (Body::SetPositionAndRotationInternal: inPosition + inRotation * mShape->GetCenterOfMass())
     var rtshape = try rtshape_settings.asShapeSettings().createShape(allocator);
     defer rtshape.deinit();
-    const body_id = BodyID.init(0); // The ID of the first body created in a PhysicsTestContext
+    const body_id = BodyID.init(1); // Stands in for body.GetID()
     var body_transformed_shape = TransformedShape.init(translation.addVec3(rotation.mulVec3(rtshape.getPtr().?.getCenterOfMass())), rotation, rtshape.getPtr().?, body_id, .{});
     defer body_transformed_shape.deinit();
 
