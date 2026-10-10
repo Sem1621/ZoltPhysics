@@ -1317,7 +1317,7 @@ const Gen = struct {
         const density = if (self.oneIn(4)) 1000.0 else self.plain(1, 3000);
         const user_data = self.next();
         if (self.oneIn(2))
-            return .{ .kind = 0, .radius = if (self.oneIn(5)) 1.0 else self.plain(0.05, 1.5), .density = density, .user_data = user_data };
+            return .{ .kind = 0, .radius = if (self.oneIn(5)) 1.0 else if (self.oneIn(10)) 1.0e-3 else self.plain(0.05, 1.5), .density = density, .user_data = user_data };
         var half_extent = self.plainVec(0.05, 1.5);
         if (self.oneIn(5)) half_extent = .{ 1, 1, 1 };
         var convex_radius: f32 = switch (self.index(3)) {
@@ -1384,7 +1384,8 @@ const Gen = struct {
             5...7 => 9 + self.index(32),
             else => 41 + self.index(max_sub_shapes - 40 - max_mutations), // Room for the shapes that the mutations add
         });
-        const extent: f32 = if (desc.num_sub_shapes < 10) 3.0 else if (desc.num_sub_shapes < 50) 8.0 else 15.0;
+        // Sometimes far beyond the range of the half floats of the tree nodes (HALF_FLT_MAX = 65504)
+        const extent: f32 = if (self.oneIn(25)) 1.0e5 else if (desc.num_sub_shapes < 10) 3.0 else if (desc.num_sub_shapes < 50) 8.0 else 15.0;
         for (desc.sub_shapes[0..desc.num_sub_shapes]) |*s| s.* = self.subDesc(desc.num_leaves, desc.num_nested > 0, extent);
         if (self.oneIn(15)) {
             // All sub shapes at the same position (the tree cannot partition them)
