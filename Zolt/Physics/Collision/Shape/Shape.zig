@@ -33,8 +33,13 @@
 //!   `out_materials: ?[]*const PhysicsMaterial` (D10). Counts are u32.
 //! - `GetStatsRecursive(VisitedShapes &)` inserts into a hash set, so it takes an allocator and returns
 //!   `Allocator.Error!Stats`. `SaveMaterialState` / `SaveSubShapeState` append to lists: allocator + error union.
+<<<<<<< HEAD
 //! - `ScaleShape(inScale)` creates shapes: `scaleShape(allocator, scale) Allocator.Error!ShapeResult` (the new
 //!   ScaledShape / StaticCompoundShape and the compound's settings use `allocator`).
+=======
+//!   `RestoreMaterialState` returns `Allocator.Error!void`: MeshShape / HeightFieldShape allocate their material list
+//!   (with the shape's allocator).
+>>>>>>> worktree-wf_15082832-05f-20
 //! - `sRestoreFromBinaryState` validates the sub shape type read from the stream (Jolt indexes the table with it and
 //!   calls a null `mConstruct`): an invalid value or a type without constructor is "Failed to read type id".
 //! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace, sDrawSubmergedVolumes and the
@@ -402,7 +407,8 @@ pub const Shape = struct {
         /// Outputs the material references that this shape has to out_materials.
         saveMaterialState: *const fn (self: *const Shape, allocator: Allocator, out_materials: *PhysicsMaterialList) Allocator.Error!void,
         /// Restore the material references after calling sRestoreFromBinaryState.
-        restoreMaterialState: *const fn (self: *Shape, materials: []const PhysicsMaterialRefC) void,
+        /// Shapes that keep a list of materials (MeshShape, HeightFieldShape) allocate it with the shape's allocator.
+        restoreMaterialState: *const fn (self: *Shape, materials: []const PhysicsMaterialRefC) Allocator.Error!void,
         /// Outputs the shape references that this shape has to out_sub_shapes.
         saveSubShapeState: *const fn (self: *const Shape, allocator: Allocator, out_sub_shapes: *ShapeList) Allocator.Error!void,
         /// Restore the shape references after calling sRestoreFromBinaryState.
@@ -853,8 +859,9 @@ pub const Shape = struct {
     }
 
     /// Restore the material references after calling sRestoreFromBinaryState. Note that the exact same materials need to be provided in the same order as returned by SaveMaterialState.
-    pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) void {
-        self.vtable.restoreMaterialState(self, materials);
+    /// Shapes that keep a list of materials (MeshShape, HeightFieldShape) allocate it with the shape's allocator.
+    pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
+        return self.vtable.restoreMaterialState(self, materials);
     }
 
     /// Outputs the shape references that this shape has to out_sub_shapes.
@@ -965,7 +972,7 @@ pub const Shape = struct {
             result.setError(mlresult.getError());
             return result;
         }
-        result.getPtr().?.restoreMaterialState(materials.items);
+        try result.getPtr().?.restoreMaterialState(materials.items);
 
         return result;
     }
@@ -1127,7 +1134,7 @@ pub const Shape = struct {
             _ = .{ self, allocator, out_materials };
         }
 
-        pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) void {
+        pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
             _ = self;
             if (Core.enable_asserts) std.debug.assert(materials.len == 0); // A corrupt stream can violate this, Jolt's release build ignores the materials
         }
@@ -1662,7 +1669,7 @@ test "Shape: binary state, restoreFromBinaryState and Jolt's error texts" {
         defer result.deinit();
         try testing.expectEqualStrings("Failed to restore shape", result.getError());
     }
-    for ([_][]const u8{ &.{}, &.{200}, &.{@intFromEnum(ShapeSubType.mesh)} }) |bytes| {
+    for ([_][]const u8{ &.{}, &.{200}, &.{@intFromEnum(ShapeSubType.soft_body)} }) |bytes| { // SoftBodyShape has no constructor (Jolt: mConstruct = nullptr)
         var result = try restoreFromBuffer(allocator, bytes);
         defer result.deinit();
         try testing.expectEqualStrings("Failed to read type id", result.getError());

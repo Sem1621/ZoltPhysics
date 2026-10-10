@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 42.0%** of 85391 lines in scope · **Unit tests: 41.8%** of 18321 lines
+**Library: 43.3%** of 85391 lines in scope · **Unit tests: 41.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -23,7 +23,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics` | 2% | 1 | 0 | 0 | 12 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 7% | 2 | 0 | 1 | 15 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 55% | 60 | 1 | 7 | 8 | 0 | 0 | 21948 |
+| `Jolt/Physics/Collision` | 60% | 61 | 1 | 6 | 8 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 0% | 0 | 0 | 0 | 35 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
@@ -294,7 +294,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Collision — 55%</summary>
+<details><summary>Jolt/Physics/Collision — 60%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -352,7 +352,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `EmptyShape.cpp`, `EmptyShape.h` | 114 | ⚪ stub | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
 | `GetTrianglesContext.h` | 210 | ✅ complete | `Zolt/Physics/Collision/Shape/GetTrianglesContext.zig` |
 | `HeightFieldShape.cpp`, `HeightFieldShape.h` | 2640 | ⚪ stub | `Zolt/Physics/Collision/Shape/HeightFieldShape.zig` |
-| `MeshShape.cpp`, `MeshShape.h` | 1269 | ⚪ stub | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
+| `MeshShape.cpp`, `MeshShape.h` | 1269 | ✅ complete | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
 | `MutableCompoundShape.cpp`, `MutableCompoundShape.h` | 618 | ✅ complete | `Zolt/Physics/Collision/Shape/MutableCompoundShape.zig` |
 | `OffsetCenterOfMassShape.cpp`, `OffsetCenterOfMassShape.h` | 271 | ✅ complete | `Zolt/Physics/Collision/Shape/OffsetCenterOfMassShape.zig` |
 | `PlaneShape.cpp`, `PlaneShape.h` | 548 | ⚪ stub | `Zolt/Physics/Collision/Shape/PlaneShape.zig` |

@@ -275,6 +275,7 @@ pub const GetTrianglesContextMultiVertexList = @import("Physics/Collision/Shape/
 pub const GetTrianglesContextVertexList = @import("Physics/Collision/Shape/GetTrianglesContext.zig").GetTrianglesContextVertexList;
 pub const HeightFieldShape = @import("Physics/Collision/Shape/HeightFieldShape.zig").HeightFieldShape;
 pub const MeshShape = @import("Physics/Collision/Shape/MeshShape.zig").MeshShape;
+pub const MeshShapeSettings = @import("Physics/Collision/Shape/MeshShape.zig").MeshShapeSettings;
 pub const MutableCompoundShape = @import("Physics/Collision/Shape/MutableCompoundShape.zig").MutableCompoundShape;
 pub const MutableCompoundShapeSettings = @import("Physics/Collision/Shape/MutableCompoundShape.zig").MutableCompoundShapeSettings;
 pub const OffsetCenterOfMassShape = @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig").OffsetCenterOfMassShape;
