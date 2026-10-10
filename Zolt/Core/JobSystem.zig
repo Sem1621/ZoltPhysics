@@ -1023,16 +1023,20 @@ const SpawnGraph = struct {
         for (0..num_jobs + 2) |fail_index| {
             var failing: FailingJobSystem = .init(inner, .{ .fail_index = @intCast(fail_index) });
             var graph: SpawnGraph = .{ .job_system = failing.jobSystem() };
-            if (graph.run()) {
+            var build_failed = false;
+            graph.run() catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                build_failed = true;
+            };
+            if (build_failed) {
+                // Failure while building the graph: no job ran
+                try std.testing.expect(fail_index < num_roots);
+                for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 0), work.load(.monotonic));
+            } else {
                 // Spawn failures (or none): the same work was done
                 try std.testing.expect(fail_index >= num_roots);
                 try std.testing.expectEqual(@as(u32, if (fail_index < num_jobs) 1 else 0), graph.num_spawn_failures.load(.monotonic));
                 for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 1), work.load(.monotonic));
-            } else |err| {
-                // Failure while building the graph: no job ran
-                try std.testing.expectEqual(error.OutOfMemory, err);
-                try std.testing.expect(fail_index < num_roots);
-                for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 0), work.load(.monotonic));
             }
             try std.testing.expectEqual(fail_index < num_jobs, failing.has_induced_failure.load(.monotonic));
             try std.testing.expectEqual(if (fail_index < num_roots) @as(u32, @intCast(fail_index + 1)) else num_jobs, failing.num_created.load(.monotonic)); // A failed build stops creating jobs
