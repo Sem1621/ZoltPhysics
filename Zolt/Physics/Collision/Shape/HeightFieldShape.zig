@@ -1007,8 +1007,8 @@ pub const HeightFieldShape = struct {
     /// Calculate bit mask for all active edges in the heightfield for a specific region
     fn calculateActiveEdges(self: *HeightFieldShape, x0: u32, y0: u32, size_x: u32, size_y: u32, heights: [*]const f32, heights_start_x: u32, heights_start_y: u32, heights_stride: isize, heights_scale: f32, active_edge_cos_threshold_angle: f32, temp_allocator: TempAllocator) Allocator.Error!void {
         // Limit the block size so we don't allocate more than 64K memory from the temp allocator
-        const block_size_x = @min(size_x, 44);
-        const block_size_y = @min(size_y, 44);
+        const block_size_x: u32 = @min(size_x, 44);
+        const block_size_y: u32 = @min(size_y, 44);
 
         // Allocate temporary buffer for normals
         const normals_size: u32 = 2 * (block_size_x + 1) * (block_size_y + 1) * @sizeOf(Vec3);
