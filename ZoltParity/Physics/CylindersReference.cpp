@@ -380,7 +380,7 @@ void jolt_cylinders_properties(const ShapeDesc *inDesc, const PropertiesInput *i
 	o.mNumTriangles = shape->GetStats().mNumTriangles;
 	o.mSubShapeIDBits = shape->GetSubShapeIDBitsRecursive();
 	SubShapeID id = MakeSubShapeID(inInput->mSubShapeID);
-	o.mMaterialIsDefault = shape->GetMaterial(id) == PhysicsMaterial::sDefault? 1 : 0;
+	o.mMaterialIsDefault = shape->GetMaterial(SubShapeID()) == PhysicsMaterial::sDefault? 1 : 0; // A convex shape asserts an empty ID
 	SubShapeID leaf_remainder;
 	o.mLeafIsSelf = shape->GetLeafShape(id, leaf_remainder) == shape.GetPtr()? 1 : 0;
 	o.mLeafRemainder = leaf_remainder.GetValue();

@@ -26,6 +26,7 @@ test {
     _ = @import("Physics/BasicsParity.zig");
     _ = @import("Physics/CompositeParity.zig");
     _ = @import("Physics/ConvexParity.zig");
+    _ = @import("Physics/CylindersParity.zig");
     _ = @import("Physics/FiltersParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
 }
