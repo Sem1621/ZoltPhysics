@@ -2267,7 +2267,7 @@ test "CompoundShape visitors: testBounds of every visitor" {
 test "CompoundShape: register (cast compound vs any shape)" {
     const registry = &RegisterTypes.registry;
     for (ShapeFile.compound_sub_shape_types) |s1| {
-        for ([_]ShapeSubType{ .sphere, .box, .convex_hull, .rotated_translated, .mesh, .user1, .empty }) |s2|
+        for ([_]ShapeSubType{ .sphere, .box, .convex_hull, .height_field, .mesh, .user1, .empty }) |s2| // The decorated shapes register later and override (compound, decorator)
             try testing.expect(registry.getCastShape(s1, s2) == &CompoundShape.castCompoundVsShape);
     }
     try testing.expect(registry.getCastShape(.user4, .user1) != &CompoundShape.castCompoundVsShape); // Only the compound sub types

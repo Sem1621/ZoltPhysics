@@ -53,6 +53,7 @@ test {
     _ = @import("Physics/CollisionGroupTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
+    _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
