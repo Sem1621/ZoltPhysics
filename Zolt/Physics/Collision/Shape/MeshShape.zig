@@ -1426,3 +1426,742 @@ pub const MeshShape = struct {
         r.registerCastShape(.sphere, .mesh, castSphereVsMesh);
     }
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (no Jolt test file tests MeshShape without a PhysicsSystem; the cases of the shared shape test files that
+// MeshShape enables are ported with them, the bit exact comparison with Jolt is in ZoltParity/Physics/MeshShapeParity.zig)
+
+const testing = std.testing;
+const math = @import("../../../Math/Math.zig");
+const Ref = @import("../../../Core/Reference.zig").Ref;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const ClosestHitCollisionCollector = CollisionCollectorImpl.ClosestHitCollisionCollector;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const BoxShape = @import("BoxShape.zig").BoxShape;
+const RegisterTypes = @import("../../../RegisterTypes.zig");
+
+/// The 12 triangles of the box [-1, 1]^3, counter clockwise seen from the outside, 2 per face
+fn boxTriangles(num_materials: u32) [12]Triangle {
+    const v = [_]Vec3{
+        Vec3.init(-1, 1, -1),  Vec3.init(-1, 1, 1),   Vec3.init(1, 1, 1),
+        Vec3.init(-1, 1, -1),  Vec3.init(1, 1, 1),    Vec3.init(1, 1, -1),
+        Vec3.init(-1, -1, -1), Vec3.init(1, -1, -1),  Vec3.init(1, -1, 1),
+        Vec3.init(-1, -1, -1), Vec3.init(1, -1, 1),   Vec3.init(-1, -1, 1),
+        Vec3.init(-1, 1, -1),  Vec3.init(-1, -1, -1), Vec3.init(-1, -1, 1),
+        Vec3.init(-1, 1, -1),  Vec3.init(-1, -1, 1),  Vec3.init(-1, 1, 1),
+        Vec3.init(1, 1, 1),    Vec3.init(1, -1, 1),   Vec3.init(1, -1, -1),
+        Vec3.init(1, 1, 1),    Vec3.init(1, -1, -1),  Vec3.init(1, 1, -1),
+        Vec3.init(-1, 1, 1),   Vec3.init(-1, -1, 1),  Vec3.init(1, -1, 1),
+        Vec3.init(-1, 1, 1),   Vec3.init(1, -1, 1),   Vec3.init(1, 1, 1),
+        Vec3.init(-1, 1, -1),  Vec3.init(1, 1, -1),   Vec3.init(1, -1, -1),
+        Vec3.init(-1, 1, -1),  Vec3.init(1, -1, -1),  Vec3.init(-1, -1, -1),
+    };
+    var triangles: [12]Triangle = undefined;
+    for (&triangles, 0..) |*t, i|
+        t.* = .init(v[3 * i], v[3 * i + 1], v[3 * i + 2], .{ .material_index = if (num_materials == 0) 0 else @intCast((i / 2) % num_materials), .user_data = @intCast(100 + i) });
+    return triangles;
+}
+
+/// A height field like grid of n x n cells (2 triangles each), user data = triangle index
+const TestGrid = struct {
+    vertices: VertexList = .empty,
+    triangles: IndexedTriangleList = .empty,
+
+    fn init(allocator: Allocator, n: u32) !TestGrid {
+        var grid: TestGrid = .{};
+        errdefer grid.deinit(allocator);
+        for (0..n + 1) |z|
+            for (0..n + 1) |x| {
+                const fx: f32 = @floatFromInt(x);
+                const fz: f32 = @floatFromInt(z);
+                try grid.vertices.append(allocator, .init(fx, @as(f32, @floatFromInt((x * 7 + z * 13) % 5)) * 0.25, fz));
+            };
+        for (0..n) |z|
+            for (0..n) |x| {
+                const v: u32 = @intCast(z * (n + 1) + x);
+                for ([_][3]u32{ .{ v, v + n + 1, v + 1 }, .{ v + 1, v + n + 1, v + n + 2 } }) |idx| {
+                    const t: u32 = @intCast(grid.triangles.items.len);
+                    try grid.triangles.append(allocator, .init(idx[0], idx[1], idx[2], .{ .user_data = t }));
+                }
+            };
+        return grid;
+    }
+
+    fn deinit(self: *TestGrid, allocator: Allocator) void {
+        self.vertices.deinit(allocator);
+        self.triangles.deinit(allocator);
+    }
+};
+
+/// Create the shape of `settings` and return the result (the caller deinits it)
+fn createMesh(settings: *MeshShapeSettings, allocator: Allocator) !ShapeResult {
+    return settings.asShapeSettings().createShape(allocator);
+}
+
+/// Collects every triangle of a mesh with its active edges and sub shape ID (walkTreePerTriangle)
+const TriangleRecorder = struct {
+    vertices: [64][3]Vec3 = undefined,
+    active_edges: [64]u8 = undefined,
+    ids: [64]SubShapeID = undefined,
+    count: u32 = 0,
+
+    pub fn shouldAbort(self: *const TriangleRecorder) bool {
+        _ = self;
+        return false;
+    }
+
+    pub fn shouldVisitNode(self: *const TriangleRecorder, stack_top: i32) bool {
+        _ = .{ self, stack_top };
+        return true;
+    }
+
+    pub fn visitNodes(self: *const TriangleRecorder, min_x: Vec4, min_y: Vec4, min_z: Vec4, max_x: Vec4, max_y: Vec4, max_z: Vec4, properties: *UVec4, stack_top: i32) i32 {
+        _ = .{ self, stack_top };
+        const valid = UVec4.bitOr(UVec4.bitOr(Vec4.less(min_x, max_x), Vec4.less(min_y, max_y)), Vec4.less(min_z, max_z));
+        return countAndSortTrues(valid, properties);
+    }
+
+    pub fn visitTriangle(self: *TriangleRecorder, v0: Vec3, v1: Vec3, v2: Vec3, active_edges: u8, sub_shape_id2: SubShapeID) void {
+        self.vertices[self.count] = .{ v0, v1, v2 };
+        self.active_edges[self.count] = active_edges;
+        self.ids[self.count] = sub_shape_id2;
+        self.count += 1;
+    }
+
+    /// The active edges of the triangle with vertices v0, v1, v2 (in this order, up to the quantization of the vertices)
+    fn activeEdgesOf(self: *const TriangleRecorder, v0: Vec3, v1: Vec3, v2: Vec3) ?u8 {
+        for (0..self.count) |i|
+            if (self.vertices[i][0].isClose(v0, .{ .max_dist_sq = 1.0e-10 }) and self.vertices[i][1].isClose(v1, .{ .max_dist_sq = 1.0e-10 }) and self.vertices[i][2].isClose(v2, .{ .max_dist_sq = 1.0e-10 }))
+                return self.active_edges[i];
+        return null;
+    }
+};
+
+test "MeshShapeSettings: constructors, Sanitize (degenerate and duplicate triangles)" {
+    const allocator = testing.allocator;
+
+    // From a triangle list: Indexify welds the 36 vertices of the box to 8
+    var box_triangles = boxTriangles(0);
+    var from_triangles = try MeshShapeSettings.init(allocator, &box_triangles, .{});
+    defer from_triangles.deinit();
+    try testing.expectEqual(@as(usize, 8), from_triangles.triangle_vertices.items.len);
+    try testing.expectEqual(@as(usize, 12), from_triangles.indexed_triangles.items.len);
+    try testing.expectEqual(@as(u32, 8), from_triangles.max_triangles_per_leaf);
+    try testing.expectEqual(@as(f32, 0.996195), from_triangles.active_edge_cos_threshold_angle);
+    try testing.expect(!from_triangles.per_triangle_user_data);
+    try testing.expectEqual(MeshShapeSettings.BuildQuality.favor_runtime_performance, from_triangles.build_quality);
+
+    // Indexed: a degenerate triangle (collinear), a duplicate (rotated, same material and user data), a triangle with
+    // the same vertices but other user data (not a duplicate) and a triangle that is degenerate after quantization
+    const vertices = [_]Float3{ .init(0, 0, 0), .init(1, 0, 0), .init(0, 1, 0), .init(2, 0, 0), .init(100000, 100000, 100000), .init(0.01, 0, 0), .init(0, 0.01, 0) };
+    const triangles = [_]IndexedTriangle{
+        .init(0, 1, 2, .{}),
+        .init(0, 1, 3, .{}), // Collinear
+        .init(1, 2, 0, .{}), // Duplicate of triangle 0
+        .init(2, 0, 1, .{ .user_data = 1 }), // Not a duplicate: different user data
+        .init(0, 2, 4, .{}),
+        .init(0, 5, 6, .{}), // Degenerate after quantization
+    };
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+    var indexed = try MeshShapeSettings.initIndexed(allocator, &vertices, &triangles, .{ .materials = &.{ material.material(), material.material() } });
+    defer indexed.deinit();
+    try testing.expectEqual(@as(u32, 3), material.material().getRefCount());
+    try testing.expectEqual(@as(usize, 3), indexed.indexed_triangles.items.len);
+    try testing.expectEqual(@as(usize, 7), indexed.triangle_vertices.items.len);
+    // Triangles are tested back to front and removed by swapping the last one into the slot, so the duplicate that is
+    // kept is the last one
+    try testing.expect(indexed.indexed_triangles.items[0].eql(.init(2, 0, 1, .{ .user_data = 1 })));
+    try testing.expect(indexed.indexed_triangles.items[1].eql(.init(0, 2, 4, .{})));
+    try testing.expect(indexed.indexed_triangles.items[2].eql(.init(1, 2, 0, .{})));
+
+    // Heap settings
+    const heap = try MeshShapeSettings.createIndexed(allocator, &vertices, &triangles, .{});
+    var heap_ref = Ref(ShapeSettings).init(heap.asShapeSettings());
+    defer heap_ref.deinit();
+    const heap2 = try MeshShapeSettings.create(allocator, &box_triangles, .{ .materials = &.{material.material()} });
+    var heap2_ref = Ref(ShapeSettings).init(heap2.asShapeSettings());
+    defer heap2_ref.deinit();
+    try testing.expectEqual(@as(usize, 12), heap2.indexed_triangles.items.len);
+    try testing.expectEqual(@as(u32, 4), material.material().getRefCount());
+}
+
+test "MeshShape: Jolt's error texts" {
+    const allocator = testing.allocator;
+    const vertices = [_]Float3{ .init(0, 0, 0), .init(1, 0, 0), .init(0, 1, 0), .init(2, 0, 0), .init(100000, 100000, 100000), .init(0.01, 0, 0), .init(0, 0.01, 0) };
+
+    const Case = struct { triangles: []const IndexedTriangle, num_materials: u32 = 0, max_triangles_per_leaf: u32 = 8, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .triangles = &.{}, .expected = "Need triangles to create a mesh shape!" },
+        .{ .triangles = &.{ .init(0, 1, 3, .{}), .init(0, 1, 2, .{}) }, .expected = "Triangle 0 is degenerate!" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 1, 3, .{}), .init(2, 1, 0, .{}) }, .expected = "Triangle 1 is degenerate!" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 2, 4, .{}), .init(0, 5, 6, .{}) }, .expected = "Triangle 2 is degenerate!" }, // In quantized space only
+        .{ .triangles = &.{ .init(0, 1, 9, .{}), .init(0, 1, 3, .{}), .init(0, 7, 8, .{}) }, .expected = "Vertex index 7 is beyond vertex list (size: 7)" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 2, 4, .{}) }, .num_materials = 33, .expected = "Supporting max 32 materials per mesh" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{ .material_index = 2 }), .init(0, 2, 4, .{ .material_index = 1 }) }, .num_materials = 2, .expected = "Triangle material 2 is beyond material list (size: 2)" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 2, 4, .{ .material_index = 1 }) }, .expected = "No materials present, all triangles should have material index 0" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 2, 4, .{}) }, .max_triangles_per_leaf = 0, .expected = "Invalid max triangles per leaf" },
+        .{ .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 2, 4, .{}) }, .max_triangles_per_leaf = 9, .expected = "Invalid max triangles per leaf" },
+    };
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+
+    for (cases) |c| {
+        // The arrays are set directly: the constructors sanitize the mesh
+        var settings = MeshShapeSettings.initDefault(allocator);
+        defer settings.deinit();
+        try settings.triangle_vertices.appendSlice(allocator, &vertices);
+        try settings.indexed_triangles.appendSlice(allocator, c.triangles);
+        for (0..c.num_materials) |_| try settings.materials.append(allocator, .init(material.material()));
+        settings.max_triangles_per_leaf = c.max_triangles_per_leaf;
+        var result = try createMesh(&settings, allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings(c.expected, result.getError());
+    }
+    try testing.expectEqual(@as(u32, 1), material.material().getRefCount()); // The failed shapes released the materials
+
+    // The same mesh without errors
+    var settings = MeshShapeSettings.initDefault(allocator);
+    defer settings.deinit();
+    try settings.triangle_vertices.appendSlice(allocator, &vertices);
+    try settings.indexed_triangles.appendSlice(allocator, &.{ IndexedTriangle.init(0, 1, 2, .{}), IndexedTriangle.init(0, 2, 4, .{}) });
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    try testing.expect(result.isValid());
+}
+
+test "MeshShape: queries on a closed box mesh (bounds, materials, normals, faces, rays, points, triangles, stats)" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    var materials: [3]*PhysicsMaterialSimple = undefined;
+    var material_refs: [3]RefConst(PhysicsMaterial) = undefined;
+    for (&materials, &material_refs, 0..) |*m, *r, i| {
+        m.* = try PhysicsMaterialSimple.create(allocator, "Mat", Color.getDistinctColor(@intCast(i)));
+        r.* = .init(m.*.material());
+    }
+    defer for (&material_refs) |*r| r.deinit();
+
+    var box_triangles = boxTriangles(3);
+    var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{ .materials = &.{ materials[0].material(), materials[1].material(), materials[2].material() } });
+    defer settings.deinit();
+    settings.per_triangle_user_data = true;
+    settings.max_triangles_per_leaf = 4;
+    settings.asShapeSettings().user_data = 77;
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    const mesh = shape.cast(MeshShape);
+
+    try expect(shape.getType() == .mesh and shape.getSubType() == .mesh);
+    try testing.expectEqual(@as(u64, 77), shape.getUserData());
+    try expect(shape.mustBeStatic());
+    try expect(shape.getLocalBounds().eql(.init(Vec3.replicate(-1), Vec3.replicate(1))));
+    try expect(shape.getCenterOfMass().eql(Vec3.zero()));
+    try testing.expectEqual(@as(f32, 0.0), shape.getInnerRadius());
+    try testing.expectEqual(@as(f32, 0.0), shape.getVolume());
+    const p = shape.getMassProperties();
+    try testing.expectEqual(@as(f32, 0.0), p.mass);
+    try expect(p.inertia.eql(Mat44.zero()));
+    try testing.expectEqual(@as(usize, 3), mesh.getMaterialList().len);
+    const bits = shape.getSubShapeIDBitsRecursive();
+    try expect(bits > MeshShape.num_triangle_bits and bits <= 32);
+
+    // Stats: the triangles in the tree
+    const stats = shape.getStats();
+    try testing.expectEqual(@as(u32, 12), stats.num_triangles);
+    try testing.expectEqual(@sizeOf(MeshShape) + 3 * @sizeOf(RefConst(PhysicsMaterial)) + mesh.tree.vector.items.len, stats.size_bytes);
+
+    // Every triangle once, with its material, user data and sub shape ID
+    var recorder: TriangleRecorder = .{};
+    const creator = SubShapeIDCreator.pushID(.{}, 5, 3);
+    mesh.walkTreePerTriangle(creator, &recorder);
+    try testing.expectEqual(@as(u32, 12), recorder.count);
+    var seen = [_]bool{false} ** 12;
+    for (0..12) |i| {
+        // Remove the prefix of the creator
+        const id = recorder.ids[i].popID(3);
+        try testing.expectEqual(@as(u32, 5), id.id);
+        const user_data = mesh.getTriangleUserData(id.remainder);
+        try expect(user_data >= 100 and user_data < 112 and !seen[user_data - 100]);
+        seen[user_data - 100] = true;
+        const t = box_triangles[user_data - 100];
+        try expect(recorder.vertices[i][0].eql(Vec3.fromFloat3(t.v[0])) and recorder.vertices[i][1].eql(Vec3.fromFloat3(t.v[1])) and recorder.vertices[i][2].eql(Vec3.fromFloat3(t.v[2])));
+        try testing.expectEqual(t.material_index, mesh.getMaterialIndex(id.remainder));
+        try expect(shape.getMaterial(id.remainder) == materials[t.material_index].material());
+        try testing.expectEqual(@as(u8, if (user_data % 2 == 0) 0b011 else 0b110), recorder.active_edges[i]); // The 90 degree edges of the box are active, the diagonal of a face is not
+
+        // Surface normal: the outward normal of the face
+        const normal = shape.getSurfaceNormal(id.remainder, Vec3.zero());
+        const expected_normal = Vec3.fromFloat3(t.v[1]).sub(Vec3.fromFloat3(t.v[0])).cross(Vec3.fromFloat3(t.v[2]).sub(Vec3.fromFloat3(t.v[0]))).normalized();
+        try expect(normal.isClose(expected_normal, .{ .max_dist_sq = 1.0e-12 }));
+
+        // Supporting face: the triangle transformed, the winding flips with an inside out scale
+        var face: Shape.SupportingFace = .empty;
+        const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.3), Vec3.init(1, 2, 3));
+        shape.getSupportingFace(id.remainder, Vec3.axisX(), Vec3.init(2, 1, 1), transform, &face);
+        try testing.expectEqual(@as(u32, 3), face.len);
+        try expect(face.get(1).isClose(transform.mulVec3(Vec3.fromFloat3(t.v[1]).mul(Vec3.init(2, 1, 1))), .{ .max_dist_sq = 1.0e-10 }));
+        shape.getSupportingFace(id.remainder, Vec3.axisX(), Vec3.init(-2, 1, 1), transform, &face);
+        try expect(face.get(1).isClose(transform.mulVec3(Vec3.fromFloat3(t.v[2]).mul(Vec3.init(-2, 1, 1))), .{ .max_dist_sq = 1.0e-10 }));
+    }
+
+    // Ray cast (single hit): the top face, then nothing closer
+    var hit: RayCastResult = .{};
+    const ray = RayCast.init(Vec3.init(0.25, 3, 0.5), Vec3.init(0, -4, 0));
+    try expect(shape.castRay(ray, creator, &hit));
+    try testing.expectEqual(@as(f32, 0.5), hit.fraction);
+    {
+        const id = hit.sub_shape_id2.popID(3);
+        try testing.expectEqual(@as(u32, 5), id.id);
+        try expect(shape.getSurfaceNormal(id.remainder, Vec3.zero()).isClose(Vec3.axisY(), .{ .max_dist_sq = 1.0e-12 }));
+    }
+    try expect(!shape.castRay(ray, creator, &hit));
+    hit.fraction = 0.0; // Early out
+    try expect(!shape.castRay(ray, creator, &hit));
+
+    // Ray cast (collector): back faces, early out fraction, the context's body ID
+    var settings_ray: RayCastSettings = .{};
+    var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+    defer hits.deinit();
+    const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(9), .{});
+    hits.base.setContext(&context);
+    shape.castRayCollector(ray, &settings_ray, creator, &hits.base, &.{});
+    try hits.checkError();
+    try testing.expectEqual(@as(usize, 1), hits.hits.items.len);
+    try testing.expectEqual(@as(f32, 0.5), hits.hits.items[0].fraction);
+    try expect(hits.hits.items[0].body_id.eql(.init(9)));
+    hits.reset();
+    settings_ray.back_face_mode_triangles = .collide_with_back_faces;
+    shape.castRayCollector(ray, &settings_ray, creator, &hits.base, &.{});
+    try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+    try testing.expectEqual(@as(f32, 1.5), hits.hits.items[0].fraction + hits.hits.items[1].fraction); // 0.5 and 1.0
+    hits.reset();
+    hits.base.updateEarlyOutFraction(0.75);
+    shape.castRayCollector(ray, &settings_ray, creator, &hits.base, &.{});
+    try testing.expectEqual(@as(usize, 1), hits.hits.items.len);
+
+    // Collide point (odd number of hits of a ray means inside)
+    var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer points.deinit();
+    shape.collidePoint(Vec3.init(0.1, 0.2, 0.3), creator, &points.base, &.{});
+    shape.collidePoint(Vec3.init(1.1, 0.2, 0.3), creator, &points.base, &.{});
+    shape.collidePoint(Vec3.init(0.1, -1.5, 0.3), creator, &points.base, &.{});
+    try points.checkError();
+    try testing.expectEqual(@as(usize, 1), points.hits.items.len);
+    try testing.expectEqual(@as(u32, 5), points.hits.items[0].sub_shape_id2.popID(3).id);
+
+    // GetTrianglesStart / Next: 12 triangles, the materials of the triangles
+    {
+        var ctx: Shape.GetTrianglesContext = .{};
+        const transform_rotation = Quat.rotation(Vec3.axisZ(), 0.5);
+        shape.getTrianglesStart(&ctx, AABox.biggest(), Vec3.init(1, 2, 3), transform_rotation, Vec3.init(1, 2, -1));
+        var out_vertices: [3 * 32]Float3 = undefined;
+        var out_materials: [32]*const PhysicsMaterial = undefined;
+        const n = shape.getTrianglesNext(&ctx, 32, &out_vertices, &out_materials);
+        try testing.expectEqual(@as(u32, 12), n);
+        try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&ctx, 32, &out_vertices, &out_materials));
+        const to_world = Mat44.rotationTranslation(transform_rotation, Vec3.init(1, 2, 3)).mul(Mat44.scaleVec3(Vec3.init(1, 2, -1)));
+        for (0..12) |t| {
+            // Inside out scale: the winding is flipped, find the triangle by its first vertex and the other two swapped
+            const w = [_]Vec3{ Vec3.fromFloat3(out_vertices[3 * t]), Vec3.fromFloat3(out_vertices[3 * t + 1]), Vec3.fromFloat3(out_vertices[3 * t + 2]) };
+            var found = false;
+            for (box_triangles) |bt| {
+                if (w[0].isClose(to_world.mulVec3(Vec3.fromFloat3(bt.v[0])), .{ .max_dist_sq = 1.0e-10 }) and w[1].isClose(to_world.mulVec3(Vec3.fromFloat3(bt.v[2])), .{ .max_dist_sq = 1.0e-10 }) and w[2].isClose(to_world.mulVec3(Vec3.fromFloat3(bt.v[1])), .{ .max_dist_sq = 1.0e-10 })) {
+                    try expect(out_materials[t] == materials[bt.material_index].material());
+                    found = true;
+                }
+            }
+            try expect(found);
+        }
+
+        // A box that only touches the top of the mesh: fewer triangles
+        shape.getTrianglesStart(&ctx, .init(Vec3.init(-5, 4.5, -5), Vec3.init(5, 6, 5)), Vec3.init(0, 4, 0), Quat.identity(), Vec3.one());
+        const top = shape.getTrianglesNext(&ctx, 32, &out_vertices, null);
+        try expect(top > 0 and top < 12);
+    }
+}
+
+test "MeshShape: GetTrianglesNext continues where the buffer was full, the default material" {
+    const allocator = testing.allocator;
+
+    var grid = try TestGrid.init(allocator, 6); // 72 triangles
+    defer grid.deinit(allocator);
+    var settings = try MeshShapeSettings.initIndexed(allocator, grid.vertices.items, grid.triangles.items, .{});
+    defer settings.deinit();
+    settings.build_quality = .favor_build_speed;
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    try testing.expectEqual(@as(u32, 72), shape.getStats().num_triangles);
+
+    var ctx: Shape.GetTrianglesContext = .{};
+    shape.getTrianglesStart(&ctx, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+    var out_vertices: [3 * 32]Float3 = undefined;
+    var out_materials: [32]*const PhysicsMaterial = undefined;
+    var total: u32 = 0;
+    var calls: u32 = 0;
+    while (true) {
+        const n = shape.getTrianglesNext(&ctx, 32, &out_vertices, &out_materials);
+        if (n == 0) break;
+        try testing.expect(n <= 32);
+        for (out_materials[0..n]) |m| try testing.expect(m == PhysicsMaterial.default);
+        total += n;
+        calls += 1;
+    }
+    try testing.expectEqual(@as(u32, 72), total);
+    try testing.expect(calls >= 3);
+    try testing.expect(shape.getMaterial(.{ .value = 0 }) == PhysicsMaterial.default);
+}
+
+test "MeshShape: active edges (coplanar, convex, concave, 3 triangles on an edge, negative threshold)" {
+    const allocator = testing.allocator;
+
+    const Case = struct { vertices: []const Float3, triangles: []const IndexedTriangle, threshold: f32 = 0.996195, expected: []const u8 };
+    const cases = [_]Case{
+        // A quad of 2 coplanar triangles: the shared edge (edge 2 of the first, edge 0 of the second) is inactive
+        .{ .vertices = &.{ .init(0, 0, 0), .init(0, 0, 1), .init(1, 0, 1), .init(1, 0, 0) }, .triangles = &.{ .init(0, 1, 2, .{}), .init(2, 3, 0, .{}) }, .expected = &.{ 0b011, 0b011 } },
+        // A convex fold of 90 degrees (a floor facing up and a wall below it facing away): active
+        .{ .vertices = &.{ .init(0, 0, 0), .init(0, 0, 1), .init(1, 0, 1), .init(0, -1, 0), .init(0, -1, 1) }, .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 3, 4, .{}), .init(0, 4, 1, .{}) }, .expected = &.{ 0b111, 0b011, 0b110 } },
+        // A concave fold of 90 degrees (a floor facing up and a wall above it facing the floor): inactive
+        .{ .vertices = &.{ .init(0, 0, 0), .init(0, 0, 1), .init(1, 0, 1), .init(0, 1, 0), .init(0, 1, 1) }, .triangles = &.{ .init(0, 1, 2, .{}), .init(0, 3, 4, .{}), .init(0, 4, 1, .{}) }, .expected = &.{ 0b110, 0b011, 0b010 } },
+        // 3 triangles share the edge 0-1: active for all of them
+        .{ .vertices = &.{ .init(0, 0, 0), .init(0, 0, 1), .init(1, 0, 1), .init(-1, 0, 1), .init(0, 1, 1) }, .triangles = &.{ .init(0, 1, 2, .{}), .init(1, 0, 3, .{}), .init(0, 1, 4, .{}) }, .expected = &.{ 0b111, 0b111, 0b111 } },
+        // Negative threshold: all edges are active
+        .{ .vertices = &.{ .init(0, 0, 0), .init(0, 0, 1), .init(1, 0, 1), .init(1, 0, 0) }, .triangles = &.{ .init(0, 1, 2, .{}), .init(2, 3, 0, .{}) }, .threshold = -1.0, .expected = &.{ 0b111, 0b111 } },
+    };
+
+    for (cases, 0..) |c, case_index| {
+        errdefer std.debug.print("case {d}\n", .{case_index});
+        var settings = try MeshShapeSettings.initIndexed(allocator, c.vertices, c.triangles, .{});
+        defer settings.deinit();
+        settings.active_edge_cos_threshold_angle = c.threshold;
+        var result = try createMesh(&settings, allocator);
+        defer result.deinit();
+        const mesh = result.getPtr().?.cast(MeshShape);
+
+        var recorder: TriangleRecorder = .{};
+        mesh.walkTreePerTriangle(.{}, &recorder);
+        try testing.expectEqual(@as(u32, @intCast(c.triangles.len)), recorder.count);
+        for (c.triangles, c.expected) |t, expected| {
+            const v = [_]Vec3{ Vec3.fromFloat3(c.vertices[t.idx[0]]), Vec3.fromFloat3(c.vertices[t.idx[1]]), Vec3.fromFloat3(c.vertices[t.idx[2]]) };
+            try testing.expectEqual(@as(?u8, expected), recorder.activeEdgesOf(v[0], v[1], v[2]));
+        }
+    }
+}
+
+test "MeshShape: collide and cast convex shapes vs the mesh (CollisionDispatch), soft body vertices" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    var grid = try TestGrid.init(allocator, 4);
+    defer grid.deinit(allocator);
+    var settings = try MeshShapeSettings.initIndexed(allocator, grid.vertices.items, grid.triangles.items, .{});
+    defer settings.deinit();
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const mesh = result.getPtr().?;
+
+    var sphere = SphereShape.init(allocator, 0.5, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    var box = BoxShape.init(allocator, Vec3.replicate(0.5), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    const mesh_transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.2), Vec3.init(-2, 0, -2));
+    const shapes = [_]*const Shape{ sphere.asShape(), box.asShape() };
+    for (shapes) |convex| {
+        // Collide: the convex shape sinks into the grid (the highest vertex is at y = 1)
+        var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer collector.deinit();
+        var collide_settings: CollideShapeSettings = .{};
+        collide_settings.back_face_mode = .collide_with_back_faces;
+        CollisionDispatch.collideShapeVsShape(convex, mesh, Vec3.one(), Vec3.one(), Mat44.translation(Vec3.init(0, 0.5, 0)), mesh_transform, .{}, .{}, &collide_settings, &collector.base, &.{});
+        try collector.checkError();
+        try expect(collector.hits.items.len > 0);
+
+        // Reversed: the mesh vs the convex shape
+        var reversed = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer reversed.deinit();
+        CollisionDispatch.collideShapeVsShape(mesh, convex, Vec3.one(), Vec3.one(), mesh_transform, Mat44.translation(Vec3.init(0, 0.5, 0)), .{}, .{}, &collide_settings, &reversed.base, &.{});
+        try reversed.checkError();
+        try testing.expectEqual(collector.hits.items.len, reversed.hits.items.len);
+
+        // Far away: nothing
+        var none = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer none.deinit();
+        CollisionDispatch.collideShapeVsShape(convex, mesh, Vec3.one(), Vec3.one(), Mat44.translation(Vec3.init(0, 10, 0)), mesh_transform, .{}, .{}, &collide_settings, &none.base, &.{});
+        try testing.expectEqual(@as(usize, 0), none.hits.items.len);
+
+        // Cast down onto the grid: the closest hit
+        var cast_collector = ClosestHitCollisionCollector(CastShapeCollector).init();
+        defer cast_collector.deinit();
+        const cast = ShapeCast.init(convex, Vec3.one(), Mat44.translation(Vec3.init(0, 5, 0)), Vec3.init(0, -10, 0));
+        var cast_settings: ShapeCastSettings = .{};
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast, &cast_settings, mesh, Vec3.one(), &.{}, mesh_transform, .{}, .{}, &cast_collector.base);
+        try expect(cast_collector.hadHit());
+        try expect(cast_collector.hit.fraction > 0.3 and cast_collector.hit.fraction < 0.5);
+
+        // Cast up from below: back faces only
+        var back_collector = ClosestHitCollisionCollector(CastShapeCollector).init();
+        defer back_collector.deinit();
+        const cast_up = ShapeCast.init(convex, Vec3.one(), Mat44.translation(Vec3.init(0, -5, 0)), Vec3.init(0, 10, 0));
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast_up, &cast_settings, mesh, Vec3.one(), &.{}, mesh_transform, .{}, .{}, &back_collector.base);
+        try expect(!back_collector.hadHit());
+        cast_settings.back_face_mode_triangles = .collide_with_back_faces;
+        CollisionDispatch.castShapeVsShapeWorldSpace(&cast_up, &cast_settings, mesh, Vec3.one(), &.{}, mesh_transform, .{}, .{}, &back_collector.base);
+        try expect(back_collector.hadHit() and back_collector.hit.is_back_face_hit);
+    }
+
+    // Soft body vertices: just above the surface (at 0.625 here), far above, far outside the grid, infinite mass
+    var positions = [_]Vec3{ Vec3.init(1.5, 0.7, 1.5), Vec3.init(1.5, 5, 1.5), Vec3.init(-50, 10, -50), Vec3.init(2.5, 0.0, 2.5) };
+    var inv_masses = [_]f32{ 1, 1, 1, 0 };
+    var planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** 4;
+    var penetrations = [_]f32{-math.flt_max} ** 4;
+    var indices = [_]i32{-1} ** 4;
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    mesh.collideSoftBodyVertices(Mat44.identity(), Vec3.one(), &vertices, 4, 3);
+    try testing.expectEqual(@as(i32, 3), indices[0]);
+    try expect(penetrations[0] < 0.0 and penetrations[0] > -0.1);
+    try testing.expectEqual(@as(i32, 3), indices[1]);
+    try expect(penetrations[1] < -3.0);
+    try testing.expectEqual(@as(i32, 3), indices[2]);
+    try testing.expectEqual(@as(i32, -1), indices[3]);
+}
+
+test "MeshShape: binary state, material state, SaveWithChildren and the registration" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+    var box_triangles = boxTriangles(1);
+    var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{ .materials = &.{material.material()} });
+    defer settings.deinit();
+    settings.per_triangle_user_data = true;
+    settings.asShapeSettings().user_data = 5;
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    const mesh = shape.cast(MeshShape);
+
+    // SaveBinaryState: sub type, user data, the tree (length + bytes)
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
+    var out = StreamWrapper.StreamOutWrapper.init(&buffer.writer);
+    shape.saveBinaryState(out.streamOut());
+    const bytes = buffer.written();
+    try testing.expectEqual(1 + 8 + 4 + mesh.tree.vector.items.len, bytes.len);
+    try testing.expectEqual(@intFromEnum(ShapeSubType.mesh), bytes[0]);
+
+    // Restore: the same tree, no materials until RestoreMaterialState
+    var reader: std.Io.Reader = .fixed(bytes);
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var restored = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer restored.deinit();
+    const restored_mesh = restored.getPtr().?.castMut(MeshShape);
+    try testing.expectEqualSlices(u8, mesh.tree.vector.items, restored_mesh.tree.vector.items);
+    try testing.expect(std.mem.isAligned(@intFromPtr(restored_mesh.tree.vector.items.ptr), Core.cache_line_size));
+    try testing.expectEqual(@as(u64, 5), restored_mesh.asShape().getUserData());
+    try testing.expectEqual(@as(usize, 0), restored_mesh.getMaterialList().len);
+    try expect(restored_mesh.asShape().getMaterial(.{ .value = 0 }) == PhysicsMaterial.default);
+
+    // Material state: SaveMaterialState replaces the list, RestoreMaterialState assigns it
+    var materials: PhysicsMaterialList = .empty;
+    defer {
+        for (materials.items) |*m| m.deinit();
+        materials.deinit(allocator);
+    }
+    try materials.append(allocator, .init(PhysicsMaterial.default));
+    try materials.append(allocator, .init(PhysicsMaterial.default));
+    try shape.saveMaterialState(allocator, &materials);
+    try testing.expectEqual(@as(usize, 1), materials.items.len);
+    try expect(materials.items[0].get() == material.material());
+    try restored_mesh.asShapeMut().restoreMaterialState(materials.items);
+    try testing.expectEqual(@as(usize, 1), restored_mesh.getMaterialList().len);
+    try testing.expectEqual(@as(u32, 5), material.material().getRefCount()); // ref, settings, shape, list, restored
+
+    // Queries on the restored shape give the same results
+    var hit1: RayCastResult = .{};
+    var hit2: RayCastResult = .{};
+    const ray = RayCast.init(Vec3.init(0.3, 0.2, -4), Vec3.init(0.1, 0.1, 8));
+    try expect(shape.castRay(ray, .{}, &hit1) and restored_mesh.asShape().castRay(ray, .{}, &hit2));
+    try testing.expectEqual(hit1.fraction, hit2.fraction);
+    try expect(hit1.sub_shape_id2.eql(hit2.sub_shape_id2));
+    try testing.expectEqual(mesh.getTriangleUserData(hit1.sub_shape_id2), restored_mesh.getTriangleUserData(hit2.sub_shape_id2));
+    try expect(restored_mesh.asShape().getMaterial(hit2.sub_shape_id2) == material.material());
+
+    // A truncated stream: the restore fails
+    {
+        var truncated: std.Io.Reader = .fixed(bytes[0..11]);
+        var truncated_in = StreamWrapper.StreamInWrapper.init(&truncated);
+        var r = try Shape.restoreFromBinaryState(allocator, truncated_in.streamIn());
+        defer r.deinit();
+        try testing.expectEqualStrings("Failed to restore shape", r.getError());
+    }
+
+    // SaveWithChildren / RestoreWithChildren (the materials are saved with the shape)
+    {
+        var children: std.Io.Writer.Allocating = .init(allocator);
+        defer children.deinit();
+        var children_out = StreamWrapper.StreamOutWrapper.init(&children.writer);
+        var shape_map: Shape.ShapeToIDMap = .empty;
+        defer shape_map.deinit(allocator);
+        var material_map: Shape.MaterialToIDMap = .empty;
+        defer material_map.deinit(allocator);
+        try shape.saveWithChildren(allocator, children_out.streamOut(), &shape_map, &material_map);
+
+        var children_reader: std.Io.Reader = .fixed(children.written());
+        var children_in = StreamWrapper.StreamInWrapper.init(&children_reader);
+        var id_to_shape: Shape.IDToShapeMap = .empty;
+        defer {
+            for (id_to_shape.items) |*s| s.deinit();
+            id_to_shape.deinit(allocator);
+        }
+        var id_to_material: Shape.IDToMaterialMap = .empty;
+        defer {
+            for (id_to_material.items) |*m| m.deinit();
+            id_to_material.deinit(allocator);
+        }
+        var r = try Shape.restoreWithChildren(allocator, children_in.streamIn(), &id_to_shape, &id_to_material);
+        defer r.deinit();
+        const rm = r.getPtr().?.cast(MeshShape);
+        try testing.expectEqualSlices(u8, mesh.tree.vector.items, rm.tree.vector.items);
+        try testing.expectEqual(@as(usize, 1), rm.getMaterialList().len);
+        const restored_material = rm.getMaterialList()[0].get().?;
+        try expect(restored_material != material.material()); // A new material with the same name and color
+        try testing.expectEqualStrings("Mat", restored_material.getDebugName());
+    }
+
+    // Registration: the constructor, the color and the collision functions
+    const functions = ShapeFunctions.get(.mesh);
+    try expect(functions.construct != null);
+    try expect(functions.color.eql(Color.red));
+    const registry = &RegisterTypes.registry;
+    try expect(registry.getCollideShape(.box, .mesh) == &MeshShape.collideConvexVsMesh);
+    try expect(registry.getCollideShape(.sphere, .mesh) == &MeshShape.collideSphereVsMesh);
+    try expect(registry.getCastShape(.box, .mesh) == &MeshShape.castConvexVsMesh);
+    try expect(registry.getCastShape(.sphere, .mesh) == &MeshShape.castSphereVsMesh);
+    try expect(registry.getCollideShape(.mesh, .user_convex8) == &CollisionDispatch.reversedCollideShape);
+    try expect(registry.getCastShape(.mesh, .capsule) == &CollisionDispatch.reversedCastShape);
+}
+
+test "MeshShape: GetSubmergedVolume is not supported" {
+    // Jolt asserts, Zolt panics with asserts enabled (not testable) and returns zeros otherwise
+    if (Core.enable_asserts) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+    var box_triangles = boxTriangles(0);
+    var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{});
+    defer settings.deinit();
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const v = result.getPtr().?.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 0.0));
+    try testing.expectEqual(@as(f32, 0.0), v.total_volume);
+    try testing.expectEqual(@as(f32, 0.0), v.submerged_volume);
+    try testing.expect(v.center_of_buoyancy.eql(Vec3.zero()));
+}
+
+test "MeshShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+
+    var grid = try TestGrid.init(allocator, 5);
+    defer grid.deinit(allocator);
+    var box_triangles = boxTriangles(2);
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+    const materials = [_]*const PhysicsMaterial{ material.material(), material.material() };
+
+    // The constructors of the settings (Indexify, Sanitize) and the heap settings
+    for (0..4) |path| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            const a = failing.allocator();
+            switch (path) {
+                0 => {
+                    var s = MeshShapeSettings.init(a, &box_triangles, .{ .materials = &materials }) catch continue;
+                    s.deinit();
+                },
+                1 => {
+                    var s = MeshShapeSettings.initIndexed(a, grid.vertices.items, grid.triangles.items, .{ .materials = &materials }) catch continue;
+                    s.deinit();
+                },
+                2 => {
+                    const s = MeshShapeSettings.create(a, &box_triangles, .{ .materials = &materials }) catch continue;
+                    var ref = Ref(ShapeSettings).init(s.asShapeSettings());
+                    ref.deinit();
+                },
+                else => {
+                    const s = MeshShapeSettings.createIndexed(a, grid.vertices.items, grid.triangles.items, .{}) catch continue;
+                    var ref = Ref(ShapeSettings).init(s.asShapeSettings());
+                    ref.deinit();
+                },
+            }
+            break;
+        }
+        try testing.expect(fail_index > 1);
+    }
+    try testing.expectEqual(@as(u32, 1), material.material().getRefCount());
+
+    // createShape: the shape, the materials, the active edges, the splitter, the builder and the buffer. Out of
+    // memory is not cached, a later call succeeds.
+    for ([_]MeshShapeSettings.BuildQuality{ .favor_runtime_performance, .favor_build_speed }) |quality| {
+        var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{ .materials = &materials });
+        defer settings.deinit();
+        settings.build_quality = quality;
+        settings.per_triangle_user_data = true;
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            var r = createMesh(&settings, failing.allocator()) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expect(settings.base.cached_result.isEmpty());
+                continue;
+            };
+            defer r.deinit();
+            try testing.expect(r.isValid());
+            break;
+        }
+        try testing.expect(fail_index > 5);
+    }
+
+    // Restore (the shape and the tree), RestoreMaterialState, SaveMaterialState
+    var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{ .materials = &materials });
+    defer settings.deinit();
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
+    var out = StreamWrapper.StreamOutWrapper.init(&buffer.writer);
+    shape.saveBinaryState(out.streamOut());
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var reader: std.Io.Reader = .fixed(buffer.written());
+        var in = StreamWrapper.StreamInWrapper.init(&reader);
+        try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+    }
+    {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
+        var reader: std.Io.Reader = .fixed(buffer.written());
+        var in = StreamWrapper.StreamInWrapper.init(&reader);
+        var r = try Shape.restoreFromBinaryState(failing.allocator(), in.streamIn());
+        defer r.deinit();
+        try testing.expectError(error.OutOfMemory, r.getPtr().?.restoreMaterialState(shape.cast(MeshShape).getMaterialList()));
+        try testing.expectEqual(@as(usize, 0), r.getPtr().?.cast(MeshShape).getMaterialList().len);
+
+        var list: PhysicsMaterialList = .empty;
+        try testing.expectError(error.OutOfMemory, shape.saveMaterialState(failing.allocator(), &list));
+    }
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.mesh).construct.?(std.testing.failing_allocator));
+}
