@@ -1,28 +1,40 @@
 //! Cross-shape parity sweep (Phase 4): the parity tests of each shape port collide and cast it against spheres and boxes,
 //! this file covers every other combination. Both sides build the same catalogue of shapes from the same node
-//! descriptions (`NodeDesc`): spheres, boxes, capsules, tapered capsules, cylinders, tapered cylinders (incl. a cone),
-//! convex hulls (4 to 150 points), triangles (with and without convex radius), planes, empty shapes, ScaledShape /
-//! RotatedTranslatedShape / OffsetCenterOfMassShape around convex shapes and around a mesh, static and mutable compounds
-//! (nested, with a mesh, with only unrotated sub shapes so that non uniform scales are valid), meshes (a grid and a
-//! closed box) and height fields (with no-collision samples and materials), with convex radius 0 and > 0, materials and
-//! user data. Then, for every ordered pair of catalogue shapes and many random relative transforms (separated, touching
-//! along an axis, overlapping, deep, rotated, uniformly and non uniformly scaled where IsValidScale allows, inside out):
+//! descriptions (`NodeDesc`): spheres (incl. a tiny one), boxes (incl. a thin plate and a big one with a big convex
+//! radius), capsules (incl. a thin one), tapered capsules, cylinders (incl. a disc), tapered cylinders (incl. a cone),
+//! convex hulls (3 to 150 points, flat ones, big convex radius), triangles (with and without convex radius, a sliver),
+//! planes, empty shapes, ScaledShape / RotatedTranslatedShape / OffsetCenterOfMassShape around convex shapes, around
+//! meshes and around compounds, static and mutable compounds (nested, with a mesh, with only unrotated sub shapes so that
+//! non uniform scales are valid, with 11 and 20 sub shapes), meshes (grids and a closed box, all edges active, one
+//! triangle per leaf) and height fields (with no-collision samples, materials, block sizes 2, 4 and 8, 2 to 8 bits per
+//! sample), with convex radius 0 and > 0, materials and user data. Then, for every ordered pair of catalogue shapes and
+//! many random relative transforms (separated, touching along an axis, overlapping, deep, coincident, rotated, far from
+//! the origin, uniformly and non uniformly scaled where IsValidScale allows, inside out):
 //! - CollisionDispatch::sCollideShapeVsShape and InternalEdgeRemovingCollector::sCollideShapeVsShape with the AllHit,
 //!   ClosestHit and AnyHit collectors and random CollideShapeSettings (max separation distance, tolerances, back face
 //!   mode, active edge mode and movement direction, collect faces), compared hit by hit in Jolt's (deterministic) order;
-//! - CollisionDispatch::sCastShapeVsShapeWorldSpace with zero and non zero directions and random ShapeCastSettings
-//!   (back face modes, shrunken shape and convex radius, deepest point, extra convex radius, collect faces, active edges);
+//! - CollisionDispatch::sCastShapeVsShapeWorldSpace with zero, tiny, normal and huge directions (into, away from and
+//!   sliding along the other shape) and random ShapeCastSettings (back face modes, shrunken shape and convex radius,
+//!   deepest point, extra convex radius, collect faces, active edges);
 //! every hit field is compared (contact points, penetration axis and depth, sub shape IDs, body ID, faces, fraction, back
 //! face flag) as well as the final early out fraction and a hash of every ShapeFilter call (PairwiseFilter rejects a
-//! pseudo random subset of the sub shape pairs).
-//! Pairs that Jolt does not support (mesh, height field and plane against each other, also inside compounds and
-//! decorators) assert in Jolt's debug build and in Zolt's safe builds: they are compared through the dispatch tables (the
-//! unsupported / reversed entries must be the same for every pair of sub types) and, in ReleaseFast, through the queries
-//! (no hits on both sides). The same holds for the AnyHit collector behind InternalEdgeRemovingCollector (see
-//! CollisionArchitecture.md section 9). Every catalogue shape also goes through the TransformedShape queries with random
-//! world transforms and scales: both CastRay overloads (with the material, user data, surface normal and supporting face
-//! of every hit), CollidePoint, CollectTransformedShapes, GetTrianglesStart / Next, GetSupportingFace and
-//! GetWorldSpaceBounds. C ABI wrappers: ZoltParity/Physics/PairwiseReference.cpp.
+//! pseudo random subset of the sub shape pairs). Every catalogue shape also goes through the TransformedShape queries with
+//! random world transforms (far from the origin too) and scales: both CastRay overloads (with the material, user data,
+//! surface normal and supporting face of every hit), CollidePoint, CollectTransformedShapes, GetTrianglesStart / Next,
+//! GetSupportingFace and GetWorldSpaceBounds (and IsValidScale / MakeScaleValid). C ABI wrappers:
+//! ZoltParity/Physics/PairwiseReference.cpp.
+//!
+//! Inputs that Jolt's debug build asserts on (CollisionArchitecture.md section 9) assert in Zolt's safe builds as well,
+//! so they only run without asserts (ReleaseFast), where Jolt's release behavior is compared:
+//! - pairs that Jolt does not support (mesh, height field and plane against each other, also inside compounds and
+//!   decorators). In safe builds they are compared through the dispatch tables instead: the unsupported / reversed
+//!   entries must be the same for every pair of Jolt's sub types;
+//! - the AnyHit collector behind InternalEdgeRemovingCollector, and with a MutableCompoundShape of more than one block
+//!   (WalkSubShapes only stops the walk through the current block when the visitor aborts);
+//! - an early out fraction set before a query with the ClosestHit collector (not every shape function checks it before
+//!   adding a hit, the collector then asserts that the early out fraction only decreases);
+//! - GetTrianglesStart / Next of compound and decorated shapes ("Cannot call on non-leaf shapes");
+//! - a degenerate triangle (CollideConvexVsTriangles).
 //!
 //! Both sides write their results into a stream of u32 (see `Stream`, the layout of every function is the same as in
 //! PairwiseReference.cpp) and the streams must be identical. The number of queries per pair depends on the cost of the
@@ -1511,11 +1523,11 @@ fn placement(gen: *Gen, bounds1: AABox, bounds2: AABox, com2: Vec3, axis_touchin
 // ---------------------------------------------------------------------------------------------------------------------
 // The tests
 
-/// Number of queries per pair: more for cheap pairs (Debug is ~50x slower than ReleaseFast, the sweep must stay fast)
+/// Number of queries per pair: more for cheap pairs (the whole sweep must stay well below ~3 minutes in Debug)
 fn queriesPerPair(built: *const Built, e1: Entry, e2: Entry) usize {
     _ = built;
     const cost = e1.cost * e2.cost;
-    const base: usize = if (builtin.mode == .Debug) 12 else 48;
+    const base: usize = if (builtin.mode == .Debug) 16 else 64;
     return @max(4, base * 16 / cost);
 }
 
@@ -1585,6 +1597,8 @@ test "Pairwise parity: collide and cast" {
     const entries = built.cat.entries.items;
     for (entries) |e1| {
         for (entries) |e2| {
+            var pair_collide_hits: usize = 0;
+            var pair_cast_hits: usize = 0;
             const shape1 = built.shape(e1.node);
             const shape2 = built.shape(e2.node);
             const collide_supported = built.supported(e1.node, e2.node, false);
@@ -1653,7 +1667,7 @@ test "Pairwise parity: collide and cast" {
                         };
                         const jolt_values = joltStream(buffer, Call{ .h = built.handle, .in = &input });
                         collide_cmp.check(e1.name, .{ e1.name, e2.name, input }, zs.values.items, jolt_values);
-                        if (jolt_values.len > 1 and jolt_values[1] != 0) collide_hits += 1;
+                        if (jolt_values.len > 1 and jolt_values[1] != 0) pair_collide_hits += 1;
                     } else skipped += 1;
                 }
 
@@ -1719,10 +1733,14 @@ test "Pairwise parity: collide and cast" {
                         };
                         const jolt_values = joltStream(buffer, Call{ .h = built.handle, .in = &input });
                         cast_cmp.check(e1.name, .{ e1.name, e2.name, input }, zs.values.items, jolt_values);
-                        if (jolt_values.len > 7 and jolt_values[7] != 0) cast_hits += 1;
+                        if (jolt_values.len > 7 and jolt_values[7] != 0) pair_cast_hits += 1;
                     } else skipped += 1;
                 }
             }
+            collide_hits += pair_collide_hits;
+            cast_hits += pair_cast_hits;
+            if (print_statistics and (collide_supported or !asserts) and (pair_collide_hits == 0 or pair_cast_hits == 0) and !std.mem.startsWith(u8, e1.name, "empty") and !std.mem.startsWith(u8, e2.name, "empty"))
+                std.debug.print("Pairwise parity: {s} vs {s}: {d} collides with hits, {d} casts with hits of {d}\n", .{ e1.name, e2.name, pair_collide_hits, pair_cast_hits, n });
         }
     }
 
@@ -1757,7 +1775,7 @@ test "Pairwise parity: TransformedShape queries" {
     for (built.cat.entries.items) |e| {
         const shape = built.shape(e.node);
         const bits = shape.getSubShapeIDBitsRecursive();
-        const n: usize = if (builtin.mode == .Debug) 1600 / e.cost else 4000;
+        const n: usize = if (builtin.mode == .Debug) 2400 / e.cost else 6000;
         for (0..n) |_| {
             const scale = randomScale(&gen, shape);
             const rotation = gen.rotation();
