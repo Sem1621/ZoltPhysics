@@ -13,6 +13,7 @@ pub const files = [_][]const u8{
     "Math/MathReference.cpp",
     "Physics/BasicsReference.cpp",
     "Physics/CompositeReference.cpp",
+    "Physics/CompoundsReference.cpp",
     "Physics/ConvexReference.cpp",
     "Physics/DecoratedReference.cpp",
     "Physics/FiltersReference.cpp",
