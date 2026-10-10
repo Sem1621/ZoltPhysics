@@ -12,6 +12,8 @@
 //! - D2 heap shapes: `T.create(allocator, ...)` (refcount 0, like `new`), kept alive by `Ref(Shape)` / `RefConst(Shape)`,
 //!   `release()` destroys them through the generated `destroy` entry. Stack / member shapes: `T.init(allocator, ...)`,
 //!   `asShape().setEmbedded()` before handing out references, `asShapeMut().deinit()` at the end of their scope.
+//!   Compile time constants in read-only memory (the dummy shape of Body.fixedToWorld(), Jolt's static
+//!   `sFixedToWorldShape`) set `is_static`: they are never reference counted (SimulationArchitecture D1).
 //! - D3 `ShapeSettings.createShape(allocator)` returns `Allocator.Error!ShapeResult` (ShapeResult = Result(Ref(Shape))
 //!   with Jolt's error texts); the shape constructors that take settings are `initFromSettings(self, settings, result,
 //!   allocator)`, run in place by `ShapeSettings.createCached` / `constructShape`.
@@ -492,6 +494,9 @@ pub const Shape = struct {
     user_data: u64 = 0,
     shape_type: ShapeType,
     shape_sub_type: ShapeSubType,
+    /// A compile time constant in read-only memory: never reference counted, never destroyed (like
+    /// PhysicsMaterial.default). Zolt addition for Jolt's static shapes (Body::sFixedToWorld's dummy shape).
+    is_static: bool = false,
 
     /// Constructor (Shape(EShapeType, EShapeSubType)), called by the classes that derive from Shape directly with
     /// `vtableFor(T)` of the most derived class
@@ -512,18 +517,19 @@ pub const Shape = struct {
 
     // RefTarget<Shape>
 
-    /// Add a reference to this object
+    /// Add a reference to this object (nothing for static shapes)
     pub fn addRef(self: *const Shape) void {
-        self.ref_count.addRef();
+        if (!self.is_static) self.ref_count.addRef();
     }
 
-    /// Release a reference to this object, destroys it after the last reference
+    /// Release a reference to this object, destroys it after the last reference (nothing for static shapes)
     pub fn release(self: *const Shape) void {
-        if (self.ref_count.release()) self.vtable.destroy(@constCast(self)); // The object is dead afterwards (Rule M exception)
+        if (!self.is_static and self.ref_count.release()) self.vtable.destroy(@constCast(self)); // The object is dead afterwards (Rule M exception)
     }
 
     /// Mark this shape as embedded (stack / member object): release() never frees it
     pub fn setEmbedded(self: *const Shape) void {
+        std.debug.assert(!self.is_static);
         self.ref_count.setEmbedded();
     }
 
@@ -534,6 +540,7 @@ pub const Shape = struct {
 
     /// Destructor of a shape that is not on the heap (embedded): runs the destructor chain, asserts that no references are left
     pub fn deinit(self: *Shape) void {
+        std.debug.assert(!self.is_static);
         self.ref_count.assertUnreferenced();
         self.vtable.deinit(self);
     }

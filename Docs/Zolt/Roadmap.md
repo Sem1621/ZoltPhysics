@@ -144,6 +144,8 @@ every collision function has bit exact parity tests, and the shape-only cases of
 `TaperedCylinderShapeTests`, `TransformedShapeTests`, `ShapeFilterTests` and `ActiveEdgesTests` pass.
 
 ### Phase 5: Bodies and simulation (`Jolt/Physics`, `Jolt/Physics/Body`, `Jolt/Physics/Constraints` core)
+Architecture and port order: [SimulationArchitecture.md](SimulationArchitecture.md) (decided by three
+competing compiled prototypes, a judge and a synthesis).
 BroadPhase, BroadPhaseQuery, QuadTree, BroadPhaseQuadTree, BroadPhaseBruteForce, NarrowPhaseQuery,
 EstimateCollisionResponse, SimShapeFilterWrapper (moved from Phase 4), then the remaining
 `PhysicsTestContext` cases of the Phase 4 test files.
