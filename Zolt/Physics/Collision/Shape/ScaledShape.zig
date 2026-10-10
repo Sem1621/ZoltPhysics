@@ -155,7 +155,8 @@ pub const ScaledShape = struct {
     /// Constructor that decorates another shape with a scale (on the stack / as a member: `asShape().setEmbedded()`
     /// before taking references, `asShapeMut().deinit()` at the end). Adds a reference to `shape`.
     pub fn init(allocator: Allocator, shape: *const Shape, scale: Vec3) ScaledShape {
-        std.debug.assert(!ScaleHelpers.isZeroScale(scale));
+        // Reachable through Shape::ScaleShape with a valid but tiny scale (see ScaledShape::IsValidScale), Jolt's release build continues
+        if (Core.enable_asserts) std.debug.assert(!ScaleHelpers.isZeroScale(scale));
         return .{ .base = .init(ScaledShape, allocator, shape_sub_type, shape), .scale = scale };
     }
 
@@ -754,7 +755,7 @@ test "ScaledShape: collide and cast through CollisionDispatch match the inner sh
     try expect(r.getCollideShape(.offset_center_of_mass, .scaled) == &ScaledShape.collideShapeVsScaled);
     try expect(r.getCastShape(.scaled, .user1) == &ScaledShape.castScaledVsShape);
     try expect(r.getCastShape(.scaled, .scaled) == &ScaledShape.castShapeVsScaled);
-    try expect(r.getCastShape(.empty, .scaled) == &ScaledShape.castShapeVsScaled);
+    try expect(r.getCastShape(.height_field, .scaled) == &ScaledShape.castShapeVsScaled); // Not .empty: EmptyShape registers after ScaledShape and overrides (empty, s) and (s, empty)
     try expect(ShapeFunctions.get(.scaled).color.eql(Color.yellow));
     try expect(ShapeFunctions.get(.scaled).construct != null);
 
