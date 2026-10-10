@@ -310,6 +310,7 @@ pub const SubShapeIDPair = @import("Physics/Collision/Shape/SubShapeIDPair.zig")
 pub const TaperedCapsuleShape = @import("Physics/Collision/Shape/TaperedCapsuleShape.zig").TaperedCapsuleShape;
 pub const TaperedCylinderShape = @import("Physics/Collision/Shape/TaperedCylinderShape.zig").TaperedCylinderShape;
 pub const TriangleShape = @import("Physics/Collision/Shape/TriangleShape.zig").TriangleShape;
+pub const TriangleShapeSettings = @import("Physics/Collision/Shape/TriangleShape.zig").TriangleShapeSettings;
 pub const RShapeCast = @import("Physics/Collision/ShapeCast.zig").RShapeCast;
 pub const ShapeCast = @import("Physics/Collision/ShapeCast.zig").ShapeCast;
 pub const ShapeCastKind = @import("Physics/Collision/ShapeCast.zig").ShapeCastKind;

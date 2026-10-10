@@ -47,6 +47,7 @@ test {
     _ = @import("Math/VectorTests.zig");
 
     // Physics
+    _ = @import("Physics/ActiveEdgesTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
