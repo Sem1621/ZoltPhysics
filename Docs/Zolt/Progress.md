@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 46.1%** of 85391 lines in scope · **Unit tests: 44.2%** of 18321 lines
+**Library: 47.3%** of 85391 lines in scope · **Unit tests: 44.7%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -23,7 +23,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics` | 2% | 1 | 0 | 0 | 12 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 7% | 2 | 0 | 1 | 15 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 71% | 62 | 1 | 5 | 8 | 0 | 0 | 21948 |
+| `Jolt/Physics/Collision` | 76% | 64 | 1 | 3 | 8 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 0% | 0 | 0 | 0 | 35 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
@@ -294,7 +294,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Collision — 71%</summary>
+<details><summary>Jolt/Physics/Collision — 76%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -347,7 +347,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `CompoundShapeVisitors.h` | 394 | ✅ complete | `Zolt/Physics/Collision/Shape/CompoundShapeVisitors.zig` |
 | `ConvexHullShape.cpp`, `ConvexHullShape.h` | 1285 | ⚪ stub | `Zolt/Physics/Collision/Shape/ConvexHullShape.zig` |
 | `ConvexShape.cpp`, `ConvexShape.h` | 585 | ✅ complete | `Zolt/Physics/Collision/Shape/ConvexShape.zig` |
-| `CylinderShape.cpp`, `CylinderShape.h` | 439 | ⚪ stub | `Zolt/Physics/Collision/Shape/CylinderShape.zig` |
+| `CylinderShape.cpp`, `CylinderShape.h` | 439 | ✅ complete | `Zolt/Physics/Collision/Shape/CylinderShape.zig` |
 | `DecoratedShape.cpp`, `DecoratedShape.h` | 128 | ✅ complete | `Zolt/Physics/Collision/Shape/DecoratedShape.zig` |
 | `EmptyShape.cpp`, `EmptyShape.h` | 114 | ⚪ stub | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
 | `GetTrianglesContext.h` | 210 | ✅ complete | `Zolt/Physics/Collision/Shape/GetTrianglesContext.zig` |
@@ -366,7 +366,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `SubShapeID.h` | 113 | ✅ complete | `Zolt/Physics/Collision/Shape/SubShapeID.zig` |
 | `SubShapeIDPair.h` | 49 | ✅ complete | `Zolt/Physics/Collision/Shape/SubShapeIDPair.zig` |
 | `TaperedCapsuleShape.cpp`, `TaperedCapsuleShape.h` | 483 | ✅ complete | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
-| `TaperedCylinderShape.cpp`, `TaperedCylinderShape.h` | 689 | ⚪ stub | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
+| `TaperedCylinderShape.cpp`, `TaperedCylinderShape.h` | 689 | ✅ complete | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
 | `TriangleShape.cpp`, `TriangleShape.h` | 461 | ✅ complete | `Zolt/Physics/Collision/Shape/TriangleShape.zig` |
 | `ShapeCast.h` | 143 | ✅ complete | `Zolt/Physics/Collision/ShapeCast.zig` |
 | `ShapeFilter.h` | 60 | ✅ complete | `Zolt/Physics/Collision/ShapeFilter.zig` |
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 21% | 4 | 8 | 2 | 19 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 22% | 5 | 8 | 2 | 18 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 28%</summary>
 
@@ -640,7 +640,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 21%</summary>
+<details><summary>UnitTests/Physics — 22%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -674,7 +674,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `SliderConstraintTests.cpp` | 488 | ❌ todo |  |
 | `SoftBodyTests.cpp` | 222 | ❌ todo |  |
 | `SubShapeIDTest.cpp` | 59 | ✅ complete | `ZoltTests/Physics/SubShapeIDTest.zig` |
-| `TaperedCylinderShapeTests.cpp` | 83 | ❌ todo |  |
+| `TaperedCylinderShapeTests.cpp` | 83 | ✅ complete | `ZoltTests/Physics/TaperedCylinderShapeTests.zig` |
 | `TransformedShapeTests.cpp` | 90 | ❌ todo |  |
 | `WheeledVehicleTests.cpp` | 304 | ❌ todo |  |
 
