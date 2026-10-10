@@ -31,4 +31,6 @@ test {
     _ = @import("Physics/DecoratedParity.zig");
     _ = @import("Physics/FiltersParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
+    _ = @import("Physics/TriangleShapeParity.zig");
+    _ = @import("Physics/TrianglesParity.zig");
 }

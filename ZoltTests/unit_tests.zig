@@ -47,10 +47,12 @@ test {
     _ = @import("Math/VectorTests.zig");
 
     // Physics
+    _ = @import("Physics/ActiveEdgesTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
     _ = @import("Physics/CollisionGroupTests.zig");
+    _ = @import("Physics/ConvexVsTrianglesTest.zig");
     _ = @import("Physics/MutableCompoundShapeTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
