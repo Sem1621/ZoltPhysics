@@ -107,7 +107,7 @@ const debug_clouds = false;
 const assert_clouds = [_]u32{};
 
 /// Number of clouds of the creation test; the other tests use the valid clouds among them
-const num_clouds = 4000;
+const num_clouds = 3000;
 
 /// Most points in a point cloud
 const max_cloud_points = 600;
@@ -835,7 +835,7 @@ const Gen = struct {
             },
             1, 2 => {
                 // On a sphere (more than 256 points: the hull stops at the max number of vertices)
-                const n = if (kind == 1) 8 + self.index(120) else 200 + self.index(max_cloud_points - 200);
+                const n = if (kind == 1 or !self.oneIn(3)) 8 + self.index(120) else 240 + self.index(120);
                 const r = self.plain(0.2, 3);
                 const noise = if (self.oneIn(2)) 0.0 else self.plain(0, 0.05);
                 for (0..n) |_| h.add(arr3(self.unitVec().mulScalar(r + self.plain(-noise, noise))));
@@ -864,7 +864,7 @@ const Gen = struct {
             },
             6 => {
                 // Prism with n sides (n up to 128: the cap vertices shrink along 2 planes)
-                const n = if (self.oneIn(2)) 3 + self.index(30) else 100 + self.index(29);
+                const n = if (!self.oneIn(8)) 3 + self.index(22) else 100 + self.index(29);
                 const r = self.plain(0.2, 2);
                 const half_height = self.plain(0.05, 2);
                 const rotation_matrix = Mat44.rotationQuat(self.rotation());
@@ -1014,7 +1014,7 @@ fn nextValidHull(allocator: Allocator, clouds: *CloudGen, out_input: *HullInput)
 // Tests
 
 /// Number of point clouds per test
-const num_hulls = 1000;
+const num_hulls = 600;
 
 test "ConvexHullShape parity: creation, Jolt's error texts and the whole hull (accessors and binary state)" {
     const allocator = std.testing.allocator;
@@ -1025,7 +1025,13 @@ test "ConvexHullShape parity: creation, Jolt's error texts and the whole hull (a
     var states: Checker = .{ .name = "binary state" };
     var num_valid: usize = 0;
     var num_errors: usize = 0;
-    var num_hull_failed: usize = 0;
+    const error_prefixes = [_][]const u8{ "Invalid convex radius", "Need at least 3 points", "Could not find a suitable initial triangle", "Hull building failed", "Too few faces in hull", "Internal error: Too many points", "A point must be connected" };
+    var num_error_kinds = [_]usize{0} ** error_prefixes.len;
+    var num_flat: usize = 0;
+    var num_max_points: usize = 0;
+    var num_points_with_faces = [_]usize{0} ** 4;
+    var num_reduced: usize = 0;
+    var num_reduced_to_zero: usize = 0;
     var num_skipped: usize = 0;
 
     const jolt_accessors = try allocator.create(AccessorsOutput);
@@ -1048,10 +1054,21 @@ test "ConvexHullShape parity: creation, Jolt's error texts and the whole hull (a
         errors.check(.{ input.num_points, input.max_convex_radius, input.hull_tolerance }, .{ @intFromBool(pair.zolt != null), pair.zolt_error }, .{ @intFromBool(pair.jolt != null), pair.jolt_error });
         if (!pair.isValid()) {
             num_errors += 1;
-            if (std.mem.startsWith(u8, &pair.jolt_error, "Hull building failed")) num_hull_failed += 1;
+            for (error_prefixes, 0..) |prefix, i| {
+                if (std.mem.startsWith(u8, &pair.jolt_error, prefix)) num_error_kinds[i] += 1;
+            }
             continue;
         }
         num_valid += 1;
+
+        // Coverage: flat hulls, hulls that reached the max number of points, points that shrink along 1, 2 or 3 planes,
+        // convex radii that were reduced (to zero)
+        const hull = pair.shape().cast(ConvexHullShape);
+        if (hull.getNumFaces() == 2) num_flat += 1;
+        if (hull.getNumPoints() == ConvexHullShape.max_points_in_hull) num_max_points += 1;
+        for (hull.points.items) |point| num_points_with_faces[@intCast(point.num_faces)] += 1;
+        if (input.max_convex_radius > 0.0 and hull.getConvexRadius() < input.max_convex_radius) num_reduced += 1;
+        if (input.max_convex_radius > 0.0 and hull.getConvexRadius() == 0.0) num_reduced_to_zero += 1;
 
         // Everything the accessors return
         jolt_accessors.* = std.mem.zeroes(AccessorsOutput);
@@ -1070,8 +1087,13 @@ test "ConvexHullShape parity: creation, Jolt's error texts and the whole hull (a
         states.check(.{ input.num_points, truncate }, zolt_state.*, jolt_state.*);
     }
     try finishAll(&.{ &errors, &accessors, &states });
-    try std.testing.expect(num_valid > num_clouds / 2 and num_errors > num_clouds / 40 and num_hull_failed > 10);
-    try std.testing.expect(num_skipped < num_clouds / 50);
+    try std.testing.expect(num_valid > num_clouds / 2 and num_skipped < num_clouds / 50);
+    // Every error text that the clouds can produce ("Too few faces in hull", "Internal error: Too many points in hull" and
+    // "A point must be connected to 2 or more faces!" are not reached by any of them)
+    for (num_error_kinds[0..4]) |n| try std.testing.expect(n > 10);
+    try std.testing.expect(num_flat > num_clouds / 20 and num_max_points > num_clouds / 100);
+    try std.testing.expect(num_points_with_faces[1] > 100 and num_points_with_faces[2] > 1000 and num_points_with_faces[3] > 1000);
+    try std.testing.expect(num_reduced > num_clouds / 10 and num_reduced_to_zero > num_clouds / 100);
 }
 
 test "ConvexHullShape parity: bounds, mass properties, volume, scales, surface normal, supporting face" {
@@ -1085,7 +1107,7 @@ test "ConvexHullShape parity: bounds, mass properties, volume, scales, surface n
         defer pair.deinit();
         const extent = extentOf(&input);
         const com = pair.shape().getCenterOfMass();
-        for (0..8) |q| {
+        for (0..12) |q| {
             var props: PropertiesInput = .{
                 .scale = if (gen.oneIn(3)) gen.anyScale() else gen.scale(),
                 .transform = arr16(gen.transform(10)),
@@ -1118,7 +1140,7 @@ test "ConvexHullShape parity: support functions of every mode (shrunk hulls, sca
         var pair = try nextValidHull(allocator, &clouds, &input);
         defer pair.deinit();
         const convex = pair.shape().cast(ConvexShape);
-        for (0..3) |_| {
+        for (0..4) |_| {
             const scale = gen.scale();
             var directions: [16 * 3]f32 = undefined;
             for (0..16) |d| directions[3 * d ..][0..3].* = gen.direction(3);
@@ -1150,7 +1172,7 @@ test "ConvexHullShape parity: CastRay (single hit and collectors) and CollidePoi
         defer pair.deinit();
         const hull = pair.shape().cast(ConvexHullShape);
         const extent = @max(extentOf(&input), 1.0e-3);
-        for (0..16) |q| {
+        for (0..24) |q| {
             var ray: RayInput = .{
                 .origin = gen.vec(-2 * extent - 0.1, 2 * extent + 0.1),
                 .direction = gen.direction(4 * extent + 0.2),
@@ -1262,7 +1284,7 @@ test "ConvexHullShape parity: collide hull vs sphere / box / hull / itself throu
         defer if (other) |*o| o.deinit();
         const other_pair = if (other) |*o| o else &pair;
 
-        for (0..4) |_| {
+        for (0..6) |_| {
             // Shape 2 near shape 1 so that about half of the pairs collide; sometimes the hull is shape 2
             const swap = gen.oneIn(2);
             const hull_scale = gen.scale();
@@ -1323,7 +1345,7 @@ test "ConvexHullShape parity: cast hull vs sphere / box / hull / itself through 
         defer if (other) |*o| o.deinit();
         const other_pair = if (other) |*o| o else &pair;
 
-        for (0..4) |_| {
+        for (0..6) |_| {
             const swap = gen.oneIn(2);
             const hull_scale = gen.scale();
             const other_scale = if (other_is_sphere) gen.uniformScale() else gen.scale();
@@ -1382,7 +1404,7 @@ test "ConvexHullShape parity: GetSubmergedVolume" {
         var pair = try nextValidHull(allocator, &clouds, &input);
         defer pair.deinit();
         const extent = extentOf(&input);
-        for (0..8) |_| {
+        for (0..12) |_| {
             const scale = gen.scale();
             const transform = arr16(gen.transform(3));
             const normal = vec3(gen.direction(1)).normalizedOr(Vec3.axisY());
@@ -1412,7 +1434,7 @@ test "ConvexHullShape parity: GetTrianglesStart / Next" {
         var input: HullInput = undefined;
         var pair = try nextValidHull(allocator, &clouds, &input);
         defer pair.deinit();
-        for (0..2) |_| {
+        for (0..3) |_| {
             const scale = gen.scale();
             const position = gen.vec(-10, 10);
             const rotation = arr4(gen.rotation().getXYZW());
@@ -1465,7 +1487,7 @@ test "ConvexHullShape parity: CollideSoftBodyVertices" {
         defer pair.deinit();
         const hull = pair.shape().cast(ConvexHullShape);
         const extent = extentOf(&input) * 1.5;
-        for (0..2) |_| {
+        for (0..3) |_| {
             const scale = gen.scale();
             const transform = arr16(gen.transform(3));
             var positions: [n * 3]f32 = undefined;
