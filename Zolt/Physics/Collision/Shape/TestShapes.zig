@@ -411,7 +411,7 @@ pub const TestBoxShape = struct {
         out_materials.appendAssumeCapacity(self.material.clone());
     }
 
-    pub fn restoreMaterialState(self: *TestBoxShape, materials: []const PhysicsMaterialRefC) void {
+    pub fn restoreMaterialState(self: *TestBoxShape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
         std.debug.assert(materials.len == 1);
         self.material.set(materials[0].get());
     }
