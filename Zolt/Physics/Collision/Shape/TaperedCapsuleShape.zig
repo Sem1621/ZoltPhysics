@@ -201,12 +201,12 @@ pub const TaperedCapsuleShape = struct {
 
         // Calculate convex radius
         self.convex_radius = math.min(self.top_radius, self.bottom_radius);
-        std.debug.assert(self.convex_radius > 0.0);
+        if (Core.enable_asserts) std.debug.assert(self.convex_radius > 0.0); // NaN radii pass the checks above and violate this, Jolt's release build continues
 
         // Calculate the sin and tan of the angle that the cone surface makes with the Y axis
         // See: TaperedCapsuleShape.gliffy
         self.sin_alpha = (self.bottom_radius - self.top_radius) / (self.top_center - self.bottom_center);
-        if (Core.enable_asserts) std.debug.assert(self.sin_alpha >= -1.0 and self.sin_alpha <= 1.0); // Rounding can violate this for nearly embedded spheres (or NaN settings), Jolt's release build continues (ASin clamps)
+        if (Core.enable_asserts) std.debug.assert(self.sin_alpha >= -1.0 and self.sin_alpha <= 1.0); // NaN settings violate this, Jolt's release build continues (ASin clamps)
         self.tan_alpha = trigonometry.tan(trigonometry.asin(self.sin_alpha));
 
         result.set(.init(self.asShapeMut()));
@@ -372,8 +372,9 @@ pub const TaperedCapsuleShape = struct {
                 // Get radii reduced by convex radius
                 const tr = scaled_top_radius - scaled_convex_radius;
                 const br = scaled_bottom_radius - scaled_convex_radius;
-                std.debug.assert(tr >= 0.0 and br >= 0.0);
-                std.debug.assert(tr == 0.0 or br == 0.0); // Convex radius should be that of the smallest sphere
+                // Shapes with NaN radii (or infinite scales) violate these, Jolt's release build continues
+                if (Core.enable_asserts) std.debug.assert(tr >= 0.0 and br >= 0.0);
+                if (Core.enable_asserts) std.debug.assert(tr == 0.0 or br == 0.0); // Convex radius should be that of the smallest sphere
                 const support = buffer.emplace(TaperedCapsule);
                 support.* = .init(scaled_top_center, scaled_bottom_center, tr, br, scaled_convex_radius);
                 return &support.base;
