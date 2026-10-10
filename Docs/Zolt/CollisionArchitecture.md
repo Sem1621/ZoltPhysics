@@ -815,7 +815,13 @@ needs only the `Body` pointer type from the F1 stub.
 - Jolt's own debug asserts that degenerate input reaches (CollideConvexVsTriangles on degenerate
   triangles, AnyHit collectors behind InternalEdgeRemovingCollector, WalkSubShapes' early abort) fire in
   Zolt's safe builds exactly as in an assert-enabled Jolt build; parity generators avoid those inputs,
-  and ReleaseFast parity compares Jolt's release behavior.
+  and ReleaseFast parity compares Jolt's release behavior. MutableCompoundShape::WalkSubShapes only stops
+  the current block of 4 sub shapes when the visitor aborts, so an AnyHit collector can get a second hit
+  from a collide query (later blocks that overlap are visited, PlaneShape::sCollideConvexVsPlane does not
+  check the early out fraction) and from a ray whose origin is inside a box or sphere of a later block
+  (RayAABox4 is negative there, below the forced early out fraction 0); casts are not affected, every cast
+  function checks the early out fraction. Likewise only collide queries assert with an early out fraction
+  set on a ClosestHit collector before the query (PlaneShape::sCollideConvexVsPlane again).
 - Jolt bugs reproduced on purpose (parity confirms the same bits; report upstream rather than fix):
   HeightFieldShape::GetTrianglesNext never finishes when one leaf block has more triangles than
   requested; HeightFieldShape skips empty range blocks only through inside-out Y bounds, which collapse
