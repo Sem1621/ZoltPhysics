@@ -2,7 +2,8 @@
 // library for CapsuleShape and TaperedCapsuleShape. The shapes are built from their settings on both sides (ShapeDesc),
 // so the Create() logic that turns a capsule without height into a SphereShape and a tapered capsule whose spheres
 // contain each other into a (RotatedTranslatedShape with a) SphereShape is compared too. Spheres and boxes are the
-// collision partners. ZoltParity/Physics/CapsulesParity.zig calls these and checks that Zolt produces the same bits.
+// collision partners. Capsules can have a PhysicsMaterialSimple (ShapeDesc::mMaterial), CollidePoint runs with
+// CapsulesParityFilter. ZoltParity/Physics/CapsulesParity.zig calls these and checks that Zolt produces the same bits.
 //
 // Conventions: vectors are passed as float arrays (3 or 4 components), quaternions as 4 floats (x, y, z, w), Mat44 as
 // 16 floats in column major order, planes as 4 floats (normal, constant). Booleans are passed as int (never bool, see
@@ -19,8 +20,10 @@
 #include <Jolt/Physics/Collision/CollidePointResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollideSoftBodyVertexIterator.h>
+#include <Jolt/Physics/Collision/PhysicsMaterialSimple.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/ShapeFilter.h>
 #include <Jolt/Physics/Collision/TransformedShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
@@ -76,19 +79,31 @@ struct ShapeDesc
 	float					mConvexRadius;			// Box
 	float					mDensity;
 	uint32					mUserData;
+	uint32					mMaterial;				// Capsule, tapered capsule: 0 for none, otherwise the color of a PhysicsMaterialSimple named cMaterialName
 };
+
+// Name of the PhysicsMaterialSimple of a ShapeDesc, must match material_name in CapsulesParity.zig
+const char *const cMaterialName = "CapsulesParity";
+
+// 1 for the default material, otherwise the debug color (the colors of ShapeDesc::mMaterial have a non zero alpha), must
+// match materialCode in CapsulesParity.zig
+uint32 MaterialCode(const PhysicsMaterial *inMaterial)
+{
+	return inMaterial == PhysicsMaterial::sDefault? 1 : inMaterial->GetDebugColor().GetUInt32();
+}
 
 // Build the shape from its settings (kinds 4 and 5 call the constructor that takes the settings directly, bypassing the
 // sphere logic of Create), null when the settings are invalid
 Ref<Shape> CreateShape(const ShapeDesc &inDesc, String *outError = nullptr)
 {
+	RefConst<PhysicsMaterial> material = inDesc.mMaterial != 0? new PhysicsMaterialSimple(cMaterialName, Color(inDesc.mMaterial)) : nullptr;
 	Shape::ShapeResult result;
 	switch (inDesc.mKind)
 	{
 	case 0:
 	case 4:
 		{
-			CapsuleShapeSettings settings(inDesc.mHalfHeight, inDesc.mRadius);
+			CapsuleShapeSettings settings(inDesc.mHalfHeight, inDesc.mRadius, material);
 			settings.SetEmbedded();
 			settings.mDensity = inDesc.mDensity;
 			settings.mUserData = inDesc.mUserData;
@@ -102,7 +117,7 @@ Ref<Shape> CreateShape(const ShapeDesc &inDesc, String *outError = nullptr)
 	case 1:
 	case 5:
 		{
-			TaperedCapsuleShapeSettings settings(inDesc.mHalfHeight, inDesc.mRadius, inDesc.mBottomRadius);
+			TaperedCapsuleShapeSettings settings(inDesc.mHalfHeight, inDesc.mRadius, inDesc.mBottomRadius, material);
 			settings.SetEmbedded();
 			settings.mDensity = inDesc.mDensity;
 			settings.mUserData = inDesc.mUserData;
@@ -171,7 +186,7 @@ struct PropertiesOutput
 	uint32					mLeafSubType;
 	uint32					mLeafRemainder;
 	uint32					mSubShapeUserData;
-	int						mDefaultMaterial;
+	uint32					mMaterial;				// MaterialCode of GetMaterial
 	uint32					mFaceCount;
 	float					mFace[32 * 3];
 };
@@ -286,6 +301,45 @@ void StoreCollideHit(const CollideShapeResult &inResult, HitOutput &outHit)
 	StoreFace(inResult.mShape2Face, outHit.mFace2Count, outHit.mFace2);
 }
 
+// The output of CollidePoint, must match PointOutput in CapsulesParity.zig
+struct PointOutput
+{
+	uint32					mNumHits;
+	uint32					mBodyID;				// Body ID and sub shape ID of the last hit
+	uint32					mSubShapeID;
+	uint32					mFilterCalls;
+	uint32					mFilterHash;
+};
+
+// A filter that rejects a shape sub type and hashes its calls, must match CapsulesParityFilter in CapsulesParity.zig
+struct FilterLog
+{
+	uint32					mCalls = 0;
+	uint32					mHash = 0x811c9dc5;
+
+	void					Add(uint32 inValue)
+	{
+		mHash = (mHash ^ inValue) * 0x01000193;
+	}
+};
+
+class CapsulesParityFilter : public ShapeFilter
+{
+public:
+	explicit				CapsulesParityFilter(uint32 inRejectSubType) : mRejectSubType(inRejectSubType) { }
+
+	virtual bool			ShouldCollide(const Shape *inShape2, const SubShapeID &inSubShapeIDOfShape2) const override
+	{
+		++mLog.mCalls;
+		mLog.Add(uint32(inShape2->GetSubType()));
+		mLog.Add(inSubShapeIDOfShape2.GetValue());
+		return uint32(inShape2->GetSubType()) != mRejectSubType;
+	}
+
+	uint32					mRejectSubType;
+	mutable FilterLog		mLog;
+};
+
 std::string SaveShape(const Shape *inShape)
 {
 	std::stringstream data;
@@ -393,7 +447,7 @@ void jolt_capsules_properties(const ShapeDesc *inDesc, const PropertiesInput *in
 	o.mLeafSubType = leaf != nullptr? uint32(leaf->GetSubType()) : 0xffffffff;
 	o.mLeafRemainder = remainder.GetValue();
 	o.mSubShapeUserData = uint32(shape->GetSubShapeUserData(SubShapeID()));
-	o.mDefaultMaterial = shape->GetMaterial(SubShapeID()) == PhysicsMaterial::sDefault? 1 : 0;
+	o.mMaterial = MaterialCode(shape->GetMaterial(SubShapeID()));
 	Shape::SupportingFace face;
 	shape->GetSupportingFace(SubShapeID(), Load3(inInput->mDirection), scale, transform, face);
 	StoreFace(face, o.mFaceCount, o.mFace);
@@ -481,22 +535,25 @@ void jolt_capsules_cast_ray(const ShapeDesc *inDesc, const RayInput *inInput, Ra
 	}
 }
 
-// CollidePoint: number of hits, body ID and sub shape ID of the last hit
-uint32 jolt_capsules_collide_point(const ShapeDesc *inDesc, const float *inPoint, const uint32 *inCreator, uint32 inBodyID, uint32 *outIDs)
+// CollidePoint with CapsulesParityFilter (rejecting sub type inRejectSubType, ~0: none)
+void jolt_capsules_collide_point(const ShapeDesc *inDesc, const float *inPoint, const uint32 *inCreator, uint32 inBodyID, uint32 inRejectSubType, PointOutput *outOutput)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
 	AllHitCollisionCollector<CollidePointCollector> collector;
 	TransformedShape context(RVec3::sZero(), Quat::sIdentity(), nullptr, BodyID(inBodyID));
 	collector.SetContext(&context);
-	shape->CollidePoint(Load3(inPoint), MakeCreator(inCreator), collector);
-	outIDs[0] = outIDs[1] = 0;
+	CapsulesParityFilter filter(inRejectSubType);
+	shape->CollidePoint(Load3(inPoint), MakeCreator(inCreator), collector, filter);
+	outOutput->mNumHits = uint32(collector.mHits.size());
+	outOutput->mBodyID = outOutput->mSubShapeID = 0;
 	for (const CollidePointResult &h : collector.mHits)
 	{
-		outIDs[0] = h.mBodyID.GetIndexAndSequenceNumber();
-		outIDs[1] = h.mSubShapeID2.GetValue();
+		outOutput->mBodyID = h.mBodyID.GetIndexAndSequenceNumber();
+		outOutput->mSubShapeID = h.mSubShapeID2.GetValue();
 	}
-	return uint32(collector.mHits.size());
+	outOutput->mFilterCalls = filter.mLog.mCalls;
+	outOutput->mFilterHash = filter.mLog.mHash;
 }
 
 // CollisionDispatch::sCollideShapeVsShape (all hits in order)
@@ -575,9 +632,8 @@ void jolt_capsules_submerged_volume(const ShapeDesc *inDesc, const float *inTran
 }
 
 // GetTrianglesStart, then GetTrianglesNext with inMaxTrianglesRequested until it returns 0: the counts per call (at most
-// 64 calls), the vertices (at most 480) and a flag per triangle (1 if the material is the default material), returns the
-// number of calls
-int jolt_capsules_triangles(const ShapeDesc *inDesc, const float *inPosition, const float *inRotation, const float *inScale, int inMaxTrianglesRequested, int *outCounts, float *outVertices, int *outDefaultMaterial)
+// 64 calls), the vertices (at most 480) and the MaterialCode of each triangle, returns the number of calls
+int jolt_capsules_triangles(const ShapeDesc *inDesc, const float *inPosition, const float *inRotation, const float *inScale, int inMaxTrianglesRequested, int *outCounts, float *outVertices, uint32 *outMaterials)
 {
 	EnsureFactory();
 	Ref<Shape> shape = CreateShape(*inDesc);
@@ -587,7 +643,7 @@ int jolt_capsules_triangles(const ShapeDesc *inDesc, const float *inPosition, co
 	Array<const PhysicsMaterial *> materials(inMaxTrianglesRequested);
 	int calls = 0;
 	float *out = outVertices;
-	int *out_material = outDefaultMaterial;
+	uint32 *out_material = outMaterials;
 	for (;;)
 	{
 		int count = shape->GetTrianglesNext(context, inMaxTrianglesRequested, triangles.data(), materials.data());
@@ -597,7 +653,7 @@ int jolt_capsules_triangles(const ShapeDesc *inDesc, const float *inPosition, co
 			out[0] = triangles[i].x; out[1] = triangles[i].y; out[2] = triangles[i].z;
 		}
 		for (int i = 0; i < count; ++i)
-			*out_material++ = materials[i] == PhysicsMaterial::sDefault? 1 : 0;
+			*out_material++ = MaterialCode(materials[i]);
 		if (count == 0 || calls == 64)
 			break;
 	}

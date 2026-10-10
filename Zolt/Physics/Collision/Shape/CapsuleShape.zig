@@ -599,6 +599,28 @@ const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMat
 const BoxShapeSettings = @import("BoxShape.zig").BoxShapeSettings;
 const RotatedTranslatedShapeSettings = @import("RotatedTranslatedShape.zig").RotatedTranslatedShapeSettings;
 
+/// A filter that accepts or rejects everything and records its calls (state behind a pointer, Rule M)
+const RecordingShapeFilter = struct {
+    pub const overrides = .{.shouldCollide};
+
+    const Log = struct {
+        calls: u32 = 0,
+        shape: ?*const Shape = null,
+        sub_shape_id: SubShapeID = .empty,
+    };
+
+    base: ShapeFilter = .init(@This()),
+    accept: bool,
+    log: *Log,
+
+    pub fn shouldCollide(self: *const RecordingShapeFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        self.log.calls += 1;
+        self.log.shape = shape2;
+        self.log.sub_shape_id = sub_shape_id_of_shape2;
+        return self.accept;
+    }
+};
+
 test "CapsuleShape: settings, Jolt's error texts, a sphere for a zero height, cached results and out of memory" {
     const allocator = testing.allocator;
 
@@ -873,6 +895,20 @@ test "CapsuleShape: ray casts (the shape part of TestCapsuleShapeRay), the colle
         point_shape.collidePoint(Vec3.init(radius, half_height + radius, radius).mul(probe).mulScalar(1.01), creator, &points.base, &.{});
         try testing.expectEqual(@as(usize, 0), points.hits.items.len);
     }
+
+    // The shape filter is called with the capsule and the ID of the creator, rejecting it skips a point inside
+    for ([_]bool{ true, false }) |accept| {
+        var log: RecordingShapeFilter.Log = .{};
+        const filter: RecordingShapeFilter = .{ .accept = accept, .log = &log };
+        var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer points.deinit();
+        point_shape.collidePoint(Vec3.zero(), creator, &points.base, &filter.base);
+        try points.checkError();
+        try testing.expectEqual(@as(usize, @intFromBool(accept)), points.hits.items.len);
+        try testing.expectEqual(@as(u32, 1), log.calls);
+        try testing.expect(log.shape.? == point_shape);
+        try testing.expect(!creator.getID().eql(.empty) and log.sub_shape_id.eql(creator.getID()));
+    }
 }
 
 test "CapsuleShape: CollideSoftBodyVertices" {
@@ -932,36 +968,45 @@ test "CapsuleShape: GetTrianglesStart / Next and the static vertex lists" {
         try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(runtime_table), std.mem.sliceAsBytes(table)));
     }
 
-    var capsule = CapsuleShape.init(allocator, 1.0, 0.5, .{});
-    capsule.asShape().setEmbedded();
-    defer capsule.asShapeMut().deinit();
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
 
-    // 64 + 32 + 64 triangles on the surface of the scaled capsule (the sign of the scale does not flip the winding)
-    var first: [3 * 160]Float3 = undefined;
-    for ([_]Vec3{ Vec3.replicate(2.0), Vec3.init(-2, 2, -2) }, 0..) |scale, pass| {
-        var context: Shape.GetTrianglesContext = .{};
-        capsule.asShape().getTrianglesStart(&context, AABox.biggest(), Vec3.init(1, 2, 3), Quat.identity(), scale);
-        var all: [3 * 160]Float3 = undefined;
-        var count: usize = 0;
-        var vertices: [3 * 32]Float3 = undefined;
-        var materials: [32]*const PhysicsMaterial = undefined;
-        for (0..5) |_| {
-            try testing.expectEqual(@as(u32, 32), capsule.asShape().getTrianglesNext(&context, 32, &vertices, &materials));
-            @memcpy(all[3 * count ..][0 .. 3 * 32], &vertices);
-            count += 32;
-            try testing.expect(materials[31] == PhysicsMaterial.default);
+    // Every triangle has the material of the capsule (GetMaterial(): the default material when it has none)
+    for ([_]?*const PhysicsMaterial{ null, material.material() }) |capsule_material| {
+        const expected_material = capsule_material orelse PhysicsMaterial.default;
+        var capsule = CapsuleShape.init(allocator, 1.0, 0.5, .{ .material = capsule_material });
+        capsule.asShape().setEmbedded();
+        defer capsule.asShapeMut().deinit();
+
+        // 64 + 32 + 64 triangles on the surface of the scaled capsule (the sign of the scale does not flip the winding)
+        var first: [3 * 160]Float3 = undefined;
+        for ([_]Vec3{ Vec3.replicate(2.0), Vec3.init(-2, 2, -2) }, 0..) |scale, pass| {
+            var context: Shape.GetTrianglesContext = .{};
+            capsule.asShape().getTrianglesStart(&context, AABox.biggest(), Vec3.init(1, 2, 3), Quat.identity(), scale);
+            var all: [3 * 160]Float3 = undefined;
+            var count: usize = 0;
+            var vertices: [3 * 32]Float3 = undefined;
+            var materials: [32]*const PhysicsMaterial = undefined;
+            for (0..5) |_| {
+                try testing.expectEqual(@as(u32, 32), capsule.asShape().getTrianglesNext(&context, 32, &vertices, &materials));
+                @memcpy(all[3 * count ..][0 .. 3 * 32], &vertices);
+                count += 32;
+                for (materials) |m|
+                    try testing.expect(m == expected_material);
+            }
+            try testing.expectEqual(@as(u32, 0), capsule.asShape().getTrianglesNext(&context, 32, &vertices, null));
+            for (all) |f| {
+                // Distance to the line segment (1, 0, 3) - (1, 4, 3) is the scaled radius
+                const v = Vec3.fromFloat3(f);
+                const closest = Vec3.init(1, math.clamp(v.getY(), 0.0, 4.0), 3);
+                try testing.expectApproxEqAbs(@as(f32, 1.0), v.sub(closest).length(), 1.0e-5);
+            }
+            if (pass == 0)
+                first = all
+            else
+                try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(&first), std.mem.sliceAsBytes(&all)));
         }
-        try testing.expectEqual(@as(u32, 0), capsule.asShape().getTrianglesNext(&context, 32, &vertices, null));
-        for (all) |f| {
-            // Distance to the line segment (1, 0, 3) - (1, 4, 3) is the scaled radius
-            const v = Vec3.fromFloat3(f);
-            const closest = Vec3.init(1, math.clamp(v.getY(), 0.0, 4.0), 3);
-            try testing.expectApproxEqAbs(@as(f32, 1.0), v.sub(closest).length(), 1.0e-5);
-        }
-        if (pass == 0)
-            first = all
-        else
-            try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(&first), std.mem.sliceAsBytes(&all)));
     }
 }
 

@@ -12,12 +12,15 @@
 //! (triangles), GetSubShapeIDBitsRecursive, IsValidScale / MakeScaleValid, GetSurfaceNormal, GetLeafShape,
 //! GetSubShapeUserData, GetMaterial, GetSupportingFace, the support points of every ESupportMode with scales, CastRay
 //! (both overloads, with the AllHit / AnyHit / ClosestHit collectors, back faces, solid or not, early out fractions),
-//! CollidePoint, CollisionDispatch::sCollideShapeVsShape and sCastShapeVsShapeWorldSpace against capsules, tapered
+//! CollidePoint (with `CapsulesParityFilter`, which rejects a shape sub type and hashes its calls),
+//! CollisionDispatch::sCollideShapeVsShape and sCastShapeVsShapeWorldSpace against capsules, tapered
 //! capsules, spheres and boxes (GJK, EPA, max separation distance, tolerances, faces, back face / active edge modes,
 //! shrunken shapes, deepest point, extra convex radius, early out fractions; all hits in order), GetSubmergedVolume,
 //! GetTrianglesStart / Next (CapsuleShape's three vertex lists, ConvexShape's version for the tapered capsule),
 //! CollideSoftBodyVertices and the binary state bytes (SaveBinaryState, sRestoreFromBinaryState, SaveWithChildren,
-//! sRestoreWithChildren). C ABI wrappers: ZoltParity/Physics/CapsulesReference.cpp.
+//! sRestoreWithChildren). Some capsules and tapered capsules have a PhysicsMaterialSimple (`ShapeDesc.material`), so
+//! GetMaterial, the materials of GetTrianglesNext and the material entries of SaveWithChildren are compared with and
+//! without a material. C ABI wrappers: ZoltParity/Physics/CapsulesReference.cpp.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -42,6 +45,7 @@ const CollideShapeResult = zolt.CollideShapeResult;
 const CollideShapeSettings = zolt.CollideShapeSettings;
 const CollideSoftBodyVertexIterator = zolt.CollideSoftBodyVertexIterator;
 const CollisionDispatch = zolt.CollisionDispatch;
+const Color = zolt.Color;
 const ConvexShape = zolt.ConvexShape;
 const DecoratedShape = zolt.DecoratedShape;
 const DMat44 = zolt.DMat44;
@@ -49,22 +53,26 @@ const DVec3 = zolt.DVec3;
 const Float3 = zolt.Float3;
 const Mat44 = zolt.Mat44;
 const PhysicsMaterial = zolt.PhysicsMaterial;
+const PhysicsMaterialSimple = zolt.PhysicsMaterialSimple;
 const Plane = zolt.Plane;
 const Quat = zolt.Quat;
 const RayCast = zolt.RayCast;
 const RayCastResult = zolt.RayCastResult;
 const RayCastSettings = zolt.RayCastSettings;
 const Ref = zolt.Ref;
+const RefConst = zolt.RefConst;
 const RVec3 = zolt.RVec3;
 const Shape = zolt.Shape;
 const ShapeCast = zolt.ShapeCast;
 const ShapeCastSettings = zolt.ShapeCastSettings;
+const ShapeFilter = zolt.ShapeFilter;
 const ShapeList = zolt.ShapeList;
 const ShapeResult = zolt.ShapeResult;
 const ShapeSettings = zolt.ShapeSettings;
 const SphereShapeSettings = zolt.SphereShapeSettings;
 const StreamInWrapper = zolt.StreamInWrapper;
 const StreamOutWrapper = zolt.StreamOutWrapper;
+const SubShapeID = zolt.SubShapeID;
 const SubShapeIDCreator = zolt.SubShapeIDCreator;
 const TaperedCapsuleShape = zolt.TaperedCapsuleShape;
 const TaperedCapsuleShapeSettings = zolt.TaperedCapsuleShapeSettings;
@@ -80,11 +88,11 @@ const jolt = struct {
     extern fn jolt_capsules_properties(desc: *const ShapeDesc, input: *const PropertiesInput, output: *PropertiesOutput) void;
     extern fn jolt_capsules_support(desc: *const ShapeDesc, mode: c_int, scale: *const P, directions: [*]const f32, num_directions: c_int, out_points: [*]f32, out_convex_radius: *f32) c_int;
     extern fn jolt_capsules_cast_ray(desc: *const ShapeDesc, input: *const RayInput, output: *RayOutput) void;
-    extern fn jolt_capsules_collide_point(desc: *const ShapeDesc, point: *const P, creator: *const [2]u32, body_id: u32, out_ids: *[2]u32) u32;
+    extern fn jolt_capsules_collide_point(desc: *const ShapeDesc, point: *const P, creator: *const [2]u32, body_id: u32, reject_sub_type: u32, output: *PointOutput) void;
     extern fn jolt_capsules_collide(input: *const CollideInput, output: *HitsOutput) void;
     extern fn jolt_capsules_cast(input: *const CastInput, output: *HitsOutput) void;
     extern fn jolt_capsules_submerged_volume(desc: *const ShapeDesc, transform: *const [16]f32, scale: *const P, plane: *const [4]f32, out_values: *[5]f32) void;
-    extern fn jolt_capsules_triangles(desc: *const ShapeDesc, position: *const P, rotation: *const [4]f32, scale: *const P, max_triangles_requested: c_int, out_counts: *[64]c_int, out_vertices: *[max_vertices * 3]f32, out_default_material: *[max_vertices / 3]c_int) c_int;
+    extern fn jolt_capsules_triangles(desc: *const ShapeDesc, position: *const P, rotation: *const [4]f32, scale: *const P, max_triangles_requested: c_int, out_counts: *[64]c_int, out_vertices: *[max_vertices * 3]f32, out_materials: *[max_vertices / 3]u32) c_int;
     extern fn jolt_capsules_binary_state(desc: *const ShapeDesc, out_bytes: *[binary_capacity]u8, out_restored_bytes: *[binary_capacity]u8, out_children_bytes: *[binary_capacity]u8, out_restored_children_bytes: *[binary_capacity]u8, capacity: u32, out_sizes: *[4]u32) void;
     extern fn jolt_capsules_soft_body(desc: *const ShapeDesc, transform: *const [16]f32, scale: *const P, num_vertices: c_int, positions: [*]const f32, inv_masses: [*]const f32, io_penetrations: [*]f32, io_planes: [*]f32, io_indices: [*]c_int, colliding_shape_index: c_int) void;
 };
@@ -117,7 +125,15 @@ const ShapeDesc = extern struct {
     convex_radius: f32 = 0.0,
     density: f32 = 1000.0,
     user_data: u32 = 0,
+    /// Capsule, tapered capsule: 0 for none, otherwise the color of a PhysicsMaterialSimple named `material_name`
+    material: u32 = 0,
 };
+
+/// Name of the PhysicsMaterialSimple of a ShapeDesc, must match cMaterialName in CapsulesReference.cpp
+const material_name = "CapsulesParity";
+
+/// The filter rejects nothing
+const no_reject: u32 = ~@as(u32, 0);
 
 /// Must match PropertiesInput in CapsulesReference.cpp
 const PropertiesInput = extern struct {
@@ -149,7 +165,8 @@ const PropertiesOutput = extern struct {
     leaf_sub_type: u32,
     leaf_remainder: u32,
     sub_shape_user_data: u32,
-    default_material: c_int,
+    /// materialCode of GetMaterial
+    material: u32,
     face_count: u32,
     face: [32 * 3]f32,
 };
@@ -186,6 +203,16 @@ const RayOutput = extern struct {
     sub_shape_id: u32,
     num_hits: u32,
     hits: [4]RayHit,
+};
+
+/// Must match PointOutput in CapsulesReference.cpp
+const PointOutput = extern struct {
+    num_hits: u32,
+    /// Body ID and sub shape ID of the last hit
+    body_id: u32,
+    sub_shape_id: u32,
+    filter_calls: u32,
+    filter_hash: u32,
 };
 
 /// Must match CollideInput in CapsulesReference.cpp
@@ -260,14 +287,45 @@ const CastInput = extern struct {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The filter, must match CapsulesParityFilter in CapsulesReference.cpp
+
+const FilterLog = struct {
+    calls: u32 = 0,
+    hash: u32 = 0x811c9dc5,
+
+    fn add(self: *FilterLog, value: u32) void {
+        self.hash = (self.hash ^ value) *% 0x01000193;
+    }
+};
+
+/// Rejects a shape sub type and hashes its calls (CollidePoint only calls the single shape version)
+const CapsulesParityFilter = struct {
+    pub const overrides = .{.shouldCollide};
+
+    base: ShapeFilter = .init(@This()),
+    reject_sub_type: u32,
+    /// The calls are logged behind a pointer (Rule M: the filter is const in the queries)
+    log: *FilterLog,
+
+    pub fn shouldCollide(self: *const CapsulesParityFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        self.log.calls += 1;
+        self.log.add(@intFromEnum(shape2.getSubType()));
+        self.log.add(sub_shape_id_of_shape2.getValue());
+        return @intFromEnum(shape2.getSubType()) != self.reject_sub_type;
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The Zolt side of the wrappers
 
 /// Build the shape from its settings (kinds 4 and 5 call the constructor that takes the settings directly, bypassing the
 /// sphere logic of Create), null when the settings are invalid (the error text is copied to `out_error` when given)
 fn createShape(allocator: Allocator, desc: ShapeDesc, out_error: ?*[128]u8) !?Ref(Shape) {
+    var material: RefConst(PhysicsMaterial) = if (desc.material != 0) .init((try PhysicsMaterialSimple.create(allocator, material_name, Color.fromUInt32(desc.material))).material()) else .empty;
+    defer material.deinit();
     var result: ShapeResult = switch (desc.kind) {
         0, 4 => blk: {
-            var settings = CapsuleShapeSettings.init(allocator, desc.half_height, desc.radius, .{});
+            var settings = CapsuleShapeSettings.init(allocator, desc.half_height, desc.radius, .{ .material = material.get() });
             defer settings.deinit();
             settings.base.density = desc.density;
             settings.asShapeSettings().user_data = desc.user_data;
@@ -277,7 +335,7 @@ fn createShape(allocator: Allocator, desc: ShapeDesc, out_error: ?*[128]u8) !?Re
             break :blk settings.asShapeSettings().cached_result.clone();
         },
         1, 5 => blk: {
-            var settings = TaperedCapsuleShapeSettings.init(allocator, desc.half_height, desc.radius, desc.bottom_radius, .{});
+            var settings = TaperedCapsuleShapeSettings.init(allocator, desc.half_height, desc.radius, desc.bottom_radius, .{ .material = material.get() });
             defer settings.deinit();
             settings.base.density = desc.density;
             settings.asShapeSettings().user_data = desc.user_data;
@@ -349,6 +407,12 @@ fn makeCreator(c: [2]u32) SubShapeIDCreator {
     return SubShapeIDCreator.pushID(.{}, c[0], c[1]);
 }
 
+/// 1 for the default material, otherwise the debug color (the colors of ShapeDesc.material have a non zero alpha), must
+/// match MaterialCode in CapsulesReference.cpp
+fn materialCode(material: *const PhysicsMaterial) u32 {
+    return if (material == PhysicsMaterial.default) 1 else material.getDebugColor().getUInt32();
+}
+
 fn storeFace(face: *const Shape.SupportingFace, out_count: *u32, out_face: *[32 * 3]f32) void {
     out_count.* = face.len;
     for (face.constSlice(), 0..) |v, i| out_face[3 * i ..][0..3].* = arr3(v);
@@ -417,7 +481,7 @@ fn zoltProperties(shape: *const Shape, input: *const PropertiesInput) Properties
     o.leaf_sub_type = if (leaf.shape) |l| @intFromEnum(l.getSubType()) else 0xffffffff;
     o.leaf_remainder = leaf.remainder.getValue();
     o.sub_shape_user_data = @truncate(shape.getSubShapeUserData(.empty));
-    o.default_material = @intFromBool(shape.getMaterial(.empty) == PhysicsMaterial.default);
+    o.material = materialCode(shape.getMaterial(.empty));
     var face: Shape.SupportingFace = .empty;
     shape.getSupportingFace(.empty, vec3(input.direction), scale, transform, &face);
     storeFace(&face, &o.face_count, &o.face);
@@ -474,6 +538,26 @@ fn zoltCastRay(allocator: Allocator, shape: *const Shape, input: *const RayInput
             if (collector.hadHit()) store(&o, &collector.hit);
         },
     }
+    return o;
+}
+
+fn zoltCollidePoint(allocator: Allocator, shape: *const Shape, point: P, creator: [2]u32, body_id: u32, reject_sub_type: u32) !PointOutput {
+    var o = std.mem.zeroes(PointOutput);
+    var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer collector.deinit();
+    const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(body_id), .{});
+    collector.base.setContext(&context);
+    var log: FilterLog = .{};
+    const filter: CapsulesParityFilter = .{ .reject_sub_type = reject_sub_type, .log = &log };
+    shape.collidePoint(vec3(point), makeCreator(creator), &collector.base, &filter.base);
+    try collector.checkError();
+    o.num_hits = @intCast(collector.hits.items.len);
+    for (collector.hits.items) |h| {
+        o.body_id = h.body_id.getIndexAndSequenceNumber();
+        o.sub_shape_id = h.sub_shape_id2.getValue();
+    }
+    o.filter_calls = log.calls;
+    o.filter_hash = log.hash;
     return o;
 }
 
@@ -675,6 +759,11 @@ const Gen = struct {
         return if (self.oneIn(4)) 1000.0 else self.plain(1, 3000);
     }
 
+    /// No material (the default material) or the color of a PhysicsMaterialSimple (a non zero alpha, see materialCode)
+    fn material(self: *Gen) u32 {
+        return if (self.oneIn(3)) self.next() | 0xff000000 else 0;
+    }
+
     /// CapsuleShapeSettings, sometimes without height (a sphere)
     fn capsule(self: *Gen) ShapeDesc {
         const half_height: f32 = switch (self.index(12)) {
@@ -689,7 +778,7 @@ const Gen = struct {
             1 => self.plain(0.01, 0.1), // Thin
             else => self.plain(0.05, 2),
         };
-        return .{ .kind = 0, .half_height = half_height, .radius = radius, .density = self.density(), .user_data = self.next() };
+        return .{ .kind = 0, .half_height = half_height, .radius = radius, .density = self.density(), .user_data = self.next(), .material = self.material() };
     }
 
     /// TaperedCapsuleShapeSettings: equal radii, one sphere containing the other (a sphere, offset with a
@@ -719,7 +808,7 @@ const Gen = struct {
             },
             else => {},
         }
-        return .{ .kind = 1, .half_height = half_height, .radius = top, .bottom_radius = bottom, .density = self.density(), .user_data = self.next() };
+        return .{ .kind = 1, .half_height = half_height, .radius = top, .bottom_radius = bottom, .density = self.density(), .user_data = self.next(), .material = self.material() };
     }
 
     /// A capsule or a tapered capsule (from settings)
@@ -963,6 +1052,7 @@ test "Capsules parity: CastRay (single hit and collectors) and CollidePoint" {
     var gen: Gen = .{};
     var rays: Checker = .{ .name = "cast ray" };
     var points: Checker = .{ .name = "collide point" };
+    var num_rejected_hits: usize = 0;
     for (0..iterations) |_| {
         const desc = gen.capsuleOrTapered();
         var shape = (try createShape(allocator, desc, null)).?;
@@ -1016,19 +1106,23 @@ test "Capsules parity: CastRay (single hit and collectors) and CollidePoint" {
             2 => point[1] = if (gen.oneIn(2)) desc.half_height else -desc.half_height,
             else => {},
         }
-        var jolt_ids: [2]u32 = undefined;
-        const jolt_count = jolt.jolt_capsules_collide_point(&desc, &point, &input.creator, input.body_id, &jolt_ids);
-        var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
-        defer collector.deinit();
-        const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(input.body_id), .{});
-        collector.base.setContext(&context);
-        shape.get().?.collidePoint(vec3(point), makeCreator(input.creator), &collector.base, &.{});
-        try collector.checkError();
-        var zolt_ids: [2]u32 = .{ 0, 0 };
-        for (collector.hits.items) |h| zolt_ids = .{ h.body_id.getIndexAndSequenceNumber(), h.sub_shape_id2.getValue() };
-        points.check(.{ desc, point }, .{ @as(u32, @intCast(collector.hits.items.len)), zolt_ids }, .{ jolt_count, jolt_ids });
+        // The filter rejects the shape (a capsule, a tapered capsule or the sphere inside a RotatedTranslatedShape), another
+        // sub type or nothing
+        const sub_type = @intFromEnum(shape.get().?.getLeafShape(.empty).shape.?.getSubType());
+        const reject_sub_type: u32 = switch (gen.index(4)) {
+            0, 1 => sub_type,
+            2 => sub_type ^ 1,
+            else => no_reject,
+        };
+        var jolt_point = std.mem.zeroes(PointOutput);
+        jolt.jolt_capsules_collide_point(&desc, &point, &input.creator, input.body_id, reject_sub_type, &jolt_point);
+        const zolt_point = try zoltCollidePoint(allocator, shape.get().?, point, input.creator, input.body_id, reject_sub_type);
+        points.check(.{ desc, point, reject_sub_type }, zolt_point, jolt_point);
+        if (reject_sub_type == sub_type and (try zoltCollidePoint(allocator, shape.get().?, point, input.creator, input.body_id, no_reject)).num_hits > 0)
+            num_rejected_hits += 1;
     }
     try finishAll(&.{ &rays, &points });
+    try std.testing.expect(num_rejected_hits > iterations / 20); // The filter often rejects a point inside the shape
 }
 
 test "Capsules parity: collide with capsules, tapered capsules, spheres and boxes through CollisionDispatch" {
@@ -1201,12 +1295,12 @@ test "Capsules parity: GetTrianglesStart / Next" {
 
         var jolt_counts: [64]c_int = @splat(0);
         var jolt_vertices: [max_vertices * 3]f32 = @splat(0);
-        var jolt_default: [max_vertices / 3]c_int = @splat(0);
-        const jolt_calls = jolt.jolt_capsules_triangles(&desc, &position, &rotation, &scale, max_requested, &jolt_counts, &jolt_vertices, &jolt_default);
+        var jolt_materials: [max_vertices / 3]u32 = @splat(0);
+        const jolt_calls = jolt.jolt_capsules_triangles(&desc, &position, &rotation, &scale, max_requested, &jolt_counts, &jolt_vertices, &jolt_materials);
 
         var zolt_counts: [64]c_int = @splat(0);
         var zolt_vertices: [max_vertices * 3]f32 = @splat(0);
-        var zolt_default: [max_vertices / 3]c_int = @splat(0);
+        var zolt_materials: [max_vertices / 3]u32 = @splat(0);
         var context: Shape.GetTrianglesContext = .{};
         shape.get().?.getTrianglesStart(&context, AABox.biggest(), vec3(position), quat(rotation), vec3(scale));
         var triangles: [3 * 232]Float3 = undefined;
@@ -1223,12 +1317,12 @@ test "Capsules parity: GetTrianglesStart / Next" {
                 out += 3;
             }
             for (materials[0..count]) |m| {
-                zolt_default[out_material] = @intFromBool(m == PhysicsMaterial.default);
+                zolt_materials[out_material] = materialCode(m);
                 out_material += 1;
             }
             if (count == 0 or zolt_calls == 64) break;
         }
-        checker.check(.{ desc, scale, position, rotation, max_requested }, .{ zolt_calls, zolt_counts, zolt_vertices, zolt_default }, .{ jolt_calls, jolt_counts, jolt_vertices, jolt_default });
+        checker.check(.{ desc, scale, position, rotation, max_requested }, .{ zolt_calls, zolt_counts, zolt_vertices, zolt_materials }, .{ jolt_calls, jolt_counts, jolt_vertices, jolt_materials });
     }
     try checker.finish();
 }
