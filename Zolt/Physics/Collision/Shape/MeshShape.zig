@@ -2165,3 +2165,109 @@ test "MeshShape: every creation path that allocates reports out of memory" {
     }
     try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.mesh).construct.?(std.testing.failing_allocator));
 }
+
+test "MeshShape: save and restore a grid (the checks of Jolt's TestSaveMeshShape)" {
+    const allocator = testing.allocator;
+
+    // Create an n x n grid of triangles
+    const n = 10;
+    const s: f32 = 0.1;
+    var triangles: [2 * n * n]Triangle = undefined;
+    var expected_bounds: AABox = .empty;
+    for (0..n) |z|
+        for (0..n) |x| {
+            const fx = s * @as(f32, @floatFromInt(x)) - s * n / 2;
+            const fz = s * @as(f32, @floatFromInt(z)) - s * n / 2;
+            const i = 2 * (z * n + x);
+            triangles[i] = .init(Vec3.init(fx, 0, fz), Vec3.init(fx, 0, fz + s), Vec3.init(fx + s, 0, fz + s), .{});
+            triangles[i + 1] = .init(Vec3.init(fx, 0, fz), Vec3.init(fx + s, 0, fz + s), Vec3.init(fx + s, 0, fz), .{});
+        };
+    for (triangles) |t|
+        for (t.v) |v| expected_bounds.encapsulateVec3(Vec3.fromFloat3(v));
+    var settings = try MeshShapeSettings.init(allocator, &triangles, .{});
+    defer settings.deinit();
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+
+    // Write mesh to stream
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
+    var out = StreamWrapper.StreamOutWrapper.init(&buffer.writer);
+    result.getPtr().?.saveBinaryState(out.streamOut());
+
+    // Read back mesh
+    var reader: std.Io.Reader = .fixed(buffer.written());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var restored = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer restored.deinit();
+    try testing.expect(restored.isValid());
+    const mesh_shape = restored.getPtr().?.cast(MeshShape).asShape();
+
+    // Test if it contains the same amount of triangles
+    try testing.expectEqual(@as(u32, triangles.len), mesh_shape.getStats().num_triangles);
+
+    // Check bounding box
+    try testing.expect(mesh_shape.getLocalBounds().eql(expected_bounds));
+
+    // Check if we can hit it with a ray
+    var hit: RayCastResult = .{};
+    const ray = RayCast.init(Vec3.init(0.5 * s, 1, 0.25 * s), Vec3.init(0, -2, 0)); // Hit in the center of a triangle
+    try testing.expect(mesh_shape.castRay(ray, .{}, &hit));
+    try testing.expectEqual(@as(f32, 0.5), hit.fraction);
+    try testing.expect(mesh_shape.getSurfaceNormal(hit.sub_shape_id2, ray.getPointOnRay(hit.fraction)).eql(Vec3.axisY()));
+}
+
+test "MeshShape: 3 coplanar triangles that share an edge (the checks of Jolt's TestNonManifoldMesh)" {
+    const allocator = testing.allocator;
+
+    // Test 3 triangles in a plane that all share the same edge
+    // Normally the shared edge would not be active, but since the mesh is non-manifold we expect all of them to be active
+    const triangles = [_]Triangle{
+        .fromFloat3(.init(0, 0, -1), .init(0, 0, 1), .init(1, 0, 0), .{}),
+        .fromFloat3(.init(0, 0, 1), .init(0, 0, -1), .init(-1, 0, 0), .{}),
+        .fromFloat3(.init(0, 0, 1), .init(0, 0, -1), .init(-0.5, 0, 0), .{}),
+    };
+    var settings = try MeshShapeSettings.init(allocator, &triangles, .{});
+    defer settings.deinit();
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+
+    var sphere = SphereShape.init(allocator, 0.1, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+
+    var collide_settings: CollideShapeSettings = .{};
+    collide_settings.active_edge_mode = .collide_only_with_active;
+
+    // Collide a sphere on both sides of the active edge so that a 45 degree normal will be found then the edge is active.
+    // An inactive edge will return a normal that is perpendicular to the plane.
+    const Case = struct { x: f32, interior: u32, shared: u32, edge_normal: Vec3 };
+    const cases = [_]Case{
+        // One interior hit because the sphere is above the triangle and 2 active edge hits that provide a normal pointing towards the sphere
+        .{ .x = 0.05, .interior = 1, .shared = 2, .edge_normal = Vec3.init(-1, -1, 0).normalized() },
+        // 2 interior hits because the sphere is above the triangle and 1 active edge hit that provide a normal pointing towards the sphere
+        .{ .x = -0.05, .interior = 2, .shared = 1, .edge_normal = Vec3.init(1, -1, 0).normalized() },
+    };
+    for (cases) |c| {
+        var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer collector.deinit();
+        CollisionDispatch.collideShapeVsShape(sphere.asShape(), shape, Vec3.one(), Vec3.one(), Mat44.translation(Vec3.init(c.x, 0.05, 0)), Mat44.identity(), .{}, .{}, &collide_settings, &collector.base, &.{});
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 3), collector.hits.items.len);
+
+        var num_interior: u32 = 0;
+        var num_on_shared_edge: u32 = 0;
+        for (collector.hits.items) |r| {
+            if (r.contact_point_on2.isClose(Vec3.init(c.x, 0.0, 0.0), .{})) {
+                try testing.expect(r.penetration_axis.normalized().isClose(Vec3.init(0, -1, 0), .{}));
+                num_interior += 1;
+            } else if (r.contact_point_on2.isNearZero(.{})) {
+                try testing.expect(r.penetration_axis.normalized().isClose(c.edge_normal, .{ .max_dist_sq = 1.0e-10 }));
+                num_on_shared_edge += 1;
+            }
+        }
+        try testing.expectEqual(c.interior, num_interior);
+        try testing.expectEqual(c.shared, num_on_shared_edge);
+    }
+}
