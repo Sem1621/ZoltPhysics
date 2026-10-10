@@ -828,7 +828,12 @@ const RegisterTypes = @import("../../../RegisterTypes.zig");
 
 /// Create a shape from tapered cylinder settings (the caller releases the reference)
 fn createTestShape(half_height: f32, top_radius: f32, bottom_radius: f32, convex_radius: f32) !RefConst(Shape) {
-    var settings = TaperedCylinderShapeSettings.init(testing.allocator, half_height, top_radius, bottom_radius, .{ .convex_radius = convex_radius });
+    return createTestShapeWithMaterial(half_height, top_radius, bottom_radius, convex_radius, null);
+}
+
+/// Create a shape from tapered cylinder settings with a material (the caller releases the reference)
+fn createTestShapeWithMaterial(half_height: f32, top_radius: f32, bottom_radius: f32, convex_radius: f32, material: ?*const PhysicsMaterial) !RefConst(Shape) {
+    var settings = TaperedCylinderShapeSettings.init(testing.allocator, half_height, top_radius, bottom_radius, .{ .convex_radius = convex_radius, .material = material });
     defer settings.deinit();
     var result = try settings.asShapeSettings().createShape(testing.allocator);
     defer result.deinit();
@@ -922,6 +927,15 @@ test "TaperedCylinderShape: equal radii create a CylinderShape (density and user
     try testing.expect(cylinder.asShape().getMaterial(.empty) == material.material());
     try testing.expectEqual(@as(f32, 1000.0), cylinder.base.getDensity()); // A default constructed CylinderShapeSettings
     try testing.expectEqual(@as(u64, 0), cylinder.asShape().getUserData());
+
+    // The triangles of the cylinder report the material
+    var context: Shape.GetTrianglesContext = .{};
+    cylinder.asShape().getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+    var vertices: [3 * 32]Float3 = undefined;
+    var materials: [32]*const PhysicsMaterial = undefined;
+    try testing.expectEqual(@as(u32, 32), cylinder.asShape().getTrianglesNext(&context, 32, &vertices, &materials));
+    for (materials) |m|
+        try testing.expect(m == material.material());
 
     // The result is cached
     var again = try settings.asShapeSettings().createShape(allocator);
@@ -1112,6 +1126,23 @@ test "TaperedCylinderShape: ray casts (TestTaperedCylinderShapeRay, ConvexShape'
     try points.checkError();
     try testing.expectEqual(@as(usize, 1), points.hits.items.len);
     try testing.expect(points.hits.items[0].body_id.eql(.init(3)));
+
+    // The shape filter is tested first: a point inside the shape is rejected
+    const RejectAll = struct {
+        pub const overrides = .{.shouldCollide};
+        base: ShapeFilter = .init(@This()),
+        pub fn shouldCollide(self: *const @This(), shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ self, shape2, sub_shape_id_of_shape2 };
+            return false;
+        }
+    };
+    const reject: RejectAll = .{};
+    points.reset();
+    shape.collidePoint(Vec3.init(1.9, 0, 0).sub(com), .{}, &points.base, &reject.base);
+    try testing.expectEqual(@as(usize, 0), points.hits.items.len);
+    shape.collidePoint(Vec3.init(1.9, 0, 0).sub(com), .{}, &points.base, &.{}); // The same point without the filter hits
+    try points.checkError();
+    try testing.expectEqual(@as(usize, 1), points.hits.items.len);
 }
 
 test "TaperedCylinderShape: CollideSoftBodyVertices (every region)" {
@@ -1153,7 +1184,7 @@ test "TaperedCylinderShape: CollideSoftBodyVertices (every region)" {
     }
 }
 
-test "TaperedCylinderShape: GetTrianglesStart / Next (caps skipped when their radius is too small)" {
+test "TaperedCylinderShape: GetTrianglesStart / Next (caps skipped when their radius is too small, the material of the shape)" {
     const Case = struct { top_radius: f32, bottom_radius: f32, scale: Vec3, num_triangles: u32 };
     for ([_]Case{
         .{ .top_radius = 1.0, .bottom_radius = 0.5, .scale = Vec3.one(), .num_triangles = 6 + 6 + 16 },
@@ -1161,7 +1192,9 @@ test "TaperedCylinderShape: GetTrianglesStart / Next (caps skipped when their ra
         .{ .top_radius = 0.0, .bottom_radius = 0.5, .scale = Vec3.one(), .num_triangles = 6 + 16 }, // Cone, no top cap
         .{ .top_radius = 1.0, .bottom_radius = 0.5e-3, .scale = Vec3.one(), .num_triangles = 6 + 16 }, // No bottom cap
     }) |c| {
-        var shape_ref = try createTestShape(1.0, c.top_radius, c.bottom_radius, 0.0);
+        // A non default material: every triangle reports the material of the shape
+        const material = try PhysicsMaterialSimple.create(testing.allocator, "Mat", Color.red);
+        var shape_ref = try createTestShapeWithMaterial(1.0, c.top_radius, c.bottom_radius, 0.0, material.material());
         defer shape_ref.deinit();
         const shape = shape_ref.get().?;
         const cylinder = shape.cast(TaperedCylinderShape);
@@ -1172,7 +1205,8 @@ test "TaperedCylinderShape: GetTrianglesStart / Next (caps skipped when their ra
         var vertices: [3 * 32]Float3 = undefined;
         var materials: [32]*const PhysicsMaterial = undefined;
         try testing.expectEqual(c.num_triangles, shape.getTrianglesNext(&context, 32, &vertices, &materials));
-        try testing.expect(materials[c.num_triangles - 1] == PhysicsMaterial.default);
+        for (materials[0..c.num_triangles]) |m|
+            try testing.expect(m == material.material());
         try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, 32, &vertices, null));
 
         // Every triangle faces outwards (the scale is never inside out)

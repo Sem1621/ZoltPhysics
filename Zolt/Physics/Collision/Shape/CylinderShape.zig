@@ -902,7 +902,9 @@ test "CylinderShape: CollideSoftBodyVertices" {
 test "CylinderShape: GetTrianglesStart / Next, GetSubmergedVolume" {
     const allocator = testing.allocator;
 
-    var cylinder = CylinderShape.init(allocator, 2.0, 0.5, .{});
+    // A non default material: every triangle reports the material of the shape
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var cylinder = CylinderShape.init(allocator, 2.0, 0.5, .{ .material = material.material() });
     cylinder.asShape().setEmbedded();
     defer cylinder.asShapeMut().deinit();
 
@@ -919,7 +921,8 @@ test "CylinderShape: GetTrianglesStart / Next, GetSubmergedVolume" {
             const expected = unit_cylinder_triangles.get(@intCast(index)).mul(Vec3.init(0.5, 2, 0.5)).mul(scale);
             try testing.expect(Vec3.fromFloat3(v).eql(expected));
         }
-        try testing.expect(materials[31] == PhysicsMaterial.default);
+        for (materials) |m|
+            try testing.expect(m == material.material());
         try testing.expectEqual(@as(u32, 0), cylinder.asShape().getTrianglesNext(&context, 32, &vertices, null));
     }
 
