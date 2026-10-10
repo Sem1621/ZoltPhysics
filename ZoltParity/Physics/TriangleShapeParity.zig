@@ -998,13 +998,15 @@ test "TriangleShape parity: collide sphere / box / triangle vs triangle and tria
     var pairs: [3][3]usize = @splat(@splat(0));
     for (0..iterations) |i| {
         var input = randomCollideInput(&gen);
-        if (i < 6) {
-            // A unit sphere / box exactly touching the triangle in the XZ plane from above, from below and at a vertex
+        if (i < 8) {
+            // A unit sphere / box exactly touching the triangle in the XZ plane from above, from below, at an edge and at a
+            // vertex (v3)
+            const touching_positions = [_]P{ .{ -0.5, 1, -0.5 }, .{ -0.5, -1, -0.5 }, .{ -2, 0, -0.5 }, .{ 2, 0, -1 } };
             input.shape1 = if (i % 2 == 0) .{ .kind = 1, .radius = 1.0 } else .{ .kind = 2, .half_extent = .{ 1, 1, 1 }, .convex_radius = 0.0 };
             input.shape2 = .{ .kind = 0, .v1 = .{ -1, 0, -1 }, .v2 = .{ -1, 0, 1 }, .v3 = .{ 1, 0, -1 } };
             input.scale1 = .{ 1, 1, 1 };
             input.scale2 = .{ 1, 1, 1 };
-            input.transform1 = arr16(Mat44.translation(Vec3.init(([_]f32{ -0.5, -0.5, -2.0 })[i / 2], ([_]f32{ 1, -1, 0 })[i / 2], -0.5)));
+            input.transform1 = arr16(Mat44.translation(vec3(touching_positions[i / 2])));
             input.transform2 = arr16(Mat44.identity());
             input.max_separation_distance = 0.0;
             input.early_out = math.flt_max;

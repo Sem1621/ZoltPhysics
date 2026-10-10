@@ -744,33 +744,56 @@ test "TriangleShape: bounds, inner radius, mass properties, volume, stats, surfa
     try testing.expect(face.at(0).eql(Vec3.init(-1, 4, 6)) and face.at(1).eql(Vec3.init(-13, 16, 20)) and face.at(2).eql(Vec3.init(-7, 10, 12)));
 }
 
-test "TriangleShape: valid scales (the triangle part of Jolt's TestIsValidScale)" {
+test "TriangleShape: TestIsValidScale, the triangle part (ShapeTests.cpp)" {
+    const allocator = testing.allocator;
+    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
+
+    var triangle_ref = Ref(Shape).init((try TriangleShape.create(allocator, Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(7, 8, 9), .{})).asShapeMut());
+    defer triangle_ref.deinit();
+    const triangle = triangle_ref.get().?;
+    try testing.expect(!triangle.isValidScale(Vec3.zero()));
+    try testing.expect(!triangle.isValidScale(Vec3.axisX()));
+    try testing.expect(!triangle.isValidScale(Vec3.axisY()));
+    try testing.expect(!triangle.isValidScale(Vec3.axisZ()));
+    try testing.expect(triangle.isValidScale(Vec3.init(2, 2, 2)));
+    try testing.expect(triangle.isValidScale(Vec3.init(-1, 1, -1)));
+    try testing.expect(triangle.isValidScale(Vec3.init(2, 1, 1)));
+    try testing.expect(triangle.isValidScale(Vec3.init(1, 2, 1)));
+    try testing.expect(triangle.isValidScale(Vec3.init(1, 1, 2)));
+    try testing.expect(triangle.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
+    try testing.expect(triangle.makeScaleValid(Vec3.init(2, 5, -4)).eql(Vec3.init(2, 5, -4)));
+
+    var triangle2_ref = Ref(Shape).init((try TriangleShape.create(allocator, Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(7, 8, 9), .{ .convex_radius = 0.01 })).asShapeMut()); // With convex radius
+    defer triangle2_ref.deinit();
+    const triangle2 = triangle2_ref.get().?;
+    try testing.expect(!triangle2.isValidScale(Vec3.zero()));
+    try testing.expect(!triangle2.isValidScale(Vec3.axisX()));
+    try testing.expect(!triangle2.isValidScale(Vec3.axisY()));
+    try testing.expect(!triangle2.isValidScale(Vec3.axisZ()));
+    try testing.expect(triangle2.isValidScale(Vec3.init(2, 2, 2)));
+    try testing.expect(triangle2.isValidScale(Vec3.init(-1, 1, -1)));
+    try testing.expect(!triangle2.isValidScale(Vec3.init(2, 1, 1)));
+    try testing.expect(!triangle2.isValidScale(Vec3.init(1, 2, 1)));
+    try testing.expect(!triangle2.isValidScale(Vec3.init(1, 1, 2)));
+    try testing.expect(triangle2.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
+    try testing.expect(triangle2.makeScaleValid(Vec3.init(2, 6, -4)).eql(Vec3.init(4, 4, -4)));
+}
+
+test "TriangleShape: more valid scales (Zolt only, not in Jolt)" {
     const allocator = testing.allocator;
 
     // Without convex radius any non zero scale is valid
     var triangle_ref = Ref(Shape).init((try TriangleShape.create(allocator, Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(7, 8, 9), .{})).asShapeMut());
     defer triangle_ref.deinit();
     const triangle = triangle_ref.get().?;
-    try testing.expect(!triangle.isValidScale(Vec3.zero()));
     try testing.expect(triangle.isValidScale(Vec3.init(1, 1, 1)));
-    try testing.expect(triangle.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(triangle.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(triangle.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(triangle.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(triangle.isValidScale(Vec3.init(1, 1, 2)));
     try testing.expect(triangle.makeScaleValid(Vec3.init(-2, 0, 4)).eql(Vec3.init(-2, ScaleHelpers.min_scale, 4)));
 
     // With convex radius the scale must be uniform (signs may differ)
     var triangle2_ref = Ref(Shape).init((try TriangleShape.create(allocator, Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(7, 8, 9), .{ .convex_radius = 0.01 })).asShapeMut());
     defer triangle2_ref.deinit();
     const triangle2 = triangle2_ref.get().?;
-    try testing.expect(!triangle2.isValidScale(Vec3.zero()));
     try testing.expect(triangle2.isValidScale(Vec3.init(1, 1, 1)));
-    try testing.expect(triangle2.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(triangle2.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(!triangle2.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(!triangle2.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(!triangle2.isValidScale(Vec3.init(1, 1, 2)));
     try testing.expect(triangle2.makeScaleValid(Vec3.init(-2, 3, 4)).eql(Vec3.init(-3, 3, 3)));
 }
 
@@ -1125,10 +1148,10 @@ test "TriangleShape: TestCollideTriangleVsTriangle (CollideShapeTests.cpp)" {
     CollisionDispatch.collideShapeVsShape(t1.get().?, t2.get().?, Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.identity(), .{}, .{}, &collide_settings, &collector.base, &.{});
 
     try testing.expect(collector.hadHit());
-    try expectClose(Vec3.zero(), collector.hit.contact_point_on1, 1.0e-4);
-    try expectClose(Vec3.init(0, -penetration, 0), collector.hit.contact_point_on2, 1.0e-4);
-    try testing.expectApproxEqAbs(penetration, collector.hit.penetration_depth, 1.0e-4);
-    try expectClose(Vec3.init(0, 1, 0), collector.hit.penetration_axis.normalized(), 1.0e-4);
+    try expectClose(Vec3.zero(), collector.hit.contact_point_on1, 1.0e-6);
+    try expectClose(Vec3.init(0, -penetration, 0), collector.hit.contact_point_on2, 1.0e-6);
+    try testing.expectApproxEqAbs(penetration, collector.hit.penetration_depth, 1.0e-6);
+    try expectClose(Vec3.init(0, 1, 0), collector.hit.penetration_axis.normalized(), 1.0e-6);
 }
 
 test "TriangleShape: TestTriangleVsBoxLargeSeparationDistance (CollideShapeTests.cpp)" {
@@ -1265,7 +1288,7 @@ test "TriangleShape: TestCastSphereTriangle, the triangle shape half (CastShapeT
         try collector.checkError();
         try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
         const result = &collector.hits.items[collector.hits.items.len - 1];
-        try testing.expectApproxEqAbs(@as(f32, 0.0), result.fraction, 1.0e-4);
+        try testing.expectApproxEqAbs(@as(f32, 0.0), result.fraction, 1.0e-6);
         try expectClose(Vec3.init(0, 0, 1), result.base.penetration_axis.normalized(), 1.0e-3);
         try testing.expectApproxEqAbs(@as(f32, 0.1), result.base.penetration_depth, 1.0e-3);
         try expectClose(Vec3.init(0, 0, 0.1), result.base.contact_point_on1, 1.0e-3);
