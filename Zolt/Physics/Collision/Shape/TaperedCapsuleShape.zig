@@ -751,25 +751,6 @@ test "TaperedCapsuleShape: center of mass, bounds, inner radius, mass properties
     try testing.expect(equal.asShape().getSurfaceNormal(.empty, Vec3.init(0, 0.5, -0.5)).eql(Vec3.axisZ().negate()));
 }
 
-test "TaperedCapsuleShape: valid scales (the tapered capsule part of Jolt's TestIsValidScale)" {
-    const allocator = testing.allocator;
-
-    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
-    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
-
-    var tapered_capsule_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 0.7);
-    defer tapered_capsule_ref.deinit();
-    const tapered_capsule = tapered_capsule_ref.get().?;
-    try testing.expect(!tapered_capsule.isValidScale(Vec3.zero()));
-    try testing.expect(tapered_capsule.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(tapered_capsule.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(!tapered_capsule.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(!tapered_capsule.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(!tapered_capsule.isValidScale(Vec3.init(1, 1, 2)));
-    try testing.expect(tapered_capsule.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
-    try testing.expect(tapered_capsule.makeScaleValid(Vec3.init(2, -3, 4)).eql(Vec3.init(3, -3, 3)));
-}
-
 test "TaperedCapsuleShape: support functions (a negative Y scale flips the capsule)" {
     const allocator = testing.allocator;
 
@@ -795,90 +776,6 @@ test "TaperedCapsuleShape: support functions (a negative Y scale flips the capsu
         try testing.expect(no_convex.getSupport(Vec3.init(0, 1, 0)).eql(Vec3.init(0, 4.5, 0)));
         try testing.expect(no_convex.getSupport(Vec3.init(0, -1, 0)).eql(Vec3.init(0, -4.5, 0)));
         try testing.expect(no_convex.getSupport(Vec3.zero()).eql(Vec3.init(0, -4.5, 0)));
-    }
-}
-
-test "TaperedCapsuleShape: ray casts (the shape part of TestTaperedCapsuleShapeRay) and collide point (TestCollidePointVsTaperedCapsule) through ConvexShape" {
-    const allocator = testing.allocator;
-
-    // TestTaperedCapsuleShapeRay: the rays go through the surface points a and b (relative to the shape's origin, rays are
-    // relative to the center of mass)
-    var shape_ref = try createTaperedCapsule(allocator, 3, 4, 2);
-    defer shape_ref.deinit();
-    const shape = shape_ref.get().?;
-    const cases = [_]struct { a: Vec3, b: Vec3 }{
-        .{ .a = Vec3.init(0, 7, 0), .b = Vec3.init(0, -5, 0) }, // Top to bottom
-        .{ .a = Vec3.init(-4, 3, 0), .b = Vec3.init(4, 3, 0) }, // Top sphere
-        .{ .a = Vec3.init(0, 3, -4), .b = Vec3.init(0, 3, 4) }, // Top sphere
-    };
-    var settings: RayCastSettings = .{};
-    settings.setBackFaceMode(.collide_with_back_faces);
-    for (cases) |c| {
-        for ([2][2]Vec3{ .{ c.a, c.b }, .{ c.b, c.a } }) |ab| {
-            const delta = ab[1].sub(ab[0]);
-            const l1 = ab[0].sub(delta.mulScalar(2.0)).sub(shape.getCenterOfMass());
-            const l2 = ab[0].sub(delta.mulScalar(0.1)).sub(shape.getCenterOfMass());
-            const inner2 = ab[1].sub(delta.mulScalar(0.1)).sub(shape.getCenterOfMass());
-            const r1 = ab[1].add(delta.mulScalar(0.1)).sub(shape.getCenterOfMass());
-
-            // Through the shape: the front and the back face
-            var hit: RayCastResult = .{};
-            try testing.expect(shape.castRay(.init(l2, r1.sub(l2)), .{}, &hit));
-            try testing.expectApproxEqAbs(@as(f32, 0.1) / 1.2, hit.fraction, 1.0e-5);
-            var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
-            defer hits.deinit();
-            shape.castRayCollector(.init(l2, r1.sub(l2)), &settings, .{}, &hits.base, &.{});
-            try hits.checkError();
-            try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
-            try testing.expectApproxEqAbs(@as(f32, 0.1) / 1.2, hits.hits.items[0].fraction, 1.0e-5);
-            try testing.expectApproxEqAbs(@as(f32, 1.1) / 1.2, hits.hits.items[1].fraction, 1.0e-5);
-
-            // Starting inside: fraction 0, the back face at 0.5
-            hit = .{};
-            try testing.expect(shape.castRay(.init(inner2, r1.sub(inner2)), .{}, &hit));
-            try testing.expectApproxEqAbs(@as(f32, 0.0), hit.fraction, 1.0e-5);
-            hits.reset();
-            shape.castRayCollector(.init(inner2, r1.sub(inner2)), &settings, .{}, &hits.base, &.{});
-            try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
-            try testing.expectApproxEqAbs(@as(f32, 0.0), hits.hits.items[0].fraction, 1.0e-5);
-            try testing.expectApproxEqAbs(@as(f32, 0.5), hits.hits.items[1].fraction, 1.0e-5);
-
-            // Stopping before the shape: no hit
-            hit = .{};
-            try testing.expect(!shape.castRay(.init(l1, l2.sub(l1)), .{}, &hit));
-        }
-    }
-
-    // TestCollidePointVsTaperedCapsule
-    const half_height: f32 = 0.4;
-    const top_radius: f32 = 0.1;
-    const bottom_radius: f32 = 0.2;
-    var point_shape_ref = try createTaperedCapsule(allocator, half_height, top_radius, bottom_radius);
-    defer point_shape_ref.deinit();
-    const point_shape = point_shape_ref.get().?;
-    const xy_probes = [_]Vec3{ Vec3.init(-1, 0, 0), Vec3.init(1, 0, 0), Vec3.init(0, 0, -1), Vec3.init(0, 0, 1) };
-    const xy_and_zero_probes = [_]Vec3{Vec3.zero()} ++ xy_probes;
-    var hit_points: [2 * xy_and_zero_probes.len + 1]Vec3 = undefined;
-    for (xy_and_zero_probes, 0..) |probe, i| {
-        hit_points[i] = probe.mulScalar(0.99 * top_radius).add(Vec3.init(0, half_height, 0)); // Top hits
-        hit_points[xy_and_zero_probes.len + i] = probe.mulScalar(0.99 * bottom_radius).add(Vec3.init(0, -half_height, 0)); // Bottom hits
-    }
-    hit_points[2 * xy_and_zero_probes.len] = Vec3.zero(); // Center hit
-    var miss_points: [2 * xy_probes.len + 2]Vec3 = undefined;
-    miss_points[0] = Vec3.init(0, half_height + top_radius + 0.01, 0); // Top misses
-    miss_points[1] = Vec3.init(0, -half_height - bottom_radius - 0.01, 0); // Bottom misses
-    for (xy_probes, 0..) |probe, i| {
-        miss_points[2 + i] = probe.mulScalar(1.01 * top_radius).add(Vec3.init(0, half_height, 0));
-        miss_points[2 + xy_probes.len + i] = probe.mulScalar(1.01 * bottom_radius).add(Vec3.init(0, -half_height, 0));
-    }
-    for ([_][]const Vec3{ &hit_points, &miss_points }, [_]usize{ 1, 0 }) |points, expected| {
-        for (points) |point| {
-            var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
-            defer collector.deinit();
-            point_shape.collidePoint(point.sub(point_shape.getCenterOfMass()), .{}, &collector.base, &.{});
-            try collector.checkError();
-            try testing.expectEqual(expected, collector.hits.items.len);
-        }
     }
 }
 

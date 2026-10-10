@@ -637,40 +637,6 @@ test "ScaledShape: bounds, center of mass, inner radius, mass properties, volume
     try expect(face.eql(&expected_face));
 }
 
-test "ScaledShape: valid scales (the ScaledShape part of Jolt's TestIsValidScale)" {
-    const allocator = testing.allocator;
-    const expect = testing.expect;
-
-    var sphere_ref = RefConst(Shape).init((try SphereShape.create(allocator, 2.0, .{})).asShape());
-    defer sphere_ref.deinit();
-    const sphere = sphere_ref.get().?;
-
-    var scaled_ref = RefConst(Shape).init((try ScaledShape.create(allocator, sphere, Vec3.init(1, 2, 1))).asShape());
-    defer scaled_ref.deinit();
-    const scaled = scaled_ref.get().?;
-    try expect(!scaled.isValidScale(Vec3.zero()));
-    try expect(!scaled.isValidScale(Vec3.init(1, 1, 1)));
-    try expect(scaled.isValidScale(Vec3.init(1, 0.5, 1)));
-    try expect(scaled.isValidScale(Vec3.init(-1, 0.5, 1)));
-    try expect(!scaled.isValidScale(Vec3.init(2, 1, 1)));
-    try expect(!scaled.isValidScale(Vec3.init(1, 2, 1)));
-    try expect(!scaled.isValidScale(Vec3.init(1, 1, 2)));
-    try expect(scaled.makeScaleValid(Vec3.init(3, 3, 3)).eql(Vec3.init(4, 2, 4)));
-    try expect(scaled.makeScaleValid(Vec3.init(4, 2, 4)).eql(Vec3.init(4, 2, 4)));
-
-    var scaled2_ref = RefConst(Shape).init((try ScaledShape.create(allocator, scaled, Vec3.init(1, 0.5, 1))).asShape());
-    defer scaled2_ref.deinit();
-    const scaled2 = scaled2_ref.get().?;
-    try expect(!scaled2.isValidScale(Vec3.zero()));
-    try expect(scaled2.isValidScale(Vec3.init(2, 2, 2)));
-    try expect(scaled2.isValidScale(Vec3.init(-1, 1, -1)));
-    try expect(!scaled2.isValidScale(Vec3.init(2, 1, 1)));
-    try expect(!scaled2.isValidScale(Vec3.init(1, 2, 1)));
-    try expect(!scaled2.isValidScale(Vec3.init(1, 1, 2)));
-    try expect(scaled2.makeScaleValid(Vec3.init(3, 3, 3)).eql(Vec3.init(3, 3, 3)));
-    try expect(scaled2.makeScaleValid(Vec3.init(5, 2, 5)).eql(Vec3.init(4, 4, 4)));
-}
-
 test "ScaledShape: ray casts, collide point, shape filters and the collector context" {
     const allocator = testing.allocator;
     const expect = testing.expect;

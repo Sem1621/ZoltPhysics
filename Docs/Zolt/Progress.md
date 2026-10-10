@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 49.3%** of 85391 lines in scope · **Unit tests: 44.7%** of 18321 lines
+**Library: 49.3%** of 85391 lines in scope · **Unit tests: 46.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 22% | 5 | 8 | 2 | 18 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 25% | 5 | 11 | 1 | 16 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 28%</summary>
 
@@ -640,13 +640,13 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 22%</summary>
+<details><summary>UnitTests/Physics — 25%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ActiveEdgesTests.cpp` | 317 | ⚪ stub | `ZoltTests/Physics/ActiveEdgesTests.zig` |
+| `ActiveEdgesTests.cpp` | 317 | 🟡 partial | `ZoltTests/Physics/ActiveEdgesTests.zig` |
 | `BroadPhaseTests.cpp` | 100 | ❌ todo |  |
-| `CastShapeTests.cpp` | 543 | ⚪ stub | `ZoltTests/Physics/CastShapeTests.zig` |
+| `CastShapeTests.cpp` | 543 | 🟡 partial | `ZoltTests/Physics/CastShapeTests.zig` |
 | `CharacterVirtualTests.cpp` | 763 | ❌ todo |  |
 | `CollidePointTests.cpp` | 361 | 🟡 partial | `ZoltTests/Physics/CollidePointTests.zig` |
 | `CollideShapeTests.cpp` | 471 | 🟡 partial | `ZoltTests/Physics/CollideShapeTests.zig` |
@@ -668,14 +668,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `PhysicsTests.cpp` | 2030 | ❌ todo |  |
 | `RayShapeTests.cpp` | 491 | 🟡 partial | `ZoltTests/Physics/RayShapeTests.zig` |
 | `SensorTests.cpp` | 622 | ❌ todo |  |
-| `ShapeFilterTests.cpp` | 80 | ❌ todo |  |
+| `ShapeFilterTests.cpp` | 80 | ⚪ stub | `ZoltTests/Physics/ShapeFilterTests.zig` |
 | `ShapeTests.cpp` | 950 | 🟡 partial | `ZoltTests/Physics/ShapeTests.zig` |
 | `SixDOFConstraintTests.cpp` | 158 | ❌ todo |  |
 | `SliderConstraintTests.cpp` | 488 | ❌ todo |  |
 | `SoftBodyTests.cpp` | 222 | ❌ todo |  |
 | `SubShapeIDTest.cpp` | 59 | ✅ complete | `ZoltTests/Physics/SubShapeIDTest.zig` |
 | `TaperedCylinderShapeTests.cpp` | 83 | ✅ complete | `ZoltTests/Physics/TaperedCylinderShapeTests.zig` |
-| `TransformedShapeTests.cpp` | 90 | ❌ todo |  |
+| `TransformedShapeTests.cpp` | 90 | 🟡 partial | `ZoltTests/Physics/TransformedShapeTests.zig` |
 | `WheeledVehicleTests.cpp` | 304 | ❌ todo |  |
 
 </details>

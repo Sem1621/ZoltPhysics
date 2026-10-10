@@ -1,10 +1,8 @@
 //! Port of: UnitTests/Physics/RayShapeTests.cpp
 //! Status: partial
 //! Missing: the PhysicsSystem part of TestRayHelper (TestSystemRay, TestSystemRayMultiHitIgnoreBackFace,
-//!   TestSystemRayMultiHitWithBackFace: need PhysicsSystem / NarrowPhaseQuery, Phase 5), TestRayMiss (only used by
-//!   shapes that are not ported yet), TestConvexHullShapeRay, TestCapsuleShapeRay, TestTaperedCapsuleShapeRay,
-//!   TestCylinderShapeRay, TestTaperedCylinderShapeRay, TestScaledShapeRay, TestStaticCompoundShapeRay,
-//!   TestMutableCompoundShapeRay (need their shapes, Phase 4 Wave A / B)
+//!   TestSystemRayMultiHitWithBackFace: insert the shape into a PhysicsSystem and cast through its NarrowPhaseQuery;
+//!   need PhysicsSystem / NarrowPhaseQuery, Phase 5), in every TEST_CASE that uses TestRayHelper
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -12,13 +10,24 @@ const fw = @import("../UnitTestFramework.zig");
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
 const BoxShape = zolt.BoxShape;
+const CapsuleShape = zolt.CapsuleShape;
 const CastRayCollector = zolt.CastRayCollector;
+const ConvexHullShapeSettings = zolt.ConvexHullShapeSettings;
+const CylinderShape = zolt.CylinderShape;
+const MutableCompoundShapeSettings = zolt.MutableCompoundShapeSettings;
+const Quat = zolt.Quat;
 const RayCast = zolt.RayCast;
 const RayCastResult = zolt.RayCastResult;
 const RayCastSettings = zolt.RayCastSettings;
 const Ref = zolt.Ref;
+const RefConst = zolt.RefConst;
+const ScaledShape = zolt.ScaledShape;
 const Shape = zolt.Shape;
+const ShapeSettings = zolt.ShapeSettings;
 const SphereShape = zolt.SphereShape;
+const StaticCompoundShapeSettings = zolt.StaticCompoundShapeSettings;
+const TaperedCapsuleShapeSettings = zolt.TaperedCapsuleShapeSettings;
+const TaperedCylinderShapeSettings = zolt.TaperedCylinderShapeSettings;
 const Vec3 = zolt.Vec3;
 const math = zolt.math;
 
@@ -202,9 +211,35 @@ fn testRayHelper(shape: *const Shape, hit_a: Vec3, hit_b: Vec3) !void {
         try testRayHelperInternal(hit_b, hit_a, kind, shape);
     }
 
-    // Not ported yet: inserting the shape into a PhysicsSystem and testing the rays through its NarrowPhaseQuery
-    // (TestSystemRay, TestSystemRayMultiHitIgnoreBackFace, TestSystemRayMultiHitWithBackFace), Phase 5
+    // Not ported: inserting the shape into a PhysicsSystem and testing the rays through its NarrowPhaseQuery
+    // (TestSystemRay, TestSystemRayMultiHitIgnoreBackFace, TestSystemRayMultiHitWithBackFace: need PhysicsSystem /
+    // NarrowPhaseQuery, Phase 5)
 }
+
+/// Helper function to check that a ray misses a shape
+fn testRayMiss(shape: *const Shape, origin: Vec3, direction: Vec3) !void {
+    var hit: RayCastResult = .{};
+    try fw.expect(!shape.castRay(.init(origin.sub(shape.getCenterOfMass()), direction), .{}, &hit));
+}
+
+/// `settings.Create().Get()`: the shape of a newly created result (the caller releases the reference)
+fn createShape(settings: *ShapeSettings) !RefConst(Shape) {
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    return RefConst(Shape).init(result.getPtr());
+}
+
+/// Convex hull shape of a box (off center so the center of mass is not zero)
+const off_center_box = [_]Vec3{
+    Vec3.init(-2, -4, -6),
+    Vec3.init(-2, -4, 7),
+    Vec3.init(-2, 5, -6),
+    Vec3.init(-2, 5, 7),
+    Vec3.init(3, -4, -6),
+    Vec3.init(3, -4, 7),
+    Vec3.init(3, 5, -6),
+    Vec3.init(3, 5, 7),
+};
 
 test "TestBoxShapeRay" {
     // Create box shape
@@ -227,4 +262,136 @@ test "TestSphereShapeRay" {
     try testRayHelper(shape.get().?, Vec3.init(-2, 0, 0), Vec3.init(2, 0, 0));
     try testRayHelper(shape.get().?, Vec3.init(0, -2, 0), Vec3.init(0, 2, 0));
     try testRayHelper(shape.get().?, Vec3.init(0, 0, -2), Vec3.init(0, 0, 2));
+}
+
+test "TestConvexHullShapeRay" {
+    // Create convex hull shape of a box (off center so the center of mass is not zero)
+    var settings = try ConvexHullShapeSettings.init(allocator, &off_center_box, .{});
+    defer settings.deinit();
+    var shape = try createShape(settings.asShapeSettings());
+    defer shape.deinit();
+
+    try testRayHelper(shape.get().?, Vec3.init(-2, 0, 0), Vec3.init(3, 0, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, -4, 0), Vec3.init(0, 5, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, 0, -6), Vec3.init(0, 0, 7));
+
+    try testRayMiss(shape.get().?, Vec3.init(-3, -5, 0), Vec3.init(0, 1, 0));
+    try testRayMiss(shape.get().?, Vec3.init(-3, 0, 0), Vec3.init(0, 1, 0));
+    try testRayMiss(shape.get().?, Vec3.init(-3, 6, 0), Vec3.init(0, 1, 0));
+}
+
+test "TestCapsuleShapeRay" {
+    // Create capsule shape
+    var shape = Ref(Shape).init((try CapsuleShape.create(allocator, 4, 2, .{})).asShapeMut());
+    defer shape.deinit();
+
+    try testRayHelper(shape.get().?, Vec3.init(-2, 0, 0), Vec3.init(2, 0, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, -6, 0), Vec3.init(0, 6, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, 0, -2), Vec3.init(0, 0, 2));
+}
+
+test "TestTaperedCapsuleShapeRay" {
+    // Create tapered capsule shape
+    var settings = TaperedCapsuleShapeSettings.init(allocator, 3, 4, 2, .{});
+    defer settings.deinit();
+    var shape = try createShape(settings.asShapeSettings());
+    defer shape.deinit();
+
+    try testRayHelper(shape.get().?, Vec3.init(0, 7, 0), Vec3.init(0, -5, 0)); // Top to bottom
+    try testRayHelper(shape.get().?, Vec3.init(-4, 3, 0), Vec3.init(4, 3, 0)); // Top sphere
+    try testRayHelper(shape.get().?, Vec3.init(0, 3, -4), Vec3.init(0, 3, 4)); // Top sphere
+}
+
+test "TestCylinderShapeRay" {
+    // Create cylinder shape
+    var shape = Ref(Shape).init((try CylinderShape.create(allocator, 4, 2, .{})).asShapeMut());
+    defer shape.deinit();
+
+    try testRayHelper(shape.get().?, Vec3.init(-2, 0, 0), Vec3.init(2, 0, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, -4, 0), Vec3.init(0, 4, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, 0, -2), Vec3.init(0, 0, 2));
+}
+
+test "TestTaperedCylinderShapeRay" {
+    // Create tapered cylinder shape
+    var settings = TaperedCylinderShapeSettings.init(allocator, 4, 1, 3, .{});
+    defer settings.deinit();
+    var shape = try createShape(settings.asShapeSettings());
+    defer shape.deinit();
+
+    // Ray through origin
+    try testRayHelper(shape.get().?, Vec3.init(-2, 0, 0), Vec3.init(2, 0, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, -4, 0), Vec3.init(0, 4, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, 0, -2), Vec3.init(0, 0, 2));
+
+    // Ray halfway to the top
+    try testRayHelper(shape.get().?, Vec3.init(-1.5, 2, 0), Vec3.init(1.5, 2, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, 2, -1.5), Vec3.init(0, 2, 1.5));
+
+    // Ray halfway to the bottom
+    try testRayHelper(shape.get().?, Vec3.init(-2.5, -2, 0), Vec3.init(2.5, -2, 0));
+    try testRayHelper(shape.get().?, Vec3.init(0, -2, -2.5), Vec3.init(0, -2, 2.5));
+}
+
+test "TestScaledShapeRay" {
+    // Create convex hull shape of a box (off center so the center of mass is not zero)
+    var settings = try ConvexHullShapeSettings.init(allocator, &off_center_box, .{});
+    defer settings.deinit();
+    var hull = try createShape(settings.asShapeSettings());
+    defer hull.deinit();
+
+    // Scale the hull
+    var shape1 = Ref(Shape).init((try ScaledShape.create(allocator, hull.get().?, Vec3.init(2, 3, 4))).asShapeMut());
+    defer shape1.deinit();
+
+    try testRayHelper(shape1.get().?, Vec3.init(-4, 0, 0), Vec3.init(6, 0, 0));
+    try testRayHelper(shape1.get().?, Vec3.init(0, -12, 0), Vec3.init(0, 15, 0));
+    try testRayHelper(shape1.get().?, Vec3.init(0, 0, -24), Vec3.init(0, 0, 28));
+
+    // Scale the hull (and flip it inside out)
+    var shape2 = Ref(Shape).init((try ScaledShape.create(allocator, hull.get().?, Vec3.init(-2, 3, 4))).asShapeMut());
+    defer shape2.deinit();
+
+    try testRayHelper(shape2.get().?, Vec3.init(-6, 0, 0), Vec3.init(4, 0, 0));
+    try testRayHelper(shape2.get().?, Vec3.init(0, -12, 0), Vec3.init(0, 15, 0));
+    try testRayHelper(shape2.get().?, Vec3.init(0, 0, -24), Vec3.init(0, 0, 28));
+}
+
+/// The body of TestStaticCompoundShapeRay and TestMutableCompoundShapeRay (`Settings` is the compound settings type)
+fn testCompoundShapeRay(comptime Settings: type) !void {
+    // Create convex hull shape of a box (off center so the center of mass is not zero)
+    var hull = Ref(ShapeSettings).init((try ConvexHullShapeSettings.create(allocator, &off_center_box, .{})).asShapeSettings());
+    defer hull.deinit();
+
+    // Translate/rotate the shape through a compound (off center to force center of mass not zero)
+    const shape1_position = Vec3.init(10, 20, 30);
+    const shape1_rotation = Quat.rotation(Vec3.axisX(), 0.1 * math.pi).mul(Quat.rotation(Vec3.axisY(), 0.2 * math.pi));
+    const shape2_position = Vec3.init(40, 50, 60);
+    const shape2_rotation = Quat.rotation(Vec3.axisZ(), 0.3 * math.pi);
+
+    var compound_settings = Settings.init(allocator);
+    defer compound_settings.deinit();
+    try compound_settings.base.addShape(shape1_position, shape1_rotation, hull.get(), .{}); // Shape 1
+    try compound_settings.base.addShape(shape2_position, shape2_rotation, hull.get(), .{}); // Shape 2
+    var compound_ref = try createShape(compound_settings.asShapeSettings());
+    defer compound_ref.deinit();
+    const compound = compound_ref.get().?;
+
+    // Hitting shape 1
+    try testRayHelper(compound, shape1_position.add(shape1_rotation.mulVec3(Vec3.init(-2, 0, 0))), shape1_position.add(shape1_rotation.mulVec3(Vec3.init(3, 0, 0))));
+    try testRayHelper(compound, shape1_position.add(shape1_rotation.mulVec3(Vec3.init(0, -4, 0))), shape1_position.add(shape1_rotation.mulVec3(Vec3.init(0, 5, 0))));
+    try testRayHelper(compound, shape1_position.add(shape1_rotation.mulVec3(Vec3.init(0, 0, -6))), shape1_position.add(shape1_rotation.mulVec3(Vec3.init(0, 0, 7))));
+
+    // Hitting shape 2
+    try testRayHelper(compound, shape2_position.add(shape2_rotation.mulVec3(Vec3.init(-2, 0, 0))), shape2_position.add(shape2_rotation.mulVec3(Vec3.init(3, 0, 0))));
+    try testRayHelper(compound, shape2_position.add(shape2_rotation.mulVec3(Vec3.init(0, -4, 0))), shape2_position.add(shape2_rotation.mulVec3(Vec3.init(0, 5, 0))));
+    try testRayHelper(compound, shape2_position.add(shape2_rotation.mulVec3(Vec3.init(0, 0, -6))), shape2_position.add(shape2_rotation.mulVec3(Vec3.init(0, 0, 7))));
+}
+
+test "TestStaticCompoundShapeRay" {
+    try testCompoundShapeRay(StaticCompoundShapeSettings);
+}
+
+test "TestMutableCompoundShapeRay" {
+    try testCompoundShapeRay(MutableCompoundShapeSettings);
 }

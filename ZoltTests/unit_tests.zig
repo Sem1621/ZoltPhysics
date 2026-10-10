@@ -59,7 +59,9 @@ test {
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
+    _ = @import("Physics/ShapeFilterTests.zig");
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
+    _ = @import("Physics/TransformedShapeTests.zig");
 }

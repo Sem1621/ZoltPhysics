@@ -1002,26 +1002,6 @@ test "TaperedCylinderShape: center of mass, bounds, inner radius, volume, mass p
     try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, 0, 0)).isClose(Vec3.init(1, -0.25, 0).normalized(), .{ .max_dist_sq = 1.0e-12 })); // On the axis: X
 }
 
-test "TaperedCylinderShape: valid scales (the tapered cylinder part of Jolt's TestIsValidScale)" {
-    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
-    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
-
-    var tapered_cylinder_ref = try createTestShape(0.5, 2.0, 3.0, PhysicsSettings.default_convex_radius);
-    defer tapered_cylinder_ref.deinit();
-    const tapered_cylinder = tapered_cylinder_ref.get().?;
-    try testing.expect(!tapered_cylinder.isValidScale(Vec3.zero()));
-    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(0, 1, 0)));
-    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(1, 0, 1)));
-    try testing.expect(tapered_cylinder.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(tapered_cylinder.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(tapered_cylinder.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(!tapered_cylinder.isValidScale(Vec3.init(1, 1, 2)));
-    try testing.expect(tapered_cylinder.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
-    try testing.expect(tapered_cylinder.makeScaleValid(Vec3.init(-1.0e-10, 1, 1.0e-10)).eql(Vec3.init(-ScaleHelpers.min_scale, 1, ScaleHelpers.min_scale)));
-    try testing.expect(tapered_cylinder.makeScaleValid(Vec3.init(2, 5, -4)).eql(Vec3.init(3, 5, -3)));
-}
-
 test "TaperedCylinderShape: support functions, a negative Y scale flips top and bottom" {
     var shape_ref = try createTestShape(1.0, 1.0, 0.5, 0.25);
     defer shape_ref.deinit();
@@ -1087,7 +1067,9 @@ test "TaperedCylinderShape: supporting faces (side, top, bottom, skipped caps of
     try testing.expectEqual(@as(u32, 8), face.len);
 }
 
-test "TaperedCylinderShape: ray casts (TestTaperedCylinderShapeRay, ConvexShape's GJK fallback) and collide point" {
+// Jolt's TestTaperedCylinderShapeRay is in ZoltTests/Physics, this adds hit positions, the collector context and the shape
+// filter
+test "TaperedCylinderShape: hit positions of ConvexShape's GJK ray cast fallback, collide point with a context and the shape filter" {
     const allocator = testing.allocator;
 
     var shape_ref = try createTestShape(4, 1, 3, PhysicsSettings.default_convex_radius);
