@@ -1150,7 +1150,7 @@ fn makeSoup(gen: *Gen, mesh: *MeshDesc, num_triangles: u32, extent: f32) !void {
 }
 
 /// Number of hand picked meshes (see makeSpecialMesh), the others are random
-const num_special_meshes = 14;
+const num_special_meshes = 15;
 
 /// Hand picked mesh number `n`: every error of the constructor and edge cases of the active edges
 fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
@@ -1173,9 +1173,9 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
             try mesh.addTriangle(0, 3, 4);
             try mesh.addTriangle(0, 2, 3);
         },
-        2 => {
-            // A triangle that is only degenerate in quantized space (not removed: mode 0)
-            mode = 0;
+        2, 14 => {
+            // A triangle that is only degenerate in quantized space (not removed with mode 0, removed by Sanitize)
+            mode = if (n == 2) 0 else 1;
             _ = try mesh.addVertex(Vec3.init(0, 0, 0));
             _ = try mesh.addVertex(Vec3.init(0.01, 0, 0));
             _ = try mesh.addVertex(Vec3.init(0, 0.01, 0));
@@ -1183,6 +1183,7 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
             _ = try mesh.addVertex(Vec3.init(0, 100000, 0));
             try mesh.addTriangle(0, 4, 3);
             try mesh.addTriangle(0, 1, 2);
+            if (n == 14) try mesh.addTriangle(0, 3, 4);
         },
         3, 4, 5, 6, 7 => {
             for (square) |v| _ = try mesh.addVertex(v);
@@ -1258,7 +1259,7 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
             try mesh.addTriangle(0, 2, 3);
             threshold = -0.5;
         },
-        else => {
+        13 => {
             // 32 materials, all used, user data
             num_materials = 32;
             for (0..9) |i| _ = try mesh.addVertex(Vec3.init(@floatFromInt(i % 3), @floatFromInt(i / 3), @as(f32, @floatFromInt(i % 2)) * 0.25));
@@ -1273,6 +1274,7 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
                 t.user_data = @intCast(1000 + i);
             }
         },
+        else => unreachable,
     }
 
     mesh.input = .{
@@ -1722,8 +1724,10 @@ test "MeshShape parity" {
             collide_cmp.check("collide", mesh_index, zs.values.items, joltStream(buffer, Call{ .h = h, .in = &input }));
         }
 
-        // Cast: a sphere or a box through the mesh, or the mesh against a sphere or a box
-        const num_casts: usize = if (ids.items.len > 2000) 25 else 60;
+        // Cast: a sphere or a box through the mesh, or the mesh against a sphere or a box. Not for the meshes with
+        // coordinates around 1e5 (special meshes 2 and 14): long casts overflow in CastSphereVsTriangles::RayCylinder
+        // and the NaN fraction violates Jolt's assert `fraction >= 0`.
+        const num_casts: usize = if (size > 1.0e4) 0 else if (ids.items.len > 2000) 25 else 60;
         for (0..num_casts) |_| {
             const convex = gen.convex();
             const mesh_cast = gen.chance(25);
