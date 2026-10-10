@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 37.2%** of 85391 lines in scope · **Unit tests: 40.1%** of 18321 lines
+**Library: 38.2%** of 85391 lines in scope · **Unit tests: 40.1%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -23,7 +23,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics` | 2% | 1 | 0 | 0 | 12 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 7% | 2 | 0 | 1 | 15 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 37% | 46 | 2 | 12 | 16 | 0 | 0 | 21948 |
+| `Jolt/Physics/Collision` | 40% | 48 | 2 | 10 | 16 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 0% | 0 | 0 | 0 | 35 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
@@ -294,7 +294,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Collision — 37%</summary>
+<details><summary>Jolt/Physics/Collision — 40%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -342,7 +342,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `PhysicsMaterialSimple.cpp`, `PhysicsMaterialSimple.h` | 55 | ✅ complete | `Zolt/Physics/Collision/PhysicsMaterialSimple.zig` |
 | `RayCast.h` | 68 | ✅ complete | `Zolt/Physics/Collision/RayCast.zig` |
 | `BoxShape.cpp`, `BoxShape.h` | 352 | ✅ complete | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
-| `CapsuleShape.cpp`, `CapsuleShape.h` | 451 | ⚪ stub | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
+| `CapsuleShape.cpp`, `CapsuleShape.h` | 451 | ✅ complete | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
 | `CompoundShape.cpp`, `CompoundShape.h` | 638 | ✅ complete | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
 | `CompoundShapeVisitors.h` | 394 | ✅ complete | `Zolt/Physics/Collision/Shape/CompoundShapeVisitors.zig` |
 | `ConvexHullShape.cpp`, `ConvexHullShape.h` | 1285 | ⚪ stub | `Zolt/Physics/Collision/Shape/ConvexHullShape.zig` |
@@ -365,7 +365,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `StaticCompoundShape.cpp`, `StaticCompoundShape.h` | 662 | ⚪ stub | `Zolt/Physics/Collision/Shape/StaticCompoundShape.zig` |
 | `SubShapeID.h` | 113 | ✅ complete | `Zolt/Physics/Collision/Shape/SubShapeID.zig` |
 | `SubShapeIDPair.h` | 49 | ✅ complete | `Zolt/Physics/Collision/Shape/SubShapeIDPair.zig` |
-| `TaperedCapsuleShape.cpp`, `TaperedCapsuleShape.h` | 483 | ⚪ stub | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
+| `TaperedCapsuleShape.cpp`, `TaperedCapsuleShape.h` | 483 | ✅ complete | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
 | `TaperedCylinderShape.cpp`, `TaperedCylinderShape.h` | 689 | ⚪ stub | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
 | `TriangleShape.cpp`, `TriangleShape.h` | 461 | ⚪ stub | `Zolt/Physics/Collision/Shape/TriangleShape.zig` |
 | `ShapeCast.h` | 143 | ✅ complete | `Zolt/Physics/Collision/ShapeCast.zig` |
