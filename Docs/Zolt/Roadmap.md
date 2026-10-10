@@ -110,7 +110,7 @@ Notes for later phases:
   near-degenerate hulls, empty meshes). Zolt panics on them with asserts enabled, like an assert-enabled
   Jolt build, and matches Jolt's release behavior in ReleaseFast (guide section 7).
 
-### Phase 4: Collision (`Jolt/Physics/Collision`) — shapes done, shared tests in progress
+### Phase 4: Collision (`Jolt/Physics/Collision`) ✅
 Architecture: [CollisionArchitecture.md](CollisionArchitecture.md) (decided by three competing compiled
 prototypes, two judges and a synthesis). Port order:
 1. Foundation F1: `Core/Virtual.zig`, `Core/PlacementBuffer.zig`, `Core/Result.zig`, BodyID,
@@ -132,7 +132,12 @@ The broad phase, NarrowPhaseQuery and EstimateCollisionResponse need `BodyManage
 Most `UnitTests/Physics` files mix pure shape cases with cases that need `PhysicsTestContext`
 (a `PhysicsSystem`): Phase 4 ports the pure cases and marks the files partial; parity tests against the
 C++ library carry most of the verification.
-**Milestone M4:** every collision function has bit exact parity tests, and the shape-only cases of
+**Milestone M4:** ✅ reached. Every shape and collision algorithm is ported and reviewed; besides the
+per-shape parity tests, `ZoltParity/Physics/PairwiseParity.zig` sweeps every ordered pair of 61 catalogue
+shapes (all shape types, decorators, nested compounds, meshes, height fields) through collide, cast,
+ray and point queries bit exact in both precisions and in Debug / ReleaseFast. The PhysicsTestContext
+parts of the shared test files are listed in their `//! Missing:` headers for Phase 5. Definition:
+every collision function has bit exact parity tests, and the shape-only cases of
 `ShapeTests`, `RayShapeTests`, `CollideShapeTests`, `CastShapeTests`, `ConvexVsTrianglesTest`,
 `CollidePointTests`, `SubShapeIDTest`, `CollisionGroupTests`, `ObjectLayerPairFilter*Tests`,
 `HeightFieldShapeTests`, `MutableCompoundShapeTests`, `OffsetCenterOfMassShapeTests`,

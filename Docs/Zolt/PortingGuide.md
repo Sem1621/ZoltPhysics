@@ -521,6 +521,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   plain operators are overflow-checked in Debug/ReleaseSafe.
 - `std.math.nan(f32)` is a quiet NaN like `numeric_limits<float>::quiet_NaN()`.
 - Shifts need a right operand of the exact log2 type: `x << @intCast(n)` with `n` a `u5` for `u32`.
+- Optimized builds (ReleaseFast) fold functions with identical machine code into one address. Never
+  identify or classify functions by comparing their addresses at runtime; compare at comptime, where
+  function pointer equality is identity (see the dispatch table parity test).
 
 ## 12. Rename table
 
@@ -673,3 +676,4 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `HeightFieldShape::GetHeights` / `SetHeights` / `GetMaterials` / `SetMaterials` (`float *` / `uint8 *`, `intptr_t` stride, `TempAllocator &`) | `[*]f32` / `[*]u8` plus `isize` stride, `temp_allocator` parameter | raw strided buffers as in Jolt |
 | `HeightFieldShape::ProjectOntoSurface(pos, outPos, outID) -> bool`, `GetSubShapeCoordinates(id, outX, outY, outTri)`, `HeightFieldShapeConstants::c*` | `projectOntoSurface(pos) ?SurfacePosition`, `getSubShapeCoordinates(id) SubShapeCoordinates`, `HeightFieldShapeConstants.no_collision_value` ... | out parameters, constants |
 | `PlaneShape::GetVertices(Vec3 *)`, `sPlaneGetOrthogonalBasis(n, outP1, outP2)` | `getVertices() [4]Vec3`, `planeGetOrthogonalBasis(n) OrthogonalBasis` | out parameters |
+| `Vec3::sUnitSphere` (static initializer) | `Vec3.unit_sphere` (comptime `StaticArray(Vec3, 1026)`) | static initializer |

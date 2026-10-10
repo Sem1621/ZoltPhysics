@@ -829,3 +829,13 @@ needs only the `Body` pointer type from the F1 stub.
   `mPoints[*end_vtx]` (probably meant `*(end_vtx - 1)`), so hulls of exactly 3 points miss an edge;
   TaperedCylinderShapeSettings drops density and user data in its equal-radii shortcut; ScaledShape's
   MakeScaleValid can return a scale below `ScaleHelpers::cMinScale`.
+- Two more Jolt debug asserts that queries reach with valid input (found by the pairwise sweep,
+  `ZoltParity/Physics/PairwiseParity.zig`): a ClosestHit collector whose early out fraction was set
+  before the query asserts when a shape adds a hit without checking the early out (e.g.
+  `PlaneShape::sCollideConvexVsPlane`); and the WalkSubShapes early-abort quirk lets AnyHit receive a
+  second hit from a MutableCompoundShape with more than one block of 4 sub shapes, in collide, cast and
+  ray queries. Both behave like Jolt (assert in safe builds, Jolt's release behavior in ReleaseFast).
+- Function identity: optimized builds fold functions with identical machine code into one address
+  (EmptyShape's empty collide / cast functions and `collideUnsupported` / `castUnsupported` share an
+  address in ReleaseFast). Code and tests that classify dispatch entries compare the comptime registry
+  (comptime function pointer equality is identity), never runtime addresses.
