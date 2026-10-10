@@ -21,6 +21,12 @@
 //! - The enum `ETriangleFlags` becomes constants (`FLAGS_ACTIVE_EGDE_SHIFT`, Jolt's spelling, is
 //!   `flags_active_edge_shift`), `NumTriangleBits` / `MaxTrianglesPerLeaf` are `num_triangle_bits` /
 //!   `max_triangles_per_leaf`.
+//! - Null entries in the material list (`RefConst.init(null)`, legal in Jolt and restored by `restoreWithChildren` /
+//!   `restoreMaterialState`) are kept as they are: `getMaterialList`, `saveMaterialState` and the binary state see the
+//!   null entry. Jolt's `GetMaterial` and the materials of `GetTrianglesNext` return nullptr for such an entry; the
+//!   shared signatures `Shape.getMaterial` / `out_materials: ?[]*const PhysicsMaterial` cannot express a null
+//!   material, so Zolt returns `PhysicsMaterial.default` instead (as `ConvexShape` does for its null material). The
+//!   constructor options take non-null materials; append `.init(null)` to `MeshShapeSettings.materials` for a null entry.
 //! - `RestoreMaterialState` allocates the material list (`Array::assign`), so `Shape.restoreMaterialState` returns
 //!   `Allocator.Error!void` (the list uses the shape's allocator).
 //! - `GetSubmergedVolume` is not supported (Jolt asserts): with asserts enabled it panics with Jolt's message, in a
@@ -793,7 +799,8 @@ pub const MeshShape = struct {
         if (self.materials.items.len == 0)
             return PhysicsMaterial.default;
 
-        return self.materials.items[self.getMaterialIndex(sub_shape_id)].get().?;
+        // Zolt: a null entry of the material list returns the default material (Jolt returns nullptr), see the file header
+        return self.materials.items[self.getMaterialIndex(sub_shape_id)].get() orelse PhysicsMaterial.default;
     }
 
     // See Shape::GetSurfaceNormal
@@ -1095,9 +1102,9 @@ pub const MeshShape = struct {
                     var flags: [max_triangles_per_leaf]u8 = undefined;
                     TriangleCodec.DecodingContext.getFlags(triangles, num_triangles, &flags);
 
-                    // Store materials
+                    // Store materials (Zolt: a null entry of the material list stores the default material, see the file header)
                     for (flags[0..num_triangles]) |f| {
-                        materials[self.materials_pos] = self.shape.materials.items[f & flags_material_mask].get().?;
+                        materials[self.materials_pos] = self.shape.materials.items[f & flags_material_mask].get() orelse PhysicsMaterial.default;
                         self.materials_pos += 1;
                     }
                 }
@@ -2052,6 +2059,91 @@ test "MeshShape: binary state, material state, SaveWithChildren and the registra
     try expect(registry.getCastShape(.sphere, .mesh) == &MeshShape.castSphereVsMesh);
     try expect(registry.getCollideShape(.mesh, .user_convex8) == &CollisionDispatch.reversedCollideShape);
     try expect(registry.getCastShape(.mesh, .capsule) == &CollisionDispatch.reversedCastShape);
+}
+
+test "MeshShape: null entries in the material list" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    // Materials 0 and 2 are set, 1 is null (Jolt allows nullptr in the PhysicsMaterialList)
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material());
+    defer material_ref.deinit();
+    var box_triangles = boxTriangles(3);
+    var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{});
+    defer settings.deinit();
+    try settings.materials.append(allocator, .init(material.material()));
+    try settings.materials.append(allocator, .init(null));
+    try settings.materials.append(allocator, .init(material.material()));
+    settings.per_triangle_user_data = true;
+    var result = try createMesh(&settings, allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    const mesh = shape.cast(MeshShape);
+
+    // The list keeps the null entry
+    try testing.expectEqual(@as(usize, 3), mesh.getMaterialList().len);
+    try expect(mesh.getMaterialList()[1].get() == null);
+
+    // GetMaterial: the default material for the null entry (Jolt: nullptr)
+    var recorder: TriangleRecorder = .{};
+    mesh.walkTreePerTriangle(.{}, &recorder);
+    try testing.expectEqual(@as(u32, 12), recorder.count);
+    for (recorder.ids[0..recorder.count]) |id| {
+        const material_index = box_triangles[mesh.getTriangleUserData(id) - 100].material_index;
+        try testing.expectEqual(material_index, mesh.getMaterialIndex(id));
+        try expect(shape.getMaterial(id) == if (material_index == 1) PhysicsMaterial.default else material.material());
+    }
+
+    // GetTrianglesNext: the default material for the null entry (Jolt: nullptr)
+    {
+        var ctx: Shape.GetTrianglesContext = .{};
+        shape.getTrianglesStart(&ctx, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+        var out_vertices: [3 * 32]Float3 = undefined;
+        var out_materials: [32]*const PhysicsMaterial = undefined;
+        try testing.expectEqual(@as(u32, 12), shape.getTrianglesNext(&ctx, 32, &out_vertices, &out_materials));
+        var num_default: u32 = 0;
+        for (out_materials[0..12]) |m| {
+            if (m == PhysicsMaterial.default)
+                num_default += 1
+            else
+                try expect(m == material.material());
+        }
+        try testing.expectEqual(@as(u32, 4), num_default); // Triangles 2, 3, 8 and 9 use material 1
+    }
+
+    // SaveWithChildren / RestoreWithChildren: the null entry is saved as null ID and restored as null
+    {
+        var children: std.Io.Writer.Allocating = .init(allocator);
+        defer children.deinit();
+        var children_out = StreamWrapper.StreamOutWrapper.init(&children.writer);
+        var shape_map: Shape.ShapeToIDMap = .empty;
+        defer shape_map.deinit(allocator);
+        var material_map: Shape.MaterialToIDMap = .empty;
+        defer material_map.deinit(allocator);
+        try shape.saveWithChildren(allocator, children_out.streamOut(), &shape_map, &material_map);
+
+        var children_reader: std.Io.Reader = .fixed(children.written());
+        var children_in = StreamWrapper.StreamInWrapper.init(&children_reader);
+        var id_to_shape: Shape.IDToShapeMap = .empty;
+        defer {
+            for (id_to_shape.items) |*s| s.deinit();
+            id_to_shape.deinit(allocator);
+        }
+        var id_to_material: Shape.IDToMaterialMap = .empty;
+        defer {
+            for (id_to_material.items) |*m| m.deinit();
+            id_to_material.deinit(allocator);
+        }
+        var r = try Shape.restoreWithChildren(allocator, children_in.streamIn(), &id_to_shape, &id_to_material);
+        defer r.deinit();
+        const rm = r.getPtr().?.cast(MeshShape);
+        const list = rm.getMaterialList();
+        try testing.expectEqual(@as(usize, 3), list.len);
+        try expect(list[0].get() != null and list[1].get() == null and list[0].get() == list[2].get());
+        for (recorder.ids[0..recorder.count]) |id|
+            try expect((rm.asShape().getMaterial(id) == PhysicsMaterial.default) == (mesh.getMaterialIndex(id) == 1));
+    }
 }
 
 test "MeshShape: GetSubmergedVolume is not supported" {

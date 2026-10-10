@@ -8,10 +8,11 @@
 //! Both sides write their results into a stream of u32 (see `Stream`, the layout of every function is the same as in
 //! MeshShapeReference.cpp) and the streams must be identical. The meshes are random grids (flat, terraced, noisy, with
 //! random diagonals and big offsets), soups of random triangles with shared vertices, closed meshes (boxes, UV spheres)
-//! and a big grid, with materials (up to 32, more for the error), user data, degenerate and duplicate triangles,
-//! every construction mode (arrays set directly, the indexed constructor, the triangle list constructor with vertices
-//! that Indexify welds) and random settings (max triangles per leaf, the active edge threshold incl. negative values,
-//! per triangle user data, build quality). The queries use random inputs mixed with hand picked edge cases: rays
+//! and a big grid, with materials (up to 32, more for the error, null entries in the list: Jolt's GetMaterial returns
+//! nullptr for them, Zolt the default material, so the C++ side writes query materials with WriteQueryMaterial), user
+//! data, degenerate and duplicate triangles, every construction mode (arrays set directly, the indexed constructor, the
+//! triangle list constructor with vertices that Indexify welds) and random settings (max triangles per leaf, the active
+//! edge threshold incl. negative values, per triangle user data, build quality). The queries use random inputs mixed with hand picked edge cases: rays
 //! through vertices and along edges, parallel to faces, starting inside or on the surface, zero length rays, touching
 //! and deeply penetrating shapes, scales with negative and non uniform components, back face and active edge modes,
 //! max separation distances, collected faces and early out fractions.
@@ -129,7 +130,8 @@ const MeshInput = extern struct {
     active_edge_cos_threshold_angle: f32,
     per_triangle_user_data: c_int,
     build_quality: u32,
-    padding: u32 = 0,
+    /// Bit i set: entry i of the material list is null (only with mode 0, the Zolt constructors take non-null materials)
+    null_materials: u32 = 0,
 };
 
 /// Must match ConvexDesc in MeshShapeReference.cpp
@@ -400,8 +402,12 @@ const Materials = struct {
         for (&self.refs) |*r| r.deinit();
     }
 
-    /// WriteMaterial in C++
-    fn write(self: *const Materials, s: *Stream, material: *const PhysicsMaterial) void {
+    /// WriteMaterial in C++ (an entry of a material list, can be null)
+    fn write(self: *const Materials, s: *Stream, material_or_null: ?*const PhysicsMaterial) void {
+        const material = material_or_null orelse {
+            s.u(0xfffffffd);
+            return;
+        };
         if (material == PhysicsMaterial.default) {
             s.u(0xffffffff);
             return;
@@ -484,6 +490,7 @@ fn zoltCreate(allocator: Allocator, materials: *const Materials, in: *const Mesh
     var material_list: [64]*const PhysicsMaterial = undefined;
     for (0..in.num_materials) |i| material_list[i] = materials.ptrs[i % num_parity_materials];
     const mesh_materials = material_list[0..in.num_materials];
+    std.debug.assert(in.null_materials == 0 or in.mode == 0);
 
     var settings = switch (in.mode) {
         0 => blk: {
@@ -491,7 +498,7 @@ fn zoltCreate(allocator: Allocator, materials: *const Materials, in: *const Mesh
             errdefer settings.deinit();
             try settings.triangle_vertices.appendSlice(allocator, in.vertices[0..in.num_vertices]);
             try settings.indexed_triangles.appendSlice(allocator, in.triangles[0..in.num_triangles]);
-            for (mesh_materials) |mat| try settings.materials.append(allocator, .init(mat));
+            for (mesh_materials, 0..) |mat, i| try settings.materials.append(allocator, .init(if (i < 32 and (in.null_materials >> @intCast(i)) & 1 != 0) null else mat));
             break :blk settings;
         },
         1 => try MeshShapeSettings.initIndexed(allocator, in.vertices[0..in.num_vertices], in.triangles[0..in.num_triangles], .{ .materials = mesh_materials }),
@@ -548,7 +555,7 @@ fn zoltCreate(allocator: Allocator, materials: *const Materials, in: *const Mesh
     s.u(stats.num_triangles);
     s.u(@intCast(stats.size_bytes - @sizeOf(MeshShape)));
     s.u(@intCast(mesh.getMaterialList().len));
-    for (mesh.getMaterialList()) |mat| materials.write(s, mat.get().?);
+    for (mesh.getMaterialList()) |mat| materials.write(s, mat.get());
     s.u(@truncate(shape.getUserData()));
     s.u(@truncate(shape.getUserData() >> 32));
 
@@ -586,7 +593,7 @@ fn zoltSubShapes(materials: *const Materials, shape: *const Shape, ids: []const 
     for (ids) |value| {
         const id = makeID(value);
         s.u(marker_sub_shape);
-        materials.write(s, shape.getMaterial(id));
+        materials.write(s, shape.getMaterial(id)); // WriteQueryMaterial in C++ (nullptr becomes the default material)
         s.u(mesh.getMaterialIndex(id));
         s.u(mesh.getTriangleUserData(id));
         s.v3(shape.getSurfaceNormal(id, vec3(in.point)));
@@ -781,7 +788,7 @@ fn zoltTriangles(allocator: Allocator, materials: *const Materials, shape: *cons
         s.u(count);
         for (vertices[0 .. 3 * count]) |v| s.f3(v);
         if (in.materials != 0)
-            for (out_materials[0..count]) |mat| materials.write(s, mat);
+            for (out_materials[0..count]) |mat| materials.write(s, mat); // WriteQueryMaterial in C++
         if (count == 0)
             break;
     }
@@ -828,7 +835,7 @@ fn zoltBinaryState(allocator: Allocator, materials: *const Materials, shape: *co
     try material_list.append(allocator, .init(PhysicsMaterial.default));
     try shape.saveMaterialState(allocator, &material_list);
     s.u(@intCast(material_list.items.len));
-    for (material_list.items) |mat| materials.write(s, mat.get().?);
+    for (material_list.items) |mat| materials.write(s, mat.get());
 
     // Restore
     {
@@ -849,7 +856,7 @@ fn zoltBinaryState(allocator: Allocator, materials: *const Materials, shape: *co
             s.f(hit.fraction);
             s.u(hit.sub_shape_id2.getValue());
             if (hit.fraction < 1.0)
-                materials.write(s, restored.getMaterial(hit.sub_shape_id2));
+                materials.write(s, restored.getMaterial(hit.sub_shape_id2)); // WriteQueryMaterial in C++
         }
     }
 
@@ -891,7 +898,7 @@ fn zoltBinaryState(allocator: Allocator, materials: *const Materials, shape: *co
             s.bytes(restored_children);
             const list = restored.cast(MeshShape).getMaterialList();
             s.u(@intCast(list.len));
-            for (list) |mat| materials.write(s, mat.get().?);
+            for (list) |mat| materials.write(s, mat.get());
         }
     }
 }
@@ -1150,7 +1157,7 @@ fn makeSoup(gen: *Gen, mesh: *MeshDesc, num_triangles: u32, extent: f32) !void {
 }
 
 /// Number of hand picked meshes (see makeSpecialMesh), the others are random
-const num_special_meshes = 15;
+const num_special_meshes = 17;
 
 /// Hand picked mesh number `n`: every error of the constructor and edge cases of the active edges
 fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
@@ -1161,6 +1168,7 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
     var num_materials: u32 = 0;
     var max_triangles_per_leaf: u32 = 8;
     var threshold: f32 = 0.996195;
+    var null_materials: u32 = 0;
     const square = [_]Vec3{ Vec3.init(0, 0, 0), Vec3.init(0, 0, 1), Vec3.init(1, 0, 1), Vec3.init(1, 0, 0) };
     switch (n) {
         0 => mode = 0, // No triangles
@@ -1274,6 +1282,31 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
                 t.user_data = @intCast(1000 + i);
             }
         },
+        15 => {
+            // Null entries in the material list (1 and 3 of 4): Jolt's GetMaterial returns nullptr, Zolt the default
+            mode = 0;
+            num_materials = 4;
+            null_materials = 0b1010;
+            for (0..9) |i| _ = try mesh.addVertex(Vec3.init(@floatFromInt(i % 3), @as(f32, @floatFromInt(i % 2)) * 0.25, @floatFromInt(i / 3)));
+            for (0..2) |z|
+                for (0..2) |x| {
+                    const v: u32 = @intCast(z * 3 + x);
+                    try mesh.addTriangle(v, v + 3, v + 1);
+                    try mesh.addTriangle(v + 1, v + 3, v + 4);
+                };
+            for (mesh.triangles.items, 0..) |*t, i| {
+                t.material_index = @intCast(i % 4);
+                t.user_data = @intCast(2000 + i);
+            }
+        },
+        16 => {
+            // A closed box with a single material that is null
+            mode = 0;
+            num_materials = 1;
+            null_materials = 1;
+            try makeBox(&mesh, Vec3.init(0.5, -0.25, 0.1), Vec3.init(1, 0.5, 2));
+            mesh.closed = true;
+        },
         else => unreachable,
     }
 
@@ -1291,6 +1324,7 @@ fn makeSpecialMesh(allocator: Allocator, n: usize) !MeshDesc {
         .active_edge_cos_threshold_angle = threshold,
         .per_triangle_user_data = 1,
         .build_quality = @intCast(n % 2),
+        .null_materials = null_materials,
     };
     mesh.finalize();
     return mesh;
@@ -1389,6 +1423,9 @@ fn makeMesh(allocator: Allocator, gen: *Gen, n: usize) !MeshDesc {
         }
     }
 
+    // Null entries in the material list (only for the arrays set directly: the Zolt constructors take non-null materials)
+    const null_materials: u32 = if (mode == 0 and num_materials > 0 and gen.chance(30)) gen.rng.next() else 0;
+
     const thresholds = [_]f32{ 0.996195, 0.996195, -1.0, 0.0, 0.5, 0.9999, 1.0 };
     mesh.input = .{
         .vertices = undefined,
@@ -1404,6 +1441,7 @@ fn makeMesh(allocator: Allocator, gen: *Gen, n: usize) !MeshDesc {
         .active_edge_cos_threshold_angle = if (gen.chance(20)) @cos(gen.float(0, 0.5 * math.pi)) else thresholds[gen.index(thresholds.len)],
         .per_triangle_user_data = @intFromBool(gen.chance(50)),
         .build_quality = gen.index(2),
+        .null_materials = null_materials,
     };
     mesh.finalize();
     return mesh;

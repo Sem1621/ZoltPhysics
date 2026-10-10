@@ -119,9 +119,15 @@ public:
 	uint32				mSize = 0;
 };
 
-// A material: the index in GetMaterials(), 0xffffffff for the default material, otherwise 0xfffffffe, the name and the color
+// A material: the index in GetMaterials(), 0xffffffff for the default material, 0xfffffffd for nullptr (an entry of a
+// material list), otherwise 0xfffffffe, the name and the color
 void WriteMaterial(OutStream &ioStream, const PhysicsMaterial *inMaterial)
 {
+	if (inMaterial == nullptr)
+	{
+		ioStream.U(0xfffffffd);
+		return;
+	}
 	if (inMaterial == PhysicsMaterial::sDefault)
 	{
 		ioStream.U(0xffffffff);
@@ -137,6 +143,14 @@ void WriteMaterial(OutStream &ioStream, const PhysicsMaterial *inMaterial)
 	ioStream.U(0xfffffffe);
 	ioStream.Str(inMaterial->GetDebugName());
 	ioStream.U(inMaterial->GetDebugColor().GetUInt32());
+}
+
+// The material returned by a query (GetMaterial, GetTrianglesNext). Zolt deviation (see MeshShape.zig): for a null entry
+// of the material list MeshShape returns nullptr, Zolt returns the default material because Shape.getMaterial and the
+// materials of getTrianglesNext are non-null
+void WriteQueryMaterial(OutStream &ioStream, const PhysicsMaterial *inMaterial)
+{
+	WriteMaterial(ioStream, inMaterial != nullptr? inMaterial : PhysicsMaterial::sDefault.GetPtr());
 }
 
 void WriteCollideHit(OutStream &ioStream, const CollideShapeResult &inResult)
@@ -169,7 +183,7 @@ struct MeshInput
 	float					mActiveEdgeCosThresholdAngle;
 	int						mPerTriangleUserData;
 	uint32					mBuildQuality;
-	uint32					mPadding;
+	uint32					mNullMaterials;			// Bit i set: entry i of the material list is nullptr (only with mode 0)
 };
 
 // The convex shape of a query, must match ConvexDesc in MeshShapeParity.zig
@@ -337,7 +351,10 @@ void *jolt_mesh_create(const MeshInput *inInput, uint32 *outStream, uint32 inCap
 
 	PhysicsMaterialList materials;
 	for (uint i = 0; i < in.mNumMaterials; ++i)
-		materials.push_back(GetMaterials()[i % cNumMaterials]);
+		if (i < 32 && ((in.mNullMaterials >> i) & 1) != 0)
+			materials.push_back(PhysicsMaterialRefC());
+		else
+			materials.push_back(GetMaterials()[i % cNumMaterials]);
 
 	Ref<MeshShapeSettings> settings;
 	switch (in.mMode)
@@ -466,7 +483,7 @@ uint32 jolt_mesh_sub_shapes(void *inHandle, const uint32 *inIDs, uint32 inNumIDs
 	{
 		SubShapeID id = MakeID(inIDs[i]);
 		s.U(cMarkerSubShape);
-		WriteMaterial(s, shape->GetMaterial(id));
+		WriteQueryMaterial(s, shape->GetMaterial(id));
 		s.U(mesh->GetMaterialIndex(id));
 		s.U(mesh->GetTriangleUserData(id));
 		s.V3(shape->GetSurfaceNormal(id, Load3(inInput->mPoint)));
@@ -690,7 +707,7 @@ uint32 jolt_mesh_triangles(void *inHandle, const TrianglesInput *inInput, uint32
 			s.F3(vertices[i]);
 		if (in.mMaterials != 0)
 			for (int i = 0; i < count; ++i)
-				WriteMaterial(s, materials[i]);
+				WriteQueryMaterial(s, materials[i]);
 		if (count == 0)
 			break;
 	}
@@ -760,7 +777,7 @@ uint32 jolt_mesh_binary_state(void *inHandle, const RayInput *inRay, uint32 *out
 		s.F(hit.mFraction);
 		s.U(hit.mSubShapeID2.GetValue());
 		if (hit.mFraction < 1.0f)
-			WriteMaterial(s, restored->GetMaterial(hit.mSubShapeID2));
+			WriteQueryMaterial(s, restored->GetMaterial(hit.mSubShapeID2));
 	}
 
 	// Truncated binary state
