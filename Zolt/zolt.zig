@@ -183,9 +183,37 @@ pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 pub const Vector = @import("Math/Vector.zig").Vector;
 
 // Physics
+pub const AllowedDOFs = @import("Physics/Body/AllowedDOFs.zig").AllowedDOFs;
 pub const Body = @import("Physics/Body/Body.zig").Body;
+pub const BodyAccess = @import("Physics/Body/BodyAccess.zig").BodyAccess;
+pub const BodyActivationListener = @import("Physics/Body/BodyActivationListener.zig").BodyActivationListener;
+pub const BodyCreationSettings = @import("Physics/Body/BodyCreationSettings.zig").BodyCreationSettings;
+pub const CreateBodyError = @import("Physics/Body/BodyCreationSettings.zig").CreateBodyError;
+pub const OverrideMassProperties = @import("Physics/Body/BodyCreationSettings.zig").OverrideMassProperties;
+pub const BodyFilter = @import("Physics/Body/BodyFilter.zig").BodyFilter;
+pub const IgnoreMultipleBodiesFilter = @import("Physics/Body/BodyFilter.zig").IgnoreMultipleBodiesFilter;
+pub const IgnoreSingleBodyFilter = @import("Physics/Body/BodyFilter.zig").IgnoreSingleBodyFilter;
+pub const IgnoreSingleBodyFilterChained = @import("Physics/Body/BodyFilter.zig").IgnoreSingleBodyFilterChained;
 pub const BodyID = @import("Physics/Body/BodyID.zig").BodyID;
+pub const BodyLockBase = @import("Physics/Body/BodyLock.zig").BodyLockBase;
+pub const BodyLockRead = @import("Physics/Body/BodyLock.zig").BodyLockRead;
+pub const BodyLockWrite = @import("Physics/Body/BodyLock.zig").BodyLockWrite;
+pub const BodyLockInterface = @import("Physics/Body/BodyLockInterface.zig").BodyLockInterface;
+pub const BodyLockMultiBase = @import("Physics/Body/BodyLockMulti.zig").BodyLockMultiBase;
+pub const BodyLockMultiRead = @import("Physics/Body/BodyLockMulti.zig").BodyLockMultiRead;
+pub const BodyLockMultiWrite = @import("Physics/Body/BodyLockMulti.zig").BodyLockMultiWrite;
+pub const BodyIDVector = @import("Physics/Body/BodyManager.zig").BodyIDVector;
+pub const BodyManager = @import("Physics/Body/BodyManager.zig").BodyManager;
+pub const BodyWithMotionProperties = @import("Physics/Body/BodyManager.zig").BodyWithMotionProperties;
+pub const BodyPair = @import("Physics/Body/BodyPair.zig").BodyPair;
+pub const body_type_count = @import("Physics/Body/BodyType.zig").body_type_count;
+pub const BodyType = @import("Physics/Body/BodyType.zig").BodyType;
 pub const MassProperties = @import("Physics/Body/MassProperties.zig").MassProperties;
+pub const CanSleep = @import("Physics/Body/MotionProperties.zig").CanSleep;
+pub const MotionProperties = @import("Physics/Body/MotionProperties.zig").MotionProperties;
+pub const track_simulation_stats = @import("Physics/Body/MotionProperties.zig").track_simulation_stats;
+pub const MotionQuality = @import("Physics/Body/MotionQuality.zig").MotionQuality;
+pub const MotionType = @import("Physics/Body/MotionType.zig").MotionType;
 pub const AABoxCast = @import("Physics/Collision/AABoxCast.zig").AABoxCast;
 pub const ActiveEdgeMode = @import("Physics/Collision/ActiveEdgeMode.zig").ActiveEdgeMode;
 pub const ActiveEdges = @import("Physics/Collision/ActiveEdges.zig");
@@ -338,8 +366,26 @@ pub const SimShapeFilter = @import("Physics/Collision/SimShapeFilter.zig").SimSh
 pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig").countAndSortTrues;
 pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
+pub const Constraint = @import("Physics/Constraints/Constraint.zig").Constraint;
+pub const Activation = @import("Physics/EActivation.zig").Activation;
+pub const PhysicsLock = @import("Physics/PhysicsLock.zig").PhysicsLock;
+pub const PhysicsLockContext = @import("Physics/PhysicsLock.zig").PhysicsLockContext;
+pub const PhysicsLockTypes = @import("Physics/PhysicsLock.zig").PhysicsLockTypes;
+pub const SharedLock = @import("Physics/PhysicsLock.zig").SharedLock;
+pub const UniqueLock = @import("Physics/PhysicsLock.zig").UniqueLock;
 pub const physics_settings = @import("Physics/PhysicsSettings.zig");
 pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
+pub const SoftBodyContactListener = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyContactListener;
+pub const SoftBodyContactSettings = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyContactSettings;
+pub const SoftBodyValidateResult = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyValidateResult;
+pub const SoftBodyCreationSettings = @import("Physics/SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
+pub const SoftBodyManifold = @import("Physics/SoftBody/SoftBodyManifold.zig").SoftBodyManifold;
+pub const SoftBodyMotionProperties = @import("Physics/SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
+pub const SoftBodySharedSettings = @import("Physics/SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
+pub const StateRecorder = @import("Physics/StateRecorder.zig").StateRecorder;
+pub const StateRecorderFilter = @import("Physics/StateRecorder.zig").StateRecorderFilter;
+pub const StateRecorderState = @import("Physics/StateRecorder.zig").StateRecorderState;
+pub const StateRecorderImpl = @import("Physics/StateRecorderImpl.zig").StateRecorderImpl;
 
 pub const SoftBodyShape = @import("Physics/SoftBody/SoftBodyShape.zig").SoftBodyShape;
 
@@ -449,9 +495,23 @@ const source_files = .{
     @import("Math/Vec3.zig"),
     @import("Math/Vec4.zig"),
     @import("Math/Vector.zig"),
+    @import("Physics/Body/AllowedDOFs.zig"),
     @import("Physics/Body/Body.zig"),
+    @import("Physics/Body/BodyAccess.zig"),
+    @import("Physics/Body/BodyActivationListener.zig"),
+    @import("Physics/Body/BodyCreationSettings.zig"),
+    @import("Physics/Body/BodyFilter.zig"),
     @import("Physics/Body/BodyID.zig"),
+    @import("Physics/Body/BodyLock.zig"),
+    @import("Physics/Body/BodyLockInterface.zig"),
+    @import("Physics/Body/BodyLockMulti.zig"),
+    @import("Physics/Body/BodyManager.zig"),
+    @import("Physics/Body/BodyPair.zig"),
+    @import("Physics/Body/BodyType.zig"),
     @import("Physics/Body/MassProperties.zig"),
+    @import("Physics/Body/MotionProperties.zig"),
+    @import("Physics/Body/MotionQuality.zig"),
+    @import("Physics/Body/MotionType.zig"),
     @import("Physics/Collision/AABoxCast.zig"),
     @import("Physics/Collision/ActiveEdgeMode.zig"),
     @import("Physics/Collision/ActiveEdges.zig"),
@@ -521,8 +581,18 @@ const source_files = .{
     @import("Physics/Collision/SimShapeFilter.zig"),
     @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/Collision/TransformedShape.zig"),
+    @import("Physics/Constraints/Constraint.zig"),
+    @import("Physics/EActivation.zig"),
+    @import("Physics/PhysicsLock.zig"),
     @import("Physics/PhysicsSettings.zig"),
+    @import("Physics/SoftBody/SoftBodyContactListener.zig"),
+    @import("Physics/SoftBody/SoftBodyCreationSettings.zig"),
+    @import("Physics/SoftBody/SoftBodyManifold.zig"),
+    @import("Physics/SoftBody/SoftBodyMotionProperties.zig"),
     @import("Physics/SoftBody/SoftBodyShape.zig"),
+    @import("Physics/SoftBody/SoftBodySharedSettings.zig"),
+    @import("Physics/StateRecorder.zig"),
+    @import("Physics/StateRecorderImpl.zig"),
     @import("RegisterTypes.zig"),
     @import("TriangleSplitter/TriangleSplitter.zig"),
     @import("TriangleSplitter/TriangleSplitterBinning.zig"),
