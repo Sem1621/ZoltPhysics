@@ -19,7 +19,9 @@
 //! - The mutating functions `setHeights` / `setMaterials` take `*HeightFieldShape` (Rule M) and the caller's
 //!   `TempAllocator`; they return `Allocator.Error` where Jolt aborts on out of memory. `setMaterials` grows the
 //!   material list with the shape's allocator. When it runs out of memory the shape stays valid, the material list may
-//!   have grown by the materials that were added before (they are unused).
+//!   have grown by the materials that were added before (they are unused). `setHeights` reports out of memory of the
+//!   active edge calculation only after updating the range block hierarchy and the min/max sample, so the shape stays
+//!   consistent and only the active edges of the patch are stale.
 //! - Raw pointer + stride parameters stay raw: `getHeights(..., out_heights: [*]f32, heights_stride: isize)`,
 //!   `setHeights(..., heights: [*]const f32, heights_stride: isize, ...)`, the same for `getMaterials` /
 //!   `setMaterials` (a stride can be negative, the data is then upside down). The material list of `setMaterials` is
@@ -1472,6 +1474,8 @@ pub const HeightFieldShape = struct {
     /// @param heights_stride_in Stride in floats between two consecutive rows of heights_in (can be negative if the data is upside down).
     /// @param temp_allocator Allocator to use for temporary memory
     /// @param opts.active_edge_cos_threshold_angle Cosine of the threshold angle (if the angle between the two triangles is bigger than this, the edge is active, note that a concave edge is always inactive).
+    /// Zolt: returns error.OutOfMemory when temp_allocator fails (Jolt aborts). If the temporary heights cannot be allocated nothing
+    /// has changed, otherwise the heights, ranges and bounds are updated and only the active edges of the patch are stale.
     pub fn setHeights(self: *HeightFieldShape, x: u32, y: u32, size_x: u32, size_y: u32, heights_in: [*]const f32, heights_stride_in: isize, temp_allocator: TempAllocator, opts: SetHeightsOptions) Allocator.Error!void {
         if (size_x == 0 or size_y == 0)
             return;
@@ -1669,15 +1673,12 @@ pub const HeightFieldShape = struct {
         const ae_y = if (y > 1) y - 2 else 0;
         const ae_sx = @min(x + size_x + 1, self.sample_count - 1) - ae_x;
         const ae_sy = @min(y + size_y + 1, self.sample_count - 1) - ae_y;
+        // (out of memory is reported at the end of this function, after the range block hierarchy has been updated)
         const active_edges_result = self.calculateActiveEdges(ae_x, ae_y, ae_sx, ae_sy, heights, affected_x, affected_y, heights_stride, 1.0, opts.active_edge_cos_threshold_angle, temp_allocator);
 
         // Free temporary buffer
         if (temp_heights) |temp|
             temp_allocator.free(temp, temp_heights_size);
-
-        // Out of memory in the active edge calculation (Jolt aborts): the heights have been updated, the active edges
-        // are partially updated
-        try active_edges_result;
 
         // Update hierarchy of range blocks
         while (max_level > 1) {
@@ -1746,6 +1747,11 @@ pub const HeightFieldShape = struct {
             };
 
         // TODO(debug_renderer): Invalidate temporary rendering data (mGeometry.clear())
+
+        // Out of memory in the active edge calculation (Jolt aborts). It is reported only now so that the heights, the
+        // range block hierarchy and the min/max sample are consistent: calculateActiveEdges allocates its normals
+        // buffer before writing any edge, so only the active edges of the patch still describe the old heights.
+        try active_edges_result;
     }
 
     /// Get the material indices of a block of data.
@@ -3609,4 +3615,57 @@ test "HeightFieldShape: every allocation failure is reported" {
         break;
     }
     try testing.expect(fail_index >= 3); // Temp heights, normals, remap table (+ the material list and indices)
+}
+
+test "HeightFieldShape: setHeights out of memory in the active edge calculation still updates ranges and bounds" {
+    const allocator = testing.allocator;
+
+    // A flat height field at height 0 that can be raised up to 20
+    const flat_samples: [32 * 32]f32 = @splat(0);
+    var settings = try HeightFieldShapeSettings.init(allocator, &flat_samples, Vec3.zero(), Vec3.one(), 32, .{});
+    defer settings.deinit();
+    settings.block_size = 4;
+    settings.min_height_value = 0;
+    settings.max_height_value = 20;
+    var original = try settings.asShapeSettings().createShape(allocator);
+    defer original.deinit();
+    settings.asShapeSettings().clearCachedResult();
+    var expected = try settings.asShapeSettings().createShape(allocator);
+    defer expected.deinit();
+    settings.asShapeSettings().clearCachedResult();
+    var failed = try settings.asShapeSettings().createShape(allocator);
+    defer failed.deinit();
+    settings.asShapeSettings().clearCachedResult();
+    const original_shape = original.getPtr().?.cast(HeightFieldShape);
+    const expected_shape = expected.getPtr().?.castMut(HeightFieldShape);
+    const failed_shape = failed.getPtr().?.castMut(HeightFieldShape);
+
+    // Raise a patch in the middle to height 10
+    const patch: [8 * 8]f32 = @splat(10);
+    var temp = TempAllocatorMalloc.init(allocator);
+    try expected_shape.setHeights(8, 8, 8, 8, &patch, 8, temp.tempAllocator(), .{});
+    try testing.expectApproxEqAbs(@as(f32, 10), expected_shape.asShape().getLocalBounds().max.getY(), 1.0e-2);
+
+    // Same, but the normals buffer of the active edge calculation cannot be allocated (allocation 0 are the temporary heights)
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    var failing_temp = TempAllocatorMalloc.init(failing.allocator());
+    try testing.expectError(error.OutOfMemory, failed_shape.setHeights(8, 8, 8, 8, &patch, 8, failing_temp.tempAllocator(), .{}));
+    try testing.expectEqual(@as(usize, 1), failing.allocations);
+    try testing.expectEqual(@as(usize, 1), failing.deallocations);
+
+    // The heights, the range block hierarchy, the min/max sample and the bounds are the same as after a successful setHeights
+    try testing.expectEqualSlices(u8, expected_shape.height_samples, failed_shape.height_samples);
+    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(expected_shape.range_blocks), std.mem.sliceAsBytes(failed_shape.range_blocks));
+    try testing.expectEqual(expected_shape.min_sample, failed_shape.min_sample);
+    try testing.expectEqual(expected_shape.max_sample, failed_shape.max_sample);
+    try testing.expect(failed_shape.asShape().getLocalBounds().eql(expected_shape.asShape().getLocalBounds()));
+
+    // So the walker finds the raised patch
+    var hit: RayCastResult = .{};
+    try testing.expect(failed_shape.asShape().castRay(.init(Vec3.init(12.25, 20, 12.75), Vec3.init(0, -20, 0)), .{}, &hit));
+    try testing.expectApproxEqAbs(@as(f32, 10), 20 - 20 * hit.fraction, 0.05); // Quantized height
+
+    // Only the active edges still describe the flat height field
+    try testing.expectEqualSlices(u8, original_shape.active_edges, failed_shape.active_edges);
+    try testing.expect(!std.mem.eql(u8, expected_shape.active_edges, failed_shape.active_edges));
 }
