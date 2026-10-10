@@ -1505,6 +1505,41 @@ fn extentOf(shape: *const Shape, scale: P) f32 {
     return @max(@max(bounds.min.abs().reduceMax(), bounds.max.abs().reduceMax()), 0.05);
 }
 
+/// Hand-picked compounds: 2 unit boxes without convex radius at (-1, 0, 0) and (1, 0, 0) that touch each other
+/// (`which` = 0) or 4 unit spheres in a row that touch each other (`which` = 1)
+fn handPickedDesc(kind: u32, which: usize) CompoundDesc {
+    var desc: CompoundDesc = .{ .kind = kind, .num_leaves = 1 };
+    if (which == 0) {
+        desc.leaves[0] = .{ .kind = 1, .half_extent = .{ 1, 1, 1 }, .convex_radius = 0 };
+        desc.num_sub_shapes = 2;
+        desc.sub_shapes[0] = .{ .position = .{ -1, 0, 0 } };
+        desc.sub_shapes[1] = .{ .position = .{ 1, 0, 0 } };
+    } else {
+        desc.leaves[0] = .{ .kind = 0, .radius = 1 };
+        desc.num_sub_shapes = 4;
+        for (desc.sub_shapes[0..4], 0..) |*sub, i| sub.* = .{ .position = .{ 2 * @as(f32, @floatFromInt(i)) - 3, 0, 0 } };
+    }
+    return desc;
+}
+
+/// Hand-picked rays for the hand-picked compounds (the center of mass is at the origin): along a face, along the face
+/// where the boxes touch, along an edge, starting inside, through the point where 2 spheres touch, parallel to the row
+const hand_picked_rays = [_]struct { origin: P, direction: P }{
+    .{ .origin = .{ -5, 1, 0 }, .direction = .{ 10, 0, 0 } },
+    .{ .origin = .{ 0, -5, 0 }, .direction = .{ 0, 10, 0 } },
+    .{ .origin = .{ -5, 1, 1 }, .direction = .{ 10, 0, 0 } },
+    .{ .origin = .{ -1, 0, 0 }, .direction = .{ 5, 0.5, 0 } },
+    .{ .origin = .{ -1, 5, 0 }, .direction = .{ 0, -10, 0 } },
+    .{ .origin = .{ -10, 0, 0 }, .direction = .{ 20, 0, 0 } },
+};
+
+/// Hand-picked shapes that touch the hand-picked compounds: a unit box at (3, 0, 0) (touches the boxes / the last sphere
+/// at x = 2 / 4), a unit sphere at (0, 2, 0) (touches the edge where the boxes meet / 2 spheres)
+const hand_picked_others = [_]struct { leaf: LeafDesc, translation: P }{
+    .{ .leaf = .{ .kind = 1, .half_extent = .{ 1, 1, 1 }, .convex_radius = 0 }, .translation = .{ 3, 0, 0 } },
+    .{ .leaf = .{ .kind = 0, .radius = 1 }, .translation = .{ 0, 2, 0 } },
+};
+
 /// Checks that a test exercised both paths (e.g. hits and misses), prints the count when not
 fn expectBetween(name: []const u8, value: usize, min: usize, max: usize) !void {
     if (value <= min or value >= max) {
@@ -1635,7 +1670,8 @@ test "Compounds parity: CastRay (single hit and collectors) and CollidePoint" {
     var num_ray_hits: usize = 0;
     var num_point_hits: usize = 0;
     for (0..iterations / 40) |i| {
-        const desc = gen.compoundDesc(@intCast(i % 2));
+        const hand_picked = i < 4 * hand_picked_rays.len;
+        const desc = if (hand_picked) handPickedDesc(@intCast(i % 2), (i / 2) % 2) else gen.compoundDesc(@intCast(i % 2));
         var shape_ref = try createShape(allocator, &desc);
         defer shape_ref.deinit();
         const shape = shape_ref.get().?;
@@ -1667,6 +1703,14 @@ test "Compounds parity: CastRay (single hit and collectors) and CollidePoint" {
                 if (gen.oneIn(3)) input.origin = arr3(target.add(vec3(gen.plainVec(-0.1, 0.1)))); // Start inside
             }
             input.direction = arr3(target.sub(vec3(input.origin)).mulScalar(gen.plain(0.5, 3)));
+        }
+        if (hand_picked) {
+            input.origin = hand_picked_rays[i / 4].origin;
+            input.direction = hand_picked_rays[i / 4].direction;
+            input.fraction = 1.0 + math.flt_epsilon;
+            input.early_out = 2.0;
+            input.reject_sub_type = no_reject;
+            input.reject_id = no_reject;
         }
         var jolt_output = std.mem.zeroes(RayOutput);
         jolt.jolt_compounds_cast_ray(&desc, &input, &jolt_output);
@@ -1760,10 +1804,12 @@ test "Compounds parity: collide with a compound on either side through Collision
     const jolt_output = try allocator.create(HitsOutput);
     defer allocator.destroy(jolt_output);
     for (0..iterations / 50) |i| {
-        var desc = gen.compoundDesc(@intCast(i % 2));
+        // The first inputs: hand-picked touching shapes (both kinds, both compounds, both other shapes, both sides)
+        const hand_picked = i < 16;
+        var desc = if (hand_picked) handPickedDesc(@intCast(i % 2), (i / 2) % 2) else gen.compoundDesc(@intCast(i % 2));
         if (desc.num_sub_shapes > 60 and gen.oneIn(2)) desc.num_sub_shapes = 60; // Keep compound vs compound affordable
-        const compound_is_shape1: u32 = @intCast(gen.index(3));
-        const other = otherDesc(&gen);
+        const compound_is_shape1: u32 = if (hand_picked) @intCast((i / 8) % 2) else @intCast(gen.index(3));
+        const other: OtherDesc = if (hand_picked) .{ .leaf = hand_picked_others[(i / 4) % 2].leaf } else otherDesc(&gen);
         var pair = try Pair.init(allocator, &desc, compound_is_shape1, &other);
         defer pair.deinit();
         const scale1 = gen.validScale(pair.shape1.get().?);
@@ -1775,7 +1821,7 @@ test "Compounds parity: collide with a compound on either side through Collision
         if (gen.oneIn(10)) relative.setTranslation(Vec3.zero()); // Same center
         const creator1 = gen.creator();
         const creator2 = gen.creator();
-        const input: CollideInput = .{
+        var input: CollideInput = .{
             .compound_is_shape1 = compound_is_shape1,
             .other = other,
             .scale1 = scale1,
@@ -1801,6 +1847,18 @@ test "Compounds parity: collide with a compound on either side through Collision
             .reject_sub_type = gen.reject(),
             .reject_id = if (gen.oneIn(2)) gen.rejectID(pair.shape1.get().?, creator1) else gen.rejectID(pair.shape2.get().?, creator2),
         };
+        if (hand_picked) {
+            const t = vec3(hand_picked_others[(i / 4) % 2].translation);
+            input.scale1 = .{ 1, 1, 1 };
+            input.scale2 = .{ 1, 1, 1 };
+            input.transform1 = arr16(if (compound_is_shape1 != 0) Mat44.identity() else Mat44.translation(t));
+            input.transform2 = arr16(if (compound_is_shape1 != 0) Mat44.translation(t) else Mat44.identity());
+            input.max_separation_distance = 0.0;
+            input.collector = 0;
+            input.early_out = math.flt_max;
+            input.reject_sub_type = no_reject;
+            input.reject_id = no_reject;
+        }
         jolt_output.* = std.mem.zeroes(HitsOutput);
         jolt.jolt_compounds_collide(&desc, &input, jolt_output);
         const zolt_output = try zoltCollide(allocator, &desc, &input);

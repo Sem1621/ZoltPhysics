@@ -805,6 +805,7 @@ const TransformedShape = @import("../TransformedShape.zig").TransformedShape;
 const CollidePointResult = @import("../CollidePointResult.zig").CollidePointResult;
 const CollideShapeResult = @import("../CollideShape.zig").CollideShapeResult;
 const ShapeCastResult = ShapeCastFile.ShapeCastResult;
+const TestBoxShape = @import("TestShapes.zig").TestBoxShape;
 
 fn saveToBuffer(shape: *const Shape, buffer: []u8) []const u8 {
     var writer: std.Io.Writer = .fixed(buffer);
@@ -1553,5 +1554,34 @@ test "Shape.scaleShape: zero scale, the shape itself, a ScaledShape or a StaticC
         var result = try rt.asShape().scaleShape(allocator, Vec3.init(1, 2, 1));
         defer result.deinit();
         try expect(result.getPtr().?.getSubType() == .rotated_translated);
+    }
+
+    // Leaves with a center of mass that is not at their origin (the spheres and boxes have it at the origin, so the parity
+    // test cannot check this part): every leaf of the scaled compound keeps its center of mass where TransformShape put it
+    {
+        var offset_box = TestBoxShape.init(allocator, Vec3.init(1, 0.5, 0.25), .{ .center_of_mass = Vec3.init(0.5, -0.25, 0.1) });
+        offset_box.asShape().setEmbedded();
+        defer offset_box.asShapeMut().deinit();
+        var settings = StaticCompoundShapeSettings.init(allocator);
+        defer settings.deinit();
+        try settings.base.addShapePtr(Vec3.init(1, 2, 3), Quat.rotation(Vec3.axisZ(), 0.25 * math.pi), offset_box.asShape(), .{});
+        try settings.base.addShapePtr(Vec3.init(-1, 0, 0), Quat.rotation(Vec3.axisX(), 0.3), offset_box.asShape(), .{});
+        var compound = try settings.asShapeSettings().createShape(allocator);
+        defer compound.deinit();
+        const shape = compound.getPtr().?;
+        const scale = Vec3.init(1, 2, 1.5);
+        var leaves = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+        defer leaves.deinit();
+        shape.transformShape(Mat44.scaleVec3(scale).mul(Mat44.translation(shape.getCenterOfMass())), &leaves.base);
+        try leaves.checkError();
+        var result = try shape.scaleShape(allocator, scale);
+        defer result.deinit();
+        const scaled = result.getPtr().?.cast(StaticCompoundShape);
+        try testing.expectEqual(@as(usize, 2), leaves.hits.items.len);
+        for (leaves.hits.items, scaled.base.getSubShapes()) |*ts, *s| {
+            const world_com = s.getPositionCOM().add(scaled.asShape().getCenterOfMass());
+            try expect(world_com.isClose(ts.shape_position_com.toVec3(), .{ .max_dist_sq = 1.0e-10 }));
+            try expect(s.shape.get().?.cast(ScaledShape).getScale().isClose(ts.getShapeScale(), .{}));
+        }
     }
 }
