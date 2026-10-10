@@ -638,11 +638,11 @@ const Gen = struct {
         };
     }
 
-    /// A radius: random, sometimes 0, tiny (around the 1e-3 minimum radius of the caps) or 1
+    /// A radius: random, sometimes 0, tiny (around or at the 1e-3 minimum radius of the caps) or 1
     fn radius(self: *Gen) f32 {
         return switch (self.index(10)) {
             0 => 0.0,
-            1 => self.plain(0, 2.0e-3),
+            1 => if (self.oneIn(2)) 1.0e-3 else self.plain(0, 2.0e-3),
             2 => 1.0,
             else => self.plain(0.05, 3),
         };
