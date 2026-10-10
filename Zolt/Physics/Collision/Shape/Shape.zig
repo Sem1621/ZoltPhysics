@@ -398,7 +398,8 @@ pub const Shape = struct {
         /// Outputs the material references that this shape has to out_materials.
         saveMaterialState: *const fn (self: *const Shape, allocator: Allocator, out_materials: *PhysicsMaterialList) Allocator.Error!void,
         /// Restore the material references after calling sRestoreFromBinaryState.
-        restoreMaterialState: *const fn (self: *Shape, materials: []const PhysicsMaterialRefC) void,
+        /// Shapes that keep a list of materials (MeshShape, HeightFieldShape) allocate it with the shape's allocator.
+        restoreMaterialState: *const fn (self: *Shape, materials: []const PhysicsMaterialRefC) Allocator.Error!void,
         /// Outputs the shape references that this shape has to out_sub_shapes.
         saveSubShapeState: *const fn (self: *const Shape, allocator: Allocator, out_sub_shapes: *ShapeList) Allocator.Error!void,
         /// Restore the shape references after calling sRestoreFromBinaryState.
@@ -802,8 +803,9 @@ pub const Shape = struct {
     }
 
     /// Restore the material references after calling sRestoreFromBinaryState. Note that the exact same materials need to be provided in the same order as returned by SaveMaterialState.
-    pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) void {
-        self.vtable.restoreMaterialState(self, materials);
+    /// Shapes that keep a list of materials (MeshShape, HeightFieldShape) allocate it with the shape's allocator.
+    pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
+        return self.vtable.restoreMaterialState(self, materials);
     }
 
     /// Outputs the shape references that this shape has to out_sub_shapes.
@@ -914,7 +916,7 @@ pub const Shape = struct {
             result.setError(mlresult.getError());
             return result;
         }
-        result.getPtr().?.restoreMaterialState(materials.items);
+        try result.getPtr().?.restoreMaterialState(materials.items);
 
         return result;
     }
@@ -1076,7 +1078,7 @@ pub const Shape = struct {
             _ = .{ self, allocator, out_materials };
         }
 
-        pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) void {
+        pub fn restoreMaterialState(self: *Shape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
             _ = self;
             if (Core.enable_asserts) std.debug.assert(materials.len == 0); // A corrupt stream can violate this, Jolt's release build ignores the materials
         }

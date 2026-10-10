@@ -492,7 +492,7 @@ pub const ConvexShape = struct {
         }
 
         // See Shape::RestoreMaterialState
-        pub fn restoreMaterialState(self: *ConvexShape, materials: []const PhysicsMaterialRefC) void {
+        pub fn restoreMaterialState(self: *ConvexShape, materials: []const PhysicsMaterialRefC) Allocator.Error!void {
             if (Core.enable_asserts) std.debug.assert(materials.len == 1); // A corrupt stream can violate this
             self.material.set(materials[0].get());
         }
@@ -1118,7 +1118,7 @@ test "ConvexShape: binary state and material state" {
     try shape.asShape().saveMaterialState(allocator, &materials);
     try testing.expectEqual(@as(usize, 1), materials.items.len);
     try testing.expect(materials.items[0].get() == material.material());
-    restored.asShapeMut().restoreMaterialState(materials.items);
+    try restored.asShapeMut().restoreMaterialState(materials.items);
     try testing.expect(restored.base.getConvexMaterial() == material.material());
 
     // Out of memory while saving the material state
