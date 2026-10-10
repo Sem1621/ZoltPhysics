@@ -75,6 +75,8 @@ const PhysicsMaterial *GetPlaneMaterial()
 }
 
 // Shape description, must match ShapeDesc in PlaneEmptyParity.zig
+// TODO(CapsuleShape): add CapsuleShape once it is ported, so that sCollideConvexVsPlane sees a convex shape with both
+// a non zero support point and a non zero convex radius in ESupportMode::Default (see Gen.convex in PlaneEmptyParity.zig)
 struct ShapeDesc
 {
 	uint32					mKind;					// 0: SphereShape, 1: BoxShape, 2: PlaneShape, 3: EmptyShape

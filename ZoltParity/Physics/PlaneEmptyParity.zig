@@ -653,6 +653,13 @@ const Gen = struct {
     }
 
     /// A convex shape: sphere or box (with or without convex radius, sometimes flat)
+    ///
+    /// With ESupportMode::Default neither of them has both a non zero support point and a non zero convex radius
+    /// (SphereShape gives SphereNoConvex: support point 0, convex radius r; BoxShape gives Box(box, 0.0f): convex
+    /// radius 0), see the collide test.
+    /// TODO(CapsuleShape): add CapsuleShape here and in PlaneEmptyReference.cpp once it is ported (CapsuleNoConvex:
+    /// support point +/- half height, convex radius = radius; CylinderShape, TaperedCapsuleShape, ConvexHullShape or
+    /// TriangleShape with a convex radius would also do).
     fn convex(self: *Gen) ShapeDesc {
         if (self.oneIn(2))
             return .{ .kind = sphere_kind, .radius = if (self.oneIn(5)) 1.0 else self.plain(0.05, 3) };
@@ -898,6 +905,13 @@ test "PlaneEmpty parity: CastRay (single hit and collectors) and CollidePoint" {
     try std.testing.expect(num_hits > iterations / 4 and num_hits < 2 * iterations); // Hits and misses
 }
 
+// Coverage gap: the operation grouping of point1 in PlaneShape.collideConvexVsPlane,
+// `T * (support_point - normal * convex_radius)`, is only checked by inspection against PlaneShape.cpp
+// sCollideConvexVsPlane. Gen.convex() only produces spheres and boxes, and with ESupportMode::Default one of
+// support_point and convex_radius is always 0 for them, so `T * (s - n * r)` and `T * s - R * (n * r)` give the same
+// bits for every generated input (a rewrite to the latter still passes this test). The cast test does catch it (the
+// support point is already transformed there and the convex radius includes the extra convex radius). This closes
+// once Gen.convex() also produces a CapsuleShape (or another convex shape with a convex radius in Default mode).
 test "PlaneEmpty parity: collide convex vs plane, plane vs convex and empty vs anything through CollisionDispatch" {
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
