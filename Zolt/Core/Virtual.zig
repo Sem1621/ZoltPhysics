@@ -377,11 +377,12 @@ fn deinitChain(comptime Root: type, comptime T: type) *const fn (self: *Root) vo
 }
 
 /// Generated `destroy` entry: `delete this` through the virtual destructor. Runs the destructor chain and frees the
-/// object with the allocator stored in the root class.
+/// object with the allocator stored in the root class. Roots that are not reference counted (Phase 5: BroadPhase,
+/// owned through a plain pointer like Jolt's `delete mBroadPhase`) have no `ref_count` to check.
 fn destroyFn(comptime Root: type, comptime T: type) *const fn (self: *Root) void {
     return &struct {
         fn f(self: *Root) void {
-            self.ref_count.assertUnreferenced();
+            if (@hasField(Root, "ref_count")) self.ref_count.assertUnreferenced();
             const allocator = self.allocator;
             deinitChain(Root, T)(self);
             allocator.destroy(downcast(T, self));
@@ -578,6 +579,39 @@ test "Virtual: heap objects, destroy, data entries and overrides inherited from 
     root.addRef();
     root.release();
     try std.testing.expectEqualStrings("DCR", log[0..log_len]);
+}
+
+test "Virtual: destroy of a root without reference count" {
+    // A class hierarchy owned through a plain pointer (Jolt: `delete mBroadPhase`): no ref_count in the root
+    const Root = struct {
+        const Self = @This();
+        pub const VTable = struct {
+            deinit: *const fn (self: *Self) void,
+            destroy: *const fn (self: *Self) void,
+        };
+        vtable: *const VTable,
+        allocator: std.mem.Allocator,
+        destructed: *u32,
+        pub const impl = struct {};
+    };
+    const Concrete = struct {
+        const Self = @This();
+        pub const overrides = .{};
+        base: Root,
+        buffer: []u8,
+
+        pub fn destruct(self: *Self) void {
+            self.base.allocator.free(self.buffer);
+            self.base.destructed.* += 1;
+        }
+    };
+
+    var destructed: u32 = 0;
+    const allocator = std.testing.allocator;
+    const concrete = try allocator.create(Concrete);
+    concrete.* = .{ .base = .{ .vtable = vtablePtr(Root.VTable, Concrete), .allocator = allocator, .destructed = &destructed }, .buffer = try allocator.alloc(u8, 16) };
+    concrete.base.vtable.destroy(&concrete.base); // Leak checked: frees the buffer and the object
+    try std.testing.expectEqual(@as(u32, 1), destructed);
 }
 
 test "Virtual: checkPrefix" {

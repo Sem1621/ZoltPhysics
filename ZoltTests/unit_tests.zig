@@ -64,4 +64,7 @@ test {
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
+
+    // Phase 5 architecture prototype (removed after the foundation port)
+    _ = @import("Prototype/SimulationPrototype.zig");
 }

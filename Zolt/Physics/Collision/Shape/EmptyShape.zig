@@ -124,6 +124,14 @@ pub const EmptyShape = struct {
         return .{ .base = .init(Shape.vtableFor(EmptyShape), allocator, .empty, shape_sub_type), .center_of_mass = center_of_mass };
     }
 
+    /// A compile time constant in read-only memory (Jolt: `static const EmptyShape sFixedToWorldShape`, the dummy shape
+    /// of Body::sFixedToWorld): `is_static`, so references to it are never counted
+    pub fn initStatic(center_of_mass: Vec3) EmptyShape {
+        var self: EmptyShape = .init(.failing, center_of_mass);
+        self.base.is_static = true;
+        return self;
+    }
+
     /// EmptyShape(const EmptyShapeSettings &inSettings, ShapeResult &outResult)
     pub fn initFromSettings(self: *EmptyShape, settings: *const EmptyShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
         _ = allocator;
@@ -491,4 +499,18 @@ test "EmptyShape: binary state (the center of mass is not saved, like Jolt) and 
     try testing.expectError(error.OutOfMemory, EmptyShapeSettings.create(failing.allocator(), Vec3.zero()));
     try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.empty).construct.?(failing.allocator()));
     try testing.expectError(error.OutOfMemory, restoreFromBuffer(failing.allocator(), bytes));
+}
+
+/// A static shape in read-only memory, like the dummy shape of Body.fixedToWorld()
+const static_empty_shape: EmptyShape = .initStatic(Vec3.zero());
+
+test "EmptyShape: a static shape is never reference counted (read-only memory, also in ReleaseFast)" {
+    // References add nothing and release nothing: the constant lives in read-only memory, a write would fault
+    var ref = RefConst(Shape).init(static_empty_shape.asShape());
+    var copy = ref.clone();
+    try testing.expectEqual(@as(u32, 0), static_empty_shape.asShape().getRefCount());
+    try testing.expect(copy.get().?.getSubType() == .empty);
+    copy.deinit();
+    ref.deinit();
+    try testing.expect(static_empty_shape.asShape().is_static);
 }
