@@ -110,7 +110,7 @@ Notes for later phases:
   near-degenerate hulls, empty meshes). Zolt panics on them with asserts enabled, like an assert-enabled
   Jolt build, and matches Jolt's release behavior in ReleaseFast (guide section 7).
 
-### Phase 4: Collision (`Jolt/Physics/Collision`) — in progress
+### Phase 4: Collision (`Jolt/Physics/Collision`) — shapes done, shared tests in progress
 Architecture: [CollisionArchitecture.md](CollisionArchitecture.md) (decided by three competing compiled
 prototypes, two judges and a synthesis). Port order:
 1. Foundation F1: `Core/Virtual.zig`, `Core/PlacementBuffer.zig`, `Core/Result.zig`, BodyID,

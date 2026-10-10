@@ -10,6 +10,7 @@ const std = @import("std");
 const ClosestPoint = @import("../../Geometry/ClosestPoint.zig");
 const RaySphere = @import("../../Geometry/RaySphere.zig");
 const math = @import("../../Math/Math.zig");
+const Core = @import("../../Core/Core.zig");
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const ShapeFile = @import("Shape/Shape.zig");
@@ -235,7 +236,7 @@ pub const CastSphereVsTriangles = struct {
         fraction = math.min(fraction, RaySphere.raySphere(Vec3.zero(), self.direction, v2, self.radius));
 
         // Check if we have a collision
-        std.debug.assert(fraction >= 0.0);
+        if (Core.enable_asserts) std.debug.assert(fraction >= 0.0); // Large finite input can make RayCylinder return NaN; Jolt's release build then skips the hit
         if (fraction < self.collector.getEarlyOutFraction()) {
             // Calculate the center of the sphere at the point of contact
             const p = self.direction.mulScalar(fraction);

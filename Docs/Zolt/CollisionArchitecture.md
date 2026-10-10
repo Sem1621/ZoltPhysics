@@ -797,3 +797,29 @@ needs only the `Body` pointer type from the F1 stub.
   (Status: partial until SoftBody, Phase 9).
 - **NarrowPhaseStats** follow Jolt's default (`JPH_TRACK_NARROWPHASE_STATS` off): a comptime switch.
 
+**Settled during Waves A and B:**
+- `restoreMaterialState` returns `Allocator.Error!void` (D11): MeshShape and HeightFieldShape assign
+  their material lists.
+- Query-like free functions whose Jolt implementation allocates through an `STLLocalAllocator` heap
+  fallback take an `allocator` and return `Allocator.Error` (exception to D13):
+  `InternalEdgeRemovingCollector.collideShapeVsShape` and `collideShapeVsShapePerLeaf`.
+  `InternalEdgeRemovingCollector` itself is built in place (`c.init(chained, tolerance_sq,
+  allocator)`, `deinit`, `checkError`) because it contains its local buffers.
+- A settings `createShape` that builds a different shape type (TaperedCylinderShapeSettings with equal
+  radii builds a CylinderShape, TaperedCapsuleShapeSettings) builds it from temporary settings and
+  assigns the result into its own cache, like Jolt; it drops what Jolt drops (density, user data).
+- Jolt's lambda registrations (EmptyShape's collide/cast functions) become named private functions so
+  the registry can store and compare them.
+- A virtual whose C++ body is only `JPH_ASSERT(false)` and whose out parameters became a returned
+  struct panics when asserts are on and returns zeros otherwise.
+- Jolt's own debug asserts that degenerate input reaches (CollideConvexVsTriangles on degenerate
+  triangles, AnyHit collectors behind InternalEdgeRemovingCollector, WalkSubShapes' early abort) fire in
+  Zolt's safe builds exactly as in an assert-enabled Jolt build; parity generators avoid those inputs,
+  and ReleaseFast parity compares Jolt's release behavior.
+- Jolt bugs reproduced on purpose (parity confirms the same bits; report upstream rather than fix):
+  HeightFieldShape::GetTrianglesNext never finishes when one leaf block has more triangles than
+  requested; HeightFieldShape skips empty range blocks only through inside-out Y bounds, which collapse
+  for a flat height field far from the origin; ConvexHullShape's CastRayHelper uses
+  `mPoints[*end_vtx]` (probably meant `*(end_vtx - 1)`), so hulls of exactly 3 points miss an edge;
+  TaperedCylinderShapeSettings drops density and user data in its equal-radii shortcut; ScaledShape's
+  MakeScaleValid can return a scale below `ScaleHelpers::cMinScale`.

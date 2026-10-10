@@ -418,6 +418,11 @@ results are reproducible as long as the code follows these rules:
     x86-64-v3 (SSE4.2/AVX2, Jolt's default CMake ISA set, no AVX512) so that it is the same on every
     machine. Differences that only show with AVX512 on NaN input (`Vec3/DVec3::GetSign` return NaN)
     are not followed; the parity tests skip NaN there.
+12. **Float to int conversions of out-of-range or NaN values** are undefined in C++, but reachable in
+    Jolt (height field quantization, shape scales from user data). Where they are reachable, emulate
+    what Jolt's x86-64 build computes: `(int)f` is `cvttss2si` to i32 (`0x80000000` for NaN / out of
+    range), `(uint)f` is a 64-bit `cvttss2si` truncated to 32 bits (see `HeightFieldShape.zig`,
+    `Vec4.toInt`). Plain `@intFromFloat` is only for values that are in range by construction.
 
 ## 9. Threading
 
@@ -657,3 +662,14 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `CollisionGroup::sInvalid` / copy / `operator==`, `GroupFilterTable(numSubGroups = 0)` | `CollisionGroup.invalid` / `clone()` / `eql`, `GroupFilterTable.init(allocator, .{ .num_sub_groups })` | value type with a reference, default argument |
 | `ContactListener` virtual callbacks, `ValidateResult::AcceptAllContactsForThisBodyPair` | pattern B `ContactListener.init(&impl)` with optional callbacks, `ValidateResult.accept_all_contacts_for_this_body_pair` | interface |
 | `PolyhedronSubmergedVolumeCalculator(transform, const Vec3 *, stride, count, surface, buffer)` | `init(transform, StridedPtrConst(Vec3), num_points, surface, []Point)` | pointer + stride, buffer slice |
+| `ScaledShapeSettings` / `RotatedTranslatedShapeSettings` / `OffsetCenterOfMassShapeSettings`(..., `const ShapeSettings *` / `const Shape *`) | `init` / `initPtr` (+ `create` / `createPtr`) | overloads |
+| `Shape::ScaleShape(scale)`, `MutableCompoundShape::Clone()`, `HeightFieldShape::Clone()` | `scaleShape(allocator, scale) !ShapeResult`, `clone(allocator)` | allocating |
+| `MutableCompoundShape::AddShape(pos, rot, shape, userData, index)` / `ModifyShape(.., shape)` / `ModifyShapes(.., Vec3 *, Quat *, strides)` | `addShape(pos, rot, shape, .{ .user_data, .index }) !u32` / `modifyShapeWithShape` / `modifyShapes(.., StridedPtrConst(Vec3), StridedPtrConst(Quat))` | default arguments, overload, pointer + stride |
+| `StaticCompoundShapeSettings::Create(TempAllocator &)` | `createShapeWithTempAllocator(allocator, temp_allocator)` | overload |
+| `XShape::GetMaterial()` (non-virtual: Convex, Plane), `HeightFieldShape::GetMaterial(x, y)` | `getConvexMaterial()`, `getPlaneMaterial()`, `getMaterialAt(x, y)` | clash with the virtual `getMaterial(sub_shape_id)` |
+| `InternalEdgeRemovingCollector(chained, toleranceSq)` / `sCollideShapeVsShape`, `CollideShapeVsShapePerLeaf<LeafCollector>` | in place `c.init(chained, tolerance_sq, allocator)` + `deinit` + `checkError` / `collideShapeVsShape(allocator, ..) !void`, `collideShapeVsShapePerLeaf(LeafCollector, allocator, ..) !void` | local buffers with heap fallback |
+| `ConvexHullShapeSettings(const Vec3 *, int, maxConvexRadius, material)` / `(const Array<Vec3> &, ...)`, `GetFaceVertices(face, max, uint *)` | `init(allocator, points: []const Vec3, .{ .max_convex_radius, .material })`, `getFaceVertices(face, out_vertices: []u32) u32` | overloads, pointer + count |
+| `MeshShapeSettings::Sanitize()`, `sFindActiveEdges`, `DecodeSubShapeID(id, outBlock, outIndex)`, `GetMaterialList()` | `sanitize() !void`, `findActiveEdges(allocator, ..)`, `decodeSubShapeID(id) DecodedSubShapeID`, `getMaterialList() []const PhysicsMaterialRefC` | allocating, out parameters |
+| `HeightFieldShape::GetHeights` / `SetHeights` / `GetMaterials` / `SetMaterials` (`float *` / `uint8 *`, `intptr_t` stride, `TempAllocator &`) | `[*]f32` / `[*]u8` plus `isize` stride, `temp_allocator` parameter | raw strided buffers as in Jolt |
+| `HeightFieldShape::ProjectOntoSurface(pos, outPos, outID) -> bool`, `GetSubShapeCoordinates(id, outX, outY, outTri)`, `HeightFieldShapeConstants::c*` | `projectOntoSurface(pos) ?SurfacePosition`, `getSubShapeCoordinates(id) SubShapeCoordinates`, `HeightFieldShapeConstants.no_collision_value` ... | out parameters, constants |
+| `PlaneShape::GetVertices(Vec3 *)`, `sPlaneGetOrthogonalBasis(n, outP1, outP2)` | `getVertices() [4]Vec3`, `planeGetOrthogonalBasis(n) OrthogonalBasis` | out parameters |
