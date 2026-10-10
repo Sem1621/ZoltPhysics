@@ -34,6 +34,7 @@ test {
     _ = @import("Physics/FiltersParity.zig");
     _ = @import("Physics/HeightFieldShapeParity.zig");
     _ = @import("Physics/MeshShapeParity.zig");
+    _ = @import("Physics/PlaneEmptyParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");

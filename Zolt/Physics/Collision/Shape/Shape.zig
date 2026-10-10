@@ -33,13 +33,10 @@
 //!   `out_materials: ?[]*const PhysicsMaterial` (D10). Counts are u32.
 //! - `GetStatsRecursive(VisitedShapes &)` inserts into a hash set, so it takes an allocator and returns
 //!   `Allocator.Error!Stats`. `SaveMaterialState` / `SaveSubShapeState` append to lists: allocator + error union.
-<<<<<<< HEAD
 //! - `ScaleShape(inScale)` creates shapes: `scaleShape(allocator, scale) Allocator.Error!ShapeResult` (the new
 //!   ScaledShape / StaticCompoundShape and the compound's settings use `allocator`).
-=======
-//!   `RestoreMaterialState` returns `Allocator.Error!void`: MeshShape / HeightFieldShape allocate their material list
+//! - `RestoreMaterialState` returns `Allocator.Error!void`: MeshShape / HeightFieldShape allocate their material list
 //!   (with the shape's allocator).
->>>>>>> worktree-wf_15082832-05f-20
 //! - `sRestoreFromBinaryState` validates the sub shape type read from the stream (Jolt indexes the table with it and
 //!   calls a null `mConstruct`): an invalid value or a type without constructor is "Failed to read type id".
 //! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace, sDrawSubmergedVolumes and the
