@@ -10,7 +10,10 @@
 //! Allocation (D6 / D13): Jolt keeps the voided features and the delayed results in `Array`s with an
 //! `STLLocalAllocator` (128 and 32 elements in the collector itself, the heap beyond that), and sorts the delayed
 //! results through another local array (32 elements). Zolt does the same with `STLLocalAllocator`s whose heap is the
-//! `allocator` passed to `init` (Jolt uses its global heap). The collector contains these buffers, so it is
+//! `allocator` passed to `init` (Jolt uses its global heap). The local buffers are taken with exact reservations
+//! (`ensureTotalCapacityPrecise`, like Jolt's `reserve` and `resize`; `std.ArrayList.resize` over-allocates and would
+//! miss the local buffer), so up to 128 voided features, 32 delayed results and their 32 sort indices never touch the
+//! heap. The collector contains these buffers, so it is
 //! constructed in place (`var c: InternalEdgeRemovingCollector = undefined; c.init(...)`) and must not be moved; it
 //! is about 37 KB, like the C++ object. Like the collectors of CollisionCollectorImpl.zig, an allocation failure is
 //! recorded in an `AllocationErrorLatch`, forces an early out, and is reported by `checkError()`; the hits that are
@@ -220,7 +223,10 @@ pub const InternalEdgeRemovingCollector = struct {
         const sorted_allocator = sorted_indices_allocator.allocator();
         var sorted_indices: std.ArrayList(u32) = .empty;
         defer sorted_indices.deinit(sorted_allocator);
-        sorted_indices.resize(sorted_allocator, self.delayed_results.items.len) catch |err| return self.setAllocationError(err);
+        // Jolt's Array::resize reserves exactly the new size, so up to 32 indices stay in the local buffer
+        // (std.ArrayList.resize would ask for more through growCapacity and always fall back to the heap)
+        sorted_indices.ensureTotalCapacityPrecise(sorted_allocator, self.delayed_results.items.len) catch |err| return self.setAllocationError(err);
+        sorted_indices.items.len = self.delayed_results.items.len;
         for (sorted_indices.items, 0..) |*index, i|
             index.* = @intCast(i);
         quickSort(u32, sorted_indices.items, self, struct {
@@ -469,6 +475,56 @@ test "InternalEdgeRemovingCollector: many delayed results and voided features (h
     }
 }
 
+test "InternalEdgeRemovingCollector: 32 delayed results and 128 voided features stay in the local buffers" {
+    const allocator = testing.allocator;
+
+    // Like Jolt, which does not touch the heap here: every heap allocation fails
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var chained = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+    defer chained.deinit();
+    var collector: InternalEdgeRemovingCollector = undefined;
+    collector.init(&chained.base, 1.0e-6, failing.allocator());
+    defer collector.deinit();
+
+    // 10 face contacts on separate triangles and a hit with a 2 vertex face: chained immediately, 32 voided features
+    for (0..10) |i| {
+        const p = Vec3.init(3.0 * @as(f32, @floatFromInt(i)), 0, 0);
+        const face_hit = triangleHit(.{ p, p.add(Vec3.init(0, 0, 1)), p.add(Vec3.init(1, 0, 0)) }, p.add(Vec3.init(0.25, 0, 0.25)), Vec3.init(0, -1, 0), 0.1, 1, @intCast(i));
+        collector.base.addHit(&face_hit);
+    }
+    var two_vertices = triangleHit(.{ Vec3.init(-3, 0, 0), Vec3.init(-3, 0, 1), Vec3.zero() }, Vec3.init(-3, 0, 0.5), Vec3.init(1, 0, 0), 0.1, 1, 10);
+    two_vertices.shape2_face.resize(2);
+    collector.base.addHit(&two_vertices);
+    try testing.expectEqual(@as(usize, 32), collector.voided_features.items.len);
+
+    // 32 edge contacts on 32 other separate triangles: delayed, then accepted by flush, which voids 96 more features
+    // (128 in total) and sorts 32 indices
+    for (0..InternalEdgeRemovingCollector.max_local_delayed_results) |i| {
+        const p = Vec3.init(3.0 * @as(f32, @floatFromInt(i)), 0, 5);
+        const edge_hit = triangleHit(.{ p, p.add(Vec3.init(0, 0, 1)), p.add(Vec3.init(1, 0, 0)) }, p.add(Vec3.init(0.5, 0, 0)), Vec3.init(0, -1, 1), 0.5 + 0.001 * @as(f32, @floatFromInt(i)), 1, @intCast(100 + i));
+        collector.base.addHit(&edge_hit);
+    }
+    try testing.expectEqual(@as(usize, InternalEdgeRemovingCollector.max_local_delayed_results), collector.delayed_results.items.len);
+    collector.flush();
+    try collector.checkError();
+    try chained.checkError();
+    try testing.expectEqual(@as(usize, 11 + InternalEdgeRemovingCollector.max_local_delayed_results), chained.hits.items.len);
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    try testing.expectEqual(@as(usize, InternalEdgeRemovingCollector.max_local_voided_features), collector.voided_features.capacity);
+    try testing.expectEqual(@as(usize, InternalEdgeRemovingCollector.max_local_delayed_results), collector.delayed_results.capacity);
+
+    // One more delayed result needs the heap
+    collector.base.reset();
+    for (0..InternalEdgeRemovingCollector.max_local_delayed_results + 1) |i| {
+        const p = Vec3.init(3.0 * @as(f32, @floatFromInt(i)), 0, 5);
+        const edge_hit = triangleHit(.{ p, p.add(Vec3.init(0, 0, 1)), p.add(Vec3.init(1, 0, 0)) }, p.add(Vec3.init(0.5, 0, 0)), Vec3.init(0, -1, 1), 0.5, 1, @intCast(100 + i));
+        collector.base.addHit(&edge_hit);
+    }
+    collector.flush();
+    try testing.expectError(error.OutOfMemory, collector.checkError());
+    try testing.expectEqual(@as(usize, 0), chained.hits.items.len);
+}
+
 test "InternalEdgeRemovingCollector.collideShapeVsShape: a box on two coplanar triangles" {
     const allocator = testing.allocator;
 
@@ -488,6 +544,15 @@ test "InternalEdgeRemovingCollector.collideShapeVsShape: a box on two coplanar t
     try InternalEdgeRemovingCollector.collideShapeVsShape(allocator, box.asShape(), sphere.asShape(), Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.translation(Vec3.init(0, 0.9, 0)), .{}, .{}, &settings, &chained.base, &.{});
     try chained.checkError();
     try testing.expectEqual(@as(usize, 1), chained.hits.items.len);
+
+    // An edge of a box rotated 45 degrees around Z pushed into the top face of the box: the hit is delayed (the contact
+    // normal is not the normal of a face of shape 2), and like in Jolt flushing it does not need the heap
+    chained.reset();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try InternalEdgeRemovingCollector.collideShapeVsShape(failing.allocator(), box.asShape(), box.asShape(), Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.25 * math.pi), Vec3.init(0, 1.1, 0)), .{}, .{}, &settings, &chained.base, &.{});
+    try chained.checkError();
+    try testing.expectEqual(@as(usize, 1), chained.hits.items.len);
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
 
     // The wrapper with triangles fed by CollideConvexVsTriangles: a box resting on 2 triangles that form a quad, sliding
     // over the shared diagonal does not report the edge normal
