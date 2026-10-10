@@ -32,10 +32,16 @@
 //! - pairs that Jolt does not support (mesh, height field and plane against each other, also inside compounds and
 //!   decorators). In safe builds they are compared through the dispatch tables instead: the unsupported / reversed
 //!   entries must be the same for every pair of Jolt's sub types;
-//! - the AnyHit collector behind InternalEdgeRemovingCollector, and with a MutableCompoundShape of more than one block
-//!   (WalkSubShapes only stops the walk through the current block when the visitor aborts);
-//! - an early out fraction set before a query with the ClosestHit collector (not every shape function checks it before
-//!   adding a hit, the collector then asserts that the early out fraction only decreases);
+//! - the AnyHit collector behind InternalEdgeRemovingCollector, and for collide and ray queries (not casts) with a
+//!   MutableCompoundShape of more than one block: WalkSubShapes only stops the walk through the current block when the
+//!   visitor aborts. The collide visitor visits every later block that overlaps (and PlaneShape::sCollideConvexVsPlane
+//!   adds hits without checking the early out fraction), the ray visitor every later block with a sub shape whose
+//!   bounds contain the ray origin (RayAABox4 is negative there, below the forced early out fraction 0, and
+//!   BoxShape / SphereShape::CastRay add a hit at fraction 0). Every cast function checks the early out fraction
+//!   before it adds a hit, so casts use AnyHit with every shape;
+//! - an early out fraction set before a collide query with the ClosestHit collector (not every collide function checks
+//!   it before adding a hit, e.g. PlaneShape::sCollideConvexVsPlane, the collector then asserts that the early out
+//!   fraction only decreases). Cast and ray functions check it, so they use a preset early out with every collector;
 //! - GetTrianglesStart / Next of compound and decorated shapes ("Cannot call on non-leaf shapes");
 //! - a degenerate triangle (CollideConvexVsTriangles).
 //!
@@ -138,7 +144,7 @@ const stream_capacity = 1 << 20;
 const print_statistics = false;
 
 /// Safe builds assert where Jolt's debug build asserts (unsupported shape pairs, AnyHit behind
-/// InternalEdgeRemovingCollector): those inputs only run without asserts (ReleaseFast)
+/// InternalEdgeRemovingCollector, see the file header): those inputs only run without asserts (ReleaseFast)
 const asserts = zolt.Core.enable_asserts;
 
 // Section markers in the streams, must match PairwiseReference.cpp
@@ -581,18 +587,20 @@ fn createNode(allocator: Allocator, materials: *const Materials, in: *const Cata
 fn zoltCatalogue(allocator: Allocator, materials: *const Materials, in: *const CatalogueInput, shapes: *std.ArrayList(RefConst(Shape)), s: *Stream) !bool {
     var valid = true;
     for (0..in.num_nodes) |i| {
+        // Reserve first so that out of memory never leaks a reference
+        try shapes.ensureUnusedCapacity(allocator, 1);
         var result = try createNode(allocator, materials, in, shapes.items, i);
         defer result.deinit();
         s.u(marker_properties);
         if (result.hasError()) {
             s.u(0);
             valid = false;
-            try shapes.append(allocator, .empty);
+            shapes.appendAssumeCapacity(.empty);
             continue;
         }
         s.u(1);
         const shape: *const Shape = result.getPtr().?;
-        try shapes.append(allocator, .init(shape));
+        shapes.appendAssumeCapacity(.init(shape));
         s.u(@intFromEnum(shape.getType()));
         s.u(@intFromEnum(shape.getSubType()));
         s.box(shape.getLocalBounds());
@@ -1600,11 +1608,17 @@ const Built = struct {
     leaf_types: std.ArrayList(u64) = .empty,
     /// Per node: contains a MutableCompoundShape with more than one block of 4 sub shapes. Its WalkSubShapes only stops
     /// the walk through the current block when the visitor aborts (CollisionArchitecture.md section 9), so the AnyHit
-    /// collector can receive a second hit after forcing an early out, which Jolt asserts (and Zolt in safe builds).
+    /// collector of a collide or ray query can receive a second hit after forcing an early out, which Jolt asserts (and
+    /// Zolt in safe builds). Casts are not affected (see the file header).
     multi_block: std.ArrayList(bool) = .empty,
 
+    /// Takes ownership of `cat` (also on error)
     fn init(allocator: Allocator, cat: Catalogue, buffer: []u32) !*Built {
-        const self = try allocator.create(Built);
+        const self = allocator.create(Built) catch |err| {
+            var owned = cat;
+            owned.deinit();
+            return err;
+        };
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .cat = cat };
         errdefer self.cat.deinit();
@@ -1615,6 +1629,7 @@ const Built = struct {
         const input = self.cat.input();
         var zs: Stream = .{ .allocator = allocator };
         defer zs.deinit();
+        errdefer self.deinitZoltShapes();
         const zolt_valid = try zoltCatalogue(allocator, &self.materials, &input, &self.shapes, &zs);
         var jolt_size: u32 = 0;
         const handle = jolt.pw_catalogue_create(&input, buffer.ptr, @intCast(buffer.len), &jolt_size);
@@ -1623,17 +1638,15 @@ const Built = struct {
         if (!zolt_valid or handle == null) {
             std.debug.print("Pairwise catalogue: invalid node (zolt valid {}, jolt valid {})\n", .{ zolt_valid, handle != null });
             if (handle) |h| jolt.pw_catalogue_destroy(h);
-            for (self.shapes.items) |*ref| ref.deinit();
-            self.shapes.deinit(allocator);
             return error.TestUnexpectedResult;
         }
         self.handle = handle.?;
-        cmp.finish() catch |err| {
-            self.deinitShapes();
-            return err;
-        };
+        errdefer jolt.pw_catalogue_destroy(self.handle);
+        try cmp.finish();
 
         // The leaf sub types of every node
+        errdefer self.leaf_types.deinit(allocator);
+        errdefer self.multi_block.deinit(allocator);
         for (self.cat.nodes.items, 0..) |n, i| {
             const own: u64 = @as(u64, 1) << @intCast(@intFromEnum(self.shapes.items[i].get().?.getSubType()));
             const leaves: u64 = switch (n.kind) {
@@ -1660,14 +1673,14 @@ const Built = struct {
         return self;
     }
 
-    fn deinitShapes(self: *Built) void {
-        jolt.pw_catalogue_destroy(self.handle);
+    fn deinitZoltShapes(self: *Built) void {
         for (self.shapes.items) |*ref| ref.deinit();
         self.shapes.deinit(self.allocator);
     }
 
     fn deinit(self: *Built) void {
-        self.deinitShapes();
+        jolt.pw_catalogue_destroy(self.handle);
+        self.deinitZoltShapes();
         self.leaf_types.deinit(self.allocator);
         self.multi_block.deinit(self.allocator);
         self.materials.deinit();
@@ -1699,7 +1712,7 @@ const Built = struct {
         return true;
     }
 
-    /// The AnyHit collector can be used with the nodes (see multi_block)
+    /// The AnyHit collector can be used for a collide or ray query with the nodes (see multi_block)
     fn anyHitAllowed(self: *const Built, node1: u32, node2: u32) bool {
         return !asserts or !(self.multi_block.items[node1] or self.multi_block.items[node2]);
     }
@@ -1773,16 +1786,19 @@ fn placement(gen: *Gen, bounds1: AABox, bounds2: AABox, com2: Vec3, axis_touchin
 // ---------------------------------------------------------------------------------------------------------------------
 // The tests
 
-/// Number of queries per pair: more for cheap pairs (the whole sweep must stay well below ~3 minutes in Debug)
+/// Number of queries per pair: more for cheap pairs (the whole sweep must stay well below ~3 minutes in Debug), at least
+/// 3 * base so that the expensive pairs (compound / mesh / height field against each other) still get a few queries per
+/// collector (the cheap pairs take most of the time)
 fn queriesPerPair(base: usize, e1: Entry, e2: Entry) usize {
     const cost = e1.cost * e2.cost;
-    return @max(4, base * 16 / cost);
+    return @max(base * 3, base * 16 / cost);
 }
 
-/// An early out fraction set before the query: the ClosestHit collector updates the early out fraction with every hit
-/// that is closer than its previous hit, Jolt asserts that this is not more than the current early out fraction (not every
-/// shape function checks the early out fraction before it adds a hit). Only without asserts for ClosestHit.
-fn earlyOutAllowed(collector: c_int) bool {
+/// An early out fraction set before a collide query: the ClosestHit collector updates the early out fraction with every
+/// hit that is closer than its previous hit, Jolt asserts that this is not more than the current early out fraction (not
+/// every collide function checks the early out fraction before it adds a hit, e.g. PlaneShape::sCollideConvexVsPlane).
+/// Only without asserts for ClosestHit. Cast and ray functions check it, they use a preset early out with every collector.
+fn collideEarlyOutAllowed(collector: c_int) bool {
     return !asserts or collector != 1;
 }
 
@@ -1866,11 +1882,12 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                 const world_offset: [3]f64 = if (zolt.Core.double_precision and gen.chance(30)) .{ 123456.75, -2.0e5, 98765.125 } else .{ 0, 0, 0 };
                 const bits1 = shape1.getSubShapeIDBitsRecursive();
                 const bits2 = shape2.getSubShapeIDBitsRecursive();
-                const num_collectors: usize = if (built.anyHitAllowed(e1.node, e2.node)) 3 else 2;
+                // AnyHit is restricted for collide only, every cast function checks the early out fraction
+                const num_collide_collectors: usize = if (built.anyHitAllowed(e1.node, e2.node)) 3 else 2;
 
                 // Collide
                 {
-                    const collector: c_int = @intCast(i % num_collectors);
+                    const collector: c_int = @intCast(i % num_collide_collectors);
                     const via_transformed_shape = gen.chance(20);
                     const internal_edge_removal = !via_transformed_shape and gen.chance(15) and !(asserts and collector == 2);
                     const input: CollideInput = .{
@@ -1894,7 +1911,7 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                         .collect_faces = @intFromBool(internal_edge_removal or gen.chance(40)),
                         .active_edge_movement_direction = if (gen.chance(50)) .{ 0, 0, 0 } else arr3(gen.vec(-1, 1)),
                         .collector = collector,
-                        .early_out = if (gen.chance(85) or !earlyOutAllowed(collector)) math.flt_max else gen.float(-0.3, 0.3),
+                        .early_out = if (gen.chance(85) or !collideEarlyOutAllowed(collector)) math.flt_max else gen.float(-0.3, 0.3),
                         .body_id = gen.index(1000),
                         .reject_modulus = if (gen.chance(75)) 0 else 2 + gen.index(4),
                         .internal_edge_removal = @intFromBool(internal_edge_removal),
@@ -1946,7 +1963,7 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                         direction = Vec3.zero();
                         start_position = com1;
                     }
-                    const cast_collector: c_int = @intCast((i + 1) % num_collectors);
+                    const cast_collector: c_int = @intCast((i + 1) % 3);
                     const input: CastInput = .{
                         .shape1 = e1.node,
                         .shape2 = e2.node,
@@ -1968,7 +1985,7 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                         .active_edge_mode = @intFromBool(gen.chance(40)),
                         .active_edge_movement_direction = if (gen.chance(50)) .{ 0, 0, 0 } else arr3(gen.vec(-1, 1)),
                         .collector = cast_collector,
-                        .early_out = if (gen.chance(85) or !earlyOutAllowed(cast_collector)) 1.0 + math.flt_epsilon else gen.float(-0.1, 1.0),
+                        .early_out = if (gen.chance(85)) 1.0 + math.flt_epsilon else gen.float(-0.1, 1.0),
                         .body_id = gen.index(1000),
                         .reject_modulus = if (gen.chance(75)) 0 else 2 + gen.index(4),
                         .via_transformed_shape = @intFromBool(gen.chance(20)),
@@ -2053,6 +2070,8 @@ fn sweepTransformedShapes(allocator: Allocator, built: *const Built, buffer: []u
                 1 => pos,
                 else => .{ pos[0] + 0.5, pos[1] - 0.25, pos[2] + 1.0 },
             };
+            // AnyHit asserts for a multi block MutableCompoundShape when the ray origin is inside a sub shape of a later block
+            // (see multi_block)
             const ray_collector: c_int = @intCast(gen.index(if (built.anyHitAllowed(e.node, e.node)) 3 else 2));
             // GetTrianglesNext needs room for cGetTrianglesMinTrianglesRequested triangles, a height field for all
             // triangles of a block (Jolt bug, see CollisionArchitecture.md section 9: it never finishes otherwise)
@@ -2072,7 +2091,7 @@ fn sweepTransformedShapes(allocator: Allocator, built: *const Built, buffer: []u
                 .back_face_mode_convex = @intFromBool(gen.chance(40)),
                 .treat_convex_as_solid = @intFromBool(gen.chance(70)),
                 .ray_collector = ray_collector,
-                .ray_early_out = if (gen.chance(85) or !earlyOutAllowed(ray_collector)) 1.0 + math.flt_epsilon else gen.float(0, 1),
+                .ray_early_out = if (gen.chance(85)) 1.0 + math.flt_epsilon else gen.float(0, 1),
                 .point = .{ point_local.getX() + pos[0], point_local.getY() + pos[1], point_local.getZ() + pos[2] },
                 .box = .{ box_local.min.getX() + @as(f32, @floatCast(pos[0])), box_local.min.getY() + @as(f32, @floatCast(pos[1])), box_local.min.getZ() + @as(f32, @floatCast(pos[2])), box_local.max.getX() + @as(f32, @floatCast(pos[0])), box_local.max.getY() + @as(f32, @floatCast(pos[1])), box_local.max.getZ() + @as(f32, @floatCast(pos[2])) },
                 .base_offset = base_offset,
