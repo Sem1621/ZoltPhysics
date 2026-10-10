@@ -3053,3 +3053,548 @@ pub const HeightFieldShape = struct {
         }
     };
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (Jolt's own height field tests are in ZoltTests/Physics/HeightFieldShapeTests.zig, the bit exact comparison
+// with Jolt in ZoltParity/Physics/HeightFieldShapeParity.zig)
+
+const testing = std.testing;
+const Ref = @import("../../../Core/Reference.zig").Ref;
+const RefConst = @import("../../../Core/Reference.zig").RefConst;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const BoxShape = @import("BoxShape.zig").BoxShape;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const RegisterTypes = @import("../../../RegisterTypes.zig");
+
+/// Samples of a test height field: a slope (h = 0.25 x + 0.5 y) with holes at the samples where `hole(x, y)` is true
+fn testSamples(allocator: Allocator, sample_count: u32, comptime hole: fn (usize, usize) bool) ![]f32 {
+    const samples = try allocator.alloc(f32, @as(usize, sample_count) * sample_count);
+    for (samples, 0..) |*h, i| {
+        const x = i % sample_count;
+        const y = i / sample_count;
+        h.* = if (hole(x, y)) no_collision_value else 0.25 * @as(f32, @floatFromInt(x)) + 0.5 * @as(f32, @floatFromInt(y));
+    }
+    return samples;
+}
+
+fn noHoles(x: usize, y: usize) bool {
+    _ = .{ x, y };
+    return false;
+}
+
+fn someHoles(x: usize, y: usize) bool {
+    return (x * 7 + y * 3) % 11 == 0;
+}
+
+fn allHoles(x: usize, y: usize) bool {
+    _ = .{ x, y };
+    return true;
+}
+
+fn saveState(allocator: Allocator, shape: *const Shape) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var wrapper = StreamWrapper.StreamOutWrapper.init(&out.writer);
+    shape.saveBinaryState(wrapper.streamOut());
+    return out.toOwnedSlice();
+}
+
+fn restoreState(allocator: Allocator, bytes: []const u8) Allocator.Error!ShapeResult {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var wrapper = StreamWrapper.StreamInWrapper.init(&reader);
+    return Shape.restoreFromBinaryState(allocator, wrapper.streamIn());
+}
+
+test "HeightFieldShape: float to int conversions follow Jolt's x86-64 build (cvttss2si)" {
+    try testing.expectEqual(@as(i32, 3), truncToInt(3.9));
+    try testing.expectEqual(@as(i32, -3), truncToInt(-3.9));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), truncToInt(-2147483648.0));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), truncToInt(2147483648.0));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), truncToInt(1.0e20));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), truncToInt(-1.0e20));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), truncToInt(std.math.nan(f32)));
+    try testing.expectEqual(@as(u32, 7), truncToUint(7.5));
+    try testing.expectEqual(@as(u32, 0xffffff00), truncToUint(4294967040.0));
+    try testing.expectEqual(@as(u32, 0), truncToUint(std.math.nan(f32)));
+    try testing.expectEqual(@as(u32, 0), truncToUint(1.0e30));
+    try testing.expectEqual(@as(u32, 0xffffffff), truncToUint(-1.0)); // The low 32 bits of -1
+}
+
+test "HeightFieldShape: settings constructor, cached result and Jolt's error texts" {
+    const allocator = testing.allocator;
+
+    // HeightFieldShapeSettings(inSamples, inOffset, inScale, inSampleCount, inMaterialIndices, inMaterialList)
+    const samples = try testSamples(allocator, 8, someHoles);
+    defer allocator.free(samples);
+    const material_a = try PhysicsMaterialSimple.create(allocator, "A", Color.red);
+    const material_b = try PhysicsMaterialSimple.create(allocator, "B", Color.green);
+    var material_a_ref = RefConst(PhysicsMaterial).init(material_a.material());
+    defer material_a_ref.deinit();
+    var material_b_ref = RefConst(PhysicsMaterial).init(material_b.material());
+    defer material_b_ref.deinit();
+    var indices: [49]u8 = undefined;
+    for (&indices, 0..) |*m, i| m.* = @intCast(i % 2);
+    const settings = try HeightFieldShapeSettings.create(allocator, samples, Vec3.init(1, 2, 3), Vec3.init(0.5, 2, 0.5), 8, .{ .material_indices = &indices, .materials = &.{ material_a.material(), material_b.material() } });
+    var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+    defer settings_ref.deinit();
+    try testing.expectEqual(@as(usize, 64), settings.height_samples.items.len);
+    try testing.expectEqual(@as(usize, 49), settings.material_indices.items.len);
+    try testing.expectEqual(@as(u32, 2), material_b.material().getRefCount()); // Settings + local reference
+    settings.asShapeSettings().user_data = 42;
+
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    var result2 = try settings.createShape(allocator); // Cached
+    defer result2.deinit();
+    try testing.expect(result.getPtr() == result2.getPtr());
+    const shape = result.getPtr().?.cast(HeightFieldShape);
+    try testing.expectEqual(@as(u64, 42), shape.asShape().getUserData());
+    try testing.expectEqual(@as(u32, 8), shape.getSampleCount());
+    try testing.expectEqual(@as(u32, 2), shape.getBlockSize());
+    try testing.expect(shape.getMaterialAt(0, 0) == material_a.material());
+    try testing.expect(shape.getMaterialAt(1, 0) == material_b.material());
+    try testing.expect(shape.asShape().mustBeStatic());
+    try testing.expectEqual(@as(f32, 0.0), shape.asShape().getVolume());
+    try testing.expectEqual(@as(f32, 0.0), shape.asShape().getInnerRadius());
+    try testing.expectEqual(@as(u32, 2 * 3 + 1), shape.asShape().getSubShapeIDBitsRecursive());
+    try testing.expectEqual(@as(u32, 2 * 7 * 7), shape.asShape().getStats().num_triangles);
+
+    // Invalid settings
+    const Case = struct { sample_count: u32, block_size: u32 = 2, bits: u32 = 8, num_materials: u32 = 0, num_indices: u32 = 0, index: u8 = 0, error_text: []const u8 };
+    const cases = [_]Case{
+        .{ .sample_count = 8, .block_size = 0, .error_text = "HeightFieldShape: Block size must be in the range [2, 8]!" },
+        .{ .sample_count = 8, .block_size = 1, .error_text = "HeightFieldShape: Block size must be in the range [2, 8]!" },
+        .{ .sample_count = 18, .block_size = 9, .error_text = "HeightFieldShape: Block size must be in the range [2, 8]!" },
+        .{ .sample_count = 8, .bits = 0, .error_text = "HeightFieldShape: Bits per sample must be in the range [1, 16]!" },
+        .{ .sample_count = 8, .bits = 17, .error_text = "HeightFieldShape: Bits per sample must be in the range [1, 16]!" },
+        .{ .sample_count = 8, .bits = 300, .error_text = "HeightFieldShape: Bits per sample must be in the range [1, 16]!" },
+        .{ .sample_count = 2, .error_text = "HeightFieldShape: Sample count too low!" },
+        .{ .sample_count = 4, .block_size = 4, .error_text = "HeightFieldShape: Sample count too low!" },
+        .{ .sample_count = 0, .error_text = "HeightFieldShape: Sample count too low!" },
+        .{ .sample_count = 2 * 16385, .error_text = "HeightFieldShape: Sample count too high!" },
+        .{ .sample_count = 40000, .block_size = 4, .error_text = "HeightFieldShape: Size exceeds the amount of available sub shape ID bits!" },
+        .{ .sample_count = 8, .num_materials = 257, .error_text = "Supporting max 256 materials per height field" },
+        .{ .sample_count = 8, .num_materials = 3, .num_indices = 49, .index = 5, .error_text = "Material 5 is beyond material list (size: 3)" },
+        .{ .sample_count = 8, .num_indices = 49, .error_text = "No materials present, mMaterialIndices should be empty" },
+    };
+    for (cases) |c| {
+        var s = HeightFieldShapeSettings.initDefault(allocator);
+        defer s.deinit();
+        s.sample_count = c.sample_count;
+        s.block_size = c.block_size;
+        s.bits_per_sample = c.bits;
+        if (c.sample_count <= 64) try s.height_samples.appendNTimes(allocator, 1.0, @as(usize, c.sample_count) * c.sample_count); // The checks happen before the samples are read
+        for (0..c.num_materials) |_| try s.materials.append(allocator, .init(material_a.material()));
+        try s.material_indices.appendNTimes(allocator, c.index, c.num_indices);
+        var r = try s.asShapeSettings().createShape(allocator);
+        defer r.deinit();
+        try testing.expectEqualStrings(c.error_text, r.getError());
+    }
+}
+
+test "HeightFieldShape: a height field without collision" {
+    const allocator = testing.allocator;
+    const samples = try testSamples(allocator, 8, allHoles);
+    defer allocator.free(samples);
+    const material = try PhysicsMaterialSimple.create(allocator, "A", Color.red);
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.init(1, 2, 3), Vec3.init(2, 1, 4), 8, .{});
+    defer settings.deinit();
+    try settings.materials.append(allocator, .init(material.material()));
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?.cast(HeightFieldShape);
+
+    // Everything is empty, the materials are cleared
+    try testing.expect(shape.buffer == null);
+    try testing.expectEqual(@as(usize, 0), shape.getMaterialList().len);
+    try testing.expect(shape.getMaterialAt(0, 0) == PhysicsMaterial.default);
+    try testing.expectEqual(@as(usize, @sizeOf(HeightFieldShape)), shape.asShape().getStats().size_bytes);
+    try testing.expectEqual(@as(u32, 0), shape.asShape().getStats().num_triangles);
+    const center = Vec3.init(1 + 0.5 * 2 * 7, 2, 3 + 0.5 * 4 * 7);
+    try testing.expect(shape.asShape().getLocalBounds().eql(.init(center, center)));
+    try testing.expect(shape.isNoCollision(3, 4));
+    try testing.expect(shape.getPosition(3, 4).eql(Vec3.init(1 + 6, 2, 3 + 16)));
+    try testing.expect(shape.projectOntoSurface(Vec3.init(5, 0, 5)) == null);
+    var heights: [16]f32 = undefined;
+    shape.getHeights(0, 0, 4, 4, &heights, 4);
+    for (heights) |h| try testing.expectEqual(@as(f32, 2.0), h);
+    var hit: RayCastResult = .{};
+    try testing.expect(!shape.asShape().castRay(.init(Vec3.init(5, 10, 5), Vec3.init(0, -20, 0)), .{}, &hit));
+
+    // Clone and binary state of a shape without buffers
+    var clone = Ref(Shape).init((try shape.clone(allocator)).asShapeMut());
+    defer clone.deinit();
+    try testing.expect(clone.get().?.cast(HeightFieldShape).buffer == null);
+    const bytes = try saveState(allocator, shape.asShape());
+    defer allocator.free(bytes);
+    var restored = try restoreState(allocator, bytes);
+    defer restored.deinit();
+    const restored_bytes = try saveState(allocator, restored.getPtr().?);
+    defer allocator.free(restored_bytes);
+    try testing.expectEqualSlices(u8, bytes, restored_bytes);
+}
+
+test "HeightFieldShape: positions, heights, projection and the sub shape functions" {
+    const allocator = testing.allocator;
+    const samples = try testSamples(allocator, 16, someHoles);
+    defer allocator.free(samples);
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.init(1, 2, 3), Vec3.init(1, 1, 1), 16, .{});
+    defer settings.deinit();
+    settings.block_size = 4;
+    settings.bits_per_sample = 16;
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?.cast(HeightFieldShape);
+
+    // Positions are close to the samples and the holes are kept
+    for (0..16) |y| for (0..16) |x| {
+        const h = samples[y * 16 + x];
+        try testing.expectEqual(h == no_collision_value, shape.isNoCollision(@intCast(x), @intCast(y)));
+        if (h != no_collision_value)
+            try testing.expect(shape.getPosition(@intCast(x), @intCast(y)).isClose(Vec3.init(@as(f32, @floatFromInt(x)) + 1, h + 2, @as(f32, @floatFromInt(y)) + 3), .{ .max_dist_sq = 1.0e-6 }));
+    };
+
+    // GetHeights with a negative stride (upside down)
+    var heights: [8 * 4]f32 = undefined;
+    shape.getHeights(4, 8, 8, 4, @as([*]f32, &heights) + 3 * 8, -8);
+    for (0..4) |y| for (0..8) |x| {
+        const expected = samples[(8 + y) * 16 + 4 + x];
+        const value = heights[(3 - y) * 8 + x];
+        if (expected == no_collision_value)
+            try testing.expectEqual(no_collision_value, value)
+        else
+            try testing.expectApproxEqAbs(expected + 2, value, 1.0e-3);
+    };
+
+    // Project onto the surface: the lower left triangle of quad (2, 5)
+    const projection = shape.projectOntoSurface(Vec3.init(3.25, 100, 8.75)).?;
+    try testing.expectApproxEqAbs(@as(f32, 0.25 * 2.25 + 0.5 * 5.75 + 2), projection.position.getY(), 1.0e-3);
+    const c = shape.getSubShapeCoordinates(projection.sub_shape_id);
+    try testing.expectEqual(HeightFieldShape.SubShapeCoordinates{ .x = 2, .y = 5, .triangle_index = 0 }, c);
+
+    // Surface normal of the slope, supporting face of the triangle
+    const normal = shape.asShape().getSurfaceNormal(projection.sub_shape_id, projection.position);
+    try testing.expect(normal.isClose(Vec3.init(-0.25, 1, -0.5).normalized(), .{ .max_dist_sq = 1.0e-8 }));
+    var face: Shape.SupportingFace = .empty;
+    shape.asShape().getSupportingFace(projection.sub_shape_id, Vec3.axisY(), Vec3.init(1, 1, -1), Mat44.translation(Vec3.init(10, 0, 0)), &face);
+    try testing.expectEqual(@as(u32, 3), face.len);
+    try testing.expect(face.get(0).isClose(shape.getPosition(2, 5).mul(Vec3.init(1, 1, -1)).add(Vec3.init(10, 0, 0)), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expect(face.get(2).isClose(shape.getPosition(2, 6).mul(Vec3.init(1, 1, -1)).add(Vec3.init(10, 0, 0)), .{ .max_dist_sq = 1.0e-10 })); // Flipped: inside out
+
+    // A ray straight down hits the same triangle
+    var hit: RayCastResult = .{};
+    try testing.expect(shape.asShape().castRay(.init(Vec3.init(3.25, 100, 8.75), Vec3.init(0, -200, 0)), .{}, &hit));
+    try testing.expect(hit.sub_shape_id2.eql(projection.sub_shape_id));
+    try testing.expectApproxEqAbs(projection.position.getY(), 100 - 200 * hit.fraction, 1.0e-3);
+}
+
+test "HeightFieldShape: GetTrianglesStart / Next returns every triangle and continues after a full buffer" {
+    const allocator = testing.allocator;
+    const samples = try testSamples(allocator, 16, noHoles);
+    defer allocator.free(samples);
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.zero(), Vec3.one(), 16, .{});
+    defer settings.deinit();
+    settings.block_size = 4; // A block has 4 * 4 * 2 = 32 triangles
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+
+    // One call with a big buffer returns every triangle once
+    var context: Shape.GetTrianglesContext = .{};
+    shape.getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+    const vertices = try allocator.alloc(Float3, 3 * 1000);
+    defer allocator.free(vertices);
+    const materials = try allocator.alloc(*const PhysicsMaterial, 1000);
+    defer allocator.free(materials);
+    try testing.expectEqual(@as(u32, 2 * 15 * 15), shape.getTrianglesNext(&context, 1000, vertices, materials));
+    try testing.expect(materials[0] == PhysicsMaterial.default);
+    try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, 1000, vertices, null));
+
+    // With a small buffer the walk is continued: a block that did not fit is visited again (Jolt's behavior), so every
+    // triangle is returned at least once
+    shape.getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+    var seen = [_]bool{false} ** (16 * 16 * 2);
+    var total: u32 = 0;
+    while (true) {
+        const count = shape.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null);
+        if (count == 0) break;
+        try testing.expect(count <= 32);
+        total += count;
+        for (0..count) |t| {
+            const v0 = Vec3.fromFloat3(vertices[3 * t]);
+            const v2 = Vec3.fromFloat3(vertices[3 * t + 2]);
+            const x: usize = @intFromFloat(v0.getX());
+            const y: usize = @intFromFloat(v0.getZ());
+            const triangle: usize = if (v2.getZ() > v0.getZ()) 0 else 1; // Triangle 0 has its third vertex at (x + 1, y + 1), triangle 1 at (x + 1, y)
+            seen[(y * 16 + x) * 2 + triangle] = true;
+        }
+    }
+    try testing.expect(total >= 2 * 15 * 15);
+    for (0..15) |y| for (0..15) |x| {
+        try testing.expect(seen[(y * 16 + x) * 2] and seen[(y * 16 + x) * 2 + 1]);
+    };
+
+    // Jolt's limitation: when one block has more triangles than requested (block size 8: 128 triangles), every call
+    // returns the first triangles of that block again and the walk never finishes
+    settings.asShapeSettings().clearCachedResult();
+    settings.block_size = 8;
+    var result8 = try settings.asShapeSettings().createShape(allocator);
+    defer result8.deinit();
+    const shape8 = result8.getPtr().?;
+    shape8.getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+    try testing.expectEqual(@as(u32, 32), shape8.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null));
+    const first = try allocator.dupe(Float3, vertices[0 .. 3 * 32]);
+    defer allocator.free(first);
+    try testing.expectEqual(@as(u32, 32), shape8.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null));
+    try testing.expectEqualSlices(Float3, first, vertices[0 .. 3 * 32]);
+}
+
+test "HeightFieldShape: collide and cast through CollisionDispatch, CollideSoftBodyVertices, registration" {
+    const allocator = testing.allocator;
+    const samples = try allocator.alloc(f32, 8 * 8);
+    defer allocator.free(samples);
+    @memset(samples, 1.0);
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.zero(), Vec3.one(), 8, .{});
+    defer settings.deinit();
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+
+    var sphere = SphereShape.init(allocator, 0.5, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    var box = BoxShape.init(allocator, Vec3.replicate(0.5), .{});
+    box.asShape().setEmbedded();
+    defer box.asShapeMut().deinit();
+
+    // A sphere / box that penetrates the flat height field by 0.1, in both orders
+    const collide_settings: CollideShapeSettings = .{};
+    for ([_]*const Shape{ sphere.asShape(), box.asShape() }) |convex| {
+        for (0..2) |order| {
+            var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+            defer collector.deinit();
+            const convex_transform = Mat44.translation(Vec3.init(3.3, 1.4, 3.6));
+            if (order == 0)
+                CollisionDispatch.collideShapeVsShape(convex, shape, Vec3.one(), Vec3.one(), convex_transform, Mat44.identity(), .{}, .{}, &collide_settings, &collector.base, &.{})
+            else
+                CollisionDispatch.collideShapeVsShape(shape, convex, Vec3.one(), Vec3.one(), Mat44.identity(), convex_transform, .{}, .{}, &collide_settings, &collector.base, &.{});
+            try collector.checkError();
+            try testing.expect(collector.hits.items.len > 0);
+            var deepest: f32 = 0.0;
+            for (collector.hits.items) |h| {
+                try testing.expect(h.penetration_depth <= 0.1 + 1.0e-3);
+                deepest = @max(deepest, h.penetration_depth);
+            }
+            try testing.expectApproxEqAbs(@as(f32, 0.1), deepest, 1.0e-3);
+        }
+    }
+
+    // A sphere cast down onto the height field
+    var cast_collector = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+    defer cast_collector.deinit();
+    const shape_cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(3.3, 3.5, 3.6)), Vec3.init(0, -4, 0));
+    CollisionDispatch.castShapeVsShapeWorldSpace(&shape_cast, &.{}, shape, Vec3.one(), &.{}, Mat44.identity(), .{}, .{}, &cast_collector.base);
+    try cast_collector.checkError();
+    try testing.expect(cast_collector.hits.items.len > 0);
+    var first_hit: f32 = 1.0;
+    for (cast_collector.hits.items) |h| first_hit = @min(first_hit, h.fraction);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), first_hit, 1.0e-3); // Travels 2 of the 4
+
+    // CollideSoftBodyVertices: a vertex 0.05 below the surface
+    var positions = [_]Vec3{ Vec3.init(2.3, 0.95, 2.6), Vec3.init(2.25, 5, 2.5) };
+    var inv_masses = [_]f32{ 1, 1 };
+    var planes = [_]Plane{ Plane.init(Vec3.zero(), 0.0), Plane.init(Vec3.zero(), 0.0) };
+    var penetrations = [_]f32{ -math.flt_max, -math.flt_max };
+    var indices = [_]i32{ -1, -1 };
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    shape.collideSoftBodyVertices(Mat44.identity(), Vec3.one(), &vertices, 2, 3);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), penetrations[0], 1.0e-3);
+    try testing.expectEqual(@as(i32, 3), indices[0]);
+    try testing.expect(planes[0].getNormal().isClose(Vec3.axisY(), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectApproxEqAbs(@as(f32, -4), penetrations[1], 1.0e-3); // Above the surface: the closest triangle, negative penetration
+
+    // Registration
+    const functions = ShapeFunctions.get(.height_field);
+    try testing.expect(functions.construct != null);
+    try testing.expect(functions.color.eql(Color.purple));
+    try testing.expect(RegisterTypes.registry.getCollideShape(.sphere, .height_field) == &HeightFieldShape.collideSphereVsHeightField);
+    try testing.expect(RegisterTypes.registry.getCastShape(.sphere, .height_field) == &HeightFieldShape.castSphereVsHeightField);
+    try testing.expect(RegisterTypes.registry.getCollideShape(.box, .height_field) == &HeightFieldShape.collideConvexVsHeightField);
+    try testing.expect(RegisterTypes.registry.getCastShape(.tapered_cylinder, .height_field) == &HeightFieldShape.castConvexVsHeightField);
+    try testing.expect(RegisterTypes.registry.getCollideShape(.height_field, .box) == &CollisionDispatch.reversedCollideShape);
+    try testing.expect(RegisterTypes.registry.getCastShape(.height_field, .sphere) == &CollisionDispatch.reversedCastShape);
+}
+
+test "HeightFieldShape: binary state, material state, clone and stats" {
+    const allocator = testing.allocator;
+    const samples = try testSamples(allocator, 12, someHoles);
+    defer allocator.free(samples);
+    const material_a = try PhysicsMaterialSimple.create(allocator, "A", Color.red);
+    const material_b = try PhysicsMaterialSimple.create(allocator, "B", Color.blue);
+    var indices: [11 * 11]u8 = undefined;
+    for (&indices, 0..) |*m, i| m.* = @intCast(i % 3 % 2);
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.init(-1, 0.5, 2), Vec3.init(1.5, 0.75, 1.25), 12, .{ .material_indices = &indices, .materials = &.{ material_a.material(), material_b.material() } });
+    defer settings.deinit();
+    settings.block_size = 3;
+    settings.bits_per_sample = 5;
+    settings.materials_capacity = 7;
+    settings.asShapeSettings().user_data = 0x1234;
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?.cast(HeightFieldShape);
+    try testing.expectEqual(@as(u32, 3), shape.num_bits_per_material_index); // The capacity of 7 materials
+    try testing.expect(shape.materials.capacity >= 7);
+
+    // Stats
+    const stats = shape.asShape().getStats();
+    try testing.expectEqual(@sizeOf(HeightFieldShape) + 2 * @sizeOf(PhysicsMaterialRefC) + shape.range_blocks.len * @sizeOf(HeightFieldShape.RangeBlock) + shape.height_samples.len + shape.active_edges.len + shape.material_indices.items.len, stats.size_bytes);
+    try testing.expectEqual(@as(u32, 2 * 11 * 11), stats.num_triangles);
+
+    // Save and restore (the materials separately)
+    const bytes = try saveState(allocator, shape.asShape());
+    defer allocator.free(bytes);
+    var restored = try restoreState(allocator, bytes);
+    defer restored.deinit();
+    const restored_shape = restored.getPtr().?;
+    var materials: PhysicsMaterialList = .empty;
+    defer {
+        for (materials.items) |*m| m.deinit();
+        materials.deinit(allocator);
+    }
+    try shape.asShape().saveMaterialState(allocator, &materials);
+    try testing.expectEqual(@as(usize, 2), materials.items.len);
+    try restored_shape.restoreMaterialState(materials.items);
+    const restored_bytes = try saveState(allocator, restored_shape);
+    defer allocator.free(restored_bytes);
+    try testing.expectEqualSlices(u8, bytes, restored_bytes);
+    try testing.expectEqual(@as(u64, 0x1234), restored_shape.getUserData());
+    try testing.expect(restored_shape.cast(HeightFieldShape).getMaterialAt(1, 0) == material_b.material());
+    try testing.expect(restored_shape.cast(HeightFieldShape).materials.capacity >= 8); // 1 << num_bits_per_material_index
+
+    // Clone
+    var clone = Ref(Shape).init((try shape.clone(allocator)).asShapeMut());
+    defer clone.deinit();
+    const clone_bytes = try saveState(allocator, clone.get().?);
+    defer allocator.free(clone_bytes);
+    try testing.expectEqualSlices(u8, bytes, clone_bytes);
+    try testing.expect(clone.get().?.cast(HeightFieldShape).materials.capacity >= shape.materials.capacity);
+    try testing.expectEqual(@as(u32, 5), material_a.material().getRefCount()); // Settings, shape, `materials`, the restored shape and the clone
+}
+
+test "HeightFieldShape: every allocation failure is reported" {
+    const allocator = testing.allocator;
+    const samples = try testSamples(allocator, 16, someHoles);
+    defer allocator.free(samples);
+    const material_a = try PhysicsMaterialSimple.create(allocator, "A", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material_a.material());
+    defer material_ref.deinit();
+    const indices: [15 * 15]u8 = @splat(0);
+
+    // Settings constructor
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const settings = HeightFieldShapeSettings.create(failing.allocator(), samples, Vec3.zero(), Vec3.one(), 16, .{ .material_indices = &indices, .materials = &.{material_a.material()} }) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+        settings_ref.deinit();
+        break;
+    }
+
+    // createShape: out of memory is returned and not cached
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.zero(), Vec3.one(), 16, .{ .material_indices = &indices, .materials = &.{material_a.material()} });
+    defer settings.deinit();
+    settings.materials_capacity = 3;
+    settings.block_size = 4;
+    fail_index = 0;
+    var allocations: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var r = settings.asShapeSettings().createShape(failing.allocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(settings.base.cached_result.isEmpty());
+            continue;
+        };
+        defer r.deinit();
+        try testing.expect(r.isValid());
+        allocations = failing.allocations;
+        settings.asShapeSettings().clearCachedResult();
+        break;
+    }
+    try testing.expect(allocations >= 8); // The shape, materials, buffers, quantized samples, ranges, normals, material indices
+
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    settings.asShapeSettings().clearCachedResult();
+    const shape = result.getPtr().?.cast(HeightFieldShape);
+
+    // Clone
+    fail_index = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const clone = shape.clone(failing.allocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        var clone_ref = Ref(Shape).init(clone.asShapeMut());
+        clone_ref.deinit();
+        break;
+    }
+
+    // Restore
+    const bytes = try saveState(allocator, shape.asShape());
+    defer allocator.free(bytes);
+    fail_index = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var r = restoreState(failing.allocator(), bytes) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer r.deinit();
+        try testing.expect(r.isValid());
+        const materials = [_]PhysicsMaterialRefC{material_ref};
+        r.getPtr().?.restoreMaterialState(&materials) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        break;
+    }
+
+    // SetHeights (temp allocator) and SetMaterials (temp allocator and the material list of the shape)
+    var heights: [8 * 8]f32 = undefined;
+    for (&heights, 0..) |*h, i| h.* = @floatFromInt(i % 5);
+    const material_b = try PhysicsMaterialSimple.create(allocator, "B", Color.green);
+    var material_b_ref = RefConst(PhysicsMaterial).init(material_b.material());
+    defer material_b_ref.deinit();
+    var patch: [4 * 4]u8 = undefined;
+    for (&patch, 0..) |*m, i| m.* = @intCast(i % 2);
+    const new_list = [_]PhysicsMaterialRefC{ material_ref, material_b_ref };
+    fail_index = 0;
+    while (true) : (fail_index += 1) {
+        // A fresh shape whose own allocator fails too
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var r = try settings.asShapeSettings().createShape(failing.allocator());
+        defer r.deinit();
+        settings.asShapeSettings().clearCachedResult();
+        const s = r.getPtr().?.castMut(HeightFieldShape);
+        failing.fail_index = failing.alloc_index + fail_index;
+        var temp = TempAllocatorMalloc.init(failing.allocator());
+        s.setHeights(4, 4, 8, 8, &heights, 8, temp.tempAllocator(), .{}) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        const set = s.setMaterials(2, 3, 4, 4, &patch, 4, &new_list, temp.tempAllocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        try testing.expect(set);
+        try testing.expect(s.getMaterialAt(3, 3) == material_b.material());
+        break;
+    }
+    try testing.expect(fail_index >= 3); // Temp heights, normals, remap table (+ the material list and indices)
+}
