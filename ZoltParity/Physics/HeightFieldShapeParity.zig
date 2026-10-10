@@ -1288,7 +1288,7 @@ test "HeightFieldShape parity: properties, positions, materials, projection, Get
     var heights_checker: Checker = .{ .name = "get heights" };
     var materials_checker: Checker = .{ .name = "get materials" };
 
-    var inputs = try heightFields(allocator, &gen, 120);
+    var inputs = try heightFields(allocator, &gen, 150);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
@@ -1419,7 +1419,7 @@ test "HeightFieldShape parity: sub shape functions of every triangle" {
     var create_checker: Checker = .{ .name = "create" };
     var checker: Checker = .{ .name = "sub shape" };
 
-    var inputs = try heightFields(allocator, &gen, 60);
+    var inputs = try heightFields(allocator, &gen, 80);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
@@ -1470,7 +1470,7 @@ test "HeightFieldShape parity: CastRay (single hit and collectors) and CollidePo
     var checker: Checker = .{ .name = "cast ray" };
     var point_checker: Checker = .{ .name = "collide point" };
 
-    var inputs = try heightFields(allocator, &gen, 80);
+    var inputs = try heightFields(allocator, &gen, 100);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
@@ -1564,14 +1564,14 @@ test "HeightFieldShape parity: collide sphere / box vs height field (and reverse
     var create_checker: Checker = .{ .name = "create" };
     var checker: Checker = .{ .name = "collide" };
 
-    var inputs = try heightFields(allocator, &gen, 50);
+    var inputs = try heightFields(allocator, &gen, 60);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
         const hf = pair.hf();
-        for (0..40) |k| {
+        for (0..60) |k| {
             const convex = gen.convex();
             const convex_scale = gen.convexScale(convex);
             const hf_scale: P = if (gen.oneIn(2)) .{ 1, 1, 1 } else gen.hfScale();
@@ -1623,14 +1623,14 @@ test "HeightFieldShape parity: cast sphere / box vs height field (and the height
     var create_checker: Checker = .{ .name = "create" };
     var checker: Checker = .{ .name = "cast" };
 
-    var inputs = try heightFields(allocator, &gen, 50);
+    var inputs = try heightFields(allocator, &gen, 60);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
         const hf = pair.hf();
-        for (0..30) |k| {
+        for (0..50) |k| {
             const convex = gen.convex();
             const convex_scale = gen.convexScale(convex);
             const hf_scale: P = if (gen.oneIn(2)) .{ 1, 1, 1 } else gen.hfScale();
@@ -1705,7 +1705,7 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
     const zolt_materials = try allocator.alloc(u32, max_triangles);
     defer allocator.free(zolt_materials);
 
-    var inputs = try heightFields(allocator, &gen, 60);
+    var inputs = try heightFields(allocator, &gen, 80);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
@@ -1774,14 +1774,14 @@ test "HeightFieldShape parity: CollideSoftBodyVertices" {
     var checker: Checker = .{ .name = "soft body vertices" };
     const n = 16;
 
-    var inputs = try heightFields(allocator, &gen, 50);
+    var inputs = try heightFields(allocator, &gen, 60);
     defer freeHeightFields(allocator, &inputs);
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
         const hf = pair.hf();
-        for (0..4) |_| {
+        for (0..6) |_| {
             const scale: P = if (gen.oneIn(2)) .{ 1, 1, 1 } else gen.hfScale();
             const transform = if (gen.oneIn(3)) Mat44.identity() else gen.transform(3);
             var positions: [n * 3]f32 = undefined;
@@ -1831,7 +1831,7 @@ test "HeightFieldShape parity: SetHeights" {
     var heights_checker: Checker = .{ .name = "heights after SetHeights" };
     var ray_checker: Checker = .{ .name = "rays after SetHeights" };
 
-    var inputs = try heightFields(allocator, &gen, 120);
+    var inputs = try heightFields(allocator, &gen, 150);
     defer freeHeightFields(allocator, &inputs);
     var temp_allocator = TempAllocatorMalloc.init(allocator);
     for (inputs.items, 0..) |*input, input_index| {
@@ -1918,7 +1918,7 @@ test "HeightFieldShape parity: SetMaterials" {
     var create_checker: Checker = .{ .name = "create" };
     var checker: Checker = .{ .name = "set materials" };
 
-    var inputs = try heightFields(allocator, &gen, 120);
+    var inputs = try heightFields(allocator, &gen, 150);
     defer freeHeightFields(allocator, &inputs);
 
     // A height field with 255 materials (adding 3 new ones exceeds 256)
