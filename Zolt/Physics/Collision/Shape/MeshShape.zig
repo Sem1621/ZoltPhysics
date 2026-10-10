@@ -2258,57 +2258,6 @@ test "MeshShape: every creation path that allocates reports out of memory" {
     try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.mesh).construct.?(std.testing.failing_allocator));
 }
 
-test "MeshShape: save and restore a grid (the checks of Jolt's TestSaveMeshShape)" {
-    const allocator = testing.allocator;
-
-    // Create an n x n grid of triangles
-    const n = 10;
-    const s: f32 = 0.1;
-    var triangles: [2 * n * n]Triangle = undefined;
-    var expected_bounds: AABox = .empty;
-    for (0..n) |z|
-        for (0..n) |x| {
-            const fx = s * @as(f32, @floatFromInt(x)) - s * n / 2;
-            const fz = s * @as(f32, @floatFromInt(z)) - s * n / 2;
-            const i = 2 * (z * n + x);
-            triangles[i] = .init(Vec3.init(fx, 0, fz), Vec3.init(fx, 0, fz + s), Vec3.init(fx + s, 0, fz + s), .{});
-            triangles[i + 1] = .init(Vec3.init(fx, 0, fz), Vec3.init(fx + s, 0, fz + s), Vec3.init(fx + s, 0, fz), .{});
-        };
-    for (triangles) |t|
-        for (t.v) |v| expected_bounds.encapsulateVec3(Vec3.fromFloat3(v));
-    var settings = try MeshShapeSettings.init(allocator, &triangles, .{});
-    defer settings.deinit();
-    var result = try createMesh(&settings, allocator);
-    defer result.deinit();
-
-    // Write mesh to stream
-    var buffer: std.Io.Writer.Allocating = .init(allocator);
-    defer buffer.deinit();
-    var out = StreamWrapper.StreamOutWrapper.init(&buffer.writer);
-    result.getPtr().?.saveBinaryState(out.streamOut());
-
-    // Read back mesh
-    var reader: std.Io.Reader = .fixed(buffer.written());
-    var in = StreamWrapper.StreamInWrapper.init(&reader);
-    var restored = try Shape.restoreFromBinaryState(allocator, in.streamIn());
-    defer restored.deinit();
-    try testing.expect(restored.isValid());
-    const mesh_shape = restored.getPtr().?.cast(MeshShape).asShape();
-
-    // Test if it contains the same amount of triangles
-    try testing.expectEqual(@as(u32, triangles.len), mesh_shape.getStats().num_triangles);
-
-    // Check bounding box
-    try testing.expect(mesh_shape.getLocalBounds().eql(expected_bounds));
-
-    // Check if we can hit it with a ray
-    var hit: RayCastResult = .{};
-    const ray = RayCast.init(Vec3.init(0.5 * s, 1, 0.25 * s), Vec3.init(0, -2, 0)); // Hit in the center of a triangle
-    try testing.expect(mesh_shape.castRay(ray, .{}, &hit));
-    try testing.expectEqual(@as(f32, 0.5), hit.fraction);
-    try testing.expect(mesh_shape.getSurfaceNormal(hit.sub_shape_id2, ray.getPointOnRay(hit.fraction)).eql(Vec3.axisY()));
-}
-
 test "MeshShape: 3 coplanar triangles that share an edge (the checks of Jolt's TestNonManifoldMesh)" {
     const allocator = testing.allocator;
 

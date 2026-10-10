@@ -741,24 +741,10 @@ test "RotatedTranslatedShape: bounds, center of mass, inner radius, mass propert
     try expect(face.eql(&expected_face));
 }
 
-test "RotatedTranslatedShape: valid scales (the RotatedTranslatedShape part of Jolt's TestIsValidScale)" {
+// Jolt's TestIsValidScale is ported in ZoltTests/Physics/ShapeTests.zig, this adds a box and MakeScaleValid
+test "RotatedTranslatedShape: valid scales of a rotated box" {
     const allocator = testing.allocator;
     const expect = testing.expect;
-
-    // Test a rotated translated shape that can only be scaled uniformly
-    var sphere_ref = RefConst(Shape).init((try SphereShape.create(allocator, 2.0, .{})).asShape());
-    defer sphere_ref.deinit();
-    var rt_settings = RotatedTranslatedShapeSettings.initPtr(allocator, Vec3.init(1, 2, 3), Quat.rotation(Vec3.axisX(), 0.1 * math.pi), sphere_ref.get());
-    defer rt_settings.deinit();
-    var rt_result = try rt_settings.asShapeSettings().createShape(allocator);
-    defer rt_result.deinit();
-    const rt_shape = rt_result.getPtr().?;
-    try expect(!rt_shape.isValidScale(Vec3.zero()));
-    try expect(rt_shape.isValidScale(Vec3.init(1, 1, 1)));
-    try expect(rt_shape.isValidScale(Vec3.init(2, 2, 2)));
-    try expect(!rt_shape.isValidScale(Vec3.init(2, 1, 1)));
-    try expect(!rt_shape.isValidScale(Vec3.init(1, 2, 1)));
-    try expect(!rt_shape.isValidScale(Vec3.init(1, 1, 2)));
 
     // A box can be scaled in any way: like Jolt's triangle tests (rt_shape3 / rt_shape4) with a box
     var box_ref = RefConst(Shape).init((try BoxShape.create(allocator, Vec3.init(1, 2, 3), .{})).asShape());

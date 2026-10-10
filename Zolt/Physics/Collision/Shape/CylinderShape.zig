@@ -734,28 +734,6 @@ test "CylinderShape: supporting faces (side, top, bottom, aligned with the direc
     try testing.expect(face.get(0).isClose(Vec3.init(0, 1, 1), .{ .max_dist_sq = 1.0e-10 }));
 }
 
-test "CylinderShape: valid scales (the cylinder part of Jolt's TestIsValidScale)" {
-    const allocator = testing.allocator;
-
-    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
-    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
-
-    var cylinder_ref = Ref(Shape).init((try CylinderShape.create(allocator, 0.5, 2.0, .{})).asShapeMut());
-    defer cylinder_ref.deinit();
-    const cylinder = cylinder_ref.get().?;
-    try testing.expect(!cylinder.isValidScale(Vec3.zero()));
-    try testing.expect(!cylinder.isValidScale(Vec3.init(0, 1, 0)));
-    try testing.expect(!cylinder.isValidScale(Vec3.init(1, 0, 1)));
-    try testing.expect(cylinder.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(cylinder.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(!cylinder.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(cylinder.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(!cylinder.isValidScale(Vec3.init(1, 1, 2)));
-    try testing.expect(cylinder.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
-    try testing.expect(cylinder.makeScaleValid(Vec3.init(-1.0e-10, 1, 1.0e-10)).eql(Vec3.init(-ScaleHelpers.min_scale, 1, ScaleHelpers.min_scale)));
-    try testing.expect(cylinder.makeScaleValid(Vec3.init(2, 5, -4)).eql(Vec3.init(3, 5, -3)));
-}
-
 test "CylinderShape: support functions" {
     const allocator = testing.allocator;
 
@@ -782,7 +760,9 @@ test "CylinderShape: support functions" {
     try testing.expect(support.getSupport(Vec3.init(1, 1, 0)).eql(Vec3.init(2 - r, 1 - r, 0)));
 }
 
-test "CylinderShape: ray casts (TestCylinderShapeRay), collide point (TestCollidePointVsCylinder) and filters" {
+// Jolt's TestCylinderShapeRay / TestCollidePointVsCylinder are in ZoltTests/Physics, this adds hit positions, sub shape IDs,
+// the collector context and the shape filter
+test "CylinderShape: analytic ray casts, the collector context, collide point with a sub shape ID creator and filters" {
     const allocator = testing.allocator;
 
     var cylinder = CylinderShape.init(allocator, 4, 2, .{});
@@ -823,7 +803,7 @@ test "CylinderShape: ray casts (TestCylinderShapeRay), collide point (TestCollid
     try testing.expectApproxEqAbs(@as(f32, 0.75), hits.hits.items[1].fraction, 1.0e-6); // Inverted ray of ConvexShape's fallback
     try testing.expect(hits.hits.items[0].body_id.eql(.init(5)) and hits.hits.items[1].body_id.eql(.init(5)));
 
-    // TestCollidePointVsCylinder
+    // The points of TestCollidePointVsCylinder with a sub shape ID creator
     const half_height: f32 = 0.2;
     const radius: f32 = 0.1;
     var small = CylinderShape.init(allocator, half_height, radius, .{});

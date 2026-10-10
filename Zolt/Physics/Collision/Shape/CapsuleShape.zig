@@ -772,27 +772,6 @@ test "CapsuleShape: bounds, inner radius, mass properties, volume, stats, surfac
     try testing.expectApproxEqAbs(@as(f32, 2.5), half.submerged_volume, 1.0e-5);
 }
 
-test "CapsuleShape: valid scales (the capsule part of Jolt's TestIsValidScale)" {
-    const allocator = testing.allocator;
-
-    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
-    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
-
-    var capsule_ref = Ref(Shape).init((try CapsuleShape.create(allocator, 2.0, 0.5, .{})).asShapeMut());
-    defer capsule_ref.deinit();
-    const capsule = capsule_ref.get().?;
-    try testing.expect(!capsule.isValidScale(Vec3.zero()));
-    try testing.expect(!capsule.isValidScale(Vec3.init(0, 1, 0)));
-    try testing.expect(!capsule.isValidScale(Vec3.init(1, 0, 1)));
-    try testing.expect(capsule.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(capsule.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(!capsule.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(!capsule.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(!capsule.isValidScale(Vec3.init(1, 1, 2)));
-    try testing.expect(capsule.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
-    try testing.expect(capsule.makeScaleValid(Vec3.init(-2, 3, 4)).eql(Vec3.init(-3, 3, 3)));
-}
-
 test "CapsuleShape: support functions" {
     const allocator = testing.allocator;
 
@@ -821,7 +800,9 @@ test "CapsuleShape: support functions" {
     }
 }
 
-test "CapsuleShape: ray casts (the shape part of TestCapsuleShapeRay), the collector version of ConvexShape and collide point (TestCollidePointVsCapsule)" {
+// Jolt's TestCapsuleShapeRay / TestCollidePointVsCapsule are in ZoltTests/Physics, this adds specific fractions, sub shape IDs
+// and the shape filter
+test "CapsuleShape: analytic ray casts, the collector version of ConvexShape, collide point with sub shape IDs and the shape filter" {
     const allocator = testing.allocator;
 
     var shape_ref = Ref(Shape).init((try CapsuleShape.create(allocator, 4, 2, .{})).asShapeMut());
@@ -866,7 +847,7 @@ test "CapsuleShape: ray casts (the shape part of TestCapsuleShapeRay), the colle
         }
     }
 
-    // TestCollidePointVsCapsule
+    // The points of TestCollidePointVsCapsule with a sub shape ID creator
     const half_height: f32 = 0.2;
     const radius: f32 = 0.1;
     var point_shape_ref = Ref(Shape).init((try CapsuleShape.create(allocator, half_height, radius, .{})).asShapeMut());
@@ -1065,61 +1046,4 @@ test "CapsuleShape: every creation path that allocates reports out of memory" {
     var reader: std.Io.Reader = .fixed(writer.buffered());
     var in = StreamWrapper.StreamInWrapper.init(&reader);
     try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
-}
-
-// Jolt's TestCollideShapeLongCapsuleVsEmbeddedBox (CollideShapeTests.cpp): colliding a very long capsule vs a box that is
-// intersecting with the line segment inside the capsule. This particular config reported the wrong penetration due to
-// accuracy problems before
-test "CapsuleShape: TestCollideShapeLongCapsuleVsEmbeddedBox" {
-    const allocator = testing.allocator;
-
-    // Create box
-    const box_min = Vec3.init(-1.0, -2.0, 0.5);
-    const box_max = Vec3.init(2.0, -0.5, 3.0);
-    const box_settings = try RotatedTranslatedShapeSettings.create(allocator, box_min.add(box_max).mulScalar(0.5), Quat.identity(), (try BoxShapeSettings.create(allocator, box_max.sub(box_min).mulScalar(0.5), .{})).asShapeSettings());
-    var box_settings_ref = Ref(ShapeSettings).init(box_settings.asShapeSettings());
-    defer box_settings_ref.deinit();
-    var box_result = try box_settings.createShape(allocator);
-    defer box_result.deinit();
-    const box_shape = box_result.getPtr().?;
-    const box_transform = Mat44.init(Vec4.init(0.516170502, -0.803887904, -0.295520246, 0.0), Vec4.init(0.815010250, 0.354940295, 0.458012700, 0.0), Vec4.init(-0.263298869, -0.477264702, 0.838386655, 0.0), Vec4.init(-10.2214508, -18.6808319, 40.7468987, 1.0));
-
-    // Create capsule
-    const capsule_half_height: f32 = 75.0;
-    const capsule_radius: f32 = 1.5;
-    const capsule_settings = try RotatedTranslatedShapeSettings.create(allocator, Vec3.init(0, 0, 75), Quat.init(0.499999970, -0.499999970, -0.499999970, 0.499999970), (try CapsuleShapeSettings.create(allocator, capsule_half_height, capsule_radius, .{})).asShapeSettings());
-    var capsule_settings_ref = Ref(ShapeSettings).init(capsule_settings.asShapeSettings());
-    defer capsule_settings_ref.deinit();
-    var capsule_result = try capsule_settings.createShape(allocator);
-    defer capsule_result.deinit();
-    const capsule_shape = capsule_result.getPtr().?;
-    const capsule_transform = Mat44.translation(Vec3.init(-9.68538570, -18.0328083, 41.3212280));
-
-    // Collision settings
-    var settings: CollideShapeSettings = .{};
-    settings.active_edge_mode = .collide_with_all;
-    settings.back_face_mode = .collide_with_back_faces;
-    settings.collect_faces_mode = .no_faces;
-
-    // Collide the two shapes
-    var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
-    defer collector.deinit();
-    CollisionDispatch.collideShapeVsShape(capsule_shape, box_shape, Vec3.one(), Vec3.one(), capsule_transform, box_transform, .{}, .{}, &settings, &collector.base, &.{});
-    try collector.checkError();
-
-    // Check that there was a hit
-    try testing.expect(collector.hits.items.len == 1);
-    const result = collector.hits.items[0];
-
-    // Now move the box 1% further than the returned penetration depth and check that it is no longer in collision
-    const distance_to_move_box = result.penetration_axis.normalized().mulScalar(result.penetration_depth);
-    collector.reset();
-    try testing.expect(!collector.hadHit());
-    CollisionDispatch.collideShapeVsShape(capsule_shape, box_shape, Vec3.one(), Vec3.one(), capsule_transform, Mat44.translation(distance_to_move_box.mulScalar(1.01)).mul(box_transform), .{}, .{}, &settings, &collector.base, &.{});
-    try testing.expect(!collector.hadHit());
-
-    // Now check that moving 1% less than the penetration distance makes the shapes still overlap
-    CollisionDispatch.collideShapeVsShape(capsule_shape, box_shape, Vec3.one(), Vec3.one(), capsule_transform, Mat44.translation(distance_to_move_box.mulScalar(0.99)).mul(box_transform), .{}, .{}, &settings, &collector.base, &.{});
-    try collector.checkError();
-    try testing.expect(collector.hits.items.len == 1);
 }

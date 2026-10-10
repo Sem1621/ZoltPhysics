@@ -559,25 +559,6 @@ test "SphereShape: bounds, inner radius, mass properties, volume, stats, surface
     try testing.expectEqual(@as(u32, 0), face.len); // Hit is always a single point
 }
 
-test "SphereShape: valid scales (the sphere part of Jolt's TestIsValidScale)" {
-    const allocator = testing.allocator;
-
-    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
-    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
-
-    var sphere_ref = Ref(Shape).init((try SphereShape.create(allocator, 2.0, .{})).asShapeMut());
-    defer sphere_ref.deinit();
-    const sphere = sphere_ref.get().?;
-    try testing.expect(!sphere.isValidScale(Vec3.zero()));
-    try testing.expect(sphere.isValidScale(Vec3.init(2, 2, 2)));
-    try testing.expect(sphere.isValidScale(Vec3.init(-1, 1, -1)));
-    try testing.expect(!sphere.isValidScale(Vec3.init(2, 1, 1)));
-    try testing.expect(!sphere.isValidScale(Vec3.init(1, 2, 1)));
-    try testing.expect(!sphere.isValidScale(Vec3.init(1, 1, 2)));
-    try testing.expect(sphere.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq })); // Averaging can cause a slight error
-    try testing.expect(sphere.makeScaleValid(Vec3.init(-2, 3, 4)).eql(Vec3.init(-3, 3, 3)));
-}
-
 test "SphereShape: support functions" {
     const allocator = testing.allocator;
 

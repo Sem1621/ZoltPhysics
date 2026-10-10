@@ -48,6 +48,7 @@ const jolt = struct {
     extern fn jolt_vec3_compress_unit_vector(v: *const [3]f32) u32;
     extern fn jolt_vec3_decompress_unit_vector(value: u32, out: *[3]f32) void;
     extern fn jolt_vec3_to_int(v: *const [3]f32, out: *[3]u32) void;
+    extern fn jolt_vec3_unit_sphere(out_vertices: *[1026 * 3]f32) u32;
 
     extern fn jolt_quat_rotation(axis: *const [3]f32, angle: f32, out: *[4]f32) void;
     extern fn jolt_quat_mul(a: *const [4]f32, b: *const [4]f32, out: *[4]f32) void;
@@ -645,6 +646,15 @@ test "Vec3 unitSpherical / compress / decompress" {
         decompress.check(value, arr3(Vec3.decompressUnitVector(value)), expected);
     }
     try finishAll(&.{ &spherical, &compress, &decompress });
+}
+
+test "Vec3.unit_sphere (Vec3::sUnitSphere)" {
+    var jolt_vertices: [1026 * 3]f32 = undefined;
+    const jolt_count = jolt.jolt_vec3_unit_sphere(&jolt_vertices);
+    try std.testing.expectEqual(jolt_count, Vec3.unit_sphere.len);
+    var checker: Checker = .{ .name = "Vec3.unit_sphere" };
+    for (Vec3.unit_sphere.constSlice(), 0..) |v, i| checker.check(.{i}, arr3(v), jolt_vertices[3 * i ..][0..3].*);
+    try checker.finish();
 }
 
 test "Quat rotation / mul / mulVec3 / inverseRotate / multiplyImaginary / rotateAxis" {

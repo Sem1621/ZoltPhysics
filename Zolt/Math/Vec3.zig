@@ -11,6 +11,7 @@ const math = @import("Math.zig");
 const HashCombine = @import("../Core/HashCombine.zig");
 const Swizzle = @import("Swizzle.zig").Swizzle;
 const Float3 = @import("Float3.zig").Float3;
+const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
 const UVec4 = @import("UVec4.zig").UVec4;
 const Vec4 = @import("Vec4.zig").Vec4;
 
@@ -165,6 +166,125 @@ pub const Vec3 = extern struct {
         const sc = Vec4.init(theta, phi, 0, 0).sinCos();
         return init(sc.sin.getX() * sc.cos.getY(), sc.sin.getX() * sc.sin.getY(), sc.cos.getX());
     }
+
+    /// A set of vectors uniformly spanning the surface of a unit sphere, usable for debug purposes (sUnitSphere)
+    ///
+    /// Jolt builds it with a static initializer, Zolt at compile time with the same operations. Jolt's sAddVertex skips
+    /// a vertex when an earlier one is within a distance of 1.0e-3; the duplicates it finds are exact (the shared edge
+    /// midpoints are computed from the same endpoints), so the compile time build finds them with a hash of the values
+    /// instead of comparing every pair, which would cost seconds of compile time. The test below checks the table
+    /// against a run time build with Jolt's sAddVertex and ZoltParity/Math/MathParity.zig against Jolt.
+    pub const unit_sphere: StaticArray(Vec3, 1026) = blk: {
+        @setEvalBranchQuota(1_000_000);
+        var dedup: UnitSphereHashDedup = .{};
+        break :blk unitSphereBuild(&dedup);
+    };
+
+    /// The subdivision level of unit_sphere
+    const unit_sphere_level = 3;
+
+    /// The initializer of sUnitSphere (Vec3.cpp), `dedup.addVertex(vertices, v)` is sAddVertex
+    fn unitSphereBuild(dedup: anytype) StaticArray(Vec3, 1026) {
+        var verts: StaticArray(Vec3, 1026) = .empty;
+
+        // Add unit axis
+        verts.append(axisX());
+        verts.append(axisX().negate());
+        verts.append(axisY());
+        verts.append(axisY().negate());
+        verts.append(axisZ());
+        verts.append(axisZ().negate());
+        dedup.addExisting(&verts);
+
+        // Subdivide
+        unitSphereCreateVertices(&verts, dedup, axisX(), axisY(), axisZ(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX().negate(), axisY(), axisZ(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX(), axisY().negate(), axisZ(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX().negate(), axisY().negate(), axisZ(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX(), axisY(), axisZ().negate(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX().negate(), axisY(), axisZ().negate(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX(), axisY().negate(), axisZ().negate(), unit_sphere_level);
+        unitSphereCreateVertices(&verts, dedup, axisX().negate(), axisY().negate(), axisZ().negate(), unit_sphere_level);
+
+        return verts;
+    }
+
+    /// sCreateVertices of Vec3.cpp
+    fn unitSphereCreateVertices(vertices: *StaticArray(Vec3, 1026), dedup: anytype, dir1: Vec3, dir2: Vec3, dir3: Vec3, level: i32) void {
+        const center1 = dir1.add(dir2).normalized();
+        const center2 = dir2.add(dir3).normalized();
+        const center3 = dir3.add(dir1).normalized();
+
+        dedup.addVertex(vertices, center1);
+        dedup.addVertex(vertices, center2);
+        dedup.addVertex(vertices, center3);
+
+        if (level > 0) {
+            const new_level = level - 1;
+            unitSphereCreateVertices(vertices, dedup, dir1, center1, center3, new_level);
+            unitSphereCreateVertices(vertices, dedup, center1, center2, center3, new_level);
+            unitSphereCreateVertices(vertices, dedup, center1, dir2, center2, new_level);
+            unitSphereCreateVertices(vertices, dedup, center3, center2, dir3, new_level);
+        }
+    }
+
+    /// sAddVertex of Vec3.cpp: adds the vertex unless an earlier one is within a distance of 1.0e-3 (compares every pair)
+    const UnitSphereLinearDedup = struct {
+        fn addExisting(_: *UnitSphereLinearDedup, _: *StaticArray(Vec3, 1026)) void {}
+
+        fn addVertex(_: *UnitSphereLinearDedup, vertices: *StaticArray(Vec3, 1026), vertex: Vec3) void {
+            var found = false;
+            for (vertices.constSlice()) |v| {
+                if (v.isClose(vertex, .{ .max_dist_sq = 1.0e-6 })) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                vertices.append(vertex);
+        }
+    };
+
+    /// The compile time sAddVertex: adds the vertex unless an earlier one has the same value (open addressing hash of
+    /// vertex indices, -0 hashes like +0)
+    const UnitSphereHashDedup = struct {
+        const table_size = 4096;
+
+        /// Index + 1 of the vertex in each slot, 0 is empty
+        slots: [table_size]u16 = @splat(0),
+
+        fn slotOf(self: *const UnitSphereHashDedup, vertices: *const StaticArray(Vec3, 1026), vertex: Vec3) usize {
+            const components: [4]f32 = vertex.value;
+            var h: u32 = 0;
+            for (components[0..3]) |c| {
+                const bits: u32 = @bitCast(c + 0.0); // -0 + 0 = +0
+                h = (h ^ bits) *% 0x9e3779b1;
+            }
+            var slot: usize = h >> 20; // 12 bits
+            while (self.slots[slot] != 0) : (slot = (slot + 1) % table_size) {
+                const v = vertices.buffer[self.slots[slot] - 1];
+                if (v.getX() == vertex.getX() and v.getY() == vertex.getY() and v.getZ() == vertex.getZ())
+                    break;
+            }
+            return slot;
+        }
+
+        fn addExisting(self: *UnitSphereHashDedup, vertices: *StaticArray(Vec3, 1026)) void {
+            for (vertices.constSlice(), 1..) |v, i| {
+                const slot = self.slotOf(vertices, v);
+                std.debug.assert(self.slots[slot] == 0);
+                self.slots[slot] = @intCast(i);
+            }
+        }
+
+        fn addVertex(self: *UnitSphereHashDedup, vertices: *StaticArray(Vec3, 1026), vertex: Vec3) void {
+            const slot = self.slotOf(vertices, vertex);
+            if (self.slots[slot] == 0) {
+                vertices.append(vertex);
+                self.slots[slot] = @intCast(vertices.len);
+            }
+        }
+    };
 
     /// Get random unit vector.
     /// `rng` is a pointer to a random bit generator (see Core/Mt19937.zig), the equivalent of a C++
@@ -548,3 +668,12 @@ pub const Vec3 = extern struct {
         return @shuffle(f32, v, undefined, @Vector(4, i32){ 0, 1, 2, 2 });
     }
 };
+
+test "Vec3.unit_sphere is sUnitSphere: the compile time table equals a run time build with Jolt's sAddVertex" {
+    var dedup: Vec3.UnitSphereLinearDedup = .{};
+    const runtime = Vec3.unitSphereBuild(&dedup);
+    try std.testing.expectEqual(@as(u32, 1026), runtime.len);
+    try std.testing.expectEqual(runtime.len, Vec3.unit_sphere.len);
+    for (runtime.constSlice(), Vec3.unit_sphere.constSlice()) |a, b|
+        try std.testing.expectEqual(@as(u128, @bitCast(a.value)), @as(u128, @bitCast(b.value)));
+}
