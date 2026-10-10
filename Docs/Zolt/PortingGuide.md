@@ -84,7 +84,7 @@ Inside the library always import by relative path, never through `zolt.zig`.
 | member variable `mFoo`                | snake_case, drop `m`                  | `mLinearVelocity` → `linear_velocity`         |
 | static member variable `sFoo`         | snake_case `pub var`                  | `sDrawConstraints` → `draw_constraints`       |
 | constant `cFoo` / `constexpr`         | snake_case `const`                    | `cLargeFloat` → `large_float`                 |
-| parameter `inFoo`, `outFoo`, `ioFoo`  | snake_case, drop prefix               | `inVelocity` → `velocity`                     |
+| parameter `inFoo`, `outFoo`, `ioFoo`  | snake_case, drop prefix (output containers that stay parameters keep `out_`: `out_vertices`; `io_` may stay when the plain name clashes with a local) | `inVelocity` → `velocity`                     |
 | macro constant `JPH_FOO`              | snake_case `const`                    | `JPH_PI` → `math.pi`                          |
 | type alias `using Foo = Bar`          | `pub const Foo = Bar;`                |                                               |
 
@@ -180,7 +180,26 @@ both types) when porting code needs them.
   `TempAllocator` when the size is unbounded. Zig has no alloca.
 - Allocation failure is an error (`error.OutOfMemory`), never ignored. Where Jolt returns a
   `Result<T>` or an error string, return `!T` with a specific error set; keep Jolt's message text
-  in a doc comment or log it with `std.log`.
+  in a doc comment or log it with `std.log`. **Exception:** Jolt's cached and copied results
+  (`ShapeResult`, `PhysicsMaterialResult`, `GroupFilterResult`, ...) stay values of
+  `Core/Result.zig`'s `Result(T)` with Jolt's exact error texts (tests compare them); only
+  allocation failure is a Zig error, and it is never cached.
+- Placement new into a caller-owned buffer (`SupportBuffer`, `GetTrianglesContext`) uses
+  `Core/PlacementBuffer.zig`: `emplace(T)` checks size and alignment at compile time and the object is
+  initialized in place (no copy of large objects, self-referencing objects work).
+- Tables that Jolt builds in static initializers (the unit sphere triangles, the box triangles, the
+  collision dispatch tables) are comptime constants with the same bits.
+
+### Rule M: no writes through `*const`
+
+Zig marks every `*const T` parameter `readonly` for LLVM, also at calls through vtable function
+pointers, and optimized builds really drop writes made through a pointer obtained from it with
+`@constCast`. A C++ `mutable` member or `const_cast` write therefore becomes a mutable receiver
+(`ShapeSettings.createShape(self: *ShapeSettings, ...)` writes its cache), a mutable pointer passed
+separately (`opts.shape_filter: ?*ShapeFilter` at the query entry points that set `body_id2`), or
+state behind a pointer field. The only exceptions are the `RefCount` atomics (`addRef` / `release`
+through `*const`) and `release()` destroying the object after its last reference. Every Phase 4+ test
+suite also runs with `-Doptimize=ReleaseFast`, where such bugs show.
 
 ### Containers
 
@@ -222,7 +241,32 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
   reference like the C++ constructor / assignment, and the owner calls `deinit()` where the C++
   destructor would run. Raw pointers stay raw (`*T`) where Jolt uses raw pointers;
 - `new Foo(...)` assigned to a `Ref` becomes `Foo.create(allocator, ...)` (refcount 0) followed by
-  `Ref(Foo).init(ptr)`; the object keeps its allocator to destroy itself.
+  `Ref(Foo).init(ptr)`; the object keeps its allocator to destroy itself. Pattern A roots
+  (`Shape`, `ShapeSettings`, `PhysicsMaterial`, `GroupFilter`) store `ref_count` and the
+  `allocator` in the root; `release()` calls the generated `destroy` (the `destruct` chain, derived
+  first, then the free with the root's allocator);
+- an object on the stack or embedded in another object is `init(...)` + `setEmbedded()` (before
+  references are taken) + `deinit()` (asserts that no references are left);
+- read-only constants that Jolt keeps in a global (`PhysicsMaterial::sDefault`) are comptime constants
+  with `is_static = true`: they are never reference counted, so nothing mutable is global;
+- a concrete class has no `addRef` / `release` of its own: Jolt's `RefConst<SphereShape>` is
+  `RefConst(Shape)` plus the checked `shape.cast(SphereShape)`.
+
+### Geometry conventions
+
+- **Vertex arrays.** Jolt's `VERTEX_ARRAY` template parameter (a `StaticArray<Vec3, N>` or an
+  `Array<Vec3>` that a function appends to) becomes `out_vertices: anytype`, accessed through
+  `Geometry/VertexArray.zig`: pass a `*StaticArray(Vec3, N)` (no allocator, the error set is empty) or a
+  `VertexArrayList{ .allocator, .list }` for an `std.ArrayList(Vec3)`. Such functions return
+  `VertexArray.Error(@TypeOf(out_vertices))!void`; read-only arrays are plain `[]const Vec3` slices.
+- **Convex objects** (GJK / EPA): any type with `getSupport(self, direction: Vec3) Vec3` and optionally
+  `getSupportingFace(self, direction, out_vertices)`, passed by pointer as `anytype`. The wrappers of
+  `Geometry/ConvexSupport.zig` (`TransformedConvexObject(T)`, `AddConvexRadius(T)`,
+  `MinkowskiDifference(A, B)`, ...) store `*const` pointers like Jolt's const references, so the
+  wrapped objects must outlive them.
+- Types that are written into buffers or passed to C++ as raw memory (`IndexedTriangle`, the AABB tree
+  codec headers, EPA's triangle blocks) are `extern struct`s in C++ field order with a comptime size
+  check.
 
 ### Strings, I/O and logging
 
@@ -243,55 +287,26 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
 
 Use one of two patterns. Both keep Jolt's ability to add user-defined subclasses.
 
-**A. Class hierarchies with data in the base class** (`Shape`, `ConvexShape`, `Constraint`,
-`ShapeSettings`, `BroadPhase`, ...): the base struct holds a `vtable: *const VTable` plus its
-data; each derived struct embeds its parent as the first field named `base`; downcasting uses
-`@fieldParentPtr` (one step per level of the hierarchy).
-```zig
-pub const Shape = struct {
-    pub const VTable = struct {
-        getLocalBounds: *const fn (self: *const Shape) AABox,
-        // ... one entry per C++ virtual function, in declaration order
-    };
-    vtable: *const VTable,
-    ref_count: std.atomic.Value(u32) = .init(0),
-    user_data: u64 = 0,
-
-    pub fn getLocalBounds(self: *const Shape) AABox {
-        return self.vtable.getLocalBounds(self);
-    }
-};
-
-pub const ConvexShape = struct {
-    base: Shape,
-    density: f32 = 1000,
-};
-
-pub const BoxShape = struct {
-    base: ConvexShape,
-    half_extent: Vec3,
-
-    const vtable: Shape.VTable = .{ .getLocalBounds = getLocalBoundsImpl };
-
-    pub fn init(half_extent: Vec3) BoxShape {
-        return .{ .base = .{ .base = .{ .vtable = &vtable } }, .half_extent = half_extent };
-    }
-
-    /// Downcast (static_cast<const BoxShape *>(shape) in C++)
-    pub fn fromShape(shape: *const Shape) *const BoxShape {
-        const convex: *const ConvexShape = @alignCast(@fieldParentPtr("base", shape));
-        return @alignCast(@fieldParentPtr("base", convex));
-    }
-
-    fn getLocalBoundsImpl(shape: *const Shape) AABox {
-        const self = fromShape(shape);
-        return .{ .min = self.half_extent.negate(), .max = self.half_extent };
-    }
-};
-```
-Virtuals with a default implementation in the base: the base exposes the default as a `pub fn`
-that derived vtables can reference. Jolt's switch-on-subtype dispatch tables (e.g.
-`CollisionDispatch`) are ported as tables, exactly like the C++.
+**A. Class hierarchies with data in the base class** (`Shape`, `ConvexShape`, `ShapeSettings`,
+`CollisionCollector`, `ShapeFilter`, `PhysicsMaterial`, `GroupFilter`, `Constraint`, `BroadPhase`,
+...): the root holds `vtable: *const VTable` plus its data; each derived struct embeds its parent as
+the field `base` (one level per C++ class). The machinery is `Core/Virtual.zig` (imported as
+`virtual`); the complete rules and examples are in
+[CollisionArchitecture.md](CollisionArchitecture.md) (D1, D2), in short:
+- a class that adds virtual functions has a `VTable` whose first field is its parent's vtable
+  (`ConvexShape.VTable { base: Shape.VTable, getSupportFunction }`); the constructor of the
+  introducing class builds the table of the most derived type with `virtual.make` /
+  `virtual.vtablePtr(VTable, T)`;
+- a concrete class lists its C++ `override`s in `pub const overrides = .{ .castRay, ... }` (top-level
+  `pub fn`s); an abstract class keeps the bodies of its virtual functions in `pub const impl = struct
+  { ... }`. A missing pure virtual, an unlisted, private or misspelled override and a wrong signature
+  are compile errors; overrides of a concrete parent are inherited like in C++;
+- a virtual call is the dispatcher of the introducing class (`shape.castRay(...)`); C++ `Base::Foo()`
+  is `Base.impl.foo(&self.base, ...)` (abstract base) or `self.base.foo(...)` (concrete base); a
+  static `self.foo()` only in `final` classes;
+- `deinit` (destructor chain over each level's `destruct`) and `destroy` (`delete this`) are
+  generated entries; per-class constants (`rtti_name`) are data entries;
+- casts: `virtual.upcast` / `virtual.downcast`, and checked casts such as `shape.cast(SphereShape)`.
 
 **B. Pure interfaces / listeners** (`ContactListener`, `BodyActivationListener`,
 `BroadPhaseLayerInterface`, `ObjectLayerPairFilter`, `JobSystem`, ...): a type-erased fat pointer
@@ -346,6 +361,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `Swizzle<SWIZZLE_Y, SWIZZLE_X, ...>()`      | `.swizzle(.y, .x, ...)` (comptime enum parameters)          |
 | `JPH_ASSERT(x)` / `JPH_ASSERT(x, "msg")`    | `std.debug.assert(x)` (keep the message as a comment)       |
 | `JPH_ASSERT(false)` on a path that release builds can reach and handle (e.g. "too many iterations", then `return false`) | `if (Core.enable_asserts) @panic("msg");` followed by the release behavior: `assert(false)` is undefined behavior in ReleaseFast |
+| `JPH_ASSERT(cond)` that valid or degenerate input can violate, after which Jolt's release build just continues (e.g. near-zero vectors in EPA, degenerate hulls, an empty mesh) | `if (Core.enable_asserts) std.debug.assert(cond);` so that ReleaseFast keeps Jolt's release behavior instead of undefined behavior; comment why |
 | `JPH_IF_ENABLE_ASSERTS(x)`                  | `if (Core.enable_asserts) { x }`                            |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
@@ -392,12 +408,21 @@ results are reproducible as long as the code follows these rules:
     against (and what Jolt computes on x86, usually also on ARM). Known cases: `Mat44::Inversed` (SSE,
     NEON and RVV share an algorithm that differs from the fallback), `Mat44::sCrossProduct` (SSE4.1
     negates with `0 - v`, the fallback with `-x`), `Vec3/Vec4/DVec3::Abs` (SSE/AVX compute
-    `max(0 - v, v)`, which keeps -0, while the fallback, NEON and AVX512 return +0). Jolt's ISA paths
+    `max(0 - v, v)`, which keeps -0, while the fallback, NEON and AVX512 return +0), `DVec3::Dot`
+    (SSE/AVX/NEON sum `(x + y) + z`, the fallback `((0 + x) + y) + z`, which loses -0),
+    `UVec4::ToFloat` (SSE converts as signed int, NEON and the fallback as unsigned) and
+    `Vec3/Vec4::ToInt` (`_mm_cvttps_epi32` gives `0x80000000` for NaN and out of range values, where
+    Zig's `@intFromFloat` would be safety-checked / undefined: `Vec4.toInt` emulates it). Jolt's ISA paths
     sometimes disagree with each other on -0 / NaN only; the determinism hashes are identical across
     platforms, so these cases don't affect simulation results. The parity reference is pinned to
     x86-64-v3 (SSE4.2/AVX2, Jolt's default CMake ISA set, no AVX512) so that it is the same on every
     machine. Differences that only show with AVX512 on NaN input (`Vec3/DVec3::GetSign` return NaN)
     are not followed; the parity tests skip NaN there.
+12. **Float to int conversions of out-of-range or NaN values** are undefined in C++, but reachable in
+    Jolt (height field quantization, shape scales from user data). Where they are reachable, emulate
+    what Jolt's x86-64 build computes: `(int)f` is `cvttss2si` to i32 (`0x80000000` for NaN / out of
+    range), `(uint)f` is a 64-bit `cvttss2si` truncated to 32 bits (see `HeightFieldShape.zig`,
+    `Vec4.toInt`). Plain `@intFromFloat` is only for values that are in range by construction.
 
 ## 9. Threading
 
@@ -452,8 +477,8 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   `build.zig` compiles the C++ library from `Jolt/` with Zig's C++ compiler in the configuration
   Zolt follows (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `-ffp-contract=off`, same precision and layer
   bits, CPU pinned to x86-64-v3) and links it into the parity test binary. Layout mirrors `Zolt/`:
-  `ZoltParity/<Dir>/<Dir>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Dir>Reference.cpp` the
-  C ABI wrappers around Jolt; shared helpers (input generator, bit comparison, `Checker`) are in
+  `ZoltParity/<Dir>/<Name>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Name>Reference.cpp` the
+  C ABI wrappers around Jolt (one pair per ported area, e.g. `Geometry/QueriesParity.zig`); shared helpers (input generator, bit comparison, `Checker`) are in
   `ZoltParity/ParityFramework.zig`. Register test files in `ZoltParity/parity.zig` and .cpp files in
   `ZoltParity/reference_sources.zig`. For each ported function, call both implementations on ~100k
   generated inputs (random values mixed with special values) and require identical bits (NaN
@@ -461,11 +486,18 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
   unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
   queries, simulation steps) is compared the same way, e.g. by hashing body state after N steps.
-- Do not pass `bool` parameters across the C ABI in parity wrappers, use `int`: declare the
-  parameter `int inFoo` in the .cpp (use it as `inFoo != 0`) and `foo: c_int` in the `extern fn`
-  (pass `@intFromBool(foo)`). Zig 0.16 (LLVM backend) does not always zero-extend runtime `bool`
-  arguments, so the clang-compiled callee can receive 0xFE for `false` and read it as `true`.
-  `bool` return values and `bool` fields or out parameters behind a pointer are fine.
+- Parity inputs must reach every branch (degenerate, touching, parallel, coplanar, empty, full,
+  iteration limits) and compare every output, including values Jolt writes only on some paths
+  (pre-fill both sides with the same sentinel). Prove that a new parity test bites: break one
+  operation in the Zig code (swap operands, `<` → `<=`, reassociate a sum), check that the test
+  fails, revert.
+- **C ABI of the wrappers:** never pass a `bool` argument from Zig to C++. Zig 0.16 (LLVM) can pass a
+  runtime bool with garbage in bits 1..7, which optimized C++ reads as `true`. Use `c_int` (or `u32`)
+  on both sides and convert with `@intFromBool` / `!= 0`; `tools/port_status.py --check` rejects
+  `bool` parameters in `extern fn` declarations under `ZoltParity/`. Bools returned by C++ or
+  written through a `bool *` are fine (C++ always writes 0 or 1). The same applies to a future C API.
+- A test that passes must not print to stderr: Zig 0.16 marks the build step as failed when a test
+  writes to stderr. Print diagnostics only on failure.
 
 - `Zolt/zolt.zig` references every public declaration of every registered file, so all
   non-generic functions are type checked even without a test. Generic functions need a test.
@@ -489,6 +521,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   plain operators are overflow-checked in Debug/ReleaseSafe.
 - `std.math.nan(f32)` is a quiet NaN like `numeric_limits<float>::quiet_NaN()`.
 - Shifts need a right operand of the exact log2 type: `x << @intCast(n)` with `n` a `u5` for `u32`.
+- Optimized builds (ReleaseFast) fold functions with identical machine code into one address. Never
+  identify or classify functions by comparing their addresses at runtime; compare at comptime, where
+  function pointer equality is identity (see the dispatch table parity test).
 
 ## 12. Rename table
 
@@ -586,3 +621,59 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `StringToVector(str, out, delim = ",", clear = true)` / `VectorToString(v, out, delim = ",")` | `stringToVector(allocator, str, &list, .{ .delimiter, .clear_vector })` / `vectorToString(allocator, v, .{ .delimiter }) ![]u8` | default arguments, out parameter |
 | `FPControlWord<Value, Mask>` (RAII) | `const cw = FPControlWord(value, mask).init(); defer cw.deinit();` | RAII                                 |
 | `LinearCurve` copy constructor     | `clone(allocator)`                     | allocating type                         |
+| `AABox()` / `AABox(min, max)` / `AABox(DVec3, DVec3)` / `AABox(center, radius)` | `AABox.empty` / `init(min, max)` / `fromDVec3` (`fromRVec3`) / `fromCenterAndRadius` | constructor overloads |
+| `AABox::Encapsulate(AABox / Vec3 / Triangle / VertexList + IndexedTriangle)` | `encapsulate` / `encapsulateVec3` / `encapsulateTriangle` / `encapsulateIndexedTriangle` | overloads; the unsuffixed name takes the own type |
+| `AABox::Contains` / `Overlaps` / `Translate` / `Transformed` overloads | `contains`, `containsVec3`, `containsDVec3`; `overlaps`, `overlapsPlane`; `translate`, `translateDVec3`; `transformed`, `transformedDMat44` (+ `RVec3` / `RMat44` aliases) | overloads |
+| `Plane(Vec4)` / `Plane(normal, constant)` / `sFromPointAndNormal(DVec3, Vec3)` / `sIntersectPlanes(.., outPoint) -> bool` | `fromVec4` / `init` / `fromPointAndNormalDVec3` / `intersectPlanes(..) ?Vec3` | overloads, out parameter |
+| `Sphere::Overlaps(AABox)`, `OrientedBox::Overlaps(AABox, eps = 1e-6)` | `overlapsAABox`, `overlapsAABox(box, .{ .epsilon })` | overload, default argument |
+| `Triangle(v1, v2, v3, mat = 0, user = 0)`, `IndexedTriangle(i1, i2, i3, mat, user = 0)` | `init(v1, v2, v3, .{ .material_index, .user_data })` | default arguments |
+| `IndexedTriangle` used as `IndexedTriangleNoMaterial &` | `toNoMaterial()` | no inheritance (IndexedTriangle is flat) |
+| `AABox4Scale(.., 6 out bounds)`, `AABox4VsBox` overloads, `AABox4...` | `aabox4Scale(..) AABox4Bounds`, `aabox4VsBox` / `aabox4VsOrientedBox` / `aabox4VsOrientedBoxMat44`, `aabox4...` | out parameters, overloads |
+| `ClipPolyVsPlane/Poly/Edge/AABox<VERTEX_ARRAY>` | `clipPolyVs*(polygon: []const Vec3, .., out_vertices: anytype)` | see Geometry conventions |
+| `Indexify(.., inWeldDistance = 1e-4f)` / `Deindexify` | `indexify(allocator, triangles, &out_vertices, &out_triangles, .{ .vertex_weld_distance })` / `deindexify(allocator, ..)` | default argument, allocator |
+| `ClosestPoint::GetBaryCentricCoordinates(a, b, outU, outV) -> bool` / `(a, b, c, outU, outV, outW)` | `getBaryCentricCoordinates(a, b) BaryCentricLine` / `getBaryCentricCoordinatesTriangle(a, b, c) BaryCentricTriangle` (`.valid`) | overload, out parameters |
+| `GetClosestPointOnLine/Triangle/Tetrahedron(.., outSet)`, `<MustIncludeC>` | `getClosestPointOn*(..) PointAndSet{ .point, .set }`, `.{ .must_include_c = true }` | out parameter, defaulted template flag |
+| `RayAABox(.., outMin, outMax)` / `RayAABoxHits(origin, direction, ..)` / `RaySphere(.., outMin, outMax) -> int` / `RayCylinder(origin, dir, radius)` | `rayAABoxMinMax` / `rayAABoxHitsDirection` / `raySphereMinMax(..) RaySphereMinMax` / `rayInfiniteCylinder` | overloads, out parameters |
+| `TransformedConvexObject(transform, obj)` etc. (CTAD) | `TransformedConvexObject(T).init(transform, &obj)`, `AddConvexRadius(T).init(&obj, r)`, `MinkowskiDifference(A, B).init(&a, &b)` | references become pointers |
+| `ConvexHullBuilder2D(positions)` + `Initialize(.., outEdges)` / `ConvexHullBuilder(positions)` + `Initialize(max, tol, outError)` | `init(allocator, positions)` + `initialize(..) !Result`; `initialize(max, tol) !InitializeResult{ .result, .error_message }` | constructor + Init, out parameter |
+| `ConvexHullBuilder::GetCenterOfMassAndVolume` / `DetermineMaxError` (out parameters) | `getCenterOfMassAndVolume() CenterOfMassAndVolume` / `determineMaxError() MaxError` | out parameters |
+| `GJKClosestPoint::CastShape(.., radiusA, radiusB, ..)` | `castShapeWithConvexRadius` | overload |
+| `GetClosestPointsSimplex(outY, outP, outQ, outNumPoints)` | `getClosestPointsSimplex(out_y, out_p, out_q) u32` | out parameter becomes the return value |
+| GJK/EPA in/out values (`ioV`, `ioLambda`, `outPointA`, ...) | stay pointer parameters (`v`, `io_lambda`, `point_a`, ...) | Jolt writes them only on some paths and callers rely on the old values |
+| `EPAPenetrationDepth::EStatus` / `ConvexHullBuilder::EResult` | `Status` / `Result` (snake_case values) | enum naming |
+| `EPAConvexHullBuilder::Points::GetSizeRef()` | `&points.len` (`Points = StaticArray(Vec3, max_points)`) | no methods can be added to an existing type |
+| `TriangleSplitter::Split(.., outLeft, outRight) -> bool` | `split(triangles) ?SplitResult` | out parameters |
+| `TriangleSplitterBinning(.., minBins = 8, maxBins = 128, perBin = 6)`, `AABBTreeBuilder(splitter, maxPerLeaf = 16)` | `init(allocator, .., .{ .min_num_bins, .. })`, `init(splitter, .{ .max_triangles_per_leaf })` | default arguments |
+| `AABBTreeToBuffer<TriangleCodec, NodeCodec>::Convert(.., outError) -> bool` | `AABBTreeToBuffer(T, N).convert(allocator, ..) Error!void` + `errorMessage(err)` (Jolt's text) | error strings become error sets |
+| codec `DecodingContext::Unpack` / `GetTriangle` / `TestRay` / `sGetFlags` overloads | `unpackWithFlags`, `getTriangle(..) TriangleVertices`, `testRay(..) TestRayResult`, `getFlags` / `getTriangleFlags` | overloads, out parameters |
+| `WalkTree` visitor `VisitNodes` / `VisitTriangles` / `ShouldAbort` / `ShouldVisitNode` | `visitNodes` / `visitTriangles` / `shouldAbort` / `shouldVisitNode` on an `anytype` visitor pointer | template visitor |
+| `BodyID(id, sequence)` / `operator<` / `operator>` / `JPH_MAKE_HASHABLE` | `BodyID.fromIndexAndSequenceNumber` / `lessThan` / `greaterThan` / `getHash()` | constructor overload, operators |
+| `SubShapeID()` / `PopID(bits, outRemainder)` | `.empty` / `popID(bits) PopResult{ .id, .remainder }` | default constructor, out parameter |
+| `RayCast` / `RRayCast` (CRTP), `RRayCast(const RayCast &)` / `explicit operator RayCast()` | `RayCastT(Vec, Mat, kind)`; distinct types in both precisions; `fromRayCast` / `toRayCast` (same for `ShapeCast` / `RShapeCast`) | templates, conversions |
+| `cObjectLayerInvalid`, `cBroadPhaseLayerInvalid`, `PhysicsSettings.h` constants | `object_layer_invalid`, `broad_phase_layer_invalid`, `zolt.physics_settings.default_collision_tolerance`, ... | constants |
+| `MassProperties::DecomposePrincipalMomentsOfInertia(outRotation, outDiagonal) -> bool` | `decomposePrincipalMomentsOfInertia() ?PrincipalMomentsOfInertia` | out parameters |
+| `PhysicsMaterial::sDefault`, `sRestoreFromBinaryState(stream)`, `GetRTTI()->GetHash()` | `PhysicsMaterial.default` (static constant), `restoreFromBinaryState(allocator, stream) !PhysicsMaterialResult`, `getRTTIHash()` | global, RTTI |
+| `Result<T>` copy / assign / move, `SetError(StringFormat(...))` | `clone()` / `assign(&other)` / `assignMove(other)`, `setErrorFmt(fmt, args)` | copy semantics |
+| `Shape::CastRay(ray, settings, creator, collector, filter)` (collector overload) | `castRayCollector` (also on `TransformedShape`) | overload |
+| `Shape::GetLeafShape` / `GetSubShapeTransformedShape` / `GetSubmergedVolume` out parameters | returned `LeafShape`, `SubShapeTransformedShape`, `SubmergedVolume` structs | out parameters |
+| `Shape::sRestoreFromBinaryState` / `sRestoreWithChildren`, `GetWorldSpaceBounds(DMat44)` | `restoreFromBinaryState(allocator, stream)` / `restoreWithChildren`, `getWorldSpaceBoundsDMat44` | static, overload |
+| `CollisionDispatch::sCollideShapeVsShape` / `sCastShapeVsShape*` / `sRegister*` | `collideShapeVsShape` / `castShapeVsShape*` / comptime `Registry.registerCollideShape` ... in each type's `register(comptime r)` | global tables become a comptime registry |
+| `ConvexShape::GetMaterial()` (non-virtual), `ESupportMode` | `getConvexMaterial()`, `SupportMode` | clashes with the virtual `getMaterial(sub_shape_id)` |
+| `XShapeSettings(args, convexRadius = .., material = nullptr)` | `init(allocator, args, .{ .convex_radius, .material })` / `create(...)`; shapes add `initDefault` / `initFromSettings` | default arguments, constructors |
+| `CompoundShapeSettings::AddShape(pos, rot, const ShapeSettings * / const Shape *, userData = 0)` | `addShape(pos, rot, ?*ShapeSettings, .{ .user_data })` / `addShapePtr(pos, rot, ?*const Shape, .{ .user_data })` | overloads |
+| `CompoundShape::GetIntersectingSubShapes(AABox / OrientedBox, uint *, int)` / `GetSubShapeIndexFromID(id, outRemainder)` | `getIntersectingSubShapes(box, []u32) u32` / `getIntersectingSubShapesOrientedBox` / `getSubShapeIndexFromID(id) SubShapeIndex` | overloads, out parameter |
+| `CollisionGroup::sInvalid` / copy / `operator==`, `GroupFilterTable(numSubGroups = 0)` | `CollisionGroup.invalid` / `clone()` / `eql`, `GroupFilterTable.init(allocator, .{ .num_sub_groups })` | value type with a reference, default argument |
+| `ContactListener` virtual callbacks, `ValidateResult::AcceptAllContactsForThisBodyPair` | pattern B `ContactListener.init(&impl)` with optional callbacks, `ValidateResult.accept_all_contacts_for_this_body_pair` | interface |
+| `PolyhedronSubmergedVolumeCalculator(transform, const Vec3 *, stride, count, surface, buffer)` | `init(transform, StridedPtrConst(Vec3), num_points, surface, []Point)` | pointer + stride, buffer slice |
+| `ScaledShapeSettings` / `RotatedTranslatedShapeSettings` / `OffsetCenterOfMassShapeSettings`(..., `const ShapeSettings *` / `const Shape *`) | `init` / `initPtr` (+ `create` / `createPtr`) | overloads |
+| `Shape::ScaleShape(scale)`, `MutableCompoundShape::Clone()`, `HeightFieldShape::Clone()` | `scaleShape(allocator, scale) !ShapeResult`, `clone(allocator)` | allocating |
+| `MutableCompoundShape::AddShape(pos, rot, shape, userData, index)` / `ModifyShape(.., shape)` / `ModifyShapes(.., Vec3 *, Quat *, strides)` | `addShape(pos, rot, shape, .{ .user_data, .index }) !u32` / `modifyShapeWithShape` / `modifyShapes(.., StridedPtrConst(Vec3), StridedPtrConst(Quat))` | default arguments, overload, pointer + stride |
+| `StaticCompoundShapeSettings::Create(TempAllocator &)` | `createShapeWithTempAllocator(allocator, temp_allocator)` | overload |
+| `XShape::GetMaterial()` (non-virtual: Convex, Plane), `HeightFieldShape::GetMaterial(x, y)` | `getConvexMaterial()`, `getPlaneMaterial()`, `getMaterialAt(x, y)` | clash with the virtual `getMaterial(sub_shape_id)` |
+| `InternalEdgeRemovingCollector(chained, toleranceSq)` / `sCollideShapeVsShape`, `CollideShapeVsShapePerLeaf<LeafCollector>` | in place `c.init(chained, tolerance_sq, allocator)` + `deinit` + `checkError` / `collideShapeVsShape(allocator, ..) !void`, `collideShapeVsShapePerLeaf(LeafCollector, allocator, ..) !void` | local buffers with heap fallback |
+| `ConvexHullShapeSettings(const Vec3 *, int, maxConvexRadius, material)` / `(const Array<Vec3> &, ...)`, `GetFaceVertices(face, max, uint *)` | `init(allocator, points: []const Vec3, .{ .max_convex_radius, .material })`, `getFaceVertices(face, out_vertices: []u32) u32` | overloads, pointer + count |
+| `MeshShapeSettings::Sanitize()`, `sFindActiveEdges`, `DecodeSubShapeID(id, outBlock, outIndex)`, `GetMaterialList()` | `sanitize() !void`, `findActiveEdges(allocator, ..)`, `decodeSubShapeID(id) DecodedSubShapeID`, `getMaterialList() []const PhysicsMaterialRefC` | allocating, out parameters |
+| `HeightFieldShape::GetHeights` / `SetHeights` / `GetMaterials` / `SetMaterials` (`float *` / `uint8 *`, `intptr_t` stride, `TempAllocator &`) | `[*]f32` / `[*]u8` plus `isize` stride, `temp_allocator` parameter | raw strided buffers as in Jolt |
+| `HeightFieldShape::ProjectOntoSurface(pos, outPos, outID) -> bool`, `GetSubShapeCoordinates(id, outX, outY, outTri)`, `HeightFieldShapeConstants::c*` | `projectOntoSurface(pos) ?SurfacePosition`, `getSubShapeCoordinates(id) SubShapeCoordinates`, `HeightFieldShapeConstants.no_collision_value` ... | out parameters, constants |
+| `PlaneShape::GetVertices(Vec3 *)`, `sPlaneGetOrthogonalBasis(n, outP1, outP2)` | `getVertices() [4]Vec3`, `planeGetOrthogonalBasis(n) OrthogonalBasis` | out parameters |
+| `Vec3::sUnitSphere` (static initializer) | `Vec3.unit_sphere` (comptime `StaticArray(Vec3, 1026)`) | static initializer |

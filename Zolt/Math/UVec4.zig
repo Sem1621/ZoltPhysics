@@ -199,7 +199,10 @@ pub const UVec4 = extern struct {
 
     /// Convert each component from an int to a float
     pub fn toFloat(self: UVec4) Vec4 {
-        return .{ .value = @floatFromInt(self.value) };
+        // Jolt's SSE path (_mm_cvtepi32_ps) converts the components as signed integers, while its NEON and scalar
+        // paths convert them as unsigned. They differ for components >= 0x80000000; Zolt follows SSE (guide section 8)
+        const signed: @Vector(4, i32) = @bitCast(self.value);
+        return .{ .value = @floatFromInt(signed) };
     }
 
     /// Reinterpret UVec4 as a Vec4 (doesn't change the bits)

@@ -406,11 +406,15 @@ pub const Vec4 = extern struct {
         out.* = .{ .x = self.value[0], .y = self.value[1], .z = self.value[2], .w = self.value[3] };
     }
 
-    /// Convert each component from a float to an int (truncating, like _mm_cvttps_epi32).
-    /// Components must be in the range of an i32, this is safety checked in Debug and ReleaseSafe.
+    /// Convert each component from a float to an int (truncating).
+    /// Follows Jolt's SSE path (_mm_cvttps_epi32): NaN and components outside the range of an i32 give 0x80000000.
     pub fn toInt(self: Vec4) UVec4 {
-        const as_int: @Vector(4, i32) = @intFromFloat(self.value);
-        return .{ .value = @bitCast(as_int) };
+        // @intFromFloat is undefined for these components (a safety panic for finite values, LLVM poison for NaN),
+        // so only convert the components in range and select 0x80000000 for the others. The comparisons are false for NaN.
+        const v = self.value;
+        const in_range = (v >= @as(Type, @splat(-2147483648.0))) & (v < @as(Type, @splat(2147483648.0)));
+        const as_int: @Vector(4, i32) = @intFromFloat(@select(f32, in_range, v, @as(Type, @splat(0.0))));
+        return .{ .value = @bitCast(@select(i32, in_range, as_int, @as(@Vector(4, i32), @splat(std.math.minInt(i32))))) };
     }
 
     /// Reinterpret Vec4 as a UVec4 (doesn't change the bits)
