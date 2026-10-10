@@ -1,7 +1,5 @@
 //! Port of: Jolt/Physics/Collision/Shape/Shape.h, Jolt/Physics/Collision/Shape/Shape.cpp
-//! Status: partial
-//! Missing: scaleShape (needs ScaledShape (Wave A) and StaticCompoundShape (Wave B): ported together with
-//!   StaticCompoundShape, which then sets this file's status to complete)
+//! Status: complete
 //!
 //! Architecture (Docs/Zolt/CollisionArchitecture.md):
 //! - D1 `Shape` is the root of pattern A: `vtable`, the atomic `ref_count`, the `allocator` that frees the shape and its
@@ -35,6 +33,8 @@
 //!   `out_materials: ?[]*const PhysicsMaterial` (D10). Counts are u32.
 //! - `GetStatsRecursive(VisitedShapes &)` inserts into a hash set, so it takes an allocator and returns
 //!   `Allocator.Error!Stats`. `SaveMaterialState` / `SaveSubShapeState` append to lists: allocator + error union.
+//! - `ScaleShape(inScale)` creates shapes: `scaleShape(allocator, scale) Allocator.Error!ShapeResult` (the new
+//!   ScaledShape / StaticCompoundShape and the compound's settings use `allocator`).
 //! - `sRestoreFromBinaryState` validates the sub shape type read from the stream (Jolt indexes the table with it and
 //!   calls a null `mConstruct`): an invalid value or a type without constructor is "Failed to read type id".
 //! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace, sDrawSubmergedVolumes and the
@@ -86,6 +86,10 @@ const ShapeCastResult = @import("../ShapeCast.zig").ShapeCastResult;
 const ShapeFilter = @import("../ShapeFilter.zig").ShapeFilter;
 const TransformedShape = @import("../TransformedShape.zig").TransformedShape;
 const CollideSoftBodyVertexIterator = @import("../CollideSoftBodyVertexIterator.zig").CollideSoftBodyVertexIterator;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const ScaledShape = @import("ScaledShape.zig").ScaledShape;
+const StaticCompoundShapeSettings = @import("StaticCompoundShape.zig").StaticCompoundShapeSettings;
 
 pub const CastRayCollector = CollisionCollector(RayCastResult, CollisionCollectorFile.CollisionCollectorTraitsCastRay);
 pub const CastShapeCollector = CollisionCollector(ShapeCastResult, CollisionCollectorFile.CollisionCollectorTraitsCastShape);
@@ -726,7 +730,54 @@ pub const Shape = struct {
         self.vtable.transformShape(self, center_of_mass_transform, collector);
     }
 
-    // ScaleShape: not ported yet (needs ScaledShape / StaticCompoundShape), see the file header
+    /// Scale this shape. Note that not all shapes support all scales, this will return a shape that matches the scale as accurately as possible. See Shape::IsValidScale for more information.
+    /// @param allocator Creates the new shapes (a ScaledShape or a StaticCompoundShape of the scaled leaf shapes)
+    /// @param scale The scale to use for this shape (note: this scale is applied to the entire shape in the space it was created, most other functions apply the scale in the space of the leaf shapes and from the center of mass!)
+    pub fn scaleShape(self: *const Shape, allocator: Allocator, scale: Vec3) Allocator.Error!ShapeResult {
+        const unit_scale = Vec3.one();
+
+        if (scale.isNearZero(.{})) {
+            var result: ShapeResult = .empty;
+            result.setError("Can't use zero scale!");
+            return result;
+        }
+
+        // First test if we can just wrap this shape in a scaled shape
+        if (self.isValidScale(scale)) {
+            // Test if the scale is near unit
+            var result: ShapeResult = .empty;
+            if (scale.isClose(unit_scale, .{}))
+                result.set(.init(@constCast(self))) // Jolt's const_cast: only the reference count is written through it
+            else
+                result.set(.init((try ScaledShape.create(allocator, self, scale)).asShapeMut()));
+            return result;
+        }
+
+        // Collect the leaf shapes and their transforms
+        var collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
+        defer collector.deinit();
+        self.transformShape(Mat44.scaleVec3(scale).mul(Mat44.translation(self.getCenterOfMass())), &collector.base);
+        try collector.checkError();
+
+        // Construct a compound shape
+        var compound = StaticCompoundShapeSettings.init(allocator);
+        defer compound.deinit();
+        try compound.base.sub_shapes.ensureTotalCapacity(allocator, collector.hits.items.len);
+        for (collector.hits.items) |*ts| {
+            var shape = RefConst(Shape).init(ts.shape.get().?);
+            defer shape.deinit();
+
+            // Construct a scaled shape if scale is not unit
+            const shape_scale = ts.getShapeScale();
+            if (!shape_scale.isClose(unit_scale, .{}))
+                shape.set((try ScaledShape.create(allocator, shape.get().?, shape_scale)).asShape());
+
+            // Add the shape
+            try compound.base.addShapePtr(ts.shape_position_com.toVec3().sub(ts.shape_rotation.mulVec3(shape.get().?.getCenterOfMass())), ts.shape_rotation, shape.get(), .{});
+        }
+
+        return compound.asShapeSettings().createShape(allocator);
+    }
 
     /// To start iterating over triangles, call this function first.
     /// context is a temporary buffer and should remain untouched until the last call to GetTrianglesNext.
@@ -1221,8 +1272,6 @@ const TestSphereShape = TestShapes.TestSphereShape;
 const TestCompoundShape = TestShapes.TestCompoundShape;
 const TestMaterial = TestShapes.TestMaterial;
 const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
-const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
-const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
 const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
 const BodyID = @import("../../Body/BodyID.zig").BodyID;
 const math = @import("../../../Math/Math.zig");
