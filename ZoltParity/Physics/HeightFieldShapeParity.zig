@@ -20,7 +20,16 @@
 //! CollideSoftBodyVertices, SetHeights (patches with holes, strides, active edge thresholds; then the state, the
 //! heights and ray casts) and SetMaterials (new lists, the 256 material limit, null lists; then the state, the
 //! material list and the material indices). GetSubmergedVolume is not compared: Jolt asserts and leaves its out
-//! parameters untouched. C ABI wrappers: ZoltParity/Physics/HeightFieldShapeReference.cpp.
+//! parameters untouched. Collide / cast height field vs height field is unsupported in Jolt (no dispatch function).
+//!
+//! Inputs where Jolt has undefined behavior are not generated: the Clone of a height field without collision (Jolt
+//! copies from a null buffer), the walking queries on height fields whose empty range blocks collapse to a valid box
+//! (`walksOutside`: Jolt then walks blocks outside the height field) and a negative or zero Y scale in the settings
+//! (same effect), CalculateBitsPerSampleForError with a sample count that is not a multiple of the block size (reads
+//! beyond the samples). GetTrianglesNext is compared for at most `max_calls` calls: with a block that has more
+//! triangles than requested, Jolt returns the same triangles forever.
+//!
+//! C ABI wrappers: ZoltParity/Physics/HeightFieldShapeReference.cpp.
 
 const std = @import("std");
 const zolt = @import("zolt");

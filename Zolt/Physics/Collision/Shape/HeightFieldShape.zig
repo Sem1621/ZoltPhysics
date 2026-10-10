@@ -47,6 +47,18 @@
 //!   shift `1 << mBitsPerSample` of an invalid number of bits per sample uses the x86 shift count (mod 32), and `clone`
 //!   of a height field without collision (no buffers) does not copy from a null buffer (the clone has no collision
 //!   either).
+//! - Jolt behaviors that are kept as they are (found while comparing with Jolt, see the tests):
+//!   - GetTrianglesNext restarts the block in which the output buffer became full, so triangles can be returned more
+//!     than once, and a block with more triangles than requested (block size 5 or more with 32 triangles requested)
+//!     is returned again and again: the walk never finishes.
+//!   - An empty range block (min 0xffff, max 0) is skipped because its Y bounds are inside out. When
+//!     offset.y + scale.y * 65535 == offset.y in float (a flat height field far from the origin) these bounds collapse
+//!     to a valid box and the walker visits blocks outside the height field when the number of blocks is not a power
+//!     of 2: Jolt reads beyond its grid and samples (undefined behavior), Zolt's safe builds assert like JPH_ASSERT.
+//!     The same happens for a negative or zero scale.y in the settings.
+//!   - Settings with more than one material and no material indices read beyond the material indices
+//!     (StoreMaterialIndices), CalculateBitsPerSampleForError reads beyond the samples when the sample count is not a
+//!     multiple of the block size: an index out of bounds in Zolt's safe builds.
 //! - JPH_DEBUG_RENDERER (Draw, sDrawTriangleOutlines and the cached debug geometry) is not ported yet:
 //!   TODO(debug_renderer).
 
