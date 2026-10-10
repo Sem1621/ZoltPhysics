@@ -2030,6 +2030,176 @@ test "ConvexHullShape: GetTrianglesStart / Next (blocks, inside out scales, mate
     }
 }
 
+// The cases of Jolt's shared shape tests that only need the convex hull (also ported with their original names in
+// ZoltTests/Physics by the integration of all shapes): TestConvexHullShape and TestEmbeddedShape (ShapeTests.cpp),
+// TestCast2DBoxVsBox (CastShapeTests.cpp), BoxVsConvexHullNoConvexRadius (CollideShapeTests.cpp)
+
+test "ConvexHullShape: Jolt's TestConvexHullShape (center of mass, mass and inertia of a box)" {
+    const allocator = testing.allocator;
+    const density: f32 = 1.5;
+
+    // Create convex hull shape of a box
+    const box = [_]Vec3{ Vec3.init(5, 6, 7), Vec3.init(5, 6, 14), Vec3.init(5, 12, 7), Vec3.init(5, 12, 14), Vec3.init(10, 6, 7), Vec3.init(10, 6, 14), Vec3.init(10, 12, 7), Vec3.init(10, 12, 14) };
+    var settings = try ConvexHullShapeSettings.init(allocator, &box, .{});
+    defer settings.deinit();
+    settings.base.setDensity(density);
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+
+    // Validate calculated center of mass
+    try testing.expect(shape.getCenterOfMass().isClose(Vec3.init(7.5, 9.0, 10.5), .{ .max_dist_sq = 1.0e-10 }));
+
+    // Calculate reference value of mass and inertia of a box
+    var reference: MassProperties = .{};
+    reference.setMassAndInertiaOfSolidBox(Vec3.init(5, 6, 7), density);
+
+    // Mass is easy to calculate, double check if SetMassAndInertiaOfSolidBox calculated it correctly
+    try testing.expectApproxEqAbs(@as(f32, 5.0 * 6.0 * 7.0 * density), reference.mass, 1.0e-6);
+
+    // Get calculated inertia tensor
+    const m = shape.getMassProperties();
+    try testing.expectApproxEqAbs(reference.mass, m.mass, 1.0e-6);
+    try testing.expect(m.inertia.isClose(reference.inertia, .{ .max_dist_sq = 1.0e-8 }));
+
+    // Check inner radius
+    try testing.expectApproxEqAbs(@as(f32, 2.5), shape.getInnerRadius(), 1.0e-6);
+}
+
+test "ConvexHullShape: Jolt's TestEmbeddedShape (a hull constructed on the stack)" {
+    const allocator = testing.allocator;
+
+    {
+        // Test shape constructed on stack, where shape construction succeeds
+        var settings = ConvexHullShapeSettings.initDefault(allocator);
+        defer settings.deinit();
+        for ([_]Vec3{ Vec3.zero(), Vec3.init(1, 0, 0), Vec3.init(0, 1, 0), Vec3.init(0, 0, 1) }) |p|
+            try settings.points.append(allocator, p);
+        var result: ShapeResult = .empty;
+        defer result.deinit();
+        var shape = ConvexHullShape.initDefault(allocator);
+        try shape.initFromSettings(&settings, &result, allocator);
+        shape.asShape().setEmbedded();
+        defer shape.asShapeMut().deinit();
+        try testing.expect(result.isValid());
+        result.clear(); // Release the reference from the result
+
+        // Test CollidePoint for this shape
+        var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer collector.deinit();
+        shape.asShape().collidePoint(Vec3.replicate(-0.1).sub(shape.getCenterOfMass()), .{}, &collector.base, &.{});
+        try testing.expectEqual(@as(usize, 0), collector.hits.items.len);
+        shape.asShape().collidePoint(Vec3.replicate(0.1).sub(shape.getCenterOfMass()), .{}, &collector.base, &.{});
+        try collector.checkError();
+        try testing.expectEqual(@as(usize, 1), collector.hits.items.len);
+    }
+
+    {
+        // Test shape constructed on stack, where shape construction fails
+        var settings = ConvexHullShapeSettings.initDefault(allocator);
+        defer settings.deinit();
+        var result: ShapeResult = .empty;
+        defer result.deinit();
+        var shape = ConvexHullShape.initDefault(allocator);
+        try shape.initFromSettings(&settings, &result, allocator);
+        shape.asShape().setEmbedded();
+        defer shape.asShapeMut().deinit();
+        try testing.expect(!result.isValid());
+    }
+}
+
+test "ConvexHullShape: Jolt's TestCast2DBoxVsBox (a flat hull cast against a box hull)" {
+    const allocator = testing.allocator;
+    const CollisionDispatch = @import("../CollisionDispatch.zig");
+    const ShapeCastFile = @import("../ShapeCast.zig");
+    const ClosestHitCollisionCollector = CollisionCollectorImpl.ClosestHitCollisionCollector;
+
+    const size: f32 = 5.0;
+    const thickness: f32 = 1.0;
+    var box_settings = try ConvexHullShapeSettings.init(allocator, &.{
+        Vec3.init(-size, -size, thickness),  Vec3.init(size, -size, thickness),  Vec3.init(size, size, thickness),  Vec3.init(-size, size, thickness),
+        Vec3.init(-size, -size, -thickness), Vec3.init(size, -size, -thickness), Vec3.init(size, size, -thickness), Vec3.init(-size, size, -thickness),
+    }, .{ .max_convex_radius = 0.0 });
+    defer box_settings.deinit();
+    var box_result = try box_settings.asShapeSettings().createShape(allocator);
+    defer box_result.deinit();
+
+    const cast_size: f32 = 1.0;
+    var cast_settings = try ConvexHullShapeSettings.init(allocator, &.{ Vec3.init(-cast_size, -cast_size, 0), Vec3.init(cast_size, -cast_size, 0), Vec3.init(cast_size, cast_size, 0), Vec3.init(-cast_size, cast_size, 0) }, .{ .max_convex_radius = 0.0 });
+    defer cast_settings.deinit();
+    var cast_result = try cast_settings.asShapeSettings().createShape(allocator);
+    defer cast_result.deinit();
+
+    // The 2d box cast touches the surface of the box at the start and moves into it
+    var settings: ShapeCastFile.ShapeCastSettings = .{};
+    settings.return_deepest_point = true;
+    const shape_cast = ShapeCastFile.ShapeCast.init(cast_result.getPtr().?, Vec3.one(), Mat44.translation(Vec3.init(0, 0, 1)), Vec3.init(0, 0, -10));
+    var collector = ClosestHitCollisionCollector(ShapeFile.CastShapeCollector).init();
+    defer collector.deinit();
+    CollisionDispatch.castShapeVsShapeLocalSpace(&shape_cast, &settings, box_result.getPtr().?, Vec3.one(), &.{}, Mat44.identity(), .{}, .{}, &collector.base);
+
+    try testing.expect(collector.hadHit());
+    try testing.expectEqual(@as(f32, 0.0), collector.hit.fraction);
+    try testing.expect(collector.hit.base.penetration_axis.normalized().isClose(Vec3.init(0, 0, -1), .{}));
+    try testing.expectApproxEqAbs(@as(f32, 0.0), collector.hit.base.penetration_depth, 1.0e-6);
+    try testing.expect(collector.hit.base.contact_point_on1.isClose(Vec3.init(0, 0, 1), .{ .max_dist_sq = 1.0e-8 }));
+    try testing.expect(collector.hit.base.contact_point_on2.isClose(Vec3.init(0, 0, 1), .{ .max_dist_sq = 1.0e-8 }));
+}
+
+test "ConvexHullShape: Jolt's BoxVsConvexHullNoConvexRadius (collide a box with a hull while rotating)" {
+    const allocator = testing.allocator;
+    const CollisionDispatch = @import("../CollisionDispatch.zig");
+    const CollideShapeSettings = @import("../CollideShape.zig").CollideShapeSettings;
+    const ClosestHitCollisionCollector = CollisionCollectorImpl.ClosestHitCollisionCollector;
+    const BoxShapeSettings = @import("BoxShape.zig").BoxShapeSettings;
+
+    const separation_distance: f32 = 0.001;
+    const box_separation_from_hull: f32 = 0.5 * separation_distance;
+    const hull_height: f32 = 0.25;
+
+    // Box with no convex radius
+    var box_settings = BoxShapeSettings.init(allocator, Vec3.init(0.25, 0.75, 0.375), .{ .convex_radius = 0.0 });
+    defer box_settings.deinit();
+    var box_result = try box_settings.asShapeSettings().createShape(allocator);
+    defer box_result.deinit();
+
+    // Convex hull (also a box) with no convex radius
+    const hull_points = [_]Vec3{
+        Vec3.init(-2.5, -hull_height, -1.5), Vec3.init(-2.5, hull_height, -1.5), Vec3.init(2.5, -hull_height, -1.5), Vec3.init(-2.5, -hull_height, 1.5),
+        Vec3.init(-2.5, hull_height, 1.5),   Vec3.init(2.5, hull_height, -1.5),  Vec3.init(2.5, -hull_height, 1.5),  Vec3.init(2.5, hull_height, 1.5),
+    };
+    var hull_settings = try ConvexHullShapeSettings.init(allocator, &hull_points, .{ .max_convex_radius = 0.0 });
+    defer hull_settings.deinit();
+    var hull_result = try hull_settings.asShapeSettings().createShape(allocator);
+    defer hull_result.deinit();
+
+    var angle: f32 = 0.0;
+    for (0..481) |_| {
+        // Slowly rotate both box and convex hull
+        angle += math.degreesToRadians(45.0) / 60.0;
+        const hull_transform = Mat44.rotationY(angle);
+        const box_local_translation = Mat44.translation(Vec3.init(0.1, 1.0 + box_separation_from_hull, -0.5));
+        const box_local_rotation = Mat44.rotationY(math.degreesToRadians(-45.0));
+        const box_local_transform = box_local_translation.mul(box_local_rotation);
+        const box_transform = hull_transform.mul(box_local_transform);
+
+        var settings: CollideShapeSettings = .{};
+        settings.max_separation_distance = separation_distance;
+        var collector = ClosestHitCollisionCollector(ShapeFile.CollideShapeCollector).init();
+        defer collector.deinit();
+        CollisionDispatch.collideShapeVsShape(box_result.getPtr().?, hull_result.getPtr().?, Vec3.one(), Vec3.one(), box_transform, hull_transform, .{}, .{}, &settings, &collector.base, &.{});
+
+        // Check that there was a hit and that the contact normal is correct
+        try testing.expect(collector.hadHit());
+        const hit = &collector.hit;
+        try testing.expectApproxEqAbs(hull_height + box_separation_from_hull, hit.contact_point_on1.getY(), 1.0e-3);
+        try testing.expectApproxEqAbs(hull_height, hit.contact_point_on2.getY(), 1.0e-6);
+        try testing.expect(hit.penetration_axis.normalizedOr(Vec3.zero()).isClose(Vec3.axisY().negate(), .{ .max_dist_sq = 1.0e-6 }));
+    }
+
+    try testing.expect(angle >= 2.0 * math.pi);
+}
+
 test "ConvexHullShape: binary state, restoreFromBinaryState and the registration" {
     const allocator = testing.allocator;
 
