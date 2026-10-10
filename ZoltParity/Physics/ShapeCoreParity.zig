@@ -1127,8 +1127,17 @@ test "ShapeCore parity: CollisionDispatch and ShapeFunctions tables (Jolt's Regi
     jolt.jolt_dispatch_tables(mask, &jolt_collide, &jolt_cast, &jolt_construct, &jolt_color);
 
     const registry = &RegisterTypes.registry;
-    const zolt_collide = tableNames(CollisionDispatch.CollideShape, &registry.collide_shape, &CollisionDispatch.collideUnsupported, &CollisionDispatch.reversedCollideShape);
-    const zolt_cast = tableNames(CollisionDispatch.CastShape, &registry.cast_shape, &CollisionDispatch.castUnsupported, &CollisionDispatch.reversedCastShape);
+    // Named at compile time: the registry is comptime, and comptime function pointer equality is function identity.
+    // At runtime an optimized build can fold functions with identical machine code to one address (ReleaseFast did),
+    // which would give two different functions the same name.
+    const zolt_collide = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        break :blk tableNames(CollisionDispatch.CollideShape, &RegisterTypes.registry.collide_shape, &CollisionDispatch.collideUnsupported, &CollisionDispatch.reversedCollideShape);
+    };
+    const zolt_cast = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        break :blk tableNames(CollisionDispatch.CastShape, &RegisterTypes.registry.cast_shape, &CollisionDispatch.castUnsupported, &CollisionDispatch.reversedCastShape);
+    };
     var zolt_construct: [num_sub_shape_types]c_int = undefined;
     var zolt_color: [num_sub_shape_types]u32 = undefined;
     for (registry.shape_functions, 0..) |f, i| {
