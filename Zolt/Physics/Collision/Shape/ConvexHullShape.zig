@@ -13,6 +13,14 @@
 //! - `CHSGetTrianglesContext` is constructed in the caller's GetTrianglesContext (D10).
 //! - JPH_STACK_ALLOC in GetSubmergedVolume is a fixed array of `max_points_in_hull` entries (the number of points is at
 //!   most that, checked at creation).
+//! - The asserts that degenerate point clouds can violate (`mPoints.size() <= 0xff` while remapping the vertices, Jolt's
+//!   release build truncates and rejects the hull afterwards, and `offset > 1.0f` in the convex radius reduction) are
+//!   only checked with `Core.enable_asserts` (porting guide section 7). The hull builder has three such asserts of its
+//!   own (see `ConvexHullBuilder.initialize`).
+//! - CastRayHelper of a flat hull (2 faces) starts its edge loop at `mPoints[*end_vtx]`, the first vertex of the second
+//!   face, not at the last vertex of the first face. This is ported as is (for a hull of 3 points the edge from the
+//!   last vertex back to the first one is not tested, see the inline test).
+//! - GetStats reports Zolt's struct sizes (they differ from C++, see CollisionArchitecture.md section 8).
 //! - JPH_DEBUG_RENDERER (Draw, DrawShrunkShape, sDrawFaceOutlines, mGeometry, the drawing of the center of buoyancy and
 //!   the `inBaseOffset` parameter of GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
 //!
