@@ -429,6 +429,12 @@ struct CollideInput
 	uint32					mRejectModulus;			// The filter (0: rejects nothing)
 	int						mInternalEdgeRemoval;	// Use InternalEdgeRemovingCollector::sCollideShapeVsShape
 	float					mVertexToleranceSq;		// mInternalEdgeRemovalVertexToleranceSq
+	int						mViaTransformedShape;	// Collide through TransformedShape::CollideShape (shape 2 is the transformed shape)
+	float					mRotation1[4];
+	float					mRotation2[4];
+	double					mPosition1[3];
+	double					mPosition2[3];
+	double					mBaseOffset[3];
 };
 
 struct CastInput
@@ -456,6 +462,12 @@ struct CastInput
 	float					mEarlyOut;				// Early out fraction of the collector (when < 1 + FLT_EPSILON)
 	uint32					mBodyID;
 	uint32					mRejectModulus;
+	int						mViaTransformedShape;	// Cast through TransformedShape::CastShape (shape 2 is the transformed shape)
+	float					mStartRotation[4];
+	float					mRotation2[4];
+	double					mStartPosition[3];
+	double					mPosition2[3];
+	double					mBaseOffset[3];
 };
 
 struct TransformedShapeInput
@@ -675,7 +687,13 @@ uint32 pw_collide(void *inCatalogue, const CollideInput *inInput, uint32 *outDat
 	RunWithCollector<CollideShapeCollector>(out, in.mCollector, in.mEarlyOut, &context,
 		[&](const CollideShapeResult &inHit) { WriteCollideHit(out, inHit); },
 		[&](CollideShapeCollector &ioCollector) {
-			if (in.mInternalEdgeRemoval != 0)
+			if (in.mViaTransformedShape != 0)
+			{
+				TransformedShape ts(LoadR3(in.mPosition2), LoadQuat(in.mRotation2), shape2, BodyID(in.mBodyID), MakeCreator(in.mCreator2));
+				ts.SetShapeScale(Load3(in.mScale2));
+				ts.CollideShape(shape1, Load3(in.mScale1), RMat44::sRotationTranslation(LoadQuat(in.mRotation1), LoadR3(in.mPosition1)), settings, LoadR3(in.mBaseOffset), ioCollector, filter);
+			}
+			else if (in.mInternalEdgeRemoval != 0)
 				InternalEdgeRemovingCollector::sCollideShapeVsShape(shape1, shape2, Load3(in.mScale1), Load3(in.mScale2), LoadMat44(in.mTransform1), LoadMat44(in.mTransform2), MakeCreator(in.mCreator1), MakeCreator(in.mCreator2), settings, ioCollector, filter);
 			else
 				CollisionDispatch::sCollideShapeVsShape(shape1, shape2, Load3(in.mScale1), Load3(in.mScale2), LoadMat44(in.mTransform1), LoadMat44(in.mTransform2), MakeCreator(in.mCreator1), MakeCreator(in.mCreator2), settings, ioCollector, filter);
@@ -699,12 +717,21 @@ uint32 pw_cast(void *inCatalogue, const CastInput *inInput, uint32 *outData, uin
 	FilterLog log;
 	PairwiseFilter filter(in.mRejectModulus, &log);
 
+	RShapeCast r_shape_cast(shape1, Load3(in.mScale1), RMat44::sRotationTranslation(LoadQuat(in.mStartRotation), LoadR3(in.mStartPosition)), Load3(in.mDirection));
+
 	out.U(cMarkerCast);
-	out.Box(shape_cast.mShapeWorldBounds);
+	out.Box(in.mViaTransformedShape != 0? r_shape_cast.mShapeWorldBounds : shape_cast.mShapeWorldBounds);
 	RunWithCollector<CastShapeCollector>(out, in.mCollector, in.mEarlyOut, &context,
 		[&](const ShapeCastResult &inHit) { WriteCastHit(out, inHit); },
 		[&](CastShapeCollector &ioCollector) {
-			CollisionDispatch::sCastShapeVsShapeWorldSpace(shape_cast, settings, shape2, Load3(in.mScale2), filter, LoadMat44(in.mTransform2), MakeCreator(in.mCreator1), MakeCreator(in.mCreator2), ioCollector);
+			if (in.mViaTransformedShape != 0)
+			{
+				TransformedShape ts(LoadR3(in.mPosition2), LoadQuat(in.mRotation2), shape2, BodyID(in.mBodyID), MakeCreator(in.mCreator2));
+				ts.SetShapeScale(Load3(in.mScale2));
+				ts.CastShape(r_shape_cast, settings, LoadR3(in.mBaseOffset), ioCollector, filter);
+			}
+			else
+				CollisionDispatch::sCastShapeVsShapeWorldSpace(shape_cast, settings, shape2, Load3(in.mScale2), filter, LoadMat44(in.mTransform2), MakeCreator(in.mCreator1), MakeCreator(in.mCreator2), ioCollector);
 		});
 	WriteFilterLog(out, log);
 	return out.mSize;

@@ -16,13 +16,16 @@
 //! - CollisionDispatch::sCastShapeVsShapeWorldSpace with zero, tiny, normal and huge directions (into, away from and
 //!   sliding along the other shape) and random ShapeCastSettings (back face modes, shrunken shape and convex radius,
 //!   deepest point, extra convex radius, collect faces, active edges);
+//! - both also through TransformedShape::CollideShape / CastShape (RMat44 / RShapeCast, base offsets, positions beyond
+//!   float precision with double precision);
 //! every hit field is compared (contact points, penetration axis and depth, sub shape IDs, body ID, faces, fraction, back
 //! face flag) as well as the final early out fraction and a hash of every ShapeFilter call (PairwiseFilter rejects a
-//! pseudo random subset of the sub shape pairs). Every catalogue shape also goes through the TransformedShape queries with
-//! random world transforms (far from the origin too) and scales: both CastRay overloads (with the material, user data,
-//! surface normal and supporting face of every hit), CollidePoint, CollectTransformedShapes, GetTrianglesStart / Next,
-//! GetSupportingFace and GetWorldSpaceBounds (and IsValidScale / MakeScaleValid). C ABI wrappers:
-//! ZoltParity/Physics/PairwiseReference.cpp.
+//! pseudo random subset of the sub shape pairs). A second catalogue with random parameters (random convex leaves,
+//! decorators, compounds, meshes and height fields) goes through the same sweep. Every catalogue shape also goes through
+//! the TransformedShape queries with random world transforms (far from the origin too) and scales: both CastRay overloads
+//! (with the material, user data, surface normal and supporting face of every hit), CollidePoint,
+//! CollectTransformedShapes, GetTrianglesStart / Next, GetSupportingFace and GetWorldSpaceBounds (and IsValidScale /
+//! MakeScaleValid). C ABI wrappers: ZoltParity/Physics/PairwiseReference.cpp.
 //!
 //! Inputs that Jolt's debug build asserts on (CollisionArchitecture.md section 9) assert in Zolt's safe builds as well,
 //! so they only run without asserts (ReleaseFast), where Jolt's release behavior is compared:
@@ -86,7 +89,9 @@ const Ref = zolt.Ref;
 const RefConst = zolt.RefConst;
 const RegisterTypes = zolt.RegisterTypes;
 const RotatedTranslatedShapeSettings = zolt.RotatedTranslatedShapeSettings;
+const RMat44 = zolt.RMat44;
 const RRayCast = zolt.RRayCast;
+const RShapeCast = zolt.RShapeCast;
 const RVec3 = zolt.RVec3;
 const ScaledShapeSettings = zolt.ScaledShapeSettings;
 const Shape = zolt.Shape;
@@ -258,6 +263,14 @@ const CollideInput = extern struct {
     /// Use InternalEdgeRemovingCollector::sCollideShapeVsShape
     internal_edge_removal: c_int,
     vertex_tolerance_sq: f32,
+    /// Collide through TransformedShape::CollideShape: shape 2 is a TransformedShape at position2 / rotation2 (with body
+    /// ID and creator2), shape 1 has the center of mass transform position1 / rotation1, the hits are relative to base_offset
+    via_transformed_shape: c_int,
+    rotation1: [4]f32,
+    rotation2: [4]f32,
+    position1: [3]f64,
+    position2: [3]f64,
+    base_offset: [3]f64,
 };
 
 /// Must match CastInput in PairwiseReference.cpp
@@ -290,6 +303,14 @@ const CastInput = extern struct {
     early_out: f32,
     body_id: u32,
     reject_modulus: u32,
+    /// Cast through TransformedShape::CastShape: shape 2 is a TransformedShape at position2 / rotation2 (with body ID and
+    /// creator2), the RShapeCast starts at start_position / start_rotation, the hits are relative to base_offset
+    via_transformed_shape: c_int,
+    start_rotation: [4]f32,
+    rotation2: [4]f32,
+    start_position: [3]f64,
+    position2: [3]f64,
+    base_offset: [3]f64,
 };
 
 /// Must match TransformedShapeInput in PairwiseReference.cpp
@@ -713,7 +734,7 @@ fn zoltCollide(allocator: Allocator, shapes: []const RefConst(Shape), in: *const
     const settings = collideSettings(in);
     const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(in.body_id), .{});
     var log: FilterLog = .{};
-    const filter: PairwiseFilter = .{ .reject_modulus = in.reject_modulus, .log = &log };
+    var filter: PairwiseFilter = .{ .reject_modulus = in.reject_modulus, .log = &log };
 
     s.u(marker_collide);
     const Query = struct {
@@ -722,11 +743,16 @@ fn zoltCollide(allocator: Allocator, shapes: []const RefConst(Shape), in: *const
         shape1: *const Shape,
         shape2: *const Shape,
         settings: *const CollideShapeSettings,
-        filter: *const ShapeFilter,
+        filter: *ShapeFilter,
 
         fn run(c: @This(), collector: *CollideShapeCollector) !void {
             const i = c.in;
-            if (i.internal_edge_removal != 0)
+            if (i.via_transformed_shape != 0) {
+                var ts = TransformedShape.init(rvec3(i.position2), quat(i.rotation2), c.shape2, .init(i.body_id), .{ .sub_shape_id_creator = makeCreator(i.creator2) });
+                defer ts.deinit();
+                ts.setShapeScale(vec3(i.scale2));
+                ts.collideShape(c.shape1, vec3(i.scale1), RMat44.rotationTranslation(quat(i.rotation1), rvec3(i.position1)), c.settings, rvec3(i.base_offset), collector, .{ .shape_filter = c.filter });
+            } else if (i.internal_edge_removal != 0)
                 try InternalEdgeRemovingCollector.collideShapeVsShape(c.allocator, c.shape1, c.shape2, vec3(i.scale1), vec3(i.scale2), mat44(i.transform1), mat44(i.transform2), makeCreator(i.creator1), makeCreator(i.creator2), c.settings, collector, c.filter)
             else
                 CollisionDispatch.collideShapeVsShape(c.shape1, c.shape2, vec3(i.scale1), vec3(i.scale2), mat44(i.transform1), mat44(i.transform2), makeCreator(i.creator1), makeCreator(i.creator2), c.settings, collector, c.filter);
@@ -748,27 +774,34 @@ fn zoltCast(allocator: Allocator, shapes: []const RefConst(Shape), in: *const Ca
     const shape_cast = ShapeCast.init(shape1, vec3(in.scale1), mat44(in.start), vec3(in.direction));
     const context = TransformedShape.init(RVec3.zero(), Quat.identity(), null, .init(in.body_id), .{});
     var log: FilterLog = .{};
-    const filter: PairwiseFilter = .{ .reject_modulus = in.reject_modulus, .log = &log };
+    var filter: PairwiseFilter = .{ .reject_modulus = in.reject_modulus, .log = &log };
+    const r_shape_cast = RShapeCast.init(shape1, vec3(in.scale1), RMat44.rotationTranslation(quat(in.start_rotation), rvec3(in.start_position)), vec3(in.direction));
 
     s.u(marker_cast);
-    s.box(shape_cast.shape_world_bounds);
+    s.box(if (in.via_transformed_shape != 0) r_shape_cast.shape_world_bounds else shape_cast.shape_world_bounds);
     const Query = struct {
         in: *const CastInput,
         shape_cast: *const ShapeCast,
+        r_shape_cast: *const RShapeCast,
         shape2: *const Shape,
         settings: *const ShapeCastSettings,
-        filter: *const ShapeFilter,
+        filter: *ShapeFilter,
 
         fn run(c: @This(), collector: *CastShapeCollector) !void {
             const i = c.in;
-            CollisionDispatch.castShapeVsShapeWorldSpace(c.shape_cast, c.settings, c.shape2, vec3(i.scale2), c.filter, mat44(i.transform2), makeCreator(i.creator1), makeCreator(i.creator2), collector);
+            if (i.via_transformed_shape != 0) {
+                var ts = TransformedShape.init(rvec3(i.position2), quat(i.rotation2), c.shape2, .init(i.body_id), .{ .sub_shape_id_creator = makeCreator(i.creator2) });
+                defer ts.deinit();
+                ts.setShapeScale(vec3(i.scale2));
+                ts.castShape(c.r_shape_cast, c.settings, rvec3(i.base_offset), collector, .{ .shape_filter = c.filter });
+            } else CollisionDispatch.castShapeVsShapeWorldSpace(c.shape_cast, c.settings, c.shape2, vec3(i.scale2), c.filter, mat44(i.transform2), makeCreator(i.creator1), makeCreator(i.creator2), collector);
         }
 
         fn write(_: @This(), st: *Stream, hit: *const ShapeCastResult) void {
             writeCastHit(st, hit);
         }
     };
-    try runWithCollector(CastShapeCollector, allocator, s, in.collector, in.early_out, &context, Query{ .in = in, .shape_cast = &shape_cast, .shape2 = shape2, .settings = &settings, .filter = &filter.base });
+    try runWithCollector(CastShapeCollector, allocator, s, in.collector, in.early_out, &context, Query{ .in = in, .shape_cast = &shape_cast, .r_shape_cast = &r_shape_cast, .shape2 = shape2, .settings = &settings, .filter = &filter.base });
     log.write(s);
 }
 
@@ -1677,6 +1710,20 @@ const Built = struct {
     }
 };
 
+/// A float vector plus a double offset
+fn add64(v: Vec3, offset: [3]f64) [3]f64 {
+    return .{ @as(f64, v.getX()) + offset[0], @as(f64, v.getY()) + offset[1], @as(f64, v.getZ()) + offset[2] };
+}
+
+/// A base offset for the TransformedShape queries: zero, the position of the shape or near it
+fn baseOffset(gen: *Gen, position: [3]f64) [3]f64 {
+    return switch (gen.index(3)) {
+        0 => .{ 0, 0, 0 },
+        1 => position,
+        else => .{ position[0] + 0.5, position[1] - 0.25, position[2] + 1.0 },
+    };
+}
+
 /// A scale that IsValidScale accepts for the shape: one, uniform, uniform with signs, non uniform (with signs)
 fn randomScale(gen: *Gen, shape: *const Shape) Vec3 {
     // Mostly moderate magnitudes, sometimes small or big ones
@@ -1815,6 +1862,8 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                 const bounds1_rotated = shape1.getWorldSpaceBounds(Mat44.rotationQuat(rotation1), scale1);
                 const com1 = if (coincident) transform2.getTranslation() else placement(&gen, if (axis_touching) bounds1_rotated else bounds1, bounds2, transform2.getTranslation(), axis_touching);
                 const transform1 = Mat44.rotationTranslation(rotation1, com1);
+                // The offset of both shapes in the TransformedShape variants (beyond float precision with double precision)
+                const world_offset: [3]f64 = if (zolt.Core.double_precision and gen.chance(30)) .{ 123456.75, -2.0e5, 98765.125 } else .{ 0, 0, 0 };
                 const bits1 = shape1.getSubShapeIDBitsRecursive();
                 const bits2 = shape2.getSubShapeIDBitsRecursive();
                 const num_collectors: usize = if (built.anyHitAllowed(e1.node, e2.node)) 3 else 2;
@@ -1822,7 +1871,8 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                 // Collide
                 {
                     const collector: c_int = @intCast(i % num_collectors);
-                    const internal_edge_removal = gen.chance(15) and !(asserts and collector == 2);
+                    const via_transformed_shape = gen.chance(20);
+                    const internal_edge_removal = !via_transformed_shape and gen.chance(15) and !(asserts and collector == 2);
                     const input: CollideInput = .{
                         .shape1 = e1.node,
                         .shape2 = e2.node,
@@ -1849,6 +1899,12 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                         .reject_modulus = if (gen.chance(75)) 0 else 2 + gen.index(4),
                         .internal_edge_removal = @intFromBool(internal_edge_removal),
                         .vertex_tolerance_sq = if (gen.chance(50)) 1.0e-8 else gen.float(0, 0.01),
+                        .via_transformed_shape = @intFromBool(via_transformed_shape),
+                        .rotation1 = arr4(rotation1.getXYZW()),
+                        .rotation2 = arr4(rotation2.getXYZW()),
+                        .position1 = add64(com1, world_offset),
+                        .position2 = add64(transform2.getTranslation(), world_offset),
+                        .base_offset = baseOffset(&gen, add64(transform2.getTranslation(), world_offset)),
                     };
                     if (collide_supported or !asserts) {
                         zs.values.clearRetainingCapacity();
@@ -1915,6 +1971,12 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
                         .early_out = if (gen.chance(85) or !earlyOutAllowed(cast_collector)) 1.0 + math.flt_epsilon else gen.float(-0.1, 1.0),
                         .body_id = gen.index(1000),
                         .reject_modulus = if (gen.chance(75)) 0 else 2 + gen.index(4),
+                        .via_transformed_shape = @intFromBool(gen.chance(20)),
+                        .start_rotation = arr4(rotation1.getXYZW()),
+                        .rotation2 = arr4(rotation2.getXYZW()),
+                        .start_position = add64(start_position, world_offset),
+                        .position2 = add64(transform2.getTranslation(), world_offset),
+                        .base_offset = baseOffset(&gen, add64(transform2.getTranslation(), world_offset)),
                     };
                     if (cast_supported or !asserts) {
                         zs.values.clearRetainingCapacity();
