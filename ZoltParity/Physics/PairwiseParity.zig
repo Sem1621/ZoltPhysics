@@ -1194,6 +1194,12 @@ fn makeCatalogue(allocator: Allocator) !Catalogue {
     for (&box_points, 0..) |*p, i| p.* = Vec3.init(if (i & 1 != 0) 0.9 else -0.7, if (i & 2 != 0) 0.6 else -0.5, if (i & 4 != 0) 0.8 else -0.8).add(gen.vec(-0.05, 0.05));
     _ = try cat.entry("convex hull (big convex radius)", 1, .{ .kind = .convex_hull, .first = try cat.points(&box_points), .count = 8, .convex_radius = 0.3, .user_data = 52 });
     _ = try cat.entry("triangle (sliver)", 1, .{ .kind = .triangle, .f = Catalogue.params(.{ -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.03, 0.01 }), .user_data = 53 });
+    _ = try cat.entry("box (thin plate)", 1, .{ .kind = .box, .f = Catalogue.params(.{ 1.5, 0.01, 1.2 }), .convex_radius = 0, .user_data = 56 });
+    _ = try cat.entry("cylinder (disc)", 1, .{ .kind = .cylinder, .f = Catalogue.params(.{ 0.02, 0.8 }), .convex_radius = 0.01, .user_data = 57 });
+    _ = try cat.entry("capsule (thin)", 1, .{ .kind = .capsule, .f = Catalogue.params(.{ 1.0, 0.01 }), .user_data = 58 });
+    const flat = try cat.points(&.{ Vec3.init(-0.8, 0.1, -0.6), Vec3.init(0.9, 0.1, -0.5), Vec3.init(0.7, 0.1, 0.8), Vec3.init(-0.5, 0.1, 0.9), Vec3.init(0.0, 0.1, -0.9) });
+    _ = try cat.entry("convex hull (flat, 5 points)", 1, .{ .kind = .convex_hull, .first = flat, .count = 5, .convex_radius = 0, .user_data = 59 });
+    _ = try cat.entry("convex hull (3 points)", 1, .{ .kind = .convex_hull, .first = flat, .count = 3, .convex_radius = 0, .user_data = 60 });
     if (!asserts) {
         // Degenerate triangles assert in CollideConvexVsTriangles (Jolt's debug build and Zolt's safe builds)
         _ = try cat.entry("triangle (degenerate)", 1, .{ .kind = .triangle, .f = Catalogue.params(.{ -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.0 }), .user_data = 54 });
@@ -1226,9 +1232,19 @@ fn makeCatalogue(allocator: Allocator) !Catalogue {
     _ = try cat.entry("rotated translated mesh", 4, .{ .kind = .rotated_translated, .child = mesh_closed, .f = Catalogue.params(.{ 0.2, 0.3, -0.5, rt_quat3.getX(), rt_quat3.getY(), rt_quat3.getZ(), rt_quat3.getW() }), .user_data = 33 });
     _ = try cat.entry("offset center of mass mesh", 4, .{ .kind = .offset_center_of_mass, .child = mesh_grid, .f = Catalogue.params(.{ 0.3, -0.2, 0.1 }), .user_data = 34 });
 
+    var bumpy = try addMesh(&cat, &gen, false);
+    bumpy.f[0] = -1.0; // Every edge is active
+    bumpy.param0 = 1; // One triangle per leaf
+    bumpy.user_data = 35;
+    _ = try cat.entry("mesh (grid, all edges active, 1 triangle per leaf)", 4, bumpy);
+
     // Height fields
     _ = try cat.entry("height field", 4, try addHeightField(&cat, &gen, 8, 2, false));
     _ = try cat.entry("height field (materials, block size 4)", 4, try addHeightField(&cat, &gen, 16, 4, true));
+    var hf_coarse = try addHeightField(&cat, &gen, 16, 8, false);
+    hf_coarse.param1 = 2; // 2 bits per sample
+    hf_coarse.f[6] = -1.0; // Every edge is active
+    _ = try cat.entry("height field (block size 8, 2 bits per sample, all edges active)", 4, hf_coarse);
 
     // Compounds
     const static_compound = try cat.compound("static compound", 3, .static_compound, 40, &.{
@@ -1579,14 +1595,16 @@ test "Pairwise parity: collide and cast" {
                 const scale2 = randomScale(&gen, shape2);
                 const bounds1 = built.bounds(e1.node, scale1);
                 const axis_touching = gen.chance(15);
+                // Sometimes exactly coincident (same center of mass and rotation)
+                const coincident = !axis_touching and gen.chance(3);
                 const rotation2 = gen.rotation();
-                const rotation1 = if (axis_touching) rotation2 else gen.rotation();
+                const rotation1 = if (axis_touching or coincident) rotation2 else gen.rotation();
                 // Sometimes far from the origin (less precision in the world space transforms)
                 const offset = if (gen.chance(10)) Vec3.init(500, -300, 200).add(gen.vec(-50, 50)) else Vec3.zero();
                 const transform2 = Mat44.rotationTranslation(rotation2, gen.vec(-2, 2).add(offset));
                 const bounds2 = shape2.getWorldSpaceBounds(transform2, scale2);
                 const bounds1_rotated = shape1.getWorldSpaceBounds(Mat44.rotationQuat(rotation1), scale1);
-                const com1 = placement(&gen, if (axis_touching) bounds1_rotated else bounds1, bounds2, transform2.getTranslation(), axis_touching);
+                const com1 = if (coincident) transform2.getTranslation() else placement(&gen, if (axis_touching) bounds1_rotated else bounds1, bounds2, transform2.getTranslation(), axis_touching);
                 const transform1 = Mat44.rotationTranslation(rotation1, com1);
                 const bits1 = shape1.getSubShapeIDBitsRecursive();
                 const bits2 = shape2.getSubShapeIDBitsRecursive();
@@ -1643,12 +1661,26 @@ test "Pairwise parity: collide and cast" {
                 {
                     const target = if (gen.chance(70)) gen.pointIn(bounds2) else transform2.getTranslation();
                     const size = bounds1.getExtent().length() + bounds2.getExtent().length();
-                    var direction = if (axis_touching)
-                        ([_]Vec3{ Vec3.axisX(), Vec3.axisY(), Vec3.axisZ() })[gen.index(3)].mulScalar(if (gen.chance(50)) size else -size)
-                    else
-                        gen.direction().mulScalar(size * gen.float(0.5, 3.0));
-                    if (gen.chance(10)) direction = Vec3.zero();
-                    const start_position = if (direction.isNearZero(.{})) com1 else target.sub(direction.mulScalar(gen.float(0.2, 1.1)));
+                    var direction: Vec3 = undefined;
+                    var start_position: Vec3 = undefined;
+                    if (axis_touching or coincident) {
+                        // From the touching / coincident position along an axis (into, away from or sliding along shape 2)
+                        direction = ([_]Vec3{ Vec3.axisX(), Vec3.axisY(), Vec3.axisZ() })[gen.index(3)].mulScalar(if (gen.chance(50)) size else -size);
+                        start_position = com1;
+                    } else {
+                        // Towards a point of shape 2, with tiny, normal and huge lengths
+                        const length = switch (gen.index(30)) {
+                            0 => 1.0e-4,
+                            1 => size * 50.0,
+                            else => size * gen.float(0.5, 3.0),
+                        };
+                        direction = gen.direction().mulScalar(length);
+                        start_position = target.sub(direction.mulScalar(gen.float(0.2, 1.1)));
+                    }
+                    if (gen.chance(10)) {
+                        direction = Vec3.zero();
+                        start_position = com1;
+                    }
                     const cast_collector: c_int = @intCast((i + 1) % num_collectors);
                     const input: CastInput = .{
                         .shape1 = e1.node,
@@ -1731,7 +1763,8 @@ test "Pairwise parity: TransformedShape queries" {
             const rotation = gen.rotation();
             const far = gen.chance(10);
             const position = gen.vec(-3, 3);
-            const offset: [3]f64 = if (far) .{ 1000.5, -2000.25, 500.0 } else .{ 0, 0, 0 };
+            // Far from the origin (beyond float precision with double precision)
+            const offset: [3]f64 = if (!far) .{ 0, 0, 0 } else if (zolt.Core.double_precision and gen.chance(50)) .{ 123456.75, -2.0e5, 98765.125 } else .{ 1000.5, -2000.25, 500.0 };
             const pos: [3]f64 = .{ position.getX() + offset[0], position.getY() + offset[1], position.getZ() + offset[2] };
             const local_bounds = shape.getWorldSpaceBounds(Mat44.rotationQuat(rotation), scale);
             const world_min = local_bounds.min.sub(Vec3.replicate(0.2));
@@ -1752,6 +1785,10 @@ test "Pairwise parity: TransformedShape queries" {
                 else => .{ pos[0] + 0.5, pos[1] - 0.25, pos[2] + 1.0 },
             };
             const ray_collector: c_int = @intCast(gen.index(if (built.anyHitAllowed(e.node, e.node)) 3 else 2));
+            // GetTrianglesNext needs room for cGetTrianglesMinTrianglesRequested triangles, a height field for all
+            // triangles of a block (Jolt bug, see CollisionArchitecture.md section 9: it never finishes otherwise)
+            const node = built.cat.nodes.items[e.node];
+            const min_triangles: u32 = if (node.kind == .height_field) @max(32, 2 * node.param0 * node.param0) else 32;
             const input: TransformedShapeInput = .{
                 .shape = e.node,
                 .body_id = gen.index(1000),
@@ -1770,7 +1807,7 @@ test "Pairwise parity: TransformedShape queries" {
                 .point = .{ point_local.getX() + pos[0], point_local.getY() + pos[1], point_local.getZ() + pos[2] },
                 .box = .{ box_local.min.getX() + @as(f32, @floatCast(pos[0])), box_local.min.getY() + @as(f32, @floatCast(pos[1])), box_local.min.getZ() + @as(f32, @floatCast(pos[2])), box_local.max.getX() + @as(f32, @floatCast(pos[0])), box_local.max.getY() + @as(f32, @floatCast(pos[1])), box_local.max.getZ() + @as(f32, @floatCast(pos[2])) },
                 .base_offset = base_offset,
-                .max_triangles_requested = @intCast(32 + gen.index(100)),
+                .max_triangles_requested = @intCast(min_triangles + gen.index(100)),
                 .materials = @intFromBool(gen.chance(70)),
                 .face_direction = arr3(gen.direction()),
                 .face_of_root = @intFromBool(bits == 0),
