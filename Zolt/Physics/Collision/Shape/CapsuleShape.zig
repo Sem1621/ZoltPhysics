@@ -579,3 +579,502 @@ pub const CapsuleShape = struct {
         }
     };
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (the bit exact comparison with Jolt is in ZoltParity/Physics/CapsulesParity.zig)
+
+const testing = std.testing;
+const Ref = @import("../../../Core/Reference.zig").Ref;
+const RefConst = @import("../../../Core/Reference.zig").RefConst;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const VertexArrayList = @import("../../../Geometry/VertexArray.zig").VertexArrayList;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const CastRayCollector = ShapeFile.CastRayCollector;
+const CollideShapeCollector = ShapeFile.CollideShapeCollector;
+const RayCastSettings = @import("../RayCast.zig").RayCastSettings;
+const CollideShapeSettings = @import("../CollideShape.zig").CollideShapeSettings;
+const CollisionDispatch = @import("../CollisionDispatch.zig");
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const BoxShapeSettings = @import("BoxShape.zig").BoxShapeSettings;
+const RotatedTranslatedShapeSettings = @import("RotatedTranslatedShape.zig").RotatedTranslatedShapeSettings;
+
+test "CapsuleShape: settings, Jolt's error texts, a sphere for a zero height, cached results and out of memory" {
+    const allocator = testing.allocator;
+
+    // Invalid settings: the height is checked first
+    const invalid = [_]struct { half_height: f32, radius: f32, err: []const u8 }{
+        .{ .half_height = -1.0, .radius = 1.0, .err = "Invalid height" },
+        .{ .half_height = 0.0, .radius = 0.0, .err = "Invalid height" }, // Not valid, so not a sphere
+        .{ .half_height = -1.0, .radius = -1.0, .err = "Invalid height" },
+        .{ .half_height = 1.0, .radius = 0.0, .err = "Invalid radius" },
+        .{ .half_height = 1.0, .radius = -2.0, .err = "Invalid radius" },
+    };
+    for (invalid) |c| {
+        var settings = CapsuleShapeSettings.init(allocator, c.half_height, c.radius, .{});
+        defer settings.deinit();
+        try testing.expect(!settings.isValid() or !settings.isSphere());
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings(c.err, result.getError());
+    }
+
+    // Default constructor (deserialization): no radius, no height
+    var default_settings = CapsuleShapeSettings.initDefault(allocator);
+    defer default_settings.deinit();
+    try testing.expect(default_settings.radius == 0.0 and default_settings.half_height_of_cylinder == 0.0);
+    var default_result = try default_settings.asShapeSettings().createShape(allocator);
+    defer default_result.deinit();
+    try testing.expectEqualStrings("Invalid height", default_result.getError());
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material()); // Used by several settings
+    defer material_ref.deinit();
+
+    // A zero height makes a sphere (also -0): SphereShape(radius, material) keeps the default density and user data
+    for ([_]f32{ 0.0, -0.0 }) |half_height| {
+        var settings = CapsuleShapeSettings.init(allocator, half_height, 2.0, .{ .material = material.material() });
+        defer settings.deinit();
+        settings.base.density = 500.0;
+        settings.asShapeSettings().user_data = 7;
+        try testing.expect(settings.isValid() and settings.isSphere());
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        const sphere = result.getPtr().?.cast(SphereShape);
+        try testing.expectEqual(@as(f32, 2.0), sphere.getRadius());
+        try testing.expect(sphere.base.getConvexMaterial() == material.material());
+        try testing.expectEqual(@as(f32, 1000.0), sphere.base.getDensity());
+        try testing.expectEqual(@as(u64, 0), sphere.asShape().getUserData());
+
+        // Cached: the same sphere again
+        var again = try settings.asShapeSettings().createShape(allocator);
+        defer again.deinit();
+        try testing.expect(again.getPtr() == result.getPtr());
+    }
+
+    // Heap settings: material, density and user data are passed to the capsule
+    const settings = try CapsuleShapeSettings.create(allocator, 1.5, 0.25, .{ .material = material.material() });
+    var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+    defer settings_ref.deinit();
+    settings.base.setDensity(321.0);
+    settings.asShapeSettings().user_data = 99;
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    const capsule = result.getPtr().?.cast(CapsuleShape);
+    try testing.expectEqual(@as(f32, 1.5), capsule.getHalfHeightOfCylinder());
+    try testing.expectEqual(@as(f32, 0.25), capsule.getRadius());
+    try testing.expect(capsule.asShape().getMaterial(.empty) == material.material());
+    try testing.expectEqual(@as(f32, 321.0), capsule.base.getDensity());
+    try testing.expectEqual(@as(u64, 99), capsule.asShape().getUserData());
+    try testing.expectEqual(ShapeSubType.capsule, capsule.asShape().getSubType());
+
+    // Out of memory while creating the shape (capsule or sphere) is returned and not cached, a later call succeeds
+    for ([_]f32{ 1.0, 0.0 }) |half_height| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var oom_settings = CapsuleShapeSettings.init(allocator, half_height, 0.5, .{});
+            defer oom_settings.deinit();
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            var r = oom_settings.asShapeSettings().createShape(failing.allocator()) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expect(oom_settings.base.base.cached_result.isEmpty());
+                continue;
+            };
+            defer r.deinit();
+            try testing.expect(r.isValid());
+            try testing.expectEqual(if (half_height == 0.0) ShapeSubType.sphere else ShapeSubType.capsule, r.getPtr().?.getSubType());
+            try testing.expectEqual(@as(usize, 1), fail_index); // Only the shape is allocated
+            break;
+        }
+    }
+}
+
+test "CapsuleShape: bounds, inner radius, mass properties, volume, stats, surface normals, supporting faces" {
+    const allocator = testing.allocator;
+
+    var capsule = CapsuleShape.init(allocator, 2.0, 0.5, .{});
+    capsule.asShape().setEmbedded();
+    defer capsule.asShapeMut().deinit();
+    const shape = capsule.asShape();
+
+    try testing.expect(shape.getLocalBounds().eql(.init(Vec3.init(-0.5, -2.5, -0.5), Vec3.init(0.5, 2.5, 0.5))));
+    try testing.expect(shape.getWorldSpaceBounds(Mat44.translation(Vec3.init(1, 2, 3)), Vec3.replicate(-2.0)).eql(.init(Vec3.init(0, -3, 2), Vec3.init(2, 7, 4))));
+    const rotated = shape.getWorldSpaceBounds(Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.5 * math.pi), Vec3.zero()), Vec3.one()); // Lying along X
+    try testing.expect(rotated.min.isClose(Vec3.init(-2.5, -0.5, -0.5), .{ .max_dist_sq = 1.0e-10 }) and rotated.max.isClose(Vec3.init(2.5, 0.5, 0.5), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expectEqual(@as(f32, 0.5), shape.getInnerRadius());
+    try testing.expect(shape.getCenterOfMass().eql(Vec3.zero()));
+    try testing.expectEqual(@as(u32, 0), shape.getSubShapeIDBitsRecursive());
+    try testing.expectEqual(@as(usize, @sizeOf(CapsuleShape)), shape.getStats().size_bytes);
+    try testing.expectEqual(@as(u32, 0), shape.getStats().num_triangles);
+
+    // Volume and mass: a cylinder of height 4 and two half spheres
+    const volume: f32 = 4.0 / 3.0 * std.math.pi * 0.125 + std.math.pi * 4.0 * 0.25;
+    try testing.expectApproxEqRel(volume, shape.getVolume(), 1.0e-6);
+    const p = shape.getMassProperties();
+    try testing.expectApproxEqRel(1000.0 * volume, p.mass, 1.0e-6);
+    const cylinder_mass: f32 = std.math.pi * 4.0 * 0.25 * 1000.0;
+    const hemisphere_mass: f32 = 2.0 * std.math.pi / 3.0 * 0.125 * 1000.0;
+    try testing.expectApproxEqRel(0.25 * cylinder_mass * 0.5 + hemisphere_mass * 4.0 * 0.25 / 5.0, p.inertia.get(1, 1), 1.0e-6);
+    try testing.expectApproxEqRel(0.25 * cylinder_mass * 0.25 + cylinder_mass * 16.0 / 12.0 + hemisphere_mass * 4.0 * 0.25 / 5.0 + hemisphere_mass * (0.5 * 16.0 + 0.75 * 4.0 * 0.5), p.inertia.get(0, 0), 1.0e-6);
+    try testing.expectEqual(p.inertia.get(0, 0), p.inertia.get(2, 2));
+    try testing.expectEqual(@as(f32, 0.0), p.inertia.get(0, 1));
+
+    // Surface normals: the caps, the cylinder (and the axis, where the normal is X)
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, 2.5, 0)).eql(Vec3.axisY()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, -2.5, 0)).eql(Vec3.axisY().negate()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, 2.0, 0.5)).eql(Vec3.axisZ())); // Exactly at the top of the cylinder
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(-0.5, 1.0, 0)).eql(Vec3.axisX().negate()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.zero()).eql(Vec3.axisX()));
+
+    // Supporting face: a line on the side of the cylinder in the opposite direction, scaled and transformed
+    var face: Shape.SupportingFace = .empty;
+    shape.getSupportingFace(.empty, Vec3.init(2, 0, 0), Vec3.replicate(2.0), Mat44.translation(Vec3.init(10, 0, 0)), &face);
+    try testing.expectEqual(@as(u32, 2), face.len);
+    try testing.expect(face.get(0).eql(Vec3.init(9, 4, 0)) and face.get(1).eql(Vec3.init(9, -4, 0)));
+
+    // Slightly tilted: still a line (within cCapsuleProjectionSlop)
+    face.clear();
+    shape.getSupportingFace(.empty, Vec3.init(1, 0.001, 0), Vec3.one(), Mat44.identity(), &face);
+    try testing.expectEqual(@as(u32, 2), face.len);
+
+    // Hitting a cap: no face
+    for ([_]Vec3{ Vec3.init(0, 1, 0), Vec3.init(1, 1, 0), Vec3.zero() }) |direction| {
+        face.clear();
+        shape.getSupportingFace(.empty, direction, Vec3.one(), Mat44.identity(), &face);
+        try testing.expectEqual(@as(u32, 0), face.len);
+    }
+
+    // GetSubmergedVolume is ConvexShape's (bounding box based)
+    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 5.0), half.total_volume);
+    try testing.expectApproxEqAbs(@as(f32, 2.5), half.submerged_volume, 1.0e-5);
+}
+
+test "CapsuleShape: valid scales (the capsule part of Jolt's TestIsValidScale)" {
+    const allocator = testing.allocator;
+
+    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
+    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
+
+    var capsule_ref = Ref(Shape).init((try CapsuleShape.create(allocator, 2.0, 0.5, .{})).asShapeMut());
+    defer capsule_ref.deinit();
+    const capsule = capsule_ref.get().?;
+    try testing.expect(!capsule.isValidScale(Vec3.zero()));
+    try testing.expect(!capsule.isValidScale(Vec3.init(0, 1, 0)));
+    try testing.expect(!capsule.isValidScale(Vec3.init(1, 0, 1)));
+    try testing.expect(capsule.isValidScale(Vec3.init(2, 2, 2)));
+    try testing.expect(capsule.isValidScale(Vec3.init(-1, 1, -1)));
+    try testing.expect(!capsule.isValidScale(Vec3.init(2, 1, 1)));
+    try testing.expect(!capsule.isValidScale(Vec3.init(1, 2, 1)));
+    try testing.expect(!capsule.isValidScale(Vec3.init(1, 1, 2)));
+    try testing.expect(capsule.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
+    try testing.expect(capsule.makeScaleValid(Vec3.init(-2, 3, 4)).eql(Vec3.init(-3, 3, 3)));
+}
+
+test "CapsuleShape: support functions" {
+    const allocator = testing.allocator;
+
+    var capsule = CapsuleShape.init(allocator, 2.0, 0.5, .{});
+    capsule.asShape().setEmbedded();
+    defer capsule.asShapeMut().deinit();
+
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const scale = Vec3.init(-2, 2, -2);
+
+    // Include convex radius: the scaled capsule, the convex radius is 0
+    const with_convex = capsule.base.getSupportFunction(.include_convex_radius, &buffer, scale);
+    try testing.expectEqual(@as(f32, 0.0), with_convex.getConvexRadius());
+    try testing.expect(with_convex.getSupport(Vec3.init(2, 0, 0)).eql(Vec3.init(1, -4, 0))); // Not up: the bottom sphere
+    try testing.expect(with_convex.getSupport(Vec3.init(0, 3, 0)).eql(Vec3.init(0, 5, 0)));
+    try testing.expect(with_convex.getSupport(Vec3.init(0, 0, -0.5)).eql(Vec3.init(0, -4, -1)));
+    try testing.expect(with_convex.getSupport(Vec3.zero()).eql(Vec3.init(0, -4, 0)));
+
+    // Exclude convex radius and default: the line segment with the scaled radius as convex radius
+    for ([_]ConvexShape.SupportMode{ .exclude_convex_radius, .default }) |mode| {
+        const no_convex = capsule.base.getSupportFunction(mode, &buffer, scale);
+        try testing.expectEqual(@as(f32, 1.0), no_convex.getConvexRadius());
+        try testing.expect(no_convex.getSupport(Vec3.init(5, 6, 7)).eql(Vec3.init(0, 4, 0)));
+        try testing.expect(no_convex.getSupport(Vec3.init(5, -6, 7)).eql(Vec3.init(0, -4, 0)));
+        try testing.expect(no_convex.getSupport(Vec3.init(5, 0, 7)).eql(Vec3.init(0, -4, 0)));
+    }
+}
+
+test "CapsuleShape: ray casts (the shape part of TestCapsuleShapeRay), the collector version of ConvexShape and collide point (TestCollidePointVsCapsule)" {
+    const allocator = testing.allocator;
+
+    var shape_ref = Ref(Shape).init((try CapsuleShape.create(allocator, 4, 2, .{})).asShapeMut());
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const creator = SubShapeIDCreator.pushID(.{}, 1, 3);
+
+    // Single hit: the analytic version
+    var hit: RayCastResult = .{};
+    try testing.expect(shape.castRay(.init(Vec3.init(-4, 0, 0), Vec3.init(8, 0, 0)), creator, &hit));
+    try testing.expectEqual(@as(f32, 0.25), hit.fraction);
+    try testing.expect(hit.sub_shape_id2.eql(creator.getID()));
+    try testing.expect(shape.castRay(.init(Vec3.init(0, -8, 0), Vec3.init(0, 16, 0)), creator, &hit)); // The bottom cap
+    try testing.expectEqual(@as(f32, 0.125), hit.fraction);
+    try testing.expect(!shape.castRay(.init(Vec3.init(0, 0, -6), Vec3.init(0, 0, 8)), creator, &hit)); // Hit at 0.5 is not closer
+    try testing.expect(shape.castRay(.init(Vec3.init(0, 5, 0), Vec3.init(0, 0, 8)), creator, &hit)); // Starts inside the top cap
+    try testing.expectEqual(@as(f32, 0.0), hit.fraction);
+    hit = .{};
+    try testing.expect(!shape.castRay(.init(Vec3.init(-3, 0, 0), Vec3.init(0, 1, 0)), creator, &hit)); // Parallel to the axis outside the cylinder
+    try testing.expect(!shape.castRay(.init(Vec3.init(-4, 0, 0), Vec3.init(1, 0, 0)), creator, &hit)); // Too short
+
+    // Collector: ConvexShape's version calls the analytic CastRay for the front and the back face (TestRayHelper)
+    const cases = [_]struct { a: Vec3, b: Vec3 }{
+        .{ .a = Vec3.init(-2, 0, 0), .b = Vec3.init(2, 0, 0) },
+        .{ .a = Vec3.init(0, -6, 0), .b = Vec3.init(0, 6, 0) },
+        .{ .a = Vec3.init(0, 0, -2), .b = Vec3.init(0, 0, 2) },
+    };
+    var settings: RayCastSettings = .{};
+    settings.setBackFaceMode(.collide_with_back_faces);
+    for (cases) |c| {
+        for ([2][2]Vec3{ .{ c.a, c.b }, .{ c.b, c.a } }) |ab| {
+            const delta = ab[1].sub(ab[0]);
+            const l2 = ab[0].sub(delta.mulScalar(0.1));
+            const r1 = ab[1].add(delta.mulScalar(0.1));
+            var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+            defer hits.deinit();
+            shape.castRayCollector(.init(l2, r1.sub(l2)), &settings, creator, &hits.base, &.{});
+            try hits.checkError();
+            try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+            try testing.expectApproxEqAbs(@as(f32, 0.1) / 1.2, hits.hits.items[0].fraction, 1.0e-5);
+            try testing.expectApproxEqAbs(@as(f32, 1.1) / 1.2, hits.hits.items[1].fraction, 1.0e-5);
+        }
+    }
+
+    // TestCollidePointVsCapsule
+    const half_height: f32 = 0.2;
+    const radius: f32 = 0.1;
+    var point_shape_ref = Ref(Shape).init((try CapsuleShape.create(allocator, half_height, radius, .{})).asShapeMut());
+    defer point_shape_ref.deinit();
+    const point_shape = point_shape_ref.get().?;
+    const xy_and_zero_probes = [_]Vec3{ Vec3.zero(), Vec3.init(-1, 0, 0), Vec3.init(1, 0, 0), Vec3.init(0, 0, -1), Vec3.init(0, 0, 1) };
+    const cube_probes = [_]Vec3{ Vec3.init(-1, 0, 0), Vec3.init(1, 0, 0), Vec3.init(0, -1, 0), Vec3.init(0, 1, 0), Vec3.init(0, 0, -1), Vec3.init(0, 0, 1) };
+    var hit_points: [2 * xy_and_zero_probes.len + 1]Vec3 = undefined;
+    for (xy_and_zero_probes, 0..) |probe, i| {
+        hit_points[i] = probe.mulScalar(0.99 * radius).add(Vec3.init(0, half_height, 0)); // Top hits
+        hit_points[xy_and_zero_probes.len + i] = probe.mulScalar(0.99 * radius).add(Vec3.init(0, -half_height, 0)); // Bottom hits
+    }
+    hit_points[2 * xy_and_zero_probes.len] = Vec3.zero(); // Center hit
+    for (hit_points) |point| {
+        var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer points.deinit();
+        point_shape.collidePoint(point, creator, &points.base, &.{});
+        try points.checkError();
+        try testing.expectEqual(@as(usize, 1), points.hits.items.len);
+        try testing.expect(points.hits.items[0].sub_shape_id2.eql(creator.getID()));
+    }
+    for (cube_probes) |probe| {
+        // Misses
+        var points = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+        defer points.deinit();
+        point_shape.collidePoint(Vec3.init(radius, half_height + radius, radius).mul(probe).mulScalar(1.01), creator, &points.base, &.{});
+        try testing.expectEqual(@as(usize, 0), points.hits.items.len);
+    }
+}
+
+test "CapsuleShape: CollideSoftBodyVertices" {
+    const allocator = testing.allocator;
+
+    var capsule = CapsuleShape.init(allocator, 1.0, 0.5, .{});
+    capsule.asShape().setEmbedded();
+    defer capsule.asShapeMut().deinit();
+
+    // Scale 2: half height 2, radius 1
+    var positions = [_]Vec3{ Vec3.init(1, 2.5, 3.5), Vec3.init(1, 2, 3), Vec3.init(1, 5, 3), Vec3.init(1, -1.5, 3), Vec3.init(1, 2, 3) };
+    var inv_masses = [_]f32{ 1, 1, 1, 1, 0 };
+    var planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** 5;
+    var penetrations: [5]f32 = .{ -math.flt_max, -math.flt_max, -math.flt_max, 0.0, -math.flt_max };
+    var indices = [_]i32{-1} ** 5;
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    capsule.asShape().collideSoftBodyVertices(Mat44.translation(Vec3.init(1, 2, 3)), Vec3.replicate(-2.0), &vertices, 5, 7);
+
+    // Near the cylinder: penetration 0.5, plane through the surface with the outward normal
+    try testing.expectEqual(@as(f32, 0.5), penetrations[0]);
+    try testing.expectEqual(@as(i32, 7), indices[0]);
+    try testing.expect(planes[0].getNormal().eql(Vec3.axisZ()));
+    try testing.expectEqual(@as(f32, 0.0), planes[0].signedDistance(Vec3.init(1, 2, 4)));
+    // On the axis: the normal is X
+    try testing.expectEqual(@as(f32, 1.0), penetrations[1]);
+    try testing.expect(planes[1].getNormal().eql(Vec3.axisX()));
+    // Touching the top cap
+    try testing.expectEqual(@as(f32, 0.0), penetrations[2]);
+    try testing.expect(planes[2].getNormal().eql(Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 0.0), planes[2].signedDistance(Vec3.init(1, 5, 3)));
+    // Outside the bottom cap with a larger penetration already stored: untouched
+    try testing.expectEqual(@as(f32, 0.0), penetrations[3]);
+    try testing.expectEqual(@as(i32, -1), indices[3]);
+    // Infinite mass: skipped
+    try testing.expectEqual(-math.flt_max, penetrations[4]);
+}
+
+test "CapsuleShape: GetTrianglesStart / Next and the static vertex lists" {
+    const allocator = testing.allocator;
+
+    // The comptime tables have the bits of a runtime build (Jolt's static initializers)
+    var level: u32 = capsule_detail_level;
+    _ = &level;
+    var top: std.ArrayList(Vec3) = .empty;
+    defer top.deinit(allocator);
+    try GetTrianglesContextVertexList.createHalfUnitSphereTop(VertexArrayList.init(allocator, &top), level);
+    var middle: std.ArrayList(Vec3) = .empty;
+    defer middle.deinit(allocator);
+    try GetTrianglesContextVertexList.createUnitOpenCylinder(VertexArrayList.init(allocator, &middle), level);
+    var bottom: std.ArrayList(Vec3) = .empty;
+    defer bottom.deinit(allocator);
+    try GetTrianglesContextVertexList.createHalfUnitSphereBottom(VertexArrayList.init(allocator, &bottom), level);
+    const runtime_tables = [_][]const Vec3{ top.items, middle.items, bottom.items };
+    const tables = [_][]const Vec3{ capsule_top_triangles.constSlice(), capsule_middle_triangles.constSlice(), capsule_bottom_triangles.constSlice() };
+    for (runtime_tables, tables) |runtime_table, table| {
+        try testing.expectEqual(runtime_table.len, table.len);
+        try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(runtime_table), std.mem.sliceAsBytes(table)));
+    }
+
+    var capsule = CapsuleShape.init(allocator, 1.0, 0.5, .{});
+    capsule.asShape().setEmbedded();
+    defer capsule.asShapeMut().deinit();
+
+    // 64 + 32 + 64 triangles on the surface of the scaled capsule (the sign of the scale does not flip the winding)
+    var first: [3 * 160]Float3 = undefined;
+    for ([_]Vec3{ Vec3.replicate(2.0), Vec3.init(-2, 2, -2) }, 0..) |scale, pass| {
+        var context: Shape.GetTrianglesContext = .{};
+        capsule.asShape().getTrianglesStart(&context, AABox.biggest(), Vec3.init(1, 2, 3), Quat.identity(), scale);
+        var all: [3 * 160]Float3 = undefined;
+        var count: usize = 0;
+        var vertices: [3 * 32]Float3 = undefined;
+        var materials: [32]*const PhysicsMaterial = undefined;
+        for (0..5) |_| {
+            try testing.expectEqual(@as(u32, 32), capsule.asShape().getTrianglesNext(&context, 32, &vertices, &materials));
+            @memcpy(all[3 * count ..][0 .. 3 * 32], &vertices);
+            count += 32;
+            try testing.expect(materials[31] == PhysicsMaterial.default);
+        }
+        try testing.expectEqual(@as(u32, 0), capsule.asShape().getTrianglesNext(&context, 32, &vertices, null));
+        for (all) |f| {
+            // Distance to the line segment (1, 0, 3) - (1, 4, 3) is the scaled radius
+            const v = Vec3.fromFloat3(f);
+            const closest = Vec3.init(1, math.clamp(v.getY(), 0.0, 4.0), 3);
+            try testing.expectApproxEqAbs(@as(f32, 1.0), v.sub(closest).length(), 1.0e-5);
+        }
+        if (pass == 0)
+            first = all
+        else
+            try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(&first), std.mem.sliceAsBytes(&all)));
+    }
+}
+
+test "CapsuleShape: binary state, restoreFromBinaryState and the registration" {
+    const allocator = testing.allocator;
+
+    var capsule = CapsuleShape.init(allocator, 1.5, 0.25, .{});
+    capsule.asShape().setEmbedded();
+    defer capsule.asShapeMut().deinit();
+    capsule.base.setDensity(321.0);
+    capsule.asShapeMut().setUserData(5);
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    capsule.asShape().saveBinaryState(out.streamOut());
+    try testing.expectEqual(@as(usize, 1 + 8 + 4 + 4 + 4), writer.buffered().len); // Sub type, user data, density, radius, half height
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var result = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer result.deinit();
+    const restored = result.getPtr().?.cast(CapsuleShape);
+    try testing.expectEqual(@as(f32, 0.25), restored.getRadius());
+    try testing.expectEqual(@as(f32, 1.5), restored.getHalfHeightOfCylinder());
+    try testing.expectEqual(@as(f32, 321.0), restored.base.getDensity());
+    try testing.expectEqual(@as(u64, 5), restored.asShape().getUserData());
+
+    // Truncated: Jolt's error text
+    var short_reader: std.Io.Reader = .fixed(writer.buffered()[0 .. writer.buffered().len - 1]);
+    var short_in = StreamWrapper.StreamInWrapper.init(&short_reader);
+    var short_result = try Shape.restoreFromBinaryState(allocator, short_in.streamIn());
+    defer short_result.deinit();
+    try testing.expectEqualStrings("Failed to restore shape", short_result.getError());
+
+    // ShapeFunctions
+    try testing.expect(ShapeFunctions.get(.capsule).construct != null);
+    try testing.expect(ShapeFunctions.get(.capsule).color.eql(Color.green));
+}
+
+test "CapsuleShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, CapsuleShape.create(failing.allocator(), 1.0, 1.0, .{}));
+    try testing.expectError(error.OutOfMemory, CapsuleShapeSettings.create(failing.allocator(), 1.0, 1.0, .{}));
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.capsule).construct.?(failing.allocator()));
+
+    // Restore: the shape is the only allocation
+    var capsule = CapsuleShape.init(allocator, 1.0, 1.0, .{});
+    capsule.asShape().setEmbedded();
+    defer capsule.asShapeMut().deinit();
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    capsule.asShape().saveBinaryState(out.streamOut());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+}
+
+// Jolt's TestCollideShapeLongCapsuleVsEmbeddedBox (CollideShapeTests.cpp): colliding a very long capsule vs a box that is
+// intersecting with the line segment inside the capsule. This particular config reported the wrong penetration due to
+// accuracy problems before
+test "CapsuleShape: TestCollideShapeLongCapsuleVsEmbeddedBox" {
+    const allocator = testing.allocator;
+
+    // Create box
+    const box_min = Vec3.init(-1.0, -2.0, 0.5);
+    const box_max = Vec3.init(2.0, -0.5, 3.0);
+    const box_settings = try RotatedTranslatedShapeSettings.create(allocator, box_min.add(box_max).mulScalar(0.5), Quat.identity(), (try BoxShapeSettings.create(allocator, box_max.sub(box_min).mulScalar(0.5), .{})).asShapeSettings());
+    var box_settings_ref = Ref(ShapeSettings).init(box_settings.asShapeSettings());
+    defer box_settings_ref.deinit();
+    var box_result = try box_settings.createShape(allocator);
+    defer box_result.deinit();
+    const box_shape = box_result.getPtr().?;
+    const box_transform = Mat44.init(Vec4.init(0.516170502, -0.803887904, -0.295520246, 0.0), Vec4.init(0.815010250, 0.354940295, 0.458012700, 0.0), Vec4.init(-0.263298869, -0.477264702, 0.838386655, 0.0), Vec4.init(-10.2214508, -18.6808319, 40.7468987, 1.0));
+
+    // Create capsule
+    const capsule_half_height: f32 = 75.0;
+    const capsule_radius: f32 = 1.5;
+    const capsule_settings = try RotatedTranslatedShapeSettings.create(allocator, Vec3.init(0, 0, 75), Quat.init(0.499999970, -0.499999970, -0.499999970, 0.499999970), (try CapsuleShapeSettings.create(allocator, capsule_half_height, capsule_radius, .{})).asShapeSettings());
+    var capsule_settings_ref = Ref(ShapeSettings).init(capsule_settings.asShapeSettings());
+    defer capsule_settings_ref.deinit();
+    var capsule_result = try capsule_settings.createShape(allocator);
+    defer capsule_result.deinit();
+    const capsule_shape = capsule_result.getPtr().?;
+    const capsule_transform = Mat44.translation(Vec3.init(-9.68538570, -18.0328083, 41.3212280));
+
+    // Collision settings
+    var settings: CollideShapeSettings = .{};
+    settings.active_edge_mode = .collide_with_all;
+    settings.back_face_mode = .collide_with_back_faces;
+    settings.collect_faces_mode = .no_faces;
+
+    // Collide the two shapes
+    var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+    defer collector.deinit();
+    CollisionDispatch.collideShapeVsShape(capsule_shape, box_shape, Vec3.one(), Vec3.one(), capsule_transform, box_transform, .{}, .{}, &settings, &collector.base, &.{});
+    try collector.checkError();
+
+    // Check that there was a hit
+    try testing.expect(collector.hits.items.len == 1);
+    const result = collector.hits.items[0];
+
+    // Now move the box 1% further than the returned penetration depth and check that it is no longer in collision
+    const distance_to_move_box = result.penetration_axis.normalized().mulScalar(result.penetration_depth);
+    collector.reset();
+    try testing.expect(!collector.hadHit());
+    CollisionDispatch.collideShapeVsShape(capsule_shape, box_shape, Vec3.one(), Vec3.one(), capsule_transform, Mat44.translation(distance_to_move_box.mulScalar(1.01)).mul(box_transform), .{}, .{}, &settings, &collector.base, &.{});
+    try testing.expect(!collector.hadHit());
+
+    // Now check that moving 1% less than the penetration distance makes the shapes still overlap
+    CollisionDispatch.collideShapeVsShape(capsule_shape, box_shape, Vec3.one(), Vec3.one(), capsule_transform, Mat44.translation(distance_to_move_box.mulScalar(0.99)).mul(box_transform), .{}, .{}, &settings, &collector.base, &.{});
+    try collector.checkError();
+    try testing.expect(collector.hits.items.len == 1);
+}

@@ -547,3 +547,471 @@ pub const TaperedCapsuleShape = struct {
         }
     };
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests (the bit exact comparison with Jolt is in ZoltParity/Physics/CapsulesParity.zig)
+
+const testing = std.testing;
+const RefConst = @import("../../../Core/Reference.zig").RefConst;
+const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
+const Float3 = @import("../../../Math/Float3.zig").Float3;
+const CollisionCollectorImpl = @import("../CollisionCollectorImpl.zig");
+const AllHitCollisionCollector = CollisionCollectorImpl.AllHitCollisionCollector;
+const CastRayCollector = ShapeFile.CastRayCollector;
+const CollidePointCollector = ShapeFile.CollidePointCollector;
+const RayCast = @import("../RayCast.zig").RayCast;
+const RayCastSettings = @import("../RayCast.zig").RayCastSettings;
+const RayCastResult = @import("../CastResult.zig").RayCastResult;
+const PhysicsMaterialSimple = @import("../PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const RotatedTranslatedShape = @import("RotatedTranslatedShape.zig").RotatedTranslatedShape;
+
+/// Create a shape from tapered capsule settings, the caller releases it
+fn createTaperedCapsule(allocator: Allocator, half_height: f32, top_radius: f32, bottom_radius: f32) !Ref(Shape) {
+    var settings = TaperedCapsuleShapeSettings.init(allocator, half_height, top_radius, bottom_radius, .{});
+    defer settings.deinit();
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    return result.get().clone();
+}
+
+test "TaperedCapsuleShape: settings, Jolt's error texts, spheres when one sphere contains the other, out of memory" {
+    const allocator = testing.allocator;
+
+    // Invalid settings: the radii are checked before the height, a zero radius at one end is invalid
+    const invalid = [_]struct { half_height: f32, top_radius: f32, bottom_radius: f32, err: []const u8 }{
+        .{ .half_height = 1.0, .top_radius = 0.0, .bottom_radius = 0.5, .err = "Invalid top radius" },
+        .{ .half_height = -1.0, .top_radius = -1.0, .bottom_radius = -1.0, .err = "Invalid top radius" },
+        .{ .half_height = 1.0, .top_radius = 0.5, .bottom_radius = 0.0, .err = "Invalid bottom radius" },
+        .{ .half_height = -1.0, .top_radius = 0.5, .bottom_radius = -0.5, .err = "Invalid bottom radius" },
+        .{ .half_height = -1.0, .top_radius = 0.5, .bottom_radius = 0.5, .err = "Invalid height" },
+        .{ .half_height = -1.0, .top_radius = 5.0, .bottom_radius = 0.5, .err = "Invalid height" }, // Not valid, so not a sphere
+    };
+    for (invalid) |c| {
+        var settings = TaperedCapsuleShapeSettings.init(allocator, c.half_height, c.top_radius, c.bottom_radius, .{});
+        defer settings.deinit();
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        try testing.expectEqualStrings(c.err, result.getError());
+    }
+
+    // Default constructor (deserialization): no radii
+    var default_settings = TaperedCapsuleShapeSettings.initDefault(allocator);
+    defer default_settings.deinit();
+    try testing.expect(default_settings.half_height_of_tapered_cylinder == 0.0 and default_settings.top_radius == 0.0 and default_settings.bottom_radius == 0.0);
+    var default_result = try default_settings.asShapeSettings().createShape(allocator);
+    defer default_result.deinit();
+    try testing.expectEqualStrings("Invalid top radius", default_result.getError());
+
+    // Create() never constructs a tapered capsule from settings that make a sphere, the constructor reports it
+    {
+        var settings = TaperedCapsuleShapeSettings.init(allocator, 1.0, 3.0, 1.0, .{});
+        defer settings.deinit();
+        try ShapeSettings.constructShape(TaperedCapsuleShape, &settings, allocator);
+        try testing.expectEqualStrings("One sphere embedded in other sphere, please use sphere shape instead", settings.base.base.cached_result.getError());
+    }
+
+    const material = try PhysicsMaterialSimple.create(allocator, "Mat", Color.red);
+    var material_ref = RefConst(PhysicsMaterial).init(material.material()); // Used by several settings
+    defer material_ref.deinit();
+
+    // One sphere contains the other: a sphere (offset with a RotatedTranslatedShape) with the default density and user data
+    const spheres = [_]struct { half_height: f32, top_radius: f32, bottom_radius: f32, radius: f32, center: f32 }{
+        .{ .half_height = 1.0, .top_radius = 3.0, .bottom_radius = 1.0, .radius = 3.0, .center = 1.0 },
+        .{ .half_height = 1.0, .top_radius = 1.0, .bottom_radius = 3.0, .radius = 3.0, .center = -1.0 },
+        .{ .half_height = 0.5, .top_radius = 1.0, .bottom_radius = 2.0, .radius = 2.0, .center = -0.5 }, // Touching inside
+        .{ .half_height = 0.0, .top_radius = 2.0, .bottom_radius = 2.0, .radius = 2.0, .center = 0.0 }, // Equal radii, no height
+        .{ .half_height = 0.0, .top_radius = 2.0, .bottom_radius = 1.0, .radius = 2.0, .center = 0.0 },
+        .{ .half_height = 1.0e-7, .top_radius = 2.0, .bottom_radius = 1.0, .radius = 2.0, .center = 0.0 }, // Offset too small
+    };
+    for (spheres) |c| {
+        var settings = TaperedCapsuleShapeSettings.init(allocator, c.half_height, c.top_radius, c.bottom_radius, .{ .material = material.material() });
+        defer settings.deinit();
+        settings.base.density = 500.0;
+        settings.asShapeSettings().user_data = 7;
+        try testing.expect(settings.isValid() and settings.isSphere());
+        var result = try settings.asShapeSettings().createShape(allocator);
+        defer result.deinit();
+        const shape = result.getPtr().?;
+        try testing.expectEqual(@as(u64, 0), shape.getUserData());
+        const sphere = if (c.center != 0.0) blk: {
+            const rotated_translated = shape.cast(RotatedTranslatedShape);
+            try testing.expect(rotated_translated.getPosition().eql(Vec3.init(0, c.center, 0)));
+            try testing.expect(rotated_translated.getRotation().eql(Quat.identity()));
+            try testing.expect(shape.getCenterOfMass().eql(Vec3.init(0, c.center, 0)));
+            break :blk rotated_translated.base.inner_shape.get().?.cast(SphereShape);
+        } else shape.cast(SphereShape);
+        try testing.expectEqual(c.radius, sphere.getRadius());
+        try testing.expect(sphere.base.getConvexMaterial() == material.material());
+        try testing.expectEqual(@as(f32, 1000.0), sphere.base.getDensity());
+
+        // Cached: the same shape again
+        var again = try settings.asShapeSettings().createShape(allocator);
+        defer again.deinit();
+        try testing.expect(again.getPtr() == result.getPtr());
+    }
+
+    // Heap settings: material, density and user data are passed to the tapered capsule
+    const settings = try TaperedCapsuleShapeSettings.create(allocator, 2.0, 0.5, 1.0, .{ .material = material.material() });
+    var settings_ref = Ref(ShapeSettings).init(settings.asShapeSettings());
+    defer settings_ref.deinit();
+    settings.base.setDensity(321.0);
+    settings.asShapeSettings().user_data = 99;
+    var result = try settings.createShape(allocator);
+    defer result.deinit();
+    const capsule = result.getPtr().?.cast(TaperedCapsuleShape);
+    try testing.expectEqual(@as(f32, 0.5), capsule.getTopRadius());
+    try testing.expectEqual(@as(f32, 1.0), capsule.getBottomRadius());
+    try testing.expectEqual(@as(f32, 2.0), capsule.getHalfHeight());
+    try testing.expect(capsule.asShape().getMaterial(.empty) == material.material());
+    try testing.expectEqual(@as(f32, 321.0), capsule.base.getDensity());
+    try testing.expectEqual(@as(u64, 99), capsule.asShape().getUserData());
+    try testing.expectEqual(ShapeSubType.tapered_capsule, capsule.asShape().getSubType());
+
+    // Out of memory while creating the shape (tapered capsule, sphere or offset sphere) is returned and not cached
+    const oom_cases = [_]struct { half_height: f32, top_radius: f32, sub_type: ShapeSubType, allocations: usize }{
+        .{ .half_height = 1.0, .top_radius = 0.5, .sub_type = .tapered_capsule, .allocations = 1 },
+        .{ .half_height = 0.0, .top_radius = 0.5, .sub_type = .sphere, .allocations = 1 },
+        .{ .half_height = 1.0, .top_radius = 5.0, .sub_type = .rotated_translated, .allocations = 2 },
+    };
+    for (oom_cases) |c| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var oom_settings = TaperedCapsuleShapeSettings.init(allocator, c.half_height, c.top_radius, 0.75, .{});
+            defer oom_settings.deinit();
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            var r = oom_settings.asShapeSettings().createShape(failing.allocator()) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expect(oom_settings.base.base.cached_result.isEmpty());
+                continue;
+            };
+            defer r.deinit();
+            try testing.expect(r.isValid());
+            try testing.expectEqual(c.sub_type, r.getPtr().?.getSubType());
+            try testing.expectEqual(c.allocations, fail_index);
+            break;
+        }
+    }
+}
+
+test "TaperedCapsuleShape: center of mass, bounds, inner radius, mass properties, volume, stats, surface normals, supporting faces" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 1.0);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const capsule = shape.cast(TaperedCapsuleShape);
+
+    // The sphere centers are shifted so that the center of mass is half way between the top and the bottom
+    try testing.expectEqual(@as(f32, 2.25), capsule.top_center);
+    try testing.expectEqual(@as(f32, -1.75), capsule.bottom_center);
+    try testing.expectEqual(@as(f32, 0.5), capsule.convex_radius);
+    try testing.expectEqual(@as(f32, 0.125), capsule.sin_alpha);
+    try testing.expectApproxEqAbs(@as(f32, 0.125 / @sqrt(1.0 - 0.125 * 0.125)), capsule.tan_alpha, 1.0e-6);
+    try testing.expect(shape.getCenterOfMass().eql(Vec3.init(0, -0.25, 0)));
+
+    try testing.expect(shape.getLocalBounds().eql(.init(Vec3.init(-1, -2.75, -1), Vec3.init(1, 2.75, 1))));
+    try testing.expect(shape.getWorldSpaceBounds(Mat44.translation(Vec3.init(1, 2, 3)), Vec3.init(2, -2, 2)).eql(.init(Vec3.init(-1, -3.5, 1), Vec3.init(3, 7.5, 5)))); // Flipped
+    try testing.expectEqual(@as(f32, 0.5), shape.getInnerRadius());
+    try testing.expectEqual(@as(f32, 22.0), shape.getVolume()); // Approximate: the bounding box
+    try testing.expectEqual(@as(usize, @sizeOf(TaperedCapsuleShape)), shape.getStats().size_bytes);
+    try testing.expectEqual(@as(u32, 0), shape.getStats().num_triangles);
+
+    // Mass properties: those of a box with the average radius
+    const p = shape.getMassProperties();
+    try testing.expectEqual(@as(f32, 1.5 * 5.5 * 1.5 * 1000.0), p.mass);
+    try testing.expectApproxEqRel(p.mass / 12.0 * (5.5 * 5.5 + 1.5 * 1.5), p.inertia.get(0, 0), 1.0e-6);
+    try testing.expectApproxEqRel(p.mass / 12.0 * (1.5 * 1.5 + 1.5 * 1.5), p.inertia.get(1, 1), 1.0e-6);
+
+    // Surface normals: the top sphere, the bottom sphere and the tapered cylinder
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, 3, 0)).eql(Vec3.axisY()));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0, -3, 0)).eql(Vec3.axisY().negate()));
+    const side_normal = Vec3.init(1, capsule.tan_alpha, 0).normalized();
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.init(0.75, 0.5, 0)).eql(side_normal));
+    try testing.expect(shape.getSurfaceNormal(.empty, Vec3.zero()).eql(side_normal));
+
+    // Supporting face: a line on the cone, only in the direction of its normal
+    var face: Shape.SupportingFace = .empty;
+    shape.getSupportingFace(.empty, side_normal.negate(), Vec3.one(), Mat44.translation(Vec3.init(10, 0, 0)), &face);
+    try testing.expectEqual(@as(u32, 2), face.len);
+    try testing.expect(face.get(0).isClose(Vec3.init(10, 2.25, 0).add(side_normal.mulScalar(0.5)), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expect(face.get(1).isClose(Vec3.init(10, -1.75, 0).add(side_normal), .{ .max_dist_sq = 1.0e-10 }));
+    for ([_]Vec3{ Vec3.init(-1, 0, 0), Vec3.init(0, 1, 0), Vec3.zero() }) |direction| {
+        face.clear();
+        shape.getSupportingFace(.empty, direction, Vec3.one(), Mat44.identity(), &face);
+        try testing.expectEqual(@as(u32, 0), face.len);
+    }
+
+    // Equal radii: a capsule
+    var equal_ref = try createTaperedCapsule(allocator, 1.0, 0.5, 0.5);
+    defer equal_ref.deinit();
+    const equal = equal_ref.get().?.cast(TaperedCapsuleShape);
+    try testing.expect(equal.sin_alpha == 0.0 and equal.tan_alpha == 0.0 and equal.top_center == 1.0 and equal.bottom_center == -1.0);
+    try testing.expect(equal.asShape().getCenterOfMass().eql(Vec3.zero()));
+    try testing.expect(equal.asShape().getSurfaceNormal(.empty, Vec3.init(0, 0.5, -0.5)).eql(Vec3.axisZ().negate()));
+}
+
+test "TaperedCapsuleShape: valid scales (the tapered capsule part of Jolt's TestIsValidScale)" {
+    const allocator = testing.allocator;
+
+    // Constant of TestIsValidScale: Square(1.0e-6f * ScaleHelpers::cMinScale)
+    const min_scale_tolerance_sq: f32 = math.square(1.0e-6 * ScaleHelpers.min_scale);
+
+    var tapered_capsule_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 0.7);
+    defer tapered_capsule_ref.deinit();
+    const tapered_capsule = tapered_capsule_ref.get().?;
+    try testing.expect(!tapered_capsule.isValidScale(Vec3.zero()));
+    try testing.expect(tapered_capsule.isValidScale(Vec3.init(2, 2, 2)));
+    try testing.expect(tapered_capsule.isValidScale(Vec3.init(-1, 1, -1)));
+    try testing.expect(!tapered_capsule.isValidScale(Vec3.init(2, 1, 1)));
+    try testing.expect(!tapered_capsule.isValidScale(Vec3.init(1, 2, 1)));
+    try testing.expect(!tapered_capsule.isValidScale(Vec3.init(1, 1, 2)));
+    try testing.expect(tapered_capsule.makeScaleValid(Vec3.zero()).isClose(Vec3.replicate(ScaleHelpers.min_scale), .{ .max_dist_sq = min_scale_tolerance_sq }));
+    try testing.expect(tapered_capsule.makeScaleValid(Vec3.init(2, -3, 4)).eql(Vec3.init(3, -3, 3)));
+}
+
+test "TaperedCapsuleShape: support functions (a negative Y scale flips the capsule)" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 1.0);
+    defer shape_ref.deinit();
+    const convex = shape_ref.get().?.cast(ConvexShape);
+
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const scale = Vec3.init(2, -2, 2);
+
+    // Include convex radius: the scaled spheres, the convex radius is 0
+    const with_convex = convex.getSupportFunction(.include_convex_radius, &buffer, scale);
+    try testing.expectEqual(@as(f32, 0.0), with_convex.getConvexRadius());
+    try testing.expect(with_convex.getSupport(Vec3.init(0, 1, 0)).eql(Vec3.init(0, 5.5, 0))); // The bottom sphere is on top
+    try testing.expect(with_convex.getSupport(Vec3.init(0, -1, 0)).eql(Vec3.init(0, -5.5, 0)));
+    try testing.expect(with_convex.getSupport(Vec3.init(4, 0, 0)).eql(Vec3.init(2, 3.5, 0))); // The bigger sphere
+    try testing.expect(with_convex.getSupport(Vec3.zero()).eql(Vec3.init(0, -3.5, 0))); // Zero vector: the top
+
+    // Exclude convex radius and default: the radii reduced by the scaled convex radius
+    for ([_]ConvexShape.SupportMode{ .exclude_convex_radius, .default }) |mode| {
+        const no_convex = convex.getSupportFunction(mode, &buffer, scale);
+        try testing.expectEqual(@as(f32, 1.0), no_convex.getConvexRadius());
+        try testing.expect(no_convex.getSupport(Vec3.init(0, 1, 0)).eql(Vec3.init(0, 4.5, 0)));
+        try testing.expect(no_convex.getSupport(Vec3.init(0, -1, 0)).eql(Vec3.init(0, -4.5, 0)));
+        try testing.expect(no_convex.getSupport(Vec3.zero()).eql(Vec3.init(0, -4.5, 0)));
+    }
+}
+
+test "TaperedCapsuleShape: ray casts (the shape part of TestTaperedCapsuleShapeRay) and collide point (TestCollidePointVsTaperedCapsule) through ConvexShape" {
+    const allocator = testing.allocator;
+
+    // TestTaperedCapsuleShapeRay: the rays go through the surface points a and b (relative to the shape's origin, rays are
+    // relative to the center of mass)
+    var shape_ref = try createTaperedCapsule(allocator, 3, 4, 2);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const cases = [_]struct { a: Vec3, b: Vec3 }{
+        .{ .a = Vec3.init(0, 7, 0), .b = Vec3.init(0, -5, 0) }, // Top to bottom
+        .{ .a = Vec3.init(-4, 3, 0), .b = Vec3.init(4, 3, 0) }, // Top sphere
+        .{ .a = Vec3.init(0, 3, -4), .b = Vec3.init(0, 3, 4) }, // Top sphere
+    };
+    var settings: RayCastSettings = .{};
+    settings.setBackFaceMode(.collide_with_back_faces);
+    for (cases) |c| {
+        for ([2][2]Vec3{ .{ c.a, c.b }, .{ c.b, c.a } }) |ab| {
+            const delta = ab[1].sub(ab[0]);
+            const l1 = ab[0].sub(delta.mulScalar(2.0)).sub(shape.getCenterOfMass());
+            const l2 = ab[0].sub(delta.mulScalar(0.1)).sub(shape.getCenterOfMass());
+            const inner2 = ab[1].sub(delta.mulScalar(0.1)).sub(shape.getCenterOfMass());
+            const r1 = ab[1].add(delta.mulScalar(0.1)).sub(shape.getCenterOfMass());
+
+            // Through the shape: the front and the back face
+            var hit: RayCastResult = .{};
+            try testing.expect(shape.castRay(.init(l2, r1.sub(l2)), .{}, &hit));
+            try testing.expectApproxEqAbs(@as(f32, 0.1) / 1.2, hit.fraction, 1.0e-5);
+            var hits = AllHitCollisionCollector(CastRayCollector).init(allocator);
+            defer hits.deinit();
+            shape.castRayCollector(.init(l2, r1.sub(l2)), &settings, .{}, &hits.base, &.{});
+            try hits.checkError();
+            try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+            try testing.expectApproxEqAbs(@as(f32, 0.1) / 1.2, hits.hits.items[0].fraction, 1.0e-5);
+            try testing.expectApproxEqAbs(@as(f32, 1.1) / 1.2, hits.hits.items[1].fraction, 1.0e-5);
+
+            // Starting inside: fraction 0, the back face at 0.5
+            hit = .{};
+            try testing.expect(shape.castRay(.init(inner2, r1.sub(inner2)), .{}, &hit));
+            try testing.expectApproxEqAbs(@as(f32, 0.0), hit.fraction, 1.0e-5);
+            hits.reset();
+            shape.castRayCollector(.init(inner2, r1.sub(inner2)), &settings, .{}, &hits.base, &.{});
+            try testing.expectEqual(@as(usize, 2), hits.hits.items.len);
+            try testing.expectApproxEqAbs(@as(f32, 0.0), hits.hits.items[0].fraction, 1.0e-5);
+            try testing.expectApproxEqAbs(@as(f32, 0.5), hits.hits.items[1].fraction, 1.0e-5);
+
+            // Stopping before the shape: no hit
+            hit = .{};
+            try testing.expect(!shape.castRay(.init(l1, l2.sub(l1)), .{}, &hit));
+        }
+    }
+
+    // TestCollidePointVsTaperedCapsule
+    const half_height: f32 = 0.4;
+    const top_radius: f32 = 0.1;
+    const bottom_radius: f32 = 0.2;
+    var point_shape_ref = try createTaperedCapsule(allocator, half_height, top_radius, bottom_radius);
+    defer point_shape_ref.deinit();
+    const point_shape = point_shape_ref.get().?;
+    const xy_probes = [_]Vec3{ Vec3.init(-1, 0, 0), Vec3.init(1, 0, 0), Vec3.init(0, 0, -1), Vec3.init(0, 0, 1) };
+    const xy_and_zero_probes = [_]Vec3{Vec3.zero()} ++ xy_probes;
+    var hit_points: [2 * xy_and_zero_probes.len + 1]Vec3 = undefined;
+    for (xy_and_zero_probes, 0..) |probe, i| {
+        hit_points[i] = probe.mulScalar(0.99 * top_radius).add(Vec3.init(0, half_height, 0)); // Top hits
+        hit_points[xy_and_zero_probes.len + i] = probe.mulScalar(0.99 * bottom_radius).add(Vec3.init(0, -half_height, 0)); // Bottom hits
+    }
+    hit_points[2 * xy_and_zero_probes.len] = Vec3.zero(); // Center hit
+    var miss_points: [2 * xy_probes.len + 2]Vec3 = undefined;
+    miss_points[0] = Vec3.init(0, half_height + top_radius + 0.01, 0); // Top misses
+    miss_points[1] = Vec3.init(0, -half_height - bottom_radius - 0.01, 0); // Bottom misses
+    for (xy_probes, 0..) |probe, i| {
+        miss_points[2 + i] = probe.mulScalar(1.01 * top_radius).add(Vec3.init(0, half_height, 0));
+        miss_points[2 + xy_probes.len + i] = probe.mulScalar(1.01 * bottom_radius).add(Vec3.init(0, -half_height, 0));
+    }
+    for ([_][]const Vec3{ &hit_points, &miss_points }, [_]usize{ 1, 0 }) |points, expected| {
+        for (points) |point| {
+            var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+            defer collector.deinit();
+            point_shape.collidePoint(point.sub(point_shape.getCenterOfMass()), .{}, &collector.base, &.{});
+            try collector.checkError();
+            try testing.expectEqual(expected, collector.hits.items.len);
+        }
+    }
+}
+
+test "TaperedCapsuleShape: CollideSoftBodyVertices" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 1.0);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+    const capsule = shape.cast(TaperedCapsuleShape);
+
+    var positions = [_]Vec3{ Vec3.init(0, 3, 0), Vec3.init(0, 2.25, 0), Vec3.init(0, -2, 0), Vec3.init(0.5, 0, 0), Vec3.init(0, -1.75, 0), Vec3.zero() };
+    var inv_masses = [_]f32{ 1, 1, 1, 1, 1, 0 };
+    var planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** positions.len;
+    var penetrations = [_]f32{-math.flt_max} ** positions.len;
+    var indices = [_]i32{-1} ** positions.len;
+    const vertices = CollideSoftBodyVertexIterator.init(.init(&positions[0], .{}), .init(&inv_masses[0], .{}), .init(&planes[0], .{}), .init(&penetrations[0], .{}), .init(&indices[0], .{}));
+    shape.collideSoftBodyVertices(Mat44.identity(), Vec3.one(), &vertices, positions.len, 3);
+
+    // Above the top sphere
+    try testing.expectEqual(@as(f32, -0.25), penetrations[0]);
+    try testing.expect(planes[0].getNormal().eql(Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 0.0), planes[0].signedDistance(Vec3.init(0, 2.75, 0)));
+    // At the top center: the normal is Y
+    try testing.expectEqual(@as(f32, 0.5), penetrations[1]);
+    try testing.expect(planes[1].getNormal().eql(Vec3.axisY()));
+    // Inside the bottom sphere
+    try testing.expectEqual(@as(f32, 0.75), penetrations[2]);
+    try testing.expect(planes[2].getNormal().eql(Vec3.axisY().negate()));
+    // Near the tapered cylinder: the distance to the cone
+    const side_normal = Vec3.init(1, capsule.tan_alpha, 0).normalized();
+    try testing.expectApproxEqAbs(-side_normal.dot(Vec3.init(0.5, 1.75, 0)) + 1.0, penetrations[3], 1.0e-6);
+    try testing.expect(planes[3].getNormal().isClose(side_normal, .{ .max_dist_sq = 1.0e-12 }));
+    // At the bottom center: the bottom sphere with the normal -Y
+    try testing.expectEqual(@as(f32, 1.0), penetrations[4]);
+    try testing.expect(planes[4].getNormal().eql(Vec3.axisY().negate()));
+    try testing.expectEqual(@as(i32, 3), indices[4]);
+    // Infinite mass: skipped
+    try testing.expectEqual(-math.flt_max, penetrations[5]);
+    try testing.expectEqual(@as(i32, -1), indices[5]);
+
+    // Flipped along Y and translated: the top sphere is at the bottom
+    var flipped_positions = [_]Vec3{ Vec3.init(1, -1, 0), Vec3.init(1, 1, 0) };
+    var flipped_inv_masses = [_]f32{ 1, 1 };
+    var flipped_planes = [_]Plane{Plane.init(Vec3.zero(), 0.0)} ** 2;
+    var flipped_penetrations = [_]f32{-math.flt_max} ** 2;
+    var flipped_indices = [_]i32{-1} ** 2;
+    const flipped_vertices = CollideSoftBodyVertexIterator.init(.init(&flipped_positions[0], .{}), .init(&flipped_inv_masses[0], .{}), .init(&flipped_planes[0], .{}), .init(&flipped_penetrations[0], .{}), .init(&flipped_indices[0], .{}));
+    shape.collideSoftBodyVertices(Mat44.translation(Vec3.init(1, 2, 0)), Vec3.init(1, -1, 1), &flipped_vertices, 2, 0);
+    try testing.expectEqual(@as(f32, -0.25), flipped_penetrations[0]); // 3 below the center
+    try testing.expect(flipped_planes[0].getNormal().eql(Vec3.axisY().negate()));
+    try testing.expectEqual(@as(f32, 0.0), flipped_planes[0].signedDistance(Vec3.init(1, -0.75, 0)));
+    try testing.expectApproxEqAbs(1.0 - 2.75 * side_normal.getY(), flipped_penetrations[1], 1.0e-6); // 1 below the center: near the tapered cylinder
+    try testing.expect(flipped_planes[1].getNormal().isClose(side_normal.flipSign(1, -1, 1), .{ .max_dist_sq = 1.0e-12 }));
+}
+
+test "TaperedCapsuleShape: GetTrianglesStart / Next and GetSubmergedVolume are ConvexShape's" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 1.0);
+    defer shape_ref.deinit();
+    const shape = shape_ref.get().?;
+
+    // The support function including the convex radius applied to the unit sphere (384 vertices)
+    var context: Shape.GetTrianglesContext = .{};
+    shape.getTrianglesStart(&context, AABox.biggest(), Vec3.init(1, 2, 3), Quat.identity(), Vec3.one());
+    var vertices: [3 * 128]Float3 = undefined;
+    var materials: [128]*const PhysicsMaterial = undefined;
+    try testing.expectEqual(@as(u32, 128), shape.getTrianglesNext(&context, 128, &vertices, &materials));
+    try testing.expect(materials[0] == PhysicsMaterial.default);
+    for (vertices) |f| {
+        const v = Vec3.fromFloat3(f).sub(Vec3.init(1, 2, 3));
+        try testing.expect(v.getY() >= -2.75 - 1.0e-5 and v.getY() <= 2.75 + 1.0e-5 and @abs(v.getX()) <= 1.0 + 1.0e-5);
+    }
+    try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, 128, &vertices, null));
+
+    // Bounding box based
+    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    try testing.expectEqual(@as(f32, 22.0), half.total_volume);
+    try testing.expectApproxEqAbs(@as(f32, 11.0), half.submerged_volume, 1.0e-4);
+}
+
+test "TaperedCapsuleShape: binary state, restoreFromBinaryState and the registration" {
+    const allocator = testing.allocator;
+
+    var shape_ref = try createTaperedCapsule(allocator, 2.0, 0.5, 1.0);
+    defer shape_ref.deinit();
+    const capsule = shape_ref.get().?.castMut(TaperedCapsuleShape);
+    capsule.base.setDensity(321.0);
+    capsule.asShapeMut().setUserData(5);
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    capsule.asShape().saveBinaryState(out.streamOut());
+    try testing.expectEqual(@as(usize, 1 + 8 + 4 + 12 + 7 * 4), writer.buffered().len); // Sub type, user data, density, center of mass, 7 floats
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    var result = try Shape.restoreFromBinaryState(allocator, in.streamIn());
+    defer result.deinit();
+    const restored = result.getPtr().?.cast(TaperedCapsuleShape);
+    inline for (.{ "top_radius", "bottom_radius", "top_center", "bottom_center", "convex_radius", "sin_alpha", "tan_alpha" }) |field|
+        try testing.expectEqual(@field(capsule, field), @field(restored, field));
+    try testing.expect(restored.center_of_mass.eql(capsule.center_of_mass));
+    try testing.expectEqual(@as(f32, 321.0), restored.base.getDensity());
+    try testing.expectEqual(@as(u64, 5), restored.asShape().getUserData());
+
+    // Truncated: Jolt's error text
+    var short_reader: std.Io.Reader = .fixed(writer.buffered()[0 .. writer.buffered().len - 1]);
+    var short_in = StreamWrapper.StreamInWrapper.init(&short_reader);
+    var short_result = try Shape.restoreFromBinaryState(allocator, short_in.streamIn());
+    defer short_result.deinit();
+    try testing.expectEqualStrings("Failed to restore shape", short_result.getError());
+
+    // ShapeFunctions
+    try testing.expect(ShapeFunctions.get(.tapered_capsule).construct != null);
+    try testing.expect(ShapeFunctions.get(.tapered_capsule).color.eql(Color.green));
+}
+
+test "TaperedCapsuleShape: every creation path that allocates reports out of memory" {
+    const allocator = testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, TaperedCapsuleShapeSettings.create(failing.allocator(), 1.0, 1.0, 0.5, .{}));
+    try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.tapered_capsule).construct.?(failing.allocator()));
+
+    // Restore: the shape is the only allocation
+    var shape_ref = try createTaperedCapsule(allocator, 1.0, 1.0, 0.5);
+    defer shape_ref.deinit();
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var out = StreamWrapper.StreamOutWrapper.init(&writer);
+    shape_ref.get().?.saveBinaryState(out.streamOut());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var in = StreamWrapper.StreamInWrapper.init(&reader);
+    try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
+}
