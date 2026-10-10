@@ -966,11 +966,13 @@ const Gen = struct {
 
     /// A random rotation: identity, a multiple of 90 degrees around an axis or random
     fn rotation(self: *Gen) Quat {
-        return switch (self.index(5)) {
+        const q = switch (self.index(5)) {
             0 => Quat.identity(),
             1 => Quat.rotation(([_]Vec3{ Vec3.axisX(), Vec3.axisY(), Vec3.axisZ() })[self.index(3)], @as(f32, @floatFromInt(self.index(4))) * 0.5 * math.pi),
             else => Quat.rotation(self.direction(), self.float(-math.pi, math.pi)),
         };
+        // The same rotation with a negative W
+        return if (self.chance(20)) q.negate() else q;
     }
 
     /// A random point in a box
@@ -1307,6 +1309,207 @@ fn makeCatalogue(allocator: Allocator) !Catalogue {
     return cat;
 }
 
+/// A random convex leaf (valid settings: convex radii within the limits of each shape)
+fn randomConvex(cat: *Catalogue, gen: *Gen, user_data: u32) !NodeDesc {
+    const material: u32 = if (gen.chance(40)) 1 + gen.index(num_materials) else 0;
+    const size = if (gen.chance(15)) gen.float(0.03, 0.2) else gen.float(0.2, 1.5);
+    var desc: NodeDesc = switch (gen.index(8)) {
+        0 => .{ .kind = .sphere, .f = Catalogue.params(.{size}) },
+        1 => blk: {
+            const h = gen.vec(0.1, 1.0).mulScalar(size * 1.5);
+            break :blk .{ .kind = .box, .f = Catalogue.params(.{ h.getX(), h.getY(), h.getZ() }), .convex_radius = if (gen.chance(40)) 0 else gen.float(0, 1) * h.reduceMin() };
+        },
+        2 => .{ .kind = .capsule, .f = Catalogue.params(.{ gen.float(0.05, 1.5) * size, gen.float(0.1, 1.0) * size }) },
+        3 => blk: {
+            const half_height = gen.float(0.2, 1.0) * size;
+            const top = gen.float(0.1, 1.0) * size;
+            // |top - bottom| < 2 * half height (otherwise one sphere is embedded in the other)
+            const bottom = math.max(0.05 * size, top + gen.float(-1.9, 1.9) * half_height);
+            break :blk .{ .kind = .tapered_capsule, .f = Catalogue.params(.{ half_height, top, bottom }) };
+        },
+        4 => blk: {
+            const half_height = gen.float(0.05, 1.5) * size;
+            const radius = gen.float(0.1, 1.0) * size;
+            break :blk .{ .kind = .cylinder, .f = Catalogue.params(.{ half_height, radius }), .convex_radius = if (gen.chance(40)) 0 else gen.float(0, 1) * math.min(half_height, radius) };
+        },
+        5 => blk: {
+            const half_height = gen.float(0.05, 1.5) * size;
+            const top = if (gen.chance(15)) 0.0 else gen.float(0.05, 1.0) * size;
+            const bottom = if (top > 0 and gen.chance(15)) 0.0 else gen.float(0.05, 1.0) * size;
+            const max_radius = math.min(half_height, math.min(top, bottom));
+            break :blk .{ .kind = .tapered_cylinder, .f = Catalogue.params(.{ half_height, top, bottom }), .convex_radius = if (gen.chance(40)) 0 else gen.float(0, 1) * max_radius };
+        },
+        6 => blk: {
+            var points: [80]Vec3 = undefined;
+            const count = 4 + gen.index(60);
+            const extent = gen.vec(0.3, 1.0).mulScalar(size);
+            const on_sphere = gen.chance(50);
+            for (points[0..count]) |*p| p.* = if (on_sphere) gen.direction().mul(extent) else gen.vec(-1, 1).mul(extent);
+            break :blk .{ .kind = .convex_hull, .first = try cat.points(points[0..count]), .count = count, .convex_radius = if (gen.chance(40)) 0 else gen.float(0, 0.3) * size };
+        },
+        else => blk: {
+            const a = gen.vec(-1, 1).mulScalar(size);
+            const b = gen.vec(-1, 1).mulScalar(size);
+            const c = gen.vec(-1, 1).mulScalar(size);
+            break :blk .{ .kind = .triangle, .f = Catalogue.params(.{ a.getX(), a.getY(), a.getZ(), b.getX(), b.getY(), b.getZ(), c.getX(), c.getY(), c.getZ() }), .convex_radius = if (gen.chance(60)) 0 else gen.float(0, 0.2) * size };
+        },
+    };
+    desc.material = material;
+    desc.user_data = user_data;
+    return desc;
+}
+
+/// A random mesh: a soup of random triangles in a box, or a bumpy grid
+fn randomMesh(cat: *Catalogue, gen: *Gen, user_data: u32) !NodeDesc {
+    const allocator = cat.allocator;
+    const first: u32 = @intCast(cat.floats.items.len);
+    const first2: u32 = @intCast(cat.triangles.items.len);
+    const mesh_materials = 1 + gen.index(4);
+    var num_vertices: u32 = 0;
+    if (gen.chance(50)) {
+        // Soup: every triangle has its own vertices
+        const n = 5 + gen.index(30);
+        for (0..n) |t| {
+            const center = gen.vec(-2, 2);
+            for (0..3) |_| try cat.floats.appendSlice(allocator, &arr3(center.add(gen.vec(-0.8, 0.8))));
+            const v: u32 = @intCast(3 * t);
+            try cat.triangles.append(allocator, .init(v, v + 1, v + 2, .{ .material_index = gen.index(mesh_materials), .user_data = @intCast(t) }));
+            num_vertices += 3;
+        }
+    } else {
+        const nx = 2 + gen.index(6);
+        const nz = 2 + gen.index(6);
+        const spacing = gen.float(0.3, 1.0);
+        const bump = gen.float(0.0, 0.6);
+        for (0..nz + 1) |z|
+            for (0..nx + 1) |x| {
+                const fx: f32 = @floatFromInt(x);
+                const fz: f32 = @floatFromInt(z);
+                try cat.floats.appendSlice(allocator, &.{ (fx - 0.5 * @as(f32, @floatFromInt(nx))) * spacing, gen.float(-bump, bump), (fz - 0.5 * @as(f32, @floatFromInt(nz))) * spacing });
+                num_vertices += 1;
+            };
+        for (0..nz) |z|
+            for (0..nx) |x| {
+                const v0: u32 = @intCast(z * (nx + 1) + x);
+                const v1 = v0 + 1;
+                const v2 = v0 + nx + 1;
+                const v3 = v2 + 1;
+                const m = gen.index(mesh_materials);
+                if (gen.chance(50)) {
+                    try cat.triangles.append(allocator, .init(v0, v2, v1, .{ .material_index = m }));
+                    try cat.triangles.append(allocator, .init(v1, v2, v3, .{ .material_index = m }));
+                } else {
+                    try cat.triangles.append(allocator, .init(v0, v2, v3, .{ .material_index = m }));
+                    try cat.triangles.append(allocator, .init(v0, v3, v1, .{ .material_index = m }));
+                }
+            };
+    }
+    return .{
+        .kind = .mesh,
+        .first = first,
+        .count = num_vertices,
+        .first2 = first2,
+        .count2 = @as(u32, @intCast(cat.triangles.items.len)) - first2,
+        .num_materials = mesh_materials,
+        .param0 = 1 + gen.index(8),
+        .param1 = @intFromBool(gen.chance(50)),
+        .f = Catalogue.params(.{if (gen.chance(20)) -1.0 else gen.float(0.5, 1.0)}),
+        .user_data = user_data,
+    };
+}
+
+/// A random height field (sample count / block size combinations that Jolt accepts)
+fn randomHeightField(cat: *Catalogue, gen: *Gen, user_data: u32) !NodeDesc {
+    const allocator = cat.allocator;
+    const configs = [_][2]u32{ .{ 4, 2 }, .{ 8, 2 }, .{ 8, 4 }, .{ 16, 4 }, .{ 16, 8 } };
+    const config = configs[gen.index(configs.len)];
+    const sample_count = config[0];
+    const first: u32 = @intCast(cat.floats.items.len);
+    const amplitude = gen.float(0.0, 1.0);
+    const no_collision_chance: u32 = if (gen.chance(50)) 0 else 10;
+    for (0..sample_count * sample_count) |_|
+        try cat.floats.append(allocator, if (gen.chance(no_collision_chance)) HeightFieldShapeConstants.no_collision_value else gen.float(-amplitude, amplitude));
+    const with_materials = gen.chance(50);
+    const mesh_materials = 1 + gen.index(4);
+    const first2: u32 = @intCast(cat.bytes.items.len);
+    const count2: u32 = if (with_materials) (sample_count - 1) * (sample_count - 1) else 0;
+    for (0..count2) |_| try cat.bytes.append(allocator, @intCast(gen.index(mesh_materials)));
+    const cell = gen.float(0.2, 0.8);
+    const extent = cell * @as(f32, @floatFromInt(sample_count - 1));
+    return .{
+        .kind = .height_field,
+        .first = first,
+        .count = sample_count,
+        .first2 = first2,
+        .count2 = count2,
+        .num_materials = if (with_materials) mesh_materials else 0,
+        .param0 = config[1],
+        .param1 = 1 + gen.index(16),
+        .f = Catalogue.params(.{ -0.5 * extent, gen.float(-0.5, 0.5), -0.5 * extent, cell, gen.float(0.5, 1.5), cell * gen.float(0.7, 1.3), @as(f32, if (gen.chance(20)) -1.0 else 0.996195) }),
+        .user_data = user_data,
+    };
+}
+
+/// A random catalogue: random convex leaves, decorators, compounds, meshes and height fields with random parameters
+fn makeRandomCatalogue(allocator: Allocator, seed: u32) !Catalogue {
+    var cat: Catalogue = .{ .allocator = allocator };
+    errdefer cat.deinit();
+    var gen: Gen = .{ .rng = .{ .state = seed } };
+
+    // Convex leaves
+    var leaves: [12]u32 = undefined;
+    for (&leaves, 0..) |*leaf, i| leaf.* = try cat.entry("random convex", 1, try randomConvex(&cat, &gen, 200 + @as(u32, @intCast(i))));
+
+    // Meshes and height fields
+    const mesh1 = try cat.entry("random mesh", 4, try randomMesh(&cat, &gen, 300));
+    const mesh2 = try cat.entry("random mesh", 4, try randomMesh(&cat, &gen, 301));
+    _ = try cat.entry("random height field", 4, try randomHeightField(&cat, &gen, 302));
+    _ = try cat.entry("random height field", 4, try randomHeightField(&cat, &gen, 303));
+
+    // Decorators around random leaves and meshes (scales that the inner shape accepts: uniform for spheres, capsules, ...)
+    for (0..6) |i| {
+        const inner = if (i < 4) leaves[gen.index(leaves.len)] else if (i == 4) mesh1 else mesh2;
+        const user_data = 310 + @as(u32, @intCast(i));
+        const cost: u32 = if (i < 4) 2 else 4;
+        switch (gen.index(3)) {
+            0 => {
+                const m = gen.float(0.4, 2.0);
+                const signs = Vec3.init(if (gen.chance(30)) -1 else 1, if (gen.chance(30)) -1 else 1, if (gen.chance(30)) -1 else 1);
+                const uniform = signs.mul(Vec3.replicate(m));
+                const non_uniform = signs.mul(gen.vec(0.4, 2.0));
+                // The settings are valid for any scale, the queries need a scale that the inner shape accepts: only use a
+                // non uniform scale for the shapes that support it (boxes, hulls, meshes, triangles without radius)
+                const kind = cat.nodes.items[inner].kind;
+                const allows_non_uniform = kind == .box or kind == .convex_hull or kind == .mesh or (kind == .triangle and cat.nodes.items[inner].convex_radius == 0);
+                const scale = if (allows_non_uniform and gen.chance(60)) non_uniform else uniform;
+                _ = try cat.entry("random scaled", cost, .{ .kind = .scaled, .child = inner, .f = Catalogue.params(.{ scale.getX(), scale.getY(), scale.getZ() }), .user_data = user_data });
+            },
+            1 => {
+                const q = gen.rotation();
+                const p = gen.vec(-1, 1);
+                _ = try cat.entry("random rotated translated", cost, .{ .kind = .rotated_translated, .child = inner, .f = Catalogue.params(.{ p.getX(), p.getY(), p.getZ(), q.getX(), q.getY(), q.getZ(), q.getW() }), .user_data = user_data });
+            },
+            else => {
+                const o = gen.vec(-0.5, 0.5);
+                _ = try cat.entry("random offset center of mass", cost, .{ .kind = .offset_center_of_mass, .child = inner, .f = Catalogue.params(.{ o.getX(), o.getY(), o.getZ() }), .user_data = user_data });
+            },
+        }
+    }
+
+    // Compounds of random leaves (sometimes with a mesh), nested
+    var compounds: [4]u32 = undefined;
+    for (&compounds, 0..) |*compound, i| {
+        var subs: [10]SubDesc = undefined;
+        const count = 2 + gen.index(8);
+        for (subs[0..count], 0..) |*sd, j| {
+            const node = if (i >= 2 and j == 0) compounds[gen.index(@intCast(i))] else if (gen.chance(10)) mesh1 else leaves[gen.index(leaves.len)];
+            sd.* = subShape(node, 400 + @as(u32, @intCast(10 * i + j)), gen.vec(-2, 2), if (gen.chance(30)) Quat.identity() else gen.rotation());
+        }
+        compound.* = try cat.compound("random compound", 4, if (gen.chance(50)) .static_compound else .mutable_compound, 320 + @as(u32, @intCast(i)), subs[0..count]);
+    }
+    return cat;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Comparison of the streams
 
@@ -1524,10 +1727,8 @@ fn placement(gen: *Gen, bounds1: AABox, bounds2: AABox, com2: Vec3, axis_touchin
 // The tests
 
 /// Number of queries per pair: more for cheap pairs (the whole sweep must stay well below ~3 minutes in Debug)
-fn queriesPerPair(built: *const Built, e1: Entry, e2: Entry) usize {
-    _ = built;
+fn queriesPerPair(base: usize, e1: Entry, e2: Entry) usize {
     const cost = e1.cost * e2.cost;
-    const base: usize = if (builtin.mode == .Debug) 16 else 64;
     return @max(4, base * 16 / cost);
 }
 
@@ -1577,21 +1778,15 @@ test "Pairwise parity: dispatch tables" {
     if (mismatches > 0) return error.ParityMismatch;
 }
 
-test "Pairwise parity: collide and cast" {
-    const allocator = std.testing.allocator;
-    const buffer = try allocator.alloc(u32, stream_capacity);
-    defer allocator.free(buffer);
-
-    const built = try Built.init(allocator, try makeCatalogue(allocator), buffer);
-    defer built.deinit();
-
+/// Collide and cast every ordered pair of catalogue shapes (`base` queries per pair of cheap shapes)
+fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u32, base: usize) !void {
     var collide_cmp: Comparison = .{ .name = "Pairwise collide (CollisionDispatch / InternalEdgeRemovingCollector)" };
     var cast_cmp: Comparison = .{ .name = "Pairwise cast (CollisionDispatch)" };
     var collide_hits: usize = 0;
     var cast_hits: usize = 0;
     var skipped: usize = 0;
 
-    var gen: Gen = .{};
+    var gen: Gen = .{ .rng = .{ .state = seed } };
     var zs: Stream = .{ .allocator = allocator };
     defer zs.deinit();
     const entries = built.cat.entries.items;
@@ -1603,7 +1798,7 @@ test "Pairwise parity: collide and cast" {
             const shape2 = built.shape(e2.node);
             const collide_supported = built.supported(e1.node, e2.node, false);
             const cast_supported = built.supported(e1.node, e2.node, true);
-            const n = queriesPerPair(built, e1, e2);
+            const n = queriesPerPair(base, e1, e2);
             for (0..n) |i| {
                 const scale1 = randomScale(&gen, shape1);
                 const scale2 = randomScale(&gen, shape2);
@@ -1760,22 +1955,16 @@ test "Pairwise parity: collide and cast" {
     if (failed) return error.ParityMismatch;
 }
 
-test "Pairwise parity: TransformedShape queries" {
-    const allocator = std.testing.allocator;
-    const buffer = try allocator.alloc(u32, stream_capacity);
-    defer allocator.free(buffer);
-
-    const built = try Built.init(allocator, try makeCatalogue(allocator), buffer);
-    defer built.deinit();
-
+/// The TransformedShape queries of every catalogue shape (`base` queries for a cheap shape)
+fn sweepTransformedShapes(allocator: Allocator, built: *const Built, buffer: []u32, seed: u32, base: usize) !void {
     var cmp: Comparison = .{ .name = "Pairwise TransformedShape queries" };
-    var gen: Gen = .{ .rng = .{ .state = 0x7a5f00d } };
+    var gen: Gen = .{ .rng = .{ .state = seed } };
     var zs: Stream = .{ .allocator = allocator };
     defer zs.deinit();
     for (built.cat.entries.items) |e| {
         const shape = built.shape(e.node);
         const bits = shape.getSubShapeIDBitsRecursive();
-        const n: usize = if (builtin.mode == .Debug) 2400 / e.cost else 6000;
+        const n: usize = base / e.cost;
         for (0..n) |_| {
             const scale = randomScale(&gen, shape);
             const rotation = gen.rotation();
@@ -1845,4 +2034,35 @@ test "Pairwise parity: TransformedShape queries" {
         }
     }
     try cmp.finish();
+}
+
+test "Pairwise parity: collide and cast" {
+    const allocator = std.testing.allocator;
+    const buffer = try allocator.alloc(u32, stream_capacity);
+    defer allocator.free(buffer);
+
+    const built = try Built.init(allocator, try makeCatalogue(allocator), buffer);
+    defer built.deinit();
+    try sweepPairs(allocator, built, buffer, 0x12345678, if (builtin.mode == .Debug) 16 else 64);
+}
+
+test "Pairwise parity: TransformedShape queries" {
+    const allocator = std.testing.allocator;
+    const buffer = try allocator.alloc(u32, stream_capacity);
+    defer allocator.free(buffer);
+
+    const built = try Built.init(allocator, try makeCatalogue(allocator), buffer);
+    defer built.deinit();
+    try sweepTransformedShapes(allocator, built, buffer, 0x7a5f00d, if (builtin.mode == .Debug) 2400 else 12000);
+}
+
+test "Pairwise parity: random catalogue" {
+    const allocator = std.testing.allocator;
+    const buffer = try allocator.alloc(u32, stream_capacity);
+    defer allocator.free(buffer);
+
+    const built = try Built.init(allocator, try makeRandomCatalogue(allocator, 0x9e3779b9), buffer);
+    defer built.deinit();
+    try sweepPairs(allocator, built, buffer, 0x51ed270b, if (builtin.mode == .Debug) 8 else 32);
+    try sweepTransformedShapes(allocator, built, buffer, 0x2545f491, if (builtin.mode == .Debug) 800 else 8000);
 }
