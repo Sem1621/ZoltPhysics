@@ -1,7 +1,8 @@
 //! Port of: UnitTests/Physics/ConvexVsTrianglesTest.cpp
 //! Status: partial
-//! Missing: the TriangleShape / MeshShape halves of sCheckCollision / sCheckCollisionNoHit (need PhysicsTestContext,
-//!   Phase 5), TestCapsuleVsNeedleTriangle (needs CapsuleShape, Phase 4 Wave A)
+//! Missing: the TriangleShape / MeshShape halves of sCheckCollision / sCheckCollisionNoHit (a body with the triangle
+//!   or a single triangle mesh, collided through NarrowPhaseQuery::CollideShape; need PhysicsTestContext /
+//!   NarrowPhaseQuery, Phase 5)
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -9,6 +10,7 @@ const fw = @import("../UnitTestFramework.zig");
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
 const BodyID = zolt.BodyID;
+const CapsuleShape = zolt.CapsuleShape;
 const CollideConvexVsTriangles = zolt.CollideConvexVsTriangles;
 const CollideShapeCollector = zolt.CollideShapeCollector;
 const CollideShapeSettings = zolt.CollideShapeSettings;
@@ -287,4 +289,44 @@ test "TestSphereVsTriangles" {
     try testConvexVsTriangles(CollideSphereVsTriangles);
 }
 
-// Not ported: TestCapsuleVsNeedleTriangle (needs CapsuleShape, Phase 4 Wave A)
+// Regression test for EPA producing a degenerate contact when the mesh triangle has
+// a very long edge relative to the query shape. In production a ~200 m needle triangle
+// against a 0.3 m capsule caused EPA to converge to the wrong Minkowski polytope facet
+// (float32 precision loss in cross products of 200 m vectors) and report point2 ~100 m
+// from point1, failing a downstream sanity assert.
+test "TestCapsuleVsNeedleTriangle" {
+    var capsule_ref = RefConst(Shape).init((try CapsuleShape.create(allocator, 0.5, 0.3, .{})).asShape());
+    defer capsule_ref.deinit();
+    const capsule = capsule_ref.get().?.cast(CapsuleShape);
+
+    const v0 = Vec3.init(0.252283931, -172.936920, -0.093847394);
+    const v1 = Vec3.init(0.242991686, 27.608593, -0.127187848);
+    const v2 = Vec3.init(0.228017807, 27.608591, -0.140446782);
+
+    const settings: CollideShapeSettings = .{};
+    var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+    defer collector.deinit();
+    var collider = CollideConvexVsTriangles.init(&capsule.base, Vec3.one(), Vec3.one(), Mat44.identity(), Mat44.identity(), .empty, &settings, &collector.base);
+    collider.collide(v0, v1, v2, 0b11, .empty);
+    try collector.checkError();
+
+    try fw.expect(collector.hits.items.len == 1);
+
+    // Without the fix, point2 snaps to a far triangle vertex ~100 m from point1,
+    // giving mPenetrationDepth ~ -100 m. With the fix the contact must lie within
+    // the radius of the capsule.
+    const hit = &collector.hits.items[0];
+    try fw.expect(hit.penetration_depth > 0.0);
+    try fw.expect(hit.penetration_depth < capsule.getRadius());
+
+    // point2 must be close to point1, not 100 m away.
+    const dist = hit.contact_point_on2.sub(hit.contact_point_on1).length();
+    try fw.expect(dist < capsule.getRadius());
+
+    // The penetration axis must point from the capsule towards the triangle, i.e.
+    // against the triangle's (v1-v0) x (v2-v0) normal (the capsule center sits on the
+    // positive-normal side of the triangle plane). Guards the contact normal that
+    // feeds collision response from coming out backwards.
+    const triangle_normal = v1.sub(v0).cross(v2.sub(v0));
+    try fw.expect(hit.penetration_axis.dot(triangle_normal) < 0.0);
+}
