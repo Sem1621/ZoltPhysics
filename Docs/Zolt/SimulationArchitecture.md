@@ -894,25 +894,22 @@ QuadTree).
   | `EActivation` defaults | `.{ .activation = ... }` |
   | `BodyLockInterfaceLocking` / `NoLock` | `BodyLockInterface.initLocking` / `initNoLock` |
 
-## 7. Open questions
+## 7. Questions settled after the review
 
-- **Barrier exhaustion.** `createBarrier` returning null panics, as Jolt crashes. Should it instead
-  be `error.OutOfMemory` from `update`? The gate would make that clean.
-- **Text equality for M5.** M5 text equality needs a C++-compatible `%g` / ostream float formatter.
-  ConvexHullShape's error texts need it too. Do we add it to StringTools, or judge M5 on bit
-  parity only?
-- **QuadTree pre-commit cost.** Committing every QuadTree node page at init costs about 170 bytes
-  per max body up front. Is that acceptable for large `max_bodies`, or should a reserve of spare
-  nodes guard only Finalize?
-- **Per-lane bound loads.** Do the per-lane atomic loads of QuadTree bounds cost anything
-  measurable? PerformanceTest decides after M6.
-- **Poisoned contact cache.** A4 must confirm `finalizeContactCacheAfterOutOfMemory` against
-  Jolt's restore path (D10).
-- **Snapshot on failure.** After an out-of-memory error inside a job, the caller must restore a
-  state. Should PhysicsSystem keep an optional internal snapshot to offer "unchanged on any
-  failure"?
-- **DeterminismLog threading.** DeterminismLog has no mutex, like Jolt's, so it is only
-  meaningful single threaded. Should the build option force a single-threaded job system in the
-  test harness?
-- **BodyAccess.** BodyAccess grants are designed (D3) but not in the prototype. F1 must verify
-  them against the unit tests that use them.
+- **Barrier exhaustion.** `createBarrier` returning null stays `@panic` (Jolt crashes). It means too
+  many concurrent updates on one job system, a configuration error and not an allocation failure.
+- **Text equality for M5.** Add a C++-compatible float formatter (`std::ostream` default, `%g` with
+  precision 6) to `Core/StringTools.zig` in Wave C. M5 needs both the bit parity of HelloWorldParity
+  and equal stdout. ConvexHullShape's error texts switch to the formatter too.
+- **QuadTree pre-commit.** Accepted. About 170 bytes per max body is what Jolt itself uses once the
+  tree is full (the allocator holds twice the estimated node count for the rebuild in `Update`),
+  and it keeps Finalize and Abort free of errors. The `initBroadPhase` doc comment states the cost.
+- **Per-lane bound loads.** Kept. PerformanceTest measures them after M6; a racy vector load needs
+  that measurement first.
+- **Poisoned contact cache.** A4 confirms `finalizeContactCacheAfterOutOfMemory` against Jolt's
+  restore path with the FailingTempAllocator sweep on a scene with contacts (D10).
+- **Snapshot on failure.** No internal snapshot. The contract of D5 stands: after
+  `error.OutOfMemory` from a job the caller restores a saved state or deinits the system.
+- **DeterminismLog threading.** Not forced. Like Jolt's, the log is only meaningful with a single
+  threaded job system, and its doc comment says so.
+- **BodyAccess.** F1 ports the grants (D3) and checks them with the unit tests that use them.
