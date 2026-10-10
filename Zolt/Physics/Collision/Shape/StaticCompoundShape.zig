@@ -249,6 +249,13 @@ pub const StaticCompoundShape = struct {
         return .{ .base = .init(StaticCompoundShape, allocator, shape_sub_type) };
     }
 
+    /// new StaticCompoundShape (the default constructor, an empty shape for restoreBinaryState): reference count 0
+    pub fn create(allocator: Allocator) Allocator.Error!*StaticCompoundShape {
+        const self = try allocator.create(StaticCompoundShape);
+        self.* = .initDefault(allocator);
+        return self;
+    }
+
     /// StaticCompoundShape(const StaticCompoundShapeSettings &inSettings, TempAllocator &inTempAllocator, ShapeResult &outResult):
     /// base part first, then the C++ body. `allocator` creates the child shapes from their settings.
     pub fn initFromSettings(self: *StaticCompoundShape, settings: *const StaticCompoundShapeSettings, temp_allocator: TempAllocator, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
@@ -1421,6 +1428,11 @@ test "StaticCompoundShape: every creation path that allocates reports out of mem
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, StaticCompoundShapeSettings.create(failing.allocator()));
+    try testing.expectError(error.OutOfMemory, StaticCompoundShape.create(failing.allocator()));
+    {
+        const empty = try StaticCompoundShape.create(allocator);
+        empty.asShapeMut().destroy();
+    }
     try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.static_compound).construct.?(failing.allocator()));
 
     // createShape with child settings (1: a RotatedTranslatedShape, otherwise a StaticCompoundShape): out of memory is
@@ -1583,5 +1595,53 @@ test "Shape.scaleShape: zero scale, the shape itself, a ScaledShape or a StaticC
             try expect(world_com.isClose(ts.shape_position_com.toVec3(), .{ .max_dist_sq = 1.0e-10 }));
             try expect(s.shape.get().?.cast(ScaledShape).getScale().isClose(ts.getShapeScale(), .{}));
         }
+    }
+}
+
+/// sTestHit / sTestMiss of Jolt's CollidePointTests (the shape part, the NarrowPhaseQuery part needs Phase 5)
+fn expectPointHits(shape: *const Shape, point: Vec3, expected: usize) !void {
+    var collector = AllHitCollisionCollector(CollidePointCollector).init(testing.allocator);
+    defer collector.deinit();
+    shape.collidePoint(point.sub(shape.getCenterOfMass()), .{}, &collector.base, &.{});
+    try collector.checkError();
+    try testing.expectEqual(expected, collector.hits.items.len);
+}
+
+test "StaticCompoundShape: TestCollidePointVsStaticCompound (the compound case of Jolt's shared CollidePointTests, shape part)" {
+    const allocator = testing.allocator;
+
+    const translation1 = Vec3.init(10.0, 11.0, 12.0);
+    const rotation1 = Quat.rotation(Vec3.init(1, 2, 3).normalized(), 0.3 * math.pi);
+    const transform1 = Mat44.rotationTranslation(rotation1, translation1);
+
+    const translation2 = Vec3.init(-1.0, -2.0, -3.0);
+    const rotation2 = Quat.rotation(Vec3.init(4, 5, 6).normalized(), 0.2 * math.pi);
+    const transform2 = Mat44.rotationTranslation(rotation2, translation2);
+
+    const half_box_size = Vec3.init(0.1, 0.2, 0.3);
+    var box = RefConst(Shape).init((try BoxShape.create(allocator, half_box_size, .{})).asShape());
+    defer box.deinit();
+
+    var settings = StaticCompoundShapeSettings.init(allocator);
+    defer settings.deinit();
+    try settings.base.addShapePtr(translation1, rotation1, box.get(), .{});
+    try settings.base.addShapePtr(translation2, rotation2, box.get(), .{});
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+
+    // Hits
+    const cube_and_zero_probes = [_]Vec3{ Vec3.init(0, 0, 0), Vec3.init(-1.0, 0, 0), Vec3.init(1.0, 0, 0), Vec3.init(0, -1.0, 0), Vec3.init(0, 1.0, 0), Vec3.init(0, 0, -1.0), Vec3.init(0, 0, 1.0) };
+    for (cube_and_zero_probes) |probe| {
+        const point = half_box_size.mulScalar(0.99).mul(probe);
+        try expectPointHits(shape, transform1.mulVec3(point), 1);
+        try expectPointHits(shape, transform2.mulVec3(point), 1);
+    }
+
+    // Misses
+    for (cube_and_zero_probes[1..]) |probe| {
+        const point = half_box_size.mulScalar(1.01).mul(probe);
+        try expectPointHits(shape, transform1.mulVec3(point), 0);
+        try expectPointHits(shape, transform2.mulVec3(point), 0);
     }
 }

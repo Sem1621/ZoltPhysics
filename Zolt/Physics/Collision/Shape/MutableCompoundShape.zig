@@ -156,6 +156,13 @@ pub const MutableCompoundShape = struct {
         return .{ .base = .init(MutableCompoundShape, allocator, shape_sub_type) };
     }
 
+    /// new MutableCompoundShape (the default constructor): an empty compound, reference count 0, put it in a Ref
+    pub fn create(allocator: Allocator) Allocator.Error!*MutableCompoundShape {
+        const self = try allocator.create(MutableCompoundShape);
+        self.* = .initDefault(allocator);
+        return self;
+    }
+
     /// MutableCompoundShape(const MutableCompoundShapeSettings &inSettings, ShapeResult &outResult): base part first,
     /// then the C++ body. `allocator` creates the child shapes from their settings.
     pub fn initFromSettings(self: *MutableCompoundShape, settings: *const MutableCompoundShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
@@ -703,6 +710,8 @@ pub const MutableCompoundShape = struct {
 
 const testing = std.testing;
 const math = @import("../../../Math/Math.zig");
+const DMat44 = @import("../../../Math/DMat44.zig").DMat44;
+const DVec3 = @import("../../../Math/DVec3.zig").DVec3;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const RefCount = @import("../../../Core/Reference.zig").RefCount;
 const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
@@ -1060,6 +1069,7 @@ test "MutableCompoundShape: clone, binary state and out of memory" {
     // Out of memory: settings, creation (child settings), restore, clone, construct
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, MutableCompoundShapeSettings.create(failing.allocator()));
+    try testing.expectError(error.OutOfMemory, MutableCompoundShape.create(failing.allocator()));
     try testing.expectError(error.OutOfMemory, ShapeFunctions.get(.mutable_compound).construct.?(failing.allocator()));
     {
         const child = try SphereShapeSettings.create(allocator, 1.0, .{});
@@ -1107,5 +1117,136 @@ test "MutableCompoundShape: clone, binary state and out of memory" {
         try testing.expectEqual(@as(u32, 0), small2.base.getNumSubShapes());
         try testing.expectEqual(@as(usize, 0), small2.sub_shape_bounds.items.len);
         try testing.expectEqual(ref_count, box.asShape().getRefCount());
+    }
+}
+
+// The cases of Jolt's shared test files (ShapeTests.cpp, CollidePointTests.cpp) that only need MutableCompoundShape and
+// the shapes that are ported already (the shared files are ported once all shapes are merged)
+
+test "MutableCompoundShape: TestIsValidSubShapeID (Jolt's ShapeTests)" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    var shape1_settings = MutableCompoundShapeSettings.init(allocator);
+    defer shape1_settings.deinit();
+    var shape1_result = try shape1_settings.asShapeSettings().createShape(allocator);
+    defer shape1_result.deinit();
+    const shape1 = shape1_result.getPtr().?.cast(CompoundShape);
+
+    var shape2_settings = MutableCompoundShapeSettings.init(allocator);
+    defer shape2_settings.deinit();
+    for (0..3) |_| {
+        var sphere = RefConst(Shape).init((try SphereShape.create(allocator, 1.0, .{})).asShape());
+        defer sphere.deinit();
+        try shape2_settings.base.addShapePtr(Vec3.zero(), Quat.identity(), sphere.get(), .{});
+    }
+    var shape2_result = try shape2_settings.asShapeSettings().createShape(allocator);
+    defer shape2_result.deinit();
+    const shape2 = shape2_result.getPtr().?.cast(CompoundShape);
+
+    // Get sub shape IDs of shape 2 and test if they're valid
+    const sub_shape1 = shape2.getSubShapeIDFromIndex(0, .{}).getID();
+    try expect(shape2.isSubShapeIDValid(sub_shape1));
+    const sub_shape2 = shape2.getSubShapeIDFromIndex(1, .{}).getID();
+    try expect(shape2.isSubShapeIDValid(sub_shape2));
+    const sub_shape3 = shape2.getSubShapeIDFromIndex(2, .{}).getID();
+    try expect(shape2.isSubShapeIDValid(sub_shape3));
+    const sub_shape4 = shape2.getSubShapeIDFromIndex(3, .{}).getID(); // This one doesn't exist
+    try expect(!shape2.isSubShapeIDValid(sub_shape4));
+
+    // Shape 1 has no parts so these sub shape ID's should not be valid
+    try expect(!shape1.isSubShapeIDValid(sub_shape1));
+    try expect(!shape1.isSubShapeIDValid(sub_shape2));
+    try expect(!shape1.isSubShapeIDValid(sub_shape3));
+    try expect(!shape1.isSubShapeIDValid(sub_shape4));
+}
+
+test "MutableCompoundShape: TestEmptyMutableCompound (Jolt's ShapeTests)" {
+    const allocator = testing.allocator;
+    const expect = testing.expect;
+
+    // Create empty shape
+    const mutable_compound = try MutableCompoundShape.create(allocator);
+    var mutable_compound_ref = Ref(Shape).init(mutable_compound.asShapeMut());
+    defer mutable_compound_ref.deinit();
+
+    // A non-identity rotation
+    const rotation = Quat.rotation(Vec3.replicate(1.0 / @sqrt(3.0)), 0.1 * math.pi);
+
+    // Check that local bounding box is a single point
+    const bounds1 = mutable_compound.asShape().getLocalBounds();
+    try expect(bounds1.eql(.init(Vec3.zero(), Vec3.zero())));
+
+    // Check that get world space bounds returns a single point
+    const vec3_pos = Vec3.init(100, 200, 300);
+    const bounds2 = mutable_compound.asShape().getWorldSpaceBounds(Mat44.rotationTranslation(rotation, vec3_pos), Vec3.init(1, 2, 3));
+    try expect(bounds2.eql(.init(vec3_pos, vec3_pos)));
+
+    // Check that get world space bounds returns a single point for double precision parameters
+    const bounds3 = mutable_compound.asShape().getWorldSpaceBoundsDMat44(DMat44.rotationTranslation(rotation, DVec3.fromVec3(vec3_pos)), Vec3.init(1, 2, 3));
+    try expect(bounds3.eql(.init(vec3_pos, vec3_pos)));
+
+    // Add a shape
+    var box = RefConst(Shape).init((try BoxShape.create(allocator, Vec3.replicate(1.0), .{})).asShape());
+    defer box.deinit();
+    _ = try mutable_compound.addShape(Vec3.zero(), Quat.identity(), box.get().?, .{});
+    const bounds4 = mutable_compound.asShape().getLocalBounds();
+    try expect(bounds4.eql(.init(Vec3.replicate(-1.0), Vec3.replicate(1.0))));
+
+    // Remove it again
+    mutable_compound.removeShape(0);
+
+    // Check that the bounding box has zero size again
+    const bounds5 = mutable_compound.asShape().getLocalBounds();
+    try expect(bounds5.eql(.init(Vec3.zero(), Vec3.zero())));
+}
+
+test "MutableCompoundShape: TestCollidePointVsMutableCompound (Jolt's CollidePointTests, shape part)" {
+    const allocator = testing.allocator;
+
+    const translation1 = Vec3.init(10.0, 11.0, 12.0);
+    const rotation1 = Quat.rotation(Vec3.init(1, 2, 3).normalized(), 0.3 * math.pi);
+    const transform1 = Mat44.rotationTranslation(rotation1, translation1);
+
+    const translation2 = Vec3.init(-1.0, -2.0, -3.0);
+    const rotation2 = Quat.rotation(Vec3.init(4, 5, 6).normalized(), 0.2 * math.pi);
+    const transform2 = Mat44.rotationTranslation(rotation2, translation2);
+
+    const half_box_size = Vec3.init(0.1, 0.2, 0.3);
+    var box = RefConst(Shape).init((try BoxShape.create(allocator, half_box_size, .{})).asShape());
+    defer box.deinit();
+
+    var settings = MutableCompoundShapeSettings.init(allocator);
+    defer settings.deinit();
+    try settings.base.addShapePtr(translation1, rotation1, box.get(), .{});
+    try settings.base.addShapePtr(translation2, rotation2, box.get(), .{});
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+
+    // sTestHit / sTestMiss (the NarrowPhaseQuery part needs Phase 5)
+    const Probe = struct {
+        fn hits(s: *const Shape, point: Vec3) !usize {
+            var collector = AllHitCollisionCollector(CollidePointCollector).init(testing.allocator);
+            defer collector.deinit();
+            s.collidePoint(point.sub(s.getCenterOfMass()), .{}, &collector.base, &.{});
+            try collector.checkError();
+            return collector.hits.items.len;
+        }
+    };
+
+    // Hits
+    const cube_and_zero_probes = [_]Vec3{ Vec3.init(0, 0, 0), Vec3.init(-1.0, 0, 0), Vec3.init(1.0, 0, 0), Vec3.init(0, -1.0, 0), Vec3.init(0, 1.0, 0), Vec3.init(0, 0, -1.0), Vec3.init(0, 0, 1.0) };
+    for (cube_and_zero_probes) |probe| {
+        const point = half_box_size.mulScalar(0.99).mul(probe);
+        try testing.expectEqual(@as(usize, 1), try Probe.hits(shape, transform1.mulVec3(point)));
+        try testing.expectEqual(@as(usize, 1), try Probe.hits(shape, transform2.mulVec3(point)));
+    }
+
+    // Misses
+    for (cube_and_zero_probes[1..]) |probe| {
+        const point = half_box_size.mulScalar(1.01).mul(probe);
+        try testing.expectEqual(@as(usize, 0), try Probe.hits(shape, transform1.mulVec3(point)));
+        try testing.expectEqual(@as(usize, 0), try Probe.hits(shape, transform2.mulVec3(point)));
     }
 }
