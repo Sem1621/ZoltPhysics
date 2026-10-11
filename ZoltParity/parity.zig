@@ -32,6 +32,7 @@ test {
     _ = @import("Physics/CompositeParity.zig");
     _ = @import("Physics/CompoundsParity.zig");
     _ = @import("Physics/ConstraintPartsParity.zig");
+    _ = @import("Physics/ContactConstraintManagerParity.zig");
     _ = @import("Physics/ConvexHullShapeParity.zig");
     _ = @import("Physics/ConvexParity.zig");
     _ = @import("Physics/CylindersParity.zig");

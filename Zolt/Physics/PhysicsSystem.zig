@@ -2471,7 +2471,7 @@ pub const PhysicsSystem = struct {
         }
 
         if (state.contacts) {
-            if (!self.contact_manager.restoreState(stream, opts.filter))
+            if (!try self.contact_manager.restoreState(stream, opts.filter))
                 return false;
         }
 

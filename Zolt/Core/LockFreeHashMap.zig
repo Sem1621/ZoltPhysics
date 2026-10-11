@@ -6,7 +6,10 @@
 //!   takes it again. `LockFreeHashMap.init(allocator, lfhm_allocator, max_buckets)` combines the C++ constructor (which
 //!   stores a reference to the LFHMAllocator) and `Init(inMaxBuckets)`. The map keeps a pointer to the LFHMAllocator
 //!   (like the C++ reference), so the LFHMAllocator must outlive the map and must not move.
-//! - `create` takes the initial value instead of forwarding constructor parameters.
+//! - `create` takes the initial value instead of forwarding constructor parameters. A C++ `Create` without
+//!   constructor parameters value-initializes the value (`Value()`), which zeroes a type without a user-provided
+//!   constructor: pass `std.mem.zeroes(Value)` there (ContactConstraintManager's caches), not a value with undefined
+//!   fields.
 //! - `KeyValue` is an `extern struct` with the C++ layout (key, next offset, value), so that the extra bytes requested
 //!   by `create` directly follow the value and handles (offsets) are the same as in Jolt. Key and Value must therefore
 //!   be types with a defined layout (integers, floats, enums with an explicit tag type, extern structs, arrays of them).
@@ -472,13 +475,17 @@ pub fn LockFreeHashMap(comptime Key: type, comptime Value: type) type {
                 if (count != 0) log.info("{d}: {d}", .{ i, count });
         }
 
-        /// Compare keys, with `eql` when the key type declares it
+        /// Compare keys, with `eql` when the key type declares it (`eql` may take the other key by value or by `*const`
+        /// pointer, like SubShapeIDPair's)
         fn keyEql(a: Key, b: Key) bool {
             const has_eql = switch (@typeInfo(Key)) {
                 .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(Key, "eql"),
                 else => false,
             };
-            return if (has_eql) a.eql(b) else a == b;
+            if (!has_eql)
+                return a == b;
+            const Other = @typeInfo(@TypeOf(Key.eql)).@"fn".params[1].type.?;
+            return if (Other == Key) a.eql(b) else a.eql(&b);
         }
     };
 }
