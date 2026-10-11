@@ -399,10 +399,12 @@ const SphereFilter = struct {
 };
 
 /// Wraps the job system of a world and counts the FindCollisions jobs that are spawned from inside jobs
-/// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies)
+/// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies) and the
+/// FindCCDContacts jobs (PostIntegrateVelocity creates them from inside its job)
 const SpawnCountingJobSystem = struct {
     inner: JobSystem,
     num_spawned_find_collisions: std.atomic.Value(u32) = .init(0),
+    num_find_ccd_contacts: std.atomic.Value(u32) = .init(0),
 
     fn jobSystem(self: *SpawnCountingJobSystem) JobSystem {
         return .init(self);
@@ -416,6 +418,8 @@ const SpawnCountingJobSystem = struct {
         const handle = try self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
         if (opts.num_dependencies == 0 and std.mem.eql(u8, job_name, "FindCollisions"))
             _ = self.num_spawned_find_collisions.fetchAdd(1, .monotonic);
+        if (std.mem.eql(u8, job_name, "FindCCDContacts"))
+            _ = self.num_find_ccd_contacts.fetchAdd(1, .monotonic);
         return handle;
     }
 
@@ -1345,14 +1349,38 @@ const Run = struct {
         if (sweep)
             return self.sweepStep(delta_time, collision_steps);
 
+        const ccd_jobs_before = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
         const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
+        self.countCCDJobs(ccd_jobs_before);
         if (!self.zw.temp.isEmpty()) return self.fail("the temp allocator is not empty after the update", .{});
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        try self.countCCDManifolds();
         try self.compareRecords();
         self.updateStats();
+    }
+
+    /// The number of FindCCDContacts jobs of the update that just ran (Zolt side)
+    fn countCCDJobs(self: *Run, before: u32) void {
+        const num_jobs = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic) - before;
+        self.stats.max_find_ccd_contacts_jobs = @max(self.stats.max_find_ccd_contacts_jobs, num_jobs);
+    }
+
+    /// Count the update when the contact cache of the C++ state after it holds CCD manifolds (a linear cast body hit
+    /// something: ContactConstraintManager::OnCCDContactAdded, the worlds have a contact listener)
+    fn countCCDManifolds(self: *Run) !void {
+        var layout: StateLayout = .{ .allocator = self.allocator, .bytes = self.jolt_state.items, .cpp = self.cw };
+        defer layout.deinit();
+        try layout.decode();
+        for (layout.fields.items) |*field| {
+            if (std.mem.eql(u8, field.name, "num_ccd_manifolds")) {
+                if (std.mem.bytesToValue(u32, self.jolt_state.items[field.offset..][0..4]) > 0)
+                    self.stats.updates_with_ccd_manifolds += 1;
+                return;
+            }
+        }
     }
 
     fn updateStats(self: *Run) void {
@@ -1388,10 +1416,13 @@ const Run = struct {
 
         // The update counting the temp allocations is the one that is compared (records included)
         var counting: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{});
+        const ccd_jobs_before = zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
         const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobSystem());
+        self.countCCDJobs(ccd_jobs_before);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        try self.countCCDManifolds();
         try zw.takeRecords(&zolt_records);
         const step_calls = try allocator.alloc(u32, zw.step_listeners.len);
         defer allocator.free(step_calls);
@@ -1482,6 +1513,10 @@ const RunStats = struct {
     updates_with_sleeping_bodies: u32 = 0,
     /// Number of updates with active linear cast bodies
     updates_with_ccd_bodies: u32 = 0,
+    /// Number of updates after which the contact cache (C++ state) holds CCD manifolds: a linear cast body hit something
+    updates_with_ccd_manifolds: u32 = 0,
+    /// Largest number of FindCCDContacts jobs in one update (Zolt side)
+    max_find_ccd_contacts_jobs: u32 = 0,
     /// Number of restore_cross operations that changed the state
     restores_changing_the_state: u32 = 0,
     /// Number of checked expect_body_state operations
@@ -1578,6 +1613,10 @@ fn runEntry(entry: *const SceneEntry) !void {
     }
     if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0);
     if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
+    if (expect.ccd_hits) try expectReached(entry, "CCD hits", stats[0].updates_with_ccd_manifolds > 0);
+    var max_find_ccd_contacts_jobs: u32 = 0;
+    for (stats) |s| max_find_ccd_contacts_jobs = @max(max_find_ccd_contacts_jobs, s.max_find_ccd_contacts_jobs);
+    if (expect.ccd_jobs > 0) try expectReached(entry, "several FindCCDContacts jobs in one update", max_find_ccd_contacts_jobs >= expect.ccd_jobs);
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
         if (config.sweeps and entry.sweep_stride != 0) {
@@ -1630,7 +1669,7 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer b_records.deinit(allocator);
 
     for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by == .none or entry.blocked_by == .release_only or entry.blocked_by == .contacts) continue; // Supported (their own tests)
+        if (entry.blocked_by.isSupported() or entry.blocked_by == .release_only) continue; // Supported (their own tests)
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);
