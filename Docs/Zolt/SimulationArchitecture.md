@@ -913,3 +913,69 @@ QuadTree).
 - **DeterminismLog threading.** Not forced. Like Jolt's, the log is only meaningful with a single
   threaded job system, and its doc comment says so.
 - **BodyAccess.** F1 ports the grants (D3) and checks them with the unit tests that use them.
+
+## 8. Settled during the port
+
+**F1 (Core additions, Body package).**
+- `LockFreeHashMap.findMut` takes a mutable map (`self: *Self`). Every place Jolt writes through a
+  `const_cast` of a `Find` result is inside a non-const ContactConstraintManager function, so A4
+  calls `findMut` on its non-const cache pointers.
+- `FailingTempAllocator` (in `TempAllocator.zig`) and `FailingJobSystem` (in `JobSystem.zig`) are
+  public Zolt test helpers. `FailingTempAllocator` fails exactly the n-th call, size 0 calls
+  included.
+- `TempArray.alloc` returns `error.OutOfMemory` when `n * @sizeOf(T)` does not fit in a `u32`
+  (Jolt truncates the size there).
+- Non-const C++ overloads of getters are named `...Mut`: `getMotionPropertiesMut`, `getBodyMut`,
+  `tryGetBodyMut`, `getBodyInterfaceMut`.
+- `SharedLock(T)` exists next to `UniqueLock(T)`, because Jolt has both.
+- BodyManager's `bodies_cache_invalid_mutex` is in `mutable_fields` too: it is locked from const
+  paths.
+- A thread pool that a test fills must have room for every job it creates: the queue keeps a
+  reference to each job until a worker takes it, so jobs that already ran through the barrier
+  still occupy a slot.
+
+**F2 (PhysicsSystem core, constraint parts, simulation parity).**
+- The F2 port covers all of REGION R1, not only the gravity-only job bodies. The CCD broad phase
+  cast and the no-hit resolve path are real, so linear cast bodies without hits are bit exact.
+  REGION R2, the island solve of R3 and the hit path of R4 are stubs that `@panic` where Jolt
+  would do work, so a result is never silently wrong.
+- Debug grants: JobFindCollisions and JobSoftBodyPrepare remove their dependencies after the scope
+  of their BodyAccess grants (Jolt: inside it). With JobSystemSingleThreaded the kicked jobs run
+  inside the call, and their grants assert that no grant is active. Jolt hits that from the
+  second collision step on, Zolt with the start gate already in the first. Results are
+  unchanged.
+- `PhysicsSystem.init` options: `.broad_phase = .brute_force` until A1, or `.custom = *BroadPhase`
+  (a Zolt addition; the system owns it after a successful init).
+- `PhysicsUpdateContext` is complete. The ContactConstraintManager stub writes Jolt's bytes for
+  an empty contact cache (two `u32` zeros).
+- `zolt.test_constraints` (`Zolt/Physics/Constraints/TestConstraints.zig`) is a test-only
+  TwoBodyConstraint made with `virtual.make`, registered through the test `zolt_user_types`. The
+  constraint part inline tests use `ConstraintPart/ConstraintPartTestContext.zig` (test only).
+- Constraint parts:
+  - The templated contact parts `ContactConstraintPart(T1, T2)` and
+    `AngularFrictionConstraintPart(T1, T2)` are extern structs with Jolt's layout, because A4
+    stores them in a raw byte buffer. Their size is checked at comptime and against C++
+    `sizeof`.
+  - Template specializations that add members become `void` fields, and multiple inheritance
+    becomes `base1` / `base2` fields plus forwarders.
+  - `SpringSettings.frequency` doubles as Jolt's anonymous union with `mStiffness`
+    (`getStiffness` / `setStiffness`).
+  - `SpringMode` and `MotorState` accept every value of their underlying integer, as Jolt's enums
+    do, so restoring an out-of-range byte is not illegal behavior.
+- Jolt asserts that a kinematic body never reaches the Gear, RackAndPinion and IndependentAxis
+  parts or AngularFriction without a dynamic body. Zolt asserts the same with asserts on and
+  matches Jolt's release behavior in ReleaseFast (covered by the ReleaseFast parity).
+- Simulation parity (`ZoltParity/Physics/SimulationParity.zig`, `SimulationReference.cpp`,
+  `SimScenes.zig`):
+  - Zolt and the C++ PhysicsSystem step in lockstep and are compared after every update, not every
+    collision step: SaveState cannot run inside an update.
+  - The thread matrix pairs Zolt single threaded and pools of 0, 1, 3 and 7 workers with C++
+    pools of 0, 3 and 7 threads.
+  - Scenes that need a later wave are marked blocked and are skipped visibly
+    (`error.SkipZigTest`). Their C++ side is already checked on its own.
+  - Every scene asserts that it reaches the edge cases it is meant to cover.
+  - The C++ reference always uses the QuadTree (Jolt's `BROAD_PHASE` define). Gravity-only scenes
+    do not depend on it; contact scenes need A1.
+- PhysicsSystem's linear cast inner radius assert only runs with asserts on (PortingGuide
+  section 7). With a mirrored ScaledShape Jolt's inner radius is negative and its debug build
+  asserts; the release-only scene compares the release behavior.
