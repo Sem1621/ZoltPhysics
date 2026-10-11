@@ -964,48 +964,76 @@ test "JobHandle removeDependencies" {
     try std.testing.expectEqual(@as(u32, 4), test_system.num_queue_jobs_calls);
 }
 
-/// A job graph like the physics update (Docs/Zolt/SimulationArchitecture.md D4, D5): `num_roots` root jobs are created
-/// behind a start gate (1 dependency, removed after the graph is built), each root spawns a child job from inside the
-/// job and adds it to the barrier. A failure while building changes nothing, a failed spawn is not an error: the root
-/// does the child's work itself.
+/// A job graph like the physics update (Docs/Zolt/SimulationArchitecture.md D4, D5): a finalize job and `num_roots`
+/// root jobs are created, the roots behind a start gate (1 dependency, removed after the graph is built). Each root
+/// spawns a child job from inside the job and adds it to the barrier, like TrySpawnJobFindCollisions: it first adds a
+/// dependency to the finalize job (Jolt's mUpdateBroadphaseFinalize.AddDependency()), which the child removes when it
+/// is done. The finalize job therefore stays in the barrier until every root and child finished, so the barrier
+/// cannot run out of jobs to wait for while a root is still adding its child. A failure while building changes
+/// nothing, a failed spawn is not an error: the root undoes the dependency and does the child's work itself.
 const SpawnGraph = struct {
     const num_roots = 8;
     const JobHandle = JobSystem.JobHandle;
 
     job_system: JobSystem,
     barrier: *JobSystem.Barrier = undefined,
+    finalize: JobHandle = .empty,
     work: [2 * num_roots]std.atomic.Value(u32) = @splat(.init(0)),
     num_spawn_failures: std.atomic.Value(u32) = .init(0),
 
+    /// Sum of `work` when the finalize job ran (maxInt: it did not run)
+    finalized_work: std.atomic.Value(u32) = .init(std.math.maxInt(u32)),
+
     fn rootJob(self: *SpawnGraph, i: usize) void {
-        if (self.job_system.createJob("Child", Color.blue, .init(childJob, .{ self, num_roots + i }), .{})) |handle| {
+        // Add a dependency from the child job to the finalize job before the child exists
+        self.finalize.addDependency(.{});
+
+        if (self.job_system.createJob("Child", Color.blue, .init(spawnedJob, .{ self, num_roots + i }), .{})) |handle| {
             var child = handle;
             defer child.deinit();
             self.barrier.addJob(&child);
         } else |_| {
-            // Not an error: the running job does the work of the job it could not create
+            // Not an error: undo the dependency, the running job does the work of the job it could not create
+            self.finalize.removeDependency(.{});
             _ = self.num_spawn_failures.fetchAdd(1, .monotonic);
             childJob(self, num_roots + i);
         }
         childJob(self, i);
+
+        self.finalize.removeDependency(.{});
+    }
+
+    fn spawnedJob(self: *SpawnGraph, i: usize) void {
+        childJob(self, i);
+        self.finalize.removeDependency(.{});
     }
 
     fn childJob(self: *SpawnGraph, i: usize) void {
         _ = self.work[i].fetchAdd(1, .monotonic);
     }
 
+    fn finalizeJob(self: *SpawnGraph) void {
+        var sum: u32 = 0;
+        for (&self.work) |*work| sum += work.load(.monotonic);
+        self.finalized_work.store(sum, .monotonic);
+    }
+
     /// Build the graph (no job runs while building), then open the start gate and wait
     fn run(self: *SpawnGraph) error{OutOfMemory}!void {
         var roots: [num_roots]JobHandle = @splat(.empty);
         defer for (&roots) |*root| root.deinit(); // On error the jobs that were created are freed without running
+        defer self.finalize.deinit();
+        self.finalize = try self.job_system.createJob("Finalize", Color.green, .init(finalizeJob, .{self}), .{ .num_dependencies = num_roots });
         for (&roots, 0..) |*root, i|
             root.* = try self.job_system.createJob("Root", Color.red, .init(rootJob, .{ self, i }), .{ .num_dependencies = 1 });
 
         self.barrier = self.job_system.createBarrier().?;
         defer self.job_system.destroyBarrier(self.barrier);
+        self.barrier.addJob(&self.finalize);
         self.barrier.addJobs(&roots);
         JobHandle.removeDependencies(&roots, .{}); // Open the start gate
         self.job_system.waitForJobs(self.barrier);
+        std.debug.assert(self.finalize.isDone());
     }
 
     /// Fail every createJob of the graph in turn
@@ -1016,9 +1044,11 @@ const SpawnGraph = struct {
         var reference: SpawnGraph = .{ .job_system = counting.jobSystem() };
         try reference.run();
         const num_jobs = counting.num_created.load(.monotonic);
-        try std.testing.expectEqual(@as(u32, 2 * num_roots), num_jobs);
+        const num_build_jobs = num_roots + 1; // The finalize job and the roots
+        try std.testing.expectEqual(@as(u32, 2 * num_roots + 1), num_jobs);
         try std.testing.expect(!counting.has_induced_failure.load(.monotonic));
         for (&reference.work) |*work| try std.testing.expectEqual(@as(u32, 1), work.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 2 * num_roots), reference.finalized_work.load(.monotonic)); // The finalize job ran after all the work
 
         for (0..num_jobs + 2) |fail_index| {
             var failing: FailingJobSystem = .init(inner, .{ .fail_index = @intCast(fail_index) });
@@ -1030,16 +1060,18 @@ const SpawnGraph = struct {
             };
             if (build_failed) {
                 // Failure while building the graph: no job ran
-                try std.testing.expect(fail_index < num_roots);
+                try std.testing.expect(fail_index < num_build_jobs);
                 for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 0), work.load(.monotonic));
+                try std.testing.expectEqual(std.math.maxInt(u32), graph.finalized_work.load(.monotonic));
             } else {
-                // Spawn failures (or none): the same work was done
-                try std.testing.expect(fail_index >= num_roots);
+                // Spawn failures (or none): the same work was done, the finalize job still ran after all of it
+                try std.testing.expect(fail_index >= num_build_jobs);
                 try std.testing.expectEqual(@as(u32, if (fail_index < num_jobs) 1 else 0), graph.num_spawn_failures.load(.monotonic));
                 for (&graph.work) |*work| try std.testing.expectEqual(@as(u32, 1), work.load(.monotonic));
+                try std.testing.expectEqual(@as(u32, 2 * num_roots), graph.finalized_work.load(.monotonic));
             }
             try std.testing.expectEqual(fail_index < num_jobs, failing.has_induced_failure.load(.monotonic));
-            try std.testing.expectEqual(if (fail_index < num_roots) @as(u32, @intCast(fail_index + 1)) else num_jobs, failing.num_created.load(.monotonic)); // A failed build stops creating jobs
+            try std.testing.expectEqual(if (fail_index < num_build_jobs) @as(u32, @intCast(fail_index + 1)) else num_jobs, failing.num_created.load(.monotonic)); // A failed build stops creating jobs
         }
     }
 };
@@ -1081,8 +1113,14 @@ test "FailingJobSystem with jobs spawning jobs on several threads" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
     const JobSystemThreadPool = @import("JobSystemThreadPool.zig").JobSystemThreadPool;
 
+    // The queue keeps a reference to every queued job until a worker thread reaches its slot, also when the barrier
+    // executed the job on this thread, so max_jobs covers every job the test creates (10 sweeps of 20 graphs of at most
+    // 17 jobs) and createJob cannot run out of jobs when the worker threads are not scheduled for a while.
+    const num_sweeps = 10;
+    const max_jobs = 4096;
+    comptime std.debug.assert(max_jobs >= num_sweeps * (2 * SpawnGraph.num_roots + 1 + 3) * (2 * SpawnGraph.num_roots + 1));
     var pool: JobSystemThreadPool = .empty;
-    try pool.init(std.testing.allocator, std.testing.io, 256, 4, .{ .num_threads = 3 });
+    try pool.init(std.testing.allocator, std.testing.io, max_jobs, 4, .{ .num_threads = 3 });
     defer pool.deinit();
-    for (0..10) |_| try SpawnGraph.sweep(pool.jobSystem());
+    for (0..num_sweeps) |_| try SpawnGraph.sweep(pool.jobSystem());
 }

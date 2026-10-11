@@ -165,8 +165,9 @@ both types) when porting code needs them.
   `packed struct(uN)` with one `bool` per bit in Jolt's bit order. Jolt's named combinations become decls
   (`AllowedDOFs.all`, `AllowedDOFs.plane_2d`, `StateRecorderState.all`), and a comptime block checks the bits against
   Jolt's values. Private flag enums that Jolt changes with atomic or / and (`Body::EFlags`,
-  `CachedManifold::EFlags`) become integer constants in a `Flags` namespace on an atomic field
-  (`flags: std.atomic.Value(u8)`, changed with `fetchOr` / `fetchAnd`).
+  `CachedManifold::EFlags`) become integer constants in a `Flags` namespace on an atomic field of Jolt's width
+  (`flags: std.atomic.Value(u8)` for `Body`, `std.atomic.Value(u16)` for `CachedManifold`), changed with `fetchOr` /
+  `fetchAnd`.
 
 ### Allocation
 
@@ -214,7 +215,10 @@ both types) when porting code needs them.
     never between a claim and its completion: other jobs may wait for the claimed work.
   - A job that cannot be created from inside a job (`createJob` returns `error.OutOfMemory` in
     `TrySpawnJobFindCollisions`, `FindCCDContacts`) is not an error: undo the claim and the dependencies, the
-    running jobs do the work. Results do not change.
+    running jobs do the work. Results do not change. PostIntegrateVelocity removes the ResolveCCDContacts and
+    ContactRemovedCallbacks dependencies of every FindCCDContacts job it could not create. When it could create none,
+    no running job processes the CCD bodies, so PostIntegrateVelocity does the FindCCDContacts work itself (the jobs
+    that were created take bodies until `next_ccd_body` runs out).
   - A failure while the job graph is built has no side effects, because the root jobs of the first step wait behind
     a start gate (one extra dependency, removed after the graph is complete) and no job has run yet.
   - Contract after `error.OutOfMemory` from a job: the state is mid-step but memory safe (no lock held, nothing

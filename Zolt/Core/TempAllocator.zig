@@ -931,8 +931,13 @@ test "FailingTempAllocator with jobs on several threads" {
         }
     };
 
+    // The queue keeps a reference to every queued job until a worker thread reaches its slot, also when the barrier
+    // executed the job on this thread, so max_jobs covers every job the test creates (num_arrays + 1 chains of
+    // 2 * num_arrays jobs) and createJob cannot run out of jobs when the worker threads are not scheduled for a while.
+    const max_jobs = 1024;
+    comptime std.debug.assert(max_jobs >= (num_arrays + 1) * 2 * num_arrays);
     var pool: JobSystemThreadPool = .empty;
-    try pool.init(std.testing.allocator, std.testing.io, 128, 4, .{ .num_threads = 3 });
+    try pool.init(std.testing.allocator, std.testing.io, max_jobs, 4, .{ .num_threads = 3 });
     defer pool.deinit();
     var impl = try TempAllocatorImpl.init(std.testing.allocator, 1024 * a16);
     defer impl.deinit();
