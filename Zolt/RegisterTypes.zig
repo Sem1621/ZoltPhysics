@@ -19,7 +19,9 @@
 //!     run after Jolt's registrations (so they override them);
 //!   - `default_material: *const zolt.PhysicsMaterial` (a static material, see PhysicsMaterial.initStatic);
 //!   - `material_types`: a tuple of material classes that PhysicsMaterial.restoreFromBinaryState can create;
-//!   - `group_filter_types`: a tuple of GroupFilter classes that GroupFilter.restoreFromBinaryState can create.
+//!   - `group_filter_types`: a tuple of GroupFilter classes that GroupFilter.restoreFromBinaryState can create;
+//!   - `constraint_settings_types`: a tuple of ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState
+//!     can create.
 //!
 //! Not needed in Zolt: RegisterTypesInternal / UnregisterTypes (nothing to register or unregister at runtime) and
 //! VerifyJoltVersionID (Zig compiles the library together with the application, so the ABI cannot mismatch).
@@ -103,6 +105,10 @@ pub const material_types = .{ PhysicsMaterial, PhysicsMaterialSimple } ++ (if (@
 /// The GroupFilter classes that GroupFilter.restoreFromBinaryState can create (the group filter part of the Factory
 /// registration, until the Factory of Phase 8): Jolt's GroupFilterTable plus the user's
 pub const group_filter_types = .{GroupFilterTable} ++ (if (@hasDecl(user_types, "group_filter_types")) user_types.group_filter_types else .{});
+
+/// The ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState can create (the constraint part of the
+/// Factory registration, until the Factory of Phase 8): Jolt's settings classes (added by Phase 6) plus the user's
+pub const constraint_settings_types = .{} ++ (if (@hasDecl(user_types, "constraint_settings_types")) user_types.constraint_settings_types else .{});
 
 test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
     const std = @import("std");
