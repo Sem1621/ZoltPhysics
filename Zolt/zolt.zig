@@ -417,6 +417,7 @@ pub const SpringMode = @import("Physics/Constraints/SpringSettings.zig").SpringM
 pub const SpringSettings = @import("Physics/Constraints/SpringSettings.zig").SpringSettings;
 pub const TwoBodyConstraint = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraint;
 pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraintSettings;
+pub const DeterminismLog = @import("Physics/DeterminismLog.zig");
 pub const Activation = @import("Physics/EActivation.zig").Activation;
 pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
 pub const IslandBuilder = @import("Physics/IslandBuilder.zig").IslandBuilder;
@@ -671,6 +672,7 @@ const source_files = .{
     @import("Physics/Constraints/SpringSettings.zig"),
     @import("Physics/Constraints/TestConstraints.zig"),
     @import("Physics/Constraints/TwoBodyConstraint.zig"),
+    @import("Physics/DeterminismLog.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
     @import("Physics/IslandBuilder.zig"),

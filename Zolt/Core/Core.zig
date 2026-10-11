@@ -19,6 +19,10 @@ pub const double_precision: bool = options.double_precision;
 /// Number of bits in an ObjectLayer (JPH_OBJECT_LAYER_BITS), set with `-Dobject_layer_bits=16|32`
 pub const object_layer_bits: u8 = options.object_layer_bits;
 
+/// Log the state of the simulation to find determinism issues (JPH_ENABLE_DETERMINISM_LOG, see
+/// Physics/DeterminismLog.zig), set with `-Ddeterminism_log=true`
+pub const determinism_log: bool = options.determinism_log;
+
 /// Cache line size, used to avoid false sharing (JPH_CACHE_LINE_SIZE)
 pub const cache_line_size = 64;
 
