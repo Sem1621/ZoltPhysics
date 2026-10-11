@@ -45,10 +45,10 @@
 //! `SimShapeFilterMode.filter_spheres` the bits of `ContactFlags` in the upper 32 bits of the user data of the two
 //! bodies decide what the listener / filter does (the same code on both sides). A contact scene states what it
 //! reaches in `SceneEntry.expect` (contact callbacks, removed contacts, sleeping bodies, FindCollisions jobs spawned
-//! from inside jobs, a large island solved by the LargeIslandSplitter); `runEntry` checks it. Rules: linear cast bodies
-//! must still not hit anything (`Blocker.ccd_hits`, REGION R4), and the contact constraint buffer and the caches must
-//! be large enough (`max_contact_constraints`, `max_body_pairs`): which contacts are dropped when they are full depends
-//! on the threads, in Jolt too.
+//! from inside jobs, a large island solved by the LargeIslandSplitter, a full manifold array in ProcessBodyPair);
+//! `runEntry` checks it. Rules: linear cast bodies must still not hit anything (`Blocker.ccd_hits`, REGION R4), and the
+//! contact constraint buffer and the caches must be large enough (`max_contact_constraints`, `max_body_pairs`): which
+//! contacts are dropped when they are full depends on the threads, in Jolt too.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -572,7 +572,16 @@ pub const Expect = struct {
     /// Bodies are put to sleep from the final batch of a split island (Zolt side: the LargeIslandSplitter has split
     /// islands when OnBodyDeactivated is called from SolvePositionConstraints)
     large_island: bool = false,
+    /// The manifold array of ProcessBodyPair's ReductionCollideShapeCollector is full: a body pair gets
+    /// `max_manifolds_per_body_pair` manifolds (OnContactAdded + OnContactPersisted calls) in one update, so its hits
+    /// with other normals take the "array full" branch of AddHit (keep the manifolds with the deepest penetration). Only
+    /// for scenes with one collision step per update (the count is per update).
+    full_manifolds: bool = false,
 };
+
+/// The capacity of the manifold array of ProcessBodyPair's ReductionCollideShapeCollector (Jolt:
+/// `using Manifolds = StaticArray<MyManifold, 32>`)
+pub const max_manifolds_per_body_pair = 32;
 
 pub const SceneEntry = struct {
     name: []const u8,
@@ -647,6 +656,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "contacts_far_from_origin", .build = buildFarFromOrigin, .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_kinematic_vs_non_dynamic", .build = buildKinematicVsNonDynamic, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "contacts_deep_penetration", .build = buildDeepPenetration, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_many_manifolds", .build = buildManyManifolds, .blocked_by = .contacts, .expect = .{ .contacts = true, .full_manifolds = true } },
     .{ .name = "contacts_random_1", .build = buildContactRandom(1, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_2", .build = buildContactRandom(2, 2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_3", .build = buildContactRandom(3, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
@@ -2697,6 +2707,82 @@ fn buildDeepPenetration(b: *SceneBuilder) Allocator.Error!void {
     for (0..4) |i|
         _ = try b.body(.{ .position = .{ real(i) * 0.4, 0.3 + real(i) * 0.5, real(i % 2) * 0.3 }, .shape = if (i % 2 == 0) box else ball, .object_layer = Layers.moving }, .activate);
     _ = try b.body(.{ .position = .{ 5, -0.3, 0 }, .shape = ball, .object_layer = Layers.moving }, .activate); // Half inside the floor
+}
+
+/// Compounds of many small spheres that start pressed into a bumpy mesh (random heights) and a disc of spheres on a
+/// static sphere: a body pair finds more contact normals than ReductionCollideShapeCollector holds manifolds, so its
+/// "array full" branch keeps the manifolds with the deepest penetration (Expect.full_manifolds), the disc with ties
+/// between the penetration depths
+fn buildManyManifolds(b: *SceneBuilder) Allocator.Error!void {
+    b.rng = 0x3a1f05;
+    b.num_updates = 40;
+    b.max_contact_constraints = 8192;
+
+    // A static mesh of 24 x 24 cells of 0.25 m with random heights in [-0.25, 0.25)
+    const n = 24;
+    const cell: f32 = 0.25;
+    const half = 0.5 * cell * @as(f32, n);
+    var heights: [(n + 1) * (n + 1)]f32 = undefined;
+    for (&heights) |*h| h.* = b.float(-0.25, 0.25);
+    var triangles: std.ArrayList([9]f32) = .empty;
+    defer triangles.deinit(b.allocator);
+    for (0..n) |iz| {
+        for (0..n) |ix| {
+            const x0 = @as(f32, @floatFromInt(ix)) * cell - half;
+            const z0 = @as(f32, @floatFromInt(iz)) * cell - half;
+            const x1 = x0 + cell;
+            const z1 = z0 + cell;
+            const h00 = heights[iz * (n + 1) + ix];
+            const h10 = heights[iz * (n + 1) + ix + 1];
+            const h01 = heights[(iz + 1) * (n + 1) + ix];
+            const h11 = heights[(iz + 1) * (n + 1) + ix + 1];
+            try triangles.append(b.allocator, .{ x0, h00, z0, x0, h01, z1, x1, h11, z1 });
+            try triangles.append(b.allocator, .{ x0, h00, z0, x1, h11, z1, x1, h10, z0 });
+        }
+    }
+    const terrain = try b.mesh(triangles.items);
+
+    // A static compound of 10 x 10 spheres and a mutable compound of 8 x 8 spheres (every sphere touches several
+    // triangles with different normals)
+    const sphere = try b.sphere(0.12);
+    var children: [100]SimCompoundChild = undefined;
+    for (&children, 0..) |*child, i|
+        child.* = .{ .shape = sphere, .position = .{ @as(f32, @floatFromInt(i % 10)) * 0.22 - 0.99, 0, @as(f32, @floatFromInt(i / 10)) * 0.22 - 0.99 } };
+    const static_compound = try b.compound(.static_compound, &children);
+    for (children[0..64], 0..) |*child, i|
+        child.* = .{ .shape = sphere, .position = .{ @as(f32, @floatFromInt(i % 8)) * 0.25 - 0.875, 0, @as(f32, @floatFromInt(i / 8)) * 0.25 - 0.875 } };
+    const mutable_compound = try b.compound(.mutable_compound, children[0..64]);
+
+    _ = try b.body(.{ .shape = terrain, .motion_type = 0, .friction = 0.6, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -1.5, 0, -0.2 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .shape = static_compound, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 1.5, 0, 0.3 }, .rotation = axisAngle(.{ 0, 1, 0 }, -0.5), .shape = mutable_compound, .object_layer = Layers.moving }, .activate);
+
+    // Equal penetration depths: a flat disc of spheres (radius 0.25, on a grid of 0.25 m) lying on a static sphere of
+    // radius 2. Every coordinate is a multiple of 0.25 and the children come in pairs (p, -p), so the center of mass of
+    // the compound is exactly 0 and in the first update the spheres at (±x, ±z) get bit identical penetration depths
+    // with normals more than 5 degrees apart: the "array full" branch meets ties between the manifold with the least
+    // penetration and other manifolds or the new hit (`<` versus `<=` there decides which manifold is kept)
+    const disc_sphere = try b.sphere(0.25);
+    const big_sphere = try b.sphere(2);
+    var disc: std.ArrayList(SimCompoundChild) = .empty;
+    defer disc.deinit(b.allocator);
+    try disc.append(b.allocator, .{ .shape = disc_sphere });
+    for (1..5) |i| {
+        for (0..5) |j| {
+            // The (i, j) with i > 0, j >= 0 and their rotations by 90, 180 and 270 degrees cover every grid point but
+            // the center once; i^2 + j^2 <= 18 are the spheres within the speculative contact distance of the big sphere
+            if (i * i + j * j > 18) continue;
+            const x = 0.25 * @as(f32, @floatFromInt(i));
+            const z = 0.25 * @as(f32, @floatFromInt(j));
+            for ([_][2]f32{ .{ x, z }, .{ -z, x } }) |p| {
+                try disc.append(b.allocator, .{ .shape = disc_sphere, .position = .{ p[0], 0, p[1] } });
+                try disc.append(b.allocator, .{ .shape = disc_sphere, .position = .{ -p[0], 0, -p[1] } });
+            }
+        }
+    }
+    const disc_compound = try b.compound(.static_compound, disc.items);
+    _ = try b.body(.{ .position = .{ 10, 0, 0 }, .shape = big_sphere, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 10, 2, 0 }, .shape = disc_compound, .object_layer = Layers.moving }, .activate);
 }
 
 /// Random shapes, random bodies and random operations in a container (seed `seed`, `steps` collision steps), random

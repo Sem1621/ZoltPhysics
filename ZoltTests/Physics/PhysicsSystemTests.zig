@@ -1568,6 +1568,9 @@ const ContactScene = struct {
     const Options = struct {
         /// The large box on the mesh uses enhanced internal edge removal
         enhanced_internal_edge_removal: bool = true,
+        /// The large box on the mesh uses manifold reduction (without it NonReductionCollideShapeCollector adds every
+        /// hit to the contact constraints at once)
+        use_manifold_reduction: bool = true,
     };
 
     /// Builds the scene in place (the physics system must not move)
@@ -1656,6 +1659,7 @@ const ContactScene = struct {
         box_settings.rotation = Quat.rotation(Vec3.init(0, 1, 0), 0.3);
         box_settings.linear_velocity = Vec3.init(0.5, 0, 0.2);
         box_settings.enhanced_internal_edge_removal = opts.enhanced_internal_edge_removal;
+        box_settings.use_manifold_reduction = opts.use_manifold_reduction;
         self.big_box = try bi.createAndAddBody(&box_settings, .activate);
     }
 
@@ -1948,7 +1952,7 @@ test "PhysicsSystem contacts: createJob fails at every job and at spawned FindCo
     try contactFailingCreateJob(.{ .thread_pool = 7 });
 }
 
-fn countHeapAllocationsOfUpdate(enhanced_internal_edge_removal: bool) !u32 {
+fn countHeapAllocationsOfUpdate(opts: ContactScene.Options) !u32 {
     var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
     var jobs: AnyJobSystem = .{};
     try jobs.init(std.testing.allocator, .single_threaded);
@@ -1957,7 +1961,7 @@ fn countHeapAllocationsOfUpdate(enhanced_internal_edge_removal: bool) !u32 {
     defer temp.deinit();
     const scene = try std.testing.allocator.create(ContactScene);
     defer std.testing.allocator.destroy(scene);
-    try scene.init(heap.allocator(), .{ .enhanced_internal_edge_removal = enhanced_internal_edge_removal });
+    try scene.init(heap.allocator(), opts);
     defer scene.deinit();
     for (0..3) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const before = heap.num_allocations.load(.monotonic);
@@ -1965,13 +1969,18 @@ fn countHeapAllocationsOfUpdate(enhanced_internal_edge_removal: bool) !u32 {
     return heap.num_allocations.load(.monotonic) - before;
 }
 
-fn contactOutOfHeapMemory(kind: JobSystemKind) !void {
+fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void {
     // The heap allocations of an update happen inside jobs: the QuadTree in UpdateBroadPhasePrepare and the
     // InternalEdgeRemovingCollector of the large box in ProcessBodyPair (the FindCollisions jobs). The heap runs out at
     // each of them in turn (that allocation and all later ones fail: a single failure of the collector is absorbed,
     // its growing arrays first try to remap and then allocate): the job latches the error (D5), the update returns
-    // error.OutOfMemory, the temp allocator is empty and the system recovers through restoreState
-    try expect(try countHeapAllocationsOfUpdate(true) > try countHeapAllocationsOfUpdate(false)); // The collector allocates
+    // error.OutOfMemory, the temp allocator is empty and the system recovers through restoreState. With manifold
+    // reduction the manifolds of the large box are not added; without it NonReductionCollideShapeCollector adds the
+    // contacts forwarded before the failure to the contact constraints and the cache at once, the update fails the same
+    // way.
+    var without_collector = opts;
+    without_collector.enhanced_internal_edge_removal = false;
+    try expect(try countHeapAllocationsOfUpdate(opts) > try countHeapAllocationsOfUpdate(without_collector)); // The collector allocates
 
     var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
     const allocator = heap.allocator();
@@ -1983,7 +1992,7 @@ fn contactOutOfHeapMemory(kind: JobSystemKind) !void {
 
     const scene = try std.testing.allocator.create(ContactScene);
     defer std.testing.allocator.destroy(scene);
-    try scene.init(allocator, .{});
+    try scene.init(allocator, opts);
     defer scene.deinit();
     for (0..3) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
 
@@ -2009,11 +2018,19 @@ fn contactOutOfHeapMemory(kind: JobSystemKind) !void {
 }
 
 test "PhysicsSystem contacts: out of heap memory inside a job (ProcessBodyPair), single threaded" {
-    try contactOutOfHeapMemory(.single_threaded);
+    try contactOutOfHeapMemory(.single_threaded, .{});
 }
 
 test "PhysicsSystem contacts: out of heap memory inside a job (ProcessBodyPair), multi threaded" {
-    try contactOutOfHeapMemory(.{ .thread_pool = 3 });
+    try contactOutOfHeapMemory(.{ .thread_pool = 3 }, .{});
+}
+
+test "PhysicsSystem contacts: out of heap memory inside a job (ProcessBodyPair without manifold reduction), single threaded" {
+    try contactOutOfHeapMemory(.single_threaded, .{ .use_manifold_reduction = false });
+}
+
+test "PhysicsSystem contacts: out of heap memory inside a job (ProcessBodyPair without manifold reduction), multi threaded" {
+    try contactOutOfHeapMemory(.{ .thread_pool = 3 }, .{ .use_manifold_reduction = false });
 }
 
 test "PhysicsSystem contacts: out of memory creating the scene" {

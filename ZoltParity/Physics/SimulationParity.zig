@@ -1296,6 +1296,7 @@ const Run = struct {
         }
         if (self.zolt_records.items.len != self.jolt_records.items.len)
             return self.fail("{d} listener records in zolt, {d} in jolt", .{ self.zolt_records.items.len, self.jolt_records.items.len });
+        self.stats.max_manifolds_per_body_pair = @max(self.stats.max_manifolds_per_body_pair, try maxManifoldsPerBodyPair(self.allocator, self.jolt_records.items));
     }
 
     fn applyOps(self: *Run, op_index: *usize, delta_time: *f32, collision_steps: *u32) !void {
@@ -1490,7 +1491,24 @@ const RunStats = struct {
     num_spawned_jobs: u32 = 0,
     /// Number of OnBodyDeactivated calls from the final batch of a split island (Zolt side, also in the sweeps)
     num_large_island_deactivations: u32 = 0,
+    /// Largest number of manifolds of one body pair in one update (OnContactAdded + OnContactPersisted records)
+    max_manifolds_per_body_pair: u32 = 0,
 };
+
+/// The largest number of OnContactAdded + OnContactPersisted records of one body pair in `records` (Expect.full_manifolds)
+fn maxManifoldsPerBodyPair(allocator: Allocator, records: []const SimRecord) Allocator.Error!u32 {
+    var counts: std.AutoHashMapUnmanaged([2]u32, u32) = .empty;
+    defer counts.deinit(allocator);
+    var max: u32 = 0;
+    for (records) |r| {
+        if (r.kind != @intFromEnum(RecordKind.contact_added) and r.kind != @intFromEnum(RecordKind.contact_persisted))
+            continue;
+        const count = try counts.getOrPutValue(allocator, .{ r.ids[0], r.ids[1] }, 0);
+        count.value_ptr.* += 1;
+        max = @max(max, count.value_ptr.*);
+    }
+    return max;
+}
 
 /// Print what every scene did (a passing test must not print: keep false)
 const verbose = false;
@@ -1578,6 +1596,10 @@ fn runEntry(entry: *const SceneEntry) !void {
     }
     if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0);
     if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
+    if (expect.full_manifolds) {
+        try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
+        try expectReached(entry, "a full manifold array in ProcessBodyPair", stats[0].max_manifolds_per_body_pair >= SimScenes.max_manifolds_per_body_pair);
+    }
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
         if (config.sweeps and entry.sweep_stride != 0) {

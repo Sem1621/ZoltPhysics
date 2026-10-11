@@ -13,7 +13,9 @@
 //!   reduction, OnContactValidate through ContactConstraintManager.validateContactPoint) as local structs with
 //!   `pub const overrides = .{.addHit}`, PruneContactPoints and AddContactConstraint. It returns Allocator.Error when the
 //!   SimCollideBodyVsBody function ran out of heap memory (the InternalEdgeRemovingCollector of the default function):
-//!   the contacts found until then are not added and the FindCollisions job latches the error (D5).
+//!   with manifold reduction the manifolds of the pair are not added, without reduction the contacts added before the
+//!   error stay (NonReductionCollideShapeCollector adds every hit at once); either way the FindCollisions job latches
+//!   the error (D5).
 //! - JobSolveVelocityConstraints solves the islands with constraints or contacts (ConstraintIdxToConstraintOffset, the
 //!   two sorts, CalculateSolverSteps, SplitIsland or warm start + velocity steps + StoreAppliedImpulses) and the batches
 //!   of the split islands. Nothing in it allocates; its closure checks the out of memory latch at job entry only
