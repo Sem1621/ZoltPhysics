@@ -579,7 +579,8 @@ pub const Expect = struct {
     /// islands when OnBodyDeactivated is called from SolvePositionConstraints)
     large_island: bool = false,
     /// A linear cast body hits something: the contact cache of the (C++) state holds CCD manifolds after some update
-    /// (ContactConstraintManager::OnCCDContactAdded, the worlds have a contact listener)
+    /// (ContactConstraintManager::OnCCDContactAdded, the worlds have a contact listener; only a hit whose sub shape pair
+    /// has no discrete contact in the same update creates one)
     ccd_hits: bool = false,
     /// At least this many FindCCDContacts jobs run in one update (in some configuration: their number is
     /// min(ceil(CCD bodies / 4), the concurrency of the job system))
