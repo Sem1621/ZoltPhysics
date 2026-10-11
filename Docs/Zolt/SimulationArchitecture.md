@@ -990,8 +990,9 @@ DeterminismLog, PhysicsScene).**
     the collision job latches the failure.
   - `notifyBodiesLayerChanged` allocates everything first; `BodyInterface.setObjectLayer` restores
     the layer on failure.
-  - Queries and `castAABoxNoLock` (used by the CCD job) have no error channel. They `@panic` when a
-    walk stack deeper than the inline 128 entries cannot be allocated.
+  - `castAABoxNoLock` returns `Allocator.Error` too; the FindCCDContacts job latches it. The
+    locking queries have no error channel: they `@panic` when a walk stack deeper than the inline
+    128 entries cannot be allocated.
 - A fixed BuildTree / AddBodiesAbort stack that overflows (undefined behavior in Jolt) `@panic`s
   with a message.
 - `optimizeBroadPhase` is not safe while queries run, as in Jolt (Jolt's `Optimize` swaps trees
@@ -1030,3 +1031,36 @@ DeterminismLog, PhysicsScene).**
 - DeterminismLog: the unit tests run a second time with the log enabled. The text is checked by
   construction and with expected strings, not against Jolt's log: the C++ reference is built
   without `JPH_ENABLE_DETERMINISM_LOG`.
+
+**Wave B (ProcessBodyPair, the island solve, CCD hits).**
+- `PhysicsSystem.zig` has no REGION markers left. Only the soft body work of Phase 9 is missing:
+  the soft body jobs after the "no active soft bodies" path, and a CCD hit on a soft body face.
+- ProcessBodyPair:
+  - Its collectors are local structs (`overrides = .{.addHit}`).
+  - It returns `Allocator.Error` from the InternalEdgeRemovingCollector's heap fallback (the
+    default SimCollideBodyVsBody), and both FindCollisions call sites latch it. This is the third
+    heap allocation inside a job after `updatePrepare` and `findCollidingPairs` (D5).
+  - With manifold reduction, the manifolds collected before such an error are dropped; without it,
+    the contacts added before the error stay.
+  - A single failed allocation of a growing STLLocalAllocator array is absorbed by its retry, so
+    heap sweeps need a "heap runs out from allocation n on" mode (`FailingHeapAllocator.fail_from`).
+- JobSolveVelocityConstraints checks the latch only at job entry (section 8, Wave A rule) and never
+  allocates. `applied_impulse |= x` is `applied_impulse = x or applied_impulse`, so the contacts
+  are always solved.
+- CCD:
+  - A CCD manifold is only recorded through `OnCCDContactAdded` when the discrete narrow phase did
+    not create a manifold for the same sub shape pair in that update; otherwise Jolt calls
+    `OnContactPersisted`.
+  - `sCalculateBodyMotion` returns `v * dt` even for a linear cast body below the cast threshold,
+    which already moved in IntegrateVelocity. This is reproduced, and a scene covers it.
+- A latent Jolt bug is kept out of every scene. JobResolveCCDContacts activates woken bodies in
+  batches of 64 while it still loops over the CCD bodies. A later CCD body that hit a body of an
+  earlier batch then reads past `mActiveBodyToCCDBody`: Jolt asserts in debug, Zolt asserts in safe
+  builds. The SimScenes header states the rule for scene authors.
+- Simulation parity now runs 36 contact scenes and 18 CCD scenes bit exact, besides the gravity
+  scenes. They cover stacks and pyramids with and without the LargeIslandSplitter, every shape type,
+  sensors, listeners that modify or reject contacts, FindCollisions jobs spawned inside jobs,
+  several FindCCDContacts jobs, cross save / restore, and far from the origin.
+  - Each scene declares in `SceneEntry.expect` the cases it must reach (contacts, removals,
+    sleeping, spawned jobs, a split island, a full manifold array, CCD hits).
+  - Only `constraints_chain` stays blocked: it needs the Phase 6 constraint types.
