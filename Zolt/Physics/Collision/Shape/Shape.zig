@@ -1187,8 +1187,9 @@ fn releaseList(comptime T: type, allocator: Allocator, list: *std.ArrayList(RefC
 }
 
 /// StreamUtils::SaveObjectReference: save an object reference to a stream. Uses a map to map objects to IDs which is also used to prevent writing duplicates.
-/// (Zolt: Jolt/Core/StreamUtils.h is deferred to the ObjectStream phase, the helpers that Shape uses live here)
-fn saveObjectReference(comptime T: type, allocator: Allocator, stream: StreamOut, object: ?*const T, object_to_id_map: ?*ObjectToIDMap(T)) Allocator.Error!void {
+/// (Zolt: Jolt/Core/StreamUtils.h is deferred to the ObjectStream phase, the helpers that Shape uses live here; public
+/// for BodyCreationSettings, which saves its group filter with them)
+pub fn saveObjectReference(comptime T: type, allocator: Allocator, stream: StreamOut, object: ?*const T, object_to_id_map: ?*ObjectToIDMap(T)) Allocator.Error!void {
     if (object_to_id_map == null or object == null) {
         // Write null ID
         stream.write(~@as(u32, 0));
@@ -1207,7 +1208,7 @@ fn saveObjectReference(comptime T: type, allocator: Allocator, stream: StreamOut
 }
 
 /// StreamUtils::RestoreObjectReference: restore an object reference from stream.
-fn restoreObjectReference(comptime T: type, allocator: Allocator, stream: StreamIn, id_to_object_map: *IDToObjectMap(T)) Allocator.Error!Result(Ref(T)) {
+pub fn restoreObjectReference(comptime T: type, allocator: Allocator, stream: StreamIn, id_to_object_map: *IDToObjectMap(T)) Allocator.Error!Result(Ref(T)) {
     var result: Result(Ref(T)) = .empty;
     errdefer result.deinit();
 
