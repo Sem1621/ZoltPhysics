@@ -14,7 +14,8 @@
 //!   steps;
 //! - several threads that split the islands and process the batches concurrently: every item is processed exactly the
 //!   right number of times and no dynamic body is in two batches at the same time;
-//! - Reset, ResetAfterOutOfMemory and every temp allocation failing in turn.
+//! - Prepare's ResetStatus (a split island that was claimed but not started yet hands out no batch), Reset,
+//!   ResetAfterOutOfMemory and every temp allocation failing in turn.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -1131,6 +1132,14 @@ test "LargeIslandSplitter out of temp memory at every allocation" {
         scene.island_builder.resetIslands(failing.tempAllocator());
         try expect(temp.isEmpty());
 
+        // The splitter is in its constructed state again (also when the allocation of the split masks failed after
+        // Prepare set the number of active bodies)
+        try expectEqual(@as(u32, 0), splitter.num_active_bodies);
+        try expectEqual(@as(u32, 0), splitter.num_split_islands);
+        try expectEqual(@as(u32, 0), splitter.contact_and_constraints_size);
+        try expectEqual(@as(u32, 0), splitter.contact_and_constraints_next_free.raw);
+        try expectEqual(@as(u32, 0), splitter.next_split_island.raw);
+
         // The next update gives the reference results
         records.clearRetainingCapacity();
         try fullUpdate(allocator, &scene, &splitter, temp.tempAllocator(), &records);
@@ -1157,10 +1166,28 @@ test "LargeIslandSplitter resetAfterOutOfMemory when no island was split" {
     try splitter.prepare(&scene.island_builder, scene.bodyManager().getNumActiveBodies(.rigid_body), temp.tempAllocator());
     try expectEqual(@as(u32, 2), splitter.num_split_islands);
     try expectEqual(@as(u32, 199 + 139), splitter.contact_and_constraints_size);
+    try expectEqual(scene.bodyManager().getNumActiveBodies(.rigid_body), splitter.num_active_bodies);
     try expectEqual(LargeIslandSplitter.Status.waiting_for_batch, fetchStatus(&splitter)); // Not every island was submitted
+
+    // Prepare prevents any of the splits from being picked up as work (ResetStatus): a split island that a job claimed
+    // in SplitIsland (mNextSplitIsland) but did not start yet hands out no batch
+    for (splitter.split_islands.items) |*s| {
+        try expectEqual(Splits.status_item_mask, s.status.load(.monotonic));
+        var split_batch: Splits.SplitBatch = undefined;
+        try expectEqual(LargeIslandSplitter.Status.waiting_for_batch, s.fetchNextBatch(&split_batch));
+        try expectEqual(Splits.status_item_mask, s.status.load(.monotonic)); // Only read
+    }
+    for (0..2) |_| {
+        _ = splitter.next_split_island.fetchAdd(1, .monotonic); // Claimed like SplitIsland does, not started
+        try expectEqual(LargeIslandSplitter.Status.waiting_for_batch, fetchStatus(&splitter));
+    }
+    for (splitter.split_islands.items) |*s|
+        try expectEqual(Splits.status_item_mask, s.status.load(.monotonic));
+
     splitter.resetAfterOutOfMemory(temp.tempAllocator());
     scene.island_builder.resetIslands(temp.tempAllocator());
     try expect(temp.isEmpty());
+    try expectEqual(@as(u32, 0), splitter.num_active_bodies);
     try expectEqual(@as(u32, 0), splitter.num_split_islands);
     try expectEqual(@as(u32, 0), splitter.contact_and_constraints_size);
     try expectEqual(@as(u32, 0), splitter.next_split_island.raw);

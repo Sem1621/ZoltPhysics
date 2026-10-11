@@ -10,11 +10,11 @@
 // pointers at the start of a record at offset i * cLISContactStride in mConstraints (set through the explicit
 // instantiation trick below, like ConstraintPartsReference.cpp). An update links the islands like Jolt (BuildIslands of
 // the constraints, then the contacts like ContactConstraintManager::CreateConstraint), finalizes them, prepares the
-// splitter, converts the contact indices to offsets and splits every island in island order (one SolveVelocityConstraints
-// job), then fetches and marks the batches of the velocity steps and, after PrepareForSolvePositions, of the position
-// steps. The order of fetches and marks follows a decision list (several batches can be out at the same time, they are
-// marked in any order), the same on both sides. Everything is logged as uint32 words. Booleans are passed as uint32
-// (never bool, see the porting guide).
+// splitter (and checks that no split island hands out work before it is split), converts the contact indices to offsets
+// and splits every island in island order (one SolveVelocityConstraints job), then fetches and marks the batches of the
+// velocity steps and, after PrepareForSolvePositions, of the position steps. The order of fetches and marks follows a
+// decision list (several batches can be out at the same time, they are marked in any order), the same on both sides.
+// Everything is logged as uint32 words. Booleans are passed as uint32 (never bool, see the porting guide).
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -244,6 +244,38 @@ static void LISLogSplitter(LISLog &ioLog, LargeIslandSplitter &inSplitter, bool 
 	}
 }
 
+// Log the split islands right after Prepare, before any island is split. Only mStatus is initialized at that point
+// (ResetStatus: "Prevent any of the splits from being picked up as work"), so the log has the status word of all
+// mNumSplitIslands split islands and what Splits::FetchNextBatch returns for them (what
+// LargeIslandSplitter::FetchNextBatch sees for a split island that a job claimed in SplitIsland but did not start yet),
+// then FetchNextBatch of the splitter
+static void LISLogPrepared(LISLog &ioLog, LargeIslandSplitter &ioSplitter)
+{
+	using Splits = LargeIslandSplitter::Splits;
+
+	ioLog.W(0x9E9A5000);
+	uint num_split_islands = ioSplitter.*LISGet(LISNumSplitIslands());
+	Splits *split_islands = ioSplitter.*LISGet(LISSplitIslands());
+	for (uint i = 0; i < num_split_islands; ++i)
+	{
+		Splits &s = split_islands[i];
+		uint64 status = s.mStatus.load(memory_order_relaxed);
+		ioLog.W64(status);
+		if (status == Splits::StatusItemMask) // The other fields are not initialized yet
+		{
+			uint32 constraints_begin, constraints_end, contacts_begin, contacts_end;
+			bool first_iteration = false;
+			ioLog.W(0xF0000000 | uint32(s.FetchNextBatch(constraints_begin, constraints_end, contacts_begin, contacts_end, first_iteration)));
+			ioLog.W64(s.mStatus.load(memory_order_relaxed));
+		}
+	}
+
+	uint split_island_index;
+	uint32 *constraints_begin, *constraints_end, *contacts_begin, *contacts_end;
+	bool first_iteration = false;
+	ioLog.W(0xF0000000 | uint32(ioSplitter.FetchNextBatch(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, first_iteration)));
+}
+
 // A scene in a BodyManager with the island builder, the splitter and a contact manager that only resolves contacts
 class LISWorld
 {
@@ -344,6 +376,7 @@ public:
 		ioLog.W(0x9E9A0000);
 		ioLog.W(uint32(mTempAllocator.GetUsage()));
 		LISLogSplitter(ioLog, mSplitter, false); // The buffers are not initialized yet
+		LISLogPrepared(ioLog, mSplitter);
 
 		// The islands, with the contacts converted to offsets (ConstraintIdxToConstraintOffset), then split them in order
 		uint32 num_islands = mIslandBuilder.GetNumIslands();

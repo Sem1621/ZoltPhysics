@@ -14,7 +14,9 @@
 //!   and the processed item counter, `memory_order_relaxed` is `.monotonic`).
 //! - Zolt addition: `resetAfterOutOfMemory` frees like `reset` but skips Reset's check that every large island was
 //!   split. When an out of memory error poisoned the update, no SolveVelocityConstraints job may have run, so the
-//!   islands that Prepare counted were never split (PhysicsSystem calls it instead of `reset` after an error).
+//!   islands that Prepare counted were never split (PhysicsSystem calls it instead of `reset` after an error). It also
+//!   sets `num_active_bodies` back to 0 when the allocation of the split masks failed (Reset only does that when it
+//!   frees the split masks), so the splitter is in Jolt's constructed state again.
 //!
 //! Out parameters and pointers:
 //! - `Splits::FetchNextBatch` / `LargeIslandSplitter::FetchNextBatch` write their out parameters into an out struct
@@ -738,6 +740,10 @@ pub const LargeIslandSplitter = struct {
     /// split: the SolveVelocityConstraints jobs that split them may have skipped their work.
     pub fn resetAfterOutOfMemory(self: *LargeIslandSplitter, temp_allocator: TempAllocator) void {
         self.freeBuffers(temp_allocator);
+
+        // Prepare sets mNumActiveBodies before it allocates the split masks. When that allocation failed, the frees
+        // above did not reset it (Jolt cannot get here: its Reset always ends with mNumActiveBodies == 0)
+        self.num_active_bodies = 0;
     }
 
     /// The frees of Reset in Jolt's order (the reverse of the allocations in Prepare), nothing for an empty TempArray

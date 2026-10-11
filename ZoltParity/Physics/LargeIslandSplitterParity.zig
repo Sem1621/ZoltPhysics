@@ -8,6 +8,9 @@
 //! in any order, like several solver jobs). Both sides log as uint32 words and the logs must be equal:
 //! - the temp memory used after Prepare (the sizes of Jolt's buffers, sizeof(Splits)) and after Reset;
 //! - the islands (bodies, contact offsets, constraints) and SplitIsland's result per island;
+//! - after Prepare, before any island is split: the status word of every split island (ResetStatus),
+//!   Splits::FetchNextBatch on each of them (a split island that a job claimed but did not start yet) and
+//!   FetchNextBatch of the splitter;
 //! - the splitter after Prepare, after splitting, after each phase and after Reset: the counters, which split each
 //!   contact and constraint was assigned to (mContactAndConstraintsSplitIdx), the sorted indices per split
 //!   (mContactAndConstraintIndices), every split island (island index, number of splits, iterations, velocity and
@@ -225,6 +228,28 @@ fn logSplitter(log: *Log, splitter: *const LargeIslandSplitter, with_buffers: bo
     }
 }
 
+/// LISLogPrepared: the split islands right after Prepare, before any island is split. Only the status is initialized at
+/// that point (resetStatus), so the log has the status word of all num_split_islands split islands and what
+/// Splits.fetchNextBatch returns for them (what LargeIslandSplitter.fetchNextBatch sees for a split island that a job
+/// claimed in splitIsland but did not start yet), then fetchNextBatch of the splitter
+fn logPrepared(log: *Log, splitter: *LargeIslandSplitter) void {
+    const Splits = LargeIslandSplitter.Splits;
+
+    log.w(0x9E9A5000);
+    for (splitter.split_islands.items[0..splitter.num_split_islands]) |*s| {
+        const status = s.status.load(.monotonic);
+        log.w64(status);
+        if (status == Splits.status_item_mask) { // The other fields are not initialized yet
+            var split_batch: Splits.SplitBatch = undefined;
+            log.w(0xF0000000 | @as(u32, @intFromEnum(s.fetchNextBatch(&split_batch))));
+            log.w64(s.status.load(.monotonic));
+        }
+    }
+
+    var batch: LargeIslandSplitter.Batch = undefined;
+    log.w(0xF0000000 | @as(u32, @intFromEnum(splitter.fetchNextBatch(&batch))));
+}
+
 /// LISWorld on the Zolt side (initialized in place)
 const World = struct {
     allocator: Allocator = undefined,
@@ -345,6 +370,7 @@ const World = struct {
         log.w(0x9E9A0000);
         log.w(@intCast(self.temp.getUsage()));
         logSplitter(log, &self.splitter, false); // The buffers are not initialized yet
+        logPrepared(log, &self.splitter);
 
         // The islands, with the contacts converted to offsets, then split them in order
         const contact_pairs: ContactPairs = .{ .pairs = self.pairs.items };
