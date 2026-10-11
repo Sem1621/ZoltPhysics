@@ -1,15 +1,12 @@
 //! Zolt addition, no Jolt file: tests of PhysicsSystem.update, the job graph and BodyInterface (SimulationArchitecture
 //! D4, D5, D6, D12)
 //! Status: partial
-//! Missing: the scenes with contacts, constraints and CCD hits (REGION R2..R4 of PhysicsSystem.zig, Wave A/B): a
-//! determinism run with FindCollisions jobs spawned from inside jobs (TrySpawnJobFindCollisions only spawns when body
-//! pairs are found), createJob failures of those spawns, and the contact / activation-by-contact checks of the Phase 5
-//! architecture prototype
+//! Missing: the scenes with constraints in islands (the Phase 6 constraint types) and CCD hits (REGION R4 of
+//! PhysicsSystem.zig, Wave B)
 //!
-//! Adapted from the Phase 5 architecture prototype (SimulationPrototype.zig, deleted in F2) for the real library, on
-//! the gravity-only path: the scene is laid out so that no two bodies ever overlap (every body has its own vertical
-//! column, the floor is far below), so ProcessBodyPair (REGION R2), the constraint solver (R3) and the narrow phase of
-//! the CCD (R4) are never reached, while every other job runs (the bullets go through the CCD jobs without hits).
+//! The gravity-only scene (adapted from the Phase 5 architecture prototype, SimulationPrototype.zig, deleted in F2) is
+//! laid out so that no two bodies ever overlap (every body has its own vertical column, the floor is far below), while
+//! every job runs (the bullets go through the CCD jobs without hits).
 //! - Determinism: JobSystemSingleThreaded against thread pools with 0, 1, 3 and 7 worker threads, the saved state is
 //!   compared after every update.
 //! - D5: every temp allocation of an update fails in turn (single and multi threaded), every createJob of an update
@@ -19,6 +16,21 @@
 //! - Every allocation of creating the scene fails in turn (std.testing.checkAllAllocationFailures).
 //! - The BodyInterface functions that flag the contact cache invalid (setShape, notifyShapeChanged,
 //!   setUseManifoldReduction, invalidateContactCache): a failed call changes nothing and can be repeated.
+//!
+//! The contact scenes (Wave B R2 / R3: ProcessBodyPair, TrySpawnJobFindCollisions, the island solve):
+//! - A dense grid of spheres (few batches of active bodies with many body pairs each), a sleeping box woken up by a
+//!   contact, a sensor, a kinematic body pushing a dynamic one and a large box with enhanced internal edge removal on
+//!   a fine mesh. Determinism against thread pools of 0, 1, 3 and 7 workers with the saved state after every update:
+//!   FindCollisions jobs are spawned from inside jobs and the order of the contact callbacks differs between the runs
+//!   (both asserted), the states are bit identical.
+//! - Save / restore of the contact cache (also validating).
+//! - D12 sweeps: every temp allocation fails in turn (the poisoned contact cache is discarded, the temp allocator is
+//!   empty, restoreState recovers), every createJob of the job graph fails in turn, spawned FindCollisions jobs fail
+//!   (not an error, the results do not change), the heap runs out at every allocation inside the jobs (the QuadTree and
+//!   the InternalEdgeRemovingCollector in ProcessBodyPair), checkAllAllocationFailures on creating the scene.
+//! - The LargeIslandSplitter path: a pyramid of 136 boxes is one island above the splitting threshold; it is solved in
+//!   splits (bit identical with thread pools, different from the solve without the splitter) and goes to sleep from
+//!   the final batch of the split island.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -401,7 +413,7 @@ const Scene = struct {
         box_settings.object_layer = Layers.moving;
         cell += 1;
 
-        // Constraints that are never active (an active constraint needs the solver of REGION R3)
+        // Constraints that are never active (the gravity-only scene; constraints in islands need the Phase 6 constraint types)
         var constraint_settings = TestConstraintSettings.init(allocator);
         defer constraint_settings.asSettings().deinit();
         constraint_settings.base.base.enabled = false;
@@ -840,6 +852,9 @@ test "PhysicsSystem createJob fails at every job, multi threaded" {
 const FailingHeapAllocator = struct {
     inner: Allocator,
     fail_index: std.atomic.Value(u32) = .init(std.math.maxInt(u32)),
+    /// Every allocation from this one on fails (an allocator that ran out: a failed remap of a growing array is retried
+    /// with an allocation, which fails too)
+    fail_from: std.atomic.Value(u32) = .init(std.math.maxInt(u32)),
     num_allocations: std.atomic.Value(u32) = .init(0),
 
     fn allocator(self: *FailingHeapAllocator) Allocator {
@@ -848,7 +863,8 @@ const FailingHeapAllocator = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *FailingHeapAllocator = @ptrCast(@alignCast(ctx));
-        if (self.num_allocations.fetchAdd(1, .monotonic) == self.fail_index.load(.monotonic))
+        const n = self.num_allocations.fetchAdd(1, .monotonic);
+        if (n == self.fail_index.load(.monotonic) or n >= self.fail_from.load(.monotonic))
             return null;
         return self.inner.rawAlloc(len, alignment, ret_addr);
     }
@@ -1340,8 +1356,8 @@ test "PhysicsSystem BodyInterface locks, threads, the batch API and a const broa
 }
 
 test "PhysicsSystem activation listener: BodyInterface activation and falling asleep" {
-    // TestPhysicsActivationDeactivation without the floor (the floor needs contacts, REGION R2): without gravity the
-    // activated box stays at rest and falls asleep
+    // TestPhysicsActivationDeactivation without the floor (the test with the floor belongs to PhysicsTests): without
+    // gravity the activated box stays at rest and falls asleep
     var c: PhysicsTestContext = undefined;
     try c.init(std.testing.allocator, .{});
     defer c.deinit();
@@ -1444,4 +1460,696 @@ test "PhysicsSystem linear cast body without inner radius (Jolt's release behavi
         try expectEqual(discrete.getY(), cast.getY());
         try expectEqual(discrete.getZ(), cast.getZ());
     }
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Contact scenes (Wave B: ProcessBodyPair, TrySpawnJobFindCollisions, the island solve, the LargeIslandSplitter)
+
+/// Counts the contact callbacks and hashes the order in which they arrive (called from the worker threads: atomics)
+const ContactOrderListener = struct {
+    num_added: std.atomic.Value(u32) = .init(0),
+    num_persisted: std.atomic.Value(u32) = .init(0),
+    num_removed: std.atomic.Value(u32) = .init(0),
+    /// Order dependent hash of the callbacks as they arrive: it differs between multi threaded runs (Jolt's contact
+    /// order is not deterministic), the simulation results do not
+    order_hash: std.atomic.Value(u64) = .init(0),
+
+    fn mix(self: *ContactOrderListener, key: u64) void {
+        var old = self.order_hash.load(.monotonic);
+        while (self.order_hash.cmpxchgWeak(old, (old *% 0x100000001b3) ^ key, .monotonic, .monotonic)) |actual| old = actual;
+    }
+
+    fn pairKey(body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold) u64 {
+        return (@as(u64, body1.getID().getIndexAndSequenceNumber()) << 40) ^ (@as(u64, body2.getID().getIndexAndSequenceNumber()) << 16) ^ manifold.sub_shape_id2.getValue();
+    }
+
+    pub fn onContactAdded(self: *ContactOrderListener, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+        _ = settings;
+        _ = self.num_added.fetchAdd(1, .monotonic);
+        self.mix(pairKey(body1, body2, manifold));
+    }
+
+    pub fn onContactPersisted(self: *ContactOrderListener, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+        _ = settings;
+        _ = self.num_persisted.fetchAdd(1, .monotonic);
+        self.mix(pairKey(body1, body2, manifold) +% 1);
+    }
+
+    pub fn onContactRemoved(self: *ContactOrderListener, sub_shape_pair: *const zolt.SubShapeIDPair) void {
+        _ = self.num_removed.fetchAdd(1, .monotonic);
+        self.mix((@as(u64, sub_shape_pair.getBody1ID().getIndexAndSequenceNumber()) << 32) | sub_shape_pair.getBody2ID().getIndexAndSequenceNumber());
+    }
+};
+
+/// Wraps a job system and counts the FindCollisions jobs that are spawned from inside jobs (TrySpawnJobFindCollisions
+/// creates them without dependencies, the job graph of `update` creates its FindCollisions jobs with dependencies)
+const SpawnCountingJobSystem = struct {
+    inner: JobSystem,
+    num_spawned_find_collisions: std.atomic.Value(u32) = .init(0),
+
+    fn jobSystem(self: *SpawnCountingJobSystem) JobSystem {
+        return .init(self);
+    }
+
+    pub fn getMaxConcurrency(self: *const SpawnCountingJobSystem) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    pub fn createJob(self: *SpawnCountingJobSystem, job_name: []const u8, color: zolt.Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        const handle = try self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+        if (opts.num_dependencies == 0 and std.mem.eql(u8, job_name, "FindCollisions"))
+            _ = self.num_spawned_find_collisions.fetchAdd(1, .monotonic);
+        return handle;
+    }
+
+    pub fn createBarrier(self: *SpawnCountingJobSystem) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    pub fn destroyBarrier(self: *SpawnCountingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    pub fn waitForJobs(self: *SpawnCountingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    // The jobs belong to `inner` and queue themselves there: not reached
+    pub fn queueJob(self: *SpawnCountingJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.queueJob(self.inner.ptr, job);
+    }
+
+    pub fn queueJobs(self: *SpawnCountingJobSystem, jobs: []const *JobSystem.Job) void {
+        self.inner.vtable.queueJobs(self.inner.ptr, jobs);
+    }
+
+    pub fn freeJob(self: *SpawnCountingJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.freeJob(self.inner.ptr, job);
+    }
+};
+
+/// A scene with contacts: a dense grid of spheres in two layers on a floor (few batches of active bodies with many body
+/// pairs each, so TrySpawnJobFindCollisions spawns FindCollisions jobs inside jobs when there are threads), a sleeping
+/// box woken up by a falling ball, a ball falling through a sensor, a kinematic box pushing a dynamic box, and a large
+/// box with enhanced internal edge removal on a fine mesh (the InternalEdgeRemovingCollector outgrows its local
+/// buffers: a heap allocation inside the FindCollisions jobs)
+const ContactScene = struct {
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+    object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+    activation_listener: ActivationCounter = .{},
+    contact_listener: ContactOrderListener = .{},
+    sleeping_box: BodyID = .invalid,
+    sensor_ball: BodyID = .invalid,
+    pushed_box: BodyID = .invalid,
+    big_box: BodyID = .invalid,
+
+    const Options = struct {
+        /// The large box on the mesh uses enhanced internal edge removal
+        enhanced_internal_edge_removal: bool = true,
+    };
+
+    /// Builds the scene in place (the physics system must not move)
+    fn init(self: *ContactScene, allocator: Allocator, opts: Options) !void {
+        self.* = .{};
+        try self.system.init(allocator, io, 1024, 0, 8192, 2048, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
+        errdefer self.system.deinit();
+        var settings = self.system.getPhysicsSettings().*;
+        settings.time_before_sleep = 0.2;
+        self.system.setPhysicsSettings(&settings);
+        self.system.setBodyActivationListener(.init(&self.activation_listener));
+        self.system.setContactListener(.init(&self.contact_listener));
+        const bi = self.system.getBodyInterfaceMut();
+
+        // Floor, its top at y = 0
+        const floor_shape = try BoxShape.create(allocator, Vec3.init(60, 1, 60), .{ .convex_radius = 0.0 });
+        var floor_settings = BodyCreationSettings.initWithShape(floor_shape.asShape(), RVec3.init(0, -1, 0), Quat.identity(), .static, Layers.non_moving);
+        defer floor_settings.deinit();
+        try expect(!(try bi.createAndAddBody(&floor_settings, .dont_activate)).isInvalid());
+
+        // A dense grid of spheres in two layers, never asleep
+        var sphere_settings = BodyCreationSettings.initWithSettings((try SphereShapeSettings.create(allocator, 0.5, .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer sphere_settings.deinit();
+        sphere_settings.allow_sleeping = false;
+        for (0..2) |layer| {
+            for (0..4) |row| {
+                for (0..8) |column| {
+                    const l = f(@intCast(layer));
+                    sphere_settings.position = RVec3.init(f(@intCast(column)) * 0.97 - 3.5 + 0.48 * l, 0.5 + 0.8 * l, f(@intCast(row)) * 0.97 - 1.5 + 0.48 * l);
+                    try expect(!(try bi.createAndAddBody(&sphere_settings, .activate)).isInvalid());
+                }
+            }
+        }
+        sphere_settings.allow_sleeping = true;
+
+        // A sleeping box and a ball that falls on it: the contact wakes the box up
+        var box_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.replicate(0.5), .{})).asShapeSettings(), RVec3.init(12, 0.5, 0), Quat.identity(), .dynamic, Layers.moving);
+        defer box_settings.deinit();
+        self.sleeping_box = try bi.createAndAddBody(&box_settings, .dont_activate);
+        sphere_settings.position = RVec3.init(12.2, 2.2, 0.1);
+        _ = try bi.createAndAddBody(&sphere_settings, .activate);
+
+        // A static sensor and a ball that falls through it
+        const sensor_shape = try BoxShape.create(allocator, Vec3.init(2, 0.5, 2), .{ .convex_radius = 0.0 });
+        var sensor_settings = BodyCreationSettings.initWithShape(sensor_shape.asShape(), RVec3.init(-12, 1.2, 0), Quat.identity(), .static, Layers.sensor);
+        defer sensor_settings.deinit();
+        sensor_settings.is_sensor = true;
+        _ = try bi.createAndAddBody(&sensor_settings, .dont_activate);
+        sphere_settings.position = RVec3.init(-12, 2.4, 0);
+        sphere_settings.linear_velocity = Vec3.init(0, -3, 0);
+        self.sensor_ball = try bi.createAndAddBody(&sphere_settings, .activate);
+        sphere_settings.linear_velocity = Vec3.zero();
+
+        // A kinematic box that pushes a dynamic box
+        box_settings.motion_type = .kinematic;
+        box_settings.position = RVec3.init(0, 0.55, 10);
+        box_settings.linear_velocity = Vec3.init(1.5, 0, 0);
+        _ = try bi.createAndAddBody(&box_settings, .activate);
+        box_settings.motion_type = .dynamic;
+        box_settings.linear_velocity = Vec3.zero();
+        box_settings.position = RVec3.init(1.2, 0.5, 10);
+        self.pushed_box = try bi.createAndAddBody(&box_settings, .activate);
+
+        // A fine static mesh with a large rotated box on it (enhanced internal edge removal: many triangles under the
+        // box, more delayed results and voided features than the collector holds without the heap)
+        var triangles: std.ArrayList(zolt.Triangle) = .empty;
+        defer triangles.deinit(allocator);
+        const cell: f32 = 0.25;
+        for (0..24) |iz| {
+            for (0..24) |ix| {
+                const x0 = f(@intCast(ix)) * cell - 3.0;
+                const z0 = f(@intCast(iz)) * cell - 3.0;
+                const v00 = Vec3.init(x0, 0, z0);
+                const v10 = Vec3.init(x0 + cell, 0, z0);
+                const v01 = Vec3.init(x0, 0, z0 + cell);
+                const v11 = Vec3.init(x0 + cell, 0, z0 + cell);
+                try triangles.append(allocator, .init(v00, v01, v11, .{}));
+                try triangles.append(allocator, .init(v00, v11, v10, .{}));
+            }
+        }
+        var mesh_settings = BodyCreationSettings.initWithSettings((try zolt.MeshShapeSettings.create(allocator, triangles.items, .{})).asShapeSettings(), RVec3.init(0, 0.5, -15), Quat.identity(), .static, Layers.non_moving);
+        defer mesh_settings.deinit();
+        _ = try bi.createAndAddBody(&mesh_settings, .dont_activate);
+        box_settings.setShapeSettings((try BoxShapeSettings.create(allocator, Vec3.init(2, 0.25, 2), .{})).asShapeSettings());
+        box_settings.position = RVec3.init(0.1, 0.75, -15.05); // Resting on the mesh (its top at y = 0.5)
+        box_settings.rotation = Quat.rotation(Vec3.init(0, 1, 0), 0.3);
+        box_settings.linear_velocity = Vec3.init(0.5, 0, 0.2);
+        box_settings.enhanced_internal_edge_removal = opts.enhanced_internal_edge_removal;
+        self.big_box = try bi.createAndAddBody(&box_settings, .activate);
+    }
+
+    fn deinit(self: *ContactScene) void {
+        self.system.deinit();
+    }
+};
+
+const contact_num_updates = 40;
+
+/// What a run of the contact scene did
+const ContactRunStats = struct {
+    order_hash: u64,
+    num_spawned_jobs: u32,
+    /// Added, persisted and removed contact callbacks
+    counts: [3]u32,
+};
+
+/// Runs the contact scene and records the saved state after every update
+fn runContactScene(allocator: Allocator, kind: JobSystemKind, states: *std.ArrayList(u8), offsets: *std.ArrayList(usize)) !ContactRunStats {
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var counting: SpawnCountingJobSystem = .{ .inner = jobs.jobSystem() };
+
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(ContactScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+
+    const bi = scene.system.getBodyInterface();
+    const pushed_start_x = bi.getPosition(scene.pushed_box).getX();
+    var woken = false;
+    for (0..contact_num_updates) |_| {
+        const errors = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), counting.jobSystem());
+        try expect(errors.isNone());
+        try expect(temp.isEmpty());
+        woken = woken or bi.isActive(scene.sleeping_box);
+
+        recorder.clear();
+        try scene.system.saveState(recorder.recorder(), .{});
+        try expect(!recorder.isFailed());
+        try offsets.append(allocator, states.items.len);
+        try states.appendSlice(allocator, recorder.getData());
+    }
+
+    // Sanity: the ball woke the sleeping box up, the ball fell through the sensor onto the floor, the kinematic box
+    // pushed the dynamic box, contacts were added, persisted and removed
+    try expect(woken);
+    try expect(bi.getPosition(scene.sensor_ball).getY() < 0.6);
+    try expect(bi.getPosition(scene.pushed_box).getX() > pushed_start_x + 0.5);
+    const listener = &scene.contact_listener;
+    const counts = [3]u32{ listener.num_added.load(.monotonic), listener.num_persisted.load(.monotonic), listener.num_removed.load(.monotonic) };
+    try expect(counts[0] > 0 and counts[1] > 0 and counts[2] > 0);
+    return .{ .order_hash = listener.order_hash.load(.monotonic), .num_spawned_jobs = counting.num_spawned_find_collisions.load(.monotonic), .counts = counts };
+}
+
+test "PhysicsSystem determinism with contacts and FindCollisions jobs spawned inside jobs" {
+    // JobSystemSingleThreaded against thread pools: the saved state after every update is bit identical while the
+    // order of the contact callbacks differs, and the dense grid makes TrySpawnJobFindCollisions spawn jobs from
+    // inside the FindCollisions jobs
+    const allocator = std.testing.allocator;
+    var ref_states: std.ArrayList(u8) = .empty;
+    defer ref_states.deinit(allocator);
+    var ref_offsets: std.ArrayList(usize) = .empty;
+    defer ref_offsets.deinit(allocator);
+    const ref = try runContactScene(allocator, .single_threaded, &ref_states, &ref_offsets);
+    try expectEqual(@as(u32, 0), ref.num_spawned_jobs); // One FindCollisions job, no room for more
+
+    const kinds = [_]JobSystemKind{ .{ .thread_pool = 0 }, .{ .thread_pool = 1 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 }, .{ .thread_pool = 7 } };
+    var num_spawned_jobs: u32 = 0;
+    var num_different_orders: u32 = 0;
+    for (kinds) |kind| {
+        var states: std.ArrayList(u8) = .empty;
+        defer states.deinit(allocator);
+        var offsets: std.ArrayList(usize) = .empty;
+        defer offsets.deinit(allocator);
+        const stats = try runContactScene(allocator, kind, &states, &offsets);
+
+        try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+        for (ref_offsets.items, 0..) |offset, i| {
+            const end = if (i + 1 < ref_offsets.items.len) ref_offsets.items[i + 1] else ref_states.items.len;
+            if (!std.mem.eql(u8, ref_states.items[offset..end], states.items[offset..end])) {
+                std.debug.print("state differs after update {d} with {any}\n", .{ i, kind });
+                return error.TestUnexpectedResult;
+            }
+        }
+        try expectEqual(ref.counts, stats.counts); // The same callbacks, in another order
+        num_spawned_jobs += stats.num_spawned_jobs;
+        if (stats.order_hash != ref.order_hash) num_different_orders += 1;
+    }
+    if (verbose) std.debug.print("contacts: spawned FindCollisions jobs {d}, runs with a different contact order {d} of {d}\n", .{ num_spawned_jobs, num_different_orders, kinds.len });
+    try expect(num_spawned_jobs > 0);
+    try expect(num_different_orders > 0);
+}
+
+test "PhysicsSystem contacts: save and restore the contact cache" {
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, .{ .thread_pool = 3 });
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(ContactScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+    for (0..10) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+
+    // Snapshot with a full contact cache, simulate, restore, simulate again: identical, also through a validating
+    // restore
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+    var contacts_only = StateRecorderImpl.init(allocator);
+    defer contacts_only.deinit();
+    try scene.system.saveState(contacts_only.recorder(), .{ .state = .{ .contacts = true } });
+    try expect(contacts_only.getData().len > 1000); // The cache holds the manifolds of the grid
+
+    var after1 = StateRecorderImpl.init(allocator);
+    defer after1.deinit();
+    for (0..10) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    try scene.system.saveState(after1.recorder(), .{});
+
+    snapshot.rewind();
+    try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+    var after2 = StateRecorderImpl.init(allocator);
+    defer after2.deinit();
+    for (0..10) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    try scene.system.saveState(after2.recorder(), .{});
+    try expect(after2.isEqual(&after1));
+
+    after2.rewind();
+    after2.recorder().setValidating(true);
+    try expect(try scene.system.restoreState(after2.recorder(), .{}));
+    try expectEqual(@as(u32, 0), after2.num_mismatches);
+}
+
+/// Restore `snapshot`, run one update with enough memory and compare with `reference`
+fn expectContactRecovery(scene: *ContactScene, snapshot: *StateRecorderImpl, reference: *StateRecorderImpl, temp: *TempAllocatorImpl, job_system: JobSystem) !void {
+    snapshot.rewind();
+    try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), job_system);
+    try expect(temp.isEmpty());
+    try expectContactState(scene, reference);
+}
+
+fn expectContactState(scene: *ContactScene, expected: *StateRecorderImpl) !void {
+    var state = StateRecorderImpl.init(std.testing.allocator);
+    defer state.deinit();
+    try scene.system.saveState(state.recorder(), .{});
+    try expect(state.isEqual(expected));
+}
+
+fn contactOutOfTempMemory(kind: JobSystemKind) !void {
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(ContactScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+    for (0..5) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+
+    // Reference: one update with enough memory, counting the temp allocations
+    var counting: FailingTempAllocator = .init(temp.tempAllocator(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, counting.tempAllocator(), jobs.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+    const num_allocations = counting.num_allocations;
+    try expect(num_allocations >= num_build_temp_allocations + collision_steps * 4);
+
+    // Fail every allocation in turn: the update returns error.OutOfMemory, the temp allocator is empty (the frees at
+    // Jolt's positions, also of the contact constraint buffer), the poisoned contact cache is discarded and restoring
+    // the snapshot recovers the reference
+    for (0..num_allocations) |fail_index| {
+        snapshot.rewind();
+        try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        const added_before = scene.contact_listener.num_added.load(.monotonic);
+
+        var failing: FailingTempAllocator = .init(temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, failing.tempAllocator(), jobs.jobSystem()));
+        try expect(failing.has_induced_failure);
+        try expect(temp.isEmpty());
+
+        // Failure while building the jobs: no job ran, no contact callback
+        if (fail_index < num_build_temp_allocations) {
+            try expectEqual(added_before, scene.contact_listener.num_added.load(.monotonic));
+            try expectContactState(scene, &snapshot);
+        }
+
+        try expectContactRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
+    }
+}
+
+test "PhysicsSystem contacts: out of temp memory at every allocation, single threaded" {
+    try contactOutOfTempMemory(.single_threaded);
+}
+
+test "PhysicsSystem contacts: out of temp memory at every allocation, multi threaded" {
+    try contactOutOfTempMemory(.{ .thread_pool = 3 });
+}
+
+fn contactFailingCreateJob(kind: JobSystemKind) !void {
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(ContactScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+    for (0..5) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+
+    // Reference: one update, counting the jobs that the update builds (they are created before any job runs, the
+    // start gate) and the FindCollisions jobs spawned from inside jobs (after them)
+    var spawn_counting: SpawnCountingJobSystem = .{ .inner = jobs.jobSystem() };
+    var counting: FailingJobSystem = .init(spawn_counting.jobSystem(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), counting.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+    const num_spawned = spawn_counting.num_spawned_find_collisions.load(.monotonic);
+    const num_built = counting.num_created.load(.monotonic) - num_spawned;
+
+    // Fail every createJob of the job graph in turn: the update fails without side effects
+    for (0..num_built) |fail_index| {
+        snapshot.rewind();
+        try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        const added_before = scene.contact_listener.num_added.load(.monotonic);
+        var failing: FailingJobSystem = .init(jobs.jobSystem(), .{ .fail_index = @intCast(fail_index) });
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem()));
+        try expect(temp.isEmpty());
+        try expectEqual(added_before, scene.contact_listener.num_added.load(.monotonic)); // No job ran
+        try expectContactState(scene, &snapshot); // Nothing changed
+        try expectContactRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
+    }
+
+    // A FindCollisions job that cannot be spawned from inside a job is not an error and changes no result (D5: the
+    // claim and the dependencies are undone, the running jobs do the work). The number of spawned jobs differs
+    // between runs: repeat until a spawn failed (the first ones of every run, then later ones).
+    if (kind == .single_threaded) {
+        try expectEqual(@as(u32, 0), num_spawned); // One FindCollisions job, no room for more
+        return;
+    }
+    var num_spawn_failures: u32 = 0;
+    var attempt: u32 = 0;
+    while (attempt < 200 and num_spawn_failures < 8) : (attempt += 1) {
+        snapshot.rewind();
+        try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        var failing: FailingJobSystem = .init(jobs.jobSystem(), .{ .fail_index = num_built + attempt % 4 });
+        const errors = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem());
+        try expect(errors.isNone());
+        try expect(temp.isEmpty());
+        if (failing.has_induced_failure.load(.monotonic)) num_spawn_failures += 1;
+        try expectContactState(scene, &reference);
+    }
+    if (verbose) std.debug.print("{any}: built jobs {d}, spawned {d}, spawn failures {d} in {d} attempts\n", .{ kind, num_built, num_spawned, num_spawn_failures, attempt });
+    try expect(num_spawn_failures > 0);
+}
+
+test "PhysicsSystem contacts: createJob fails at every job, single threaded" {
+    try contactFailingCreateJob(.single_threaded);
+}
+
+test "PhysicsSystem contacts: createJob fails at every job and at spawned FindCollisions jobs, multi threaded" {
+    try contactFailingCreateJob(.{ .thread_pool = 7 });
+}
+
+fn countHeapAllocationsOfUpdate(enhanced_internal_edge_removal: bool) !u32 {
+    var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(std.testing.allocator, .single_threaded);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(std.testing.allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+    const scene = try std.testing.allocator.create(ContactScene);
+    defer std.testing.allocator.destroy(scene);
+    try scene.init(heap.allocator(), .{ .enhanced_internal_edge_removal = enhanced_internal_edge_removal });
+    defer scene.deinit();
+    for (0..3) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    const before = heap.num_allocations.load(.monotonic);
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    return heap.num_allocations.load(.monotonic) - before;
+}
+
+fn contactOutOfHeapMemory(kind: JobSystemKind) !void {
+    // The heap allocations of an update happen inside jobs: the QuadTree in UpdateBroadPhasePrepare and the
+    // InternalEdgeRemovingCollector of the large box in ProcessBodyPair (the FindCollisions jobs). The heap runs out at
+    // each of them in turn (that allocation and all later ones fail: a single failure of the collector is absorbed,
+    // its growing arrays first try to remap and then allocate): the job latches the error (D5), the update returns
+    // error.OutOfMemory, the temp allocator is empty and the system recovers through restoreState
+    try expect(try countHeapAllocationsOfUpdate(true) > try countHeapAllocationsOfUpdate(false)); // The collector allocates
+
+    var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
+    const allocator = heap.allocator();
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(std.testing.allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(std.testing.allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try std.testing.allocator.create(ContactScene);
+    defer std.testing.allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+    for (0..3) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+
+    var snapshot = StateRecorderImpl.init(std.testing.allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+    const before = heap.num_allocations.load(.monotonic);
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    var reference = StateRecorderImpl.init(std.testing.allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    for (0..num_allocations) |i| {
+        snapshot.rewind();
+        try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
+        heap.fail_from.store(std.math.maxInt(u32), .monotonic);
+        try expect(temp.isEmpty());
+        try expectContactRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
+    }
+}
+
+test "PhysicsSystem contacts: out of heap memory inside a job (ProcessBodyPair), single threaded" {
+    try contactOutOfHeapMemory(.single_threaded);
+}
+
+test "PhysicsSystem contacts: out of heap memory inside a job (ProcessBodyPair), multi threaded" {
+    try contactOutOfHeapMemory(.{ .thread_pool = 3 });
+}
+
+test "PhysicsSystem contacts: out of memory creating the scene" {
+    const Ctx = struct {
+        fn build(allocator: Allocator) !void {
+            const scene = try allocator.create(ContactScene);
+            defer allocator.destroy(scene);
+            try scene.init(allocator, .{});
+            scene.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Ctx.build, .{});
+}
+
+/// Counts the bodies that are deactivated while the LargeIslandSplitter holds split islands: a large island that falls
+/// asleep is put to sleep by CheckSleepAndUpdateBounds from the final batch of the split island (in
+/// SolvePositionConstraints, between JobFinalizeIslands and the reset of the splitter)
+const SplitIslandSleepListener = struct {
+    system: *const PhysicsSystem,
+    num_deactivated: std.atomic.Value(u32) = .init(0),
+    num_deactivated_from_split_island: std.atomic.Value(u32) = .init(0),
+
+    pub fn onBodyActivated(self: *SplitIslandSleepListener, body_id: BodyID, body_user_data: u64) void {
+        _ = .{ self, body_id, body_user_data };
+    }
+
+    pub fn onBodyDeactivated(self: *SplitIslandSleepListener, body_id: BodyID, body_user_data: u64) void {
+        _ = .{ body_id, body_user_data };
+        _ = self.num_deactivated.fetchAdd(1, .monotonic);
+        if (self.system.large_island_splitter.num_split_islands > 0)
+            _ = self.num_deactivated_from_split_island.fetchAdd(1, .monotonic);
+    }
+};
+
+/// A pyramid of boxes with a base of 16 (136 bodies, about 256 contacts in one island)
+const PyramidScene = struct {
+    const base = 16;
+    const num_boxes = base * (base + 1) / 2;
+
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+    object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+    listener: SplitIslandSleepListener = undefined,
+
+    fn init(self: *PyramidScene, allocator: Allocator, use_large_island_splitter: bool) !void {
+        self.* = .{};
+        try self.system.init(allocator, io, 1024, 0, 4096, 2048, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
+        errdefer self.system.deinit();
+        var settings = self.system.getPhysicsSettings().*;
+        settings.time_before_sleep = 0.25;
+        settings.use_large_island_splitter = use_large_island_splitter;
+        self.system.setPhysicsSettings(&settings);
+        self.listener = .{ .system = &self.system };
+        self.system.setBodyActivationListener(.init(&self.listener));
+        const bi = self.system.getBodyInterfaceMut();
+
+        const floor_shape = try BoxShape.create(allocator, Vec3.init(30, 1, 30), .{ .convex_radius = 0.0 });
+        var floor_settings = BodyCreationSettings.initWithShape(floor_shape.asShape(), RVec3.init(0, -1, 0), Quat.identity(), .static, Layers.non_moving);
+        defer floor_settings.deinit();
+        _ = try bi.createAndAddBody(&floor_settings, .dont_activate);
+
+        var box_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.replicate(0.5), .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer box_settings.deinit();
+        for (0..base) |y| {
+            for (0..base - y) |x| {
+                box_settings.position = RVec3.init(f(@intCast(x)) * 1.05 + f(@intCast(y)) * 0.525 - 8.0, 0.5 + f(@intCast(y)), 0);
+                _ = try bi.createAndAddBody(&box_settings, .activate);
+            }
+        }
+    }
+
+    fn deinit(self: *PyramidScene) void {
+        self.system.deinit();
+    }
+};
+
+/// Runs the pyramid until it is asleep, returns the state after every update
+fn runPyramid(allocator: Allocator, kind: JobSystemKind, use_large_island_splitter: bool, states: *std.ArrayList(u8), offsets: *std.ArrayList(usize)) !SplitIslandSleepListener {
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+    const scene = try allocator.create(PyramidScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, use_large_island_splitter);
+    defer scene.deinit();
+
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    for (0..60) |_| {
+        const errors = try scene.system.update(delta_time, 1, temp.tempAllocator(), jobs.jobSystem());
+        try expect(errors.isNone());
+        try expect(temp.isEmpty());
+        recorder.clear();
+        try scene.system.saveState(recorder.recorder(), .{});
+        try offsets.append(allocator, states.items.len);
+        try states.appendSlice(allocator, recorder.getData());
+    }
+    try expectEqual(@as(u32, 0), scene.system.getNumActiveBodies(.rigid_body)); // The pyramid is asleep
+    return scene.listener;
+}
+
+test "PhysicsSystem large island: the LargeIslandSplitter path" {
+    // The pyramid is one island of about 256 contacts (more than LargeIslandSplitter::cLargeIslandTreshold): its
+    // velocities and positions are solved in batches of splits by all SolveVelocityConstraints /
+    // SolvePositionConstraints jobs, and the whole island goes to sleep from the final batch of the split island
+    const allocator = std.testing.allocator;
+    var ref_states: std.ArrayList(u8) = .empty;
+    defer ref_states.deinit(allocator);
+    var ref_offsets: std.ArrayList(usize) = .empty;
+    defer ref_offsets.deinit(allocator);
+    const ref = try runPyramid(allocator, .single_threaded, true, &ref_states, &ref_offsets);
+    try expectEqual(@as(u32, PyramidScene.num_boxes), ref.num_deactivated.load(.monotonic));
+    try expectEqual(@as(u32, PyramidScene.num_boxes), ref.num_deactivated_from_split_island.load(.monotonic));
+
+    // Bit identical with thread pools (the batches of the splits run on all threads)
+    for ([_]JobSystemKind{ .{ .thread_pool = 0 }, .{ .thread_pool = 1 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 }, .{ .thread_pool = 7 } }) |kind| {
+        var states: std.ArrayList(u8) = .empty;
+        defer states.deinit(allocator);
+        var offsets: std.ArrayList(usize) = .empty;
+        defer offsets.deinit(allocator);
+        const listener = try runPyramid(allocator, kind, true, &states, &offsets);
+        try expectEqual(@as(u32, PyramidScene.num_boxes), listener.num_deactivated_from_split_island.load(.monotonic));
+        try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+        try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+    }
+
+    // Without the splitter the island is solved in one piece by one job: other results, nothing from a split island
+    var states: std.ArrayList(u8) = .empty;
+    defer states.deinit(allocator);
+    var offsets: std.ArrayList(usize) = .empty;
+    defer offsets.deinit(allocator);
+    const without = try runPyramid(allocator, .{ .thread_pool = 3 }, false, &states, &offsets);
+    try expectEqual(@as(u32, PyramidScene.num_boxes), without.num_deactivated.load(.monotonic));
+    try expectEqual(@as(u32, 0), without.num_deactivated_from_split_island.load(.monotonic));
+    try expect(!std.mem.eql(u8, ref_states.items, states.items));
 }

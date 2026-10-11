@@ -38,6 +38,8 @@
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/SimShapeFilter.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
@@ -209,6 +211,80 @@ struct SimSceneDesc
 	uint32						mNumConstraints;
 	const SimPhysicsSettings *	mPhysicsSettings;
 	uint32						mNumPhysicsSettings;
+	uint32						mContactListenerMode;
+	uint32						mCombineMode;
+	uint32						mSimShapeFilterMode;
+};
+
+// Must match ContactFlags in SimScenes.zig (bits in the upper 32 bits of the user data of a body)
+namespace SimContactFlags
+{
+	static constexpr uint32 cRejectAll = 1 << 0;
+	static constexpr uint32 cRejectSpeculative = 1 << 1;
+	static constexpr uint32 cAcceptEach = 1 << 2;
+	static constexpr uint32 cZeroFriction = 1 << 3;
+	static constexpr uint32 cBouncy = 1 << 4;
+	static constexpr uint32 cMassScale = 1 << 5;
+	static constexpr uint32 cSurfaceVelocity = 1 << 6;
+	static constexpr uint32 cSensor = 1 << 7;
+	static constexpr uint32 cFilterSpheres = 1 << 8;
+}
+
+// The ContactFlags of a body pair
+static uint32 SimContactFlagsOf(const Body &inBody1, const Body &inBody2)
+{
+	return uint32((inBody1.GetUserData() | inBody2.GetUserData()) >> 32);
+}
+
+// FNV-1a (32 bit), hashBytes of SimScenes.zig
+static uint32 SimHashBytes(uint32 inHash, const void *inData, size_t inSize)
+{
+	uint32 hash = inHash;
+	const uint8 *data = static_cast<const uint8 *>(inData);
+	for (size_t i = 0; i < inSize; ++i)
+	{
+		hash ^= data[i];
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+// The hash of the base offset and the contact points of a manifold, hashManifold of SimulationParity.zig
+static uint32 SimHashManifold(const ContactManifold &inManifold)
+{
+	uint32 hash = 2166136261u;
+	Real offset[3] = { inManifold.mBaseOffset.GetX(), inManifold.mBaseOffset.GetY(), inManifold.mBaseOffset.GetZ() };
+	hash = SimHashBytes(hash, offset, sizeof(offset));
+	for (const ContactPoints *points : { &inManifold.mRelativeContactPointsOn1, &inManifold.mRelativeContactPointsOn2 })
+		for (Vec3 p : *points)
+		{
+			float v[3] = { p.GetX(), p.GetY(), p.GetZ() };
+			hash = SimHashBytes(hash, v, sizeof(v));
+		}
+	return hash;
+}
+
+// CombineMode.custom of SimScenes.zig
+static float SimCombineFriction(const Body &inBody1, const SubShapeID &inSubShapeID1, const Body &inBody2, const SubShapeID &inSubShapeID2)
+{
+	return 0.5f * (inBody1.GetFriction() + inBody2.GetFriction());
+}
+
+static float SimCombineRestitution(const Body &inBody1, const SubShapeID &inSubShapeID1, const Body &inBody2, const SubShapeID &inSubShapeID2)
+{
+	return inSubShapeID1.GetValue() == inSubShapeID2.GetValue()? max(inBody1.GetRestitution(), inBody2.GetRestitution()) : min(inBody1.GetRestitution(), inBody2.GetRestitution());
+}
+
+// SimShapeFilterMode.filter_spheres of SimScenes.zig
+class SimSphereFilter final : public SimShapeFilter
+{
+public:
+	virtual bool				ShouldCollide(const Body &inBody1, const Shape *inShape1, const SubShapeID &inSubShapeIDOfShape1, const Body &inBody2, const Shape *inShape2, const SubShapeID &inSubShapeIDOfShape2) const override
+	{
+		if ((SimContactFlagsOf(inBody1, inBody2) & SimContactFlags::cFilterSpheres) == 0)
+			return true;
+		return inShape1->GetSubType() != EShapeSubType::Sphere && inShape2->GetSubType() != EShapeSubType::Sphere;
+	}
 };
 
 // Must match SimRecord in SimScenes.zig
@@ -408,6 +484,24 @@ class SimContactListener final : public ContactListener
 public:
 	virtual ValidateResult		OnContactValidate(const Body &inBody1, const Body &inBody2, RVec3Arg inBaseOffset, const CollideShapeResult &inCollisionResult) override
 	{
+		Record(inBody1, inBody2, inCollisionResult);
+
+		// ContactListenerMode.modify of SimScenes.zig
+		if (mMode == 1)
+		{
+			uint32 flags = SimContactFlagsOf(inBody1, inBody2);
+			if (flags & SimContactFlags::cRejectAll)
+				return ValidateResult::RejectAllContactsForThisBodyPair;
+			if (flags & SimContactFlags::cRejectSpeculative)
+				return inCollisionResult.mPenetrationDepth < 0.0f? ValidateResult::RejectContact : ValidateResult::AcceptContact;
+			if (flags & SimContactFlags::cAcceptEach)
+				return ValidateResult::AcceptContact;
+		}
+		return ValidateResult::AcceptAllContactsForThisBodyPair;
+	}
+
+	void						Record(const Body &inBody1, const Body &inBody2, const CollideShapeResult &inCollisionResult)
+	{
 		SimRecord r = { };
 		r.mKind = uint32(ESimRecordKind::ContactValidate);
 		r.mIDs[0] = inBody1.GetID().GetIndexAndSequenceNumber();
@@ -419,17 +513,18 @@ public:
 		r.mData[2] = SimFloatBits(inCollisionResult.mPenetrationAxis.GetY());
 		r.mData[3] = SimFloatBits(inCollisionResult.mPenetrationAxis.GetZ());
 		mRecorder->Add(r);
-		return ValidateResult::AcceptAllContactsForThisBodyPair;
 	}
 
 	virtual void				OnContactAdded(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override
 	{
 		Record(ESimRecordKind::ContactAdded, inBody1, inBody2, inManifold, ioSettings);
+		Modify(inBody1, inBody2, ioSettings);
 	}
 
 	virtual void				OnContactPersisted(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override
 	{
 		Record(ESimRecordKind::ContactPersisted, inBody1, inBody2, inManifold, ioSettings);
+		Modify(inBody1, inBody2, ioSettings);
 	}
 
 	virtual void				OnContactRemoved(const SubShapeIDPair &inSubShapePair) override
@@ -444,8 +539,35 @@ public:
 	}
 
 	SimRecorder *				mRecorder = nullptr;
+	uint32						mMode = 0;
 
 private:
+	// ContactListenerMode.modify of SimScenes.zig
+	void						Modify(const Body &inBody1, const Body &inBody2, ContactSettings &ioSettings) const
+	{
+		if (mMode != 1)
+			return;
+		uint32 flags = SimContactFlagsOf(inBody1, inBody2);
+		if (flags & SimContactFlags::cZeroFriction)
+			ioSettings.mCombinedFriction = 0.0f;
+		if (flags & SimContactFlags::cBouncy)
+			ioSettings.mCombinedRestitution = 0.9f;
+		if (flags & SimContactFlags::cMassScale)
+		{
+			ioSettings.mInvMassScale1 = 0.5f;
+			ioSettings.mInvInertiaScale1 = 0.25f;
+			ioSettings.mInvMassScale2 = 2.0f;
+			ioSettings.mInvInertiaScale2 = 1.5f;
+		}
+		if (flags & SimContactFlags::cSurfaceVelocity)
+		{
+			ioSettings.mRelativeLinearSurfaceVelocity = Vec3(1.5f, 0.0f, 0.5f);
+			ioSettings.mRelativeAngularSurfaceVelocity = Vec3(0.0f, 0.7f, 0.0f);
+		}
+		if (flags & SimContactFlags::cSensor)
+			ioSettings.mIsSensor = true;
+	}
+
 	void						Record(ESimRecordKind inKind, const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, const ContactSettings &inSettings)
 	{
 		SimRecord r = { };
@@ -458,10 +580,10 @@ private:
 		r.mData[1] = SimFloatBits(inManifold.mWorldSpaceNormal.GetY());
 		r.mData[2] = SimFloatBits(inManifold.mWorldSpaceNormal.GetZ());
 		r.mData[3] = SimFloatBits(inManifold.mPenetrationDepth);
-		r.mData[4] = uint32(inManifold.mRelativeContactPointsOn1.size());
+		r.mData[4] = uint32(inManifold.mRelativeContactPointsOn1.size()) | ((inSettings.mIsSensor? 1u : 0u) << 8);
 		r.mData[5] = SimFloatBits(inSettings.mCombinedFriction);
 		r.mData[6] = SimFloatBits(inSettings.mCombinedRestitution);
-		r.mData[7] = inSettings.mIsSensor? 1 : 0;
+		r.mData[7] = SimHashManifold(inManifold);
 		mRecorder->Add(r);
 	}
 };
@@ -488,8 +610,16 @@ public:
 		mSystem.SetGravity(SimLoad3(inDesc.mGravity));
 		mActivationListener.mRecorder = &mRecorder;
 		mContactListener.mRecorder = &mRecorder;
+		mContactListener.mMode = inDesc.mContactListenerMode;
 		mSystem.SetBodyActivationListener(&mActivationListener);
 		mSystem.SetContactListener(&mContactListener);
+		if (inDesc.mCombineMode == 1)
+		{
+			mSystem.SetCombineFriction(SimCombineFriction);
+			mSystem.SetCombineRestitution(SimCombineRestitution);
+		}
+		if (inDesc.mSimShapeFilterMode == 1)
+			mSystem.SetSimShapeFilter(&mSphereFilter);
 
 		for (uint32 i = 0; i < inDesc.mNumShapes; ++i)
 			mShapes.push_back(MakeShape(inDesc.mShapes[i]));
@@ -553,6 +683,7 @@ public:
 			}
 			break;
 		case 10:	settings = new EmptyShapeSettings(SimLoad3(p)); break;
+		case 16:	settings = new HeightFieldShapeSettings(mDesc.mFloats + inShape.mData, SimLoad3(p), SimLoad3(p + 3), inShape.mCount); break;
 		case 11:	settings = new RotatedTranslatedShapeSettings(SimLoad3(p), SimLoadQuat(inShape.mRotation), mShapes[inShape.mChild]); break;
 		case 12:	settings = new ScaledShapeSettings(mShapes[inShape.mChild], SimLoad3(p)); break;
 		case 13:	settings = new OffsetCenterOfMassShapeSettings(SimLoad3(p), mShapes[inShape.mChild]); break;
@@ -833,6 +964,7 @@ public:
 	SimRecorder					mRecorder;
 	SimActivationListener		mActivationListener;
 	SimContactListener			mContactListener;
+	SimSphereFilter				mSphereFilter;
 	PhysicsSystem				mSystem;
 	Array<RefConst<Shape>>		mShapes;
 	Array<BodyID>				mHandles;

@@ -668,7 +668,7 @@ const World = struct {
             .get_material => out.i[0] = self.tables.materialIndex(b.getMaterial(id, .{ .value = i[2] })),
             .set_shape => try b.setShape(id, self.tables.shapes.items[i[2]].get().?, i[3] != 0, activation),
             .notify_shape_changed => try b.notifyShapeChanged(id, load3(f[0..3]), i[3] != 0, activation),
-            .set_object_layer => b.setObjectLayer(id, @intCast(i[2])),
+            .set_object_layer => try b.setObjectLayer(id, @intCast(i[2])),
             .get_object_layer => out.i[0] = b.getObjectLayer(id),
             .activate_body => b.activateBody(id),
             .activate_bodies => b.activateBodies(ids),

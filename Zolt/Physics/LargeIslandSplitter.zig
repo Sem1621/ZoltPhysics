@@ -36,7 +36,7 @@
 //!   split islands take Jolt's temp memory. `mNumIterations`, `mNumVelocitySteps` and `mNumPositionSteps` stay `i32`
 //!   (Jolt's `int`), assigned from CalculateSolverSteps' unsigned counts with Jolt's two's complement conversion.
 //!
-//! Use in PhysicsSystem (REGION R3, Jolt's JobSolveVelocityConstraints / JobSolvePositionConstraints):
+//! Use in PhysicsSystem (Jolt's JobSolveVelocityConstraints / JobSolvePositionConstraints):
 //! - SolveVelocityConstraints: after ConstraintIdxToConstraintOffset and the two sorts of an island, call
 //!   `splitIsland(island_idx, &island_builder, &body_manager, &contact_manager, active_constraints, &steps_calculator)`
 //!   with a fresh `CalculateSolverSteps.init(&physics_settings)`; on `false` solve the island yourself with the same
