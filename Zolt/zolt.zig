@@ -380,6 +380,8 @@ pub const SimShapeFilter = @import("Physics/Collision/SimShapeFilter.zig").SimSh
 pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig").countAndSortTrues;
 pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
+pub const CalculateSolverSteps = @import("Physics/Constraints/CalculateSolverSteps.zig").CalculateSolverSteps;
+pub const DummyCalculateSolverSteps = @import("Physics/Constraints/CalculateSolverSteps.zig").DummyCalculateSolverSteps;
 pub const Constraint = @import("Physics/Constraints/Constraint.zig").Constraint;
 pub const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
 pub const ConstraintSpace = @import("Physics/Constraints/Constraint.zig").ConstraintSpace;
@@ -390,6 +392,31 @@ pub const Constraints = @import("Physics/Constraints/ConstraintManager.zig").Con
 pub const ContactConstraintManager = @import("Physics/Constraints/ContactConstraintManager.zig").ContactConstraintManager;
 pub const TwoBodyConstraint = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraint;
 pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraintSettings;
+pub const AngleConstraintPart = @import("Physics/Constraints/ConstraintPart/AngleConstraintPart.zig").AngleConstraintPart;
+pub const AngularFrictionConstraintPart = @import("Physics/Constraints/ConstraintPart/AngularFrictionConstraintPart.zig").AngularFrictionConstraintPart;
+pub const AngularFrictionConstraintPart1 = @import("Physics/Constraints/ConstraintPart/AngularFrictionConstraintPart.zig").AngularFrictionConstraintPart1;
+pub const AngularFrictionConstraintPart2 = @import("Physics/Constraints/ConstraintPart/AngularFrictionConstraintPart.zig").AngularFrictionConstraintPart2;
+pub const AxisConstraintPart = @import("Physics/Constraints/ConstraintPart/AxisConstraintPart.zig").AxisConstraintPart;
+pub const ContactConstraintPart = @import("Physics/Constraints/ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart;
+pub const ContactConstraintPart1 = @import("Physics/Constraints/ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart1;
+pub const ContactConstraintPart2 = @import("Physics/Constraints/ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart2;
+pub const DualAxisConstraintPart = @import("Physics/Constraints/ConstraintPart/DualAxisConstraintPart.zig").DualAxisConstraintPart;
+pub const GearConstraintPart = @import("Physics/Constraints/ConstraintPart/GearConstraintPart.zig").GearConstraintPart;
+pub const HingeRotationConstraintPart = @import("Physics/Constraints/ConstraintPart/HingeRotationConstraintPart.zig").HingeRotationConstraintPart;
+pub const IndependentAxisConstraintPart = @import("Physics/Constraints/ConstraintPart/IndependentAxisConstraintPart.zig").IndependentAxisConstraintPart;
+pub const PointConstraintPart = @import("Physics/Constraints/ConstraintPart/PointConstraintPart.zig").PointConstraintPart;
+pub const RackAndPinionConstraintPart = @import("Physics/Constraints/ConstraintPart/RackAndPinionConstraintPart.zig").RackAndPinionConstraintPart;
+pub const RotationEulerConstraintPart = @import("Physics/Constraints/ConstraintPart/RotationEulerConstraintPart.zig").RotationEulerConstraintPart;
+pub const RotationQuatConstraintPart = @import("Physics/Constraints/ConstraintPart/RotationQuatConstraintPart.zig").RotationQuatConstraintPart;
+pub const SpringPart = @import("Physics/Constraints/ConstraintPart/SpringPart.zig").SpringPart;
+pub const SwingTwistConstraintPart = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingTwistConstraintPart;
+pub const SwingType = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingType;
+pub const isPositionMotor = @import("Physics/Constraints/MotorSettings.zig").isPositionMotor;
+pub const isVelocityMotor = @import("Physics/Constraints/MotorSettings.zig").isVelocityMotor;
+pub const MotorSettings = @import("Physics/Constraints/MotorSettings.zig").MotorSettings;
+pub const MotorState = @import("Physics/Constraints/MotorSettings.zig").MotorState;
+pub const SpringMode = @import("Physics/Constraints/SpringSettings.zig").SpringMode;
+pub const SpringSettings = @import("Physics/Constraints/SpringSettings.zig").SpringSettings;
 pub const Activation = @import("Physics/EActivation.zig").Activation;
 pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
 pub const IslandBuilder = @import("Physics/IslandBuilder.zig").IslandBuilder;
@@ -621,11 +648,29 @@ const source_files = .{
     @import("Physics/Collision/SimShapeFilter.zig"),
     @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/Collision/TransformedShape.zig"),
+    @import("Physics/Constraints/CalculateSolverSteps.zig"),
     @import("Physics/Constraints/Constraint.zig"),
     @import("Physics/Constraints/ConstraintManager.zig"),
     @import("Physics/Constraints/ContactConstraintManager.zig"),
     @import("Physics/Constraints/TestConstraints.zig"),
     @import("Physics/Constraints/TwoBodyConstraint.zig"),
+    @import("Physics/Constraints/ConstraintPart/AngleConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/AngularFrictionConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/AxisConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/ConstraintPartTestContext.zig"),
+    @import("Physics/Constraints/ConstraintPart/ContactConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/DualAxisConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/GearConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/HingeRotationConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/IndependentAxisConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/PointConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/RackAndPinionConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/RotationEulerConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/RotationQuatConstraintPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/SpringPart.zig"),
+    @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig"),
+    @import("Physics/Constraints/MotorSettings.zig"),
+    @import("Physics/Constraints/SpringSettings.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
     @import("Physics/IslandBuilder.zig"),
