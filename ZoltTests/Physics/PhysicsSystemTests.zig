@@ -1129,3 +1129,50 @@ test "PhysicsSystem activation listener: BodyInterface activation and falling as
     try std.testing.expectError(error.OutOfMemory, failing_listener.checkError());
     c.getSystem().setBodyActivationListener(null);
 }
+
+test "PhysicsSystem linear cast body without inner radius (Jolt's release behavior)" {
+    // A dynamic mesh or a mirrored ScaledShape with the linear cast motion quality has a zero or negative inner
+    // radius. Jolt asserts (a usage error) and its release build casts every movement; Zolt's ReleaseFast build does
+    // the same instead of reaching undefined behavior (the assert in jobIntegrateVelocity was unconditional). Nothing
+    // is in the way, so the bodies move exactly like their discrete twins. (SimulationParity compares this with Jolt
+    // in the scene linear_cast_without_inner_radius.)
+    if (Core.enable_asserts) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{ .collision_steps = 2 });
+    defer c.deinit();
+
+    const mesh = try zolt.MeshShapeSettings.create(allocator, &.{zolt.Triangle.init(Vec3.zero(), Vec3.init(1, 0, 0), Vec3.init(0, 0, 1), .{})}, .{});
+    var mesh_ref = Ref(zolt.ShapeSettings).init(mesh.asShapeSettings());
+    defer mesh_ref.deinit();
+    const mirrored = try zolt.ScaledShapeSettings.create(allocator, (try SphereShapeSettings.create(allocator, 0.5, .{})).asShapeSettings(), Vec3.replicate(-1.0));
+    var mirrored_ref = Ref(zolt.ShapeSettings).init(mirrored.asShapeSettings());
+    defer mirrored_ref.deinit();
+
+    var bodies: [4]*Body = undefined;
+    for (&bodies, 0..) |*body, i| {
+        var settings: BodyCreationSettings = .{};
+        defer settings.deinit();
+        settings.setShapeSettings(if (i < 2) mesh.asShapeSettings() else mirrored.asShapeSettings());
+        settings.position = RVec3.init(@floatFromInt(20 * i), 10, 0);
+        settings.linear_velocity = Vec3.init(0, -30, 0);
+        settings.motion_quality = if (i % 2 == 0) .linear_cast else .discrete;
+        settings.object_layer = Layers.moving;
+        settings.override_mass_properties = .mass_and_inertia_provided;
+        settings.mass_properties_override.mass = 2.0;
+        settings.mass_properties_override.inertia = zolt.Mat44.identity();
+        body.* = try c.createBody(&settings, .activate);
+    }
+    try expect(bodies[0].getShape().getInnerRadius() == 0.0);
+    try expect(bodies[2].getShape().getInnerRadius() < 0.0);
+
+    _ = try c.simulate(0.5, {});
+    for (0..2) |pair| {
+        const cast = bodies[2 * pair].getPosition();
+        const discrete = bodies[2 * pair + 1].getPosition();
+        try expect(cast.getY() < 0.0); // It moved
+        try expectEqual(discrete.getY(), cast.getY());
+        try expectEqual(discrete.getZ(), cast.getZ());
+    }
+}

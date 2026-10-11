@@ -1379,6 +1379,79 @@ test {
     _ = SimScenes;
 }
 
+// The scenes of the later waves run on the C++ side already, with 0 and 3 worker threads in lockstep: their
+// descriptions build, Jolt is deterministic on them, and they reach what they are written for (contact callbacks,
+// constraints in the state). When a wave lands only the Zolt side is new.
+test "SimScenes blocked scenes run on the C++ side" {
+    const allocator = std.testing.allocator;
+    var a_state: std.ArrayList(u8) = .empty;
+    defer a_state.deinit(allocator);
+    var b_state: std.ArrayList(u8) = .empty;
+    defer b_state.deinit(allocator);
+    var a_records: std.ArrayList(SimRecord) = .empty;
+    defer a_records.deinit(allocator);
+    var b_records: std.ArrayList(SimRecord) = .empty;
+    defer b_records.deinit(allocator);
+
+    for (&SimScenes.scenes) |*entry| {
+        if (entry.blocked_by == .none or entry.blocked_by == .release_only) continue;
+        var builder: SceneBuilder = .init(allocator);
+        defer builder.deinit();
+        try entry.build(&builder);
+        const desc = builder.desc();
+        const a = CppWorld.init(&desc, 0);
+        defer a.deinit();
+        const b = CppWorld.init(&desc, 3);
+        defer b.deinit();
+
+        var delta_time = builder.delta_time;
+        var collision_steps = builder.collision_steps;
+        var records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0);
+        var op_index: usize = 0;
+        for (0..builder.num_updates) |update| {
+            while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
+                const op = &builder.ops.items[op_index];
+                switch (@as(OpKind, @enumFromInt(op.kind))) {
+                    .set_update => {
+                        delta_time = op.f[0];
+                        collision_steps = op.count;
+                    },
+                    .snapshot, .restore_cross => return error.SkipZigTest, // Not used by the blocked scenes yet
+                    else => try std.testing.expectEqual(a.applyOp(op), b.applyOp(op)),
+                }
+            }
+            try std.testing.expectEqual(a.update(delta_time, collision_steps), b.update(delta_time, collision_steps));
+            try a.saveState(allocator, .all, &a_state);
+            try b.saveState(allocator, .all, &b_state);
+            try std.testing.expectEqualSlices(u8, a_state.items, b_state.items);
+            a_records.clearRetainingCapacity();
+            b_records.clearRetainingCapacity();
+            try a.takeRecords(allocator, &a_records);
+            try b.takeRecords(allocator, &b_records);
+            std.sort.pdq(SimRecord, a_records.items, {}, SimRecord.lessThan);
+            std.sort.pdq(SimRecord, b_records.items, {}, SimRecord.lessThan);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a_records.items), std.mem.sliceAsBytes(b_records.items));
+            for (a_records.items) |r| records[r.kind] += 1;
+        }
+
+        // The state decodes completely
+        var layout: StateLayout = .{ .allocator = allocator, .bytes = a_state.items, .cpp = a };
+        defer layout.deinit();
+        try layout.decode();
+        try std.testing.expect(!layout.truncated and layout.pos == a_state.items.len);
+
+        switch (entry.blocked_by) {
+            .contacts, .ccd_hits => try std.testing.expect(records[@intFromEnum(RecordKind.contact_added)] > 0),
+            .constraints => {
+                var num_constraints: u32 = 0;
+                _ = jolt.jolt_sim_constraint_state_size(a.handle, 0, &num_constraints);
+                try std.testing.expect(num_constraints > 0);
+            },
+            .none, .soft_bodies, .release_only => {},
+        }
+    }
+}
+
 test "SimScenes struct layout matches SimulationReference.cpp" {
     var sizes: [12]u32 = undefined;
     jolt.jolt_sim_struct_sizes(&sizes);
