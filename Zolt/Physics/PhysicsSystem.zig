@@ -1550,120 +1550,128 @@ pub const PhysicsSystem = struct {
     /// (Jolt disables TSAN for this function: the body pair slots are `.monotonic` atomics in Zolt, see
     /// PhysicsUpdateContext.BodyPairSlot)
     fn jobFindCollisions(self: *Self, step: *Step, job_index: u32) void {
-        // We read positions and read velocities (for elastic collisions)
-        var grant: BodyAccess.Grant = .init(.read, .read);
-        defer grant.deinit();
+        find: {
+            // We read positions and read velocities (for elastic collisions)
+            var grant: BodyAccess.Grant = .init(.read, .read);
+            defer grant.deinit();
 
-        // Can only activate bodies
-        var grant_active: BodyManager.GrantActiveBodiesAccess = .init(true, false);
-        defer grant_active.deinit();
+            // Can only activate bodies
+            var grant_active: BodyManager.GrantActiveBodiesAccess = .init(true, false);
+            defer grant_active.deinit();
 
-        const context = step.context;
+            const context = step.context;
 
-        // Allocation context for allocating new contact points
-        var contact_allocator = self.contact_manager.getContactAllocator();
+            // Allocation context for allocating new contact points
+            var contact_allocator = self.contact_manager.getContactAllocator();
 
-        // Determine initial queue to read pairs from if no broadphase work can be done
-        // (always start looking at results from the next job)
-        var read_queue_idx = (job_index + 1) % step.body_pair_queues.len;
+            // Determine initial queue to read pairs from if no broadphase work can be done
+            // (always start looking at results from the next job)
+            var read_queue_idx = (job_index + 1) % step.body_pair_queues.len;
 
-        // Allocate space to temporarily store a batch of active bodies
-        var active_bodies: [active_bodies_batch_size]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
+            // Allocate space to temporarily store a batch of active bodies
+            var active_bodies: [active_bodies_batch_size]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
 
-        while (true) {
-            // Zolt (D5): no new work after an out of memory error (checked before the claims below)
-            const poisoned = context.isOutOfMemory();
+            while (true) {
+                // Zolt (D5): no new work after an out of memory error (checked before the claims below)
+                const poisoned = context.isOutOfMemory();
 
-            // Check if there are active bodies to be processed
-            const active_bodies_read_idx = step.active_body_read_idx.value.load(.seq_cst);
-            const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body);
-            if (!poisoned and active_bodies_read_idx < num_active_bodies) {
-                // Take a batch of active bodies
-                const active_bodies_read_idx_end = @min(num_active_bodies, active_bodies_read_idx + active_bodies_batch_size);
-                if (step.active_body_read_idx.value.cmpxchgStrong(active_bodies_read_idx, active_bodies_read_idx_end, .seq_cst, .seq_cst) == null) {
-                    // Callback when a new body pair is found
-                    const MyBodyPairCallback = struct {
-                        pub const overrides = .{.addHit};
+                // Check if there are active bodies to be processed
+                const active_bodies_read_idx = step.active_body_read_idx.value.load(.seq_cst);
+                const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body);
+                if (!poisoned and active_bodies_read_idx < num_active_bodies) {
+                    // Take a batch of active bodies
+                    const active_bodies_read_idx_end = @min(num_active_bodies, active_bodies_read_idx + active_bodies_batch_size);
+                    if (step.active_body_read_idx.value.cmpxchgStrong(active_bodies_read_idx, active_bodies_read_idx_end, .seq_cst, .seq_cst) == null) {
+                        // Callback when a new body pair is found
+                        const MyBodyPairCallback = struct {
+                            pub const overrides = .{.addHit};
 
-                        base: BodyPairCollector = .init(@This()),
-                        step: *Step,
-                        contact_allocator: *ContactAllocator,
-                        job_index: u32,
+                            base: BodyPairCollector = .init(@This()),
+                            step: *Step,
+                            contact_allocator: *ContactAllocator,
+                            job_index: u32,
 
-                        // Callback function when a body pair is found
-                        pub fn addHit(cb: *@This(), pair: *const BodyPair) void {
-                            // Check if we have space in our write queue
-                            const queue = &cb.step.body_pair_queues.slice()[cb.job_index];
-                            const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
-                            if (body_pairs_in_queue >= cb.step.max_body_pairs_per_queue) {
-                                // Buffer full, process the pair now
-                                cb.step.context.physics_system.processBodyPair(cb.contact_allocator, pair.*) catch cb.step.context.setOutOfMemory();
-                            } else {
-                                // Store the pair in our own queue
-                                PhysicsUpdateContext.storeBodyPair(&cb.step.context.body_pairs.items[cb.job_index * cb.step.max_body_pairs_per_queue + queue.write_idx.load(.seq_cst) % cb.step.max_body_pairs_per_queue], pair.*);
-                                _ = queue.write_idx.fetchAdd(1, .seq_cst);
+                            // Callback function when a body pair is found
+                            pub fn addHit(cb: *@This(), pair: *const BodyPair) void {
+                                // Check if we have space in our write queue
+                                const queue = &cb.step.body_pair_queues.slice()[cb.job_index];
+                                const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
+                                if (body_pairs_in_queue >= cb.step.max_body_pairs_per_queue) {
+                                    // Buffer full, process the pair now
+                                    cb.step.context.physics_system.processBodyPair(cb.contact_allocator, pair.*) catch cb.step.context.setOutOfMemory();
+                                } else {
+                                    // Store the pair in our own queue
+                                    PhysicsUpdateContext.storeBodyPair(&cb.step.context.body_pairs.items[cb.job_index * cb.step.max_body_pairs_per_queue + queue.write_idx.load(.seq_cst) % cb.step.max_body_pairs_per_queue], pair.*);
+                                    _ = queue.write_idx.fetchAdd(1, .seq_cst);
+                                }
                             }
-                        }
-                    };
-                    var add_pair: MyBodyPairCallback = .{ .step = step, .contact_allocator = &contact_allocator, .job_index = job_index };
+                        };
+                        var add_pair: MyBodyPairCallback = .{ .step = step, .contact_allocator = &contact_allocator, .job_index = job_index };
 
-                    // Copy active bodies to temporary array, broadphase will reorder them
-                    const batch_size = active_bodies_read_idx_end - active_bodies_read_idx;
-                    @memcpy(active_bodies[0..batch_size], self.body_manager.getActiveBodiesUnsafe(.rigid_body)[active_bodies_read_idx..active_bodies_read_idx_end]);
+                        // Copy active bodies to temporary array, broadphase will reorder them
+                        const batch_size = active_bodies_read_idx_end - active_bodies_read_idx;
+                        @memcpy(active_bodies[0..batch_size], self.body_manager.getActiveBodiesUnsafe(.rigid_body)[active_bodies_read_idx..active_bodies_read_idx_end]);
 
-                    // Find pairs in the broadphase
-                    self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base);
+                        // Find pairs in the broadphase
+                        self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base);
 
-                    // Check if we have enough pairs in the buffer to start a new job
-                    const queue = &step.body_pair_queues.slice()[job_index];
-                    const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
-                    if (body_pairs_in_queue >= narrow_phase_batch_size)
-                        self.trySpawnJobFindCollisions(step);
-                }
-            } else {
-                // Lockless loop to get the next body pair from the pairs buffer
-                const first_read_queue_idx = read_queue_idx;
-                while (true) {
-                    const queue = &step.body_pair_queues.slice()[read_queue_idx];
-
-                    // Get the next pair to process
-                    const pair_idx = queue.read_idx.load(.seq_cst);
-
-                    // If the pair hasn't been written yet (Zolt D5: a poisoned job treats every queue as empty)
-                    if (poisoned or pair_idx >= queue.write_idx.load(.seq_cst)) {
-                        // Go to the next queue
-                        read_queue_idx = (read_queue_idx + 1) % step.body_pair_queues.len;
-
-                        // If we're back at the first queue, we've looked at all of them and found nothing
-                        if (read_queue_idx == first_read_queue_idx) {
-                            // Collect information from the contact allocator and accumulate it in the step.
-                            finalizeContactAllocator(step, &contact_allocator);
-
-                            // Mark this job as inactive
-                            _ = step.active_find_collision_jobs.fetchAnd(~(@as(JobMask, 1) << @intCast(job_index)), .release);
-
-                            // Trigger the next jobs
-                            step.update_broadphase_finalize.removeDependency(.{});
-                            step.finalize_islands.removeDependency(.{});
-                            return;
-                        }
-
-                        // Try again reading from the next queue
-                        continue;
+                        // Check if we have enough pairs in the buffer to start a new job
+                        const queue = &step.body_pair_queues.slice()[job_index];
+                        const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
+                        if (body_pairs_in_queue >= narrow_phase_batch_size)
+                            self.trySpawnJobFindCollisions(step);
                     }
+                } else {
+                    // Lockless loop to get the next body pair from the pairs buffer
+                    const first_read_queue_idx = read_queue_idx;
+                    while (true) {
+                        const queue = &step.body_pair_queues.slice()[read_queue_idx];
 
-                    // Copy the body pair out of the buffer
-                    const bp = PhysicsUpdateContext.loadBodyPair(&context.body_pairs.items[read_queue_idx * step.max_body_pairs_per_queue + pair_idx % step.max_body_pairs_per_queue]);
+                        // Get the next pair to process
+                        const pair_idx = queue.read_idx.load(.seq_cst);
 
-                    // Mark this pair as taken
-                    if (queue.read_idx.cmpxchgStrong(pair_idx, pair_idx + 1, .seq_cst, .seq_cst) == null) {
-                        // Process the actual body pair
-                        self.processBodyPair(&contact_allocator, bp) catch context.setOutOfMemory();
-                        break;
+                        // If the pair hasn't been written yet (Zolt D5: a poisoned job treats every queue as empty)
+                        if (poisoned or pair_idx >= queue.write_idx.load(.seq_cst)) {
+                            // Go to the next queue
+                            read_queue_idx = (read_queue_idx + 1) % step.body_pair_queues.len;
+
+                            // If we're back at the first queue, we've looked at all of them and found nothing
+                            if (read_queue_idx == first_read_queue_idx) {
+                                // Collect information from the contact allocator and accumulate it in the step.
+                                finalizeContactAllocator(step, &contact_allocator);
+
+                                // Mark this job as inactive
+                                _ = step.active_find_collision_jobs.fetchAnd(~(@as(JobMask, 1) << @intCast(job_index)), .release);
+
+                                // Trigger the next jobs (Zolt: after the grants, see below)
+                                break :find;
+                            }
+
+                            // Try again reading from the next queue
+                            continue;
+                        }
+
+                        // Copy the body pair out of the buffer
+                        const bp = PhysicsUpdateContext.loadBodyPair(&context.body_pairs.items[read_queue_idx * step.max_body_pairs_per_queue + pair_idx % step.max_body_pairs_per_queue]);
+
+                        // Mark this pair as taken
+                        if (queue.read_idx.cmpxchgStrong(pair_idx, pair_idx + 1, .seq_cst, .seq_cst) == null) {
+                            // Process the actual body pair
+                            self.processBodyPair(&contact_allocator, bp) catch context.setOutOfMemory();
+                            break;
+                        }
                     }
                 }
             }
         }
+
+        // Trigger the next jobs
+        // (Zolt: after the scope of the grants above. JobSystemSingleThreaded runs the jobs that become ready inside this
+        // call, and their Grant asserts that no other grant is active on the thread. Jolt triggers inside the scope,
+        // which asserts with JobSystemSingleThreaded from the second collision step on (Jolt only tests that job system
+        // with one step); with the Zolt start gate (D4) already in the first step. Same in jobSoftBodyPrepare.)
+        step.update_broadphase_finalize.removeDependency(.{});
+        step.finalize_islands.removeDependency(.{});
     }
 
     /// Process narrow phase for a single body pair
@@ -2373,18 +2381,22 @@ pub const PhysicsSystem = struct {
             if (!context.isOutOfMemory())
                 self.body_manager.getActiveBodies(self.allocator, .soft_body, &active_bodies) catch context.setOutOfMemory();
 
-            // Quit if there are no active soft bodies
-            if (active_bodies.items.len == 0) {
-                // Kick the next step
-                if (step.start_next_step.isValid())
-                    step.start_next_step.removeDependency(.{});
-                return;
+            if (active_bodies.items.len != 0) {
+                // Phase 9: sort the active soft bodies, allocate and initialize the SoftBodyUpdateContexts and (after
+                // this scope) create the SoftBodyFinalize / SoftBodySimulate / SoftBodyCollide jobs and return (no soft
+                // body can be created before Phase 9)
+                @panic("PhysicsSystem.jobSoftBodyPrepare: soft bodies: Phase 9");
             }
         }
 
-        // Phase 9: sort the active soft bodies, allocate and initialize the SoftBodyUpdateContexts and create the
-        // SoftBodyFinalize / SoftBodySimulate / SoftBodyCollide jobs (no soft body can be created before Phase 9)
-        @panic("PhysicsSystem.jobSoftBodyPrepare: soft bodies: Phase 9");
+        // Quit if there are no active soft bodies
+        // (Zolt: the kick happens after the scope of the grant, Jolt kicks inside it, see jobFindCollisions)
+        {
+            // Kick the next step
+            if (step.start_next_step.isValid())
+                step.start_next_step.removeDependency(.{});
+            return;
+        }
     }
 
     // -----------------------------------------------------------------------------------------------------------------

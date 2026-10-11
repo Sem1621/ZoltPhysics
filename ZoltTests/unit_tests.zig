@@ -53,6 +53,7 @@ test {
     _ = @import("Physics/BodyManagerTests.zig");
     _ = @import("Physics/BodyTestContext.zig");
     _ = @import("Physics/BodyTests.zig");
+    _ = @import("Physics/BroadPhaseBruteForceTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
@@ -64,6 +65,7 @@ test {
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");
     _ = @import("Physics/PhysicsStepListenerTests.zig");
+    _ = @import("Physics/PhysicsSystemTests.zig");
     _ = @import("Physics/PhysicsTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
