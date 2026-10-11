@@ -427,6 +427,7 @@ pub const PhysicsLockContext = @import("Physics/PhysicsLock.zig").PhysicsLockCon
 pub const PhysicsLockTypes = @import("Physics/PhysicsLock.zig").PhysicsLockTypes;
 pub const SharedLock = @import("Physics/PhysicsLock.zig").SharedLock;
 pub const UniqueLock = @import("Physics/PhysicsLock.zig").UniqueLock;
+pub const PhysicsScene = @import("Physics/PhysicsScene.zig").PhysicsScene;
 pub const physics_settings = @import("Physics/PhysicsSettings.zig");
 pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
 pub const PhysicsStepListener = @import("Physics/PhysicsStepListener.zig").PhysicsStepListener;
@@ -678,6 +679,7 @@ const source_files = .{
     @import("Physics/IslandBuilder.zig"),
     @import("Physics/LargeIslandSplitter.zig"),
     @import("Physics/PhysicsLock.zig"),
+    @import("Physics/PhysicsScene.zig"),
     @import("Physics/PhysicsSettings.zig"),
     @import("Physics/PhysicsStepListener.zig"),
     @import("Physics/PhysicsSystem.zig"),
