@@ -6,6 +6,8 @@
 
 test {
     _ = @import("Layers.zig");
+    _ = @import("LoggingBodyActivationListener.zig");
+    _ = @import("PhysicsTestContext.zig");
     _ = @import("UnitTestFramework.zig");
 
     // Core
@@ -61,6 +63,8 @@ test {
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");
+    _ = @import("Physics/PhysicsStepListenerTests.zig");
+    _ = @import("Physics/PhysicsTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
     _ = @import("Physics/ShapeTests.zig");
