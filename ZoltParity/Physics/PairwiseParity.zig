@@ -138,7 +138,7 @@ const P = [3]f32;
 const num_materials = 8;
 
 /// Capacity of the C++ output stream (in u32)
-const stream_capacity = 1 << 20;
+pub const stream_capacity = 1 << 20;
 
 /// Print the number of queries and hits of the sweep (passing tests must not print, only for tuning)
 const print_statistics = false;
@@ -162,7 +162,7 @@ const marker_bounds: u32 = 0xC000000B;
 const marker_filter: u32 = 0xC000000C;
 
 /// Node kinds, must match the enum in PairwiseReference.cpp
-const NodeKind = enum(u32) {
+pub const NodeKind = enum(u32) {
     /// f[0]: radius
     sphere,
     /// f[0..3]: half extent, convex_radius
@@ -403,63 +403,63 @@ fn makeCreator(c: [2]u32) SubShapeIDCreator {
 // ---------------------------------------------------------------------------------------------------------------------
 // The output stream (the same layout as OutStream in PairwiseReference.cpp)
 
-const Stream = struct {
+pub const Stream = struct {
     allocator: Allocator,
     values: std.ArrayList(u32) = .empty,
 
-    fn deinit(s: *Stream) void {
+    pub fn deinit(s: *Stream) void {
         s.values.deinit(s.allocator);
     }
 
-    fn u(s: *Stream, v: u32) void {
+    pub fn u(s: *Stream, v: u32) void {
         s.values.append(s.allocator, v) catch @panic("out of memory");
     }
 
-    fn b(s: *Stream, v: bool) void {
+    pub fn b(s: *Stream, v: bool) void {
         s.u(@intFromBool(v));
     }
 
-    fn f(s: *Stream, v: f32) void {
+    pub fn f(s: *Stream, v: f32) void {
         s.u(@bitCast(v));
     }
 
-    fn d(s: *Stream, v: f64) void {
+    pub fn d(s: *Stream, v: f64) void {
         const bits: u64 = @bitCast(v);
         s.u(@truncate(bits));
         s.u(@truncate(bits >> 32));
     }
 
-    fn v3(s: *Stream, v: Vec3) void {
+    pub fn v3(s: *Stream, v: Vec3) void {
         s.f(v.getX());
         s.f(v.getY());
         s.f(v.getZ());
     }
 
-    fn f3(s: *Stream, v: Float3) void {
+    pub fn f3(s: *Stream, v: Float3) void {
         s.f(v.x);
         s.f(v.y);
         s.f(v.z);
     }
 
-    fn r3(s: *Stream, v: RVec3) void {
+    pub fn r3(s: *Stream, v: RVec3) void {
         s.d(v.getX());
         s.d(v.getY());
         s.d(v.getZ());
     }
 
-    fn q(s: *Stream, v: Quat) void {
+    pub fn q(s: *Stream, v: Quat) void {
         s.f(v.getX());
         s.f(v.getY());
         s.f(v.getZ());
         s.f(v.getW());
     }
 
-    fn box(s: *Stream, v: AABox) void {
+    pub fn box(s: *Stream, v: AABox) void {
         s.v3(v.min);
         s.v3(v.max);
     }
 
-    fn face(s: *Stream, v: *const Shape.SupportingFace) void {
+    pub fn face(s: *Stream, v: *const Shape.SupportingFace) void {
         s.u(v.len);
         for (v.constSlice()) |p| s.v3(p);
     }
@@ -977,26 +977,26 @@ fn zoltTransformedShape(allocator: Allocator, materials: *const Materials, shape
 
 const Rng = fw.Rng;
 
-const Gen = struct {
+pub const Gen = struct {
     rng: Rng = .{},
 
-    fn index(self: *Gen, n: u32) u32 {
+    pub fn index(self: *Gen, n: u32) u32 {
         return self.rng.next() % n;
     }
 
-    fn chance(self: *Gen, percent: u32) bool {
+    pub fn chance(self: *Gen, percent: u32) bool {
         return self.index(100) < percent;
     }
 
-    fn float(self: *Gen, min: f32, max: f32) f32 {
+    pub fn float(self: *Gen, min: f32, max: f32) f32 {
         return self.rng.float(min, max);
     }
 
-    fn vec(self: *Gen, min: f32, max: f32) Vec3 {
+    pub fn vec(self: *Gen, min: f32, max: f32) Vec3 {
         return Vec3.init(self.float(min, max), self.float(min, max), self.float(min, max));
     }
 
-    fn direction(self: *Gen) Vec3 {
+    pub fn direction(self: *Gen) Vec3 {
         while (true) {
             const v = self.vec(-1, 1);
             const len_sq = v.lengthSq();
@@ -1006,7 +1006,7 @@ const Gen = struct {
     }
 
     /// A random rotation: identity, a multiple of 90 degrees around an axis or random
-    fn rotation(self: *Gen) Quat {
+    pub fn rotation(self: *Gen) Quat {
         const q = switch (self.index(5)) {
             0 => Quat.identity(),
             1 => Quat.rotation(([_]Vec3{ Vec3.axisX(), Vec3.axisY(), Vec3.axisZ() })[self.index(3)], @as(f32, @floatFromInt(self.index(4))) * 0.5 * math.pi),
@@ -1017,7 +1017,7 @@ const Gen = struct {
     }
 
     /// A random point in a box
-    fn pointIn(self: *Gen, box: AABox) Vec3 {
+    pub fn pointIn(self: *Gen, box: AABox) Vec3 {
         return box.min.add(box.max.sub(box.min).mul(self.vec(0, 1)));
     }
 
@@ -1033,7 +1033,7 @@ const Gen = struct {
 };
 
 /// One entry of the sweep: a node of the catalogue
-const Entry = struct {
+pub const Entry = struct {
     name: []const u8,
     node: u32,
     /// The pair costs (Debug): 1 cheap (convex), 2 decorated / small composite, 4 mesh / height field / compound
@@ -1041,7 +1041,7 @@ const Entry = struct {
 };
 
 /// The catalogue description and its arrays
-const Catalogue = struct {
+pub const Catalogue = struct {
     allocator: Allocator,
     nodes: std.ArrayList(NodeDesc) = .empty,
     subs: std.ArrayList(SubDesc) = .empty,
@@ -1205,7 +1205,7 @@ fn addHeightField(cat: *Catalogue, gen: *Gen, sample_count: u32, block_size: u32
 }
 
 /// The catalogue of the sweep
-fn makeCatalogue(allocator: Allocator) !Catalogue {
+pub fn makeCatalogue(allocator: Allocator) !Catalogue {
     var cat: Catalogue = .{ .allocator = allocator };
     errdefer cat.deinit();
     var gen: Gen = .{ .rng = .{ .state = 0x5eed1234 } };
@@ -1554,12 +1554,12 @@ fn makeRandomCatalogue(allocator: Allocator, seed: u32) !Catalogue {
 // ---------------------------------------------------------------------------------------------------------------------
 // Comparison of the streams
 
-const Comparison = struct {
+pub const Comparison = struct {
     name: []const u8,
     calls: usize = 0,
     mismatches: usize = 0,
 
-    fn check(self: *Comparison, what: []const u8, input: anytype, zolt_values: []const u32, jolt_values: []const u32) void {
+    pub fn check(self: *Comparison, what: []const u8, input: anytype, zolt_values: []const u32, jolt_values: []const u32) void {
         self.calls += 1;
         if (std.mem.eql(u32, zolt_values, jolt_values))
             return;
@@ -1579,7 +1579,7 @@ const Comparison = struct {
         self.mismatches += 1;
     }
 
-    fn finish(self: *const Comparison) !void {
+    pub fn finish(self: *const Comparison) !void {
         if (self.mismatches > 0) {
             std.debug.print("{s}: {d} mismatches in {d} calls\n", .{ self.name, self.mismatches, self.calls });
             return error.ParityMismatch;
@@ -1588,7 +1588,7 @@ const Comparison = struct {
 };
 
 /// Run a C++ function that writes a stream (`call.run(out, capacity) u32`)
-fn joltStream(buffer: []u32, call: anytype) []const u32 {
+pub fn joltStream(buffer: []u32, call: anytype) []const u32 {
     const size = call.run(buffer.ptr, @intCast(buffer.len));
     std.debug.assert(size <= buffer.len); // The capacity is big enough for every query of the test
     return buffer[0..size];
@@ -1598,7 +1598,7 @@ fn joltStream(buffer: []u32, call: anytype) []const u32 {
 // The shapes on both sides
 
 /// The catalogue built on both sides, with per node information for the input generation
-const Built = struct {
+pub const Built = struct {
     allocator: Allocator,
     cat: Catalogue,
     materials: Materials = .{},
@@ -1613,7 +1613,7 @@ const Built = struct {
     multi_block: std.ArrayList(bool) = .empty,
 
     /// Takes ownership of `cat` (also on error)
-    fn init(allocator: Allocator, cat: Catalogue, buffer: []u32) !*Built {
+    pub fn init(allocator: Allocator, cat: Catalogue, buffer: []u32) !*Built {
         const self = allocator.create(Built) catch |err| {
             var owned = cat;
             owned.deinit();
@@ -1678,7 +1678,7 @@ const Built = struct {
         self.shapes.deinit(self.allocator);
     }
 
-    fn deinit(self: *Built) void {
+    pub fn deinit(self: *Built) void {
         jolt.pw_catalogue_destroy(self.handle);
         self.deinitZoltShapes();
         self.leaf_types.deinit(self.allocator);
@@ -1688,12 +1688,12 @@ const Built = struct {
         self.allocator.destroy(self);
     }
 
-    fn shape(self: *const Built, node: u32) *const Shape {
+    pub fn shape(self: *const Built, node: u32) *const Shape {
         return self.shapes.items[node].get().?;
     }
 
     /// The collide / cast functions of every pair of leaf sub types of the two nodes are supported
-    fn supported(self: *const Built, node1: u32, node2: u32, comptime cast: bool) bool {
+    pub fn supported(self: *const Built, node1: u32, node2: u32, comptime cast: bool) bool {
         const set1 = self.leaf_types.items[node1];
         const set2 = self.leaf_types.items[node2];
         for (0..64) |t1| {
@@ -1713,7 +1713,7 @@ const Built = struct {
     }
 
     /// The AnyHit collector can be used for a collide or ray query with the nodes (see multi_block)
-    fn anyHitAllowed(self: *const Built, node1: u32, node2: u32) bool {
+    pub fn anyHitAllowed(self: *const Built, node1: u32, node2: u32) bool {
         return !asserts or !(self.multi_block.items[node1] or self.multi_block.items[node2]);
     }
 
@@ -1738,7 +1738,7 @@ fn baseOffset(gen: *Gen, position: [3]f64) [3]f64 {
 }
 
 /// A scale that IsValidScale accepts for the shape: one, uniform, uniform with signs, non uniform (with signs)
-fn randomScale(gen: *Gen, shape: *const Shape) Vec3 {
+pub fn randomScale(gen: *Gen, shape: *const Shape) Vec3 {
     // Mostly moderate magnitudes, sometimes small or big ones
     const min: f32, const max: f32 = switch (gen.index(20)) {
         0 => .{ 0.2, 0.4 },

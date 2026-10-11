@@ -25,6 +25,7 @@ pub const files = [_][]const u8{
     "Physics/FiltersReference.cpp",
     "Physics/HeightFieldShapeReference.cpp",
     "Physics/MeshShapeReference.cpp",
+    "Physics/NarrowPhaseQueryReference.cpp",
     "Physics/PairwiseReference.cpp",
     "Physics/PlaneEmptyReference.cpp",
     "Physics/ShapeCoreReference.cpp",
