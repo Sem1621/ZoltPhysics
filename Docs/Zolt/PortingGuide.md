@@ -54,7 +54,8 @@ Contents:
 5. Port the matching tests from `UnitTests/` into `ZoltTests/` (see [Tests](#10-tests)).
 6. Add parity tests (see [Tests](#10-tests)): every ported function that computes numbers gets
    compared bit for bit with the C++ library on many inputs.
-7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build parity` (also with
+7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build test -Doptimize=ReleaseFast`
+   (see section 10), `zig build parity` (also with
    `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig fmt Zolt ZoltTests ZoltParity build.zig`,
    then `python3 tools/port_status.py --write`.
 
@@ -160,6 +161,13 @@ both types) when porting code needs them.
   `extern struct` when layout matters: SIMD types, data that is hashed/streamed as bytes,
   data shared with GPU code. Uninitialized C++ values (`Vec3 v;`) become `var v: Vec3 = undefined;`.
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
+- **Bit flags.** Public bit flag enums (`EAllowedDOFs`, `EStateRecorderState`, `EPhysicsUpdateError`) become
+  `packed struct(uN)` with one `bool` per bit in Jolt's bit order. Jolt's named combinations become decls
+  (`AllowedDOFs.all`, `AllowedDOFs.plane_2d`, `StateRecorderState.all`), and a comptime block checks the bits against
+  Jolt's values. Private flag enums that Jolt changes with atomic or / and (`Body::EFlags`,
+  `CachedManifold::EFlags`) become integer constants in a `Flags` namespace on an atomic field of Jolt's width
+  (`flags: std.atomic.Value(u8)` for `Body`, `std.atomic.Value(u16)` for `CachedManifold`), changed with `fetchOr` /
+  `fetchAnd`.
 
 ### Allocation
 
@@ -175,6 +183,13 @@ both types) when porting code needs them.
   (Jolt's default constructor + `Init`). Document that they must not be moved after `init`.
 - `TempAllocator` is ported as its own type (it is a stack allocator with LIFO semantics), and
   additionally exposes a `std.mem.Allocator` interface for use with std containers.
+- Jolt's typed temp blocks (`T *p = (T *)inTempAllocator->Allocate(n * sizeof(T))` ... `inTempAllocator->Free(p,
+  n * sizeof(T))`, also `Array<T, STLTempAllocator<T>>` that is resized once) become `TempArray(T)`
+  (`Core/TempAllocator.zig`): `x = try .alloc(temp_allocator, n)` and `x.free(temp_allocator)`. An empty `TempArray`
+  means "nothing allocated" (the allocation failed, was skipped, or had size 0) and its `free` does nothing. Members
+  start as `.empty`, so every free stays at Jolt's position and is never skipped, and the blocks that were allocated
+  are always freed in LIFO order, also after an allocation failed. Temp blocks are only `rvector_alignment` (16 / 32
+  bytes) aligned: nothing that lives in temp memory may use `align` above 16 (see section 9 for padded atomics).
 - `JPH_STACK_ALLOC(n)` (alloca): use a fixed size array when `n` is comptime known, otherwise a
   fixed stack buffer with an asserted upper bound (see `Math/GaussianElimination.zig`), or the
   `TempAllocator` when the size is unbounded. Zig has no alloca.
@@ -184,6 +199,31 @@ both types) when porting code needs them.
   (`ShapeResult`, `PhysicsMaterialResult`, `GroupFilterResult`, ...) stay values of
   `Core/Result.zig`'s `Result(T)` with Jolt's exact error texts (tests compare them); only
   allocation failure is a Zig error, and it is never cached.
+- Jolt's soft errors stay values (`EPhysicsUpdateError` flags, `bool` returns, null pointers, invalid IDs). Where Jolt
+  crashes instead of reporting an error (`std::abort`, "QuadTree: Out of nodes!", no free barrier), Zolt calls
+  `@panic` with Jolt's text.
+- **Out of memory inside jobs** (the physics update, [SimulationArchitecture.md](SimulationArchitecture.md) D4, D5):
+  - A job cannot return an error. An allocation failure inside a job is latched in the update context
+    (`context.setOutOfMemory()`), and `update` returns `error.OutOfMemory` after the barrier.
+  - A job body that allocates is a literal port that returns `Allocator.Error!void` and uses `try`. Its closure
+    wraps it and then does the lambda's bookkeeping unconditionally:
+    `if (!c.isOutOfMemory()) c.physics_system.jobFoo(c, s) catch c.setOutOfMemory();` followed by the
+    `removeDependency` calls. A poisoned job skips its work and its allocations, but always does its frees, its
+    commits and its dependency bookkeeping, so the barrier always drains. Jobs that carry protocol in their body
+    (BroadPhasePrepare, FindCollisions, ...) check the latch themselves (table in D5).
+  - Check the latch only at job entry or before a claim (an atomic batch counter, a queue read, an island claim),
+    never between a claim and its completion: other jobs may wait for the claimed work.
+  - A job that cannot be created from inside a job (`createJob` returns `error.OutOfMemory` in
+    `TrySpawnJobFindCollisions`, `FindCCDContacts`) is not an error: undo the claim and the dependencies, the
+    running jobs do the work. Results do not change. PostIntegrateVelocity removes the ResolveCCDContacts and
+    ContactRemovedCallbacks dependencies of every FindCCDContacts job it could not create. When it could create none,
+    no running job processes the CCD bodies, so PostIntegrateVelocity does the FindCCDContacts work itself (the jobs
+    that were created take bodies until `next_ccd_body` runs out).
+  - A failure while the job graph is built has no side effects, because the root jobs of the first step wait behind
+    a start gate (one extra dependency, removed after the graph is complete) and no job has run yet.
+  - Contract after `error.OutOfMemory` from a job: the state is mid-step but memory safe (no lock held, nothing
+    leaked, the temp allocator is empty). The caller restores a saved state or deinits the system, and the doc
+    comment of the function says so. Only a failure before any job ran leaves the state unchanged.
 - Placement new into a caller-owned buffer (`SupportBuffer`, `GetTrianglesContext`) uses
   `Core/PlacementBuffer.zig`: `emplace(T)` checks size and alignment at compile time and the object is
   initialized in place (no copy of large objects, self-referencing objects work).
@@ -200,6 +240,17 @@ separately (`opts.shape_filter: ?*ShapeFilter` at the query entry points that se
 state behind a pointer field. The only exceptions are the `RefCount` atomics (`addRef` / `release`
 through `*const`) and `release()` destroying the object after its last reference. Every Phase 4+ test
 suite also runs with `-Doptimize=ReleaseFast`, where such bugs show.
+
+Phase 5 adds no exception, only these patterns ([SimulationArchitecture.md](SimulationArchitecture.md) section 0):
+- A C++ `mutable` mutex or lock that const functions lock goes in a heap block `mutable_fields: *MutableFields`,
+  allocated in `init`. The const functions then keep their `*const` receivers (`BodyManager.getNumBodies`,
+  `lockAllBodies`, `saveState`, the broad phase queries). Never make a query receiver mutable to lock a mutex.
+- A `const_cast` of a `LockFreeHashMap` find result (`const_cast<MKeyValue *>(mCachedManifolds.Find(...))`) becomes
+  `findMut(key, key_hash)`, which takes a mutable map.
+- Jolt's `Body &` references to `Body::sFixedToWorld` become `Body.fixedToWorld()`: a `*Body` to a constant in
+  read-only memory, the one audited `@constCast` of Phase 5. Nothing writes through it (every write path of the
+  solver first checks the motion type), and a stray write, such as a user's `setUserData` on it, faults instead of
+  silently changing state that all physics systems share.
 
 ### Containers
 
@@ -247,8 +298,10 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
   first, then the free with the root's allocator);
 - an object on the stack or embedded in another object is `init(...)` + `setEmbedded()` (before
   references are taken) + `deinit()` (asserts that no references are left);
-- read-only constants that Jolt keeps in a global (`PhysicsMaterial::sDefault`) are comptime constants
-  with `is_static = true`: they are never reference counted, so nothing mutable is global;
+- read-only constants that Jolt keeps in a global (`PhysicsMaterial::sDefault`, the dummy `EmptyShape` of
+  `Body::sFixedToWorld`) are comptime constants with `is_static = true` (`PhysicsMaterial.is_static`,
+  `Shape.is_static`, built with `PhysicsMaterialSimple.initStatic` / `EmptyShape.initStatic`): they are never
+  reference counted, so nothing mutable is global, and `RefConst(...).init` on them is legal;
 - a concrete class has no `addRef` / `release` of its own: Jolt's `RefConst<SphereShape>` is
   `RefConst(Shape)` plus the checked `shape.cast(SphereShape)`.
 
@@ -306,7 +359,16 @@ the field `base` (one level per C++ class). The machinery is `Core/Virtual.zig` 
   static `self.foo()` only in `final` classes;
 - `deinit` (destructor chain over each level's `destruct`) and `destroy` (`delete this`) are
   generated entries; per-class constants (`rtti_name`) are data entries;
-- casts: `virtual.upcast` / `virtual.downcast`, and checked casts such as `shape.cast(SphereShape)`.
+- casts: `virtual.upcast` / `virtual.downcast`, and checked casts such as `shape.cast(SphereShape)`;
+- a root without `ref_count` (`BroadPhaseQuery` → `BroadPhase` → `BroadPhaseQuadTree`, which Jolt deletes through a
+  plain pointer) is owned through a plain pointer and freed with the generated `destroy`: `delete mBroadPhase` is
+  `self.broad_phase.base.destroy()` (`destroy` checks the reference count only when the root has one).
+
+**Closed sets of `final` classes.** When Jolt has a fixed set of `final` implementations and nothing else derives from
+the base (`BodyLockInterface` with `BodyLockInterfaceNoLock` and `BodyLockInterfaceLocking`), the base may be a tagged
+struct instead: a `kind` field, one constructor per C++ class (`initNoLock` / `initLocking`) and functions that switch
+exhaustively over the kind, with the C++ class bodies side by side in the switch prongs. Users cannot add
+implementations, so no vtable is needed.
 
 **B. Pure interfaces / listeners** (`ContactListener`, `BodyActivationListener`,
 `BroadPhaseLayerInterface`, `ObjectLayerPairFilter`, `JobSystem`, ...): a type-erased fat pointer
@@ -363,18 +425,39 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `JPH_ASSERT(false)` on a path that release builds can reach and handle (e.g. "too many iterations", then `return false`) | `if (Core.enable_asserts) @panic("msg");` followed by the release behavior: `assert(false)` is undefined behavior in ReleaseFast |
 | `JPH_ASSERT(cond)` that valid or degenerate input can violate, after which Jolt's release build just continues (e.g. near-zero vectors in EPA, degenerate hulls, an empty mesh) | `if (Core.enable_asserts) std.debug.assert(cond);` so that ReleaseFast keeps Jolt's release behavior instead of undefined behavior; comment why |
 | `JPH_IF_ENABLE_ASSERTS(x)`                  | `if (Core.enable_asserts) { x }`                            |
+| members (and `thread_local` state) that only exist with `JPH_ENABLE_ASSERTS` | typed `void` without asserts: `cached_motion_type: if (Core.enable_asserts) MotionType else void = if (Core.enable_asserts) .static else {}`, so the compiler proves they cannot influence release results |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
 | `#ifdef JPH_DEBUG_RENDERER`                 | not ported yet: leave `// TODO(debug_renderer): ...` where code is skipped |
 | developer debug switches that are commented out in Jolt (`JPH_GJK_DEBUG`, `JPH_EPA_PENETRATION_DEPTH_DEBUG`, `JPH_EPA_CONVEX_BUILDER_DRAW`, `JPH_EPA_CONVEX_BUILDER_VALIDATE`, `JPH_CONVEX_BUILDER_DEBUG`, `JPH_CONVEX_BUILDER_DUMP_SHAPE`, `JPH_CONVEX_BUILDER_2D_DEBUG`, ...) | not ported: list them in a `//! Not ported: ...` header line. They do not affect the Status (a file without them is `complete`) |
 | `#ifdef JPH_CPU_BIG_ENDIAN`                 | `if (builtin.cpu.arch.endian() == .big)` (comptime); port both branches |
 | `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped for now (a profiler may come later)                 |
-| `JPH_DET_LOG(...)`                          | port when the determinism log is needed for debugging       |
+| `JPH_DET_LOG(a << b)`                       | `if (DeterminismLog.enabled) DeterminismLog.log(.{ a, b });` (Jolt's text: floats as hex bits, BodyIDs as 8 hex digits; `DeterminismLog.enabled` is the build option `-Ddeterminism_log`, off by default) |
 | `JPH_NAMESPACE_BEGIN/END`, `JPH_EXPORT`, `JPH_SUPPRESS_WARNINGS*` | dropped                               |
 | `JPH_DECLARE_SERIALIZABLE_*`, `JPH_RTTI`    | deferred to the ObjectStream phase; leave a `// TODO(serialization)` |
 | `JPH_CACHE_LINE_SIZE` alignment             | `align(Core.cache_line_size)`                               |
 | `static_assert`                             | `comptime { std.debug.assert(...); }` or `@compileError`    |
 | `JPH_MAKE_HASHABLE(T, a, b)`                | `pub fn getHash(self: T) u64 { return HashCombine.hashCombineArgs(.{ a, b }); }` |
+| a lambda passed to `JobSystem::CreateJob`   | an inline closure at the lambda's position, see below       |
+
+**Lambdas passed to the job system** (`PhysicsSystem::Update`, [SimulationArchitecture.md](SimulationArchitecture.md)
+D4) become inline closures at the lambda's position: `.init(struct { fn call(...) void { ... } }.call, .{ captures })`.
+The captures map 1:1 to the argument tuple (`[&context, &step]` → `.{ context, step }`, `[&step, i]` → `.{ step, i }`,
+`[this, next_step]` → `.{ self, next_step }`, at most 4 words, see `JobFunction.max_capture_size`). Keep every
+dependency count with its `// depends on:` comment, the order in which the jobs are created and the order in which
+they are kicked:
+
+```zig
+for (step.apply_gravity.slice()) |*h|
+    h.* = try job_system.createJob("ApplyGravity", color_apply_gravity, .init(struct {
+        fn call(c: *PhysicsUpdateContext, s: *Step) void {
+            if (!c.isOutOfMemory())
+                c.physics_system.jobApplyGravity(c, s);
+
+            JobHandle.removeDependenciesStaticArray(&s.find_collisions, .{});
+        }
+    }.call, .{ context, step }), .{ .num_dependencies = previous_step_dependency_count }); // depends on: ...
+```
 
 ## 8. Floating point determinism
 
@@ -431,6 +514,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
 - **Where `io` comes from.** A type that blocks (locks, waits) gets an `io: std.Io` in `init`, next to
   the allocator, and stores it, e.g. `pool.init(allocator, io, ...)` for `JobSystemThreadPool`. Applications get
   it from `std.process.Init` (`init.io`) or `std.Io.Threaded`; tests use `std.testing.io`.
+  In the simulation only the owners that block store it (BodyManager, the broad phase, ConstraintManager,
+  PhysicsSystem); everything else reads `body_manager.io`. User-facing functions keep Jolt's signatures and never
+  take `io`.
 - **Small sync primitives take `io` per call** instead of storing it, because they are embedded in many
   other structs (Jolt's `Mutex` is a member of BodyManager, MutexArray, ...): `mutex.lock(io)`,
   `mutex.unlock(io)`, `mutex.tryLock()`.
@@ -445,8 +531,14 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   `Core/Semaphore.zig` on top of `std.Io.Mutex` + `std.Io.Condition` or atomics + `std.Io` futex
   (`io.futexWait` / `io.futexWake`), keeping Jolt's fast path (atomic counter, only block when needed).
 - `std::atomic<T>` → `std.atomic.Value(T)`; memory orders: `relaxed` → `.monotonic`,
-  `acquire`/`release`/`acq_rel`/`seq_cst` map 1:1. Zig has no standalone fence (`@fence` is gone):
+  `acquire`/`release`/`acq_rel`/`seq_cst` map 1:1 (a `seq_cst` stays `.seq_cst`). Zig has no standalone fence (`@fence` is gone):
   where Jolt uses `atomic_thread_fence`, strengthen the adjacent atomic operation instead and comment why.
+- **Jolt's TSAN-suppressed races** (plain variables that Jolt reads while another thread writes them, and suppresses
+  for ThreadSanitizer) become `.monotonic` atomics: the atomic load or store compiles to the same instruction on x86
+  and ARM and removes the undefined behavior. Examples: `BodyManager.bodies_size` (`mBodies.size()`),
+  `MotionProperties.index_in_active_bodies`, the body pair queue slots of the contact manager, the QuadTree node
+  bounds (loaded per lane into a `Vec4`, which gives the bits of Jolt's vector load). Every other atomic keeps Jolt's
+  memory order.
 - `std::thread` → `std.Thread.spawn(.{}, func, .{args})` + `join()`; `std::this_thread::yield()` →
   `std.Thread.yield()`; cache line padding → `align(std.atomic.cache_line)` / `Core.cache_line_size`.
   Zig reorders the fields of a (non-extern) struct, so `alignas(JPH_CACHE_LINE_SIZE)` on one member
@@ -454,6 +546,18 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   groups of members (false sharing), put the group in a nested struct whose first field is
   `align(Core.cache_line_size)` (it then occupies whole cache lines) and check the offsets at comptime,
   see `FixedSizeFreeList.free_list`.
+- **Padded atomics in temp memory** (`PhysicsUpdateContext::Step` lives in a `TempArray`) cannot use
+  `align(Core.cache_line_size)`, because temp blocks are only 16 / 32 byte aligned. They are extern structs with
+  explicit padding:
+  ```zig
+  const PaddedAtomicU32 = extern struct {
+      value: std.atomic.Value(u32) = .init(0),
+      padding: [Core.cache_line_size - @sizeOf(u32)]u8 = undefined,
+  };
+  ```
+- Debug-only `thread_local` state (PhysicsLock's table of held locks) is a `threadlocal var` typed `void` without
+  asserts: `threadlocal var locks: if (Core.enable_asserts) [4]LockData else void = ...`. It is the only kind of
+  per-thread state allowed.
 - `JobSystem` is interface pattern B; `JobSystemThreadPool` is built on `std.Thread` + `std.Io`
   primitives. Multithreaded results must be identical to single threaded ones (Jolt guarantees
   this, so the port must keep the same barriers and sorting of results).
@@ -473,6 +577,32 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   checks with a comment `// Not ported: relies on ExpectAssert`.
 - Small tests of Zolt-specific code (helpers that have no Jolt counterpart) go inline in the
   source file as `test` blocks.
+- **Memory.** Tests allocate with `std.testing.allocator`, which reports leaks. Every path that allocates gets a
+  failure loop: `std.testing.checkAllAllocationFailures(std.testing.allocator, f, .{})` or a
+  `std.testing.FailingAllocator` loop. After each failure the error must arrive and nothing may leak. Heap
+  allocations that happen inside jobs need a failing allocator with an atomic counter (`FailingAllocator` is not
+  thread safe).
+- **Temp memory** (`TempArray`, section 5): a `FailingTempAllocator` sweep (`Core/TempAllocator.zig`, a Zolt test
+  helper that fails the n-th `allocate` of the temp allocator it wraps). Run the code once to count the allocations
+  (`num_allocations`), then fail every index in turn and check that `error.OutOfMemory` arrives and that the wrapped
+  `TempAllocatorImpl` `isEmpty()` afterwards, which proves that the frees stayed at Jolt's positions in LIFO order.
+  For the physics update also check that a failure before any job ran left the state unchanged (`saveState` bytes),
+  and that the system recovers: `restoreState` of a snapshot, then one update with enough memory gives the bytes of
+  a reference run.
+- **Jobs:** code that creates jobs gets a `FailingJobSystem` sweep (`Core/JobSystem.zig`, a Zolt test helper that
+  fails the n-th `createJob` of the job system it wraps, from any thread). Count the jobs (`num_created`), then fail
+  every index in turn: a failure while the job graph is built returns `error.OutOfMemory`, no job ran and the state is
+  unchanged; a job that cannot be spawned from inside a job is not an error and the results equal the reference run
+  (`has_induced_failure` tells that the failure happened).
+- **Per simulation scene** ([SimulationArchitecture.md](SimulationArchitecture.md) D12): the `FailingTempAllocator`
+  sweep, the `FailingJobSystem` sweep for files that create jobs, `checkAllAllocationFailures` on creation, and a
+  ReleaseFast run.
+- **Threads.** Where Jolt is used from several threads (job systems, lock-free containers, body locks, listeners),
+  the tests do that too. Simulation tests compare the `saveState` bytes after every update between
+  `JobSystemSingleThreaded` and thread pools with 0, 1, 3 and 7 workers: the results must not depend on the thread
+  count or the schedule.
+- Every Phase 4+ test suite also passes with `-Doptimize=ReleaseFast` (Rule M bugs and data races only show in
+  optimized builds), `-Ddouble_precision=true` and `-Duse_llvm=false`.
 - **Parity tests** (`ZoltParity/`, run with `zig build parity`) are the proof of exactness.
   `build.zig` compiles the C++ library from `Jolt/` with Zig's C++ compiler in the configuration
   Zolt follows (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `-ffp-contract=off`, same precision and layer
@@ -485,7 +615,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   payloads excepted). For containers and algorithms with an observable order (hash table iteration,
   sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
   unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
-  queries, simulation steps) is compared the same way, e.g. by hashing body state after N steps.
+  queries, simulation steps) is compared the same way. Simulation parity (`ZoltParity/Physics/SimulationParity.zig`)
+  compares the `saveState(.all)` bytes after every step and the listener callbacks as sorted records
+  ([SimulationArchitecture.md](SimulationArchitecture.md) D12).
 - Parity inputs must reach every branch (degenerate, touching, parallel, coplanar, empty, full,
   iteration limits) and compare every output, including values Jolt writes only on some paths
   (pre-fill both sides with the same sentinel). Prove that a new parity test bites: break one
@@ -677,3 +809,14 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `HeightFieldShape::ProjectOntoSurface(pos, outPos, outID) -> bool`, `GetSubShapeCoordinates(id, outX, outY, outTri)`, `HeightFieldShapeConstants::c*` | `projectOntoSurface(pos) ?SurfacePosition`, `getSubShapeCoordinates(id) SubShapeCoordinates`, `HeightFieldShapeConstants.no_collision_value` ... | out parameters, constants |
 | `PlaneShape::GetVertices(Vec3 *)`, `sPlaneGetOrthogonalBasis(n, outP1, outP2)` | `getVertices() [4]Vec3`, `planeGetOrthogonalBasis(n) OrthogonalBasis` | out parameters |
 | `Vec3::sUnitSphere` (static initializer) | `Vec3.unit_sphere` (comptime `StaticArray(Vec3, 1026)`) | static initializer |
+| `TwoBodyConstraintSettings::Create(Body &, Body &)` | `createConstraint(allocator, body1, body2)` | clashes with the constructor `create(allocator, ...)` (`new XSettings`) |
+| `BroadPhase::Init(BodyManager *, const BroadPhaseLayerInterface &)` | `initBroadPhase` | `init` is the constructor |
+| `Body::sFixedToWorld`              | `Body.fixedToWorld()` (a `*Body` to a read-only constant) | static global, Rule M (section 5) |
+| `BodyLockInterface::LockRead(BodyID)` / `LockRead(MutexMask)` (also `UnlockRead`, `LockWrite`, `UnlockWrite`) | `lockRead` / `lockReadMask` (`unlockReadMask`, `lockWriteMask`, `unlockWriteMask`) | overloads |
+| `BodyLockInterfaceNoLock` / `BodyLockInterfaceLocking` | `BodyLockInterface.initNoLock` / `initLocking` | closed set of `final` classes (section 6) |
+| `BodyManager::mBodies.size()`      | `bodies_size` (`std.atomic.Value(u32)`) | TSAN-suppressed race (section 9) |
+| `Body::EFlags`, `CachedManifold::EFlags` | `Body.Flags`, `CachedManifold.Flags` (integer constants on an atomic `flags` field) | private flags changed with atomics (section 5) |
+| `BodyCreationSettings::mShape` / `mShapePtr` | `shape: ShapeSource` (`.none` / `.settings` / `.shape`) | mutually exclusive members become a tagged union |
+| defaulted `EActivation inActivationMode = EActivation::Activate` | `.{ .activation = .activate }` | default arguments |
+| `const_cast<KeyValue *>(LockFreeHashMap::Find(key, hash))` | `findMut(key, hash)` | Rule M (section 5) |
+| `(T *)TempAllocator::Allocate(n * sizeof(T))` / `Free(p, n * sizeof(T))` | `TempArray(T).alloc(temp_allocator, n)` / `array.free(temp_allocator)` | typed block, empty when nothing is allocated (section 5) |
