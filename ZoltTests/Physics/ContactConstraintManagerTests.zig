@@ -331,6 +331,16 @@ const Harness = struct {
         self.manager.finishConstraintBuffer();
     }
 
+    /// The next collision step of the same update: the ContactRemovedCallbacks job of this step and the start of the
+    /// next one (PhysicsSystem::JobFinalizeIslands: ResetIslands, PrepareContactConstraints, RecycleConstraintBuffer)
+    fn nextStep(self: *Harness) TempAllocator.Error!void {
+        self.manager.finalizeContactCacheAndCallContactPointRemovedCallbacks(self.contact_allocator.num_body_pairs, self.contact_allocator.num_manifolds);
+        self.island_builder.resetIslands(self.temp_allocator);
+        try self.island_builder.prepareContactConstraints(self.manager.getMaxConstraints(), self.temp_allocator);
+        self.manager.recycleConstraintBuffer();
+        self.contact_allocator = self.manager.getContactAllocator();
+    }
+
     /// The contact constraint with index `i` (in creation order)
     fn constraint(self: *Harness, i: u32) *CCM.ContactConstraintBase {
         std.debug.assert(i < self.manager.getNumConstraints());
@@ -770,6 +780,76 @@ test "ContactConstraintManager: contacts over several frames (cache hits, lambda
     h.endStep();
     try expectEqual(@as(usize, 1), h.listener.count(.added));
     try expect(h.temp.isEmpty());
+}
+
+/// Two collision steps, either in one update (RecycleConstraintBuffer between them) or in two updates. Returns the
+/// state of the bodies and the contact cache after the second step.
+fn twoCollisionSteps(allocator: Allocator, recycle: bool, out: *std.ArrayList(u8)) !void {
+    var h: Harness = undefined;
+    try h.init(allocator, .{});
+    defer h.deinit();
+    h.system.setGravity(Vec3.init(0, -9.81, 0));
+
+    const top = try h.createBox(.dynamic, RVec3.init(0, 0.99, 0), .{ .linear_velocity = Vec3.init(0, -1, 0) });
+    const bottom = try h.createBox(.static, RVec3.init(0, -1, 0), .{});
+    const other = try h.createBox(.dynamic, RVec3.init(5, 0.99, 0), .{ .linear_velocity = Vec3.init(0.1, -1, 0) });
+
+    // Step 1: two new contacts
+    try h.beginStep(h.temp.tempAllocator(), 1.0 / 120.0, 1.0);
+    {
+        const m1 = makeManifold(top.getCenterOfMassPosition(), RVec3.init(0, 0, 0), 4, 0.01, 1, 0);
+        h.processPair(&h.contact_allocator, top, bottom, (&m1)[0..1], true);
+        const m2 = makeManifold(other.getCenterOfMassPosition(), RVec3.init(5, 0, 0), 3, 0.01, 0, 0);
+        h.processPair(&h.contact_allocator, other, bottom, (&m2)[0..1], true);
+    }
+    try expectEqual(@as(usize, 2), h.listener.count(.added));
+    try h.solve(10, 2);
+
+    // Next step
+    if (recycle) {
+        try h.nextStep();
+        try expect(!h.manager.constraints.isEmpty()); // The buffers are kept
+    } else {
+        h.endStep();
+        try h.beginStep(h.temp.tempAllocator(), 1.0 / 120.0, 1.0);
+    }
+    try expectEqual(@as(u32, 0), h.manager.getNumConstraints());
+
+    // Step 2: top did not move (cache hit with step 1's contacts), other moved (found again by the narrow phase)
+    other.addPositionStep(Vec3.init(0.01, 0.0, 0.0));
+    h.listener.reset();
+    try expect(h.manager.getContactsFromCache(&h.contact_allocator, top, bottom));
+    {
+        const m = makeManifold(other.getCenterOfMassPosition(), RVec3.init(5.01, 0, 0), 3, 0.01, 0, 0);
+        h.processPair(&h.contact_allocator, other, bottom, (&m)[0..1], true);
+    }
+    try expectEqual(@as(usize, 2), h.listener.count(.persisted));
+    try expectEqual(@as(u32, 2), h.manager.getNumConstraints());
+    {
+        // The constraints start with step 1's lambdas
+        const c = CCM.ContactConstraint(.dynamic, .static).fromBase(h.constraint(0));
+        try expect(c.getContactPoints()[0].non_penetration_constraint.getTotalLambda() > 0.0);
+    }
+    try h.solve(10, 2);
+    h.endStep();
+    try expectEqual(@as(usize, 0), h.listener.count(.removed));
+    try expect(h.temp.isEmpty());
+
+    var recorder: StateRecorderImpl = .init(allocator);
+    defer recorder.deinit();
+    try h.saveAll(&recorder);
+    try out.appendSlice(allocator, recorder.getData());
+}
+
+test "ContactConstraintManager: two collision steps in one update (RecycleConstraintBuffer) give the result of two updates" {
+    const allocator = std.testing.allocator;
+    var one_update: std.ArrayList(u8) = .empty;
+    defer one_update.deinit(allocator);
+    var two_updates: std.ArrayList(u8) = .empty;
+    defer two_updates.deinit(allocator);
+    try twoCollisionSteps(allocator, true, &one_update);
+    try twoCollisionSteps(allocator, false, &two_updates);
+    try expectEqualSlices(u8, two_updates.items, one_update.items);
 }
 
 fn subShape(value: u32) SubShapeID {

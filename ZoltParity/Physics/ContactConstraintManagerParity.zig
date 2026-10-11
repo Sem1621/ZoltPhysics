@@ -99,6 +99,7 @@ const jolt = struct {
     extern fn jolt_ccm_dump_constraints(world: *anyopaque, with_impulses: u32, out: [*]u32, capacity: u32, num: *u32) void;
     extern fn jolt_ccm_solve(world: *anyopaque, velocity_steps: u32, position_steps: u32, use_dummy: u32, out: [*]u32, capacity: u32, num: *u32) void;
     extern fn jolt_ccm_end_step(world: *anyopaque) void;
+    extern fn jolt_ccm_next_step(world: *anyopaque) void;
     extern fn jolt_ccm_allocator_info(world: *anyopaque, allocator: u32, out: *[4]u32) void;
     extern fn jolt_ccm_dump_bodies(world: *anyopaque, out: [*]u32, capacity: u32, num: *u32) void;
     extern fn jolt_ccm_records(world: *anyopaque, out: [*]u32, capacity: u32, num: *u32) void;
@@ -637,6 +638,25 @@ const World = struct {
         self.manager.finishConstraintBuffer();
     }
 
+    /// jolt_ccm_next_step: the ContactRemovedCallbacks job and StartNextStep
+    fn nextStep(self: *World) !void {
+        var num_body_pairs: u32 = 0;
+        var num_manifolds: u32 = 0;
+        for (self.allocators) |a| {
+            num_body_pairs += a.num_body_pairs;
+            num_manifolds += a.num_manifolds;
+        }
+        self.manager.finalizeContactCacheAndCallContactPointRemovedCallbacks(num_body_pairs, num_manifolds);
+        self.island_builder.resetIslands(self.temp.tempAllocator());
+        try self.island_builder.prepareContactConstraints(self.manager.getMaxConstraints(), self.temp.tempAllocator());
+        self.manager.recycleConstraintBuffer();
+        // The buffer holds the previous step's constraints (body pointers differ between Jolt and Zolt), start from
+        // zeros like beginStep
+        @memset(self.manager.constraints.items, 0);
+        for (&self.allocators) |*a|
+            a.* = self.manager.getContactAllocator();
+    }
+
     fn allocatorInfo(self: *World, index: u32) [4]u32 {
         const a = &self.allocators[index];
         return .{ a.num_body_pairs, a.num_manifolds, a.errors.toInt(), self.manager.getNumConstraints() };
@@ -711,6 +731,7 @@ const Coverage = struct {
         kinematic_vs_dynamic,
         no_constraint_pair,
         multi_island,
+        recycled_step,
     };
     hits: [@typeInfo(Kind).@"enum".fields.len]u32 = @splat(0),
 
@@ -1040,109 +1061,121 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
         try p.zolt_world.beginStep(delta_time, ratio);
         jolt.jolt_ccm_begin_step(p.jolt_world, delta_time, ratio);
 
-        // The body pairs (not static vs static), each processed by one of the contact allocators
-        var ccd_candidates: [64]struct { id1: u32, id2: u32, manifold: CCMManifold } = undefined;
-        var num_ccd_candidates: usize = 0;
-        for (0..num_bodies) |a| {
-            for (a + 1..num_bodies) |b| {
-                if (types[a] == .static and types[b] == .static) continue;
-                if (rng.intRange(u32, 0, 9) < 4) continue;
-                const swap = rng.intRange(u32, 0, 1) == 0;
-                const id1 = if (swap) ids[b] else ids[a];
-                const id2 = if (swap) ids[a] else ids[b];
-                const allocator_index = rng.intRange(u32, 0, 3);
-                const use_cache = rng.intRange(u32, 0, 9) < 7;
-
-                // Manifolds with distinct sub shape pairs (fresh keys every frame with small limits)
-                var manifolds: [3]CCMManifold = undefined;
-                const num_manifolds = rng.intRange(u32, 0, 3);
-                const key_offset: u32 = if (small_limits) @intCast(frame * 10) else 0;
-                var used: [9]bool = @splat(false);
-                for (manifolds[0..num_manifolds]) |*m| {
-                    var key = rng.intRange(u32, 0, 8);
-                    while (used[key]) key = (key + 1) % 9;
-                    used[key] = true;
-                    m.* = randomManifold(rng, &p, id1, id2, key_offset + key / 3, key_offset + key % 3);
-                }
-
-                const z = p.zolt_world.processPair(id1, id2, manifolds[0..num_manifolds], use_cache, allocator_index);
-                const j = jolt.jolt_ccm_process_pair(p.jolt_world, id1, id2, &manifolds, num_manifolds, @intFromBool(use_cache), allocator_index);
-                try p.compareValues("ProcessPair", z, j);
-                if (z == 1) coverage.hit(.cache_handled);
-                if (z == 2) coverage.hit(.body_pair_full_handle);
-                if (z == 4 and num_manifolds > 0) coverage.hit(.no_constraint_pair);
-
-                if (!small_limits and num_manifolds > 0 and !sensors[a] and !sensors[b] and num_ccd_candidates < ccd_candidates.len) {
-                    ccd_candidates[num_ccd_candidates] = .{ .id1 = id1, .id2 = id2, .manifold = manifolds[0] };
-                    num_ccd_candidates += 1;
-                }
+        // 1 to 3 collision steps in this update
+        const num_steps = rng.intRange(u32, 1, 3);
+        for (0..num_steps) |step| {
+            if (step > 0) {
+                // ContactRemovedCallbacks of the previous step and StartNextStep
+                try p.zolt_world.nextStep();
+                jolt.jolt_ccm_next_step(p.jolt_world);
+                coverage.hit(.recycled_step);
+                try p.compareRecords(coverage);
             }
-        }
-        try p.compareRecords(coverage);
 
-        // CCD contacts: on the key of a manifold of this step, or on their own keys (twice: the second one persists)
-        if (!small_limits) {
-            for (ccd_candidates[0..num_ccd_candidates]) |*c| {
-                if (rng.intRange(u32, 0, 2) != 0) continue;
-                var m = c.manifold;
-                const own_key = rng.intRange(u32, 0, 1) == 0;
-                if (own_key) {
-                    m.sub_shape_id1 = 100 + rng.intRange(u32, 0, 1);
-                    m.sub_shape_id2 = 100;
-                }
-                const swap = rng.intRange(u32, 0, 1) == 0;
-                const times = rng.intRange(u32, 1, 2);
-                for (0..times) |_| {
+            // The body pairs (not static vs static), each processed by one of the contact allocators
+            var ccd_candidates: [64]struct { id1: u32, id2: u32, manifold: CCMManifold } = undefined;
+            var num_ccd_candidates: usize = 0;
+            for (0..num_bodies) |a| {
+                for (a + 1..num_bodies) |b| {
+                    if (types[a] == .static and types[b] == .static) continue;
+                    if (rng.intRange(u32, 0, 9) < 4) continue;
+                    const swap = rng.intRange(u32, 0, 1) == 0;
+                    const id1 = if (swap) ids[b] else ids[a];
+                    const id2 = if (swap) ids[a] else ids[b];
                     const allocator_index = rng.intRange(u32, 0, 3);
-                    if (swap)
-                        p.zolt_world.ccdContact(c.id2, c.id1, &m, allocator_index, p.rec())
-                    else
-                        p.zolt_world.ccdContact(c.id1, c.id2, &m, allocator_index, p.rec());
-                    if (swap)
-                        jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id2, c.id1, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num)
-                    else
-                        jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id1, c.id2, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num);
-                    try p.compare("OnCCDContactAdded settings");
+                    const use_cache = rng.intRange(u32, 0, 9) < 7;
+
+                    // Manifolds with distinct sub shape pairs (fresh keys every frame with small limits)
+                    var manifolds: [3]CCMManifold = undefined;
+                    const num_manifolds = rng.intRange(u32, 0, 3);
+                    const key_offset: u32 = if (small_limits) @intCast((frame * 3 + step) * 10) else 0;
+                    var used: [9]bool = @splat(false);
+                    for (manifolds[0..num_manifolds]) |*m| {
+                        var key = rng.intRange(u32, 0, 8);
+                        while (used[key]) key = (key + 1) % 9;
+                        used[key] = true;
+                        m.* = randomManifold(rng, &p, id1, id2, key_offset + key / 3, key_offset + key % 3);
+                    }
+
+                    const z = p.zolt_world.processPair(id1, id2, manifolds[0..num_manifolds], use_cache, allocator_index);
+                    const j = jolt.jolt_ccm_process_pair(p.jolt_world, id1, id2, &manifolds, num_manifolds, @intFromBool(use_cache), allocator_index);
+                    try p.compareValues("ProcessPair", z, j);
+                    if (z == 1) coverage.hit(.cache_handled);
+                    if (z == 2) coverage.hit(.body_pair_full_handle);
+                    if (z == 4 and num_manifolds > 0) coverage.hit(.no_constraint_pair);
+
+                    if (!small_limits and num_manifolds > 0 and !sensors[a] and !sensors[b] and num_ccd_candidates < ccd_candidates.len) {
+                        ccd_candidates[num_ccd_candidates] = .{ .id1 = id1, .id2 = id2, .manifold = manifolds[0] };
+                        num_ccd_candidates += 1;
+                    }
                 }
-                if (own_key and times == 2 and p.zolt_world.manager.getContactListener() != null) coverage.hit(.ccd_persisted);
             }
             try p.compareRecords(coverage);
+
+            // CCD contacts: on the key of a manifold of this step, or on their own keys (twice: the second one persists)
+            if (!small_limits) {
+                for (ccd_candidates[0..num_ccd_candidates]) |*c| {
+                    if (rng.intRange(u32, 0, 2) != 0) continue;
+                    var m = c.manifold;
+                    const own_key = rng.intRange(u32, 0, 1) == 0;
+                    if (own_key) {
+                        m.sub_shape_id1 = 100 + rng.intRange(u32, 0, 1);
+                        m.sub_shape_id2 = 100;
+                    }
+                    const swap = rng.intRange(u32, 0, 1) == 0;
+                    const times = rng.intRange(u32, 1, 2);
+                    for (0..times) |_| {
+                        const allocator_index = rng.intRange(u32, 0, 3);
+                        if (swap)
+                            p.zolt_world.ccdContact(c.id2, c.id1, &m, allocator_index, p.rec())
+                        else
+                            p.zolt_world.ccdContact(c.id1, c.id2, &m, allocator_index, p.rec());
+                        if (swap)
+                            jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id2, c.id1, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num)
+                        else
+                            jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id1, c.id2, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num);
+                        try p.compare("OnCCDContactAdded settings");
+                    }
+                    if (own_key and times == 2 and p.zolt_world.manager.getContactListener() != null) coverage.hit(.ccd_persisted);
+                }
+                try p.compareRecords(coverage);
+            }
+
+            // ValidateContactPoint
+            for (0..3) |_| {
+                const a = rng.intRange(u32, 0, num_bodies - 1);
+                const b = rng.intRange(u32, 0, num_bodies - 1);
+                const base_offset: [3]Real = .{ rng.float(-1, 1), 0, 0 };
+                try p.compareValues("ValidateContactPoint", p.zolt_world.validate(ids[a], ids[b], &base_offset), jolt.jolt_ccm_validate(p.jolt_world, ids[a], ids[b], &base_offset));
+            }
+
+            // The contact allocators
+            for (0..4) |i| {
+                var info: [4]u32 = undefined;
+                jolt.jolt_ccm_allocator_info(p.jolt_world, @intCast(i), &info);
+                const z = p.zolt_world.allocatorInfo(@intCast(i));
+                try p.compareValues("contact allocator", z, info);
+                const errors: zolt.PhysicsUpdateError = .fromInt(z[2]);
+                if (errors.contact_constraints_full) coverage.hit(.contact_constraints_full);
+                if (errors.manifold_cache_full) coverage.hit(.manifold_cache_full);
+                if (errors.body_pair_cache_full) coverage.hit(.body_pair_cache_full);
+            }
+
+            // The constraints and the bodies (activated by the contacts)
+            try p.compareConstraints(false, coverage);
+            try p.compareBodies();
+
+            // Solve
+            const velocity_steps = rng.intRange(u32, 1, 10);
+            const position_steps = rng.intRange(u32, 0, 3);
+            const use_dummy = rng.intRange(u32, 0, 3) == 0;
+            try p.zolt_world.solve(velocity_steps, position_steps, use_dummy, p.rec());
+            jolt.jolt_ccm_solve(p.jolt_world, velocity_steps, position_steps, @intFromBool(use_dummy), p.jolt_words.ptr, max_words, &p.jolt_num);
+            try p.compare("solve");
+            if (p.zolt_world.island_builder.getNumIslands() > 1) coverage.hit(.multi_island);
+            try p.compareConstraints(true, coverage);
+            try p.compareBodies();
         }
-
-        // ValidateContactPoint
-        for (0..3) |_| {
-            const a = rng.intRange(u32, 0, num_bodies - 1);
-            const b = rng.intRange(u32, 0, num_bodies - 1);
-            const base_offset: [3]Real = .{ rng.float(-1, 1), 0, 0 };
-            try p.compareValues("ValidateContactPoint", p.zolt_world.validate(ids[a], ids[b], &base_offset), jolt.jolt_ccm_validate(p.jolt_world, ids[a], ids[b], &base_offset));
-        }
-
-        // The contact allocators
-        for (0..4) |i| {
-            var info: [4]u32 = undefined;
-            jolt.jolt_ccm_allocator_info(p.jolt_world, @intCast(i), &info);
-            const z = p.zolt_world.allocatorInfo(@intCast(i));
-            try p.compareValues("contact allocator", z, info);
-            const errors: zolt.PhysicsUpdateError = .fromInt(z[2]);
-            if (errors.contact_constraints_full) coverage.hit(.contact_constraints_full);
-            if (errors.manifold_cache_full) coverage.hit(.manifold_cache_full);
-            if (errors.body_pair_cache_full) coverage.hit(.body_pair_cache_full);
-        }
-
-        // The constraints and the bodies (activated by the contacts)
-        try p.compareConstraints(false, coverage);
-        try p.compareBodies();
-
-        // Solve
-        const velocity_steps = rng.intRange(u32, 1, 10);
-        const position_steps = rng.intRange(u32, 0, 3);
-        const use_dummy = rng.intRange(u32, 0, 3) == 0;
-        try p.zolt_world.solve(velocity_steps, position_steps, use_dummy, p.rec());
-        jolt.jolt_ccm_solve(p.jolt_world, velocity_steps, position_steps, @intFromBool(use_dummy), p.jolt_words.ptr, max_words, &p.jolt_num);
-        try p.compare("solve");
-        if (p.zolt_world.island_builder.getNumIslands() > 1) coverage.hit(.multi_island);
-        try p.compareConstraints(true, coverage);
-        try p.compareBodies();
 
         // Finalize the contact cache
         p.zolt_world.endStep();

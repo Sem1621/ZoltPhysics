@@ -2349,6 +2349,9 @@ pub const ContactConstraintManager = struct {
         self.write_cache = null;
     }
 
+    // TODO(debug_renderer): Drawing properties (static bool sDrawContactPoint, sDrawSupportingFaces,
+    // sDrawContactPointReduction, sDrawContactManifolds)
+
     /// Saving state for replay
     /// (Zolt: Allocator.Error from the sorted arrays)
     pub fn saveState(self: *const ContactConstraintManager, stream: *StateRecorder, filter: ?*const StateRecorderFilter) Allocator.Error!void {

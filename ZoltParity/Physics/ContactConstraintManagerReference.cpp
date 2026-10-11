@@ -627,6 +627,28 @@ void jolt_ccm_end_step(void *inWorld)
 	w->mContext.reset();
 }
 
+// The next collision step of the same update: the ContactRemovedCallbacks job and StartNextStep (the constraint buffer
+// is recycled, not zeroed: both sides have the same bytes in it)
+void jolt_ccm_next_step(void *inWorld)
+{
+	CCMWorld *w = static_cast<CCMWorld *>(inWorld);
+	uint32 num_body_pairs = 0, num_manifolds = 0;
+	for (ContactAllocator *a : w->mAllocators)
+	{
+		num_body_pairs += a->mNumBodyPairs;
+		num_manifolds += a->mNumManifolds;
+	}
+	w->mManager.FinalizeContactCacheAndCallContactPointRemovedCallbacks(num_body_pairs, num_manifolds);
+	w->mIslandBuilder.ResetIslands(&w->mTempAllocator);
+	w->mIslandBuilder.PrepareContactConstraints(w->mManager.GetMaxConstraints(), &w->mTempAllocator);
+	w->mManager.RecycleConstraintBuffer();
+	// The buffer holds the previous step's constraints (body pointers differ between Jolt and Zolt), start from zeros
+	// like jolt_ccm_begin_step
+	memset(w->mManager.*CCMGet(CCMConstraintsTag{}), 0, size_t(w->mManager.GetMaxConstraints()) * ContactConstraintManager::cMaxConstraintSize);
+	for (int i = 0; i < 4; ++i)
+		w->mAllocators[i] = new (w->mAllocatorStorage[i]) ContactAllocator(w->mManager.GetContactAllocator());
+}
+
 void jolt_ccm_allocator_info(void *inWorld, uint32 inAllocator, uint32 *outInfo)
 {
 	CCMWorld *w = static_cast<CCMWorld *>(inWorld);
