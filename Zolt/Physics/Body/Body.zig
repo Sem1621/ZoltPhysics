@@ -996,7 +996,6 @@ pub const Body = struct {
     }
 
     ///@name THESE FUNCTIONS ARE FOR INTERNAL USE ONLY AND SHOULD NOT BE CALLED BY THE APPLICATION
-
     /// Helper function for BroadPhase::FindCollidingPairs that returns true when two bodies can collide
     /// It assumes that body 1 is dynamic and active and guarantees that it body 1 collides with body 2 that body 2 will not collide with body 1 in order to avoid finding duplicate collision pairs
     pub fn findCollidingPairsCanCollide(body1: *const Body, body2: *const Body) bool {

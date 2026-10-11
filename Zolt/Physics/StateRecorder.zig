@@ -116,7 +116,6 @@ pub const StateRecorderFilter = struct {
     }
 
     ///@name Functions called during SaveState
-
     /// If the state of a specific body should be saved
     pub fn shouldSaveBody(self: *const StateRecorderFilter, body: *const Body) bool {
         return self.vtable.shouldSaveBody(self, body);
@@ -133,7 +132,6 @@ pub const StateRecorderFilter = struct {
     }
 
     ///@name Functions called during RestoreState
-
     /// If the state of a specific contact should be restored
     pub fn shouldRestoreContact(self: *const StateRecorderFilter, body1: BodyID, body2: BodyID) bool {
         return self.vtable.shouldRestoreContact(self, body1, body2);

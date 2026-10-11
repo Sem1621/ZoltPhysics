@@ -235,7 +235,6 @@ pub const MotionProperties = struct {
     }
 
     ///@name Velocity limits
-
     /// Maximum linear velocity that a body can achieve. Used to prevent the system from exploding.
     pub fn getMaxLinearVelocity(self: *const MotionProperties) f32 {
         return self.max_linear_velocity;

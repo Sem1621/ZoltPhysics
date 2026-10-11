@@ -44,7 +44,6 @@ pub const BodyLockInterface = struct {
     }
 
     ///@name Locking functions
-
     pub fn lockRead(self: *const BodyLockInterface, body_id: BodyID) ?*SharedMutex {
         switch (self.kind) {
             .no_lock => return null,
@@ -95,7 +94,6 @@ pub const BodyLockInterface = struct {
     }
 
     ///@name Batch locking functions
-
     pub fn getMutexMask(self: *const BodyLockInterface, bodies: []const BodyID) MutexMask {
         return switch (self.kind) {
             .no_lock => 0,

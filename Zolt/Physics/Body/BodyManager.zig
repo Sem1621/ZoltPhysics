@@ -756,7 +756,6 @@ pub const BodyManager = struct {
     }
 
     ///@name Batch body mutex access (do not use directly)
-
     pub fn getAllBodiesMutexMask(self: *const BodyManager) MutexMask {
         return if (self.body_mutexes.getNumMutexes() == @bitSizeOf(MutexMask)) ~@as(MutexMask, 0) else (@as(MutexMask, 1) << @intCast(self.body_mutexes.getNumMutexes())) - 1;
     }
