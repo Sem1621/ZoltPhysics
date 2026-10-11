@@ -62,6 +62,7 @@ test {
     _ = @import("Physics/ConvexVsTrianglesTest.zig");
     _ = @import("Physics/HeightFieldShapeTests.zig");
     _ = @import("Physics/IslandBuilderTests.zig");
+    _ = @import("Physics/LargeIslandSplitterTests.zig");
     _ = @import("Physics/MutableCompoundShapeTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");

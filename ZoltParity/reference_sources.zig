@@ -23,6 +23,7 @@ pub const files = [_][]const u8{
     "Physics/DecoratedReference.cpp",
     "Physics/FiltersReference.cpp",
     "Physics/HeightFieldShapeReference.cpp",
+    "Physics/LargeIslandSplitterReference.cpp",
     "Physics/MeshShapeReference.cpp",
     "Physics/PairwiseReference.cpp",
     "Physics/PlaneEmptyReference.cpp",

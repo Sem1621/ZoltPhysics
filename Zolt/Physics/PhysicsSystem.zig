@@ -931,8 +931,11 @@ pub const PhysicsSystem = struct {
         if (track_simulation_stats and !context.isOutOfMemory())
             self.gatherIslandStats();
 
-        // Clear the large island splitter
-        self.large_island_splitter.reset(temp_allocator);
+        // Clear the large island splitter (Zolt D5: after an out of memory error not every large island was split)
+        if (context.isOutOfMemory())
+            self.large_island_splitter.resetAfterOutOfMemory(temp_allocator)
+        else
+            self.large_island_splitter.reset(temp_allocator);
 
         // Clear the island builder
         self.island_builder.resetIslands(temp_allocator);
@@ -1218,9 +1221,13 @@ pub const PhysicsSystem = struct {
                         // Store the number of active bodies at the start of the step
                         ns.num_active_bodies_at_step_start = ps.body_manager.getNumActiveBodies(.rigid_body);
 
-                        // Clear the large island splitter
+                        // Clear the large island splitter (Zolt D5: after an out of memory error not every large
+                        // island was split)
                         const temp_allocator_ns = c.temp_allocator;
-                        ps.large_island_splitter.reset(temp_allocator_ns);
+                        if (c.isOutOfMemory())
+                            ps.large_island_splitter.resetAfterOutOfMemory(temp_allocator_ns)
+                        else
+                            ps.large_island_splitter.reset(temp_allocator_ns);
 
                         // Clear the island builder
                         ps.island_builder.resetIslands(temp_allocator_ns);
