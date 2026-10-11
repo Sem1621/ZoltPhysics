@@ -1695,6 +1695,8 @@ test "AxisConstraintPart parity" {
         coverage.hit("position skipped", results.false_count > 0);
         coverage.hit("velocity zero range", input.f[9 + 6] == input.f[9 + 7] and countResults(world.zolt_out, 3).false_count > 0);
         coverage.hit("static vs static", input.i[4] != 0);
+        coverage.hit("deactivated", pair[0] != .dynamic and pair[1] != .dynamic);
+        coverage.hit("spring", input.i[0] >= 1 and input.i[0] <= 4 and input.f[9 + 2] > 0.0);
         coverage.hit("kinematic vs dynamic", pair[0] == .kinematic and pair[1] == .dynamic);
     }
     try check.finish();
@@ -1759,6 +1761,7 @@ test "ContactConstraintPart parity" {
 
         coverage.hit("split solve", input.i[5] != 0 and input.i[2] > 0 and !(pair[0] == .static and pair[1] == .static));
         coverage.hit("dynamic vs dynamic", pair[0] == .dynamic and pair[1] == .dynamic);
+        coverage.hit("no inverse mass", pair[0] == .dynamic and pair[1] != .dynamic and f[0] == 0.0 and std.mem.allEqual(f32, f[1..17], 0.0));
         coverage.hit("static vs kinematic", pair[0] == .static and pair[1] == .kinematic);
     }
     try check.finish();
@@ -1860,6 +1863,7 @@ test "HingeRotationConstraintPart parity" {
     defer world.deinit();
     var check: Checker = .{ .name = "HingeRotationConstraintPart" };
     var gen: Gen = .{ .rng = .{ .state = 0x41A6E000 } };
+    var coverage: Coverage = .{};
     for (0..scenario_iterations) |_| {
         var input: CPInput = .{ .body = undefined };
         const pair = gen.motionTypes(.all);
@@ -1883,8 +1887,15 @@ test "HingeRotationConstraintPart parity" {
         input.i[2] = @intCast(gen.index(5));
         input.i[3] = @intCast(gen.index(4));
         try compareScenario(&world, &check, "HingeRotationConstraintPart", &input, HingeRotationRun, JoltRun(jolt.jolt_cp_hinge_rotation));
+
+        // The branches of CalculateConstraintProperties for axes more than 90 degrees apart
+        const dot = a1.dot(a2);
+        coverage.hit("blend axes", dot <= 1.0e-3);
+        coverage.hit("random perpendicular", dot <= 1.0e-3 and a2.sub(a1.mulScalar(dot)).lengthSq() < 1.0e-6);
+        coverage.hit("singular", pair[0] != .dynamic and pair[1] != .dynamic);
     }
     try check.finish();
+    try coverage.expectAllReached("HingeRotationConstraintPart");
 }
 
 test "RotationEulerConstraintPart parity" {
@@ -1893,6 +1904,7 @@ test "RotationEulerConstraintPart parity" {
     defer world.deinit();
     var check: Checker = .{ .name = "RotationEulerConstraintPart" };
     var gen: Gen = .{ .rng = .{ .state = 0xE01E7000 } };
+    var coverage: Coverage = .{};
     for (0..scenario_iterations) |_| {
         var input: CPInput = .{ .body = undefined };
         const pair = gen.motionTypes(.all);
@@ -1919,8 +1931,14 @@ test "RotationEulerConstraintPart parity" {
         input.i[2] = @intCast(gen.index(5));
         input.i[3] = @intCast(gen.index(4));
         try compareScenario(&world, &check, "RotationEulerConstraintPart", &input, RotationEulerRun, JoltRun(jolt.jolt_cp_rotation_euler));
+
+        coverage.hit("identical frames", same);
+        coverage.hit("zero inertia columns", pair[0] != .dynamic and pair[1] != .dynamic);
+        coverage.hit("locked rotation axis", (pair[0] == .dynamic and input.body[0].allowed_dofs & 0b111000 != 0b111000) or (pair[1] == .dynamic and input.body[1].allowed_dofs & 0b111000 != 0b111000));
+        coverage.hit("position applied", countResults(world.zolt_out, 4).true_count > 0);
     }
     try check.finish();
+    try coverage.expectAllReached("RotationEulerConstraintPart");
 }
 
 test "RotationQuatConstraintPart parity" {
@@ -2061,6 +2079,24 @@ test "SwingTwistConstraintPart parity" {
         coverage.hit("position applied", countResults(world.zolt_out, 4).true_count > 0);
         coverage.hit("position skipped", countResults(world.zolt_out, 4).false_count > 0);
         coverage.hit("velocity applied", countResults(world.zolt_out, 3).true_count > 0);
+
+        // The branches of CalculateConstraintProperties: which limit axes are locked / free and what got clamped
+        var probe: SwingTwistConstraintPart = .{};
+        probe.setSwingType(swing_type);
+        probe.setLimits(f[0], f[1], f[2], f[3], f[4], f[5]);
+        const swing_twist = loadQuat(f[6..10]).getSwingTwist();
+        var swing = swing_twist.swing;
+        var twist = swing_twist.twist;
+        const clamped = probe.clampSwingTwist(&swing, &twist);
+        const flags = probe.rotation_flags;
+        coverage.hit("swing y and z locked", flags & 0b110 == 0b110);
+        coverage.hit("swing y locked, z clamped min", flags & 0b110 == 0b010 and clamped & SwingTwistConstraintPart.clamped_swing_z_min != 0);
+        coverage.hit("swing z locked, y clamped min", flags & 0b110 == 0b100 and clamped & SwingTwistConstraintPart.clamped_swing_y_min != 0);
+        coverage.hit("swing limited and clamped", flags & 0b110110 == 0 and clamped & 0b111100 != 0);
+        coverage.hit("swing free", flags & 0b110000 == 0b110000);
+        coverage.hit("twist locked", flags & 0b1 != 0);
+        coverage.hit("twist clamped min", flags & 0b1001 == 0 and clamped & SwingTwistConstraintPart.clamped_twist_min != 0);
+        coverage.hit("twist free", flags & 0b1000 != 0);
     }
     try check.finish();
     try coverage.expectAllReached("SwingTwistConstraintPart");

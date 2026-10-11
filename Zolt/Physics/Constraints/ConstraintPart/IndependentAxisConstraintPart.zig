@@ -242,8 +242,9 @@ test "IndependentAxisConstraintPart for every combination of motion types" {
     const ratio: f32 = 1.5;
 
     for (TestContext.motion_type_pairs) |pair| {
-        // A kinematic body trips Jolt's dynamic body assert in GetInverseMass
-        if (Core.enable_asserts and (pair[0] == .kinematic or pair[1] == .kinematic))
+        // A kinematic body trips Jolt's dynamic body assert in GetInverseMass (without asserts its mass counts in the
+        // effective mass while the body does not move, so one iteration does not remove J v)
+        if (pair[0] == .kinematic or pair[1] == .kinematic)
             continue;
 
         const bodies = try context.createBodyPair(pair);

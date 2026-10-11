@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 53.6%** of 85391 lines in scope · **Unit tests: 46.8%** of 18321 lines
+**Library: 57.8%** of 85391 lines in scope · **Unit tests: 46.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -24,7 +24,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Body` | 61% | 15 | 2 | 0 | 1 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 84% | 67 | 1 | 0 | 8 | 0 | 0 | 21948 |
-| `Jolt/Physics/Constraints` | 0% | 0 | 0 | 1 | 34 | 0 | 0 | 12068 |
+| `Jolt/Physics/Constraints` | 30% | 17 | 0 | 1 | 17 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
@@ -377,34 +377,34 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Constraints — 0%</summary>
+<details><summary>Jolt/Physics/Constraints — 30%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `CalculateSolverSteps.h` | 57 | ❌ todo |  |
+| `CalculateSolverSteps.h` | 57 | ✅ complete | `Zolt/Physics/Constraints/CalculateSolverSteps.zig` |
 | `ConeConstraint.cpp`, `ConeConstraint.h` | 310 | ❌ todo |  |
 | `Constraint.cpp`, `Constraint.h` | 252 | ⚪ stub | `Zolt/Physics/Constraints/Constraint.zig` |
 | `ConstraintManager.cpp`, `ConstraintManager.h` | 308 | ❌ todo |  |
-| `AngleConstraintPart.h` | 251 | ❌ todo |  |
-| `AngularFrictionConstraintPart.h` | 117 | ❌ todo |  |
-| `AxisConstraintPart.h` | 342 | ❌ todo |  |
-| `ContactConstraintPart.h` | 213 | ❌ todo |  |
-| `DualAxisConstraintPart.h` | 240 | ❌ todo |  |
-| `GearConstraintPart.h` | 173 | ❌ todo |  |
-| `HingeRotationConstraintPart.h` | 192 | ❌ todo |  |
-| `IndependentAxisConstraintPart.h` | 219 | ❌ todo |  |
-| `PointConstraintPart.h` | 214 | ❌ todo |  |
-| `RackAndPinionConstraintPart.h` | 174 | ❌ todo |  |
-| `RotationEulerConstraintPart.h` | 260 | ❌ todo |  |
-| `RotationQuatConstraintPart.h` | 225 | ❌ todo |  |
-| `SpringPart.h` | 164 | ❌ todo |  |
-| `SwingTwistConstraintPart.h` | 543 | ❌ todo |  |
+| `AngleConstraintPart.h` | 251 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/AngleConstraintPart.zig` |
+| `AngularFrictionConstraintPart.h` | 117 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/AngularFrictionConstraintPart.zig` |
+| `AxisConstraintPart.h` | 342 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/AxisConstraintPart.zig` |
+| `ContactConstraintPart.h` | 213 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/ContactConstraintPart.zig` |
+| `DualAxisConstraintPart.h` | 240 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/DualAxisConstraintPart.zig` |
+| `GearConstraintPart.h` | 173 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/GearConstraintPart.zig` |
+| `HingeRotationConstraintPart.h` | 192 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/HingeRotationConstraintPart.zig` |
+| `IndependentAxisConstraintPart.h` | 219 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/IndependentAxisConstraintPart.zig` |
+| `PointConstraintPart.h` | 214 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/PointConstraintPart.zig` |
+| `RackAndPinionConstraintPart.h` | 174 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/RackAndPinionConstraintPart.zig` |
+| `RotationEulerConstraintPart.h` | 260 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/RotationEulerConstraintPart.zig` |
+| `RotationQuatConstraintPart.h` | 225 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/RotationQuatConstraintPart.zig` |
+| `SpringPart.h` | 164 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/SpringPart.zig` |
+| `SwingTwistConstraintPart.h` | 543 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig` |
 | `ContactConstraintManager.cpp`, `ContactConstraintManager.h` | 2185 | ❌ todo |  |
 | `DistanceConstraint.cpp`, `DistanceConstraint.h` | 316 | ❌ todo |  |
 | `FixedConstraint.cpp`, `FixedConstraint.h` | 255 | ❌ todo |  |
 | `GearConstraint.cpp`, `GearConstraint.h` | 242 | ❌ todo |  |
 | `HingeConstraint.cpp`, `HingeConstraint.h` | 549 | ❌ todo |  |
-| `MotorSettings.cpp`, `MotorSettings.h` | 100 | ❌ todo |  |
+| `MotorSettings.cpp`, `MotorSettings.h` | 100 | ✅ complete | `Zolt/Physics/Constraints/MotorSettings.zig` |
 | `PathConstraint.cpp`, `PathConstraint.h` | 538 | ❌ todo |  |
 | `PathConstraintPath.cpp`, `PathConstraintPath.h` | 129 | ❌ todo |  |
 | `PathConstraintPathHermite.cpp`, `PathConstraintPathHermite.h` | 293 | ❌ todo |  |
@@ -413,7 +413,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `RackAndPinionConstraint.cpp`, `RackAndPinionConstraint.h` | 245 | ❌ todo |  |
 | `SixDOFConstraint.cpp`, `SixDOFConstraint.h` | 1023 | ❌ todo |  |
 | `SliderConstraint.cpp`, `SliderConstraint.h` | 583 | ❌ todo |  |
-| `SpringSettings.cpp`, `SpringSettings.h` | 99 | ❌ todo |  |
+| `SpringSettings.cpp`, `SpringSettings.h` | 99 | ✅ complete | `Zolt/Physics/Constraints/SpringSettings.zig` |
 | `SwingTwistConstraint.cpp`, `SwingTwistConstraint.h` | 632 | ❌ todo |  |
 | `TwoBodyConstraint.cpp`, `TwoBodyConstraint.h` | 109 | ❌ todo |  |
 
