@@ -27,6 +27,7 @@ test {
     _ = @import("ParityFramework.zig");
     _ = @import("Physics/BasicsParity.zig");
     _ = @import("Physics/BodyParity.zig");
+    _ = @import("Physics/BroadPhaseQuadTreeParity.zig");
     _ = @import("Physics/CapsulesParity.zig");
     _ = @import("Physics/CompositeParity.zig");
     _ = @import("Physics/CompoundsParity.zig");
