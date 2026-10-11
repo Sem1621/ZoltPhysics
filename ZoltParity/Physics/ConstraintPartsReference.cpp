@@ -636,7 +636,8 @@ void jolt_cp_world_destroy(void *inWorld)
 }
 
 // SpringPart: inF = dt, inv effective mass, bias, C, frequency / stiffness, damping, total lambda; inOp selects the
-// function (0 bias, 1 stiffness and damping, 2 frequency and damping, 3 mass normalized, 4 settings with inMode)
+// function (0 bias, 1 stiffness and damping, 2 frequency and damping, 3 mass normalized, 4 settings with inMode, which
+// may be a uint8 outside the named ESpringMode values: then no case of the switch matches and nothing is written)
 void jolt_cp_spring_part(const float *inF, uint32 inOp, uint32 inMode, float *outF)
 {
 	CPEnsureFactory();
@@ -657,8 +658,9 @@ void jolt_cp_spring_part(const float *inF, uint32 inOp, uint32 inMode, float *ou
 	outF[4] = part.IsActive()? 1.0f : 0.0f;
 }
 
-// SpringSettings: save the settings, the checks, and restore from inRestore (9 bytes). outBytes gets 9 bytes,
-// outInfo: HasStiffness, HasStiffnessOrDamping, restored mode; outRestored: frequency, damping
+// SpringSettings: save the settings, the checks, and restore from inRestore (9 bytes, any mode byte). outBytes gets 9
+// bytes, outInfo: HasStiffness, HasStiffnessOrDamping, restored mode, state size, HasStiffness and HasStiffnessOrDamping
+// of the restored settings; outRestored: frequency, damping, stiffness
 void jolt_cp_spring_settings(uint32 inMode, float inFrequency, float inDamping, const uint8 *inRestore, uint8 *outBytes, uint32 *outInfo, float *outRestored)
 {
 	CPEnsureFactory();
@@ -679,6 +681,8 @@ void jolt_cp_spring_settings(uint32 inMode, float inFrequency, float inDamping, 
 	outRestored[0] = restored.mFrequency;
 	outRestored[1] = restored.mDamping;
 	outRestored[2] = restored.mStiffness;
+	outInfo[4] = restored.HasStiffness()? 1 : 0;
+	outInfo[5] = restored.HasStiffnessOrDamping()? 1 : 0;
 }
 
 // MotorSettings: inConstructor selects the constructor (0 default, 1 (f, d), 2 (mode, f, d), 3 (f, d, force, torque),
@@ -735,8 +739,8 @@ void jolt_cp_motor_settings(uint32 inConstructor, uint32 inMode, const float *in
 	outInfo[4] = restored.IsValid()? 1 : 0;
 }
 
-// IsVelocityMotor / IsPositionMotor for a motor state
-uint32 jolt_cp_motor_state(uint32 inState)
+// IsVelocityMotor / IsPositionMotor for a motor state (any int, EMotorState has the fixed underlying type int)
+uint32 jolt_cp_motor_state(int inState)
 {
 	EMotorState state = EMotorState(inState);
 	return (IsVelocityMotor(state)? 1 : 0) | (IsPositionMotor(state)? 2 : 0);

@@ -2,7 +2,9 @@
 //! Status: complete
 //!
 //! - `EMotorState` is an `enum class` without an underlying type (`int`), so `MotorState` is `enum(i32)`: constraints
-//!   write it with `inStream.Write(mMotorState)`, 4 bytes.
+//!   write it with `inStream.Write(mMotorState)`, 4 bytes. The underlying type of an enum class is fixed, so every
+//!   `int` is a valid EMotorState and a constraint's RestoreBinaryState stores whatever the stream holds: `MotorState` is
+//!   non-exhaustive, a switch on it needs a `_` prong that does what Jolt's switch does when no case matches.
 //! - The constructor overloads are `init(frequency, damping)` (Jolt's `MotorSettings(inFrequency, inDamping)`),
 //!   `initMode(mode, frequency, damping)`, `initLimits(frequency, damping, force_limit, torque_limit)` and
 //!   `initModeLimits(mode, frequency, damping, force_limit, torque_limit)`; the default constructor is `.{}`.
@@ -28,6 +30,8 @@ pub const MotorState = enum(i32) {
     position,
     /// Motor will drive both to target position and velocity using: force = stiffness * (target_position - current_position) + damping * (target_velocity - current_velocity)
     position_and_velocity,
+    /// Any other int value (Jolt's enum class has the fixed underlying type int, see the file comment)
+    _,
 };
 
 // Ability to check if position/velocity is enabled for a motor state
@@ -155,6 +159,11 @@ test "MotorState values and helpers" {
     var state: MotorState = .position_and_velocity;
     _ = &state;
     try testing.expect(isVelocityMotor(state) and isPositionMotor(state));
+
+    // Values outside the named states (a restored int) test the bits like Jolt
+    try testing.expect(isVelocityMotor(@enumFromInt(5)) and !isPositionMotor(@enumFromInt(5)));
+    try testing.expect(!isVelocityMotor(@enumFromInt(4)) and !isPositionMotor(@enumFromInt(4)));
+    try testing.expect(isVelocityMotor(@enumFromInt(-1)) and isPositionMotor(@enumFromInt(-1)));
 }
 
 test "MotorSettings constructors, limits and validity" {

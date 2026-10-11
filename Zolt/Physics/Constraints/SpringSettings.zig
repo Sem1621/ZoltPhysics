@@ -7,6 +7,10 @@
 //!   `float`, so the union is one value with two names). The constructor `SpringSettings(inMode,
 //!   inFrequencyOrStiffness, inDamping)` is `init(mode, frequency_or_stiffness, damping)`.
 //! - The binary state is Jolt's bytes: the mode as one byte, then the frequency / stiffness and the damping.
+//! - `ESpringMode` is an `enum class` with the fixed underlying type `uint8`, so every byte is a valid ESpringMode and
+//!   RestoreBinaryState stores whatever byte the stream holds. `SpringMode` is therefore a non-exhaustive `enum(u8)`:
+//!   a restored mode byte of 3..255 is a valid (unnamed) value, and a switch on the mode handles it with a `_` prong
+//!   that does what Jolt's switch does when no case matches.
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: TODO(serialization).
 
 const std = @import("std");
@@ -21,6 +25,8 @@ pub const SpringMode = enum(u8) {
     stiffness_and_damping,
     /// Stiffness and damping divided by mass / inertia are specified (also known as acceleration mode). This makes it easier to tune the spring and makes it mass independent.
     mass_normalized_stiffness_and_damping,
+    /// Any other uint8 value (Jolt's enum class has the fixed underlying type uint8, see the file comment)
+    _,
 };
 
 /// Settings for a linear or angular spring
@@ -155,4 +161,33 @@ test "SpringSettings binary state is Jolt's bytes and round trips" {
     try testing.expectEqual(settings.mode, restored.mode);
     try testing.expectEqual(settings.frequency, restored.frequency);
     try testing.expectEqual(settings.damping, restored.damping);
+}
+
+test "SpringSettings restores any mode byte, like Jolt's uint8 enum" {
+    const testing = std.testing;
+    const StateRecorderImpl = @import("../StateRecorderImpl.zig").StateRecorderImpl;
+
+    for ([_]u8{ 3, 0x7F, 0xFF }) |mode_byte| {
+        var recorder = StateRecorderImpl.init(testing.allocator);
+        defer recorder.deinit();
+        var bytes: [9]u8 = undefined;
+        bytes[0] = mode_byte;
+        @memcpy(bytes[1..5], std.mem.asBytes(&@as(f32, 0.0)));
+        @memcpy(bytes[5..9], std.mem.asBytes(&@as(f32, 0.5)));
+        recorder.recorder().writeBytes(&bytes);
+
+        var restored: SpringSettings = .{};
+        restored.restoreBinaryState(recorder.recorder().streamIn());
+        try testing.expect(!recorder.isFailed());
+        try testing.expectEqual(mode_byte, @intFromEnum(restored.mode));
+        try testing.expect(!restored.hasStiffness());
+        // Not ESpringMode::FrequencyAndDamping, so the damping makes the spring active
+        try testing.expect(restored.hasStiffnessOrDamping());
+
+        // Saving writes the byte back
+        var out = StateRecorderImpl.init(testing.allocator);
+        defer out.deinit();
+        restored.saveBinaryState(out.recorder().streamOut());
+        try testing.expectEqualSlices(u8, &bytes, out.getData());
+    }
 }

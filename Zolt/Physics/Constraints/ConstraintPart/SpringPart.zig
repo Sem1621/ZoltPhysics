@@ -1,9 +1,14 @@
 //! Port of: Jolt/Physics/Constraints/ConstraintPart/SpringPart.h
 //! Status: complete
 //!
-//! The out parameter `float &outEffectiveMass` of the CalculateSpringProperties* functions is the return value (Jolt
-//! writes it on every path). In CalculateSpringPropertiesWithFrequencyAndDamping the local `c` (the damping constant)
-//! is `c_damping`, because the parameter `inC` is `c`.
+//! - The out parameter `float &outEffectiveMass` of CalculateSpringPropertiesWithStiffnessAndDamping,
+//!   CalculateSpringPropertiesWithFrequencyAndDamping and CalculateSpringPropertiesWithMassNormalizedStiffnessAndDamping
+//!   is the return value (Jolt writes it on every path).
+//! - CalculateSpringPropertiesWithSettings keeps the out parameter (`effective_mass: *f32`): a spring mode outside the
+//!   three named values (any uint8 is a valid ESpringMode, e.g. a restored mode byte, see SpringSettings.zig) matches no
+//!   case of Jolt's switch, which then leaves outEffectiveMass and the spring part unchanged.
+//! - In CalculateSpringPropertiesWithFrequencyAndDamping the local `c` (the damping constant) is `c_damping`, because
+//!   the parameter `inC` is `c`.
 
 const std = @import("std");
 const Core = @import("../../../Core/Core.zig");
@@ -123,13 +128,14 @@ pub const SpringPart = struct {
 
     /// Calculate spring properties based on SpringSettings object.
     /// Assumes the spring has either stiffness or damping.
-    /// @return (outEffectiveMass) the new effective mass K^-1
-    pub fn calculateSpringPropertiesWithSettings(self: *SpringPart, delta_time: f32, inv_effective_mass: f32, bias: f32, c: f32, spring_settings: *const SpringSettings) f32 {
-        return switch (spring_settings.mode) {
-            .frequency_and_damping => self.calculateSpringPropertiesWithFrequencyAndDamping(delta_time, inv_effective_mass, bias, c, spring_settings.frequency, spring_settings.damping),
-            .stiffness_and_damping => self.calculateSpringPropertiesWithStiffnessAndDamping(delta_time, inv_effective_mass, bias, c, spring_settings.getStiffness(), spring_settings.damping),
-            .mass_normalized_stiffness_and_damping => self.calculateSpringPropertiesWithMassNormalizedStiffnessAndDamping(delta_time, inv_effective_mass, bias, c, spring_settings.getStiffness(), spring_settings.damping),
-        };
+    /// @param outEffectiveMass (effective_mass) receives the new effective mass K^-1 (unchanged for an unnamed spring mode, see the file comment)
+    pub fn calculateSpringPropertiesWithSettings(self: *SpringPart, delta_time: f32, inv_effective_mass: f32, bias: f32, c: f32, spring_settings: *const SpringSettings, effective_mass: *f32) void {
+        switch (spring_settings.mode) {
+            .frequency_and_damping => effective_mass.* = self.calculateSpringPropertiesWithFrequencyAndDamping(delta_time, inv_effective_mass, bias, c, spring_settings.frequency, spring_settings.damping),
+            .stiffness_and_damping => effective_mass.* = self.calculateSpringPropertiesWithStiffnessAndDamping(delta_time, inv_effective_mass, bias, c, spring_settings.getStiffness(), spring_settings.damping),
+            .mass_normalized_stiffness_and_damping => effective_mass.* = self.calculateSpringPropertiesWithMassNormalizedStiffnessAndDamping(delta_time, inv_effective_mass, bias, c, spring_settings.getStiffness(), spring_settings.damping),
+            _ => {}, // Jolt's switch has no case (and no default) for this value: nothing is written
+        }
     }
 
     /// Returns if this spring is active
@@ -230,19 +236,34 @@ test "SpringPart frequency and damping and settings dispatch" {
     try testing.expectEqual(reference.bias, part.bias);
 
     // The settings select the same functions
-    const modes = [_]@import("../SpringSettings.zig").SpringMode{ .frequency_and_damping, .stiffness_and_damping, .mass_normalized_stiffness_and_damping };
+    const SpringMode = @import("../SpringSettings.zig").SpringMode;
+    const modes = [_]SpringMode{ .frequency_and_damping, .stiffness_and_damping, .mass_normalized_stiffness_and_damping };
     for (modes) |mode| {
         const settings = SpringSettings.init(mode, 3.0, 0.75);
         var with_settings: SpringPart = .{};
-        const em1 = with_settings.calculateSpringPropertiesWithSettings(dt, inv_effective_mass, 0.1, 0.3, &settings);
+        var em1: f32 = 0.0;
+        with_settings.calculateSpringPropertiesWithSettings(dt, inv_effective_mass, 0.1, 0.3, &settings, &em1);
         var direct: SpringPart = .{};
         const em2 = switch (mode) {
             .frequency_and_damping => direct.calculateSpringPropertiesWithFrequencyAndDamping(dt, inv_effective_mass, 0.1, 0.3, 3.0, 0.75),
             .stiffness_and_damping => direct.calculateSpringPropertiesWithStiffnessAndDamping(dt, inv_effective_mass, 0.1, 0.3, 3.0, 0.75),
             .mass_normalized_stiffness_and_damping => direct.calculateSpringPropertiesWithMassNormalizedStiffnessAndDamping(dt, inv_effective_mass, 0.1, 0.3, 3.0, 0.75),
+            _ => unreachable,
         };
         try testing.expectEqual(em2, em1);
         try testing.expectEqual(direct.softness, with_settings.softness);
         try testing.expectEqual(direct.bias, with_settings.bias);
+    }
+
+    // A mode outside the named values (any uint8 is a valid ESpringMode) leaves the effective mass and the part unchanged
+    for ([_]u8{ 3, 0xFF }) |mode_byte| {
+        const settings = SpringSettings.init(@enumFromInt(mode_byte), 3.0, 0.75);
+        var part_unnamed: SpringPart = .{};
+        part_unnamed.calculateSpringPropertiesWithBias(0.5);
+        var em: f32 = -12345.0;
+        part_unnamed.calculateSpringPropertiesWithSettings(dt, inv_effective_mass, 0.1, 0.3, &settings, &em);
+        try testing.expectEqual(@as(f32, -12345.0), em);
+        try testing.expectEqual(@as(f32, 0.5), part_unnamed.bias);
+        try testing.expectEqual(@as(f32, 0.0), part_unnamed.softness);
     }
 }

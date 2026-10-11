@@ -206,7 +206,7 @@ pub const AxisConstraintPart = struct {
         else if (!spring_settings.hasStiffness()) {
             self.effective_mass = 1.0 / inv_effective_mass;
             self.spring_part.calculateSpringPropertiesWithBias(bias);
-        } else self.effective_mass = self.spring_part.calculateSpringPropertiesWithSettings(delta_time, inv_effective_mass, bias, c, spring_settings);
+        } else self.spring_part.calculateSpringPropertiesWithSettings(delta_time, inv_effective_mass, bias, c, spring_settings, &self.effective_mass);
     }
 
     /// Calculate properties used during the functions below based on inSpringSettings.
@@ -219,7 +219,7 @@ pub const AxisConstraintPart = struct {
         if (inv_effective_mass < math.flt_min)
             self.deactivate()
         else
-            self.effective_mass = self.spring_part.calculateSpringPropertiesWithSettings(delta_time, inv_effective_mass, bias, c, spring_settings);
+            self.spring_part.calculateSpringPropertiesWithSettings(delta_time, inv_effective_mass, bias, c, spring_settings, &self.effective_mass);
     }
 
     /// Deactivate this constraint
@@ -500,7 +500,8 @@ test "AxisConstraintPart springs" {
         var motor: AxisConstraintPart = .{};
         motor.calculateConstraintPropertiesWithSettingsForMotor(dt, body1, r1_plus_u, body2, r2, axis, 0.0, 0.1, &settings);
         var spring: SpringPart = .{};
-        const effective_mass = spring.calculateSpringPropertiesWithSettings(dt, inv_effective_mass, 0.0, 0.1, &settings);
+        var effective_mass: f32 = 0.0;
+        spring.calculateSpringPropertiesWithSettings(dt, inv_effective_mass, 0.0, 0.1, &settings, &effective_mass);
         try testing.expectEqual(effective_mass, limit.effective_mass);
         try testing.expectEqual(effective_mass, motor.effective_mass);
         try testing.expectEqual(spring.softness, limit.spring_part.softness);
@@ -511,6 +512,18 @@ test "AxisConstraintPart springs" {
     var motor_damping: AxisConstraintPart = .{};
     motor_damping.calculateConstraintPropertiesWithSettingsForMotor(dt, body1, r1_plus_u, body2, r2, axis, 0.0, 0.1, &damping_only);
     try testing.expect(motor_damping.spring_part.isActive());
+
+    // A spring mode outside the named values (e.g. a restored mode byte) matches no case of Jolt's switch: the effective
+    // mass and the spring part keep their previous values
+    const unnamed_mode = SpringSettings.init(@enumFromInt(200), 3.0, 0.5);
+    var limit_unnamed = soft;
+    limit_unnamed.calculateConstraintPropertiesWithSettingsForLimit(dt, body1, r1_plus_u, body2, r2, axis, 0.0, 0.1, &unnamed_mode);
+    try testing.expectEqual(soft.effective_mass, limit_unnamed.effective_mass);
+    try testing.expectEqual(soft.spring_part, limit_unnamed.spring_part);
+    var motor_unnamed = soft;
+    motor_unnamed.calculateConstraintPropertiesWithSettingsForMotor(dt, body1, r1_plus_u, body2, r2, axis, 0.0, 0.1, &unnamed_mode);
+    try testing.expectEqual(soft.effective_mass, motor_unnamed.effective_mass);
+    try testing.expectEqual(soft.spring_part, motor_unnamed.spring_part);
 
     // The spring bias feeds back the accumulated impulse
     const total_before = soft.getTotalLambda();

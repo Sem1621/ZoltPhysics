@@ -86,9 +86,9 @@ const jolt = struct {
     extern fn jolt_cp_world_create() *anyopaque;
     extern fn jolt_cp_world_destroy(world: *anyopaque) void;
     extern fn jolt_cp_spring_part(f: *const [7]f32, op: u32, mode: u32, out: *[5]f32) void;
-    extern fn jolt_cp_spring_settings(mode: u32, frequency: f32, damping: f32, restore: *const [9]u8, out_bytes: *[9]u8, out_info: *[4]u32, out_restored: *[3]f32) void;
+    extern fn jolt_cp_spring_settings(mode: u32, frequency: f32, damping: f32, restore: *const [9]u8, out_bytes: *[9]u8, out_info: *[6]u32, out_restored: *[3]f32) void;
     extern fn jolt_cp_motor_settings(constructor: u32, mode: u32, f: *const [7]f32, setter: u32, restore: *const [25]u8, out_bytes: *[25]u8, out_f: *[14]f32, out_info: *[5]u32) void;
-    extern fn jolt_cp_motor_state(state: u32) u32;
+    extern fn jolt_cp_motor_state(state: c_int) u32;
     extern fn jolt_cp_solver_steps(default_velocity: u32, default_position: u32, overrides: [*]const u32, count: u32, out_steps: *[4]u32) void;
     extern fn jolt_cp_axis(world: *anyopaque, input: *const CPInput, output: *CPOutput) void;
     extern fn jolt_cp_angle(world: *anyopaque, input: *const CPInput, output: *CPOutput) void;
@@ -569,6 +569,12 @@ const Gen = struct {
         return @enumFromInt(self.index(3));
     }
 
+    /// A spring mode byte: mostly one of the named ESpringMode values, sometimes another uint8 (a valid ESpringMode in
+    /// Jolt, e.g. a restored mode byte, that no case of a switch on the mode matches)
+    fn springMode(self: *Gen) u32 {
+        return if (self.oneIn(10)) @intCast(3 + self.index(253)) else @intCast(self.index(3));
+    }
+
     /// A pair of motion types (every combination, or only those with a dynamic body, or only dynamic bodies)
     fn motionTypes(self: *Gen, comptime which: enum { all, any_dynamic, dynamic_or_kinematic }) [2]MotionType {
         while (true) {
@@ -590,7 +596,7 @@ const Gen = struct {
     /// the overload and spring mode in `i`.
     fn springScenario(self: *Gen, f: []f32, i: []u32) void {
         const overload: u32 = @intCast(self.index(6));
-        const mode: u32 = @intCast(self.index(3));
+        const mode = self.springMode();
         i[0] = overload;
         i[1] = mode;
         f[0] = if (self.oneIn(3)) 0.0 else self.float(-1, 1);
@@ -1460,7 +1466,7 @@ test "SpringPart parity" {
         in[2] = if (gen.oneIn(3)) 0.0 else gen.float(-2, 2);
         in[3] = if (gen.oneIn(3)) 0.0 else gen.float(-1, 1);
         const op: u32 = @intCast(gen.index(5));
-        const mode: u32 = @intCast(gen.index(3));
+        const mode = gen.springMode();
         // Positive frequency / stiffness, damping may be zero (the asserts of the functions)
         in[4] = switch (op) {
             2 => gen.float(0.01, 30),
@@ -1483,13 +1489,14 @@ test "SpringPart parity" {
             3 => effective_mass = part.calculateSpringPropertiesWithMassNormalizedStiffnessAndDamping(in[0], in[1], in[2], in[3], in[4], in[5]),
             else => {
                 const settings = SpringSettings.init(@enumFromInt(mode), in[4], in[5]);
-                effective_mass = part.calculateSpringPropertiesWithSettings(in[0], in[1], in[2], in[3], &settings);
+                part.calculateSpringPropertiesWithSettings(in[0], in[1], in[2], in[3], &settings, &effective_mass);
             },
         }
         const zolt_out = [5]f32{ effective_mass, part.bias, part.softness, part.getBias(in[6]), if (part.isActive()) 1.0 else 0.0 };
         check.check(.{ in, op, mode }, zolt_out, jolt_out);
         coverage.hit("inactive", !part.isActive());
         coverage.hit("damping only", op == 1 and in[4] == 0.0);
+        coverage.hit("unnamed spring mode", op == 4 and mode > 2);
     }
     try check.finish();
     try coverage.expectAllReached("SpringPart");
@@ -1502,15 +1509,17 @@ test "SpringSettings and MotorSettings parity" {
     var gen: Gen = .{ .rng = .{ .state = 0x5E771265 } };
     const allocator = std.testing.allocator;
 
-    for (0..4) |state| {
+    // The named states and other ints (EMotorState has the fixed underlying type int, e.g. a restored state)
+    const states = [_]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 13, 255, 256, -1, -2, -3, -4, std.math.maxInt(i32), std.math.minInt(i32) };
+    for (states) |state| {
         const s: MotorState = @enumFromInt(state);
         const zolt_bits: u32 = @as(u32, @intFromBool(zolt.isVelocityMotor(s))) | @as(u32, @intFromBool(zolt.isPositionMotor(s))) << 1;
-        check_state.check(state, zolt_bits, jolt.jolt_cp_motor_state(@intCast(state)));
+        check_state.check(state, zolt_bits, jolt.jolt_cp_motor_state(state));
     }
 
     for (0..fw.iterations / 10) |_| {
         // SpringSettings
-        const mode: u32 = @intCast(gen.index(3));
+        const mode = gen.springMode();
         const frequency: f32 = switch (gen.index(4)) {
             0 => 0.0,
             1 => -gen.float(0, 5),
@@ -1523,10 +1532,10 @@ test "SpringSettings and MotorSettings parity" {
         };
         var restore: [9]u8 = undefined;
         for (&restore) |*byte| byte.* = @truncate(gen.rng.next());
-        restore[0] = @intCast(gen.index(3));
+        restore[0] = @intCast(gen.springMode());
 
         var jolt_bytes: [9]u8 = undefined;
-        var jolt_info: [4]u32 = undefined;
+        var jolt_info: [6]u32 = undefined;
         var jolt_restored: [3]f32 = undefined;
         jolt.jolt_cp_spring_settings(mode, frequency, damping, &restore, &jolt_bytes, &jolt_info, &jolt_restored);
 
@@ -1542,13 +1551,13 @@ test "SpringSettings and MotorSettings parity" {
         restore_recorder.recorder().writeBytes(&restore);
         var restored: SpringSettings = .{};
         restored.restoreBinaryState(restore_recorder.recorder().streamIn());
-        const zolt_info = [4]u32{ @intFromBool(settings.hasStiffness()), @intFromBool(settings.hasStiffnessOrDamping()), @intFromEnum(restored.mode), @intCast(data.len) };
+        const zolt_info = [6]u32{ @intFromBool(settings.hasStiffness()), @intFromBool(settings.hasStiffnessOrDamping()), @intFromEnum(restored.mode), @intCast(data.len), @intFromBool(restored.hasStiffness()), @intFromBool(restored.hasStiffnessOrDamping()) };
         const zolt_restored = [3]f32{ restored.frequency, restored.damping, restored.getStiffness() };
         check_spring.check(.{ mode, frequency, damping, restore }, .{ zolt_bytes, zolt_info, zolt_restored }, .{ jolt_bytes, jolt_info, jolt_restored });
 
         // MotorSettings: the constructors assert IsValid, so they get valid values; the setters may make it invalid
         const constructor: u32 = @intCast(gen.index(5));
-        const motor_mode: u32 = @intCast(gen.index(3));
+        const motor_mode = gen.springMode();
         var f: [7]f32 = undefined;
         f[0] = if (gen.oneIn(4)) 0.0 else gen.float(0, 50);
         f[1] = if (gen.oneIn(4)) 0.0 else gen.float(0, 5);
@@ -1561,7 +1570,7 @@ test "SpringSettings and MotorSettings parity" {
         if ((setter == 1 or setter == 2) and f[5] > f[6]) std.mem.swap(f32, &f[5], &f[6]);
         var motor_restore: [25]u8 = undefined;
         for (&motor_restore) |*byte| byte.* = @truncate(gen.rng.next());
-        motor_restore[0] = @intCast(gen.index(3));
+        motor_restore[0] = @intCast(gen.springMode());
 
         var jolt_motor_bytes: [25]u8 = undefined;
         var jolt_motor_f: [14]f32 = undefined;
@@ -1697,6 +1706,7 @@ test "AxisConstraintPart parity" {
         coverage.hit("deactivated", pair[0] != .dynamic and pair[1] != .dynamic);
         coverage.hit("spring", input.i[0] >= 1 and input.i[0] <= 4 and input.f[9 + 2] > 0.0);
         coverage.hit("kinematic vs dynamic", pair[0] == .kinematic and pair[1] == .dynamic);
+        coverage.hit("unnamed spring mode", input.i[1] > 2 and (input.i[0] == 4 or (input.i[0] == 3 and input.f[9 + 2] > 0.0)));
     }
     try check.finish();
     try coverage.expectAllReached("AxisConstraintPart");
@@ -1721,6 +1731,7 @@ test "AngleConstraintPart parity" {
         coverage.hit("position applied", results.true_count > 0);
         coverage.hit("position skipped", results.false_count > 0);
         coverage.hit("motor", input.i[0] == 4);
+        coverage.hit("unnamed spring mode", input.i[1] > 2 and (input.i[0] == 4 or (input.i[0] == 3 and input.f[3 + 2] > 0.0)));
     }
     try check.finish();
     try coverage.expectAllReached("AngleConstraintPart");
