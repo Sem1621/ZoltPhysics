@@ -22,9 +22,22 @@
 //! cannot be spawned from inside a job changes no result). Creating the scene (system, shapes, the bodies of update 0)
 //! runs under std.testing.checkAllAllocationFailures.
 //!
-//! Every scene is its own test (`SceneTest(name, index)`). A scene whose `blocked_by` is not supported yet
-//! (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts it as skipped. Add a scene in
-//! SimScenes.zig (see its header).
+//! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
+//! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts
+//! it as skipped. The test "SimScenes blocked scenes run on the C++ side" runs those scenes on the C++ side alone. Add a
+//! scene in SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping
+//! bodies, step listener calls, CCD bodies, sweep counts): check it when you write a scene.
+//!
+//! The C++ PhysicsSystem uses BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp), Zolt
+//! BroadPhaseBruteForce until A1. The gravity-only scenes do not depend on it: no body pair reaches the narrow phase,
+//! and the different orders of the active bodies (AddBodiesPrepare sorts by layer in the QuadTree) change no saved
+//! byte and no sorted record.
+//!
+//! Proof that it bites: computing `(gravity * gravity_factor) * dt + (force * inv_mass) * dt` instead of Jolt's
+//! `(gravity * gravity_factor + force * inv_mass) * dt` in MotionProperties.applyForceTorqueAndDragInternal is reported
+//! as "state differs at byte 862 ...: bodies[6] (id 0x00800006) motion_properties.linear_velocity.y zolt 0xc0dcbfe1
+//! jolt 0xc0dcbfe2" (scene forces_torques_impulses, update 42); passing user data + 1 to OnBodyDeactivated is reported
+//! as a differing listener record.
 //!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
