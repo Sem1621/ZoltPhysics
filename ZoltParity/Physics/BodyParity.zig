@@ -21,6 +21,11 @@
 //! - a BodyManager sequence (create / add with custom IDs / destroy / activate / deactivate / SetMotionQuality / out of
 //!   bodies / save / restore, validating restores): the body IDs, the active body order, the CCD count, GetBodyIDs, the
 //!   body stats, GetMutexMask and the SaveState bytes after every step.
+//! Volume: 100k GetMassProperties inputs; 10000 bodies with 30 operations each (more than 4000 calls per operation, the
+//! slots are reused often enough for the u8 sequence numbers to wrap around). `Coverage` counts the branches that only
+//! some inputs reach (buoyancy not submerged / no relative velocity / drag clamps, the inertia fallback of
+//! GetBodyCreationSettings, rotation steps at the 1.0e-6 threshold, the sleep test result, sequence number wraparound)
+//! and requires each of them `min_hits` times.
 //! C ABI wrappers: ZoltParity/Physics/BodyReference.cpp.
 
 const std = @import("std");
@@ -679,6 +684,16 @@ const Gen = struct {
         };
     }
 
+    /// A rotation step around the 1.0e-6 threshold of Body::AddRotationStep / SubRotationStep
+    fn rotationNearThreshold(self: *Gen, out: *[3]f32) void {
+        out.* = switch (self.index(4)) {
+            0 => @splat(1.0e-7), // Below
+            1 => .{ 1.0e-6, 0, 0 }, // At the threshold: Length() is exactly 1.0e-6f, not rotated
+            2 => .{ 0, -1.01e-6, 0 }, // Just above
+            else => .{ 5.7e-7, -5.7e-7, 5.7e-7 }, // Just below
+        };
+    }
+
     fn quat(self: *Gen) [4]f32 {
         if (self.oneIn(6)) return .{ 0, 0, 0, 1 };
         const q = Quat.fromVec4(Vec4.init(self.float(-1, 1), self.float(-1, 1), self.float(-1, 1), self.float(-1, 1)).normalized());
@@ -835,8 +850,11 @@ const Gen = struct {
                     const n = Vec3.init(self.float(-0.3, 0.3), 1, self.float(-0.3, 0.3)).normalized();
                     store3(n, o.f[0..3]);
                     o.f[3] = self.float(0, 2);
-                    o.f[4] = self.float(0, 1);
-                    o.f[5] = self.float(0, 0.1);
+                    // Large drag factors reach the overshoot clamps of the drag impulses
+                    o.f[4] = if (self.oneIn(4)) self.float(1, 50) else self.float(0, 1);
+                    o.f[5] = if (self.oneIn(3)) self.float(1, 100) else self.float(0, 0.1);
+                    // A fluid moving with the body: no relative velocity when the body doesn't rotate (area 0)
+                    if (self.oneIn(6)) store3(body.getLinearVelocity(), o.f[6..9]);
                     o.f[9] = 0;
                     o.f[10] = -9.81;
                     o.f[11] = 0;
@@ -852,7 +870,8 @@ const Gen = struct {
                 .position_steps => {
                     if (!has_mp) continue;
                     for (o.f[0..12]) |*x| x.* *= 0.05;
-                    if (self.oneIn(5)) @memset(o.f[3..6], 1.0e-7); // Below the rotation threshold
+                    if (self.oneIn(4)) self.rotationNearThreshold(o.f[3..6]);
+                    if (self.oneIn(4)) self.rotationNearThreshold(o.f[9..12]);
                 },
                 .scale_to_mass => {
                     if (!translation_allowed) continue;
@@ -901,11 +920,116 @@ const Gen = struct {
     }
 };
 
+/// Branches that only some inputs of the operations reach. The conditions are evaluated on the Zolt body before the
+/// operation (with Jolt's formulas); every branch must be reached `min_hits` times.
+const Coverage = struct {
+    buoyancy_not_submerged: u32 = 0,
+    buoyancy_submerged: u32 = 0,
+    buoyancy_no_relative_velocity: u32 = 0,
+    buoyancy_linear_drag_clamped: u32 = 0,
+    buoyancy_linear_drag_not_clamped: u32 = 0,
+    buoyancy_angular_drag_clamped: u32 = 0,
+    buoyancy_angular_drag_not_clamped: u32 = 0,
+    settings_inertia_inverted: u32 = 0,
+    settings_inertia_fallback: u32 = 0,
+    settings_no_motion_properties: u32 = 0,
+    add_rotation_step_applied: u32 = 0,
+    add_rotation_step_skipped: u32 = 0,
+    sub_rotation_step_applied: u32 = 0,
+    sub_rotation_step_skipped: u32 = 0,
+    sleep_test_can_sleep: u32 = 0,
+    sleep_test_cannot_sleep: u32 = 0,
+    sequence_number_wrapped: u32 = 0,
+
+    const min_hits = 20;
+
+    /// Count the branches that the operation will take
+    fn recordOp(self: *Coverage, body: *const Body, o: *const BodyOp) void {
+        const f = &o.f;
+        switch (@as(BodyOpKind, @enumFromInt(o.kind))) {
+            .apply_buoyancy_impulse => self.recordBuoyancy(body, o),
+            .body_creation_settings => if (body.getMotionPropertiesUnchecked()) |mp| {
+                var inertia: Mat44 = undefined;
+                if (inertia.setInversed3x3(mp.getLocalSpaceInverseInertiaUnchecked()))
+                    self.settings_inertia_inverted += 1
+                else
+                    self.settings_inertia_fallback += 1;
+            } else {
+                self.settings_no_motion_properties += 1;
+            },
+            .position_steps => {
+                if (load3(f[3..6]).length() > 1.0e-6) self.add_rotation_step_applied += 1 else self.add_rotation_step_skipped += 1;
+                if (load3(f[9..12]).length() > 1.0e-6) self.sub_rotation_step_applied += 1 else self.sub_rotation_step_skipped += 1;
+            },
+            else => {},
+        }
+    }
+
+    /// Body::ApplyBuoyancyImpulse up to its branches
+    fn recordBuoyancy(self: *Coverage, body: *const Body, o: *const BodyOp) void {
+        const f = &o.f;
+        const volume = body.getSubmergedVolume(loadR3(o.r[0..3]), load3(f[0..3]));
+        if (!(volume.submerged_volume > 0.0)) {
+            self.buoyancy_not_submerged += 1;
+            return;
+        }
+        self.buoyancy_submerged += 1;
+        const mp = body.getMotionPropertiesUnchecked().?;
+        const inverse_mass = mp.getInverseMass();
+        const fluid_density = f[3] / (volume.total_volume * inverse_mass);
+        const linear_velocity = mp.getLinearVelocity();
+        const angular_velocity = mp.getAngularVelocity();
+        const relative_velocity = load3(f[6..9]).sub(linear_velocity.add(angular_velocity.cross(volume.relative_center_of_buoyancy)));
+        const size = body.getShape().getLocalBounds().getSize();
+        var area: f32 = 0.0;
+        const relative_velocity_len_sq = relative_velocity.lengthSq();
+        if (relative_velocity_len_sq > 1.0e-12)
+            area = body.getRotation().inverseRotate(relative_velocity).abs().dot(size.swizzle(.y, .z, .x).mul(size.swizzle(.z, .x, .y))) / @sqrt(relative_velocity_len_sq)
+        else
+            self.buoyancy_no_relative_velocity += 1;
+        const drag_impulse = relative_velocity.mulScalar(0.5 * fluid_density * f[4] * area * f[12]).mulScalar(relative_velocity.length());
+        if (drag_impulse.mulScalar(inverse_mass).lengthSq() > linear_velocity.lengthSq())
+            self.buoyancy_linear_drag_clamped += 1
+        else
+            self.buoyancy_linear_drag_not_clamped += 1;
+        const l = (size.getX() + size.getY() + size.getZ()) / 3.0;
+        const drag_angular_impulse = angular_velocity.mulScalar(-f[5] * volume.submerged_volume / volume.total_volume * f[12] * l * l / inverse_mass);
+        if (body.getInverseInertia().mulVec3(drag_angular_impulse).lengthSq() > angular_velocity.lengthSq())
+            self.buoyancy_angular_drag_clamped += 1
+        else
+            self.buoyancy_angular_drag_not_clamped += 1;
+    }
+
+    /// Count the results of the operation
+    fn recordResult(self: *Coverage, o: *const BodyOp, result: *const BodyOpResult) void {
+        if (o.kind == @intFromEnum(BodyOpKind.update_sleep_state)) {
+            if (result.i[0] == @intFromEnum(zolt.CanSleep.can_sleep)) self.sleep_test_can_sleep += 1 else self.sleep_test_cannot_sleep += 1;
+        }
+    }
+
+    /// Count a body created with AddBody (the u8 sequence number of its slot wrapped around when it is 0)
+    fn recordCreate(self: *Coverage, id: u32) void {
+        if (BodyID.init(id).getSequenceNumber() == 0)
+            self.sequence_number_wrapped += 1;
+    }
+
+    fn expectAllReached(self: *const Coverage) !void {
+        var ok = true;
+        inline for (@typeInfo(Coverage).@"struct".fields) |field| {
+            if (@field(self, field.name) < min_hits) {
+                std.debug.print("Branch reached {} times, less than {}: {s}\n", .{ @field(self, field.name), min_hits, field.name });
+                ok = false;
+            }
+        }
+        if (!ok) return error.TestUnexpectedResult;
+    }
+};
+
 test "BodyCreationSettings::GetMassProperties for every mode and shape" {
     const allocator = std.testing.allocator;
     var gen: Gen = .{};
     var check: Checker = .{ .name = "GetMassProperties" };
-    for (0..2000) |n| {
+    for (0..100_000) |n| {
         var desc = gen.bodyDesc();
         desc.override_mass_properties = @intCast(n % 3);
         desc.shape = gen.shapeOfKind(@intCast((n / 3) % 8));
@@ -940,10 +1064,12 @@ test "Body and MotionProperties operations" {
     var check_ops: Checker = .{ .name = "Body operation" };
     var check_results: Checker = .{ .name = "Body operation result" };
     var op_counts: [26]u32 = @splat(0);
+    var coverage: Coverage = .{};
 
     var live: std.ArrayList(u32) = .empty;
     defer live.deinit(allocator);
-    for (0..3000) |n| {
+    // 10000 bodies: every slot is reused more than 256 times, so the sequence numbers wrap around
+    for (0..10_000) |n| {
         // Create a body
         const desc = gen.bodyDesc();
         const activate = gen.oneIn(2);
@@ -953,16 +1079,19 @@ test "Body and MotionProperties operations" {
         if (zolt_id != jolt_id or zolt_id == BodyID.invalid_body_id) break;
         try checkBody(&world, &check_create, zolt_id, desc);
         try live.append(allocator, zolt_id);
+        coverage.recordCreate(zolt_id);
 
         // Apply random operations, compare after each one
-        for (0..10) |_| {
+        for (0..30) |_| {
             const body = world.body_manager.getBody(.init(zolt_id));
             const o = gen.op(body);
             op_counts[o.kind] += 1;
+            coverage.recordOp(body, &o);
             const zolt_result = try applyOp(&world, zolt_id, &o);
             var jolt_result: BodyOpResult = .{};
             jolt.jolt_body_op(world.jolt_world, jolt_id, &o, &jolt_result);
             check_results.check(.{ n, o.kind }, zolt_result, jolt_result);
+            coverage.recordResult(&o, &zolt_result);
             try checkBody(&world, &check_ops, zolt_id, .{ n, o.kind });
         }
 
@@ -974,7 +1103,8 @@ test "Body and MotionProperties operations" {
             for (live.items) |other| try checkBody(&world, &check_ops, other, .{ n, "destroy" });
         }
     }
-    for (op_counts) |c| try std.testing.expect(c > 100); // Every operation was tested
+    for (op_counts) |c| try std.testing.expect(c > 1000); // Every operation was tested
+    try coverage.expectAllReached();
     try finishAll(&.{ &check_create, &check_ops, &check_results });
 }
 
@@ -1036,6 +1166,7 @@ test "BodyManager sequence: IDs, active body order, mutex masks and state" {
     var num_out_of_bodies: u32 = 0;
     var num_custom: u32 = 0;
     var num_restores: u32 = 0;
+    var num_wrapped: u32 = 0;
 
     for (0..20) |round| {
         var world: World = undefined;
@@ -1051,7 +1182,9 @@ test "BodyManager sequence: IDs, active body order, mutex masks and state" {
                     // Create, with AddBody or with a custom ID (that may be in use, freed or beyond the end)
                     const desc = gen.bodyDesc();
                     const custom = gen.oneIn(4);
-                    const custom_id: u32 = if (custom) BodyID.fromIndexAndSequenceNumber(@intCast(gen.index(max_sequence_bodies + 2)), @truncate(gen.rng.next())).getIndexAndSequenceNumber() else BodyID.invalid_body_id;
+                    // Sequence numbers near the end of the u8 range: a later AddBody in the slot wraps around to 0
+                    const sequence_number: u8 = if (gen.oneIn(3)) @intCast(255 - gen.index(2)) else @truncate(gen.rng.next());
+                    const custom_id: u32 = if (custom) BodyID.fromIndexAndSequenceNumber(@intCast(gen.index(max_sequence_bodies + 2)), sequence_number).getIndexAndSequenceNumber() else BodyID.invalid_body_id;
                     const activate = !gen.oneIn(3);
                     const zolt_id = try world.createBody(&desc, custom_id, activate);
                     const jolt_id = jolt.jolt_body_world_create_body(world.jolt_world, &desc, custom_id, @intFromBool(activate));
@@ -1059,6 +1192,7 @@ test "BodyManager sequence: IDs, active body order, mutex masks and state" {
                     if (zolt_id != BodyID.invalid_body_id) {
                         try live.append(allocator, zolt_id);
                         if (custom) num_custom += 1;
+                        if (!custom and BodyID.init(zolt_id).getSequenceNumber() == 0) num_wrapped += 1;
                     } else num_out_of_bodies += 1;
                 },
                 3 => if (live.items.len > 0) {
@@ -1142,6 +1276,6 @@ test "BodyManager sequence: IDs, active body order, mutex masks and state" {
             check.check(.{ round, step, action }, try zoltWorldInfo(&world), joltWorldInfo(&world));
         }
     }
-    try std.testing.expect(num_out_of_bodies > 0 and num_custom > 0 and num_restores > 0);
+    try std.testing.expect(num_out_of_bodies > 0 and num_custom > 0 and num_restores > 0 and num_wrapped > 0);
     try finishAll(&.{ &check, &check_ids, &check_masks });
 }

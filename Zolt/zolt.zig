@@ -383,6 +383,7 @@ pub const SoftBodyCreationSettings = @import("Physics/SoftBody/SoftBodyCreationS
 pub const SoftBodyManifold = @import("Physics/SoftBody/SoftBodyManifold.zig").SoftBodyManifold;
 pub const SoftBodyMotionProperties = @import("Physics/SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
 pub const SoftBodySharedSettings = @import("Physics/SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
+pub const SoftBodyUpdateContext = @import("Physics/SoftBody/SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
 pub const StateRecorder = @import("Physics/StateRecorder.zig").StateRecorder;
 pub const StateRecorderFilter = @import("Physics/StateRecorder.zig").StateRecorderFilter;
 pub const StateRecorderState = @import("Physics/StateRecorder.zig").StateRecorderState;
@@ -592,6 +593,7 @@ const source_files = .{
     @import("Physics/SoftBody/SoftBodyMotionProperties.zig"),
     @import("Physics/SoftBody/SoftBodyShape.zig"),
     @import("Physics/SoftBody/SoftBodySharedSettings.zig"),
+    @import("Physics/SoftBody/SoftBodyUpdateContext.zig"),
     @import("Physics/StateRecorder.zig"),
     @import("Physics/StateRecorderImpl.zig"),
     @import("RegisterTypes.zig"),

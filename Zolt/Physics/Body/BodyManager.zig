@@ -22,8 +22,10 @@
 //!   body; `addBody` keeps Jolt's `bool` for "out of IDs". Functions that fill a caller's array take its `allocator`
 //!   (`getActiveBodies`, `getBodyIDs`); `saveState` / `restoreState` build temporary arrays with the manager's
 //!   allocator. All of them return `Allocator.Error`. `restoreState` reserves its arrays before it restores a body, so
-//!   out of memory leaves the bodies unchanged. `invalidateContactCacheForBody` returns `Allocator.Error` (the list of
-//!   bodies to validate grows) and then clears the flag again, so the flag and the list stay consistent.
+//!   out of memory on a stream written by `saveState` leaves the bodies unchanged (a malformed stream that names a body
+//!   more than once can still grow them mid-restore, see `restoreState`). `invalidateContactCacheForBody` returns
+//!   `Allocator.Error` (the list of bodies to validate grows) and then clears the flag again, so the flag and the list
+//!   stay consistent.
 //! - Overloads: the const / non-const `GetBody`, `TryGetBody`, `GetBodies` are `getBody` / `getBodyMut`, `tryGetBody` /
 //!   `tryGetBodyMut`, `getBodies` / `getBodiesMut`. Pointer + count parameters are slices.
 //! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): TODO(debug_renderer).
@@ -917,7 +919,10 @@ pub const BodyManager = struct {
     }
 
     /// Restoring state for replay. Returns false if failed.
-    /// Zolt: the lists of bodies to (de)activate are reserved before any body is restored, so out of memory changes no body.
+    /// Zolt: the lists of bodies to (de)activate are reserved before any body is restored. A stream written by saveState
+    /// names every body at most once, so it never needs more and out of memory changes no body. When not validating, a
+    /// malformed stream that names a body more than once can make an append allocate after earlier bodies were restored
+    /// (Jolt's push_back); out of memory then leaves those bodies restored and the activation unchanged.
     pub fn restoreState(self: *BodyManager, stream: *StateRecorder) Allocator.Error!bool {
         var bodies_to_activate: BodyIDVector = .empty;
         defer bodies_to_activate.deinit(self.allocator);
@@ -970,7 +975,8 @@ pub const BodyManager = struct {
                 var num_bodies: u32 = 0;
                 stream.read(&num_bodies);
 
-                // Zolt: at most the number of bodies in the manager can change their activation (a valid ID per body)
+                // Zolt: at most the number of bodies in the manager can change their activation (a valid ID per body), unless
+                // the stream names a body more than once (not written by saveState): then the appends below can allocate
                 const max_to_change = @min(num_bodies, self.num_bodies);
                 try bodies_to_activate.ensureTotalCapacity(self.allocator, max_to_change);
                 try bodies_to_deactivate.ensureTotalCapacity(self.allocator, max_to_change);

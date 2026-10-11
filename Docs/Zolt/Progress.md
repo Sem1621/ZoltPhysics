@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 53.5%** of 85391 lines in scope · **Unit tests: 46.8%** of 18321 lines
+**Library: 53.6%** of 85391 lines in scope · **Unit tests: 46.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -27,7 +27,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Constraints` | 0% | 0 | 0 | 1 | 34 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
-| `Jolt/Physics/SoftBody` | 11% | 1 | 0 | 5 | 2 | 0 | 0 | 3880 |
+| `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 0% | 0 | 0 | 0 | 12 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
 | `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
@@ -438,7 +438,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/SoftBody — 11%</summary>
+<details><summary>Jolt/Physics/SoftBody — 12%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -448,7 +448,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `SoftBodyMotionProperties.cpp`, `SoftBodyMotionProperties.h` | 1553 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodyMotionProperties.zig` |
 | `SoftBodyShape.cpp`, `SoftBodyShape.h` | 345 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodyShape.zig` |
 | `SoftBodySharedSettings.cpp`, `SoftBodySharedSettings.h` | 1611 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
-| `SoftBodyUpdateContext.h` | 53 | ❌ todo |  |
+| `SoftBodyUpdateContext.h` | 53 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyUpdateContext.zig` |
 | `SoftBodyVertex.h` | 37 | ❌ todo |  |
 
 </details>
