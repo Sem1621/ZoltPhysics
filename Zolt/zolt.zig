@@ -198,6 +198,7 @@ pub const IgnoreMultipleBodiesFilter = @import("Physics/Body/BodyFilter.zig").Ig
 pub const IgnoreSingleBodyFilter = @import("Physics/Body/BodyFilter.zig").IgnoreSingleBodyFilter;
 pub const IgnoreSingleBodyFilterChained = @import("Physics/Body/BodyFilter.zig").IgnoreSingleBodyFilterChained;
 pub const BodyID = @import("Physics/Body/BodyID.zig").BodyID;
+pub const BodyInterface = @import("Physics/Body/BodyInterface.zig").BodyInterface;
 pub const BodyLockBase = @import("Physics/Body/BodyLock.zig").BodyLockBase;
 pub const BodyLockRead = @import("Physics/Body/BodyLock.zig").BodyLockRead;
 pub const BodyLockWrite = @import("Physics/Body/BodyLock.zig").BodyLockWrite;
@@ -222,6 +223,9 @@ pub const AABoxCast = @import("Physics/Collision/AABoxCast.zig").AABoxCast;
 pub const ActiveEdgeMode = @import("Physics/Collision/ActiveEdgeMode.zig").ActiveEdgeMode;
 pub const ActiveEdges = @import("Physics/Collision/ActiveEdges.zig");
 pub const BackFaceMode = @import("Physics/Collision/BackFaceMode.zig").BackFaceMode;
+pub const BodyPairCollector = @import("Physics/Collision/BroadPhase/BroadPhase.zig").BodyPairCollector;
+pub const BroadPhase = @import("Physics/Collision/BroadPhase/BroadPhase.zig").BroadPhase;
+pub const BroadPhaseBruteForce = @import("Physics/Collision/BroadPhase/BroadPhaseBruteForce.zig").BroadPhaseBruteForce;
 pub const broad_phase_layer_invalid = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").broad_phase_layer_invalid;
 pub const BroadPhaseLayer = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
 pub const BroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayerFilter;
@@ -231,6 +235,11 @@ pub const ObjectVsBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/
 pub const SpecifiedBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").SpecifiedBroadPhaseLayerFilter;
 pub const BroadPhaseLayerInterfaceMask = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig").BroadPhaseLayerInterfaceMask;
 pub const BroadPhaseLayerInterfaceTable = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+pub const BroadPhaseQuery = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").BroadPhaseQuery;
+pub const BroadPhaseQueryFilters = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").QueryFilters;
+pub const CastShapeBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").CastShapeBodyCollector;
+pub const CollideShapeBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").CollideShapeBodyCollector;
+pub const RayCastBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").RayCastBodyCollector;
 pub const ObjectVsBroadPhaseLayerFilterMask = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig").ObjectVsBroadPhaseLayerFilterMask;
 pub const ObjectVsBroadPhaseLayerFilterTable = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
 pub const CastConvexVsTriangles = @import("Physics/Collision/CastConvexVsTriangles.zig").CastConvexVsTriangles;
@@ -270,6 +279,7 @@ pub const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").G
 pub const InternalEdgeRemovingCollector = @import("Physics/Collision/InternalEdgeRemovingCollector.zig").InternalEdgeRemovingCollector;
 pub const manifoldBetweenTwoFaces = @import("Physics/Collision/ManifoldBetweenTwoFaces.zig").manifoldBetweenTwoFaces;
 pub const pruneContactPoints = @import("Physics/Collision/ManifoldBetweenTwoFaces.zig").pruneContactPoints;
+pub const NarrowPhaseQuery = @import("Physics/Collision/NarrowPhaseQuery.zig").NarrowPhaseQuery;
 pub const NarrowPhaseStat = @import("Physics/Collision/NarrowPhaseStats.zig").NarrowPhaseStat;
 pub const track_narrowphase_stats = @import("Physics/Collision/NarrowPhaseStats.zig").track_narrowphase_stats;
 pub const TrackNarrowPhaseCollector = @import("Physics/Collision/NarrowPhaseStats.zig").TrackNarrowPhaseCollector;
@@ -371,7 +381,19 @@ pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig
 pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
 pub const Constraint = @import("Physics/Constraints/Constraint.zig").Constraint;
+pub const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
+pub const ConstraintSpace = @import("Physics/Constraints/Constraint.zig").ConstraintSpace;
+pub const ConstraintSubType = @import("Physics/Constraints/Constraint.zig").ConstraintSubType;
+pub const ConstraintType = @import("Physics/Constraints/Constraint.zig").ConstraintType;
+pub const ConstraintManager = @import("Physics/Constraints/ConstraintManager.zig").ConstraintManager;
+pub const Constraints = @import("Physics/Constraints/ConstraintManager.zig").Constraints;
+pub const ContactConstraintManager = @import("Physics/Constraints/ContactConstraintManager.zig").ContactConstraintManager;
+pub const TwoBodyConstraint = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraint;
+pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraintSettings;
 pub const Activation = @import("Physics/EActivation.zig").Activation;
+pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
+pub const IslandBuilder = @import("Physics/IslandBuilder.zig").IslandBuilder;
+pub const LargeIslandSplitter = @import("Physics/LargeIslandSplitter.zig").LargeIslandSplitter;
 pub const PhysicsLock = @import("Physics/PhysicsLock.zig").PhysicsLock;
 pub const PhysicsLockContext = @import("Physics/PhysicsLock.zig").PhysicsLockContext;
 pub const PhysicsLockTypes = @import("Physics/PhysicsLock.zig").PhysicsLockTypes;
@@ -379,6 +401,10 @@ pub const SharedLock = @import("Physics/PhysicsLock.zig").SharedLock;
 pub const UniqueLock = @import("Physics/PhysicsLock.zig").UniqueLock;
 pub const physics_settings = @import("Physics/PhysicsSettings.zig");
 pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
+pub const PhysicsStepListener = @import("Physics/PhysicsStepListener.zig").PhysicsStepListener;
+pub const PhysicsStepListenerContext = @import("Physics/PhysicsStepListener.zig").PhysicsStepListenerContext;
+pub const PhysicsSystem = @import("Physics/PhysicsSystem.zig").PhysicsSystem;
+pub const PhysicsUpdateContext = @import("Physics/PhysicsUpdateContext.zig").PhysicsUpdateContext;
 pub const SoftBodyContactListener = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyContactListener;
 pub const SoftBodyContactSettings = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyContactSettings;
 pub const SoftBodyValidateResult = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyValidateResult;
@@ -399,6 +425,10 @@ pub const RegisterTypes = @import("RegisterTypes.zig");
 
 /// Test shapes of the inline tests of the shape core, registered through `zolt_user_types` by build.zig (only in test builds)
 pub const test_shapes = if (@import("builtin").is_test) @import("Physics/Collision/Shape/TestShapes.zig") else struct {};
+
+/// Test constraint of the inline tests and the unit tests, its settings are registered through `zolt_user_types` by
+/// build.zig for the inline tests (only in test builds)
+pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Constraints/TestConstraints.zig") else struct {};
 
 // TriangleSplitter
 pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
@@ -507,6 +537,7 @@ const source_files = .{
     @import("Physics/Body/BodyCreationSettings.zig"),
     @import("Physics/Body/BodyFilter.zig"),
     @import("Physics/Body/BodyID.zig"),
+    @import("Physics/Body/BodyInterface.zig"),
     @import("Physics/Body/BodyLock.zig"),
     @import("Physics/Body/BodyLockInterface.zig"),
     @import("Physics/Body/BodyLockMulti.zig"),
@@ -521,9 +552,12 @@ const source_files = .{
     @import("Physics/Collision/ActiveEdgeMode.zig"),
     @import("Physics/Collision/ActiveEdges.zig"),
     @import("Physics/Collision/BackFaceMode.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhase.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseBruteForce.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig"),
     @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig"),
     @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig"),
     @import("Physics/Collision/CastConvexVsTriangles.zig"),
@@ -546,6 +580,7 @@ const source_files = .{
     @import("Physics/Collision/GroupFilterTable.zig"),
     @import("Physics/Collision/InternalEdgeRemovingCollector.zig"),
     @import("Physics/Collision/ManifoldBetweenTwoFaces.zig"),
+    @import("Physics/Collision/NarrowPhaseQuery.zig"),
     @import("Physics/Collision/NarrowPhaseStats.zig"),
     @import("Physics/Collision/ObjectLayer.zig"),
     @import("Physics/Collision/ObjectLayerPairFilterMask.zig"),
@@ -587,9 +622,19 @@ const source_files = .{
     @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/Collision/TransformedShape.zig"),
     @import("Physics/Constraints/Constraint.zig"),
+    @import("Physics/Constraints/ConstraintManager.zig"),
+    @import("Physics/Constraints/ContactConstraintManager.zig"),
+    @import("Physics/Constraints/TestConstraints.zig"),
+    @import("Physics/Constraints/TwoBodyConstraint.zig"),
     @import("Physics/EActivation.zig"),
+    @import("Physics/EPhysicsUpdateError.zig"),
+    @import("Physics/IslandBuilder.zig"),
+    @import("Physics/LargeIslandSplitter.zig"),
     @import("Physics/PhysicsLock.zig"),
     @import("Physics/PhysicsSettings.zig"),
+    @import("Physics/PhysicsStepListener.zig"),
+    @import("Physics/PhysicsSystem.zig"),
+    @import("Physics/PhysicsUpdateContext.zig"),
     @import("Physics/SoftBody/SoftBodyContactListener.zig"),
     @import("Physics/SoftBody/SoftBodyCreationSettings.zig"),
     @import("Physics/SoftBody/SoftBodyManifold.zig"),

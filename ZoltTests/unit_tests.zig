@@ -6,6 +6,8 @@
 
 test {
     _ = @import("Layers.zig");
+    _ = @import("LoggingBodyActivationListener.zig");
+    _ = @import("PhysicsTestContext.zig");
     _ = @import("UnitTestFramework.zig");
 
     // Core
@@ -51,23 +53,26 @@ test {
     _ = @import("Physics/BodyManagerTests.zig");
     _ = @import("Physics/BodyTestContext.zig");
     _ = @import("Physics/BodyTests.zig");
+    _ = @import("Physics/BroadPhaseBruteForceTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
     _ = @import("Physics/CollisionGroupTests.zig");
+    _ = @import("Physics/ConstraintManagerTests.zig");
     _ = @import("Physics/ConvexVsTrianglesTest.zig");
     _ = @import("Physics/HeightFieldShapeTests.zig");
+    _ = @import("Physics/IslandBuilderTests.zig");
     _ = @import("Physics/MutableCompoundShapeTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");
+    _ = @import("Physics/PhysicsStepListenerTests.zig");
+    _ = @import("Physics/PhysicsSystemTests.zig");
+    _ = @import("Physics/PhysicsTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
-
-    // Phase 5 architecture prototype (removed after the foundation port)
-    _ = @import("Prototype/SimulationPrototype.zig");
 }

@@ -78,10 +78,12 @@ pub fn build(b: *std.Build) void {
     // library and the unit tests use the default (empty) module, the parity tests have their own (see below).
     const test_user_types_module = b.createModule(.{
         .root_source_file = b.addWriteFiles().add("zolt_user_types.zig",
-            \\//! `zolt_user_types` of the inline tests: the test shapes and the test material of Zolt (only declared in tests).
+            \\//! `zolt_user_types` of the inline tests: the test shapes, the test material and the test constraint of Zolt
+            \\//! (only declared in tests).
             \\const test_shapes = @import("zolt").test_shapes;
             \\pub const registrations = test_shapes.registrations;
             \\pub const material_types = test_shapes.material_types;
+            \\pub const constraint_settings_types = @import("zolt").test_constraints.constraint_settings_types;
             \\
         ),
         .target = target,

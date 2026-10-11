@@ -1,8 +1,8 @@
 //! Zolt addition, no Jolt file: tests of BodyManager, the body locks and the state recorder (Phase 5 F1)
 //!
 //! Jolt has no unit test file for these classes (its tests go through a PhysicsSystem, Wave C). Adapted from the
-//! Phase 5 architecture prototype (ZoltTests/Prototype/SimulationPrototype.zig: "BodyManager ID allocation like Jolt",
-//! the lock parts of "body locks, the tagged lock interface and BodyInterface", the body parts of "state recorder save,
+//! Phase 5 architecture prototype (SimulationPrototype.zig, removed in F2: "BodyManager ID allocation like Jolt", the
+//! lock parts of "body locks, the tagged lock interface and BodyInterface", the body parts of "state recorder save,
 //! restore, validation and filter") plus activation, the active body arrays, the listener, multi-threaded locking and
 //! out of memory. ZoltParity/Physics/BodyParity.zig compares the IDs, orders and state bytes with the C++ library.
 
