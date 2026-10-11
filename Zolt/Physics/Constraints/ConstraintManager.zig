@@ -300,7 +300,7 @@ pub const ConstraintManager = struct {
 
             var idx: u32 = 0;
             while (idx < num_constraints) : (idx += 1) {
-                var constraint_index: u32 = undefined;
+                var constraint_index: u32 = Constraint.invalid_constraint_index; // Zolt: Jolt leaves it uninitialized, a failed read takes the error path below
                 stream.read(&constraint_index);
                 if (self.constraints.items.len <= constraint_index) {
                     if (Core.enable_asserts) @panic("Restoring state for non-existing constraint");
