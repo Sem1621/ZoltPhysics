@@ -1840,7 +1840,6 @@ test "QuadTree NodeID and Node layout" {
     try std.testing.expectEqual(@as(usize, 124), @sizeOf(QuadTree.Node));
 }
 
-
 test "QuadTree partition" {
     const NodeID = QuadTree.NodeID;
     // Trivial cases: half
@@ -1870,4 +1869,205 @@ test "QuadTree partition" {
     try std.testing.expectEqual(@as(u32, 0), split[0]);
     try std.testing.expectEqual(@as(u32, 9), split[4]);
     try std.testing.expect(split[0] <= split[1] and split[1] <= split[2] and split[2] <= split[3] and split[3] <= split[4]);
+}
+
+/// Test helper: a body manager with `num_levels * 3` static spheres along x and one active dynamic box that overlaps
+/// all of them, and a tree built by hand that is deeper than any BuildTree: node i has the children [3 bodies, node
+/// i + 1], so the walks visit the deep child first and keep 3 entries per level on their stack
+const DeepTreeTest = struct {
+    const BodyManager = @import("../../Body/BodyManager.zig").BodyManager;
+    const BodyCreationSettings = @import("../../Body/BodyCreationSettings.zig").BodyCreationSettings;
+    const SphereShape = @import("../Shape/SphereShape.zig").SphereShape;
+    const BoxShape = @import("../Shape/BoxShape.zig").BoxShape;
+    const RVec3 = @import("../../../Math/Real.zig").RVec3;
+    const Quat = @import("../../../Math/Quat.zig").Quat;
+    const BroadPhaseLayerInterface = BroadPhaseLayerFile.BroadPhaseLayerInterface;
+
+    const num_levels = 100;
+    const num_bodies = 3 * num_levels;
+
+    const LayerInterface = struct {
+        pub const overrides = .{ .getNumBroadPhaseLayers, .getBroadPhaseLayer };
+        base: BroadPhaseLayerInterface = .init(@This()),
+        pub fn getNumBroadPhaseLayers(self: *const @This()) u32 {
+            _ = self;
+            return 1;
+        }
+        pub fn getBroadPhaseLayer(self: *const @This(), layer: ObjectLayer) BroadPhaseLayer {
+            _ = .{ self, layer };
+            return .init(0);
+        }
+    };
+
+    layer_interface: LayerInterface = .{},
+    body_manager: BodyManager = .empty,
+    ids: [num_bodies]BodyID = undefined,
+    active: BodyID = .invalid,
+    node_allocator: QuadTree.NodeAllocator = .empty,
+    tracking: []QuadTree.Tracking = &.{},
+
+    fn init(self: *DeepTreeTest, allocator: Allocator) !void {
+        self.* = .{};
+        try self.body_manager.init(allocator, std.testing.io, num_bodies + 1, 0, &self.layer_interface.base);
+        var settings = BodyCreationSettings.initWithShape((try SphereShape.create(allocator, 0.25, .{})).asShape(), RVec3.zero(), Quat.identity(), .static, 0);
+        defer settings.deinit();
+        for (&self.ids, 0..) |*id, i| {
+            settings.position = RVec3.init(@floatFromInt(i), 0, 0);
+            const body = try self.body_manager.allocateBody(&settings);
+            std.debug.assert(self.body_manager.addBody(body));
+            id.* = body.getID();
+        }
+        var box_settings = BodyCreationSettings.initWithShape((try BoxShape.create(allocator, Vec3.init(400, 1, 1), .{})).asShape(), RVec3.zero(), Quat.identity(), .dynamic, 0);
+        defer box_settings.deinit();
+        const body = try self.body_manager.allocateBody(&box_settings);
+        std.debug.assert(self.body_manager.addBody(body));
+        self.active = body.getID();
+        body.setInBroadPhaseInternal(true); // ActivateBodies only activates bodies in the broad phase
+        self.body_manager.activateBodies(&.{self.active});
+        self.node_allocator = try .init(allocator, std.testing.io, 2 * num_levels, 64);
+        try self.node_allocator.reserveAllPages();
+        self.tracking = try allocator.alloc(QuadTree.Tracking, num_bodies + 1);
+        @memset(self.tracking, .{});
+    }
+
+    fn deinit(self: *DeepTreeTest, allocator: Allocator) void {
+        allocator.free(self.tracking);
+        self.node_allocator.deinit();
+        self.body_manager.deinit();
+    }
+
+    /// Builds the deep tree in `tree` (initialized, empty) by hand
+    fn build(self: *DeepTreeTest, tree: *QuadTree) void {
+        const bodies = self.body_manager.getBodies();
+        var node_idx: [num_levels]u32 = undefined;
+        node_idx[0] = tree.getCurrentRoot().index.load(.monotonic);
+        for (node_idx[1..]) |*n| n.* = tree.allocateNode(false);
+        var subtree: AABox = .empty;
+        var level: usize = num_levels;
+        while (level > 0) {
+            level -= 1;
+            const node = tree.getNode(node_idx[level]);
+            var bounds: AABox = .empty;
+            for (0..3) |c| {
+                const id = self.ids[3 * level + c];
+                const body_bounds = bodies[id.getIndex()].getBody().getWorldSpaceBounds().*;
+                node.child_node_id[c].set(.fromBodyID(id));
+                node.setChildBounds(c, body_bounds);
+                tree.setBodyLocation(self.tracking, id, node_idx[level], @intCast(c));
+                self.tracking[id.getIndex()].broad_phase_layer.store(0, .monotonic);
+                self.tracking[id.getIndex()].object_layer.store(0, .monotonic);
+                bounds.encapsulate(body_bounds);
+            }
+            if (level + 1 < num_levels) {
+                node.child_node_id[3].set(.fromNodeIndex(node_idx[level + 1]));
+                node.setChildBounds(3, subtree);
+                tree.getNode(node_idx[level + 1]).parent_node_index.store(node_idx[level], .monotonic);
+                bounds.encapsulate(subtree);
+            }
+            subtree = bounds;
+        }
+        tree.tree_state.num_bodies.store(num_bodies, .monotonic);
+    }
+
+    /// A snapshot of the current tree (node indices, parents, flags, children and bounds in walk order)
+    fn dump(allocator: Allocator, tree: *const QuadTree) ![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        errdefer out.deinit(allocator);
+        var stack: std.ArrayList(u32) = .empty;
+        defer stack.deinit(allocator);
+        try out.appendSlice(allocator, &.{ tree.tree_state.num_bodies.load(.monotonic), @intFromBool(tree.isDirty()), tree.free_node_batch.num_objects });
+        try stack.append(allocator, tree.getCurrentRoot().index.load(.monotonic));
+        while (stack.pop()) |node_idx| {
+            const node = tree.getNode(node_idx);
+            try out.appendSlice(allocator, &.{ node_idx, node.parent_node_index.load(.monotonic), node.is_changed.load(.monotonic) });
+            for (0..4) |i| {
+                const child = node.child_node_id[i].get();
+                const bounds = node.getChildBounds(i);
+                try out.appendSlice(allocator, &.{ child.id, @bitCast(bounds.min.getX()), @bitCast(bounds.max.getX()) });
+                if (child.isValid() and child.isNode()) try stack.append(allocator, child.getNodeIndex());
+            }
+        }
+        return out.toOwnedSlice(allocator);
+    }
+};
+
+test "QuadTree deep tree: the walk stacks grow on the heap, findCollidingPairs and updatePrepare out of memory" {
+    const allocator = std.testing.allocator;
+    var t: DeepTreeTest = undefined;
+    try t.init(allocator);
+    defer t.deinit(allocator);
+    const bodies = t.body_manager.getBodies();
+
+    {
+        var tree: QuadTree = .empty;
+        tree.init(&t.node_allocator, allocator);
+        defer tree.deinit(); // Frees the deep tree without allocating
+        t.build(&tree);
+        if (builtin.mode == .Debug) tree.validateTree(bodies, t.tracking, tree.getCurrentRoot().index.load(.monotonic), DeepTreeTest.num_bodies);
+        try std.testing.expectEqual(@as(u32, DeepTreeTest.num_levels), tree.getMaxTreeDepth(tree.getCurrentRoot().getNodeID()));
+
+        // A query that overlaps everything: 3 stack entries per level, the stack leaves its local buffer
+        const AllHits = @import("../CollisionCollectorImpl.zig").AllHitCollisionCollector;
+        var collector = AllHits(CollideShapeBodyCollector).init(allocator);
+        defer collector.deinit();
+        tree.collideAABox(&AABox.init(Vec3.replicate(-1000), Vec3.replicate(1000)), &collector.base, &.{}, t.tracking);
+        try collector.checkError();
+        try std.testing.expectEqual(@as(usize, DeepTreeTest.num_bodies), collector.hits.items.len);
+
+        // FindCollidingPairs: every body overlaps the active box
+        var pairs = AllHits(BodyPairCollector).init(allocator);
+        defer pairs.deinit();
+        try tree.findCollidingPairs(bodies, &.{t.active}, 0.0, &pairs.base, &.{});
+        try pairs.checkError();
+        try std.testing.expectEqual(@as(usize, DeepTreeTest.num_bodies), pairs.hits.items.len);
+
+        // The stack cannot grow: error.OutOfMemory (here before any body was reached: the walk descends first)
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+        tree.allocator = failing.allocator();
+        pairs.reset();
+        try std.testing.expectError(error.OutOfMemory, tree.findCollidingPairs(bodies, &.{t.active}, 0.0, &pairs.base, &.{}));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expect(pairs.hits.items.len < DeepTreeTest.num_bodies);
+        tree.allocator = allocator;
+    }
+
+    // A full rebuild in which every allocation fails in turn (the node IDs, the growing node stack while nodes are being
+    // batched to be freed, BuildTree's centers): error.OutOfMemory and the tree is unchanged
+    var num_allocations: usize = 0;
+    var num_failures: usize = 0;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tree: QuadTree = .empty;
+        tree.init(&t.node_allocator, allocator);
+        defer tree.deinit();
+        t.build(&tree);
+        tree.tree_state.is_dirty.store(true, .monotonic);
+        const before = try DeepTreeTest.dump(allocator, &tree);
+        defer allocator.free(before);
+
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        tree.allocator = failing.allocator();
+        const result = tree.updatePrepare(bodies, t.tracking, true);
+        tree.allocator = allocator;
+        if (result) |state| {
+            tree.updateFinalize(bodies, t.tracking, state);
+            tree.discardOldTree();
+            if (!failing.has_induced_failure) {
+                num_allocations = failing.alloc_index;
+                try std.testing.expect(tree.getMaxTreeDepth(tree.getCurrentRoot().getNodeID()) < 10);
+                break;
+            }
+            // Otherwise the debug validation of the tree failed to allocate and was skipped
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            num_failures += 1;
+            const after = try DeepTreeTest.dump(allocator, &tree);
+            defer allocator.free(after);
+            try std.testing.expectEqualSlices(u32, before, after);
+            try std.testing.expect(tree.canBeUpdated());
+            if (builtin.mode == .Debug) tree.validateTree(bodies, t.tracking, tree.getCurrentRoot().index.load(.monotonic), DeepTreeTest.num_bodies);
+        }
+    }
+    try std.testing.expect(num_failures >= 3); // The node IDs, at least one growth of the node stack, the centers
+    try std.testing.expect(num_allocations >= num_failures);
 }
