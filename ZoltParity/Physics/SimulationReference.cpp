@@ -282,6 +282,7 @@ enum class ESimOp : uint32
 	SetShape = 45,
 	ActivateBodiesInAABox = 46,
 	ApplyBuoyancyImpulse = 47,
+	ExpectBodyState = 48,
 };
 
 static constexpr uint32 cInvalidHandle = 0xffffffff;
@@ -794,6 +795,8 @@ public:
 				bool applied = bi.ApplyBuoyancyImpulse(id, r, SimLoad3(f), f[3], f[4], f[5], SimLoad3(f + 6), SimLoad3(f + 9), f[12]);
 				return (applied? 4 : 0) | (bi.IsActive(id)? 1 : 0) | (bi.IsAdded(id)? 2 : 0);
 			}
+
+		case ESimOp::ExpectBodyState:			break; // Changes nothing, the driver checks the result
 
 		case ESimOp::CreateConstraint:
 			{

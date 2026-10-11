@@ -14,7 +14,9 @@
 //!    descriptions (`b.addBodyDesc(.{ ... })`, a `SimBody` is Jolt's BodyCreationSettings) and operations: `b.at(u)`
 //!    selects the update before which the following operations run, `b.createBody(desc, .activate)` returns a body
 //!    handle (the index of the created body in creation order), `b.op(.add_force, handle, .{ .f = ... })` adds any
-//!    other operation (see `OpKind` for the fields each kind reads).
+//!    other operation (see `OpKind` for the fields each kind reads). Where a scene is written for a body state (an
+//!    operation on a sleeping body), say so with `b.expectSleeping(handle)` / `b.expectAwake(handle)`: the driver
+//!    checks it on both sides, a comment alone becomes false unnoticed when the scene changes.
 //! 2. Add one entry to `scenes` with its name and builder. Every entry is its own test (`SceneTest("name", index)`,
 //!    run one with `zig build parity -Dtest-filter=name`). A scene that Zolt cannot run yet gets
 //!    `.blocked_by = .contacts` (or `.constraints`, `.ccd_hits`, ...): its test returns error.SkipZigTest until
@@ -230,8 +232,9 @@ pub const SimConstraint = extern struct {
 
 /// Operations between the updates. Unless noted otherwise they go through the locking BodyInterface, `body` is a body
 /// handle, `activation` is EActivation (0 activate, 1 don't activate), `f` / `r` / `index` / `count` are listed per
-/// kind. Every operation returns a u32 that both sides must agree on (a body ID, or IsActive(body) after the operation,
-/// or 0).
+/// kind. Every operation returns a u32 that both sides must agree on: a body ID (the create operations), the
+/// `BodyState` bits IsActive(body) | IsAdded(body) << 1 after a body operation (ApplyBuoyancyImpulse adds its result
+/// as bit 2), or 0 (the other operations).
 pub const OpKind = enum(u32) {
     /// CreateBody(bodies[index]) + AddBody(activation); returns the BodyID (invalid when out of bodies, the handle is
     /// then invalid too)
@@ -331,6 +334,10 @@ pub const OpKind = enum(u32) {
     /// ApplyBuoyancyImpulse(surface position r, normal f[0..3], buoyancy f[3], linear drag f[4], angular drag f[5],
     /// fluid velocity f[6..9], gravity f[9..12], delta time f[12]); bit 2 of the result is its return value
     apply_buoyancy_impulse = 47,
+    /// A check of the scene itself: changes nothing and returns the `BodyState` bits like every body operation, the
+    /// driver fails unless they are `index` (`SceneBuilder.expectSleeping` / `expectAwake`). A scene states with it
+    /// that it reaches the edge case it is written for (a sleeping body before an operation that must not wake it).
+    expect_body_state = 48,
     /// Driver: the following updates use delta time f[0] and `count` collision steps
     set_update = 100,
     /// Driver: both sides save their state in slot `index`
@@ -409,6 +416,16 @@ pub const SimRecord = extern struct {
 };
 
 pub const invalid_handle: u32 = std.math.maxInt(u32);
+
+/// The result bits of a body operation: IsActive(body) | IsAdded(body) << 1
+pub const BodyState = struct {
+    pub const active: u32 = 1;
+    pub const added: u32 = 2;
+    /// In the broad phase and asleep
+    pub const sleeping: u32 = added;
+    /// In the broad phase and awake
+    pub const awake: u32 = added | active;
+};
 
 /// Object layers of UnitTests/Layers.h (ZoltTests/Layers.zig)
 pub const Layers = struct {
@@ -735,6 +752,16 @@ pub const SceneBuilder = struct {
         return self.createWith(.create_body_no_add, body_desc, .dont_activate);
     }
 
+    /// The body must be asleep at this point (in the broad phase, not active): the driver checks it on both sides
+    pub fn expectSleeping(self: *SceneBuilder, handle: u32) Allocator.Error!void {
+        return self.op(.expect_body_state, handle, .{ .index = BodyState.sleeping });
+    }
+
+    /// The body must be awake at this point (in the broad phase and active): the driver checks it on both sides
+    pub fn expectAwake(self: *SceneBuilder, handle: u32) Allocator.Error!void {
+        return self.op(.expect_body_state, handle, .{ .index = BodyState.awake });
+    }
+
     /// Add a body description and create the body
     pub fn body(self: *SceneBuilder, desc_value: SimBody, activation: Activation) Allocator.Error!u32 {
         return self.createBody(try self.addBodyDesc(desc_value), activation);
@@ -1032,6 +1059,8 @@ fn buildKinematic(b: *SceneBuilder) Allocator.Error!void {
     b.at(60);
     for (0..num_bodies) |i|
         try b.op(.set_linear_and_angular_velocity, @intCast(i), .{ .f = &.{ 0, 0, 0, 0, 0, 0 } });
+    b.at(99);
+    for (0..num_bodies) |i| try b.expectSleeping(@intCast(i));
 }
 
 /// Forces, torques and impulses applied between the updates (with and without activation, on sleeping bodies)
@@ -1048,6 +1077,8 @@ fn buildForces(b: *SceneBuilder) Allocator.Error!void {
             .object_layer = Layers.unused1,
         }, if (i % 4 == 3) .dont_activate else .activate);
     }
+    // A body without velocity and gravity that the loop below does not touch: it falls asleep
+    const sleeper = try b.body(.{ .position = gridPosition(num_bodies, 0, 0), .shape = shapes.capsule, .gravity_factor = 0.0, .object_layer = Layers.unused1 }, .activate);
     var u: u32 = 0;
     while (u < 78) : (u += 7) {
         b.at(u);
@@ -1061,11 +1092,24 @@ fn buildForces(b: *SceneBuilder) Allocator.Error!void {
         try b.op(.add_impulse_at_position, (h + 5) % num_bodies, .{ .f = &.{ 1, 0, 0 }, .r = gridPositionOffset(gridPosition((h + 5) % num_bodies, 0, 0), .{ 0, 0.5, 0 }) });
         try b.op(.add_angular_impulse, (h + 6) % num_bodies, .{ .f = &.{ 0, 0.3, -0.2 } });
     }
-    // Forces twice in a row (they accumulate) and on a sleeping body without activation
+    // Forces twice in a row (they accumulate) and on an awake body without activation (applied)
     b.at(80);
     try b.op(.add_force, 0, .{ .f = &.{ 1, 2, 3 } });
     try b.op(.add_force, 0, .{ .f = &.{ 4, 5, 6 } });
+    try b.expectAwake(1);
     try b.op(.add_torque, 1, .{ .f = &.{ 1, 2, 3 }, .activation = .dont_activate });
+    // Forces and torques on a sleeping body without activation are dropped, the body stays asleep
+    try b.expectSleeping(sleeper);
+    try b.op(.add_force, sleeper, .{ .f = &.{ 10, 20, 30 }, .activation = .dont_activate });
+    try b.op(.add_force_at_position, sleeper, .{ .f = &.{ 0, 50, 10 }, .r = gridPositionOffset(gridPosition(num_bodies, 0, 0), .{ 0.4, 0.1, -0.3 }), .activation = .dont_activate });
+    try b.op(.add_torque, sleeper, .{ .f = &.{ 1, 2, 3 }, .activation = .dont_activate });
+    try b.op(.add_force_and_torque, sleeper, .{ .f = &.{ -10, 0, 7, 0, 3, 1 }, .activation = .dont_activate });
+    try b.expectSleeping(sleeper);
+    // An impulse wakes it up (without the dropped forces)
+    b.at(85);
+    try b.expectSleeping(sleeper);
+    try b.op(.add_impulse, sleeper, .{ .f = &.{ 0.5, 0, 0 } });
+    try b.expectAwake(sleeper);
 }
 
 /// `v` scaled to length `len` when it is longer (computed in f64 by the scene builder)
@@ -1096,6 +1140,8 @@ fn buildSetters(b: *SceneBuilder) Allocator.Error!void {
     }
     // A static body that is moved around
     const static_body = try b.body(.{ .position = gridPosition(20, 30, 2), .shape = shapes.box, .motion_type = 0, .object_layer = Layers.unused1 }, .dont_activate);
+    // A body without velocity and gravity that the loop below does not touch: it falls asleep
+    const sleeper = try b.body(.{ .position = gridPosition(21, 30, 2), .shape = shapes.compound, .gravity_factor = 0.0, .object_layer = Layers.unused1 }, .activate);
     var u: u32 = 0;
     while (u < 50) : (u += 5) {
         b.at(u);
@@ -1114,9 +1160,24 @@ fn buildSetters(b: *SceneBuilder) Allocator.Error!void {
         try b.op(.set_position_rotation_and_velocity, (h + 9) % num_bodies, .{ .r = gridPosition((h + 9) % num_bodies, 30, 3), .f = &(axisAngle(.{ 0, 1, 0 }, 0.5) ++ [6]f32{ 0, 2, 0, 0.1, 0, 0 }) });
         try b.op(.set_position_and_rotation, static_body, .{ .r = gridPosition(20, 30, s), .f = &axisAngle(.{ 0, 1, 0 }, s * 0.1), .activation = .dont_activate });
     }
-    // Setting the velocity of a sleeping body to zero does not wake it
+    // Setting a zero or near zero velocity (IsNearZero: length squared <= 1.0e-12) does not wake a sleeping body, the
+    // near zero velocity is stored; moving it with SetPositionRotationAndVelocity and zero velocities neither
     b.at(55);
-    try b.op(.set_linear_velocity, 0, .{ .f = &.{ 0, 0, 0 } });
+    try b.expectSleeping(sleeper);
+    try b.op(.set_linear_velocity, sleeper, .{ .f = &.{ 0, 0, 0 } });
+    try b.op(.set_angular_velocity, sleeper, .{ .f = &.{ 0, 0, 0 } });
+    try b.op(.set_linear_and_angular_velocity, sleeper, .{ .f = &.{ 0, 0, 0, 0, 0, 0 } });
+    try b.op(.set_position_rotation_and_velocity, sleeper, .{ .r = gridPosition(21, 30, 2.5), .f = &(axisAngle(.{ 0, 1, 0 }, 0.25) ++ [6]f32{ 0, 0, 0, 0, 0, 0 }) });
+    try b.op(.set_linear_velocity, sleeper, .{ .f = &.{ 2.0e-7, 0, -3.0e-7 } });
+    try b.op(.add_linear_velocity, sleeper, .{ .f = &.{ 1.0e-7, 1.0e-7, 0 } });
+    try b.op(.set_angular_velocity, sleeper, .{ .f = &.{ 0, 4.0e-7, 0 } });
+    try b.op(.add_linear_and_angular_velocity, sleeper, .{ .f = &.{ 0, 0, 1.0e-7, -1.0e-7, 0, 1.0e-7 } });
+    try b.expectSleeping(sleeper);
+    // Activated with its near zero velocity
+    b.at(57);
+    try b.expectSleeping(sleeper);
+    try b.op(.activate_body, sleeper, .{});
+    try b.expectAwake(sleeper);
 }
 
 /// Bodies that fall asleep (the sleep test of CheckSleepAndUpdateBounds without contacts) and are woken up again
@@ -1139,19 +1200,32 @@ fn buildSleep(b: *SceneBuilder) Allocator.Error!void {
             .user_data = 0xdead_0000_0000 + i,
         }, .activate);
     }
-    // Wake them up in different ways
+    // A body without velocity that only the operations on sleeping bodies below touch
+    const sleeper = try b.body(.{ .position = gridPosition(num_bodies, 0, 0), .shape = shapes.box, .gravity_factor = 0.0, .object_layer = Layers.unused1, .user_data = 0xdead_0000_0000 + num_bodies }, .activate);
+    // Bodies 0..3 are asleep, wake them up in different ways (4.. are still awake)
     b.at(70);
+    for (0..4) |h| try b.expectSleeping(@intCast(h));
     try b.op(.activate_body, 0, .{});
     try b.op(.add_force, 1, .{ .f = &.{ 10, 0, 0 } });
     try b.op(.add_impulse, 2, .{ .f = &.{ 0, 1, 0 } });
     try b.op(.set_linear_velocity, 3, .{ .f = &.{ 0.5, 0, 0 } });
-    try b.op(.activate_bodies, 4, .{ .count = 3 });
+    for (0..4) |h| try b.expectAwake(@intCast(h));
+    try b.expectAwake(4);
+    try b.op(.activate_bodies, 4, .{ .count = 3 }); // Awake: changes nothing
     try b.op(.reset_sleep_timer, 8, .{});
-    try b.op(.add_force, 9, .{ .f = &.{ 10, 0, 0 }, .activation = .dont_activate }); // Asleep: the force is dropped
+    try b.expectAwake(9);
+    try b.op(.add_force, 9, .{ .f = &.{ 10, 0, 0 }, .activation = .dont_activate }); // Awake: the force is applied
+    // Asleep: the force is dropped, the body stays asleep
+    try b.expectSleeping(sleeper);
+    try b.op(.add_force, sleeper, .{ .f = &.{ 10, 0, 0 }, .activation = .dont_activate });
+    try b.expectSleeping(sleeper);
     b.at(80);
     try b.op(.deactivate_body, 10, .{});
     try b.op(.deactivate_bodies, 0, .{ .count = 2 });
-    try b.op(.activate_body, 9, .{});
+    try b.op(.activate_body, 9, .{}); // Awake: changes nothing
+    // Woken up without the dropped force
+    try b.expectSleeping(sleeper);
+    try b.op(.activate_body, sleeper, .{});
     b.at(100);
     try b.op(.set_angular_velocity, 11, .{ .f = &.{ 0, 0, 3 } });
     try b.op(.reset_sleep_timer, 12, .{});
@@ -1283,24 +1357,28 @@ fn buildCustomGravity(b: *SceneBuilder) Allocator.Error!void {
     try b.sysOp(.set_gravity, .{ .f = &.{ 0, -9.81, 0 } });
 }
 
-/// The same scene with 1..4 collision steps per update
+/// The same scene with 1..4 collision steps per update. Jolt checks sleeping in the last step only and accumulates
+/// the step delta time (CheckSleepAndUpdateBounds): with the default time_before_sleep of 0.5 s a body needs 30 updates
+/// per collision step to fall asleep, with 0.1 s at most 24 updates.
 fn buildCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
     return struct {
         fn build(b: *SceneBuilder) Allocator.Error!void {
             const shapes = try BasicShapes.add(b);
             b.collision_steps = steps;
             b.num_updates = 50;
+            b.settings.time_before_sleep = 0.1; // Max movement 0.03 * 0.1 = 0.003 m
             for (0..24) |i| {
                 _ = try b.body(.{
                     .position = gridPosition(@intCast(i), 20, 10),
                     .rotation = axisAngle(.{ 0, 1, 0 }, @floatFromInt(i)),
-                    .linear_velocity = .{ 0, 5, 0 },
-                    .angular_velocity = .{ 0.5, 0.2 * @as(f32, @floatFromInt(i % 3)), 0 },
+                    // The bodies i % 5 == 0 move slowly without gravity: they fall asleep
+                    .linear_velocity = if (i % 5 == 0) .{ 0, 0.005, 0 } else .{ 0, 5, 0 },
+                    .angular_velocity = if (i % 5 == 0) .{ 0.002, 0.001 * @as(f32, @floatFromInt(i % 3)), 0 } else .{ 0.5, 0.2 * @as(f32, @floatFromInt(i % 3)), 0 },
                     .shape = shapes.pick(@intCast(i)),
                     .apply_gyroscopic_force = @intCast(i % 2),
                     .motion_type = if (i % 8 == 7) 1 else 2,
                     .motion_quality = @intCast((i / 2) % 2),
-                    .gravity_factor = if (i % 5 == 0) 0.0 else 1.0, // These fall asleep
+                    .gravity_factor = if (i % 5 == 0) 0.0 else 1.0,
                     .linear_damping = if (i % 5 == 0) 0.9 else 0.05,
                     .angular_damping = if (i % 5 == 0) 0.9 else 0.05,
                     .object_layer = if (i % 2 == 0) Layers.moving else Layers.unused1,
@@ -1308,7 +1386,12 @@ fn buildCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Erro
             }
             b.at(25);
             try b.op(.add_impulse, 3, .{ .f = &.{ 5, 0, 0 } });
+            b.at(40);
+            for ([_]u32{ 0, 5, 10, 15, 20 }) |h| try b.expectSleeping(h);
             try b.op(.activate_body, 0, .{});
+            try b.op(.add_impulse, 5, .{ .f = &.{ 0, 0, 1 } });
+            try b.expectAwake(0);
+            try b.expectAwake(5);
         }
     }.build;
 }
@@ -1371,7 +1454,10 @@ fn buildStepListeners(b: *SceneBuilder) Allocator.Error!void {
     try b.sysOp(.remove_step_listener, .{ .index = 23 });
     try b.sysOp(.remove_step_listener, .{ .index = 5 });
     b.at(30);
+    try b.expectSleeping(23);
     try b.sysOp(.add_step_listener, .{ .index = waker });
+    b.at(31);
+    try b.expectAwake(23);
     b.at(50);
     try b.sysOp(.add_step_listener, .{ .index = 5 });
     var settings: SimPhysicsSettings = b.settings;
@@ -1392,8 +1478,10 @@ fn buildStepListenersOnly(b: *SceneBuilder) Allocator.Error!void {
     try b.sysOp(.add_step_listener, .{ .index = recorder });
     const waker = try b.addStepListener(.{ .body = 0, .mode = @intFromEnum(StepListenerMode.add_linear_velocity), .f = .{ 0, 1, 0, 0 } });
     b.at(10);
+    try b.expectSleeping(0);
     try b.sysOp(.add_step_listener, .{ .index = waker });
     b.at(11);
+    try b.expectAwake(0);
     try b.sysOp(.remove_step_listener, .{ .index = waker });
     try b.sysOp(.set_update, .{ .f = &.{0.0}, .count = 1 });
     b.at(12);
@@ -1420,12 +1508,17 @@ fn buildSaveRestore(b: *SceneBuilder) Allocator.Error!void {
     try b.sysOp(.snapshot, .{ .index = 0 });
     try b.sysOp(.set_gravity, .{ .f = &.{ 0, -20, 0 } });
     b.at(40);
+    try b.expectSleeping(0);
     try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 10 (the gravity is restored too): the sleeping bodies wake up
+    try b.expectAwake(0);
     b.at(70);
     try b.sysOp(.snapshot, .{ .index = 1 });
+    try b.expectSleeping(11);
     try b.op(.add_force, 11, .{ .f = &.{ 0, 100, 0 } });
     b.at(80);
+    try b.expectAwake(11);
     try b.sysOp(.restore_cross, .{ .index = 1 }); // Body 11 is asleep again
+    try b.expectSleeping(11);
     try b.sysOp(.restore_cross, .{ .index = 1 }); // Twice in a row
     b.at(90);
     try b.sysOp(.snapshot, .{ .index = 2 });
@@ -1573,10 +1666,15 @@ fn buildShapeChanges(b: *SceneBuilder) Allocator.Error!void {
     }
     // Bodies 6 and 7 are asleep by now, the box wakes 6 up (and nothing else: the other bodies are far away)
     b.at(45);
+    try b.expectSleeping(6);
+    try b.expectSleeping(7);
     const p = gridPosition(6, 30, 0);
     try b.sysOp(.activate_bodies_in_aabox, .{ .f = &.{ @floatCast(p[0] - 1), @floatCast(p[1] - 1), @floatCast(p[2] - 1), @floatCast(p[0] + 1), @floatCast(p[1] + 1), @floatCast(p[2] + 1) } });
+    try b.expectAwake(6);
+    try b.expectSleeping(7);
     b.at(50);
     try b.op(.set_shape, 7, .{ .index = shapes.sphere, .count = 1, .activation = .activate });
+    try b.expectAwake(7);
 }
 
 /// Random bodies and random operations (seed `seed`, `steps` collision steps)
@@ -1656,7 +1754,11 @@ fn buildRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder) Al
 }
 
 /// Linear cast bodies whose shape has no inner radius (a mesh, an empty shape) or a negative one (a mirrored
-/// ScaledShape): Jolt asserts, its release build casts every movement (Blocker.release_only)
+/// ScaledShape): Jolt asserts (Blocker.release_only), its release build compares the squared movement of a step with
+/// Square(linear_cast_threshold * inner_radius). A zero radius casts every movement, a negative radius r every movement
+/// longer than 0.75 * |r|: the mirrored sphere (r = -0.3) above 27 m/s, the mirrored box (r = -0.2) above 18 m/s (two
+/// collision steps). The bodies j = 1 start at 40 m/s and all of them cast, of the bodies j = 0 (falling from rest) only
+/// the ones with zero radius do.
 fn buildLinearCastWithoutInnerRadius(b: *SceneBuilder) Allocator.Error!void {
     const mesh = try b.mesh(&.{ .{ 0, 0, 0, 1, 0, 0, 0, 0, 1 }, .{ 1, 0, 0, 1, 0, 1, 0, 0, 1 } });
     const empty_shape = try b.empty(.{ 0.1, 0, 0 });
@@ -1674,7 +1776,7 @@ fn buildLinearCastWithoutInnerRadius(b: *SceneBuilder) Allocator.Error!void {
         for (0..2) |j| {
             _ = try b.body(.{
                 .position = gridPosition(@intCast(2 * i + j), 40, 100),
-                .linear_velocity = .{ 0, -20.0 * @as(f32, @floatFromInt(j)), 0 },
+                .linear_velocity = .{ 0, -40.0 * @as(f32, @floatFromInt(j)), 0 },
                 .angular_velocity = .{ 1, 0, 0 },
                 .shape = shape,
                 .motion_quality = 1,

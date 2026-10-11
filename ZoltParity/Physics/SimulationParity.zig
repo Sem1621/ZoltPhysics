@@ -6,7 +6,9 @@
 //! - the PhysicsSystem::SaveState(EStateRecorderState::All) bytes. On a mismatch the first differing byte is decoded to
 //!   (section, body, field) with the layout of PhysicsSystem / BodyManager / Body / MotionProperties::SaveState (and
 //!   the contact cache / constraint sections), and the first differing fields are listed with both values;
-//! - the EPhysicsUpdateError bits returned by Update and the result of every operation (body IDs, IsActive / IsAdded);
+//! - the EPhysicsUpdateError bits returned by Update and the result of every operation (body IDs, IsActive / IsAdded).
+//!   The `expect_body_state` operations must also return what the scene expects (a body asleep before an operation
+//!   that must not wake it): a scene that no longer reaches the case it is written for fails;
 //! - the listener callbacks of the update and of the operations before it as sorted records (body activation listener,
 //!   step listeners, contact listener): their order depends on the threads, their content does not.
 //! At the end of a scene the partial states (each EStateRecorderState flag) are compared too.
@@ -381,6 +383,7 @@ const ZoltWorld = struct {
     shapes: std.ArrayList(RefConst(Shape)) = .empty,
     handles: std.ArrayList(BodyID) = .empty,
     step_listeners: []StepListenerImpl = &.{},
+    /// Which step listeners are added to the system (destroy removes them like ~SimWorld)
     step_listener_added: []bool = &.{},
 
     fn create(allocator: Allocator, desc: *const SimSceneDesc, job_kind: JobKind) !*ZoltWorld {
@@ -425,6 +428,9 @@ const ZoltWorld = struct {
 
     fn destroy(self: *ZoltWorld) void {
         const allocator = self.allocator;
+        for (self.step_listeners, self.step_listener_added) |*listener, added| {
+            if (added) self.system.removeStepListener(.init(listener));
+        }
         self.system.deinit();
         for (self.shapes.items) |*s| s.deinit();
         self.shapes.deinit(allocator);
@@ -685,6 +691,7 @@ const ZoltWorld = struct {
                 const applied = bi.applyBuoyancyImpulse(id, r, load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12]);
                 return (@as(u32, @intFromBool(applied)) << 2) | @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
             },
+            .expect_body_state => {}, // Changes nothing, the driver checks the result
             .create_constraint => {
                 // Phase 6: one prong per ConstraintKind when the class is ported (the scenes that need it are blocked
                 // by SimScenes.Blocker.constraints until then)
@@ -1150,11 +1157,16 @@ const Run = struct {
                         return self.fail("jolt could not restore the zolt state of slot {d}", .{op.index});
                     try self.compareStates(.all, "after restore_cross");
                 },
-                else => {
+                else => |kind| {
                     const zolt_result = try self.zw.applyOp(op);
                     const jolt_result = self.cw.applyOp(op);
                     if (zolt_result != jolt_result)
-                        return self.fail("operation {d} ({t} on handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, @as(OpKind, @enumFromInt(op.kind)), op.body, zolt_result, jolt_result });
+                        return self.fail("operation {d} ({t} on handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.body, zolt_result, jolt_result });
+                    if (kind == .expect_body_state) {
+                        if (jolt_result != op.index)
+                            return self.fail("operation {d}: the scene expects handle {d} in BodyState {d}, it is in BodyState {d} on both sides (the scene does not reach what it is written for)", .{ op_index.*, op.body, op.index, jolt_result });
+                        self.stats.num_expectations += 1;
+                    }
                 },
             }
         }
@@ -1305,6 +1317,8 @@ const RunStats = struct {
     updates_with_ccd_bodies: u32 = 0,
     /// Number of restore_cross operations that changed the state
     restores_changing_the_state: u32 = 0,
+    /// Number of checked expect_body_state operations
+    num_expectations: u32 = 0,
 };
 
 /// Print what every scene did (a passing test must not print: keep false)
@@ -1371,12 +1385,16 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (verbose)
         std.debug.print("{s}: {any}\n", .{ entry.name, stats[0] });
 
-    // The listener records do not depend on the threads (their number neither); the sweeps ran
+    // The listener records do not depend on the threads (their number neither); the sweeps ran in every configuration
+    // with sweeps, temp allocations and createJob calls failed
     for (stats[1..]) |s|
         try std.testing.expectEqualSlices(u32, &stats[0].records, &s.records);
-    if (entry.sweep_stride != 0) {
-        try std.testing.expect(stats[0].num_job_failures > 0);
-        try std.testing.expect(stats[3].num_job_failures > 0);
+    for (configs, stats) |config, s| {
+        try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
+        if (config.sweeps and entry.sweep_stride != 0) {
+            try std.testing.expect(s.num_temp_failures > 0);
+            try std.testing.expect(s.num_job_failures > 0);
+        }
     }
 
     try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
@@ -1439,7 +1457,12 @@ test "SimScenes blocked scenes run on the C++ side" {
                         collision_steps = op.count;
                     },
                     .snapshot, .restore_cross => return error.SkipZigTest, // Not used by the blocked scenes yet
-                    else => try std.testing.expectEqual(a.applyOp(op), b.applyOp(op)),
+                    else => |kind| {
+                        const result = a.applyOp(op);
+                        try std.testing.expectEqual(result, b.applyOp(op));
+                        if (kind == .expect_body_state)
+                            try std.testing.expectEqual(op.index, result);
+                    },
                 }
             }
             try std.testing.expectEqual(a.update(delta_time, collision_steps), b.update(delta_time, collision_steps));

@@ -1132,10 +1132,12 @@ test "PhysicsSystem activation listener: BodyInterface activation and falling as
 
 test "PhysicsSystem linear cast body without inner radius (Jolt's release behavior)" {
     // A dynamic mesh or a mirrored ScaledShape with the linear cast motion quality has a zero or negative inner
-    // radius. Jolt asserts (a usage error) and its release build casts every movement; Zolt's ReleaseFast build does
-    // the same instead of reaching undefined behavior (the assert in jobIntegrateVelocity was unconditional). Nothing
-    // is in the way, so the bodies move exactly like their discrete twins. (SimulationParity compares this with Jolt
-    // in the scene linear_cast_without_inner_radius.)
+    // radius. Jolt asserts (a usage error), its release build compares the squared movement of a step with
+    // Square(linear_cast_threshold * inner_radius): a zero radius casts every movement, a negative radius r every
+    // movement longer than linear_cast_threshold * |r|. Zolt's ReleaseFast build does the same instead of reaching
+    // undefined behavior (the assert in jobIntegrateVelocity was unconditional). Nothing is in the way, so the bodies
+    // move exactly like their discrete twins. (SimulationParity compares this with Jolt in the scene
+    // linear_cast_without_inner_radius.)
     if (Core.enable_asserts) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
@@ -1150,13 +1152,14 @@ test "PhysicsSystem linear cast body without inner radius (Jolt's release behavi
     var mirrored_ref = Ref(zolt.ShapeSettings).init(mirrored.asShapeSettings());
     defer mirrored_ref.deinit();
 
+    const speed: f32 = 60.0;
     var bodies: [4]*Body = undefined;
     for (&bodies, 0..) |*body, i| {
         var settings: BodyCreationSettings = .{};
         defer settings.deinit();
         settings.setShapeSettings(if (i < 2) mesh.asShapeSettings() else mirrored.asShapeSettings());
         settings.position = RVec3.init(@floatFromInt(20 * i), 10, 0);
-        settings.linear_velocity = Vec3.init(0, -30, 0);
+        settings.linear_velocity = Vec3.init(0, -speed, 0);
         settings.motion_quality = if (i % 2 == 0) .linear_cast else .discrete;
         settings.object_layer = Layers.moving;
         settings.override_mass_properties = .mass_and_inertia_provided;
@@ -1166,6 +1169,14 @@ test "PhysicsSystem linear cast body without inner radius (Jolt's release behavi
     }
     try expect(bodies[0].getShape().getInnerRadius() == 0.0);
     try expect(bodies[2].getShape().getInnerRadius() < 0.0);
+
+    // Both linear cast bodies take the cast path: every step moves at least speed * step delta time (gravity only adds
+    // to it), the negative radius needs more than 0.75 * 0.5 m per step (45 m/s)
+    const step_movement = speed * c.getStepDeltaTime();
+    for ([_]*Body{ bodies[0], bodies[2] }) |body| {
+        const threshold = c.getSystem().getPhysicsSettings().linear_cast_threshold * body.getShape().getInnerRadius();
+        try expect(step_movement * step_movement > threshold * threshold);
+    }
 
     _ = try c.simulate(0.5, {});
     for (0..2) |pair| {
