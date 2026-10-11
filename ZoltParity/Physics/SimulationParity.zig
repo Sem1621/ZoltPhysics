@@ -30,10 +30,9 @@
 //! scene in SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping
 //! bodies, step listener calls, CCD bodies, sweep counts): check it when you write a scene.
 //!
-//! The C++ PhysicsSystem uses BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp), Zolt
-//! BroadPhaseBruteForce until A1. The gravity-only scenes do not depend on it: no body pair reaches the narrow phase,
-//! and the different orders of the active bodies (AddBodiesPrepare sorts by layer in the QuadTree) change no saved
-//! byte and no sorted record.
+//! Both PhysicsSystems use BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp, Zolt's default since A1;
+//! no comparison was ever loosened for the brute force broad phase that Zolt used before). The trees themselves are
+//! compared by BroadPhaseQuadTreeParity.zig.
 //!
 //! Proof that it bites: computing `(gravity * gravity_factor) * dt + (force * inv_mass) * dt` instead of Jolt's
 //! `(gravity * gravity_factor + force * inv_mass) * dt` in MotionProperties.applyForceTorqueAndDragInternal is reported
