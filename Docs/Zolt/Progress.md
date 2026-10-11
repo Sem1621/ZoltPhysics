@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 62.6%** of 85391 lines in scope · **Unit tests: 54.8%** of 18321 lines
+**Library: 64.9%** of 85391 lines in scope · **Unit tests: 54.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -24,7 +24,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Body` | 73% | 15 | 3 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 86% | 70 | 1 | 1 | 4 | 0 | 0 | 21948 |
-| `Jolt/Physics/Constraints` | 37% | 20 | 0 | 1 | 14 | 0 | 0 | 12068 |
+| `Jolt/Physics/Constraints` | 53% | 21 | 0 | 0 | 14 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
@@ -377,7 +377,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Constraints — 37%</summary>
+<details><summary>Jolt/Physics/Constraints — 53%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -399,7 +399,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `RotationQuatConstraintPart.h` | 225 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/RotationQuatConstraintPart.zig` |
 | `SpringPart.h` | 164 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/SpringPart.zig` |
 | `SwingTwistConstraintPart.h` | 543 | ✅ complete | `Zolt/Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig` |
-| `ContactConstraintManager.cpp`, `ContactConstraintManager.h` | 2185 | ⚪ stub | `Zolt/Physics/Constraints/ContactConstraintManager.zig` |
+| `ContactConstraintManager.cpp`, `ContactConstraintManager.h` | 2185 | ✅ complete | `Zolt/Physics/Constraints/ContactConstraintManager.zig` |
 | `DistanceConstraint.cpp`, `DistanceConstraint.h` | 316 | ❌ todo |  |
 | `FixedConstraint.cpp`, `FixedConstraint.h` | 255 | ❌ todo |  |
 | `GearConstraint.cpp`, `GearConstraint.h` | 242 | ❌ todo |  |
