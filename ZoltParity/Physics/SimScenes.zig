@@ -15,16 +15,23 @@
 //!    selects the update before which the following operations run, `b.createBody(desc, .activate)` returns a body
 //!    handle (the index of the created body in creation order), `b.op(.add_force, handle, .{ .f = ... })` adds any
 //!    other operation (see `OpKind` for the fields each kind reads).
-//! 2. Add one entry to `scenes` with its name and builder. A scene that Zolt cannot run yet gets
-//!    `.blocked_by = .contacts` (or `.constraints`, `.ccd_hits`, ...): SimulationParity runs it as soon as
-//!    `Blocker.isSupported` says so (flip it when the wave lands) and skips it until then. Skipped scenes are never
-//!    silent: every blocked group is its own test that returns error.SkipZigTest, so the build summary counts them as
-//!    "skipped".
+//! 2. Add one entry to `scenes` with its name and builder. Every entry is its own test (`SceneTest("name", index)`,
+//!    run one with `zig build parity -Dtest-filter=name`). A scene that Zolt cannot run yet gets
+//!    `.blocked_by = .contacts` (or `.constraints`, `.ccd_hits`, ...): its test returns error.SkipZigTest until
+//!    `Blocker.isSupported` says so (flip it when the wave lands), so the build summary counts it as "skipped", never
+//!    silently. Meanwhile the test "SimScenes blocked scenes run on the C++ side" runs it on the C++ side with 0 and
+//!    3 worker threads and checks that it reaches what it is written for (contact callbacks, constraints).
+//!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: it runs
+//!    without Zolt's asserts only (ReleaseFast).
 //! 3. A scene with contacts needs nothing else (the C++ side and the Zolt side create every shape kind of `ShapeKind`,
 //!    and the contact listener records are compared already). A new shape kind is a new `ShapeKind` value plus its
 //!    creation in `SimulationReference.cpp` (MakeShape) and `SimulationParity.zig` (makeShapeSettings). Constraints
 //!    are described by `SimConstraint`; the C++ side creates every `ConstraintKind`, the Zolt side gets the
-//!    corresponding prong in SimulationParity.zig's createConstraint when Phase 6 ports the class.
+//!    corresponding prong in SimulationParity.zig's `applyOpInner` (`.create_constraint`) when Phase 6 ports the class.
+//!    A new operation is a new `OpKind` value plus its prong in ApplyOp (C++) and applyOpInner (Zolt).
+//! 4. Avoid what Jolt asserts (Zolt's Debug build asserts the same): initial velocities above the maximum, a linear
+//!    cast shape without inner radius, invalid scales, a kinematic / dynamic body without mass (a mesh needs
+//!    `override_mass_properties`), setting the velocity of a static body.
 //!
 //! Rules for the gravity-only scenes (until A4 / Wave B): no two bodies whose layers collide may ever have
 //! overlapping bounds (the broad phase would report a pair and ProcessBodyPair is REGION R2), and the linear cast
@@ -317,6 +324,13 @@ pub const OpKind = enum(u32) {
     set_friction_and_restitution = 43,
     /// CreateConstraint(constraints[index]) + PhysicsSystem::AddConstraint (Phase 6)
     create_constraint = 44,
+    /// SetShape(shapes[index], update mass properties = count != 0, activation)
+    set_shape = 45,
+    /// ActivateBodiesInAABox(AABox(f[0..3], f[3..6]), default filters)
+    activate_bodies_in_aabox = 46,
+    /// ApplyBuoyancyImpulse(surface position r, normal f[0..3], buoyancy f[3], linear drag f[4], angular drag f[5],
+    /// fluid velocity f[6..9], gravity f[9..12], delta time f[12]); bit 2 of the result is its return value
+    apply_buoyancy_impulse = 47,
     /// Driver: the following updates use delta time f[0] and `count` collision steps
     set_update = 100,
     /// Driver: both sides save their state in slot `index`
@@ -333,7 +347,7 @@ pub const SimOp = extern struct {
     count: u32 = 0,
     activation: u32 = 0,
     index: u32 = 0,
-    f: [12]f32 = @splat(0),
+    f: [16]f32 = @splat(0),
     r: [3]Real = @splat(0),
 };
 
@@ -472,6 +486,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "linear_cast_without_hits", .build = buildLinearCast },
     .{ .name = "shapes", .build = buildShapes },
     .{ .name = "motion_type_and_quality_changes", .build = buildMotionChanges },
+    .{ .name = "shape_changes_buoyancy_and_box_activation", .build = buildShapeChanges },
     .{ .name = "random_1", .build = buildRandom(1, 1) },
     .{ .name = "random_2", .build = buildRandom(2, 2) },
     .{ .name = "random_3", .build = buildRandom(3, 3) },
@@ -1525,6 +1540,43 @@ fn buildMotionChanges(b: *SceneBuilder) Allocator.Error!void {
     try b.op(.set_motion_type, 5, .{ .index = 2, .activation = .activate });
     try b.op(.set_motion_type, 4, .{ .index = 1, .activation = .activate });
     try b.op(.move_kinematic, 4, .{ .r = gridPosition(4, 40, 30), .f = &(identity_rotation ++ [1]f32{0.5}) });
+}
+
+/// SetShape with and without updating the mass properties, ApplyBuoyancyImpulse, ActivateBodiesInAABox
+fn buildShapeChanges(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try BasicShapes.add(b);
+    const big_box = try b.box(.{ 1.0, 0.3, 0.6 }, 0.1);
+    b.num_updates = 60;
+    for (0..8) |i| {
+        _ = try b.body(.{
+            .position = gridPosition(@intCast(i), 30, 0),
+            .rotation = axisAngle(.{ 0, 0, 1 }, 0.2 * @as(f64, @floatFromInt(i))),
+            .angular_velocity = if (i >= 6) @splat(0) else .{ 0.5, 0, 0 }, // 6 and 7 fall asleep
+            .shape = shapes.pick(@intCast(i)),
+            .gravity_factor = if (i >= 6) 0.0 else 1.0,
+            .linear_damping = 2.0,
+            .angular_damping = 2.0,
+            .motion_type = if (i == 5) 1 else 2,
+            .object_layer = if (i % 2 == 0) Layers.moving else Layers.unused1,
+        }, .activate);
+    }
+    b.at(5);
+    try b.op(.set_shape, 0, .{ .index = big_box, .count = 1 });
+    try b.op(.set_shape, 1, .{ .index = shapes.compound, .count = 0 });
+    try b.op(.set_shape, 5, .{ .index = shapes.capsule, .count = 1 }); // Kinematic
+    var u: u32 = 10;
+    while (u < 40) : (u += 3) {
+        b.at(u);
+        // Body 2 is under water (the impulse is applied), body 3 above it (it is not)
+        try b.op(.apply_buoyancy_impulse, 2, .{ .r = gridPosition(2, 30, 100), .f = &.{ 0, 1, 0, 1.1, 0.3, 0.05, 1, 0, 0, 0, -9.81, 0, b.delta_time } });
+        try b.op(.apply_buoyancy_impulse, 3, .{ .r = gridPosition(3, 30, -100), .f = &.{ 0.6, 0.8, 0, 2.0, 0.5, 0.5, 0, 0, -1, 0, -9.81, 0, b.delta_time } });
+    }
+    // Bodies 6 and 7 are asleep by now, the box wakes 6 up (and nothing else: the other bodies are far away)
+    b.at(45);
+    const p = gridPosition(6, 30, 0);
+    try b.sysOp(.activate_bodies_in_aabox, .{ .f = &.{ @floatCast(p[0] - 1), @floatCast(p[1] - 1), @floatCast(p[2] - 1), @floatCast(p[0] + 1), @floatCast(p[1] + 1), @floatCast(p[2] + 1) } });
+    b.at(50);
+    try b.op(.set_shape, 7, .{ .index = shapes.sphere, .count = 1, .activation = .activate });
 }
 
 /// Random bodies and random operations (seed `seed`, `steps` collision steps)

@@ -9,6 +9,8 @@
 //! new .cpp files in `reference_sources.zig` (both lists are merged with git's union driver, keep them sorted).
 //! `Physics/ShapeCoreUserTypes.zig` is not a test file: it is the `zolt_user_types` module of the parity build's own
 //! `zolt` instance (user shape registrations, see build.zig), imported by the tests as "parity_user_types".
+//! `Physics/SimScenes.zig` is not a test file either: it is the scene table of `Physics/SimulationParity.zig`, which
+//! also imports ZoltTests/Layers.zig as "test_layers" (see build.zig).
 //!
 //! Run: zig build parity [-Ddouble_precision=true] [-Dtest-filter=Vec4]
 

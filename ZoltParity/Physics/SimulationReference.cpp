@@ -182,7 +182,7 @@ struct SimOp
 	uint32				mCount;
 	uint32				mActivation;
 	uint32				mIndex;
-	float				mF[12];
+	float				mF[16];
 	Real				mR[3];
 };
 
@@ -279,6 +279,9 @@ enum class ESimOp : uint32
 	SetUserData = 42,
 	SetFrictionAndRestitution = 43,
 	CreateConstraint = 44,
+	SetShape = 45,
+	ActivateBodiesInAABox = 46,
+	ApplyBuoyancyImpulse = 47,
 };
 
 static constexpr uint32 cInvalidHandle = 0xffffffff;
@@ -780,6 +783,17 @@ public:
 			return 0;
 
 		case ESimOp::OptimizeBroadPhase:		mSystem.OptimizeBroadPhase(); return 0;
+		case ESimOp::SetShape:					bi.SetShape(id, mShapes[inOp.mIndex], inOp.mCount != 0, activation); break;
+
+		case ESimOp::ActivateBodiesInAABox:
+			bi.ActivateBodiesInAABox(AABox(SimLoad3(f), SimLoad3(f + 3)), { }, { });
+			return 0;
+
+		case ESimOp::ApplyBuoyancyImpulse:
+			{
+				bool applied = bi.ApplyBuoyancyImpulse(id, r, SimLoad3(f), f[3], f[4], f[5], SimLoad3(f + 6), SimLoad3(f + 9), f[12]);
+				return (applied? 4 : 0) | (bi.IsActive(id)? 1 : 0) | (bi.IsAdded(id)? 2 : 0);
+			}
 
 		case ESimOp::CreateConstraint:
 			{

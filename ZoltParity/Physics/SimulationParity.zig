@@ -663,6 +663,15 @@ const ZoltWorld = struct {
                 self.system.optimizeBroadPhase();
                 return 0;
             },
+            .set_shape => try bi.setShape(id, self.shapes.items[op.index].get().?, op.count != 0, activation),
+            .activate_bodies_in_aabox => {
+                try bi.activateBodiesInAABox(&zolt.AABox.init(load3(f[0..3]), load3(f[3..6])), &.{}, &.{});
+                return 0;
+            },
+            .apply_buoyancy_impulse => {
+                const applied = bi.applyBuoyancyImpulse(id, r, load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12]);
+                return (@as(u32, @intFromBool(applied)) << 2) | @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
+            },
             .create_constraint => {
                 // Phase 6: one prong per ConstraintKind when the class is ported (the scenes that need it are blocked
                 // by SimScenes.Blocker.constraints until then)
