@@ -275,6 +275,8 @@ pub const ContactManifold = @import("Physics/Collision/ContactListener.zig").Con
 pub const ContactPoints = @import("Physics/Collision/ContactListener.zig").ContactPoints;
 pub const ContactSettings = @import("Physics/Collision/ContactListener.zig").ContactSettings;
 pub const ValidateResult = @import("Physics/Collision/ContactListener.zig").ValidateResult;
+pub const CollisionEstimationResult = @import("Physics/Collision/EstimateCollisionResponse.zig").CollisionEstimationResult;
+pub const estimateCollisionResponse = @import("Physics/Collision/EstimateCollisionResponse.zig").estimateCollisionResponse;
 pub const GroupFilter = @import("Physics/Collision/GroupFilter.zig").GroupFilter;
 pub const GroupFilterResult = @import("Physics/Collision/GroupFilter.zig").GroupFilter.GroupFilterResult;
 pub const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").GroupFilterTable;
@@ -379,6 +381,7 @@ pub const ShapeCastT = @import("Physics/Collision/ShapeCast.zig").ShapeCastT;
 pub const ReversedShapeFilter = @import("Physics/Collision/ShapeFilter.zig").ReversedShapeFilter;
 pub const ShapeFilter = @import("Physics/Collision/ShapeFilter.zig").ShapeFilter;
 pub const SimShapeFilter = @import("Physics/Collision/SimShapeFilter.zig").SimShapeFilter;
+pub const SimShapeFilterWrapper = @import("Physics/Collision/SimShapeFilterWrapper.zig").SimShapeFilterWrapper;
 pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig").countAndSortTrues;
 pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
@@ -607,6 +610,7 @@ const source_files = .{
     @import("Physics/Collision/CollisionDispatch.zig"),
     @import("Physics/Collision/CollisionGroup.zig"),
     @import("Physics/Collision/ContactListener.zig"),
+    @import("Physics/Collision/EstimateCollisionResponse.zig"),
     @import("Physics/Collision/GroupFilter.zig"),
     @import("Physics/Collision/GroupFilterTable.zig"),
     @import("Physics/Collision/InternalEdgeRemovingCollector.zig"),
@@ -650,6 +654,7 @@ const source_files = .{
     @import("Physics/Collision/ShapeCast.zig"),
     @import("Physics/Collision/ShapeFilter.zig"),
     @import("Physics/Collision/SimShapeFilter.zig"),
+    @import("Physics/Collision/SimShapeFilterWrapper.zig"),
     @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/Collision/TransformedShape.zig"),
     @import("Physics/Constraints/CalculateSolverSteps.zig"),
