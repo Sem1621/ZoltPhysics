@@ -19,7 +19,8 @@
 //!   - `Vec3` / `Float3` are 3 floats, `Vec4` and `Quat` (`GetXYZW`) 4 floats, `DVec3` 3 doubles of 16 hex digits,
 //!     separated by a space; `Mat44` its 4 columns, `DMat44` 3 columns and the translation, separated by `" "`
 //!     strings (which switch to decimal like Jolt's).
-//!   Jolt has no overload for `double`, `bool` or `uint8`: they are compile errors here too.
+//!   - `u8` is C++ `char`: the character, the base does not change. (A C++ `uint8` would be promoted to `int`: cast
+//!     it to `i32`.) Jolt has no overload for `double` or `bool`: they are compile errors here too.
 //! - Like Jolt's log it is not thread safe and only meaningful with a single threaded job system.
 
 const std = @import("std");
@@ -127,6 +128,9 @@ pub const Format = struct {
             // operator << (const char *) / (const String &)
             self.hex = false;
             try w.writeAll(value);
+        } else if (T == u8) {
+            // operator << (char): the character as is
+            try w.writeByte(value);
         } else if (T == i32) {
             // operator << (int): the current base, no width
             if (self.hex)
@@ -226,6 +230,10 @@ test "DeterminismLog: Jolt's text for every operator <<" {
     try expectEqualStrings("fffffff4", try formatForTest(&buffer, &format, .{@as(i32, -12)}));
     try expectEqualStrings(" 12", try formatForTest(&buffer, &format, .{ " ", @as(i32, 12) }));
     try std.testing.expect(!format.hex);
+
+    // A char is written as is and keeps the base
+    try expectEqualStrings("a:00000001 1b", try formatForTest(&buffer, &format, .{ "a", @as(u8, ':'), @as(u32, 1), @as(u8, ' '), @as(i32, 27) }));
+    try expectEqualStrings(" 27", try formatForTest(&buffer, &format, .{ " ", @as(i32, 27) }));
 
     // uint64, float bits, BodyID and SubShapeID
     try expectEqualStrings("0123456789abcdef 00000000 80000000 3f800000 7fc00000", try formatForTest(&buffer, &format, .{ @as(u64, 0x0123456789abcdef), " ", @as(f32, 0.0), " ", @as(f32, -0.0), " ", @as(f32, 1.0), " ", std.math.nan(f32) }));

@@ -50,6 +50,7 @@ test {
 
     // Physics
     _ = @import("Physics/ActiveEdgesTests.zig");
+    _ = @import("Physics/BodyInterfaceTests.zig");
     _ = @import("Physics/BodyManagerTests.zig");
     _ = @import("Physics/BodyTestContext.zig");
     _ = @import("Physics/BodyTests.zig");

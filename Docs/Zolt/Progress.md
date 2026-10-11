@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 62.6%** of 85391 lines in scope · **Unit tests: 54.8%** of 18321 lines
+**Library: 63.1%** of 85391 lines in scope · **Unit tests: 54.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -20,8 +20,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
-| `Jolt/Physics` | 52% | 9 | 1 | 1 | 2 | 0 | 0 | 5053 |
-| `Jolt/Physics/Body` | 73% | 15 | 3 | 0 | 0 | 0 | 0 | 5146 |
+| `Jolt/Physics` | 58% | 10 | 2 | 1 | 0 | 0 | 0 | 5053 |
+| `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 86% | 70 | 1 | 1 | 4 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 37% | 20 | 0 | 1 | 14 | 0 | 0 | 12068 |
@@ -238,17 +238,17 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics — 52%</summary>
+<details><summary>Jolt/Physics — 58%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `DeterminismLog.cpp`, `DeterminismLog.h` | 156 | ❌ todo |  |
+| `DeterminismLog.cpp`, `DeterminismLog.h` | 156 | ✅ complete | `Zolt/Physics/DeterminismLog.zig` |
 | `EActivation.h` | 12 | ✅ complete | `Zolt/Physics/EActivation.zig` |
 | `EPhysicsUpdateError.h` | 30 | ✅ complete | `Zolt/Physics/EPhysicsUpdateError.zig` |
 | `IslandBuilder.cpp`, `IslandBuilder.h` | 519 | ✅ complete | `Zolt/Physics/IslandBuilder.zig` |
 | `LargeIslandSplitter.cpp`, `LargeIslandSplitter.h` | 645 | ⚪ stub | `Zolt/Physics/LargeIslandSplitter.zig` |
 | `PhysicsLock.h` | 144 | ✅ complete | `Zolt/Physics/PhysicsLock.zig` |
-| `PhysicsScene.cpp`, `PhysicsScene.h` | 298 | ❌ todo |  |
+| `PhysicsScene.cpp`, `PhysicsScene.h` | 298 | 🟡 partial | `Zolt/Physics/PhysicsScene.zig` |
 | `PhysicsSettings.h` | 89 | ✅ complete | `Zolt/Physics/PhysicsSettings.zig` |
 | `PhysicsStepListener.h` | 30 | ✅ complete | `Zolt/Physics/PhysicsStepListener.zig` |
 | `PhysicsSystem.cpp`, `PhysicsSystem.h` | 2755 | 🟡 partial | `Zolt/Physics/PhysicsSystem.zig` |
@@ -258,7 +258,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Body — 73%</summary>
+<details><summary>Jolt/Physics/Body — 76%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -266,7 +266,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Body.cpp`, `Body.h`, `Body.inl` | 933 | ✅ complete | `Zolt/Physics/Body/Body.zig` |
 | `BodyAccess.h` | 55 | ✅ complete | `Zolt/Physics/Body/BodyAccess.zig` |
 | `BodyActivationListener.h` | 21 | ✅ complete | `Zolt/Physics/Body/BodyActivationListener.zig` |
-| `BodyCreationSettings.cpp`, `BodyCreationSettings.h` | 347 | 🟡 partial | `Zolt/Physics/Body/BodyCreationSettings.zig` |
+| `BodyCreationSettings.cpp`, `BodyCreationSettings.h` | 347 | ✅ complete | `Zolt/Physics/Body/BodyCreationSettings.zig` |
 | `BodyFilter.h` | 108 | ✅ complete | `Zolt/Physics/Body/BodyFilter.zig` |
 | `BodyID.h` | 82 | ✅ complete | `Zolt/Physics/Body/BodyID.zig` |
 | `BodyInterface.cpp`, `BodyInterface.h` | 1199 | 🟡 partial | `Zolt/Physics/Body/BodyInterface.zig` |
