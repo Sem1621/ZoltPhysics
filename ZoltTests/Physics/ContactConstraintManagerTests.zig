@@ -10,7 +10,8 @@
 //! They cover every motion type combination (sensors, kinematic vs static), manifolds of 1 to 4 points, the listener
 //! overrides of the contact settings, the soft errors (contact constraints / manifold cache / body pair cache full),
 //! several frames through the contact cache (persisted, removed and re-found contacts, preserved lambdas), CCD
-//! contacts, WereBodiesInContact, SaveState / RestoreState round trips (validation, filters, multiple parts),
+//! contacts, CCD manifolds and manifolds without a constraint found again (zero impulses, like Jolt's value-initialized
+//! cache entries), WereBodiesInContact, SaveState / RestoreState round trips (validation, filters, multiple parts),
 //! AddContactConstraint from several threads against a single threaded reference, allocation failures in `init`, and
 //! the D10 proof of finalizeContactCacheAfterOutOfMemory: every temp allocation of a frame with contacts fails in
 //! turn, the temp allocator ends empty, both caches stay structurally valid, no OnContactRemoved is called, and
@@ -1009,6 +1010,105 @@ test "ContactConstraintManager: CCD contacts" {
     try expectEqual(@as(u32, 0), h.contact_allocator.num_manifolds);
     try h.solve(10, 2);
     h.endStep();
+}
+
+/// The only contact constraint of the step (between `body` and a static body) was created from an old manifold that has
+/// no impulses of its own: its friction parts start at exactly 0, and warm starting them leaves the resting body at
+/// rest (WarmStart skips a lambda of 0)
+fn expectZeroFrictionWarmStart(h: *Harness, body: *Body) !void {
+    try expectEqual(@as(u32, 1), h.manager.getNumConstraints());
+    const base = h.constraint(0);
+    if (base.body1 == body)
+        try expectZeroLambdas(CCM.ContactConstraint(.dynamic, .static).fromBase(base))
+    else {
+        try expect(base.body2 == body);
+        try expectZeroLambdas(CCM.ContactConstraint(.static, .dynamic).fromBase(base));
+    }
+    try h.solve(0, 0); // Warm start only
+    try expect(body.getLinearVelocity().eql(Vec3.zero()));
+    try expect(body.getAngularVelocity().eql(Vec3.zero()));
+}
+
+fn expectZeroLambdas(c: anytype) !void {
+    try expectEqual(@as(u32, 0), @as(u32, @bitCast(c.friction_constraint1.getTotalLambda())));
+    try expectEqual(@as(u32, 0), @as(u32, @bitCast(c.friction_constraint2.getTotalLambda())));
+    try expectEqual(@as(u32, 0), @as(u32, @bitCast(c.angular_friction_constraint.getTotalLambda())));
+    try expectEqual(@as(u32, 0), @as(u32, @bitCast(c.getContactPoints()[0].non_penetration_constraint.getTotalLambda())));
+}
+
+test "ContactConstraintManager: a CCD manifold or a manifold without a constraint found again has zero impulses" {
+    // Jolt's LockFreeHashMap::Create value-initializes the CachedManifold (`new (&kv->mValue) Value()`), so the
+    // impulses that these manifolds never get written are 0 when AddContactConstraint finds them in the next update
+    const allocator = std.testing.allocator;
+
+    // A box hits the floor through CCD, then rests on it: the narrow phase finds the contact on the same sub shapes,
+    // first from the CCD manifold of the previous update, then from the same manifold restored from a saved state
+    {
+        var h: Harness = undefined;
+        try h.init(allocator, .{});
+        defer h.deinit();
+        const box = try h.createBox(.dynamic, RVec3.init(0, 0.99, 0), .{});
+        const floor = try h.createBox(.static, RVec3.init(0, -1, 0), .{ .half_extent = Vec3.init(50, 1, 50) });
+
+        try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 0.0);
+        {
+            const m = makeManifold(box.getCenterOfMassPosition(), RVec3.init(0, 0, 0), 1, 0.0, 0, 0);
+            var settings: ContactSettings = .{};
+            h.manager.onCCDContactAdded(&h.contact_allocator, box, floor, &m, &settings);
+        }
+        try expectEqual(@as(u32, 1), h.contact_allocator.num_manifolds);
+        try h.solve(10, 2);
+        h.endStep();
+        var state: StateRecorderImpl = .init(allocator);
+        defer state.deinit();
+        try h.saveAll(&state);
+
+        for (0..2) |pass| {
+            if (pass == 1) try h.restoreAll(&state);
+            h.listener.reset();
+            try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 1.0);
+            const m = makeManifold(box.getCenterOfMassPosition(), RVec3.init(0, 0, 0), 2, 0.0, 0, 0);
+            h.processPair(&h.contact_allocator, box, floor, (&m)[0..1], true);
+            try expectEqual(@as(usize, 1), h.listener.count(.persisted));
+            try expectZeroFrictionWarmStart(&h, box);
+            h.endStep();
+        }
+        try expect(h.temp.isEmpty());
+    }
+
+    // 4 constraints at most: the 5th box gets a manifold but no constraint, in the next update it is the only contact
+    // (not from the body pair cache, which holds no manifolds for it) and finds that manifold again
+    {
+        var h: Harness = undefined;
+        try h.init(allocator, .{ .max_contact_constraints = 4 });
+        defer h.deinit();
+        const floor = try h.createBox(.static, RVec3.init(0, -1, 0), .{ .half_extent = Vec3.init(50, 1, 50) });
+        var boxes: [5]*Body = undefined;
+        for (&boxes, 0..) |*b, i|
+            b.* = try h.createBox(.dynamic, RVec3.init(@as(f32, @floatFromInt(i)) * 3.0, 0.99, 0), .{});
+
+        try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 0.0);
+        for (boxes) |b| {
+            const m = makeManifold(b.getCenterOfMassPosition(), b.getCenterOfMassPosition().add(RVec3.init(0, -1, 0)), 2, 0.01, 0, 0);
+            h.processPair(&h.contact_allocator, b, floor, (&m)[0..1], true);
+        }
+        try expect(h.contact_allocator.errors.contact_constraints_full);
+        try h.solve(10, 2);
+        h.endStep();
+        try expect(!h.manager.wereBodiesInContact(boxes[4].getID(), floor.getID()));
+
+        h.listener.reset();
+        try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 1.0);
+        {
+            const b = boxes[4];
+            const m = makeManifold(b.getCenterOfMassPosition(), b.getCenterOfMassPosition().add(RVec3.init(0, -1, 0)), 2, 0.01, 0, 0);
+            h.processPair(&h.contact_allocator, b, floor, (&m)[0..1], false);
+        }
+        try expectEqual(@as(usize, 1), h.listener.count(.persisted));
+        try expectZeroFrictionWarmStart(&h, boxes[4]);
+        h.endStep();
+        try expect(h.temp.isEmpty());
+    }
 }
 
 test "ContactConstraintManager: SortContacts orders on the sort key and the body IDs" {

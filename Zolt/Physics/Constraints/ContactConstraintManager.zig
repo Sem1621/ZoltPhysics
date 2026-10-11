@@ -194,25 +194,25 @@ pub const ContactConstraintManager = struct {
         };
 
         /// Handle to next cached contact points in ManifoldCache::mCachedManifolds for the same body pair
-        next_with_same_body_pair: u32 = undefined,
+        next_with_same_body_pair: u32,
 
         /// Contact normal in the space of 2.
         /// Note: this value is read through sLoadFloat3Unsafe.
-        contact_normal: Float3 = undefined,
+        contact_normal: Float3,
 
         /// Total applied impulse during the last update that it was used
-        friction_lambda: Vector(2) = undefined,
-        angular_friction_lambda: f32 = undefined,
+        friction_lambda: Vector(2),
+        angular_friction_lambda: f32,
 
         /// @see Flags (Jolt: `mutable atomic<uint16> mFlags { 0 }`)
         flags: std.atomic.Value(u16) = .init(0),
 
         /// Number of contact points in the array below
-        num_contact_points: u16 = undefined,
+        num_contact_points: u16,
 
         /// Contact points that this manifold consists of (the first of `num_contact_points`, the others follow this
         /// struct, see getContactPoints)
-        contact_points: [1]CachedContactPoint = undefined,
+        contact_points: [1]CachedContactPoint,
 
         /// Calculate size in bytes needed beyond the size of the class to store inNumContactPoints
         pub fn getRequiredExtraSize(num_contact_points: i32) i32 {
@@ -266,14 +266,14 @@ pub const ContactConstraintManager = struct {
     pub const CachedBodyPair = extern struct {
         /// Local space position difference from Body A to Body B.
         /// Note: this value is read through sLoadFloat3Unsafe
-        delta_position: Float3 = undefined,
+        delta_position: Float3,
 
         /// Local space rotation difference from Body A to Body B, fourth component of quaternion is not stored but is guaranteed >= 0.
         /// Note: this value is read through sLoadFloat3Unsafe
-        delta_rotation: Float3 = undefined,
+        delta_rotation: Float3,
 
         /// Handle to first manifold in ManifoldCache::mCachedManifolds
-        first_cached_manifold: u32 = undefined,
+        first_cached_manifold: u32,
 
         /// Saving / restoring state for replay
         pub fn saveState(self: *const CachedBodyPair, stream: *StateRecorder) void {
@@ -386,7 +386,12 @@ pub const ContactConstraintManager = struct {
 
         pub fn createManifold(self: *ManifoldCache, contact_allocator: *ContactAllocator, key: SubShapeIDPair, key_hash: u64, num_contact_points: i32) ?*MKeyValue {
             if (Core.enable_asserts) std.debug.assert(!self.is_finalized);
-            const kv = self.cached_manifolds.create(&contact_allocator.base, key, key_hash, CachedManifold.getRequiredExtraSize(num_contact_points), .{}) orelse {
+            // Jolt's LockFreeHashMap::Create constructs the value with `new (&kv->mValue) Value()`, a value
+            // initialization: CachedManifold has no user-provided constructor, so all of its bytes are zeroed (and
+            // mFlags is 0). The manifolds that never get their impulses written (CCD contacts, a failed constraint, a
+            // restored CCD manifold) are found again with zero lambdas. The extra contact points stay uninitialized
+            // like Jolt's.
+            const kv = self.cached_manifolds.create(&contact_allocator.base, key, key_hash, CachedManifold.getRequiredExtraSize(num_contact_points), std.mem.zeroes(CachedManifold)) orelse {
                 contact_allocator.errors = contact_allocator.errors.bitOr(.{ .manifold_cache_full = true });
                 return null;
             };
@@ -424,7 +429,8 @@ pub const ContactConstraintManager = struct {
 
         pub fn createBodyPair(self: *ManifoldCache, contact_allocator: *ContactAllocator, key: BodyPair, key_hash: u64) ?*BPKeyValue {
             if (Core.enable_asserts) std.debug.assert(!self.is_finalized);
-            const kv = self.cached_body_pairs.create(&contact_allocator.base, key, key_hash, 0, .{}) orelse {
+            // `new (&kv->mValue) Value()` value-initializes: the body pair is zeroed (see createManifold)
+            const kv = self.cached_body_pairs.create(&contact_allocator.base, key, key_hash, 0, std.mem.zeroes(CachedBodyPair)) orelse {
                 contact_allocator.errors = contact_allocator.errors.bitOr(.{ .body_pair_cache_full = true });
                 return null;
             };
@@ -608,7 +614,9 @@ pub const ContactConstraintManager = struct {
 
         /// (Zolt: the counts that Jolt leaves uninitialized before reading them from the stream start at 0, and the
         /// temporaries of a skipped contact are zeroed, so a stream that ends early or a validating stream never reads
-        /// undefined memory. The validating path allocates the sorted arrays: Allocator.Error.)
+        /// undefined memory. The validating path allocates the sorted arrays: Allocator.Error. Like Jolt's, the body
+        /// pairs and manifolds created here start zeroed (see createManifold): a validating stream with more entries
+        /// than the read cache is compared against zeros.)
         pub fn restoreState(self: *ManifoldCache, allocator: Allocator, read_cache: *const ManifoldCache, stream: *StateRecorder, filter: ?*const StateRecorderFilter) Allocator.Error!bool {
             if (Core.enable_asserts) std.debug.assert(!self.is_finalized);
 

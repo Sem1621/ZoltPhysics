@@ -29,11 +29,13 @@
 //! bytes of the contact cache (with and without filters) after every step; RestoreState (round trips, validating,
 //! restore filters, two parts, a cache that is too small); WereBodiesInContact for every pair; ValidateContactPoint.
 //!
-//! Known Jolt behavior the generator avoids, because Jolt reads uninitialized memory there (the results would be
-//! garbage on both sides): a manifold whose contact constraint could not be created (contact constraints full) keeps
-//! uninitialized impulses and is found again by the same key in the next step, and so is a manifold created by
-//! OnCCDContactAdded (it has no impulses either). Scenarios with small limits use fresh sub shape keys every step and
-//! no CCD contacts; CCD contacts use their own sub shape keys or the key of a manifold of the same step.
+//! Manifolds without impulses of their own are found again: a manifold whose contact constraint could not be created
+//! (contact constraints full) and a manifold created by OnCCDContactAdded (also one restored from a saved state).
+//! Jolt's LockFreeHashMap::Create value-initializes the CachedManifold, so a new constraint starts from zero friction
+//! impulses. The generator keeps a list of these manifolds and lets a manifold of the next step use their key (and
+//! skip the body pair cache more often, or process only those body pairs); CCD contacts use their own sub shape keys,
+//! the key of a manifold of the same step or a random key 0 - 2. Coverage counts the constraints that start from such
+//! a manifold.
 //!
 //! C ABI wrappers: ZoltParity/Physics/ContactConstraintManagerReference.cpp.
 
@@ -386,6 +388,12 @@ fn loadManifold(desc: *const CCMManifold) ContactManifold {
     return m;
 }
 
+/// A manifold without contact points: a CCD contact or (`failed`) a manifold whose constraint could not be created
+const EmptyManifold = struct {
+    key: SubShapeIDPair,
+    failed: bool,
+};
+
 /// CCMWorld of the C++ side
 const World = struct {
     allocator: Allocator,
@@ -399,6 +407,13 @@ const World = struct {
     context: PhysicsUpdateContext = undefined,
     allocators: [4]ContactAllocator = undefined,
     listener: Listener,
+    /// The read cache is the one RestoreState restored (until the next step finalizes the write cache)
+    read_cache_restored: bool = false,
+    /// Constraints that started from an old manifold without contact points: a CCD manifold (restored from a saved
+    /// state or not), a manifold whose constraint could not be created
+    refound_ccd: u32 = 0,
+    refound_restored_ccd: u32 = 0,
+    refound_failed: u32 = 0,
 
     /// In place (the managers point into the world)
     fn init(self: *World, allocator: Allocator, config: *const CCMConfig) !void {
@@ -517,9 +532,53 @@ const World = struct {
         var link_and_activate = true;
         for (manifolds) |*desc| {
             const manifold = loadManifold(desc);
+            const old = self.findCachedManifold(self.manager.read_cache.?, manifoldKey(id1, id2, desc.sub_shape_id1, desc.sub_shape_id2));
+            const num_constraints = self.manager.getNumConstraints();
             self.manager.addContactConstraint(contact_allocator, &link_and_activate, handle, body1, body2, &manifold);
+            if (old) |cm| {
+                if (cm.num_contact_points == 0 and self.manager.getNumConstraints() > num_constraints) {
+                    if ((cm.flags.load(.seq_cst) & CCM.CachedManifold.Flags.ccd_contact) != 0) {
+                        self.refound_ccd += 1;
+                        if (self.read_cache_restored) self.refound_restored_ccd += 1;
+                    } else self.refound_failed += 1;
+                }
+            }
         }
         return if (link_and_activate) 4 else 0;
+    }
+
+    /// The key under which the manager caches a manifold between body `id1` (sub shape `sub_shape_id1`) and body `id2`
+    /// (sub shape `sub_shape_id2`): the bodies in ID order, like AddContactConstraint and OnCCDContactAdded
+    fn manifoldKey(id1: u32, id2: u32, sub_shape_id1: u32, sub_shape_id2: u32) SubShapeIDPair {
+        const body1: BodyID = .init(id1);
+        const body2: BodyID = .init(id2);
+        var sub1: SubShapeID = .{};
+        sub1.setValue(sub_shape_id1);
+        var sub2: SubShapeID = .{};
+        sub2.setValue(sub_shape_id2);
+        return if (body2.lessThan(body1)) .init(body2, sub2, body1, sub1) else .init(body1, sub1, body2, sub2);
+    }
+
+    /// A manifold of a cache (without the finalized checks of findManifold)
+    fn findCachedManifold(self: *World, cache: *const CCM.ManifoldCache, key: SubShapeIDPair) ?*const CCM.CachedManifold {
+        _ = self;
+        const kv = cache.cached_manifolds.find(key, key.getHash()) orelse return null;
+        return kv.getValueConst();
+    }
+
+    /// The manifolds without contact points in the write cache (CCD contacts and manifolds whose constraint could not
+    /// be created)
+    fn emptyManifolds(self: *World, out: []EmptyManifold) usize {
+        var n: usize = 0;
+        var it = self.manager.write_cache.?.cached_manifolds.begin();
+        while (it.next()) |kv| {
+            const cm = kv.getValueConst();
+            if (cm.num_contact_points == 0 and n < out.len) {
+                out[n] = .{ .key = kv.getKey().*, .failed = (cm.flags.load(.seq_cst) & CCM.CachedManifold.Flags.ccd_contact) == 0 };
+                n += 1;
+            }
+        }
+        return n;
     }
 
     fn ccdContact(self: *World, id1: u32, id2: u32, desc: *const CCMManifold, allocator_index: u32, rec: Rec) void {
@@ -634,6 +693,7 @@ const World = struct {
             num_manifolds += a.num_manifolds;
         }
         self.manager.finalizeContactCacheAndCallContactPointRemovedCallbacks(num_body_pairs, num_manifolds);
+        self.read_cache_restored = false;
         self.island_builder.resetIslands(self.temp.tempAllocator());
         self.manager.finishConstraintBuffer();
     }
@@ -647,6 +707,7 @@ const World = struct {
             num_manifolds += a.num_manifolds;
         }
         self.manager.finalizeContactCacheAndCallContactPointRemovedCallbacks(num_body_pairs, num_manifolds);
+        self.read_cache_restored = false;
         self.island_builder.resetIslands(self.temp.tempAllocator());
         try self.island_builder.prepareContactConstraints(self.manager.getMaxConstraints(), self.temp.tempAllocator());
         self.manager.recycleConstraintBuffer();
@@ -704,6 +765,7 @@ const World = struct {
         recorder.base.setIsLastPart(last_part);
         const filter: Filter = .{ .mode = filter_mode, .body = .init(filter_body) };
         const success = try self.manager.restoreState(recorder.recorder(), if (filter_mode != 0) &filter.base else null);
+        self.read_cache_restored = true;
         return @as(u32, @intFromBool(success)) | (@as(u32, @intFromBool(recorder.isFailed())) << 1);
     }
 };
@@ -732,11 +794,18 @@ const Coverage = struct {
         no_constraint_pair,
         multi_island,
         recycled_step,
+        refound_ccd_manifold,
+        refound_restored_ccd_manifold,
+        refound_failed_manifold,
     };
     hits: [@typeInfo(Kind).@"enum".fields.len]u32 = @splat(0),
 
     fn hit(self: *Coverage, kind: Kind) void {
         self.hits[@intFromEnum(kind)] += 1;
+    }
+
+    fn add(self: *Coverage, kind: Kind, count: u32) void {
+        self.hits[@intFromEnum(kind)] += count;
     }
 
     fn check(self: *const Coverage) !void {
@@ -965,7 +1034,7 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
         .num_velocity_steps = rng.intRange(u32, 1, 12),
         .num_position_steps = rng.intRange(u32, 1, 4),
         .max_bodies = 64,
-        .max_body_pairs = if (small_limits) rng.intRange(u32, 0, 12) else 256,
+        .max_body_pairs = if (small_limits) (if (rng.intRange(u32, 0, 1) == 0) rng.intRange(u32, 0, 12) else 64) else 256,
         .max_contact_constraints = if (small_limits) rng.intRange(u32, 0, 12) else 512,
         .listener = @intFromBool(listener_mode != 0),
         .modifier_mode = @intFromBool(listener_mode >= 3),
@@ -1021,6 +1090,11 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
     }
     try p.compareBodies();
 
+    // The manifolds without contact points of the previous step (CCD contacts, manifolds whose constraint could not be
+    // created): a manifold of the next step can find them again
+    var pending: [64]EmptyManifold = undefined;
+    var num_pending: usize = 0;
+
     const num_frames = rng.intRange(u32, 4, 9);
     for (0..num_frames) |frame| {
         p.frame = frame;
@@ -1075,26 +1149,67 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
             // The body pairs (not static vs static), each processed by one of the contact allocators
             var ccd_candidates: [64]struct { id1: u32, id2: u32, manifold: CCMManifold } = undefined;
             var num_ccd_candidates: usize = 0;
+
+            // After a step with manifolds whose constraint could not be created, often only the body pairs with a
+            // manifold to find again are processed (so that their constraints fit this time)
+            var has_failed = false;
+            for (pending[0..num_pending]) |e|
+                has_failed = has_failed or e.failed;
+            const refind_only = has_failed and rng.intRange(u32, 0, 2) != 0;
+
             for (0..num_bodies) |a| {
                 for (a + 1..num_bodies) |b| {
                     if (types[a] == .static and types[b] == .static) continue;
-                    if (rng.intRange(u32, 0, 9) < 4) continue;
+                    var pending_key: ?SubShapeIDPair = null;
+                    for (pending[0..num_pending]) |e| {
+                        const body1 = e.key.getBody1ID().getIndexAndSequenceNumber();
+                        const body2 = e.key.getBody2ID().getIndexAndSequenceNumber();
+                        if ((body1 == ids[a] and body2 == ids[b]) or (body1 == ids[b] and body2 == ids[a])) {
+                            pending_key = e.key;
+                            break;
+                        }
+                    }
+                    if (refind_only) {
+                        if (pending_key == null) continue;
+                    } else if (rng.intRange(u32, 0, 9) < 4) continue;
                     const swap = rng.intRange(u32, 0, 1) == 0;
                     const id1 = if (swap) ids[b] else ids[a];
                     const id2 = if (swap) ids[a] else ids[b];
                     const allocator_index = rng.intRange(u32, 0, 3);
-                    const use_cache = rng.intRange(u32, 0, 9) < 7;
 
-                    // Manifolds with distinct sub shape pairs (fresh keys every frame with small limits)
+                    // Half of the time (always when only these pairs are processed) the first manifold uses the key of
+                    // a manifold without contact points of the previous step between these bodies (the sub shapes in
+                    // the order id1, id2)
+                    var refind: ?[2]u32 = null;
+                    if (pending_key) |key| {
+                        if (refind_only or rng.intRange(u32, 0, 1) == 0) {
+                            const sub1 = key.getSubShapeID1().getValue();
+                            const sub2 = key.getSubShapeID2().getValue();
+                            refind = if (key.getBody1ID().getIndexAndSequenceNumber() == id1) .{ sub1, sub2 } else .{ sub2, sub1 };
+                        }
+                    }
+
+                    // The body pair cache would keep the old contacts (without the manifold to find again), skip it
+                    // more often then
+                    const use_cache = rng.intRange(u32, 0, 9) < @as(u32, if (refind != null) 3 else 7);
+
+                    // Manifolds with distinct sub shape pairs (keys 0 - 2, or the key to find again)
                     var manifolds: [3]CCMManifold = undefined;
-                    const num_manifolds = rng.intRange(u32, 0, 3);
-                    const key_offset: u32 = if (small_limits) @intCast((frame * 3 + step) * 10) else 0;
+                    var num_manifolds = rng.intRange(u32, 0, 3);
                     var used: [9]bool = @splat(false);
-                    for (manifolds[0..num_manifolds]) |*m| {
+                    var first_random: usize = 0;
+                    if (refind) |subs| {
+                        num_manifolds = @max(num_manifolds, 1);
+                        if (subs[0] < 3 and subs[1] < 3)
+                            used[subs[0] * 3 + subs[1]] = true;
+                        manifolds[0] = randomManifold(rng, &p, id1, id2, subs[0], subs[1]);
+                        first_random = 1;
+                    }
+                    for (manifolds[first_random..num_manifolds]) |*m| {
                         var key = rng.intRange(u32, 0, 8);
                         while (used[key]) key = (key + 1) % 9;
                         used[key] = true;
-                        m.* = randomManifold(rng, &p, id1, id2, key_offset + key / 3, key_offset + key % 3);
+                        m.* = randomManifold(rng, &p, id1, id2, key / 3, key % 3);
                     }
 
                     const z = p.zolt_world.processPair(id1, id2, manifolds[0..num_manifolds], use_cache, allocator_index);
@@ -1104,7 +1219,7 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
                     if (z == 2) coverage.hit(.body_pair_full_handle);
                     if (z == 4 and num_manifolds > 0) coverage.hit(.no_constraint_pair);
 
-                    if (!small_limits and num_manifolds > 0 and !sensors[a] and !sensors[b] and num_ccd_candidates < ccd_candidates.len) {
+                    if (num_manifolds > 0 and !sensors[a] and !sensors[b] and num_ccd_candidates < ccd_candidates.len) {
                         ccd_candidates[num_ccd_candidates] = .{ .id1 = id1, .id2 = id2, .manifold = manifolds[0] };
                         num_ccd_candidates += 1;
                     }
@@ -1112,34 +1227,37 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
             }
             try p.compareRecords(coverage);
 
-            // CCD contacts: on the key of a manifold of this step, or on their own keys (twice: the second one persists)
-            if (!small_limits) {
-                for (ccd_candidates[0..num_ccd_candidates]) |*c| {
-                    if (rng.intRange(u32, 0, 2) != 0) continue;
-                    var m = c.manifold;
-                    const own_key = rng.intRange(u32, 0, 1) == 0;
-                    if (own_key) {
-                        m.sub_shape_id1 = 100 + rng.intRange(u32, 0, 1);
-                        m.sub_shape_id2 = 100;
-                    }
-                    const swap = rng.intRange(u32, 0, 1) == 0;
-                    const times = rng.intRange(u32, 1, 2);
-                    for (0..times) |_| {
-                        const allocator_index = rng.intRange(u32, 0, 3);
-                        if (swap)
-                            p.zolt_world.ccdContact(c.id2, c.id1, &m, allocator_index, p.rec())
-                        else
-                            p.zolt_world.ccdContact(c.id1, c.id2, &m, allocator_index, p.rec());
-                        if (swap)
-                            jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id2, c.id1, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num)
-                        else
-                            jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id1, c.id2, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num);
-                        try p.compare("OnCCDContactAdded settings");
-                    }
-                    if (own_key and times == 2 and p.zolt_world.manager.getContactListener() != null) coverage.hit(.ccd_persisted);
+            // CCD contacts: on the key of a manifold of this step, on their own keys (twice: the second one persists)
+            // or on a random key 0 - 2 (a manifold of this step or a new CCD manifold)
+            for (ccd_candidates[0..num_ccd_candidates]) |*c| {
+                if (rng.intRange(u32, 0, 2) != 0) continue;
+                var m = c.manifold;
+                const key_kind = rng.intRange(u32, 0, 2);
+                const own_key = key_kind == 0;
+                if (own_key) {
+                    m.sub_shape_id1 = 100 + rng.intRange(u32, 0, 1);
+                    m.sub_shape_id2 = 100;
+                } else if (key_kind == 2) {
+                    m.sub_shape_id1 = rng.intRange(u32, 0, 2);
+                    m.sub_shape_id2 = rng.intRange(u32, 0, 2);
                 }
-                try p.compareRecords(coverage);
+                const swap = rng.intRange(u32, 0, 1) == 0;
+                const times = rng.intRange(u32, 1, 2);
+                for (0..times) |_| {
+                    const allocator_index = rng.intRange(u32, 0, 3);
+                    if (swap)
+                        p.zolt_world.ccdContact(c.id2, c.id1, &m, allocator_index, p.rec())
+                    else
+                        p.zolt_world.ccdContact(c.id1, c.id2, &m, allocator_index, p.rec());
+                    if (swap)
+                        jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id2, c.id1, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num)
+                    else
+                        jolt.jolt_ccm_ccd_contact(p.jolt_world, c.id1, c.id2, &m, allocator_index, p.jolt_words.ptr, max_words, &p.jolt_num);
+                    try p.compare("OnCCDContactAdded settings");
+                }
+                if (own_key and times == 2 and p.zolt_world.manager.getContactListener() != null) coverage.hit(.ccd_persisted);
             }
+            try p.compareRecords(coverage);
 
             // ValidateContactPoint
             for (0..3) |_| {
@@ -1175,6 +1293,9 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
             if (p.zolt_world.island_builder.getNumIslands() > 1) coverage.hit(.multi_island);
             try p.compareConstraints(true, coverage);
             try p.compareBodies();
+
+            // The manifolds without contact points that the next step can find again
+            num_pending = p.zolt_world.emptyManifolds(&pending);
         }
 
         // Finalize the contact cache
@@ -1225,6 +1346,10 @@ fn runScenario(allocator: Allocator, rng: *fw.Rng, scenario_index: usize, covera
         };
         try p.compareRecords(coverage);
     }
+
+    coverage.add(.refound_ccd_manifold, p.zolt_world.refound_ccd);
+    coverage.add(.refound_restored_ccd_manifold, p.zolt_world.refound_restored_ccd);
+    coverage.add(.refound_failed_manifold, p.zolt_world.refound_failed);
 }
 
 test "ContactConstraintManager parity: sizes" {
