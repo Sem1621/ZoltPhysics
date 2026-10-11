@@ -54,7 +54,8 @@ Contents:
 5. Port the matching tests from `UnitTests/` into `ZoltTests/` (see [Tests](#10-tests)).
 6. Add parity tests (see [Tests](#10-tests)): every ported function that computes numbers gets
    compared bit for bit with the C++ library on many inputs.
-7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build parity` (also with
+7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build test -Doptimize=ReleaseFast`
+   (see section 10), `zig build parity` (also with
    `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig fmt Zolt ZoltTests ZoltParity build.zig`,
    then `python3 tools/port_status.py --write`.
 
