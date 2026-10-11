@@ -38,6 +38,7 @@ test {
     _ = @import("Physics/PairwiseParity.zig");
     _ = @import("Physics/PlaneEmptyParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
+    _ = @import("Physics/SimulationParity.zig");
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");
 }

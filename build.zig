@@ -190,6 +190,17 @@ pub fn build(b: *std.Build) void {
     });
     parity_user_types_module.addImport("zolt", zolt_for_parity);
 
+    // The layers of the unit tests (ZoltTests/Layers.zig), used by the simulation parity tests whose C++ side includes
+    // UnitTests/Layers.h. The parity tests import it as "test_layers".
+    const parity_layers_module = b.createModule(.{
+        .root_source_file = b.path("ZoltTests/Layers.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zolt", .module = zolt_for_parity },
+        },
+    });
+
     const parity_tests = b.addTest(.{
         .name = "zolt-parity",
         .root_module = b.createModule(.{
@@ -199,6 +210,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zolt", .module = zolt_for_parity },
                 .{ .name = "parity_user_types", .module = parity_user_types_module },
+                .{ .name = "test_layers", .module = parity_layers_module },
             },
         }),
         .filters = test_filters,
