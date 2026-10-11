@@ -38,7 +38,14 @@
 //! `(gravity * gravity_factor + force * inv_mass) * dt` in MotionProperties.applyForceTorqueAndDragInternal is reported
 //! as "state differs at byte 862 ...: bodies[6] (id 0x00800006) motion_properties.linear_velocity.y zolt 0xc0dcbfe1
 //! jolt 0xc0dcbfe2" (scene forces_torques_impulses, update 42); passing user data + 1 to OnBodyDeactivated is reported
-//! as a differing listener record.
+//! as a differing listener record. Computing r1_plus_u of JobResolveCCDContacts as
+//! `(contact point - center of mass) - fraction * delta` instead of Jolt's `contact point - (center of mass + fraction *
+//! delta)` is reported as "state differs at byte 254 ...: bodies[3] (id 0x00800003)
+//! motion_properties.linear_velocity.x zolt 0x41cc9e9c jolt 0x41cc9ea4" (scene ccd_static_targets, update 7).
+//!
+//! CCD (Wave B R4): the driver counts the FindCCDContacts jobs of every update (Zolt side) and the updates after which
+//! the contact cache of the C++ state holds CCD manifolds (OnCCDContactAdded of a hit without a discrete contact of the
+//! same sub shape pair in the same update), for SimScenes.Expect.ccd_jobs / ccd_hits.
 //!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
@@ -272,6 +279,16 @@ fn contactFlags(body1: *const Body, body2: *const Body) u32 {
     return @truncate((body1.getUserData() | body2.getUserData()) >> 32);
 }
 
+/// ContactFlags.reject_marked_child: the sub shape of the body is a child of a compound with the marked user data
+/// (SimIsMarkedChild in SimulationReference.cpp)
+fn isMarkedChild(body: *const Body, sub_shape_id: SubShapeID) bool {
+    const shape = body.getShape();
+    if (shape.getType() != .compound)
+        return false;
+    const compound = shape.cast(zolt.CompoundShape);
+    return compound.getCompoundUserData(compound.getSubShapeIndexFromID(sub_shape_id).index) == ContactFlags.marked_child_user_data;
+}
+
 /// The hash of the base offset and the contact points of a manifold (SimHashManifold in SimulationReference.cpp)
 fn hashManifold(manifold: *const ContactManifold) u32 {
     var h = SimScenes.hash_seed;
@@ -305,6 +322,8 @@ const ContactListenerImpl = struct {
             const flags = contactFlags(body1, body2);
             if ((flags & ContactFlags.reject_all) != 0)
                 return .reject_all_contacts_for_this_body_pair;
+            if ((flags & ContactFlags.reject_marked_child) != 0 and isMarkedChild(body2, collision_result.sub_shape_id2))
+                return .reject_contact;
             if ((flags & ContactFlags.reject_speculative) != 0)
                 return if (collision_result.penetration_depth < 0.0) .reject_contact else .accept_contact;
             if ((flags & ContactFlags.accept_each) != 0)
@@ -399,10 +418,12 @@ const SphereFilter = struct {
 };
 
 /// Wraps the job system of a world and counts the FindCollisions jobs that are spawned from inside jobs
-/// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies)
+/// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies) and the
+/// FindCCDContacts jobs (PostIntegrateVelocity creates them from inside its job)
 const SpawnCountingJobSystem = struct {
     inner: JobSystem,
     num_spawned_find_collisions: std.atomic.Value(u32) = .init(0),
+    num_find_ccd_contacts: std.atomic.Value(u32) = .init(0),
 
     fn jobSystem(self: *SpawnCountingJobSystem) JobSystem {
         return .init(self);
@@ -416,6 +437,8 @@ const SpawnCountingJobSystem = struct {
         const handle = try self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
         if (opts.num_dependencies == 0 and std.mem.eql(u8, job_name, "FindCollisions"))
             _ = self.num_spawned_find_collisions.fetchAdd(1, .monotonic);
+        if (std.mem.eql(u8, job_name, "FindCCDContacts"))
+            _ = self.num_find_ccd_contacts.fetchAdd(1, .monotonic);
         return handle;
     }
 
@@ -906,6 +929,17 @@ const ZoltWorld = struct {
     fn discardRecords(self: *ZoltWorld) void {
         self.recorder.records.clearRetainingCapacity();
     }
+
+    /// The number of records of this kind that were not taken yet
+    fn countRecords(self: *ZoltWorld, kind: RecordKind) u32 {
+        self.recorder.mutex.lock(io);
+        defer self.recorder.mutex.unlock(io);
+        var n: u32 = 0;
+        for (self.recorder.records.items) |r| {
+            if (r.kind == @intFromEnum(kind)) n += 1;
+        }
+        return n;
+    }
 };
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -1346,14 +1380,47 @@ const Run = struct {
         if (sweep)
             return self.sweepStep(delta_time, collision_steps);
 
+        const ccd_jobs_before = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
+        const activations_before = self.zw.countRecords(.body_activated);
         const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
+        self.countCCDJobs(ccd_jobs_before);
+        self.countUpdateActivations(activations_before);
         if (!self.zw.temp.isEmpty()) return self.fail("the temp allocator is not empty after the update", .{});
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        try self.countCCDManifolds();
         try self.compareRecords();
         self.updateStats();
+    }
+
+    /// The number of bodies activated from inside the update that just ran (Zolt side, `before`: the activation
+    /// records of the operations before it)
+    fn countUpdateActivations(self: *Run, before: u32) void {
+        const num_activations = self.zw.countRecords(.body_activated) - before;
+        self.stats.max_update_activations = @max(self.stats.max_update_activations, num_activations);
+    }
+
+    /// The number of FindCCDContacts jobs of the update that just ran (Zolt side)
+    fn countCCDJobs(self: *Run, before: u32) void {
+        const num_jobs = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic) - before;
+        self.stats.max_find_ccd_contacts_jobs = @max(self.stats.max_find_ccd_contacts_jobs, num_jobs);
+    }
+
+    /// Count the update when the contact cache of the C++ state after it holds CCD manifolds (a linear cast body hit
+    /// something: ContactConstraintManager::OnCCDContactAdded, the worlds have a contact listener)
+    fn countCCDManifolds(self: *Run) !void {
+        var layout: StateLayout = .{ .allocator = self.allocator, .bytes = self.jolt_state.items, .cpp = self.cw };
+        defer layout.deinit();
+        try layout.decode();
+        for (layout.fields.items) |*field| {
+            if (std.mem.eql(u8, field.name, "num_ccd_manifolds")) {
+                if (std.mem.bytesToValue(u32, self.jolt_state.items[field.offset..][0..4]) > 0)
+                    self.stats.updates_with_ccd_manifolds += 1;
+                return;
+            }
+        }
     }
 
     fn updateStats(self: *Run) void {
@@ -1389,10 +1456,15 @@ const Run = struct {
 
         // The update counting the temp allocations is the one that is compared (records included)
         var counting: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{});
+        const ccd_jobs_before = zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
+        const activations_before = zw.countRecords(.body_activated);
         const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobSystem());
+        self.countCCDJobs(ccd_jobs_before);
+        self.countUpdateActivations(activations_before);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        try self.countCCDManifolds();
         try zw.takeRecords(&zolt_records);
         const step_calls = try allocator.alloc(u32, zw.step_listeners.len);
         defer allocator.free(step_calls);
@@ -1483,6 +1555,13 @@ const RunStats = struct {
     updates_with_sleeping_bodies: u32 = 0,
     /// Number of updates with active linear cast bodies
     updates_with_ccd_bodies: u32 = 0,
+    /// Number of updates after which the contact cache (C++ state) holds CCD manifolds: a linear cast body hit something
+    updates_with_ccd_manifolds: u32 = 0,
+    /// Largest number of FindCCDContacts jobs in one update (Zolt side)
+    max_find_ccd_contacts_jobs: u32 = 0,
+    /// Largest number of bodies activated from inside one update (Zolt side, the activations of the operations before
+    /// the update not counted)
+    max_update_activations: u32 = 0,
     /// Number of restore_cross operations that changed the state
     restores_changing_the_state: u32 = 0,
     /// Number of checked expect_body_state operations
@@ -1600,6 +1679,11 @@ fn runEntry(entry: *const SceneEntry) !void {
         try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
         try expectReached(entry, "a full manifold array in ProcessBodyPair", stats[0].max_manifolds_per_body_pair >= SimScenes.max_manifolds_per_body_pair);
     }
+    if (expect.ccd_hits) try expectReached(entry, "CCD hits", stats[0].updates_with_ccd_manifolds > 0);
+    var max_find_ccd_contacts_jobs: u32 = 0;
+    for (stats) |s| max_find_ccd_contacts_jobs = @max(max_find_ccd_contacts_jobs, s.max_find_ccd_contacts_jobs);
+    if (expect.ccd_jobs > 0) try expectReached(entry, "several FindCCDContacts jobs in one update", max_find_ccd_contacts_jobs >= expect.ccd_jobs);
+    if (expect.update_activations > 0) try expectReached(entry, "bodies activated from inside one update", stats[0].max_update_activations >= expect.update_activations);
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
         if (config.sweeps and entry.sweep_stride != 0) {
@@ -1652,7 +1736,7 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer b_records.deinit(allocator);
 
     for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by == .none or entry.blocked_by == .release_only or entry.blocked_by == .contacts) continue; // Supported (their own tests)
+        if (entry.blocked_by.isSupported() or entry.blocked_by == .release_only) continue; // Supported (their own tests)
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);

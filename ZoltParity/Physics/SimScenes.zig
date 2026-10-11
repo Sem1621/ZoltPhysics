@@ -45,10 +45,18 @@
 //! `SimShapeFilterMode.filter_spheres` the bits of `ContactFlags` in the upper 32 bits of the user data of the two
 //! bodies decide what the listener / filter does (the same code on both sides). A contact scene states what it
 //! reaches in `SceneEntry.expect` (contact callbacks, removed contacts, sleeping bodies, FindCollisions jobs spawned
-//! from inside jobs, a large island solved by the LargeIslandSplitter, a full manifold array in ProcessBodyPair);
-//! `runEntry` checks it. Rules: linear cast bodies must still not hit anything (`Blocker.ccd_hits`, REGION R4), and the
-//! contact constraint buffer and the caches must be large enough (`max_contact_constraints`, `max_body_pairs`): which
-//! contacts are dropped when they are full depends on the threads, in Jolt too.
+//! from inside jobs, a large island solved by the LargeIslandSplitter, a full manifold array in ProcessBodyPair, CCD
+//! hits, several FindCCDContacts jobs); `runEntry` checks it. Rule: the contact constraint buffer and the caches must be
+//! large enough (`max_contact_constraints`, `max_body_pairs`): which contacts are dropped when they are full depends on
+//! the threads, in Jolt too.
+//!
+//! CCD scenes (Wave B R4, `Blocker.ccd_hits` is supported): linear cast bodies hit things (JobFindCCDContacts,
+//! sSolveCCDContact, JobResolveCCDContacts). Rules: a linear cast shape needs an inner radius (no mesh, height field,
+//! plane or mirrored ScaledShape), no body may move faster than its max linear velocity (500 m/s by default), and a CCD
+//! body that is resolved after JobResolveCCDContacts activated a full batch of 64 woken up bodies must not have hit one
+//! of the bodies of that batch (sGetCCDBody then reads past mActiveBodyToCCDBody, Zolt asserts in safe builds). More
+//! than 64 sleeping bodies may be woken up by CCD hits in one collision step when each of them is hit by one CCD body
+//! only (`ccd_wake_batch`).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -447,6 +455,13 @@ pub const ContactFlags = struct {
     pub const sensor: u32 = 1 << 7;
     /// SimShapeFilterMode.filter_spheres: filter the spheres of the pair
     pub const filter_spheres: u32 = 1 << 8;
+    /// OnContactValidate (checked after reject_all): RejectContact when body 2 is a compound and the sub shape of the
+    /// contact (mSubShapeID2) is a child with the compound user data `marked_child_user_data`, else the other flags
+    /// decide (only this hit is rejected: the next contacts of the pair, e.g. the next hit of a CCD cast, are validated
+    /// again)
+    pub const reject_marked_child: u32 = 1 << 9;
+    /// The compound user data (`SimCompoundChild.user_data`) of the children that `reject_marked_child` rejects
+    pub const marked_child_user_data: u32 = 77;
 
     /// The user data of a body with these flags (and `low` in the lower 32 bits)
     pub fn userData(flags: u32, low: u32) u64 {
@@ -538,7 +553,7 @@ pub const Blocker = enum {
     contacts,
     /// Constraints in islands: the constraint classes (Phase 6) and the solver (Wave B R3)
     constraints,
-    /// Linear cast bodies that hit something (Wave B R4)
+    /// Linear cast bodies that hit something (Wave B R4, supported)
     ccd_hits,
     /// Soft bodies (Phase 9)
     soft_bodies,
@@ -549,9 +564,9 @@ pub const Blocker = enum {
     /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
-            .none, .contacts => true,
+            .none, .contacts, .ccd_hits => true,
             .release_only => !zolt.Core.enable_asserts,
-            .constraints, .ccd_hits, .soft_bodies => false,
+            .constraints, .soft_bodies => false,
         };
     }
 };
@@ -577,6 +592,17 @@ pub const Expect = struct {
     /// with other normals take the "array full" branch of AddHit (keep the manifolds with the deepest penetration). Only
     /// for scenes with one collision step per update (the count is per update).
     full_manifolds: bool = false,
+    /// A linear cast body hits something: the contact cache of the (C++) state holds CCD manifolds after some update
+    /// (ContactConstraintManager::OnCCDContactAdded, the worlds have a contact listener; only a hit whose sub shape pair
+    /// has no discrete contact in the same update creates one)
+    ccd_hits: bool = false,
+    /// At least this many FindCCDContacts jobs run in one update (in some configuration: their number is
+    /// min(ceil(CCD bodies / 4), the concurrency of the job system))
+    ccd_jobs: u32 = 0,
+    /// At least this many bodies are activated from inside one update (OnBodyActivated during PhysicsSystem::Update,
+    /// not by the operations before it: woken up by contacts or CCD hits; more than 64 CCD hits on sleeping bodies in
+    /// one collision step fill the batch of JobResolveCCDContacts)
+    update_activations: u32 = 0,
 };
 
 /// The capacity of the manifold array of ProcessBodyPair's ReductionCollideShapeCollector (Jolt:
@@ -661,8 +687,27 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "contacts_random_2", .build = buildContactRandom(2, 2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_3", .build = buildContactRandom(3, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_4", .build = buildContactRandom(4, 3), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    // CCD (Wave B R4: linear cast bodies that hit something)
+    .{ .name = "ccd_bullet_hits_wall", .build = buildBulletHitsWall, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_static_targets", .build = buildCCDStaticTargets, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_bodies_hit_each_other", .build = buildCCDBodiesHitEachOther, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_kinematic_and_dynamic", .build = buildCCDKinematicAndDynamic, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_restitution_friction", .build = buildCCDRestitutionFriction, .blocked_by = .ccd_hits, .sweep_stride = 2, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_combine_custom", .build = buildCCDCombineCustom, .blocked_by = .ccd_hits, .sweep_stride = 2, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_listener", .build = buildCCDListener, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .validated = true, .ccd_hits = true } },
+    .{ .name = "ccd_starts_penetrating", .build = buildCCDStartsPenetrating, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_many_bodies", .build = buildCCDManyBodies, .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true, .ccd_jobs = 8 } },
+    .{ .name = "ccd_wake_batch", .build = buildCCDWakeBatch, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true, .update_activations = ccd_wake_batch_targets } },
+    .{ .name = "ccd_sensors", .build = buildCCDSensors, .blocked_by = .ccd_hits, .sweep_stride = 2, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_terrain", .build = buildCCDTerrain, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_collision_steps_2", .build = buildCCDCollisionSteps(2), .blocked_by = .ccd_hits, .sweep_stride = 4, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_collision_steps_3", .build = buildCCDCollisionSteps(3), .blocked_by = .ccd_hits, .sweep_stride = 4, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_save_restore_cross", .build = buildCCDSaveRestore, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_far_from_origin", .build = buildCCDFarFromOrigin, .blocked_by = .ccd_hits, .sweep_stride = 2, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_random_1", .build = buildCCDRandom(1, 1), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_random_2", .build = buildCCDRandom(2, 2), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_random_3", .build = buildCCDRandom(3, 1), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
     // Later waves (blocked until Zolt has the parts, see Blocker)
-    .{ .name = "ccd_bullet_hits_wall", .build = buildBulletHitsWall, .blocked_by = .ccd_hits },
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
 };
 
@@ -2866,7 +2911,7 @@ fn buildContactRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuil
 }
 
 // -------------------------------------------------------------------------------------------------------------------
-// Scenes of the later waves
+// CCD scenes (Wave B R4: JobFindCCDContacts, sSolveCCDContact, JobResolveCCDContacts)
 
 /// A linear cast bullet that hits a thin wall
 fn buildBulletHitsWall(b: *SceneBuilder) Allocator.Error!void {
@@ -2877,6 +2922,526 @@ fn buildBulletHitsWall(b: *SceneBuilder) Allocator.Error!void {
     _ = try b.body(.{ .position = .{ 0, 0, 5 }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
     _ = try b.body(.{ .linear_velocity = .{ 0, 0, 200 }, .shape = bullet, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
 }
+
+/// The dynamic shapes of the CCD scenes (every convex kind, compounds and decorated shapes, all with an inner radius)
+const BulletShapes = struct {
+    list: [10]u32,
+
+    fn add(b: *SceneBuilder) Allocator.Error!BulletShapes {
+        const sphere = try b.sphere(0.2);
+        const box = try b.box(.{ 0.2, 0.15, 0.25 }, 0.05);
+        const capsule = try b.capsule(0.2, 0.15);
+        const tapered_capsule = try b.taperedCapsule(0.2, 0.1, 0.18);
+        const cylinder = try b.cylinder(0.2, 0.2, 0.05);
+        const hull = try b.convexHull(&.{ .{ -0.25, -0.2, -0.15 }, .{ 0.3, -0.2, -0.1 }, .{ 0.05, 0.25, 0.05 }, .{ 0.0, -0.05, 0.3 }, .{ 0.15, 0.15, -0.25 } }, 0.03);
+        const compound = try b.compound(.static_compound, &.{
+            .{ .shape = box, .position = .{ 0.2, 0, 0 } },
+            .{ .shape = sphere, .position = .{ -0.25, 0.1, 0 }, .user_data = 5 },
+        });
+        const rotated = try b.rotatedTranslated(box, .{ 0.1, -0.05, 0.05 }, axisAngle(.{ 0, 0, 1 }, 0.4));
+        const scaled = try b.scaled(sphere, .{ 1.5, 1.5, 1.5 });
+        const offset = try b.offsetCenterOfMass(box, .{ 0.05, -0.05, 0.02 });
+        return .{ .list = .{ sphere, box, capsule, tapered_capsule, cylinder, hull, compound, rotated, scaled, offset } };
+    }
+
+    fn pick(self: BulletShapes, i: usize) u32 {
+        return self.list[i % self.list.len];
+    }
+};
+
+/// Vertical quad (two triangles) in the plane x = 0, 4 x 4 m, its front faces point to -x (`front`) or +x
+fn wallTriangles(front: bool) [2][9]f32 {
+    if (front)
+        return .{ .{ 0, -2, -2, 0, -2, 2, 0, 2, 2 }, .{ 0, -2, -2, 0, 2, 2, 0, 2, -2 } };
+    return .{ .{ 0, -2, -2, 0, 2, 2, 0, -2, 2 }, .{ 0, -2, -2, 0, 2, -2, 0, 2, 2 } };
+}
+
+/// Linear cast bullets of every dynamic shape kind fired at static targets of every kind, one lane per target: a thin
+/// box, a mesh wall (front faces and back faces, which the cast ignores), a triangle, a convex hull, a compound, a
+/// scaled box, a rotated wall (an oblique hit with friction), a plane, a wall in a layer the bullet does not collide
+/// with in the broad phase (lq_debris) and one that only the object layer filter rejects (hq_debris vs hq_debris)
+fn buildCCDStaticTargets(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try BulletShapes.add(b);
+    const wall = try b.box(.{ 0.05, 2, 2 }, 0);
+    const mesh_front = try b.mesh(&wallTriangles(true));
+    const mesh_back = try b.mesh(&wallTriangles(false));
+    const triangle = try b.triangle(.{ 0, -2, -2, 0, -2, 2, 0, 2, 0 }, 0);
+    const hull = try b.convexHull(&.{ .{ -0.3, -2, -2 }, .{ -0.3, -2, 2 }, .{ -0.3, 2, -2 }, .{ -0.3, 2, 2 }, .{ 0.3, 0, 0 } }, 0.05);
+    const thin = try b.box(.{ 0.05, 1, 2 }, 0);
+    const compound = try b.compound(.static_compound, &.{ .{ .shape = thin, .position = .{ 0, 1, 0 } }, .{ .shape = thin, .position = .{ 0.3, -1, 0 }, .user_data = 9 } });
+    const scaled = try b.scaled(wall, .{ 0.5, 1.5, 1 });
+    const plane = try b.plane(.{ -1, 0, 0 }, 0, 2);
+    b.num_updates = 40;
+    _ = try addFloor(b, 60, -8); // Catches what falls down
+
+    const Target = struct { shape: u32, rotation: [4]f32 = identity_rotation, layer: u32 = Layers.non_moving, bullet_layer: u32 = Layers.moving, friction: f32 = 0.2, restitution: f32 = 0.0 };
+    const targets = [_]Target{
+        .{ .shape = wall },
+        .{ .shape = mesh_front, .friction = 0.5 },
+        .{ .shape = mesh_back },
+        .{ .shape = triangle },
+        .{ .shape = hull, .restitution = 0.5 },
+        .{ .shape = compound },
+        .{ .shape = scaled, .restitution = 1.0 },
+        .{ .shape = wall, .rotation = axisAngle(.{ 0, 1, 0 }, 0.6), .friction = 0.8 },
+        .{ .shape = plane },
+        .{ .shape = wall, .layer = Layers.lq_debris },
+        .{ .shape = wall, .layer = Layers.hq_debris, .bullet_layer = Layers.hq_debris },
+    };
+    for (targets, 0..) |t, i| {
+        const z = real(i) * 6.0 - 30.0;
+        _ = try b.body(.{ .position = .{ 20, 2, z }, .rotation = t.rotation, .shape = t.shape, .motion_type = 0, .friction = t.friction, .restitution = t.restitution, .object_layer = t.layer }, .dont_activate);
+        for (0..2) |j| {
+            _ = try b.body(.{
+                .position = .{ 0, 1.5 + real(j), z + real(j) * 0.5 - 0.25 },
+                .rotation = axisAngle(.{ 0.6, 0.8, 0 }, 0.3 * @as(f64, @floatFromInt(i + j))),
+                .linear_velocity = .{ 120.0 + 30.0 * @as(f32, @floatFromInt(j)), 0, 0 },
+                .angular_velocity = if (j == 0) .{ 0, 0, 0 } else .{ 0, 3, 1 },
+                .shape = shapes.pick(i + 3 * j),
+                .restitution = if (j == 1) 0.3 else 0.0,
+                .motion_quality = 1,
+                .object_layer = t.bullet_layer,
+            }, .activate);
+        }
+    }
+}
+
+/// Linear cast bodies hitting each other: head on (elastic boxes as in MotionQualityLinearCastTests, inelastic spheres
+/// of different mass), a body that chases another one which hits a wall first (no response for the chaser), a body that
+/// hits another linear cast body before that one hits a wall (the other body's hit is reset and its motion shortened),
+/// bodies moving in parallel (relative movement below the threshold), a slow linear cast body that does not cast, and
+/// three bodies converging
+fn buildCCDBodiesHitEachOther(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const sphere = try b.sphere(0.4);
+    const heavy_sphere = try b.sphere(0.4);
+    b.setDensity(heavy_sphere, 3000);
+    const small_sphere = try b.sphere(0.3);
+    const big_sphere = try b.sphere(0.5);
+    const wall = try b.box(.{ 0.05, 2, 2 }, 0);
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    // Head on, elastic
+    _ = try b.body(.{ .position = .{ -1, 0, -24 }, .linear_velocity = .{ 120, 0, 0 }, .restitution = 1.0, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 1, 0, -24 }, .linear_velocity = .{ -120, 0, 0 }, .restitution = 1.0, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    // Head on, inelastic, different masses and speeds, slightly offset (angular velocity)
+    _ = try b.body(.{ .position = .{ -3, 0, -18 }, .linear_velocity = .{ 200, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3, 0.2, -18 }, .linear_velocity = .{ -100, 0, 0 }, .shape = heavy_sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    // A chases B, B hits the wall first: A moves to its hit without a response
+    _ = try b.body(.{ .position = .{ 4, 0, -12 }, .linear_velocity = .{ 360, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 8, 0, -12 }, .linear_velocity = .{ 120, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 10, 0, -12 }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    // A hits B before B hits the wall behind A: B's hit is reset and B's motion shortened
+    _ = try b.body(.{ .position = .{ 0, 0, -6 }, .linear_velocity = .{ 90, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 4, 0, -6 }, .linear_velocity = .{ -432, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ -3, 0, -6 }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    // Moving in parallel and one behind the other with the same velocity, then a wall
+    _ = try b.body(.{ .position = .{ 0, 0, 0 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0, 0.9 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 1.0, 0, 0.3 }, .linear_velocity = .{ 150, 0, 0 }, .shape = small_sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 30, 0, 0.5 }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    // A bullet hits a slow linear cast body (it moves less than the threshold: no cast, it moved already)
+    _ = try b.body(.{ .position = .{ 0, 0, 6 }, .linear_velocity = .{ 150, 0, 0 }, .shape = small_sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 4, 0.1, 6 }, .linear_velocity = .{ -10, 0, 0 }, .shape = big_sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    // Three bodies converging
+    _ = try b.body(.{ .position = .{ -4, 0, 12 }, .linear_velocity = .{ 200, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 4, 0, 12 }, .linear_velocity = .{ -200, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 4, 12 }, .linear_velocity = .{ 0, -200, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.5), .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+}
+
+/// Linear cast bodies against kinematic and dynamic bodies: a kinematic box moving towards the bullet (no correction
+/// for its motion, it moved already) and a rotating kinematic platform (the response leaves them unchanged), a
+/// sleeping dynamic box (woken up by the hit), a slow dynamic box, a fast discrete box (moved before the casts: the
+/// bullet tunnels through it), a heavy dynamic body
+fn buildCCDKinematicAndDynamic(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.25);
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const platform = try b.box(.{ 0.3, 2, 2 }, 0.05);
+    const heavy = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.setDensity(heavy, 20000);
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    b.settings.time_before_sleep = 0.2;
+    _ = try b.body(.{ .position = .{ 8, 0, -12 }, .linear_velocity = .{ -5, 0, 0 }, .shape = box, .motion_type = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0, -12 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 8, 0, -6 }, .angular_velocity = .{ 0, 4, 0 }, .shape = platform, .motion_type = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0.3, -5.5 }, .linear_velocity = .{ 160, 0, 0 }, .shape = box, .motion_quality = 1, .friction = 0.7, .object_layer = Layers.moving }, .activate);
+    const sleeping = try b.body(.{ .position = .{ 8, 0, 0 }, .shape = box, .object_layer = Layers.moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 0, 0.2, 0 }, .linear_velocity = .{ 180, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 8, 0, 6 }, .linear_velocity = .{ -4, 0, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0, 6 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 2.5, 0, 12 }, .linear_velocity = .{ -150, 0, 0 }, .shape = box, .object_layer = Layers.moving }, .activate); // Ends where the bullet starts: the bullet moves out of it (a back face)
+    _ = try b.body(.{ .position = .{ 0, 0, 12 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 8, 0, 18 }, .shape = heavy, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0.4, 18 }, .linear_velocity = .{ 200, 0, 0 }, .angular_velocity = .{ 5, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    try b.expectSleeping(sleeping);
+    b.at(5);
+    try b.expectAwake(sleeping); // Woken up by the CCD hit in update 0
+}
+
+/// Linear cast bodies fired diagonally onto a floor with every combination of friction and restitution (the friction
+/// part of sSolveCCDContact, the restitution bias above MinVelocityForRestitution)
+fn buildCCDRestitutionFriction(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try BulletShapes.add(b);
+    b.num_updates = 60;
+    const floor = try b.box(.{ 40, 0.05, 40 }, 0);
+    _ = try b.body(.{ .position = .{ 0, -0.05, 0 }, .shape = floor, .motion_type = 0, .friction = 0.6, .restitution = 0.2, .object_layer = Layers.non_moving }, .dont_activate);
+    const frictions = [_]f32{ 0.0, 0.3, 1.0 };
+    const restitutions = [_]f32{ 0.0, 0.5, 1.0 };
+    for (frictions, 0..) |friction, i| {
+        for (restitutions, 0..) |restitution, j| {
+            _ = try b.body(.{
+                .position = .{ -20 + real(i) * 2, 10, real(j) * 6.0 - 6.0 },
+                .linear_velocity = .{ 60, -150, 8.0 * @as(f32, @floatFromInt(j)) },
+                .angular_velocity = .{ 0, 0, 2.0 * @as(f32, @floatFromInt(i)) },
+                .shape = shapes.pick(3 * i + j),
+                .friction = friction,
+                .restitution = restitution,
+                .motion_quality = 1,
+                .object_layer = Layers.moving,
+            }, .activate);
+        }
+    }
+}
+
+/// The custom combine functions with CCD hits on a compound target (the sub shape IDs of the CCD manifold)
+fn buildCCDCombineCustom(b: *SceneBuilder) Allocator.Error!void {
+    b.combine_mode = .custom;
+    try buildCCDRestitutionFriction(b);
+    const thin = try b.box(.{ 2, 0.05, 2 }, 0);
+    const compound = try b.compound(.static_compound, &.{ .{ .shape = thin, .position = .{ -2, 0, 0 } }, .{ .shape = thin, .position = .{ 2, 0, 0 }, .user_data = 2 } });
+    const sphere = try b.sphere(0.2);
+    _ = try b.body(.{ .position = .{ 20, 2, 20 }, .shape = compound, .motion_type = 0, .friction = 0.9, .restitution = 0.7, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..4) |i|
+        _ = try b.body(.{ .position = .{ 17 + real(i) * 2, 12, 20 }, .linear_velocity = .{ 5, -160, 0 }, .restitution = 0.25 * @as(f32, @floatFromInt(i)), .friction = 0.3, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+}
+
+/// The contact listener with CCD hits (ContactListenerMode.modify): OnContactValidate rejects all contacts of a pair
+/// (the bullet goes through the wall), rejects speculative contacts (a cast hit has no negative depth), accepts each
+/// contact, rejects the hit of one child of a compound (RejectContact: the cast goes on and the bullet hits the other
+/// child); OnContactAdded makes the contact a sensor (no response), bouncy, frictionless, with mass scales (the bullet
+/// created before and after its target: the body pair is swapped for the callback and the scales swapped back)
+fn buildCCDListener(b: *SceneBuilder) Allocator.Error!void {
+    b.contact_listener_mode = .modify;
+    const shapes = try BulletShapes.add(b);
+    const wall = try b.box(.{ 0.05, 2, 2 }, 0);
+    const target = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    const F = ContactFlags;
+    const flag_sets = [_]u32{ 0, F.reject_all, F.reject_speculative, F.accept_each, F.sensor, F.bouncy, F.zero_friction, F.mass_scale, F.bouncy | F.zero_friction, F.surface_velocity, F.accept_each | F.mass_scale };
+    for (flag_sets, 0..) |flags, i| {
+        const z = real(i) * 6.0 - 30.0;
+        _ = try b.body(.{ .position = .{ 20, 0, z }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ 0, 0, z }, .linear_velocity = .{ 150, 0, 10 }, .shape = shapes.pick(i), .user_data = ContactFlags.userData(flags, @intCast(i)), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    }
+    // Dynamic targets: created before the bullet (lower ID) and after it
+    for (0..2) |i| {
+        const z = 40.0 + real(i) * 6.0;
+        const flags: u32 = F.mass_scale | F.bouncy;
+        if (i == 0) _ = try b.body(.{ .position = .{ 10, 0, z }, .shape = target, .object_layer = Layers.moving }, .activate);
+        _ = try b.body(.{ .position = .{ 0, 0, z }, .linear_velocity = .{ 150, 0, 0 }, .shape = shapes.pick(i), .user_data = ContactFlags.userData(flags, 20), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+        if (i == 1) _ = try b.body(.{ .position = .{ 10, 0, z }, .shape = target, .object_layer = Layers.moving }, .activate);
+    }
+    // Static compounds of two parallel plates 0.8 m apart, the child at -x marked (reject_marked_child). The bullets
+    // move 2.5 m per step and reach both plates in the same cast (step 8, they start it 0.35 m or more before the first
+    // plate). From -x the marked plate is hit first: its hit is rejected (RejectContact, not stored, no early out) and
+    // the next hit of the same body pair, the far plate, is validated again (AcceptAllContactsForThisBodyPair, with
+    // accept_each AcceptContact): the bullet goes through the marked plate and stops at the far one. From +x the
+    // unmarked plate is hit first and the marked one lies behind the early out fraction.
+    const plate = try b.box(.{ 0.05, 2, 2 }, 0);
+    const plates = try b.compound(.static_compound, &.{
+        .{ .shape = plate, .position = .{ -0.4, 0, 0 }, .user_data = F.marked_child_user_data },
+        .{ .shape = plate, .position = .{ 0.4, 0, 0 } },
+    });
+    const marked_bullets = [_]struct { x: Real, vx: f32, flags: u32 }{
+        .{ .x = 0, .vx = 150, .flags = F.reject_marked_child },
+        .{ .x = 0, .vx = 150, .flags = F.reject_marked_child | F.accept_each },
+        .{ .x = 42, .vx = -150, .flags = F.reject_marked_child },
+    };
+    for (marked_bullets, 0..) |bullet, i| {
+        const z = 54.0 + real(i) * 6.0;
+        _ = try b.body(.{ .position = .{ 21, 0, z }, .shape = plates, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ bullet.x, 0, z }, .linear_velocity = .{ bullet.vx, 0, 0 }, .shape = shapes.pick(i), .user_data = ContactFlags.userData(bullet.flags, 30 + @as(u32, @intCast(i))), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Linear cast bodies that start penetrating: a sphere half inside a thick box moving deeper, a box touching a box and
+/// two linear cast boxes starting in contact and moving towards each other (the discrete contacts at the start of the
+/// step take their velocity into the boxes away before they are integrated, so they move less than the cast threshold),
+/// a sphere inside a box moving out of it (it casts, the back face is ignored). Hits at fraction 0 (penetrating at the
+/// start of the cast, the deepest point) happen in the other CCD scenes, where bodies lie against a wall and are pushed
+/// into it.
+fn buildCCDStartsPenetrating(b: *SceneBuilder) Allocator.Error!void {
+    const thick = try b.box(.{ 1, 1, 1 }, 0.05);
+    const sphere = try b.sphere(0.2);
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 30;
+    b.gravity = .{ 0, 0, 0 };
+    _ = try b.body(.{ .position = .{ 0, 0, -10 }, .shape = thick, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -1.1, 0, -10 }, .linear_velocity = .{ 120, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0, -5 }, .shape = thick, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 0.2, 0.1, -5 }, .linear_velocity = .{ 120, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0, 0 }, .shape = thick, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -1.3, 0, 0 }, .linear_velocity = .{ 90, 30, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0, 0, 5 }, .linear_velocity = .{ 100, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0.55, 0.05, 5 }, .linear_velocity = .{ -100, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    // A bullet that starts away from the box: the only hit of the scene without a discrete contact of the same sub shape
+    // pair in the same update, so the contact cache records a CCD manifold (Expect.ccd_hits)
+    _ = try b.body(.{ .position = .{ 0, 0, 10 }, .shape = thick, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -8, 0, 10 }, .linear_velocity = .{ 120, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+}
+
+/// 72 linear cast bodies in a container of thin walls, fired in every direction: many CCD bodies per step, so that
+/// several FindCCDContacts jobs run (one per 4 CCD bodies, up to the concurrency of the job system), hits against the
+/// walls and against each other
+fn buildCCDManyBodies(b: *SceneBuilder) Allocator.Error!void {
+    b.rng = 0x5eed1;
+    const shapes = try BulletShapes.add(b);
+    b.num_updates = 40;
+    b.max_contact_constraints = 4096;
+    const floor = try b.box(.{ 12, 0.1, 12 }, 0);
+    const wall_x = try b.box(.{ 0.05, 4, 12 }, 0);
+    const wall_z = try b.box(.{ 12, 4, 0.05 }, 0);
+    _ = try b.body(.{ .position = .{ 0, -0.1, 0 }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for ([_]Real{ -11, 11 }) |x|
+        _ = try b.body(.{ .position = .{ x, 4, 0 }, .shape = wall_x, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for ([_]Real{ -11, 11 }) |z|
+        _ = try b.body(.{ .position = .{ 0, 4, z }, .shape = wall_z, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..72) |i| {
+        const dir = b.vec3(-1, 1);
+        _ = try b.body(.{
+            .position = .{ real(i % 6) * 2.5 - 6.25, 1.0 + real(i / 36) * 3.0, real((i / 6) % 6) * 2.5 - 6.25 },
+            .rotation = b.rotation(),
+            .linear_velocity = .{ dir[0] * 150.0, dir[1] * 40.0, dir[2] * 150.0 },
+            .angular_velocity = b.vec3(-3, 3),
+            .shape = shapes.pick(b.index(10)),
+            .restitution = if (b.oneIn(3)) b.float(0, 1) else 0,
+            .friction = b.float(0, 1),
+            .motion_quality = 1,
+            .object_layer = Layers.moving,
+        }, .activate);
+    }
+}
+
+/// 70 sleeping dynamic boxes woken up by CCD hits in the same collision step (update 1): JobResolveCCDContacts
+/// activates a full batch of 64 bodies while it still resolves the CCD bodies, the other 6 at the end
+/// (Expect.update_activations). Each box is hit by its own bullet (the rule for CCD scenes at the top), the boxes are a
+/// little further away in some lanes so that the CCD bodies are resolved in an order that differs from their body IDs.
+fn buildCCDWakeBatch(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.25);
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.num_updates = 8;
+    b.gravity = .{ 0, 0, 0 };
+    var boxes: [ccd_wake_batch_targets]u32 = undefined;
+    for (&boxes, 0..) |*handle, i| {
+        // The bullets move 2.5 m per step: after update 0 they are 0.75 m (plus up to 0.1 m) before their box
+        const y = real(i / 10) * 2.5;
+        const z = real(i % 10) * 2.5;
+        handle.* = try b.body(.{ .position = .{ 4.0 + 0.01 * real((i * 7) % 11), y, z }, .shape = box, .object_layer = Layers.moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ 0, y, z }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    }
+    b.at(1);
+    for (boxes) |handle| try b.expectSleeping(handle);
+    b.at(2);
+    for (boxes) |handle| try b.expectAwake(handle);
+}
+
+/// Number of sleeping boxes of `buildCCDWakeBatch` (more than the batch of 64 bodies of JobResolveCCDContacts)
+const ccd_wake_batch_targets = 70;
+
+/// Sensors in the path of linear cast bodies: a static sensor and a moving kinematic sensor between the bullets and a
+/// wall (the casts ignore sensors), a dynamic linear cast sensor (no cast: CCD sensors are not supported)
+fn buildCCDSensors(b: *SceneBuilder) Allocator.Error!void {
+    const sensor_box = try b.box(.{ 0.5, 2, 2 }, 0);
+    const wall = try b.box(.{ 0.05, 2, 2 }, 0);
+    const sphere = try b.sphere(0.25);
+    b.num_updates = 30;
+    b.gravity = .{ 0, 0, 0 };
+    _ = try b.body(.{ .position = .{ 10, 0, 0 }, .shape = sensor_box, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 10, 0, 6 }, .linear_velocity = .{ 0, 0, 1 }, .shape = sensor_box, .motion_type = 1, .is_sensor = 1, .object_layer = Layers.sensor }, .activate);
+    for ([_]Real{ 0, 6 }) |z| {
+        _ = try b.body(.{ .position = .{ 20, 0, z }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ 0, 0, z }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+        _ = try b.body(.{ .position = .{ 9, 0.5, z + 0.5 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate); // Starts inside the sensor
+    }
+    _ = try b.body(.{ .position = .{ 0, 0, 12 }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -10, 0, 12 }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .is_sensor = 1, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+}
+
+/// Fast bodies falling onto a mesh terrain and a height field terrain (back faces, active edges, enhanced internal edge
+/// removal on some bodies), bodies thrown fast over the terrain, two collision steps
+fn buildCCDTerrain(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try BulletShapes.add(b);
+    const mesh = try addMeshTerrain(b, 10, 1.5, false);
+    const height_field = try addHeightFieldTerrain(b, 13, 1.25);
+    b.num_updates = 50;
+    b.collision_steps = 2;
+    b.max_contact_constraints = 2048;
+    _ = try b.body(.{ .position = .{ -10, 0, 0 }, .shape = mesh, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 10, 0, 0 }, .shape = height_field, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..16) |i| {
+        const x = real(i % 4) * 2.5 - 13.75 + real(i / 8) * 20.0;
+        const z = real((i / 4) % 2) * 3.0 - 1.5;
+        _ = try b.body(.{
+            .position = .{ x, 8 + real(i % 3), z },
+            .rotation = axisAngle(.{ 0.6, 0, 0.8 }, 0.4 * @as(f64, @floatFromInt(i))),
+            .linear_velocity = .{ 10.0 * @as(f32, @floatFromInt(i % 3)) - 10.0, -200, 3 },
+            .shape = shapes.pick(i),
+            .restitution = if (i % 4 == 0) 0.5 else 0,
+            .enhanced_internal_edge_removal = @intCast(i % 2),
+            .motion_quality = 1,
+            .object_layer = Layers.moving,
+        }, .activate);
+    }
+    for (0..2) |i|
+        _ = try b.body(.{ .position = .{ -16 + real(i) * 20, 1.0, 4 }, .linear_velocity = .{ 120, -20, 0 }, .shape = shapes.pick(i), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+}
+
+/// Linear cast bodies with several collision steps per update and changing delta times
+fn buildCCDCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const shapes = try BulletShapes.add(b);
+            const wall = try b.box(.{ 0.05, 3, 3 }, 0);
+            b.num_updates = 40;
+            b.collision_steps = steps;
+            _ = try addFloor(b, 40, -3);
+            for (0..6) |i| {
+                const z = real(i) * 6.0 - 15.0;
+                _ = try b.body(.{ .position = .{ -15, 0, z }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+                _ = try b.body(.{ .position = .{ 15, 0, z }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.2 * @as(f64, @floatFromInt(i))), .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+                _ = try b.body(.{ .position = .{ 0, 0, z }, .linear_velocity = .{ 100.0 + 40.0 * @as(f32, @floatFromInt(i)), 5, 0 }, .restitution = if (i % 2 == 0) 0.6 else 0, .shape = shapes.pick(i), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+            }
+            b.at(15);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 30.0}, .count = steps + 1 });
+            for (0..6) |i|
+                try b.op(.set_linear_velocity, 3 + 3 * @as(u32, @intCast(i)), .{ .f = &.{ -150, 0, 10 } }); // The bullet of lane i (handle 0 is the floor)
+        }
+    }.build;
+}
+
+/// SaveState / RestoreState around CCD hits (the CCD manifolds of the contact cache), C++ restores the Zolt state and
+/// Zolt the C++ state
+fn buildCCDSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.2);
+    const wall = try b.box(.{ 0.05, 2, 2 }, 0);
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    for (0..3) |i| {
+        const z = real(i) * 5.0;
+        _ = try b.body(.{ .position = .{ 20, 0, z }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ 0, 0, z }, .linear_velocity = .{ 100.0 + 20.0 * @as(f32, @floatFromInt(i)), 0, 0 }, .restitution = 0.5, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    }
+    b.at(9);
+    try b.sysOp(.snapshot, .{ .index = 0 }); // Just before the first hit
+    b.at(12);
+    try b.sysOp(.snapshot, .{ .index = 1 }); // The CCD manifolds of the hits are in the cache
+    b.at(20);
+    try b.sysOp(.restore_cross, .{ .index = 0 });
+    b.at(25);
+    try b.op(.set_linear_velocity, 1, .{ .f = &.{ -150, 0, 0 } });
+    try b.sysOp(.restore_cross, .{ .index = 1 });
+}
+
+/// CCD hits far from the origin (the base offsets of the cast and the manifold, double precision)
+fn buildCCDFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.2);
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const wall = try b.box(.{ 0.05, 2, 2 }, 0);
+    b.num_updates = 30;
+    const o: Real = 5000.0;
+    _ = try b.body(.{ .position = .{ o + 20, 0, -o }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ o, 0, -o }, .linear_velocity = .{ 150, 1, 0 }, .shape = sphere, .restitution = 0.8, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ o + 5, 0.5, -o + 1 }, .linear_velocity = .{ 120, 0, -5 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ o + 30, 0, -o + 0.5 }, .linear_velocity = .{ -150, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+}
+
+/// Random linear cast and discrete bodies with random high velocities in a container of thin walls (seed `seed`,
+/// `steps` collision steps), random listener, combine and filter modes, random operations (velocities, motion
+/// qualities, impulses, activation)
+fn buildCCDRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0xccd5eed * seed + 7;
+            b.collision_steps = steps;
+            b.num_updates = 60;
+            b.max_contact_constraints = 4096;
+            b.gravity = .{ b.float(-2, 2), b.float(-15, -5), b.float(-2, 2) };
+            if (b.oneIn(2)) b.contact_listener_mode = .modify;
+            if (b.oneIn(2)) b.combine_mode = .custom;
+            if (b.oneIn(2)) b.sim_shape_filter_mode = .filter_spheres;
+            if (b.oneIn(3)) b.settings.check_active_edges = 0;
+            b.settings.time_before_sleep = b.float(0.2, 1.0);
+            const shapes = try BulletShapes.add(b);
+            const half: f32 = 8;
+            const floor = try b.box(.{ half + 1, 0.1, half + 1 }, 0);
+            const wall_x = try b.box(.{ 0.1, 4, half + 1 }, 0.02);
+            const wall_z = try b.box(.{ half + 1, 4, 0.1 }, 0.02);
+            const ceiling = try b.box(.{ half + 1, 0.1, half + 1 }, 0);
+            _ = try b.body(.{ .position = .{ 0, -0.1, 0 }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+            _ = try b.body(.{ .position = .{ 0, 8.1, 0 }, .shape = ceiling, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+            for ([_]Real{ -half, half }) |x|
+                _ = try b.body(.{ .position = .{ x, 4, 0 }, .shape = wall_x, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+            for ([_]Real{ -half, half }) |z|
+                _ = try b.body(.{ .position = .{ 0, 4, z }, .shape = wall_z, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+            const num_bodies = 48;
+            const first: u32 = b.num_handles;
+            const F = ContactFlags;
+            const flag_choices = [_]u32{ 0, 0, 0, F.zero_friction, F.bouncy, F.mass_scale, F.accept_each, F.reject_speculative, F.filter_spheres, F.sensor };
+            for (0..num_bodies) |i| {
+                const motion_type: u32 = if (b.oneIn(10)) 1 else 2;
+                const activation: SceneBuilder.Activation = if (b.oneIn(8)) .dont_activate else .activate;
+                const speed = if (b.oneIn(4)) b.float(1, 10) else b.float(50, 200);
+                const dir = b.vec3(-1, 1);
+                const w = b.vec3(-4, 4);
+                _ = try b.body(.{
+                    .position = .{ real(i % 6) * 2.4 - 6.0, 1.0 + real(i / 36) * 3.0 + b.float(0, 0.5), real((i / 6) % 6) * 2.4 - 6.0 },
+                    .rotation = b.rotation(),
+                    .linear_velocity = if (activation == .activate) .{ dir[0] * speed, dir[1] * speed * 0.5, dir[2] * speed } else @splat(0),
+                    .angular_velocity = if (activation == .activate) w else @splat(0),
+                    .friction = b.float(0, 1),
+                    .restitution = if (b.oneIn(3)) b.float(0, 1) else 0,
+                    .gravity_factor = if (b.oneIn(6)) b.float(0, 2) else 1.0,
+                    .allowed_dofs = if (motion_type == 2 and b.oneIn(8)) 0b100011 else 0b111111,
+                    .enhanced_internal_edge_removal = b.index(2),
+                    .motion_type = motion_type,
+                    .motion_quality = if (b.oneIn(3)) 0 else 1,
+                    .allow_dynamic_or_kinematic = 1,
+                    .is_sensor = if (b.oneIn(16)) 1 else 0,
+                    .shape = shapes.pick(b.index(10)),
+                    .user_data = ContactFlags.userData(flag_choices[b.index(flag_choices.len)], @intCast(i)),
+                    .object_layer = Layers.moving,
+                }, activation);
+            }
+            var u: u32 = 1;
+            while (u < b.num_updates) : (u += 1 + b.index(5)) {
+                b.at(u);
+                for (0..b.index(4)) |_| {
+                    const h = first + b.index(num_bodies);
+                    const dir = b.vec3(-1, 1);
+                    const speed = b.float(20, 180);
+                    switch (b.index(8)) {
+                        0 => try b.op(.set_linear_velocity, h, .{ .f = &.{ dir[0] * speed, dir[1] * speed * 0.5, dir[2] * speed } }),
+                        1 => try b.op(.set_motion_quality, h, .{ .index = b.index(2) }),
+                        2 => try b.op(.add_impulse, h, .{ .f = &.{ dir[0] * 30, dir[1] * 30, dir[2] * 30 } }),
+                        3 => try b.op(.activate_body, h, .{}),
+                        4 => try b.op(.set_user_data, h, .{ .index = h, .count = flag_choices[b.index(flag_choices.len)] }),
+                        5 => try b.op(.set_friction_and_restitution, h, .{ .f = &.{ b.float(0, 1), b.float(0, 1) } }),
+                        6 => try b.op(.set_motion_type, h, .{ .index = 1 + b.index(2), .activation = .activate }),
+                        else => {
+                            const w = b.vec3(-5, 5);
+                            try b.op(.set_angular_velocity, h, .{ .f = &w });
+                        },
+                    }
+                }
+            }
+        }
+    }.build;
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Scenes of the later waves
 
 /// A chain of boxes hanging from the world with point constraints
 fn buildConstraintChain(b: *SceneBuilder) Allocator.Error!void {

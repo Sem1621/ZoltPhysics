@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 69.6%** of 85391 lines in scope · **Unit tests: 62.3%** of 18321 lines
+**Library: 69.6%** of 85391 lines in scope · **Unit tests: 64.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -546,22 +546,22 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 55% | 3 | 1 | 0 | 3 | 1 | 0 | 1185 |
+| `UnitTests` | 65% | 4 | 1 | 0 | 2 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 48% | 14 | 6 | 1 | 12 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 51% | 15 | 6 | 1 | 11 | 0 | 0 | 11009 |
 
-<details><summary>UnitTests — 55%</summary>
+<details><summary>UnitTests — 65%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `Layers.h` | 142 | ✅ complete | `ZoltTests/Layers.zig` |
 | `LoggingBodyActivationListener.h` | 51 | ✅ complete | `ZoltTests/LoggingBodyActivationListener.zig` |
 | `LoggingCharacterContactListener.h` | 143 | ❌ todo |  |
-| `LoggingContactListener.h` | 118 | ❌ todo |  |
+| `LoggingContactListener.h` | 118 | ✅ complete | `ZoltTests/LoggingContactListener.zig` |
 | `LoggingSoftBodyContactListener.h` | 81 | ❌ todo |  |
 | `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ✅ complete | `ZoltTests/PhysicsTestContext.zig` |
 | `UnitTestFramework.cpp`, `UnitTestFramework.h` | 382 | 🟡 partial | `ZoltTests/UnitTestFramework.zig` |
@@ -640,7 +640,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 48%</summary>
+<details><summary>UnitTests/Physics — 51%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -657,7 +657,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `EstimateCollisionResponseTest.cpp` | 65 | 🟡 partial | `ZoltTests/Physics/EstimateCollisionResponseTest.zig` |
 | `HeightFieldShapeTests.cpp` | 449 | ✅ complete | `ZoltTests/Physics/HeightFieldShapeTests.zig` |
 | `HingeConstraintTests.cpp` | 74 | ❌ todo |  |
-| `MotionQualityLinearCastTests.cpp` | 310 | ❌ todo |  |
+| `MotionQualityLinearCastTests.cpp` | 310 | ✅ complete | `ZoltTests/Physics/MotionQualityLinearCastTests.zig` |
 | `MutableCompoundShapeTests.cpp` | 185 | ✅ complete | `ZoltTests/Physics/MutableCompoundShapeTests.zig` |
 | `ObjectLayerPairFilterMaskTests.cpp` | 134 | 🟡 partial | `ZoltTests/Physics/ObjectLayerPairFilterMaskTests.zig` |
 | `ObjectLayerPairFilterTableTests.cpp` | 113 | ✅ complete | `ZoltTests/Physics/ObjectLayerPairFilterTableTests.zig` |
