@@ -2269,6 +2269,9 @@ const CCDJobSystem = struct {
 /// one that hits a kinematic box. Many CCD bodies per collision step: several FindCCDContacts jobs with threads.
 const CCDScene = struct {
     const num_ccd_bullets = 32;
+    /// The linear cast bodies: the bullets, the two bullets hitting each other head on and the bullets that hit the
+    /// sleeping box and the kinematic box
+    const num_ccd_bodies = num_ccd_bullets + 4;
     const half_extent = 12.0;
 
     broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
@@ -2407,6 +2410,7 @@ fn runCCDScene(allocator: Allocator, kind: JobSystemKind, states: *std.ArrayList
     defer recorder.deinit();
 
     const bi = scene.system.getBodyInterface();
+    try expectEqual(@as(u32, CCDScene.num_ccd_bodies), scene.system.body_manager.getNumActiveCCDBodies());
     var max_jobs: u32 = 0;
     for (0..ccd_num_updates) |_| {
         const before = counting.num_find_ccd_contacts.load(.monotonic);
@@ -2465,9 +2469,11 @@ test "PhysicsSystem CCD: determinism single vs multi threaded with several FindC
         }
         try expectEqual(ref.counts, stats.counts);
 
-        // min(ceil(CCD bodies / 4), concurrency) jobs per step: 32 bullets need 8 jobs with 7 workers
+        // min(ceil(CCD bodies / 4), concurrency) jobs per step (all CCD bodies cast in the first update): the 36 CCD
+        // bodies need 9 jobs, capped at 8 by the concurrency of 7 workers
         const concurrency: u32 = @intCast(kind.thread_pool + 1);
-        try expectEqual(collision_steps * @as(u32, @min(concurrency, 8)), stats.max_find_ccd_contacts_jobs);
+        const jobs_per_step: u32 = @min(concurrency, (CCDScene.num_ccd_bodies + 3) / 4);
+        try expectEqual(collision_steps * jobs_per_step, stats.max_find_ccd_contacts_jobs);
     }
 }
 

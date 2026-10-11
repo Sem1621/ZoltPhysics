@@ -228,12 +228,25 @@ namespace SimContactFlags
 	static constexpr uint32 cSurfaceVelocity = 1 << 6;
 	static constexpr uint32 cSensor = 1 << 7;
 	static constexpr uint32 cFilterSpheres = 1 << 8;
+	static constexpr uint32 cRejectMarkedChild = 1 << 9;
+	static constexpr uint32 cMarkedChildUserData = 77;
 }
 
 // The ContactFlags of a body pair
 static uint32 SimContactFlagsOf(const Body &inBody1, const Body &inBody2)
 {
 	return uint32((inBody1.GetUserData() | inBody2.GetUserData()) >> 32);
+}
+
+// ContactFlags.reject_marked_child of SimScenes.zig: the sub shape is a child of a compound with the marked user data
+static bool SimIsMarkedChild(const Body &inBody, const SubShapeID &inSubShapeID)
+{
+	const Shape *shape = inBody.GetShape();
+	if (shape->GetType() != EShapeType::Compound)
+		return false;
+	const CompoundShape *compound = static_cast<const CompoundShape *>(shape);
+	SubShapeID remainder;
+	return compound->GetCompoundUserData(compound->GetSubShapeIndexFromID(inSubShapeID, remainder)) == SimContactFlags::cMarkedChildUserData;
 }
 
 // FNV-1a (32 bit), hashBytes of SimScenes.zig
@@ -492,6 +505,8 @@ public:
 			uint32 flags = SimContactFlagsOf(inBody1, inBody2);
 			if (flags & SimContactFlags::cRejectAll)
 				return ValidateResult::RejectAllContactsForThisBodyPair;
+			if ((flags & SimContactFlags::cRejectMarkedChild) && SimIsMarkedChild(inBody2, inCollisionResult.mSubShapeID2))
+				return ValidateResult::RejectContact;
 			if (flags & SimContactFlags::cRejectSpeculative)
 				return inCollisionResult.mPenetrationDepth < 0.0f? ValidateResult::RejectContact : ValidateResult::AcceptContact;
 			if (flags & SimContactFlags::cAcceptEach)

@@ -52,9 +52,11 @@
 //!
 //! CCD scenes (Wave B R4, `Blocker.ccd_hits` is supported): linear cast bodies hit things (JobFindCCDContacts,
 //! sSolveCCDContact, JobResolveCCDContacts). Rules: a linear cast shape needs an inner radius (no mesh, height field,
-//! plane or mirrored ScaledShape), no body may move faster than its max linear velocity (500 m/s by default), and at
-//! most 64 sleeping bodies may be woken up by CCD hits in one collision step (Jolt then activates a batch while it
-//! still resolves the CCD bodies, and a later CCD body that hit one of them reads past mActiveBodyToCCDBody).
+//! plane or mirrored ScaledShape), no body may move faster than its max linear velocity (500 m/s by default), and a CCD
+//! body that is resolved after JobResolveCCDContacts activated a full batch of 64 woken up bodies must not have hit one
+//! of the bodies of that batch (sGetCCDBody then reads past mActiveBodyToCCDBody, Zolt asserts in safe builds). More
+//! than 64 sleeping bodies may be woken up by CCD hits in one collision step when each of them is hit by one CCD body
+//! only (`ccd_wake_batch`).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -453,6 +455,13 @@ pub const ContactFlags = struct {
     pub const sensor: u32 = 1 << 7;
     /// SimShapeFilterMode.filter_spheres: filter the spheres of the pair
     pub const filter_spheres: u32 = 1 << 8;
+    /// OnContactValidate (checked after reject_all): RejectContact when body 2 is a compound and the sub shape of the
+    /// contact (mSubShapeID2) is a child with the compound user data `marked_child_user_data`, else the other flags
+    /// decide (only this hit is rejected: the next contacts of the pair, e.g. the next hit of a CCD cast, are validated
+    /// again)
+    pub const reject_marked_child: u32 = 1 << 9;
+    /// The compound user data (`SimCompoundChild.user_data`) of the children that `reject_marked_child` rejects
+    pub const marked_child_user_data: u32 = 77;
 
     /// The user data of a body with these flags (and `low` in the lower 32 bits)
     pub fn userData(flags: u32, low: u32) u64 {
@@ -585,6 +594,10 @@ pub const Expect = struct {
     /// At least this many FindCCDContacts jobs run in one update (in some configuration: their number is
     /// min(ceil(CCD bodies / 4), the concurrency of the job system))
     ccd_jobs: u32 = 0,
+    /// At least this many bodies are activated from inside one update (OnBodyActivated during PhysicsSystem::Update,
+    /// not by the operations before it: woken up by contacts or CCD hits; more than 64 CCD hits on sleeping bodies in
+    /// one collision step fill the batch of JobResolveCCDContacts)
+    update_activations: u32 = 0,
 };
 
 pub const SceneEntry = struct {
@@ -674,6 +687,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "ccd_listener", .build = buildCCDListener, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .validated = true, .ccd_hits = true } },
     .{ .name = "ccd_starts_penetrating", .build = buildCCDStartsPenetrating, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_many_bodies", .build = buildCCDManyBodies, .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true, .ccd_jobs = 8 } },
+    .{ .name = "ccd_wake_batch", .build = buildCCDWakeBatch, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true, .update_activations = ccd_wake_batch_targets } },
     .{ .name = "ccd_sensors", .build = buildCCDSensors, .blocked_by = .ccd_hits, .sweep_stride = 2, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_terrain", .build = buildCCDTerrain, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_collision_steps_2", .build = buildCCDCollisionSteps(2), .blocked_by = .ccd_hits, .sweep_stride = 4, .expect = .{ .contacts = true, .ccd_hits = true } },
@@ -3016,10 +3030,11 @@ fn buildCCDCombineCustom(b: *SceneBuilder) Allocator.Error!void {
         _ = try b.body(.{ .position = .{ 17 + real(i) * 2, 12, 20 }, .linear_velocity = .{ 5, -160, 0 }, .restitution = 0.25 * @as(f32, @floatFromInt(i)), .friction = 0.3, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
 }
 
-/// The contact listener with CCD hits (ContactListenerMode.modify): OnContactValidate rejects all contacts of a pair (the
-/// bullet goes through the wall), rejects speculative contacts (a cast hit has no negative depth), accepts each contact;
-/// OnContactAdded makes the contact a sensor (no response), bouncy, frictionless, with mass scales (the bullet created
-/// before and after its target: the body pair is swapped for the callback and the scales swapped back)
+/// The contact listener with CCD hits (ContactListenerMode.modify): OnContactValidate rejects all contacts of a pair
+/// (the bullet goes through the wall), rejects speculative contacts (a cast hit has no negative depth), accepts each
+/// contact, rejects the hit of one child of a compound (RejectContact: the cast goes on and the bullet hits the other
+/// child); OnContactAdded makes the contact a sensor (no response), bouncy, frictionless, with mass scales (the bullet
+/// created before and after its target: the body pair is swapped for the callback and the scales swapped back)
 fn buildCCDListener(b: *SceneBuilder) Allocator.Error!void {
     b.contact_listener_mode = .modify;
     const shapes = try BulletShapes.add(b);
@@ -3041,6 +3056,27 @@ fn buildCCDListener(b: *SceneBuilder) Allocator.Error!void {
         if (i == 0) _ = try b.body(.{ .position = .{ 10, 0, z }, .shape = target, .object_layer = Layers.moving }, .activate);
         _ = try b.body(.{ .position = .{ 0, 0, z }, .linear_velocity = .{ 150, 0, 0 }, .shape = shapes.pick(i), .user_data = ContactFlags.userData(flags, 20), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
         if (i == 1) _ = try b.body(.{ .position = .{ 10, 0, z }, .shape = target, .object_layer = Layers.moving }, .activate);
+    }
+    // Static compounds of two parallel plates 0.8 m apart, the child at -x marked (reject_marked_child). The bullets
+    // move 2.5 m per step and reach both plates in the same cast (step 8, they start it 0.35 m or more before the first
+    // plate). From -x the marked plate is hit first: its hit is rejected (RejectContact, not stored, no early out) and
+    // the next hit of the same body pair, the far plate, is validated again (AcceptAllContactsForThisBodyPair, with
+    // accept_each AcceptContact): the bullet goes through the marked plate and stops at the far one. From +x the
+    // unmarked plate is hit first and the marked one lies behind the early out fraction.
+    const plate = try b.box(.{ 0.05, 2, 2 }, 0);
+    const plates = try b.compound(.static_compound, &.{
+        .{ .shape = plate, .position = .{ -0.4, 0, 0 }, .user_data = F.marked_child_user_data },
+        .{ .shape = plate, .position = .{ 0.4, 0, 0 } },
+    });
+    const marked_bullets = [_]struct { x: Real, vx: f32, flags: u32 }{
+        .{ .x = 0, .vx = 150, .flags = F.reject_marked_child },
+        .{ .x = 0, .vx = 150, .flags = F.reject_marked_child | F.accept_each },
+        .{ .x = 42, .vx = -150, .flags = F.reject_marked_child },
+    };
+    for (marked_bullets, 0..) |bullet, i| {
+        const z = 54.0 + real(i) * 6.0;
+        _ = try b.body(.{ .position = .{ 21, 0, z }, .shape = plates, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ bullet.x, 0, z }, .linear_velocity = .{ bullet.vx, 0, 0 }, .shape = shapes.pick(i), .user_data = ContactFlags.userData(bullet.flags, 30 + @as(u32, @intCast(i))), .motion_quality = 1, .object_layer = Layers.moving }, .activate);
     }
 }
 
@@ -3101,6 +3137,32 @@ fn buildCCDManyBodies(b: *SceneBuilder) Allocator.Error!void {
         }, .activate);
     }
 }
+
+/// 70 sleeping dynamic boxes woken up by CCD hits in the same collision step (update 1): JobResolveCCDContacts
+/// activates a full batch of 64 bodies while it still resolves the CCD bodies, the other 6 at the end
+/// (Expect.update_activations). Each box is hit by its own bullet (the rule for CCD scenes at the top), the boxes are a
+/// little further away in some lanes so that the CCD bodies are resolved in an order that differs from their body IDs.
+fn buildCCDWakeBatch(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.25);
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.num_updates = 8;
+    b.gravity = .{ 0, 0, 0 };
+    var boxes: [ccd_wake_batch_targets]u32 = undefined;
+    for (&boxes, 0..) |*handle, i| {
+        // The bullets move 2.5 m per step: after update 0 they are 0.75 m (plus up to 0.1 m) before their box
+        const y = real(i / 10) * 2.5;
+        const z = real(i % 10) * 2.5;
+        handle.* = try b.body(.{ .position = .{ 4.0 + 0.01 * real((i * 7) % 11), y, z }, .shape = box, .object_layer = Layers.moving }, .dont_activate);
+        _ = try b.body(.{ .position = .{ 0, y, z }, .linear_velocity = .{ 150, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    }
+    b.at(1);
+    for (boxes) |handle| try b.expectSleeping(handle);
+    b.at(2);
+    for (boxes) |handle| try b.expectAwake(handle);
+}
+
+/// Number of sleeping boxes of `buildCCDWakeBatch` (more than the batch of 64 bodies of JobResolveCCDContacts)
+const ccd_wake_batch_targets = 70;
 
 /// Sensors in the path of linear cast bodies: a static sensor and a moving kinematic sensor between the bullets and a
 /// wall (the casts ignore sensors), a dynamic linear cast sensor (no cast: CCD sensors are not supported)
