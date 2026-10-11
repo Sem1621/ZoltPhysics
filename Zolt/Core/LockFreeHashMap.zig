@@ -14,6 +14,10 @@
 //! - The iterator keeps Jolt's begin() / end() / operator++ / operator* (`begin`, `end`, `advance`, `get`) and adds a
 //!   Zig style `next()`: `var it = map.begin(); while (it.next()) |kv| { ... }`.
 //! - Implicit atomic loads of the C++ code (`uint32 offset = *bucket`) are sequentially consistent, like in C++.
+//! - Zolt addition: `findMut` returns a mutable key value pair. Jolt `const_cast`s the result of the const `Find` to
+//!   modify a value (ContactConstraintManager::ManifoldCache::FindOrCreate and the `mutable` CachedManifold flags);
+//!   Zig marks `*const` pointers read only, so the mutable access needs its own function (Rule M, porting guide
+//!   section 5).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -314,6 +318,18 @@ pub fn LockFreeHashMap(comptime Key: type, comptime Value: type) type {
 
         /// Find an element, returns null if not found
         pub fn find(self: *const Self, key: Key, key_hash: u64) ?*const KeyValue {
+            return self.findKeyValue(key, key_hash);
+        }
+
+        /// Zolt addition: find an element and return it mutable, returns null if not found.
+        /// Replaces Jolt's `const_cast<KeyValue *>(map.Find(key, hash))` (see the top of this file). Like `find`, it can
+        /// be called while other threads insert elements. The key must not be changed through the returned pointer.
+        pub fn findMut(self: *Self, key: Key, key_hash: u64) ?*KeyValue {
+            return self.findKeyValue(key, key_hash);
+        }
+
+        /// The body of Find (shared by `find` and `findMut`, the key value pairs live in the LFHMAllocator)
+        fn findKeyValue(self: *const Self, key: Key, key_hash: u64) ?*KeyValue {
             // Get the offset to the keyvalue object from the bucket with corresponding hash
             var offset = self.buckets[@intCast(key_hash & (self.num_buckets - 1))].load(.acquire);
             while (offset != invalid_handle) {
@@ -780,4 +796,154 @@ test "LockFreeHashMap multi threaded create and find" {
         const key: u32 = @intCast(i);
         try std.testing.expectEqual(Context.valueForKey(key), map.find(key, HashCombine.hash(key)).?.getValueConst().*);
     }
+}
+
+test "LockFreeHashMap findMut" {
+    const allocator = std.testing.allocator;
+
+    // A value with `mutable` flags and extra bytes, like ContactConstraintManager's CachedManifold
+    const Value = extern struct {
+        id: u32,
+        flags: std.atomic.Value(u16),
+        num_data: u16,
+        data: [1]u32,
+    };
+    const Map = LockFreeHashMap(u32, Value);
+
+    var lfhm_allocator: LFHMAllocator = try .init(allocator, 8192);
+    defer lfhm_allocator.deinit(allocator);
+    var map: Map = try .init(allocator, &lfhm_allocator, 16);
+    defer map.deinit(allocator);
+    var context: LFHMAllocatorContext = .init(&lfhm_allocator, 256);
+
+    const num_keys = 100;
+    for (0..num_keys) |i| {
+        const key: u32 = @intCast(i * 3);
+        const num_data: u16 = @intCast(i % 4 + 1);
+        _ = map.create(&context, key, HashCombine.hash(key), (num_data - 1) * @sizeOf(u32), .{ .id = key, .flags = .init(0), .num_data = num_data, .data = .{0} }).?;
+    }
+
+    for (0..num_keys) |i| {
+        const key: u32 = @intCast(i * 3);
+        const hash = HashCombine.hash(key);
+
+        // findMut returns the same key value pair as find
+        const kv = map.findMut(key, hash).?;
+        try std.testing.expectEqual(@as(*const Map.KeyValue, kv), map.find(key, hash).?);
+        try std.testing.expectEqual(key, kv.getKey().*);
+
+        // Modify the value and its extra bytes through findMut, find sees the changes
+        const value = kv.getValue();
+        value.id += 1000;
+        _ = value.flags.fetchOr(@as(u16, 1) << @intCast(i % 16), .monotonic);
+        const data: [*]u32 = &value.data;
+        for (0..value.num_data) |j| data[j] = @intCast(i * 10 + j);
+
+        // Keys that are not in the map
+        const missing: u32 = key + 1;
+        try std.testing.expectEqual(@as(?*Map.KeyValue, null), map.findMut(missing, HashCombine.hash(missing)));
+    }
+
+    for (0..num_keys) |i| {
+        const key: u32 = @intCast(i * 3);
+        const value = map.find(key, HashCombine.hash(key)).?.getValueConst();
+        try std.testing.expectEqual(key + 1000, value.id);
+        try std.testing.expectEqual(@as(u16, 1) << @intCast(i % 16), value.flags.load(.monotonic));
+        const data: [*]const u32 = &value.data;
+        for (0..value.num_data) |j| try std.testing.expectEqual(@as(u32, @intCast(i * 10 + j)), data[j]);
+    }
+
+    // After clearing nothing is found
+    lfhm_allocator.clear();
+    map.clear();
+    const zero: u32 = 0;
+    try std.testing.expectEqual(@as(?*Map.KeyValue, null), map.findMut(zero, HashCombine.hash(zero)));
+}
+
+test "LockFreeHashMap findMut multi threaded" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // Like the read cache of ContactConstraintManager: several threads set flags on existing entries (findMut + atomic
+    // or) while they insert new entries in the same map and modify those through findMut
+    const num_threads = 4;
+    const num_old_keys = 20_000;
+    const new_keys_per_thread = 10_000;
+    const Value = extern struct {
+        flags: std.atomic.Value(u16),
+        thread: u16,
+        counter: u32,
+    };
+    const Map = LockFreeHashMap(u32, Value);
+
+    const Context = struct {
+        lfhm_allocator: *LFHMAllocator,
+        map: *Map,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), thread_index: u32) void {
+            var context: LFHMAllocatorContext = .init(self.lfhm_allocator, 256);
+            const thread_flag = @as(u16, 1) << @intCast(thread_index);
+            for (0..num_old_keys) |k| {
+                // Mark an existing entry (every thread visits every old key once, each thread in a different order)
+                const key: u32 = @intCast((k * 7919 + thread_index * 4999) % num_old_keys);
+                const kv = self.map.findMut(key, HashCombine.hash(key)) orelse {
+                    self.failed.store(true, .monotonic);
+                    return;
+                };
+                if ((kv.getValue().flags.fetchOr(thread_flag, .monotonic) & thread_flag) != 0)
+                    self.failed.store(true, .monotonic);
+
+                // Insert a new entry and modify it through findMut
+                if (k < new_keys_per_thread) {
+                    const new_key: u32 = @intCast(num_old_keys + k * num_threads + thread_index);
+                    const new_hash = HashCombine.hash(new_key);
+                    const created = self.map.create(&context, new_key, new_hash, 0, .{ .flags = .init(0), .thread = @intCast(thread_index), .counter = 0 }) orelse {
+                        self.failed.store(true, .monotonic);
+                        return;
+                    };
+                    const found = self.map.findMut(new_key, new_hash) orelse {
+                        self.failed.store(true, .monotonic);
+                        return;
+                    };
+                    if (found != created)
+                        self.failed.store(true, .monotonic);
+                    found.getValue().counter += 1; // Only this thread writes this entry
+                }
+            }
+        }
+    };
+
+    var lfhm_allocator: LFHMAllocator = try .init(allocator, 2 * (num_old_keys + num_threads * new_keys_per_thread) * @sizeOf(Map.KeyValue));
+    defer lfhm_allocator.deinit(allocator);
+    var map: Map = try .init(allocator, &lfhm_allocator, 4096);
+    defer map.deinit(allocator);
+
+    var context: LFHMAllocatorContext = .init(&lfhm_allocator, 256);
+    for (0..num_old_keys) |k| {
+        const key: u32 = @intCast(k);
+        _ = map.create(&context, key, HashCombine.hash(key), 0, .{ .flags = .init(0), .thread = 0xffff, .counter = 0 }).?;
+    }
+
+    var shared: Context = .{ .lfhm_allocator = &lfhm_allocator, .map = &map };
+    var threads: [num_threads]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Context.run, .{ &shared, @as(u32, @intCast(i)) });
+    for (threads) |t| t.join();
+    try std.testing.expect(!shared.failed.load(.monotonic));
+
+    // Every thread marked every old entry exactly once, every new entry was modified once by the thread that created it
+    for (0..num_old_keys) |k| {
+        const key: u32 = @intCast(k);
+        const value = map.find(key, HashCombine.hash(key)).?.getValueConst();
+        try std.testing.expectEqual(@as(u16, (1 << num_threads) - 1), value.flags.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 0), value.counter);
+    }
+    for (0..num_threads * new_keys_per_thread) |k| {
+        const key: u32 = @intCast(num_old_keys + k);
+        const value = map.find(key, HashCombine.hash(key)).?.getValueConst();
+        try std.testing.expectEqual(@as(u16, @intCast(k % num_threads)), value.thread);
+        try std.testing.expectEqual(@as(u32, 1), value.counter);
+        try std.testing.expectEqual(@as(u16, 0), value.flags.load(.monotonic));
+    }
+    if (Core.enable_asserts) try std.testing.expectEqual(@as(u32, num_old_keys + num_threads * new_keys_per_thread), map.getNumKeyValues());
 }

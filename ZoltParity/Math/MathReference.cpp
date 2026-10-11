@@ -57,6 +57,8 @@ void jolt_vec4_abs(const float *inV, float *outV)	{ Store4(Load4(inV).Abs(), out
 void jolt_vec3_abs(const float *inV, float *outV)	{ Store3(Load3(inV).Abs(), outV); }
 uint32 jolt_vec4_compress_unit_vector(const float *inV) { return Load4(inV).CompressUnitVector(); }
 void jolt_vec4_decompress_unit_vector(uint32 inValue, float *outV) { Store4(Vec4::sDecompressUnitVector(inValue), outV); }
+void jolt_vec4_to_int(const float *inV, uint32 *outV) { Load4(inV).ToInt().StoreInt4(outV); }
+void jolt_uvec4_to_float(const uint32 *inV, float *outV) { Store4(UVec4::sLoadInt4(inV).ToFloat(), outV); }
 
 // Math/Vec3.h
 void jolt_vec3_normalized(const float *inV, float *outV) { Store3(Load3(inV).Normalized(), outV); }
@@ -67,6 +69,15 @@ void jolt_vec3_normalized_perpendicular(const float *inV, float *outV) { Store3(
 void jolt_vec3_unit_spherical(float inTheta, float inPhi, float *outV) { Store3(Vec3::sUnitSpherical(inTheta, inPhi), outV); }
 uint32 jolt_vec3_compress_unit_vector(const float *inV) { return Load3(inV).CompressUnitVector(); }
 void jolt_vec3_decompress_unit_vector(uint32 inValue, float *outV) { Store3(Vec3::sDecompressUnitVector(inValue), outV); }
+void jolt_vec3_to_int(const float *inV, uint32 *outV) { UVec4 v = Load3(inV).ToInt(); outV[0] = v.GetX(); outV[1] = v.GetY(); outV[2] = v.GetZ(); }
+
+// Vec3::sUnitSphere (1026 vertices, 3 floats each), returns the number of vertices
+uint32 jolt_vec3_unit_sphere(float *outVertices)
+{
+	for (size_t i = 0; i < Vec3::sUnitSphere.size(); ++i)
+		Store3(Vec3::sUnitSphere[i], outVertices + 3 * i);
+	return (uint32)Vec3::sUnitSphere.size();
+}
 
 // Math/Quat.h
 void jolt_quat_rotation(const float *inAxis, float inAngle, float *outQ) { StoreQuat(Quat::sRotation(Load3(inAxis), inAngle), outQ); }

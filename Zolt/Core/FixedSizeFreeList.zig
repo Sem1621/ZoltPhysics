@@ -16,6 +16,9 @@
 //!   it (written by every construct / destruct) on other cache lines than the constants that `Get()` reads. Zig
 //!   reorders the fields of a struct, so these members are grouped in `free_list: FreeListState`, a struct that is
 //!   aligned to and occupies whole cache lines (`list.free_list.page_mutex` etc., checked at comptime).
+//! - Zolt addition (no C++ counterpart): `reserveAllPages()` allocates every page up front. Afterwards
+//!   `constructObject` never allocates and never returns `error.OutOfMemory`, which the QuadTree needs so that
+//!   `AddBodiesFinalize` cannot fail on memory (Docs/Zolt/SimulationArchitecture.md D9).
 //!
 //! The page layout, the object index encoding (page = index >> page_shift, slot = index & object_mask), the free list
 //! (LIFO, batches are pushed as a whole) and the order in which never used objects are handed out are identical to
@@ -200,6 +203,28 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
                 self.allocator.free(pages[0..self.num_pages]);
             }
             self.* = .empty;
+        }
+
+        /// Zolt addition (no C++ counterpart): allocate every page that is not allocated yet, so that `constructObject`
+        /// never allocates (and never returns error.OutOfMemory) afterwards. This commits the memory that Jolt allocates
+        /// on demand: `num_pages * page_size * object_storage_size` bytes.
+        /// The objects are handed out in the same order as without the reservation (the object indices are identical).
+        /// On error.OutOfMemory the pages that were allocated stay allocated (deinit frees them) and the list stays
+        /// usable: constructObject allocates the missing pages when it needs them, as without the reservation.
+        /// Thread safe (the page mutex is locked), but it is meant to be called once, right after init (not on `empty`).
+        pub fn reserveAllPages(self: *Self) error{OutOfMemory}!void {
+            std.debug.assert(self.pages != null); // init must have been called
+            self.free_list.page_mutex.lock(self.io);
+            defer self.free_list.page_mutex.unlock(self.io);
+            while (true) {
+                const num_objects_allocated = self.num_objects_allocated.load(.monotonic);
+                const next_page = num_objects_allocated / self.page_size;
+                if (next_page == self.num_pages)
+                    return; // All pages are allocated
+                const page = try self.allocator.alignedAlloc(ObjectStorage, page_alignment, self.page_size);
+                self.pages.?[next_page] = page.ptr;
+                self.num_objects_allocated.store(num_objects_allocated +% self.page_size, .release); // Publishes the page pointer, like constructObject
+            }
         }
 
         /// Access the object storage given the object index
@@ -514,12 +539,141 @@ test "FixedSizeFreeList large and over aligned objects" {
     for (0..50) |i| aligned.destructObjectPtr(aligned.get(@intCast(i)));
 }
 
+test "FixedSizeFreeList reserveAllPages" {
+    const io = std.testing.io;
+    const List = FixedSizeFreeList(u64);
+
+    // 10 objects with pages of 4: 3 pages, all allocated by the reservation
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var list: List = try .init(failing.allocator(), io, 10, 4);
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations); // The page table
+    try list.reserveAllPages();
+    try std.testing.expectEqual(@as(usize, 4), failing.allocations);
+    try std.testing.expectEqual(@as(u32, 12), list.num_objects_allocated.load(.monotonic));
+    for (list.pages.?[0..list.num_pages]) |page|
+        try std.testing.expect(std.mem.isAligned(@intFromPtr(page), List.page_alignment.toByteUnits()));
+
+    // A second reservation allocates nothing
+    try list.reserveAllPages();
+    try std.testing.expectEqual(@as(usize, 4), failing.allocations);
+
+    // From now on every allocation fails: constructObject must not allocate
+    failing.fail_index = failing.alloc_index;
+
+    // The objects are handed out in the same order as without the reservation (see the single threaded test)
+    for (0..12) |i|
+        try std.testing.expectEqual(@as(u32, @intCast(i)), try list.constructObject(100 + i));
+    try std.testing.expectEqual(List.invalid_object_index, try list.constructObject(0));
+    list.destructObject(3);
+    list.destructObjectPtr(list.get(9));
+    try std.testing.expectEqual(@as(u32, 9), try list.constructObject(209));
+    try std.testing.expectEqual(@as(u32, 3), try list.constructObject(203));
+    try std.testing.expectEqual(List.invalid_object_index, try list.constructObject(0));
+    try std.testing.expectEqual(@as(u64, 209), list.get(9).*);
+    try std.testing.expectEqual(@as(u64, 111), list.get(11).*);
+    var all: List.Batch = .{};
+    for (0..12) |i| list.addObjectToBatch(&all, @intCast(i));
+    list.destructObjectBatch(&all);
+    for (0..12) |_|
+        try std.testing.expect(try list.constructObject(0) != List.invalid_object_index);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 4), failing.allocations);
+    var all_again: List.Batch = .{};
+    for (0..12) |i| list.addObjectToBatch(&all_again, @intCast(i));
+    list.destructObjectBatch(&all_again);
+
+    // Destruction frees the reserved pages and the page table (std.testing.allocator checks for leaks)
+    list.deinit();
+    try std.testing.expectEqual(@as(usize, 4), failing.deallocations);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "FixedSizeFreeList reserveAllPages after constructObject allocated pages" {
+    const io = std.testing.io;
+    const List = FixedSizeFreeList(u32);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var list: List = try .init(failing.allocator(), io, 64, 16);
+    defer list.deinit();
+
+    // The first page is allocated on demand, the reservation allocates the 3 others
+    try std.testing.expectEqual(@as(u32, 0), try list.constructObject(7));
+    try std.testing.expectEqual(@as(usize, 2), failing.allocations);
+    const first_page = list.pages.?[0];
+    try list.reserveAllPages();
+    try std.testing.expectEqual(@as(usize, 5), failing.allocations);
+    try std.testing.expectEqual(first_page, list.pages.?[0]);
+    try std.testing.expectEqual(@as(u32, 7), list.get(0).*);
+
+    failing.fail_index = failing.alloc_index;
+    var batch: List.Batch = .{};
+    list.addObjectToBatch(&batch, 0);
+    for (1..64) |i| {
+        const index = try list.constructObject(@intCast(i));
+        try std.testing.expectEqual(@as(u32, @intCast(i)), index);
+        list.addObjectToBatch(&batch, index);
+    }
+    try std.testing.expectEqual(List.invalid_object_index, try list.constructObject(0));
+    try std.testing.expect(!failing.has_induced_failure);
+    list.destructObjectBatch(&batch);
+}
+
+test "FixedSizeFreeList reserveAllPages out of memory" {
+    const io = std.testing.io;
+    const List = FixedSizeFreeList(u32);
+
+    // Every allocation of init + reserveAllPages fails in turn
+    const Ctx = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var list: List = try .init(allocator, std.testing.io, 100, 8);
+            defer list.deinit();
+            try list.reserveAllPages();
+            var batch: List.Batch = .{};
+            for (0..100) |i| list.addObjectToBatch(&batch, try list.constructObject(@intCast(i)));
+            list.destructObjectBatch(&batch);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Ctx.run, .{});
+
+    // After a failed reservation the pages that were allocated stay allocated and the list stays usable:
+    // constructObject allocates the missing pages
+    for (1..14) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var list: List = try .init(failing.allocator(), io, 100, 8); // 13 pages
+        defer list.deinit();
+        try std.testing.expectError(error.OutOfMemory, list.reserveAllPages());
+        try std.testing.expectEqual(@as(u32, @intCast(8 * (fail_index - 1))), list.num_objects_allocated.load(.monotonic));
+
+        // While the allocator fails, objects of the allocated pages can be constructed, then constructObject fails
+        var batch: List.Batch = .{};
+        for (0..8 * (fail_index - 1)) |i|
+            list.addObjectToBatch(&batch, try list.constructObject(@intCast(i)));
+        try std.testing.expectError(error.OutOfMemory, list.constructObject(0));
+        list.destructObjectBatch(&batch);
+
+        // The allocator works again: the missing pages are allocated on demand. The failed constructObject took the index
+        // of the first object of the missing pages, which is never handed out, so 103 of the 104 objects can be constructed.
+        failing.fail_index = std.math.maxInt(usize);
+        var count: u32 = 0;
+        var all: List.Batch = .{};
+        while (true) {
+            const index = try list.constructObject(0);
+            if (index == List.invalid_object_index) break;
+            list.addObjectToBatch(&all, index);
+            count += 1;
+        }
+        try std.testing.expectEqual(@as(u32, 103), count);
+        list.destructObjectBatch(&all);
+    }
+}
+
 /// Stress test: several threads construct and destruct (single and batched) objects at the same time and check that
 /// no object is handed out twice and that no object is modified while it is in use.
 /// Each thread keeps up to `max_live_per_thread` objects alive. Before the threads start, `num_reserved` objects are
 /// taken so that the threads run out of objects when `max_objects - num_reserved < max_live_per_thread`, even when
 /// the threads happen to not run at the same time.
-fn stressFixedSizeFreeList(max_objects: u32, page_size: u32, max_live_per_thread: u32, num_reserved: u32) !void {
+/// With `opts.reserve_all_pages` all pages are allocated before the threads start and every later allocation fails.
+fn stressFixedSizeFreeList(max_objects: u32, page_size: u32, max_live_per_thread: u32, num_reserved: u32, opts: struct { reserve_all_pages: bool = false }) !void {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
     const io = std.testing.io;
 
@@ -631,14 +785,21 @@ fn stressFixedSizeFreeList(max_objects: u32, page_size: u32, max_live_per_thread
     };
 
     const allocator = std.testing.allocator;
+    var list_allocator = std.testing.FailingAllocator.init(allocator, .{});
     var context: Context = .{
-        .list = try .init(allocator, io, max_objects, page_size),
+        .list = try .init(list_allocator.allocator(), io, max_objects, page_size),
         .in_use = try allocator.alloc(std.atomic.Value(bool), max_objects),
         .max_live = max_live_per_thread,
     };
     defer allocator.free(context.in_use);
     defer context.list.deinit();
     @memset(context.in_use, .init(false));
+    if (opts.reserve_all_pages) {
+        try context.list.reserveAllPages();
+        try std.testing.expectEqual(context.list.num_pages * page_size, context.list.num_objects_allocated.load(.monotonic));
+        list_allocator.fail_index = list_allocator.alloc_index; // constructObject must not allocate (it would fail)
+    }
+    const num_list_allocations = list_allocator.allocations;
 
     var reserved: List.Batch = .{};
     for (0..num_reserved) |_| {
@@ -675,17 +836,27 @@ fn stressFixedSizeFreeList(max_objects: u32, page_size: u32, max_live_per_thread
     }
     try std.testing.expectEqual(List.invalid_object_index, try context.list.constructObject(.{ .value = 0, .check = 0 }));
     context.list.destructObjectBatch(&batch);
+    if (opts.reserve_all_pages) {
+        try std.testing.expect(!list_allocator.has_induced_failure);
+        try std.testing.expectEqual(num_list_allocations, list_allocator.allocations);
+    }
 }
 
 test "FixedSizeFreeList multi threaded" {
-    try stressFixedSizeFreeList(1024, 64, 200, 0);
+    try stressFixedSizeFreeList(1024, 64, 200, 0, .{});
 }
 
 test "FixedSizeFreeList multi threaded running out of objects" {
-    try stressFixedSizeFreeList(256, 16, 100, 200);
+    try stressFixedSizeFreeList(256, 16, 100, 200, .{});
 }
 
 test "FixedSizeFreeList multi threaded small pages" {
     // Many pages are allocated while the threads are constructing objects
-    try stressFixedSizeFreeList(2048, 4, 400, 0);
+    try stressFixedSizeFreeList(2048, 4, 400, 0, .{});
+}
+
+test "FixedSizeFreeList multi threaded with all pages reserved" {
+    // No allocation happens while the threads are constructing objects (every allocation would fail)
+    try stressFixedSizeFreeList(2048, 4, 400, 0, .{ .reserve_all_pages = true });
+    try stressFixedSizeFreeList(256, 16, 100, 200, .{ .reserve_all_pages = true });
 }

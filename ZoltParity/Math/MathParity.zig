@@ -37,6 +37,8 @@ const jolt = struct {
     extern fn jolt_vec3_abs(v: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec4_compress_unit_vector(v: *const [4]f32) u32;
     extern fn jolt_vec4_decompress_unit_vector(value: u32, out: *[4]f32) void;
+    extern fn jolt_vec4_to_int(v: *const [4]f32, out: *[4]u32) void;
+    extern fn jolt_uvec4_to_float(v: *const [4]u32, out: *[4]f32) void;
     extern fn jolt_vec3_normalized(v: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec3_cross(a: *const [3]f32, b: *const [3]f32, out: *[3]f32) void;
     extern fn jolt_vec3_dot(a: *const [3]f32, b: *const [3]f32) f32;
@@ -45,6 +47,8 @@ const jolt = struct {
     extern fn jolt_vec3_unit_spherical(theta: f32, phi: f32, out: *[3]f32) void;
     extern fn jolt_vec3_compress_unit_vector(v: *const [3]f32) u32;
     extern fn jolt_vec3_decompress_unit_vector(value: u32, out: *[3]f32) void;
+    extern fn jolt_vec3_to_int(v: *const [3]f32, out: *[3]u32) void;
+    extern fn jolt_vec3_unit_sphere(out_vertices: *[1026 * 3]f32) u32;
 
     extern fn jolt_quat_rotation(axis: *const [3]f32, angle: f32, out: *[4]f32) void;
     extern fn jolt_quat_mul(a: *const [4]f32, b: *const [4]f32, out: *[4]f32) void;
@@ -558,6 +562,48 @@ test "Vec4 compress / decompress unit vector" {
     try finishAll(&.{ &compress, &decompress });
 }
 
+/// Inputs of toInt that are not in the range of an i32 or close to its limits
+const to_int_special_values = [_]f32{ std.math.nan(f32), -std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), zolt.math.flt_max, -zolt.math.flt_max, 3.0e38, -3.0e38, 3.0e9, -3.0e9, 2147483648.0, -2147483648.0, 2147483520.0, -2147483904.0, 4294967296.0, 1.0e10, -1.0e10, -0.0, -0.5, -0.9999999, -1.0, -1.5, 0.9999999, 65535.5, 1.0e-30 };
+
+test "Vec4 / Vec3 toInt (NaN, infinity, out of range)" {
+    var rng: Rng = .{};
+    var to_int4: Checker = .{ .name = "Vec4.toInt" };
+    var to_int3: Checker = .{ .name = "Vec3.toInt" };
+    for (0..iterations) |_| {
+        var v: [4]f32 = undefined;
+        for (&v) |*c| {
+            c.* = switch (rng.next() % 3) {
+                0 => to_int_special_values[rng.next() % to_int_special_values.len],
+                1 => rng.float(-5.0e9, 5.0e9),
+                else => rng.float(-100, 100),
+            };
+        }
+        var expected: [4]u32 = undefined;
+        jolt.jolt_vec4_to_int(&v, &expected);
+        to_int4.check(v, @as([4]u32, vec4(v).toInt().value), expected);
+        const v3 = [3]f32{ v[0], v[1], v[2] };
+        var expected3: [3]u32 = undefined;
+        jolt.jolt_vec3_to_int(&v3, &expected3);
+        const r3 = vec3(v3).toInt();
+        to_int3.check(v3, [3]u32{ r3.getX(), r3.getY(), r3.getZ() }, expected3);
+    }
+    try finishAll(&.{ &to_int4, &to_int3 });
+}
+
+test "UVec4 toFloat (full u32 range, Jolt's SSE path converts as signed int)" {
+    var rng: Rng = .{};
+    var to_float: Checker = .{ .name = "UVec4.toFloat" };
+    const edge = [_]u32{ 0, 1, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0xffff_ffff, 0x00ff_ffff, 0x0100_0001, 0xc000_0000 };
+    for (0..iterations) |i| {
+        var v: [4]u32 = undefined;
+        for (&v, 0..) |*c, k| c.* = if (i < edge.len) edge[(i + k) % edge.len] else rng.next();
+        var expected: [4]f32 = undefined;
+        jolt.jolt_uvec4_to_float(&v, &expected);
+        to_float.check(v, arr4(UVec4.init(v[0], v[1], v[2], v[3]).toFloat()), expected);
+    }
+    try finishAll(&.{&to_float});
+}
+
 test "Vec3 normalized / cross / dot / length / perpendicular" {
     var rng: Rng = .{};
     var normalized: Checker = .{ .name = "Vec3.normalized" };
@@ -600,6 +646,15 @@ test "Vec3 unitSpherical / compress / decompress" {
         decompress.check(value, arr3(Vec3.decompressUnitVector(value)), expected);
     }
     try finishAll(&.{ &spherical, &compress, &decompress });
+}
+
+test "Vec3.unit_sphere (Vec3::sUnitSphere)" {
+    var jolt_vertices: [1026 * 3]f32 = undefined;
+    const jolt_count = jolt.jolt_vec3_unit_sphere(&jolt_vertices);
+    try std.testing.expectEqual(jolt_count, Vec3.unit_sphere.len);
+    var checker: Checker = .{ .name = "Vec3.unit_sphere" };
+    for (Vec3.unit_sphere.constSlice(), 0..) |v, i| checker.check(.{i}, arr3(v), jolt_vertices[3 * i ..][0..3].*);
+    try checker.finish();
 }
 
 test "Quat rotation / mul / mulVec3 / inverseRotate / multiplyImaginary / rotateAxis" {
@@ -1038,6 +1093,18 @@ test "DVec3 arithmetic / normalized / length / dot / cross" {
         jolt.jolt_dvec3_normalized(&a, &expected);
         normalized.check(a, arrD3(dvec3(a).normalized()), expected);
     }
+
+    // Dot products where all products are -0 (Jolt's SIMD paths sum (x + y) + z, which keeps the -0)
+    const zero_products = [_][2][3]f64{
+        .{ .{ 0, 0, 0 }, .{ -1, -2, -0.0 } },
+        .{ .{ -0.0, 0, -0.0 }, .{ 1, -2, 3 } },
+        .{ .{ -0.0, -0.0, -0.0 }, .{ 0, 0, 0 } },
+        .{ .{ 0, 0, 0 }, .{ 0, 0, 0 } },
+        .{ .{ 1.0e-300, -1.0e-300, 0 }, .{ -1.0e-300, 1.0e-300, -1 } },
+    };
+    for (zero_products) |c|
+        dot.check(c, dvec3(c[0]).dot(dvec3(c[1])), jolt.jolt_dvec3_dot(&c[0], &c[1]));
+
     try finishAll(&.{ &add, &sub, &mul, &div, &add_vec3, &sub_vec3, &mul_scalar, &div_scalar, &negate, &abs, &reciprocal, &sqrt, &get_sign, &min, &max, &cross, &dot, &length_sq, &length, &normalized });
 }
 

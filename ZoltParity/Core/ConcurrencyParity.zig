@@ -323,7 +323,7 @@ fn runHashMapParity(comptime T: type, config: HashMapConfig, checker: *Checker) 
         return;
     map.clear();
     lfhm_allocator.clear();
-    jolt.jolt_lfhm_clear(jolt_map, @intFromBool(true));
+    jolt.jolt_lfhm_clear(jolt_map, 1);
     if (!try compareHashMapContents(T, &map, jolt_map, keys, values, handles, .{ config, operation + 1 }, checker))
         return;
     for (0..config.key_range) |i| {
