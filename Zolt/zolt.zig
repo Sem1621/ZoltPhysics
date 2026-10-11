@@ -235,6 +235,7 @@ pub const ObjectVsBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/
 pub const SpecifiedBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").SpecifiedBroadPhaseLayerFilter;
 pub const BroadPhaseLayerInterfaceMask = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig").BroadPhaseLayerInterfaceMask;
 pub const BroadPhaseLayerInterfaceTable = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+pub const BroadPhaseQuadTree = @import("Physics/Collision/BroadPhase/BroadPhaseQuadTree.zig").BroadPhaseQuadTree;
 pub const BroadPhaseQuery = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").BroadPhaseQuery;
 pub const BroadPhaseQueryFilters = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").QueryFilters;
 pub const CastShapeBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").CastShapeBodyCollector;
@@ -242,6 +243,7 @@ pub const CollideShapeBodyCollector = @import("Physics/Collision/BroadPhase/Broa
 pub const RayCastBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").RayCastBodyCollector;
 pub const ObjectVsBroadPhaseLayerFilterMask = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig").ObjectVsBroadPhaseLayerFilterMask;
 pub const ObjectVsBroadPhaseLayerFilterTable = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
+pub const QuadTree = @import("Physics/Collision/BroadPhase/QuadTree.zig").QuadTree;
 pub const CastConvexVsTriangles = @import("Physics/Collision/CastConvexVsTriangles.zig").CastConvexVsTriangles;
 pub const BroadPhaseCastResult = @import("Physics/Collision/CastResult.zig").BroadPhaseCastResult;
 pub const RayCastResult = @import("Physics/Collision/CastResult.zig").RayCastResult;
@@ -584,9 +586,11 @@ const source_files = .{
     @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseQuadTree.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig"),
     @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig"),
     @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig"),
+    @import("Physics/Collision/BroadPhase/QuadTree.zig"),
     @import("Physics/Collision/CastConvexVsTriangles.zig"),
     @import("Physics/Collision/CastResult.zig"),
     @import("Physics/Collision/CastSphereVsTriangles.zig"),

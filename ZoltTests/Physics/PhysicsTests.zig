@@ -851,6 +851,6 @@ test "TestOptimizeBroadPhase" {
             try expect(!bi.isAdded(id));
 
         // Optimize the broad phase to recycle quad tree nodes
-        c.getSystem().optimizeBroadPhase();
+        try c.getSystem().optimizeBroadPhase();
     }
 }

@@ -14,7 +14,7 @@
 //!   compared after every update.
 //! - D5: every temp allocation of an update fails in turn (single and multi threaded), every createJob of an update
 //!   fails in turn, a heap allocation inside a job fails (a custom broad phase that allocates in updatePrepare, which
-//!   runs in the UpdateBroadPhasePrepare job). The update returns error.OutOfMemory, the temp allocator is empty, a
+//!   runs in the UpdateBroadPhasePrepare job, or fails castAABoxNoLock in the FindCCDContacts jobs). The update returns error.OutOfMemory, the temp allocator is empty, a
 //!   failure while building the jobs changes nothing, and the system recovers by restoring the state saved before.
 //! - Every allocation of creating the scene fails in turn (std.testing.checkAllAllocationFailures).
 //! - The BodyInterface functions that flag the contact cache invalid (setShape, notifyShapeChanged,
@@ -117,7 +117,8 @@ const PushListener = struct {
 
 // -------------------------------------------------------------------------------------------------------------------
 // A broad phase that allocates in updatePrepare (a heap allocation inside the UpdateBroadPhasePrepare job, like the new
-// tree of Jolt's BroadPhaseQuadTree) and delegates everything else to a BroadPhaseBruteForce
+// tree of Jolt's BroadPhaseQuadTree), can fail castAABoxNoLock (the node stack of BroadPhaseQuadTree's cast growing on
+// the heap inside the FindCCDContacts job) and delegates everything else to a BroadPhaseBruteForce
 
 const AllocatingBroadPhase = struct {
     pub const overrides = .{ .initBroadPhase, .optimize, .frameSync, .lockModifications, .updatePrepare, .updateFinalize, .unlockModifications, .addBodiesPrepare, .addBodiesFinalize, .addBodiesAbort, .removeBodies, .notifyBodiesAABBChanged, .notifyBodiesLayerChanged, .castRay, .collideAABox, .collideSphere, .collidePoint, .collideOrientedBox, .castAABoxNoLock, .castAABox, .findCollidingPairs, .getBounds };
@@ -127,6 +128,8 @@ const AllocatingBroadPhase = struct {
     base: BroadPhase,
     inner: *BroadPhaseBruteForce,
     num_prepared: u32 = 0,
+    /// castAABoxNoLock returns error.OutOfMemory (read by the FindCCDContacts jobs)
+    fail_cast: std.atomic.Value(bool) = .init(false),
 
     fn create(allocator: Allocator) Allocator.Error!*AllocatingBroadPhase {
         const inner = try BroadPhaseBruteForce.create(allocator);
@@ -153,8 +156,8 @@ const AllocatingBroadPhase = struct {
         try self.innerBroadPhase().initBroadPhase(body_manager, layer_interface);
     }
 
-    pub fn optimize(self: *AllocatingBroadPhase) void {
-        self.innerBroadPhase().optimize();
+    pub fn optimize(self: *AllocatingBroadPhase) Allocator.Error!void {
+        return self.innerBroadPhase().optimize();
     }
 
     pub fn frameSync(self: *AllocatingBroadPhase) void {
@@ -207,8 +210,8 @@ const AllocatingBroadPhase = struct {
         self.innerBroadPhase().notifyBodiesAABBChanged(bodies, .{ .take_lock = take_lock });
     }
 
-    pub fn notifyBodiesLayerChanged(self: *AllocatingBroadPhase, bodies: []BodyID) void {
-        self.innerBroadPhase().notifyBodiesLayerChanged(bodies);
+    pub fn notifyBodiesLayerChanged(self: *AllocatingBroadPhase, bodies: []BodyID) Allocator.Error!void {
+        return self.innerBroadPhase().notifyBodiesLayerChanged(bodies);
     }
 
     pub fn castRay(self: *const AllocatingBroadPhase, ray: *const RayCast, collector: *RayCastBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
@@ -231,16 +234,18 @@ const AllocatingBroadPhase = struct {
         self.innerQuery().collideOrientedBox(box, collector, .{ .broad_phase_layer_filter = broad_phase_layer_filter, .object_layer_filter = object_layer_filter });
     }
 
-    pub fn castAABoxNoLock(self: *const AllocatingBroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
-        self.innerBroadPhase().castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter);
+    pub fn castAABoxNoLock(self: *const AllocatingBroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) Allocator.Error!void {
+        if (self.fail_cast.load(.monotonic))
+            return error.OutOfMemory;
+        return self.innerBroadPhase().castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter);
     }
 
     pub fn castAABox(self: *const AllocatingBroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
         self.innerQuery().castAABox(box, collector, .{ .broad_phase_layer_filter = broad_phase_layer_filter, .object_layer_filter = object_layer_filter });
     }
 
-    pub fn findCollidingPairs(self: *const AllocatingBroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) void {
-        self.innerBroadPhase().findCollidingPairs(active_bodies, speculative_contact_distance, object_vs_broad_phase_layer_filter, object_layer_pair_filter, pair_collector);
+    pub fn findCollidingPairs(self: *const AllocatingBroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void {
+        return self.innerBroadPhase().findCollidingPairs(active_bodies, speculative_contact_distance, object_vs_broad_phase_layer_filter, object_layer_pair_filter, pair_collector);
     }
 
     pub fn getBounds(self: *const AllocatingBroadPhase) AABox {
@@ -900,6 +905,142 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhase.updatePrepare)" 
         try expect(temp.isEmpty());
         try expectRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
     }
+}
+
+fn outOfHeapMemoryInCCDCast(kind: JobSystemKind) !void {
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    // The system owns the custom broad phase after a successful init
+    const scene = try allocator.create(Scene);
+    defer allocator.destroy(scene);
+    const broad_phase = try AllocatingBroadPhase.create(allocator);
+    scene.initSystem(allocator, .{ .broad_phase = .{ .custom = &broad_phase.base } }) catch |err| {
+        broad_phase.base.base.destroy();
+        return err;
+    };
+    defer scene.deinit();
+    try scene.populate(allocator);
+    for (0..5) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    // The casts of the bullets fail: the FindCCDContacts jobs latch the error, the update returns it
+    snapshot.rewind();
+    try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+    broad_phase.fail_cast.store(true, .monotonic);
+    try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
+    broad_phase.fail_cast.store(false, .monotonic);
+    try expect(temp.isEmpty());
+    try expectRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
+}
+
+test "PhysicsSystem out of heap memory inside a job (BroadPhase.castAABoxNoLock), single threaded" {
+    try outOfHeapMemoryInCCDCast(.single_threaded);
+}
+
+test "PhysicsSystem out of heap memory inside a job (BroadPhase.castAABoxNoLock), multi threaded" {
+    try outOfHeapMemoryInCCDCast(.{ .thread_pool = 3 });
+}
+
+test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePrepare)" {
+    // The default broad phase allocates the node IDs and BuildTree's centers in the UpdateBroadPhasePrepare job
+    var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
+    const allocator = heap.allocator();
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(std.testing.allocator, .{ .thread_pool = 3 });
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(std.testing.allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try std.testing.allocator.create(Scene);
+    defer std.testing.allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+    for (0..5) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+
+    var snapshot = StateRecorderImpl.init(std.testing.allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+
+    // Reference: count the heap allocations of one update (the first step rebuilds the tree of the moving bodies, the
+    // second step cannot update it again before the next FrameSync discards its old tree)
+    const before = heap.num_allocations.load(.monotonic);
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expect(num_allocations >= 2); // The node IDs and the centers
+    var reference = StateRecorderImpl.init(std.testing.allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    for (0..num_allocations) |i| {
+        snapshot.rewind();
+        try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        heap.fail_index.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
+        heap.fail_index.store(std.math.maxInt(u32), .monotonic);
+        try expect(temp.isEmpty());
+        try expectRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
+    }
+}
+
+test "PhysicsSystem with the brute force broad phase gives the results of the quad tree" {
+    // The broad phase does not change the results (Jolt's determinism comes from the contact sorts)
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, .single_threaded);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    var states: [2]StateRecorderImpl = .{ .init(allocator), .init(allocator) };
+    defer for (&states) |*s| s.deinit();
+    for ([_]PhysicsSystem.BroadPhaseOption{ .quad_tree, .brute_force }, &states) |option, *state| {
+        const scene = try allocator.create(Scene);
+        defer allocator.destroy(scene);
+        try scene.init(allocator, .{ .broad_phase = option });
+        defer scene.deinit();
+        try scene.system.optimizeBroadPhase();
+        for (0..10) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+        try scene.system.saveState(state.recorder(), .{});
+    }
+    try expect(states[0].isEqual(&states[1]));
+}
+
+test "PhysicsSystem BodyInterface setObjectLayer out of memory changes nothing" {
+    const allocator = std.testing.allocator;
+    var failing: std.testing.FailingAllocator = .init(allocator, .{});
+    const scene = try allocator.create(Scene);
+    defer allocator.destroy(scene);
+    try scene.init(failing.allocator(), .{});
+    defer scene.deinit();
+    const bi = scene.system.getBodyInterfaceMut();
+
+    // The quad tree moves the body to the tree of its new broad phase layer: the layer state and BuildTree's centers
+    var k: usize = 0;
+    while (true) : (k += 1) {
+        failing.fail_index = failing.alloc_index + k;
+        const result = bi.setObjectLayer(scene.kinematic_body, Layers.moving2);
+        failing.fail_index = std.math.maxInt(usize);
+        if (result) |_| break else |err| {
+            try expectEqual(error.OutOfMemory, err);
+            try expectEqual(Layers.moving, bi.getObjectLayer(scene.kinematic_body));
+            try expect(bi.isAdded(scene.kinematic_body));
+        }
+    }
+    try expect(k >= 2);
+    try expectEqual(Layers.moving2, bi.getObjectLayer(scene.kinematic_body));
+    try expect(bi.isAdded(scene.kinematic_body));
 }
 
 test "PhysicsSystem out of memory creating the scene" {

@@ -30,10 +30,9 @@
 //! scene in SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping
 //! bodies, step listener calls, CCD bodies, sweep counts): check it when you write a scene.
 //!
-//! The C++ PhysicsSystem uses BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp), Zolt
-//! BroadPhaseBruteForce until A1. The gravity-only scenes do not depend on it: no body pair reaches the narrow phase,
-//! and the different orders of the active bodies (AddBodiesPrepare sorts by layer in the QuadTree) change no saved
-//! byte and no sorted record.
+//! Both PhysicsSystems use BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp, Zolt's default since A1;
+//! no comparison was ever loosened for the brute force broad phase that Zolt used before). The trees themselves are
+//! compared by BroadPhaseQuadTreeParity.zig.
 //!
 //! Proof that it bites: computing `(gravity * gravity_factor) * dt + (force * inv_mass) * dt` instead of Jolt's
 //! `(gravity * gravity_factor + force * inv_mass) * dt` in MotionProperties.applyForceTorqueAndDragInternal is reported
@@ -652,7 +651,7 @@ const ZoltWorld = struct {
             .set_max_linear_velocity => bi.setMaxLinearVelocity(id, f[0]),
             .set_max_angular_velocity => bi.setMaxAngularVelocity(id, f[0]),
             .reset_sleep_timer => bi.resetSleepTimer(id),
-            .set_object_layer => bi.setObjectLayer(id, @intCast(op.index)),
+            .set_object_layer => try bi.setObjectLayer(id, @intCast(op.index)),
             .set_user_data => bi.setUserData(id, @as(u64, op.index) | (@as(u64, op.count) << 32)),
             .set_friction_and_restitution => {
                 bi.setFriction(id, f[0]);
@@ -679,7 +678,7 @@ const ZoltWorld = struct {
                 return 0;
             },
             .optimize_broad_phase => {
-                self.system.optimizeBroadPhase();
+                try self.system.optimizeBroadPhase();
                 return 0;
             },
             .set_shape => try bi.setShape(id, self.shapes.items[op.index].get().?, op.count != 0, activation),

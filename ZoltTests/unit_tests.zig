@@ -54,6 +54,8 @@ test {
     _ = @import("Physics/BodyTestContext.zig");
     _ = @import("Physics/BodyTests.zig");
     _ = @import("Physics/BroadPhaseBruteForceTests.zig");
+    _ = @import("Physics/BroadPhaseQuadTreeTests.zig");
+    _ = @import("Physics/BroadPhaseTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");

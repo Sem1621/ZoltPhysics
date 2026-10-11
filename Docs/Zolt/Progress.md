@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 62.6%** of 85391 lines in scope · **Unit tests: 54.8%** of 18321 lines
+**Library: 65.3%** of 85391 lines in scope · **Unit tests: 55.3%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -23,7 +23,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics` | 52% | 9 | 1 | 1 | 2 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 73% | 15 | 3 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 86% | 70 | 1 | 1 | 4 | 0 | 0 | 21948 |
+| `Jolt/Physics/Collision` | 97% | 72 | 1 | 1 | 2 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 37% | 20 | 0 | 1 | 14 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
@@ -294,7 +294,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Collision — 86%</summary>
+<details><summary>Jolt/Physics/Collision — 97%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -307,11 +307,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `BroadPhaseLayer.h` | 121 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseLayer.zig` |
 | `BroadPhaseLayerInterfaceMask.h` | 76 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig` |
 | `BroadPhaseLayerInterfaceTable.h` | 52 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig` |
-| `BroadPhaseQuadTree.cpp`, `BroadPhaseQuadTree.h` | 589 | ❌ todo |  |
+| `BroadPhaseQuadTree.cpp`, `BroadPhaseQuadTree.h` | 589 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.zig` |
 | `BroadPhaseQuery.h` | 42 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseQuery.zig` |
 | `ObjectVsBroadPhaseLayerFilterMask.h` | 27 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig` |
 | `ObjectVsBroadPhaseLayerFilterTable.h` | 55 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig` |
-| `QuadTree.cpp`, `QuadTree.h` | 1783 | ❌ todo |  |
+| `QuadTree.cpp`, `QuadTree.h` | 1783 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/QuadTree.zig` |
 | `CastConvexVsTriangles.cpp`, `CastConvexVsTriangles.h` | 127 | ✅ complete | `Zolt/Physics/Collision/CastConvexVsTriangles.zig` |
 | `CastResult.h` | 27 | ✅ complete | `Zolt/Physics/Collision/CastResult.zig` |
 | `CastSphereVsTriangles.cpp`, `CastSphereVsTriangles.h` | 231 | ✅ complete | `Zolt/Physics/Collision/CastSphereVsTriangles.zig` |
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 36% | 6 | 12 | 1 | 14 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 37% | 7 | 12 | 1 | 13 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 55%</summary>
 
@@ -640,12 +640,12 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 36%</summary>
+<details><summary>UnitTests/Physics — 37%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ActiveEdgesTests.cpp` | 317 | 🟡 partial | `ZoltTests/Physics/ActiveEdgesTests.zig` |
-| `BroadPhaseTests.cpp` | 100 | ❌ todo |  |
+| `BroadPhaseTests.cpp` | 100 | ✅ complete | `ZoltTests/Physics/BroadPhaseTests.zig` |
 | `CastShapeTests.cpp` | 543 | 🟡 partial | `ZoltTests/Physics/CastShapeTests.zig` |
 | `CharacterVirtualTests.cpp` | 763 | ❌ todo |  |
 | `CollidePointTests.cpp` | 361 | 🟡 partial | `ZoltTests/Physics/CollidePointTests.zig` |
