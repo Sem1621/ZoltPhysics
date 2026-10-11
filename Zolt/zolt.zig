@@ -426,6 +426,10 @@ pub const RegisterTypes = @import("RegisterTypes.zig");
 /// Test shapes of the inline tests of the shape core, registered through `zolt_user_types` by build.zig (only in test builds)
 pub const test_shapes = if (@import("builtin").is_test) @import("Physics/Collision/Shape/TestShapes.zig") else struct {};
 
+/// Test constraint of the inline tests and the unit tests, its settings are registered through `zolt_user_types` by
+/// build.zig for the inline tests (only in test builds)
+pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Constraints/TestConstraints.zig") else struct {};
+
 // TriangleSplitter
 pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
 pub const TriangleSplitterBinning = @import("TriangleSplitter/TriangleSplitterBinning.zig").TriangleSplitterBinning;
@@ -620,6 +624,7 @@ const source_files = .{
     @import("Physics/Constraints/Constraint.zig"),
     @import("Physics/Constraints/ConstraintManager.zig"),
     @import("Physics/Constraints/ContactConstraintManager.zig"),
+    @import("Physics/Constraints/TestConstraints.zig"),
     @import("Physics/Constraints/TwoBodyConstraint.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
