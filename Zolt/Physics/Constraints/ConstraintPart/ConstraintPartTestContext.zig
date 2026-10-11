@@ -19,7 +19,6 @@ const BodyCreationSettings = @import("../../Body/BodyCreationSettings.zig").Body
 const CreateBodyError = @import("../../Body/BodyCreationSettings.zig").CreateBodyError;
 const BodyManager = @import("../../Body/BodyManager.zig").BodyManager;
 const MotionType = @import("../../Body/MotionType.zig").MotionType;
-const BroadPhaseLayer = @import("../../Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
 const BroadPhaseLayerInterfaceTable = @import("../../Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
 const BoxShape = @import("../../Collision/Shape/BoxShape.zig").BoxShape;
 
@@ -35,12 +34,6 @@ pub const motion_type_pairs = blk: {
             pairs[i * 3 + j] = .{ t1, t2 };
     }
     break :blk pairs;
-};
-
-/// The pairs where at least one body is dynamic (the only ones where a constraint can do something)
-pub const dynamic_motion_type_pairs = [_]MotionTypePair{
-    .{ .static, .dynamic },    .{ .kinematic, .dynamic }, .{ .dynamic, .static },
-    .{ .dynamic, .kinematic }, .{ .dynamic, .dynamic },
 };
 
 /// Options for a test body

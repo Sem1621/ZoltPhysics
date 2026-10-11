@@ -33,7 +33,6 @@ const fw = @import("../ParityFramework.zig");
 const Checker = fw.Checker;
 
 const Allocator = std.mem.Allocator;
-const AllowedDOFs = zolt.AllowedDOFs;
 const AngleConstraintPart = zolt.AngleConstraintPart;
 const AngularFrictionConstraintPart = zolt.AngularFrictionConstraintPart;
 const AxisConstraintPart = zolt.AxisConstraintPart;
