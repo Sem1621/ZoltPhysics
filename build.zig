@@ -6,6 +6,7 @@
 //!   zig build check        Compile everything without running (fast feedback / ZLS build-on-save)
 //!   zig build docs         Emit autodoc HTML into zig-out/docs
 //!   zig build parity       Compare Zolt bit for bit with the C++ Jolt library (compiled from Jolt/ with Zig's C++ compiler)
+//!   zig build performance-test -- <args>   Run ZoltPerformanceTest (the port of PerformanceTest/, see its -h)
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
@@ -170,6 +171,38 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&lib_tests.step);
     check_step.dependOn(&unit_tests.step);
     if (det_log_tests_opt) |t| check_step.dependOn(&t.step);
+
+    // Port of PerformanceTest/ (milestone M6): installed with the library, `zig build performance-test -- <arguments>`
+    // runs it, e.g. `zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid
+    // -validate_hash=0x74d0118836ac0892` (the hashes of .github/workflows/determinism_check.yml)
+    const performance_test = b.addExecutable(.{
+        .name = "ZoltPerformanceTest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("ZoltPerformanceTest/PerformanceTest.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = zolt },
+            },
+        }),
+        .use_llvm = use_llvm,
+    });
+    b.installArtifact(performance_test);
+    const run_performance_test = b.addRunArtifact(performance_test);
+    if (b.args) |args| run_performance_test.addArgs(args);
+    const performance_test_step = b.step("performance-test", "Run the port of PerformanceTest (arguments after --)");
+    performance_test_step.dependOn(&run_performance_test.step);
+    check_step.dependOn(&performance_test.step);
+
+    // The inline tests of ZoltPerformanceTest/
+    const performance_test_tests = b.addTest(.{
+        .name = "zolt-performance-test-tests",
+        .root_module = performance_test.root_module,
+        .filters = test_filters,
+        .use_llvm = use_llvm,
+    });
+    test_step.dependOn(&b.addRunArtifact(performance_test_tests).step);
+    check_step.dependOn(&performance_test_tests.step);
 
     const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
     docs_step.dependOn(&b.addInstallDirectory(.{
