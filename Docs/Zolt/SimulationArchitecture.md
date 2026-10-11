@@ -979,3 +979,54 @@ QuadTree).
 - PhysicsSystem's linear cast inner radius assert only runs with asserts on (PortingGuide
   section 7). With a mirrored ScaledShape Jolt's inner radius is negative and its debug build
   asserts; the release-only scene compares the release behavior.
+
+**Wave A (QuadTree, ContactConstraintManager, LargeIslandSplitter, NarrowPhaseQuery, BodyInterface,
+DeterminismLog, PhysicsScene).**
+- The QuadTree is the PhysicsSystem default, as Jolt's `BROAD_PHASE` define makes it; `.brute_force`
+  stays selectable, and a test checks that it gives the same simulation results.
+- Jolt also heap-allocates in `Optimize`, `NotifyBodiesLayerChanged` and in the
+  `STLLocalAllocator<., 128>` walk stacks. Allocation failures are handled as follows:
+  - `findCollidingPairs`, `optimize` and `notifyBodiesLayerChanged` return `Allocator.Error`, and
+    the collision job latches the failure.
+  - `notifyBodiesLayerChanged` allocates everything first; `BodyInterface.setObjectLayer` restores
+    the layer on failure.
+  - Queries and `castAABoxNoLock` (used by the CCD job) have no error channel. They `@panic` when a
+    walk stack deeper than the inline 128 entries cannot be allocated.
+- A fixed BuildTree / AddBodiesAbort stack that overflows (undefined behavior in Jolt) `@panic`s
+  with a message.
+- `optimizeBroadPhase` is not safe while queries run, as in Jolt (Jolt's `Optimize` swaps trees
+  without flipping the query lock index).
+- ContactConstraintManager:
+  - The cache types and the constraint buffer have Jolt's exact layout. `CachedManifold` flags are
+    `std.atomic.Value(u16)` with `.seq_cst`.
+  - New cache entries are zero-filled like Jolt's value-initialization.
+  - Motion type pairs for which Jolt's dispatch table holds `nullptr` `@panic`.
+  - `restoreState` returns `Allocator.Error!bool`.
+  - `finalizeContactCacheAfterOutOfMemory` clears the write cache, resets the read cache's persisted
+    marks and calls no listener.
+- Two Jolt bugs are reproduced: re-found manifolds of a failed constraint creation (or of CCD) read
+  uninitialized friction lambdas, and a restore into a cache that is too small desynchronizes the
+  stream.
+- LargeIslandSplitter:
+  - `Splits` is an extern struct with Jolt's layout.
+  - The temp buffers are TempArrays freed LIFO in Reset. `resetAfterOutOfMemory` frees without
+    Reset's completion asserts after a poisoned update.
+  - `SplitIsland` takes the contact manager as `anytype`.
+- **Rule for R3 (refines D5).** In SolveVelocityConstraints, check the out-of-memory latch only at
+  job entry. A job that has entered must keep claiming and splitting islands even when poisoned.
+  Otherwise `next_split_island` never reaches `num_split_islands`, and jobs in the batch loop spin
+  forever on `FetchNextBatch`.
+- NarrowPhaseQuery:
+  - Every query takes `*const` receivers; the shape filter is `?*ShapeFilter` where Jolt writes its
+    `mBodyID2`.
+  - `collideShapeWithInternalEdgeRemoval` takes an allocator for the collector's heap fallback.
+  - The single-hit `castRay` returns `hit.fraction <= 1.0` like Jolt's code (not its doc comment).
+- BodyCreationSettings binary state rejects out-of-range enum bytes with Jolt's error text.
+  `saveWithChildren` returns `error.InvalidShape` without a shape (Jolt dereferences null).
+- PhysicsScene:
+  - `createBodies` undoes everything on an allocation error.
+  - Soft bodies are rejected until Phase 9.
+  - Constraint parity waits for the Phase 6 constraint settings.
+- DeterminismLog: the unit tests run a second time with the log enabled. The text is checked by
+  construction and with expected strings, not against Jolt's log: the C++ reference is built
+  without `JPH_ENABLE_DETERMINISM_LOG`.
