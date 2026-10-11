@@ -766,12 +766,16 @@ fn multiThreaded(round: usize) !void {
         stop: std.atomic.Value(bool) = .init(false),
         failures: std.atomic.Value(u32) = .init(0),
         queries: std.atomic.Value(u32) = .init(0),
+        /// The number of readers that run (the main thread waits for them: on a loaded machine the threads may start
+        /// only after the main loop would have finished)
+        started: std.atomic.Value(u32) = .init(0),
         /// The number of updates of the main thread: the adder does one add / remove per update, the removed bodies
         /// leave empty nodes until their tree is rebuilt (Jolt runs out of nodes otherwise too)
         updates: std.atomic.Value(u32) = .init(0),
         fixed: *const [32]BodyID,
 
         fn reader(s: *@This(), seed: u64) void {
+            _ = s.started.fetchAdd(1, .release);
             var prng: std.Random.DefaultPrng = .init(seed);
             const random = prng.random();
             var collector = AllHitCollisionCollector(CollideShapeBodyCollector).init(std.testing.allocator);
@@ -837,10 +841,14 @@ fn multiThreaded(round: usize) !void {
     for (&readers, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Shared.reader, .{ &shared, @as(u64, round * 10 + i) });
     const adder = try std.Thread.spawn(.{}, Shared.adder, .{ &shared, &changing });
 
-    // This thread moves bodies, notifies the broad phase and rebuilds the trees (the PhysicsSystem protocol)
+    // This thread moves bodies, notifies the broad phase and rebuilds the trees (the PhysicsSystem protocol). It starts
+    // when the readers run and goes on until they ran enough queries (a loaded machine runs the threads late and slowly).
+    while (shared.started.load(.acquire) < readers.len) std.Thread.yield() catch {};
     var prng: std.Random.DefaultPrng = .init(round);
     const random = prng.random();
-    for (0..300) |iteration| {
+    const min_queries = 100;
+    var iteration: usize = 0;
+    while (iteration < 300 or (shared.queries.load(.monotonic) < min_queries and iteration < 1_000_000)) : (iteration += 1) {
         for (&moving) |id| {
             const b = c.bodyMut(id);
             const p = b.getPosition();
@@ -859,7 +867,7 @@ fn multiThreaded(round: usize) !void {
     for (readers) |t| t.join();
     adder.join();
     try expectEqual(@as(u32, 0), shared.failures.load(.monotonic));
-    try expect(shared.queries.load(.monotonic) > 0);
+    try expect(shared.queries.load(.monotonic) >= min_queries);
     try c.update();
     _ = try validate(allocator, &c);
 }
