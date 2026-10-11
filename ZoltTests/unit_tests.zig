@@ -64,8 +64,8 @@ test {
     _ = @import("Physics/ConstraintManagerTests.zig");
     _ = @import("Physics/ContactConstraintManagerTests.zig");
     _ = @import("Physics/ConvexVsTrianglesTest.zig");
-    _ = @import("Physics/EstimateCollisionResponseTest.zig");
     _ = @import("Physics/DeterminismLogTests.zig");
+    _ = @import("Physics/EstimateCollisionResponseTest.zig");
     _ = @import("Physics/HeightFieldShapeTests.zig");
     _ = @import("Physics/IslandBuilderTests.zig");
     _ = @import("Physics/LargeIslandSplitterTests.zig");

@@ -47,7 +47,7 @@
 //!   CalculateSolverSteps or a DummyCalculateSolverSteps): `callback.call(MotionProperties, mp)`.
 //! - The private nested types of Jolt are `pub` (the tests and the parity tests read them); they are internal.
 //!
-//! JPH_DET_LOG: TODO(determinism_log). JPH_DEBUG_RENDERER (sDrawContactPoint, sDrawSupportingFaces,
+//! JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER (sDrawContactPoint, sDrawSupportingFaces,
 //! sDrawContactPointReduction, sDrawContactManifolds, ContactConstraint::Draw): TODO(debug_renderer).
 //! JPH_TRACK_SIMULATION_STATS follows MotionProperties' comptime switch `track_simulation_stats` (off). JPH_PROFILE is
 //! dropped.
@@ -93,6 +93,7 @@ const ValidateResult = ContactListenerFile.ValidateResult;
 const ContactConstraintPart = @import("ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart;
 const AngularFrictionConstraintPart = @import("ConstraintPart/AngularFrictionConstraintPart.zig").AngularFrictionConstraintPart;
 const PhysicsSettings = @import("../PhysicsSettings.zig").PhysicsSettings;
+const DeterminismLog = @import("../DeterminismLog.zig");
 const PhysicsUpdateError = @import("../EPhysicsUpdateError.zig").PhysicsUpdateError;
 const PhysicsUpdateContext = @import("../PhysicsUpdateContext.zig").PhysicsUpdateContext;
 const StateRecorderFile = @import("../StateRecorder.zig");
@@ -792,8 +793,7 @@ pub const ContactConstraintManager = struct {
 
             /// Calculate constraint properties for the non penetration constraint
             pub fn calculateNonPenetrationConstraintProperties(self: *Self, delta_time: f32, gravity: Vec3, body1: *const Body, body2: *const Body, inv_m1: f32, inv_m2: f32, inv_i1: Mat44, inv_i2: Mat44, world_space_position1: RVec3, world_space_position2: RVec3, world_space_normal: Vec3, settings: *const ContactSettings, min_velocity_for_restitution: f32) void {
-                // TODO(determinism_log): JPH_DET_LOG("CalculateNonPenetrationConstraintProperties: p1: " << inWorldSpacePosition1 << " p2: " << inWorldSpacePosition2
-                //   << " normal: " << inWorldSpaceNormal << " restitution: " << inSettings.mCombinedRestitution << " minv: " << inMinVelocityForRestitution);
+                if (DeterminismLog.enabled) DeterminismLog.log(.{ "CalculateNonPenetrationConstraintProperties: p1: ", world_space_position1, " p2: ", world_space_position2, " normal: ", world_space_normal, " restitution: ", settings.combined_restitution, " minv: ", min_velocity_for_restitution });
 
                 // Calculate collision points relative to body
                 const p = world_space_position1.add(world_space_position2).mulScalar(0.5);
@@ -965,9 +965,7 @@ pub const ContactConstraintManager = struct {
                         friction_point = friction_point.add(c);
                     friction_point = friction_point.divScalar(@as(Real, @floatFromInt(self.base.num_contact_points)));
 
-                    // TODO(determinism_log): JPH_DET_LOG("CalculateFrictionConstraintProperties: point: " << friction_point
-                    //   << " friction: " << inSettings.mCombinedFriction
-                    //   << " surface_vel: " << inSettings.mRelativeLinearSurfaceVelocity << " surface_ang: " << inSettings.mRelativeAngularSurfaceVelocity);
+                    if (DeterminismLog.enabled) DeterminismLog.log(.{ "CalculateFrictionConstraintProperties: point: ", friction_point, " friction: ", settings.combined_friction, " surface_vel: ", settings.relative_linear_surface_velocity, " surface_ang: ", settings.relative_angular_surface_velocity });
 
                     // Calculate distance of contact points to friction center in the normal plane
                     for (self.getContactPoints()[0..self.base.num_contact_points], world_space_contacts[0..self.base.num_contact_points]) |*wcp, c| {
@@ -1347,7 +1345,7 @@ pub const ContactConstraintManager = struct {
                     break;
                 };
 
-                // TODO(determinism_log): JPH_DET_LOG("GetContactsFromCache: id1: " << inBody1.GetID() << " id2: " << inBody2.GetID() << " key: " << constraint->mSortKey);
+                if (DeterminismLog.enabled) DeterminismLog.log(.{ "GetContactsFromCache: id1: ", body1.getID(), " id2: ", body2.getID(), " key: ", constraint.base.sort_key });
 
                 // Calculate scaled mass and inertia
                 var inv_i1: Mat44 = undefined;
@@ -1583,7 +1581,7 @@ pub const ContactConstraintManager = struct {
                 return;
             };
 
-            // TODO(determinism_log): JPH_DET_LOG("AddContactConstraint: id1: " << constraint->mBody1->GetID() << " id2: " << constraint->mBody2->GetID() << " key: " << constraint->mSortKey);
+            if (DeterminismLog.enabled) DeterminismLog.log(.{ "AddContactConstraint: id1: ", constraint.base.body1.getID(), " id2: ", constraint.base.body2.getID(), " key: ", constraint.base.sort_key });
 
             // Get time step and gravity
             const context = self.update_context.?;
@@ -1732,9 +1730,7 @@ pub const ContactConstraintManager = struct {
     /// v1, v2 = (linear velocity, angular velocity): 6 vectors containing linear and angular velocity for body 1 and 2.
     /// M = mass matrix, a diagonal matrix of the mass and inertia with diagonal [m1, I1, m2, I2].
     pub fn addContactConstraint(self: *ContactConstraintManager, contact_allocator: *ContactAllocator, activate_and_link_bodies: *bool, body_pair_handle: BodyPairHandle, body1_in: *Body, body2_in: *Body, manifold_in: *const ContactManifold) void {
-        // TODO(determinism_log): JPH_DET_LOG("AddContactConstraint: id1: " << inBody1.GetID() << " id2: " << inBody2.GetID()
-        //   << " subshape1: " << inManifold.mSubShapeID1 << " subshape2: " << inManifold.mSubShapeID2
-        //   << " normal: " << inManifold.mWorldSpaceNormal << " pendepth: " << inManifold.mPenetrationDepth);
+        if (DeterminismLog.enabled) DeterminismLog.log(.{ "AddContactConstraint: id1: ", body1_in.getID(), " id2: ", body2_in.getID(), " subshape1: ", manifold_in.sub_shape_id1, " subshape2: ", manifold_in.sub_shape_id2, " normal: ", manifold_in.world_space_normal, " pendepth: ", manifold_in.penetration_depth });
 
         if (Core.enable_asserts) std.debug.assert(manifold_in.world_space_normal.isNormalized(.{}));
 
