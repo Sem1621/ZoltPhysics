@@ -2,7 +2,7 @@
 //!
 //! Jolt has no unit test file for these classes (its body tests need a PhysicsSystem, Wave C). These tests check the
 //! behavior with hand-computed values; ZoltParity/Physics/BodyParity.zig compares the bits with the C++ library. Some
-//! are adapted from the Phase 5 architecture prototype (ZoltTests/Prototype/SimulationPrototype.zig).
+//! are adapted from the Phase 5 architecture prototype (SimulationPrototype.zig, removed at the end of F2).
 
 const std = @import("std");
 const zolt = @import("zolt");

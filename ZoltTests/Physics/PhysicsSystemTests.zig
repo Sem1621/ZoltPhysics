@@ -22,6 +22,8 @@ const std = @import("std");
 const zolt = @import("zolt");
 const LayersFile = @import("../Layers.zig");
 const Layers = LayersFile.Layers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
+const LoggingBodyActivationListener = @import("../LoggingBodyActivationListener.zig").LoggingBodyActivationListener;
 
 const Allocator = std.mem.Allocator;
 const Core = zolt.Core;
@@ -812,6 +814,11 @@ fn failingCreateJob(kind: JobSystemKind) !void {
     try expect(num_build_failures >= collision_steps * num_job_kinds_per_step + 1); // + StartNextStep of the first step, more jobs with more threads
     try expect(num_spawn_failures > 0); // The FindCCDContacts spawns
     try expectEqual(num_jobs, num_build_failures + num_spawn_failures);
+    if (kind == .single_threaded) {
+        // One job of each kind per step (a concurrency of 1), one FindCCDContacts job per step (3 bullets)
+        try expectEqual(@as(u32, collision_steps * num_job_kinds_per_step + 1), num_build_failures);
+        try expectEqual(@as(u32, collision_steps), num_spawn_failures);
+    }
 }
 
 test "PhysicsSystem createJob fails at every job, single threaded" {
@@ -1072,4 +1079,53 @@ test "PhysicsSystem BodyInterface locks, threads, the batch API and a const broa
     try system.getActiveBodies(allocator, .rigid_body, &bodies);
     try expectEqual(@as(usize, 3), bodies.items.len); // id, batch[0] and batch[1] (AddBodiesFinalize activates the batch)
     try expectEqual(@as(u32, 3), system.getNumActiveBodies(.rigid_body));
+}
+
+test "PhysicsSystem activation listener: BodyInterface activation and falling asleep" {
+    // TestPhysicsActivationDeactivation without the floor (the floor needs contacts, REGION R2): without gravity the
+    // activated box stays at rest and falls asleep
+    var c: PhysicsTestContext = undefined;
+    try c.init(std.testing.allocator, .{});
+    defer c.deinit();
+    c.zeroGravity();
+
+    var listener: LoggingBodyActivationListener = .init(std.testing.allocator);
+    defer listener.deinit();
+    c.getSystem().setBodyActivationListener(.init(&listener));
+
+    const box = try c.createBox(RVec3.init(0, 5, 0), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.5), .{ .activation = .dont_activate });
+    try expect(!box.isActive());
+
+    // Box should not activate by itself
+    _ = try c.simulate(1.0, {});
+    try expect(box.getPosition().eql(RVec3.init(0, 5, 0)));
+    try expect(!box.isActive());
+    try expectEqual(@as(usize, 0), listener.getEntryCount());
+
+    // Activate the body and validate it is active now
+    c.getBodyInterface().activateBody(box.getID());
+    try expect(box.isActive());
+    try expectEqual(@as(usize, 1), listener.getEntryCount());
+    try expect(listener.contains(.activated, box.getID()));
+    listener.clear();
+
+    // It falls asleep after PhysicsSettings.time_before_sleep and does not move
+    _ = try c.simulate(0.4, {});
+    try expect(box.isActive());
+    _ = try c.simulate(0.2, {});
+    try expect(!box.isActive());
+    try expect(box.getPosition().eql(RVec3.init(0, 5, 0)));
+    try expectEqual(@as(usize, 1), listener.getEntryCount());
+    try expect(listener.contains(.deactivated, box.getID()));
+    try expect(!listener.contains(.activated, box.getID()));
+    try listener.checkError();
+
+    // A log entry that cannot be stored is reported by checkError
+    var failing_allocator: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var failing_listener: LoggingBodyActivationListener = .init(failing_allocator.allocator());
+    defer failing_listener.deinit();
+    c.getSystem().setBodyActivationListener(.init(&failing_listener));
+    c.getBodyInterface().activateBody(box.getID());
+    try std.testing.expectError(error.OutOfMemory, failing_listener.checkError());
+    c.getSystem().setBodyActivationListener(null);
 }

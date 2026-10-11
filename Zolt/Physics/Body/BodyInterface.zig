@@ -347,7 +347,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Access to the shape of a body
-
     /// Get the current shape (the caller owns the returned reference: `deinit` it)
     pub fn getShape(self: *const BodyInterface, body_id: BodyID) RefConst(Shape) {
         var shape: RefConst(Shape) = .empty;
@@ -423,7 +422,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Object layer of a body
-
     /// The collision layer this body belongs to (determines if two objects can collide)
     pub fn setObjectLayer(self: *BodyInterface, body_id: BodyID, layer: ObjectLayer) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -456,7 +454,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Position and rotation of a body
-
     pub fn setPositionAndRotation(self: *BodyInterface, body_id: BodyID, position: RVec3, rotation: Quat, activation_mode: Activation) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
         defer lock.deinit();
@@ -788,7 +785,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Add forces to the body
-
     /// @see Body::AddForce
     pub fn addForce(self: *BodyInterface, body_id: BodyID, force: Vec3, opts: struct { activation: Activation = .activate }) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -851,7 +847,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Add an impulse to the body
-
     /// Applied at center of mass. @see Body::AddImpulse
     pub fn addImpulse(self: *BodyInterface, body_id: BodyID, impulse: Vec3) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -913,7 +908,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Body type
-
     /// @see Body::GetBodyType
     pub fn getBodyType(self: *const BodyInterface, body_id: BodyID) BodyType {
         var lock: BodyLockRead = .init(self.body_lock_interface, body_id);
@@ -925,7 +919,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Body motion type
-
     /// @see Body::SetMotionType
     pub fn setMotionType(self: *BodyInterface, body_id: BodyID, motion_type: MotionType, activation_mode: Activation) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -956,7 +949,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Body motion quality
-
     /// How well it detects collisions when it has a high velocity
     pub fn setMotionQuality(self: *BodyInterface, body_id: BodyID, motion_quality: MotionQuality) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -987,7 +979,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Restitution
-
     /// @see Body::SetRestitution
     pub fn setRestitution(self: *BodyInterface, body_id: BodyID, restitution: f32) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -1007,7 +998,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Friction
-
     /// @see Body::SetFriction
     pub fn setFriction(self: *BodyInterface, body_id: BodyID, friction: f32) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -1027,7 +1017,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Gravity factor
-
     /// @see MotionProperties::SetGravityFactor
     pub fn setGravityFactor(self: *BodyInterface, body_id: BodyID, gravity_factor: f32) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -1050,7 +1039,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Max linear velocity
-
     /// @see MotionProperties::SetMaxLinearVelocity
     pub fn setMaxLinearVelocity(self: *BodyInterface, body_id: BodyID, linear_velocity: f32) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -1073,7 +1061,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Max angular velocity
-
     /// @see MotionProperties::SetMaxAngularVelocity
     pub fn setMaxAngularVelocity(self: *BodyInterface, body_id: BodyID, angular_velocity: f32) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -1096,7 +1083,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Manifold reduction
-
     /// @see Body::SetUseManifoldReduction
     /// (Zolt: Allocator.Error from flagging the contact cache, the body was changed)
     pub fn setUseManifoldReduction(self: *BodyInterface, body_id: BodyID, use_reduction: bool) Allocator.Error!void {
@@ -1124,7 +1110,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Sensor
-
     /// @see Body::SetIsSensor
     pub fn setIsSensor(self: *BodyInterface, body_id: BodyID, is_sensor: bool) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
@@ -1144,7 +1129,6 @@ pub const BodyInterface = struct {
     }
 
     ///@name Collision group
-
     /// @see Body::SetCollisionGroup
     pub fn setCollisionGroup(self: *BodyInterface, body_id: BodyID, collision_group: *const CollisionGroup) void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
