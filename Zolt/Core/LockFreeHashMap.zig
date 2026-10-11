@@ -472,13 +472,17 @@ pub fn LockFreeHashMap(comptime Key: type, comptime Value: type) type {
                 if (count != 0) log.info("{d}: {d}", .{ i, count });
         }
 
-        /// Compare keys, with `eql` when the key type declares it
+        /// Compare keys, with `eql` when the key type declares it (`eql` may take the other key by value or by `*const`
+        /// pointer, like SubShapeIDPair's)
         fn keyEql(a: Key, b: Key) bool {
             const has_eql = switch (@typeInfo(Key)) {
                 .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(Key, "eql"),
                 else => false,
             };
-            return if (has_eql) a.eql(b) else a == b;
+            if (!has_eql)
+                return a == b;
+            const Other = @typeInfo(@TypeOf(Key.eql)).@"fn".params[1].type.?;
+            return if (Other == Key) a.eql(b) else a.eql(&b);
         }
     };
 }
