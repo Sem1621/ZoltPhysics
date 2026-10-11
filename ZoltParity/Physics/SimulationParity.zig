@@ -38,7 +38,14 @@
 //! `(gravity * gravity_factor + force * inv_mass) * dt` in MotionProperties.applyForceTorqueAndDragInternal is reported
 //! as "state differs at byte 862 ...: bodies[6] (id 0x00800006) motion_properties.linear_velocity.y zolt 0xc0dcbfe1
 //! jolt 0xc0dcbfe2" (scene forces_torques_impulses, update 42); passing user data + 1 to OnBodyDeactivated is reported
-//! as a differing listener record.
+//! as a differing listener record. Computing r1_plus_u of JobResolveCCDContacts as
+//! `(contact point - center of mass) - fraction * delta` instead of Jolt's `contact point - (center of mass + fraction *
+//! delta)` is reported as "state differs at byte 254 ...: bodies[3] (id 0x00800003)
+//! motion_properties.linear_velocity.x zolt 0x41cc9e9c jolt 0x41cc9ea4" (scene ccd_static_targets, update 7).
+//!
+//! CCD (Wave B R4): the driver counts the FindCCDContacts jobs of every update (Zolt side) and the updates after which
+//! the contact cache of the C++ state holds CCD manifolds (OnCCDContactAdded of a hit without a discrete contact of the
+//! same sub shape pair in the same update), for SimScenes.Expect.ccd_jobs / ccd_hits.
 //!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
