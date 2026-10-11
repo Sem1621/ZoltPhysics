@@ -18,7 +18,8 @@
 //!   const listener = ContactListener.init(&my_listener);
 //!   ```
 //!   The listener does not own the implementation (the C++ virtual destructor has no counterpart).
-//! - `Body` is the Phase 4 stub (only used as a pointer type here).
+//! - The callbacks receive the real `Body` (Physics/Body/Body.zig); they run concurrently on the job system's worker
+//!   threads during PhysicsSystem.update.
 
 const std = @import("std");
 const StaticArray = @import("../../Core/StaticArray.zig").StaticArray;

@@ -48,6 +48,9 @@ test {
 
     // Physics
     _ = @import("Physics/ActiveEdgesTests.zig");
+    _ = @import("Physics/BodyManagerTests.zig");
+    _ = @import("Physics/BodyTestContext.zig");
+    _ = @import("Physics/BodyTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
