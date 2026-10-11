@@ -2268,7 +2268,7 @@ const CCDJobSystem = struct {
 /// go through the wall), two bullets hitting each other head on, a bullet that hits a sleeping box (it wakes up) and
 /// one that hits a kinematic box. Many CCD bodies per collision step: several FindCCDContacts jobs with threads.
 const CCDScene = struct {
-    const num_bullets = 32;
+    const num_ccd_bullets = 32;
     const half_extent = 12.0;
 
     broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
@@ -2277,7 +2277,7 @@ const CCDScene = struct {
     system: PhysicsSystem = .empty,
     activation_listener: ActivationCounter = .{},
     contact_listener: CCDContactListener = .{},
-    bullets: [num_bullets]BodyID = @splat(.invalid),
+    bullets: [num_ccd_bullets]BodyID = @splat(.invalid),
     rejected_bullet: BodyID = .invalid,
     sensor_bullet: BodyID = .invalid,
     sleeping_box: BodyID = .invalid,
@@ -2323,7 +2323,7 @@ const CCDScene = struct {
         defer box_settings.deinit();
         for (&self.bullets, 0..) |*bullet, i| {
             const settings = if (i % 2 == 0) &sphere_settings else &box_settings;
-            const angle = 2.0 * std.math.pi * f(@intCast(i)) / num_bullets;
+            const angle = 2.0 * std.math.pi * f(@intCast(i)) / num_ccd_bullets;
             settings.position = RVec3.init(3.5 * @cos(angle), 1.0 + 0.1 * f(@intCast(i % 7)), 3.5 * @sin(angle));
             settings.rotation = Quat.rotation(Vec3.init(0, 1, 0), 0.3 * f(@intCast(i)));
             settings.linear_velocity = Vec3.init(@cos(angle), 0.05, @sin(angle)).mulScalar(100.0 + 5.0 * f(@intCast(i % 5)));
@@ -2467,7 +2467,7 @@ test "PhysicsSystem CCD: determinism single vs multi threaded with several FindC
 
         // min(ceil(CCD bodies / 4), concurrency) jobs per step: 32 bullets need 8 jobs with 7 workers
         const concurrency: u32 = @intCast(kind.thread_pool + 1);
-        try expectEqual(collision_steps * @min(concurrency, 8), stats.max_find_ccd_contacts_jobs);
+        try expectEqual(collision_steps * @as(u32, @min(concurrency, 8)), stats.max_find_ccd_contacts_jobs);
     }
 }
 
@@ -2616,7 +2616,7 @@ fn ccdFailingCreateJob(kind: JobSystemKind) !void {
             try expectCCDRecovery(scene, &fx.snapshot, &fx.reference, &fx.temp, fx.jobs.jobSystem());
         }
     }
-    try expect(num_build_failures >= collision_steps * num_job_kinds_per_step + 1);
+    try expect(num_build_failures >= collision_steps * (num_job_kinds_per_step - 1) + 1); // No step listener job
 
     // A FindCCDContacts job that cannot be created is not an error and changes no result (D5): fail the FindCCDContacts
     // job with every index and every job from that index on (none created in a step: PostIntegrateVelocity does the
