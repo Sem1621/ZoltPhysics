@@ -395,8 +395,8 @@ const ZoltWorld = struct {
         self.system.setBodyActivationListener(.init(&self.activation_listener));
         self.system.setContactListener(.init(&self.contact_listener));
 
-        errdefer for (self.shapes.items) |*s| s.deinit();
         errdefer self.shapes.deinit(allocator);
+        errdefer for (self.shapes.items) |*s| s.deinit();
         try self.shapes.ensureTotalCapacity(allocator, desc.num_shapes);
         for (desc.shapes[0..desc.num_shapes]) |*shape|
             self.shapes.appendAssumeCapacity(try self.makeShape(shape));
@@ -1050,9 +1050,7 @@ const Run = struct {
     jolt_records: std.ArrayList(SimRecord) = .empty,
     snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty }),
     /// Statistics for the sanity checks of the test
-    num_temp_failures: u32 = 0,
-    num_job_failures: u32 = 0,
-    num_records: u32 = 0,
+    stats: RunStats = .{},
 
     fn deinit(self: *Run) void {
         self.zolt_state.deinit(self.allocator);
@@ -1093,7 +1091,8 @@ const Run = struct {
     fn compareTakenRecords(self: *Run) !void {
         std.sort.pdq(SimRecord, self.zolt_records.items, {}, SimRecord.lessThan);
         std.sort.pdq(SimRecord, self.jolt_records.items, {}, SimRecord.lessThan);
-        self.num_records += @intCast(self.jolt_records.items.len);
+        for (self.jolt_records.items) |r|
+            self.stats.records[r.kind] += 1;
         const n = @min(self.zolt_records.items.len, self.jolt_records.items.len);
         for (self.zolt_records.items[0..n], self.jolt_records.items[0..n], 0..) |z, j, i| {
             if (!std.meta.eql(z, j))
@@ -1120,6 +1119,9 @@ const Run = struct {
                 .restore_cross => {
                     // Zolt restores the C++ state, C++ the Zolt state
                     const slot = &self.snapshots[op.index];
+                    try self.zw.saveState(.all, &self.zolt_state);
+                    if (!std.mem.eql(u8, self.zolt_state.items, slot[1].items))
+                        self.stats.restores_changing_the_state += 1;
                     if (!try self.zw.restoreState(slot[1].items))
                         return self.fail("zolt could not restore the jolt state of slot {d}", .{op.index});
                     if (!self.cw.restoreState(slot[0].items))
@@ -1149,6 +1151,17 @@ const Run = struct {
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
         try self.compareRecords();
+        self.updateStats();
+    }
+
+    fn updateStats(self: *Run) void {
+        const system = &self.zw.system;
+        const num_active = system.getNumActiveBodies(.rigid_body);
+        self.stats.max_active_bodies = @max(self.stats.max_active_bodies, num_active);
+        if (system.getBodyStats().num_bodies_dynamic + system.getBodyStats().num_bodies_kinematic > num_active)
+            self.stats.updates_with_sleeping_bodies += 1;
+        if (system.body_manager.getNumActiveCCDBodies() > 0)
+            self.stats.updates_with_ccd_bodies += 1;
     }
 
     /// The update with the D12 sweeps: every temp allocation and every createJob fails once, the system recovers by
@@ -1196,7 +1209,7 @@ const Run = struct {
             if (fail_index < 2) // The steps and the body pairs are allocated before any job runs
                 try self.expectZoltState(snapshot.items, "temp allocation failed while building the jobs");
             try self.recoverZolt(snapshot.items, reference.items, delta_time, collision_steps, "after temp allocation failure");
-            self.num_temp_failures += 1;
+            self.stats.num_temp_failures += 1;
         }
 
         // Every createJob fails once: count the jobs first (a normal update)
@@ -1218,7 +1231,7 @@ const Run = struct {
                 try self.recoverZolt(snapshot.items, reference.items, delta_time, collision_steps, "after a createJob failure");
             }
             if (!zw.temp.isEmpty()) return self.fail("createJob {d} failed: the temp allocator is not empty", .{fail_index});
-            if (failing.has_induced_failure.load(.monotonic)) self.num_job_failures += 1;
+            if (failing.has_induced_failure.load(.monotonic)) self.stats.num_job_failures += 1;
         }
 
         // The Zolt side is at the reference state again: drop the records of the sweeps, restore the listener counters
@@ -1231,6 +1244,7 @@ const Run = struct {
         try self.zolt_records.appendSlice(allocator, zolt_records.items);
         try self.cw.takeRecords(allocator, &self.jolt_records);
         try self.compareTakenRecords();
+        self.updateStats();
     }
 
     fn restoreZolt(self: *Run, snapshot: []const u8) !void {
@@ -1255,11 +1269,24 @@ const Run = struct {
     }
 };
 
+/// What a scene did (the sanity checks of runEntry, printed with `verbose`)
 const RunStats = struct {
+    /// Number of listener records per RecordKind
+    records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0),
     num_temp_failures: u32 = 0,
     num_job_failures: u32 = 0,
-    num_records: u32 = 0,
+    /// Largest number of active bodies after an update
+    max_active_bodies: u32 = 0,
+    /// Number of updates that ended with sleeping bodies (bodies in the broad phase that are not active)
+    updates_with_sleeping_bodies: u32 = 0,
+    /// Number of updates with active linear cast bodies
+    updates_with_ccd_bodies: u32 = 0,
+    /// Number of restore_cross operations that changed the state
+    restores_changing_the_state: u32 = 0,
 };
+
+/// Print what every scene did (a passing test must not print: keep false)
+const verbose = false;
 
 /// Run a scene in one configuration
 fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder, config: Config) !RunStats {
@@ -1288,7 +1315,7 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     for (all_states) |state|
         try run.compareStates(state, "at the end");
 
-    return .{ .num_temp_failures = run.num_temp_failures, .num_job_failures = run.num_job_failures, .num_records = run.num_records };
+    return run.stats;
 }
 
 /// Creating the scene (the system, the shapes, the operations before the first update) with every allocation failing
@@ -1319,9 +1346,12 @@ fn runEntry(entry: *const SceneEntry) !void {
     for (configs, &stats) |config, *s|
         s.* = try runScene(allocator, entry, &builder, config);
 
+    if (verbose)
+        std.debug.print("{s}: {any}\n", .{ entry.name, stats[0] });
+
     // The listener records do not depend on the threads (their number neither); the sweeps ran
     for (stats[1..]) |s|
-        try std.testing.expectEqual(stats[0].num_records, s.num_records);
+        try std.testing.expectEqualSlices(u32, &stats[0].records, &s.records);
     if (entry.sweep_stride != 0) {
         try std.testing.expect(stats[0].num_job_failures > 0);
         try std.testing.expect(stats[3].num_job_failures > 0);
@@ -1334,7 +1364,7 @@ fn runEntry(entry: *const SceneEntry) !void {
 fn SceneTest(comptime name: []const u8, comptime index: usize) type {
     _ = name;
     return struct {
-        test {
+        test "SimulationParity scene" {
             try runEntry(&SimScenes.scenes[index]);
         }
     };

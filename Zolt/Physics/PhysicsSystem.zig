@@ -1870,7 +1870,8 @@ pub const PhysicsSystem = struct {
                         {
                             // Determine inner radius (the smallest sphere that fits into the shape)
                             const inner_radius = body.getShape().getInnerRadius();
-                            std.debug.assert(inner_radius > 0.0); // The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.
+                            // (Zolt: a mesh / height field / mirrored ScaledShape reaches this with a zero or negative inner radius, Jolt's release build continues: no UB in ReleaseFast)
+                            if (Core.enable_asserts) std.debug.assert(inner_radius > 0.0); // The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.
 
                             // Measure translation in this step and check if it above the threshold to perform a linear cast
                             const linear_cast_threshold_sq = math.square(self.physics_settings.linear_cast_threshold * inner_radius);

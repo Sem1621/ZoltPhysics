@@ -425,11 +425,15 @@ pub const Blocker = enum {
     ccd_hits,
     /// Soft bodies (Phase 9)
     soft_bodies,
+    /// The scene violates a JPH_ASSERT that Jolt's release build (the reference library is built without asserts)
+    /// ignores: it compares Jolt's release behavior and runs only without Zolt's asserts (ReleaseFast)
+    release_only,
 
     /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
             .none => true,
+            .release_only => !zolt.Core.enable_asserts,
             .contacts, .constraints, .ccd_hits, .soft_bodies => false,
         };
     }
@@ -472,6 +476,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "random_2", .build = buildRandom(2, 2) },
     .{ .name = "random_3", .build = buildRandom(3, 3) },
     .{ .name = "random_4", .build = buildRandom(4, 4) },
+    .{ .name = "linear_cast_without_inner_radius", .build = buildLinearCastWithoutInnerRadius, .blocked_by = .release_only },
     // Later waves (blocked until Zolt has the parts, see Blocker)
     .{ .name = "contacts_box_on_floor", .build = buildBoxOnFloor, .blocked_by = .contacts },
     .{ .name = "contacts_pyramid", .build = buildPyramid, .blocked_by = .contacts },
@@ -609,8 +614,8 @@ pub const SceneBuilder = struct {
         return self.addShape(.{ .kind = @intFromEnum(ShapeKind.empty), .params = params(&center_of_mass) });
     }
 
-    pub fn rotatedTranslated(self: *SceneBuilder, child: u32, position: [3]f32, rotation: [4]f32) Allocator.Error!u32 {
-        return self.addShape(.{ .kind = @intFromEnum(ShapeKind.rotated_translated), .child = child, .params = params(&position), .rotation = rotation });
+    pub fn rotatedTranslated(self: *SceneBuilder, child: u32, position: [3]f32, rotation_value: [4]f32) Allocator.Error!u32 {
+        return self.addShape(.{ .kind = @intFromEnum(ShapeKind.rotated_translated), .child = child, .params = params(&position), .rotation = rotation_value });
     }
 
     pub fn scaled(self: *SceneBuilder, child: u32, scale: [3]f32) Allocator.Error!u32 {
@@ -642,8 +647,8 @@ pub const SceneBuilder = struct {
     // ---------------------------------------------------------------------------------------------------------------
     // Bodies, listeners, settings
 
-    pub fn addBodyDesc(self: *SceneBuilder, body: SimBody) Allocator.Error!u32 {
-        try self.bodies.append(self.allocator, body);
+    pub fn addBodyDesc(self: *SceneBuilder, body_desc: SimBody) Allocator.Error!u32 {
+        try self.bodies.append(self.allocator, body_desc);
         return @intCast(self.bodies.items.len - 1);
     }
 
@@ -683,8 +688,8 @@ pub const SceneBuilder = struct {
     pub const Activation = enum(u32) { activate = 0, dont_activate = 1 };
 
     /// Add an operation on body handle `body` (invalid_handle for system operations)
-    pub fn op(self: *SceneBuilder, kind: OpKind, body: u32, args: OpArgs) Allocator.Error!void {
-        var o: SimOp = .{ .update = self.current_update, .kind = @intFromEnum(kind), .body = body, .count = args.count, .activation = @intFromEnum(args.activation), .index = args.index, .r = args.r };
+    pub fn op(self: *SceneBuilder, kind: OpKind, handle: u32, args: OpArgs) Allocator.Error!void {
+        var o: SimOp = .{ .update = self.current_update, .kind = @intFromEnum(kind), .body = handle, .count = args.count, .activation = @intFromEnum(args.activation), .index = args.index, .r = args.r };
         @memcpy(o.f[0..args.f.len], args.f);
         try self.ops.append(self.allocator, o);
     }
@@ -1029,7 +1034,7 @@ fn buildForces(b: *SceneBuilder) Allocator.Error!void {
         }, if (i % 4 == 3) .dont_activate else .activate);
     }
     var u: u32 = 0;
-    while (u < b.num_updates) : (u += 7) {
+    while (u < 78) : (u += 7) {
         b.at(u);
         const h: u32 = (u / 7) % num_bodies;
         const s: f32 = @floatFromInt(u + 1);
@@ -1310,7 +1315,7 @@ fn buildVaryingUpdates(b: *SceneBuilder) Allocator.Error!void {
         }, .activate);
     }
     const params = [_]struct { u32, f32, u32 }{
-        .{ 5, 1.0 / 30.0, 2 },  .{ 10, 0.0, 1 },        .{ 11, 1.0 / 60.0, 3 }, .{ 15, 0.1, 4 },
+        .{ 5, 1.0 / 30.0, 2 },   .{ 10, 0.0, 1 },        .{ 11, 1.0 / 60.0, 3 }, .{ 15, 0.1, 4 },
         .{ 20, 1.0 / 120.0, 1 }, .{ 30, 1.0 / 90.0, 2 }, .{ 40, 0.0, 3 },        .{ 41, 0.05, 1 },
     };
     for (params) |p| {
@@ -1381,33 +1386,33 @@ fn buildStepListenersOnly(b: *SceneBuilder) Allocator.Error!void {
 }
 
 /// SaveState / RestoreState round trips in the middle of a run: Zolt restores a C++ state and C++ a Zolt state. The
-/// restored states have other active bodies (bodies that fell asleep in between are woken up again).
+/// restored states have other active bodies: the bodies without velocity and gravity fall asleep after about 30
+/// updates, restoring an older state wakes them up again and restoring a newer one puts them to sleep again.
 fn buildSaveRestore(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try BasicShapes.add(b);
     b.num_updates = 100;
     for (0..12) |i| {
+        const still = i % 2 == 0; // These fall asleep
         _ = try b.body(.{
             .position = gridPosition(@intCast(i), 0, 0),
             .shape = shapes.pick(@intCast(i)),
-            .angular_velocity = .{ 0.3, 0.1, 0 },
-            .gravity_factor = if (i % 2 == 0) 0.0 else 1.0,
-            .linear_damping = if (i % 2 == 0) 1.0 else 0.05,
-            .angular_damping = if (i % 2 == 0) 1.0 else 0.05,
+            .angular_velocity = if (still) @splat(0) else .{ 0.3, 0.1, 0 },
+            .gravity_factor = if (still) 0.0 else 1.0,
             .object_layer = Layers.unused1,
         }, if (i == 11) .dont_activate else .activate);
     }
     b.at(10);
     try b.sysOp(.snapshot, .{ .index = 0 });
     try b.sysOp(.set_gravity, .{ .f = &.{ 0, -20, 0 } });
-    b.at(30);
-    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 10 (the gravity is restored too)
-    b.at(60);
+    b.at(40);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 10 (the gravity is restored too): the sleeping bodies wake up
+    b.at(70);
     try b.sysOp(.snapshot, .{ .index = 1 });
     try b.op(.add_force, 11, .{ .f = &.{ 0, 100, 0 } });
-    b.at(70);
-    try b.sysOp(.restore_cross, .{ .index = 1 }); // The sleeping bodies of update 60 are asleep again
-    try b.sysOp(.restore_cross, .{ .index = 1 }); // Twice in a row
     b.at(80);
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // Body 11 is asleep again
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // Twice in a row
+    b.at(90);
     try b.sysOp(.snapshot, .{ .index = 2 });
     try b.sysOp(.restore_cross, .{ .index = 2 }); // The current state
 }
@@ -1455,7 +1460,8 @@ fn buildShapes(b: *SceneBuilder) Allocator.Error!void {
     try list.append(b.allocator, dense);
     try list.append(b.allocator, try b.rotatedTranslated(box, .{ 0.2, -0.1, 0.4 }, axisAngle(.{ 0, 0, 1 }, 0.4)));
     try list.append(b.allocator, try b.scaled(box, .{ 1.5, 0.5, 2.0 }));
-    try list.append(b.allocator, try b.scaled(sphere, .{ -2.0, -2.0, -2.0 }));
+    const mirrored = try b.scaled(sphere, .{ -2.0, -2.0, -2.0 }); // Negative inner radius: discrete only (Jolt asserts for a linear cast)
+    try list.append(b.allocator, mirrored);
     try list.append(b.allocator, try b.offsetCenterOfMass(sphere, .{ 0.1, 0.2, -0.3 }));
     try list.append(b.allocator, try b.compound(.static_compound, &.{ .{ .shape = box, .position = .{ 0, 1, 0 } }, .{ .shape = sphere, .position = .{ 0.5, -0.5, 0 }, .user_data = 7 } }));
     try list.append(b.allocator, try b.compound(.mutable_compound, &.{ .{ .shape = box, .rotation = axisAngle(.{ 1, 0, 0 }, 1.0) }, .{ .shape = sphere, .position = .{ -1, 0, 0 } } }));
@@ -1468,7 +1474,7 @@ fn buildShapes(b: *SceneBuilder) Allocator.Error!void {
                 .angular_velocity = .{ 2, 1, 0.5 },
                 .apply_gyroscopic_force = @intCast(gyro),
                 .shape = shape,
-                .motion_quality = @intCast(gyro),
+                .motion_quality = if (shape == mirrored) 0 else @intCast(gyro),
                 .object_layer = Layers.unused1,
             }, .activate);
         }
@@ -1536,7 +1542,7 @@ fn buildRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder) Al
             const extra = [_]u32{
                 try b.taperedCapsule(0.4, 0.1, 0.3),
                 try b.convexHull(&.{ .{ -0.5, 0, 0 }, .{ 0.5, 0, 0 }, .{ 0, 0.8, 0 }, .{ 0, 0, 0.6 } }, 0.02),
-                try b.scaled(shapes.compound, .{ 0.5, 1.5, 1.0 }),
+                try b.scaled(shapes.box, .{ 0.5, 1.5, 1.0 }),
             };
             const num_bodies = 40;
             for (0..num_bodies) |i| {
@@ -1595,6 +1601,38 @@ fn buildRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder) Al
             }
         }
     }.build;
+}
+
+/// Linear cast bodies whose shape has no inner radius (a mesh, an empty shape) or a negative one (a mirrored
+/// ScaledShape): Jolt asserts, its release build casts every movement (Blocker.release_only)
+fn buildLinearCastWithoutInnerRadius(b: *SceneBuilder) Allocator.Error!void {
+    const mesh = try b.mesh(&.{ .{ 0, 0, 0, 1, 0, 0, 0, 0, 1 }, .{ 1, 0, 0, 1, 0, 1, 0, 0, 1 } });
+    const empty_shape = try b.empty(.{ 0.1, 0, 0 });
+    const sphere = try b.sphere(0.3);
+    const mirrored = try b.scaled(sphere, .{ -1.0, -1.0, -1.0 });
+    const mirrored_box = try b.scaled(try b.box(.{ 0.3, 0.2, 0.4 }, 0.05), .{ 1.0, -1.0, 1.0 });
+    b.num_updates = 30;
+    b.collision_steps = 2;
+    var inertia: [16]f32 = @splat(0);
+    inertia[0] = 1;
+    inertia[5] = 1;
+    inertia[10] = 1;
+    inertia[15] = 1;
+    for ([_]u32{ mesh, empty_shape, mirrored, mirrored_box }, 0..) |shape, i| {
+        for (0..2) |j| {
+            _ = try b.body(.{
+                .position = gridPosition(@intCast(2 * i + j), 40, 100),
+                .linear_velocity = .{ 0, -20.0 * @as(f32, @floatFromInt(j)), 0 },
+                .angular_velocity = .{ 1, 0, 0 },
+                .shape = shape,
+                .motion_quality = 1,
+                .override_mass_properties = 2,
+                .mass = 2,
+                .inertia = inertia,
+                .object_layer = if (j == 0) Layers.moving else Layers.unused1,
+            }, .activate);
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------------------------------
