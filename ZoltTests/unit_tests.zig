@@ -62,9 +62,11 @@ test {
     _ = @import("Physics/CollisionGroupTests.zig");
     _ = @import("Physics/ConstraintManagerTests.zig");
     _ = @import("Physics/ConvexVsTrianglesTest.zig");
+    _ = @import("Physics/EstimateCollisionResponseTest.zig");
     _ = @import("Physics/HeightFieldShapeTests.zig");
     _ = @import("Physics/IslandBuilderTests.zig");
     _ = @import("Physics/MutableCompoundShapeTests.zig");
+    _ = @import("Physics/NarrowPhaseQueryTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");

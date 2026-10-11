@@ -1,14 +1,23 @@
 //! Port of: UnitTests/Physics/RayShapeTests.cpp
-//! Status: partial
-//! Missing: the PhysicsSystem part of TestRayHelper (TestSystemRay, TestSystemRayMultiHitIgnoreBackFace,
-//!   TestSystemRayMultiHitWithBackFace: insert the shape into a PhysicsSystem and cast through its NarrowPhaseQuery;
-//!   need PhysicsSystem / NarrowPhaseQuery, Phase 5), in every TEST_CASE that uses TestRayHelper
+//! Status: complete
+//!
+//! The `TestFunction` lambdas of TestRayHelper are the `TestKind` cases of `testFunction`, their captures (the shape,
+//! the physics system and the shape matrix) are a `Context`.
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const LayersFile = @import("../Layers.zig");
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
+const BodyCreationSettings = zolt.BodyCreationSettings;
+const Core = zolt.Core;
+const Mat44 = zolt.Mat44;
+const ObjectLayerPairFilter = zolt.ObjectLayerPairFilter;
+const ObjectVsBroadPhaseLayerFilter = zolt.ObjectVsBroadPhaseLayerFilter;
+const PhysicsSystem = zolt.PhysicsSystem;
+const RRayCast = zolt.RRayCast;
+const RVec3 = zolt.RVec3;
 const BoxShape = zolt.BoxShape;
 const CapsuleShape = zolt.CapsuleShape;
 const CastRayCollector = zolt.CastRayCollector;
@@ -34,25 +43,45 @@ const math = zolt.math;
 const allocator = std.testing.allocator;
 const flt_max = math.flt_max;
 
-/// The kind of test that TestRayHelper runs (the TestFunction lambdas that test directly against a shape)
+/// The kind of test that TestRayHelper runs (the TestFunction lambdas)
 const TestKind = enum {
     shape_ray,
     shape_ray_multi_hit_ignore_back_face,
     shape_ray_multi_hit_with_back_face,
     shape_ray_multi_hit_ignore_back_face_non_solid,
     shape_ray_multi_hit_with_back_face_non_solid,
+    system_ray,
+    system_ray_multi_hit_ignore_back_face,
+    system_ray_multi_hit_with_back_face,
+};
+
+/// The captures of the TestFunction lambdas
+const Context = struct {
+    /// The shape (`[inShape]`)
+    shape: *const Shape,
+    /// The physics system that holds a body with the shape (`[&system, cShapeMatrix]`, the system kinds only)
+    system: ?*const PhysicsSystem = null,
+    shape_matrix: Mat44 = Mat44.identity(),
 };
 
 // Function that does the actual ray cast test, expected_fraction1/2 should be FLT_MAX if no hit expected
-fn testFunction(kind: TestKind, shape: *const Shape, in_ray: RayCast, expected_fraction1_in: f32, expected_fraction2_in: f32) !void {
+fn testFunction(kind: TestKind, ctx: *const Context, in_ray: RayCast, expected_fraction1_in: f32, expected_fraction2_in: f32) !void {
     var expected_fraction1 = expected_fraction1_in;
     var expected_fraction2 = expected_fraction2_in;
+    const shape = ctx.shape;
+
+    switch (kind) {
+        .system_ray, .system_ray_multi_hit_ignore_back_face, .system_ray_multi_hit_with_back_face => return testSystemFunction(kind, ctx, in_ray, expected_fraction1, expected_fraction2),
+        else => {},
+    }
 
     // CastRay works relative to center of mass, so transform the ray
     var ray = in_ray;
     ray.origin = ray.origin.sub(shape.getCenterOfMass());
 
     switch (kind) {
+        .system_ray, .system_ray_multi_hit_ignore_back_face, .system_ray_multi_hit_with_back_face => unreachable,
+
         // Test function that directly tests against a shape
         .shape_ray => {
             var hit: RayCastResult = .{};
@@ -169,8 +198,80 @@ fn testFunction(kind: TestKind, shape: *const Shape, in_ray: RayCast, expected_f
     }
 }
 
+/// The TestFunction lambdas that test a ray against a shape through a physics system
+fn testSystemFunction(kind: TestKind, ctx: *const Context, in_ray: RayCast, expected_fraction1: f32, expected_fraction2: f32) !void {
+    const narrow_phase = ctx.system.?.getNarrowPhaseQuery();
+
+    // in_ray is relative to shape, transform it into world space
+    const ray = RRayCast.fromRayCast(in_ray.transformed(ctx.shape_matrix));
+
+    switch (kind) {
+        // Test a ray against a shape through a physics system
+        .system_ray => {
+            var hit: RayCastResult = .{};
+            if (expected_fraction1 != flt_max) {
+                try fw.expect(narrow_phase.castRay(ray, &hit, .{}));
+                try fw.checkApproxEqual(hit.fraction, expected_fraction1, .{ .tolerance = 2.5e-5 });
+            } else {
+                try fw.expect(!narrow_phase.castRay(ray, &hit, .{}));
+            }
+        },
+
+        // Test a ray against a shape through a physics system allowing multiple hits but no back facing hits
+        .system_ray_multi_hit_ignore_back_face => {
+            // Ray cast settings
+            var settings: RayCastSettings = .{};
+            settings.setBackFaceMode(.ignore_back_faces);
+            settings.treat_convex_as_solid = true;
+
+            var collector = AllHitCollisionCollector(CastRayCollector).init(allocator);
+            defer collector.deinit();
+            narrow_phase.castRayCollector(ray, &settings, &collector.base, .{});
+            try collector.checkError();
+
+            if (expected_fraction1 != flt_max) {
+                try fw.expect(collector.hits.items.len == 1);
+                try fw.checkApproxEqual(collector.hits.items[0].fraction, expected_fraction1, .{ .tolerance = 2.5e-5 });
+            } else {
+                try fw.expect(collector.hits.items.len == 0);
+            }
+        },
+
+        // Test a ray against a shape through a physics system allowing multiple hits and back facing hits
+        .system_ray_multi_hit_with_back_face => {
+            // Ray cast settings
+            var settings: RayCastSettings = .{};
+            settings.setBackFaceMode(.collide_with_back_faces);
+            settings.treat_convex_as_solid = true;
+
+            var collector = AllHitCollisionCollector(CastRayCollector).init(allocator);
+            defer collector.deinit();
+            narrow_phase.castRayCollector(ray, &settings, &collector.base, .{});
+            try collector.checkError();
+            collector.sort();
+
+            if (expected_fraction1 != flt_max) {
+                try fw.expect(collector.hits.items.len >= 1);
+                try fw.checkApproxEqual(collector.hits.items[0].fraction, expected_fraction1, .{ .tolerance = 2.5e-5 });
+            } else {
+                std.debug.assert(expected_fraction2 == flt_max);
+                try fw.expect(collector.hits.items.len == 0);
+            }
+
+            if (expected_fraction2 != flt_max) {
+                try fw.expect(collector.hits.items.len >= 2);
+                try fw.checkApproxEqual(collector.hits.items[1].fraction, expected_fraction2, .{ .tolerance = 2.5e-5 });
+            } else {
+                try fw.expect(collector.hits.items.len < 2);
+            }
+        },
+
+        else => unreachable,
+    }
+}
+
 // Test ray against shape with lines going through hit_a and hit_b (which should be surface positions of the shape)
-fn testRayHelperInternal(hit_a: Vec3, hit_b: Vec3, kind: TestKind, shape: *const Shape) !void {
+fn testRayHelperInternal(hit_a: Vec3, hit_b: Vec3, kind: TestKind, ctx: *const Context) !void {
     // Determine points before and after the surface on both sides (i1 / i2 are inner1 / inner2: i1 is a Zig type)
     const delta = hit_b.sub(hit_a);
     const l1 = hit_a.sub(delta.mulScalar(2.0));
@@ -181,39 +282,65 @@ fn testRayHelperInternal(hit_a: Vec3, hit_b: Vec3, kind: TestKind, shape: *const
     const r2 = hit_b.add(delta.mulScalar(2.0));
 
     // -O---->-|--------|--------
-    try testFunction(kind, shape, .init(l1, l2.sub(l1)), flt_max, flt_max);
+    try testFunction(kind, ctx, .init(l1, l2.sub(l1)), flt_max, flt_max);
 
     // -----O>-|--------|--------
-    try testFunction(kind, shape, .init(l2, Vec3.zero()), flt_max, flt_max);
+    try testFunction(kind, ctx, .init(l2, Vec3.zero()), flt_max, flt_max);
 
     // ------O-|->------|--------
-    try testFunction(kind, shape, .init(l2, inner1.sub(l2)), 0.5, flt_max);
+    try testFunction(kind, ctx, .init(l2, inner1.sub(l2)), 0.5, flt_max);
 
     // ------O-|--------|->------
-    try testFunction(kind, shape, .init(l2, r1.sub(l2)), @as(f32, 0.1) / 1.2, @as(f32, 1.1) / 1.2);
+    try testFunction(kind, ctx, .init(l2, r1.sub(l2)), @as(f32, 0.1) / 1.2, @as(f32, 1.1) / 1.2);
 
     // --------|-----O>-|--------
-    try testFunction(kind, shape, .init(inner2, Vec3.zero()), 0.0, flt_max);
+    try testFunction(kind, ctx, .init(inner2, Vec3.zero()), 0.0, flt_max);
 
     // --------|------O-|->------
-    try testFunction(kind, shape, .init(inner2, r1.sub(inner2)), 0.0, 0.5);
+    try testFunction(kind, ctx, .init(inner2, r1.sub(inner2)), 0.0, 0.5);
 
     // --------|--------|-O---->-
-    try testFunction(kind, shape, .init(r1, r2.sub(l1)), flt_max, flt_max);
+    try testFunction(kind, ctx, .init(r1, r2.sub(l1)), flt_max, flt_max);
 }
 
 fn testRayHelper(shape: *const Shape, hit_a: Vec3, hit_b: Vec3) !void {
+    const shape_ctx: Context = .{ .shape = shape };
     for ([_]TestKind{ .shape_ray, .shape_ray_multi_hit_ignore_back_face, .shape_ray_multi_hit_with_back_face, .shape_ray_multi_hit_ignore_back_face_non_solid, .shape_ray_multi_hit_with_back_face_non_solid }) |kind| {
         // Test normal ray
-        try testRayHelperInternal(hit_a, hit_b, kind, shape);
+        try testRayHelperInternal(hit_a, hit_b, kind, &shape_ctx);
 
         // Test inverse ray
-        try testRayHelperInternal(hit_b, hit_a, kind, shape);
+        try testRayHelperInternal(hit_b, hit_a, kind, &shape_ctx);
     }
 
-    // Not ported: inserting the shape into a PhysicsSystem and testing the rays through its NarrowPhaseQuery
-    // (TestSystemRay, TestSystemRayMultiHitIgnoreBackFace, TestSystemRayMultiHitWithBackFace: need PhysicsSystem /
-    // NarrowPhaseQuery, Phase 5)
+    //////////////////////////////////////////////////////////////////////////////////////////////////
+    // Insert the shape into the world
+    //////////////////////////////////////////////////////////////////////////////////////////////////
+
+    // A non-zero test position for the shape
+    const shape_position = Vec3.init(2, 3, 4);
+    const shape_rotation = Quat.rotation(Vec3.axisX(), 0.25 * math.pi);
+    const shape_matrix = Mat44.rotationTranslation(shape_rotation, shape_position);
+
+    // Make the shape part of a body and insert it into the physics system
+    var broad_phase_layer_interface = LayersFile.BPLayerInterfaceImpl.init();
+    const object_vs_broadphase_layer_filter: ObjectVsBroadPhaseLayerFilter = .{};
+    const object_vs_object_layer_filter: ObjectLayerPairFilter = .{};
+    var system: PhysicsSystem = .empty;
+    try system.init(allocator, std.testing.io, 1, 0, 4, 4, &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter, &object_vs_object_layer_filter, .{});
+    defer system.deinit();
+    var body_settings = BodyCreationSettings.initWithShape(shape, if (Core.double_precision) RVec3.fromVec3(shape_position) else shape_position, shape_rotation, .static, 0);
+    defer body_settings.deinit();
+    _ = try system.getBodyInterfaceMut().createAndAddBody(&body_settings, .dont_activate);
+
+    const system_ctx: Context = .{ .shape = shape, .system = &system, .shape_matrix = shape_matrix };
+    for ([_]TestKind{ .system_ray, .system_ray_multi_hit_ignore_back_face, .system_ray_multi_hit_with_back_face }) |kind| {
+        // Test normal ray
+        try testRayHelperInternal(hit_a, hit_b, kind, &system_ctx);
+
+        // Test inverse ray
+        try testRayHelperInternal(hit_b, hit_a, kind, &system_ctx);
+    }
 }
 
 /// Helper function to check that a ray misses a shape

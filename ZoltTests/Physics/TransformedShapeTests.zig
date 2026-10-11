@@ -1,17 +1,13 @@
 //! Port of: UnitTests/Physics/TransformedShapeTests.cpp
-//! Status: partial
-//! Missing: creating the body in a PhysicsTestContext and collecting its leaf shape with
-//!   NarrowPhaseQuery::CollectTransformedShapes in TestTransformedShape (need PhysicsTestContext / NarrowPhaseQuery,
-//!   Phase 5). The port starts from the TransformedShape the body would have (Body::GetTransformedShape) and collects the
-//!   leaf shape with TransformedShape::CollectTransformedShapes, which is what NarrowPhaseQuery does per body.
+//! Status: complete
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AABox = zolt.AABox;
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
-const BodyID = zolt.BodyID;
 const BoxShapeSettings = zolt.BoxShapeSettings;
 const Color = zolt.Color;
 const DMat44 = zolt.DMat44;
@@ -25,7 +21,6 @@ const RotatedTranslatedShapeSettings = zolt.RotatedTranslatedShapeSettings;
 const RRayCast = zolt.RRayCast;
 const RVec3 = zolt.RVec3;
 const ScaledShapeSettings = zolt.ScaledShapeSettings;
-const TransformedShape = zolt.TransformedShape;
 const TransformedShapeCollector = zolt.TransformedShapeCollector;
 const Vec3 = zolt.Vec3;
 const math = zolt.math;
@@ -57,20 +52,16 @@ test "TestTransformedShape" {
     defer rtshape_settings.deinit();
 
     // Create a body with this shape
-    // Not ported: PhysicsTestContext::CreateBody (Phase 5). Body::GetTransformedShape is the shape at the center of mass
-    // position of the body (Body::SetPositionAndRotationInternal: inPosition + inRotation * mShape->GetCenterOfMass())
-    var rtshape = try rtshape_settings.asShapeSettings().createShape(allocator);
-    defer rtshape.deinit();
-    const body_id = BodyID.init(1); // Stands in for body.GetID()
-    var body_transformed_shape = TransformedShape.init(translation.addVec3(rotation.mulVec3(rtshape.getPtr().?.getCenterOfMass())), rotation, rtshape.getPtr().?, body_id, .{});
-    defer body_transformed_shape.deinit();
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    const body = try c.createBodyWithShapeSettings(rtshape_settings.asShapeSettings(), translation, rotation, .static, .discrete, 0, .dont_activate);
+    const body_id = body.getID();
 
     // Collect the leaf shape transform
     var collector = AllHitCollisionCollector(TransformedShapeCollector).init(allocator);
     defer collector.deinit();
-    // Not ported: c.GetSystem()->GetNarrowPhaseQuery().CollectTransformedShapes(AABox::sBiggest(), collector) (Phase 5),
-    // NarrowPhaseQuery calls this for each body with OnBody / OnBodyEnd around it
-    body_transformed_shape.collectTransformedShapes(AABox.biggest(), &collector.base, .{});
+    c.getSystem().getNarrowPhaseQuery().collectTransformedShapes(AABox.biggest(), &collector.base, .{});
     try collector.checkError();
 
     // Check that there is exactly 1 shape
