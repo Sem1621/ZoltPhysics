@@ -1,8 +1,7 @@
 //! Zolt addition, no Jolt file: tests of PhysicsSystem.update, the job graph and BodyInterface (SimulationArchitecture
 //! D4, D5, D6, D12)
 //! Status: partial
-//! Missing: the scenes with constraints in islands (the Phase 6 constraint types) and CCD hits (REGION R4 of
-//! PhysicsSystem.zig, Wave B)
+//! Missing: the scenes with constraints in islands (the Phase 6 constraint types)
 //!
 //! The gravity-only scene (adapted from the Phase 5 architecture prototype, SimulationPrototype.zig, deleted in F2) is
 //! laid out so that no two bodies ever overlap (every body has its own vertical column, the floor is far below), while
@@ -31,6 +30,17 @@
 //! - The LargeIslandSplitter path: a pyramid of 136 boxes is one island above the splitting threshold; it is solved in
 //!   splits (bit identical with thread pools, different from the solve without the splitter) and goes to sleep from
 //!   the final batch of the split island.
+//!
+//! The CCD scene (Wave B R4: JobFindCCDContacts, sSolveCCDContact, JobResolveCCDContacts): 32 linear cast bullets
+//! fired at the thin walls of a container (one rejected by OnContactValidate and one turned into a sensor contact go
+//! through), two bullets hitting each other, a bullet that wakes a sleeping box up and one that hits a kinematic box.
+//! - Determinism against thread pools of 0, 1, 3 and 7 workers with the saved state after every update, with
+//!   min(ceil(CCD bodies / 4), concurrency) FindCCDContacts jobs per step (asserted).
+//! - D12 sweeps on the update in which the bullets hit the walls: every temp allocation fails in turn, every createJob
+//!   of the job graph fails in turn, every FindCCDContacts job (and every job from it on) cannot be created (not an
+//!   error, PostIntegrateVelocity does the work itself when none could be created: the results do not change), the heap
+//!   runs out at every allocation inside the jobs, the broad phase cast of FindCCDContacts runs out of memory,
+//!   checkAllAllocationFailures on creating the scene; save and restore with the CCD manifolds in the contact cache.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -2152,4 +2162,580 @@ test "PhysicsSystem large island: the LargeIslandSplitter path" {
     try expectEqual(@as(u32, PyramidScene.num_boxes), without.num_deactivated.load(.monotonic));
     try expectEqual(@as(u32, 0), without.num_deactivated_from_split_island.load(.monotonic));
     try expect(!std.mem.eql(u8, ref_states.items, states.items));
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// CCD scenes (Wave B R4: JobFindCCDContacts, sSolveCCDContact, JobResolveCCDContacts)
+
+/// The user data bits of the bullets that the CCD contact listener acts on
+const CCDFlags = struct {
+    /// OnContactValidate: RejectAllContactsForThisBodyPair (the bullet goes through the wall)
+    const reject: u64 = 1 << 32;
+    /// OnContactAdded / OnContactPersisted: a sensor contact (no response, the bullet goes through)
+    const sensor: u64 = 2 << 32;
+};
+
+/// Counts the contact callbacks and acts on CCDFlags (called from the worker threads: atomics)
+const CCDContactListener = struct {
+    num_validated: std.atomic.Value(u32) = .init(0),
+    num_added: std.atomic.Value(u32) = .init(0),
+    num_persisted: std.atomic.Value(u32) = .init(0),
+    num_removed: std.atomic.Value(u32) = .init(0),
+
+    pub fn onContactValidate(self: *CCDContactListener, body1: *const Body, body2: *const Body, base_offset: RVec3, collision_result: *const zolt.CollideShapeResult) zolt.ValidateResult {
+        _ = .{ base_offset, collision_result };
+        _ = self.num_validated.fetchAdd(1, .monotonic);
+        return if (((body1.getUserData() | body2.getUserData()) & CCDFlags.reject) != 0) .reject_all_contacts_for_this_body_pair else .accept_all_contacts_for_this_body_pair;
+    }
+
+    fn modify(body1: *const Body, body2: *const Body, settings: *zolt.ContactSettings) void {
+        if (((body1.getUserData() | body2.getUserData()) & CCDFlags.sensor) != 0)
+            settings.is_sensor = true;
+    }
+
+    pub fn onContactAdded(self: *CCDContactListener, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+        _ = manifold;
+        _ = self.num_added.fetchAdd(1, .monotonic);
+        modify(body1, body2, settings);
+    }
+
+    pub fn onContactPersisted(self: *CCDContactListener, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+        _ = manifold;
+        _ = self.num_persisted.fetchAdd(1, .monotonic);
+        modify(body1, body2, settings);
+    }
+
+    pub fn onContactRemoved(self: *CCDContactListener, sub_shape_pair: *const zolt.SubShapeIDPair) void {
+        _ = sub_shape_pair;
+        _ = self.num_removed.fetchAdd(1, .monotonic);
+    }
+};
+
+/// Wraps a job system: counts the FindCCDContacts jobs (PostIntegrateVelocity creates them from inside its job) and
+/// fails the FindCCDContacts jobs with index `fail_from` (counting from 0 over the whole update) and later
+const CCDJobSystem = struct {
+    inner: JobSystem,
+    fail_from: u32 = std.math.maxInt(u32),
+    num_find_ccd_contacts: std.atomic.Value(u32) = .init(0),
+    num_failed: std.atomic.Value(u32) = .init(0),
+
+    fn jobSystem(self: *CCDJobSystem) JobSystem {
+        return .init(self);
+    }
+
+    pub fn getMaxConcurrency(self: *const CCDJobSystem) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    pub fn createJob(self: *CCDJobSystem, job_name: []const u8, color: zolt.Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        if (std.mem.eql(u8, job_name, "FindCCDContacts")) {
+            if (self.num_find_ccd_contacts.fetchAdd(1, .monotonic) >= self.fail_from) {
+                _ = self.num_failed.fetchAdd(1, .monotonic);
+                return error.OutOfMemory;
+            }
+        }
+        return self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+    }
+
+    pub fn createBarrier(self: *CCDJobSystem) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    pub fn destroyBarrier(self: *CCDJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    pub fn waitForJobs(self: *CCDJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    // The jobs belong to `inner` and queue themselves there: not reached
+    pub fn queueJob(self: *CCDJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.queueJob(self.inner.ptr, job);
+    }
+
+    pub fn queueJobs(self: *CCDJobSystem, jobs: []const *JobSystem.Job) void {
+        self.inner.vtable.queueJobs(self.inner.ptr, jobs);
+    }
+
+    pub fn freeJob(self: *CCDJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.freeJob(self.inner.ptr, job);
+    }
+};
+
+/// A scene with continuous collision detection: 32 linear cast bullets in a container of thin walls, fired at the walls
+/// (most bullets, one rejected by OnContactValidate, one whose contact OnContactAdded turns into a sensor contact: both
+/// go through the wall), two bullets hitting each other head on, a bullet that hits a sleeping box (it wakes up) and
+/// one that hits a kinematic box. Many CCD bodies per collision step: several FindCCDContacts jobs with threads.
+const CCDScene = struct {
+    const num_bullets = 32;
+    const half_extent = 12.0;
+
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+    object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+    activation_listener: ActivationCounter = .{},
+    contact_listener: CCDContactListener = .{},
+    bullets: [num_bullets]BodyID = @splat(.invalid),
+    rejected_bullet: BodyID = .invalid,
+    sensor_bullet: BodyID = .invalid,
+    sleeping_box: BodyID = .invalid,
+
+    /// Builds the scene in place (the physics system must not move)
+    fn init(self: *CCDScene, allocator: Allocator, opts: PhysicsSystem.InitOptions) !void {
+        try self.initSystem(allocator, opts);
+        errdefer self.deinit();
+        try self.populate(allocator);
+    }
+
+    /// Initializes the physics system (on error a custom broad phase still belongs to the caller)
+    fn initSystem(self: *CCDScene, allocator: Allocator, opts: PhysicsSystem.InitOptions) !void {
+        self.* = .{};
+        try self.system.init(allocator, io, 1024, 0, 4096, 2048, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, opts);
+    }
+
+    fn populate(self: *CCDScene, allocator: Allocator) !void {
+        self.system.setBodyActivationListener(.init(&self.activation_listener));
+        self.system.setContactListener(.init(&self.contact_listener));
+        const bi = self.system.getBodyInterfaceMut();
+
+        // Floor and four thin walls
+        const floor_shape = try BoxShape.create(allocator, Vec3.init(40, 1, 40), .{ .convex_radius = 0.0 });
+        var static_settings = BodyCreationSettings.initWithShape(floor_shape.asShape(), RVec3.init(0, -1, 0), Quat.identity(), .static, Layers.non_moving);
+        defer static_settings.deinit();
+        try expect(!(try bi.createAndAddBody(&static_settings, .dont_activate)).isInvalid());
+        static_settings.setShape((try BoxShape.create(allocator, Vec3.init(0.05, 4, half_extent), .{ .convex_radius = 0.0 })).asShape());
+        for ([_]f32{ -half_extent, half_extent }) |x| {
+            static_settings.position = RVec3.init(x, 4, 0);
+            _ = try bi.createAndAddBody(&static_settings, .dont_activate);
+        }
+        static_settings.setShape((try BoxShape.create(allocator, Vec3.init(half_extent, 4, 0.05), .{ .convex_radius = 0.0 })).asShape());
+        for ([_]f32{ -half_extent, half_extent }) |z| {
+            static_settings.position = RVec3.init(0, 4, z);
+            _ = try bi.createAndAddBody(&static_settings, .dont_activate);
+        }
+
+        // The bullets, fired at the walls in all directions
+        var sphere_settings = BodyCreationSettings.initWithSettings((try SphereShapeSettings.create(allocator, 0.2, .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer sphere_settings.deinit();
+        var box_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.init(0.2, 0.15, 0.25), .{ .convex_radius = 0.05 })).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer box_settings.deinit();
+        for (&self.bullets, 0..) |*bullet, i| {
+            const settings = if (i % 2 == 0) &sphere_settings else &box_settings;
+            const angle = 2.0 * std.math.pi * f(@intCast(i)) / num_bullets;
+            settings.position = RVec3.init(3.5 * @cos(angle), 1.0 + 0.1 * f(@intCast(i % 7)), 3.5 * @sin(angle));
+            settings.rotation = Quat.rotation(Vec3.init(0, 1, 0), 0.3 * f(@intCast(i)));
+            settings.linear_velocity = Vec3.init(@cos(angle), 0.05, @sin(angle)).mulScalar(100.0 + 5.0 * f(@intCast(i % 5)));
+            settings.angular_velocity = Vec3.init(0, 2, 0);
+            settings.restitution = if (i % 3 == 0) 0.5 else 0.0;
+            settings.friction = 0.2 + 0.1 * f(@intCast(i % 4));
+            settings.motion_quality = .linear_cast;
+            settings.user_data = if (i == 5) CCDFlags.reject else if (i == 9) CCDFlags.sensor else 0;
+            bullet.* = try bi.createAndAddBody(settings, .activate);
+        }
+        self.rejected_bullet = self.bullets[5];
+        self.sensor_bullet = self.bullets[9];
+        sphere_settings.user_data = 0;
+        box_settings.user_data = 0;
+
+        // Two bullets hitting each other head on (elastic)
+        sphere_settings.restitution = 1.0;
+        sphere_settings.rotation = Quat.identity();
+        sphere_settings.angular_velocity = Vec3.zero();
+        sphere_settings.position = RVec3.init(-1, 6, 6);
+        sphere_settings.linear_velocity = Vec3.init(120, 0, 0);
+        _ = try bi.createAndAddBody(&sphere_settings, .activate);
+        sphere_settings.position = RVec3.init(1, 6, 6);
+        sphere_settings.linear_velocity = Vec3.init(-120, 0, 0);
+        _ = try bi.createAndAddBody(&sphere_settings, .activate);
+
+        // A sleeping box and a bullet that hits it
+        box_settings.motion_quality = .discrete;
+        box_settings.rotation = Quat.identity();
+        box_settings.angular_velocity = Vec3.zero();
+        box_settings.linear_velocity = Vec3.zero();
+        box_settings.restitution = 0.0;
+        box_settings.position = RVec3.init(4, 0.15, -6);
+        self.sleeping_box = try bi.createAndAddBody(&box_settings, .dont_activate);
+        sphere_settings.restitution = 0.0;
+        sphere_settings.position = RVec3.init(-4, 0.2, -6);
+        sphere_settings.linear_velocity = Vec3.init(150, 0, 0);
+        _ = try bi.createAndAddBody(&sphere_settings, .activate);
+
+        // A kinematic box and a bullet that hits it
+        box_settings.motion_type = .kinematic;
+        box_settings.position = RVec3.init(4, 3, -8);
+        box_settings.linear_velocity = Vec3.init(-2, 0, 0);
+        _ = try bi.createAndAddBody(&box_settings, .activate);
+        sphere_settings.position = RVec3.init(-4, 3, -8);
+        sphere_settings.linear_velocity = Vec3.init(150, 0, 0);
+        _ = try bi.createAndAddBody(&sphere_settings, .activate);
+    }
+
+    fn deinit(self: *CCDScene) void {
+        self.system.deinit();
+    }
+};
+
+const ccd_num_updates = 30;
+
+/// What a run of the CCD scene did
+const CCDRunStats = struct {
+    /// Largest number of FindCCDContacts jobs in one update
+    max_find_ccd_contacts_jobs: u32,
+    /// Validated, added, persisted and removed contact callbacks
+    counts: [4]u32,
+};
+
+/// Runs the CCD scene and records the saved state after every update
+fn runCCDScene(allocator: Allocator, kind: JobSystemKind, states: *std.ArrayList(u8), offsets: *std.ArrayList(usize)) !CCDRunStats {
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var counting: CCDJobSystem = .{ .inner = jobs.jobSystem() };
+
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(CCDScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, .{});
+    defer scene.deinit();
+
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+
+    const bi = scene.system.getBodyInterface();
+    var max_jobs: u32 = 0;
+    for (0..ccd_num_updates) |_| {
+        const before = counting.num_find_ccd_contacts.load(.monotonic);
+        const errors = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), counting.jobSystem());
+        max_jobs = @max(max_jobs, counting.num_find_ccd_contacts.load(.monotonic) - before);
+        try expect(errors.isNone());
+        try expect(temp.isEmpty());
+
+        recorder.clear();
+        try scene.system.saveState(recorder.recorder(), .{});
+        try expect(!recorder.isFailed());
+        try offsets.append(allocator, states.items.len);
+        try states.appendSlice(allocator, recorder.getData());
+    }
+
+    // Sanity: the bullets stayed in the container (the walls are thinner than a step of a bullet), except the one whose
+    // hit was rejected and the one whose hit became a sensor contact; the sleeping box was woken up
+    for (scene.bullets) |bullet| {
+        const p = bi.getPosition(bullet);
+        const inside = @abs(p.getX()) < CCDScene.half_extent and @abs(p.getZ()) < CCDScene.half_extent;
+        try expectEqual(!bullet.eql(scene.rejected_bullet) and !bullet.eql(scene.sensor_bullet), inside);
+    }
+    try expect(bi.getPosition(scene.sleeping_box).getX() > 4.5);
+    const listener = &scene.contact_listener;
+    const counts = [4]u32{ listener.num_validated.load(.monotonic), listener.num_added.load(.monotonic), listener.num_persisted.load(.monotonic), listener.num_removed.load(.monotonic) };
+    try expect(counts[0] > 0 and counts[1] > 0 and counts[2] > 0);
+    return .{ .max_find_ccd_contacts_jobs = max_jobs, .counts = counts };
+}
+
+test "PhysicsSystem CCD: determinism single vs multi threaded with several FindCCDContacts jobs" {
+    // JobSystemSingleThreaded against thread pools: the saved state after every update is bit identical, the CCD
+    // bodies are spread over several FindCCDContacts jobs with threads
+    const allocator = std.testing.allocator;
+    var ref_states: std.ArrayList(u8) = .empty;
+    defer ref_states.deinit(allocator);
+    var ref_offsets: std.ArrayList(usize) = .empty;
+    defer ref_offsets.deinit(allocator);
+    const ref = try runCCDScene(allocator, .single_threaded, &ref_states, &ref_offsets);
+    try expectEqual(@as(u32, collision_steps), ref.max_find_ccd_contacts_jobs); // One job per collision step
+
+    const kinds = [_]JobSystemKind{ .{ .thread_pool = 0 }, .{ .thread_pool = 1 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 }, .{ .thread_pool = 7 } };
+    for (kinds) |kind| {
+        var states: std.ArrayList(u8) = .empty;
+        defer states.deinit(allocator);
+        var offsets: std.ArrayList(usize) = .empty;
+        defer offsets.deinit(allocator);
+        const stats = try runCCDScene(allocator, kind, &states, &offsets);
+
+        try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+        for (ref_offsets.items, 0..) |offset, i| {
+            const end = if (i + 1 < ref_offsets.items.len) ref_offsets.items[i + 1] else ref_states.items.len;
+            if (!std.mem.eql(u8, ref_states.items[offset..end], states.items[offset..end])) {
+                std.debug.print("state differs after update {d} with {any}\n", .{ i, kind });
+                return error.TestUnexpectedResult;
+            }
+        }
+        try expectEqual(ref.counts, stats.counts);
+
+        // min(ceil(CCD bodies / 4), concurrency) jobs per step: 32 bullets need 8 jobs with 7 workers
+        const concurrency: u32 = @intCast(kind.thread_pool + 1);
+        try expectEqual(collision_steps * @min(concurrency, 8), stats.max_find_ccd_contacts_jobs);
+    }
+}
+
+/// Restore `snapshot`, run one update with enough memory and compare with `reference`
+fn expectCCDRecovery(scene: *CCDScene, snapshot: *StateRecorderImpl, reference: *StateRecorderImpl, temp: *TempAllocatorImpl, job_system: JobSystem) !void {
+    snapshot.rewind();
+    try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), job_system);
+    try expect(temp.isEmpty());
+    try expectCCDState(scene, reference);
+}
+
+fn expectCCDState(scene: *CCDScene, expected: *StateRecorderImpl) !void {
+    var state = StateRecorderImpl.init(std.testing.allocator);
+    defer state.deinit();
+    try scene.system.saveState(state.recorder(), .{});
+    try expect(state.isEqual(expected));
+}
+
+/// The CCD scene before the bullets reach the walls (`num_updates` updates), with a snapshot of the state, and the
+/// reference state after one more update in which the bullets hit the walls
+const CCDFixture = struct {
+    jobs: AnyJobSystem = .{},
+    temp: TempAllocatorImpl,
+    scene: *CCDScene,
+    snapshot: StateRecorderImpl,
+    reference: StateRecorderImpl,
+
+    /// The update in which the bullets that fly at 45 degrees hit the walls (they move 0.85 to 1 m per collision step
+    /// from 3.5 m off the center, the walls are at 12 m; the bullets along the axes hit them an update earlier)
+    const hit_update = 5;
+
+    /// `opts.broad_phase` may be a custom broad phase: the fixture owns it from the call on
+    fn init(self: *CCDFixture, kind: JobSystemKind, scene_allocator: Allocator, opts: PhysicsSystem.InitOptions) !void {
+        const allocator = std.testing.allocator;
+        self.* = .{ .temp = undefined, .scene = undefined, .snapshot = .init(allocator), .reference = .init(allocator) };
+        errdefer self.reference.deinit();
+        errdefer self.snapshot.deinit();
+        self.scene = allocator.create(CCDScene) catch |err| {
+            if (opts.broad_phase == .custom) opts.broad_phase.custom.base.destroy();
+            return err;
+        };
+        errdefer allocator.destroy(self.scene);
+        self.scene.initSystem(scene_allocator, opts) catch |err| {
+            if (opts.broad_phase == .custom) opts.broad_phase.custom.base.destroy();
+            return err;
+        };
+        errdefer self.scene.deinit();
+        try self.scene.populate(scene_allocator);
+        self.temp = try .init(allocator, 4 * 1024 * 1024);
+        errdefer self.temp.deinit();
+        try self.jobs.init(allocator, kind);
+        errdefer self.jobs.deinit();
+        for (0..hit_update) |_| _ = try self.scene.system.update(delta_time, collision_steps, self.temp.tempAllocator(), self.jobs.jobSystem());
+        try self.scene.system.saveState(self.snapshot.recorder(), .{});
+        _ = try self.scene.system.update(delta_time, collision_steps, self.temp.tempAllocator(), self.jobs.jobSystem());
+        try self.scene.system.saveState(self.reference.recorder(), .{});
+    }
+
+    fn deinit(self: *CCDFixture) void {
+        self.reference.deinit();
+        self.snapshot.deinit();
+        self.scene.deinit();
+        std.testing.allocator.destroy(self.scene);
+        self.jobs.deinit();
+        self.temp.deinit();
+    }
+
+    fn restore(self: *CCDFixture) !void {
+        self.snapshot.rewind();
+        try expect(try self.scene.system.restoreState(self.snapshot.recorder(), .{}));
+    }
+};
+
+fn ccdOutOfTempMemory(kind: JobSystemKind) !void {
+    var fx: CCDFixture = undefined;
+    try fx.init(kind, std.testing.allocator, .{});
+    defer fx.deinit();
+    const scene = fx.scene;
+
+    // The update of the hits again, counting the temp allocations (per step: the CCD bodies, the mapping from active
+    // bodies to CCD bodies, the sorted CCD bodies in ResolveCCDContacts)
+    try fx.restore();
+    var counting: FailingTempAllocator = .init(fx.temp.tempAllocator(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, counting.tempAllocator(), fx.jobs.jobSystem());
+    try expectCCDState(scene, &fx.reference);
+    const num_allocations = counting.num_allocations;
+    try expect(num_allocations >= num_build_temp_allocations + collision_steps * 3);
+
+    // Fail every allocation in turn: the update returns error.OutOfMemory, the temp allocator is empty (the CCD arrays
+    // are freed by ResolveCCDContacts also when it skipped its work) and restoring the snapshot recovers the reference
+    for (0..num_allocations) |fail_index| {
+        try fx.restore();
+        var failing: FailingTempAllocator = .init(fx.temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, failing.tempAllocator(), fx.jobs.jobSystem()));
+        try expect(failing.has_induced_failure);
+        try expect(fx.temp.isEmpty());
+        if (fail_index < num_build_temp_allocations)
+            try expectCCDState(scene, &fx.snapshot); // No job ran
+        try expectCCDRecovery(scene, &fx.snapshot, &fx.reference, &fx.temp, fx.jobs.jobSystem());
+    }
+}
+
+test "PhysicsSystem CCD: out of temp memory at every allocation, single threaded" {
+    try ccdOutOfTempMemory(.single_threaded);
+}
+
+test "PhysicsSystem CCD: out of temp memory at every allocation, multi threaded" {
+    try ccdOutOfTempMemory(.{ .thread_pool = 7 });
+}
+
+fn ccdFailingCreateJob(kind: JobSystemKind) !void {
+    var fx: CCDFixture = undefined;
+    try fx.init(kind, std.testing.allocator, .{});
+    defer fx.deinit();
+    const scene = fx.scene;
+
+    // Count the jobs of the update that the update builds (they are created before any job runs, the start gate) and
+    // the FindCCDContacts jobs that PostIntegrateVelocity creates (it runs after every built job was created)
+    try fx.restore();
+    var ccd_counting: CCDJobSystem = .{ .inner = fx.jobs.jobSystem() };
+    var counting: FailingJobSystem = .init(ccd_counting.jobSystem(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), counting.jobSystem());
+    try expectCCDState(scene, &fx.reference);
+    const num_ccd_jobs = ccd_counting.num_find_ccd_contacts.load(.monotonic);
+    try expect(num_ccd_jobs >= collision_steps);
+
+    // Every createJob of the job graph fails in turn: the update fails without side effects
+    var fail_index: u32 = 0;
+    var num_build_failures: u32 = 0;
+    while (true) : (fail_index += 1) {
+        try fx.restore();
+        var failing: FailingJobSystem = .init(fx.jobs.jobSystem(), .{ .fail_index = fail_index });
+        if (scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), failing.jobSystem())) |errors| {
+            // Past the jobs of the graph (or a job spawned from inside a job failed): no error, the reference results
+            try expect(errors.isNone());
+            try expectCCDState(scene, &fx.reference);
+            try expect(fx.temp.isEmpty());
+            if (!failing.has_induced_failure.load(.monotonic)) break;
+            continue;
+        } else |err| {
+            try expectEqual(error.OutOfMemory, err);
+            num_build_failures += 1;
+            try expect(fx.temp.isEmpty());
+            try expectCCDState(scene, &fx.snapshot); // Nothing changed
+            try expectCCDRecovery(scene, &fx.snapshot, &fx.reference, &fx.temp, fx.jobs.jobSystem());
+        }
+    }
+    try expect(num_build_failures >= collision_steps * num_job_kinds_per_step + 1);
+
+    // A FindCCDContacts job that cannot be created is not an error and changes no result (D5): fail the FindCCDContacts
+    // job with every index and every job from that index on (none created in a step: PostIntegrateVelocity does the
+    // work itself)
+    for (0..num_ccd_jobs + 1) |ccd_index| {
+        try fx.restore();
+        var failing: CCDJobSystem = .{ .inner = fx.jobs.jobSystem(), .fail_from = @intCast(ccd_index) };
+        const errors = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), failing.jobSystem());
+        try expect(errors.isNone());
+        try expect(fx.temp.isEmpty());
+        try expectCCDState(scene, &fx.reference);
+        try expectEqual(num_ccd_jobs - @min(num_ccd_jobs, @as(u32, @intCast(ccd_index))) > 0, failing.num_failed.load(.monotonic) > 0);
+    }
+}
+
+test "PhysicsSystem CCD: createJob fails at every job and at every FindCCDContacts job, single threaded" {
+    try ccdFailingCreateJob(.single_threaded);
+}
+
+test "PhysicsSystem CCD: createJob fails at every job and at every FindCCDContacts job, multi threaded" {
+    try ccdFailingCreateJob(.{ .thread_pool = 7 });
+}
+
+fn ccdOutOfHeapMemory(kind: JobSystemKind) !void {
+    // The heap allocations inside the jobs of the update of the hits (the QuadTree in UpdateBroadPhasePrepare) fail in
+    // turn, every later one too: the job latches the error (D5), the update returns error.OutOfMemory, the temp allocator
+    // is empty and the system recovers through restoreState
+    var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
+    var fx: CCDFixture = undefined;
+    try fx.init(kind, heap.allocator(), .{});
+    defer fx.deinit();
+    const scene = fx.scene;
+
+    try fx.restore();
+    const before = heap.num_allocations.load(.monotonic);
+    _ = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem());
+    const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expect(num_allocations > 0);
+    try expectCCDState(scene, &fx.reference);
+
+    for (0..num_allocations) |i| {
+        try fx.restore();
+        heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem()));
+        heap.fail_from.store(std.math.maxInt(u32), .monotonic);
+        try expect(fx.temp.isEmpty());
+        try expectCCDRecovery(scene, &fx.snapshot, &fx.reference, &fx.temp, fx.jobs.jobSystem());
+    }
+}
+
+test "PhysicsSystem CCD: out of heap memory inside a job, single threaded" {
+    try ccdOutOfHeapMemory(.single_threaded);
+}
+
+test "PhysicsSystem CCD: out of heap memory inside a job, multi threaded" {
+    try ccdOutOfHeapMemory(.{ .thread_pool = 3 });
+}
+
+fn ccdOutOfHeapMemoryInCast(kind: JobSystemKind) !void {
+    // The broad phase cast of the FindCCDContacts jobs fails (BroadPhaseQuadTree's node stack growing on the heap) while
+    // the bullets hit the walls: the jobs latch the error, ResolveCCDContacts skips its work (and frees), the update
+    // returns error.OutOfMemory and the system recovers
+    const broad_phase = try AllocatingBroadPhase.create(std.testing.allocator);
+    var fx: CCDFixture = undefined;
+    try fx.init(kind, std.testing.allocator, .{ .broad_phase = .{ .custom = &broad_phase.base } });
+    defer fx.deinit();
+    const scene = fx.scene;
+
+    try fx.restore();
+    broad_phase.fail_cast.store(true, .monotonic);
+    try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem()));
+    broad_phase.fail_cast.store(false, .monotonic);
+    try expect(fx.temp.isEmpty());
+    try expectCCDRecovery(scene, &fx.snapshot, &fx.reference, &fx.temp, fx.jobs.jobSystem());
+}
+
+test "PhysicsSystem CCD: out of heap memory in the broad phase cast of FindCCDContacts, single threaded" {
+    try ccdOutOfHeapMemoryInCast(.single_threaded);
+}
+
+test "PhysicsSystem CCD: out of heap memory in the broad phase cast of FindCCDContacts, multi threaded" {
+    try ccdOutOfHeapMemoryInCast(.{ .thread_pool = 7 });
+}
+
+test "PhysicsSystem CCD: save and restore with CCD hits" {
+    // Snapshot before the hits, simulate, restore, simulate again: identical (the CCD manifolds in the contact cache),
+    // also through a validating restore
+    var fx: CCDFixture = undefined;
+    try fx.init(.{ .thread_pool = 3 }, std.testing.allocator, .{});
+    defer fx.deinit();
+    const scene = fx.scene;
+    const allocator = std.testing.allocator;
+
+    var after1 = StateRecorderImpl.init(allocator);
+    defer after1.deinit();
+    for (0..10) |_| _ = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem());
+    try scene.system.saveState(after1.recorder(), .{});
+
+    try fx.restore();
+    var after2 = StateRecorderImpl.init(allocator);
+    defer after2.deinit();
+    for (0..11) |_| _ = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem());
+    try scene.system.saveState(after2.recorder(), .{});
+    try expect(after2.isEqual(&after1));
+
+    after2.rewind();
+    after2.recorder().setValidating(true);
+    try expect(try scene.system.restoreState(after2.recorder(), .{}));
+    try expectEqual(@as(u32, 0), after2.num_mismatches);
+}
+
+test "PhysicsSystem CCD: out of memory creating the scene" {
+    const Ctx = struct {
+        fn build(allocator: Allocator) !void {
+            const scene = try allocator.create(CCDScene);
+            defer allocator.destroy(scene);
+            try scene.init(allocator, .{});
+            scene.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Ctx.build, .{});
 }

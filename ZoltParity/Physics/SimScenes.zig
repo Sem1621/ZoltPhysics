@@ -3043,9 +3043,12 @@ fn buildCCDListener(b: *SceneBuilder) Allocator.Error!void {
     }
 }
 
-/// Linear cast bodies that start penetrating: a sphere half inside a thick box moving deeper (a hit at fraction 0, the
-/// deepest point), a sphere inside a box moving out (the back face is ignored), a box touching a wall, two linear cast
-/// bodies starting in contact and moving towards each other
+/// Linear cast bodies that start penetrating: a sphere half inside a thick box moving deeper, a box touching a box and
+/// two linear cast boxes starting in contact and moving towards each other (the discrete contacts at the start of the
+/// step take their velocity into the boxes away before they are integrated, so they move less than the cast threshold),
+/// a sphere inside a box moving out of it (it casts, the back face is ignored). Hits at fraction 0 (penetrating at the
+/// start of the cast, the deepest point) happen in the other CCD scenes, where bodies lie against a wall and are pushed
+/// into it.
 fn buildCCDStartsPenetrating(b: *SceneBuilder) Allocator.Error!void {
     const thick = try b.box(.{ 1, 1, 1 }, 0.05);
     const sphere = try b.sphere(0.2);
@@ -3060,6 +3063,10 @@ fn buildCCDStartsPenetrating(b: *SceneBuilder) Allocator.Error!void {
     _ = try b.body(.{ .position = .{ -1.3, 0, 0 }, .linear_velocity = .{ 90, 30, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
     _ = try b.body(.{ .position = .{ 0, 0, 5 }, .linear_velocity = .{ 100, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
     _ = try b.body(.{ .position = .{ 0.55, 0.05, 5 }, .linear_velocity = .{ -100, 0, 0 }, .shape = box, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
+    // A bullet that starts away from the box: the only hit of the scene without a discrete contact of the same sub shape
+    // pair in the same update, so the contact cache records a CCD manifold (Expect.ccd_hits)
+    _ = try b.body(.{ .position = .{ 0, 0, 10 }, .shape = thick, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -8, 0, 10 }, .linear_velocity = .{ 120, 0, 0 }, .shape = sphere, .motion_quality = 1, .object_layer = Layers.moving }, .activate);
 }
 
 /// 72 linear cast bodies in a container of thin walls, fired in every direction: many CCD bodies per step, so that
