@@ -35,10 +35,20 @@
 //!    cast shape without inner radius, invalid scales, a kinematic / dynamic body without mass (a mesh needs
 //!    `override_mass_properties`), setting the velocity of a static body.
 //!
-//! Rules for the gravity-only scenes (until A4 / Wave B): no two bodies whose layers collide may ever have
-//! overlapping bounds (the broad phase would report a pair and ProcessBodyPair is REGION R2), and the linear cast
-//! bodies must not find a body in their path (REGION R4). Bodies in the `Layers.unused*` layers collide with nothing,
-//! the other layers are spread out on a grid (`gridPosition`).
+//! Rules for the gravity-only scenes: no two bodies whose layers collide may ever have overlapping bounds, the linear
+//! cast bodies must not find a body in their path. Bodies in the `Layers.unused*` layers collide with nothing, the
+//! other layers are spread out on a grid (`gridPosition`).
+//!
+//! Contact scenes (Wave B, `Blocker.contacts` is supported): bodies collide, the contact listener records are
+//! compared. The contact listener, the combine functions and the SimShapeFilter of a scene are selected with
+//! `b.contact_listener_mode` / `b.combine_mode` / `b.sim_shape_filter_mode`; in `ContactListenerMode.modify` and
+//! `SimShapeFilterMode.filter_spheres` the bits of `ContactFlags` in the upper 32 bits of the user data of the two
+//! bodies decide what the listener / filter does (the same code on both sides). A contact scene states what it
+//! reaches in `SceneEntry.expect` (contact callbacks, removed contacts, sleeping bodies, FindCollisions jobs spawned
+//! from inside jobs, a large island solved by the LargeIslandSplitter, a full manifold array in ProcessBodyPair);
+//! `runEntry` checks it. Rules: linear cast bodies must still not hit anything (`Blocker.ccd_hits`, REGION R4), and the
+//! contact constraint buffer and the caches must be large enough (`max_contact_constraints`, `max_body_pairs`): which
+//! contacts are dropped when they are full depends on the threads, in Jolt too.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -83,6 +93,8 @@ pub const ShapeKind = enum(u32) {
     static_compound = 14,
     /// `count` children at children[child..]
     mutable_compound = 15,
+    /// `count` * `count` height samples at floats[data..], params[0..3] offset, params[3..6] scale
+    height_field = 16,
 };
 
 /// A shape, created once per scene from its settings (ShapeSettings::Create) on both sides. Bodies refer to it by
@@ -380,6 +392,66 @@ pub const SimSceneDesc = extern struct {
     num_constraints: u32,
     physics_settings: [*]const SimPhysicsSettings,
     num_physics_settings: u32,
+    /// ContactListenerMode
+    contact_listener_mode: u32,
+    /// CombineMode (PhysicsSystem::SetCombineFriction / SetCombineRestitution)
+    combine_mode: u32,
+    /// SimShapeFilterMode (PhysicsSystem::SetSimShapeFilter)
+    sim_shape_filter_mode: u32,
+};
+
+/// What the contact listener does besides recording the callbacks
+pub const ContactListenerMode = enum(u32) {
+    /// Record the callbacks, OnContactValidate returns AcceptAllContactsForThisBodyPair
+    record = 0,
+    /// Record the callbacks (the settings as Jolt passes them in) and then act on the `ContactFlags` of the two bodies
+    modify = 1,
+};
+
+/// The combine functions of friction and restitution
+pub const CombineMode = enum(u32) {
+    /// Jolt's defaults: sqrt(friction1 * friction2), max(restitution1, restitution2)
+    default = 0,
+    /// friction 0.5 * (friction1 + friction2), restitution max(restitution1, restitution2) when both sub shape IDs are
+    /// equal, else min(restitution1, restitution2)
+    custom = 1,
+};
+
+/// The SimShapeFilter of the system
+pub const SimShapeFilterMode = enum(u32) {
+    /// No filter (nullptr)
+    none = 0,
+    /// ShouldCollide is false when one of the two bodies has `ContactFlags.filter_spheres` and one of the two shapes is
+    /// a SphereShape (it is called for every level of a compound)
+    filter_spheres = 1,
+};
+
+/// Bits in the upper 32 bits of a body's user data (`user_data_flags << 32`) that the contact listener in
+/// `ContactListenerMode.modify` and the shape filter act on (the bits of both bodies are combined with or)
+pub const ContactFlags = struct {
+    /// OnContactValidate: RejectAllContactsForThisBodyPair
+    pub const reject_all: u32 = 1 << 0;
+    /// OnContactValidate: RejectContact when the penetration depth is negative (speculative), else AcceptContact
+    pub const reject_speculative: u32 = 1 << 1;
+    /// OnContactValidate: AcceptContact (it is called again for the next contact of the pair)
+    pub const accept_each: u32 = 1 << 2;
+    /// OnContactAdded / OnContactPersisted: mCombinedFriction = 0
+    pub const zero_friction: u32 = 1 << 3;
+    /// OnContactAdded / OnContactPersisted: mCombinedRestitution = 0.9
+    pub const bouncy: u32 = 1 << 4;
+    /// OnContactAdded / OnContactPersisted: inverse mass scales 0.5 / 2.0, inverse inertia scales 0.25 / 1.5
+    pub const mass_scale: u32 = 1 << 5;
+    /// OnContactAdded / OnContactPersisted: relative surface velocity (1.5, 0, 0.5), angular (0, 0.7, 0)
+    pub const surface_velocity: u32 = 1 << 6;
+    /// OnContactAdded / OnContactPersisted: mIsSensor = true
+    pub const sensor: u32 = 1 << 7;
+    /// SimShapeFilterMode.filter_spheres: filter the spheres of the pair
+    pub const filter_spheres: u32 = 1 << 8;
+
+    /// The user data of a body with these flags (and `low` in the lower 32 bits)
+    pub fn userData(flags: u32, low: u32) u64 {
+        return (@as(u64, flags) << 32) | low;
+    }
 };
 
 /// Listener callback kinds of `SimRecord`
@@ -393,7 +465,8 @@ pub const RecordKind = enum(u32) {
     /// ids[0..2] body IDs, ids[2..4] sub shape IDs, data[0] penetration depth, data[1..4] penetration axis
     contact_validate = 3,
     /// ids[0..2] body IDs, ids[2..4] sub shape IDs, data[0..3] world space normal, data[3] penetration depth, data[4]
-    /// number of contact points, data[5] combined friction, data[6] combined restitution, data[7] is sensor
+    /// number of contact points | is sensor << 8, data[5] combined friction, data[6] combined restitution, data[7] the
+    /// FNV-1a hash of the base offset and the contact points on both shapes (`hashManifold`)
     contact_added = 4,
     contact_persisted = 5,
     /// ids: body 1, sub shape 1, body 2, sub shape 2
@@ -416,6 +489,19 @@ pub const SimRecord = extern struct {
 };
 
 pub const invalid_handle: u32 = std.math.maxInt(u32);
+
+/// FNV-1a (32 bit) over bytes, the hash of the contact listener records (SimHashBytes in SimulationReference.cpp)
+pub fn hashBytes(hash: u32, bytes: []const u8) u32 {
+    var h = hash;
+    for (bytes) |c| {
+        h ^= c;
+        h *%= 16777619;
+    }
+    return h;
+}
+
+/// The FNV-1a offset basis
+pub const hash_seed: u32 = 2166136261;
 
 /// The result bits of a body operation: IsActive(body) | IsAdded(body) << 1
 pub const BodyState = struct {
@@ -448,7 +534,7 @@ pub const Layers = struct {
 /// What a scene needs that Zolt cannot do yet
 pub const Blocker = enum {
     none,
-    /// Body pairs reach the narrow phase: ProcessBodyPair and the contact solver (A4, Wave B R2 / R3)
+    /// Body pairs reach the narrow phase: ProcessBodyPair and the contact solver (A4, Wave B R2 / R3, supported)
     contacts,
     /// Constraints in islands: the constraint classes (Phase 6) and the solver (Wave B R3)
     constraints,
@@ -463,12 +549,39 @@ pub const Blocker = enum {
     /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
-            .none => true,
+            .none, .contacts => true,
             .release_only => !zolt.Core.enable_asserts,
-            .contacts, .constraints, .ccd_hits, .soft_bodies => false,
+            .constraints, .ccd_hits, .soft_bodies => false,
         };
     }
 };
+
+/// What a scene must reach (checked by SimulationParity.zig's runEntry, so that a scene that no longer does what it is
+/// written for fails)
+pub const Expect = struct {
+    /// OnContactAdded is called (in every configuration)
+    contacts: bool = false,
+    /// OnContactRemoved is called
+    removed: bool = false,
+    /// OnContactValidate is called (a scene with ContactListenerMode.modify that rejects contacts)
+    validated: bool = false,
+    /// Bodies are asleep after some update
+    sleeping: bool = false,
+    /// FindCollisions jobs are spawned from inside jobs (TrySpawnJobFindCollisions) in a multi threaded configuration
+    spawned_jobs: bool = false,
+    /// Bodies are put to sleep from the final batch of a split island (Zolt side: the LargeIslandSplitter has split
+    /// islands when OnBodyDeactivated is called from SolvePositionConstraints)
+    large_island: bool = false,
+    /// The manifold array of ProcessBodyPair's ReductionCollideShapeCollector is full: a body pair gets
+    /// `max_manifolds_per_body_pair` manifolds (OnContactAdded + OnContactPersisted calls) in one update, so its hits
+    /// with other normals take the "array full" branch of AddHit (keep the manifolds with the deepest penetration). Only
+    /// for scenes with one collision step per update (the count is per update).
+    full_manifolds: bool = false,
+};
+
+/// The capacity of the manifold array of ProcessBodyPair's ReductionCollideShapeCollector (Jolt:
+/// `using Manifolds = StaticArray<MyManifold, 32>`)
+pub const max_manifolds_per_body_pair = 32;
 
 pub const SceneEntry = struct {
     name: []const u8,
@@ -477,6 +590,7 @@ pub const SceneEntry = struct {
     /// D12 sweeps (every temp allocation and every createJob of the update fails once) before every
     /// `sweep_stride`-th update and before the first one, 0: none
     sweep_stride: u32 = 25,
+    expect: Expect = .{},
 };
 
 pub const scenes = [_]SceneEntry{
@@ -509,10 +623,45 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "random_3", .build = buildRandom(3, 3) },
     .{ .name = "random_4", .build = buildRandom(4, 4) },
     .{ .name = "linear_cast_without_inner_radius", .build = buildLinearCastWithoutInnerRadius, .blocked_by = .release_only },
+    // Contacts (Wave B R2 / R3)
+    .{ .name = "contacts_box_on_floor", .build = buildBoxOnFloor, .blocked_by = .contacts, .expect = .{ .contacts = true, .sleeping = true } },
+    .{ .name = "contacts_pyramid", .build = buildPyramid, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_sensor", .build = buildSensor, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_large_pyramid_splitter", .build = buildLargePyramid, .blocked_by = .contacts, .sweep_stride = 45, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
+    .{ .name = "contacts_large_pyramid_collapse", .build = buildLargePyramidWithoutSplitter, .blocked_by = .contacts, .sweep_stride = 30, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_shapes_on_floor", .build = buildShapesOnFloor, .blocked_by = .contacts, .expect = .{ .contacts = true, .sleeping = true } },
+    .{ .name = "contacts_shape_stacks", .build = buildShapeStacks, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_mesh_ground", .build = buildMeshGround, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_height_field_ground", .build = buildHeightFieldGround, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_static_shapes", .build = buildStaticShapes, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_friction_restitution", .build = buildFrictionRestitution, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_combine_functions", .build = buildCombineFunctions, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_sensors", .build = buildSensors, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true, .sleeping = true } },
+    .{ .name = "contacts_kinematic_push", .build = buildKinematicPush, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_sleep_and_wake_by_hit", .build = buildSleepAndWakeByHit, .blocked_by = .contacts, .expect = .{ .contacts = true, .sleeping = true } },
+    .{ .name = "contacts_listener_modify", .build = buildListenerModify, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_listener_validate", .build = buildListenerValidate, .blocked_by = .contacts, .expect = .{ .contacts = true, .validated = true } },
+    .{ .name = "contacts_without_manifold_reduction", .build = buildWithoutManifoldReduction, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_body_without_manifold_reduction", .build = buildBodyWithoutManifoldReduction, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_enhanced_internal_edge_removal", .build = buildEnhancedInternalEdgeRemoval, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_sim_shape_filter", .build = buildSimShapeFilter, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_spawned_find_collisions", .build = buildSpawnedFindCollisions, .blocked_by = .contacts, .expect = .{ .contacts = true, .spawned_jobs = true } },
+    .{ .name = "contacts_many_bodies", .build = buildManyBodies, .blocked_by = .contacts, .sweep_stride = 30, .expect = .{ .contacts = true, .removed = true, .spawned_jobs = true } },
+    .{ .name = "contacts_collision_steps_2", .build = buildContactCollisionSteps(2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_collision_steps_3", .build = buildContactCollisionSteps(3), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_save_restore_cross", .build = buildContactSaveRestore, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_solver_settings", .build = buildSolverSettings, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_body_changes", .build = buildBodyChangesInContact, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_allowed_dofs", .build = buildContactAllowedDOFs, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_far_from_origin", .build = buildFarFromOrigin, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_kinematic_vs_non_dynamic", .build = buildKinematicVsNonDynamic, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_deep_penetration", .build = buildDeepPenetration, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_many_manifolds", .build = buildManyManifolds, .blocked_by = .contacts, .expect = .{ .contacts = true, .full_manifolds = true } },
+    .{ .name = "contacts_random_1", .build = buildContactRandom(1, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_random_2", .build = buildContactRandom(2, 2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_random_3", .build = buildContactRandom(3, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_random_4", .build = buildContactRandom(4, 3), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     // Later waves (blocked until Zolt has the parts, see Blocker)
-    .{ .name = "contacts_box_on_floor", .build = buildBoxOnFloor, .blocked_by = .contacts },
-    .{ .name = "contacts_pyramid", .build = buildPyramid, .blocked_by = .contacts },
-    .{ .name = "contacts_sensor", .build = buildSensor, .blocked_by = .contacts },
     .{ .name = "ccd_bullet_hits_wall", .build = buildBulletHitsWall, .blocked_by = .ccd_hits },
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
 };
@@ -529,6 +678,9 @@ pub const SceneBuilder = struct {
     delta_time: f32 = 1.0 / 60.0,
     collision_steps: u32 = 1,
     num_updates: u32 = 60,
+    contact_listener_mode: ContactListenerMode = .record,
+    combine_mode: CombineMode = .default,
+    sim_shape_filter_mode: SimShapeFilterMode = .none,
 
     shapes: std.ArrayList(SimShape) = .empty,
     children: std.ArrayList(SimCompoundChild) = .empty,
@@ -584,6 +736,9 @@ pub const SceneBuilder = struct {
             .num_constraints = @intCast(self.constraints.items.len),
             .physics_settings = self.physics_settings.items.ptr,
             .num_physics_settings = @intCast(self.physics_settings.items.len),
+            .contact_listener_mode = @intFromEnum(self.contact_listener_mode),
+            .combine_mode = @intFromEnum(self.combine_mode),
+            .sim_shape_filter_mode = @intFromEnum(self.sim_shape_filter_mode),
         };
     }
 
@@ -640,6 +795,14 @@ pub const SceneBuilder = struct {
         const data: u32 = @intCast(self.floats.items.len);
         for (triangles) |t| try self.floats.appendSlice(self.allocator, &t);
         return self.addShape(.{ .kind = @intFromEnum(ShapeKind.mesh), .count = @intCast(triangles.len), .data = data });
+    }
+
+    /// A height field of `sample_count` * `sample_count` samples (row major, `samples.len == sample_count^2`)
+    pub fn heightField(self: *SceneBuilder, samples: []const f32, sample_count: u32, offset: [3]f32, scale: [3]f32) Allocator.Error!u32 {
+        std.debug.assert(samples.len == @as(usize, sample_count) * sample_count);
+        const data: u32 = @intCast(self.floats.items.len);
+        try self.floats.appendSlice(self.allocator, samples);
+        return self.addShape(.{ .kind = @intFromEnum(ShapeKind.height_field), .params = params(&.{ offset[0], offset[1], offset[2], scale[0], scale[1], scale[2] }), .count = sample_count, .data = data });
     }
 
     pub fn empty(self: *SceneBuilder, center_of_mass: [3]f32) Allocator.Error!u32 {
@@ -1790,7 +1953,108 @@ fn buildLinearCastWithoutInnerRadius(b: *SceneBuilder) Allocator.Error!void {
 }
 
 // -------------------------------------------------------------------------------------------------------------------
-// Scenes of the later waves
+// Contact scenes (Wave B: ProcessBodyPair, the contact cache, the island solve, the LargeIslandSplitter)
+
+fn real(v: anytype) Real {
+    return switch (@typeInfo(@TypeOf(v))) {
+        .int, .comptime_int => @floatFromInt(v),
+        else => @floatCast(v),
+    };
+}
+
+/// A static box floor (top at y = `top`) in the NON_MOVING layer, returns its handle
+fn addFloor(b: *SceneBuilder, half_extent: f32, top: Real) Allocator.Error!u32 {
+    const floor = try b.box(.{ half_extent, 1, half_extent }, 0);
+    return b.body(.{ .position = .{ 0, top - 1, 0 }, .shape = floor, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving }, .dont_activate);
+}
+
+/// A floor and four walls around [-half_extent, half_extent]^2 (a container for the random scenes)
+fn addContainer(b: *SceneBuilder, half_extent: f32, wall_height: f32) Allocator.Error!void {
+    _ = try addFloor(b, half_extent + 1, 0);
+    const wall_x = try b.box(.{ 0.5, wall_height, half_extent + 1 }, 0.05);
+    const wall_z = try b.box(.{ half_extent + 1, wall_height, 0.5 }, 0.05);
+    const h = real(half_extent + 0.5);
+    for ([_][3]Real{ .{ -h, wall_height, 0 }, .{ h, wall_height, 0 } }) |p|
+        _ = try b.body(.{ .position = p, .shape = wall_x, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for ([_][3]Real{ .{ 0, wall_height, -h }, .{ 0, wall_height, h } }) |p|
+        _ = try b.body(.{ .position = p, .shape = wall_z, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+}
+
+/// Every dynamic shape kind of the scenes (convex shapes, compounds and decorated shapes)
+const ContactShapes = struct {
+    list: [14]u32,
+
+    fn add(b: *SceneBuilder) Allocator.Error!ContactShapes {
+        const sphere = try b.sphere(0.45);
+        const box = try b.box(.{ 0.4, 0.3, 0.5 }, 0.05);
+        const capsule = try b.capsule(0.4, 0.3);
+        const tapered_capsule = try b.taperedCapsule(0.4, 0.2, 0.35);
+        const cylinder = try b.cylinder(0.35, 0.4, 0.05);
+        const tapered_cylinder = try b.taperedCylinder(0.4, 0.15, 0.45, 0.05);
+        const hull = try b.convexHull(&.{ .{ -0.5, -0.4, -0.3 }, .{ 0.6, -0.4, -0.2 }, .{ 0.1, 0.5, 0.1 }, .{ 0.0, -0.1, 0.6 }, .{ 0.3, 0.3, -0.5 }, .{ -0.4, 0.2, 0.3 } }, 0.05);
+        const static_compound = try b.compound(.static_compound, &.{
+            .{ .shape = box, .position = .{ 0.4, 0, 0 } },
+            .{ .shape = sphere, .position = .{ -0.5, 0.2, 0.1 }, .user_data = 3 },
+            .{ .shape = capsule, .position = .{ 0, -0.2, 0.5 }, .rotation = axisAngle(.{ 1, 0, 0 }, std.math.pi / 2.0) },
+        });
+        const mutable_compound = try b.compound(.mutable_compound, &.{
+            .{ .shape = box, .rotation = axisAngle(.{ 0, 1, 0 }, 0.7) },
+            .{ .shape = sphere, .position = .{ 0, 0.6, 0 } },
+        });
+        const rotated = try b.rotatedTranslated(box, .{ 0.2, -0.1, 0.1 }, axisAngle(.{ 0, 0, 1 }, 0.4));
+        const scaled = try b.scaled(box, .{ 1.5, 0.7, 1.2 });
+        const scaled_sphere = try b.scaled(sphere, .{ 0.8, 0.8, 0.8 });
+        const offset = try b.offsetCenterOfMass(box, .{ 0.1, -0.15, 0.05 });
+        const nested = try b.compound(.static_compound, &.{
+            .{ .shape = static_compound, .position = .{ 0, 0.3, 0 } },
+            .{ .shape = rotated, .position = .{ 0.8, 0, 0 } },
+        });
+        return .{ .list = .{ sphere, box, capsule, tapered_capsule, cylinder, tapered_cylinder, hull, static_compound, mutable_compound, rotated, scaled, scaled_sphere, offset, nested } };
+    }
+
+    fn pick(self: ContactShapes, i: usize) u32 {
+        return self.list[i % self.list.len];
+    }
+};
+
+/// A wavy height function for the mesh and height field terrains
+fn terrainHeight(x: f32, z: f32) f32 {
+    return @floatCast(0.4 * @sin(0.7 * @as(f64, x)) * @cos(0.5 * @as(f64, z)) + 0.1 * @sin(1.9 * @as(f64, x + z)));
+}
+
+/// A mesh terrain of `n` x `n` quads of `cell` meters centered on the origin
+fn addMeshTerrain(b: *SceneBuilder, n: u32, cell: f32, flat: bool) Allocator.Error!u32 {
+    var triangles: std.ArrayList([9]f32) = .empty;
+    defer triangles.deinit(b.allocator);
+    const half = 0.5 * cell * @as(f32, @floatFromInt(n));
+    for (0..n) |iz| {
+        for (0..n) |ix| {
+            const x0 = @as(f32, @floatFromInt(ix)) * cell - half;
+            const z0 = @as(f32, @floatFromInt(iz)) * cell - half;
+            const x1 = x0 + cell;
+            const z1 = z0 + cell;
+            const h00 = if (flat) 0 else terrainHeight(x0, z0);
+            const h10 = if (flat) 0 else terrainHeight(x1, z0);
+            const h01 = if (flat) 0 else terrainHeight(x0, z1);
+            const h11 = if (flat) 0 else terrainHeight(x1, z1);
+            try triangles.append(b.allocator, .{ x0, h00, z0, x0, h01, z1, x1, h11, z1 });
+            try triangles.append(b.allocator, .{ x0, h00, z0, x1, h11, z1, x1, h10, z0 });
+        }
+    }
+    return b.mesh(triangles.items);
+}
+
+/// A height field terrain of `n` x `n` samples `cell` meters apart centered on the origin
+fn addHeightFieldTerrain(b: *SceneBuilder, n: u32, cell: f32) Allocator.Error!u32 {
+    var samples: std.ArrayList(f32) = .empty;
+    defer samples.deinit(b.allocator);
+    const half = 0.5 * cell * @as(f32, @floatFromInt(n - 1));
+    for (0..n) |iz| {
+        for (0..n) |ix|
+            try samples.append(b.allocator, terrainHeight(@as(f32, @floatFromInt(ix)) * cell - half, @as(f32, @floatFromInt(iz)) * cell - half));
+    }
+    return b.heightField(samples.items, n, .{ -half, 0, -half }, .{ cell, 1, cell });
+}
 
 /// A box falling on a static floor (contacts, sleeping on the floor)
 fn buildBoxOnFloor(b: *SceneBuilder) Allocator.Error!void {
@@ -1801,7 +2065,7 @@ fn buildBoxOnFloor(b: *SceneBuilder) Allocator.Error!void {
     _ = try b.body(.{ .position = .{ 0, 2, 0 }, .rotation = axisAngle(.{ 1, 0, 0 }, 0.3), .shape = box, .object_layer = Layers.moving }, .activate);
 }
 
-/// A small pyramid of boxes on a floor (islands, the contact cache, the large island splitter)
+/// A small pyramid of boxes on a floor (islands, the contact cache)
 fn buildPyramid(b: *SceneBuilder) Allocator.Error!void {
     const floor = try b.box(.{ 50, 1, 50 }, 0);
     const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
@@ -1824,6 +2088,785 @@ fn buildSensor(b: *SceneBuilder) Allocator.Error!void {
     _ = try b.body(.{ .shape = sensor, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
     _ = try b.body(.{ .position = .{ 0, 3, 0 }, .shape = sphere, .object_layer = Layers.moving }, .activate);
 }
+
+/// A pyramid with a base of 16 boxes (136 bodies, about 256 contacts in one island): the LargeIslandSplitter splits it
+/// (an island of at least LargeIslandSplitter::cLargeIslandTreshold = 128 constraints and contacts), and the whole
+/// island falls asleep from the final batch of the split island
+fn buildLargePyramid(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.num_updates = 90;
+    b.max_contact_constraints = 2048;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 30, 0);
+    const base = 16;
+    for (0..base) |y| {
+        for (0..base - y) |x| {
+            const px = real(x) * 1.05 + real(y) * 0.525 - 8.0;
+            _ = try b.body(.{ .position = .{ px, 0.5 + real(y), 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+        }
+    }
+    // A second, smaller pyramid next to it: an island below the threshold in the same update (solved without a split)
+    for (0..4) |y| {
+        for (0..4 - y) |x| {
+            const px = real(x) * 1.05 + real(y) * 0.525 + 12.0;
+            _ = try b.body(.{ .position = .{ px, 0.5 + real(y), 3 }, .shape = box, .object_layer = Layers.moving }, .activate);
+        }
+    }
+}
+
+/// The same large pyramid without the LargeIslandSplitter and with 2 collision steps, a ball knocks it over
+fn buildLargePyramidWithoutSplitter(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const ball = try b.sphere(0.6);
+    b.num_updates = 60;
+    b.collision_steps = 2;
+    b.max_contact_constraints = 2048;
+    b.settings.use_large_island_splitter = 0;
+    _ = try addFloor(b, 30, 0);
+    const base = 12;
+    for (0..base) |y| {
+        for (0..base - y) |x| {
+            const px = real(x) * 1.05 + real(y) * 0.525 - 6.0;
+            _ = try b.body(.{ .position = .{ px, 0.5 + real(y), 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+        }
+    }
+    b.at(20);
+    _ = try b.body(.{ .position = .{ -3, 3, 8 }, .linear_velocity = .{ 0, 0, -15 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    b.at(40);
+    try b.sysOp(.set_physics_settings, .{ .index = try b.addPhysicsSettings(.{}) }); // Back to Jolt's defaults: the splitter splits the collapsing island
+}
+
+/// Every dynamic shape kind dropped on a box floor (rotated, spinning), a dynamic triangle with provided mass properties
+fn buildShapesOnFloor(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try ContactShapes.add(b);
+    b.num_updates = 100;
+    _ = try addFloor(b, 40, 0);
+    for (shapes.list, 0..) |shape, i| {
+        for (0..2) |j| {
+            _ = try b.body(.{
+                .position = .{ real(i) * 2.5 - 17.0, 1.5 + real(j) * 0.5, real(j) * 3.0 - 1.5 },
+                .rotation = axisAngle(.{ 0.48, 0.6, 0.64 }, 0.4 * @as(f64, @floatFromInt(i + j))),
+                .angular_velocity = if (j == 0) .{ 0, 0, 0 } else .{ 1, 2, 0.5 },
+                .linear_velocity = .{ 0, -1, 0 },
+                .friction = 0.4 + 0.1 * @as(f32, @floatFromInt(j)),
+                .shape = shape,
+                .object_layer = Layers.moving,
+            }, .activate);
+        }
+    }
+    var inertia: [16]f32 = @splat(0);
+    inertia[0] = 0.1;
+    inertia[5] = 0.1;
+    inertia[10] = 0.1;
+    inertia[15] = 1;
+    const triangle = try b.triangle(.{ -0.5, 0, -0.3, 0.5, 0, -0.3, 0, 0, 0.6 }, 0.05);
+    _ = try b.body(.{ .position = .{ 0, 2, 6 }, .rotation = axisAngle(.{ 1, 0, 0 }, 0.3), .shape = triangle, .override_mass_properties = 2, .mass = 1, .inertia = inertia, .object_layer = Layers.moving }, .activate);
+}
+
+/// Dynamic shapes stacked on each other (every shape kind against another kind), on a floor
+fn buildShapeStacks(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try ContactShapes.add(b);
+    b.num_updates = 90;
+    _ = try addFloor(b, 40, 0);
+    for (shapes.list, 0..) |shape, i| {
+        const x = real(i) * 2.6 - 18.0;
+        _ = try b.body(.{ .position = .{ x, 0.8, 0 }, .shape = shapes.pick(i + 5), .object_layer = Layers.moving }, .activate);
+        _ = try b.body(.{ .position = .{ x + 0.1, 2.2, 0.05 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .shape = shape, .object_layer = Layers.moving }, .activate);
+        _ = try b.body(.{ .position = .{ x - 0.1, 3.6, -0.05 }, .shape = shapes.pick(i + 9), .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Shapes falling on a static mesh terrain, with and without enhanced internal edge removal
+fn buildMeshGround(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try ContactShapes.add(b);
+    const terrain = try addMeshTerrain(b, 12, 1.5, false);
+    b.num_updates = 80;
+    b.max_contact_constraints = 2048;
+    _ = try b.body(.{ .shape = terrain, .motion_type = 0, .friction = 0.6, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..24) |i| {
+        const x = real(i % 6) * 2.4 - 6.0;
+        const z = real(i / 6) * 2.4 - 3.6;
+        _ = try b.body(.{
+            .position = .{ x, 1.8, z },
+            .rotation = axisAngle(.{ 0, 0.6, 0.8 }, 0.5 * @as(f64, @floatFromInt(i))),
+            .linear_velocity = .{ 0.5, 0, -0.3 },
+            .shape = shapes.pick(i),
+            .enhanced_internal_edge_removal = @intCast(i % 2),
+            .object_layer = Layers.moving,
+        }, .activate);
+    }
+}
+
+/// Shapes falling on a static height field terrain, with and without enhanced internal edge removal
+fn buildHeightFieldGround(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try ContactShapes.add(b);
+    const terrain = try addHeightFieldTerrain(b, 17, 1.0);
+    b.num_updates = 80;
+    b.max_contact_constraints = 2048;
+    _ = try b.body(.{ .shape = terrain, .motion_type = 0, .friction = 0.6, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..20) |i| {
+        const x = real(i % 5) * 2.6 - 5.2;
+        const z = real(i / 5) * 2.6 - 3.9;
+        _ = try b.body(.{
+            .position = .{ x, 1.6, z },
+            .rotation = axisAngle(.{ 0.8, 0, 0.6 }, 0.3 * @as(f64, @floatFromInt(i))),
+            .angular_velocity = .{ 0, 1, 0 },
+            .shape = shapes.pick(i + 3),
+            .enhanced_internal_edge_removal = @intCast((i / 2) % 2),
+            .object_layer = Layers.moving,
+        }, .activate);
+    }
+}
+
+/// Static grounds of other shape kinds: a plane, a triangle, a convex hull, a compound, a scaled mesh, a rotated box
+fn buildStaticShapes(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.4);
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const capsule = try b.capsule(0.3, 0.25);
+    const plane = try b.plane(.{ 0, 1, 0 }, 0, 8);
+    const triangle = try b.triangle(.{ -3, 0, -3, 3, 0.5, -3, 0, -0.2, 3 }, 0);
+    const hull = try b.convexHull(&.{ .{ -3, -1, -3 }, .{ 3, -1, -3 }, .{ 3, -1, 3 }, .{ -3, -1, 3 }, .{ 0, 0.5, 0 } }, 0.05);
+    const static_box = try b.box(.{ 2, 0.5, 2 }, 0.05);
+    const compound = try b.compound(.static_compound, &.{ .{ .shape = static_box, .position = .{ -1, 0, 0 } }, .{ .shape = static_box, .position = .{ 2.5, 0.3, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.2) } });
+    const mesh = try b.scaled(try addMeshTerrain(b, 4, 1.5, false), .{ 1.0, 2.0, 1.0 });
+    const rotated = try b.rotatedTranslated(static_box, .{ 0, 0.2, 0 }, axisAngle(.{ 1, 0, 0 }, 0.25));
+    b.num_updates = 80;
+    _ = try addFloor(b, 50, -5); // Catches what falls off
+    const grounds = [_]u32{ plane, triangle, hull, compound, mesh, rotated };
+    for (grounds, 0..) |ground, i| {
+        const x = real(i) * 12.0 - 30.0;
+        _ = try b.body(.{ .position = .{ x, 0, 0 }, .shape = ground, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        for ([_]u32{ sphere, box, capsule }, 0..) |shape, j| {
+            _ = try b.body(.{ .position = .{ x + real(j) * 1.2 - 1.2, 2.0 + real(j) * 0.3, real(j) * 0.4 - 0.4 }, .linear_velocity = .{ 0.4, 0, 0.2 }, .shape = shape, .object_layer = Layers.moving }, .activate);
+        }
+    }
+}
+
+/// Friction and restitution: boxes sliding down a ramp with different frictions, balls bouncing with different
+/// restitutions, capsules rolling (the default combine functions)
+fn buildFrictionRestitution(b: *SceneBuilder) Allocator.Error!void {
+    const ramp = try b.box(.{ 12, 0.5, 10 }, 0);
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.4);
+    const capsule = try b.capsule(0.4, 0.3);
+    b.num_updates = 120;
+    _ = try addFloor(b, 50, -5);
+    _ = try b.body(.{ .position = .{ 0, 0, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.35), .shape = ramp, .friction = 0.6, .restitution = 0.2, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const frictions = [_]f32{ 0.0, 0.1, 0.3, 0.6, 1.0, 2.0 };
+    for (frictions, 0..) |friction, i| {
+        _ = try b.body(.{ .position = .{ 4, 2.2, real(i) * 1.5 - 4.0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.35), .shape = box, .friction = friction, .object_layer = Layers.moving }, .activate);
+    }
+    const restitutions = [_]f32{ 0.0, 0.3, 0.6, 0.9, 1.0 };
+    for (restitutions, 0..) |restitution, i| {
+        _ = try b.body(.{ .position = .{ -20, real(i) * 0.5 + 2.0, real(i) * 1.5 - 4.0 }, .linear_velocity = .{ 0, -2, 0 }, .shape = ball, .restitution = restitution, .object_layer = Layers.moving }, .activate);
+    }
+    for (0..3) |i| {
+        _ = try b.body(.{ .position = .{ 6, 3.0, real(i) * 2.0 + 5.0 }, .rotation = axisAngle(.{ 1, 0, 0 }, std.math.pi / 2.0), .shape = capsule, .friction = 0.5 * @as(f32, @floatFromInt(i)), .restitution = 0.2, .object_layer = Layers.moving }, .activate);
+    }
+    b.at(60);
+    try b.op(.set_friction_and_restitution, 3, .{ .f = &.{ 0.0, 0.5 } });
+    try b.op(.set_friction_and_restitution, 9, .{ .f = &.{ 1.0, 0.0 } });
+}
+
+/// The custom combine functions (friction and restitution of compound sub shapes, sub shape IDs differ)
+fn buildCombineFunctions(b: *SceneBuilder) Allocator.Error!void {
+    b.combine_mode = .custom;
+    try buildFrictionRestitution(b);
+    const shapes = try ContactShapes.add(b);
+    for (0..4) |i| {
+        _ = try b.body(.{ .position = .{ -10, 2.0, real(i) * 2.5 - 4 }, .shape = shapes.list[7 + i % 2], .friction = 0.3 * @as(f32, @floatFromInt(i)), .restitution = 0.25 * @as(f32, @floatFromInt(i)), .linear_velocity = .{ 2, -3, 0 }, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Sensors: a static sensor that bodies fall through, a kinematic sensor that moves through sleeping and awake bodies,
+/// a dynamic sensor that falls onto the floor (and through it), a kinematic sensor with CollideKinematicVsNonDynamic
+/// that detects static bodies, a sensor in the SENSOR layer and one in the MOVING layer
+fn buildSensors(b: *SceneBuilder) Allocator.Error!void {
+    const sensor_box = try b.box(.{ 2, 0.5, 2 }, 0);
+    const small_sensor = try b.box(.{ 0.5, 0.5, 0.5 }, 0);
+    const sphere = try b.sphere(0.4);
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    b.num_updates = 100;
+    b.settings.time_before_sleep = 0.3;
+    _ = try addFloor(b, 40, 0);
+    // Static sensor in the SENSOR layer above the floor, balls fall through it onto the floor
+    _ = try b.body(.{ .position = .{ -10, 2, 0 }, .shape = sensor_box, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+    for (0..3) |i|
+        _ = try b.body(.{ .position = .{ -11 + real(i), 5 + real(i), 0 }, .shape = sphere, .object_layer = Layers.moving }, .activate);
+    // A row of boxes that fall asleep, then a kinematic sensor (SENSOR layer) moves through them
+    const first_box = b.num_handles;
+    for (0..4) |i|
+        _ = try b.body(.{ .position = .{ real(i) * 1.5, 0.4, 5 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const kinematic_sensor = try b.body(.{ .position = .{ -1.5, 0.5, 5 }, .shape = small_sensor, .motion_type = 1, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+    // A dynamic sensor in the MOVING layer: it detects the floor and falls through it
+    _ = try b.body(.{ .position = .{ 10, 3, 0 }, .shape = small_sensor, .is_sensor = 1, .object_layer = Layers.moving }, .activate);
+    // A kinematic sensor with CollideKinematicVsNonDynamic in the MOVING layer moving over static bodies
+    for (0..3) |i|
+        _ = try b.body(.{ .position = .{ 15 + real(i) * 2, 0.5, -5 }, .shape = box, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const sweeper = try b.body(.{ .position = .{ 12, 0.6, -5 }, .linear_velocity = .{ 2, 0, 0 }, .shape = small_sensor, .motion_type = 1, .is_sensor = 1, .collide_kinematic_vs_non_dynamic = 1, .object_layer = Layers.moving }, .activate);
+    b.at(50);
+    try b.expectSleeping(first_box);
+    try b.op(.set_linear_velocity, kinematic_sensor, .{ .f = &.{ 4, 0, 0 } });
+    try b.expectAwake(kinematic_sensor);
+    try b.expectSleeping(first_box); // A sensor does not wake bodies up
+    b.at(90);
+    try b.op(.set_linear_velocity, sweeper, .{ .f = &.{ -3, 0, 0 } });
+}
+
+/// Kinematic bodies pushing dynamic ones: a kinematic box with a velocity, a rotating kinematic platform with boxes on
+/// it, MoveKinematic between the updates
+fn buildKinematicPush(b: *SceneBuilder) Allocator.Error!void {
+    const pusher = try b.box(.{ 0.5, 1, 3 }, 0.05);
+    const platform = try b.box(.{ 3, 0.25, 3 }, 0.05);
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.35);
+    b.num_updates = 90;
+    _ = try addFloor(b, 40, 0);
+    _ = try b.body(.{ .position = .{ -6, 1, 0 }, .linear_velocity = .{ 2, 0, 0 }, .shape = pusher, .motion_type = 1, .object_layer = Layers.moving }, .activate);
+    for (0..5) |i| {
+        for (0..2) |j|
+            _ = try b.body(.{ .position = .{ -3 + real(i) * 0.9, 0.4 + real(j) * 0.8, real(j) * 0.2 }, .shape = if ((i + j) % 2 == 0) box else ball, .object_layer = Layers.moving }, .activate);
+    }
+    const rotating = try b.body(.{ .position = .{ 10, 1, 0 }, .angular_velocity = .{ 0, 0.8, 0 }, .shape = platform, .motion_type = 1, .object_layer = Layers.moving }, .activate);
+    for (0..4) |i|
+        _ = try b.body(.{ .position = .{ 8.5 + real(i), 1.7, 1 }, .shape = box, .friction = 0.8, .object_layer = Layers.moving }, .activate);
+    var u: u32 = 30;
+    while (u < 60) : (u += 5) {
+        b.at(u);
+        const t: f32 = @floatFromInt(u - 30);
+        try b.op(.move_kinematic, rotating, .{ .r = .{ 10, 1 + 0.05 * t, 0 }, .f = &(axisAngle(.{ 0, 1, 0 }, 0.05 * @as(f64, t)) ++ [1]f32{5 * b.delta_time}) });
+    }
+}
+
+/// Bodies come to rest on the floor and fall asleep, a ball that is created later hits one of them and wakes it up
+/// (and its island), another body stays asleep
+fn buildSleepAndWakeByHit(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const ball = try b.sphere(0.3);
+    b.num_updates = 110;
+    b.settings.time_before_sleep = 0.3;
+    _ = try addFloor(b, 20, 0);
+    const target = try b.body(.{ .position = .{ 0, 0.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const on_top = try b.body(.{ .position = .{ 0, 1.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const far = try b.body(.{ .position = .{ 8, 0.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const ball_desc = try b.addBodyDesc(.{ .position = .{ -4, 1.2, 0 }, .linear_velocity = .{ 10, 0, 0 }, .shape = ball, .object_layer = Layers.moving });
+    b.at(60);
+    try b.expectSleeping(target);
+    try b.expectSleeping(on_top);
+    try b.expectSleeping(far);
+    _ = try b.createBody(ball_desc, .activate);
+    b.at(95); // The ball hits the box at about update 77
+    try b.expectAwake(target);
+    try b.expectAwake(on_top); // Same island
+    try b.expectSleeping(far);
+}
+
+/// The contact listener changes the contact settings (ContactListenerMode.modify): friction, restitution, mass scales,
+/// surface velocity (a conveyor), sensor contacts
+fn buildListenerModify(b: *SceneBuilder) Allocator.Error!void {
+    b.contact_listener_mode = .modify;
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.4);
+    const conveyor = try b.box(.{ 4, 0.25, 1 }, 0.05);
+    b.num_updates = 90;
+    _ = try addFloor(b, 40, 0);
+    const F = ContactFlags;
+    // Boxes sliding with a velocity: zero friction slides on
+    for ([_]u32{ 0, F.zero_friction }, 0..) |flags, i|
+        _ = try b.body(.{ .position = .{ -10, 0.4, real(i) * 2 }, .linear_velocity = .{ 4, 0, 0 }, .shape = box, .user_data = ContactFlags.userData(flags, @intCast(i)), .object_layer = Layers.moving }, .activate);
+    // Balls dropped: bouncy ones bounce
+    for ([_]u32{ 0, F.bouncy, F.bouncy | F.zero_friction }, 0..) |flags, i|
+        _ = try b.body(.{ .position = .{ -5, 3, real(i) * 2 }, .shape = ball, .user_data = ContactFlags.userData(flags, 10 + @as(u32, @intCast(i))), .object_layer = Layers.moving }, .activate);
+    // Stacks with mass scales
+    for (0..3) |j|
+        _ = try b.body(.{ .position = .{ 0, 0.4 + real(j) * 0.85, 0 }, .shape = box, .user_data = ContactFlags.userData(if (j == 1) F.mass_scale else 0, 20), .object_layer = Layers.moving }, .activate);
+    // A static conveyor with a surface velocity, boxes ride on it
+    _ = try b.body(.{ .position = .{ 6, 0.25, 0 }, .shape = conveyor, .motion_type = 0, .user_data = ContactFlags.userData(F.surface_velocity, 30), .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..2) |i|
+        _ = try b.body(.{ .position = .{ 4 + real(i) * 2, 1.0, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    // A box whose contacts are sensor contacts: it falls through the floor
+    _ = try b.body(.{ .position = .{ 10, 1, 4 }, .shape = box, .user_data = ContactFlags.userData(F.sensor, 40), .object_layer = Layers.moving }, .activate);
+    // The flags change between the updates
+    b.at(45);
+    try b.op(.set_user_data, 2, .{ .index = 2, .count = F.zero_friction | F.mass_scale });
+    try b.op(.set_linear_velocity, 2, .{ .f = &.{ -3, 0, 0 } });
+}
+
+/// OnContactValidate rejects contacts (ContactListenerMode.modify): all contacts of a pair (the body falls through
+/// the floor), speculative contacts, and AcceptContact that keeps the callback being called for every hit
+fn buildListenerValidate(b: *SceneBuilder) Allocator.Error!void {
+    b.contact_listener_mode = .modify;
+    const shapes = try ContactShapes.add(b);
+    const terrain = try addMeshTerrain(b, 6, 2.0, false);
+    b.num_updates = 70;
+    _ = try addFloor(b, 40, -3);
+    _ = try b.body(.{ .position = .{ 0, 0, 0 }, .shape = terrain, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const F = ContactFlags;
+    const flag_sets = [_]u32{ 0, F.reject_all, F.reject_speculative, F.accept_each, F.accept_each | F.bouncy };
+    for (flag_sets, 0..) |flags, i| {
+        for (0..2) |j| {
+            _ = try b.body(.{
+                .position = .{ real(i) * 2.2 - 4.4, 1.5 + real(j), real(j) * 2.0 - 1.0 },
+                .linear_velocity = .{ 0, -2, 0 },
+                .shape = shapes.pick(i * 2 + j + 6),
+                .user_data = ContactFlags.userData(flags, @intCast(i)),
+                .object_layer = Layers.moving,
+            }, .activate);
+        }
+    }
+    b.at(35);
+    try b.op(.set_user_data, 4, .{ .index = 1, .count = 0 }); // The first rejected body collides again (it fell through the terrain onto the floor)
+}
+
+/// PhysicsSettings::mUseManifoldReduction off: one manifold per sub shape pair (compounds and meshes)
+fn buildWithoutManifoldReduction(b: *SceneBuilder) Allocator.Error!void {
+    b.settings.use_manifold_reduction = 0;
+    try buildManifoldReductionScene(b);
+}
+
+/// Body::SetUseManifoldReduction off on half of the bodies
+fn buildBodyWithoutManifoldReduction(b: *SceneBuilder) Allocator.Error!void {
+    try buildManifoldReductionScene(b);
+}
+
+fn buildManifoldReductionScene(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try ContactShapes.add(b);
+    const terrain = try addMeshTerrain(b, 8, 1.0, true);
+    b.num_updates = 60;
+    b.max_contact_constraints = 2048;
+    _ = try b.body(.{ .shape = terrain, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..12) |i| {
+        _ = try b.body(.{
+            .position = .{ real(i % 4) * 1.8 - 2.7, 1.0 + real(i / 4) * 1.4, real(i % 3) - 1.0 },
+            .rotation = axisAngle(.{ 0, 1, 0 }, 0.2 * @as(f64, @floatFromInt(i))),
+            .shape = shapes.list[7 + i % 7], // Compounds and decorated shapes: several sub shape pairs
+            .use_manifold_reduction = @intCast(i % 2),
+            .object_layer = Layers.moving,
+        }, .activate);
+    }
+}
+
+/// Boxes sliding over a flat mesh made of many triangles and over a height field, with and without enhanced internal
+/// edge removal, then the same without PhysicsSettings::mCheckActiveEdges
+fn buildEnhancedInternalEdgeRemoval(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.2, 0.4 }, 0.02);
+    const mesh = try addMeshTerrain(b, 16, 0.5, true);
+    const height_field = try addHeightFieldTerrain(b, 9, 1.0);
+    b.num_updates = 70;
+    b.max_contact_constraints = 2048;
+    _ = try b.body(.{ .position = .{ 0, 0, 0 }, .shape = mesh, .motion_type = 0, .friction = 0.1, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 0, 0, 12 }, .shape = height_field, .motion_type = 0, .friction = 0.1, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..4) |i| {
+        for ([_]Real{ 0, 12 }) |z| {
+            _ = try b.body(.{
+                .position = .{ -3.5, 0.6, z + real(i) * 1.2 - 1.8 },
+                .linear_velocity = .{ 4, 0, 0.3 },
+                .shape = box,
+                .friction = 0.1,
+                .enhanced_internal_edge_removal = @intCast(i % 2),
+                .object_layer = Layers.moving,
+            }, .activate);
+        }
+    }
+    var settings: SimPhysicsSettings = .{};
+    settings.check_active_edges = 0;
+    b.at(35);
+    try b.sysOp(.set_physics_settings, .{ .index = try b.addPhysicsSettings(settings) });
+    for (0..8) |h|
+        try b.op(.set_linear_velocity, 2 + @as(u32, @intCast(h)), .{ .f = &.{ -4, 0, -0.3 } });
+}
+
+/// A SimShapeFilter (SimShapeFilterMode.filter_spheres): bodies with the flag ignore the spheres of compounds
+fn buildSimShapeFilter(b: *SceneBuilder) Allocator.Error!void {
+    b.sim_shape_filter_mode = .filter_spheres;
+    const shapes = try ContactShapes.add(b);
+    b.num_updates = 60;
+    _ = try addFloor(b, 30, 0);
+    for (0..8) |i| {
+        const flags: u32 = if (i % 2 == 0) ContactFlags.filter_spheres else 0;
+        _ = try b.body(.{ .position = .{ real(i) * 2.5 - 9, 1.5, 0 }, .shape = shapes.list[if (i < 4) 0 else 7 + i % 3], .user_data = ContactFlags.userData(flags, @intCast(i)), .object_layer = Layers.moving }, .activate);
+        _ = try b.body(.{ .position = .{ real(i) * 2.5 - 9, 3.5, 0.2 }, .shape = shapes.list[i % 3], .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// A dense grid of touching spheres on a floor: few batches of active bodies with many body pairs each, so that
+/// FindCollisions jobs are spawned from inside jobs (TrySpawnJobFindCollisions) in the multi threaded configurations
+fn buildSpawnedFindCollisions(b: *SceneBuilder) Allocator.Error!void {
+    const sphere = try b.sphere(0.5);
+    b.num_updates = 40;
+    b.max_contact_constraints = 4096;
+    _ = try addFloor(b, 20, 0);
+    for (0..2) |layer| {
+        for (0..4) |row| {
+            for (0..8) |column| {
+                _ = try b.body(.{
+                    .position = .{ real(column) * 0.97 - 3.5 + real(layer) * 0.48, 0.5 + real(layer) * 0.8, real(row) * 0.97 - 1.5 + real(layer) * 0.48 },
+                    .shape = sphere,
+                    .allow_sleeping = 0,
+                    .object_layer = Layers.moving,
+                }, .activate);
+            }
+        }
+    }
+}
+
+/// 240 random bodies dropped into a container (many body pairs, many islands, spawned FindCollisions jobs)
+fn buildManyBodies(b: *SceneBuilder) Allocator.Error!void {
+    b.rng = 0xabcdef;
+    const shapes = try ContactShapes.add(b);
+    b.num_updates = 60;
+    b.max_body_pairs = 16384;
+    b.max_contact_constraints = 8192;
+    try addContainer(b, 8, 4);
+    for (0..240) |i| {
+        _ = try b.body(.{
+            .position = .{ real(i % 8) * 2.0 - 7.0, 1.0 + real(i / 64) * 2.2, real((i / 8) % 8) * 2.0 - 7.0 },
+            .rotation = b.rotation(),
+            .linear_velocity = b.vec3(-2, 2),
+            .angular_velocity = b.vec3(-2, 2),
+            .shape = shapes.pick(b.index(14)),
+            .friction = b.float(0.1, 1.0),
+            .restitution = if (b.oneIn(4)) b.float(0, 0.8) else 0,
+            .object_layer = Layers.moving,
+        }, .activate);
+    }
+}
+
+/// Several collision steps per update with contacts (a stack, rolling balls, a box on a ramp)
+fn buildContactCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+            const ball = try b.sphere(0.4);
+            const ramp = try b.box(.{ 4, 0.25, 2 }, 0.05);
+            b.num_updates = 60;
+            b.collision_steps = steps;
+            _ = try addFloor(b, 30, 0);
+            for (0..6) |j|
+                _ = try b.body(.{ .position = .{ 0, 0.4 + real(j) * 0.82, real(j % 2) * 0.05 }, .shape = box, .object_layer = Layers.moving }, .activate);
+            for (0..4) |i|
+                _ = try b.body(.{ .position = .{ 5, 0.4, real(i) * 1.5 - 2 }, .linear_velocity = .{ -2.0 - @as(f32, @floatFromInt(i)), 0, 0.5 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+            _ = try b.body(.{ .position = .{ -8, 1.5, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.3), .shape = ramp, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+            _ = try b.body(.{ .position = .{ -7, 3, 0 }, .shape = box, .friction = 0.1, .object_layer = Layers.moving }, .activate);
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 45.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// SaveState / RestoreState of the contact cache in the middle of a contact scene (C++ restores the Zolt state and
+/// Zolt the C++ state)
+fn buildContactSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.4);
+    b.num_updates = 90;
+    b.settings.time_before_sleep = 0.4;
+    _ = try addFloor(b, 30, 0);
+    for (0..4) |j|
+        _ = try b.body(.{ .position = .{ 0, 0.4 + real(j) * 0.82, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const roller = try b.body(.{ .position = .{ 4, 0.4, 0 }, .linear_velocity = .{ -1, 0, 1 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(25);
+    try b.op(.add_impulse, roller, .{ .f = &.{ -20, 5, 0 } });
+    b.at(35);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 15 (the contact cache of update 15 included)
+    b.at(50);
+    try b.sysOp(.snapshot, .{ .index = 1 });
+    b.at(55);
+    try b.op(.add_impulse, 1, .{ .f = &.{ 5, 0, 0 } });
+    try b.sysOp(.restore_cross, .{ .index = 1 });
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // Twice in a row
+    b.at(80);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.sysOp(.restore_cross, .{ .index = 2 }); // The current state
+}
+
+/// The solver settings change between the updates: no warm start, no body pair cache, other step counts, Baumgarte,
+/// penetration slop, the speculative contact distance; bodies with their own velocity / position step counts
+fn buildSolverSettings(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.4);
+    b.num_updates = 100;
+    _ = try addFloor(b, 30, 0);
+    for (0..3) |s| {
+        for (0..4) |j|
+            _ = try b.body(.{
+                .position = .{ real(s) * 3 - 3, 0.4 + real(j) * 0.82, 0 },
+                .shape = box,
+                .num_velocity_steps_override = if (s == 1) 3 else if (s == 2) 15 else 0,
+                .num_position_steps_override = if (s == 1) 1 else if (s == 2) 5 else 0,
+                .object_layer = Layers.moving,
+            }, .activate);
+    }
+    _ = try b.body(.{ .position = .{ 6, 0.4, 0 }, .linear_velocity = .{ -3, 0, 0 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    var no_warm_start: SimPhysicsSettings = .{};
+    no_warm_start.constraint_warm_start = 0;
+    var no_cache: SimPhysicsSettings = .{};
+    no_cache.use_body_pair_contact_cache = 0;
+    var steps: SimPhysicsSettings = .{};
+    steps.num_velocity_steps = 4;
+    steps.num_position_steps = 1;
+    steps.baumgarte = 0.5;
+    steps.penetration_slop = 0.05;
+    steps.speculative_contact_distance = 0.05;
+    steps.min_velocity_for_restitution = 0.5;
+    var other: SimPhysicsSettings = .{};
+    other.max_penetration_distance = 0.05;
+    other.contact_point_preserve_lambda_max_dist_sq = 0.0;
+    other.body_pair_cache_max_delta_position_sq = 1.0e-8;
+    other.manifold_tolerance = 0.01;
+    const indices = [_]u32{ try b.addPhysicsSettings(no_warm_start), try b.addPhysicsSettings(no_cache), try b.addPhysicsSettings(steps), try b.addPhysicsSettings(other), try b.addPhysicsSettings(.{}) };
+    for (indices, 0..) |index, i| {
+        b.at(15 + 15 * @as(u32, @intCast(i)));
+        try b.sysOp(.set_physics_settings, .{ .index = index });
+        try b.op(.add_impulse, 13, .{ .f = &.{ if (i % 2 == 0) 4 else -4, 0, 0.5 } }); // The ball
+    }
+}
+
+/// Bodies change while they are in contact: removed and added again (contact removed callbacks), a new shape (the
+/// contact cache of the body is invalidated), a layer that does not collide, another motion type, teleported,
+/// destroyed, deactivated
+fn buildBodyChangesInContact(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.45);
+    const capsule = try b.capsule(0.3, 0.3);
+    b.num_updates = 80;
+    _ = try addFloor(b, 30, 0);
+    // Stack i: bottom box handle 1 + 2 i, top box 2 + 2 i
+    for (0..6) |i| {
+        for (0..2) |j|
+            _ = try b.body(.{ .position = .{ real(i) * 2 - 5, 0.4 + real(j) * 0.82, 0 }, .shape = box, .allow_dynamic_or_kinematic = 1, .object_layer = Layers.moving }, .activate);
+    }
+    b.at(20);
+    try b.op(.remove_body, 2, .{}); // The top box of stack 0
+    try b.op(.set_shape, 3, .{ .index = ball, .count = 1, .activation = .activate });
+    try b.op(.set_object_layer, 6, .{ .index = Layers.moving2 }); // Collides with the floor, not with the box below: falls through it
+    try b.op(.set_motion_type, 7, .{ .index = 1, .activation = .activate }); // Dynamic -> kinematic with a box on it
+    try b.op(.set_position, 11, .{ .r = .{ 3, 3, 2 }, .activation = .activate }); // Teleported, the box on it falls
+    b.at(30);
+    try b.op(.add_body, 2, .{ .activation = .activate });
+    try b.op(.set_shape, 3, .{ .index = capsule, .count = 0, .activation = .dont_activate });
+    try b.op(.set_motion_type, 7, .{ .index = 2, .activation = .activate });
+    try b.op(.set_motion_type, 9, .{ .index = 0, .activation = .dont_activate }); // Dynamic -> static with a box on it
+    b.at(40);
+    try b.op(.remove_body, 12, .{});
+    try b.op(.destroy_body, 12, .{});
+    try b.op(.set_object_layer, 6, .{ .index = Layers.moving });
+    try b.op(.set_rotation, 10, .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.3), .activation = .activate });
+    b.at(50);
+    try b.op(.set_motion_type, 9, .{ .index = 2, .activation = .activate });
+    try b.op(.deactivate_body, 1, .{}); // A body in contact goes to sleep, the box on it keeps it in its island
+}
+
+/// Bodies with restricted degrees of freedom and gyroscopic forces colliding
+fn buildContactAllowedDOFs(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try ContactShapes.add(b);
+    b.num_updates = 70;
+    _ = try addFloor(b, 30, 0);
+    const dofs = [_]u32{ 0b111111, 0b100011, 0b000111, 0b111000, 0b010111, 0b101101 };
+    for (dofs, 0..) |d, i| {
+        _ = try b.body(.{ .position = .{ real(i) * 2.2 - 5.5, 1.5, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.4), .angular_velocity = .{ 1, 3, 0 }, .shape = shapes.pick(i + 1), .allowed_dofs = d, .apply_gyroscopic_force = @intCast(i % 2), .object_layer = Layers.moving }, .activate);
+        _ = try b.body(.{ .position = .{ real(i) * 2.2 - 5.5, 3.5, 0.1 }, .shape = shapes.pick(i + 4), .allowed_dofs = dofs[(i + 1) % dofs.len], .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// A floor and a stack far from the origin (the base offsets of the narrow phase and the cache, double precision)
+fn buildFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const floor = try b.box(.{ 20, 1, 20 }, 0);
+    const box = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const ball = try b.sphere(0.4);
+    b.num_updates = 60;
+    const o: Real = 5000.0;
+    _ = try b.body(.{ .position = .{ o, -1, -o }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..4) |j|
+        _ = try b.body(.{ .position = .{ o, 0.4 + real(j) * 0.82, -o + real(j % 2) * 0.03 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ o + 4, 0.4, -o }, .linear_velocity = .{ -4, 0, 0 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+}
+
+/// Kinematic and static bodies with CollideKinematicVsNonDynamic: contacts without a response between non-dynamic
+/// bodies, kinematic vs kinematic
+fn buildKinematicVsNonDynamic(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.num_updates = 60;
+    _ = try addFloor(b, 30, 0);
+    for (0..3) |i|
+        _ = try b.body(.{ .position = .{ real(i) * 2, 0.5, 0 }, .shape = box, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -3, 0.6, 0 }, .linear_velocity = .{ 2, 0, 0 }, .shape = box, .motion_type = 1, .collide_kinematic_vs_non_dynamic = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ -3, 0.6, 3 }, .linear_velocity = .{ 2, 0, 0 }, .shape = box, .motion_type = 1, .collide_kinematic_vs_non_dynamic = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3, 0.6, 3 }, .linear_velocity = .{ -2, 0, 0 }, .shape = box, .motion_type = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 1, 3, 3 }, .shape = box, .object_layer = Layers.moving }, .activate); // A dynamic box on the kinematic ones
+}
+
+/// Bodies that start deeply penetrating each other (MaxPenetrationDistance, the position solver pushes them apart)
+fn buildDeepPenetration(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const ball = try b.sphere(0.5);
+    b.num_updates = 50;
+    _ = try addFloor(b, 30, 0);
+    for (0..4) |i|
+        _ = try b.body(.{ .position = .{ real(i) * 0.4, 0.3 + real(i) * 0.5, real(i % 2) * 0.3 }, .shape = if (i % 2 == 0) box else ball, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 5, -0.3, 0 }, .shape = ball, .object_layer = Layers.moving }, .activate); // Half inside the floor
+}
+
+/// Compounds of many small spheres that start pressed into a bumpy mesh (random heights) and a disc of spheres on a
+/// static sphere: a body pair finds more contact normals than ReductionCollideShapeCollector holds manifolds, so its
+/// "array full" branch keeps the manifolds with the deepest penetration (Expect.full_manifolds), the disc with ties
+/// between the penetration depths
+fn buildManyManifolds(b: *SceneBuilder) Allocator.Error!void {
+    b.rng = 0x3a1f05;
+    b.num_updates = 40;
+    b.max_contact_constraints = 8192;
+
+    // A static mesh of 24 x 24 cells of 0.25 m with random heights in [-0.25, 0.25)
+    const n = 24;
+    const cell: f32 = 0.25;
+    const half = 0.5 * cell * @as(f32, n);
+    var heights: [(n + 1) * (n + 1)]f32 = undefined;
+    for (&heights) |*h| h.* = b.float(-0.25, 0.25);
+    var triangles: std.ArrayList([9]f32) = .empty;
+    defer triangles.deinit(b.allocator);
+    for (0..n) |iz| {
+        for (0..n) |ix| {
+            const x0 = @as(f32, @floatFromInt(ix)) * cell - half;
+            const z0 = @as(f32, @floatFromInt(iz)) * cell - half;
+            const x1 = x0 + cell;
+            const z1 = z0 + cell;
+            const h00 = heights[iz * (n + 1) + ix];
+            const h10 = heights[iz * (n + 1) + ix + 1];
+            const h01 = heights[(iz + 1) * (n + 1) + ix];
+            const h11 = heights[(iz + 1) * (n + 1) + ix + 1];
+            try triangles.append(b.allocator, .{ x0, h00, z0, x0, h01, z1, x1, h11, z1 });
+            try triangles.append(b.allocator, .{ x0, h00, z0, x1, h11, z1, x1, h10, z0 });
+        }
+    }
+    const terrain = try b.mesh(triangles.items);
+
+    // A static compound of 10 x 10 spheres and a mutable compound of 8 x 8 spheres (every sphere touches several
+    // triangles with different normals)
+    const sphere = try b.sphere(0.12);
+    var children: [100]SimCompoundChild = undefined;
+    for (&children, 0..) |*child, i|
+        child.* = .{ .shape = sphere, .position = .{ @as(f32, @floatFromInt(i % 10)) * 0.22 - 0.99, 0, @as(f32, @floatFromInt(i / 10)) * 0.22 - 0.99 } };
+    const static_compound = try b.compound(.static_compound, &children);
+    for (children[0..64], 0..) |*child, i|
+        child.* = .{ .shape = sphere, .position = .{ @as(f32, @floatFromInt(i % 8)) * 0.25 - 0.875, 0, @as(f32, @floatFromInt(i / 8)) * 0.25 - 0.875 } };
+    const mutable_compound = try b.compound(.mutable_compound, children[0..64]);
+
+    _ = try b.body(.{ .shape = terrain, .motion_type = 0, .friction = 0.6, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ -1.5, 0, -0.2 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .shape = static_compound, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 1.5, 0, 0.3 }, .rotation = axisAngle(.{ 0, 1, 0 }, -0.5), .shape = mutable_compound, .object_layer = Layers.moving }, .activate);
+
+    // Equal penetration depths: a flat disc of spheres (radius 0.25, on a grid of 0.25 m) lying on a static sphere of
+    // radius 2. Every coordinate is a multiple of 0.25 and the children come in pairs (p, -p), so the center of mass of
+    // the compound is exactly 0 and in the first update the spheres at (±x, ±z) get bit identical penetration depths
+    // with normals more than 5 degrees apart: the "array full" branch meets ties between the manifold with the least
+    // penetration and other manifolds or the new hit (`<` versus `<=` there decides which manifold is kept)
+    const disc_sphere = try b.sphere(0.25);
+    const big_sphere = try b.sphere(2);
+    var disc: std.ArrayList(SimCompoundChild) = .empty;
+    defer disc.deinit(b.allocator);
+    try disc.append(b.allocator, .{ .shape = disc_sphere });
+    for (1..5) |i| {
+        for (0..5) |j| {
+            // The (i, j) with i > 0, j >= 0 and their rotations by 90, 180 and 270 degrees cover every grid point but
+            // the center once; i^2 + j^2 <= 18 are the spheres within the speculative contact distance of the big sphere
+            if (i * i + j * j > 18) continue;
+            const x = 0.25 * @as(f32, @floatFromInt(i));
+            const z = 0.25 * @as(f32, @floatFromInt(j));
+            for ([_][2]f32{ .{ x, z }, .{ -z, x } }) |p| {
+                try disc.append(b.allocator, .{ .shape = disc_sphere, .position = .{ p[0], 0, p[1] } });
+                try disc.append(b.allocator, .{ .shape = disc_sphere, .position = .{ -p[0], 0, -p[1] } });
+            }
+        }
+    }
+    const disc_compound = try b.compound(.static_compound, disc.items);
+    _ = try b.body(.{ .position = .{ 10, 0, 0 }, .shape = big_sphere, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 10, 2, 0 }, .shape = disc_compound, .object_layer = Layers.moving }, .activate);
+}
+
+/// Random shapes, random bodies and random operations in a container (seed `seed`, `steps` collision steps), random
+/// listener, combine and filter modes and settings
+fn buildContactRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0x51ed27 * seed + 13;
+            b.collision_steps = steps;
+            b.num_updates = 80;
+            b.max_contact_constraints = 4096;
+            b.gravity = .{ b.float(-2, 2), b.float(-15, -5), b.float(-2, 2) };
+            if (b.oneIn(2)) b.contact_listener_mode = .modify;
+            if (b.oneIn(2)) b.combine_mode = .custom;
+            if (b.oneIn(2)) b.sim_shape_filter_mode = .filter_spheres;
+            if (b.oneIn(3)) b.settings.use_manifold_reduction = 0;
+            if (b.oneIn(3)) b.settings.allow_sleeping = 0;
+            if (b.oneIn(4)) b.settings.use_large_island_splitter = 0;
+            b.settings.time_before_sleep = b.float(0.2, 1.0);
+            const shapes = try ContactShapes.add(b);
+            try addContainer(b, 6, 3);
+            const num_bodies = 60;
+            const first: u32 = b.num_handles;
+            const F = ContactFlags;
+            const flag_choices = [_]u32{ 0, 0, 0, F.zero_friction, F.bouncy, F.mass_scale, F.accept_each, F.reject_speculative, F.filter_spheres, F.surface_velocity };
+            for (0..num_bodies) |i| {
+                const motion_type: u32 = if (b.oneIn(12)) 1 else 2;
+                const dofs: u32 = if (b.oneIn(6)) 0b100011 else 0b111111;
+                // A body that is not activated has no velocity (Jolt asserts it in ProcessBodyPair: Body::ValidateMotion)
+                const activation: SceneBuilder.Activation = if (b.oneIn(6)) .dont_activate else .activate;
+                const v = b.vec3(-3, 3);
+                const w = b.vec3(-2, 2);
+                _ = try b.body(.{
+                    .position = .{ real(i % 6) * 1.9 - 4.75, 0.8 + real(i / 36) * 2.0 + b.float(0, 0.3), real((i / 6) % 6) * 1.9 - 4.75 },
+                    .rotation = b.rotation(),
+                    .linear_velocity = if (activation == .activate) v else @splat(0),
+                    .angular_velocity = if (activation == .activate) w else @splat(0),
+                    .friction = b.float(0, 1),
+                    .restitution = if (b.oneIn(3)) b.float(0, 1) else 0,
+                    .linear_damping = if (b.oneIn(3)) b.float(0, 1) else 0.05,
+                    .gravity_factor = if (b.oneIn(6)) b.float(0, 2) else 1.0,
+                    .allowed_dofs = if (motion_type == 2) dofs else 0b111111, // Kinematic bodies have all DOFs
+                    .apply_gyroscopic_force = b.index(2),
+                    .enhanced_internal_edge_removal = b.index(2),
+                    .use_manifold_reduction = if (b.oneIn(4)) 0 else 1,
+                    .num_velocity_steps_override = if (b.oneIn(8)) 1 + b.index(15) else 0,
+                    .num_position_steps_override = if (b.oneIn(8)) 1 + b.index(5) else 0,
+                    .motion_type = motion_type,
+                    .allow_dynamic_or_kinematic = 1,
+                    .is_sensor = if (b.oneIn(15)) 1 else 0,
+                    .shape = shapes.pick(b.index(14)),
+                    .user_data = ContactFlags.userData(flag_choices[b.index(flag_choices.len)], @intCast(i)),
+                    .object_layer = if (b.oneIn(10)) Layers.moving2 else Layers.moving,
+                }, activation);
+            }
+            var u: u32 = 1;
+            while (u < b.num_updates) : (u += 1 + b.index(4)) {
+                b.at(u);
+                for (0..b.index(4)) |_| {
+                    const h = first + b.index(num_bodies);
+                    const v = b.vec3(-4, 4);
+                    const w = b.vec3(-2, 2);
+                    switch (b.index(12)) {
+                        0 => try b.op(.add_impulse, h, .{ .f = &.{ v[0] * 3, v[1] * 3, v[2] * 3 } }),
+                        1 => try b.op(.add_angular_impulse, h, .{ .f = &w }),
+                        2 => try b.op(.set_linear_velocity, h, .{ .f = &v }),
+                        3 => try b.op(.activate_body, h, .{}),
+                        4 => try b.op(.deactivate_body, h, .{}),
+                        5 => try b.op(.set_friction_and_restitution, h, .{ .f = &.{ b.float(0, 1), b.float(0, 1) } }),
+                        6 => try b.op(.set_user_data, h, .{ .index = h, .count = flag_choices[b.index(flag_choices.len)] }),
+                        7 => try b.op(.set_motion_type, h, .{ .index = 1 + b.index(2), .activation = .activate }),
+                        8 => try b.op(.set_shape, h, .{ .index = shapes.pick(b.index(14)), .count = 1, .activation = .activate }),
+                        9 => try b.op(.add_force, h, .{ .f = &.{ v[0] * 100, v[1] * 100, v[2] * 100 } }),
+                        10 => try b.op(.set_position, h, .{ .r = .{ real(b.float(-4, 4)), real(b.float(1, 4)), real(b.float(-4, 4)) }, .activation = .activate }),
+                        else => try b.op(.reset_sleep_timer, h, .{}),
+                    }
+                }
+            }
+        }
+    }.build;
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Scenes of the later waves
 
 /// A linear cast bullet that hits a thin wall
 fn buildBulletHitsWall(b: *SceneBuilder) Allocator.Error!void {

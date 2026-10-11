@@ -104,6 +104,13 @@ const SceneBuilder = SimScenes.SceneBuilder;
 const SceneEntry = SimScenes.SceneEntry;
 const OpKind = SimScenes.OpKind;
 const ShapeKind = SimScenes.ShapeKind;
+const ContactListenerMode = SimScenes.ContactListenerMode;
+const CombineMode = SimScenes.CombineMode;
+const SimShapeFilterMode = SimScenes.SimShapeFilterMode;
+const ContactFlags = SimScenes.ContactFlags;
+const SimShapeFilter = zolt.SimShapeFilter;
+const SubShapeID = zolt.SubShapeID;
+const Color = zolt.Color;
 const RecordKind = SimScenes.RecordKind;
 const StepListenerMode = SimScenes.StepListenerMode;
 const invalid_handle = SimScenes.invalid_handle;
@@ -235,6 +242,7 @@ const Recorder = struct {
 
 const ActivationListenerImpl = struct {
     recorder: *Recorder,
+    world: *ZoltWorld,
 
     fn record(self: *ActivationListenerImpl, kind: RecordKind, body_id: BodyID, body_user_data: u64) void {
         var r: SimRecord = .{ .kind = @intFromEnum(kind) };
@@ -250,11 +258,38 @@ const ActivationListenerImpl = struct {
 
     pub fn onBodyDeactivated(self: *ActivationListenerImpl, body_id: BodyID, body_user_data: u64) void {
         self.record(.body_deactivated, body_id, body_user_data);
+
+        // Zolt only (Expect.large_island): bodies that go to sleep from the final batch of a split island are deactivated
+        // while the LargeIslandSplitter holds its split islands (between JobFinalizeIslands and the reset in
+        // StartNextStep / the end of the update, no job writes it then); between the updates it is 0
+        if (self.world.system.large_island_splitter.num_split_islands > 0)
+            _ = self.world.num_large_island_deactivations.fetchAdd(1, .monotonic);
     }
 };
 
+/// The bits of ContactFlags of a body pair
+fn contactFlags(body1: *const Body, body2: *const Body) u32 {
+    return @truncate((body1.getUserData() | body2.getUserData()) >> 32);
+}
+
+/// The hash of the base offset and the contact points of a manifold (SimHashManifold in SimulationReference.cpp)
+fn hashManifold(manifold: *const ContactManifold) u32 {
+    var h = SimScenes.hash_seed;
+    const offset = [3]Real{ manifold.base_offset.getX(), manifold.base_offset.getY(), manifold.base_offset.getZ() };
+    h = SimScenes.hashBytes(h, std.mem.sliceAsBytes(&offset));
+    for ([_]*const zolt.ContactPoints{ &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2 }) |points| {
+        for (points.constSlice()) |p| {
+            const v = [3]f32{ p.getX(), p.getY(), p.getZ() };
+            h = SimScenes.hashBytes(h, std.mem.sliceAsBytes(&v));
+        }
+    }
+    return h;
+}
+
+/// SimContactListener of SimulationReference.cpp
 const ContactListenerImpl = struct {
     recorder: *Recorder,
+    mode: ContactListenerMode,
 
     pub fn onContactValidate(self: *ContactListenerImpl, body1: *const Body, body2: *const Body, base_offset: RVec3, collision_result: *const CollideShapeResult) ValidateResult {
         _ = base_offset;
@@ -265,7 +300,40 @@ const ContactListenerImpl = struct {
         r.data[2] = floatBits(collision_result.penetration_axis.getY());
         r.data[3] = floatBits(collision_result.penetration_axis.getZ());
         self.recorder.add(r);
+
+        if (self.mode == .modify) {
+            const flags = contactFlags(body1, body2);
+            if ((flags & ContactFlags.reject_all) != 0)
+                return .reject_all_contacts_for_this_body_pair;
+            if ((flags & ContactFlags.reject_speculative) != 0)
+                return if (collision_result.penetration_depth < 0.0) .reject_contact else .accept_contact;
+            if ((flags & ContactFlags.accept_each) != 0)
+                return .accept_contact;
+        }
         return .accept_all_contacts_for_this_body_pair;
+    }
+
+    /// ContactFlags of ContactListenerMode.modify
+    fn modify(self: *const ContactListenerImpl, body1: *const Body, body2: *const Body, settings: *ContactSettings) void {
+        if (self.mode != .modify)
+            return;
+        const flags = contactFlags(body1, body2);
+        if ((flags & ContactFlags.zero_friction) != 0)
+            settings.combined_friction = 0.0;
+        if ((flags & ContactFlags.bouncy) != 0)
+            settings.combined_restitution = 0.9;
+        if ((flags & ContactFlags.mass_scale) != 0) {
+            settings.inv_mass_scale1 = 0.5;
+            settings.inv_inertia_scale1 = 0.25;
+            settings.inv_mass_scale2 = 2.0;
+            settings.inv_inertia_scale2 = 1.5;
+        }
+        if ((flags & ContactFlags.surface_velocity) != 0) {
+            settings.relative_linear_surface_velocity = Vec3.init(1.5, 0.0, 0.5);
+            settings.relative_angular_surface_velocity = Vec3.init(0.0, 0.7, 0.0);
+        }
+        if ((flags & ContactFlags.sensor) != 0)
+            settings.is_sensor = true;
     }
 
     fn record(self: *ContactListenerImpl, kind: RecordKind, body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *const ContactSettings) void {
@@ -276,26 +344,103 @@ const ContactListenerImpl = struct {
             floatBits(manifold.world_space_normal.getY()),
             floatBits(manifold.world_space_normal.getZ()),
             floatBits(manifold.penetration_depth),
-            @intCast(manifold.relative_contact_points_on1.len),
+            @as(u32, manifold.relative_contact_points_on1.len) | (@as(u32, @intFromBool(settings.is_sensor)) << 8),
             floatBits(settings.combined_friction),
             floatBits(settings.combined_restitution),
-            @intFromBool(settings.is_sensor),
+            hashManifold(manifold),
         };
         self.recorder.add(r);
     }
 
     pub fn onContactAdded(self: *ContactListenerImpl, body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *ContactSettings) void {
         self.record(.contact_added, body1, body2, manifold, settings);
+        self.modify(body1, body2, settings);
     }
 
     pub fn onContactPersisted(self: *ContactListenerImpl, body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *ContactSettings) void {
         self.record(.contact_persisted, body1, body2, manifold, settings);
+        self.modify(body1, body2, settings);
     }
 
     pub fn onContactRemoved(self: *ContactListenerImpl, sub_shape_pair: *const SubShapeIDPair) void {
         var r: SimRecord = .{ .kind = @intFromEnum(RecordKind.contact_removed) };
         r.ids = .{ sub_shape_pair.body1_id.getIndexAndSequenceNumber(), sub_shape_pair.sub_shape_id1.getValue(), sub_shape_pair.body2_id.getIndexAndSequenceNumber(), sub_shape_pair.sub_shape_id2.getValue() };
         self.recorder.add(r);
+    }
+};
+
+/// CombineMode.custom (SimCombineFriction / SimCombineRestitution of SimulationReference.cpp)
+const CustomCombine = struct {
+    fn friction(body1: *const Body, sub_shape_id1: SubShapeID, body2: *const Body, sub_shape_id2: SubShapeID) f32 {
+        _ = .{ sub_shape_id1, sub_shape_id2 };
+        return 0.5 * (body1.getFriction() + body2.getFriction());
+    }
+
+    fn restitution(body1: *const Body, sub_shape_id1: SubShapeID, body2: *const Body, sub_shape_id2: SubShapeID) f32 {
+        return if (sub_shape_id1.getValue() == sub_shape_id2.getValue())
+            zolt.math.max(body1.getRestitution(), body2.getRestitution())
+        else
+            zolt.math.min(body1.getRestitution(), body2.getRestitution());
+    }
+};
+
+/// SimShapeFilterMode.filter_spheres (SimSphereFilter of SimulationReference.cpp)
+const SphereFilter = struct {
+    pub const overrides = .{.shouldCollide};
+
+    base: SimShapeFilter = .init(@This()),
+
+    pub fn shouldCollide(self: *const SphereFilter, body1: *const Body, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, body2: *const Body, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = .{ self, sub_shape_id_of_shape1, sub_shape_id_of_shape2 };
+        if ((contactFlags(body1, body2) & ContactFlags.filter_spheres) == 0)
+            return true;
+        return shape1.getSubType() != .sphere and shape2.getSubType() != .sphere;
+    }
+};
+
+/// Wraps the job system of a world and counts the FindCollisions jobs that are spawned from inside jobs
+/// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies)
+const SpawnCountingJobSystem = struct {
+    inner: JobSystem,
+    num_spawned_find_collisions: std.atomic.Value(u32) = .init(0),
+
+    fn jobSystem(self: *SpawnCountingJobSystem) JobSystem {
+        return .init(self);
+    }
+
+    pub fn getMaxConcurrency(self: *const SpawnCountingJobSystem) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    pub fn createJob(self: *SpawnCountingJobSystem, job_name: []const u8, color: Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        const handle = try self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+        if (opts.num_dependencies == 0 and std.mem.eql(u8, job_name, "FindCollisions"))
+            _ = self.num_spawned_find_collisions.fetchAdd(1, .monotonic);
+        return handle;
+    }
+
+    pub fn createBarrier(self: *SpawnCountingJobSystem) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    pub fn destroyBarrier(self: *SpawnCountingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    pub fn waitForJobs(self: *SpawnCountingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    pub fn queueJob(self: *SpawnCountingJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.queueJob(self.inner.ptr, job); // The jobs belong to `inner` (they queue themselves there), not reached
+    }
+
+    pub fn queueJobs(self: *SpawnCountingJobSystem, jobs: []const *JobSystem.Job) void {
+        self.inner.vtable.queueJobs(self.inner.ptr, jobs); // The jobs belong to `inner` (they queue themselves there), not reached
+    }
+
+    pub fn freeJob(self: *SpawnCountingJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.freeJob(self.inner.ptr, job); // The jobs belong to `inner` (they queue themselves there), not reached
     }
 };
 
@@ -378,6 +523,11 @@ const ZoltWorld = struct {
     recorder: Recorder,
     activation_listener: ActivationListenerImpl = undefined,
     contact_listener: ContactListenerImpl = undefined,
+    sphere_filter: SphereFilter = .{},
+    /// The job system the updates run on (counts the spawned FindCollisions jobs, see `jobSystem`)
+    counting_jobs: SpawnCountingJobSystem = undefined,
+    /// Number of OnBodyDeactivated calls while the LargeIslandSplitter held split islands (Expect.large_island)
+    num_large_island_deactivations: std.atomic.Value(u32) = .init(0),
     system: PhysicsSystem = .empty,
     shapes: std.ArrayList(RefConst(Shape)) = .empty,
     handles: std.ArrayList(BodyID) = .empty,
@@ -405,10 +555,22 @@ const ZoltWorld = struct {
         const settings = toPhysicsSettings(&desc.settings);
         self.system.setPhysicsSettings(&settings);
         self.system.setGravity(load3(&desc.gravity));
-        self.activation_listener = .{ .recorder = &self.recorder };
-        self.contact_listener = .{ .recorder = &self.recorder };
+        self.activation_listener = .{ .recorder = &self.recorder, .world = self };
+        self.contact_listener = .{ .recorder = &self.recorder, .mode = @enumFromInt(desc.contact_listener_mode) };
         self.system.setBodyActivationListener(.init(&self.activation_listener));
         self.system.setContactListener(.init(&self.contact_listener));
+        switch (@as(CombineMode, @enumFromInt(desc.combine_mode))) {
+            .default => {},
+            .custom => {
+                self.system.setCombineFriction(CustomCombine.friction);
+                self.system.setCombineRestitution(CustomCombine.restitution);
+            },
+        }
+        switch (@as(SimShapeFilterMode, @enumFromInt(desc.sim_shape_filter_mode))) {
+            .none => {},
+            .filter_spheres => self.system.setSimShapeFilter(&self.sphere_filter.base),
+        }
+        self.counting_jobs = .{ .inner = self.jobs.jobSystem() };
 
         errdefer self.shapes.deinit(allocator);
         errdefer for (self.shapes.items) |*s| s.deinit();
@@ -440,6 +602,11 @@ const ZoltWorld = struct {
         self.recorder.deinit();
         self.temp.deinit();
         allocator.destroy(self);
+    }
+
+    /// The job system of the updates (the world's job system, counting the spawned FindCollisions jobs)
+    fn jobSystem(self: *ZoltWorld) JobSystem {
+        return self.counting_jobs.jobSystem();
     }
 
     fn getHandle(self: *const ZoltWorld, handle: u32) BodyID {
@@ -495,6 +662,7 @@ const ZoltWorld = struct {
                 }
                 break :blk (try zolt.MeshShapeSettings.create(allocator, triangles, .{})).asShapeSettings();
             },
+            .height_field => (try zolt.HeightFieldShapeSettings.create(allocator, floats[shape.data..][0 .. @as(usize, shape.count) * shape.count], load3(p[0..3]), load3(p[3..6]), shape.count, .{})).asShapeSettings(),
             .empty => (try zolt.EmptyShapeSettings.create(allocator, load3(p[0..3]))).asShapeSettings(),
             .rotated_translated => (try zolt.RotatedTranslatedShapeSettings.createPtr(allocator, load3(p[0..3]), loadQuat(&shape.rotation), self.shapes.items[shape.child].get().?)).asShapeSettings(),
             .scaled => (try zolt.ScaledShapeSettings.createPtr(allocator, self.shapes.items[shape.child].get().?, load3(p[0..3]))).asShapeSettings(),
@@ -1128,6 +1296,7 @@ const Run = struct {
         }
         if (self.zolt_records.items.len != self.jolt_records.items.len)
             return self.fail("{d} listener records in zolt, {d} in jolt", .{ self.zolt_records.items.len, self.jolt_records.items.len });
+        self.stats.max_manifolds_per_body_pair = @max(self.stats.max_manifolds_per_body_pair, try maxManifoldsPerBodyPair(self.allocator, self.jolt_records.items));
     }
 
     fn applyOps(self: *Run, op_index: *usize, delta_time: *f32, collision_steps: *u32) !void {
@@ -1177,7 +1346,7 @@ const Run = struct {
         if (sweep)
             return self.sweepStep(delta_time, collision_steps);
 
-        const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobs.jobSystem());
+        const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
         if (!self.zw.temp.isEmpty()) return self.fail("the temp allocator is not empty after the update", .{});
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         if (zolt_errors != jolt_errors)
@@ -1220,7 +1389,7 @@ const Run = struct {
 
         // The update counting the temp allocations is the one that is compared (records included)
         var counting: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{});
-        const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobs.jobSystem());
+        const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobSystem());
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
@@ -1234,7 +1403,7 @@ const Run = struct {
         for (0..num_allocations) |fail_index| {
             try self.restoreZolt(snapshot.items);
             var failing: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
-            if (zw.update(delta_time, collision_steps, failing.tempAllocator(), zw.jobs.jobSystem())) |_| {
+            if (zw.update(delta_time, collision_steps, failing.tempAllocator(), zw.jobSystem())) |_| {
                 return self.fail("temp allocation {d} of {d} failed but the update succeeded", .{ fail_index, num_allocations });
             } else |err| if (err != error.OutOfMemory) return err;
             if (!failing.has_induced_failure) return self.fail("temp allocation {d} did not fail", .{fail_index});
@@ -1247,13 +1416,13 @@ const Run = struct {
 
         // Every createJob fails once: count the jobs first (a normal update)
         try self.restoreZolt(snapshot.items);
-        var counting_jobs: FailingJobSystem = .init(zw.jobs.jobSystem(), .{});
+        var counting_jobs: FailingJobSystem = .init(zw.jobSystem(), .{});
         _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), counting_jobs.jobSystem());
         try self.expectZoltState(reference.items, "after the update counting the jobs");
         const num_jobs = counting_jobs.num_created.load(.monotonic);
         for (0..num_jobs + 2) |fail_index| {
             try self.restoreZolt(snapshot.items);
-            var failing: FailingJobSystem = .init(zw.jobs.jobSystem(), .{ .fail_index = @intCast(fail_index) });
+            var failing: FailingJobSystem = .init(zw.jobSystem(), .{ .fail_index = @intCast(fail_index) });
             if (zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), failing.jobSystem())) |_| {
                 // A job that could not be spawned from inside a job changes no result
                 try self.expectZoltState(reference.items, "a job could not be spawned");
@@ -1296,7 +1465,7 @@ const Run = struct {
     /// Restore the snapshot and redo the update with enough memory: the C++ bytes
     fn recoverZolt(self: *Run, snapshot: []const u8, reference: []const u8, delta_time: f32, collision_steps: u32, what: []const u8) !void {
         try self.restoreZolt(snapshot);
-        _ = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobs.jobSystem());
+        _ = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
         if (!self.zw.temp.isEmpty()) return self.fail("{s}: the temp allocator is not empty", .{what});
         try self.expectZoltState(reference, what);
     }
@@ -1318,7 +1487,28 @@ const RunStats = struct {
     restores_changing_the_state: u32 = 0,
     /// Number of checked expect_body_state operations
     num_expectations: u32 = 0,
+    /// Number of FindCollisions jobs spawned from inside jobs (Zolt side, also in the sweeps)
+    num_spawned_jobs: u32 = 0,
+    /// Number of OnBodyDeactivated calls from the final batch of a split island (Zolt side, also in the sweeps)
+    num_large_island_deactivations: u32 = 0,
+    /// Largest number of manifolds of one body pair in one update (OnContactAdded + OnContactPersisted records)
+    max_manifolds_per_body_pair: u32 = 0,
 };
+
+/// The largest number of OnContactAdded + OnContactPersisted records of one body pair in `records` (Expect.full_manifolds)
+fn maxManifoldsPerBodyPair(allocator: Allocator, records: []const SimRecord) Allocator.Error!u32 {
+    var counts: std.AutoHashMapUnmanaged([2]u32, u32) = .empty;
+    defer counts.deinit(allocator);
+    var max: u32 = 0;
+    for (records) |r| {
+        if (r.kind != @intFromEnum(RecordKind.contact_added) and r.kind != @intFromEnum(RecordKind.contact_persisted))
+            continue;
+        const count = try counts.getOrPutValue(allocator, .{ r.ids[0], r.ids[1] }, 0);
+        count.value_ptr.* += 1;
+        max = @max(max, count.value_ptr.*);
+    }
+    return max;
+}
 
 /// Print what every scene did (a passing test must not print: keep false)
 const verbose = false;
@@ -1350,6 +1540,8 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     for (all_states) |state|
         try run.compareStates(state, "at the end");
 
+    run.stats.num_spawned_jobs = zw.counting_jobs.num_spawned_find_collisions.load(.monotonic);
+    run.stats.num_large_island_deactivations = zw.num_large_island_deactivations.load(.monotonic);
     return run.stats;
 }
 
@@ -1388,6 +1580,26 @@ fn runEntry(entry: *const SceneEntry) !void {
     // with sweeps, temp allocations and createJob calls failed
     for (stats[1..]) |s|
         try std.testing.expectEqualSlices(u32, &stats[0].records, &s.records);
+
+    // The scene reaches what it is written for (SimScenes.Expect)
+    const expect = entry.expect;
+    const records = &stats[0].records;
+    if (expect.contacts) try expectReached(entry, "contacts", records[@intFromEnum(RecordKind.contact_added)] > 0);
+    if (expect.removed) try expectReached(entry, "removed contacts", records[@intFromEnum(RecordKind.contact_removed)] > 0);
+    if (expect.validated) try expectReached(entry, "OnContactValidate", records[@intFromEnum(RecordKind.contact_validate)] > 0);
+    if (expect.sleeping) try expectReached(entry, "sleeping bodies", stats[0].updates_with_sleeping_bodies > 0);
+    var num_spawned_jobs: u32 = 0;
+    var num_large_island_deactivations: u32 = 0;
+    for (stats) |s| {
+        num_spawned_jobs += s.num_spawned_jobs;
+        num_large_island_deactivations += s.num_large_island_deactivations;
+    }
+    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0);
+    if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
+    if (expect.full_manifolds) {
+        try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
+        try expectReached(entry, "a full manifold array in ProcessBodyPair", stats[0].max_manifolds_per_body_pair >= SimScenes.max_manifolds_per_body_pair);
+    }
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
         if (config.sweeps and entry.sweep_stride != 0) {
@@ -1397,6 +1609,13 @@ fn runEntry(entry: *const SceneEntry) !void {
     }
 
     try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
+}
+
+fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !void {
+    if (!reached) {
+        std.debug.print("SimulationParity: scene {s} does not reach what it is written for: {s}\n", .{ entry.name, what });
+        return error.TestUnexpectedResult;
+    }
 }
 
 /// One test per scene: `SceneTest("name", index)` (a blocked scene is skipped)
@@ -1433,7 +1652,7 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer b_records.deinit(allocator);
 
     for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by == .none or entry.blocked_by == .release_only) continue;
+        if (entry.blocked_by == .none or entry.blocked_by == .release_only or entry.blocked_by == .contacts) continue; // Supported (their own tests)
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);
