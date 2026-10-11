@@ -42,8 +42,9 @@
 //!   `restoreState(stream, .{ .filter = null })`. Functions that allocate return Allocator.Error (`getBodies`,
 //!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`,
 //!   `optimizeBroadPhase`).
-//! - JPH_DET_LOG: TODO(determinism_log). JPH_DEBUG_RENDERER (sDrawMotionQualityLinearCast, DrawBodies,
-//!   DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame): TODO(debug_renderer).
+//! - JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER
+//!   (sDrawMotionQualityLinearCast, DrawBodies, DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame):
+//!   TODO(debug_renderer).
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
@@ -52,6 +53,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Core = @import("../Core/Core.zig");
+const DeterminismLog = @import("DeterminismLog.zig");
 const math = @import("../Math/Math.zig");
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
 const Quat = @import("../Math/Quat.zig").Quat;
@@ -743,7 +745,7 @@ pub const PhysicsSystem = struct {
     /// half done (memory safe, no lock held, nothing leaked, the temp allocator is empty): restore a saved state or
     /// deinit the system.
     pub fn update(self: *Self, delta_time: f32, collision_steps: u32, temp_allocator: TempAllocator, job_system: JobSystem) error{OutOfMemory}!PhysicsUpdateError {
-        // TODO(determinism_log): JPH_DET_LOG("PhysicsSystem::Update: dt: " << inDeltaTime << " steps: " << inCollisionSteps);
+        if (DeterminismLog.enabled) DeterminismLog.log(.{ "PhysicsSystem::Update: dt: ", delta_time, " steps: ", @as(i32, @bitCast(collision_steps)) }); // inCollisionSteps is an int in Jolt
 
         std.debug.assert(collision_steps > 0);
         std.debug.assert(delta_time >= 0.0);
@@ -1848,7 +1850,7 @@ pub const PhysicsSystem = struct {
                 const body = self.body_manager.getBodyMut(body_id);
                 const mp = body.getMotionPropertiesMut();
 
-                // TODO(determinism_log): JPH_DET_LOG("JobIntegrateVelocity: id: " << body_id << " v: " << body.GetLinearVelocity() << " w: " << body.GetAngularVelocity());
+                if (DeterminismLog.enabled) DeterminismLog.log(.{ "JobIntegrateVelocity: id: ", body_id, " v: ", body.getLinearVelocity(), " w: ", body.getAngularVelocity() });
 
                 // Clamp velocities (not for kinematic bodies)
                 if (body.isDynamic()) {

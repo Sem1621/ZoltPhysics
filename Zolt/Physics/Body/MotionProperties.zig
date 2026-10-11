@@ -10,8 +10,8 @@
 //! - The BodyAccess checks are `BodyAccess.assertVelocityAccess(.read)` etc. (only evaluated with asserts).
 //! - JPH_TRACK_SIMULATION_STATS (off by default, like Jolt's CMake option) is the comptime switch
 //!   `track_simulation_stats`; `simulation_stats` is `void` while it is off.
-//! - `JPH_DET_LOG` in ApplyLinearVelocityStep / ApplyAngularVelocityStep: TODO(determinism_log), the DeterminismLog
-//!   (SimulationArchitecture D11) is ported in Wave A8.
+//! - `JPH_DET_LOG` in ApplyLinearVelocityStep / ApplyAngularVelocityStep: `if (DeterminismLog.enabled)
+//!   DeterminismLog.log(.{ ... })` (SimulationArchitecture D11, the build option `-Ddeterminism_log`).
 //! - `ResetSleepTestSpheres(const RVec3 *)` takes `*const [3]RVec3`.
 //! - Jolt's `JPH_ASSERT`s on user values (finite velocities, positive masses, valid DOFs) are
 //!   `if (Core.enable_asserts) std.debug.assert(...)`, so ReleaseFast keeps Jolt's release behavior.
@@ -36,6 +36,7 @@ const BodyType = @import("BodyType.zig").BodyType;
 const BodyAccess = @import("BodyAccess.zig").BodyAccess;
 const MassProperties = @import("MassProperties.zig").MassProperties;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
+const DeterminismLog = @import("../DeterminismLog.zig");
 
 /// JPH_TRACK_SIMULATION_STATS: track per body simulation statistics (off, like Jolt's default)
 pub const track_simulation_stats = false;
@@ -536,7 +537,7 @@ pub const MotionProperties = struct {
 
     ///@name Update linear and angular velocity (used during constraint solving)
     pub fn applyLinearVelocityStep(self: *MotionProperties, linear_velocity: Vec3) void {
-        // TODO(determinism_log): JPH_DET_LOG("ApplyLinearVelocityStep: " << inLinearVelocity) (DeterminismLog, Wave A8)
+        if (DeterminismLog.enabled) DeterminismLog.log(.{ "ApplyLinearVelocityStep: ", linear_velocity });
         BodyAccess.assertVelocityAccess(.read_write);
         if (Core.enable_asserts) std.debug.assert(self.cached_motion_type == .dynamic);
         if (Core.enable_asserts) std.debug.assert(!linear_velocity.isNaN());
@@ -552,7 +553,7 @@ pub const MotionProperties = struct {
     }
 
     pub fn applyAngularVelocityStep(self: *MotionProperties, angular_velocity: Vec3) void {
-        // TODO(determinism_log): JPH_DET_LOG("ApplyAngularVelocityStep: " << inAngularVelocity) (DeterminismLog, Wave A8)
+        if (DeterminismLog.enabled) DeterminismLog.log(.{ "ApplyAngularVelocityStep: ", angular_velocity });
         BodyAccess.assertVelocityAccess(.read_write);
         if (Core.enable_asserts) std.debug.assert(self.cached_motion_type == .dynamic);
         if (Core.enable_asserts) std.debug.assert(!angular_velocity.isNaN());

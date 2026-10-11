@@ -10,6 +10,8 @@
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
 //!   -Dobject_layer_bits=16|32   JPH_OBJECT_LAYER_BITS
+//!   -Ddeterminism_log=true      JPH_ENABLE_DETERMINISM_LOG: Zolt/Physics/DeterminismLog.zig exists at run time (the
+//!                               `test` step always also runs the DeterminismLog unit tests with it enabled)
 //!   -Dtest-filter=<substring>   Only run tests whose name contains the substring (repeatable)
 //!   -Duse_llvm=true|false       Use the LLVM backend (default: true). Zig 0.16's self-hosted x86_64 backend,
 //!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
@@ -23,6 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const double_precision = b.option(bool, "double_precision", "Use f64 for world space positions (JPH_DOUBLE_PRECISION)") orelse false;
     const object_layer_bits = b.option(u8, "object_layer_bits", "Number of bits in ObjectLayer, 16 or 32 (JPH_OBJECT_LAYER_BITS)") orelse 16;
+    const determinism_log = b.option(bool, "determinism_log", "Log the simulation state to find determinism issues (JPH_ENABLE_DETERMINISM_LOG)") orelse false;
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
     // Zig 0.16's self-hosted x86_64 backend (the default for Debug builds) miscompiles some vector operations
     // (e.g. @bitCast of @Vector(4, bool)), so default to LLVM. Use -Duse_llvm=false for faster Debug compiles.
@@ -36,6 +39,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "double_precision", double_precision);
     options.addOption(u8, "object_layer_bits", object_layer_bits);
+    options.addOption(bool, "determinism_log", determinism_log);
     const options_module = options.createModule();
 
     // User shape registrations, default material and material types (Zolt/RegisterTypes.zig): an empty module by
@@ -125,11 +129,47 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
+    // The unit tests once more on a library built with the determinism log enabled (-Ddeterminism_log=true), so that
+    // the log text of a simulation is checked by every test run. Without -Dtest-filter only the DeterminismLog tests
+    // run (the others are compiled out by the filter); with filters the given tests run in this configuration too.
+    var det_log_tests_opt: ?*std.Build.Step.Compile = null;
+    if (!determinism_log) {
+        const det_log_options = b.addOptions();
+        det_log_options.addOption(bool, "double_precision", double_precision);
+        det_log_options.addOption(u8, "object_layer_bits", object_layer_bits);
+        det_log_options.addOption(bool, "determinism_log", true);
+        const zolt_det_log = b.createModule(.{
+            .root_source_file = b.path("Zolt/zolt.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt_options", .module = det_log_options.createModule() },
+                .{ .name = "zolt_user_types", .module = user_types_module },
+            },
+        });
+        const det_log_tests = b.addTest(.{
+            .name = "zolt-unit-tests-determinism-log",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("ZoltTests/unit_tests.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zolt", .module = zolt_det_log },
+                },
+            }),
+            .filters = if (test_filters.len != 0) test_filters else &.{"DeterminismLog"},
+            .use_llvm = use_llvm,
+        });
+        test_step.dependOn(&b.addRunArtifact(det_log_tests).step);
+        det_log_tests_opt = det_log_tests;
+    }
+
     // Compile-only step, used for fast feedback and by ZLS (build-on-save)
     const check_step = b.step("check", "Compile the library and tests without running them");
     check_step.dependOn(&lib.step);
     check_step.dependOn(&lib_tests.step);
     check_step.dependOn(&unit_tests.step);
+    if (det_log_tests_opt) |t| check_step.dependOn(&t.step);
 
     const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
     docs_step.dependOn(&b.addInstallDirectory(.{
