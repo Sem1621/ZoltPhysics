@@ -17,9 +17,10 @@
 //!   broad phase allocates in AddBodiesPrepare); on error the body was not added, and `createAndAddBody` destroys the
 //!   body it created. The functions that flag the contact cache invalid (`setShape`, `notifyShapeChanged`,
 //!   `setUseManifoldReduction`, `invalidateContactCache`) return the `Allocator.Error` of
-//!   BodyManager.invalidateContactCacheForBody after the body was changed. `activateBodiesInAABox` collects the bodies in an
-//!   AllHitCollisionCollector (Allocator.Error, nothing was activated). `createConstraint` allocates the constraint with
-//!   the body manager's allocator (Jolt: `new`), its reference count is 0 like Jolt's.
+//!   BodyManager.invalidateContactCacheForBody. They flag the contact cache before they change the body (Jolt: after,
+//!   the result is the same), so a failed call changed nothing and can be repeated. `activateBodiesInAABox` collects
+//!   the bodies in an AllHitCollisionCollector (Allocator.Error, nothing was activated). `createConstraint` allocates
+//!   the constraint with the body manager's allocator (Jolt: `new`), its reference count is 0 like Jolt's.
 //! - `getShape` and `getTransformedShape` return values that hold a shape reference: the caller `deinit`s them.
 
 const std = @import("std");
@@ -370,11 +371,12 @@ pub const BodyInterface = struct {
 
             // Check if shape actually changed
             if (body.getShape() != shape) {
+                // Flag collision cache invalid for this body (Zolt: before the shape is updated, Jolt does it after, so
+                // that a failed call changes nothing and can be repeated; the flag does not depend on the shape)
+                try self.body_manager.invalidateContactCacheForBody(body);
+
                 // Update the shape
                 body.setShapeInternal(shape, update_mass_properties);
-
-                // Flag collision cache invalid for this body
-                try self.body_manager.invalidateContactCacheForBody(body);
 
                 // Notify broadphase of change
                 if (body.isInBroadPhase()) {
@@ -400,14 +402,16 @@ pub const BodyInterface = struct {
         if (lock.succeeded()) {
             const body = lock.getBody();
 
+            // Flag collision cache invalid for this body (Zolt: before the center of mass is updated, Jolt does it
+            // after, so that a failed call changes nothing and can be repeated; updating the center of mass moves the
+            // body relative to previous_center_of_mass, a second update after a failure would move it again)
+            try self.body_manager.invalidateContactCacheForBody(body);
+
             // Update center of mass, mass and inertia
             body.updateCenterOfMassInternal(previous_center_of_mass, update_mass_properties);
 
             // Recalculate bounding box
             body.calculateWorldSpaceBoundsInternal();
-
-            // Flag collision cache invalid for this body
-            try self.body_manager.invalidateContactCacheForBody(body);
 
             // Notify broadphase of change
             if (body.isInBroadPhase()) {
@@ -1084,17 +1088,18 @@ pub const BodyInterface = struct {
 
     ///@name Manifold reduction
     /// @see Body::SetUseManifoldReduction
-    /// (Zolt: Allocator.Error from flagging the contact cache, the body was changed)
+    /// (Zolt: Allocator.Error from flagging the contact cache, nothing was changed)
     pub fn setUseManifoldReduction(self: *BodyInterface, body_id: BodyID, use_reduction: bool) Allocator.Error!void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
         defer lock.deinit();
         if (lock.succeeded()) {
             const body = lock.getBody();
             if (body.getUseManifoldReduction() != use_reduction) {
-                body.setUseManifoldReduction(use_reduction);
-
-                // Flag collision cache invalid for this body
+                // Flag collision cache invalid for this body (Zolt: before the flag is set, Jolt does it after, so that
+                // a failed call changes nothing and can be repeated)
                 try self.body_manager.invalidateContactCacheForBody(body);
+
+                body.setUseManifoldReduction(use_reduction);
             }
         }
     }

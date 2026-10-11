@@ -17,6 +17,8 @@
 //!   runs in the UpdateBroadPhasePrepare job). The update returns error.OutOfMemory, the temp allocator is empty, a
 //!   failure while building the jobs changes nothing, and the system recovers by restoring the state saved before.
 //! - Every allocation of creating the scene fails in turn (std.testing.checkAllAllocationFailures).
+//! - The BodyInterface functions that flag the contact cache invalid (setShape, notifyShapeChanged,
+//!   setUseManifoldReduction, invalidateContactCache): a failed call changes nothing and can be repeated.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -991,6 +993,121 @@ test "PhysicsSystem BodyInterface ID allocation like Jolt" {
     defer empty.deinit();
     try std.testing.expectError(error.InvalidShape, bi.createBody(&empty));
     try std.testing.expectError(error.InvalidShape, bi.createAndAddBody(&empty, .activate));
+}
+
+/// The BodyInterface functions that flag the contact cache invalid (an allocation in
+/// BodyManager.invalidateContactCacheForBody) on the first body of a fresh system: the first call fails, it changes
+/// nothing and repeating it gives the same body as the same call on an identical body without a failure
+fn testContactCacheFailure(comptime Call: type) !void {
+    const allocator = std.testing.allocator;
+    var failing: std.testing.FailingAllocator = .init(allocator, .{});
+    var scene: Scene = .{};
+    try scene.system.init(failing.allocator(), io, 4, 0, 16, 16, &scene.broad_phase_layer_interface.base, &scene.object_vs_broad_phase_layer_filter.base, &scene.object_layer_pair_filter.base, .{});
+    defer scene.system.deinit();
+    const bi = scene.system.getBodyInterfaceMut();
+
+    // Two identical sleeping boxes in the broad phase
+    const box = try BoxShape.create(allocator, Vec3.init(0.5, 0.75, 1.0), .{});
+    var settings = BodyCreationSettings.initWithShape(box.asShape(), RVec3.init(1, 2, 3), Quat.rotation(Vec3.init(0, 1, 0), 0.3), .dynamic, Layers.moving);
+    defer settings.deinit();
+    const failed = (try bi.createBody(&settings)).?;
+    try bi.addBody(failed.getID(), .dont_activate);
+    const reference = (try bi.createBody(&settings)).?;
+    try bi.addBody(reference.getID(), .dont_activate);
+    const cache_invalid = &scene.system.body_manager.bodies_cache_invalid;
+    try expectEqual(@as(usize, 0), cache_invalid.capacity); // The next flag allocates
+
+    // The failed call changes nothing
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, Call.run(bi, failed.getID()));
+    failing.fail_index = std.math.maxInt(usize);
+    try expectSameBody(failed, reference);
+    try expect(!failed.isCollisionCacheInvalid());
+    try expectEqual(@as(usize, 0), cache_invalid.items.len);
+
+    // Repeating it gives the result of a call that did not fail
+    try Call.run(bi, failed.getID());
+    try Call.run(bi, reference.getID());
+    try expectSameBody(failed, reference);
+    try expect(failed.isCollisionCacheInvalid());
+    try expectEqual(@as(usize, 2), cache_invalid.items.len);
+    try expect(cache_invalid.items[0].eql(failed.getID()) and cache_invalid.items[1].eql(reference.getID()));
+    try Call.check(failed);
+}
+
+/// Everything that the contact cache functions change on a body (the bodies have different IDs)
+fn expectSameBody(a: *const Body, b: *const Body) !void {
+    try expect(a.getShape() == b.getShape());
+    try expect(a.getCenterOfMassPosition().eql(b.getCenterOfMassPosition()));
+    try expect(a.getRotation().eql(b.getRotation()));
+    try expect(a.getWorldSpaceBounds().min.eql(b.getWorldSpaceBounds().min));
+    try expect(a.getWorldSpaceBounds().max.eql(b.getWorldSpaceBounds().max));
+    try expectEqual(a.getMotionProperties().getInverseMass(), b.getMotionProperties().getInverseMass());
+    try expect(a.getMotionProperties().getInverseInertiaDiagonal().eql(b.getMotionProperties().getInverseInertiaDiagonal()));
+    try expectEqual(a.isActive(), b.isActive());
+    try expectEqual(a.isCollisionCacheInvalid(), b.isCollisionCacheInvalid());
+    try expectEqual(a.getUseManifoldReduction(), b.getUseManifoldReduction());
+}
+
+test "PhysicsSystem BodyInterface setShape out of memory can be repeated" {
+    const sphere = try zolt.SphereShape.create(std.testing.allocator, 0.7, .{});
+    sphere.asShape().addRef();
+    defer sphere.asShape().release();
+    const Call = struct {
+        var shape: *const zolt.Shape = undefined;
+        fn run(bi: *BodyInterface, id: BodyID) !void {
+            try bi.setShape(id, shape, true, .activate);
+        }
+        fn check(body: *const Body) !void {
+            // The shape and the mass changed, the body woke up
+            try expect(body.getShape() == shape);
+            try expect(body.isActive());
+            try expectEqual(1.0 / shape.getMassProperties().mass, body.getMotionProperties().getInverseMass());
+        }
+    };
+    Call.shape = sphere.asShape();
+    try testContactCacheFailure(Call);
+}
+
+test "PhysicsSystem BodyInterface notifyShapeChanged out of memory can be repeated" {
+    const Call = struct {
+        fn run(bi: *BodyInterface, id: BodyID) !void {
+            // The center of mass of the shape moved from (0.25, 0, 0) to the origin: the center of mass of the body
+            // moves along the body's x axis
+            try bi.notifyShapeChanged(id, Vec3.init(0.25, 0, 0), true, .activate);
+        }
+        fn check(body: *const Body) !void {
+            try expect(body.isActive());
+            const expected = RVec3.init(1, 2, 3).addVec3(Quat.rotation(Vec3.init(0, 1, 0), 0.3).mulVec3(Vec3.init(-0.25, 0, 0)));
+            try expect(body.getCenterOfMassPosition().eql(expected));
+        }
+    };
+    try testContactCacheFailure(Call);
+}
+
+test "PhysicsSystem BodyInterface setUseManifoldReduction out of memory can be repeated" {
+    const Call = struct {
+        fn run(bi: *BodyInterface, id: BodyID) !void {
+            try bi.setUseManifoldReduction(id, false);
+        }
+        fn check(body: *const Body) !void {
+            try expect(!body.getUseManifoldReduction());
+            try expect(!body.isActive());
+        }
+    };
+    try testContactCacheFailure(Call);
+}
+
+test "PhysicsSystem BodyInterface invalidateContactCache out of memory can be repeated" {
+    const Call = struct {
+        fn run(bi: *BodyInterface, id: BodyID) !void {
+            try bi.invalidateContactCache(id);
+        }
+        fn check(body: *const Body) !void {
+            try expect(!body.isActive());
+        }
+    };
+    try testContactCacheFailure(Call);
 }
 
 test "PhysicsSystem BodyInterface locks, threads, the batch API and a const broad phase query" {

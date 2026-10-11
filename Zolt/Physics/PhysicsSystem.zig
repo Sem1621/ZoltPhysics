@@ -772,9 +772,8 @@ pub const PhysicsSystem = struct {
             return .none;
         }
 
-        // Reset accumulated stats on the active bodies
-        if (track_simulation_stats)
-            self.body_manager.resetSimulationStats();
+        // Zolt: Jolt resets the accumulated stats on the active bodies here (JPH_TRACK_SIMULATION_STATS), Zolt does it
+        // after building the jobs, before the first job starts, so that a failure while building them changes nothing
 
         // Calculate ratio between current and previous frame delta time to scale initial constraint forces.
         // Note that scaling of the impulses works perfectly for a system in equilibrium. When a body is falling on another body, it will receive
@@ -832,6 +831,10 @@ pub const PhysicsSystem = struct {
             self.previous_step_delta_time = old_previous_step_delta_time;
             return err;
         };
+
+        // Reset accumulated stats on the active bodies (Zolt: moved here, see above; no job has run yet)
+        if (track_simulation_stats)
+            self.body_manager.resetSimulationStats();
 
         // Zolt start gate (D4): Jolt starts the first step's root jobs while building the jobs, Zolt kicks them now,
         // exactly like StartNextStep kicks the following steps (their root jobs have 1 dependency in both)
