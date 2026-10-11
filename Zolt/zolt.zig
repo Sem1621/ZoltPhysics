@@ -204,6 +204,7 @@ pub const BodyLockMultiRead = @import("Physics/Body/BodyLockMulti.zig").BodyLock
 pub const BodyLockMultiWrite = @import("Physics/Body/BodyLockMulti.zig").BodyLockMultiWrite;
 pub const BodyIDVector = @import("Physics/Body/BodyManager.zig").BodyIDVector;
 pub const BodyManager = @import("Physics/Body/BodyManager.zig").BodyManager;
+pub const BodyVector = @import("Physics/Body/BodyManager.zig").BodyVector;
 pub const BodyWithMotionProperties = @import("Physics/Body/BodyManager.zig").BodyWithMotionProperties;
 pub const BodyPair = @import("Physics/Body/BodyPair.zig").BodyPair;
 pub const body_type_count = @import("Physics/Body/BodyType.zig").body_type_count;

@@ -61,6 +61,9 @@ const PhysicsLockFile = @import("../PhysicsLock.zig");
 const PhysicsLock = PhysicsLockFile.PhysicsLock;
 const UniqueLock = PhysicsLockFile.UniqueLock;
 
+/// Array of bodies (BodyVector = Array<Body *>): the slots of BodyManager.bodies, a body pointer or a freed index
+pub const BodyVector = []BodyManager.BodySlot;
+
 /// Array of body ID's
 pub const BodyIDVector = std.ArrayList(BodyID);
 

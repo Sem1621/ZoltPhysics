@@ -204,6 +204,11 @@ test "PhysicsLock: lock order bookkeeping, UniqueLock and SharedLock" {
     try std.testing.expect(!list_mutex.isLocked());
     PhysicsLock.unlock(&body_mutex, io, c1, .per_body);
     {
+        var exclusive: UniqueLock(SharedMutex) = .init(&body_mutex, io, c1, .per_body);
+        defer exclusive.deinit();
+        try std.testing.expect(body_mutex.isLocked());
+    }
+    {
         var shared: SharedLock(SharedMutex) = .init(&body_mutex, io, c1, .per_body);
         defer shared.deinit();
         try std.testing.expect(body_mutex.tryLockShared(io)); // Other readers may enter
