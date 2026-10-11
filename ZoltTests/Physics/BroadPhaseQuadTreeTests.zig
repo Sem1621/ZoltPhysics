@@ -14,9 +14,10 @@
 //! - the out of memory paths: checkAllAllocationFailures on init and on a whole sequence, and a failing heap in
 //!   addBodiesPrepare, updatePrepare, optimize and notifyBodiesLayerChanged, which must leave the broad phase
 //!   unchanged (a dump of every tree and of the tracking is compared);
-//! - a ray along bodies that were added one by one: the walk stack grows on the heap (Jolt's "Stack full!").
+//! - a ray along bodies that were added one by one: the walk stack grows on the heap (Jolt's "Stack full!"), and
+//!   castAABoxNoLock returns error.OutOfMemory when it cannot.
 //! The PhysicsSystem tests with the QuadTree (the default broad phase) are in PhysicsSystemTests.zig, the walk stacks of
-//! a hand built deep tree (FindCollidingPairs out of memory) in QuadTree.zig.
+//! a hand built deep tree (FindCollidingPairs and the casts out of memory) in QuadTree.zig.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -399,7 +400,7 @@ fn checkQueries(allocator: Allocator, c: *Context, random: std.Random, exact: bo
                 if (kind == 5)
                     c.query().castAABox(&cast, &collector.base, filters)
                 else
-                    c.bp().castAABoxNoLock(&cast, &collector.base, &bp_filter.base, &ol_filter.base);
+                    try c.bp().castAABoxNoLock(&cast, &collector.base, &bp_filter.base, &ol_filter.base);
                 try collector.checkError();
                 for (collector.hits.items) |hit| try found.append(allocator, hit.body_id);
             },
@@ -655,7 +656,7 @@ test "BroadPhaseQuadTree queries with filters and early outs" {
         try checkApproxEqual(collector.hit.fraction, 3.0 / 40.0, .{});
         var collector2 = ClosestHitCollisionCollector(CastShapeBodyCollector).init();
         defer collector2.deinit();
-        c.bp().castAABoxNoLock(&cast, &collector2.base, &.{}, &.{});
+        try c.bp().castAABoxNoLock(&cast, &collector2.base, &.{}, &.{});
         try expect(collector2.hit.body_id.eql(ids[0]));
     }
 
@@ -876,8 +877,9 @@ test "BroadPhaseQuadTree a ray along bodies that were added one by one grows the
     // Every single body creates a new root on top of the old one: a deep tree. The old root (child 0) has huge bounds,
     // so the ray enters it first (its fraction is negative) and the leaves of every level stay on the stack.
     const allocator = std.testing.allocator;
+    var heap: std.testing.FailingAllocator = .init(allocator, .{});
     var c: Context = undefined;
-    try c.init(allocator, allocator, 512);
+    try c.init(allocator, heap.allocator(), 512);
     defer c.deinit();
     var settings = BodyCreationSettings.initWithShape((try SphereShape.create(allocator, 0.4, .{})).asShape(), RVec3.zero(), Quat.identity(), .static, Layers.non_moving);
     defer settings.deinit();
@@ -898,7 +900,22 @@ test "BroadPhaseQuadTree a ray along bodies that were added one by one grows the
     try expectEqual(@as(usize, 400), collector.hits.items.len);
     var cast_collector = AllHitCollisionCollector(CastShapeBodyCollector).init(allocator);
     defer cast_collector.deinit();
-    c.query().castAABox(&.{ .box = .init(Vec3.init(-1.1, -0.1, -0.1), Vec3.init(-0.9, 0.1, 0.1)), .direction = Vec3.init(500, 0, 0) }, &cast_collector.base, .{});
+    const cast: AABoxCast = .{ .box = .init(Vec3.init(-1.1, -0.1, -0.1), Vec3.init(-0.9, 0.1, 0.1)), .direction = Vec3.init(500, 0, 0) };
+    c.query().castAABox(&cast, &cast_collector.base, .{});
+    try expectEqual(@as(usize, 400), cast_collector.hits.items.len);
+
+    // castAABoxNoLock (the cast of the FindCCDContacts job) passes on a heap failure of the node stack (first
+    // allocation) or of the fraction stack (second allocation), the hits found so far were reported
+    for (0..2) |k| {
+        cast_collector.reset();
+        heap.fail_index = heap.alloc_index + k;
+        try std.testing.expectError(error.OutOfMemory, c.bp().castAABoxNoLock(&cast, &cast_collector.base, &.{}, &.{}));
+        try expect(heap.has_induced_failure);
+        heap.fail_index = std.math.maxInt(usize);
+        try expect(cast_collector.hits.items.len < 400);
+    }
+    cast_collector.reset();
+    try c.bp().castAABoxNoLock(&cast, &cast_collector.base, &.{}, &.{});
     try expectEqual(@as(usize, 400), cast_collector.hits.items.len);
 
     // After the rebuild the tree is shallow

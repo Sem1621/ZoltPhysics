@@ -19,12 +19,15 @@
 //! - Errors (D9): `addBodiesPrepare` (`new LayerState[]` and BuildTree's `new Vec3[]`) and `updatePrepare`
 //!   (`new NodeID[]`, BuildTree, the node stack) return Allocator.Error and leave the broad phase unchanged: a failing
 //!   AddBodiesPrepare aborts the layers it prepared (ioBodies stays sorted), a failing UpdatePrepare restores
-//!   `next_layer_to_update` and the tree. A zeroed UpdateState is a no-op in updateFinalize. Three Jolt functions that
+//!   `next_layer_to_update` and the tree. A zeroed UpdateState is a no-op in updateFinalize. Four Jolt functions that
 //!   allocate return Allocator.Error too (BroadPhase.zig): `optimize` (UpdatePrepare with a full rebuild: the layers
 //!   before the failing one are optimized, the others unchanged, the broad phase stays valid), `notifyBodiesLayerChanged`
-//!   (it allocates what AddBodiesPrepare needs before it changes anything, so nothing changed on error) and
-//!   `findCollidingPairs` (its node stack can grow on the heap, the FindCollisions job latches the error, D5). The
-//!   queries cannot fail (see QuadTree.zig).
+//!   (it allocates what AddBodiesPrepare needs before it changes anything, so nothing changed on error),
+//!   `findCollidingPairs` (its node stack can grow on the heap, the FindCollisions job latches the error, D5) and
+//!   `castAABoxNoLock` (the same, inside the FindCCDContacts job). The locking BroadPhaseQuery queries have no error
+//!   channel (CollisionArchitecture rule 4): their node stack growing on the heap is the one heap allocation of a
+//!   query (from the broad phase's heap, only in a tree deeper than about 40 levels) and a failure there panics, where
+//!   Jolt's allocator aborts (see QuadTree.zig).
 //! - `LayerState`'s `mBodyStart` / `mBodyEnd` are a slice of ioBodies (null: the layer has no bodies). `UpdateStateImpl`
 //!   is an extern struct that is reinterpreted from BroadPhase.UpdateState, like Jolt's reinterpret_cast.
 //! - `std::upper_bound` on the sorted bodies is `upperBound` (libstdc++'s binary search, the result is unique).
@@ -97,6 +100,10 @@ pub const BroadPhaseQuadTree = struct {
         /// We double buffer all trees so that we can query while building the next one and we destroy the old tree the next physics update.
         /// This structure ensures that we wait for queries that are still using the old tree.
         query_locks: [2]SharedMutex = .{ .{}, .{} },
+
+        /// Zolt: the latch of QuadTree's performance warning, shared by the trees (Jolt: a function `static`, only with
+        /// asserts), so that nothing mutable is global
+        triggered_report: if (Core.enable_asserts) std.atomic.Value(bool) else void = if (Core.enable_asserts) .init(false) else {},
     };
 
     base: BroadPhase,
@@ -208,6 +215,7 @@ pub const BroadPhaseQuadTree = struct {
         for (layers) |*layer| {
             layer.* = .empty;
             layer.init(&self.node_allocator, allocator);
+            if (Core.enable_asserts) layer.triggered_report = &self.mutable_fields.triggered_report;
         }
         self.layers = layers;
     }
@@ -628,6 +636,12 @@ pub const BroadPhaseQuadTree = struct {
         }
     }
 
+    /// Zolt: the BroadPhaseQuery queries have no error channel (CollisionArchitecture rule 4): a node stack that cannot
+    /// grow on the heap (only in a tree deeper than about 40 levels) panics, where Jolt's allocator aborts
+    fn queryOutOfMemory() noreturn {
+        @panic("BroadPhaseQuadTree: Out of memory while growing the node stack of a query");
+    }
+
     /// Cast a ray and add any hits to ioCollector
     pub fn castRay(self: *const BroadPhaseQuadTree, ray: *const RayCast, collector: *RayCastBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
         std.debug.assert(self.max_bodies == self.bodyManager().getMaxBodies());
@@ -640,7 +654,7 @@ pub const BroadPhaseQuadTree = struct {
         // Loop over all layers and test the ones that could hit
         for (self.layers, 0..) |*tree, l| {
             if (tree.hasBodies() and broad_phase_layer_filter.shouldCollide(.init(@intCast(l)))) {
-                tree.castRay(ray, collector, object_layer_filter, self.tracking);
+                tree.castRay(ray, collector, object_layer_filter, self.tracking) catch queryOutOfMemory();
                 if (collector.shouldEarlyOut())
                     break;
             }
@@ -659,7 +673,7 @@ pub const BroadPhaseQuadTree = struct {
         // Loop over all layers and test the ones that could hit
         for (self.layers, 0..) |*tree, l| {
             if (tree.hasBodies() and broad_phase_layer_filter.shouldCollide(.init(@intCast(l)))) {
-                tree.collideAABox(box, collector, object_layer_filter, self.tracking);
+                tree.collideAABox(box, collector, object_layer_filter, self.tracking) catch queryOutOfMemory();
                 if (collector.shouldEarlyOut())
                     break;
             }
@@ -678,7 +692,7 @@ pub const BroadPhaseQuadTree = struct {
         // Loop over all layers and test the ones that could hit
         for (self.layers, 0..) |*tree, l| {
             if (tree.hasBodies() and broad_phase_layer_filter.shouldCollide(.init(@intCast(l)))) {
-                tree.collideSphere(center, radius, collector, object_layer_filter, self.tracking);
+                tree.collideSphere(center, radius, collector, object_layer_filter, self.tracking) catch queryOutOfMemory();
                 if (collector.shouldEarlyOut())
                     break;
             }
@@ -697,7 +711,7 @@ pub const BroadPhaseQuadTree = struct {
         // Loop over all layers and test the ones that could hit
         for (self.layers, 0..) |*tree, l| {
             if (tree.hasBodies() and broad_phase_layer_filter.shouldCollide(.init(@intCast(l)))) {
-                tree.collidePoint(point, collector, object_layer_filter, self.tracking);
+                tree.collidePoint(point, collector, object_layer_filter, self.tracking) catch queryOutOfMemory();
                 if (collector.shouldEarlyOut())
                     break;
             }
@@ -716,7 +730,7 @@ pub const BroadPhaseQuadTree = struct {
         // Loop over all layers and test the ones that could hit
         for (self.layers, 0..) |*tree, l| {
             if (tree.hasBodies() and broad_phase_layer_filter.shouldCollide(.init(@intCast(l)))) {
-                tree.collideOrientedBox(box, collector, object_layer_filter, self.tracking);
+                tree.collideOrientedBox(box, collector, object_layer_filter, self.tracking) catch queryOutOfMemory();
                 if (collector.shouldEarlyOut())
                     break;
             }
@@ -724,13 +738,14 @@ pub const BroadPhaseQuadTree = struct {
     }
 
     /// Same as BroadPhaseQuery::CastAABox but can be implemented in a way to take no broad phase locks.
-    pub fn castAABoxNoLock(self: *const BroadPhaseQuadTree, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
+    /// (Zolt: Allocator.Error when a node stack cannot grow on the heap, the hits found so far were reported)
+    pub fn castAABoxNoLock(self: *const BroadPhaseQuadTree, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) Allocator.Error!void {
         std.debug.assert(self.max_bodies == self.bodyManager().getMaxBodies());
 
         // Loop over all layers and test the ones that could hit
         for (self.layers, 0..) |*tree, l| {
             if (tree.hasBodies() and broad_phase_layer_filter.shouldCollide(.init(@intCast(l)))) {
-                tree.castAABox(box, collector, object_layer_filter, self.tracking);
+                try tree.castAABox(box, collector, object_layer_filter, self.tracking);
                 if (collector.shouldEarlyOut())
                     break;
             }
@@ -744,7 +759,7 @@ pub const BroadPhaseQuadTree = struct {
         query_lock.lockShared(self.io());
         defer query_lock.unlockShared(self.io());
 
-        self.castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter);
+        self.castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter) catch queryOutOfMemory();
     }
 
     /// Find all colliding pairs between dynamic bodies (see BroadPhase.findCollidingPairs)

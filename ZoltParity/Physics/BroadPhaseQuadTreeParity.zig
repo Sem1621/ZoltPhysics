@@ -384,7 +384,7 @@ const ZoltWorld = struct {
                 if (q.kind == 5)
                     query_interface.castAABox(&cast, &collector.base, filters)
                 else
-                    self.bp().castAABoxNoLock(&cast, &collector.base, &bp_filter.base, &ol_filter.base);
+                    try self.bp().castAABoxNoLock(&cast, &collector.base, &bp_filter.base, &ol_filter.base);
                 if (collector.failed) return error.OutOfMemory;
             },
         }

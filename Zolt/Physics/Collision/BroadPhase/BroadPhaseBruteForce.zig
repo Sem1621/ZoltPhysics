@@ -328,7 +328,8 @@ pub const BroadPhaseBruteForce = struct {
         }
     }
 
-    pub fn castAABoxNoLock(self: *const BroadPhaseBruteForce, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
+    /// (Zolt: the error union of the interface, the brute force broad phase cannot fail)
+    pub fn castAABoxNoLock(self: *const BroadPhaseBruteForce, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) Allocator.Error!void {
         _ = broad_phase_layer_filter;
         const mutex = &self.mutable_fields.mutex;
         mutex.lockShared(self.io());
@@ -364,7 +365,7 @@ pub const BroadPhaseBruteForce = struct {
     }
 
     pub fn castAABox(self: *const BroadPhaseBruteForce, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
-        self.castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter);
+        self.castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter) catch unreachable; // Cannot fail
     }
 
     pub fn findCollidingPairs(self: *const BroadPhaseBruteForce, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void {

@@ -1988,7 +1988,7 @@ pub const PhysicsSystem = struct {
 
     /// The CCD bodies are cast through the broad phase like Jolt; the narrow phase cast against a candidate body is
     /// REGION R4 (see the panic in CCDBroadPhaseCollector.addHit).
-    fn jobFindCCDContacts(self: *Self, context: *const PhysicsUpdateContext, step: *Step) void {
+    fn jobFindCCDContacts(self: *Self, context: *PhysicsUpdateContext, step: *Step) void {
         // We only read positions, but the validate callback may read body positions and velocities
         var grant: BodyAccess.Grant = .init(.read, .read);
         defer grant.deinit();
@@ -2081,7 +2081,12 @@ pub const PhysicsSystem = struct {
                 .step = step,
                 .delta_time = context.step_delta_time,
             };
-            self.getBroadPhase().castAABoxNoLock(&.{ .box = shape_cast.shape_world_bounds, .direction = shape_cast.direction }, &bp_collector.base, &broadphase_layer_filter.base, &object_layer_filter.base);
+            self.getBroadPhase().castAABoxNoLock(&.{ .box = shape_cast.shape_world_bounds, .direction = shape_cast.direction }, &bp_collector.base, &broadphase_layer_filter.base, &object_layer_filter.base) catch {
+                // Zolt (D5): the broad phase ran out of heap memory, latched. The hit of this body is incomplete, so
+                // this job takes no further bodies (ResolveCCDContacts skips its work)
+                context.setOutOfMemory();
+                break;
+            };
 
             // Check if there was a hit
             if (ccd_body.fraction_plus_slop < 1.0) {

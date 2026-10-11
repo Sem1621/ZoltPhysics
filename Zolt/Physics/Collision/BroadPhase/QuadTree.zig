@@ -8,9 +8,13 @@
 //! - Node bounds are `[4]std.atomic.Value(f32)` per axis (Jolt: `atomic<float>`). The setters and getters keep
 //!   Jolt's implicit `seq_cst` operations, EncapsulateChildBounds widens them with Jolt's AtomicMin / AtomicMax
 //!   (compare-exchange). The tree walks load each lane with `.monotonic` into a Vec4 (Jolt: an unsynchronized 16 byte
-//!   vector load, a race that Jolt suppresses for TSAN; the same bits without undefined behavior, rule 3). The 4 child
-//!   IDs that Jolt loads the same way (`UVec4::sLoadInt4Aligned` on the `AtomicNodeID`s) are loaded per lane with
-//!   `.monotonic` too. Every other atomic keeps Jolt's (default `seq_cst`) memory order.
+//!   vector load that races with the atomic stores of other threads, not annotated for TSAN in Jolt; the same bits
+//!   without undefined behavior, rule 3). The 4 child IDs that Jolt loads the same way (`UVec4::sLoadInt4Aligned` on
+//!   the `AtomicNodeID`s) are loaded per lane with `.acquire`: a node is constructed with plain stores
+//!   (FixedSizeFreeList.constructObject copies it in) and published by the `seq_cst` compare-exchange of TryInsertLeaf /
+//!   TryCreateNewRoot (or the `seq_cst` root stores), so the acquire load of the ID that leads to a node orders its
+//!   construction before the walk reads it (with `.monotonic` that is a data race, which TSAN reports). The bits are
+//!   the same (on x86 it is the same instruction). Every other atomic keeps Jolt's (default `seq_cst`) memory order.
 //! - Nodes come from a `NodeAllocator` (Jolt's `QuadTree::Allocator`, a FixedSizeFreeList of 128 byte nodes) whose
 //!   pages must all be committed (`reserveAllPages`, BroadPhaseQuadTree does it in initBroadPhase), so AllocateNode
 //!   never needs memory: AddBodiesFinalize, AddBodiesAbort and UpdateFinalize cannot fail. Running out of nodes stays
@@ -24,9 +28,11 @@
 //!   - `findCollidingPairs` returns Allocator.Error when its node stack cannot grow on the heap (it runs inside the
 //!     FindCollisions job, which latches the error, D5).
 //!   - The queries (`castRay`, `collideAABox`, `collideSphere`, `collidePoint`, `collideOrientedBox`, `castAABox`)
-//!     have no error channel (CollisionArchitecture rule 4). Their stack only leaves its 128 local entries in a tree
-//!     deeper than about 40 levels (Jolt's "Performance warning: Stack full!"); a heap failure there panics, where
-//!     Jolt's allocator aborts.
+//!     return Allocator.Error when their node stack (or the fraction stack of the casts) cannot grow on the heap, the
+//!     hits found so far were reported. Their stacks only leave their 128 local entries in a tree deeper than about 40
+//!     levels (Jolt's "Performance warning: Stack full!"). BroadPhaseQuadTree's `castAABoxNoLock` passes the error on
+//!     (it runs inside the FindCCDContacts job, which latches it, D5); the locking BroadPhaseQuery queries have no
+//!     error channel (CollisionArchitecture rule 4) and panic there, where Jolt's allocator aborts.
 //!   - The destructor (`deinit`) cannot fail: it threads its node stack through the `parent_node_index` of the nodes it
 //!     frees (they are dead afterwards) instead of allocating one; the nodes are batched in Jolt's order.
 //!   - ValidateTree (JPH_DEBUG, Debug builds) is skipped when its stack cannot grow.
@@ -43,8 +49,10 @@
 //! - The private nested classes (NodeID, AtomicNodeID, Node, RootNode) are `pub` so that the parity test can walk the
 //!   tree. `Tracking`'s copy constructor (for Jolt's `Array::resize`) is not needed: the tracking array is allocated
 //!   once.
-//! - `sQuadTreePerformanceWarning`'s `static atomic<bool>` is a module level variable that only exists with asserts
-//!   (`void` otherwise), like PhysicsLock's debug table.
+//! - `sQuadTreePerformanceWarning`'s `static atomic<bool> triggered_report` (only with asserts) is not a global: the
+//!   tree points to the latch (`triggered_report`, `void` without asserts) in the `mutable_fields` of its
+//!   BroadPhaseQuadTree, so the warning is reported once per broad phase instead of once per process (a tree without a
+//!   broad phase does not report it).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -323,9 +331,12 @@ pub const QuadTree = struct {
             return .init(bounds[0].load(.monotonic), bounds[1].load(.monotonic), bounds[2].load(.monotonic), bounds[3].load(.monotonic));
         }
 
-        /// Zolt: the 4 child IDs, each lane loaded with .monotonic (Jolt: `UVec4::sLoadInt4Aligned((const uint32 *)&mChildNodeID[0])`)
+        /// Zolt: the 4 child IDs, each lane loaded with .acquire (Jolt: `UVec4::sLoadInt4Aligned((const uint32 *)&mChildNodeID[0])`).
+        /// A child node is constructed with plain stores (FixedSizeFreeList.constructObject) and then published by the
+        /// seq_cst compare-exchange of TryInsertLeaf / TryCreateNewRoot: the acquire makes its construction visible
+        /// before the walk reads its bounds and child IDs (see the file comment)
         fn loadChildIDs(self: *const Node) UVec4 {
-            return .init(self.child_node_id[0].id.load(.monotonic), self.child_node_id[1].id.load(.monotonic), self.child_node_id[2].id.load(.monotonic), self.child_node_id[3].id.load(.monotonic));
+            return .init(self.child_node_id[0].id.load(.acquire), self.child_node_id[1].id.load(.acquire), self.child_node_id[2].id.load(.acquire), self.child_node_id[3].id.load(.acquire));
         }
     };
 
@@ -419,6 +430,10 @@ pub const QuadTree = struct {
 
     /// mNumBodies, mRootNode, mRootNodeIndex and mIsDirty
     tree_state: TreeState = .{},
+
+    /// Zolt: the latch of sQuadTreePerformanceWarning (Jolt: a function `static atomic<bool>`, only with asserts),
+    /// shared by the trees of a BroadPhaseQuadTree, which sets it after init (null: the warning is not reported)
+    triggered_report: if (Core.enable_asserts) ?*std.atomic.Value(bool) else void = if (Core.enable_asserts) null else {},
 
     /// A tree that is not initialized (Jolt's default constructor), call init
     pub const empty: QuadTree = .{};
@@ -1291,7 +1306,8 @@ pub const QuadTree = struct {
     }
 
     /// Walk the node tree calling the Visitor::VisitNodes for each node encountered and Visitor::VisitBody for each body encountered
-    fn walkTree(self: *const QuadTree, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking, visitor: anytype) void {
+    /// (Zolt: Allocator.Error when the node stack, or the visitor's stack in OnStackResized, cannot grow on the heap)
+    fn walkTree(self: *const QuadTree, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking, visitor: anytype) Allocator.Error!void {
         // Get the root
         const root_node = self.getCurrentRoot();
 
@@ -1318,10 +1334,10 @@ pub const QuadTree = struct {
             } else if (child_node_id.isValid()) {
                 // Ensure there is space on the stack (falls back to heap if there isn't)
                 if (top + 4 >= node_stack.len) {
-                    quadTreePerformanceWarning();
-                    node_stack_array.resize(node_stack.len << 1) catch @panic("QuadTree: Out of memory while growing the node stack of a query");
+                    quadTreePerformanceWarning(self);
+                    try node_stack_array.resize(node_stack.len << 1);
                     node_stack = node_stack_array.items();
-                    visitor.onStackResized(node_stack.len);
+                    try visitor.onStackResized(node_stack.len);
                 }
 
                 // Process normal node
@@ -1356,7 +1372,7 @@ pub const QuadTree = struct {
     }
 
     /// Cast a ray and get the intersecting bodies in ioCollector.
-    pub fn castRay(self: *const QuadTree, ray: *const RayCast, collector: *RayCastBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) void {
+    pub fn castRay(self: *const QuadTree, ray: *const RayCast, collector: *RayCastBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) Allocator.Error!void {
         const Visitor = struct {
             origin: Vec3,
             inv_direction: RayInvDirection,
@@ -1403,15 +1419,15 @@ pub const QuadTree = struct {
             }
 
             /// Called when the stack is resized, this allows us to resize the fraction stack to match the new stack size
-            pub fn onStackResized(v: *@This(), new_stack_size: usize) void {
-                v.fraction_stack.resize(new_stack_size) catch @panic("QuadTree: Out of memory while growing the node stack of a query");
+            pub fn onStackResized(v: *@This(), new_stack_size: usize) Allocator.Error!void {
+                try v.fraction_stack.resize(new_stack_size);
             }
         };
 
         var visitor: Visitor = undefined;
         visitor.init(ray, collector, self.allocator);
         defer visitor.deinit();
-        self.walkTree(object_layer_filter, tracking, &visitor);
+        try self.walkTree(object_layer_filter, tracking, &visitor);
     }
 
     /// The visitor of the collide queries: Test(box) is the 4 box overlap test, every node is visited and every hit
@@ -1449,7 +1465,7 @@ pub const QuadTree = struct {
             }
 
             /// Called when the stack is resized
-            pub fn onStackResized(v: *const @This(), new_stack_size: usize) void {
+            pub fn onStackResized(v: *const @This(), new_stack_size: usize) Allocator.Error!void {
                 // Nothing to do
                 _ = .{ v, new_stack_size };
             }
@@ -1457,7 +1473,7 @@ pub const QuadTree = struct {
     }
 
     /// Get bodies intersecting with inBox in ioCollector
-    pub fn collideAABox(self: *const QuadTree, box: *const AABox, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) void {
+    pub fn collideAABox(self: *const QuadTree, box: *const AABox, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) Allocator.Error!void {
         const Test = struct {
             box: *const AABox,
 
@@ -1468,11 +1484,11 @@ pub const QuadTree = struct {
         };
 
         const visitor: CollideVisitor(Test) = .{ .test_data = .{ .box = box }, .collector = collector };
-        self.walkTree(object_layer_filter, tracking, &visitor);
+        try self.walkTree(object_layer_filter, tracking, &visitor);
     }
 
     /// Get bodies intersecting with a sphere in ioCollector
-    pub fn collideSphere(self: *const QuadTree, center: Vec3, radius: f32, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) void {
+    pub fn collideSphere(self: *const QuadTree, center: Vec3, radius: f32, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) Allocator.Error!void {
         const Test = struct {
             center_x: Vec4,
             center_y: Vec4,
@@ -1494,11 +1510,11 @@ pub const QuadTree = struct {
             },
             .collector = collector,
         };
-        self.walkTree(object_layer_filter, tracking, &visitor);
+        try self.walkTree(object_layer_filter, tracking, &visitor);
     }
 
     /// Get bodies intersecting with a point and any hits to ioCollector
-    pub fn collidePoint(self: *const QuadTree, point: Vec3, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) void {
+    pub fn collidePoint(self: *const QuadTree, point: Vec3, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) Allocator.Error!void {
         const Test = struct {
             point: Vec3,
 
@@ -1509,11 +1525,11 @@ pub const QuadTree = struct {
         };
 
         const visitor: CollideVisitor(Test) = .{ .test_data = .{ .point = point }, .collector = collector };
-        self.walkTree(object_layer_filter, tracking, &visitor);
+        try self.walkTree(object_layer_filter, tracking, &visitor);
     }
 
     /// Get bodies intersecting with an oriented box and any hits to ioCollector
-    pub fn collideOrientedBox(self: *const QuadTree, box: *const OrientedBox, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) void {
+    pub fn collideOrientedBox(self: *const QuadTree, box: *const OrientedBox, collector: *CollideShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) Allocator.Error!void {
         const Test = struct {
             box: OrientedBox,
 
@@ -1524,11 +1540,11 @@ pub const QuadTree = struct {
         };
 
         const visitor: CollideVisitor(Test) = .{ .test_data = .{ .box = box.* }, .collector = collector };
-        self.walkTree(object_layer_filter, tracking, &visitor);
+        try self.walkTree(object_layer_filter, tracking, &visitor);
     }
 
     /// Cast a box and get intersecting bodies in ioCollector
-    pub fn castAABox(self: *const QuadTree, box: *const AABoxCast, collector: *CastShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) void {
+    pub fn castAABox(self: *const QuadTree, box: *const AABoxCast, collector: *CastShapeBodyCollector, object_layer_filter: *const ObjectLayerFilter, tracking: []const Tracking) Allocator.Error!void {
         const Visitor = struct {
             origin: Vec3,
             extent: Vec3,
@@ -1586,15 +1602,15 @@ pub const QuadTree = struct {
             }
 
             /// Called when the stack is resized, this allows us to resize the fraction stack to match the new stack size
-            pub fn onStackResized(v: *@This(), new_stack_size: usize) void {
-                v.fraction_stack.resize(new_stack_size) catch @panic("QuadTree: Out of memory while growing the node stack of a query");
+            pub fn onStackResized(v: *@This(), new_stack_size: usize) Allocator.Error!void {
+                try v.fraction_stack.resize(new_stack_size);
             }
         };
 
         var visitor: Visitor = undefined;
         visitor.init(box, collector, self.allocator);
         defer visitor.deinit();
-        self.walkTree(object_layer_filter, tracking, &visitor);
+        try self.walkTree(object_layer_filter, tracking, &visitor);
     }
 
     /// Find all colliding pairs between dynamic bodies, calls ioPairCollector for every pair found
@@ -1669,7 +1685,7 @@ pub const QuadTree = struct {
 
                         // Ensure there is space on the stack (falls back to heap if there isn't)
                         if (top + 4 >= node_stack.len) {
-                            quadTreePerformanceWarning();
+                            quadTreePerformanceWarning(self);
                             try node_stack_array.resize(node_stack.len << 1);
                             node_stack = node_stack_array.items();
                         }
@@ -1788,11 +1804,10 @@ pub const QuadTree = struct {
     }
 };
 
-/// static atomic<bool> triggered_report in sQuadTreePerformanceWarning (only with asserts, `void` otherwise)
-var triggered_report: if (Core.enable_asserts) std.atomic.Value(bool) else void = if (Core.enable_asserts) .init(false) else {};
-
-fn quadTreePerformanceWarning() void {
+/// sQuadTreePerformanceWarning (Zolt: the `static atomic<bool> triggered_report` is the latch of the tree's broad phase)
+fn quadTreePerformanceWarning(tree: *const QuadTree) void {
     if (Core.enable_asserts) {
+        const triggered_report = tree.triggered_report orelse return;
         if (triggered_report.cmpxchgStrong(false, true, .seq_cst, .seq_cst) == null)
             log.info("QuadTree: Performance warning: Stack full!\n" ++
                 "This must be a very deep tree. Are you batch adding bodies through BodyInterface::AddBodiesPrepare/AddBodiesFinalize?\n" ++
@@ -1991,7 +2006,7 @@ const DeepTreeTest = struct {
     }
 };
 
-test "QuadTree deep tree: the walk stacks grow on the heap, findCollidingPairs and updatePrepare out of memory" {
+test "QuadTree deep tree: the walk stacks grow on the heap, findCollidingPairs, the casts and updatePrepare out of memory" {
     const allocator = std.testing.allocator;
     var t: DeepTreeTest = undefined;
     try t.init(allocator);
@@ -2010,7 +2025,7 @@ test "QuadTree deep tree: the walk stacks grow on the heap, findCollidingPairs a
         const AllHits = @import("../CollisionCollectorImpl.zig").AllHitCollisionCollector;
         var collector = AllHits(CollideShapeBodyCollector).init(allocator);
         defer collector.deinit();
-        tree.collideAABox(&AABox.init(Vec3.replicate(-1000), Vec3.replicate(1000)), &collector.base, &.{}, t.tracking);
+        try tree.collideAABox(&AABox.init(Vec3.replicate(-1000), Vec3.replicate(1000)), &collector.base, &.{}, t.tracking);
         try collector.checkError();
         try std.testing.expectEqual(@as(usize, DeepTreeTest.num_bodies), collector.hits.items.len);
 
@@ -2029,6 +2044,43 @@ test "QuadTree deep tree: the walk stacks grow on the heap, findCollidingPairs a
         try std.testing.expect(failing.has_induced_failure);
         try std.testing.expect(pairs.hits.items.len < DeepTreeTest.num_bodies);
         tree.allocator = allocator;
+
+        // The casts, from beyond the last body towards the first: the deep child is the closest hit, so the 3 bodies of
+        // every level stay on the stack (node IDs and fractions)
+        const cast: AABoxCast = .{ .box = .init(Vec3.init(399.9, -0.1, -0.1), Vec3.init(400.1, 0.1, 0.1)), .direction = Vec3.init(-500, 0, 0) };
+        const ray: RayCast = .init(Vec3.init(400, 0, 0), Vec3.init(-500, 0, 0));
+        {
+            var cast_hits = AllHits(CastShapeBodyCollector).init(allocator);
+            defer cast_hits.deinit();
+            try tree.castAABox(&cast, &cast_hits.base, &.{}, t.tracking);
+            try cast_hits.checkError();
+            try std.testing.expectEqual(@as(usize, DeepTreeTest.num_bodies), cast_hits.hits.items.len);
+            var ray_hits = AllHits(RayCastBodyCollector).init(allocator);
+            defer ray_hits.deinit();
+            try tree.castRay(&ray, &ray_hits.base, &.{}, t.tracking);
+            try ray_hits.checkError();
+            try std.testing.expectEqual(@as(usize, DeepTreeTest.num_bodies), ray_hits.hits.items.len);
+        }
+
+        // The node stack (first allocation) or the fraction stack (second allocation, OnStackResized) cannot grow:
+        // error.OutOfMemory, which CastAABoxNoLock passes on to the FindCCDContacts job (the hits so far were reported)
+        for (0..2) |fail_index| {
+            var cast_failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+            tree.allocator = cast_failing.allocator();
+            var cast_hits = AllHits(CastShapeBodyCollector).init(allocator);
+            defer cast_hits.deinit();
+            try std.testing.expectError(error.OutOfMemory, tree.castAABox(&cast, &cast_hits.base, &.{}, t.tracking));
+            try std.testing.expect(cast_failing.has_induced_failure);
+            try std.testing.expect(cast_hits.hits.items.len < DeepTreeTest.num_bodies);
+
+            var ray_failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+            tree.allocator = ray_failing.allocator();
+            var ray_hits = AllHits(RayCastBodyCollector).init(allocator);
+            defer ray_hits.deinit();
+            try std.testing.expectError(error.OutOfMemory, tree.castRay(&ray, &ray_hits.base, &.{}, t.tracking));
+            try std.testing.expect(ray_failing.has_induced_failure);
+            tree.allocator = allocator;
+        }
     }
 
     // A full rebuild in which every allocation fails in turn (the node IDs, the growing node stack while nodes are being

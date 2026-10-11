@@ -10,10 +10,11 @@
 //! - The functions that allocate in BroadPhaseQuadTree return errors even where an implementation cannot fail:
 //!   `addBodiesPrepare(bodies) Allocator.Error!AddState` and `updatePrepare() Allocator.Error!UpdateState` (the latter
 //!   runs inside the BroadPhasePrepare job, which latches the error, D5). On error nothing changed. Finalize and Abort
-//!   never fail, and a zeroed `UpdateState` makes `updateFinalize` a no-op. A1 added three more (BroadPhaseQuadTree
+//!   never fail, and a zeroed `UpdateState` makes `updateFinalize` a no-op. A1 added four more (BroadPhaseQuadTree
 //!   allocates in them too): `optimize` (a full rebuild of the trees), `notifyBodiesLayerChanged` (it adds the bodies
-//!   to their new trees; nothing changed on error) and `findCollidingPairs` (its node stack can grow on the heap; it
-//!   runs inside the FindCollisions job, which latches the error).
+//!   to their new trees; nothing changed on error), `findCollidingPairs` and `castAABoxNoLock` (their node stack can
+//!   grow on the heap; they run inside the FindCollisions / FindCCDContacts jobs, which latch the error). The locking
+//!   BroadPhaseQuery queries keep no error channel (CollisionArchitecture rule 4).
 //! - Pointer + count parameters are slices (`ioBodies` may be shuffled by the implementation, so they are mutable).
 //!   Jolt's defaulted `inTakeLock = true` is an option: `notifyBodiesAABBChanged(bodies, .{ .take_lock = false })`.
 //! - `mBodyManager` is `body_manager: ?*BodyManager` (a non-const pointer that const queries read through, Rule M).
@@ -121,7 +122,8 @@ pub const BroadPhase = struct {
         findCollidingPairs: *const fn (self: *const BroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void,
 
         /// Same as BroadPhaseQuery::CastAABox but can be implemented in a way to take no broad phase locks.
-        castAABoxNoLock: *const fn (self: *const BroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void,
+        /// (Zolt: Allocator.Error when the implementation runs out of heap memory, the hits found so far were reported)
+        castAABoxNoLock: *const fn (self: *const BroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) Allocator.Error!void,
     };
 
     base: BroadPhaseQuery,
@@ -224,8 +226,8 @@ pub const BroadPhase = struct {
     }
 
     /// Same as BroadPhaseQuery::CastAABox but can be implemented in a way to take no broad phase locks.
-    pub fn castAABoxNoLock(self: *const BroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
-        self.getVTable().castAABoxNoLock(self, box, collector, broad_phase_layer_filter, object_layer_filter);
+    pub fn castAABoxNoLock(self: *const BroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) Allocator.Error!void {
+        return self.getVTable().castAABoxNoLock(self, box, collector, broad_phase_layer_filter, object_layer_filter);
     }
 
     /// Jolt's bodies of the optional virtual functions (BroadPhase is abstract)

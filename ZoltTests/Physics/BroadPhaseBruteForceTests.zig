@@ -281,7 +281,7 @@ test "BroadPhaseBruteForce queries" {
 
         // castAABoxNoLock is the same query without the lock
         collector.reset();
-        c.broad_phase.castAABoxNoLock(&.{ .box = .init(Vec3.init(9.5, 3.5, -0.5), Vec3.init(10.5, 4.5, 0.5)), .direction = Vec3.init(0, -8, 0) }, &collector.base, &.{}, &.{});
+        try c.broad_phase.castAABoxNoLock(&.{ .box = .init(Vec3.init(9.5, 3.5, -0.5), Vec3.init(10.5, 4.5, 0.5)), .direction = Vec3.init(0, -8, 0) }, &collector.base, &.{}, &.{});
         try expectEqual(@as(usize, 1), collector.hits.items.len);
         try expectEqual(@as(f32, 0.375), collector.hits.items[0].fraction);
     }
