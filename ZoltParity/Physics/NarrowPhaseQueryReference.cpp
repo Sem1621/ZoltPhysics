@@ -32,6 +32,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 
 #include <cstring>
+#include <type_traits>
 
 using namespace JPH;
 
@@ -356,6 +357,18 @@ public:
 	uint32				mNumNodes;
 };
 
+// The early out fraction of a result (TransformedShape has none in Jolt), must match earlyOut in NarrowPhaseQueryParity.zig
+template <class ResultType>
+float NpqEarlyOut(const ResultType &inResult)
+{
+	return inResult.GetEarlyOutFraction();
+}
+
+float NpqEarlyOut(const TransformedShape &)
+{
+	return FLT_MAX;
+}
+
 // A collector that writes the protocol of the query (OnBody, AddHit with the body of the context, OnBodyEnd) and follows
 // one of the collector strategies: 0 keeps every hit, 1 the closest hit, 2 forces an early out at the first hit, 3 the
 // closest hit per body. Must match LoggingCollector in NarrowPhaseQueryParity.zig.
@@ -381,7 +394,7 @@ public:
 		mWriter.mOut.U(CollectorType::GetContext()->mBodyID.GetIndexAndSequenceNumber());
 		mWriter.mOut.F(CollectorType::GetEarlyOutFraction());
 		mWriter.Write(inResult);
-		float fraction = inResult.GetEarlyOutFraction();
+		float fraction = NpqEarlyOut(inResult);
 		switch (mMode)
 		{
 		case 1:
@@ -412,10 +425,29 @@ public:
 	float				mPreviousEarlyOutFraction = 0.0f;
 };
 
-// Run a query (inQuery(collector)) with the collector of the query, write the hits and the final early out fraction
+// Run a query with Jolt's AllHit collector and write the hits and the final early out fraction
+template <class CollectorType, class Query>
+void RunAllHit(const ResultWriter &inWriter, const NpqQuery &inQuery, const Query &inRun)
+{
+	OutStream &out = inWriter.mOut;
+	AllHitCollisionCollector<CollectorType> collector;
+	if (inQuery.mEarlyOut < collector.GetEarlyOutFraction())
+		collector.UpdateEarlyOutFraction(inQuery.mEarlyOut);
+	inRun(collector);
+	out.U(cNpqMarkerResult);
+	out.U(uint32(collector.mHits.size()));
+	for (const typename CollectorType::ResultType &hit : collector.mHits)
+		inWriter.Write(hit);
+	out.F(collector.GetEarlyOutFraction());
+}
+
+// Run a query (inRun(collector)) with the collector of the query, write the hits and the final early out fraction.
+// Jolt's ClosestHit and ClosestHitPerBody collectors need GetEarlyOutFraction, which TransformedShape does not have:
+// collect queries use AllHit for them. Must match runWithCollector in NarrowPhaseQueryParity.zig.
 template <class CollectorType, class Query>
 void RunWithCollector(const ResultWriter &inWriter, const NpqQuery &inQuery, const Query &inRun)
 {
+	constexpr bool cHasEarlyOut = !std::is_same<typename CollectorType::ResultType, TransformedShape>::value;
 	OutStream &out = inWriter.mOut;
 	auto preset = [&](CollectorType &ioCollector) {
 		if (inQuery.mEarlyOut < ioCollector.GetEarlyOutFraction())
@@ -436,20 +468,8 @@ void RunWithCollector(const ResultWriter &inWriter, const NpqQuery &inQuery, con
 			break;
 		}
 
-	case 4:
-		{
-			AllHitCollisionCollector<CollectorType> collector;
-			preset(collector);
-			inRun(collector);
-			out.U(cNpqMarkerResult);
-			out.U(uint32(collector.mHits.size()));
-			for (const typename CollectorType::ResultType &hit : collector.mHits)
-				inWriter.Write(hit);
-			out.F(collector.GetEarlyOutFraction());
-			break;
-		}
-
 	case 5:
+		if constexpr (cHasEarlyOut)
 		{
 			ClosestHitCollisionCollector<CollectorType> collector;
 			preset(collector);
@@ -459,8 +479,10 @@ void RunWithCollector(const ResultWriter &inWriter, const NpqQuery &inQuery, con
 			if (collector.HadHit())
 				inWriter.Write(collector.mHit);
 			out.F(collector.GetEarlyOutFraction());
-			break;
 		}
+		else
+			RunAllHit<CollectorType>(inWriter, inQuery, inRun);
+		break;
 
 	case 6:
 		{
@@ -475,7 +497,8 @@ void RunWithCollector(const ResultWriter &inWriter, const NpqQuery &inQuery, con
 			break;
 		}
 
-	default:
+	case 7:
+		if constexpr (cHasEarlyOut)
 		{
 			ClosestHitPerBodyCollisionCollector<CollectorType> collector;
 			preset(collector);
@@ -485,8 +508,14 @@ void RunWithCollector(const ResultWriter &inWriter, const NpqQuery &inQuery, con
 			for (const typename CollectorType::ResultType &hit : collector.mHits)
 				inWriter.Write(hit);
 			out.F(collector.GetEarlyOutFraction());
-			break;
 		}
+		else
+			RunAllHit<CollectorType>(inWriter, inQuery, inRun);
+		break;
+
+	default:
+		RunAllHit<CollectorType>(inWriter, inQuery, inRun);
+		break;
 	}
 }
 
@@ -534,6 +563,14 @@ public:
 
 extern "C"
 {
+
+// The sizes of the structs of the C ABI (checked against NarrowPhaseQueryParity.zig)
+void npq_struct_sizes(uint32 *outSizes)
+{
+	outSizes[0] = uint32(sizeof(NpqBody));
+	outSizes[1] = uint32(sizeof(NpqQuery));
+	outSizes[2] = uint32(sizeof(NpqEstimateInput));
+}
 
 // Create the world: a body per description (a shape of the catalogue of PairwiseReference.cpp)
 void *npq_world_create(void *inCatalogue, const NpqBody *inBodies, uint32 inNumBodies, uint32 inMaxBodies)
