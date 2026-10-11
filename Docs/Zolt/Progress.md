@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 53.6%** of 85391 lines in scope · **Unit tests: 46.8%** of 18321 lines
+**Library: 58.4%** of 85391 lines in scope · **Unit tests: 54.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -20,11 +20,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
-| `Jolt/Physics` | 9% | 5 | 0 | 0 | 8 | 0 | 0 | 5053 |
-| `Jolt/Physics/Body` | 61% | 15 | 2 | 0 | 1 | 0 | 0 | 5146 |
+| `Jolt/Physics` | 52% | 9 | 1 | 1 | 2 | 0 | 0 | 5053 |
+| `Jolt/Physics/Body` | 73% | 15 | 3 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 84% | 67 | 1 | 0 | 8 | 0 | 0 | 21948 |
-| `Jolt/Physics/Constraints` | 0% | 0 | 0 | 1 | 34 | 0 | 0 | 12068 |
+| `Jolt/Physics/Collision` | 86% | 70 | 1 | 1 | 4 | 0 | 0 | 21948 |
+| `Jolt/Physics/Constraints` | 7% | 3 | 0 | 1 | 31 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
@@ -238,27 +238,27 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics — 9%</summary>
+<details><summary>Jolt/Physics — 52%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `DeterminismLog.cpp`, `DeterminismLog.h` | 156 | ❌ todo |  |
 | `EActivation.h` | 12 | ✅ complete | `Zolt/Physics/EActivation.zig` |
-| `EPhysicsUpdateError.h` | 30 | ❌ todo |  |
-| `IslandBuilder.cpp`, `IslandBuilder.h` | 519 | ❌ todo |  |
-| `LargeIslandSplitter.cpp`, `LargeIslandSplitter.h` | 645 | ❌ todo |  |
+| `EPhysicsUpdateError.h` | 30 | ✅ complete | `Zolt/Physics/EPhysicsUpdateError.zig` |
+| `IslandBuilder.cpp`, `IslandBuilder.h` | 519 | ✅ complete | `Zolt/Physics/IslandBuilder.zig` |
+| `LargeIslandSplitter.cpp`, `LargeIslandSplitter.h` | 645 | ⚪ stub | `Zolt/Physics/LargeIslandSplitter.zig` |
 | `PhysicsLock.h` | 144 | ✅ complete | `Zolt/Physics/PhysicsLock.zig` |
 | `PhysicsScene.cpp`, `PhysicsScene.h` | 298 | ❌ todo |  |
 | `PhysicsSettings.h` | 89 | ✅ complete | `Zolt/Physics/PhysicsSettings.zig` |
-| `PhysicsStepListener.h` | 30 | ❌ todo |  |
-| `PhysicsSystem.cpp`, `PhysicsSystem.h` | 2755 | ❌ todo |  |
-| `PhysicsUpdateContext.cpp`, `PhysicsUpdateContext.h` | 156 | ❌ todo |  |
+| `PhysicsStepListener.h` | 30 | ✅ complete | `Zolt/Physics/PhysicsStepListener.zig` |
+| `PhysicsSystem.cpp`, `PhysicsSystem.h` | 2755 | 🟡 partial | `Zolt/Physics/PhysicsSystem.zig` |
+| `PhysicsUpdateContext.cpp`, `PhysicsUpdateContext.h` | 156 | ✅ complete | `Zolt/Physics/PhysicsUpdateContext.zig` |
 | `StateRecorder.h` | 109 | ✅ complete | `Zolt/Physics/StateRecorder.zig` |
 | `StateRecorderImpl.cpp`, `StateRecorderImpl.h` | 110 | ✅ complete | `Zolt/Physics/StateRecorderImpl.zig` |
 
 </details>
 
-<details><summary>Jolt/Physics/Body — 61%</summary>
+<details><summary>Jolt/Physics/Body — 73%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -269,7 +269,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `BodyCreationSettings.cpp`, `BodyCreationSettings.h` | 347 | 🟡 partial | `Zolt/Physics/Body/BodyCreationSettings.zig` |
 | `BodyFilter.h` | 108 | ✅ complete | `Zolt/Physics/Body/BodyFilter.zig` |
 | `BodyID.h` | 82 | ✅ complete | `Zolt/Physics/Body/BodyID.zig` |
-| `BodyInterface.cpp`, `BodyInterface.h` | 1199 | ❌ todo |  |
+| `BodyInterface.cpp`, `BodyInterface.h` | 1199 | 🟡 partial | `Zolt/Physics/Body/BodyInterface.zig` |
 | `BodyLock.h` | 96 | ✅ complete | `Zolt/Physics/Body/BodyLock.zig` |
 | `BodyLockInterface.h` | 109 | ✅ complete | `Zolt/Physics/Body/BodyLockInterface.zig` |
 | `BodyLockMulti.h` | 104 | ✅ complete | `Zolt/Physics/Body/BodyLockMulti.zig` |
@@ -294,7 +294,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Collision — 84%</summary>
+<details><summary>Jolt/Physics/Collision — 86%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -302,13 +302,13 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ActiveEdgeMode.h` | 13 | ✅ complete | `Zolt/Physics/Collision/ActiveEdgeMode.zig` |
 | `ActiveEdges.h` | 99 | ✅ complete | `Zolt/Physics/Collision/ActiveEdges.zig` |
 | `BackFaceMode.h` | 12 | ✅ complete | `Zolt/Physics/Collision/BackFaceMode.zig` |
-| `BroadPhase.cpp`, `BroadPhase.h` | 94 | ❌ todo |  |
-| `BroadPhaseBruteForce.cpp`, `BroadPhaseBruteForce.h` | 292 | ❌ todo |  |
+| `BroadPhase.cpp`, `BroadPhase.h` | 94 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhase.zig` |
+| `BroadPhaseBruteForce.cpp`, `BroadPhaseBruteForce.h` | 292 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseBruteForce.zig` |
 | `BroadPhaseLayer.h` | 121 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseLayer.zig` |
 | `BroadPhaseLayerInterfaceMask.h` | 76 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig` |
 | `BroadPhaseLayerInterfaceTable.h` | 52 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig` |
 | `BroadPhaseQuadTree.cpp`, `BroadPhaseQuadTree.h` | 589 | ❌ todo |  |
-| `BroadPhaseQuery.h` | 42 | ❌ todo |  |
+| `BroadPhaseQuery.h` | 42 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/BroadPhaseQuery.zig` |
 | `ObjectVsBroadPhaseLayerFilterMask.h` | 27 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig` |
 | `ObjectVsBroadPhaseLayerFilterTable.h` | 55 | ✅ complete | `Zolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig` |
 | `QuadTree.cpp`, `QuadTree.h` | 1783 | ❌ todo |  |
@@ -333,7 +333,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `GroupFilterTable.cpp`, `GroupFilterTable.h` | 135 | ✅ complete | `Zolt/Physics/Collision/GroupFilterTable.zig` |
 | `InternalEdgeRemovingCollector.h` | 245 | ✅ complete | `Zolt/Physics/Collision/InternalEdgeRemovingCollector.zig` |
 | `ManifoldBetweenTwoFaces.cpp`, `ManifoldBetweenTwoFaces.h` | 272 | ✅ complete | `Zolt/Physics/Collision/ManifoldBetweenTwoFaces.zig` |
-| `NarrowPhaseQuery.cpp`, `NarrowPhaseQuery.h` | 441 | ❌ todo |  |
+| `NarrowPhaseQuery.cpp`, `NarrowPhaseQuery.h` | 441 | ⚪ stub | `Zolt/Physics/Collision/NarrowPhaseQuery.zig` |
 | `NarrowPhaseStats.cpp`, `NarrowPhaseStats.h` | 133 | ✅ complete | `Zolt/Physics/Collision/NarrowPhaseStats.zig` |
 | `ObjectLayer.h` | 93 | ✅ complete | `Zolt/Physics/Collision/ObjectLayer.zig` |
 | `ObjectLayerPairFilterMask.h` | 42 | ✅ complete | `Zolt/Physics/Collision/ObjectLayerPairFilterMask.zig` |
@@ -377,14 +377,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Constraints — 0%</summary>
+<details><summary>Jolt/Physics/Constraints — 7%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `CalculateSolverSteps.h` | 57 | ❌ todo |  |
 | `ConeConstraint.cpp`, `ConeConstraint.h` | 310 | ❌ todo |  |
-| `Constraint.cpp`, `Constraint.h` | 252 | ⚪ stub | `Zolt/Physics/Constraints/Constraint.zig` |
-| `ConstraintManager.cpp`, `ConstraintManager.h` | 308 | ❌ todo |  |
+| `Constraint.cpp`, `Constraint.h` | 252 | ✅ complete | `Zolt/Physics/Constraints/Constraint.zig` |
+| `ConstraintManager.cpp`, `ConstraintManager.h` | 308 | ✅ complete | `Zolt/Physics/Constraints/ConstraintManager.zig` |
 | `AngleConstraintPart.h` | 251 | ❌ todo |  |
 | `AngularFrictionConstraintPart.h` | 117 | ❌ todo |  |
 | `AxisConstraintPart.h` | 342 | ❌ todo |  |
@@ -399,7 +399,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `RotationQuatConstraintPart.h` | 225 | ❌ todo |  |
 | `SpringPart.h` | 164 | ❌ todo |  |
 | `SwingTwistConstraintPart.h` | 543 | ❌ todo |  |
-| `ContactConstraintManager.cpp`, `ContactConstraintManager.h` | 2185 | ❌ todo |  |
+| `ContactConstraintManager.cpp`, `ContactConstraintManager.h` | 2185 | ⚪ stub | `Zolt/Physics/Constraints/ContactConstraintManager.zig` |
 | `DistanceConstraint.cpp`, `DistanceConstraint.h` | 316 | ❌ todo |  |
 | `FixedConstraint.cpp`, `FixedConstraint.h` | 255 | ❌ todo |  |
 | `GearConstraint.cpp`, `GearConstraint.h` | 242 | ❌ todo |  |
@@ -415,7 +415,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `SliderConstraint.cpp`, `SliderConstraint.h` | 583 | ❌ todo |  |
 | `SpringSettings.cpp`, `SpringSettings.h` | 99 | ❌ todo |  |
 | `SwingTwistConstraint.cpp`, `SwingTwistConstraint.h` | 632 | ❌ todo |  |
-| `TwoBodyConstraint.cpp`, `TwoBodyConstraint.h` | 109 | ❌ todo |  |
+| `TwoBodyConstraint.cpp`, `TwoBodyConstraint.h` | 109 | ✅ complete | `Zolt/Physics/Constraints/TwoBodyConstraint.zig` |
 
 </details>
 
@@ -546,24 +546,24 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 28% | 1 | 1 | 0 | 5 | 1 | 0 | 1185 |
+| `UnitTests` | 55% | 3 | 1 | 0 | 3 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 25% | 5 | 11 | 1 | 16 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 36% | 6 | 12 | 1 | 14 | 0 | 0 | 11009 |
 
-<details><summary>UnitTests — 28%</summary>
+<details><summary>UnitTests — 55%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `Layers.h` | 142 | ✅ complete | `ZoltTests/Layers.zig` |
-| `LoggingBodyActivationListener.h` | 51 | ❌ todo |  |
+| `LoggingBodyActivationListener.h` | 51 | ✅ complete | `ZoltTests/LoggingBodyActivationListener.zig` |
 | `LoggingCharacterContactListener.h` | 143 | ❌ todo |  |
 | `LoggingContactListener.h` | 118 | ❌ todo |  |
 | `LoggingSoftBodyContactListener.h` | 81 | ❌ todo |  |
-| `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ❌ todo |  |
+| `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ✅ complete | `ZoltTests/PhysicsTestContext.zig` |
 | `UnitTestFramework.cpp`, `UnitTestFramework.h` | 382 | 🟡 partial | `ZoltTests/UnitTestFramework.zig` |
 | `doctest.h` | 7301 | ➖ n/a | test framework, Zolt uses Zig's test runner |
 
@@ -640,7 +640,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 25%</summary>
+<details><summary>UnitTests/Physics — 36%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -664,8 +664,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `OffsetCenterOfMassShapeTests.cpp` | 129 | 🟡 partial | `ZoltTests/Physics/OffsetCenterOfMassShapeTests.zig` |
 | `PathConstraintTests.cpp` | 43 | ❌ todo |  |
 | `PhysicsDeterminismTests.cpp` | 165 | ❌ todo |  |
-| `PhysicsStepListenerTests.cpp` | 117 | ❌ todo |  |
-| `PhysicsTests.cpp` | 2030 | ❌ todo |  |
+| `PhysicsStepListenerTests.cpp` | 117 | ✅ complete | `ZoltTests/Physics/PhysicsStepListenerTests.zig` |
+| `PhysicsTests.cpp` | 2030 | 🟡 partial | `ZoltTests/Physics/PhysicsTests.zig` |
 | `RayShapeTests.cpp` | 491 | 🟡 partial | `ZoltTests/Physics/RayShapeTests.zig` |
 | `SensorTests.cpp` | 622 | ❌ todo |  |
 | `ShapeFilterTests.cpp` | 80 | ⚪ stub | `ZoltTests/Physics/ShapeFilterTests.zig` |

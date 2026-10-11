@@ -23,6 +23,10 @@
 //!   and the protocol jobs (BroadPhasePrepare, UpdateBroadPhaseFinalize, FindCollisions, PostIntegrateVelocity,
 //!   ResolveCCDContacts, ContactRemovedCallbacks, StartNextStep, SoftBodyPrepare) follow D5's table. A job that cannot be
 //!   created from inside a job is not an error. Temp memory is `TempArray`, freed at Jolt's positions.
+//! - Debug grants (BodyAccess.Grant, GrantActiveBodiesAccess) end before a job kicks other jobs: JobFindCollisions and
+//!   JobSoftBodyPrepare remove their dependencies after the scope of their grants (Jolt: inside it). With
+//!   JobSystemSingleThreaded the kicked jobs run inside the call and their grants assert that no grant is active on the
+//!   thread; Jolt hits this from the second collision step on, Zolt with the start gate already in the first step.
 //! - The PhysicsSystem is initialized in place (`var system: PhysicsSystem = .empty; try system.init(...)`) because the
 //!   lock and body interfaces point into it; it must not move afterwards. `init` takes Jolt's arguments plus
 //!   `allocator`, `io` and an options struct: `.broad_phase = .brute_force` (default until A1 ports the QuadTree, which
