@@ -153,8 +153,8 @@ const AllocatingBroadPhase = struct {
         try self.innerBroadPhase().initBroadPhase(body_manager, layer_interface);
     }
 
-    pub fn optimize(self: *AllocatingBroadPhase) void {
-        self.innerBroadPhase().optimize();
+    pub fn optimize(self: *AllocatingBroadPhase) Allocator.Error!void {
+        return self.innerBroadPhase().optimize();
     }
 
     pub fn frameSync(self: *AllocatingBroadPhase) void {
@@ -207,8 +207,8 @@ const AllocatingBroadPhase = struct {
         self.innerBroadPhase().notifyBodiesAABBChanged(bodies, .{ .take_lock = take_lock });
     }
 
-    pub fn notifyBodiesLayerChanged(self: *AllocatingBroadPhase, bodies: []BodyID) void {
-        self.innerBroadPhase().notifyBodiesLayerChanged(bodies);
+    pub fn notifyBodiesLayerChanged(self: *AllocatingBroadPhase, bodies: []BodyID) Allocator.Error!void {
+        return self.innerBroadPhase().notifyBodiesLayerChanged(bodies);
     }
 
     pub fn castRay(self: *const AllocatingBroadPhase, ray: *const RayCast, collector: *RayCastBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void {
@@ -239,8 +239,8 @@ const AllocatingBroadPhase = struct {
         self.innerQuery().castAABox(box, collector, .{ .broad_phase_layer_filter = broad_phase_layer_filter, .object_layer_filter = object_layer_filter });
     }
 
-    pub fn findCollidingPairs(self: *const AllocatingBroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) void {
-        self.innerBroadPhase().findCollidingPairs(active_bodies, speculative_contact_distance, object_vs_broad_phase_layer_filter, object_layer_pair_filter, pair_collector);
+    pub fn findCollidingPairs(self: *const AllocatingBroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void {
+        return self.innerBroadPhase().findCollidingPairs(active_bodies, speculative_contact_distance, object_vs_broad_phase_layer_filter, object_layer_pair_filter, pair_collector);
     }
 
     pub fn getBounds(self: *const AllocatingBroadPhase) AABox {

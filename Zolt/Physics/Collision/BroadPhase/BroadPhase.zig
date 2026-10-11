@@ -7,10 +7,13 @@
 //! with `.init(T, allocator)` (the constructor of the introducing class builds the vtable of the most derived class).
 //! - Jolt's `Init` is `initBroadPhase`, because `init` is the constructor. It returns Allocator.Error: the QuadTree
 //!   allocates its trees and commits its node pages there.
-//! - The two functions that allocate in BroadPhaseQuadTree return errors even where an implementation cannot fail:
+//! - The functions that allocate in BroadPhaseQuadTree return errors even where an implementation cannot fail:
 //!   `addBodiesPrepare(bodies) Allocator.Error!AddState` and `updatePrepare() Allocator.Error!UpdateState` (the latter
 //!   runs inside the BroadPhasePrepare job, which latches the error, D5). On error nothing changed. Finalize and Abort
-//!   never fail, and a zeroed `UpdateState` makes `updateFinalize` a no-op.
+//!   never fail, and a zeroed `UpdateState` makes `updateFinalize` a no-op. A1 added three more (BroadPhaseQuadTree
+//!   allocates in them too): `optimize` (a full rebuild of the trees), `notifyBodiesLayerChanged` (it adds the bodies
+//!   to their new trees; nothing changed on error) and `findCollidingPairs` (its node stack can grow on the heap; it
+//!   runs inside the FindCollisions job, which latches the error).
 //! - Pointer + count parameters are slices (`ioBodies` may be shuffled by the implementation, so they are mutable).
 //!   Jolt's defaulted `inTakeLock = true` is an option: `notifyBodiesAABBChanged(bodies, .{ .take_lock = false })`.
 //! - `mBodyManager` is `body_manager: ?*BodyManager` (a non-const pointer that const queries read through, Rule M).
@@ -59,7 +62,8 @@ pub const BroadPhase = struct {
         initBroadPhase: *const fn (self: *BroadPhase, body_manager: *BodyManager, layer_interface: *const BroadPhaseLayerInterface) Allocator.Error!void,
 
         /// Should be called after many objects have been inserted to make the broadphase more efficient, usually done on startup only
-        optimize: *const fn (self: *BroadPhase) void,
+        /// (Zolt: Allocator.Error, the broad phase stays valid)
+        optimize: *const fn (self: *BroadPhase) Allocator.Error!void,
 
         /// Must be called just before updating the broadphase when none of the body mutexes are locked
         frameSync: *const fn (self: *BroadPhase) void,
@@ -102,7 +106,8 @@ pub const BroadPhase = struct {
         notifyBodiesAABBChanged: *const fn (self: *BroadPhase, bodies: []BodyID, take_lock: bool) void,
 
         /// Call whenever the layer (and optionally the aabb as well) of a body changes (can change order of ioBodies array)
-        notifyBodiesLayerChanged: *const fn (self: *BroadPhase, bodies: []BodyID) void,
+        /// (Zolt: Allocator.Error, nothing changed on error)
+        notifyBodiesLayerChanged: *const fn (self: *BroadPhase, bodies: []BodyID) Allocator.Error!void,
 
         /// Find all colliding pairs between dynamic bodies
         /// Note that this function is very specifically tailored for the PhysicsSystem::Update function, hence it is not part of the BroadPhaseQuery interface.
@@ -112,7 +117,8 @@ pub const BroadPhase = struct {
         /// @param object_vs_broad_phase_layer_filter is the filter that determines if an object can collide with a broadphase layer.
         /// @param object_layer_pair_filter is the filter that determines if two objects can collide.
         /// @param pair_collector receives callbacks for every body pair found.
-        findCollidingPairs: *const fn (self: *const BroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) void,
+        /// (Zolt: Allocator.Error when the implementation runs out of heap memory, the pairs found so far were reported)
+        findCollidingPairs: *const fn (self: *const BroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void,
 
         /// Same as BroadPhaseQuery::CastAABox but can be implemented in a way to take no broad phase locks.
         castAABoxNoLock: *const fn (self: *const BroadPhase, box: *const AABoxCast, collector: *CastShapeBodyCollector, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter) void,
@@ -153,8 +159,8 @@ pub const BroadPhase = struct {
     }
 
     /// Should be called after many objects have been inserted to make the broadphase more efficient, usually done on startup only
-    pub fn optimize(self: *BroadPhase) void {
-        self.getVTable().optimize(self);
+    pub fn optimize(self: *BroadPhase) Allocator.Error!void {
+        return self.getVTable().optimize(self);
     }
 
     /// Must be called just before updating the broadphase when none of the body mutexes are locked
@@ -208,13 +214,13 @@ pub const BroadPhase = struct {
     }
 
     /// Call whenever the layer (and optionally the aabb as well) of a body changes (can change order of ioBodies array)
-    pub fn notifyBodiesLayerChanged(self: *BroadPhase, bodies: []BodyID) void {
-        self.getVTable().notifyBodiesLayerChanged(self, bodies);
+    pub fn notifyBodiesLayerChanged(self: *BroadPhase, bodies: []BodyID) Allocator.Error!void {
+        return self.getVTable().notifyBodiesLayerChanged(self, bodies);
     }
 
     /// Find all colliding pairs between dynamic bodies (see VTable.findCollidingPairs)
-    pub fn findCollidingPairs(self: *const BroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) void {
-        self.getVTable().findCollidingPairs(self, active_bodies, speculative_contact_distance, object_vs_broad_phase_layer_filter, object_layer_pair_filter, pair_collector);
+    pub fn findCollidingPairs(self: *const BroadPhase, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void {
+        return self.getVTable().findCollidingPairs(self, active_bodies, speculative_contact_distance, object_vs_broad_phase_layer_filter, object_layer_pair_filter, pair_collector);
     }
 
     /// Same as BroadPhaseQuery::CastAABox but can be implemented in a way to take no broad phase locks.
@@ -229,7 +235,7 @@ pub const BroadPhase = struct {
             self.body_manager = body_manager;
         }
 
-        pub fn optimize(self: *BroadPhase) void {
+        pub fn optimize(self: *BroadPhase) Allocator.Error!void {
             _ = self; // Optionally overridden by implementation
         }
 

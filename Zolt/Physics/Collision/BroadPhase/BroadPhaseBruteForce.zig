@@ -183,7 +183,7 @@ pub const BroadPhaseBruteForce = struct {
         _ = .{ self, bodies, take_lock };
     }
 
-    pub fn notifyBodiesLayerChanged(self: *BroadPhaseBruteForce, bodies: []BodyID) void {
+    pub fn notifyBodiesLayerChanged(self: *BroadPhaseBruteForce, bodies: []BodyID) Allocator.Error!void {
         // Do nothing, we directly reference the body
         _ = .{ self, bodies };
     }
@@ -367,7 +367,7 @@ pub const BroadPhaseBruteForce = struct {
         self.castAABoxNoLock(box, collector, broad_phase_layer_filter, object_layer_filter);
     }
 
-    pub fn findCollidingPairs(self: *const BroadPhaseBruteForce, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) void {
+    pub fn findCollidingPairs(self: *const BroadPhaseBruteForce, active_bodies: []BodyID, speculative_contact_distance: f32, object_vs_broad_phase_layer_filter: *const ObjectVsBroadPhaseLayerFilter, object_layer_pair_filter: *const ObjectLayerPairFilter, pair_collector: *BodyPairCollector) Allocator.Error!void {
         _ = object_vs_broad_phase_layer_filter;
         const mutex = &self.mutable_fields.mutex;
         mutex.lockShared(self.io());

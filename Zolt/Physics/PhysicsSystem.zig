@@ -29,9 +29,9 @@
 //!   thread; Jolt hits this from the second collision step on, Zolt with the start gate already in the first step.
 //! - The PhysicsSystem is initialized in place (`var system: PhysicsSystem = .empty; try system.init(...)`) because the
 //!   lock and body interfaces point into it; it must not move afterwards. `init` takes Jolt's arguments plus
-//!   `allocator`, `io` and an options struct: `.broad_phase = .brute_force` (default until A1 ports the QuadTree, which
-//!   Jolt's BROAD_PHASE define selects) or `.custom = *BroadPhase` (a Zolt addition: a broad phase that the system owns
-//!   from a successful init on).
+//!   `allocator`, `io` and an options struct: `.broad_phase = .quad_tree` (the default, Jolt's BROAD_PHASE define),
+//!   `.brute_force` or `.custom = *BroadPhase` (a Zolt addition: a broad phase that the system owns from a successful
+//!   init on).
 //! - Const / non-const overloads: `getBodyInterface` / `getBodyInterfaceMut`, `getBodyInterfaceNoLock` /
 //!   `getBodyInterfaceNoLockMut`. Listeners are stored by value (pattern B, D7): `?ContactListener`,
 //!   `?BodyActivationListener`, `?SoftBodyContactListener`; `AddStepListener` keeps the `PhysicsStepListener` value
@@ -40,7 +40,8 @@
 //!   InternalEdgeRemovingCollector of the default function needs.
 //! - Defaulted parameters are options: `saveState(stream, .{ .state = .all, .filter = null })`,
 //!   `restoreState(stream, .{ .filter = null })`. Functions that allocate return Allocator.Error (`getBodies`,
-//!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`).
+//!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`,
+//!   `optimizeBroadPhase`).
 //! - JPH_DET_LOG: TODO(determinism_log). JPH_DEBUG_RENDERER (sDrawMotionQualityLinearCast, DrawBodies,
 //!   DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame): TODO(debug_renderer).
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
@@ -101,6 +102,7 @@ const BroadPhaseQueryFile = @import("Collision/BroadPhase/BroadPhaseQuery.zig");
 const BroadPhaseQuery = BroadPhaseQueryFile.BroadPhaseQuery;
 const CastShapeBodyCollector = BroadPhaseQueryFile.CastShapeBodyCollector;
 const BroadPhaseBruteForce = @import("Collision/BroadPhase/BroadPhaseBruteForce.zig").BroadPhaseBruteForce;
+const BroadPhaseQuadTree = @import("Collision/BroadPhase/BroadPhaseQuadTree.zig").BroadPhaseQuadTree;
 const BroadPhaseCastResult = @import("Collision/CastResult.zig").BroadPhaseCastResult;
 const RShapeCast = @import("Collision/ShapeCast.zig").RShapeCast;
 const ShapeFile = @import("Collision/Shape/Shape.zig");
@@ -218,7 +220,9 @@ pub const PhysicsSystem = struct {
 
     /// The broad phase that `init` creates (Zolt option, Jolt: the BROAD_PHASE define)
     pub const BroadPhaseOption = union(enum) {
-        /// BroadPhaseBruteForce (the default until A1 ports BroadPhaseQuadTree, Jolt's default)
+        /// BroadPhaseQuadTree (the default, Jolt's BROAD_PHASE define)
+        quad_tree,
+        /// BroadPhaseBruteForce (a reference implementation for tests)
         brute_force,
         /// A broad phase created by the caller; the system owns it after a successful init (it destroys it in deinit)
         custom: *BroadPhase,
@@ -226,7 +230,7 @@ pub const PhysicsSystem = struct {
 
     /// Zolt options of `init`
     pub const InitOptions = struct {
-        broad_phase: BroadPhaseOption = .brute_force,
+        broad_phase: BroadPhaseOption = .quad_tree,
     };
 
     /// Number of constraints to process at once in JobDetermineActiveConstraints
@@ -352,10 +356,11 @@ pub const PhysicsSystem = struct {
 
         // Create broadphase
         const broad_phase: *BroadPhase = switch (opts.broad_phase) {
+            .quad_tree => (try BroadPhaseQuadTree.create(allocator)).asBroadPhase(),
             .brute_force => (try BroadPhaseBruteForce.create(allocator)).asBroadPhase(),
             .custom => |custom| custom,
         };
-        errdefer if (opts.broad_phase == .brute_force) broad_phase.base.destroy();
+        errdefer if (opts.broad_phase != .custom) broad_phase.base.destroy();
         try broad_phase.initBroadPhase(&self.body_manager, broad_phase_layer_interface);
 
         // Init contact constraint manager
@@ -559,8 +564,9 @@ pub const PhysicsSystem = struct {
     /// in a roughly unoccupied space (e.g. a new level section) then a call to OptimizeBroadPhase is also not needed
     /// as batch adding creates an efficient bounding volume hierarchy.
     /// Don't call this function while bodies are being modified from another thread or use the locking BodyInterface to modify bodies.
-    pub fn optimizeBroadPhase(self: *Self) void {
-        self.getBroadPhase().optimize();
+    /// (Zolt: Allocator.Error from rebuilding the trees, the broad phase stays valid)
+    pub fn optimizeBroadPhase(self: *Self) Allocator.Error!void {
+        return self.getBroadPhase().optimize();
     }
 
     /// Adds a new step listener
@@ -1619,8 +1625,8 @@ pub const PhysicsSystem = struct {
                         const batch_size = active_bodies_read_idx_end - active_bodies_read_idx;
                         @memcpy(active_bodies[0..batch_size], self.body_manager.getActiveBodiesUnsafe(.rigid_body)[active_bodies_read_idx..active_bodies_read_idx_end]);
 
-                        // Find pairs in the broadphase
-                        self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base);
+                        // Find pairs in the broadphase (Zolt D5: the broad phase ran out of heap memory, latched)
+                        self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base) catch context.setOutOfMemory();
 
                         // Check if we have enough pairs in the buffer to start a new job
                         const queue = &step.body_pair_queues.slice()[job_index];

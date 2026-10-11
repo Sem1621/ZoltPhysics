@@ -652,7 +652,7 @@ const ZoltWorld = struct {
             .set_max_linear_velocity => bi.setMaxLinearVelocity(id, f[0]),
             .set_max_angular_velocity => bi.setMaxAngularVelocity(id, f[0]),
             .reset_sleep_timer => bi.resetSleepTimer(id),
-            .set_object_layer => bi.setObjectLayer(id, @intCast(op.index)),
+            .set_object_layer => try bi.setObjectLayer(id, @intCast(op.index)),
             .set_user_data => bi.setUserData(id, @as(u64, op.index) | (@as(u64, op.count) << 32)),
             .set_friction_and_restitution => {
                 bi.setFriction(id, f[0]);
@@ -679,7 +679,7 @@ const ZoltWorld = struct {
                 return 0;
             },
             .optimize_broad_phase => {
-                self.system.optimizeBroadPhase();
+                try self.system.optimizeBroadPhase();
                 return 0;
             },
             .set_shape => try bi.setShape(id, self.shapes.items[op.index].get().?, op.count != 0, activation),
