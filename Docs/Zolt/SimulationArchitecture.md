@@ -810,6 +810,15 @@ QuadTree).
 4. To find a divergence: a `PyramidParity` scene in SimulationParity compares the `saveState`
    bytes after every step for the first 50 steps, and the first differing field names the culprit.
 
+**Status.**
+- M5 is reached. `zig build hello-world-check` runs the C++ HelloWorld and its Zig port and fails unless
+  their stdout is byte identical; it is part of `zig build parity`. HelloWorldParity and the
+  `contacts_hello_world` scene compare the state bits after every step.
+- M6 is reached, and goes beyond the plan above. ZoltPerformanceTest reproduces Jolt's published
+  hashes from `determinism_check.yml` for Pyramid, ConvexVsMesh and HighSpeed (`-q=LinearCast`). This
+  holds in both precisions and with `-t=max`, `-t=1` and `-t=2`. Zolt's CI runs them in its
+  determinism job. Ragdoll and CharacterVirtual need Phases 6 to 8.
+
 ## 4. Checklist for porters
 
 - [ ] One file per Jolt header, with the `//! Port of:` and `//! Status:` header, registered in
@@ -1064,3 +1073,26 @@ DeterminismLog, PhysicsScene).**
   - Each scene declares in `SceneEntry.expect` the cases it must reach (contacts, removals,
     sleeping, spawned jobs, a split island, a full manifold array, CCD hits).
   - Only `constraints_chain` stays blocked: it needs the Phase 6 constraint types.
+
+**Wave C (tests, M5, M6).**
+- Library fix: after `error.OutOfMemory` inside a job, the InvalidateContactCache flags set before
+  the update (SetShape, NotifyShapeChanged, SetUseManifoldReduction, InvalidateContactCache) were
+  lost. They are not saved state, and ContactRemovedCallbacks clears them. BodyManager now saves
+  them before the update (`saveContactCacheInvalidation`, its capacity reserved where the flag is
+  set) and restores them after a failed update (`restoreContactCacheInvalidation`). A successful
+  update behaves exactly like Jolt. A flag that a step listener sets during a failed update is
+  dropped: per D5 the caller restores a saved state, and the retried update sets it again.
+- `StringTools.cppFloat` / `writeFloatPrecision` format like `std::ostream` / `%g` (PortingGuide
+  section 5, "Strings, I/O and logging"). The `format` methods of the Math types use it, so
+  `convertToString` equals Jolt's ConvertToString.
+- ZoltPerformanceTest:
+  - It ports every argument, the state recording and validation, and Jolt's output texts.
+  - The PerformanceTestScene interface is pattern B.
+  - `Trace` goes to stdout through a custom `std_options.logFn`.
+  - The `perf_*` simulation parity scenes (Pyramid 50, ConvexVsMesh 80, HighSpeed 20 updates) find a
+    hash mismatch at its first differing field.
+- Performance (information, not a bit exactness issue): ConvexVsMesh runs 4 to 9 times slower than
+  the C++ build. Most of the time is a memset of ProcessBodyPair's local
+  `StaticArray(MyManifold, 32)` (about 70 KB) per body pair, plus smaller ones in
+  `CollideShapeResult.init` and ClipPoly. Pyramid and HighSpeed are 1.2 to 2 times slower. A later
+  performance pass should avoid zero-filling these `undefined` buffers.

@@ -12,6 +12,8 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 | `Zolt/`              | The Zig port, mirrors `Jolt/` file by file. Module root: `Zolt/zolt.zig` |
 | `ZoltTests/`         | Port of `UnitTests/`, root: `ZoltTests/unit_tests.zig`                |
 | `ZoltParity/`        | Bit-for-bit comparison of Zolt with the C++ library (`zig build parity`) |
+| `ZoltHelloWorld/`    | Port of `HelloWorld/HelloWorld.cpp` (milestone M5)                      |
+| `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestone M6) |
 | `Docs/Zolt/`         | Porting docs: **read `PortingGuide.md` before writing any Zig code**  |
 | `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`)                    |
 
@@ -23,7 +25,9 @@ zig build test -Ddouble_precision=true      # same with JPH_DOUBLE_PRECISION sem
 zig build test -Dtest-filter=TestVec3Cross  # run matching tests only
 zig build check                             # compile only (fast)
 zig build parity                            # compare with the C++ Jolt library bit for bit (first build ~4 min)
-zig fmt Zolt ZoltTests ZoltParity build.zig # format (CI checks this)
+zig build hello-world-check                 # C++ HelloWorld and its port must print the same bytes
+zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892
+zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig  # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
 python3 tools/port_status.py --write        # regenerate Docs/Zolt/Progress.md
 python3 tools/port_status.py --next         # what can be ported now (dependencies done)
@@ -49,7 +53,8 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
 - Port the matching Jolt unit tests with the same names and values, and add parity tests
   (`ZoltParity/`) for every function that computes numbers.
 - Before finishing: `zig build test`, `zig build test -Ddouble_precision=true`, `zig build parity`,
-  `zig fmt --check Zolt ZoltTests ZoltParity build.zig`, `python3 tools/port_status.py --write`.
+  `zig fmt --check Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig`,
+  `python3 tools/port_status.py --write`.
 
 ## Plan and status
 

@@ -335,6 +335,10 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
   `writeString` / `writeArrayWith`.
 - Jolt's `String` results (`ConvertToString`, `StringFormat`, ...) become owned `[]u8` returned
   from a function that takes the allocator. `StringFormat` takes a Zig format string, not printf.
+- Text that Jolt streams through `std::ostream` (`<< float`, the `operator<<` of the Math types,
+  error texts built with `%g`) must use `StringTools.cppFloat` (`{f}`), never Zig's `{d}`:
+  `std::ostream` prints floats with precision 6 and `%g` rules, which `{d}` (shortest round trip)
+  does not. `writeFloatPrecision` is the `%.*g` variant. NaN prints as `nan` / `-nan` like glibc.
 
 ## 6. Polymorphism (virtual functions)
 
