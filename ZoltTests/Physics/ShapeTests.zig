@@ -1,14 +1,18 @@
 //! Port of: UnitTests/Physics/ShapeTests.cpp
-//! Status: partial
-//! Missing: the PhysicsTestContext parts of TestBoxShape, TestCylinderShape and TestTaperedCylinderShape (a zero sized
-//!   shape resting on a floor; need PhysicsTestContext, Phase 5)
+//! Status: complete
+//!
+//! The PhysicsTestContext parts of TestBoxShape, TestCylinderShape and TestTaperedCylinderShape (a zero sized shape
+//! resting on a floor) are the same code three times in Jolt: `checkRestsOnFloor`.
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const Layers = @import("../Layers.zig").Layers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AABox = zolt.AABox;
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
+const BodyCreationSettings = zolt.BodyCreationSettings;
 const BoxShape = zolt.BoxShape;
 const BoxShapeSettings = zolt.BoxShapeSettings;
 const CapsuleShape = zolt.CapsuleShape;
@@ -32,8 +36,10 @@ const MeshShape = zolt.MeshShape;
 const MeshShapeSettings = zolt.MeshShapeSettings;
 const MutableCompoundShape = zolt.MutableCompoundShape;
 const MutableCompoundShapeSettings = zolt.MutableCompoundShapeSettings;
+const PhysicsSettings = zolt.PhysicsSettings;
 const Plane = zolt.Plane;
 const Quat = zolt.Quat;
+const RVec3 = zolt.RVec3;
 const RayCast = zolt.RayCast;
 const RayCastResult = zolt.RayCastResult;
 const Ref = zolt.Ref;
@@ -59,6 +65,42 @@ const Vec3 = zolt.Vec3;
 const math = zolt.math;
 
 const allocator = std.testing.allocator;
+
+/// Check that a zero sized shape successfully rests on a floor: `shape1` lands at (0, 0, 0), `shape2` (when not null) at
+/// (1, 0, 0)
+fn checkRestsOnFloor(shape1: *const Shape, shape2: ?*const Shape) !void {
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    _ = try c.createFloor();
+
+    // Override speculative contact distance and penetration slop to 0 so that we land exactly at (0, 0, 0)
+    var settings: PhysicsSettings = .{};
+    settings.speculative_contact_distance = 0.0;
+    settings.penetration_slop = 0.0;
+    c.getSystem().setPhysicsSettings(&settings);
+
+    // Create bodies and check it lands on the floor
+    var bcs: BodyCreationSettings = .{};
+    defer bcs.deinit();
+    bcs.setShape(shape1);
+    bcs.override_mass_properties = .mass_and_inertia_provided;
+    bcs.mass_properties_override.mass = 1.0;
+    bcs.mass_properties_override.inertia = Mat44.identity();
+    bcs.position = RVec3.init(0, 1, 0);
+    bcs.object_layer = Layers.moving;
+    const body1 = try c.createBody(&bcs, .activate);
+    var body2: ?*zolt.Body = null;
+    if (shape2) |s2| {
+        bcs.position = RVec3.init(1, 1, 0);
+        bcs.setShape(s2);
+        body2 = try c.createBody(&bcs, .activate);
+    }
+    _ = try c.simulate(1.0, {});
+    try fw.checkApproxEqual(body1.getPosition(), RVec3.zero(), .{});
+    if (body2) |b2|
+        try fw.checkApproxEqual(b2.getPosition(), RVec3.init(1, 0, 0), .{});
+}
 
 /// `settings.Create().Get()`: the shape of a newly created result (the caller releases the reference)
 fn createShape(settings: *zolt.ShapeSettings) !RefConst(Shape) {
@@ -1097,7 +1139,8 @@ test "TestBoxShape" {
         try fw.expect(box.get().?.cast(BoxShape).getConvexRadius() == 0.0);
         try fw.expect(box2.get().?.cast(BoxShape).getConvexRadius() == 0.0);
 
-        // Not ported: checking that it successfully rests on a floor (needs PhysicsTestContext, Phase 5)
+        // Check that it successfully rests on a floor
+        try checkRestsOnFloor(box.get().?, box2.get().?);
     }
 }
 
@@ -1144,7 +1187,8 @@ test "TestCylinderShape" {
         try fw.expect(cylinder.get().?.cast(CylinderShape).getConvexRadius() == 0.0);
         try fw.expect(cylinder2.get().?.cast(CylinderShape).getConvexRadius() == 0.0);
 
-        // Not ported: checking that it successfully rests on a floor (needs PhysicsTestContext, Phase 5)
+        // Check that it successfully rests on a floor
+        try checkRestsOnFloor(cylinder.get().?, cylinder2.get().?);
     }
 }
 
@@ -1195,6 +1239,7 @@ test "TestTaperedCylinderShape" {
         // Check convex radius is adjusted to zero
         try fw.expect(cylinder.get().?.cast(TaperedCylinderShape).getConvexRadius() == 0.0);
 
-        // Not ported: checking that it successfully rests on a floor (needs PhysicsTestContext, Phase 5)
+        // Check that it successfully rests on a floor
+        try checkRestsOnFloor(cylinder.get().?, null);
     }
 }

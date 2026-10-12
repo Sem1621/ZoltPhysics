@@ -1,16 +1,17 @@
 //! Port of: UnitTests/Physics/EstimateCollisionResponseTest.cpp
-//! Status: partial
-//! Missing: TestEstimateCollisionResponse (it compares the estimate with the velocities after a simulation step with
-//!   contacts, which needs the contact solve of PhysicsSystem, REGION R2 / R3, Wave B)
+//! Status: complete
 //!
-//! Until the contact solve exists, "TestEstimateCollisionResponseWithoutSimulation" runs the same loops over Jolt's
-//! values (motion types, restitution, friction, offsets, angular velocities) with the bodies of the C++ test, builds the
-//! manifold the way PhysicsSystem::ProcessBodyPair does without manifold reduction (NarrowPhaseQuery::CollideShape with
-//! the body 1 shape, ManifoldBetweenTwoFaces, PruneContactPoints) and checks what a collision response must satisfy:
-//! a static body 2 keeps zero velocity, a kinematic body 2 keeps its velocity, the linear momentum of two dynamic bodies
-//! is conserved, the contact impulses are not negative and the bodies no longer approach each other along the normal
-//! (without restitution). The bit exactness of the estimate is checked by
-//! ZoltParity/Physics/NarrowPhaseQueryParity.zig.
+//! Zolt additions besides Jolt's TestEstimateCollisionResponse (which compares the estimate made in OnContactAdded
+//! with the velocities after the simulation step):
+//! - "TestEstimateCollisionResponseWithoutSimulation" runs the same loops over Jolt's values (motion types,
+//!   restitution, friction, offsets, angular velocities) with the bodies of the C++ test, builds the manifold the way
+//!   PhysicsSystem::ProcessBodyPair does without manifold reduction (NarrowPhaseQuery::CollideShape with the body 1
+//!   shape, ManifoldBetweenTwoFaces, PruneContactPoints) and checks what a collision response must satisfy: a static
+//!   body 2 keeps zero velocity, a kinematic body 2 keeps its velocity, the linear momentum of two dynamic bodies is
+//!   conserved, the contact impulses are not negative and the bodies no longer approach each other along the normal
+//!   (without restitution).
+//! - The iteration count edge cases of the last test.
+//! The bit exactness of the estimate is checked by ZoltParity/Physics/NarrowPhaseQueryParity.zig.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -26,6 +27,7 @@ const CollideShapeCollector = zolt.CollideShapeCollector;
 const CollideShapeSettings = zolt.CollideShapeSettings;
 const CollisionEstimationResult = zolt.CollisionEstimationResult;
 const ContactManifold = zolt.ContactManifold;
+const ContactSettings = zolt.ContactSettings;
 const MotionType = zolt.MotionType;
 const Quat = zolt.Quat;
 const RVec3 = zolt.RVec3;
@@ -34,6 +36,72 @@ const Vec3 = zolt.Vec3;
 const math = zolt.math;
 
 const allocator = std.testing.allocator;
+
+// Test CastShape ordering according to penetration depth
+test "TestEstimateCollisionResponse" {
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    c.zeroGravity();
+
+    const box1_half_extents = Vec3.init(0.1, 1, 2);
+    const box2_half_extents = Vec3.init(0.2, 3, 4);
+
+    // Test different motion types, restitution, positions and angular velocities
+    for ([_]MotionType{ .static, .kinematic, .dynamic }) |mt|
+        for ([_]f32{ 0.0, 0.3, 1.0 }) |restitution|
+            for ([_]f32{ 0.0, 0.3, 1.0 }) |friction|
+                for ([_]f32{ 0.0, 0.5, box2_half_extents.getY() }) |y|
+                    for ([_]f32{ 0.0, 0.5, box2_half_extents.getZ() }) |z|
+                        for ([_]f32{ 0.0, -1.0, 1.0 }) |w| {
+                            // Install a listener that predicts the collision response
+                            const MyListener = struct {
+                                pub fn onContactAdded(self: *@This(), body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *ContactSettings) void {
+                                    self.result = zolt.estimateCollisionResponse(body1, body2, manifold, settings.combined_friction, settings.combined_restitution, .{});
+                                    self.has_result = true;
+                                }
+
+                                result: CollisionEstimationResult = .{},
+                                /// Zolt: OnContactAdded was called (Jolt would compare an uninitialized result)
+                                has_result: bool = false,
+                            };
+
+                            var listener: MyListener = .{};
+                            c.getSystem().setContactListener(.init(&listener));
+
+                            const base_offset = RVec3.init(1, 2, 3);
+                            const epsilon: Real = 0.0001;
+
+                            const box1 = try c.createBox(base_offset, Quat.identity(), .dynamic, .discrete, Layers.moving, box1_half_extents, .{});
+                            box1.setFriction(friction);
+                            box1.setRestitution(restitution);
+                            box1.setLinearVelocity(Vec3.init(1, 1, 0));
+                            box1.setAngularVelocity(Vec3.init(0, w, 0));
+
+                            const box2 = try c.createBox(base_offset.add(RVec3.init(box1_half_extents.getX() + box2_half_extents.getX() - epsilon, y, z)), Quat.identity(), mt, .discrete, if (mt == .static) Layers.non_moving else Layers.moving, box2_half_extents, .{});
+                            box2.setFriction(friction);
+                            box2.setRestitution(restitution);
+                            if (mt != .static)
+                                box2.setLinearVelocity(Vec3.init(-1, 0, 0));
+
+                            // Step the simulation
+                            _ = try c.simulateSingleStep();
+
+                            // Check that the predicted velocities are correct
+                            try fw.expect(listener.has_result);
+                            try fw.checkApproxEqual(listener.result.linear_velocity1, box1.getLinearVelocity(), .{});
+                            try fw.checkApproxEqual(listener.result.angular_velocity1, box1.getAngularVelocity(), .{});
+                            try fw.checkApproxEqual(listener.result.linear_velocity2, box2.getLinearVelocity(), .{});
+                            try fw.checkApproxEqual(listener.result.angular_velocity2, box2.getAngularVelocity(), .{});
+
+                            // Remove the bodies in reverse order
+                            const bi = c.getBodyInterface();
+                            bi.removeBody(box2.getID());
+                            bi.removeBody(box1.getID());
+                            bi.destroyBody(box2.getID());
+                            bi.destroyBody(box1.getID());
+                        };
+}
 
 /// Only body 2 passes (the body pair of ProcessBodyPair)
 const OnlyBodyFilter = struct {
