@@ -7,6 +7,8 @@
 //!   zig build docs         Emit autodoc HTML into zig-out/docs
 //!   zig build parity       Compare Zolt bit for bit with the C++ Jolt library (compiled from Jolt/ with Zig's C++ compiler)
 //!   zig build performance-test -- <args>   Run ZoltPerformanceTest (the port of PerformanceTest/, see its -h)
+//!   zig build hello-world  Run ZoltHelloWorld (the port of HelloWorld/HelloWorld.cpp, milestone M5)
+//!   zig build hello-world-check  Run the C++ HelloWorld and its port, fail unless their stdout is identical (part of parity)
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
@@ -293,4 +295,53 @@ pub fn build(b: *std.Build) void {
 
     const parity_step = b.step("parity", "Compare Zolt bit for bit with the C++ Jolt library");
     parity_step.dependOn(&b.addRunArtifact(parity_tests).step);
+
+    // Port of HelloWorld/HelloWorld.cpp (milestone M5): installed with the library, `zig build hello-world` runs it.
+    const hello_world = b.addExecutable(.{
+        .name = "ZoltHelloWorld",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("ZoltHelloWorld/HelloWorld.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = zolt },
+            },
+        }),
+        .use_llvm = use_llvm,
+    });
+    b.installArtifact(hello_world);
+    check_step.dependOn(&hello_world.step);
+    const hello_world_step = b.step("hello-world", "Run the port of HelloWorld/HelloWorld.cpp");
+    hello_world_step.dependOn(&b.addRunArtifact(hello_world).step);
+
+    // `zig build hello-world-check`: the C++ HelloWorld, built against the C++ Jolt library of the parity tests (same
+    // flags), and the Zig port must print the same bytes (ZoltHelloWorld/CompareOutput.zig compares them). The parity
+    // step includes the check.
+    const hello_world_cpp = b.addExecutable(.{
+        .name = "JoltHelloWorld",
+        .root_module = b.createModule(.{
+            .target = reference_target,
+            .optimize = .ReleaseFast,
+            .link_libcpp = true,
+            .sanitize_c = .off,
+        }),
+    });
+    hello_world_cpp.root_module.addIncludePath(b.path("."));
+    hello_world_cpp.root_module.addCSourceFile(.{ .file = b.path("HelloWorld/HelloWorld.cpp"), .flags = cpp_flags.items });
+    hello_world_cpp.root_module.linkLibrary(jolt_cpp);
+    const compare_output = b.addExecutable(.{
+        .name = "CompareOutput",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("ZoltHelloWorld/CompareOutput.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+        .use_llvm = use_llvm,
+    });
+    const run_compare_output = b.addRunArtifact(compare_output);
+    run_compare_output.addFileArg(b.addRunArtifact(hello_world_cpp).captureStdOut(.{}));
+    run_compare_output.addFileArg(b.addRunArtifact(hello_world).captureStdOut(.{}));
+    const hello_world_check_step = b.step("hello-world-check", "Fail unless HelloWorld/HelloWorld.cpp and its Zig port print the same bytes");
+    hello_world_check_step.dependOn(&run_compare_output.step);
+    parity_step.dependOn(&run_compare_output.step);
 }

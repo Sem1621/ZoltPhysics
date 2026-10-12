@@ -4,7 +4,7 @@
 //! Follows the porter template of Docs/Zolt/CollisionArchitecture.md (section 2, SphereShape.zig / BoxShape.zig):
 //! - `overrides` lists every C++ `override` in header order. The hull is built with Geometry/ConvexHullBuilder.zig in
 //!   `initFromSettings` (D3, Jolt's error texts; the `%g` / `%d` / `%u` of Jolt's StringFormat messages are formatted
-//!   like C's printf through `StringTools.writeFloatGeneral`, so the texts are identical).
+//!   like C's printf through the C++ compatible float formatter `StringTools.cppFloat`, so the texts are identical).
 //! - The arrays the shape owns (points, faces, planes, vertex indices) are allocated with the shape's allocator and freed
 //!   in `destruct`; the settings own a copy of their points (`ConvexHullShapeSettings.points`, freed with the settings).
 //! - The support classes are constructed in place in the caller's SupportBuffer (D9). `HullNoConvex` holds up to 256
@@ -40,7 +40,7 @@ const Core = @import("../../../Core/Core.zig");
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
-const StringTools = @import("../../../Core/StringTools.zig");
+const cppFloat = @import("../../../Core/StringTools.zig").cppFloat;
 const UnorderedMap = @import("../../../Core/UnorderedMap.zig").UnorderedMap;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
 const ClosestPoint = @import("../../../Geometry/ClosestPoint.zig");
@@ -242,7 +242,7 @@ pub const ConvexHullShape = struct {
         if (build_result.result == .success) {
             const max_error = builder.determineMaxError();
             if (max_error.max_error > 4.0 * math.max(max_error.coplanar_distance, settings.hull_tolerance)) { // Coplanar distance could be bigger than the allowed tolerance if the points are far apart
-                result.setErrorFmt("Hull building failed, point {d} had an error of {f} (relative to tolerance: {f})", .{ max_error.max_error_position_idx, PrintfG{ .value = max_error.max_error }, PrintfG{ .value = max_error.max_error / settings.hull_tolerance } });
+                result.setErrorFmt("Hull building failed, point {d} had an error of {f} (relative to tolerance: {f})", .{ max_error.max_error_position_idx, cppFloat(max_error.max_error), cppFloat(max_error.max_error / settings.hull_tolerance) });
                 return;
             }
         }
@@ -1397,15 +1397,6 @@ pub const ConvexHullShape = struct {
             return 0.0;
         }
     };
-};
-
-/// Formats a float like C's printf("%g") (Jolt's StringFormat with "%g" and a double argument)
-const PrintfG = struct {
-    value: f64,
-
-    pub fn format(self: PrintfG, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return StringTools.writeFloatGeneral(writer, self.value);
-    }
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -40,6 +40,7 @@ test {
     _ = @import("Physics/DecoratedParity.zig");
     _ = @import("Physics/FiltersParity.zig");
     _ = @import("Physics/HeightFieldShapeParity.zig");
+    _ = @import("Physics/HelloWorldParity.zig");
     _ = @import("Physics/LargeIslandSplitterParity.zig");
     _ = @import("Physics/MeshShapeParity.zig");
     _ = @import("Physics/NarrowPhaseQueryParity.zig");

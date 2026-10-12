@@ -1054,149 +1054,156 @@ const Field = struct {
     component: ?u8 = null,
 };
 
-/// Walks the bytes of a saved state like PhysicsSystem::RestoreState reads them. `cpp` answers which bodies have
-/// motion properties and the sizes of the constraint states (the decoded bytes are the C++ ones).
-const StateLayout = struct {
-    allocator: Allocator,
-    bytes: []const u8,
-    cpp: CppWorld,
-    fields: std.ArrayList(Field) = .empty,
-    pos: usize = 0,
-    truncated: bool = false,
+/// Walks the bytes of a saved state like PhysicsSystem::RestoreState reads them. `cpp` (a CppWorld, or the C++ world of
+/// another parity test) answers which bodies have motion properties (`hasMotionProperties(body_id) bool`) and the sizes
+/// of the constraint states (`constraintStateSize(index) u32`); the decoded bytes are the C++ ones.
+pub fn StateLayoutFor(comptime Cpp: type) type {
+    return struct {
+        const Self = @This();
 
-    fn deinit(self: *StateLayout) void {
-        self.fields.deinit(self.allocator);
-    }
+        allocator: Allocator,
+        bytes: []const u8,
+        cpp: Cpp,
+        fields: std.ArrayList(Field) = .empty,
+        pos: usize = 0,
+        truncated: bool = false,
 
-    fn add(self: *StateLayout, kind: FieldKind, size: usize, section: []const u8, item: ?usize, id: ?u32, name: []const u8, component: ?u8) !void {
-        if (self.truncated or self.pos + size > self.bytes.len) {
-            self.truncated = true;
-            return;
-        }
-        try self.fields.append(self.allocator, .{ .offset = self.pos, .size = size, .kind = kind, .section = section, .item = item, .id = id, .name = name, .component = component });
-        self.pos += size;
-    }
-
-    fn scalar(self: *StateLayout, comptime T: type, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
-        const kind: FieldKind = switch (T) {
-            u8 => .u8,
-            bool => .bool,
-            u16 => .u16,
-            u32 => .u32,
-            f32 => .f32,
-            f64 => .f64,
-            else => @compileError("unsupported"),
-        };
-        try self.add(kind, @sizeOf(T), section, item, id, name, null);
-    }
-
-    fn vector(self: *StateLayout, comptime T: type, n: u8, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
-        for (0..n) |c|
-            try self.add(if (T == f64) .f64 else .f32, @sizeOf(T), section, item, id, name, @intCast(c));
-    }
-
-    fn read(self: *const StateLayout, comptime T: type) ?T {
-        if (self.pos + @sizeOf(T) > self.bytes.len) return null;
-        return std.mem.bytesToValue(T, self.bytes[self.pos..][0..@sizeOf(T)]);
-    }
-
-    fn decode(self: *StateLayout) !void {
-        const state_byte = self.read(u8) orelse return;
-        try self.scalar(u8, "header", null, null, "state");
-        const state = StateRecorderState.fromInt(state_byte);
-
-        if (state.global) {
-            try self.scalar(f32, "global", null, null, "previous_step_delta_time");
-            try self.vector(f32, 3, "global", null, null, "gravity");
+        fn deinit(self: *Self) void {
+            self.fields.deinit(self.allocator);
         }
 
-        if (state.bodies) {
-            const num_bodies = self.read(u32) orelse return;
-            try self.scalar(u32, "bodies", null, null, "num_bodies");
-            for (0..num_bodies) |i| {
-                const id = self.read(u32) orelse return;
-                try self.scalar(u32, "bodies", i, id, "id");
-                try self.scalar(bool, "bodies", i, id, "is_active");
-                try self.vector(Real, 3, "bodies", i, id, "position");
-                try self.vector(f32, 4, "bodies", i, id, "rotation");
-                if (self.cpp.hasMotionProperties(id)) {
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.linear_velocity");
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.angular_velocity");
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.force");
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.torque");
-                    if (Core.double_precision)
-                        try self.vector(f64, 3, "bodies", i, id, "motion_properties.sleep_test_offset");
-                    for ([_][]const u8{ "motion_properties.sleep_test_spheres[0]", "motion_properties.sleep_test_spheres[1]", "motion_properties.sleep_test_spheres[2]" }) |name| {
-                        try self.vector(f32, 3, "bodies", i, id, name); // center
-                        try self.add(.f32, 4, "bodies", i, id, name, 3); // radius
+        fn add(self: *Self, kind: FieldKind, size: usize, section: []const u8, item: ?usize, id: ?u32, name: []const u8, component: ?u8) !void {
+            if (self.truncated or self.pos + size > self.bytes.len) {
+                self.truncated = true;
+                return;
+            }
+            try self.fields.append(self.allocator, .{ .offset = self.pos, .size = size, .kind = kind, .section = section, .item = item, .id = id, .name = name, .component = component });
+            self.pos += size;
+        }
+
+        fn scalar(self: *Self, comptime T: type, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
+            const kind: FieldKind = switch (T) {
+                u8 => .u8,
+                bool => .bool,
+                u16 => .u16,
+                u32 => .u32,
+                f32 => .f32,
+                f64 => .f64,
+                else => @compileError("unsupported"),
+            };
+            try self.add(kind, @sizeOf(T), section, item, id, name, null);
+        }
+
+        fn vector(self: *Self, comptime T: type, n: u8, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
+            for (0..n) |c|
+                try self.add(if (T == f64) .f64 else .f32, @sizeOf(T), section, item, id, name, @intCast(c));
+        }
+
+        fn read(self: *const Self, comptime T: type) ?T {
+            if (self.pos + @sizeOf(T) > self.bytes.len) return null;
+            return std.mem.bytesToValue(T, self.bytes[self.pos..][0..@sizeOf(T)]);
+        }
+
+        fn decode(self: *Self) !void {
+            const state_byte = self.read(u8) orelse return;
+            try self.scalar(u8, "header", null, null, "state");
+            const state = StateRecorderState.fromInt(state_byte);
+
+            if (state.global) {
+                try self.scalar(f32, "global", null, null, "previous_step_delta_time");
+                try self.vector(f32, 3, "global", null, null, "gravity");
+            }
+
+            if (state.bodies) {
+                const num_bodies = self.read(u32) orelse return;
+                try self.scalar(u32, "bodies", null, null, "num_bodies");
+                for (0..num_bodies) |i| {
+                    const id = self.read(u32) orelse return;
+                    try self.scalar(u32, "bodies", i, id, "id");
+                    try self.scalar(bool, "bodies", i, id, "is_active");
+                    try self.vector(Real, 3, "bodies", i, id, "position");
+                    try self.vector(f32, 4, "bodies", i, id, "rotation");
+                    if (self.cpp.hasMotionProperties(id)) {
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.linear_velocity");
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.angular_velocity");
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.force");
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.torque");
+                        if (Core.double_precision)
+                            try self.vector(f64, 3, "bodies", i, id, "motion_properties.sleep_test_offset");
+                        for ([_][]const u8{ "motion_properties.sleep_test_spheres[0]", "motion_properties.sleep_test_spheres[1]", "motion_properties.sleep_test_spheres[2]" }) |name| {
+                            try self.vector(f32, 3, "bodies", i, id, name); // center
+                            try self.add(.f32, 4, "bodies", i, id, name, 3); // radius
+                        }
+                        try self.scalar(f32, "bodies", i, id, "motion_properties.sleep_test_timer");
+                        try self.scalar(bool, "bodies", i, id, "motion_properties.allow_sleeping");
                     }
-                    try self.scalar(f32, "bodies", i, id, "motion_properties.sleep_test_timer");
-                    try self.scalar(bool, "bodies", i, id, "motion_properties.allow_sleeping");
+                }
+            }
+
+            if (state.contacts) {
+                const num_body_pairs = self.read(u32) orelse return;
+                try self.scalar(u32, "contacts", null, null, "num_body_pairs");
+                var manifold_index: usize = 0;
+                for (0..num_body_pairs) |i| {
+                    const body_a = self.read(u32) orelse return;
+                    try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_a");
+                    try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_b");
+                    try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_position");
+                    try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_rotation");
+                    const num_manifolds = self.read(u32) orelse return;
+                    try self.scalar(u32, "contacts.body_pairs", i, body_a, "num_manifolds");
+                    for (0..num_manifolds) |_| {
+                        const m = manifold_index;
+                        manifold_index += 1;
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body1");
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape1");
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body2");
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape2");
+                        const num_points = self.read(u16) orelse return;
+                        try self.scalar(u16, "contacts.manifolds", m, body_a, "num_contact_points");
+                        try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_normal");
+                        try self.vector(f32, 2, "contacts.manifolds", m, body_a, "friction_lambda");
+                        try self.scalar(f32, "contacts.manifolds", m, body_a, "angular_friction_lambda");
+                        for (0..num_points) |_| {
+                            try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position1");
+                            try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position2");
+                            try self.scalar(f32, "contacts.manifolds", m, body_a, "contact_point.non_penetration_lambda");
+                        }
+                    }
+                }
+                const num_ccd = self.read(u32) orelse return;
+                try self.scalar(u32, "contacts", null, null, "num_ccd_manifolds");
+                for (0..num_ccd) |i| {
+                    for ([_][]const u8{ "key.body1", "key.sub_shape1", "key.body2", "key.sub_shape2" }) |name|
+                        try self.scalar(u32, "contacts.ccd_manifolds", i, null, name);
+                }
+            }
+
+            if (state.constraints) {
+                const num_constraints = self.read(u32) orelse return;
+                try self.scalar(u32, "constraints", null, null, "num_constraints");
+                for (0..num_constraints) |i| {
+                    const index = self.read(u32) orelse return;
+                    try self.scalar(u32, "constraints", i, index, "constraint_index");
+                    try self.scalar(bool, "constraints", i, index, "enabled");
+                    const size = self.cpp.constraintStateSize(@intCast(i));
+                    if (size > 1)
+                        try self.add(.bytes, size - 1, "constraints", i, index, "state of the constraint class", null);
                 }
             }
         }
 
-        if (state.contacts) {
-            const num_body_pairs = self.read(u32) orelse return;
-            try self.scalar(u32, "contacts", null, null, "num_body_pairs");
-            var manifold_index: usize = 0;
-            for (0..num_body_pairs) |i| {
-                const body_a = self.read(u32) orelse return;
-                try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_a");
-                try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_b");
-                try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_position");
-                try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_rotation");
-                const num_manifolds = self.read(u32) orelse return;
-                try self.scalar(u32, "contacts.body_pairs", i, body_a, "num_manifolds");
-                for (0..num_manifolds) |_| {
-                    const m = manifold_index;
-                    manifold_index += 1;
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body1");
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape1");
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body2");
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape2");
-                    const num_points = self.read(u16) orelse return;
-                    try self.scalar(u16, "contacts.manifolds", m, body_a, "num_contact_points");
-                    try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_normal");
-                    try self.vector(f32, 2, "contacts.manifolds", m, body_a, "friction_lambda");
-                    try self.scalar(f32, "contacts.manifolds", m, body_a, "angular_friction_lambda");
-                    for (0..num_points) |_| {
-                        try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position1");
-                        try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position2");
-                        try self.scalar(f32, "contacts.manifolds", m, body_a, "contact_point.non_penetration_lambda");
-                    }
-                }
+        fn find(self: *const Self, offset: usize) ?*const Field {
+            for (self.fields.items) |*field| {
+                if (offset >= field.offset and offset < field.offset + field.size)
+                    return field;
             }
-            const num_ccd = self.read(u32) orelse return;
-            try self.scalar(u32, "contacts", null, null, "num_ccd_manifolds");
-            for (0..num_ccd) |i| {
-                for ([_][]const u8{ "key.body1", "key.sub_shape1", "key.body2", "key.sub_shape2" }) |name|
-                    try self.scalar(u32, "contacts.ccd_manifolds", i, null, name);
-            }
+            return null;
         }
+    };
+}
 
-        if (state.constraints) {
-            const num_constraints = self.read(u32) orelse return;
-            try self.scalar(u32, "constraints", null, null, "num_constraints");
-            for (0..num_constraints) |i| {
-                const index = self.read(u32) orelse return;
-                try self.scalar(u32, "constraints", i, index, "constraint_index");
-                try self.scalar(bool, "constraints", i, index, "enabled");
-                const size = self.cpp.constraintStateSize(@intCast(i));
-                if (size > 1)
-                    try self.add(.bytes, size - 1, "constraints", i, index, "state of the constraint class", null);
-            }
-        }
-    }
-
-    fn find(self: *const StateLayout, offset: usize) ?*const Field {
-        for (self.fields.items) |*field| {
-            if (offset >= field.offset and offset < field.offset + field.size)
-                return field;
-        }
-        return null;
-    }
-};
+const StateLayout = StateLayoutFor(CppWorld);
 
 fn writeValue(w: *std.Io.Writer, field: *const Field, bytes: []const u8) !void {
     if (field.offset + field.size > bytes.len) {
@@ -1229,11 +1236,12 @@ fn writeField(w: *std.Io.Writer, field: *const Field) !void {
     if (field.component) |c| try w.print(".{c}", .{"xyzw"[c]});
 }
 
-/// Describe where the Zolt state differs from the Jolt state (null when they are equal)
-fn describeStateDifference(allocator: Allocator, zolt_bytes: []const u8, jolt_bytes: []const u8, cpp: CppWorld) !?[]u8 {
+/// Describe where the Zolt state differs from the Jolt state (null when they are equal). `cpp` is the C++ world (see
+/// StateLayoutFor), the caller owns the returned text.
+pub fn describeStateDifference(allocator: Allocator, zolt_bytes: []const u8, jolt_bytes: []const u8, cpp: anytype) !?[]u8 {
     const first = std.mem.indexOfDiff(u8, zolt_bytes, jolt_bytes) orelse return null;
 
-    var layout: StateLayout = .{ .allocator = allocator, .bytes = jolt_bytes, .cpp = cpp };
+    var layout: StateLayoutFor(@TypeOf(cpp)) = .{ .allocator = allocator, .bytes = jolt_bytes, .cpp = cpp };
     defer layout.deinit();
     try layout.decode();
 

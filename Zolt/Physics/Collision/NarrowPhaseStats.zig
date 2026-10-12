@@ -11,10 +11,12 @@
 //!   `TrackNarrowPhaseStat.root` (`threadlocal var`).
 //! - The RAII trackers become `var track: TrackNarrowPhaseStat = undefined; track.init(&stat); defer track.deinit();`
 //!   (in place: the root points to the tracker, so it must not be moved).
-//! - `Trace` is `std.log` (info level) and the percentages are formatted by Zig (`{d}`), not by `std::stringstream`.
+//! - `Trace` is `std.log` (info level). The percentages are printed like `std::stringstream` prints a double
+//!   (`StringTools.cppFloat`), so the lines are Jolt's.
 
 const std = @import("std");
 const getProcessorTickCount = @import("../../Core/TickCounter.zig").getProcessorTickCount;
+const cppFloat = @import("../../Core/StringTools.zig").cppFloat;
 const ShapeFile = @import("Shape/Shape.zig");
 const ShapeSubType = ShapeFile.ShapeSubType;
 const all_sub_shape_types = ShapeFile.all_sub_shape_types;
@@ -46,7 +48,7 @@ pub const NarrowPhaseStat = struct {
         const total_pct = 100.0 * @as(f64, @floatFromInt(total_ticks)) / @as(f64, @floatFromInt(ticks_100_pct));
         const total_pct_excl_children = 100.0 * @as(f64, @floatFromInt(total_ticks -% child_ticks)) / @as(f64, @floatFromInt(ticks_100_pct));
 
-        log.info("{s}, {s}, {s}, {d}, {d}, {d}, {d}, {d}", .{ name, sub_shape_type_names[@intFromEnum(type1)], sub_shape_type_names[@intFromEnum(type2)], num_queries, total_pct, total_pct_excl_children, total_pct_excl_children / @as(f64, @floatFromInt(num_queries)), self.hits_reported.load(.seq_cst) });
+        log.info("{s}, {s}, {s}, {d}, {f}, {f}, {f}, {d}", .{ name, sub_shape_type_names[@intFromEnum(type1)], sub_shape_type_names[@intFromEnum(type2)], num_queries, cppFloat(total_pct), cppFloat(total_pct_excl_children), cppFloat(total_pct_excl_children / @as(f64, @floatFromInt(num_queries))), self.hits_reported.load(.seq_cst) });
     }
 
     /// Trace the collected broadphase stats in CSV form.

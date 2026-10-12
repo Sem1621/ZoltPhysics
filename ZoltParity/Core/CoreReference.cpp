@@ -15,6 +15,9 @@
 #include <Jolt/Core/StreamWrapper.h>
 #include <Jolt/Core/StringTools.h>
 
+#include <Jolt/Math/Float2.h>
+
+#include <cstdio>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -465,6 +468,44 @@ uint32 jolt_convert_to_string_float(float inValue, char *outChars, uint32 inCapa
 uint32 jolt_convert_to_string_double(double inValue, char *outChars, uint32 inCapacity)	{ EnsureAllocator(); return CopyString(ConvertToString(inValue), outChars, inCapacity); }
 uint32 jolt_convert_to_string_int(int inValue, char *outChars, uint32 inCapacity)		{ EnsureAllocator(); return CopyString(ConvertToString(inValue), outChars, inCapacity); }
 uint32 jolt_convert_to_string_uint64(uint64 inValue, char *outChars, uint32 inCapacity)	{ EnsureAllocator(); return CopyString(ConvertToString(inValue), outChars, inCapacity); }
+
+// ConvertToString of the Math types (their operator <<: the components are streamed like a float / double)
+uint32 jolt_convert_to_string_vec3(const float *inV, char *outChars, uint32 inCapacity)		{ EnsureAllocator(); return CopyString(ConvertToString(Vec3(inV[0], inV[1], inV[2])), outChars, inCapacity); }
+uint32 jolt_convert_to_string_vec4(const float *inV, char *outChars, uint32 inCapacity)		{ EnsureAllocator(); return CopyString(ConvertToString(LoadVec4(inV)), outChars, inCapacity); }
+uint32 jolt_convert_to_string_quat(const float *inV, char *outChars, uint32 inCapacity)		{ EnsureAllocator(); return CopyString(ConvertToString(Quat(inV[0], inV[1], inV[2], inV[3])), outChars, inCapacity); }
+uint32 jolt_convert_to_string_mat44(const float *inV, char *outChars, uint32 inCapacity)	{ EnsureAllocator(); return CopyString(ConvertToString(Mat44(LoadVec4(inV), LoadVec4(inV + 4), LoadVec4(inV + 8), LoadVec4(inV + 12))), outChars, inCapacity); }
+uint32 jolt_convert_to_string_float2(const float *inV, char *outChars, uint32 inCapacity)	{ EnsureAllocator(); return CopyString(ConvertToString(Float2(inV[0], inV[1])), outChars, inCapacity); }
+uint32 jolt_convert_to_string_dvec3(const double *inV, char *outChars, uint32 inCapacity)	{ EnsureAllocator(); return CopyString(ConvertToString(DVec3(inV[0], inV[1], inV[2])), outChars, inCapacity); }
+uint32 jolt_convert_to_string_dmat44(const float *inCols, const double *inT, char *outChars, uint32 inCapacity)
+{
+	EnsureAllocator();
+	return CopyString(ConvertToString(DMat44(LoadVec4(inCols), LoadVec4(inCols + 4), LoadVec4(inCols + 8), DVec3(inT[0], inT[1], inT[2]))), outChars, inCapacity);
+}
+
+// The C library's printf("%.*g", inPrecision, inValue): what std::ostream uses to print a float (converted to double) or a
+// double with the default float field (libstdc++ and libc++ both call vsnprintf with "%.*g")
+uint32 jolt_snprintf_g(double inValue, int inPrecision, char *outChars, uint32 inCapacity)
+{
+	int size = snprintf(outChars, inCapacity, "%.*g", inPrecision, inValue);
+	return size < 0? 0 : uint32(size);
+}
+
+// A std::ostream with precision inPrecision (std::setprecision) and the default float field printing a float / double
+uint32 jolt_ostream_float(float inValue, int inPrecision, char *outChars, uint32 inCapacity)
+{
+	std::ostringstream stream;
+	stream.precision(inPrecision);
+	stream << inValue;
+	return CopyString(stream.str(), (uint8 *)outChars, inCapacity);
+}
+
+uint32 jolt_ostream_double(double inValue, int inPrecision, char *outChars, uint32 inCapacity)
+{
+	std::ostringstream stream;
+	stream.precision(inPrecision);
+	stream << inValue;
+	return CopyString(stream.str(), (uint8 *)outChars, inCapacity);
+}
 
 uint32 jolt_to_lower(const char *inChars, uint32 inSize, char *outChars, uint32 inCapacity)
 {

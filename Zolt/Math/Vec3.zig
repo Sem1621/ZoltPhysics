@@ -9,6 +9,7 @@ const std = @import("std");
 const Core = @import("../Core/Core.zig");
 const math = @import("Math.zig");
 const HashCombine = @import("../Core/HashCombine.zig");
+const cppFloat = @import("../Core/StringTools.zig").cppFloat;
 const Swizzle = @import("Swizzle.zig").Swizzle;
 const Float3 = @import("Float3.zig").Float3;
 const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
@@ -659,8 +660,9 @@ pub const Vec3 = extern struct {
         return HashCombine.hashCombineArgs(.{ self.getX(), self.getY(), self.getZ() });
     }
 
+    /// To String (operator <<, the components are printed like std::ostream prints a float)
     pub fn format(self: Vec3, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{d}, {d}, {d}", .{ self.value[0], self.value[1], self.value[2] });
+        try writer.print("{f}, {f}, {f}", .{ cppFloat(self.value[0]), cppFloat(self.value[1]), cppFloat(self.value[2]) });
     }
 
     /// Internal helper function that ensures that the Z component is replicated to the W component (sFixW)

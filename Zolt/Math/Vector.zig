@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const math = @import("Math.zig");
+const cppFloat = @import("../Core/StringTools.zig").cppFloat;
 
 /// Templatized vector class
 pub fn Vector(comptime rows: u32) type {
@@ -155,8 +156,8 @@ pub fn Vector(comptime rows: u32) type {
         pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try writer.writeAll("[");
             for (0..rows - 1) |i|
-                try writer.print("{d}, ", .{self.f32s[i]});
-            try writer.print("{d}]", .{self.f32s[rows - 1]});
+                try writer.print("{f}, ", .{cppFloat(self.f32s[i])});
+            try writer.print("{f}]", .{cppFloat(self.f32s[rows - 1])});
         }
     };
 }

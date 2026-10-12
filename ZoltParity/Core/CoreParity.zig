@@ -3,7 +3,9 @@
 //!
 //! Covers the Core code with observable numeric or ordering results: QuickSort / InsertionSort (order of equal
 //! keys), BinaryHeap, HashCombine, Mt19937 (std::mt19937), LinearCurve, the bytes written and read by
-//! StreamOut / StreamIn / StreamWrapper, and StringTools.
+//! StreamOut / StreamIn / StreamWrapper, and StringTools, including the C++ compatible float formatter
+//! (writeFloatPrecision / cppFloat, against the C library's snprintf("%.*g") and std::ostream) and the operator << of
+//! the Math types.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -131,6 +133,16 @@ const jolt = struct {
     extern fn jolt_convert_to_string_double(value: f64, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_convert_to_string_int(value: c_int, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_convert_to_string_uint64(value: u64, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_vec3(v: *const [3]f32, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_vec4(v: *const [4]f32, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_quat(v: *const [4]f32, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_mat44(v: *const [16]f32, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_float2(v: *const [2]f32, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_dvec3(v: *const [3]f64, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_convert_to_string_dmat44(cols: *const [12]f32, t: *const [3]f64, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_snprintf_g(value: f64, precision: c_int, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_ostream_float(value: f32, precision: c_int, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_ostream_double(value: f64, precision: c_int, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_to_lower(chars: [*]const u8, size: u32, out: [*]u8, capacity: u32) u32;
     extern fn jolt_string_replace(chars: [*]const u8, size: u32, search: [*]const u8, search_size: u32, replace: [*]const u8, replace_size: u32, out: [*]u8, capacity: u32) u32;
     extern fn jolt_string_to_vector(chars: [*]const u8, size: u32, delimiter: [*]const u8, delimiter_size: u32, clear_vector: c_int, num_initial: u32, lengths: [*]u32, max_strings: u32, out: [*]u8, capacity: u32) u32;
@@ -1026,6 +1038,279 @@ test "ConvertToString" {
         }
     }
     try finishAll(&.{ &float_checker, &double_checker, &int_checker, &uint64_checker });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The C++ compatible float formatter (StringTools.writeFloatPrecision / cppFloat, used by the Math types' operator <<)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// std::ostream's default precision
+const default_stream_precision = 6;
+
+/// Compares Zolt's float formatter with the C library's snprintf("%.*g", precision, value), which is what std::ostream
+/// prints with the default float field (libstdc++ and libc++ call vsnprintf), and with std::ostream itself. NaN is
+/// compared too: the C++ stream prints it with the same C library ("nan" / "-nan" by the sign bit on glibc and musl).
+const FloatFormatChecker = struct {
+    printf_checker: Checker = .{ .name = "writeFloatPrecision vs snprintf(\"%.*g\")" },
+    ostream_checker: Checker = .{ .name = "writeFloatPrecision vs std::ostream" },
+    num_checks: usize = 0,
+
+    fn zoltString(buffer: []u8, value: f64, precision: u32) []const u8 {
+        var writer: std.Io.Writer = .fixed(buffer);
+        zolt.writeFloatPrecision(&writer, value, precision) catch unreachable; // At most 24 characters
+        return writer.buffered();
+    }
+
+    /// A double printed with `precision` (0 is 1 like in printf) against snprintf
+    fn checkDouble(self: *FloatFormatChecker, value: f64, precision: u32) void {
+        var zolt_chars: [64]u8 = undefined;
+        const s = zoltString(&zolt_chars, value, precision);
+        var c_chars: [64]u8 = undefined;
+        const input = .{ .value = value, .bits = @as(u64, @bitCast(value)), .precision = precision };
+        checkString(&self.printf_checker, input, s, &c_chars, jolt.jolt_snprintf_g(value, @intCast(precision), &c_chars, c_chars.len));
+        self.num_checks += 1;
+    }
+
+    /// A double against snprintf and against a std::ostream with that precision
+    fn checkDoubleAndStream(self: *FloatFormatChecker, value: f64, precision: u32) void {
+        self.checkDouble(value, precision);
+        var zolt_chars: [64]u8 = undefined;
+        const s = zoltString(&zolt_chars, value, precision);
+        var c_chars: [64]u8 = undefined;
+        const input = .{ .value = value, .bits = @as(u64, @bitCast(value)), .precision = precision };
+        checkString(&self.ostream_checker, input, s, &c_chars, jolt.jolt_ostream_double(value, @intCast(precision), &c_chars, c_chars.len));
+    }
+
+    /// A float as std::ostream prints it (converted to double), against snprintf and against a std::ostream
+    fn checkFloat(self: *FloatFormatChecker, value: f32, precision: u32) void {
+        self.checkDouble(value, precision);
+        var zolt_chars: [64]u8 = undefined;
+        const s = zoltString(&zolt_chars, value, precision);
+        var c_chars: [64]u8 = undefined;
+        const input = .{ .value = value, .bits = @as(u32, @bitCast(value)), .precision = precision };
+        checkString(&self.ostream_checker, input, s, &c_chars, jolt.jolt_ostream_float(value, @intCast(precision), &c_chars, c_chars.len));
+    }
+
+    fn finish(self: *const FloatFormatChecker) !void {
+        try finishAll(&.{ &self.printf_checker, &self.ostream_checker });
+    }
+};
+
+/// A random precision from 0 (printed like 1) to max_float_precision
+fn randomPrecision(rng: *Rng) u32 {
+    return rng.next() % 18;
+}
+
+test "Float formatter: every float exponent" {
+    var c: FloatFormatChecker = .{};
+    var rng: Rng = .{ .state = 0x2468ace1 };
+    const fixed_mantissas = [_]u32{ 0, 1, 2, 3, 0x400000, 0x7ffffe, 0x7fffff, 0x7ff800, 0x000fff, 0x555555 };
+    for (0..256) |exponent| {
+        for ([_]u32{ 0, 1 }) |sign| {
+            for (0..48) |i| {
+                const mantissa: u32 = if (i < fixed_mantissas.len) fixed_mantissas[i] else rng.next() & 0x7fffff;
+                const f: f32 = @bitCast(sign << 31 | @as(u32, @intCast(exponent)) << 23 | mantissa);
+                c.checkFloat(f, default_stream_precision);
+                c.checkFloat(f, randomPrecision(&rng));
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 256 * 2 * 48 * 2), c.num_checks);
+    try c.finish();
+}
+
+test "Float formatter: every double exponent" {
+    var c: FloatFormatChecker = .{};
+    var rng: Rng = .{ .state = 0x13579bdf };
+    const fixed_mantissas = [_]u64{ 0, 1, 2, 0x8000000000000, 0xffffffffffffe, 0xfffffffffffff, 0xfffff00000000 };
+    for (0..2048) |exponent| {
+        for ([_]u64{ 0, 1 }) |sign| {
+            for (0..16) |i| {
+                const mantissa: u64 = if (i < fixed_mantissas.len) fixed_mantissas[i] else next64(&rng) & 0xfffffffffffff;
+                const d: f64 = @bitCast(sign << 63 | @as(u64, @intCast(exponent)) << 52 | mantissa);
+                c.checkDoubleAndStream(d, default_stream_precision);
+                c.checkDouble(d, randomPrecision(&rng));
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2048 * 2 * 16 * 2), c.num_checks);
+    try c.finish();
+}
+
+test "Float formatter: random bit patterns" {
+    var c: FloatFormatChecker = .{};
+    var rng: Rng = .{ .state = 0x0badf00d };
+    for (0..iterations) |_| {
+        const f: f32 = @bitCast(rng.next());
+        c.checkFloat(f, default_stream_precision);
+        c.checkFloat(f, randomPrecision(&rng));
+        const d: f64 = @bitCast(next64(&rng));
+        c.checkDoubleAndStream(d, default_stream_precision);
+        c.checkDouble(d, randomPrecision(&rng));
+    }
+    try c.finish();
+}
+
+/// The double `steps` ulps away from the positive finite `value` (null when that leaves the positive finite numbers)
+fn ulpStep(value: f64, steps: i64) ?f64 {
+    const bits: i64 = @intCast(@as(u64, @bitCast(value)));
+    const stepped = bits + steps;
+    if (stepped <= 0 or stepped >= 0x7ff0000000000000) return null;
+    return @bitCast(@as(u64, @intCast(stepped)));
+}
+
+/// The float `steps` ulps away from the positive finite `value` (null when that leaves the positive finite numbers)
+fn ulpStepF32(value: f32, steps: i32) ?f32 {
+    const bits: i32 = @intCast(@as(u32, @bitCast(value)));
+    const stepped = bits + steps;
+    if (stepped <= 0 or stepped >= 0x7f800000) return null;
+    return @bitCast(@as(u32, @intCast(stepped)));
+}
+
+test "Float formatter: rounding boundaries of every decimal exponent" {
+    // The ties of `precision` significant digits at decimal exponent k are (D + 1/2) * 10^(k - precision + 1) for the
+    // integers D in [10^(precision - 1), 10^precision), written "D5e(k - precision)". The nearest double (float) and
+    // its neighbours lie just below, on or just above the tie, so they test the exact rounding (ties to even when the
+    // tie is representable, as in 123456.5) and, with D = 99...9, the carry into the next exponent (999999.5 ->
+    // 1e+06, 9.999995 -> 10, 0.00009999995 -> 0.0001: the exponent of the rounded value selects the notation).
+    // The powers of 10 and their neighbours test the switch between fixed and scientific notation.
+    var c: FloatFormatChecker = .{};
+    var rng: Rng = .{ .state = 0x5eed5eed };
+    var num_ties: usize = 0;
+    var text: [64]u8 = undefined;
+    var k: i32 = -325;
+    while (k <= 308) : (k += 1) {
+        for ([_]u32{ default_stream_precision, 1 + rng.next() % 17 }) |precision| {
+            for (0..5) |j| {
+                // D: all nines (the carry), then random digits
+                var digits: u64 = 0;
+                for (0..precision) |d| {
+                    const digit: u64 = if (j == 0) 9 else if (d == 0) 1 + rng.next() % 9 else rng.next() % 10;
+                    digits = digits * 10 + digit;
+                }
+                const tie = std.fmt.bufPrint(&text, "{d}5e{d}", .{ digits, k - @as(i32, @intCast(precision)) }) catch unreachable;
+                const nearest = std.fmt.parseFloat(f64, tie) catch unreachable;
+                if (nearest != 0 and std.math.isFinite(nearest)) {
+                    num_ties += 1;
+                    var step: i64 = -2;
+                    while (step <= 2) : (step += 1) {
+                        const v = ulpStep(nearest, step) orelse continue;
+                        c.checkDouble(v, precision);
+                        if (step == 0) c.checkDoubleAndStream(-v, precision);
+                    }
+                }
+
+                // The same ties for floats (printed as their double value)
+                const nearest_f32 = std.fmt.parseFloat(f32, tie) catch unreachable;
+                if (nearest_f32 != 0 and std.math.isFinite(nearest_f32)) {
+                    var step: i32 = -1;
+                    while (step <= 1) : (step += 1) {
+                        const v = ulpStepF32(nearest_f32, step) orelse continue;
+                        c.checkFloat(v, precision);
+                    }
+                }
+            }
+
+            // The power of 10 (fixed / scientific notation switch at the exponents -5 / -4 and precision - 1 /
+            // precision)
+            const power = std.fmt.bufPrint(&text, "1e{d}", .{k}) catch unreachable;
+            const nearest = std.fmt.parseFloat(f64, power) catch unreachable;
+            if (nearest != 0 and std.math.isFinite(nearest)) {
+                var step: i64 = -2;
+                while (step <= 2) : (step += 1) {
+                    const v = ulpStep(nearest, step) orelse continue;
+                    c.checkDouble(v, precision);
+                }
+            }
+            const nearest_f32 = std.fmt.parseFloat(f32, power) catch unreachable;
+            if (nearest_f32 != 0 and std.math.isFinite(nearest_f32)) {
+                var step: i32 = -1;
+                while (step <= 1) : (step += 1) {
+                    const v = ulpStepF32(nearest_f32, step) orelse continue;
+                    c.checkFloat(v, precision);
+                }
+            }
+        }
+    }
+
+    // Nearly every tie is a finite nonzero double (the exceptions are below the smallest denormal or above the largest
+    // double)
+    try std.testing.expect(num_ties > 6000);
+    try c.finish();
+}
+
+test "Float formatter: special values at every precision" {
+    var c: FloatFormatChecker = .{};
+    const doubles = [_]f64{
+        0.0,                    std.math.inf(f64),      std.math.nan(f64),       9.999995,
+        0.0001,                 1.0e-5,                 123456.5,                1234567.0,
+        999999.5,               1234565.0,              99999.95,                0.00009999995,
+        0.1,                    0.15,                   0.25,                    0.35,
+        0.5,                    1.5,                    2.5,                     1.0e100,
+        1.0e-100,               1.0e21,                 1.0e22,                  123456789012345678.0,
+        std.math.floatMin(f64), std.math.floatMax(f64), 4.9406564584124654e-324, 2.2250738585072009e-308,
+        std.math.floatEps(f64), 1.0 / 3.0,              2.0 / 3.0,               100.0,
+    };
+    const floats = [_]f32{
+        0.0,                    std.math.inf(f32),      std.math.nan(f32), 9.999995,
+        0.0001,                 1.0e-5,                 123456.5,          1234567.0,
+        999999.5,               0.1,                    0.2,               1.0 / 3.0,
+        std.math.floatMin(f32), std.math.floatMax(f32), 1.0e-45,           1.1754942e-38,
+        std.math.floatEps(f32), 16777216.0,             16777215.0,        -9.81,
+    };
+    for (0..18) |precision| {
+        for (doubles) |d| {
+            c.checkDoubleAndStream(d, @intCast(precision));
+            c.checkDoubleAndStream(-d, @intCast(precision));
+        }
+        for (floats) |f| {
+            c.checkFloat(f, @intCast(precision));
+            c.checkFloat(-f, @intCast(precision));
+        }
+    }
+    try c.finish();
+}
+
+test "ConvertToString of the Math types (operator <<)" {
+    var rng: Rng = .{ .state = 0x600dcafe };
+    var checker: Checker = .{ .name = "ConvertToString(Math types)" };
+    var chars: [1024]u8 = undefined;
+    for (0..iterations / 10) |_| {
+        var f: [16]f32 = undefined;
+        for (&f) |*v| v.* = anyFloat(&rng);
+        var d: [3]f64 = undefined;
+        for (&d) |*v| v.* = anyDouble(&rng);
+        const input = .{ .f = f, .d = d };
+
+        const vec3_string = try zolt.convertToString(allocator, Vec3.init(f[0], f[1], f[2]));
+        defer allocator.free(vec3_string);
+        checkString(&checker, input, vec3_string, &chars, jolt.jolt_convert_to_string_vec3(f[0..3], &chars, chars.len));
+
+        const vec4_string = try zolt.convertToString(allocator, Vec4.init(f[0], f[1], f[2], f[3]));
+        defer allocator.free(vec4_string);
+        checkString(&checker, input, vec4_string, &chars, jolt.jolt_convert_to_string_vec4(f[0..4], &chars, chars.len));
+
+        const quat_string = try zolt.convertToString(allocator, Quat.init(f[4], f[5], f[6], f[7]));
+        defer allocator.free(quat_string);
+        checkString(&checker, input, quat_string, &chars, jolt.jolt_convert_to_string_quat(f[4..8], &chars, chars.len));
+
+        const mat44_string = try zolt.convertToString(allocator, Mat44.init(Vec4.init(f[0], f[1], f[2], f[3]), Vec4.init(f[4], f[5], f[6], f[7]), Vec4.init(f[8], f[9], f[10], f[11]), Vec4.init(f[12], f[13], f[14], f[15])));
+        defer allocator.free(mat44_string);
+        checkString(&checker, input, mat44_string, &chars, jolt.jolt_convert_to_string_mat44(&f, &chars, chars.len));
+
+        const float2_string = try zolt.convertToString(allocator, zolt.Float2.init(f[8], f[9]));
+        defer allocator.free(float2_string);
+        checkString(&checker, input, float2_string, &chars, jolt.jolt_convert_to_string_float2(f[8..10], &chars, chars.len));
+
+        const dvec3_string = try zolt.convertToString(allocator, DVec3.init(d[0], d[1], d[2]));
+        defer allocator.free(dvec3_string);
+        checkString(&checker, input, dvec3_string, &chars, jolt.jolt_convert_to_string_dvec3(&d, &chars, chars.len));
+
+        const dmat44_string = try zolt.convertToString(allocator, DMat44.init(Vec4.init(f[0], f[1], f[2], f[3]), Vec4.init(f[4], f[5], f[6], f[7]), Vec4.init(f[8], f[9], f[10], f[11]), DVec3.init(d[0], d[1], d[2])));
+        defer allocator.free(dmat44_string);
+        checkString(&checker, input, dmat44_string, &chars, jolt.jolt_convert_to_string_dmat44(f[0..12], &d, &chars, chars.len));
+    }
+    try checker.finish();
 }
 
 test "ToLower" {
