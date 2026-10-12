@@ -19,18 +19,17 @@
 //!    checks it on both sides, a comment alone becomes false unnoticed when the scene changes.
 //! 2. Add one entry to `scenes` with its name and builder. Every entry is its own test (`SceneTest("name", index)`,
 //!    run one with `zig build parity -Dtest-filter=name`). A scene that Zolt cannot run yet gets
-//!    `.blocked_by = .contacts` (or `.constraints`, `.ccd_hits`, ...): its test returns error.SkipZigTest until
-//!    `Blocker.isSupported` says so (flip it when the wave lands), so the build summary counts it as "skipped", never
-//!    silently. Meanwhile the test "SimScenes blocked scenes run on the C++ side" runs it on the C++ side with 0 and
-//!    3 worker threads and checks that it reaches what it is written for (contact callbacks, constraints).
+//!    `.blocked_by = .contacts` (or `.constraints`, `.hinge_constraints`, `.ccd_hits`, ...): its test returns
+//!    error.SkipZigTest until `Blocker.isSupported` says so (flip it when the wave lands; the constraint blockers flip
+//!    themselves), so the build summary counts it as "skipped", never silently. Meanwhile the test "SimScenes blocked
+//!    scenes run on the C++ side" runs it on the C++ side with 0 and 3 worker threads and checks that it reaches what it
+//!    is written for (contact callbacks, active constraints, its expect_* operations).
 //!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: it runs
 //!    without Zolt's asserts only (ReleaseFast).
 //! 3. A scene with contacts needs nothing else (the C++ side and the Zolt side create every shape kind of `ShapeKind`,
 //!    and the contact listener records are compared already). A new shape kind is a new `ShapeKind` value plus its
-//!    creation in `SimulationReference.cpp` (MakeShape) and `SimulationParity.zig` (makeShapeSettings). Constraints
-//!    are described by `SimConstraint`; the C++ side creates every `ConstraintKind`, the Zolt side the kinds whose class
-//!    is ported (SimulationParity.zig's `makeConstraintSettings` gets a prong when Phase 6 ports the class; until then a
-//!    scene with that kind is skipped and runs on the C++ side alone).
+//!    creation in `SimulationReference.cpp` (MakeShape) and `SimulationParity.zig` (makeShapeSettings). Constraints:
+//!    see "Constraint scenes" below.
 //!    A new operation is a new `OpKind` value plus its prong in ApplyOp (C++) and applyOpInner (Zolt).
 //! 4. Avoid what Jolt asserts (Zolt's Debug build asserts the same): initial velocities above the maximum, a linear
 //!    cast shape without inner radius, invalid scales, a kinematic / dynamic body without mass (a mesh needs
@@ -59,6 +58,79 @@
 //! of the bodies of that batch (sGetCCDBody then reads past mActiveBodyToCCDBody, Zolt asserts in safe builds). More
 //! than 64 sleeping bodies may be woken up by CCD hits in one collision step when each of them is hit by one CCD body
 //! only (`ccd_wake_batch`).
+//!
+//! # Constraint scenes (Phase 6)
+//!
+//! Every Jolt two body constraint class can be described and created, and every one of its setters applied, on both
+//! sides; the C++ side (SimulationReference.cpp) covers all of them since the Phase 6 harness, the Zolt side
+//! (SimulationParity.zig) the classes that are ported.
+//! - **Descriptions.** A `SimConstraint` is the ConstraintSettings members (enabled, priority, step overrides, draw size,
+//!   user data) plus the members of the settings class in `i` / `r` / `f`, laid out per `ConstraintKind` (listed at each
+//!   value; the layout of CSMakeSettings of the constraint parity, ConstraintsReference.cpp, plus the SetRatio helpers of
+//!   Gear / RackAndPinion). `Desc.defaults(kind)` holds the defaults of Jolt's settings class (test "SimScenes
+//!   Desc.defaults are the defaults of Jolt's constraint settings"), `Desc.point`, `Desc.fixedAuto`, `Desc.hinge`, ...
+//!   fill in the geometry of the common setups. Body handle `invalid_handle` is Body::sFixedToWorld (body 1 or body 2).
+//!   `constraint1` / `constraint2` are the constraint handles that a Gear / RackAndPinion gets with SetConstraints.
+//! - **Creation and handles.** `b.constraint(desc)` adds a description and creates the constraint with
+//!   `OpKind.create_constraint` (BodyInterface::CreateConstraint + PhysicsSystem::AddConstraint, returns the number of
+//!   constraints); `b.createConstraintNoAdd(index)` creates one that is added later. Both return a constraint handle
+//!   (the n-th created constraint): both worlds keep a reference to every created constraint, so a removed constraint
+//!   can be added again.
+//! - **Operations.** `b.constraintOp(kind, handle, .{ .i, .f, .r, .body })` adds an operation on a constraint: the
+//!   generic ones (`ConstraintOpRange.generic`: enable, priority, step overrides, user data, NotifyShapeChanged,
+//!   ResetWarmStart, remove / add one or a batch, ActivateConstraint, the hash of GetConstraintSettings, and
+//!   `b.expectConstraintState(handle, state)`, the check that a constraint is (not) active at that point) and the
+//!   setters of each class in the range of its group. They return the `ConstraintState` bits (enabled | active << 1) of
+//!   the constraint, which both sides must agree on. `snapshot` takes the EStateRecorderState bits in i[0] (partial
+//!   states, e.g. the constraints only).
+//! - **Blockers.** A scene declares the constraint kinds it needs with its `Blocker` (`.constraints` for Fixed / Point,
+//!   one per other kind, `.gear_constraints` / `.rack_and_pinion_constraints` include their hinges / slider). They are
+//!   supported as soon as the Zolt class is ported (`ConstraintKind.isPorted`: the settings no longer declare
+//!   `is_stub`), so nothing has to be flipped by hand; until then the scene is skipped and runs on the C++ side alone
+//!   ("SimScenes blocked scenes run on the C++ side": two C++ worlds in lockstep, its expectations, finite results). A
+//!   supported scene that creates a kind that is still a stub fails, and so does a ported class whose slot in
+//!   SimulationParity.zig is still `StubSlot` (error.SceneNotSupported).
+//! - **Expectations.** Every scene with constraints must have active constraints (they are solved);
+//!   `Expect.active_constraints` asks for at least that many in one update. Bodies woken up by a constraint
+//!   (BuildIslands) count in `update_activations`, a constraint island split by the LargeIslandSplitter shows in
+//!   `large_island` when it falls asleep from the final batch of a split island.
+//! - **Rules.** Jolt asserts on: two equal bodies or two invalid body handles in CreateConstraint, removing a constraint
+//!   that is not in the system and adding one that is, a restore of a snapshot taken with other constraints in the
+//!   system (RestoreState reads constraint indices), the limits of the class setters (HingeConstraint::SetLimits,
+//!   SliderConstraint::SetLimits, SetDistance, SetLength, SetHalfConeAngle, SetTargetPathFraction, ...), a motor state
+//!   other than Off with invalid motor settings, SetSliderAxis outside world space, step overrides of 256 or more.
+//!   PathConstraint::GetConstraintSettings is not implemented in Jolt (no `constraint_settings_hash` on a path).
+//!
+//! ## Reserved numbers
+//!
+//! OpKind: 0..52 body and system operations, 53..99 reserved for operations of later phases that are not constraint
+//! operations, 100..102 driver operations, 200..399 constraint operations in ranges of 20 (`ConstraintOpRange`):
+//! 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279 Hinge, 280..299 Slider, 300..319
+//! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare. ConstraintKind:
+//! 0..11 (the order of the Phase 6 plan, not EConstraintSubType: `subType()` maps them), new kinds from 12. Blocker: one
+//! value per kind. `Expect` fields are named, not numbered. The scene table and the builders have one region per
+//! worker group, marked "(append the ... scenes here)".
+//!
+//! ## Recipe for a Phase 6 worker (adding a constraint class to the simulation parity)
+//!
+//! 1. Port the class (FixedConstraint.zig is the template); removing `is_stub` from its settings makes the scenes with
+//!    its Blocker run instead of being skipped.
+//! 2. SimulationParity.zig: replace `const XSlot = StubSlot;` of the group with a struct like `FixedPointSlot`:
+//!    `makeSettings` (the members of the settings class from `i` / `r` / `f`, exactly SimMakeConstraintSettings of
+//!    SimulationReference.cpp), `applyOp` (the operations of the group's range, exactly ApplyConstraintOp of the .cpp,
+//!    `castConstraint` checks the subtype), `stateFields` (the SaveState layout of the class after `enabled`, for the
+//!    state decoder) and for Gear / RackAndPinion `setConstraints`. The tests "SimScenes constraint descriptions are
+//!    ConstraintsParity's" and every scene's `checkConstraintDescriptions` compare the binary state of the settings
+//!    that the slot makes with the C++ ones.
+//! 3. Run `zig build parity -Dtest-filter=constraints_<kind>`: the C++ scene of the group (`constraints_<kind>_ops`,
+//!    every setter of the class) now runs against Zolt, bit exact in the whole thread matrix with the D12 sweeps.
+//! 4. Add scenes of the group in its regions (builders in "---- <group> ----" below, entries in the scene table):
+//!    limits and springs reached, motors in every EMotorState, the class in islands with other kinds and contacts, a
+//!    LargeIslandSplitter island, sleeping bodies, cross save / restore with the class' state, far from the origin.
+//!    A new operation of the class goes into the group's range (`OpKind`, ApplyConstraintOp in the .cpp, the slot's
+//!    `applyOp`); a new generic operation into 214..219.
+//! 5. Prove the scenes bite (break one operation of the class, a scene must fail) and run the parity in Debug,
+//!    ReleaseFast and double precision.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -234,28 +306,177 @@ pub const StepListenerMode = enum(u32) {
     record_only = 3,
 };
 
-/// Constraint kinds (Phase 6: the C++ side creates every kind, the Zolt side the kinds whose class is ported, see
-/// SimulationParity.zig's `constraintKindSupported` / `makeConstraintSettings`; a scene with a kind that is not ported
-/// yet is skipped)
+/// Constraint kinds (Phase 6): every Jolt two body constraint class. The C++ side creates every kind and applies every
+/// operation of `OpKind`; the Zolt side the kinds whose class is ported (`isPorted`, SimulationParity.zig's constraint
+/// slots). A scene that creates a kind whose Zolt class is still a stub declares it with its `Blocker` and is skipped.
+/// The description of each kind (`SimConstraint.i` / `r` / `f`) is listed per value.
 pub const ConstraintKind = enum(u32) {
-    /// FixedConstraintSettings with mAutoDetectPoint = true
+    /// FixedConstraintSettings: i[0] space, i[1] auto detect point; r[0..3] point 1, r[3..6] point 2; f[0..3] axis X1,
+    /// f[3..6] axis Y1, f[6..9] axis X2, f[9..12] axis Y2
     fixed = 0,
-    /// PointConstraintSettings, f[0..3] point1, f[3..6] point2 (world space)
+    /// PointConstraintSettings: i[0] space; r[0..3] point 1, r[3..6] point 2
     point = 1,
-    /// DistanceConstraintSettings, f[0..3] point1, f[3..6] point2, f[6] min distance, f[7] max distance
+    /// DistanceConstraintSettings: i[0] space; r[0..3] point 1, r[3..6] point 2; f[0] min distance, f[1] max distance,
+    /// limits spring i[1] f[2..4]
     distance = 2,
-    /// HingeConstraintSettings, f[0..3] point, f[3..6] hinge axis, f[6..9] normal axis (world space, both bodies)
+    /// HingeConstraintSettings: i[0] space; r[0..3] point 1, r[3..6] point 2; f[0..3] hinge axis 1, f[3..6] normal axis
+    /// 1, f[6..9] hinge axis 2, f[9..12] normal axis 2, f[12] limits min, f[13] limits max, limits spring i[1]
+    /// f[14..16], f[16] max friction torque, motor i[2] f[17..23]
     hinge = 3,
-    /// SliderConstraintSettings with mAutoDetectPoint = true, f[0..3] slider axis
+    /// SliderConstraintSettings: i[0] space, i[1] auto detect point, i[2] != 0: SetSliderAxis(f[0..3]) instead of the
+    /// four axes; r[0..3] point 1, r[3..6] point 2; f[0..3] slider axis 1, f[3..6] normal axis 1, f[6..9] slider axis 2,
+    /// f[9..12] normal axis 2, f[12] limits min, f[13] limits max, limits spring i[3] f[14..16], f[16] max friction
+    /// force, motor i[4] f[17..23]
     slider = 4,
+    /// ConeConstraintSettings: i[0] space; r[0..3] point 1, r[3..6] point 2; f[0..3] twist axis 1, f[3..6] twist axis
+    /// 2, f[6] half cone angle
+    cone = 5,
+    /// SwingTwistConstraintSettings: i[0] space, i[1] swing type; r[0..3] position 1, r[3..6] position 2; f[0..3] twist
+    /// axis 1, f[3..6] plane axis 1, f[6..9] twist axis 2, f[9..12] plane axis 2, f[12] normal half cone angle, f[13]
+    /// plane half cone angle, f[14] twist min angle, f[15] twist max angle, f[16] max friction torque, swing motor i[2]
+    /// f[17..23], twist motor i[3] f[23..29]
+    swing_twist = 6,
+    /// SixDOFConstraintSettings: i[0] space, i[1] swing type; r[0..3] position 1, r[3..6] position 2; f[0..3] axis X1,
+    /// f[3..6] axis Y1, f[6..9] axis X2, f[9..12] axis Y2, f[12..18] max friction, f[18..24] limit min, f[24..30] limit
+    /// max, limits spring of translation axis k (k < 3) i[2 + k] f[30 + 2k .. 32 + 2k], motor of axis k (k < 6) i[5 + k]
+    /// f[36 + 6k .. 42 + 6k]
+    six_dof = 7,
+    /// PathConstraintSettings with a PathConstraintPathHermite: i[1] path is looping, i[2] number of path points (1 ..
+    /// 16), i[3] rotation constraint type, motor i[4]; f[0..3] path position, f[3..7] path rotation, f[7] path fraction,
+    /// f[8] max friction force, motor f[9..15], point p: f[16 + 9p ..] position, tangent, normal
+    path = 8,
+    /// GearConstraintSettings: i[0] space, i[1] != 0: SetRatio(i[2], i[3]) (numbers of teeth) instead of f[6]; f[0..3]
+    /// hinge axis 1, f[3..6] hinge axis 2, f[6] ratio. `SimConstraint.constraint1` / `constraint2`: the two hinges
+    gear = 9,
+    /// RackAndPinionConstraintSettings: i[0] space, i[1] != 0: SetRatio(i[2] teeth of the rack, f[7] rack length, i[3]
+    /// teeth of the pinion) instead of f[6]; f[0..3] hinge axis, f[3..6] slider axis, f[6] ratio. Body 1 is the
+    /// pinion, body 2 the rack; `SimConstraint.constraint1` / `constraint2`: the pinion hinge and the rack slider
+    rack_and_pinion = 10,
+    /// PulleyConstraintSettings: i[0] space; r[0..3] body point 1, r[3..6] fixed point 1, r[6..9] body point 2,
+    /// r[9..12] fixed point 2; f[0] ratio, f[1] min length, f[2] max length
+    pulley = 11,
+
+    /// The Zolt settings class of the kind
+    pub fn Settings(comptime self: ConstraintKind) type {
+        return switch (self) {
+            .fixed => zolt.FixedConstraintSettings,
+            .point => zolt.PointConstraintSettings,
+            .distance => zolt.DistanceConstraintSettings,
+            .hinge => zolt.HingeConstraintSettings,
+            .slider => zolt.SliderConstraintSettings,
+            .cone => zolt.ConeConstraintSettings,
+            .swing_twist => zolt.SwingTwistConstraintSettings,
+            .six_dof => zolt.SixDOFConstraintSettings,
+            .path => zolt.PathConstraintSettings,
+            .gear => zolt.GearConstraintSettings,
+            .rack_and_pinion => zolt.RackAndPinionConstraintSettings,
+            .pulley => zolt.PulleyConstraintSettings,
+        };
+    }
+
+    /// True when the Zolt class of the kind is ported: its settings no longer declare the stub marker `is_stub` (a
+    /// path needs PathConstraintPathHermite too)
+    pub fn isPorted(self: ConstraintKind) bool {
+        return switch (self) {
+            .path => !@hasDecl(zolt.PathConstraintSettings, "is_stub") and !@hasDecl(zolt.PathConstraintPathHermite, "is_stub"),
+            inline else => |k| !@hasDecl(k.Settings(), "is_stub"),
+        };
+    }
+
+    /// The EConstraintSubType value (the kind numbers of ConstraintsParity.zig / ConstraintsReference.cpp)
+    pub fn subType(self: ConstraintKind) u32 {
+        return switch (self) {
+            .fixed => 0,
+            .point => 1,
+            .hinge => 2,
+            .slider => 3,
+            .distance => 4,
+            .cone => 5,
+            .swing_twist => 6,
+            .six_dof => 7,
+            .path => 8,
+            .rack_and_pinion => 10,
+            .gear => 11,
+            .pulley => 12,
+        };
+    }
 };
 
-/// A two body constraint (added with `OpKind.create_constraint`). Body handle `invalid_handle` is Body::sFixedToWorld.
+/// EConstraintSpace values for `SimConstraint.i[0]`
+pub const ConstraintSpace = struct {
+    pub const local_to_body_com: u32 = 0;
+    pub const world_space: u32 = 1;
+};
+
+/// A two body constraint, created with `OpKind.create_constraint` (or `create_constraint_no_add`): the
+/// ConstraintSettings members plus the members of the settings class in `i` / `r` / `f` (the layout of each kind is
+/// listed at `ConstraintKind`; it is the layout of CSMakeSettings in ConstraintsReference.cpp, plus the SetRatio
+/// helpers of Gear / RackAndPinion, checked by "SimScenes constraint descriptions are ConstraintsParity's"). A spring is
+/// its mode in `i` and frequency / stiffness, damping in `f`; a motor is its spring mode in `i` and frequency /
+/// stiffness, damping, min / max force limit, min / max torque limit in `f`.
 pub const SimConstraint = extern struct {
+    /// ConstraintKind
     kind: u32,
-    body1: u32,
-    body2: u32,
-    f: [16]f32 = @splat(0),
+    /// Body handles, `invalid_handle`: Body::sFixedToWorld (BodyInterface::CreateConstraint with an invalid BodyID)
+    body1: u32 = invalid_handle,
+    body2: u32 = invalid_handle,
+    /// Gear / RackAndPinion: SetConstraints(constraint handle `constraint1`, constraint handle `constraint2`) after the
+    /// creation, before AddConstraint (`invalid_handle`: nullptr; SetConstraints is not called when both are invalid)
+    constraint1: u32 = invalid_handle,
+    constraint2: u32 = invalid_handle,
+    /// The ConstraintSettings members (Jolt's defaults)
+    enabled: u32 = 1,
+    constraint_priority: u32 = 0,
+    num_velocity_steps_override: u32 = 0,
+    num_position_steps_override: u32 = 0,
+    draw_constraint_size: f32 = 1.0,
+    user_data: u64 = 0,
+    /// The members of the settings class, per ConstraintKind
+    i: [32]u32 = @splat(0),
+    r: [12]Real = @splat(0),
+    f: [192]f32 = @splat(0),
+};
+
+/// The result bits of a constraint operation: GetEnabled() | IsActive() << 1 of the constraint afterwards
+pub const ConstraintState = struct {
+    pub const enabled: u32 = 1;
+    pub const active: u32 = 2;
+    /// Enabled, but neither body is active (or neither is dynamic)
+    pub const inactive: u32 = enabled;
+};
+
+/// The reserved OpKind ranges of the constraint operations (Phase 6, see the file header): every worker group adds its
+/// operations in its own range only, so that branches never clash
+pub const ConstraintOpRange = enum(u32) {
+    /// Operations of every constraint (Constraint, TwoBodyConstraint, PhysicsSystem / BodyInterface constraint functions)
+    generic = 200,
+    /// FixedConstraint / PointConstraint
+    fixed_point = 220,
+    /// DistanceConstraint / PulleyConstraint
+    distance_pulley = 240,
+    /// HingeConstraint
+    hinge = 260,
+    /// SliderConstraint
+    slider = 280,
+    /// ConeConstraint / SwingTwistConstraint
+    cone_swing_twist = 300,
+    /// SixDOFConstraint
+    six_dof = 320,
+    /// PathConstraint (+ PathConstraintPathHermite)
+    path = 340,
+    /// GearConstraint / RackAndPinionConstraint
+    gear_rack_and_pinion = 360,
+    /// Spare (380..399), unassigned
+    spare = 380,
+
+    /// Each range has 20 numbers
+    pub const size: u32 = 20;
+
+    /// The range of an operation number (null: not a constraint operation)
+    pub fn of(op: u32) ?ConstraintOpRange {
+        if (op < 200 or op >= 400) return null;
+        return @enumFromInt(200 + (op - 200) / size * size);
+    }
 };
 
 /// Operations between the updates. Unless noted otherwise they go through the locking BodyInterface, `body` is a body
@@ -353,7 +574,9 @@ pub const OpKind = enum(u32) {
     set_user_data = 42,
     /// SetFriction(f[0]), SetRestitution(f[1]) (no effect on the gravity path, for the contact scenes)
     set_friction_and_restitution = 43,
-    /// CreateConstraint(constraints[index]) + PhysicsSystem::AddConstraint (Phase 6)
+    /// BodyInterface::CreateConstraint(constraints[index]) (+ SetConstraints of a Gear / RackAndPinion) +
+    /// PhysicsSystem::AddConstraint (Phase 6). The constraint gets the next constraint handle (the harness keeps a
+    /// reference to it, so it can be removed and added again); returns the number of constraints of the system
     create_constraint = 44,
     /// SetShape(shapes[index], update mass properties = count != 0, activation)
     set_shape = 45,
@@ -376,12 +599,179 @@ pub const OpKind = enum(u32) {
     were_bodies_in_contact = 51,
     /// Body::SetCollideKinematicVsNonDynamic(count != 0) under a BodyLockWrite (BodyInterface has no setter)
     set_collide_kinematic_vs_non_dynamic = 52,
+    // 53..99: reserved for operations of later phases that are not constraint operations
+
     /// Driver: the following updates use delta time f[0] and `count` collision steps
     set_update = 100,
-    /// Driver: both sides save their state in slot `index`
+    /// Driver: both sides save their state in slot `index` (the EStateRecorderState bits i[0], 0: All)
     snapshot = 101,
     /// Driver: Zolt restores the C++ state of slot `index` and C++ the Zolt state (RestoreState, not validating)
     restore_cross = 102,
+
+    // Constraint operations (Phase 6), in the reserved ranges of `ConstraintOpRange`. `index` is a constraint handle (the
+    // n-th constraint created by create_constraint / create_constraint_no_add), `i` holds the integer arguments, `f` /
+    // `r` the others. Unless noted otherwise they return the `ConstraintState` bits of the constraint afterwards. The
+    // class operations check the subtype of the constraint (a scene error otherwise).
+
+    // ---- ConstraintOpRange.generic (200..219) ----
+    /// Constraint::SetEnabled(i[0] != 0)
+    set_constraint_enabled = 200,
+    /// Constraint::SetConstraintPriority(i[0])
+    set_constraint_priority = 201,
+    /// Constraint::SetNumVelocityStepsOverride(i[0]), SetNumPositionStepsOverride(i[1]) (both < 256)
+    set_constraint_steps_override = 202,
+    /// Constraint::SetUserData(i[0] | i[1] << 32) (the state filter of the end of a scene reads the user data)
+    set_constraint_user_data = 203,
+    /// Constraint::NotifyShapeChanged(body handle `body`, delta COM f[0..3]) (`invalid_handle`: an invalid BodyID, which
+    /// is neither body of the constraint)
+    notify_constraint_shape_changed = 204,
+    /// Constraint::ResetWarmStart
+    reset_constraint_warm_start = 205,
+    /// PhysicsSystem::RemoveConstraint (the harness keeps its reference); returns the number of constraints of the system
+    remove_constraint = 206,
+    /// PhysicsSystem::AddConstraint of a constraint that is not in the system; returns the number of constraints
+    add_constraint = 207,
+    /// PhysicsSystem::RemoveConstraints of the handles [index, index + i[0]); returns the number of constraints
+    remove_constraints = 208,
+    /// PhysicsSystem::AddConstraints of the handles [index, index + i[0]); returns the number of constraints
+    add_constraints = 209,
+    /// BodyInterface::ActivateConstraint
+    activate_constraint = 210,
+    /// BodyInterface::CreateConstraint(constraints[index]) (+ SetConstraints) without adding it to the system (add it
+    /// with add_constraint / add_constraints): the next constraint handle; returns its ConstraintState bits
+    create_constraint_no_add = 211,
+    /// A check of the scene: changes nothing, the driver fails unless the ConstraintState bits are i[0]
+    /// (`SceneBuilder.expectConstraintState`)
+    expect_constraint_state = 212,
+    /// Returns the FNV-1a hash (`hashBytes`) of the SaveBinaryState bytes of GetConstraintSettings (not for a
+    /// PathConstraint: Jolt's PathConstraint::GetConstraintSettings is not implemented)
+    constraint_settings_hash = 213,
+    // 214..219: free for generic constraint operations
+
+    // ---- ConstraintOpRange.fixed_point (220..239) ----
+    /// PointConstraint::SetPoint1(EConstraintSpace(i[0]), r)
+    point_set_point1 = 220,
+    /// PointConstraint::SetPoint2(EConstraintSpace(i[0]), r)
+    point_set_point2 = 221,
+
+    // ---- ConstraintOpRange.distance_pulley (240..259) ----
+    /// DistanceConstraint::SetDistance(f[0], f[1])
+    distance_set_distance = 240,
+    /// DistanceConstraint::SetLimitsSpringSettings(spring i[0] f[0..2])
+    distance_set_limits_spring_settings = 241,
+    /// PulleyConstraint::SetLength(f[0], f[1])
+    pulley_set_length = 250,
+
+    // ---- ConstraintOpRange.hinge (260..279) ----
+    /// HingeConstraint::SetMaxFrictionTorque(f[0])
+    hinge_set_max_friction_torque = 260,
+    /// HingeConstraint::SetMotorState(EMotorState(i[0]))
+    hinge_set_motor_state = 261,
+    /// HingeConstraint::SetTargetAngularVelocity(f[0])
+    hinge_set_target_angular_velocity = 262,
+    /// HingeConstraint::SetTargetAngle(f[0])
+    hinge_set_target_angle = 263,
+    /// HingeConstraint::SetTargetOrientationBS(f[0..4])
+    hinge_set_target_orientation_bs = 264,
+    /// HingeConstraint::SetLimits(f[0], f[1])
+    hinge_set_limits = 265,
+    /// HingeConstraint::SetLimitsSpringSettings(spring i[0] f[0..2])
+    hinge_set_limits_spring_settings = 266,
+    /// HingeConstraint::GetMotorSettings() = motor i[0] f[0..6]
+    hinge_set_motor_settings = 267,
+
+    // ---- ConstraintOpRange.slider (280..299) ----
+    /// SliderConstraint::SetMaxFrictionForce(f[0])
+    slider_set_max_friction_force = 280,
+    /// SliderConstraint::SetMotorState(EMotorState(i[0]))
+    slider_set_motor_state = 281,
+    /// SliderConstraint::SetTargetVelocity(f[0])
+    slider_set_target_velocity = 282,
+    /// SliderConstraint::SetTargetPosition(f[0])
+    slider_set_target_position = 283,
+    /// SliderConstraint::SetLimits(f[0], f[1])
+    slider_set_limits = 284,
+    /// SliderConstraint::SetLimitsSpringSettings(spring i[0] f[0..2])
+    slider_set_limits_spring_settings = 285,
+    /// SliderConstraint::GetMotorSettings() = motor i[0] f[0..6]
+    slider_set_motor_settings = 286,
+
+    // ---- ConstraintOpRange.cone_swing_twist (300..319) ----
+    /// ConeConstraint::SetHalfConeAngle(f[0])
+    cone_set_half_cone_angle = 300,
+    /// SwingTwistConstraint::SetNormalHalfConeAngle(f[0])
+    swing_twist_set_normal_half_cone_angle = 305,
+    /// SwingTwistConstraint::SetPlaneHalfConeAngle(f[0])
+    swing_twist_set_plane_half_cone_angle = 306,
+    /// SwingTwistConstraint::SetTwistMinAngle(f[0])
+    swing_twist_set_twist_min_angle = 307,
+    /// SwingTwistConstraint::SetTwistMaxAngle(f[0])
+    swing_twist_set_twist_max_angle = 308,
+    /// SwingTwistConstraint::SetMaxFrictionTorque(f[0])
+    swing_twist_set_max_friction_torque = 309,
+    /// SwingTwistConstraint::SetSwingMotorState(EMotorState(i[0]))
+    swing_twist_set_swing_motor_state = 310,
+    /// SwingTwistConstraint::SetTwistMotorState(EMotorState(i[0]))
+    swing_twist_set_twist_motor_state = 311,
+    /// SwingTwistConstraint::SetTargetAngularVelocityCS(f[0..3])
+    swing_twist_set_target_angular_velocity_cs = 312,
+    /// SwingTwistConstraint::SetTargetAngularVelocityBS(f[0..3])
+    swing_twist_set_target_angular_velocity_bs = 313,
+    /// SwingTwistConstraint::SetTargetOrientationCS(f[0..4])
+    swing_twist_set_target_orientation_cs = 314,
+    /// SwingTwistConstraint::SetTargetOrientationBS(f[0..4])
+    swing_twist_set_target_orientation_bs = 315,
+    /// SwingTwistConstraint::GetSwingMotorSettings() = motor i[0] f[0..6]
+    swing_twist_set_swing_motor_settings = 316,
+    /// SwingTwistConstraint::GetTwistMotorSettings() = motor i[0] f[0..6]
+    swing_twist_set_twist_motor_settings = 317,
+
+    // ---- ConstraintOpRange.six_dof (320..339) ----
+    /// SixDOFConstraint::SetTranslationLimits(f[0..3], f[3..6])
+    six_dof_set_translation_limits = 320,
+    /// SixDOFConstraint::SetRotationLimits(f[0..3], f[3..6])
+    six_dof_set_rotation_limits = 321,
+    /// SixDOFConstraint::SetLimitsSpringSettings(EAxis(i[0]), spring i[1] f[0..2]) (a translation axis)
+    six_dof_set_limits_spring_settings = 322,
+    /// SixDOFConstraint::SetMaxFriction(EAxis(i[0]), f[0])
+    six_dof_set_max_friction = 323,
+    /// SixDOFConstraint::SetMotorState(EAxis(i[0]), EMotorState(i[1]))
+    six_dof_set_motor_state = 324,
+    /// SixDOFConstraint::SetTargetVelocityCS(f[0..3])
+    six_dof_set_target_velocity_cs = 325,
+    /// SixDOFConstraint::SetTargetAngularVelocityCS(f[0..3])
+    six_dof_set_target_angular_velocity_cs = 326,
+    /// SixDOFConstraint::SetTargetPositionCS(f[0..3])
+    six_dof_set_target_position_cs = 327,
+    /// SixDOFConstraint::SetTargetOrientationCS(f[0..4])
+    six_dof_set_target_orientation_cs = 328,
+    /// SixDOFConstraint::SetTargetOrientationBS(f[0..4])
+    six_dof_set_target_orientation_bs = 329,
+    /// SixDOFConstraint::GetMotorSettings(EAxis(i[0])) = motor i[1] f[0..6]
+    six_dof_set_motor_settings = 330,
+
+    // ---- ConstraintOpRange.path (340..359) ----
+    /// PathConstraint::SetPath(i[0] != 0? a new PathConstraintPathHermite from the path of constraints[i[1]] (a
+    /// description of kind path) : nullptr, path fraction f[0]) (a constraint without path is not active)
+    path_set_path = 340,
+    /// PathConstraint::SetMaxFrictionForce(f[0])
+    path_set_max_friction_force = 341,
+    /// PathConstraint::SetPositionMotorState(EMotorState(i[0]))
+    path_set_position_motor_state = 342,
+    /// PathConstraint::SetTargetVelocity(f[0])
+    path_set_target_velocity = 343,
+    /// PathConstraint::SetTargetPathFraction(f[0])
+    path_set_target_path_fraction = 344,
+    /// PathConstraint::GetPositionMotorSettings() = motor i[0] f[0..6]
+    path_set_position_motor_settings = 345,
+
+    // ---- ConstraintOpRange.gear_rack_and_pinion (360..379) ----
+    /// GearConstraint::SetConstraints(constraint handle i[0], constraint handle i[1]) (`invalid_handle`: nullptr)
+    gear_set_constraints = 360,
+    /// RackAndPinionConstraint::SetConstraints(pinion constraint handle i[0], rack constraint handle i[1])
+    rack_and_pinion_set_constraints = 370,
+
+    // ---- ConstraintOpRange.spare (380..399): unassigned ----
 };
 
 /// An operation, applied before update `update`
@@ -392,6 +782,8 @@ pub const SimOp = extern struct {
     count: u32 = 0,
     activation: u32 = 0,
     index: u32 = 0,
+    /// Integer arguments (the constraint operations, the state bits of `snapshot`)
+    i: [4]u32 = @splat(0),
     f: [16]f32 = @splat(0),
     r: [3]Real = @splat(0),
 };
@@ -600,9 +992,8 @@ pub const Blocker = enum {
     none,
     /// Body pairs reach the narrow phase: ProcessBodyPair and the contact solver (A4, Wave B R2 / R3, supported)
     contacts,
-    /// Constraints in islands: the constraint classes (Phase 6) and the solver (Wave B R3). Supported since the Phase 6
-    /// foundation: a scene whose ConstraintKinds are not all ported in Zolt yet is skipped by SimulationParity.zig's
-    /// `sceneConstraintsSupported` (and runs on the C++ side alone), independent of this blocker
+    /// Constraints in islands with FixedConstraint / PointConstraint (Phase 6 foundation, supported). A scene that
+    /// creates other kinds names the blocker of its kind below.
     constraints,
     /// Linear cast bodies that hit something (Wave B R4, supported)
     ccd_hits,
@@ -612,12 +1003,39 @@ pub const Blocker = enum {
     /// ignores: it compares Jolt's release behavior and runs only without Zolt's asserts (ReleaseFast)
     release_only,
 
+    // Phase 6, one blocker per constraint kind: supported as soon as the Zolt class is ported (ConstraintKind.isPorted,
+    // nothing to flip by hand). A scene with several kinds names the blocker that needs all of them (gear: gear and
+    // hinge; rack and pinion: rack and pinion, hinge and slider) or, for other combinations, the kind of the group that
+    // runs it. SimulationParity's runEntry fails a supported scene that creates a kind that is still a stub.
+    distance_constraints,
+    pulley_constraints,
+    hinge_constraints,
+    slider_constraints,
+    cone_constraints,
+    swing_twist_constraints,
+    six_dof_constraints,
+    path_constraints,
+    /// GearConstraint between two hinges: GearConstraint and HingeConstraint
+    gear_constraints,
+    /// RackAndPinionConstraint between a hinge and a slider: RackAndPinionConstraint, HingeConstraint, SliderConstraint
+    rack_and_pinion_constraints,
+
     /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
             .none, .contacts, .ccd_hits, .constraints => true,
             .release_only => !zolt.Core.enable_asserts,
             .soft_bodies => false,
+            .distance_constraints => ConstraintKind.distance.isPorted(),
+            .pulley_constraints => ConstraintKind.pulley.isPorted(),
+            .hinge_constraints => ConstraintKind.hinge.isPorted(),
+            .slider_constraints => ConstraintKind.slider.isPorted(),
+            .cone_constraints => ConstraintKind.cone.isPorted(),
+            .swing_twist_constraints => ConstraintKind.swing_twist.isPorted(),
+            .six_dof_constraints => ConstraintKind.six_dof.isPorted(),
+            .path_constraints => ConstraintKind.path.isPorted(),
+            .gear_constraints => ConstraintKind.gear.isPorted() and ConstraintKind.hinge.isPorted(),
+            .rack_and_pinion_constraints => ConstraintKind.rack_and_pinion.isPorted() and ConstraintKind.hinge.isPorted() and ConstraintKind.slider.isPorted(),
         };
     }
 };
@@ -654,6 +1072,11 @@ pub const Expect = struct {
     /// not by the operations before it: woken up by contacts or CCD hits; more than 64 CCD hits on sleeping bodies in
     /// one collision step fill the batch of JobResolveCCDContacts)
     update_activations: u32 = 0,
+    /// Phase 6: at least this many constraints are active (solved) in one update (Zolt side: the constraints of the
+    /// system whose IsActive() is true before the update, as DetermineActiveConstraints sees them). Bodies woken up by
+    /// a constraint (TwoBodyConstraint::BuildIslands activates the sleeping body of an active constraint) count in
+    /// `update_activations` (in a scene without contacts they are the only activations from inside an update).
+    active_constraints: u32 = 0,
 };
 
 /// The capacity of the manifold array of ProcessBodyPair's ReductionCollideShapeCollector (Jolt:
@@ -801,13 +1224,52 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "physics_tests_switch_use_manifold_reduction_2", .build = buildTestsSwitchUseManifoldReduction(2), .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "physics_tests_apply_body_creation_settings", .build = buildTestsApplyBodyCreationSettings, .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
 
-    // Constraints (Phase 6): scenes with a constraint kind that Zolt does not have yet are skipped
+    // Constraints (Phase 6), one region per worker group (append a group's scenes at the end of its region only)
+    // ---- Fixed / Point (Phase 6 foundation) ----
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
     .{ .name = "constraints_fixed", .build = buildConstraintsFixed, .blocked_by = .constraints, .sweep_stride = 10 },
     .{ .name = "constraints_pendulum_hits_stack", .build = buildConstraintsPendulumHitsStack, .blocked_by = .constraints, .sweep_stride = 15, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "constraints_net_splitter", .build = buildConstraintsNet, .blocked_by = .constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
     .{ .name = "constraints_sleep_and_wake", .build = buildConstraintsSleepAndWake, .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .sleeping = true } },
     .{ .name = "constraints_save_restore_and_settings", .build = buildConstraintsSaveRestore, .blocked_by = .constraints, .sweep_stride = 15 },
+    .{ .name = "constraints_ragdoll_pile", .build = buildConstraintsRagdollPile, .blocked_by = .constraints, .sweep_stride = 50, .expect = .{ .contacts = true, .active_constraints = 88 } },
+    .{ .name = "constraints_ragdolls_lying_splitter", .build = buildConstraintsRagdollsLying, .blocked_by = .constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .active_constraints = 95 } },
+    .{ .name = "constraints_world_and_static_bodies", .build = buildConstraintsWorldAndStatic, .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 7 } },
+    .{ .name = "constraints_curtain_and_hub_splitter", .build = buildConstraintsCurtain, .blocked_by = .constraints, .sweep_stride = 40, .expect = .{ .sleeping = true, .large_island = true, .active_constraints = 276 + 131 } },
+    .{ .name = "constraints_enable_disable_remove", .build = buildConstraintsEnableRemove, .blocked_by = .constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 15 } },
+    .{ .name = "constraints_priorities_and_step_overrides", .build = buildConstraintsPriorities, .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 18 } },
+    .{ .name = "constraints_sleeping_bodies", .build = buildConstraintsSleepingBodies, .blocked_by = .constraints, .sweep_stride = 5, .expect = .{ .sleeping = true, .update_activations = 2 } },
+    .{ .name = "constraints_partial_states", .build = buildConstraintsPartialStates, .blocked_by = .constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 5 } },
+    .{ .name = "constraints_collision_steps_2", .build = buildConstraintsCollisionSteps(2), .blocked_by = .constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_collision_steps_3", .build = buildConstraintsCollisionSteps(3), .blocked_by = .constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_far_from_origin", .build = buildConstraintsFarFromOrigin, .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_random_1", .build = buildConstraintsRandom(1), .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_random_2", .build = buildConstraintsRandom(2), .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    // (append the Fixed / Point scenes here)
+    // ---- Distance / Pulley ----
+    .{ .name = "constraints_distance_ops", .build = buildDistanceOps, .blocked_by = .distance_constraints, .expect = .{ .active_constraints = 2 } },
+    .{ .name = "constraints_pulley_ops", .build = buildPulleyOps, .blocked_by = .pulley_constraints, .expect = .{ .active_constraints = 2 } },
+    // (append the distance / pulley scenes here)
+    // ---- Hinge ----
+    .{ .name = "constraints_hinge_ops", .build = buildHingeOps, .blocked_by = .hinge_constraints, .expect = .{ .active_constraints = 3 } },
+    // (append the hinge scenes here)
+    // ---- Slider ----
+    .{ .name = "constraints_slider_ops", .build = buildSliderOps, .blocked_by = .slider_constraints, .expect = .{ .active_constraints = 3 } },
+    // (append the slider scenes here)
+    // ---- Cone / SwingTwist ----
+    .{ .name = "constraints_cone_ops", .build = buildConeOps, .blocked_by = .cone_constraints, .expect = .{ .active_constraints = 2 } },
+    .{ .name = "constraints_swing_twist_ops", .build = buildSwingTwistOps, .blocked_by = .swing_twist_constraints, .expect = .{ .active_constraints = 2 } },
+    // (append the cone / swing twist scenes here)
+    // ---- SixDOF ----
+    .{ .name = "constraints_six_dof_ops", .build = buildSixDOFOps, .blocked_by = .six_dof_constraints, .expect = .{ .active_constraints = 2 } },
+    // (append the six dof scenes here)
+    // ---- Path ----
+    .{ .name = "constraints_path_ops", .build = buildPathOps, .blocked_by = .path_constraints, .expect = .{ .active_constraints = 2 } },
+    // (append the path scenes here)
+    // ---- Gear / RackAndPinion ----
+    .{ .name = "constraints_gear_ops", .build = buildGearOps, .blocked_by = .gear_constraints, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_rack_and_pinion_ops", .build = buildRackAndPinionOps, .blocked_by = .rack_and_pinion_constraints, .expect = .{ .active_constraints = 6 } },
+    // (append the gear / rack and pinion scenes here)
 };
 
 /// A built scene: the description plus the operations and the update parameters (the memory is owned by the builder)
@@ -841,6 +1303,8 @@ pub const SceneBuilder = struct {
     current_update: u32 = 0,
     /// Number of body handles created so far
     num_handles: u32 = 0,
+    /// Number of constraint handles created so far (create_constraint, create_constraint_no_add)
+    num_constraint_handles: u32 = 0,
     /// Random numbers for the scenes (xorshift32, deterministic)
     rng: u32 = 0x9e3779b9,
 
@@ -1015,8 +1479,9 @@ pub const SceneBuilder = struct {
         return @intCast(self.step_listeners.items.len - 1);
     }
 
-    pub fn addConstraint(self: *SceneBuilder, constraint: SimConstraint) Allocator.Error!u32 {
-        try self.constraints.append(self.allocator, constraint);
+    /// Add a constraint description (create it with `createConstraint`), returns its index
+    pub fn addConstraint(self: *SceneBuilder, desc_value: SimConstraint) Allocator.Error!u32 {
+        try self.constraints.append(self.allocator, desc_value);
         return @intCast(self.constraints.items.len - 1);
     }
 
@@ -1039,6 +1504,7 @@ pub const SceneBuilder = struct {
         count: u32 = 0,
         activation: Activation = .activate,
         index: u32 = 0,
+        i: []const u32 = &.{},
         f: []const f32 = &.{},
         r: [3]Real = @splat(0),
     };
@@ -1048,8 +1514,53 @@ pub const SceneBuilder = struct {
     /// Add an operation on body handle `body` (invalid_handle for system operations)
     pub fn op(self: *SceneBuilder, kind: OpKind, handle: u32, args: OpArgs) Allocator.Error!void {
         var o: SimOp = .{ .update = self.current_update, .kind = @intFromEnum(kind), .body = handle, .count = args.count, .activation = @intFromEnum(args.activation), .index = args.index, .r = args.r };
+        @memcpy(o.i[0..args.i.len], args.i);
         @memcpy(o.f[0..args.f.len], args.f);
         try self.ops.append(self.allocator, o);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Constraints (Phase 6)
+
+    pub const ConstraintOpArgs = struct {
+        /// The body handle of notify_constraint_shape_changed
+        body: u32 = invalid_handle,
+        i: []const u32 = &.{},
+        f: []const f32 = &.{},
+        r: [3]Real = @splat(0),
+    };
+
+    /// Add a constraint operation (`OpKind` 200..399) on constraint handle `constraint_handle`
+    pub fn constraintOp(self: *SceneBuilder, kind: OpKind, constraint_handle: u32, args: ConstraintOpArgs) Allocator.Error!void {
+        std.debug.assert(ConstraintOpRange.of(@intFromEnum(kind)) != null);
+        return self.op(kind, args.body, .{ .index = constraint_handle, .i = args.i, .f = args.f, .r = args.r });
+    }
+
+    /// Create the constraint of description `desc_index` and add it to the system (create_constraint), returns its
+    /// constraint handle
+    pub fn createConstraint(self: *SceneBuilder, desc_index: u32) Allocator.Error!u32 {
+        try self.sysOp(.create_constraint, .{ .index = desc_index });
+        self.num_constraint_handles += 1;
+        return self.num_constraint_handles - 1;
+    }
+
+    /// Create the constraint of description `desc_index` without adding it (create_constraint_no_add), returns its
+    /// constraint handle
+    pub fn createConstraintNoAdd(self: *SceneBuilder, desc_index: u32) Allocator.Error!u32 {
+        try self.op(.create_constraint_no_add, invalid_handle, .{ .index = desc_index });
+        self.num_constraint_handles += 1;
+        return self.num_constraint_handles - 1;
+    }
+
+    /// Add a constraint description and create the constraint (create_constraint), returns its constraint handle
+    pub fn constraint(self: *SceneBuilder, desc_value: SimConstraint) Allocator.Error!u32 {
+        return self.createConstraint(try self.addConstraint(desc_value));
+    }
+
+    /// The ConstraintState bits of a constraint must be `state` at this point (`ConstraintState.active`, ...): the driver
+    /// checks it on both sides
+    pub fn expectConstraintState(self: *SceneBuilder, constraint_handle: u32, state: u32) Allocator.Error!void {
+        return self.constraintOp(.expect_constraint_state, constraint_handle, .{ .i = &.{state} });
     }
 
     /// A system operation
@@ -4346,7 +4857,323 @@ fn buildSensorVsStatic(b: *SceneBuilder) Allocator.Error!void {
 }
 
 // -------------------------------------------------------------------------------------------------------------------
-// Scenes of the later waves
+// Constraint scenes (Phase 6)
+//
+// Descriptions: `Desc.defaults(kind)` is a description with Jolt's defaults of the settings class (world space, the
+// default axes, limits, springs and motors), the other `Desc` functions fill in the geometry of the common setups. A
+// scene changes the remaining members in `i` / `r` / `f` (the layout is listed at ConstraintKind) before
+// `b.constraint(desc)` creates the constraint.
+
+/// Descriptions of constraints (`SimConstraint`)
+pub const Desc = struct {
+    const x_axis: [3]f32 = .{ 1, 0, 0 };
+    const y_axis: [3]f32 = .{ 0, 1, 0 };
+
+    /// Jolt's default SpringSettings: FrequencyAndDamping, frequency 0, damping 0
+    pub fn setSpring(c: *SimConstraint, i_index: usize, f_index: usize, mode: u32, frequency: f32, damping: f32) void {
+        c.i[i_index] = mode;
+        c.f[f_index] = frequency;
+        c.f[f_index + 1] = damping;
+    }
+
+    /// A MotorSettings: the spring (mode, frequency / stiffness, damping), min / max force limit, min / max torque limit
+    pub fn setMotor(c: *SimConstraint, i_index: usize, f_index: usize, mode: u32, values: [6]f32) void {
+        c.i[i_index] = mode;
+        @memcpy(c.f[f_index..][0..6], &values);
+    }
+
+    /// Jolt's default MotorSettings (spring FrequencyAndDamping, frequency 2, damping 1, no force / torque limits)
+    pub const default_motor: [6]f32 = .{ 2, 1, -flt_max, flt_max, -flt_max, flt_max };
+
+    fn set3(dst: []f32, v: [3]f32) void {
+        @memcpy(dst[0..3], &v);
+    }
+
+    fn setR3(dst: []Real, v: [3]Real) void {
+        @memcpy(dst[0..3], &v);
+    }
+
+    /// A description with the defaults of Jolt's settings class of `kind` (the members a constructor sets in C++)
+    pub fn defaults(kind: ConstraintKind) SimConstraint {
+        var c: SimConstraint = .{ .kind = @intFromEnum(kind) };
+        c.i[0] = ConstraintSpace.world_space; // mSpace = EConstraintSpace::WorldSpace (unused by the path)
+        switch (kind) {
+            .point, .pulley => {},
+            .fixed => {
+                set3(c.f[0..], x_axis);
+                set3(c.f[3..], y_axis);
+                set3(c.f[6..], x_axis);
+                set3(c.f[9..], y_axis);
+            },
+            .distance => {
+                c.f[0] = -1.0; // mMinDistance
+                c.f[1] = -1.0; // mMaxDistance
+            },
+            .hinge => {
+                set3(c.f[0..], y_axis);
+                set3(c.f[3..], x_axis);
+                set3(c.f[6..], y_axis);
+                set3(c.f[9..], x_axis);
+                c.f[12] = -std.math.pi; // -JPH_PI
+                c.f[13] = std.math.pi;
+                setMotor(&c, 2, 17, 0, default_motor);
+            },
+            .slider => {
+                set3(c.f[0..], x_axis);
+                set3(c.f[3..], y_axis);
+                set3(c.f[6..], x_axis);
+                set3(c.f[9..], y_axis);
+                c.f[12] = -flt_max;
+                c.f[13] = flt_max;
+                setMotor(&c, 4, 17, 0, default_motor);
+            },
+            .cone => {
+                set3(c.f[0..], x_axis);
+                set3(c.f[3..], x_axis);
+            },
+            .swing_twist => {
+                set3(c.f[0..], x_axis);
+                set3(c.f[3..], y_axis);
+                set3(c.f[6..], x_axis);
+                set3(c.f[9..], y_axis);
+                setMotor(&c, 2, 17, 0, default_motor);
+                setMotor(&c, 3, 23, 0, default_motor);
+            },
+            .six_dof => {
+                set3(c.f[0..], x_axis);
+                set3(c.f[3..], y_axis);
+                set3(c.f[6..], x_axis);
+                set3(c.f[9..], y_axis);
+                @memset(c.f[18..24], -flt_max);
+                @memset(c.f[24..30], flt_max);
+                for (0..6) |a| setMotor(&c, 5 + a, 36 + 6 * a, 0, default_motor);
+            },
+            .path => {
+                c.f[6] = 1.0; // mPathRotation = identity (x, y, z, w)
+                setMotor(&c, 4, 9, 0, default_motor);
+            },
+            .gear, .rack_and_pinion => {
+                set3(c.f[0..], x_axis);
+                set3(c.f[3..], x_axis);
+                c.f[6] = 1.0; // mRatio
+            },
+        }
+        if (kind == .pulley) {
+            c.f[0] = 1.0; // mRatio
+            c.f[1] = 0.0; // mMinLength
+            c.f[2] = -1.0; // mMaxLength
+        }
+        return c;
+    }
+
+    /// FixedConstraintSettings with mAutoDetectPoint (world space, Jolt's default axes)
+    pub fn fixedAuto(body1: u32, body2: u32) SimConstraint {
+        var c = defaults(.fixed);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.i[1] = 1;
+        return c;
+    }
+
+    /// FixedConstraintSettings with given points and axes in `space`
+    pub fn fixed(body1: u32, body2: u32, space: u32, point1: [3]Real, axis_x1: [3]f32, axis_y1: [3]f32, point2: [3]Real, axis_x2: [3]f32, axis_y2: [3]f32) SimConstraint {
+        var c = defaults(.fixed);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.i[0] = space;
+        setR3(c.r[0..], point1);
+        setR3(c.r[3..], point2);
+        set3(c.f[0..], axis_x1);
+        set3(c.f[3..], axis_y1);
+        set3(c.f[6..], axis_x2);
+        set3(c.f[9..], axis_y2);
+        return c;
+    }
+
+    /// PointConstraintSettings in `space`
+    pub fn point(body1: u32, body2: u32, space: u32, point1: [3]Real, point2: [3]Real) SimConstraint {
+        var c = defaults(.point);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.i[0] = space;
+        setR3(c.r[0..], point1);
+        setR3(c.r[3..], point2);
+        return c;
+    }
+
+    /// PointConstraintSettings with the same world space point on both bodies
+    pub fn pointWorld(body1: u32, body2: u32, p: [3]Real) SimConstraint {
+        return point(body1, body2, ConstraintSpace.world_space, p, p);
+    }
+
+    /// DistanceConstraintSettings in world space
+    pub fn distance(body1: u32, body2: u32, point1: [3]Real, point2: [3]Real, min_distance: f32, max_distance: f32) SimConstraint {
+        var c = defaults(.distance);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], point1);
+        setR3(c.r[3..], point2);
+        c.f[0] = min_distance;
+        c.f[1] = max_distance;
+        return c;
+    }
+
+    /// HingeConstraintSettings in world space, the same point and axes on both bodies
+    pub fn hinge(body1: u32, body2: u32, p: [3]Real, hinge_axis: [3]f32, normal_axis: [3]f32) SimConstraint {
+        var c = defaults(.hinge);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], p);
+        setR3(c.r[3..], p);
+        set3(c.f[0..], hinge_axis);
+        set3(c.f[3..], normal_axis);
+        set3(c.f[6..], hinge_axis);
+        set3(c.f[9..], normal_axis);
+        return c;
+    }
+
+    /// SliderConstraintSettings with mAutoDetectPoint and SetSliderAxis (world space)
+    pub fn slider(body1: u32, body2: u32, slider_axis: [3]f32) SimConstraint {
+        var c = defaults(.slider);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.i[1] = 1;
+        c.i[2] = 1;
+        set3(c.f[0..], slider_axis);
+        return c;
+    }
+
+    /// SliderConstraintSettings in world space, the same point and axes on both bodies
+    pub fn sliderAxes(body1: u32, body2: u32, p: [3]Real, slider_axis: [3]f32, normal_axis: [3]f32) SimConstraint {
+        var c = defaults(.slider);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], p);
+        setR3(c.r[3..], p);
+        set3(c.f[0..], slider_axis);
+        set3(c.f[3..], normal_axis);
+        set3(c.f[6..], slider_axis);
+        set3(c.f[9..], normal_axis);
+        return c;
+    }
+
+    /// ConeConstraintSettings in world space, the same point and twist axis on both bodies
+    pub fn cone(body1: u32, body2: u32, p: [3]Real, twist_axis: [3]f32, half_cone_angle: f32) SimConstraint {
+        var c = defaults(.cone);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], p);
+        setR3(c.r[3..], p);
+        set3(c.f[0..], twist_axis);
+        set3(c.f[3..], twist_axis);
+        c.f[6] = half_cone_angle;
+        return c;
+    }
+
+    /// SwingTwistConstraintSettings in world space, the same position and axes on both bodies, with the swing and twist
+    /// limits (normal half cone angle, plane half cone angle, twist min / max angle)
+    pub fn swingTwist(body1: u32, body2: u32, p: [3]Real, twist_axis: [3]f32, plane_axis: [3]f32, limits: [4]f32) SimConstraint {
+        var c = defaults(.swing_twist);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], p);
+        setR3(c.r[3..], p);
+        set3(c.f[0..], twist_axis);
+        set3(c.f[3..], plane_axis);
+        set3(c.f[6..], twist_axis);
+        set3(c.f[9..], plane_axis);
+        @memcpy(c.f[12..16], &limits);
+        return c;
+    }
+
+    /// SixDOFConstraintSettings in world space, the same position and axes on both bodies, every axis free
+    pub fn sixDOF(body1: u32, body2: u32, p: [3]Real, axis_x: [3]f32, axis_y: [3]f32) SimConstraint {
+        var c = defaults(.six_dof);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], p);
+        setR3(c.r[3..], p);
+        set3(c.f[0..], axis_x);
+        set3(c.f[3..], axis_y);
+        set3(c.f[6..], axis_x);
+        set3(c.f[9..], axis_y);
+        return c;
+    }
+
+    /// The limits of SixDOF axis `axis` (EAxis: 0..2 translation X / Y / Z, 3..5 rotation X / Y / Z; min >= max fixes it)
+    pub fn setSixDOFLimits(c: *SimConstraint, axis: usize, min: f32, max: f32) void {
+        c.f[18 + axis] = min;
+        c.f[24 + axis] = max;
+    }
+
+    /// PathConstraintSettings with a Hermite path of `points` (position, tangent, normal; at most 16) in the space of
+    /// body 1 at the path position / rotation, body 2 starts at `path_fraction`
+    pub fn path(body1: u32, body2: u32, points: []const [9]f32, is_looping: bool, path_position: [3]f32, path_rotation: [4]f32, path_fraction: f32, rotation_constraint_type: u32) SimConstraint {
+        std.debug.assert(points.len >= 1 and points.len <= 16);
+        var c = defaults(.path);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.i[1] = @intFromBool(is_looping);
+        c.i[2] = @intCast(points.len);
+        c.i[3] = rotation_constraint_type;
+        set3(c.f[0..], path_position);
+        @memcpy(c.f[3..7], &path_rotation);
+        c.f[7] = path_fraction;
+        for (points, 0..) |p, k| @memcpy(c.f[16 + 9 * k ..][0..9], &p);
+        return c;
+    }
+
+    /// GearConstraintSettings in world space between two bodies with hinges `hinge1` / `hinge2` (constraint handles)
+    pub fn gear(body1: u32, body2: u32, hinge_axis1: [3]f32, hinge_axis2: [3]f32, ratio: f32, hinge1: u32, hinge2: u32) SimConstraint {
+        var c = defaults(.gear);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.constraint1 = hinge1;
+        c.constraint2 = hinge2;
+        set3(c.f[0..], hinge_axis1);
+        set3(c.f[3..], hinge_axis2);
+        c.f[6] = ratio;
+        return c;
+    }
+
+    /// RackAndPinionConstraintSettings in world space: body 1 the pinion on hinge `pinion`, body 2 the rack on slider
+    /// `rack` (constraint handles)
+    pub fn rackAndPinion(body1: u32, body2: u32, hinge_axis: [3]f32, slider_axis: [3]f32, ratio: f32, pinion: u32, rack: u32) SimConstraint {
+        var c = defaults(.rack_and_pinion);
+        c.body1 = body1;
+        c.body2 = body2;
+        c.constraint1 = pinion;
+        c.constraint2 = rack;
+        set3(c.f[0..], hinge_axis);
+        set3(c.f[3..], slider_axis);
+        c.f[6] = ratio;
+        return c;
+    }
+
+    /// PulleyConstraintSettings in world space
+    pub fn pulley(body1: u32, body2: u32, body_point1: [3]Real, fixed_point1: [3]Real, body_point2: [3]Real, fixed_point2: [3]Real, ratio: f32, min_length: f32, max_length: f32) SimConstraint {
+        var c = defaults(.pulley);
+        c.body1 = body1;
+        c.body2 = body2;
+        setR3(c.r[0..], body_point1);
+        setR3(c.r[3..], fixed_point1);
+        setR3(c.r[6..], body_point2);
+        setR3(c.r[9..], fixed_point2);
+        c.f[0] = ratio;
+        c.f[1] = min_length;
+        c.f[2] = max_length;
+        return c;
+    }
+};
+
+const flt_max = std.math.floatMax(f32);
+
+/// A [3]f32 as [3]Real
+fn r3(v: [3]f32) [3]Real {
+    return .{ v[0], v[1], v[2] };
+}
+
+// ---- Fixed / Point (Phase 6 foundation, Blocker.constraints) ----
 
 /// A chain of boxes hanging from the world with point constraints
 fn buildConstraintChain(b: *SceneBuilder) Allocator.Error!void {
@@ -4356,22 +5183,20 @@ fn buildConstraintChain(b: *SceneBuilder) Allocator.Error!void {
     for (0..5) |i| {
         const y: f32 = -@as(f32, @floatFromInt(i));
         const h = try b.body(.{ .position = .{ 0.3 * @as(Real, @floatFromInt(i)), y, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
-        const c = try b.addConstraint(.{ .kind = @intFromEnum(ConstraintKind.point), .body1 = previous, .body2 = h, .f = .{ 0.3 * @as(f32, @floatFromInt(i)), y + 0.5, 0, 0.3 * @as(f32, @floatFromInt(i)), y + 0.5, 0 } ++ @as([10]f32, @splat(0)) });
-        try b.sysOp(.create_constraint, .{ .index = c });
+        _ = try b.constraint(Desc.pointWorld(previous, h, .{ 0.3 * @as(Real, @floatFromInt(i)), y + 0.5, 0 }));
         previous = h;
     }
 }
 
-/// A constraint between two body handles (`invalid_handle`: Body::sFixedToWorld), created with `create_constraint`
-fn addPointConstraint(b: *SceneBuilder, body1: u32, body2: u32, point1: [3]f32, point2: [3]f32) Allocator.Error!void {
-    const c = try b.addConstraint(.{ .kind = @intFromEnum(ConstraintKind.point), .body1 = body1, .body2 = body2, .f = point1 ++ point2 ++ @as([10]f32, @splat(0)) });
-    try b.sysOp(.create_constraint, .{ .index = c });
+/// A point constraint between two body handles (`invalid_handle`: Body::sFixedToWorld) in world space, returns its
+/// constraint handle
+fn addPointConstraint(b: *SceneBuilder, body1: u32, body2: u32, point1: [3]f32, point2: [3]f32) Allocator.Error!u32 {
+    return b.constraint(Desc.point(body1, body2, ConstraintSpace.world_space, r3(point1), r3(point2)));
 }
 
-/// A fixed constraint (mAutoDetectPoint) between two body handles
-fn addFixedConstraint(b: *SceneBuilder, body1: u32, body2: u32) Allocator.Error!void {
-    const c = try b.addConstraint(.{ .kind = @intFromEnum(ConstraintKind.fixed), .body1 = body1, .body2 = body2 });
-    try b.sysOp(.create_constraint, .{ .index = c });
+/// A fixed constraint (mAutoDetectPoint) between two body handles, returns its constraint handle
+fn addFixedConstraint(b: *SceneBuilder, body1: u32, body2: u32) Allocator.Error!u32 {
+    return b.constraint(Desc.fixedAuto(body1, body2));
 }
 
 /// Fixed constraints (mAutoDetectPoint): a chain of boxes welded to each other that hangs from the world on a point
@@ -4389,30 +5214,30 @@ fn buildConstraintsFixed(b: *SceneBuilder) Allocator.Error!void {
         const x: f32 = 0.7 * @as(f32, @floatFromInt(i));
         const h = try b.body(.{ .position = .{ x, 5, 0 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.1 * @as(f64, @floatFromInt(i))), .shape = if (i % 2 == 0) box else offset_box, .object_layer = Layers.unused1 }, .activate);
         if (i == 0)
-            try addPointConstraint(b, invalid_handle, h, .{ x - 0.35, 5.3, 0 }, .{ x - 0.35, 5.3, 0 })
+            _ = try addPointConstraint(b, invalid_handle, h, .{ x - 0.35, 5.3, 0 }, .{ x - 0.35, 5.3, 0 })
         else
-            try addFixedConstraint(b, previous, h);
+            _ = try addFixedConstraint(b, previous, h);
         previous = h;
     }
 
     // A kinematic body that moves, with a dynamic box welded to it
     const kinematic = try b.body(.{ .position = .{ 6, 5, 0 }, .linear_velocity = .{ 0.5, 0, 0 }, .angular_velocity = .{ 0, 0.7, 0 }, .shape = box, .motion_type = 1, .object_layer = Layers.unused1 }, .activate);
     const welded = try b.body(.{ .position = .{ 6.7, 5.2, 0.1 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
-    try addFixedConstraint(b, kinematic, welded);
+    _ = try addFixedConstraint(b, kinematic, welded);
 
     // A box welded to the world
     const to_world = try b.body(.{ .position = .{ -4, 3, 0 }, .rotation = axisAngle(.{ 1, 0, 0 }, 0.3), .shape = offset_box, .object_layer = Layers.unused1 }, .activate);
-    try addFixedConstraint(b, invalid_handle, to_world);
+    _ = try addFixedConstraint(b, invalid_handle, to_world);
 
     // A light and a heavy box (mass override): the anchor is weighted towards the light one
     const light = try b.body(.{ .position = .{ 0, 8, 4 }, .shape = box, .mass = 0.5, .override_mass_properties = 1, .object_layer = Layers.unused1 }, .activate);
     const heavy = try b.body(.{ .position = .{ 0.8, 8.3, 4 }, .shape = box, .mass = 20, .override_mass_properties = 1, .object_layer = Layers.unused1 }, .activate);
-    try addFixedConstraint(b, light, heavy);
+    _ = try addFixedConstraint(b, light, heavy);
 
     // A box welded to a static body (the anchor is the center of mass of the box)
     const static_body = try b.body(.{ .position = .{ 4, 2, -4 }, .shape = box, .motion_type = 0, .object_layer = Layers.unused1 }, .dont_activate);
     const on_static = try b.body(.{ .position = .{ 4.5, 2.6, -4 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
-    try addFixedConstraint(b, static_body, on_static);
+    _ = try addFixedConstraint(b, static_body, on_static);
 
     b.at(20);
     try b.op(.add_force, previous, .{ .f = &.{ 0, 0, 300 } });
@@ -4435,13 +5260,13 @@ fn buildConstraintsPendulumHitsStack(b: *SceneBuilder) Allocator.Error!void {
 
     // The pendulum hangs from (-4, 6, 0) and starts horizontal
     const pendulum = try b.body(.{ .position = .{ -8, 6, 0 }, .shape = bob, .object_layer = Layers.moving }, .activate);
-    try addPointConstraint(b, invalid_handle, pendulum, .{ -4, 6, 0 }, .{ -4, 6, 0 });
+    _ = try addPointConstraint(b, invalid_handle, pendulum, .{ -4, 6, 0 }, .{ -4, 6, 0 });
 
     // A second pendulum made of two boxes on point constraints
     const upper = try b.body(.{ .position = .{ 4, 5, 0.2 }, .shape = bob, .object_layer = Layers.moving }, .activate);
-    try addPointConstraint(b, invalid_handle, upper, .{ 4, 6, 0.2 }, .{ 4, 6, 0.2 });
+    _ = try addPointConstraint(b, invalid_handle, upper, .{ 4, 6, 0.2 }, .{ 4, 6, 0.2 });
     const lower = try b.body(.{ .position = .{ 5, 4, 0.2 }, .shape = bob, .object_layer = Layers.moving }, .activate);
-    try addPointConstraint(b, upper, lower, .{ 4.5, 4.5, 0.2 }, .{ 4.5, 4.5, 0.2 });
+    _ = try addPointConstraint(b, upper, lower, .{ 4.5, 4.5, 0.2 }, .{ 4.5, 4.5, 0.2 });
 }
 
 /// A net of boxes lying on the floor, each connected to its neighbours by point constraints and the corners pinned to
@@ -4460,14 +5285,14 @@ fn buildConstraintsNet(b: *SceneBuilder) Allocator.Error!void {
             const px: f32 = @as(f32, @floatFromInt(x)) - 5.0;
             const pz: f32 = @as(f32, @floatFromInt(z)) - 7.0;
             handles[z * nx + x] = try b.body(.{ .position = .{ px, 0.25, pz }, .shape = box, .object_layer = Layers.moving }, .activate);
-            if (x > 0) try addPointConstraint(b, handles[z * nx + x - 1], handles[z * nx + x], .{ px - 0.5, 0.25, pz }, .{ px - 0.5, 0.25, pz });
-            if (z > 0) try addPointConstraint(b, handles[(z - 1) * nx + x], handles[z * nx + x], .{ px, 0.25, pz - 0.5 }, .{ px, 0.25, pz - 0.5 });
+            if (x > 0) _ = try addPointConstraint(b, handles[z * nx + x - 1], handles[z * nx + x], .{ px - 0.5, 0.25, pz }, .{ px - 0.5, 0.25, pz });
+            if (z > 0) _ = try addPointConstraint(b, handles[(z - 1) * nx + x], handles[z * nx + x], .{ px, 0.25, pz - 0.5 }, .{ px, 0.25, pz - 0.5 });
         }
     }
     // Pin the corners to the world
     for ([_]usize{ 0, nx - 1, (nz - 1) * nx, nz * nx - 1 }) |i| {
         const p: [3]f32 = .{ @as(f32, @floatFromInt(i % nx)) - 5.0, 0.25, @as(f32, @floatFromInt(i / nx)) - 7.0 };
-        try addPointConstraint(b, invalid_handle, handles[i], p, p);
+        _ = try addPointConstraint(b, invalid_handle, handles[i], p, p);
     }
     b.at(10);
     try b.op(.add_impulse, handles[nx * nz / 2], .{ .f = &.{ 0, 3, 0 } });
@@ -4485,7 +5310,7 @@ fn buildConstraintsSleepAndWake(b: *SceneBuilder) Allocator.Error!void {
     for (0..4) |i| {
         const y: f32 = 5.0 - @as(f32, @floatFromInt(i));
         const h = try b.body(.{ .position = .{ 0, y, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
-        try addPointConstraint(b, previous, h, .{ 0, y + 0.5, 0 }, .{ 0, y + 0.5, 0 });
+        _ = try addPointConstraint(b, previous, h, .{ 0, y + 0.5, 0 }, .{ 0, y + 0.5, 0 });
         chain[i] = h;
         previous = h;
     }
@@ -4500,7 +5325,7 @@ fn buildConstraintsSleepAndWake(b: *SceneBuilder) Allocator.Error!void {
     b.at(63);
     try b.expectAwake(chain[0]);
     b.at(70);
-    try addFixedConstraint(b, chain[3], extra);
+    _ = try addFixedConstraint(b, chain[3], extra);
 }
 
 /// Constraints across a cross save / restore (the warm start impulses are state) and changes of the physics settings:
@@ -4524,9 +5349,9 @@ fn buildConstraintsSaveRestore(b: *SceneBuilder) Allocator.Error!void {
         const x: f32 = 0.6 * @as(f32, @floatFromInt(i));
         const h = try b.body(.{ .position = .{ x, 6, 0 }, .angular_velocity = .{ 0, 0, 0.5 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
         if (i % 3 == 2)
-            try addFixedConstraint(b, previous, h)
+            _ = try addFixedConstraint(b, previous, h)
         else
-            try addPointConstraint(b, previous, h, .{ x - 0.3, 6, 0 }, .{ x - 0.3, 6, 0 });
+            _ = try addPointConstraint(b, previous, h, .{ x - 0.3, 6, 0 }, .{ x - 0.3, 6, 0 });
         previous = h;
     }
     b.at(15);
@@ -4543,6 +5368,931 @@ fn buildConstraintsSaveRestore(b: *SceneBuilder) Allocator.Error!void {
     b.at(70);
     try b.sysOp(.restore_cross, .{ .index = 1 });
 }
+
+/// The shapes of a ragdoll (`addRagdoll`)
+const RagdollShapes = struct {
+    pelvis: u32,
+    spine: u32,
+    chest: u32,
+    head: u32,
+    upper_arm: u32,
+    lower_arm: u32,
+    upper_leg: u32,
+    lower_leg: u32,
+
+    fn add(b: *SceneBuilder) Allocator.Error!RagdollShapes {
+        return .{
+            .pelvis = try b.box(.{ 0.15, 0.1, 0.1 }, 0.05),
+            .spine = try b.box(.{ 0.12, 0.12, 0.08 }, 0.05),
+            .chest = try b.box(.{ 0.18, 0.12, 0.1 }, 0.05),
+            .head = try b.sphere(0.1),
+            .upper_arm = try b.capsule(0.09, 0.06),
+            .lower_arm = try b.capsule(0.1, 0.05),
+            .upper_leg = try b.capsule(0.13, 0.07),
+            .lower_leg = try b.capsule(0.14, 0.06),
+        };
+    }
+};
+
+/// A ragdoll-like tree of 12 bodies around the pelvis at `base` (the parts do not touch: every joint has a small gap):
+/// the spine on a point constraint, the chest welded to the spine (FixedConstraint with auto detect point), the head,
+/// arms and legs on point constraints (11 constraints). Returns the handle of the pelvis.
+fn addRagdoll(b: *SceneBuilder, shapes: RagdollShapes, base: [3]Real, layer: u32, angular_velocity: [3]f32, lying: bool) Allocator.Error!u32 {
+    // Lying on its back: a quarter turn around X, (x, y, z) -> (x, -z, y)
+    const rotation: [4]f32 = if (lying) axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi) else identity_rotation;
+    const place = struct {
+        fn place(origin: [3]Real, offset: [3]f32, turned: bool) [3]Real {
+            const o: [3]f32 = if (turned) .{ offset[0], -offset[2], offset[1] } else offset;
+            return .{ origin[0] + o[0], origin[1] + o[1], origin[2] + o[2] };
+        }
+    }.place;
+    const Part = struct { shape: u32, offset: [3]f32 };
+    const parts = [_]Part{
+        .{ .shape = shapes.pelvis, .offset = .{ 0, 0, 0 } }, // 0
+        .{ .shape = shapes.spine, .offset = .{ 0, 0.25, 0 } }, // 1
+        .{ .shape = shapes.chest, .offset = .{ 0, 0.52, 0 } }, // 2
+        .{ .shape = shapes.head, .offset = .{ 0, 0.8, 0 } }, // 3
+        .{ .shape = shapes.upper_arm, .offset = .{ -0.3, 0.48, 0 } }, // 4
+        .{ .shape = shapes.upper_arm, .offset = .{ 0.3, 0.48, 0 } }, // 5
+        .{ .shape = shapes.lower_arm, .offset = .{ -0.3, 0.16, 0 } }, // 6
+        .{ .shape = shapes.lower_arm, .offset = .{ 0.3, 0.16, 0 } }, // 7
+        .{ .shape = shapes.upper_leg, .offset = .{ -0.09, -0.33, 0 } }, // 8
+        .{ .shape = shapes.upper_leg, .offset = .{ 0.09, -0.33, 0 } }, // 9
+        .{ .shape = shapes.lower_leg, .offset = .{ -0.09, -0.76, 0 } }, // 10
+        .{ .shape = shapes.lower_leg, .offset = .{ 0.09, -0.76, 0 } }, // 11
+    };
+    var handles: [parts.len]u32 = undefined;
+    for (parts, &handles) |part, *h|
+        h.* = try b.body(.{ .position = place(base, part.offset, lying), .rotation = rotation, .shape = part.shape, .angular_velocity = angular_velocity, .linear_damping = 0.3, .angular_damping = 0.6, .object_layer = layer }, .activate);
+    const Joint = struct { parent: usize, child: usize, point: [3]f32 };
+    const joints = [_]Joint{
+        .{ .parent = 0, .child = 1, .point = .{ 0, 0.115, 0 } },
+        .{ .parent = 2, .child = 3, .point = .{ 0, 0.67, 0 } },
+        .{ .parent = 2, .child = 4, .point = .{ -0.21, 0.6, 0 } },
+        .{ .parent = 2, .child = 5, .point = .{ 0.21, 0.6, 0 } },
+        .{ .parent = 4, .child = 6, .point = .{ -0.3, 0.32, 0 } },
+        .{ .parent = 5, .child = 7, .point = .{ 0.3, 0.32, 0 } },
+        .{ .parent = 0, .child = 8, .point = .{ -0.09, -0.115, 0 } },
+        .{ .parent = 0, .child = 9, .point = .{ 0.09, -0.115, 0 } },
+        .{ .parent = 8, .child = 10, .point = .{ -0.09, -0.545, 0 } },
+        .{ .parent = 9, .child = 11, .point = .{ 0.09, -0.545, 0 } },
+    };
+    for (joints) |j|
+        _ = try b.constraint(Desc.pointWorld(handles[j.parent], handles[j.child], place(base, j.point, lying)));
+    _ = try b.constraint(Desc.fixedAuto(handles[1], handles[2])); // The chest is welded to the spine
+    return handles[0];
+}
+
+/// Ragdoll-like trees: 8 ragdolls in two columns fall onto a floor and onto each other and tumble: contacts between the
+/// parts of different ragdolls and constraints in one island that the LargeIslandSplitter splits
+fn buildConstraintsRagdollPile(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 120;
+    b.max_contact_constraints = 4096;
+    _ = try addFloor(b, 20, 0);
+    for (0..8) |i| {
+        const fi: f32 = @floatFromInt(i);
+        const column: Real = if (i % 2 == 0) -0.4 else 0.4;
+        const base: [3]Real = .{ column, 1.2 + 2.0 * real(i / 2), real(0.2 * @sin(fi)) };
+        _ = try addRagdoll(b, shapes, base, Layers.moving, .{ 0.5 * @sin(2 * fi), 0.3, 0.5 * @cos(3 * fi) }, false);
+    }
+}
+
+/// 8 ragdolls lying on their backs in a row, holding hands (a point constraint between the lower arms of neighbours):
+/// one island of 95 constraints and the floor contacts that the LargeIslandSplitter splits, which settles and falls
+/// asleep from the final batch of a split island; a push wakes the island up again through its constraints
+fn buildConstraintsRagdollsLying(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 110;
+    b.max_contact_constraints = 4096;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const lower_arm_left = 6; // Handle offsets from the pelvis (addRagdoll's parts)
+    const lower_arm_right = 7;
+    var pelvis: [8]u32 = undefined;
+    for (&pelvis, 0..) |*h, i| {
+        const base: [3]Real = .{ 0.75 * real(i), 0.2, 0 };
+        h.* = try addRagdoll(b, shapes, base, Layers.moving, @splat(0), true);
+        if (i > 0) _ = try b.constraint(Desc.pointWorld(pelvis[i - 1] + lower_arm_right, h.* + lower_arm_left, .{ base[0] - 0.375, 0.2, 0.16 }));
+    }
+    b.at(95);
+    try b.expectSleeping(pelvis[0]);
+    try b.op(.add_impulse, pelvis[5], .{ .f = &.{ 0, 60, 0 } });
+}
+
+/// Body::sFixedToWorld as body 2 and in local space, static and kinematic bodies: a pendulum whose world anchor is body 2;
+/// a box welded to the world as body 2 (auto detect: the anchor is its center of mass); a point constraint in local space
+/// from the world (point 1 is relative to the world origin); two boxes welded in local space with frames that differ by a
+/// quarter turn (the fixed constraint turns them into place); a box welded in world space to a static body with given
+/// points and axes; a box hanging from a kinematic body that moves (MoveKinematic); a point constraint between two
+/// kinematic bodies (not active: neither body is dynamic); a constraint between a static body and a dynamic body far away
+fn buildConstraintsWorldAndStatic(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const offset_box = try b.offsetCenterOfMass(box, .{ 0.05, 0.1, -0.05 });
+    b.num_updates = 70;
+    // A pendulum with the world as body 2
+    const pendulum = try b.body(.{ .position = .{ 1, 5, 0 }, .shape = box }, .activate);
+    _ = try b.constraint(Desc.point(pendulum, invalid_handle, ConstraintSpace.world_space, .{ 0, 6, 0 }, .{ 0, 6, 0 }));
+    // Welded to the world as body 2
+    const welded = try b.body(.{ .position = .{ 3, 5, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.3), .shape = offset_box, .angular_velocity = .{ 1, 0, 0 } }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(welded, invalid_handle));
+    // Local space from the world: point 1 is a world position, point 2 is relative to the center of mass of body 2
+    const local = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = offset_box }, .activate);
+    _ = try b.constraint(Desc.point(invalid_handle, local, ConstraintSpace.local_to_body_com, .{ 6.3, 5.6, 0 }, .{ 0.3, 0.5, 0.05 }));
+    // Two boxes welded in local space with frames a quarter turn apart
+    const left = try b.body(.{ .position = .{ 9, 5, 0 }, .shape = box, .gravity_factor = 0 }, .activate);
+    const right = try b.body(.{ .position = .{ 9.5, 5, 0 }, .shape = offset_box, .gravity_factor = 0 }, .activate);
+    _ = try b.constraint(Desc.fixed(left, right, ConstraintSpace.local_to_body_com, .{ 0.25, 0, 0 }, .{ 0, 0, 1 }, .{ 0, 1, 0 }, .{ -0.3, -0.1, 0.05 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }));
+    // Welded in world space to a static body with given points and axes
+    const static_body = try b.body(.{ .position = .{ 12, 5, 0 }, .shape = box, .motion_type = 0 }, .dont_activate);
+    const on_static = try b.body(.{ .position = .{ 12.5, 5.2, 0 }, .shape = box }, .activate);
+    _ = try b.constraint(Desc.fixed(static_body, on_static, ConstraintSpace.world_space, .{ 12.25, 5.1, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 12.25, 5.1, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }));
+    // Hanging from a kinematic body
+    const kinematic = try b.body(.{ .position = .{ 15, 6, 0 }, .shape = box, .motion_type = 1 }, .activate);
+    const hanging = try b.body(.{ .position = .{ 15, 5, 0 }, .shape = box }, .activate);
+    _ = try b.constraint(Desc.pointWorld(kinematic, hanging, .{ 15, 5.6, 0 }));
+    // Between two kinematic bodies: not active
+    const k1 = try b.body(.{ .position = .{ 18, 5, 0 }, .shape = box, .motion_type = 1, .linear_velocity = .{ 0, 0.2, 0 } }, .activate);
+    const k2 = try b.body(.{ .position = .{ 18.5, 5, 0 }, .shape = box, .motion_type = 1 }, .activate);
+    const kinematic_pair = try b.constraint(Desc.pointWorld(k1, k2, .{ 18.25, 5, 0 }));
+    try b.expectConstraintState(kinematic_pair, ConstraintState.inactive);
+    // A static body and a far away dynamic body (a long rigid rod)
+    const anchor = try b.body(.{ .position = .{ 21, 8, 0 }, .shape = box, .motion_type = 0 }, .dont_activate);
+    const far = try b.body(.{ .position = .{ 24, 6, 1 }, .shape = box }, .activate);
+    _ = try b.constraint(Desc.pointWorld(anchor, far, .{ 21, 8, 0 }));
+    b.at(10);
+    try b.op(.move_kinematic, kinematic, .{ .r = .{ 15.5, 6.2, 0 }, .f = &(axisAngle(.{ 0, 1, 0 }, 0.5) ++ [1]f32{0.5}) });
+    b.at(30);
+    try b.op(.move_kinematic, kinematic, .{ .r = .{ 15, 6.5, 0.5 }, .f = &(axisAngle(.{ 1, 0, 0 }, 0.3) ++ [1]f32{0.5}) });
+    try b.op(.add_impulse, welded, .{ .f = &.{ 0, 3, 0 } });
+    try b.op(.add_angular_impulse, right, .{ .f = &.{ 0, 0, 1 } });
+}
+
+/// An island of constraints without contacts that the LargeIslandSplitter splits: a curtain of 12 x 12 boxes on point
+/// constraints that hangs from 12 pins and falls asleep, then a push wakes it up; and a hub with 130 spokes on point
+/// constraints (every constraint of the island has the hub as a body, so at most one fits in each split: the others go
+/// to the non-parallel split, and the splits with too few constraints are merged into it)
+fn buildConstraintsCurtain(b: *SceneBuilder) Allocator.Error!void {
+    const tile = try b.box(.{ 0.2, 0.2, 0.05 }, 0.05);
+    const spoke = try b.box(.{ 0.05, 0.2, 0.05 }, 0.02);
+    const hub_shape = try b.sphere(0.5);
+    b.num_updates = 120;
+    b.settings.time_before_sleep = 0.25;
+    const n = 12;
+    var tiles: [n * n]u32 = undefined;
+    for (0..n) |row| {
+        for (0..n) |col| {
+            const x: Real = 0.5 * real(col) - 3;
+            const y: Real = 8 - 0.5 * real(row);
+            const h = try b.body(.{ .position = .{ x, y, 0 }, .shape = tile, .linear_damping = 0.3, .angular_damping = 0.3 }, .activate);
+            tiles[row * n + col] = h;
+            if (row == 0) _ = try b.constraint(Desc.pointWorld(invalid_handle, h, .{ x, y + 0.25, 0 }));
+            if (col > 0) _ = try b.constraint(Desc.pointWorld(tiles[row * n + col - 1], h, .{ x - 0.25, y, 0 }));
+            if (row > 0) _ = try b.constraint(Desc.pointWorld(tiles[(row - 1) * n + col], h, .{ x, y + 0.25, 0 }));
+        }
+    }
+    // The hub hangs from the world, the spokes hang from the hub
+    const hub = try b.body(.{ .position = .{ 10, 8, 0 }, .shape = hub_shape }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, hub, .{ 10, 8.5, 0 }));
+    for (0..130) |i| {
+        const a: f64 = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 130.0;
+        const p: [3]Real = .{ 10 + real(0.45 * @cos(a)), 7.5, real(0.45 * @sin(a)) };
+        const h = try b.body(.{ .position = .{ p[0], p[1] - 0.25, p[2] }, .shape = spoke }, .activate);
+        _ = try b.constraint(Desc.pointWorld(hub, h, p));
+    }
+    b.at(100);
+    try b.expectSleeping(tiles[0]);
+    try b.op(.add_impulse, tiles[n * n - 1], .{ .f = &.{ 0, 0, 20 } }); // Wakes the curtain up through its constraints
+}
+
+/// Constraints that are disabled, enabled, removed and added between the updates: three chains hanging from the world, a
+/// constraint disabled and enabled again (expect_constraint_state), one removed from the middle of the constraint list
+/// (Jolt swaps the last one into its place) and added again, a whole chain removed and added as a batch, a constraint
+/// created without adding it and added later, the user data, GetConstraintSettings after the bodies moved, a shape
+/// change with NotifyShapeChanged, SetPoint1 / SetPoint2 and ResetWarmStart
+fn buildConstraintsEnableRemove(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.15, 0.2, 0.15 }, 0.05);
+    const offset_box = try b.offsetCenterOfMass(box, .{ 0, 0.08, 0.03 });
+    b.num_updates = 90;
+    var chains: [3][5]u32 = undefined;
+    var links: [3][5]u32 = undefined;
+    for (0..3) |c| {
+        var previous: u32 = invalid_handle;
+        for (0..5) |i| {
+            const x: Real = 2 * real(c) + 0.1 * real(i);
+            const y: Real = 6 - 0.5 * real(i);
+            const h = try b.body(.{ .position = .{ x, y, 0 }, .shape = box }, .activate);
+            links[c][i] = if (c == 1 and i == 2)
+                try b.constraint(Desc.fixedAuto(previous, h)) // A fixed constraint in the middle of chain 1
+            else
+                try b.constraint(Desc.pointWorld(previous, h, .{ x, y + 0.25, 0 }));
+            chains[c][i] = h;
+            previous = h;
+        }
+    }
+    // A constraint that is created now and added later
+    const late_desc = try b.addConstraint(Desc.pointWorld(chains[0][4], chains[2][4], .{ 2.2, 4, 0.5 }));
+    b.at(10);
+    try b.constraintOp(.set_constraint_enabled, links[0][2], .{ .i = &.{0} }); // Chain 0 breaks
+    try b.expectConstraintState(links[0][2], 0);
+    try b.constraintOp(.set_constraint_user_data, links[0][3], .{ .i = &.{ 0x1234, 0x5678 } });
+    b.at(20);
+    try b.constraintOp(.set_constraint_enabled, links[0][2], .{ .i = &.{1} });
+    try b.expectConstraintState(links[0][2], ConstraintState.enabled | ConstraintState.active);
+    try b.constraintOp(.remove_constraint, links[1][1], .{}); // From the middle of the list
+    b.at(25);
+    try b.constraintOp(.add_constraint, links[1][1], .{});
+    try b.constraintOp(.remove_constraints, links[2][0], .{ .i = &.{5} }); // Chain 2 falls
+    b.at(32);
+    try b.constraintOp(.add_constraints, links[2][0], .{ .i = &.{5} });
+    const late = try b.createConstraintNoAdd(late_desc);
+    try b.expectConstraintState(late, ConstraintState.enabled | ConstraintState.active); // Active, but not in the system
+    b.at(40);
+    try b.constraintOp(.add_constraint, late, .{});
+    try b.constraintOp(.constraint_settings_hash, links[0][1], .{});
+    try b.constraintOp(.constraint_settings_hash, links[1][2], .{});
+    b.at(50);
+    // The center of mass of chains[1][3] moves by (0, 0.08, 0.03): the constraints of the body are told
+    try b.op(.set_shape, chains[1][3], .{ .index = offset_box, .count = 1 });
+    try b.constraintOp(.notify_constraint_shape_changed, links[1][3], .{ .body = chains[1][3], .f = &.{ 0, 0.08, 0.03 } });
+    try b.constraintOp(.notify_constraint_shape_changed, links[1][4], .{ .body = chains[1][3], .f = &.{ 0, 0.08, 0.03 } });
+    try b.constraintOp(.notify_constraint_shape_changed, links[1][2], .{ .body = chains[0][0], .f = &.{ 1, 1, 1 } }); // Neither body: nothing
+    b.at(60);
+    try b.constraintOp(.point_set_point1, links[0][4], .{ .i = &.{ConstraintSpace.world_space}, .r = .{ 0.4, 4.3, 0.1 } });
+    try b.constraintOp(.point_set_point2, links[2][4], .{ .i = &.{ConstraintSpace.local_to_body_com}, .r = .{ 0.05, 0.2, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, links[2][3], .{});
+    try b.constraintOp(.constraint_settings_hash, links[0][4], .{});
+    b.at(70);
+    try b.constraintOp(.remove_constraints, links[0][0], .{ .i = &.{2} });
+    try b.constraintOp(.set_constraint_enabled, links[1][0], .{ .i = &.{0} });
+}
+
+/// Constraint priorities and step overrides: with 2 velocity steps and 1 position step two equal chains differ only in
+/// the priorities of their constraints (ConstraintManager::sSortConstraints solves higher priorities last, equal ones in
+/// index order); a third chain has a constraint with step overrides (the island gets the largest override, also of
+/// a body); the priorities and overrides change between the updates
+fn buildConstraintsPriorities(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.15, 0.25, 0.15 }, 0.05);
+    b.num_updates = 70;
+    b.settings.num_velocity_steps = 2;
+    b.settings.num_position_steps = 1;
+    var links: [3][6]u32 = undefined;
+    var bodies: [3][6]u32 = undefined;
+    for (0..3) |c| {
+        var previous: u32 = invalid_handle;
+        for (0..6) |i| {
+            const x: Real = 3 * real(c) + 0.4 * real(i);
+            const y: Real = 6;
+            const h = try b.body(.{ .position = .{ x, y, 0 }, .shape = box, .num_velocity_steps_override = if (c == 2 and i == 5) 6 else 0 }, .activate);
+            var desc = if (i == 3) Desc.fixedAuto(previous, h) else Desc.pointWorld(previous, h, .{ x - 0.2, y, 0 });
+            if (c == 1) desc.constraint_priority = @intCast(10 - i); // Reversed priorities
+            if (c == 2 and i == 2) {
+                desc.num_velocity_steps_override = 8;
+                desc.num_position_steps_override = 4;
+            }
+            links[c][i] = try b.constraint(desc);
+            bodies[c][i] = h;
+            previous = h;
+        }
+    }
+    b.at(20);
+    for (0..6) |i| try b.constraintOp(.set_constraint_priority, links[0][i], .{ .i = &.{@intCast(i % 3)} });
+    try b.constraintOp(.set_constraint_steps_override, links[2][2], .{ .i = &.{ 1, 0 } });
+    try b.constraintOp(.set_constraint_steps_override, links[2][4], .{ .i = &.{ 12, 3 } });
+    b.at(40);
+    try b.constraintOp(.set_constraint_priority, links[1][0], .{ .i = &.{0} });
+    try b.constraintOp(.set_constraint_steps_override, links[2][4], .{ .i = &.{ 0, 0 } });
+    try b.op(.add_impulse, bodies[0][5], .{ .f = &.{ 0, 0, 5 } });
+    try b.op(.add_impulse, bodies[1][5], .{ .f = &.{ 0, 0, 5 } });
+}
+
+/// Constraints and sleeping bodies (no contacts, without gravity): a constraint created between an awake and a
+/// sleeping body wakes the sleeping one from inside the update (TwoBodyConstraint::BuildIslands); a constraint between
+/// two sleeping bodies is not active and wakes nothing until ActivateConstraint; a disabled constraint between an awake
+/// and a sleeping body wakes nothing until it is enabled; removing a constraint from a sleeping pair keeps it asleep; a
+/// kinematic body that moves wakes the body hanging from it; a static body and a sleeping body: not active
+fn buildConstraintsSleepingBodies(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 60;
+    b.gravity = .{ 0, 0, 0 };
+    b.settings.time_before_sleep = 0.2;
+    const awake_a = try b.body(.{ .position = .{ 0, 5, 0 }, .shape = box, .linear_velocity = .{ 0.5, 0, 0 }, .allow_sleeping = 0 }, .activate);
+    const asleep_a = try b.body(.{ .position = .{ 0, 4.4, 0 }, .shape = box }, .dont_activate);
+    const asleep_b1 = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box }, .dont_activate);
+    const asleep_b2 = try b.body(.{ .position = .{ 3, 4.4, 0 }, .shape = box }, .dont_activate);
+    const awake_c = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = box, .angular_velocity = .{ 0, 1, 0 }, .allow_sleeping = 0 }, .activate);
+    const asleep_c = try b.body(.{ .position = .{ 6, 4.4, 0 }, .shape = box }, .dont_activate);
+    const asleep_d1 = try b.body(.{ .position = .{ 9, 5, 0 }, .shape = box }, .dont_activate);
+    const asleep_d2 = try b.body(.{ .position = .{ 9, 4.4, 0 }, .shape = box }, .dont_activate);
+    const kinematic = try b.body(.{ .position = .{ 12, 5, 0 }, .shape = box, .motion_type = 1 }, .dont_activate);
+    const asleep_e = try b.body(.{ .position = .{ 12, 4.4, 0 }, .shape = box }, .dont_activate);
+    const static_body = try b.body(.{ .position = .{ 15, 5, 0 }, .shape = box, .motion_type = 0 }, .dont_activate);
+    const asleep_f = try b.body(.{ .position = .{ 15, 4.4, 0 }, .shape = box }, .dont_activate);
+    b.at(5);
+    try b.expectSleeping(asleep_a);
+    _ = try b.constraint(Desc.pointWorld(awake_a, asleep_a, .{ 0, 4.7, 0 })); // Wakes asleep_a in the next update
+    const sleeping_pair = try b.constraint(Desc.fixedAuto(asleep_b1, asleep_b2));
+    try b.expectConstraintState(sleeping_pair, ConstraintState.inactive);
+    var disabled = Desc.pointWorld(awake_c, asleep_c, .{ 6, 4.7, 0 });
+    disabled.enabled = 0;
+    const disabled_handle = try b.constraint(disabled);
+    const removed = try b.constraint(Desc.pointWorld(asleep_d1, asleep_d2, .{ 9, 4.7, 0 }));
+    const kinematic_link = try b.constraint(Desc.pointWorld(kinematic, asleep_e, .{ 12, 4.7, 0 }));
+    const static_link = try b.constraint(Desc.pointWorld(static_body, asleep_f, .{ 15, 4.7, 0 }));
+    try b.expectConstraintState(static_link, ConstraintState.inactive);
+    b.at(6);
+    try b.expectAwake(asleep_a);
+    try b.expectSleeping(asleep_b1);
+    try b.expectSleeping(asleep_c);
+    b.at(10);
+    try b.constraintOp(.remove_constraint, removed, .{});
+    try b.expectSleeping(asleep_d1);
+    try b.constraintOp(.activate_constraint, sleeping_pair, .{});
+    try b.expectAwake(asleep_b1);
+    try b.expectAwake(asleep_b2);
+    b.at(15);
+    try b.expectSleeping(asleep_c);
+    try b.constraintOp(.set_constraint_enabled, disabled_handle, .{ .i = &.{1} }); // Wakes asleep_c in the next update
+    try b.op(.set_linear_velocity, kinematic, .{ .f = &.{ 0, 0.5, 0 } }); // Wakes the kinematic body, then asleep_e
+    try b.expectConstraintState(kinematic_link, ConstraintState.enabled | ConstraintState.active);
+    b.at(16);
+    try b.expectAwake(asleep_c);
+    try b.expectAwake(asleep_e);
+    try b.expectSleeping(asleep_f);
+    try b.expectSleeping(asleep_d2);
+}
+
+/// Partial states of the constraints across cross save / restore: a snapshot of everything, of the constraints only
+/// (restoring it brings back a disabled constraint's enabled flag and the warm start impulses) and of the bodies and
+/// constraints; ResetWarmStart before a restore
+fn buildConstraintsPartialStates(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 70;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+    const state_bodies: u32 = 2; // EStateRecorderState::Bodies
+    var previous: u32 = invalid_handle;
+    var links: [5]u32 = undefined;
+    var bodies: [5]u32 = undefined;
+    for (0..5) |i| {
+        const x: Real = 0.5 * real(i);
+        const h = try b.body(.{ .position = .{ x, 6, 0 }, .shape = box, .angular_velocity = .{ 0, 0.5, 0 } }, .activate);
+        links[i] = if (i == 2) try b.constraint(Desc.fixedAuto(previous, h)) else try b.constraint(Desc.pointWorld(previous, h, .{ x - 0.25, 6, 0 }));
+        bodies[i] = h;
+        previous = h;
+    }
+    b.at(10);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(12);
+    try b.constraintOp(.set_constraint_enabled, links[3], .{ .i = &.{0} });
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(20);
+    try b.constraintOp(.set_constraint_enabled, links[3], .{ .i = &.{1} });
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 12: links[3] is disabled again
+    try b.expectConstraintState(links[3], 0);
+    b.at(30);
+    try b.constraintOp(.set_constraint_enabled, links[3], .{ .i = &.{1} });
+    try b.sysOp(.snapshot, .{ .index = 2, .i = &.{state_bodies | state_constraints} });
+    b.at(40);
+    try b.constraintOp(.reset_constraint_warm_start, links[1], .{});
+    try b.op(.add_impulse, bodies[4], .{ .f = &.{ 0, 0, 2 } });
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+    b.at(50);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Everything of update 10
+    try b.expectConstraintState(links[3], ConstraintState.enabled | ConstraintState.active);
+}
+
+/// Fixed and point constraints with several collision steps per update and changing update parameters (the warm start
+/// impulses are scaled by the step ratio, Jolt's mPreviousStepDeltaTime)
+fn buildConstraintsCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 0.2, 0.3, 0.2 }, 0.05);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var previous: u32 = invalid_handle;
+            for (0..6) |i| {
+                const x: Real = 0.45 * real(i);
+                const h = try b.body(.{ .position = .{ x, 6, 0 }, .shape = box }, .activate);
+                if (i % 2 == 1)
+                    _ = try b.constraint(Desc.fixedAuto(previous, h))
+                else
+                    _ = try b.constraint(Desc.pointWorld(previous, h, .{ x - 0.2, 6, 0 }));
+                previous = h;
+            }
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Constraints far from the origin (world space points are Real: in double precision the anchors keep their
+/// precision): a chain hanging from the world, a welded pair that falls onto a floor next to a box
+fn buildConstraintsFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 60;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    var previous: u32 = invalid_handle;
+    for (0..4) |i| {
+        const p: [3]Real = .{ o[0] - 4 + 0.6 * real(i), o[1] + 5, o[2] };
+        const h = try b.body(.{ .position = p, .shape = box, .object_layer = Layers.moving }, .activate);
+        _ = try b.constraint(Desc.pointWorld(previous, h, .{ p[0] - 0.3, p[1], p[2] }));
+        previous = h;
+    }
+    const w1 = try b.body(.{ .position = .{ o[0] + 3, o[1] + 2, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const w2 = try b.body(.{ .position = .{ o[0] + 3.5, o[1] + 2.4, o[2] + 0.1 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(w1, w2));
+    _ = try b.body(.{ .position = .{ o[0] - 1.6, o[1] + 0.25, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// Random bodies (dynamic, kinematic, static; every basic shape) with random point and fixed constraints between them and
+/// to the world, on a floor in a container, and random constraint operations between the updates (enable, priority,
+/// step overrides, user data, remove / add, ActivateConstraint, ResetWarmStart, impulses)
+fn buildConstraintsRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0x51ab_cd00 +% seed *% 0x9e3779b9;
+            const shapes = try BasicShapes.add(b);
+            b.num_updates = 80;
+            b.max_contact_constraints = 2048;
+            try addContainer(b, 6, 2);
+            const num_bodies = 24;
+            var bodies: [num_bodies]u32 = undefined;
+            for (&bodies, 0..) |*h, i| {
+                const motion_type: u32 = if (b.oneIn(8)) 0 else if (b.oneIn(7)) 1 else 2;
+                const p = b.vec3(-4, 4);
+                h.* = try b.body(.{
+                    .position = .{ p[0], 1.5 + 0.8 * real(i), p[2] },
+                    .rotation = b.rotation(),
+                    .shape = shapes.pick(b.index(6)),
+                    .motion_type = motion_type,
+                    .linear_velocity = if (motion_type == 1) b.vec3(-0.5, 0.5) else @splat(0),
+                    .angular_velocity = if (motion_type != 0) b.vec3(-1, 1) else @splat(0),
+                    .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+                }, if (motion_type == 0) .dont_activate else .activate);
+            }
+            // Constraints between random pairs and to the world
+            const num_constraints = 20;
+            var handles: [num_constraints]u32 = undefined;
+            var in_system: [num_constraints]bool = @splat(true);
+            for (&handles) |*c| {
+                const index1 = b.index(num_bodies + 1); // num_bodies: the world
+                var index2 = b.index(num_bodies);
+                if (index2 == index1) index2 = (index2 + 1) % num_bodies;
+                const body1 = if (index1 == num_bodies) invalid_handle else bodies[index1];
+                const body2 = bodies[index2];
+                var desc = if (b.oneIn(3))
+                    Desc.fixedAuto(body1, body2)
+                else
+                    Desc.point(body1, body2, ConstraintSpace.world_space, r3(b.vec3(-4, 4)), r3(b.vec3(-4, 4)));
+                desc.constraint_priority = b.index(3);
+                if (b.oneIn(5)) desc.num_velocity_steps_override = 1 + b.index(15);
+                if (b.oneIn(5)) desc.num_position_steps_override = 1 + b.index(5);
+                if (b.oneIn(8)) desc.enabled = 0;
+                desc.user_data = b.next(); // Odd: not saved by the state filter of the end of the scene
+                c.* = try b.constraint(desc);
+            }
+            var update: u32 = 5;
+            while (update < b.num_updates) : (update += 1 + b.index(8)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_constraints);
+                    const c = handles[k];
+                    switch (b.index(8)) {
+                        0 => try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{b.index(2)} }),
+                        1 => try b.constraintOp(.set_constraint_priority, c, .{ .i = &.{b.index(4)} }),
+                        2 => try b.constraintOp(.set_constraint_steps_override, c, .{ .i = &.{ b.index(12), b.index(4) } }),
+                        3 => {
+                            try b.constraintOp(if (in_system[k]) .remove_constraint else .add_constraint, c, .{});
+                            in_system[k] = !in_system[k];
+                        },
+                        4 => try b.constraintOp(.activate_constraint, c, .{}),
+                        5 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        6 => try b.constraintOp(.set_constraint_user_data, c, .{ .i = &.{ b.next(), b.next() } }),
+                        else => try b.op(.add_impulse, bodies[b.index(num_bodies)], .{ .f = &b.vec3(-3, 3) }),
+                    }
+                }
+            }
+        }
+    }.build;
+}
+
+// (append the scenes of the fixed / point group here)
+
+// ---- Distance / Pulley (Blocker.distance_constraints / .pulley_constraints, OpKind 240..259) ----
+
+/// Every operation of DistanceConstraint (the C++ side runs it until the class is ported): a box on a rope of fixed
+/// length from the world (min = max = -1: the distance at creation), a second box on a soft rope with a range and a
+/// limits spring given in local space, the setters, NotifyShapeChanged, ResetWarmStart and GetConstraintSettings
+fn buildDistanceOps(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 60;
+    const a = try b.body(.{ .position = .{ 1, 4, 0 }, .shape = box }, .activate);
+    const rope = try b.constraint(Desc.distance(invalid_handle, a, .{ 0, 6, 0 }, .{ 1, 4.2, 0 }, -1, -1));
+    const c = try b.body(.{ .position = .{ 1.5, 2.5, 0.5 }, .shape = box }, .activate);
+    var soft = Desc.distance(a, c, .{ 0, -0.2, 0 }, .{ 0, 0.2, 0 }, 0.8, 1.6);
+    soft.i[0] = ConstraintSpace.local_to_body_com;
+    Desc.setSpring(&soft, 1, 2, 0, 3, 0.3);
+    const soft_rope = try b.constraint(soft);
+    b.at(10);
+    try b.constraintOp(.distance_set_distance, rope, .{ .f = &.{ 1.5, 2.5 } });
+    try b.expectConstraintState(soft_rope, ConstraintState.enabled | ConstraintState.active);
+    b.at(20);
+    try b.constraintOp(.distance_set_limits_spring_settings, soft_rope, .{ .i = &.{1}, .f = &.{ 40, 2 } }); // StiffnessAndDamping
+    try b.constraintOp(.constraint_settings_hash, soft_rope, .{});
+    b.at(30);
+    try b.constraintOp(.notify_constraint_shape_changed, rope, .{ .body = a, .f = &.{ 0.05, 0, 0 } });
+    try b.constraintOp(.notify_constraint_shape_changed, soft_rope, .{ .body = c, .f = &.{ 0, -0.05, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, rope, .{});
+    b.at(40);
+    try b.constraintOp(.distance_set_distance, soft_rope, .{ .f = &.{ 1, 1 } });
+    try b.constraintOp(.distance_set_limits_spring_settings, soft_rope, .{ .i = &.{2}, .f = &.{ 10, 1 } }); // MassNormalizedStiffnessAndDamping
+    try b.constraintOp(.constraint_settings_hash, rope, .{});
+}
+
+/// Every operation of PulleyConstraint: two boxes on a rope over two fixed points with a ratio, the second pulley in local
+/// space with a length range; SetLength, NotifyShapeChanged, ResetWarmStart, GetConstraintSettings
+fn buildPulleyOps(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 60;
+    // Nearly in balance with a ratio of 2 (m2 = 2 m1): body 2 sinks slowly
+    const a = try b.body(.{ .position = .{ -1, 3, 0 }, .shape = box, .mass = 50, .override_mass_properties = 1 }, .activate);
+    const c = try b.body(.{ .position = .{ 1, 3.5, 0 }, .shape = box, .mass = 110, .override_mass_properties = 1 }, .activate);
+    const pulley = try b.constraint(Desc.pulley(a, c, .{ -1, 3.3, 0 }, .{ -1, 6, 0 }, .{ 1, 3.8, 0 }, .{ 1, 6, 0 }, 2, 0, -1));
+    const d = try b.body(.{ .position = .{ -1, 3, 4 }, .shape = box }, .activate);
+    const e = try b.body(.{ .position = .{ 1, 3, 4 }, .shape = box }, .activate);
+    var local = Desc.pulley(d, e, .{ 0, 0.3, 0 }, .{ -1, 6, 4 }, .{ 0, 0.3, 0 }, .{ 1, 6, 4 }, 1, 4, 6);
+    local.i[0] = ConstraintSpace.local_to_body_com; // The fixed points stay in world space
+    const local_pulley = try b.constraint(local);
+    b.at(15);
+    try b.constraintOp(.pulley_set_length, pulley, .{ .f = &.{ 4, 7 } });
+    try b.constraintOp(.constraint_settings_hash, local_pulley, .{});
+    b.at(30);
+    try b.constraintOp(.pulley_set_length, local_pulley, .{ .f = &.{ 5, 5 } });
+    try b.constraintOp(.notify_constraint_shape_changed, pulley, .{ .body = c, .f = &.{ 0, 0.1, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, local_pulley, .{});
+    try b.constraintOp(.constraint_settings_hash, pulley, .{});
+}
+
+// (append the scenes of the distance / pulley group here)
+
+// ---- Hinge (Blocker.hinge_constraints, OpKind 260..279) ----
+
+/// Every operation of HingeConstraint: a door hinged to the world with limits and friction driven by its motor (velocity,
+/// then position with a target angle and a target orientation), a hinged pair of dynamic boxes with a limits spring
+fn buildHingeOps(b: *SceneBuilder) Allocator.Error!void {
+    const door = try b.box(.{ 0.5, 1, 0.05 }, 0.02);
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 70;
+    const d = try b.body(.{ .position = .{ 0.5, 3, 0 }, .shape = door }, .activate);
+    var hinge = Desc.hinge(invalid_handle, d, .{ 0, 3, 0 }, .{ 0, 1, 0 }, .{ 1, 0, 0 });
+    hinge.f[12] = -1.2; // Limits
+    hinge.f[13] = 1.2;
+    hinge.f[16] = 0.1; // Max friction torque
+    const door_hinge = try b.constraint(hinge);
+    const a = try b.body(.{ .position = .{ 4, 5, 0 }, .shape = box }, .activate);
+    const c = try b.body(.{ .position = .{ 4.7, 5, 0 }, .shape = box, .angular_velocity = .{ 0, 0, 2 } }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, a, .{ 4, 5.4, 0 }));
+    var pair = Desc.hinge(a, c, .{ 4.35, 5, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+    pair.f[12] = -0.5;
+    pair.f[13] = 0.5;
+    Desc.setSpring(&pair, 1, 14, 0, 4, 0.5);
+    const pair_hinge = try b.constraint(pair);
+    b.at(5);
+    try b.constraintOp(.hinge_set_max_friction_torque, door_hinge, .{ .f = &.{0.5} });
+    try b.constraintOp(.hinge_set_motor_settings, door_hinge, .{ .i = &.{0}, .f = &.{ 4, 1, -1000, 1000, -50, 50 } });
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{1} }); // Velocity
+    try b.constraintOp(.hinge_set_target_angular_velocity, door_hinge, .{ .f = &.{1.5} });
+    b.at(20);
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{2} }); // Position
+    try b.constraintOp(.hinge_set_target_angle, door_hinge, .{ .f = &.{-0.7} });
+    b.at(35);
+    try b.constraintOp(.hinge_set_target_orientation_bs, door_hinge, .{ .f = &axisAngle(.{ 0, 1, 0 }, 0.4) });
+    try b.constraintOp(.hinge_set_limits, pair_hinge, .{ .f = &.{ -0.2, 0.8 } });
+    try b.constraintOp(.hinge_set_limits_spring_settings, pair_hinge, .{ .i = &.{1}, .f = &.{ 30, 1 } });
+    b.at(45);
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{3} }); // PositionAndVelocity
+    try b.constraintOp(.hinge_set_target_angular_velocity, door_hinge, .{ .f = &.{-0.5} });
+    try b.constraintOp(.constraint_settings_hash, door_hinge, .{});
+    b.at(55);
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{0} });
+    try b.constraintOp(.notify_constraint_shape_changed, pair_hinge, .{ .body = a, .f = &.{ 0, 0.02, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, door_hinge, .{});
+    try b.constraintOp(.constraint_settings_hash, pair_hinge, .{});
+}
+
+// (append the scenes of the hinge group here)
+
+// ---- Slider (Blocker.slider_constraints, OpKind 280..299) ----
+
+/// Every operation of SliderConstraint: a box on a horizontal slider from the world (auto detect point and
+/// SetSliderAxis) driven by its motor (velocity, then position), with limits and friction; a slider between two boxes
+/// with explicit axes and a limits spring
+fn buildSliderOps(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 70;
+    const a = try b.body(.{ .position = .{ 0, 3, 0 }, .shape = box }, .activate);
+    var s1 = Desc.slider(invalid_handle, a, .{ 1, 0, 0 });
+    s1.f[12] = -1.5; // Limits
+    s1.f[13] = 1.5;
+    const rail = try b.constraint(s1);
+    const c = try b.body(.{ .position = .{ 4, 5, 0 }, .shape = box }, .activate);
+    const e = try b.body(.{ .position = .{ 4, 4, 0.2 }, .shape = box, .linear_velocity = .{ 0, 0, 1 } }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(invalid_handle, c));
+    var s2 = Desc.sliderAxes(c, e, .{ 4, 4.5, 0.1 }, .{ 0, 0, 1 }, .{ 0, 1, 0 });
+    s2.f[12] = -0.4;
+    s2.f[13] = 0.4;
+    Desc.setSpring(&s2, 3, 14, 0, 5, 0.5);
+    const piston = try b.constraint(s2);
+    b.at(5);
+    try b.constraintOp(.slider_set_max_friction_force, rail, .{ .f = &.{2} });
+    try b.constraintOp(.slider_set_motor_settings, rail, .{ .i = &.{0}, .f = &.{ 3, 1, -200, 200, -1000, 1000 } });
+    try b.constraintOp(.slider_set_motor_state, rail, .{ .i = &.{1} });
+    try b.constraintOp(.slider_set_target_velocity, rail, .{ .f = &.{0.8} });
+    b.at(25);
+    try b.constraintOp(.slider_set_motor_state, rail, .{ .i = &.{2} });
+    try b.constraintOp(.slider_set_target_position, rail, .{ .f = &.{-0.6} });
+    try b.constraintOp(.slider_set_limits, piston, .{ .f = &.{ -0.1, 0.6 } });
+    try b.constraintOp(.slider_set_limits_spring_settings, piston, .{ .i = &.{1}, .f = &.{ 50, 2 } });
+    b.at(45);
+    try b.constraintOp(.slider_set_limits, rail, .{ .f = &.{ -1, 0.5 } });
+    try b.constraintOp(.slider_set_target_position, rail, .{ .f = &.{3} }); // Clamped to the limits
+    try b.constraintOp(.constraint_settings_hash, rail, .{});
+    b.at(55);
+    try b.constraintOp(.slider_set_motor_state, rail, .{ .i = &.{0} });
+    try b.constraintOp(.notify_constraint_shape_changed, piston, .{ .body = e, .f = &.{ 0.01, 0, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, piston, .{});
+    try b.constraintOp(.constraint_settings_hash, piston, .{});
+}
+
+// (append the scenes of the slider group here)
+
+// ---- Cone / SwingTwist (Blocker.cone_constraints / .swing_twist_constraints, OpKind 300..319) ----
+
+/// Every operation of ConeConstraint: boxes hanging from the world and from each other in a cone, SetHalfConeAngle,
+/// NotifyShapeChanged, ResetWarmStart, GetConstraintSettings
+fn buildConeOps(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.1, 0.4, 0.1 }, 0.05);
+    b.num_updates = 60;
+    const a = try b.body(.{ .position = .{ 0.3, 4.6, 0 }, .shape = box, .angular_velocity = .{ 0, 0, 1 } }, .activate);
+    const cone = try b.constraint(Desc.cone(invalid_handle, a, .{ 0, 5, 0 }, .{ 0, -1, 0 }, 0.6));
+    const c = try b.body(.{ .position = .{ 0.6, 3.8, 0.2 }, .shape = box }, .activate);
+    const cone2 = try b.constraint(Desc.cone(a, c, .{ 0.45, 4.2, 0.1 }, .{ 0.3, -1, 0.1 }, 0.3));
+    b.at(20);
+    try b.constraintOp(.cone_set_half_cone_angle, cone, .{ .f = &.{0.2} });
+    try b.constraintOp(.constraint_settings_hash, cone, .{});
+    b.at(40);
+    try b.constraintOp(.cone_set_half_cone_angle, cone2, .{ .f = &.{1.0} });
+    try b.constraintOp(.notify_constraint_shape_changed, cone2, .{ .body = c, .f = &.{ 0, 0.05, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, cone, .{});
+    try b.constraintOp(.constraint_settings_hash, cone2, .{});
+}
+
+/// Every operation of SwingTwistConstraint: an arm on a shoulder joint (cone swing) and a forearm on an elbow (pyramid
+/// swing) with friction, swing and twist motors (velocity, then position with target orientations in constraint and
+/// body space), the limit setters
+fn buildSwingTwistOps(b: *SceneBuilder) Allocator.Error!void {
+    const limb = try b.box(.{ 0.1, 0.4, 0.1 }, 0.05);
+    b.num_updates = 80;
+    const arm = try b.body(.{ .position = .{ 0, 4.5, 0 }, .shape = limb }, .activate);
+    const shoulder = try b.constraint(Desc.swingTwist(invalid_handle, arm, .{ 0, 4.9, 0 }, .{ 0, -1, 0 }, .{ 1, 0, 0 }, .{ 0.6, 0.4, -0.3, 0.3 }));
+    const forearm = try b.body(.{ .position = .{ 0, 3.7, 0 }, .shape = limb, .angular_velocity = .{ 1, 0, 0.5 } }, .activate);
+    var elbow_desc = Desc.swingTwist(arm, forearm, .{ 0, 4.1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0.8, 0.2, -0.1, 0.5 });
+    elbow_desc.i[1] = 1; // ESwingType::Pyramid
+    elbow_desc.f[16] = 0.05; // Max friction torque
+    const elbow = try b.constraint(elbow_desc);
+    b.at(5);
+    try b.constraintOp(.swing_twist_set_max_friction_torque, shoulder, .{ .f = &.{0.1} });
+    try b.constraintOp(.swing_twist_set_swing_motor_settings, shoulder, .{ .i = &.{0}, .f = &.{ 5, 1, -1000, 1000, -20, 20 } });
+    try b.constraintOp(.swing_twist_set_twist_motor_settings, shoulder, .{ .i = &.{0}, .f = &.{ 5, 1, -1000, 1000, -20, 20 } });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulder, .{ .i = &.{1} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulder, .{ .i = &.{1} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, shoulder, .{ .f = &.{ 0.3, 0.2, -0.1 } });
+    b.at(20);
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_bs, shoulder, .{ .f = &.{ -0.2, 0.1, 0.3 } });
+    try b.constraintOp(.swing_twist_set_normal_half_cone_angle, elbow, .{ .f = &.{0.5} });
+    try b.constraintOp(.swing_twist_set_plane_half_cone_angle, elbow, .{ .f = &.{0.3} });
+    try b.constraintOp(.swing_twist_set_twist_min_angle, elbow, .{ .f = &.{-0.4} });
+    try b.constraintOp(.swing_twist_set_twist_max_angle, elbow, .{ .f = &.{0.2} });
+    b.at(35);
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulder, .{ .i = &.{2} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulder, .{ .i = &.{2} });
+    try b.constraintOp(.swing_twist_set_target_orientation_cs, shoulder, .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.3) });
+    b.at(50);
+    try b.constraintOp(.swing_twist_set_target_orientation_bs, shoulder, .{ .f = &axisAngle(.{ 1, 0, 0 }, -0.2) });
+    try b.constraintOp(.swing_twist_set_max_friction_torque, elbow, .{ .f = &.{0.3} });
+    try b.constraintOp(.constraint_settings_hash, shoulder, .{});
+    b.at(65);
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulder, .{ .i = &.{0} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulder, .{ .i = &.{3} }); // PositionAndVelocity
+    try b.constraintOp(.notify_constraint_shape_changed, elbow, .{ .body = forearm, .f = &.{ 0, -0.02, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, elbow, .{});
+    try b.constraintOp(.constraint_settings_hash, elbow, .{});
+}
+
+// (append the scenes of the cone / swing twist group here)
+
+// ---- SixDOF (Blocker.six_dof_constraints, OpKind 320..339) ----
+
+/// Every operation of SixDOFConstraint: a box hanging from the world with limited, fixed and free axes, a soft
+/// translation limit, friction, and motors on a translation and a rotation axis (velocity, then position with target
+/// positions and orientations); a second box with every axis fixed (the fully constrained path)
+fn buildSixDOFOps(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 80;
+    const a = try b.body(.{ .position = .{ 0, 4, 0 }, .shape = box, .angular_velocity = .{ 0.3, 0.5, 0.2 } }, .activate);
+    var six = Desc.sixDOF(invalid_handle, a, .{ 0, 4, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    Desc.setSixDOFLimits(&six, 0, -0.5, 0.5); // Translation X limited
+    Desc.setSixDOFLimits(&six, 1, 0, 0); // Translation Y fixed
+    // Translation Z free
+    Desc.setSixDOFLimits(&six, 3, 0, 0); // Rotation X fixed
+    Desc.setSixDOFLimits(&six, 4, -0.4, 0.4); // Rotation Y limited
+    Desc.setSixDOFLimits(&six, 5, -0.6, 0.6); // Rotation Z limited
+    Desc.setSpring(&six, 2, 30, 0, 2, 0.5); // A soft limit on translation X
+    six.f[12 + 5] = 0.2; // Friction on rotation Z
+    const joint = try b.constraint(six);
+    const c = try b.body(.{ .position = .{ 3, 4, 0 }, .shape = box }, .activate);
+    var fixed = Desc.sixDOF(invalid_handle, c, .{ 3, 4.3, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    for (0..6) |axis| Desc.setSixDOFLimits(&fixed, axis, 0, 0);
+    fixed.i[1] = 1; // ESwingType::Pyramid
+    const welded = try b.constraint(fixed);
+    b.at(5);
+    try b.constraintOp(.six_dof_set_motor_settings, joint, .{ .i = &.{ 2, 0 }, .f = &.{ 4, 1, -100, 100, -1000, 1000 } });
+    try b.constraintOp(.six_dof_set_motor_settings, joint, .{ .i = &.{ 5, 0 }, .f = &.{ 4, 1, -1000, 1000, -10, 10 } });
+    try b.constraintOp(.six_dof_set_motor_state, joint, .{ .i = &.{ 2, 1 } }); // Translation Z: velocity
+    try b.constraintOp(.six_dof_set_motor_state, joint, .{ .i = &.{ 5, 1 } }); // Rotation Z: velocity
+    try b.constraintOp(.six_dof_set_target_velocity_cs, joint, .{ .f = &.{ 0, 0, 0.5 } });
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joint, .{ .f = &.{ 0, 0, 0.4 } });
+    b.at(25);
+    try b.constraintOp(.six_dof_set_motor_state, joint, .{ .i = &.{ 2, 2 } }); // Position
+    try b.constraintOp(.six_dof_set_motor_state, joint, .{ .i = &.{ 5, 2 } });
+    try b.constraintOp(.six_dof_set_target_position_cs, joint, .{ .f = &.{ 0, 0, -0.3 } });
+    try b.constraintOp(.six_dof_set_target_orientation_cs, joint, .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.3) });
+    try b.constraintOp(.six_dof_set_max_friction, joint, .{ .i = &.{4}, .f = &.{0.5} });
+    b.at(40);
+    try b.constraintOp(.six_dof_set_target_orientation_bs, joint, .{ .f = &axisAngle(.{ 0, 0, 1 }, -0.2) });
+    try b.constraintOp(.six_dof_set_translation_limits, joint, .{ .f = &.{ -0.2, 0, -1, 0.3, 0, 1 } });
+    try b.constraintOp(.six_dof_set_rotation_limits, joint, .{ .f = &.{ 0, -0.2, -0.8, 0, 0.2, 0.8 } });
+    try b.constraintOp(.six_dof_set_limits_spring_settings, joint, .{ .i = &.{ 0, 1 }, .f = &.{ 60, 3 } });
+    try b.constraintOp(.constraint_settings_hash, joint, .{});
+    b.at(60);
+    try b.constraintOp(.six_dof_set_motor_state, joint, .{ .i = &.{ 2, 0 } });
+    try b.constraintOp(.six_dof_set_motor_state, joint, .{ .i = &.{ 5, 3 } }); // PositionAndVelocity
+    try b.constraintOp(.notify_constraint_shape_changed, welded, .{ .body = c, .f = &.{ 0.02, 0, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, joint, .{});
+    try b.constraintOp(.constraint_settings_hash, welded, .{});
+}
+
+// (append the scenes of the six dof group here)
+
+// ---- Path (Blocker.path_constraints, OpKind 340..359) ----
+
+/// The points of a Hermite path on a circle of `radius` in the XZ plane (position, tangent, normal per point; a closed
+/// loop when `num` points cover the circle), computed in f64 by the scene builder
+fn circlePathPoints(comptime num: usize, radius: f64, arc: f64) [num][9]f32 {
+    var points: [num][9]f32 = undefined;
+    for (&points, 0..) |*p, k| {
+        const a = arc * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(num));
+        const step = arc / @as(f64, @floatFromInt(num));
+        p.* = .{ @floatCast(radius * @cos(a)), 0, @floatCast(radius * @sin(a)), @floatCast(-radius * step * @sin(a)), 0, @floatCast(radius * step * @cos(a)), 0, 1, 0 };
+    }
+    return points;
+}
+
+/// Every operation of PathConstraint: a box that follows an open arc path from the world (rotation constrained around the
+/// tangent) with friction and a position motor (velocity, then a target path fraction), a box on a looping circle on a
+/// dynamic plate (rotation fully constrained); SetPath with another path and with no path (the constraint is then not
+/// active), NotifyShapeChanged, ResetWarmStart
+fn buildPathOps(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const plate = try b.box(.{ 2.5, 0.2, 2.5 }, 0.05);
+    b.num_updates = 80;
+    const arc = circlePathPoints(6, 2, 0.75 * std.math.pi * 2.0);
+    const a = try b.body(.{ .position = .{ 2, 5, 0 }, .shape = box, .gravity_factor = 0.5 }, .activate);
+    var open = Desc.path(invalid_handle, a, &arc, false, .{ 0, 5, 0 }, .{ 0, 0, 0, 1 }, 0, 1); // ConstrainAroundTangent
+    open.f[8] = 0.5; // Max friction force
+    const follower = try b.constraint(open);
+    const circle = circlePathPoints(8, 2, std.math.pi * 2.0);
+    const base = try b.body(.{ .position = .{ 8, 3, 0 }, .shape = plate, .gravity_factor = 0 }, .activate);
+    const rider = try b.body(.{ .position = .{ 10, 3.5, 0 }, .shape = box }, .activate);
+    const loop_desc = try b.addConstraint(Desc.path(base, rider, &circle, true, .{ 0, 0.5, 0 }, axisAngle(.{ 1, 0, 0 }, 0.1), 0, 5)); // FullyConstrained
+    const loop = try b.createConstraint(loop_desc);
+    // A description that only provides another path for path_set_path
+    const other_path = try b.addConstraint(Desc.path(invalid_handle, a, &circlePathPoints(5, 1.5, std.math.pi), false, .{ 0, 5, 0 }, .{ 0, 0, 0, 1 }, 0, 0));
+    b.at(5);
+    try b.constraintOp(.path_set_position_motor_settings, follower, .{ .i = &.{0}, .f = &.{ 3, 1, -50, 50, -1000, 1000 } });
+    try b.constraintOp(.path_set_position_motor_state, follower, .{ .i = &.{1} });
+    try b.constraintOp(.path_set_target_velocity, follower, .{ .f = &.{1} });
+    try b.constraintOp(.path_set_position_motor_state, loop, .{ .i = &.{1} });
+    try b.constraintOp(.path_set_target_velocity, loop, .{ .f = &.{-2} });
+    b.at(25);
+    try b.constraintOp(.path_set_position_motor_state, follower, .{ .i = &.{2} });
+    try b.constraintOp(.path_set_target_path_fraction, follower, .{ .f = &.{3.5} });
+    try b.constraintOp(.path_set_max_friction_force, loop, .{ .f = &.{1} });
+    b.at(40);
+    try b.constraintOp(.path_set_path, follower, .{ .i = &.{ 1, other_path }, .f = &.{1.5} });
+    try b.constraintOp(.path_set_target_path_fraction, follower, .{ .f = &.{0.5} });
+    try b.constraintOp(.notify_constraint_shape_changed, loop, .{ .body = rider, .f = &.{ 0, 0.05, 0 } });
+    try b.constraintOp(.notify_constraint_shape_changed, loop, .{ .body = base, .f = &.{ 0.1, 0, 0 } });
+    b.at(55);
+    try b.constraintOp(.path_set_path, loop, .{ .i = &.{0}, .f = &.{0} }); // No path: not active
+    try b.expectConstraintState(loop, ConstraintState.inactive);
+    try b.constraintOp(.reset_constraint_warm_start, follower, .{});
+    b.at(65);
+    try b.constraintOp(.path_set_path, loop, .{ .i = &.{ 1, loop_desc }, .f = &.{2} }); // The circle again
+    try b.constraintOp(.path_set_position_motor_state, follower, .{ .i = &.{0} });
+}
+
+// (append the scenes of the path group here)
+
+// ---- Gear / RackAndPinion (Blocker.gear_constraints / .rack_and_pinion_constraints, OpKind 360..379) ----
+
+/// Every operation of GearConstraint: two gears on hinges to the world, the first driven by its hinge motor, coupled by a
+/// gear constraint with a ratio from SetRatio (and a second pair with an explicit ratio and no hinges at first);
+/// SetConstraints, NotifyShapeChanged, ResetWarmStart, GetConstraintSettings
+fn buildGearOps(b: *SceneBuilder) Allocator.Error!void {
+    const wheel = try b.cylinder(0.1, 0.5, 0.05);
+    const small_wheel = try b.cylinder(0.1, 0.25, 0.05);
+    b.num_updates = 60;
+    const lying = axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi); // The cylinder axis (Y) along Z
+    const g1 = try b.body(.{ .position = .{ 0, 4, 0 }, .rotation = lying, .shape = wheel }, .activate);
+    const g2 = try b.body(.{ .position = .{ 0.75, 4, 0 }, .rotation = lying, .shape = small_wheel }, .activate);
+    var h1_desc = Desc.hinge(invalid_handle, g1, .{ 0, 4, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+    Desc.setMotor(&h1_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -100, 100 });
+    const h1 = try b.constraint(h1_desc);
+    const h2 = try b.constraint(Desc.hinge(invalid_handle, g2, .{ 0.75, 4, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    var gear = Desc.gear(g1, g2, .{ 0, 0, 1 }, .{ 0, 0, 1 }, 1, h1, h2);
+    gear.i[1] = 1; // SetRatio(20 teeth, 10 teeth)
+    gear.i[2] = 20;
+    gear.i[3] = 10;
+    const g12 = try b.constraint(gear);
+    const g3 = try b.body(.{ .position = .{ 3, 4, 0 }, .rotation = lying, .shape = wheel }, .activate);
+    const g4 = try b.body(.{ .position = .{ 4, 4, 0 }, .rotation = lying, .shape = wheel, .angular_velocity = .{ 0, 0, 3 } }, .activate);
+    const h3 = try b.constraint(Desc.hinge(invalid_handle, g3, .{ 3, 4, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    const h4 = try b.constraint(Desc.hinge(invalid_handle, g4, .{ 4, 4, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    const g34 = try b.constraint(Desc.gear(g3, g4, .{ 0, 0, 1 }, .{ 0, 0, 1 }, 1.5, invalid_handle, invalid_handle));
+    b.at(5);
+    try b.constraintOp(.hinge_set_motor_state, h1, .{ .i = &.{1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, h1, .{ .f = &.{3} });
+    b.at(20);
+    try b.constraintOp(.gear_set_constraints, g34, .{ .i = &.{ h3, h4 } });
+    try b.constraintOp(.constraint_settings_hash, g12, .{});
+    b.at(35);
+    try b.constraintOp(.gear_set_constraints, g12, .{ .i = &.{ h1, invalid_handle } });
+    try b.constraintOp(.notify_constraint_shape_changed, g34, .{ .body = g3, .f = &.{ 0.1, 0, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, g12, .{});
+    b.at(45);
+    try b.constraintOp(.gear_set_constraints, g12, .{ .i = &.{ h1, h2 } });
+    try b.constraintOp(.constraint_settings_hash, g34, .{});
+}
+
+/// Every operation of RackAndPinionConstraint: a pinion on a hinge driven by its motor and a rack on a slider, coupled with
+/// a ratio from SetRatio; a second pair with an explicit ratio that gets its hinge and slider later (SetConstraints)
+fn buildRackAndPinionOps(b: *SceneBuilder) Allocator.Error!void {
+    const wheel = try b.cylinder(0.1, 0.5, 0.05);
+    const rack_shape = try b.box(.{ 2, 0.1, 0.1 }, 0.05);
+    b.num_updates = 60;
+    const lying = axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi);
+    const pinion_body = try b.body(.{ .position = .{ 0, 4, 0 }, .rotation = lying, .shape = wheel }, .activate);
+    const rack_body = try b.body(.{ .position = .{ 0, 3.4, 0 }, .shape = rack_shape, .gravity_factor = 0 }, .activate);
+    var hinge = Desc.hinge(invalid_handle, pinion_body, .{ 0, 4, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+    Desc.setMotor(&hinge, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -100, 100 });
+    const pinion = try b.constraint(hinge);
+    var slider = Desc.slider(invalid_handle, rack_body, .{ 1, 0, 0 });
+    slider.f[12] = -1.5;
+    slider.f[13] = 1.5;
+    const rack = try b.constraint(slider);
+    var rp = Desc.rackAndPinion(pinion_body, rack_body, .{ 0, 0, 1 }, .{ 1, 0, 0 }, 1, pinion, rack);
+    rp.i[1] = 1; // SetRatio(30 teeth on the rack, rack length 4, 10 teeth on the pinion)
+    rp.i[2] = 30;
+    rp.i[3] = 10;
+    rp.f[7] = 4;
+    const rack_and_pinion = try b.constraint(rp);
+    const pinion_body2 = try b.body(.{ .position = .{ 0, 8, 0 }, .rotation = lying, .shape = wheel, .angular_velocity = .{ 0, 0, -2 } }, .activate);
+    const rack_body2 = try b.body(.{ .position = .{ 0, 7.4, 0 }, .shape = rack_shape, .gravity_factor = 0 }, .activate);
+    const pinion2 = try b.constraint(Desc.hinge(invalid_handle, pinion_body2, .{ 0, 8, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    const rack2 = try b.constraint(Desc.slider(invalid_handle, rack_body2, .{ 1, 0, 0 }));
+    const rack_and_pinion2 = try b.constraint(Desc.rackAndPinion(pinion_body2, rack_body2, .{ 0, 0, 1 }, .{ 1, 0, 0 }, 2, invalid_handle, invalid_handle));
+    b.at(5);
+    try b.constraintOp(.hinge_set_motor_state, pinion, .{ .i = &.{1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, pinion, .{ .f = &.{1} });
+    b.at(20);
+    try b.constraintOp(.rack_and_pinion_set_constraints, rack_and_pinion2, .{ .i = &.{ pinion2, rack2 } });
+    try b.constraintOp(.constraint_settings_hash, rack_and_pinion, .{});
+    b.at(35);
+    try b.constraintOp(.notify_constraint_shape_changed, rack_and_pinion, .{ .body = rack_body, .f = &.{ 0.1, 0, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, rack_and_pinion2, .{});
+    try b.constraintOp(.rack_and_pinion_set_constraints, rack_and_pinion, .{ .i = &.{ invalid_handle, rack } });
+    b.at(45);
+    try b.constraintOp(.rack_and_pinion_set_constraints, rack_and_pinion, .{ .i = &.{ pinion, rack } });
+    try b.constraintOp(.constraint_settings_hash, rack_and_pinion2, .{});
+}
+
+// (append the scenes of the gear / rack and pinion group here)
 
 test "SimScenes builders" {
     // Every scene builds and its operations are in update order
