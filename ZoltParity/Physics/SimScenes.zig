@@ -28,8 +28,9 @@
 //! 3. A scene with contacts needs nothing else (the C++ side and the Zolt side create every shape kind of `ShapeKind`,
 //!    and the contact listener records are compared already). A new shape kind is a new `ShapeKind` value plus its
 //!    creation in `SimulationReference.cpp` (MakeShape) and `SimulationParity.zig` (makeShapeSettings). Constraints
-//!    are described by `SimConstraint`; the C++ side creates every `ConstraintKind`, the Zolt side gets the
-//!    corresponding prong in SimulationParity.zig's `applyOpInner` (`.create_constraint`) when Phase 6 ports the class.
+//!    are described by `SimConstraint`; the C++ side creates every `ConstraintKind`, the Zolt side the kinds whose class
+//!    is ported (SimulationParity.zig's `makeConstraintSettings` gets a prong when Phase 6 ports the class; until then a
+//!    scene with that kind is skipped and runs on the C++ side alone).
 //!    A new operation is a new `OpKind` value plus its prong in ApplyOp (C++) and applyOpInner (Zolt).
 //! 4. Avoid what Jolt asserts (Zolt's Debug build asserts the same): initial velocities above the maximum, a linear
 //!    cast shape without inner radius, invalid scales, a kinematic / dynamic body without mass (a mesh needs
@@ -233,7 +234,9 @@ pub const StepListenerMode = enum(u32) {
     record_only = 3,
 };
 
-/// Constraint kinds (Phase 6: the C++ side creates them already, the Zolt side when the class is ported)
+/// Constraint kinds (Phase 6: the C++ side creates every kind, the Zolt side the kinds whose class is ported, see
+/// SimulationParity.zig's `constraintKindSupported` / `makeConstraintSettings`; a scene with a kind that is not ported
+/// yet is skipped)
 pub const ConstraintKind = enum(u32) {
     /// FixedConstraintSettings with mAutoDetectPoint = true
     fixed = 0,
@@ -597,7 +600,9 @@ pub const Blocker = enum {
     none,
     /// Body pairs reach the narrow phase: ProcessBodyPair and the contact solver (A4, Wave B R2 / R3, supported)
     contacts,
-    /// Constraints in islands: the constraint classes (Phase 6) and the solver (Wave B R3)
+    /// Constraints in islands: the constraint classes (Phase 6) and the solver (Wave B R3). Supported since the Phase 6
+    /// foundation: a scene whose ConstraintKinds are not all ported in Zolt yet is skipped by SimulationParity.zig's
+    /// `sceneConstraintsSupported` (and runs on the C++ side alone), independent of this blocker
     constraints,
     /// Linear cast bodies that hit something (Wave B R4, supported)
     ccd_hits,
@@ -610,9 +615,9 @@ pub const Blocker = enum {
     /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
-            .none, .contacts, .ccd_hits => true,
+            .none, .contacts, .ccd_hits, .constraints => true,
             .release_only => !zolt.Core.enable_asserts,
-            .constraints, .soft_bodies => false,
+            .soft_bodies => false,
         };
     }
 };
@@ -796,7 +801,13 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "physics_tests_switch_use_manifold_reduction_2", .build = buildTestsSwitchUseManifoldReduction(2), .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "physics_tests_apply_body_creation_settings", .build = buildTestsApplyBodyCreationSettings, .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
 
+    // Constraints (Phase 6): scenes with a constraint kind that Zolt does not have yet are skipped
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
+    .{ .name = "constraints_fixed", .build = buildConstraintsFixed, .blocked_by = .constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_pendulum_hits_stack", .build = buildConstraintsPendulumHitsStack, .blocked_by = .constraints, .sweep_stride = 15, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "constraints_net_splitter", .build = buildConstraintsNet, .blocked_by = .constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
+    .{ .name = "constraints_sleep_and_wake", .build = buildConstraintsSleepAndWake, .blocked_by = .constraints, .sweep_stride = 20, .expect = .{ .sleeping = true } },
+    .{ .name = "constraints_save_restore_and_settings", .build = buildConstraintsSaveRestore, .blocked_by = .constraints, .sweep_stride = 15 },
 };
 
 /// A built scene: the description plus the operations and the update parameters (the memory is owned by the builder)
@@ -4349,6 +4360,188 @@ fn buildConstraintChain(b: *SceneBuilder) Allocator.Error!void {
         try b.sysOp(.create_constraint, .{ .index = c });
         previous = h;
     }
+}
+
+/// A constraint between two body handles (`invalid_handle`: Body::sFixedToWorld), created with `create_constraint`
+fn addPointConstraint(b: *SceneBuilder, body1: u32, body2: u32, point1: [3]f32, point2: [3]f32) Allocator.Error!void {
+    const c = try b.addConstraint(.{ .kind = @intFromEnum(ConstraintKind.point), .body1 = body1, .body2 = body2, .f = point1 ++ point2 ++ @as([10]f32, @splat(0)) });
+    try b.sysOp(.create_constraint, .{ .index = c });
+}
+
+/// A fixed constraint (mAutoDetectPoint) between two body handles
+fn addFixedConstraint(b: *SceneBuilder, body1: u32, body2: u32) Allocator.Error!void {
+    const c = try b.addConstraint(.{ .kind = @intFromEnum(ConstraintKind.fixed), .body1 = body1, .body2 = body2 });
+    try b.sysOp(.create_constraint, .{ .index = c });
+}
+
+/// Fixed constraints (mAutoDetectPoint): a chain of boxes welded to each other that hangs from the world on a point
+/// constraint; a box welded to a kinematic body that moves and turns; a box welded to the world (Body::sFixedToWorld as
+/// body 1: the anchor is the center of mass of the box); a light and a heavy box welded together (the anchor is weighted
+/// towards the light one) and a box welded to a static body. Forces, torques and impulses shake them.
+fn buildConstraintsFixed(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const offset_box = try b.offsetCenterOfMass(box, .{ 0.1, -0.05, 0.02 });
+    b.num_updates = 80;
+
+    // A chain welded with fixed constraints, hanging from the world on a point constraint
+    var previous: u32 = invalid_handle;
+    for (0..4) |i| {
+        const x: f32 = 0.7 * @as(f32, @floatFromInt(i));
+        const h = try b.body(.{ .position = .{ x, 5, 0 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.1 * @as(f64, @floatFromInt(i))), .shape = if (i % 2 == 0) box else offset_box, .object_layer = Layers.unused1 }, .activate);
+        if (i == 0)
+            try addPointConstraint(b, invalid_handle, h, .{ x - 0.35, 5.3, 0 }, .{ x - 0.35, 5.3, 0 })
+        else
+            try addFixedConstraint(b, previous, h);
+        previous = h;
+    }
+
+    // A kinematic body that moves, with a dynamic box welded to it
+    const kinematic = try b.body(.{ .position = .{ 6, 5, 0 }, .linear_velocity = .{ 0.5, 0, 0 }, .angular_velocity = .{ 0, 0.7, 0 }, .shape = box, .motion_type = 1, .object_layer = Layers.unused1 }, .activate);
+    const welded = try b.body(.{ .position = .{ 6.7, 5.2, 0.1 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    try addFixedConstraint(b, kinematic, welded);
+
+    // A box welded to the world
+    const to_world = try b.body(.{ .position = .{ -4, 3, 0 }, .rotation = axisAngle(.{ 1, 0, 0 }, 0.3), .shape = offset_box, .object_layer = Layers.unused1 }, .activate);
+    try addFixedConstraint(b, invalid_handle, to_world);
+
+    // A light and a heavy box (mass override): the anchor is weighted towards the light one
+    const light = try b.body(.{ .position = .{ 0, 8, 4 }, .shape = box, .mass = 0.5, .override_mass_properties = 1, .object_layer = Layers.unused1 }, .activate);
+    const heavy = try b.body(.{ .position = .{ 0.8, 8.3, 4 }, .shape = box, .mass = 20, .override_mass_properties = 1, .object_layer = Layers.unused1 }, .activate);
+    try addFixedConstraint(b, light, heavy);
+
+    // A box welded to a static body (the anchor is the center of mass of the box)
+    const static_body = try b.body(.{ .position = .{ 4, 2, -4 }, .shape = box, .motion_type = 0, .object_layer = Layers.unused1 }, .dont_activate);
+    const on_static = try b.body(.{ .position = .{ 4.5, 2.6, -4 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    try addFixedConstraint(b, static_body, on_static);
+
+    b.at(20);
+    try b.op(.add_force, previous, .{ .f = &.{ 0, 0, 300 } });
+    try b.op(.add_torque, welded, .{ .f = &.{ 50, 0, 0 } });
+    b.at(35);
+    try b.op(.add_impulse, to_world, .{ .f = &.{ 2, 5, 0 } });
+    try b.op(.add_angular_impulse, heavy, .{ .f = &.{ 0, 0, 10 } });
+    b.at(50);
+    try b.op(.set_linear_velocity, kinematic, .{ .f = &.{ 0, 0.5, 0 } });
+}
+
+/// A box on a point constraint swings from the world into a stack of boxes on the floor: contacts and constraints in
+/// the same island
+fn buildConstraintsPendulumHitsStack(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const bob = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    b.num_updates = 90;
+    _ = try addFloor(b, 20, 0);
+    for (0..4) |y| _ = try b.body(.{ .position = .{ 0, 0.5 + real(y) * 1.01, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+
+    // The pendulum hangs from (-4, 6, 0) and starts horizontal
+    const pendulum = try b.body(.{ .position = .{ -8, 6, 0 }, .shape = bob, .object_layer = Layers.moving }, .activate);
+    try addPointConstraint(b, invalid_handle, pendulum, .{ -4, 6, 0 }, .{ -4, 6, 0 });
+
+    // A second pendulum made of two boxes on point constraints
+    const upper = try b.body(.{ .position = .{ 4, 5, 0.2 }, .shape = bob, .object_layer = Layers.moving }, .activate);
+    try addPointConstraint(b, invalid_handle, upper, .{ 4, 6, 0.2 }, .{ 4, 6, 0.2 });
+    const lower = try b.body(.{ .position = .{ 5, 4, 0.2 }, .shape = bob, .object_layer = Layers.moving }, .activate);
+    try addPointConstraint(b, upper, lower, .{ 4.5, 4.5, 0.2 }, .{ 4.5, 4.5, 0.2 });
+}
+
+/// A net of boxes lying on the floor, each connected to its neighbours by point constraints and the corners pinned to
+/// the world: an island with more than 128 constraints that the LargeIslandSplitter splits, and that falls asleep
+fn buildConstraintsNet(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.2, 0.4 }, 0.05);
+    b.num_updates = 100;
+    b.max_contact_constraints = 2048;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const nx = 10;
+    const nz = 14;
+    var handles: [nx * nz]u32 = undefined;
+    for (0..nz) |z| {
+        for (0..nx) |x| {
+            const px: f32 = @as(f32, @floatFromInt(x)) - 5.0;
+            const pz: f32 = @as(f32, @floatFromInt(z)) - 7.0;
+            handles[z * nx + x] = try b.body(.{ .position = .{ px, 0.25, pz }, .shape = box, .object_layer = Layers.moving }, .activate);
+            if (x > 0) try addPointConstraint(b, handles[z * nx + x - 1], handles[z * nx + x], .{ px - 0.5, 0.25, pz }, .{ px - 0.5, 0.25, pz });
+            if (z > 0) try addPointConstraint(b, handles[(z - 1) * nx + x], handles[z * nx + x], .{ px, 0.25, pz - 0.5 }, .{ px, 0.25, pz - 0.5 });
+        }
+    }
+    // Pin the corners to the world
+    for ([_]usize{ 0, nx - 1, (nz - 1) * nx, nz * nx - 1 }) |i| {
+        const p: [3]f32 = .{ @as(f32, @floatFromInt(i % nx)) - 5.0, 0.25, @as(f32, @floatFromInt(i / nx)) - 7.0 };
+        try addPointConstraint(b, invalid_handle, handles[i], p, p);
+    }
+    b.at(10);
+    try b.op(.add_impulse, handles[nx * nz / 2], .{ .f = &.{ 0, 3, 0 } });
+}
+
+/// A chain hanging straight down from the world comes to rest and falls asleep; a force on its lowest box wakes the
+/// chain link by link (BuildIslands of an active constraint activates its sleeping body, a constraint between two
+/// sleeping bodies is not active) and a fixed constraint welds a sleeping box to it later
+fn buildConstraintsSleepAndWake(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.4, 0.2 }, 0.05);
+    b.num_updates = 120;
+    b.settings.time_before_sleep = 0.2;
+    var previous: u32 = invalid_handle;
+    var chain: [4]u32 = undefined;
+    for (0..4) |i| {
+        const y: f32 = 5.0 - @as(f32, @floatFromInt(i));
+        const h = try b.body(.{ .position = .{ 0, y, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+        try addPointConstraint(b, previous, h, .{ 0, y + 0.5, 0 }, .{ 0, y + 0.5, 0 });
+        chain[i] = h;
+        previous = h;
+    }
+    const extra = try b.body(.{ .position = .{ 0.5, 1.6, 0 }, .shape = box, .gravity_factor = 0, .object_layer = Layers.unused1 }, .dont_activate);
+    b.at(60);
+    try b.expectSleeping(chain[0]);
+    try b.expectSleeping(chain[3]);
+    try b.op(.add_force, chain[3], .{ .f = &.{ 200, 0, 0 } });
+    b.at(61);
+    try b.expectAwake(chain[2]); // The force activated the lowest box, BuildIslands of its constraint the box above it
+    try b.expectSleeping(chain[0]); // Only active constraints wake bodies: one more link per update
+    b.at(63);
+    try b.expectAwake(chain[0]);
+    b.at(70);
+    try addFixedConstraint(b, chain[3], extra);
+}
+
+/// Constraints across a cross save / restore (the warm start impulses are state) and changes of the physics settings:
+/// no constraint warm start, other solver iteration counts and Baumgarte factor
+fn buildConstraintsSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 90;
+    var no_warm_start = b.settings;
+    no_warm_start.constraint_warm_start = 0;
+    no_warm_start.num_velocity_steps = 4;
+    no_warm_start.num_position_steps = 1;
+    const settings1 = try b.addPhysicsSettings(no_warm_start);
+    var more_steps = b.settings;
+    more_steps.num_velocity_steps = 15;
+    more_steps.num_position_steps = 5;
+    more_steps.baumgarte = 0.5;
+    const settings2 = try b.addPhysicsSettings(more_steps);
+
+    var previous: u32 = invalid_handle;
+    for (0..6) |i| {
+        const x: f32 = 0.6 * @as(f32, @floatFromInt(i));
+        const h = try b.body(.{ .position = .{ x, 6, 0 }, .angular_velocity = .{ 0, 0, 0.5 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+        if (i % 3 == 2)
+            try addFixedConstraint(b, previous, h)
+        else
+            try addPointConstraint(b, previous, h, .{ x - 0.3, 6, 0 }, .{ x - 0.3, 6, 0 });
+        previous = h;
+    }
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(30);
+    try b.sysOp(.set_physics_settings, .{ .index = settings1 });
+    b.at(45);
+    try b.sysOp(.restore_cross, .{ .index = 0 });
+    b.at(50);
+    try b.sysOp(.set_physics_settings, .{ .index = settings2 });
+    b.at(60);
+    try b.sysOp(.snapshot, .{ .index = 1 });
+    try b.op(.add_impulse, previous, .{ .f = &.{ 0, 0, 3 } });
+    b.at(70);
+    try b.sysOp(.restore_cross, .{ .index = 1 });
 }
 
 test "SimScenes builders" {

@@ -1,6 +1,5 @@
 //! Port of: UnitTests/Physics/PhysicsTests.cpp
-//! Status: partial
-//! Missing: TestPhysicsConstraintUserData (creates a PointConstraint, Phase 6)
+//! Status: complete
 //!
 //! - `RVec3(..., 0.99f, ...)` (a float literal or float arithmetic) and `RVec3(..., 0.99_r, ...)` (a Real literal)
 //!   differ in double precision: the float values are computed as f32 and widened (`rvec3f`), like in C++.
@@ -412,6 +411,33 @@ test "TestPhysicsBodyUserData" {
     var body_settings2 = body.getBodyCreationSettings();
     defer body_settings2.deinit();
     try expect(body_settings2.user_data == 0x5678123443218765);
+}
+
+test "TestPhysicsConstraintUserData" {
+    const allocator = std.testing.allocator;
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+
+    // Create a body
+    const body = try c.createBox(RVec3.zero(), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.one(), .{});
+
+    // Create constraint with user data
+    var constraint_settings = zolt.PointConstraintSettings.init(allocator);
+    defer constraint_settings.asSettings().deinit();
+    constraint_settings.base.base.user_data = 0x1234567887654321;
+    var constraint = zolt.Ref(zolt.Constraint).init((try constraint_settings.createConstraint(allocator, body, zolt.Body.fixedToWorld())).asConstraint());
+    defer constraint.deinit();
+    try expect(constraint.get().?.getUserData() == 0x1234567887654321);
+
+    // Change the user data
+    constraint.get().?.setUserData(0x5678123443218765);
+    try expect(constraint.get().?.getUserData() == 0x5678123443218765);
+
+    // Convert back to constraint settings
+    var constraint_settings2 = try constraint.get().?.getConstraintSettings();
+    defer constraint_settings2.deinit();
+    try expect(constraint_settings2.get().?.user_data == 0x5678123443218765);
 }
 
 test "TestPhysicsPosition" {

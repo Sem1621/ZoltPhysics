@@ -36,8 +36,9 @@
 //! 0x3d604197" (update 59).
 //!
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
-//! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts
-//! it as skipped. The test "SimScenes blocked scenes run on the C++ side" runs those scenes on the C++ side alone. Add a
+//! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported), or that creates a constraint kind whose Zolt class
+//! is still a stub (Phase 6, `constraintKindSupported`), returns error.SkipZigTest: the build summary counts it as
+//! skipped. The test "SimScenes blocked scenes run on the C++ side" runs those scenes on the C++ side alone. Add a
 //! scene in SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping
 //! bodies, step listener calls, CCD bodies, sweep counts): check it when you write a scene.
 //!
@@ -53,6 +54,9 @@
 //! `(contact point - center of mass) - fraction * delta` instead of Jolt's `contact point - (center of mass + fraction *
 //! delta)` is reported as "state differs at byte 254 ...: bodies[3] (id 0x00800003)
 //! motion_properties.linear_velocity.x zolt 0x41cc9e9c jolt 0x41cc9ea4" (scene ccd_static_targets, update 7).
+//! Solving the point part of FixedConstraint.solveVelocityConstraint before its rotation part is reported as "state
+//! differs at byte 26 ...: bodies[0] (id 0x00800000) position.x zolt 0xba004cc4 jolt 0xba023e82" (scene
+//! constraints_fixed, update 0).
 //!
 //! CCD (Wave B R4): the driver counts the FindCCDContacts jobs of every update (Zolt side) and the updates after which
 //! the contact cache of the C++ state holds CCD manifolds (OnCCDContactAdded of a hit without a discrete contact of the
@@ -123,6 +127,7 @@ const SimBody = SimScenes.SimBody;
 const SimPhysicsSettings = SimScenes.SimPhysicsSettings;
 const SimStepListener = SimScenes.SimStepListener;
 const SimConstraint = SimScenes.SimConstraint;
+const ConstraintKind = SimScenes.ConstraintKind;
 const SimOp = SimScenes.SimOp;
 const SimSceneDesc = SimScenes.SimSceneDesc;
 const SimRecord = SimScenes.SimRecord;
@@ -994,9 +999,16 @@ const ZoltWorld = struct {
                     lock.getBody().setCollideKinematicVsNonDynamic(op.count != 0);
             },
             .create_constraint => {
-                // Phase 6: one prong per ConstraintKind when the class is ported (the scenes that need it are blocked
-                // by SimScenes.Blocker.constraints until then)
-                return error.SceneNotSupported;
+                // CreateConstraint(constraints[index]) + AddConstraint (a scene with a kind whose class is not ported
+                // yet is skipped before it runs, see `constraintKindSupported`)
+                const c = &self.desc.constraints[op.index];
+                var settings = try makeConstraintSettings(allocator, c);
+                defer settings.deinit();
+                const two_body = try bi.createConstraint(zolt.virtual.downcast(zolt.TwoBodyConstraintSettings, settings.get().?), self.getHandle(c.body1), self.getHandle(c.body2));
+                var constraint = Ref(zolt.Constraint).init(&two_body.base); // Jolt: AddConstraint takes the first reference; a temporary one frees the constraint when AddConstraint fails
+                defer constraint.deinit();
+                try self.system.addConstraint(&two_body.base);
+                return 0;
             },
 
             .set_update, .snapshot, .restore_cross => unreachable, // Driver operations
@@ -1775,6 +1787,46 @@ fn createScene(allocator: Allocator, builder: *const SceneBuilder) !void {
     }
 }
 
+/// True when the Zolt class of a SimScenes.ConstraintKind is ported (its settings no longer declare the stub marker
+/// `is_stub`): scenes with a kind that is not ported yet are skipped (error.SkipZigTest) and run on the C++ side alone
+/// ("SimScenes blocked scenes run on the C++ side"). The porter of a class adds its prong to `makeConstraintSettings`.
+fn constraintKindSupported(kind: ConstraintKind) bool {
+    return switch (kind) {
+        .fixed => !@hasDecl(zolt.FixedConstraintSettings, "is_stub"),
+        .point => !@hasDecl(zolt.PointConstraintSettings, "is_stub"),
+        .distance => !@hasDecl(zolt.DistanceConstraintSettings, "is_stub"),
+        .hinge => !@hasDecl(zolt.HingeConstraintSettings, "is_stub"),
+        .slider => !@hasDecl(zolt.SliderConstraintSettings, "is_stub"),
+    };
+}
+
+/// True when every constraint kind of a scene is supported (see `constraintKindSupported`)
+fn sceneConstraintsSupported(builder: *const SceneBuilder) bool {
+    for (builder.constraints.items) |c|
+        if (!constraintKindSupported(@enumFromInt(c.kind))) return false;
+    return true;
+}
+
+/// MakeConstraintSettings of SimulationReference.cpp: the settings of a SimConstraint (one reference owned by the caller)
+fn makeConstraintSettings(allocator: Allocator, c: *const SimConstraint) !Ref(zolt.ConstraintSettings) {
+    const f = &c.f;
+    switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+        .fixed => {
+            const s = try zolt.FixedConstraintSettings.create(allocator);
+            s.auto_detect_point = true;
+            return .init(s.asSettings());
+        },
+        .point => {
+            const s = try zolt.PointConstraintSettings.create(allocator);
+            s.point1 = RVec3.fromVec3(load3(f[0..3]));
+            s.point2 = RVec3.fromVec3(load3(f[3..6]));
+            return .init(s.asSettings());
+        },
+        // Phase 6: the porter of the class adds its prong here (the C++ side creates every kind already)
+        .distance, .hinge, .slider => return error.SceneNotSupported,
+    }
+}
+
 fn runEntry(entry: *const SceneEntry) !void {
     if (!entry.blocked_by.isSupported())
         return error.SkipZigTest;
@@ -1783,6 +1835,8 @@ fn runEntry(entry: *const SceneEntry) !void {
     var builder: SceneBuilder = .init(allocator);
     defer builder.deinit();
     try entry.build(&builder);
+    if (!sceneConstraintsSupported(&builder))
+        return error.SkipZigTest; // A constraint class of the scene is not ported yet (Phase 6)
 
     var stats: [configs.len]RunStats = undefined;
     for (configs, &stats) |config, *s|
@@ -1873,10 +1927,11 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer b_records.deinit(allocator);
 
     for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by.isSupported() or entry.blocked_by == .release_only) continue; // Supported (their own tests)
+        if (entry.blocked_by == .release_only) continue; // Supported (their own tests)
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);
+        if (entry.blocked_by.isSupported() and sceneConstraintsSupported(&builder)) continue; // Supported (their own tests)
         const desc = builder.desc();
         const a = CppWorld.init(&desc, 0);
         defer a.deinit();
@@ -1926,12 +1981,12 @@ test "SimScenes blocked scenes run on the C++ side" {
 
         switch (entry.blocked_by) {
             .contacts, .ccd_hits => try std.testing.expect(records[@intFromEnum(RecordKind.contact_added)] > 0),
-            .constraints => {
-                var num_constraints: u32 = 0;
-                _ = jolt.jolt_sim_constraint_state_size(a.handle, 0, &num_constraints);
-                try std.testing.expect(num_constraints > 0);
-            },
-            .none, .soft_bodies, .release_only => {},
+            .none, .constraints, .soft_bodies, .release_only => {},
+        }
+        if (builder.constraints.items.len > 0) {
+            var num_constraints: u32 = 0;
+            _ = jolt.jolt_sim_constraint_state_size(a.handle, 0, &num_constraints);
+            try std.testing.expect(num_constraints > 0);
         }
     }
 }
