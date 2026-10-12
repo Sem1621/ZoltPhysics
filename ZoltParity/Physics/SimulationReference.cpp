@@ -214,6 +214,7 @@ struct SimSceneDesc
 	uint32						mContactListenerMode;
 	uint32						mCombineMode;
 	uint32						mSimShapeFilterMode;
+	uint32						mTempAllocatorSize;
 };
 
 // Must match ContactFlags in SimScenes.zig (bits in the upper 32 bits of the user data of a body)
@@ -618,6 +619,7 @@ class SimWorld
 public:
 								SimWorld(const SimSceneDesc &inDesc, uint32 inNumThreads) :
 		mDesc(inDesc),
+		mTempAllocator(inDesc.mTempAllocatorSize),
 		mJobSystem(cMaxPhysicsJobs, cMaxPhysicsBarriers, int(inNumThreads))
 	{
 		mSystem.Init(inDesc.mMaxBodies, inDesc.mNumBodyMutexes, inDesc.mMaxBodyPairs, inDesc.mMaxContactConstraints, mBroadPhaseLayerInterface, mObjectVsBroadPhaseLayerFilter, mObjectLayerPairFilter);
@@ -695,6 +697,23 @@ public:
 					triangles.push_back(Triangle(SimLoad3(t), SimLoad3(t + 3), SimLoad3(t + 6)));
 				}
 				settings = new MeshShapeSettings(triangles);
+			}
+			break;
+		case 17:
+			{
+				VertexList vertices;
+				for (uint32 i = 0; i < inShape.mCount; ++i)
+				{
+					const float *v = mDesc.mFloats + inShape.mData + 3 * i;
+					vertices.push_back(Float3(v[0], v[1], v[2]));
+				}
+				IndexedTriangleList triangles;
+				const float *indices = mDesc.mFloats + inShape.mData + 3 * inShape.mCount;
+				for (uint32 i = 0; i < uint32(p[0]); ++i)
+					triangles.push_back(IndexedTriangle(uint32(indices[3 * i]), uint32(indices[3 * i + 1]), uint32(indices[3 * i + 2])));
+				MeshShapeSettings *mesh = new MeshShapeSettings(vertices, triangles);
+				mesh->mMaxTrianglesPerLeaf = uint(p[1]);
+				settings = mesh;
 			}
 			break;
 		case 10:	settings = new EmptyShapeSettings(SimLoad3(p)); break;
@@ -974,7 +993,7 @@ public:
 	BPLayerInterfaceImpl		mBroadPhaseLayerInterface;
 	ObjectVsBroadPhaseLayerFilterImpl mObjectVsBroadPhaseLayerFilter;
 	ObjectLayerPairFilterImpl	mObjectLayerPairFilter;
-	TempAllocatorImpl			mTempAllocator { 10 * 1024 * 1024 };
+	TempAllocatorImpl			mTempAllocator;
 	JobSystemThreadPool			mJobSystem;
 	SimRecorder					mRecorder;
 	SimActivationListener		mActivationListener;

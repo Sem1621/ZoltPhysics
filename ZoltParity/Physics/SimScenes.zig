@@ -103,6 +103,10 @@ pub const ShapeKind = enum(u32) {
     mutable_compound = 15,
     /// `count` * `count` height samples at floats[data..], params[0..3] offset, params[3..6] scale
     height_field = 16,
+    /// MeshShapeSettings(VertexList, IndexedTriangleList): `count` vertices at floats[data..][0 .. 3 * count], followed
+    /// by params[0] triangles of 3 vertex indices each (stored as floats, exact below 2^24), params[1] the max number
+    /// of triangles per leaf (mMaxTrianglesPerLeaf)
+    indexed_mesh = 17,
 };
 
 /// A shape, created once per scene from its settings (ShapeSettings::Create) on both sides. Bodies refer to it by
@@ -406,6 +410,8 @@ pub const SimSceneDesc = extern struct {
     combine_mode: u32,
     /// SimShapeFilterMode (PhysicsSystem::SetSimShapeFilter)
     sim_shape_filter_mode: u32,
+    /// Size of the TempAllocatorImpl of the world in bytes
+    temp_allocator_size: u32,
 };
 
 /// What the contact listener does besides recording the callbacks
@@ -616,6 +622,10 @@ pub const SceneEntry = struct {
     /// D12 sweeps (every temp allocation and every createJob of the update fails once) before every
     /// `sweep_stride`-th update and before the first one, 0: none
     sweep_stride: u32 = 25,
+    /// Creating the scene runs under std.testing.checkAllAllocationFailures (D12). Its cost is quadratic in the number
+    /// of bodies: false for the PerformanceTest scenes with thousands of bodies, whose creation runs the same code as
+    /// the other scenes.
+    creation_sweep: bool = true,
     expect: Expect = .{},
 };
 
@@ -707,6 +717,10 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "ccd_random_1", .build = buildCCDRandom(1, 1), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_random_2", .build = buildCCDRandom(2, 2), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_random_3", .build = buildCCDRandom(3, 1), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
+    // The PerformanceTest scenes of the determinism check (milestone M6), exactly as ZoltPerformanceTest sets them up
+    .{ .name = "perf_pyramid", .build = buildPerfPyramid, .blocked_by = .contacts, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true } },
+    .{ .name = "perf_convex_vs_mesh", .build = buildPerfConvexVsMesh, .blocked_by = .contacts, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true } },
+    .{ .name = "perf_high_speed", .build = buildPerfHighSpeed, .blocked_by = .ccd_hits, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true, .ccd_hits = true, .ccd_jobs = 4 } },
     // Later waves (blocked until Zolt has the parts, see Blocker)
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
 };
@@ -726,6 +740,7 @@ pub const SceneBuilder = struct {
     contact_listener_mode: ContactListenerMode = .record,
     combine_mode: CombineMode = .default,
     sim_shape_filter_mode: SimShapeFilterMode = .none,
+    temp_allocator_size: u32 = 10 * 1024 * 1024,
 
     shapes: std.ArrayList(SimShape) = .empty,
     children: std.ArrayList(SimCompoundChild) = .empty,
@@ -784,6 +799,7 @@ pub const SceneBuilder = struct {
             .contact_listener_mode = @intFromEnum(self.contact_listener_mode),
             .combine_mode = @intFromEnum(self.combine_mode),
             .sim_shape_filter_mode = @intFromEnum(self.sim_shape_filter_mode),
+            .temp_allocator_size = self.temp_allocator_size,
         };
     }
 
@@ -840,6 +856,21 @@ pub const SceneBuilder = struct {
         const data: u32 = @intCast(self.floats.items.len);
         for (triangles) |t| try self.floats.appendSlice(self.allocator, &t);
         return self.addShape(.{ .kind = @intFromEnum(ShapeKind.mesh), .count = @intCast(triangles.len), .data = data });
+    }
+
+    /// MeshShapeSettings(vertices, indexed triangles) with `max_triangles_per_leaf` (the construction of the
+    /// PerformanceTest scenes: no Indexify, the triangle order is the given one)
+    pub fn indexedMesh(self: *SceneBuilder, vertices: []const [3]f32, triangles: []const [3]u32, max_triangles_per_leaf: u32) Allocator.Error!u32 {
+        const data: u32 = @intCast(self.floats.items.len);
+        try self.floats.ensureUnusedCapacity(self.allocator, 3 * (vertices.len + triangles.len));
+        for (vertices) |v| self.floats.appendSliceAssumeCapacity(&v);
+        for (triangles) |t| {
+            for (t) |vertex_index| {
+                std.debug.assert(vertex_index < 1 << 24); // Exact as a float
+                self.floats.appendAssumeCapacity(@floatFromInt(vertex_index));
+            }
+        }
+        return self.addShape(.{ .kind = @intFromEnum(ShapeKind.indexed_mesh), .params = params(&.{ @floatFromInt(triangles.len), @floatFromInt(max_triangles_per_leaf) }), .count = @intCast(vertices.len), .data = data });
     }
 
     /// A height field of `sample_count` * `sample_count` samples (row major, `samples.len == sample_count^2`)
@@ -3438,6 +3469,202 @@ fn buildCCDRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder)
             }
         }
     }.build;
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// The PerformanceTest scenes (milestone M6, ZoltPerformanceTest/): the setup of PyramidScene.h, ConvexVsMeshScene.h and
+// HighSpeedScene.h with the arguments of the determinism check (-q=LinearCast), PerformanceTest.cpp's PhysicsSystem
+// (10240 bodies, 0 body mutexes, 65536 body pairs, 20480 contact constraints, the default settings and gravity, 60 Hz,
+// 1 collision step) and its OptimizeBroadPhase after StartTest. The layers NON_MOVING / MOVING of
+// PerformanceTest/Layers.h behave like Layers.non_moving / Layers.moving here (only the broad phase layers differ, which
+// does not change the simulation). The values are computed with Zolt's functions exactly as ZoltPerformanceTest does
+// (Mt19937, Quat.random, Vec3.random, Sin, Cos), whose hashes equal Jolt's published ones. They run without the D12
+// sweeps (thousands of bodies; the other scenes cover the sweeps) and for as many updates as keep the run time of the
+// suite reasonable.
+
+/// The PhysicsSystem of PerformanceTest.cpp (PerformanceTestScene's defaults)
+fn perfSystem(b: *SceneBuilder) void {
+    b.max_bodies = 10240;
+    b.num_body_mutexes = 0;
+    b.max_body_pairs = 65536;
+    b.max_contact_constraints = 20480;
+    b.temp_allocator_size = 32 * 1024 * 1024;
+}
+
+/// The rotation of a body description
+fn quatToArray(q: zolt.Quat) [4]f32 {
+    return .{ q.getX(), q.getY(), q.getZ(), q.getW() };
+}
+
+/// PyramidScene: 1240 boxes without convex radius that may not sleep, one large island (50 updates)
+fn buildPerfPyramid(b: *SceneBuilder) Allocator.Error!void {
+    perfSystem(b);
+    b.num_updates = 50;
+
+    // Floor
+    const floor = try b.box(.{ 50.0, 1.0, 50.0 }, 0.0);
+    _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ 0.0, -1.0, 0.0 }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }), .dont_activate);
+
+    const box_size: f32 = 2.0;
+    const box_separation: f32 = 0.5;
+    const half_box_size: f32 = 0.5 * box_size;
+    const pyramid_height: i32 = 15;
+
+    const box = try b.box(.{ half_box_size, half_box_size, half_box_size }, 0.0); // No convex radius to force more collisions
+
+    // Pyramid
+    var i: i32 = 0;
+    while (i < pyramid_height) : (i += 1) {
+        var j: i32 = @divTrunc(i, 2);
+        while (j < pyramid_height - @divTrunc(i + 1, 2)) : (j += 1) {
+            var k: i32 = @divTrunc(i, 2);
+            while (k < pyramid_height - @divTrunc(i + 1, 2)) : (k += 1) {
+                // PyramidScene computes the coordinates in float and converts them to Real
+                const offset: f32 = if (i & 1 != 0) half_box_size else 0.0;
+                const position: [3]Real = .{
+                    @as(f32, @floatFromInt(-pyramid_height)) + box_size * @as(f32, @floatFromInt(j)) + offset,
+                    1.0 + (box_size + box_separation) * @as(f32, @floatFromInt(i)),
+                    @as(f32, @floatFromInt(-pyramid_height)) + box_size * @as(f32, @floatFromInt(k)) + offset,
+                };
+                _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = position, .shape = box, .object_layer = Layers.moving, .allow_sleeping = 0 }), .activate); // No sleeping to force the large island to stay awake
+            }
+        }
+    }
+
+    try b.sysOp(.optimize_broad_phase, .{});
+}
+
+/// ConvexVsMeshScene: 1764 convex shapes (linear cast) dropped on a 100 x 100 mesh terrain with 4 velocity steps and 1
+/// position step (80 updates: the first bodies reach the terrain after about 55)
+fn buildPerfConvexVsMesh(b: *SceneBuilder) Allocator.Error!void {
+    perfSystem(b);
+    b.num_updates = 80;
+
+    // Load: the mesh
+    const n = 100;
+    const cell_size: f32 = 3.0;
+    const max_height: f32 = 5.0;
+    const center: f32 = @as(f32, n) * cell_size / 2;
+    const vertices = try b.allocator.alloc([3]f32, (n + 1) * (n + 1));
+    defer b.allocator.free(vertices);
+    for (0..n + 1) |x| {
+        for (0..n + 1) |z| {
+            const fx: f32 = @floatFromInt(x);
+            const fz: f32 = @floatFromInt(z);
+            const height = zolt.trigonometry.sin(fx * 50.0 / @as(f32, n)) * zolt.trigonometry.cos(fz * 50.0 / @as(f32, n));
+            vertices[z * (n + 1) + x] = .{ cell_size * fx, max_height * height, cell_size * fz };
+        }
+    }
+    const triangles = try b.allocator.alloc([3]u32, n * n * 2);
+    defer b.allocator.free(triangles);
+    var next: usize = 0;
+    for (0..n) |x| {
+        for (0..n) |z| {
+            const start: u32 = @intCast((n + 1) * z + x);
+            triangles[next] = .{ start, start + n + 1, start + 1 };
+            triangles[next + 1] = .{ start + 1, start + n + 1, start + n + 2 };
+            next += 2;
+        }
+    }
+    const mesh = try b.indexedMesh(vertices, triangles, 4);
+
+    // Load: the other shapes
+    const shapes = [_]u32{
+        try b.box(.{ 0.5, 0.75, 1.0 }, 0.05),
+        try b.sphere(0.5),
+        try b.capsule(0.75, 0.5),
+        try b.convexHull(&.{ .{ 0, 1, 0 }, .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 } }, 0.05),
+    };
+
+    // StartTest: reduce the solver iteration count, the scene doesn't have any constraints
+    b.settings.num_velocity_steps = 4;
+    b.settings.num_position_steps = 1;
+
+    // Create background
+    _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ -center, max_height, -center }, .shape = mesh, .motion_type = 0, .object_layer = Layers.non_moving, .friction = 0.5, .restitution = 0.6 }), .dont_activate);
+
+    // Construct bodies
+    var x: i32 = -10;
+    while (x <= 10) : (x += 1) {
+        for (shapes, 0..) |shape, y| {
+            var z: i32 = -10;
+            while (z <= 10) : (z += 1) {
+                const position: [3]Real = .{ 7.5 * real(x), 15.0 + 2.0 * real(y), 7.5 * real(z) };
+                _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = position, .shape = shape, .motion_quality = 1, .object_layer = Layers.moving, .friction = 0.5, .restitution = 0.6 }), .activate);
+            }
+        }
+    }
+
+    try b.sysOp(.optimize_broad_phase, .{});
+}
+
+/// HighSpeedScene: 5000 linear cast bodies at 250 m/s in a closed box (20 updates)
+fn buildPerfHighSpeed(b: *SceneBuilder) Allocator.Error!void {
+    perfSystem(b);
+    b.num_updates = 20;
+
+    // Load: the shapes
+    const shape_size: f32 = 0.5;
+    const capsule = try b.capsule(shape_size, 0.25 * shape_size);
+    const compound_box = try b.box(.{ shape_size, 0.25 * shape_size, 0.25 * shape_size }, 0.05);
+    const shapes = [_]u32{
+        try b.sphere(shape_size),
+        try b.box(.{ 0.5 * shape_size, shape_size, 1.0 * shape_size }, 0.05),
+        try b.compound(.static_compound, &.{ .{ .shape = capsule, .position = .{ 0, shape_size, 0 } }, .{ .shape = compound_box, .position = .{ shape_size, 0, 0 } } }),
+    };
+
+    // StartTest
+    const speed: f32 = 250.0;
+    const wall_thickness: f32 = 0.2;
+    const half_box_size: f32 = 50.0;
+    const pos_range: f32 = 0.9 * half_box_size;
+
+    // Create hollow box to enclose the objects
+    const wall = try b.box(.{ half_box_size, wall_thickness, half_box_size }, 0.05);
+    const rotation_x = quatToArray(zolt.Quat.rotation(zolt.Vec3.axisX(), 0.5 * zolt.math.pi));
+    const rotation_z = quatToArray(zolt.Quat.rotation(zolt.Vec3.axisZ(), 0.5 * zolt.math.pi));
+    const h: Real = half_box_size;
+    const Wall = struct { position: [3]Real, rotation: [4]f32 };
+    const walls = [_]Wall{
+        .{ .position = .{ 0, -h, 0 }, .rotation = identity_rotation },
+        .{ .position = .{ 0, h, 0 }, .rotation = identity_rotation },
+        .{ .position = .{ 0, 0, -h }, .rotation = rotation_x },
+        .{ .position = .{ 0, 0, h }, .rotation = rotation_x },
+        .{ .position = .{ -h, 0, 0 }, .rotation = rotation_z },
+        .{ .position = .{ h, 0, 0 }, .rotation = rotation_z },
+    };
+    for (walls) |w|
+        _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = w.position, .rotation = w.rotation, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving, .friction = 1.0, .restitution = 1.0 }), .dont_activate);
+
+    // Create many instances with high velocity (HighSpeedScene's random_float lambda)
+    const randomFloat = struct {
+        fn f(rnd: *zolt.Mt19937, min: f32, max: f32) f32 {
+            return min + @as(f32, @floatFromInt(rnd.next() - zolt.Mt19937.min_value)) * (max - min) / @as(f32, @floatFromInt(zolt.Mt19937.max_value - zolt.Mt19937.min_value));
+        }
+    }.f;
+    var rnd = zolt.Mt19937.init(zolt.Mt19937.default_seed);
+    for (0..5000) |i| {
+        // In HighSpeedScene's order: x, y, z, rotation, friction, restitution, velocity
+        const x = randomFloat(&rnd, -pos_range, pos_range);
+        const y = randomFloat(&rnd, -pos_range, pos_range);
+        const z = randomFloat(&rnd, -pos_range, pos_range);
+        const rotation = quatToArray(zolt.Quat.random(&rnd));
+        const friction = randomFloat(&rnd, 0.5, 1.0);
+        const restitution = randomFloat(&rnd, 0.9, 1.0);
+        const velocity = zolt.Vec3.random(&rnd).mulScalar(speed);
+        _ = try b.createAndAddBody(try b.addBodyDesc(.{
+            .position = .{ x, y, z },
+            .rotation = rotation,
+            .linear_velocity = .{ velocity.getX(), velocity.getY(), velocity.getZ() },
+            .shape = shapes[i % shapes.len],
+            .motion_quality = 1,
+            .object_layer = Layers.moving,
+            .friction = friction,
+            .restitution = restitution,
+        }), .activate);
+    }
+
+    try b.sysOp(.optimize_broad_phase, .{});
 }
 
 // -------------------------------------------------------------------------------------------------------------------

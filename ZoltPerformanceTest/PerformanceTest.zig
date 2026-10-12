@@ -1,0 +1,809 @@
+//! Port of: PerformanceTest/PerformanceTest.cpp
+//! Status: partial
+//! Missing: RagdollScene (-s=Ragdoll, -s=RagdollSinglePile and the default scene: Skeleton, Ragdoll, the constraints and
+//! the ObjectStream loading of Assets/, Phases 6 to 8) and CharacterVirtualScene (-s=CharacterVirtual: CharacterVirtual,
+//! Phase 7). Selecting one of them prints an error and returns 1.
+//! Not ported: -r (JPH_DEBUG_RENDERER, DebugRendererRecorder: TODO(debug_renderer); like a Jolt build without the debug
+//! renderer the argument is ignored), the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are
+//! compiled out as in Jolt's Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
+//!
+//! Milestone M6 (SimulationArchitecture section 3): `zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast
+//! -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892` must print Jolt's published hash (determinism_check.yml), in
+//! both precisions and for every thread count.
+//!
+//! The program is a statement by statement port of PerformanceTest.cpp, with the same arguments, the same output text
+//! and the same hash:
+//! - `Trace` is `std.log.info`; `std_options.logFn` is Jolt's TraceImpl: every message (also the library's) is
+//!   formatted into a 1024 byte buffer (longer messages are truncated like vsnprintf) and printed to stdout with a new
+//!   line. printf formats become Zig formats (`%f` is `{d:.6}`, with printf's texts for NaN and infinity). Zig rounds
+//!   the shortest round trip digits of the value where printf rounds its exact binary value (ties to even), so a value
+//!   whose shortest digits end halfway can differ in the last printed digit (0.1234565: Zig 0.123457, printf
+//!   0.123456). This only affects printed timings and LargeMeshScene's statistics (`%.1f` / `%.3f`), not the hash.
+//! - JPH_BREAKPOINT in StateRecorderImpl::ReadBytes (-vs): Jolt stops the program at the first mismatch in every build
+//!   (int3 / __builtin_trap, not tied to JPH_ENABLE_ASSERTS), Zolt's StateRecorderImpl only panics when asserts are on.
+//!   `validateState` reports a mismatch (`num_mismatches`) or a read past the end of the state (a shorter or missing
+//!   state file: Jolt compares against uninitialized stack memory) and main then runs `@breakpoint()` (int3 / brk,
+//!   SIGTRAP like Jolt) after the state of that frame is restored. Without asserts the trace therefore lists all
+//!   mismatches of the frame where Jolt's lists the first one; with asserts the library panics at the first one.
+//! - `RegisterDefaultAllocator`, `Factory::sInstance`, `RegisterTypes` / `UnregisterTypes`: nothing to do, the
+//!   allocator is `init.gpa` and the type registry of Zolt is comptime.
+//! - The scenes are PerformanceTestScene interfaces (`unique_ptr<PerformanceTestScene>`: the interface owns the scene).
+//! - `thread::hardware_concurrency()` is `std.Thread.getCpuCount()` (0 when it fails), `atoi` is C's atoi.
+//! - `std::chrono::high_resolution_clock` is the monotonic clock of `std.Io` (`Clock.awake`).
+//! - `std::filesystem::path` operations of the asset search are emulated on strings (`parentPath`, `appendPath`), the
+//!   `ofstream` / `ifstream` of the per frame timings and the state files are `OutputFile` / `InputFile` (a file that
+//!   could not be opened ignores writes and reads nothing, like a failed stream).
+//! - JPH_DET_LOG is `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (build option `-Ddeterminism_log`).
+
+const std = @import("std");
+const zolt = @import("zolt");
+const PerformanceTestScene = @import("PerformanceTestScene.zig").PerformanceTestScene;
+const LayersFile = @import("Layers.zig");
+const ConvexVsMeshScene = @import("ConvexVsMeshScene.zig").ConvexVsMeshScene;
+const PyramidScene = @import("PyramidScene.zig").PyramidScene;
+const LargeMeshScene = @import("LargeMeshScene.zig").LargeMeshScene;
+const MaxBodiesScene = @import("MaxBodiesScene.zig").MaxBodiesScene;
+const HighSpeedScene = @import("HighSpeedScene.zig").HighSpeedScene;
+
+const Allocator = std.mem.Allocator;
+const Real = zolt.Real;
+const MotionQuality = zolt.MotionQuality;
+const PhysicsSystem = zolt.PhysicsSystem;
+const TempAllocatorImpl = zolt.TempAllocatorImpl;
+const JobSystemThreadPool = zolt.JobSystemThreadPool;
+const StateRecorderImpl = zolt.StateRecorderImpl;
+const BodyIDVector = zolt.BodyIDVector;
+const BodyLockRead = zolt.BodyLockRead;
+const BodyLockWrite = zolt.BodyLockWrite;
+const DeterminismLog = zolt.DeterminismLog;
+const HashCombine = zolt.HashCombine;
+const physics_settings = zolt.physics_settings;
+
+const log = std.log;
+
+/// Time step for physics
+const delta_time: f32 = 1.0 / 60.0;
+
+/// Jolt's `Trace = TraceImpl`: every log message of the program and the library goes to stdout (Trace has no levels)
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = traceImpl,
+};
+
+/// TraceImpl
+fn traceImpl(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+    _ = level;
+    _ = scope;
+
+    // Format the message (vsnprintf into a char[1024]: at most 1023 characters)
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(buffer[0 .. buffer.len - 1]);
+    writer.print(format, args) catch {}; // A fixed writer fills the buffer before it fails: the message is truncated
+    const len = writer.end;
+
+    // Print to the TTY (cout << buffer << endl)
+    buffer[len] = '\n';
+    std.Io.File.stdout().writeStreamingAll(std.Options.debug_io, buffer[0 .. len + 1]) catch {};
+}
+
+/// printf("%f", value): `{d:.6}`, with printf's texts for NaN and infinity. Equal to printf except for values whose
+/// shortest round trip digits end halfway between two 6 digit decimals: Zig rounds those digits, printf the exact
+/// binary value (0.1234565: Zig 0.123457, printf 0.123456)
+const PrintfFloat = struct {
+    value: f64,
+
+    pub fn format(self: PrintfFloat, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (std.math.isNan(self.value))
+            return writer.writeAll(if (std.math.signbit(self.value)) "-nan" else "nan");
+        if (std.math.isInf(self.value))
+            return writer.writeAll(if (self.value < 0) "-inf" else "inf");
+        return writer.print("{d:.6}", .{self.value});
+    }
+};
+
+/// C's atoi (glibc: `(int)strtol(s, NULL, 10)`): leading white space, an optional sign and decimal digits, 0 when there
+/// are no digits; strtol saturates at the limits of `long`, the conversion to int keeps the lower 32 bits
+fn atoi(s: []const u8) i32 {
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
+    var negative = false;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+        negative = s[i] == '-';
+        i += 1;
+    }
+    const limit: i128 = @as(i128, std.math.maxInt(i64)) + 1;
+    var value: i128 = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1)
+        value = @min(value * 10 + (s[i] - '0'), limit);
+    if (negative) value = -value;
+    const long: i64 = @intCast(std.math.clamp(value, std.math.minInt(i64), std.math.maxInt(i64)));
+    return @truncate(long);
+}
+
+/// thread::hardware_concurrency(): the number of CPUs, 0 when it cannot be determined
+fn hardwareConcurrency() u32 {
+    const count = std.Thread.getCpuCount() catch return 0;
+    return std.math.cast(u32, count) orelse std.math.maxInt(u32);
+}
+
+/// std::filesystem::path::root_path() of a path (the leading separator, if any)
+fn rootPath(path: []const u8) []const u8 {
+    return if (path.len > 0 and std.fs.path.isSep(path[0])) path[0..1] else path[0..0];
+}
+
+/// std::filesystem::path::parent_path(): the path without its last element and the separators before it (the path
+/// itself when it has no relative part)
+fn parentPath(path: []const u8) []const u8 {
+    const root = rootPath(path);
+    if (path.len == root.len)
+        return path;
+    var end = path.len;
+    while (end > root.len and !std.fs.path.isSep(path[end - 1])) end -= 1; // The file name
+    while (end > root.len and std.fs.path.isSep(path[end - 1])) end -= 1; // The separators before it
+    return path[0..end];
+}
+
+/// std::filesystem::path::operator / (a relative element): adds a separator unless the path is empty or ends with one
+fn appendPath(allocator: Allocator, path: []const u8, element: []const u8) Allocator.Error![]u8 {
+    if (path.len == 0)
+        return allocator.dupe(u8, element);
+    if (std.fs.path.isSep(path[path.len - 1]))
+        return std.mem.concat(allocator, u8, &.{ path, element });
+    return std.mem.concat(allocator, u8, &.{ path, "/", element });
+}
+
+/// std::filesystem::exists
+fn exists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
+/// An std::ofstream opened for writing (truncated): when the file cannot be opened the writes are ignored, write errors
+/// are ignored too (the stream state is never checked). Initialized in place (the writer points into `buffer`).
+const OutputFile = struct {
+    io: std.Io = undefined,
+    file: ?std.Io.File = null,
+    file_writer: std.Io.File.Writer = undefined,
+    buffer: [4096]u8 = undefined,
+
+    fn open(self: *OutputFile, io: std.Io, name: []const u8) void {
+        self.io = io;
+        self.file = std.Io.Dir.cwd().createFile(io, name, .{}) catch null;
+        if (self.file) |f|
+            self.file_writer = f.writer(io, &self.buffer);
+    }
+
+    fn writer(self: *OutputFile) ?*std.Io.Writer {
+        return if (self.file != null) &self.file_writer.interface else null;
+    }
+
+    fn write(self: *OutputFile, bytes: []const u8) void {
+        if (self.writer()) |w| w.writeAll(bytes) catch {};
+    }
+
+    fn print(self: *OutputFile, comptime format: []const u8, args: anytype) void {
+        if (self.writer()) |w| w.print(format, args) catch {};
+    }
+
+    /// The destructor: flush and close
+    fn close(self: *OutputFile) void {
+        if (self.file) |f| {
+            self.file_writer.interface.flush() catch {};
+            f.close(self.io);
+            self.file = null;
+        }
+    }
+};
+
+/// An std::ifstream opened for reading: `read` reads up to the size of the buffer, a short read sets the fail state,
+/// after which (and when the file cannot be opened) reads read nothing. Initialized in place (the reader points into
+/// `buffer`).
+const InputFile = struct {
+    io: std.Io = undefined,
+    file: ?std.Io.File = null,
+    file_reader: std.Io.File.Reader = undefined,
+    buffer: [4096]u8 = undefined,
+    failed: bool = false,
+
+    fn open(self: *InputFile, io: std.Io, name: []const u8) void {
+        self.io = io;
+        self.file = std.Io.Dir.cwd().openFile(io, name, .{}) catch null;
+        if (self.file) |f|
+            self.file_reader = f.reader(io, &self.buffer)
+        else
+            self.failed = true;
+    }
+
+    fn read(self: *InputFile, out: []u8) void {
+        if (self.failed)
+            return;
+        const num_read = self.file_reader.interface.readSliceShort(out) catch 0;
+        if (num_read < out.len)
+            self.failed = true;
+    }
+
+    /// The destructor
+    fn close(self: *InputFile) void {
+        if (self.file) |f| {
+            f.close(self.io);
+            self.file = null;
+        }
+    }
+};
+
+/// The -vs branch of main after the state of a frame was read: copy it to a validator and validate the physics system
+/// against it. Zolt: returns true where Jolt's StateRecorderImpl::ReadBytes runs JPH_BREAKPOINT (the caller breaks):
+/// the validator counted a mismatch, or it read past the end of the state (Jolt then compares against uninitialized
+/// stack memory, Zolt's validator reads nothing and is left failed).
+fn validateState(allocator: Allocator, physics_system: *PhysicsSystem, data: []const u8) Allocator.Error!bool {
+    // Copy to validator
+    var validator = StateRecorderImpl.init(allocator);
+    defer validator.deinit();
+    validator.writeBytes(data);
+    if (validator.isFailed())
+        return error.OutOfMemory; // The stringstream could not grow (Jolt: std::bad_alloc)
+
+    // Validate state
+    validator.recorder().setValidating(true);
+    _ = try physics_system.restoreState(validator.recorder(), .{});
+
+    return validator.num_mismatches != 0 or validator.isFailed();
+}
+
+/// The scenes that need later phases: an error instead of the scene (Jolt creates them)
+fn sceneNotPorted(name: []const u8, needs: []const u8) u8 {
+    log.info("Scene {s} is not ported to Zolt yet, it needs {s}", .{ name, needs });
+    return 1;
+}
+
+const ragdoll_needs = "Skeleton, Ragdoll, the constraints and the ObjectStream loading of Assets/ (Phases 6 to 8)";
+const character_virtual_needs = "CharacterVirtual (Phase 7)";
+
+/// Replace the scene (unique_ptr assignment: the old scene is destroyed)
+fn setScene(scene: *?PerformanceTestScene, new_scene: PerformanceTestScene) void {
+    if (scene.*) |old| old.destroy();
+    scene.* = new_scene;
+}
+
+// Program entry point
+pub fn main(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
+    const io = init.io;
+    const arena = init.arena.allocator();
+    const argv = try init.minimal.args.toSlice(arena);
+
+    // Install callbacks (Trace = TraceImpl: std_options.logFn)
+
+    // Register allocation hook (Zolt: the allocator is passed explicitly)
+
+    // Helper function that creates the default scene (Jolt: a RagdollScene(4, 10, 0.6f) with JPH_OBJECT_STREAM, else a
+    // ConvexVsMeshScene): see sceneNotPorted
+
+    // Parse command line parameters
+    var specified_quality: i32 = -1;
+    var specified_threads: i32 = -1;
+    var max_iterations: u32 = 500;
+    var disable_sleep = false;
+    var enable_profiler = false;
+    var enable_per_frame_recording = false;
+    var record_state = false;
+    var validate_state = false;
+    var scene: ?PerformanceTestScene = null;
+    defer if (scene) |s| s.destroy();
+    var validate_hash: ?[]const u8 = null;
+    var repeat: i32 = 1;
+    for (argv[@min(1, argv.len)..]) |arg| {
+        if (std.mem.startsWith(u8, arg, "-s=")) {
+            // Parse scene
+            const name = arg[3..];
+            if (std.mem.eql(u8, name, "Ragdoll"))
+                return sceneNotPorted("Ragdoll", ragdoll_needs)
+            else if (std.mem.eql(u8, name, "RagdollSinglePile"))
+                return sceneNotPorted("RagdollSinglePile", ragdoll_needs)
+            else if (std.mem.eql(u8, name, "ConvexVsMesh"))
+                setScene(&scene, (try ConvexVsMeshScene.create(allocator)).scene())
+            else if (std.mem.eql(u8, name, "Pyramid"))
+                setScene(&scene, (try PyramidScene.create(allocator)).scene())
+            else if (std.mem.eql(u8, name, "LargeMesh"))
+                setScene(&scene, (try LargeMeshScene.create(allocator, io)).scene())
+            else if (std.mem.eql(u8, name, "CharacterVirtual"))
+                return sceneNotPorted("CharacterVirtual", character_virtual_needs)
+            else if (std.mem.eql(u8, name, "MaxBodies"))
+                setScene(&scene, (try MaxBodiesScene.create(allocator)).scene())
+            else if (std.mem.eql(u8, name, "HighSpeed"))
+                setScene(&scene, (try HighSpeedScene.create(allocator)).scene())
+            else {
+                log.info("Invalid scene", .{});
+                return 1;
+            }
+        } else if (std.mem.startsWith(u8, arg, "-i=")) {
+            // Parse max iterations
+            max_iterations = @bitCast(atoi(arg[3..]));
+        } else if (std.mem.startsWith(u8, arg, "-q=")) {
+            // Parse quality
+            if (std.mem.eql(u8, arg[3..], "Discrete"))
+                specified_quality = 0
+            else if (std.mem.eql(u8, arg[3..], "LinearCast"))
+                specified_quality = 1
+            else {
+                log.info("Invalid quality", .{});
+                return 1;
+            }
+        } else if (std.mem.startsWith(u8, arg, "-t=max")) {
+            // Default to number of threads on the system
+            specified_threads = @bitCast(hardwareConcurrency());
+        } else if (std.mem.startsWith(u8, arg, "-t=")) {
+            // Parse threads
+            specified_threads = atoi(arg[3..]);
+        } else if (std.mem.eql(u8, arg, "-no_sleep")) {
+            disable_sleep = true;
+        } else if (std.mem.eql(u8, arg, "-p")) {
+            enable_profiler = true;
+        }
+        // TODO(debug_renderer): -r (JPH_DEBUG_RENDERER)
+        else if (std.mem.eql(u8, arg, "-f")) {
+            enable_per_frame_recording = true;
+        } else if (std.mem.eql(u8, arg, "-rs")) {
+            record_state = true;
+        } else if (std.mem.eql(u8, arg, "-vs")) {
+            validate_state = true;
+        } else if (std.mem.startsWith(u8, arg, "-validate_hash=")) {
+            validate_hash = arg[15..];
+        } else if (std.mem.startsWith(u8, arg, "-repeat=")) {
+            // Parse repeat count
+            repeat = atoi(arg[8..]);
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            // Print usage
+            log.info("Usage:\n" ++
+                "-s=<scene>: Select scene (Ragdoll, RagdollSinglePile, ConvexVsMesh, Pyramid)\n" ++
+                "-i=<num physics steps>: Number of physics steps to simulate (default 500)\n" ++
+                "-q=<quality>: Test only with specified quality (Discrete, LinearCast)\n" ++
+                "-t=<num threads>: Test only with N threads (default is to iterate over 1 .. num hardware threads)\n" ++
+                "-t=max: Test with the number of threads available on the system\n" ++
+                "-p: Write out profiles\n" ++
+                "-r: Record debug renderer output for JoltViewer\n" ++
+                "-f: Record per frame timings\n" ++
+                "-no_sleep: Disable sleeping\n" ++
+                "-rs: Record state\n" ++
+                "-vs: Validate state\n" ++
+                "-validate_hash=<hash>: Validate hash (return 0 if successful, 1 if failed)\n" ++
+                "-repeat=<num>: Repeat all tests <num> times", .{});
+            return 0;
+        }
+    }
+
+    // Create a factory, register all Jolt physics types: nothing to do (Zolt's type registry is comptime)
+
+    // Show used instruction sets
+    log.info("{s}", .{zolt.getConfigurationString()});
+
+    // If no scene was specified use the default scene
+    if (scene == null)
+        return sceneNotPorted("Ragdoll", ragdoll_needs);
+    const s = scene.?;
+
+    // Output scene we're running
+    log.info("Running scene: {s}", .{s.getName()});
+
+    // Create temp allocator
+    var temp_allocator = try TempAllocatorImpl.init(allocator, s.getTempAllocatorSizeMB() * 1024 * 1024);
+    defer temp_allocator.deinit();
+
+    // Find the asset path
+    var found = false;
+    var asset_path: []const u8 = if (argv.len > 0) argv[0] else "";
+    const root_path = rootPath(asset_path);
+    while (!std.mem.eql(u8, asset_path, root_path)) {
+        asset_path = parentPath(asset_path);
+        if (exists(io, try appendPath(arena, asset_path, "Assets"))) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) { // Note that argv[0] can be a relative path like './PerformanceTest' so we also scan up using '..'
+        for (0..5) |_| {
+            asset_path = try appendPath(arena, asset_path, "..");
+            if (exists(io, try appendPath(arena, asset_path, "Assets"))) {
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found)
+        asset_path = "Assets"
+    else
+        asset_path = try appendPath(arena, asset_path, "Assets");
+    asset_path = try appendPath(arena, asset_path, "");
+
+    // Load the scene
+    if (!try s.load(asset_path))
+        return 1;
+
+    // Create mapping table from object layer to broadphase layer
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+
+    // Create class that filters object vs broadphase layers
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+
+    // Create class that filters object vs object layers
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+
+    // Start profiling this program (JPH_PROFILE_START: compiled out)
+
+    // Start the determinism log
+    if (DeterminismLog.enabled) try DeterminismLog.open(io);
+    defer if (DeterminismLog.enabled) DeterminismLog.close();
+
+    // Trace header
+    log.info("Motion Quality, Thread Count, Steps / Second, Hash", .{});
+
+    // Repeat test
+    var r: i32 = 0;
+    while (r < repeat) : (r += 1) {
+        // Iterate motion qualities
+        for (0..2) |mq| {
+            // Skip quality if another was specified
+            if (specified_quality != -1 and mq != @as(u32, @bitCast(specified_quality)))
+                continue;
+
+            // Determine motion quality
+            const motion_quality: MotionQuality = if (mq == 0) .discrete else .linear_cast;
+            const motion_quality_str: []const u8 = if (mq == 0) "Discrete" else "LinearCast";
+
+            // Determine which thread counts to test
+            var thread_permutations: std.ArrayList(u32) = .empty;
+            defer thread_permutations.deinit(allocator);
+            if (specified_threads > 0) {
+                try thread_permutations.append(allocator, @as(u32, @bitCast(specified_threads)) - 1);
+            } else {
+                var num_threads: u32 = 0;
+                while (num_threads < hardwareConcurrency()) : (num_threads += 1)
+                    try thread_permutations.append(allocator, num_threads);
+            }
+
+            // Test thread permutations
+            for (thread_permutations.items) |num_threads| {
+                // Create job system with desired number of threads
+                var job_system: JobSystemThreadPool = .empty;
+                try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = @bitCast(num_threads) });
+                defer job_system.deinit();
+
+                // Create physics system
+                var physics_system: PhysicsSystem = .empty;
+                try physics_system.init(allocator, io, s.getMaxBodies(), 0, s.getMaxBodyPairs(), s.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+                defer physics_system.deinit();
+
+                // Start test scene
+                try s.startTest(&physics_system, motion_quality);
+
+                // Disable sleeping if requested
+                if (disable_sleep) {
+                    const bli = physics_system.getBodyLockInterfaceNoLock();
+                    var body_ids: BodyIDVector = .empty;
+                    defer body_ids.deinit(allocator);
+                    try physics_system.getBodies(allocator, &body_ids);
+                    for (body_ids.items) |id| {
+                        var lock: BodyLockWrite = .init(bli, id);
+                        defer lock.deinit();
+                        if (lock.succeeded()) {
+                            const body = lock.getBody();
+                            if (!body.isStatic())
+                                body.setAllowSleeping(false);
+                        }
+                    }
+                }
+
+                // Optimize the broadphase to prevent an expensive first frame
+                try physics_system.optimizeBroadPhase();
+
+                // A tag used to identify the test
+                const motion_quality_lower = try zolt.toLower(allocator, motion_quality_str);
+                defer allocator.free(motion_quality_lower);
+                const num_threads_str = try zolt.convertToString(allocator, num_threads + 1);
+                defer allocator.free(num_threads_str);
+                const tag = try std.mem.concat(allocator, u8, &.{ motion_quality_lower, "_th", num_threads_str });
+                defer allocator.free(tag);
+
+                // TODO(debug_renderer): open the renderer output performance_test_<tag>.jor (-r)
+
+                // Open per frame timing output
+                var per_frame_file: OutputFile = .{};
+                defer per_frame_file.close();
+                if (enable_per_frame_recording) {
+                    const name = try std.mem.concat(allocator, u8, &.{ "per_frame_", tag, ".csv" });
+                    defer allocator.free(name);
+                    per_frame_file.open(io, name);
+                    per_frame_file.write("Frame, Time (ms)\n");
+                }
+
+                var record_state_file: OutputFile = .{};
+                defer record_state_file.close();
+                var validate_state_file: InputFile = .{};
+                defer validate_state_file.close();
+                if (record_state or validate_state) {
+                    const name = try std.mem.concat(allocator, u8, &.{ "state_", motion_quality_lower, ".bin" });
+                    defer allocator.free(name);
+                    if (record_state)
+                        record_state_file.open(io, name)
+                    else if (validate_state)
+                        validate_state_file.open(io, name);
+                }
+
+                var total_duration: i96 = 0;
+
+                // Step the world for a fixed amount of iterations
+                var iterations: u32 = 0;
+                while (iterations < max_iterations) : (iterations += 1) {
+                    // JPH_PROFILE_NEXTFRAME: compiled out
+                    if (DeterminismLog.enabled) DeterminismLog.log(.{ "Iteration: ", iterations });
+
+                    // Start measuring
+                    const clock_start = std.Io.Clock.awake.now(io);
+
+                    // Update the test
+                    try s.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+
+                    // Do a physics step
+                    _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+
+                    // Stop measuring
+                    const clock_end = std.Io.Clock.awake.now(io);
+                    const duration = clock_start.durationTo(clock_end).toNanoseconds();
+                    total_duration += duration;
+
+                    // TODO(debug_renderer): DrawBodies and EndFrame (-r)
+
+                    // Record time taken this iteration
+                    if (enable_per_frame_recording) {
+                        const time_str = try zolt.convertToString(allocator, 1.0e-6 * @as(f64, @floatFromInt(duration)));
+                        defer allocator.free(time_str);
+                        per_frame_file.print("{d}, {s}\n", .{ iterations, time_str });
+                    }
+
+                    // Dump profile information every 100 iterations
+                    if (enable_profiler and iterations % 100 == 0) {
+                        // JPH_PROFILE_DUMP(tag + "_it" + ConvertToString(iterations)): compiled out
+                    }
+
+                    if (record_state) {
+                        // Record state
+                        var recorder = StateRecorderImpl.init(allocator);
+                        defer recorder.deinit();
+                        try physics_system.saveState(recorder.recorder(), .{});
+
+                        // Write to file
+                        const data = recorder.getData();
+                        const size: u32 = @truncate(data.len);
+                        record_state_file.write(std.mem.asBytes(&size));
+                        record_state_file.write(data[0..size]);
+                    } else if (validate_state) {
+                        // Read state
+                        var size: u32 = 0;
+                        validate_state_file.read(std.mem.asBytes(&size));
+                        const data = try allocator.alloc(u8, size);
+                        defer allocator.free(data);
+                        @memset(data, 0);
+                        validate_state_file.read(data);
+
+                        // Copy to validator and validate state
+                        if (try validateState(allocator, &physics_system, data))
+                            @breakpoint(); // JPH_BREAKPOINT of StateRecorderImpl::ReadBytes (see the file header)
+                    }
+
+                    if (DeterminismLog.enabled) {
+                        const bli = physics_system.getBodyLockInterfaceNoLock();
+                        var body_ids: BodyIDVector = .empty;
+                        defer body_ids.deinit(allocator);
+                        try physics_system.getBodies(allocator, &body_ids);
+                        for (body_ids.items) |id| {
+                            var lock: BodyLockRead = .init(bli, id);
+                            defer lock.deinit();
+                            const body = lock.getBody();
+                            if (!body.isStatic())
+                                DeterminismLog.log(.{ id, ": p: ", body.getPosition(), " r: ", body.getRotation(), " v: ", body.getLinearVelocity(), " w: ", body.getAngularVelocity() });
+                        }
+                    }
+                }
+
+                // Calculate hash of all positions and rotations of the bodies
+                var hash: u64 = HashCombine.hashBytes(&.{}); // Ensure we start with the proper seed
+                const bi = physics_system.getBodyInterfaceNoLock();
+                var body_ids: BodyIDVector = .empty;
+                defer body_ids.deinit(allocator);
+                try physics_system.getBodies(allocator, &body_ids);
+                for (body_ids.items) |id| {
+                    const pos = bi.getPosition(id);
+                    hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&pos)[0 .. 3 * @sizeOf(Real)], hash);
+                    const rot = bi.getRotation(id);
+                    hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&rot), hash);
+                }
+
+                // Let the scene hash its own state
+                s.updateHash(&hash);
+
+                // Convert hash to string
+                const hash_str = try std.fmt.allocPrint(allocator, "0x{x}", .{hash});
+                defer allocator.free(hash_str);
+
+                // Stop test scene
+                s.stopTest(&physics_system);
+
+                // Trace stat line
+                log.info("{s}, {d}, {f}, {s}", .{ motion_quality_str, num_threads + 1, PrintfFloat{ .value = @as(f64, @floatFromInt(max_iterations)) / (1.0e-9 * @as(f64, @floatFromInt(total_duration))) }, hash_str });
+
+                // Check hash code
+                if (validate_hash) |expected| {
+                    if (!std.mem.eql(u8, hash_str, expected)) {
+                        log.info("Fail hash validation. Was: {s}, expected: {s}", .{ hash_str, expected });
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // JPH_TRACK_NARROWPHASE_STATS (NarrowPhaseStat::sReportStats): not ported
+
+    // Unregisters all types with the factory and cleans up the default material, destroy the factory: nothing to do
+
+    // End the determinism log (the deferred DeterminismLog.close)
+
+    // End profiling this program (JPH_PROFILE_END: compiled out)
+
+    return 0;
+}
+
+test "atoi" {
+    try std.testing.expectEqual(@as(i32, 0), atoi(""));
+    try std.testing.expectEqual(@as(i32, 0), atoi("max"));
+    try std.testing.expectEqual(@as(i32, 42), atoi("42"));
+    try std.testing.expectEqual(@as(i32, 42), atoi("  42abc"));
+    try std.testing.expectEqual(@as(i32, -7), atoi("-7"));
+    try std.testing.expectEqual(@as(i32, 3), atoi("+3"));
+    try std.testing.expectEqual(@as(i32, -1), atoi("9223372036854775807")); // LONG_MAX truncated to int
+    try std.testing.expectEqual(@as(i32, -1), atoi("99999999999999999999")); // strtol saturates at LONG_MAX
+}
+
+test "path helpers emulate std::filesystem::path" {
+    try std.testing.expectEqualStrings("/", rootPath("/a/b"));
+    try std.testing.expectEqualStrings("", rootPath("a/b"));
+    try std.testing.expectEqualStrings("/a", parentPath("/a/b"));
+    try std.testing.expectEqualStrings("/", parentPath("/a"));
+    try std.testing.expectEqualStrings("/", parentPath("/"));
+    try std.testing.expectEqualStrings("a/b", parentPath("a/b/"));
+    try std.testing.expectEqualStrings(".", parentPath("./PerformanceTest"));
+    try std.testing.expectEqualStrings("", parentPath("."));
+    try std.testing.expectEqualStrings("", parentPath("PerformanceTest"));
+
+    const allocator = std.testing.allocator;
+    const cases = [_][3][]const u8{
+        .{ "", "Assets", "Assets" },
+        .{ "a", "Assets", "a/Assets" },
+        .{ "a/", "Assets", "a/Assets" },
+        .{ "/", "..", "/.." },
+        .{ "a/Assets", "", "a/Assets/" },
+    };
+    for (cases) |c| {
+        const joined = try appendPath(allocator, c[0], c[1]);
+        defer allocator.free(joined);
+        try std.testing.expectEqualStrings(c[2], joined);
+    }
+}
+
+test "PrintfFloat" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("123.456789", try std.fmt.bufPrint(&buffer, "{f}", .{PrintfFloat{ .value = 123.4567891 }}));
+    try std.testing.expectEqualStrings("0.500000", try std.fmt.bufPrint(&buffer, "{f}", .{PrintfFloat{ .value = 0.5 }}));
+    try std.testing.expectEqualStrings("inf", try std.fmt.bufPrint(&buffer, "{f}", .{PrintfFloat{ .value = std.math.inf(f64) }}));
+    try std.testing.expectEqualStrings("-nan", try std.fmt.bufPrint(&buffer, "{f}", .{PrintfFloat{ .value = -std.math.nan(f64) }}));
+}
+
+/// Zolt test: load a scene, run `num_updates` updates like `main` (with an extra worker thread) and return the hash
+fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, num_updates: u32) !u64 {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    defer scene.destroy();
+    try std.testing.expect(try scene.load(""));
+
+    var temp_allocator = try TempAllocatorImpl.init(allocator, scene.getTempAllocatorSizeMB() * 1024 * 1024);
+    defer temp_allocator.deinit();
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+    var job_system: JobSystemThreadPool = .empty;
+    try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = 1 });
+    defer job_system.deinit();
+    var physics_system: PhysicsSystem = .empty;
+    try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+    defer physics_system.deinit();
+    try scene.startTest(&physics_system, motion_quality);
+    try physics_system.optimizeBroadPhase();
+    for (0..num_updates) |_| {
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+        try std.testing.expect(temp_allocator.isEmpty());
+    }
+
+    var hash: u64 = HashCombine.hashBytes(&.{});
+    const bi = physics_system.getBodyInterfaceNoLock();
+    var body_ids: BodyIDVector = .empty;
+    defer body_ids.deinit(allocator);
+    try physics_system.getBodies(allocator, &body_ids);
+    for (body_ids.items) |id| {
+        const pos = bi.getPosition(id);
+        hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&pos)[0 .. 3 * @sizeOf(Real)], hash);
+        const rot = bi.getRotation(id);
+        hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&rot), hash);
+    }
+    scene.updateHash(&hash);
+    scene.stopTest(&physics_system);
+    return hash;
+}
+
+test "PerformanceTest scenes give Jolt's hashes after a few updates" {
+    // The scenes of the determinism check (the published hashes of 500 updates are checked by the determinism CI job,
+    // .github/workflows/zolt.yml), a few updates each, in Debug and on every platform of the test CI job. The expected
+    // values are the hashes that the C++ PerformanceTest prints with the same arguments (-s=<scene> -q=<quality>
+    // -i=<updates>), built from Jolt/ with CROSS_PLATFORM_DETERMINISTIC. The testing allocator also checks that the
+    // scenes release all their shapes and settings.
+    const allocator = std.testing.allocator;
+    const dp = zolt.Core.double_precision;
+    try std.testing.expectEqual(@as(u64, if (dp) 0x874b972e6c896604 else 0x8ae6dee69e292017), try runSceneForTest((try PyramidScene.create(allocator)).scene(), .linear_cast, 10));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x6b13f19597ad79f4 else 0xbb1738ab6ae53857), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .discrete, 100));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x2b4f1c7cf1a90e26 else 0x93894e4298eed8e1), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x5109b031ac53c66e else 0x375628eabc094b31), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
+}
+
+test "validateState: -vs fails on a state that differs or ends early" {
+    // Zolt test of the JPH_BREAKPOINT emulation of -vs (see the file header): record the state of a frame like -rs and
+    // validate it like -vs. The same state passes. A state that ends early (a missing or shorter state file) fails, and
+    // without asserts (with asserts the library panics at the mismatch) so does the state of another frame.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const scene = (try PyramidScene.create(allocator)).scene();
+    defer scene.destroy();
+    try std.testing.expect(try scene.load(""));
+
+    var temp_allocator = try TempAllocatorImpl.init(allocator, scene.getTempAllocatorSizeMB() * 1024 * 1024);
+    defer temp_allocator.deinit();
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+    var job_system: JobSystemThreadPool = .empty;
+    try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = 1 });
+    defer job_system.deinit();
+    var physics_system: PhysicsSystem = .empty;
+    try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+    defer physics_system.deinit();
+    try scene.startTest(&physics_system, .linear_cast);
+    defer scene.stopTest(&physics_system);
+    try physics_system.optimizeBroadPhase();
+    for (0..3) |_| {
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+    }
+
+    // Record state (-rs)
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    try physics_system.saveState(recorder.recorder(), .{});
+    const data = recorder.getData();
+    try std.testing.expect(data.len > 0);
+
+    // Validate state (-vs)
+    try std.testing.expect(!try validateState(allocator, &physics_system, data));
+    try std.testing.expect(try validateState(allocator, &physics_system, &.{})); // Read past the end of the state file
+    try std.testing.expect(try validateState(allocator, &physics_system, data[0 .. data.len - 1]));
+    try std.testing.expect(!try validateState(allocator, &physics_system, data)); // The failed validations left the state unchanged
+
+    if (!zolt.Core.enable_asserts) {
+        // The state of the next frame differs
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+        try std.testing.expect(try validateState(allocator, &physics_system, data));
+    }
+}
+
+test {
+    _ = LayersFile;
+}
