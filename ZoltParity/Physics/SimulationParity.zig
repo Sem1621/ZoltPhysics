@@ -2234,7 +2234,86 @@ const SliderSlot = StubSlot;
 const ConeSwingTwistSlot = StubSlot;
 
 // ---- SLOT six_dof: SixDOFConstraint (ConstraintKind six_dof, OpKind 320..339) ----
-const SixDOFSlot = StubSlot;
+const SixDOFSlot = struct {
+    const Axis = zolt.SixDOFConstraintSettings.Axis;
+
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .six_dof => {
+                const s = try zolt.SixDOFConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.swing_type = @enumFromInt(@as(u8, @intCast(i[1])));
+                s.position1 = loadR3(r[0..3]);
+                s.axis_x1 = load3(f[0..3]);
+                s.axis_y1 = load3(f[3..6]);
+                s.position2 = loadR3(r[3..6]);
+                s.axis_x2 = load3(f[6..9]);
+                s.axis_y2 = load3(f[9..12]);
+                for (0..Axis.num) |a| {
+                    s.max_friction[a] = f[12 + a];
+                    s.limit_min[a] = f[18 + a];
+                    s.limit_max[a] = f[24 + a];
+                    s.motor_settings[a] = loadMotor(i[5 + a], f[36 + 6 * a ..][0..6]);
+                }
+                for (0..Axis.num_translation) |a|
+                    s.limits_spring_settings[a] = loadSpring(i[2 + a], f[30 + 2 * a ..][0..2]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const i = &op.i;
+        const f = &op.f;
+        const six_dof = try castConstraint(zolt.SixDOFConstraint, c, .six_dof);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .six_dof_set_translation_limits => six_dof.setTranslationLimits(load3(f[0..3]), load3(f[3..6])),
+            .six_dof_set_rotation_limits => six_dof.setRotationLimits(load3(f[0..3]), load3(f[3..6])),
+            .six_dof_set_limits_spring_settings => six_dof.setLimitsSpringSettings(@enumFromInt(i[0]), loadSpring(i[1], f[0..2])),
+            .six_dof_set_max_friction => six_dof.setMaxFriction(@enumFromInt(i[0]), f[0]),
+            .six_dof_set_motor_state => six_dof.setMotorState(@enumFromInt(i[0]), @enumFromInt(@as(i32, @bitCast(i[1])))),
+            .six_dof_set_target_velocity_cs => six_dof.setTargetVelocityCS(load3(f[0..3])),
+            .six_dof_set_target_angular_velocity_cs => six_dof.setTargetAngularVelocityCS(load3(f[0..3])),
+            .six_dof_set_target_position_cs => six_dof.setTargetPositionCS(load3(f[0..3])),
+            .six_dof_set_target_orientation_cs => six_dof.setTargetOrientationCS(loadQuat(f[0..4])),
+            .six_dof_set_target_orientation_bs => six_dof.setTargetOrientationBS(loadQuat(f[0..4])),
+            .six_dof_set_motor_settings => six_dof.getMotorSettingsMut(@enumFromInt(i[0])).* = loadMotor(i[1], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .six_dof => &.{
+                .{ .name = "translation_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "translation_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "translation_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_y_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_z_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.twist_limit_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "motor_translation_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "motor_translation_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "motor_translation_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "motor_rotation_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "motor_rotation_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "motor_rotation_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "motor_state", .kind = .u32, .count = 6 },
+                .{ .name = "target_velocity", .kind = .f32, .count = 3 },
+                .{ .name = "target_angular_velocity", .kind = .f32, .count = 3 },
+                .{ .name = "target_position", .kind = .f32, .count = 3 },
+                .{ .name = "target_orientation", .kind = .f32, .count = 4 },
+            },
+            else => null,
+        };
+    }
+};
 
 // ---- SLOT path: PathConstraint, PathConstraintPathHermite (ConstraintKind path, OpKind 340..359) ----
 const PathSlot = StubSlot;

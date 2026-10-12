@@ -22,11 +22,16 @@ const AngleConstraintPart = @import("AngleConstraintPart.zig").AngleConstraintPa
 const RotationEulerConstraintPart = @import("RotationEulerConstraintPart.zig").RotationEulerConstraintPart;
 
 /// How the swing limit behaves (ESwingType)
+/// (Jolt's enum class has the fixed underlying type uint8, which the binary state of the SixDOF / SwingTwist constraint
+/// settings writes; like SpringMode and MotorState every byte is a valid ESwingType, so a restored value outside the
+/// named ones is not illegal behavior: it behaves like Pyramid, Jolt only compares with Cone)
 pub const SwingType = enum(u8) {
     /// Swing is limited by a cone shape, note that this cone starts to deform for larger swing angles. Cone limits only support limits that are symmetric around 0.
     cone,
     /// Swing is limited by a pyramid shape, note that this pyramid starts to deform for larger swing angles.
     pyramid,
+    /// Any other uint8 value
+    _,
 };
 
 /// Quaternion based constraint that decomposes the rotation in constraint space in swing and twist: q = q_swing * q_twist
