@@ -22,7 +22,12 @@
 //! restoring the state saved before the update one more update gives the C++ bytes), then every createJob fails once
 //! (FailingJobSystem: a failure while building the job graph returns error.OutOfMemory and changes nothing, a job that
 //! cannot be spawned from inside a job changes no result). Creating the scene (system, shapes, the bodies of update 0)
-//! runs under std.testing.checkAllAllocationFailures.
+//! runs under std.testing.checkAllAllocationFailures (unless `SceneEntry.creation_sweep` is false: the PerformanceTest
+//! scenes with thousands of bodies, for which it is quadratic).
+//!
+//! The PerformanceTest scenes (`perf_*`, milestone M6) are the exact setup of ZoltPerformanceTest's Pyramid,
+//! ConvexVsMesh and HighSpeed scenes with -q=LinearCast, compared after every update for their first 50 / 80 / 20
+//! updates: a hash of the determinism check that no longer matches is found here first, with the first differing field.
 //!
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
 //! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts
@@ -564,7 +569,7 @@ const ZoltWorld = struct {
         self.* = .{
             .allocator = allocator,
             .desc = desc,
-            .temp = try .init(allocator, 10 * 1024 * 1024),
+            .temp = try .init(allocator, desc.temp_allocator_size),
             .broad_phase_layer_interface = .init(),
             .recorder = .{ .allocator = allocator },
         };
@@ -684,6 +689,22 @@ const ZoltWorld = struct {
                     t.* = .init(load3(v[0..3]), load3(v[3..6]), load3(v[6..9]), .{});
                 }
                 break :blk (try zolt.MeshShapeSettings.create(allocator, triangles, .{})).asShapeSettings();
+            },
+            .indexed_mesh => blk: {
+                const vertices = try allocator.alloc(zolt.Float3, shape.count);
+                defer allocator.free(vertices);
+                for (vertices, 0..) |*v, i| {
+                    const f = floats[shape.data + 3 * i ..][0..3];
+                    v.* = .init(f[0], f[1], f[2]);
+                }
+                const indices = floats[shape.data + 3 * shape.count ..];
+                const triangles = try allocator.alloc(zolt.IndexedTriangle, @intFromFloat(p[0]));
+                defer allocator.free(triangles);
+                for (triangles, 0..) |*t, i|
+                    t.* = .init(@intFromFloat(indices[3 * i]), @intFromFloat(indices[3 * i + 1]), @intFromFloat(indices[3 * i + 2]), .{});
+                const mesh = try zolt.MeshShapeSettings.createIndexed(allocator, vertices, triangles, .{});
+                mesh.max_triangles_per_leaf = @intFromFloat(p[1]);
+                break :blk mesh.asShapeSettings();
             },
             .height_field => (try zolt.HeightFieldShapeSettings.create(allocator, floats[shape.data..][0 .. @as(usize, shape.count) * shape.count], load3(p[0..3]), load3(p[3..6]), shape.count, .{})).asShapeSettings(),
             .empty => (try zolt.EmptyShapeSettings.create(allocator, load3(p[0..3]))).asShapeSettings(),
@@ -1692,7 +1713,8 @@ fn runEntry(entry: *const SceneEntry) !void {
         }
     }
 
-    try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
+    if (entry.creation_sweep)
+        try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
 }
 
 fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !void {
