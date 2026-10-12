@@ -47,6 +47,13 @@
 //! Determinism against thread pools of 0, 1, 3 and 7 workers, save / restore (also validating) of the constraint state,
 //! every temp allocation and every createJob of an update fails in turn, checkAllAllocationFailures on creating the
 //! scene (createConstraint, addConstraint). Jolt's other constraint types come with the Phase 6 waves.
+//!
+//! The constraint operations scene (Phase 6 simulation harness): the operations of SimScenes' constraint scenes between
+//! the updates (disable / enable, remove / add one constraint and a batch out of an island that the LargeIslandSplitter
+//! splits, priorities, step overrides, a new constraint that wakes a sleeping body from inside the update,
+//! ActivateConstraint, ResetWarmStart, SetPoint1 / SetPoint2, NotifyShapeChanged). Determinism against thread pools of
+//! 0, 1, 3 and 7 workers, and the D12 sweeps (every temp allocation and createJob fails) on the updates right after the
+//! operations.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -3126,6 +3133,340 @@ test "PhysicsSystem constraints: out of memory creating the scene" {
     const Ctx = struct {
         fn build(allocator: Allocator) !void {
             const scene = try allocator.create(ConstraintScene);
+            defer allocator.destroy(scene);
+            try scene.init(allocator);
+            scene.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Ctx.build, .{});
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Constraint operations between the updates (Phase 6 simulation harness: the operations of SimScenes' constraint
+// scenes, here also in -Duse_llvm=false and without the C++ library)
+
+/// A net of 8 x 8 boxes on the floor (112 point constraints and the floor contacts: an island that the
+/// LargeIslandSplitter splits), a chain of 6 boxes hanging from the world (point constraints and a fixed one), a pair
+/// of sleeping boxes and a body that turns forever. `applyOps` changes the constraints between the updates: disable /
+/// enable, remove / add (one and a batch of a net row), priorities and step overrides, a new constraint between the
+/// turning body and a sleeping box (it wakes the box from inside the update), ActivateConstraint of the sleeping pair,
+/// ResetWarmStart, SetPoint1 / SetPoint2, NotifyShapeChanged.
+const ConstraintOpsScene = struct {
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+    object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+    activation_listener: ActivationCounter = .{},
+    allocator: Allocator = undefined,
+    /// The scene's own reference to every constraint (removed constraints stay alive), released after the system
+    refs: std.ArrayList(Ref(Constraint)) = .empty,
+    net: [net_n * net_n]BodyID = @splat(.invalid),
+    /// The constraints of the net row that `applyOps` removes and adds as a batch (consecutive refs)
+    row_constraints: [net_n - 1]*Constraint = undefined,
+    chain: [6]BodyID = @splat(.invalid),
+    chain_constraints: [6]*zolt.TwoBodyConstraint = undefined,
+    sleeping_pair: [2]BodyID = @splat(.invalid),
+    sleeping_pair_constraint: *zolt.TwoBodyConstraint = undefined,
+    turning: BodyID = .invalid,
+    sleeper: BodyID = .invalid,
+
+    const net_n = 8;
+    const num_updates = 40;
+
+    /// Create a constraint (one reference for the scene) and add it to the system unless `add` is false
+    fn create(self: *ConstraintOpsScene, settings: *const zolt.TwoBodyConstraintSettings, body1: BodyID, body2: BodyID, add: bool) !*zolt.TwoBodyConstraint {
+        try self.refs.ensureUnusedCapacity(self.allocator, 1);
+        const constraint = try self.system.getBodyInterfaceMut().createConstraint(settings, body1, body2);
+        self.refs.appendAssumeCapacity(Ref(Constraint).init(&constraint.base));
+        if (add) try self.system.addConstraint(&constraint.base);
+        return constraint;
+    }
+
+    /// Builds the scene in place (the physics system must not move)
+    fn init(self: *ConstraintOpsScene, allocator: Allocator) !void {
+        self.* = .{ .allocator = allocator };
+        try self.system.init(allocator, io, 512, 0, 4096, 2048, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
+        errdefer self.deinit();
+        var settings = self.system.getPhysicsSettings().*;
+        settings.time_before_sleep = 0.2;
+        self.system.setPhysicsSettings(&settings);
+        self.system.setBodyActivationListener(.init(&self.activation_listener));
+        const bi = self.system.getBodyInterfaceMut();
+
+        // Floor, its top at y = 0
+        const floor_shape = try BoxShape.create(allocator, Vec3.init(30, 1, 30), .{ .convex_radius = 0.0 });
+        var floor_settings = BodyCreationSettings.initWithShape(floor_shape.asShape(), RVec3.init(0, -1, 0), Quat.identity(), .static, Layers.non_moving);
+        defer floor_settings.deinit();
+        try expect(!(try bi.createAndAddBody(&floor_settings, .dont_activate)).isInvalid());
+
+        var box_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.init(0.2, 0.1, 0.2), .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer box_settings.deinit();
+        var point = zolt.PointConstraintSettings.init(allocator);
+        defer point.asSettings().deinit();
+        var fixed = zolt.FixedConstraintSettings.init(allocator);
+        defer fixed.asSettings().deinit();
+        fixed.auto_detect_point = true;
+
+        // The net on the floor; the constraints of row 3 along x are consecutive refs
+        for (0..net_n) |z| {
+            for (0..net_n) |x| {
+                const px = 0.5 * f(@intCast(x)) - 2;
+                const pz = 0.5 * f(@intCast(z)) - 2;
+                box_settings.position = RVec3.init(px, 0.1, pz);
+                self.net[z * net_n + x] = try bi.createAndAddBody(&box_settings, .activate);
+            }
+        }
+        for (0..net_n) |z| {
+            for (1..net_n) |x| {
+                point.point1 = RVec3.init(0.5 * f(@intCast(x)) - 2.25, 0.1, 0.5 * f(@intCast(z)) - 2);
+                point.point2 = point.point1;
+                const c = try self.create(&point.base, self.net[z * net_n + x - 1], self.net[z * net_n + x], true);
+                if (z == 3) self.row_constraints[x - 1] = &c.base;
+            }
+        }
+        for (1..net_n) |z| {
+            for (0..net_n) |x| {
+                point.point1 = RVec3.init(0.5 * f(@intCast(x)) - 2, 0.1, 0.5 * f(@intCast(z)) - 2.25);
+                point.point2 = point.point1;
+                _ = try self.create(&point.base, self.net[(z - 1) * net_n + x], self.net[z * net_n + x], true);
+            }
+        }
+
+        // The chain hanging from the world (unused layer: no contacts)
+        box_settings.object_layer = Layers.unused1;
+        var previous: BodyID = .invalid;
+        for (&self.chain, &self.chain_constraints, 0..) |*h, *c, i| {
+            const x = 10 + 0.5 * f(@intCast(i));
+            box_settings.position = RVec3.init(x, 6, 0);
+            h.* = try bi.createAndAddBody(&box_settings, .activate);
+            if (i == 3) {
+                c.* = try self.create(&fixed.base, previous, h.*, true);
+            } else {
+                point.point1 = RVec3.init(x - 0.25, 6, 0);
+                point.point2 = point.point1;
+                c.* = try self.create(&point.base, previous, h.*, true);
+            }
+            previous = h.*;
+        }
+
+        // A sleeping pair welded together (not active until ActivateConstraint), a turning body and a sleeping box
+        box_settings.gravity_factor = 0;
+        box_settings.position = RVec3.init(15, 5, 0);
+        self.sleeping_pair[0] = try bi.createAndAddBody(&box_settings, .dont_activate);
+        box_settings.position = RVec3.init(15.5, 5, 0);
+        self.sleeping_pair[1] = try bi.createAndAddBody(&box_settings, .dont_activate);
+        self.sleeping_pair_constraint = try self.create(&fixed.base, self.sleeping_pair[0], self.sleeping_pair[1], true);
+        box_settings.position = RVec3.init(20, 5, 0);
+        box_settings.angular_velocity = Vec3.init(0, 1, 0);
+        box_settings.allow_sleeping = false;
+        self.turning = try bi.createAndAddBody(&box_settings, .activate);
+        box_settings.position = RVec3.init(20, 4.5, 0);
+        box_settings.angular_velocity = Vec3.zero();
+        box_settings.allow_sleeping = true;
+        self.sleeper = try bi.createAndAddBody(&box_settings, .dont_activate);
+    }
+
+    fn deinit(self: *ConstraintOpsScene) void {
+        self.system.deinit();
+        for (self.refs.items) |*r| r.deinit();
+        self.refs.deinit(self.allocator);
+    }
+
+    /// The operations before update `update`
+    fn applyOps(self: *ConstraintOpsScene, update: u32) !void {
+        const bi = self.system.getBodyInterfaceMut();
+        switch (update) {
+            3 => {
+                self.chain_constraints[2].base.setEnabled(false);
+                for (self.chain_constraints, 0..) |c, i| c.base.setConstraintPriority(@intCast(5 - i));
+            },
+            6 => {
+                self.chain_constraints[2].base.setEnabled(true);
+                self.system.removeConstraint(&self.chain_constraints[1].base);
+                self.system.removeConstraints(&self.row_constraints);
+            },
+            9 => {
+                try self.system.addConstraint(&self.chain_constraints[1].base);
+                try self.system.addConstraints(&self.row_constraints);
+                var point = zolt.PointConstraintSettings.init(self.allocator);
+                defer point.asSettings().deinit();
+                point.point1 = RVec3.init(20, 4.75, 0);
+                point.point2 = point.point1;
+                try expect(!bi.isActive(self.sleeper));
+                _ = try self.create(&point.base, self.turning, self.sleeper, true); // Wakes the sleeper in this update
+            },
+            12 => {
+                try expect(bi.isActive(self.sleeper));
+                try expect(!self.sleeping_pair_constraint.base.isActive());
+                bi.activateConstraint(self.sleeping_pair_constraint);
+                try expect(self.sleeping_pair_constraint.base.isActive());
+                self.chain_constraints[4].base.setNumVelocityStepsOverride(15);
+                self.chain_constraints[4].base.setNumPositionStepsOverride(4);
+            },
+            15 => {
+                self.chain_constraints[0].base.resetWarmStart();
+                const p = zolt.virtual.downcast(zolt.PointConstraint, self.chain_constraints[5]);
+                p.setPoint1(.world_space, RVec3.init(12.4, 6.1, 0.05));
+                p.setPoint2(.local_to_body_com, RVec3.init(-0.2, 0.02, 0));
+                self.chain_constraints[0].base.notifyShapeChanged(self.chain[0], Vec3.init(0.01, 0, 0));
+                bi.addImpulse(self.net[net_n * net_n / 2], Vec3.init(0, 2, 0));
+            },
+            else => {},
+        }
+    }
+};
+
+/// Runs the operations scene and records the saved state after every update
+fn runConstraintOpsScene(allocator: Allocator, kind: JobSystemKind, states: *std.ArrayList(u8), offsets: *std.ArrayList(usize)) ![2]u32 {
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(ConstraintOpsScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator);
+    defer scene.deinit();
+
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    for (0..ConstraintOpsScene.num_updates) |update| {
+        try scene.applyOps(@intCast(update));
+        const errors = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+        try expect(errors.isNone());
+        try expect(temp.isEmpty());
+
+        recorder.clear();
+        try scene.system.saveState(recorder.recorder(), .{});
+        try expect(!recorder.isFailed());
+        try offsets.append(allocator, states.items.len);
+        try states.appendSlice(allocator, recorder.getData());
+    }
+
+    // Sanity: the sleeping pair was activated, the net's split island is solved
+    const bi = scene.system.getBodyInterface();
+    try expect(bi.isActive(scene.sleeper));
+    try expect(!zolt.virtual.downcast(zolt.PointConstraint, scene.chain_constraints[1]).getTotalLambdaPosition().eql(Vec3.zero()));
+    return .{ scene.activation_listener.num_activated.load(.monotonic), scene.activation_listener.num_deactivated.load(.monotonic) };
+}
+
+test "PhysicsSystem constraint operations: determinism single vs multi threaded" {
+    // Disable / enable, remove / add (also as a batch while the island is split), priorities, step overrides, waking a
+    // sleeping body through a new constraint: the saved state after every update is bit identical with thread pools
+    const allocator = std.testing.allocator;
+    var ref_states: std.ArrayList(u8) = .empty;
+    defer ref_states.deinit(allocator);
+    var ref_offsets: std.ArrayList(usize) = .empty;
+    defer ref_offsets.deinit(allocator);
+    const ref = try runConstraintOpsScene(allocator, .single_threaded, &ref_states, &ref_offsets);
+
+    for ([_]JobSystemKind{ .{ .thread_pool = 0 }, .{ .thread_pool = 1 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 } }) |kind| {
+        var states: std.ArrayList(u8) = .empty;
+        defer states.deinit(allocator);
+        var offsets: std.ArrayList(usize) = .empty;
+        defer offsets.deinit(allocator);
+        const counts = try runConstraintOpsScene(allocator, kind, &states, &offsets);
+        try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+        for (ref_offsets.items, 0..) |offset, i| {
+            const end = if (i + 1 < ref_offsets.items.len) ref_offsets.items[i + 1] else ref_states.items.len;
+            if (!std.mem.eql(u8, ref_states.items[offset..end], states.items[offset..end])) {
+                std.debug.print("state differs after update {d} with {any}\n", .{ i, kind });
+                return error.TestUnexpectedResult;
+            }
+        }
+        try expectEqual(ref, counts);
+    }
+}
+
+/// The D12 sweeps on the update right after the operations of `update` (every temp allocation and every createJob of
+/// the job graph fails in turn: error.OutOfMemory, the temp allocator is empty, a failure before any job ran changes
+/// nothing, restoring the snapshot taken after the operations recovers the reference)
+fn constraintOpsSweeps(kind: JobSystemKind, sweep_update: u32) !void {
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 8 * 1024 * 1024);
+    defer temp.deinit();
+    const scene = try allocator.create(ConstraintOpsScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator);
+    defer scene.deinit();
+    for (0..sweep_update) |update| {
+        try scene.applyOps(@intCast(update));
+        _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    }
+    try scene.applyOps(sweep_update);
+
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.system.saveState(snapshot.recorder(), .{});
+    const Helper = struct {
+        fn restore(s: *ConstraintOpsScene, state: *StateRecorderImpl) !void {
+            state.rewind();
+            try expect(try s.system.restoreState(state.recorder(), .{}));
+        }
+
+        fn expectState(s: *ConstraintOpsScene, expected: *StateRecorderImpl) !void {
+            var state = StateRecorderImpl.init(std.testing.allocator);
+            defer state.deinit();
+            try s.system.saveState(state.recorder(), .{});
+            try expect(state.isEqual(expected));
+        }
+    };
+
+    // Reference: the update with enough memory, counting the temp allocations and the jobs of the job graph
+    var counting: FailingTempAllocator = .init(temp.tempAllocator(), .{});
+    var spawn_counting: SpawnCountingJobSystem = .{ .inner = jobs.jobSystem() };
+    var counting_jobs: FailingJobSystem = .init(spawn_counting.jobSystem(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, counting.tempAllocator(), counting_jobs.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+    const num_allocations = counting.num_allocations;
+    const num_built = counting_jobs.num_created.load(.monotonic) - spawn_counting.num_spawned_find_collisions.load(.monotonic);
+    try expect(num_allocations >= num_build_temp_allocations);
+
+    for (0..num_allocations) |fail_index| {
+        try Helper.restore(scene, &snapshot);
+        var failing: FailingTempAllocator = .init(temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, failing.tempAllocator(), jobs.jobSystem()));
+        try expect(failing.has_induced_failure);
+        try expect(temp.isEmpty());
+        if (fail_index < num_build_temp_allocations)
+            try Helper.expectState(scene, &snapshot);
+        try Helper.restore(scene, &snapshot);
+        _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+        try Helper.expectState(scene, &reference);
+    }
+    for (0..num_built) |fail_index| {
+        try Helper.restore(scene, &snapshot);
+        var failing: FailingJobSystem = .init(jobs.jobSystem(), .{ .fail_index = @intCast(fail_index) });
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem()));
+        try expect(temp.isEmpty());
+        try Helper.expectState(scene, &snapshot); // Nothing changed
+        try Helper.restore(scene, &snapshot);
+        _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+        try Helper.expectState(scene, &reference);
+    }
+}
+
+test "PhysicsSystem constraint operations: out of temp memory and failing jobs after the operations, single threaded" {
+    // After a batch removal from the split island (update 6) and after a new constraint woke a sleeping body (update 9)
+    try constraintOpsSweeps(.single_threaded, 6);
+    try constraintOpsSweeps(.single_threaded, 9);
+}
+
+test "PhysicsSystem constraint operations: out of temp memory and failing jobs after the operations, multi threaded" {
+    try constraintOpsSweeps(.{ .thread_pool = 3 }, 9);
+    try constraintOpsSweeps(.{ .thread_pool = 3 }, 12);
+}
+
+test "PhysicsSystem constraint operations: out of memory creating the scene" {
+    const Ctx = struct {
+        fn build(allocator: Allocator) !void {
+            const scene = try allocator.create(ConstraintOpsScene);
             defer allocator.destroy(scene);
             try scene.init(allocator);
             scene.deinit();

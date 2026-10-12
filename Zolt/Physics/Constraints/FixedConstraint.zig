@@ -77,9 +77,11 @@
 //!   CSMakeSettings calls, applyOp for the kind specific setter operations, recordGetters, recordSettingsGetters for
 //!   SixDOF) exactly like the C++ functions (CSMakeSettings, CSApplyKindOp, ...); the test "Constraint parity: x" then
 //!   runs instead of being skipped (the file header describes the steps and the reserved numbers).
-//! - ZoltParity/Physics/SimulationParity.zig: the `.create_constraint` prong of `applyOpInner` gets the
-//!   `SimScenes.ConstraintKind` of the class (the C++ side in SimulationReference.cpp creates every kind already); scenes
-//!   with that kind then run instead of being skipped.
+//! - ZoltParity/Physics/SimulationParity.zig: fill the slot of the class' worker group (`XSlot = StubSlot`: makeSettings
+//!   from the `SimConstraint` description, applyOp for the operations of the group's OpKind range, stateFields) exactly
+//!   like the C++ functions in SimulationReference.cpp, which covers every kind and setter already; the scenes with the
+//!   class' Blocker then run instead of being skipped (the recipe and the reserved numbers are in the SimScenes.zig
+//!   header).
 //! - ZoltParity/Physics/BodyInterfaceParity.zig (PhysicsScene with constraints): a kind of `SceneConstraintKind`.
 //!   The class becomes one by itself when its ConstraintsParity slot is filled (`scene_constraint_kinds`, Path excepted:
 //!   Jolt's PathConstraint::GetConstraintSettings is not implemented), there is nothing to add in that file.
