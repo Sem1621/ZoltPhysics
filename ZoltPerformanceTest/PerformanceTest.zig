@@ -15,7 +15,16 @@
 //! and the same hash:
 //! - `Trace` is `std.log.info`; `std_options.logFn` is Jolt's TraceImpl: every message (also the library's) is
 //!   formatted into a 1024 byte buffer (longer messages are truncated like vsnprintf) and printed to stdout with a new
-//!   line. printf formats become Zig formats (`%f` is `{d:.6}`, with printf's texts for NaN and infinity).
+//!   line. printf formats become Zig formats (`%f` is `{d:.6}`, with printf's texts for NaN and infinity). Zig rounds
+//!   the shortest round trip digits of the value where printf rounds its exact binary value (ties to even), so a value
+//!   whose shortest digits end halfway can differ in the last printed digit (0.1234565: Zig 0.123457, printf
+//!   0.123456). This only affects printed timings and LargeMeshScene's statistics (`%.1f` / `%.3f`), not the hash.
+//! - JPH_BREAKPOINT in StateRecorderImpl::ReadBytes (-vs): Jolt stops the program at the first mismatch in every build
+//!   (int3 / __builtin_trap, not tied to JPH_ENABLE_ASSERTS), Zolt's StateRecorderImpl only panics when asserts are on.
+//!   `validateState` reports a mismatch (`num_mismatches`) or a read past the end of the state (a shorter or missing
+//!   state file: Jolt compares against uninitialized stack memory) and main then runs `@breakpoint()` (int3 / brk,
+//!   SIGTRAP like Jolt) after the state of that frame is restored. Without asserts the trace therefore lists all
+//!   mismatches of the frame where Jolt's lists the first one; with asserts the library panics at the first one.
 //! - `RegisterDefaultAllocator`, `Factory::sInstance`, `RegisterTypes` / `UnregisterTypes`: nothing to do, the
 //!   allocator is `init.gpa` and the type registry of Zolt is comptime.
 //! - The scenes are PerformanceTestScene interfaces (`unique_ptr<PerformanceTestScene>`: the interface owns the scene).
@@ -77,7 +86,9 @@ fn traceImpl(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comp
     std.Io.File.stdout().writeStreamingAll(std.Options.debug_io, buffer[0 .. len + 1]) catch {};
 }
 
-/// printf("%f", value): `{d:.6}`, with printf's texts for NaN and infinity
+/// printf("%f", value): `{d:.6}`, with printf's texts for NaN and infinity. Equal to printf except for values whose
+/// shortest round trip digits end halfway between two 6 digit decimals: Zig rounds those digits, printf the exact
+/// binary value (0.1234565: Zig 0.123457, printf 0.123456)
 const PrintfFloat = struct {
     value: f64,
 
@@ -219,6 +230,25 @@ const InputFile = struct {
         }
     }
 };
+
+/// The -vs branch of main after the state of a frame was read: copy it to a validator and validate the physics system
+/// against it. Zolt: returns true where Jolt's StateRecorderImpl::ReadBytes runs JPH_BREAKPOINT (the caller breaks):
+/// the validator counted a mismatch, or it read past the end of the state (Jolt then compares against uninitialized
+/// stack memory, Zolt's validator reads nothing and is left failed).
+fn validateState(allocator: Allocator, physics_system: *PhysicsSystem, data: []const u8) Allocator.Error!bool {
+    // Copy to validator
+    var validator = StateRecorderImpl.init(allocator);
+    defer validator.deinit();
+    validator.writeBytes(data);
+    if (validator.isFailed())
+        return error.OutOfMemory; // The stringstream could not grow (Jolt: std::bad_alloc)
+
+    // Validate state
+    validator.recorder().setValidating(true);
+    _ = try physics_system.restoreState(validator.recorder(), .{});
+
+    return validator.num_mismatches != 0 or validator.isFailed();
+}
 
 /// The scenes that need later phases: an error instead of the scene (Jolt creates them)
 fn sceneNotPorted(name: []const u8, needs: []const u8) u8 {
@@ -555,14 +585,9 @@ pub fn main(init: std.process.Init) !u8 {
                         @memset(data, 0);
                         validate_state_file.read(data);
 
-                        // Copy to validator
-                        var validator = StateRecorderImpl.init(allocator);
-                        defer validator.deinit();
-                        validator.writeBytes(data);
-
-                        // Validate state
-                        validator.recorder().setValidating(true);
-                        _ = try physics_system.restoreState(validator.recorder(), .{});
+                        // Copy to validator and validate state
+                        if (try validateState(allocator, &physics_system, data))
+                            @breakpoint(); // JPH_BREAKPOINT of StateRecorderImpl::ReadBytes (see the file header)
                     }
 
                     if (DeterminismLog.enabled) {
@@ -727,6 +752,56 @@ test "PerformanceTest scenes give Jolt's hashes after a few updates" {
     try std.testing.expectEqual(@as(u64, if (dp) 0x6b13f19597ad79f4 else 0xbb1738ab6ae53857), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .discrete, 100));
     try std.testing.expectEqual(@as(u64, if (dp) 0x2b4f1c7cf1a90e26 else 0x93894e4298eed8e1), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
     try std.testing.expectEqual(@as(u64, if (dp) 0x5109b031ac53c66e else 0x375628eabc094b31), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
+}
+
+test "validateState: -vs fails on a state that differs or ends early" {
+    // Zolt test of the JPH_BREAKPOINT emulation of -vs (see the file header): record the state of a frame like -rs and
+    // validate it like -vs. The same state passes. A state that ends early (a missing or shorter state file) fails, and
+    // without asserts (with asserts the library panics at the mismatch) so does the state of another frame.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const scene = (try PyramidScene.create(allocator)).scene();
+    defer scene.destroy();
+    try std.testing.expect(try scene.load(""));
+
+    var temp_allocator = try TempAllocatorImpl.init(allocator, scene.getTempAllocatorSizeMB() * 1024 * 1024);
+    defer temp_allocator.deinit();
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+    var job_system: JobSystemThreadPool = .empty;
+    try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = 1 });
+    defer job_system.deinit();
+    var physics_system: PhysicsSystem = .empty;
+    try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+    defer physics_system.deinit();
+    try scene.startTest(&physics_system, .linear_cast);
+    defer scene.stopTest(&physics_system);
+    try physics_system.optimizeBroadPhase();
+    for (0..3) |_| {
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+    }
+
+    // Record state (-rs)
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    try physics_system.saveState(recorder.recorder(), .{});
+    const data = recorder.getData();
+    try std.testing.expect(data.len > 0);
+
+    // Validate state (-vs)
+    try std.testing.expect(!try validateState(allocator, &physics_system, data));
+    try std.testing.expect(try validateState(allocator, &physics_system, &.{})); // Read past the end of the state file
+    try std.testing.expect(try validateState(allocator, &physics_system, data[0 .. data.len - 1]));
+    try std.testing.expect(!try validateState(allocator, &physics_system, data)); // The failed validations left the state unchanged
+
+    if (!zolt.Core.enable_asserts) {
+        // The state of the next frame differs
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+        try std.testing.expect(try validateState(allocator, &physics_system, data));
+    }
 }
 
 test {

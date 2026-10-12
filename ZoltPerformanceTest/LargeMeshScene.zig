@@ -3,8 +3,10 @@
 //!
 //! `new LargeMeshScene` is `LargeMeshScene.create(allocator)`; the scene is used through the PerformanceTestScene
 //! interface (`scene()`), which owns it. `Trace` is `std.log.info`: PerformanceTest.zig's `std_options.logFn` prints it
-//! like Jolt's TraceImpl. The printf formats `%u` / `%llu` / `%d` / `%.1f` / `%.3f` are `{d}` / `{d:.1}` / `{d:.3}`.
-//! The time is measured with the monotonic clock of `std.Io` (Jolt: `std::chrono::high_resolution_clock`).
+//! like Jolt's TraceImpl. The printf formats `%u` / `%llu` / `%d` / `%.1f` / `%.3f` are `{d}` / `{d:.1}` / `{d:.3}`,
+//! which differ from printf in the last digit when the value's shortest round trip digits end halfway (Zig rounds
+//! those digits, printf the exact binary value, see PerformanceTest.zig). The time is measured with the monotonic
+//! clock of `std.Io` (Jolt: `std::chrono::high_resolution_clock`).
 
 const std = @import("std");
 const zolt = @import("zolt");
