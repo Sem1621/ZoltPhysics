@@ -28,6 +28,9 @@
 //! The PerformanceTest scenes (`perf_*`, milestone M6) are the exact setup of ZoltPerformanceTest's Pyramid,
 //! ConvexVsMesh and HighSpeed scenes with -q=LinearCast, compared after every update for their first 50 / 80 / 20
 //! updates: a hash of the determinism check that no longer matches is found here first, with the first differing field.
+//! Building the terrain of perf_convex_vs_mesh with 8 instead of the scene's 4 triangles per leaf on the Zolt side only
+//! is reported as "state differs at byte 46837 ...: bodies[350] (id 0x0080015e) rotation.x zolt 0x3d6041ab jolt
+//! 0x3d604197" (update 59).
 //!
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
 //! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts
