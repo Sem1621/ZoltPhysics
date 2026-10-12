@@ -22,6 +22,9 @@
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollideShapeVsShapePerLeaf.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/CollisionDispatch.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
@@ -214,6 +217,7 @@ struct SimSceneDesc
 	uint32						mContactListenerMode;
 	uint32						mCombineMode;
 	uint32						mSimShapeFilterMode;
+	uint32						mSimCollideMode;
 };
 
 // Must match ContactFlags in SimScenes.zig (bits in the upper 32 bits of the user data of a body)
@@ -230,6 +234,16 @@ namespace SimContactFlags
 	static constexpr uint32 cFilterSpheres = 1 << 8;
 	static constexpr uint32 cRejectMarkedChild = 1 << 9;
 	static constexpr uint32 cMarkedChildUserData = 77;
+	static constexpr uint32 cMassOverride = 1 << 10;
+}
+
+// ContactFlags.massOverrideScale of SimScenes.zig (sGetInvMassScale of UnitTests/Physics/ContactListenerTests.cpp)
+static float SimMassOverrideScale(const Body &inBody)
+{
+	uint64 ud = inBody.GetUserData();
+	int index = ((ud & 1) != 0? (ud >> 1) : (ud >> 3)) & 0b11;
+	float mass_overrides[] = { 1.0f, 0.0f, 0.5f, 2.0f };
+	return mass_overrides[index];
 }
 
 // The ContactFlags of a body pair
@@ -299,6 +313,33 @@ public:
 		return inShape1->GetSubType() != EShapeSubType::Sphere && inShape2->GetSubType() != EShapeSubType::Sphere;
 	}
 };
+
+// SimCollideMode.all of SimScenes.zig (sCollideBodyVsBodyAll of UnitTests/Physics/SensorTests.cpp)
+static void SimCollideBodyVsBodyAll(const Body &inBody1, const Body &inBody2, Mat44Arg inCenterOfMassTransform1, Mat44Arg inCenterOfMassTransform2, CollideShapeSettings &ioCollideShapeSettings, CollideShapeCollector &ioCollector, const ShapeFilter &inShapeFilter)
+{
+	// Override the back face mode so we get hits with all triangles
+	ioCollideShapeSettings.mBackFaceMode = EBackFaceMode::CollideWithBackFaces;
+	PhysicsSystem::sDefaultSimCollideBodyVsBody(inBody1, inBody2, inCenterOfMassTransform1, inCenterOfMassTransform2, ioCollideShapeSettings, ioCollector, inShapeFilter);
+}
+
+// SimCollideMode.per_body of SimScenes.zig (sCollideBodyVsBodyPerBody of UnitTests/Physics/SensorTests.cpp)
+static void SimCollideBodyVsBodyPerBody(const Body &inBody1, const Body &inBody2, Mat44Arg inCenterOfMassTransform1, Mat44Arg inCenterOfMassTransform2, CollideShapeSettings &ioCollideShapeSettings, CollideShapeCollector &ioCollector, const ShapeFilter &inShapeFilter)
+{
+	// Max 1 hit per body pair
+	AnyHitCollisionCollector<CollideShapeCollector> collector;
+	SubShapeIDCreator part1, part2;
+	CollisionDispatch::sCollideShapeVsShape(inBody1.GetShape(), inBody2.GetShape(), Vec3::sOne(), Vec3::sOne(), inCenterOfMassTransform1, inCenterOfMassTransform2, part1, part2, ioCollideShapeSettings, collector);
+	if (collector.HadHit())
+		ioCollector.AddHit(collector.mHit);
+}
+
+// SimCollideMode.per_leaf of SimScenes.zig (sCollideBodyVsBodyPerLeaf of UnitTests/Physics/SensorTests.cpp)
+static void SimCollideBodyVsBodyPerLeaf(const Body &inBody1, const Body &inBody2, Mat44Arg inCenterOfMassTransform1, Mat44Arg inCenterOfMassTransform2, CollideShapeSettings &ioCollideShapeSettings, CollideShapeCollector &ioCollector, const ShapeFilter &inShapeFilter)
+{
+	// Max 1 hit per leaf shape pair
+	SubShapeIDCreator part1, part2;
+	CollideShapeVsShapePerLeaf<AnyHitCollisionCollector<CollideShapeCollector>>(inBody1.GetShape(), inBody2.GetShape(), Vec3::sOne(), Vec3::sOne(), inCenterOfMassTransform1, inCenterOfMassTransform2, part1, part2, ioCollideShapeSettings, ioCollector, inShapeFilter);
+}
 
 // Must match SimRecord in SimScenes.zig
 struct SimRecord
@@ -372,6 +413,8 @@ enum class ESimOp : uint32
 	ActivateBodiesInAABox = 46,
 	ApplyBuoyancyImpulse = 47,
 	ExpectBodyState = 48,
+	WereBodiesInContact = 49,
+	SetCollideKinematicVsNonDynamic = 50,
 };
 
 static constexpr uint32 cInvalidHandle = 0xffffffff;
@@ -574,6 +617,15 @@ private:
 			ioSettings.mInvMassScale2 = 2.0f;
 			ioSettings.mInvInertiaScale2 = 1.5f;
 		}
+		if (flags & SimContactFlags::cMassOverride)
+		{
+			float scale1 = SimMassOverrideScale(inBody1);
+			ioSettings.mInvMassScale1 = scale1;
+			ioSettings.mInvInertiaScale1 = scale1;
+			float scale2 = SimMassOverrideScale(inBody2);
+			ioSettings.mInvMassScale2 = scale2;
+			ioSettings.mInvInertiaScale2 = scale2;
+		}
 		if (flags & SimContactFlags::cSurfaceVelocity)
 		{
 			ioSettings.mRelativeLinearSurfaceVelocity = Vec3(1.5f, 0.0f, 0.5f);
@@ -635,6 +687,13 @@ public:
 		}
 		if (inDesc.mSimShapeFilterMode == 1)
 			mSystem.SetSimShapeFilter(&mSphereFilter);
+		switch (inDesc.mSimCollideMode)
+		{
+		case 1:		mSystem.SetSimCollideBodyVsBody(SimCollideBodyVsBodyAll); break;
+		case 2:		mSystem.SetSimCollideBodyVsBody(SimCollideBodyVsBodyPerLeaf); break;
+		case 3:		mSystem.SetSimCollideBodyVsBody(SimCollideBodyVsBodyPerBody); break;
+		default:	break;
+		}
 
 		for (uint32 i = 0; i < inDesc.mNumShapes; ++i)
 			mShapes.push_back(MakeShape(inDesc.mShapes[i]));
@@ -943,6 +1002,20 @@ public:
 			}
 
 		case ESimOp::ExpectBodyState:			break; // Changes nothing, the driver checks the result
+
+		case ESimOp::WereBodiesInContact:
+			{
+				BodyID id2 = GetHandle(inOp.mIndex);
+				return (mSystem.WereBodiesInContact(id, id2)? 1 : 0) | (mSystem.WereBodiesInContact(id2, id)? 2 : 0);
+			}
+
+		case ESimOp::SetCollideKinematicVsNonDynamic:
+			{
+				BodyLockWrite lock(mSystem.GetBodyLockInterface(), id);
+				if (lock.Succeeded())
+					lock.GetBody().SetCollideKinematicVsNonDynamic(inOp.mCount != 0);
+			}
+			break;
 
 		case ESimOp::CreateConstraint:
 			{

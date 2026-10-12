@@ -47,6 +47,15 @@
 //! the contact cache of the C++ state holds CCD manifolds (OnCCDContactAdded of a hit without a discrete contact of the
 //! same sub shape pair in the same update), for SimScenes.Expect.ccd_jobs / ccd_hits.
 //!
+//! Wave C: the cases of the ported unit tests (ContactListenerTests, SensorTests, ShapeTests, ActiveEdgesTests) that the
+//! other scenes did not reach are mirrored by scenes of their own, with ContactFlags.mass_override (TestMassOverride's
+//! sGetInvMassScale), SimCollideMode (the sCollideBodyVsBody functions of SensorTests) and the operations
+//! `were_bodies_in_contact` / `set_collide_kinematic_vs_non_dynamic`. Proof that they bite: giving body 2 the inverse
+//! mass (or inertia) scale of body 1 fails contacts_mass_override (and ccd_infinite_mass_override), installing the
+//! default function for SimCollideMode.all fails contacts_sim_collide_all, and returning only one order of
+//! WereBodiesInContact is reported as "operation 8 (were_bodies_in_contact on handle 0) returned 1 in zolt and 3 in
+//! jolt".
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
@@ -114,6 +123,7 @@ const ShapeKind = SimScenes.ShapeKind;
 const ContactListenerMode = SimScenes.ContactListenerMode;
 const CombineMode = SimScenes.CombineMode;
 const SimShapeFilterMode = SimScenes.SimShapeFilterMode;
+const SimCollideMode = SimScenes.SimCollideMode;
 const ContactFlags = SimScenes.ContactFlags;
 const SimShapeFilter = zolt.SimShapeFilter;
 const SubShapeID = zolt.SubShapeID;
@@ -347,6 +357,14 @@ const ContactListenerImpl = struct {
             settings.inv_mass_scale2 = 2.0;
             settings.inv_inertia_scale2 = 1.5;
         }
+        if ((flags & ContactFlags.mass_override) != 0) {
+            const scale1 = ContactFlags.massOverrideScale(body1.getUserData());
+            settings.inv_mass_scale1 = scale1;
+            settings.inv_inertia_scale1 = scale1;
+            const scale2 = ContactFlags.massOverrideScale(body2.getUserData());
+            settings.inv_mass_scale2 = scale2;
+            settings.inv_inertia_scale2 = scale2;
+        }
         if ((flags & ContactFlags.surface_velocity) != 0) {
             settings.relative_linear_surface_velocity = Vec3.init(1.5, 0.0, 0.5);
             settings.relative_angular_surface_velocity = Vec3.init(0.0, 0.7, 0.0);
@@ -414,6 +432,47 @@ const SphereFilter = struct {
         if ((contactFlags(body1, body2) & ContactFlags.filter_spheres) == 0)
             return true;
         return shape1.getSubType() != .sphere and shape2.getSubType() != .sphere;
+    }
+};
+
+/// The body vs body collision functions of SimCollideMode (SimCollideBodyVsBody* of SimulationReference.cpp, the
+/// sCollideBodyVsBody* functions of SensorTests)
+const SimCollide = struct {
+    const CollideShapeCollector = zolt.CollideShapeCollector;
+    const CollideShapeSettings = zolt.CollideShapeSettings;
+    const AnyHitCollector = zolt.AnyHitCollisionCollector(CollideShapeCollector);
+    const SubShapeIDCreator = zolt.SubShapeIDCreator;
+    const ShapeFilter = zolt.ShapeFilter;
+
+    /// SimCollideMode.all: the default function with EBackFaceMode::CollideWithBackFaces
+    fn all(context: ?*anyopaque, allocator: std.mem.Allocator, body1: *const Body, body2: *const Body, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, collide_shape_settings: *CollideShapeSettings, collector: *CollideShapeCollector, shape_filter: *const ShapeFilter) std.mem.Allocator.Error!void {
+        _ = context;
+
+        // Override the back face mode so we get hits with all triangles
+        collide_shape_settings.back_face_mode = .collide_with_back_faces;
+        try PhysicsSystem.defaultSimCollideBodyVsBody(allocator, body1, body2, center_of_mass_transform1, center_of_mass_transform2, collide_shape_settings, collector, shape_filter);
+    }
+
+    /// SimCollideMode.per_body: max 1 hit per body pair
+    fn perBody(context: ?*anyopaque, allocator: std.mem.Allocator, body1: *const Body, body2: *const Body, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, collide_shape_settings: *CollideShapeSettings, collector: *CollideShapeCollector, shape_filter: *const ShapeFilter) std.mem.Allocator.Error!void {
+        _ = .{ context, allocator, shape_filter };
+
+        var any_hit_collector = AnyHitCollector.init();
+        defer any_hit_collector.deinit();
+        const part1: SubShapeIDCreator = .{};
+        const part2: SubShapeIDCreator = .{};
+        zolt.CollisionDispatch.collideShapeVsShape(body1.getShape(), body2.getShape(), Vec3.one(), Vec3.one(), center_of_mass_transform1, center_of_mass_transform2, part1, part2, collide_shape_settings, &any_hit_collector.base, &.{});
+        if (any_hit_collector.hadHit())
+            collector.addHit(&any_hit_collector.hit);
+    }
+
+    /// SimCollideMode.per_leaf: max 1 hit per leaf shape pair
+    fn perLeaf(context: ?*anyopaque, allocator: std.mem.Allocator, body1: *const Body, body2: *const Body, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, collide_shape_settings: *CollideShapeSettings, collector: *CollideShapeCollector, shape_filter: *const ShapeFilter) std.mem.Allocator.Error!void {
+        _ = context;
+
+        const part1: SubShapeIDCreator = .{};
+        const part2: SubShapeIDCreator = .{};
+        try zolt.collideShapeVsShapePerLeaf(AnyHitCollector, allocator, body1.getShape(), body2.getShape(), Vec3.one(), Vec3.one(), center_of_mass_transform1, center_of_mass_transform2, part1, part2, collide_shape_settings, collector, shape_filter);
     }
 };
 
@@ -592,6 +651,12 @@ const ZoltWorld = struct {
         switch (@as(SimShapeFilterMode, @enumFromInt(desc.sim_shape_filter_mode))) {
             .none => {},
             .filter_spheres => self.system.setSimShapeFilter(&self.sphere_filter.base),
+        }
+        switch (@as(SimCollideMode, @enumFromInt(desc.sim_collide_mode))) {
+            .default => {},
+            .all => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.all }),
+            .per_leaf => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.perLeaf }),
+            .per_body => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.perBody }),
         }
         self.counting_jobs = .{ .inner = self.jobs.jobSystem() };
 
@@ -882,6 +947,16 @@ const ZoltWorld = struct {
                 return (@as(u32, @intFromBool(applied)) << 2) | @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
             },
             .expect_body_state => {}, // Changes nothing, the driver checks the result
+            .were_bodies_in_contact => {
+                const id2 = self.getHandle(op.index);
+                return @as(u32, @intFromBool(self.system.wereBodiesInContact(id, id2))) | (@as(u32, @intFromBool(self.system.wereBodiesInContact(id2, id))) << 1);
+            },
+            .set_collide_kinematic_vs_non_dynamic => {
+                var lock: zolt.BodyLockWrite = .init(self.system.getBodyLockInterface(), id);
+                defer lock.deinit();
+                if (lock.succeeded())
+                    lock.getBody().setCollideKinematicVsNonDynamic(op.count != 0);
+            },
             .create_constraint => {
                 // Phase 6: one prong per ConstraintKind when the class is ported (the scenes that need it are blocked
                 // by SimScenes.Blocker.constraints until then)

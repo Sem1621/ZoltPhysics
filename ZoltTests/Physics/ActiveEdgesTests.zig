@@ -1,11 +1,11 @@
 //! Port of: UnitTests/Physics/ActiveEdgesTests.cpp
-//! Status: partial
-//! Missing: DiscreteCubeSlideMesh, DiscreteCubeSlideHeightField, LinearCastCubeSlideMesh, LinearCastCubeSlideHeightField
-//!   (sDiscreteCubeSlide / sLinearCastCubeSlide simulate a box sliding over the shape, need PhysicsTestContext, Phase 5)
+//! Status: complete
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const Layers = @import("../Layers.zig").Layers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
 const CapsuleShapeSettings = zolt.CapsuleShapeSettings;
@@ -16,6 +16,10 @@ const CollisionDispatch = zolt.CollisionDispatch;
 const Float3 = zolt.Float3;
 const HeightFieldShapeSettings = zolt.HeightFieldShapeSettings;
 const Mat44 = zolt.Mat44;
+const PhysicsSettings = zolt.PhysicsSettings;
+const Quat = zolt.Quat;
+const RVec3 = zolt.RVec3;
+const ScaledShapeSettings = zolt.ScaledShapeSettings;
 const MeshShapeSettings = zolt.MeshShapeSettings;
 const Ref = zolt.Ref;
 const RefConst = zolt.RefConst;
@@ -232,9 +236,150 @@ test "CastShapeHeightField" {
     try testCastShape(shape.get().?, Vec3.init(-1, 1, 1), true);
 }
 
-// Not ported: sDiscreteCubeSlide, DiscreteCubeSlideMesh, DiscreteCubeSlideHeightField, sLinearCastCubeSlide,
-// LinearCastCubeSlideMesh and LinearCastCubeSlideHeightField (they simulate a box sliding over the shape, need
-// PhysicsTestContext, Phase 5)
+// Tests a discrete cube sliding over a mesh / heightfield shape
+fn discreteCubeSlide(shape: *ShapeSettings, check_active_edges: bool) !void {
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+
+    const penetration_slop = c.getSystem().getPhysicsSettings().penetration_slop;
+
+    // Set simulation settings
+    var settings: PhysicsSettings = .{};
+    settings.check_active_edges = check_active_edges;
+    c.getSystem().setPhysicsSettings(&settings);
+
+    // Create frictionless floor
+    const floor = try c.createBodyWithShapeSettings(shape, RVec3.zero(), Quat.identity(), .static, .discrete, Layers.non_moving, .dont_activate);
+    floor.setFriction(0.0);
+
+    // Create box sliding over the floor
+    const initial_position = RVec3.init(-3, 0.1 - penetration_slop, 0);
+    const initial_velocity = Vec3.init(3, 0, 0);
+    const box = try c.createBox(initial_position, Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.1), .{});
+    box.setLinearVelocity(initial_velocity);
+    box.setFriction(0.0);
+    box.getMotionPropertiesMut().setLinearDamping(0.0);
+
+    const simulation_time: f32 = 2.0;
+    _ = try c.simulate(simulation_time, {});
+
+    const expected_position = initial_position.addVec3(initial_velocity.mulScalar(simulation_time));
+    if (check_active_edges) {
+        // Box should have slided frictionless over the plane without encountering any collisions
+        try fw.checkApproxEqual(box.getPosition(), expected_position, .{ .tolerance = 1.0e-3 });
+        try fw.checkApproxEqual(box.getLinearVelocity(), initial_velocity, .{ .tolerance = 2.0e-3 });
+    } else {
+        // Box should have bumped into an internal edge and not reached its target
+        try fw.expect(box.getPosition().getX() < expected_position.getX() - 1.0);
+    }
+}
+
+test "DiscreteCubeSlideMesh" {
+    var shape = try createMeshShape();
+    defer shape.deinit();
+
+    try discreteCubeSlide(shape.get().?, false);
+
+    try discreteCubeSlide(shape.get().?, true);
+
+    var scaled_shape = Ref(ShapeSettings).init((try ScaledShapeSettings.create(allocator, shape.get(), Vec3.init(-1, 1, 1))).asShapeSettings());
+    defer scaled_shape.deinit();
+
+    try discreteCubeSlide(scaled_shape.get().?, false);
+
+    try discreteCubeSlide(scaled_shape.get().?, true);
+}
+
+test "DiscreteCubeSlideHeightField" {
+    var shape = try createHeightFieldShape();
+    defer shape.deinit();
+
+    try discreteCubeSlide(shape.get().?, false);
+
+    try discreteCubeSlide(shape.get().?, true);
+
+    var scaled_shape = Ref(ShapeSettings).init((try ScaledShapeSettings.create(allocator, shape.get(), Vec3.init(-1, 1, 1))).asShapeSettings());
+    defer scaled_shape.deinit();
+
+    try discreteCubeSlide(scaled_shape.get().?, false);
+
+    try discreteCubeSlide(scaled_shape.get().?, true);
+}
+
+// Tests a linear cast cube sliding over a mesh / heightfield shape
+fn linearCastCubeSlide(shape: *ShapeSettings, check_active_edges: bool) !void {
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+
+    const penetration_slop = c.getSystem().getPhysicsSettings().penetration_slop;
+
+    // Set simulation settings
+    var settings: PhysicsSettings = .{};
+    settings.check_active_edges = check_active_edges;
+    c.getSystem().setPhysicsSettings(&settings);
+
+    // Create frictionless floor
+    const floor = try c.createBodyWithShapeSettings(shape, RVec3.zero(), Quat.identity(), .static, .discrete, Layers.non_moving, .dont_activate);
+    floor.setFriction(0.0);
+
+    // Create box starting a little bit above the floor and ending 0.5 * cPenetrationSlop below the floor so that if no internal edges are hit the motion should not be stopped
+    // Note that we need the vertical velocity or else back face culling will ignore the face
+    const initial_position = RVec3.init(-3, 0.1 + penetration_slop, 0);
+    const initial_velocity = Vec3.init(6 * 60, -1.5 * penetration_slop * 60, 0);
+    const box = try c.createBox(initial_position, Quat.identity(), .dynamic, .linear_cast, Layers.moving, Vec3.replicate(0.1), .{});
+    box.setLinearVelocity(initial_velocity);
+    box.setFriction(0.0);
+    box.getMotionPropertiesMut().setLinearDamping(0.0);
+
+    // To avoid extra vertical velocity being picked up in 1 step, zero gravity
+    c.zeroGravity();
+
+    _ = try c.simulateSingleStep();
+
+    const expected_position = initial_position.addVec3(initial_velocity.divScalar(60.0));
+    if (check_active_edges) {
+        // Box should stepped in one frame over the plane without encountering any linear cast collisions
+        try fw.checkApproxEqual(box.getPosition(), expected_position, .{ .tolerance = 1.0e-4 });
+        try fw.checkApproxEqual(box.getLinearVelocity(), initial_velocity, .{ .tolerance = 1.0e-4 });
+    } else {
+        // Box should have bumped into an internal edge and not reached its target
+        try fw.expect(box.getPosition().getX() < expected_position.getX() - 1.0);
+    }
+}
+
+test "LinearCastCubeSlideMesh" {
+    var shape = try createMeshShape();
+    defer shape.deinit();
+
+    try linearCastCubeSlide(shape.get().?, false);
+
+    try linearCastCubeSlide(shape.get().?, true);
+
+    var scaled_shape = Ref(ShapeSettings).init((try ScaledShapeSettings.create(allocator, shape.get(), Vec3.init(-1, 1, 1))).asShapeSettings());
+    defer scaled_shape.deinit();
+
+    try linearCastCubeSlide(scaled_shape.get().?, false);
+
+    try linearCastCubeSlide(scaled_shape.get().?, true);
+}
+
+test "LinearCastCubeSlideHeightField" {
+    var shape = try createHeightFieldShape();
+    defer shape.deinit();
+
+    try linearCastCubeSlide(shape.get().?, false);
+
+    try linearCastCubeSlide(shape.get().?, true);
+
+    var scaled_shape = Ref(ShapeSettings).init((try ScaledShapeSettings.create(allocator, shape.get(), Vec3.init(-1, 1, 1))).asShapeSettings());
+    defer scaled_shape.deinit();
+
+    try linearCastCubeSlide(scaled_shape.get().?, false);
+
+    try linearCastCubeSlide(scaled_shape.get().?, true);
+}
 
 test "TestNonManifoldMesh" {
     // Test 3 triangles in a plane that all share the same edge

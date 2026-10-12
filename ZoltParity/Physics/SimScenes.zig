@@ -41,7 +41,8 @@
 //!
 //! Contact scenes (Wave B, `Blocker.contacts` is supported): bodies collide, the contact listener records are
 //! compared. The contact listener, the combine functions and the SimShapeFilter of a scene are selected with
-//! `b.contact_listener_mode` / `b.combine_mode` / `b.sim_shape_filter_mode`; in `ContactListenerMode.modify` and
+//! `b.contact_listener_mode` / `b.combine_mode` / `b.sim_shape_filter_mode` (the body vs body collision function with
+//! `b.sim_collide_mode`); in `ContactListenerMode.modify` and
 //! `SimShapeFilterMode.filter_spheres` the bits of `ContactFlags` in the upper 32 bits of the user data of the two
 //! bodies decide what the listener / filter does (the same code on both sides). A contact scene states what it
 //! reaches in `SceneEntry.expect` (contact callbacks, removed contacts, sleeping bodies, FindCollisions jobs spawned
@@ -358,6 +359,11 @@ pub const OpKind = enum(u32) {
     /// driver fails unless they are `index` (`SceneBuilder.expectSleeping` / `expectAwake`). A scene states with it
     /// that it reaches the edge case it is written for (a sleeping body before an operation that must not wake it).
     expect_body_state = 48,
+    /// PhysicsSystem::WereBodiesInContact(body, handle `index`) | WereBodiesInContact(handle `index`, body) << 1 (changes
+    /// nothing)
+    were_bodies_in_contact = 49,
+    /// Body::SetCollideKinematicVsNonDynamic(count != 0) under a BodyLockWrite (BodyInterface has no setter)
+    set_collide_kinematic_vs_non_dynamic = 50,
     /// Driver: the following updates use delta time f[0] and `count` collision steps
     set_update = 100,
     /// Driver: both sides save their state in slot `index`
@@ -406,6 +412,8 @@ pub const SimSceneDesc = extern struct {
     combine_mode: u32,
     /// SimShapeFilterMode (PhysicsSystem::SetSimShapeFilter)
     sim_shape_filter_mode: u32,
+    /// SimCollideMode (PhysicsSystem::SetSimCollideBodyVsBody)
+    sim_collide_mode: u32,
 };
 
 /// What the contact listener does besides recording the callbacks
@@ -432,6 +440,21 @@ pub const SimShapeFilterMode = enum(u32) {
     /// ShouldCollide is false when one of the two bodies has `ContactFlags.filter_spheres` and one of the two shapes is
     /// a SphereShape (it is called for every level of a compound)
     filter_spheres = 1,
+};
+
+/// The function that collides two bodies during the simulation (PhysicsSystem::SetSimCollideBodyVsBody): the three
+/// functions of SensorTests' TestSimCollideBodyVsBody
+pub const SimCollideMode = enum(u32) {
+    /// PhysicsSystem::sDefaultSimCollideBodyVsBody
+    default = 0,
+    /// sCollideBodyVsBodyAll: the default function with EBackFaceMode::CollideWithBackFaces (hits with all triangles)
+    all = 1,
+    /// sCollideBodyVsBodyPerLeaf: CollideShapeVsShapePerLeaf with an AnyHitCollisionCollector (max 1 hit per leaf shape
+    /// pair)
+    per_leaf = 2,
+    /// sCollideBodyVsBodyPerBody: CollisionDispatch::sCollideShapeVsShape into an AnyHitCollisionCollector (max 1 hit
+    /// per body pair)
+    per_body = 3,
 };
 
 /// Bits in the upper 32 bits of a body's user data (`user_data_flags << 32`) that the contact listener in
@@ -462,6 +485,18 @@ pub const ContactFlags = struct {
     pub const reject_marked_child: u32 = 1 << 9;
     /// The compound user data (`SimCompoundChild.user_data`) of the children that `reject_marked_child` rejects
     pub const marked_child_user_data: u32 = 77;
+    /// OnContactAdded / OnContactPersisted (after `mass_scale`): the inverse mass and inertia scale of each body is
+    /// `massOverrideScale` of its user data (sGetInvMassScale of ContactListenerTests' TestMassOverride: 1, 0, 0.5 or 2;
+    /// 0 gives the body infinite mass for the contact)
+    pub const mass_override: u32 = 1 << 10;
+
+    /// The inverse mass / inertia scale of a body with `user_data` for `mass_override` (sGetInvMassScale of
+    /// UnitTests/Physics/ContactListenerTests.cpp, also SimMassOverrideScale in SimulationReference.cpp)
+    pub fn massOverrideScale(user_data: u64) f32 {
+        const index = (if ((user_data & 1) != 0) (user_data >> 1) else (user_data >> 3)) & 0b11;
+        const mass_overrides = [_]f32{ 1.0, 0.0, 0.5, 2.0 };
+        return mass_overrides[@intCast(index)];
+    }
 
     /// The user data of a body with these flags (and `low` in the lower 32 bits)
     pub fn userData(flags: u32, low: u32) u64 {
@@ -687,6 +722,16 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "contacts_random_2", .build = buildContactRandom(2, 2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_3", .build = buildContactRandom(3, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_4", .build = buildContactRandom(4, 3), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_mass_override", .build = buildMassOverride, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_zero_delta_time", .build = buildZeroDeltaTime, .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_zero_sized_shapes", .build = buildZeroSizedShapes, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_cube_slide_active_edges", .build = buildDiscreteCubeSlide(1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_cube_slide_all_edges", .build = buildDiscreteCubeSlide(0), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_sim_collide_all", .build = buildSimCollideBodyVsBody(.all), .blocked_by = .contacts, .sweep_stride = 3, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_sim_collide_per_leaf", .build = buildSimCollideBodyVsBody(.per_leaf), .blocked_by = .contacts, .sweep_stride = 3, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_sim_collide_per_body", .build = buildSimCollideBodyVsBody(.per_body), .blocked_by = .contacts, .sweep_stride = 3, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_were_bodies_in_contact", .build = buildWereBodiesInContact, .blocked_by = .contacts, .sweep_stride = 3, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_sensor_vs_static", .build = buildSensorVsStatic, .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
     // CCD (Wave B R4: linear cast bodies that hit something)
     .{ .name = "ccd_bullet_hits_wall", .build = buildBulletHitsWall, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_static_targets", .build = buildCCDStaticTargets, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
@@ -707,6 +752,9 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "ccd_random_1", .build = buildCCDRandom(1, 1), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_random_2", .build = buildCCDRandom(2, 2), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_random_3", .build = buildCCDRandom(3, 1), .blocked_by = .ccd_hits, .sweep_stride = 5, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_infinite_mass_override", .build = buildInfiniteMassOverride, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
+    .{ .name = "ccd_cube_slide_active_edges", .build = buildLinearCastCubeSlide(1), .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true } },
+    .{ .name = "ccd_cube_slide_all_edges", .build = buildLinearCastCubeSlide(0), .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
     // Later waves (blocked until Zolt has the parts, see Blocker)
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
 };
@@ -726,6 +774,7 @@ pub const SceneBuilder = struct {
     contact_listener_mode: ContactListenerMode = .record,
     combine_mode: CombineMode = .default,
     sim_shape_filter_mode: SimShapeFilterMode = .none,
+    sim_collide_mode: SimCollideMode = .default,
 
     shapes: std.ArrayList(SimShape) = .empty,
     children: std.ArrayList(SimCompoundChild) = .empty,
@@ -784,6 +833,7 @@ pub const SceneBuilder = struct {
             .contact_listener_mode = @intFromEnum(self.contact_listener_mode),
             .combine_mode = @intFromEnum(self.combine_mode),
             .sim_shape_filter_mode = @intFromEnum(self.sim_shape_filter_mode),
+            .sim_collide_mode = @intFromEnum(self.sim_collide_mode),
         };
     }
 
@@ -3438,6 +3488,267 @@ fn buildCCDRandom(comptime seed: u32, comptime steps: u32) fn (b: *SceneBuilder)
             }
         }
     }.build;
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Mirrors of the Wave C unit tests (ContactListenerTests, ShapeTests, ActiveEdgesTests): the bit exact counterpart of
+// the cases that the other scenes do not reach yet
+
+/// TestMassOverride of ContactListenerTests: two spheres on a collision course for every pair of motion types (not both
+/// static) and each of the 16 user data values of the test; the listener overrides the inverse mass and inertia scales
+/// of both bodies (ContactFlags.mass_override: 1, 0, 0.5 or 2 by user data, so some pairs have no body with mass and
+/// create no contact constraint); zero gravity, restitution 1, no linear damping. The pairs of the test collide head on,
+/// a second set hits off center (friction turns the spheres, so the inverse inertia scales matter too).
+fn buildMassOverride(b: *SceneBuilder) Allocator.Error!void {
+    const F = ContactFlags;
+    b.contact_listener_mode = .modify;
+    b.gravity = .{ 0, 0, 0 };
+    b.num_updates = 60;
+    const sphere = try b.sphere(1.0);
+    var group: u32 = 0;
+    for ([_]Real{ 0, 0.6 }) |y| {
+        for (0..3) |m1| {
+            for (0..3) |m2| {
+                if (m1 == 0 and m2 == 0)
+                    continue;
+                for (0..16) |i| {
+                    const x = real(group) * 30;
+                    const z = real(i) * 3;
+                    const low: u32 = @intCast(i << 1);
+                    _ = try b.body(.{
+                        .position = .{ x - 2, 0, z },
+                        .linear_velocity = .{ if (m1 != 0) 3.0 else 0.0, 0, 0 },
+                        .shape = sphere,
+                        .motion_type = @intCast(m1),
+                        .override_mass_properties = 1,
+                        .mass = 1.0,
+                        .restitution = 1.0,
+                        .linear_damping = 0.0,
+                        .user_data = F.userData(F.mass_override, low),
+                        .object_layer = if (m1 != 0) Layers.moving else Layers.non_moving,
+                    }, .activate);
+                    _ = try b.body(.{
+                        .position = .{ x + 2, y, z },
+                        .linear_velocity = .{ if (m2 != 0) -4.0 else 0.0, 0, 0 },
+                        .shape = sphere,
+                        .motion_type = @intCast(m2),
+                        .override_mass_properties = 1,
+                        .mass = 2.0,
+                        .restitution = 1.0,
+                        .linear_damping = 0.0,
+                        .user_data = F.userData(F.mass_override, low + 1),
+                        .object_layer = if (m2 != 0) Layers.moving else Layers.non_moving,
+                    }, .activate);
+                }
+                group += 1;
+            }
+        }
+    }
+}
+
+/// TestInfiniteMassOverride of ContactListenerTests: a sphere (discrete or linear cast) hits a box that the listener
+/// gives infinite mass (inverse mass and inertia scale 0, ContactFlags.mass_override), with the box created first or
+/// second (the listener sees the bodies in both orders); zero gravity
+fn buildInfiniteMassOverride(b: *SceneBuilder) Allocator.Error!void {
+    const F = ContactFlags;
+    b.contact_listener_mode = .modify;
+    b.gravity = .{ 0, 0, 0 };
+    b.num_updates = 30;
+    const box = try b.box(.{ 2, 2, 2 }, 0.05);
+    const sphere = try b.sphere(2);
+    for ([_]bool{ false, true }, 0..) |do_swap, s| {
+        for (0..2) |quality| {
+            const z = real(s * 2 + quality) * 20;
+            const box_desc = try b.addBodyDesc(.{ .position = .{ 0, 2, z }, .shape = box, .override_mass_properties = 1, .mass = 1.0, .user_data = F.userData(F.mass_override, 8), .object_layer = Layers.moving });
+            const sphere_desc = try b.addBodyDesc(.{ .position = .{ 30, 2, z }, .linear_velocity = .{ -100, 0, 0 }, .shape = sphere, .override_mass_properties = 1, .mass = 10.0, .restitution = 0.1, .linear_damping = 0.0, .motion_quality = @intCast(quality), .object_layer = Layers.moving });
+            if (do_swap) {
+                // Swap the bodies so that the contact listener will receive the bodies in the opposite order
+                _ = try b.createAndAddBody(sphere_desc, .activate);
+                _ = try b.createAndAddBody(box_desc, .activate);
+            } else {
+                _ = try b.createAndAddBody(box_desc, .activate);
+                _ = try b.createAndAddBody(sphere_desc, .activate);
+            }
+        }
+    }
+}
+
+/// TestZeroDeltaTime of ContactListenerTests: updates with zero delta time call no contact callbacks and keep the
+/// contact cache, the next update reports the contacts as persisted (or added for a body created in between)
+fn buildZeroDeltaTime(b: *SceneBuilder) Allocator.Error!void {
+    const floor = try b.box(.{ 100, 1, 100 }, 0);
+    const sphere = try b.sphere(1.0);
+    b.num_updates = 12;
+    _ = try b.body(.{ .position = .{ 0, -1, 0 }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.body(.{ .shape = sphere, .linear_damping = 0, .angular_damping = 0, .collision_group_id = 0, .object_layer = Layers.moving }, .activate);
+    try b.sysOp(.set_update, .{ .f = &.{0.0}, .count = 1 });
+    b.at(1);
+    try b.sysOp(.set_update, .{ .f = &.{1.0 / 60.0}, .count = 1 });
+    b.at(2);
+    _ = try b.body(.{ .position = .{ 4, 0, 0 }, .shape = sphere, .linear_damping = 0, .angular_damping = 0, .collision_group_id = 0, .object_layer = Layers.moving }, .activate);
+    try b.sysOp(.set_update, .{ .f = &.{0.0}, .count = 1 });
+    b.at(3);
+    try b.sysOp(.set_update, .{ .f = &.{1.0 / 60.0}, .count = 1 });
+    b.at(6);
+    try b.sysOp(.set_update, .{ .f = &.{0.0}, .count = 2 });
+    b.at(7);
+    try b.sysOp(.set_update, .{ .f = &.{1.0 / 60.0}, .count = 2 });
+}
+
+/// The PhysicsTestContext parts of TestBoxShape, TestCylinderShape and TestTaperedCylinderShape of ShapeTests: zero
+/// sized shapes (the convex radius is adjusted to zero) with the mass and inertia provided land on a floor, with the
+/// speculative contact distance and the penetration slop set to 0
+fn buildZeroSizedShapes(b: *SceneBuilder) Allocator.Error!void {
+    b.settings.speculative_contact_distance = 0.0;
+    b.settings.penetration_slop = 0.0;
+    b.num_updates = 90;
+    const floor = try b.box(.{ 100, 1, 100 }, 0);
+    _ = try b.body(.{ .position = .{ 0, -1, 0 }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const shapes = [_]u32{
+        try b.box(.{ 0, 0, 0 }, 1.0),
+        try b.cylinder(0.0, 0.0, 1.0),
+        try b.taperedCylinder(1.0e-12, 0.0, 1.0e-12, 1.0), // Top != bottom or else we'll be creating a CylinderShape instead
+    };
+    var identity: [16]f32 = @splat(0);
+    for (0..4) |i| identity[i * 5] = 1.0;
+    for (shapes, 0..) |shape, i| {
+        _ = try b.body(.{ .position = .{ real(i), 1, 0 }, .shape = shape, .override_mass_properties = 2, .mass = 1.0, .inertia = identity, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// The flat floors of ActiveEdgesTests in lanes 10 m apart along z: the 7 x 7 quad mesh, the 8 x 8 sample height field
+/// and both mirrored with ScaledShape (-1, 1, 1) (sCreateMeshShape / sCreateHeightFieldShape), static and frictionless
+fn addActiveEdgesFloors(b: *SceneBuilder) Allocator.Error![4]Real {
+    const mesh = try addMeshTerrain(b, 7, 1.0, true);
+    const zeros: [8 * 8]f32 = @splat(0);
+    const height_field = try b.heightField(&zeros, 8, .{ -3.5, 0, -3.5 }, .{ 1, 1, 1 });
+    const floors = [_]u32{ mesh, height_field, try b.scaled(mesh, .{ -1, 1, 1 }), try b.scaled(height_field, .{ -1, 1, 1 }) };
+    var lanes: [4]Real = undefined;
+    for (floors, 0..) |floor, i| {
+        lanes[i] = real(i) * 10;
+        _ = try b.body(.{ .position = .{ 0, 0, lanes[i] }, .shape = floor, .motion_type = 0, .friction = 0.0, .collision_group_id = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    }
+    return lanes;
+}
+
+/// sDiscreteCubeSlide of ActiveEdgesTests: a frictionless box slides over each floor of `addActiveEdgesFloors`, with
+/// PhysicsSettings::mCheckActiveEdges `check_active_edges` (without it the box bumps into the internal edges)
+fn buildDiscreteCubeSlide(comptime check_active_edges: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.settings.check_active_edges = check_active_edges;
+            b.num_updates = 120;
+            const box = try b.box(.{ 0.1, 0.1, 0.1 }, 0.05);
+            const penetration_slop = b.settings.penetration_slop;
+            for (try addActiveEdgesFloors(b)) |z|
+                _ = try b.body(.{ .position = .{ -3, 0.1 - penetration_slop, z }, .linear_velocity = .{ 3, 0, 0 }, .shape = box, .friction = 0.0, .linear_damping = 0.0, .angular_damping = 0.0, .collision_group_id = 0, .object_layer = Layers.moving }, .activate);
+        }
+    }.build;
+}
+
+/// sLinearCastCubeSlide of ActiveEdgesTests: a frictionless linear cast box crosses each floor of
+/// `addActiveEdgesFloors` in one step, ending 0.5 * penetration slop below it (the vertical velocity keeps the faces
+/// from being back face culled), with PhysicsSettings::mCheckActiveEdges `check_active_edges` (without it the cast hits
+/// an internal edge); zero gravity
+fn buildLinearCastCubeSlide(comptime check_active_edges: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.settings.check_active_edges = check_active_edges;
+            b.gravity = .{ 0, 0, 0 };
+            b.num_updates = 4;
+            const box = try b.box(.{ 0.1, 0.1, 0.1 }, 0.05);
+            const penetration_slop = b.settings.penetration_slop;
+            for (try addActiveEdgesFloors(b)) |z|
+                _ = try b.body(.{ .position = .{ -3, 0.1 + penetration_slop, z }, .linear_velocity = .{ 6 * 60, -1.5 * penetration_slop * 60, 0 }, .shape = box, .friction = 0.0, .linear_damping = 0.0, .angular_damping = 0.0, .motion_quality = 1, .collision_group_id = 0, .object_layer = Layers.moving }, .activate);
+        }
+    }.build;
+}
+
+/// TestSimCollideBodyVsBody of SensorTests: a kinematic sensor that also detects static bodies (without manifold
+/// reduction) overlaps 11 x 11 pyramids of a static compound floor of 21 x 21 pyramid meshes, with the body vs body
+/// collision function `mode` (all triangles, one hit per leaf shape pair, one hit per body pair)
+fn buildSimCollideBodyVsBody(comptime mode: SimCollideMode) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.sim_collide_mode = mode;
+            b.num_updates = 6;
+            b.max_contact_constraints = 4096;
+
+            // Create pyramid with flat top
+            const v = [_][3]f32{ .{ 1, 0, 1 }, .{ 1, 0, -1 }, .{ -1, 0, -1 }, .{ -1, 0, 1 }, .{ 0.1, 1, 0.1 }, .{ 0.1, 1, -0.1 }, .{ -0.1, 1, -0.1 }, .{ -0.1, 1, 0.1 } };
+            const indices = [_][3]u32{ .{ 0, 1, 4 }, .{ 4, 1, 5 }, .{ 1, 2, 5 }, .{ 2, 6, 5 }, .{ 2, 3, 6 }, .{ 3, 7, 6 }, .{ 3, 0, 7 }, .{ 0, 4, 7 }, .{ 4, 5, 6 }, .{ 4, 6, 7 } };
+            var triangles: [indices.len][9]f32 = undefined;
+            for (indices, &triangles) |t, *out|
+                out.* = v[t[0]] ++ v[t[1]] ++ v[t[2]];
+            const pyramid = try b.mesh(&triangles);
+
+            // Create floor of many pyramids
+            var children: std.ArrayList(SimCompoundChild) = .empty;
+            defer children.deinit(b.allocator);
+            var x: i32 = -10;
+            while (x <= 10) : (x += 1) {
+                var z: i32 = -10;
+                while (z <= 10) : (z += 1)
+                    try children.append(b.allocator, .{ .shape = pyramid, .position = .{ @as(f32, @floatFromInt(x)) * 2.0, 0, @as(f32, @floatFromInt(z)) * 2.0 } });
+            }
+            const compound = try b.compound(.static_compound, children.items);
+            _ = try b.body(.{ .shape = compound, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+
+            // A kinematic sensor that also detects static bodies
+            // Note that the size has been picked so that it is slightly smaller than 11 x 11 pyramids and incorporates all triangles in those pyramids
+            const sensor = try b.box(.{ 10.99, 10.99, 10.99 }, 0.05);
+            _ = try b.body(.{ .position = .{ 0, 5, 0 }, .shape = sensor, .motion_type = 1, .is_sensor = 1, .collide_kinematic_vs_non_dynamic = 1, .use_manifold_reduction = 0, .object_layer = Layers.moving }, .activate);
+            b.at(3);
+            try b.op(.set_linear_velocity, 1, .{ .f = &.{ 0.5, 0, 0.3 } });
+        }
+    }.build;
+}
+
+/// TestWereBodiesInContact of ContactListenerTests: a dynamic compound of two spheres on a floor is lifted on one side
+/// and then on the other by impulses; WereBodiesInContact (in both orders) is compared after every step, also while
+/// manifold reduction picks the other sphere's sub shape for the contact
+fn buildWereBodiesInContact(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 12;
+    const floor_shape = try b.box(.{ 100, 1, 100 }, 0);
+    const sphere = try b.sphere(1);
+    const compound = try b.compound(.static_compound, &.{ .{ .shape = sphere, .position = .{ -2, 0, 0 } }, .{ .shape = sphere, .position = .{ 2, 0, 0 } } });
+    const signs = [_]Real{ -1, 1 };
+    var floors: [2]u32 = undefined;
+    var bodies: [2]u32 = undefined;
+    for (signs, 0..) |_, lane| {
+        const z = real(lane) * 210; // The floors are 200 m wide
+        floors[lane] = try b.body(.{ .position = .{ 0, -1, z }, .shape = floor_shape, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        bodies[lane] = try b.body(.{ .position = .{ 0, 0.999, z }, .shape = compound, .object_layer = Layers.moving }, .activate);
+    }
+    for (0..b.num_updates) |u| {
+        b.at(@intCast(u));
+        for (signs, floors, bodies, 0..) |sign, floor, body, lane| {
+            const z = real(lane) * 210;
+            try b.op(.were_bodies_in_contact, floor, .{ .index = body });
+            try b.op(.were_bodies_in_contact, body, .{ .index = floor });
+            if (u == 1) // Impulse on one side
+                try b.op(.add_impulse_at_position, body, .{ .f = &.{ 0, 10000, 0 }, .r = .{ -sign * 2, 0, z } });
+            if (u == 3) // Impulse on the other side
+                try b.op(.add_impulse_at_position, body, .{ .f = &.{ 0, 10000, 0 }, .r = .{ sign * 2, 0, z } });
+        }
+    }
+}
+
+/// TestSensorVsStatic of SensorTests: a kinematic sensor between two static spheres (created before and after it)
+/// detects them only while Body::SetCollideKinematicVsNonDynamic is on
+fn buildSensorVsStatic(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 6;
+    const sphere = try b.sphere(1.0);
+    const box = try b.box(.{ 1, 1, 1 }, 0.05);
+    _ = try b.body(.{ .shape = sphere, .motion_type = 0, .linear_damping = 0, .angular_damping = 0, .collision_group_id = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const sensor = try b.body(.{ .shape = box, .motion_type = 1, .is_sensor = 1, .object_layer = Layers.moving }, .activate); // Put in layer that collides with static
+    _ = try b.body(.{ .shape = sphere, .motion_type = 0, .linear_damping = 0, .angular_damping = 0, .collision_group_id = 0, .object_layer = Layers.non_moving }, .dont_activate); // Created after the sensor to force higher body ID
+    b.at(1);
+    try b.op(.set_collide_kinematic_vs_non_dynamic, sensor, .{ .count = 1 }); // Start detecting static
+    b.at(3);
+    try b.op(.set_collide_kinematic_vs_non_dynamic, sensor, .{ .count = 0 }); // Stop detecting static
+    b.at(4);
+    try b.op(.set_collide_kinematic_vs_non_dynamic, sensor, .{ .count = 1 });
 }
 
 // -------------------------------------------------------------------------------------------------------------------
