@@ -876,6 +876,9 @@ pub const PhysicsSystem = struct {
         self.body_manager.lockAllBodies();
         broad_phase.lockModifications();
 
+        // Zolt (D5): the jobs reset the InvalidateContactCache flags, an update that runs out of memory puts them back
+        self.body_manager.saveContactCacheInvalidation();
+
         // Build the jobs. Zolt: no job runs before every job exists (the start gate), so a failure has no side effects.
         var constraints_locked = false;
         self.buildJobs(&context, collision_steps, &constraints_locked) catch |err| {
@@ -939,6 +942,11 @@ pub const PhysicsSystem = struct {
         // The other job could try to e.g. add/remove a body which would try to
         // lock a body mutex while this thread has already locked the mutex
         job_system.waitForJobs(barrier);
+
+        // Zolt (D5): an allocation failed inside a job: flag the contact caches that were invalid at the start of the
+        // update again (the caller restores a saved state, which does not hold the flags)
+        if (context.isOutOfMemory())
+            self.body_manager.restoreContactCacheInvalidation();
 
         self.finishUpdate(&context, constraints_locked);
 

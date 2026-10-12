@@ -26,6 +26,12 @@
 //!   more than once can still grow them mid-restore, see `restoreState`). `invalidateContactCacheForBody` returns
 //!   `Allocator.Error` (the list of bodies to validate grows) and then clears the flag again, so the flag and the list
 //!   stay consistent.
+//! - Zolt (D5): an update that runs out of memory inside a job may already have reset the InvalidateContactCache flags
+//!   (`validateContactCacheForAllBodies` runs in every ContactRemovedCallbacks job), and the flags are not part of the
+//!   saved state. `saveContactCacheInvalidation` copies the list at the start of the update into
+//!   `bodies_cache_invalid_at_update_start` (its room is reserved in `invalidateContactCacheForBody`, the update does not
+//!   allocate) and `restoreContactCacheInvalidation` puts the flags and the list back when the update failed, so that
+//!   the update after restoring a saved state treats the contact cache like the update that failed.
 //! - Overloads: the const / non-const `GetBody`, `TryGetBody`, `GetBodies` are `getBody` / `getBodyMut`, `tryGetBody` /
 //!   `tryGetBodyMut`, `getBodies` / `getBodiesMut`. Pointer + count parameters are slices.
 //! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): TODO(debug_renderer).
@@ -210,6 +216,10 @@ pub const BodyManager = struct {
     /// List of all bodies that should have their cache invalidated
     bodies_cache_invalid: BodyIDVector = .empty,
 
+    /// Zolt (D5): `bodies_cache_invalid` at the start of the current update (saveContactCacheInvalidation). Its capacity
+    /// is kept at least the length of `bodies_cache_invalid` by invalidateContactCacheForBody.
+    bodies_cache_invalid_at_update_start: BodyIDVector = .empty,
+
     /// Listener that is notified whenever a body is activated/deactivated
     activation_listener: ?BodyActivationListener = null,
 
@@ -293,6 +303,7 @@ pub const BodyManager = struct {
         }
 
         self.bodies_cache_invalid.deinit(self.allocator);
+        self.bodies_cache_invalid_at_update_start.deinit(self.allocator);
         self.allocator.free(self.body_sequence_numbers);
         self.allocator.free(self.bodies);
         self.body_mutexes.deinit(self.allocator);
@@ -864,6 +875,11 @@ pub const BodyManager = struct {
             const mutex = &self.mutableFields().bodies_cache_invalid_mutex;
             mutex.lock(self.io);
             defer mutex.unlock(self.io);
+            // Zolt (D5): room for the copy that an update makes (saveContactCacheInvalidation)
+            self.bodies_cache_invalid_at_update_start.ensureTotalCapacity(self.allocator, self.bodies_cache_invalid.items.len + 1) catch |err| {
+                body.validateContactCacheInternal();
+                return err;
+            };
             self.bodies_cache_invalid.append(self.allocator, body.getID()) catch |err| {
                 body.validateContactCacheInternal();
                 return err;
@@ -884,6 +900,41 @@ pub const BodyManager = struct {
                 body.validateContactCacheInternal();
         }
         self.bodies_cache_invalid.clearRetainingCapacity();
+    }
+
+    /// Zolt (D5): remember the bodies whose contact cache is invalid at the start of an update (called by
+    /// PhysicsSystem.update before the first job runs; does not allocate)
+    pub fn saveContactCacheInvalidation(self: *BodyManager) void {
+        const mutex = &self.mutableFields().bodies_cache_invalid_mutex;
+        mutex.lock(self.io);
+        defer mutex.unlock(self.io);
+
+        self.bodies_cache_invalid_at_update_start.clearRetainingCapacity();
+        self.bodies_cache_invalid_at_update_start.appendSliceAssumeCapacity(self.bodies_cache_invalid.items);
+    }
+
+    /// Zolt (D5): after an update that ran out of memory inside a job (called by PhysicsSystem.update with all bodies
+    /// locked; does not allocate): the bodies flagged during the update are reset, the bodies that were flagged at its
+    /// start (saveContactCacheInvalidation) are flagged again, and the list is the list at the start of the update.
+    /// The flags are not part of the saved state, so the update after restoring a state saved before the failed update
+    /// treats the contact cache like the failed update did.
+    pub fn restoreContactCacheInvalidation(self: *BodyManager) void {
+        const mutex = &self.mutableFields().bodies_cache_invalid_mutex;
+        mutex.lock(self.io);
+        defer mutex.unlock(self.io);
+
+        for (self.bodies_cache_invalid.items) |b| {
+            if (self.tryGetBodyMut(b)) |body|
+                body.validateContactCacheInternal();
+        }
+        for (self.bodies_cache_invalid_at_update_start.items) |b| {
+            if (self.tryGetBodyMut(b)) |body|
+                _ = body.invalidateContactCacheInternal();
+        }
+
+        // The list held these entries at the start of the update and never shrinks its capacity
+        self.bodies_cache_invalid.clearRetainingCapacity();
+        self.bodies_cache_invalid.appendSliceAssumeCapacity(self.bodies_cache_invalid_at_update_start.items);
     }
 
     /// Return the BroadPhaseLayerInterface that this class has been initialized with
@@ -1236,3 +1287,59 @@ pub const BodyManager = struct {
         }
     }
 };
+
+test "BodyManager: the contact cache flags of an update that runs out of memory are put back (Zolt, D5)" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+    const Quat = @import("../../Math/Quat.zig").Quat;
+    const RVec3 = @import("../../Math/Real.zig").RVec3;
+    const ObjectLayer = @import("../Collision/ObjectLayer.zig").ObjectLayer;
+    const BroadPhaseLayer = @import("../Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
+    const SphereShape = @import("../Collision/Shape/SphereShape.zig").SphereShape;
+
+    const LayerInterface = struct {
+        pub const overrides = .{ .getNumBroadPhaseLayers, .getBroadPhaseLayer };
+        base: BroadPhaseLayerInterface = .init(@This()),
+        pub fn getNumBroadPhaseLayers(_: *const @This()) u32 {
+            return 1;
+        }
+        pub fn getBroadPhaseLayer(_: *const @This(), _: ObjectLayer) BroadPhaseLayer {
+            return .init(0);
+        }
+    };
+    const layers: LayerInterface = .{};
+    var bm: BodyManager = .empty;
+    try bm.init(allocator, std.testing.io, 4, 0, &layers.base);
+    defer bm.deinit();
+
+    const sphere = try SphereShape.create(allocator, 1, .{});
+    var settings = BodyCreationSettings.initWithShape(sphere.asShape(), RVec3.zero(), Quat.identity(), .dynamic, 0);
+    defer settings.deinit();
+    var bodies: [3]*Body = undefined;
+    for (&bodies) |*b| {
+        b.* = try bm.allocateBody(&settings);
+        try expect(bm.addBody(b.*));
+    }
+
+    // Bodies 0 and 1 are flagged before the update
+    try bm.invalidateContactCacheForBody(bodies[0]);
+    try bm.invalidateContactCacheForBody(bodies[1]);
+    bm.saveContactCacheInvalidation();
+
+    // The update resets the flags (JobContactRemovedCallbacks), bodies 2 and 0 are flagged again (e.g. by a step
+    // listener of the next collision step) and the update runs out of memory: the flags and the list are put back
+    bm.validateContactCacheForAllBodies();
+    try expect(!bodies[0].isCollisionCacheInvalid() and !bodies[1].isCollisionCacheInvalid());
+    try bm.invalidateContactCacheForBody(bodies[2]);
+    try bm.invalidateContactCacheForBody(bodies[0]);
+    bm.restoreContactCacheInvalidation();
+    try expect(bodies[0].isCollisionCacheInvalid() and bodies[1].isCollisionCacheInvalid() and !bodies[2].isCollisionCacheInvalid());
+    try std.testing.expectEqualSlices(BodyID, &.{ bodies[0].getID(), bodies[1].getID() }, bm.bodies_cache_invalid.items);
+
+    // The next update resets them like Jolt
+    bm.saveContactCacheInvalidation();
+    bm.validateContactCacheForAllBodies();
+    for (bodies) |b|
+        try expect(!b.isCollisionCacheInvalid());
+    try std.testing.expectEqual(@as(usize, 0), bm.bodies_cache_invalid.items.len);
+}

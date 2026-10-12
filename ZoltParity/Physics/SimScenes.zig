@@ -362,6 +362,11 @@ pub const OpKind = enum(u32) {
     /// driver fails unless they are `index` (`SceneBuilder.expectSleeping` / `expectAwake`). A scene states with it
     /// that it reaches the edge case it is written for (a sleeping body before an operation that must not wake it).
     expect_body_state = 48,
+    /// SetUseManifoldReduction(count != 0) (invalidates the contact cache of the body)
+    set_use_manifold_reduction = 49,
+    /// Body::ApplyBodyCreationSettings(bodies[index], GetBroadPhaseLayerInterface()) under a BodyLockWrite (the body
+    /// must not be in the broad phase)
+    apply_body_creation_settings = 50,
     /// Driver: the following updates use delta time f[0] and `count` collision steps
     set_update = 100,
     /// Driver: both sides save their state in slot `index`
@@ -722,6 +727,26 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "perf_convex_vs_mesh", .build = buildPerfConvexVsMesh, .blocked_by = .contacts, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true } },
     .{ .name = "perf_high_speed", .build = buildPerfHighSpeed, .blocked_by = .ccd_hits, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true, .ccd_hits = true, .ccd_jobs = 4 } },
     // Later waves (blocked until Zolt has the parts, see Blocker)
+    // Scenes of the ported PhysicsTests (Wave C)
+    .{ .name = "physics_tests_restitution_1", .build = buildTestsRestitution(1), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_restitution_2", .build = buildTestsRestitution(2), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_restitution_4", .build = buildTestsRestitution(4), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_min_velocity_for_restitution_inelastic", .build = buildTestsMinVelocityForRestitution(1.01), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_min_velocity_for_restitution_elastic", .build = buildTestsMinVelocityForRestitution(0.99), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_penetration_slop_1", .build = buildTestsPenetrationSlop(1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_penetration_slop_2", .build = buildTestsPenetrationSlop(2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_penetration_slop_4", .build = buildTestsPenetrationSlop(4), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_speculative_contacts", .build = buildTestsSpeculativeContacts, .blocked_by = .contacts, .sweep_stride = 2, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_speculative_no_hit", .build = buildTestsSpeculativeNoHit, .blocked_by = .contacts, .sweep_stride = 2, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_activate_during_step", .build = buildTestsActivateDuringStep, .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .update_activations = 18 } },
+    .{ .name = "physics_tests_broad_phase_layers", .build = buildTestsBroadPhaseLayers, .blocked_by = .contacts, .sweep_stride = 50, .expect = .{ .contacts = true, .sleeping = true } },
+    .{ .name = "physics_tests_friction", .build = buildTestsFriction, .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_allowed_dofs_vs_collision", .build = buildTestsAllowedDOFsVsCollision, .blocked_by = .contacts, .sweep_stride = 5, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_contacts_vs_simulation_islands", .build = buildTestsContactsVsSimulationIslands, .blocked_by = .contacts, .sweep_stride = 5, .expect = .{ .contacts = true } },
+    .{ .name = "physics_tests_switch_use_manifold_reduction_1", .build = buildTestsSwitchUseManifoldReduction(1), .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_switch_use_manifold_reduction_2", .build = buildTestsSwitchUseManifoldReduction(2), .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "physics_tests_apply_body_creation_settings", .build = buildTestsApplyBodyCreationSettings, .blocked_by = .contacts, .sweep_stride = 1, .expect = .{ .contacts = true, .removed = true } },
+
     .{ .name = "constraints_chain", .build = buildConstraintChain, .blocked_by = .constraints },
 };
 
@@ -3665,6 +3690,310 @@ fn buildPerfHighSpeed(b: *SceneBuilder) Allocator.Error!void {
     }
 
     try b.sysOp(.optimize_broad_phase, .{});
+}
+
+// Scenes of UnitTests/Physics/PhysicsTests.cpp (Wave C): ZoltTests/Physics/PhysicsTests.zig checks these scenarios
+// with Jolt's tolerances, the scenes compare them with Jolt bit for bit. The bodies are made like PhysicsTestContext
+// makes them (no damping), the floors like CreateFloor (a box without convex radius, top at y = 0).
+
+/// The body description of PhysicsTestContext::CreateBody (the shape settings overload): no linear and angular damping
+fn testBody(desc_value: SimBody) SimBody {
+    var result = desc_value;
+    result.linear_damping = 0;
+    result.angular_damping = 0;
+    return result;
+}
+
+/// PhysicsTestContext::CreateFloor at (x, z) with `half_extent` instead of 100, returns its handle
+fn addTestFloor(b: *SceneBuilder, x: Real, z: Real, half_extent: f32, friction: f32, restitution: f32) Allocator.Error!u32 {
+    const floor = try b.box(.{ half_extent, 1, half_extent }, 0);
+    return b.body(.{ .position = .{ x, -1, z }, .shape = floor, .motion_type = 0, .friction = friction, .restitution = restitution, .object_layer = Layers.non_moving }, .dont_activate);
+}
+
+/// TestPhysicsCollisionElastic, TestPhysicsCollisionPartiallyElastic, TestPhysicsCollisionElasticDynamic,
+/// TestPhysicsCollisionInelastic: spheres with restitution 1, 0.9 and 0 bouncing on the floor, two spheres with
+/// restitution 1 colliding in the air (with `steps` collision steps of 1/60 s per update, like the tests)
+fn buildTestsRestitution(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const ball = try b.sphere(1.0);
+            const big_ball = try b.sphere(2.0);
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            b.collision_steps = steps;
+            b.num_updates = 300 / steps;
+            _ = try addTestFloor(b, 0, 0, 100, 0.2, 0);
+            _ = try b.body(testBody(.{ .position = .{ -20, 0.9999 + 4.905, 0 }, .shape = ball, .restitution = 1.0, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ -10, 0.9999 + 4.905, 0 }, .shape = ball, .restitution = 0.0, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ 0, 10, 0 }, .shape = big_ball, .restitution = 0.9, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ 18, 30, 0 }, .linear_velocity = .{ 5, 0, 0 }, .shape = ball, .restitution = 1.0, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ 22, 30, 0 }, .linear_velocity = .{ -10, 0, 0 }, .shape = ball, .restitution = 1.0, .object_layer = Layers.moving }), .activate);
+        }
+    }.build;
+}
+
+/// TestMinVelocityForRestitution: two spheres with restitution 1 without gravity, the speed of the first one is 1,
+/// PhysicsSettings::mMinVelocityForRestitution is `min_velocity` (1.01: inelastic, 0.99: elastic)
+fn buildTestsMinVelocityForRestitution(comptime min_velocity: f32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const ball = try b.sphere(1.0);
+            b.gravity = .{ 0, 0, 0 };
+            b.settings.min_velocity_for_restitution = min_velocity;
+            b.num_updates = 150;
+            _ = try b.body(testBody(.{ .position = .{ 0, -2, 0 }, .linear_velocity = .{ 0, 1, 0 }, .shape = ball, .restitution = 1.0, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ 0, 2, 0 }, .shape = ball, .restitution = 1.0, .object_layer = Layers.moving }), .activate);
+        }
+    }.build;
+}
+
+/// TestPhysicsPenetrationSlop1, 2 and 3: boxes that start penetrating the floor by the penetration slop, by twice the
+/// slop and by a tenth of it (with `steps` collision steps of 1/60 s per update, like the tests)
+fn buildTestsPenetrationSlop(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 1, 1, 1 }, 0.05);
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            b.collision_steps = steps;
+            b.num_updates = 60 / steps;
+            const slop = b.settings.penetration_slop;
+            _ = try addTestFloor(b, 0, 0, 100, 0.2, 0);
+            _ = try b.body(testBody(.{ .position = .{ -10, 1.0 - slop, 0 }, .shape = box, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ 0, 1.0 - 2.0 * slop, 0 }, .shape = box, .object_layer = Layers.moving }), .activate);
+            _ = try b.body(testBody(.{ .position = .{ 10, 1.0 - 0.1 * slop, 0 }, .shape = box, .object_layer = Layers.moving }), .activate);
+        }
+    }.build;
+}
+
+/// TestPhysicsOutsideOfSpeculativeContactDistance and the TestPhysicsInsideSpeculativeContactDistance cases without
+/// gravity, each on its own floor: a box and a sphere moving 1 m per update towards the floor from just outside / just
+/// inside the speculative contact distance (without and with restitution), a sensor sphere, and a box and a sphere
+/// moving away from the floor
+fn buildTestsSpeculativeContacts(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 1, 1, 1 }, 0.05);
+    const ball = try b.sphere(1.0);
+    b.gravity = .{ 0, 0, 0 };
+    b.num_updates = 10;
+    const speculative_contact_distance = b.settings.speculative_contact_distance;
+    const down: f32 = -1.0 / b.delta_time;
+    const Case = struct { distance: f32, velocity: f32, restitution: f32, sensor: bool };
+    const cases = [_]Case{
+        .{ .distance = 1.1 * speculative_contact_distance, .velocity = down, .restitution = 0, .sensor = false }, // Outside
+        .{ .distance = 0.9 * speculative_contact_distance, .velocity = down, .restitution = 0, .sensor = false }, // Inside, no restitution
+        .{ .distance = 0.9 * speculative_contact_distance, .velocity = down, .restitution = 1, .sensor = false }, // Inside, with restitution
+        .{ .distance = 0.9 * speculative_contact_distance, .velocity = down, .restitution = 0, .sensor = true }, // Inside, sensor
+        .{ .distance = 0.9 * speculative_contact_distance, .velocity = -down, .restitution = 1, .sensor = false }, // Inside, moving away
+    };
+    for (cases, 0..) |case, i| {
+        const x = real(i) * 25.0;
+        _ = try addTestFloor(b, x, 0, 8, 0.2, 0);
+        const y: f32 = 1.0 + case.distance;
+        if (!case.sensor)
+            _ = try b.body(testBody(.{ .position = .{ x, y, 0 }, .linear_velocity = .{ 0, case.velocity, 0 }, .shape = box, .restitution = case.restitution, .object_layer = Layers.moving }), .activate);
+        _ = try b.body(testBody(.{ .position = .{ x + 5, y, 0 }, .linear_velocity = .{ 0, case.velocity, 0 }, .shape = ball, .restitution = case.restitution, .is_sensor = @intFromBool(case.sensor), .object_layer = Layers.moving }), .activate);
+    }
+}
+
+/// TestPhysicsInsideSpeculativeContactDistanceNoHit: a sphere with restitution 1 inside the speculative contact
+/// distance of a floor with restitution 1, too slow to touch it in one update, mMinVelocityForRestitution = 0
+fn buildTestsSpeculativeNoHit(b: *SceneBuilder) Allocator.Error!void {
+    const ball = try b.sphere(1.0);
+    b.gravity = .{ 0, 0, 0 };
+    b.settings.min_velocity_for_restitution = 0.0;
+    b.num_updates = 10;
+    const distance_above_floor = 0.9 * b.settings.speculative_contact_distance;
+    _ = try addTestFloor(b, 0, 0, 100, 0.2, 1.0);
+    _ = try b.body(testBody(.{ .position = .{ 0, 1.0 + distance_above_floor, 0 }, .linear_velocity = .{ 0, -0.9 * distance_above_floor / b.delta_time, 0 }, .shape = ball, .restitution = 1.0, .object_layer = Layers.moving }), .activate);
+}
+
+/// TestPhysicsActivateDuringStep: two rows of sleeping boxes that penetrate their neighbors by the penetration slop
+/// (one row created left to right, one right to left), the left most box of each row gets a velocity that would make
+/// it tunnel through the second box: the whole row is woken up and collides in the same update
+fn buildTestsActivateDuringStep(b: *SceneBuilder) Allocator.Error!void {
+    const box_extent: f32 = 0.5;
+    const box = try b.box(.{ box_extent, box_extent, box_extent }, 0.05);
+    b.num_updates = 6;
+    const penetration_slop = b.settings.penetration_slop;
+    const num_bodies = 10;
+    var first: [2]u32 = undefined;
+    for (0..2) |row| {
+        for (0..num_bodies) |k| {
+            const i = if (row == 0) k else num_bodies - 1 - k;
+            const x: f32 = @as(f32, @floatFromInt(i)) * (2.0 * box_extent - penetration_slop);
+            const h = try b.body(testBody(.{ .position = .{ x, 0, real(row) * 10.0 }, .shape = box, .object_layer = Layers.moving }), .dont_activate);
+            if (i == 0) first[row] = h;
+        }
+    }
+    for (first) |h|
+        try b.op(.set_linear_velocity, h, .{ .f = &.{ 500, 0, 0 } });
+}
+
+/// TestPhysicsBroadPhaseLayers: boxes in the MOVING, HQ_DEBRIS and LQ_DEBRIS layers falling on each other (without
+/// penetration slop), then the HQ_DEBRIS boxes change to LQ_DEBRIS (another broad phase layer) and later the MOVING
+/// boxes to HQ_DEBRIS (the same broad phase layer)
+fn buildTestsBroadPhaseLayers(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.settings.penetration_slop = 0.0;
+    b.num_updates = 900;
+    _ = try addTestFloor(b, 0, 0, 100, 0.2, 0);
+    const layers = [_]u32{ Layers.moving, Layers.moving, Layers.hq_debris, Layers.hq_debris, Layers.lq_debris, Layers.lq_debris };
+    var handles: [layers.len]u32 = undefined;
+    for (layers, &handles, 0..) |layer, *h, i|
+        h.* = try b.body(testBody(.{ .position = .{ 0, real(i + 1), 0 }, .shape = box, .object_layer = layer }), .activate);
+    b.at(300);
+    for (handles) |h|
+        try b.expectSleeping(h);
+    for (handles[2..4]) |h|
+        try b.op(.set_object_layer, h, .{ .index = Layers.lq_debris });
+    for (handles[2..4]) |h|
+        try b.op(.activate_body, h, .{});
+    b.at(600);
+    for (handles) |h|
+        try b.expectSleeping(h);
+    for (handles[0..2]) |h|
+        try b.op(.set_object_layer, h, .{ .index = Layers.hq_debris });
+    for (handles[0..2]) |h|
+        try b.op(.activate_body, h, .{});
+}
+
+/// TestFriction (boxes sliding over a floor in 12 directions) and TestAngularFriction (a box spinning on a floor), each
+/// on its own floor
+fn buildTestsFriction(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 1, 1, 1 }, 0.05);
+    b.num_updates = 60;
+    _ = try addTestFloor(b, 0, 0, 150, 0.9, 0);
+    for (0..12) |i| {
+        // 60 m apart: a box slides about 24 m
+        const angle = std.math.degreesToRadians(30.0 * @as(f64, @floatFromInt(i)));
+        const v: [3]f32 = .{ @floatCast(20.0 * @sin(angle)), 0, @floatCast(20.0 * @cos(angle)) };
+        const x = (real(i % 4) - 1.5) * 60.0;
+        const z = (real(i / 4) - 1.0) * 60.0;
+        _ = try b.body(.{ .position = .{ x, 0.999, z }, .linear_velocity = v, .shape = box, .friction = 0.8, .linear_damping = 0, .object_layer = Layers.moving }, .activate);
+    }
+    _ = try addTestFloor(b, 400, 0, 30, 0.2, 0);
+    _ = try b.body(.{ .position = .{ 410, 0.999, 10 }, .angular_velocity = .{ 0, 10, 0 }, .shape = box, .friction = 0.3, .angular_damping = 0, .object_layer = Layers.moving }, .activate);
+}
+
+/// TestAllowedDOFsVsCollision (a box that can only rotate around Y penetrates the floor: the contact has an infinite
+/// effective mass and must not stop the rotation) and TestAllowedDOFsVsSmallRotation (a 2D box with a denormal
+/// rotation around the locked X axis: a denormal effective mass for the angular friction)
+fn buildTestsAllowedDOFsVsCollision(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 1, 1, 1 }, 0.05);
+    const small_box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    b.num_updates = 30;
+    _ = try addTestFloor(b, 0, 0, 100, 1.0, 0);
+    const rotating = try b.body(.{ .position = .{ 0, @as(f32, 0.99), 0 }, .shape = box, .allowed_dofs = 0b010000, .angular_damping = 0, .override_mass_properties = 1, .mass = 1.0, .friction = 1.0, .object_layer = Layers.moving }, .activate);
+    try b.op(.add_torque, rotating, .{ .f = &.{ 0, 100, 0 } });
+    _ = try b.body(.{ .position = .{ 10, 0.5 - real(b.settings.penetration_slop), 0 }, .rotation = .{ 1.0e-20, 0, 0, 1 }, .linear_velocity = .{ 0, -1, 0 }, .shape = small_box, .allowed_dofs = 0b100011, .friction = 1.0, .object_layer = Layers.moving }, .activate);
+}
+
+/// TestContactsVsSimulationIslands: rows of three touching boxes with every combination of static, kinematic and
+/// dynamic motion types
+fn buildTestsContactsVsSimulationIslands(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 1, 1, 1 }, 0.05);
+    b.num_updates = 20;
+    var cell: u32 = 0;
+    for (0..3) |m1| {
+        for (0..3) |m2| {
+            for (0..3) |m3| {
+                const p = gridPosition(cell, 20, 0);
+                const motion_types = [_]u32{ @intCast(m1), @intCast(m2), @intCast(m3) };
+                const offsets = [_]f32{ 0, 1.99, 3.98 };
+                for (motion_types, offsets) |m, dx|
+                    _ = try b.body(testBody(.{ .position = .{ p[0] + dx, p[1], p[2] }, .shape = box, .motion_type = m, .object_layer = Layers.moving }), .activate);
+                cell += 1;
+            }
+        }
+    }
+}
+
+/// TestSwitchUseManifoldReduction: a compound of four boxes embedded in the floor, manifold reduction is switched off
+/// and on again (BodyInterface::SetUseManifoldReduction flags the contact cache of the body invalid until the next
+/// update; the sweeps of the updates after the switches check that an update that runs out of memory keeps the flag,
+/// with 2 collision steps also after the first step reset it)
+fn buildTestsSwitchUseManifoldReduction(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            b.collision_steps = steps;
+            try buildSwitchUseManifoldReductionScene(b);
+        }
+    }.build;
+}
+
+fn buildSwitchUseManifoldReductionScene(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 2, 2, 2 }, 0.05);
+    const compound = try b.compound(.static_compound, &.{
+        .{ .shape = box, .position = .{ 5, 0, 0 } },
+        .{ .shape = box, .position = .{ -5, 0, 0 } },
+        .{ .shape = box, .position = .{ 0, 0, 5 } },
+        .{ .shape = box, .position = .{ 0, 0, -5 } },
+    });
+    b.num_updates = 8;
+    _ = try addTestFloor(b, 0, 0, 100, 0.2, 0);
+    const body_handle = try b.body(.{ .position = .{ 0, 1.99, 0 }, .shape = compound, .use_manifold_reduction = 1, .object_layer = Layers.moving }, .activate);
+    b.at(1);
+    try b.op(.set_use_manifold_reduction, body_handle, .{ .count = 0 });
+    b.at(2);
+    try b.op(.set_use_manifold_reduction, body_handle, .{ .count = 1 });
+    b.at(5);
+    try b.op(.set_use_manifold_reduction, body_handle, .{ .count = 0 });
+}
+
+/// TestApplyBodyCreationSettings: a box in contact with the floor is removed, gets non default settings for
+/// everything (Body::ApplyBodyCreationSettings: a kinematic linear cast sensor sphere in another layer), is added again
+/// (the contact persists) and finally destroyed
+fn buildTestsApplyBodyCreationSettings(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 1, 1, 1 }, 0.05);
+    const ball = try b.sphere(1.0);
+    b.num_updates = 5;
+    _ = try addTestFloor(b, 0, 0, 100, 0.2, 0);
+    const handle = try b.body(testBody(.{ .position = .{ 0, 0.99, 0 }, .shape = box, .object_layer = Layers.moving }), .activate);
+    var inertia: [16]f32 = @splat(0);
+    inertia[0] = 8;
+    inertia[5] = 8;
+    inertia[10] = 8;
+    inertia[15] = 1;
+    const settings = try b.addBodyDesc(.{
+        .position = .{ 1.0, 0.99, 0 },
+        .rotation = axisAngle(.{ 1, 0, 0 }, 0.1),
+        .motion_type = 1,
+        .shape = ball,
+        .object_layer = Layers.moving2,
+        .collision_group_id = 1,
+        .collision_sub_group_id = 2,
+        .linear_velocity = .{ -0.1, -0.2, -0.3 },
+        .angular_velocity = .{ 0.1, 0.2, 0.3 },
+        .user_data = 1234,
+        .allow_dynamic_or_kinematic = 1,
+        .is_sensor = 1,
+        .collide_kinematic_vs_non_dynamic = 1,
+        .use_manifold_reduction = 0,
+        .apply_gyroscopic_force = 1,
+        .motion_quality = 1,
+        .enhanced_internal_edge_removal = 1,
+        .allow_sleeping = 0,
+        .friction = 0.3,
+        .restitution = 0.4,
+        .linear_damping = 0.01,
+        .angular_damping = 0.02,
+        .max_linear_velocity = 100.0,
+        .max_angular_velocity = std.math.pi * 60.0,
+        .gravity_factor = 0.5,
+        .num_velocity_steps_override = 1,
+        .num_position_steps_override = 3,
+        .override_mass_properties = 2,
+        .mass = 4.0,
+        .inertia = inertia,
+    });
+    b.at(1);
+    try b.op(.deactivate_body, handle, .{});
+    try b.op(.remove_body, handle, .{});
+    try b.op(.apply_body_creation_settings, handle, .{ .index = settings });
+    try b.op(.add_body, handle, .{ .activation = .activate });
+    b.at(3);
+    try b.op(.deactivate_body, handle, .{});
+    try b.op(.remove_body, handle, .{});
+    try b.op(.destroy_body, handle, .{});
 }
 
 // -------------------------------------------------------------------------------------------------------------------

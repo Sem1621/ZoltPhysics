@@ -373,6 +373,8 @@ enum class ESimOp : uint32
 	ActivateBodiesInAABox = 46,
 	ApplyBuoyancyImpulse = 47,
 	ExpectBodyState = 48,
+	SetUseManifoldReduction = 49,
+	ApplyBodyCreationSettings = 50,
 };
 
 static constexpr uint32 cInvalidHandle = 0xffffffff;
@@ -962,6 +964,16 @@ public:
 			}
 
 		case ESimOp::ExpectBodyState:			break; // Changes nothing, the driver checks the result
+		case ESimOp::SetUseManifoldReduction:	bi.SetUseManifoldReduction(id, inOp.mCount != 0); break;
+
+		case ESimOp::ApplyBodyCreationSettings:
+			{
+				BodyCreationSettings settings = MakeBodyCreationSettings(mDesc.mBodies[inOp.mIndex]);
+				BodyLockWrite lock(mSystem.GetBodyLockInterface(), id);
+				JPH_ASSERT(lock.Succeeded());
+				lock.GetBody().ApplyBodyCreationSettings(settings, mSystem.GetBroadPhaseLayerInterface());
+				break;
+			}
 
 		case ESimOp::CreateConstraint:
 			{

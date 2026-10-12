@@ -76,6 +76,7 @@ test {
     _ = @import("Physics/ObjectLayerPairFilterMaskTests.zig");
     _ = @import("Physics/ObjectLayerPairFilterTableTests.zig");
     _ = @import("Physics/OffsetCenterOfMassShapeTests.zig");
+    _ = @import("Physics/PhysicsDeterminismTests.zig");
     _ = @import("Physics/PhysicsStepListenerTests.zig");
     _ = @import("Physics/PhysicsSystemTests.zig");
     _ = @import("Physics/PhysicsTests.zig");
