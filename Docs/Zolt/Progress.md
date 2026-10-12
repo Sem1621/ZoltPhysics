@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 69.6%** of 85391 lines in scope · **Unit tests: 75.7%** of 18321 lines
+**Library: 69.6%** of 85391 lines in scope · **Unit tests: 76.2%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 69% | 22 | 1 | 0 | 10 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 70% | 22 | 2 | 0 | 9 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 65%</summary>
 
@@ -640,7 +640,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 69%</summary>
+<details><summary>UnitTests/Physics — 70%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -663,7 +663,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ObjectLayerPairFilterTableTests.cpp` | 113 | ✅ complete | `ZoltTests/Physics/ObjectLayerPairFilterTableTests.zig` |
 | `OffsetCenterOfMassShapeTests.cpp` | 129 | ✅ complete | `ZoltTests/Physics/OffsetCenterOfMassShapeTests.zig` |
 | `PathConstraintTests.cpp` | 43 | ❌ todo |  |
-| `PhysicsDeterminismTests.cpp` | 165 | ❌ todo |  |
+| `PhysicsDeterminismTests.cpp` | 165 | 🟡 partial | `ZoltTests/Physics/PhysicsDeterminismTests.zig` |
 | `PhysicsStepListenerTests.cpp` | 117 | ✅ complete | `ZoltTests/Physics/PhysicsStepListenerTests.zig` |
 | `PhysicsTests.cpp` | 2030 | 🟡 partial | `ZoltTests/Physics/PhysicsTests.zig` |
 | `RayShapeTests.cpp` | 491 | ✅ complete | `ZoltTests/Physics/RayShapeTests.zig` |
