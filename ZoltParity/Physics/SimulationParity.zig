@@ -1184,7 +1184,12 @@ const ZoltWorld = struct {
                     c.base.setNumVelocityStepsOverride(i[0]);
                     c.base.setNumPositionStepsOverride(i[1]);
                 },
-                .set_constraint_user_data => c.base.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32)),
+                .set_constraint_user_data => {
+                    c.base.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32));
+                    // The whole value read back: the ConstraintState bits and the state filter (bit 0) do not show it
+                    const user_data = c.base.getUserData();
+                    return SimScenes.hashBytes(SimScenes.hash_seed, std.mem.asBytes(&user_data));
+                },
                 .notify_constraint_shape_changed => c.base.notifyShapeChanged(self.getHandle(op.body), load3(f[0..3])),
                 .reset_constraint_warm_start => c.base.resetWarmStart(),
                 .activate_constraint => self.system.getBodyInterfaceMut().activateConstraint(c),

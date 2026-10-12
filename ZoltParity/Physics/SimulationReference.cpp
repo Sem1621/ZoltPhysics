@@ -1362,7 +1362,13 @@ public:
 		case ESimOp::SetConstraintEnabled:			c->SetEnabled(i[0] != 0); break;
 		case ESimOp::SetConstraintPriority:			c->SetConstraintPriority(i[0]); break;
 		case ESimOp::SetConstraintStepsOverride:	c->SetNumVelocityStepsOverride(i[0]); c->SetNumPositionStepsOverride(i[1]); break;
-		case ESimOp::SetConstraintUserData:			c->SetUserData(uint64(i[0]) | (uint64(i[1]) << 32)); break;
+		case ESimOp::SetConstraintUserData:
+			{
+				// The whole value read back: the ConstraintState bits and the state filter (bit 0) do not show it
+				c->SetUserData(uint64(i[0]) | (uint64(i[1]) << 32));
+				uint64 user_data = c->GetUserData();
+				return SimHashBytes(2166136261u, &user_data, sizeof(user_data));
+			}
 		case ESimOp::NotifyConstraintShapeChanged:	c->NotifyShapeChanged(GetHandle(inOp.mBody), SimLoad3(f)); break;
 		case ESimOp::ResetConstraintWarmStart:		c->ResetWarmStart(); break;
 		case ESimOp::ActivateConstraint:			mSystem.GetBodyInterface().ActivateConstraint(c); break;

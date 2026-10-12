@@ -620,7 +620,8 @@ pub const OpKind = enum(u32) {
     set_constraint_priority = 201,
     /// Constraint::SetNumVelocityStepsOverride(i[0]), SetNumPositionStepsOverride(i[1]) (both < 256)
     set_constraint_steps_override = 202,
-    /// Constraint::SetUserData(i[0] | i[1] << 32) (the state filter of the end of a scene reads the user data)
+    /// Constraint::SetUserData(i[0] | i[1] << 32) (the state filter of the end of a scene reads bit 0 of the user data);
+    /// returns the FNV-1a hash (`hashBytes`) of the 8 bytes of GetUserData afterwards
     set_constraint_user_data = 203,
     /// Constraint::NotifyShapeChanged(body handle `body`, delta COM f[0..3]) (`invalid_handle`: an invalid BodyID, which
     /// is neither body of the constraint)
