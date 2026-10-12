@@ -7,6 +7,8 @@ on:
       - 'Zolt/**'
       - 'ZoltTests/**'
       - 'ZoltParity/**'
+      - 'ZoltHelloWorld/**'
+      - 'HelloWorld/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -17,6 +19,8 @@ on:
       - 'Zolt/**'
       - 'ZoltTests/**'
       - 'ZoltParity/**'
+      - 'ZoltHelloWorld/**'
+      - 'HelloWorld/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -39,7 +43,7 @@ jobs:
       with:
         version: ${{ env.ZIG_VERSION }}
     - name: Check formatting
-      run: zig fmt --check Zolt ZoltTests ZoltParity build.zig build.zig.zon
+      run: zig fmt --check Zolt ZoltTests ZoltParity ZoltHelloWorld build.zig build.zig.zon
     - name: Check that Docs/Zolt/Progress.md is up to date and the port headers are valid
       run: python3 tools/port_status.py --check
 
@@ -90,5 +94,5 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ env.ZIG_VERSION }}
-    - name: Compare with the C++ library
+    - name: Compare with the C++ library (includes hello-world-check, milestone M5)
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}

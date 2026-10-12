@@ -2,6 +2,7 @@
 //! Status: complete
 
 const std = @import("std");
+const cppFloat = @import("../Core/StringTools.zig").cppFloat;
 
 /// Class that holds 2 floats, used as a storage class mainly
 pub const Float2 = extern struct {
@@ -17,7 +18,8 @@ pub const Float2 = extern struct {
         return self.x == other.x and self.y == other.y;
     }
 
+    /// To String (operator <<, the components are printed like std::ostream prints a float)
     pub fn format(self: Float2, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{d}, {d}", .{ self.x, self.y });
+        try writer.print("{f}, {f}", .{ cppFloat(self.x), cppFloat(self.y) });
     }
 };

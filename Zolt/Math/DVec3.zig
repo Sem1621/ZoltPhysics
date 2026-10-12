@@ -12,6 +12,7 @@
 const std = @import("std");
 const Core = @import("../Core/Core.zig");
 const HashCombine = @import("../Core/HashCombine.zig");
+const cppFloat = @import("../Core/StringTools.zig").cppFloat;
 const Double3 = @import("Double3.zig").Double3;
 const Vec3 = @import("Vec3.zig").Vec3;
 const Vec4 = @import("Vec4.zig").Vec4;
@@ -395,8 +396,9 @@ pub const DVec3 = extern struct {
         return HashCombine.hashCombineArgs(.{ self.getX(), self.getY(), self.getZ() });
     }
 
+    /// To String (operator <<, the components are printed like std::ostream prints a double)
     pub fn format(self: DVec3, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{d}, {d}, {d}", .{ self.value[0], self.value[1], self.value[2] });
+        try writer.print("{f}, {f}, {f}", .{ cppFloat(self.value[0]), cppFloat(self.value[1]), cppFloat(self.value[2]) });
     }
 
     // Zolt helpers (no Jolt equivalent)

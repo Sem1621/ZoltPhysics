@@ -687,6 +687,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "contacts_random_2", .build = buildContactRandom(2, 2), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_3", .build = buildContactRandom(3, 1), .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_random_4", .build = buildContactRandom(4, 3), .blocked_by = .contacts, .expect = .{ .contacts = true } },
+    .{ .name = "contacts_hello_world", .build = buildHelloWorld, .blocked_by = .contacts, .expect = .{ .contacts = true, .sleeping = true } },
     // CCD (Wave B R4: linear cast bodies that hit something)
     .{ .name = "ccd_bullet_hits_wall", .build = buildBulletHitsWall, .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_static_targets", .build = buildCCDStaticTargets, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
@@ -2099,6 +2100,32 @@ fn addHeightFieldTerrain(b: *SceneBuilder, n: u32, cell: f32) Allocator.Error!u3
             try samples.append(b.allocator, terrainHeight(@as(f32, @floatFromInt(ix)) * cell - half, @as(f32, @floatFromInt(iz)) * cell - half));
     }
     return b.heightField(samples.items, n, .{ -half, 0, -half }, .{ cell, 1, cell });
+}
+
+/// The number of updates of HelloWorld/HelloWorld.cpp: its sphere is awake before each of them and falls asleep in the
+/// last one, so HelloWorld prints this many "Step ..." lines (HelloWorldParity.zig checks it with HelloWorld's own loop)
+pub const hello_world_steps: u32 = 48;
+
+/// HelloWorld/HelloWorld.cpp (milestone M5): a sphere (radius 0.5, at y = 2, thrown down at 5 m/s) bounces on a floor box
+/// until it falls asleep, with HelloWorld's system parameters, bodies and OptimizeBroadPhase. HelloWorldParity.zig runs
+/// it with HelloWorld's own layer classes, listeners and loop; this entry adds the D12 sweeps and the thread matrix of
+/// SimulationParity.
+fn buildHelloWorld(b: *SceneBuilder) Allocator.Error!void {
+    b.max_bodies = 1024;
+    b.num_body_mutexes = 0;
+    b.max_body_pairs = 1024;
+    b.max_contact_constraints = 1024;
+    b.num_updates = hello_world_steps;
+    const floor_shape = try b.box(.{ 100, 1, 100 }, zolt.physics_settings.default_convex_radius); // BoxShapeSettings(Vec3(100, 1, 100))
+    const sphere_shape = try b.sphere(0.5);
+    _ = try b.body(.{ .position = .{ 0, -1, 0 }, .shape = floor_shape, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const sphere = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ 0, 2, 0 }, .shape = sphere_shape, .object_layer = Layers.moving }), .activate);
+    try b.op(.set_linear_velocity, sphere, .{ .f = &.{ 0, -5, 0 } });
+    try b.sysOp(.optimize_broad_phase, .{});
+
+    // HelloWorld's loop runs while the sphere is active: it is before the last update (Expect.sleeping: asleep after it)
+    b.at(hello_world_steps - 1);
+    try b.expectAwake(sphere);
 }
 
 /// A box falling on a static floor (contacts, sleeping on the floor)
