@@ -18,11 +18,15 @@
 //!   other side's bytes with sRestoreWithChildren and saves them again, which must reproduce the bytes. Truncated
 //!   streams must give the same error text (or the same result) on both sides.
 //! - "PhysicsScene parity: binary state and CreateBodies": the same for PhysicsScene::SaveBinaryState /
-//!   sRestoreFromBinaryState (bodies only: no constraint settings class exists on both sides before Phase 6), and
+//!   sRestoreFromBinaryState (bodies and constraints: random constraint settings between the bodies of the scene and
+//!   the world, of every kind whose Zolt class is ported, `scene_constraint_kinds`: the filled slots of
+//!   ConstraintsParity.zig, whose descriptions `SceneConstraint` uses, so a Phase 6 porter adds nothing here), and
 //!   FixInvalidScales + CreateBodies of a restored scene (the scaled sphere of the table gets a non uniform scale in
 //!   half of the tests, which FixInvalidScales turns into a compound; compared: its result, the fixed scene's bytes
-//!   with shapes, and the bodies; C++: a PhysicsSystem with its QuadTree, the active bodies are compared sorted,
-//!   because QuadTree's AddBodiesPrepare sorts the bodies by layer), also when the system runs out of bodies.
+//!   with shapes, the bodies, SaveState of the bodies and the constraints, and the scene that FromPhysicsSystem makes of
+//!   the system (the constraints through GetConstraintSettings); C++: a PhysicsSystem with its QuadTree, the active
+//!   bodies are compared sorted, because QuadTree's AddBodiesPrepare sorts the bodies by layer), also when the system
+//!   runs out of bodies.
 //! The DeterminismLog text is not compared here: the C++ library is built without JPH_ENABLE_DETERMINISM_LOG (see
 //! ZoltTests/Physics/DeterminismLogTests.zig).
 
@@ -30,6 +34,7 @@ const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
 const TestLayers = @import("test_layers");
+const ConstraintsParity = @import("ConstraintsParity.zig");
 
 const Checker = fw.Checker;
 const Rng = fw.Rng;
@@ -91,7 +96,7 @@ const jolt = struct {
     extern fn jolt_bi_snapshot(world: *anyopaque, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_bi_bcs_save(tables: *const Tables, bodies: [*]const BodyDesc, num_bodies: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_bi_bcs_resave(bytes: [*]const u8, size: u32, num_bodies: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32, out_error: [*]u8, error_capacity: u32) u32;
-    extern fn jolt_bi_scene_save(tables: *const Tables, bodies: [*]const BodyDesc, num_bodies: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_bi_scene_save(tables: *const Tables, bodies: [*]const BodyDesc, num_bodies: u32, constraint_bodies: [*]const [2]u32, constraint_settings: [*]const ConstraintsParity.CSSettings, num_constraints: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_bi_scene_resave(bytes: [*]const u8, size: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32, out_error: [*]u8, error_capacity: u32) u32;
     extern fn jolt_bi_scene_create_bodies(bytes: [*]const u8, size: u32, max_bodies: u32, out_result: *u32, out_bytes: [*]u8, capacity: u32) u32;
 };
@@ -171,6 +176,50 @@ const BodyDesc = extern struct {
     group_filter: u32 = none,
     group_id: u32 = 0xffffffff,
     sub_group_id: u32 = 0xffffffff,
+};
+
+/// The kinds of the scene constraints: the EConstraintSubType values of the constraint parity (ConstraintsParity.Kind)
+const SceneConstraintKind = ConstraintsParity.Kind;
+
+/// The kinds that the scenes create: every kind whose slot in ConstraintsParity.zig is filled (the Zolt class is
+/// ported), except Path: Jolt's PathConstraint::GetConstraintSettings is not implemented (it asserts and returns
+/// nullptr), so FromPhysicsSystem cannot convert a system with a path constraint
+const scene_constraint_kinds: []const SceneConstraintKind = blk: {
+    var kinds: [ConstraintsParity.ported_kinds.len]SceneConstraintKind = undefined;
+    var n: usize = 0;
+    for (ConstraintsParity.ported_kinds) |kind| {
+        if (kind != .path) {
+            kinds[n] = kind;
+            n += 1;
+        }
+    }
+    const result = kinds[0..n].*;
+    break :blk &result;
+};
+
+/// A constraint of a PhysicsScene: the indices of its bodies and its settings, a description of the constraint parity
+/// (ConstraintsParity.CSSettings: the kind is its EConstraintSubType value, the layout per kind is CSMakeSettings of
+/// ConstraintsReference.cpp, which the C++ side calls through CSMakeConstraintSettings for every kind; the Zolt side is
+/// ConstraintsParity.makeDescriptionSettings, the slot of the kind). The C ABI passes the body indices and the
+/// descriptions as two arrays (`jolt_bi_scene_save`).
+const SceneConstraint = struct {
+    /// Index in the bodies of the scene or PhysicsScene.fixed_to_world
+    bodies: [2]u32,
+    settings: ConstraintsParity.CSSettings,
+
+    /// A random constraint of a random kind of `scene_constraint_kinds` between the bodies of a scene with `num_bodies`
+    /// bodies (and the world)
+    fn random(rng: *Rng, num_bodies: u32) SceneConstraint {
+        const kind = scene_constraint_kinds[rng.intRange(usize, 0, scene_constraint_kinds.len - 1)];
+        const body2 = rng.intRange(u32, 0, num_bodies - 1);
+        const body1 = if (num_bodies == 1 or rng.intRange(u32, 0, 3) == 0) PhysicsScene.fixed_to_world else (body2 + rng.intRange(u32, 1, num_bodies - 1)) % num_bodies; // Never the same body twice
+        return .{ .bodies = .{ body1, body2 }, .settings = ConstraintsParity.randomDescription(rng.next(), kind) };
+    }
+
+    /// The settings (one reference owned by the caller)
+    fn makeSettings(self: *const SceneConstraint, allocator: Allocator) !Ref(zolt.ConstraintSettings) {
+        return ConstraintsParity.makeDescriptionSettings(allocator, &self.settings);
+    }
 };
 
 /// Must match BIOp in BodyInterfaceReference.cpp. `i[0]` is the activation mode, `i[1]` the number of bodies of the
@@ -1532,7 +1581,19 @@ fn zoltSceneCreateBodies(allocator: Allocator, bytes: []const u8, max_bodies: u3
 
     const no_tables: TableObjects = .{ .allocator = allocator };
     writeBodies(allocator, bodies.items, active.items, &no_tables, out.recorder());
-    try system.saveState(out.recorder(), .{ .state = .{ .bodies = true } });
+    try system.saveState(out.recorder(), .{ .state = .{ .bodies = true, .constraints = true } });
+
+    // The system back to a scene (the constraints through getConstraintSettings)
+    var from_system = Ref(PhysicsScene).init(try PhysicsScene.create(allocator));
+    defer from_system.deinit();
+    try from_system.get().?.fromPhysicsSystem(&system);
+    {
+        var data: std.Io.Writer.Allocating = .init(allocator);
+        defer data.deinit();
+        var w = StreamOutWrapper.init(&data.writer);
+        try from_system.get().?.saveBinaryState(w.streamOut(), true, false);
+        out.writeBytes(data.written());
+    }
 }
 
 test "PhysicsScene parity: binary state and CreateBodies" {
@@ -1544,6 +1605,8 @@ test "PhysicsScene parity: binary state and CreateBodies" {
     var create_checker: Checker = .{ .name = "PhysicsScene parity (CreateBodies)" };
     var num_out_of_bodies: u32 = 0;
     var num_invalid_scales: u32 = 0;
+    var total_constraints: u32 = 0;
+    var kind_counts: std.EnumArray(SceneConstraintKind, u32) = .initFill(0);
 
     for (0..300) |iteration| {
         var table_descs = TableDescs.random(&rng);
@@ -1555,6 +1618,17 @@ test "PhysicsScene parity: binary state and CreateBodies" {
         var descs: [10]BodyDesc = undefined;
         const num_bodies = rng.intRange(u32, 0, descs.len);
         for (descs[0..num_bodies]) |*d| d.* = randomBodyDesc(&rng, @intCast(table_descs.shapes.len), @intCast(table_descs.filters.len), .{ .allow_no_shape = !save_shapes });
+        var constraints: [6]SceneConstraint = undefined;
+        const num_constraints: u32 = if (num_bodies == 0) 0 else rng.intRange(u32, 0, constraints.len);
+        for (constraints[0..num_constraints]) |*c| c.* = SceneConstraint.random(&rng, num_bodies);
+        total_constraints += num_constraints;
+        var constraint_bodies: [constraints.len][2]u32 = undefined;
+        var constraint_settings: [constraints.len]ConstraintsParity.CSSettings = undefined;
+        for (constraints[0..num_constraints], 0..) |*c, k| {
+            constraint_bodies[k] = c.bodies;
+            constraint_settings[k] = c.settings;
+            kind_counts.getPtr(@enumFromInt(c.settings.kind)).* += 1;
+        }
 
         // Zolt
         var objects: TableObjects = undefined;
@@ -1567,13 +1641,18 @@ test "PhysicsScene parity: binary state and CreateBodies" {
             defer settings.deinit();
             try scene.get().?.addBody(&settings);
         }
+        for (constraints[0..num_constraints]) |*c| {
+            var settings = try c.makeSettings(allocator);
+            defer settings.deinit();
+            try scene.get().?.addConstraint(zolt.virtual.downcast(zolt.TwoBodyConstraintSettings, settings.get().?), c.bodies[0], c.bodies[1]);
+        }
         var zolt_bytes: std.Io.Writer.Allocating = .init(allocator);
         defer zolt_bytes.deinit();
         var wrapper = StreamOutWrapper.init(&zolt_bytes.writer);
         try scene.get().?.saveBinaryState(wrapper.streamOut(), save_shapes, save_filters);
 
         // C++
-        const jolt_size = jolt.jolt_bi_scene_save(&tables, &descs, num_bodies, @intFromBool(save_shapes), @intFromBool(save_filters), &big_buffer, big_buffer.len);
+        const jolt_size = jolt.jolt_bi_scene_save(&tables, &descs, num_bodies, &constraint_bodies, &constraint_settings, num_constraints, @intFromBool(save_shapes), @intFromBool(save_filters), &big_buffer, big_buffer.len);
         try std.testing.expect(jolt_size <= big_buffer.len);
         const jolt_bytes = big_buffer[0..jolt_size];
         save_checker.check(iteration, std.mem.eql(u8, zolt_bytes.written(), jolt_bytes), true);
@@ -1621,6 +1700,17 @@ test "PhysicsScene parity: binary state and CreateBodies" {
             var j: Resaved = .{};
             defer j.deinit(allocator);
             try joltResaved(allocator, jolt.jolt_bi_scene_resave(zolt_bytes.written().ptr, @intCast(len), 0, @intFromBool(save_filters), &big_buffer2, big_buffer2.len, &err_buffer, err_buffer.len), &big_buffer2, &err_buffer, &j);
+
+            // Jolt's Array::resize default-constructs the ConnectedConstraints and mBody1 / mBody2 have no initializer:
+            // when the stream ends inside the body indices of the last constraint (the 8 bytes before the soft body
+            // count), Jolt keeps whatever was in memory in the bytes that were not read (undefined, Zolt: 0). Those
+            // bytes of the resaved scenes (the same place: body1, body2, soft body count at the end) are not compared.
+            const body_indices = zolt_bytes.written().len -| 12;
+            if (num_constraints > 0 and len >= body_indices and len < body_indices + 8 and z.err == null and j.err == null and z.bytes.items.len == j.bytes.items.len and z.bytes.items.len >= 12) {
+                const first_unread = z.bytes.items.len - 12 + (len - body_indices);
+                @memset(z.bytes.items[first_unread .. z.bytes.items.len - 4], 0);
+                @memset(j.bytes.items[first_unread .. j.bytes.items.len - 4], 0);
+            }
             error_checker.check(.{ iteration, len, z.err orelse "", j.err orelse "" }, z.eql(&j), true);
         }
 
@@ -1651,4 +1741,11 @@ test "PhysicsScene parity: binary state and CreateBodies" {
     try fw.finishAll(&.{ &save_checker, &resave_checker, &error_checker, &create_checker });
     try std.testing.expect(num_out_of_bodies > 10);
     try std.testing.expect(num_invalid_scales > 10);
+    try std.testing.expect(total_constraints > 300);
+    for (scene_constraint_kinds) |kind| {
+        if (kind_counts.get(kind) < 300 / scene_constraint_kinds.len) {
+            std.debug.print("PhysicsScene parity: {d} constraints of kind {t}\n", .{ kind_counts.get(kind), kind });
+            return error.KindNotReached;
+        }
+    }
 }

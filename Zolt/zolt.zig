@@ -391,6 +391,8 @@ pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.z
 pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
 pub const CalculateSolverSteps = @import("Physics/Constraints/CalculateSolverSteps.zig").CalculateSolverSteps;
 pub const DummyCalculateSolverSteps = @import("Physics/Constraints/CalculateSolverSteps.zig").DummyCalculateSolverSteps;
+pub const ConeConstraint = @import("Physics/Constraints/ConeConstraint.zig").ConeConstraint;
+pub const ConeConstraintSettings = @import("Physics/Constraints/ConeConstraint.zig").ConeConstraintSettings;
 pub const Constraint = @import("Physics/Constraints/Constraint.zig").Constraint;
 pub const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
 pub const ConstraintSpace = @import("Physics/Constraints/Constraint.zig").ConstraintSpace;
@@ -418,12 +420,37 @@ pub const SpringPart = @import("Physics/Constraints/ConstraintPart/SpringPart.zi
 pub const SwingTwistConstraintPart = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingTwistConstraintPart;
 pub const SwingType = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingType;
 pub const ContactConstraintManager = @import("Physics/Constraints/ContactConstraintManager.zig").ContactConstraintManager;
+pub const DistanceConstraint = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraint;
+pub const DistanceConstraintSettings = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraintSettings;
+pub const FixedConstraint = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraint;
+pub const FixedConstraintSettings = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraintSettings;
+pub const GearConstraint = @import("Physics/Constraints/GearConstraint.zig").GearConstraint;
+pub const GearConstraintSettings = @import("Physics/Constraints/GearConstraint.zig").GearConstraintSettings;
+pub const HingeConstraint = @import("Physics/Constraints/HingeConstraint.zig").HingeConstraint;
+pub const HingeConstraintSettings = @import("Physics/Constraints/HingeConstraint.zig").HingeConstraintSettings;
 pub const isPositionMotor = @import("Physics/Constraints/MotorSettings.zig").isPositionMotor;
 pub const isVelocityMotor = @import("Physics/Constraints/MotorSettings.zig").isVelocityMotor;
 pub const MotorSettings = @import("Physics/Constraints/MotorSettings.zig").MotorSettings;
 pub const MotorState = @import("Physics/Constraints/MotorSettings.zig").MotorState;
+pub const PathConstraint = @import("Physics/Constraints/PathConstraint.zig").PathConstraint;
+pub const PathConstraintSettings = @import("Physics/Constraints/PathConstraint.zig").PathConstraintSettings;
+pub const PathRotationConstraintType = @import("Physics/Constraints/PathConstraint.zig").PathRotationConstraintType;
+pub const PathConstraintPath = @import("Physics/Constraints/PathConstraintPath.zig").PathConstraintPath;
+pub const PathConstraintPathHermite = @import("Physics/Constraints/PathConstraintPathHermite.zig").PathConstraintPathHermite;
+pub const PointConstraint = @import("Physics/Constraints/PointConstraint.zig").PointConstraint;
+pub const PointConstraintSettings = @import("Physics/Constraints/PointConstraint.zig").PointConstraintSettings;
+pub const PulleyConstraint = @import("Physics/Constraints/PulleyConstraint.zig").PulleyConstraint;
+pub const PulleyConstraintSettings = @import("Physics/Constraints/PulleyConstraint.zig").PulleyConstraintSettings;
+pub const RackAndPinionConstraint = @import("Physics/Constraints/RackAndPinionConstraint.zig").RackAndPinionConstraint;
+pub const RackAndPinionConstraintSettings = @import("Physics/Constraints/RackAndPinionConstraint.zig").RackAndPinionConstraintSettings;
+pub const SixDOFConstraint = @import("Physics/Constraints/SixDOFConstraint.zig").SixDOFConstraint;
+pub const SixDOFConstraintSettings = @import("Physics/Constraints/SixDOFConstraint.zig").SixDOFConstraintSettings;
+pub const SliderConstraint = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraint;
+pub const SliderConstraintSettings = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraintSettings;
 pub const SpringMode = @import("Physics/Constraints/SpringSettings.zig").SpringMode;
 pub const SpringSettings = @import("Physics/Constraints/SpringSettings.zig").SpringSettings;
+pub const SwingTwistConstraint = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraint;
+pub const SwingTwistConstraintSettings = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraintSettings;
 pub const TwoBodyConstraint = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraint;
 pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraintSettings;
 pub const DeterminismLog = @import("Physics/DeterminismLog.zig");
@@ -664,6 +691,7 @@ const source_files = .{
     @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/Collision/TransformedShape.zig"),
     @import("Physics/Constraints/CalculateSolverSteps.zig"),
+    @import("Physics/Constraints/ConeConstraint.zig"),
     @import("Physics/Constraints/Constraint.zig"),
     @import("Physics/Constraints/ConstraintManager.zig"),
     @import("Physics/Constraints/ConstraintPart/AngleConstraintPart.zig"),
@@ -682,8 +710,21 @@ const source_files = .{
     @import("Physics/Constraints/ConstraintPart/SpringPart.zig"),
     @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig"),
     @import("Physics/Constraints/ContactConstraintManager.zig"),
+    @import("Physics/Constraints/DistanceConstraint.zig"),
+    @import("Physics/Constraints/FixedConstraint.zig"),
+    @import("Physics/Constraints/GearConstraint.zig"),
+    @import("Physics/Constraints/HingeConstraint.zig"),
     @import("Physics/Constraints/MotorSettings.zig"),
+    @import("Physics/Constraints/PathConstraint.zig"),
+    @import("Physics/Constraints/PathConstraintPath.zig"),
+    @import("Physics/Constraints/PathConstraintPathHermite.zig"),
+    @import("Physics/Constraints/PointConstraint.zig"),
+    @import("Physics/Constraints/PulleyConstraint.zig"),
+    @import("Physics/Constraints/RackAndPinionConstraint.zig"),
+    @import("Physics/Constraints/SixDOFConstraint.zig"),
+    @import("Physics/Constraints/SliderConstraint.zig"),
     @import("Physics/Constraints/SpringSettings.zig"),
+    @import("Physics/Constraints/SwingTwistConstraint.zig"),
     @import("Physics/Constraints/TestConstraints.zig"),
     @import("Physics/Constraints/TwoBodyConstraint.zig"),
     @import("Physics/DeterminismLog.zig"),

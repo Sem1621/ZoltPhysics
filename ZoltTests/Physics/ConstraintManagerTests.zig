@@ -6,7 +6,8 @@
 //! removing (the swap remove keeps `constraint_index`), the reference counts, the active constraints, the sort by
 //! priority and index, the solver loops (every constraint is solved, the results are OR-ed), building islands (which
 //! activates sleeping bodies), save / restore (validating, non-validating, filtered), allocation failures and adding /
-//! removing from several threads.
+//! removing from several threads. One test uses Jolt's FixedConstraint and PointConstraint (Phase 6) in the manager:
+//! the active constraints, the solver loops stopping the bodies, and save / restore of the lambdas of their parts.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -335,6 +336,85 @@ test "ConstraintManager saveState and restoreState" {
     try expectEqual(@as(f32, -1.0), testConstraint(ptrs[0]).value);
     try expectEqual(@as(f32, 2.0), testConstraint(ptrs[1]).value);
     try expectEqual(@as(f32, -1.0), testConstraint(ptrs[2]).value);
+}
+
+test "ConstraintManager with FixedConstraint and PointConstraint: active constraints, solver, save and restore" {
+    const allocator = std.testing.allocator;
+    var c: Context = undefined;
+    try c.init(allocator);
+    defer c.deinit();
+    const a = try c.createBody(.dynamic, .activate);
+    const b = try c.createBody(.dynamic, .activate);
+    const static = try c.createBody(.static, .dont_activate);
+
+    // [0] a fixed to the static body, [1] a point between a and b, [2] a disabled point between the static body and b
+    var fixed_settings = zolt.FixedConstraintSettings.init(allocator);
+    defer fixed_settings.asSettings().deinit();
+    fixed_settings.auto_detect_point = true;
+    var point_settings = zolt.PointConstraintSettings.init(allocator);
+    defer point_settings.asSettings().deinit();
+    point_settings.point1 = RVec3.init(0.25, 0.5, 0.0);
+    point_settings.point2 = RVec3.init(0.25, 0.5, 0.0);
+    var refs = [_]Ref(Constraint){
+        .init(&(try fixed_settings.createConstraint(allocator, static, a)).base),
+        .init(&(try point_settings.createConstraint(allocator, a, b)).base),
+        .init(&(try point_settings.createConstraint(allocator, static, b)).base),
+    };
+    defer for (&refs) |*r| r.deinit();
+    var ptrs: [3]*Constraint = undefined;
+    for (&ptrs, refs) |*p, r| p.* = r.get().?;
+    ptrs[2].setEnabled(false);
+    try c.manager.add(&ptrs);
+    try expectEqual(zolt.ConstraintSubType.fixed, ptrs[0].getSubType());
+    try expectEqual(zolt.ConstraintSubType.point, ptrs[1].getSubType());
+
+    var active: [3]*Constraint = undefined;
+    try expectEqual(@as(u32, 2), c.manager.getActiveConstraints(0, 3, &active));
+    try expect(active[0] == ptrs[0] and active[1] == ptrs[1]);
+    var idx = [_]u32{ 0, 1 };
+    ConstraintManager.sortConstraints(active[0..2], &idx);
+
+    // Both bodies fall: the solver stops a (fixed to the static body) and b (hanging from a)
+    a.setLinearVelocity(Vec3.init(0.0, -1.0, 0.0));
+    b.setLinearVelocity(Vec3.init(0.5, -1.0, 0.0));
+    const NoCallback = struct {
+        pub fn call(self: *@This(), comptime T: type, object: *const T) void {
+            _ = self;
+            _ = object;
+        }
+    };
+    var callback: NoCallback = .{};
+    ConstraintManager.setupVelocityConstraints(active[0..2], 1.0 / 60.0);
+    ConstraintManager.warmStartVelocityConstraints(active[0..2], &idx, 1.0, &callback);
+    try expect(ConstraintManager.solveVelocityConstraints(active[0..2], &idx, 1.0 / 60.0));
+    for (0..30) |_| _ = ConstraintManager.solveVelocityConstraints(active[0..2], &idx, 1.0 / 60.0);
+    try expect(a.getLinearVelocity().isNearZero(.{ .max_dist_sq = 1.0e-6 }));
+    try expect(a.getAngularVelocity().isNearZero(.{ .max_dist_sq = 1.0e-6 }));
+    const fixed = zolt.virtual.downcast(zolt.FixedConstraint, zolt.virtual.downcast(zolt.TwoBodyConstraint, ptrs[0]));
+    const point = zolt.virtual.downcast(zolt.PointConstraint, zolt.virtual.downcast(zolt.TwoBodyConstraint, ptrs[1]));
+    const fixed_lambda = fixed.getTotalLambdaPosition();
+    const point_lambda = point.getTotalLambdaPosition();
+    try expect(!fixed_lambda.isNearZero(.{}) and !point_lambda.isNearZero(.{}));
+
+    // Count, then per constraint its index, enabled and the lambdas of its parts (fixed: rotation and point part)
+    var state = StateRecorderImpl.init(allocator);
+    defer state.deinit();
+    try c.manager.saveState(state.recorder(), null);
+    try expectEqual(@as(usize, 4 + (4 + 1 + 12 + 12) + (4 + 1 + 12) + (4 + 1 + 12)), state.getData().len);
+
+    // Reset and restore
+    for (ptrs) |p| p.resetWarmStart();
+    try expect(fixed.getTotalLambdaPosition().isNearZero(.{}) and point.getTotalLambdaPosition().isNearZero(.{}));
+    ptrs[2].setEnabled(true);
+    try expect(c.manager.restoreState(state.recorder()));
+    try expect(fixed.getTotalLambdaPosition().eql(fixed_lambda) and point.getTotalLambdaPosition().eql(point_lambda));
+    try expect(!ptrs[2].getEnabled());
+
+    // Validating restore of the current state
+    state.rewind();
+    state.recorder().setValidating(true);
+    try expect(c.manager.restoreState(state.recorder()));
+    try expectEqual(@as(u32, 0), state.num_mismatches);
 }
 
 test "ConstraintManager out of memory" {

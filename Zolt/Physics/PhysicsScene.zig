@@ -11,9 +11,9 @@
 //!   `RefConst<TwoBodyConstraintSettings>`; a concrete class has no addRef / release of its own, guide section 5),
 //!   `getSettings()` returns the TwoBodyConstraintSettings.
 //! - The constraints of a restored scene are created by ConstraintSettings.restoreFromBinaryState, which knows the
-//!   classes in `RegisterTypes.constraint_settings_types` (Jolt's settings classes arrive with Phase 6, the Factory
-//!   with Phase 8): until then only user / test constraint settings can be restored, other types give Jolt's "Failed
-//!   to create instance of type".
+//!   classes in `RegisterTypes.constraint_settings_types` (until the Factory of Phase 8): Jolt's settings classes that
+//!   are ported (FixedConstraintSettings, PointConstraintSettings, ...) and user / test constraint settings; a stub
+//!   class or an unknown type gives Jolt's "Failed to create instance of type".
 //! - Soft bodies (Phase 9): `saveBinaryState` writes Jolt's soft body count (always 0), `restoreFromBinaryState`
 //!   reports the Zolt error "Soft bodies are not supported" for a stream that contains soft bodies.
 //! - Errors (Zolt): functions that allocate return `Allocator.Error`. Where Jolt dereferences the null shape of a body
@@ -368,6 +368,8 @@ pub const PhysicsScene = struct {
                 result.setError(c_result.getError());
                 return result;
             }
+            // Jolt: mConstraints.resize(len) default-constructs the elements, mBody1 / mBody2 stay uninitialized when the
+            // stream ends inside them (the reads below do not check the stream); Zolt: 0
             var cc: ConnectedConstraint = .{};
             cc.settings.set(c_result.getPtr()); // Jolt: StaticCast<TwoBodyConstraintSettings>
             if (Core.enable_asserts) std.debug.assert(isTwoBodyConstraintSettings(cc.settings.get().?));

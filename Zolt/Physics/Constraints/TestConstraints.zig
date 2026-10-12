@@ -5,8 +5,8 @@
 //! Only used by tests: `zolt.test_constraints` is this file in test builds (`builtin.is_test`), and build.zig gives the
 //! inline tests a `zolt_user_types` module that registers `constraint_settings_types` of this file, so that
 //! ConstraintSettings.restoreFromBinaryState can create `TestConstraintSettings` (the unit tests use the default, empty
-//! module). Jolt's constraint types arrive with Phase 6, the F2 tests need a concrete TwoBodyConstraint to instantiate
-//! the virtual function machinery (SimulationArchitecture D8): `TestConstraintSettings` (a TwoBodyConstraintSettings
+//! module). The F2 tests (written before Jolt's constraint types of Phase 6) need a concrete TwoBodyConstraint with
+//! observable solver calls to instantiate the virtual function machinery (SimulationArchitecture D8): `TestConstraintSettings` (a TwoBodyConstraintSettings
 //! with a binary state) creates a `TestConstraint` that counts the solver calls and stores one float of state. The
 //! solver functions return a configurable "impulse applied" result so that the OR semantics of the ConstraintManager
 //! can be tested.
