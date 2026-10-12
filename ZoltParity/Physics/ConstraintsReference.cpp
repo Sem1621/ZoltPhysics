@@ -11,7 +11,9 @@
 // SolvePositionConstraint (several). After the creation and after every call jolt_cs_run records (Rec, COutput): the
 // step id and the return value, position / rotation / velocities of both bodies, IsActive, the SaveState bytes, the
 // matrices GetConstraintToBody1/2Matrix and every getter of the kind (RecordGetters). At the start and at the end it
-// records the SaveBinaryState bytes of GetConstraintSettings.
+// records the SaveBinaryState bytes of GetConstraintSettings, after the creation the getters of the settings class
+// (CSRecordSettingsGetters). The descriptions also call the helpers of the settings classes that compute values
+// (SetSliderAxis, SetRatio, MakeFreeAxis / MakeFixedAxis / SetLimitedAxis, see CSMakeSettings).
 //
 // The kind of a constraint is its EConstraintSubType value (ConstraintKind in ConstraintsParity.zig). This file covers
 // every kind; the Zolt side fills its slots as the classes are ported.
@@ -321,13 +323,17 @@ static Ref<PathConstraintPathHermite> CSMakePath(const CSSettings &inS)
 //   I[3] F[23..29]
 // - SixDOF: I[0] space, I[1] swing type; R[0..3] position 1, R[3..6] position 2; F[0..3] axis X1, F[3..6] axis Y1,
 //   F[6..9] axis X2, F[9..12] axis Y2, F[12..18] max friction, F[18..24] limit min, F[24..30] limit max, limits spring
-//   k (k < 3) I[2 + k] F[30 + 2k..32 + 2k], motor k (k < 6) I[5 + k] F[36 + 6k..42 + 6k]
+//   k (k < 3) I[2 + k] F[30 + 2k..32 + 2k], motor k (k < 6) I[5 + k] F[36 + 6k..42 + 6k]; I[11 + k] how the limits of
+//   axis k are set: 1 SetLimitedAxis(k, F[18 + k], F[24 + k]), 2 MakeFreeAxis(k), 3 MakeFixedAxis(k), any other value
+//   the members mLimitMin[k] / mLimitMax[k] = F[18 + k] / F[24 + k] (0 and 1 give the same settings)
 // - Path: I[0] unused (the settings always have a path: SaveBinaryState dereferences it), I[1] path is looping, I[2]
 //   number of path points (<= 16), I[3] rotation constraint type, motor I[4]; F[0..3] path position, F[3..7] path
 //   rotation, F[7] path fraction, F[8] max friction force, motor F[9..15], point p: F[16 + 9p..] position, tangent,
 //   normal
-// - RackAndPinion: I[0] space; F[0..3] hinge axis, F[3..6] slider axis, F[6] ratio
-// - Gear: I[0] space; F[0..3] hinge axis 1, F[3..6] hinge axis 2, F[6] ratio
+// - RackAndPinion: I[0] space, I[1] != 0: SetRatio(int(I[2]) teeth of the rack, F[7] rack length, int(I[3]) teeth of the
+//   pinion) instead of F[6]; F[0..3] hinge axis, F[3..6] slider axis, F[6] ratio
+// - Gear: I[0] space, I[1] != 0: SetRatio(int(I[2]) teeth of gear 1, int(I[3]) teeth of gear 2) instead of F[6]; F[0..3]
+//   hinge axis 1, F[3..6] hinge axis 2, F[6] ratio
 // - Pulley: I[0] space; R[0..3] body point 1, R[3..6] fixed point 1, R[6..9] body point 2, R[9..12] fixed point 2; F[0]
 //   ratio, F[1] min length, F[2] max length
 static Ref<TwoBodyConstraintSettings> CSMakeSettings(const CSSettings &inS)
@@ -468,9 +474,15 @@ static Ref<TwoBodyConstraintSettings> CSMakeSettings(const CSSettings &inS)
 			s->mAxisY2 = CSLoad3(f + 9);
 			for (int a = 0; a < SixDOFConstraintSettings::EAxis::Num; ++a)
 			{
+				SixDOFConstraintSettings::EAxis axis = SixDOFConstraintSettings::EAxis(a);
 				s->mMaxFriction[a] = f[12 + a];
-				s->mLimitMin[a] = f[18 + a];
-				s->mLimitMax[a] = f[24 + a];
+				switch (i[11 + a])
+				{
+				case 1:		s->SetLimitedAxis(axis, f[18 + a], f[24 + a]); break;
+				case 2:		s->MakeFreeAxis(axis); break;
+				case 3:		s->MakeFixedAxis(axis); break;
+				default:	s->mLimitMin[a] = f[18 + a]; s->mLimitMax[a] = f[24 + a]; break;
+				}
 				s->mMotorSettings[a] = CSLoadMotor(i[5 + a], f + 36 + 6 * a);
 			}
 			for (int a = 0; a < SixDOFConstraintSettings::EAxis::NumTranslation; ++a)
@@ -499,7 +511,10 @@ static Ref<TwoBodyConstraintSettings> CSMakeSettings(const CSSettings &inS)
 			s->mSpace = EConstraintSpace(i[0]);
 			s->mHingeAxis = CSLoad3(f);
 			s->mSliderAxis = CSLoad3(f + 3);
-			s->mRatio = f[6];
+			if (i[1] != 0)
+				s->SetRatio(int(i[2]), f[7], int(i[3]));
+			else
+				s->mRatio = f[6];
 			settings = s;
 			break;
 		}
@@ -510,7 +525,10 @@ static Ref<TwoBodyConstraintSettings> CSMakeSettings(const CSSettings &inS)
 			s->mSpace = EConstraintSpace(i[0]);
 			s->mHingeAxis1 = CSLoad3(f);
 			s->mHingeAxis2 = CSLoad3(f + 3);
-			s->mRatio = f[6];
+			if (i[1] != 0)
+				s->SetRatio(int(i[2]), int(i[3]));
+			else
+				s->mRatio = f[6];
 			settings = s;
 			break;
 		}
@@ -992,6 +1010,45 @@ static void CSRecordGetters(Rec &ioRec, const TwoBodyConstraint &inC)
 	}
 }
 
+// The getters of the settings class of a kind (the helpers that compute a value from the settings), recorded after the
+// creation. The Zolt slot of the kind records the same values in its `recordSettingsGetters`:
+// - SixDOF: IsFreeAxis(k), IsFixedAxis(k) of every axis k
+static void CSRecordSettingsGetters(Rec &ioRec, const TwoBodyConstraintSettings &inSettings, EConstraintSubType inKind)
+{
+	switch (inKind)
+	{
+	case EConstraintSubType::SixDOF:
+		{
+			const SixDOFConstraintSettings &s = static_cast<const SixDOFConstraintSettings &>(inSettings);
+			for (int a = 0; a < SixDOFConstraintSettings::EAxis::Num; ++a)
+			{
+				SixDOFConstraintSettings::EAxis axis = SixDOFConstraintSettings::EAxis(a);
+				ioRec.B(s.IsFreeAxis(axis));
+				ioRec.B(s.IsFixedAxis(axis));
+			}
+			break;
+		}
+
+	case EConstraintSubType::Fixed:
+	case EConstraintSubType::Point:
+	case EConstraintSubType::Hinge:
+	case EConstraintSubType::Slider:
+	case EConstraintSubType::Distance:
+	case EConstraintSubType::Cone:
+	case EConstraintSubType::SwingTwist:
+	case EConstraintSubType::Path:
+	case EConstraintSubType::Vehicle:
+	case EConstraintSubType::RackAndPinion:
+	case EConstraintSubType::Gear:
+	case EConstraintSubType::Pulley:
+	case EConstraintSubType::User1:
+	case EConstraintSubType::User2:
+	case EConstraintSubType::User3:
+	case EConstraintSubType::User4:
+		break;
+	}
+}
+
 // The SaveState bytes of a constraint
 static std::string CSSaveState(const Constraint &inC)
 {
@@ -1101,6 +1158,15 @@ static void CSApplyOps(Rec &ioRec, TwoBodyConstraint &ioC, const CSScenario &inS
 
 } // namespace
 
+// The settings of the description inSettings[inIndex] (a CSSettings array) for the other wrapper files: the constraints
+// of the PhysicsScene parity in BodyInterfaceReference.cpp, which declares this function (its Zolt side is
+// makeDescriptionSettings of ConstraintsParity.zig). Every kind of CSMakeSettings, any other kind aborts.
+Ref<TwoBodyConstraintSettings> CSMakeConstraintSettings(const void *inSettings, uint32 inIndex)
+{
+	CSEnsureFactory();
+	return CSMakeSettings(static_cast<const CSSettings *>(inSettings)[inIndex]);
+}
+
 extern "C"
 {
 
@@ -1150,6 +1216,7 @@ void jolt_cs_run(void *inWorld, const CSScenario *inScenario, CSOutput *outOutpu
 		// Created
 		rec.I(uint32(c.GetType()));
 		rec.I(uint32(c.GetSubType()));
+		CSRecordSettingsGetters(rec, *settings, c.GetSubType());
 		CSStep(rec, 0, 0, c);
 		CSRecordSettings(rec, c);
 

@@ -73,13 +73,16 @@
 //!
 //! **Harnesses.**
 //! - ZoltParity/Physics/ConstraintsParity.zig (+ ConstraintsReference.cpp, whose C++ side exists for every kind): fill
-//!   the slot `XKind` of the class (makeSettings from the `CSettings` description, applyOp for the kind specific setter
-//!   operations, recordGetters) exactly like the C++ functions of the same names; the test "Constraint parity: x" then
+//!   the slot `XKind` of the class (makeSettings from the `CSSettings` description, including the settings helpers that
+//!   CSMakeSettings calls, applyOp for the kind specific setter operations, recordGetters, recordSettingsGetters for
+//!   SixDOF) exactly like the C++ functions (CSMakeSettings, CSApplyKindOp, ...); the test "Constraint parity: x" then
 //!   runs instead of being skipped (the file header describes the steps and the reserved numbers).
 //! - ZoltParity/Physics/SimulationParity.zig: the `.create_constraint` prong of `applyOpInner` gets the
 //!   `SimScenes.ConstraintKind` of the class (the C++ side in SimulationReference.cpp creates every kind already); scenes
 //!   with that kind then run instead of being skipped.
 //! - ZoltParity/Physics/BodyInterfaceParity.zig (PhysicsScene with constraints): a kind of `SceneConstraintKind`.
+//!   The class becomes one by itself when its ConstraintsParity slot is filled (`scene_constraint_kinds`, Path excepted:
+//!   Jolt's PathConstraint::GetConstraintSettings is not implemented), there is nothing to add in that file.
 //!
 //! **Tests to write.** The Jolt TEST_CASEs of `UnitTests/Physics/XConstraintTests.cpp` (same names and values) in
 //! `ZoltTests/Physics/XConstraintTests.zig`; inline tests of the class: the virtual dispatch through Constraint /

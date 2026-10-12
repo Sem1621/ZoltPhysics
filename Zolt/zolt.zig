@@ -434,6 +434,7 @@ pub const MotorSettings = @import("Physics/Constraints/MotorSettings.zig").Motor
 pub const MotorState = @import("Physics/Constraints/MotorSettings.zig").MotorState;
 pub const PathConstraint = @import("Physics/Constraints/PathConstraint.zig").PathConstraint;
 pub const PathConstraintSettings = @import("Physics/Constraints/PathConstraint.zig").PathConstraintSettings;
+pub const PathRotationConstraintType = @import("Physics/Constraints/PathConstraint.zig").PathRotationConstraintType;
 pub const PathConstraintPath = @import("Physics/Constraints/PathConstraintPath.zig").PathConstraintPath;
 pub const PathConstraintPathHermite = @import("Physics/Constraints/PathConstraintPathHermite.zig").PathConstraintPathHermite;
 pub const PointConstraint = @import("Physics/Constraints/PointConstraint.zig").PointConstraint;

@@ -33,18 +33,24 @@
 //!
 //! **How a Phase 6 worker extends this file** (only the slot and the generator of its own kind, nothing shared):
 //! 1. Replace the stub slot `XKind = StubKind(...)` of the kind with a struct like `FixedKind`: `Settings`,
-//!    `Constraint`, `makeSettings` (the kind specific part of CSMakeSettings: the base class members are set by the
-//!    driver), `applyOp` (the kind specific operations of CSApplyKindOp, same numbers), `recordGetters` (exactly the
-//!    getters of CSRecordGetters, in the same order), optionally `coverage` (the branches the scenarios must reach) and
-//!    `settingsSaveable` (PathConstraint: `pub fn settingsSaveable(c) bool { return false; }`, Jolt's
-//!    PathConstraint::GetConstraintSettings is not implemented: it asserts and returns nullptr, CSRecordSettings skips it).
+//!    `Constraint`, `makeSettings` (the kind specific part of CSMakeSettings, including the helpers of the settings class
+//!    that it calls: SetSliderAxis, SetRatio, MakeFreeAxis / MakeFixedAxis / SetLimitedAxis; the base class members are
+//!    set by the driver), `applyOp` (the kind specific operations of CSApplyKindOp, same numbers), `recordGetters`
+//!    (exactly the getters of CSRecordGetters, in the same order), `recordSettingsGetters(rec, settings: *const
+//!    Settings)` when CSRecordSettingsGetters records the kind (SixDOF: IsFreeAxis / IsFixedAxis of the settings),
+//!    optionally `coverage` (the branches the scenarios must reach) and `settingsSaveable` (PathConstraint: `pub fn
+//!    settingsSaveable(c) bool { return false; }`, Jolt's PathConstraint::GetConstraintSettings is not implemented: it
+//!    asserts and returns nullptr, CSRecordSettings skips it).
+//!    The filled slot also adds the kind to the PhysicsScene parity of BodyInterfaceParity.zig (random constraints of
+//!    the ported kinds from `randomDescription` / `makeDescriptionSettings` in a PhysicsScene: binary state,
+//!    CreateBodies, FromPhysicsSystem; Path excepted, see its `scene_constraint_kinds`), nothing to add there.
 //! 2. Check the generator `genX` of the kind (it defines the layout the C++ side reads; widen what it covers, keep away
 //!    from what Jolt asserts: Zolt's Debug build asserts the same).
 //! 3. Prove that the test bites: break one operation of the Zig class temporarily, the test must fail.
 //! Reserved numbers: the kind is the EConstraintSubType value (`Kind`); the generic operations are 0..15, the kind
 //! operations 16..; the step ids are 0 (created), 1 (setup), 2 (warm start), 3 (velocity), 4 (position) and
 //! 0x100 | op (after an operation). A new generic operation is a new `GenericOp` value plus its prong in CSApplyOp
-//! (C++) and `applyGenericOp` (Zig).
+//! (C++) and `applyOp` (Zig).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -125,8 +131,9 @@ const CSBodyDesc = extern struct {
     allow_dynamic_or_kinematic: u32,
 };
 
-/// Must match CSSettings: the settings of a constraint, `i` / `r` / `f` per kind (see CSMakeSettings)
-const CSSettings = extern struct {
+/// Must match CSSettings: the settings of a constraint, `i` / `r` / `f` per kind (see CSMakeSettings). Also the
+/// constraint description of the PhysicsScene parity (BodyInterfaceParity.zig).
+pub const CSSettings = extern struct {
     kind: u32,
     enabled: u32 = 1,
     constraint_priority: u32 = 0,
@@ -182,7 +189,7 @@ const CSOutput = extern struct {
 };
 
 /// The kind of a constraint: its EConstraintSubType value
-const Kind = enum(u32) {
+pub const Kind = enum(u32) {
     fixed = 0,
     point = 1,
     hinge = 2,
@@ -758,6 +765,7 @@ fn zoltRun(comptime K: type, world: *World, sc: *const CSScenario, out: *CSOutpu
     // Created
     rec.i(@intFromEnum(base.getType()));
     rec.i(@intFromEnum(base.getSubType()));
+    if (@hasDecl(K, "recordSettingsGetters")) K.recordSettingsGetters(&rec, virtual.downcast(K.Settings, settings.get().?));
     recordStep(K, &rec, 0, 0, c);
     try recordSettings(K, &rec, c);
 
@@ -1437,7 +1445,8 @@ fn genSixDOFLimit(g: *Gen, axis: usize, swing_type: u32, min: *f32, max: *f32) v
 
 /// SixDOF: I[0] space, I[1] swing type; R[0..3] position 1, R[3..6] position 2; F[0..12] axis X1, Y1, X2, Y2, F[12..18]
 /// max friction, F[18..24] limit min, F[24..30] limit max, limits spring k I[2 + k] F[30 + 2k..], motor k I[5 + k]
-/// F[36 + 6k..]
+/// F[36 + 6k..]; I[11 + k] the settings helper that sets the limits of axis k: 1 SetLimitedAxis(k, F[18 + k], F[24 + k]),
+/// 2 MakeFreeAxis(k), 3 MakeFixedAxis(k), otherwise the members (see CSMakeSettings)
 fn genSixDOF(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
     s.i[0] = g.space();
@@ -1456,6 +1465,7 @@ fn genSixDOF(g: *Gen, sc: *CSScenario) void {
         g.motor(&s.i[5 + a], s.f[36 + 6 * a .. 42 + 6 * a]);
     }
     for (0..3) |a| g.spring(&s.i[2 + a], s.f[30 + 2 * a .. 32 + 2 * a]);
+    for (0..6) |a| s.i[11 + a] = @intCast(g.index(4)); // Members, SetLimitedAxis, MakeFreeAxis, MakeFixedAxis
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, @intCast(16 + g.index(11)), .{});
         switch (op.op) {
@@ -1548,14 +1558,21 @@ fn genReferenceFrame(g: *Gen, f: []f32) void {
     store3(frame[1], f[3..6]);
 }
 
-/// RackAndPinion: I[0] space; F[0..3] hinge axis, F[3..6] slider axis, F[6] ratio. Operation 16 SetConstraints (I[0] bit
-/// 0 pinion hinge, bit 1 rack slider; F[0..6] hinge axis and normal, F[6..12] slider axis and normal, world space)
+/// RackAndPinion: I[0] space, I[1] != 0: SetRatio(I[2] teeth of the rack, F[7] rack length, I[3] teeth of the pinion)
+/// instead of F[6]; F[0..3] hinge axis, F[3..6] slider axis, F[6] ratio. Operation 16 SetConstraints (I[0] bit 0 pinion
+/// hinge, bit 1 rack slider; F[0..6] hinge axis and normal, F[6..12] slider axis and normal, world space)
 fn genRackAndPinion(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
     s.i[0] = g.space();
     store3(g.unit(), s.f[0..3]);
     store3(g.unit(), s.f[3..6]);
     s.f[6] = if (g.oneIn(3)) 1.0 else g.float(-5, 5);
+    if (g.oneIn(2)) {
+        s.i[1] = 1;
+        s.i[2] = @intCast(1 + g.index(50));
+        s.i[3] = @intCast(1 + g.index(50));
+        s.f[7] = g.float(0.5, 5);
+    }
     if (!g.oneIn(3)) {
         const op = g.kindOp(sc, 16, .{});
         op.i[0] = @intCast(g.index(4));
@@ -1564,14 +1581,20 @@ fn genRackAndPinion(g: *Gen, sc: *CSScenario) void {
     }
 }
 
-/// Gear: I[0] space; F[0..3] hinge axis 1, F[3..6] hinge axis 2, F[6] ratio. Operation 16 SetConstraints (I[0] bit 0
-/// hinge of body 1, bit 1 hinge of body 2; F[0..6] / F[6..12] axis and normal, world space)
+/// Gear: I[0] space, I[1] != 0: SetRatio(I[2] teeth of gear 1, I[3] teeth of gear 2) instead of F[6]; F[0..3] hinge axis
+/// 1, F[3..6] hinge axis 2, F[6] ratio. Operation 16 SetConstraints (I[0] bit 0 hinge of body 1, bit 1 hinge of body 2;
+/// F[0..6] / F[6..12] axis and normal, world space)
 fn genGear(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
     s.i[0] = g.space();
     store3(g.unit(), s.f[0..3]);
     store3(g.unit(), s.f[3..6]);
     s.f[6] = if (g.oneIn(3)) 1.0 else g.float(-5, 5);
+    if (g.oneIn(2)) {
+        s.i[1] = 1;
+        s.i[2] = @intCast(1 + g.index(50));
+        s.i[3] = @intCast(1 + g.index(50));
+    }
     if (!g.oneIn(3)) {
         const op = g.kindOp(sc, 16, .{});
         op.i[0] = @intCast(g.index(4));
@@ -1601,6 +1624,46 @@ fn genPulley(g: *Gen, sc: *CSScenario) void {
         const op = g.kindOp(sc, 16, .{});
         op.f[0] = g.float(0, 5);
         op.f[1] = op.f[0] + g.float(0, 5);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The descriptions for the other parity files (BodyInterfaceParity.zig: the constraints of a PhysicsScene, whose C++ side
+// calls CSMakeConstraintSettings of ConstraintsReference.cpp)
+
+/// The kinds whose slot is filled (the Zolt class is ported), in EConstraintSubType order
+pub const ported_kinds: []const Kind = blk: {
+    const fields = @typeInfo(Kind).@"enum".fields;
+    var kinds: [fields.len]Kind = undefined;
+    var n: usize = 0;
+    for (fields) |field| {
+        if (!isStubSlot(Slot(@enumFromInt(field.value)))) {
+            kinds[n] = @enumFromInt(field.value);
+            n += 1;
+        }
+    }
+    const result = kinds[0..n].*;
+    break :blk &result;
+};
+
+/// A random description of `kind`: the settings of a random scenario of the generator (`seed` selects it)
+pub fn randomDescription(seed: u32, kind: Kind) CSSettings {
+    var g: Gen = .{ .rng = .{ .state = seed } };
+    return switch (kind) {
+        inline else => |k| g.scenario(k).settings,
+    };
+}
+
+/// The Zolt settings of a description (CSMakeSettings, one reference owned by the caller): error.UnknownKind when the
+/// kind is not a two body EConstraintSubType of `Kind`, error.KindNotPorted while the slot of the kind is a stub
+pub fn makeDescriptionSettings(allocator: Allocator, d: *const CSSettings) !Ref(ConstraintSettings) {
+    const kind = std.enums.fromInt(Kind, d.kind) orelse return error.UnknownKind;
+    switch (kind) {
+        inline else => |k| {
+            const K = Slot(k);
+            if (comptime isStubSlot(K)) return error.KindNotPorted;
+            return makeSettings(K, allocator, d);
+        },
     }
 }
 
@@ -1789,6 +1852,95 @@ test "Constraint parity: the slots of the ported classes are filled" {
             std.debug.print("ConstraintsParity.zig: the slot of {s} is {s} but its class is {s}: fill the slot (see the file comment)\n", .{ field.name, if (isStubSlot(K)) "a stub" else "filled", if (class_is_stub) "a stub" else "ported" });
             return error.SlotOutOfDate;
         }
+    }
+}
+
+test "Constraint parity: the C++ side calls the settings helpers" {
+    // The descriptions select the helpers of the settings classes that compute values (CSMakeSettings), so their porters
+    // get parity coverage: SetRatio of Gear / RackAndPinion (mRatio is the last value of their binary state) and the axis
+    // helpers of SixDOF (CSRecordSettingsGetters records IsFreeAxis / IsFixedAxis of the settings right after the type
+    // and the sub type)
+    const allocator = std.testing.allocator;
+    const world = jolt.jolt_cs_world_create();
+    defer jolt.jolt_cs_world_destroy(world);
+    const out = try allocator.create(CSOutput);
+    defer allocator.destroy(out);
+    var g: Gen = .{ .rng = .{ .state = 0x4E1BE000 } };
+    var num_set_ratio: [2]u32 = @splat(0);
+    var num_axis_helpers: [4]u32 = @splat(0);
+    for (0..300) |_| {
+        for ([_]Kind{ .gear, .rack_and_pinion }, &num_set_ratio) |kind, *count| {
+            const d = randomDescription(g.rng.next(), kind);
+            const bytes = try joltSettingsSave(allocator, &d);
+            defer allocator.free(bytes);
+            const ratio: f32 = @bitCast(bytes[bytes.len - 4 ..][0..4].*);
+            const teeth2: f32 = @floatFromInt(d.i[2]);
+            const teeth3: f32 = @floatFromInt(d.i[3]);
+            const expected = if (d.i[1] == 0)
+                d.f[6]
+            else if (kind == .gear)
+                teeth3 / teeth2 // SetRatio(inNumTeethGear1, inNumTeethGear2): float(inNumTeethGear2) / float(inNumTeethGear1)
+            else
+                2.0 * math.pi * teeth2 / (d.f[7] * teeth3); // 2.0f * JPH_PI * inNumTeethRack / (inRackLength * inNumTeethPinion)
+            try std.testing.expect(fw.sameBits(expected, ratio));
+            if (d.i[1] != 0) count.* += 1;
+        }
+
+        const sc = g.scenario(.six_dof);
+        jolt.jolt_cs_run(world, &sc, out);
+        try std.testing.expectEqual(@intFromEnum(Kind.six_dof), out.i[1]);
+        for (0..6) |a| {
+            const helper = sc.settings.i[11 + a];
+            const min = switch (helper) {
+                2 => -math.flt_max,
+                3 => math.flt_max,
+                else => sc.settings.f[18 + a],
+            };
+            const max = switch (helper) {
+                2 => math.flt_max,
+                3 => -math.flt_max,
+                else => sc.settings.f[24 + a],
+            };
+            try std.testing.expectEqual(@intFromBool(min == -math.flt_max and max == math.flt_max), out.i[2 + 2 * a]); // IsFreeAxis
+            try std.testing.expectEqual(@intFromBool(min >= max), out.i[3 + 2 * a]); // IsFixedAxis
+            num_axis_helpers[@min(helper, 3)] += 1;
+        }
+        try std.testing.expectEqual(@as(u32, 0xC0DE0000), out.i[14]); // The first step follows
+    }
+    for (num_set_ratio) |n| try std.testing.expect(n > 100);
+    for (num_axis_helpers) |n| try std.testing.expect(n > 300);
+}
+
+test "Constraint parity: descriptions for the other parity files" {
+    // randomDescription / makeDescriptionSettings (BodyInterfaceParity.zig): the settings of a ported kind have the bytes
+    // of the C++ settings, a stub kind is error.KindNotPorted, a number that is no two body kind of `Kind` (Vehicle,
+    // the user types, anything else) is error.UnknownKind
+    const allocator = std.testing.allocator;
+    var num_ported: u32 = 0;
+    for (std.enums.values(Kind)) |kind| {
+        for (0..20) |seed| {
+            const d = randomDescription(@intCast(0xDE5C0000 + 64 * @intFromEnum(kind) + seed), kind);
+            try std.testing.expectEqual(@intFromEnum(kind), d.kind);
+            var settings = makeDescriptionSettings(allocator, &d) catch |err| {
+                try std.testing.expectEqual(error.KindNotPorted, err);
+                try std.testing.expect(std.mem.indexOfScalar(Kind, ported_kinds, kind) == null);
+                continue;
+            };
+            defer settings.deinit();
+            try std.testing.expect(std.mem.indexOfScalar(Kind, ported_kinds, kind) != null);
+            const zolt_bytes = try settingsBytes(allocator, settings.get().?);
+            defer allocator.free(zolt_bytes);
+            const jolt_bytes = try joltSettingsSave(allocator, &d);
+            defer allocator.free(jolt_bytes);
+            try std.testing.expectEqualSlices(u8, jolt_bytes, zolt_bytes);
+            num_ported += 1;
+        }
+    }
+    try std.testing.expectEqual(20 * ported_kinds.len, num_ported);
+    try std.testing.expect(ported_kinds.len >= 2); // Fixed and Point
+    for ([_]u32{ 9, 13, 14, 15, 16, 17, 0xFFFFFFFF }) |kind| {
+        const d: CSSettings = .{ .kind = kind };
+        try std.testing.expectError(error.UnknownKind, makeDescriptionSettings(allocator, &d));
     }
 }
 

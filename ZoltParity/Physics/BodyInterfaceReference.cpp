@@ -15,8 +15,9 @@
 //   sRestoreWithChildren of a stream followed by a new save (the cross check: each side restores the other side's
 //   bytes). jolt_bi_scene_save / jolt_bi_scene_resave do the same for a PhysicsScene, jolt_bi_scene_create_bodies
 //   restores a scene, fixes its invalid scales (FixInvalidScales) and instantiates it in a PhysicsSystem (CreateBodies).
-//   The scenes have constraints (BISceneConstraint, Phase 6: the constraint classes that Zolt has ported, FixedConstraint
-//   and PointConstraint); CreateBodies creates them, and PhysicsScene::FromPhysicsSystem converts the system back.
+//   The scenes have constraints (Phase 6: the kinds whose Zolt class is ported); each is two body indices and a
+//   description of the constraint parity (CSSettings of ConstraintsReference.cpp, created by its CSMakeConstraintSettings
+//   for every kind). CreateBodies creates them, and PhysicsScene::FromPhysicsSystem converts the system back.
 //
 // The structs below must match the extern structs of BodyInterfaceParity.zig (checked by jolt_bi_struct_sizes).
 // Booleans are passed as uint32 (never bool, see the porting guide). All C functions have the prefix jolt_bi_.
@@ -44,8 +45,6 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
-#include <Jolt/Physics/Constraints/FixedConstraint.h>
-#include <Jolt/Physics/Constraints/PointConstraint.h>
 
 #include <cstring>
 #include <sstream>
@@ -153,59 +152,9 @@ struct BIBodyDesc
 	uint32				mSubGroupID;
 };
 
-// Must match SceneConstraint in BodyInterfaceParity.zig: a constraint of a PhysicsScene
-struct BISceneConstraint
-{
-	uint32				mKind;						// 0 FixedConstraintSettings, 1 PointConstraintSettings
-	uint32				mBody1;						// Index in the bodies of the scene or PhysicsScene::cFixedToWorld
-	uint32				mBody2;
-	uint32				mEnabled;
-	uint32				mConstraintPriority;
-	uint32				mNumVelocityStepsOverride;
-	uint32				mNumPositionStepsOverride;
-	uint32				mSpace;
-	uint32				mAutoDetectPoint;			// Fixed
-	float				mDrawConstraintSize;
-	uint64				mUserData;
-	Real				mPoint1[3];
-	Real				mPoint2[3];
-	float				mAxes[12];					// Fixed: axis X1, Y1, X2, Y2
-};
-
-// The settings of a scene constraint
-static Ref<TwoBodyConstraintSettings> BIMakeConstraintSettings(const BISceneConstraint &inC)
-{
-	Ref<TwoBodyConstraintSettings> settings;
-	const float *a = inC.mAxes;
-	if (inC.mKind == 0)
-	{
-		FixedConstraintSettings *s = new FixedConstraintSettings;
-		s->mSpace = EConstraintSpace(inC.mSpace);
-		s->mAutoDetectPoint = inC.mAutoDetectPoint != 0;
-		s->mPoint1 = RVec3(inC.mPoint1[0], inC.mPoint1[1], inC.mPoint1[2]);
-		s->mAxisX1 = Vec3(a[0], a[1], a[2]);
-		s->mAxisY1 = Vec3(a[3], a[4], a[5]);
-		s->mPoint2 = RVec3(inC.mPoint2[0], inC.mPoint2[1], inC.mPoint2[2]);
-		s->mAxisX2 = Vec3(a[6], a[7], a[8]);
-		s->mAxisY2 = Vec3(a[9], a[10], a[11]);
-		settings = s;
-	}
-	else
-	{
-		PointConstraintSettings *s = new PointConstraintSettings;
-		s->mSpace = EConstraintSpace(inC.mSpace);
-		s->mPoint1 = RVec3(inC.mPoint1[0], inC.mPoint1[1], inC.mPoint1[2]);
-		s->mPoint2 = RVec3(inC.mPoint2[0], inC.mPoint2[1], inC.mPoint2[2]);
-		settings = s;
-	}
-	settings->mEnabled = inC.mEnabled != 0;
-	settings->mConstraintPriority = inC.mConstraintPriority;
-	settings->mNumVelocityStepsOverride = inC.mNumVelocityStepsOverride;
-	settings->mNumPositionStepsOverride = inC.mNumPositionStepsOverride;
-	settings->mDrawConstraintSize = inC.mDrawConstraintSize;
-	settings->mUserData = inC.mUserData;
-	return settings;
-}
+// The settings of the description inSettings[inIndex] of the constraint parity (an array of CSSettings, see
+// ConstraintsReference.cpp, which defines this function): every kind of its CSMakeSettings, any other kind aborts
+Ref<TwoBodyConstraintSettings> CSMakeConstraintSettings(const void *inSettings, uint32 inIndex);
 
 // Must match BIOp in BodyInterfaceParity.zig
 struct BIOp
@@ -550,7 +499,6 @@ void jolt_bi_struct_sizes(uint32 *outSizes)
 	outSizes[4] = sizeof(BIBodyDesc);
 	outSizes[5] = sizeof(BIOp);
 	outSizes[6] = sizeof(BIOut);
-	outSizes[7] = sizeof(BISceneConstraint);
 }
 
 void *jolt_bi_world_create(uint32 inMaxBodies, uint32 inNumBodyMutexes, const BITables *inTables)
@@ -882,8 +830,10 @@ uint32 jolt_bi_bcs_resave(const uint8 *inBytes, uint32 inSize, uint32 inNumBodie
 	return BICopyBytes(data.str(), outBytes, inCapacity);
 }
 
-// PhysicsScene::SaveBinaryState of a scene with the bodies and the constraints, returns the size
-uint32 jolt_bi_scene_save(const BITables *inTables, const BIBodyDesc *inBodies, uint32 inNumBodies, const BISceneConstraint *inConstraints, uint32 inNumConstraints, uint32 inSaveShapes, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity)
+// PhysicsScene::SaveBinaryState of a scene with the bodies and the constraints (constraint c: the body indices
+// inConstraintBodies[2 * c], inConstraintBodies[2 * c + 1] and the CSSettings description inConstraintSettings[c]),
+// returns the size
+uint32 jolt_bi_scene_save(const BITables *inTables, const BIBodyDesc *inBodies, uint32 inNumBodies, const uint32 *inConstraintBodies, const void *inConstraintSettings, uint32 inNumConstraints, uint32 inSaveShapes, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity)
 {
 	BIEnsureFactory();
 	BITableObjects tables;
@@ -892,7 +842,7 @@ uint32 jolt_bi_scene_save(const BITables *inTables, const BIBodyDesc *inBodies, 
 	for (uint32 b = 0; b < inNumBodies; ++b)
 		scene->AddBody(tables.MakeBodyCreationSettings(inBodies[b]));
 	for (uint32 c = 0; c < inNumConstraints; ++c)
-		scene->AddConstraint(BIMakeConstraintSettings(inConstraints[c]), inConstraints[c].mBody1, inConstraints[c].mBody2);
+		scene->AddConstraint(CSMakeConstraintSettings(inConstraintSettings, c), inConstraintBodies[2 * c], inConstraintBodies[2 * c + 1]);
 	std::stringstream data;
 	StreamOutWrapper out(data);
 	scene->SaveBinaryState(out, inSaveShapes != 0, inSaveGroupFilters != 0);
