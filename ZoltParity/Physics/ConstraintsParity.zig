@@ -585,7 +585,99 @@ const HingeKind = StubKind(zolt.HingeConstraintSettings);
 const SliderKind = StubKind(zolt.SliderConstraintSettings);
 
 // ---- SLOT distance (Zolt/Physics/Constraints/DistanceConstraint.zig) ----
-const DistanceKind = StubKind(zolt.DistanceConstraintSettings);
+const DistanceKind = struct {
+    pub const Settings = zolt.DistanceConstraintSettings;
+    pub const Constraint = zolt.DistanceConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.point1 = loadR3(d.r[0..3]);
+        s.point2 = loadR3(d.r[3..6]);
+        s.min_distance = d.f[0];
+        s.max_distance = d.f[1];
+        s.limits_spring_settings = loadSpring(d.i[1], d.f[2..4]);
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        switch (op.op) {
+            16 => c.setDistance(op.f[0], op.f[1]),
+            17 => c.setLimitsSpringSettings(loadSpring(op.i[0], op.f[0..2])),
+            else => {
+                std.debug.print("distance: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.f(c.getMinDistance());
+        rec.f(c.getMaxDistance());
+        rec.spring(c.getLimitsSpringSettings().*);
+        rec.f(c.getTotalLambdaPosition());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+        cov.hit("world space", d.i[0] == @intFromEnum(ConstraintSpace.world_space));
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+        coverMotionTypes(cov, sc, true);
+
+        // The distances of the constructor
+        cov.hit("min and max from the distance", d.f[0] < 0.0 and d.f[1] < 0.0);
+        cov.hit("min from the distance (min(distance, max))", d.f[0] < 0.0 and d.f[1] >= 0.0);
+        cov.hit("max from the distance (max(distance, min))", d.f[0] >= 0.0 and d.f[1] < 0.0);
+        cov.hit("min and max given", d.f[0] >= 0.0 and d.f[1] >= 0.0);
+        var set_distance = false;
+        var set_spring = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op == 16) set_distance = true;
+            if (op.op == 17) set_spring = true;
+        }
+        cov.hit("SetDistance", set_distance);
+        cov.hit("SetLimitsSpringSettings", set_spring);
+        const spring = c.getLimitsSpringSettings();
+        cov.hit("spring in frequency mode", spring.mode == .frequency_and_damping and spring.hasStiffness());
+        cov.hit("spring in stiffness mode", spring.mode == .stiffness_and_damping and spring.hasStiffness());
+        cov.hit("spring in mass normalized stiffness mode", spring.mode == .mass_normalized_stiffness_and_damping and spring.hasStiffness());
+
+        // The branch of the last CalculateConstraintProperties (when nothing changed the constraint after the last frame)
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.frame == sc.num_frames) return;
+        }
+        const delta_len = c.world_space_position2.sub(c.world_space_position1).toVec3().length();
+        cov.hit("points coincide (the normal is kept)", delta_len == 0.0);
+        const active = c.axis_constraint.isActive();
+        const min = c.getMinDistance();
+        const max = c.getMaxDistance();
+        cov.hit("single distance", active and min == max);
+        cov.hit("closer than the min distance", active and min != max and c.min_lambda == 0.0);
+        cov.hit("further than the max distance", active and min != max and c.max_lambda == 0.0);
+        cov.hit("between min and max (deactivated)", !active and min < delta_len and delta_len < max);
+        cov.hit("hard limit", active and !c.axis_constraint.spring_part.isActive());
+        cov.hit("soft limit", active and c.axis_constraint.spring_part.isActive());
+    }
+
+    /// The motion types of the bodies (`with_kinematic`: the kind supports kinematic bodies)
+    fn coverMotionTypes(cov: *Coverage, sc: *const CSScenario, comptime with_kinematic: bool) void {
+        const static: u32 = @intFromEnum(MotionType.static);
+        const kinematic: u32 = @intFromEnum(MotionType.kinematic);
+        const dynamic: u32 = @intFromEnum(MotionType.dynamic);
+        cov.hit("body 1 static", sc.body[0].fixed_to_world == 0 and sc.body[0].motion_type == static);
+        cov.hit("body 1 dynamic", sc.body[0].motion_type == dynamic);
+        cov.hit("body 2 static", sc.body[1].motion_type == static);
+        cov.hit("body 2 dynamic", sc.body[1].motion_type == dynamic);
+        if (with_kinematic) {
+            cov.hit("body 1 kinematic", sc.body[0].motion_type == kinematic);
+            cov.hit("body 2 kinematic", sc.body[1].motion_type == kinematic);
+        }
+        cov.hit("static body with motion properties", (sc.body[0].fixed_to_world == 0 and sc.body[0].allow_dynamic_or_kinematic != 0) or sc.body[1].allow_dynamic_or_kinematic != 0);
+    }
+};
 
 // ---- SLOT cone (Zolt/Physics/Constraints/ConeConstraint.zig) ----
 const ConeKind = StubKind(zolt.ConeConstraintSettings);
@@ -606,7 +698,77 @@ const RackAndPinionKind = StubKind(zolt.RackAndPinionConstraintSettings);
 const GearKind = StubKind(zolt.GearConstraintSettings);
 
 // ---- SLOT pulley (Zolt/Physics/Constraints/PulleyConstraint.zig) ----
-const PulleyKind = StubKind(zolt.PulleyConstraintSettings);
+const PulleyKind = struct {
+    pub const Settings = zolt.PulleyConstraintSettings;
+    pub const Constraint = zolt.PulleyConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.body_point1 = loadR3(d.r[0..3]);
+        s.fixed_point1 = loadR3(d.r[3..6]);
+        s.body_point2 = loadR3(d.r[6..9]);
+        s.fixed_point2 = loadR3(d.r[9..12]);
+        s.ratio = d.f[0];
+        s.min_length = d.f[1];
+        s.max_length = d.f[2];
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        switch (op.op) {
+            16 => c.setLength(op.f[0], op.f[1]),
+            else => {
+                std.debug.print("pulley: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.f(c.getMinLength());
+        rec.f(c.getMaxLength());
+        rec.f(c.getCurrentLength());
+        rec.f(c.getTotalLambdaPosition());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+        cov.hit("world space", d.i[0] == @intFromEnum(ConstraintSpace.world_space));
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+        DistanceKind.coverMotionTypes(cov, sc, false);
+        cov.hit("ratio 1", d.f[0] == 1.0);
+        cov.hit("ratio below 1", d.f[0] < 1.0);
+        cov.hit("ratio above 1", d.f[0] > 1.0);
+
+        // The lengths of the constructor
+        cov.hit("min and max from the length", d.f[1] < 0.0 and d.f[2] < 0.0);
+        cov.hit("min from the length", d.f[1] < 0.0 and d.f[2] >= 0.0);
+        cov.hit("max from the length", d.f[1] >= 0.0 and d.f[2] < 0.0);
+        cov.hit("min and max given", d.f[1] >= 0.0 and d.f[2] >= 0.0 and d.f[1] <= d.f[2]);
+        cov.hit("min above max (the constructor does not check)", d.f[1] >= 0.0 and d.f[2] >= 0.0 and d.f[1] > d.f[2]);
+        var set_length = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op == 16) set_length = true;
+        }
+        cov.hit("SetLength", set_length);
+
+        // The branch of the last SetupVelocityConstraint (when nothing changed the constraint after the last frame)
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.frame == sc.num_frames) return;
+        }
+        cov.hit("segment 1 of length 0 (the normal is kept)", c.world_space_position1.sub(c.fixed_position1).toVec3().length() == 0.0);
+        cov.hit("segment 2 of length 0 (the normal is kept)", c.world_space_position2.sub(c.fixed_position2).toVec3().length() == 0.0);
+        const active = c.independent_axis_constraint_part.isActive();
+        cov.hit("min and max violated (forces in both directions)", active and c.min_lambda == -math.flt_max and c.max_lambda == math.flt_max);
+        cov.hit("shorter than the min length", active and c.min_lambda == 0.0);
+        cov.hit("longer than the max length", active and c.max_lambda == 0.0);
+        cov.hit("between min and max (deactivated)", !active and c.getMinLength() < c.getCurrentLength() and c.getCurrentLength() < c.getMaxLength());
+    }
+};
 
 /// The slot of a kind
 fn Slot(comptime kind: Kind) type {
@@ -1337,32 +1499,67 @@ fn genSlider(g: *Gen, sc: *CSScenario) void {
     }
 }
 
-/// Distance: I[0] space; R[0..3] point 1, R[3..6] point 2; F[0] min distance, F[1] max distance (-1: the distance at
-/// creation), limits spring I[1] F[2..4]
+/// Distance: I[0] space; R[0..3] point 1, R[3..6] point 2; F[0] min distance, F[1] max distance (negative: from the
+/// distance at creation), limits spring I[1] F[2..4]. Operations: 16 SetDistance(F[0], F[1]), 17
+/// SetLimitsSpringSettings(I[0] F[0..2]). Sometimes both points are the centers of mass of two bodies at the same place
+/// (local space, no center of mass offset): the distance is exactly 0 and the normal of the constructor (then of the
+/// last update) is used.
 fn genDistance(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
     s.i[0] = g.space();
     g.point(sc, s.i[0], s.r[0..3]);
     g.point(sc, s.i[0], s.r[3..6]);
-    if (g.oneIn(3)) {
-        s.f[0] = -1.0;
-        s.f[1] = -1.0;
-    } else {
-        s.f[0] = g.float(0, 2);
-        s.f[1] = s.f[0] + (if (g.oneIn(4)) 0.0 else g.float(0, 2));
+    if (g.oneIn(8)) {
+        coincidingCenters(sc);
+        s.i[0] = @intFromEnum(ConstraintSpace.local_to_body_com);
+        @memset(s.r[0..6], 0);
+    } else if (s.i[0] == @intFromEnum(ConstraintSpace.world_space) and g.oneIn(8)) {
+        @memcpy(s.r[3..6], s.r[0..3]); // The same world space point on both bodies (a cheap point constraint)
+    }
+    switch (g.index(6)) {
+        0, 1 => {
+            // The distance at creation (any negative value)
+            s.f[0] = if (g.oneIn(2)) -1.0 else -g.float(0.1, 2);
+            s.f[1] = if (g.oneIn(2)) -1.0 else -g.float(0.1, 2);
+        },
+        2 => {
+            // min(distance, max)
+            s.f[0] = -1.0;
+            s.f[1] = g.float(0, 4);
+        },
+        3 => {
+            // max(distance, min)
+            s.f[0] = g.float(0, 4);
+            s.f[1] = -1.0;
+        },
+        else => {
+            s.f[0] = g.float(0, 2);
+            s.f[1] = s.f[0] + (if (g.oneIn(4)) 0.0 else g.float(0, 2));
+        },
     }
     g.spring(&s.i[1], s.f[2..4]);
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, @intCast(16 + g.index(2)), .{});
         switch (op.op) {
             16 => {
-                op.f[0] = g.float(0, 2);
-                op.f[1] = op.f[0] + g.float(0, 2);
+                op.f[0] = g.float(0, 3);
+                op.f[1] = op.f[0] + (if (g.oneIn(4)) 0.0 else g.float(0, 2));
             },
             17 => g.spring(&op.i[0], op.f[0..2]),
             else => unreachable,
         }
     }
+}
+
+/// Moves body 2 to the center of mass of body 1 (the origin for Body::sFixedToWorld) and removes the center of mass
+/// offsets: the local space point 0 of both bodies is exactly the same world space point
+fn coincidingCenters(sc: *CSScenario) void {
+    if (sc.body[0].fixed_to_world != 0)
+        sc.body[1].position = @splat(0)
+    else
+        sc.body[1].position = sc.body[0].position;
+    sc.body[0].com_offset = @splat(0);
+    sc.body[1].com_offset = @splat(0);
 }
 
 /// Cone: I[0] space; R[0..3] point 1, R[3..6] point 2; F[0..3] twist axis 1, F[3..6] twist axis 2, F[6] half cone angle
@@ -1604,26 +1801,56 @@ fn genGear(g: *Gen, sc: *CSScenario) void {
 }
 
 /// Pulley: I[0] space; R[0..3] body point 1, R[3..6] fixed point 1, R[6..9] body point 2, R[9..12] fixed point 2 (world
-/// space); F[0] ratio, F[1] min length, F[2] max length (-1: the length at creation). Operation 16 SetLength(F[0], F[1])
+/// space); F[0] ratio, F[1] min length, F[2] max length (negative: the length at creation; the constructor accepts a min
+/// length above the max length). Operation 16 SetLength(F[0], F[1]). Sometimes a fixed point is the center of mass of
+/// its body (local space body point 0, no center of mass offset): the segment has length 0 exactly and keeps the normal
+/// of the constructor (then of the last update).
 fn genPulley(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
-    s.i[0] = g.space();
+    const on_fixed_point = g.oneIn(6);
+    s.i[0] = if (on_fixed_point) @intFromEnum(ConstraintSpace.local_to_body_com) else g.space();
     g.point(sc, s.i[0], s.r[0..3]);
     for (0..3) |k| s.r[3 + k] = sc.body[1].position[k] + g.float(-1, 1) + @as(Real, if (k == 1) 5.0 else 0.0);
     g.point(sc, s.i[0], s.r[6..9]);
     for (0..3) |k| s.r[9 + k] = sc.body[1].position[k] + g.float(-1, 1) + @as(Real, if (k == 1) 5.0 else 0.0);
-    s.f[0] = if (g.oneIn(3)) 1.0 else g.float(0.5, 3);
-    if (g.oneIn(3)) {
-        s.f[1] = -1.0;
-        s.f[2] = -1.0;
-    } else {
-        s.f[1] = g.float(0, 5);
-        s.f[2] = if (g.oneIn(4)) -1.0 else s.f[1] + g.float(0, 5);
+    if (on_fixed_point) {
+        // The body point of body b on its fixed point (the center of mass of body b)
+        const b: usize = if (sc.body[0].fixed_to_world != 0 or g.oneIn(2)) 1 else 0;
+        sc.body[b].com_offset = @splat(0);
+        @memset(s.r[6 * b ..][0..3], 0);
+        @memcpy(s.r[6 * b + 3 ..][0..3], &sc.body[b].position);
+    }
+    s.f[0] = switch (g.index(6)) {
+        0, 1 => 1.0,
+        2 => g.float(0.05, 1),
+        else => g.float(1, 4),
+    };
+    switch (g.index(6)) {
+        0, 1 => {
+            s.f[1] = if (g.oneIn(2)) -1.0 else -g.float(0.1, 2);
+            s.f[2] = if (g.oneIn(2)) -1.0 else -g.float(0.1, 2);
+        },
+        2 => {
+            s.f[1] = -1.0;
+            s.f[2] = g.float(0, 12);
+        },
+        3 => {
+            s.f[1] = g.float(0, 8);
+            s.f[2] = -1.0;
+        },
+        4 => {
+            s.f[1] = g.float(0, 8);
+            s.f[2] = s.f[1] + (if (g.oneIn(4)) 0.0 else g.float(0, 6));
+        },
+        else => {
+            s.f[1] = g.float(3, 10);
+            s.f[2] = g.float(0, 3);
+        },
     }
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, 16, .{});
-        op.f[0] = g.float(0, 5);
-        op.f[1] = op.f[0] + g.float(0, 5);
+        op.f[0] = g.float(0, 8);
+        op.f[1] = op.f[0] + (if (g.oneIn(4)) 0.0 else g.float(0, 6));
     }
 }
 

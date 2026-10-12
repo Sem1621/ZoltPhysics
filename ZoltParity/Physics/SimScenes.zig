@@ -1250,6 +1250,17 @@ pub const scenes = [_]SceneEntry{
     // ---- Distance / Pulley ----
     .{ .name = "constraints_distance_ops", .build = buildDistanceOps, .blocked_by = .distance_constraints, .expect = .{ .active_constraints = 2 } },
     .{ .name = "constraints_pulley_ops", .build = buildPulleyOps, .blocked_by = .pulley_constraints, .expect = .{ .active_constraints = 2 } },
+    .{ .name = "constraints_distance_limits_and_springs", .build = buildDistanceLimitsAndSprings, .blocked_by = .distance_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 9 } },
+    .{ .name = "constraints_pulley_lengths", .build = buildPulleyLengths, .blocked_by = .pulley_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 7 } },
+    .{ .name = "constraints_distance_pulley_islands_and_contacts", .build = buildDistancePulleyIslands, .blocked_by = .pulley_constraints, .sweep_stride = 15, .expect = .{ .contacts = true, .removed = true, .active_constraints = 8 } },
+    .{ .name = "constraints_distance_net_splitter", .build = buildDistanceNet, .blocked_by = .pulley_constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .active_constraints = 262 } },
+    .{ .name = "constraints_distance_pulley_sleeping_bodies", .build = buildDistancePulleySleeping, .blocked_by = .pulley_constraints, .sweep_stride = 10, .expect = .{ .sleeping = true, .update_activations = 2, .active_constraints = 4 } },
+    .{ .name = "constraints_distance_pulley_save_restore", .build = buildDistancePulleySaveRestore, .blocked_by = .pulley_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_distance_pulley_collision_steps_2", .build = buildDistancePulleyCollisionSteps(2), .blocked_by = .pulley_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_distance_pulley_collision_steps_3", .build = buildDistancePulleyCollisionSteps(3), .blocked_by = .pulley_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_distance_pulley_far_from_origin", .build = buildDistancePulleyFarFromOrigin, .blocked_by = .pulley_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 6 } },
+    .{ .name = "constraints_distance_pulley_random_1", .build = buildDistancePulleyRandom(1), .blocked_by = .pulley_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 19 } },
+    .{ .name = "constraints_distance_pulley_random_2", .build = buildDistancePulleyRandom(2), .blocked_by = .pulley_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 16 } },
     // (append the distance / pulley scenes here)
     // ---- Hinge ----
     .{ .name = "constraints_hinge_ops", .build = buildHingeOps, .blocked_by = .hinge_constraints, .expect = .{ .active_constraints = 3 } },
@@ -5937,6 +5948,517 @@ fn buildPulleyOps(b: *SceneBuilder) Allocator.Error!void {
     try b.constraintOp(.notify_constraint_shape_changed, pulley, .{ .body = c, .f = &.{ 0, 0.1, 0 } });
     try b.constraintOp(.reset_constraint_warm_start, local_pulley, .{});
     try b.constraintOp(.constraint_settings_hash, pulley, .{});
+}
+
+/// A distance description from body handle `body1` to `body2` (`invalid_handle`: Body::sFixedToWorld) in world space
+/// with a limits spring (mode, frequency / stiffness, damping)
+fn distanceSpring(body1: u32, body2: u32, point1: [3]Real, point2: [3]Real, min_distance: f32, max_distance: f32, mode: u32, frequency: f32, damping: f32) SimConstraint {
+    var c = Desc.distance(body1, body2, point1, point2, min_distance, max_distance);
+    Desc.setSpring(&c, 1, 2, mode, frequency, damping);
+    return c;
+}
+
+/// Distance limits and springs: a box on a rope with a range from the world falls freely until the rope is taut (hard
+/// max limit) and swings; a box thrown up towards its pivot on a rod that only pushes (hard min limit); spheres that fall
+/// into soft max limits in the three spring modes (frequency, stiffness, mass normalized stiffness); a sphere on a spring
+/// with min = max = 0 (TestDistanceSpring, stiffness mode); a box with point 1 = point 2 in world space (a cheap point
+/// constraint: the distance is 0, the normal of the constructor); a spinning dumbbell of two dynamic boxes on a single
+/// distance without gravity (forces in both directions); a box on a rope in local space with the world as body 2;
+/// SetDistance and SetLimitsSpringSettings between the updates (a range becomes a single distance, a hard limit soft, a
+/// soft limit hard, the rope gets shorter and longer), NotifyShapeChanged, ResetWarmStart, GetConstraintSettings
+fn buildDistanceLimitsAndSprings(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const ball = try b.sphere(0.2);
+    b.num_updates = 120;
+
+    // A rope with a range [0.5, 2]: the box starts 1 below the pivot and falls into the max limit
+    const falling = try b.body(.{ .position = .{ 0.3, 9, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const rope = try b.constraint(Desc.distance(invalid_handle, falling, .{ 0, 10, 0 }, .{ 0.3, 9, 0 }, 0.5, 2));
+
+    // A rod that only pushes: the box is thrown up into the min limit
+    const thrown = try b.body(.{ .position = .{ 3, 8, 0 }, .shape = box, .linear_velocity = .{ 0.5, 7, 0 }, .allow_sleeping = 0 }, .activate);
+    const rod = try b.constraint(Desc.distance(invalid_handle, thrown, .{ 3, 10, 0 }, .{ 3, 8, 0 }, 1, 3));
+
+    // Soft max limits in the three spring modes
+    var soft: [3]u32 = undefined;
+    const springs = [3][3]f32{ .{ 0, 2, 0.3 }, .{ 1, 300, 4 }, .{ 2, 60, 1 } };
+    for (springs, &soft, 0..) |spring, *handle, i| {
+        const x: Real = 6 + 2 * real(i);
+        const h = try b.body(.{ .position = .{ x, 9, 0 }, .shape = ball, .allow_sleeping = 0 }, .activate);
+        handle.* = try b.constraint(distanceSpring(invalid_handle, h, .{ x, 10, 0 }, .{ x, 9, 0 }, 0, 1, @intFromFloat(spring[0]), spring[1], spring[2]));
+    }
+
+    // A spring with min = max = 0 in stiffness mode: the sphere starts 2 away from its rest point
+    const sprung = try b.body(.{ .position = .{ 14, 9, 0 }, .shape = ball, .linear_damping = 0, .allow_sleeping = 0 }, .activate);
+    _ = try b.constraint(distanceSpring(invalid_handle, sprung, .{ 14, 9, 2 }, .{ 14, 9, 0 }, 0, 0, 1, 150, 2));
+
+    // Point 1 = point 2 at a corner of a box (distance 0: the normal of the constructor, then of the last update)
+    const corner = try b.body(.{ .position = .{ 17, 9, 0 }, .shape = box, .linear_velocity = .{ 1, 0, 0.5 }, .allow_sleeping = 0 }, .activate);
+    _ = try b.constraint(Desc.distance(invalid_handle, corner, .{ 17.2, 9.2, 0.2 }, .{ 17.2, 9.2, 0.2 }, -1, -1));
+
+    // A spinning dumbbell without gravity: a single distance between two dynamic boxes
+    const left = try b.body(.{ .position = .{ 20, 9, 0 }, .shape = box, .gravity_factor = 0, .linear_velocity = .{ 0, 1, 0 }, .angular_velocity = .{ 0, 0, 2 }, .allow_sleeping = 0 }, .activate);
+    const right = try b.body(.{ .position = .{ 21, 9, 0 }, .shape = ball, .gravity_factor = 0, .linear_velocity = .{ 0, -1, 0.5 }, .allow_sleeping = 0 }, .activate);
+    const dumbbell = try b.constraint(Desc.distance(left, right, .{ 20.1, 9, 0 }, .{ 20.9, 9, 0 }, -1, -1));
+
+    // Local space with the world as body 2: point 1 relative to the box, point 2 relative to the world origin
+    const local_box = try b.body(.{ .position = .{ 24, 8, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.4), .shape = box, .allow_sleeping = 0 }, .activate);
+    var local = Desc.distance(local_box, invalid_handle, .{ 0.2, 0.2, 0 }, .{ 24.5, 10, 0 }, 1.5, 2.5);
+    local.i[0] = ConstraintSpace.local_to_body_com;
+    const local_rope = try b.constraint(local);
+
+    b.at(30);
+    try b.constraintOp(.distance_set_distance, rope, .{ .f = &.{ 0.5, 1.2 } }); // Shorter: pulls the box up
+    try b.constraintOp(.distance_set_limits_spring_settings, soft[0], .{ .i = &.{0}, .f = &.{ 0, 0 } }); // Soft becomes hard
+    try b.constraintOp(.constraint_settings_hash, local_rope, .{});
+    b.at(50);
+    try b.constraintOp(.distance_set_limits_spring_settings, rope, .{ .i = &.{1}, .f = &.{ 200, 8 } }); // Hard becomes soft
+    try b.constraintOp(.distance_set_distance, rod, .{ .f = &.{ 2.5, 2.5 } }); // A single distance
+    try b.constraintOp(.distance_set_distance, dumbbell, .{ .f = &.{ 0.5, 1.5 } }); // The dumbbell gets a range
+    try b.constraintOp(.constraint_settings_hash, soft[1], .{});
+    b.at(70);
+    try b.constraintOp(.distance_set_distance, soft[2], .{ .f = &.{ 0.2, 0.4 } });
+    try b.constraintOp(.distance_set_distance, rope, .{ .f = &.{ 2, 3 } }); // Longer: the box falls into the soft limit
+    try b.constraintOp(.notify_constraint_shape_changed, dumbbell, .{ .body = right, .f = &.{ 0.05, 0, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, rod, .{});
+    b.at(90);
+    try b.constraintOp(.distance_set_limits_spring_settings, soft[2], .{ .i = &.{2}, .f = &.{ 0, 3 } }); // No stiffness: hard
+    try b.constraintOp(.constraint_settings_hash, rope, .{});
+    try b.constraintOp(.constraint_settings_hash, dumbbell, .{});
+}
+
+/// Pulley lengths: Jolt's defaults (min 0, max the length at creation) with equal masses in balance, an impulse throws
+/// body 2 up (the rope goes slack) and it falls back until the rope is taut; a block and tackle (ratio 2, min = max =
+/// the length) with equal masses; ratio 0.5 with a min length above the length at creation (pushes the bodies away from
+/// their fixed points); a min length above the max length (Jolt's constructor accepts it: forces in both directions);
+/// Body::sFixedToWorld as body 1 with its point on fixed point 1 (segment 1 has length 0 and keeps its normal); a static
+/// body 1 in local space; a box whose center of mass is on fixed point 2 (local space body point 0) falls away from it;
+/// SetLength between the updates (longer, shorter, min = max), NotifyShapeChanged, ResetWarmStart, GetConstraintSettings
+fn buildPulleyLengths(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    const light = try b.box(.{ 0.15, 0.15, 0.15 }, 0.05);
+    b.num_updates = 120;
+
+    // Jolt's default lengths, in balance
+    const a1 = try b.body(.{ .position = .{ -1, 6, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const a2 = try b.body(.{ .position = .{ 1, 6.5, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const slack = try b.constraint(Desc.pulley(a1, a2, .{ -1, 6.25, 0 }, .{ -1, 9, 0 }, .{ 1, 6.75, 0 }, .{ 1, 9, 0 }, 1, 0, -1));
+
+    // A block and tackle
+    const b1 = try b.body(.{ .position = .{ 3, 6, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const b2 = try b.body(.{ .position = .{ 5, 6, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const tackle = try b.constraint(Desc.pulley(b1, b2, .{ 3, 6.25, 0 }, .{ 3, 9, 0 }, .{ 5, 6.25, 0 }, .{ 5.2, 9, 0 }, 2, -1, -1));
+
+    // Ratio 0.5, a min length above the length at creation (and a max length)
+    const c1 = try b.body(.{ .position = .{ 7, 7, 0 }, .shape = light, .allow_sleeping = 0 }, .activate);
+    const c2 = try b.body(.{ .position = .{ 9, 7, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const pushing = try b.constraint(Desc.pulley(c1, c2, .{ 7, 7, 0 }, .{ 7, 9, 0 }, .{ 9, 7, 0 }, .{ 9, 9, 0 }, 0.5, 4, 5));
+
+    // A min length above the max length
+    const d1 = try b.body(.{ .position = .{ 11, 7, 0 }, .shape = light, .linear_velocity = .{ 0, -1, 0.5 }, .allow_sleeping = 0 }, .activate);
+    const d2 = try b.body(.{ .position = .{ 13, 7, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    _ = try b.constraint(Desc.pulley(d1, d2, .{ 11, 7, 0 }, .{ 11, 9, 0 }, .{ 13, 7, 0 }, .{ 13, 9, 0 }, 1.5, 6, 4));
+
+    // The world as body 1 with its point on fixed point 1: a rope over a fixed point for body 2 only
+    const e2 = try b.body(.{ .position = .{ 15.5, 6, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const world_pulley = try b.constraint(Desc.pulley(invalid_handle, e2, .{ 15, 9, 0 }, .{ 15, 9, 0 }, .{ 15.5, 6.25, 0 }, .{ 15, 9, 0 }, 1, 0, -1));
+
+    // A static body 1 in local space (body points relative to the centers of mass, the fixed points in world space)
+    const anchor = try b.body(.{ .position = .{ 18, 6, 0 }, .shape = box, .motion_type = 0 }, .dont_activate);
+    const f2 = try b.body(.{ .position = .{ 19, 6, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.5), .shape = box, .angular_velocity = .{ 0, 1, 0 }, .allow_sleeping = 0 }, .activate);
+    var static_desc = Desc.pulley(anchor, f2, .{ 0, 0.25, 0 }, .{ 18, 9, 0 }, .{ 0.1, 0.2, 0 }, .{ 19.3, 9, 0 }, 1.25, -1, -1);
+    static_desc.i[0] = ConstraintSpace.local_to_body_com;
+    const static_pulley = try b.constraint(static_desc);
+
+    // The center of mass of body 2 on fixed point 2 (segment 2 has length 0 until the box falls away)
+    const g1 = try b.body(.{ .position = .{ 21, 6, 0 }, .shape = box, .allow_sleeping = 0 }, .activate);
+    const g2 = try b.body(.{ .position = .{ 23, 7, 0 }, .shape = light, .allow_sleeping = 0 }, .activate);
+    var on_fixed = Desc.pulley(g1, g2, .{ 0, 0.25, 0 }, .{ 21, 9, 0 }, .{ 0, 0, 0 }, .{ 23, 7, 0 }, 1, 0, -1);
+    on_fixed.i[0] = ConstraintSpace.local_to_body_com;
+    _ = try b.constraint(on_fixed);
+
+    b.at(10);
+    try b.op(.add_impulse, a2, .{ .f = &.{ 0, 600, 0 } }); // Thrown up: the rope goes slack
+    try b.constraintOp(.constraint_settings_hash, static_pulley, .{});
+    b.at(40);
+    try b.constraintOp(.pulley_set_length, tackle, .{ .f = &.{ 0, 12 } }); // A slack block and tackle
+    try b.constraintOp(.pulley_set_length, world_pulley, .{ .f = &.{ 2.5, 2.5 } }); // Shorter: lifts body 2
+    try b.constraintOp(.notify_constraint_shape_changed, pushing, .{ .body = c2, .f = &.{ 0, 0.1, 0 } });
+    b.at(60);
+    try b.constraintOp(.pulley_set_length, slack, .{ .f = &.{ 5, 5 } });
+    try b.constraintOp(.pulley_set_length, pushing, .{ .f = &.{ 0, 3 } });
+    try b.constraintOp(.reset_constraint_warm_start, tackle, .{});
+    b.at(80);
+    try b.constraintOp(.pulley_set_length, tackle, .{ .f = &.{ 7, 9 } }); // Too short: pushes
+    try b.constraintOp(.constraint_settings_hash, tackle, .{});
+    try b.constraintOp(.constraint_settings_hash, world_pulley, .{});
+}
+
+/// Distance and pulley constraints in islands with point / fixed constraints and contacts: a chain that starts
+/// horizontal (a single distance from the world, a point constraint, a rope with a range, a box welded to the last link)
+/// swings into a stack of boxes on the floor; a counterweight on a pulley lifts a crate off the floor; a slack rope
+/// between two boxes on the floor: a force drags the first box until the rope is taut and drags the second one along; a
+/// box on a distance rope swings into a box hanging from a point constraint
+fn buildDistancePulleyIslands(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    const crate_shape = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    b.num_updates = 120;
+    _ = try addFloor(b, 20, 0);
+
+    // The stack
+    for (0..4) |y| _ = try b.body(.{ .position = .{ 0, 0.25 + real(y) * 0.51, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+
+    // The chain hangs from (-3, 3, 0) and starts horizontal
+    const l1 = try b.body(.{ .position = .{ -4, 3, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.distance(invalid_handle, l1, .{ -3, 3, 0 }, .{ -3.75, 3, 0 }, -1, -1));
+    const l2 = try b.body(.{ .position = .{ -4.6, 3, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.pointWorld(l1, l2, .{ -4.3, 3, 0 }));
+    const l3 = try b.body(.{ .position = .{ -5.5, 3, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const range = try b.constraint(Desc.distance(l2, l3, .{ -4.85, 3, 0 }, .{ -5.25, 3, 0 }, 0.2, 0.6));
+    const weight = try b.body(.{ .position = .{ -5.5, 3.55, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(l3, weight));
+
+    // A counterweight lifts a crate off the floor (the crate is the lighter body)
+    const crate = try b.body(.{ .position = .{ 5, 0.4, 0 }, .shape = crate_shape, .object_layer = Layers.moving, .mass = 10, .override_mass_properties = 1 }, .activate);
+    const counterweight = try b.body(.{ .position = .{ 7, 3, 0 }, .shape = box, .object_layer = Layers.moving, .mass = 15, .override_mass_properties = 1 }, .activate);
+    const lift = try b.constraint(Desc.pulley(crate, counterweight, .{ 5, 0.8, 0 }, .{ 5, 5, 0 }, .{ 7, 3.25, 0 }, .{ 7, 5, 0 }, 1, -1, -1));
+
+    // A slack rope between two boxes on the floor
+    const puller = try b.body(.{ .position = .{ 0, 0.25, 4 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const dragged = try b.body(.{ .position = .{ 1, 0.25, 4 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.distance(puller, dragged, .{ 0, 0.25, 4 }, .{ 1, 0.25, 4 }, 0, 1.5));
+
+    // A box on a soft rope swings into a box on a point constraint
+    const swinger = try b.body(.{ .position = .{ -2, 4, -4 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(distanceSpring(invalid_handle, swinger, .{ 0, 4, -4 }, .{ -2, 4, -4 }, 0, 2, 0, 8, 0.5));
+    const hanging = try b.body(.{ .position = .{ 0.5, 2, -4 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, hanging, .{ 0.5, 3, -4 }));
+
+    b.at(10);
+    try b.op(.add_impulse, puller, .{ .f = &.{ -400, 0, 0 } }); // Slides until the rope is taut, then drags the other box
+    b.at(60);
+    try b.constraintOp(.pulley_set_length, lift, .{ .f = &.{ 0, 8 } }); // Slack: the crate and the counterweight fall onto the floor
+    try b.constraintOp(.distance_set_distance, range, .{ .f = &.{ 0.4, 0.4 } });
+}
+
+/// A net of boxes on the floor, the neighbours along X connected by single distances and along Z by distance ranges,
+/// some pairs by point constraints, the corners hanging on ropes from the world and two pulleys across the net: an island
+/// with more than 128 constraints that the LargeIslandSplitter splits, and that falls asleep
+fn buildDistanceNet(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.2, 0.4 }, 0.05);
+    b.num_updates = 100;
+    b.max_contact_constraints = 2048;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const nx = 10;
+    const nz = 14;
+    var handles: [nx * nz]u32 = undefined;
+    for (0..nz) |z| {
+        for (0..nx) |x| {
+            const px: Real = real(x) - 5.0;
+            const pz: Real = real(z) - 7.0;
+            handles[z * nx + x] = try b.body(.{ .position = .{ px, 0.25, pz }, .shape = box, .object_layer = Layers.moving }, .activate);
+            if (x > 0) _ = try b.constraint(Desc.distance(handles[z * nx + x - 1], handles[z * nx + x], .{ px - 0.6, 0.25, pz }, .{ px - 0.4, 0.25, pz }, -1, -1));
+            if (z > 0) {
+                if ((x + z) % 4 == 0)
+                    _ = try b.constraint(Desc.pointWorld(handles[(z - 1) * nx + x], handles[z * nx + x], .{ px, 0.25, pz - 0.5 }))
+                else
+                    _ = try b.constraint(Desc.distance(handles[(z - 1) * nx + x], handles[z * nx + x], .{ px, 0.25, pz - 0.6 }, .{ px, 0.25, pz - 0.4 }, 0.1, 0.3));
+            }
+        }
+    }
+    // The corners hang on ropes from the world
+    for ([_]usize{ 0, nx - 1, (nz - 1) * nx, nz * nx - 1 }) |i| {
+        const p: [3]Real = .{ real(i % nx) - 5.0, 0.25, real(i / nx) - 7.0 };
+        _ = try b.constraint(Desc.distance(invalid_handle, handles[i], .{ p[0], 2, p[2] }, p, 0, 1.8));
+    }
+    // Two pulleys across the net
+    _ = try b.constraint(Desc.pulley(handles[0], handles[nz * nx - 1], .{ -5, 0.25, -7 }, .{ -5, 3, 0 }, .{ 4, 0.25, 6 }, .{ 4, 3, 0 }, 1, 0, 14.6));
+    _ = try b.constraint(Desc.pulley(handles[nx - 1], handles[(nz - 1) * nx], .{ 4, 0.25, -7 }, .{ 4, 3, -1 }, .{ -5, 0.25, 6 }, .{ -5, 3, -1 }, 1, 0, 14.6));
+    b.at(10);
+    try b.op(.add_impulse, handles[nx * nz / 2], .{ .f = &.{ 0, 3, 0 } });
+}
+
+/// Distance / pulley constraints and sleeping bodies (the first part without gravity): a rope created between an awake
+/// body and a sleeping one wakes the sleeping one from inside the update; a slack rope between an awake and a sleeping
+/// body is active (TwoBodyConstraint::IsActive) and wakes it too; a pulley between two sleeping bodies is not active,
+/// SetLength wakes nothing until ActivateConstraint; with gravity, a box on a rope and two boxes on a pulley come to rest
+/// and fall asleep, SetDistance / SetLength / SetLimitsSpringSettings do not wake them until ActivateConstraint
+fn buildDistancePulleySleeping(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 120;
+    b.settings.time_before_sleep = 0.2;
+    const awake_a = try b.body(.{ .position = .{ 0, 5, 0 }, .shape = box, .gravity_factor = 0, .linear_velocity = .{ 0, 0, 0.3 }, .allow_sleeping = 0 }, .activate);
+    const asleep_a = try b.body(.{ .position = .{ 0, 4, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const awake_b = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box, .gravity_factor = 0, .linear_velocity = .{ 0.2, 0, 0 }, .allow_sleeping = 0 }, .activate);
+    const asleep_b = try b.body(.{ .position = .{ 3, 4, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const pair1 = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const pair2 = try b.body(.{ .position = .{ 7, 5, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+
+    // With gravity: a box on a rope, two boxes on a pulley (they settle and fall asleep)
+    const hanging = try b.body(.{ .position = .{ 10, 4, 0 }, .shape = box, .linear_damping = 0.5 }, .activate);
+    const rope = try b.constraint(Desc.distance(invalid_handle, hanging, .{ 10, 5, 0 }, .{ 10, 4.2, 0 }, -1, -1));
+    const p1 = try b.body(.{ .position = .{ 13, 4, 0 }, .shape = box, .linear_damping = 0.5 }, .activate);
+    const p2 = try b.body(.{ .position = .{ 15, 4, 0 }, .shape = box, .linear_damping = 0.5 }, .activate);
+    const resting_pulley = try b.constraint(Desc.pulley(p1, p2, .{ 13, 4.2, 0 }, .{ 13, 6, 0 }, .{ 15, 4.2, 0 }, .{ 15, 6, 0 }, 1, -1, -1));
+
+    b.at(5);
+    try b.expectSleeping(asleep_a);
+    _ = try b.constraint(Desc.distance(awake_a, asleep_a, .{ 0, 4.8, 0 }, .{ 0, 4.2, 0 }, -1, -1)); // Wakes asleep_a in the next update
+    const slack_rope = try b.constraint(Desc.distance(awake_b, asleep_b, .{ 3, 4.8, 0 }, .{ 3, 4.2, 0 }, 0, 3));
+    try b.expectConstraintState(slack_rope, ConstraintState.enabled | ConstraintState.active);
+    const sleeping_pulley = try b.constraint(Desc.pulley(pair1, pair2, .{ 6, 5.2, 0 }, .{ 6, 7, 0 }, .{ 7, 5.2, 0 }, .{ 7, 7, 0 }, 1, -1, -1));
+    try b.expectConstraintState(sleeping_pulley, ConstraintState.inactive);
+    b.at(6);
+    try b.expectAwake(asleep_a);
+    try b.expectAwake(asleep_b);
+    try b.expectSleeping(pair1);
+    b.at(10);
+    try b.constraintOp(.pulley_set_length, sleeping_pulley, .{ .f = &.{ 1, 2 } }); // Violated, but wakes nothing
+    b.at(12);
+    try b.expectSleeping(pair1);
+    try b.expectSleeping(pair2);
+    try b.constraintOp(.activate_constraint, sleeping_pulley, .{});
+    try b.expectAwake(pair1);
+    try b.expectAwake(pair2);
+    b.at(80);
+    try b.expectSleeping(hanging);
+    try b.expectSleeping(p1);
+    try b.constraintOp(.distance_set_distance, rope, .{ .f = &.{ 0.3, 0.5 } });
+    try b.constraintOp(.pulley_set_length, resting_pulley, .{ .f = &.{ 1, 2.5 } });
+    try b.constraintOp(.distance_set_limits_spring_settings, rope, .{ .i = &.{0}, .f = &.{ 3, 0.5 } });
+    b.at(82);
+    try b.expectSleeping(hanging);
+    try b.expectSleeping(p2);
+    try b.expectConstraintState(rope, ConstraintState.inactive);
+    try b.constraintOp(.activate_constraint, rope, .{});
+    try b.constraintOp(.activate_constraint, resting_pulley, .{});
+    try b.expectAwake(hanging);
+    try b.expectAwake(p2);
+}
+
+/// Distance and pulley constraints across cross save / restore (the total lambdas and the world space normals are
+/// state; the normal matters when the points coincide) and partial states (the constraints only, bodies and
+/// constraints), with changes of the physics settings (no warm start, other iteration counts and Baumgarte factor) and of
+/// the constraints between the snapshots
+fn buildDistancePulleySaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 100;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+    const state_bodies: u32 = 2; // EStateRecorderState::Bodies
+    var no_warm_start = b.settings;
+    no_warm_start.constraint_warm_start = 0;
+    no_warm_start.num_velocity_steps = 4;
+    no_warm_start.num_position_steps = 1;
+    const settings1 = try b.addPhysicsSettings(no_warm_start);
+    var more_steps = b.settings;
+    more_steps.num_velocity_steps = 15;
+    more_steps.num_position_steps = 5;
+    more_steps.baumgarte = 0.5;
+    const settings2 = try b.addPhysicsSettings(more_steps);
+
+    // A chain of ropes from the world
+    var previous: u32 = invalid_handle;
+    var links: [4]u32 = undefined;
+    for (0..4) |i| {
+        const x: Real = 0.7 * real(i);
+        const h = try b.body(.{ .position = .{ x, 6, 0 }, .angular_velocity = .{ 0, 0, 0.5 }, .shape = box }, .activate);
+        links[i] = if (i == 2)
+            try b.constraint(distanceSpring(previous, h, .{ x - 0.45, 6, 0 }, .{ x - 0.25, 6, 0 }, 0, 0.4, 1, 500, 10))
+        else
+            try b.constraint(Desc.distance(previous, h, .{ x - 0.45, 6, 0 }, .{ x - 0.25, 6, 0 }, -1, -1));
+        previous = h;
+    }
+    // Two pulleys, one with a point on its fixed point
+    const a1 = try b.body(.{ .position = .{ 5, 5, 0 }, .shape = box }, .activate);
+    const a2 = try b.body(.{ .position = .{ 7, 5.5, 0 }, .shape = box, .linear_velocity = .{ 0, 0, 1 } }, .activate);
+    const pulley = try b.constraint(Desc.pulley(a1, a2, .{ 5, 5.25, 0 }, .{ 5, 8, 0 }, .{ 7, 5.75, 0 }, .{ 7, 8, 0 }, 1.5, -1, -1));
+    const c2 = try b.body(.{ .position = .{ 10, 7, 0 }, .shape = box, .linear_velocity = .{ 0.5, 0, 0 } }, .activate);
+    var on_fixed = Desc.pulley(invalid_handle, c2, .{ 9, 8, 0 }, .{ 9, 8, 0 }, .{ 0, 0, 0 }, .{ 10, 7, 0 }, 1, 0, 1);
+    on_fixed.i[0] = ConstraintSpace.local_to_body_com;
+    const fixed_point_pulley = try b.constraint(on_fixed);
+
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(25);
+    try b.sysOp(.set_physics_settings, .{ .index = settings1 });
+    try b.constraintOp(.distance_set_distance, links[1], .{ .f = &.{ 0.1, 0.3 } });
+    b.at(35);
+    try b.constraintOp(.set_constraint_enabled, links[3], .{ .i = &.{0} });
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(45);
+    try b.constraintOp(.set_constraint_enabled, links[3], .{ .i = &.{1} });
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 35: links[3] is disabled again
+    try b.expectConstraintState(links[3], 0);
+    b.at(50);
+    try b.sysOp(.set_physics_settings, .{ .index = settings2 });
+    try b.constraintOp(.set_constraint_enabled, links[3], .{ .i = &.{1} });
+    try b.sysOp(.snapshot, .{ .index = 2, .i = &.{state_bodies | state_constraints} });
+    b.at(60);
+    try b.constraintOp(.reset_constraint_warm_start, pulley, .{});
+    try b.constraintOp(.reset_constraint_warm_start, fixed_point_pulley, .{});
+    try b.op(.add_impulse, a2, .{ .f = &.{ 0, 0, 30 } });
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+    b.at(70);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Everything of update 15
+    try b.expectConstraintState(links[3], ConstraintState.enabled | ConstraintState.active);
+    b.at(85);
+    try b.sysOp(.snapshot, .{ .index = 3 });
+    try b.op(.add_impulse, previous, .{ .f = &.{ 0, 0, 20 } });
+    b.at(90);
+    try b.sysOp(.restore_cross, .{ .index = 3 });
+}
+
+/// Distance and pulley constraints with several collision steps per update and changing update parameters (the warm
+/// start impulses are scaled by the step ratio)
+fn buildDistancePulleyCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 0.2, 0.3, 0.2 }, 0.05);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var previous: u32 = invalid_handle;
+            for (0..5) |i| {
+                const x: Real = 0.6 * real(i);
+                const h = try b.body(.{ .position = .{ x, 6, 0 }, .shape = box }, .activate);
+                if (i % 2 == 1)
+                    _ = try b.constraint(distanceSpring(previous, h, .{ x - 0.4, 6, 0 }, .{ x - 0.2, 6, 0 }, 0, 0.3, 0, 4, 0.5))
+                else
+                    _ = try b.constraint(Desc.distance(previous, h, .{ x - 0.4, 6, 0 }, .{ x - 0.2, 6, 0 }, -1, -1));
+                previous = h;
+            }
+            const p1 = try b.body(.{ .position = .{ 5, 5, 0 }, .shape = box }, .activate);
+            const p2 = try b.body(.{ .position = .{ 7, 5.5, 0 }, .shape = box, .gravity_factor = 1.5 }, .activate);
+            _ = try b.constraint(Desc.pulley(p1, p2, .{ 5, 5.3, 0 }, .{ 5, 8, 0 }, .{ 7, 5.8, 0 }, .{ 7, 8, 0 }, 2, -1, -1));
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Distance and pulley constraints far from the origin (the world space points and the fixed points are Real: in double
+/// precision they keep their precision): a chain of ropes hanging from the world, a box on a soft rope and a pulley
+/// whose body falls onto a floor next to a box
+fn buildDistancePulleyFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 80;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    var previous: u32 = invalid_handle;
+    for (0..4) |i| {
+        const p: [3]Real = .{ o[0] - 4 + 0.6 * real(i), o[1] + 5, o[2] };
+        const h = try b.body(.{ .position = p, .shape = box, .object_layer = Layers.moving }, .activate);
+        _ = try b.constraint(Desc.distance(previous, h, .{ p[0] - 0.4, p[1], p[2] }, .{ p[0] - 0.2, p[1], p[2] }, -1, -1));
+        previous = h;
+    }
+    const soft = try b.body(.{ .position = .{ o[0] + 2, o[1] + 3, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(distanceSpring(invalid_handle, soft, .{ o[0] + 2, o[1] + 4, o[2] }, .{ o[0] + 2, o[1] + 3.25, o[2] }, 0, 1, 2, 30, 1));
+    const p1 = try b.body(.{ .position = .{ o[0] + 4, o[1] + 3, o[2] }, .shape = box, .object_layer = Layers.moving, .mass = 20, .override_mass_properties = 1 }, .activate);
+    const p2 = try b.body(.{ .position = .{ o[0] + 6, o[1] + 2, o[2] }, .shape = box, .object_layer = Layers.moving, .mass = 50, .override_mass_properties = 1 }, .activate);
+    _ = try b.constraint(Desc.pulley(p1, p2, .{ o[0] + 4, o[1] + 3.25, o[2] }, .{ o[0] + 4, o[1] + 6, o[2] }, .{ o[0] + 6, o[1] + 2.25, o[2] }, .{ o[0] + 6, o[1] + 6, o[2] }, 1, 0, -1));
+    _ = try b.body(.{ .position = .{ o[0] + 6.2, o[1] + 0.25, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// Random bodies (dynamic, kinematic, static; every basic shape) with random distance and pulley constraints between
+/// them and to the world (pulleys only between static or dynamic bodies, IndependentAxisConstraintPart asserts on a
+/// kinematic body), on a floor in a container, and random operations between the updates (SetDistance,
+/// SetLimitsSpringSettings, SetLength, enable, remove / add, ActivateConstraint, ResetWarmStart, NotifyShapeChanged,
+/// impulses)
+fn buildDistancePulleyRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0xd157_0000 +% seed *% 0x9e3779b9;
+            const shapes = try BasicShapes.add(b);
+            b.num_updates = 80;
+            b.max_contact_constraints = 2048;
+            try addContainer(b, 6, 2);
+            const num_bodies = 24;
+            var bodies: [num_bodies]u32 = undefined;
+            var kinematic: [num_bodies]bool = undefined;
+            for (&bodies, &kinematic, 0..) |*h, *k, i| {
+                const motion_type: u32 = if (b.oneIn(8)) 0 else if (b.oneIn(7)) 1 else 2;
+                k.* = motion_type == 1;
+                const p = b.vec3(-4, 4);
+                h.* = try b.body(.{
+                    .position = .{ p[0], 1.5 + 0.8 * real(i), p[2] },
+                    .rotation = b.rotation(),
+                    .shape = shapes.pick(b.index(6)),
+                    .motion_type = motion_type,
+                    .linear_velocity = if (motion_type == 1) b.vec3(-0.5, 0.5) else @splat(0),
+                    .angular_velocity = if (motion_type != 0) b.vec3(-1, 1) else @splat(0),
+                    .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+                }, if (motion_type == 0) .dont_activate else .activate);
+            }
+            // Constraints between random pairs and to the world
+            const num_constraints = 20;
+            var handles: [num_constraints]u32 = undefined;
+            var is_pulley: [num_constraints]bool = undefined;
+            var in_system: [num_constraints]bool = @splat(true);
+            for (&handles, &is_pulley) |*c, *pulley| {
+                pulley.* = b.oneIn(3);
+                var index1 = b.index(num_bodies + 1); // num_bodies: the world
+                var index2 = b.index(num_bodies);
+                if (pulley.*) {
+                    while (index1 < num_bodies and kinematic[index1]) index1 = b.index(num_bodies + 1);
+                    while (kinematic[index2] or index2 == index1) index2 = b.index(num_bodies);
+                } else if (index2 == index1) index2 = (index2 + 1) % num_bodies;
+                const body1 = if (index1 == num_bodies) invalid_handle else bodies[index1];
+                const body2 = bodies[index2];
+                var desc: SimConstraint = undefined;
+                if (pulley.*) {
+                    const lengths = [_][2]f32{ .{ 0, -1 }, .{ -1, -1 }, .{ 2, 12 }, .{ -1, 15 } };
+                    const l = lengths[b.index(lengths.len)];
+                    desc = Desc.pulley(body1, body2, r3(b.vec3(-4, 4)), r3(b.vec3(-4, 4)), r3(b.vec3(-4, 4)), r3(b.vec3(-4, 4)), b.float(0.5, 2), l[0], l[1]);
+                    desc.r[4] = 6 + desc.r[4]; // The fixed points above the bodies
+                    desc.r[10] = 6 + desc.r[10];
+                } else {
+                    const min = if (b.oneIn(3)) -1.0 else b.float(0, 2);
+                    const max = if (min < 0 and b.oneIn(2)) -1.0 else (if (min < 0) 0 else min) + b.float(0, 2);
+                    desc = Desc.distance(body1, body2, r3(b.vec3(-4, 4)), r3(b.vec3(-4, 4)), min, max);
+                    if (b.oneIn(2)) Desc.setSpring(&desc, 1, 2, b.index(3), if (b.oneIn(3)) 0 else b.float(1, 10), b.float(0, 1));
+                }
+                if (b.oneIn(4)) desc.i[0] = ConstraintSpace.local_to_body_com;
+                desc.constraint_priority = b.index(3);
+                if (b.oneIn(5)) desc.num_velocity_steps_override = 1 + b.index(15);
+                if (b.oneIn(5)) desc.num_position_steps_override = 1 + b.index(5);
+                if (b.oneIn(8)) desc.enabled = 0;
+                desc.user_data = b.next(); // Odd: not saved by the state filter of the end of the scene
+                c.* = try b.constraint(desc);
+            }
+            var update: u32 = 5;
+            while (update < b.num_updates) : (update += 1 + b.index(8)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_constraints);
+                    const c = handles[k];
+                    switch (b.index(9)) {
+                        0 => if (is_pulley[k]) {
+                            const min = b.float(0, 6);
+                            try b.constraintOp(.pulley_set_length, c, .{ .f = &.{ min, min + b.float(0, 6) } });
+                        } else {
+                            const min = b.float(0, 3);
+                            try b.constraintOp(.distance_set_distance, c, .{ .f = &.{ min, min + (if (b.oneIn(3)) 0 else b.float(0, 2)) } });
+                        },
+                        1 => if (!is_pulley[k]) try b.constraintOp(.distance_set_limits_spring_settings, c, .{ .i = &.{b.index(3)}, .f = &.{ if (b.oneIn(3)) 0 else b.float(1, 10), b.float(0, 1) } }),
+                        2 => try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{b.index(2)} }),
+                        3 => {
+                            try b.constraintOp(if (in_system[k]) .remove_constraint else .add_constraint, c, .{});
+                            in_system[k] = !in_system[k];
+                        },
+                        4 => try b.constraintOp(.activate_constraint, c, .{}),
+                        5 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        6 => try b.constraintOp(.notify_constraint_shape_changed, c, .{ .body = bodies[b.index(num_bodies)], .f = &b.vec3(-0.1, 0.1) }),
+                        7 => try b.constraintOp(.constraint_settings_hash, c, .{}),
+                        else => try b.op(.add_impulse, bodies[b.index(num_bodies)], .{ .f = &b.vec3(-3, 3) }),
+                    }
+                }
+            }
+        }
+    }.build;
 }
 
 // (append the scenes of the distance / pulley group here)
