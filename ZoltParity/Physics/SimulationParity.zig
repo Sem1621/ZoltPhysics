@@ -22,7 +22,10 @@
 //! restoring the state saved before the update one more update gives the C++ bytes), then every createJob fails once
 //! (FailingJobSystem: a failure while building the job graph returns error.OutOfMemory and changes nothing, a job that
 //! cannot be spawned from inside a job changes no result). Creating the scene (system, shapes, the bodies of update 0)
-//! runs under std.testing.checkAllAllocationFailures.
+//! runs under std.testing.checkAllAllocationFailures. The InvalidateContactCache flags that the operations before the
+//! update set (SetShape, SetUseManifoldReduction, ...) are not saved state, in Jolt neither: every swept update starts
+//! from the snapshot with them set again (`restoreZoltBeforeUpdate`), while the recovery after a failed update relies
+//! on PhysicsSystem.update putting them back (scenes physics_tests_switch_use_manifold_reduction_1 and _2).
 //!
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
 //! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts
@@ -882,6 +885,15 @@ const ZoltWorld = struct {
                 return (@as(u32, @intFromBool(applied)) << 2) | @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
             },
             .expect_body_state => {}, // Changes nothing, the driver checks the result
+            .set_use_manifold_reduction => try bi.setUseManifoldReduction(id, op.count != 0),
+            .apply_body_creation_settings => {
+                var settings = self.makeBodyCreationSettings(&self.desc.bodies[op.index]);
+                defer settings.deinit();
+                var lock: zolt.BodyLockWrite = .init(self.system.getBodyLockInterface(), id);
+                defer lock.deinit();
+                if (!lock.succeeded()) return error.SceneNotSupported;
+                try lock.getBody().applyBodyCreationSettings(allocator, &settings, self.system.getBroadPhaseLayerInterface());
+            },
             .create_constraint => {
                 // Phase 6: one prong per ConstraintKind when the class is ported (the scenes that need it are blocked
                 // by SimScenes.Blocker.constraints until then)
@@ -1448,6 +1460,11 @@ const Run = struct {
         defer snapshot.deinit(allocator);
         try zw.saveState(.all, &snapshot);
 
+        // The bodies whose contact cache is invalid (the operations before the update flagged them): the flags are not
+        // part of the saved state (in Jolt neither), every update that starts from the snapshot gets them again
+        const pending_invalid = try allocator.dupe(BodyID, zw.system.body_manager.bodies_cache_invalid.items);
+        defer allocator.free(pending_invalid);
+
         // C++ first: the reference bytes after the update
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         var reference: std.ArrayList(u8) = .empty;
@@ -1473,7 +1490,7 @@ const Run = struct {
         // Every temp allocation fails once
         const num_allocations = counting.num_allocations;
         for (0..num_allocations) |fail_index| {
-            try self.restoreZolt(snapshot.items);
+            try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
             var failing: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
             if (zw.update(delta_time, collision_steps, failing.tempAllocator(), zw.jobSystem())) |_| {
                 return self.fail("temp allocation {d} of {d} failed but the update succeeded", .{ fail_index, num_allocations });
@@ -1487,13 +1504,13 @@ const Run = struct {
         }
 
         // Every createJob fails once: count the jobs first (a normal update)
-        try self.restoreZolt(snapshot.items);
+        try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
         var counting_jobs: FailingJobSystem = .init(zw.jobSystem(), .{});
         _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), counting_jobs.jobSystem());
         try self.expectZoltState(reference.items, "after the update counting the jobs");
         const num_jobs = counting_jobs.num_created.load(.monotonic);
         for (0..num_jobs + 2) |fail_index| {
-            try self.restoreZolt(snapshot.items);
+            try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
             var failing: FailingJobSystem = .init(zw.jobSystem(), .{ .fail_index = @intCast(fail_index) });
             if (zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), failing.jobSystem())) |_| {
                 // A job that could not be spawned from inside a job changes no result
@@ -1524,6 +1541,18 @@ const Run = struct {
     fn restoreZolt(self: *Run, snapshot: []const u8) !void {
         if (!try self.zw.restoreState(snapshot))
             return self.fail("zolt could not restore its snapshot", .{});
+    }
+
+    /// Restore the snapshot and flag the contact caches that were invalid when it was taken (the first update after the
+    /// snapshot reset the flags). The recovery after a failed update (recoverZolt) does not: PhysicsSystem.update puts
+    /// the flags back itself when it runs out of memory (BodyManager.restoreContactCacheInvalidation).
+    fn restoreZoltBeforeUpdate(self: *Run, snapshot: []const u8, pending_invalid: []const BodyID) !void {
+        try self.restoreZolt(snapshot);
+        const body_manager = &self.zw.system.body_manager;
+        for (pending_invalid) |id| {
+            if (body_manager.tryGetBodyMut(id)) |body|
+                try body_manager.invalidateContactCacheForBody(body);
+        }
     }
 
     fn expectZoltState(self: *Run, expected: []const u8, what: []const u8) !void {
