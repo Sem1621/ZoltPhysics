@@ -6,6 +6,9 @@
 //! - `sDistanceToMinShorter` is `distanceToMinShorter`, the `cClamped*` constants are `clamped_*` (`u32`).
 //! - The private `ERotationFlags` enum is the namespace `RotationFlags` of `u8` constants on `rotation_flags`.
 //! - `impulse |= part.SolveVelocityConstraint(...)` always runs the solve (no short circuit).
+//! - `ESwingType` is an `enum class` with the fixed underlying type `uint8`, so `SwingType` is a non-exhaustive
+//!   `enum(u8)`: the binary state of SwingTwistConstraintSettings / SixDOFConstraintSettings restores any byte (as
+//!   SpringMode / MotorState do), and every value but Cone is treated as Pyramid, like Jolt's `== ESwingType::Cone`.
 
 const std = @import("std");
 const Core = @import("../../../Core/Core.zig");
@@ -27,6 +30,10 @@ pub const SwingType = enum(u8) {
     cone,
     /// Swing is limited by a pyramid shape, note that this pyramid starts to deform for larger swing angles.
     pyramid,
+    /// Any other uint8 value: Jolt's enum class has the fixed underlying type uint8, so the binary state of the
+    /// SwingTwist / SixDOF settings restores whatever byte the stream holds (like SpringMode / MotorState); the part
+    /// treats every value but Cone as Pyramid, as Jolt's `mSwingType == ESwingType::Cone` check does
+    _,
 };
 
 /// Quaternion based constraint that decomposes the rotation in constraint space in swing and twist: q = q_swing * q_twist

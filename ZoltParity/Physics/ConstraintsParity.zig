@@ -588,10 +588,194 @@ const SliderKind = StubKind(zolt.SliderConstraintSettings);
 const DistanceKind = StubKind(zolt.DistanceConstraintSettings);
 
 // ---- SLOT cone (Zolt/Physics/Constraints/ConeConstraint.zig) ----
-const ConeKind = StubKind(zolt.ConeConstraintSettings);
+const ConeKind = struct {
+    pub const Settings = zolt.ConeConstraintSettings;
+    pub const Constraint = zolt.ConeConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.point1 = loadR3(d.r[0..3]);
+        s.twist_axis1 = load3(d.f[0..3]);
+        s.point2 = loadR3(d.r[3..6]);
+        s.twist_axis2 = load3(d.f[3..6]);
+        s.half_cone_angle = d.f[6];
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        switch (op.op) {
+            16 => c.setHalfConeAngle(op.f[0]),
+            else => {
+                std.debug.print("cone: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.f(c.getCosHalfConeAngle());
+        rec.v3(c.getTotalLambdaPosition());
+        rec.f(c.getTotalLambdaRotation());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        var set_angle = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op == 16) set_angle = true;
+        }
+        cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+        cov.hit("world space", d.i[0] == @intFromEnum(ConstraintSpace.world_space));
+        cov.hit("same twist axes", load3(d.f[0..3]).eql(load3(d.f[3..6])));
+        cov.hit("half cone angle 0", d.f[6] == 0.0);
+        cov.hit("half cone angle pi", d.f[6] == std.math.pi);
+        cov.hit("SetHalfConeAngle", set_angle);
+        cov.hit("outside the cone at the end (angle part active)", c.angle_constraint_part.isActive());
+        cov.hit("inside the cone at the end (angle part off)", !c.angle_constraint_part.isActive());
+        cov.hit("rotation limit impulse", c.getTotalLambdaRotation() > 0.0);
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+    }
+};
 
 // ---- SLOT swing_twist (Zolt/Physics/Constraints/SwingTwistConstraint.zig) ----
-const SwingTwistKind = StubKind(zolt.SwingTwistConstraintSettings);
+const SwingTwistKind = struct {
+    pub const Settings = zolt.SwingTwistConstraintSettings;
+    pub const Constraint = zolt.SwingTwistConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.swing_type = @enumFromInt(@as(u8, @truncate(d.i[1])));
+        s.position1 = loadR3(d.r[0..3]);
+        s.twist_axis1 = load3(d.f[0..3]);
+        s.plane_axis1 = load3(d.f[3..6]);
+        s.position2 = loadR3(d.r[3..6]);
+        s.twist_axis2 = load3(d.f[6..9]);
+        s.plane_axis2 = load3(d.f[9..12]);
+        s.normal_half_cone_angle = d.f[12];
+        s.plane_half_cone_angle = d.f[13];
+        s.twist_min_angle = d.f[14];
+        s.twist_max_angle = d.f[15];
+        s.max_friction_torque = d.f[16];
+        s.swing_motor_settings = loadMotor(d.i[2], d.f[17..23]);
+        s.twist_motor_settings = loadMotor(d.i[3], d.f[23..29]);
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        const f = &op.f;
+        switch (op.op) {
+            16 => c.setNormalHalfConeAngle(f[0]),
+            17 => c.setPlaneHalfConeAngle(f[0]),
+            18 => c.setTwistMinAngle(f[0]),
+            19 => c.setTwistMaxAngle(f[0]),
+            20 => c.setMaxFrictionTorque(f[0]),
+            21 => c.setSwingMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            22 => c.setTwistMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            23 => c.setTargetAngularVelocityCS(load3(f[0..3])),
+            24 => c.setTargetAngularVelocityBS(load3(f[0..3])),
+            25 => c.setTargetOrientationCS(loadQuat(f[0..4])),
+            26 => c.setTargetOrientationBS(loadQuat(f[0..4])),
+            27 => c.getSwingMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            28 => c.getTwistMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            else => {
+                std.debug.print("swing_twist: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.v3(c.getLocalSpacePosition1());
+        rec.v3(c.getLocalSpacePosition2());
+        rec.q(c.getConstraintToBody1());
+        rec.q(c.getConstraintToBody2());
+        rec.f(c.getNormalHalfConeAngle());
+        rec.f(c.getPlaneHalfConeAngle());
+        rec.f(c.getTwistMinAngle());
+        rec.f(c.getTwistMaxAngle());
+        rec.motor(c.getSwingMotorSettings());
+        rec.motor(c.getTwistMotorSettings());
+        rec.f(c.getMaxFrictionTorque());
+        rec.i(@bitCast(@intFromEnum(c.getSwingMotorState())));
+        rec.i(@bitCast(@intFromEnum(c.getTwistMotorState())));
+        rec.v3(c.getTargetAngularVelocityCS());
+        rec.q(c.getTargetOrientationCS());
+        rec.q(c.getRotationInConstraintSpace());
+        rec.v3(c.getTotalLambdaPosition());
+        rec.f(c.getTotalLambdaTwist());
+        rec.f(c.getTotalLambdaSwingY());
+        rec.f(c.getTotalLambdaSwingZ());
+        rec.v3(c.getTotalLambdaMotor());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        var swing_states: [4]bool = @splat(false);
+        var twist_states: [4]bool = @splat(false);
+        var set_limits = false;
+        var set_friction = false;
+        var set_velocity = false;
+        var set_motor_settings = false;
+        var clamped_target = false;
+        var target_cs = false;
+        var target_bs = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            switch (op.op) {
+                16...19 => set_limits = true,
+                20 => set_friction = true,
+                21 => swing_states[op.i[0]] = true,
+                22 => twist_states[op.i[0]] = true,
+                23, 24 => set_velocity = true,
+                25 => {
+                    target_cs = true;
+                    // The last target orientation in constraint space was clamped against the limits (the constraint
+                    // stores q_swing * q_twist)
+                    clamped_target = !c.getTargetOrientationCS().eql(loadQuat(op.f[0..4]));
+                },
+                26 => {
+                    target_bs = true;
+                    clamped_target = false;
+                },
+                27, 28 => set_motor_settings = true,
+                else => {},
+            }
+        }
+        const stc = &c.swing_twist_constraint_part;
+        cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+        cov.hit("world space", d.i[0] == @intFromEnum(ConstraintSpace.world_space));
+        cov.hit("cone swing", d.i[1] == 0);
+        cov.hit("pyramid swing", d.i[1] == 1);
+        cov.hit("twist locked", d.f[14] == 0.0 and d.f[15] == 0.0);
+        cov.hit("twist free", d.f[14] == -std.math.pi and d.f[15] == std.math.pi);
+        cov.hit("swing locked", d.f[12] == 0.0 and d.f[13] == 0.0);
+        cov.hit("friction", d.f[16] > 0.0 or set_friction);
+        cov.hit("limit setters", set_limits);
+        cov.hit("swing motor velocity", swing_states[1]);
+        cov.hit("swing motor position", swing_states[2]);
+        cov.hit("swing motor position and velocity", swing_states[3]);
+        cov.hit("swing motor off again", swing_states[0]);
+        cov.hit("twist motor velocity", twist_states[1]);
+        cov.hit("twist motor position", twist_states[2]);
+        cov.hit("twist motor position and velocity", twist_states[3]);
+        cov.hit("twist motor off again", twist_states[0]);
+        cov.hit("target angular velocity", set_velocity);
+        cov.hit("target orientation in constraint space", target_cs);
+        cov.hit("target orientation in body space", target_bs);
+        cov.hit("target orientation clamped", clamped_target);
+        cov.hit("motor settings", set_motor_settings);
+        cov.hit("twist motor part active at the end", c.motor_constraint_part[0].isActive());
+        cov.hit("swing motor parts active at the end", c.motor_constraint_part[1].isActive());
+        cov.hit("twist limit active at the end", stc.twist_limit_constraint_part.isActive());
+        cov.hit("swing limit active at the end", stc.swing_limit_y_constraint_part.isActive() or stc.swing_limit_z_constraint_part.isActive());
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+    }
+};
 
 // ---- SLOT six_dof (Zolt/Physics/Constraints/SixDOFConstraint.zig) ----
 const SixDOFKind = StubKind(zolt.SixDOFConstraintSettings);
@@ -1365,8 +1549,32 @@ fn genDistance(g: *Gen, sc: *CSScenario) void {
     }
 }
 
+/// True when a dynamic body of the scenario can rotate around some axes but not around all (EAllowedDOFs)
+fn hasPartialRotationDOFs(sc: *const CSScenario) bool {
+    for (sc.body) |b| {
+        const rotation_dofs = (b.allowed_dofs >> 3) & 0b111;
+        if (b.fixed_to_world == 0 and b.motion_type == @intFromEnum(MotionType.dynamic) and rotation_dofs != 0 and rotation_dofs != 0b111)
+            return true;
+    }
+    return false;
+}
+
+/// Keeps a cone scenario away from Jolt's assert that a body rotation is not NaN (with asserts on only: the release
+/// builds of Jolt and Zolt run the scenario and agree). When a dynamic body can rotate around some axes only, the
+/// inverse inertia is masked (MotionProperties::MultiplyWorldSpaceInverseInertiaByVector), and a rotation axis of the
+/// cone that is almost perpendicular to the allowed rotation axes gives an effective mass of up to 1 / FLT_MIN with a
+/// finite inverse inertia times axis. AngleConstraintPart::SolvePositionConstraint then rotates the body by a huge angle
+/// (lambda = -K^-1 * beta * C, the error C is not small), whose sine overflows to NaN in Quat::sRotation
+/// (Body::AddRotationStep asserts in Jolt's debug build). The velocity steps stay bounded (the masked impulse only
+/// removes the velocity along the masked axis), so these scenarios keep their velocity steps and drop the position steps.
+fn keepAwayFromHugeRotationSteps(sc: *CSScenario) void {
+    if (Core.enable_asserts and hasPartialRotationDOFs(sc))
+        sc.num_position_steps = 0;
+}
+
 /// Cone: I[0] space; R[0..3] point 1, R[3..6] point 2; F[0..3] twist axis 1, F[3..6] twist axis 2, F[6] half cone angle
 fn genCone(g: *Gen, sc: *CSScenario) void {
+    keepAwayFromHugeRotationSteps(sc);
     const s = &sc.settings;
     s.i[0] = g.space();
     g.point(sc, s.i[0], s.r[0..3]);
@@ -1415,6 +1623,23 @@ fn genSwingTwist(g: *Gen, sc: *CSScenario) void {
             25, 26 => storeQuat(g.quat(), op.f[0..4]),
             27, 28 => g.motor(&op.i[0], op.f[0..6]),
             else => unreachable,
+        }
+    }
+
+    // Keep away from Jolt's assert that the two swing motor parts turn on / off together (with asserts on only: the
+    // release builds of Jolt and Zolt run the scenario and agree). When a dynamic body can rotate around some axes only,
+    // the inverse inertia along a swing motor axis that is exactly an axis that the body cannot rotate around is zero
+    // (MotionProperties::MultiplyWorldSpaceInverseInertiaByVector masks it), that part deactivates itself and the other
+    // one does not (axis aligned frames and rotations are common in the scenarios). Without friction and swing motor
+    // the swing motor parts stay off (the twist motor uses part 0 only).
+    if (Core.enable_asserts and hasPartialRotationDOFs(sc)) {
+        s.f[16] = 0.0;
+        for (sc.ops[0..sc.num_ops]) |*op| {
+            switch (op.op) {
+                20 => op.f[0] = 0.0, // SetMaxFrictionTorque
+                21 => op.i[0] = 0, // SetSwingMotorState(EMotorState::Off)
+                else => {},
+            }
         }
     }
 }

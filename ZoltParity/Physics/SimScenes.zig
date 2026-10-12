@@ -1260,6 +1260,16 @@ pub const scenes = [_]SceneEntry{
     // ---- Cone / SwingTwist ----
     .{ .name = "constraints_cone_ops", .build = buildConeOps, .blocked_by = .cone_constraints, .expect = .{ .active_constraints = 2 } },
     .{ .name = "constraints_swing_twist_ops", .build = buildSwingTwistOps, .blocked_by = .swing_twist_constraints, .expect = .{ .active_constraints = 2 } },
+    .{ .name = "constraints_swing_twist_ragdoll_pile", .build = buildSwingTwistRagdollPile, .blocked_by = .swing_twist_constraints, .sweep_stride = 50, .expect = .{ .contacts = true, .active_constraints = 88 } },
+    .{ .name = "constraints_swing_twist_ragdolls_lying_splitter", .build = buildSwingTwistRagdollsLying, .blocked_by = .swing_twist_constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .active_constraints = 95 } },
+    .{ .name = "constraints_swing_twist_motors", .build = buildSwingTwistMotors, .blocked_by = .swing_twist_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 11 } },
+    .{ .name = "constraints_cone_swing_twist_save_restore", .build = buildConeSwingTwistSaveRestore, .blocked_by = .swing_twist_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_cone_swing_twist_sleeping", .build = buildConeSwingTwistSleeping, .blocked_by = .swing_twist_constraints, .sweep_stride = 10, .expect = .{ .sleeping = true, .update_activations = 1, .active_constraints = 5 } },
+    .{ .name = "constraints_cone_swing_twist_collision_steps_2", .build = buildConeSwingTwistCollisionSteps(2), .blocked_by = .swing_twist_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_cone_swing_twist_collision_steps_3", .build = buildConeSwingTwistCollisionSteps(3), .blocked_by = .swing_twist_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_cone_swing_twist_far_from_origin", .build = buildConeSwingTwistFarFromOrigin, .blocked_by = .swing_twist_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 8 } },
+    .{ .name = "constraints_cone_swing_twist_random_1", .build = buildConeSwingTwistRandom(1), .blocked_by = .swing_twist_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_cone_swing_twist_random_2", .build = buildConeSwingTwistRandom(2), .blocked_by = .swing_twist_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     // (append the cone / swing twist scenes here)
     // ---- SixDOF ----
     .{ .name = "constraints_six_dof_ops", .build = buildSixDOFOps, .blocked_by = .six_dof_constraints, .expect = .{ .active_constraints = 2 } },
@@ -6093,6 +6103,636 @@ fn buildSwingTwistOps(b: *SceneBuilder) Allocator.Error!void {
     try b.constraintOp(.notify_constraint_shape_changed, elbow, .{ .body = forearm, .f = &.{ 0, -0.02, 0 } });
     try b.constraintOp(.reset_constraint_warm_start, elbow, .{});
     try b.constraintOp(.constraint_settings_hash, elbow, .{});
+}
+
+/// The EMotorState values of the swing twist motor operations
+const MotorStateValue = struct {
+    const off: u32 = 0;
+    const velocity: u32 = 1;
+    const position: u32 = 2;
+    const position_and_velocity: u32 = 3;
+};
+
+/// The ESpringMode values of the motor springs
+const SpringModeValue = struct {
+    const frequency_and_damping: u32 = 0;
+    const stiffness_and_damping: u32 = 1;
+    const mass_normalized_stiffness_and_damping: u32 = 2;
+};
+
+/// Sets the swing motor (mode i[2], f[17..23]) or the twist motor (mode i[3], f[23..29]) of a swing twist description
+fn setSwingTwistMotor(c: *SimConstraint, twist: bool, mode: u32, values: [6]f32) void {
+    if (twist) Desc.setMotor(c, 3, 23, mode, values) else Desc.setMotor(c, 2, 17, mode, values);
+}
+
+/// A swing twist description in world space with the swing type and the max friction torque
+fn swingTwistDesc(body1: u32, body2: u32, p: [3]Real, twist_axis: [3]f32, plane_axis: [3]f32, limits: [4]f32, swing_type: u32, friction: f32) SimConstraint {
+    var c = Desc.swingTwist(body1, body2, p, twist_axis, plane_axis, limits);
+    c.i[1] = swing_type;
+    c.f[16] = friction;
+    return c;
+}
+
+/// (x, y, z) -> (x, -z, y): a quarter turn around X (the parts of a lying ragdoll, see `addRagdoll`)
+fn turnVector(v: [3]f32, turned: bool) [3]f32 {
+    return if (turned) .{ v[0], -v[2], v[1] } else v;
+}
+
+/// The position of a ragdoll part or joint at `offset` from the pelvis at `origin` (turned for a lying ragdoll)
+fn ragdollPlace(origin: [3]Real, offset: [3]f32, turned: bool) [3]Real {
+    const o = turnVector(offset, turned);
+    return .{ origin[0] + o[0], origin[1] + o[1], origin[2] + o[2] };
+}
+
+/// The constraints of `addSwingTwistRagdoll`
+const SwingTwistRagdoll = struct {
+    /// The body handle of the pelvis (the parts follow in `addRagdoll`'s order)
+    pelvis: u32,
+    /// The constraint handles: lower back, chest weld, neck, shoulders, elbows, hips, knees
+    lower_back: u32,
+    neck: u32,
+    shoulders: [2]u32,
+    elbows: [2]u32,
+    hips: [2]u32,
+    knees: [2]u32,
+};
+
+/// The ragdoll of `addRagdoll` (the same 12 parts) with Jolt's ragdoll joints: swing twist joints at the lower back (cone
+/// swing), the shoulders (cone swing with friction), the elbows (pyramid swing that only bends one way: an almost hinge
+/// with a locked swing axis) and the hips (pyramid swing), cone joints at the neck and the knees, the chest welded to the
+/// spine (a FixedConstraint with auto detect point): 11 constraints, 7 swing twists, 3 cones, 1 fixed. `hip_motor` puts
+/// a position motor (spring `hip_spring_mode`) on the swing and twist of the hips with the rest pose as the target.
+fn addSwingTwistRagdoll(b: *SceneBuilder, shapes: RagdollShapes, base: [3]Real, layer: u32, angular_velocity: [3]f32, lying: bool, hip_motor: bool) Allocator.Error!SwingTwistRagdoll {
+    const rotation: [4]f32 = if (lying) axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi) else identity_rotation;
+    const Part = struct { shape: u32, offset: [3]f32 };
+    const parts = [_]Part{
+        .{ .shape = shapes.pelvis, .offset = .{ 0, 0, 0 } }, // 0
+        .{ .shape = shapes.spine, .offset = .{ 0, 0.25, 0 } }, // 1
+        .{ .shape = shapes.chest, .offset = .{ 0, 0.52, 0 } }, // 2
+        .{ .shape = shapes.head, .offset = .{ 0, 0.8, 0 } }, // 3
+        .{ .shape = shapes.upper_arm, .offset = .{ -0.3, 0.48, 0 } }, // 4
+        .{ .shape = shapes.upper_arm, .offset = .{ 0.3, 0.48, 0 } }, // 5
+        .{ .shape = shapes.lower_arm, .offset = .{ -0.3, 0.16, 0 } }, // 6
+        .{ .shape = shapes.lower_arm, .offset = .{ 0.3, 0.16, 0 } }, // 7
+        .{ .shape = shapes.upper_leg, .offset = .{ -0.09, -0.33, 0 } }, // 8
+        .{ .shape = shapes.upper_leg, .offset = .{ 0.09, -0.33, 0 } }, // 9
+        .{ .shape = shapes.lower_leg, .offset = .{ -0.09, -0.76, 0 } }, // 10
+        .{ .shape = shapes.lower_leg, .offset = .{ 0.09, -0.76, 0 } }, // 11
+    };
+    var handles: [parts.len]u32 = undefined;
+    for (parts, &handles) |part, *h|
+        h.* = try b.body(.{ .position = ragdollPlace(base, part.offset, lying), .rotation = rotation, .shape = part.shape, .angular_velocity = angular_velocity, .linear_damping = 0.3, .angular_damping = 0.6, .object_layer = layer }, .activate);
+
+    const up = turnVector(.{ 0, 1, 0 }, lying);
+    const down = turnVector(.{ 0, -1, 0 }, lying);
+    const right = turnVector(.{ 1, 0, 0 }, lying);
+    const forward = turnVector(.{ 0, 0, 1 }, lying);
+    const joint = struct {
+        fn swingTwist(bb: *SceneBuilder, origin: [3]Real, turned: bool, parent: u32, child: u32, point: [3]f32, twist: [3]f32, plane: [3]f32, limits: [4]f32, swing_type: u32, friction: f32) Allocator.Error!u32 {
+            return bb.constraint(swingTwistDesc(parent, child, ragdollPlace(origin, point, turned), twist, plane, limits, swing_type, friction));
+        }
+        fn cone(bb: *SceneBuilder, origin: [3]Real, turned: bool, parent: u32, child: u32, point: [3]f32, twist: [3]f32, half_cone_angle: f32) Allocator.Error!u32 {
+            return bb.constraint(Desc.cone(parent, child, ragdollPlace(origin, point, turned), twist, half_cone_angle));
+        }
+    };
+    var r: SwingTwistRagdoll = undefined;
+    r.pelvis = handles[0];
+    r.lower_back = try joint.swingTwist(b, base, lying, handles[0], handles[1], .{ 0, 0.115, 0 }, up, right, .{ 0.3, 0.2, -0.2, 0.2 }, 0, 0);
+    _ = try b.constraint(Desc.fixedAuto(handles[1], handles[2])); // The chest is welded to the spine
+    r.neck = try joint.cone(b, base, lying, handles[2], handles[3], .{ 0, 0.67, 0 }, up, 0.5);
+    r.shoulders[0] = try joint.swingTwist(b, base, lying, handles[2], handles[4], .{ -0.21, 0.6, 0 }, down, right, .{ 0.9, 0.6, -0.6, 0.6 }, 0, 0.3);
+    r.shoulders[1] = try joint.swingTwist(b, base, lying, handles[2], handles[5], .{ 0.21, 0.6, 0 }, down, right, .{ 0.9, 0.6, -0.6, 0.6 }, 0, 0.3);
+    // Elbows: rotation around the plane axis (swing Z, the normal half cone angle) is locked, the arm bends around the
+    // normal axis (swing Y, the plane half cone angle)
+    r.elbows[0] = try joint.swingTwist(b, base, lying, handles[4], handles[6], .{ -0.3, 0.32, 0 }, down, forward, .{ 0, 1.2, -0.1, 0.1 }, 1, 0);
+    r.elbows[1] = try joint.swingTwist(b, base, lying, handles[5], handles[7], .{ 0.3, 0.32, 0 }, down, forward, .{ 0, 1.2, -0.1, 0.1 }, 1, 0);
+    for (0..2) |side| {
+        const x: f32 = if (side == 0) -0.09 else 0.09;
+        var hip = swingTwistDesc(handles[0], handles[8 + side], ragdollPlace(base, .{ x, -0.115, 0 }, lying), down, forward, .{ 0.7, 0.4, -0.3, 0.3 }, 1, 0);
+        if (hip_motor) {
+            setSwingTwistMotor(&hip, false, SpringModeValue.stiffness_and_damping, .{ 30, 2, -flt_max, flt_max, -20, 20 });
+            setSwingTwistMotor(&hip, true, SpringModeValue.frequency_and_damping, .{ 3, 0.8, -flt_max, flt_max, -5, 5 });
+        }
+        r.hips[side] = try b.constraint(hip);
+        r.knees[side] = try joint.cone(b, base, lying, handles[8 + side], handles[10 + side], .{ x, -0.545, 0 }, down, 0.6);
+    }
+    if (hip_motor) {
+        for (r.hips) |h| {
+            try b.constraintOp(.swing_twist_set_swing_motor_state, h, .{ .i = &.{MotorStateValue.position} });
+            try b.constraintOp(.swing_twist_set_twist_motor_state, h, .{ .i = &.{MotorStateValue.position} });
+        }
+    }
+    return r;
+}
+
+/// 8 ragdolls with swing twist and cone joints (`addSwingTwistRagdoll`, half of them with hip motors) fall in two
+/// columns onto a floor and onto each other and tumble: the joint limits are reached, contacts between the parts of
+/// different ragdolls, cones, swing twists and fixed constraints in one island that the LargeIslandSplitter splits
+fn buildSwingTwistRagdollPile(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 120;
+    b.max_contact_constraints = 4096;
+    _ = try addFloor(b, 20, 0);
+    for (0..8) |i| {
+        const fi: f32 = @floatFromInt(i);
+        const column: Real = if (i % 2 == 0) -0.4 else 0.4;
+        const base: [3]Real = .{ column, 1.2 + 2.0 * real(i / 2), real(0.2 * @sin(fi)) };
+        _ = try addSwingTwistRagdoll(b, shapes, base, Layers.moving, .{ 0.8 * @sin(2 * fi), 0.5, 0.8 * @cos(3 * fi) }, false, i % 2 == 1);
+    }
+}
+
+/// 8 swing twist ragdolls lying on their backs in a row, holding hands (a cone constraint between the lower arms of
+/// neighbours): one island of 95 constraints and the floor contacts that the LargeIslandSplitter splits, which settles
+/// and falls asleep from the final batch of a split island; a push wakes the island up again through its constraints
+fn buildSwingTwistRagdollsLying(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 110;
+    b.max_contact_constraints = 4096;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const lower_arm_left = 6; // Handle offsets from the pelvis (addRagdoll's parts)
+    const lower_arm_right = 7;
+    var pelvis: [8]u32 = undefined;
+    for (&pelvis, 0..) |*h, i| {
+        const base: [3]Real = .{ 0.75 * real(i), 0.2, 0 };
+        h.* = (try addSwingTwistRagdoll(b, shapes, base, Layers.moving, @splat(0), true, i % 3 == 0)).pelvis;
+        if (i > 0) _ = try b.constraint(Desc.cone(pelvis[i - 1] + lower_arm_right, h.* + lower_arm_left, .{ base[0] - 0.375, 0.2, 0.16 }, .{ 1, 0, 0 }, 0.4));
+    }
+    b.at(95);
+    try b.expectSleeping(pelvis[0]);
+    try b.op(.add_impulse, pelvis[5], .{ .f = &.{ 0, 60, 0 } });
+}
+
+/// Swing twist motors in every EMotorState with springs in every ESpringMode, friction and the limits, and cone
+/// constraints in every situation. Five arms hang from the world on swing twist shoulders (cone and pyramid swing):
+/// - friction only (swing and twist off), the arm spins against it;
+/// - velocity motors that drive the arm into the swing and twist limits, then a twist position motor (frequency mode) and
+///   the swing motor off without friction (the motor parts are deactivated), then the twist motor off;
+/// - position motors (stiffness mode) towards a target orientation outside the limits (clamped by SetTargetOrientationCS),
+///   then position and velocity motors with a target angular velocity in body space;
+/// - a swing position motor without stiffness (the parts are deactivated) and a twist position and velocity motor with
+///   damping only, small torque limits;
+/// - mass normalized springs, asymmetric torque limits, target orientations in body space, motor settings changed while
+///   the motors run, the limits changed while they are reached.
+/// The cones: a ball tilted beyond its cone (the limit pushes it back at once) with the world as body 2, a box on a cone
+/// of half angle 0 from another box (the twist axes stay aligned), a cone of half angle pi (never active), a cone in
+/// local space from a kinematic body that moves and turns, SetHalfConeAngle while the limit is reached. A swing twist in
+/// local space from the kinematic body.
+fn buildSwingTwistMotors(b: *SceneBuilder) Allocator.Error!void {
+    const limb = try b.box(.{ 0.1, 0.4, 0.1 }, 0.05);
+    const ball = try b.sphere(0.2);
+    b.num_updates = 120;
+
+    var arms: [5]u32 = undefined;
+    var shoulders: [5]u32 = undefined;
+    for (0..5) |k| {
+        const x: Real = 1.5 * real(k);
+        arms[k] = try b.body(.{ .position = .{ x, 4.5, 0 }, .shape = limb, .angular_velocity = if (k == 0) .{ 0.5, 3, 0.2 } else @splat(0) }, .activate);
+        var d = swingTwistDesc(invalid_handle, arms[k], .{ x, 4.9, 0 }, .{ 0, -1, 0 }, .{ 1, 0, 0 }, .{ 0.8, 0.5, -0.7, 0.7 }, @intCast(k % 2), if (k == 0) 0.4 else 0);
+        switch (k) {
+            1 => setSwingTwistMotor(&d, true, SpringModeValue.frequency_and_damping, .{ 4, 0.5, -flt_max, flt_max, -flt_max, flt_max }),
+            2 => {
+                setSwingTwistMotor(&d, false, SpringModeValue.stiffness_and_damping, .{ 60, 3, -flt_max, flt_max, -40, 40 });
+                setSwingTwistMotor(&d, true, SpringModeValue.stiffness_and_damping, .{ 40, 2, -flt_max, flt_max, -40, 40 });
+            },
+            3 => {
+                setSwingTwistMotor(&d, false, SpringModeValue.stiffness_and_damping, .{ 0, 4, -flt_max, flt_max, -1, 1 });
+                setSwingTwistMotor(&d, true, SpringModeValue.stiffness_and_damping, .{ 0, 4, -flt_max, flt_max, -0.2, 0.2 });
+            },
+            4 => {
+                setSwingTwistMotor(&d, false, SpringModeValue.mass_normalized_stiffness_and_damping, .{ 50, 5, -flt_max, flt_max, -1, 6 });
+                setSwingTwistMotor(&d, true, SpringModeValue.mass_normalized_stiffness_and_damping, .{ 80, 2, -flt_max, flt_max, -6, 1 });
+            },
+            else => {},
+        }
+        shoulders[k] = try b.constraint(d);
+    }
+
+    // The cones
+    // A ball on a cone from the world (body 2): the twist axis of the ball points from the pivot to the ball, the one of
+    // the world down, 45 degrees apart (outside the cone)
+    const tilted = try b.body(.{ .position = .{ -2, 4, 0 }, .shape = ball }, .activate);
+    var tilted_desc = Desc.cone(tilted, invalid_handle, .{ -2.6, 4.6, 0 }, .{ 0.70710677, -0.70710677, 0 }, 0.3);
+    Desc.set3(tilted_desc.f[3..], .{ 0, -1, 0 });
+    const tilted_cone = try b.constraint(tilted_desc);
+    const upper = try b.body(.{ .position = .{ -4, 4.5, 0 }, .shape = limb }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, upper, .{ -4, 4.9, 0 }));
+    const lower = try b.body(.{ .position = .{ -4, 3.7, 0 }, .shape = limb, .angular_velocity = .{ 0, 0, 2 } }, .activate);
+    _ = try b.constraint(Desc.cone(upper, lower, .{ -4, 4.1, 0 }, .{ 0, -1, 0 }, 0));
+    const free = try b.body(.{ .position = .{ -6, 4.5, 0 }, .shape = limb, .angular_velocity = .{ 2, 0, 1 } }, .activate);
+    _ = try b.constraint(Desc.cone(invalid_handle, free, .{ -6, 4.9, 0 }, .{ 0, -1, 0 }, std.math.pi));
+    const kinematic = try b.body(.{ .position = .{ 10, 5, 0 }, .shape = limb, .motion_type = 1 }, .activate);
+    const on_kinematic = try b.body(.{ .position = .{ 10, 4.2, 0 }, .shape = limb }, .activate);
+    var local_cone = Desc.cone(kinematic, on_kinematic, .{ 0, -0.4, 0 }, .{ 0, -1, 0 }, 0.4);
+    local_cone.i[0] = ConstraintSpace.local_to_body_com;
+    local_cone.r[3] = 0;
+    local_cone.r[4] = 0.4;
+    local_cone.r[5] = 0;
+    const kinematic_cone = try b.constraint(local_cone);
+    const on_kinematic2 = try b.body(.{ .position = .{ 11, 4.5, 0 }, .shape = limb }, .activate);
+    var local_swing_twist = swingTwistDesc(kinematic, on_kinematic2, .{ 0.5, 0.1, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0.6, 0.6, -1, 1 }, 0, 0.1);
+    local_swing_twist.i[0] = ConstraintSpace.local_to_body_com;
+    local_swing_twist.r[3] = -0.5;
+    local_swing_twist.r[4] = 0.6;
+    local_swing_twist.r[5] = 0;
+    const kinematic_swing_twist = try b.constraint(local_swing_twist);
+
+    // Arm 1: velocity motors into the limits
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[1], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[1], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, shoulders[1], .{ .f = &.{ 3, 1.5, -1 } });
+    // Arm 2: position motors towards a target outside the limits (clamped)
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[2], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[2], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_target_orientation_cs, shoulders[2], .{ .f = &axisAngle(normalize3(.{ 0.6, 0.8, 0 }), 1.6) });
+    // Arm 3: a swing position motor without stiffness, a twist position and velocity motor with damping only
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[3], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[3], .{ .i = &.{MotorStateValue.position_and_velocity} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, shoulders[3], .{ .f = &.{ 4, 0.5, 0.5 } });
+    // Arm 4: mass normalized springs towards a target in body space
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[4], .{ .i = &.{MotorStateValue.position_and_velocity} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[4], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_target_orientation_bs, shoulders[4], .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.4) });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_bs, shoulders[4], .{ .f = &.{ 0, 0.2, 0.3 } });
+    // The kinematic body moves and turns
+    try b.op(.set_linear_velocity, kinematic, .{ .f = &.{ 0.3, 0, 0.2 } });
+    try b.op(.set_angular_velocity, kinematic, .{ .f = &.{ 0, 0.8, 0.4 } });
+
+    b.at(30);
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[1], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[1], .{ .i = &.{MotorStateValue.off} });
+    try b.constraintOp(.swing_twist_set_target_orientation_cs, shoulders[1], .{ .f = &axisAngle(.{ 1, 0, 0 }, -0.4) });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[2], .{ .i = &.{MotorStateValue.position_and_velocity} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[2], .{ .i = &.{MotorStateValue.position_and_velocity} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_bs, shoulders[2], .{ .f = &.{ 0.5, -0.5, 0.2 } });
+    try b.constraintOp(.swing_twist_set_swing_motor_settings, shoulders[4], .{ .i = &.{SpringModeValue.frequency_and_damping}, .f = &.{ 1.5, 0.3, -flt_max, flt_max, -3, 3 } });
+    try b.constraintOp(.cone_set_half_cone_angle, tilted_cone, .{ .f = &.{0.6} });
+    try b.constraintOp(.constraint_settings_hash, shoulders[2], .{});
+    b.at(50);
+    try b.constraintOp(.swing_twist_set_normal_half_cone_angle, shoulders[1], .{ .f = &.{0.2} });
+    try b.constraintOp(.swing_twist_set_plane_half_cone_angle, shoulders[1], .{ .f = &.{0.3} });
+    try b.constraintOp(.swing_twist_set_twist_min_angle, shoulders[2], .{ .f = &.{-0.2} });
+    try b.constraintOp(.swing_twist_set_twist_max_angle, shoulders[2], .{ .f = &.{0.1} });
+    try b.constraintOp(.swing_twist_set_max_friction_torque, shoulders[0], .{ .f = &.{2} });
+    try b.constraintOp(.swing_twist_set_twist_motor_settings, shoulders[3], .{ .i = &.{SpringModeValue.stiffness_and_damping}, .f = &.{ 20, 1, -flt_max, flt_max, -0.5, 2 } });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[3], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.swing_twist_set_target_orientation_bs, shoulders[4], .{ .f = &axisAngle(.{ 1, 0, 0 }, 0.9) });
+    try b.constraintOp(.cone_set_half_cone_angle, kinematic_cone, .{ .f = &.{0.1} });
+    try b.op(.set_angular_velocity, kinematic, .{ .f = &.{ 0.7, 0, -0.5 } });
+    b.at(80);
+    try b.constraintOp(.swing_twist_set_twist_motor_state, shoulders[1], .{ .i = &.{MotorStateValue.off} });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, shoulders[2], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, shoulders[2], .{ .f = &.{ 0, 0, 0 } });
+    try b.constraintOp(.reset_constraint_warm_start, shoulders[4], .{});
+    try b.constraintOp(.notify_constraint_shape_changed, kinematic_swing_twist, .{ .body = on_kinematic2, .f = &.{ 0, 0.05, 0 } });
+    try b.constraintOp(.constraint_settings_hash, kinematic_swing_twist, .{});
+    try b.constraintOp(.constraint_settings_hash, kinematic_cone, .{});
+    try b.constraintOp(.constraint_settings_hash, tilted_cone, .{});
+}
+
+/// A normalized [3]f32 (computed in f64 by the scene builder)
+fn normalize3(v: [3]f32) [3]f32 {
+    const len = @sqrt(@as(f64, v[0]) * v[0] + @as(f64, v[1]) * v[1] + @as(f64, v[2]) * v[2]);
+    return .{ @floatCast(v[0] / len), @floatCast(v[1] / len), @floatCast(v[2] / len) };
+}
+
+/// A chain hanging from the world: links alternate between swing twist joints (cone swing, pyramid swing) with motors and
+/// cone joints, 6 boxes; returns the constraint handles
+fn addConeSwingTwistChain(b: *SceneBuilder, shape: u32, origin: [3]Real, layer: u32, handles: *[6]u32, bodies: *[6]u32) Allocator.Error!void {
+    var previous: u32 = invalid_handle;
+    for (0..6) |i| {
+        const x: Real = origin[0] + 0.5 * real(i);
+        const y: Real = origin[1];
+        const z: Real = origin[2];
+        const h = try b.body(.{ .position = .{ x, y, z }, .shape = shape, .angular_velocity = .{ 0, 0.4, 0.3 }, .object_layer = layer }, .activate);
+        const p: [3]Real = .{ x - 0.25, y, z };
+        handles[i] = if (i % 2 == 0)
+            try b.constraint(swingTwistDesc(previous, h, p, .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0.5, 0.4, -0.3, 0.6 }, @intCast((i / 2) % 2), 0.05))
+        else
+            try b.constraint(Desc.cone(previous, h, p, .{ 1, 0, 0 }, 0.35));
+        bodies[i] = h;
+        previous = h;
+    }
+}
+
+/// Cone and swing twist constraints across cross save / restore and partial states: the motor states, the targets, the
+/// warm start impulses and the rotation axis of the cones are state. Snapshots of everything and of the constraints
+/// only, motor states and targets changed between snapshot and restore, ResetWarmStart before a restore, other physics
+/// settings (no warm start, more steps)
+fn buildConeSwingTwistSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.12, 0.12 }, 0.05);
+    b.num_updates = 90;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+    const state_bodies: u32 = 2; // EStateRecorderState::Bodies
+    var no_warm_start = b.settings;
+    no_warm_start.constraint_warm_start = 0;
+    no_warm_start.num_velocity_steps = 4;
+    const settings1 = try b.addPhysicsSettings(no_warm_start);
+    var links: [6]u32 = undefined;
+    var bodies: [6]u32 = undefined;
+    try addConeSwingTwistChain(b, box, .{ 0, 6, 0 }, Layers.unused1, &links, &bodies);
+    try b.constraintOp(.swing_twist_set_twist_motor_state, links[0], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, links[0], .{ .f = &.{ 1, 0, 0 } });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, links[2], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_target_orientation_cs, links[2], .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.3) });
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(20);
+    try b.constraintOp(.swing_twist_set_twist_motor_state, links[0], .{ .i = &.{MotorStateValue.off} });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, links[2], .{ .i = &.{MotorStateValue.position_and_velocity} });
+    try b.constraintOp(.swing_twist_set_target_orientation_cs, links[2], .{ .f = &axisAngle(.{ 0, 1, 0 }, -0.3) });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, links[2], .{ .f = &.{ 0, 0.5, 0 } });
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(30);
+    try b.constraintOp(.swing_twist_set_twist_motor_state, links[4], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.reset_constraint_warm_start, links[1], .{});
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // The motors of update 15 again
+    b.at(40);
+    try b.sysOp(.set_physics_settings, .{ .index = settings1 });
+    try b.constraintOp(.swing_twist_set_swing_motor_state, links[2], .{ .i = &.{MotorStateValue.off} });
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 20: the swing motor of links[2] runs again
+    b.at(50);
+    try b.sysOp(.snapshot, .{ .index = 2, .i = &.{state_bodies | state_constraints} });
+    try b.op(.add_impulse, bodies[5], .{ .f = &.{ 0, 0, 2 } });
+    try b.constraintOp(.cone_set_half_cone_angle, links[3], .{ .f = &.{0.05} });
+    b.at(60);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+    try b.constraintOp(.reset_constraint_warm_start, links[5], .{});
+    b.at(70);
+    try b.sysOp(.snapshot, .{ .index = 3 });
+    b.at(75);
+    try b.sysOp(.restore_cross, .{ .index = 3 });
+}
+
+/// Cone and swing twist constraints and sleeping bodies (without contacts): a chain held up by a swing position motor
+/// comes to rest and falls asleep; a new target orientation does not wake it (the setters do not activate bodies), a
+/// force on its lowest box wakes the chain link by link; a cone between two sleeping bodies is not active until
+/// ActivateConstraint; a swing twist between an awake body and a sleeping one wakes the sleeping one from inside the
+/// update
+fn buildConeSwingTwistSleeping(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.12, 0.25, 0.12 }, 0.05);
+    b.num_updates = 120;
+    b.settings.time_before_sleep = 0.2;
+    var chain: [4]u32 = undefined;
+    var links: [4]u32 = undefined;
+    var previous: u32 = invalid_handle;
+    for (0..4) |i| {
+        const y: Real = 5 - 0.55 * real(i);
+        const h = try b.body(.{ .position = .{ 0, y, 0 }, .shape = box, .linear_damping = 0.5, .angular_damping = 0.5 }, .activate);
+        const p: [3]Real = .{ 0, y + 0.275, 0 };
+        links[i] = if (i % 2 == 0)
+            try b.constraint(swingTwistDesc(previous, h, p, .{ 0, -1, 0 }, .{ 1, 0, 0 }, .{ 0.4, 0.4, -0.2, 0.2 }, 0, 0.2))
+        else
+            try b.constraint(Desc.cone(previous, h, p, .{ 0, -1, 0 }, 0.3));
+        chain[i] = h;
+        previous = h;
+    }
+    try b.constraintOp(.swing_twist_set_swing_motor_state, links[0], .{ .i = &.{MotorStateValue.position} });
+    try b.constraintOp(.swing_twist_set_twist_motor_state, links[2], .{ .i = &.{MotorStateValue.position} });
+    const asleep1 = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const asleep2 = try b.body(.{ .position = .{ 3, 4.45, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const awake = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = box, .gravity_factor = 0, .angular_velocity = .{ 0, 1, 0 }, .allow_sleeping = 0 }, .activate);
+    const asleep3 = try b.body(.{ .position = .{ 6, 4.45, 0 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    b.at(5);
+    const sleeping_cone = try b.constraint(Desc.cone(asleep1, asleep2, .{ 3, 4.725, 0 }, .{ 0, -1, 0 }, 0.2));
+    try b.expectConstraintState(sleeping_cone, ConstraintState.inactive);
+    _ = try b.constraint(swingTwistDesc(awake, asleep3, .{ 6, 4.725, 0 }, .{ 0, -1, 0 }, .{ 1, 0, 0 }, .{ 0.3, 0.3, -0.5, 0.5 }, 1, 0)); // Wakes asleep3 in the next update
+    b.at(6);
+    try b.expectAwake(asleep3);
+    try b.expectSleeping(asleep1);
+    b.at(60);
+    try b.expectSleeping(chain[0]);
+    try b.expectSleeping(chain[3]);
+    try b.constraintOp(.swing_twist_set_target_orientation_cs, links[0], .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.3) });
+    b.at(61);
+    try b.expectSleeping(chain[0]); // Setting a target does not wake the bodies
+    try b.constraintOp(.activate_constraint, sleeping_cone, .{});
+    try b.expectAwake(asleep1);
+    try b.expectAwake(asleep2);
+    try b.op(.add_force, chain[3], .{ .f = &.{ 50, 0, 0 } });
+    b.at(62);
+    try b.expectAwake(chain[2]); // The force activated the lowest box, BuildIslands of its constraint the box above it
+    b.at(65);
+    try b.expectAwake(chain[0]);
+}
+
+/// Cone and swing twist chains with several collision steps per update and changing update parameters (the warm start
+/// impulses are scaled by the step ratio), with motors
+fn buildConeSwingTwistCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 0.25, 0.12, 0.12 }, 0.05);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var links: [6]u32 = undefined;
+            var bodies: [6]u32 = undefined;
+            try addConeSwingTwistChain(b, box, .{ 0, 6, 0 }, Layers.unused1, &links, &bodies);
+            try b.constraintOp(.swing_twist_set_twist_motor_state, links[0], .{ .i = &.{MotorStateValue.velocity} });
+            try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, links[0], .{ .f = &.{ 2, 0, 0 } });
+            try b.constraintOp(.swing_twist_set_swing_motor_state, links[4], .{ .i = &.{MotorStateValue.position_and_velocity} });
+            try b.constraintOp(.swing_twist_set_target_orientation_cs, links[4], .{ .f = &axisAngle(.{ 0, 1, 0 }, 0.3) });
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Cone and swing twist chains far from the origin (world space positions are Real: in double precision the anchors keep
+/// their precision) that fall onto a floor: contacts and constraints in the same islands
+fn buildConeSwingTwistFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.12, 0.12 }, 0.05);
+    b.num_updates = 70;
+    const o: [3]Real = .{ -7000, 150, 9000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    var links: [6]u32 = undefined;
+    var bodies: [6]u32 = undefined;
+    try addConeSwingTwistChain(b, box, .{ o[0] - 1.5, o[1] + 2, o[2] }, Layers.moving, &links, &bodies);
+    try b.constraintOp(.swing_twist_set_twist_motor_state, links[2], .{ .i = &.{MotorStateValue.velocity} });
+    try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, links[2], .{ .f = &.{ 3, 0, 0 } });
+    // A loose pair (cone + swing twist between dynamic bodies) falls onto the floor
+    const a = try b.body(.{ .position = .{ o[0] + 3, o[1] + 1.5, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const c = try b.body(.{ .position = .{ o[0] + 3.5, o[1] + 1.6, o[2] + 0.1 }, .shape = box, .angular_velocity = .{ 2, 1, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(swingTwistDesc(a, c, .{ o[0] + 3.25, o[1] + 1.55, o[2] + 0.05 }, .{ 1, 0, 0 }, .{ 0, 0, 1 }, .{ 0.2, 0.6, -0.4, 0.4 }, 1, 0.1));
+    const d = try b.body(.{ .position = .{ o[0] + 4, o[1] + 1.7, o[2] + 0.2 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.cone(c, d, .{ o[0] + 3.75, o[1] + 1.65, o[2] + 0.15 }, .{ 1, 0, 0 }, 0.1));
+    b.at(40);
+    try b.op(.add_impulse, bodies[5], .{ .f = &.{ 0, 1, 1 } });
+}
+
+/// Random bodies (dynamic, kinematic, static; every basic shape) with random cone, swing twist, point and fixed
+/// constraints between them and to the world (random frames, limits, swing types, friction, motors with springs in
+/// every mode, both spaces), on a floor in a container, and random operations between the updates (every setter of the
+/// two classes, motor states, targets, enable, remove / add, ResetWarmStart, impulses)
+fn buildConeSwingTwistRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0xc0e5_7700 +% seed *% 0x9e3779b9;
+            const shapes = try BasicShapes.add(b);
+            b.num_updates = 80;
+            b.max_contact_constraints = 2048;
+            try addContainer(b, 6, 2);
+            const num_bodies = 20;
+            var bodies: [num_bodies]u32 = undefined;
+            for (&bodies, 0..) |*h, i| {
+                const motion_type: u32 = if (b.oneIn(8)) 0 else if (b.oneIn(7)) 1 else 2;
+                const p = b.vec3(-4, 4);
+                h.* = try b.body(.{
+                    .position = .{ p[0], 1.5 + 0.8 * real(i), p[2] },
+                    .rotation = b.rotation(),
+                    .shape = shapes.pick(b.index(6)),
+                    .motion_type = motion_type,
+                    .linear_velocity = if (motion_type == 1) b.vec3(-0.5, 0.5) else @splat(0),
+                    .angular_velocity = if (motion_type != 0) b.vec3(-1, 1) else @splat(0),
+                    .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+                }, if (motion_type == 0) .dont_activate else .activate);
+            }
+            const num_constraints = 18;
+            var handles: [num_constraints]u32 = undefined;
+            var is_swing_twist: [num_constraints]bool = @splat(false);
+            var is_cone: [num_constraints]bool = @splat(false);
+            var in_system: [num_constraints]bool = @splat(true);
+            for (&handles, 0..) |*c, k| {
+                const index1 = b.index(num_bodies + 1); // num_bodies: the world
+                var index2 = b.index(num_bodies);
+                if (index2 == index1) index2 = (index2 + 1) % num_bodies;
+                const body1 = if (index1 == num_bodies) invalid_handle else bodies[index1];
+                const body2 = bodies[index2];
+                const p1 = b.vec3(-4, 4);
+                const p2 = if (b.oneIn(2)) p1 else b.vec3(-4, 4);
+                const space = if (b.oneIn(4)) ConstraintSpace.local_to_body_com else ConstraintSpace.world_space;
+                const q1 = b.rotation();
+                const q2 = if (b.oneIn(2)) q1 else b.rotation();
+                var desc: SimConstraint = undefined;
+                switch (b.index(5)) {
+                    0, 1 => {
+                        desc = Desc.defaults(.swing_twist);
+                        desc.i[0] = space;
+                        desc.i[1] = b.index(2);
+                        Desc.setR3(desc.r[0..], r3(p1));
+                        Desc.setR3(desc.r[3..], r3(p2));
+                        Desc.set3(desc.f[0..], rotateAxis(q1, 0));
+                        Desc.set3(desc.f[3..], rotateAxis(q1, 1));
+                        Desc.set3(desc.f[6..], rotateAxis(q2, 0));
+                        Desc.set3(desc.f[9..], rotateAxis(q2, 1));
+                        desc.f[12] = randomAngle(b, 0, std.math.pi);
+                        desc.f[13] = randomAngle(b, 0, std.math.pi);
+                        desc.f[14] = randomAngle(b, -std.math.pi, 0);
+                        desc.f[15] = randomAngle(b, 0, std.math.pi);
+                        desc.f[16] = if (b.oneIn(2)) 0 else b.float(0, 3);
+                        randomMotor(b, &desc, false);
+                        randomMotor(b, &desc, true);
+                        is_swing_twist[k] = true;
+                    },
+                    2, 3 => {
+                        desc = Desc.defaults(.cone);
+                        desc.i[0] = space;
+                        Desc.setR3(desc.r[0..], r3(p1));
+                        Desc.setR3(desc.r[3..], r3(p2));
+                        Desc.set3(desc.f[0..], rotateAxis(q1, 0));
+                        Desc.set3(desc.f[3..], rotateAxis(q2, 0));
+                        desc.f[6] = randomAngle(b, 0, std.math.pi);
+                        is_cone[k] = true;
+                    },
+                    else => desc = if (b.oneIn(2)) Desc.fixedAuto(body1, body2) else Desc.point(body1, body2, ConstraintSpace.world_space, r3(p1), r3(p2)),
+                }
+                desc.body1 = body1;
+                desc.body2 = body2;
+                desc.constraint_priority = b.index(3);
+                if (b.oneIn(6)) desc.num_velocity_steps_override = 1 + b.index(15);
+                if (b.oneIn(6)) desc.num_position_steps_override = 1 + b.index(5);
+                if (b.oneIn(10)) desc.enabled = 0;
+                desc.user_data = b.next(); // Odd: not saved by the state filter of the end of the scene
+                c.* = try b.constraint(desc);
+            }
+            var update: u32 = 3;
+            while (update < b.num_updates) : (update += 1 + b.index(6)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_constraints);
+                    const c = handles[k];
+                    if (is_swing_twist[k] and !b.oneIn(4)) {
+                        switch (b.index(13)) {
+                            0 => try b.constraintOp(.swing_twist_set_normal_half_cone_angle, c, .{ .f = &.{randomAngle(b, 0, std.math.pi)} }),
+                            1 => try b.constraintOp(.swing_twist_set_plane_half_cone_angle, c, .{ .f = &.{randomAngle(b, 0, std.math.pi)} }),
+                            2 => try b.constraintOp(.swing_twist_set_twist_min_angle, c, .{ .f = &.{randomAngle(b, -std.math.pi, 0)} }),
+                            3 => try b.constraintOp(.swing_twist_set_twist_max_angle, c, .{ .f = &.{randomAngle(b, 0, std.math.pi)} }),
+                            4 => try b.constraintOp(.swing_twist_set_max_friction_torque, c, .{ .f = &.{b.float(0, 3)} }),
+                            5, 6 => try b.constraintOp(.swing_twist_set_swing_motor_state, c, .{ .i = &.{b.index(4)} }),
+                            7 => try b.constraintOp(.swing_twist_set_twist_motor_state, c, .{ .i = &.{b.index(4)} }),
+                            8 => try b.constraintOp(.swing_twist_set_target_angular_velocity_cs, c, .{ .f = &b.vec3(-3, 3) }),
+                            9 => try b.constraintOp(.swing_twist_set_target_angular_velocity_bs, c, .{ .f = &b.vec3(-3, 3) }),
+                            10 => try b.constraintOp(.swing_twist_set_target_orientation_cs, c, .{ .f = &b.rotation() }),
+                            11 => try b.constraintOp(.swing_twist_set_target_orientation_bs, c, .{ .f = &b.rotation() }),
+                            else => {
+                                var m: [6]f32 = undefined;
+                                const mode = randomMotorValues(b, &m);
+                                try b.constraintOp(if (b.oneIn(2)) .swing_twist_set_swing_motor_settings else .swing_twist_set_twist_motor_settings, c, .{ .i = &.{mode}, .f = &m });
+                            },
+                        }
+                    } else if (is_cone[k] and !b.oneIn(3)) {
+                        try b.constraintOp(.cone_set_half_cone_angle, c, .{ .f = &.{randomAngle(b, 0, std.math.pi)} });
+                    } else switch (b.index(6)) {
+                        0 => try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{b.index(2)} }),
+                        1 => {
+                            try b.constraintOp(if (in_system[k]) .remove_constraint else .add_constraint, c, .{});
+                            in_system[k] = !in_system[k];
+                        },
+                        2 => try b.constraintOp(.activate_constraint, c, .{}),
+                        3 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        4 => try b.constraintOp(.constraint_settings_hash, c, .{}),
+                        else => try b.op(.add_impulse, bodies[b.index(num_bodies)], .{ .f = &b.vec3(-3, 3) }),
+                    }
+                }
+            }
+        }
+    }.build;
+}
+
+/// Axis `axis` (0: X, 1: Y) of the rotation `q` (x, y, z, w) (computed in f64 by the scene builder)
+fn rotateAxis(q: [4]f32, axis: u32) [3]f32 {
+    const x: f64 = q[0];
+    const y: f64 = q[1];
+    const z: f64 = q[2];
+    const w: f64 = q[3];
+    const v: [3]f64 = if (axis == 0)
+        .{ 1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y) }
+    else
+        .{ 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x) };
+    return normalize3(.{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) });
+}
+
+/// A random angle in [min, max], the bounds themselves now and then
+fn randomAngle(b: *SceneBuilder, min: f32, max: f32) f32 {
+    return switch (b.index(6)) {
+        0 => min,
+        1 => max,
+        else => b.float(min, max),
+    };
+}
+
+/// A valid random motor (MotorSettings::IsValid): returns the spring mode, the frequency / stiffness, damping and the
+/// limits in `m`
+fn randomMotorValues(b: *SceneBuilder, m: *[6]f32) u32 {
+    const mode = b.index(3);
+    m[0] = if (b.oneIn(4)) 0 else if (mode == 0) b.float(0.5, 10) else b.float(1, 100);
+    m[1] = if (b.oneIn(3)) 0 else b.float(0, 2);
+    m[2] = -flt_max;
+    m[3] = flt_max;
+    const torque = if (b.oneIn(3)) flt_max else b.float(0.1, 50);
+    m[4] = -torque;
+    m[5] = torque;
+    return mode;
+}
+
+/// A random swing (`twist` false) or twist motor of a swing twist description
+fn randomMotor(b: *SceneBuilder, c: *SimConstraint, twist: bool) void {
+    var m: [6]f32 = undefined;
+    const mode = randomMotorValues(b, &m);
+    setSwingTwistMotor(c, twist, mode, m);
 }
 
 // (append the scenes of the cone / swing twist group here)
