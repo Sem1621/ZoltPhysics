@@ -578,8 +578,125 @@ const PointKind = struct {
     }
 };
 
-// ---- SLOT hinge (Zolt/Physics/Constraints/HingeConstraint.zig, Phase 6 worker: replace with a slot like FixedKind) ----
-const HingeKind = StubKind(zolt.HingeConstraintSettings);
+// ---- SLOT hinge (Zolt/Physics/Constraints/HingeConstraint.zig) ----
+const HingeKind = struct {
+    pub const Settings = zolt.HingeConstraintSettings;
+    pub const Constraint = zolt.HingeConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.point1 = loadR3(d.r[0..3]);
+        s.hinge_axis1 = load3(d.f[0..3]);
+        s.normal_axis1 = load3(d.f[3..6]);
+        s.point2 = loadR3(d.r[3..6]);
+        s.hinge_axis2 = load3(d.f[6..9]);
+        s.normal_axis2 = load3(d.f[9..12]);
+        s.limits_min = d.f[12];
+        s.limits_max = d.f[13];
+        s.limits_spring_settings = loadSpring(d.i[1], d.f[14..16]);
+        s.max_friction_torque = d.f[16];
+        s.motor_settings = loadMotor(d.i[2], d.f[17..23]);
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        const f = &op.f;
+        switch (op.op) {
+            16 => c.setMaxFrictionTorque(f[0]),
+            17 => c.setMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            18 => c.setTargetAngularVelocity(f[0]),
+            19 => c.setTargetAngle(f[0]),
+            20 => c.setTargetOrientationBS(loadQuat(f[0..4])),
+            21 => c.setLimits(f[0], f[1]),
+            22 => c.setLimitsSpringSettings(loadSpring(op.i[0], f[0..2])),
+            23 => c.getMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            else => {
+                std.debug.print("hinge: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.v3(c.getLocalSpacePoint1());
+        rec.v3(c.getLocalSpacePoint2());
+        rec.v3(c.getLocalSpaceHingeAxis1());
+        rec.v3(c.getLocalSpaceHingeAxis2());
+        rec.v3(c.getLocalSpaceNormalAxis1());
+        rec.v3(c.getLocalSpaceNormalAxis2());
+        rec.f(c.getCurrentAngle());
+        rec.f(c.getMaxFrictionTorque());
+        rec.motor(c.getMotorSettings());
+        rec.i(@bitCast(@intFromEnum(c.getMotorState())));
+        rec.f(c.getTargetAngularVelocity());
+        rec.f(c.getTargetAngle());
+        rec.f(c.getLimitsMin());
+        rec.f(c.getLimitsMax());
+        rec.b(c.hasLimits());
+        rec.spring(c.getLimitsSpringSettings().*);
+        rec.v3(c.getTotalLambdaPosition());
+        rec.v2(c.getTotalLambdaRotation());
+        rec.f(c.getTotalLambdaRotationLimits());
+        rec.f(c.getTotalLambdaMotor());
+    }
+
+    /// Is the minimum limit closer to the angle than the maximum (HingeConstraint::IsMinLimitClosest)
+    fn minLimitClosest(c: *const Constraint) bool {
+        return @abs(math.centerAngleAroundZero(c.theta - c.getLimitsMin())) < @abs(math.centerAngleAroundZero(c.theta - c.getLimitsMax()));
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        const limits_min = d.f[12];
+        const limits_max = d.f[13];
+        const has_limits = limits_min > -math.pi or limits_max < math.pi;
+        cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+        cov.hit("same frames on both bodies", load3(d.f[0..3]).eql(load3(d.f[6..9])) and load3(d.f[3..6]).eql(load3(d.f[9..12])));
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+        cov.hit("settings with equal limits (soft)", limits_min == limits_max);
+        cov.hit("settings with soft limits", has_limits and d.f[14] > 0.0);
+        cov.hit("settings with hard limits", has_limits and d.f[14] <= 0.0);
+        cov.hit("limits spring in stiffness mode", d.i[1] != 0 and d.f[14] > 0.0);
+        cov.hit("motor without stiffness", d.f[17] == 0.0);
+
+        var ops: [8]bool = @splat(false);
+        var motor_states: [4]bool = @splat(false);
+        var equal_limits_op = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op >= 16 and op.op < 24) ops[op.op - 16] = true;
+            if (op.op == 17 and op.i[0] < 4 and op.frame < sc.num_frames) motor_states[op.i[0]] = true;
+            if (op.op == 21 and op.f[0] == op.f[1]) equal_limits_op = true;
+        }
+        cov.hit("SetMaxFrictionTorque", ops[0]);
+        cov.hit("SetTargetAngularVelocity", ops[2]);
+        cov.hit("SetTargetAngle", ops[3]);
+        cov.hit("SetTargetOrientationBS", ops[4]);
+        cov.hit("SetLimits", ops[5]);
+        cov.hit("SetLimitsSpringSettings", ops[6]);
+        cov.hit("GetMotorSettings() =", ops[7]);
+        cov.hit("SetLimits with equal limits", equal_limits_op);
+        cov.hit("motor state off before a frame", motor_states[0]);
+        cov.hit("motor state velocity before a frame", motor_states[1]);
+        cov.hit("motor state position before a frame", motor_states[2]);
+        cov.hit("motor state position and velocity before a frame", motor_states[3]);
+
+        // The state of the parts at the end (after the last SetupVelocityConstraint / SolvePositionConstraint)
+        const limits_active = c.rotation_limits_constraint_part.isActive();
+        const equal = c.getLimitsMin() == c.getLimitsMax();
+        cov.hit("limits part active, min limit closest", limits_active and !equal and minLimitClosest(c));
+        cov.hit("limits part active, max limit closest", limits_active and !equal and !minLimitClosest(c));
+        cov.hit("limits part active, equal limits", limits_active and equal);
+        const motor_active = c.motor_constraint_part.isActive();
+        cov.hit("friction part active", motor_active and c.getMotorState() == .off);
+        cov.hit("velocity motor active", motor_active and c.getMotorState() == .velocity);
+        cov.hit("position motor active", motor_active and c.getMotorState() == .position);
+        cov.hit("position and velocity motor active", motor_active and c.getMotorState() == .position_and_velocity);
+        cov.hit("position motor without stiffness (inactive)", !motor_active and c.getMotorState() == .position and !c.getMotorSettings().spring_settings.hasStiffness());
+    }
+};
 
 // ---- SLOT slider (Zolt/Physics/Constraints/SliderConstraint.zig) ----
 const SliderKind = StubKind(zolt.SliderConstraintSettings);
@@ -1259,6 +1376,7 @@ fn genHingeLimits(g: *Gen, out: []f32) void {
 /// Hinge: I[0] space; R[0..3] point 1, R[3..6] point 2; F[0..12] hinge axis 1, normal axis 1, hinge axis 2, normal axis
 /// 2, F[12] limits min, F[13] limits max, limits spring I[1] F[14..16], F[16] max friction torque, motor I[2] F[17..23]
 fn genHinge(g: *Gen, sc: *CSScenario) void {
+    genHingeRotationDOFs(sc);
     const s = &sc.settings;
     s.i[0] = g.space();
     g.point(sc, s.i[0], s.r[0..3]);
@@ -1271,21 +1389,75 @@ fn genHinge(g: *Gen, sc: *CSScenario) void {
     store3(frame2[1], s.f[9..12]);
     genHingeLimits(g, s.f[12..14]);
     g.spring(&s.i[1], s.f[14..16]);
+    // Equal limits only with a soft limits spring (the constructor asserts "better use a fixed constraint" otherwise)
+    if (s.f[14] > 0.0 and g.oneIn(5)) {
+        s.f[12] = 0.0;
+        s.f[13] = 0.0;
+    }
     s.f[16] = if (g.oneIn(2)) 0.0 else g.float(0, 10);
-    g.motor(&s.i[2], s.f[17..23]);
+    genHingeMotor(g, &s.i[2], s.f[17..23]);
+    if (g.oneIn(12)) {
+        // An exactly satisfied hinge (SolvePositionConstraint applies no impulse): both bodies at the same position
+        // without rotation and center of mass offset, the hinge at the center of mass, the same axis aligned frames
+        for (&sc.body) |*b| {
+            b.rotation = .{ 0, 0, 0, 1 };
+            b.com_offset = @splat(0);
+        }
+        sc.body[1].position = if (sc.body[0].fixed_to_world != 0) @splat(0) else sc.body[0].position;
+        s.i[0] = @intFromEnum(ConstraintSpace.local_to_body_com);
+        s.r = @splat(0);
+        for ([_]usize{ 0, 6 }) |k| {
+            store3(Vec3.axisX(), s.f[k..][0..3]);
+            store3(Vec3.axisY(), s.f[k + 3 ..][0..3]);
+        }
+    }
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, @intCast(16 + g.index(8)), .{});
         switch (op.op) {
-            16 => op.f[0] = g.float(0, 10),
+            16 => op.f[0] = if (g.oneIn(4)) 0.0 else g.float(0, 10),
             17 => op.i[0] = g.motorState(),
             18 => op.f[0] = g.float(-10, 10),
             19 => op.f[0] = g.float(-4, 4),
             20 => storeQuat(g.quat(), op.f[0..4]),
-            21 => genHingeLimits(g, op.f[0..2]),
+            21 => if (g.oneIn(6)) {
+                // Equal limits (SetLimits does not assert on them)
+                op.f[0] = 0.0;
+                op.f[1] = 0.0;
+            } else genHingeLimits(g, op.f[0..2]),
             22 => g.spring(&op.i[0], op.f[0..2]),
-            23 => g.motor(&op.i[0], op.f[0..6]),
+            23 => genHingeMotor(g, &op.i[0], op.f[0..6]),
             else => unreachable,
         }
+    }
+}
+
+/// A hinge motor: a valid motor (`Gen.motor`), sometimes without stiffness (a position motor is then off) and without
+/// damping (a position and velocity motor too, in frequency mode)
+/// The HingeRotationConstraintPart inverts the summed inverse inertia of the bodies for the two axes perpendicular to the
+/// hinge axis (a 2x2 matrix, Mat22::SetInversed only rejects an exact zero determinant). When the only dynamic body (or
+/// both) can rotate around some axes only, that matrix is singular, the inverse of its rounding errors is huge and the
+/// velocities become NaN, which Jolt asserts (MotionProperties::ApplyAngularVelocityStep). So a dynamic body keeps
+/// partially allowed rotations only when the other body is dynamic and rotates freely; otherwise it gets all three
+/// rotations back (the translation DOFs stay as generated, a body without any rotation DOF stays: its inverse inertia is
+/// exactly zero).
+fn genHingeRotationDOFs(sc: *CSScenario) void {
+    const rotation: u32 = 0b111000;
+    for (0..2) |k| {
+        const body = &sc.body[k];
+        const other = &sc.body[1 - k];
+        const dynamic = body.motion_type == @intFromEnum(MotionType.dynamic) and body.fixed_to_world == 0;
+        const partial = (body.allowed_dofs & rotation) != 0 and (body.allowed_dofs & rotation) != rotation;
+        const other_rotates_freely = other.motion_type == @intFromEnum(MotionType.dynamic) and other.fixed_to_world == 0 and (other.allowed_dofs & rotation) == rotation;
+        if (dynamic and partial and !other_rotates_freely)
+            body.allowed_dofs |= rotation;
+    }
+}
+
+fn genHingeMotor(g: *Gen, i: *u32, f: []f32) void {
+    g.motor(i, f);
+    if (g.oneIn(5)) {
+        f[0] = 0.0;
+        if (g.oneIn(2)) f[1] = 0.0;
     }
 }
 

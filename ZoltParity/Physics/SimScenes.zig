@@ -1253,6 +1253,17 @@ pub const scenes = [_]SceneEntry{
     // (append the distance / pulley scenes here)
     // ---- Hinge ----
     .{ .name = "constraints_hinge_ops", .build = buildHingeOps, .blocked_by = .hinge_constraints, .expect = .{ .active_constraints = 3 } },
+    .{ .name = "constraints_hinge_limits_and_springs", .build = buildHingeLimits, .blocked_by = .hinge_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 10 } },
+    .{ .name = "constraints_hinge_motors", .build = buildHingeMotors, .blocked_by = .hinge_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 9 } },
+    .{ .name = "constraints_hinge_car", .build = buildHingeCar, .blocked_by = .hinge_constraints, .sweep_stride = 30, .expect = .{ .contacts = true, .removed = true, .active_constraints = 9 } },
+    .{ .name = "constraints_hinge_mat_splitter", .build = buildHingeMatSplitter, .blocked_by = .hinge_constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .active_constraints = 155 } },
+    .{ .name = "constraints_hinge_sleep_and_save_restore", .build = buildHingeSleepAndSaveRestore, .blocked_by = .hinge_constraints, .sweep_stride = 10, .expect = .{ .sleeping = true, .update_activations = 1, .active_constraints = 3 } },
+    .{ .name = "constraints_hinge_collision_steps_2", .build = buildHingeCollisionSteps(2), .blocked_by = .hinge_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_hinge_collision_steps_3", .build = buildHingeCollisionSteps(3), .blocked_by = .hinge_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_hinge_far_from_origin", .build = buildHingeFarFromOrigin, .blocked_by = .hinge_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 6 } },
+    .{ .name = "constraints_hinge_random_1", .build = buildHingeRandom(1), .blocked_by = .hinge_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_hinge_random_2", .build = buildHingeRandom(2), .blocked_by = .hinge_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_hinge_random_3", .build = buildHingeRandom(3), .blocked_by = .hinge_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     // (append the hinge scenes here)
     // ---- Slider ----
     .{ .name = "constraints_slider_ops", .build = buildSliderOps, .blocked_by = .slider_constraints, .expect = .{ .active_constraints = 3 } },
@@ -5984,6 +5995,564 @@ fn buildHingeOps(b: *SceneBuilder) Allocator.Error!void {
     try b.constraintOp(.notify_constraint_shape_changed, pair_hinge, .{ .body = a, .f = &.{ 0, 0.02, 0 } });
     try b.constraintOp(.reset_constraint_warm_start, door_hinge, .{});
     try b.constraintOp(.constraint_settings_hash, pair_hinge, .{});
+}
+
+/// A hinge to the world (Body::sFixedToWorld as body 1) around `axis` at `pivot`, with limits, returns the description
+fn worldHinge(body2: u32, pivot: [3]Real, axis: [3]f32, normal: [3]f32, limits_min: f32, limits_max: f32) SimConstraint {
+    var c = Desc.hinge(invalid_handle, body2, pivot, axis, normal);
+    c.f[12] = limits_min;
+    c.f[13] = limits_max;
+    return c;
+}
+
+/// Hinge limits and their springs: bars hinged to the world around Z start horizontal and swing into hard limits (the
+/// minimum limit, a maximum limit only), soft limits in all three spring modes, equal limits with a spring (a torsion
+/// spring like TestHingeSpring), limits with friction; a pair of dynamic bodies with limits in local space whose frames
+/// differ (the zero angle is not the angle of the creation); a box hinged to a kinematic body that turns; SetLimits
+/// (narrower limits that the bar is outside of, equal hard limits, no limits) and SetLimitsSpringSettings while they act
+fn buildHingeLimits(b: *SceneBuilder) Allocator.Error!void {
+    const bar = try b.box(.{ 0.5, 0.1, 0.1 }, 0.05);
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 100;
+    const Pendulum = struct { side: f32, min: f32, max: f32, spring_mode: u32 = 0, frequency: f32 = 0, damping: f32 = 0, friction: f32 = 0 };
+    const pendulums = [_]Pendulum{
+        .{ .side = 1, .min = -0.6, .max = 0.3 }, // Swings down into the hard minimum limit
+        .{ .side = -1, .min = -std.math.pi, .max = 0.4 }, // A maximum limit only
+        .{ .side = 1, .min = -0.5, .max = 0.5, .spring_mode = 0, .frequency = 2, .damping = 0.2 }, // Soft: frequency and damping
+        .{ .side = 1, .min = -0.5, .max = 0.5, .spring_mode = 1, .frequency = 400, .damping = 5 }, // Soft: stiffness and damping
+        .{ .side = -1, .min = -0.5, .max = 0.5, .spring_mode = 2, .frequency = 60, .damping = 3 }, // Soft: mass normalized
+        .{ .side = 1, .min = 0, .max = 0, .spring_mode = 0, .frequency = 1.5, .damping = 0.1 }, // A torsion spring
+        .{ .side = 1, .min = -1, .max = 1, .friction = 30 }, // Friction and limits
+    };
+    var hinges: [pendulums.len]u32 = undefined;
+    for (pendulums, &hinges, 0..) |p, *h, k| {
+        const x: Real = 3 * real(k);
+        const body = try b.body(.{ .position = .{ x + 0.5 * p.side, 5, 0 }, .shape = bar, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+        var c = worldHinge(body, .{ x, 5, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }, p.min, p.max);
+        Desc.setSpring(&c, 1, 14, p.spring_mode, p.frequency, p.damping);
+        c.f[16] = p.friction;
+        h.* = try b.constraint(c);
+    }
+
+    // A pair of dynamic boxes: a hangs from the world on a point constraint, c on a hinge in local space whose normal
+    // axes differ by 30 degrees, with hard limits that the spinning c reaches
+    const a = try b.body(.{ .position = .{ 25, 5, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    const c = try b.body(.{ .position = .{ 25.8, 5, 0 }, .shape = box, .angular_velocity = .{ 0, 0, 3 }, .object_layer = Layers.unused1 }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, a, .{ 25, 5.4, 0 }));
+    var local = Desc.hinge(a, c, .{ 0.4, 0, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+    local.i[0] = ConstraintSpace.local_to_body_com;
+    local.r[3] = -0.4;
+    local.r[4] = 0;
+    local.r[5] = 0;
+    local.f[9] = @floatCast(@cos(std.math.pi / 6.0)); // Normal axis 2
+    local.f[10] = @floatCast(@sin(std.math.pi / 6.0));
+    local.f[12] = -0.3;
+    local.f[13] = 0.3;
+    const pair_hinge = try b.constraint(local);
+
+    // A box hinged to a kinematic body that turns around X (the hinge axis), with limits: the box is dragged along
+    const kinematic = try b.body(.{ .position = .{ 30, 5, 0 }, .shape = box, .motion_type = 1, .angular_velocity = .{ 1.5, 0, 0 }, .object_layer = Layers.unused1 }, .activate);
+    const dragged = try b.body(.{ .position = .{ 30, 4.2, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    var kinematic_hinge = Desc.hinge(kinematic, dragged, .{ 30, 4.6, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    kinematic_hinge.f[12] = -0.5;
+    kinematic_hinge.f[13] = 0.5;
+    _ = try b.constraint(kinematic_hinge);
+
+    b.at(40);
+    try b.constraintOp(.hinge_set_limits, hinges[0], .{ .f = &.{ -0.3, 0.3 } }); // The bar is outside: pushed back
+    try b.constraintOp(.hinge_set_limits_spring_settings, hinges[2], .{ .i = &.{0}, .f = &.{ 0, 0 } }); // Hard now
+    try b.constraintOp(.hinge_set_limits_spring_settings, hinges[1], .{ .i = &.{1}, .f = &.{ 200, 2 } }); // Soft now
+    try b.constraintOp(.constraint_settings_hash, pair_hinge, .{});
+    b.at(55);
+    try b.constraintOp(.hinge_set_limits, hinges[5], .{ .f = &.{ -std.math.pi, std.math.pi } }); // The torsion spring is gone
+    try b.constraintOp(.hinge_set_max_friction_torque, hinges[6], .{ .f = &.{0} });
+    try b.constraintOp(.constraint_settings_hash, hinges[3], .{});
+    b.at(70);
+    try b.constraintOp(.hinge_set_limits, hinges[0], .{ .f = &.{ 0, 0 } }); // Equal hard limits: the angle is fixed
+    try b.constraintOp(.hinge_set_limits, pair_hinge, .{ .f = &.{ -0.1, 0.05 } });
+    try b.constraintOp(.notify_constraint_shape_changed, pair_hinge, .{ .body = c, .f = &.{ 0.02, 0, 0 } });
+    try b.constraintOp(.constraint_settings_hash, hinges[0], .{});
+}
+
+/// Hinge motors in every EMotorState: doors hinged to the world around Y (vertical): off with friction; a velocity motor
+/// with a torque limit whose target changes, then off; a position motor (target angle, SetTargetOrientationBS, a target
+/// clamped by limits set later, then a velocity motor); a position motor without stiffness (inactive) that becomes a
+/// position and velocity motor with damping only; a position and velocity motor with a spring; a position motor with
+/// asymmetric torque limits; a mass normalized motor spring with limits; a velocity motor with the world as body 2; and
+/// one door that goes through every state. The doors never sleep: a motor state set on the hinge of a sleeping door
+/// does nothing (the constraint is not active, see constraints_hinge_sleep_and_save_restore)
+fn buildHingeMotors(b: *SceneBuilder) Allocator.Error!void {
+    const door = try b.box(.{ 0.5, 1, 0.05 }, 0.02);
+    b.num_updates = 90;
+    var doors: [9]u32 = undefined;
+    var hinges: [9]u32 = undefined;
+    for (&doors, &hinges, 0..) |*d, *h, k| {
+        const x: Real = 3 * real(k);
+        const spin: [3]f32 = if (k == 0) .{ 0, 3, 0 } else @splat(0);
+        d.* = try b.body(.{ .position = .{ x + 0.5, 3, 0 }, .shape = door, .angular_velocity = spin, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+        var c = if (k == 7)
+            Desc.hinge(d.*, invalid_handle, .{ x, 3, 0 }, .{ 0, 1, 0 }, .{ 1, 0, 0 }) // The world as body 2
+        else
+            Desc.hinge(invalid_handle, d.*, .{ x, 3, 0 }, .{ 0, 1, 0 }, .{ 1, 0, 0 });
+        switch (k) {
+            0 => c.f[16] = 5, // Friction
+            3 => Desc.setMotor(&c, 2, 17, 1, .{ 0, 20, -flt_max, flt_max, -flt_max, flt_max }), // Damping only
+            4 => Desc.setMotor(&c, 2, 17, 0, .{ 3, 0.5, -flt_max, flt_max, -100, 100 }),
+            5 => Desc.setMotor(&c, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -2, 100 }), // Asymmetric torque limits
+            6 => {
+                Desc.setMotor(&c, 2, 17, 2, .{ 30, 4, -flt_max, flt_max, -flt_max, flt_max }); // Mass normalized
+                c.f[12] = -0.8;
+                c.f[13] = 0.8;
+            },
+            else => {},
+        }
+        h.* = try b.constraint(c);
+    }
+    b.at(1);
+    try b.constraintOp(.hinge_set_motor_settings, hinges[1], .{ .i = &.{0}, .f = &.{ 2, 1, -flt_max, flt_max, -20, 20 } });
+    try b.constraintOp(.hinge_set_motor_state, hinges[1], .{ .i = &.{1} }); // Velocity
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[1], .{ .f = &.{2} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[2], .{ .i = &.{2} }); // Position
+    try b.constraintOp(.hinge_set_target_angle, hinges[2], .{ .f = &.{1} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[3], .{ .i = &.{2} }); // Position without stiffness: inactive
+    try b.constraintOp(.hinge_set_target_angle, hinges[3], .{ .f = &.{1} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[4], .{ .i = &.{3} }); // Position and velocity
+    try b.constraintOp(.hinge_set_target_angle, hinges[4], .{ .f = &.{0.5} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[4], .{ .f = &.{0.3} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[5], .{ .i = &.{2} });
+    try b.constraintOp(.hinge_set_target_angle, hinges[5], .{ .f = &.{1.2} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[6], .{ .i = &.{2} });
+    try b.constraintOp(.hinge_set_target_angle, hinges[6], .{ .f = &.{-1} }); // Clamped to the limit -0.8
+    try b.constraintOp(.hinge_set_motor_state, hinges[7], .{ .i = &.{1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[7], .{ .f = &.{-1.5} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[8], .{ .i = &.{1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[8], .{ .f = &.{1} });
+    b.at(20);
+    try b.constraintOp(.hinge_set_motor_state, hinges[8], .{ .i = &.{2} });
+    try b.constraintOp(.hinge_set_target_angle, hinges[8], .{ .f = &.{-0.5} });
+    b.at(25);
+    try b.constraintOp(.hinge_set_target_orientation_bs, hinges[2], .{ .f = &axisAngle(.{ 0, 1, 0 }, -0.6) });
+    b.at(30);
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[1], .{ .f = &.{-1} });
+    try b.constraintOp(.hinge_set_motor_state, hinges[3], .{ .i = &.{3} }); // Damping only: active
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[3], .{ .f = &.{0.8} });
+    try b.constraintOp(.constraint_settings_hash, hinges[5], .{});
+    b.at(40);
+    try b.constraintOp(.hinge_set_motor_state, hinges[8], .{ .i = &.{3} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[8], .{ .f = &.{0.4} });
+    b.at(45);
+    try b.constraintOp(.hinge_set_limits, hinges[2], .{ .f = &.{ -0.5, 0.5 } });
+    try b.constraintOp(.hinge_set_target_angle, hinges[2], .{ .f = &.{1.2} }); // Clamped to 0.5
+    try b.constraintOp(.hinge_set_max_friction_torque, hinges[0], .{ .f = &.{40} });
+    b.at(50);
+    try b.constraintOp(.hinge_set_motor_state, hinges[1], .{ .i = &.{0} }); // Off: no friction, the door swings on
+    try b.constraintOp(.hinge_set_motor_settings, hinges[4], .{ .i = &.{1}, .f = &.{ 50, 5, -flt_max, flt_max, -30, 30 } });
+    b.at(60);
+    try b.constraintOp(.hinge_set_motor_state, hinges[2], .{ .i = &.{1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, hinges[2], .{ .f = &.{-2} }); // Into the limit
+    try b.constraintOp(.hinge_set_motor_state, hinges[8], .{ .i = &.{0} });
+    try b.constraintOp(.hinge_set_max_friction_torque, hinges[8], .{ .f = &.{3} });
+    try b.constraintOp(.constraint_settings_hash, hinges[8], .{});
+    b.at(75);
+    try b.constraintOp(.reset_constraint_warm_start, hinges[4], .{});
+    try b.constraintOp(.hinge_set_motor_state, hinges[7], .{ .i = &.{2} });
+    try b.constraintOp(.hinge_set_target_orientation_bs, hinges[7], .{ .f = &axisAngle(.{ 0, 1, 0 }, 0.3) });
+}
+
+/// A car on hinges in one island with contacts and other constraint kinds: a chassis with four wheels (cylinders) on
+/// hinges, the rear wheels driven by velocity motors, the front wheels with friction; a roof welded to the chassis
+/// (FixedConstraint) and a trailer with two free wheels on a point constraint hitch; the car drives over the floor into
+/// boxes and a gate hinged to the world, reverses, then brakes (motors off, friction)
+fn buildHingeCar(b: *SceneBuilder) Allocator.Error!void {
+    const chassis_shape = try b.box(.{ 1.0, 0.25, 1.6 }, 0.05);
+    const roof_shape = try b.box(.{ 0.8, 0.2, 0.8 }, 0.05);
+    const trailer_shape = try b.box(.{ 0.8, 0.3, 0.9 }, 0.05);
+    const wheel_shape = try b.cylinder(0.15, 0.45, 0.05);
+    const crate = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    const gate_shape = try b.box(.{ 1.2, 0.8, 0.1 }, 0.05);
+    const wheel_rotation = axisAngle(.{ 0, 0, 1 }, 0.5 * std.math.pi); // The cylinder axis along X
+    b.num_updates = 150;
+    b.max_contact_constraints = 2048;
+    _ = try addFloor(b, 30, 0);
+
+    const chassis = try b.body(.{ .position = .{ 0, 0.95, 0 }, .shape = chassis_shape, .friction = 0.5, .object_layer = Layers.moving }, .activate);
+    const roof = try b.body(.{ .position = .{ 0, 1.42, -0.3 }, .shape = roof_shape, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(chassis, roof));
+    var wheel_hinges: [4]u32 = undefined;
+    for (&wheel_hinges, 0..) |*h, k| {
+        const x: Real = if (k % 2 == 0) -1.3 else 1.3;
+        const z: Real = if (k < 2) 1.1 else -1.1; // Front wheels first
+        const wheel = try b.body(.{ .position = .{ x, 0.45, z }, .rotation = wheel_rotation, .shape = wheel_shape, .friction = 1, .object_layer = Layers.moving }, .activate);
+        var c = Desc.hinge(chassis, wheel, .{ x, 0.45, z }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+        if (k < 2) c.f[16] = 0.5; // Front wheels: a little friction
+        Desc.setMotor(&c, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -400, 400 });
+        h.* = try b.constraint(c);
+    }
+
+    // The trailer on one axle with free wheels, hitched with a point constraint
+    const trailer = try b.body(.{ .position = .{ 0, 0.85, -3.2 }, .shape = trailer_shape, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.pointWorld(chassis, trailer, .{ 0, 0.85, -2.0 }));
+    for ([_]Real{ -1.05, 1.05 }) |x| {
+        const wheel = try b.body(.{ .position = .{ x, 0.45, -3.2 }, .rotation = wheel_rotation, .shape = wheel_shape, .friction = 1, .object_layer = Layers.moving }, .activate);
+        _ = try b.constraint(Desc.hinge(trailer, wheel, .{ x, 0.45, -3.2 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }));
+    }
+
+    // Crates and a gate hinged to the world (vertical axis, limits, friction) in the way
+    for (0..3) |k| _ = try b.body(.{ .position = .{ -0.9 + 0.9 * real(k), 0.4, 5.5 }, .shape = crate, .object_layer = Layers.moving }, .activate);
+    const gate = try b.body(.{ .position = .{ 1.2, 0.85, 9 }, .shape = gate_shape, .object_layer = Layers.moving }, .activate);
+    var gate_hinge = worldHinge(gate, .{ 0, 0.85, 9 }, .{ 0, 1, 0 }, .{ 1, 0, 0 }, -1.4, 1.4);
+    gate_hinge.f[16] = 20;
+    const gate_handle = try b.constraint(gate_hinge);
+
+    b.at(1);
+    for (wheel_hinges[2..]) |h| {
+        try b.constraintOp(.hinge_set_motor_state, h, .{ .i = &.{1} });
+        try b.constraintOp(.hinge_set_target_angular_velocity, h, .{ .f = &.{6} });
+    }
+    b.at(90);
+    for (wheel_hinges[2..]) |h| try b.constraintOp(.hinge_set_target_angular_velocity, h, .{ .f = &.{-3} });
+    try b.constraintOp(.constraint_settings_hash, gate_handle, .{});
+    b.at(120);
+    for (wheel_hinges) |h| {
+        try b.constraintOp(.hinge_set_motor_state, h, .{ .i = &.{0} });
+        try b.constraintOp(.hinge_set_max_friction_torque, h, .{ .f = &.{150} });
+    }
+}
+
+/// A mat of 12 strips of 12 plates lying on the floor: the plates of a strip are hinged to each other, the strips are
+/// joined by point constraints at both ends and the first plate is hinged to the world. One island of 155 constraints
+/// and the floor contacts that the LargeIslandSplitter splits, which settles and falls asleep from the final batch of a
+/// split island; a push wakes the mat up through its constraints. The gaps between the plates (0.12) are wider than the
+/// speculative contact distance: with gaps of 0.02 (body pairs between neighbouring plates) Jolt itself gives different
+/// contact caches with 0 and with 3 / 7 worker threads two updates after the push (one body pair more single threaded,
+/// two C++ worlds in lockstep, the bodies equal), which no scene may reach.
+fn buildHingeMatSplitter(b: *SceneBuilder) Allocator.Error!void {
+    const plate = try b.box(.{ 0.24, 0.05, 0.24 }, 0.02);
+    b.num_updates = 120;
+    b.max_contact_constraints = 4096;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const n = 12;
+    var plates: [n * n]u32 = undefined;
+    const y: Real = 0.051;
+    for (0..n) |row| {
+        for (0..n) |col| {
+            const x: Real = 0.6 * real(col) - 3;
+            const z: Real = 0.6 * real(row) - 3;
+            const h = try b.body(.{ .position = .{ x, y, z }, .shape = plate, .object_layer = Layers.moving }, .activate);
+            plates[row * n + col] = h;
+            if (col > 0) _ = try b.constraint(Desc.hinge(plates[row * n + col - 1], h, .{ x - 0.3, y, z }, .{ 0, 0, 1 }, .{ 0, 1, 0 }));
+            if (row > 0 and (col == 0 or col == n - 1)) _ = try b.constraint(Desc.pointWorld(plates[(row - 1) * n + col], h, .{ x, y, z - 0.3 }));
+        }
+    }
+    _ = try b.constraint(worldHinge(plates[0], .{ -3.3, y, -3 }, .{ 0, 0, 1 }, .{ 0, 1, 0 }, -0.5, 0.5));
+    b.at(100);
+    try b.expectSleeping(plates[0]);
+    try b.expectSleeping(plates[n * n - 1]);
+    try b.op(.add_impulse, plates[n * n / 2], .{ .f = &.{ 0, 3, 0 } });
+    b.at(101);
+    try b.expectAwake(plates[n * n / 2]);
+}
+
+/// Hinges and sleeping bodies, and cross save / restore of the hinge state (the warm start impulses of the four parts,
+/// the motor state, the target velocity and the target angle; the limits, springs, friction and motor settings are not
+/// state): a bar with friction comes to rest and falls asleep, a motor set on the sleeping hinge wakes nothing until an
+/// impulse does; a hinge created between an awake and a sleeping body wakes the sleeping one; a door with a motor and
+/// limits is restored from snapshots of everything and of the constraints only after its motor state changed
+fn buildHingeSleepAndSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const bar = try b.box(.{ 0.1, 0.5, 0.1 }, 0.05);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const door = try b.box(.{ 0.5, 1, 0.05 }, 0.02);
+    b.num_updates = 90;
+    b.settings.time_before_sleep = 0.2;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+
+    // A bar hanging from a hinge with friction and limits, at rest
+    const hanging = try b.body(.{ .position = .{ 0, 4.5, 0 }, .shape = bar, .object_layer = Layers.unused1 }, .activate);
+    var hanging_desc = worldHinge(hanging, .{ 0, 5, 0 }, .{ 0, 0, 1 }, .{ 0, 1, 0 }, -0.3, 0.3);
+    hanging_desc.f[16] = 20;
+    const hanging_hinge = try b.constraint(hanging_desc);
+
+    // An awake body that spins and a sleeping body
+    const awake = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box, .angular_velocity = .{ 0, 0, 1 }, .gravity_factor = 0, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+    const asleep = try b.body(.{ .position = .{ 3.5, 5, 0 }, .shape = box, .gravity_factor = 0, .object_layer = Layers.unused1 }, .dont_activate);
+
+    // A door with limits that a velocity motor drives
+    const d = try b.body(.{ .position = .{ 6.5, 3, 0 }, .shape = door, .object_layer = Layers.unused1 }, .activate);
+    const door_hinge = try b.constraint(worldHinge(d, .{ 6, 3, 0 }, .{ 0, 1, 0 }, .{ 1, 0, 0 }, -1, 1));
+
+    b.at(2);
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, door_hinge, .{ .f = &.{0.8} });
+    b.at(5);
+    try b.expectSleeping(asleep);
+    const pair_hinge = try b.constraint(Desc.hinge(awake, asleep, .{ 3.25, 5, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 })); // Wakes asleep in the next update
+    b.at(6);
+    try b.expectAwake(asleep);
+    b.at(20);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(25);
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{2} });
+    try b.constraintOp(.hinge_set_target_angle, door_hinge, .{ .f = &.{-0.5} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, door_hinge, .{ .f = &.{0} });
+    try b.constraintOp(.hinge_set_limits, door_hinge, .{ .f = &.{ -0.9, 0.9 } }); // Not state: stays after the restore
+    b.at(35);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // The velocity motor of update 20 again
+    b.at(40);
+    try b.expectSleeping(hanging);
+    try b.constraintOp(.hinge_set_motor_state, hanging_hinge, .{ .i = &.{1} }); // The bar sleeps: nothing happens
+    try b.constraintOp(.hinge_set_target_angular_velocity, hanging_hinge, .{ .f = &.{1} });
+    try b.expectConstraintState(hanging_hinge, ConstraintState.inactive);
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(41);
+    try b.expectSleeping(hanging);
+    b.at(45);
+    try b.op(.add_impulse, hanging, .{ .f = &.{ 1, 0, 0 } }); // Wakes the bar, the motor drives it into its limit
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{3} });
+    try b.constraintOp(.reset_constraint_warm_start, pair_hinge, .{});
+    b.at(55);
+    try b.expectAwake(hanging);
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 40: the motor states and their impulses
+    try b.constraintOp(.constraint_settings_hash, door_hinge, .{});
+    b.at(70);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.op(.add_angular_impulse, d, .{ .f = &.{ 0, 5, 0 } });
+    b.at(80);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+}
+
+/// A chain of hinged bars with limits and a velocity motor on the first hinge, with several collision steps per update
+/// and changing update parameters (the warm start impulses are scaled by the step ratio)
+fn buildHingeCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const bar = try b.box(.{ 0.3, 0.08, 0.08 }, 0.04);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var previous: u32 = invalid_handle;
+            var first: u32 = 0;
+            for (0..6) |i| {
+                const x: Real = 0.7 * real(i);
+                const h = try b.body(.{ .position = .{ x + 0.3, 6, 0 }, .shape = bar, .object_layer = Layers.unused1 }, .activate);
+                const axis: [3]f32 = if (i % 2 == 0) .{ 0, 0, 1 } else .{ 0, 1, 0 };
+                const normal: [3]f32 = if (i % 2 == 0) .{ 0, 1, 0 } else .{ 0, 0, 1 };
+                var c = Desc.hinge(previous, h, .{ x - 0.05, 6, 0 }, axis, normal);
+                if (i % 3 == 1) {
+                    c.f[12] = -0.4;
+                    c.f[13] = 0.4;
+                }
+                if (i == 4) Desc.setSpring(&c, 1, 14, 0, 3, 0.5);
+                const handle = try b.constraint(c);
+                if (i == 0) first = handle;
+                previous = h;
+            }
+            b.at(1);
+            try b.constraintOp(.hinge_set_motor_state, first, .{ .i = &.{1} });
+            try b.constraintOp(.hinge_set_target_angular_velocity, first, .{ .f = &.{-1} });
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            try b.constraintOp(.hinge_set_motor_state, first, .{ .i = &.{2} });
+            try b.constraintOp(.hinge_set_target_angle, first, .{ .f = &.{0.3} });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Hinges far from the origin (world space points are Real: in double precision the anchors keep their precision): a
+/// chain of hinged planks hangs from the world and swings onto a floor and a box, a door with a position motor
+fn buildHingeFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const plank = try b.box(.{ 0.3, 0.05, 0.25 }, 0.02);
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    const door = try b.box(.{ 0.5, 1, 0.05 }, 0.02);
+    b.num_updates = 70;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    var previous: u32 = invalid_handle;
+    for (0..5) |i| {
+        const p: [3]Real = .{ o[0] - 3 + 0.65 * real(i), o[1] + 2.5, o[2] };
+        const h = try b.body(.{ .position = p, .shape = plank, .object_layer = Layers.moving }, .activate);
+        var c = Desc.hinge(previous, h, .{ p[0] - 0.325, p[1], p[2] }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+        c.f[12] = -1.2;
+        c.f[13] = 1.2;
+        _ = try b.constraint(c);
+        previous = h;
+    }
+    _ = try b.body(.{ .position = .{ o[0] - 1, o[1] + 0.25, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const d = try b.body(.{ .position = .{ o[0] + 4.5, o[1] + 1.2, o[2] }, .shape = door, .object_layer = Layers.moving }, .activate);
+    const door_hinge = try b.constraint(worldHinge(d, .{ o[0] + 4, o[1] + 1.2, o[2] }, .{ 0, 1, 0 }, .{ 1, 0, 0 }, -1.5, 1.5));
+    b.at(1);
+    try b.constraintOp(.hinge_set_motor_state, door_hinge, .{ .i = &.{2} });
+    try b.constraintOp(.hinge_set_target_angle, door_hinge, .{ .f = &.{1.3} });
+    b.at(40);
+    try b.constraintOp(.hinge_set_target_orientation_bs, door_hinge, .{ .f = &axisAngle(.{ 0, 1, 0 }, -0.7) });
+}
+
+/// Random bodies (dynamic, kinematic, static; every basic shape) in a forest of random hinges (each body hangs from the
+/// world or an earlier body; world or local space, random frames, limits hard or soft in every spring mode, friction,
+/// motor settings), on a floor in a container, and random operations between the updates: every hinge setter, every
+/// motor state, the generic constraint operations and impulses (the compound's center of mass is not at its origin:
+/// its local space hinges start with an error that the solver corrects)
+fn buildHingeRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        /// `v` rotated by the unit quaternion `q` (x, y, z, w), in f64 (`inverse`: by its conjugate)
+        fn rotate(q: [4]f32, v: [3]f64, inverse: bool) [3]f64 {
+            const u: [3]f64 = if (inverse) .{ -@as(f64, q[0]), -@as(f64, q[1]), -@as(f64, q[2]) } else .{ q[0], q[1], q[2] };
+            const s: f64 = q[3];
+            const dot = u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+            const uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+            const cross: [3]f64 = .{ u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] };
+            var r: [3]f64 = undefined;
+            for (0..3) |k| r[k] = 2 * dot * u[k] + (s * s - uu) * v[k] + 2 * s * cross[k];
+            return r;
+        }
+
+        fn toF32(v: [3]f64) [3]f32 {
+            return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
+        }
+
+        fn limits(b: *SceneBuilder) [2]f32 {
+            if (b.oneIn(3)) return .{ -std.math.pi, std.math.pi };
+            return .{ -b.float(0.05, std.math.pi), b.float(0.05, std.math.pi) };
+        }
+
+        fn motor(b: *SceneBuilder) [7]f32 {
+            const mode: f32 = @floatFromInt(b.index(3));
+            const frequency = if (b.oneIn(5)) 0 else if (mode == 0) b.float(0.5, 8) else b.float(5, 300);
+            const torque = if (b.oneIn(3)) flt_max else b.float(5, 200);
+            return .{ mode, frequency, if (b.oneIn(4)) 0 else b.float(0, 2), -flt_max, flt_max, -torque, torque };
+        }
+
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0x41b9_e000 +% seed *% 0x9e3779b9;
+            const shapes = try BasicShapes.add(b);
+            b.num_updates = 80;
+            b.max_contact_constraints = 2048;
+            try addContainer(b, 6, 2);
+            const num_bodies = 20;
+            var bodies: [num_bodies]u32 = undefined;
+            var positions: [num_bodies][3]f64 = undefined;
+            var rotations: [num_bodies][4]f32 = undefined;
+            for (&bodies, &positions, &rotations, 0..) |*h, *p, *q, i| {
+                const motion_type: u32 = if (b.oneIn(8)) 0 else if (b.oneIn(7)) 1 else 2;
+                const v = b.vec3(-3.5, 3.5);
+                p.* = .{ v[0], 1.5 + 0.7 * @as(f64, @floatFromInt(i)), v[2] };
+                q.* = b.rotation();
+                h.* = try b.body(.{
+                    .position = .{ real(p[0]), real(p[1]), real(p[2]) },
+                    .rotation = q.*,
+                    .shape = shapes.pick(b.index(6)),
+                    .motion_type = motion_type,
+                    .linear_velocity = if (motion_type == 1) b.vec3(-0.3, 0.3) else @splat(0),
+                    .angular_velocity = if (motion_type != 0) b.vec3(-1, 1) else @splat(0),
+                    .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+                }, if (motion_type == 0) .dont_activate else .activate);
+            }
+
+            // A forest of hinges: every body hangs from the world or from an earlier body, the hinge point between the two
+            // bodies, the hinge frame consistent with the poses of the creation (world space, or local space computed
+            // from the poses), normal axes that sometimes differ by a turn around the hinge axis (another zero angle)
+            var handles: [num_bodies]u32 = undefined;
+            var in_system: [num_bodies]bool = @splat(true);
+            for (&handles, 0..) |*c, k| {
+                const to_world = k == 0 or b.oneIn(4);
+                const parent: usize = if (to_world) 0 else b.index(@intCast(k));
+                const body1 = if (to_world) invalid_handle else bodies[parent];
+                const offset = b.vec3(-0.6, 0.6);
+                var point: [3]f64 = undefined;
+                for (0..3) |n| point[n] = (if (to_world) positions[k][n] else 0.5 * (positions[k][n] + positions[parent][n])) + offset[n];
+                const q = b.rotation();
+                const axis = rotate(q, .{ 1, 0, 0 }, false);
+                const normal1 = rotate(q, .{ 0, 1, 0 }, false);
+                const angle: f64 = if (b.oneIn(2)) 0 else b.float(-2, 2);
+                const binormal = rotate(q, .{ 0, 0, 1 }, false);
+                var normal2: [3]f64 = undefined;
+                for (0..3) |n| normal2[n] = @cos(angle) * normal1[n] + @sin(angle) * binormal[n];
+                var desc = Desc.defaults(.hinge);
+                desc.body1 = body1;
+                desc.body2 = bodies[k];
+                if (b.oneIn(3)) {
+                    // Local space: the point and the axes in the center of mass space of each body (the shapes have their
+                    // center of mass at the origin, the world has no rotation)
+                    desc.i[0] = ConstraintSpace.local_to_body_com;
+                    var local1 = point;
+                    var axis1 = axis;
+                    var n1 = normal1;
+                    if (!to_world) {
+                        var d: [3]f64 = undefined;
+                        for (0..3) |n| d[n] = point[n] - positions[parent][n];
+                        local1 = rotate(rotations[parent], d, true);
+                        axis1 = rotate(rotations[parent], axis, true);
+                        n1 = rotate(rotations[parent], normal1, true);
+                    }
+                    var d2: [3]f64 = undefined;
+                    for (0..3) |n| d2[n] = point[n] - positions[k][n];
+                    const local2 = rotate(rotations[k], d2, true);
+                    for (0..3) |n| {
+                        desc.r[n] = real(local1[n]);
+                        desc.r[3 + n] = real(local2[n]);
+                    }
+                    @memcpy(desc.f[0..3], &toF32(axis1));
+                    @memcpy(desc.f[3..6], &toF32(n1));
+                    @memcpy(desc.f[6..9], &toF32(rotate(rotations[k], axis, true)));
+                    @memcpy(desc.f[9..12], &toF32(rotate(rotations[k], normal2, true)));
+                } else {
+                    for (0..3) |n| {
+                        desc.r[n] = real(point[n]);
+                        desc.r[3 + n] = real(point[n]);
+                    }
+                    @memcpy(desc.f[0..3], &toF32(axis));
+                    @memcpy(desc.f[3..6], &toF32(normal1));
+                    @memcpy(desc.f[6..9], &toF32(axis));
+                    @memcpy(desc.f[9..12], &toF32(normal2));
+                }
+                const l = limits(b);
+                desc.f[12] = l[0];
+                desc.f[13] = l[1];
+                if (b.oneIn(3)) Desc.setSpring(&desc, 1, 14, b.index(3), b.float(1, 50), b.float(0, 1));
+                if (b.oneIn(3)) desc.f[16] = b.float(0, 20);
+                const m = motor(b);
+                Desc.setMotor(&desc, 2, 17, @intFromFloat(m[0]), m[1..7].*);
+                desc.constraint_priority = b.index(3);
+                if (b.oneIn(5)) desc.num_velocity_steps_override = 1 + b.index(15);
+                if (b.oneIn(8)) desc.enabled = 0;
+                c.* = try b.constraint(desc);
+            }
+            var update: u32 = 3;
+            while (update < b.num_updates) : (update += 1 + b.index(6)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_bodies);
+                    const c = handles[k];
+                    switch (b.index(13)) {
+                        0 => try b.constraintOp(.hinge_set_max_friction_torque, c, .{ .f = &.{if (b.oneIn(3)) 0 else b.float(0, 20)} }),
+                        1, 2 => try b.constraintOp(.hinge_set_motor_state, c, .{ .i = &.{b.index(4)} }),
+                        3 => try b.constraintOp(.hinge_set_target_angular_velocity, c, .{ .f = &.{b.float(-4, 4)} }),
+                        4 => try b.constraintOp(.hinge_set_target_angle, c, .{ .f = &.{b.float(-3.5, 3.5)} }),
+                        5 => try b.constraintOp(.hinge_set_target_orientation_bs, c, .{ .f = &b.rotation() }),
+                        6 => {
+                            const l = limits(b);
+                            try b.constraintOp(.hinge_set_limits, c, .{ .f = &l });
+                        },
+                        7 => try b.constraintOp(.hinge_set_limits_spring_settings, c, .{ .i = &.{b.index(3)}, .f = &.{ if (b.oneIn(3)) 0 else b.float(1, 50), b.float(0, 1) } }),
+                        8 => {
+                            const m = motor(b);
+                            try b.constraintOp(.hinge_set_motor_settings, c, .{ .i = &.{@intFromFloat(m[0])}, .f = m[1..7] });
+                        },
+                        9 => {
+                            try b.constraintOp(if (in_system[k]) .remove_constraint else .add_constraint, c, .{});
+                            in_system[k] = !in_system[k];
+                        },
+                        10 => try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{b.index(2)} }),
+                        11 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        else => try b.op(.add_impulse, bodies[b.index(num_bodies)], .{ .f = &b.vec3(-3, 3) }),
+                    }
+                }
+            }
+        }
+    }.build;
 }
 
 // (append the scenes of the hinge group here)

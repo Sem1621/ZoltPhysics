@@ -70,6 +70,7 @@ test {
     _ = @import("Physics/EstimateCollisionResponseTest.zig");
     _ = @import("Physics/FixedConstraintTests.zig");
     _ = @import("Physics/HeightFieldShapeTests.zig");
+    _ = @import("Physics/HingeConstraintTests.zig");
     _ = @import("Physics/IslandBuilderTests.zig");
     _ = @import("Physics/LargeIslandSplitterTests.zig");
     _ = @import("Physics/MotionQualityLinearCastTests.zig");

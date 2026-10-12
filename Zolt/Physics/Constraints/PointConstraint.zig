@@ -294,6 +294,17 @@ fn testSaveSettings(allocator: Allocator, settings: *const ConstraintSettings) !
     return data.toOwnedSlice();
 }
 
+/// The RTTI names of the settings classes of RegisterTypes.constraint_settings_types that are still stubs (`is_stub`)
+const stub_settings_names = blk: {
+    var names: []const []const u8 = &.{};
+    for (@import("../../RegisterTypes.zig").constraint_settings_types) |T| {
+        if (@hasDecl(T, "is_stub")) names = names ++ .{T.rtti_name};
+    }
+    var result: [names.len][]const u8 = undefined;
+    @memcpy(&result, names);
+    break :blk result;
+};
+
 /// ConstraintSettings.restoreFromBinaryState of bytes
 fn testRestoreSettings(allocator: Allocator, bytes: []const u8) Allocator.Error!ConstraintSettings.ConstraintResult {
     var reader: std.Io.Reader = .fixed(bytes);
@@ -347,11 +358,11 @@ test "PointConstraintSettings: defaults, binary state, restoreFromBinaryState th
         try testing.expectEqualSlices(u8, odd, resaved);
     }
 
-    // An unknown type and a stub class (HingeConstraintSettings, Phase 6) are Jolt's "Failed to create instance of type"
-    {
+    // An unknown type and every class that is still a stub (Phase 6) are Jolt's "Failed to create instance of type"
+    for ([_][]const u8{"UnknownConstraintSettings"} ++ stub_settings_names) |name| {
         var odd = try allocator.dupe(u8, bytes);
         defer allocator.free(odd);
-        std.mem.writeInt(u32, odd[0..4], ConstraintSettings.rttiHash("HingeConstraintSettings"), .little);
+        std.mem.writeInt(u32, odd[0..4], ConstraintSettings.rttiHash(name), .little);
         var result = try testRestoreSettings(allocator, odd);
         defer result.deinit();
         try testing.expectEqualStrings("Failed to create instance of type", result.getError());
