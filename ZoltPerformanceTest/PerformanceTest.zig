@@ -673,6 +673,62 @@ test "PrintfFloat" {
     try std.testing.expectEqualStrings("-nan", try std.fmt.bufPrint(&buffer, "{f}", .{PrintfFloat{ .value = -std.math.nan(f64) }}));
 }
 
+/// Zolt test: load a scene, run `num_updates` updates like `main` (with an extra worker thread) and return the hash
+fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, num_updates: u32) !u64 {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    defer scene.destroy();
+    try std.testing.expect(try scene.load(""));
+
+    var temp_allocator = try TempAllocatorImpl.init(allocator, scene.getTempAllocatorSizeMB() * 1024 * 1024);
+    defer temp_allocator.deinit();
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+    var job_system: JobSystemThreadPool = .empty;
+    try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = 1 });
+    defer job_system.deinit();
+    var physics_system: PhysicsSystem = .empty;
+    try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+    defer physics_system.deinit();
+    try scene.startTest(&physics_system, motion_quality);
+    try physics_system.optimizeBroadPhase();
+    for (0..num_updates) |_| {
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+        try std.testing.expect(temp_allocator.isEmpty());
+    }
+
+    var hash: u64 = HashCombine.hashBytes(&.{});
+    const bi = physics_system.getBodyInterfaceNoLock();
+    var body_ids: BodyIDVector = .empty;
+    defer body_ids.deinit(allocator);
+    try physics_system.getBodies(allocator, &body_ids);
+    for (body_ids.items) |id| {
+        const pos = bi.getPosition(id);
+        hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&pos)[0 .. 3 * @sizeOf(Real)], hash);
+        const rot = bi.getRotation(id);
+        hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&rot), hash);
+    }
+    scene.updateHash(&hash);
+    scene.stopTest(&physics_system);
+    return hash;
+}
+
+test "PerformanceTest scenes give Jolt's hashes after a few updates" {
+    // The scenes of the determinism check (the published hashes of 500 updates are checked by the determinism CI job,
+    // .github/workflows/zolt.yml), a few updates each, in Debug and on every platform of the test CI job. The expected
+    // values are the hashes that the C++ PerformanceTest prints with the same arguments (-s=<scene> -q=<quality>
+    // -i=<updates>), built from Jolt/ with CROSS_PLATFORM_DETERMINISTIC. The testing allocator also checks that the
+    // scenes release all their shapes and settings.
+    const allocator = std.testing.allocator;
+    const dp = zolt.Core.double_precision;
+    try std.testing.expectEqual(@as(u64, if (dp) 0x874b972e6c896604 else 0x8ae6dee69e292017), try runSceneForTest((try PyramidScene.create(allocator)).scene(), .linear_cast, 10));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x6b13f19597ad79f4 else 0xbb1738ab6ae53857), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .discrete, 100));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x2b4f1c7cf1a90e26 else 0x93894e4298eed8e1), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x5109b031ac53c66e else 0x375628eabc094b31), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
+}
+
 test {
     _ = LayersFile;
 }
