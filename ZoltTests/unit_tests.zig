@@ -69,6 +69,7 @@ test {
     _ = @import("Physics/DeterminismLogTests.zig");
     _ = @import("Physics/EstimateCollisionResponseTest.zig");
     _ = @import("Physics/FixedConstraintTests.zig");
+    _ = @import("Physics/GearConstraintTests.zig");
     _ = @import("Physics/HeightFieldShapeTests.zig");
     _ = @import("Physics/HingeConstraintTests.zig");
     _ = @import("Physics/IslandBuilderTests.zig");
@@ -84,10 +85,12 @@ test {
     _ = @import("Physics/PhysicsSystemTests.zig");
     _ = @import("Physics/PhysicsTests.zig");
     _ = @import("Physics/PointConstraintTests.zig");
+    _ = @import("Physics/RackAndPinionConstraintTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/SensorTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
     _ = @import("Physics/ShapeTests.zig");
+    _ = @import("Physics/SliderConstraintTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
