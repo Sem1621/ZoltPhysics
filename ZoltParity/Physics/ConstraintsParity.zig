@@ -677,6 +677,17 @@ const DistanceKind = struct {
         }
         cov.hit("static body with motion properties", (sc.body[0].fixed_to_world == 0 and sc.body[0].allow_dynamic_or_kinematic != 0) or sc.body[1].allow_dynamic_or_kinematic != 0);
     }
+
+    /// Moves body 2 to the center of mass of body 1 (the origin for Body::sFixedToWorld) and removes the center of mass
+    /// offsets: the local space point 0 of both bodies is exactly the same world space point
+    fn coincidingCenters(sc: *CSScenario) void {
+        if (sc.body[0].fixed_to_world != 0)
+            sc.body[1].position = @splat(0)
+        else
+            sc.body[1].position = sc.body[0].position;
+        sc.body[0].com_offset = @splat(0);
+        sc.body[1].com_offset = @splat(0);
+    }
 };
 
 // ---- SLOT cone (Zolt/Physics/Constraints/ConeConstraint.zig) ----
@@ -1510,7 +1521,7 @@ fn genDistance(g: *Gen, sc: *CSScenario) void {
     g.point(sc, s.i[0], s.r[0..3]);
     g.point(sc, s.i[0], s.r[3..6]);
     if (g.oneIn(8)) {
-        coincidingCenters(sc);
+        DistanceKind.coincidingCenters(sc);
         s.i[0] = @intFromEnum(ConstraintSpace.local_to_body_com);
         @memset(s.r[0..6], 0);
     } else if (s.i[0] == @intFromEnum(ConstraintSpace.world_space) and g.oneIn(8)) {
@@ -1549,17 +1560,6 @@ fn genDistance(g: *Gen, sc: *CSScenario) void {
             else => unreachable,
         }
     }
-}
-
-/// Moves body 2 to the center of mass of body 1 (the origin for Body::sFixedToWorld) and removes the center of mass
-/// offsets: the local space point 0 of both bodies is exactly the same world space point
-fn coincidingCenters(sc: *CSScenario) void {
-    if (sc.body[0].fixed_to_world != 0)
-        sc.body[1].position = @splat(0)
-    else
-        sc.body[1].position = sc.body[0].position;
-    sc.body[0].com_offset = @splat(0);
-    sc.body[1].com_offset = @splat(0);
 }
 
 /// Cone: I[0] space; R[0..3] point 1, R[3..6] point 2; F[0..3] twist axis 1, F[3..6] twist axis 2, F[6] half cone angle
