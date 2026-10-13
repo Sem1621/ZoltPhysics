@@ -1,6 +1,5 @@
 //! Port of: UnitTests/Physics/PhysicsDeterminismTests.cpp
-//! Status: partial
-//! Missing: TestGridOfBoxesConstrained (chains of SwingTwistConstraints, Phase 6)
+//! Status: complete
 //!
 //! Each case steps the same scene in a context without worker threads and in one with 15 worker threads, and checks
 //! after every step that the bodies are bit identical. `uniform_real_distribution<float>` is
@@ -19,6 +18,14 @@ const AABox = zolt.AABox;
 const BodyID = zolt.BodyID;
 const BodyIDVector = zolt.BodyIDVector;
 const BodyLockRead = zolt.BodyLockRead;
+const Body = zolt.Body;
+const Ref = zolt.Ref;
+const CollisionGroup = zolt.CollisionGroup;
+const GroupFilter = zolt.GroupFilter;
+const GroupFilterTable = zolt.GroupFilterTable;
+const SwingTwistConstraint = zolt.SwingTwistConstraint;
+const SwingTwistConstraintSettings = zolt.SwingTwistConstraintSettings;
+const degreesToRadians = zolt.math.degreesToRadians;
 const UnitTestRandom = fw.UnitTestRandom;
 const UniformFloatDistribution = fw.UniformFloatDistribution;
 
@@ -150,6 +157,73 @@ test "TestGridOfBoxesLinearCast" {
     try c2.init(allocator, .{ .delta_time = 1.0 / 60.0, .collision_steps = 1, .worker_threads = 15 });
     defer c2.deinit();
     try createGridOfBoxesLinearCast(&c2);
+
+    try compareSimulations(&c1, &c2, 5.0);
+}
+
+fn createGridOfBoxesConstrained(context: *PhysicsTestContext) !void {
+    const allocator = std.testing.allocator;
+    var random = UnitTestRandom.init(UnitTestRandom.default_seed);
+    const restitution = UniformFloatDistribution.init(0.0, 1.0);
+
+    _ = try context.createFloor();
+
+    const num_per_axis = 5;
+
+    // Build a collision group filter that disables collision between adjacent bodies
+    const group_filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = num_per_axis });
+    var group_filter_ref = Ref(GroupFilter).init(group_filter.asGroupFilterMut());
+    defer group_filter_ref.deinit();
+    var i: CollisionGroup.SubGroupID = 0;
+    while (i < num_per_axis - 1) : (i += 1)
+        group_filter.disableCollision(i, i + 1);
+
+    // Create a number of chains
+    for (0..num_per_axis) |x| {
+        // Create a chain of bodies connected with swing twist constraints
+        var prev_body: ?*Body = null;
+        for (0..num_per_axis) |z| {
+            const body_pos = RVec3.init(@floatFromInt(x), 5.0, 0.2 * @as(f32, @floatFromInt(z)));
+            const body = try context.createBox(body_pos, Quat.random(&random), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.1), .{});
+            body.setRestitution(restitution.next(&random));
+            body.setLinearVelocity(Vec3.random(&random));
+            var group = CollisionGroup.init(group_filter.asGroupFilter(), @intCast(x), @intCast(z));
+            defer group.deinit();
+            body.setCollisionGroup(&group);
+
+            // Constrain the body to the previous body
+            if (prev_body) |prev| {
+                var st = SwingTwistConstraintSettings.init(allocator);
+                defer st.asSettings().deinit();
+                st.position1 = body_pos.subVec3(Vec3.init(0, 0, 0.1));
+                st.position2 = st.position1;
+                st.twist_axis1 = Vec3.axisZ();
+                st.twist_axis2 = st.twist_axis1;
+                st.plane_axis1 = Vec3.axisX();
+                st.plane_axis2 = st.plane_axis1;
+                st.normal_half_cone_angle = degreesToRadians(45.0);
+                st.plane_half_cone_angle = degreesToRadians(30.0);
+                st.twist_min_angle = degreesToRadians(-15.0);
+                st.twist_max_angle = degreesToRadians(15.0);
+                _ = try context.createConstraint(SwingTwistConstraint, prev, body, st.asTwoBodySettingsConst());
+            }
+
+            prev_body = body;
+        }
+    }
+}
+
+test "TestGridOfBoxesConstrained" {
+    const allocator = std.testing.allocator;
+    var c1: PhysicsTestContext = undefined;
+    try c1.init(allocator, .{ .delta_time = 1.0 / 60.0, .collision_steps = 1, .worker_threads = 0 });
+    defer c1.deinit();
+    try createGridOfBoxesConstrained(&c1);
+
+    var c2: PhysicsTestContext = undefined;
+    try c2.init(allocator, .{ .delta_time = 1.0 / 60.0, .collision_steps = 1, .worker_threads = 15 });
+    defer c2.deinit();
+    try createGridOfBoxesConstrained(&c2);
 
     try compareSimulations(&c1, &c2, 5.0);
 }

@@ -2349,7 +2349,92 @@ const SliderSlot = struct {
 };
 
 // ---- SLOT cone_swing_twist: ConeConstraint, SwingTwistConstraint (ConstraintKind cone / swing_twist, OpKind 300..319) ----
-const ConeSwingTwistSlot = StubSlot;
+const ConeSwingTwistSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .cone => {
+                const s = try zolt.ConeConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.twist_axis1 = load3(f[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                s.twist_axis2 = load3(f[3..6]);
+                s.half_cone_angle = f[6];
+                return .init(s.asSettings());
+            },
+            .swing_twist => {
+                const s = try zolt.SwingTwistConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.swing_type = @enumFromInt(@as(u8, @truncate(i[1])));
+                s.position1 = loadR3(r[0..3]);
+                s.twist_axis1 = load3(f[0..3]);
+                s.plane_axis1 = load3(f[3..6]);
+                s.position2 = loadR3(r[3..6]);
+                s.twist_axis2 = load3(f[6..9]);
+                s.plane_axis2 = load3(f[9..12]);
+                s.normal_half_cone_angle = f[12];
+                s.plane_half_cone_angle = f[13];
+                s.twist_min_angle = f[14];
+                s.twist_max_angle = f[15];
+                s.max_friction_torque = f[16];
+                s.swing_motor_settings = loadMotor(i[2], f[17..23]);
+                s.twist_motor_settings = loadMotor(i[3], f[23..29]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const f = &op.f;
+        const motor_state: zolt.MotorState = @enumFromInt(@as(i32, @bitCast(op.i[0])));
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .cone_set_half_cone_angle => (try castConstraint(zolt.ConeConstraint, c, .cone)).setHalfConeAngle(f[0]),
+            .swing_twist_set_normal_half_cone_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setNormalHalfConeAngle(f[0]),
+            .swing_twist_set_plane_half_cone_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setPlaneHalfConeAngle(f[0]),
+            .swing_twist_set_twist_min_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTwistMinAngle(f[0]),
+            .swing_twist_set_twist_max_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTwistMaxAngle(f[0]),
+            .swing_twist_set_max_friction_torque => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setMaxFrictionTorque(f[0]),
+            .swing_twist_set_swing_motor_state => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setSwingMotorState(motor_state),
+            .swing_twist_set_twist_motor_state => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTwistMotorState(motor_state),
+            .swing_twist_set_target_angular_velocity_cs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetAngularVelocityCS(load3(f[0..3])),
+            .swing_twist_set_target_angular_velocity_bs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetAngularVelocityBS(load3(f[0..3])),
+            .swing_twist_set_target_orientation_cs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetOrientationCS(loadQuat(f[0..4])),
+            .swing_twist_set_target_orientation_bs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetOrientationBS(loadQuat(f[0..4])),
+            .swing_twist_set_swing_motor_settings => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).getSwingMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            .swing_twist_set_twist_motor_settings => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).getTwistMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .cone => &.{
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "angle_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "world_space_rotation_axis", .kind = .f32, .count = 3 },
+            },
+            .swing_twist => &.{
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_y_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_z_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.twist_limit_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "motor_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "motor_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "motor_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "swing_motor_state", .kind = .u32 },
+                .{ .name = "twist_motor_state", .kind = .u32 },
+                .{ .name = "target_angular_velocity", .kind = .f32, .count = 3 },
+                .{ .name = "target_orientation", .kind = .f32, .count = 4 },
+            },
+            else => null,
+        };
+    }
+};
 
 // ---- SLOT six_dof: SixDOFConstraint (ConstraintKind six_dof, OpKind 320..339) ----
 const SixDOFSlot = struct {

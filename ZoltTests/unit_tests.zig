@@ -62,6 +62,7 @@ test {
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
     _ = @import("Physics/CollisionGroupTests.zig");
+    _ = @import("Physics/ConeConstraintTests.zig");
     _ = @import("Physics/ConstraintManagerTests.zig");
     _ = @import("Physics/ContactConstraintManagerTests.zig");
     _ = @import("Physics/ContactListenerTests.zig");
@@ -93,6 +94,7 @@ test {
     _ = @import("Physics/SliderConstraintTests.zig");
     _ = @import("Physics/SixDOFConstraintTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
+    _ = @import("Physics/SwingTwistConstraintTests.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
 }
