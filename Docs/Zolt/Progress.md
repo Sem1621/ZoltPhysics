@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 76.2%** of 85391 lines in scope · **Unit tests: 86.7%** of 18321 lines
+**Library: 76.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 88% | 29 | 0 | 0 | 4 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 88% | 30 | 0 | 0 | 3 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 65%</summary>
 
@@ -654,7 +654,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ContactListenerTests.cpp` | 607 | ✅ complete | `ZoltTests/Physics/ContactListenerTests.zig` |
 | `ConvexVsTrianglesTest.cpp` | 346 | ✅ complete | `ZoltTests/Physics/ConvexVsTrianglesTest.zig` |
 | `DistanceConstraintTests.cpp` | 66 | ✅ complete | `ZoltTests/Physics/DistanceConstraintTests.zig` |
-| `EstimateCollisionResponseTest.cpp` | 65 | ❌ todo |  |
+| `EstimateCollisionResponseTest.cpp` | 65 | ✅ complete | `ZoltTests/Physics/EstimateCollisionResponseTest.zig` |
 | `HeightFieldShapeTests.cpp` | 449 | ✅ complete | `ZoltTests/Physics/HeightFieldShapeTests.zig` |
 | `HingeConstraintTests.cpp` | 74 | ✅ complete | `ZoltTests/Physics/HingeConstraintTests.zig` |
 | `MotionQualityLinearCastTests.cpp` | 310 | ✅ complete | `ZoltTests/Physics/MotionQualityLinearCastTests.zig` |

@@ -117,8 +117,8 @@ def read_zig_headers(base_dir):
                 m = HEADER_PORT.match(line.strip())
                 if m:
                     ports = [p.strip() for p in m.group(1).split(",") if p.strip()]
-                if HEADER_ADDITION.match(line.strip()):
-                    ports = []  # Zolt specific file without a C++ counterpart
+                if HEADER_ADDITION.match(line.strip()) and ports is None:
+                    ports = []  # Zolt specific file without a C++ counterpart (only without a `Port of:` line)
                 m = HEADER_STATUS.match(line.strip())
                 if m:
                     status = m.group(1).lower()
