@@ -815,7 +815,160 @@ const ConeKind = StubKind(zolt.ConeConstraintSettings);
 const SwingTwistKind = StubKind(zolt.SwingTwistConstraintSettings);
 
 // ---- SLOT six_dof (Zolt/Physics/Constraints/SixDOFConstraint.zig) ----
-const SixDOFKind = StubKind(zolt.SixDOFConstraintSettings);
+const SixDOFKind = struct {
+    pub const Settings = zolt.SixDOFConstraintSettings;
+    pub const Constraint = zolt.SixDOFConstraint;
+    const Axis = Settings.Axis;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const i = &d.i;
+        const f = &d.f;
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(i[0])));
+        s.swing_type = @enumFromInt(@as(u8, @intCast(i[1])));
+        s.position1 = loadR3(d.r[0..3]);
+        s.axis_x1 = load3(f[0..3]);
+        s.axis_y1 = load3(f[3..6]);
+        s.position2 = loadR3(d.r[3..6]);
+        s.axis_x2 = load3(f[6..9]);
+        s.axis_y2 = load3(f[9..12]);
+        for (0..Axis.num) |a| {
+            const axis: Axis = @enumFromInt(a);
+            s.max_friction[a] = f[12 + a];
+            switch (i[11 + a]) {
+                1 => s.setLimitedAxis(axis, f[18 + a], f[24 + a]),
+                2 => s.makeFreeAxis(axis),
+                3 => s.makeFixedAxis(axis),
+                else => {
+                    s.limit_min[a] = f[18 + a];
+                    s.limit_max[a] = f[24 + a];
+                },
+            }
+            s.motor_settings[a] = loadMotor(i[5 + a], f[36 + 6 * a ..][0..6]);
+        }
+        for (0..Axis.num_translation) |a|
+            s.limits_spring_settings[a] = loadSpring(i[2 + a], f[30 + 2 * a ..][0..2]);
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        const i = &op.i;
+        const f = &op.f;
+        switch (op.op) {
+            16 => c.setTranslationLimits(load3(f[0..3]), load3(f[3..6])),
+            17 => c.setRotationLimits(load3(f[0..3]), load3(f[3..6])),
+            18 => c.setLimitsSpringSettings(@enumFromInt(i[0]), loadSpring(i[1], f[0..2])),
+            19 => c.setMaxFriction(@enumFromInt(i[0]), f[0]),
+            20 => c.setMotorState(@enumFromInt(i[0]), @enumFromInt(@as(i32, @bitCast(i[1])))),
+            21 => c.setTargetVelocityCS(load3(f[0..3])),
+            22 => c.setTargetAngularVelocityCS(load3(f[0..3])),
+            23 => c.setTargetPositionCS(load3(f[0..3])),
+            24 => c.setTargetOrientationCS(loadQuat(f[0..4])),
+            25 => c.setTargetOrientationBS(loadQuat(f[0..4])),
+            26 => c.getMotorSettingsMut(@enumFromInt(i[0])).* = loadMotor(i[1], f[0..6]),
+            else => {
+                std.debug.print("six_dof: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        for (0..Axis.num) |a| {
+            const axis: Axis = @enumFromInt(a);
+            rec.f(c.getLimitsMin(axis));
+            rec.f(c.getLimitsMax(axis));
+            rec.b(c.isFixedAxis(axis));
+            rec.b(c.isFreeAxis(axis));
+            rec.f(c.getMaxFriction(axis));
+            rec.i(@bitCast(@intFromEnum(c.getMotorState(axis))));
+            rec.motor(c.getMotorSettings(axis));
+            if (a < Axis.num_translation)
+                rec.spring(c.getLimitsSpringSettings(axis).*);
+        }
+        rec.v3(c.getTranslationLimitsMin());
+        rec.v3(c.getTranslationLimitsMax());
+        rec.v3(c.getRotationLimitsMin());
+        rec.v3(c.getRotationLimitsMax());
+        rec.q(c.getRotationInConstraintSpace());
+        rec.v3(c.getTargetVelocityCS());
+        rec.v3(c.getTargetAngularVelocityCS());
+        rec.v3(c.getTargetPositionCS());
+        rec.q(c.getTargetOrientationCS());
+        rec.v3(c.getTotalLambdaPosition());
+        rec.v3(c.getTotalLambdaRotation());
+        rec.v3(c.getTotalLambdaMotorTranslation());
+        rec.v3(c.getTotalLambdaMotorRotation());
+    }
+
+    /// CSRecordSettingsGetters: IsFreeAxis / IsFixedAxis of the settings
+    pub fn recordSettingsGetters(rec: *Rec, s: *const Settings) void {
+        for (0..Axis.num) |a| {
+            const axis: Axis = @enumFromInt(a);
+            rec.b(s.isFreeAxis(axis));
+            rec.b(s.isFixedAxis(axis));
+        }
+    }
+
+    /// The branches the scenarios must reach (at most 28: Coverage holds 32 names, the driver adds 4)
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+        cov.hit("pyramid swing type", d.i[1] == 1);
+        cov.hit("same frames on both bodies", load3(d.f[0..3]).eql(load3(d.f[6..9])) and load3(d.f[3..6]).eql(load3(d.f[9..12])));
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+        var helpers: [4]bool = @splat(false);
+        for (0..Axis.num) |a| helpers[@min(d.i[11 + a], 3)] = true;
+        cov.hit("settings SetLimitedAxis, MakeFreeAxis and MakeFixedAxis", helpers[1] and helpers[2] and helpers[3]);
+        var springs: [3]bool = @splat(false);
+        for (0..Axis.num_translation) |a| {
+            if (d.f[30 + 2 * a] > 0.0) springs[@min(d.i[2 + a], 2)] = true;
+        }
+        cov.hit("soft limits springs in every spring mode", springs[0] and springs[1] and springs[2]);
+
+        var ops: [11]bool = @splat(false);
+        var motor_states: [4]bool = @splat(false);
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op >= 16 and op.op < 27) ops[op.op - 16] = true;
+            if (op.op == 20 and op.i[1] < 4 and op.frame < sc.num_frames) motor_states[op.i[1]] = true;
+        }
+        cov.hit("SetTranslationLimits", ops[0]);
+        cov.hit("SetRotationLimits", ops[1]);
+        cov.hit("SetLimitsSpringSettings", ops[2]);
+        cov.hit("SetMaxFriction", ops[3]);
+        cov.hit("SetTargetVelocityCS, SetTargetAngularVelocityCS and SetTargetPositionCS", ops[5] and ops[6] and ops[7]);
+        cov.hit("SetTargetOrientationCS and SetTargetOrientationBS", ops[8] and ops[9]);
+        cov.hit("GetMotorSettings() =", ops[10]);
+        cov.hit("SetMotorState off before a frame", motor_states[0]);
+        cov.hit("SetMotorState velocity before a frame", motor_states[1]);
+        cov.hit("SetMotorState position before a frame", motor_states[2]);
+        cov.hit("SetMotorState position and velocity before a frame", motor_states[3]);
+
+        // The state of the constraint at the end (SixDOFConstraint's private IsTranslationFullyConstrained etc.)
+        const translation_fixed = (c.fixed_axis & 0b111) == 0b111;
+        const rotation_fixed = (c.fixed_axis & 0b111000) == 0b111000;
+        cov.hit("translation fully constrained (point part)", translation_fixed and !c.has_spring_limits);
+        cov.hit("translation fixed with soft limits (axis parts)", translation_fixed and c.has_spring_limits);
+        cov.hit("rotation fully constrained (Euler part)", rotation_fixed);
+        cov.hit("translation fixed at a value (equal limits)", translation_fixed and !c.getTranslationLimitsMin().eql(Vec3.zero()));
+        cov.hit("rotation fixed at a value (equal limits)", rotation_fixed and !c.getRotationLimitsMin().eql(Vec3.zero()));
+        var limit_active = false;
+        var translation_motor_active = false;
+        var rotation_motor_active = false;
+        for (0..3) |k| {
+            if (c.translation_constraint_part[k].isActive() and !c.isFixedAxis(@enumFromInt(k))) limit_active = true;
+            if (c.motor_translation_constraint_part[k].isActive()) translation_motor_active = true;
+            if (c.motor_rotation_constraint_part[k].isActive()) rotation_motor_active = true;
+        }
+        cov.hit("translation limit part active on a limited axis", limit_active);
+        cov.hit("swing twist part active", c.swing_twist_constraint_part.isActive());
+        cov.hit("translation and rotation motor / friction parts active", translation_motor_active and rotation_motor_active);
+        cov.hit("rotation position motors on several axes", @popCount(c.rotation_position_motor_active) >= 2);
+        cov.hit("no dynamic body (kinematic / static pairs)", sc.body[0].motion_type != @intFromEnum(MotionType.dynamic) and sc.body[1].motion_type != @intFromEnum(MotionType.dynamic));
+    }
+};
 
 // ---- SLOT path (Zolt/Physics/Constraints/PathConstraint.zig, PathConstraintPathHermite.zig) ----
 const PathKind = StubKind(zolt.PathConstraintSettings);
@@ -1906,9 +2059,30 @@ fn genSwingTwist(g: *Gen, sc: *CSScenario) void {
     }
 }
 
+/// The rotation parts of the SixDOF (the RotationEulerConstraintPart, the AngleConstraintParts of the swing twist part and
+/// of the rotation motors) invert the summed world space inverse inertia of the bodies (3x3 or along an axis; Jolt only
+/// deactivates a part when the determinant / the inverse effective mass is exactly zero / below FLT_MIN). When the only
+/// dynamic body (or both) can rotate around some world axes only, an axis almost perpendicular to them gives a huge
+/// effective mass from rounding noise, the velocities overflow and become NaN, which Jolt asserts
+/// (MotionProperties::ApplyAngularVelocityStep). So, like the hinge generator, a dynamic body keeps partially allowed
+/// rotations only when the other body is dynamic and rotates freely; otherwise it gets all three rotations back (the
+/// translation DOFs stay as generated, a body without any rotation DOF stays: its inverse inertia is exactly zero).
+fn genSixDOFRotationDOFs(sc: *CSScenario) void {
+    const rotation: u32 = 0b111000;
+    for (0..2) |k| {
+        const body = &sc.body[k];
+        const other = &sc.body[1 - k];
+        const dynamic = body.motion_type == @intFromEnum(MotionType.dynamic) and body.fixed_to_world == 0;
+        const partial = (body.allowed_dofs & rotation) != 0 and (body.allowed_dofs & rotation) != rotation;
+        const other_rotates_freely = other.motion_type == @intFromEnum(MotionType.dynamic) and other.fixed_to_world == 0 and (other.allowed_dofs & rotation) == rotation;
+        if (dynamic and partial and !other_rotates_freely)
+            body.allowed_dofs |= rotation;
+    }
+}
+
 /// The limits of one SixDOF axis: free, fixed or a range (rotation Y / Z: symmetric for the cone swing type)
 fn genSixDOFLimit(g: *Gen, axis: usize, swing_type: u32, min: *f32, max: *f32) void {
-    switch (g.index(4)) {
+    switch (g.index(5)) {
         0 => {
             min.* = -math.flt_max;
             max.* = math.flt_max;
@@ -1916,6 +2090,18 @@ fn genSixDOFLimit(g: *Gen, axis: usize, swing_type: u32, min: *f32, max: *f32) v
         1 => {
             min.* = math.flt_max;
             max.* = -math.flt_max;
+        },
+        2 => if (axis < 3) {
+            // Fixed at a value (equal limits: the point / axis parts drive to it)
+            min.* = if (g.oneIn(4)) 0.0 else g.float(-1, 1);
+            max.* = min.*;
+        } else if (axis == 3 or swing_type == 1) {
+            min.* = if (g.oneIn(4)) 0.0 else g.angle(-std.math.pi, std.math.pi);
+            max.* = min.*;
+        } else {
+            // Cone: the min is the negated max, equal limits are 0
+            min.* = 0.0;
+            max.* = 0.0;
         },
         else => if (axis < 3) {
             min.* = g.float(-2, 0);
@@ -1930,11 +2116,29 @@ fn genSixDOFLimit(g: *Gen, axis: usize, swing_type: u32, min: *f32, max: *f32) v
     }
 }
 
+/// A SixDOF motor: a valid motor (`Gen.motor`), sometimes without stiffness (a position motor is then off) and without
+/// damping (a position and velocity motor too, in frequency mode)
+fn genSixDOFMotor(g: *Gen, i: *u32, f: []f32) void {
+    g.motor(i, f);
+    if (g.oneIn(5)) {
+        f[0] = 0.0;
+        if (g.oneIn(2)) f[1] = 0.0;
+    }
+}
+
 /// SixDOF: I[0] space, I[1] swing type; R[0..3] position 1, R[3..6] position 2; F[0..12] axis X1, Y1, X2, Y2, F[12..18]
 /// max friction, F[18..24] limit min, F[24..30] limit max, limits spring k I[2 + k] F[30 + 2k..], motor k I[5 + k]
 /// F[36 + 6k..]; I[11 + k] the settings helper that sets the limits of axis k: 1 SetLimitedAxis(k, F[18 + k], F[24 + k]),
 /// 2 MakeFreeAxis(k), 3 MakeFixedAxis(k), otherwise the members (see CSMakeSettings)
 fn genSixDOF(g: *Gen, sc: *CSScenario) void {
+    genSixDOFRotationDOFs(sc);
+    // Sometimes no dynamic body at all, so that every motion type pair is covered (the constraint is not active, its
+    // parts deactivate themselves: the effective masses are zero)
+    if (g.oneIn(10)) {
+        for (&sc.body) |*body| {
+            if (body.motion_type == @intFromEnum(MotionType.dynamic)) body.motion_type = @intFromEnum(MotionType.kinematic);
+        }
+    }
     const s = &sc.settings;
     s.i[0] = g.space();
     s.i[1] = @intCast(g.index(2));
@@ -1949,10 +2153,49 @@ fn genSixDOF(g: *Gen, sc: *CSScenario) void {
     for (0..6) |a| {
         s.f[12 + a] = if (g.oneIn(2)) 0.0 else g.float(0, 10);
         genSixDOFLimit(g, a, s.i[1], &s.f[18 + a], &s.f[24 + a]);
-        g.motor(&s.i[5 + a], s.f[36 + 6 * a .. 42 + 6 * a]);
+        genSixDOFMotor(g, &s.i[5 + a], s.f[36 + 6 * a .. 42 + 6 * a]);
     }
     for (0..3) |a| g.spring(&s.i[2 + a], s.f[30 + 2 * a .. 32 + 2 * a]);
     for (0..6) |a| s.i[11 + a] = @intCast(g.index(4)); // Members, SetLimitedAxis, MakeFreeAxis, MakeFixedAxis
+
+    // Every translation axis fixed (the point part; with a soft limit the axis parts) or every rotation axis fixed (the
+    // Euler part): rare with independent axes
+    if (g.oneIn(5)) {
+        for (0..3) |a| {
+            if (g.oneIn(2)) {
+                s.i[11 + a] = 3;
+            } else {
+                s.i[11 + a] = @intCast(g.index(2));
+                const v: f32 = if (g.oneIn(2)) 0.0 else g.float(-1, 1);
+                s.f[18 + a] = v;
+                s.f[24 + a] = v;
+            }
+        }
+        if (!g.oneIn(4)) {
+            for (0..3) |a| s.f[30 + 2 * a] = 0.0; // No soft limits
+        }
+    }
+    if (g.oneIn(5)) {
+        for (3..6) |a| {
+            if (g.oneIn(2)) s.i[11 + a] = 3 else {
+                s.i[11 + a] = @intCast(g.index(2));
+                const v: f32 = if (g.oneIn(2) or (a > 3 and s.i[1] == 0)) 0.0 else g.angle(-std.math.pi, std.math.pi);
+                s.f[18 + a] = v;
+                s.f[24 + a] = v;
+            }
+        }
+    }
+
+    // Motor states on several axes (the projections of the rotation position motors)
+    if (g.oneIn(4)) {
+        for (0..6) |a| {
+            if (g.oneIn(2)) continue;
+            const op = g.kindOp(sc, 20, .{});
+            op.i[0] = @intCast(a);
+            op.i[1] = g.motorState();
+        }
+    }
+
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, @intCast(16 + g.index(11)), .{});
         switch (op.op) {
@@ -1973,7 +2216,7 @@ fn genSixDOF(g: *Gen, sc: *CSScenario) void {
             24, 25 => storeQuat(g.quat(), op.f[0..4]),
             26 => {
                 op.i[0] = @intCast(g.index(6));
-                g.motor(&op.i[1], op.f[0..6]);
+                genSixDOFMotor(g, &op.i[1], op.f[0..6]);
             },
             else => unreachable,
         }

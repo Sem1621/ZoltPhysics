@@ -1289,6 +1289,17 @@ pub const scenes = [_]SceneEntry{
     // (append the cone / swing twist scenes here)
     // ---- SixDOF ----
     .{ .name = "constraints_six_dof_ops", .build = buildSixDOFOps, .blocked_by = .six_dof_constraints, .expect = .{ .active_constraints = 2 } },
+    .{ .name = "constraints_six_dof_limits_and_springs", .build = buildSixDOFLimits, .blocked_by = .six_dof_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 11 } },
+    .{ .name = "constraints_six_dof_motors", .build = buildSixDOFMotors, .blocked_by = .six_dof_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 16 } },
+    .{ .name = "constraints_six_dof_ragdolls", .build = buildSixDOFRagdolls, .blocked_by = .six_dof_constraints, .sweep_stride = 30, .expect = .{ .contacts = true, .removed = true, .active_constraints = 33 } },
+    .{ .name = "constraints_six_dof_net_splitter", .build = buildSixDOFNetSplitter, .blocked_by = .six_dof_constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .active_constraints = 241 } },
+    .{ .name = "constraints_six_dof_sleep_and_save_restore", .build = buildSixDOFSleepAndSaveRestore, .blocked_by = .six_dof_constraints, .sweep_stride = 10, .expect = .{ .sleeping = true, .update_activations = 1, .active_constraints = 3 } },
+    .{ .name = "constraints_six_dof_collision_steps_2", .build = buildSixDOFCollisionSteps(2), .blocked_by = .six_dof_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_six_dof_collision_steps_3", .build = buildSixDOFCollisionSteps(3), .blocked_by = .six_dof_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_six_dof_far_from_origin", .build = buildSixDOFFarFromOrigin, .blocked_by = .six_dof_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 6 } },
+    .{ .name = "constraints_six_dof_random_1", .build = buildSixDOFRandom(1), .blocked_by = .six_dof_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_six_dof_random_2", .build = buildSixDOFRandom(2), .blocked_by = .six_dof_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_six_dof_random_3", .build = buildSixDOFRandom(3), .blocked_by = .six_dof_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     // (append the six dof scenes here)
     // ---- Path ----
     .{ .name = "constraints_path_ops", .build = buildPathOps, .blocked_by = .path_constraints, .expect = .{ .active_constraints = 2 } },
@@ -7345,6 +7356,749 @@ fn buildSixDOFOps(b: *SceneBuilder) Allocator.Error!void {
     try b.constraintOp(.notify_constraint_shape_changed, welded, .{ .body = c, .f = &.{ 0.02, 0, 0 } });
     try b.constraintOp(.reset_constraint_warm_start, joint, .{});
     try b.constraintOp(.constraint_settings_hash, welded, .{});
+}
+
+/// A SixDOF from the world (Body::sFixedToWorld as body 1) at `p`, the constraint frame (axis_x, axis_y) on both sides,
+/// every translation fixed and every rotation free
+fn worldSixDOF(body2: u32, p: [3]Real, axis_x: [3]f32, axis_y: [3]f32) SimConstraint {
+    var c = Desc.sixDOF(invalid_handle, body2, p, axis_x, axis_y);
+    for (0..3) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+    return c;
+}
+
+/// The limits spring of SixDOF translation axis `axis` (0..2)
+fn setSixDOFSpring(c: *SimConstraint, axis: usize, mode: u32, frequency: f32, damping: f32) void {
+    Desc.setSpring(c, 2 + axis, 30 + 2 * axis, mode, frequency, damping);
+}
+
+/// The motor settings of SixDOF axis `axis` (0..5)
+fn setSixDOFMotor(c: *SimConstraint, axis: usize, mode: u32, values: [6]f32) void {
+    Desc.setMotor(c, 5 + axis, 36 + 6 * axis, mode, values);
+}
+
+/// SixDOF limits and their springs: boxes hanging from the world drop into a hard translation limit and into soft
+/// limits in all three spring modes; a box with every translation fixed at an offset (the point part with
+/// GetTranslationLimitsMin) and every rotation fixed at an angle (the Euler part with GetRotationLimitsMin); a spinning
+/// bar into twist and cone swing limits; a bar into asymmetric pyramid swing limits; a box on fixed translations with
+/// soft springs (TestSixDOFSpring); a pair of dynamic boxes in local space whose frames differ, one hanging from a
+/// point constraint; a box dragged by a kinematic body; SetTranslationLimits / SetRotationLimits (narrower limits the
+/// body is outside of, a fixed axis that becomes limited, everything free) and SetLimitsSpringSettings while they act
+fn buildSixDOFLimits(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const bar = try b.box(.{ 0.5, 0.1, 0.1 }, 0.05);
+    b.num_updates = 100;
+    const x_axis: [3]f32 = .{ 1, 0, 0 };
+    const y_axis: [3]f32 = .{ 0, 1, 0 };
+
+    // Boxes that drop along Y into a hard limit and soft limits (the other axes fixed)
+    var drops: [4]u32 = undefined;
+    for (&drops, 0..) |*h, k| {
+        const x: Real = 2 * real(k);
+        const body = try b.body(.{ .position = .{ x, 6, 0 }, .shape = box, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+        var c = worldSixDOF(body, .{ x, 6, 0 }, x_axis, y_axis);
+        Desc.setSixDOFLimits(&c, 1, -0.6, 0.2);
+        for (3..6) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+        switch (k) {
+            1 => setSixDOFSpring(&c, 1, 0, 2, 0.3), // Frequency and damping
+            2 => setSixDOFSpring(&c, 1, 1, 300, 5), // Stiffness and damping
+            3 => setSixDOFSpring(&c, 1, 2, 40, 2), // Mass normalized
+            else => {},
+        }
+        h.* = try b.constraint(c);
+    }
+
+    // Fixed at an offset and an orientation: the position solver moves the box there
+    const offset_box = try b.body(.{ .position = .{ 9, 6, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    var offset = worldSixDOF(offset_box, .{ 9, 6, 0 }, x_axis, y_axis);
+    Desc.setSixDOFLimits(&offset, 0, 0.3, 0.3);
+    Desc.setSixDOFLimits(&offset, 2, -0.2, -0.2);
+    Desc.setSixDOFLimits(&offset, 3, 0.2, 0.2);
+    Desc.setSixDOFLimits(&offset, 4, -0.3, -0.3);
+    Desc.setSixDOFLimits(&offset, 5, 0.1, 0.1);
+    offset.i[1] = 1; // Pyramid: the swing limits are not made symmetric
+    const offset_handle = try b.constraint(offset);
+
+    // A spinning bar into twist limits (constraint X is the bar's long axis) and cone swing limits
+    const twist_bar = try b.body(.{ .position = .{ 12.5, 6, 0 }, .shape = bar, .angular_velocity = .{ 3, 1, 0.5 }, .object_layer = Layers.unused1 }, .activate);
+    var twist = worldSixDOF(twist_bar, .{ 12, 6, 0 }, x_axis, y_axis);
+    Desc.setSixDOFLimits(&twist, 3, -0.3, 0.5);
+    Desc.setSixDOFLimits(&twist, 4, -0.4, 0.4);
+    Desc.setSixDOFLimits(&twist, 5, -0.6, 0.6);
+    twist.f[12 + 3] = 0.5; // Twist friction
+    const twist_handle = try b.constraint(twist);
+
+    // A bar that swings down into asymmetric pyramid swing limits, the twist free
+    const swing_bar = try b.body(.{ .position = .{ 15.5, 6, 0 }, .shape = bar, .object_layer = Layers.unused1 }, .activate);
+    var swing = worldSixDOF(swing_bar, .{ 15, 6, 0 }, x_axis, y_axis);
+    swing.i[1] = 1; // Pyramid
+    Desc.setSixDOFLimits(&swing, 4, -0.2, 0.6);
+    Desc.setSixDOFLimits(&swing, 5, -0.5, 0.1);
+    _ = try b.constraint(swing);
+
+    // Soft springs on every translation axis (the fixed axes become axis parts), started away from the anchor
+    const spring_box = try b.body(.{ .position = .{ 18.4, 6.3, 0.2 }, .shape = box, .gravity_factor = 0, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+    var spring = Desc.sixDOF(invalid_handle, spring_box, .{ 18, 6, 0 }, x_axis, y_axis);
+    spring.r[3] = 18.4;
+    spring.r[4] = 6.3;
+    spring.r[5] = 0.2;
+    for (0..3) |axis| {
+        Desc.setSixDOFLimits(&spring, axis, 0, 0);
+        setSixDOFSpring(&spring, axis, @intCast(axis), if (axis == 1) 200 else 1.5, 0.1);
+    }
+    const spring_handle = try b.constraint(spring);
+
+    // A pair of dynamic boxes: a hangs from the world on a point constraint, c on a SixDOF in local space whose frames
+    // differ by a turn around Z, translation limited along the constraint X axis, a cone swing limit
+    const a = try b.body(.{ .position = .{ 25, 6, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    const c = try b.body(.{ .position = .{ 25.8, 6, 0 }, .shape = box, .angular_velocity = .{ 0, 2, 1 }, .object_layer = Layers.unused1 }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, a, .{ 25, 6.4, 0 }));
+    var local = Desc.sixDOF(a, c, .{ 0.4, 0, 0 }, x_axis, y_axis);
+    local.i[0] = ConstraintSpace.local_to_body_com;
+    local.r[3] = -0.4;
+    local.r[4] = 0;
+    local.r[5] = 0;
+    local.f[6] = @floatCast(@cos(std.math.pi / 6.0)); // Axis X2
+    local.f[7] = @floatCast(@sin(std.math.pi / 6.0));
+    local.f[9] = @floatCast(-@sin(std.math.pi / 6.0)); // Axis Y2
+    local.f[10] = @floatCast(@cos(std.math.pi / 6.0));
+    Desc.setSixDOFLimits(&local, 0, -0.1, 0.2);
+    Desc.setSixDOFLimits(&local, 1, 0, 0);
+    Desc.setSixDOFLimits(&local, 2, 0, 0);
+    Desc.setSixDOFLimits(&local, 4, -0.3, 0.3);
+    Desc.setSixDOFLimits(&local, 5, -0.3, 0.3);
+    const pair = try b.constraint(local);
+
+    // A box hanging from a kinematic body that turns around Z, rotation limited: the box is dragged along
+    const kinematic = try b.body(.{ .position = .{ 30, 6, 0 }, .shape = box, .motion_type = 1, .angular_velocity = .{ 0, 0, 1.5 }, .object_layer = Layers.unused1 }, .activate);
+    const dragged = try b.body(.{ .position = .{ 30, 5.2, 0 }, .shape = box, .object_layer = Layers.unused1 }, .activate);
+    var kinematic_desc = Desc.sixDOF(kinematic, dragged, .{ 30, 5.6, 0 }, x_axis, y_axis);
+    for (0..3) |axis| Desc.setSixDOFLimits(&kinematic_desc, axis, 0, 0);
+    Desc.setSixDOFLimits(&kinematic_desc, 3, -0.2, 0.2);
+    Desc.setSixDOFLimits(&kinematic_desc, 4, -0.2, 0.2);
+    Desc.setSixDOFLimits(&kinematic_desc, 5, -0.4, 0.4);
+    _ = try b.constraint(kinematic_desc);
+
+    b.at(40);
+    try b.constraintOp(.six_dof_set_translation_limits, drops[0], .{ .f = &.{ 0, -0.3, 0, 0, 0.2, 0 } }); // Outside: pushed back
+    try b.constraintOp(.six_dof_set_limits_spring_settings, drops[1], .{ .i = &.{ 1, 0 }, .f = &.{ 0, 0 } }); // Hard now
+    try b.constraintOp(.six_dof_set_limits_spring_settings, drops[0], .{ .i = &.{ 1, 1 }, .f = &.{ 150, 2 } }); // Soft now
+    try b.constraintOp(.constraint_settings_hash, pair, .{});
+    b.at(55);
+    try b.constraintOp(.six_dof_set_rotation_limits, twist_handle, .{ .f = &.{ -flt_max, -flt_max, -flt_max, flt_max, flt_max, flt_max } }); // Free
+    try b.constraintOp(.six_dof_set_max_friction, twist_handle, .{ .i = &.{3}, .f = &.{2} });
+    try b.constraintOp(.constraint_settings_hash, offset_handle, .{});
+    b.at(70);
+    try b.constraintOp(.six_dof_set_translation_limits, offset_handle, .{ .f = &.{ -0.2, 0, -0.2, 0.5, 0, -0.2 } }); // X limited now
+    try b.constraintOp(.six_dof_set_rotation_limits, offset_handle, .{ .f = &.{ 0, 0, 0, 0, 0, 0 } }); // Fixed at zero
+    try b.constraintOp(.six_dof_set_limits_spring_settings, spring_handle, .{ .i = &.{ 0, 0 }, .f = &.{ 0, 0 } }); // Hard X
+    try b.constraintOp(.notify_constraint_shape_changed, pair, .{ .body = c, .f = &.{ 0.02, 0, 0 } });
+    try b.constraintOp(.constraint_settings_hash, twist_handle, .{});
+}
+
+/// SixDOF motors in every EMotorState on translation and rotation axes (zero gravity, every body on a SixDOF to the
+/// world): friction only (motor off); translation velocity motors with a force limit and a changing target; translation
+/// position motors, one without stiffness (inactive) that becomes a damping only position and velocity motor; rotation
+/// velocity motors; rotation position motors on every combination of axes (the projections of the difference to the
+/// target orientation) with SetTargetOrientationCS / BS; a mass normalized motor with asymmetric torque limits;
+/// rotation motors on a fully fixed rotation (not solved); and one box that goes through every state
+fn buildSixDOFMotors(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.3, 0.2, 0.25 }, 0.05);
+    b.num_updates = 90;
+    b.gravity = .{ 0, 0, 0 };
+    const x_axis: [3]f32 = .{ 1, 0, 0 };
+    const y_axis: [3]f32 = .{ 0, 1, 0 };
+    const num = 16;
+    var bodies: [num]u32 = undefined;
+    var joints: [num]u32 = undefined;
+    for (&bodies, &joints, 0..) |*h, *j, k| {
+        const x: Real = 2 * real(k);
+        const velocity: [3]f32 = if (k == 0) .{ 2, 0, 1 } else @splat(0);
+        const spin: [3]f32 = if (k == 0) .{ 0, 2, 0 } else @splat(0);
+        h.* = try b.body(.{ .position = .{ x, 3, 0 }, .shape = box, .linear_velocity = velocity, .angular_velocity = spin, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+        var c = Desc.sixDOF(invalid_handle, h.*, .{ x, 3, 0 }, x_axis, y_axis);
+        switch (k) {
+            0 => {
+                c.f[12 + 0] = 3; // Translation X friction
+                c.f[12 + 4] = 1; // Rotation Y friction
+            },
+            1 => setSixDOFMotor(&c, 0, 0, .{ 2, 1, -5, 5, -flt_max, flt_max }), // Force limited
+            3 => setSixDOFMotor(&c, 2, 1, .{ 0, 20, -flt_max, flt_max, -flt_max, flt_max }), // Damping only
+            4 => Desc.setSixDOFLimits(&c, 1, -0.2, 0.2), // Velocity motors with a limited axis
+            12 => {
+                setSixDOFMotor(&c, 3, 2, .{ 30, 4, -flt_max, flt_max, -2, 10 }); // Mass normalized, asymmetric torque limits
+                setSixDOFMotor(&c, 5, 2, .{ 30, 4, -flt_max, flt_max, -10, 10 });
+            },
+            13 => for (3..6) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0), // Rotation fully fixed
+            else => {},
+        }
+        j.* = try b.constraint(c);
+    }
+    const target = axisAngle(.{ 0.3, -0.5, 0.8 }, 0.9);
+    b.at(1);
+    try b.constraintOp(.six_dof_set_motor_state, joints[1], .{ .i = &.{ 0, 1 } }); // Translation X velocity
+    try b.constraintOp(.six_dof_set_target_velocity_cs, joints[1], .{ .f = &.{ 1.5, 0, 0 } });
+    for (0..3) |axis| try b.constraintOp(.six_dof_set_motor_state, joints[2], .{ .i = &.{ @intCast(axis), 2 } }); // Translation position
+    try b.constraintOp(.six_dof_set_target_position_cs, joints[2], .{ .f = &.{ 0.5, -0.3, 0.2 } });
+    try b.constraintOp(.six_dof_set_motor_settings, joints[3], .{ .i = &.{ 2, 1 }, .f = &.{ 0, 0, -flt_max, flt_max, -flt_max, flt_max } }); // No stiffness
+    try b.constraintOp(.six_dof_set_motor_state, joints[3], .{ .i = &.{ 2, 2 } }); // Position without stiffness: inactive
+    try b.constraintOp(.six_dof_set_target_position_cs, joints[3], .{ .f = &.{ 0, 0, 1 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[4], .{ .i = &.{ 4, 1 } }); // Rotation Y velocity
+    try b.constraintOp(.six_dof_set_motor_state, joints[4], .{ .i = &.{ 1, 1 } }); // Translation Y velocity (into the limit)
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joints[4], .{ .f = &.{ 0, 1.2, 0 } });
+    try b.constraintOp(.six_dof_set_target_velocity_cs, joints[4], .{ .f = &.{ 0, 0.8, 0 } });
+    // Rotation position motors on every combination of axes (masks 1..7)
+    for (1..8) |mask| {
+        const j = joints[4 + mask];
+        for (0..3) |axis| {
+            if ((mask & (@as(usize, 1) << @intCast(axis))) != 0)
+                try b.constraintOp(.six_dof_set_motor_state, j, .{ .i = &.{ @intCast(3 + axis), if (mask == 7 and axis == 1) 3 else 2 } });
+        }
+        if (mask % 2 == 0)
+            try b.constraintOp(.six_dof_set_target_orientation_cs, j, .{ .f = &target })
+        else
+            try b.constraintOp(.six_dof_set_target_orientation_bs, j, .{ .f = &target });
+    }
+    try b.constraintOp(.six_dof_set_motor_state, joints[12], .{ .i = &.{ 3, 2 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[12], .{ .i = &.{ 5, 3 } });
+    try b.constraintOp(.six_dof_set_target_orientation_cs, joints[12], .{ .f = &axisAngle(.{ 1, 0, 1 }, -2.5) });
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joints[12], .{ .f = &.{ 0, 0, 0.5 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[13], .{ .i = &.{ 3, 1 } }); // Rotation fixed: the motor is not solved
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joints[13], .{ .f = &.{ 2, 0, 0 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 5, 1 } }); // The box that goes through every state
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joints[14], .{ .f = &.{ 0, 0, 1 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 2, 1 } });
+    try b.constraintOp(.six_dof_set_target_velocity_cs, joints[14], .{ .f = &.{ 0, 0, -0.5 } });
+    try b.constraintOp(.six_dof_set_max_friction, joints[15], .{ .i = &.{1}, .f = &.{2} });
+    try b.constraintOp(.six_dof_set_max_friction, joints[15], .{ .i = &.{3}, .f = &.{1} });
+    b.at(20);
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 5, 2 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 2, 2 } });
+    try b.constraintOp(.six_dof_set_target_orientation_cs, joints[14], .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.7) });
+    try b.constraintOp(.six_dof_set_target_position_cs, joints[14], .{ .f = &.{ 0, 0, 0.4 } });
+    try b.op(.add_impulse, bodies[15], .{ .f = &.{ 0, 2, 0 } });
+    try b.op(.add_angular_impulse, bodies[15], .{ .f = &.{ 1, 0, 0 } });
+    b.at(30);
+    try b.constraintOp(.six_dof_set_target_velocity_cs, joints[1], .{ .f = &.{ -1, 0, 0 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[3], .{ .i = &.{ 2, 3 } }); // Damping only: active
+    try b.constraintOp(.six_dof_set_target_velocity_cs, joints[3], .{ .f = &.{ 0, 0, 0.6 } });
+    try b.constraintOp(.constraint_settings_hash, joints[12], .{});
+    b.at(40);
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 5, 3 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 2, 3 } });
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joints[14], .{ .f = &.{ 0, 0, -0.3 } });
+    try b.constraintOp(.six_dof_set_motor_settings, joints[2], .{ .i = &.{ 0, 1 }, .f = &.{ 80, 6, -20, 20, -flt_max, flt_max } });
+    try b.constraintOp(.six_dof_set_target_orientation_bs, joints[6], .{ .f = &axisAngle(.{ 0, 1, 0 }, -0.6) });
+    b.at(50);
+    try b.constraintOp(.six_dof_set_motor_state, joints[1], .{ .i = &.{ 0, 0 } }); // Off: the box slides on
+    try b.constraintOp(.six_dof_set_motor_state, joints[9], .{ .i = &.{ 4, 1 } }); // Mask 0b111 -> 0b101 with a velocity motor
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, joints[9], .{ .f = &.{ 0, -0.5, 0 } });
+    try b.constraintOp(.six_dof_set_rotation_limits, joints[13], .{ .f = &.{ -0.5, -0.5, -0.5, 0.5, 0.5, 0.5 } }); // The motor acts now
+    b.at(60);
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 5, 0 } });
+    try b.constraintOp(.six_dof_set_motor_state, joints[14], .{ .i = &.{ 2, 0 } });
+    try b.constraintOp(.six_dof_set_max_friction, joints[14], .{ .i = &.{5}, .f = &.{3} });
+    try b.constraintOp(.six_dof_set_max_friction, joints[0], .{ .i = &.{0}, .f = &.{0} });
+    try b.constraintOp(.constraint_settings_hash, joints[14], .{});
+    b.at(75);
+    try b.constraintOp(.reset_constraint_warm_start, joints[2], .{});
+    try b.constraintOp(.six_dof_set_motor_state, joints[13], .{ .i = &.{ 4, 2 } });
+    try b.constraintOp(.six_dof_set_target_orientation_cs, joints[13], .{ .f = &axisAngle(.{ 0, 1, 0 }, 0.3) });
+}
+
+/// Ragdolls built from SixDOF joints (translation fixed, twist and swing limits of both swing types, friction) with a
+/// welded head (FixedConstraint) and hands on point constraints, in one island with contacts: they drop onto a floor,
+/// crates and each other; one ragdoll's knee has a position motor
+fn buildSixDOFRagdolls(b: *SceneBuilder) Allocator.Error!void {
+    const torso = try b.box(.{ 0.18, 0.25, 0.1 }, 0.05);
+    const head = try b.sphere(0.12);
+    const limb = try b.capsule(0.15, 0.06);
+    const hand = try b.sphere(0.06);
+    const crate = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
+    b.num_updates = 110;
+    b.max_contact_constraints = 2048;
+    _ = try addFloor(b, 15, 0);
+    for (0..3) |k| _ = try b.body(.{ .position = .{ -1 + real(k), 0.4, 0.3 * real(k) }, .shape = crate, .object_layer = Layers.moving }, .activate);
+    for (0..3) |r| {
+        const ox: Real = -0.6 + 0.6 * real(r);
+        const oy: Real = 2.5 + 1.4 * real(r);
+        const oz: Real = 0.4 * real(r);
+        const tilt = axisAngle(.{ 1, 0, 0.3 }, 0.4 * real(r));
+        const t = try b.body(.{ .position = .{ ox, oy, oz }, .rotation = tilt, .shape = torso, .friction = 0.6, .object_layer = Layers.moving }, .activate);
+        const h = try b.body(.{ .position = .{ ox, oy + 0.4, oz }, .shape = head, .object_layer = Layers.moving }, .activate);
+        _ = try b.constraint(Desc.fixedAuto(t, h));
+        // Arms and legs: SixDOF joints at the shoulders and hips, the twist around the limb (constraint X along Y)
+        var knee: u32 = invalid_handle;
+        for (0..4) |l| {
+            const side: Real = if (l % 2 == 0) -1 else 1;
+            const arm = l < 2;
+            const joint_p: [3]Real = .{ ox + side * @as(Real, if (arm) 0.22 else 0.1), oy + @as(Real, if (arm) 0.2 else -0.27), oz };
+            const upper = try b.body(.{ .position = .{ joint_p[0], joint_p[1] - 0.22, joint_p[2] }, .shape = limb, .friction = 0.6, .object_layer = Layers.moving }, .activate);
+            var c = Desc.sixDOF(t, upper, joint_p, .{ 0, -1, 0 }, .{ 1, 0, 0 });
+            for (0..3) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+            Desc.setSixDOFLimits(&c, 3, -0.4, 0.4);
+            if (arm) {
+                Desc.setSixDOFLimits(&c, 4, -1.2, 1.2); // Cone
+                Desc.setSixDOFLimits(&c, 5, -0.8, 0.8);
+            } else {
+                c.i[1] = 1; // Pyramid
+                Desc.setSixDOFLimits(&c, 4, -0.3, 1.2);
+                Desc.setSixDOFLimits(&c, 5, -0.4, 0.2);
+            }
+            c.f[12 + 3] = 0.05; // Joint friction
+            c.f[12 + 4] = 0.05;
+            _ = try b.constraint(c);
+            // The lower limb on a SixDOF with one rotation (an elbow / a knee), the hand on a point constraint
+            const lower_p: [3]Real = .{ joint_p[0], joint_p[1] - 0.44, joint_p[2] };
+            const lower = try b.body(.{ .position = .{ lower_p[0], lower_p[1] - 0.22, lower_p[2] }, .shape = limb, .friction = 0.6, .object_layer = Layers.moving }, .activate);
+            var hinge_like = Desc.sixDOF(upper, lower, lower_p, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+            for (0..3) |axis| Desc.setSixDOFLimits(&hinge_like, axis, 0, 0);
+            Desc.setSixDOFLimits(&hinge_like, 3, @as(f32, if (arm) -1.5 else 0), @as(f32, if (arm) 0 else 1.5));
+            Desc.setSixDOFLimits(&hinge_like, 4, 0, 0);
+            Desc.setSixDOFLimits(&hinge_like, 5, 0, 0);
+            const joint = try b.constraint(hinge_like);
+            if (!arm and r == 1) knee = joint;
+            if (arm) {
+                const hp: [3]Real = .{ lower_p[0], lower_p[1] - 0.5, lower_p[2] };
+                const hd = try b.body(.{ .position = hp, .shape = hand, .object_layer = Layers.moving }, .activate);
+                _ = try b.constraint(Desc.pointWorld(lower, hd, .{ hp[0], hp[1] + 0.06, hp[2] }));
+            }
+        }
+        if (knee != invalid_handle) {
+            b.at(1);
+            try b.constraintOp(.six_dof_set_motor_state, knee, .{ .i = &.{ 3, 2 } });
+            try b.constraintOp(.six_dof_set_target_orientation_cs, knee, .{ .f = &axisAngle(.{ 1, 0, 0 }, 1.0) });
+            b.at(60);
+            try b.constraintOp(.six_dof_set_motor_state, knee, .{ .i = &.{ 3, 0 } });
+            try b.constraintOp(.constraint_settings_hash, knee, .{});
+        }
+    }
+}
+
+/// A net of boxes lying on the floor, each joined to its neighbours by SixDOF joints (translation fixed, every third
+/// one fully fixed, the others with twist and cone limits) and the corners pinned to the world with point constraints:
+/// one island of more than 128 constraints that the LargeIslandSplitter splits, which falls asleep from the final
+/// batch of a split island; an impulse wakes it through its constraints
+fn buildSixDOFNetSplitter(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.15, 0.4 }, 0.05);
+    b.num_updates = 120;
+    b.max_contact_constraints = 2048;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const nx = 10;
+    const nz = 13;
+    var handles: [nx * nz]u32 = undefined;
+    var count: u32 = 0;
+    for (0..nz) |z| {
+        for (0..nx) |x| {
+            const px: Real = real(x) - 5.0;
+            const pz: Real = real(z) - 6.5;
+            const h = try b.body(.{ .position = .{ px, 0.151, pz }, .shape = box, .object_layer = Layers.moving }, .activate);
+            handles[z * nx + x] = h;
+            const neighbours = [2]?struct { u32, [3]Real, [3]f32 }{
+                if (x > 0) .{ handles[z * nx + x - 1], .{ px - 0.5, 0.151, pz }, .{ 1, 0, 0 } } else null,
+                if (z > 0) .{ handles[(z - 1) * nx + x], .{ px, 0.151, pz - 0.5 }, .{ 0, 0, 1 } } else null,
+            };
+            for (neighbours) |neighbour| {
+                const n = neighbour orelse continue;
+                var c = Desc.sixDOF(n[0], h, n[1], n[2], .{ 0, 1, 0 });
+                for (0..3) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+                if (count % 3 == 0) {
+                    for (3..6) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+                } else {
+                    Desc.setSixDOFLimits(&c, 3, -0.2, 0.2);
+                    Desc.setSixDOFLimits(&c, 4, -0.3, 0.3);
+                    Desc.setSixDOFLimits(&c, 5, -0.3, 0.3);
+                }
+                count += 1;
+                _ = try b.constraint(c);
+            }
+        }
+    }
+    for ([_]usize{ 0, nx - 1, (nz - 1) * nx, nz * nx - 1 }) |i| {
+        const p: [3]Real = .{ real(i % nx) - 5.0, 0.151, real(i / nx) - 6.5 };
+        _ = try b.constraint(Desc.pointWorld(invalid_handle, handles[i], p));
+    }
+    b.at(10);
+    try b.op(.add_impulse, handles[nx * nz / 2], .{ .f = &.{ 0, 3, 0 } });
+    b.at(100);
+    try b.expectSleeping(handles[0]);
+    try b.expectSleeping(handles[nx * nz - 1]);
+    try b.op(.add_impulse, handles[nx * nz / 2 + 3], .{ .f = &.{ 0, 4, 0 } });
+    b.at(101);
+    try b.expectAwake(handles[nx * nz / 2 + 3]);
+}
+
+/// SixDOF constraints and sleeping bodies, and cross save / restore of the SixDOF state (the warm start impulses of
+/// every part, the motor states and the four targets; the limits, springs, friction and motor settings are not state):
+/// a bar with friction and limits comes to rest and falls asleep, a motor set on the sleeping constraint wakes nothing
+/// until an impulse does; a SixDOF created between an awake and a sleeping body wakes the sleeping one; a box with
+/// motors on every axis is restored from snapshots of everything and of the constraints only after its motor states and
+/// targets changed
+fn buildSixDOFSleepAndSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const bar = try b.box(.{ 0.1, 0.5, 0.1 }, 0.05);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 90;
+    b.settings.time_before_sleep = 0.2;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+    const x_axis: [3]f32 = .{ 1, 0, 0 };
+    const y_axis: [3]f32 = .{ 0, 1, 0 };
+
+    // A bar hanging from a SixDOF with friction and limits, at rest
+    const hanging = try b.body(.{ .position = .{ 0, 4.5, 0 }, .shape = bar, .object_layer = Layers.unused1 }, .activate);
+    var hanging_desc = worldSixDOF(hanging, .{ 0, 5, 0 }, x_axis, y_axis);
+    Desc.setSixDOFLimits(&hanging_desc, 3, -0.3, 0.3);
+    Desc.setSixDOFLimits(&hanging_desc, 4, -0.3, 0.3);
+    Desc.setSixDOFLimits(&hanging_desc, 5, -0.3, 0.3);
+    for (3..6) |axis| hanging_desc.f[12 + axis] = 5;
+    const hanging_joint = try b.constraint(hanging_desc);
+
+    // An awake body that spins and a sleeping body
+    const awake = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box, .angular_velocity = .{ 0, 0, 1 }, .gravity_factor = 0, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+    const asleep = try b.body(.{ .position = .{ 3.5, 5, 0 }, .shape = box, .gravity_factor = 0, .object_layer = Layers.unused1 }, .dont_activate);
+
+    // A box with limits and motors on every axis
+    const m = try b.body(.{ .position = .{ 6, 3, 0 }, .shape = box, .gravity_factor = 0, .allow_sleeping = 0, .object_layer = Layers.unused1 }, .activate);
+    var motor_desc = Desc.sixDOF(invalid_handle, m, .{ 6, 3, 0 }, x_axis, y_axis);
+    Desc.setSixDOFLimits(&motor_desc, 0, -1, 1);
+    Desc.setSixDOFLimits(&motor_desc, 4, -0.8, 0.8);
+    Desc.setSixDOFLimits(&motor_desc, 5, -0.8, 0.8);
+    const motor_joint = try b.constraint(motor_desc);
+
+    b.at(2);
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 0, 1 } });
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 3, 1 } });
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 4, 2 } });
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 5, 2 } });
+    try b.constraintOp(.six_dof_set_target_velocity_cs, motor_joint, .{ .f = &.{ 0.5, 0, 0 } });
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, motor_joint, .{ .f = &.{ 0.8, 0, 0 } });
+    try b.constraintOp(.six_dof_set_target_orientation_cs, motor_joint, .{ .f = &axisAngle(.{ 0, 1, 1 }, 0.5) });
+    b.at(5);
+    try b.expectSleeping(asleep);
+    var pair_desc = Desc.sixDOF(awake, asleep, .{ 3.25, 5, 0 }, x_axis, y_axis);
+    for (0..3) |axis| Desc.setSixDOFLimits(&pair_desc, axis, 0, 0);
+    Desc.setSixDOFLimits(&pair_desc, 3, 0, 0);
+    const pair_joint = try b.constraint(pair_desc); // Wakes asleep in the next update
+    b.at(6);
+    try b.expectAwake(asleep);
+    b.at(20);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(25);
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 0, 2 } });
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 3, 3 } });
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 4, 0 } });
+    try b.constraintOp(.six_dof_set_target_position_cs, motor_joint, .{ .f = &.{ -0.5, 0, 0 } });
+    try b.constraintOp(.six_dof_set_target_orientation_bs, motor_joint, .{ .f = &axisAngle(.{ 1, 0, 0 }, -0.4) });
+    try b.constraintOp(.six_dof_set_translation_limits, motor_joint, .{ .f = &.{ -0.8, -flt_max, -flt_max, 0.8, flt_max, flt_max } }); // Not state
+    b.at(35);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // The motors of update 20 again
+    b.at(40);
+    try b.expectSleeping(hanging);
+    try b.constraintOp(.six_dof_set_motor_state, hanging_joint, .{ .i = &.{ 4, 1 } }); // The bar sleeps: nothing happens
+    try b.constraintOp(.six_dof_set_target_angular_velocity_cs, hanging_joint, .{ .f = &.{ 0, 1, 0 } });
+    try b.expectConstraintState(hanging_joint, ConstraintState.inactive);
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(41);
+    try b.expectSleeping(hanging);
+    b.at(45);
+    try b.op(.add_impulse, hanging, .{ .f = &.{ 1, 0, 0 } }); // Wakes the bar, the motor drives it into its limit
+    try b.constraintOp(.six_dof_set_motor_state, motor_joint, .{ .i = &.{ 5, 3 } });
+    try b.constraintOp(.reset_constraint_warm_start, pair_joint, .{});
+    b.at(55);
+    try b.expectAwake(hanging);
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 40: the motor states and their impulses
+    try b.constraintOp(.constraint_settings_hash, motor_joint, .{});
+    b.at(70);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.op(.add_angular_impulse, m, .{ .f = &.{ 0, 2, 0 } });
+    b.at(80);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+}
+
+/// A chain of bars on SixDOF joints (translation fixed, alternating twist / swing limits, a soft translation spring, a
+/// fully fixed joint) with a velocity motor on the first joint, with several collision steps per update and changing
+/// update parameters (the warm start impulses are scaled by the step ratio)
+fn buildSixDOFCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const bar = try b.box(.{ 0.3, 0.08, 0.08 }, 0.04);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var previous: u32 = invalid_handle;
+            var first: u32 = 0;
+            for (0..6) |i| {
+                const x: Real = 0.7 * real(i);
+                const h = try b.body(.{ .position = .{ x + 0.3, 6, 0 }, .shape = bar, .object_layer = Layers.unused1 }, .activate);
+                var c = Desc.sixDOF(previous, h, .{ x - 0.05, 6, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+                for (0..3) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+                switch (i % 3) {
+                    0 => Desc.setSixDOFLimits(&c, 3, -0.4, 0.4),
+                    1 => {
+                        Desc.setSixDOFLimits(&c, 4, -0.5, 0.5);
+                        Desc.setSixDOFLimits(&c, 5, -0.5, 0.5);
+                    },
+                    else => {
+                        c.i[1] = 1;
+                        Desc.setSixDOFLimits(&c, 4, -0.2, 0.6);
+                    },
+                }
+                if (i == 4) setSixDOFSpring(&c, 1, 0, 3, 0.5);
+                if (i == 5) for (3..6) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+                const handle = try b.constraint(c);
+                if (i == 0) first = handle;
+                previous = h;
+            }
+            b.at(1);
+            try b.constraintOp(.six_dof_set_motor_state, first, .{ .i = &.{ 3, 1 } });
+            try b.constraintOp(.six_dof_set_target_angular_velocity_cs, first, .{ .f = &.{ -1, 0, 0 } });
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            try b.constraintOp(.six_dof_set_motor_state, first, .{ .i = &.{ 3, 2 } });
+            try b.constraintOp(.six_dof_set_target_orientation_cs, first, .{ .f = &axisAngle(.{ 1, 0, 0 }, 0.3) });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// SixDOF joints far from the origin (world space positions are Real: in double precision the anchors keep their
+/// precision): a chain of planks hangs from the world on SixDOF joints and swings onto a floor and a box, a door on a
+/// SixDOF with a rotation position motor and a translation limit
+fn buildSixDOFFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const plank = try b.box(.{ 0.3, 0.05, 0.25 }, 0.02);
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    const door = try b.box(.{ 0.5, 1, 0.05 }, 0.02);
+    b.num_updates = 70;
+    const o: [3]Real = .{ -7000, 150, 11000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    var previous: u32 = invalid_handle;
+    for (0..5) |i| {
+        const p: [3]Real = .{ o[0] - 3 + 0.65 * real(i), o[1] + 2.5, o[2] };
+        const h = try b.body(.{ .position = p, .shape = plank, .object_layer = Layers.moving }, .activate);
+        var c = Desc.sixDOF(previous, h, .{ p[0] - 0.325, p[1], p[2] }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+        for (0..3) |axis| Desc.setSixDOFLimits(&c, axis, 0, 0);
+        Desc.setSixDOFLimits(&c, 3, -1.2, 1.2);
+        Desc.setSixDOFLimits(&c, 4, -0.1, 0.1);
+        Desc.setSixDOFLimits(&c, 5, -0.1, 0.1);
+        _ = try b.constraint(c);
+        previous = h;
+    }
+    _ = try b.body(.{ .position = .{ o[0] - 1, o[1] + 0.25, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const d = try b.body(.{ .position = .{ o[0] + 4.5, o[1] + 1.2, o[2] }, .shape = door, .object_layer = Layers.moving }, .activate);
+    var door_desc = Desc.sixDOF(invalid_handle, d, .{ o[0] + 4, o[1] + 1.2, o[2] }, .{ 0, 1, 0 }, .{ 1, 0, 0 });
+    Desc.setSixDOFLimits(&door_desc, 0, -0.05, 0.05);
+    Desc.setSixDOFLimits(&door_desc, 1, 0, 0);
+    Desc.setSixDOFLimits(&door_desc, 2, 0, 0);
+    Desc.setSixDOFLimits(&door_desc, 3, -1.5, 1.5);
+    Desc.setSixDOFLimits(&door_desc, 4, 0, 0);
+    Desc.setSixDOFLimits(&door_desc, 5, 0, 0);
+    const door_joint = try b.constraint(door_desc);
+    b.at(1);
+    try b.constraintOp(.six_dof_set_motor_state, door_joint, .{ .i = &.{ 3, 2 } });
+    try b.constraintOp(.six_dof_set_target_orientation_cs, door_joint, .{ .f = &axisAngle(.{ 1, 0, 0 }, 1.3) });
+    b.at(40);
+    try b.constraintOp(.six_dof_set_target_orientation_bs, door_joint, .{ .f = &axisAngle(.{ 0, 1, 0 }, -0.7) });
+}
+
+/// Random bodies (dynamic, kinematic, static; every basic shape) in a forest of random SixDOF joints (each body hangs
+/// from the world or an earlier body; world or local space, random frames, both swing types, limits per axis free,
+/// fixed (at zero or at a value), limited; soft translation limits in every spring mode, friction, motor settings), on
+/// a floor in a container, and random operations between the updates: every SixDOF setter, every motor state, the
+/// generic constraint operations and impulses
+fn buildSixDOFRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        /// `v` rotated by the unit quaternion `q` (x, y, z, w), in f64 (`inverse`: by its conjugate)
+        fn rotate(q: [4]f32, v: [3]f64, inverse: bool) [3]f64 {
+            const u: [3]f64 = if (inverse) .{ -@as(f64, q[0]), -@as(f64, q[1]), -@as(f64, q[2]) } else .{ q[0], q[1], q[2] };
+            const s: f64 = q[3];
+            const dot = u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+            const uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+            const cross: [3]f64 = .{ u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] };
+            var r: [3]f64 = undefined;
+            for (0..3) |k| r[k] = 2 * dot * u[k] + (s * s - uu) * v[k] + 2 * s * cross[k];
+            return r;
+        }
+
+        fn toF32(v: [3]f64) [3]f32 {
+            return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
+        }
+
+        /// The limits of axis `axis`: free, fixed (at zero or at a value), limited (cone swing: symmetric)
+        fn limits(b: *SceneBuilder, axis: usize, pyramid: bool) [2]f32 {
+            switch (b.index(5)) {
+                0 => return .{ -flt_max, flt_max },
+                1 => return .{ flt_max, -flt_max },
+                2 => {
+                    const v: f32 = if (b.oneIn(2)) 0 else if (axis < 3) b.float(-0.3, 0.3) else if (axis == 3 or pyramid) b.float(-0.5, 0.5) else 0;
+                    return .{ v, v };
+                },
+                else => {
+                    if (axis < 3) return .{ -b.float(0, 0.5), b.float(0, 0.5) };
+                    if (axis == 3 or pyramid) return .{ -b.float(0.05, std.math.pi), b.float(0.05, std.math.pi) };
+                    const v = b.float(0.05, std.math.pi);
+                    return .{ -v, v };
+                },
+            }
+        }
+
+        fn motor(b: *SceneBuilder) [7]f32 {
+            const mode: f32 = @floatFromInt(b.index(3));
+            const frequency = if (b.oneIn(5)) 0 else if (mode == 0) b.float(0.5, 8) else b.float(5, 300);
+            const force = if (b.oneIn(3)) flt_max else b.float(5, 200);
+            const torque = if (b.oneIn(3)) flt_max else b.float(5, 200);
+            return .{ mode, frequency, if (b.oneIn(4)) 0 else b.float(0, 2), -force, force, -torque, torque };
+        }
+
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0x6d0f_5000 +% seed *% 0x9e3779b9;
+            const shapes = try BasicShapes.add(b);
+            b.num_updates = 80;
+            b.max_contact_constraints = 2048;
+            try addContainer(b, 6, 2);
+            const num_bodies = 20;
+            var bodies: [num_bodies]u32 = undefined;
+            var positions: [num_bodies][3]f64 = undefined;
+            var rotations: [num_bodies][4]f32 = undefined;
+            for (&bodies, &positions, &rotations, 0..) |*h, *p, *q, i| {
+                const motion_type: u32 = if (b.oneIn(8)) 0 else if (b.oneIn(7)) 1 else 2;
+                const v = b.vec3(-3.5, 3.5);
+                p.* = .{ v[0], 1.5 + 0.7 * @as(f64, @floatFromInt(i)), v[2] };
+                q.* = b.rotation();
+                h.* = try b.body(.{
+                    .position = .{ real(p[0]), real(p[1]), real(p[2]) },
+                    .rotation = q.*,
+                    .shape = shapes.pick(b.index(6)),
+                    .motion_type = motion_type,
+                    .linear_velocity = if (motion_type == 1) b.vec3(-0.3, 0.3) else @splat(0),
+                    .angular_velocity = if (motion_type != 0) b.vec3(-1, 1) else @splat(0),
+                    .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+                }, if (motion_type == 0) .dont_activate else .activate);
+            }
+
+            // A forest of SixDOF joints: every body hangs from the world or from an earlier body, the joint between the
+            // two bodies, the frame consistent with the poses of the creation (world space, or local space computed from
+            // the poses), the frame of body 2 sometimes turned around the X axis (the twist starts away from zero)
+            var handles: [num_bodies]u32 = undefined;
+            var in_system: [num_bodies]bool = @splat(true);
+            var pyramid: [num_bodies]bool = undefined;
+            for (&handles, 0..) |*c, k| {
+                const to_world = k == 0 or b.oneIn(4);
+                const parent: usize = if (to_world) 0 else b.index(@intCast(k));
+                const body1 = if (to_world) invalid_handle else bodies[parent];
+                const offset = b.vec3(-0.6, 0.6);
+                var point: [3]f64 = undefined;
+                for (0..3) |n| point[n] = (if (to_world) positions[k][n] else 0.5 * (positions[k][n] + positions[parent][n])) + offset[n];
+                const q = b.rotation();
+                const axis_x = rotate(q, .{ 1, 0, 0 }, false);
+                const axis_y1 = rotate(q, .{ 0, 1, 0 }, false);
+                const angle: f64 = if (b.oneIn(2)) 0 else b.float(-0.5, 0.5);
+                const axis_z = rotate(q, .{ 0, 0, 1 }, false);
+                var axis_y2: [3]f64 = undefined;
+                for (0..3) |n| axis_y2[n] = @cos(angle) * axis_y1[n] + @sin(angle) * axis_z[n];
+                var desc = Desc.defaults(.six_dof);
+                desc.body1 = body1;
+                desc.body2 = bodies[k];
+                pyramid[k] = b.oneIn(2);
+                desc.i[1] = @intFromBool(pyramid[k]);
+                if (b.oneIn(3)) {
+                    // Local space: the position and the axes in the center of mass space of each body (the shapes have
+                    // their center of mass at the origin, the world has no rotation)
+                    desc.i[0] = ConstraintSpace.local_to_body_com;
+                    var local1 = point;
+                    var x1 = axis_x;
+                    var y1 = axis_y1;
+                    if (!to_world) {
+                        var d: [3]f64 = undefined;
+                        for (0..3) |n| d[n] = point[n] - positions[parent][n];
+                        local1 = rotate(rotations[parent], d, true);
+                        x1 = rotate(rotations[parent], axis_x, true);
+                        y1 = rotate(rotations[parent], axis_y1, true);
+                    }
+                    var d2: [3]f64 = undefined;
+                    for (0..3) |n| d2[n] = point[n] - positions[k][n];
+                    const local2 = rotate(rotations[k], d2, true);
+                    for (0..3) |n| {
+                        desc.r[n] = real(local1[n]);
+                        desc.r[3 + n] = real(local2[n]);
+                    }
+                    @memcpy(desc.f[0..3], &toF32(x1));
+                    @memcpy(desc.f[3..6], &toF32(y1));
+                    @memcpy(desc.f[6..9], &toF32(rotate(rotations[k], axis_x, true)));
+                    @memcpy(desc.f[9..12], &toF32(rotate(rotations[k], axis_y2, true)));
+                } else {
+                    for (0..3) |n| {
+                        desc.r[n] = real(point[n]);
+                        desc.r[3 + n] = real(point[n]);
+                    }
+                    @memcpy(desc.f[0..3], &toF32(axis_x));
+                    @memcpy(desc.f[3..6], &toF32(axis_y1));
+                    @memcpy(desc.f[6..9], &toF32(axis_x));
+                    @memcpy(desc.f[9..12], &toF32(axis_y2));
+                }
+                for (0..6) |axis| {
+                    const l = limits(b, axis, pyramid[k]);
+                    Desc.setSixDOFLimits(&desc, axis, l[0], l[1]);
+                    if (b.oneIn(4)) desc.f[12 + axis] = b.float(0, 20);
+                    const m = motor(b);
+                    setSixDOFMotor(&desc, axis, @intFromFloat(m[0]), m[1..7].*);
+                }
+                for (0..3) |axis| {
+                    if (b.oneIn(3)) setSixDOFSpring(&desc, axis, b.index(3), b.float(1, 50), b.float(0, 1));
+                }
+                desc.constraint_priority = b.index(3);
+                if (b.oneIn(5)) desc.num_velocity_steps_override = 1 + b.index(15);
+                if (b.oneIn(8)) desc.enabled = 0;
+                c.* = try b.constraint(desc);
+            }
+            var update: u32 = 3;
+            while (update < b.num_updates) : (update += 1 + b.index(6)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_bodies);
+                    const c = handles[k];
+                    switch (b.index(16)) {
+                        0 => {
+                            var f: [6]f32 = undefined;
+                            for (0..3) |axis| {
+                                const l = limits(b, axis, pyramid[k]);
+                                f[axis] = l[0];
+                                f[3 + axis] = l[1];
+                            }
+                            try b.constraintOp(.six_dof_set_translation_limits, c, .{ .f = &f });
+                        },
+                        1 => {
+                            var f: [6]f32 = undefined;
+                            for (0..3) |axis| {
+                                const l = limits(b, 3 + axis, pyramid[k]);
+                                f[axis] = l[0];
+                                f[3 + axis] = l[1];
+                            }
+                            try b.constraintOp(.six_dof_set_rotation_limits, c, .{ .f = &f });
+                        },
+                        2 => try b.constraintOp(.six_dof_set_limits_spring_settings, c, .{ .i = &.{ b.index(3), b.index(3) }, .f = &.{ if (b.oneIn(3)) 0 else b.float(1, 50), b.float(0, 1) } }),
+                        3 => try b.constraintOp(.six_dof_set_max_friction, c, .{ .i = &.{b.index(6)}, .f = &.{if (b.oneIn(3)) 0 else b.float(0, 20)} }),
+                        4, 5, 6 => try b.constraintOp(.six_dof_set_motor_state, c, .{ .i = &.{ b.index(6), b.index(4) } }),
+                        7 => try b.constraintOp(.six_dof_set_target_velocity_cs, c, .{ .f = &b.vec3(-2, 2) }),
+                        8 => try b.constraintOp(.six_dof_set_target_angular_velocity_cs, c, .{ .f = &b.vec3(-2, 2) }),
+                        9 => try b.constraintOp(.six_dof_set_target_position_cs, c, .{ .f = &b.vec3(-0.5, 0.5) }),
+                        10 => try b.constraintOp(if (b.oneIn(2)) .six_dof_set_target_orientation_cs else .six_dof_set_target_orientation_bs, c, .{ .f = &b.rotation() }),
+                        11 => {
+                            const m = motor(b);
+                            try b.constraintOp(.six_dof_set_motor_settings, c, .{ .i = &.{ b.index(6), @intFromFloat(m[0]) }, .f = m[1..7] });
+                        },
+                        12 => {
+                            try b.constraintOp(if (in_system[k]) .remove_constraint else .add_constraint, c, .{});
+                            in_system[k] = !in_system[k];
+                        },
+                        13 => try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{b.index(2)} }),
+                        14 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        else => try b.op(.add_impulse, bodies[b.index(num_bodies)], .{ .f = &b.vec3(-3, 3) }),
+                    }
+                }
+            }
+        }
+    }.build;
 }
 
 // (append the scenes of the six dof group here)
