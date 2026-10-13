@@ -100,6 +100,10 @@
 //!   SliderConstraint::SetLimits, SetDistance, SetLength, SetHalfConeAngle, SetTargetPathFraction, ...), a motor state
 //!   other than Off with invalid motor settings, SetSliderAxis outside world space, step overrides of 256 or more.
 //!   PathConstraint::GetConstraintSettings is not implemented in Jolt (no `constraint_settings_hash` on a path).
+//!   A Gear / RackAndPinion must only reference (Create or SetConstraints) hinges / sliders whose bodies are in its own
+//!   island: SolvePositionConstraint reads the bodies of the referenced constraints (HingeConstraint::GetCurrentAngle,
+//!   SliderConstraint::GetCurrentPosition), and the islands are solved by parallel jobs, so a read across islands
+//!   depends on the thread timing, in Jolt too.
 //!
 //! ## Reserved numbers
 //!
@@ -1302,6 +1306,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "constraints_gear_far_from_origin", .build = buildGearFarFromOrigin, .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 6 } },
     .{ .name = "constraints_gear_random_1", .build = buildGearRandom(1), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     .{ .name = "constraints_gear_random_2", .build = buildGearRandom(2), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_gear_random_4", .build = buildGearRandom(4), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     .{ .name = "constraints_gear_kinematic_release", .build = buildGearKinematicRelease, .blocked_by = .release_only, .expect = .{ .active_constraints = 4 } },
     // (append the gear / rack and pinion scenes here)
 };
@@ -8052,13 +8057,17 @@ fn buildGearFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
 
 /// Random gear trains and racks and pinions (random axes in world or local space, ratios from SetRatio or explicit,
 /// hinge and slider motors in every state, limits, friction) with random operations between the updates: SetConstraints
-/// (also with nullptr and with the constraints of another pair), the motor setters, impulses, rotations and the generic
-/// constraint operations (enable / disable, remove / add, ResetWarmStart, the settings hash); gears in the moving layer
-/// collide with each other and with boxes on the floor
+/// (also with nullptr), the motor setters, impulses, rotations and the generic constraint operations (enable / disable,
+/// remove / add, ResetWarmStart, the settings hash); gears in the moving layer collide with each other and with boxes on
+/// the floor.
+/// Only the committed seeds (1, 2, 4) are known to converge: the ratio and teeth rules do not rule out a combination of
+/// ratios, limits and motors that makes the velocities infinite (seed 5 does, in Jolt too: Zolt's Debug build asserts in
+/// MotionProperties.clampAngularVelocity, ReleaseFast matches Jolt bit for bit). Run a new seed in Debug before adding it.
 fn buildGearRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
     return struct {
         /// A ratio: positive from 0.6 (or of either sign for a rack and pinion, whose part is consistent with its
-        /// Jacobian), negative above -0.8 for a gear between equal wheels (see buildGearMotors)
+        /// Jacobian), negative above -0.8 for a gear between equal wheels (see buildGearMotors). This keeps most pairs
+        /// convergent, not all of them (see above)
         fn ratio(b: *SceneBuilder, rack: bool) f32 {
             if (rack) return if (b.oneIn(3)) -b.float(0.3, 3) else b.float(0.3, 3);
             return if (b.oneIn(4)) -b.float(0.2, 0.8) else b.float(0.6, 3);
@@ -8184,16 +8193,19 @@ fn buildGearRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!voi
                     const c = couplings[k];
                     switch (b.index(12)) {
                         0, 1 => {
-                            // SetConstraints: the own constraints, nullptr, or a hinge of another pair (still a hinge for
-                            // the gear; the pinion of a rack and pinion must be a hinge and the rack a slider)
+                            // SetConstraints: the own constraints or nullptr. Never a hinge of another pair: its body is
+                            // in another island, GearConstraint::SolvePositionConstraint would read the rotation of a body
+                            // that another job may be correcting at the same time (thread dependent, in Jolt too; see
+                            // "Constraint scenes"). The draws of the former choice of another pair are kept so that the
+                            // scenes of the committed seeds do not change otherwise.
                             const first = if (b.oneIn(4)) invalid_handle else hinges[2 * k];
                             const second = if (b.oneIn(4)) invalid_handle else hinges[2 * k + 1];
                             if (is_rack[k]) {
                                 try b.constraintOp(.rack_and_pinion_set_constraints, c, .{ .i = &.{ first, second } });
                             } else {
                                 const other = b.index(num_pairs);
-                                const foreign = if (!is_rack[other] and b.oneIn(3)) hinges[2 * other + 1] else second;
-                                try b.constraintOp(.gear_set_constraints, c, .{ .i = &.{ first, foreign } });
+                                if (!is_rack[other]) _ = b.oneIn(3);
+                                try b.constraintOp(.gear_set_constraints, c, .{ .i = &.{ first, second } });
                             }
                         },
                         2, 3 => try b.constraintOp(.hinge_set_motor_state, hinges[2 * k], .{ .i = &.{b.index(4)} }),
