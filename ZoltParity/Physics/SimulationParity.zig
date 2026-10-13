@@ -2222,7 +2222,56 @@ const FixedPointSlot = struct {
 };
 
 // ---- SLOT distance_pulley: DistanceConstraint, PulleyConstraint (ConstraintKind distance / pulley, OpKind 240..259) ----
-const DistancePulleySlot = StubSlot;
+const DistancePulleySlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .distance => {
+                const s = try zolt.DistanceConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                s.min_distance = f[0];
+                s.max_distance = f[1];
+                s.limits_spring_settings = loadSpring(i[1], f[2..4]);
+                return .init(s.asSettings());
+            },
+            .pulley => {
+                const s = try zolt.PulleyConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.body_point1 = loadR3(r[0..3]);
+                s.fixed_point1 = loadR3(r[3..6]);
+                s.body_point2 = loadR3(r[6..9]);
+                s.fixed_point2 = loadR3(r[9..12]);
+                s.ratio = f[0];
+                s.min_length = f[1];
+                s.max_length = f[2];
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .distance_set_distance => (try castConstraint(zolt.DistanceConstraint, c, .distance)).setDistance(op.f[0], op.f[1]),
+            .distance_set_limits_spring_settings => (try castConstraint(zolt.DistanceConstraint, c, .distance)).setLimitsSpringSettings(loadSpring(op.i[0], op.f[0..2])),
+            .pulley_set_length => (try castConstraint(zolt.PulleyConstraint, c, .pulley)).setLength(op.f[0], op.f[1]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .distance => &.{ .{ .name = "axis_constraint.total_lambda", .kind = .f32 }, .{ .name = "world_space_normal", .kind = .f32, .count = 3 } },
+            .pulley => &.{ .{ .name = "independent_axis_constraint_part.total_lambda", .kind = .f32 }, .{ .name = "world_space_normal1", .kind = .f32, .count = 3 }, .{ .name = "world_space_normal2", .kind = .f32, .count = 3 } },
+            else => null,
+        };
+    }
+};
 
 // ---- SLOT hinge: HingeConstraint (ConstraintKind hinge, OpKind 260..279) ----
 const HingeSlot = struct {

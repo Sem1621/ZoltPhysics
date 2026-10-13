@@ -68,6 +68,7 @@ test {
     _ = @import("Physics/ContactListenerTests.zig");
     _ = @import("Physics/ConvexVsTrianglesTest.zig");
     _ = @import("Physics/DeterminismLogTests.zig");
+    _ = @import("Physics/DistanceConstraintTests.zig");
     _ = @import("Physics/EstimateCollisionResponseTest.zig");
     _ = @import("Physics/FixedConstraintTests.zig");
     _ = @import("Physics/GearConstraintTests.zig");
@@ -87,6 +88,7 @@ test {
     _ = @import("Physics/PhysicsTests.zig");
     _ = @import("Physics/PointConstraintTests.zig");
     _ = @import("Physics/RackAndPinionConstraintTests.zig");
+    _ = @import("Physics/PulleyConstraintTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/SensorTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
