@@ -173,14 +173,31 @@ exceeded:
   Phase 4 test files, are ported. Only the cases that need concrete constraint types are left.
 - Design and settled decisions: [SimulationArchitecture.md](SimulationArchitecture.md).
 
-### Phase 6: Constraints (`Jolt/Physics/Constraints`)
+### Phase 6: Constraints (`Jolt/Physics/Constraints`) ✅
 Fixed, Point, Distance, Hinge, Slider, Cone, SwingTwist, SixDOF, Path (+ PathConstraintPath,
 Hermite), Gear, RackAndPinion, Pulley. MotorSettings, SpringSettings, every ConstraintPart and
 CalculateSolverSteps were ported in Phase 5. The concrete classes declare `overrides` (D8). Their
 settings types go into a comptime `constraint_settings_types` list until the Phase 8 Factory.
 **Milestone M7:** the constraint unit tests and the constraint cases of PhysicsTests pass. The
 simulation parity scene `constraints_chain`, and the constraint part of the PhysicsScene parity, run
-bit exact. (The HighSpeed and ConvexVsMesh hashes already match since M6.)
+bit exact. (The HighSpeed and ConvexVsMesh hashes already match since M6.) ✅ Reached and exceeded:
+- All 14 files of the phase are ported; `Jolt/Physics/Constraints` is complete. The parity found no
+  numeric bug in the ported classes. The reviews found one safety bug: PhysicsScene unwrapped the
+  null settings of a PathConstraint.
+- The constraint unit tests of `UnitTests/Physics` are ported (Distance, Hinge, Path, SixDOF, Slider),
+  and so are the constraint cases of PhysicsTests (TestPhysicsConstraintUserData) and
+  PhysicsDeterminismTests (TestGridOfBoxesConstrained). Zolt adds simulation tests for the seven
+  classes without a Jolt test file, and ConstraintManagerTests.
+- ConstraintsParity compares every class with the C++ library after every call: creation between
+  bodies of every supported motion type, every setter, the solver calls, the state and the settings
+  binary state.
+- The simulation parity runs about 100 constraint scenes bit exact in its thread matrix with the
+  D12 failure sweeps: every class, its limits, springs and motors, mixed islands with contacts,
+  LargeIslandSplitter islands, sleeping and waking, cross save / restore. The PhysicsScene parity
+  creates random constraints of every class but Path (Jolt's PathConstraint cannot return its
+  settings).
+- Settled points, the Jolt bugs that are reproduced on purpose and the degenerate cases that the
+  harnesses avoid: [SimulationArchitecture.md](SimulationArchitecture.md), section 9.
 
 ### Phase 7: Character, Skeleton, Ragdoll, Vehicles
 Character, CharacterVirtual, CharacterBase, Skeleton, SkeletalAnimation, SkeletonMapper,

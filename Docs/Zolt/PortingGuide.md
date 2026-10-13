@@ -168,6 +168,11 @@ both types) when porting code needs them.
   `CachedManifold::EFlags`) become integer constants in a `Flags` namespace on an atomic field of Jolt's width
   (`flags: std.atomic.Value(u8)` for `Body`, `std.atomic.Value(u16)` for `CachedManifold`), changed with `fetchOr` /
   `fetchAnd`.
+- **Enums read from a stream.** An `enum class` (its underlying type is fixed, `int` unless given) whose value the
+  binary state restores (`EConstraintSpace`, `ESpringMode`, `EMotorState`, `ESwingType`,
+  `EPathRotationConstraintType`) becomes a non-exhaustive Zig enum of that width (`enum(i32) { ..., _ }`): the stream
+  can hold any value. Code that switches on it handles the unknown values as Jolt's comparisons do
+  (`mSwingType == ESwingType::Cone` makes every other value Pyramid), never with `unreachable`.
 
 ### Allocation
 

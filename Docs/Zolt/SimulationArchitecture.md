@@ -817,7 +817,7 @@ QuadTree).
 - M6 is reached, and goes beyond the plan above. ZoltPerformanceTest reproduces Jolt's published
   hashes from `determinism_check.yml` for Pyramid, ConvexVsMesh and HighSpeed (`-q=LinearCast`). This
   holds in both precisions and with `-t=max`, `-t=1` and `-t=2`. Zolt's CI runs them in its
-  determinism job. Ragdoll and CharacterVirtual need Phases 6 to 8.
+  determinism job. Ragdoll and CharacterVirtual need Phases 7 and 8.
 
 ## 4. Checklist for porters
 
@@ -1072,7 +1072,8 @@ DeterminismLog, PhysicsScene).**
   several FindCCDContacts jobs, cross save / restore, and far from the origin.
   - Each scene declares in `SceneEntry.expect` the cases it must reach (contacts, removals,
     sleeping, spawned jobs, a split island, a full manifold array, CCD hits).
-  - Only `constraints_chain` stays blocked: it needs the Phase 6 constraint types.
+  - Only `constraints_chain` stays blocked: it needs the Phase 6 constraint types (it runs since
+    the Phase 6 foundation).
 
 **Wave C (tests, M5, M6).**
 - Library fix: after `error.OutOfMemory` inside a job, the InvalidateContactCache flags set before
@@ -1096,3 +1097,90 @@ DeterminismLog, PhysicsScene).**
   `StaticArray(MyManifold, 32)` (about 70 KB) per body pair, plus smaller ones in
   `CollideShapeResult.init` and ClipPoly. Pyramid and HighSpeed are 1.2 to 2 times slower. A later
   performance pass should avoid zero-filling these `undefined` buffers.
+
+## 9. Phase 6: constraints
+
+Phase 6 adds the twelve two body constraint classes, PathConstraintPath and
+PathConstraintPathHermite on top of D8. It was ported as a foundation (Fixed, Point, the harnesses,
+stubs of the other classes) and then one worker group per class family. These points were settled
+on the way and bind later phases that add constraints (VehicleConstraint, Ragdoll).
+
+**Structure.**
+- The header of `FixedConstraint.zig` is the porter template for a constraint class: pattern A with
+  `overrides`, the settings with `createConstraint`, the binary state, the state recorder layout and
+  the parity slots to fill.
+- `RegisterTypes.constraint_settings_types` follows Jolt's RegisterTypes.cpp order (VehicleConstraint
+  goes after Path in Phase 7). `path_constraint_path_types` holds PathConstraintPathHermite. A user
+  adds classes through `zolt_user_types`.
+- A class that is not ported yet is a stub file whose settings declare `pub const is_stub = true`.
+  `restoreFromBinaryState` skips stubs, and the parity harnesses skip the scenes and kinds that
+  need them; removing `is_stub` turns them on. No stub is left after Phase 6.
+- Enums that the binary state restores (an `enum class` has a fixed underlying type)
+  (`ConstraintSpace`, `SpringMode`, `MotorState`, `SwingType`, `PathRotationConstraintType`) are
+  non-exhaustive Zig enums. A stream can hold any value, and the code must treat unknown values as
+  Jolt does (e.g. the SwingTwist part treats every value but Cone as Pyramid).
+- Gear and RackAndPinion read the referenced Hinge / Slider through `getCurrentAngle` /
+  `getCurrentPosition`, so they import those classes.
+
+**Harnesses.**
+- `ConstraintsParity.zig` (+ `ConstraintsReference.cpp`) compares one constraint between two bodies
+  after every call: creation for every supported motion type combination (fixed to world, static
+  with motion properties, partially allowed DOFs, offset centers of mass, far from the origin in
+  double precision), every setter, the solver calls, the getters, `saveState` and the settings
+  binary state with a cross restore. Its header explains how a class fills its slot.
+- The SimScenes header ("Constraint scenes (Phase 6)", "Reserved numbers", "Recipe for a Phase 6
+  worker") describes the constraint descriptions, the operations in the reserved OpKind ranges
+  (200..399, 380..399 spare), the per kind blockers and the rules for scene authors. 105
+  constraint scenes run bit exact in the thread matrix with the D12 sweeps.
+- BodyInterfaceParity's PhysicsScene parity creates random constraints of every class but Path.
+
+**Jolt behavior reproduced on purpose.** Each is documented where it is ported and covered by a
+test or a parity case:
+- `SixDOFConstraint::GetConstraintSettings` does not copy `mLimitsSpringSettings`, so the returned
+  settings have hard limits. `SetLimitsSpringSettings` does not call `UpdateFixedFreeAxis`, and
+  `SetMaxFriction(0)` clears the motor flag without deactivating the motor parts.
+- `PathConstraint::GetConstraintSettings` is not implemented: with asserts enabled Zolt asserts like
+  Jolt's debug build, without them it returns an empty `Ref` like the release build.
+  `PhysicsScene.fromPhysicsSystem` then adds the constraint without settings, and `createBodies` /
+  `saveBinaryState` panic where Jolt dereferences the null pointer. The test of this behavior runs
+  only without asserts.
+- `PathConstraintSettings::RestoreBinaryState` ignores a failed path restore and keeps reading.
+  `GetIndexAndT` maps fractions outside the int range or NaN to `INT_MIN`. Negative fractions on a
+  looping path extrapolate instead of wrapping.
+- The GearConstraintPart applies `lambda * I2^-1 b` to body 2 where its Jacobian needs
+  `r * lambda * I2^-1 b`. It diverges for some valid settings (ratios below 0.5 with a heavy gear 1,
+  most negative ratios). The gear position correction uses hinge angles that wrap at ±pi.
+- DistanceConstraintSettings computes a negative distance from the world positions in local space
+  too, and `< 0.0f` treats -0.0 as a given distance. PulleyConstraint accepts `min > max` and any
+  negative minimum in its constructor; only `SetLength` asserts.
+- Setters (SetMotorState, SetTargetPosition, SetLimits, SetHalfConeAngle, SetTargetOrientation*)
+  do not wake sleeping bodies; only `ActivateConstraint` does. The cone's Baumgarte correction acts
+  on cos(angle), so a body can fall asleep slightly outside a narrowed cone.
+- `PathConstraint::SaveState` writes `MotorSettings` raw, with 3 padding bytes. Zolt writes zeros,
+  like the C++ parity build; a C++ build with garbage there would differ only in those bytes.
+
+**Jolt undefined behavior that Zolt does not reproduce.** A 1-point open path indexes
+`mPoints[-1]` and an empty path indexes out of bounds: Zolt's safe builds panic, ReleaseFast stays
+undefined as in C++. A null path dereference is an explicit `@panic` with a message.
+
+**Degenerate cases that the harnesses keep away from.** The C++ reference library is built without
+`JPH_ASSERT`, so it cannot prove that a scene respects Jolt's debug asserts; Zolt's Debug build
+asserts the same and finds them. The generators avoid them instead of changing library code:
+- A dynamic body with partially allowed rotation DOFs as the only rotating body of a Hinge or
+  SixDOF: the effective mass is singular up to rounding noise, so the velocities become NaN (Jolt
+  asserts in `MotionProperties::ApplyAngularVelocityStep`).
+- ConeConstraint position correction with partially masked rotation DOFs and an axis almost
+  perpendicular to the allowed ones (NaN), and SwingTwist's "swing parts should turn on / off
+  together" assert with an axis aligned swing motor axis masked by AllowedDOFs. Both are compared in
+  ReleaseFast only, where Jolt release and Zolt agree bit for bit, NaNs included.
+- Gear / RackAndPinion with a body that is not dynamic (Jolt asserts; compared in ReleaseFast
+  only), and Gear ratios that diverge.
+- A Gear / RackAndPinion that references a hinge or slider in another island: SolvePositionConstraint
+  reads bodies that a parallel job may be moving, so the result depends on thread timing, in Jolt
+  too.
+
+**Open: a Jolt thread dependency.** A 12x12 mat of hinged plates spaced 0.5 apart (gaps of 0.02,
+inside the speculative contact distance) falls asleep and is woken by an impulse. Two updates later
+C++ Jolt with 0 worker threads has one contact cache body pair more (199) than with 3 or 7 threads
+(198), while the body states are still equal. This reproduces with two C++ worlds alone. The cause
+was not found; the scene spaces the plates 0.6 apart.
