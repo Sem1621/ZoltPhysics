@@ -88,14 +88,14 @@ test {
     _ = @import("Physics/PhysicsSystemTests.zig");
     _ = @import("Physics/PhysicsTests.zig");
     _ = @import("Physics/PointConstraintTests.zig");
-    _ = @import("Physics/RackAndPinionConstraintTests.zig");
     _ = @import("Physics/PulleyConstraintTests.zig");
+    _ = @import("Physics/RackAndPinionConstraintTests.zig");
     _ = @import("Physics/RayShapeTests.zig");
     _ = @import("Physics/SensorTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
     _ = @import("Physics/ShapeTests.zig");
-    _ = @import("Physics/SliderConstraintTests.zig");
     _ = @import("Physics/SixDOFConstraintTests.zig");
+    _ = @import("Physics/SliderConstraintTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/SwingTwistConstraintTests.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
