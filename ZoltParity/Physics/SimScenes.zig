@@ -1324,6 +1324,16 @@ pub const scenes = [_]SceneEntry{
     // (append the six dof scenes here)
     // ---- Path ----
     .{ .name = "constraints_path_ops", .build = buildPathOps, .blocked_by = .path_constraints, .expect = .{ .active_constraints = 2 } },
+    .{ .name = "constraints_path_limits_and_friction", .build = buildPathLimitsAndFriction, .blocked_by = .path_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 5 } },
+    .{ .name = "constraints_path_motors", .build = buildPathMotors, .blocked_by = .path_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 10 } },
+    .{ .name = "constraints_path_rotation_types", .build = buildPathRotationTypes, .blocked_by = .path_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 7, .update_activations = 1 } },
+    .{ .name = "constraints_path_train_with_contacts", .build = buildPathTrainWithContacts, .blocked_by = .path_constraints, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 12 } },
+    .{ .name = "constraints_path_net_splitter", .build = buildPathNetSplitter, .blocked_by = .path_constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
+    .{ .name = "constraints_path_sleep_and_wake", .build = buildPathSleepAndWake, .blocked_by = .path_constraints, .sweep_stride = 20, .expect = .{ .sleeping = true, .update_activations = 1 } },
+    .{ .name = "constraints_path_save_restore", .build = buildPathSaveRestore, .blocked_by = .path_constraints, .sweep_stride = 20, .expect = .{ .active_constraints = 7 } },
+    .{ .name = "constraints_path_collision_steps_2", .build = buildPathCollisionSteps(2), .blocked_by = .path_constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_path_collision_steps_3", .build = buildPathCollisionSteps(3), .blocked_by = .path_constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_path_far_from_origin", .build = buildPathFarFromOrigin, .blocked_by = .path_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 3 } },
     // (append the path scenes here)
     // ---- Gear / RackAndPinion ----
     .{ .name = "constraints_gear_ops", .build = buildGearOps, .blocked_by = .gear_constraints, .expect = .{ .active_constraints = 6 } },
@@ -9321,6 +9331,438 @@ fn buildPathOps(b: *SceneBuilder) Allocator.Error!void {
     b.at(65);
     try b.constraintOp(.path_set_path, loop, .{ .i = &.{ 1, loop_desc }, .f = &.{2} }); // The circle again
     try b.constraintOp(.path_set_position_motor_state, follower, .{ .i = &.{0} });
+}
+
+/// EPathRotationConstraintType values for `Desc.path`
+const PathRotation = struct {
+    const free: u32 = 0;
+    const around_tangent: u32 = 1;
+    const around_normal: u32 = 2;
+    const around_binormal: u32 = 3;
+    const to_path: u32 = 4;
+    const fully_constrained: u32 = 5;
+};
+
+/// The points of a straight Hermite path from `start` to `end` (`num` points, the tangents are the segments, normal
+/// `normal`), computed in f64 by the scene builder
+fn linePathPoints(comptime num: usize, start: [3]f64, end: [3]f64, normal: [3]f32) [num][9]f32 {
+    var points: [num][9]f32 = undefined;
+    const segments: f64 = @floatFromInt(num - 1);
+    for (&points, 0..) |*p, k| {
+        const t = @as(f64, @floatFromInt(k)) / segments;
+        for (0..3) |c| {
+            p[c] = @floatCast(start[c] + (end[c] - start[c]) * t);
+            p[3 + c] = @floatCast((end[c] - start[c]) / segments);
+            p[6 + c] = normal[c];
+        }
+    }
+    return points;
+}
+
+/// A path description with a motor: `Desc.path` plus the max friction force and the motor (spring mode, the six motor
+/// values of `Desc.setMotor`)
+fn pathWithMotor(body1: u32, body2: u32, points: []const [9]f32, is_looping: bool, path_position: [3]f32, path_fraction: f32, rotation_type: u32, max_friction_force: f32, motor_mode: u32, motor: [6]f32) SimConstraint {
+    var c = Desc.path(body1, body2, points, is_looping, path_position, identity_rotation, path_fraction, rotation_type);
+    c.f[8] = max_friction_force;
+    Desc.setMotor(&c, 4, 9, motor_mode, motor);
+    return c;
+}
+
+/// The world space position of a point of a path whose start is at `origin` (identity rotation)
+fn pathPoint(origin: [3]Real, points: []const [9]f32, k: usize) [3]Real {
+    return .{ origin[0] + points[k][0], origin[1] + points[k][1], origin[2] + points[k][2] };
+}
+
+/// Bodies on open slopes from the world under gravity: one slides down and stops at the limit at the end of the path,
+/// one is pushed up beyond the start (the limit at fraction 0) and slides back, one is held by friction until the
+/// friction is removed, one slides slowly against weak friction, one rides on a slope attached to a heavy cart (body
+/// 1 dynamic), each with another rotation constraint type; SetPath with the same path at another fraction re-attaches
+/// a body where it is
+fn buildPathLimitsAndFriction(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const cart_shape = try b.box(.{ 1.5, 0.25, 0.6 }, 0.05);
+    b.num_updates = 100;
+    const slope = linePathPoints(4, .{ 0, 0, 0 }, .{ 6, -3, 0 }, .{ 0, 0, 1 });
+    const mass: f32 = 0.4 * 0.4 * 0.4 * 1000.0; // The density of the box shape is 1000
+    const along_slope: f32 = mass * 9.81 * 0.4472136; // m g sin(atan(3 / 6))
+    var handles: [5]u32 = undefined;
+    var constraints: [4]u32 = undefined;
+    var descs: [4]u32 = undefined;
+    const Setup = struct { z: f32, fraction: f32, rotation: u32, friction: f32, velocity: [3]f32 };
+    const setups = [_]Setup{
+        .{ .z = 0, .fraction = 0.5, .rotation = PathRotation.to_path, .friction = 0, .velocity = .{ 0, 0, 0 } },
+        .{ .z = 2, .fraction = 1.5, .rotation = PathRotation.free, .friction = 0, .velocity = .{ -6, 3, 0 } },
+        .{ .z = 4, .fraction = 1.0, .rotation = PathRotation.fully_constrained, .friction = 2.0 * along_slope, .velocity = .{ 0, 0, 0 } },
+        .{ .z = 6, .fraction = 0.25, .rotation = PathRotation.around_tangent, .friction = 0.5 * along_slope, .velocity = .{ 0, 0, 0 } },
+    };
+    for (setups, 0..) |s, k| {
+        // On the straight path starting at (0, 8, z): a fraction f is at (2 f, 8 - f, z)
+        const p: [3]Real = .{ 2.0 * real(s.fraction), 8.0 - real(s.fraction), s.z };
+        handles[k] = try b.body(.{ .position = p, .shape = box, .linear_velocity = s.velocity, .angular_damping = 0.5 }, .activate);
+        descs[k] = try b.addConstraint(pathWithMotor(invalid_handle, handles[k], &slope, false, .{ 0, 8, s.z }, s.fraction, s.rotation, s.friction, 0, Desc.default_motor));
+        constraints[k] = try b.createConstraint(descs[k]);
+    }
+    // A heavy cart without gravity carries a slope (in its own space), the box rides on it around the binormal
+    const cart = try b.body(.{ .position = .{ 3, 2, 10 }, .shape = cart_shape, .gravity_factor = 0, .linear_velocity = .{ 0.5, 0, 0 } }, .activate);
+    handles[4] = try b.body(.{ .position = .{ 2, 3, 10 }, .shape = box }, .activate);
+    const riding = try b.constraint(pathWithMotor(cart, handles[4], &slope, false, .{ -3, 2, 0 }, 1.0, PathRotation.around_binormal, 0, 0, Desc.default_motor));
+    b.at(40);
+    try b.constraintOp(.path_set_max_friction_force, constraints[2], .{ .f = &.{0} }); // The held box starts to slide
+    b.at(50);
+    try b.constraintOp(.path_set_path, constraints[3], .{ .i = &.{ 1, descs[3] }, .f = &.{2.5} }); // The slow box is attached at fraction 2.5 where it is
+    try b.constraintOp(.notify_constraint_shape_changed, riding, .{ .body = cart, .f = &.{ 0.1, 0, 0 } });
+    b.at(70);
+    try b.op(.add_impulse, handles[4], .{ .f = &.{ -400, 0, 0 } }); // Up the cart's slope, against the start limit
+}
+
+/// The position motor of PathConstraint in every EMotorState without gravity: a velocity motor with force limits on a
+/// looping circle; position motors with springs in frequency, stiffness and mass normalized stiffness mode (one drives
+/// across the end of a looping path, CalculateConstraintValue's fmod); a position motor without stiffness and a
+/// position + velocity motor without stiffness or damping (the motor part is deactivated: the bodies coast); a position
+/// + velocity motor with damping only; friction without motor. The states, targets, settings and friction change
+/// between the updates, also to an int that is no EMotorState (no case of Jolt's switches matches). Body 1 is the world,
+/// a static body or a kinematic body that turns.
+fn buildPathMotors(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.15, 0.15, 0.15 }, 0.05);
+    const post = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 90;
+    b.gravity = .{ 0, 0, 0 };
+    const circle = circlePathPoints(8, 2, std.math.pi * 2.0);
+    const arc = circlePathPoints(6, 2, 0.75 * std.math.pi * 2.0);
+    const Setup = struct { looping: bool, fraction: f32, rotation: u32, friction: f32, mode: u32, motor: [6]f32, state: u32, target_velocity: f32, target_fraction: f32, velocity: [3]f32 };
+    const setups = [_]Setup{
+        // Velocity motor with force limits, rotation constrained to the path
+        .{ .looping = true, .fraction = 0, .rotation = PathRotation.to_path, .friction = 0, .mode = 0, .motor = .{ 2, 1, -150, 150, -flt_max, flt_max }, .state = 1, .target_velocity = 3, .target_fraction = 0, .velocity = .{ 0, 0, 0 } },
+        // Position motor, frequency and damping
+        .{ .looping = false, .fraction = 0, .rotation = PathRotation.free, .friction = 0, .mode = 0, .motor = .{ 2, 1, -flt_max, flt_max, -flt_max, flt_max }, .state = 2, .target_velocity = 0, .target_fraction = 4, .velocity = .{ 0, 0, 0 } },
+        // Position motor, stiffness and damping
+        .{ .looping = false, .fraction = 4, .rotation = PathRotation.around_normal, .friction = 0, .mode = 1, .motor = .{ 500, 40, -300, 300, -flt_max, flt_max }, .state = 2, .target_velocity = 0, .target_fraction = 1, .velocity = .{ 0, 0, 0 } },
+        // Position motor, mass normalized stiffness, across the end of a looping path (7 -> 0.5 is 1.5 forward)
+        .{ .looping = true, .fraction = 7, .rotation = PathRotation.around_tangent, .friction = 0, .mode = 2, .motor = .{ 20, 4, -flt_max, flt_max, -flt_max, flt_max }, .state = 2, .target_velocity = 0, .target_fraction = 0.5, .velocity = .{ 0, 0, 0 } },
+        // Position motor without stiffness: no motor, the body coasts
+        .{ .looping = true, .fraction = 2, .rotation = PathRotation.free, .friction = 0, .mode = 0, .motor = .{ 0, 1, -flt_max, flt_max, -flt_max, flt_max }, .state = 2, .target_velocity = 0, .target_fraction = 5, .velocity = .{ 0, 0, 1 } },
+        // Position and velocity motor with damping only
+        .{ .looping = false, .fraction = 1, .rotation = PathRotation.fully_constrained, .friction = 0, .mode = 1, .motor = .{ 0, 30, -flt_max, flt_max, -flt_max, flt_max }, .state = 3, .target_velocity = 1, .target_fraction = 3, .velocity = .{ 0, 0, 0 } },
+        // Position and velocity motor without stiffness or damping: no motor
+        .{ .looping = true, .fraction = 4, .rotation = PathRotation.around_binormal, .friction = 0, .mode = 0, .motor = .{ 0, 0, -flt_max, flt_max, -flt_max, flt_max }, .state = 3, .target_velocity = 2, .target_fraction = 6, .velocity = .{ 1, 0, 0 } },
+        // No motor, friction slows the body down
+        .{ .looping = true, .fraction = 6, .rotation = PathRotation.to_path, .friction = 20, .mode = 0, .motor = Desc.default_motor, .state = 0, .target_velocity = 0, .target_fraction = 0, .velocity = .{ 0, 0, -2 } },
+    };
+    var constraints: [setups.len + 2]u32 = undefined;
+    var descs: [setups.len + 2]u32 = undefined;
+    for (setups, 0..) |s, k| {
+        const origin: [3]Real = .{ 6.0 * real(k), 2, 0 };
+        const points: []const [9]f32 = if (s.looping) &circle else &arc;
+        const h = try b.body(.{ .position = pathPoint(origin, points, @intFromFloat(s.fraction)), .shape = box, .linear_velocity = s.velocity }, .activate);
+        descs[k] = try b.addConstraint(pathWithMotor(invalid_handle, h, points, s.looping, .{ @floatCast(origin[0]), @floatCast(origin[1]), @floatCast(origin[2]) }, s.fraction, s.rotation, s.friction, s.mode, s.motor));
+        constraints[k] = try b.createConstraint(descs[k]);
+        try b.constraintOp(.path_set_position_motor_state, constraints[k], .{ .i = &.{s.state} });
+        try b.constraintOp(.path_set_target_velocity, constraints[k], .{ .f = &.{s.target_velocity} });
+        try b.constraintOp(.path_set_target_path_fraction, constraints[k], .{ .f = &.{s.target_fraction} });
+    }
+    // On a static post: a velocity motor; on a kinematic post that turns: a position motor
+    const static_post = try b.body(.{ .position = .{ 0, 2, 8 }, .shape = post, .motion_type = 0 }, .dont_activate);
+    const rider1 = try b.body(.{ .position = .{ 2, 2, 8 }, .shape = box }, .activate);
+    descs[setups.len] = try b.addConstraint(pathWithMotor(static_post, rider1, &circle, true, .{ 0, 0, 0 }, 0, PathRotation.to_path, 0, 0, Desc.default_motor));
+    constraints[setups.len] = try b.createConstraint(descs[setups.len]);
+    try b.constraintOp(.path_set_position_motor_state, constraints[setups.len], .{ .i = &.{1} });
+    try b.constraintOp(.path_set_target_velocity, constraints[setups.len], .{ .f = &.{-1.5} });
+    const kinematic_post = try b.body(.{ .position = .{ 8, 2, 8 }, .shape = post, .motion_type = 1, .angular_velocity = .{ 0, 0.8, 0 } }, .activate);
+    const rider2 = try b.body(.{ .position = .{ 10, 2, 8 }, .shape = box }, .activate);
+    descs[setups.len + 1] = try b.addConstraint(pathWithMotor(kinematic_post, rider2, &circle, true, .{ 0, 0, 0 }, 0, PathRotation.fully_constrained, 0, 0, .{ 3, 0.5, -flt_max, flt_max, -flt_max, flt_max }));
+    constraints[setups.len + 1] = try b.createConstraint(descs[setups.len + 1]);
+    try b.constraintOp(.path_set_position_motor_state, constraints[setups.len + 1], .{ .i = &.{2} });
+    try b.constraintOp(.path_set_target_path_fraction, constraints[setups.len + 1], .{ .f = &.{4} });
+
+    b.at(25);
+    try b.constraintOp(.path_set_position_motor_state, constraints[0], .{ .i = &.{2} }); // Velocity -> position
+    try b.constraintOp(.path_set_target_path_fraction, constraints[0], .{ .f = &.{-3.25} }); // Any fraction on a looping path
+    try b.constraintOp(.path_set_position_motor_state, constraints[1], .{ .i = &.{3} }); // Position -> position and velocity
+    try b.constraintOp(.path_set_target_velocity, constraints[1], .{ .f = &.{-0.5} });
+    try b.constraintOp(.path_set_position_motor_state, constraints[4], .{ .i = &.{1} }); // Coasting -> velocity
+    try b.constraintOp(.path_set_target_velocity, constraints[4], .{ .f = &.{2} });
+    try b.constraintOp(.path_set_max_friction_force, constraints[7], .{ .f = &.{0} });
+    b.at(40);
+    try b.constraintOp(.path_set_position_motor_settings, constraints[0], .{ .i = &.{1}, .f = &.{ 300, 30, -200, 200, -1, 1 } });
+    try b.constraintOp(.path_set_position_motor_state, constraints[2], .{ .i = &.{0} }); // Off
+    try b.constraintOp(.path_set_max_friction_force, constraints[2], .{ .f = &.{5} });
+    try b.constraintOp(.path_set_position_motor_state, constraints[5], .{ .i = &.{5} }); // No EMotorState: the part keeps its last setup
+    try b.constraintOp(.path_set_position_motor_settings, constraints[3], .{ .i = &.{2}, .f = &.{ 60, 0, -flt_max, flt_max, -flt_max, flt_max } });
+    try b.constraintOp(.path_set_target_path_fraction, constraints[3], .{ .f = &.{6.5} }); // Backwards across the end
+    b.at(55);
+    try b.constraintOp(.path_set_position_motor_state, constraints[5], .{ .i = &.{1} });
+    try b.constraintOp(.path_set_target_velocity, constraints[5], .{ .f = &.{-1} });
+    try b.constraintOp(.path_set_position_motor_state, constraints[6], .{ .i = &.{2} });
+    try b.constraintOp(.path_set_position_motor_settings, constraints[6], .{ .i = &.{0}, .f = &.{ 1.5, 0.3, -flt_max, flt_max, -flt_max, flt_max } });
+    try b.constraintOp(.reset_constraint_warm_start, constraints[0], .{});
+    b.at(70);
+    try b.constraintOp(.path_set_position_motor_state, constraints[setups.len + 1], .{ .i = &.{3} });
+    try b.constraintOp(.path_set_target_velocity, constraints[setups.len + 1], .{ .f = &.{0.5} });
+    try b.constraintOp(.path_set_path, constraints[setups.len], .{ .i = &.{ 1, descs[1] }, .f = &.{2} }); // The arc
+}
+
+/// Every EPathRotationConstraintType (and an int that is no EPathRotationConstraintType: no rotation constraint) on
+/// curved paths attached to plates that turn freely (body 1 dynamic without gravity), the bodies on the paths spin and
+/// are driven by velocity motors; one path is attached to a sleeping plate (BuildIslands wakes it)
+fn buildPathRotationTypes(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.15, 0.25, 0.1 }, 0.05);
+    const plate = try b.box(.{ 1.2, 0.1, 1.2 }, 0.05);
+    b.num_updates = 70;
+    b.gravity = .{ 0, -2, 0 };
+    const arc = circlePathPoints(5, 1, std.math.pi);
+    const rotation_types = [_]u32{ PathRotation.free, PathRotation.around_tangent, PathRotation.around_normal, PathRotation.around_binormal, PathRotation.to_path, PathRotation.fully_constrained, 7 };
+    var constraints: [rotation_types.len]u32 = undefined;
+    var riders: [rotation_types.len]u32 = undefined;
+    for (rotation_types, 0..) |rotation, k| {
+        const x: Real = 4.0 * real(k);
+        // The plate of the binormal type sleeps (a sleeping body has no velocity) until BuildIslands wakes it
+        const asleep = k == 3;
+        const base = try b.body(.{ .position = .{ x, 3, 0 }, .shape = plate, .gravity_factor = 0, .angular_velocity = if (asleep) .{ 0, 0, 0 } else .{ 0.1, 0.3, -0.2 } }, if (asleep) .dont_activate else .activate);
+        const h = try b.body(.{ .position = .{ x + 1, 3.5, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.2), .shape = box, .angular_velocity = .{ 1, -2, 0.5 } }, .activate);
+        riders[k] = h;
+        constraints[k] = try b.constraint(pathWithMotor(base, h, &arc, false, .{ 0, 0.5, 0 }, 0.0, rotation, 0, 0, Desc.default_motor));
+        try b.constraintOp(.path_set_position_motor_state, constraints[k], .{ .i = &.{1} });
+        try b.constraintOp(.path_set_target_velocity, constraints[k], .{ .f = &.{0.6} });
+    }
+    b.at(30);
+    for (constraints) |c| try b.constraintOp(.path_set_target_velocity, c, .{ .f = &.{-0.4} });
+    try b.constraintOp(.notify_constraint_shape_changed, constraints[4], .{ .body = riders[4], .f = &.{ 0, 0.02, 0 } }); // Body 2
+}
+
+/// A train on a looping track (a path from the world): six cars, each on the track (rotation constrained to the path),
+/// linked by point constraints, the first one driven by a velocity motor with a force limit, the last one with cargo
+/// welded on it (fixed constraint); boxes fall onto the cars and the floor (contacts in the island of the train)
+fn buildPathTrainWithContacts(b: *SceneBuilder) Allocator.Error!void {
+    const car = try b.box(.{ 0.3, 0.2, 0.2 }, 0.05);
+    const crate = try b.box(.{ 0.15, 0.15, 0.15 }, 0.05);
+    b.num_updates = 90;
+    _ = try addFloor(b, 15, 0);
+    const radius = 4.0;
+    const track = circlePathPoints(16, radius, std.math.pi * 2.0);
+    const origin: [3]f32 = .{ 0, 1, 0 };
+    const num_cars = 6;
+    var cars: [num_cars]u32 = undefined;
+    for (0..num_cars) |k| {
+        const fraction: f32 = @floatFromInt(2 * k);
+        const p = pathPoint(.{ 0, 1, 0 }, &track, 2 * k);
+        const tangent = track[2 * k][3..6];
+        const heading = std.math.atan2(-@as(f64, tangent[2]), @as(f64, tangent[0]));
+        cars[k] = try b.body(.{ .position = p, .rotation = axisAngle(.{ 0, 1, 0 }, heading), .shape = car, .object_layer = Layers.moving }, .activate);
+        const c = try b.constraint(pathWithMotor(invalid_handle, cars[k], &track, true, origin, fraction, PathRotation.to_path, 0, 0, .{ 2, 1, -400, 400, -flt_max, flt_max }));
+        if (k == 0) {
+            try b.constraintOp(.path_set_position_motor_state, c, .{ .i = &.{1} });
+            try b.constraintOp(.path_set_target_velocity, c, .{ .f = &.{-1.5} });
+        }
+        if (k > 0) {
+            // The coupling halfway between the cars (on the chord)
+            const q = pathPoint(.{ 0, 1, 0 }, &track, 2 * k - 1);
+            _ = try addPointConstraint(b, cars[k - 1], cars[k], .{ @floatCast(q[0]), @floatCast(q[1]), @floatCast(q[2]) }, .{ @floatCast(q[0]), @floatCast(q[1]), @floatCast(q[2]) });
+        }
+    }
+    _ = try b.body(.{ .position = .{ 0, 1.5, 0 }, .shape = crate, .object_layer = Layers.moving }, .activate); // Falls onto the floor
+    const last = pathPoint(.{ 0, 1, 0 }, &track, 2 * (num_cars - 1));
+    const welded = try b.body(.{ .position = .{ last[0], last[1] + 0.36, last[2] }, .shape = crate, .object_layer = Layers.moving }, .activate);
+    _ = try addFixedConstraint(b, cars[num_cars - 1], welded);
+    b.at(10);
+    for ([_]usize{ 0, 4, 8, 13 }) |k| {
+        // On cars 0, 2 and 4, and next to the track
+        const p = pathPoint(.{ 0, 2.5, 0 }, &track, k);
+        _ = try b.body(.{ .position = p, .shape = crate, .object_layer = Layers.moving }, .activate);
+    }
+    b.at(45);
+    try b.constraintOp(.path_set_target_velocity, 0, .{ .f = &.{2} });
+}
+
+/// A net of boxes on the floor: neighbours along X are linked by point constraints, along Z by path constraints on
+/// straight paths in the space of the previous box (with friction, fully constrained rotation); the corners hang on the
+/// world. More than 128 constraints in one island: the LargeIslandSplitter splits it, and it falls asleep.
+fn buildPathNetSplitter(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.2, 0.4 }, 0.05);
+    b.num_updates = 100;
+    b.max_contact_constraints = 2048;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const nx = 8;
+    const nz = 12;
+    const link = linePathPoints(3, .{ 0, 0, 0.5 }, .{ 0, 0, 1.5 }, .{ 0, 1, 0 });
+    var handles: [nx * nz]u32 = undefined;
+    for (0..nz) |z| {
+        for (0..nx) |x| {
+            const px: f32 = @as(f32, @floatFromInt(x)) - 4.0;
+            const pz: f32 = @as(f32, @floatFromInt(z)) - 6.0;
+            handles[z * nx + x] = try b.body(.{ .position = .{ px, 0.25, pz }, .shape = box, .object_layer = Layers.moving }, .activate);
+            if (x > 0) _ = try addPointConstraint(b, handles[z * nx + x - 1], handles[z * nx + x], .{ px - 0.5, 0.25, pz }, .{ px - 0.5, 0.25, pz });
+            if (z > 0) _ = try b.constraint(pathWithMotor(handles[(z - 1) * nx + x], handles[z * nx + x], &link, false, .{ 0, 0, 0 }, 1.0, if ((x + z) % 2 == 0) PathRotation.fully_constrained else PathRotation.around_normal, 50, 0, Desc.default_motor));
+        }
+    }
+    // Pin the corners to the world
+    for ([_]usize{ 0, nx - 1, (nz - 1) * nx, nz * nx - 1 }) |i| {
+        const p: [3]f32 = .{ @as(f32, @floatFromInt(i % nx)) - 4.0, 0.25, @as(f32, @floatFromInt(i / nx)) - 6.0 };
+        _ = try addPointConstraint(b, invalid_handle, handles[i], p, p);
+    }
+    b.at(10);
+    try b.op(.add_impulse, handles[nx * nz / 2], .{ .f = &.{ 0, 300, 400 } });
+}
+
+/// Sleeping and waking: a box held by friction on a slope falls asleep and an impulse wakes it; a path constraint created
+/// between an awake body and a sleeping one wakes the sleeping body (BuildIslands), one between two sleeping bodies is
+/// not active until ActivateConstraint; SetPath(nullptr) makes a constraint inactive, SetPath with a path again active
+fn buildPathSleepAndWake(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 80;
+    b.settings.time_before_sleep = 0.2;
+    const slope = linePathPoints(3, .{ 0, 0, 0 }, .{ 4, -1, 0 }, .{ 0, 0, 1 });
+    const held = try b.body(.{ .position = .{ 2, 4.5, 0 }, .shape = box }, .activate);
+    const holding = try b.constraint(pathWithMotor(invalid_handle, held, &slope, false, .{ 0, 5, 0 }, 1.0, PathRotation.fully_constrained, 400, 0, Desc.default_motor));
+    const awake = try b.body(.{ .position = .{ 0, 5, 4 }, .shape = box, .gravity_factor = 0, .angular_velocity = .{ 0, 1, 0 }, .allow_sleeping = 0 }, .activate);
+    const sleeper = try b.body(.{ .position = .{ 1, 5, 4 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const sleeper1 = try b.body(.{ .position = .{ 0, 5, 8 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const sleeper2 = try b.body(.{ .position = .{ 1, 5, 8 }, .shape = box, .gravity_factor = 0 }, .dont_activate);
+    const local = linePathPoints(3, .{ 0, 0, 0 }, .{ 2, 0, 0 }, .{ 0, 1, 0 });
+    b.at(5);
+    try b.expectSleeping(sleeper);
+    const waking_desc = try b.addConstraint(pathWithMotor(awake, sleeper, &local, false, .{ 0, 0, 0 }, 1.0, PathRotation.around_normal, 0, 0, Desc.default_motor));
+    const waking = try b.createConstraint(waking_desc);
+    const sleeping_pair = try b.constraint(pathWithMotor(sleeper1, sleeper2, &local, false, .{ 0, 0, 0 }, 1.0, PathRotation.free, 0, 0, Desc.default_motor));
+    try b.expectConstraintState(sleeping_pair, ConstraintState.inactive);
+    b.at(6);
+    try b.expectAwake(sleeper);
+    try b.expectSleeping(sleeper1);
+    b.at(15);
+    try b.constraintOp(.activate_constraint, sleeping_pair, .{});
+    try b.expectAwake(sleeper1);
+    try b.expectAwake(sleeper2);
+    try b.constraintOp(.path_set_position_motor_state, sleeping_pair, .{ .i = &.{1} });
+    try b.constraintOp(.path_set_target_velocity, sleeping_pair, .{ .f = &.{0.3} });
+    b.at(40);
+    try b.expectSleeping(held);
+    try b.op(.add_impulse, held, .{ .f = &.{ 0, 300, 0 } });
+    try b.constraintOp(.path_set_path, waking, .{ .i = &.{0}, .f = &.{0} }); // No path: not active
+    try b.expectConstraintState(waking, ConstraintState.inactive);
+    b.at(41);
+    try b.expectAwake(held);
+    b.at(50);
+    try b.constraintOp(.path_set_max_friction_force, holding, .{ .f = &.{10} }); // It slides down to the end
+    try b.constraintOp(.path_set_path, waking, .{ .i = &.{ 1, waking_desc }, .f = &.{1.5} });
+    try b.expectConstraintState(waking, ConstraintState.enabled | ConstraintState.active);
+}
+
+/// Path constraints across cross save / restore: the restored state brings back the warm start impulses, the friction,
+/// the motor settings (written as raw bytes), the motor state, the targets and the path fraction, but not the path
+/// (SetPath between the snapshot and the restore keeps the other path); changes of the physics settings (no warm start,
+/// other iteration counts); a snapshot of the constraints only
+fn buildPathSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 90;
+    var no_warm_start = b.settings;
+    no_warm_start.constraint_warm_start = 0;
+    no_warm_start.num_velocity_steps = 4;
+    no_warm_start.num_position_steps = 1;
+    const settings1 = try b.addPhysicsSettings(no_warm_start);
+    var more_steps = b.settings;
+    more_steps.num_velocity_steps = 15;
+    more_steps.num_position_steps = 5;
+    more_steps.baumgarte = 0.5;
+    const settings2 = try b.addPhysicsSettings(more_steps);
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+
+    const circle = circlePathPoints(8, 1.5, std.math.pi * 2.0);
+    const arc = circlePathPoints(6, 1.5, 0.75 * std.math.pi * 2.0);
+    var bodies: [4]u32 = undefined;
+    var constraints: [4]u32 = undefined;
+    for (0..4) |k| {
+        const origin: [3]Real = .{ 5.0 * real(k), 4, 0 };
+        bodies[k] = try b.body(.{ .position = pathPoint(origin, &circle, k), .shape = box, .angular_velocity = .{ 0, 0.5, 0 } }, .activate);
+        constraints[k] = try b.constraint(pathWithMotor(invalid_handle, bodies[k], &circle, true, .{ @floatCast(origin[0]), 4, 0 }, @floatFromInt(k), @intCast(k + 2), 10, @intCast(k % 3), .{ 2, 1, -500, 500, -flt_max, flt_max }));
+        try b.constraintOp(.path_set_position_motor_state, constraints[k], .{ .i = &.{@intCast(k)} });
+        try b.constraintOp(.path_set_target_velocity, constraints[k], .{ .f = &.{1} });
+        try b.constraintOp(.path_set_target_path_fraction, constraints[k], .{ .f = &.{@floatFromInt(k + 3)} });
+    }
+    const arc_desc = try b.addConstraint(Desc.path(invalid_handle, bodies[0], &arc, false, .{ 0, 4, 0 }, identity_rotation, 0, 0));
+    // A chain hanging from the last body (point constraints)
+    var previous = bodies[3];
+    for (0..3) |k| {
+        const p = pathPoint(.{ 15, 4, 0 }, &circle, 3);
+        const h = try b.body(.{ .position = .{ p[0], p[1] - 0.5 * real(k + 1), p[2] }, .shape = box }, .activate);
+        _ = try addPointConstraint(b, previous, h, .{ @floatCast(p[0]), @floatCast(p[1] - 0.5 * real(k) - 0.25), @floatCast(p[2]) }, .{ @floatCast(p[0]), @floatCast(p[1] - 0.5 * real(k) - 0.25), @floatCast(p[2]) });
+        previous = h;
+    }
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(25);
+    try b.sysOp(.set_physics_settings, .{ .index = settings1 });
+    try b.constraintOp(.path_set_position_motor_state, constraints[1], .{ .i = &.{3} });
+    try b.constraintOp(.path_set_position_motor_settings, constraints[1], .{ .i = &.{1}, .f = &.{ 100, 5, -20, 20, -1, 1 } });
+    try b.constraintOp(.path_set_max_friction_force, constraints[0], .{ .f = &.{0} });
+    try b.constraintOp(.path_set_target_velocity, constraints[2], .{ .f = &.{-2} });
+    try b.constraintOp(.path_set_path, constraints[3], .{ .i = &.{ 1, arc_desc }, .f = &.{2} });
+    b.at(35);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // The motor of constraints[1] and the friction come back, the arc stays
+    b.at(45);
+    try b.sysOp(.set_physics_settings, .{ .index = settings2 });
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    try b.op(.add_impulse, bodies[2], .{ .f = &.{ 0, 0, 100 } });
+    b.at(55);
+    try b.constraintOp(.reset_constraint_warm_start, constraints[2], .{});
+    try b.constraintOp(.path_set_target_path_fraction, constraints[2], .{ .f = &.{7.5} });
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints only
+    b.at(70);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.op(.add_impulse, bodies[1], .{ .f = &.{ 50, 0, 0 } });
+    b.at(75);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+}
+
+/// Path constraints with several collision steps per update and changing update parameters (the warm start impulses
+/// are scaled by the step ratio): bodies on looping and open paths with motors and limits, a chain on point constraints
+fn buildPathCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 0.2, 0.3, 0.2 }, 0.05);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            const circle = circlePathPoints(8, 2, std.math.pi * 2.0);
+            const slope = linePathPoints(4, .{ 0, 0, 0 }, .{ 3, -3, 0 }, .{ 0, 0, 1 });
+            const a = try b.body(.{ .position = .{ 2, 5, 0 }, .shape = box }, .activate);
+            const looping = try b.constraint(pathWithMotor(invalid_handle, a, &circle, true, .{ 0, 5, 0 }, 0, PathRotation.to_path, 0, 0, .{ 3, 1, -200, 200, -flt_max, flt_max }));
+            try b.constraintOp(.path_set_position_motor_state, looping, .{ .i = &.{2} });
+            try b.constraintOp(.path_set_target_path_fraction, looping, .{ .f = &.{5} });
+            const c = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = box }, .activate);
+            _ = try b.constraint(pathWithMotor(invalid_handle, c, &slope, false, .{ 6, 5, 0 }, 0, PathRotation.around_tangent, 0, 0, Desc.default_motor));
+            const d = try b.body(.{ .position = .{ 6, 4.4, 0 }, .shape = box }, .activate);
+            _ = try addPointConstraint(b, c, d, .{ 6, 4.7, 0 }, .{ 6, 4.7, 0 });
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Path constraints far from the origin: a path in world space whose start (`mPathPosition`, a float) is far away, a
+/// path attached to a static and to a kinematic body far away (in the space of the body: the anchors keep their
+/// precision in double precision), boxes on them fall onto a floor
+fn buildPathFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const post = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    b.num_updates = 60;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const slope = linePathPoints(4, .{ 0, 0, 0 }, .{ 3, -2, 0 }, .{ 0, 0, 1 });
+    const circle = circlePathPoints(8, 1.5, std.math.pi * 2.0);
+    const a = try b.body(.{ .position = .{ o[0] - 4, o[1] + 3, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(pathWithMotor(invalid_handle, a, &slope, false, .{ @floatCast(o[0] - 4), @floatCast(o[1] + 3), @floatCast(o[2]) }, 0, PathRotation.to_path, 0, 0, Desc.default_motor));
+    const static_post = try b.body(.{ .position = .{ o[0] + 2, o[1] + 2, o[2] }, .shape = post, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const c = try b.body(.{ .position = .{ o[0] + 3.5, o[1] + 2, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const on_static = try b.constraint(pathWithMotor(static_post, c, &circle, true, .{ 0, 0, 0 }, 0, PathRotation.fully_constrained, 0, 0, Desc.default_motor));
+    try b.constraintOp(.path_set_position_motor_state, on_static, .{ .i = &.{1} });
+    try b.constraintOp(.path_set_target_velocity, on_static, .{ .f = &.{2} });
+    const kinematic_post = try b.body(.{ .position = .{ o[0] - 2, o[1] + 4, o[2] + 4 }, .shape = post, .motion_type = 1, .linear_velocity = .{ 0.3, 0, 0 }, .angular_velocity = .{ 0, 0.5, 0 }, .object_layer = Layers.moving }, .activate);
+    const d = try b.body(.{ .position = .{ o[0] - 0.5, o[1] + 4, o[2] + 4 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(pathWithMotor(kinematic_post, d, &circle, true, .{ 0, 0, 0 }, 0, PathRotation.around_normal, 5, 0, Desc.default_motor));
+    _ = try b.body(.{ .position = .{ o[0] - 1, o[1] + 0.2, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
 }
 
 // (append the scenes of the path group here)
