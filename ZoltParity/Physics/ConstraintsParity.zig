@@ -597,7 +597,126 @@ const SwingTwistKind = StubKind(zolt.SwingTwistConstraintSettings);
 const SixDOFKind = StubKind(zolt.SixDOFConstraintSettings);
 
 // ---- SLOT path (Zolt/Physics/Constraints/PathConstraint.zig, PathConstraintPathHermite.zig) ----
-const PathKind = StubKind(zolt.PathConstraintSettings);
+const PathKind = struct {
+    pub const Settings = zolt.PathConstraintSettings;
+    pub const Constraint = zolt.PathConstraint;
+
+    /// CSMakePath: the Hermite path of a description (one reference owned by the caller)
+    fn makePath(allocator: Allocator, d: *const CSSettings) !Ref(zolt.PathConstraintPath) {
+        const hermite = try zolt.PathConstraintPathHermite.create(allocator);
+        var path = Ref(zolt.PathConstraintPath).init(hermite.asPath());
+        errdefer path.deinit();
+        hermite.base.setIsLooping(d.i[1] != 0);
+        for (0..d.i[2]) |p| {
+            const pf = d.f[16 + 9 * p ..];
+            try hermite.addPoint(load3(pf[0..3]), load3(pf[3..6]), load3(pf[6..9]));
+        }
+        return path;
+    }
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        var path = try makePath(allocator, d);
+        defer path.deinit();
+        const s = try Settings.create(allocator);
+        s.path.set(path.get());
+        s.path_position = load3(d.f[0..3]);
+        s.path_rotation = loadQuat(d.f[3..7]);
+        s.path_fraction = d.f[7];
+        s.max_friction_force = d.f[8];
+        s.position_motor_settings = loadMotor(d.i[4], d.f[9..15]);
+        s.rotation_constraint_type = @enumFromInt(@as(i32, @bitCast(d.i[3])));
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        switch (op.op) {
+            16 => {
+                var path: Ref(zolt.PathConstraintPath) = if (op.i[0] != 0) try makePath(allocator, d) else .empty;
+                defer path.deinit();
+                c.setPath(path.get(), op.f[0]);
+            },
+            17 => c.setMaxFrictionForce(op.f[0]),
+            18 => c.setPositionMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            19 => c.setTargetVelocity(op.f[0]),
+            20 => c.setTargetPathFraction(op.f[0]),
+            21 => c.getPositionMotorSettingsMut().* = loadMotor(op.i[0], op.f[0..6]),
+            else => {
+                std.debug.print("path: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        const path = c.getPath();
+        rec.b(path != null);
+        if (path) |p| {
+            rec.b(p.isLooping());
+            rec.f(p.getPathMaxFraction());
+            const point = p.getPointOnPath(c.getPathFraction());
+            rec.v3(point.position);
+            rec.v3(point.tangent);
+            rec.v3(point.normal);
+            rec.v3(point.binormal);
+        }
+        rec.f(c.getPathFraction());
+        rec.f(c.getMaxFrictionForce());
+        rec.motor(c.getPositionMotorSettings());
+        rec.i(@bitCast(@intFromEnum(c.getPositionMotorState())));
+        rec.f(c.getTargetVelocity());
+        rec.f(c.getTargetPathFraction());
+        rec.v2(c.getTotalLambdaPosition());
+        rec.f(c.getTotalLambdaPositionLimits());
+        rec.f(c.getTotalLambdaMotor());
+        rec.v2(c.getTotalLambdaRotationHinge());
+        rec.v3(c.getTotalLambdaRotation());
+    }
+
+    /// Jolt's PathConstraint::GetConstraintSettings is not implemented (it asserts and returns nullptr), CSRecordSettings
+    /// skips it
+    pub fn settingsSaveable(c: *const Constraint) bool {
+        _ = c;
+        return false;
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        const looping = d.i[1] != 0;
+        cov.hit("looping path", looping);
+        cov.hit("open path", !looping);
+        cov.hit("many points", d.i[2] >= 6);
+        cov.hit("rotation free", d.i[3] == 0);
+        cov.hit("rotation around the tangent", d.i[3] == 1);
+        cov.hit("rotation around the normal", d.i[3] == 2);
+        cov.hit("rotation around the binormal", d.i[3] == 3);
+        cov.hit("rotation constrained to the path", d.i[3] == 4);
+        cov.hit("rotation fully constrained", d.i[3] == 5);
+        cov.hit("friction", d.f[8] > 0.0);
+        cov.hit("motor spring with frequency", d.i[4] == 0);
+        cov.hit("motor spring with stiffness", d.i[4] != 0);
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+        var states: [4]bool = @splat(false);
+        var set_path = false;
+        var clear_path = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op == 18) states[op.i[0]] = true;
+            if (op.op == 16) {
+                if (op.i[0] != 0) set_path = true else clear_path = true;
+            }
+        }
+        cov.hit("motor off", states[0]);
+        cov.hit("velocity motor", states[1]);
+        cov.hit("position motor", states[2]);
+        cov.hit("position and velocity motor", states[3]);
+        cov.hit("SetPath", set_path);
+        cov.hit("SetPath(nullptr)", clear_path);
+        // The state at the end of the scenario: the limits at an end of an open path, the motor part
+        const at_end = !looping and c.getPath() != null and (c.getPathFraction() <= 0.0 or c.getPathFraction() >= c.getPath().?.getPathMaxFraction());
+        cov.hit("at an end of an open path", at_end);
+        cov.hit("limits applied an impulse", c.getTotalLambdaPositionLimits() != 0.0);
+        cov.hit("motor applied an impulse", c.getTotalLambdaMotor() != 0.0);
+    }
+};
 
 // ---- SLOT rack_and_pinion (Zolt/Physics/Constraints/RackAndPinionConstraint.zig) ----
 const RackAndPinionKind = StubKind(zolt.RackAndPinionConstraintSettings);
@@ -1493,14 +1612,36 @@ fn genSixDOF(g: *Gen, sc: *CSScenario) void {
     }
 }
 
+/// The parts of PathConstraint invert the summed inverse masses / inertias of the bodies for two or three directions
+/// (DualAxisConstraintPart and HingeRotationConstraintPart a 2x2 matrix, RotationEulerConstraintPart a 3x3 matrix; their
+/// SetInversed only rejects an exact zero determinant). When the only dynamic body (or both) can move along or rotate
+/// around some axes only, that matrix is singular, the inverse of its rounding errors is huge and the velocities become
+/// NaN, which Jolt asserts (MotionProperties::ApplyAngularVelocityStep). So a dynamic body keeps partially allowed
+/// translations / rotations only when the other body is dynamic and translates / rotates freely; otherwise it gets all
+/// three back (a body without any translation or rotation DOF keeps it: its inverse mass / inertia is exactly zero there).
+fn genPathDOFs(sc: *CSScenario) void {
+    for ([_]u32{ 0b000111, 0b111000 }) |group| {
+        for (0..2) |k| {
+            const body = &sc.body[k];
+            const other = &sc.body[1 - k];
+            const dynamic = body.motion_type == @intFromEnum(MotionType.dynamic) and body.fixed_to_world == 0;
+            const partial = (body.allowed_dofs & group) != 0 and (body.allowed_dofs & group) != group;
+            const other_moves_freely = other.motion_type == @intFromEnum(MotionType.dynamic) and other.fixed_to_world == 0 and (other.allowed_dofs & group) == group;
+            if (dynamic and partial and !other_moves_freely)
+                body.allowed_dofs |= group;
+        }
+    }
+}
+
 /// Path: I[1] looping, I[2] number of points, I[3] rotation constraint type, motor I[4]; F[0..3] path position, F[3..7]
 /// path rotation, F[7] path fraction, F[8] max friction force, motor F[9..15], point p at F[16 + 9p..]: position,
-/// tangent, normal. The points lie in the XZ plane with normal Y (a circle when looping), so the interpolated normals are
-/// never degenerate.
+/// tangent, normal. The points lie near the XZ plane with normal Y (a circle when looping, up to 16 points, sometimes
+/// with a little height and slope), so the interpolated normals are never degenerate.
 fn genPath(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
     const looping = g.oneIn(3);
-    const num_points: u32 = @intCast(if (looping) 3 + g.index(6) else 2 + g.index(7));
+    const num_points: u32 = @intCast(if (looping) 3 + g.index(if (g.oneIn(4)) 14 else 6) else 2 + g.index(if (g.oneIn(4)) 15 else 7));
+    const bumpy = g.oneIn(3);
     s.i[0] = 1;
     s.i[1] = @intFromBool(looping);
     s.i[2] = num_points;
@@ -1520,6 +1661,10 @@ fn genPath(g: *Gen, sc: *CSScenario) void {
             store3(Vec3.init(1, 0, g.float(-0.3, 0.3)).mulScalar(g.float(0.5, 2)), pf[3..6]);
         }
         store3(Vec3.axisY(), pf[6..9]);
+        if (bumpy) {
+            pf[1] = g.float(-0.2, 0.2); // Height of the point
+            pf[4] = g.float(-0.1, 0.1); // Slope of the tangent
+        }
     }
     store3(g.vec(1), s.f[0..3]);
     storeQuat(g.quat(), s.f[3..7]);
@@ -1527,6 +1672,22 @@ fn genPath(g: *Gen, sc: *CSScenario) void {
     s.f[7] = g.angle(0, max_fraction);
     s.f[8] = if (g.oneIn(2)) 0.0 else g.float(0, 10);
     g.motor(&s.i[4], s.f[9..15]);
+    if (!looping and g.oneIn(8)) {
+        // Body 2 exactly at the start of an open path from the world, without rotation: U is zero, so the position
+        // constraint and the limit at the start apply no impulse (SolvePositionConstraint returns false), also far from
+        // the origin in double precision
+        sc.body[0].fixed_to_world = 1;
+        sc.body[1].motion_type = @intFromEnum(MotionType.dynamic);
+        storeQuat(Quat.identity(), &sc.body[1].rotation);
+        sc.body[1].com_offset = @splat(0);
+        @memset(s.f[16..19], 0); // The first point at the origin of the path
+        storeQuat(Quat.identity(), s.f[3..7]);
+        for (0..3) |k| s.f[k] = @floatCast(sc.body[1].position[k]); // The path starts at body 2 (a float position)
+        for (0..3) |k| sc.body[1].position[k] = s.f[k];
+        s.f[7] = 0.0;
+        s.i[3] = 0; // EPathRotationConstraintType::Free
+    }
+    genPathDOFs(sc);
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, @intCast(16 + g.index(6)), .{});
         switch (op.op) {

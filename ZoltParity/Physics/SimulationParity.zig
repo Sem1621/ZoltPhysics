@@ -2237,7 +2237,80 @@ const ConeSwingTwistSlot = StubSlot;
 const SixDOFSlot = StubSlot;
 
 // ---- SLOT path: PathConstraint, PathConstraintPathHermite (ConstraintKind path, OpKind 340..359) ----
-const PathSlot = StubSlot;
+const PathSlot = struct {
+    /// SimMakePath: the Hermite path of a description of kind path (one reference owned by the caller)
+    fn makePath(allocator: Allocator, c: *const SimConstraint) !Ref(zolt.PathConstraintPath) {
+        const hermite = try zolt.PathConstraintPathHermite.create(allocator);
+        var path = Ref(zolt.PathConstraintPath).init(hermite.asPath());
+        errdefer path.deinit();
+        hermite.base.setIsLooping(c.i[1] != 0);
+        for (0..c.i[2]) |p| {
+            const pf = c.f[16 + 9 * p ..];
+            try hermite.addPoint(load3(pf[0..3]), load3(pf[3..6]), load3(pf[6..9]));
+        }
+        return path;
+    }
+
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const f = &c.f;
+        var path = try makePath(allocator, c);
+        defer path.deinit();
+        const s = try zolt.PathConstraintSettings.create(allocator);
+        s.path.set(path.get());
+        s.path_position = load3(f[0..3]);
+        s.path_rotation = loadQuat(f[3..7]);
+        s.path_fraction = f[7];
+        s.max_friction_force = f[8];
+        s.position_motor_settings = loadMotor(i[4], f[9..15]);
+        s.rotation_constraint_type = @enumFromInt(@as(i32, @bitCast(i[3])));
+        return .init(s.asSettings());
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        const i = &op.i;
+        const f = &op.f;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .path_set_path => {
+                var path: Ref(zolt.PathConstraintPath) = if (i[0] != 0) try makePath(world.allocator, &world.desc.constraints[i[1]]) else .empty;
+                defer path.deinit();
+                (try castConstraint(zolt.PathConstraint, c, .path)).setPath(path.get(), f[0]);
+            },
+            .path_set_max_friction_force => (try castConstraint(zolt.PathConstraint, c, .path)).setMaxFrictionForce(f[0]),
+            .path_set_position_motor_state => (try castConstraint(zolt.PathConstraint, c, .path)).setPositionMotorState(@enumFromInt(@as(i32, @bitCast(i[0])))),
+            .path_set_target_velocity => (try castConstraint(zolt.PathConstraint, c, .path)).setTargetVelocity(f[0]),
+            .path_set_target_path_fraction => (try castConstraint(zolt.PathConstraint, c, .path)).setTargetPathFraction(f[0]),
+            .path_set_position_motor_settings => (try castConstraint(zolt.PathConstraint, c, .path)).getPositionMotorSettingsMut().* = loadMotor(i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .path => &.{
+                .{ .name = "position_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "position_limits_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "position_motor_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "hinge_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "max_friction_force", .kind = .f32 },
+                .{ .name = "position_motor_settings.spring_settings.mode", .kind = .u8 },
+                .{ .name = "position_motor_settings (padding of the C++ struct)", .kind = .bytes, .count = 3 },
+                .{ .name = "position_motor_settings.spring_settings.frequency", .kind = .f32 },
+                .{ .name = "position_motor_settings.spring_settings.damping", .kind = .f32 },
+                .{ .name = "position_motor_settings.min_force_limit", .kind = .f32 },
+                .{ .name = "position_motor_settings.max_force_limit", .kind = .f32 },
+                .{ .name = "position_motor_settings.min_torque_limit", .kind = .f32 },
+                .{ .name = "position_motor_settings.max_torque_limit", .kind = .f32 },
+                .{ .name = "position_motor_state", .kind = .u32 },
+                .{ .name = "target_velocity", .kind = .f32 },
+                .{ .name = "target_path_fraction", .kind = .f32 },
+                .{ .name = "path_fraction", .kind = .f32 },
+            },
+            else => null,
+        };
+    }
+};
 
 // ---- SLOT gear_rack_and_pinion: GearConstraint, RackAndPinionConstraint (ConstraintKind gear / rack_and_pinion,
 // OpKind 360..379, `setConstraints` for SimConstraint.constraint1 / constraint2) ----

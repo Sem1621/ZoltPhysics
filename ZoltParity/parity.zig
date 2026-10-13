@@ -46,6 +46,7 @@ test {
     _ = @import("Physics/MeshShapeParity.zig");
     _ = @import("Physics/NarrowPhaseQueryParity.zig");
     _ = @import("Physics/PairwiseParity.zig");
+    _ = @import("Physics/PathConstraintPathParity.zig");
     _ = @import("Physics/PlaneEmptyParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
     _ = @import("Physics/SimulationParity.zig");
