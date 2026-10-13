@@ -569,23 +569,29 @@ static Ref<TwoBodyConstraintSettings> CSMakeSettings(const CSSettings &inS)
 }
 
 // A hinge from the world to inBody in world space at the center of mass of the body (the gear / rack and pinion
-// references)
-static Ref<Constraint> CSMakeReferenceHinge(Body &inBody, const float *inAxis, const float *inNormal)
+// references). The normal of body 2 is the normal of body 1 rotated by inAngle around the axis, so the hinge angle of
+// the body at creation is inAngle (up to the sign): the scenarios do not integrate the bodies, without it the gear /
+// rack and pinion would never see a position error to correct
+static Ref<Constraint> CSMakeReferenceHinge(Body &inBody, const float *inAxis, const float *inNormal, float inAngle)
 {
 	HingeConstraintSettings s;
 	s.mPoint1 = s.mPoint2 = inBody.GetCenterOfMassPosition();
 	s.mHingeAxis1 = s.mHingeAxis2 = CSLoad3(inAxis);
-	s.mNormalAxis1 = s.mNormalAxis2 = CSLoad3(inNormal);
+	s.mNormalAxis1 = CSLoad3(inNormal);
+	s.mNormalAxis2 = Quat::sRotation(s.mHingeAxis1, inAngle) * s.mNormalAxis1;
 	return s.Create(Body::sFixedToWorld, inBody);
 }
 
-// A slider from the world to inBody in world space at the center of mass of the body (the rack reference)
-static Ref<Constraint> CSMakeReferenceSlider(Body &inBody, const float *inAxis, const float *inNormal)
+// A slider from the world to inBody in world space at the center of mass of the body (the rack reference). The point of
+// body 2 is moved by inOffset along the axis, so the slider position of the body at creation is inOffset (see
+// CSMakeReferenceHinge)
+static Ref<Constraint> CSMakeReferenceSlider(Body &inBody, const float *inAxis, const float *inNormal, float inOffset)
 {
 	SliderConstraintSettings s;
-	s.mPoint1 = s.mPoint2 = inBody.GetCenterOfMassPosition();
+	s.mPoint1 = inBody.GetCenterOfMassPosition();
 	s.mSliderAxis1 = s.mSliderAxis2 = CSLoad3(inAxis);
 	s.mNormalAxis1 = s.mNormalAxis2 = CSLoad3(inNormal);
+	s.mPoint2 = s.mPoint1 + inOffset * s.mSliderAxis1;
 	return s.Create(Body::sFixedToWorld, inBody);
 }
 
@@ -612,9 +618,10 @@ static Ref<Constraint> CSMakeReferenceSlider(Body &inBody, const float *inAxis, 
 //   SetPositionMotorState(I[0]), 19 SetTargetVelocity(F[0]), 20 SetTargetPathFraction(F[0]), 21
 //   GetPositionMotorSettings() = motor I[0] F[0..6]
 // - RackAndPinion: 16 SetConstraints(I[0] & 1? a hinge from the world to body 1 (axis F[0..3], normal F[3..6], world
-//   space) : nullptr, I[0] & 2? a slider from the world to body 2 (axis F[6..9], normal F[9..12]) : nullptr)
-// - Gear: 16 SetConstraints(I[0] & 1? a hinge from the world to body 1 (axis F[0..3], normal F[3..6]) : nullptr, I[0] & 2?
-//   a hinge from the world to body 2 (axis F[6..9], normal F[9..12]) : nullptr)
+//   space, angle float(R[0]) at creation) : nullptr, I[0] & 2? a slider from the world to body 2 (axis F[6..9], normal
+//   F[9..12], position float(R[1]) at creation) : nullptr)
+// - Gear: 16 SetConstraints(I[0] & 1? a hinge from the world to body 1 (axis F[0..3], normal F[3..6], angle float(R[0]))
+//   : nullptr, I[0] & 2? a hinge from the world to body 2 (axis F[6..9], normal F[9..12], angle float(R[1])) : nullptr)
 // - Pulley: 16 SetLength(F[0], F[1])
 static void CSApplyKindOp(TwoBodyConstraint &ioC, const CSOp &inOp, const CSSettings &inS)
 {
@@ -757,8 +764,8 @@ static void CSApplyKindOp(TwoBodyConstraint &ioC, const CSOp &inOp, const CSSett
 			{
 			case 16:
 				{
-					Ref<Constraint> pinion = (i[0] & 1) != 0? CSMakeReferenceHinge(*c.GetBody1(), f, f + 3) : nullptr;
-					Ref<Constraint> rack = (i[0] & 2) != 0? CSMakeReferenceSlider(*c.GetBody2(), f + 6, f + 9) : nullptr;
+					Ref<Constraint> pinion = (i[0] & 1) != 0? CSMakeReferenceHinge(*c.GetBody1(), f, f + 3, float(inOp.mR[0])) : nullptr;
+					Ref<Constraint> rack = (i[0] & 2) != 0? CSMakeReferenceSlider(*c.GetBody2(), f + 6, f + 9, float(inOp.mR[1])) : nullptr;
 					c.SetConstraints(pinion, rack);
 					return;
 				}
@@ -773,8 +780,8 @@ static void CSApplyKindOp(TwoBodyConstraint &ioC, const CSOp &inOp, const CSSett
 			{
 			case 16:
 				{
-					Ref<Constraint> gear1 = (i[0] & 1) != 0? CSMakeReferenceHinge(*c.GetBody1(), f, f + 3) : nullptr;
-					Ref<Constraint> gear2 = (i[0] & 2) != 0? CSMakeReferenceHinge(*c.GetBody2(), f + 6, f + 9) : nullptr;
+					Ref<Constraint> gear1 = (i[0] & 1) != 0? CSMakeReferenceHinge(*c.GetBody1(), f, f + 3, float(inOp.mR[0])) : nullptr;
+					Ref<Constraint> gear2 = (i[0] & 2) != 0? CSMakeReferenceHinge(*c.GetBody2(), f + 6, f + 9, float(inOp.mR[1])) : nullptr;
 					c.SetConstraints(gear1, gear2);
 					return;
 				}

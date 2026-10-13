@@ -1292,6 +1292,17 @@ pub const scenes = [_]SceneEntry{
     // ---- Gear / RackAndPinion ----
     .{ .name = "constraints_gear_ops", .build = buildGearOps, .blocked_by = .gear_constraints, .expect = .{ .active_constraints = 6 } },
     .{ .name = "constraints_rack_and_pinion_ops", .build = buildRackAndPinionOps, .blocked_by = .rack_and_pinion_constraints, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_gear_motors", .build = buildGearMotors, .blocked_by = .gear_constraints, .sweep_stride = 30, .expect = .{ .active_constraints = 32 } },
+    .{ .name = "constraints_rack_and_pinion_motors", .build = buildRackAndPinionMotors, .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 30, .expect = .{ .active_constraints = 27 } },
+    .{ .name = "constraints_gear_islands_and_contacts", .build = buildGearIslands, .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 14 } },
+    .{ .name = "constraints_gear_splitter", .build = buildGearSplitter, .blocked_by = .gear_constraints, .sweep_stride = 40, .expect = .{ .sleeping = true, .large_island = true, .update_activations = 1, .active_constraints = 139 } },
+    .{ .name = "constraints_gear_sleep_and_save_restore", .build = buildGearSleepAndSaveRestore, .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 10, .expect = .{ .sleeping = true, .update_activations = 1, .active_constraints = 9 } },
+    .{ .name = "constraints_gear_collision_steps_2", .build = buildGearCollisionSteps(2), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 8 } },
+    .{ .name = "constraints_gear_collision_steps_3", .build = buildGearCollisionSteps(3), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 10, .expect = .{ .active_constraints = 8 } },
+    .{ .name = "constraints_gear_far_from_origin", .build = buildGearFarFromOrigin, .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 6 } },
+    .{ .name = "constraints_gear_random_1", .build = buildGearRandom(1), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_gear_random_2", .build = buildGearRandom(2), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_gear_kinematic_release", .build = buildGearKinematicRelease, .blocked_by = .release_only, .expect = .{ .active_constraints = 4 } },
     // (append the gear / rack and pinion scenes here)
 };
 
@@ -7474,6 +7485,798 @@ fn buildRackAndPinionOps(b: *SceneBuilder) Allocator.Error!void {
     b.at(45);
     try b.constraintOp(.rack_and_pinion_set_constraints, rack_and_pinion, .{ .i = &.{ pinion, rack } });
     try b.constraintOp(.constraint_settings_hash, rack_and_pinion2, .{});
+}
+
+/// The rotation of a lying gear (a cylinder whose axis, Y, lies along Z)
+const gear_lying = axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi);
+
+/// A gear body: a lying cylinder at `p` (no collisions unless `layer` says otherwise)
+fn gearBody(b: *SceneBuilder, shape: u32, p: [3]Real, opts: struct { spin: f32 = 0, layer: u32 = Layers.unused1, rotation: [4]f32 = gear_lying, gravity_factor: f32 = 1 }) Allocator.Error!u32 {
+    return b.body(.{ .position = p, .rotation = opts.rotation, .shape = shape, .angular_velocity = .{ 0, 0, opts.spin }, .gravity_factor = opts.gravity_factor, .object_layer = opts.layer }, .activate);
+}
+
+/// The hinge of a gear: from the world around Z at its center
+fn gearHinge(body: u32, p: [3]Real) SimConstraint {
+    return Desc.hinge(invalid_handle, body, p, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+}
+
+/// A GearConstraint around Z on both bodies with SetRatio(teeth1, teeth2), coupled to the hinges `hinge1` / `hinge2`
+fn gearWithTeeth(body1: u32, body2: u32, hinge1: u32, hinge2: u32, teeth1: u32, teeth2: u32) SimConstraint {
+    var c = Desc.gear(body1, body2, .{ 0, 0, 1 }, .{ 0, 0, 1 }, 1, hinge1, hinge2);
+    c.i[1] = 1;
+    c.i[2] = teeth1;
+    c.i[3] = teeth2;
+    return c;
+}
+
+/// A RackAndPinionConstraint (pinion around Z, rack along X) with SetRatio(rack teeth, rack length, pinion teeth),
+/// coupled to the pinion hinge `pinion` and the rack slider `rack`
+fn rackAndPinionWithTeeth(pinion_body: u32, rack_body: u32, pinion: u32, rack: u32, rack_teeth: u32, rack_length: f32, pinion_teeth: u32) SimConstraint {
+    var c = Desc.rackAndPinion(pinion_body, rack_body, .{ 0, 0, 1 }, .{ 1, 0, 0 }, 1, pinion, rack);
+    c.i[1] = 1;
+    c.i[2] = rack_teeth;
+    c.i[3] = pinion_teeth;
+    c.f[7] = rack_length;
+    return c;
+}
+
+/// The motor hinge operations: SetMotorState(state)
+fn setHingeMotorState(b: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
+    try b.constraintOp(.hinge_set_motor_state, handle, .{ .i = &.{state} });
+}
+
+/// Gear trains driven by hinge motors in every EMotorState, ratios from SetRatio and explicit (negative for a bevel gear
+/// with perpendicular axes), long enough for the hinge angles to wrap around (the position correction then takes
+/// fmod(gear1rot + ratio gear2rot, 2 pi)): a velocity motor driving three gears; a position motor (whose targets jump
+/// across +-pi); a position and velocity motor with damping only and later with a spring; the motor off with friction
+/// on a spinning train; a bevel gear; a driven gear with hard limits and one with a soft limit (the motors are torque
+/// limited); a gear without hinges at first (drift without position correction, then corrected after SetConstraints,
+/// then one hinge removed again); a gear in local space driven by a position motor in the stiffness mode.
+/// Jolt's GearConstraintPart applies lambda I2^-1 b to body 2 where its Jacobian [a, r b] asks for r lambda I2^-1 b
+/// (reproduced): an iteration scales the velocity error by 1 - (A + r B) / (A + r^2 B) (A = a . I1^-1 a, B = b . I2^-1
+/// b), which diverges unless 0 < (A + r B) / (A + r^2 B) < 2: the gear scenes use ratios of at least 0.5, negative
+/// ratios only with A > |r| B (Zolt asserts on the infinite velocities that Jolt's release build would produce)
+fn buildGearMotors(b: *SceneBuilder) Allocator.Error!void {
+    const big = try b.cylinder(0.1, 0.5, 0.05);
+    const small = try b.cylinder(0.1, 0.25, 0.05);
+    b.num_updates = 150;
+    const z: [3]f32 = .{ 0, 0, 1 };
+    const y: Real = 4;
+
+    // A velocity motor driving three gears (20 -> 10 -> 20 teeth)
+    const t0 = [3]u32{ try gearBody(b, big, .{ 0, y, 0 }, .{}), try gearBody(b, small, .{ 0.8, y, 0 }, .{}), try gearBody(b, big, .{ 1.6, y, 0 }, .{}) };
+    var h0_desc = gearHinge(t0[0], .{ 0, y, 0 });
+    Desc.setMotor(&h0_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -500, 500 });
+    const h0 = try b.constraint(h0_desc);
+    const h0b = try b.constraint(gearHinge(t0[1], .{ 0.8, y, 0 }));
+    const h0c = try b.constraint(gearHinge(t0[2], .{ 1.6, y, 0 }));
+    _ = try b.constraint(gearWithTeeth(t0[0], t0[1], h0, h0b, 20, 10));
+    _ = try b.constraint(gearWithTeeth(t0[1], t0[2], h0b, h0c, 10, 20));
+
+    // A position motor (12 -> 36 teeth)
+    const t1 = [2]u32{ try gearBody(b, big, .{ 4, y, 0 }, .{}), try gearBody(b, small, .{ 4.8, y, 0 }, .{}) };
+    var h1_desc = gearHinge(t1[0], .{ 4, y, 0 });
+    Desc.setMotor(&h1_desc, 2, 17, 0, .{ 3, 1, -flt_max, flt_max, -500, 500 });
+    const h1 = try b.constraint(h1_desc);
+    const h1b = try b.constraint(gearHinge(t1[1], .{ 4.8, y, 0 }));
+    _ = try b.constraint(gearWithTeeth(t1[0], t1[1], h1, h1b, 12, 36));
+
+    // A position and velocity motor with damping only (stiffness mode, zero stiffness)
+    const t2 = [2]u32{ try gearBody(b, big, .{ 8, y, 0 }, .{}), try gearBody(b, big, .{ 9.1, y, 0 }, .{}) };
+    var h2_desc = gearHinge(t2[0], .{ 8, y, 0 });
+    Desc.setMotor(&h2_desc, 2, 17, 1, .{ 0, 20, -flt_max, flt_max, -flt_max, flt_max });
+    const h2 = try b.constraint(h2_desc);
+    const h2b = try b.constraint(gearHinge(t2[1], .{ 9.1, y, 0 }));
+    _ = try b.constraint(gearWithTeeth(t2[0], t2[1], h2, h2b, 16, 16));
+
+    // The motor off with friction on a spinning train
+    const t3 = [2]u32{ try gearBody(b, big, .{ 12, y, 0 }, .{ .spin = 6 }), try gearBody(b, small, .{ 12.8, y, 0 }, .{ .spin = -12 }) };
+    var h3_desc = gearHinge(t3[0], .{ 12, y, 0 });
+    h3_desc.f[16] = 0.5; // mMaxFrictionTorque
+    const h3 = try b.constraint(h3_desc);
+    var h3b_desc = gearHinge(t3[1], .{ 12.8, y, 0 });
+    h3b_desc.f[16] = 0.1;
+    const h3b = try b.constraint(h3b_desc);
+    _ = try b.constraint(gearWithTeeth(t3[0], t3[1], h3, h3b, 24, 12));
+
+    // A bevel gear: the driven gear stands (its axis along X), explicit negative ratio (a small driver: with Jolt's
+    // GearConstraintPart a negative ratio r only converges when a . I1^-1 a > |r| b . I2^-1 b, see buildGearMotors)
+    const t4 = [2]u32{ try gearBody(b, small, .{ 16, y, 0 }, .{}), try gearBody(b, big, .{ 16.7, y, 0.6 }, .{ .rotation = axisAngle(z, 0.5 * std.math.pi) }) };
+    var h4_desc = gearHinge(t4[0], .{ 16, y, 0 });
+    Desc.setMotor(&h4_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -200, 200 });
+    const h4 = try b.constraint(h4_desc);
+    const h4b = try b.constraint(Desc.hinge(invalid_handle, t4[1], .{ 16.7, y, 0.6 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }));
+    _ = try b.constraint(Desc.gear(t4[0], t4[1], z, .{ 1, 0, 0 }, -0.5, h4, h4b));
+
+    // A driven gear with hard limits (the torque limited velocity motor stalls at them)
+    const t5 = [2]u32{ try gearBody(b, big, .{ 20, y, 0 }, .{}), try gearBody(b, big, .{ 21.1, y, 0 }, .{}) };
+    var h5_desc = gearHinge(t5[0], .{ 20, y, 0 });
+    Desc.setMotor(&h5_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -50, 50 });
+    const h5 = try b.constraint(h5_desc);
+    var h5b_desc = gearHinge(t5[1], .{ 21.1, y, 0 });
+    h5b_desc.f[12] = -1;
+    h5b_desc.f[13] = 1;
+    const h5b = try b.constraint(h5b_desc);
+    _ = try b.constraint(gearWithTeeth(t5[0], t5[1], h5, h5b, 10, 10));
+
+    // A driven gear with a soft limit (frequency and damping)
+    const t6 = [2]u32{ try gearBody(b, big, .{ 24, y, 0 }, .{}), try gearBody(b, small, .{ 24.8, y, 0 }, .{}) };
+    var h6_desc = gearHinge(t6[0], .{ 24, y, 0 });
+    Desc.setMotor(&h6_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -20, 20 });
+    const h6 = try b.constraint(h6_desc);
+    var h6b_desc = gearHinge(t6[1], .{ 24.8, y, 0 });
+    h6b_desc.f[12] = -0.5;
+    h6b_desc.f[13] = 0.5;
+    Desc.setSpring(&h6b_desc, 1, 14, 0, 2, 0.5);
+    const h6b = try b.constraint(h6b_desc);
+    _ = try b.constraint(Desc.gear(t6[0], t6[1], z, z, 0.75, h6, h6b));
+
+    // A gear without hinges at first
+    const t7 = [2]u32{ try gearBody(b, big, .{ 28, y, 0 }, .{}), try gearBody(b, small, .{ 28.8, y, 0 }, .{}) };
+    var h7_desc = gearHinge(t7[0], .{ 28, y, 0 });
+    Desc.setMotor(&h7_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -300, 300 });
+    const h7 = try b.constraint(h7_desc);
+    const h7b = try b.constraint(gearHinge(t7[1], .{ 28.8, y, 0 }));
+    const g7 = try b.constraint(Desc.gear(t7[0], t7[1], z, z, 2, invalid_handle, invalid_handle));
+
+    // A gear in local space (the local Y axis of the lying cylinders is world Z)
+    const t8 = [2]u32{ try gearBody(b, big, .{ 32, y, 0 }, .{}), try gearBody(b, big, .{ 33.1, y, 0 }, .{}) };
+    var h8_desc = gearHinge(t8[0], .{ 32, y, 0 });
+    Desc.setMotor(&h8_desc, 2, 17, 1, .{ 500, 50, -flt_max, flt_max, -flt_max, flt_max });
+    const h8 = try b.constraint(h8_desc);
+    const h8b = try b.constraint(gearHinge(t8[1], .{ 33.1, y, 0 }));
+    var g8_desc = gearWithTeeth(t8[0], t8[1], h8, h8b, 15, 25);
+    g8_desc.i[0] = ConstraintSpace.local_to_body_com;
+    Desc.set3(g8_desc.f[0..], .{ 0, 1, 0 });
+    Desc.set3(g8_desc.f[3..], .{ 0, 1, 0 });
+    const g8 = try b.constraint(g8_desc);
+
+    // A high ratio (5 -> 35 teeth: gear1rot + 7 gear2rot reaches 6 pi, where fmod differs from repeated subtractions of
+    // 2 pi, which are exact up to 2 pi + 8) with a small driver (see above)
+    const t9 = [2]u32{ try gearBody(b, small, .{ 36, y, 0 }, .{}), try gearBody(b, big, .{ 36.8, y, 0 }, .{}) };
+    var h9_desc = gearHinge(t9[0], .{ 36, y, 0 });
+    Desc.setMotor(&h9_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -500, 500 });
+    const h9 = try b.constraint(h9_desc);
+    const h9b = try b.constraint(gearHinge(t9[1], .{ 36.8, y, 0 }));
+    _ = try b.constraint(gearWithTeeth(t9[0], t9[1], h9, h9b, 5, 35));
+
+    b.at(1);
+    try setHingeMotorState(b, h9, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h9, .{ .f = &.{10} });
+    try setHingeMotorState(b, h0, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h0, .{ .f = &.{3} });
+    try setHingeMotorState(b, h1, motor_position);
+    try b.constraintOp(.hinge_set_target_angle, h1, .{ .f = &.{2.5} });
+    try setHingeMotorState(b, h2, motor_position_and_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h2, .{ .f = &.{-2} });
+    try setHingeMotorState(b, h4, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h4, .{ .f = &.{2} });
+    try setHingeMotorState(b, h5, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h5, .{ .f = &.{1.5} });
+    try setHingeMotorState(b, h6, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h6, .{ .f = &.{2} });
+    try setHingeMotorState(b, h7, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h7, .{ .f = &.{4} });
+    try setHingeMotorState(b, h8, motor_position);
+    try b.constraintOp(.hinge_set_target_angle, h8, .{ .f = &.{1.5} });
+    b.at(40);
+    try b.constraintOp(.hinge_set_target_angle, h1, .{ .f = &.{-2.5} }); // Across +-pi
+    try b.constraintOp(.hinge_set_motor_settings, h2, .{ .i = &.{0}, .f = &.{ 1.5, 0.8, -flt_max, flt_max, -flt_max, flt_max } });
+    try b.constraintOp(.hinge_set_target_angle, h2, .{ .f = &.{0.5} });
+    try b.constraintOp(.constraint_settings_hash, g8, .{});
+    b.at(60);
+    try b.constraintOp(.gear_set_constraints, g7, .{ .i = &.{ h7, h7b } });
+    try b.constraintOp(.hinge_set_target_angular_velocity, h5, .{ .f = &.{-1.5} });
+    try b.constraintOp(.hinge_set_target_angle, h8, .{ .f = &.{-3} });
+    b.at(80);
+    try setHingeMotorState(b, h0, motor_off);
+    try b.constraintOp(.hinge_set_max_friction_torque, h0, .{ .f = &.{5} });
+    try setHingeMotorState(b, h4, motor_position_and_velocity);
+    try b.constraintOp(.hinge_set_target_angle, h4, .{ .f = &.{-1} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, h4, .{ .f = &.{0.5} });
+    try b.constraintOp(.hinge_set_limits_spring_settings, h6b, .{ .i = &.{1}, .f = &.{ 200, 5 } }); // Stiffness mode
+    b.at(100);
+    try b.constraintOp(.gear_set_constraints, g7, .{ .i = &.{ h7, invalid_handle } });
+    try setHingeMotorState(b, h1, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h1, .{ .f = &.{-5} });
+    try b.constraintOp(.reset_constraint_warm_start, g7, .{});
+    b.at(120);
+    try b.op(.set_rotation, t3[0], .{ .f = &axisAngle(z, 3) }); // A position error beyond pi
+}
+
+/// Racks and pinions driven by slider motors in every EMotorState (and one pinion driven by its hinge motor), ratios
+/// from SetRatio and explicit: a velocity motor into the hard limit of the rack and back; a position motor; a position
+/// and velocity motor with damping only; the motor off with friction on a thrown rack; a velocity motor into a soft
+/// limit (frequency and damping); a hinge motor on the pinion pushing the rack into a soft limit in the stiffness mode; a
+/// rack and pinion in local space without its constraints at first; a pinion with hard limits that stop a force limited
+/// rack; a high ratio (rotation - ratio * translation beyond 2 pi + 8, where fmod differs from repeated subtractions of
+/// 2 pi)
+fn buildRackAndPinionMotors(b: *SceneBuilder) Allocator.Error!void {
+    const wheel = try b.cylinder(0.1, 0.3, 0.05);
+    const rack_shape = try b.box(.{ 1.2, 0.08, 0.08 }, 0.04);
+    b.num_updates = 150;
+    const y: Real = 4;
+    const ry: Real = 3.62;
+    var pinion_bodies: [9]u32 = undefined;
+    var rack_bodies: [9]u32 = undefined;
+    var pinions: [9]u32 = undefined;
+    var racks: [9]u32 = undefined;
+    var rps: [9]u32 = undefined;
+    for (0..9) |k| {
+        const x: Real = 4 * real(k);
+        pinion_bodies[k] = try gearBody(b, wheel, .{ x, y, 0 }, .{});
+        rack_bodies[k] = try b.body(.{ .position = .{ x, ry, 0 }, .shape = rack_shape, .linear_velocity = if (k == 3) .{ 2, 0, 0 } else @splat(0), .gravity_factor = if (k == 3) 0 else 1 }, .activate);
+        var hinge = gearHinge(pinion_bodies[k], .{ x, y, 0 });
+        var slider = Desc.slider(invalid_handle, rack_bodies[k], .{ 1, 0, 0 });
+        switch (k) {
+            0 => {
+                slider.f[12] = -1.5;
+                slider.f[13] = 1.5;
+            },
+            3 => {
+                slider.f[16] = 2; // mMaxFrictionForce
+                hinge.f[16] = 0.1;
+            },
+            4 => {
+                slider.f[12] = -0.5;
+                slider.f[13] = 0.5;
+                Desc.setSpring(&slider, 3, 14, 0, 3, 0.3);
+                Desc.setMotor(&slider, 4, 17, 0, .{ 2, 1, -30, 30, -flt_max, flt_max });
+            },
+            5 => {
+                slider.f[12] = -0.3;
+                slider.f[13] = 0.3;
+                Desc.setSpring(&slider, 3, 14, 1, 200, 5);
+                Desc.setMotor(&hinge, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -20, 20 });
+            },
+            7 => {
+                hinge.f[12] = -1.2;
+                hinge.f[13] = 1.2;
+                Desc.setMotor(&slider, 4, 17, 0, .{ 2, 1, -40, 40, -flt_max, flt_max });
+            },
+            else => {},
+        }
+        if (k == 2) Desc.setMotor(&slider, 4, 17, 1, .{ 0, 30, -flt_max, flt_max, -flt_max, flt_max });
+        pinions[k] = try b.constraint(hinge);
+        racks[k] = try b.constraint(slider);
+        var rp = switch (k) {
+            0 => rackAndPinionWithTeeth(pinion_bodies[k], rack_bodies[k], pinions[k], racks[k], 30, 3, 10),
+            1 => rackAndPinionWithTeeth(pinion_bodies[k], rack_bodies[k], pinions[k], racks[k], 20, 4, 10),
+            2, 4 => rackAndPinionWithTeeth(pinion_bodies[k], rack_bodies[k], pinions[k], racks[k], 12, 2.4, 9),
+            3 => Desc.rackAndPinion(pinion_bodies[k], rack_bodies[k], .{ 0, 0, 1 }, .{ 1, 0, 0 }, -3, pinions[k], racks[k]),
+            6 => Desc.rackAndPinion(pinion_bodies[k], rack_bodies[k], .{ 0, 1, 0 }, .{ 1, 0, 0 }, -2, invalid_handle, invalid_handle),
+            8 => rackAndPinionWithTeeth(pinion_bodies[k], rack_bodies[k], pinions[k], racks[k], 40, 2, 8), // 5 pi rad / m
+            else => Desc.rackAndPinion(pinion_bodies[k], rack_bodies[k], .{ 0, 0, 1 }, .{ 1, 0, 0 }, 1.0 / 0.3, pinions[k], racks[k]),
+        };
+        if (k == 6) rp.i[0] = ConstraintSpace.local_to_body_com; // The local Y axis of the lying pinion is world Z
+        rps[k] = try b.constraint(rp);
+    }
+
+    b.at(1);
+    try setSliderMotorState(b, racks[0], motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, racks[0], .{ .f = &.{1} });
+    try setSliderMotorState(b, racks[1], motor_position);
+    try b.constraintOp(.slider_set_target_position, racks[1], .{ .f = &.{0.8} });
+    try setSliderMotorState(b, racks[2], motor_position_and_velocity);
+    try b.constraintOp(.slider_set_target_velocity, racks[2], .{ .f = &.{0.7} });
+    try setSliderMotorState(b, racks[4], motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, racks[4], .{ .f = &.{1} });
+    try setHingeMotorState(b, pinions[5], motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, pinions[5], .{ .f = &.{2} });
+    try setSliderMotorState(b, racks[6], motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, racks[6], .{ .f = &.{-0.6} });
+    try setSliderMotorState(b, racks[7], motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, racks[7], .{ .f = &.{0.8} });
+    try setSliderMotorState(b, racks[8], motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, racks[8], .{ .f = &.{0.6} }); // rotation - ratio translation beyond 2 pi + 8
+    b.at(50);
+    try b.constraintOp(.rack_and_pinion_set_constraints, rps[6], .{ .i = &.{ pinions[6], racks[6] } });
+    try b.constraintOp(.slider_set_target_position, racks[1], .{ .f = &.{-0.6} });
+    try b.constraintOp(.constraint_settings_hash, rps[6], .{});
+    b.at(70);
+    try setSliderMotorState(b, racks[2], motor_position_and_velocity);
+    try b.constraintOp(.slider_set_motor_settings, racks[2], .{ .i = &.{0}, .f = &.{ 2, 0.8, -flt_max, flt_max, -flt_max, flt_max } });
+    try b.constraintOp(.slider_set_target_position, racks[2], .{ .f = &.{-0.2} });
+    try b.constraintOp(.slider_set_target_velocity, racks[2], .{ .f = &.{0} });
+    try b.constraintOp(.hinge_set_target_angular_velocity, pinions[5], .{ .f = &.{-2} });
+    b.at(90);
+    try b.constraintOp(.rack_and_pinion_set_constraints, rps[6], .{ .i = &.{ invalid_handle, racks[6] } });
+    try b.constraintOp(.reset_constraint_warm_start, rps[4], .{});
+    try setSliderMotorState(b, racks[7], motor_off);
+    try b.constraintOp(.slider_set_max_friction_force, racks[7], .{ .f = &.{5} });
+    b.at(100);
+    try b.constraintOp(.slider_set_target_velocity, racks[0], .{ .f = &.{-1.5} });
+    try b.constraintOp(.constraint_settings_hash, rps[0], .{});
+    b.at(120);
+    try b.op(.set_position, rack_bodies[1], .{ .r = .{ 4.6, ry, 0 } }); // A jump of the rack
+}
+
+/// Gears and racks in islands with other constraint kinds and contacts: a cart on the floor carries two gears and a
+/// pinion on hinges from the cart body (not the world: the angles are relative to the moving cart); a velocity motor on
+/// the first gear drives the second one, whose welded arm (FixedConstraint) swings into the cart and a crate, and the
+/// pinion, which moves a rack on a slider from the cart into a crate; a chain of point constraints hangs from the first
+/// gear onto the floor; crates fall on a gear pair on the floor
+fn buildGearIslands(b: *SceneBuilder) Allocator.Error!void {
+    const cart_shape = try b.box(.{ 2.0, 0.2, 0.6 }, 0.05);
+    const wheel = try b.cylinder(0.1, 0.4, 0.05);
+    const small_wheel = try b.cylinder(0.1, 0.2, 0.05);
+    const arm_shape = try b.box(.{ 0.05, 0.5, 0.05 }, 0.02);
+    const rack_shape = try b.box(.{ 0.8, 0.06, 0.06 }, 0.03);
+    const crate = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const link = try b.box(.{ 0.05, 0.15, 0.05 }, 0.02);
+    b.num_updates = 120;
+    b.max_contact_constraints = 2048;
+    _ = try addFloor(b, 20, 0);
+
+    // The cart (moving layer: it collides with the floor, the arm, the rack and the crates; the gears are in moving2)
+    const cart = try b.body(.{ .position = .{ 0, 0.2, 0 }, .shape = cart_shape, .friction = 0.8, .object_layer = Layers.moving }, .activate);
+    const g1 = try gearBody(b, wheel, .{ -0.6, 1.0, 0 }, .{ .layer = Layers.moving2 });
+    const g2 = try gearBody(b, small_wheel, .{ 0.05, 1.0, 0 }, .{ .layer = Layers.moving2 });
+    const pinion_body = try gearBody(b, small_wheel, .{ 0.7, 0.75, 0 }, .{ .layer = Layers.moving2 });
+    var h1_desc = Desc.hinge(cart, g1, .{ -0.6, 1.0, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+    Desc.setMotor(&h1_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -100, 100 });
+    const h1 = try b.constraint(h1_desc);
+    const h2 = try b.constraint(Desc.hinge(cart, g2, .{ 0.05, 1.0, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    const hp = try b.constraint(Desc.hinge(cart, pinion_body, .{ 0.7, 0.75, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    _ = try b.constraint(gearWithTeeth(g1, g2, h1, h2, 20, 10));
+    _ = try b.constraint(gearWithTeeth(g2, pinion_body, h2, hp, 10, 10));
+
+    // An arm welded to the second gear, a crate on the cart next to it
+    const arm = try b.body(.{ .position = .{ 0.05, 1.5, 0.25 }, .shape = arm_shape, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(g2, arm));
+    _ = try b.body(.{ .position = .{ -0.9, 0.61, 0.3 }, .shape = crate, .object_layer = Layers.moving }, .activate);
+
+    // A rack on a slider from the cart, driven by the pinion, and a crate on the cart in its way
+    const rack_body = try b.body(.{ .position = .{ 0.7, 0.5, 0.3 }, .shape = rack_shape, .object_layer = Layers.moving }, .activate);
+    var rack_desc = Desc.sliderAxes(cart, rack_body, .{ 0.7, 0.5, 0.3 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    rack_desc.f[12] = -0.6;
+    rack_desc.f[13] = 0.6;
+    const rack = try b.constraint(rack_desc);
+    _ = try b.constraint(rackAndPinionWithTeeth(pinion_body, rack_body, hp, rack, 16, 1.6, 8));
+    _ = try b.body(.{ .position = .{ 1.75, 0.61, 0.3 }, .shape = crate, .object_layer = Layers.moving }, .activate);
+
+    // A chain hanging from the first gear onto the floor (moving2: the floor only)
+    var previous = g1;
+    for (0..3) |k| {
+        const p: [3]Real = .{ -0.25, 0.75 - 0.3 * real(k), 0.2 };
+        const l = try b.body(.{ .position = p, .shape = link, .object_layer = Layers.moving2 }, .activate);
+        _ = try b.constraint(Desc.pointWorld(previous, l, .{ p[0], p[1] + 0.15, p[2] }));
+        previous = l;
+    }
+
+    // Crates falling on a gear pair on the floor
+    const f1 = try gearBody(b, wheel, .{ 4, 0.5, 0 }, .{ .layer = Layers.moving });
+    const f2 = try gearBody(b, wheel, .{ 4.85, 0.5, 0 }, .{ .layer = Layers.moving });
+    const fh1 = try b.constraint(gearHinge(f1, .{ 4, 0.5, 0 }));
+    const fh2 = try b.constraint(gearHinge(f2, .{ 4.85, 0.5, 0 }));
+    _ = try b.constraint(gearWithTeeth(f1, f2, fh1, fh2, 18, 18));
+    for (0..3) |k| _ = try b.body(.{ .position = .{ 3.7 + 0.5 * real(k), 2 + 0.6 * real(k), 0 }, .shape = crate, .object_layer = Layers.moving }, .activate);
+
+    b.at(1);
+    try setHingeMotorState(b, h1, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h1, .{ .f = &.{-2} });
+    b.at(60);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h1, .{ .f = &.{3} });
+    try b.op(.add_impulse, cart, .{ .f = &.{ 0, 0, 200 } });
+    b.at(90);
+    try setHingeMotorState(b, h1, motor_position);
+    try b.constraintOp(.hinge_set_target_angle, h1, .{ .f = &.{0} });
+}
+
+/// A chain of 70 gears on hinges from the world (alternating 10 and 20 teeth, friction on the hinges): one island of 139
+/// constraints that the LargeIslandSplitter splits; the first gear spins, the train slows down and falls asleep from the
+/// final batch of a split island; an angular impulse on a gear in the middle wakes its neighbours through the gears
+fn buildGearSplitter(b: *SceneBuilder) Allocator.Error!void {
+    const big = try b.cylinder(0.05, 0.3, 0.02);
+    const small = try b.cylinder(0.05, 0.15, 0.02);
+    b.num_updates = 140;
+    b.settings.time_before_sleep = 0.25;
+    const n = 70;
+    var gears: [n]u32 = undefined;
+    var hinges: [n]u32 = undefined;
+    for (&gears, &hinges, 0..) |*g, *h, k| {
+        const p: [3]Real = .{ 0.5 * real(k % 35), 3 + 2 * real(k / 35), 0 };
+        g.* = try gearBody(b, if (k % 2 == 0) big else small, p, .{ .spin = if (k == 0) 2 else 0 });
+        var hinge = gearHinge(g.*, p);
+        hinge.f[16] = 0.5;
+        h.* = try b.constraint(hinge);
+        if (k > 0) _ = try b.constraint(gearWithTeeth(gears[k - 1], g.*, hinges[k - 1], h.*, if (k % 2 == 1) 20 else 10, if (k % 2 == 1) 10 else 20));
+    }
+    b.at(110);
+    try b.expectSleeping(gears[0]);
+    try b.expectSleeping(gears[n - 1]);
+    try b.op(.add_angular_impulse, gears[n / 2], .{ .f = &.{ 0, 0, 0.05 } });
+    b.at(111);
+    try b.expectAwake(gears[n / 2 - 1]); // Woken by their gear constraints (one constraint per update)
+    try b.expectAwake(gears[n / 2 + 1]);
+}
+
+/// Gears and racks with sleeping bodies, and cross save / restore of their state (the total lambda of the part; the
+/// constraints of SetConstraints are not state): a gear pair with friction comes to rest and falls asleep, SetConstraints
+/// on the sleeping pair wakes nothing until an angular impulse does; a gear created between an awake and a sleeping gear
+/// wakes the sleeping one; a rack and pinion driven by a slider motor is restored from snapshots of everything and of the
+/// constraints only after its constraints changed
+fn buildGearSleepAndSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const wheel = try b.cylinder(0.1, 0.4, 0.05);
+    const rack_shape = try b.box(.{ 1.0, 0.06, 0.06 }, 0.03);
+    b.num_updates = 100;
+    b.settings.time_before_sleep = 0.2;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+
+    // A gear pair with friction that comes to rest
+    const r1 = try gearBody(b, wheel, .{ 0, 4, 0 }, .{ .spin = 1 });
+    const r2 = try gearBody(b, wheel, .{ 0.85, 4, 0 }, .{});
+    var rh1_desc = gearHinge(r1, .{ 0, 4, 0 });
+    rh1_desc.f[16] = 30;
+    const rh1 = try b.constraint(rh1_desc);
+    const rh2 = try b.constraint(gearHinge(r2, .{ 0.85, 4, 0 }));
+    const resting = try b.constraint(Desc.gear(r1, r2, .{ 0, 0, 1 }, .{ 0, 0, 1 }, 1, invalid_handle, invalid_handle));
+
+    // An awake gear that spins and a sleeping one
+    const awake = try gearBody(b, wheel, .{ 4, 4, 0 }, .{ .spin = 2 });
+    const asleep = try b.body(.{ .position = .{ 4.85, 4, 0 }, .rotation = gear_lying, .shape = wheel, .object_layer = Layers.unused1 }, .dont_activate);
+    var ah_desc = gearHinge(awake, .{ 4, 4, 0 });
+    Desc.setMotor(&ah_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -50, 50 });
+    const awake_hinge = try b.constraint(ah_desc);
+    const asleep_hinge = try b.constraint(gearHinge(asleep, .{ 4.85, 4, 0 }));
+
+    // A rack and pinion driven by a slider motor
+    const pinion_body = try gearBody(b, wheel, .{ 8, 4, 0 }, .{});
+    const rack_body = try b.body(.{ .position = .{ 8, 3.5, 0 }, .shape = rack_shape, .object_layer = Layers.unused1 }, .activate);
+    const pinion = try b.constraint(gearHinge(pinion_body, .{ 8, 4, 0 }));
+    const rack = try b.constraint(sliderWithLimits(invalid_handle, rack_body, .{ 1, 0, 0 }, -0.8, 0.8));
+    const rp = try b.constraint(rackAndPinionWithTeeth(pinion_body, rack_body, pinion, rack, 10, 2, 8));
+
+    b.at(2);
+    try setSliderMotorState(b, rack, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, rack, .{ .f = &.{0.5} });
+    try setHingeMotorState(b, awake_hinge, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, awake_hinge, .{ .f = &.{2} });
+    b.at(5);
+    try b.expectSleeping(asleep);
+    const pair = try b.constraint(gearWithTeeth(awake, asleep, awake_hinge, asleep_hinge, 12, 12)); // Wakes asleep in the next update
+    b.at(6);
+    try b.expectAwake(asleep);
+    b.at(20);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(25);
+    try b.constraintOp(.rack_and_pinion_set_constraints, rp, .{ .i = &.{ invalid_handle, invalid_handle } }); // Not state
+    try b.constraintOp(.slider_set_target_velocity, rack, .{ .f = &.{-0.5} });
+    b.at(35);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // The bodies and impulses of update 20, the motor goes on with -0.5
+    b.at(60);
+    try b.expectSleeping(r1);
+    try b.constraintOp(.gear_set_constraints, resting, .{ .i = &.{ rh1, rh2 } }); // The pair sleeps: nothing happens
+    try b.expectConstraintState(resting, ConstraintState.inactive);
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(61);
+    try b.expectSleeping(r2);
+    b.at(65);
+    try b.op(.add_angular_impulse, r2, .{ .f = &.{ 0, 0, 2 } }); // Wakes the pair through the gear
+    try b.constraintOp(.rack_and_pinion_set_constraints, rp, .{ .i = &.{ pinion, rack } });
+    try b.constraintOp(.reset_constraint_warm_start, pair, .{});
+    b.at(75);
+    try b.expectAwake(r1);
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 60: the total lambdas and the motor states
+    try b.constraintOp(.constraint_settings_hash, rp, .{});
+    b.at(85);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.op(.add_angular_impulse, pinion_body, .{ .f = &.{ 0, 0, 1 } });
+    b.at(92);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+}
+
+/// A gear train and a rack and pinion with several collision steps per update and changing update parameters (the warm
+/// start impulses are scaled by the step ratio)
+fn buildGearCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const wheel = try b.cylinder(0.1, 0.4, 0.05);
+            const rack_shape = try b.box(.{ 1.0, 0.06, 0.06 }, 0.03);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var gears: [3]u32 = undefined;
+            var hinges: [3]u32 = undefined;
+            for (&gears, &hinges, 0..) |*g, *h, k| {
+                const p: [3]Real = .{ 0.85 * real(k), 5, 0 };
+                g.* = try gearBody(b, wheel, p, .{});
+                var hinge = gearHinge(g.*, p);
+                if (k == 0) Desc.setMotor(&hinge, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -100, 100 });
+                h.* = try b.constraint(hinge);
+            }
+            _ = try b.constraint(gearWithTeeth(gears[0], gears[1], hinges[0], hinges[1], 10, 15));
+            _ = try b.constraint(Desc.gear(gears[1], gears[2], .{ 0, 0, 1 }, .{ 0, 0, 1 }, 0.8, hinges[1], hinges[2]));
+            const pinion_body = try gearBody(b, wheel, .{ 4, 5, 0 }, .{});
+            const rack_body = try b.body(.{ .position = .{ 4, 4.5, 0 }, .shape = rack_shape, .object_layer = Layers.unused1 }, .activate);
+            const pinion = try b.constraint(gearHinge(pinion_body, .{ 4, 5, 0 }));
+            const rack = try b.constraint(sliderWithLimits(invalid_handle, rack_body, .{ 1, 0, 0 }, -0.7, 0.7));
+            _ = try b.constraint(rackAndPinionWithTeeth(pinion_body, rack_body, pinion, rack, 20, 2.5, 10));
+            b.at(1);
+            try setHingeMotorState(b, hinges[0], motor_velocity);
+            try b.constraintOp(.hinge_set_target_angular_velocity, hinges[0], .{ .f = &.{-2} });
+            try setSliderMotorState(b, rack, motor_velocity);
+            try b.constraintOp(.slider_set_target_velocity, rack, .{ .f = &.{0.5} });
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            try setHingeMotorState(b, hinges[0], motor_position);
+            try b.constraintOp(.hinge_set_target_angle, hinges[0], .{ .f = &.{0.3} });
+            try setSliderMotorState(b, rack, motor_position);
+            try b.constraintOp(.slider_set_target_position, rack, .{ .f = &.{-0.4} });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Gears and a rack and pinion far from the origin (world space points are Real: in double precision the hinges and
+/// the slider keep their precision): a gear train on a cart that falls onto the floor and rolls on, a rack and pinion
+/// driven by a slider motor that pushes a box
+fn buildGearFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const wheel = try b.cylinder(0.1, 0.35, 0.05);
+    const rack_shape = try b.box(.{ 0.8, 0.06, 0.06 }, 0.03);
+    const cart_shape = try b.box(.{ 0.9, 0.15, 0.5 }, 0.05);
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 80;
+    const o: [3]Real = .{ -8000, 300, 15000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+
+    // A cart with two gears on hinges from the cart
+    const cart = try b.body(.{ .position = .{ o[0] - 3, o[1] + 0.5, o[2] }, .shape = cart_shape, .linear_velocity = .{ 1, 0, 0 }, .object_layer = Layers.moving }, .activate);
+    const g1 = try gearBody(b, wheel, .{ o[0] - 3.4, o[1] + 1.1, o[2] }, .{ .layer = Layers.moving2 });
+    const g2 = try gearBody(b, wheel, .{ o[0] - 2.65, o[1] + 1.1, o[2] }, .{ .layer = Layers.moving2 });
+    var h1_desc = Desc.hinge(cart, g1, .{ o[0] - 3.4, o[1] + 1.1, o[2] }, .{ 0, 0, 1 }, .{ 1, 0, 0 });
+    Desc.setMotor(&h1_desc, 2, 17, 0, .{ 2, 1, -flt_max, flt_max, -80, 80 });
+    const h1 = try b.constraint(h1_desc);
+    const h2 = try b.constraint(Desc.hinge(cart, g2, .{ o[0] - 2.65, o[1] + 1.1, o[2] }, .{ 0, 0, 1 }, .{ 1, 0, 0 }));
+    _ = try b.constraint(gearWithTeeth(g1, g2, h1, h2, 14, 21));
+
+    // A rack and pinion from the world, the rack pushes a box
+    const pinion_body = try gearBody(b, wheel, .{ o[0] + 2, o[1] + 0.9, o[2] }, .{ .layer = Layers.moving2 });
+    const rack_body = try b.body(.{ .position = .{ o[0] + 2, o[1] + 0.49, o[2] }, .shape = rack_shape, .object_layer = Layers.moving }, .activate);
+    const pinion = try b.constraint(gearHinge(pinion_body, .{ o[0] + 2, o[1] + 0.9, o[2] }));
+    const rack = try b.constraint(sliderWithLimits(invalid_handle, rack_body, .{ 1, 0, 0 }, -1, 1));
+    _ = try b.constraint(rackAndPinionWithTeeth(pinion_body, rack_body, pinion, rack, 18, 1.8, 12));
+    _ = try b.body(.{ .position = .{ o[0] + 3.1, o[1] + 0.25, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+
+    b.at(1);
+    try setHingeMotorState(b, h1, motor_velocity);
+    try b.constraintOp(.hinge_set_target_angular_velocity, h1, .{ .f = &.{4} });
+    try setSliderMotorState(b, rack, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, rack, .{ .f = &.{0.8} });
+    b.at(40);
+    try setSliderMotorState(b, rack, motor_position);
+    try b.constraintOp(.slider_set_target_position, rack, .{ .f = &.{-0.5} });
+}
+
+/// Random gear trains and racks and pinions (random axes in world or local space, ratios from SetRatio or explicit,
+/// hinge and slider motors in every state, limits, friction) with random operations between the updates: SetConstraints
+/// (also with nullptr and with the constraints of another pair), the motor setters, impulses, rotations and the generic
+/// constraint operations (enable / disable, remove / add, ResetWarmStart, the settings hash); gears in the moving layer
+/// collide with each other and with boxes on the floor
+fn buildGearRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        /// A ratio: positive from 0.6 (or of either sign for a rack and pinion, whose part is consistent with its
+        /// Jacobian), negative above -0.8 for a gear between equal wheels (see buildGearMotors)
+        fn ratio(b: *SceneBuilder, rack: bool) f32 {
+            if (rack) return if (b.oneIn(3)) -b.float(0.3, 3) else b.float(0.3, 3);
+            return if (b.oneIn(4)) -b.float(0.2, 0.8) else b.float(0.6, 3);
+        }
+
+        /// The numbers of teeth for SetRatio of a gear: gear 2 has at least 2/3 of the teeth of gear 1
+        fn teeth(b: *SceneBuilder) [2]u32 {
+            const teeth1 = 6 + b.index(24);
+            return .{ teeth1, if (b.oneIn(2)) teeth1 + b.index(20) else teeth1 - b.index(teeth1 / 3) };
+        }
+
+        fn motor(b: *SceneBuilder) [7]f32 {
+            const mode: f32 = @floatFromInt(b.index(3));
+            const frequency = if (b.oneIn(5)) 0 else if (mode == 0) b.float(0.5, 8) else b.float(5, 300);
+            const limit = if (b.oneIn(3)) flt_max else b.float(5, 200);
+            return .{ mode, frequency, if (b.oneIn(4)) 0 else b.float(0, 2), -limit, limit, -limit, limit };
+        }
+
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0x6ea7_0000 +% seed *% 0x9e3779b9;
+            const wheel = try b.cylinder(0.1, 0.35, 0.05);
+            const rack_shape = try b.box(.{ 0.8, 0.06, 0.06 }, 0.03);
+            const crate = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+            b.num_updates = 90;
+            b.max_contact_constraints = 2048;
+            _ = try addFloor(b, 20, 0);
+            const num_pairs = 8;
+            var hinges: [2 * num_pairs]u32 = undefined; // The hinges of the gear bodies
+            var sliders: [num_pairs]u32 = undefined; // The sliders of the racks (pairs that are racks and pinions)
+            var couplings: [num_pairs]u32 = undefined;
+            var is_rack: [num_pairs]bool = undefined;
+            var bodies: [2 * num_pairs]u32 = undefined;
+            var in_system: [num_pairs]bool = @splat(true);
+            for (0..num_pairs) |k| {
+                is_rack[k] = b.oneIn(3);
+                const x: Real = 2.5 * real(k % 4) - 4;
+                const z: Real = 2.5 * real(k / 4) - 1.5;
+                const y: Real = 1.5 + real(b.float(0, 1));
+                const layer = if (b.oneIn(2)) Layers.moving else Layers.unused1;
+                // The axis of the pair: Z, X or a random direction around which the bodies are rotated
+                const q = if (b.oneIn(2)) [4]f32{ 0, 0, 0, 1 } else b.rotation();
+                const axis = quatRotate(q, .{ 0, 0, 1 });
+                const normal = quatRotate(q, .{ 1, 0, 0 });
+                const body_rotation = quatMul(q, gear_lying);
+                const p1: [3]Real = .{ x, y, z };
+                bodies[2 * k] = try b.body(.{ .position = p1, .rotation = body_rotation, .shape = wheel, .angular_velocity = if (b.oneIn(3)) scale3(axis, b.float(-3, 3)) else @splat(0), .object_layer = layer }, .activate);
+                var h = Desc.hinge(invalid_handle, bodies[2 * k], p1, axis, normal);
+                if (b.oneIn(3)) {
+                    h.f[12] = -b.float(0.3, 3);
+                    h.f[13] = b.float(0.3, 3);
+                }
+                if (b.oneIn(3)) h.f[16] = b.float(0, 5);
+                const m = motor(b);
+                Desc.setMotor(&h, 2, 17, @intFromFloat(m[0]), m[1..7].*);
+                hinges[2 * k] = try b.constraint(h);
+                if (is_rack[k]) {
+                    // The rack next to the pinion (along the hinge axis, clear of it), sliding along the normal
+                    const p2: [3]Real = .{ x + real(0.5 * axis[0]), y + real(0.5 * axis[1]), z + real(0.5 * axis[2]) };
+                    bodies[2 * k + 1] = try b.body(.{ .position = p2, .rotation = q, .shape = rack_shape, .gravity_factor = if (b.oneIn(2)) 0 else 1, .object_layer = layer }, .activate);
+                    var s = Desc.sliderAxes(invalid_handle, bodies[2 * k + 1], p2, normal, axis);
+                    if (b.oneIn(2)) {
+                        s.f[12] = -b.float(0.2, 1);
+                        s.f[13] = b.float(0.2, 1);
+                        if (b.oneIn(2)) Desc.setSpring(&s, 3, 14, b.index(3), b.float(1, 50), b.float(0, 1));
+                    }
+                    if (b.oneIn(3)) s.f[16] = b.float(0, 10);
+                    const sm = motor(b);
+                    Desc.setMotor(&s, 4, 17, @intFromFloat(sm[0]), sm[1..7].*);
+                    sliders[k] = try b.constraint(s);
+                    hinges[2 * k + 1] = sliders[k];
+                    var rp = Desc.rackAndPinion(bodies[2 * k], bodies[2 * k + 1], axis, normal, ratio(b, true), hinges[2 * k], sliders[k]);
+                    if (b.oneIn(2)) {
+                        rp.i[1] = 1;
+                        rp.i[2] = 4 + b.index(30);
+                        rp.f[7] = b.float(0.5, 4);
+                        rp.i[3] = 4 + b.index(30);
+                    }
+                    if (b.oneIn(4)) {
+                        rp.constraint1 = invalid_handle;
+                        rp.constraint2 = if (b.oneIn(2)) sliders[k] else invalid_handle;
+                    }
+                    couplings[k] = try b.constraint(rp);
+                } else {
+                    // The second gear next to the first one, its axis parallel or perpendicular (a bevel gear)
+                    const bevel = b.oneIn(3);
+                    const axis2 = if (bevel) normal else axis;
+                    const normal2 = if (bevel) axis else normal;
+                    const offset: f32 = 0.75;
+                    const p2: [3]Real = .{ x + real(offset * normal[0]), y + real(offset * normal[1]), z + real(offset * normal[2]) };
+                    const rotation2 = if (bevel) quatMul(q, axisAngle(.{ 0, 0, 1 }, 0.5 * std.math.pi)) else body_rotation;
+                    bodies[2 * k + 1] = try b.body(.{ .position = p2, .rotation = rotation2, .shape = wheel, .object_layer = layer }, .activate);
+                    var h2 = Desc.hinge(invalid_handle, bodies[2 * k + 1], p2, axis2, normal2);
+                    if (b.oneIn(3)) h2.f[16] = b.float(0, 2);
+                    hinges[2 * k + 1] = try b.constraint(h2);
+                    var g = Desc.gear(bodies[2 * k], bodies[2 * k + 1], axis, axis2, ratio(b, false), hinges[2 * k], hinges[2 * k + 1]);
+                    if (b.oneIn(2)) {
+                        const n = teeth(b);
+                        g.i[1] = 1;
+                        g.i[2] = n[0];
+                        g.i[3] = n[1];
+                    }
+                    if (b.oneIn(3)) {
+                        // Local space: the axes in the space of the bodies (the shapes have their center of mass at the
+                        // origin)
+                        g.i[0] = ConstraintSpace.local_to_body_com;
+                        Desc.set3(g.f[0..], .{ 0, 1, 0 });
+                        Desc.set3(g.f[3..], .{ 0, 1, 0 });
+                    }
+                    if (b.oneIn(4)) {
+                        g.constraint1 = if (b.oneIn(2)) hinges[2 * k] else invalid_handle;
+                        g.constraint2 = invalid_handle;
+                    }
+                    couplings[k] = try b.constraint(g);
+                }
+            }
+            for (0..6) |k| _ = try b.body(.{ .position = .{ 2 * real(k) - 5, 4 + real(k), 0.3 * real(k) - 1 }, .shape = crate, .object_layer = Layers.moving }, .activate);
+
+            var update: u32 = 2;
+            while (update < b.num_updates) : (update += 1 + b.index(5)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_pairs);
+                    const c = couplings[k];
+                    switch (b.index(12)) {
+                        0, 1 => {
+                            // SetConstraints: the own constraints, nullptr, or a hinge of another pair (still a hinge for
+                            // the gear; the pinion of a rack and pinion must be a hinge and the rack a slider)
+                            const first = if (b.oneIn(4)) invalid_handle else hinges[2 * k];
+                            const second = if (b.oneIn(4)) invalid_handle else hinges[2 * k + 1];
+                            if (is_rack[k]) {
+                                try b.constraintOp(.rack_and_pinion_set_constraints, c, .{ .i = &.{ first, second } });
+                            } else {
+                                const other = b.index(num_pairs);
+                                const foreign = if (!is_rack[other] and b.oneIn(3)) hinges[2 * other + 1] else second;
+                                try b.constraintOp(.gear_set_constraints, c, .{ .i = &.{ first, foreign } });
+                            }
+                        },
+                        2, 3 => try b.constraintOp(.hinge_set_motor_state, hinges[2 * k], .{ .i = &.{b.index(4)} }),
+                        4 => try b.constraintOp(.hinge_set_target_angular_velocity, hinges[2 * k], .{ .f = &.{b.float(-4, 4)} }),
+                        5 => try b.constraintOp(.hinge_set_target_angle, hinges[2 * k], .{ .f = &.{b.float(-3, 3)} }),
+                        6 => if (is_rack[k]) {
+                            try b.constraintOp(.slider_set_motor_state, sliders[k], .{ .i = &.{b.index(4)} });
+                            try b.constraintOp(.slider_set_target_velocity, sliders[k], .{ .f = &.{b.float(-1, 1)} });
+                            try b.constraintOp(.slider_set_target_position, sliders[k], .{ .f = &.{b.float(-1, 1)} });
+                        } else {
+                            const m = motor(b);
+                            try b.constraintOp(.hinge_set_motor_settings, hinges[2 * k], .{ .i = &.{@intFromFloat(m[0])}, .f = m[1..7] });
+                        },
+                        7 => {
+                            try b.constraintOp(if (in_system[k]) .remove_constraint else .add_constraint, c, .{});
+                            in_system[k] = !in_system[k];
+                        },
+                        8 => try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{b.index(2)} }),
+                        9 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        10 => try b.constraintOp(.constraint_settings_hash, c, .{}),
+                        else => try b.op(.add_angular_impulse, bodies[2 * k + b.index(2)], .{ .f = &b.vec3(-1, 1) }),
+                    }
+                }
+            }
+        }
+    }.build;
+}
+
+/// `v` rotated by the unit quaternion `q` (x, y, z, w), computed in f64
+fn quatRotate(q: [4]f32, v: [3]f32) [3]f32 {
+    const u: [3]f64 = .{ q[0], q[1], q[2] };
+    const s: f64 = q[3];
+    const w: [3]f64 = .{ v[0], v[1], v[2] };
+    const dot = u[0] * w[0] + u[1] * w[1] + u[2] * w[2];
+    const uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+    const cross: [3]f64 = .{ u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0] };
+    var r: [3]f32 = undefined;
+    for (0..3) |k| r[k] = @floatCast(2 * dot * u[k] + (s * s - uu) * w[k] + 2 * s * cross[k]);
+    return r;
+}
+
+/// The product `a b` of two unit quaternions (x, y, z, w), computed in f64 and normalized
+fn quatMul(a: [4]f32, b: [4]f32) [4]f32 {
+    const ax: f64 = a[0];
+    const ay: f64 = a[1];
+    const az: f64 = a[2];
+    const aw: f64 = a[3];
+    const bx: f64 = b[0];
+    const by: f64 = b[1];
+    const bz: f64 = b[2];
+    const bw: f64 = b[3];
+    return normalizedQuat(.{
+        @floatCast(aw * bx + ax * bw + ay * bz - az * by),
+        @floatCast(aw * by - ax * bz + ay * bw + az * bx),
+        @floatCast(aw * bz + ax * by - ay * bx + az * bw),
+        @floatCast(aw * bw - ax * bx - ay * by - az * bz),
+    });
+}
+
+/// `v` times `s`
+fn scale3(v: [3]f32, s: f32) [3]f32 {
+    return .{ v[0] * s, v[1] * s, v[2] * s };
+}
+
+/// Jolt's release build only (Blocker.release_only: Jolt asserts that the gear and rack and pinion parts only see
+/// dynamic bodies, its release build reads the motion properties of a kinematic body and changes its velocities): a
+/// gear between a kinematic driver gear (MoveKinematic) and a dynamic gear, and a rack and pinion with a kinematic rack
+fn buildGearKinematicRelease(b: *SceneBuilder) Allocator.Error!void {
+    const wheel = try b.cylinder(0.1, 0.4, 0.05);
+    const rack_shape = try b.box(.{ 1.0, 0.06, 0.06 }, 0.03);
+    b.num_updates = 60;
+    const driver = try b.body(.{ .position = .{ 0, 4, 0 }, .rotation = gear_lying, .shape = wheel, .motion_type = 1, .angular_velocity = .{ 0, 0, 2 }, .object_layer = Layers.unused1 }, .activate);
+    const driven = try gearBody(b, wheel, .{ 0.85, 4, 0 }, .{});
+    const dh1 = try b.constraint(gearHinge(driver, .{ 0, 4, 0 }));
+    const dh2 = try b.constraint(gearHinge(driven, .{ 0.85, 4, 0 }));
+    _ = try b.constraint(gearWithTeeth(driver, driven, dh1, dh2, 10, 20));
+    const pinion_body = try gearBody(b, wheel, .{ 4, 4, 0 }, .{});
+    const rack_body = try b.body(.{ .position = .{ 4, 3.5, 0 }, .shape = rack_shape, .motion_type = 1, .linear_velocity = .{ 0.4, 0, 0 }, .object_layer = Layers.unused1 }, .activate);
+    const pinion = try b.constraint(gearHinge(pinion_body, .{ 4, 4, 0 }));
+    const rack = try b.constraint(Desc.sliderAxes(invalid_handle, rack_body, .{ 4, 3.5, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }));
+    _ = try b.constraint(rackAndPinionWithTeeth(pinion_body, rack_body, pinion, rack, 10, 2, 10));
+    b.at(30);
+    try b.op(.move_kinematic, driver, .{ .r = .{ 0, 4, 0 }, .f = &.{ 0, 0, 0, 1, 1.0 / 60.0 } });
 }
 
 // (append the scenes of the gear / rack and pinion group here)

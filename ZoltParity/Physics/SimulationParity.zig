@@ -2359,7 +2359,68 @@ const PathSlot = StubSlot;
 
 // ---- SLOT gear_rack_and_pinion: GearConstraint, RackAndPinionConstraint (ConstraintKind gear / rack_and_pinion,
 // OpKind 360..379, `setConstraints` for SimConstraint.constraint1 / constraint2) ----
-const GearRackAndPinionSlot = StubSlot;
+const GearRackAndPinionSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .gear => {
+                const s = try zolt.GearConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.hinge_axis1 = load3(f[0..3]);
+                s.hinge_axis2 = load3(f[3..6]);
+                if (i[1] != 0)
+                    s.setRatio(@bitCast(i[2]), @bitCast(i[3]))
+                else
+                    s.ratio = f[6];
+                return .init(s.asSettings());
+            },
+            .rack_and_pinion => {
+                const s = try zolt.RackAndPinionConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.hinge_axis = load3(f[0..3]);
+                s.slider_axis = load3(f[3..6]);
+                if (i[1] != 0)
+                    s.setRatio(@bitCast(i[2]), f[7], @bitCast(i[3]))
+                else
+                    s.ratio = f[6];
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .gear_set_constraints => try setConstraints(world, &(try castConstraint(zolt.GearConstraint, c, .gear)).base, op.i[0], op.i[1]),
+            .rack_and_pinion_set_constraints => try setConstraints(world, &(try castConstraint(zolt.RackAndPinionConstraint, c, .rack_and_pinion)).base, op.i[0], op.i[1]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .gear => &.{.{ .name = "gear_constraint_part.total_lambda", .kind = .f32 }},
+            .rack_and_pinion => &.{.{ .name = "rack_and_pinion_constraint_part.total_lambda", .kind = .f32 }},
+            else => null,
+        };
+    }
+
+    /// SetConstraints of SimulationReference.cpp: SetConstraints of a Gear / RackAndPinion with two constraint handles
+    /// (`invalid_handle`, or a handle that is not created yet: nullptr)
+    fn setConstraints(world: *ZoltWorld, c: *TwoBodyConstraint, handle1: u32, handle2: u32) !void {
+        const c1: ?*const Constraint = if (world.getConstraint(handle1)) |t| &t.base else null;
+        const c2: ?*const Constraint = if (world.getConstraint(handle2)) |t| &t.base else null;
+        switch (c.base.getSubType()) {
+            .gear => zolt.virtual.downcast(zolt.GearConstraint, c).setConstraints(c1, c2),
+            .rack_and_pinion => zolt.virtual.downcast(zolt.RackAndPinionConstraint, c).setConstraints(c1, c2),
+            else => {
+                std.debug.print("SimulationParity: SetConstraints on a constraint of subtype {t}\n", .{c.base.getSubType()});
+                return error.SceneError;
+            },
+        }
+    }
+};
 
 // ---- end of the slots ----
 

@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 72.0%** of 85391 lines in scope · **Unit tests: 84.8%** of 18321 lines
+**Library: 72.5%** of 85391 lines in scope · **Unit tests: 84.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -24,7 +24,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 75 | 1 | 0 | 0 | 0 | 0 | 21948 |
-| `Jolt/Physics/Constraints` | 70% | 25 | 0 | 10 | 0 | 0 | 0 | 12068 |
+| `Jolt/Physics/Constraints` | 73% | 27 | 0 | 8 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
@@ -377,7 +377,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Constraints — 70%</summary>
+<details><summary>Jolt/Physics/Constraints — 73%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -402,7 +402,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ContactConstraintManager.cpp`, `ContactConstraintManager.h` | 2185 | ✅ complete | `Zolt/Physics/Constraints/ContactConstraintManager.zig` |
 | `DistanceConstraint.cpp`, `DistanceConstraint.h` | 316 | ⚪ stub | `Zolt/Physics/Constraints/DistanceConstraint.zig` |
 | `FixedConstraint.cpp`, `FixedConstraint.h` | 255 | ✅ complete | `Zolt/Physics/Constraints/FixedConstraint.zig` |
-| `GearConstraint.cpp`, `GearConstraint.h` | 242 | ⚪ stub | `Zolt/Physics/Constraints/GearConstraint.zig` |
+| `GearConstraint.cpp`, `GearConstraint.h` | 242 | ✅ complete | `Zolt/Physics/Constraints/GearConstraint.zig` |
 | `HingeConstraint.cpp`, `HingeConstraint.h` | 549 | ✅ complete | `Zolt/Physics/Constraints/HingeConstraint.zig` |
 | `MotorSettings.cpp`, `MotorSettings.h` | 100 | ✅ complete | `Zolt/Physics/Constraints/MotorSettings.zig` |
 | `PathConstraint.cpp`, `PathConstraint.h` | 538 | ⚪ stub | `Zolt/Physics/Constraints/PathConstraint.zig` |
@@ -410,7 +410,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `PathConstraintPathHermite.cpp`, `PathConstraintPathHermite.h` | 293 | ⚪ stub | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
 | `PointConstraint.cpp`, `PointConstraint.h` | 200 | ✅ complete | `Zolt/Physics/Constraints/PointConstraint.zig` |
 | `PulleyConstraint.cpp`, `PulleyConstraint.h` | 316 | ⚪ stub | `Zolt/Physics/Constraints/PulleyConstraint.zig` |
-| `RackAndPinionConstraint.cpp`, `RackAndPinionConstraint.h` | 245 | ⚪ stub | `Zolt/Physics/Constraints/RackAndPinionConstraint.zig` |
+| `RackAndPinionConstraint.cpp`, `RackAndPinionConstraint.h` | 245 | ✅ complete | `Zolt/Physics/Constraints/RackAndPinionConstraint.zig` |
 | `SixDOFConstraint.cpp`, `SixDOFConstraint.h` | 1023 | ⚪ stub | `Zolt/Physics/Constraints/SixDOFConstraint.zig` |
 | `SliderConstraint.cpp`, `SliderConstraint.h` | 583 | ✅ complete | `Zolt/Physics/Constraints/SliderConstraint.zig` |
 | `SpringSettings.cpp`, `SpringSettings.h` | 99 | ✅ complete | `Zolt/Physics/Constraints/SpringSettings.zig` |

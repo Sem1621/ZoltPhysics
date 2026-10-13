@@ -821,10 +821,180 @@ const SixDOFKind = StubKind(zolt.SixDOFConstraintSettings);
 const PathKind = StubKind(zolt.PathConstraintSettings);
 
 // ---- SLOT rack_and_pinion (Zolt/Physics/Constraints/RackAndPinionConstraint.zig) ----
-const RackAndPinionKind = StubKind(zolt.RackAndPinionConstraintSettings);
+
+/// CSMakeReferenceHinge: a hinge from the world to `body` in world space at the center of mass of the body (the pinion /
+/// gear reference) whose angle at creation is `angle` (the normal of body 2 is rotated around the axis), one reference
+/// owned by the caller
+fn makeReferenceHinge(allocator: Allocator, body: *Body, axis: []const f32, normal: []const f32, angle: f32) !Ref(AnyConstraint) {
+    var s = zolt.HingeConstraintSettings.init(allocator);
+    defer s.asSettings().deinit();
+    s.point1 = body.getCenterOfMassPosition();
+    s.point2 = s.point1;
+    s.hinge_axis1 = load3(axis);
+    s.hinge_axis2 = s.hinge_axis1;
+    s.normal_axis1 = load3(normal);
+    s.normal_axis2 = Quat.rotation(s.hinge_axis1, angle).mulVec3(s.normal_axis1);
+    return .init(&(try s.asTwoBodySettingsConst().createConstraint(allocator, Body.fixedToWorld(), body)).base);
+}
+
+/// CSMakeReferenceSlider: a slider from the world to `body` in world space at the center of mass of the body (the rack
+/// reference) whose position at creation is `offset` (the point of body 2 is moved along the axis), one reference owned
+/// by the caller
+fn makeReferenceSlider(allocator: Allocator, body: *Body, axis: []const f32, normal: []const f32, offset: f32) !Ref(AnyConstraint) {
+    var s = zolt.SliderConstraintSettings.init(allocator);
+    defer s.asSettings().deinit();
+    s.point1 = body.getCenterOfMassPosition();
+    s.slider_axis1 = load3(axis);
+    s.slider_axis2 = s.slider_axis1;
+    s.normal_axis1 = load3(normal);
+    s.normal_axis2 = s.normal_axis1;
+    s.point2 = s.point1.addVec3(s.slider_axis1.mulScalar(offset));
+    return .init(&(try s.asTwoBodySettingsConst().createConstraint(allocator, Body.fixedToWorld(), body)).base);
+}
+
+/// Coverage of a Gear / RackAndPinion scenario: the settings, the SetConstraints operations, the motion types (the
+/// kinematic and static bodies with motion properties of the release build, see genGearBodies) and the state of
+/// the constraint part at the end
+fn gearCoverage(cov: *Coverage, sc: *const CSScenario, part_active: bool, position_error: ?f32) void {
+    const d = &sc.settings;
+    cov.hit("local space", d.i[0] == @intFromEnum(ConstraintSpace.local_to_body_com));
+    cov.hit("world space", d.i[0] == @intFromEnum(ConstraintSpace.world_space));
+    cov.hit("SetRatio", d.i[1] != 0);
+    cov.hit("negative ratio", d.i[1] == 0 and d.f[6] < 0.0);
+    var both = false;
+    var one = false;
+    var none = false;
+    for (sc.ops[0..sc.num_ops]) |op| {
+        if (op.op != first_kind_op) continue;
+        switch (op.i[0]) {
+            3 => both = true,
+            1, 2 => one = true,
+            else => none = true,
+        }
+    }
+    cov.hit("SetConstraints with both constraints", both);
+    cov.hit("SetConstraints with one constraint", one);
+    cov.hit("SetConstraints with nullptr", none);
+    cov.hit("part active at the end", part_active);
+    cov.hit("part inactive at the end", !part_active);
+
+    // The position error of the last SolvePositionConstraint input (both constraints set): beyond pi
+    // CenterAngleAroundZero(fmod(error, 2 pi)) wraps it
+    cov.hit("position error within pi", position_error != null and @abs(position_error.?) <= math.pi);
+    cov.hit("position error beyond pi", position_error != null and @abs(position_error.?) > math.pi);
+    cov.hit("position error beyond 2 pi", position_error != null and @abs(position_error.?) > 2.0 * math.pi);
+    if (!Core.enable_asserts) {
+        const dynamic = @intFromEnum(MotionType.dynamic);
+        cov.hit("kinematic body (release only)", sc.body[0].motion_type == @intFromEnum(MotionType.kinematic) or sc.body[1].motion_type == @intFromEnum(MotionType.kinematic));
+        cov.hit("static body with motion properties (release only)", sc.body[0].motion_type == @intFromEnum(MotionType.static) or sc.body[1].motion_type == @intFromEnum(MotionType.static));
+        cov.hit("no dynamic body (release only)", sc.body[0].motion_type != dynamic and sc.body[1].motion_type != dynamic);
+    }
+}
+
+const RackAndPinionKind = struct {
+    pub const Settings = zolt.RackAndPinionConstraintSettings;
+    pub const Constraint = zolt.RackAndPinionConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.hinge_axis = load3(d.f[0..3]);
+        s.slider_axis = load3(d.f[3..6]);
+        if (d.i[1] != 0)
+            s.setRatio(@bitCast(d.i[2]), d.f[7], @bitCast(d.i[3]))
+        else
+            s.ratio = d.f[6];
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        const i = &op.i;
+        const f = &op.f;
+        switch (op.op) {
+            16 => {
+                var pinion = if ((i[0] & 1) != 0) try makeReferenceHinge(allocator, c.base.getBody1(), f[0..3], f[3..6], @floatCast(op.r[0])) else Ref(AnyConstraint).empty;
+                defer pinion.deinit();
+                var rack = if ((i[0] & 2) != 0) try makeReferenceSlider(allocator, c.base.getBody2(), f[6..9], f[9..12], @floatCast(op.r[1])) else Ref(AnyConstraint).empty;
+                defer rack.deinit();
+                c.setConstraints(pinion.get(), rack.get());
+            },
+            else => {
+                std.debug.print("rack_and_pinion: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.f(c.getTotalLambda());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        var position_error: ?f32 = null;
+        if (c.pinion_constraint.get()) |pinion| {
+            if (c.rack_constraint.get()) |rack| {
+                const rotation = virtual.downcast(zolt.HingeConstraint, virtual.downcast(TwoBodyConstraint, pinion)).getCurrentAngle();
+                const translation = virtual.downcast(zolt.SliderConstraint, virtual.downcast(TwoBodyConstraint, rack)).getCurrentPosition();
+                position_error = rotation - c.ratio * translation;
+            }
+        }
+        gearCoverage(cov, sc, c.rack_and_pinion_constraint_part.isActive(), position_error);
+    }
+};
 
 // ---- SLOT gear (Zolt/Physics/Constraints/GearConstraint.zig) ----
-const GearKind = StubKind(zolt.GearConstraintSettings);
+const GearKind = struct {
+    pub const Settings = zolt.GearConstraintSettings;
+    pub const Constraint = zolt.GearConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.hinge_axis1 = load3(d.f[0..3]);
+        s.hinge_axis2 = load3(d.f[3..6]);
+        if (d.i[1] != 0)
+            s.setRatio(@bitCast(d.i[2]), @bitCast(d.i[3]))
+        else
+            s.ratio = d.f[6];
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        const i = &op.i;
+        const f = &op.f;
+        switch (op.op) {
+            16 => {
+                var gear1 = if ((i[0] & 1) != 0) try makeReferenceHinge(allocator, c.base.getBody1(), f[0..3], f[3..6], @floatCast(op.r[0])) else Ref(AnyConstraint).empty;
+                defer gear1.deinit();
+                var gear2 = if ((i[0] & 2) != 0) try makeReferenceHinge(allocator, c.base.getBody2(), f[6..9], f[9..12], @floatCast(op.r[1])) else Ref(AnyConstraint).empty;
+                defer gear2.deinit();
+                c.setConstraints(gear1.get(), gear2.get());
+            },
+            else => {
+                std.debug.print("gear: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.f(c.getTotalLambda());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        var position_error: ?f32 = null;
+        if (c.gear1_constraint.get()) |gear1| {
+            if (c.gear2_constraint.get()) |gear2| {
+                const gear1rot = virtual.downcast(zolt.HingeConstraint, virtual.downcast(TwoBodyConstraint, gear1)).getCurrentAngle();
+                const gear2rot = virtual.downcast(zolt.HingeConstraint, virtual.downcast(TwoBodyConstraint, gear2)).getCurrentAngle();
+                position_error = gear1rot + c.ratio * gear2rot;
+            }
+        }
+        gearCoverage(cov, sc, c.gear_constraint_part.isActive(), position_error);
+    }
+};
 
 // ---- SLOT pulley (Zolt/Physics/Constraints/PulleyConstraint.zig) ----
 const PulleyKind = StubKind(zolt.PulleyConstraintSettings);
@@ -1875,49 +2045,108 @@ fn genReferenceFrame(g: *Gen, f: []f32) void {
     store3(frame[1], f[3..6]);
 }
 
+/// The bodies of a Gear / RackAndPinion scenario (`rotating`: the bodies whose rotation the constraint couples, both for
+/// a gear, the pinion for a rack and pinion).
+/// - Motion types: both bodies dynamic (`MotionPolicy.both_dynamic`, Jolt's parts assert that the motion properties they
+///   use are those of a dynamic body). Without asserts (ReleaseFast) a third of the scenarios replaces bodies with
+///   kinematic bodies or static bodies with motion properties (mAllowDynamicOrKinematic): Jolt's release build runs
+///   them (the parts read the inverse mass / inertia of those motion properties); a static body without motion
+///   properties (Body::sFixedToWorld) would dereference nullptr in Jolt too.
+/// - Allowed DOFs: a rotating body keeps either all or none of its rotation DOFs. With some of them the inverse inertia
+///   around a hinge axis that is nearly perpendicular to the allowed rotations is a rounding error (a . I^-1 a tiny but
+///   not zero, |I^-1 a| much larger): with a ratio of 0 (or a body 2 without rotation / translation DOFs) the effective
+///   mass is huge and the position correction rotates the body by an infinite angle (a NaN rotation, Jolt asserts)
+fn genGearBodies(g: *Gen, sc: *CSScenario, rotating: [2]bool) void {
+    const rotation: u32 = 0b111000;
+    for (&sc.body, rotating) |*body, rotates| {
+        if (rotates and (body.allowed_dofs & rotation) != 0)
+            body.allowed_dofs |= rotation;
+    }
+    if (Core.enable_asserts or !g.oneIn(3)) return;
+    for (&sc.body) |*body| {
+        switch (g.index(3)) {
+            0 => body.motion_type = @intFromEnum(MotionType.kinematic),
+            1 => {
+                body.motion_type = @intFromEnum(MotionType.static);
+                body.allow_dynamic_or_kinematic = 1;
+            },
+            else => {},
+        }
+    }
+}
+
+/// A ratio: 1, 0, or a random value of either sign
+fn genGearRatio(g: *Gen) f32 {
+    return switch (g.index(8)) {
+        0, 1 => 1.0,
+        2 => 0.0,
+        else => g.float(-5, 5),
+    };
+}
+
+/// A number of teeth for SetRatio: 1 .. 50
+fn genTeeth(g: *Gen) u32 {
+    return @intCast(1 + g.index(50));
+}
+
+/// Operation 16 SetConstraints: I[0] bit 0 the first constraint (pinion hinge / hinge of body 1), bit 1 the second one
+/// (rack slider / hinge of body 2); F[0..6] / F[6..12] axis and normal in world space; R[0] / R[1] the angle (hinge) or
+/// position (slider) of the first / second constraint at creation (the bodies are not integrated: the offsets are what
+/// gives the position correction an error, up to (1 + |ratio|) pi: CenterAngleAroundZero(fmod(...)) matters). Several
+/// of them, sometimes after the last frame, and in half of the scenarios one with both constraints before the first
+/// frame (the position correction then runs in every frame)
+fn genSetConstraintsOps(g: *Gen, sc: *CSScenario, second_is_slider: bool) void {
+    const num_ops = g.numKindOps() / 2;
+    const first_both = g.oneIn(2);
+    for (0..num_ops + @intFromBool(first_both)) |k| {
+        const op = g.kindOp(sc, 16, .{});
+        op.i[0] = @intCast(g.index(4));
+        if (k == num_ops) {
+            op.frame = 0;
+            op.i[0] = 3;
+        }
+        genReferenceFrame(g, op.f[0..6]);
+        genReferenceFrame(g, op.f[6..12]);
+        op.r[0] = if (g.oneIn(4)) 0.0 else g.angle(-math.pi, math.pi);
+        op.r[1] = if (g.oneIn(4)) 0.0 else if (second_is_slider) g.float(-3, 3) else g.angle(-math.pi, math.pi);
+    }
+}
+
 /// RackAndPinion: I[0] space, I[1] != 0: SetRatio(I[2] teeth of the rack, F[7] rack length, I[3] teeth of the pinion)
 /// instead of F[6]; F[0..3] hinge axis, F[3..6] slider axis, F[6] ratio. Operation 16 SetConstraints (I[0] bit 0 pinion
 /// hinge, bit 1 rack slider; F[0..6] hinge axis and normal, F[6..12] slider axis and normal, world space)
 fn genRackAndPinion(g: *Gen, sc: *CSScenario) void {
+    genGearBodies(g, sc, .{ true, false });
     const s = &sc.settings;
     s.i[0] = g.space();
     store3(g.unit(), s.f[0..3]);
     store3(g.unit(), s.f[3..6]);
-    s.f[6] = if (g.oneIn(3)) 1.0 else g.float(-5, 5);
+    s.f[6] = genGearRatio(g);
     if (g.oneIn(2)) {
         s.i[1] = 1;
-        s.i[2] = @intCast(1 + g.index(50));
-        s.i[3] = @intCast(1 + g.index(50));
-        s.f[7] = g.float(0.5, 5);
+        s.i[2] = genTeeth(g);
+        s.i[3] = genTeeth(g);
+        s.f[7] = if (g.oneIn(8)) -g.float(0.5, 5) else g.float(0.5, 5);
     }
-    if (!g.oneIn(3)) {
-        const op = g.kindOp(sc, 16, .{});
-        op.i[0] = @intCast(g.index(4));
-        genReferenceFrame(g, op.f[0..6]);
-        genReferenceFrame(g, op.f[6..12]);
-    }
+    genSetConstraintsOps(g, sc, true);
 }
 
 /// Gear: I[0] space, I[1] != 0: SetRatio(I[2] teeth of gear 1, I[3] teeth of gear 2) instead of F[6]; F[0..3] hinge axis
 /// 1, F[3..6] hinge axis 2, F[6] ratio. Operation 16 SetConstraints (I[0] bit 0 hinge of body 1, bit 1 hinge of body 2;
 /// F[0..6] / F[6..12] axis and normal, world space)
 fn genGear(g: *Gen, sc: *CSScenario) void {
+    genGearBodies(g, sc, .{ true, true });
     const s = &sc.settings;
     s.i[0] = g.space();
     store3(g.unit(), s.f[0..3]);
     store3(g.unit(), s.f[3..6]);
-    s.f[6] = if (g.oneIn(3)) 1.0 else g.float(-5, 5);
+    s.f[6] = genGearRatio(g);
     if (g.oneIn(2)) {
         s.i[1] = 1;
-        s.i[2] = @intCast(1 + g.index(50));
-        s.i[3] = @intCast(1 + g.index(50));
+        s.i[2] = genTeeth(g);
+        s.i[3] = genTeeth(g);
     }
-    if (!g.oneIn(3)) {
-        const op = g.kindOp(sc, 16, .{});
-        op.i[0] = @intCast(g.index(4));
-        genReferenceFrame(g, op.f[0..6]);
-        genReferenceFrame(g, op.f[6..12]);
-    }
+    genSetConstraintsOps(g, sc, false);
 }
 
 /// Pulley: I[0] space; R[0..3] body point 1, R[3..6] fixed point 1, R[6..9] body point 2, R[9..12] fixed point 2 (world
