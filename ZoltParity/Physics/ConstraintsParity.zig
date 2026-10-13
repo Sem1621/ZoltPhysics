@@ -699,7 +699,111 @@ const HingeKind = struct {
 };
 
 // ---- SLOT slider (Zolt/Physics/Constraints/SliderConstraint.zig) ----
-const SliderKind = StubKind(zolt.SliderConstraintSettings);
+const SliderKind = struct {
+    pub const Settings = zolt.SliderConstraintSettings;
+    pub const Constraint = zolt.SliderConstraint;
+
+    pub fn makeSettings(allocator: Allocator, d: *const CSSettings) !*Settings {
+        const s = try Settings.create(allocator);
+        s.space = @enumFromInt(@as(i32, @bitCast(d.i[0])));
+        s.auto_detect_point = d.i[1] != 0;
+        s.point1 = loadR3(d.r[0..3]);
+        s.point2 = loadR3(d.r[3..6]);
+        if (d.i[2] != 0) {
+            s.setSliderAxis(load3(d.f[0..3]));
+        } else {
+            s.slider_axis1 = load3(d.f[0..3]);
+            s.normal_axis1 = load3(d.f[3..6]);
+            s.slider_axis2 = load3(d.f[6..9]);
+            s.normal_axis2 = load3(d.f[9..12]);
+        }
+        s.limits_min = d.f[12];
+        s.limits_max = d.f[13];
+        s.limits_spring_settings = loadSpring(d.i[3], d.f[14..16]);
+        s.max_friction_force = d.f[16];
+        s.motor_settings = loadMotor(d.i[4], d.f[17..23]);
+        return s;
+    }
+
+    pub fn applyOp(c: *Constraint, op: *const CSOp, d: *const CSSettings, allocator: Allocator) !void {
+        _ = d;
+        _ = allocator;
+        switch (op.op) {
+            16 => c.setMaxFrictionForce(op.f[0]),
+            17 => c.setMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            18 => c.setTargetVelocity(op.f[0]),
+            19 => c.setTargetPosition(op.f[0]),
+            20 => c.setLimits(op.f[0], op.f[1]),
+            21 => c.setLimitsSpringSettings(loadSpring(op.i[0], op.f[0..2])),
+            22 => c.getMotorSettingsMut().* = loadMotor(op.i[0], op.f[0..6]),
+            else => {
+                std.debug.print("slider: unknown operation {d}\n", .{op.op});
+                return error.UnknownOperation;
+            },
+        }
+    }
+
+    pub fn recordGetters(rec: *Rec, c: *const Constraint) void {
+        rec.f(c.getCurrentPosition());
+        rec.f(c.getMaxFrictionForce());
+        rec.motor(c.getMotorSettings());
+        rec.i(@bitCast(@intFromEnum(c.getMotorState())));
+        rec.f(c.getTargetVelocity());
+        rec.f(c.getTargetPosition());
+        rec.f(c.getLimitsMin());
+        rec.f(c.getLimitsMax());
+        rec.b(c.hasLimits());
+        rec.spring(c.getLimitsSpringSettings().*);
+        rec.v2(c.getTotalLambdaPosition());
+        rec.f(c.getTotalLambdaPositionLimits());
+        rec.v3(c.getTotalLambdaRotation());
+        rec.f(c.getTotalLambdaMotor());
+    }
+
+    pub fn coverage(cov: *Coverage, sc: *const CSScenario, c: *const Constraint) void {
+        const d = &sc.settings;
+        const world = d.i[0] == @intFromEnum(ConstraintSpace.world_space);
+        const auto = world and d.i[1] != 0;
+        const can1 = sc.body[0].fixed_to_world == 0 and (sc.body[0].motion_type != @intFromEnum(MotionType.static) or sc.body[0].allow_dynamic_or_kinematic != 0);
+        const can2 = sc.body[1].motion_type != @intFromEnum(MotionType.static) or sc.body[1].allow_dynamic_or_kinematic != 0;
+        cov.hit("local space", !world);
+        cov.hit("world space, given points", world and !auto);
+        cov.hit("auto detect, body 1 static", auto and !can1);
+        cov.hit("auto detect, body 2 static", auto and can1 and !can2);
+        cov.hit("auto detect, weighted anchor", auto and can1 and can2);
+        cov.hit("SetSliderAxis", d.i[2] != 0);
+        cov.hit("body 1 is fixed to world", sc.body[0].fixed_to_world != 0);
+
+        // The limits (the final values)
+        const min = c.getLimitsMin();
+        const max = c.getLimitsMax();
+        cov.hit("no limits", !c.hasLimits());
+        cov.hit("limits on both sides", min != -math.flt_max and max != math.flt_max and min != max);
+        cov.hit("limit on one side", (min == -math.flt_max) != (max == math.flt_max));
+        cov.hit("equal limits", min == max);
+
+        // The state of the parts after the last SetupVelocityConstraint (when no kind operation follows the last frame)
+        var changed_after_last_frame = false;
+        for (sc.ops[0..sc.num_ops]) |op| {
+            if (op.op >= first_kind_op and op.frame == sc.num_frames) changed_after_last_frame = true;
+        }
+        if (changed_after_last_frame) return;
+        const limits_active = c.position_limits_constraint_part.isActive();
+        const soft = c.getLimitsSpringSettings().hasStiffness();
+        cov.hit("hard limit reached", limits_active and !soft);
+        cov.hit("soft limit reached", limits_active and soft);
+        cov.hit("equal limits reached", limits_active and min == max);
+        const motor_active = c.motor_constraint_part.isActive();
+        const spring = &c.getMotorSettings().spring_settings;
+        cov.hit("friction (motor off)", c.getMotorState() == .off and motor_active);
+        cov.hit("velocity motor", c.getMotorState() == .velocity and motor_active);
+        cov.hit("position motor", c.getMotorState() == .position and motor_active);
+        cov.hit("position motor without stiffness", c.getMotorState() == .position and !spring.hasStiffness());
+        cov.hit("position and velocity motor", c.getMotorState() == .position_and_velocity and motor_active);
+        cov.hit("position and velocity motor with damping only", c.getMotorState() == .position_and_velocity and motor_active and !spring.hasStiffness());
+        cov.hit("position and velocity motor without stiffness and damping", c.getMotorState() == .position_and_velocity and !spring.hasStiffnessOrDamping());
+    }
+};
 
 // ---- SLOT distance (Zolt/Physics/Constraints/DistanceConstraint.zig) ----
 const DistanceKind = StubKind(zolt.DistanceConstraintSettings);
@@ -1461,21 +1565,56 @@ fn genHingeMotor(g: *Gen, i: *u32, f: []f32) void {
     }
 }
 
-/// Slider limits: none, or min <= 0, max >= 0 (min != max)
-fn genSliderLimits(g: *Gen, out: []f32) void {
+/// Slider limits: none, on one side, or min <= 0 and max >= 0; equal limits (both 0) only when `allow_equal` (the
+/// constructor asserts that equal limits have a soft spring, SetLimits does not)
+fn genSliderLimits(g: *Gen, out: []f32, allow_equal: bool) void {
+    switch (g.index(6)) {
+        0, 1 => {
+            out[0] = -math.flt_max;
+            out[1] = math.flt_max;
+        },
+        2 => {
+            out[0] = -math.flt_max;
+            out[1] = if (g.oneIn(4)) 0.0 else g.float(0, 2);
+        },
+        3 => {
+            out[0] = if (g.oneIn(4)) 0.0 else g.float(-2, 0);
+            out[1] = math.flt_max;
+        },
+        else => {
+            if (allow_equal and g.oneIn(4)) {
+                out[0] = 0.0;
+                out[1] = 0.0;
+            } else {
+                out[0] = if (g.oneIn(6)) 0.0 else g.float(-2, 0);
+                out[1] = if (g.oneIn(6)) 0.0 else g.float(0, 2);
+                if (out[0] == out[1]) out[1] = 1.0;
+            }
+        },
+    }
+}
+
+/// A slider motor: a valid motor (Gen.motor), sometimes without stiffness (MotorSettings::IsValid allows it: the position
+/// motor deactivates, the position and velocity motor runs on its damping in the stiffness modes or deactivates)
+fn genSliderMotor(g: *Gen, i: *u32, f: []f32) void {
+    g.motor(i, f);
     if (g.oneIn(3)) {
-        out[0] = -math.flt_max;
-        out[1] = math.flt_max;
-    } else {
-        out[0] = if (g.oneIn(6)) 0.0 else g.float(-2, 0);
-        out[1] = if (g.oneIn(6)) 0.0 else g.float(0, 2);
-        if (out[0] == out[1]) out[1] = 1.0;
+        f[0] = 0.0;
+        if (g.oneIn(3)) {
+            f[1] = 0.0;
+        } else {
+            // Damping only (in a stiffness mode the spring is active)
+            if (f[1] == 0.0) f[1] = g.float(0.1, 2);
+            if (i.* == 0 and g.oneIn(2)) i.* = @intCast(1 + g.index(2));
+        }
     }
 }
 
 /// Slider: I[0] space, I[1] auto detect point, I[2] SetSliderAxis(F[0..3]); R[0..3] point 1, R[3..6] point 2; F[0..12]
 /// slider axis 1, normal axis 1, slider axis 2, normal axis 2, F[12] limits min, F[13] limits max, limits spring I[3]
-/// F[14..16], F[16] max friction force, motor I[4] F[17..23]
+/// F[14..16], F[16] max friction force, motor I[4] F[17..23]. Operations: 16 SetMaxFrictionForce(F[0]), 17
+/// SetMotorState(I[0]), 18 SetTargetVelocity(F[0]), 19 SetTargetPosition(F[0]), 20 SetLimits(F[0], F[1]), 21
+/// SetLimitsSpringSettings(I[0] F[0..2]), 22 GetMotorSettings() = motor I[0] F[0..6]
 fn genSlider(g: *Gen, sc: *CSScenario) void {
     const s = &sc.settings;
     s.i[0] = g.space();
@@ -1490,22 +1629,28 @@ fn genSlider(g: *Gen, sc: *CSScenario) void {
     store3(frame1[1], s.f[3..6]);
     store3(frame2[0], s.f[6..9]);
     store3(frame2[1], s.f[9..12]);
-    genSliderLimits(g, s.f[12..14]);
     g.spring(&s.i[3], s.f[14..16]);
+    genSliderLimits(g, s.f[12..14], s.f[14] > 0.0);
     s.f[16] = if (g.oneIn(2)) 0.0 else g.float(0, 10);
-    g.motor(&s.i[4], s.f[17..23]);
+    genSliderMotor(g, &s.i[4], s.f[17..23]);
     for (0..g.numKindOps()) |_| {
         const op = g.kindOp(sc, @intCast(16 + g.index(7)), .{});
         switch (op.op) {
-            16 => op.f[0] = g.float(0, 10),
+            16 => op.f[0] = if (g.oneIn(4)) 0.0 else g.float(0, 10),
             17 => op.i[0] = g.motorState(),
             18 => op.f[0] = g.float(-10, 10),
             19 => op.f[0] = g.float(-3, 3),
-            20 => genSliderLimits(g, op.f[0..2]),
+            20 => genSliderLimits(g, op.f[0..2], true),
             21 => g.spring(&op.i[0], op.f[0..2]),
-            22 => g.motor(&op.i[0], op.f[0..6]),
+            22 => genSliderMotor(g, &op.i[0], op.f[0..6]),
             else => unreachable,
         }
+    }
+
+    // The motor in every state: an extra SetMotorState in half of the scenarios
+    if (g.oneIn(2)) {
+        const op = g.kindOp(sc, 17, .{});
+        op.i[0] = g.motorState();
     }
 }
 

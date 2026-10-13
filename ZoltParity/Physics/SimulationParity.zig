@@ -2286,7 +2286,67 @@ const HingeSlot = struct {
 };
 
 // ---- SLOT slider: SliderConstraint (ConstraintKind slider, OpKind 280..299) ----
-const SliderSlot = StubSlot;
+const SliderSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .slider => {
+                const s = try zolt.SliderConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.auto_detect_point = i[1] != 0;
+                s.point1 = loadR3(r[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                if (i[2] != 0) {
+                    s.setSliderAxis(load3(f[0..3]));
+                } else {
+                    s.slider_axis1 = load3(f[0..3]);
+                    s.normal_axis1 = load3(f[3..6]);
+                    s.slider_axis2 = load3(f[6..9]);
+                    s.normal_axis2 = load3(f[9..12]);
+                }
+                s.limits_min = f[12];
+                s.limits_max = f[13];
+                s.limits_spring_settings = loadSpring(i[3], f[14..16]);
+                s.max_friction_force = f[16];
+                s.motor_settings = loadMotor(i[4], f[17..23]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const f = &op.f;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .slider_set_max_friction_force => (try castConstraint(zolt.SliderConstraint, c, .slider)).setMaxFrictionForce(f[0]),
+            .slider_set_motor_state => (try castConstraint(zolt.SliderConstraint, c, .slider)).setMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            .slider_set_target_velocity => (try castConstraint(zolt.SliderConstraint, c, .slider)).setTargetVelocity(f[0]),
+            .slider_set_target_position => (try castConstraint(zolt.SliderConstraint, c, .slider)).setTargetPosition(f[0]),
+            .slider_set_limits => (try castConstraint(zolt.SliderConstraint, c, .slider)).setLimits(f[0], f[1]),
+            .slider_set_limits_spring_settings => (try castConstraint(zolt.SliderConstraint, c, .slider)).setLimitsSpringSettings(loadSpring(op.i[0], f[0..2])),
+            .slider_set_motor_settings => (try castConstraint(zolt.SliderConstraint, c, .slider)).getMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .slider => &.{
+                .{ .name = "motor_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "position_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "position_limits_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "motor_state", .kind = .u32 },
+                .{ .name = "target_velocity", .kind = .f32 },
+                .{ .name = "target_position", .kind = .f32 },
+            },
+            else => null,
+        };
+    }
+};
 
 // ---- SLOT cone_swing_twist: ConeConstraint, SwingTwistConstraint (ConstraintKind cone / swing_twist, OpKind 300..319) ----
 const ConeSwingTwistSlot = StubSlot;

@@ -88,6 +88,7 @@ test {
     _ = @import("Physics/SensorTests.zig");
     _ = @import("Physics/ShapeFilterTests.zig");
     _ = @import("Physics/ShapeTests.zig");
+    _ = @import("Physics/SliderConstraintTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");

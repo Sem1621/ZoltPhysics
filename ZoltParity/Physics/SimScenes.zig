@@ -1267,6 +1267,17 @@ pub const scenes = [_]SceneEntry{
     // (append the hinge scenes here)
     // ---- Slider ----
     .{ .name = "constraints_slider_ops", .build = buildSliderOps, .blocked_by = .slider_constraints, .expect = .{ .active_constraints = 3 } },
+    .{ .name = "constraints_slider_limits_and_springs", .build = buildSliderLimitsAndSprings, .blocked_by = .slider_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 6 } },
+    .{ .name = "constraints_slider_motors", .build = buildSliderMotors, .blocked_by = .slider_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 11 } },
+    .{ .name = "constraints_slider_islands_and_contacts", .build = buildSliderIslands, .blocked_by = .slider_constraints, .sweep_stride = 15, .expect = .{ .contacts = true, .active_constraints = 11 } },
+    .{ .name = "constraints_slider_net_splitter", .build = buildSliderNet, .blocked_by = .slider_constraints, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
+    .{ .name = "constraints_slider_sleeping_bodies", .build = buildSliderSleeping, .blocked_by = .slider_constraints, .sweep_stride = 10, .expect = .{ .sleeping = true, .update_activations = 1 } },
+    .{ .name = "constraints_slider_save_restore", .build = buildSliderSaveRestore, .blocked_by = .slider_constraints, .sweep_stride = 15, .expect = .{ .active_constraints = 5 } },
+    .{ .name = "constraints_slider_collision_steps_2", .build = buildSliderCollisionSteps(2), .blocked_by = .slider_constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_slider_collision_steps_3", .build = buildSliderCollisionSteps(3), .blocked_by = .slider_constraints, .sweep_stride = 10 },
+    .{ .name = "constraints_slider_far_from_origin", .build = buildSliderFarFromOrigin, .blocked_by = .slider_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_slider_random_1", .build = buildSliderRandom(1), .blocked_by = .slider_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
+    .{ .name = "constraints_slider_random_2", .build = buildSliderRandom(2), .blocked_by = .slider_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     // (append the slider scenes here)
     // ---- Cone / SwingTwist ----
     .{ .name = "constraints_cone_ops", .build = buildConeOps, .blocked_by = .cone_constraints, .expect = .{ .active_constraints = 2 } },
@@ -6597,6 +6608,609 @@ fn buildSliderOps(b: *SceneBuilder) Allocator.Error!void {
     try b.constraintOp(.notify_constraint_shape_changed, piston, .{ .body = e, .f = &.{ 0.01, 0, 0 } });
     try b.constraintOp(.reset_constraint_warm_start, piston, .{});
     try b.constraintOp(.constraint_settings_hash, piston, .{});
+}
+
+/// A unit vector of the scene builder (normalized in f64, like normalizedQuat)
+fn sliderUnit(v: [3]f64) [3]f32 {
+    const len = @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    return .{ @floatCast(v[0] / len), @floatCast(v[1] / len), @floatCast(v[2] / len) };
+}
+
+/// The X and Y axes of a rotation (a slider axis and a normal axis that are perpendicular), computed in f64
+fn sliderFrame(q: [4]f32) [2][3]f32 {
+    const x: f64 = q[0];
+    const y: f64 = q[1];
+    const z: f64 = q[2];
+    const w: f64 = q[3];
+    return .{
+        sliderUnit(.{ 1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y) }),
+        sliderUnit(.{ 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x) }),
+    };
+}
+
+/// A slider description from the world (`invalid_handle`) or a body to `body2` with mAutoDetectPoint and SetSliderAxis
+/// and limits
+fn sliderWithLimits(body1: u32, body2: u32, axis: [3]f32, limits_min: f32, limits_max: f32) SimConstraint {
+    var s = Desc.slider(body1, body2, axis);
+    s.f[12] = limits_min;
+    s.f[13] = limits_max;
+    return s;
+}
+
+/// The motor slider operations: SetMotorState(state)
+fn setSliderMotorState(b: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
+    try b.constraintOp(.slider_set_motor_state, handle, .{ .i = &.{state} });
+}
+
+/// EMotorState values
+const motor_off: u32 = 0;
+const motor_velocity: u32 = 1;
+const motor_position: u32 = 2;
+const motor_position_and_velocity: u32 = 3;
+
+/// Slider limits and springs: a box on an inclined slider from the world slides down into its hard min limit; a box on
+/// a vertical slider falls into a soft limit (frequency and damping) and bounces on its spring; boxes on springs with
+/// equal limits (min = max = 0, TestSliderSpring) in the stiffness and the mass normalized stiffness modes start away
+/// from their rest position; a one sided limit (min = -FLT_MAX) on an incline the other way; two dynamic boxes on a
+/// slider with limits that impulses pull apart into the max limit and push together into the min limit; SetLimits and
+/// SetLimitsSpringSettings between the updates (a soft limit becomes hard, a hard limit soft, a limit moves past the
+/// box, the limits are removed)
+fn buildSliderLimitsAndSprings(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 90;
+
+    // An inclined slider from the world with hard limits: the box slides down into its min limit
+    const down = try b.body(.{ .position = .{ 0, 5, 0 }, .shape = box }, .activate);
+    const hard = try b.constraint(sliderWithLimits(invalid_handle, down, sliderUnit(.{ 1, 1, 0 }), -1.2, 0.8));
+
+    // A vertical slider from the world with a soft limit (frequency and damping): the box falls into the spring
+    const falling = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box }, .activate);
+    var s_soft = sliderWithLimits(invalid_handle, falling, .{ 0, 1, 0 }, -0.5, flt_max);
+    Desc.setSpring(&s_soft, 3, 14, 0, 3, 0.2);
+    const soft = try b.constraint(s_soft);
+
+    // Springs with equal limits (min = max = 0): point 1 is the rest position, point 2 the start position of the box
+    for (0..2) |m| {
+        const x: Real = 6 + 3 * real(m);
+        const h = try b.body(.{ .position = .{ x + 0.75, 5, 0.25 }, .shape = box }, .activate);
+        var s = Desc.defaults(.slider);
+        s.body1 = invalid_handle;
+        s.body2 = h;
+        Desc.setR3(s.r[0..], .{ x, 5, 0.25 });
+        Desc.setR3(s.r[3..], .{ x + 0.75, 5, 0.25 });
+        s.f[12] = 0;
+        s.f[13] = 0;
+        if (m == 0)
+            Desc.setSpring(&s, 3, 14, 1, 2000, 100) // StiffnessAndDamping
+        else
+            Desc.setSpring(&s, 3, 14, 2, 50, 0.5); // MassNormalizedStiffnessAndDamping
+        _ = try b.constraint(s);
+    }
+
+    // A one sided limit (min = -FLT_MAX): the slider axis points down the incline, the box slides into its max limit
+    const one_sided = try b.body(.{ .position = .{ 12, 5, 0 }, .shape = box }, .activate);
+    _ = try b.constraint(sliderWithLimits(invalid_handle, one_sided, sliderUnit(.{ 1, -1, 0 }), -flt_max, 0.3));
+
+    // Two dynamic boxes on a slider with limits (without gravity)
+    const left = try b.body(.{ .position = .{ 15, 5, 0 }, .shape = box, .gravity_factor = 0 }, .activate);
+    const right = try b.body(.{ .position = .{ 15.6, 5, 0 }, .shape = box, .gravity_factor = 0 }, .activate);
+    var s_pair = Desc.sliderAxes(left, right, .{ 15.3, 5, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    s_pair.f[12] = -0.05;
+    s_pair.f[13] = 0.4;
+    const pair = try b.constraint(s_pair);
+
+    b.at(10);
+    try b.op(.add_impulse, right, .{ .f = &.{ 300, 0, 0 } }); // Apart into the max limit
+    b.at(30);
+    try b.op(.add_impulse, right, .{ .f = &.{ -600, 0, 50 } }); // Together into the min limit
+    b.at(40);
+    try b.constraintOp(.slider_set_limits_spring_settings, soft, .{ .i = &.{0}, .f = &.{ 0, 0 } }); // The soft limit becomes hard
+    try b.constraintOp(.slider_set_limits, hard, .{ .f = &.{ -0.6, 0.8 } }); // The box is beyond the new min limit
+    try b.constraintOp(.constraint_settings_hash, hard, .{});
+    b.at(60);
+    try b.constraintOp(.slider_set_limits_spring_settings, hard, .{ .i = &.{2}, .f = &.{ 30, 1 } }); // The hard limit becomes soft
+    try b.constraintOp(.slider_set_limits, soft, .{ .f = &.{ -flt_max, flt_max } }); // No limits: the box falls
+    try b.constraintOp(.slider_set_limits, pair, .{ .f = &.{ -0.2, 0.0 } });
+    try b.constraintOp(.constraint_settings_hash, pair, .{});
+}
+
+/// Slider motors in every EMotorState: friction with the motor off (a box thrown along a horizontal slider stops);
+/// velocity motors with symmetric and asymmetric force limits (one can push but not pull); position motors with a
+/// frequency spring, a stiffness spring and without stiffness (deactivated: the box falls along its slider into a
+/// limit); position and velocity motors with a spring, with damping only (a stiffness mode with zero stiffness) and
+/// without stiffness and damping (deactivated until its motor settings change); a
+/// velocity motor between two dynamic bodies; a position motor on a slider from a kinematic body that moves. The states,
+/// targets, friction and motor settings change between the updates.
+fn buildSliderMotors(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 80;
+
+    // Friction with the motor off
+    const thrown = try b.body(.{ .position = .{ 0, 5, 0 }, .shape = box, .linear_velocity = .{ 3, 0, 0 } }, .activate);
+    var s_friction = Desc.slider(invalid_handle, thrown, .{ 1, 0, 0 });
+    s_friction.f[16] = 150; // mMaxFrictionForce
+    const friction = try b.constraint(s_friction);
+
+    // Velocity motors: symmetric force limits; asymmetric (pushes up to 300 N, cannot pull)
+    const vel1 = try b.body(.{ .position = .{ 2, 5, 0 }, .shape = box }, .activate);
+    var s_vel1 = Desc.slider(invalid_handle, vel1, .{ 0, 1, 0 });
+    Desc.setMotor(&s_vel1, 4, 17, 0, .{ 2, 1, -400, 400, -flt_max, flt_max });
+    const velocity1 = try b.constraint(s_vel1);
+    const vel2 = try b.body(.{ .position = .{ 4, 5, 0 }, .shape = box }, .activate);
+    var s_vel2 = Desc.slider(invalid_handle, vel2, .{ 0, 1, 0 });
+    Desc.setMotor(&s_vel2, 4, 17, 0, .{ 2, 1, 0, 300, -flt_max, flt_max });
+    const velocity2 = try b.constraint(s_vel2);
+
+    // Position motors (vertical sliders against gravity): frequency spring, stiffness spring, no stiffness (with limits)
+    const pos1 = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = box }, .activate);
+    const position1 = try b.constraint(Desc.slider(invalid_handle, pos1, .{ 0, 1, 0 }));
+    const pos2 = try b.body(.{ .position = .{ 8, 5, 0 }, .shape = box }, .activate);
+    var s_pos2 = Desc.slider(invalid_handle, pos2, .{ 0, 1, 0 });
+    Desc.setMotor(&s_pos2, 4, 17, 1, .{ 3000, 150, -2000, 2000, -flt_max, flt_max });
+    const position2 = try b.constraint(s_pos2);
+    const pos3 = try b.body(.{ .position = .{ 10, 5, 0 }, .shape = box }, .activate);
+    var s_pos3 = sliderWithLimits(invalid_handle, pos3, .{ 0, 1, 0 }, -1, 1);
+    Desc.setMotor(&s_pos3, 4, 17, 0, .{ 0, 0, -flt_max, flt_max, -flt_max, flt_max });
+    const position3 = try b.constraint(s_pos3);
+
+    // Position and velocity motors: a frequency spring; damping only (StiffnessAndDamping with zero stiffness)
+    const pv1 = try b.body(.{ .position = .{ 12, 5, 0 }, .shape = box }, .activate);
+    var s_pv1 = Desc.slider(invalid_handle, pv1, sliderUnit(.{ 1, 1, 0 }));
+    Desc.setMotor(&s_pv1, 4, 17, 0, .{ 2, 0.7, -flt_max, flt_max, -flt_max, flt_max });
+    const pos_vel1 = try b.constraint(s_pv1);
+    const pv2 = try b.body(.{ .position = .{ 14, 5, 0 }, .shape = box, .gravity_factor = 0 }, .activate);
+    var s_pv2 = Desc.slider(invalid_handle, pv2, .{ 1, 0, 0 });
+    Desc.setMotor(&s_pv2, 4, 17, 1, .{ 0, 200, -flt_max, flt_max, -flt_max, flt_max });
+    const pos_vel2 = try b.constraint(s_pv2);
+    const pv3 = try b.body(.{ .position = .{ 14, 5, 2 }, .shape = box, .gravity_factor = 0, .linear_velocity = .{ 0.5, 0, 0 } }, .activate);
+    var s_pv3 = Desc.slider(invalid_handle, pv3, .{ 1, 0, 0 });
+    Desc.setMotor(&s_pv3, 4, 17, 0, .{ 0, 1, -flt_max, flt_max, -flt_max, flt_max }); // FrequencyAndDamping without frequency: deactivated
+    const pos_vel3 = try b.constraint(s_pv3);
+
+    // A velocity motor between two dynamic bodies (without gravity): equal and opposite impulses
+    const m1 = try b.body(.{ .position = .{ 16, 5, 0 }, .shape = box, .gravity_factor = 0 }, .activate);
+    const m2 = try b.body(.{ .position = .{ 16.5, 5, 0 }, .shape = box, .gravity_factor = 0, .mass = 20, .override_mass_properties = 1 }, .activate);
+    var s_pair = Desc.sliderAxes(m1, m2, .{ 16.25, 5, 0 }, sliderUnit(.{ 1, 0, 1 }), .{ 0, 1, 0 });
+    Desc.setMotor(&s_pair, 4, 17, 0, .{ 2, 1, -100, 100, -flt_max, flt_max });
+    const pair = try b.constraint(s_pair);
+
+    // A position motor on a slider from a kinematic body that moves and turns
+    const kinematic = try b.body(.{ .position = .{ 19, 5, 0 }, .shape = box, .motion_type = 1, .linear_velocity = .{ 0, 0.3, 0 }, .angular_velocity = .{ 0, 0.5, 0 } }, .activate);
+    const follower = try b.body(.{ .position = .{ 19.6, 5, 0 }, .shape = box }, .activate);
+    var s_follow = Desc.sliderAxes(kinematic, follower, .{ 19.3, 5, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    s_follow.f[12] = -0.3;
+    s_follow.f[13] = 0.5;
+    const follow = try b.constraint(s_follow);
+
+    // The motor states and targets
+    try setSliderMotorState(b, velocity1, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, velocity1, .{ .f = &.{1.5} });
+    try setSliderMotorState(b, velocity2, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, velocity2, .{ .f = &.{-2} }); // Cannot pull: falls slower than free fall
+    try setSliderMotorState(b, position1, motor_position);
+    try b.constraintOp(.slider_set_target_position, position1, .{ .f = &.{0.5} });
+    try setSliderMotorState(b, position2, motor_position);
+    try b.constraintOp(.slider_set_target_position, position2, .{ .f = &.{-0.4} });
+    try setSliderMotorState(b, position3, motor_position); // No stiffness: the motor is deactivated
+    try setSliderMotorState(b, pos_vel1, motor_position_and_velocity);
+    try b.constraintOp(.slider_set_target_velocity, pos_vel1, .{ .f = &.{0.2} });
+    try b.constraintOp(.slider_set_target_position, pos_vel1, .{ .f = &.{0.6} });
+    try setSliderMotorState(b, pos_vel2, motor_position_and_velocity);
+    try b.constraintOp(.slider_set_target_velocity, pos_vel2, .{ .f = &.{0.8} });
+    try setSliderMotorState(b, pos_vel3, motor_position_and_velocity); // No stiffness or damping: the motor is deactivated
+    try b.constraintOp(.slider_set_target_velocity, pos_vel3, .{ .f = &.{-0.3} });
+    try setSliderMotorState(b, pair, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, pair, .{ .f = &.{0.5} });
+    try setSliderMotorState(b, follow, motor_position);
+    try b.constraintOp(.slider_set_target_position, follow, .{ .f = &.{0.2} });
+
+    b.at(25);
+    try setSliderMotorState(b, velocity1, motor_position); // Holds the position it drives to
+    try b.constraintOp(.slider_set_target_position, velocity1, .{ .f = &.{1} });
+    try setSliderMotorState(b, position1, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, position1, .{ .f = &.{-0.5} });
+    try b.constraintOp(.slider_set_motor_settings, position3, .{ .i = &.{0}, .f = &.{ 4, 1, -flt_max, flt_max, -flt_max, flt_max } }); // Now with stiffness
+    try b.constraintOp(.slider_set_target_position, position3, .{ .f = &.{3} }); // Clamped to the max limit
+    try b.constraintOp(.slider_set_max_friction_force, friction, .{ .f = &.{40} });
+    try setSliderMotorState(b, pos_vel2, motor_off); // No friction: slides on
+    b.at(45);
+    try setSliderMotorState(b, pair, motor_position_and_velocity);
+    try b.constraintOp(.slider_set_target_velocity, pair, .{ .f = &.{0} });
+    try b.constraintOp(.slider_set_target_position, pair, .{ .f = &.{0} });
+    try setSliderMotorState(b, pos_vel1, motor_off);
+    try b.constraintOp(.slider_set_max_friction_force, pos_vel1, .{ .f = &.{500} }); // Friction holds it on the incline
+    try b.constraintOp(.slider_set_motor_settings, position2, .{ .i = &.{2}, .f = &.{ 40, 2, -flt_max, flt_max, -flt_max, flt_max } }); // MassNormalizedStiffnessAndDamping
+    try b.constraintOp(.constraint_settings_hash, position2, .{});
+    b.at(60);
+    try setSliderMotorState(b, velocity2, motor_off);
+    try setSliderMotorState(b, follow, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, follow, .{ .f = &.{-1} }); // Into the min limit
+    try b.constraintOp(.slider_set_motor_settings, pos_vel3, .{ .i = &.{0}, .f = &.{ 3, 1, -flt_max, flt_max, -flt_max, flt_max } }); // Now it drives
+    try b.constraintOp(.constraint_settings_hash, follow, .{});
+}
+
+/// Sliders in islands with other constraint kinds and contacts: a train of carts on sliders from a static rail body
+/// (body 1 of the sliders), coupled by point constraints, with a chimney welded on (fixed constraint), driven by the
+/// velocity motor of the first cart into boxes on the floor; a piston (a box on a vertical slider with a soft limit)
+/// that a falling box lands on; a box on a slider from the world with hard limits that a box on a point constraint
+/// swings into
+fn buildSliderIslands(b: *SceneBuilder) Allocator.Error!void {
+    const cart = try b.box(.{ 0.25, 0.2, 0.25 }, 0.05);
+    const small = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 90;
+    _ = try addFloor(b, 20, 0);
+    const rail = try b.body(.{ .position = .{ 0, 4, -3 }, .shape = small, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+
+    // The train (the slider of the front cart has the motor)
+    var carts: [4]u32 = undefined;
+    var drive: u32 = undefined;
+    for (&carts, 0..) |*h, i| {
+        const x: Real = -4 + 0.6 * real(i);
+        h.* = try b.body(.{ .position = .{ x, 0.25, 0 }, .shape = cart, .object_layer = Layers.moving }, .activate);
+        var s = Desc.slider(rail, h.*, .{ 1, 0, 0 });
+        if (i == carts.len - 1) Desc.setMotor(&s, 4, 17, 0, .{ 2, 1, -3000, 3000, -flt_max, flt_max });
+        drive = try b.constraint(s);
+        if (i > 0) _ = try b.constraint(Desc.pointWorld(carts[i - 1], h.*, .{ x - 0.3, 0.3, 0 }));
+    }
+    const chimney = try b.body(.{ .position = .{ -4, 0.66, 0 }, .shape = small, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.fixedAuto(carts[0], chimney));
+    try setSliderMotorState(b, drive, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, drive, .{ .f = &.{2} });
+
+    // The boxes in front of the train
+    for (0..3) |i| _ = try b.body(.{ .position = .{ -1 + 0.6 * real(i), 0.2, 0.05 * real(i) }, .shape = small, .object_layer = Layers.moving }, .activate);
+
+    // The piston and the box that falls on it
+    const piston = try b.body(.{ .position = .{ 4, 1, 0 }, .shape = cart, .object_layer = Layers.moving }, .activate);
+    var s_piston = sliderWithLimits(invalid_handle, piston, .{ 0, 1, 0 }, -0.5, 0.5);
+    Desc.setSpring(&s_piston, 3, 14, 0, 4, 0.3);
+    _ = try b.constraint(s_piston);
+    _ = try b.body(.{ .position = .{ 4.05, 3, 0 }, .shape = small, .object_layer = Layers.moving }, .activate);
+
+    // A pendulum swings into a box on a slider with hard limits
+    const target = try b.body(.{ .position = .{ 8.15, 2, 0 }, .shape = small, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(sliderWithLimits(invalid_handle, target, .{ 1, 0, 0 }, -0.2, 0.6));
+    const bob = try b.body(.{ .position = .{ 6.3, 3.5, 0 }, .shape = small, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.pointWorld(invalid_handle, bob, .{ 7.8, 3.5, 0 }));
+
+    b.at(50);
+    try b.constraintOp(.slider_set_target_velocity, drive, .{ .f = &.{-1} });
+}
+
+/// A net of boxes on the floor, the neighbours along X connected by sliders with limits and along Z by point
+/// constraints, the corners pinned to the world: an island with more than 128 constraints that the LargeIslandSplitter
+/// splits, and that falls asleep
+fn buildSliderNet(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.4, 0.2, 0.4 }, 0.05);
+    b.num_updates = 100;
+    b.max_contact_constraints = 2048;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const nx = 10;
+    const nz = 14;
+    var handles: [nx * nz]u32 = undefined;
+    for (0..nz) |z| {
+        for (0..nx) |x| {
+            const px: Real = real(x) - 5.0;
+            const pz: Real = real(z) - 7.0;
+            handles[z * nx + x] = try b.body(.{ .position = .{ px, 0.2, pz }, .shape = box, .object_layer = Layers.moving }, .activate);
+            if (x > 0) {
+                var s = Desc.sliderAxes(handles[z * nx + x - 1], handles[z * nx + x], .{ px - 0.5, 0.2, pz }, .{ 1, 0, 0 }, .{ 0, 1, 0 });
+                s.f[12] = -0.1;
+                s.f[13] = 0.1;
+                _ = try b.constraint(s);
+            }
+            if (z > 0) _ = try b.constraint(Desc.pointWorld(handles[(z - 1) * nx + x], handles[z * nx + x], .{ px, 0.2, pz - 0.5 }));
+        }
+    }
+    // Pin the corners to the world
+    for ([_]usize{ 0, nx - 1, (nz - 1) * nx, nz * nx - 1 }) |i| {
+        const p: [3]Real = .{ real(i % nx) - 5.0, 0.2, real(i / nx) - 7.0 };
+        _ = try b.constraint(Desc.pointWorld(invalid_handle, handles[i], p));
+    }
+    b.at(10);
+    try b.op(.add_impulse, handles[nx * nz / 2], .{ .f = &.{ 0, 3, 0 } });
+}
+
+/// Sliders and sleeping bodies (without gravity): a slider created between an awake body and a sleeping one wakes the
+/// sleeping one from inside the update; a slider with a velocity motor between two sleeping bodies is not active (setting
+/// the motor state wakes nothing) until ActivateConstraint; a box that a position motor drove to its target falls asleep,
+/// a new target does not wake it (SetTargetPosition does not activate bodies) until ActivateConstraint; a box at rest at
+/// its hard limit falls asleep, SetLimits wakes nothing either
+fn buildSliderSleeping(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 90;
+    b.gravity = .{ 0, 0, 0 };
+    b.settings.time_before_sleep = 0.2;
+    const awake = try b.body(.{ .position = .{ 0, 5, 0 }, .shape = box, .linear_velocity = .{ 0, 0, 0.5 }, .allow_sleeping = 0 }, .activate);
+    const asleep = try b.body(.{ .position = .{ 0.6, 5, 0 }, .shape = box }, .dont_activate);
+    const pair1 = try b.body(.{ .position = .{ 3, 5, 0 }, .shape = box }, .dont_activate);
+    const pair2 = try b.body(.{ .position = .{ 3.6, 5, 0 }, .shape = box }, .dont_activate);
+    const driven = try b.body(.{ .position = .{ 6, 5, 0 }, .shape = box }, .activate);
+    const at_limit = try b.body(.{ .position = .{ 9, 5, 0 }, .shape = box, .linear_velocity = .{ 1, 0, 0 } }, .activate);
+
+    const motor_pair = try b.constraint(Desc.sliderAxes(pair1, pair2, .{ 3.3, 5, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }));
+    try setSliderMotorState(b, motor_pair, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, motor_pair, .{ .f = &.{0.5} });
+    try b.expectConstraintState(motor_pair, ConstraintState.inactive);
+    const position_motor = try b.constraint(Desc.slider(invalid_handle, driven, .{ 0, 1, 0 }));
+    try setSliderMotorState(b, position_motor, motor_position);
+    try b.constraintOp(.slider_set_target_position, position_motor, .{ .f = &.{0.3} });
+    const limit = try b.constraint(sliderWithLimits(invalid_handle, at_limit, .{ 1, 0, 0 }, -0.5, 0.2));
+    b.at(5);
+    try b.expectSleeping(asleep);
+    _ = try b.constraint(Desc.sliderAxes(awake, asleep, .{ 0.3, 5, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 })); // Wakes it in the next update
+    b.at(6);
+    try b.expectAwake(asleep);
+    try b.expectSleeping(pair1);
+    b.at(10);
+    try b.constraintOp(.activate_constraint, motor_pair, .{});
+    try b.expectAwake(pair1);
+    try b.expectAwake(pair2);
+    b.at(60);
+    try b.expectSleeping(driven);
+    try b.expectSleeping(at_limit);
+    try b.constraintOp(.slider_set_target_position, position_motor, .{ .f = &.{-0.4} });
+    try b.constraintOp(.slider_set_limits, limit, .{ .f = &.{ -0.5, 0.1 } });
+    b.at(65);
+    try b.expectSleeping(driven);
+    try b.expectSleeping(at_limit);
+    try b.constraintOp(.activate_constraint, position_motor, .{});
+    try b.constraintOp(.activate_constraint, limit, .{});
+    try b.expectAwake(driven);
+    try b.expectAwake(at_limit);
+}
+
+/// Sliders across cross save / restore: the warm start impulses of the four parts, the motor state and the targets are
+/// state. A snapshot, then motor state and target changes, then a restore of the other world's snapshot brings them
+/// back; a snapshot of the constraints only; other physics settings (no warm start, other step counts and Baumgarte)
+fn buildSliderSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 90;
+    const state_constraints: u32 = 8; // EStateRecorderState::Constraints
+    var no_warm_start = b.settings;
+    no_warm_start.constraint_warm_start = 0;
+    no_warm_start.num_velocity_steps = 4;
+    no_warm_start.num_position_steps = 1;
+    const settings1 = try b.addPhysicsSettings(no_warm_start);
+    var more_steps = b.settings;
+    more_steps.num_velocity_steps = 15;
+    more_steps.num_position_steps = 5;
+    more_steps.baumgarte = 0.5;
+    const settings2 = try b.addPhysicsSettings(more_steps);
+
+    // A chain: sliders between neighbours with limits and motors, hanging from the world on a point constraint
+    var previous: u32 = invalid_handle;
+    var links: [5]u32 = undefined;
+    var bodies: [5]u32 = undefined;
+    for (0..5) |i| {
+        const x: Real = 0.5 * real(i);
+        const h = try b.body(.{ .position = .{ x, 6, 0 }, .angular_velocity = .{ 0, 0, 0.3 }, .shape = box }, .activate);
+        if (i == 0) {
+            links[i] = try b.constraint(Desc.pointWorld(invalid_handle, h, .{ x - 0.25, 6, 0 }));
+        } else {
+            var s = Desc.sliderAxes(previous, h, .{ x - 0.25, 6, 0 }, sliderUnit(.{ 1, 0.2, 0 }), sliderUnit(.{ -0.2, 1, 0 }));
+            s.f[12] = -0.15;
+            s.f[13] = 0.15;
+            if (i % 2 == 0) Desc.setSpring(&s, 3, 14, 0, 5, 0.5);
+            s.f[16] = 20;
+            links[i] = try b.constraint(s);
+        }
+        bodies[i] = h;
+        previous = h;
+    }
+    try setSliderMotorState(b, links[1], motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, links[1], .{ .f = &.{0.3} });
+    try setSliderMotorState(b, links[3], motor_position);
+    try b.constraintOp(.slider_set_target_position, links[3], .{ .f = &.{0.1} });
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(18);
+    try setSliderMotorState(b, links[1], motor_position_and_velocity);
+    try b.constraintOp(.slider_set_target_position, links[3], .{ .f = &.{-0.1} });
+    try b.constraintOp(.slider_set_target_velocity, links[2], .{ .f = &.{1} });
+    try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_constraints} });
+    b.at(25);
+    try setSliderMotorState(b, links[1], motor_off);
+    try setSliderMotorState(b, links[4], motor_velocity);
+    try b.sysOp(.set_physics_settings, .{ .index = settings1 });
+    b.at(30);
+    try b.sysOp(.restore_cross, .{ .index = 1 }); // The constraints of update 18: the motor states and targets come back
+    b.at(40);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Everything of update 15
+    try b.sysOp(.set_physics_settings, .{ .index = settings2 });
+    b.at(55);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.op(.add_impulse, bodies[4], .{ .f = &.{ 0, 0, 3 } });
+    try b.constraintOp(.reset_constraint_warm_start, links[2], .{});
+    b.at(70);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+}
+
+/// Sliders with limits, springs and motors with several collision steps per update and changing update parameters
+/// (the warm start impulses are scaled by the step ratio)
+fn buildSliderCollisionSteps(comptime steps: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const box = try b.box(.{ 0.2, 0.3, 0.2 }, 0.05);
+            b.num_updates = 50;
+            b.collision_steps = steps;
+            b.delta_time = @as(f32, @floatFromInt(steps)) / 60.0;
+            var previous: u32 = invalid_handle;
+            for (0..5) |i| {
+                const x: Real = 0.45 * real(i);
+                const h = try b.body(.{ .position = .{ x, 6, 0 }, .shape = box }, .activate);
+                var s = sliderWithLimits(previous, h, sliderUnit(.{ 1, -0.5, 0 }), -0.2, 0.3);
+                if (i % 2 == 1) Desc.setSpring(&s, 3, 14, 1, 800, 20);
+                const c = try b.constraint(s);
+                if (i == 2) {
+                    try setSliderMotorState(b, c, motor_velocity);
+                    try b.constraintOp(.slider_set_target_velocity, c, .{ .f = &.{-0.5} });
+                } else if (i == 4) {
+                    try setSliderMotorState(b, c, motor_position);
+                    try b.constraintOp(.slider_set_target_position, c, .{ .f = &.{0.2} });
+                }
+                previous = h;
+            }
+            b.at(20);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 90.0}, .count = 1 });
+            b.at(30);
+            try b.sysOp(.set_update, .{ .f = &.{1.0 / 20.0}, .count = steps + 1 });
+        }
+    }.build;
+}
+
+/// Sliders far from the origin (the world space points are Real: in double precision the anchors keep their
+/// precision): a box on a slider from the world with a velocity motor pushes a box over a floor, a slider pair with a
+/// soft limit falls onto the floor
+fn buildSliderFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    b.num_updates = 60;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const pusher = try b.body(.{ .position = .{ o[0] - 3, o[1] + 0.3, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const push = try b.constraint(sliderWithLimits(invalid_handle, pusher, .{ 1, 0, 0 }, -0.5, 4));
+    try setSliderMotorState(b, push, motor_velocity);
+    try b.constraintOp(.slider_set_target_velocity, push, .{ .f = &.{3} });
+    _ = try b.body(.{ .position = .{ o[0] - 1.5, o[1] + 0.25, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const p1 = try b.body(.{ .position = .{ o[0] + 3, o[1] + 2, o[2] }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const p2 = try b.body(.{ .position = .{ o[0] + 3.6, o[1] + 2.2, o[2] + 0.1 }, .shape = box, .object_layer = Layers.moving2 }, .activate);
+    var s = Desc.slider(p1, p2, sliderUnit(.{ 1, 0.3, 0 }));
+    s.f[12] = -0.3;
+    s.f[13] = 0.1;
+    Desc.setSpring(&s, 3, 14, 0, 6, 0.5);
+    _ = try b.constraint(s);
+}
+
+/// A random slider description between two body handles: a random space (world: given points and axes, auto detect, or
+/// SetSliderAxis; local: points near the centers of mass and random frames), limits (none, one sided, both sides, equal
+/// with a soft spring), a limits spring, friction and a motor (sometimes without stiffness)
+fn randomSliderDescription(b: *SceneBuilder, body1: u32, body2: u32, p: [3]Real) SimConstraint {
+    var s = Desc.defaults(.slider);
+    s.body1 = body1;
+    s.body2 = body2;
+    const frame1 = sliderFrame(b.rotation());
+    const frame2 = if (b.oneIn(2)) frame1 else sliderFrame(b.rotation());
+    @memcpy(s.f[0..3], &frame1[0]);
+    @memcpy(s.f[3..6], &frame1[1]);
+    @memcpy(s.f[6..9], &frame2[0]);
+    @memcpy(s.f[9..12], &frame2[1]);
+    if (b.oneIn(4)) {
+        s.i[0] = ConstraintSpace.local_to_body_com;
+        Desc.setR3(s.r[0..], r3(b.vec3(-0.3, 0.3)));
+        Desc.setR3(s.r[3..], r3(b.vec3(-0.3, 0.3)));
+    } else {
+        s.i[1] = @intFromBool(b.oneIn(3)); // mAutoDetectPoint
+        s.i[2] = @intFromBool(b.oneIn(3)); // SetSliderAxis
+        Desc.setR3(s.r[0..], p);
+        Desc.setR3(s.r[3..], if (b.oneIn(2)) p else .{ p[0] + real(b.float(-0.2, 0.2)), p[1] + real(b.float(-0.2, 0.2)), p[2] });
+    }
+    const soft = !b.oneIn(3);
+    Desc.setSpring(&s, 3, 14, b.index(3), if (soft) b.float(2, 8) else 0, b.float(0, 1));
+    if (s.i[3] != 0 and soft) s.f[14] *= 100; // Stiffness
+    switch (b.index(5)) {
+        0 => {}, // No limits
+        1 => s.f[13] = b.float(0, 0.5), // One sided
+        2 => s.f[12] = -b.float(0, 0.5),
+        3 => if (soft) {
+            s.f[12] = 0; // Equal limits with a soft spring
+            s.f[13] = 0;
+        },
+        else => {
+            s.f[12] = -b.float(0.05, 0.5);
+            s.f[13] = b.float(0.05, 0.5);
+        },
+    }
+    if (b.oneIn(3)) s.f[16] = b.float(0, 200); // Friction
+    Desc.setMotor(&s, 4, 17, b.index(3), .{ if (b.oneIn(4)) 0 else b.float(1, 5), b.float(0, 1), -b.float(100, 2000), b.float(100, 2000), -flt_max, flt_max });
+    if (s.i[4] != 0) s.f[17] *= 100; // Stiffness
+    return s;
+}
+
+/// Random bodies (dynamic, kinematic, static; every basic shape) in a container with random slider constraints between
+/// them and to the world (randomSliderDescription) and some point and fixed constraints, and random slider operations
+/// between the updates (motor states, targets, limits, springs, friction, motor settings) and generic ones
+fn buildSliderRandom(comptime seed: u32) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            b.rng = 0x511d_e700 +% seed *% 0x9e3779b9;
+            const shapes = try BasicShapes.add(b);
+            b.num_updates = 80;
+            b.max_contact_constraints = 2048;
+            try addContainer(b, 6, 2);
+            const num_bodies = 20;
+            var bodies: [num_bodies]u32 = undefined;
+            for (&bodies, 0..) |*h, i| {
+                const motion_type: u32 = if (b.oneIn(8)) 0 else if (b.oneIn(7)) 1 else 2;
+                const p = b.vec3(-4, 4);
+                h.* = try b.body(.{
+                    .position = .{ p[0], 1.5 + 0.8 * real(i), p[2] },
+                    .rotation = b.rotation(),
+                    .shape = shapes.pick(b.index(6)),
+                    .motion_type = motion_type,
+                    .linear_velocity = if (motion_type == 1) b.vec3(-0.5, 0.5) else @splat(0),
+                    .angular_velocity = if (motion_type != 0) b.vec3(-1, 1) else @splat(0),
+                    .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+                }, if (motion_type == 0) .dont_activate else .activate);
+            }
+            const num_constraints = 16;
+            var handles: [num_constraints]u32 = undefined;
+            var is_slider: [num_constraints]bool = undefined;
+            for (&handles, &is_slider) |*c, *slider| {
+                const index1 = b.index(num_bodies + 1); // num_bodies: the world
+                var index2 = b.index(num_bodies);
+                if (index2 == index1) index2 = (index2 + 1) % num_bodies;
+                const body1 = if (index1 == num_bodies) invalid_handle else bodies[index1];
+                const body2 = bodies[index2];
+                const p = r3(b.vec3(-4, 4));
+                slider.* = !b.oneIn(4);
+                var desc = if (slider.*)
+                    randomSliderDescription(b, body1, body2, .{ p[0], 1 + p[1] / 2, p[2] })
+                else if (b.oneIn(2))
+                    Desc.fixedAuto(body1, body2)
+                else
+                    Desc.pointWorld(body1, body2, p);
+                desc.constraint_priority = b.index(3);
+                if (b.oneIn(5)) desc.num_velocity_steps_override = 1 + b.index(15);
+                if (b.oneIn(8)) desc.enabled = 0;
+                c.* = try b.constraint(desc);
+            }
+            var update: u32 = 3;
+            while (update < b.num_updates) : (update += 1 + b.index(6)) {
+                b.at(update);
+                for (0..1 + b.index(3)) |_| {
+                    const k = b.index(num_constraints);
+                    const c = handles[k];
+                    if (!is_slider[k]) {
+                        try b.constraintOp(.set_constraint_enabled, c, .{ .i = &.{@intFromBool(!b.oneIn(3))} });
+                        continue;
+                    }
+                    switch (b.index(10)) {
+                        0 => try b.constraintOp(.slider_set_max_friction_force, c, .{ .f = &.{if (b.oneIn(3)) 0 else b.float(0, 300)} }),
+                        1, 2 => try setSliderMotorState(b, c, b.index(4)),
+                        3 => try b.constraintOp(.slider_set_target_velocity, c, .{ .f = &.{b.float(-2, 2)} }),
+                        4 => try b.constraintOp(.slider_set_target_position, c, .{ .f = &.{b.float(-1, 1)} }),
+                        5 => {
+                            const min: f32 = if (b.oneIn(4)) -flt_max else -b.float(0, 0.6);
+                            const max: f32 = if (b.oneIn(4)) flt_max else b.float(0, 0.6);
+                            try b.constraintOp(.slider_set_limits, c, .{ .f = &.{ min, max } });
+                        },
+                        6 => {
+                            const mode = b.index(3);
+                            try b.constraintOp(.slider_set_limits_spring_settings, c, .{ .i = &.{mode}, .f = &.{ if (b.oneIn(3)) 0 else if (mode == 0) b.float(2, 8) else b.float(200, 800), b.float(0, 1) } });
+                        },
+                        7 => {
+                            const mode = b.index(3);
+                            try b.constraintOp(.slider_set_motor_settings, c, .{ .i = &.{mode}, .f = &.{ if (b.oneIn(4)) 0 else if (mode == 0) b.float(1, 5) else b.float(100, 500), b.float(0, 1), -b.float(100, 2000), b.float(100, 2000), -flt_max, flt_max } });
+                        },
+                        8 => try b.constraintOp(.reset_constraint_warm_start, c, .{}),
+                        else => try b.op(.add_impulse, bodies[b.index(num_bodies)], .{ .f = &b.vec3(-3, 3) }),
+                    }
+                }
+            }
+        }
+    }.build;
 }
 
 // (append the scenes of the slider group here)
