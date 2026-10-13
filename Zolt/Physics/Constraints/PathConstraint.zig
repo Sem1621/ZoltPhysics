@@ -17,7 +17,8 @@
 //!   four limits, 28 bytes (`MotorSettingsBytes`). Zolt writes zeros as padding, which is what the C++ build writes
 //!   (the parity compares the bytes); a restored stream with other padding bytes is accepted, its padding is not kept.
 //! - `GetConstraintSettings` is not implemented in Jolt (`JPH_ASSERT(false); return nullptr;`): with asserts enabled it
-//!   asserts, without it returns an empty `Ref`. Where Jolt dereferences a null path (SaveBinaryState of settings
+//!   asserts, without it returns an empty `Ref` (PhysicsScene.fromPhysicsSystem then adds the constraint without
+//!   settings, like Jolt's release build). Where Jolt dereferences a null path (SaveBinaryState of settings
 //!   without a path, the solver functions called directly on a constraint without a path, which the ConstraintManager
 //!   never does: it is not active), Zolt panics with a message.
 //! - The asserts on user input (a motor state other than Off with invalid motor settings, a target path fraction

@@ -21,6 +21,9 @@
 //!   (`CreateBodyError`, like BodyInterface.createBody). `createBodies` is all or nothing for these errors: the bodies
 //!   and constraints it created are removed and destroyed again before the error is returned (Jolt's soft failure
 //!   "out of bodies" keeps Jolt's behavior: the bodies that could be created are added, the result is false).
+//! - A constraint whose GetConstraintSettings returns nullptr (PathConstraint, reached with asserts off) becomes a
+//!   ConnectedConstraint without settings in `fromPhysicsSystem`, like Jolt's AddConstraint(nullptr, ...);
+//!   `createBodies` and `saveBinaryState` panic on it where Jolt dereferences the null pointer.
 //! - TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL (PhysicsScene, ConnectedConstraint).
 
 const std = @import("std");
@@ -249,7 +252,8 @@ pub const PhysicsScene = struct {
         for (self.constraints.items) |*cc| {
             const body1_id: BodyID = if (cc.body1 == fixed_to_world) .invalid else body_ids.items[cc.body1];
             const body2_id: BodyID = if (cc.body2 == fixed_to_world) .invalid else body_ids.items[cc.body2];
-            const c = try bi.createConstraint(cc.getSettings().?, body1_id, body2_id);
+            const settings = cc.getSettings() orelse @panic("PhysicsScene::CreateBodies: a constraint without settings (Jolt dereferences a null pointer)");
+            const c = try bi.createConstraint(settings, body1_id, body2_id);
 
             // Jolt: AddConstraint takes the first reference; Zolt: a temporary one, so that the constraint is freed when
             // AddConstraint fails
@@ -310,7 +314,8 @@ pub const PhysicsScene = struct {
         // Save constraints
         stream.write(@as(u32, @intCast(self.constraints.items.len)));
         for (self.constraints.items) |*cc| {
-            cc.settings.get().?.saveBinaryState(stream);
+            const settings = cc.settings.get() orelse @panic("PhysicsScene::SaveBinaryState: a constraint without settings (Jolt dereferences a null pointer)");
+            settings.saveBinaryState(stream);
             stream.write(cc.body1);
             stream.write(cc.body2);
         }
@@ -446,7 +451,13 @@ pub const PhysicsScene = struct {
                 // Create constraint settings and add the constraint
                 var settings = try c.getConstraintSettings();
                 defer settings.deinit();
-                try self.addConstraint(virtual.downcast(TwoBodyConstraintSettings, settings.get().?), b1.?.value, b2.?.value);
+                if (settings.get()) |s| {
+                    try self.addConstraint(virtual.downcast(TwoBodyConstraintSettings, s), b1.?.value, b2.?.value);
+                } else {
+                    // Jolt: AddConstraint(nullptr, ...), a constraint without settings. GetConstraintSettings returns
+                    // nullptr where it is not implemented (PathConstraint), after an assert: reached with asserts off
+                    try self.constraints.append(self.allocator, .{ .body1 = b1.?.value, .body2 = b2.?.value });
+                }
             }
         }
     }

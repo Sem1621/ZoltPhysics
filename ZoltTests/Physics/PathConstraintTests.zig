@@ -23,6 +23,8 @@ const Vec4 = zolt.Vec4;
 const Quat = zolt.Quat;
 const RVec3 = zolt.RVec3;
 const Body = zolt.Body;
+const Core = zolt.Core;
+const PhysicsScene = zolt.PhysicsScene;
 const Ref = zolt.Ref;
 const RefConst = zolt.RefConst;
 const PathConstraint = zolt.PathConstraint;
@@ -266,4 +268,44 @@ test "TestPathConstraintMomentum" {
     const local = box1.getInverseCenterOfMassTransform().mulVec3(box2.getCenterOfMassPosition().toVec3()).toVec3();
     try expect(@abs(local.getY()) < 1.0e-2 and @abs(local.getZ()) < 1.0e-2);
     try expect(local.getX() > 0.1);
+}
+
+test "TestPathConstraintFromPhysicsSystem (Jolt's release behavior)" {
+    // PathConstraint::GetConstraintSettings is not implemented in Jolt: it asserts and returns nullptr. Jolt's release
+    // build continues, PhysicsScene::FromPhysicsSystem adds the constraint with null settings (AddConstraint(nullptr,
+    // ...)) and the body indices. Zolt's ReleaseFast build does the same instead of unwrapping the empty Ref.
+    if (Core.enable_asserts) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+
+    var path = try makeLine(allocator, Vec3.init(-5, 0, 0), Vec3.init(5, 0, 0), 3, Vec3.axisY());
+    defer path.deinit();
+    const box1 = try c.createBox(RVec3.init(0, 0, 0), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.init(0.5, 0.5, 0.5), .{});
+    const box2 = try c.createBox(RVec3.init(1, 0, 0), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.init(0.2, 0.2, 0.2), .{});
+    var settings = PathConstraintSettings.init(allocator);
+    defer settings.asSettings().deinit();
+    settings.path.set(path.get());
+    _ = try c.createConstraint(PathConstraint, box1, box2, settings.asTwoBodySettingsConst());
+    _ = try c.createConstraint(PathConstraint, Body.fixedToWorld(), box1, settings.asTwoBodySettingsConst());
+
+    var scene: PhysicsScene = .init(allocator);
+    defer scene.deinit();
+    try scene.fromPhysicsSystem(&c.system);
+    try std.testing.expectEqual(@as(usize, 2), scene.getNumBodies());
+    try std.testing.expectEqual(@as(usize, 2), scene.getNumConstraints());
+    const constraints = scene.getConstraints();
+    try expect(constraints[0].getSettings() == null);
+    try std.testing.expectEqual(@as(u32, 0), constraints[0].body1);
+    try std.testing.expectEqual(@as(u32, 1), constraints[0].body2);
+    try expect(constraints[1].getSettings() == null);
+    try std.testing.expectEqual(PhysicsScene.fixed_to_world, constraints[1].body1);
+    try std.testing.expectEqual(@as(u32, 0), constraints[1].body2);
+
+    // A copy of the scene keeps the constraints without settings
+    var copy = scene.getConstraints()[0].clone();
+    defer copy.deinit();
+    try expect(copy.getSettings() == null);
 }

@@ -6397,19 +6397,21 @@ fn buildPathRotationTypes(b: *SceneBuilder) Allocator.Error!void {
     const arc = circlePathPoints(5, 1, std.math.pi);
     const rotation_types = [_]u32{ PathRotation.free, PathRotation.around_tangent, PathRotation.around_normal, PathRotation.around_binormal, PathRotation.to_path, PathRotation.fully_constrained, 7 };
     var constraints: [rotation_types.len]u32 = undefined;
+    var riders: [rotation_types.len]u32 = undefined;
     for (rotation_types, 0..) |rotation, k| {
         const x: Real = 4.0 * real(k);
         // The plate of the binormal type sleeps (a sleeping body has no velocity) until BuildIslands wakes it
         const asleep = k == 3;
         const base = try b.body(.{ .position = .{ x, 3, 0 }, .shape = plate, .gravity_factor = 0, .angular_velocity = if (asleep) .{ 0, 0, 0 } else .{ 0.1, 0.3, -0.2 } }, if (asleep) .dont_activate else .activate);
         const h = try b.body(.{ .position = .{ x + 1, 3.5, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.2), .shape = box, .angular_velocity = .{ 1, -2, 0.5 } }, .activate);
+        riders[k] = h;
         constraints[k] = try b.constraint(pathWithMotor(base, h, &arc, false, .{ 0, 0.5, 0 }, 0.0, rotation, 0, 0, Desc.default_motor));
         try b.constraintOp(.path_set_position_motor_state, constraints[k], .{ .i = &.{1} });
         try b.constraintOp(.path_set_target_velocity, constraints[k], .{ .f = &.{0.6} });
     }
     b.at(30);
     for (constraints) |c| try b.constraintOp(.path_set_target_velocity, c, .{ .f = &.{-0.4} });
-    try b.constraintOp(.notify_constraint_shape_changed, constraints[4], .{ .body = 9, .f = &.{ 0, 0.02, 0 } });
+    try b.constraintOp(.notify_constraint_shape_changed, constraints[4], .{ .body = riders[4], .f = &.{ 0, 0.02, 0 } }); // Body 2
 }
 
 /// A train on a looping track (a path from the world): six cars, each on the track (rotation constrained to the path),
