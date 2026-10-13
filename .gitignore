@@ -17,5 +17,6 @@
 **/zig-out
 **/zig-pkg
 .zig-cache
+__pycache__/
 # Claude Code worktrees used for parallel porting
 .claude/worktrees/
