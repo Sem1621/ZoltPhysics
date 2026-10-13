@@ -2225,7 +2225,65 @@ const FixedPointSlot = struct {
 const DistancePulleySlot = StubSlot;
 
 // ---- SLOT hinge: HingeConstraint (ConstraintKind hinge, OpKind 260..279) ----
-const HingeSlot = StubSlot;
+const HingeSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .hinge => {
+                const s = try zolt.HingeConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.hinge_axis1 = load3(f[0..3]);
+                s.normal_axis1 = load3(f[3..6]);
+                s.point2 = loadR3(r[3..6]);
+                s.hinge_axis2 = load3(f[6..9]);
+                s.normal_axis2 = load3(f[9..12]);
+                s.limits_min = f[12];
+                s.limits_max = f[13];
+                s.limits_spring_settings = loadSpring(i[1], f[14..16]);
+                s.max_friction_torque = f[16];
+                s.motor_settings = loadMotor(i[2], f[17..23]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const i = &op.i;
+        const f = &op.f;
+        const hinge = try castConstraint(zolt.HingeConstraint, c, .hinge);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .hinge_set_max_friction_torque => hinge.setMaxFrictionTorque(f[0]),
+            .hinge_set_motor_state => hinge.setMotorState(@enumFromInt(@as(i32, @bitCast(i[0])))),
+            .hinge_set_target_angular_velocity => hinge.setTargetAngularVelocity(f[0]),
+            .hinge_set_target_angle => hinge.setTargetAngle(f[0]),
+            .hinge_set_target_orientation_bs => hinge.setTargetOrientationBS(loadQuat(f[0..4])),
+            .hinge_set_limits => hinge.setLimits(f[0], f[1]),
+            .hinge_set_limits_spring_settings => hinge.setLimitsSpringSettings(loadSpring(i[0], f[0..2])),
+            .hinge_set_motor_settings => hinge.getMotorSettingsMut().* = loadMotor(i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .hinge => &.{
+                .{ .name = "motor_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "rotation_limits_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "motor_state", .kind = .u32 },
+                .{ .name = "target_angular_velocity", .kind = .f32 },
+                .{ .name = "target_angle", .kind = .f32 },
+            },
+            else => null,
+        };
+    }
+};
 
 // ---- SLOT slider: SliderConstraint (ConstraintKind slider, OpKind 280..299) ----
 const SliderSlot = StubSlot;
