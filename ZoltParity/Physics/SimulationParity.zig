@@ -828,6 +828,9 @@ const ZoltWorld = struct {
 
     fn destroy(self: *ZoltWorld) void {
         const allocator = self.allocator;
+        // The records of the teardown are not compared: an allocation failure of the activation listener there (the
+        // bodies the Phase 7 objects remove are deactivated) would be swallowed and fail the creation sweep
+        self.system.setBodyActivationListener(null);
         // Phase 7 objects first (~SimWorld of the .cpp): they remove their bodies and constraints from the system
         self.destroyPhase7();
         for (self.step_listeners, self.step_listener_added) |*listener, added| {
@@ -1380,7 +1383,11 @@ const ZoltWorld = struct {
         recorder.rewind();
         try CharacterSlot.restoreStates(self, &recorder);
         try CharacterVirtualSlot.restoreStates(self, &recorder);
-        return !recorder.isFailed();
+        // All bytes were read (jolt_sim_restore_character_states): a read past the end sets eof
+        const read = !recorder.isFailed();
+        var extra: [1]u8 = undefined;
+        recorder.readBytes(&extra);
+        return read and recorder.isEOF();
     }
 
     fn takeCharacterRecords(self: *ZoltWorld, out: *std.ArrayList(SimRecord)) !void {
@@ -2569,7 +2576,7 @@ const RunStats = struct {
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
 fn isPhase7Expectation(kind: OpKind) bool {
     return switch (kind) {
-        .character_expect_ground_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts => true,
+        .character_expect_ground_state, .cv_expect_ground_state, .cv_expect_value, .ragdoll_expect_active, .vehicle_expect_wheel_contacts => true,
         else => false,
     };
 }
@@ -3867,6 +3874,80 @@ const CharacterVirtualSlot = struct {
                 recorder.recorder().setValidating(i[0] != 0);
                 try c.restoreState(recorder.recorder());
                 return hash;
+            },
+            .cv_expect_value => return switch (i[0]) { // Changes nothing, the driver checks the result
+                0 => @intFromBool(c.getMaxHitsExceeded()),
+                1 => @intCast(c.getActiveContacts().len),
+                2, 3 => blk: {
+                    var n: u32 = 0;
+                    for (c.getActiveContacts()) |*contact| {
+                        if (contact.had_collision and (i[0] == 2 or contact.character_b != null))
+                            n += 1;
+                    }
+                    break :blk n;
+                },
+                4 => @intFromBool(c.base.getGroundBodyID().eql(world.getHandle(op.body))),
+                5 => @intFromBool(!c.base.getGroundVelocity().isNearZero(.{ .max_dist_sq = 1.0e-6 })),
+                6 => getShapeIndex(world, c.getShape()),
+                else => {
+                    std.debug.print("SimulationParity: unknown character virtual value {d}\n", .{i[0]});
+                    return error.InvalidScene;
+                },
+            },
+            .cv_set_step_velocity => {
+                // Character::Step of CharacterVirtualTests.cpp
+                const current_vertical_velocity = Vec3.init(0, c.getLinearVelocity().getY(), 0);
+                const ground_velocity = c.base.getGroundVelocity();
+                var new_velocity: Vec3 = undefined;
+                if (c.base.getGroundState() == .on_ground and // If on ground
+                    (current_vertical_velocity.getY() - ground_velocity.getY()) < 0.1) // And not moving away from ground
+                {
+                    // Assume velocity of ground when on ground
+                    new_velocity = ground_velocity;
+
+                    // Jump
+                    new_velocity = new_velocity.add(Vec3.init(0, f[7], 0));
+                } else new_velocity = current_vertical_velocity;
+
+                // Gravity
+                new_velocity = new_velocity.add(load3(f[3..6]).mulScalar(f[6]));
+
+                // Player input
+                new_velocity = new_velocity.add(load3(f[0..3]));
+
+                c.setLinearVelocity(new_velocity);
+            },
+            .cv_perf_update => {
+                // The step of a character in CharacterVirtualScene::UpdateTest of PerformanceTest
+
+                // Calculate new vertical velocity
+                var new_velocity: Vec3 = undefined;
+                if (c.base.getGroundState() == .on_ground and // If on ground
+                    c.getLinearVelocity().getY() < 0.1) // And not moving away from ground
+                    new_velocity = Vec3.zero()
+                else
+                    new_velocity = c.getLinearVelocity().mul(Vec3.init(0, 1, 0));
+                new_velocity = new_velocity.add(world.system.getGravity().mulScalar(f[0]));
+
+                // Deterministic random input
+                const count: u64 = op.count;
+                const hash = zolt.HashCombine.hash(count);
+                const x: i32 = @intCast(hash % 10);
+                const y: i32 = @intCast((hash / 10) % 10);
+                const speed: i32 = @intCast((hash / 100) % 10);
+
+                // Determine target position
+                const target = RVec3.init(4.0 * @as(Real, @floatFromInt(x)) - 20.0, 5.0, 4.0 * @as(Real, @floatFromInt(y)) - 20.0);
+
+                // Determine new character velocity
+                var direction = target.sub(c.getPosition()).toVec3().normalizedOr(Vec3.zero());
+                direction.setY(0);
+                new_velocity = new_velocity.add(direction.mulScalar(5.0 + 0.5 * @as(f32, @floatFromInt(speed))));
+                c.setLinearVelocity(new_velocity);
+
+                // Update the character position
+                const update_settings: CharacterVirtual.ExtendedUpdateSettings = .{};
+                try c.extendedUpdate(f[0], world.system.getGravity(), &update_settings, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp);
             },
             else => |kind| {
                 std.debug.print("SimulationParity: unknown character virtual operation {t}\n", .{kind});
