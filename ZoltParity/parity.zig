@@ -50,6 +50,7 @@ test {
     _ = @import("Physics/PlaneEmptyParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
     _ = @import("Physics/SimulationParity.zig");
+    _ = @import("Physics/SkeletonParity.zig");
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");
 }

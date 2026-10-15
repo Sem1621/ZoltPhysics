@@ -495,6 +495,12 @@ pub const test_shapes = if (@import("builtin").is_test) @import("Physics/Collisi
 /// build.zig for the inline tests (only in test builds)
 pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Constraints/TestConstraints.zig") else struct {};
 
+// Skeleton
+pub const SkeletalAnimation = @import("Skeleton/SkeletalAnimation.zig").SkeletalAnimation;
+pub const Skeleton = @import("Skeleton/Skeleton.zig").Skeleton;
+pub const SkeletonMapper = @import("Skeleton/SkeletonMapper.zig").SkeletonMapper;
+pub const SkeletonPose = @import("Skeleton/SkeletonPose.zig").SkeletonPose;
+
 // TriangleSplitter
 pub const TriangleSplitter = @import("TriangleSplitter/TriangleSplitter.zig").TriangleSplitter;
 pub const TriangleSplitterBinning = @import("TriangleSplitter/TriangleSplitterBinning.zig").TriangleSplitterBinning;
@@ -748,6 +754,10 @@ const source_files = .{
     @import("Physics/StateRecorder.zig"),
     @import("Physics/StateRecorderImpl.zig"),
     @import("RegisterTypes.zig"),
+    @import("Skeleton/SkeletalAnimation.zig"),
+    @import("Skeleton/Skeleton.zig"),
+    @import("Skeleton/SkeletonMapper.zig"),
+    @import("Skeleton/SkeletonPose.zig"),
     @import("TriangleSplitter/TriangleSplitter.zig"),
     @import("TriangleSplitter/TriangleSplitterBinning.zig"),
     @import("TriangleSplitter/TriangleSplitterMean.zig"),

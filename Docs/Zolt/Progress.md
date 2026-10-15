@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 76.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
+**Library: 77.1%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -31,7 +31,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Vehicle` | 0% | 0 | 0 | 0 | 12 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
 | `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
-| `Jolt/Skeleton` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 780 |
+| `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
 
 <details><summary>Jolt — 100%</summary>
@@ -521,14 +521,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Skeleton — 0%</summary>
+<details><summary>Jolt/Skeleton — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `SkeletalAnimation.cpp`, `SkeletalAnimation.h` | 206 | ❌ todo |  |
-| `Skeleton.cpp`, `Skeleton.h` | 121 | ❌ todo |  |
-| `SkeletonMapper.cpp`, `SkeletonMapper.h` | 318 | ❌ todo |  |
-| `SkeletonPose.cpp`, `SkeletonPose.h` | 135 | ❌ todo |  |
+| `SkeletalAnimation.cpp`, `SkeletalAnimation.h` | 206 | ✅ complete | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `Skeleton.cpp`, `Skeleton.h` | 121 | ✅ complete | `Zolt/Skeleton/Skeleton.zig` |
+| `SkeletonMapper.cpp`, `SkeletonMapper.h` | 318 | ✅ complete | `Zolt/Skeleton/SkeletonMapper.zig` |
+| `SkeletonPose.cpp`, `SkeletonPose.h` | 135 | ✅ complete | `Zolt/Skeleton/SkeletonPose.zig` |
 
 </details>
 
