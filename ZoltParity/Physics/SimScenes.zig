@@ -12851,9 +12851,10 @@ fn buildCharacterVirtualContactLimits(b: *SceneBuilder) Allocator.Error!void {
     }
 }
 
-/// Penetration recovery: three characters start inside a box with penetration recovery speeds 0, 0.5 and 1
-/// (TestInitiallyIntersecting; the first one changes to 0.75 later), a fourth one between two 75 degree slabs that
-/// intersect it (TestInitiallyIntersecting2) is driven upwards, then walks out of them
+/// Penetration recovery: three characters start inside a box (turned by 30 degrees, so that the contact normals have
+/// no zero components) with penetration recovery speeds 0, 0.5 and 1 (TestInitiallyIntersecting; the first one changes
+/// to 0.75 later), a fourth one with speed 0.75 between two 75 degree slabs that intersect it
+/// (TestInitiallyIntersecting2) is driven upwards, then walks out of them
 fn buildCharacterVirtualPenetration(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
     b.num_updates = 60;
@@ -12862,12 +12863,12 @@ fn buildCharacterVirtualPenetration(b: *SceneBuilder) Allocator.Error!void {
     var handles: [3]u32 = undefined;
     for (&handles, speeds, 0..) |*h, speed, i| {
         const z = 3 * real(i);
-        _ = try addStaticBox(b, .{ 0.5, 0.5, 0.5 }, .{ -0.5, 0.5, z }, identity_rotation, 0);
+        _ = try addStaticBox(b, .{ 0.5, 0.5, 0.5 }, .{ -0.5, 0.5, z }, axisAngle(.{ 0, 1, 0 }, std.math.pi / 6.0), 0);
         h.* = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, z }, .penetration_recovery_speed = speed });
     }
     _ = try addStaticBox(b, .{ 1.0, 0.1, 1.0 }, .{ 0, 0, -4 }, axisAngle(.{ 0, 0, 1 }, 75.0 * std.math.pi / 180.0), 0);
     _ = try addStaticBox(b, .{ 1.0, 0.1, 1.0 }, .{ 0, 0, -4 }, axisAngle(.{ 0, 0, 1 }, -75.0 * std.math.pi / 180.0), 0);
-    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, -4 } });
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, -4 }, .penetration_recovery_speed = 0.75 });
 
     for (0..b.num_updates) |update| {
         const u: u32 = @intCast(update);
