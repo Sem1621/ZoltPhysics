@@ -68,8 +68,10 @@
 //! - The has-constraint flag that Jolt reads into a `bool` is read as a byte (`!= 0`), like BodyCreationSettings' bools.
 //!
 //! Where Jolt has undefined behavior or dereferences null, Zolt panics with a message (also in optimized builds): a
-//! null skeleton (`mSkeleton->`), a null additional constraint (SaveBinaryState, CreateRagdoll,
-//! CalculateConstraintPriorities), a part whose constraint connects it to a parent that is not created before it
+//! null skeleton (`mSkeleton->`, where Jolt dereferences it), the null settings of a ragdoll made with the public
+//! constructor (`mRagdollSettings->` in DriveToPoseUsingMotors), a null additional constraint (SaveBinaryState,
+//! CreateRagdoll, CalculateConstraintPriorities), a part whose constraint connects it to a parent that is not created
+//! before it
 //! (CreateRagdoll reads an uninitialized slot of its JPH_STACK_ALLOC), a body that cannot be locked in IsActive /
 //! SetGroupID / GetPose (Jolt dereferences the null body of a destroyed or invalid body ID). Out of range indices
 //! (GetRootTransform of a ragdoll without bodies, a body index of an additional constraint) are Zig's bounds checks. A
@@ -506,10 +508,9 @@ pub const RagdollSettings = struct {
     /// @param opts.base_priority The lowest priority that will be used in the ragdoll.
     pub fn calculateConstraintPriorities(self: *RagdollSettings, opts: struct { base_priority: u32 = 0 }) Allocator.Error!void {
         const base_priority = opts.base_priority;
-        const skeleton = self.skeletonOf();
         const num_parts = self.parts.items.len;
         if (Core.enable_asserts) std.debug.assert(base_priority +% @as(u32, @truncate(num_parts)) > base_priority); // Base priority is too high and will cause overflows
-        if (Core.enable_asserts) std.debug.assert(skeleton.areJointsCorrectlyOrdered());
+        if (Core.enable_asserts) std.debug.assert(self.skeletonOf().areJointsCorrectlyOrdered());
 
         // Calculate priority for each part. Start with the base priority and increment towards the root
         const priorities = try self.allocator.alloc(u32, num_parts);
@@ -525,7 +526,7 @@ pub const RagdollSettings = struct {
                 priorities[jj] = @max(priorities[jj], cur_priority);
                 cur_priority +%= 1;
 
-                j = skeleton.getJoint(jj).parent_joint_index;
+                j = self.skeletonOf().getJoint(jj).parent_joint_index;
                 if (j == -1) break;
             }
         }
@@ -763,7 +764,6 @@ pub const RagdollSettings = struct {
     /// are allocated with the settings' allocator. `error.InvalidShape` for a part without a shape, error.OutOfMemory:
     /// the bodies and constraints that were created are destroyed again.)
     pub fn createRagdoll(self: *const RagdollSettings, collision_group: CollisionGroup.GroupID, user_data: u64, system: *PhysicsSystem) CreateBodyError!?*Ragdoll {
-        const skeleton = self.skeletonOf();
         const r = try Ragdoll.create(self.allocator, system);
         errdefer r.destroy(); // delete r: destroys the bodies and releases the constraints that were created
         r.ragdoll_settings.set(self);
@@ -792,7 +792,7 @@ pub const RagdollSettings = struct {
 
             // Create constraint
             if (p.getToParent()) |to_parent| {
-                const parent = skeleton.getJoint(joint_idx).parent_joint_index;
+                const parent = self.skeletonOf().getJoint(joint_idx).parent_joint_index;
                 if (parent < 0 or parent >= @as(i32, @intCast(joint_idx)))
                     @panic("RagdollSettings.createRagdoll: a part is connected to a parent part that is not created before it (Jolt reads an uninitialized body pointer)");
                 const body1 = bodies[@intCast(parent)];
@@ -1067,12 +1067,16 @@ pub const Ragdoll = struct {
         }
     }
 
-    /// The skeleton of the settings (JPH_ASSERT(inPose.GetSkeleton() == mRagdollSettings->mSkeleton))
+    /// `mRagdollSettings->`: Jolt dereferences the settings without a check (a ragdoll made with the public constructor
+    /// has none)
+    fn settingsOf(self: *const Ragdoll) *const RagdollSettings {
+        return self.ragdoll_settings.get() orelse @panic("Ragdoll: no ragdoll settings (Jolt dereferences a null mRagdollSettings)");
+    }
+
+    /// JPH_ASSERT(inPose.GetSkeleton() == mRagdollSettings->mSkeleton)
     fn checkPoseSkeleton(self: *const Ragdoll, pose: *const SkeletonPose) void {
-        if (Core.enable_asserts) {
-            const settings = self.ragdoll_settings.get().?;
-            std.debug.assert(pose.getSkeleton() == settings.skeleton.get());
-        }
+        if (Core.enable_asserts)
+            std.debug.assert(pose.getSkeleton() == self.settingsOf().skeleton.get());
     }
 
     /// Set the ragdoll to a pose (calls BodyInterface::SetPositionAndRotation to instantly move the ragdoll)
@@ -1151,11 +1155,10 @@ pub const Ragdoll = struct {
     /// Drive the ragdoll to a specific pose by activating the motors on each constraint.
     pub fn driveToPoseUsingMotors(self: *Ragdoll, pose: *const SkeletonPose) void {
         self.checkPoseSkeleton(pose);
-        const settings = self.ragdoll_settings.get().?;
 
         // Move bodies into the correct position using constraints
         for (0..pose.getJointMatrices().len) |i| {
-            const constraint_idx = settings.getConstraintIndexForBodyIndex(i);
+            const constraint_idx = self.settingsOf().getConstraintIndexForBodyIndex(i);
             if (constraint_idx >= 0) {
                 // Get desired rotation of this body relative to its parent
                 const joint_state = pose.getJoint(i);
@@ -1186,11 +1189,10 @@ pub const Ragdoll = struct {
         self.checkPoseSkeleton(prev_pose);
         self.checkPoseSkeleton(pose);
         if (Core.enable_asserts) std.debug.assert(delta_time > 0.0);
-        const settings = self.ragdoll_settings.get().?;
 
         // Move bodies into the correct position using constraints
         for (0..pose.getJointMatrices().len) |i| {
-            const constraint_idx = settings.getConstraintIndexForBodyIndex(i);
+            const constraint_idx = self.settingsOf().getConstraintIndexForBodyIndex(i);
             if (constraint_idx >= 0) {
                 // Get desired rotation of this body relative to its parent
                 const prev_joint_state = prev_pose.getJoint(i);
