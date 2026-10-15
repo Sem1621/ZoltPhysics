@@ -100,7 +100,7 @@ jobs:
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}
 
   determinism:
-    # Milestone M6: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
+    # Milestones M6 and M8: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
     # arguments), and the hash does not depend on the thread count
     runs-on: ubuntu-latest
     name: Determinism check double_precision=${{ matrix.double_precision }}
@@ -112,10 +112,12 @@ jobs:
             pyramid_hash: '0x74d0118836ac0892'
             convex_vs_mesh_hash: '0x918f27cacae9752b'
             high_speed_hash: '0x58d8d892536f4021'
+            character_virtual_hash: '0xc1d4e05b164b1221'
           - double_precision: true
             pyramid_hash: '0xf07f04597a102a82'
             convex_vs_mesh_hash: '0x3729e7890b93a289'
             high_speed_hash: '0x183f48cb94739ce'
+            character_virtual_hash: '0xa0b16727aa16fdb0'
     steps:
     - name: Checkout Code
       uses: actions/checkout@v5
@@ -135,3 +137,9 @@ jobs:
       run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=1 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
     - name: Test Pyramid with 2 threads
       run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=2 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
+    - name: Test CharacterVirtual
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=Discrete -t=max -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
+    - name: Test CharacterVirtual with 1 thread
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=Discrete -t=1 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
+    - name: Test CharacterVirtual with 2 threads
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=Discrete -t=2 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
