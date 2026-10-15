@@ -3543,6 +3543,21 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 //   are zero-initialized in Zolt (the reference zero-fills its allocations, see the rules of the SimScenes header).
 // A slot whose classes are not ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes are skipped through
 // their Blocker, and a supported scene that creates its objects fails (checkPhase7Slots).
+//
+// The interface changes of the foundation review (for a group that started on the earlier interface):
+// - TrackedVehicleSlot / MotorcycleSlot: `applyOp(world, op) !u32` is now `applyVehicleOp(world, op, vehicle) !void`
+//   (the driver finds the vehicle with VehicleSlot.vehicle and returns VehicleSlot.constraintState). The ranges are
+//   routed by Phase7OpRange: the vehicle core 520..569, tracked 570..579, motorcycle 580..589 (were 554..559 and
+//   560..566; the variant operations are renumbered on both sides). New hooks of the variants: makeControllerSettings,
+//   makeWheelSettings, writeWheelState, writeControllerState, engine, transmission (VehicleSlot calls them in create,
+//   writeState, settingsPart and its engine / transmission operations, so the variants never edit VehicleSlot).
+// - New functions: CharacterVirtualSlot.characterIdSequence, RagdollSlot.settingsBytes / settingsInfo,
+//   VehicleSlot.vehicle / constraintState / settingsPart (the CharacterID test and checkPhase7Settings call them).
+// - New operations: character_body_hash (421), the vehicle core operations 554..562 (the Constraint interface of
+//   VehicleConstraint, vehicle_expect_constraint_state, WheelWV::ApplyTorque, VehicleEngine::ApplyTorque /
+//   ApplyDamping); SimScenes.ObjectField.vehicle_properties holds the constraint priority, the step overrides and the
+//   user data of a vehicle; a character state restore must read every byte (ZoltWorld.restoreCharacterStates);
+//   destroyAll frees the slot's Storage too.
 
 /// The slot of a class group whose classes are not ported yet: the functions of every slot, every operation returns
 /// error.SceneNotSupported
