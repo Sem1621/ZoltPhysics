@@ -12,6 +12,8 @@
 //!   `restoreState` are virtual (CharacterVirtual overrides them), the destructor is generated. Its constructor is
 //!   `init(T, allocator, settings, system)` with the most derived type `T`, it takes references to the shape and to the
 //!   ground material (`PhysicsMaterial.default`, a static material whose references are not counted).
+//!   `restoreState` returns `Allocator.Error`: CharacterVirtual's resizes its list of active contacts (Jolt's
+//!   `mActiveContacts.resize`), the only allocation of a restore.
 //! - `system: *PhysicsSystem` is Jolt's `mSystem` (E4): the derived classes create, move and query bodies through it.
 //! - `EGroundState` is restored from a stream (`RestoreState` reads it as an `int`), so `GroundState` is a
 //!   non-exhaustive `enum(i32)`: `toString` gives "Unknown" for other values like Jolt's release build (and asserts like
@@ -152,8 +154,8 @@ pub const CharacterBase = struct {
         /// Saving state for replay
         saveState: *const fn (self: *const CharacterBase, stream: *StateRecorder) void,
 
-        /// Restoring state for replay
-        restoreState: *const fn (self: *CharacterBase, stream: *StateRecorder) void,
+        /// Restoring state for replay (CharacterVirtual's resizes its contact list, so it can fail to allocate)
+        restoreState: *const fn (self: *CharacterBase, stream: *StateRecorder) Allocator.Error!void,
     };
 
     pub const GroundState = enum(i32) {
@@ -366,8 +368,8 @@ pub const CharacterBase = struct {
     }
 
     /// Restoring state for replay
-    pub fn restoreState(self: *CharacterBase, stream: *StateRecorder) void {
-        self.vtable.restoreState(self, stream);
+    pub fn restoreState(self: *CharacterBase, stream: *StateRecorder) Allocator.Error!void {
+        return self.vtable.restoreState(self, stream);
     }
 
     /// The bodies of the virtual functions of CharacterBase
@@ -382,7 +384,7 @@ pub const CharacterBase = struct {
             // Can't save user data (may be a pointer) and material
         }
 
-        pub fn restoreState(self: *CharacterBase, stream: *StateRecorder) void {
+        pub fn restoreState(self: *CharacterBase, stream: *StateRecorder) Allocator.Error!void {
             stream.read(&self.ground_state);
             stream.read(&self.ground_body_id);
             stream.read(&self.ground_body_sub_shape_id);
@@ -446,8 +448,8 @@ const TestCharacter = struct {
         stream.write(self.position);
     }
 
-    pub fn restoreState(self: *TestCharacter, stream: *StateRecorder) void {
-        CharacterBase.impl.restoreState(&self.base, stream);
+    pub fn restoreState(self: *TestCharacter, stream: *StateRecorder) Allocator.Error!void {
+        try CharacterBase.impl.restoreState(&self.base, stream);
         stream.read(&self.position);
     }
 };
@@ -615,7 +617,7 @@ test "CharacterBase: SaveState / RestoreState round trip, user data and material
     base.ground_velocity = Vec3.zero();
     character.position = RVec3.zero();
     recorder.rewind();
-    character.base.restoreState(recorder.recorder());
+    try character.base.restoreState(recorder.recorder());
     try testing.expect(!recorder.isFailed() and !recorder.isEOF());
     try testing.expectEqual(CharacterBase.GroundState.on_steep_ground, base.getGroundState());
     try testing.expect(base.getGroundBodyID().eql(BodyID.fromIndexAndSequenceNumber(12, 3)));
@@ -635,7 +637,7 @@ test "CharacterBase: SaveState / RestoreState round trip, user data and material
     odd.writeBytes(data);
     std.mem.writeInt(i32, odd.data.items[0..4], 9, .little);
     odd.rewind();
-    character.base.restoreState(odd.recorder());
+    try character.base.restoreState(odd.recorder());
     try testing.expectEqual(@as(i32, 9), @intFromEnum(base.getGroundState()));
     try testing.expect(!base.isSupported());
 }
