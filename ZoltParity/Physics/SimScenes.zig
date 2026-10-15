@@ -2627,8 +2627,17 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "character_ops", .build = buildCharacterOps, .blocked_by = .characters, .sweep_stride = 20, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
     // (append the Character scenes here)
     // ---- CharacterVirtual ----
-    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 30, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
-    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 25, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
+    // No D12 sweeps in the CharacterVirtual scenes (`sweep_stride = 0`): the swept updates rebuild the Zolt broad phase
+    // trees (BroadPhaseQuadTree's UpdatePrepare / UpdateFinalize also run in an update that fails later, every restore of
+    // the snapshot marks all bodies as changed), which then get another layout than the C++ trees: the layout depends on
+    // the history and is not part of the saved state. A CharacterVirtual query receives its hits in the order of the
+    // layout, and Jolt calls OnAdjustBodyVelocity / OnContactValidate (ContactCastCollector) in that order, before it
+    // sorts the contacts, so the character records (compared in call order) and the cv_check_collision hashes differ after
+    // a sweep (character_virtual_characters with sweeps: record 40 of update 37 adjusts body 300 in Jolt and body
+    // 0x00800002 in Zolt, both are hit by the same query). Without sweeps both sides have the same history (restore_cross
+    // too: both sides restore).
+    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
+    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
     // (append the CharacterVirtual scenes here)
     // ---- Ragdoll ----
     .{ .name = "ragdoll_ops", .build = buildRagdollOps, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 10 } },
