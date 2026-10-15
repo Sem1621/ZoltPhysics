@@ -19,7 +19,9 @@
 //!   corrupt stream, where Jolt's resize aborts) is `error.OutOfMemory`.
 //! - Sample: Jolt's asserts on its input (`inTime >= 0`, the keyframe fraction in [0, 1], normalized rotations) are
 //!   checked in safe builds only (`if (Core.enable_asserts)`), so that optimized builds compute what Jolt's release
-//!   build computes. Where Jolt has undefined behavior Zolt panics: an animated joint that is not in the pose's skeleton
+//!   build computes. The binary search always ends on two keyframes that bracket the time, also when the keyframes are
+//!   not sorted, so the fraction is only outside [0, 1] when it is NaN: times whose differences overflow (near the end
+//!   of the float range, infinite). Where Jolt has undefined behavior Zolt panics: an animated joint that is not in the pose's skeleton
 //!   (Jolt writes `ioPose.GetJoint(-1)`), an animated joint without keyframes (Jolt reads `front()` of an empty array)
 //!   and a pose without a skeleton (Jolt dereferences null).
 //! - `fmod(inTime, duration)` is `@rem(time, duration)`: both are the exact remainder with the sign of the time (see
@@ -221,7 +223,7 @@ pub const SkeletalAnimation = struct {
                 const s2 = &keyframes[@intCast(low + 1)];
 
                 const fraction = (t - s1.time) / (s2.time - s1.time);
-                if (Core.enable_asserts) std.debug.assert(fraction >= 0.0 and fraction <= 1.0); // Only when the keyframes are not sorted, Jolt's release build continues
+                if (Core.enable_asserts) std.debug.assert(fraction >= 0.0 and fraction <= 1.0); // Only a NaN fails it (times whose differences overflow), Jolt's release build continues
 
                 state.translation = s1.base.translation.mulScalar(1.0 - fraction).add(s2.base.translation.mulScalar(fraction));
                 if (Core.enable_asserts) std.debug.assert(s1.base.rotation.isNormalized(.{}));

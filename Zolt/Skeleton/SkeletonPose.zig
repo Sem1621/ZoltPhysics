@@ -12,6 +12,9 @@
 //!   allocated with `allocator`).
 //! - Jolt's "Joints must be ordered: parents first" assert is checked in safe builds only (`if (Core.enable_asserts)`):
 //!   Jolt's release build continues with a matrix that was computed earlier, and so do Zolt's optimized builds.
+//! - Where Jolt has undefined behavior Zolt panics: calculateJointMatrices and calculateJointStates of a pose that has
+//!   joint states but no skeleton (Jolt dereferences a null mSkeleton; reachable by adding joint states through
+//!   getJointsMut before setSkeleton).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

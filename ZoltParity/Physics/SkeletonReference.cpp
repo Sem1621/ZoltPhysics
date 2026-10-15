@@ -32,6 +32,8 @@ static constexpr uint32 cSkelMaxJoints = 40;
 static constexpr uint32 cSkelMaxName = 8;
 static constexpr uint32 cSkelMaxAnimatedJoints = 12;
 static constexpr uint32 cSkelMaxKeyframes = 12;
+static constexpr uint32 cSkelMaxResults = 2 * cSkelMaxJoints + 1;	///< Mappings, chains, unmapped and locked joints of two Initialize calls and a user chain
+static constexpr uint32 cSkelMaxUserChain = 4;
 
 // Must match SkelJointDesc in SkeletonParity.zig
 struct SkelJointDesc
@@ -66,6 +68,7 @@ struct SkelResult
 	int32				mParentJointIndices[cSkelMaxJoints];
 	uint32				mJointCount;
 	uint32				mCorrectlyOrdered;
+	uint32				mRefCount;								///< GetRefCount of the skeleton (held by one Ref)
 };
 
 // Must match SkelKeyframe in SkeletonParity.zig
@@ -101,10 +104,14 @@ struct SkelPoseResult
 	float				mJointStates[cSkelMaxJoints][7];		///< CalculateJointStates of the input matrices
 	float				mResizedStates[cSkelMaxJoints][7];		///< The joint states after SetSkeleton(skeleton 2)
 	float				mFromMatrixStates[cSkelMaxJoints][7];	///< JointState::FromMatrix of every input matrix
+	float				mCopyStates[cSkelMaxJoints][7];			///< The joint states of a copy of the pose (copy constructor)
 	Real				mRootOffset[3];
 	uint32				mJointCount;
 	uint32				mResizedJointCount;
 	uint32				mResizedMatrixCount;
+	uint32				mCopyJointCount;
+	uint32				mCopyMatrixCount;
+	uint32				mRefCounts[7];							///< GetRefCount of the skeletons around SetSkeleton and a copy of the pose, see jolt_skel_pose
 };
 
 // Must match SkelMapperDesc in SkeletonParity.zig
@@ -115,8 +122,12 @@ struct SkelMapperDesc
 	float				mNeutralPose1[cSkelMaxJoints][16];
 	float				mNeutralPose2[cSkelMaxJoints][16];
 	uint32				mCanMapMode;							///< 0: the default argument (sDefaultCanMapJoint), 1: SkelCanMapJoint with mCanMapTable
+	uint32				mInitializeTwice;						///< Call Initialize a second time (Jolt asserts, its release build appends)
 	uint32				mLockMode;								///< Bit 0: LockTranslations(mLocked), bit 1: LockAllTranslations (when there are mappings), in that order
 	uint32				mMap;									///< Call Map (no locked joint without a parent)
+	uint32				mUserChainLengths[2];					///< A chain added through GetChains() after the locks when not 0 (lengths of mUserChain1 / mUserChain2)
+	int32				mUserChain1[cSkelMaxUserChain];
+	int32				mUserChain2[cSkelMaxUserChain];
 	uint8				mCanMapTable[cSkelMaxJoints * cSkelMaxJoints]; ///< [j1 * n2 + j2]: 0 no, 1 if the names are equal, 2 yes
 	uint8				mLocked[cSkelMaxJoints];
 	float				mPose1ModelSpace[cSkelMaxJoints][16];
@@ -132,14 +143,15 @@ struct SkelMapperResult
 	uint32				mNumChains;
 	uint32				mNumUnmapped;
 	uint32				mNumLocked;
-	int32				mMappingJoints[cSkelMaxJoints][2];
-	float				mMappingMatrices[cSkelMaxJoints][2][16];
-	uint32				mChainLengths[cSkelMaxJoints][2];
-	int32				mChainJoints1[cSkelMaxJoints][cSkelMaxJoints];
-	int32				mChainJoints2[cSkelMaxJoints][cSkelMaxJoints];
-	int32				mUnmapped[cSkelMaxJoints][2];
-	int32				mLockedJoints[2 * cSkelMaxJoints][2];
-	float				mLockedTranslations[2 * cSkelMaxJoints][3];
+	uint32				mRefCounts[3];							///< GetRefCount of the mapper, skeleton 1 and skeleton 2 at the end
+	int32				mMappingJoints[cSkelMaxResults][2];
+	float				mMappingMatrices[cSkelMaxResults][2][16];
+	uint32				mChainLengths[cSkelMaxResults][2];
+	int32				mChainJoints1[cSkelMaxResults][cSkelMaxJoints];
+	int32				mChainJoints2[cSkelMaxResults][cSkelMaxJoints];
+	int32				mUnmapped[cSkelMaxResults][2];
+	int32				mLockedJoints[cSkelMaxResults][2];
+	float				mLockedTranslations[cSkelMaxResults][3];
 	int32				mMappedJointIdx[cSkelMaxJoints + 2];	///< GetMappedJointIdx(j1) for j1 = -1 .. n1
 	uint32				mIsLocked[cSkelMaxJoints + 2];			///< IsJointTranslationLocked(j2) for j2 = -1 .. n2
 	float				mPose2ModelSpace[cSkelMaxJoints][16];	///< Map
@@ -261,14 +273,16 @@ uint32 jolt_skel_skeleton(const SkelDesc *inDesc, const SkelName *inQueries, uin
 		outResult->mParentJointIndices[j] = skeleton->GetJoint(j).mParentJointIndex;
 	outResult->mJointCount = uint32(skeleton->GetJointCount());
 	outResult->mCorrectlyOrdered = skeleton->AreJointsCorrectlyOrdered()? 1 : 0;
+	outResult->mRefCount = skeleton->GetRefCount();
 	for (uint32 q = 0; q < inNumQueries; ++q)
 		outJointIndices[q] = skeleton->GetJointIndex(string_view(inQueries[q].mName, inQueries[q].mLength));
 	return SkelCopyBytes(SkelSave(*skeleton), outBytes, inCapacity);
 }
 
 // Skeleton::sRestoreFromBinaryState of the bytes, then SaveBinaryState of the result. Returns the size of the saved
-// bytes, or 0xFFFFFFFF and the error text in outError.
-uint32 jolt_skel_skeleton_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity, char *outError, uint32 inErrorCapacity)
+// bytes and the reference count of the restored skeleton (held by the result), or 0xFFFFFFFF and the error text in
+// outError.
+uint32 jolt_skel_skeleton_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity, char *outError, uint32 inErrorCapacity, uint32 *outRefCount)
 {
 	SkelEnsureAllocator();
 	std::stringstream data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
@@ -280,16 +294,19 @@ uint32 jolt_skel_skeleton_resave(const uint8 *inBytes, uint32 inSize, uint8 *out
 		size_t n = std::min(size_t(inErrorCapacity - 1), error.size());
 		memcpy(outError, error.data(), n);
 		outError[n] = 0;
+		*outRefCount = 0;
 		return 0xFFFFFFFF;
 	}
+	*outRefCount = result.Get()->GetRefCount();
 	return SkelCopyBytes(SkelSave(*result.Get()), outBytes, inCapacity);
 }
 
 // SkeletalAnimation: a pose of the skeleton starts with inInitialStates (7 floats per joint: rotation, translation),
 // then Sample at every time (outStates gets the states of all joints after each sample), ScaleJoints(inScale) and
-// Sample at every time again (the second half of outStates), GetDuration before and after scaling, IsLooping and
-// SaveBinaryState after scaling (returns the size of the bytes)
-uint32 jolt_skel_animation(const SkelDesc *inSkeleton, const SkelAnimDesc *inAnimation, const float *inInitialStates, const float *inTimes, uint32 inNumTimes, float inScale, float *outStates, float *outDurations, uint32 *outIsLooping, uint8 *outBytes, uint32 inCapacity)
+// Sample at every time again (the second half of outStates), GetDuration before and after scaling, IsLooping, the
+// reference counts of the skeleton (held by a Ref and the pose) and the animation, and SaveBinaryState after scaling
+// (returns the size of the bytes)
+uint32 jolt_skel_animation(const SkelDesc *inSkeleton, const SkelAnimDesc *inAnimation, const float *inInitialStates, const float *inTimes, uint32 inNumTimes, float inScale, float *outStates, float *outDurations, uint32 *outIsLooping, uint32 *outRefCounts, uint8 *outBytes, uint32 inCapacity)
 {
 	SkelEnsureAllocator();
 	Ref<Skeleton> skeleton = SkelMakeSkeleton(*inSkeleton, nullptr);
@@ -315,24 +332,31 @@ uint32 jolt_skel_animation(const SkelDesc *inSkeleton, const SkelAnimDesc *inAni
 	}
 
 	*outIsLooping = animation->IsLooping()? 1 : 0;
+	outRefCounts[0] = skeleton->GetRefCount();
+	outRefCounts[1] = animation->GetRefCount();
 	return SkelCopyBytes(SkelSave(*animation), outBytes, inCapacity);
 }
 
-// SkeletalAnimation::sRestoreFromBinaryState of the bytes (never an error), then SaveBinaryState of the result
-uint32 jolt_skel_animation_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity)
+// SkeletalAnimation::sRestoreFromBinaryState of the bytes (never an error), then SaveBinaryState of the result, and the
+// reference count of the restored animation (held by the result)
+uint32 jolt_skel_animation_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity, uint32 *outRefCount)
 {
 	SkelEnsureAllocator();
 	std::stringstream data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
 	StreamInWrapper in(data);
 	SkeletalAnimation::AnimationResult result = SkeletalAnimation::sRestoreFromBinaryState(in);
+	*outRefCount = result.Get()->GetRefCount();
 	return SkelCopyBytes(SkelSave(*result.Get()), outBytes, inCapacity);
 }
 
 // SkeletonPose: SetSkeleton(skeleton 1), the joint states inStates (7 floats per joint) and SetRootOffset, the joint
 // matrices inMatrices (16 floats per joint, read by CalculateJointMatrices for parents after their children),
 // CalculateJointMatrices, CalculateLocalSpaceJointMatrices, then the joint matrices inMatrices again and
-// CalculateJointStates, then SetSkeleton(skeleton 2) (the states that are kept and the new default states), and
-// JointState::FromMatrix of every input matrix (cSkelMaxJoints of them)
+// CalculateJointStates, then a copy of the pose and SetSkeleton(skeleton 2) twice (the states that are kept and the
+// new default states), and JointState::FromMatrix of every input matrix (cSkelMaxJoints of them). The reference counts
+// of the skeletons (each also held by a Ref here): [0] skeleton 1 after SetSkeleton(skeleton 1), [1] skeleton 1 after
+// the copy, [2] skeleton 1 and [3] skeleton 2 after SetSkeleton(skeleton 2), [4] skeleton 2 after setting it again,
+// [5] skeleton 1 and [6] skeleton 2 after the copy is destroyed.
 void jolt_skel_pose(const SkelDesc *inSkeleton1, const SkelDesc *inSkeleton2, const float *inStates, const float *inMatrices, const Real *inRootOffset, SkelPoseResult *outResult)
 {
 	SkelEnsureAllocator();
@@ -341,6 +365,7 @@ void jolt_skel_pose(const SkelDesc *inSkeleton1, const SkelDesc *inSkeleton2, co
 
 	SkeletonPose pose;
 	pose.SetSkeleton(skeleton1);
+	outResult->mRefCounts[0] = skeleton1->GetRefCount();
 	uint n = pose.GetJointCount();
 	outResult->mJointCount = n;
 	for (uint j = 0; j < n; ++j)
@@ -370,7 +395,22 @@ void jolt_skel_pose(const SkelDesc *inSkeleton1, const SkelDesc *inSkeleton2, co
 	outResult->mRootOffset[1] = offset.GetY();
 	outResult->mRootOffset[2] = offset.GetZ();
 
-	pose.SetSkeleton(skeleton2);
+	{
+		SkeletonPose copy = pose;
+		outResult->mRefCounts[1] = skeleton1->GetRefCount();
+		pose.SetSkeleton(skeleton2);
+		outResult->mRefCounts[2] = skeleton1->GetRefCount();
+		outResult->mRefCounts[3] = skeleton2->GetRefCount();
+		pose.SetSkeleton(skeleton2);
+		outResult->mRefCounts[4] = skeleton2->GetRefCount();
+		outResult->mCopyJointCount = copy.GetJointCount();
+		outResult->mCopyMatrixCount = uint32(copy.GetJointMatrices().size());
+		for (uint j = 0; j < copy.GetJointCount(); ++j)
+			SkelStoreState(copy.GetJoint(j), outResult->mCopyStates[j]);
+	}
+	outResult->mRefCounts[5] = skeleton1->GetRefCount();
+	outResult->mRefCounts[6] = skeleton2->GetRefCount();
+
 	outResult->mResizedJointCount = pose.GetJointCount();
 	outResult->mResizedMatrixCount = uint32(pose.GetJointMatrices().size());
 	for (uint j = 0; j < pose.GetJointCount(); ++j)
@@ -384,9 +424,9 @@ void jolt_skel_pose(const SkelDesc *inSkeleton1, const SkelDesc *inSkeleton2, co
 	}
 }
 
-// SkeletonMapper: Initialize (with the default argument or with SkelCanMapJoint), LockTranslations /
-// LockAllTranslations, the mappings, chains, unmapped and locked joints, GetMappedJointIdx, IsJointTranslationLocked,
-// Map and MapReverse
+// SkeletonMapper: Initialize (with the default argument or with SkelCanMapJoint, once or twice), LockTranslations /
+// LockAllTranslations, a chain added through GetChains(), the mappings, chains, unmapped and locked joints,
+// GetMappedJointIdx, IsJointTranslationLocked, Map, MapReverse and the reference counts
 void jolt_skel_mapper(const SkelMapperDesc *inDesc, SkelMapperResult *outResult)
 {
 	SkelEnsureAllocator();
@@ -402,10 +442,13 @@ void jolt_skel_mapper(const SkelMapperDesc *inDesc, SkelMapperResult *outResult)
 		neutral2[j] = SkelLoadMat44(inDesc->mNeutralPose2[j]);
 
 	Ref<SkeletonMapper> mapper = new SkeletonMapper;
-	if (inDesc->mCanMapMode == 0)
-		mapper->Initialize(skeleton1, neutral1, skeleton2, neutral2);
-	else
-		mapper->Initialize(skeleton1, neutral1, skeleton2, neutral2, [inDesc](const Skeleton *inSkeleton1, int inIndex1, const Skeleton *inSkeleton2, int inIndex2) { return SkelCanMapJoint(*inDesc, inSkeleton1, inIndex1, inSkeleton2, inIndex2); });
+	for (uint32 i = 0; i < (inDesc->mInitializeTwice != 0? 2u : 1u); ++i)
+	{
+		if (inDesc->mCanMapMode == 0)
+			mapper->Initialize(skeleton1, neutral1, skeleton2, neutral2);
+		else
+			mapper->Initialize(skeleton1, neutral1, skeleton2, neutral2, [inDesc](const Skeleton *inSkeleton1, int inIndex1, const Skeleton *inSkeleton2, int inIndex2) { return SkelCanMapJoint(*inDesc, inSkeleton1, inIndex1, inSkeleton2, inIndex2); });
+	}
 
 	if ((inDesc->mLockMode & 1) != 0)
 	{
@@ -416,6 +459,9 @@ void jolt_skel_mapper(const SkelMapperDesc *inDesc, SkelMapperResult *outResult)
 	}
 	if ((inDesc->mLockMode & 2) != 0 && !mapper->GetMappings().empty())
 		mapper->LockAllTranslations(skeleton2, neutral2);
+
+	if (inDesc->mUserChainLengths[0] != 0)
+		mapper->GetChains().emplace_back(Array<int>(inDesc->mUserChain1, inDesc->mUserChain1 + inDesc->mUserChainLengths[0]), Array<int>(inDesc->mUserChain2, inDesc->mUserChain2 + inDesc->mUserChainLengths[1]));
 
 	const SkeletonMapper::MappingVector &mappings = mapper->GetMappings();
 	outResult->mNumMappings = uint32(mappings.size());
@@ -485,6 +531,11 @@ void jolt_skel_mapper(const SkelMapperDesc *inDesc, SkelMapperResult *outResult)
 		SkelStoreMat44(out2[j], outResult->mPose2ModelSpace[j]);
 	for (int j = 0; j < n1; ++j)
 		SkelStoreMat44(out1[j], outResult->mPose1ModelSpace[j]);
+
+	// The mapper does not hold references to the skeletons
+	outResult->mRefCounts[0] = mapper->GetRefCount();
+	outResult->mRefCounts[1] = skeleton1->GetRefCount();
+	outResult->mRefCounts[2] = skeleton2->GetRefCount();
 }
 
 } // extern "C"

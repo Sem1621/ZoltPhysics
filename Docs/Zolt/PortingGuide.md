@@ -197,7 +197,11 @@ both types) when porting code needs them.
   bytes) aligned: nothing that lives in temp memory may use `align` above 16 (see section 9 for padded atomics).
 - `JPH_STACK_ALLOC(n)` (alloca): use a fixed size array when `n` is comptime known, otherwise a
   fixed stack buffer with an asserted upper bound (see `Math/GaussianElimination.zig`), or the
-  `TempAllocator` when the size is unbounded. Zig has no alloca.
+  `TempAllocator` when the size is unbounded. Zig has no alloca. An unbounded `JPH_STACK_ALLOC` in a function
+  without a `TempAllocator` (`SkeletonMapper::LockAllTranslations`, `RagdollSettings::CreateRagdoll`,
+  `Ragdoll::AddToPhysicsSystem` / `RemoveFromPhysicsSystem`) allocates with the allocator of the object that owns the
+  function (a RefTarget keeps its allocator), frees it before returning, makes the function return `Allocator.Error`
+  and is listed in the file header.
 - Allocation failure is an error (`error.OutOfMemory`), never ignored. Where Jolt returns a
   `Result<T>` or an error string, return `!T` with a specific error set; keep Jolt's message text
   in a doc comment or log it with `std.log`. **Exception:** Jolt's cached and copied results

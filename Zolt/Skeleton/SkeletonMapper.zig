@@ -9,16 +9,24 @@
 //!   context (`CanMapJoint.init(&context, function)`); Jolt's default argument `sDefaultCanMapJoint` is
 //!   `CanMapJoint.default`: `initialize(..., .{})` or `initialize(..., .{ .can_map_joint = c })`.
 //! - The `const Mat44 *` / `Mat44 *` / `const bool *` arrays are slices with (at least) one element per joint.
+//! - Joint indices: the fields of Mapping, Chain, Unmapped and Locked mirror Jolt's `int` members as `i32`, also where
+//!   they are always valid joints (Mapping.joint_idx1 / joint_idx2, the chains), so they compare directly with
+//!   `Skeleton.Joint.parent_joint_index` and with -1; so do getMappedJointIdx and isJointTranslationLocked. CanMapJoint
+//!   gets the joint indices as `usize` (always valid joints, like `Skeleton.getJoint`).
 //! - Initialize, LockTranslations and LockAllTranslations allocate and return `Allocator.Error`. They are all or
 //!   nothing: when an allocation fails, the mapper is left as it was. LockAllTranslations' JPH_STACK_ALLOC (one bool per
 //!   joint, unbounded) is allocated with the mapper's allocator.
 //! - Asserts on the input that Jolt's release build ignores ("Should not be initialized yet", "Skeleton 1 should be the
 //!   low detail skeleton!", ordered joints) are checked in safe builds only (`if (Core.enable_asserts)`), so that
-//!   optimized builds compute what Jolt's release build computes. Where Jolt has undefined behavior Zolt panics:
-//!   LockAllTranslations before Initialize ("Call Initialize first!", Jolt reads mMappings[0] of an empty array) and Map
-//!   with a locked joint that has no parent. LockTranslations stores the model space translation of a locked joint
-//!   without a parent, but Map reads `outPose2ModelSpace[-1]` for it (a Jolt bug), so such a lock can only be used
-//!   without Map.
+//!   optimized builds compute what Jolt's release build computes (a second Initialize appends, like Jolt's).
+//! - Where Jolt has undefined behavior Zolt panics:
+//!   - LockAllTranslations before Initialize ("Call Initialize first!", Jolt reads mMappings[0] of an empty array) or
+//!     when the first mapped joint is not a joint of `skeleton2` (Jolt writes outside its array);
+//!   - Map with an empty chain (Jolt reads the first / last element of an empty array; chains of 1 or 2 joints, which
+//!     a user can add through getChainsMut, are fine and handled like Jolt's signed loop);
+//!   - Map with a locked joint that has no parent. LockTranslations stores the model space translation of a locked
+//!     joint without a parent, but Map reads `outPose2ModelSpace[-1]` for it (a Jolt bug), so such a lock can only be
+//!     used without Map.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -375,10 +383,13 @@ pub const SkeletonMapper = struct {
 
         // The first mapping is the top most one (remember that joints should be ordered so that parents go before children).
         // Because we created the mappings from the lowest joint first, this should contain the first mappable joint.
-        const root_idx: usize = @intCast(self.mappings.items[0].joint_idx2);
+        const root = self.mappings.items[0].joint_idx2;
 
         // Create temp array to hold locked joints (Zolt: allocated with the mapper's allocator instead of on the stack)
         const n = skeleton2.getJointCount();
+        if (root < 0 or root >= n)
+            @panic("SkeletonMapper::LockAllTranslations: the first mapped joint is not a joint of skeleton 2 (Jolt writes outside its array)");
+        const root_idx: usize = @intCast(root);
         const locked_translations = try self.allocator.alloc(bool, n);
         defer self.allocator.free(locked_translations);
         @memset(locked_translations, false);
@@ -416,6 +427,8 @@ pub const SkeletonMapper = struct {
         for (self.chains.items) |*c| {
             const indices1 = c.joint_indices1.items;
             const indices2 = c.joint_indices2.items;
+            if (indices1.len == 0 or indices2.len == 0)
+                @panic("SkeletonMapper::Map: an empty chain (Jolt reads the first / last element of an empty array)");
 
             // Calculate end of chain given local space transforms of the joints of the chain
             const chain_start = &out_pose2_model_space[@intCast(indices2[0])];
@@ -431,8 +444,10 @@ pub const SkeletonMapper = struct {
             // Rotate the start of the chain
             chain_start.setRotation(Mat44.rotationQuat(rotation).mul(chain_start.getRotation()));
 
-            // Update all joints but the first and the last joint using their local space transforms
-            for (1..indices2.len - 1) |j| {
+            // Update all joints but the first and the last joint using their local space transforms (Jolt's signed
+            // `j < size - 1`: no joints for a chain of 1 or 2 joints, which a user can add through getChainsMut)
+            var j: usize = 1;
+            while (j + 1 < indices2.len) : (j += 1) {
                 const parent = indices2[j - 1];
                 const child = indices2[j];
                 out_pose2_model_space[@intCast(child)] = out_pose2_model_space[@intCast(parent)].mul(pose2_local_space[@intCast(child)]);
@@ -807,6 +822,52 @@ test "SkeletonMapper: lockTranslations" {
     try testing.expect(!mapper.isJointTranslationLocked(1));
 }
 
+/// Add a chain like a user of Jolt's non-const GetChains (the arrays are allocated with the mapper's allocator)
+fn addChain(mapper: *SkeletonMapper, joints1: []const i32, joints2: []const i32) !void {
+    const allocator = mapper.allocator;
+    var chain: SkeletonMapper.Chain = .{};
+    errdefer chain.deinit(allocator);
+    try chain.joint_indices1.appendSlice(allocator, joints1);
+    try chain.joint_indices2.appendSlice(allocator, joints2);
+    try mapper.getChainsMut().append(allocator, chain);
+}
+
+test "SkeletonMapper: map with chains of 1 and 2 joints" {
+    // Initialize only makes chains with joints in between, but a user can add any chain through getChainsMut (Jolt's
+    // non-const GetChains). Jolt's Map handles chains of 1 joint (it points nowhere, sFromTo gives the identity) and of
+    // 2 joints (no joints in between to update).
+    const allocator = testing.allocator;
+    var s: TestSkeletons = undefined;
+    try s.init(allocator);
+    defer s.deinit();
+    var mapper: SkeletonMapper = .init(allocator);
+    defer mapper.deinit();
+    try mapper.initialize(&s.skeleton1, &s.poses.pose1, &s.skeleton2, &s.poses.pose2, .{});
+
+    // The ragdoll's arm moved: the output without user chains
+    var pose1 = s.poses.pose1;
+    pose1[3].setTranslation(pose1[3].getTranslation().add(Vec3.init(0, 0.1, 0.05)));
+    var reference: [10]Mat44 = undefined;
+    mapper.map(&pose1, &s.poses.local2, &reference);
+
+    // A chain of 1 joint (the head) changes nothing
+    try addChain(&mapper, &.{2}, &.{6});
+    var out2: [10]Mat44 = undefined;
+    mapper.map(&pose1, &s.poses.local2, &out2);
+    for (out2, reference) |a, b|
+        try testing.expect(a.eql(b));
+
+    // A chain of 2 joints (spine to arm) rotates the spine towards the ragdoll's arm, the arm keeps its mapping
+    try addChain(&mapper, &.{ 1, 3 }, &.{ 4, 7 });
+    mapper.map(&pose1, &s.poses.local2, &out2);
+    try testing.expect(out2[4].getTranslation().eql(reference[4].getTranslation()));
+    try testing.expect(!out2[4].getRotation().eql(reference[4].getRotation()));
+    const direction = out2[4].mul(s.poses.local2[7]).getTranslation().sub(out2[4].getTranslation()).normalized();
+    try testing.expect(direction.isClose(pose1[3].getTranslation().sub(pose1[1].getTranslation()).normalized(), .{ .max_dist_sq = 1.0e-10 }));
+    try testing.expect(out2[7].eql(reference[7]));
+    try testing.expect(out2[8].eql(reference[8]));
+}
+
 fn initializeOutOfMemory(allocator: Allocator) !void {
     var s: TestSkeletons = undefined;
     try s.init(allocator);
@@ -831,6 +892,65 @@ fn initializeOutOfMemory(allocator: Allocator) !void {
 
 test "SkeletonMapper: out of memory in initialize and lockAllTranslations" {
     try testing.checkAllAllocationFailures(testing.allocator, initializeOutOfMemory, .{});
+}
+
+/// The arrays of a mapper, to compare its state before and after a failed call
+const MapperState = struct {
+    mappings: [16]SkeletonMapper.Mapping = undefined,
+    num_mappings: usize = 0,
+    chain_lengths: [8][2]usize = undefined,
+    num_chains: usize = 0,
+    unmapped: [16]SkeletonMapper.Unmapped = undefined,
+    num_unmapped: usize = 0,
+
+    fn of(mapper: *const SkeletonMapper) MapperState {
+        var state: MapperState = .{ .num_mappings = mapper.getMappings().len, .num_chains = mapper.getChains().len, .num_unmapped = mapper.getUnmapped().len };
+        @memcpy(state.mappings[0..state.num_mappings], mapper.getMappings());
+        for (mapper.getChains(), 0..) |*c, i| state.chain_lengths[i] = .{ c.joint_indices1.items.len, c.joint_indices2.items.len };
+        @memcpy(state.unmapped[0..state.num_unmapped], mapper.getUnmapped());
+        return state;
+    }
+
+    fn expectEqual(self: *const MapperState, other: *const MapperState) !void {
+        try testing.expectEqual(self.num_mappings, other.num_mappings);
+        for (self.mappings[0..self.num_mappings], other.mappings[0..other.num_mappings]) |a, b| {
+            try testing.expectEqual(a.joint_idx1, b.joint_idx1);
+            try testing.expectEqual(a.joint_idx2, b.joint_idx2);
+            try testing.expect(a.joint1_to2.eql(b.joint1_to2));
+        }
+        try testing.expectEqualSlices([2]usize, self.chain_lengths[0..self.num_chains], other.chain_lengths[0..other.num_chains]);
+        try testing.expectEqualSlices(SkeletonMapper.Unmapped, self.unmapped[0..self.num_unmapped], other.unmapped[0..other.num_unmapped]);
+    }
+};
+
+fn initializeTwiceOutOfMemory(allocator: Allocator) !void {
+    var s: TestSkeletons = undefined;
+    try s.init(allocator);
+    defer s.deinit();
+    var mapper: SkeletonMapper = .init(allocator);
+    defer mapper.deinit();
+    try mapper.initialize(&s.skeleton1, &s.poses.pose1, &s.skeleton2, &s.poses.pose2, .{});
+    const first = MapperState.of(&mapper);
+
+    // Jolt's release build appends a second initialization (its chain search also runs over the first mappings); when an
+    // allocation fails, Zolt removes what the second call added
+    mapper.initialize(&s.skeleton1, &s.poses.pose1, &s.skeleton2, &s.poses.pose2, .{}) catch |err| {
+        try first.expectEqual(&MapperState.of(&mapper));
+        return err;
+    };
+    try testing.expectEqual(2 * first.num_mappings, mapper.getMappings().len);
+    try testing.expectEqual(2 * first.num_chains, mapper.getChains().len);
+    try testing.expectEqual(2 * first.num_unmapped, mapper.getUnmapped().len);
+    var first_part = MapperState.of(&mapper);
+    first_part.num_mappings = first.num_mappings;
+    first_part.num_chains = first.num_chains;
+    first_part.num_unmapped = first.num_unmapped;
+    try first.expectEqual(&first_part);
+}
+
+test "SkeletonMapper: out of memory in a second initialize (release only)" {
+    if (Core.enable_asserts) return error.SkipZigTest; // Jolt asserts "Should not be initialized yet"
+    try testing.checkAllAllocationFailures(testing.allocator, initializeTwiceOutOfMemory, .{});
 }
 
 test "SkeletonMapper: map a sampled pose" {
