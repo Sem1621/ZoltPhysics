@@ -3092,3 +3092,647 @@ fn correctFractionForCharacterPadding(shape: *const Shape, start: Mat44, displac
         return false;
     }
 }
+
+// -------------------------------------------------------------------------------------------------------------------
+// Tests: Zolt's allocation failure handling and edge cases. The ported Jolt unit tests are in
+// ZoltTests/Physics/CharacterVirtualTests.zig, the comparison with Jolt in ZoltParity/Physics/SimulationParity.zig.
+
+const testing = std.testing;
+const TempAllocatorImpl = TempAllocatorFile.TempAllocatorImpl;
+const TempAllocatorMalloc = TempAllocatorFile.TempAllocatorMalloc;
+const FailingTempAllocator = TempAllocatorFile.FailingTempAllocator;
+const StateRecorderImpl = @import("../StateRecorderImpl.zig").StateRecorderImpl;
+const BroadPhaseLayerInterfaceTable = @import("../Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+const ObjectLayerPairFilterTable = @import("../Collision/ObjectLayerPairFilterTable.zig").ObjectLayerPairFilterTable;
+const ObjectVsBroadPhaseLayerFilterTable = @import("../Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
+const BoxShape = @import("../Collision/Shape/BoxShape.zig").BoxShape;
+const CapsuleShape = @import("../Collision/Shape/CapsuleShape.zig").CapsuleShape;
+const Real = RealFile.Real;
+
+/// A physics system with one object layer that collides with itself: a floor, a dynamic box and a low step
+const TestWorld = struct {
+    layer_interface: BroadPhaseLayerInterfaceTable,
+    pair_filter: ObjectLayerPairFilterTable,
+    ovb_filter: ObjectVsBroadPhaseLayerFilterTable,
+    system: PhysicsSystem,
+    floor_id: BodyID = .invalid,
+    box_id: BodyID = .invalid,
+    step_id: BodyID = .invalid,
+
+    fn init(self: *TestWorld, allocator: Allocator) !void {
+        self.layer_interface = try .init(allocator, 1, 1);
+        errdefer self.layer_interface.deinit();
+        self.layer_interface.mapObjectToBroadPhaseLayer(0, .init(0));
+        self.pair_filter = try .init(allocator, 1);
+        errdefer self.pair_filter.deinit();
+        self.pair_filter.enableCollision(0, 0);
+        self.ovb_filter = try .init(allocator, &self.layer_interface.base, 1, &self.pair_filter.base, 1);
+        errdefer self.ovb_filter.deinit();
+        self.system = .empty;
+        try self.system.init(allocator, testing.io, 16, 0, 64, 64, &self.layer_interface.base, &self.ovb_filter.base, &self.pair_filter.base, .{});
+        errdefer self.system.deinit();
+
+        self.floor_id = try self.addBox(allocator, RVec3.init(0, -1, 0), Vec3.init(20, 1, 20), .static);
+        self.box_id = try self.addBox(allocator, RVec3.init(1, 0.5, 0), Vec3.replicate(0.5), .dynamic);
+        self.step_id = try self.addBox(allocator, RVec3.init(-1.2, 0.1, 0), Vec3.init(0.5, 0.1, 1), .static);
+    }
+
+    fn deinit(self: *TestWorld) void {
+        self.system.deinit();
+        self.ovb_filter.deinit();
+        self.pair_filter.deinit();
+        self.layer_interface.deinit();
+    }
+
+    fn addBox(self: *TestWorld, allocator: Allocator, position: RVec3, half_extent: Vec3, motion_type: MotionType) !BodyID {
+        const box = try BoxShape.create(allocator, half_extent, .{});
+        var settings: BodyCreationSettings = .initWithShape(box.asShape(), position, Quat.identity(), motion_type, 0);
+        defer settings.deinit();
+        const id = try self.system.getBodyInterfaceMut().createAndAddBody(&settings, .dont_activate);
+        std.debug.assert(!id.isInvalid()); // Room for 16 bodies
+        return id;
+    }
+};
+
+/// A listener that logs every callback (Jolt's order of the callbacks is checked by the simulation parity)
+const TestListener = struct {
+    const Kind = enum { adjust, validate, added, persisted, removed, character_validate, character_added, character_persisted, character_removed, solve, character_solve };
+    const Entry = struct { kind: Kind, body: BodyID = .invalid, character_id: CharacterID = .invalid, sub_shape: SubShapeID = .empty };
+
+    allocator: Allocator,
+    log: std.ArrayList(Entry) = .empty,
+    /// An append failed (reported by checkError: a swallowed allocation failure would hide it from the sweeps)
+    out_of_memory: bool = false,
+
+    fn deinit(self: *TestListener) void {
+        self.log.deinit(self.allocator);
+    }
+
+    fn append(self: *TestListener, entry: Entry) void {
+        self.log.append(self.allocator, entry) catch {
+            self.out_of_memory = true;
+        };
+    }
+
+    fn checkError(self: *const TestListener) !void {
+        if (self.out_of_memory) return error.OutOfMemory;
+    }
+
+    fn count(self: *const TestListener, kind: Kind) usize {
+        var n: usize = 0;
+        for (self.log.items) |e| {
+            if (e.kind == kind) n += 1;
+        }
+        return n;
+    }
+
+    pub fn onAdjustBodyVelocity(self: *TestListener, character: *const CharacterVirtual, body2: *const Body, linear_velocity: *Vec3, angular_velocity: *Vec3) void {
+        _ = .{ character, linear_velocity, angular_velocity };
+        self.append(.{ .kind = .adjust, .body = body2.getID() });
+    }
+
+    pub fn onContactValidate(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+        _ = character;
+        self.append(.{ .kind = .validate, .body = contact.base.body_b, .sub_shape = contact.base.sub_shape_id_b });
+        return true;
+    }
+
+    pub fn onContactAdded(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+        _ = .{ character, settings };
+        self.append(.{ .kind = .added, .body = contact.base.body_b, .sub_shape = contact.base.sub_shape_id_b });
+    }
+
+    pub fn onContactPersisted(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+        _ = .{ character, settings };
+        self.append(.{ .kind = .persisted, .body = contact.base.body_b, .sub_shape = contact.base.sub_shape_id_b });
+    }
+
+    pub fn onContactRemoved(self: *TestListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID) void {
+        _ = character;
+        self.append(.{ .kind = .removed, .body = body_id2, .sub_shape = sub_shape_id2 });
+    }
+
+    pub fn onCharacterContactValidate(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+        _ = character;
+        self.append(.{ .kind = .character_validate, .character_id = contact.base.character_id_b, .sub_shape = contact.base.sub_shape_id_b });
+        return true;
+    }
+
+    pub fn onCharacterContactAdded(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+        _ = .{ character, settings };
+        self.append(.{ .kind = .character_added, .character_id = contact.base.character_id_b, .sub_shape = contact.base.sub_shape_id_b });
+    }
+
+    pub fn onCharacterContactPersisted(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+        _ = .{ character, settings };
+        self.append(.{ .kind = .character_persisted, .character_id = contact.base.character_id_b, .sub_shape = contact.base.sub_shape_id_b });
+    }
+
+    pub fn onCharacterContactRemoved(self: *TestListener, character: *const CharacterVirtual, other_character_id: CharacterID, sub_shape_id2: SubShapeID) void {
+        _ = character;
+        self.append(.{ .kind = .character_removed, .character_id = other_character_id, .sub_shape = sub_shape_id2 });
+    }
+
+    pub fn onContactSolve(self: *TestListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+        _ = .{ character, contact_position, contact_normal, contact_velocity, contact_material, character_velocity, new_character_velocity };
+        self.append(.{ .kind = .solve, .body = body_id2, .sub_shape = sub_shape_id2 });
+    }
+
+    pub fn onCharacterContactSolve(self: *TestListener, character: *const CharacterVirtual, other_character: *const CharacterVirtual, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+        _ = .{ character, contact_position, contact_normal, contact_velocity, contact_material, character_velocity, new_character_velocity };
+        self.append(.{ .kind = .character_solve, .character_id = other_character.getID(), .sub_shape = sub_shape_id2 });
+    }
+};
+
+/// After an operation failed: the tracking of contact changes is finished (Jolt's JPH_SCOPE_EXIT)
+fn expectConsistent(character: *const CharacterVirtual) !void {
+    try testing.expectEqual(@as(i32, 0), character.tracking_contact_changes);
+    try testing.expect(character.listener_contacts.isEmpty());
+}
+
+/// Run a character operation, check that the character is consistent when it fails
+fn checkedOp(character: *const CharacterVirtual, result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload {
+    return result catch |err| {
+        try expectConsistent(character);
+        return err;
+    };
+}
+
+/// Two characters with inner bodies, a listener and character vs character collision in a TestWorld
+const TestScene = struct {
+    allocator: Allocator,
+    world: TestWorld,
+    listener: TestListener,
+    collision: CharacterVsCharacterCollisionSimple,
+    standing_shape: RefConst(Shape),
+    crouching_shape: RefConst(Shape),
+    character: *CharacterVirtual,
+    other: *CharacterVirtual,
+
+    fn init(self: *TestScene, allocator: Allocator) !void {
+        self.allocator = allocator;
+        try self.world.init(allocator);
+        errdefer self.world.deinit();
+        self.listener = .{ .allocator = allocator };
+        errdefer self.listener.deinit();
+        self.collision = .init(allocator);
+        errdefer self.collision.deinit();
+
+        // Shapes: a standing and a crouching capsule with their bottom at the origin, a sphere for the inner body
+        var standing_capsule = RefConst(Shape).init((try CapsuleShape.create(allocator, 0.675, 0.3, .{})).asShape());
+        defer standing_capsule.deinit();
+        self.standing_shape = .init((try RotatedTranslatedShape.create(allocator, Vec3.init(0, 0.975, 0), Quat.identity(), standing_capsule.get().?)).asShape());
+        errdefer self.standing_shape.deinit();
+        var crouching_capsule = RefConst(Shape).init((try CapsuleShape.create(allocator, 0.3, 0.3, .{})).asShape());
+        defer crouching_capsule.deinit();
+        self.crouching_shape = .init((try RotatedTranslatedShape.create(allocator, Vec3.init(0, 0.6, 0), Quat.identity(), crouching_capsule.get().?)).asShape());
+        errdefer self.crouching_shape.deinit();
+        var inner_capsule = RefConst(Shape).init((try CapsuleShape.create(allocator, 0.5, 0.25, .{})).asShape());
+        defer inner_capsule.deinit();
+
+        var settings = CharacterVirtualSettings.init(allocator);
+        defer settings.deinit();
+        settings.base.shape.set(self.standing_shape.get());
+        settings.base.supporting_volume = Plane.init(Vec3.axisY(), -0.3);
+        settings.inner_body_shape.set(inner_capsule.get());
+        self.character = try CharacterVirtual.create(allocator, &settings, RVec3.zero(), Quat.identity(), 1, &self.world.system);
+        self.character.base.addRef();
+        errdefer self.character.base.release();
+
+        // The other character uses the enhanced internal edge removal (the heap fallback of its collector)
+        settings.id = CharacterID.nextCharacterID();
+        settings.base.enhanced_internal_edge_removal = true;
+        self.other = try CharacterVirtual.create(allocator, &settings, RVec3.init(0, 0, 1), Quat.identity(), 2, &self.world.system);
+        self.other.base.addRef();
+        errdefer self.other.base.release();
+
+        try self.collision.add(self.character);
+        try self.collision.add(self.other);
+        for ([_]*CharacterVirtual{ self.character, self.other }) |c| {
+            c.setListener(CharacterContactListener.init(&self.listener));
+            c.setCharacterVsCharacterCollision(self.collision.characterVsCharacterCollision());
+        }
+    }
+
+    fn deinit(self: *TestScene) void {
+        self.other.base.release();
+        self.character.base.release();
+        self.crouching_shape.deinit();
+        self.standing_shape.deinit();
+        self.collision.deinit();
+        self.listener.deinit();
+        self.world.deinit();
+    }
+
+    /// Walk into the dynamic box, onto the step and against the other character, change shape, save and restore
+    fn runOps(self: *TestScene, temp_allocator: TempAllocator, num_steps: usize) !void {
+        const character = self.character;
+        const gravity = Vec3.init(0, -9.81, 0);
+        const delta_time: f32 = 1.0 / 60.0;
+        const update_settings: CharacterVirtual.ExtendedUpdateSettings = .{};
+
+        const velocities = [_]Vec3{ Vec3.init(4, -1, 0), Vec3.init(-4, -1, 0), Vec3.init(0, -1, 3) };
+        for (velocities) |velocity| {
+            for (0..num_steps) |_| {
+                character.setLinearVelocity(velocity);
+                try checkedOp(character, character.extendedUpdate(delta_time, gravity, &update_settings, &.{}, &.{}, &.{}, null, temp_allocator));
+                try self.listener.checkError();
+            }
+        }
+
+        // The basic operations
+        try checkedOp(character, character.update(delta_time, gravity, &.{}, &.{}, &.{}, null, temp_allocator));
+        _ = try checkedOp(character, character.stickToFloor(Vec3.init(0, -0.5, 0), &.{}, &.{}, &.{}, null, temp_allocator));
+        _ = try checkedOp(character, character.walkStairs(delta_time, Vec3.init(0, 0.4, 0), Vec3.init(-0.1, 0, 0), Vec3.init(-0.15, 0, 0), Vec3.zero(), &.{}, &.{}, &.{}, null, temp_allocator));
+        try checkedOp(character, character.refreshContacts(&.{}, &.{}, &.{}, null, temp_allocator));
+        try self.listener.checkError();
+
+        // Crouch with a check for penetration, stand up without it
+        _ = try checkedOp(character, character.setShape(self.crouching_shape.get(), 0.1, &.{}, &.{}, &.{}, null, temp_allocator));
+        _ = try checkedOp(character, character.setShape(self.standing_shape.get(), math.flt_max, &.{}, &.{}, &.{}, null, temp_allocator));
+        try self.listener.checkError();
+
+        // The other character (enhanced internal edge removal)
+        self.other.setLinearVelocity(Vec3.init(0, -1, -3));
+        for (0..num_steps) |_|
+            try checkedOp(self.other, self.other.update(delta_time, gravity, &.{}, &.{}, &.{}, null, temp_allocator));
+        try self.listener.checkError();
+
+        // Save and restore
+        var recorder = StateRecorderImpl.init(self.allocator);
+        defer recorder.deinit();
+        character.saveState(recorder.recorder());
+        if (recorder.isFailed()) return error.OutOfMemory; // The recorder could not grow its buffer
+        recorder.rewind();
+        try character.restoreState(recorder.recorder());
+        try testing.expect(!recorder.isFailed());
+    }
+};
+
+test "CharacterVirtualSettings: Jolt's defaults, CharacterID consumption, copy" {
+    const saved = CharacterID.next_id.load(.monotonic);
+    defer CharacterID.next_id.store(saved, .monotonic);
+    CharacterID.setNextCharacterID(.{ .next_value = 10 });
+
+    // The default constructor consumes an ID (Jolt's default member initializer)
+    var settings = CharacterVirtualSettings.init(testing.allocator);
+    defer settings.deinit();
+    try testing.expectEqual(@as(u32, 10), settings.id.getValue());
+    try testing.expectEqual(@as(u32, 11), CharacterID.next_id.load(.monotonic));
+    try testing.expectEqual(@as(f32, 70.0), settings.mass);
+    try testing.expectEqual(@as(f32, 100.0), settings.max_strength);
+    try testing.expect(settings.shape_offset.eql(Vec3.zero()));
+    try testing.expectEqual(BackFaceMode.collide_with_back_faces, settings.back_face_mode);
+    try testing.expectEqual(@as(f32, 0.1), settings.predictive_contact_distance);
+    try testing.expectEqual(@as(u32, 5), settings.max_collision_iterations);
+    try testing.expectEqual(@as(u32, 15), settings.max_constraint_iterations);
+    try testing.expectEqual(@as(f32, 1.0e-4), settings.min_time_remaining);
+    try testing.expectEqual(@as(f32, 1.0e-3), settings.collision_tolerance);
+    try testing.expectEqual(@as(f32, 0.02), settings.character_padding);
+    try testing.expectEqual(@as(u32, 256), settings.max_num_hits);
+    try testing.expectEqual(@as(f32, 0.999), settings.hit_reduction_cos_max_angle);
+    try testing.expectEqual(@as(f32, 1.0), settings.penetration_recovery_speed);
+    try testing.expect(settings.inner_body_shape.get() == null);
+    try testing.expect(settings.inner_body_id_override.isInvalid());
+    try testing.expectEqual(@as(ObjectLayer, 0), settings.inner_body_layer);
+
+    // The copy keeps the ID and takes references to the shapes
+    const capsule = try CapsuleShape.create(testing.allocator, 0.5, 0.25, .{});
+    var shape_ref = RefConst(Shape).init(capsule.asShape());
+    defer shape_ref.deinit();
+    settings.base.shape.set(capsule.asShape());
+    settings.inner_body_shape.set(capsule.asShape());
+    settings.mass = 5.0;
+    {
+        var copy = CharacterVirtualSettings.initCopy(testing.allocator, &settings);
+        defer copy.deinit();
+        try testing.expectEqual(@as(u32, 10), copy.id.getValue());
+        try testing.expectEqual(@as(f32, 5.0), copy.mass);
+        try testing.expectEqual(@as(u32, 5), capsule.asShape().getRefCount());
+        try testing.expectEqual(@as(u32, 11), CharacterID.next_id.load(.monotonic));
+
+        // Copy assignment copies the ID too
+        var other = CharacterVirtualSettings.init(testing.allocator);
+        defer other.deinit();
+        try testing.expectEqual(@as(u32, 11), other.id.getValue());
+        other.assign(&copy);
+        try testing.expectEqual(@as(u32, 10), other.id.getValue());
+        try testing.expectEqual(@as(u32, 7), capsule.asShape().getRefCount());
+    }
+    try testing.expectEqual(@as(u32, 3), capsule.asShape().getRefCount());
+
+    // Heap settings consume an ID and are destroyed by the last release
+    const heap = try CharacterVirtualSettings.create(testing.allocator);
+    var heap_ref = RefConst(CharacterBaseSettings).init(&heap.base);
+    try testing.expectEqual(@as(u32, 12), heap.id.getValue());
+    heap.inner_body_shape.set(capsule.asShape());
+    heap_ref.deinit();
+    try testing.expectEqual(@as(u32, 3), capsule.asShape().getRefCount());
+
+    // The default of ExtendedUpdateSettings is Jolt's Cos(DegreesToRadians(75.0f)), evaluated at compile time
+    const angle = math.degreesToRadians(75.0);
+    const update_settings: CharacterVirtual.ExtendedUpdateSettings = .{};
+    try testing.expectEqual(trigonometry.cos(angle), update_settings.walk_stairs_cos_angle_forward_contact);
+}
+
+test "CharacterContactKey: layout, equality, hash" {
+    try testing.expectEqual(@as(usize, 12), @sizeOf(CharacterContactKey));
+    const a = CharacterContactKey.fromBody(BodyID.fromIndexAndSequenceNumber(3, 1), SubShapeID.empty);
+    const b = CharacterContactKey.fromCharacter(CharacterID.init(7), SubShapeID.empty);
+    try testing.expect(a.character_id_b.isInvalid() and b.body_b.isInvalid());
+    try testing.expect(!a.eql(b) and a.eql(a));
+    try testing.expect(a.isSameBody(&a) and !a.isSameBody(&b));
+
+    // Same body, other sub shape: not equal, but the same body
+    var c = a;
+    c.sub_shape_id_b = SubShapeID{ .value = 5 };
+    try testing.expect(!a.eql(c) and a.isSameBody(&c));
+
+    // Jolt hashes the 12 bytes of the key: body ID, character ID, sub shape ID
+    var bytes: [12]u8 = undefined;
+    std.mem.writeInt(u32, bytes[0..4], BodyID.fromIndexAndSequenceNumber(3, 1).getIndexAndSequenceNumber(), .little);
+    std.mem.writeInt(u32, bytes[4..8], CharacterID.invalid_character_id, .little);
+    std.mem.writeInt(u32, bytes[8..12], 5, .little);
+    try testing.expectEqual(HashCombine.hashBytes(&bytes), c.getHash());
+}
+
+test "CharacterContact: SaveState byte layout, RestoreState" {
+    var other_settings = CharacterVirtualSettings.init(testing.allocator);
+    defer other_settings.deinit();
+
+    var contact: CharacterContact = .{};
+    contact.base = .fromBody(BodyID.fromIndexAndSequenceNumber(4, 2), SubShapeID{ .value = 0x55 });
+    contact.position = RVec3.init(1, 2, 3);
+    contact.linear_velocity = Vec3.init(4, 5, 6);
+    contact.contact_normal = Vec3.init(0, 1, 0);
+    contact.surface_normal = Vec3.init(0, 0, 1);
+    contact.distance = -0.25;
+    contact.fraction = 0.5;
+    contact.motion_type_b = .dynamic;
+    contact.is_sensor_b = true;
+    contact.user_data = 42;
+    contact.had_collision = true;
+    contact.can_push_character = false;
+    contact.is_back_facing_contact = true;
+
+    var recorder = StateRecorderImpl.init(testing.allocator);
+    defer recorder.deinit();
+    contact.saveState(recorder.recorder());
+
+    // Key (12 bytes), RVec3, 3 Vec3 (12 bytes each), distance, fraction, EMotionType (1 byte), 4 bools
+    const real_size = 3 * @sizeOf(Real);
+    const data = recorder.getData();
+    try testing.expectEqual(@as(usize, 12 + real_size + 36 + 8 + 1 + 4), data.len);
+    try testing.expectEqual(@as(u32, 0x55), std.mem.readInt(u32, data[8..12], .little));
+    const flags = data[12 + real_size + 44 ..];
+    try testing.expectEqualSlices(u8, &[_]u8{ @intFromEnum(MotionType.dynamic), 1, 1, 0, 0 }, flags);
+
+    // Restore: the pointers, the user data and the back facing flag are not in the stream
+    var restored: CharacterContact = .{ .character_b = @ptrFromInt(0x1000), .user_data = 7, .is_back_facing_contact = false };
+    recorder.rewind();
+    restored.restoreState(recorder.recorder());
+    try testing.expect(!recorder.isFailed());
+    try testing.expect(restored.base.eql(contact.base));
+    try testing.expect(restored.position.eql(contact.position) and restored.surface_normal.eql(contact.surface_normal));
+    try testing.expectEqual(contact.distance, restored.distance);
+    try testing.expectEqual(MotionType.dynamic, restored.motion_type_b);
+    try testing.expect(restored.is_sensor_b and restored.had_collision and !restored.was_discarded and !restored.can_push_character);
+    try testing.expect(restored.character_b == null);
+    try testing.expectEqual(@as(u64, 0), restored.user_data);
+    try testing.expect(restored.material == PhysicsMaterial.default);
+    try testing.expect(!restored.is_back_facing_contact);
+
+    // A motion type byte that is not an EMotionType becomes Static
+    var odd = StateRecorderImpl.init(testing.allocator);
+    defer odd.deinit();
+    odd.writeBytes(data);
+    odd.data.items[12 + real_size + 44] = 9;
+    odd.rewind();
+    restored.restoreState(odd.recorder());
+    try testing.expectEqual(MotionType.static, restored.motion_type_b);
+}
+
+test "CharacterVirtual: creation, getters, inner body, GetCharacterVirtualSettings, destruction" {
+    const saved = CharacterID.next_id.load(.monotonic);
+    defer CharacterID.next_id.store(saved, .monotonic);
+
+    var world: TestWorld = undefined;
+    try world.init(testing.allocator);
+    defer world.deinit();
+    const num_bodies = world.system.getNumBodies();
+
+    var capsule = RefConst(Shape).init((try CapsuleShape.create(testing.allocator, 0.5, 0.3, .{})).asShape());
+    defer capsule.deinit();
+    var settings = CharacterVirtualSettings.init(testing.allocator);
+    defer settings.deinit();
+    settings.base.shape.set(capsule.get());
+    settings.base.max_slope_angle = math.degreesToRadians(40.0);
+    settings.inner_body_shape.set(capsule.get());
+    settings.inner_body_id_override = BodyID.fromIndexAndSequenceNumber(9, 0);
+    settings.shape_offset = Vec3.init(0, 0.1, 0);
+    settings.mass = 50.0;
+
+    var character = try CharacterVirtual.init(testing.allocator, &settings, RVec3.init(0, 1, 0), Quat.identity(), 0x1234, &world.system);
+    var alive = true;
+    defer if (alive) character.base.deinit();
+    try testing.expect(character.getID().eql(settings.id));
+    try testing.expectEqual(@as(f32, 50.0), character.getMass());
+    try testing.expectEqual(@as(u64, 0x1234), character.getUserData());
+    try testing.expect(character.getShape().? == capsule.get().?);
+
+    // The inner body has the requested ID, Jolt's position and the user data
+    try testing.expect(character.getInnerBodyID().eql(BodyID.fromIndexAndSequenceNumber(9, 0)));
+    try testing.expectEqual(num_bodies + 1, world.system.getNumBodies());
+    const bi = world.system.getBodyInterface();
+    try testing.expect(bi.getPosition(character.getInnerBodyID()).isClose(RVec3.init(0, 1.12, 0), .{ .max_dist_sq = 1.0e-12 }));
+    try testing.expectEqual(@as(u64, 0x1234), bi.getUserData(character.getInnerBodyID()));
+    character.setUserData(0x5678);
+    try testing.expectEqual(@as(u64, 0x5678), bi.getUserData(character.getInnerBodyID()));
+    character.setPosition(RVec3.init(1, 2, 3));
+    try testing.expect(bi.getPosition(character.getInnerBodyID()).isClose(RVec3.init(1, 2.12, 3), .{ .max_dist_sq = 1.0e-12 }));
+
+    // GetCharacterVirtualSettings consumes a CharacterID (Jolt's default constructor) and describes the character
+    const next = CharacterID.next_id.load(.monotonic);
+    var copy = character.getCharacterVirtualSettings();
+    defer copy.deinit();
+    try testing.expectEqual(next + 1, CharacterID.next_id.load(.monotonic));
+    try testing.expect(copy.id.eql(character.getID()));
+    try testing.expectEqual(@as(f32, 50.0), copy.mass);
+    try testing.expectEqual(trigonometry.acos(trigonometry.cos(math.degreesToRadians(40.0))), copy.base.max_slope_angle);
+    try testing.expect(copy.inner_body_shape.get().? == capsule.get().?);
+    try testing.expect(copy.inner_body_id_override.eql(character.getInnerBodyID()));
+
+    // The destructor removes and destroys the inner body
+    character.base.deinit();
+    alive = false;
+    try testing.expectEqual(num_bodies, world.system.getNumBodies());
+}
+
+test "CharacterVirtual: RestoreState keeps a stale back facing flag, validating restore drops contacts without collision" {
+    var world: TestWorld = undefined;
+    try world.init(testing.allocator);
+    defer world.deinit();
+    var capsule = RefConst(Shape).init((try CapsuleShape.create(testing.allocator, 0.5, 0.3, .{})).asShape());
+    defer capsule.deinit();
+    var settings = CharacterVirtualSettings.init(testing.allocator);
+    defer settings.deinit();
+    settings.base.shape.set(capsule.get());
+
+    var a = try CharacterVirtual.init(testing.allocator, &settings, RVec3.zero(), Quat.identity(), 0, &world.system);
+    defer a.base.deinit();
+    var b = try CharacterVirtual.init(testing.allocator, &settings, RVec3.zero(), Quat.identity(), 0, &world.system);
+    defer b.base.deinit();
+
+    // A has two contacts with collision and one without (not saved)
+    try a.active_contacts.appendSlice(testing.allocator, &.{
+        .{ .base = .fromBody(BodyID.fromIndexAndSequenceNumber(1, 0), .empty), .had_collision = true },
+        .{ .base = .fromBody(BodyID.fromIndexAndSequenceNumber(2, 0), .empty), .had_collision = false },
+        .{ .base = .fromBody(BodyID.fromIndexAndSequenceNumber(3, 0), .empty), .had_collision = true },
+    });
+    var recorder = StateRecorderImpl.init(testing.allocator);
+    defer recorder.deinit();
+    a.saveState(recorder.recorder());
+
+    // B has one back facing contact: a non-validating restore keeps its flag (RestoreState does not read it), the new
+    // contact is default constructed
+    try b.active_contacts.append(testing.allocator, .{ .is_back_facing_contact = true, .had_collision = true });
+    recorder.rewind();
+    try b.restoreState(recorder.recorder());
+    try testing.expect(!recorder.isFailed());
+    try testing.expectEqual(@as(usize, 2), b.getActiveContacts().len);
+    try testing.expect(b.getActiveContacts()[0].base.body_b.eql(BodyID.fromIndexAndSequenceNumber(1, 0)));
+    try testing.expect(b.getActiveContacts()[0].is_back_facing_contact); // Stale, like Jolt
+    try testing.expect(b.getActiveContacts()[1].base.body_b.eql(BodyID.fromIndexAndSequenceNumber(3, 0)));
+    try testing.expect(!b.getActiveContacts()[1].is_back_facing_contact);
+    try testing.expect(b.hasCollidedWith(BodyID.fromIndexAndSequenceNumber(3, 0)) and !b.hasCollidedWith(BodyID.fromIndexAndSequenceNumber(2, 0)));
+
+    // A validating restore of A's own state first drops the contact without collision
+    recorder.rewind();
+    recorder.recorder().setValidating(true);
+    try a.restoreState(recorder.recorder());
+    try testing.expectEqual(@as(u32, 0), recorder.num_mismatches);
+    try testing.expectEqual(@as(usize, 2), a.getActiveContacts().len);
+    try testing.expect(a.getActiveContacts()[1].base.body_b.eql(BodyID.fromIndexAndSequenceNumber(3, 0)));
+}
+
+test "CharacterVirtual: contact tracking nests, removal callbacks at the outermost finish" {
+    var world: TestWorld = undefined;
+    try world.init(testing.allocator);
+    defer world.deinit();
+    var capsule = RefConst(Shape).init((try CapsuleShape.create(testing.allocator, 0.5, 0.3, .{})).asShape());
+    defer capsule.deinit();
+    var settings = CharacterVirtualSettings.init(testing.allocator);
+    defer settings.deinit();
+    settings.base.shape.set(capsule.get());
+    var character = try CharacterVirtual.init(testing.allocator, &settings, RVec3.zero(), Quat.identity(), 0, &world.system);
+    defer character.base.deinit();
+    var listener: TestListener = .{ .allocator = testing.allocator };
+    defer listener.deinit();
+    character.setListener(CharacterContactListener.init(&listener));
+
+    try character.active_contacts.appendSlice(testing.allocator, &.{
+        .{ .base = .fromBody(BodyID.fromIndexAndSequenceNumber(1, 0), .empty), .had_collision = true },
+        .{ .base = .fromCharacter(CharacterID.init(77), .empty), .had_collision = true },
+        .{ .base = .fromBody(BodyID.fromIndexAndSequenceNumber(2, 0), .empty), .had_collision = false },
+    });
+    try character.startTrackingContactChanges();
+    try character.startTrackingContactChanges();
+    try testing.expectEqual(@as(u32, 2), character.listener_contacts.count());
+    character.active_contacts.clearRetainingCapacity();
+    character.finishTrackingContactChanges();
+    try testing.expectEqual(@as(usize, 0), listener.log.items.len);
+    character.finishTrackingContactChanges();
+    try testing.expectEqual(@as(usize, 1), listener.count(.removed));
+    try testing.expectEqual(@as(usize, 1), listener.count(.character_removed));
+    try testing.expect(character.listener_contacts.isEmpty());
+    try testing.expectEqual(@as(i32, 0), character.tracking_contact_changes);
+
+    // Without a listener nothing is tracked
+    character.setListener(null);
+    try character.startTrackingContactChanges();
+    try testing.expect(character.listener_contacts.isEmpty());
+    character.finishTrackingContactChanges();
+}
+
+test "CharacterVirtual: SetShape with and without a max penetration depth, CharacterVsCharacterCollisionSimple" {
+    var scene: TestScene = undefined;
+    try scene.init(testing.allocator);
+    defer scene.deinit();
+    var temp = try TempAllocatorImpl.init(testing.allocator, 256 * 1024);
+    defer temp.deinit();
+    const character = scene.character;
+
+    // Stand inside the dynamic box: switching shape with a max penetration depth fails, without succeeds
+    character.setPosition(RVec3.init(1.6, 0, 0));
+    try testing.expect(!try character.setShape(scene.crouching_shape.get(), 0.01, &.{}, &.{}, &.{}, null, temp.tempAllocator()));
+    try testing.expect(character.getShape() == scene.standing_shape.get());
+    try testing.expect(try character.setShape(scene.crouching_shape.get(), math.flt_max, &.{}, &.{}, &.{}, null, temp.tempAllocator()));
+    try testing.expect(character.getShape() == scene.crouching_shape.get());
+    try testing.expect(try character.setShape(scene.crouching_shape.get(), 0.0, &.{}, &.{}, &.{}, null, temp.tempAllocator())); // Same shape
+    try testing.expect(!try character.setShape(null, math.flt_max, &.{}, &.{}, &.{}, null, temp.tempAllocator()));
+    try testing.expect(temp.isEmpty());
+
+    // The simple collision keeps Jolt's order, removing an unknown character does nothing
+    try testing.expectEqual(@as(usize, 2), scene.collision.characters.items.len);
+    scene.collision.remove(scene.character);
+    try testing.expect(scene.collision.characters.items[0] == scene.other);
+    scene.collision.remove(scene.character);
+    try testing.expectEqual(@as(usize, 1), scene.collision.characters.items.len);
+    try scene.collision.add(scene.character);
+    try testing.expect(scene.collision.characters.items[1] == scene.character);
+}
+
+test "CharacterVirtual: the operations of the allocation failure sweeps work" {
+    var scene: TestScene = undefined;
+    try scene.init(testing.allocator);
+    defer scene.deinit();
+    var temp = try TempAllocatorImpl.init(testing.allocator, 1024 * 1024);
+    defer temp.deinit();
+    try scene.runOps(temp.tempAllocator(), 10);
+    try testing.expect(temp.isEmpty());
+
+    // The operations reach the interesting paths
+    try testing.expect(scene.listener.count(.added) > 0 and scene.listener.count(.persisted) > 0 and scene.listener.count(.removed) > 0);
+    try testing.expect(scene.listener.count(.solve) > 0 and scene.listener.count(.adjust) > 0);
+    try testing.expect(scene.listener.count(.character_added) > 0);
+    try testing.expect(!scene.world.system.getBodyInterface().getLinearVelocity(scene.world.box_id).isNearZero(.{})); // Pushed by the character
+}
+
+test "CharacterVirtual: an allocation failure of the heap leaves the character consistent and nothing behind" {
+    const Test = struct {
+        fn run(allocator: Allocator) !void {
+            var scene: TestScene = undefined;
+            try scene.init(allocator);
+            defer scene.deinit();
+            var temp = TempAllocatorMalloc.init(allocator);
+            try scene.runOps(temp.tempAllocator(), 2);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Test.run, .{});
+}
+
+test "CharacterVirtual: an allocation failure of the temp allocator leaves the character consistent" {
+    var fail_index: u32 = 0;
+    while (true) : (fail_index += 1) {
+        var scene: TestScene = undefined;
+        try scene.init(testing.allocator);
+        defer scene.deinit();
+        var temp = try TempAllocatorImpl.init(testing.allocator, 1024 * 1024);
+        defer temp.deinit();
+        var failing: FailingTempAllocator = .init(temp.tempAllocator(), .{ .fail_index = fail_index });
+        const result = scene.runOps(failing.tempAllocator(), 4);
+        if (!failing.has_induced_failure) {
+            try result;
+            try testing.expect(fail_index > 20); // The sweep covered the operations
+            break;
+        }
+        try testing.expectError(error.OutOfMemory, result);
+        try testing.expect(temp.isEmpty()); // LIFO frees on the error path
+        try expectConsistent(scene.character);
+        try expectConsistent(scene.other);
+
+        // The character still works
+        try scene.runOps(temp.tempAllocator(), 1);
+        try testing.expect(temp.isEmpty());
+    }
+}
