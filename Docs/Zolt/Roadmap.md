@@ -143,7 +143,7 @@ every collision function has bit exact parity tests, and the shape-only cases of
 `HeightFieldShapeTests`, `MutableCompoundShapeTests`, `OffsetCenterOfMassShapeTests`,
 `TaperedCylinderShapeTests`, `TransformedShapeTests`, `ShapeFilterTests` and `ActiveEdgesTests` pass.
 
-### Phase 5: Bodies and simulation (`Jolt/Physics`, `Jolt/Physics/Body`, `Jolt/Physics/Constraints` core)
+### Phase 5: Bodies and simulation (`Jolt/Physics`, `Jolt/Physics/Body`, `Jolt/Physics/Constraints` core) ✅
 Architecture and port order: [SimulationArchitecture.md](SimulationArchitecture.md) (decided by three
 competing compiled prototypes, a judge and a synthesis).
 BroadPhase, BroadPhaseQuery, QuadTree, BroadPhaseQuadTree, BroadPhaseBruteForce, NarrowPhaseQuery,
@@ -154,14 +154,50 @@ BodyCreationSettings, BodyManager, BodyLock*, BodyInterface, BodyFilter, Physics
 ContactConstraintManager, ConstraintPart/*, CalculateSolverSteps, ConstraintManager, IslandBuilder,
 LargeIslandSplitter, PhysicsUpdateContext, PhysicsSystem, StateRecorder(Impl), PhysicsScene.
 **Milestone M5:** a Zig port of `HelloWorld/HelloWorld.cpp` runs and prints the same positions
-and velocities as the C++ version (step by step, bit for bit).
-**Milestone M6:** a Zig port of `PerformanceTest` (`ZoltPerformanceTest/`) reproduces the
-**Pyramid** hashes in single and double precision, single and multithreaded.
+and velocities as the C++ version (step by step, bit for bit). ✅ Reached:
+- `zig build hello-world-check` (part of `zig build parity`) runs both programs and finds their stdout
+  byte identical in both precisions.
+- HelloWorldParity compares the state bits after every step.
 
-### Phase 6: Constraints (`Jolt/Physics/Constraints`)
+**Milestone M6:** a Zig port of `PerformanceTest` (`ZoltPerformanceTest/`) reproduces the
+**Pyramid** hashes in single and double precision, single and multithreaded. ✅ Reached and
+exceeded:
+- The Pyramid, **ConvexVsMesh** and **HighSpeed** hashes of `determinism_check.yml` all match, in both
+  precisions, with `-t=max`, `-t=1` and `-t=2`. No library fix was needed. Zolt's CI checks them.
+- Every Phase 5 file is ported, apart from the soft body parts of Phase 9.
+- The simulation parity compares Zolt with the C++ PhysicsSystem after every update over about 120
+  scenes (gravity, contacts, CCD, the ported unit test cases, HelloWorld, the PerformanceTest scenes).
+  It runs in a thread matrix and with failure sweeps.
+- The PhysicsTests, PhysicsDeterminismTests, ContactListenerTests, SensorTests, BroadPhaseTests,
+  MotionQualityLinearCastTests and PhysicsStepListenerTests suites, and the simulating cases of the
+  Phase 4 test files, are ported. Only the cases that need concrete constraint types are left.
+- Design and settled decisions: [SimulationArchitecture.md](SimulationArchitecture.md).
+
+### Phase 6: Constraints (`Jolt/Physics/Constraints`) ✅
 Fixed, Point, Distance, Hinge, Slider, Cone, SwingTwist, SixDOF, Path (+ PathConstraintPath,
-Hermite), Gear, RackAndPinion, Pulley, MotorSettings, SpringSettings, ConstraintPart extras.
-**Milestone M7:** constraint unit tests pass; **HighSpeed** and **ConvexVsMesh** hashes match.
+Hermite), Gear, RackAndPinion, Pulley. MotorSettings, SpringSettings, every ConstraintPart and
+CalculateSolverSteps were ported in Phase 5. The concrete classes declare `overrides` (D8). Their
+settings types go into a comptime `constraint_settings_types` list until the Phase 8 Factory.
+**Milestone M7:** the constraint unit tests and the constraint cases of PhysicsTests pass. The
+simulation parity scene `constraints_chain`, and the constraint part of the PhysicsScene parity, run
+bit exact. (The HighSpeed and ConvexVsMesh hashes already match since M6.) ✅ Reached and exceeded:
+- All 14 files of the phase are ported; `Jolt/Physics/Constraints` is complete. The parity found no
+  numeric bug in the ported classes. The reviews found one safety bug: PhysicsScene unwrapped the
+  null settings of a PathConstraint.
+- The constraint unit tests of `UnitTests/Physics` are ported (Distance, Hinge, Path, SixDOF, Slider),
+  and so are the constraint cases of PhysicsTests (TestPhysicsConstraintUserData) and
+  PhysicsDeterminismTests (TestGridOfBoxesConstrained). Zolt adds simulation tests for the seven
+  classes without a Jolt test file, and ConstraintManagerTests.
+- ConstraintsParity compares every class with the C++ library after every call: creation between
+  bodies of every supported motion type, every setter, the solver calls, the state and the settings
+  binary state.
+- The simulation parity runs about 100 constraint scenes bit exact in its thread matrix with the
+  D12 failure sweeps: every class, its limits, springs and motors, mixed islands with contacts,
+  LargeIslandSplitter islands, sleeping and waking, cross save / restore. The PhysicsScene parity
+  creates random constraints of every class but Path (Jolt's PathConstraint cannot return its
+  settings).
+- Settled points, the Jolt bugs that are reproduced on purpose and the degenerate cases that the
+  harnesses avoid: [SimulationArchitecture.md](SimulationArchitecture.md), section 9.
 
 ### Phase 7: Character, Skeleton, Ragdoll, Vehicles
 Character, CharacterVirtual, CharacterBase, Skeleton, SkeletalAnimation, SkeletonMapper,

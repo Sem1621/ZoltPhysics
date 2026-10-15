@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const math = @import("Math.zig");
+const cppFloat = @import("../Core/StringTools.zig").cppFloat;
 const Swizzle = @import("Swizzle.zig").Swizzle;
 const Float4 = @import("Float4.zig").Float4;
 const UVec4 = @import("UVec4.zig").UVec4;
@@ -748,7 +749,8 @@ pub const Vec4 = extern struct {
         return v;
     }
 
+    /// To String (operator <<, the components are printed like std::ostream prints a float)
     pub fn format(self: Vec4, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{d}, {d}, {d}, {d}", .{ self.value[0], self.value[1], self.value[2], self.value[3] });
+        try writer.print("{f}, {f}, {f}, {f}", .{ cppFloat(self.value[0]), cppFloat(self.value[1]), cppFloat(self.value[2]), cppFloat(self.value[3]) });
     }
 };

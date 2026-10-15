@@ -16,7 +16,11 @@
 //!   The binary state is ported like GroupFilter's (CollisionArchitecture D8): `SaveBinaryState` writes the RTTI hash
 //!   of `rtti_name` (a vtable data entry that every concrete settings class declares), and `restoreFromBinaryState`
 //!   (StreamUtils::RestoreObject) finds the class in the comptime list `RegisterTypes.constraint_settings_types`
-//!   until the Factory of Phase 8 (Phase 6 adds Jolt's settings classes there; D8).
+//!   until the Factory of Phase 8 (D8). The list holds Jolt's settings classes in RegisterTypes.cpp order; a class
+//!   whose port is still a stub (`pub const is_stub = true`) is skipped, its hash gives Jolt's "Failed to create
+//!   instance of type".
+//! - `ConstraintSpace` is an `enum(i32)` that accepts every value: Jolt's binary state writes the enum as its
+//!   underlying int and reads back any value (a value other than world space means local space).
 //! - JPH_DEBUG_RENDERER (`mDrawConstraintSize`, `DrawConstraint`, `DrawConstraintLimits`,
 //!   `DrawConstraintReferenceFrame`, `Get/SetDrawConstraintSize`): TODO(debug_renderer). ConstraintSettings keeps its
 //!   public `mDrawConstraintSize` (it is serialized).
@@ -70,11 +74,16 @@ pub const ConstraintSubType = enum {
 };
 
 /// Certain constraints support setting them up in local or world space. This governs what is used.
-pub const ConstraintSpace = enum {
+/// (Jolt's enum class has the underlying type int, which the binary state of the settings writes; like MotorState, every
+/// int value is a valid EConstraintSpace, so a restored value outside the named ones is not illegal behavior: the
+/// constraints treat everything but WorldSpace as LocalToBodyCOM, as Jolt's `== EConstraintSpace::WorldSpace` checks do)
+pub const ConstraintSpace = enum(i32) {
     /// All constraint properties are specified in local space to center of mass of the bodies that are being constrained (so e.g. 'constraint position 1' will be local to body 1 COM, 'constraint position 2' will be local to body 2 COM). Note that this means you need to subtract Shape::GetCenterOfMass() from positions!
     local_to_body_com,
     /// All constraint properties are specified in world space
     world_space,
+    /// Any other int value
+    _,
 };
 
 /// Class used to store the configuration of a constraint. Allows run-time creation of constraints.
@@ -204,8 +213,9 @@ pub const ConstraintSettings = struct {
             return result;
         }
 
-        // Get the RTTI for the type and construct it
+        // Get the RTTI for the type and construct it (Zolt: a class that is still a stub, `is_stub`, is not known yet)
         const object: *ConstraintSettings = inline for (constraint_settings_types) |T| {
+            if (comptime @hasDecl(T, "is_stub")) continue;
             if (hash == comptime rttiHash(T.rtti_name)) break virtual.upcast(ConstraintSettings, try T.createDefault(allocator));
         } else {
             result.setError("Failed to create instance of type");

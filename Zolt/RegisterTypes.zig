@@ -21,6 +21,8 @@
 //!   - `material_types`: a tuple of material classes that PhysicsMaterial.restoreFromBinaryState can create;
 //!   - `group_filter_types`: a tuple of GroupFilter classes that GroupFilter.restoreFromBinaryState can create;
 //!   - `constraint_settings_types`: a tuple of ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState
+//!     can create;
+//!   - `path_constraint_path_types`: a tuple of PathConstraintPath classes that PathConstraintPath.restoreFromBinaryState
 //!     can create.
 //!
 //! Not needed in Zolt: RegisterTypesInternal / UnregisterTypes (nothing to register or unregister at runtime) and
@@ -52,6 +54,19 @@ const TaperedCapsuleShape = @import("Physics/Collision/Shape/TaperedCapsuleShape
 const TaperedCylinderShape = @import("Physics/Collision/Shape/TaperedCylinderShape.zig").TaperedCylinderShape;
 const TriangleShape = @import("Physics/Collision/Shape/TriangleShape.zig").TriangleShape;
 const SoftBodyShape = @import("Physics/SoftBody/SoftBodyShape.zig").SoftBodyShape;
+const ConeConstraintSettings = @import("Physics/Constraints/ConeConstraint.zig").ConeConstraintSettings;
+const DistanceConstraintSettings = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraintSettings;
+const FixedConstraintSettings = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraintSettings;
+const GearConstraintSettings = @import("Physics/Constraints/GearConstraint.zig").GearConstraintSettings;
+const HingeConstraintSettings = @import("Physics/Constraints/HingeConstraint.zig").HingeConstraintSettings;
+const PathConstraintSettings = @import("Physics/Constraints/PathConstraint.zig").PathConstraintSettings;
+const PathConstraintPathHermite = @import("Physics/Constraints/PathConstraintPathHermite.zig").PathConstraintPathHermite;
+const PointConstraintSettings = @import("Physics/Constraints/PointConstraint.zig").PointConstraintSettings;
+const PulleyConstraintSettings = @import("Physics/Constraints/PulleyConstraint.zig").PulleyConstraintSettings;
+const RackAndPinionConstraintSettings = @import("Physics/Constraints/RackAndPinionConstraint.zig").RackAndPinionConstraintSettings;
+const SixDOFConstraintSettings = @import("Physics/Constraints/SixDOFConstraint.zig").SixDOFConstraintSettings;
+const SliderConstraintSettings = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraintSettings;
+const SwingTwistConstraintSettings = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraintSettings;
 
 /// The user types module (see the file comment), an empty module unless the application provides one
 pub const user_types = @import("zolt_user_types");
@@ -107,8 +122,30 @@ pub const material_types = .{ PhysicsMaterial, PhysicsMaterialSimple } ++ (if (@
 pub const group_filter_types = .{GroupFilterTable} ++ (if (@hasDecl(user_types, "group_filter_types")) user_types.group_filter_types else .{});
 
 /// The ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState can create (the constraint part of the
-/// Factory registration, until the Factory of Phase 8): Jolt's settings classes (added by Phase 6) plus the user's
-pub const constraint_settings_types = .{} ++ (if (@hasDecl(user_types, "constraint_settings_types")) user_types.constraint_settings_types else .{});
+/// Factory registration, until the Factory of Phase 8): Jolt's settings classes in the order of RegisterTypes.cpp plus
+/// the user's. The Phase 6 classes that are still stubs declare `pub const is_stub = true`: restoreFromBinaryState
+/// skips them (their hash gives Jolt's "Failed to create instance of type", as for a type the Factory does not know), so
+/// a porter only removes the marker and never edits this list.
+pub const constraint_settings_types = .{
+    PointConstraintSettings,
+    SixDOFConstraintSettings,
+    SliderConstraintSettings,
+    SwingTwistConstraintSettings,
+    DistanceConstraintSettings,
+    HingeConstraintSettings,
+    FixedConstraintSettings,
+    ConeConstraintSettings,
+    PathConstraintSettings,
+    // VehicleConstraintSettings follows here in Jolt's list (Phase 7, Vehicle)
+    RackAndPinionConstraintSettings,
+    GearConstraintSettings,
+    PulleyConstraintSettings,
+} ++ (if (@hasDecl(user_types, "constraint_settings_types")) user_types.constraint_settings_types else .{});
+
+/// The PathConstraintPath classes that PathConstraintPath.restoreFromBinaryState can create (the path part of the Factory
+/// registration, until the Factory of Phase 8): Jolt's PathConstraintPathHermite (PathConstraintPath itself is abstract)
+/// plus the user's (`path_constraint_path_types` of `zolt_user_types`). A stub declares `is_stub` (see above).
+pub const path_constraint_path_types = .{PathConstraintPathHermite} ++ (if (@hasDecl(user_types, "path_constraint_path_types")) user_types.path_constraint_path_types else .{});
 
 test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
     const std = @import("std");
@@ -150,4 +187,34 @@ test "RegisterTypes: Jolt's registration order, the user hook, the default mater
     try testing.expectEqualStrings("Default", default_material.getDebugName());
     try testing.expectEqual(@as(usize, 3), material_types.len);
     try testing.expect(material_types[0] == PhysicsMaterial and material_types[1] == PhysicsMaterialSimple and material_types[2] == TestShapes.TestMaterial);
+}
+
+test "RegisterTypes: the constraint settings and path classes in Jolt's order, stubs are marked" {
+    const std = @import("std");
+    const testing = std.testing;
+    const TestConstraints = @import("Physics/Constraints/TestConstraints.zig");
+    const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
+
+    // RegisterTypesInternal's order of the constraint settings (VehicleConstraintSettings is Phase 7), then the user's
+    // (the inline tests register TestConstraintSettings through zolt_user_types)
+    const expected = [_][]const u8{ "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "TestConstraintSettings" };
+    try testing.expectEqual(expected.len, constraint_settings_types.len);
+    inline for (constraint_settings_types, expected) |T, name| {
+        try testing.expectEqualStrings(name, T.rtti_name);
+        try testing.expect(std.mem.endsWith(u8, @typeName(T), "." ++ name));
+    }
+    try testing.expect(constraint_settings_types[constraint_settings_types.len - 1] == TestConstraints.TestConstraintSettings);
+
+    // The ported classes can be created by restoreFromBinaryState, the stubs are marked (no RTTI hash collisions)
+    inline for (constraint_settings_types, 0..) |T, i| {
+        if (!@hasDecl(T, "is_stub")) try testing.expect(@hasDecl(T, "createDefault"));
+        inline for (constraint_settings_types, 0..) |U, j| {
+            if (i != j) try testing.expect(ConstraintSettings.rttiHash(T.rtti_name) != ConstraintSettings.rttiHash(U.rtti_name));
+        }
+    }
+    try testing.expect(!@hasDecl(constraint_settings_types[0], "is_stub")); // Point
+    try testing.expect(!@hasDecl(constraint_settings_types[6], "is_stub")); // Fixed
+
+    try testing.expectEqual(@as(usize, 1), path_constraint_path_types.len);
+    try testing.expectEqualStrings("PathConstraintPathHermite", path_constraint_path_types[0].rtti_name);
 }

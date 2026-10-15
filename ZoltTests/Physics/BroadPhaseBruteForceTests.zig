@@ -281,7 +281,7 @@ test "BroadPhaseBruteForce queries" {
 
         // castAABoxNoLock is the same query without the lock
         collector.reset();
-        c.broad_phase.castAABoxNoLock(&.{ .box = .init(Vec3.init(9.5, 3.5, -0.5), Vec3.init(10.5, 4.5, 0.5)), .direction = Vec3.init(0, -8, 0) }, &collector.base, &.{}, &.{});
+        try c.broad_phase.castAABoxNoLock(&.{ .box = .init(Vec3.init(9.5, 3.5, -0.5), Vec3.init(10.5, 4.5, 0.5)), .direction = Vec3.init(0, -8, 0) }, &collector.base, &.{}, &.{});
         try expectEqual(@as(usize, 1), collector.hits.items.len);
         try expectEqual(@as(f32, 0.375), collector.hits.items[0].fraction);
     }
@@ -312,7 +312,7 @@ test "BroadPhaseBruteForce findCollidingPairs" {
     var collector = Collector.init(allocator);
     defer collector.deinit();
     var active = [_]BodyID{ scene.box, scene.sphere, box2[0] };
-    c.broad_phase.findCollidingPairs(&active, 0.0, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
+    try c.broad_phase.findCollidingPairs(&active, 0.0, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
     try collector.checkError();
 
     // box vs floor, box vs box2 once (the pair of two active bodies is reported by the body with the lower index); the
@@ -329,15 +329,15 @@ test "BroadPhaseBruteForce findCollidingPairs" {
     // box2 ([2, 4]) with 5.6, and reports the pair because it has the lower index in the active bodies
     var sphere = [_]BodyID{scene.sphere};
     collector.reset();
-    c.broad_phase.findCollidingPairs(&sphere, 0.0, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
+    try c.broad_phase.findCollidingPairs(&sphere, 0.0, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
     try expect(!collector.hadHit());
-    c.broad_phase.findCollidingPairs(&sphere, 5.6, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
+    try c.broad_phase.findCollidingPairs(&sphere, 5.6, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
     try expectEqual(@as(usize, 1), collector.hits.items.len);
     try expect(collector.hits.items[0].eql(.init(scene.sphere, box2[0])));
 
     // From box2 the pair is skipped (Body::sFindCollidingPairsCanCollide), only the box overlaps
     collector.reset();
-    c.broad_phase.findCollidingPairs(&box2, 5.6, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
+    try c.broad_phase.findCollidingPairs(&box2, 5.6, &c.object_vs_broad_phase_layer_filter.base, &c.object_layer_pair_filter.base, &collector.base);
     for (collector.hits.items) |hit| try expect(!hit.eql(.init(box2[0], scene.sphere)) and !hit.eql(.init(box2[0], scene.box)));
 }
 

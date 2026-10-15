@@ -1,14 +1,20 @@
 //! Port of: UnitTests/Physics/CollidePointTests.cpp
-//! Status: partial
-//! Missing: the NarrowPhaseQuery overloads of sTestHit / sTestMiss and the body part of TestCollidePointVsMesh
-//!   (creating the mesh body with a random position and rotation and testing the points through NarrowPhaseQuery;
-//!   need PhysicsTestContext / NarrowPhaseQuery, Phase 5)
+//! Status: complete
+//!
+//! The `sTestHit` / `sTestMiss` overloads that take a NarrowPhaseQuery are `testHitNarrowPhase` / `testMissNarrowPhase`.
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const Layers = @import("../Layers.zig").Layers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
+const BodyID = zolt.BodyID;
+const Core = zolt.Core;
+const NarrowPhaseQuery = zolt.NarrowPhaseQuery;
+const RMat44 = zolt.RMat44;
+const RVec3 = zolt.RVec3;
 const BoxShape = zolt.BoxShape;
 const CapsuleShape = zolt.CapsuleShape;
 const CollidePointCollector = zolt.CollidePointCollector;
@@ -91,7 +97,14 @@ fn testHit(shape: *const Shape, position: Vec3) !void {
     try fw.expect(collector.hits.items.len == 1);
 }
 
-// Not ported: sTestHit(const NarrowPhaseQuery &, RVec3Arg, const BodyID &) (needs NarrowPhaseQuery, Phase 5)
+fn testHitNarrowPhase(narrow_phase: *const NarrowPhaseQuery, position: RVec3, body_id: BodyID) !void {
+    var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer collector.deinit();
+    narrow_phase.collidePoint(position, &collector.base, .{});
+    try collector.checkError();
+    try fw.expect(collector.hits.items.len == 1);
+    try fw.expect(collector.hits.items[0].body_id.eql(body_id));
+}
 
 fn testMiss(shape: *const Shape, position: Vec3) !void {
     var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
@@ -101,7 +114,13 @@ fn testMiss(shape: *const Shape, position: Vec3) !void {
     try fw.expect(collector.hits.items.len == 0);
 }
 
-// Not ported: sTestMiss(const NarrowPhaseQuery &, RVec3Arg) (needs NarrowPhaseQuery, Phase 5)
+fn testMissNarrowPhase(narrow_phase: *const NarrowPhaseQuery, position: RVec3) !void {
+    var collector = AllHitCollisionCollector(CollidePointCollector).init(allocator);
+    defer collector.deinit();
+    narrow_phase.collidePoint(position, &collector.base, .{});
+    try collector.checkError();
+    try fw.expect(collector.hits.items.len == 0);
+}
 
 /// `settings.Create().Get()`: the shape of a newly created result (the caller releases the reference)
 fn createShape(settings: *ShapeSettings) !RefConst(Shape) {
@@ -394,9 +413,23 @@ test "TestCollidePointVsMesh" {
         }
     }
 
-    // Get the shape (the body with a random position and rotation is not ported, see the header)
-    var mesh_shape = try createShape(settings.asShapeSettings());
+    // Create body with random orientation
+    var context: PhysicsTestContext = undefined;
+    try context.init(allocator, .{});
+    defer context.deinit();
+    const position = Vec3.random(&random);
+    const mesh_body = try context.createBodyWithShapeSettings(settings.asShapeSettings(), if (Core.double_precision) RVec3.fromVec3(position) else position, Quat.random(&random), .static, .discrete, Layers.non_moving, .dont_activate);
+
+    // Get the shape
+    var mesh_shape = RefConst(Shape).init(mesh_body.getShape());
     defer mesh_shape.deinit();
+
+    // Get narrow phase
+    const narrow_phase = context.getSystem().getNarrowPhaseQuery();
+
+    // Get transform
+    const body_transform = mesh_body.getWorldTransform();
+    try fw.expect(!body_transform.eql(RMat44.identity()));
 
     // Test points
     x = -grid_size;
@@ -409,13 +442,13 @@ test "TestCollidePointVsMesh" {
 
                 // The center point should hit
                 try testHit(mesh_shape.get().?, center);
-                // Not ported: sTestHit(narrow_phase, body_transform * center, mesh_body.GetID()) (Phase 5)
+                try testHitNarrowPhase(narrow_phase, body_transform.mulVec3(center), mesh_body.getID());
 
                 // Points outside the hull should not hit
                 for (cube_probes) |probe| {
                     const point = center.add(probe.mulScalar(0.4));
                     try testMiss(mesh_shape.get().?, point);
-                    // Not ported: sTestMiss(narrow_phase, body_transform * point) (Phase 5)
+                    try testMissNarrowPhase(narrow_phase, body_transform.mulVec3(point));
                 }
             }
         }

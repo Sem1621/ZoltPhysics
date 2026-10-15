@@ -1,14 +1,38 @@
 //! Port of: Jolt/Physics/PhysicsSystem.h, Jolt/Physics/PhysicsSystem.cpp
 //! Status: partial
-//! Missing: the job bodies that need parts of Waves A and B, each marked `// REGION Rn` (SimulationArchitecture section 2):
-//! REGION R2 ProcessBodyPair (the narrow phase and the contact constraints, needs the ContactConstraintManager of A4);
-//! REGION R3 the constraint and contact solving in JobSolveVelocityConstraints / JobSolvePositionConstraints (needs A4,
-//! the LargeIslandSplitter of A5 and CalculateSolverSteps of A2); REGION R4 the narrow phase cast of JobFindCCDContacts,
-//! sSolveCCDContact and the hit path of JobResolveCCDContacts (needs A4 and A7); the soft body jobs beyond the "no
-//! active soft bodies" path of JobSoftBodyPrepare (JobSoftBodyCollide, JobSoftBodySimulate, JobSoftBodyFinalize,
-//! Phase 9). Every stub panics where Jolt would do work it cannot do yet, so a result is never silently wrong: the
-//! gravity-only path (no body pair reaches the narrow phase, no constraint or contact in an island, no CCD hit, no soft
-//! body) runs Jolt's code end to end.
+//! Missing: the soft body work of Phase 9: the soft body jobs beyond the "no active soft bodies" path of
+//! JobSoftBodyPrepare (JobSoftBodyCollide, JobSoftBodySimulate, JobSoftBodyFinalize) and the response of a CCD body
+//! against a soft body face in JobResolveCCDContacts (SoftBodyShape::GetFaceIndex, SoftBodyMotionProperties::GetFace /
+//! GetVertex). Every stub panics where Jolt would do work it cannot do yet, so a result is never silently wrong: no soft
+//! body can be created before Phase 9, everything else (contacts, the island solve with and without the
+//! LargeIslandSplitter, sleeping, continuous collision detection) runs Jolt's code end to end.
+//!
+//! Continuous collision detection (Wave B R4):
+//! - JobFindCCDContacts is a literal port: the ShapeCastSettings, the CCDNarrowPhaseCollector (OnContactValidate through
+//!   ContactConstraintManager.validateContactPoint, OnSoftBodyContactValidate for a soft body 2, the earliest hit plus
+//!   the penetration slop, the correction for the motion of body 2) and the CCDBroadPhaseCollector (the body filters, the
+//!   ray against the widened bounds, the narrow phase cast through TransformedShape.castShape with the
+//!   SimShapeFilterWrapper, the early out) as local structs with `pub const overrides = .{.addHit}`, then the hit:
+//!   ManifoldBetweenTwoFaces, ContactConstraintManager.onCCDContactAdded, sensors and the average contact point.
+//! - sSolveCCDContact<Type2> is `solveCCDContact(comptime type2, ...)`, Jolt's dispatch table over the motion type of
+//!   body 2 in JobResolveCCDContacts an `inline else` switch. JobResolveCCDContacts sorts the CCD bodies, shortens the
+//!   other CCD body, solves the contact and activates the bodies it hit in batches of 64 (JPH_STACK_ALLOC: a fixed
+//!   array).
+//!
+//! Contacts and solving (Wave B R2 / R3):
+//! - ProcessBodyPair is a literal port: the contact cache (GetContactsFromCache), AddBodyPair, the narrow phase through
+//!   `sim_collide_body_vs_body` with the SimShapeFilterWrapper, the two collectors (with and without manifold
+//!   reduction, OnContactValidate through ContactConstraintManager.validateContactPoint) as local structs with
+//!   `pub const overrides = .{.addHit}`, PruneContactPoints and AddContactConstraint. It returns Allocator.Error when the
+//!   SimCollideBodyVsBody function ran out of heap memory (the InternalEdgeRemovingCollector of the default function):
+//!   with manifold reduction the manifolds of the pair are not added, without reduction the contacts added before the
+//!   error stay (NonReductionCollideShapeCollector adds every hit at once); either way the FindCollisions job latches
+//!   the error (D5).
+//! - JobSolveVelocityConstraints solves the islands with constraints or contacts (ConstraintIdxToConstraintOffset, the
+//!   two sorts, CalculateSolverSteps, SplitIsland or warm start + velocity steps + StoreAppliedImpulses) and the batches
+//!   of the split islands. Nothing in it allocates; its closure checks the out of memory latch at job entry only
+//!   (SimulationArchitecture section 8), so a job that entered keeps claiming and splitting islands and the batch
+//!   protocol of the LargeIslandSplitter is never left halfway.
 //!
 //! SimulationArchitecture D4 / D5 / D6 / D7:
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
@@ -29,9 +53,9 @@
 //!   thread; Jolt hits this from the second collision step on, Zolt with the start gate already in the first step.
 //! - The PhysicsSystem is initialized in place (`var system: PhysicsSystem = .empty; try system.init(...)`) because the
 //!   lock and body interfaces point into it; it must not move afterwards. `init` takes Jolt's arguments plus
-//!   `allocator`, `io` and an options struct: `.broad_phase = .brute_force` (default until A1 ports the QuadTree, which
-//!   Jolt's BROAD_PHASE define selects) or `.custom = *BroadPhase` (a Zolt addition: a broad phase that the system owns
-//!   from a successful init on).
+//!   `allocator`, `io` and an options struct: `.broad_phase = .quad_tree` (the default, Jolt's BROAD_PHASE define),
+//!   `.brute_force` or `.custom = *BroadPhase` (a Zolt addition: a broad phase that the system owns from a successful
+//!   init on).
 //! - Const / non-const overloads: `getBodyInterface` / `getBodyInterfaceMut`, `getBodyInterfaceNoLock` /
 //!   `getBodyInterfaceNoLockMut`. Listeners are stored by value (pattern B, D7): `?ContactListener`,
 //!   `?BodyActivationListener`, `?SoftBodyContactListener`; `AddStepListener` keeps the `PhysicsStepListener` value
@@ -40,9 +64,11 @@
 //!   InternalEdgeRemovingCollector of the default function needs.
 //! - Defaulted parameters are options: `saveState(stream, .{ .state = .all, .filter = null })`,
 //!   `restoreState(stream, .{ .filter = null })`. Functions that allocate return Allocator.Error (`getBodies`,
-//!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`).
-//! - JPH_DET_LOG: TODO(determinism_log). JPH_DEBUG_RENDERER (sDrawMotionQualityLinearCast, DrawBodies,
-//!   DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame): TODO(debug_renderer).
+//!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`,
+//!   `optimizeBroadPhase`).
+//! - JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER
+//!   (sDrawMotionQualityLinearCast, DrawBodies, DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame):
+//!   TODO(debug_renderer).
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
@@ -51,6 +77,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Core = @import("../Core/Core.zig");
+const DeterminismLog = @import("DeterminismLog.zig");
 const math = @import("../Math/Math.zig");
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
 const Quat = @import("../Math/Quat.zig").Quat;
@@ -76,6 +103,7 @@ const Body = @import("Body/Body.zig").Body;
 const BodyID = @import("Body/BodyID.zig").BodyID;
 const BodyPair = @import("Body/BodyPair.zig").BodyPair;
 const BodyType = @import("Body/BodyType.zig").BodyType;
+const MotionType = @import("Body/MotionType.zig").MotionType;
 const BodyAccess = @import("Body/BodyAccess.zig").BodyAccess;
 const BodyInterface = @import("Body/BodyInterface.zig").BodyInterface;
 const BodyLockInterface = @import("Body/BodyLockInterface.zig").BodyLockInterface;
@@ -101,17 +129,31 @@ const BroadPhaseQueryFile = @import("Collision/BroadPhase/BroadPhaseQuery.zig");
 const BroadPhaseQuery = BroadPhaseQueryFile.BroadPhaseQuery;
 const CastShapeBodyCollector = BroadPhaseQueryFile.CastShapeBodyCollector;
 const BroadPhaseBruteForce = @import("Collision/BroadPhase/BroadPhaseBruteForce.zig").BroadPhaseBruteForce;
+const BroadPhaseQuadTree = @import("Collision/BroadPhase/BroadPhaseQuadTree.zig").BroadPhaseQuadTree;
 const BroadPhaseCastResult = @import("Collision/CastResult.zig").BroadPhaseCastResult;
-const RShapeCast = @import("Collision/ShapeCast.zig").RShapeCast;
+const ShapeCastFile = @import("Collision/ShapeCast.zig");
+const RShapeCast = ShapeCastFile.RShapeCast;
+const ShapeCastSettings = ShapeCastFile.ShapeCastSettings;
+const ShapeCastResult = ShapeCastFile.ShapeCastResult;
 const ShapeFile = @import("Collision/Shape/Shape.zig");
 const CollideShapeCollector = ShapeFile.CollideShapeCollector;
+const CastShapeCollector = ShapeFile.CastShapeCollector;
 const SubShapeIDCreator = @import("Collision/Shape/SubShapeID.zig").SubShapeIDCreator;
-const CollideShapeSettings = @import("Collision/CollideShape.zig").CollideShapeSettings;
+const CollideShapeFile = @import("Collision/CollideShape.zig");
+const CollideShapeSettings = CollideShapeFile.CollideShapeSettings;
+const CollideShapeResult = CollideShapeFile.CollideShapeResult;
+const ManifoldBetweenTwoFacesFile = @import("Collision/ManifoldBetweenTwoFaces.zig");
+const manifoldBetweenTwoFaces = ManifoldBetweenTwoFacesFile.manifoldBetweenTwoFaces;
+const pruneContactPoints = ManifoldBetweenTwoFacesFile.pruneContactPoints;
 const CollisionDispatch = @import("Collision/CollisionDispatch.zig");
 const InternalEdgeRemovingCollector = @import("Collision/InternalEdgeRemovingCollector.zig").InternalEdgeRemovingCollector;
 const ShapeFilter = @import("Collision/ShapeFilter.zig").ShapeFilter;
 const SimShapeFilter = @import("Collision/SimShapeFilter.zig").SimShapeFilter;
-const ContactListener = @import("Collision/ContactListener.zig").ContactListener;
+const SimShapeFilterWrapper = @import("Collision/SimShapeFilterWrapper.zig").SimShapeFilterWrapper;
+const ContactListenerFile = @import("Collision/ContactListener.zig");
+const ContactListener = ContactListenerFile.ContactListener;
+const ContactManifold = ContactListenerFile.ContactManifold;
+const ContactSettings = ContactListenerFile.ContactSettings;
 const NarrowPhaseQuery = @import("Collision/NarrowPhaseQuery.zig").NarrowPhaseQuery;
 const ConstraintFile = @import("Constraints/Constraint.zig");
 const Constraint = ConstraintFile.Constraint;
@@ -119,7 +161,10 @@ const ConstraintManagerFile = @import("Constraints/ConstraintManager.zig");
 const ConstraintManager = ConstraintManagerFile.ConstraintManager;
 const Constraints = ConstraintManagerFile.Constraints;
 const ContactConstraintManager = @import("Constraints/ContactConstraintManager.zig").ContactConstraintManager;
-const SoftBodyContactListener = @import("SoftBody/SoftBodyContactListener.zig").SoftBodyContactListener;
+const SoftBodyContactListenerFile = @import("SoftBody/SoftBodyContactListener.zig");
+const SoftBodyContactListener = SoftBodyContactListenerFile.SoftBodyContactListener;
+const SoftBodyContactSettings = SoftBodyContactListenerFile.SoftBodyContactSettings;
+const ContactConstraintPart = @import("Constraints/ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart;
 const StateRecorderFile = @import("StateRecorder.zig");
 const StateRecorder = StateRecorderFile.StateRecorder;
 const StateRecorderState = StateRecorderFile.StateRecorderState;
@@ -131,6 +176,9 @@ const PhysicsStepListenerContext = PhysicsStepListenerFile.PhysicsStepListenerCo
 const PhysicsUpdateContext = @import("PhysicsUpdateContext.zig").PhysicsUpdateContext;
 const IslandBuilder = @import("IslandBuilder.zig").IslandBuilder;
 const LargeIslandSplitter = @import("LargeIslandSplitter.zig").LargeIslandSplitter;
+const CalculateSolverStepsFile = @import("Constraints/CalculateSolverSteps.zig");
+const CalculateSolverSteps = CalculateSolverStepsFile.CalculateSolverSteps;
+const DummyCalculateSolverSteps = CalculateSolverStepsFile.DummyCalculateSolverSteps;
 
 const color_update_broad_phase_finalize = Color.getDistinctColor(1);
 const color_update_broad_phase_prepare = Color.getDistinctColor(2);
@@ -218,7 +266,9 @@ pub const PhysicsSystem = struct {
 
     /// The broad phase that `init` creates (Zolt option, Jolt: the BROAD_PHASE define)
     pub const BroadPhaseOption = union(enum) {
-        /// BroadPhaseBruteForce (the default until A1 ports BroadPhaseQuadTree, Jolt's default)
+        /// BroadPhaseQuadTree (the default, Jolt's BROAD_PHASE define)
+        quad_tree,
+        /// BroadPhaseBruteForce (a reference implementation for tests)
         brute_force,
         /// A broad phase created by the caller; the system owns it after a successful init (it destroys it in deinit)
         custom: *BroadPhase,
@@ -226,7 +276,7 @@ pub const PhysicsSystem = struct {
 
     /// Zolt options of `init`
     pub const InitOptions = struct {
-        broad_phase: BroadPhaseOption = .brute_force,
+        broad_phase: BroadPhaseOption = .quad_tree,
     };
 
     /// Number of constraints to process at once in JobDetermineActiveConstraints
@@ -352,10 +402,11 @@ pub const PhysicsSystem = struct {
 
         // Create broadphase
         const broad_phase: *BroadPhase = switch (opts.broad_phase) {
+            .quad_tree => (try BroadPhaseQuadTree.create(allocator)).asBroadPhase(),
             .brute_force => (try BroadPhaseBruteForce.create(allocator)).asBroadPhase(),
             .custom => |custom| custom,
         };
-        errdefer if (opts.broad_phase == .brute_force) broad_phase.base.destroy();
+        errdefer if (opts.broad_phase != .custom) broad_phase.base.destroy();
         try broad_phase.initBroadPhase(&self.body_manager, broad_phase_layer_interface);
 
         // Init contact constraint manager
@@ -559,8 +610,9 @@ pub const PhysicsSystem = struct {
     /// in a roughly unoccupied space (e.g. a new level section) then a call to OptimizeBroadPhase is also not needed
     /// as batch adding creates an efficient bounding volume hierarchy.
     /// Don't call this function while bodies are being modified from another thread or use the locking BodyInterface to modify bodies.
-    pub fn optimizeBroadPhase(self: *Self) void {
-        self.getBroadPhase().optimize();
+    /// (Zolt: Allocator.Error from rebuilding the trees, the broad phase stays valid)
+    pub fn optimizeBroadPhase(self: *Self) Allocator.Error!void {
+        return self.getBroadPhase().optimize();
     }
 
     /// Adds a new step listener
@@ -737,7 +789,7 @@ pub const PhysicsSystem = struct {
     /// half done (memory safe, no lock held, nothing leaked, the temp allocator is empty): restore a saved state or
     /// deinit the system.
     pub fn update(self: *Self, delta_time: f32, collision_steps: u32, temp_allocator: TempAllocator, job_system: JobSystem) error{OutOfMemory}!PhysicsUpdateError {
-        // TODO(determinism_log): JPH_DET_LOG("PhysicsSystem::Update: dt: " << inDeltaTime << " steps: " << inCollisionSteps);
+        if (DeterminismLog.enabled) DeterminismLog.log(.{ "PhysicsSystem::Update: dt: ", delta_time, " steps: ", @as(i32, @bitCast(collision_steps)) }); // inCollisionSteps is an int in Jolt
 
         std.debug.assert(collision_steps > 0);
         std.debug.assert(delta_time >= 0.0);
@@ -824,6 +876,9 @@ pub const PhysicsSystem = struct {
         self.body_manager.lockAllBodies();
         broad_phase.lockModifications();
 
+        // Zolt (D5): the jobs reset the InvalidateContactCache flags, an update that runs out of memory puts them back
+        self.body_manager.saveContactCacheInvalidation();
+
         // Build the jobs. Zolt: no job runs before every job exists (the start gate), so a failure has no side effects.
         var constraints_locked = false;
         self.buildJobs(&context, collision_steps, &constraints_locked) catch |err| {
@@ -888,6 +943,11 @@ pub const PhysicsSystem = struct {
         // lock a body mutex while this thread has already locked the mutex
         job_system.waitForJobs(barrier);
 
+        // Zolt (D5): an allocation failed inside a job: flag the contact caches that were invalid at the start of the
+        // update again (the caller restores a saved state, which does not hold the flags)
+        if (context.isOutOfMemory())
+            self.body_manager.restoreContactCacheInvalidation();
+
         self.finishUpdate(&context, constraints_locked);
 
         // Zolt (D5): an allocation failed inside a job
@@ -931,8 +991,11 @@ pub const PhysicsSystem = struct {
         if (track_simulation_stats and !context.isOutOfMemory())
             self.gatherIslandStats();
 
-        // Clear the large island splitter
-        self.large_island_splitter.reset(temp_allocator);
+        // Clear the large island splitter (Zolt D5: after an out of memory error not every large island was split)
+        if (context.isOutOfMemory())
+            self.large_island_splitter.resetAfterOutOfMemory(temp_allocator)
+        else
+            self.large_island_splitter.reset(temp_allocator);
 
         // Clear the island builder
         self.island_builder.resetIslands(temp_allocator);
@@ -1218,9 +1281,13 @@ pub const PhysicsSystem = struct {
                         // Store the number of active bodies at the start of the step
                         ns.num_active_bodies_at_step_start = ps.body_manager.getNumActiveBodies(.rigid_body);
 
-                        // Clear the large island splitter
+                        // Clear the large island splitter (Zolt D5: after an out of memory error not every large
+                        // island was split)
                         const temp_allocator_ns = c.temp_allocator;
-                        ps.large_island_splitter.reset(temp_allocator_ns);
+                        if (c.isOutOfMemory())
+                            ps.large_island_splitter.resetAfterOutOfMemory(temp_allocator_ns)
+                        else
+                            ps.large_island_splitter.reset(temp_allocator_ns);
 
                         // Clear the island builder
                         ps.island_builder.resetIslands(temp_allocator_ns);
@@ -1619,8 +1686,8 @@ pub const PhysicsSystem = struct {
                         const batch_size = active_bodies_read_idx_end - active_bodies_read_idx;
                         @memcpy(active_bodies[0..batch_size], self.body_manager.getActiveBodiesUnsafe(.rigid_body)[active_bodies_read_idx..active_bodies_read_idx_end]);
 
-                        // Find pairs in the broadphase
-                        self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base);
+                        // Find pairs in the broadphase (Zolt D5: the broad phase ran out of heap memory, latched)
+                        self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base) catch context.setOutOfMemory();
 
                         // Check if we have enough pairs in the buffer to start a new job
                         const queue = &step.body_pair_queues.slice()[job_index];
@@ -1682,15 +1749,282 @@ pub const PhysicsSystem = struct {
     }
 
     /// Process narrow phase for a single body pair
-    /// (Zolt: Allocator.Error, the narrow phase allocates: InternalEdgeRemovingCollector, the collectors)
+    /// (Zolt: Allocator.Error when the SimCollideBodyVsBody function ran out of heap memory (the default one in the
+    /// InternalEdgeRemovingCollector); the contacts of the pair are then incomplete, the caller latches the error, D5)
     fn processBodyPair(self: *Self, contact_allocator: *ContactAllocator, body_pair: BodyPair) Allocator.Error!void {
-        _ = .{ self, contact_allocator, body_pair };
+        // Fetch body pair
+        var body1 = self.body_manager.getBodyMut(body_pair.body_a);
+        var body2 = self.body_manager.getBodyMut(body_pair.body_b);
+        std.debug.assert(body1.isActive());
 
-        // REGION R2: stub. The narrow phase between the bodies of a pair, the contact cache and the contact constraints
-        // (GetContactsFromCache, AddBodyPair, AddContactConstraint, the contact listener calls) need the
-        // ContactConstraintManager (A4). Only reached when the broad phase reports a body pair (overlapping bounds of
-        // bodies whose layers collide).
-        @panic("PhysicsSystem.processBodyPair: REGION R2 (needs the ContactConstraintManager, A4)");
+        if (DeterminismLog.enabled) DeterminismLog.log(.{ "ProcessBodyPair: id1: ", body_pair.body_a, " id2: ", body_pair.body_b, " p1: ", body1.getCenterOfMassPosition(), " p2: ", body2.getCenterOfMassPosition(), " r1: ", body1.getRotation(), " r2: ", body2.getRotation() });
+
+        // Validates that a body that is sleeping has zero velocity.
+        if (Core.enable_asserts) body2.validateMotion();
+
+        // Check for soft bodies
+        if (body2.isSoftBody()) {
+            // If the 2nd body is a soft body and not active, we activate it now
+            if (!body2.isActive())
+                self.body_manager.activateBodies((&body_pair.body_b)[0..1]);
+
+            // Soft body processing is done later in the pipeline
+            return;
+        }
+
+        // Ensure that body1 has the higher motion type (i.e. dynamic trumps kinematic), this ensures that we do the collision detection in the space of a moving body,
+        // which avoids accuracy problems when testing a very large static object against a small dynamic object
+        // Ensure that body1 id < body2 id when motion types are the same.
+        if (@intFromEnum(body1.getMotionType()) < @intFromEnum(body2.getMotionType()) or
+            (body1.getMotionType() == body2.getMotionType() and body_pair.body_b.lessThan(body_pair.body_a)))
+            std.mem.swap(*Body, &body1, &body2);
+
+        // Check if the contact points from the previous frame are reusable and if so copy them
+        var pair_handled = false;
+        if (self.physics_settings.use_body_pair_contact_cache and !(body1.isCollisionCacheInvalid() or body2.isCollisionCacheInvalid()))
+            pair_handled = self.contact_manager.getContactsFromCache(contact_allocator, body1, body2);
+
+        // If the cache hasn't handled this body pair do actual collision detection
+        if (!pair_handled) {
+            const start_ticks = if (track_simulation_stats) getProcessorTickCount() else {};
+
+            // Create entry in the cache for this body pair
+            // Needs to happen irrespective if we found a collision or not (we want to remember that no collision was found too)
+            const body_pair_handle = self.contact_manager.addBodyPair(contact_allocator, body1, body2);
+            if (body_pair_handle == null)
+                return; // Out of cache space
+
+            // Create the query settings
+            var settings: CollideShapeSettings = .{};
+            settings.collect_faces_mode = .collect_faces;
+            settings.active_edge_mode = if (self.physics_settings.check_active_edges) .collide_only_with_active else .collide_with_all;
+            settings.max_separation_distance = if (body1.isSensor() or body2.isSensor()) 0.0 else self.physics_settings.speculative_contact_distance;
+            settings.active_edge_movement_direction = body1.getLinearVelocity().sub(body2.getLinearVelocity());
+            settings.internal_edge_removal_vertex_tolerance_sq = self.physics_settings.internal_edge_removal_vertex_tolerance_sq;
+
+            // Create shape filter
+            var shape_filter: SimShapeFilterWrapper = .init(self.sim_shape_filter, body1);
+            shape_filter.setBody2(body2);
+
+            // Get transforms relative to body1
+            const offset = body1.getCenterOfMassPosition();
+            const transform1 = Mat44.rotationQuat(body1.getRotation());
+            const transform2 = body2.getCenterOfMassTransform().postTranslatedRVec3(offset.negate()).toMat44();
+
+            if (self.physics_settings.use_manifold_reduction // Check global flag
+            and body1.getUseManifoldReductionWithBody(body2)) // Check body flag
+            {
+                // Version WITH contact manifold reduction
+
+                const MyManifold = struct {
+                    base: ContactManifold,
+                    first_world_space_normal: Vec3,
+                };
+
+                // A temporary structure that allows us to keep track of the all manifolds between this body pair
+                const Manifolds = StaticArray(MyManifold, 32);
+
+                // Create collector
+                const ReductionCollideShapeCollector = struct {
+                    pub const overrides = .{.addHit};
+
+                    base: CollideShapeCollector = .init(@This()),
+                    system: *const Self,
+                    body1: *const Body,
+                    body2: *const Body,
+                    validate_body_pair: bool = true,
+                    manifolds: Manifolds = .empty,
+
+                    pub fn addHit(collector: *@This(), result: *const CollideShapeResult) void {
+                        // The first body should be the one with the highest motion type
+                        std.debug.assert(@intFromEnum(collector.body1.getMotionType()) >= @intFromEnum(collector.body2.getMotionType()));
+                        std.debug.assert(!collector.base.shouldEarlyOut());
+
+                        // Test if we want to accept this hit
+                        if (collector.validate_body_pair) {
+                            switch (collector.system.contact_manager.validateContactPoint(collector.body1, collector.body2, collector.body1.getCenterOfMassPosition(), result)) {
+                                .accept_contact => {
+                                    // We're just accepting this one, nothing to do
+                                },
+
+                                .accept_all_contacts_for_this_body_pair => {
+                                    // Accept and stop calling the validate callback
+                                    collector.validate_body_pair = false;
+                                },
+
+                                .reject_contact => {
+                                    // Skip this contact
+                                    return;
+                                },
+
+                                .reject_all_contacts_for_this_body_pair => {
+                                    // Skip this and early out
+                                    collector.base.forceEarlyOut();
+                                    return;
+                                },
+                            }
+                        }
+
+                        // Calculate normal
+                        const world_space_normal = result.penetration_axis.normalized();
+
+                        // Check if we can add it to an existing manifold
+                        const contact_normal_cos_max_delta_rot = collector.system.physics_settings.contact_normal_cos_max_delta_rotation;
+                        var manifold_index: u32 = 0;
+                        while (manifold_index < collector.manifolds.len) : (manifold_index += 1) {
+                            const m = collector.manifolds.at(manifold_index);
+                            if (world_space_normal.dot(m.first_world_space_normal) >= contact_normal_cos_max_delta_rot) {
+                                // Update average normal
+                                m.base.world_space_normal = m.base.world_space_normal.add(world_space_normal);
+                                m.base.penetration_depth = math.max(m.base.penetration_depth, result.penetration_depth);
+                                break;
+                            }
+                        }
+                        if (manifold_index == collector.manifolds.len) {
+                            // Check if array is full
+                            if (collector.manifolds.len == Manifolds.capacity) {
+                                // Full, find manifold with least amount of penetration
+                                manifold_index = 0;
+                                var m: u32 = 1;
+                                while (m < collector.manifolds.len) : (m += 1) {
+                                    if (collector.manifolds.get(m).base.penetration_depth < collector.manifolds.get(manifold_index).base.penetration_depth)
+                                        manifold_index = m;
+                                }
+
+                                // If this contacts penetration is smaller than the smallest manifold, we skip this contact
+                                if (result.penetration_depth < collector.manifolds.get(manifold_index).base.penetration_depth)
+                                    return;
+
+                                // Replace the manifold
+                                collector.manifolds.at(manifold_index).* = .{ .base = .{ .base_offset = collector.body1.getCenterOfMassPosition(), .world_space_normal = world_space_normal, .penetration_depth = result.penetration_depth, .sub_shape_id1 = result.sub_shape_id1, .sub_shape_id2 = result.sub_shape_id2 }, .first_world_space_normal = world_space_normal };
+                            } else {
+                                // Not full, create new manifold
+                                collector.manifolds.append(.{ .base = .{ .base_offset = collector.body1.getCenterOfMassPosition(), .world_space_normal = world_space_normal, .penetration_depth = result.penetration_depth, .sub_shape_id1 = result.sub_shape_id1, .sub_shape_id2 = result.sub_shape_id2 }, .first_world_space_normal = world_space_normal });
+                                manifold_index = collector.manifolds.len - 1;
+                            }
+                        }
+                        const manifold = collector.manifolds.at(manifold_index);
+
+                        // Determine contact points
+                        const settings_ps = &collector.system.physics_settings;
+                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2);
+
+                        // Prune if we have more than 32 points (this means we could run out of space in the next iteration)
+                        if (manifold.base.relative_contact_points_on1.len > 32)
+                            pruneContactPoints(manifold.first_world_space_normal, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2);
+                    }
+                };
+                var collector: ReductionCollideShapeCollector = .{ .system = self, .body1 = body1, .body2 = body2 };
+
+                // Perform collision detection between the two shapes
+                try self.sim_collide_body_vs_body.call(self.allocator, body1, body2, transform1, transform2, &settings, &collector.base, shape_filter.getFilter());
+
+                // Add the contacts
+                var link_and_activate_bodies = true;
+                for (collector.manifolds.slice()) |*my_manifold| {
+                    const manifold = &my_manifold.base;
+
+                    // Normalize the normal (is a sum of all normals from merged manifolds)
+                    manifold.world_space_normal = manifold.world_space_normal.normalized();
+
+                    // If we still have too many points, prune them now
+                    if (manifold.relative_contact_points_on1.len > 4)
+                        pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+
+                    // Actually add the contact points to the manager
+                    self.contact_manager.addContactConstraint(contact_allocator, &link_and_activate_bodies, body_pair_handle, body1, body2, manifold);
+                }
+            } else {
+                // Version WITHOUT contact manifold reduction
+
+                // Create collector
+                const NonReductionCollideShapeCollector = struct {
+                    pub const overrides = .{.addHit};
+
+                    base: CollideShapeCollector = .init(@This()),
+                    system: *Self,
+                    contact_allocator: *ContactAllocator,
+                    body1: *Body,
+                    body2: *Body,
+                    body_pair_handle: ContactConstraintManager.BodyPairHandle,
+                    validate_body_pair: bool = true,
+                    link_and_activate_bodies: bool = true,
+
+                    pub fn addHit(collector: *@This(), result: *const CollideShapeResult) void {
+                        // The first body should be the one with the highest motion type
+                        std.debug.assert(@intFromEnum(collector.body1.getMotionType()) >= @intFromEnum(collector.body2.getMotionType()));
+                        std.debug.assert(!collector.base.shouldEarlyOut());
+
+                        // Test if we want to accept this hit
+                        if (collector.validate_body_pair) {
+                            switch (collector.system.contact_manager.validateContactPoint(collector.body1, collector.body2, collector.body1.getCenterOfMassPosition(), result)) {
+                                .accept_contact => {
+                                    // We're just accepting this one, nothing to do
+                                },
+
+                                .accept_all_contacts_for_this_body_pair => {
+                                    // Accept and stop calling the validate callback
+                                    collector.validate_body_pair = false;
+                                },
+
+                                .reject_contact => {
+                                    // Skip this contact
+                                    return;
+                                },
+
+                                .reject_all_contacts_for_this_body_pair => {
+                                    // Skip this and early out
+                                    collector.base.forceEarlyOut();
+                                    return;
+                                },
+                            }
+                        }
+
+                        // Determine contact points
+                        var manifold: ContactManifold = .{};
+                        manifold.base_offset = collector.body1.getCenterOfMassPosition();
+                        const settings_ps = &collector.system.physics_settings;
+                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+
+                        // Calculate normal
+                        manifold.world_space_normal = result.penetration_axis.normalized();
+
+                        // Store penetration depth
+                        manifold.penetration_depth = result.penetration_depth;
+
+                        // Prune if we have more than 4 points
+                        if (manifold.relative_contact_points_on1.len > 4)
+                            pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+
+                        // Set other properties
+                        manifold.sub_shape_id1 = result.sub_shape_id1;
+                        manifold.sub_shape_id2 = result.sub_shape_id2;
+
+                        // Actually add the contact points to the manager
+                        collector.system.contact_manager.addContactConstraint(collector.contact_allocator, &collector.link_and_activate_bodies, collector.body_pair_handle, collector.body1, collector.body2, &manifold);
+                    }
+                };
+                var collector: NonReductionCollideShapeCollector = .{ .system = self, .contact_allocator = contact_allocator, .body1 = body1, .body2 = body2, .body_pair_handle = body_pair_handle };
+
+                // Perform collision detection between the two shapes
+                try self.sim_collide_body_vs_body.call(self.allocator, body1, body2, transform1, transform2, &settings, &collector.base, shape_filter.getFilter());
+            }
+
+            if (track_simulation_stats) {
+                // Track time spent processing collision for this body pair
+                var num_ticks = getProcessorTickCount() -% start_ticks;
+                if (@intFromEnum(body1.getMotionType()) > @intFromEnum(body2.getMotionType())) {
+                    // Assign all ticks to the body with the higher motion type
+                    _ = body1.getMotionPropertiesMut().getSimulationStatsMut().narrow_phase_ticks.fetchAdd(num_ticks, .monotonic);
+                } else {
+                    // When two bodies with the same motion type are involved, we give both bodies half the ticks
+                    std.debug.assert(body1.getMotionType() == body2.getMotionType());
+                    num_ticks /= 2;
+                    _ = body1.getMotionPropertiesMut().getSimulationStatsMut().narrow_phase_ticks.fetchAdd(num_ticks, .monotonic);
+                    _ = body2.getMotionPropertiesMut().getSimulationStatsMut().narrow_phase_ticks.fetchAdd(num_ticks, .monotonic);
+                }
+            }
+        }
     }
 
     fn jobFinalizeIslands(self: *Self, context: *PhysicsUpdateContext) TempAllocator.Error!void {
@@ -1721,10 +2055,20 @@ pub const PhysicsSystem = struct {
         }
     }
 
+    /// (Zolt D5 and SimulationArchitecture section 8: the closure checks the out of memory latch at job entry only. A job
+    /// that has entered claims and splits islands until none are left even when the update got poisoned meanwhile,
+    /// otherwise `next_split_island` never reaches the number of large islands and the jobs in the batch loop wait
+    /// forever. Nothing in here allocates.)
     fn jobSolveVelocityConstraints(self: *Self, context: *PhysicsUpdateContext, step: *Step) void {
         // We update velocities and need to read positions to do so
         var grant: BodyAccess.Grant = .init(.read_write, .read);
         defer grant.deinit();
+
+        const delta_time = context.step_delta_time;
+        const active_constraints = context.active_constraints.items;
+
+        // Only the first step to correct for the delta time difference in the previous update
+        const warm_start_impulse_ratio: f32 = if (self.physics_settings.constraint_warm_start) (if (step.is_first) context.warm_start_impulse_ratio else 1.0) else 0.0;
 
         var check_islands = true;
         var check_split_islands = self.physics_settings.use_large_island_splitter;
@@ -1734,10 +2078,35 @@ pub const PhysicsSystem = struct {
                 var batch: LargeIslandSplitter.Batch = undefined;
                 switch (self.large_island_splitter.fetchNextBatch(&batch)) {
                     .batch_retrieved => {
-                        // REGION R3: stub. Warm start (first iteration) or solve the batch, mark it as processed and store
-                        // the applied impulses (needs A2's CalculateSolverSteps, A4 and A5; the splitter stub never
-                        // creates a batch)
-                        @panic("PhysicsSystem.jobSolveVelocityConstraints: REGION R3 (split island batch)");
+                        const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
+
+                        if (batch.first_iteration) {
+                            // Iteration 0 is used to warm start the batch (we added 1 to the number of iterations in LargeIslandSplitter::SplitIsland)
+                            var dummy: DummyCalculateSolverSteps = .{};
+                            ConstraintManager.warmStartVelocityConstraints(active_constraints, batch.constraints, warm_start_impulse_ratio, &dummy);
+                            self.contact_manager.warmStartVelocityConstraints(batch.contacts, warm_start_impulse_ratio, &dummy);
+                        } else {
+                            // Solve velocity constraints
+                            _ = ConstraintManager.solveVelocityConstraints(active_constraints, batch.constraints, delta_time);
+                            _ = self.contact_manager.solveVelocityConstraints(batch.contacts);
+                        }
+
+                        // Mark the batch as processed
+                        var last_iteration: bool = undefined;
+                        var final_batch: bool = undefined;
+                        self.large_island_splitter.markBatchProcessed(batch.split_island_index, batch.constraints, batch.contacts, &last_iteration, &final_batch);
+
+                        // Save back the lambdas in the contact cache for the warm start of the next physics update
+                        if (last_iteration)
+                            self.contact_manager.storeAppliedImpulses(batch.contacts);
+
+                        if (track_simulation_stats) {
+                            const num_ticks = getProcessorTickCount() -% start_tick;
+                            _ = self.island_builder.getIslandStats(self.large_island_splitter.getIslandIndex(batch.split_island_index)).velocity_constraint_ticks.fetchAdd(num_ticks, .monotonic);
+                        }
+
+                        // We processed work, loop again
+                        continue;
                     },
 
                     .waiting_for_batch => {},
@@ -1778,11 +2147,54 @@ pub const PhysicsSystem = struct {
                     continue;
                 }
 
-                // REGION R3: stub. Convert the contact indices to offsets, sort the constraints and the contacts, split
-                // the island or warm start and solve it with CalculateSolverSteps, store the number of position steps
-                // and the applied impulses (needs A2's CalculateSolverSteps, A4 and A5).
-                _ = context;
-                @panic("PhysicsSystem.jobSolveVelocityConstraints: REGION R3 (an island with constraints or contacts)");
+                const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
+
+                // Convert indices to offsets so that we lose one indirection in the solver. We couldn't do this earlier as we need constraint indices to build islands.
+                self.contact_manager.constraintIdxToConstraintOffset(contacts);
+
+                // Sort constraints to give a deterministic simulation
+                ConstraintManager.sortConstraints(active_constraints, constraints);
+
+                // Sort contacts to give a deterministic simulation
+                self.contact_manager.sortContacts(contacts);
+
+                // Split up large islands
+                var is_large_island = true;
+                var steps_calculator: CalculateSolverSteps = .init(&self.physics_settings);
+                if (!self.physics_settings.use_large_island_splitter or
+                    !self.large_island_splitter.splitIsland(island_idx, &self.island_builder, &self.body_manager, &self.contact_manager, active_constraints, &steps_calculator))
+                {
+                    is_large_island = false;
+
+                    // We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
+                    ConstraintManager.warmStartVelocityConstraints(active_constraints, constraints, warm_start_impulse_ratio, &steps_calculator);
+                    self.contact_manager.warmStartVelocityConstraints(contacts, warm_start_impulse_ratio, &steps_calculator);
+                    steps_calculator.finalize();
+
+                    // Store the number of position steps for later
+                    self.island_builder.setNumPositionSteps(island_idx, steps_calculator.getNumPositionSteps());
+
+                    // Solve velocity constraints
+                    var velocity_step: u32 = 0;
+                    while (velocity_step < steps_calculator.getNumVelocitySteps()) : (velocity_step += 1) {
+                        var applied_impulse = ConstraintManager.solveVelocityConstraints(active_constraints, constraints, delta_time);
+                        applied_impulse = self.contact_manager.solveVelocityConstraints(contacts) or applied_impulse; // Jolt: applied_impulse |= ..., the contacts are always solved
+                        if (!applied_impulse)
+                            break;
+                    }
+
+                    // Save back the lambdas in the contact cache for the warm start of the next physics update
+                    self.contact_manager.storeAppliedImpulses(contacts);
+                }
+
+                if (track_simulation_stats) {
+                    const num_ticks = getProcessorTickCount() -% start_tick;
+                    const stats = self.island_builder.getIslandStats(island_idx);
+                    stats.num_velocity_steps = @truncate(steps_calculator.getNumVelocitySteps());
+                    stats.num_position_steps = @truncate(steps_calculator.getNumPositionSteps());
+                    _ = stats.velocity_constraint_ticks.fetchAdd(num_ticks, .monotonic);
+                    stats.is_large_island = is_large_island;
+                }
             } else if (check_split_islands) {
                 // If there are split islands, but we didn't do any work, give up a time slice
                 std.Thread.yield() catch {};
@@ -1835,7 +2247,7 @@ pub const PhysicsSystem = struct {
                 const body = self.body_manager.getBodyMut(body_id);
                 const mp = body.getMotionPropertiesMut();
 
-                // TODO(determinism_log): JPH_DET_LOG("JobIntegrateVelocity: id: " << body_id << " v: " << body.GetLinearVelocity() << " w: " << body.GetAngularVelocity());
+                if (DeterminismLog.enabled) DeterminismLog.log(.{ "JobIntegrateVelocity: id: ", body_id, " v: ", body.getLinearVelocity(), " w: ", body.getAngularVelocity() });
 
                 // Clamp velocities (not for kinematic bodies)
                 if (body.isDynamic()) {
@@ -1980,18 +2392,24 @@ pub const PhysicsSystem = struct {
         return ccd_body;
     }
 
-    /// The CCD bodies are cast through the broad phase like Jolt; the narrow phase cast against a candidate body is
-    /// REGION R4 (see the panic in CCDBroadPhaseCollector.addHit).
-    fn jobFindCCDContacts(self: *Self, context: *const PhysicsUpdateContext, step: *Step) void {
+    /// (Zolt D5: castAABoxNoLock returns Allocator.Error when a node stack of the QuadTree cannot grow on the heap; the job
+    /// then latches the error and takes no further bodies, ResolveCCDContacts skips its work)
+    fn jobFindCCDContacts(self: *Self, context: *PhysicsUpdateContext, step: *Step) void {
         // We only read positions, but the validate callback may read body positions and velocities
         var grant: BodyAccess.Grant = .init(.read, .read);
         defer grant.deinit();
 
         // Allocation context for allocating new contact points
-        const contact_allocator = self.contact_manager.getContactAllocator();
+        var contact_allocator = self.contact_manager.getContactAllocator();
 
-        // REGION R4: the ShapeCastSettings of the narrow phase cast (mUseShrunkenShapeAndConvexRadius, the back face
-        // modes, mReturnDeepestPoint, mCollectFacesMode, mActiveEdgeMode)
+        // Settings
+        var settings: ShapeCastSettings = .{};
+        settings.use_shrunken_shape_and_convex_radius = true;
+        settings.back_face_mode_triangles = .ignore_back_faces;
+        settings.back_face_mode_convex = .ignore_back_faces;
+        settings.return_deepest_point = true;
+        settings.collect_faces_mode = .collect_faces;
+        settings.active_edge_mode = if (self.physics_settings.check_active_edges) .collide_only_with_active else .collide_with_all;
 
         while (true) {
             // Fetch the next body to cast
@@ -2007,6 +2425,127 @@ pub const PhysicsSystem = struct {
 
             // TODO(debug_renderer): Draw start and end shape of cast (sDrawMotionQualityLinearCast)
 
+            // Create a collector that will find the maximum distance allowed to travel while not penetrating more than 'max penetration'
+            const CCDNarrowPhaseCollector = struct {
+                pub const overrides = .{.addHit};
+
+                base: CastShapeCollector = .init(@This()),
+                /// If we still have to call the ValidateContactPoint for this body pair
+                validate_body_pair: bool = true,
+                /// Reject all further contacts between this body pair
+                reject_all: bool = false,
+                body_manager: *const BodyManager,
+                contact_constraint_manager: *const ContactConstraintManager,
+                soft_body_contact_listener: ?SoftBodyContactListener,
+                ccd_body: *CCDBody,
+                result: *ShapeCastResult,
+                delta_time: f32,
+
+                pub fn addHit(collector: *@This(), result: *const ShapeCastResult) void {
+                    // Check if this is a possible earlier hit than the one before
+                    const fraction = result.fraction;
+                    if (fraction < collector.ccd_body.fraction_plus_slop) {
+                        // Normalize normal
+                        const normal = result.base.penetration_axis.normalized();
+
+                        // Calculate how much we can add to the fraction to penetrate the collision point by mMaxPenetration.
+                        // Note that the normal is pointing towards body 2!
+                        // Let the extra distance that we can travel along delta_pos be 'dist': mMaxPenetration / dist = cos(angle between normal and delta_pos) = normal . delta_pos / |delta_pos|
+                        // <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
+                        // Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
+                        const denominator = normal.dot(collector.ccd_body.delta_position);
+                        if (denominator > collector.ccd_body.max_penetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
+                        {
+                            const fraction_plus_slop = fraction + collector.ccd_body.max_penetration / denominator;
+                            if (fraction_plus_slop < collector.ccd_body.fraction_plus_slop) {
+                                const body2 = collector.body_manager.getBody(result.base.body_id2);
+
+                                // Check if we've already accepted all hits from this body
+                                if (collector.validate_body_pair) {
+                                    // Validate the contact result
+                                    const body1 = collector.body_manager.getBody(collector.ccd_body.body_id1);
+                                    if (body2.isRigidBody()) {
+                                        const validate_result = collector.contact_constraint_manager.validateContactPoint(body1, body2, body1.getCenterOfMassPosition(), &result.base); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
+                                        switch (validate_result) {
+                                            .accept_contact => {
+                                                // Just continue
+                                            },
+
+                                            .accept_all_contacts_for_this_body_pair => {
+                                                // Accept this and all following contacts from this body
+                                                collector.validate_body_pair = false;
+                                            },
+
+                                            .reject_contact => return,
+
+                                            .reject_all_contacts_for_this_body_pair => {
+                                                // Reject this and all following contacts from this body
+                                                collector.reject_all = true;
+                                                collector.base.forceEarlyOut();
+                                                return;
+                                            },
+                                        }
+                                    } else {
+                                        var sb_settings: SoftBodyContactSettings = .{};
+                                        sb_settings.is_sensor = false;
+                                        if ((collector.soft_body_contact_listener == null or
+                                            collector.soft_body_contact_listener.?.onSoftBodyContactValidate(body2, body1, &sb_settings) == .accept_contact) // Note reversal, soft body needs to be first parameter
+                                        and !sb_settings.is_sensor) // If the contact listener turned this into a sensor, we want to ignore it
+                                        {
+                                            // Convert the soft body contact settings (note bodies are swapped)
+                                            collector.ccd_body.contact_settings.inv_mass_scale1 = sb_settings.inv_mass_scale2;
+                                            collector.ccd_body.contact_settings.inv_mass_scale2 = sb_settings.inv_mass_scale1;
+                                            collector.ccd_body.contact_settings.inv_inertia_scale1 = sb_settings.inv_inertia_scale2;
+
+                                            // Accept this and all following contacts from this body
+                                            collector.validate_body_pair = false;
+                                        } else {
+                                            // Reject this and all following contacts from this body
+                                            collector.reject_all = true;
+                                            collector.base.forceEarlyOut();
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                // This is the earliest hit so far, store it
+                                collector.ccd_body.contact_normal = normal;
+                                collector.ccd_body.body_id2 = result.base.body_id2;
+                                collector.ccd_body.sub_shape_id2 = result.base.sub_shape_id2;
+                                collector.ccd_body.fraction = fraction;
+                                collector.ccd_body.fraction_plus_slop = fraction_plus_slop;
+                                collector.result.* = result.*;
+
+                                // Result was assuming body 2 is not moving, but it is, so we need to correct for it
+                                const movement2 = calculateBodyMotion(body2, collector.delta_time).mulScalar(fraction);
+                                if (!movement2.isNearZero(.{})) {
+                                    collector.result.base.contact_point_on1 = collector.result.base.contact_point_on1.add(movement2);
+                                    collector.result.base.contact_point_on2 = collector.result.base.contact_point_on2.add(movement2);
+                                    for (collector.result.base.shape1_face.slice()) |*v|
+                                        v.* = v.add(movement2);
+                                    for (collector.result.base.shape2_face.slice()) |*v|
+                                        v.* = v.add(movement2);
+                                }
+
+                                // Update early out fraction
+                                collector.base.updateEarlyOutFraction(fraction_plus_slop);
+                            }
+                        }
+                    }
+                }
+            };
+
+            // Narrowphase collector
+            var cast_shape_result: ShapeCastResult = .{};
+            var np_collector: CCDNarrowPhaseCollector = .{
+                .body_manager = &self.body_manager,
+                .contact_constraint_manager = &self.contact_manager,
+                .soft_body_contact_listener = self.soft_body_contact_listener,
+                .ccd_body = ccd_body,
+                .result = &cast_shape_result,
+                .delta_time = context.step_delta_time,
+            };
+
             // This collector wraps the narrowphase collector and collects the closest hit
             const CCDBroadPhaseCollector = struct {
                 pub const overrides = .{.addHit};
@@ -2016,6 +2555,9 @@ pub const PhysicsSystem = struct {
                 body1: *const Body,
                 body1_extent: Vec3,
                 shape_cast: RShapeCast,
+                shape_cast_settings: *ShapeCastSettings,
+                shape_filter: *SimShapeFilterWrapper,
+                collector: *CCDNarrowPhaseCollector,
                 body_manager: *const BodyManager,
                 step: *Step,
                 delta_time: f32,
@@ -2056,13 +2598,33 @@ pub const PhysicsSystem = struct {
                     if (hit_fraction > collector.base.getPositiveEarlyOutFraction()) // If early out fraction <= 0, we have the possibility of finding a deeper hit so we need to clamp the early out fraction
                         return;
 
-                    // REGION R4: stub. Reset the narrow phase collector for this body pair, set body 2 on the shape
-                    // filter, cast the shape against body 2 (TransformedShape.castShape with the CCDNarrowPhaseCollector:
-                    // ValidateContactPoint of the ContactConstraintManager, the earliest hit, the movement of body 2) and
-                    // update the early out fraction (needs A4 and A7's SimShapeFilterWrapper).
-                    @panic("PhysicsSystem.jobFindCCDContacts: REGION R4 (narrow phase cast against a candidate body)");
+                    // Reset collector (this is a new body pair)
+                    collector.collector.base.resetEarlyOutFraction(.{ .fraction = collector.base.getEarlyOutFraction() });
+                    collector.collector.validate_body_pair = true;
+                    collector.collector.reject_all = false;
+
+                    // Set body ID on shape filter
+                    collector.shape_filter.setBody2(body2);
+
+                    // Provide direction as hint for the active edges algorithm
+                    collector.shape_cast_settings.active_edge_movement_direction = direction;
+
+                    // Do narrow phase collision check
+                    const relative_cast: RShapeCast = .initWithBounds(collector.shape_cast.shape, collector.shape_cast.scale, collector.shape_cast.center_of_mass_start, direction, collector.shape_cast.shape_world_bounds);
+                    var transformed_shape = body2.getTransformedShape();
+                    defer transformed_shape.deinit();
+                    transformed_shape.castShape(&relative_cast, collector.shape_cast_settings, collector.shape_cast.center_of_mass_start.getTranslation(), &collector.collector.base, .{ .shape_filter = collector.shape_filter.getFilterMut() });
+
+                    // Update early out fraction based on narrow phase collector
+                    if (!collector.collector.reject_all)
+                        collector.base.updateEarlyOutFraction(collector.collector.base.getEarlyOutFraction());
                 }
             };
+
+            // Create shape filter
+            var shape_filter: SimShapeFilterWrapper = .init(self.sim_shape_filter, body);
+
+            const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
             // Check if we collide with any other body. Note that we use the non-locking interface as we know the broadphase cannot be modified at this point.
             const shape_cast: RShapeCast = .init(body.getShape(), Vec3.one(), body.getCenterOfMassTransform(), ccd_body.delta_position);
@@ -2071,23 +2633,132 @@ pub const PhysicsSystem = struct {
                 .body1 = body,
                 .body1_extent = shape_cast.shape_world_bounds.getExtent(),
                 .shape_cast = shape_cast,
+                .shape_cast_settings = &settings,
+                .shape_filter = &shape_filter,
+                .collector = &np_collector,
                 .body_manager = &self.body_manager,
                 .step = step,
                 .delta_time = context.step_delta_time,
             };
-            self.getBroadPhase().castAABoxNoLock(&.{ .box = shape_cast.shape_world_bounds, .direction = shape_cast.direction }, &bp_collector.base, &broadphase_layer_filter.base, &object_layer_filter.base);
+            self.getBroadPhase().castAABoxNoLock(&.{ .box = shape_cast.shape_world_bounds, .direction = shape_cast.direction }, &bp_collector.base, &broadphase_layer_filter.base, &object_layer_filter.base) catch {
+                // Zolt (D5): the broad phase ran out of heap memory, latched. The hit of this body is incomplete, so
+                // this job takes no further bodies (ResolveCCDContacts skips its work)
+                context.setOutOfMemory();
+                break;
+            };
+
+            if (track_simulation_stats) {
+                const num_ticks = getProcessorTickCount() -% start_tick;
+                // (Jolt: a const_cast of the stats of the const body, Zolt: the mutable body)
+                _ = self.body_manager.getBodyMut(ccd_body.body_id1).getMotionPropertiesMut().getSimulationStatsMut().ccd_ticks.fetchAdd(num_ticks, .monotonic);
+            }
 
             // Check if there was a hit
             if (ccd_body.fraction_plus_slop < 1.0) {
-                // REGION R4: stub. The contact manifold of the hit (ManifoldBetweenTwoFaces), the contact point
-                // callbacks (OnCCDContactAdded), sensors and the average contact point (needs A4). Not reached: the
-                // broad phase collector above panics before a hit is stored.
-                @panic("PhysicsSystem.jobFindCCDContacts: REGION R4 (a CCD hit)");
+                const body2 = self.body_manager.getBody(ccd_body.body_id2);
+
+                // Determine contact manifold
+                var manifold: ContactManifold = .{};
+                manifold.base_offset = shape_cast.center_of_mass_start.getTranslation();
+                manifoldBetweenTwoFaces(cast_shape_result.base.contact_point_on1, cast_shape_result.base.contact_point_on2, cast_shape_result.base.penetration_axis, self.physics_settings.manifold_tolerance, &cast_shape_result.base.shape1_face, &cast_shape_result.base.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                manifold.sub_shape_id1 = cast_shape_result.base.sub_shape_id1;
+                manifold.sub_shape_id2 = cast_shape_result.base.sub_shape_id2;
+                manifold.penetration_depth = cast_shape_result.base.penetration_depth;
+                manifold.world_space_normal = ccd_body.contact_normal;
+
+                // Call contact point callbacks
+                if (body2.isRigidBody())
+                    self.contact_manager.onCCDContactAdded(&contact_allocator, body, body2, &manifold, &ccd_body.contact_settings)
+                else {
+                    // We already have mass and inertia scale from the OnSoftBodyContactValidate callback, but we need to fill in the rest of the contact settings
+                    ccd_body.contact_settings.combined_friction = 0.0; // Soft bodies CCD contacts don't apply friction
+                    ccd_body.contact_settings.combined_restitution = self.contact_manager.getCombineRestitution()(body, .empty, body2, .empty); // Soft bodies don't pass sub shape IDs because the restitution is uniform across the entire body
+                    ccd_body.contact_settings.is_sensor = false; // We've filtered out sensors already
+                }
+
+                if (ccd_body.contact_settings.is_sensor) {
+                    // If this is a sensor, we don't want to solve the contact
+                    ccd_body.fraction_plus_slop = 1.0;
+                    ccd_body.body_id2 = .invalid;
+                } else {
+                    // Calculate the average position from the manifold (this will result in the same impulse applied as when we apply impulses to all contact points)
+                    if (manifold.relative_contact_points_on2.len > 1) {
+                        var average_contact_point = Vec3.zero();
+                        for (manifold.relative_contact_points_on2.constSlice()) |v|
+                            average_contact_point = average_contact_point.add(v);
+                        average_contact_point = average_contact_point.divScalar(@floatFromInt(manifold.relative_contact_points_on2.len));
+                        ccd_body.contact_point_on2 = manifold.base_offset.addVec3(average_contact_point);
+                    } else ccd_body.contact_point_on2 = manifold.base_offset.addVec3(cast_shape_result.base.contact_point_on2);
+                }
             }
         }
 
         // Collect information from the contact allocator and accumulate it in the step.
         finalizeContactAllocator(step, &contact_allocator);
+    }
+
+    /// Solve a CCD contact against rigid body 2 (Jolt's template sSolveCCDContact<EMotionType Type2>, the dispatch table in
+    /// JobResolveCCDContacts is an `inline else` switch over the motion type of body 2)
+    fn solveCCDContact(comptime type2: MotionType, body1: *Body, inv_m1: f32, inv_i1: Mat44, r1_plus_u: Vec3, body2: *Body, r2: Vec3, contact_normal: Vec3, normal_velocity_bias: f32, friction_direction_in: Vec3, contact_settings: *const ContactSettings) void {
+        const body_mp = body1.getMotionPropertiesMut();
+
+        // Get inverse mass of body 2
+        var inv_m2: f32 = undefined;
+        var inv_i2: Mat44 = undefined;
+        if (comptime type2 == .dynamic) {
+            inv_m2 = contact_settings.inv_mass_scale2 * body2.getMotionPropertiesUnchecked().?.getInverseMassUnchecked();
+            inv_i2 = body2.getInverseInertia().mulScalar(contact_settings.inv_inertia_scale2);
+        } else {
+            inv_m2 = 0.0;
+            inv_i2 = Mat44.zero();
+        }
+
+        // Get velocities
+        var linear_velocity1 = body_mp.getLinearVelocity();
+        var angular_velocity1 = body_mp.getAngularVelocity();
+        var linear_velocity2: Vec3 = undefined;
+        var angular_velocity2: Vec3 = undefined;
+        if (comptime type2 != .static) {
+            const body2_mp = body2.getMotionPropertiesUnchecked().?;
+            linear_velocity2 = body2_mp.getLinearVelocity();
+            angular_velocity2 = body2_mp.getAngularVelocity();
+        } else {
+            linear_velocity2 = Vec3.zero();
+            angular_velocity2 = Vec3.zero();
+        }
+
+        // Solve contact constraint
+        var contact_constraint: ContactConstraintPart(.dynamic, .dynamic) = .{};
+        contact_constraint.setTotalLambda(0.0);
+        contact_constraint.calculateConstraintProperties(inv_m1, inv_i1, r1_plus_u, inv_m2, inv_i2, r2, contact_normal, .{ .bias = normal_velocity_bias });
+        _ = contact_constraint.solveVelocityConstraint(&linear_velocity1, &angular_velocity1, &linear_velocity2, &angular_velocity2, inv_m1, inv_m2, contact_normal, -math.flt_max, math.flt_max);
+
+        // Apply friction
+        if (contact_settings.combined_friction > 0.0) {
+            // Calculate friction direction by removing normal velocity from the relative velocity
+            const friction_direction_len_sq = friction_direction_in.lengthSq();
+            if (friction_direction_len_sq > 1.0e-12) {
+                // Normalize friction direction
+                const friction_direction = friction_direction_in.divScalar(@sqrt(friction_direction_len_sq));
+
+                // Calculate max friction impulse
+                const max_lambda_f = contact_settings.combined_friction * contact_constraint.getTotalLambda();
+
+                var friction: ContactConstraintPart(.dynamic, .dynamic) = .{};
+                friction.setTotalLambda(0.0);
+                friction.calculateConstraintProperties(inv_m1, inv_i1, r1_plus_u, inv_m2, inv_i2, r2, friction_direction, .{ .bias = 0.0 });
+                _ = friction.solveVelocityConstraint(&linear_velocity1, &angular_velocity1, &linear_velocity2, &angular_velocity2, inv_m1, inv_m2, friction_direction, -max_lambda_f, max_lambda_f);
+            }
+        }
+
+        // Write back velocities
+        body_mp.setLinearVelocityClamped(linear_velocity1);
+        body_mp.setAngularVelocityClamped(angular_velocity1);
+        if (comptime type2 != .static) {
+            const body2_mp = body2.getMotionPropertiesMut();
+            body2_mp.setLinearVelocityClamped(linear_velocity2);
+            body2_mp.setAngularVelocityClamped(angular_velocity2);
+        }
     }
 
     /// Zolt (D5): a protocol job. The work is skipped when poisoned, the frees at the end always happen.
@@ -2138,23 +2809,100 @@ pub const PhysicsSystem = struct {
 
         // We can collide with bodies that are not active, we track them here so we can activate them in one go at the end.
         // This is also needed because we can't modify the active body array while we iterate it.
-        // (REGION R4: the batch of cBodiesBatch = 64 bodies to activate, filled by the hit path below)
+        const bodies_batch = 64;
+        var bodies_to_activate: [bodies_batch]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
+        var num_bodies_to_activate: usize = 0;
 
         for (sorted_ccd_bodies.items) |ccd_body| {
             const body1 = self.body_manager.getBodyMut(ccd_body.body_id1);
+            const body_mp = body1.getMotionPropertiesMut();
 
             // If there was a hit
             if (!ccd_body.body_id2.isInvalid()) {
-                // REGION R4: stub. Shorten the other CCD body, sSolveCCDContact (rigid body 2) or the soft body face
-                // response, and the activation of body 2 (needs A4; the hit path of JobFindCCDContacts panics first).
-                @panic("PhysicsSystem.jobResolveCCDContacts: REGION R4 (a CCD hit)");
+                const body2 = self.body_manager.getBodyMut(ccd_body.body_id2);
+
+                // Determine if the other body has a CCD body
+                const ccd_body2 = getCCDBody(body2, step);
+                if (ccd_body2) |other| {
+                    std.debug.assert(!other.body_id2.eql(ccd_body.body_id1)); // If we collided with another body, that other body should have ignored collisions with us!
+
+                    // Check if the other body found a hit that is further away
+                    if (other.fraction > ccd_body.fraction) {
+                        // Reset the colliding body of the other CCD body. The other body will shorten its distance traveled and will not do any collision response (we'll do that).
+                        // This means that at this point we have triggered a contact point add/persist for our further hit by accident for the other body.
+                        // We accept this as calling the contact point callbacks here would require persisting the manifolds up to this point and doing the callbacks single threaded.
+                        other.body_id2 = .invalid;
+                        other.fraction_plus_slop = ccd_body.fraction;
+                    }
+                }
+
+                // If the other body moved less than us before hitting something, we're not colliding with it so we again have triggered contact point add/persist callbacks by accident.
+                // We'll just move to the collision position anyway (as that's the last position we know is good), but we won't do any collision response.
+                if (ccd_body2 == null or ccd_body2.?.fraction >= ccd_body.fraction) {
+                    const contact_settings = &ccd_body.contact_settings;
+
+                    // Calculate contact point velocity for body 1
+                    const r1_plus_u = toVec3(ccd_body.contact_point_on2.sub(body1.getCenterOfMassPosition().addVec3(ccd_body.delta_position.mulScalar(ccd_body.fraction))));
+                    const v1 = body1.getPointVelocityCOM(r1_plus_u);
+
+                    // Calculate inverse mass for body 1
+                    const inv_m1 = contact_settings.inv_mass_scale1 * body_mp.getInverseMass();
+                    const inv_i1 = body1.getInverseInertia().mulScalar(contact_settings.inv_inertia_scale1);
+
+                    if (body2.isRigidBody()) {
+                        // Calculate contact point velocity for body 2
+                        const r2 = toVec3(ccd_body.contact_point_on2.sub(body2.getCenterOfMassPosition()));
+                        const v2 = body2.getPointVelocityCOM(r2);
+
+                        // Calculate relative contact velocity
+                        const relative_velocity = v2.sub(v1);
+                        const normal_velocity = relative_velocity.dot(ccd_body.contact_normal);
+
+                        // Calculate velocity bias due to restitution
+                        var normal_velocity_bias: f32 = undefined;
+                        if (contact_settings.combined_restitution > 0.0 and normal_velocity < -self.physics_settings.min_velocity_for_restitution)
+                            normal_velocity_bias = contact_settings.combined_restitution * normal_velocity
+                        else
+                            normal_velocity_bias = 0.0;
+
+                        // Calculate direction in which the friction operates
+                        const friction_direction = relative_velocity.sub(ccd_body.contact_normal.mulScalar(normal_velocity));
+
+                        // Dispatch to the correct form
+                        switch (body2.getMotionType()) {
+                            inline else => |type2| solveCCDContact(type2, body1, inv_m1, inv_i1, r1_plus_u, body2, r2, ccd_body.contact_normal, normal_velocity_bias, friction_direction, contact_settings),
+                        }
+                    } else {
+                        // Phase 9: the response against a face of the soft body (SoftBodyShape::GetFaceIndex,
+                        // SoftBodyMotionProperties::GetFace / GetVertex, the barycentric velocity of the face, the
+                        // impulse on body 1 and the 3 vertices, MarkCCDContact and RequestContactCallback). No soft body
+                        // can be created before Phase 9, so this is unreachable.
+                        @panic("PhysicsSystem.jobResolveCCDContacts: soft bodies: Phase 9");
+                    }
+
+                    // Activate the 2nd body if it is not already active
+                    if (body2.isDynamic() and !body2.isActive()) {
+                        bodies_to_activate[num_bodies_to_activate] = ccd_body.body_id2;
+                        num_bodies_to_activate += 1;
+                        if (num_bodies_to_activate == bodies_batch) {
+                            // Batch is full, activate now
+                            self.body_manager.activateBodies(bodies_to_activate[0..num_bodies_to_activate]);
+                            num_bodies_to_activate = 0;
+                        }
+                    }
+
+                    // TODO(debug_renderer): Draw the collision location, the location + slop, the contact normal and the
+                    // post contact velocities (sDrawMotionQualityLinearCast)
+                }
             }
 
             // Update body position
             body1.addPositionStep(ccd_body.delta_position.mulScalar(ccd_body.fraction_plus_slop));
         }
 
-        // Activate the requested bodies (REGION R4: the bodies collected by the hit path)
+        // Activate the requested bodies
+        if (num_bodies_to_activate > 0)
+            self.body_manager.activateBodies(bodies_to_activate[0..num_bodies_to_activate]);
     }
 
     /// Zolt (D5): a protocol job. When poisoned the write cache is discarded instead of swapped (D10).
@@ -2460,7 +3208,7 @@ pub const PhysicsSystem = struct {
         }
 
         if (state.contacts) {
-            if (!self.contact_manager.restoreState(stream, opts.filter))
+            if (!try self.contact_manager.restoreState(stream, opts.filter))
                 return false;
         }
 

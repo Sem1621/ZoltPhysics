@@ -1,17 +1,30 @@
 //! Port of: UnitTests/Physics/CollideShapeTests.cpp
-//! Status: partial
-//! Missing: TestCollideShapeSphere, TestCollideShapeSphereVsBox (entirely NarrowPhaseQuery::CollideShape against bodies in
-//!   a PhysicsTestContext, need PhysicsTestContext / NarrowPhaseQuery, Phase 5; sCompareCollideShapeResultSphere is
-//!   only used by TestCollideShapeSphere)
+//! Status: complete
 //!
-//! One check of TestTriangleVsBoxLargeSeparationDistance is not portable (not a Phase 5 item): in the no hit branch Jolt
-//! reads the uninitialized mHit of a collector that had no hit (see the comment there).
+//! One check of TestTriangleVsBoxLargeSeparationDistance is not portable: in the no hit branch Jolt reads the
+//! uninitialized mHit of a collector that had no hit (see the comment there).
+//!
+//! The collectors of TestCollideShapeSphere check the hits in AddHit, which cannot fail in Zig: they record a failed
+//! check and the test checks it after the query (`FAIL` / `CHECK` inside the callback).
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const LayersFile = @import("../Layers.zig");
+const Layers = LayersFile.Layers;
+const BroadPhaseLayers = LayersFile.BroadPhaseLayers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
+const Body = zolt.Body;
+const CollideShapeResult = zolt.CollideShapeResult;
+const Core = zolt.Core;
+const RMat44 = zolt.RMat44;
+const RVec3 = zolt.RVec3;
+const ScaledShape = zolt.ScaledShape;
+const ScaledShapeSettings = zolt.ScaledShapeSettings;
+const SpecifiedBroadPhaseLayerFilter = zolt.SpecifiedBroadPhaseLayerFilter;
+const SpecifiedObjectLayerFilter = zolt.SpecifiedObjectLayerFilter;
 const BoxShape = zolt.BoxShape;
 const BoxShapeSettings = zolt.BoxShapeSettings;
 const CapsuleShape = zolt.CapsuleShape;
@@ -50,8 +63,223 @@ fn createShape(settings: *ShapeSettings) !RefConst(Shape) {
     return RefConst(Shape).init(result.getPtr());
 }
 
-// Not ported: sCompareCollideShapeResultSphere, TestCollideShapeSphere and TestCollideShapeSphereVsBox (they collide
-// with bodies through NarrowPhaseQuery::CollideShape, need PhysicsTestContext / NarrowPhaseQuery, Phase 5)
+/// RMat44 * Mat44
+fn mulRMat44Mat44(a: RMat44, b: Mat44) RMat44 {
+    return if (Core.double_precision) a.mulMat44(b) else a.mul(b);
+}
+
+// Compares CollideShapeResult for two spheres with given positions and radii (returns false when a check fails: the
+// collectors call it from AddHit, which cannot fail)
+fn compareCollideShapeResultSphere(position1: Vec3, radius1: f32, position2: Vec3, radius2: f32, result: *const CollideShapeResult) bool {
+    // Test if spheres overlap
+    const delta = position2.sub(position1);
+    const len = delta.length();
+    if (!(len > 0.0)) return false;
+    if (!(len <= radius1 + radius2)) return false;
+
+    // Calculate points on surface + vector that will push 2 out of collision
+    const expected_point1 = position1.add(delta.mulScalar(radius1 / len));
+    const expected_point2 = position2.sub(delta.mulScalar(radius2 / len));
+    const expected_penetration_axis = delta.divScalar(len);
+
+    // Get actual results
+    const penetration_axis = result.penetration_axis.normalized();
+
+    // Compare
+    return fw.isApproxEqual(expected_point1, result.contact_point_on1, .{}) and
+        fw.isApproxEqual(expected_point2, result.contact_point_on2, .{}) and
+        fw.isApproxEqual(expected_penetration_axis, penetration_axis, .{});
+}
+
+// Test CollideShape function for spheres
+test "TestCollideShapeSphere" {
+    // Locations of test sphere
+    const position1_a = RVec3.init(10.0, 11.0, 12.0);
+    const position1_b = RVec3.init(10.0, 21.0, 12.0);
+    const radius1: f32 = 2.0;
+
+    // Locations of sphere in the physics system
+    const position2_a = RVec3.init(13.0, 11.0, 12.0);
+    const position2_b = RVec3.init(13.0, 22.0, 12.0);
+    const radius2: f32 = 1.5;
+
+    // Create sphere to test with (shape 1)
+    var shape1 = Ref(Shape).init((try SphereShape.create(allocator, radius1, .{})).asShapeMut());
+    defer shape1.deinit();
+    const shape1_com = Mat44.translation(shape1.get().?.getCenterOfMass());
+    var shape1_transform = mulRMat44Mat44(mulRMat44Mat44(RMat44.translation(position1_a), Mat44.rotationX(0.1 * math.pi)), shape1_com);
+
+    // Create sphere to collide against (shape 2)
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    const body2 = try c.createSphere(position2_a, radius2, .static, .discrete, Layers.non_moving, .{});
+
+    // Filters
+    const broadphase_moving_filter = SpecifiedBroadPhaseLayerFilter.init(BroadPhaseLayers.moving);
+    const broadphase_non_moving_filter = SpecifiedBroadPhaseLayerFilter.init(BroadPhaseLayers.non_moving);
+    const object_moving_filter = SpecifiedObjectLayerFilter.init(Layers.moving);
+    const object_non_moving_filter = SpecifiedObjectLayerFilter.init(Layers.non_moving);
+
+    // Collector that fails the test
+    const FailCollideShapeCollector = struct {
+        pub const overrides = .{.addHit};
+
+        base: CollideShapeCollector = .init(@This()),
+        failed: bool = false,
+
+        pub fn addHit(self: *@This(), result: *const CollideShapeResult) void {
+            _ = result;
+            self.failed = true; // FAIL("Callback should not be called")
+        }
+    };
+    var fail_collector: FailCollideShapeCollector = .{};
+
+    // Set settings
+    var settings: CollideShapeSettings = .{};
+    settings.active_edge_mode = .collide_with_all;
+    settings.back_face_mode = .collide_with_back_faces;
+
+    const narrow_phase = c.getSystem().getNarrowPhaseQuery();
+
+    // Test against wrong layer
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &fail_collector.base, .{ .broad_phase_layer_filter = &broadphase_moving_filter.base, .object_layer_filter = &object_moving_filter.base });
+    try fw.expect(!fail_collector.failed);
+
+    // Collector that tests that collision happens at position A (Jolt's PositionACollideShapeCollector) or B (Jolt's
+    // PositionBCollideShapeCollector, which also overrides Reset)
+    const PositionCollideShapeCollector = struct {
+        pub const overrides = .{ .reset, .addHit };
+
+        base: CollideShapeCollector = .init(@This()),
+        was_hit: bool = false,
+        /// A CHECK in AddHit failed
+        failed: bool = false,
+        body2: *const Body,
+        position1: Vec3,
+        position2: Vec3,
+
+        pub fn reset(self: *@This()) void {
+            CollideShapeCollector.impl.reset(&self.base);
+
+            self.was_hit = false;
+        }
+
+        pub fn addHit(self: *@This(), result: *const CollideShapeResult) void {
+            if (!self.body2.getID().eql(self.base.getContext().?.body_id)) self.failed = true;
+            if (!compareCollideShapeResultSphere(self.position1, radius1, self.position2, radius2, result)) self.failed = true;
+            self.was_hit = true;
+        }
+    };
+    var position_a_collector: PositionCollideShapeCollector = .{ .body2 = body2, .position1 = position1_a.toVec3(), .position2 = position2_a.toVec3() };
+
+    // Test collision against correct layer
+    try fw.expect(!position_a_collector.was_hit);
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &position_a_collector.base, .{ .broad_phase_layer_filter = &broadphase_non_moving_filter.base, .object_layer_filter = &object_non_moving_filter.base });
+    try fw.expect(position_a_collector.was_hit);
+    try fw.expect(!position_a_collector.failed);
+
+    // Now move body to position B
+    c.getSystem().getBodyInterfaceMut().setPositionAndRotation(body2.getID(), position2_b, Quat.rotation(Vec3.axisY(), 0.2 * math.pi), .dont_activate);
+
+    // Test that original position doesn't collide anymore
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &fail_collector.base, .{ .broad_phase_layer_filter = &broadphase_non_moving_filter.base, .object_layer_filter = &object_non_moving_filter.base });
+    try fw.expect(!fail_collector.failed);
+
+    // Move test shape to position B
+    shape1_transform = mulRMat44Mat44(mulRMat44Mat44(RMat44.translation(position1_b), Mat44.rotationZ(0.3 * math.pi)), shape1_com);
+
+    // Test against wrong layer
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &fail_collector.base, .{ .broad_phase_layer_filter = &broadphase_moving_filter.base, .object_layer_filter = &object_moving_filter.base });
+    try fw.expect(!fail_collector.failed);
+
+    // Callback that tests that collision happens at position B
+    var position_b_collector: PositionCollideShapeCollector = .{ .body2 = body2, .position1 = position1_b.toVec3(), .position2 = position2_b.toVec3() };
+
+    // Test collision
+    try fw.expect(!position_b_collector.was_hit);
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &position_b_collector.base, .{ .broad_phase_layer_filter = &broadphase_non_moving_filter.base, .object_layer_filter = &object_non_moving_filter.base });
+    try fw.expect(position_b_collector.was_hit);
+    try fw.expect(!position_b_collector.failed);
+
+    // Update the physics system (optimizes the broadphase)
+    _ = try c.simulate(c.getDeltaTime(), {});
+
+    // Test against wrong layer
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &fail_collector.base, .{ .broad_phase_layer_filter = &broadphase_moving_filter.base, .object_layer_filter = &object_moving_filter.base });
+    try fw.expect(!fail_collector.failed);
+
+    // Test collision again
+    position_b_collector.base.reset();
+    try fw.expect(!position_b_collector.was_hit);
+    narrow_phase.collideShape(shape1.get().?, Vec3.one(), shape1_transform, &settings, RVec3.zero(), &position_b_collector.base, .{ .broad_phase_layer_filter = &broadphase_non_moving_filter.base, .object_layer_filter = &object_non_moving_filter.base });
+    try fw.expect(position_b_collector.was_hit);
+    try fw.expect(!position_b_collector.failed);
+}
+
+// Test CollideShape function for a (scaled) sphere vs box
+test "TestCollideShapeSphereVsBox" {
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+
+    // Create box to collide against (shape 2)
+    // The box is scaled up by a factor 10 in the X axis and then rotated so that the X axis is up
+    var box = BoxShapeSettings.init(allocator, Vec3.one(), .{});
+    box.asShapeSettings().setEmbedded();
+    defer box.deinit();
+    var scaled_box = ScaledShapeSettings.init(allocator, box.asShapeSettings(), Vec3.init(10, 1, 1));
+    scaled_box.asShapeSettings().setEmbedded();
+    defer scaled_box.deinit();
+    const body2 = try c.createBodyWithShapeSettings(scaled_box.asShapeSettings(), RVec3.init(0, 1, 0), Quat.rotation(Vec3.axisZ(), 0.5 * math.pi), .static, .discrete, Layers.non_moving, .dont_activate);
+
+    // Set settings
+    var settings: CollideShapeSettings = .{};
+    settings.active_edge_mode = .collide_with_all;
+    settings.back_face_mode = .collide_with_back_faces;
+
+    {
+        // Create sphere
+        var normal_sphere = Ref(Shape).init((try SphereShape.create(allocator, 1.0, .{})).asShapeMut());
+        defer normal_sphere.deinit();
+
+        // Collect hit with normal sphere
+        var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer collector.deinit();
+        c.getSystem().getNarrowPhaseQuery().collideShape(normal_sphere.get().?, Vec3.one(), RMat44.translation(RVec3.init(0, 11, 0)), &settings, RVec3.zero(), &collector.base, .{});
+        try collector.checkError();
+        try fw.expect(collector.hits.items.len == 1);
+        const result = &collector.hits.items[0];
+        try fw.expect(result.body_id2.eql(body2.getID()));
+        try fw.checkApproxEqual(result.contact_point_on1, Vec3.init(0, 10, 0), .{ .tolerance = 1.0e-4 });
+        try fw.checkApproxEqual(result.contact_point_on2, Vec3.init(0, 11, 0), .{ .tolerance = 1.0e-4 });
+        const pen_axis = result.penetration_axis.normalized();
+        try fw.checkApproxEqual(pen_axis, Vec3.init(0, -1, 0), .{ .tolerance = 1.0e-4 });
+        try fw.checkApproxEqual(result.penetration_depth, 1.0, .{ .tolerance = 1.0e-5 });
+    }
+
+    {
+        // This repeats the same test as above but uses scaling at all levels
+        var sphere = RefConst(Shape).init((try SphereShape.create(allocator, 0.1, .{})).asShape());
+        defer sphere.deinit();
+        var scaled_sphere = Ref(Shape).init((try ScaledShape.create(allocator, sphere.get().?, Vec3.replicate(5.0))).asShapeMut());
+        defer scaled_sphere.deinit();
+
+        // Collect hit with scaled sphere
+        var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+        defer collector.deinit();
+        c.getSystem().getNarrowPhaseQuery().collideShape(scaled_sphere.get().?, Vec3.replicate(2.0), RMat44.translation(RVec3.init(0, 11, 0)), &settings, RVec3.zero(), &collector.base, .{});
+        try collector.checkError();
+        try fw.expect(collector.hits.items.len == 1);
+        const result = &collector.hits.items[0];
+        try fw.expect(result.body_id2.eql(body2.getID()));
+        try fw.checkApproxEqual(result.contact_point_on1, Vec3.init(0, 10, 0), .{ .tolerance = 1.0e-4 });
+        try fw.checkApproxEqual(result.contact_point_on2, Vec3.init(0, 11, 0), .{ .tolerance = 1.0e-4 });
+        const pen_axis = result.penetration_axis.normalized();
+        try fw.checkApproxEqual(pen_axis, Vec3.init(0, -1, 0), .{ .tolerance = 1.0e-4 });
+        try fw.checkApproxEqual(result.penetration_depth, 1.0, .{ .tolerance = 1.0e-5 });
+    }
+}
 
 // Test colliding a very long capsule vs a box that is intersecting with the line segment inside the capsule
 // This particular config reported the wrong penetration due to accuracy problems before

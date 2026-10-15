@@ -1,15 +1,20 @@
 //! Port of: UnitTests/Physics/ConvexVsTrianglesTest.cpp
-//! Status: partial
-//! Missing: the TriangleShape / MeshShape halves of sCheckCollision / sCheckCollisionNoHit (a body with the triangle
-//!   or a single triangle mesh, collided through NarrowPhaseQuery::CollideShape; need PhysicsTestContext /
-//!   NarrowPhaseQuery, Phase 5)
+//! Status: complete
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const Layers = @import("../Layers.zig").Layers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
 const BodyID = zolt.BodyID;
+const Core = zolt.Core;
+const MeshShapeSettings = zolt.MeshShapeSettings;
+const RMat44 = zolt.RMat44;
+const RVec3 = zolt.RVec3;
+const Triangle = zolt.Triangle;
+const TriangleShapeSettings = zolt.TriangleShapeSettings;
 const CapsuleShape = zolt.CapsuleShape;
 const CollideConvexVsTriangles = zolt.CollideConvexVsTriangles;
 const CollideShapeCollector = zolt.CollideShapeCollector;
@@ -27,6 +32,32 @@ const math = zolt.math;
 const allocator = std.testing.allocator;
 
 const edge_length: f32 = 4.0;
+
+/// RVec3(Vec3)
+fn toRVec3(v: Vec3) RVec3 {
+    return if (Core.double_precision) RVec3.fromVec3(v) else v;
+}
+
+/// RMat44(Mat44)
+fn toRMat44(m: Mat44) RMat44 {
+    return if (Core.double_precision) RMat44.fromMat44(m) else m;
+}
+
+/// The body shapes of sCheckCollision / sCheckCollisionNoHit: a TriangleShape and a MeshShape with a single triangle
+const BodyShape = enum { triangle, mesh };
+
+/// `context.CreateBody(new TriangleShapeSettings(v1, v2, v3), ...)` / `context.CreateBody(new MeshShapeSettings(triangles), ...)`
+fn createTriangleBody(context: *PhysicsTestContext, body_shape: BodyShape, v1: Vec3, v2: Vec3, v3: Vec3, position: RVec3, rotation: Quat) !*zolt.Body {
+    const settings: *zolt.ShapeSettings = switch (body_shape) {
+        .triangle => (try TriangleShapeSettings.create(allocator, v1, v2, v3, .{})).asShapeSettings(),
+        .mesh => blk: {
+            // Create a mesh with a single triangle
+            const triangles = [_]Triangle{Triangle.init(v1, v2, v3, .{})};
+            break :blk (try MeshShapeSettings.create(allocator, &triangles, .{})).asShapeSettings();
+        },
+    };
+    return context.createBodyWithShapeSettings(settings, position, rotation, .static, .discrete, Layers.non_moving, .dont_activate);
+}
 
 /// `Collider collider(sphere, ...)`: CollideConvexVsTriangles takes the sphere as a ConvexShape
 fn initCollider(comptime Collider: type, sphere: *const SphereShape, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, sub_shape_id1: SubShapeID, settings: *const CollideShapeSettings, collector: *CollideShapeCollector) Collider {
@@ -54,8 +85,24 @@ fn checkCollisionNoHit(comptime Collider: type, settings: *const CollideShapeSet
         try fw.expect(!collector.hadHit());
     }
 
-    // Not ported: the TriangleShape and MeshShape (a single triangle) versions through NarrowPhaseQuery::CollideShape
-    // (need PhysicsTestContext, Phase 5)
+    // A triangle shape has all edges active, so only test if all edges are active
+    // A mesh shape with a single triangle has all edges active, so only test if all edges are active
+    if (active_edges == 0b111) {
+        for ([_]BodyShape{ .triangle, .mesh }) |body_shape| {
+            // Create the triangle shape / a mesh with a single triangle
+            var context: PhysicsTestContext = undefined;
+            try context.init(allocator, .{});
+            defer context.deinit();
+            _ = try createTriangleBody(&context, body_shape, v1, v2, v3, RVec3.zero(), Quat.identity());
+
+            // Collide sphere
+            var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+            defer collector.deinit();
+            context.getSystem().getNarrowPhaseQuery().collideShape(sphere.get().?, Vec3.one(), RMat44.translation(toRVec3(center)), settings, RVec3.zero(), &collector.base, .{});
+            try collector.checkError();
+            try fw.expect(!collector.hadHit());
+        }
+    }
 }
 
 fn checkCollision(comptime Collider: type, settings_in: *const CollideShapeSettings, center: Vec3, radius: f32, active_edges: u8, expected_contact_on1: Vec3, expected_contact_on2: Vec3, expected_penetration_axis: Vec3, expected_penetration_depth: f32) !void {
@@ -111,8 +158,41 @@ fn checkCollision(comptime Collider: type, settings_in: *const CollideShapeSetti
         try fw.checkApproxEqual(hit.penetration_depth, expected_penetration_depth, .{ .tolerance = 1.0e-4 });
     }
 
-    // Not ported: the TriangleShape and MeshShape (a single triangle) versions through NarrowPhaseQuery::CollideShape
-    // (need PhysicsTestContext, Phase 5)
+    // A triangle shape has all edges active, so only test if all edges are active
+    // A mesh shape with a single triangle has all edges active, so only test if all edges are active
+    if (active_edges == 0b111) {
+        for ([_]BodyShape{ .triangle, .mesh }) |body_shape| {
+            // Create the triangle shape / a mesh with a single triangle
+            var context: PhysicsTestContext = undefined;
+            try context.init(allocator, .{});
+            defer context.deinit();
+            const body = try createTriangleBody(&context, body_shape, v1, v2, v3, toRVec3(translation), rotation);
+
+            // Collide sphere
+            var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+            defer collector.deinit();
+            context.getSystem().getNarrowPhaseQuery().collideShape(sphere.get().?, Vec3.one(), toRMat44(sphere_transform), &settings, RVec3.zero(), &collector.base, .{});
+            try collector.checkError();
+
+            // Test result
+            try fw.expectEqual(@as(usize, 1), collector.hits.items.len);
+            const hit = &collector.hits.items[0];
+            try fw.expect(hit.body_id2.eql(body.getID()));
+            try fw.expectEqual(SubShapeID.empty.getValue(), hit.sub_shape_id1.getValue());
+            switch (body_shape) {
+                .triangle => try fw.expectEqual(SubShapeID.empty.getValue(), hit.sub_shape_id2.getValue()),
+                .mesh => try fw.expect(hit.sub_shape_id2.getValue() != SubShapeID.empty.getValue()), // We don't really know what SubShapeID a triangle in the mesh will get, but it should not be invalid
+            }
+            const contact1 = inv_transform.mulVec3(hit.contact_point_on1);
+            const contact2 = inv_transform.mulVec3(hit.contact_point_on2);
+            const pen_axis = transform.multiply3x3Transposed(hit.penetration_axis).normalized();
+            const expected_pen_axis = expected_penetration_axis.normalized();
+            try fw.checkApproxEqual(contact1, expected_contact_on1, .{ .tolerance = 1.0e-4 });
+            try fw.checkApproxEqual(contact2, expected_contact_on2, .{ .tolerance = 1.0e-4 });
+            try fw.checkApproxEqual(pen_axis, expected_pen_axis, .{ .tolerance = 1.0e-4 });
+            try fw.checkApproxEqual(hit.penetration_depth, expected_penetration_depth, .{ .tolerance = 1.0e-4 });
+        }
+    }
 }
 
 // Compares CollideShapeResult for two spheres with given positions and radii

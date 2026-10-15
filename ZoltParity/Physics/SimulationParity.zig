@@ -11,7 +11,10 @@
 //!   that must not wake it): a scene that no longer reaches the case it is written for fails;
 //! - the listener callbacks of the update and of the operations before it as sorted records (body activation listener,
 //!   step listeners, contact listener): their order depends on the threads, their content does not.
-//! At the end of a scene the partial states (each EStateRecorderState flag) are compared too.
+//! At the end of a scene the partial states (each EStateRecorderState flag) are compared too, and the states filtered by a
+//! StateRecorderFilter (`StateFilter` / SimStateFilter: some bodies, the constraints with even user data, some contacts),
+//! which each side then restores from the other side's bytes (ShouldRestoreContact filters the contacts) before the
+//! full states are compared again.
 //!
 //! Thread matrix: Zolt with JobSystemSingleThreaded and JobSystemThreadPool with 0, 1, 3 and 7 workers, C++ with a
 //! JobSystemThreadPool with 0, 3 and 7 workers (`configs`). Run it in Debug and ReleaseFast, single and double precision.
@@ -22,24 +25,72 @@
 //! restoring the state saved before the update one more update gives the C++ bytes), then every createJob fails once
 //! (FailingJobSystem: a failure while building the job graph returns error.OutOfMemory and changes nothing, a job that
 //! cannot be spawned from inside a job changes no result). Creating the scene (system, shapes, the bodies of update 0)
-//! runs under std.testing.checkAllAllocationFailures.
+//! runs under std.testing.checkAllAllocationFailures (unless `SceneEntry.creation_sweep` is false: the PerformanceTest
+//! scenes with thousands of bodies, for which it is quadratic). The InvalidateContactCache flags that the operations
+//! before the update set (SetShape, SetUseManifoldReduction, ...) are not saved state, in Jolt neither: every swept update
+//! starts from the snapshot with them set again (`restoreZoltBeforeUpdate`), while the recovery after a failed update
+//! relies on PhysicsSystem.update putting them back (scenes physics_tests_switch_use_manifold_reduction_1 and _2).
+//!
+//! The PerformanceTest scenes (`perf_*`, milestone M6) are the exact setup of ZoltPerformanceTest's Pyramid,
+//! ConvexVsMesh and HighSpeed scenes with -q=LinearCast, compared after every update for their first 50 / 80 / 20
+//! updates: a hash of the determinism check that no longer matches is found here first, with the first differing field.
+//! Building the terrain of perf_convex_vs_mesh with 8 instead of the scene's 4 triangles per leaf on the Zolt side only
+//! is reported as "state differs at byte 46837 ...: bodies[350] (id 0x0080015e) rotation.x zolt 0x3d6041ab jolt
+//! 0x3d604197" (update 59).
 //!
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
-//! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported) returns error.SkipZigTest: the build summary counts
-//! it as skipped. The test "SimScenes blocked scenes run on the C++ side" runs those scenes on the C++ side alone. Add a
-//! scene in SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping
-//! bodies, step listener calls, CCD bodies, sweep counts): check it when you write a scene.
+//! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported; the constraint blockers follow
+//! ConstraintKind.isPorted) returns error.SkipZigTest: the build summary counts it as skipped. The test "SimScenes
+//! blocked scenes run on the C++ side" runs those scenes on the C++ side alone. Add a scene in SimScenes.zig (see its
+//! header). `verbose = true` prints what every scene did (activations, sleeping bodies, step listener calls, CCD bodies,
+//! active constraints, sweep counts): check it when you write a scene.
 //!
-//! The C++ PhysicsSystem uses BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp), Zolt
-//! BroadPhaseBruteForce until A1. The gravity-only scenes do not depend on it: no body pair reaches the narrow phase,
-//! and the different orders of the active bodies (AddBodiesPrepare sorts by layer in the QuadTree) change no saved
-//! byte and no sorted record.
+//! Both PhysicsSystems use BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp, Zolt's default since A1;
+//! no comparison was ever loosened for the brute force broad phase that Zolt used before). The trees themselves are
+//! compared by BroadPhaseQuadTreeParity.zig.
 //!
 //! Proof that it bites: computing `(gravity * gravity_factor) * dt + (force * inv_mass) * dt` instead of Jolt's
 //! `(gravity * gravity_factor + force * inv_mass) * dt` in MotionProperties.applyForceTorqueAndDragInternal is reported
 //! as "state differs at byte 862 ...: bodies[6] (id 0x00800006) motion_properties.linear_velocity.y zolt 0xc0dcbfe1
 //! jolt 0xc0dcbfe2" (scene forces_torques_impulses, update 42); passing user data + 1 to OnBodyDeactivated is reported
-//! as a differing listener record.
+//! as a differing listener record. Computing r1_plus_u of JobResolveCCDContacts as
+//! `(contact point - center of mass) - fraction * delta` instead of Jolt's `contact point - (center of mass + fraction *
+//! delta)` is reported as "state differs at byte 254 ...: bodies[3] (id 0x00800003)
+//! motion_properties.linear_velocity.x zolt 0x41cc9e9c jolt 0x41cc9ea4" (scene ccd_static_targets, update 7).
+//! Solving the point part of FixedConstraint.solveVelocityConstraint before its rotation part is reported as "state
+//! differs at byte 26 ...: bodies[0] (id 0x00800000) position.x zolt 0xba004cc4 jolt 0xba023e82" (scene
+//! constraints_fixed, update 0).
+//!
+//! CCD (Wave B R4): the driver counts the FindCCDContacts jobs of every update (Zolt side) and the updates after which
+//! the contact cache of the C++ state holds CCD manifolds (OnCCDContactAdded of a hit without a discrete contact of the
+//! same sub shape pair in the same update), for SimScenes.Expect.ccd_jobs / ccd_hits.
+//!
+//! Wave C: the cases of the ported unit tests (ContactListenerTests, SensorTests, ShapeTests, ActiveEdgesTests) that the
+//! other scenes did not reach are mirrored by scenes of their own, with ContactFlags.mass_override (TestMassOverride's
+//! sGetInvMassScale), SimCollideMode (the sCollideBodyVsBody functions of SensorTests) and the operations
+//! `were_bodies_in_contact` / `set_collide_kinematic_vs_non_dynamic`. Proof that they bite: giving body 2 the inverse
+//! mass (or inertia) scale of body 1 fails contacts_mass_override (and ccd_infinite_mass_override), installing the
+//! default function for SimCollideMode.all fails contacts_sim_collide_all, and returning only one order of
+//! WereBodiesInContact is reported as "operation 8 (were_bodies_in_contact on handle 0) returned 1 in zolt and 3 in
+//! jolt".
+//!
+//! Constraints (Phase 6, the recipe for a worker is in the SimScenes header): both worlds keep a reference to every
+//! created constraint (constraint handles). The Zolt side of each ConstraintKind and of the class operations is a slot
+//! per worker group (`FixedPointSlot`, `HingeSlot`, ...; `StubSlot` while the classes are not ported: their scenes are
+//! skipped through their Blocker, and a ported class with a stub slot fails with error.SceneNotSupported). Before a
+//! scene runs, `checkConstraintDescriptions` compares the binary state of the settings that the slots make from the
+//! scene's descriptions with the C++ settings (SimMakeConstraintSettings), so a mismatch later is the library's, not the
+//! harness'. The state decoder names the fields of a constraint class (`stateFields` of its slot, e.g.
+//! "constraints[3] (id 0x00000003) point_constraint_part.total_lambda.x"). The driver counts the active constraints
+//! before every update (Expect.active_constraints; every scene with constraints must solve some) and checks the
+//! `expect_constraint_state` operations. Proof that it bites: computing SetPoint1's world space point with body 2's
+//! inverse center of mass transform is reported as "operation 51 (constraint_settings_hash on constraint handle 4)
+//! returned ... in zolt and ... in jolt" (scene constraints_enable_disable_remove, update 60); adding the delta in
+//! PointConstraint.notifyShapeChanged instead of subtracting it as "state differs at byte 696 ...: bodies[5] (id
+//! 0x00800005) position.x" (same scene, update 50); saving the constraints that the filter rejects as "the filtered
+//! states differ at byte 1979" (scene constraints_random_1); reading axis Y2 of a fixed constraint description from
+//! f[6..9] in the slot fails "SimScenes constraint descriptions are ConstraintsParity's" and every fixed constraint scene
+//! before it runs ("constraint description 1 (fixed): the settings of the Zolt slot differ from SimMakeConstraintSettings").
 //!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
@@ -97,6 +148,12 @@ const SimBody = SimScenes.SimBody;
 const SimPhysicsSettings = SimScenes.SimPhysicsSettings;
 const SimStepListener = SimScenes.SimStepListener;
 const SimConstraint = SimScenes.SimConstraint;
+const ConstraintKind = SimScenes.ConstraintKind;
+const ConstraintState = SimScenes.ConstraintState;
+const ConstraintOpRange = SimScenes.ConstraintOpRange;
+const Constraint = zolt.Constraint;
+const TwoBodyConstraint = zolt.TwoBodyConstraint;
+const ConstraintSettings = zolt.ConstraintSettings;
 const SimOp = SimScenes.SimOp;
 const SimSceneDesc = SimScenes.SimSceneDesc;
 const SimRecord = SimScenes.SimRecord;
@@ -105,6 +162,14 @@ const SceneBuilder = SimScenes.SceneBuilder;
 const SceneEntry = SimScenes.SceneEntry;
 const OpKind = SimScenes.OpKind;
 const ShapeKind = SimScenes.ShapeKind;
+const ContactListenerMode = SimScenes.ContactListenerMode;
+const CombineMode = SimScenes.CombineMode;
+const SimShapeFilterMode = SimScenes.SimShapeFilterMode;
+const SimCollideMode = SimScenes.SimCollideMode;
+const ContactFlags = SimScenes.ContactFlags;
+const SimShapeFilter = zolt.SimShapeFilter;
+const SubShapeID = zolt.SubShapeID;
+const Color = zolt.Color;
 const RecordKind = SimScenes.RecordKind;
 const StepListenerMode = SimScenes.StepListenerMode;
 const invalid_handle = SimScenes.invalid_handle;
@@ -113,7 +178,7 @@ const io = std.testing.io;
 
 /// The C++ reference functions, see SimulationReference.cpp
 const jolt = struct {
-    extern fn jolt_sim_struct_sizes(out_sizes: *[12]u32) void;
+    extern fn jolt_sim_struct_sizes(out_sizes: *[16]u32) void;
     extern fn jolt_sim_default_settings(out_settings: *SimPhysicsSettings) void;
     extern fn jolt_sim_create(desc: *const SimSceneDesc, num_threads: u32) *anyopaque;
     extern fn jolt_sim_destroy(world: *anyopaque) void;
@@ -121,9 +186,34 @@ const jolt = struct {
     extern fn jolt_sim_update(world: *anyopaque, delta_time: f32, collision_steps: u32) u32;
     extern fn jolt_sim_save_state(world: *anyopaque, state: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_sim_restore_state(world: *anyopaque, bytes: [*]const u8, size: u32) u32;
+    extern fn jolt_sim_save_state_filtered(world: *anyopaque, state: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_restore_state_filtered(world: *anyopaque, bytes: [*]const u8, size: u32) u32;
     extern fn jolt_sim_take_records(world: *anyopaque, out_records: [*]SimRecord, capacity: u32) u32;
     extern fn jolt_sim_body_has_motion_properties(world: *anyopaque, body_id: u32) u32;
     extern fn jolt_sim_constraint_state_size(world: *anyopaque, index: u32, out_num_constraints: *u32) u32;
+    extern fn jolt_sim_constraint_sub_type(world: *anyopaque, index: u32) u32;
+    extern fn jolt_sim_num_active_constraints(world: *anyopaque) u32;
+    extern fn jolt_sim_default_constraint_settings_save(kind: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_constraint_settings_save(constraint: *const SimConstraint, out_bytes: [*]u8, capacity: u32) u32;
+    // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
+    extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
+    extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
+};
+
+/// CSSettings of ConstraintsReference.cpp (ConstraintsParity.zig): the constraint descriptions of the constraint parity,
+/// whose layout SimScenes.SimConstraint shares (test "SimScenes constraint descriptions are ConstraintsParity's")
+const CSSettings = extern struct {
+    /// EConstraintSubType
+    kind: u32,
+    enabled: u32,
+    constraint_priority: u32,
+    num_velocity_steps_override: u32,
+    num_position_steps_override: u32,
+    draw_constraint_size: f32,
+    user_data: u64,
+    i: [32]u32,
+    r: [12]Real,
+    f: [192]f32,
 };
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -236,6 +326,7 @@ const Recorder = struct {
 
 const ActivationListenerImpl = struct {
     recorder: *Recorder,
+    world: *ZoltWorld,
 
     fn record(self: *ActivationListenerImpl, kind: RecordKind, body_id: BodyID, body_user_data: u64) void {
         var r: SimRecord = .{ .kind = @intFromEnum(kind) };
@@ -251,11 +342,48 @@ const ActivationListenerImpl = struct {
 
     pub fn onBodyDeactivated(self: *ActivationListenerImpl, body_id: BodyID, body_user_data: u64) void {
         self.record(.body_deactivated, body_id, body_user_data);
+
+        // Zolt only (Expect.large_island): bodies that go to sleep from the final batch of a split island are deactivated
+        // while the LargeIslandSplitter holds its split islands (between JobFinalizeIslands and the reset in
+        // StartNextStep / the end of the update, no job writes it then); between the updates it is 0
+        if (self.world.system.large_island_splitter.num_split_islands > 0)
+            _ = self.world.num_large_island_deactivations.fetchAdd(1, .monotonic);
     }
 };
 
+/// The bits of ContactFlags of a body pair
+fn contactFlags(body1: *const Body, body2: *const Body) u32 {
+    return @truncate((body1.getUserData() | body2.getUserData()) >> 32);
+}
+
+/// ContactFlags.reject_marked_child: the sub shape of the body is a child of a compound with the marked user data
+/// (SimIsMarkedChild in SimulationReference.cpp)
+fn isMarkedChild(body: *const Body, sub_shape_id: SubShapeID) bool {
+    const shape = body.getShape();
+    if (shape.getType() != .compound)
+        return false;
+    const compound = shape.cast(zolt.CompoundShape);
+    return compound.getCompoundUserData(compound.getSubShapeIndexFromID(sub_shape_id).index) == ContactFlags.marked_child_user_data;
+}
+
+/// The hash of the base offset and the contact points of a manifold (SimHashManifold in SimulationReference.cpp)
+fn hashManifold(manifold: *const ContactManifold) u32 {
+    var h = SimScenes.hash_seed;
+    const offset = [3]Real{ manifold.base_offset.getX(), manifold.base_offset.getY(), manifold.base_offset.getZ() };
+    h = SimScenes.hashBytes(h, std.mem.sliceAsBytes(&offset));
+    for ([_]*const zolt.ContactPoints{ &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2 }) |points| {
+        for (points.constSlice()) |p| {
+            const v = [3]f32{ p.getX(), p.getY(), p.getZ() };
+            h = SimScenes.hashBytes(h, std.mem.sliceAsBytes(&v));
+        }
+    }
+    return h;
+}
+
+/// SimContactListener of SimulationReference.cpp
 const ContactListenerImpl = struct {
     recorder: *Recorder,
+    mode: ContactListenerMode,
 
     pub fn onContactValidate(self: *ContactListenerImpl, body1: *const Body, body2: *const Body, base_offset: RVec3, collision_result: *const CollideShapeResult) ValidateResult {
         _ = base_offset;
@@ -266,7 +394,50 @@ const ContactListenerImpl = struct {
         r.data[2] = floatBits(collision_result.penetration_axis.getY());
         r.data[3] = floatBits(collision_result.penetration_axis.getZ());
         self.recorder.add(r);
+
+        if (self.mode == .modify) {
+            const flags = contactFlags(body1, body2);
+            if ((flags & ContactFlags.reject_all) != 0)
+                return .reject_all_contacts_for_this_body_pair;
+            if ((flags & ContactFlags.reject_marked_child) != 0 and isMarkedChild(body2, collision_result.sub_shape_id2))
+                return .reject_contact;
+            if ((flags & ContactFlags.reject_speculative) != 0)
+                return if (collision_result.penetration_depth < 0.0) .reject_contact else .accept_contact;
+            if ((flags & ContactFlags.accept_each) != 0)
+                return .accept_contact;
+        }
         return .accept_all_contacts_for_this_body_pair;
+    }
+
+    /// ContactFlags of ContactListenerMode.modify
+    fn modify(self: *const ContactListenerImpl, body1: *const Body, body2: *const Body, settings: *ContactSettings) void {
+        if (self.mode != .modify)
+            return;
+        const flags = contactFlags(body1, body2);
+        if ((flags & ContactFlags.zero_friction) != 0)
+            settings.combined_friction = 0.0;
+        if ((flags & ContactFlags.bouncy) != 0)
+            settings.combined_restitution = 0.9;
+        if ((flags & ContactFlags.mass_scale) != 0) {
+            settings.inv_mass_scale1 = 0.5;
+            settings.inv_inertia_scale1 = 0.25;
+            settings.inv_mass_scale2 = 2.0;
+            settings.inv_inertia_scale2 = 1.5;
+        }
+        if ((flags & ContactFlags.mass_override) != 0) {
+            const scale1 = ContactFlags.massOverrideScale(body1.getUserData());
+            settings.inv_mass_scale1 = scale1;
+            settings.inv_inertia_scale1 = scale1;
+            const scale2 = ContactFlags.massOverrideScale(body2.getUserData());
+            settings.inv_mass_scale2 = scale2;
+            settings.inv_inertia_scale2 = scale2;
+        }
+        if ((flags & ContactFlags.surface_velocity) != 0) {
+            settings.relative_linear_surface_velocity = Vec3.init(1.5, 0.0, 0.5);
+            settings.relative_angular_surface_velocity = Vec3.init(0.0, 0.7, 0.0);
+        }
+        if ((flags & ContactFlags.sensor) != 0)
+            settings.is_sensor = true;
     }
 
     fn record(self: *ContactListenerImpl, kind: RecordKind, body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *const ContactSettings) void {
@@ -277,26 +448,177 @@ const ContactListenerImpl = struct {
             floatBits(manifold.world_space_normal.getY()),
             floatBits(manifold.world_space_normal.getZ()),
             floatBits(manifold.penetration_depth),
-            @intCast(manifold.relative_contact_points_on1.len),
+            @as(u32, manifold.relative_contact_points_on1.len) | (@as(u32, @intFromBool(settings.is_sensor)) << 8),
             floatBits(settings.combined_friction),
             floatBits(settings.combined_restitution),
-            @intFromBool(settings.is_sensor),
+            hashManifold(manifold),
         };
         self.recorder.add(r);
     }
 
     pub fn onContactAdded(self: *ContactListenerImpl, body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *ContactSettings) void {
         self.record(.contact_added, body1, body2, manifold, settings);
+        self.modify(body1, body2, settings);
     }
 
     pub fn onContactPersisted(self: *ContactListenerImpl, body1: *const Body, body2: *const Body, manifold: *const ContactManifold, settings: *ContactSettings) void {
         self.record(.contact_persisted, body1, body2, manifold, settings);
+        self.modify(body1, body2, settings);
     }
 
     pub fn onContactRemoved(self: *ContactListenerImpl, sub_shape_pair: *const SubShapeIDPair) void {
         var r: SimRecord = .{ .kind = @intFromEnum(RecordKind.contact_removed) };
         r.ids = .{ sub_shape_pair.body1_id.getIndexAndSequenceNumber(), sub_shape_pair.sub_shape_id1.getValue(), sub_shape_pair.body2_id.getIndexAndSequenceNumber(), sub_shape_pair.sub_shape_id2.getValue() };
         self.recorder.add(r);
+    }
+};
+
+/// The state filter of the end of a scene (SimStateFilter of SimulationReference.cpp): bodies whose index is not 1 modulo
+/// 3, constraints whose user data is even, contacts of body pairs whose index sum is even; restored are the contacts of
+/// body pairs whose index sum is not a multiple of 3
+const StateFilter = struct {
+    pub const overrides = .{ .shouldSaveBody, .shouldSaveConstraint, .shouldSaveContact, .shouldRestoreContact };
+
+    base: zolt.StateRecorderFilter = .init(@This()),
+
+    pub fn shouldSaveBody(self: *const StateFilter, body: *const Body) bool {
+        _ = self;
+        return body.getID().getIndex() % 3 != 1;
+    }
+
+    pub fn shouldSaveConstraint(self: *const StateFilter, constraint: *const Constraint) bool {
+        _ = self;
+        return (constraint.getUserData() & 1) == 0;
+    }
+
+    pub fn shouldSaveContact(self: *const StateFilter, body1: BodyID, body2: BodyID) bool {
+        _ = self;
+        return ((body1.getIndex() + body2.getIndex()) & 1) == 0;
+    }
+
+    pub fn shouldRestoreContact(self: *const StateFilter, body1: BodyID, body2: BodyID) bool {
+        _ = self;
+        return (body1.getIndex() + body2.getIndex()) % 3 != 0;
+    }
+};
+
+/// CombineMode.custom (SimCombineFriction / SimCombineRestitution of SimulationReference.cpp)
+const CustomCombine = struct {
+    fn friction(body1: *const Body, sub_shape_id1: SubShapeID, body2: *const Body, sub_shape_id2: SubShapeID) f32 {
+        _ = .{ sub_shape_id1, sub_shape_id2 };
+        return 0.5 * (body1.getFriction() + body2.getFriction());
+    }
+
+    fn restitution(body1: *const Body, sub_shape_id1: SubShapeID, body2: *const Body, sub_shape_id2: SubShapeID) f32 {
+        return if (sub_shape_id1.getValue() == sub_shape_id2.getValue())
+            zolt.math.max(body1.getRestitution(), body2.getRestitution())
+        else
+            zolt.math.min(body1.getRestitution(), body2.getRestitution());
+    }
+};
+
+/// SimShapeFilterMode.filter_spheres (SimSphereFilter of SimulationReference.cpp)
+const SphereFilter = struct {
+    pub const overrides = .{.shouldCollide};
+
+    base: SimShapeFilter = .init(@This()),
+
+    pub fn shouldCollide(self: *const SphereFilter, body1: *const Body, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, body2: *const Body, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+        _ = .{ self, sub_shape_id_of_shape1, sub_shape_id_of_shape2 };
+        if ((contactFlags(body1, body2) & ContactFlags.filter_spheres) == 0)
+            return true;
+        return shape1.getSubType() != .sphere and shape2.getSubType() != .sphere;
+    }
+};
+
+/// The body vs body collision functions of SimCollideMode (SimCollideBodyVsBody* of SimulationReference.cpp, the
+/// sCollideBodyVsBody* functions of SensorTests)
+const SimCollide = struct {
+    const CollideShapeCollector = zolt.CollideShapeCollector;
+    const CollideShapeSettings = zolt.CollideShapeSettings;
+    const AnyHitCollector = zolt.AnyHitCollisionCollector(CollideShapeCollector);
+    const SubShapeIDCreator = zolt.SubShapeIDCreator;
+    const ShapeFilter = zolt.ShapeFilter;
+
+    /// SimCollideMode.all: the default function with EBackFaceMode::CollideWithBackFaces
+    fn all(context: ?*anyopaque, allocator: std.mem.Allocator, body1: *const Body, body2: *const Body, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, collide_shape_settings: *CollideShapeSettings, collector: *CollideShapeCollector, shape_filter: *const ShapeFilter) std.mem.Allocator.Error!void {
+        _ = context;
+
+        // Override the back face mode so we get hits with all triangles
+        collide_shape_settings.back_face_mode = .collide_with_back_faces;
+        try PhysicsSystem.defaultSimCollideBodyVsBody(allocator, body1, body2, center_of_mass_transform1, center_of_mass_transform2, collide_shape_settings, collector, shape_filter);
+    }
+
+    /// SimCollideMode.per_body: max 1 hit per body pair
+    fn perBody(context: ?*anyopaque, allocator: std.mem.Allocator, body1: *const Body, body2: *const Body, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, collide_shape_settings: *CollideShapeSettings, collector: *CollideShapeCollector, shape_filter: *const ShapeFilter) std.mem.Allocator.Error!void {
+        _ = .{ context, allocator, shape_filter };
+
+        var any_hit_collector = AnyHitCollector.init();
+        defer any_hit_collector.deinit();
+        const part1: SubShapeIDCreator = .{};
+        const part2: SubShapeIDCreator = .{};
+        zolt.CollisionDispatch.collideShapeVsShape(body1.getShape(), body2.getShape(), Vec3.one(), Vec3.one(), center_of_mass_transform1, center_of_mass_transform2, part1, part2, collide_shape_settings, &any_hit_collector.base, &.{});
+        if (any_hit_collector.hadHit())
+            collector.addHit(&any_hit_collector.hit);
+    }
+
+    /// SimCollideMode.per_leaf: max 1 hit per leaf shape pair
+    fn perLeaf(context: ?*anyopaque, allocator: std.mem.Allocator, body1: *const Body, body2: *const Body, center_of_mass_transform1: Mat44, center_of_mass_transform2: Mat44, collide_shape_settings: *CollideShapeSettings, collector: *CollideShapeCollector, shape_filter: *const ShapeFilter) std.mem.Allocator.Error!void {
+        _ = context;
+
+        const part1: SubShapeIDCreator = .{};
+        const part2: SubShapeIDCreator = .{};
+        try zolt.collideShapeVsShapePerLeaf(AnyHitCollector, allocator, body1.getShape(), body2.getShape(), Vec3.one(), Vec3.one(), center_of_mass_transform1, center_of_mass_transform2, part1, part2, collide_shape_settings, collector, shape_filter);
+    }
+};
+
+/// Wraps the job system of a world and counts the FindCollisions jobs that are spawned from inside jobs
+/// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies) and the
+/// FindCCDContacts jobs (PostIntegrateVelocity creates them from inside its job)
+const SpawnCountingJobSystem = struct {
+    inner: JobSystem,
+    num_spawned_find_collisions: std.atomic.Value(u32) = .init(0),
+    num_find_ccd_contacts: std.atomic.Value(u32) = .init(0),
+
+    fn jobSystem(self: *SpawnCountingJobSystem) JobSystem {
+        return .init(self);
+    }
+
+    pub fn getMaxConcurrency(self: *const SpawnCountingJobSystem) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    pub fn createJob(self: *SpawnCountingJobSystem, job_name: []const u8, color: Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        const handle = try self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+        if (opts.num_dependencies == 0 and std.mem.eql(u8, job_name, "FindCollisions"))
+            _ = self.num_spawned_find_collisions.fetchAdd(1, .monotonic);
+        if (std.mem.eql(u8, job_name, "FindCCDContacts"))
+            _ = self.num_find_ccd_contacts.fetchAdd(1, .monotonic);
+        return handle;
+    }
+
+    pub fn createBarrier(self: *SpawnCountingJobSystem) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    pub fn destroyBarrier(self: *SpawnCountingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    pub fn waitForJobs(self: *SpawnCountingJobSystem, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    pub fn queueJob(self: *SpawnCountingJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.queueJob(self.inner.ptr, job); // The jobs belong to `inner` (they queue themselves there), not reached
+    }
+
+    pub fn queueJobs(self: *SpawnCountingJobSystem, jobs: []const *JobSystem.Job) void {
+        self.inner.vtable.queueJobs(self.inner.ptr, jobs); // The jobs belong to `inner` (they queue themselves there), not reached
+    }
+
+    pub fn freeJob(self: *SpawnCountingJobSystem, job: *JobSystem.Job) void {
+        self.inner.vtable.freeJob(self.inner.ptr, job); // The jobs belong to `inner` (they queue themselves there), not reached
     }
 };
 
@@ -379,12 +701,19 @@ const ZoltWorld = struct {
     recorder: Recorder,
     activation_listener: ActivationListenerImpl = undefined,
     contact_listener: ContactListenerImpl = undefined,
+    sphere_filter: SphereFilter = .{},
+    /// The job system the updates run on (counts the spawned FindCollisions jobs, see `jobSystem`)
+    counting_jobs: SpawnCountingJobSystem = undefined,
+    /// Number of OnBodyDeactivated calls while the LargeIslandSplitter held split islands (Expect.large_island)
+    num_large_island_deactivations: std.atomic.Value(u32) = .init(0),
     system: PhysicsSystem = .empty,
     shapes: std.ArrayList(RefConst(Shape)) = .empty,
     handles: std.ArrayList(BodyID) = .empty,
     step_listeners: []StepListenerImpl = &.{},
     /// Which step listeners are added to the system (destroy removes them like ~SimWorld)
     step_listener_added: []bool = &.{},
+    /// The constraints of the constraint handles (one reference each, also for constraints that are not in the system)
+    constraint_handles: std.ArrayList(Ref(Constraint)) = .empty,
 
     fn create(allocator: Allocator, desc: *const SimSceneDesc, job_kind: JobKind) !*ZoltWorld {
         const self = try allocator.create(ZoltWorld);
@@ -392,7 +721,7 @@ const ZoltWorld = struct {
         self.* = .{
             .allocator = allocator,
             .desc = desc,
-            .temp = try .init(allocator, 10 * 1024 * 1024),
+            .temp = try .init(allocator, desc.temp_allocator_size),
             .broad_phase_layer_interface = .init(),
             .recorder = .{ .allocator = allocator },
         };
@@ -406,10 +735,28 @@ const ZoltWorld = struct {
         const settings = toPhysicsSettings(&desc.settings);
         self.system.setPhysicsSettings(&settings);
         self.system.setGravity(load3(&desc.gravity));
-        self.activation_listener = .{ .recorder = &self.recorder };
-        self.contact_listener = .{ .recorder = &self.recorder };
+        self.activation_listener = .{ .recorder = &self.recorder, .world = self };
+        self.contact_listener = .{ .recorder = &self.recorder, .mode = @enumFromInt(desc.contact_listener_mode) };
         self.system.setBodyActivationListener(.init(&self.activation_listener));
         self.system.setContactListener(.init(&self.contact_listener));
+        switch (@as(CombineMode, @enumFromInt(desc.combine_mode))) {
+            .default => {},
+            .custom => {
+                self.system.setCombineFriction(CustomCombine.friction);
+                self.system.setCombineRestitution(CustomCombine.restitution);
+            },
+        }
+        switch (@as(SimShapeFilterMode, @enumFromInt(desc.sim_shape_filter_mode))) {
+            .none => {},
+            .filter_spheres => self.system.setSimShapeFilter(&self.sphere_filter.base),
+        }
+        switch (@as(SimCollideMode, @enumFromInt(desc.sim_collide_mode))) {
+            .default => {},
+            .all => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.all }),
+            .per_leaf => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.perLeaf }),
+            .per_body => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.perBody }),
+        }
+        self.counting_jobs = .{ .inner = self.jobs.jobSystem() };
 
         errdefer self.shapes.deinit(allocator);
         errdefer for (self.shapes.items) |*s| s.deinit();
@@ -432,6 +779,8 @@ const ZoltWorld = struct {
             if (added) self.system.removeStepListener(.init(listener));
         }
         self.system.deinit();
+        for (self.constraint_handles.items) |*c| c.deinit();
+        self.constraint_handles.deinit(allocator);
         for (self.shapes.items) |*s| s.deinit();
         self.shapes.deinit(allocator);
         self.handles.deinit(allocator);
@@ -441,6 +790,11 @@ const ZoltWorld = struct {
         self.recorder.deinit();
         self.temp.deinit();
         allocator.destroy(self);
+    }
+
+    /// The job system of the updates (the world's job system, counting the spawned FindCollisions jobs)
+    fn jobSystem(self: *ZoltWorld) JobSystem {
+        return self.counting_jobs.jobSystem();
     }
 
     fn getHandle(self: *const ZoltWorld, handle: u32) BodyID {
@@ -496,6 +850,23 @@ const ZoltWorld = struct {
                 }
                 break :blk (try zolt.MeshShapeSettings.create(allocator, triangles, .{})).asShapeSettings();
             },
+            .indexed_mesh => blk: {
+                const vertices = try allocator.alloc(zolt.Float3, shape.count);
+                defer allocator.free(vertices);
+                for (vertices, 0..) |*v, i| {
+                    const f = floats[shape.data + 3 * i ..][0..3];
+                    v.* = .init(f[0], f[1], f[2]);
+                }
+                const indices = floats[shape.data + 3 * shape.count ..];
+                const triangles = try allocator.alloc(zolt.IndexedTriangle, @intFromFloat(p[0]));
+                defer allocator.free(triangles);
+                for (triangles, 0..) |*t, i|
+                    t.* = .init(@intFromFloat(indices[3 * i]), @intFromFloat(indices[3 * i + 1]), @intFromFloat(indices[3 * i + 2]), .{});
+                const mesh = try zolt.MeshShapeSettings.createIndexed(allocator, vertices, triangles, .{});
+                mesh.max_triangles_per_leaf = @intFromFloat(p[1]);
+                break :blk mesh.asShapeSettings();
+            },
+            .height_field => (try zolt.HeightFieldShapeSettings.create(allocator, floats[shape.data..][0 .. @as(usize, shape.count) * shape.count], load3(p[0..3]), load3(p[3..6]), shape.count, .{})).asShapeSettings(),
             .empty => (try zolt.EmptyShapeSettings.create(allocator, load3(p[0..3]))).asShapeSettings(),
             .rotated_translated => (try zolt.RotatedTranslatedShapeSettings.createPtr(allocator, load3(p[0..3]), loadQuat(&shape.rotation), self.shapes.items[shape.child].get().?)).asShapeSettings(),
             .scaled => (try zolt.ScaledShapeSettings.createPtr(allocator, self.shapes.items[shape.child].get().?, load3(p[0..3]))).asShapeSettings(),
@@ -652,7 +1023,7 @@ const ZoltWorld = struct {
             .set_max_linear_velocity => bi.setMaxLinearVelocity(id, f[0]),
             .set_max_angular_velocity => bi.setMaxAngularVelocity(id, f[0]),
             .reset_sleep_timer => bi.resetSleepTimer(id),
-            .set_object_layer => bi.setObjectLayer(id, @intCast(op.index)),
+            .set_object_layer => try bi.setObjectLayer(id, @intCast(op.index)),
             .set_user_data => bi.setUserData(id, @as(u64, op.index) | (@as(u64, op.count) << 32)),
             .set_friction_and_restitution => {
                 bi.setFriction(id, f[0]);
@@ -679,7 +1050,7 @@ const ZoltWorld = struct {
                 return 0;
             },
             .optimize_broad_phase => {
-                self.system.optimizeBroadPhase();
+                try self.system.optimizeBroadPhase();
                 return 0;
             },
             .set_shape => try bi.setShape(id, self.shapes.items[op.index].get().?, op.count != 0, activation),
@@ -692,17 +1063,160 @@ const ZoltWorld = struct {
                 return (@as(u32, @intFromBool(applied)) << 2) | @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
             },
             .expect_body_state => {}, // Changes nothing, the driver checks the result
+            .set_use_manifold_reduction => try bi.setUseManifoldReduction(id, op.count != 0),
+            .apply_body_creation_settings => {
+                var settings = self.makeBodyCreationSettings(&self.desc.bodies[op.index]);
+                defer settings.deinit();
+                var lock: zolt.BodyLockWrite = .init(self.system.getBodyLockInterface(), id);
+                defer lock.deinit();
+                if (!lock.succeeded()) return error.SceneNotSupported;
+                try lock.getBody().applyBodyCreationSettings(allocator, &settings, self.system.getBroadPhaseLayerInterface());
+            },
+            .were_bodies_in_contact => {
+                const id2 = self.getHandle(op.index);
+                return @as(u32, @intFromBool(self.system.wereBodiesInContact(id, id2))) | (@as(u32, @intFromBool(self.system.wereBodiesInContact(id2, id))) << 1);
+            },
+            .set_collide_kinematic_vs_non_dynamic => {
+                var lock: zolt.BodyLockWrite = .init(self.system.getBodyLockInterface(), id);
+                defer lock.deinit();
+                if (lock.succeeded())
+                    lock.getBody().setCollideKinematicVsNonDynamic(op.count != 0);
+            },
             .create_constraint => {
-                // Phase 6: one prong per ConstraintKind when the class is ported (the scenes that need it are blocked
-                // by SimScenes.Blocker.constraints until then)
-                return error.SceneNotSupported;
+                // CreateConstraint(constraints[index]) (+ SetConstraints) + AddConstraint
+                try self.constraint_handles.ensureUnusedCapacity(allocator, 1);
+                const constraint = try self.createConstraint(op.index);
+                errdefer {
+                    self.constraint_handles.items[self.constraint_handles.items.len - 1].deinit();
+                    self.constraint_handles.items.len -= 1;
+                }
+                try self.system.addConstraint(&constraint.base);
+                return self.system.constraint_manager.getNumConstraints();
             },
 
             .set_update, .snapshot, .restore_cross => unreachable, // Driver operations
+
+            // The constraint operations (Phase 6): every OpKind in a ConstraintOpRange, without a list that the worker
+            // groups would extend at the same place
+            inline else => |k| {
+                if (comptime ConstraintOpRange.of(@intFromEnum(k)) == null)
+                    @compileError("operation without prong: " ++ @tagName(k));
+                return self.applyConstraintOp(op);
+            },
         }
 
         // Body operations return IsActive and IsAdded of the body afterwards
         return @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
+    }
+
+    /// The constraint of a constraint handle (null: not created)
+    fn getConstraint(self: *const ZoltWorld, handle: u32) ?*TwoBodyConstraint {
+        if (handle >= self.constraint_handles.items.len) return null;
+        return zolt.virtual.downcast(TwoBodyConstraint, self.constraint_handles.items[handle].get().?);
+    }
+
+    /// CreateConstraint of description `desc_index` (+ SetConstraints of a Gear / RackAndPinion) as the next constraint
+    /// handle (CreateConstraint of SimulationReference.cpp; the caller reserved the handle)
+    fn createConstraint(self: *ZoltWorld, desc_index: u32) !*TwoBodyConstraint {
+        std.debug.assert(self.constraint_handles.unusedCapacitySlice().len > 0);
+        const c = &self.desc.constraints[desc_index];
+        var settings = try makeConstraintSettings(self.allocator, c);
+        defer settings.deinit();
+        const constraint = try self.system.getBodyInterfaceMut().createConstraint(zolt.virtual.downcast(zolt.TwoBodyConstraintSettings, settings.get().?), self.getHandle(c.body1), self.getHandle(c.body2));
+        var ref = Ref(Constraint).init(&constraint.base); // The harness' reference (Jolt: a Ref<TwoBodyConstraint> in mConstraintHandles)
+        errdefer ref.deinit();
+        if (c.constraint1 != invalid_handle or c.constraint2 != invalid_handle)
+            try GearRackAndPinionSlot.setConstraints(self, constraint, c.constraint1, c.constraint2);
+        self.constraint_handles.appendAssumeCapacity(ref);
+        return constraint;
+    }
+
+    /// The constraints of the handles [op.index, op.index + op.i[0]) (the caller frees the slice)
+    fn getConstraintHandles(self: *const ZoltWorld, op: *const SimOp) ![]*Constraint {
+        const constraints = try self.allocator.alloc(*Constraint, op.i[0]);
+        errdefer self.allocator.free(constraints);
+        for (constraints, 0..) |*c, i|
+            c.* = &(self.getConstraint(op.index + @as(u32, @intCast(i))) orelse return error.SceneError).base;
+        return constraints;
+    }
+
+    /// A constraint operation (ApplyConstraintOp of SimulationReference.cpp): the generic ones here, the class ones in
+    /// the slot of their ConstraintOpRange
+    fn applyConstraintOp(self: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = self.allocator;
+        const kind: OpKind = @enumFromInt(op.kind);
+        const i = &op.i;
+        const f = &op.f;
+
+        // The operations that create constraints or change the constraints of the system
+        switch (kind) {
+            .create_constraint_no_add => {
+                try self.constraint_handles.ensureUnusedCapacity(allocator, 1);
+                return constraintState(&(try self.createConstraint(op.index)).base);
+            },
+            .remove_constraint => {
+                self.system.removeConstraint(&(self.getConstraint(op.index) orelse return error.SceneError).base);
+                return self.system.constraint_manager.getNumConstraints();
+            },
+            .add_constraint => {
+                try self.system.addConstraint(&(self.getConstraint(op.index) orelse return error.SceneError).base);
+                return self.system.constraint_manager.getNumConstraints();
+            },
+            .remove_constraints, .add_constraints => {
+                const constraints = try self.getConstraintHandles(op);
+                defer allocator.free(constraints);
+                if (kind == .remove_constraints)
+                    self.system.removeConstraints(constraints)
+                else
+                    try self.system.addConstraints(constraints);
+                return self.system.constraint_manager.getNumConstraints();
+            },
+            else => {},
+        }
+
+        const c = self.getConstraint(op.index) orelse return error.SceneError;
+        const range = ConstraintOpRange.of(op.kind).?;
+        switch (range) {
+            .generic => switch (kind) {
+                .set_constraint_enabled => c.base.setEnabled(i[0] != 0),
+                .set_constraint_priority => c.base.setConstraintPriority(i[0]),
+                .set_constraint_steps_override => {
+                    c.base.setNumVelocityStepsOverride(i[0]);
+                    c.base.setNumPositionStepsOverride(i[1]);
+                },
+                .set_constraint_user_data => {
+                    c.base.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32));
+                    // The whole value read back: the ConstraintState bits and the state filter (bit 0) do not show it
+                    const user_data = c.base.getUserData();
+                    return SimScenes.hashBytes(SimScenes.hash_seed, std.mem.asBytes(&user_data));
+                },
+                .notify_constraint_shape_changed => c.base.notifyShapeChanged(self.getHandle(op.body), load3(f[0..3])),
+                .reset_constraint_warm_start => c.base.resetWarmStart(),
+                .activate_constraint => self.system.getBodyInterfaceMut().activateConstraint(c),
+                .expect_constraint_state => {}, // Changes nothing, the driver checks the result
+                .constraint_settings_hash => {
+                    var settings = try c.base.getConstraintSettings();
+                    defer settings.deinit();
+                    var out: std.Io.Writer.Allocating = .init(allocator);
+                    defer out.deinit();
+                    var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+                    settings.get().?.saveBinaryState(wrapper.streamOut());
+                    if (wrapper.isFailed()) return error.OutOfMemory;
+                    return SimScenes.hashBytes(SimScenes.hash_seed, out.written());
+                },
+                else => return error.SceneError, // Handled above
+            },
+            .fixed_point => try FixedPointSlot.applyOp(self, op, c),
+            .distance_pulley => try DistancePulleySlot.applyOp(self, op, c),
+            .hinge => try HingeSlot.applyOp(self, op, c),
+            .slider => try SliderSlot.applyOp(self, op, c),
+            .cone_swing_twist => try ConeSwingTwistSlot.applyOp(self, op, c),
+            .six_dof => try SixDOFSlot.applyOp(self, op, c),
+            .path => try PathSlot.applyOp(self, op, c),
+            .gear_rack_and_pinion => try GearRackAndPinionSlot.applyOp(self, op, c),
+            .spare => return error.SceneNotSupported,
+        }
+        return constraintState(&c.base);
     }
 
     fn update(self: *ZoltWorld, delta_time: f32, collision_steps: u32, temp_allocator: TempAllocator, job_system: JobSystem) !u32 {
@@ -738,6 +1252,17 @@ const ZoltWorld = struct {
 
     fn discardRecords(self: *ZoltWorld) void {
         self.recorder.records.clearRetainingCapacity();
+    }
+
+    /// The number of records of this kind that were not taken yet
+    fn countRecords(self: *ZoltWorld, kind: RecordKind) u32 {
+        self.recorder.mutex.lock(io);
+        defer self.recorder.mutex.unlock(io);
+        var n: u32 = 0;
+        for (self.recorder.records.items) |r| {
+            if (r.kind == @intFromEnum(kind)) n += 1;
+        }
+        return n;
     }
 };
 
@@ -797,6 +1322,17 @@ const CppWorld = struct {
         var num: u32 = 0;
         return jolt.jolt_sim_constraint_state_size(self.handle, index, &num);
     }
+
+    /// The subtype of constraint `index` of the system (null: none, or a subtype Zolt does not know)
+    fn constraintSubType(self: CppWorld, index: u32) ?zolt.ConstraintSubType {
+        const sub_type = jolt.jolt_sim_constraint_sub_type(self.handle, index);
+        return if (sub_type < @typeInfo(zolt.ConstraintSubType).@"enum".fields.len) @enumFromInt(sub_type) else null;
+    }
+
+    /// The number of constraints of the system whose IsActive() is true
+    fn numActiveConstraints(self: CppWorld) u32 {
+        return jolt.jolt_sim_num_active_constraints(self.handle);
+    }
 };
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -817,149 +1353,187 @@ const Field = struct {
     component: ?u8 = null,
 };
 
-/// Walks the bytes of a saved state like PhysicsSystem::RestoreState reads them. `cpp` answers which bodies have
-/// motion properties and the sizes of the constraint states (the decoded bytes are the C++ ones).
-const StateLayout = struct {
-    allocator: Allocator,
-    bytes: []const u8,
-    cpp: CppWorld,
-    fields: std.ArrayList(Field) = .empty,
-    pos: usize = 0,
-    truncated: bool = false,
+/// Walks the bytes of a saved state like PhysicsSystem::RestoreState reads them. `cpp` (a CppWorld, or the C++ world of
+/// another parity test) answers which bodies have motion properties (`hasMotionProperties(body_id) bool`) and the sizes
+/// of the constraint states (`constraintStateSize(index) u32`); the decoded bytes are the C++ ones.
+pub fn StateLayoutFor(comptime Cpp: type) type {
+    return struct {
+        const Self = @This();
 
-    fn deinit(self: *StateLayout) void {
-        self.fields.deinit(self.allocator);
-    }
+        allocator: Allocator,
+        bytes: []const u8,
+        cpp: Cpp,
+        fields: std.ArrayList(Field) = .empty,
+        pos: usize = 0,
+        truncated: bool = false,
 
-    fn add(self: *StateLayout, kind: FieldKind, size: usize, section: []const u8, item: ?usize, id: ?u32, name: []const u8, component: ?u8) !void {
-        if (self.truncated or self.pos + size > self.bytes.len) {
-            self.truncated = true;
-            return;
-        }
-        try self.fields.append(self.allocator, .{ .offset = self.pos, .size = size, .kind = kind, .section = section, .item = item, .id = id, .name = name, .component = component });
-        self.pos += size;
-    }
-
-    fn scalar(self: *StateLayout, comptime T: type, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
-        const kind: FieldKind = switch (T) {
-            u8 => .u8,
-            bool => .bool,
-            u16 => .u16,
-            u32 => .u32,
-            f32 => .f32,
-            f64 => .f64,
-            else => @compileError("unsupported"),
-        };
-        try self.add(kind, @sizeOf(T), section, item, id, name, null);
-    }
-
-    fn vector(self: *StateLayout, comptime T: type, n: u8, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
-        for (0..n) |c|
-            try self.add(if (T == f64) .f64 else .f32, @sizeOf(T), section, item, id, name, @intCast(c));
-    }
-
-    fn read(self: *const StateLayout, comptime T: type) ?T {
-        if (self.pos + @sizeOf(T) > self.bytes.len) return null;
-        return std.mem.bytesToValue(T, self.bytes[self.pos..][0..@sizeOf(T)]);
-    }
-
-    fn decode(self: *StateLayout) !void {
-        const state_byte = self.read(u8) orelse return;
-        try self.scalar(u8, "header", null, null, "state");
-        const state = StateRecorderState.fromInt(state_byte);
-
-        if (state.global) {
-            try self.scalar(f32, "global", null, null, "previous_step_delta_time");
-            try self.vector(f32, 3, "global", null, null, "gravity");
+        fn deinit(self: *Self) void {
+            self.fields.deinit(self.allocator);
         }
 
-        if (state.bodies) {
-            const num_bodies = self.read(u32) orelse return;
-            try self.scalar(u32, "bodies", null, null, "num_bodies");
-            for (0..num_bodies) |i| {
-                const id = self.read(u32) orelse return;
-                try self.scalar(u32, "bodies", i, id, "id");
-                try self.scalar(bool, "bodies", i, id, "is_active");
-                try self.vector(Real, 3, "bodies", i, id, "position");
-                try self.vector(f32, 4, "bodies", i, id, "rotation");
-                if (self.cpp.hasMotionProperties(id)) {
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.linear_velocity");
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.angular_velocity");
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.force");
-                    try self.vector(f32, 3, "bodies", i, id, "motion_properties.torque");
-                    if (Core.double_precision)
-                        try self.vector(f64, 3, "bodies", i, id, "motion_properties.sleep_test_offset");
-                    for ([_][]const u8{ "motion_properties.sleep_test_spheres[0]", "motion_properties.sleep_test_spheres[1]", "motion_properties.sleep_test_spheres[2]" }) |name| {
-                        try self.vector(f32, 3, "bodies", i, id, name); // center
-                        try self.add(.f32, 4, "bodies", i, id, name, 3); // radius
+        fn add(self: *Self, kind: FieldKind, size: usize, section: []const u8, item: ?usize, id: ?u32, name: []const u8, component: ?u8) !void {
+            if (self.truncated or self.pos + size > self.bytes.len) {
+                self.truncated = true;
+                return;
+            }
+            try self.fields.append(self.allocator, .{ .offset = self.pos, .size = size, .kind = kind, .section = section, .item = item, .id = id, .name = name, .component = component });
+            self.pos += size;
+        }
+
+        fn scalar(self: *Self, comptime T: type, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
+            const kind: FieldKind = switch (T) {
+                u8 => .u8,
+                bool => .bool,
+                u16 => .u16,
+                u32 => .u32,
+                f32 => .f32,
+                f64 => .f64,
+                else => @compileError("unsupported"),
+            };
+            try self.add(kind, @sizeOf(T), section, item, id, name, null);
+        }
+
+        fn vector(self: *Self, comptime T: type, n: u8, section: []const u8, item: ?usize, id: ?u32, name: []const u8) !void {
+            for (0..n) |c|
+                try self.add(if (T == f64) .f64 else .f32, @sizeOf(T), section, item, id, name, @intCast(c));
+        }
+
+        fn read(self: *const Self, comptime T: type) ?T {
+            if (self.pos + @sizeOf(T) > self.bytes.len) return null;
+            return std.mem.bytesToValue(T, self.bytes[self.pos..][0..@sizeOf(T)]);
+        }
+
+        fn decode(self: *Self) !void {
+            const state_byte = self.read(u8) orelse return;
+            try self.scalar(u8, "header", null, null, "state");
+            const state = StateRecorderState.fromInt(state_byte);
+
+            if (state.global) {
+                try self.scalar(f32, "global", null, null, "previous_step_delta_time");
+                try self.vector(f32, 3, "global", null, null, "gravity");
+            }
+
+            if (state.bodies) {
+                const num_bodies = self.read(u32) orelse return;
+                try self.scalar(u32, "bodies", null, null, "num_bodies");
+                for (0..num_bodies) |i| {
+                    const id = self.read(u32) orelse return;
+                    try self.scalar(u32, "bodies", i, id, "id");
+                    try self.scalar(bool, "bodies", i, id, "is_active");
+                    try self.vector(Real, 3, "bodies", i, id, "position");
+                    try self.vector(f32, 4, "bodies", i, id, "rotation");
+                    if (self.cpp.hasMotionProperties(id)) {
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.linear_velocity");
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.angular_velocity");
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.force");
+                        try self.vector(f32, 3, "bodies", i, id, "motion_properties.torque");
+                        if (Core.double_precision)
+                            try self.vector(f64, 3, "bodies", i, id, "motion_properties.sleep_test_offset");
+                        for ([_][]const u8{ "motion_properties.sleep_test_spheres[0]", "motion_properties.sleep_test_spheres[1]", "motion_properties.sleep_test_spheres[2]" }) |name| {
+                            try self.vector(f32, 3, "bodies", i, id, name); // center
+                            try self.add(.f32, 4, "bodies", i, id, name, 3); // radius
+                        }
+                        try self.scalar(f32, "bodies", i, id, "motion_properties.sleep_test_timer");
+                        try self.scalar(bool, "bodies", i, id, "motion_properties.allow_sleeping");
                     }
-                    try self.scalar(f32, "bodies", i, id, "motion_properties.sleep_test_timer");
-                    try self.scalar(bool, "bodies", i, id, "motion_properties.allow_sleeping");
+                }
+            }
+
+            if (state.contacts) {
+                const num_body_pairs = self.read(u32) orelse return;
+                try self.scalar(u32, "contacts", null, null, "num_body_pairs");
+                var manifold_index: usize = 0;
+                for (0..num_body_pairs) |i| {
+                    const body_a = self.read(u32) orelse return;
+                    try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_a");
+                    try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_b");
+                    try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_position");
+                    try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_rotation");
+                    const num_manifolds = self.read(u32) orelse return;
+                    try self.scalar(u32, "contacts.body_pairs", i, body_a, "num_manifolds");
+                    for (0..num_manifolds) |_| {
+                        const m = manifold_index;
+                        manifold_index += 1;
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body1");
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape1");
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body2");
+                        try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape2");
+                        const num_points = self.read(u16) orelse return;
+                        try self.scalar(u16, "contacts.manifolds", m, body_a, "num_contact_points");
+                        try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_normal");
+                        try self.vector(f32, 2, "contacts.manifolds", m, body_a, "friction_lambda");
+                        try self.scalar(f32, "contacts.manifolds", m, body_a, "angular_friction_lambda");
+                        for (0..num_points) |_| {
+                            try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position1");
+                            try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position2");
+                            try self.scalar(f32, "contacts.manifolds", m, body_a, "contact_point.non_penetration_lambda");
+                        }
+                    }
+                }
+                const num_ccd = self.read(u32) orelse return;
+                try self.scalar(u32, "contacts", null, null, "num_ccd_manifolds");
+                for (0..num_ccd) |i| {
+                    for ([_][]const u8{ "key.body1", "key.sub_shape1", "key.body2", "key.sub_shape2" }) |name|
+                        try self.scalar(u32, "contacts.ccd_manifolds", i, null, name);
+                }
+            }
+
+            if (state.constraints) {
+                const num_constraints = self.read(u32) orelse return;
+                try self.scalar(u32, "constraints", null, null, "num_constraints");
+                for (0..num_constraints) |i| {
+                    const index = self.read(u32) orelse return;
+                    try self.scalar(u32, "constraints", i, index, "constraint_index");
+                    try self.scalar(bool, "constraints", i, index, "enabled");
+                    const size = self.cpp.constraintStateSize(@intCast(i));
+                    if (size > 1)
+                        try self.constraintClassFields(i, index, size - 1);
                 }
             }
         }
 
-        if (state.contacts) {
-            const num_body_pairs = self.read(u32) orelse return;
-            try self.scalar(u32, "contacts", null, null, "num_body_pairs");
-            var manifold_index: usize = 0;
-            for (0..num_body_pairs) |i| {
-                const body_a = self.read(u32) orelse return;
-                try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_a");
-                try self.scalar(u32, "contacts.body_pairs", i, body_a, "key.body_b");
-                try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_position");
-                try self.vector(f32, 3, "contacts.body_pairs", i, body_a, "delta_rotation");
-                const num_manifolds = self.read(u32) orelse return;
-                try self.scalar(u32, "contacts.body_pairs", i, body_a, "num_manifolds");
-                for (0..num_manifolds) |_| {
-                    const m = manifold_index;
-                    manifold_index += 1;
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body1");
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape1");
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.body2");
-                    try self.scalar(u32, "contacts.manifolds", m, body_a, "key.sub_shape2");
-                    const num_points = self.read(u16) orelse return;
-                    try self.scalar(u16, "contacts.manifolds", m, body_a, "num_contact_points");
-                    try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_normal");
-                    try self.vector(f32, 2, "contacts.manifolds", m, body_a, "friction_lambda");
-                    try self.scalar(f32, "contacts.manifolds", m, body_a, "angular_friction_lambda");
-                    for (0..num_points) |_| {
-                        try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position1");
-                        try self.vector(f32, 3, "contacts.manifolds", m, body_a, "contact_point.position2");
-                        try self.scalar(f32, "contacts.manifolds", m, body_a, "contact_point.non_penetration_lambda");
+        /// The SaveState of a constraint class after `enabled`: the fields of its slot (`constraintStateFields`) when
+        /// the C++ world tells the subtype and their size adds up, else one block of bytes
+        fn constraintClassFields(self: *Self, i: usize, index: u32, size: u32) !void {
+            const fields: ?[]const StateField = if (comptime @hasDecl(Cpp, "constraintSubType"))
+                if (self.cpp.constraintSubType(@intCast(i))) |sub_type| constraintStateFields(sub_type) else null
+            else
+                null;
+            if (fields) |list| {
+                var total: usize = 0;
+                for (list) |field| total += fieldSize(field.kind) * field.count;
+                if (total == size) {
+                    for (list) |field| {
+                        for (0..field.count) |c|
+                            try self.add(field.kind, fieldSize(field.kind), "constraints", i, index, field.name, if (field.count > 1) @intCast(c) else null);
                     }
+                    return;
                 }
             }
-            const num_ccd = self.read(u32) orelse return;
-            try self.scalar(u32, "contacts", null, null, "num_ccd_manifolds");
-            for (0..num_ccd) |i| {
-                for ([_][]const u8{ "key.body1", "key.sub_shape1", "key.body2", "key.sub_shape2" }) |name|
-                    try self.scalar(u32, "contacts.ccd_manifolds", i, null, name);
-            }
+            try self.add(.bytes, size, "constraints", i, index, "state of the constraint class", null);
         }
 
-        if (state.constraints) {
-            const num_constraints = self.read(u32) orelse return;
-            try self.scalar(u32, "constraints", null, null, "num_constraints");
-            for (0..num_constraints) |i| {
-                const index = self.read(u32) orelse return;
-                try self.scalar(u32, "constraints", i, index, "constraint_index");
-                try self.scalar(bool, "constraints", i, index, "enabled");
-                const size = self.cpp.constraintStateSize(@intCast(i));
-                if (size > 1)
-                    try self.add(.bytes, size - 1, "constraints", i, index, "state of the constraint class", null);
-            }
+        fn fieldSize(kind: FieldKind) usize {
+            return switch (kind) {
+                .u8, .bool => 1,
+                .u16 => 2,
+                .u32, .f32 => 4,
+                .f64 => 8,
+                .bytes => 1,
+            };
         }
-    }
 
-    fn find(self: *const StateLayout, offset: usize) ?*const Field {
-        for (self.fields.items) |*field| {
-            if (offset >= field.offset and offset < field.offset + field.size)
-                return field;
+        fn find(self: *const Self, offset: usize) ?*const Field {
+            for (self.fields.items) |*field| {
+                if (offset >= field.offset and offset < field.offset + field.size)
+                    return field;
+            }
+            return null;
         }
-        return null;
-    }
-};
+    };
+}
+
+const StateLayout = StateLayoutFor(CppWorld);
 
 fn writeValue(w: *std.Io.Writer, field: *const Field, bytes: []const u8) !void {
     if (field.offset + field.size > bytes.len) {
@@ -992,11 +1566,12 @@ fn writeField(w: *std.Io.Writer, field: *const Field) !void {
     if (field.component) |c| try w.print(".{c}", .{"xyzw"[c]});
 }
 
-/// Describe where the Zolt state differs from the Jolt state (null when they are equal)
-fn describeStateDifference(allocator: Allocator, zolt_bytes: []const u8, jolt_bytes: []const u8, cpp: CppWorld) !?[]u8 {
+/// Describe where the Zolt state differs from the Jolt state (null when they are equal). `cpp` is the C++ world (see
+/// StateLayoutFor), the caller owns the returned text.
+pub fn describeStateDifference(allocator: Allocator, zolt_bytes: []const u8, jolt_bytes: []const u8, cpp: anytype) !?[]u8 {
     const first = std.mem.indexOfDiff(u8, zolt_bytes, jolt_bytes) orelse return null;
 
-    var layout: StateLayout = .{ .allocator = allocator, .bytes = jolt_bytes, .cpp = cpp };
+    var layout: StateLayoutFor(@TypeOf(cpp)) = .{ .allocator = allocator, .bytes = jolt_bytes, .cpp = cpp };
     defer layout.deinit();
     try layout.decode();
 
@@ -1063,6 +1638,11 @@ const all_states = [_]StateRecorderState{
     .all,
 };
 
+/// The EStateRecorderState of a `snapshot` operation (i[0], 0: All)
+fn snapshotState(op: *const SimOp) StateRecorderState {
+    return if (op.i[0] == 0) .all else .fromInt(@intCast(op.i[0]));
+}
+
 /// One scene in one configuration, both sides in lockstep
 const Run = struct {
     allocator: Allocator,
@@ -1108,6 +1688,36 @@ const Run = struct {
         }
     }
 
+    /// The filtered states (StateFilter / SimStateFilter): both sides save the same bytes, then each side restores the
+    /// filtered bytes of the other side (the contacts through ShouldRestoreContact) and the full states must still match
+    fn compareFilteredStates(self: *Run) !void {
+        const allocator = self.allocator;
+        var filter: StateFilter = .{};
+        var recorder = StateRecorderImpl.init(allocator);
+        defer recorder.deinit();
+        try self.zw.system.saveState(recorder.recorder(), .{ .filter = &filter.base });
+        if (recorder.isFailed()) return error.OutOfMemory;
+        var jolt_bytes: std.ArrayList(u8) = .empty;
+        defer jolt_bytes.deinit(allocator);
+        const size = jolt.jolt_sim_save_state_filtered(self.cw.handle, StateRecorderState.all.toInt(), jolt_bytes.items.ptr, 0);
+        try jolt_bytes.resize(allocator, size);
+        _ = jolt.jolt_sim_save_state_filtered(self.cw.handle, StateRecorderState.all.toInt(), jolt_bytes.items.ptr, size);
+        if (std.mem.indexOfDiff(u8, recorder.getData(), jolt_bytes.items)) |first|
+            return self.fail("the filtered states differ at byte {d} (zolt {d} bytes, jolt {d} bytes)", .{ first, recorder.getData().len, jolt_bytes.items.len });
+
+        // Cross restore of the filtered states
+        var restore = StateRecorderImpl.init(allocator);
+        defer restore.deinit();
+        restore.writeBytes(jolt_bytes.items);
+        if (restore.isFailed()) return error.OutOfMemory;
+        restore.rewind();
+        if (!try self.zw.system.restoreState(restore.recorder(), .{ .filter = &filter.base }))
+            return self.fail("zolt could not restore the filtered jolt state", .{});
+        if (jolt.jolt_sim_restore_state_filtered(self.cw.handle, recorder.getData().ptr, @intCast(recorder.getData().len)) == 0)
+            return self.fail("jolt could not restore the filtered zolt state", .{});
+        try self.compareStates(.all, "after the filtered cross restore");
+    }
+
     /// Compare the listener callbacks since the last comparison as sorted records
     fn compareRecords(self: *Run) !void {
         self.zolt_records.clearRetainingCapacity();
@@ -1129,6 +1739,7 @@ const Run = struct {
         }
         if (self.zolt_records.items.len != self.jolt_records.items.len)
             return self.fail("{d} listener records in zolt, {d} in jolt", .{ self.zolt_records.items.len, self.jolt_records.items.len });
+        self.stats.max_manifolds_per_body_pair = @max(self.stats.max_manifolds_per_body_pair, try maxManifoldsPerBodyPair(self.allocator, self.jolt_records.items));
     }
 
     fn applyOps(self: *Run, op_index: *usize, delta_time: *f32, collision_steps: *u32) !void {
@@ -1142,8 +1753,9 @@ const Run = struct {
                 },
                 .snapshot => {
                     const slot = &self.snapshots[op.index];
-                    try self.zw.saveState(.all, &slot[0]);
-                    try self.cw.saveState(self.allocator, .all, &slot[1]);
+                    const state = snapshotState(op);
+                    try self.zw.saveState(state, &slot[0]);
+                    try self.cw.saveState(self.allocator, state, &slot[1]);
                 },
                 .restore_cross => {
                     // Zolt restores the C++ state, C++ the Zolt state
@@ -1160,11 +1772,19 @@ const Run = struct {
                 else => |kind| {
                     const zolt_result = try self.zw.applyOp(op);
                     const jolt_result = self.cw.applyOp(op);
-                    if (zolt_result != jolt_result)
+                    if (zolt_result != jolt_result) {
+                        if (ConstraintOpRange.of(op.kind) != null)
+                            return self.fail("operation {d} ({t} on constraint handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.index, zolt_result, jolt_result });
                         return self.fail("operation {d} ({t} on handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.body, zolt_result, jolt_result });
+                    }
                     if (kind == .expect_body_state) {
                         if (jolt_result != op.index)
                             return self.fail("operation {d}: the scene expects handle {d} in BodyState {d}, it is in BodyState {d} on both sides (the scene does not reach what it is written for)", .{ op_index.*, op.body, op.index, jolt_result });
+                        self.stats.num_expectations += 1;
+                    }
+                    if (kind == .expect_constraint_state) {
+                        if (jolt_result != op.i[0])
+                            return self.fail("operation {d}: the scene expects constraint handle {d} in ConstraintState {d}, it is in ConstraintState {d} on both sides (the scene does not reach what it is written for)", .{ op_index.*, op.index, op.i[0], jolt_result });
                         self.stats.num_expectations += 1;
                     }
                 },
@@ -1174,18 +1794,61 @@ const Run = struct {
 
     /// One update on both sides, then the comparisons
     fn step(self: *Run, delta_time: f32, collision_steps: u32) !void {
+        self.countActiveConstraints();
         const sweep = self.config.sweeps and self.entry.sweep_stride != 0 and self.update % self.entry.sweep_stride == 0;
         if (sweep)
             return self.sweepStep(delta_time, collision_steps);
 
-        const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobs.jobSystem());
+        const ccd_jobs_before = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
+        const activations_before = self.zw.countRecords(.body_activated);
+        const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
+        self.countCCDJobs(ccd_jobs_before);
+        self.countUpdateActivations(activations_before);
         if (!self.zw.temp.isEmpty()) return self.fail("the temp allocator is not empty after the update", .{});
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        try self.countCCDManifolds();
         try self.compareRecords();
         self.updateStats();
+    }
+
+    /// The number of active constraints before the update (Zolt side: IsActive as DetermineActiveConstraints sees it)
+    fn countActiveConstraints(self: *Run) void {
+        var num_active: u32 = 0;
+        for (self.zw.system.constraint_manager.constraints.items) |*c| {
+            if (c.get().?.isActive()) num_active += 1;
+        }
+        self.stats.max_active_constraints = @max(self.stats.max_active_constraints, num_active);
+    }
+
+    /// The number of bodies activated from inside the update that just ran (Zolt side, `before`: the activation
+    /// records of the operations before it)
+    fn countUpdateActivations(self: *Run, before: u32) void {
+        const num_activations = self.zw.countRecords(.body_activated) - before;
+        self.stats.max_update_activations = @max(self.stats.max_update_activations, num_activations);
+    }
+
+    /// The number of FindCCDContacts jobs of the update that just ran (Zolt side)
+    fn countCCDJobs(self: *Run, before: u32) void {
+        const num_jobs = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic) - before;
+        self.stats.max_find_ccd_contacts_jobs = @max(self.stats.max_find_ccd_contacts_jobs, num_jobs);
+    }
+
+    /// Count the update when the contact cache of the C++ state after it holds CCD manifolds (a linear cast body hit
+    /// something: ContactConstraintManager::OnCCDContactAdded, the worlds have a contact listener)
+    fn countCCDManifolds(self: *Run) !void {
+        var layout: StateLayout = .{ .allocator = self.allocator, .bytes = self.jolt_state.items, .cpp = self.cw };
+        defer layout.deinit();
+        try layout.decode();
+        for (layout.fields.items) |*field| {
+            if (std.mem.eql(u8, field.name, "num_ccd_manifolds")) {
+                if (std.mem.bytesToValue(u32, self.jolt_state.items[field.offset..][0..4]) > 0)
+                    self.stats.updates_with_ccd_manifolds += 1;
+                return;
+            }
+        }
     }
 
     fn updateStats(self: *Run) void {
@@ -1213,6 +1876,11 @@ const Run = struct {
         defer snapshot.deinit(allocator);
         try zw.saveState(.all, &snapshot);
 
+        // The bodies whose contact cache is invalid (the operations before the update flagged them): the flags are not
+        // part of the saved state (in Jolt neither), every update that starts from the snapshot gets them again
+        const pending_invalid = try allocator.dupe(BodyID, zw.system.body_manager.bodies_cache_invalid.items);
+        defer allocator.free(pending_invalid);
+
         // C++ first: the reference bytes after the update
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         var reference: std.ArrayList(u8) = .empty;
@@ -1221,10 +1889,15 @@ const Run = struct {
 
         // The update counting the temp allocations is the one that is compared (records included)
         var counting: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{});
-        const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobs.jobSystem());
+        const ccd_jobs_before = zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
+        const activations_before = zw.countRecords(.body_activated);
+        const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobSystem());
+        self.countCCDJobs(ccd_jobs_before);
+        self.countUpdateActivations(activations_before);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        try self.countCCDManifolds();
         try zw.takeRecords(&zolt_records);
         const step_calls = try allocator.alloc(u32, zw.step_listeners.len);
         defer allocator.free(step_calls);
@@ -1233,9 +1906,9 @@ const Run = struct {
         // Every temp allocation fails once
         const num_allocations = counting.num_allocations;
         for (0..num_allocations) |fail_index| {
-            try self.restoreZolt(snapshot.items);
+            try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
             var failing: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
-            if (zw.update(delta_time, collision_steps, failing.tempAllocator(), zw.jobs.jobSystem())) |_| {
+            if (zw.update(delta_time, collision_steps, failing.tempAllocator(), zw.jobSystem())) |_| {
                 return self.fail("temp allocation {d} of {d} failed but the update succeeded", .{ fail_index, num_allocations });
             } else |err| if (err != error.OutOfMemory) return err;
             if (!failing.has_induced_failure) return self.fail("temp allocation {d} did not fail", .{fail_index});
@@ -1247,14 +1920,14 @@ const Run = struct {
         }
 
         // Every createJob fails once: count the jobs first (a normal update)
-        try self.restoreZolt(snapshot.items);
-        var counting_jobs: FailingJobSystem = .init(zw.jobs.jobSystem(), .{});
+        try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
+        var counting_jobs: FailingJobSystem = .init(zw.jobSystem(), .{});
         _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), counting_jobs.jobSystem());
         try self.expectZoltState(reference.items, "after the update counting the jobs");
         const num_jobs = counting_jobs.num_created.load(.monotonic);
         for (0..num_jobs + 2) |fail_index| {
-            try self.restoreZolt(snapshot.items);
-            var failing: FailingJobSystem = .init(zw.jobs.jobSystem(), .{ .fail_index = @intCast(fail_index) });
+            try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
+            var failing: FailingJobSystem = .init(zw.jobSystem(), .{ .fail_index = @intCast(fail_index) });
             if (zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), failing.jobSystem())) |_| {
                 // A job that could not be spawned from inside a job changes no result
                 try self.expectZoltState(reference.items, "a job could not be spawned");
@@ -1286,6 +1959,18 @@ const Run = struct {
             return self.fail("zolt could not restore its snapshot", .{});
     }
 
+    /// Restore the snapshot and flag the contact caches that were invalid when it was taken (the first update after the
+    /// snapshot reset the flags). The recovery after a failed update (recoverZolt) does not: PhysicsSystem.update puts
+    /// the flags back itself when it runs out of memory (BodyManager.restoreContactCacheInvalidation).
+    fn restoreZoltBeforeUpdate(self: *Run, snapshot: []const u8, pending_invalid: []const BodyID) !void {
+        try self.restoreZolt(snapshot);
+        const body_manager = &self.zw.system.body_manager;
+        for (pending_invalid) |id| {
+            if (body_manager.tryGetBodyMut(id)) |body|
+                try body_manager.invalidateContactCacheForBody(body);
+        }
+    }
+
     fn expectZoltState(self: *Run, expected: []const u8, what: []const u8) !void {
         try self.zw.saveState(.all, &self.zolt_state);
         if (try describeStateDifference(self.allocator, self.zolt_state.items, expected, self.cw)) |message| {
@@ -1297,7 +1982,7 @@ const Run = struct {
     /// Restore the snapshot and redo the update with enough memory: the C++ bytes
     fn recoverZolt(self: *Run, snapshot: []const u8, reference: []const u8, delta_time: f32, collision_steps: u32, what: []const u8) !void {
         try self.restoreZolt(snapshot);
-        _ = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobs.jobSystem());
+        _ = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
         if (!self.zw.temp.isEmpty()) return self.fail("{s}: the temp allocator is not empty", .{what});
         try self.expectZoltState(reference, what);
     }
@@ -1315,11 +2000,41 @@ const RunStats = struct {
     updates_with_sleeping_bodies: u32 = 0,
     /// Number of updates with active linear cast bodies
     updates_with_ccd_bodies: u32 = 0,
+    /// Number of updates after which the contact cache (C++ state) holds CCD manifolds: a linear cast body hit something
+    updates_with_ccd_manifolds: u32 = 0,
+    /// Largest number of FindCCDContacts jobs in one update (Zolt side)
+    max_find_ccd_contacts_jobs: u32 = 0,
+    /// Largest number of bodies activated from inside one update (Zolt side, the activations of the operations before
+    /// the update not counted)
+    max_update_activations: u32 = 0,
     /// Number of restore_cross operations that changed the state
     restores_changing_the_state: u32 = 0,
     /// Number of checked expect_body_state operations
     num_expectations: u32 = 0,
+    /// Number of FindCollisions jobs spawned from inside jobs (Zolt side, also in the sweeps)
+    num_spawned_jobs: u32 = 0,
+    /// Number of OnBodyDeactivated calls from the final batch of a split island (Zolt side, also in the sweeps)
+    num_large_island_deactivations: u32 = 0,
+    /// Largest number of manifolds of one body pair in one update (OnContactAdded + OnContactPersisted records)
+    max_manifolds_per_body_pair: u32 = 0,
+    /// Largest number of active constraints before an update (Zolt side, Expect.active_constraints)
+    max_active_constraints: u32 = 0,
 };
+
+/// The largest number of OnContactAdded + OnContactPersisted records of one body pair in `records` (Expect.full_manifolds)
+fn maxManifoldsPerBodyPair(allocator: Allocator, records: []const SimRecord) Allocator.Error!u32 {
+    var counts: std.AutoHashMapUnmanaged([2]u32, u32) = .empty;
+    defer counts.deinit(allocator);
+    var max: u32 = 0;
+    for (records) |r| {
+        if (r.kind != @intFromEnum(RecordKind.contact_added) and r.kind != @intFromEnum(RecordKind.contact_persisted))
+            continue;
+        const count = try counts.getOrPutValue(allocator, .{ r.ids[0], r.ids[1] }, 0);
+        count.value_ptr.* += 1;
+        max = @max(max, count.value_ptr.*);
+    }
+    return max;
+}
 
 /// Print what every scene did (a passing test must not print: keep false)
 const verbose = false;
@@ -1347,10 +2062,13 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     }
     std.debug.assert(op_index == builder.ops.items.len);
 
-    // Every part of the state
+    // Every part of the state, and the filtered state
     for (all_states) |state|
         try run.compareStates(state, "at the end");
+    try run.compareFilteredStates();
 
+    run.stats.num_spawned_jobs = zw.counting_jobs.num_spawned_find_collisions.load(.monotonic);
+    run.stats.num_large_island_deactivations = zw.num_large_island_deactivations.load(.monotonic);
     return run.stats;
 }
 
@@ -1369,6 +2087,710 @@ fn createScene(allocator: Allocator, builder: *const SceneBuilder) !void {
     }
 }
 
+// -------------------------------------------------------------------------------------------------------------------
+// Constraints (Phase 6): the Zolt side of the ConstraintKinds and of the class operations, one slot per worker group
+// (see the SimScenes header for the recipe; the C++ side, SimulationReference.cpp, covers every kind and operation).
+//
+// A slot is a struct with
+// - `makeSettings(allocator, c: *const SimConstraint) !Ref(ConstraintSettings)`: the settings of a description of one of
+//   the kinds of the slot, the members of the settings class only (exactly SimMakeConstraintSettings of
+//   SimulationReference.cpp; makeConstraintSettings sets the ConstraintSettings members);
+// - `applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void`: an operation of the OpKind range of the
+//   slot (ApplyConstraintOp of SimulationReference.cpp, `castConstraint` checks the subtype);
+// - `stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField`: the SaveState layout of the classes of the slot
+//   after Constraint::SaveState's `enabled` (for the state decoder, null: decoded as one block of bytes);
+// - `setConstraints(world, c: *TwoBodyConstraint, handle1: u32, handle2: u32) !void`: Gear / RackAndPinion only.
+// A slot whose classes are not ported yet is `StubSlot`: scenes with its kinds are skipped through their Blocker, an
+// operation of its range returns error.SceneNotSupported.
+
+/// The ConstraintState bits of a constraint (SimConstraintState of SimulationReference.cpp)
+fn constraintState(c: *const Constraint) u32 {
+    return @as(u32, @intFromBool(c.getEnabled())) | (@as(u32, @intFromBool(c.isActive())) << 1);
+}
+
+/// A field of the SaveState of a constraint class (for the state decoder)
+const StateField = struct {
+    name: []const u8,
+    kind: FieldKind,
+    /// Number of components (3 for a Vec3, 1 for a float)
+    count: u8 = 1,
+};
+
+/// The constraint `c` as class T after checking its subtype (SimCast of SimulationReference.cpp)
+fn castConstraint(comptime T: type, c: *TwoBodyConstraint, sub_type: zolt.ConstraintSubType) !*T {
+    if (c.base.getSubType() != sub_type) {
+        std.debug.print("SimulationParity: a {t} operation on a {t} constraint (an error of the scene)\n", .{ sub_type, c.base.getSubType() });
+        return error.SceneError;
+    }
+    return zolt.virtual.downcast(T, c);
+}
+
+/// The EConstraintSpace of a description member
+fn loadSpace(v: u32) zolt.ConstraintSpace {
+    return @enumFromInt(@as(i32, @bitCast(v)));
+}
+
+/// A spring of a description: mode, frequency / stiffness, damping (SimLoadSpring)
+fn loadSpring(mode: u32, f: []const f32) zolt.SpringSettings {
+    var s: zolt.SpringSettings = .{};
+    s.mode = @enumFromInt(@as(u8, @intCast(mode)));
+    s.frequency = f[0];
+    s.damping = f[1];
+    return s;
+}
+
+/// A motor of a description: the spring, min / max force limit, min / max torque limit (SimLoadMotor)
+fn loadMotor(mode: u32, f: []const f32) zolt.MotorSettings {
+    var m: zolt.MotorSettings = .{};
+    m.spring_settings = loadSpring(mode, f);
+    m.min_force_limit = f[2];
+    m.max_force_limit = f[3];
+    m.min_torque_limit = f[4];
+    m.max_torque_limit = f[5];
+    return m;
+}
+
+/// The slot of a worker group whose classes are not ported yet
+const StubSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        _ = .{ allocator, c };
+        return error.SceneNotSupported;
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = .{ world, op, c };
+        return error.SceneNotSupported;
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        _ = sub_type;
+        return null;
+    }
+
+    fn setConstraints(world: *ZoltWorld, c: *TwoBodyConstraint, handle1: u32, handle2: u32) !void {
+        _ = .{ world, c, handle1, handle2 };
+        return error.SceneNotSupported;
+    }
+};
+
+// ---- SLOT fixed_point: FixedConstraint, PointConstraint (ConstraintKind fixed / point, OpKind 220..239) ----
+const FixedPointSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .fixed => {
+                const s = try zolt.FixedConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.auto_detect_point = i[1] != 0;
+                s.point1 = loadR3(r[0..3]);
+                s.axis_x1 = load3(f[0..3]);
+                s.axis_y1 = load3(f[3..6]);
+                s.point2 = loadR3(r[3..6]);
+                s.axis_x2 = load3(f[6..9]);
+                s.axis_y2 = load3(f[9..12]);
+                return .init(s.asSettings());
+            },
+            .point => {
+                const s = try zolt.PointConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .point_set_point1 => (try castConstraint(zolt.PointConstraint, c, .point)).setPoint1(loadSpace(op.i[0]), loadR3(&op.r)),
+            .point_set_point2 => (try castConstraint(zolt.PointConstraint, c, .point)).setPoint2(loadSpace(op.i[0]), loadR3(&op.r)),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .fixed => &.{ .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 }, .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 } },
+            .point => &.{.{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 }},
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT distance_pulley: DistanceConstraint, PulleyConstraint (ConstraintKind distance / pulley, OpKind 240..259) ----
+const DistancePulleySlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .distance => {
+                const s = try zolt.DistanceConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                s.min_distance = f[0];
+                s.max_distance = f[1];
+                s.limits_spring_settings = loadSpring(i[1], f[2..4]);
+                return .init(s.asSettings());
+            },
+            .pulley => {
+                const s = try zolt.PulleyConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.body_point1 = loadR3(r[0..3]);
+                s.fixed_point1 = loadR3(r[3..6]);
+                s.body_point2 = loadR3(r[6..9]);
+                s.fixed_point2 = loadR3(r[9..12]);
+                s.ratio = f[0];
+                s.min_length = f[1];
+                s.max_length = f[2];
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .distance_set_distance => (try castConstraint(zolt.DistanceConstraint, c, .distance)).setDistance(op.f[0], op.f[1]),
+            .distance_set_limits_spring_settings => (try castConstraint(zolt.DistanceConstraint, c, .distance)).setLimitsSpringSettings(loadSpring(op.i[0], op.f[0..2])),
+            .pulley_set_length => (try castConstraint(zolt.PulleyConstraint, c, .pulley)).setLength(op.f[0], op.f[1]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .distance => &.{ .{ .name = "axis_constraint.total_lambda", .kind = .f32 }, .{ .name = "world_space_normal", .kind = .f32, .count = 3 } },
+            .pulley => &.{ .{ .name = "independent_axis_constraint_part.total_lambda", .kind = .f32 }, .{ .name = "world_space_normal1", .kind = .f32, .count = 3 }, .{ .name = "world_space_normal2", .kind = .f32, .count = 3 } },
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT hinge: HingeConstraint (ConstraintKind hinge, OpKind 260..279) ----
+const HingeSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .hinge => {
+                const s = try zolt.HingeConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.hinge_axis1 = load3(f[0..3]);
+                s.normal_axis1 = load3(f[3..6]);
+                s.point2 = loadR3(r[3..6]);
+                s.hinge_axis2 = load3(f[6..9]);
+                s.normal_axis2 = load3(f[9..12]);
+                s.limits_min = f[12];
+                s.limits_max = f[13];
+                s.limits_spring_settings = loadSpring(i[1], f[14..16]);
+                s.max_friction_torque = f[16];
+                s.motor_settings = loadMotor(i[2], f[17..23]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const i = &op.i;
+        const f = &op.f;
+        const hinge = try castConstraint(zolt.HingeConstraint, c, .hinge);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .hinge_set_max_friction_torque => hinge.setMaxFrictionTorque(f[0]),
+            .hinge_set_motor_state => hinge.setMotorState(@enumFromInt(@as(i32, @bitCast(i[0])))),
+            .hinge_set_target_angular_velocity => hinge.setTargetAngularVelocity(f[0]),
+            .hinge_set_target_angle => hinge.setTargetAngle(f[0]),
+            .hinge_set_target_orientation_bs => hinge.setTargetOrientationBS(loadQuat(f[0..4])),
+            .hinge_set_limits => hinge.setLimits(f[0], f[1]),
+            .hinge_set_limits_spring_settings => hinge.setLimitsSpringSettings(loadSpring(i[0], f[0..2])),
+            .hinge_set_motor_settings => hinge.getMotorSettingsMut().* = loadMotor(i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .hinge => &.{
+                .{ .name = "motor_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "rotation_limits_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "motor_state", .kind = .u32 },
+                .{ .name = "target_angular_velocity", .kind = .f32 },
+                .{ .name = "target_angle", .kind = .f32 },
+            },
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT slider: SliderConstraint (ConstraintKind slider, OpKind 280..299) ----
+const SliderSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .slider => {
+                const s = try zolt.SliderConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.auto_detect_point = i[1] != 0;
+                s.point1 = loadR3(r[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                if (i[2] != 0) {
+                    s.setSliderAxis(load3(f[0..3]));
+                } else {
+                    s.slider_axis1 = load3(f[0..3]);
+                    s.normal_axis1 = load3(f[3..6]);
+                    s.slider_axis2 = load3(f[6..9]);
+                    s.normal_axis2 = load3(f[9..12]);
+                }
+                s.limits_min = f[12];
+                s.limits_max = f[13];
+                s.limits_spring_settings = loadSpring(i[3], f[14..16]);
+                s.max_friction_force = f[16];
+                s.motor_settings = loadMotor(i[4], f[17..23]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const f = &op.f;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .slider_set_max_friction_force => (try castConstraint(zolt.SliderConstraint, c, .slider)).setMaxFrictionForce(f[0]),
+            .slider_set_motor_state => (try castConstraint(zolt.SliderConstraint, c, .slider)).setMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),
+            .slider_set_target_velocity => (try castConstraint(zolt.SliderConstraint, c, .slider)).setTargetVelocity(f[0]),
+            .slider_set_target_position => (try castConstraint(zolt.SliderConstraint, c, .slider)).setTargetPosition(f[0]),
+            .slider_set_limits => (try castConstraint(zolt.SliderConstraint, c, .slider)).setLimits(f[0], f[1]),
+            .slider_set_limits_spring_settings => (try castConstraint(zolt.SliderConstraint, c, .slider)).setLimitsSpringSettings(loadSpring(op.i[0], f[0..2])),
+            .slider_set_motor_settings => (try castConstraint(zolt.SliderConstraint, c, .slider)).getMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .slider => &.{
+                .{ .name = "motor_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "position_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "position_limits_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "motor_state", .kind = .u32 },
+                .{ .name = "target_velocity", .kind = .f32 },
+                .{ .name = "target_position", .kind = .f32 },
+            },
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT cone_swing_twist: ConeConstraint, SwingTwistConstraint (ConstraintKind cone / swing_twist, OpKind 300..319) ----
+const ConeSwingTwistSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .cone => {
+                const s = try zolt.ConeConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.point1 = loadR3(r[0..3]);
+                s.twist_axis1 = load3(f[0..3]);
+                s.point2 = loadR3(r[3..6]);
+                s.twist_axis2 = load3(f[3..6]);
+                s.half_cone_angle = f[6];
+                return .init(s.asSettings());
+            },
+            .swing_twist => {
+                const s = try zolt.SwingTwistConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.swing_type = @enumFromInt(@as(u8, @truncate(i[1])));
+                s.position1 = loadR3(r[0..3]);
+                s.twist_axis1 = load3(f[0..3]);
+                s.plane_axis1 = load3(f[3..6]);
+                s.position2 = loadR3(r[3..6]);
+                s.twist_axis2 = load3(f[6..9]);
+                s.plane_axis2 = load3(f[9..12]);
+                s.normal_half_cone_angle = f[12];
+                s.plane_half_cone_angle = f[13];
+                s.twist_min_angle = f[14];
+                s.twist_max_angle = f[15];
+                s.max_friction_torque = f[16];
+                s.swing_motor_settings = loadMotor(i[2], f[17..23]);
+                s.twist_motor_settings = loadMotor(i[3], f[23..29]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const f = &op.f;
+        const motor_state: zolt.MotorState = @enumFromInt(@as(i32, @bitCast(op.i[0])));
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .cone_set_half_cone_angle => (try castConstraint(zolt.ConeConstraint, c, .cone)).setHalfConeAngle(f[0]),
+            .swing_twist_set_normal_half_cone_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setNormalHalfConeAngle(f[0]),
+            .swing_twist_set_plane_half_cone_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setPlaneHalfConeAngle(f[0]),
+            .swing_twist_set_twist_min_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTwistMinAngle(f[0]),
+            .swing_twist_set_twist_max_angle => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTwistMaxAngle(f[0]),
+            .swing_twist_set_max_friction_torque => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setMaxFrictionTorque(f[0]),
+            .swing_twist_set_swing_motor_state => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setSwingMotorState(motor_state),
+            .swing_twist_set_twist_motor_state => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTwistMotorState(motor_state),
+            .swing_twist_set_target_angular_velocity_cs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetAngularVelocityCS(load3(f[0..3])),
+            .swing_twist_set_target_angular_velocity_bs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetAngularVelocityBS(load3(f[0..3])),
+            .swing_twist_set_target_orientation_cs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetOrientationCS(loadQuat(f[0..4])),
+            .swing_twist_set_target_orientation_bs => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).setTargetOrientationBS(loadQuat(f[0..4])),
+            .swing_twist_set_swing_motor_settings => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).getSwingMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            .swing_twist_set_twist_motor_settings => (try castConstraint(zolt.SwingTwistConstraint, c, .swing_twist)).getTwistMotorSettingsMut().* = loadMotor(op.i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .cone => &.{
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "angle_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "world_space_rotation_axis", .kind = .f32, .count = 3 },
+            },
+            .swing_twist => &.{
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_y_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_z_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.twist_limit_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "motor_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "motor_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "motor_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "swing_motor_state", .kind = .u32 },
+                .{ .name = "twist_motor_state", .kind = .u32 },
+                .{ .name = "target_angular_velocity", .kind = .f32, .count = 3 },
+                .{ .name = "target_orientation", .kind = .f32, .count = 4 },
+            },
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT six_dof: SixDOFConstraint (ConstraintKind six_dof, OpKind 320..339) ----
+const SixDOFSlot = struct {
+    const Axis = zolt.SixDOFConstraintSettings.Axis;
+
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const r = &c.r;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .six_dof => {
+                const s = try zolt.SixDOFConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.swing_type = @enumFromInt(@as(u8, @intCast(i[1])));
+                s.position1 = loadR3(r[0..3]);
+                s.axis_x1 = load3(f[0..3]);
+                s.axis_y1 = load3(f[3..6]);
+                s.position2 = loadR3(r[3..6]);
+                s.axis_x2 = load3(f[6..9]);
+                s.axis_y2 = load3(f[9..12]);
+                for (0..Axis.num) |a| {
+                    s.max_friction[a] = f[12 + a];
+                    s.limit_min[a] = f[18 + a];
+                    s.limit_max[a] = f[24 + a];
+                    s.motor_settings[a] = loadMotor(i[5 + a], f[36 + 6 * a ..][0..6]);
+                }
+                for (0..Axis.num_translation) |a|
+                    s.limits_spring_settings[a] = loadSpring(i[2 + a], f[30 + 2 * a ..][0..2]);
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        _ = world;
+        const i = &op.i;
+        const f = &op.f;
+        const six_dof = try castConstraint(zolt.SixDOFConstraint, c, .six_dof);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .six_dof_set_translation_limits => six_dof.setTranslationLimits(load3(f[0..3]), load3(f[3..6])),
+            .six_dof_set_rotation_limits => six_dof.setRotationLimits(load3(f[0..3]), load3(f[3..6])),
+            .six_dof_set_limits_spring_settings => six_dof.setLimitsSpringSettings(@enumFromInt(i[0]), loadSpring(i[1], f[0..2])),
+            .six_dof_set_max_friction => six_dof.setMaxFriction(@enumFromInt(i[0]), f[0]),
+            .six_dof_set_motor_state => six_dof.setMotorState(@enumFromInt(i[0]), @enumFromInt(@as(i32, @bitCast(i[1])))),
+            .six_dof_set_target_velocity_cs => six_dof.setTargetVelocityCS(load3(f[0..3])),
+            .six_dof_set_target_angular_velocity_cs => six_dof.setTargetAngularVelocityCS(load3(f[0..3])),
+            .six_dof_set_target_position_cs => six_dof.setTargetPositionCS(load3(f[0..3])),
+            .six_dof_set_target_orientation_cs => six_dof.setTargetOrientationCS(loadQuat(f[0..4])),
+            .six_dof_set_target_orientation_bs => six_dof.setTargetOrientationBS(loadQuat(f[0..4])),
+            .six_dof_set_motor_settings => six_dof.getMotorSettingsMut(@enumFromInt(i[0])).* = loadMotor(i[1], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .six_dof => &.{
+                .{ .name = "translation_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "translation_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "translation_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "point_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_y_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.swing_limit_z_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "swing_twist_constraint_part.twist_limit_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "motor_translation_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "motor_translation_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "motor_translation_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "motor_rotation_constraint_part[0].total_lambda", .kind = .f32 },
+                .{ .name = "motor_rotation_constraint_part[1].total_lambda", .kind = .f32 },
+                .{ .name = "motor_rotation_constraint_part[2].total_lambda", .kind = .f32 },
+                .{ .name = "motor_state", .kind = .u32, .count = 6 },
+                .{ .name = "target_velocity", .kind = .f32, .count = 3 },
+                .{ .name = "target_angular_velocity", .kind = .f32, .count = 3 },
+                .{ .name = "target_position", .kind = .f32, .count = 3 },
+                .{ .name = "target_orientation", .kind = .f32, .count = 4 },
+            },
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT path: PathConstraint, PathConstraintPathHermite (ConstraintKind path, OpKind 340..359) ----
+const PathSlot = struct {
+    /// SimMakePath: the Hermite path of a description of kind path (one reference owned by the caller)
+    fn makePath(allocator: Allocator, c: *const SimConstraint) !Ref(zolt.PathConstraintPath) {
+        const hermite = try zolt.PathConstraintPathHermite.create(allocator);
+        var path = Ref(zolt.PathConstraintPath).init(hermite.asPath());
+        errdefer path.deinit();
+        hermite.base.setIsLooping(c.i[1] != 0);
+        for (0..c.i[2]) |p| {
+            const pf = c.f[16 + 9 * p ..];
+            try hermite.addPoint(load3(pf[0..3]), load3(pf[3..6]), load3(pf[6..9]));
+        }
+        return path;
+    }
+
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const f = &c.f;
+        var path = try makePath(allocator, c);
+        defer path.deinit();
+        const s = try zolt.PathConstraintSettings.create(allocator);
+        s.path.set(path.get());
+        s.path_position = load3(f[0..3]);
+        s.path_rotation = loadQuat(f[3..7]);
+        s.path_fraction = f[7];
+        s.max_friction_force = f[8];
+        s.position_motor_settings = loadMotor(i[4], f[9..15]);
+        s.rotation_constraint_type = @enumFromInt(@as(i32, @bitCast(i[3])));
+        return .init(s.asSettings());
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        const i = &op.i;
+        const f = &op.f;
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .path_set_path => {
+                var path: Ref(zolt.PathConstraintPath) = if (i[0] != 0) try makePath(world.allocator, &world.desc.constraints[i[1]]) else .empty;
+                defer path.deinit();
+                (try castConstraint(zolt.PathConstraint, c, .path)).setPath(path.get(), f[0]);
+            },
+            .path_set_max_friction_force => (try castConstraint(zolt.PathConstraint, c, .path)).setMaxFrictionForce(f[0]),
+            .path_set_position_motor_state => (try castConstraint(zolt.PathConstraint, c, .path)).setPositionMotorState(@enumFromInt(@as(i32, @bitCast(i[0])))),
+            .path_set_target_velocity => (try castConstraint(zolt.PathConstraint, c, .path)).setTargetVelocity(f[0]),
+            .path_set_target_path_fraction => (try castConstraint(zolt.PathConstraint, c, .path)).setTargetPathFraction(f[0]),
+            .path_set_position_motor_settings => (try castConstraint(zolt.PathConstraint, c, .path)).getPositionMotorSettingsMut().* = loadMotor(i[0], f[0..6]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .path => &.{
+                .{ .name = "position_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "position_limits_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "position_motor_constraint_part.total_lambda", .kind = .f32 },
+                .{ .name = "hinge_constraint_part.total_lambda", .kind = .f32, .count = 2 },
+                .{ .name = "rotation_constraint_part.total_lambda", .kind = .f32, .count = 3 },
+                .{ .name = "max_friction_force", .kind = .f32 },
+                .{ .name = "position_motor_settings.spring_settings.mode", .kind = .u8 },
+                .{ .name = "position_motor_settings (padding of the C++ struct)", .kind = .bytes, .count = 3 },
+                .{ .name = "position_motor_settings.spring_settings.frequency", .kind = .f32 },
+                .{ .name = "position_motor_settings.spring_settings.damping", .kind = .f32 },
+                .{ .name = "position_motor_settings.min_force_limit", .kind = .f32 },
+                .{ .name = "position_motor_settings.max_force_limit", .kind = .f32 },
+                .{ .name = "position_motor_settings.min_torque_limit", .kind = .f32 },
+                .{ .name = "position_motor_settings.max_torque_limit", .kind = .f32 },
+                .{ .name = "position_motor_state", .kind = .u32 },
+                .{ .name = "target_velocity", .kind = .f32 },
+                .{ .name = "target_path_fraction", .kind = .f32 },
+                .{ .name = "path_fraction", .kind = .f32 },
+            },
+            else => null,
+        };
+    }
+};
+
+// ---- SLOT gear_rack_and_pinion: GearConstraint, RackAndPinionConstraint (ConstraintKind gear / rack_and_pinion,
+// OpKind 360..379, `setConstraints` for SimConstraint.constraint1 / constraint2) ----
+const GearRackAndPinionSlot = struct {
+    fn makeSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+        const i = &c.i;
+        const f = &c.f;
+        switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+            .gear => {
+                const s = try zolt.GearConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.hinge_axis1 = load3(f[0..3]);
+                s.hinge_axis2 = load3(f[3..6]);
+                if (i[1] != 0)
+                    s.setRatio(@bitCast(i[2]), @bitCast(i[3]))
+                else
+                    s.ratio = f[6];
+                return .init(s.asSettings());
+            },
+            .rack_and_pinion => {
+                const s = try zolt.RackAndPinionConstraintSettings.create(allocator);
+                s.space = loadSpace(i[0]);
+                s.hinge_axis = load3(f[0..3]);
+                s.slider_axis = load3(f[3..6]);
+                if (i[1] != 0)
+                    s.setRatio(@bitCast(i[2]), f[7], @bitCast(i[3]))
+                else
+                    s.ratio = f[6];
+                return .init(s.asSettings());
+            },
+            else => unreachable,
+        }
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp, c: *TwoBodyConstraint) !void {
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .gear_set_constraints => try setConstraints(world, &(try castConstraint(zolt.GearConstraint, c, .gear)).base, op.i[0], op.i[1]),
+            .rack_and_pinion_set_constraints => try setConstraints(world, &(try castConstraint(zolt.RackAndPinionConstraint, c, .rack_and_pinion)).base, op.i[0], op.i[1]),
+            else => return error.SceneNotSupported,
+        }
+    }
+
+    fn stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+        return switch (sub_type) {
+            .gear => &.{.{ .name = "gear_constraint_part.total_lambda", .kind = .f32 }},
+            .rack_and_pinion => &.{.{ .name = "rack_and_pinion_constraint_part.total_lambda", .kind = .f32 }},
+            else => null,
+        };
+    }
+
+    /// SetConstraints of SimulationReference.cpp: SetConstraints of a Gear / RackAndPinion with two constraint handles
+    /// (`invalid_handle`, or a handle that is not created yet: nullptr)
+    fn setConstraints(world: *ZoltWorld, c: *TwoBodyConstraint, handle1: u32, handle2: u32) !void {
+        const c1: ?*const Constraint = if (world.getConstraint(handle1)) |t| &t.base else null;
+        const c2: ?*const Constraint = if (world.getConstraint(handle2)) |t| &t.base else null;
+        switch (c.base.getSubType()) {
+            .gear => zolt.virtual.downcast(zolt.GearConstraint, c).setConstraints(c1, c2),
+            .rack_and_pinion => zolt.virtual.downcast(zolt.RackAndPinionConstraint, c).setConstraints(c1, c2),
+            else => {
+                std.debug.print("SimulationParity: SetConstraints on a constraint of subtype {t}\n", .{c.base.getSubType()});
+                return error.SceneError;
+            },
+        }
+    }
+};
+
+// ---- end of the slots ----
+
+/// SimMakeConstraintSettings of SimulationReference.cpp: the settings of a description (one reference owned by the
+/// caller), error.SceneNotSupported while the slot of the kind is a stub
+fn makeConstraintSettings(allocator: Allocator, c: *const SimConstraint) !Ref(ConstraintSettings) {
+    var settings = switch (@as(ConstraintKind, @enumFromInt(c.kind))) {
+        .fixed, .point => try FixedPointSlot.makeSettings(allocator, c),
+        .distance, .pulley => try DistancePulleySlot.makeSettings(allocator, c),
+        .hinge => try HingeSlot.makeSettings(allocator, c),
+        .slider => try SliderSlot.makeSettings(allocator, c),
+        .cone, .swing_twist => try ConeSwingTwistSlot.makeSettings(allocator, c),
+        .six_dof => try SixDOFSlot.makeSettings(allocator, c),
+        .path => try PathSlot.makeSettings(allocator, c),
+        .gear, .rack_and_pinion => try GearRackAndPinionSlot.makeSettings(allocator, c),
+    };
+    errdefer settings.deinit();
+
+    // The ConstraintSettings members
+    const s = settings.get().?;
+    s.enabled = c.enabled != 0;
+    s.constraint_priority = c.constraint_priority;
+    s.num_velocity_steps_override = c.num_velocity_steps_override;
+    s.num_position_steps_override = c.num_position_steps_override;
+    s.draw_constraint_size = c.draw_constraint_size;
+    s.user_data = c.user_data;
+    return settings;
+}
+
+/// The SaveState layout of a constraint class after Constraint::SaveState's `enabled` (the slot of the class)
+fn constraintStateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField {
+    return switch (sub_type) {
+        .fixed, .point => FixedPointSlot.stateFields(sub_type),
+        .distance, .pulley => DistancePulleySlot.stateFields(sub_type),
+        .hinge => HingeSlot.stateFields(sub_type),
+        .slider => SliderSlot.stateFields(sub_type),
+        .cone, .swing_twist => ConeSwingTwistSlot.stateFields(sub_type),
+        .six_dof => SixDOFSlot.stateFields(sub_type),
+        .path => PathSlot.stateFields(sub_type),
+        .gear, .rack_and_pinion => GearRackAndPinionSlot.stateFields(sub_type),
+        .vehicle, .user1, .user2, .user3, .user4 => null,
+    };
+}
+
+/// The SaveBinaryState bytes of settings
+fn saveSettingsBytes(allocator: Allocator, settings: *const ConstraintSettings) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+    settings.saveBinaryState(wrapper.streamOut());
+    if (wrapper.isFailed()) return error.OutOfMemory;
+    return out.toOwnedSlice();
+}
+
+/// Before a scene runs: every constraint kind of the scene is ported (a supported Blocker must cover its kinds), and the
+/// settings that the Zolt slot makes from each description have the binary state of the C++ settings (a mismatch is an
+/// error of the slot's makeSettings, not of the library)
+fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    var jolt_bytes: std.ArrayList(u8) = .empty;
+    defer jolt_bytes.deinit(allocator);
+    for (builder.constraints.items, 0..) |*c, index| {
+        const kind: ConstraintKind = @enumFromInt(c.kind);
+        if (!kind.isPorted()) {
+            std.debug.print("SimulationParity: scene {s} creates {t} constraints, whose Zolt class is still a stub, but its blocker .{t} is supported (declare the Blocker of the kind)\n", .{ entry.name, kind, entry.blocked_by });
+            return error.TestUnexpectedResult;
+        }
+        var settings = makeConstraintSettings(allocator, c) catch |err| {
+            if (err == error.SceneNotSupported)
+                std.debug.print("SimulationParity: scene {s}: the {t} class is ported but the slot of its kind in SimulationParity.zig is still a stub\n", .{ entry.name, kind });
+            return err;
+        };
+        defer settings.deinit();
+        const zolt_bytes = try saveSettingsBytes(allocator, settings.get().?);
+        defer allocator.free(zolt_bytes);
+        const size = jolt.jolt_sim_constraint_settings_save(c, jolt_bytes.items.ptr, 0);
+        try jolt_bytes.resize(allocator, size);
+        _ = jolt.jolt_sim_constraint_settings_save(c, jolt_bytes.items.ptr, size);
+        if (!std.mem.eql(u8, zolt_bytes, jolt_bytes.items)) {
+            std.debug.print("SimulationParity: scene {s}, constraint description {d} ({t}): the settings of the Zolt slot differ from SimMakeConstraintSettings (byte {?d} of {d})\n", .{ entry.name, index, kind, std.mem.indexOfDiff(u8, zolt_bytes, jolt_bytes.items), jolt_bytes.items.len });
+            return error.ParityMismatch;
+        }
+    }
+}
+
 fn runEntry(entry: *const SceneEntry) !void {
     if (!entry.blocked_by.isSupported())
         return error.SkipZigTest;
@@ -1377,6 +2799,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     var builder: SceneBuilder = .init(allocator);
     defer builder.deinit();
     try entry.build(&builder);
+    try checkConstraintDescriptions(allocator, entry, &builder);
 
     var stats: [configs.len]RunStats = undefined;
     for (configs, &stats) |config, *s|
@@ -1389,7 +2812,35 @@ fn runEntry(entry: *const SceneEntry) !void {
     // with sweeps, temp allocations and createJob calls failed
     for (stats[1..]) |s|
         try std.testing.expectEqualSlices(u32, &stats[0].records, &s.records);
+
+    // The scene reaches what it is written for (SimScenes.Expect)
+    const expect = entry.expect;
+    const records = &stats[0].records;
+    if (expect.contacts) try expectReached(entry, "contacts", records[@intFromEnum(RecordKind.contact_added)] > 0);
+    if (expect.removed) try expectReached(entry, "removed contacts", records[@intFromEnum(RecordKind.contact_removed)] > 0);
+    if (expect.validated) try expectReached(entry, "OnContactValidate", records[@intFromEnum(RecordKind.contact_validate)] > 0);
+    if (expect.sleeping) try expectReached(entry, "sleeping bodies", stats[0].updates_with_sleeping_bodies > 0);
+    var num_spawned_jobs: u32 = 0;
+    var num_large_island_deactivations: u32 = 0;
+    for (stats) |s| {
+        num_spawned_jobs += s.num_spawned_jobs;
+        num_large_island_deactivations += s.num_large_island_deactivations;
+    }
+    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0);
+    if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
+    if (expect.full_manifolds) {
+        try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
+        try expectReached(entry, "a full manifold array in ProcessBodyPair", stats[0].max_manifolds_per_body_pair >= SimScenes.max_manifolds_per_body_pair);
+    }
+    if (expect.ccd_hits) try expectReached(entry, "CCD hits", stats[0].updates_with_ccd_manifolds > 0);
+    var max_find_ccd_contacts_jobs: u32 = 0;
+    for (stats) |s| max_find_ccd_contacts_jobs = @max(max_find_ccd_contacts_jobs, s.max_find_ccd_contacts_jobs);
+    if (expect.ccd_jobs > 0) try expectReached(entry, "several FindCCDContacts jobs in one update", max_find_ccd_contacts_jobs >= expect.ccd_jobs);
+    if (expect.update_activations > 0) try expectReached(entry, "bodies activated from inside one update", stats[0].max_update_activations >= expect.update_activations);
+    if (expect.active_constraints > 0) try expectReached(entry, "active constraints", stats[0].max_active_constraints >= expect.active_constraints);
+    if (builder.constraints.items.len > 0) try expectReached(entry, "constraints that are solved (every scene with constraints)", stats[0].max_active_constraints > 0);
     for (configs, stats) |config, s| {
+        try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
         if (config.sweeps and entry.sweep_stride != 0) {
             try std.testing.expect(s.num_temp_failures > 0);
@@ -1397,7 +2848,15 @@ fn runEntry(entry: *const SceneEntry) !void {
         }
     }
 
-    try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
+    if (entry.creation_sweep)
+        try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
+}
+
+fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !void {
+    if (!reached) {
+        std.debug.print("SimulationParity: scene {s} does not reach what it is written for: {s}\n", .{ entry.name, what });
+        return error.TestUnexpectedResult;
+    }
 }
 
 /// One test per scene: `SceneTest("name", index)` (a blocked scene is skipped)
@@ -1421,7 +2880,8 @@ test {
 
 // The scenes of the later waves run on the C++ side already, with 0 and 3 worker threads in lockstep: their
 // descriptions build, Jolt is deterministic on them, and they reach what they are written for (contact callbacks,
-// constraints in the state). When a wave lands only the Zolt side is new.
+// active constraints, the expect_body_state / expect_constraint_state checks). When a wave lands only the Zolt side is
+// new. `restore_cross` restores the snapshot of the other world in each world.
 test "SimScenes blocked scenes run on the C++ side" {
     const allocator = std.testing.allocator;
     var a_state: std.ArrayList(u8) = .empty;
@@ -1432,9 +2892,14 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer a_records.deinit(allocator);
     var b_records: std.ArrayList(SimRecord) = .empty;
     defer b_records.deinit(allocator);
+    var snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
+    defer for (&snapshots) |*s| {
+        s[0].deinit(allocator);
+        s[1].deinit(allocator);
+    };
 
     for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by == .none or entry.blocked_by == .release_only) continue;
+        if (entry.blocked_by.isSupported() or entry.blocked_by == .release_only) continue; // Supported (their own tests)
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);
@@ -1447,6 +2912,7 @@ test "SimScenes blocked scenes run on the C++ side" {
         var delta_time = builder.delta_time;
         var collision_steps = builder.collision_steps;
         var records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0);
+        var max_active_constraints: u32 = 0;
         var op_index: usize = 0;
         for (0..builder.num_updates) |update| {
             while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
@@ -1456,15 +2922,27 @@ test "SimScenes blocked scenes run on the C++ side" {
                         delta_time = op.f[0];
                         collision_steps = op.count;
                     },
-                    .snapshot, .restore_cross => return error.SkipZigTest, // Not used by the blocked scenes yet
+                    .snapshot => {
+                        const state = snapshotState(op);
+                        try a.saveState(allocator, state, &snapshots[op.index][0]);
+                        try b.saveState(allocator, state, &snapshots[op.index][1]);
+                    },
+                    .restore_cross => {
+                        try std.testing.expect(a.restoreState(snapshots[op.index][1].items));
+                        try std.testing.expect(b.restoreState(snapshots[op.index][0].items));
+                    },
                     else => |kind| {
                         const result = a.applyOp(op);
                         try std.testing.expectEqual(result, b.applyOp(op));
                         if (kind == .expect_body_state)
                             try std.testing.expectEqual(op.index, result);
+                        if (kind == .expect_constraint_state)
+                            try std.testing.expectEqual(op.i[0], result);
                     },
                 }
             }
+            max_active_constraints = @max(max_active_constraints, a.numActiveConstraints());
+            try std.testing.expectEqual(a.numActiveConstraints(), b.numActiveConstraints());
             try std.testing.expectEqual(a.update(delta_time, collision_steps), b.update(delta_time, collision_steps));
             try a.saveState(allocator, .all, &a_state);
             try b.saveState(allocator, .all, &b_state);
@@ -1479,28 +2957,42 @@ test "SimScenes blocked scenes run on the C++ side" {
             for (a_records.items) |r| records[r.kind] += 1;
         }
 
-        // The state decodes completely
+        // The state decodes completely and stays finite (a scene that blows up is no test: Zolt's asserts would fire on
+        // the NaNs that Jolt's release build ignores)
         var layout: StateLayout = .{ .allocator = allocator, .bytes = a_state.items, .cpp = a };
         defer layout.deinit();
         try layout.decode();
         try std.testing.expect(!layout.truncated and layout.pos == a_state.items.len);
-
-        switch (entry.blocked_by) {
-            .contacts, .ccd_hits => try std.testing.expect(records[@intFromEnum(RecordKind.contact_added)] > 0),
-            .constraints => {
-                var num_constraints: u32 = 0;
-                _ = jolt.jolt_sim_constraint_state_size(a.handle, 0, &num_constraints);
-                try std.testing.expect(num_constraints > 0);
-            },
-            .none, .soft_bodies, .release_only => {},
+        for (layout.fields.items) |*field| {
+            const finite = switch (field.kind) {
+                .f32 => std.math.isFinite(std.mem.bytesToValue(f32, a_state.items[field.offset..][0..4])),
+                .f64 => std.math.isFinite(std.mem.bytesToValue(f64, a_state.items[field.offset..][0..8])),
+                else => true,
+            };
+            if (!finite) {
+                std.debug.print("SimulationParity: scene {s} ends with a value that is not finite in ", .{entry.name});
+                var buffer: [256]u8 = undefined;
+                var w: std.Io.Writer = .fixed(&buffer);
+                try writeField(&w, field);
+                std.debug.print("{s}\n", .{w.buffered()});
+                return error.TestUnexpectedResult;
+            }
         }
+
+        // What the scene is written for
+        if (entry.blocked_by == .contacts or entry.blocked_by == .ccd_hits or entry.expect.contacts)
+            try expectReached(entry, "contacts", records[@intFromEnum(RecordKind.contact_added)] > 0);
+        if (builder.constraints.items.len > 0)
+            try expectReached(entry, "constraints that are solved (every scene with constraints)", max_active_constraints > 0);
+        if (entry.expect.active_constraints > 0)
+            try expectReached(entry, "active constraints", max_active_constraints >= entry.expect.active_constraints);
     }
 }
 
 test "SimScenes struct layout matches SimulationReference.cpp" {
-    var sizes: [12]u32 = undefined;
+    var sizes: [16]u32 = undefined;
     jolt.jolt_sim_struct_sizes(&sizes);
-    const expected = [12]u32{
+    const expected = [16]u32{
         @sizeOf(SimShape),
         @sizeOf(SimCompoundChild),
         @sizeOf(SimBody),
@@ -1513,8 +3005,121 @@ test "SimScenes struct layout matches SimulationReference.cpp" {
         @offsetOf(SimBody, "shape"),
         @offsetOf(SimSceneDesc, "shapes"),
         @offsetOf(SimOp, "r"),
+        @offsetOf(SimOp, "i"),
+        @offsetOf(SimConstraint, "user_data"),
+        @offsetOf(SimConstraint, "r"),
+        @offsetOf(SimConstraint, "f"),
     };
     try std.testing.expectEqualSlices(u32, &expected, &sizes);
+
+    // CSSettings of ConstraintsReference.cpp (test "SimScenes constraint descriptions are ConstraintsParity's")
+    var cs_sizes: [12]u32 = undefined;
+    jolt.jolt_cs_struct_sizes(&cs_sizes);
+    try std.testing.expectEqual(@as(u32, @sizeOf(CSSettings)), cs_sizes[1]);
+    try std.testing.expectEqual(@as(u32, @offsetOf(CSSettings, "user_data")), cs_sizes[5]);
+    try std.testing.expectEqual(@as(u32, @offsetOf(CSSettings, "r")), cs_sizes[6]);
+    try std.testing.expectEqual(@as(u32, @offsetOf(CSSettings, "f")), cs_sizes[7]);
+}
+
+/// A random constraint description of `kind` (valid enum values, any floats; Gear / RackAndPinion with SetRatio when
+/// `use_set_ratio`)
+fn randomConstraintDescription(b: *SceneBuilder, kind: ConstraintKind, use_set_ratio: bool) SimConstraint {
+    var c: SimConstraint = .{ .kind = @intFromEnum(kind), .body1 = b.index(4), .body2 = b.index(4) };
+    c.enabled = b.index(2);
+    c.constraint_priority = b.next();
+    c.num_velocity_steps_override = b.index(256);
+    c.num_position_steps_override = b.index(256);
+    c.draw_constraint_size = b.float(0, 3);
+    c.user_data = @as(u64, b.next()) << 32 | b.next();
+    for (&c.i) |*v| v.* = b.index(2); // Spaces, booleans, spring and motor modes, swing types
+    for (&c.r) |*v| v.* = b.float(-100, 100);
+    for (&c.f) |*v| v.* = b.float(-10, 10);
+    switch (kind) {
+        .slider => {
+            if (c.i[2] != 0) c.i[0] = SimScenes.ConstraintSpace.world_space; // SetSliderAxis asserts world space
+        },
+        .path => {
+            c.i[2] = 1 + b.index(16); // Number of path points
+            c.i[3] = b.index(6); // EPathRotationConstraintType
+        },
+        .gear, .rack_and_pinion => {
+            c.i[1] = @intFromBool(use_set_ratio);
+            c.i[2] = 1 + b.index(50); // Numbers of teeth
+            c.i[3] = 1 + b.index(50);
+            c.f[7] = b.float(0.5, 5); // Rack length
+        },
+        else => {},
+    }
+    return c;
+}
+
+/// The SaveBinaryState bytes of the C++ settings of a description
+fn cppSettingsBytes(allocator: Allocator, c: *const SimConstraint, out: *std.ArrayList(u8)) !void {
+    const size = jolt.jolt_sim_constraint_settings_save(c, out.items.ptr, 0);
+    try out.resize(allocator, size);
+    _ = jolt.jolt_sim_constraint_settings_save(c, out.items.ptr, size);
+}
+
+test "SimScenes constraint descriptions are ConstraintsParity's" {
+    // The C++ settings of SimMakeConstraintSettings (SimulationReference.cpp) and CSMakeSettings (ConstraintsReference.cpp)
+    // of the same random description have the same binary state, so SimConstraint has the layout of the constraint
+    // parity (minus the SetRatio helpers of Gear / RackAndPinion, which CSMakeSettings does not have); for the ported
+    // kinds the settings of the Zolt slot (makeConstraintSettings) have the same bytes too
+    const allocator = std.testing.allocator;
+    var b: SceneBuilder = .init(allocator);
+    defer b.deinit();
+    var sim_bytes: std.ArrayList(u8) = .empty;
+    defer sim_bytes.deinit(allocator);
+    var cs_bytes: std.ArrayList(u8) = .empty;
+    defer cs_bytes.deinit(allocator);
+    var num_zolt: u32 = 0;
+    for (0..200) |iteration| {
+        inline for (@typeInfo(ConstraintKind).@"enum".fields) |field| {
+            const kind: ConstraintKind = @enumFromInt(field.value);
+            const use_set_ratio = (kind == .gear or kind == .rack_and_pinion) and iteration % 2 == 1;
+            const c = randomConstraintDescription(&b, kind, use_set_ratio);
+            try cppSettingsBytes(allocator, &c, &sim_bytes);
+
+            if (!use_set_ratio) {
+                const cs: CSSettings = .{ .kind = kind.subType(), .enabled = c.enabled, .constraint_priority = c.constraint_priority, .num_velocity_steps_override = c.num_velocity_steps_override, .num_position_steps_override = c.num_position_steps_override, .draw_constraint_size = c.draw_constraint_size, .user_data = c.user_data, .i = c.i, .r = c.r, .f = c.f };
+                const size = jolt.jolt_cs_settings_save(&cs, cs_bytes.items.ptr, 0);
+                try cs_bytes.resize(allocator, size);
+                _ = jolt.jolt_cs_settings_save(&cs, cs_bytes.items.ptr, size);
+                try std.testing.expectEqualSlices(u8, cs_bytes.items, sim_bytes.items);
+            }
+
+            if (kind.isPorted()) {
+                var settings = try makeConstraintSettings(allocator, &c);
+                defer settings.deinit();
+                const zolt_bytes = try saveSettingsBytes(allocator, settings.get().?);
+                defer allocator.free(zolt_bytes);
+                try std.testing.expectEqualSlices(u8, sim_bytes.items, zolt_bytes);
+                num_zolt += 1;
+            }
+        }
+    }
+    try std.testing.expect(num_zolt >= 2 * 200); // Fixed and Point at least
+}
+
+test "SimScenes Desc.defaults are the defaults of Jolt's constraint settings" {
+    // The description that the scenes start from (SimScenes.Desc.defaults) gives the settings of Jolt's default
+    // constructors, for every kind
+    const allocator = std.testing.allocator;
+    var desc_bytes: std.ArrayList(u8) = .empty;
+    defer desc_bytes.deinit(allocator);
+    var default_bytes: std.ArrayList(u8) = .empty;
+    defer default_bytes.deinit(allocator);
+    for (std.enums.values(ConstraintKind)) |kind| {
+        const c = SimScenes.Desc.defaults(kind);
+        try cppSettingsBytes(allocator, &c, &desc_bytes);
+        const size = jolt.jolt_sim_default_constraint_settings_save(@intFromEnum(kind), default_bytes.items.ptr, 0);
+        try default_bytes.resize(allocator, size);
+        _ = jolt.jolt_sim_default_constraint_settings_save(@intFromEnum(kind), default_bytes.items.ptr, size);
+        std.testing.expectEqualSlices(u8, default_bytes.items, desc_bytes.items) catch |err| {
+            std.debug.print("SimScenes.Desc.defaults({t}) is not Jolt's default\n", .{kind});
+            return err;
+        };
+    }
 }
 
 test "SimScenes default settings are Jolt's PhysicsSettings" {
@@ -1565,4 +3170,43 @@ test "SimulationParity state decoder" {
     try std.testing.expect(std.mem.indexOf(u8, message, "bodies[1]") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "motion_properties.linear_velocity.y") != null);
     try std.testing.expect(try describeStateDifference(allocator, bytes.items, bytes.items, cw) == null);
+}
+
+test "SimulationParity state decoder: constraints" {
+    // The SaveState of a constraint class is decoded with the fields of its slot (`stateFields`): a byte changed in the
+    // rotation part of a fixed constraint is reported with its name
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    const box = try builder.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const a = try builder.body(.{ .shape = box, .position = .{ 0, 2, 0 } }, .activate);
+    const b = try builder.body(.{ .shape = box, .position = .{ 0.5, 2, 0 }, .angular_velocity = .{ 0, 1, 0 } }, .activate);
+    _ = try builder.constraint(SimScenes.Desc.pointWorld(SimScenes.invalid_handle, a, .{ 0, 2.3, 0 }));
+    _ = try builder.constraint(SimScenes.Desc.fixedAuto(a, b));
+    const desc = builder.desc();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    for (builder.ops.items) |*op| _ = cw.applyOp(op);
+    _ = cw.update(1.0 / 60.0, 1);
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try cw.saveState(allocator, .all, &bytes);
+    var layout: StateLayout = .{ .allocator = allocator, .bytes = bytes.items, .cpp = cw };
+    defer layout.deinit();
+    try layout.decode();
+    try std.testing.expect(!layout.truncated);
+    try std.testing.expectEqual(bytes.items.len, layout.pos);
+
+    const copy = try allocator.dupe(u8, bytes.items);
+    defer allocator.free(copy);
+    var target: ?*const Field = null;
+    for (layout.fields.items) |*field| {
+        if (field.item == 1 and std.mem.eql(u8, field.name, "rotation_constraint_part.total_lambda") and field.component == 2)
+            target = field;
+    }
+    copy[target.?.offset] ^= 1;
+    const message = (try describeStateDifference(allocator, copy, bytes.items, cw)).?;
+    defer allocator.free(message);
+    try std.testing.expect(std.mem.indexOf(u8, message, "constraints[1] (id 0x00000001) rotation_constraint_part.total_lambda.z") != null);
 }

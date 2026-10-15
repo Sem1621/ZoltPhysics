@@ -7,6 +7,9 @@ on:
       - 'Zolt/**'
       - 'ZoltTests/**'
       - 'ZoltParity/**'
+      - 'ZoltPerformanceTest/**'
+      - 'ZoltHelloWorld/**'
+      - 'HelloWorld/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -17,6 +20,9 @@ on:
       - 'Zolt/**'
       - 'ZoltTests/**'
       - 'ZoltParity/**'
+      - 'ZoltPerformanceTest/**'
+      - 'ZoltHelloWorld/**'
+      - 'HelloWorld/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -39,7 +45,7 @@ jobs:
       with:
         version: ${{ env.ZIG_VERSION }}
     - name: Check formatting
-      run: zig fmt --check Zolt ZoltTests ZoltParity build.zig build.zig.zon
+      run: zig fmt --check Zolt ZoltTests ZoltParity ZoltPerformanceTest ZoltHelloWorld build.zig build.zig.zon
     - name: Check that Docs/Zolt/Progress.md is up to date and the port headers are valid
       run: python3 tools/port_status.py --check
 
@@ -90,5 +96,42 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ env.ZIG_VERSION }}
-    - name: Compare with the C++ library
+    - name: Compare with the C++ library (includes hello-world-check, milestone M5)
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}
+
+  determinism:
+    # Milestone M6: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
+    # arguments), and the hash does not depend on the thread count
+    runs-on: ubuntu-latest
+    name: Determinism check double_precision=${{ matrix.double_precision }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - double_precision: false
+            pyramid_hash: '0x74d0118836ac0892'
+            convex_vs_mesh_hash: '0x918f27cacae9752b'
+            high_speed_hash: '0x58d8d892536f4021'
+          - double_precision: true
+            pyramid_hash: '0xf07f04597a102a82'
+            convex_vs_mesh_hash: '0x3729e7890b93a289'
+            high_speed_hash: '0x183f48cb94739ce'
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Build
+      run: zig build -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }}
+    - name: Test ConvexVsMesh
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=max -s=ConvexVsMesh -validate_hash=${{ matrix.convex_vs_mesh_hash }}
+    - name: Test HighSpeed
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=max -s=HighSpeed -validate_hash=${{ matrix.high_speed_hash }}
+    - name: Test Pyramid
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=max -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
+    - name: Test Pyramid with 1 thread
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=1 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
+    - name: Test Pyramid with 2 threads
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=2 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}

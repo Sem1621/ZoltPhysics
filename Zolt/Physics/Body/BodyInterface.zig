@@ -21,6 +21,8 @@
 //!   the result is the same), so a failed call changed nothing and can be repeated. `activateBodiesInAABox` collects
 //!   the bodies in an AllHitCollisionCollector (Allocator.Error, nothing was activated). `createConstraint` allocates
 //!   the constraint with the body manager's allocator (Jolt: `new`), its reference count is 0 like Jolt's.
+//!   `setObjectLayer` returns the `Allocator.Error` of BroadPhase.notifyBodiesLayerChanged (the QuadTree adds the body
+//!   to the tree of its new layer); it restores the layer of the body then, so a failed call changed nothing.
 //! - `getShape` and `getTransformedShape` return values that hold a shape reference: the caller `deinit`s them.
 
 const std = @import("std");
@@ -427,7 +429,8 @@ pub const BodyInterface = struct {
 
     ///@name Object layer of a body
     /// The collision layer this body belongs to (determines if two objects can collide)
-    pub fn setObjectLayer(self: *BodyInterface, body_id: BodyID, layer: ObjectLayer) void {
+    /// (Zolt: Allocator.Error from the broad phase, which moves the body to the tree of its new layer; nothing changed then)
+    pub fn setObjectLayer(self: *BodyInterface, body_id: BodyID, layer: ObjectLayer) Allocator.Error!void {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
         defer lock.deinit();
         if (lock.succeeded()) {
@@ -436,12 +439,17 @@ pub const BodyInterface = struct {
             // Check if layer actually changed, updating the broadphase is rather expensive
             if (body.getObjectLayer() != layer) {
                 // Update the layer on the body
+                const old_layer = body.getObjectLayer();
                 body.setObjectLayerInternal(layer, self.body_manager.getBroadPhaseLayerInterface());
 
                 // Notify broadphase of change
                 if (body.isInBroadPhase()) {
                     var id = body.getID();
-                    self.broad_phase.notifyBodiesLayerChanged((&id)[0..1]);
+                    self.broad_phase.notifyBodiesLayerChanged((&id)[0..1]) catch |err| {
+                        // Zolt: the broad phase is unchanged, restore the layer of the body
+                        body.setObjectLayerInternal(old_layer, self.body_manager.getBroadPhaseLayerInterface());
+                        return err;
+                    };
                 }
             }
         }

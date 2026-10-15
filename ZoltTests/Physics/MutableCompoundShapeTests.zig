@@ -1,14 +1,21 @@
 //! Port of: UnitTests/Physics/MutableCompoundShapeTests.cpp
-//! Status: partial
-//! Missing: TestEmptyMutableCompoundShape (needs PhysicsTestContext, Phase 5)
+//! Status: complete
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
+const Layers = @import("../Layers.zig").Layers;
+const PhysicsTestContext = @import("../PhysicsTestContext.zig").PhysicsTestContext;
 
 const AABox = zolt.AABox;
 const AllHitCollisionCollector = zolt.AllHitCollisionCollector;
+const BodyCreationSettings = zolt.BodyCreationSettings;
 const BoxShape = zolt.BoxShape;
+const CollideShapeCollector = zolt.CollideShapeCollector;
+const CollideShapeSettings = zolt.CollideShapeSettings;
+const Mat44 = zolt.Mat44;
+const RMat44 = zolt.RMat44;
+const RVec3 = zolt.RVec3;
 const CollidePointCollector = zolt.CollidePointCollector;
 const MutableCompoundShape = zolt.MutableCompoundShape;
 const MutableCompoundShapeSettings = zolt.MutableCompoundShapeSettings;
@@ -205,4 +212,49 @@ test "TestMutableCompoundShapeAdjustCenterOfMass" {
     collector.base.reset();
 }
 
-// TestEmptyMutableCompoundShape: not ported yet, needs PhysicsTestContext (Phase 5)
+test "TestEmptyMutableCompoundShape" {
+    // Create an empty compound shape
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    var settings = MutableCompoundShapeSettings.init(allocator);
+    defer settings.deinit();
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?.castMut(MutableCompoundShape);
+    var bcs = BodyCreationSettings.initWithShape(shape.asShape(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+    defer bcs.deinit();
+    bcs.linear_damping = 0.0;
+    bcs.override_mass_properties = .mass_and_inertia_provided;
+    bcs.mass_properties_override.mass = 1.0;
+    bcs.mass_properties_override.inertia = Mat44.identity();
+    const body_id = try c.getBodyInterface().createAndAddBody(&bcs, .activate);
+
+    // Simulate with empty shape
+    _ = try c.simulate(1.0, {});
+    const expected_pos = c.predictPosition(RVec3.zero(), Vec3.zero(), c.getSystem().getGravity(), 1.0);
+    try fw.checkApproxEqual(c.getBodyInterface().getPosition(body_id), expected_pos, .{});
+
+    // Check that we can't hit the shape
+    var box_shape = RefConst(Shape).init((try BoxShape.create(allocator, Vec3.replicate(10000), .{})).asShape());
+    defer box_shape.deinit();
+    var collector = AllHitCollisionCollector(CollideShapeCollector).init(allocator);
+    defer collector.deinit();
+    const collide_settings: CollideShapeSettings = .{};
+    c.getSystem().getNarrowPhaseQuery().collideShape(box_shape.get().?, Vec3.one(), RMat44.identity(), &collide_settings, RVec3.zero(), &collector.base, .{});
+    try collector.checkError();
+    try fw.expect(collector.hits.items.len == 0);
+
+    // Add a box to the compound shape
+    const com = shape.asShape().getCenterOfMass();
+    var box = RefConst(Shape).init((try BoxShape.create(allocator, Vec3.one(), .{})).asShape());
+    defer box.deinit();
+    _ = try shape.addShape(Vec3.zero(), Quat.identity(), box.get().?, .{});
+    try c.getBodyInterface().notifyShapeChanged(body_id, com, false, .dont_activate);
+
+    // Check that we can now hit the shape
+    c.getSystem().getNarrowPhaseQuery().collideShape(box_shape.get().?, Vec3.one(), RMat44.identity(), &collide_settings, RVec3.zero(), &collector.base, .{});
+    try collector.checkError();
+    try fw.expect(collector.hits.items.len == 1);
+    try fw.expect(collector.hits.items[0].body_id2.eql(body_id));
+}

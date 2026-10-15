@@ -72,12 +72,16 @@ pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
 pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
 pub const StridedPtrConst = @import("Core/StridedPtr.zig").StridedPtrConst;
 pub const convertToString = @import("Core/StringTools.zig").convertToString;
+pub const CppFloat = @import("Core/StringTools.zig").CppFloat;
+pub const cppFloat = @import("Core/StringTools.zig").cppFloat;
 pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
 pub const stringFormat = @import("Core/StringTools.zig").stringFormat;
 pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
 pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
 pub const toLower = @import("Core/StringTools.zig").toLower;
 pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
+pub const writeFloatGeneral = @import("Core/StringTools.zig").writeFloatGeneral;
+pub const writeFloatPrecision = @import("Core/StringTools.zig").writeFloatPrecision;
 pub const FailingTempAllocator = @import("Core/TempAllocator.zig").FailingTempAllocator;
 pub const TempAllocator = @import("Core/TempAllocator.zig").TempAllocator;
 pub const TempAllocatorImpl = @import("Core/TempAllocator.zig").TempAllocatorImpl;
@@ -235,6 +239,7 @@ pub const ObjectVsBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/
 pub const SpecifiedBroadPhaseLayerFilter = @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig").SpecifiedBroadPhaseLayerFilter;
 pub const BroadPhaseLayerInterfaceMask = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig").BroadPhaseLayerInterfaceMask;
 pub const BroadPhaseLayerInterfaceTable = @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+pub const BroadPhaseQuadTree = @import("Physics/Collision/BroadPhase/BroadPhaseQuadTree.zig").BroadPhaseQuadTree;
 pub const BroadPhaseQuery = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").BroadPhaseQuery;
 pub const BroadPhaseQueryFilters = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").QueryFilters;
 pub const CastShapeBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").CastShapeBodyCollector;
@@ -242,6 +247,7 @@ pub const CollideShapeBodyCollector = @import("Physics/Collision/BroadPhase/Broa
 pub const RayCastBodyCollector = @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig").RayCastBodyCollector;
 pub const ObjectVsBroadPhaseLayerFilterMask = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig").ObjectVsBroadPhaseLayerFilterMask;
 pub const ObjectVsBroadPhaseLayerFilterTable = @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
+pub const QuadTree = @import("Physics/Collision/BroadPhase/QuadTree.zig").QuadTree;
 pub const CastConvexVsTriangles = @import("Physics/Collision/CastConvexVsTriangles.zig").CastConvexVsTriangles;
 pub const BroadPhaseCastResult = @import("Physics/Collision/CastResult.zig").BroadPhaseCastResult;
 pub const RayCastResult = @import("Physics/Collision/CastResult.zig").RayCastResult;
@@ -273,6 +279,8 @@ pub const ContactManifold = @import("Physics/Collision/ContactListener.zig").Con
 pub const ContactPoints = @import("Physics/Collision/ContactListener.zig").ContactPoints;
 pub const ContactSettings = @import("Physics/Collision/ContactListener.zig").ContactSettings;
 pub const ValidateResult = @import("Physics/Collision/ContactListener.zig").ValidateResult;
+pub const CollisionEstimationResult = @import("Physics/Collision/EstimateCollisionResponse.zig").CollisionEstimationResult;
+pub const estimateCollisionResponse = @import("Physics/Collision/EstimateCollisionResponse.zig").estimateCollisionResponse;
 pub const GroupFilter = @import("Physics/Collision/GroupFilter.zig").GroupFilter;
 pub const GroupFilterResult = @import("Physics/Collision/GroupFilter.zig").GroupFilter.GroupFilterResult;
 pub const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").GroupFilterTable;
@@ -377,11 +385,14 @@ pub const ShapeCastT = @import("Physics/Collision/ShapeCast.zig").ShapeCastT;
 pub const ReversedShapeFilter = @import("Physics/Collision/ShapeFilter.zig").ReversedShapeFilter;
 pub const ShapeFilter = @import("Physics/Collision/ShapeFilter.zig").ShapeFilter;
 pub const SimShapeFilter = @import("Physics/Collision/SimShapeFilter.zig").SimShapeFilter;
+pub const SimShapeFilterWrapper = @import("Physics/Collision/SimShapeFilterWrapper.zig").SimShapeFilterWrapper;
 pub const countAndSortTrues = @import("Physics/Collision/SortReverseAndStore.zig").countAndSortTrues;
 pub const sortReverseAndStore = @import("Physics/Collision/SortReverseAndStore.zig").sortReverseAndStore;
 pub const TransformedShape = @import("Physics/Collision/TransformedShape.zig").TransformedShape;
 pub const CalculateSolverSteps = @import("Physics/Constraints/CalculateSolverSteps.zig").CalculateSolverSteps;
 pub const DummyCalculateSolverSteps = @import("Physics/Constraints/CalculateSolverSteps.zig").DummyCalculateSolverSteps;
+pub const ConeConstraint = @import("Physics/Constraints/ConeConstraint.zig").ConeConstraint;
+pub const ConeConstraintSettings = @import("Physics/Constraints/ConeConstraint.zig").ConeConstraintSettings;
 pub const Constraint = @import("Physics/Constraints/Constraint.zig").Constraint;
 pub const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
 pub const ConstraintSpace = @import("Physics/Constraints/Constraint.zig").ConstraintSpace;
@@ -409,14 +420,40 @@ pub const SpringPart = @import("Physics/Constraints/ConstraintPart/SpringPart.zi
 pub const SwingTwistConstraintPart = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingTwistConstraintPart;
 pub const SwingType = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingType;
 pub const ContactConstraintManager = @import("Physics/Constraints/ContactConstraintManager.zig").ContactConstraintManager;
+pub const DistanceConstraint = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraint;
+pub const DistanceConstraintSettings = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraintSettings;
+pub const FixedConstraint = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraint;
+pub const FixedConstraintSettings = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraintSettings;
+pub const GearConstraint = @import("Physics/Constraints/GearConstraint.zig").GearConstraint;
+pub const GearConstraintSettings = @import("Physics/Constraints/GearConstraint.zig").GearConstraintSettings;
+pub const HingeConstraint = @import("Physics/Constraints/HingeConstraint.zig").HingeConstraint;
+pub const HingeConstraintSettings = @import("Physics/Constraints/HingeConstraint.zig").HingeConstraintSettings;
 pub const isPositionMotor = @import("Physics/Constraints/MotorSettings.zig").isPositionMotor;
 pub const isVelocityMotor = @import("Physics/Constraints/MotorSettings.zig").isVelocityMotor;
 pub const MotorSettings = @import("Physics/Constraints/MotorSettings.zig").MotorSettings;
 pub const MotorState = @import("Physics/Constraints/MotorSettings.zig").MotorState;
+pub const PathConstraint = @import("Physics/Constraints/PathConstraint.zig").PathConstraint;
+pub const PathConstraintSettings = @import("Physics/Constraints/PathConstraint.zig").PathConstraintSettings;
+pub const PathRotationConstraintType = @import("Physics/Constraints/PathConstraint.zig").PathRotationConstraintType;
+pub const PathConstraintPath = @import("Physics/Constraints/PathConstraintPath.zig").PathConstraintPath;
+pub const PathConstraintPathHermite = @import("Physics/Constraints/PathConstraintPathHermite.zig").PathConstraintPathHermite;
+pub const PointConstraint = @import("Physics/Constraints/PointConstraint.zig").PointConstraint;
+pub const PointConstraintSettings = @import("Physics/Constraints/PointConstraint.zig").PointConstraintSettings;
+pub const PulleyConstraint = @import("Physics/Constraints/PulleyConstraint.zig").PulleyConstraint;
+pub const PulleyConstraintSettings = @import("Physics/Constraints/PulleyConstraint.zig").PulleyConstraintSettings;
+pub const RackAndPinionConstraint = @import("Physics/Constraints/RackAndPinionConstraint.zig").RackAndPinionConstraint;
+pub const RackAndPinionConstraintSettings = @import("Physics/Constraints/RackAndPinionConstraint.zig").RackAndPinionConstraintSettings;
+pub const SixDOFConstraint = @import("Physics/Constraints/SixDOFConstraint.zig").SixDOFConstraint;
+pub const SixDOFConstraintSettings = @import("Physics/Constraints/SixDOFConstraint.zig").SixDOFConstraintSettings;
+pub const SliderConstraint = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraint;
+pub const SliderConstraintSettings = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraintSettings;
 pub const SpringMode = @import("Physics/Constraints/SpringSettings.zig").SpringMode;
 pub const SpringSettings = @import("Physics/Constraints/SpringSettings.zig").SpringSettings;
+pub const SwingTwistConstraint = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraint;
+pub const SwingTwistConstraintSettings = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraintSettings;
 pub const TwoBodyConstraint = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraint;
 pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstraint.zig").TwoBodyConstraintSettings;
+pub const DeterminismLog = @import("Physics/DeterminismLog.zig");
 pub const Activation = @import("Physics/EActivation.zig").Activation;
 pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
 pub const IslandBuilder = @import("Physics/IslandBuilder.zig").IslandBuilder;
@@ -426,6 +463,7 @@ pub const PhysicsLockContext = @import("Physics/PhysicsLock.zig").PhysicsLockCon
 pub const PhysicsLockTypes = @import("Physics/PhysicsLock.zig").PhysicsLockTypes;
 pub const SharedLock = @import("Physics/PhysicsLock.zig").SharedLock;
 pub const UniqueLock = @import("Physics/PhysicsLock.zig").UniqueLock;
+pub const PhysicsScene = @import("Physics/PhysicsScene.zig").PhysicsScene;
 pub const physics_settings = @import("Physics/PhysicsSettings.zig");
 pub const PhysicsSettings = @import("Physics/PhysicsSettings.zig").PhysicsSettings;
 pub const PhysicsStepListener = @import("Physics/PhysicsStepListener.zig").PhysicsStepListener;
@@ -584,9 +622,11 @@ const source_files = .{
     @import("Physics/Collision/BroadPhase/BroadPhaseLayer.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceMask.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig"),
+    @import("Physics/Collision/BroadPhase/BroadPhaseQuadTree.zig"),
     @import("Physics/Collision/BroadPhase/BroadPhaseQuery.zig"),
     @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterMask.zig"),
     @import("Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig"),
+    @import("Physics/Collision/BroadPhase/QuadTree.zig"),
     @import("Physics/Collision/CastConvexVsTriangles.zig"),
     @import("Physics/Collision/CastResult.zig"),
     @import("Physics/Collision/CastSphereVsTriangles.zig"),
@@ -603,6 +643,7 @@ const source_files = .{
     @import("Physics/Collision/CollisionDispatch.zig"),
     @import("Physics/Collision/CollisionGroup.zig"),
     @import("Physics/Collision/ContactListener.zig"),
+    @import("Physics/Collision/EstimateCollisionResponse.zig"),
     @import("Physics/Collision/GroupFilter.zig"),
     @import("Physics/Collision/GroupFilterTable.zig"),
     @import("Physics/Collision/InternalEdgeRemovingCollector.zig"),
@@ -646,9 +687,11 @@ const source_files = .{
     @import("Physics/Collision/ShapeCast.zig"),
     @import("Physics/Collision/ShapeFilter.zig"),
     @import("Physics/Collision/SimShapeFilter.zig"),
+    @import("Physics/Collision/SimShapeFilterWrapper.zig"),
     @import("Physics/Collision/SortReverseAndStore.zig"),
     @import("Physics/Collision/TransformedShape.zig"),
     @import("Physics/Constraints/CalculateSolverSteps.zig"),
+    @import("Physics/Constraints/ConeConstraint.zig"),
     @import("Physics/Constraints/Constraint.zig"),
     @import("Physics/Constraints/ConstraintManager.zig"),
     @import("Physics/Constraints/ConstraintPart/AngleConstraintPart.zig"),
@@ -667,15 +710,30 @@ const source_files = .{
     @import("Physics/Constraints/ConstraintPart/SpringPart.zig"),
     @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig"),
     @import("Physics/Constraints/ContactConstraintManager.zig"),
+    @import("Physics/Constraints/DistanceConstraint.zig"),
+    @import("Physics/Constraints/FixedConstraint.zig"),
+    @import("Physics/Constraints/GearConstraint.zig"),
+    @import("Physics/Constraints/HingeConstraint.zig"),
     @import("Physics/Constraints/MotorSettings.zig"),
+    @import("Physics/Constraints/PathConstraint.zig"),
+    @import("Physics/Constraints/PathConstraintPath.zig"),
+    @import("Physics/Constraints/PathConstraintPathHermite.zig"),
+    @import("Physics/Constraints/PointConstraint.zig"),
+    @import("Physics/Constraints/PulleyConstraint.zig"),
+    @import("Physics/Constraints/RackAndPinionConstraint.zig"),
+    @import("Physics/Constraints/SixDOFConstraint.zig"),
+    @import("Physics/Constraints/SliderConstraint.zig"),
     @import("Physics/Constraints/SpringSettings.zig"),
+    @import("Physics/Constraints/SwingTwistConstraint.zig"),
     @import("Physics/Constraints/TestConstraints.zig"),
     @import("Physics/Constraints/TwoBodyConstraint.zig"),
+    @import("Physics/DeterminismLog.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
     @import("Physics/IslandBuilder.zig"),
     @import("Physics/LargeIslandSplitter.zig"),
     @import("Physics/PhysicsLock.zig"),
+    @import("Physics/PhysicsScene.zig"),
     @import("Physics/PhysicsSettings.zig"),
     @import("Physics/PhysicsStepListener.zig"),
     @import("Physics/PhysicsSystem.zig"),

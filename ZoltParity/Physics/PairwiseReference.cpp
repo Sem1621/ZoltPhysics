@@ -653,6 +653,12 @@ void pw_catalogue_destroy(void *inCatalogue)
 	delete static_cast<Catalogue *>(inCatalogue);
 }
 
+// The shape of a catalogue node (used by NarrowPhaseQueryReference.cpp, which puts the catalogue shapes in bodies)
+const Shape *pw_catalogue_shape(void *inCatalogue, uint32 inIndex)
+{
+	return static_cast<Catalogue *>(inCatalogue)->mShapes[inIndex];
+}
+
 // The dispatch table entries of a pair of sub types: -1 unsupported (the function sInit installs, the entry of the User8
 // pair that nothing registers), -2 the reversed function, 1 another function
 void pw_dispatch(uint32 inType1, uint32 inType2, int *outCollide, int *outCast)

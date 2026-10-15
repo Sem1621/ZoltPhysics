@@ -19,6 +19,8 @@
 //! - Zolt addition (no C++ counterpart): `reserveAllPages()` allocates every page up front. Afterwards
 //!   `constructObject` never allocates and never returns `error.OutOfMemory`, which the QuadTree needs so that
 //!   `AddBodiesFinalize` cannot fail on memory (Docs/Zolt/SimulationArchitecture.md D9).
+//! - Zolt addition (no C++ counterpart): `cancelBatch(batch)` undoes `addObjectToBatch` (the objects stay in use), so
+//!   that QuadTree.updatePrepare can leave the tree unchanged when an allocation fails after it batched nodes (D9).
 //!
 //! The page layout, the object index encoding (page = index >> page_shift, slot = index & object_mask), the free list
 //! (LIFO, batches are pushed as a whole) and the order in which never used objects are handed out are identical to
@@ -387,6 +389,21 @@ pub fn FixedSizeFreeList(comptime Object: type) type {
             }
         }
 
+        /// Zolt addition (no C++ counterpart): undo `addObjectToBatch` for every object of a batch that was not
+        /// destructed. The objects stay in use (their bookkeeping is restored, nothing is destructed) and the batch is
+        /// empty afterwards. QuadTree.updatePrepare uses it to leave the tree unchanged when an allocation fails
+        /// (Docs/Zolt/SimulationArchitecture.md D9).
+        pub fn cancelBatch(self: *Self, batch: *Batch) void {
+            var object_idx = batch.first_object_index;
+            while (object_idx != invalid_object_index) {
+                const next_free_object = &self.getStorage(object_idx).next_free_object;
+                const next = next_free_object.load(.monotonic);
+                next_free_object.store(object_idx, .release); // In use again: the object's own index
+                object_idx = next;
+            }
+            batch.* = .{};
+        }
+
         /// Access an object by index (both the const and the non const Get of the C++ version).
         pub fn get(self: *const Self, object_index: u32) *Object {
             return &self.getStorage(object_index).object;
@@ -456,6 +473,35 @@ test "FixedSizeFreeList single threaded" {
     for (0..12) |i| list.addObjectToBatch(&all, @intCast(i));
     list.destructObjectBatch(&all);
     if (Core.enable_asserts) try std.testing.expectEqual(@as(u32, 12), list.free_list.num_free_objects.load(.monotonic));
+}
+
+test "FixedSizeFreeList cancelBatch" {
+    const io = std.testing.io;
+    const List = FixedSizeFreeList(u32);
+    var list: List = try .init(std.testing.allocator, io, 8, 4);
+    defer list.deinit();
+    for (0..8) |i| _ = try list.constructObject(@intCast(i));
+
+    // A cancelled batch leaves its objects in use: they can be batched and destructed again later
+    var batch: List.Batch = .{};
+    list.addObjectToBatch(&batch, 6);
+    list.addObjectToBatch(&batch, 2);
+    list.addObjectToBatch(&batch, 4);
+    list.cancelBatch(&batch);
+    try std.testing.expectEqual(List.Batch{}, batch);
+    try std.testing.expectEqual(List.invalid_object_index, try list.constructObject(0)); // Still all in use
+    for ([_]u32{ 6, 2, 4 }) |i| try std.testing.expectEqual(i, list.get(i).*);
+    list.destructObjectPtr(list.get(4)); // The object knows its index again
+    try std.testing.expectEqual(@as(u32, 4), try list.constructObject(0));
+
+    // An empty batch
+    var empty: List.Batch = .{};
+    list.cancelBatch(&empty);
+
+    // Free everything
+    var all: List.Batch = .{};
+    for (0..8) |i| list.addObjectToBatch(&all, @intCast(i));
+    list.destructObjectBatch(&all);
 }
 
 test "FixedSizeFreeList calls deinit as destructor" {
