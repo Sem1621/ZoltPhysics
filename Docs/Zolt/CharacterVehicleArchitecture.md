@@ -191,6 +191,21 @@ class fills.
 - **Documentation.** The foundation writes a "Recipe for a Phase 7 worker" in the SimScenes header, the counterpart of
   the Phase 6 recipe.
 
+### Settled in the foundation review
+
+The foundation found these Jolt behaviors, and the review confirmed every one against the Jolt source. Porters
+follow the decision column.
+
+| Jolt behavior | Decision |
+|---|---|
+| `Wheel` leaves `mContactPosition`, `mContactNormal`, `mContactLateral` (and the neighbouring contact members) uninitialized until the first contact; `VehicleConstraint::SaveState` writes them | Keep the byte layout and zero-initialize these members in Zolt (documented deviation). The reference library zero-fills its allocations, so a vehicle that starts in the air compares too |
+| `MotorcycleController::SaveState` omits `mLeanSpringIntegratedDeltaAngle` | Reproduce exactly: the state bytes are Jolt's |
+| `VehicleTrackSettings::mDrivenWheel` is uninitialized | Default it to 0 (undefined in Jolt, nothing to reproduce) and document it |
+| `VehicleEngineSettings` Save/RestoreBinaryState omit `mInertia` and `mAngularDamping` | Reproduce exactly |
+| `VehicleConstraintSettings::RestoreBinaryState` dereferences null wheel settings (E6) and a null RTTI for an unknown controller hash | Panic with a message in both cases |
+| `CharacterVirtualSettings`' default initializer and `CharacterVirtual::GetCharacterVirtualSettings` each consume a CharacterID; the copy constructor does not | Reproduce exactly (`init` / `create` and `getCharacterVirtualSettings` consume one, a copy does not). M8 depends on it; the parity has a counter test |
+| `WheeledVehicleController::GetWheelSpeedAtClutch` computes 0/0 without driven wheels | Reproduce: no guard |
+
 ## 4. Groups and order
 
 1. **Foundation:** CharacterID and CharacterBase (complete), stub files for Character, CharacterVirtual, Ragdoll and
@@ -200,13 +215,12 @@ class fills.
 2. After the foundation merge, at most two groups at a time (the machine has 4 cores; a parity run takes 20 to 40
    minutes):
    - **CharacterVirtual group:** CharacterVirtual, CharacterVsCharacterCollisionSimple, the port of
-     LoggingCharacterContactListener, CharacterVirtualTests and scenes.
+     LoggingCharacterContactListener, CharacterVirtualTests and scenes. It also does M8: ZoltPerformanceTest's
+     CharacterVirtual scene, a `perf_character_virtual` simulation scene, and the CI steps.
    - **Vehicle core group:** the ten core files, WheeledVehicleTests, the vehicle registry and scenes.
    - **Ragdoll group:** Ragdoll and scenes; needs the Skeleton group.
    - **Character group:** Character and scenes.
    - **Vehicle variants group:** TrackedVehicleController, MotorcycleController and scenes; needs Vehicle core.
-   - **M8:** ZoltPerformanceTest's CharacterVirtual scene, a `perf_character_virtual` simulation scene, and the CI
-     steps; needs CharacterVirtual.
 3. **Workflow per group:** port, then review, then fix, then merge and run the full verification:
    - tests in 4 configs;
    - parity in Debug, double precision and ReleaseFast;
