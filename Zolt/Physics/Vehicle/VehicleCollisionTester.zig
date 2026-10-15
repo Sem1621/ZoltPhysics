@@ -631,3 +631,40 @@ pub const VehicleCollisionTesterCastCylinder = struct {
         }
     }
 };
+
+test "VehicleCollisionTester constructors, object layer, filters and reference count" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // The ray tester stores the cosine of the max slope angle
+    const ray = try VehicleCollisionTesterRay.create(allocator, 3, .{ .up = Vec3.axisZ(), .max_slope_angle = 0.5 });
+    const tester = ray.asTester();
+    tester.addRef();
+    defer tester.release(); // Destroys the tester through the vtable (leak checked)
+    try testing.expectEqual(@as(ObjectLayer, 3), tester.getObjectLayer());
+    try testing.expect(ray.up.eql(Vec3.axisZ()));
+    try testing.expectEqual(Trigonometry.cos(@as(f32, 0.5)), ray.cos_max_slope_angle);
+    tester.setObjectLayer(5);
+    try testing.expectEqual(@as(ObjectLayer, 5), tester.getObjectLayer());
+
+    // No filters by default (the queries use the defaults for the object layer and the vehicle body)
+    try testing.expect(tester.getBroadPhaseLayerFilter() == null);
+    try testing.expect(tester.getObjectLayerFilter() == null);
+    try testing.expect(tester.getBodyFilter() == null);
+    const body_filter: IgnoreSingleBodyFilter = .init(BodyID.init(7));
+    tester.setBodyFilter(&body_filter.base);
+    try testing.expect(tester.getBodyFilter() == &body_filter.base);
+    tester.setBodyFilter(null);
+
+    // The sphere and cylinder testers, embedded
+    var sphere: VehicleCollisionTesterCastSphere = .init(allocator, 1, 0.5, .{});
+    sphere.base.setEmbedded();
+    defer sphere.base.deinit();
+    try testing.expectEqual(@as(f32, 0.5), sphere.radius);
+    try testing.expectEqual(Trigonometry.cos(math.degreesToRadians(80.0)), sphere.cos_max_slope_angle);
+    var cylinder: VehicleCollisionTesterCastCylinder = .init(allocator, 2, .{});
+    cylinder.base.setEmbedded();
+    defer cylinder.base.deinit();
+    try testing.expectEqual(@as(f32, 0.1), cylinder.convex_radius_fraction);
+    try testing.expectEqual(@as(ObjectLayer, 2), cylinder.base.getObjectLayer());
+}

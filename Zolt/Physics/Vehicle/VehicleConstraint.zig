@@ -1259,3 +1259,90 @@ pub const VehicleConstraint = struct {
 fn mulRMat44Mat44(a: RMat44, b: Mat44) RMat44 {
     return if (Core.double_precision) a.mulMat44(b) else a.mul(b);
 }
+
+const testing = std.testing;
+
+test "VehicleConstraintSettings defaults, copies and binary state without wheels" {
+    const allocator = testing.allocator;
+    const StreamWrapper = @import("../../Core/StreamWrapper.zig");
+    const WheeledVehicleControllerFile = @import("WheeledVehicleController.zig");
+
+    var settings = VehicleConstraintSettings.init(allocator);
+    defer settings.asSettings().deinit();
+    try testing.expect(settings.up.eql(Vec3.init(0, 1, 0)));
+    try testing.expect(settings.forward.eql(Vec3.init(0, 0, 1)));
+    try testing.expectEqual(math.pi, settings.max_pitch_roll_angle);
+    try testing.expect(settings.wheels.items.len == 0 and settings.anti_roll_bars.items.len == 0 and settings.controller.ptr == null);
+    try testing.expectEqual(ConstraintSettings.rttiHash("VehicleConstraintSettings"), settings.asSettings().getRTTIHash());
+
+    const wheel = try WheeledVehicleControllerFile.WheelSettingsWV.create(allocator);
+    try settings.addWheel(&wheel.base);
+    try settings.addAntiRollBar(.{ .left_wheel = 2, .right_wheel = 3, .stiffness = 500.0 });
+    const controller = try WheeledVehicleControllerFile.WheeledVehicleControllerSettings.create(allocator);
+    settings.setController(&controller.base);
+    try testing.expectEqual(@as(u32, 1), wheel.base.getRefCount());
+    try testing.expectEqual(@as(u32, 1), controller.base.getRefCount());
+
+    // The copy shares the wheels and the controller
+    {
+        var copy = try VehicleConstraintSettings.initCopy(allocator, &settings);
+        defer copy.asSettings().deinit();
+        try testing.expect(copy.wheels.items[0].ptr.? == &wheel.base);
+        try testing.expect(copy.controller.ptr.? == &controller.base);
+        try testing.expectEqual(@as(u32, 2), wheel.base.getRefCount());
+        try testing.expectEqual(@as(u32, 2), controller.base.getRefCount());
+        try testing.expectEqual(@as(f32, 500.0), copy.anti_roll_bars.items[0].stiffness);
+    }
+    try testing.expectEqual(@as(u32, 1), wheel.base.getRefCount());
+    const Copy = struct {
+        fn run(a: Allocator, s: *const VehicleConstraintSettings) !void {
+            var copy = try VehicleConstraintSettings.initCopy(a, s);
+            copy.asSettings().deinit();
+        }
+    };
+    try testing.checkAllAllocationFailures(allocator, Copy.run, .{&settings});
+
+    // The binary state of settings without wheels (Jolt cannot restore settings with wheels, see the file comment):
+    // the hash, ConstraintSettings, up, forward, the angle, the anti-roll bars, no wheels, the controller hash and the
+    // controller
+    for (settings.wheels.items) |*w| w.deinit();
+    settings.wheels.clearRetainingCapacity();
+    settings.max_pitch_roll_angle = 1.0;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var out_wrapper: StreamWrapper.StreamOutWrapper = .init(&out.writer);
+    settings.asSettings().saveBinaryState(out_wrapper.streamOut());
+    var controller_out: std.Io.Writer.Allocating = .init(allocator);
+    defer controller_out.deinit();
+    var controller_wrapper: StreamWrapper.StreamOutWrapper = .init(&controller_out.writer);
+    controller.base.saveBinaryState(controller_wrapper.streamOut());
+    try testing.expectEqual(@as(usize, 21 + 12 + 12 + 4 + 4 + 12 + 4 + 4) + controller_out.written().len, out.written().len);
+
+    const Restore = struct {
+        fn run(a: Allocator, bytes: []const u8) !void {
+            var restored = VehicleConstraintSettings.init(a);
+            defer restored.asSettings().deinit();
+            var reader: std.Io.Reader = .fixed(bytes);
+            var in_wrapper: StreamWrapper.StreamInWrapper = .init(&reader);
+            var hash: u32 = 0;
+            in_wrapper.streamIn().read(&hash); // Read by sRestoreFromBinaryState
+            try testing.expectEqual(ConstraintSettings.rttiHash("VehicleConstraintSettings"), hash);
+            try restored.restoreBinaryState(in_wrapper.streamIn());
+            try testing.expect(!in_wrapper.isEOF() and !in_wrapper.isFailed());
+            try testing.expectEqual(@as(f32, 1.0), restored.max_pitch_roll_angle);
+            try testing.expectEqual(@as(usize, 1), restored.anti_roll_bars.items.len);
+            try testing.expectEqual(@as(i32, 3), restored.anti_roll_bars.items[0].right_wheel);
+            try testing.expectEqual(VehicleControllerSettings.rttiHash("WheeledVehicleControllerSettings"), restored.controller.ptr.?.getRTTIHash());
+
+            // Saved again: the same bytes
+            var again: std.Io.Writer.Allocating = .init(a);
+            defer again.deinit();
+            var again_wrapper: StreamWrapper.StreamOutWrapper = .init(&again.writer);
+            restored.asSettings().saveBinaryState(again_wrapper.streamOut());
+            if (again_wrapper.isFailed()) return error.OutOfMemory; // The allocating writer could not grow
+            try testing.expectEqualSlices(u8, bytes, again.written());
+        }
+    };
+    try Restore.run(allocator, out.written());
+    try testing.checkAllAllocationFailures(allocator, Restore.run, .{out.written()});
+}

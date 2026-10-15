@@ -245,3 +245,128 @@ pub const VehicleController = struct {
     /// Abstract: every virtual function is pure virtual
     pub const impl = struct {};
 };
+
+/// A user controller (settings, controller and wheel classes) for the tests of the virtual functions
+const TestControllerSettings = struct {
+    pub const rtti_name = "TestControllerSettings";
+    pub const overrides = .{ .saveBinaryState, .restoreBinaryState, .constructController };
+
+    base: VehicleControllerSettings,
+    value: f32 = 1.0,
+
+    fn create(allocator: Allocator, value: f32) Allocator.Error!*TestControllerSettings {
+        const self = try allocator.create(TestControllerSettings);
+        self.* = .{ .base = .init(TestControllerSettings, allocator), .value = value };
+        return self;
+    }
+
+    pub fn saveBinaryState(self: *const TestControllerSettings, stream: StreamOut) void {
+        stream.write(self.value);
+    }
+
+    pub fn restoreBinaryState(self: *TestControllerSettings, stream: StreamIn) Allocator.Error!void {
+        stream.read(&self.value);
+    }
+
+    pub fn constructController(self: *const TestControllerSettings, allocator: Allocator, constraint: *VehicleConstraint) Allocator.Error!*VehicleController {
+        const controller = try allocator.create(TestController);
+        controller.* = .{ .base = .init(TestController, allocator, constraint), .value = self.value };
+        return &controller.base;
+    }
+};
+
+const TestController = struct {
+    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState };
+
+    base: VehicleController,
+    value: f32,
+
+    pub fn getSettings(self: *const TestController) Allocator.Error!Ref(VehicleControllerSettings) {
+        const settings = try TestControllerSettings.create(self.base.allocator, self.value);
+        return .init(&settings.base);
+    }
+
+    pub fn constructWheel(self: *const TestController, allocator: Allocator, wheel: *const WheelSettings) Allocator.Error!*Wheel {
+        _ = self;
+        const result = try allocator.create(TestWheel);
+        result.* = .{ .base = .init(TestWheel, allocator, wheel) };
+        return &result.base;
+    }
+
+    pub fn allowSleep(self: *const TestController) bool {
+        return self.value > 0.0;
+    }
+
+    pub fn preCollide(self: *TestController, delta_time: f32, physics_system: *PhysicsSystem) void {
+        _ = physics_system;
+        self.value += delta_time;
+    }
+
+    pub fn postCollide(self: *TestController, delta_time: f32, physics_system: *PhysicsSystem) void {
+        _ = physics_system;
+        self.value -= delta_time;
+    }
+
+    pub fn solveLongitudinalAndLateralConstraints(self: *TestController, delta_time: f32) bool {
+        _ = .{ self, delta_time };
+        return false;
+    }
+
+    pub fn saveState(self: *const TestController, stream: *StateRecorder) void {
+        stream.write(self.value);
+    }
+
+    pub fn restoreState(self: *TestController, stream: *StateRecorder) void {
+        stream.read(&self.value);
+    }
+};
+
+const TestWheel = struct {
+    pub const overrides = .{};
+
+    base: Wheel,
+};
+
+test "VehicleControllerSettings and VehicleController dispatch through their vtables" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const StateRecorderImpl = @import("../StateRecorderImpl.zig").StateRecorderImpl;
+
+    const settings = try TestControllerSettings.create(allocator, 3.0);
+    var settings_ref = Ref(VehicleControllerSettings).init(&settings.base);
+    defer settings_ref.deinit();
+    try testing.expectEqual(VehicleControllerSettings.rttiHash("TestControllerSettings"), settings.base.getRTTIHash());
+
+    // The controller keeps a pointer to its constraint (not used by this controller)
+    var constraint: VehicleConstraint = undefined;
+    const controller = try settings.base.constructController(allocator, &constraint);
+    defer controller.destroy(); // Frees the TestController through the vtable (leak checked)
+    try testing.expect(controller.getConstraint() == &constraint);
+    try testing.expect(controller.allowSleep());
+    try testing.expect(!controller.solveLongitudinalAndLateralConstraints(1.0 / 60.0));
+
+    // The settings are recreated by the controller
+    var recreated = try controller.getSettings();
+    defer recreated.deinit();
+    try testing.expectEqual(@as(f32, 3.0), virtual.downcast(TestControllerSettings, recreated.get().?).value);
+
+    // State
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    controller.saveState(recorder.recorder());
+    const test_controller = virtual.downcast(TestController, controller);
+    test_controller.value = -1.0;
+    try testing.expect(!controller.allowSleep());
+    recorder.rewind();
+    controller.restoreState(recorder.recorder());
+    try testing.expectEqual(@as(f32, 3.0), test_controller.value);
+
+    // A wheel constructed by the controller references its settings
+    const wheel_settings = try WheelSettings.create(allocator);
+    var wheel_settings_ref = Ref(WheelSettings).init(wheel_settings);
+    defer wheel_settings_ref.deinit();
+    const wheel = try controller.constructWheel(allocator, wheel_settings);
+    try testing.expectEqual(@as(u32, 2), wheel_settings.getRefCount());
+    wheel.destroy();
+    try testing.expectEqual(@as(u32, 1), wheel_settings.getRefCount());
+}

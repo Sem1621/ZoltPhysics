@@ -1156,3 +1156,143 @@ pub const WheeledVehicleController = struct {
         self.transmission.restoreState(stream);
     }
 };
+
+const testing = std.testing;
+
+/// SaveBinaryState of `object` into `out`
+fn testSave(object: anytype, out: *std.Io.Writer.Allocating) void {
+    const StreamOutWrapper = @import("../../Core/StreamWrapper.zig").StreamOutWrapper;
+    var wrapper: StreamOutWrapper = .init(&out.writer);
+    object.saveBinaryState(wrapper.streamOut());
+}
+
+/// RestoreBinaryState of `object` from `bytes`, the stream must not hit its end
+fn testRestore(object: anytype, bytes: []const u8) !void {
+    const StreamInWrapper = @import("../../Core/StreamWrapper.zig").StreamInWrapper;
+    var reader: std.Io.Reader = .fixed(bytes);
+    var wrapper: StreamInWrapper = .init(&reader);
+    try object.restoreBinaryState(wrapper.streamIn());
+    try testing.expect(!wrapper.isEOF() and !wrapper.isFailed());
+}
+
+test "WheelSettingsWV defaults, IsKindOf and binary state" {
+    const allocator = testing.allocator;
+
+    const settings = try WheelSettingsWV.create(allocator);
+    var ref = Ref(WheelSettings).init(&settings.base);
+    defer ref.deinit();
+    try testing.expectEqual(@as(f32, 0.9), settings.inertia);
+    try testing.expectEqual(@as(f32, 0.2), settings.angular_damping);
+    try testing.expectEqual(math.degreesToRadians(70.0), settings.max_steer_angle);
+    try testing.expectEqual(@as(f32, 1500.0), settings.max_brake_torque);
+    try testing.expectEqual(@as(f32, 4000.0), settings.max_hand_brake_torque);
+    try testing.expectEqual(@as(usize, 3), settings.longitudinal_friction.points.items.len);
+    try testing.expectEqual(@as(f32, 1.2), settings.longitudinal_friction.getValue(0.06));
+    try testing.expectEqual(@as(f32, 1.2), settings.lateral_friction.getValue(3.0));
+    try testing.expectEqual(@as(f32, 1.0), settings.lateral_friction.getValue(30.0));
+    try testing.expect(settings.base.isKindOf(WheelSettings) and settings.base.isKindOf(WheelSettingsWV));
+    try testing.expect(settings.base.cast(WheelSettingsWV) == settings);
+
+    // The binary state: WheelSettings followed by the members of WheelSettingsWV (through the base class)
+    settings.inertia = 2.0;
+    settings.base.radius = 0.4;
+    try settings.lateral_friction.addPoint(allocator, 40.0, 0.5);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    testSave(&settings.base, &out);
+    try testing.expectEqual(@as(usize, 6 * 12 + 3 * 4 + 9 + 2 * 4 + 1 + 3 * 4 + (4 + 3 * 8) + (4 + 4 * 8) + 2 * 4), out.written().len);
+
+    const restored = try WheelSettingsWV.create(allocator);
+    var restored_ref = Ref(WheelSettings).init(&restored.base);
+    defer restored_ref.deinit();
+    try testRestore(&restored.base, out.written());
+    try testing.expectEqual(@as(f32, 2.0), restored.inertia);
+    try testing.expectEqual(@as(f32, 0.4), restored.base.radius);
+    try testing.expectEqual(@as(usize, 4), restored.lateral_friction.points.items.len);
+    var out2: std.Io.Writer.Allocating = .init(allocator);
+    defer out2.deinit();
+    testSave(&restored.base, &out2);
+    try testing.expectEqualSlices(u8, out.written(), out2.written());
+
+    // Out of memory: creation and restore leave nothing behind
+    const S = struct {
+        fn run(a: Allocator, bytes: []const u8) !void {
+            const s = try WheelSettingsWV.create(a);
+            var s_ref = Ref(WheelSettings).init(&s.base);
+            defer s_ref.deinit();
+            try testRestore(&s.base, bytes);
+        }
+    };
+    try testing.checkAllAllocationFailures(allocator, S.run, .{out.written()});
+}
+
+test "WheeledVehicleControllerSettings defaults, RTTI hash and binary state" {
+    const allocator = testing.allocator;
+
+    const settings = try WheeledVehicleControllerSettings.create(allocator);
+    var ref = Ref(VehicleControllerSettings).init(&settings.base);
+    defer ref.deinit();
+    try testing.expectEqual(@as(usize, 3), settings.engine.normalized_torque.points.items.len);
+    try testing.expectEqual(@as(usize, 5), settings.transmission.gear_ratios.items.len);
+    try testing.expectEqual(@as(usize, 1), settings.transmission.reverse_gear_ratios.items.len);
+    try testing.expectEqual(@as(usize, 0), settings.differentials.items.len);
+    try testing.expectEqual(@as(f32, 1.4), settings.differential_limited_slip_ratio);
+    try testing.expectEqual(VehicleControllerSettings.rttiHash("WheeledVehicleControllerSettings"), settings.base.getRTTIHash());
+
+    // The binary state (through the base class), new differentials are default constructed by the restore
+    try settings.differentials.append(allocator, .{ .left_wheel = 2, .right_wheel = 3, .engine_torque_ratio = 0.25 });
+    try settings.differentials.append(allocator, .{ .limited_slip_ratio = math.flt_max });
+    settings.differential_limited_slip_ratio = 2.0;
+    settings.transmission.mode = .manual;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    testSave(&settings.base, &out);
+
+    const restored = try WheeledVehicleControllerSettings.create(allocator);
+    var restored_ref = Ref(VehicleControllerSettings).init(&restored.base);
+    defer restored_ref.deinit();
+    try testRestore(&restored.base, out.written());
+    try testing.expectEqual(@as(usize, 2), restored.differentials.items.len);
+    try testing.expectEqual(@as(i32, 3), restored.differentials.items[0].right_wheel);
+    try testing.expectEqual(math.flt_max, restored.differentials.items[1].limited_slip_ratio);
+    try testing.expectEqual(@as(f32, 2.0), restored.differential_limited_slip_ratio);
+    try testing.expectEqual(VehicleTransmissionFile.TransmissionMode.manual, restored.transmission.mode);
+    var out2: std.Io.Writer.Allocating = .init(allocator);
+    defer out2.deinit();
+    testSave(&restored.base, &out2);
+    try testing.expectEqualSlices(u8, out.written(), out2.written());
+
+    // Out of memory: creation and restore leave nothing behind
+    const S = struct {
+        fn run(a: Allocator, bytes: []const u8) !void {
+            const s = try WheeledVehicleControllerSettings.create(a);
+            var s_ref = Ref(VehicleControllerSettings).init(&s.base);
+            defer s_ref.deinit();
+            try testRestore(&s.base, bytes);
+        }
+    };
+    try testing.checkAllAllocationFailures(allocator, S.run, .{out.written()});
+}
+
+test "WheeledVehicleController TireMaxImpulseCallback default and with a context" {
+    const TireMaxImpulseCallback = WheeledVehicleController.TireMaxImpulseCallback;
+    var longitudinal: f32 = 0.0;
+    var lateral: f32 = 0.0;
+    TireMaxImpulseCallback.default.call(0, &longitudinal, &lateral, 10.0, 0.5, 0.25, 0.1, 0.2, 1.0 / 60.0);
+    try testing.expectEqual(@as(f32, 5.0), longitudinal);
+    try testing.expectEqual(@as(f32, 2.5), lateral);
+
+    const Grip = struct {
+        factor: f32,
+        fn apply(self: *const @This(), wheel_index: u32, longitudinal_impulse: *f32, lateral_impulse: *f32, suspension_impulse: f32, longitudinal_friction: f32, lateral_friction: f32, longitudinal_slip: f32, lateral_slip: f32, delta_time: f32) void {
+            _ = .{ wheel_index, longitudinal_slip, lateral_slip, delta_time };
+            longitudinal_impulse.* = self.factor * longitudinal_friction * suspension_impulse;
+            lateral_impulse.* = self.factor * lateral_friction * suspension_impulse;
+        }
+    };
+    const grip: Grip = .{ .factor = 2.0 };
+    const callback: TireMaxImpulseCallback = .init(&grip, Grip.apply);
+    callback.call(1, &longitudinal, &lateral, 10.0, 0.5, 0.25, 0.1, 0.2, 1.0 / 60.0);
+    try testing.expectEqual(@as(f32, 10.0), longitudinal);
+    try testing.expectEqual(@as(f32, 5.0), lateral);
+}
