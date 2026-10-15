@@ -105,15 +105,117 @@
 //!   SliderConstraint::GetCurrentPosition), and the islands are solved by parallel jobs, so a read across islands
 //!   depends on the thread timing, in Jolt too.
 //!
+//! # Characters, ragdolls and vehicles (Phase 7)
+//!
+//! Character, CharacterVirtual (with CharacterVsCharacterCollisionSimple and the CharacterContactListener), Ragdoll and
+//! VehicleConstraint (wheeled, tracked and motorcycle controllers, the ray / cast sphere / cast cylinder collision
+//! testers) can be described, created and driven by every public setter and action on both sides; the C++ side
+//! (SimulationReference.cpp) covers all of them since the Phase 7 foundation, the Zolt side (SimulationParity.zig) the
+//! classes that are ported (one slot per class group).
+//! - **Descriptions.** `SimCharacter`, `SimCharacterVirtual`, `SimRagdoll` (+ `SimRagdollJoint`,
+//!   `SimRagdollAdditionalConstraint`, `SimRagdollPose`) and `SimVehicle` (+ `SimVehicleWheel`, `SimVehicleDifferential`,
+//!   `SimVehicleAntiRollBar`, the engine, transmission, tracks and tester) hold every member of the settings classes,
+//!   with Jolt's defaults (test "SimScenes Phase 7 description defaults are Jolt's"; `SimVehicle.defaults(kind)` /
+//!   `SimVehicleWheel.defaults(kind)` for the other controller and wheel classes). Curves, gear ratios and pose joint
+//!   states live in the float pool (`addFloats`, `addRagdollPose`), the track wheel indices in the integer pool
+//!   (`addUints`). A ragdoll's parts are body descriptions, its joints constraint descriptions (their body handles are not
+//!   used). The character virtual IDs are explicit (`SceneBuilder.characterVirtual` numbers them 1, 2, ...): CharacterID's
+//!   counter is global in both libraries.
+//! - **Creation and handles.** `b.character(desc)`, `b.characterVirtual(desc)`, `b.createRagdoll(addRagdoll(...))` and
+//!   `b.createVehicle(addVehicle(...))` create an object of the next handle of its class (character, character virtual,
+//!   ragdoll, vehicle handles count separately). A Character starts outside the system (character_add_to_physics_system);
+//!   a CharacterVirtual gets its listener (`SimCharacterVirtual.listener`) and collision group from the description; a
+//!   vehicle is added to the system with its step listener.
+//! - **Operations.** `b.objectOp(kind, handle, .{ .i, .f, .r, .body, .count, .activation })` (OpKind 400..599, one
+//!   `Phase7OpRange` per class group), `b.characterVirtualQuery` / `b.extendedUpdate` for the CharacterVirtual queries
+//!   with their filters (`CharacterQuery`). The operations run between the updates on the user thread, the character
+//!   virtual queries with the world's TempAllocator, like PerformanceTest and the unit tests call them; `i[3] != 0`
+//!   selects the no-lock interfaces where Jolt has `inLockBodies`. `b.expectCharacterGroundState`,
+//!   `expectCharacterVirtualGroundState`, `expectRagdollActive` and `expectWheelContacts` state what a scene reaches at
+//!   that point.
+//! - **What is compared.** After every update, besides the PhysicsSystem state (which holds the ragdolls' bodies and
+//!   constraints and the VehicleConstraint state) and the sorted records (with the vehicle callbacks, RecordKind 18..20):
+//!   the object state (`ObjectField`: the SaveState bytes of every character and character virtual, and the getters that
+//!   the states do not hold: the active contacts, the ground material and user data, CanWalkStairs, the transforms and
+//!   transformed shapes, a ragdoll's pose, root transform, bounds and constraints, every wheel's contact and transforms,
+//!   the engine, transmission, differentials, tracks, lean parameters), decoded to field, object handle, item and
+//!   component on a mismatch; and the CharacterContactListener records (RecordKind 7..17) in call order. `snapshot` /
+//!   `restore_cross` include the SaveState of every character and character virtual.
+//! - **Listener modes.** `CharacterListenerMode` record / modify: in modify mode the `CharacterFlags` in the upper 32
+//!   bits of the user data of a body, another character or the character itself reject contacts, stop pushing, stop
+//!   impulses, make a conveyor belt and slow the solved velocity (the same code on both sides). The vehicle callbacks
+//!   (`VehicleCallbacks`, with a steering pre-step callback), `VehicleCombineFriction` and `VehicleTireMaxImpulse` are
+//!   functions of the description or of an operation.
+//! - **Blockers.** `.characters`, `.character_virtuals`, `.ragdolls`, `.wheeled_vehicles`, `.tracked_vehicles`,
+//!   `.motorcycles`: supported as soon as the Zolt classes of the group are ported (`Phase7Classes`: the settings and
+//!   testers no longer declare `is_stub`). Until then the scene runs on the C++ side alone ("SimScenes blocked scenes run
+//!   on the C++ side": two C++ worlds with 0 and 3 threads in lockstep with their object states and character records,
+//!   its expectations, finite and completely decoded object states). A supported scene whose classes are still stubs, or
+//!   whose slot in SimulationParity.zig is still `Phase7StubSlot`, fails (checkPhase7Slots).
+//! - **Rules.** Avoid what Jolt asserts or leaves undefined:
+//!   - every wheel of a vehicle touches the ground in the first update after its creation, and no snapshot is taken
+//!     between the creation and that update (VehicleConstraint::SaveState writes the contact position, normal and lateral
+//!     direction of a wheel that never had a contact uninitialized);
+//!   - the body of a vehicle stays in the system while the vehicle exists, vehicles do not drive on each other (their
+//!     step listeners run in parallel);
+//!   - a vehicle needs at least one wheel and normalized axes, a wheeled controller a differential when the object state
+//!     reads GetWheelSpeedAtClutch (0 / 0 otherwise), the tracked ratios are never 0, a motorcycle keeps
+//!     mLeanSpringIntegrationCoefficient at 0 in scenes with sweeps or restores (Jolt's MotorcycleController::SaveState
+//!     does not save mLeanSpringIntegratedDeltaAngle);
+//!   - a Character has a shape, is removed before it is destroyed; a CharacterVirtual's shape is convex, decorated or
+//!     compound (sCorrectFractionForCharacterPadding asserts on other shapes), its listener does not change between
+//!     StartTrackingContactChanges and FinishTrackingContactChanges, its inner body is never removed by a body operation;
+//!   - a ragdoll's joints list the parents before the children, its motors drive SwingTwist and Hinge constraints only
+//!     (DriveToPoseUsingMotors asserts on other classes), it is removed before it is destroyed;
+//!   - no character, character virtual, ragdoll or vehicle is created or destroyed between a snapshot and its
+//!     restore_cross (the restore reads the objects of the snapshot);
+//!   - the object layers of the tester and the queries are layers of `Layers` (the layer filters assert on others).
+//!   The C++ side of the Phase 7 scenes hits no assert and no Trace of a Jolt build with JPH_ENABLE_ASSERTS (checked by
+//!   the Phase 7 foundation; the reference library has no asserts). To check new scenes: add `-DJPH_ENABLE_ASSERTS` to
+//!   `cpp_flags` in build.zig, let SimEnsureFactory install `AssertFailed` and `Trace` functions that print and return
+//!   false, use `std::unique_lock` for the recorder locks of SimulationReference.cpp and HelloWorldReference.cpp
+//!   (PhysicsLock's UniqueLock takes a lock context in assert builds), run `zig build parity -Dtest-filter="blocked
+//!   scenes run on the C++ side"` and revert.
+//!
+//! ## Recipe for a Phase 7 worker (adding a class group to the simulation parity)
+//!
+//! 1. Port the classes of the group (CharacterBase.zig, the foundation's port, shows the pattern A layout of a
+//!    character); removing `is_stub` from the settings (and testers) makes the scenes with the group's Blocker run instead
+//!    of being skipped, and the test "SimulationParity Phase 7 slots follow the ported classes" fails until step 2.
+//! 2. SimulationParity.zig: replace `const XSlot = Phase7StubSlot;` of the group with a struct (the interface is
+//!    documented above Phase7StubSlot): `Storage` (the objects of the handles), `create` and `applyOp` (exactly
+//!    ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp of SimulationReference.cpp, with the
+//!    same results), `writeState` (the fields of `objectFieldLayout` in the order of WriteObjectState of the .cpp),
+//!    `saveStates` / `restoreStates` (characters), `destroyAll`. CharacterVirtualSlot ports SimCharacterContactListener
+//!    (record / modify, `CharacterRecords` builds the records), the vehicle slots the callbacks of SetVehicleCallbacks,
+//!    SimVehicleCombineFriction and SimVehicleTireMaxImpulse (`VehicleRecords`).
+//! 3. Run `zig build parity -Dtest-filter=<scene>`: the C++ scenes of the group (`character_ops`,
+//!    `character_virtual_ops`, `character_virtual_characters`, `ragdoll_ops`, `vehicle_wheeled_ops`,
+//!    `vehicle_tracked_ops`, `vehicle_motorcycle_ops`) now run against Zolt, bit exact in the whole thread matrix with
+//!    the D12 sweeps; a mismatch names the field of the object state ("object state differs at byte ...: cv_active_contact
+//!    (object handle 0, item 2) contact_normal.y zolt ... jolt ...") or the first differing character record.
+//! 4. Add scenes of the group in its regions (builders in "---- <group> ----" below, entries in the scene table):
+//!    PerformanceTest's CharacterVirtual setup (milestone M8), stairs and slopes, moving platforms, many characters,
+//!    ragdolls in piles and LargeIslandSplitter islands, vehicles on meshes and height fields, cross save / restore, far
+//!    from the origin. A new operation of the group goes into its range (`OpKind`, ApplyObjectOp of the .cpp, the slot's
+//!    `applyOp`), a new object state field gets a new `ObjectField` value with its `objectFieldLayout`.
+//! 5. Prove the scenes bite (break one operation of the class, a scene must fail), check new scenes against an asserting
+//!    Jolt build (see the rules above) and run the parity in Debug, ReleaseFast and double precision.
+//!
 //! ## Reserved numbers
 //!
 //! OpKind: 0..52 body and system operations, 53..99 reserved for operations of later phases that are not constraint
 //! operations, 100..102 driver operations, 200..399 constraint operations in ranges of 20 (`ConstraintOpRange`):
 //! 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279 Hinge, 280..299 Slider, 300..319
-//! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare. ConstraintKind:
+//! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare; 400..599 the
+//! Phase 7 operations (`Phase7OpRange`): 400..429 Character (421..429 free), 430..489 CharacterVirtual (468..489 free),
+//! 490..519 Ragdoll (511..519 free), 520..579 vehicles (520..553 VehicleConstraint, testers, wheeled controller;
+//! 554..559 tracked; 560..566 motorcycle; 567..579 free), 580..599 spare. RecordKind: 0..6 bodies, steps and contacts,
+//! 7..17 the CharacterContactListener (call order), 18..20 the vehicle callbacks, new kinds from 21. ObjectField: 1..9
+//! Character, 10..19 CharacterVirtual, 20..29 Ragdoll, 30..49 vehicles, new fields in the group's block. ConstraintKind:
 //! 0..11 (the order of the Phase 6 plan, not EConstraintSubType: `subType()` maps them), new kinds from 12. Blocker: one
-//! value per kind. `Expect` fields are named, not numbered. The scene table and the builders have one region per
-//! worker group, marked "(append the ... scenes here)".
+//! value per kind or class group. `Expect` fields are named, not numbered. The scene table and the builders have one
+//! region per worker group, marked "(append the ... scenes here)".
 //!
 //! ## Recipe for a Phase 6 worker (adding a constraint class to the simulation parity)
 //!
@@ -483,6 +585,465 @@ pub const ConstraintOpRange = enum(u32) {
     }
 };
 
+// -------------------------------------------------------------------------------------------------------------------
+// Characters, ragdolls and vehicles (Phase 7, see the file header): the descriptions (Must match SimulationReference.cpp,
+// checked by the test "SimScenes struct layout"), the operation ranges and the listener modes
+
+/// The members of CharacterBaseSettings (Jolt's defaults), part of SimCharacter and SimCharacterVirtual
+pub const SimCharacterBase = extern struct {
+    up: [3]f32 = .{ 0, 1, 0 },
+    /// mSupportingVolume: normal xyz, constant
+    supporting_volume: [4]f32 = .{ 0, 1, 0, -1.0e10 },
+    max_slope_angle: f32 = zolt.math.degreesToRadians(50.0),
+    enhanced_internal_edge_removal: u32 = 0,
+    /// mShape: shape index (`invalid_handle`: none)
+    shape: u32 = invalid_handle,
+};
+
+/// A Character (OpKind.create_character): CharacterSettings (Jolt's defaults) and the constructor arguments
+pub const SimCharacter = extern struct {
+    base: SimCharacterBase = .{},
+    layer: u32 = 0,
+    mass: f32 = 80.0,
+    friction: f32 = 0.2,
+    gravity_factor: f32 = 1.0,
+    /// EAllowedDOFs bits (Jolt's default: TranslationX | TranslationY | TranslationZ)
+    allowed_dofs: u32 = 0b000111,
+    /// Character(settings, position, rotation, user data, system)
+    position: [3]Real = @splat(0),
+    rotation: [4]f32 = .{ 0, 0, 0, 1 },
+    user_data: u64 = 0,
+};
+
+/// A CharacterVirtual (OpKind.create_character_virtual): CharacterVirtualSettings (Jolt's defaults), the constructor
+/// arguments and the harness' setup of the new character
+pub const SimCharacterVirtual = extern struct {
+    base: SimCharacterBase = .{},
+    /// mID: the CharacterID value. Set explicitly: CharacterID's counter is global in both libraries and shared by the
+    /// two C++ worlds of a run. `SceneBuilder.characterVirtual` replaces `invalid_handle` with the next ID of the scene
+    /// (1, 2, ... like PerformanceTest after CharacterID::sSetNextCharacterID()).
+    id: u32 = invalid_handle,
+    mass: f32 = 70.0,
+    max_strength: f32 = 100.0,
+    shape_offset: [3]f32 = @splat(0),
+    /// EBackFaceMode: 0 IgnoreBackFaces, 1 CollideWithBackFaces
+    back_face_mode: u32 = 1,
+    predictive_contact_distance: f32 = 0.1,
+    max_collision_iterations: u32 = 5,
+    max_constraint_iterations: u32 = 15,
+    min_time_remaining: f32 = 1.0e-4,
+    collision_tolerance: f32 = 1.0e-3,
+    character_padding: f32 = 0.02,
+    max_num_hits: u32 = 256,
+    hit_reduction_cos_max_angle: f32 = 0.999,
+    penetration_recovery_speed: f32 = 1.0,
+    /// mInnerBodyShape: shape index (`invalid_handle`: no inner body)
+    inner_body_shape: u32 = invalid_handle,
+    /// mInnerBodyIDOverride: BodyID value (0xffffffff: none, CreateBody chooses the ID)
+    inner_body_id_override: u32 = 0xffffffff,
+    inner_body_layer: u32 = 0,
+    /// CharacterVirtual(settings, position, rotation, user data, system)
+    position: [3]Real = @splat(0),
+    rotation: [4]f32 = .{ 0, 0, 0, 1 },
+    user_data: u64 = 0,
+    /// Harness: SetListener after the creation (CharacterListenerMode)
+    listener: u32 = @intFromEnum(CharacterListenerMode.record),
+    /// Harness: the CharacterVsCharacterCollisionSimple (index < `num_character_collision_groups`) that the new
+    /// character is added to (Add) and uses (SetCharacterVsCharacterCollision); `invalid_handle`: none
+    collision_group: u32 = invalid_handle,
+};
+
+/// The number of CharacterVsCharacterCollisionSimple objects of a world (the `collision_group` indices)
+pub const num_character_collision_groups = 4;
+
+/// What the CharacterContactListener of a CharacterVirtual does (`SimCharacterVirtual.listener`,
+/// OpKind.cv_set_listener). Every callback is recorded (RecordKind 7..17, compared in call order).
+pub const CharacterListenerMode = enum(u32) {
+    /// SetListener(nullptr)
+    none = 0,
+    /// Record the callbacks, keep Jolt's defaults (validate returns true, the settings are not changed)
+    record = 1,
+    /// Record the callbacks (the arguments as Jolt passes them in), then act on the `CharacterFlags`
+    modify = 2,
+};
+
+/// Bits in the upper 32 bits of a user data value that the character listener in `CharacterListenerMode.modify` acts
+/// on: the user data of the body or of the other character of a contact (CharacterContact::mUserData), of the body in
+/// OnAdjustBodyVelocity, or of the character itself in the solve callbacks. The bits do not overlap `ContactFlags`.
+pub const CharacterFlags = struct {
+    /// OnContactValidate / OnCharacterContactValidate return false
+    pub const reject: u32 = 1 << 16;
+    /// OnContactAdded / OnContactPersisted (and the character versions): mCanPushCharacter = false
+    pub const cannot_push: u32 = 1 << 17;
+    /// OnContactAdded / OnContactPersisted (and the character versions): mCanReceiveImpulses = false
+    pub const no_impulses: u32 = 1 << 18;
+    /// OnAdjustBodyVelocity: linear velocity += (1.5, 0, 0), angular velocity += (0, 0.5, 0) (a conveyor belt)
+    pub const conveyor: u32 = 1 << 19;
+    /// OnContactSolve / OnCharacterContactSolve (the character's own user data): the new character velocity * 0.5
+    pub const slow_solve: u32 = 1 << 20;
+
+    /// The user data of a body / character with these flags (and `low` in the lower 32 bits)
+    pub fn userData(flags: u32, low: u32) u64 {
+        return (@as(u64, flags) << 32) | low;
+    }
+};
+
+/// The filters of the CharacterVirtual queries (Update, ExtendedUpdate, StickToFloor, WalkStairs, RefreshContacts,
+/// SetShape, CheckCollision): op.i[0] the object layer of PhysicsSystem::GetDefaultBroadPhaseLayerFilter /
+/// GetDefaultLayerFilter (`no_layer_filter`: the accept-all BroadPhaseLayerFilter / ObjectLayerFilter), op.i[1] the
+/// CharacterBodyFilter, op.i[2] the CharacterShapeFilter, op.body the body handle of CharacterBodyFilter.ignore_body
+pub const CharacterQueryFilter = struct {
+    pub const no_layer_filter: u32 = invalid_handle;
+};
+
+/// The BodyFilter of a CharacterVirtual query (op.i[1])
+pub const CharacterBodyFilter = enum(u32) {
+    /// BodyFilter (accepts every body)
+    all = 0,
+    /// IgnoreSingleBodyFilter(body handle op.body)
+    ignore_body = 1,
+    /// IgnoreSingleBodyFilter(GetInnerBodyID())
+    ignore_inner_body = 2,
+};
+
+/// The ShapeFilter of a CharacterVirtual query (op.i[2])
+pub const CharacterShapeFilter = enum(u32) {
+    /// ShapeFilter (accepts every shape pair)
+    all = 0,
+    /// ShouldCollide is false when shape 2 is a SphereShape
+    no_spheres = 1,
+};
+
+/// A ragdoll (OpKind.create_ragdoll). The RagdollSettings of a description is built at the first create_ragdoll of
+/// the description and shared by the ragdolls created from it (Jolt's usage): a Skeleton with one joint per
+/// SimRagdollJoint (Skeleton::AddJoint("Joint<index>", parent), parents before children), one Part per joint (its
+/// BodyCreationSettings from `bodies`, mToParent from `constraints`), the additional constraints, then the preparation
+/// below, then CalculateBodyIndexToConstraintIndex and CalculateConstraintIndexToBodyIdxPair.
+pub const SimRagdoll = extern struct {
+    /// The joints: `num_joints` at ragdoll_joints[first_joint..]
+    first_joint: u32 = 0,
+    num_joints: u32 = 0,
+    /// RagdollSettings::mAdditionalConstraints: `num_additional` at ragdoll_additional_constraints[first_additional..]
+    first_additional: u32 = 0,
+    num_additional: u32 = 0,
+    /// RagdollSettings::Stabilize
+    stabilize: u32 = 0,
+    /// RagdollSettings::CalculateConstraintPriorities(base_priority) when != 0
+    calculate_constraint_priorities: u32 = 0,
+    base_priority: u32 = 0,
+    /// RagdollSettings::DisableParentChildCollisions: 0 not called, 1 without joint matrices, 2 with the joint matrices
+    /// of ragdoll_poses[pose] (SkeletonPose::CalculateJointMatrices) and `min_separation_distance`
+    disable_parent_child_collisions: u32 = 0,
+    pose: u32 = 0,
+    min_separation_distance: f32 = 0.0,
+    /// CreateRagdoll(collision group, user data, system)
+    collision_group: u32 = 0,
+    user_data: u64 = 0,
+};
+
+/// A joint of a ragdoll: the skeleton joint and the part attached to it
+pub const SimRagdollJoint = extern struct {
+    /// The parent joint index (-1: a root joint)
+    parent: i32 = -1,
+    /// The part's BodyCreationSettings: index of a body description (`bodies`)
+    body: u32,
+    /// mToParent: index of a constraint description (`constraints`, its body handles are not used: CreateRagdoll
+    /// connects the parent part and this part); `invalid_handle`: none (the root)
+    to_parent: u32 = invalid_handle,
+};
+
+/// RagdollSettings::AdditionalConstraint
+pub const SimRagdollAdditionalConstraint = extern struct {
+    /// mBodyIdx: the indices of the two parts
+    body1: i32,
+    body2: i32,
+    /// mConstraint: index of a constraint description (`constraints`)
+    constraint: u32,
+};
+
+/// A pose of a ragdoll's skeleton (the ragdoll operations that take a pose)
+pub const SimRagdollPose = extern struct {
+    /// SkeletonPose::SetRootOffset
+    root_offset: [3]Real = @splat(0),
+    /// `count` joint states at floats[data..][0 .. 7 * count]: translation xyz, rotation xyzw. The SkeletonPose
+    /// operations use them as local joint states (CalculateJointMatrices), the `_matrices` operations as model space
+    /// joint matrices (Mat44::sRotationTranslation(rotation, translation))
+    data: u32 = 0,
+    count: u32 = 0,
+};
+
+/// The controller of a vehicle (`SimVehicle.controller`)
+pub const VehicleControllerKind = enum(u32) {
+    /// WheeledVehicleControllerSettings (wheels of kind wv)
+    wheeled = 0,
+    /// TrackedVehicleControllerSettings (wheels of kind tv)
+    tracked = 1,
+    /// MotorcycleControllerSettings (a WheeledVehicleControllerSettings, wheels of kind wv)
+    motorcycle = 2,
+};
+
+/// The wheel settings class of a vehicle wheel (`SimVehicleWheel.kind`)
+pub const VehicleWheelKind = enum(u32) {
+    /// WheelSettingsWV
+    wv = 0,
+    /// WheelSettingsTV
+    tv = 1,
+};
+
+/// The VehicleCollisionTester class of a vehicle (`SimVehicleTester.kind`, OpKind.vehicle_set_collision_tester)
+pub const VehicleTesterKind = enum(u32) {
+    /// VehicleCollisionTesterRay(layer, up, max slope angle)
+    ray = 0,
+    /// VehicleCollisionTesterCastSphere(layer, radius, up, max slope angle)
+    cast_sphere = 1,
+    /// VehicleCollisionTesterCastCylinder(layer, convex radius fraction)
+    cast_cylinder = 2,
+};
+
+/// VehicleEngineSettings (Jolt's defaults)
+pub const SimVehicleEngine = extern struct {
+    max_torque: f32 = 500.0,
+    min_rpm: f32 = 1000.0,
+    max_rpm: f32 = 6000.0,
+    /// mNormalizedTorque: `num_torque_points` (x, y) points at floats[torque_points..] (`invalid_handle`: the curve of
+    /// the constructor)
+    torque_points: u32 = invalid_handle,
+    num_torque_points: u32 = 0,
+    inertia: f32 = 0.5,
+    angular_damping: f32 = 0.2,
+};
+
+/// VehicleTransmissionSettings (Jolt's defaults)
+pub const SimVehicleTransmission = extern struct {
+    /// ETransmissionMode: 0 Auto, 1 Manual
+    mode: u32 = 0,
+    /// mGearRatios: `num_gear_ratios` at floats[gear_ratios..] (`invalid_handle`: the ratios of the controller
+    /// settings' constructor)
+    gear_ratios: u32 = invalid_handle,
+    num_gear_ratios: u32 = 0,
+    /// mReverseGearRatios, like `gear_ratios`
+    reverse_gear_ratios: u32 = invalid_handle,
+    num_reverse_gear_ratios: u32 = 0,
+    switch_time: f32 = 0.5,
+    clutch_release_time: f32 = 0.3,
+    switch_latency: f32 = 0.5,
+    shift_up_rpm: f32 = 4000.0,
+    shift_down_rpm: f32 = 2000.0,
+    clutch_strength: f32 = 10.0,
+};
+
+/// VehicleTrackSettings (Jolt's defaults; mDrivenWheel has none in Jolt)
+pub const SimVehicleTrack = extern struct {
+    driven_wheel: u32 = 0,
+    /// mWheels: `num_wheels` wheel indices at uints[wheels..]
+    wheels: u32 = 0,
+    num_wheels: u32 = 0,
+    inertia: f32 = 10.0,
+    angular_damping: f32 = 0.5,
+    max_brake_torque: f32 = 15000.0,
+    differential_ratio: f32 = 6.0,
+};
+
+/// VehicleDifferentialSettings (Jolt's defaults)
+pub const SimVehicleDifferential = extern struct {
+    left_wheel: i32 = -1,
+    right_wheel: i32 = -1,
+    differential_ratio: f32 = 3.42,
+    left_right_split: f32 = 0.5,
+    limited_slip_ratio: f32 = 1.4,
+    engine_torque_ratio: f32 = 1.0,
+};
+
+/// VehicleAntiRollBar (Jolt's defaults)
+pub const SimVehicleAntiRollBar = extern struct {
+    left_wheel: i32 = 0,
+    right_wheel: i32 = 1,
+    stiffness: f32 = 1000.0,
+};
+
+/// A wheel: WheelSettings plus the members of WheelSettingsWV or WheelSettingsTV (`kind`), Jolt's defaults
+pub const SimVehicleWheel = extern struct {
+    /// VehicleWheelKind
+    kind: u32 = @intFromEnum(VehicleWheelKind.wv),
+    position: [3]f32 = @splat(0),
+    suspension_force_point: [3]f32 = @splat(0),
+    suspension_direction: [3]f32 = .{ 0, -1, 0 },
+    steering_axis: [3]f32 = .{ 0, 1, 0 },
+    wheel_up: [3]f32 = .{ 0, 1, 0 },
+    wheel_forward: [3]f32 = .{ 0, 0, 1 },
+    suspension_min_length: f32 = 0.3,
+    suspension_max_length: f32 = 0.5,
+    suspension_preload_length: f32 = 0.0,
+    /// mSuspensionSpring: ESpringMode, frequency / stiffness, damping
+    suspension_spring_mode: u32 = 0,
+    suspension_frequency: f32 = 1.5,
+    suspension_damping: f32 = 0.5,
+    radius: f32 = 0.3,
+    width: f32 = 0.1,
+    enable_suspension_force_point: u32 = 0,
+    /// WheelSettingsWV
+    inertia: f32 = 0.9,
+    angular_damping: f32 = 0.2,
+    max_steer_angle: f32 = zolt.math.degreesToRadians(70.0),
+    /// mLongitudinalFriction: `num_longitudinal_friction` (x, y) points at floats[longitudinal_friction..]
+    /// (`invalid_handle`: the curve of the constructor)
+    longitudinal_friction: u32 = invalid_handle,
+    num_longitudinal_friction: u32 = 0,
+    /// mLateralFriction, like `longitudinal_friction`
+    lateral_friction: u32 = invalid_handle,
+    num_lateral_friction: u32 = 0,
+    max_brake_torque: f32 = 1500.0,
+    max_hand_brake_torque: f32 = 4000.0,
+    /// WheelSettingsTV: mLongitudinalFriction, mLateralFriction
+    longitudinal_friction_tv: f32 = 4.0,
+    lateral_friction_tv: f32 = 2.0,
+
+    /// Jolt's defaults of a wheel of `kind` (both classes keep the WheelSettings defaults; checked by the test "SimScenes
+    /// Phase 7 description defaults are Jolt's")
+    pub fn defaults(kind: VehicleWheelKind) SimVehicleWheel {
+        return .{ .kind = @intFromEnum(kind) };
+    }
+};
+
+/// The VehicleCollisionTester of a vehicle (the constructor arguments of the class of `kind`)
+pub const SimVehicleTester = extern struct {
+    /// VehicleTesterKind
+    kind: u32 = @intFromEnum(VehicleTesterKind.ray),
+    /// The object layer of the wheels (inObjectLayer)
+    object_layer: u32 = 0,
+    /// Ray, CastSphere: inUp, inMaxSlopeAngle
+    up: [3]f32 = .{ 0, 1, 0 },
+    max_slope_angle: f32 = zolt.math.degreesToRadians(80.0),
+    /// CastSphere: inRadius
+    radius: f32 = 0.3,
+    /// CastCylinder: inConvexRadiusFraction
+    convex_radius_fraction: f32 = 0.1,
+};
+
+/// A vehicle (OpKind.create_vehicle): VehicleConstraintSettings with its wheels, anti-roll bars and controller settings
+/// (Jolt's defaults of the wheeled controller; `SimVehicle.defaults(kind)` gives the defaults of each kind), the
+/// collision tester and the harness' callbacks. The harness creates `VehicleConstraint(body, settings)`, sets the
+/// collision tester, adds the constraint (AddConstraint) and the step listener (AddStepListener).
+pub const SimVehicle = extern struct {
+    /// The vehicle body (body handle, created before)
+    body: u32 = invalid_handle,
+    /// The ConstraintSettings members (Jolt's defaults)
+    enabled: u32 = 1,
+    constraint_priority: u32 = 0,
+    num_velocity_steps_override: u32 = 0,
+    num_position_steps_override: u32 = 0,
+    draw_constraint_size: f32 = 1.0,
+    user_data: u64 = 0,
+    up: [3]f32 = .{ 0, 1, 0 },
+    forward: [3]f32 = .{ 0, 0, 1 },
+    max_pitch_roll_angle: f32 = std.math.pi,
+    /// mWheels: `num_wheels` at vehicle_wheels[first_wheel..]
+    first_wheel: u32 = 0,
+    num_wheels: u32 = 0,
+    /// mAntiRollBars: `num_anti_roll_bars` at vehicle_anti_roll_bars[first_anti_roll_bar..]
+    first_anti_roll_bar: u32 = 0,
+    num_anti_roll_bars: u32 = 0,
+    /// mController: VehicleControllerKind
+    controller: u32 = @intFromEnum(VehicleControllerKind.wheeled),
+    engine: SimVehicleEngine = .{},
+    transmission: SimVehicleTransmission = .{},
+    /// Wheeled / motorcycle: mDifferentials (`num_differentials` at vehicle_differentials[first_differential..]),
+    /// mDifferentialLimitedSlipRatio
+    first_differential: u32 = 0,
+    num_differentials: u32 = 0,
+    differential_limited_slip_ratio: f32 = 1.4,
+    /// Tracked: mTracks (left, right)
+    tracks: [2]SimVehicleTrack = .{ .{}, .{} },
+    /// Motorcycle: MotorcycleControllerSettings
+    max_lean_angle: f32 = zolt.math.degreesToRadians(45.0),
+    lean_spring_constant: f32 = 5000.0,
+    lean_spring_damping: f32 = 1000.0,
+    lean_spring_integration_coefficient: f32 = 0.0,
+    lean_spring_integration_coefficient_decay: f32 = 4.0,
+    lean_smoothing_factor: f32 = 0.8,
+    /// SetVehicleCollisionTester
+    tester: SimVehicleTester = .{},
+    /// Harness: VehicleCallbacks bits (SetPreStepCallback / SetPostCollideCallback / SetPostStepCallback)
+    callbacks: u32 = 0,
+    /// Harness: VehicleCombineFriction (SetCombineFriction)
+    combine_friction: u32 = 0,
+    /// Harness: VehicleTireMaxImpulse (WheeledVehicleController::SetTireMaxImpulseCallback, wheeled / motorcycle)
+    tire_max_impulse: u32 = 0,
+
+    /// Jolt's defaults of the controller kind: the engine and transmission of TrackedVehicleControllerSettings'
+    /// constructor for a tracked vehicle, else WheeledVehicleControllerSettings' (checked by the test "SimScenes Phase 7
+    /// description defaults are Jolt's")
+    pub fn defaults(kind: VehicleControllerKind) SimVehicle {
+        var v: SimVehicle = .{ .controller = @intFromEnum(kind) };
+        if (kind == .tracked) {
+            v.engine.min_rpm = 500.0;
+            v.engine.max_rpm = 4000.0;
+            v.engine.max_torque = 500.0;
+            v.transmission.shift_down_rpm = 1000.0;
+            v.transmission.shift_up_rpm = 3500.0;
+        }
+        return v;
+    }
+};
+
+/// The step callbacks of a vehicle (bits of `SimVehicle.callbacks`, OpKind.vehicle_set_callbacks). They run in the step
+/// listener jobs, their records (RecordKind.vehicle_*) are compared sorted.
+pub const VehicleCallbacks = struct {
+    /// SetPreStepCallback: record
+    pub const pre_step: u32 = 1 << 0;
+    /// SetPostCollideCallback: record
+    pub const post_collide: u32 = 1 << 1;
+    /// SetPostStepCallback: record
+    pub const post_step: u32 = 1 << 2;
+    /// Wheeled / motorcycle controller: the pre-step callback steers, SetRightInput(GetRightInput() > 0 ? -0.25 : 0.5)
+    /// (alternating, from the controller's saved state, so that a restore or a D12 sweep gives the same steering)
+    pub const steer: u32 = 1 << 3;
+};
+
+/// The friction combine function of a vehicle (`SimVehicle.combine_friction`, OpKind.vehicle_set_combine_friction)
+pub const VehicleCombineFriction = enum(u32) {
+    /// Jolt's default: sqrt(tire friction * body friction) in both directions
+    default = 0,
+    /// longitudinal = 0.5 * (longitudinal + body friction), lateral = min(lateral, body friction), then both *= 0.9 on
+    /// the wheels with an odd index (SimVehicleCombineFriction of SimulationReference.cpp)
+    custom = 1,
+};
+
+/// The tire max impulse callback of a wheeled / motorcycle controller (`SimVehicle.tire_max_impulse`)
+pub const VehicleTireMaxImpulse = enum(u32) {
+    /// Jolt's default: friction * suspension impulse in both directions
+    default = 0,
+    /// longitudinal = (0.9 * longitudinal friction) * suspension impulse, lateral = lateral friction * suspension impulse,
+    /// then both *= 0.5 on wheel 0 (SimVehicleTireMaxImpulse of SimulationReference.cpp)
+    custom = 1,
+};
+
+/// The reserved OpKind ranges of the Phase 7 operations (see the file header): every worker group adds operations in
+/// its own range only
+pub const Phase7OpRange = enum(u32) {
+    /// Character (400..429)
+    character = 400,
+    /// CharacterVirtual and CharacterVsCharacterCollisionSimple (430..489)
+    character_virtual = 430,
+    /// Ragdoll (490..519)
+    ragdoll = 490,
+    /// VehicleConstraint, the wheeled controller, the collision testers (520..553), the tracked controller (554..559),
+    /// the motorcycle controller (560..566), free (567..579)
+    vehicle = 520,
+    /// Spare (580..599), unassigned
+    spare = 580,
+
+    /// The range of an operation number (null: not a Phase 7 operation)
+    pub fn of(op: u32) ?Phase7OpRange {
+        if (op < 400 or op >= 600) return null;
+        if (op < 430) return .character;
+        if (op < 490) return .character_virtual;
+        if (op < 520) return .ragdoll;
+        if (op < 580) return .vehicle;
+        return .spare;
+    }
+};
+
 /// Operations between the updates. Unless noted otherwise they go through the locking BodyInterface, `body` is a body
 /// handle, `activation` is EActivation (0 activate, 1 don't activate), `f` / `r` / `index` / `count` are listed per
 /// kind. Every operation returns a u32 that both sides must agree on: a body ID (the create operations), the
@@ -777,6 +1338,305 @@ pub const OpKind = enum(u32) {
     rack_and_pinion_set_constraints = 370,
 
     // ---- ConstraintOpRange.spare (380..399): unassigned ----
+
+    // Character, CharacterVirtual, Ragdoll and Vehicle operations (Phase 7), in the reserved ranges of `Phase7OpRange`.
+    // `index` is the object handle (the n-th created object of the class: character, character virtual, ragdoll or
+    // vehicle handle; the create operations take the description index instead), `i` holds the integer arguments,
+    // `f` / `r` the others, `body` a body handle. `lock` means: i[3] != 0 passes inLockBodies = false (the no-lock
+    // interfaces; the operations run between the updates, nothing else touches the bodies), else Jolt's default true.
+    // The `expect_*` operations are checks of the scene: they change nothing, the driver fails unless their result is
+    // `count` (SceneBuilder.expect*).
+
+    // ---- Phase7OpRange.character (400..429): Character ----
+    /// new Character(characters[index], system) (the next character handle); returns GetBodyID() (invalid when out of
+    /// bodies)
+    create_character = 400,
+    /// AddToPhysicsSystem(activation, lock); the character operations return the BodyState bits of the character's body
+    character_add_to_physics_system = 401,
+    /// RemoveFromPhysicsSystem(lock)
+    character_remove_from_physics_system = 402,
+    /// Activate(lock)
+    character_activate = 403,
+    /// PostSimulation(max separation distance f[0], lock); returns GetGroundState()
+    character_post_simulation = 404,
+    /// SetLinearAndAngularVelocity(f[0..3], f[3..6], lock)
+    character_set_linear_and_angular_velocity = 405,
+    /// SetLinearVelocity(f[0..3], lock)
+    character_set_linear_velocity = 406,
+    /// AddLinearVelocity(f[0..3], lock)
+    character_add_linear_velocity = 407,
+    /// AddImpulse(f[0..3], lock)
+    character_add_impulse = 408,
+    /// SetPositionAndRotation(r, f[0..4], activation, lock)
+    character_set_position_and_rotation = 409,
+    /// SetPosition(r, activation, lock)
+    character_set_position = 410,
+    /// SetRotation(f[0..4], activation, lock)
+    character_set_rotation = 411,
+    /// SetLayer(i[0], lock)
+    character_set_layer = 412,
+    /// SetShape(shapes[i[0]], max penetration depth f[0], lock); returns its result
+    character_set_shape = 413,
+    /// CharacterBase::SetMaxSlopeAngle(f[0])
+    character_set_max_slope_angle = 414,
+    /// CharacterBase::SetUp(f[0..3])
+    character_set_up = 415,
+    /// CharacterBase::SetSupportingVolume(Plane(f[0..3], f[3]))
+    character_set_supporting_volume = 416,
+    /// delete (the character must be removed from the system: Jolt destroys its body); returns 0
+    character_destroy = 417,
+    /// Returns the hash (`hashBytes`) of the members of GetCharacterSettings(lock) (shapes as their index)
+    character_settings_hash = 418,
+    /// CheckCollision(position r, rotation f[0..4], movement direction f[4..7], max separation distance f[7],
+    /// shapes[i[0]], base offset r, a collector that hashes every hit in call order, lock); returns that hash
+    /// (SimCheckCollisionCollector of SimulationReference.cpp: contact points, penetration axis and depth, sub shape IDs,
+    /// body ID 2 and the character ID of the collector's user data, then the number of hits)
+    character_check_collision = 419,
+    /// Check: GetGroundState() must be `count`
+    character_expect_ground_state = 420,
+    // 421..429: free for Character operations
+
+    // ---- Phase7OpRange.character_virtual (430..489): CharacterVirtual, CharacterVsCharacterCollisionSimple ----
+    /// new CharacterVirtual(character_virtuals[index], system) plus the harness setup of the description (the next
+    /// character virtual handle); returns GetInnerBodyID(). The character virtual operations return 0 unless noted.
+    create_character_virtual = 430,
+    /// Remove the character from every CharacterVsCharacterCollisionSimple, then release it (destroys its inner body)
+    cv_destroy = 431,
+    /// SetLinearVelocity(f[0..3])
+    cv_set_linear_velocity = 432,
+    /// SetPosition(r)
+    cv_set_position = 433,
+    /// SetRotation(f[0..4])
+    cv_set_rotation = 434,
+    /// CharacterBase::SetUp(f[0..3])
+    cv_set_up = 435,
+    /// CharacterBase::SetMaxSlopeAngle(f[0])
+    cv_set_max_slope_angle = 436,
+    /// CharacterBase::SetSupportingVolume(Plane(f[0..3], f[3]))
+    cv_set_supporting_volume = 437,
+    /// SetMass(f[0])
+    cv_set_mass = 438,
+    /// SetMaxStrength(f[0])
+    cv_set_max_strength = 439,
+    /// SetPenetrationRecoverySpeed(f[0])
+    cv_set_penetration_recovery_speed = 440,
+    /// SetEnhancedInternalEdgeRemoval(i[0] != 0)
+    cv_set_enhanced_internal_edge_removal = 441,
+    /// SetMaxNumHits(i[0])
+    cv_set_max_num_hits = 442,
+    /// SetHitReductionCosMaxAngle(f[0])
+    cv_set_hit_reduction_cos_max_angle = 443,
+    /// SetShapeOffset(f[0..3])
+    cv_set_shape_offset = 444,
+    /// SetUserData(i[0] | i[1] << 32)
+    cv_set_user_data = 445,
+    /// SetListener(CharacterListenerMode(i[0]))
+    cv_set_listener = 446,
+    /// SetCharacterVsCharacterCollision(collision group i[0], `invalid_handle`: nullptr)
+    cv_set_character_vs_character_collision = 447,
+    /// CharacterVsCharacterCollisionSimple(i[0])::Add
+    cv_add_to_collision_group = 448,
+    /// CharacterVsCharacterCollisionSimple(i[0])::Remove
+    cv_remove_from_collision_group = 449,
+    /// Update(delta time f[0], gravity f[1..4], filters (CharacterQueryFilter), the world's TempAllocator)
+    cv_update = 450,
+    /// ExtendedUpdate(delta time f[0], gravity f[1..4], ExtendedUpdateSettings f[4..16] (stick to floor step down
+    /// f[4..7], walk stairs step up f[7..10], min step forward f[10], step forward test f[11], cos angle forward contact
+    /// f[12], step down extra f[13..16]; `SceneBuilder.extendedUpdate`), filters, TempAllocator)
+    cv_extended_update = 451,
+    /// StickToFloor(step down f[0..3], filters, TempAllocator); returns its result
+    cv_stick_to_floor = 452,
+    /// WalkStairs(delta time f[0], step up f[1..4], step forward f[4..7], step forward test f[7..10], step down extra
+    /// f[10..13], filters, TempAllocator); returns its result
+    cv_walk_stairs = 453,
+    /// Returns CanWalkStairs(f[0..3])
+    cv_can_walk_stairs = 454,
+    /// RefreshContacts(filters, TempAllocator)
+    cv_refresh_contacts = 455,
+    /// UpdateGroundVelocity()
+    cv_update_ground_velocity = 456,
+    /// SetShape(shapes[i[3]], max penetration depth f[0], filters, TempAllocator); returns its result
+    cv_set_shape = 457,
+    /// SetInnerBodyShape(shapes[i[0]])
+    cv_set_inner_body_shape = 458,
+    /// Returns the hash of CancelVelocityTowardsSteepSlopes(f[0..3])
+    cv_cancel_velocity_towards_steep_slopes = 459,
+    /// StartTrackingContactChanges()
+    cv_start_tracking_contact_changes = 460,
+    /// FinishTrackingContactChanges()
+    cv_finish_tracking_contact_changes = 461,
+    /// CheckCollision(position r, rotation f[0..4], movement direction f[4..7], max separation distance f[7],
+    /// shapes[i[3]], base offset r, the collector of character_check_collision, filters); returns the hash of the hits
+    /// in their order (each with the character ID that CharacterVsCharacterCollisionSimple passes as user data)
+    cv_check_collision = 462,
+    /// Returns the hash of the members of GetCharacterVirtualSettings() (shapes as their index)
+    cv_settings_hash = 463,
+    /// Returns HasCollidedWith(body handle `body`)
+    cv_has_collided_with_body = 464,
+    /// Returns HasCollidedWith(GetID() of character virtual handle i[0]) | HasCollidedWith(that character) << 1
+    cv_has_collided_with_character = 465,
+    /// Check: GetGroundState() must be `count`
+    cv_expect_ground_state = 466,
+    /// SaveState into a StateRecorderImpl, then RestoreState from it (i[0] != 0: a validating recorder, which drops the
+    /// active contacts without mHadCollision); returns the hash of the bytes
+    cv_save_restore_state = 467,
+    // 468..489: free for CharacterVirtual operations
+
+    // ---- Phase7OpRange.ragdoll (490..519): Ragdoll, RagdollSettings ----
+    /// ragdolls[index]: the RagdollSettings (built at the first creation of the description) CreateRagdoll (the next
+    /// ragdoll handle, null when out of bodies); returns GetBodyCount() (0: null). The ragdoll operations return
+    /// IsActive() of the ragdoll unless noted.
+    create_ragdoll = 490,
+    /// AddToPhysicsSystem(activation, lock)
+    ragdoll_add_to_physics_system = 491,
+    /// RemoveFromPhysicsSystem(lock)
+    ragdoll_remove_from_physics_system = 492,
+    /// Activate(lock)
+    ragdoll_activate = 493,
+    /// Returns IsActive(lock)
+    ragdoll_is_active = 494,
+    /// SetGroupID(i[0], lock)
+    ragdoll_set_group_id = 495,
+    /// SetPose(SkeletonPose of ragdoll_poses[i[0]], lock)
+    ragdoll_set_pose = 496,
+    /// SetPose(root offset, joint matrices of ragdoll_poses[i[0]], lock)
+    ragdoll_set_pose_matrices = 497,
+    /// ResetWarmStart()
+    ragdoll_reset_warm_start = 498,
+    /// DriveToPoseUsingKinematics(SkeletonPose of ragdoll_poses[i[0]], delta time f[0], lock)
+    ragdoll_drive_to_pose_using_kinematics = 499,
+    /// DriveToPoseUsingKinematics(root offset, joint matrices of ragdoll_poses[i[0]], delta time f[0], lock)
+    ragdoll_drive_to_pose_using_kinematics_matrices = 500,
+    /// DriveToPoseUsingMotors(SkeletonPose of ragdoll_poses[i[0]]) (SwingTwist / Hinge constraints only)
+    ragdoll_drive_to_pose_using_motors = 501,
+    /// DriveToPoseUsingMotors(previous pose ragdoll_poses[i[1]], pose ragdoll_poses[i[0]], delta time f[0] > 0)
+    ragdoll_drive_to_pose_using_motors_velocity = 502,
+    /// SetLinearAndAngularVelocity(f[0..3], f[3..6], lock)
+    ragdoll_set_linear_and_angular_velocity = 503,
+    /// SetLinearVelocity(f[0..3], lock)
+    ragdoll_set_linear_velocity = 504,
+    /// AddLinearVelocity(f[0..3], lock)
+    ragdoll_add_linear_velocity = 505,
+    /// AddImpulse(f[0..3], lock)
+    ragdoll_add_impulse = 506,
+    /// delete (the ragdoll must be removed from the system: Jolt destroys its bodies); returns 0
+    ragdoll_destroy = 507,
+    /// Returns the hash of GetRagdollSettings()->SaveBinaryState(stream, save shapes i[0] != 0, save group filter
+    /// i[1] != 0) (`index` is the ragdoll handle)
+    ragdoll_settings_hash = 508,
+    /// Returns the hash of GetPose(SkeletonPose &, lock): the root offset and the joint matrices
+    ragdoll_get_pose_hash = 509,
+    /// Check: IsActive() must be `count`
+    ragdoll_expect_active = 510,
+    // 511..519: free for Ragdoll operations
+
+    // ---- Phase7OpRange.vehicle (520..579): VehicleConstraint, the controllers, the collision testers ----
+    /// The vehicles[index] constraint (the next vehicle handle): VehicleConstraint(body, settings), the collision
+    /// tester, AddConstraint and AddStepListener; returns the number of constraints of the system. The vehicle
+    /// operations return the ConstraintState bits of the vehicle constraint unless noted.
+    create_vehicle = 520,
+    /// RemoveStepListener + RemoveConstraint; returns the number of constraints
+    vehicle_remove = 521,
+    /// AddConstraint + AddStepListener of a removed vehicle; returns the number of constraints
+    vehicle_add = 522,
+    /// SetMaxPitchRollAngle(f[0])
+    vehicle_set_max_pitch_roll_angle = 523,
+    /// OverrideGravity(f[0..3])
+    vehicle_override_gravity = 524,
+    /// ResetGravityOverride()
+    vehicle_reset_gravity_override = 525,
+    /// SetNumStepsBetweenCollisionTestActive(i[0])
+    vehicle_set_num_steps_between_collision_test_active = 526,
+    /// SetNumStepsBetweenCollisionTestInactive(i[0])
+    vehicle_set_num_steps_between_collision_test_inactive = 527,
+    /// SetVehicleCollisionTester(a new tester of VehicleTesterKind(i[0]), object layer i[1], up f[0..3], max slope angle
+    /// f[3], radius f[4], convex radius fraction f[5])
+    vehicle_set_collision_tester = 528,
+    /// The vehicle's tester: SetObjectLayer(i[0])
+    vehicle_tester_set_object_layer = 529,
+    /// The vehicle's tester: i[0] == 0: SetBroadPhaseLayerFilter / SetObjectLayerFilter / SetBodyFilter(nullptr), else
+    /// the default filters of object layer i[1] and an IgnoreMultipleBodiesFilter of the vehicle body and body handle
+    /// `body` (`invalid_handle`: the vehicle body only; a body filter replaces the tester's own IgnoreSingleBodyFilter of
+    /// the vehicle body)
+    vehicle_tester_set_filters = 530,
+    /// SetCombineFriction(VehicleCombineFriction(i[0]))
+    vehicle_set_combine_friction = 531,
+    /// The step callbacks (VehicleCallbacks bits i[0])
+    vehicle_set_callbacks = 532,
+    /// GetWheel(i[0])->SetAngularVelocity(f[0])
+    vehicle_wheel_set_angular_velocity = 533,
+    /// GetWheel(i[0])->SetRotationAngle(f[0])
+    vehicle_wheel_set_rotation_angle = 534,
+    /// GetWheel(i[0])->SetSteerAngle(f[0])
+    vehicle_wheel_set_steer_angle = 535,
+    /// GetAntiRollBars()[i[0]] = (left wheel i[1], right wheel i[2], stiffness f[0])
+    vehicle_set_anti_roll_bar = 536,
+    /// Returns the hash of GetConstraintSettings()->SaveBinaryState
+    vehicle_settings_hash = 537,
+    /// Returns the hash of GetController()->GetSettings()->SaveBinaryState
+    vehicle_controller_settings_hash = 538,
+    /// Check: the bits of the wheels with HasContact() must be `count`
+    vehicle_expect_wheel_contacts = 539,
+    /// Engine (wheeled, tracked, motorcycle): GetEngine().SetCurrentRPM(f[0])
+    vehicle_engine_set_current_rpm = 540,
+    /// Engine: mMaxTorque f[0], mMinRPM f[1], mMaxRPM f[2], mInertia f[3], mAngularDamping f[4] of GetEngine()
+    vehicle_engine_set_settings = 541,
+    /// Engine: mNormalizedTorque = i[1] (x, y) points at floats[i[0]..]
+    vehicle_engine_set_torque_curve = 542,
+    /// Transmission: GetTransmission().Set(gear i[0] as int, clutch friction f[0])
+    vehicle_transmission_set = 543,
+    /// Transmission: mMode i[0], mSwitchTime f[0], mClutchReleaseTime f[1], mSwitchLatency f[2], mShiftUpRPM f[3],
+    /// mShiftDownRPM f[4], mClutchStrength f[5]
+    vehicle_transmission_set_settings = 544,
+    /// Transmission: mGearRatios = i[1] at floats[i[0]..], mReverseGearRatios = i[3] at floats[i[2]..]
+    vehicle_transmission_set_gear_ratios = 545,
+    /// Wheeled / motorcycle: SetDriverInput(f[0], f[1], f[2], f[3])
+    wheeled_set_driver_input = 546,
+    /// Wheeled / motorcycle: SetForwardInput(f[0])
+    wheeled_set_forward_input = 547,
+    /// Wheeled / motorcycle: SetRightInput(f[0])
+    wheeled_set_right_input = 548,
+    /// Wheeled / motorcycle: SetBrakeInput(f[0])
+    wheeled_set_brake_input = 549,
+    /// Wheeled / motorcycle: SetHandBrakeInput(f[0])
+    wheeled_set_hand_brake_input = 550,
+    /// Wheeled / motorcycle: GetDifferentials()[i[0]] = (left i[1] as int, right i[2] as int, ratio f[0], left right
+    /// split f[1], limited slip ratio f[2], engine torque ratio f[3])
+    wheeled_set_differential = 551,
+    /// Wheeled / motorcycle: SetDifferentialLimitedSlipRatio(f[0])
+    wheeled_set_differential_limited_slip_ratio = 552,
+    /// Wheeled / motorcycle: SetTireMaxImpulseCallback(VehicleTireMaxImpulse(i[0]))
+    wheeled_set_tire_max_impulse_callback = 553,
+    /// Tracked: SetDriverInput(f[0], f[1], f[2], f[3]) (the ratios must not be 0)
+    tracked_set_driver_input = 554,
+    /// Tracked: SetForwardInput(f[0])
+    tracked_set_forward_input = 555,
+    /// Tracked: SetLeftRatio(f[0]) (not 0)
+    tracked_set_left_ratio = 556,
+    /// Tracked: SetRightRatio(f[0]) (not 0)
+    tracked_set_right_ratio = 557,
+    /// Tracked: SetBrakeInput(f[0])
+    tracked_set_brake_input = 558,
+    /// Tracked: GetTracks()[i[0]]: mAngularVelocity f[0], mInertia f[1], mAngularDamping f[2], mMaxBrakeTorque f[3],
+    /// mDifferentialRatio f[4]
+    tracked_set_track = 559,
+    /// Motorcycle: EnableLeanController(i[0] != 0)
+    motorcycle_enable_lean_controller = 560,
+    /// Motorcycle: EnableLeanSteeringLimit(i[0] != 0)
+    motorcycle_enable_lean_steering_limit = 561,
+    /// Motorcycle: SetLeanSpringConstant(f[0])
+    motorcycle_set_lean_spring_constant = 562,
+    /// Motorcycle: SetLeanSpringDamping(f[0])
+    motorcycle_set_lean_spring_damping = 563,
+    /// Motorcycle: SetLeanSpringIntegrationCoefficient(f[0])
+    motorcycle_set_lean_spring_integration_coefficient = 564,
+    /// Motorcycle: SetLeanSpringIntegrationCoefficientDecay(f[0])
+    motorcycle_set_lean_spring_integration_coefficient_decay = 565,
+    /// Motorcycle: SetLeanSmoothingFactor(f[0])
+    motorcycle_set_lean_smoothing_factor = 566,
+    // 567..579: free for vehicle operations
+
+    // ---- Phase7OpRange.spare (580..599): unassigned ----
 };
 
 /// An operation, applied before update `update`
@@ -825,6 +1685,31 @@ pub const SimSceneDesc = extern struct {
     temp_allocator_size: u32,
     /// SimCollideMode (PhysicsSystem::SetSimCollideBodyVsBody)
     sim_collide_mode: u32,
+
+    // Phase 7: the descriptions of the characters, ragdolls and vehicles (created by their operations), and a pool of
+    // integers (track wheel indices; the float pool `floats` holds the curves, gear ratios and pose joint states)
+    characters: [*]const SimCharacter,
+    num_characters: u32,
+    character_virtuals: [*]const SimCharacterVirtual,
+    num_character_virtuals: u32,
+    ragdolls: [*]const SimRagdoll,
+    num_ragdolls: u32,
+    ragdoll_joints: [*]const SimRagdollJoint,
+    num_ragdoll_joints: u32,
+    ragdoll_additional_constraints: [*]const SimRagdollAdditionalConstraint,
+    num_ragdoll_additional_constraints: u32,
+    ragdoll_poses: [*]const SimRagdollPose,
+    num_ragdoll_poses: u32,
+    vehicles: [*]const SimVehicle,
+    num_vehicles: u32,
+    vehicle_wheels: [*]const SimVehicleWheel,
+    num_vehicle_wheels: u32,
+    vehicle_differentials: [*]const SimVehicleDifferential,
+    num_vehicle_differentials: u32,
+    vehicle_anti_roll_bars: [*]const SimVehicleAntiRollBar,
+    num_vehicle_anti_roll_bars: u32,
+    uints: [*]const u32,
+    num_uints: u32,
 };
 
 /// What the contact listener does besides recording the callbacks
@@ -932,10 +1817,306 @@ pub const RecordKind = enum(u32) {
     contact_persisted = 5,
     /// ids: body 1, sub shape 1, body 2, sub shape 2
     contact_removed = 6,
+
+    // Phase 7: the CharacterContactListener callbacks of the character virtuals (the user thread calls them in Jolt's
+    // deterministic order: they are compared in call order, `isCharacterRecord`). A contact record
+    // (`characterContactRecord`) has ids: character ID, CharacterContact::mBodyB, mCharacterIDB, mSubShapeIDB; data[0..3]
+    // mContactNormal, data[3] mDistance, data[4] mFraction, data[5] the flags (mMotionTypeB | mIsSensorB << 8 |
+    // mHadCollision << 9 | mWasDiscarded << 10 | mCanPushCharacter << 11 | mIsBackFacingContact << 12 | (mCharacterB !=
+    // null) << 13, and for added / persisted the incoming CharacterContactSettings mCanPushCharacter << 16 |
+    // mCanReceiveImpulses << 17), data[6] the hash of the other members (`hashCharacterContact`), data[7] the result:
+    // the return value of validate, the settings after the callback for added / persisted (can push | can receive << 1).
+    /// OnContactValidate (a contact record)
+    character_contact_validate = 7,
+    /// OnContactAdded (a contact record)
+    character_contact_added = 8,
+    /// OnContactPersisted (a contact record)
+    character_contact_persisted = 9,
+    /// OnContactRemoved: ids character ID, body ID 2, invalid, sub shape ID 2
+    character_contact_removed = 10,
+    /// OnCharacterContactValidate (a contact record)
+    character_vs_character_contact_validate = 11,
+    /// OnCharacterContactAdded (a contact record)
+    character_vs_character_contact_added = 12,
+    /// OnCharacterContactPersisted (a contact record)
+    character_vs_character_contact_persisted = 13,
+    /// OnCharacterContactRemoved: ids character ID, invalid, other character ID, sub shape ID 2
+    character_vs_character_contact_removed = 14,
+    /// OnContactSolve: ids character ID, body ID 2, invalid, sub shape ID 2; data[0..3] ioNewCharacterVelocity as passed
+    /// in, data[3..6] inCharacterVelocity, data[6] the hash of the contact position, normal, velocity and the material's
+    /// debug name, data[7] the hash of ioNewCharacterVelocity after the callback
+    character_contact_solve = 15,
+    /// OnCharacterContactSolve: like character_contact_solve, ids[2] the other character's ID, ids[1] invalid
+    character_vs_character_contact_solve = 16,
+    /// OnAdjustBodyVelocity: ids character ID, body ID 2; data[0..3] the linear velocity as passed in, data[3..6] the
+    /// angular velocity, data[6] the hash of both after the callback
+    character_adjust_body_velocity = 17,
+
+    // Phase 7: the step callbacks of a vehicle (VehicleCallbacks), called from the step listener jobs: compared sorted.
+    // ids[0] vehicle handle, ids[1] the BodyID of the vehicle body; data[0] delta time bits, data[1] first step, data[2]
+    // last step, data[3] the bits of the wheels with HasContact(), data[4] the FNV-1a hash of GetSuspensionLength,
+    // GetAngularVelocity and GetSteerAngle of every wheel in order (SimVehicleRecord of SimulationReference.cpp)
+    vehicle_pre_step = 18,
+    vehicle_post_collide = 19,
+    vehicle_post_step = 20,
+
+    /// True for the records of the CharacterContactListener (compared in call order)
+    pub fn isCharacterRecord(kind: u32) bool {
+        return kind >= @intFromEnum(RecordKind.character_contact_validate) and kind <= @intFromEnum(RecordKind.character_adjust_body_velocity);
+    }
+};
+
+/// The hash of the members of a CharacterContact that a contact record does not hold directly (data[6], see RecordKind;
+/// SimHashCharacterContact in SimulationReference.cpp): FNV-1a over mPosition (3 Real), mLinearVelocity, mSurfaceNormal
+/// (3 floats each), mUserData (u64) and the hash of the material's debug name (u32). mCharacterB is never dereferenced
+/// (Jolt: "may be a dangling pointer"), only whether it is null is compared (flag bit 13, `has_character_b`); its ID
+/// is mCharacterIDB.
+pub fn hashCharacterContact(position: [3]Real, linear_velocity: [3]f32, surface_normal: [3]f32, user_data: u64, material_hash: u32) u32 {
+    var h = hash_seed;
+    h = hashBytes(h, std.mem.asBytes(&position));
+    h = hashBytes(h, std.mem.asBytes(&linear_velocity));
+    h = hashBytes(h, std.mem.asBytes(&surface_normal));
+    h = hashBytes(h, std.mem.asBytes(&user_data));
+    h = hashBytes(h, std.mem.asBytes(&material_hash));
+    return h;
+}
+
+/// The identity of a material in the records and the object state: the hash of GetDebugName()
+pub fn materialHash(debug_name: []const u8) u32 {
+    return hashBytes(hash_seed, debug_name);
+}
+
+/// The fields of the object state (Phase 7): after every update both sides write the state of every character,
+/// character virtual, ragdoll and vehicle (in handle order, destroyed objects are skipped) as a list of fields
+/// `[field: u16][handle: u16][item: u16][size: u16][size bytes]` (`ObjectStateWriter`, SimObjectStateWriter in
+/// SimulationReference.cpp; values little endian, floats as bits, Real as f32 or f64). `item` is the index of a contact,
+/// wheel, joint, ... (0 for the fields of the object). `objectFieldLayout` names the components of each field for the
+/// report of a mismatch. The `*_save_state` fields hold the bytes of SaveState.
+pub const ObjectField = enum(u16) {
+    // Character
+    character_save_state = 1,
+    /// GetBodyID, GetLayer, the shape index of GetShape, IsSupported, the material hash of GetGroundMaterial,
+    /// GetGroundUserData
+    character_properties = 2,
+    /// GetUp, GetCosMaxSlopeAngle, GetSupportingVolume
+    character_base = 3,
+    /// GetPosition, GetRotation, GetCenterOfMassPosition, GetLinearVelocity, GetWorldTransform (lock bodies; not written
+    /// for a character without body, out of bodies)
+    character_body = 4,
+    /// GetTransformedShape: mShapePositionCOM, mShapeRotation, GetShapeScale, mBodyID, the shape index (not written for a
+    /// character without body)
+    character_transformed_shape = 5,
+
+    // CharacterVirtual
+    cv_save_state = 10,
+    /// GetID, GetUserData, GetInnerBodyID, the shape index of GetShape, GetMass, GetMaxStrength,
+    /// GetPenetrationRecoverySpeed, GetEnhancedInternalEdgeRemoval, GetCharacterPadding, GetMaxNumHits,
+    /// GetHitReductionCosMaxAngle, GetMaxHitsExceeded, GetShapeOffset
+    cv_properties = 11,
+    /// GetUp, GetCosMaxSlopeAngle, GetSupportingVolume, the material hash of GetGroundMaterial, GetGroundUserData,
+    /// IsSupported, CanWalkStairs(GetLinearVelocity())
+    cv_base = 12,
+    /// GetCenterOfMassPosition, GetWorldTransform, GetCenterOfMassTransform
+    cv_transforms = 13,
+    /// GetTransformedShape
+    cv_transformed_shape = 14,
+    /// The number of GetActiveContacts()
+    cv_num_active_contacts = 15,
+    /// GetActiveContacts()[item], every member (mCharacterB != null, never dereferenced; mMaterial as its hash)
+    cv_active_contact = 16,
+
+    // Ragdoll
+    /// GetBodyCount, GetConstraintCount, IsActive
+    ragdoll_properties = 20,
+    /// GetBodyID(item)
+    ragdoll_body = 21,
+    /// GetRootTransform
+    ragdoll_root_transform = 22,
+    /// GetPose(RVec3 &, Mat44 *): the root offset
+    ragdoll_pose_root_offset = 23,
+    /// GetPose(RVec3 &, Mat44 *): joint matrix `item`
+    ragdoll_pose_joint = 24,
+    /// GetWorldSpaceBounds
+    ragdoll_bounds = 25,
+    /// GetConstraint(item): GetSubType, GetConstraintPriority, GetEnabled, IsActive, the body IDs
+    ragdoll_constraint = 26,
+
+    // Vehicle
+    /// IsActive, GetEnabled, GetNumStepsBetweenCollisionTestActive / Inactive, GetMaxPitchRollAngle,
+    /// IsGravityOverridden, GetGravityOverride, GetLocalForward, GetLocalUp, GetWorldUp, the number of wheels, the body ID
+    vehicle_properties = 30,
+    /// GetWheel(item): GetAngularVelocity, GetRotationAngle, GetSteerAngle, HasContact, GetContactBodyID,
+    /// GetContactSubShapeID, GetSuspensionLength, HasHitHardPoint, GetSuspensionLambda, GetLongitudinalLambda,
+    /// GetLateralLambda
+    vehicle_wheel = 31,
+    /// GetWheel(item) with a contact: GetContactPosition, GetContactPointVelocity, GetContactNormal,
+    /// GetContactLongitudinal, GetContactLateral
+    vehicle_wheel_contact = 32,
+    /// GetWheelLocalBasis, GetWheelLocalTransform and GetWheelWorldTransform of wheel `item` (wheel right (0, 1, 0),
+    /// wheel up (1, 0, 0))
+    vehicle_wheel_transform = 33,
+    /// WheelWV `item`: mLongitudinalSlip, mLateralSlip, mCombinedLongitudinalFriction, mCombinedLateralFriction,
+    /// mBrakeImpulse
+    vehicle_wheel_wv = 34,
+    /// WheelTV `item`: mTrackIndex, mCombinedLongitudinalFriction, mCombinedLateralFriction, mBrakeImpulse
+    vehicle_wheel_tv = 35,
+    /// GetAntiRollBars()[item]
+    vehicle_anti_roll_bar = 36,
+    /// The engine: GetCurrentRPM, GetAngularVelocity, GetTorque(1), AllowSleep and its settings
+    vehicle_engine = 37,
+    /// The transmission: GetCurrentGear, GetClutchFriction, IsSwitchingGear, GetCurrentRatio, AllowSleep, mMode
+    vehicle_transmission = 38,
+    /// Wheeled / motorcycle: the four inputs, GetDifferentialLimitedSlipRatio, GetWheelSpeedAtClutch
+    vehicle_wheeled = 39,
+    /// Wheeled / motorcycle: GetDifferentials()[item] and its CalculateTorqueRatio of the current wheel speeds
+    vehicle_differential = 40,
+    /// Tracked: the four inputs
+    vehicle_tracked = 41,
+    /// Tracked: GetTracks()[item]
+    vehicle_track = 42,
+    /// Motorcycle: GetWheelBase, IsLeanControllerEnabled, IsLeanSteeringLimitEnabled, the five lean parameters
+    vehicle_motorcycle = 43,
+};
+
+/// The header of a field of the object state
+pub const ObjectFieldHeader = extern struct {
+    field: u16,
+    handle: u16,
+    item: u16,
+    size: u16,
+};
+
+/// The kind of a component of a field of the object state (u8: the bools and EMotionType of the SaveState fields)
+pub const ObjectComponentKind = enum { u8, u32, i32, u64, f32, real };
+
+/// A component of a field of the object state (for the report of a mismatch)
+pub const ObjectComponent = struct {
+    name: []const u8,
+    kind: ObjectComponentKind,
+    /// Number of values (3 for a Vec3)
+    count: u8 = 1,
+};
+
+/// The components of a field of the object state (the order in which both sides write them; null: a block of bytes)
+pub fn objectFieldLayout(field: ObjectField) ?[]const ObjectComponent {
+    return switch (field) {
+        .character_save_state, .cv_save_state => null,
+        .character_properties => &.{ .{ .name = "body_id", .kind = .u32 }, .{ .name = "layer", .kind = .u32 }, .{ .name = "shape", .kind = .u32 }, .{ .name = "is_supported", .kind = .u32 }, .{ .name = "ground_material", .kind = .u32 }, .{ .name = "ground_user_data", .kind = .u64 } },
+        .character_base => &.{ .{ .name = "up", .kind = .f32, .count = 3 }, .{ .name = "cos_max_slope_angle", .kind = .f32 }, .{ .name = "supporting_volume", .kind = .f32, .count = 4 } },
+        .character_body => &.{ .{ .name = "position", .kind = .real, .count = 3 }, .{ .name = "rotation", .kind = .f32, .count = 4 }, .{ .name = "center_of_mass_position", .kind = .real, .count = 3 }, .{ .name = "linear_velocity", .kind = .f32, .count = 3 }, .{ .name = "world_transform.rotation", .kind = .f32, .count = 12 }, .{ .name = "world_transform.translation", .kind = .real, .count = 3 } },
+        .character_transformed_shape, .cv_transformed_shape => &.{ .{ .name = "shape_position_com", .kind = .real, .count = 3 }, .{ .name = "shape_rotation", .kind = .f32, .count = 4 }, .{ .name = "shape_scale", .kind = .f32, .count = 3 }, .{ .name = "body_id", .kind = .u32 }, .{ .name = "shape", .kind = .u32 } },
+        .cv_properties => &.{ .{ .name = "id", .kind = .u32 }, .{ .name = "user_data", .kind = .u64 }, .{ .name = "inner_body_id", .kind = .u32 }, .{ .name = "shape", .kind = .u32 }, .{ .name = "mass", .kind = .f32 }, .{ .name = "max_strength", .kind = .f32 }, .{ .name = "penetration_recovery_speed", .kind = .f32 }, .{ .name = "enhanced_internal_edge_removal", .kind = .u32 }, .{ .name = "character_padding", .kind = .f32 }, .{ .name = "max_num_hits", .kind = .u32 }, .{ .name = "hit_reduction_cos_max_angle", .kind = .f32 }, .{ .name = "max_hits_exceeded", .kind = .u32 }, .{ .name = "shape_offset", .kind = .f32, .count = 3 } },
+        .cv_base => &.{ .{ .name = "up", .kind = .f32, .count = 3 }, .{ .name = "cos_max_slope_angle", .kind = .f32 }, .{ .name = "supporting_volume", .kind = .f32, .count = 4 }, .{ .name = "ground_material", .kind = .u32 }, .{ .name = "ground_user_data", .kind = .u64 }, .{ .name = "is_supported", .kind = .u32 }, .{ .name = "can_walk_stairs", .kind = .u32 } },
+        .cv_transforms => &.{ .{ .name = "center_of_mass_position", .kind = .real, .count = 3 }, .{ .name = "world_transform.rotation", .kind = .f32, .count = 12 }, .{ .name = "world_transform.translation", .kind = .real, .count = 3 }, .{ .name = "center_of_mass_transform.rotation", .kind = .f32, .count = 12 }, .{ .name = "center_of_mass_transform.translation", .kind = .real, .count = 3 } },
+        .cv_num_active_contacts => &.{.{ .name = "num_active_contacts", .kind = .u32 }},
+        .cv_active_contact => &.{ .{ .name = "body_b", .kind = .u32 }, .{ .name = "character_id_b", .kind = .u32 }, .{ .name = "sub_shape_id_b", .kind = .u32 }, .{ .name = "position", .kind = .real, .count = 3 }, .{ .name = "linear_velocity", .kind = .f32, .count = 3 }, .{ .name = "contact_normal", .kind = .f32, .count = 3 }, .{ .name = "surface_normal", .kind = .f32, .count = 3 }, .{ .name = "distance", .kind = .f32 }, .{ .name = "fraction", .kind = .f32 }, .{ .name = "motion_type_b", .kind = .u32 }, .{ .name = "is_sensor_b", .kind = .u32 }, .{ .name = "has_character_b", .kind = .u32 }, .{ .name = "user_data", .kind = .u64 }, .{ .name = "material", .kind = .u32 }, .{ .name = "had_collision", .kind = .u32 }, .{ .name = "was_discarded", .kind = .u32 }, .{ .name = "can_push_character", .kind = .u32 }, .{ .name = "is_back_facing_contact", .kind = .u32 } },
+        .ragdoll_properties => &.{ .{ .name = "body_count", .kind = .u32 }, .{ .name = "constraint_count", .kind = .u32 }, .{ .name = "is_active", .kind = .u32 } },
+        .ragdoll_body => &.{.{ .name = "body_id", .kind = .u32 }},
+        .ragdoll_root_transform => &.{ .{ .name = "position", .kind = .real, .count = 3 }, .{ .name = "rotation", .kind = .f32, .count = 4 } },
+        .ragdoll_pose_root_offset => &.{.{ .name = "root_offset", .kind = .real, .count = 3 }},
+        .ragdoll_pose_joint => &.{.{ .name = "joint_matrix", .kind = .f32, .count = 16 }},
+        .ragdoll_bounds => &.{ .{ .name = "min", .kind = .f32, .count = 3 }, .{ .name = "max", .kind = .f32, .count = 3 } },
+        .ragdoll_constraint => &.{ .{ .name = "sub_type", .kind = .u32 }, .{ .name = "priority", .kind = .u32 }, .{ .name = "enabled", .kind = .u32 }, .{ .name = "is_active", .kind = .u32 }, .{ .name = "body1_id", .kind = .u32 }, .{ .name = "body2_id", .kind = .u32 } },
+        .vehicle_properties => &.{ .{ .name = "is_active", .kind = .u32 }, .{ .name = "enabled", .kind = .u32 }, .{ .name = "num_steps_between_collision_test_active", .kind = .u32 }, .{ .name = "num_steps_between_collision_test_inactive", .kind = .u32 }, .{ .name = "max_pitch_roll_angle", .kind = .f32 }, .{ .name = "is_gravity_overridden", .kind = .u32 }, .{ .name = "gravity_override", .kind = .f32, .count = 3 }, .{ .name = "local_forward", .kind = .f32, .count = 3 }, .{ .name = "local_up", .kind = .f32, .count = 3 }, .{ .name = "world_up", .kind = .f32, .count = 3 }, .{ .name = "num_wheels", .kind = .u32 }, .{ .name = "body_id", .kind = .u32 } },
+        .vehicle_wheel => &.{ .{ .name = "angular_velocity", .kind = .f32 }, .{ .name = "rotation_angle", .kind = .f32 }, .{ .name = "steer_angle", .kind = .f32 }, .{ .name = "has_contact", .kind = .u32 }, .{ .name = "contact_body_id", .kind = .u32 }, .{ .name = "contact_sub_shape_id", .kind = .u32 }, .{ .name = "suspension_length", .kind = .f32 }, .{ .name = "has_hit_hard_point", .kind = .u32 }, .{ .name = "suspension_lambda", .kind = .f32 }, .{ .name = "longitudinal_lambda", .kind = .f32 }, .{ .name = "lateral_lambda", .kind = .f32 } },
+        .vehicle_wheel_contact => &.{ .{ .name = "contact_position", .kind = .real, .count = 3 }, .{ .name = "contact_point_velocity", .kind = .f32, .count = 3 }, .{ .name = "contact_normal", .kind = .f32, .count = 3 }, .{ .name = "contact_longitudinal", .kind = .f32, .count = 3 }, .{ .name = "contact_lateral", .kind = .f32, .count = 3 } },
+        .vehicle_wheel_transform => &.{ .{ .name = "local_basis.forward", .kind = .f32, .count = 3 }, .{ .name = "local_basis.up", .kind = .f32, .count = 3 }, .{ .name = "local_basis.right", .kind = .f32, .count = 3 }, .{ .name = "local_transform", .kind = .f32, .count = 16 }, .{ .name = "world_transform.rotation", .kind = .f32, .count = 12 }, .{ .name = "world_transform.translation", .kind = .real, .count = 3 } },
+        .vehicle_wheel_wv => &.{ .{ .name = "longitudinal_slip", .kind = .f32 }, .{ .name = "lateral_slip", .kind = .f32 }, .{ .name = "combined_longitudinal_friction", .kind = .f32 }, .{ .name = "combined_lateral_friction", .kind = .f32 }, .{ .name = "brake_impulse", .kind = .f32 } },
+        .vehicle_wheel_tv => &.{ .{ .name = "track_index", .kind = .i32 }, .{ .name = "combined_longitudinal_friction", .kind = .f32 }, .{ .name = "combined_lateral_friction", .kind = .f32 }, .{ .name = "brake_impulse", .kind = .f32 } },
+        .vehicle_anti_roll_bar => &.{ .{ .name = "left_wheel", .kind = .i32 }, .{ .name = "right_wheel", .kind = .i32 }, .{ .name = "stiffness", .kind = .f32 } },
+        .vehicle_engine => &.{ .{ .name = "current_rpm", .kind = .f32 }, .{ .name = "angular_velocity", .kind = .f32 }, .{ .name = "torque_at_full_gas", .kind = .f32 }, .{ .name = "allow_sleep", .kind = .u32 }, .{ .name = "max_torque", .kind = .f32 }, .{ .name = "min_rpm", .kind = .f32 }, .{ .name = "max_rpm", .kind = .f32 }, .{ .name = "inertia", .kind = .f32 }, .{ .name = "angular_damping", .kind = .f32 } },
+        .vehicle_transmission => &.{ .{ .name = "current_gear", .kind = .i32 }, .{ .name = "clutch_friction", .kind = .f32 }, .{ .name = "is_switching_gear", .kind = .u32 }, .{ .name = "current_ratio", .kind = .f32 }, .{ .name = "allow_sleep", .kind = .u32 }, .{ .name = "mode", .kind = .u32 } },
+        .vehicle_wheeled => &.{ .{ .name = "forward_input", .kind = .f32 }, .{ .name = "right_input", .kind = .f32 }, .{ .name = "brake_input", .kind = .f32 }, .{ .name = "hand_brake_input", .kind = .f32 }, .{ .name = "differential_limited_slip_ratio", .kind = .f32 }, .{ .name = "wheel_speed_at_clutch", .kind = .f32 } },
+        .vehicle_differential => &.{ .{ .name = "left_wheel", .kind = .i32 }, .{ .name = "right_wheel", .kind = .i32 }, .{ .name = "differential_ratio", .kind = .f32 }, .{ .name = "left_right_split", .kind = .f32 }, .{ .name = "limited_slip_ratio", .kind = .f32 }, .{ .name = "engine_torque_ratio", .kind = .f32 }, .{ .name = "left_torque_fraction", .kind = .f32 }, .{ .name = "right_torque_fraction", .kind = .f32 } },
+        .vehicle_tracked => &.{ .{ .name = "forward_input", .kind = .f32 }, .{ .name = "left_ratio", .kind = .f32 }, .{ .name = "right_ratio", .kind = .f32 }, .{ .name = "brake_input", .kind = .f32 } },
+        .vehicle_track => &.{ .{ .name = "angular_velocity", .kind = .f32 }, .{ .name = "driven_wheel", .kind = .u32 }, .{ .name = "num_wheels", .kind = .u32 }, .{ .name = "inertia", .kind = .f32 }, .{ .name = "angular_damping", .kind = .f32 }, .{ .name = "max_brake_torque", .kind = .f32 }, .{ .name = "differential_ratio", .kind = .f32 } },
+        .vehicle_motorcycle => &.{ .{ .name = "wheel_base", .kind = .f32 }, .{ .name = "lean_controller_enabled", .kind = .u32 }, .{ .name = "lean_steering_limit_enabled", .kind = .u32 }, .{ .name = "lean_spring_constant", .kind = .f32 }, .{ .name = "lean_spring_damping", .kind = .f32 }, .{ .name = "lean_spring_integration_coefficient", .kind = .f32 }, .{ .name = "lean_spring_integration_coefficient_decay", .kind = .f32 }, .{ .name = "lean_smoothing_factor", .kind = .f32 } },
+    };
+}
+
+/// The size of a component kind
+pub fn objectComponentSize(kind: ObjectComponentKind) usize {
+    return switch (kind) {
+        .u8 => 1,
+        .u32, .i32, .f32 => 4,
+        .u64 => 8,
+        .real => @sizeOf(Real),
+    };
+}
+
+/// Writes the object state (the Zolt side, SimObjectStateWriter of SimulationReference.cpp): `begin` a field, the
+/// values in the order of `objectFieldLayout`, `end`
+pub const ObjectStateWriter = struct {
+    allocator: Allocator,
+    bytes: std.ArrayList(u8) = .empty,
+    /// Offset of the header of the open field
+    start: usize = 0,
+
+    pub fn deinit(self: *ObjectStateWriter) void {
+        self.bytes.deinit(self.allocator);
+    }
+
+    pub fn begin(self: *ObjectStateWriter, field: ObjectField, handle: u32, item: u32) Allocator.Error!void {
+        self.start = self.bytes.items.len;
+        const header: ObjectFieldHeader = .{ .field = @intFromEnum(field), .handle = @intCast(handle), .item = @intCast(item), .size = 0 };
+        try self.bytes.appendSlice(self.allocator, std.mem.asBytes(&header));
+    }
+
+    pub fn end(self: *ObjectStateWriter) void {
+        const size = self.bytes.items.len - self.start - @sizeOf(ObjectFieldHeader);
+        std.mem.writeInt(u16, self.bytes.items[self.start + 6 ..][0..2], @intCast(size), .little);
+    }
+
+    /// A value of any type that the C++ writer writes as raw bytes (u32, i32, u64, f32, Real, arrays of them)
+    pub fn value(self: *ObjectStateWriter, v: anytype) Allocator.Error!void {
+        try self.bytes.appendSlice(self.allocator, std.mem.asBytes(&v));
+    }
+
+    /// A bool as u32
+    pub fn boolean(self: *ObjectStateWriter, v: bool) Allocator.Error!void {
+        try self.value(@as(u32, @intFromBool(v)));
+    }
+
+    /// A Vec3 (3 floats)
+    pub fn vec3(self: *ObjectStateWriter, v: zolt.Vec3) Allocator.Error!void {
+        try self.value([3]f32{ v.getX(), v.getY(), v.getZ() });
+    }
+
+    /// An RVec3 (3 Real)
+    pub fn rvec3(self: *ObjectStateWriter, v: zolt.RVec3) Allocator.Error!void {
+        try self.value([3]Real{ v.getX(), v.getY(), v.getZ() });
+    }
+
+    /// A Quat (x, y, z, w)
+    pub fn quat(self: *ObjectStateWriter, q: zolt.Quat) Allocator.Error!void {
+        try self.value([4]f32{ q.getX(), q.getY(), q.getZ(), q.getW() });
+    }
+
+    /// A Mat44 (16 floats, column major)
+    pub fn mat44(self: *ObjectStateWriter, m: zolt.Mat44) Allocator.Error!void {
+        for (0..4) |c| {
+            const col = m.getColumn4(@intCast(c));
+            try self.value([4]f32{ col.getX(), col.getY(), col.getZ(), col.getW() });
+        }
+    }
+
+    /// An RMat44: the 3 rotation columns (12 floats) and the translation (3 Real)
+    pub fn rmat44(self: *ObjectStateWriter, m: zolt.RMat44) Allocator.Error!void {
+        for (0..3) |c| {
+            const col = m.getColumn4(@intCast(c));
+            try self.value([4]f32{ col.getX(), col.getY(), col.getZ(), col.getW() });
+        }
+        try self.rvec3(m.getTranslation());
+    }
+
+    /// A block of bytes (the `*_save_state` fields)
+    pub fn raw(self: *ObjectStateWriter, data: []const u8) Allocator.Error!void {
+        try self.bytes.appendSlice(self.allocator, data);
+    }
 };
 
 /// One listener callback (floats as bits). Records are compared as sorted lists: the order of the callbacks depends
-/// on the threads.
+/// on the threads (the character records are compared in call order, see `RecordKind.isCharacterRecord`).
 pub const SimRecord = extern struct {
     kind: u32,
     ids: [4]u32 = @splat(0),
@@ -1025,9 +2206,31 @@ pub const Blocker = enum {
     /// RackAndPinionConstraint between a hinge and a slider: RackAndPinionConstraint, HingeConstraint, SliderConstraint
     rack_and_pinion_constraints,
 
+    // Phase 7, one blocker per class group: supported as soon as the Zolt classes the scenes need are ported (their
+    // stub markers `is_stub` are gone, `Phase7Classes`), nothing to flip by hand. SimulationParity's runEntry fails a
+    // supported scene whose slot (CharacterSlot, CharacterVirtualSlot, ...) is still a stub.
+    /// Character
+    characters,
+    /// CharacterVirtual (with CharacterVsCharacterCollisionSimple and the CharacterContactListener)
+    character_virtuals,
+    /// Ragdoll (needs the Skeleton files too, which RagdollSettings uses)
+    ragdolls,
+    /// VehicleConstraint with the wheeled controller, WheelSettingsWV and the three collision testers
+    wheeled_vehicles,
+    /// VehicleConstraint with the tracked controller and WheelSettingsTV (and the collision testers)
+    tracked_vehicles,
+    /// VehicleConstraint with the motorcycle controller (a wheeled controller)
+    motorcycles,
+
     /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
+            .characters => Phase7Classes.characters(),
+            .character_virtuals => Phase7Classes.characterVirtuals(),
+            .ragdolls => Phase7Classes.ragdolls(),
+            .wheeled_vehicles => Phase7Classes.wheeledVehicles(),
+            .tracked_vehicles => Phase7Classes.trackedVehicles(),
+            .motorcycles => Phase7Classes.motorcycles(),
             .none, .contacts, .ccd_hits, .constraints => true,
             .release_only => !zolt.Core.enable_asserts,
             .soft_bodies => false,
@@ -1042,6 +2245,43 @@ pub const Blocker = enum {
             .gear_constraints => ConstraintKind.gear.isPorted() and ConstraintKind.hinge.isPorted(),
             .rack_and_pinion_constraints => ConstraintKind.rack_and_pinion.isPorted() and ConstraintKind.hinge.isPorted() and ConstraintKind.slider.isPorted(),
         };
+    }
+};
+
+/// Which Phase 7 classes are ported: a class is ported when its stub marker `is_stub` is gone (the stub files of the
+/// foundation declare it on every type the scenes need)
+pub const Phase7Classes = struct {
+    fn ported(comptime T: type) bool {
+        return !@hasDecl(T, "is_stub");
+    }
+
+    pub fn characters() bool {
+        return ported(zolt.CharacterSettings);
+    }
+
+    pub fn characterVirtuals() bool {
+        return ported(zolt.CharacterVirtualSettings);
+    }
+
+    pub fn ragdolls() bool {
+        return ported(zolt.RagdollSettings);
+    }
+
+    /// VehicleConstraint and the collision testers (the vehicle core group)
+    pub fn vehicleCore() bool {
+        return ported(zolt.VehicleConstraintSettings) and ported(zolt.VehicleCollisionTesterRay) and ported(zolt.VehicleCollisionTesterCastSphere) and ported(zolt.VehicleCollisionTesterCastCylinder);
+    }
+
+    pub fn wheeledVehicles() bool {
+        return vehicleCore() and ported(zolt.WheeledVehicleControllerSettings) and ported(zolt.WheelSettingsWV);
+    }
+
+    pub fn trackedVehicles() bool {
+        return vehicleCore() and ported(zolt.TrackedVehicleControllerSettings) and ported(zolt.WheelSettingsTV);
+    }
+
+    pub fn motorcycles() bool {
+        return wheeledVehicles() and ported(zolt.MotorcycleControllerSettings);
     }
 };
 
@@ -1082,6 +2322,35 @@ pub const Expect = struct {
     /// a constraint (TwoBodyConstraint::BuildIslands activates the sleeping body of an active constraint) count in
     /// `update_activations` (in a scene without contacts they are the only activations from inside an update).
     active_constraints: u32 = 0,
+
+    // Phase 7 (also checked on the C++ side by "SimScenes blocked scenes run on the C++ side")
+    /// The CharacterContactListener records of the scene include each of these RecordKinds at least once (bit
+    /// `1 << kind`)
+    character_records: u32 = 0,
+    /// The characters and character virtuals reach each of these ground states (bit `1 << EGroundState`) after some
+    /// update (from their saved state)
+    ground_states: u32 = 0,
+    /// Some wheel of a vehicle has a contact after some update
+    wheel_contacts: bool = false,
+};
+
+/// The bit of a RecordKind in `Expect.character_records`
+pub fn recordBit(kind: RecordKind) u32 {
+    return @as(u32, 1) << @intCast(@intFromEnum(kind));
+}
+
+/// The bit of a ground state (CharacterBase::EGroundState: 0 OnGround, 1 OnSteepGround, 2 NotSupported, 3 InAir) in
+/// `Expect.ground_states`
+pub fn groundStateBit(state: u32) u32 {
+    return @as(u32, 1) << @intCast(state);
+}
+
+/// CharacterBase::EGroundState values
+pub const GroundState = struct {
+    pub const on_ground: u32 = 0;
+    pub const on_steep_ground: u32 = 1;
+    pub const not_supported: u32 = 2;
+    pub const in_air: u32 = 3;
 };
 
 /// The capacity of the manifold array of ProcessBodyPair's ReductionCollideShapeCollector (Jolt:
@@ -1351,7 +2620,34 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "constraints_gear_random_4", .build = buildGearRandom(4), .blocked_by = .rack_and_pinion_constraints, .sweep_stride = 20, .expect = .{ .contacts = true } },
     .{ .name = "constraints_gear_kinematic_release", .build = buildGearKinematicRelease, .blocked_by = .release_only, .expect = .{ .active_constraints = 4 } },
     // (append the gear / rack and pinion scenes here)
+
+    // Characters, ragdolls and vehicles (Phase 7), one region per worker group (append a group's scenes at the end of its
+    // region only)
+    // ---- Character ----
+    .{ .name = "character_ops", .build = buildCharacterOps, .blocked_by = .characters, .sweep_stride = 20, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
+    // (append the Character scenes here)
+    // ---- CharacterVirtual ----
+    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 30, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
+    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 25, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
+    // (append the CharacterVirtual scenes here)
+    // ---- Ragdoll ----
+    .{ .name = "ragdoll_ops", .build = buildRagdollOps, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 10 } },
+    // (append the Ragdoll scenes here)
+    // ---- Vehicles ----
+    .{ .name = "vehicle_wheeled_ops", .build = buildVehicleWheeledOps, .blocked_by = .wheeled_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
+    .{ .name = "vehicle_tracked_ops", .build = buildVehicleTrackedOps, .blocked_by = .tracked_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
+    .{ .name = "vehicle_motorcycle_ops", .build = buildVehicleMotorcycleOps, .blocked_by = .motorcycles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
+    // (append the vehicle scenes here)
 };
+
+/// Expect.ground_states: every EGroundState
+const all_ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.on_steep_ground) | groundStateBit(GroundState.not_supported) | groundStateBit(GroundState.in_air);
+
+/// Expect.character_records: the callbacks of a character virtual that touches bodies
+const character_body_records = recordBit(.character_contact_validate) | recordBit(.character_contact_added) | recordBit(.character_contact_persisted) | recordBit(.character_contact_removed) | recordBit(.character_contact_solve) | recordBit(.character_adjust_body_velocity);
+
+/// Expect.character_records: the callbacks of character virtuals that touch each other
+const character_vs_character_records = recordBit(.character_vs_character_contact_validate) | recordBit(.character_vs_character_contact_added) | recordBit(.character_vs_character_contact_persisted) | recordBit(.character_vs_character_contact_removed) | recordBit(.character_vs_character_contact_solve);
 
 /// A built scene: the description plus the operations and the update parameters (the memory is owned by the builder)
 pub const SceneBuilder = struct {
@@ -1379,6 +2675,18 @@ pub const SceneBuilder = struct {
     constraints: std.ArrayList(SimConstraint) = .empty,
     physics_settings: std.ArrayList(SimPhysicsSettings) = .empty,
     ops: std.ArrayList(SimOp) = .empty,
+    // Phase 7
+    characters: std.ArrayList(SimCharacter) = .empty,
+    character_virtuals: std.ArrayList(SimCharacterVirtual) = .empty,
+    ragdolls: std.ArrayList(SimRagdoll) = .empty,
+    ragdoll_joints: std.ArrayList(SimRagdollJoint) = .empty,
+    ragdoll_additional_constraints: std.ArrayList(SimRagdollAdditionalConstraint) = .empty,
+    ragdoll_poses: std.ArrayList(SimRagdollPose) = .empty,
+    vehicles: std.ArrayList(SimVehicle) = .empty,
+    vehicle_wheels: std.ArrayList(SimVehicleWheel) = .empty,
+    vehicle_differentials: std.ArrayList(SimVehicleDifferential) = .empty,
+    vehicle_anti_roll_bars: std.ArrayList(SimVehicleAntiRollBar) = .empty,
+    uints: std.ArrayList(u32) = .empty,
 
     /// The update before which the next operations run
     current_update: u32 = 0,
@@ -1386,6 +2694,13 @@ pub const SceneBuilder = struct {
     num_handles: u32 = 0,
     /// Number of constraint handles created so far (create_constraint, create_constraint_no_add)
     num_constraint_handles: u32 = 0,
+    /// Number of character, character virtual, ragdoll and vehicle handles created so far (Phase 7)
+    num_character_handles: u32 = 0,
+    num_character_virtual_handles: u32 = 0,
+    num_ragdoll_handles: u32 = 0,
+    num_vehicle_handles: u32 = 0,
+    /// The CharacterID that `characterVirtual` gives the next description without an ID
+    next_character_id: u32 = 1,
     /// Random numbers for the scenes (xorshift32, deterministic)
     rng: u32 = 0x9e3779b9,
 
@@ -1402,6 +2717,17 @@ pub const SceneBuilder = struct {
         self.constraints.deinit(self.allocator);
         self.physics_settings.deinit(self.allocator);
         self.ops.deinit(self.allocator);
+        self.characters.deinit(self.allocator);
+        self.character_virtuals.deinit(self.allocator);
+        self.ragdolls.deinit(self.allocator);
+        self.ragdoll_joints.deinit(self.allocator);
+        self.ragdoll_additional_constraints.deinit(self.allocator);
+        self.ragdoll_poses.deinit(self.allocator);
+        self.vehicles.deinit(self.allocator);
+        self.vehicle_wheels.deinit(self.allocator);
+        self.vehicle_differentials.deinit(self.allocator);
+        self.vehicle_anti_roll_bars.deinit(self.allocator);
+        self.uints.deinit(self.allocator);
     }
 
     /// The C ABI description (valid until the builder changes)
@@ -1432,6 +2758,28 @@ pub const SceneBuilder = struct {
             .sim_shape_filter_mode = @intFromEnum(self.sim_shape_filter_mode),
             .temp_allocator_size = self.temp_allocator_size,
             .sim_collide_mode = @intFromEnum(self.sim_collide_mode),
+            .characters = self.characters.items.ptr,
+            .num_characters = @intCast(self.characters.items.len),
+            .character_virtuals = self.character_virtuals.items.ptr,
+            .num_character_virtuals = @intCast(self.character_virtuals.items.len),
+            .ragdolls = self.ragdolls.items.ptr,
+            .num_ragdolls = @intCast(self.ragdolls.items.len),
+            .ragdoll_joints = self.ragdoll_joints.items.ptr,
+            .num_ragdoll_joints = @intCast(self.ragdoll_joints.items.len),
+            .ragdoll_additional_constraints = self.ragdoll_additional_constraints.items.ptr,
+            .num_ragdoll_additional_constraints = @intCast(self.ragdoll_additional_constraints.items.len),
+            .ragdoll_poses = self.ragdoll_poses.items.ptr,
+            .num_ragdoll_poses = @intCast(self.ragdoll_poses.items.len),
+            .vehicles = self.vehicles.items.ptr,
+            .num_vehicles = @intCast(self.vehicles.items.len),
+            .vehicle_wheels = self.vehicle_wheels.items.ptr,
+            .num_vehicle_wheels = @intCast(self.vehicle_wheels.items.len),
+            .vehicle_differentials = self.vehicle_differentials.items.ptr,
+            .num_vehicle_differentials = @intCast(self.vehicle_differentials.items.len),
+            .vehicle_anti_roll_bars = self.vehicle_anti_roll_bars.items.ptr,
+            .num_vehicle_anti_roll_bars = @intCast(self.vehicle_anti_roll_bars.items.len),
+            .uints = self.uints.items.ptr,
+            .num_uints = @intCast(self.uints.items.len),
         };
     }
 
@@ -1683,6 +3031,177 @@ pub const SceneBuilder = struct {
     /// Add a body description and create the body
     pub fn body(self: *SceneBuilder, desc_value: SimBody, activation: Activation) Allocator.Error!u32 {
         return self.createBody(try self.addBodyDesc(desc_value), activation);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Characters, ragdolls and vehicles (Phase 7)
+
+    pub const ObjectOpArgs = struct {
+        /// A body handle (cv_has_collided_with_body, CharacterBodyFilter.ignore_body, vehicle_tester_set_filters)
+        body: u32 = invalid_handle,
+        /// The expected result of the `expect_*` operations
+        count: u32 = 0,
+        activation: Activation = .activate,
+        i: []const u32 = &.{},
+        f: []const f32 = &.{},
+        r: [3]Real = @splat(0),
+    };
+
+    /// Add an operation (OpKind 400..599) on object handle `handle` (a character, character virtual, ragdoll or vehicle
+    /// handle; the description index for the create operations)
+    pub fn objectOp(self: *SceneBuilder, kind: OpKind, handle: u32, args: ObjectOpArgs) Allocator.Error!void {
+        std.debug.assert(Phase7OpRange.of(@intFromEnum(kind)) != null);
+        var o: SimOp = .{ .update = self.current_update, .kind = @intFromEnum(kind), .body = args.body, .count = args.count, .activation = @intFromEnum(args.activation), .index = handle, .r = args.r };
+        @memcpy(o.i[0..args.i.len], args.i);
+        @memcpy(o.f[0..args.f.len], args.f);
+        try self.ops.append(self.allocator, o);
+    }
+
+    /// The filters of a CharacterVirtual query (CharacterQueryFilter: op.i[0..3] and op.body)
+    pub const CharacterQuery = struct {
+        layer: u32 = CharacterQueryFilter.no_layer_filter,
+        body_filter: CharacterBodyFilter = .all,
+        shape_filter: CharacterShapeFilter = .all,
+        /// The body handle of CharacterBodyFilter.ignore_body
+        body: u32 = invalid_handle,
+    };
+
+    /// A CharacterVirtual query operation (cv_update, cv_extended_update, ...) with its filters, `i3` is op.i[3] (the shape
+    /// of cv_set_shape / cv_check_collision)
+    pub fn characterVirtualQuery(self: *SceneBuilder, kind: OpKind, handle: u32, query: CharacterQuery, args: struct { f: []const f32 = &.{}, r: [3]Real = @splat(0), i3: u32 = 0 }) Allocator.Error!void {
+        return self.objectOp(kind, handle, .{ .body = query.body, .i = &.{ query.layer, @intFromEnum(query.body_filter), @intFromEnum(query.shape_filter), args.i3 }, .f = args.f, .r = args.r });
+    }
+
+    /// CharacterVirtual::ExtendedUpdateSettings (Jolt's defaults; null: Cos(DegreesToRadians(75.0f)))
+    pub const ExtendedUpdateSettings = struct {
+        stick_to_floor_step_down: [3]f32 = .{ 0, -0.5, 0 },
+        walk_stairs_step_up: [3]f32 = .{ 0, 0.4, 0 },
+        walk_stairs_min_step_forward: f32 = 0.02,
+        walk_stairs_step_forward_test: f32 = 0.15,
+        walk_stairs_cos_angle_forward_contact: ?f32 = null,
+        walk_stairs_step_down_extra: [3]f32 = @splat(0),
+
+        /// The 12 floats of f[4..16] of cv_extended_update
+        pub fn toFloats(self: ExtendedUpdateSettings) [12]f32 {
+            const cos_angle = self.walk_stairs_cos_angle_forward_contact orelse zolt.trigonometry.cos(zolt.math.degreesToRadians(75.0));
+            return self.stick_to_floor_step_down ++ self.walk_stairs_step_up ++ [_]f32{ self.walk_stairs_min_step_forward, self.walk_stairs_step_forward_test, cos_angle } ++ self.walk_stairs_step_down_extra;
+        }
+    };
+
+    /// cv_extended_update(delta time, gravity, settings) with the filters of `query`
+    pub fn extendedUpdate(self: *SceneBuilder, handle: u32, delta_time: f32, gravity: [3]f32, settings: ExtendedUpdateSettings, query: CharacterQuery) Allocator.Error!void {
+        const f = [_]f32{delta_time} ++ gravity ++ settings.toFloats();
+        return self.characterVirtualQuery(.cv_extended_update, handle, query, .{ .f = &f });
+    }
+
+    /// Add floats to the pool, returns their offset
+    pub fn addFloats(self: *SceneBuilder, values: []const f32) Allocator.Error!u32 {
+        const offset: u32 = @intCast(self.floats.items.len);
+        try self.floats.appendSlice(self.allocator, values);
+        return offset;
+    }
+
+    /// Add integers to the pool, returns their offset
+    pub fn addUints(self: *SceneBuilder, values: []const u32) Allocator.Error!u32 {
+        const offset: u32 = @intCast(self.uints.items.len);
+        try self.uints.appendSlice(self.allocator, values);
+        return offset;
+    }
+
+    /// Add a character description and create the character (create_character), returns its character handle
+    pub fn character(self: *SceneBuilder, desc_value: SimCharacter) Allocator.Error!u32 {
+        try self.characters.append(self.allocator, desc_value);
+        try self.objectOp(.create_character, @intCast(self.characters.items.len - 1), .{});
+        self.num_character_handles += 1;
+        return self.num_character_handles - 1;
+    }
+
+    /// Add a character virtual description (without an ID it gets the scene's next CharacterID) and create the character
+    /// (create_character_virtual), returns its character virtual handle
+    pub fn characterVirtual(self: *SceneBuilder, desc_value: SimCharacterVirtual) Allocator.Error!u32 {
+        var d = desc_value;
+        if (d.id == invalid_handle) {
+            d.id = self.next_character_id;
+            self.next_character_id += 1;
+        }
+        try self.character_virtuals.append(self.allocator, d);
+        try self.objectOp(.create_character_virtual, @intCast(self.character_virtuals.items.len - 1), .{});
+        self.num_character_virtual_handles += 1;
+        return self.num_character_virtual_handles - 1;
+    }
+
+    /// Add a ragdoll description with its joints and additional constraints (`first_joint` / `first_additional` and the
+    /// counts are filled in), returns the description index
+    pub fn addRagdoll(self: *SceneBuilder, desc_value: SimRagdoll, joints: []const SimRagdollJoint, additional: []const SimRagdollAdditionalConstraint) Allocator.Error!u32 {
+        var d = desc_value;
+        d.first_joint = @intCast(self.ragdoll_joints.items.len);
+        d.num_joints = @intCast(joints.len);
+        d.first_additional = @intCast(self.ragdoll_additional_constraints.items.len);
+        d.num_additional = @intCast(additional.len);
+        try self.ragdoll_joints.appendSlice(self.allocator, joints);
+        try self.ragdoll_additional_constraints.appendSlice(self.allocator, additional);
+        try self.ragdolls.append(self.allocator, d);
+        return @intCast(self.ragdolls.items.len - 1);
+    }
+
+    /// Create a ragdoll of description `desc_index` (create_ragdoll), returns its ragdoll handle
+    pub fn createRagdoll(self: *SceneBuilder, desc_index: u32) Allocator.Error!u32 {
+        try self.objectOp(.create_ragdoll, desc_index, .{});
+        self.num_ragdoll_handles += 1;
+        return self.num_ragdoll_handles - 1;
+    }
+
+    /// Add a pose of a ragdoll skeleton: the root offset and per joint the translation and rotation (x, y, z, x, y, z,
+    /// w), returns the pose index
+    pub fn addRagdollPose(self: *SceneBuilder, root_offset: [3]Real, joints: []const [7]f32) Allocator.Error!u32 {
+        const data: u32 = @intCast(self.floats.items.len);
+        for (joints) |j| try self.floats.appendSlice(self.allocator, &j);
+        try self.ragdoll_poses.append(self.allocator, .{ .root_offset = root_offset, .data = data, .count = @intCast(joints.len) });
+        return @intCast(self.ragdoll_poses.items.len - 1);
+    }
+
+    /// Add a vehicle description with its wheels, differentials and anti-roll bars (the first / num members are filled
+    /// in), returns the description index
+    pub fn addVehicle(self: *SceneBuilder, desc_value: SimVehicle, wheels: []const SimVehicleWheel, differentials: []const SimVehicleDifferential, anti_roll_bars: []const SimVehicleAntiRollBar) Allocator.Error!u32 {
+        var d = desc_value;
+        d.first_wheel = @intCast(self.vehicle_wheels.items.len);
+        d.num_wheels = @intCast(wheels.len);
+        d.first_differential = @intCast(self.vehicle_differentials.items.len);
+        d.num_differentials = @intCast(differentials.len);
+        d.first_anti_roll_bar = @intCast(self.vehicle_anti_roll_bars.items.len);
+        d.num_anti_roll_bars = @intCast(anti_roll_bars.len);
+        try self.vehicle_wheels.appendSlice(self.allocator, wheels);
+        try self.vehicle_differentials.appendSlice(self.allocator, differentials);
+        try self.vehicle_anti_roll_bars.appendSlice(self.allocator, anti_roll_bars);
+        try self.vehicles.append(self.allocator, d);
+        return @intCast(self.vehicles.items.len - 1);
+    }
+
+    /// Create the vehicle of description `desc_index` (create_vehicle), returns its vehicle handle
+    pub fn createVehicle(self: *SceneBuilder, desc_index: u32) Allocator.Error!u32 {
+        try self.objectOp(.create_vehicle, desc_index, .{});
+        self.num_vehicle_handles += 1;
+        return self.num_vehicle_handles - 1;
+    }
+
+    /// Check: the ground state of character handle `handle` (GroundState) at this point
+    pub fn expectCharacterGroundState(self: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
+        return self.objectOp(.character_expect_ground_state, handle, .{ .count = state });
+    }
+
+    /// Check: the ground state of character virtual handle `handle` (GroundState) at this point
+    pub fn expectCharacterVirtualGroundState(self: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
+        return self.objectOp(.cv_expect_ground_state, handle, .{ .count = state });
+    }
+
+    /// Check: Ragdoll::IsActive of ragdoll handle `handle` at this point
+    pub fn expectRagdollActive(self: *SceneBuilder, handle: u32, active: bool) Allocator.Error!void {
+        return self.objectOp(.ragdoll_expect_active, handle, .{ .count = @intFromBool(active) });
+    }
+
+    /// Check: the bits of the wheels of vehicle handle `handle` that have a contact at this point
+    pub fn expectWheelContacts(self: *SceneBuilder, handle: u32, bits: u32) Allocator.Error!void {
+        return self.objectOp(.vehicle_expect_wheel_contacts, handle, .{ .count = bits });
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -10650,6 +12169,726 @@ fn buildGearKinematicRelease(b: *SceneBuilder) Allocator.Error!void {
 }
 
 // (append the scenes of the gear / rack and pinion group here)
+
+// -------------------------------------------------------------------------------------------------------------------
+// Characters, ragdolls and vehicles (Phase 7), one region per worker group (append a group's scenes at the end of its
+// region only). They run on the C++ side alone until the classes are ported ("SimScenes blocked scenes run on the C++
+// side"), see "Recipe for a Phase 7 worker" in the file header.
+
+/// i[3] of the operations with `lock`: the no-lock interfaces (inLockBodies = false)
+const no_lock = [_]u32{ 0, 0, 0, 1 };
+
+/// The shapes of the character scenes: Jolt's CharacterTest capsules with the base at the origin (standing and
+/// crouching), a sphere around the character that reaches into the floor (SetShape with a max penetration depth fails)
+/// and the smaller capsule of an inner body
+const CharacterShapes = struct {
+    standing: u32,
+    crouching: u32,
+    big: u32,
+    inner: u32,
+
+    fn add(b: *SceneBuilder) Allocator.Error!CharacterShapes {
+        return .{
+            .standing = try b.rotatedTranslated(try b.capsule(0.6, 0.3), .{ 0, 0.9, 0 }, identity_rotation),
+            .crouching = try b.rotatedTranslated(try b.capsule(0.3, 0.3), .{ 0, 0.6, 0 }, identity_rotation),
+            .big = try b.rotatedTranslated(try b.sphere(1.0), .{ 0, 0.8, 0 }, identity_rotation),
+            .inner = try b.rotatedTranslated(try b.capsule(0.55, 0.25), .{ 0, 0.85, 0 }, identity_rotation),
+        };
+    }
+};
+
+/// A static box (non_moving layer), returns its body handle
+fn addStaticBox(b: *SceneBuilder, half_extent: [3]f32, position: [3]Real, rotation_value: [4]f32, user_data: u64) Allocator.Error!u32 {
+    const shape = try b.box(half_extent, 0.05);
+    return b.body(.{ .position = position, .rotation = rotation_value, .shape = shape, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving, .user_data = user_data }, .dont_activate);
+}
+
+/// The gravity of the character virtual operations
+const character_gravity: [3]f32 = .{ 0, -9.81, 0 };
+
+// ---- Character (Phase 7, Blocker.characters) ----
+
+/// Every Character operation: two characters walk and one jumps on a floor with a crate (PostSimulation after every
+/// update), change their velocity in every way, their shape (a switch that fits and one that collides), layer, position
+/// and rotation, are removed and added again, one is destroyed after its removal and a third one with all degrees of
+/// freedom is created; the up vector, the max slope angle and the supporting volume give the four ground states; the
+/// queries (CheckCollision, GetCharacterSettings) with and without locking the bodies
+fn buildCharacterOps(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 90;
+    _ = try addFloor(b, 20, 0);
+    const crate_shape = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    _ = try b.body(.{ .position = .{ 1.6, 0.25, 0 }, .shape = crate_shape, .object_layer = Layers.moving }, .activate);
+
+    const c0 = try b.character(.{ .base = .{ .shape = shapes.standing }, .layer = Layers.moving, .position = .{ 0, 0.02, 0 }, .user_data = 7 });
+    const c1 = try b.character(.{ .base = .{ .shape = shapes.standing, .max_slope_angle = zolt.math.degreesToRadians(40.0) }, .layer = Layers.moving, .position = .{ 4, 0.02, 2 }, .friction = 0.5, .mass = 60, .gravity_factor = 1.2 });
+    try b.objectOp(.character_add_to_physics_system, c0, .{});
+    try b.objectOp(.character_add_to_physics_system, c1, .{ .activation = .dont_activate, .i = &no_lock });
+    try b.expectCharacterGroundState(c0, GroundState.in_air);
+    var c1_alive = true;
+    var c2: ?u32 = null;
+
+    for (1..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        // PostSimulation of the previous update
+        try b.objectOp(.character_post_simulation, c0, .{ .f = &.{0.05} });
+        if (c1_alive) try b.objectOp(.character_post_simulation, c1, .{ .f = &.{0.05}, .i = &no_lock });
+        if (c2) |c| try b.objectOp(.character_post_simulation, c, .{ .f = &.{0.1} });
+        switch (u) {
+            1 => {
+                try b.objectOp(.character_set_linear_velocity, c0, .{ .f = &.{ 2, 0, 0 } });
+                try b.objectOp(.character_set_linear_and_angular_velocity, c1, .{ .f = &.{ -1, 0, 0, 0, 0, 0 }, .i = &no_lock });
+            },
+            4 => try b.expectCharacterGroundState(c0, GroundState.on_ground),
+            6 => {
+                try b.objectOp(.character_add_impulse, c0, .{ .f = &.{ 0, 120, 0 } });
+                try b.objectOp(.character_add_linear_velocity, c1, .{ .f = &.{ -0.5, 0, 0.2 }, .i = &no_lock });
+            },
+            10 => {
+                try b.expectCharacterGroundState(c0, GroundState.in_air);
+                try b.objectOp(.character_check_collision, c0, .{ .i = &.{shapes.standing}, .r = .{ 0.5, 0.1, 0 }, .f = &.{ 0, 0, 0, 1, 1, 0, 0, 0.1 } });
+                try b.objectOp(.character_check_collision, c1, .{ .i = &.{ shapes.crouching, 0, 0, 1 }, .r = .{ 3.5, 0.0, 2 }, .f = &.{ 0, 0, 0, 1, 0, -1, 0, 0.05 } });
+            },
+            12 => {
+                try b.objectOp(.character_settings_hash, c0, .{});
+                try b.objectOp(.character_settings_hash, c1, .{ .i = &no_lock });
+            },
+            14 => try b.objectOp(.character_set_layer, c1, .{ .i = &.{ Layers.moving2, 0, 0, 1 } }),
+            16 => try b.objectOp(.character_set_shape, c1, .{ .i = &.{ shapes.crouching, 0, 0, 1 }, .f = &.{flt_max} }),
+            18 => try b.objectOp(.character_set_position_and_rotation, c1, .{ .r = .{ 3, 0.05, 3 }, .f = &axisAngle(.{ 0, 1, 0 }, 0.4), .i = &no_lock }),
+            20 => try b.objectOp(.character_set_position, c1, .{ .r = .{ 3.5, 0.05, 3 }, .activation = .dont_activate }),
+            22 => {
+                try b.objectOp(.character_set_rotation, c1, .{ .f = &axisAngle(.{ 0, 1, 0 }, -0.2), .i = &no_lock });
+                try b.objectOp(.character_set_layer, c1, .{ .i = &.{Layers.moving} });
+            },
+            // On the ground again: a too steep ground through the up vector and the max slope angle
+            30 => {
+                try b.objectOp(.character_set_up, c0, .{ .f = &.{ 0.8, 0.6, 0 } });
+                try b.objectOp(.character_set_max_slope_angle, c0, .{ .f = &.{zolt.math.degreesToRadians(30.0)} });
+            },
+            32 => {
+                try b.expectCharacterGroundState(c0, GroundState.on_steep_ground);
+                try b.objectOp(.character_set_up, c0, .{ .f = &.{ 0, 1, 0 } });
+                try b.objectOp(.character_set_max_slope_angle, c0, .{ .f = &.{zolt.math.degreesToRadians(50.0)} });
+                // The contact point lies on the positive side of the supporting volume: not supported
+                try b.objectOp(.character_set_supporting_volume, c0, .{ .f = &.{ 0, 1, 0, 0.5 } });
+            },
+            34 => {
+                try b.expectCharacterGroundState(c0, GroundState.not_supported);
+                try b.objectOp(.character_set_supporting_volume, c0, .{ .f = &.{ 0, 1, 0, -1.0e10 } });
+            },
+            36 => {
+                try b.expectCharacterGroundState(c0, GroundState.on_ground);
+                // A shape that reaches 0.2 into the floor: the switch fails, then one that fits
+                try b.objectOp(.character_set_shape, c0, .{ .i = &.{shapes.big}, .f = &.{0.1} });
+                try b.objectOp(.character_set_shape, c0, .{ .i = &.{shapes.crouching}, .f = &.{0.1} });
+            },
+            40 => try b.objectOp(.character_set_shape, c0, .{ .i = &.{shapes.standing}, .f = &.{flt_max} }),
+            44 => try b.objectOp(.character_remove_from_physics_system, c1, .{ .i = &no_lock }),
+            48 => try b.objectOp(.character_add_to_physics_system, c1, .{}),
+            50 => {
+                try b.objectOp(.character_set_linear_velocity, c0, .{ .f = &.{ -1, 0, 1 }, .i = &no_lock });
+                try b.objectOp(.character_activate, c1, .{ .i = &no_lock });
+            },
+            56 => try b.objectOp(.character_remove_from_physics_system, c1, .{}),
+            57 => {
+                try b.objectOp(.character_destroy, c1, .{});
+                c1_alive = false;
+                // A third character with all degrees of freedom (it can tip over), enhanced internal edge removal and
+                // its own gravity factor
+                c2 = try b.character(.{ .base = .{ .shape = shapes.crouching, .enhanced_internal_edge_removal = 1 }, .layer = Layers.moving, .position = .{ -2, 0.3, -1 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.2), .allowed_dofs = 0b111111, .gravity_factor = 0.5, .friction = 0.8, .user_data = 0x1234 });
+                try b.objectOp(.character_add_to_physics_system, c2.?, .{});
+                try b.objectOp(.character_set_linear_and_angular_velocity, c2.?, .{ .f = &.{ 0.5, 0, 0, 0, 0, 1 } });
+            },
+            60 => {
+                try b.objectOp(.character_settings_hash, c2.?, .{});
+                try b.objectOp(.character_check_collision, c2.?, .{ .i = &.{ shapes.big, 0, 0, 1 }, .r = .{ -2, 0, -1 }, .f = &.{ 0, 0, 0, 1, 0, 0, 1, 0.2 } });
+            },
+            70 => try b.objectOp(.character_add_impulse, c2.?, .{ .f = &.{ 0, 30, 0 }, .i = &no_lock }),
+            80 => try b.objectOp(.character_set_rotation, c0, .{ .f = &axisAngle(.{ 0, 1, 0 }, 1.0), .activation = .dont_activate }),
+            else => {},
+        }
+    }
+}
+
+// (append the Character scenes here)
+
+// ---- CharacterVirtual (Phase 7, Blocker.character_virtuals) ----
+
+/// The query of the character virtual scenes: the default filters of the moving layer
+const cv_query: SceneBuilder.CharacterQuery = .{ .layer = Layers.moving };
+
+/// Set the velocity of a character virtual for the next update (the scene does not integrate the vertical velocity),
+/// then Update or ExtendedUpdate (Jolt's default settings)
+fn moveCharacterVirtual(b: *SceneBuilder, handle: u32, velocity: [3]f32, extended: bool, query: SceneBuilder.CharacterQuery) Allocator.Error!void {
+    try b.objectOp(.cv_set_linear_velocity, handle, .{ .f = &velocity });
+    if (extended)
+        try b.extendedUpdate(handle, b.delta_time, character_gravity, .{}, query)
+    else
+        try b.characterVirtualQuery(.cv_update, handle, query, .{ .f = &([_]f32{b.delta_time} ++ character_gravity) });
+}
+
+/// Every CharacterVirtual operation in three lanes of a floor that is a conveyor belt for the listener in modify mode:
+/// character 0 runs into a post (that the modify mode rejects), climbs stairs (ExtendedUpdate, WalkStairs,
+/// StickToFloor) and walks off them; character 1 falls onto the floor and pushes a crate (whose flags stop the pushing in
+/// modify mode); character 2 runs into a steep slope and a wall through a sensor. The listener modes (none, record,
+/// modify: the rejected post, the conveyor, the slowed solves), the contact tracking, the shape switches (one
+/// collides), every setter, SaveState / RestoreState (validating too), the queries, the collision groups.
+fn buildCharacterVirtualOps(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 120;
+    const floor = try addFloor(b, 20, 0);
+    try b.op(.set_user_data, floor, .{ .index = 0, .count = CharacterFlags.conveyor }); // A conveyor belt in modify mode
+    // Lane 0 (z = 0): a post that the modify mode rejects, stairs of three steps of 0.2 m from x = 1
+    _ = try addStaticBox(b, .{ 0.1, 0.5, 0.1 }, .{ 0.6, 0.5, 0 }, identity_rotation, CharacterFlags.userData(CharacterFlags.reject, 2));
+    for (0..3) |s| {
+        const fs: f32 = @floatFromInt(s);
+        _ = try addStaticBox(b, .{ 0.3, 0.1 + 0.1 * fs, 1.0 }, .{ 1.3 + 0.6 * fs, 0.1 + 0.1 * fs, 0 }, identity_rotation, 0);
+    }
+    // Lane 1 (z = -2.5): a crate, pushing it stops in modify mode
+    const crate_shape = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const crate = try b.body(.{ .position = .{ 1.0, 0.3, -2.5 }, .shape = crate_shape, .object_layer = Layers.moving, .user_data = CharacterFlags.userData(CharacterFlags.cannot_push | CharacterFlags.no_impulses, 1) }, .activate);
+    // Lane 2 (z = 2.5): a sensor, a 60 degree slope, a wall
+    const sensor_shape = try b.box(.{ 0.2, 0.5, 0.5 }, 0.05);
+    const sensor = try b.body(.{ .position = .{ 0.8, 0.5, 2.5 }, .shape = sensor_shape, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+    _ = try addStaticBox(b, .{ 1.0, 0.1, 1.0 }, .{ 2.0, 0.6, 2.5 }, axisAngle(.{ 0, 0, 1 }, std.math.pi / 3.0), 0);
+    _ = try addStaticBox(b, .{ 0.1, 1.0, 1.0 }, .{ -2.0, 1.0, 2.5 }, identity_rotation, 0);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 0 }, .collision_group = 0, .user_data = CharacterFlags.userData(CharacterFlags.slow_solve, 10) });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ -0.2, 0.6, -2.5 }, .listener = @intFromEnum(CharacterListenerMode.none), .collision_group = 0, .mass = 80, .max_strength = 400 });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing, .max_slope_angle = zolt.math.degreesToRadians(45.0) }, .position = .{ 0, 0, 2.5 }, .back_face_mode = 0, .predictive_contact_distance = 0.15, .character_padding = 0.03, .collision_group = 1 });
+    try b.characterVirtualQuery(.cv_refresh_contacts, cv0, cv_query, .{});
+    try b.characterVirtualQuery(.cv_refresh_contacts, cv2, cv_query, .{});
+    try b.expectCharacterVirtualGroundState(cv0, GroundState.on_ground);
+    try b.expectCharacterVirtualGroundState(cv1, GroundState.in_air);
+    var cv1_alive = true;
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        // Character 0: into the post, up the stairs (ExtendedUpdate) and off them, then back
+        const v0: [3]f32 = if (u < 70) .{ 2.0, -0.5, 0 } else .{ -2.0, -0.5, 0 };
+        try moveCharacterVirtual(b, cv0, v0, u >= 4, cv_query);
+        // Character 1: falls, pushes the crate (a body filter that ignores the sensor, a shape filter without spheres)
+        if (cv1_alive) try moveCharacterVirtual(b, cv1, .{ 1.5, -3.0, 0 }, false, .{ .layer = Layers.moving, .body_filter = .ignore_body, .body = sensor, .shape_filter = .no_spheres });
+        // Character 2: through the sensor into the slope, then back into the wall (without layer filters from update 20)
+        const v2: [3]f32 = if (u < 50) .{ 2.0, -1.0, 0 } else .{ -3.0, -1.0, 0 };
+        try moveCharacterVirtual(b, cv2, v2, false, if (u < 20) cv_query else .{});
+        switch (u) {
+            2 => {
+                try b.characterVirtualQuery(.cv_check_collision, cv0, cv_query, .{ .r = .{ 0.5, 0, 0 }, .f = &.{ 0, 0, 0, 1, 1, 0, 0, 0.1 }, .i3 = shapes.standing });
+                try b.objectOp(.cv_settings_hash, cv0, .{});
+                try b.objectOp(.cv_cancel_velocity_towards_steep_slopes, cv0, .{ .f = &.{ 2, 0, 0 } });
+            },
+            6 => try b.objectOp(.cv_set_listener, cv1, .{ .i = &.{@intFromEnum(CharacterListenerMode.record)} }),
+            8 => {
+                try b.objectOp(.cv_can_walk_stairs, cv0, .{ .f = &.{ 2, 0, 0 } });
+                try b.objectOp(.cv_cancel_velocity_towards_steep_slopes, cv0, .{ .f = &.{ 2, 0, 0 } });
+                try b.characterVirtualQuery(.cv_walk_stairs, cv0, cv_query, .{ .f = &.{ b.delta_time, 0, 0.4, 0, 0.05, 0, 0, 0.15, 0, 0, 0, -0.1, 0 } });
+                try b.characterVirtualQuery(.cv_stick_to_floor, cv0, cv_query, .{ .f = &.{ 0, -0.5, 0 } });
+            },
+            12 => {
+                try b.objectOp(.cv_set_listener, cv0, .{ .i = &.{@intFromEnum(CharacterListenerMode.modify)} });
+                try b.objectOp(.cv_set_listener, cv1, .{ .i = &.{@intFromEnum(CharacterListenerMode.modify)} });
+            },
+            16 => try b.objectOp(.cv_update_ground_velocity, cv0, .{}),
+            20 => {
+                try b.objectOp(.cv_start_tracking_contact_changes, cv2, .{});
+                try b.objectOp(.cv_has_collided_with_body, cv1, .{ .body = crate });
+            },
+            22 => try b.objectOp(.cv_finish_tracking_contact_changes, cv2, .{}),
+            24 => {
+                try b.objectOp(.cv_set_listener, cv0, .{ .i = &.{@intFromEnum(CharacterListenerMode.record)} });
+                try b.objectOp(.cv_has_collided_with_body, cv2, .{ .body = sensor });
+                try b.objectOp(.cv_has_collided_with_character, cv0, .{ .i = &.{cv1} });
+            },
+            30 => {
+                try b.objectOp(.cv_save_restore_state, cv0, .{ .i = &.{0} });
+                try b.objectOp(.cv_save_restore_state, cv2, .{ .i = &.{1} });
+            },
+            32 => {
+                try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{0.05}, .i3 = shapes.big });
+                try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{flt_max}, .i3 = shapes.crouching });
+                try b.objectOp(.cv_set_inner_body_shape, cv2, .{ .i = &.{shapes.inner} });
+            },
+            36 => {
+                try b.objectOp(.cv_set_mass, cv1, .{ .f = &.{100} });
+                try b.objectOp(.cv_set_max_strength, cv1, .{ .f = &.{50} });
+                try b.objectOp(.cv_set_penetration_recovery_speed, cv1, .{ .f = &.{0.5} });
+                try b.objectOp(.cv_set_enhanced_internal_edge_removal, cv1, .{ .i = &.{1} });
+                try b.objectOp(.cv_set_hit_reduction_cos_max_angle, cv1, .{ .f = &.{-1} });
+                try b.objectOp(.cv_set_user_data, cv1, .{ .i = &.{ 5, 0 } });
+            },
+            40 => {
+                try b.objectOp(.cv_set_max_num_hits, cv2, .{ .i = &.{1} });
+                try b.objectOp(.cv_set_shape_offset, cv2, .{ .f = &.{ 0, 0.02, 0 } });
+            },
+            44 => {
+                try b.objectOp(.cv_set_max_num_hits, cv2, .{ .i = &.{256} });
+                try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{0.1}, .i3 = shapes.standing });
+            },
+            // The ground states of the up vector, the max slope angle and the supporting volume (character 2)
+            56 => {
+                try b.objectOp(.cv_set_up, cv2, .{ .f = &.{ 0.8, 0.6, 0 } });
+                try b.objectOp(.cv_set_max_slope_angle, cv2, .{ .f = &.{zolt.math.degreesToRadians(30.0)} });
+            },
+            58 => {
+                try b.objectOp(.cv_set_up, cv2, .{ .f = &.{ 0, 1, 0 } });
+                try b.objectOp(.cv_set_max_slope_angle, cv2, .{ .f = &.{zolt.math.degreesToRadians(50.0)} });
+                try b.objectOp(.cv_set_supporting_volume, cv2, .{ .f = &.{ 0, 1, 0, 0.5 } });
+            },
+            60 => try b.objectOp(.cv_set_supporting_volume, cv2, .{ .f = &.{ 0, 1, 0, -1.0e10 } }),
+            64 => {
+                try b.objectOp(.cv_set_position, cv1, .{ .r = .{ 1.5, 0.05, -1.5 } });
+                try b.objectOp(.cv_set_rotation, cv1, .{ .f = &axisAngle(.{ 0, 1, 0 }, 0.5) });
+                try b.characterVirtualQuery(.cv_refresh_contacts, cv1, cv_query, .{});
+            },
+            80 => {
+                try b.objectOp(.cv_remove_from_collision_group, cv1, .{ .i = &.{0} });
+                try b.objectOp(.cv_add_to_collision_group, cv1, .{ .i = &.{2} });
+                try b.objectOp(.cv_set_character_vs_character_collision, cv1, .{ .i = &.{invalid_handle} });
+            },
+            90 => {
+                try b.objectOp(.cv_destroy, cv1, .{});
+                cv1_alive = false;
+            },
+            100 => try b.objectOp(.cv_set_character_vs_character_collision, cv0, .{ .i = &.{2} }),
+            else => {},
+        }
+    }
+}
+
+/// Character vs character on a mesh floor: three character virtuals with inner bodies (one with mInnerBodyIDOverride)
+/// walk into each other in one CharacterVsCharacterCollisionSimple (the character contact callbacks, solved by both
+/// sides), a fourth one in another group passes through them; the inner bodies push a crate (contact listener callbacks
+/// of the system), one inner body gets another shape (SetInnerBodyShape) and one character is destroyed (its inner body
+/// leaves the system)
+fn buildCharacterVirtualCharacters(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 100;
+    // A mesh floor of 8 x 8 quads over [-8, 8]^2
+    var triangles: [128][9]f32 = undefined;
+    for (0..8) |i| {
+        for (0..8) |j| {
+            const x0 = -8.0 + 2.0 * @as(f32, @floatFromInt(i));
+            const z0 = -8.0 + 2.0 * @as(f32, @floatFromInt(j));
+            const k = 2 * (8 * i + j);
+            triangles[k] = .{ x0, 0, z0, x0, 0, z0 + 2, x0 + 2, 0, z0 + 2 };
+            triangles[k + 1] = .{ x0, 0, z0, x0 + 2, 0, z0 + 2, x0 + 2, 0, z0 };
+        }
+    }
+    const mesh = try b.mesh(&triangles);
+    _ = try b.body(.{ .shape = mesh, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const crate_shape = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    _ = try b.body(.{ .position = .{ 0, 0.3, 2.2 }, .shape = crate_shape, .object_layer = Layers.moving }, .activate);
+
+    const a = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -1.2, 0, 0 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .collision_group = 0 });
+    const c = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 1.2, 0, 0 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .inner_body_id_override = 300, .collision_group = 0, .listener = @intFromEnum(CharacterListenerMode.modify), .user_data = CharacterFlags.userData(CharacterFlags.cannot_push, 3) });
+    const d = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 0, 0, 1.0 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .collision_group = 0 });
+    const e = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0.2, 0, -1.5 }, .collision_group = 1 });
+    var d_alive = true;
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const towards: f32 = if (u < 60) 1.5 else -1.5;
+        try moveCharacterVirtual(b, a, .{ towards, -0.5, 0 }, false, cv_query);
+        try moveCharacterVirtual(b, c, .{ -towards, -0.5, 0 }, true, cv_query);
+        if (d_alive) try moveCharacterVirtual(b, d, .{ 0, -0.5, towards }, false, .{ .layer = Layers.moving, .body_filter = .ignore_inner_body });
+        try moveCharacterVirtual(b, e, .{ 0, -0.5, 2.0 }, false, cv_query);
+        switch (u) {
+            30 => {
+                try b.objectOp(.cv_has_collided_with_character, a, .{ .i = &.{c} });
+                try b.characterVirtualQuery(.cv_check_collision, a, cv_query, .{ .r = .{ -0.5, 0, 0 }, .f = &.{ 0, 0, 0, 1, 1, 0, 0, 0.2 }, .i3 = shapes.standing });
+            },
+            40 => try b.objectOp(.cv_set_inner_body_shape, a, .{ .i = &.{shapes.standing} }),
+            50 => try b.objectOp(.cv_set_user_data, c, .{ .i = &.{ 4, CharacterFlags.slow_solve } }),
+            70 => {
+                try b.objectOp(.cv_destroy, d, .{});
+                d_alive = false;
+            },
+            else => {},
+        }
+    }
+}
+
+// (append the CharacterVirtual scenes here)
+
+// ---- Ragdoll (Phase 7, Blocker.ragdolls) ----
+
+/// The ragdoll of the ragdoll scenes: a skeleton of 4 joints (pelvis, spine, head, leg) at the pelvis position `root`,
+/// swing twists to the spine and the head, a hinge to the leg (DriveToPoseUsingMotors drives these two classes) and an
+/// additional distance constraint between the head and the leg. Returns the description index.
+fn addTestRagdoll(b: *SceneBuilder, root: [3]Real, desc_value: SimRagdoll) Allocator.Error!u32 {
+    const pelvis = try b.box(.{ 0.15, 0.1, 0.1 }, 0.05);
+    const spine = try b.box(.{ 0.12, 0.12, 0.08 }, 0.05);
+    const head = try b.sphere(0.1);
+    const leg = try b.capsule(0.2, 0.06);
+    const Part = struct { shape: u32, offset: [3]f32 };
+    const parts = [_]Part{
+        .{ .shape = pelvis, .offset = .{ 0, 0, 0 } },
+        .{ .shape = spine, .offset = .{ 0, 0.3, 0 } },
+        .{ .shape = head, .offset = .{ 0, 0.55, 0 } },
+        .{ .shape = leg, .offset = .{ 0.08, -0.4, 0 } },
+    };
+    var bodies: [parts.len]u32 = undefined;
+    for (parts, &bodies) |part, *body_desc|
+        body_desc.* = try b.addBodyDesc(.{ .position = gridPositionOffset(root, part.offset), .shape = part.shape, .object_layer = Layers.moving, .linear_damping = 0.2, .angular_damping = 0.4 });
+    const spine_joint = try b.addConstraint(swingTwistDesc(invalid_handle, invalid_handle, gridPositionOffset(root, .{ 0, 0.14, 0 }), .{ 0, 1, 0 }, .{ 1, 0, 0 }, .{ 0.4, 0.3, -0.3, 0.3 }, 0, 0.5));
+    const neck_joint = try b.addConstraint(swingTwistDesc(invalid_handle, invalid_handle, gridPositionOffset(root, .{ 0, 0.44, 0 }), .{ 0, 1, 0 }, .{ 1, 0, 0 }, .{ 0.5, 0.5, -0.4, 0.4 }, 1, 0));
+    var knee = Desc.hinge(invalid_handle, invalid_handle, gridPositionOffset(root, .{ 0.08, -0.12, 0 }), .{ 1, 0, 0 }, .{ 0, 1, 0 });
+    knee.f[12] = -1.0; // Limits
+    knee.f[13] = 1.0;
+    const leg_joint = try b.addConstraint(knee);
+    const additional = try b.addConstraint(Desc.distance(invalid_handle, invalid_handle, gridPositionOffset(root, .{ 0, 0.55, 0 }), gridPositionOffset(root, .{ 0.08, -0.4, 0 }), 0.8, 1.1));
+    return b.addRagdoll(desc_value, &.{
+        .{ .body = bodies[0] },
+        .{ .parent = 0, .body = bodies[1], .to_parent = spine_joint },
+        .{ .parent = 1, .body = bodies[2], .to_parent = neck_joint },
+        .{ .parent = 0, .body = bodies[3], .to_parent = leg_joint },
+    }, &.{.{ .body1 = 2, .body2 = 3, .constraint = additional }});
+}
+
+/// The local joint states of a pose of `addTestRagdoll` (translation relative to the parent, rotation): the bind pose
+/// with the spine bent by `bend` around Z and the knee by `knee` around X
+fn testRagdollPose(bend: f32, knee: f32) [4][7]f32 {
+    const spine = axisAngle(.{ 0, 0, 1 }, bend);
+    const leg = axisAngle(.{ 1, 0, 0 }, knee);
+    return .{
+        .{ 0, 0, 0, 0, 0, 0, 1 },
+        .{ 0, 0.3, 0, spine[0], spine[1], spine[2], spine[3] },
+        .{ 0, 0.25, 0, 0, 0, 0, 1 },
+        .{ 0.08, -0.4, 0, leg[0], leg[1], leg[2], leg[3] },
+    };
+}
+
+/// Every Ragdoll operation: three ragdolls of two descriptions (the first prepared with Stabilize, the constraint
+/// priorities and DisableParentChildCollisions of a pose, its settings shared by two ragdolls; the second without
+/// preparation and DisableParentChildCollisions without pose) fall on a floor; poses set (SkeletonPose and matrices),
+/// driven by kinematics and motors (with velocity), the velocity setters and impulses with and without locking, the
+/// group ID, the settings hashes with and without shapes, one ragdoll removed, added again and destroyed
+fn buildRagdollOps(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 90;
+    _ = try addFloor(b, 20, 0);
+    const prepared = try addTestRagdoll(b, .{ 0, 1.2, 0 }, .{ .stabilize = 1, .calculate_constraint_priorities = 1, .base_priority = 10, .disable_parent_child_collisions = 2, .pose = 0, .min_separation_distance = 0.05, .collision_group = 1, .user_data = 11 });
+    const plain = try addTestRagdoll(b, .{ 0, 1.2, 0 }, .{ .disable_parent_child_collisions = 1, .collision_group = 2, .user_data = 22 });
+    const bind = try b.addRagdollPose(.{ 0, 1.2, 0 }, &testRagdollPose(0, 0));
+    const bent = try b.addRagdollPose(.{ 2, 1.2, 0 }, &testRagdollPose(0.3, -0.6));
+    const left = try b.addRagdollPose(.{ -2, 1.5, 0 }, &testRagdollPose(-0.2, 0.4));
+    const bent_more = try b.addRagdollPose(.{ 2, 1.2, 0 }, &testRagdollPose(0.4, -0.9));
+
+    const rag0 = try b.createRagdoll(prepared);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag0, .{});
+    try b.expectRagdollActive(rag0, true);
+    const rag1 = try b.createRagdoll(prepared); // Shares the settings of rag0
+    try b.objectOp(.ragdoll_set_pose_matrices, rag1, .{ .i = &.{bent} });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag1, .{ .activation = .dont_activate, .i = &no_lock });
+    try b.expectRagdollActive(rag1, false);
+    const rag2 = try b.createRagdoll(plain);
+    try b.objectOp(.ragdoll_set_pose, rag2, .{ .i = &.{ left, 0, 0, 1 } });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag2, .{});
+    try b.objectOp(.ragdoll_settings_hash, rag0, .{ .i = &.{ 1, 1 } });
+    try b.objectOp(.ragdoll_settings_hash, rag2, .{ .i = &.{ 0, 0 } });
+
+    b.at(3);
+    try b.objectOp(.ragdoll_activate, rag1, .{ .i = &no_lock });
+    try b.objectOp(.ragdoll_drive_to_pose_using_motors, rag1, .{ .i = &.{bent_more} });
+    try b.objectOp(.ragdoll_set_linear_velocity, rag2, .{ .f = &.{ 0.5, 0, 0 } });
+    b.at(6);
+    try b.objectOp(.ragdoll_drive_to_pose_using_motors_velocity, rag0, .{ .i = &.{ bent, bind }, .f = &.{b.delta_time} });
+    try b.objectOp(.ragdoll_add_linear_velocity, rag2, .{ .f = &.{ 0, 0, 0.3 }, .i = &no_lock });
+    b.at(10);
+    try b.objectOp(.ragdoll_set_linear_and_angular_velocity, rag0, .{ .f = &.{ 0, 1, 0, 0, 2, 0 } });
+    try b.objectOp(.ragdoll_add_impulse, rag2, .{ .f = &.{ 0, 5, 0 } });
+    try b.objectOp(.ragdoll_get_pose_hash, rag1, .{});
+    b.at(15);
+    try b.objectOp(.ragdoll_reset_warm_start, rag0, .{});
+    try b.objectOp(.ragdoll_set_group_id, rag2, .{ .i = &.{ 5, 0, 0, 1 } });
+    try b.objectOp(.ragdoll_is_active, rag2, .{ .i = &no_lock });
+    b.at(20);
+    try b.objectOp(.ragdoll_set_linear_velocity, rag1, .{ .f = &.{ 0, 0, -0.5 }, .i = &no_lock });
+    try b.objectOp(.ragdoll_set_linear_and_angular_velocity, rag2, .{ .f = &.{ 0, 0, 0, 1, 0, 0 }, .i = &no_lock });
+    b.at(25);
+    try b.objectOp(.ragdoll_add_impulse, rag1, .{ .f = &.{ 2, 0, 0 }, .i = &no_lock });
+    try b.objectOp(.ragdoll_add_linear_velocity, rag0, .{ .f = &.{ 0.2, 0, 0 } });
+    b.at(30);
+    try b.objectOp(.ragdoll_remove_from_physics_system, rag1, .{});
+    try b.objectOp(.ragdoll_get_pose_hash, rag0, .{ .i = &no_lock });
+    b.at(32);
+    try b.objectOp(.ragdoll_set_pose, rag1, .{ .i = &.{bent} });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag1, .{});
+    b.at(40);
+    try b.objectOp(.ragdoll_remove_from_physics_system, rag1, .{ .i = &no_lock });
+    b.at(41);
+    try b.objectOp(.ragdoll_destroy, rag1, .{});
+    b.at(45);
+    // A ragdoll created later reuses the settings of the description
+    const rag3 = try b.createRagdoll(prepared);
+    try b.objectOp(.ragdoll_drive_to_pose_using_kinematics, rag3, .{ .i = &.{bent}, .f = &.{b.delta_time} });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag3, .{});
+    b.at(46);
+    try b.objectOp(.ragdoll_drive_to_pose_using_kinematics_matrices, rag3, .{ .i = &.{ bent_more, 0, 0, 1 }, .f = &.{b.delta_time} });
+    b.at(60);
+    try b.objectOp(.ragdoll_drive_to_pose_using_motors, rag3, .{ .i = &.{bind} });
+}
+
+// (append the Ragdoll scenes here)
+
+// ---- Vehicles (Phase 7, Blocker.wheeled_vehicles / tracked_vehicles / motorcycles) ----
+
+/// The vehicle body of the vehicle scenes: a box of `half_extent` with its center of mass lowered by its half height
+/// (Jolt's VehicleConstraintTest) and the mass `mass`, whose wheels reach the floor in the first update
+fn addVehicleBody(b: *SceneBuilder, half_extent: [3]f32, mass: f32, position: [3]Real) Allocator.Error!u32 {
+    const shape = try b.offsetCenterOfMass(try b.box(half_extent, 0.05), .{ 0, -half_extent[1], 0 });
+    return b.body(.{ .position = position, .shape = shape, .object_layer = Layers.moving, .override_mass_properties = 1, .mass = mass }, .activate);
+}
+
+/// A wheeled car (Jolt's VehicleConstraintTest: four wheels, front steering, a differential per axle that gets half of
+/// the engine torque, two anti-roll bars), returns the vehicle handle. Every wheel touches the floor at y = 0 in the first
+/// update when `position` is 0.85 above it (VehicleConstraint saves the contact of a wheel that never had one
+/// uninitialized, see the file header).
+fn addTestCar(b: *SceneBuilder, position: [3]Real, desc_value: SimVehicle) Allocator.Error!u32 {
+    var v = desc_value;
+    v.body = try addVehicleBody(b, .{ 0.9, 0.2, 2.0 }, 1500, position);
+    var wheels: [4]SimVehicleWheel = undefined;
+    for (&wheels, 0..) |*w, i| {
+        const front = i < 2;
+        w.* = .{ .position = .{ if (i % 2 == 0) 0.9 else -0.9, -0.18, if (front) 1.4 else -1.4 }, .max_steer_angle = if (front) zolt.math.degreesToRadians(30.0) else 0, .max_hand_brake_torque = if (front) 0 else 4000 };
+    }
+    return b.createVehicle(try b.addVehicle(v, &wheels, &.{ .{ .left_wheel = 0, .right_wheel = 1, .engine_torque_ratio = 0.5 }, .{ .left_wheel = 2, .right_wheel = 3, .engine_torque_ratio = 0.5 } }, &.{ .{ .left_wheel = 0, .right_wheel = 1 }, .{ .left_wheel = 2, .right_wheel = 3 } }));
+}
+
+/// Every operation of VehicleConstraint, the wheeled controller and the collision testers: a car drives off, shifts
+/// gears, steers through its pre-step callback, brakes and hand brakes over a floor with a bump; its tester is replaced
+/// by a cast sphere, a cast cylinder and a ray again and gets filters and another layer; the custom friction and tire
+/// impulse functions; the engine, transmission, differential, anti-roll bar and wheel setters; gravity overrides; the
+/// steps between the collision tests; its removal and addition; a snapshot that is restored cross after the car drove on
+fn buildVehicleWheeledOps(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 120;
+    _ = try addFloor(b, 40, 0);
+    _ = try addStaticBox(b, .{ 2.0, 0.05, 0.3 }, .{ 0, 0.0, 6 }, identity_rotation, 0); // A bump across the way
+    const torque_curve = try b.addFloats(&.{ 0, 0.8, 0.5, 1.0, 1.0, 0.7 });
+    const gears = try b.addFloats(&.{ 3.0, 2.0, 1.4, 1.0 });
+    const reverse_gears = try b.addFloats(&.{-3.0});
+    const car = try addTestCar(b, .{ 0, 0.85, 0 }, .{ .tester = .{ .object_layer = Layers.moving }, .callbacks = VehicleCallbacks.pre_step | VehicleCallbacks.post_collide | VehicleCallbacks.post_step, .max_pitch_roll_angle = zolt.math.degreesToRadians(60.0), .draw_constraint_size = 0.1, .user_data = 6 });
+    const crate_shape = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const crate = try b.body(.{ .position = .{ 3, 0.3, 4 }, .shape = crate_shape, .object_layer = Layers.moving }, .activate);
+
+    b.at(1);
+    try b.expectWheelContacts(car, 0b1111);
+    try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 1.0, 0, 0, 0 } });
+    try b.objectOp(.vehicle_settings_hash, car, .{});
+    try b.objectOp(.vehicle_controller_settings_hash, car, .{});
+    b.at(5);
+    try b.objectOp(.vehicle_set_callbacks, car, .{ .i = &.{VehicleCallbacks.pre_step | VehicleCallbacks.post_step | VehicleCallbacks.steer} });
+    try b.objectOp(.vehicle_set_combine_friction, car, .{ .i = &.{@intFromEnum(VehicleCombineFriction.custom)} });
+    try b.objectOp(.wheeled_set_tire_max_impulse_callback, car, .{ .i = &.{@intFromEnum(VehicleTireMaxImpulse.custom)} });
+    b.at(10);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    try b.objectOp(.wheeled_set_brake_input, car, .{ .f = &.{0.2} });
+    b.at(14);
+    try b.objectOp(.wheeled_set_hand_brake_input, car, .{ .f = &.{0.5} });
+    try b.objectOp(.wheeled_set_differential, car, .{ .i = &.{ 0, 0, 1 }, .f = &.{ 3.0, 0.6, 1.5, 0.5 } });
+    try b.objectOp(.wheeled_set_differential_limited_slip_ratio, car, .{ .f = &.{1.6} });
+    b.at(18);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 10 (the brakes are part of the controller state)
+    b.at(20);
+    try b.objectOp(.vehicle_set_collision_tester, car, .{ .i = &.{ @intFromEnum(VehicleTesterKind.cast_sphere), Layers.moving }, .f = &.{ 0, 1, 0, zolt.math.degreesToRadians(80.0), 0.3, 0.1 } });
+    b.at(25);
+    try b.objectOp(.vehicle_tester_set_object_layer, car, .{ .i = &.{Layers.moving2} });
+    try b.objectOp(.wheeled_set_forward_input, car, .{ .f = &.{0.7} });
+    try b.objectOp(.wheeled_set_right_input, car, .{ .f = &.{-0.3} });
+    b.at(30);
+    try b.objectOp(.vehicle_tester_set_filters, car, .{ .i = &.{ 1, Layers.moving }, .body = crate });
+    b.at(35);
+    try b.objectOp(.vehicle_set_collision_tester, car, .{ .i = &.{ @intFromEnum(VehicleTesterKind.cast_cylinder), Layers.moving }, .f = &.{ 0, 1, 0, 0, 0, 0.2 } });
+    try b.objectOp(.vehicle_tester_set_filters, car, .{ .i = &.{ 1, Layers.moving } });
+    b.at(40);
+    try b.objectOp(.vehicle_tester_set_filters, car, .{ .i = &.{0} });
+    b.at(42);
+    try b.objectOp(.vehicle_set_collision_tester, car, .{ .i = &.{ @intFromEnum(VehicleTesterKind.ray), Layers.moving }, .f = &.{ 0, 1, 0, zolt.math.degreesToRadians(70.0), 0, 0 } });
+    b.at(45);
+    try b.objectOp(.vehicle_wheel_set_angular_velocity, car, .{ .i = &.{2}, .f = &.{5.0} });
+    try b.objectOp(.vehicle_wheel_set_rotation_angle, car, .{ .i = &.{3}, .f = &.{1.0} });
+    try b.objectOp(.vehicle_wheel_set_steer_angle, car, .{ .i = &.{0}, .f = &.{0.1} });
+    try b.objectOp(.vehicle_set_anti_roll_bar, car, .{ .i = &.{ 1, 2, 3 }, .f = &.{2000} });
+    b.at(50);
+    try b.objectOp(.vehicle_engine_set_current_rpm, car, .{ .f = &.{3000} });
+    try b.objectOp(.vehicle_engine_set_settings, car, .{ .f = &.{ 600, 900, 6500, 0.6, 0.25 } });
+    try b.objectOp(.vehicle_engine_set_torque_curve, car, .{ .i = &.{ torque_curve, 3 } });
+    b.at(55);
+    try b.objectOp(.vehicle_transmission_set_settings, car, .{ .i = &.{1}, .f = &.{ 0.4, 0.25, 0.4, 4500, 1800, 12 } });
+    try b.objectOp(.vehicle_transmission_set_gear_ratios, car, .{ .i = &.{ gears, 4, reverse_gears, 1 } });
+    try b.objectOp(.vehicle_transmission_set, car, .{ .i = &.{2}, .f = &.{0.8} });
+    try b.objectOp(.vehicle_controller_settings_hash, car, .{});
+    b.at(60);
+    try b.objectOp(.vehicle_override_gravity, car, .{ .f = &.{ 0, -6, 0 } });
+    try b.objectOp(.vehicle_set_max_pitch_roll_angle, car, .{ .f = &.{zolt.math.degreesToRadians(45.0)} });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, car, .{ .i = &.{2} });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_inactive, car, .{ .i = &.{3} });
+    b.at(70);
+    try b.objectOp(.vehicle_reset_gravity_override, car, .{});
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, car, .{ .i = &.{1} });
+    try b.objectOp(.vehicle_settings_hash, car, .{});
+    b.at(75);
+    try b.objectOp(.vehicle_set_callbacks, car, .{ .i = &.{0} });
+    try b.objectOp(.vehicle_set_combine_friction, car, .{ .i = &.{@intFromEnum(VehicleCombineFriction.default)} });
+    try b.objectOp(.wheeled_set_tire_max_impulse_callback, car, .{ .i = &.{@intFromEnum(VehicleTireMaxImpulse.default)} });
+    b.at(80);
+    try b.objectOp(.vehicle_remove, car, .{});
+    b.at(85);
+    try b.objectOp(.vehicle_add, car, .{});
+    b.at(90);
+    try b.objectOp(.vehicle_transmission_set_settings, car, .{ .i = &.{0}, .f = &.{ 0.5, 0.3, 0.5, 4000, 2000, 10 } });
+    try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ -0.5, 0.4, 0, 0 } });
+    b.at(105);
+    try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 0, 0, 1, 1 } });
+}
+
+/// A tank with two tracks of four wheels each (Jolt's TankTest, smaller), returns the vehicle handle: the wheels touch
+/// the floor at y = 0 in the first update when `position` is 0.95 above it
+fn addTestTank(b: *SceneBuilder, position: [3]Real, desc_value: SimVehicle) Allocator.Error!u32 {
+    var v = desc_value;
+    v.body = try addVehicleBody(b, .{ 1.2, 0.4, 2.0 }, 4000, position);
+    var wheels: [8]SimVehicleWheel = undefined;
+    for (0..2) |t| {
+        for (0..4) |i| {
+            const z: f32 = 1.5 - @as(f32, @floatFromInt(i));
+            wheels[4 * t + i] = .{ .kind = @intFromEnum(VehicleWheelKind.tv), .position = .{ if (t == 0) 1.2 else -1.2, -0.3, z }, .suspension_frequency = 1.0, .longitudinal_friction_tv = 4.0 - 0.5 * @as(f32, @floatFromInt(i)) };
+        }
+        v.tracks[t].wheels = try b.addUints(&.{ 4 * @as(u32, @intCast(t)), 4 * @as(u32, @intCast(t)) + 1, 4 * @as(u32, @intCast(t)) + 2, 4 * @as(u32, @intCast(t)) + 3 });
+        v.tracks[t].num_wheels = 4;
+        v.tracks[t].driven_wheel = 4 * @as(u32, @intCast(t)) + 3;
+    }
+    return b.createVehicle(try b.addVehicle(v, &wheels, &.{}, &.{}));
+}
+
+/// Every operation of the tracked controller: a tank drives off, turns with the track ratios (one negative: it turns on
+/// the spot), brakes; a track and the engine / transmission are changed, the callbacks and the custom friction, a
+/// snapshot restored cross
+fn buildVehicleTrackedOps(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 100;
+    _ = try addFloor(b, 40, 0);
+    const tank = try addTestTank(b, .{ 0, 0.95, 0 }, blk: {
+        var v = SimVehicle.defaults(.tracked);
+        v.tester = .{ .object_layer = Layers.moving };
+        v.max_pitch_roll_angle = zolt.math.degreesToRadians(60.0);
+        v.callbacks = VehicleCallbacks.post_collide | VehicleCallbacks.post_step;
+        v.combine_friction = @intFromEnum(VehicleCombineFriction.custom);
+        break :blk v;
+    });
+    b.at(1);
+    try b.expectWheelContacts(tank, 0xff);
+    try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 1.0, 1.0, 1.0, 0 } });
+    try b.objectOp(.vehicle_controller_settings_hash, tank, .{});
+    b.at(10);
+    try b.objectOp(.tracked_set_left_ratio, tank, .{ .f = &.{0.5} });
+    try b.objectOp(.vehicle_set_callbacks, tank, .{ .i = &.{VehicleCallbacks.pre_step} });
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 1 });
+    b.at(20);
+    try b.objectOp(.tracked_set_forward_input, tank, .{ .f = &.{0.8} });
+    try b.objectOp(.tracked_set_brake_input, tank, .{ .f = &.{0.1} });
+    b.at(25);
+    try b.sysOp(.restore_cross, .{ .index = 1 });
+    b.at(30);
+    try b.objectOp(.tracked_set_track, tank, .{ .i = &.{0}, .f = &.{ 2.0, 12, 0.6, 16000, 5.5 } });
+    try b.objectOp(.tracked_set_right_ratio, tank, .{ .f = &.{-0.5} });
+    b.at(40);
+    try b.objectOp(.vehicle_engine_set_current_rpm, tank, .{ .f = &.{1500} });
+    try b.objectOp(.vehicle_transmission_set, tank, .{ .i = &.{1}, .f = &.{1.0} });
+    try b.objectOp(.vehicle_set_combine_friction, tank, .{ .i = &.{@intFromEnum(VehicleCombineFriction.default)} });
+    b.at(50);
+    try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0.6, 1.0, 0.8, 0 } });
+    b.at(70);
+    try b.objectOp(.tracked_set_brake_input, tank, .{ .f = &.{1.0} });
+    try b.objectOp(.tracked_set_forward_input, tank, .{ .f = &.{0} });
+    try b.objectOp(.vehicle_settings_hash, tank, .{});
+}
+
+/// A motorcycle (Jolt's MotorcycleTest: a front wheel with a caster angle and an overridden suspension force point, a
+/// back wheel, one differential to the back wheel), returns the vehicle handle: the wheels touch the floor at y = 0 in the
+/// first update when `position` is 0.9 above it
+fn addTestMotorcycle(b: *SceneBuilder, position: [3]Real, desc_value: SimVehicle) Allocator.Error!u32 {
+    var v = desc_value;
+    v.body = try addVehicleBody(b, .{ 0.2, 0.3, 0.4 }, 240, position);
+    const caster = zolt.math.degreesToRadians(30.0);
+    const tan_caster: f32 = @floatCast(@tan(@as(f64, caster)));
+    const len: f32 = @floatCast(@sqrt(1.0 + @as(f64, tan_caster) * tan_caster));
+    const direction: [3]f32 = .{ 0, -1.0 / len, tan_caster / len };
+    const front_position: [3]f32 = .{ 0, -0.27, 0.75 };
+    const wheels = [_]SimVehicleWheel{
+        .{ .position = front_position, .max_steer_angle = zolt.math.degreesToRadians(30.0), .suspension_direction = direction, .steering_axis = .{ 0, -direction[1], -direction[2] }, .radius = 0.31, .width = 0.05, .max_brake_torque = 500, .enable_suspension_force_point = 1, .suspension_force_point = .{ 0, front_position[1] + 0.3 * direction[1], front_position[2] + 0.3 * direction[2] } },
+        .{ .position = .{ 0, -0.27, -0.75 }, .max_steer_angle = 0, .radius = 0.31, .width = 0.05, .suspension_frequency = 2.0, .max_brake_torque = 250 },
+    };
+    v.engine.max_torque = 150;
+    v.engine.max_rpm = 10000;
+    v.transmission.shift_down_rpm = 2000;
+    v.transmission.shift_up_rpm = 8000;
+    v.transmission.gear_ratios = try b.addFloats(&.{ 2.27, 1.63, 1.3, 1.09, 0.96, 0.88 });
+    v.transmission.num_gear_ratios = 6;
+    v.transmission.reverse_gear_ratios = try b.addFloats(&.{-4.0});
+    v.transmission.num_reverse_gear_ratios = 1;
+    v.transmission.clutch_strength = 2.0;
+    return b.createVehicle(try b.addVehicle(v, &wheels, &.{.{ .left_wheel = -1, .right_wheel = 1, .differential_ratio = 1.93 * 40.0 / 16.0 }}, &.{}));
+}
+
+/// Every operation of the motorcycle controller: a motorcycle drives off and leans into a turn (the lean controller and
+/// the lean steering limit switched off and on, every lean parameter changed; the integration coefficient stays 0:
+/// Jolt's MotorcycleController::SaveState does not save mLeanSpringIntegratedDeltaAngle, the D12 sweeps and the cross
+/// restores would see it), the wheeled operations on it, a snapshot restored cross
+fn buildVehicleMotorcycleOps(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 100;
+    _ = try addFloor(b, 40, 0);
+    const bike = try addTestMotorcycle(b, .{ 0, 0.9, 0 }, .{ .controller = @intFromEnum(VehicleControllerKind.motorcycle), .tester = .{ .object_layer = Layers.moving }, .max_pitch_roll_angle = zolt.math.degreesToRadians(60.0), .callbacks = VehicleCallbacks.pre_step | VehicleCallbacks.post_step, .tire_max_impulse = @intFromEnum(VehicleTireMaxImpulse.custom) });
+    b.at(1);
+    try b.expectWheelContacts(bike, 0b11);
+    try b.objectOp(.wheeled_set_driver_input, bike, .{ .f = &.{ 1.0, 0, 0, 0 } });
+    try b.objectOp(.vehicle_controller_settings_hash, bike, .{});
+    b.at(10);
+    try b.objectOp(.wheeled_set_right_input, bike, .{ .f = &.{0.3} });
+    try b.objectOp(.motorcycle_set_lean_spring_constant, bike, .{ .f = &.{6000} });
+    try b.objectOp(.motorcycle_set_lean_spring_damping, bike, .{ .f = &.{1200} });
+    b.at(15);
+    try b.sysOp(.snapshot, .{ .index = 2 });
+    try b.objectOp(.motorcycle_enable_lean_steering_limit, bike, .{ .i = &.{0} });
+    b.at(20);
+    try b.objectOp(.motorcycle_set_lean_spring_integration_coefficient, bike, .{ .f = &.{0} });
+    try b.objectOp(.motorcycle_set_lean_spring_integration_coefficient_decay, bike, .{ .f = &.{3.0} });
+    try b.objectOp(.motorcycle_set_lean_smoothing_factor, bike, .{ .f = &.{0.7} });
+    b.at(25);
+    try b.sysOp(.restore_cross, .{ .index = 2 });
+    b.at(30);
+    try b.objectOp(.motorcycle_enable_lean_controller, bike, .{ .i = &.{0} });
+    b.at(33);
+    try b.objectOp(.motorcycle_enable_lean_controller, bike, .{ .i = &.{1} });
+    try b.objectOp(.motorcycle_enable_lean_steering_limit, bike, .{ .i = &.{1} });
+    b.at(40);
+    try b.objectOp(.wheeled_set_right_input, bike, .{ .f = &.{-0.2} });
+    try b.objectOp(.vehicle_settings_hash, bike, .{});
+    b.at(70);
+    try b.objectOp(.wheeled_set_driver_input, bike, .{ .f = &.{ 0, 0, 0.5, 0 } });
+}
+
+// (append the vehicle scenes here)
+
+/// The scene of the test "SimulationParity object state decoder": a character, a character virtual on the floor (an
+/// active contact after its first update), a ragdoll and a car (every object state field but the tracked and the
+/// motorcycle ones), for a few updates on the C++ side
+pub fn buildObjectStateTestScene(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 3;
+    _ = try addFloor(b, 20, 0);
+    const c = try b.character(.{ .base = .{ .shape = shapes.standing }, .layer = Layers.moving, .position = .{ 5, 0.02, 5 } });
+    try b.objectOp(.character_add_to_physics_system, c, .{});
+    try b.objectOp(.character_post_simulation, c, .{ .f = &.{0.05} });
+    const cv = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -5, 0, 5 } });
+    try moveCharacterVirtual(b, cv, .{ 0.5, -0.5, 0 }, false, cv_query);
+    const ragdoll = try b.createRagdoll(try addTestRagdoll(b, .{ 5, 1.2, -5 }, .{ .stabilize = 1 }));
+    try b.objectOp(.ragdoll_add_to_physics_system, ragdoll, .{});
+    _ = try addTestCar(b, .{ -5, 0.85, -5 }, .{ .tester = .{ .object_layer = Layers.moving } });
+}
 
 test "SimScenes builders" {
     // Every scene builds and its operations are in update order

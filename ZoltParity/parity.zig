@@ -30,6 +30,7 @@ test {
     _ = @import("Physics/BodyParity.zig");
     _ = @import("Physics/BroadPhaseQuadTreeParity.zig");
     _ = @import("Physics/CapsulesParity.zig");
+    _ = @import("Physics/CharacterBaseParity.zig");
     _ = @import("Physics/CompositeParity.zig");
     _ = @import("Physics/CompoundsParity.zig");
     _ = @import("Physics/ConstraintPartsParity.zig");

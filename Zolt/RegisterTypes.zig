@@ -67,6 +67,7 @@ const RackAndPinionConstraintSettings = @import("Physics/Constraints/RackAndPini
 const SixDOFConstraintSettings = @import("Physics/Constraints/SixDOFConstraint.zig").SixDOFConstraintSettings;
 const SliderConstraintSettings = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraintSettings;
 const SwingTwistConstraintSettings = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraintSettings;
+const VehicleConstraintSettings = @import("Physics/Vehicle/VehicleConstraint.zig").VehicleConstraintSettings;
 
 /// The user types module (see the file comment), an empty module unless the application provides one
 pub const user_types = @import("zolt_user_types");
@@ -123,7 +124,7 @@ pub const group_filter_types = .{GroupFilterTable} ++ (if (@hasDecl(user_types, 
 
 /// The ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState can create (the constraint part of the
 /// Factory registration, until the Factory of Phase 8): Jolt's settings classes in the order of RegisterTypes.cpp plus
-/// the user's. The Phase 6 classes that are still stubs declare `pub const is_stub = true`: restoreFromBinaryState
+/// the user's. The classes that are still stubs declare `pub const is_stub = true`: restoreFromBinaryState
 /// skips them (their hash gives Jolt's "Failed to create instance of type", as for a type the Factory does not know), so
 /// a porter only removes the marker and never edits this list.
 pub const constraint_settings_types = .{
@@ -136,7 +137,7 @@ pub const constraint_settings_types = .{
     FixedConstraintSettings,
     ConeConstraintSettings,
     PathConstraintSettings,
-    // VehicleConstraintSettings follows here in Jolt's list (Phase 7, Vehicle)
+    VehicleConstraintSettings, // Phase 7 (Vehicle core group)
     RackAndPinionConstraintSettings,
     GearConstraintSettings,
     PulleyConstraintSettings,
@@ -195,9 +196,9 @@ test "RegisterTypes: the constraint settings and path classes in Jolt's order, s
     const TestConstraints = @import("Physics/Constraints/TestConstraints.zig");
     const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
 
-    // RegisterTypesInternal's order of the constraint settings (VehicleConstraintSettings is Phase 7), then the user's
-    // (the inline tests register TestConstraintSettings through zolt_user_types)
-    const expected = [_][]const u8{ "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "TestConstraintSettings" };
+    // RegisterTypesInternal's order of the constraint settings, then the user's (the inline tests register
+    // TestConstraintSettings through zolt_user_types)
+    const expected = [_][]const u8{ "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "VehicleConstraintSettings", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "TestConstraintSettings" };
     try testing.expectEqual(expected.len, constraint_settings_types.len);
     inline for (constraint_settings_types, expected) |T, name| {
         try testing.expectEqualStrings(name, T.rtti_name);

@@ -92,6 +92,33 @@
 //! f[6..9] in the slot fails "SimScenes constraint descriptions are ConstraintsParity's" and every fixed constraint scene
 //! before it runs ("constraint description 1 (fixed): the settings of the Zolt slot differ from SimMakeConstraintSettings").
 //!
+//! Characters, ragdolls and vehicles (Phase 7, the recipe for a worker is in the SimScenes header): both worlds keep
+//! their characters, character virtuals, ragdolls and vehicles by handle. The Zolt side of each class group is a slot
+//! (`CharacterSlot`, `CharacterVirtualSlot`, `RagdollSlot`, `VehicleSlot`, `TrackedVehicleSlot`, `MotorcycleSlot`;
+//! `Phase7StubSlot` until the group is ported: the scenes of its Blocker are skipped, a supported scene with a stub slot
+//! fails in checkPhase7Slots). After every update (and after the D12 sweeps and every restore_cross) the object states
+//! are compared (SimScenes.ObjectField: the SaveState bytes of the characters and character virtuals and the getters
+//! that the states do not hold), a mismatch is decoded to the field, the object handle, the item and the component
+//! (`describeObjectStateDifference`, the SaveState fields with the members of CharacterBase / CharacterVirtual /
+//! CharacterContact::SaveState); the CharacterContactListener records (RecordKind 7..17) are compared in call order
+//! (they are the callbacks of the user thread's character operations); `snapshot` / `restore_cross` include the
+//! SaveState of every character; the `expect_*` operations of Phase 7 must return the scene's `count`. Until the classes
+//! are ported the Phase 7 scenes run on the C++ side ("SimScenes blocked scenes run on the C++ side": the object states
+//! of the worlds with 0 and 3 threads are identical, decode completely and stay finite, the character records are
+//! identical in call order). Proof that it bites: flipping a bit of the object state that the C++ world with 3 threads
+//! writes is reported as "scene character_ops, update 0: the C++ worlds with 0 and 3 threads differ: object state
+//! differs at byte 316 (3 threads 616 bytes, 0 threads 616 bytes): character_save_state (object handle 1, item 0)
+//! ground_state 3 threads 0x00000002 0 threads 0x00000003"; swapping its first two character records as "scene
+//! character_virtual_ops, update 0: character listener record 0 of 14 (call order) differs between the C++ worlds with
+//! 0 and 3 threads" (character_adjust_body_velocity against character_contact_validate); a Zolt object state field
+//! that the C++ side does not write as "object state differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more,
+//! starting with ragdoll_properties (object handle 0, item 0)"; a supported Blocker whose classes are stubs as "scene
+//! character_ops creates Character objects, whose Zolt classes are still stubs, but its blocker .characters is
+//! supported"; a ported class (no `is_stub`) with a stub slot as "the Character classes are ported but their slot in
+//! SimulationParity.zig is still Phase7StubSlot" (and the test "SimulationParity Phase 7 slots follow the ported
+//! classes" fails). CharacterBaseParity.zig compares CharacterBase's SaveState bytes: writing the ground normal in
+//! place of the ground velocity fails it.
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
@@ -173,6 +200,13 @@ const Color = zolt.Color;
 const RecordKind = SimScenes.RecordKind;
 const StepListenerMode = SimScenes.StepListenerMode;
 const invalid_handle = SimScenes.invalid_handle;
+const Phase7OpRange = SimScenes.Phase7OpRange;
+const Phase7Classes = SimScenes.Phase7Classes;
+const ObjectField = SimScenes.ObjectField;
+const ObjectFieldHeader = SimScenes.ObjectFieldHeader;
+const ObjectComponent = SimScenes.ObjectComponent;
+const ObjectStateWriter = SimScenes.ObjectStateWriter;
+const VehicleControllerKind = SimScenes.VehicleControllerKind;
 
 const io = std.testing.io;
 
@@ -195,6 +229,18 @@ const jolt = struct {
     extern fn jolt_sim_num_active_constraints(world: *anyopaque) u32;
     extern fn jolt_sim_default_constraint_settings_save(kind: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_sim_constraint_settings_save(constraint: *const SimConstraint, out_bytes: [*]u8, capacity: u32) u32;
+    // Phase 7: characters, ragdolls and vehicles
+    extern fn jolt_sim_phase7_struct_sizes(out_sizes: *[32]u32) void;
+    extern fn jolt_sim_object_state(world: *anyopaque, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_take_character_records(world: *anyopaque, out_records: [*]SimRecord, capacity: u32) u32;
+    extern fn jolt_sim_save_character_states(world: *anyopaque, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_restore_character_states(world: *anyopaque, bytes: [*]const u8, size: u32) u32;
+    extern fn jolt_sim_default_character(out_character: *SimScenes.SimCharacter) void;
+    extern fn jolt_sim_default_character_virtual(out_character: *SimScenes.SimCharacterVirtual) void;
+    extern fn jolt_sim_default_extended_update(out_floats: *[12]f32) void;
+    extern fn jolt_sim_default_vehicle(kind: u32, out_vehicle: *SimScenes.SimVehicle) void;
+    extern fn jolt_sim_default_vehicle_wheel(kind: u32, out_wheel: *SimScenes.SimVehicleWheel) void;
+    extern fn jolt_sim_vehicle_settings_save(desc: *const SimSceneDesc, index: u32, out_bytes: [*]u8, capacity: u32) u32;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -714,6 +760,11 @@ const ZoltWorld = struct {
     step_listener_added: []bool = &.{},
     /// The constraints of the constraint handles (one reference each, also for constraints that are not in the system)
     constraint_handles: std.ArrayList(Ref(Constraint)) = .empty,
+    /// Phase 7: the CharacterContactListener records of the character virtuals (`CharacterRecords` builds them, compared
+    /// in call order)
+    character_recorder: Recorder,
+    /// Phase 7: the objects of the slots (characters, character virtuals, ragdolls, vehicles)
+    phase7: Phase7Storage = .{},
 
     fn create(allocator: Allocator, desc: *const SimSceneDesc, job_kind: JobKind) !*ZoltWorld {
         const self = try allocator.create(ZoltWorld);
@@ -724,9 +775,11 @@ const ZoltWorld = struct {
             .temp = try .init(allocator, desc.temp_allocator_size),
             .broad_phase_layer_interface = .init(),
             .recorder = .{ .allocator = allocator },
+            .character_recorder = .{ .allocator = allocator },
         };
         errdefer self.temp.deinit();
         errdefer self.recorder.deinit();
+        errdefer self.character_recorder.deinit();
         try self.jobs.init(allocator, job_kind);
         errdefer self.jobs.deinit();
 
@@ -775,6 +828,8 @@ const ZoltWorld = struct {
 
     fn destroy(self: *ZoltWorld) void {
         const allocator = self.allocator;
+        // Phase 7 objects first (~SimWorld of the .cpp): they remove their bodies and constraints from the system
+        self.destroyPhase7();
         for (self.step_listeners, self.step_listener_added) |*listener, added| {
             if (added) self.system.removeStepListener(.init(listener));
         }
@@ -788,6 +843,7 @@ const ZoltWorld = struct {
         allocator.free(self.step_listener_added);
         self.jobs.deinit();
         self.recorder.deinit();
+        self.character_recorder.deinit();
         self.temp.deinit();
         allocator.destroy(self);
     }
@@ -1096,12 +1152,16 @@ const ZoltWorld = struct {
 
             .set_update, .snapshot, .restore_cross => unreachable, // Driver operations
 
-            // The constraint operations (Phase 6): every OpKind in a ConstraintOpRange, without a list that the worker
-            // groups would extend at the same place
+            // The constraint operations (Phase 6) and the character, ragdoll and vehicle operations (Phase 7): every OpKind
+            // in a ConstraintOpRange / Phase7OpRange, without a list that the worker groups would extend at the same place
             inline else => |k| {
-                if (comptime ConstraintOpRange.of(@intFromEnum(k)) == null)
+                if (comptime ConstraintOpRange.of(@intFromEnum(k)) != null) {
+                    return self.applyConstraintOp(op);
+                } else if (comptime Phase7OpRange.of(@intFromEnum(k)) != null) {
+                    return self.applyPhase7Op(op);
+                } else {
                     @compileError("operation without prong: " ++ @tagName(k));
-                return self.applyConstraintOp(op);
+                }
             },
         }
 
@@ -1264,6 +1324,80 @@ const ZoltWorld = struct {
         }
         return n;
     }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Phase 7: characters, ragdolls and vehicles (the slots, see "Characters, ragdolls and vehicles" below)
+
+    /// A Phase 7 operation (ApplyObjectOp of SimulationReference.cpp): the slot of its Phase7OpRange
+    fn applyPhase7Op(self: *ZoltWorld, op: *const SimOp) !u32 {
+        const kind: OpKind = @enumFromInt(op.kind);
+        return switch (Phase7OpRange.of(op.kind).?) {
+            .character => if (kind == .create_character) CharacterSlot.create(self, op) else CharacterSlot.applyOp(self, op),
+            .character_virtual => if (kind == .create_character_virtual) CharacterVirtualSlot.create(self, op) else CharacterVirtualSlot.applyOp(self, op),
+            .ragdoll => if (kind == .create_ragdoll) RagdollSlot.create(self, op) else RagdollSlot.applyOp(self, op),
+            .vehicle => if (kind == .create_vehicle)
+                VehicleSlot.create(self, op)
+            else if (op.kind >= @intFromEnum(OpKind.tracked_set_driver_input) and op.kind <= @intFromEnum(OpKind.tracked_set_track))
+                TrackedVehicleSlot.applyOp(self, op)
+            else if (op.kind >= @intFromEnum(OpKind.motorcycle_enable_lean_controller) and op.kind <= @intFromEnum(OpKind.motorcycle_set_lean_smoothing_factor))
+                MotorcycleSlot.applyOp(self, op)
+            else
+                VehicleSlot.applyOp(self, op),
+            .spare => error.SceneNotSupported,
+        };
+    }
+
+    /// The object state (WriteObjectState of SimulationReference.cpp): every character, character virtual, ragdoll and
+    /// vehicle in handle order, the destroyed ones skipped
+    fn writeObjectState(self: *ZoltWorld, out: *std.ArrayList(u8)) !void {
+        var writer: ObjectStateWriter = .{ .allocator = self.allocator, .bytes = out.* };
+        defer out.* = writer.bytes;
+        writer.bytes.clearRetainingCapacity();
+        try CharacterSlot.writeState(self, &writer);
+        try CharacterVirtualSlot.writeState(self, &writer);
+        try RagdollSlot.writeState(self, &writer);
+        try VehicleSlot.writeState(self, &writer);
+    }
+
+    /// The SaveState bytes of every character and character virtual in handle order (SaveCharacterStates of the .cpp)
+    fn saveCharacterStates(self: *ZoltWorld, out: *std.ArrayList(u8)) !void {
+        var recorder = StateRecorderImpl.init(self.allocator);
+        defer recorder.deinit();
+        try CharacterSlot.saveStates(self, &recorder);
+        try CharacterVirtualSlot.saveStates(self, &recorder);
+        if (recorder.isFailed()) return error.OutOfMemory;
+        out.clearRetainingCapacity();
+        try out.appendSlice(self.allocator, recorder.getData());
+    }
+
+    /// RestoreState of every character and character virtual from the bytes of `saveCharacterStates` (of either side)
+    fn restoreCharacterStates(self: *ZoltWorld, bytes: []const u8) !bool {
+        var recorder = StateRecorderImpl.init(self.allocator);
+        defer recorder.deinit();
+        recorder.writeBytes(bytes);
+        if (recorder.isFailed()) return error.OutOfMemory;
+        recorder.rewind();
+        try CharacterSlot.restoreStates(self, &recorder);
+        try CharacterVirtualSlot.restoreStates(self, &recorder);
+        return !recorder.isFailed();
+    }
+
+    fn takeCharacterRecords(self: *ZoltWorld, out: *std.ArrayList(SimRecord)) !void {
+        try self.character_recorder.checkError();
+        self.character_recorder.mutex.lock(io);
+        defer self.character_recorder.mutex.unlock(io);
+        try out.appendSlice(self.allocator, self.character_recorder.records.items);
+        self.character_recorder.records.clearRetainingCapacity();
+    }
+
+    /// Destroy the Phase 7 objects (before the system, ~SimWorld of the .cpp: vehicles, characters, character virtuals,
+    /// ragdolls)
+    fn destroyPhase7(self: *ZoltWorld) void {
+        VehicleSlot.destroyAll(self);
+        CharacterSlot.destroyAll(self);
+        CharacterVirtualSlot.destroyAll(self);
+        RagdollSlot.destroyAll(self);
+    }
 };
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -1332,6 +1466,44 @@ const CppWorld = struct {
     /// The number of constraints of the system whose IsActive() is true
     fn numActiveConstraints(self: CppWorld) u32 {
         return jolt.jolt_sim_num_active_constraints(self.handle);
+    }
+
+    /// Phase 7: the object state (WriteObjectState)
+    fn objectState(self: CppWorld, allocator: Allocator, out: *std.ArrayList(u8)) !void {
+        try getBytes(allocator, out, self.handle, &jolt.jolt_sim_object_state);
+    }
+
+    /// Phase 7: the SaveState bytes of every character and character virtual in handle order
+    fn saveCharacterStates(self: CppWorld, allocator: Allocator, out: *std.ArrayList(u8)) !void {
+        try getBytes(allocator, out, self.handle, &jolt.jolt_sim_save_character_states);
+    }
+
+    fn restoreCharacterStates(self: CppWorld, bytes: []const u8) bool {
+        return jolt.jolt_sim_restore_character_states(self.handle, bytes.ptr, @intCast(bytes.len)) != 0;
+    }
+
+    /// Phase 7: the CharacterContactListener records in call order
+    fn takeCharacterRecords(self: CppWorld, allocator: Allocator, out: *std.ArrayList(SimRecord)) !void {
+        const n = jolt.jolt_sim_take_character_records(self.handle, out.items.ptr, 0);
+        if (n == 0) return;
+        try out.ensureUnusedCapacity(allocator, n);
+        const unused = out.unusedCapacitySlice();
+        const taken = jolt.jolt_sim_take_character_records(self.handle, unused.ptr, @intCast(unused.len));
+        std.debug.assert(taken <= unused.len);
+        out.items.len += taken;
+    }
+
+    /// The bytes of a C function that returns their size and copies them when they fit
+    fn getBytes(allocator: Allocator, out: *std.ArrayList(u8), handle: *anyopaque, function: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32) !void {
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = function(handle, out.items.ptr, @intCast(out.capacity));
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
     }
 };
 
@@ -1611,6 +1783,311 @@ pub fn describeStateDifference(allocator: Allocator, zolt_bytes: []const u8, jol
 }
 
 // -------------------------------------------------------------------------------------------------------------------
+// Phase 7: the object state decoder. The object state (SimScenes.ObjectField, written by the slots' `writeState` and
+// WriteObjectState of SimulationReference.cpp) is a list of fields; a mismatch is reported with the field, the object
+// handle, the item (contact, wheel, joint, ...) and the component, the SaveState fields with the members of
+// CharacterBase / CharacterVirtual / CharacterContact::SaveState.
+
+/// A field of an object state: its header and the offset of the header in the bytes
+const ObjectFieldView = struct {
+    header: ObjectFieldHeader,
+    offset: usize,
+
+    fn data(self: ObjectFieldView, bytes: []const u8) []const u8 {
+        return bytes[self.offset + @sizeOf(ObjectFieldHeader) ..][0..self.header.size];
+    }
+
+    fn field(self: ObjectFieldView) ?ObjectField {
+        return std.enums.fromInt(ObjectField, self.header.field);
+    }
+};
+
+/// Iterates the fields of an object state (error.InvalidObjectState when a field does not fit in the bytes)
+const ObjectFieldIterator = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *ObjectFieldIterator) !?ObjectFieldView {
+        if (self.pos == self.bytes.len) return null;
+        if (self.pos + @sizeOf(ObjectFieldHeader) > self.bytes.len) return error.InvalidObjectState;
+        const header = std.mem.bytesToValue(ObjectFieldHeader, self.bytes[self.pos..][0..@sizeOf(ObjectFieldHeader)]);
+        const end = self.pos + @sizeOf(ObjectFieldHeader) + header.size;
+        if (end > self.bytes.len) return error.InvalidObjectState;
+        const view: ObjectFieldView = .{ .header = header, .offset = self.pos };
+        self.pos = end;
+        return view;
+    }
+};
+
+/// The members of CharacterBase::SaveState (the start of the `*_save_state` fields)
+const character_base_save_state = [_]ObjectComponent{
+    .{ .name = "ground_state", .kind = .u32 },
+    .{ .name = "ground_body_id", .kind = .u32 },
+    .{ .name = "ground_body_sub_shape_id", .kind = .u32 },
+    .{ .name = "ground_position", .kind = .real, .count = 3 },
+    .{ .name = "ground_normal", .kind = .f32, .count = 3 },
+    .{ .name = "ground_velocity", .kind = .f32, .count = 3 },
+};
+
+/// The members of CharacterVirtual::SaveState after CharacterBase's (then `num_contacts` contacts)
+const character_virtual_save_state = [_]ObjectComponent{
+    .{ .name = "position", .kind = .real, .count = 3 },
+    .{ .name = "rotation", .kind = .f32, .count = 4 },
+    .{ .name = "linear_velocity", .kind = .f32, .count = 3 },
+    .{ .name = "last_delta_time", .kind = .f32 },
+    .{ .name = "max_hits_exceeded", .kind = .u8 },
+    .{ .name = "num_contacts", .kind = .u32 },
+};
+
+/// The members of CharacterContact::SaveState (the contacts with mHadCollision of CharacterVirtual::SaveState)
+const character_contact_save_state = [_]ObjectComponent{
+    .{ .name = "contact.body_b", .kind = .u32 },
+    .{ .name = "contact.character_id_b", .kind = .u32 },
+    .{ .name = "contact.sub_shape_id_b", .kind = .u32 },
+    .{ .name = "contact.position", .kind = .real, .count = 3 },
+    .{ .name = "contact.linear_velocity", .kind = .f32, .count = 3 },
+    .{ .name = "contact.contact_normal", .kind = .f32, .count = 3 },
+    .{ .name = "contact.surface_normal", .kind = .f32, .count = 3 },
+    .{ .name = "contact.distance", .kind = .f32 },
+    .{ .name = "contact.fraction", .kind = .f32 },
+    .{ .name = "contact.motion_type_b", .kind = .u8 },
+    .{ .name = "contact.is_sensor_b", .kind = .u8 },
+    .{ .name = "contact.had_collision", .kind = .u8 },
+    .{ .name = "contact.was_discarded", .kind = .u8 },
+    .{ .name = "contact.can_push_character", .kind = .u8 },
+};
+
+fn componentsSize(components: []const ObjectComponent) usize {
+    var size: usize = 0;
+    for (components) |c| size += SimScenes.objectComponentSize(c.kind) * c.count;
+    return size;
+}
+
+/// The components of a field of an object state (the caller frees the slice; null: an unknown field number)
+fn objectFieldComponents(allocator: Allocator, view: ObjectFieldView, bytes: []const u8) !?[]ObjectComponent {
+    const field = view.field() orelse return null;
+    var list: std.ArrayList(ObjectComponent) = .empty;
+    errdefer list.deinit(allocator);
+    switch (field) {
+        .character_save_state => try list.appendSlice(allocator, &character_base_save_state),
+        .cv_save_state => {
+            try list.appendSlice(allocator, &character_base_save_state);
+            try list.appendSlice(allocator, &character_virtual_save_state);
+            const data = view.data(bytes);
+            const offset = componentsSize(list.items) - 4;
+            if (offset + 4 <= data.len) {
+                // The contacts (bounded by the size of the field, the number may be garbage in a mismatch)
+                const num_contacts = std.mem.readInt(u32, data[offset..][0..4], .little);
+                const max_contacts = (data.len - offset - 4) / componentsSize(&character_contact_save_state);
+                for (0..@min(num_contacts, max_contacts)) |_|
+                    try list.appendSlice(allocator, &character_contact_save_state);
+            }
+        },
+        else => try list.appendSlice(allocator, SimScenes.objectFieldLayout(field).?),
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
+/// A value of an object state
+const ObjectValue = struct {
+    offset: usize,
+    kind: SimScenes.ObjectComponentKind,
+    header: ObjectFieldHeader,
+    name: []const u8,
+    /// The element of a vector / matrix component (null: a scalar)
+    index: ?u8 = null,
+};
+
+/// The values of an object state (the layout of the C++ bytes). `complete` is false when a field is unknown or its
+/// components do not add up to its size.
+const ObjectStateLayout = struct {
+    allocator: Allocator,
+    values: std.ArrayList(ObjectValue) = .empty,
+    complete: bool = true,
+
+    fn deinit(self: *ObjectStateLayout) void {
+        self.values.deinit(self.allocator);
+    }
+
+    fn decode(self: *ObjectStateLayout, bytes: []const u8) !void {
+        var it: ObjectFieldIterator = .{ .bytes = bytes };
+        while (true) {
+            const view = (it.next() catch {
+                self.complete = false;
+                return;
+            }) orelse return;
+            const components = (try objectFieldComponents(self.allocator, view, bytes)) orelse {
+                self.complete = false;
+                continue;
+            };
+            defer self.allocator.free(components);
+            var offset = view.offset + @sizeOf(ObjectFieldHeader);
+            const end = offset + view.header.size;
+            components: for (components) |c| {
+                const size = SimScenes.objectComponentSize(c.kind);
+                for (0..c.count) |k| {
+                    if (offset + size > end) {
+                        self.complete = false;
+                        break :components;
+                    }
+                    try self.values.append(self.allocator, .{ .offset = offset, .kind = c.kind, .header = view.header, .name = c.name, .index = if (c.count > 1) @intCast(k) else null });
+                    offset += size;
+                }
+            }
+            if (offset != end) self.complete = false;
+        }
+    }
+
+    /// The first value that is not finite (a float or Real)
+    fn firstNotFinite(self: *const ObjectStateLayout, bytes: []const u8) ?*const ObjectValue {
+        for (self.values.items) |*v| {
+            const finite = switch (v.kind) {
+                .f32 => std.math.isFinite(std.mem.bytesToValue(f32, bytes[v.offset..][0..4])),
+                .real => std.math.isFinite(std.mem.bytesToValue(Real, bytes[v.offset..][0..@sizeOf(Real)])),
+                else => true,
+            };
+            if (!finite) return v;
+        }
+        return null;
+    }
+};
+
+fn writeObjectFieldName(w: *std.Io.Writer, header: ObjectFieldHeader) !void {
+    if (std.enums.fromInt(ObjectField, header.field)) |field|
+        try w.print("{t}", .{field})
+    else
+        try w.print("field {d}", .{header.field});
+    try w.print(" (object handle {d}, item {d})", .{ header.handle, header.item });
+}
+
+fn writeObjectValueName(w: *std.Io.Writer, value: *const ObjectValue) !void {
+    try writeObjectFieldName(w, value.header);
+    try w.print(" {s}", .{value.name});
+    if (value.index) |i| {
+        if (i < 4) try w.print(".{c}", .{"xyzw"[i]}) else try w.print("[{d}]", .{i});
+    }
+}
+
+fn writeObjectValue(w: *std.Io.Writer, value: *const ObjectValue, bytes: []const u8) !void {
+    const size = SimScenes.objectComponentSize(value.kind);
+    if (value.offset + size > bytes.len) {
+        try w.writeAll("(missing)");
+        return;
+    }
+    const b = bytes[value.offset..][0..size];
+    switch (value.kind) {
+        .u8 => try w.print("{d}", .{b[0]}),
+        .u32 => try w.print("0x{x:0>8}", .{std.mem.bytesToValue(u32, b[0..4])}),
+        .i32 => try w.print("{d}", .{std.mem.bytesToValue(i32, b[0..4])}),
+        .u64 => try w.print("0x{x:0>16}", .{std.mem.bytesToValue(u64, b[0..8])}),
+        .f32 => {
+            const v = std.mem.bytesToValue(f32, b[0..4]);
+            try w.print("0x{x:0>8} ({e})", .{ @as(u32, @bitCast(v)), v });
+        },
+        .real => {
+            const v = std.mem.bytesToValue(Real, b[0..@sizeOf(Real)]);
+            try w.print("0x{x} ({e})", .{ @as(std.meta.Int(.unsigned, @bitSizeOf(Real)), @bitCast(v)), v });
+        },
+    }
+}
+
+/// The names of the two object states that `describeObjectStateDifference` compares: the checked one and the reference,
+/// whose layout decodes the bytes ("SimScenes blocked scenes run on the C++ side" compares two C++ worlds)
+pub const ObjectStateSides = struct {
+    checked: []const u8 = "zolt",
+    reference: []const u8 = "jolt",
+};
+
+/// Describe where the Zolt object state differs from the Jolt one (null when they are equal), the caller owns the text
+pub fn describeObjectStateDifference(allocator: Allocator, zolt_bytes: []const u8, jolt_bytes: []const u8, sides: ObjectStateSides) !?[]u8 {
+    const first = std.mem.indexOfDiff(u8, zolt_bytes, jolt_bytes) orelse return null;
+
+    var layout: ObjectStateLayout = .{ .allocator = allocator };
+    defer layout.deinit();
+    try layout.decode(jolt_bytes);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.print("object state differs at byte {d} ({s} {d} bytes, {s} {d} bytes)", .{ first, sides.checked, zolt_bytes.len, sides.reference, jolt_bytes.len });
+
+    // Zolt writes more: the fields after the end of the jolt bytes
+    if (first == jolt_bytes.len) {
+        try w.print(": {s} writes more, starting with ", .{sides.checked});
+        if (first + @sizeOf(ObjectFieldHeader) <= zolt_bytes.len)
+            try writeObjectFieldName(w, std.mem.bytesToValue(ObjectFieldHeader, zolt_bytes[first..][0..@sizeOf(ObjectFieldHeader)]))
+        else
+            try w.writeAll("a truncated field");
+        return try out.toOwnedSlice();
+    }
+
+    // A field header: the sides write other fields or objects here
+    var it: ObjectFieldIterator = .{ .bytes = jolt_bytes };
+    while (it.next() catch null) |view| {
+        if (first >= view.offset + @sizeOf(ObjectFieldHeader)) continue;
+        if (first < view.offset) break;
+        try w.print(": the fields differ, {s} ", .{sides.reference});
+        try writeObjectFieldName(w, view.header);
+        try w.print(" of {d} bytes, {s} ", .{ view.header.size, sides.checked });
+        if (view.offset + @sizeOf(ObjectFieldHeader) <= zolt_bytes.len) {
+            const zolt_header = std.mem.bytesToValue(ObjectFieldHeader, zolt_bytes[view.offset..][0..@sizeOf(ObjectFieldHeader)]);
+            try writeObjectFieldName(w, zolt_header);
+            try w.print(" of {d} bytes", .{zolt_header.size});
+        } else try w.writeAll("nothing");
+        return try out.toOwnedSlice();
+    }
+
+    // The first differing values
+    var listed: u32 = 0;
+    for (layout.values.items) |*value| {
+        const size = SimScenes.objectComponentSize(value.kind);
+        if (value.offset + size <= first) continue;
+        const differs = value.offset + size > zolt_bytes.len or !std.mem.eql(u8, zolt_bytes[value.offset..][0..size], jolt_bytes[value.offset..][0..size]);
+        if (!differs) continue;
+        switch (listed) {
+            0 => try w.writeAll(": "),
+            1 => try w.print("\n  further differing values ({s} layout):\n    ", .{sides.reference}),
+            else => try w.writeAll("\n    "),
+        }
+        try writeObjectValueName(w, value);
+        try w.print(" {s} ", .{sides.checked});
+        try writeObjectValue(w, value, zolt_bytes);
+        try w.print(" {s} ", .{sides.reference});
+        try writeObjectValue(w, value, jolt_bytes);
+        listed += 1;
+        if (listed == 12) break;
+    }
+    if (listed == 0) try w.writeAll(": past the decoded values");
+    return try out.toOwnedSlice();
+}
+
+/// What the object states of a run show (Expect.ground_states, Expect.wheel_contacts)
+const ObjectStats = struct {
+    /// The ground states (bit `1 << EGroundState`) of the characters and character virtuals after some update
+    ground_states: u32 = 0,
+    /// Some wheel had a contact after some update
+    wheel_contacts: bool = false,
+};
+
+/// Add what an object state shows to `stats`
+fn scanObjectState(bytes: []const u8, stats: *ObjectStats) !void {
+    var it: ObjectFieldIterator = .{ .bytes = bytes };
+    while (try it.next()) |view| {
+        const data = view.data(bytes);
+        switch (view.field() orelse continue) {
+            .character_save_state, .cv_save_state => if (data.len >= 4) {
+                const ground_state = std.mem.readInt(u32, data[0..4], .little);
+                if (ground_state < 32) stats.ground_states |= @as(u32, 1) << @intCast(ground_state);
+            },
+            .vehicle_wheel => if (data.len >= 16 and std.mem.readInt(u32, data[12..16], .little) != 0) {
+                stats.wheel_contacts = true;
+            },
+            else => {},
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------------------------
 // The driver
 
 const Config = struct {
@@ -1658,6 +2135,12 @@ const Run = struct {
     zolt_records: std.ArrayList(SimRecord) = .empty,
     jolt_records: std.ArrayList(SimRecord) = .empty,
     snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty }),
+    /// Phase 7: the object states, the character listener records and the character states of the snapshots
+    zolt_objects: std.ArrayList(u8) = .empty,
+    jolt_objects: std.ArrayList(u8) = .empty,
+    zolt_character_records: std.ArrayList(SimRecord) = .empty,
+    jolt_character_records: std.ArrayList(SimRecord) = .empty,
+    character_snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty }),
     /// Statistics for the sanity checks of the test
     stats: RunStats = .{},
 
@@ -1670,6 +2153,43 @@ const Run = struct {
             s[0].deinit(self.allocator);
             s[1].deinit(self.allocator);
         }
+        self.zolt_objects.deinit(self.allocator);
+        self.jolt_objects.deinit(self.allocator);
+        self.zolt_character_records.deinit(self.allocator);
+        self.jolt_character_records.deinit(self.allocator);
+        for (&self.character_snapshots) |*s| {
+            s[0].deinit(self.allocator);
+            s[1].deinit(self.allocator);
+        }
+    }
+
+    /// Phase 7: compare the object states of both sides (`what` describes the moment)
+    fn compareObjectStates(self: *Run, what: []const u8) !void {
+        try self.zw.writeObjectState(&self.zolt_objects);
+        try self.cw.objectState(self.allocator, &self.jolt_objects);
+        if (try describeObjectStateDifference(self.allocator, self.zolt_objects.items, self.jolt_objects.items, .{})) |message| {
+            defer self.allocator.free(message);
+            return self.fail("{s}: {s}", .{ what, message });
+        }
+        try scanObjectState(self.jolt_objects.items, &self.stats.objects);
+    }
+
+    /// Phase 7: compare the CharacterContactListener records since the last comparison in call order (the user thread
+    /// calls them in Jolt's deterministic order: the character operations run between the updates)
+    fn compareCharacterRecords(self: *Run) !void {
+        self.zolt_character_records.clearRetainingCapacity();
+        self.jolt_character_records.clearRetainingCapacity();
+        try self.zw.takeCharacterRecords(&self.zolt_character_records);
+        try self.cw.takeCharacterRecords(self.allocator, &self.jolt_character_records);
+        for (self.jolt_character_records.items) |r|
+            self.stats.records[r.kind] += 1;
+        const n = @min(self.zolt_character_records.items.len, self.jolt_character_records.items.len);
+        for (self.zolt_character_records.items[0..n], self.jolt_character_records.items[0..n], 0..) |z, j, i| {
+            if (!std.meta.eql(z, j))
+                return self.fail("character listener record {d} of {d} (call order) differs:\n  zolt {f}\n  jolt {f}", .{ i, self.jolt_character_records.items.len, RecordText{ .record = z }, RecordText{ .record = j } });
+        }
+        if (self.zolt_character_records.items.len != self.jolt_character_records.items.len)
+            return self.fail("{d} character listener records in zolt, {d} in jolt", .{ self.zolt_character_records.items.len, self.jolt_character_records.items.len });
     }
 
     fn fail(self: *const Run, comptime fmt: []const u8, args: anytype) error{ParityMismatch} {
@@ -1756,6 +2276,10 @@ const Run = struct {
                     const state = snapshotState(op);
                     try self.zw.saveState(state, &slot[0]);
                     try self.cw.saveState(self.allocator, state, &slot[1]);
+                    // Phase 7: the characters are not part of the PhysicsSystem state
+                    const character_slot = &self.character_snapshots[op.index];
+                    try self.zw.saveCharacterStates(&character_slot[0]);
+                    try self.cw.saveCharacterStates(self.allocator, &character_slot[1]);
                 },
                 .restore_cross => {
                     // Zolt restores the C++ state, C++ the Zolt state
@@ -1767,7 +2291,13 @@ const Run = struct {
                         return self.fail("zolt could not restore the jolt state of slot {d}", .{op.index});
                     if (!self.cw.restoreState(slot[0].items))
                         return self.fail("jolt could not restore the zolt state of slot {d}", .{op.index});
+                    const character_slot = &self.character_snapshots[op.index];
+                    if (!try self.zw.restoreCharacterStates(character_slot[1].items))
+                        return self.fail("zolt could not restore the jolt character states of slot {d}", .{op.index});
+                    if (!self.cw.restoreCharacterStates(character_slot[0].items))
+                        return self.fail("jolt could not restore the zolt character states of slot {d}", .{op.index});
                     try self.compareStates(.all, "after restore_cross");
+                    try self.compareObjectStates("after restore_cross");
                 },
                 else => |kind| {
                     const zolt_result = try self.zw.applyOp(op);
@@ -1775,7 +2305,14 @@ const Run = struct {
                     if (zolt_result != jolt_result) {
                         if (ConstraintOpRange.of(op.kind) != null)
                             return self.fail("operation {d} ({t} on constraint handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.index, zolt_result, jolt_result });
+                        if (Phase7OpRange.of(op.kind) != null)
+                            return self.fail("operation {d} ({t} on object handle / description {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.index, zolt_result, jolt_result });
                         return self.fail("operation {d} ({t} on handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.body, zolt_result, jolt_result });
+                    }
+                    if (isPhase7Expectation(kind)) {
+                        if (jolt_result != op.count)
+                            return self.fail("operation {d}: the scene expects {t} of object handle {d} to be {d}, it is {d} on both sides (the scene does not reach what it is written for)", .{ op_index.*, kind, op.index, op.count, jolt_result });
+                        self.stats.num_expectations += 1;
                     }
                     if (kind == .expect_body_state) {
                         if (jolt_result != op.index)
@@ -1811,6 +2348,8 @@ const Run = struct {
         try self.compareStates(.all, "after the update");
         try self.countCCDManifolds();
         try self.compareRecords();
+        try self.compareObjectStates("after the update");
+        try self.compareCharacterRecords();
         self.updateStats();
     }
 
@@ -1951,6 +2490,9 @@ const Run = struct {
         try self.zolt_records.appendSlice(allocator, zolt_records.items);
         try self.cw.takeRecords(allocator, &self.jolt_records);
         try self.compareTakenRecords();
+        // Phase 7: the objects after the last update of the sweeps (a full update from the snapshot, like the C++ one)
+        try self.compareObjectStates("after the sweeps");
+        try self.compareCharacterRecords();
         self.updateStats();
     }
 
@@ -2019,7 +2561,30 @@ const RunStats = struct {
     max_manifolds_per_body_pair: u32 = 0,
     /// Largest number of active constraints before an update (Zolt side, Expect.active_constraints)
     max_active_constraints: u32 = 0,
+    /// Phase 7: what the object states after the updates show (Expect.ground_states, Expect.wheel_contacts)
+    objects: ObjectStats = .{},
 };
+
+/// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
+fn isPhase7Expectation(kind: OpKind) bool {
+    return switch (kind) {
+        .character_expect_ground_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts => true,
+        else => false,
+    };
+}
+
+/// True when `records` (counts per RecordKind) has every RecordKind of the bits (Expect.character_records); the missing
+/// kinds are printed
+fn recordsReach(records: []const u32, bits: u32) bool {
+    var reached = true;
+    for (records, 0..) |count, kind| {
+        if (kind < 32 and (bits & (@as(u32, 1) << @intCast(kind))) != 0 and count == 0) {
+            std.debug.print("SimulationParity: no {t} records\n", .{@as(RecordKind, @enumFromInt(kind))});
+            reached = false;
+        }
+    }
+    return reached;
+}
 
 /// The largest number of OnContactAdded + OnContactPersisted records of one body pair in `records` (Expect.full_manifolds)
 fn maxManifoldsPerBodyPair(allocator: Allocator, records: []const SimRecord) Allocator.Error!u32 {
@@ -2791,6 +3356,232 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
     }
 }
 
+// -------------------------------------------------------------------------------------------------------------------
+// Characters, ragdolls and vehicles (Phase 7): the Zolt side of the classes, one slot per class group (the recipe is in
+// the SimScenes header; the C++ side, SimulationReference.cpp, covers every class and operation). A slot is a struct
+// with
+// - `Storage`: what the world keeps of the objects of its handles (a field of ZoltWorld.phase7, initialized with .{});
+// - `create(world: *ZoltWorld, op: *const SimOp) !u32`: the create operation of the slot (create_character,
+//   create_character_virtual, create_ragdoll, create_vehicle): the object of the next handle, the result of
+//   ApplyObjectOp in SimulationReference.cpp;
+// - `applyOp(world, op) !u32`: the other operations of its Phase7OpRange (TrackedVehicleSlot: 554..559, MotorcycleSlot:
+//   560..566, VehicleSlot: the rest of 520..579; the variants find their vehicle in VehicleSlot's storage), exactly the
+//   ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp of the .cpp (lock: i[3] == 0, the
+//   filters of SimCharacterFilters, the world's temp allocator for the character virtual queries);
+// - `writeState(world, w: *ObjectStateWriter) !void`: the object state of its objects in handle order, the fields of
+//   SimScenes.objectFieldLayout in the order of WriteObjectState of the .cpp (VehicleSlot writes the controller fields of
+//   the tracked and motorcycle controllers through their slots);
+// - `saveStates(world, recorder: *StateRecorderImpl) !void` / `restoreStates(world, recorder) !void`: SaveState /
+//   RestoreState of its characters in handle order (CharacterSlot, CharacterVirtualSlot; the other slots do nothing);
+// - `destroyAll(world: *ZoltWorld) void`: remove its objects from the system and destroy them (~SimWorld of the .cpp).
+// The listener of CharacterVirtualSlot is the port of SimCharacterContactListener (CharacterListenerMode record / modify,
+// the CharacterFlags): it adds `CharacterRecords` to world.character_recorder; the vehicle callbacks (VehicleCallbacks,
+// VehicleCombineFriction, VehicleTireMaxImpulse) add `VehicleRecords` to world.recorder. A slot whose classes are not
+// ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes are skipped through their Blocker, and a
+// supported scene that creates its objects fails (checkPhase7Slots).
+
+/// The slot of a class group whose classes are not ported yet: every operation returns error.SceneNotSupported
+const Phase7StubSlot = struct {
+    pub const is_stub = true;
+
+    const Storage = struct {};
+
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        _ = .{ world, op };
+        return error.SceneNotSupported;
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        _ = .{ world, op };
+        return error.SceneNotSupported;
+    }
+
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        _ = .{ world, w };
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    fn destroyAll(world: *ZoltWorld) void {
+        _ = world;
+    }
+};
+
+// ---- SLOT character: Character (Phase7OpRange.character, Blocker.characters) ----
+const CharacterSlot = Phase7StubSlot;
+
+// ---- SLOT character_virtual: CharacterVirtual, CharacterVsCharacterCollisionSimple and the CharacterContactListener
+// (Phase7OpRange.character_virtual, Blocker.character_virtuals) ----
+const CharacterVirtualSlot = Phase7StubSlot;
+
+// ---- SLOT ragdoll: Ragdoll, RagdollSettings (Phase7OpRange.ragdoll, Blocker.ragdolls) ----
+const RagdollSlot = Phase7StubSlot;
+
+// ---- SLOT vehicle: VehicleConstraint, the collision testers, WheeledVehicleController (OpKind 520..553 and 567..579,
+// Blocker.wheeled_vehicles) ----
+const VehicleSlot = Phase7StubSlot;
+
+// ---- SLOT tracked_vehicle: TrackedVehicleController (OpKind 554..559, Blocker.tracked_vehicles) ----
+const TrackedVehicleSlot = Phase7StubSlot;
+
+// ---- SLOT motorcycle: MotorcycleController (OpKind 560..566, Blocker.motorcycles) ----
+const MotorcycleSlot = Phase7StubSlot;
+
+// ---- end of the Phase 7 slots ----
+
+/// The objects of the Phase 7 slots (ZoltWorld.phase7; the vehicle variants keep their vehicles in VehicleSlot's)
+const Phase7Storage = struct {
+    characters: CharacterSlot.Storage = .{},
+    character_virtuals: CharacterVirtualSlot.Storage = .{},
+    ragdolls: RagdollSlot.Storage = .{},
+    vehicles: VehicleSlot.Storage = .{},
+};
+
+/// A record in a failure message (`{f}`): the kind by name, the ids and the data; "nothing" when a side has no record
+const RecordText = struct {
+    record: ?SimRecord,
+
+    pub fn format(self: RecordText, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const r = self.record orelse return w.writeAll("nothing");
+        if (std.enums.fromInt(RecordKind, r.kind)) |kind|
+            try w.print("{t}", .{kind})
+        else
+            try w.print("kind {d}", .{r.kind});
+        try w.print(" ids {any} data {any}", .{ r.ids, r.data });
+    }
+};
+
+/// The CharacterContactListener records of the Zolt side (SimCharacterContactListener of SimulationReference.cpp, the
+/// layouts of RecordKind 7..17): the listener of CharacterVirtualSlot adds them to world.character_recorder
+const CharacterRecords = struct {
+    fn vec3Bits(v: Vec3) [3]u32 {
+        return .{ floatBits(v.getX()), floatBits(v.getY()), floatBits(v.getZ()) };
+    }
+
+    fn hashVec3(hash: u32, v: Vec3) u32 {
+        const values = [3]f32{ v.getX(), v.getY(), v.getZ() };
+        return SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+    }
+
+    fn hashRVec3(hash: u32, v: RVec3) u32 {
+        const values = [3]Real{ v.getX(), v.getY(), v.getZ() };
+        return SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+    }
+
+    /// The flags of a contact record (SimCharacterContactFlags): mMotionTypeB | mIsSensorB << 8 | mHadCollision << 9 |
+    /// mWasDiscarded << 10 | mCanPushCharacter << 11 | mIsBackFacingContact << 12 | (mCharacterB != null) << 13
+    pub fn contactFlags(motion_type_b: u32, is_sensor_b: bool, had_collision: bool, was_discarded: bool, can_push_character: bool, is_back_facing_contact: bool, has_character_b: bool) u32 {
+        return motion_type_b |
+            (@as(u32, @intFromBool(is_sensor_b)) << 8) |
+            (@as(u32, @intFromBool(had_collision)) << 9) |
+            (@as(u32, @intFromBool(was_discarded)) << 10) |
+            (@as(u32, @intFromBool(can_push_character)) << 11) |
+            (@as(u32, @intFromBool(is_back_facing_contact)) << 12) |
+            (@as(u32, @intFromBool(has_character_b)) << 13);
+    }
+
+    /// The bits of CharacterContactSettings (SimCharacterContactSettingsBits): mCanPushCharacter | mCanReceiveImpulses << 1
+    pub fn settingsBits(can_push_character: bool, can_receive_impulses: bool) u32 {
+        return @as(u32, @intFromBool(can_push_character)) | (@as(u32, @intFromBool(can_receive_impulses)) << 1);
+    }
+
+    /// A contact record (validate / added / persisted and the character versions): `flags` from contactFlags, `settings_in`
+    /// the settingsBits passed in (added / persisted, else 0), `hash` SimScenes.hashCharacterContact of the contact,
+    /// `result` the return value of validate (1 / 0) or the settingsBits after the callback
+    pub fn contact(kind: RecordKind, character_id: u32, body_b: BodyID, character_id_b: u32, sub_shape_id_b: SubShapeID, contact_normal: Vec3, distance: f32, fraction: f32, flags: u32, settings_in: u32, hash: u32, result: u32) SimRecord {
+        const n = vec3Bits(contact_normal);
+        return .{
+            .kind = @intFromEnum(kind),
+            .ids = .{ character_id, body_b.getIndexAndSequenceNumber(), character_id_b, sub_shape_id_b.getValue() },
+            .data = .{ n[0], n[1], n[2], floatBits(distance), floatBits(fraction), flags | (settings_in << 16), hash, result },
+        };
+    }
+
+    /// OnContactRemoved (body_id2, invalid character ID) / OnCharacterContactRemoved (invalid BodyID, character_id2)
+    pub fn removed(kind: RecordKind, character_id: u32, body_id2: BodyID, character_id2: u32, sub_shape_id2: SubShapeID) SimRecord {
+        return .{ .kind = @intFromEnum(kind), .ids = .{ character_id, body_id2.getIndexAndSequenceNumber(), character_id2, sub_shape_id2.getValue() } };
+    }
+
+    /// OnContactSolve (body_id2, invalid character ID) / OnCharacterContactSolve (invalid BodyID, the other character's
+    /// ID): the new velocity as passed in and after the callback
+    pub fn solve(kind: RecordKind, character_id: u32, body_id2: BodyID, character_id2: u32, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, material_hash: u32, character_velocity: Vec3, new_velocity_in: Vec3, new_velocity_out: Vec3) SimRecord {
+        const v_in = vec3Bits(new_velocity_in);
+        const v_character = vec3Bits(character_velocity);
+        var h = hashRVec3(SimScenes.hash_seed, contact_position);
+        h = hashVec3(h, contact_normal);
+        h = hashVec3(h, contact_velocity);
+        h = SimScenes.hashBytes(h, std.mem.asBytes(&material_hash));
+        return .{
+            .kind = @intFromEnum(kind),
+            .ids = .{ character_id, body_id2.getIndexAndSequenceNumber(), character_id2, sub_shape_id2.getValue() },
+            .data = .{ v_in[0], v_in[1], v_in[2], v_character[0], v_character[1], v_character[2], h, hashVec3(SimScenes.hash_seed, new_velocity_out) },
+        };
+    }
+
+    /// OnAdjustBodyVelocity: the velocities as passed in and after the callback
+    pub fn adjustBodyVelocity(character_id: u32, body_id2: BodyID, linear_in: Vec3, angular_in: Vec3, linear_out: Vec3, angular_out: Vec3) SimRecord {
+        const l = vec3Bits(linear_in);
+        const a = vec3Bits(angular_in);
+        return .{
+            .kind = @intFromEnum(RecordKind.character_adjust_body_velocity),
+            .ids = .{ character_id, body_id2.getIndexAndSequenceNumber(), 0, 0 },
+            .data = .{ l[0], l[1], l[2], a[0], a[1], a[2], hashVec3(hashVec3(SimScenes.hash_seed, linear_out), angular_out), 0 },
+        };
+    }
+};
+
+/// The step callback records of a vehicle (SimVehicleRecord of SimulationReference.cpp, RecordKind 18..20)
+const VehicleRecords = struct {
+    /// The hash of the wheels of a record: per wheel in order (from SimScenes.hash_seed) GetSuspensionLength,
+    /// GetAngularVelocity and GetSteerAngle
+    pub fn hashWheel(hash: u32, suspension_length: f32, angular_velocity: f32, steer_angle: f32) u32 {
+        const values = [3]f32{ suspension_length, angular_velocity, steer_angle };
+        return SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+    }
+
+    /// A record of a vehicle callback: `wheel_contacts` the bits of the wheels with HasContact(), `wheel_hash` from hashWheel
+    pub fn record(kind: RecordKind, handle: u32, body_id: BodyID, context: *const PhysicsStepListenerContext, wheel_contacts: u32, wheel_hash: u32) SimRecord {
+        return .{
+            .kind = @intFromEnum(kind),
+            .ids = .{ handle, body_id.getIndexAndSequenceNumber(), 0, 0 },
+            .data = .{ floatBits(context.delta_time), @intFromBool(context.is_first_step), @intFromBool(context.is_last_step), wheel_contacts, wheel_hash, 0, 0, 0 },
+        };
+    }
+};
+
+/// Before a scene runs: the Phase 7 classes that it creates are ported (a supported Blocker must cover them) and their
+/// slots are no longer stubs
+fn checkPhase7Slots(entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    if (builder.characters.items.len > 0)
+        try checkPhase7Slot(entry, "Character", Phase7Classes.characters(), !@hasDecl(CharacterSlot, "is_stub"));
+    if (builder.character_virtuals.items.len > 0)
+        try checkPhase7Slot(entry, "CharacterVirtual", Phase7Classes.characterVirtuals(), !@hasDecl(CharacterVirtualSlot, "is_stub"));
+    if (builder.ragdolls.items.len > 0)
+        try checkPhase7Slot(entry, "Ragdoll", Phase7Classes.ragdolls(), !@hasDecl(RagdollSlot, "is_stub"));
+    for (builder.vehicles.items) |*v| switch (@as(VehicleControllerKind, @enumFromInt(v.controller))) {
+        .wheeled => try checkPhase7Slot(entry, "wheeled vehicle", Phase7Classes.wheeledVehicles(), !@hasDecl(VehicleSlot, "is_stub")),
+        .tracked => try checkPhase7Slot(entry, "tracked vehicle", Phase7Classes.trackedVehicles(), !@hasDecl(VehicleSlot, "is_stub") and !@hasDecl(TrackedVehicleSlot, "is_stub")),
+        .motorcycle => try checkPhase7Slot(entry, "motorcycle", Phase7Classes.motorcycles(), !@hasDecl(VehicleSlot, "is_stub") and !@hasDecl(MotorcycleSlot, "is_stub")),
+    };
+}
+
+fn checkPhase7Slot(entry: *const SceneEntry, what: []const u8, ported: bool, slot_filled: bool) !void {
+    if (!ported) {
+        std.debug.print("SimulationParity: scene {s} creates {s} objects, whose Zolt classes are still stubs, but its blocker .{t} is supported (declare the Blocker of the class)\n", .{ entry.name, what, entry.blocked_by });
+        return error.TestUnexpectedResult;
+    }
+    if (!slot_filled) {
+        std.debug.print("SimulationParity: scene {s}: the {s} classes are ported but their slot in SimulationParity.zig is still Phase7StubSlot\n", .{ entry.name, what });
+        return error.SceneNotSupported;
+    }
+}
+
 fn runEntry(entry: *const SceneEntry) !void {
     if (!entry.blocked_by.isSupported())
         return error.SkipZigTest;
@@ -2800,6 +3591,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     defer builder.deinit();
     try entry.build(&builder);
     try checkConstraintDescriptions(allocator, entry, &builder);
+    try checkPhase7Slots(entry, &builder);
 
     var stats: [configs.len]RunStats = undefined;
     for (configs, &stats) |config, *s|
@@ -2839,9 +3631,13 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (expect.update_activations > 0) try expectReached(entry, "bodies activated from inside one update", stats[0].max_update_activations >= expect.update_activations);
     if (expect.active_constraints > 0) try expectReached(entry, "active constraints", stats[0].max_active_constraints >= expect.active_constraints);
     if (builder.constraints.items.len > 0) try expectReached(entry, "constraints that are solved (every scene with constraints)", stats[0].max_active_constraints > 0);
+    if (expect.character_records != 0) try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(records, expect.character_records));
+    if (expect.ground_states != 0) try expectReached(entry, "the ground states of Expect.ground_states", (stats[0].objects.ground_states & expect.ground_states) == expect.ground_states);
+    if (expect.wheel_contacts) try expectReached(entry, "wheel contacts", stats[0].objects.wheel_contacts);
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
+        try std.testing.expectEqual(stats[0].objects, s.objects);
         if (config.sweeps and entry.sweep_stride != 0) {
             try std.testing.expect(s.num_temp_failures > 0);
             try std.testing.expect(s.num_job_failures > 0);
@@ -2880,8 +3676,10 @@ test {
 
 // The scenes of the later waves run on the C++ side already, with 0 and 3 worker threads in lockstep: their
 // descriptions build, Jolt is deterministic on them, and they reach what they are written for (contact callbacks,
-// active constraints, the expect_body_state / expect_constraint_state checks). When a wave lands only the Zolt side is
-// new. `restore_cross` restores the snapshot of the other world in each world.
+// active constraints, the expect_* checks, the Phase 7 Expect fields). When a wave lands only the Zolt side is new.
+// `restore_cross` restores the snapshot of the other world in each world (with the character states). Phase 7: the
+// object states of both worlds are identical after every update and decode completely, the character listener records
+// are identical in call order.
 test "SimScenes blocked scenes run on the C++ side" {
     const allocator = std.testing.allocator;
     var a_state: std.ArrayList(u8) = .empty;
@@ -2892,8 +3690,17 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer a_records.deinit(allocator);
     var b_records: std.ArrayList(SimRecord) = .empty;
     defer b_records.deinit(allocator);
+    var a_objects: std.ArrayList(u8) = .empty;
+    defer a_objects.deinit(allocator);
+    var b_objects: std.ArrayList(u8) = .empty;
+    defer b_objects.deinit(allocator);
     var snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
     defer for (&snapshots) |*s| {
+        s[0].deinit(allocator);
+        s[1].deinit(allocator);
+    };
+    var character_snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
+    defer for (&character_snapshots) |*s| {
         s[0].deinit(allocator);
         s[1].deinit(allocator);
     };
@@ -2913,6 +3720,7 @@ test "SimScenes blocked scenes run on the C++ side" {
         var collision_steps = builder.collision_steps;
         var records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0);
         var max_active_constraints: u32 = 0;
+        var objects: ObjectStats = .{};
         var op_index: usize = 0;
         for (0..builder.num_updates) |update| {
             while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
@@ -2926,10 +3734,14 @@ test "SimScenes blocked scenes run on the C++ side" {
                         const state = snapshotState(op);
                         try a.saveState(allocator, state, &snapshots[op.index][0]);
                         try b.saveState(allocator, state, &snapshots[op.index][1]);
+                        try a.saveCharacterStates(allocator, &character_snapshots[op.index][0]);
+                        try b.saveCharacterStates(allocator, &character_snapshots[op.index][1]);
                     },
                     .restore_cross => {
                         try std.testing.expect(a.restoreState(snapshots[op.index][1].items));
                         try std.testing.expect(b.restoreState(snapshots[op.index][0].items));
+                        try std.testing.expect(a.restoreCharacterStates(character_snapshots[op.index][1].items));
+                        try std.testing.expect(b.restoreCharacterStates(character_snapshots[op.index][0].items));
                     },
                     else => |kind| {
                         const result = a.applyOp(op);
@@ -2938,6 +3750,12 @@ test "SimScenes blocked scenes run on the C++ side" {
                             try std.testing.expectEqual(op.index, result);
                         if (kind == .expect_constraint_state)
                             try std.testing.expectEqual(op.i[0], result);
+                        if (isPhase7Expectation(kind)) {
+                            if (result != op.count) {
+                                std.debug.print("SimulationParity: scene {s}, operation {d}: the scene expects {t} of object handle {d} to be {d}, it is {d}\n", .{ entry.name, op_index, kind, op.index, op.count, result });
+                                return error.TestUnexpectedResult;
+                            }
+                        }
                     },
                 }
             }
@@ -2955,6 +3773,44 @@ test "SimScenes blocked scenes run on the C++ side" {
             std.sort.pdq(SimRecord, b_records.items, {}, SimRecord.lessThan);
             try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a_records.items), std.mem.sliceAsBytes(b_records.items));
             for (a_records.items) |r| records[r.kind] += 1;
+
+            // Phase 7: the object states, the character listener records in call order
+            try a.objectState(allocator, &a_objects);
+            try b.objectState(allocator, &b_objects);
+            if (try describeObjectStateDifference(allocator, b_objects.items, a_objects.items, .{ .checked = "3 threads", .reference = "0 threads" })) |message| {
+                defer allocator.free(message);
+                std.debug.print("SimulationParity: scene {s}, update {d}: the C++ worlds with 0 and 3 threads differ: {s}\n", .{ entry.name, update, message });
+                return error.TestUnexpectedResult;
+            }
+            try scanObjectState(a_objects.items, &objects);
+            a_records.clearRetainingCapacity();
+            b_records.clearRetainingCapacity();
+            try a.takeCharacterRecords(allocator, &a_records);
+            try b.takeCharacterRecords(allocator, &b_records);
+            for (a_records.items, 0..) |r, i| {
+                if (i >= b_records.items.len or !std.meta.eql(r, b_records.items[i])) {
+                    std.debug.print("SimulationParity: scene {s}, update {d}: character listener record {d} of {d} (call order) differs between the C++ worlds with 0 and 3 threads:\n  0 threads {f}\n  3 threads {f}\n", .{ entry.name, update, i, a_records.items.len, RecordText{ .record = r }, RecordText{ .record = if (i < b_records.items.len) b_records.items[i] else null } });
+                    return error.TestUnexpectedResult;
+                }
+            }
+            try std.testing.expectEqual(a_records.items.len, b_records.items.len);
+            for (a_records.items) |r| records[r.kind] += 1;
+
+            // The object state decodes completely and stays finite
+            var object_layout: ObjectStateLayout = .{ .allocator = allocator };
+            defer object_layout.deinit();
+            try object_layout.decode(a_objects.items);
+            if (!object_layout.complete) {
+                std.debug.print("SimulationParity: scene {s}, update {d}: the object state does not decode (SimScenes.objectFieldLayout and WriteObjectState of SimulationReference.cpp differ)\n", .{ entry.name, update });
+                return error.TestUnexpectedResult;
+            }
+            if (object_layout.firstNotFinite(a_objects.items)) |value| {
+                var buffer: [256]u8 = undefined;
+                var w: std.Io.Writer = .fixed(&buffer);
+                try writeObjectValueName(&w, value);
+                std.debug.print("SimulationParity: scene {s}, update {d}: an object value is not finite: {s}\n", .{ entry.name, update, w.buffered() });
+                return error.TestUnexpectedResult;
+            }
         }
 
         // The state decodes completely and stays finite (a scene that blows up is no test: Zolt's asserts would fire on
@@ -2986,6 +3842,24 @@ test "SimScenes blocked scenes run on the C++ side" {
             try expectReached(entry, "constraints that are solved (every scene with constraints)", max_active_constraints > 0);
         if (entry.expect.active_constraints > 0)
             try expectReached(entry, "active constraints", max_active_constraints >= entry.expect.active_constraints);
+
+        if (verbose)
+            std.debug.print("{s} (C++ side): records {any}, max active constraints {d}, objects {any}\n", .{ entry.name, records, max_active_constraints, objects });
+
+        // Phase 7: a scene with a Phase 7 blocker creates the objects of its classes and reaches its Expect fields
+        switch (entry.blocked_by) {
+            .characters => try expectReached(entry, "characters", builder.characters.items.len > 0),
+            .character_virtuals => try expectReached(entry, "character virtuals", builder.character_virtuals.items.len > 0),
+            .ragdolls => try expectReached(entry, "ragdolls", builder.ragdolls.items.len > 0),
+            .wheeled_vehicles, .tracked_vehicles, .motorcycles => try expectReached(entry, "vehicles", builder.vehicles.items.len > 0),
+            else => {},
+        }
+        if (entry.expect.character_records != 0)
+            try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(&records, entry.expect.character_records));
+        if (entry.expect.ground_states != 0)
+            try expectReached(entry, "the ground states of Expect.ground_states", (objects.ground_states & entry.expect.ground_states) == entry.expect.ground_states);
+        if (entry.expect.wheel_contacts)
+            try expectReached(entry, "wheel contacts", objects.wheel_contacts);
     }
 }
 
@@ -3209,4 +4083,211 @@ test "SimulationParity state decoder: constraints" {
     const message = (try describeStateDifference(allocator, copy, bytes.items, cw)).?;
     defer allocator.free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "constraints[1] (id 0x00000001) rotation_constraint_part.total_lambda.z") != null);
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Phase 7
+
+test "SimScenes Phase 7 struct layout matches SimulationReference.cpp" {
+    var sizes: [32]u32 = undefined;
+    jolt.jolt_sim_phase7_struct_sizes(&sizes);
+    const S = SimScenes;
+    const expected = [32]u32{
+        @sizeOf(S.SimCharacterBase),
+        @sizeOf(S.SimCharacter),
+        @sizeOf(S.SimCharacterVirtual),
+        @sizeOf(S.SimRagdoll),
+        @sizeOf(S.SimRagdollJoint),
+        @sizeOf(S.SimRagdollAdditionalConstraint),
+        @sizeOf(S.SimRagdollPose),
+        @sizeOf(S.SimVehicleEngine),
+        @sizeOf(S.SimVehicleTransmission),
+        @sizeOf(S.SimVehicleTrack),
+        @sizeOf(S.SimVehicleDifferential),
+        @sizeOf(S.SimVehicleAntiRollBar),
+        @sizeOf(S.SimVehicleWheel),
+        @sizeOf(S.SimVehicleTester),
+        @sizeOf(S.SimVehicle),
+        @offsetOf(S.SimCharacter, "position"),
+        @offsetOf(S.SimCharacter, "user_data"),
+        @offsetOf(S.SimCharacterVirtual, "position"),
+        @offsetOf(S.SimCharacterVirtual, "user_data"),
+        @offsetOf(S.SimCharacterVirtual, "collision_group"),
+        @offsetOf(S.SimRagdoll, "user_data"),
+        @offsetOf(S.SimVehicle, "user_data"),
+        @offsetOf(S.SimVehicle, "engine"),
+        @offsetOf(S.SimVehicle, "tracks"),
+        @offsetOf(S.SimVehicle, "tester"),
+        @offsetOf(S.SimVehicle, "tire_max_impulse"),
+        @offsetOf(S.SimVehicleWheel, "lateral_friction_tv"),
+        @offsetOf(SimSceneDesc, "characters"),
+        @offsetOf(SimSceneDesc, "vehicles"),
+        @offsetOf(SimSceneDesc, "uints"),
+        @sizeOf(SimSceneDesc),
+        @offsetOf(S.SimRagdollPose, "data"),
+    };
+    try std.testing.expectEqualSlices(u32, &expected, &sizes);
+    // The header of an object state field: four u16 (SimObjectStateWriter)
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(ObjectFieldHeader));
+}
+
+/// Compare two extern structs field by field (the bytes of the values, not the padding)
+fn expectEqualFields(comptime T: type, expected: T, actual: T) !void {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const e = @field(expected, field.name);
+        const a = @field(actual, field.name);
+        switch (@typeInfo(field.type)) {
+            .@"struct" => try expectEqualFields(field.type, e, a),
+            .array => |info| if (@typeInfo(info.child) == .@"struct") {
+                for (e, a) |ee, aa| try expectEqualFields(info.child, ee, aa);
+            } else if (!std.mem.eql(u8, std.mem.asBytes(&e), std.mem.asBytes(&a))) {
+                std.debug.print("{s}.{s}: expected {any}, got {any}\n", .{ @typeName(T), field.name, e, a });
+                return error.TestExpectedEqual;
+            },
+            else => if (!std.mem.eql(u8, std.mem.asBytes(&e), std.mem.asBytes(&a))) {
+                std.debug.print("{s}.{s}: expected {any}, got {any}\n", .{ @typeName(T), field.name, e, a });
+                return error.TestExpectedEqual;
+            },
+        }
+    }
+}
+
+test "SimScenes Phase 7 description defaults are Jolt's" {
+    // The descriptions that the scenes start from have the defaults of Jolt's settings classes (CharacterSettings,
+    // CharacterVirtualSettings, VehicleConstraintSettings with the controller settings of each kind, WheelSettingsWV /
+    // TV, ExtendedUpdateSettings), bit for bit
+    var character: SimScenes.SimCharacter = undefined;
+    jolt.jolt_sim_default_character(&character);
+    try expectEqualFields(SimScenes.SimCharacter, .{}, character);
+    var character_virtual: SimScenes.SimCharacterVirtual = undefined;
+    jolt.jolt_sim_default_character_virtual(&character_virtual);
+    try expectEqualFields(SimScenes.SimCharacterVirtual, .{}, character_virtual);
+    var extended_update: [12]f32 = undefined;
+    jolt.jolt_sim_default_extended_update(&extended_update);
+    const zolt_extended_update = (SceneBuilder.ExtendedUpdateSettings{}).toFloats();
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&extended_update), std.mem.asBytes(&zolt_extended_update));
+    for (std.enums.values(VehicleControllerKind)) |kind| {
+        var vehicle: SimScenes.SimVehicle = undefined;
+        jolt.jolt_sim_default_vehicle(@intFromEnum(kind), &vehicle);
+        expectEqualFields(SimScenes.SimVehicle, SimScenes.SimVehicle.defaults(kind), vehicle) catch |err| {
+            std.debug.print("SimVehicle.defaults({t}) is not Jolt's default\n", .{kind});
+            return err;
+        };
+    }
+    for (std.enums.values(SimScenes.VehicleWheelKind)) |kind| {
+        var wheel: SimScenes.SimVehicleWheel = undefined;
+        jolt.jolt_sim_default_vehicle_wheel(@intFromEnum(kind), &wheel);
+        expectEqualFields(SimScenes.SimVehicleWheel, SimScenes.SimVehicleWheel.defaults(kind), wheel) catch |err| {
+            std.debug.print("SimVehicleWheel.defaults({t}) is not Jolt's default\n", .{kind});
+            return err;
+        };
+    }
+}
+
+test "SimulationParity Phase 7 slots follow the ported classes" {
+    // A slot is filled when the classes of its group are ported: removing `is_stub` from a class requires its slot
+    // (the recipe in the SimScenes header), and a filled slot needs the ported classes
+    try std.testing.expectEqual(Phase7Classes.characters(), !@hasDecl(CharacterSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.characterVirtuals(), !@hasDecl(CharacterVirtualSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.ragdolls(), !@hasDecl(RagdollSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.wheeledVehicles(), !@hasDecl(VehicleSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.trackedVehicles(), !@hasDecl(TrackedVehicleSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.motorcycles(), !@hasDecl(MotorcycleSlot, "is_stub"));
+}
+
+test "SimulationParity Phase 7 record helpers" {
+    // The layouts of RecordKind 7..20 (SimCharacterContactListener / SimVehicleRecord of SimulationReference.cpp)
+    try std.testing.expectEqual(@as(u32, 2 | (1 << 8) | (1 << 13)), CharacterRecords.contactFlags(2, true, false, false, false, false, true));
+    try std.testing.expectEqual(@as(u32, (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12)), CharacterRecords.contactFlags(0, false, true, true, true, true, false));
+    try std.testing.expectEqual(@as(u32, 2), CharacterRecords.settingsBits(false, true));
+    const contact = CharacterRecords.contact(.character_contact_added, 1, .invalid, 2, .empty, Vec3.init(0, 1, 0), -0.01, 0.5, 9, 3, 77, 1);
+    try std.testing.expectEqual(@as(u32, 8), contact.kind);
+    try std.testing.expectEqual([4]u32{ 1, 0xffffffff, 2, 0xffffffff }, contact.ids);
+    try std.testing.expectEqual(@as(u32, 9 | (3 << 16)), contact.data[5]);
+    try std.testing.expectEqual(@as(u32, 0x3f800000), contact.data[1]);
+    const removed = CharacterRecords.removed(.character_vs_character_contact_removed, 1, .invalid, 4, .empty);
+    try std.testing.expectEqual([4]u32{ 1, 0xffffffff, 4, 0xffffffff }, removed.ids);
+    var buffer: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{f}", .{RecordText{ .record = removed }});
+    try std.testing.expect(std.mem.startsWith(u8, text, "character_vs_character_contact_removed ids { 1, 4294967295, 4, 4294967295 } data "));
+    try std.testing.expectEqualStrings("nothing", try std.fmt.bufPrint(&buffer, "{f}", .{RecordText{ .record = null }}));
+    const v = Vec3.init(1, 2, 3);
+    const solve = CharacterRecords.solve(.character_contact_solve, 1, .invalid, 0xffffffff, .empty, RVec3.init(1, 0, 0), v, v, 5, v, v, v);
+    try std.testing.expectEqual(solve.data[7], CharacterRecords.hashVec3(SimScenes.hash_seed, v));
+    const adjust = CharacterRecords.adjustBodyVelocity(1, .invalid, v, v, v, v);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(RecordKind.character_adjust_body_velocity)), adjust.kind);
+    const context: PhysicsStepListenerContext = .{ .delta_time = 0.5, .is_first_step = true, .is_last_step = false, .physics_system = undefined };
+    const record = VehicleRecords.record(.vehicle_post_step, 3, .invalid, &context, 0b101, VehicleRecords.hashWheel(SimScenes.hash_seed, 0.4, 2, 0));
+    try std.testing.expectEqual([8]u32{ 0x3f000000, 1, 0, 0b101, record.data[4], 0, 0, 0 }, record.data);
+}
+
+test "SimulationParity object state decoder" {
+    // The object state of a C++ world with every kind of object decodes completely (the layouts of objectFieldLayout and
+    // the SaveState fields add up to the sizes of the fields that SimulationReference.cpp writes); a byte changed in a
+    // value of the Zolt copy is reported with the field, the object handle, the item and the component
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildObjectStateTestScene(&builder);
+    const desc = builder.desc();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    for (builder.ops.items) |*op| _ = cw.applyOp(op);
+    for (0..3) |_| _ = cw.update(1.0 / 60.0, 1);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try cw.objectState(allocator, &bytes);
+
+    var layout: ObjectStateLayout = .{ .allocator = allocator };
+    defer layout.deinit();
+    try layout.decode(bytes.items);
+    try std.testing.expect(layout.complete);
+    try std.testing.expect(layout.firstNotFinite(bytes.items) == null);
+
+    // Every field kind of the scene is there
+    var seen: std.EnumSet(ObjectField) = .initEmpty();
+    var it: ObjectFieldIterator = .{ .bytes = bytes.items };
+    while (try it.next()) |view| seen.insert(view.field().?);
+    for ([_]ObjectField{ .character_save_state, .character_properties, .character_base, .character_body, .character_transformed_shape, .cv_save_state, .cv_properties, .cv_base, .cv_transforms, .cv_transformed_shape, .cv_num_active_contacts, .cv_active_contact, .ragdoll_properties, .ragdoll_body, .ragdoll_root_transform, .ragdoll_pose_root_offset, .ragdoll_pose_joint, .ragdoll_bounds, .ragdoll_constraint, .vehicle_properties, .vehicle_wheel, .vehicle_wheel_contact, .vehicle_wheel_transform, .vehicle_wheel_wv, .vehicle_anti_roll_bar, .vehicle_engine, .vehicle_transmission, .vehicle_wheeled, .vehicle_differential }) |field| {
+        if (!seen.contains(field)) {
+            std.debug.print("the object state has no {t} field\n", .{field});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // A changed contact normal of the active contact of the character virtual
+    const copy = try allocator.dupe(u8, bytes.items);
+    defer allocator.free(copy);
+    var target: ?*const ObjectValue = null;
+    for (layout.values.items) |*value| {
+        if (value.header.field == @intFromEnum(ObjectField.cv_active_contact) and std.mem.eql(u8, value.name, "contact_normal") and value.index == 1)
+            target = value;
+    }
+    copy[target.?.offset] ^= 1;
+    const message = (try describeObjectStateDifference(allocator, copy, bytes.items, .{})).?;
+    defer allocator.free(message);
+    try std.testing.expect(std.mem.indexOf(u8, message, "cv_active_contact (object handle 0, item 0) contact_normal.y zolt ") != null);
+
+    // A changed ground state in the SaveState bytes of the character
+    @memcpy(copy, bytes.items);
+    var save_state: ?*const ObjectValue = null;
+    for (layout.values.items) |*value| {
+        if (value.header.field == @intFromEnum(ObjectField.character_save_state) and std.mem.eql(u8, value.name, "ground_state"))
+            save_state = value;
+    }
+    copy[save_state.?.offset] ^= 2;
+    const message2 = (try describeObjectStateDifference(allocator, copy, bytes.items, .{ .checked = "3 threads", .reference = "0 threads" })).?;
+    defer allocator.free(message2);
+    try std.testing.expect(std.mem.indexOf(u8, message2, "character_save_state (object handle 0, item 0) ground_state 3 threads ") != null);
+
+    // A missing field
+    const message3 = (try describeObjectStateDifference(allocator, bytes.items[0 .. bytes.items.len - 1], bytes.items, .{})).?;
+    defer allocator.free(message3);
+    try std.testing.expect(try describeObjectStateDifference(allocator, bytes.items, bytes.items, .{}) == null);
+
+    // The scan for the Expect fields
+    var stats: ObjectStats = .{};
+    try scanObjectState(bytes.items, &stats);
+    try std.testing.expect(stats.wheel_contacts);
+    try std.testing.expect(stats.ground_states != 0);
 }

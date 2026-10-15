@@ -223,6 +223,19 @@ pub const MotionProperties = @import("Physics/Body/MotionProperties.zig").Motion
 pub const track_simulation_stats = @import("Physics/Body/MotionProperties.zig").track_simulation_stats;
 pub const MotionQuality = @import("Physics/Body/MotionQuality.zig").MotionQuality;
 pub const MotionType = @import("Physics/Body/MotionType.zig").MotionType;
+pub const Character = @import("Physics/Character/Character.zig").Character;
+pub const CharacterSettings = @import("Physics/Character/Character.zig").CharacterSettings;
+pub const CharacterBase = @import("Physics/Character/CharacterBase.zig").CharacterBase;
+pub const CharacterBaseSettings = @import("Physics/Character/CharacterBase.zig").CharacterBaseSettings;
+pub const CharacterID = @import("Physics/Character/CharacterID.zig").CharacterID;
+pub const CharacterContact = @import("Physics/Character/CharacterVirtual.zig").CharacterContact;
+pub const CharacterContactKey = @import("Physics/Character/CharacterVirtual.zig").CharacterContactKey;
+pub const CharacterContactListener = @import("Physics/Character/CharacterVirtual.zig").CharacterContactListener;
+pub const CharacterContactSettings = @import("Physics/Character/CharacterVirtual.zig").CharacterContactSettings;
+pub const CharacterVirtual = @import("Physics/Character/CharacterVirtual.zig").CharacterVirtual;
+pub const CharacterVirtualSettings = @import("Physics/Character/CharacterVirtual.zig").CharacterVirtualSettings;
+pub const CharacterVsCharacterCollision = @import("Physics/Character/CharacterVirtual.zig").CharacterVsCharacterCollision;
+pub const CharacterVsCharacterCollisionSimple = @import("Physics/Character/CharacterVirtual.zig").CharacterVsCharacterCollisionSimple;
 pub const AABoxCast = @import("Physics/Collision/AABoxCast.zig").AABoxCast;
 pub const ActiveEdgeMode = @import("Physics/Collision/ActiveEdgeMode.zig").ActiveEdgeMode;
 pub const ActiveEdges = @import("Physics/Collision/ActiveEdges.zig");
@@ -470,6 +483,8 @@ pub const PhysicsStepListener = @import("Physics/PhysicsStepListener.zig").Physi
 pub const PhysicsStepListenerContext = @import("Physics/PhysicsStepListener.zig").PhysicsStepListenerContext;
 pub const PhysicsSystem = @import("Physics/PhysicsSystem.zig").PhysicsSystem;
 pub const PhysicsUpdateContext = @import("Physics/PhysicsUpdateContext.zig").PhysicsUpdateContext;
+pub const Ragdoll = @import("Physics/Ragdoll/Ragdoll.zig").Ragdoll;
+pub const RagdollSettings = @import("Physics/Ragdoll/Ragdoll.zig").RagdollSettings;
 pub const SoftBodyContactListener = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyContactListener;
 pub const SoftBodyContactSettings = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyContactSettings;
 pub const SoftBodyValidateResult = @import("Physics/SoftBody/SoftBodyContactListener.zig").SoftBodyValidateResult;
@@ -482,6 +497,26 @@ pub const StateRecorder = @import("Physics/StateRecorder.zig").StateRecorder;
 pub const StateRecorderFilter = @import("Physics/StateRecorder.zig").StateRecorderFilter;
 pub const StateRecorderState = @import("Physics/StateRecorder.zig").StateRecorderState;
 pub const StateRecorderImpl = @import("Physics/StateRecorderImpl.zig").StateRecorderImpl;
+pub const MotorcycleController = @import("Physics/Vehicle/MotorcycleController.zig").MotorcycleController;
+pub const MotorcycleControllerSettings = @import("Physics/Vehicle/MotorcycleController.zig").MotorcycleControllerSettings;
+pub const TrackedVehicleController = @import("Physics/Vehicle/TrackedVehicleController.zig").TrackedVehicleController;
+pub const TrackedVehicleControllerSettings = @import("Physics/Vehicle/TrackedVehicleController.zig").TrackedVehicleControllerSettings;
+pub const WheelSettingsTV = @import("Physics/Vehicle/TrackedVehicleController.zig").WheelSettingsTV;
+pub const WheelTV = @import("Physics/Vehicle/TrackedVehicleController.zig").WheelTV;
+pub const VehicleCollisionTester = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTester;
+pub const VehicleCollisionTesterCastCylinder = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTesterCastCylinder;
+pub const VehicleCollisionTesterCastSphere = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTesterCastSphere;
+pub const VehicleCollisionTesterRay = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTesterRay;
+pub const VehicleConstraint = @import("Physics/Vehicle/VehicleConstraint.zig").VehicleConstraint;
+pub const VehicleConstraintSettings = @import("Physics/Vehicle/VehicleConstraint.zig").VehicleConstraintSettings;
+pub const VehicleController = @import("Physics/Vehicle/VehicleController.zig").VehicleController;
+pub const VehicleControllerSettings = @import("Physics/Vehicle/VehicleController.zig").VehicleControllerSettings;
+pub const Wheel = @import("Physics/Vehicle/Wheel.zig").Wheel;
+pub const WheelSettings = @import("Physics/Vehicle/Wheel.zig").WheelSettings;
+pub const WheeledVehicleController = @import("Physics/Vehicle/WheeledVehicleController.zig").WheeledVehicleController;
+pub const WheeledVehicleControllerSettings = @import("Physics/Vehicle/WheeledVehicleController.zig").WheeledVehicleControllerSettings;
+pub const WheelSettingsWV = @import("Physics/Vehicle/WheeledVehicleController.zig").WheelSettingsWV;
+pub const WheelWV = @import("Physics/Vehicle/WheeledVehicleController.zig").WheelWV;
 
 pub const SoftBodyShape = @import("Physics/SoftBody/SoftBodyShape.zig").SoftBodyShape;
 
@@ -619,6 +654,10 @@ const source_files = .{
     @import("Physics/Body/MotionProperties.zig"),
     @import("Physics/Body/MotionQuality.zig"),
     @import("Physics/Body/MotionType.zig"),
+    @import("Physics/Character/Character.zig"),
+    @import("Physics/Character/CharacterBase.zig"),
+    @import("Physics/Character/CharacterID.zig"),
+    @import("Physics/Character/CharacterVirtual.zig"),
     @import("Physics/Collision/AABoxCast.zig"),
     @import("Physics/Collision/ActiveEdgeMode.zig"),
     @import("Physics/Collision/ActiveEdges.zig"),
@@ -744,6 +783,7 @@ const source_files = .{
     @import("Physics/PhysicsStepListener.zig"),
     @import("Physics/PhysicsSystem.zig"),
     @import("Physics/PhysicsUpdateContext.zig"),
+    @import("Physics/Ragdoll/Ragdoll.zig"),
     @import("Physics/SoftBody/SoftBodyContactListener.zig"),
     @import("Physics/SoftBody/SoftBodyCreationSettings.zig"),
     @import("Physics/SoftBody/SoftBodyManifold.zig"),
@@ -753,6 +793,13 @@ const source_files = .{
     @import("Physics/SoftBody/SoftBodyUpdateContext.zig"),
     @import("Physics/StateRecorder.zig"),
     @import("Physics/StateRecorderImpl.zig"),
+    @import("Physics/Vehicle/MotorcycleController.zig"),
+    @import("Physics/Vehicle/TrackedVehicleController.zig"),
+    @import("Physics/Vehicle/VehicleCollisionTester.zig"),
+    @import("Physics/Vehicle/VehicleConstraint.zig"),
+    @import("Physics/Vehicle/VehicleController.zig"),
+    @import("Physics/Vehicle/Wheel.zig"),
+    @import("Physics/Vehicle/WheeledVehicleController.zig"),
     @import("RegisterTypes.zig"),
     @import("Skeleton/SkeletalAnimation.zig"),
     @import("Skeleton/Skeleton.zig"),
