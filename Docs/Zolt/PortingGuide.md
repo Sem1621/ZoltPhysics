@@ -197,7 +197,11 @@ both types) when porting code needs them.
   bytes) aligned: nothing that lives in temp memory may use `align` above 16 (see section 9 for padded atomics).
 - `JPH_STACK_ALLOC(n)` (alloca): use a fixed size array when `n` is comptime known, otherwise a
   fixed stack buffer with an asserted upper bound (see `Math/GaussianElimination.zig`), or the
-  `TempAllocator` when the size is unbounded. Zig has no alloca.
+  `TempAllocator` when the size is unbounded. Zig has no alloca. An unbounded `JPH_STACK_ALLOC` in a function
+  without a `TempAllocator` (`SkeletonMapper::LockAllTranslations`, `RagdollSettings::CreateRagdoll`,
+  `Ragdoll::AddToPhysicsSystem` / `RemoveFromPhysicsSystem`) allocates with the allocator of the object that owns the
+  function (a RefTarget keeps its allocator), frees it before returning, makes the function return `Allocator.Error`
+  and is listed in the file header.
 - Allocation failure is an error (`error.OutOfMemory`), never ignored. Where Jolt returns a
   `Result<T>` or an error string, return `!T` with a specific error set; keep Jolt's message text
   in a doc comment or log it with `std.log`. **Exception:** Jolt's cached and copied results
@@ -829,3 +833,7 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | defaulted `EActivation inActivationMode = EActivation::Activate` | `.{ .activation = .activate }` | default arguments |
 | `const_cast<KeyValue *>(LockFreeHashMap::Find(key, hash))` | `findMut(key, hash)` | Rule M (section 5) |
 | `(T *)TempAllocator::Allocate(n * sizeof(T))` / `Free(p, n * sizeof(T))` | `TempArray(T).alloc(temp_allocator, n)` / `array.free(temp_allocator)` | typed block, empty when nothing is allocated (section 5) |
+| `Skeleton::AddJoint(name, parentName = "")` / `AddJoint(name, int parentIndex)` | `addJoint(name, .{ .parent_name })` / `addJointWithParentIndex(name, parent_index)` (both `Allocator.Error!u32`) | overloads, default argument |
+| non-const `GetJoints()` / `GetAnimatedJoints()` / `GetJointMatrices()` / `GetMappings()` ... of the Skeleton classes, non-const `GetJoint(i)` / `GetJointMatrix(i)` | `getJointsMut()` / `getAnimatedJointsMut()` / `getJointMatricesMut()` / `getMappingsMut()` ... (the `std.ArrayList` itself, like `PhysicsScene.getBodiesMut`), `getJointMut(i)` / `getJointMatrixMut(i)` | const overloads |
+| `SkeletonMapper::CanMapJoint` (`std::function`), `sDefaultCanMapJoint`, `Initialize(.., inCanMapJoint = sDefaultCanMapJoint)` | `CanMapJoint.init(&context, function)`, `defaultCanMapJoint` / `CanMapJoint.default`, `initialize(.., .{ .can_map_joint })` | std::function, default argument |
+| `SkeletonPose` copy constructor, `SkeletalAnimation::Keyframe : JointState` | `clone() !SkeletonPose`, `keyframe.base` | allocating type, non-virtual inheritance |

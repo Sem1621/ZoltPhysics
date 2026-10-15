@@ -36,6 +36,7 @@ pub const files = [_][]const u8{
     "Physics/PlaneEmptyReference.cpp",
     "Physics/ShapeCoreReference.cpp",
     "Physics/SimulationReference.cpp",
+    "Physics/SkeletonReference.cpp",
     "Physics/TriangleShapeReference.cpp",
     "Physics/TrianglesReference.cpp",
 };
