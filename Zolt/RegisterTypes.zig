@@ -23,7 +23,9 @@
 //!   - `constraint_settings_types`: a tuple of ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState
 //!     can create;
 //!   - `path_constraint_path_types`: a tuple of PathConstraintPath classes that PathConstraintPath.restoreFromBinaryState
-//!     can create.
+//!     can create;
+//!   - `vehicle_controller_settings_types`: a tuple of VehicleControllerSettings classes that
+//!     VehicleConstraintSettings.restoreBinaryState can create.
 //!
 //! Not needed in Zolt: RegisterTypesInternal / UnregisterTypes (nothing to register or unregister at runtime) and
 //! VerifyJoltVersionID (Zig compiles the library together with the application, so the ABI cannot mismatch).
@@ -68,6 +70,9 @@ const SixDOFConstraintSettings = @import("Physics/Constraints/SixDOFConstraint.z
 const SliderConstraintSettings = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraintSettings;
 const SwingTwistConstraintSettings = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraintSettings;
 const VehicleConstraintSettings = @import("Physics/Vehicle/VehicleConstraint.zig").VehicleConstraintSettings;
+const WheeledVehicleControllerSettings = @import("Physics/Vehicle/WheeledVehicleController.zig").WheeledVehicleControllerSettings;
+const TrackedVehicleControllerSettings = @import("Physics/Vehicle/TrackedVehicleController.zig").TrackedVehicleControllerSettings;
+const MotorcycleControllerSettings = @import("Physics/Vehicle/MotorcycleController.zig").MotorcycleControllerSettings;
 
 /// The user types module (see the file comment), an empty module unless the application provides one
 pub const user_types = @import("zolt_user_types");
@@ -148,6 +153,18 @@ pub const constraint_settings_types = .{
 /// plus the user's (`path_constraint_path_types` of `zolt_user_types`). A stub declares `is_stub` (see above).
 pub const path_constraint_path_types = .{PathConstraintPathHermite} ++ (if (@hasDecl(user_types, "path_constraint_path_types")) user_types.path_constraint_path_types else .{});
 
+/// The VehicleControllerSettings classes that VehicleConstraintSettings.restoreBinaryState can create from the RTTI hash
+/// of its controller (`Factory::sInstance->Find(hash)`, the vehicle part of the Factory registration until the Factory of
+/// Phase 8, CharacterVehicleArchitecture E3): Jolt's controller settings classes in the order of RegisterTypes.cpp plus
+/// the user's (`vehicle_controller_settings_types` of `zolt_user_types`). Each one declares `rtti_name` and
+/// `createDefault(allocator) Allocator.Error!*T`. A class that is still a stub declares `is_stub`: the restore skips it
+/// (its hash is unknown, which panics like Jolt's null dereference, see VehicleConstraint.zig).
+pub const vehicle_controller_settings_types = .{
+    WheeledVehicleControllerSettings,
+    TrackedVehicleControllerSettings, // Phase 7 (Vehicle variants group)
+    MotorcycleControllerSettings, // Phase 7 (Vehicle variants group)
+} ++ (if (@hasDecl(user_types, "vehicle_controller_settings_types")) user_types.vehicle_controller_settings_types else .{});
+
 test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
     const std = @import("std");
     const testing = std.testing;
@@ -218,4 +235,20 @@ test "RegisterTypes: the constraint settings and path classes in Jolt's order, s
 
     try testing.expectEqual(@as(usize, 1), path_constraint_path_types.len);
     try testing.expectEqualStrings("PathConstraintPathHermite", path_constraint_path_types[0].rtti_name);
+}
+
+test "RegisterTypes: the vehicle controller settings classes in Jolt's order" {
+    const std = @import("std");
+    const testing = std.testing;
+    const VehicleControllerSettings = @import("Physics/Vehicle/VehicleController.zig").VehicleControllerSettings;
+
+    const expected = [_][]const u8{ "WheeledVehicleControllerSettings", "TrackedVehicleControllerSettings", "MotorcycleControllerSettings" };
+    try testing.expectEqual(expected.len, vehicle_controller_settings_types.len);
+    inline for (vehicle_controller_settings_types, expected, 0..) |T, name, i| {
+        try testing.expectEqualStrings(name, T.rtti_name);
+        if (!@hasDecl(T, "is_stub")) try testing.expect(@hasDecl(T, "createDefault"));
+        inline for (vehicle_controller_settings_types, 0..) |U, j| {
+            if (i != j) try testing.expect(VehicleControllerSettings.rttiHash(T.rtti_name) != VehicleControllerSettings.rttiHash(U.rtti_name));
+        }
+    }
 }
