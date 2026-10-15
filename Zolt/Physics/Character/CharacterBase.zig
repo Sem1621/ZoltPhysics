@@ -313,7 +313,6 @@ pub const CharacterBase = struct {
     }
 
     ///@name Properties of the ground this character is standing on
-
     /// Current ground state
     pub fn getGroundState(self: *const CharacterBase) GroundState {
         return self.ground_state;
