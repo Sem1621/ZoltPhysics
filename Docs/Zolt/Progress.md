@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 78.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
+**Library: 79.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -26,7 +26,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Collision` | 100% | 75 | 1 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
-| `Jolt/Physics/Ragdoll` | 10% | 0 | 0 | 1 | 0 | 0 | 0 | 861 |
+| `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 8% | 0 | 0 | 7 | 5 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
@@ -430,11 +430,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Ragdoll — 10%</summary>
+<details><summary>Jolt/Physics/Ragdoll — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `Ragdoll.cpp`, `Ragdoll.h` | 861 | ⚪ stub | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `Ragdoll.cpp`, `Ragdoll.h` | 861 | ✅ complete | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
 
 </details>
 
