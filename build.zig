@@ -16,6 +16,8 @@
 //!   -Ddeterminism_log=true      JPH_ENABLE_DETERMINISM_LOG: Zolt/Physics/DeterminismLog.zig exists at run time (the
 //!                               `test` step always also runs the DeterminismLog unit tests with it enabled)
 //!   -Dtest-filter=<substring>   Only run tests whose name contains the substring (repeatable)
+//!   -Dreference_asserts=true    Build the C++ reference of `zig build parity` with JPH_ENABLE_ASSERTS: the simulation
+//!                               parity fails a scene whose C++ side hits a Jolt assert
 //!   -Duse_llvm=true|false       Use the LLVM backend (default: true). Zig 0.16's self-hosted x86_64 backend,
 //!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
 const std = @import("std");
@@ -215,11 +217,15 @@ pub fn build(b: *std.Build) void {
 
     // Parity tests: the C++ library is the reference. It is compiled in the configuration that Zolt
     // follows (JPH_CROSS_PLATFORM_DETERMINISTIC, no FP contraction, no asserts / debug renderer /
-    // profiler, like the Distribution build used for Jolt's determinism hashes).
+    // profiler, like the Distribution build used for Jolt's determinism hashes). -Dreference_asserts=true adds
+    // JPH_ENABLE_ASSERTS: a failed Jolt assert is printed and counted (SimulationReference.cpp's hooks), and the
+    // simulation parity fails a scene whose C++ side hit one (the check that scenes keep away from Jolt's asserts).
+    const reference_asserts = b.option(bool, "reference_asserts", "Build the C++ reference of the parity tests with JPH_ENABLE_ASSERTS (scenes that hit a Jolt assert fail)") orelse false;
     var cpp_flags: std.ArrayList([]const u8) = .empty;
     cpp_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-ffp-contract=off", "-DJPH_CROSS_PLATFORM_DETERMINISTIC" }) catch @panic("OOM");
     if (double_precision) cpp_flags.append(b.allocator, "-DJPH_DOUBLE_PRECISION") catch @panic("OOM");
     cpp_flags.append(b.allocator, b.fmt("-DJPH_OBJECT_LAYER_BITS={d}", .{object_layer_bits})) catch @panic("OOM");
+    if (reference_asserts) cpp_flags.append(b.allocator, "-DJPH_ENABLE_ASSERTS") catch @panic("OOM");
 
     // On x86_64 the reference is pinned to x86-64-v3 (SSE4.2/AVX/AVX2/F16C/LZCNT/TZCNT, no AVX-512), which
     // matches the default ISA options of Jolt's CMake build, so parity results don't depend on the host CPU.
