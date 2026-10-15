@@ -202,6 +202,7 @@ bit exact. (The HighSpeed and ConvexVsMesh hashes already match since M6.) ✅ R
 ### Phase 7: Character, Skeleton, Ragdoll, Vehicles
 Character, CharacterVirtual, CharacterBase, Skeleton, SkeletalAnimation, SkeletonMapper,
 SkeletonPose, Ragdoll, Vehicle* (wheeled, tracked, motorcycle).
+Design, groups and harness plan: [CharacterVehicleArchitecture.md](CharacterVehicleArchitecture.md).
 **Milestone M8:** **CharacterVirtual** hash matches.
 
 ### Phase 8: ObjectStream and serialization (`Jolt/ObjectStream`)
