@@ -12707,9 +12707,10 @@ fn buildCharacterMovingPlatforms(b: *SceneBuilder) Allocator.Error!void {
 
 /// SetShape (crouch / stand) with and without max penetration depth, with and without locking: a character crouches under
 /// a ceiling (bottom at y = 1.6) and is not allowed to stand up (the standing capsule reaches 1.8 m), then is allowed with a
-/// larger max penetration depth and pushed back down; another one walks out from under the ceiling while it tries to stand
-/// up every 5 updates (rejected below the ceiling, accepted outside); a third one switches shapes in the open, to a sphere
-/// that reaches into the floor (rejected) and then forced (FLT_MAX: no check, the solver pushes it out)
+/// larger max penetration depth (squeezed between the floor and the ceiling until it crouches again); another one walks
+/// out from under the ceiling while it tries to stand up every 5 updates (rejected below the ceiling, accepted outside); a
+/// third one switches shapes in the open, to a sphere that reaches into the floor (rejected) and then forced (FLT_MAX: no
+/// check, the solver pushes it out)
 fn buildCharacterCrouchStand(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
     b.num_updates = 120;
