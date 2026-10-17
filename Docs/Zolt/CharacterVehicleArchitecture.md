@@ -56,7 +56,7 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
 | `SkeletonPose` | Value struct owning its arrays (`init` / `deinit` with the allocator) |
 | Non-virtual inheritance: `SkeletalAnimation::Keyframe : JointState`, `RagdollSettings::Part : BodyCreationSettings`, `CharacterContact : CharacterContactKey`, `VehicleEngine : VehicleEngineSettings`, `VehicleTransmission`, `VehicleTrack` | The parent is embedded as the field `base`, like `ShapeCastResult.base` |
 | `CharacterBaseSettings` → `CharacterSettings`, `CharacterVirtualSettings` | Pattern A root with `ref_count` (Jolt's only virtual is the destructor) |
-| `CharacterBase` → `Character`, `CharacterVirtual` | Pattern A root with `ref_count`; `saveState` / `restoreState` are virtual |
+| `CharacterBase` → `Character`, `CharacterVirtual` | Pattern A root with `ref_count`; `saveState` / `restoreState` are virtual. `restoreState` returns `Allocator.Error!void`, because CharacterVirtual's restore resizes its active contacts |
 | `CharacterContactListener` | Pattern B; every callback is optional (Jolt's defaults do nothing or return `true`) |
 | `CharacterVsCharacterCollision` → `CharacterVsCharacterCollisionSimple` | Pattern B: a user implemented interface, held by CharacterVirtual as an optional fat pointer |
 | `CharacterVirtual::ContactCollector` / `ContactCastCollector` | Collectors embedding `base: CollideShapeCollector` / `CastShapeCollector`, overriding `addHit` and `setUserData` (CollisionArchitecture D5) |
@@ -116,7 +116,8 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
   `reinterpret_cast<uint64>`.
 - **Inner body.** The inner body (`mInnerBodyID`) is a kinematic body that CharacterVirtual creates, moves and
   destroys through the BodyInterface. Its user data and object layer come from the settings. Its creation can fail
-  ("out of bodies") and is reported like Jolt does: no inner body, and an assert in debug builds.
+  ("out of bodies", or an override ID that is out of range or in use); then the character has no inner body, exactly
+  like Jolt, which does not assert there.
 
 ### E6 Vehicles
 
