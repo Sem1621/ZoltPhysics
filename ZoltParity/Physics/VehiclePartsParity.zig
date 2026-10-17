@@ -33,6 +33,14 @@
 //!   copies of the settings and MotorcycleController::GetSettings' self assignment of mLeanSpringDamping, and the
 //!   SaveState bytes of the new controller), and TrackedVehicleController::SyncLeftRightTracks on random ratios, angular
 //!   velocities and inertias (same and opposite directions, zero ratios and inertias, NaN and infinities).
+//!
+//! Proof that the vehicle variants' tests bite (each breakage then reverted): writing WheelSettingsTV's two frictions
+//! in the other order fails "the default settings ..." (wheel_settings_tv bytes differ) and "binary state of
+//! WheelSettingsTV"; writing MotorcycleControllerSettings' integration coefficient after its decay fails the defaults
+//! and "binary state of MotorcycleControllerSettings"; copying the controller's lean spring damping in
+//! MotorcycleController::GetSettings fails "MotorcycleController construction, GetSettings and SaveState" (500
+//! mismatches); `-=` instead of `+=` for the right track in SyncLeftRightTracks' branch of opposite ratios fails
+//! "TrackedVehicleController SyncLeftRightTracks" (3964 mismatches).
 
 const std = @import("std");
 const zolt = @import("zolt");

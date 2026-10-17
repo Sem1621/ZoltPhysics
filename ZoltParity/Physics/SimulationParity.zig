@@ -5681,7 +5681,16 @@ const VehicleSlot = struct {
 
 /// The vehicle variants group, tracked vehicles: the hooks that VehicleSlot calls (SimMakeTrackedControllerSettings,
 /// SimMakeWheelSettingsTV, WriteTrackedWheelState, WriteTrackedControllerState, GetEngine / GetTransmission of a
-/// tracked vehicle) and ApplyTrackedOp of SimulationReference.cpp
+/// tracked vehicle) and ApplyTrackedOp of SimulationReference.cpp. Proof that the tracked scenes bite (each breakage of
+/// Zolt/Physics/Vehicle/TrackedVehicleController.zig, then reverted): reassociating PostCollide's
+/// `differential_torque * delta_time / inertia` as `differential_torque * (delta_time / inertia)` is reported as "scene
+/// vehicle_tracked_ops ... update 2: after the update, state f: state differs at byte 59 ...: bodies[1] (id 0x00800001)
+/// position.x zolt 0x2fd23654 jolt 0x2fcecaea"; `-=` instead of `+=` for the right track in SyncLeftRightTracks' branch
+/// of opposite ratios as "scene vehicle_tracked_terrains ... update 75: ... bodies[2] (id 0x00800002) position.x zolt
+/// 0xc1c6f3ff jolt 0xc1c6f2d7" (turning on the spot; VehiclePartsParity's SyncLeftRightTracks test fails too); summing
+/// the radius of every wheel of a braking track instead of those with a contact as "scene vehicle_tracked_terrains ...
+/// update 125: ... bodies[3] (id 0x00800003) position.x zolt 0x41cccda3 jolt 0x41cccd22" (and in
+/// vehicle_tracked_pushing_boxes and vehicle_tracked_far_from_origin, the scenes that brake with wheels in the air).
 const TrackedVehicleSlot = struct {
     const TrackedVehicleController = zolt.TrackedVehicleController;
     const TrackedVehicleControllerSettings = zolt.TrackedVehicleControllerSettings;
@@ -5798,7 +5807,17 @@ const TrackedVehicleSlot = struct {
 
 /// The vehicle variants group, motorcycles: the hooks that VehicleSlot calls (SimMakeMotorcycleControllerSettings,
 /// WriteMotorcycleControllerState) and ApplyMotorcycleOp of SimulationReference.cpp. A MotorcycleController is a
-/// WheeledVehicleController: VehicleSlot reaches its wheeled parts itself.
+/// WheeledVehicleController: VehicleSlot reaches its wheeled parts itself. Proof that the motorcycle scenes bite (each
+/// breakage of Zolt/Physics/Vehicle/MotorcycleController.zig, then reverted): no lean steering limit (a max steer angle
+/// 10 rad higher) is reported as "scene vehicle_motorcycle_turns ... update 60: after the update, state f: state
+/// differs at byte 193 ...: bodies[2] (id 0x00800002) position.x zolt 0xba28cdaa jolt 0xba36e5cf"; clamping the target
+/// lean to the other side (`-Sign(w_angle) * mMaxLeanAngle`) as "scene vehicle_motorcycle_turns ... update 62: ...
+/// bodies[2] (id 0x00800002) position.x zolt 0xbbd38af5 jolt 0xbc1755c0" (the clamp is reached); subtracting the
+/// integration term of the lean impulse as "scene vehicle_motorcycle_lean_integration ... update 13: ... bodies[1] (id
+/// 0x00800001) position.x zolt 0x3d358665 jolt 0x3d35d8f6" (and in vehicle_motorcycle_lean_integration_slope); copying
+/// the controller's lean spring damping in GetSettings (Jolt assigns the settings' own value) as "scene
+/// vehicle_motorcycle_ops ... update 40: operation 19 (vehicle_settings_hash on object handle / description 0) returned
+/// 869730697 in zolt and 4196340125 in jolt" (and VehiclePartsParity's controller test).
 const MotorcycleSlot = struct {
     const MotorcycleController = zolt.MotorcycleController;
     const MotorcycleControllerSettings = zolt.MotorcycleControllerSettings;
