@@ -138,6 +138,15 @@
 //! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
 //! 3").
 //!
+//! Proof that the vehicle scenes bite (VehicleSlot, the vehicle core group): multiplying WheelWV's lateral slip angle by
+//! 1.0001 is reported as "scene vehicle_wheeled_ops, ... update 11: ... state differs at byte 92 ...: bodies[2] (id
+//! 0x00800002) position.x zolt 0xbaa3b604 jolt 0xbaa3b60b" (and vehicle_wheeled_in_air at update 28); the convex radius
+//! of VehicleCollisionTesterCastCylinder from the larger instead of the smaller of the wheel's half width and radius as
+//! "scene vehicle_wheeled_ops, ... update 35: ... bodies[2] (id 0x00800002) position.x" (the scene switches to the cast
+//! cylinder tester at update 35); a WheeledVehicleController::GetWheelSpeedAtClutch that is 1.0001 times Jolt's (only the
+//! object state sees it) as "update 1: ... object state differs at byte 1516 ...: vehicle_wheeled (object handle 0, item 0)
+//! wheel_speed_at_clutch".
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
