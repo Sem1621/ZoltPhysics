@@ -20,13 +20,19 @@
 //! - The binary state of every settings class: VehicleEngineSettings, VehicleTransmissionSettings,
 //!   VehicleDifferentialSettings, VehicleAntiRollBar, VehicleTrackSettings, WheelSettings, WheelSettingsWV,
 //!   WheeledVehicleControllerSettings and VehicleConstraintSettings without wheels (Jolt cannot restore settings with
-//!   wheels, CharacterVehicleArchitecture E6). For each: the bytes of the default object and of random objects (random
+//!   wheels, CharacterVehicleArchitecture E6), and the vehicle variants' WheelSettingsTV, TrackedVehicleControllerSettings
+//!   and MotorcycleControllerSettings. For each: the bytes of the default object and of random objects (random
 //!   bit patterns, NaNs and unknown enum bytes included), the cross restore (each side restores the other side's bytes
 //!   and saves again) and truncated streams at every length. A truncated stream is restored into an object built from
 //!   a template whose arrays have the maximum size, so that the arrays never grow (Jolt's Array::resize leaves new
 //!   trivial elements uninitialized); the EOF / failed flags and the bytes saved again are compared. A truncated
 //!   VehicleConstraintSettings is cut after the controller hash (Jolt dereferences a null RTTI when the hash cannot be
 //!   read) and compared through the restore error.
+//! - The vehicle variants' controllers, which need no vehicle constraint for this (they keep a reference to it): a
+//!   TrackedVehicleController and a MotorcycleController constructed from random settings (GetSettings, which covers the
+//!   copies of the settings and MotorcycleController::GetSettings' self assignment of mLeanSpringDamping, and the
+//!   SaveState bytes of the new controller), and TrackedVehicleController::SyncLeftRightTracks on random ratios, angular
+//!   velocities and inertias (same and opposite directions, zero ratios and inertias, NaN and infinities).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -56,6 +62,12 @@ const WheelSettingsWV = zolt.WheelSettingsWV;
 const VehicleControllerSettings = zolt.VehicleControllerSettings;
 const WheeledVehicleControllerSettings = zolt.WheeledVehicleControllerSettings;
 const VehicleConstraintSettings = zolt.VehicleConstraintSettings;
+const VehicleConstraint = zolt.VehicleConstraint;
+const WheelSettingsTV = zolt.WheelSettingsTV;
+const TrackedVehicleController = zolt.TrackedVehicleController;
+const TrackedVehicleControllerSettings = zolt.TrackedVehicleControllerSettings;
+const MotorcycleController = zolt.MotorcycleController;
+const MotorcycleControllerSettings = zolt.MotorcycleControllerSettings;
 
 const testing_allocator = std.testing.allocator;
 
@@ -179,6 +191,32 @@ const VPConstraint = extern struct {
     controller: VPController,
 };
 
+/// Must match VPWheelTV in VehiclePartsReference.cpp: WheelSettings (the WheelSettingsWV members of `wheel` are not
+/// used) and the members of WheelSettingsTV
+const VPWheelTV = extern struct {
+    wheel: VPWheel,
+    longitudinal_friction: f32,
+    lateral_friction: f32,
+};
+
+/// Must match VPTracked in VehiclePartsReference.cpp: TrackedVehicleControllerSettings
+const VPTracked = extern struct {
+    engine: VPEngine,
+    transmission: VPTransmission,
+    tracks: [2]VPTrack,
+};
+
+/// Must match VPMotorcycle in VehiclePartsReference.cpp: MotorcycleControllerSettings
+const VPMotorcycle = extern struct {
+    controller: VPController,
+    max_lean_angle: f32,
+    lean_spring_constant: f32,
+    lean_spring_damping: f32,
+    lean_spring_integration_coefficient: f32,
+    lean_spring_integration_coefficient_decay: f32,
+    lean_smoothing_factor: f32,
+};
+
 /// The settings classes of jolt_vp_save / jolt_vp_resave (must match VPKind in VehiclePartsReference.cpp)
 const VPKind = enum(u32) {
     engine,
@@ -190,6 +228,11 @@ const VPKind = enum(u32) {
     wheel_settings_wv,
     controller,
     constraint,
+    /// The vehicle variants: WheelSettingsTV (a VPWheelTV), TrackedVehicleControllerSettings (a VPTracked),
+    /// MotorcycleControllerSettings (a VPMotorcycle)
+    wheel_settings_tv,
+    tracked_controller,
+    motorcycle_controller,
 };
 
 /// Must match VPEngineOp in VehiclePartsReference.cpp
@@ -225,7 +268,7 @@ const VPTransmissionResult = extern struct {
 };
 
 const jolt = struct {
-    extern fn jolt_vp_struct_sizes(out_sizes: *[12]u32) void;
+    extern fn jolt_vp_struct_sizes(out_sizes: *[15]u32) void;
     extern fn jolt_vp_save(kind: u32, desc: ?*const anyopaque, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_vp_resave(kind: u32, template: ?*const anyopaque, bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32, out_eof: *u32, out_failed: *u32, out_error: *u32) u32;
     extern fn jolt_vp_engine_defaults(out_inertia: *f32, out_angular_damping: *f32, out_current_rpm: *f32) void;
@@ -233,6 +276,8 @@ const jolt = struct {
     extern fn jolt_vp_transmission(desc: *const VPTransmission, ops: [*]const VPTransmissionOp, num_ops: u32, out_results: [*]VPTransmissionResult) void;
     extern fn jolt_vp_differential(desc: *const VPDifferential, velocities: [*]const f32, count: u32, out_fractions: [*]f32) void;
     extern fn jolt_vp_default_curves(x: [*]const f32, count: u32, out_values: [*]f32) void;
+    extern fn jolt_vp_controller(kind: u32, desc: *const anyopaque, out_settings: [*]u8, settings_capacity: u32, out_state: [*]u8, state_capacity: u32, out_state_size: *u32) u32;
+    extern fn jolt_vp_tracked_sync(cases: [*]const f32, count: u32, out_velocities: [*]f32) void;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -327,6 +372,29 @@ fn makeController(allocator: Allocator, desc: *const VPController, s: *WheeledVe
     s.differential_limited_slip_ratio = desc.differential_limited_slip_ratio;
 }
 
+fn makeWheelTV(desc: *const VPWheelTV, s: *WheelSettingsTV) void {
+    makeWheel(&desc.wheel, &s.base);
+    s.longitudinal_friction = desc.longitudinal_friction;
+    s.lateral_friction = desc.lateral_friction;
+}
+
+fn makeTracked(allocator: Allocator, desc: *const VPTracked, s: *TrackedVehicleControllerSettings) !void {
+    try makeEngine(allocator, &desc.engine, &s.engine);
+    try makeTransmission(allocator, &desc.transmission, &s.transmission);
+    for (&s.tracks, &desc.tracks) |*t, *d|
+        try makeTrack(allocator, d, t);
+}
+
+fn makeMotorcycle(allocator: Allocator, desc: *const VPMotorcycle, s: *MotorcycleControllerSettings) !void {
+    try makeController(allocator, &desc.controller, &s.base);
+    s.max_lean_angle = desc.max_lean_angle;
+    s.lean_spring_constant = desc.lean_spring_constant;
+    s.lean_spring_damping = desc.lean_spring_damping;
+    s.lean_spring_integration_coefficient = desc.lean_spring_integration_coefficient;
+    s.lean_spring_integration_coefficient_decay = desc.lean_spring_integration_coefficient_decay;
+    s.lean_smoothing_factor = desc.lean_smoothing_factor;
+}
+
 /// VehicleConstraintSettings of a description (one reference owned by the caller); a null description gives the default
 /// settings with a default controller (SaveBinaryState needs one)
 fn makeConstraint(allocator: Allocator, desc: ?*const VPConstraint) !Ref(ConstraintSettings) {
@@ -413,6 +481,27 @@ fn zoltSave(allocator: Allocator, kind: VPKind, desc: ?*const anyopaque) ![]u8 {
         .constraint => {
             var ref = try makeConstraint(allocator, if (desc) |d| @ptrCast(@alignCast(d)) else null);
             defer ref.deinit();
+            return saveBytes(allocator, ref.get().?);
+        },
+        .wheel_settings_tv => {
+            const s = try WheelSettingsTV.create(allocator);
+            var ref = Ref(WheelSettings).init(&s.base);
+            defer ref.deinit();
+            if (desc) |d| makeWheelTV(@ptrCast(@alignCast(d)), s);
+            return saveBytes(allocator, ref.get().?);
+        },
+        .tracked_controller => {
+            const s = try TrackedVehicleControllerSettings.create(allocator);
+            var ref = Ref(VehicleControllerSettings).init(&s.base);
+            defer ref.deinit();
+            if (desc) |d| try makeTracked(allocator, @ptrCast(@alignCast(d)), s);
+            return saveBytes(allocator, ref.get().?);
+        },
+        .motorcycle_controller => {
+            const s = try MotorcycleControllerSettings.create(allocator);
+            var ref = Ref(VehicleControllerSettings).init(s.asControllerSettings());
+            defer ref.deinit();
+            if (desc) |d| try makeMotorcycle(allocator, @ptrCast(@alignCast(d)), s);
             return saveBytes(allocator, ref.get().?);
         },
     }
@@ -531,6 +620,33 @@ fn zoltResave(allocator: Allocator, kind: VPKind, template: ?*const anyopaque, b
                 defer ref.deinit();
                 result.bytes = try saveBytes(allocator, ref.get().?);
             }
+        },
+        .wheel_settings_tv => {
+            const s = try WheelSettingsTV.create(allocator);
+            var ref = Ref(WheelSettings).init(&s.base);
+            defer ref.deinit();
+            if (template) |d| makeWheelTV(@ptrCast(@alignCast(d)), s);
+            try ref.get().?.restoreBinaryState(stream);
+            flags.set(&result, &in);
+            result.bytes = try saveBytes(allocator, ref.get().?);
+        },
+        .tracked_controller => {
+            const s = try TrackedVehicleControllerSettings.create(allocator);
+            var ref = Ref(VehicleControllerSettings).init(&s.base);
+            defer ref.deinit();
+            if (template) |d| try makeTracked(allocator, @ptrCast(@alignCast(d)), s);
+            try ref.get().?.restoreBinaryState(stream);
+            flags.set(&result, &in);
+            result.bytes = try saveBytes(allocator, ref.get().?);
+        },
+        .motorcycle_controller => {
+            const s = try MotorcycleControllerSettings.create(allocator);
+            var ref = Ref(VehicleControllerSettings).init(s.asControllerSettings());
+            defer ref.deinit();
+            if (template) |d| try makeMotorcycle(allocator, @ptrCast(@alignCast(d)), s);
+            try ref.get().?.restoreBinaryState(stream);
+            flags.set(&result, &in);
+            result.bytes = try saveBytes(allocator, ref.get().?);
         },
     }
     return result;
@@ -735,6 +851,62 @@ fn randomConstraint(rng: *Rng) VPConstraint {
     return c;
 }
 
+fn randomWheelTV(rng: *Rng) VPWheelTV {
+    return .{ .wheel = randomWheel(rng, .{}), .longitudinal_friction = randomBits(rng), .lateral_friction = randomBits(rng) };
+}
+
+fn randomTracked(rng: *Rng) VPTracked {
+    return .{ .engine = randomEngine(rng, .{ .bits = true }), .transmission = randomTransmission(rng, .{ .bits = true }), .tracks = .{ randomTrack(rng, .{}), randomTrack(rng, .{}) } };
+}
+
+fn randomMotorcycle(rng: *Rng) VPMotorcycle {
+    return .{
+        .controller = randomController(rng, .{}),
+        .max_lean_angle = randomBits(rng),
+        .lean_spring_constant = randomBits(rng),
+        .lean_spring_damping = randomBits(rng),
+        .lean_spring_integration_coefficient = randomBits(rng),
+        .lean_spring_integration_coefficient_decay = randomBits(rng),
+        .lean_smoothing_factor = randomBits(rng),
+    };
+}
+
+/// Engine and transmission settings that pass the asserts of the controller constructors (the transmission's shift up
+/// RPM below the engine's max RPM, positive gear ratios, negative reverse gear ratios, a positive clutch strength)
+fn validEngineAndTransmission(rng: *Rng) struct { engine: VPEngine, transmission: VPTransmission } {
+    const transmission = randomTransmission(rng, .{});
+    const min_rpm = rng.float(0.0, 2000.0);
+    return .{
+        .engine = .{ .max_torque = rng.float(0.0, 1000.0), .min_rpm = min_rpm, .max_rpm = math.max(min_rpm, transmission.shift_up_rpm) + rng.float(1.0, 4000.0), .normalized_torque = randomCurve(rng, .{}), .inertia = rng.float(0.01, 2.0), .angular_damping = rng.float(0.0, 2.0) },
+        .transmission = transmission,
+    };
+}
+
+/// Tracked controller settings that pass the asserts of TrackedVehicleController's constructor
+fn validTracked(rng: *Rng) VPTracked {
+    const et = validEngineAndTransmission(rng);
+    var d: VPTracked = .{ .engine = et.engine, .transmission = et.transmission, .tracks = .{ randomTrack(rng, .{}), randomTrack(rng, .{}) } };
+    for (&d.tracks) |*t| {
+        t.inertia = rng.float(0.0, 20.0);
+        t.angular_damping = rng.float(0.0, 2.0);
+        t.max_brake_torque = rng.float(0.0, 20000.0);
+        t.differential_ratio = rng.float(0.5, 10.0);
+    }
+    return d;
+}
+
+/// Motorcycle controller settings that pass the asserts of WheeledVehicleController's constructor (the lean members
+/// are not checked)
+fn validMotorcycle(rng: *Rng) VPMotorcycle {
+    const et = validEngineAndTransmission(rng);
+    var d = randomMotorcycle(rng);
+    d.controller.engine = et.engine;
+    d.controller.transmission = et.transmission;
+    for (&d.controller.differentials) |*diff| diff.* = randomDifferential(rng, .{});
+    d.controller.differential_limited_slip_ratio = if (rng.next() % 4 == 0) math.flt_max else rng.float(1.01, 5.0);
+    return d;
+}
+
 /// Fill the arrays of a template to their maximum size (truncated restores never grow an array)
 fn fullCurve(c: *VPCurve) void {
     c.num_points = max_points;
@@ -744,9 +916,9 @@ fn fullCurve(c: *VPCurve) void {
 // Tests
 
 test "VehicleParts: struct sizes match the C++ side" {
-    var sizes: [12]u32 = undefined;
+    var sizes: [15]u32 = undefined;
     jolt.jolt_vp_struct_sizes(&sizes);
-    const expected = [12]usize{ @sizeOf(VPCurve), @sizeOf(VPEngine), @sizeOf(VPTransmission), @sizeOf(VPDifferential), @sizeOf(VPAntiRollBar), @sizeOf(VPTrack), @sizeOf(VPWheel), @sizeOf(VPController), @sizeOf(VPConstraint), @sizeOf(VPEngineOp), @sizeOf(VPTransmissionOp), @sizeOf(VPTransmissionResult) };
+    const expected = [15]usize{ @sizeOf(VPCurve), @sizeOf(VPEngine), @sizeOf(VPTransmission), @sizeOf(VPDifferential), @sizeOf(VPAntiRollBar), @sizeOf(VPTrack), @sizeOf(VPWheel), @sizeOf(VPController), @sizeOf(VPConstraint), @sizeOf(VPEngineOp), @sizeOf(VPTransmissionOp), @sizeOf(VPTransmissionResult), @sizeOf(VPWheelTV), @sizeOf(VPTracked), @sizeOf(VPMotorcycle) };
     for (sizes, expected) |s, e|
         try std.testing.expectEqual(e, @as(usize, s));
 }
@@ -1052,6 +1224,34 @@ const descs = struct {
     fn constraint(rng: *Rng) VPConstraint {
         return randomConstraint(rng);
     }
+    fn wheelTV(rng: *Rng) VPWheelTV {
+        return randomWheelTV(rng);
+    }
+    fn wheelTVTemplate(rng: *Rng) VPWheelTV {
+        var w = randomWheelTV(rng);
+        fullCurve(&w.wheel.longitudinal_friction);
+        fullCurve(&w.wheel.lateral_friction);
+        return w;
+    }
+    fn tracked(rng: *Rng) VPTracked {
+        return randomTracked(rng);
+    }
+    fn trackedTemplate(rng: *Rng) VPTracked {
+        var t = randomTracked(rng);
+        fullCurve(&t.engine.normalized_torque);
+        t.transmission.num_gear_ratios = max_ratios;
+        t.transmission.num_reverse_gear_ratios = max_ratios;
+        for (&t.tracks) |*full| full.num_wheels = max_track_wheels;
+        return t;
+    }
+    fn motorcycle(rng: *Rng) VPMotorcycle {
+        return randomMotorcycle(rng);
+    }
+    fn motorcycleTemplate(rng: *Rng) VPMotorcycle {
+        var m = randomMotorcycle(rng);
+        m.controller = controllerTemplate(rng);
+        return m;
+    }
 };
 
 test "VehicleParts: binary state of VehicleEngineSettings" {
@@ -1088,4 +1288,143 @@ test "VehicleParts: binary state of WheeledVehicleControllerSettings" {
 
 test "VehicleParts: binary state of VehicleConstraintSettings without wheels" {
     try checkBinaryState(.constraint, VPConstraint, 200, 0xb1a5_0009, descs.constraint, descs.constraint);
+}
+
+test "VehicleParts: binary state of WheelSettingsTV" {
+    try checkBinaryState(.wheel_settings_tv, VPWheelTV, 300, 0xb1a5_000a, descs.wheelTV, descs.wheelTVTemplate);
+}
+
+test "VehicleParts: binary state of TrackedVehicleControllerSettings" {
+    try checkBinaryState(.tracked_controller, VPTracked, 200, 0xb1a5_000b, descs.tracked, descs.trackedTemplate);
+}
+
+test "VehicleParts: binary state of MotorcycleControllerSettings" {
+    try checkBinaryState(.motorcycle_controller, VPMotorcycle, 200, 0xb1a5_000c, descs.motorcycle, descs.motorcycleTemplate);
+}
+
+/// The results of jolt_vp_controller
+const ControllerBytes = struct {
+    /// SaveBinaryState of GetSettings()
+    settings: []u8,
+    /// SaveState of the new controller
+    state: []u8,
+
+    fn deinit(self: *ControllerBytes, allocator: Allocator) void {
+        allocator.free(self.settings);
+        allocator.free(self.state);
+    }
+};
+
+/// jolt_vp_controller on the Zolt side: a controller of the settings `desc` (a VPTracked / VPMotorcycle for `kind`)
+/// constructed for a vehicle constraint that it never accesses
+fn zoltController(allocator: Allocator, kind: VPKind, desc: *const anyopaque) !ControllerBytes {
+    var dummy: VehicleConstraint = undefined; // The constructors, GetSettings and SaveState only keep its address
+    var settings: Ref(VehicleControllerSettings) = switch (kind) {
+        .tracked_controller => blk: {
+            const s = try TrackedVehicleControllerSettings.create(allocator);
+            var ref = Ref(VehicleControllerSettings).init(&s.base);
+            errdefer ref.deinit();
+            try makeTracked(allocator, @ptrCast(@alignCast(desc)), s);
+            break :blk ref;
+        },
+        .motorcycle_controller => blk: {
+            const s = try MotorcycleControllerSettings.create(allocator);
+            var ref = Ref(VehicleControllerSettings).init(s.asControllerSettings());
+            errdefer ref.deinit();
+            try makeMotorcycle(allocator, @ptrCast(@alignCast(desc)), s);
+            break :blk ref;
+        },
+        else => unreachable,
+    };
+    defer settings.deinit();
+    const controller = try settings.get().?.constructController(allocator, &dummy);
+    defer controller.destroy();
+
+    var copy = try controller.getSettings();
+    defer copy.deinit();
+    const settings_bytes = try saveBytes(allocator, copy.get().?);
+    errdefer allocator.free(settings_bytes);
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    controller.saveState(recorder.recorder());
+    return .{ .settings = settings_bytes, .state = try allocator.dupe(u8, recorder.getData()) };
+}
+
+/// jolt_vp_controller
+fn joltController(allocator: Allocator, kind: VPKind, desc: *const anyopaque) !ControllerBytes {
+    var settings_buffer: [max_bytes]u8 = undefined;
+    var state_buffer: [256]u8 = undefined;
+    var state_size: u32 = 0;
+    const size = jolt.jolt_vp_controller(@intFromEnum(kind), desc, &settings_buffer, max_bytes, &state_buffer, state_buffer.len, &state_size);
+    std.debug.assert(size <= max_bytes and state_size <= state_buffer.len);
+    const settings = try allocator.dupe(u8, settings_buffer[0..size]);
+    errdefer allocator.free(settings);
+    return .{ .settings = settings, .state = try allocator.dupe(u8, state_buffer[0..state_size]) };
+}
+
+fn checkControllers(comptime kind: VPKind, comptime Desc: type, count: usize, seed: u32, comptime valid: fn (*Rng) Desc) !void {
+    const allocator = testing_allocator;
+    var checker: Checker = .{ .name = "VehicleParts controller " ++ @tagName(kind) };
+    var rng: Rng = .{ .state = seed };
+    for (0..count) |_| {
+        const desc = valid(&rng);
+        var z = try zoltController(allocator, kind, &desc);
+        defer z.deinit(allocator);
+        var j = try joltController(allocator, kind, &desc);
+        defer j.deinit(allocator);
+        if (!std.mem.eql(u8, z.settings, j.settings) or !std.mem.eql(u8, z.state, j.state)) {
+            if (checker.mismatches < 5) std.debug.print("{s}: GetSettings / SaveState differ for {any}\n  zolt: {any}\n        {any}\n  jolt: {any}\n        {any}\n", .{ checker.name, desc, z.settings, z.state, j.settings, j.state });
+            checker.mismatches += 1;
+        }
+    }
+    try checker.finish();
+}
+
+test "VehicleParts: TrackedVehicleController construction, GetSettings and SaveState" {
+    try checkControllers(.tracked_controller, VPTracked, 500, 0xc0de_0001, validTracked);
+}
+
+test "VehicleParts: MotorcycleController construction, GetSettings and SaveState" {
+    try checkControllers(.motorcycle_controller, VPMotorcycle, 500, 0xc0de_0002, validMotorcycle);
+}
+
+test "VehicleParts: TrackedVehicleController SyncLeftRightTracks" {
+    const allocator = testing_allocator;
+    var checker: Checker = .{ .name = "TrackedVehicleController SyncLeftRightTracks" };
+    var rng: Rng = .{ .state = 0x5ac0_0003 };
+
+    const n = 8192;
+    const ratio_choices = [_]f32{ 1.0, 0.5, -0.5, -1.0, 0.0, -0.0, 2.0 };
+    var cases: [6 * n]f32 = undefined;
+    for (0..n) |i| {
+        const c = cases[6 * i ..][0..6];
+        for (c[0..2]) |*r| r.* = switch (rng.next() % 4) {
+            0 => ratio_choices[rng.next() % ratio_choices.len],
+            1 => randomFloat(&rng, -1.5, 1.5, .{ .nan = true }),
+            else => rng.float(-1.0, 1.0),
+        };
+        for (c[2..4]) |*w| w.* = randomFloat(&rng, -50.0, 50.0, .{ .nan = true });
+        for (c[4..6]) |*inertia| inertia.* = if (rng.next() % 8 == 0) randomFloat(&rng, 0.0, 20.0, .{ .nan = true }) else rng.float(0.0, 20.0);
+    }
+    var jolt_velocities: [2 * n]f32 = undefined;
+    jolt.jolt_vp_tracked_sync(&cases, n, &jolt_velocities);
+
+    var settings = try TrackedVehicleControllerSettings.init(allocator);
+    settings.base.setEmbedded();
+    defer settings.base.deinit();
+    var dummy: VehicleConstraint = undefined; // Only its address is kept
+    var controller = try TrackedVehicleController.init(allocator, &settings, &dummy);
+    defer controller.base.deinit();
+    for (0..n) |i| {
+        const c = cases[6 * i ..][0..6];
+        controller.left_ratio = c[0]; // Not through the setters: they assert that the ratio is not 0
+        controller.right_ratio = c[1];
+        controller.tracks[0].angular_velocity = c[2];
+        controller.tracks[1].angular_velocity = c[3];
+        controller.tracks[0].base.inertia = c[4];
+        controller.tracks[1].base.inertia = c[5];
+        controller.syncLeftRightTracks();
+        checker.check(c.*, [2]f32{ controller.tracks[0].angular_velocity, controller.tracks[1].angular_velocity }, jolt_velocities[2 * i ..][0..2].*);
+    }
+    try checker.finish();
 }
