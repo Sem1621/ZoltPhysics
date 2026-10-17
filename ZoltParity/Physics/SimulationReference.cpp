@@ -3196,6 +3196,7 @@ public:
 			case 4:		return c->GetGroundBodyID() == GetHandle(inOp.mBody)? 1 : 0;
 			case 5:		return c->GetGroundVelocity().IsNearZero(1.0e-6f)? 0 : 1;
 			case 6:		return GetShapeIndex(c->GetShape());
+			case 7:		return c->GetInnerBodyID().IsInvalid()? 0 : 1;
 			default:
 				Trace("SimulationReference: unknown character virtual value %u", i[0]);
 				abort();

@@ -13,7 +13,9 @@
 //! - `new CharacterVirtual(settings, position, rotation, user data, system)` is `CharacterVirtual.create(...)` (reference
 //!   count 0 like `new`, the last `release` of a `Ref(CharacterBase)` destroys it), an embedded character `init(...)`.
 //!   Jolt's constructor without user data is the same call with `user_data = 0`. A failed creation (out of memory while
-//!   creating or adding the inner body) leaves nothing behind: no inner body, no references.
+//!   creating or adding the inner body) leaves nothing behind: no inner body, no references. When CreateBody /
+//!   CreateBodyWithID returns null (the system is full, the override ID is taken) the character has no inner body, as in
+//!   Jolt (which does not assert).
 //! - `CharacterContactListener` and `CharacterVsCharacterCollision` are pattern B interfaces (`init(&impl)`): every
 //!   listener callback is optional (Jolt's defaults do nothing / return true), the two collision functions are required.
 //!   `CharacterVsCharacterCollisionSimple` keeps Jolt's `Array<CharacterVirtual *>` order and passes the other character
@@ -1832,7 +1834,8 @@ pub const CharacterVirtual = struct {
     }
 
     /// (Zolt: error.OutOfMemory when the active contacts cannot grow to the restored count; the base state, position,
-    /// rotation and velocity are restored then, the active contacts are unchanged)
+    /// rotation and velocity are restored then, and the active contacts are unchanged, except that a validating restore
+    /// has already removed the contacts without collision like Jolt does before it reads them)
     pub fn restoreState(self: *CharacterVirtual, stream: *StateRecorder) Allocator.Error!void {
         try CharacterBase.impl.restoreState(&self.base, stream);
 
@@ -3107,9 +3110,14 @@ const ObjectLayerPairFilterTable = @import("../Collision/ObjectLayerPairFilterTa
 const ObjectVsBroadPhaseLayerFilterTable = @import("../Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
 const BoxShape = @import("../Collision/Shape/BoxShape.zig").BoxShape;
 const CapsuleShape = @import("../Collision/Shape/CapsuleShape.zig").CapsuleShape;
+const MeshShapeSettings = @import("../Collision/Shape/MeshShape.zig").MeshShapeSettings;
+const Triangle = @import("../../Geometry/Triangle.zig").Triangle;
+const AllHitCollisionCollector = @import("../Collision/CollisionCollectorImpl.zig").AllHitCollisionCollector;
 const Real = RealFile.Real;
 
-/// A physics system with one object layer that collides with itself: a floor, a dynamic box and a low step
+/// A physics system with one object layer that collides with itself: a floor, a dynamic box and a low step next to the
+/// origin (a character there touches both within the predictive contact distance), and a patch of a fine mesh where the
+/// other character of TestScene stands
 const TestWorld = struct {
     layer_interface: BroadPhaseLayerInterfaceTable,
     pair_filter: ObjectLayerPairFilterTable,
@@ -3118,6 +3126,7 @@ const TestWorld = struct {
     floor_id: BodyID = .invalid,
     box_id: BodyID = .invalid,
     step_id: BodyID = .invalid,
+    mesh_id: BodyID = .invalid,
 
     fn init(self: *TestWorld, allocator: Allocator) !void {
         self.layer_interface = try .init(allocator, 1, 1);
@@ -3133,8 +3142,39 @@ const TestWorld = struct {
         errdefer self.system.deinit();
 
         self.floor_id = try self.addBox(allocator, RVec3.init(0, -1, 0), Vec3.init(20, 1, 20), .static);
-        self.box_id = try self.addBox(allocator, RVec3.init(1, 0.5, 0), Vec3.replicate(0.5), .dynamic);
-        self.step_id = try self.addBox(allocator, RVec3.init(-1.2, 0.1, 0), Vec3.init(0.5, 0.1, 1), .static);
+        self.box_id = try self.addBox(allocator, RVec3.init(0.85, 0.5, 0), Vec3.replicate(0.5), .dynamic);
+        self.step_id = try self.addBox(allocator, RVec3.init(-0.85, 0.1, 0), Vec3.init(0.5, 0.1, 1), .static);
+        self.mesh_id = try self.addMeshPatch(allocator);
+    }
+
+    /// Triangles of 0.05 m just above the floor (x -0.3..0.3, z 0.25..1.05): the enhanced internal edge removal of a
+    /// character on them gets more than 32 delayed results (edge and vertex contacts), its collector falls back to the
+    /// heap
+    fn addMeshPatch(self: *TestWorld, allocator: Allocator) !BodyID {
+        const cell: f32 = 0.05;
+        const nx = 12;
+        const nz = 16;
+        var triangles: [2 * nx * nz]Triangle = undefined;
+        for (0..nx) |ix| {
+            for (0..nz) |iz| {
+                const x0 = -0.3 + cell * @as(f32, @floatFromInt(ix));
+                const z0 = 0.25 + cell * @as(f32, @floatFromInt(iz));
+                const p00 = Vec3.init(x0, 0.005, z0);
+                const p01 = Vec3.init(x0, 0.005, z0 + cell);
+                const p10 = Vec3.init(x0 + cell, 0.005, z0);
+                const p11 = Vec3.init(x0 + cell, 0.005, z0 + cell);
+                triangles[2 * (ix * nz + iz)] = .init(p00, p01, p10, .{});
+                triangles[2 * (ix * nz + iz) + 1] = .init(p10, p01, p11, .{});
+            }
+        }
+        var mesh = try MeshShapeSettings.init(allocator, &triangles, .{});
+        defer mesh.deinit();
+        mesh.asShapeSettings().setEmbedded();
+        var settings: BodyCreationSettings = .initWithSettings(mesh.asShapeSettings(), RVec3.zero(), Quat.identity(), .static, 0);
+        defer settings.deinit();
+        const id = try self.system.getBodyInterfaceMut().createAndAddBody(&settings, .dont_activate);
+        std.debug.assert(!id.isInvalid()); // Room for 16 bodies
+        return id;
     }
 
     fn deinit(self: *TestWorld) void {
@@ -3159,19 +3199,51 @@ const TestListener = struct {
     const Kind = enum { adjust, validate, added, persisted, removed, character_validate, character_added, character_persisted, character_removed, solve, character_solve };
     const Entry = struct { kind: Kind, body: BodyID = .invalid, character_id: CharacterID = .invalid, sub_shape: SubShapeID = .empty };
 
+    /// A contact of a character as the listener sees it
+    const Key = struct { character: usize, key: CharacterContactKey };
+
     allocator: Allocator,
     log: std.ArrayList(Entry) = .empty,
     /// An append failed (reported by checkError: a swallowed allocation failure would hide it from the sweeps)
     out_of_memory: bool = false,
+    /// OnContactAdded minus OnContactRemoved per contact (the character versions too), in memory that does not fail
+    balance: std.AutoHashMapUnmanaged(Key, i32) = .empty,
 
     fn deinit(self: *TestListener) void {
         self.log.deinit(self.allocator);
+        self.balance.deinit(testing.allocator);
     }
 
     fn append(self: *TestListener, entry: Entry) void {
         self.log.append(self.allocator, entry) catch {
             self.out_of_memory = true;
         };
+    }
+
+    fn addBalance(self: *TestListener, character: *const CharacterVirtual, key: CharacterContactKey, delta: i32) void {
+        const entry = self.balance.getOrPut(testing.allocator, .{ .character = @intFromPtr(character), .key = key }) catch @panic("out of memory");
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += delta;
+    }
+
+    /// After an operation (also a failed one, the tracking of contact changes has finished): the listener knows exactly
+    /// the active contacts with a collision (added once, not removed), every other contact it was told about is removed
+    fn expectBalanced(self: *const TestListener, character: *const CharacterVirtual) !void {
+        var it = self.balance.iterator();
+        while (it.next()) |e| {
+            if (e.key_ptr.character != @intFromPtr(character)) continue;
+            const balance = e.value_ptr.*;
+            try testing.expect(balance == 0 or balance == 1);
+            var listed = false;
+            for (character.getActiveContacts()) |*c| {
+                if (c.had_collision and c.base.eql(e.key_ptr.key)) listed = true;
+            }
+            try testing.expectEqual(listed, balance == 1);
+        }
+        for (character.getActiveContacts()) |*c| {
+            if (c.had_collision)
+                try testing.expectEqual(@as(i32, 1), self.balance.get(.{ .character = @intFromPtr(character), .key = c.base }) orelse 0);
+        }
     }
 
     fn checkError(self: *const TestListener) !void {
@@ -3198,8 +3270,9 @@ const TestListener = struct {
     }
 
     pub fn onContactAdded(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
-        _ = .{ character, settings };
+        _ = settings;
         self.append(.{ .kind = .added, .body = contact.base.body_b, .sub_shape = contact.base.sub_shape_id_b });
+        self.addBalance(character, contact.base, 1);
     }
 
     pub fn onContactPersisted(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
@@ -3208,8 +3281,8 @@ const TestListener = struct {
     }
 
     pub fn onContactRemoved(self: *TestListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID) void {
-        _ = character;
         self.append(.{ .kind = .removed, .body = body_id2, .sub_shape = sub_shape_id2 });
+        self.addBalance(character, .fromBody(body_id2, sub_shape_id2), -1);
     }
 
     pub fn onCharacterContactValidate(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
@@ -3219,8 +3292,9 @@ const TestListener = struct {
     }
 
     pub fn onCharacterContactAdded(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
-        _ = .{ character, settings };
+        _ = settings;
         self.append(.{ .kind = .character_added, .character_id = contact.base.character_id_b, .sub_shape = contact.base.sub_shape_id_b });
+        self.addBalance(character, contact.base, 1);
     }
 
     pub fn onCharacterContactPersisted(self: *TestListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
@@ -3229,8 +3303,8 @@ const TestListener = struct {
     }
 
     pub fn onCharacterContactRemoved(self: *TestListener, character: *const CharacterVirtual, other_character_id: CharacterID, sub_shape_id2: SubShapeID) void {
-        _ = character;
         self.append(.{ .kind = .character_removed, .character_id = other_character_id, .sub_shape = sub_shape_id2 });
+        self.addBalance(character, .fromCharacter(other_character_id, sub_shape_id2), -1);
     }
 
     pub fn onContactSolve(self: *TestListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
@@ -3250,13 +3324,35 @@ fn expectConsistent(character: *const CharacterVirtual) !void {
     try testing.expect(character.listener_contacts.isEmpty());
 }
 
-/// Run a character operation, check that the character is consistent when it fails
-fn checkedOp(character: *const CharacterVirtual, result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload {
-    return result catch |err| {
-        try expectConsistent(character);
-        return err;
-    };
-}
+/// The contacts with a collision of a character before an operation
+const ContactsBefore = struct {
+    keys: [32]CharacterContactKey = undefined,
+    len: usize = 0,
+
+    fn take(character: *const CharacterVirtual) ContactsBefore {
+        var self: ContactsBefore = .{};
+        for (character.getActiveContacts()) |*c| {
+            if (c.had_collision and self.len < self.keys.len) {
+                self.keys[self.len] = c.base;
+                self.len += 1;
+            }
+        }
+        return self;
+    }
+
+    /// After a failed operation: the operations replace the active contacts in one step, so they are the contacts
+    /// before the operation or the complete contacts of a position that the operation reached (in these scenes less than
+    /// the predictive contact distance away, so the contacts with a collision are still found)
+    fn expectListed(self: *const ContactsBefore, character: *const CharacterVirtual) !void {
+        for (self.keys[0..self.len]) |key| {
+            var listed = false;
+            for (character.getActiveContacts()) |*c| {
+                if (c.base.eql(key)) listed = true;
+            }
+            try testing.expect(listed);
+        }
+    }
+};
 
 /// Two characters with inner bodies, a listener and character vs character collision in a TestWorld
 const TestScene = struct {
@@ -3273,6 +3369,9 @@ const TestScene = struct {
         self.allocator = allocator;
         try self.world.init(allocator);
         errdefer self.world.deinit();
+        // A failed creation leaves no inner body behind (checked after the characters were released)
+        const num_bodies = self.world.system.getNumBodies();
+        errdefer if (self.world.system.getNumBodies() != num_bodies) @panic("TestScene.init failed and left bodies behind");
         self.listener = .{ .allocator = allocator };
         errdefer self.listener.deinit();
         self.collision = .init(allocator);
@@ -3299,10 +3398,11 @@ const TestScene = struct {
         self.character.base.addRef();
         errdefer self.character.base.release();
 
-        // The other character uses the enhanced internal edge removal (the heap fallback of its collector)
+        // The other character stands on the mesh patch, 5 cm from the character, and uses the enhanced internal edge
+        // removal (the heap fallback of its collector)
         settings.id = CharacterID.nextCharacterID();
         settings.base.enhanced_internal_edge_removal = true;
-        self.other = try CharacterVirtual.create(allocator, &settings, RVec3.init(0, 0, 1), Quat.identity(), 2, &self.world.system);
+        self.other = try CharacterVirtual.create(allocator, &settings, RVec3.init(0, 0, 0.65), Quat.identity(), 2, &self.world.system);
         self.other.base.addRef();
         errdefer self.other.base.release();
 
@@ -3324,8 +3424,28 @@ const TestScene = struct {
         self.world.deinit();
     }
 
-    /// Walk into the dynamic box, onto the step and against the other character, change shape, save and restore
-    fn runOps(self: *TestScene, temp_allocator: TempAllocator, num_steps: usize) !void {
+    /// After an operation of `character`: the operation succeeded or left the character consistent (tracking finished,
+    /// the contacts with a collision before it still listed, the listener's added / removed callbacks in balance with
+    /// the active contacts)
+    fn checked(self: *TestScene, character: *const CharacterVirtual, before: *const ContactsBefore, result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload {
+        const value = result catch |err| {
+            try expectConsistent(character);
+            try before.expectListed(character);
+            try self.listener.expectBalanced(character);
+            return err;
+        };
+        try self.listener.checkError();
+        try self.listener.expectBalanced(character);
+        return value;
+    }
+
+    /// The number of steps per direction of runOps in the tests: the character touches the box, the step and the other
+    /// character, the other character stands on the mesh patch, from the start
+    const num_steps = 2;
+
+    /// Walk into the dynamic box, onto the step and against the other character, change shape, save and restore (also
+    /// into a new character without contacts: RestoreState allocates them)
+    fn runOps(self: *TestScene, temp_allocator: TempAllocator, steps: usize) !void {
         const character = self.character;
         const gravity = Vec3.init(0, -9.81, 0);
         const delta_time: f32 = 1.0 / 60.0;
@@ -3333,30 +3453,47 @@ const TestScene = struct {
 
         const velocities = [_]Vec3{ Vec3.init(4, -1, 0), Vec3.init(-4, -1, 0), Vec3.init(0, -1, 3) };
         for (velocities) |velocity| {
-            for (0..num_steps) |_| {
+            for (0..steps) |_| {
                 character.setLinearVelocity(velocity);
-                try checkedOp(character, character.extendedUpdate(delta_time, gravity, &update_settings, &.{}, &.{}, &.{}, null, temp_allocator));
-                try self.listener.checkError();
+                const before: ContactsBefore = .take(character);
+                try self.checked(character, &before, character.extendedUpdate(delta_time, gravity, &update_settings, &.{}, &.{}, &.{}, null, temp_allocator));
             }
         }
 
         // The basic operations
-        try checkedOp(character, character.update(delta_time, gravity, &.{}, &.{}, &.{}, null, temp_allocator));
-        _ = try checkedOp(character, character.stickToFloor(Vec3.init(0, -0.5, 0), &.{}, &.{}, &.{}, null, temp_allocator));
-        _ = try checkedOp(character, character.walkStairs(delta_time, Vec3.init(0, 0.4, 0), Vec3.init(-0.1, 0, 0), Vec3.init(-0.15, 0, 0), Vec3.zero(), &.{}, &.{}, &.{}, null, temp_allocator));
-        try checkedOp(character, character.refreshContacts(&.{}, &.{}, &.{}, null, temp_allocator));
-        try self.listener.checkError();
+        {
+            const before: ContactsBefore = .take(character);
+            try self.checked(character, &before, character.update(delta_time, gravity, &.{}, &.{}, &.{}, null, temp_allocator));
+        }
+        {
+            const before: ContactsBefore = .take(character);
+            _ = try self.checked(character, &before, character.stickToFloor(Vec3.init(0, -0.5, 0), &.{}, &.{}, &.{}, null, temp_allocator));
+        }
+        {
+            const before: ContactsBefore = .take(character);
+            _ = try self.checked(character, &before, character.walkStairs(delta_time, Vec3.init(0, 0.4, 0), Vec3.init(-0.1, 0, 0), Vec3.init(-0.15, 0, 0), Vec3.zero(), &.{}, &.{}, &.{}, null, temp_allocator));
+        }
+        {
+            const before: ContactsBefore = .take(character);
+            try self.checked(character, &before, character.refreshContacts(&.{}, &.{}, &.{}, null, temp_allocator));
+        }
 
         // Crouch with a check for penetration, stand up without it
-        _ = try checkedOp(character, character.setShape(self.crouching_shape.get(), 0.1, &.{}, &.{}, &.{}, null, temp_allocator));
-        _ = try checkedOp(character, character.setShape(self.standing_shape.get(), math.flt_max, &.{}, &.{}, &.{}, null, temp_allocator));
-        try self.listener.checkError();
+        {
+            const before: ContactsBefore = .take(character);
+            _ = try self.checked(character, &before, character.setShape(self.crouching_shape.get(), 0.1, &.{}, &.{}, &.{}, null, temp_allocator));
+        }
+        {
+            const before: ContactsBefore = .take(character);
+            _ = try self.checked(character, &before, character.setShape(self.standing_shape.get(), math.flt_max, &.{}, &.{}, &.{}, null, temp_allocator));
+        }
 
-        // The other character (enhanced internal edge removal)
+        // The other character (enhanced internal edge removal on the mesh patch)
         self.other.setLinearVelocity(Vec3.init(0, -1, -3));
-        for (0..num_steps) |_|
-            try checkedOp(self.other, self.other.update(delta_time, gravity, &.{}, &.{}, &.{}, null, temp_allocator));
-        try self.listener.checkError();
+        for (0..steps) |_| {
+            const before: ContactsBefore = .take(self.other);
+            try self.checked(self.other, &before, self.other.update(delta_time, gravity, &.{}, &.{}, &.{}, null, temp_allocator));
+        }
 
         // Save and restore
         var recorder = StateRecorderImpl.init(self.allocator);
@@ -3366,6 +3503,25 @@ const TestScene = struct {
         recorder.rewind();
         try character.restoreState(recorder.recorder());
         try testing.expect(!recorder.isFailed());
+
+        // Restore into a new character without contacts: on failure its position, rotation and velocity are restored
+        // and its contacts unchanged
+        var target_settings = CharacterVirtualSettings.init(self.allocator);
+        defer target_settings.deinit();
+        target_settings.base.shape.set(self.standing_shape.get());
+        const target = try CharacterVirtual.create(self.allocator, &target_settings, RVec3.init(5, 0, 5), Quat.identity(), 3, &self.world.system);
+        target.base.addRef();
+        defer target.base.release();
+        recorder.rewind();
+        target.restoreState(recorder.recorder()) catch |err| {
+            try testing.expectEqual(@as(usize, 0), target.getActiveContacts().len);
+            try testing.expect(target.getPosition().eql(character.getPosition()));
+            try testing.expect(target.getRotation().eql(character.getRotation()));
+            try testing.expect(target.getLinearVelocity().eql(character.getLinearVelocity()));
+            return err;
+        };
+        try testing.expect(target.getActiveContacts().len > 0); // The restore allocated the contacts
+        try testing.expect(target.getPosition().eql(character.getPosition()));
     }
 };
 
@@ -3663,7 +3819,7 @@ test "CharacterVirtual: SetShape with and without a max penetration depth, Chara
     const character = scene.character;
 
     // Stand inside the dynamic box: switching shape with a max penetration depth fails, without succeeds
-    character.setPosition(RVec3.init(1.6, 0, 0));
+    character.setPosition(RVec3.init(0.85, 0, 0));
     try testing.expect(!try character.setShape(scene.crouching_shape.get(), 0.01, &.{}, &.{}, &.{}, null, temp.tempAllocator()));
     try testing.expect(character.getShape() == scene.standing_shape.get());
     try testing.expect(try character.setShape(scene.crouching_shape.get(), math.flt_max, &.{}, &.{}, &.{}, null, temp.tempAllocator()));
@@ -3683,32 +3839,63 @@ test "CharacterVirtual: SetShape with and without a max penetration depth, Chara
 }
 
 test "CharacterVirtual: the operations of the allocation failure sweeps work" {
+    // The sweeps below run the same number of steps
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
     var scene: TestScene = undefined;
-    try scene.init(testing.allocator);
+    try scene.init(counting.allocator());
     defer scene.deinit();
     var temp = try TempAllocatorImpl.init(testing.allocator, 1024 * 1024);
     defer temp.deinit();
-    try scene.runOps(temp.tempAllocator(), 10);
+    try scene.runOps(temp.tempAllocator(), TestScene.num_steps);
     try testing.expect(temp.isEmpty());
 
     // The operations reach the interesting paths
     try testing.expect(scene.listener.count(.added) > 0 and scene.listener.count(.persisted) > 0 and scene.listener.count(.removed) > 0);
     try testing.expect(scene.listener.count(.solve) > 0 and scene.listener.count(.adjust) > 0);
-    try testing.expect(scene.listener.count(.character_added) > 0);
+    try testing.expect(scene.listener.count(.character_added) > 0 and scene.listener.count(.character_solve) > 0);
     try testing.expect(!scene.world.system.getBodyInterface().getLinearVelocity(scene.world.box_id).isNearZero(.{})); // Pushed by the character
+    try testing.expect(scene.character.hasCollidedWith(scene.world.step_id) or scene.listener.count(.removed) > 0);
+
+    // The enhanced internal edge removal of the other character on the mesh patch gets more than 32 delayed results:
+    // the collector of CheckCollision falls back to the character's heap
+    var collector = AllHitCollisionCollector(CollideShapeCollector).init(testing.allocator);
+    defer collector.deinit();
+    const allocations_before = counting.allocations;
+    try scene.other.checkCollision(scene.other.getPosition(), Quat.identity(), Vec3.zero(), 0.1, scene.other.getShape().?, scene.other.getPosition(), &collector.base, &.{}, &.{}, &.{}, null);
+    try collector.checkError();
+    try testing.expect(counting.allocations > allocations_before);
+    try testing.expect(collector.hits.items.len > 0);
 }
 
 test "CharacterVirtual: an allocation failure of the heap leaves the character consistent and nothing behind" {
-    const Test = struct {
-        fn run(allocator: Allocator) !void {
-            var scene: TestScene = undefined;
-            try scene.init(allocator);
-            defer scene.deinit();
-            var temp = TempAllocatorMalloc.init(allocator);
-            try scene.runOps(temp.tempAllocator(), 2);
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        var scene: TestScene = undefined;
+        scene.init(allocator) catch |err| {
+            // TestScene.init checked that no inner body was left behind, testing.allocator checks the memory
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(failing.has_induced_failure);
+            continue;
+        };
+        defer scene.deinit();
+        var temp = TempAllocatorMalloc.init(allocator);
+        const result = scene.runOps(temp.tempAllocator(), TestScene.num_steps);
+        if (!failing.has_induced_failure) {
+            try result;
+            try testing.expect(fail_index > 100); // The sweep covered the operations
+            break;
         }
-    };
-    try testing.checkAllAllocationFailures(testing.allocator, Test.run, .{});
+        try testing.expectError(error.OutOfMemory, result);
+        try expectConsistent(scene.character);
+        try expectConsistent(scene.other);
+
+        // The characters still work with enough memory (the log of the listener may have lost the failed entry)
+        failing.fail_index = std.math.maxInt(usize);
+        scene.listener.out_of_memory = false;
+        try scene.runOps(temp.tempAllocator(), 1);
+    }
 }
 
 test "CharacterVirtual: an allocation failure of the temp allocator leaves the character consistent" {
@@ -3720,7 +3907,7 @@ test "CharacterVirtual: an allocation failure of the temp allocator leaves the c
         var temp = try TempAllocatorImpl.init(testing.allocator, 1024 * 1024);
         defer temp.deinit();
         var failing: FailingTempAllocator = .init(temp.tempAllocator(), .{ .fail_index = fail_index });
-        const result = scene.runOps(failing.tempAllocator(), 4);
+        const result = scene.runOps(failing.tempAllocator(), TestScene.num_steps);
         if (!failing.has_induced_failure) {
             try result;
             try testing.expect(fail_index > 20); // The sweep covered the operations
@@ -3734,5 +3921,101 @@ test "CharacterVirtual: an allocation failure of the temp allocator leaves the c
         // The character still works
         try scene.runOps(temp.tempAllocator(), 1);
         try testing.expect(temp.isEmpty());
+    }
+}
+
+/// A character whose inner body could not be created (CreateBody / CreateBodyWithID returned null): it has none, the
+/// body count is unchanged, it works and is destroyed like one without an inner body
+fn expectWithoutInnerBody(world: *TestWorld, character: *CharacterVirtual, num_bodies: u32) !void {
+    try testing.expect(character.getInnerBodyID().isInvalid());
+    try testing.expectEqual(num_bodies, world.system.getNumBodies());
+    character.setPosition(RVec3.init(1, 2, 3));
+    try testing.expect(character.getPosition().eql(RVec3.init(1, 2, 3)));
+    character.setUserData(77);
+    try testing.expectEqual(@as(u64, 77), character.getUserData());
+    var settings = character.getCharacterVirtualSettings();
+    defer settings.deinit();
+    try testing.expect(settings.inner_body_shape.get() == null);
+    try testing.expect(settings.inner_body_id_override.isInvalid());
+}
+
+test "CharacterVirtual: no inner body when its ID is taken or the system is full" {
+    const saved = CharacterID.next_id.load(.monotonic);
+    defer CharacterID.next_id.store(saved, .monotonic);
+
+    var world: TestWorld = undefined;
+    try world.init(testing.allocator);
+    defer world.deinit();
+    var capsule = RefConst(Shape).init((try CapsuleShape.create(testing.allocator, 0.5, 0.3, .{})).asShape());
+    defer capsule.deinit();
+    var settings = CharacterVirtualSettings.init(testing.allocator);
+    defer settings.deinit();
+    settings.base.shape.set(capsule.get());
+    settings.inner_body_shape.set(capsule.get());
+
+    // The override is the ID of the floor: CreateBodyWithID returns null
+    settings.inner_body_id_override = world.floor_id;
+    var num_bodies = world.system.getNumBodies();
+    {
+        const character = try CharacterVirtual.create(testing.allocator, &settings, RVec3.zero(), Quat.identity(), 0, &world.system);
+        character.base.addRef();
+        defer character.base.release();
+        try expectWithoutInnerBody(&world, character, num_bodies);
+    }
+    try testing.expectEqual(num_bodies, world.system.getNumBodies());
+
+    // Fill the system (16 bodies): CreateBody returns null
+    settings.inner_body_id_override = .invalid;
+    while (world.system.getNumBodies() < 16)
+        _ = try world.addBox(testing.allocator, RVec3.init(5, 0.5, 5), Vec3.replicate(0.1), .static);
+    num_bodies = world.system.getNumBodies();
+    {
+        const character = try CharacterVirtual.create(testing.allocator, &settings, RVec3.zero(), Quat.identity(), 0, &world.system);
+        character.base.addRef();
+        defer character.base.release();
+        try expectWithoutInnerBody(&world, character, num_bodies);
+    }
+    try testing.expectEqual(num_bodies, world.system.getNumBodies());
+}
+
+test "CharacterVirtual: a failure while the active contacts grow keeps the old ones" {
+    var fail_offset: usize = 0;
+    while (true) : (fail_offset += 1) {
+        var world: TestWorld = undefined;
+        try world.init(testing.allocator);
+        defer world.deinit();
+        // Four posts around (0, 0, -3), 5 cm from a character standing there
+        for ([_][2]Real{ .{ 0.5, -3 }, .{ -0.5, -3 }, .{ 0, -2.5 }, .{ 0, -3.5 } }) |p|
+            _ = try world.addBox(testing.allocator, RVec3.init(p[0], 0.3, p[1]), Vec3.init(0.15, 0.3, 0.15), .static);
+        var capsule = RefConst(Shape).init((try CapsuleShape.create(testing.allocator, 0.5, 0.3, .{})).asShape());
+        defer capsule.deinit();
+        var settings = CharacterVirtualSettings.init(testing.allocator);
+        defer settings.deinit();
+        settings.base.shape.set(capsule.get());
+        settings.shape_offset = Vec3.init(0, 0.8, 0);
+
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+        const character = try CharacterVirtual.create(failing.allocator(), &settings, RVec3.init(0, 0, -6), Quat.identity(), 0, &world.system);
+        character.base.addRef();
+        defer character.base.release();
+        var temp = TempAllocatorMalloc.init(testing.allocator);
+
+        // On the floor alone, then between the posts: the update finds five contacts
+        try character.refreshContacts(&.{}, &.{}, &.{}, null, temp.tempAllocator());
+        try testing.expectEqual(@as(usize, 1), character.getActiveContacts().len);
+        try testing.expect(character.getActiveContacts()[0].had_collision);
+        character.setPosition(RVec3.init(0, 0, -3));
+        const before: ContactsBefore = .take(character);
+        failing.fail_index = failing.alloc_index + fail_offset;
+        character.update(1.0 / 60.0, Vec3.init(0, -9.81, 0), &.{}, &.{}, &.{}, null, temp.tempAllocator()) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try expectConsistent(character);
+            try before.expectListed(character); // The floor contact was not lost
+            continue;
+        };
+        try testing.expect(!failing.has_induced_failure);
+        try testing.expectEqual(@as(usize, 5), character.getActiveContacts().len);
+        try testing.expect(fail_offset > 0); // Growing the contacts allocated
+        break;
     }
 }

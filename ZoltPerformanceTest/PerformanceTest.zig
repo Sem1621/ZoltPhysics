@@ -718,6 +718,7 @@ fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, n
     try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
     defer physics_system.deinit();
     try scene.startTest(&physics_system, motion_quality);
+    errdefer scene.stopTest(&physics_system);
     try physics_system.optimizeBroadPhase();
     for (0..num_updates) |_| {
         try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
@@ -808,4 +809,5 @@ test "validateState: -vs fails on a state that differs or ends early" {
 
 test {
     _ = LayersFile;
+    _ = CharacterVirtualScene;
 }
