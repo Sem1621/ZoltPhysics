@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 78.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
+**Library: 80.7%** of 85391 lines in scope · **Unit tests: 92.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -22,7 +22,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
-| `Jolt/Physics/Character` | 17% | 2 | 0 | 2 | 0 | 0 | 0 | 2997 |
+| `Jolt/Physics/Character` | 88% | 3 | 0 | 1 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 75 | 1 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
@@ -283,14 +283,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Character — 17%</summary>
+<details><summary>Jolt/Physics/Character — 88%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `Character.cpp`, `Character.h` | 414 | ⚪ stub | `Zolt/Physics/Character/Character.zig` |
 | `CharacterBase.cpp`, `CharacterBase.h` | 170 | ✅ complete | `Zolt/Physics/Character/CharacterBase.zig` |
 | `CharacterID.h` | 79 | ✅ complete | `Zolt/Physics/Character/CharacterID.zig` |
-| `CharacterVirtual.cpp`, `CharacterVirtual.h` | 2334 | ⚪ stub | `Zolt/Physics/Character/CharacterVirtual.zig` |
+| `CharacterVirtual.cpp`, `CharacterVirtual.h` | 2334 | ✅ complete | `Zolt/Physics/Character/CharacterVirtual.zig` |
 
 </details>
 
@@ -546,21 +546,21 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 65% | 4 | 1 | 0 | 2 | 1 | 0 | 1185 |
+| `UnitTests` | 77% | 5 | 1 | 0 | 1 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 88% | 30 | 0 | 0 | 3 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 95% | 31 | 0 | 0 | 2 | 0 | 0 | 11009 |
 
-<details><summary>UnitTests — 65%</summary>
+<details><summary>UnitTests — 77%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `Layers.h` | 142 | ✅ complete | `ZoltTests/Layers.zig` |
 | `LoggingBodyActivationListener.h` | 51 | ✅ complete | `ZoltTests/LoggingBodyActivationListener.zig` |
-| `LoggingCharacterContactListener.h` | 143 | ❌ todo |  |
+| `LoggingCharacterContactListener.h` | 143 | ✅ complete | `ZoltTests/LoggingCharacterContactListener.zig` |
 | `LoggingContactListener.h` | 118 | ✅ complete | `ZoltTests/LoggingContactListener.zig` |
 | `LoggingSoftBodyContactListener.h` | 81 | ❌ todo |  |
 | `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ✅ complete | `ZoltTests/PhysicsTestContext.zig` |
@@ -640,14 +640,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 88%</summary>
+<details><summary>UnitTests/Physics — 95%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ActiveEdgesTests.cpp` | 317 | ✅ complete | `ZoltTests/Physics/ActiveEdgesTests.zig` |
 | `BroadPhaseTests.cpp` | 100 | ✅ complete | `ZoltTests/Physics/BroadPhaseTests.zig` |
 | `CastShapeTests.cpp` | 543 | ✅ complete | `ZoltTests/Physics/CastShapeTests.zig` |
-| `CharacterVirtualTests.cpp` | 763 | ❌ todo |  |
+| `CharacterVirtualTests.cpp` | 763 | ✅ complete | `ZoltTests/Physics/CharacterVirtualTests.zig` |
 | `CollidePointTests.cpp` | 361 | ✅ complete | `ZoltTests/Physics/CollidePointTests.zig` |
 | `CollideShapeTests.cpp` | 471 | ✅ complete | `ZoltTests/Physics/CollideShapeTests.zig` |
 | `CollisionGroupTests.cpp` | 74 | ✅ complete | `ZoltTests/Physics/CollisionGroupTests.zig` |
