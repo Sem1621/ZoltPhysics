@@ -191,8 +191,12 @@
 //!   - a Character has a shape, is removed before it is destroyed; a CharacterVirtual's shape is convex, decorated or
 //!     compound (sCorrectFractionForCharacterPadding asserts on other shapes), its listener does not change between
 //!     StartTrackingContactChanges and FinishTrackingContactChanges, its inner body is never removed by a body operation;
-//!   - a ragdoll's joints list the parents before the children, its motors drive SwingTwist and Hinge constraints only
-//!     (DriveToPoseUsingMotors asserts on other classes), it is removed before it is destroyed;
+//!   - a ragdoll's joints list the parents before the children (a joint may be its own parent: CreateRagdoll connects
+//!     its body with itself; its ragdoll then has no DisableParentChildCollisions, GroupFilterTable asserts on a pair of
+//!     equal sub groups, no CalculateConstraintPriorities and no SkeletonPose operations, which assert on the order), its
+//!     motors drive SwingTwist and Hinge constraints only (DriveToPoseUsingMotors asserts on other classes), it is
+//!     removed before it is destroyed; no operation follows a create_ragdoll that ran out of bodies (its handle has no
+//!     ragdoll);
 //!   - no character, character virtual, ragdoll or vehicle is created or destroyed between a snapshot and its
 //!     restore_cross (the restore reads the objects of the snapshot);
 //!   - the object layers of the tester and the queries are layers of `Layers` (the layer filters assert on others).
@@ -805,7 +809,8 @@ pub const SimRagdoll = extern struct {
 
 /// A joint of a ragdoll: the skeleton joint and the part attached to it
 pub const SimRagdollJoint = extern struct {
-    /// The parent joint index (-1: a root joint)
+    /// The parent joint index (-1: a root joint; the joint's own index: a joint that is its own parent, added with
+    /// Skeleton::AddJoint(name) and its mParentJointIndex set)
     parent: i32 = -1,
     /// The part's BodyCreationSettings: index of a body description (`bodies`)
     body: u32,
@@ -2876,6 +2881,8 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "ragdoll_save_restore", .build = buildRagdollSaveRestore, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 22 } },
     .{ .name = "ragdoll_far_from_origin", .build = buildRagdollFarFromOrigin, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 33 } },
     .{ .name = "ragdoll_add_activation", .build = buildRagdollAddActivation, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .sleeping = true, .update_activations = 1, .active_constraints = 45 } },
+    .{ .name = "ragdoll_out_of_bodies", .build = buildRagdollOutOfBodies, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 22 } },
+    .{ .name = "ragdoll_self_parented_joint", .build = buildRagdollSelfParentedJoint, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 11 } },
     // (append the Ragdoll scenes here)
     // ---- Vehicles ----
     .{ .name = "vehicle_wheeled_ops", .build = buildVehicleWheeledOps, .blocked_by = .wheeled_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
@@ -14722,6 +14729,65 @@ fn buildRagdollAddActivation(b: *SceneBuilder) Allocator.Error!void {
     try b.objectOp(.ragdoll_remove_from_physics_system, ragdolls[1], .{});
     b.at(56);
     try b.objectOp(.ragdoll_destroy, ragdolls[1], .{});
+}
+
+/// CreateRagdoll out of bodies (out_of_bodies with ragdolls): max_bodies = 30, a floor and two humanoids (25 bodies); a
+/// humanoid of a second description runs out of bodies after 5 of its 12 parts (CreateRagdoll deletes the ragdoll: its
+/// 5 bodies are destroyed, the 4 constraints that were created are released; both sides return 0 and the handle has no
+/// ragdoll), three boxes reuse the freed body slots; one humanoid is removed and destroyed, then the second description
+/// creates its ragdoll (with the settings built at the failed creation) and a third humanoid runs out of bodies after 2
+/// parts (1 constraint)
+fn buildRagdollOutOfBodies(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.max_bodies = 30;
+    b.num_updates = 60;
+    _ = try addFloor(b, 20, 0);
+    const first = try addHumanoidRagdoll(b, shapes, .{ -1.5, 1, 0 }, .{}, .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 1 });
+    const second = try addHumanoidRagdoll(b, shapes, .{ 1.5, 1, 0 }, .{}, .{ .calculate_constraint_priorities = 1, .disable_parent_child_collisions = 1, .collision_group = 2 });
+    const middle = try b.addRagdollPose(.{ 0, 1, 0 }, &Humanoid.modelPose(identity_rotation));
+
+    const rag0 = try b.createRagdoll(first);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag0, .{});
+    const rag1 = try b.createRagdoll(first);
+    try b.objectOp(.ragdoll_set_pose_matrices, rag1, .{ .i = &.{middle} });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag1, .{});
+    _ = try b.createRagdoll(second); // Out of bodies after 5 parts
+    for (0..3) |i|
+        _ = try b.body(.{ .position = .{ -3 + 0.6 * real(i), 0.2, 2 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    try b.expectRagdollActive(rag1, true);
+
+    b.at(20);
+    try b.objectOp(.ragdoll_remove_from_physics_system, rag0, .{});
+    try b.objectOp(.ragdoll_destroy, rag0, .{});
+    b.at(21);
+    const rag3 = try b.createRagdoll(second); // Fits now
+    try b.objectOp(.ragdoll_add_to_physics_system, rag3, .{ .i = &no_lock });
+    try b.expectRagdollActive(rag3, true);
+    _ = try b.createRagdoll(first); // Out of bodies after 2 parts
+    b.at(40);
+    try b.objectOp(.ragdoll_get_pose_hash, rag3, .{});
+}
+
+/// A joint that is its own parent (degenerate input that CreateRagdoll accepts: Jolt stores the body of a part before it
+/// reads the body of the parent joint): the head of a humanoid is its own parent, so its neck constraint connects the
+/// head with itself (the object state's constraint has the same body twice) and nothing holds the head on the chest when
+/// the humanoid falls over. The settings tables (the pair (3, 3)) and binary state are compared before the scene runs;
+/// Stabilize leaves the head alone (no chain reaches it). No group filter (DisableParentChildCollisions would disable
+/// the pair (3, 3), which GroupFilterTable asserts on): the parts collide with each other.
+fn buildRagdollSelfParentedJoint(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 60;
+    _ = try addFloor(b, 20, 0);
+    var joints: [Humanoid.num_joints]SimRagdollJoint = undefined;
+    try addHumanoidJoints(b, shapes, .{ 0, 1, 0 }, .{}, 0, &joints);
+    joints[3].parent = 3;
+    const ragdoll = try b.createRagdoll(try b.addRagdoll(.{ .stabilize = 1, .collision_group = 1 }, &joints, &.{}));
+    try b.objectOp(.ragdoll_add_to_physics_system, ragdoll, .{});
+    try b.objectOp(.ragdoll_add_impulse, ragdoll, .{ .f = &.{ 0.3, 0, 0.1 } });
+    b.at(30);
+    try b.objectOp(.ragdoll_get_pose_hash, ragdoll, .{});
+    try b.objectOp(.ragdoll_settings_hash, ragdoll, .{ .i = &.{ 1, 1 } });
 }
 
 // (append the Ragdoll scenes here)

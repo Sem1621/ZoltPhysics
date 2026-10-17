@@ -70,10 +70,11 @@
 //! Where Jolt has undefined behavior or dereferences null, Zolt panics with a message (also in optimized builds): a
 //! null skeleton (`mSkeleton->`, where Jolt dereferences it), the null settings of a ragdoll made with the public
 //! constructor (`mRagdollSettings->` in DriveToPoseUsingMotors), a null additional constraint (SaveBinaryState,
-//! CreateRagdoll, CalculateConstraintPriorities), a part whose constraint connects it to a parent that is not created
-//! before it
-//! (CreateRagdoll reads an uninitialized slot of its JPH_STACK_ALLOC), a body that cannot be locked in IsActive /
-//! SetGroupID / GetPose (Jolt dereferences the null body of a destroyed or invalid body ID). Out of range indices
+//! CreateRagdoll, CalculateConstraintPriorities), a part with a constraint whose parent joint index is negative
+//! (CreateRagdoll reads before its JPH_STACK_ALLOC) or greater than its own index (an uninitialized slot of the
+//! JPH_STACK_ALLOC; a joint that is its own parent reads the slot of its own body, which Jolt stores before it creates
+//! the constraint: the constraint connects the body with itself, as in Jolt), a body that cannot be locked in
+//! IsActive / SetGroupID / GetPose (Jolt dereferences the null body of a destroyed or invalid body ID). Out of range indices
 //! (GetRootTransform of a ragdoll without bodies, a body index of an additional constraint) are Zig's bounds checks. A
 //! pose of a ragdoll without bodies: Jolt's GetPose(SkeletonPose &) sets the pose's root offset to an uninitialized
 //! RVec3, Zolt to zero.
@@ -789,8 +790,8 @@ pub const RagdollSettings = struct {
             // Create constraint
             if (p.getToParent()) |to_parent| {
                 const parent = self.skeletonOf().getJoint(joint_idx).parent_joint_index;
-                if (parent < 0 or parent >= @as(i32, @intCast(joint_idx)))
-                    @panic("RagdollSettings.createRagdoll: a part is connected to a parent part that is not created before it (Jolt reads an uninitialized body pointer)");
+                if (parent < 0 or parent > @as(i32, @intCast(joint_idx)))
+                    @panic("RagdollSettings.createRagdoll: a part is connected to a parent joint that is negative (Jolt reads before its body pointers) or greater than its own index (Jolt reads an uninitialized body pointer)");
                 const body1 = bodies[@intCast(parent)];
                 const constraint = try to_parent.createConstraint(self.allocator, body1, body2);
                 r.constraints.appendAssumeCapacity(.init(&constraint.base));
@@ -2146,6 +2147,46 @@ test "Ragdoll: createRagdoll out of bodies and with a part without a shape" {
     settings.get().?.parts.items[6].base.setShape(null);
     try testing.expectError(error.InvalidShape, settings.get().?.createRagdoll(1, 0, &world2.system));
     try testing.expectEqual(@as(u32, 0), world2.system.getNumBodies());
+}
+
+test "Ragdoll: createRagdoll with a joint that is its own parent" {
+    // Jolt stores the body of a part before it reads the body of the parent joint: a joint that is its own parent gets a
+    // constraint between its body and itself (degenerate input, no assert in Jolt's CreateRagdoll or TwoBodyConstraint)
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator, 16);
+    defer world.deinit();
+    _ = try world.addFloor();
+    var settings = Ref(RagdollSettings).init(try buildChain(allocator, &.{ 2, 1, 1 }, &.{ .dynamic, .dynamic, .dynamic }));
+    defer settings.deinit();
+    const s = settings.get().?;
+    s.skeleton.get().?.getJointMut(2).parent_joint_index = 2;
+    for (s.parts.items[1..], 1..) |*part, i| {
+        const fixed = try FixedConstraintSettings.create(allocator);
+        fixed.point1 = Vec3.init(0.5 * @as(f32, @floatFromInt(i)) - 0.25, 0, 0);
+        fixed.point2 = fixed.point1;
+        part.setToParent(fixed.asTwoBodySettings());
+    }
+    try s.calculateBodyIndexToConstraintIndex();
+    try s.calculateConstraintIndexToBodyIdxPair();
+    try testing.expectEqualSlices(i32, &.{ -1, 0, 1 }, s.getBodyIndexToConstraintIndex());
+    try testing.expectEqual(RagdollSettings.BodyIdxPair{ .first = 2, .second = 2 }, s.getBodyIndicesForConstraintIndex(1));
+
+    var ragdoll = Ref(Ragdoll).init((try s.createRagdoll(1, 0, &world.system)).?);
+    defer ragdoll.deinit();
+    const r = ragdoll.get().?;
+    try testing.expectEqual(@as(usize, 2), r.getConstraintCount());
+    try testing.expect(r.getConstraint(0).getBody1() != r.getConstraint(0).getBody2());
+    try testing.expect(r.getConstraint(1).getBody1() == r.getConstraint(1).getBody2());
+    try testing.expect(r.getConstraint(1).getBody1().getID().eql(r.getBodyID(2)));
+
+    // It simulates (the constraint has no error: both points are the same point of the same body)
+    try r.addToPhysicsSystem(.activate, .{});
+    try world.update(30);
+    try testing.expect(r.isActive(.{}));
+    const bounds = r.getWorldSpaceBounds(.{});
+    try testing.expect(bounds.min.getY() > -0.2 and bounds.max.getY() < 0.5);
+    try r.removeFromPhysicsSystem(.{});
 }
 
 test "Ragdoll: setPose / getPose and the root transform, far from the origin" {
