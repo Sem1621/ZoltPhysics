@@ -4596,6 +4596,7 @@ const CharacterVirtualSlot = struct {
                 4 => @intFromBool(c.base.getGroundBodyID().eql(world.getHandle(op.body))),
                 5 => @intFromBool(!c.base.getGroundVelocity().isNearZero(.{ .max_dist_sq = 1.0e-6 })),
                 6 => getShapeIndex(world, c.getShape()),
+                7 => @intFromBool(!c.getInnerBodyID().isInvalid()),
                 else => {
                     std.debug.print("SimulationParity: unknown character virtual value {d}\n", .{i[0]});
                     return error.InvalidScene;

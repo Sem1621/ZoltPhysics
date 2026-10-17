@@ -760,6 +760,8 @@ pub const CharacterVirtualValue = enum(u32) {
     ground_velocity_not_zero = 5,
     /// The shape index of GetShape()
     shape = 6,
+    /// The character has an inner body (GetInnerBodyID is valid)
+    has_inner_body = 7,
 };
 
 /// A ragdoll (OpKind.create_ragdoll). The RagdollSettings of a description is built at the first create_ragdoll of
@@ -13388,7 +13390,7 @@ fn buildCharacterVirtualCrowd(b: *SceneBuilder) Allocator.Error!void {
 /// The inner bodies push and are pushed: character 0 pushes three crates (HandleContact impulses, its inner body
 /// collides with them in the simulation), a ball rolls into the inner body of standing character 1 (the character
 /// sees the ball approach and gets pushed), character 2 stands on a big crate (Update adds its weight as an impulse to
-/// the crate) and walks off it
+/// the crate) and walks off it; character 3's inner body ID override is taken (it has no inner body)
 fn buildCharacterVirtualInnerBody(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
     b.num_updates = 120;
@@ -13404,6 +13406,8 @@ fn buildCharacterVirtualInnerBody(b: *SceneBuilder) Allocator.Error!void {
     const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 0 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .max_strength = 500 });
     const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 4 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving });
     const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0.82, -4 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .mass = 150 });
+    // The inner body ID override of character 3 is the floor's ID (index 0, sequence number 1): CreateBodyWithID returns null
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -3, 0, 0 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .inner_body_id_override = 0x00800000 });
 
     for (0..b.num_updates) |update| {
         const u: u32 = @intCast(update);
@@ -13411,7 +13415,12 @@ fn buildCharacterVirtualInnerBody(b: *SceneBuilder) Allocator.Error!void {
         try stepCharacterVirtual(b, cv0, if (u < 90) .{ 1.5, 0, 0 } else .{ -1.5, 0, 0 }, 0, .{}, cv_query);
         try stepCharacterVirtual(b, cv1, .{ 0, 0, 0 }, 0, null, cv_query);
         try stepCharacterVirtual(b, cv2, if (u < 60) .{ 0, 0, 0 } else .{ 0, 0, 2 }, 0, if (u < 60) null else .{}, cv_query);
+        try stepCharacterVirtual(b, cv3, .{ -1, 0, 0 }, 0, null, cv_query);
         if (u == 30) try b.expectCharacterVirtualValue(cv2, .ground_body_is, 1, .{ .body = big });
+        if (u == 1) {
+            try b.expectCharacterVirtualValue(cv2, .has_inner_body, 1, .{});
+            try b.expectCharacterVirtualValue(cv3, .has_inner_body, 0, .{});
+        }
     }
 }
 
