@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 81.1%** of 85391 lines in scope · **Unit tests: 92.0%** of 18321 lines
+**Library: 84.4%** of 85391 lines in scope · **Unit tests: 93.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -28,7 +28,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 10% | 0 | 0 | 1 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
-| `Jolt/Physics/Vehicle` | 8% | 0 | 0 | 7 | 5 | 0 | 0 | 3942 |
+| `Jolt/Physics/Vehicle` | 79% | 10 | 0 | 2 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
 | `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
 | `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
@@ -453,22 +453,22 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Vehicle — 8%</summary>
+<details><summary>Jolt/Physics/Vehicle — 79%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `MotorcycleController.cpp`, `MotorcycleController.h` | 337 | ⚪ stub | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
 | `TrackedVehicleController.cpp`, `TrackedVehicleController.h` | 584 | ⚪ stub | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
-| `VehicleAntiRollBar.cpp`, `VehicleAntiRollBar.h` | 50 | ❌ todo |  |
-| `VehicleCollisionTester.cpp`, `VehicleCollisionTester.h` | 433 | ⚪ stub | `Zolt/Physics/Vehicle/VehicleCollisionTester.zig` |
-| `VehicleConstraint.cpp`, `VehicleConstraint.h` | 806 | ⚪ stub | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |
-| `VehicleController.cpp`, `VehicleController.h` | 77 | ⚪ stub | `Zolt/Physics/Vehicle/VehicleController.zig` |
-| `VehicleDifferential.cpp`, `VehicleDifferential.h` | 98 | ❌ todo |  |
-| `VehicleEngine.cpp`, `VehicleEngine.h` | 173 | ❌ todo |  |
-| `VehicleTrack.cpp`, `VehicleTrack.h` | 87 | ❌ todo |  |
-| `VehicleTransmission.cpp`, `VehicleTransmission.h` | 215 | ❌ todo |  |
-| `Wheel.cpp`, `Wheel.h` | 193 | ⚪ stub | `Zolt/Physics/Vehicle/Wheel.zig` |
-| `WheeledVehicleController.cpp`, `WheeledVehicleController.h` | 889 | ⚪ stub | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
+| `VehicleAntiRollBar.cpp`, `VehicleAntiRollBar.h` | 50 | ✅ complete | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
+| `VehicleCollisionTester.cpp`, `VehicleCollisionTester.h` | 433 | ✅ complete | `Zolt/Physics/Vehicle/VehicleCollisionTester.zig` |
+| `VehicleConstraint.cpp`, `VehicleConstraint.h` | 806 | ✅ complete | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |
+| `VehicleController.cpp`, `VehicleController.h` | 77 | ✅ complete | `Zolt/Physics/Vehicle/VehicleController.zig` |
+| `VehicleDifferential.cpp`, `VehicleDifferential.h` | 98 | ✅ complete | `Zolt/Physics/Vehicle/VehicleDifferential.zig` |
+| `VehicleEngine.cpp`, `VehicleEngine.h` | 173 | ✅ complete | `Zolt/Physics/Vehicle/VehicleEngine.zig` |
+| `VehicleTrack.cpp`, `VehicleTrack.h` | 87 | ✅ complete | `Zolt/Physics/Vehicle/VehicleTrack.zig` |
+| `VehicleTransmission.cpp`, `VehicleTransmission.h` | 215 | ✅ complete | `Zolt/Physics/Vehicle/VehicleTransmission.zig` |
+| `Wheel.cpp`, `Wheel.h` | 193 | ✅ complete | `Zolt/Physics/Vehicle/Wheel.zig` |
+| `WheeledVehicleController.cpp`, `WheeledVehicleController.h` | 889 | ✅ complete | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
 
 </details>
 
@@ -552,7 +552,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 95% | 31 | 0 | 0 | 2 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 98% | 32 | 0 | 0 | 1 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 77%</summary>
 
@@ -640,7 +640,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 95%</summary>
+<details><summary>UnitTests/Physics — 98%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -676,6 +676,6 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `SubShapeIDTest.cpp` | 59 | ✅ complete | `ZoltTests/Physics/SubShapeIDTest.zig` |
 | `TaperedCylinderShapeTests.cpp` | 83 | ✅ complete | `ZoltTests/Physics/TaperedCylinderShapeTests.zig` |
 | `TransformedShapeTests.cpp` | 90 | ✅ complete | `ZoltTests/Physics/TransformedShapeTests.zig` |
-| `WheeledVehicleTests.cpp` | 304 | ❌ todo |  |
+| `WheeledVehicleTests.cpp` | 304 | ✅ complete | `ZoltTests/Physics/WheeledVehicleTests.zig` |
 
 </details>

@@ -503,6 +503,8 @@ pub const TrackedVehicleController = @import("Physics/Vehicle/TrackedVehicleCont
 pub const TrackedVehicleControllerSettings = @import("Physics/Vehicle/TrackedVehicleController.zig").TrackedVehicleControllerSettings;
 pub const WheelSettingsTV = @import("Physics/Vehicle/TrackedVehicleController.zig").WheelSettingsTV;
 pub const WheelTV = @import("Physics/Vehicle/TrackedVehicleController.zig").WheelTV;
+pub const VehicleAntiRollBar = @import("Physics/Vehicle/VehicleAntiRollBar.zig").VehicleAntiRollBar;
+pub const VehicleAntiRollBars = @import("Physics/Vehicle/VehicleAntiRollBar.zig").VehicleAntiRollBars;
 pub const VehicleCollisionTester = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTester;
 pub const VehicleCollisionTesterCastCylinder = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTesterCastCylinder;
 pub const VehicleCollisionTesterCastSphere = @import("Physics/Vehicle/VehicleCollisionTester.zig").VehicleCollisionTesterCastSphere;
@@ -511,7 +513,18 @@ pub const VehicleConstraint = @import("Physics/Vehicle/VehicleConstraint.zig").V
 pub const VehicleConstraintSettings = @import("Physics/Vehicle/VehicleConstraint.zig").VehicleConstraintSettings;
 pub const VehicleController = @import("Physics/Vehicle/VehicleController.zig").VehicleController;
 pub const VehicleControllerSettings = @import("Physics/Vehicle/VehicleController.zig").VehicleControllerSettings;
+pub const VehicleDifferentialSettings = @import("Physics/Vehicle/VehicleDifferential.zig").VehicleDifferentialSettings;
+pub const VehicleEngine = @import("Physics/Vehicle/VehicleEngine.zig").VehicleEngine;
+pub const VehicleEngineSettings = @import("Physics/Vehicle/VehicleEngine.zig").VehicleEngineSettings;
+pub const TrackSide = @import("Physics/Vehicle/VehicleTrack.zig").TrackSide;
+pub const VehicleTrack = @import("Physics/Vehicle/VehicleTrack.zig").VehicleTrack;
+pub const VehicleTracks = @import("Physics/Vehicle/VehicleTrack.zig").VehicleTracks;
+pub const VehicleTrackSettings = @import("Physics/Vehicle/VehicleTrack.zig").VehicleTrackSettings;
+pub const TransmissionMode = @import("Physics/Vehicle/VehicleTransmission.zig").TransmissionMode;
+pub const VehicleTransmission = @import("Physics/Vehicle/VehicleTransmission.zig").VehicleTransmission;
+pub const VehicleTransmissionSettings = @import("Physics/Vehicle/VehicleTransmission.zig").VehicleTransmissionSettings;
 pub const Wheel = @import("Physics/Vehicle/Wheel.zig").Wheel;
+pub const Wheels = @import("Physics/Vehicle/Wheel.zig").Wheels;
 pub const WheelSettings = @import("Physics/Vehicle/Wheel.zig").WheelSettings;
 pub const WheeledVehicleController = @import("Physics/Vehicle/WheeledVehicleController.zig").WheeledVehicleController;
 pub const WheeledVehicleControllerSettings = @import("Physics/Vehicle/WheeledVehicleController.zig").WheeledVehicleControllerSettings;
@@ -795,9 +808,14 @@ const source_files = .{
     @import("Physics/StateRecorderImpl.zig"),
     @import("Physics/Vehicle/MotorcycleController.zig"),
     @import("Physics/Vehicle/TrackedVehicleController.zig"),
+    @import("Physics/Vehicle/VehicleAntiRollBar.zig"),
     @import("Physics/Vehicle/VehicleCollisionTester.zig"),
     @import("Physics/Vehicle/VehicleConstraint.zig"),
     @import("Physics/Vehicle/VehicleController.zig"),
+    @import("Physics/Vehicle/VehicleDifferential.zig"),
+    @import("Physics/Vehicle/VehicleEngine.zig"),
+    @import("Physics/Vehicle/VehicleTrack.zig"),
+    @import("Physics/Vehicle/VehicleTransmission.zig"),
     @import("Physics/Vehicle/Wheel.zig"),
     @import("Physics/Vehicle/WheeledVehicleController.zig"),
     @import("RegisterTypes.zig"),

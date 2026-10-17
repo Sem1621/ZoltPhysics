@@ -138,6 +138,15 @@
 //! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
 //! 3").
 //!
+//! Proof that the vehicle scenes bite (VehicleSlot, the vehicle core group): multiplying WheelWV's lateral slip angle by
+//! 1.0001 is reported as "scene vehicle_wheeled_ops, ... update 11: ... state differs at byte 92 ...: bodies[2] (id
+//! 0x00800002) position.x zolt 0xbaa3b604 jolt 0xbaa3b60b" (and vehicle_wheeled_in_air at update 28); the convex radius
+//! of VehicleCollisionTesterCastCylinder from the larger instead of the smaller of the wheel's half width and radius as
+//! "scene vehicle_wheeled_ops, ... update 35: ... bodies[2] (id 0x00800002) position.x" (the scene switches to the cast
+//! cylinder tester at update 35); a WheeledVehicleController::GetWheelSpeedAtClutch that is 1.0001 times Jolt's (only the
+//! object state sees it) as "update 1: ... object state differs at byte 1516 ...: vehicle_wheeled (object handle 0, item 0)
+//! wheel_speed_at_clutch".
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
@@ -4685,7 +4694,987 @@ const RagdollSlot = Phase7StubSlot;
 
 // ---- SLOT vehicle: VehicleConstraint, the collision testers, the wheels, the engine, the transmission, the anti-roll
 // bars, WheeledVehicleController (Phase7OpRange.vehicle 520..569, Blocker.wheeled_vehicles) ----
-const VehicleSlot = Phase7StubSlot;
+
+/// The vehicle core group: the vehicles of all three controller kinds (the tracked and motorcycle parts through the hooks
+/// of TrackedVehicleSlot / MotorcycleSlot). The port of the vehicle code of SimulationReference.cpp: SimMakeVehicleSettings
+/// and its helpers (`makeVehicleSettings`, `fillWheeled`, ...), SimVehicleData (`Vehicle`), ApplyVehicleOp (`create`,
+/// `applyOp`), WriteVehicleState (`writeState`), SimVehicleSettingsPart (`settingsPart`), the callbacks of
+/// SetVehicleCallbacks, SimVehicleCombineFriction and SimVehicleTireMaxImpulse.
+const VehicleSlot = struct {
+    const WheeledVehicleController = zolt.WheeledVehicleController;
+    const WheeledVehicleControllerSettings = zolt.WheeledVehicleControllerSettings;
+    const WheelSettingsWV = zolt.WheelSettingsWV;
+    const WheelWV = zolt.WheelWV;
+    const VehicleConstraintSettings = zolt.VehicleConstraintSettings;
+    const VehicleCollisionTester = zolt.VehicleCollisionTester;
+    const VehicleEngine = zolt.VehicleEngine;
+    const VehicleEngineSettings = zolt.VehicleEngineSettings;
+    const VehicleTransmission = zolt.VehicleTransmission;
+    const VehicleTransmissionSettings = zolt.VehicleTransmissionSettings;
+    const VehicleTrackSettings = zolt.VehicleTrackSettings;
+    const VehicleDifferentialSettings = zolt.VehicleDifferentialSettings;
+    const VehicleAntiRollBar = zolt.VehicleAntiRollBar;
+    const LinearCurve = zolt.LinearCurve;
+    const SimVehicleEngine = SimScenes.SimVehicleEngine;
+    const SimVehicleTransmission = SimScenes.SimVehicleTransmission;
+    const SimVehicleTrack = SimScenes.SimVehicleTrack;
+    const SimVehicleDifferential = SimScenes.SimVehicleDifferential;
+    const SimVehicleAntiRollBar = SimScenes.SimVehicleAntiRollBar;
+    const VehicleWheelKind = SimScenes.VehicleWheelKind;
+    const VehicleTesterKind = SimScenes.VehicleTesterKind;
+    const VehicleCallbacks = SimScenes.VehicleCallbacks;
+
+    /// A vehicle of the world (SimVehicleData of the .cpp): the constraint, its tester, the defaults of its callbacks and
+    /// the filters of vehicle_tester_set_filters (the tester keeps pointers to them). Heap allocated: the step callbacks
+    /// get it as their context.
+    const Vehicle = struct {
+        world: *ZoltWorld,
+        /// The harness' reference (Ref<VehicleConstraint> mConstraint)
+        constraint: Ref(Constraint),
+        tester: Ref(VehicleCollisionTester) = .empty,
+        handle: u32,
+        controller: VehicleControllerKind,
+        added: bool = false,
+        /// The VehicleCallbacks bits of the step callbacks (the value that the lambdas of SetVehicleCallbacks capture: the
+        /// callbacks are set again whenever it changes)
+        callbacks: u32 = 0,
+        default_combine_friction: VehicleConstraint.CombineFunction = .default,
+        default_tire_max_impulse: WheeledVehicleController.TireMaxImpulseCallback = .default,
+        broad_phase_layer_filter: ?*zolt.DefaultBroadPhaseLayerFilter = null,
+        object_layer_filter: ?*zolt.DefaultObjectLayerFilter = null,
+        body_filter: ?*zolt.IgnoreMultipleBodiesFilter = null,
+
+        fn get(self: *const Vehicle) *VehicleConstraint {
+            return zolt.virtual.downcast(VehicleConstraint, self.constraint.ptr.?);
+        }
+
+        /// ~SimVehicleData: releases the constraint and the tester, frees the filters
+        fn destroy(self: *Vehicle, allocator: Allocator) void {
+            self.constraint.deinit();
+            self.tester.deinit();
+            freeFilters(allocator, self.broad_phase_layer_filter, self.object_layer_filter, self.body_filter);
+            allocator.destroy(self);
+        }
+    };
+
+    const Storage = struct {
+        /// The vehicles of the vehicle handles
+        vehicles: std.ArrayList(*Vehicle) = .empty,
+    };
+
+    fn freeFilters(allocator: Allocator, broad_phase_layer_filter: ?*zolt.DefaultBroadPhaseLayerFilter, object_layer_filter: ?*zolt.DefaultObjectLayerFilter, body_filter: ?*zolt.IgnoreMultipleBodiesFilter) void {
+        if (broad_phase_layer_filter) |f| allocator.destroy(f);
+        if (object_layer_filter) |f| allocator.destroy(f);
+        if (body_filter) |f| {
+            f.deinit();
+            allocator.destroy(f);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The settings of a description (SimFillEngine, SimFillTransmission, ... of the .cpp)
+
+    /// SimLoadCurve: a LinearCurve from (x, y) points of the float pool (the curve is replaced; built aside first so that
+    /// an allocation failure leaves the curve unchanged)
+    fn loadCurve(allocator: Allocator, scene: *const SimSceneDesc, offset: u32, num_points: u32, curve: *LinearCurve) !void {
+        var new: LinearCurve = .{};
+        errdefer new.deinit(allocator);
+        for (0..num_points) |p|
+            try new.addPoint(allocator, scene.floats[offset + 2 * p], scene.floats[offset + 2 * p + 1]);
+        curve.deinit(allocator);
+        curve.* = new;
+    }
+
+    /// SimLoadFloats: an array of floats of the float pool (the array is replaced)
+    fn loadFloats(allocator: Allocator, scene: *const SimSceneDesc, offset: u32, count: u32, array: *std.ArrayList(f32)) !void {
+        var new: std.ArrayList(f32) = .empty;
+        try new.appendSlice(allocator, scene.floats[offset..][0..count]);
+        array.deinit(allocator);
+        array.* = new;
+    }
+
+    /// SimFillEngine (the curve is replaced when the description has one; `allocator` is the allocator of the settings)
+    fn fillEngine(allocator: Allocator, scene: *const SimSceneDesc, d: *const SimVehicleEngine, engine_settings: *VehicleEngineSettings) !void {
+        engine_settings.max_torque = d.max_torque;
+        engine_settings.min_rpm = d.min_rpm;
+        engine_settings.max_rpm = d.max_rpm;
+        if (d.torque_points != invalid_handle)
+            try loadCurve(allocator, scene, d.torque_points, d.num_torque_points, &engine_settings.normalized_torque);
+        engine_settings.inertia = d.inertia;
+        engine_settings.angular_damping = d.angular_damping;
+    }
+
+    /// SimFillTransmission (the ratios are replaced when the description has them)
+    fn fillTransmission(allocator: Allocator, scene: *const SimSceneDesc, d: *const SimVehicleTransmission, transmission_settings: *VehicleTransmissionSettings) !void {
+        transmission_settings.mode = @enumFromInt(@as(u8, @truncate(d.mode))); // ETransmissionMode(uint32): a uint8 enum
+        if (d.gear_ratios != invalid_handle)
+            try loadFloats(allocator, scene, d.gear_ratios, d.num_gear_ratios, &transmission_settings.gear_ratios);
+        if (d.reverse_gear_ratios != invalid_handle)
+            try loadFloats(allocator, scene, d.reverse_gear_ratios, d.num_reverse_gear_ratios, &transmission_settings.reverse_gear_ratios);
+        transmission_settings.switch_time = d.switch_time;
+        transmission_settings.clutch_release_time = d.clutch_release_time;
+        transmission_settings.switch_latency = d.switch_latency;
+        transmission_settings.shift_up_rpm = d.shift_up_rpm;
+        transmission_settings.shift_down_rpm = d.shift_down_rpm;
+        transmission_settings.clutch_strength = d.clutch_strength;
+    }
+
+    /// SimFillTrack
+    fn fillTrack(allocator: Allocator, scene: *const SimSceneDesc, d: *const SimVehicleTrack, track: *VehicleTrackSettings) !void {
+        track.driven_wheel = d.driven_wheel;
+        track.wheels.clearRetainingCapacity();
+        try track.wheels.appendSlice(allocator, scene.uints[d.wheels..][0..d.num_wheels]);
+        track.inertia = d.inertia;
+        track.angular_damping = d.angular_damping;
+        track.max_brake_torque = d.max_brake_torque;
+        track.differential_ratio = d.differential_ratio;
+    }
+
+    /// SimFillDifferential
+    fn fillDifferential(d: *const SimVehicleDifferential) VehicleDifferentialSettings {
+        return .{ .left_wheel = d.left_wheel, .right_wheel = d.right_wheel, .differential_ratio = d.differential_ratio, .left_right_split = d.left_right_split, .limited_slip_ratio = d.limited_slip_ratio, .engine_torque_ratio = d.engine_torque_ratio };
+    }
+
+    /// SimFillAntiRollBar
+    fn fillAntiRollBar(d: *const SimVehicleAntiRollBar) VehicleAntiRollBar {
+        return .{ .left_wheel = d.left_wheel, .right_wheel = d.right_wheel, .stiffness = d.stiffness };
+    }
+
+    /// SimFillWheeled: the wheeled controller members of a description (WheeledVehicleControllerSettings, also the base
+    /// of MotorcycleControllerSettings: MotorcycleSlot.makeControllerSettings calls it). The arrays are allocated with the
+    /// settings' allocator.
+    fn fillWheeled(scene: *const SimSceneDesc, v: *const SimVehicle, settings: *WheeledVehicleControllerSettings) !void {
+        const allocator = settings.base.allocator;
+        try fillEngine(allocator, scene, &v.engine, &settings.engine);
+        try fillTransmission(allocator, scene, &v.transmission, &settings.transmission);
+        try settings.differentials.ensureUnusedCapacity(allocator, v.num_differentials);
+        for (scene.vehicle_differentials[v.first_differential..][0..v.num_differentials]) |*d|
+            settings.differentials.appendAssumeCapacity(fillDifferential(d));
+        settings.differential_limited_slip_ratio = v.differential_limited_slip_ratio;
+    }
+
+    /// The new controller settings of a description (SimMakeControllerSettings, no reference yet): the wheeled settings
+    /// here, the tracked and motorcycle ones through the hooks of the vehicle variants
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        return switch (try controllerKind(v)) {
+            .wheeled => {
+                const s = try WheeledVehicleControllerSettings.create(allocator);
+                errdefer {
+                    s.base.addRef();
+                    s.base.release();
+                }
+                try fillWheeled(scene, v, s);
+                return &s.base;
+            },
+            .tracked => TrackedVehicleSlot.makeControllerSettings(allocator, scene, v),
+            .motorcycle => MotorcycleSlot.makeControllerSettings(allocator, scene, v),
+        };
+    }
+
+    /// SimFillWheelSettings: the WheelSettings members of a wheel description
+    fn fillWheelSettings(w: *const SimVehicleWheel, s: *WheelSettings) void {
+        s.position = load3(&w.position);
+        s.suspension_force_point = load3(&w.suspension_force_point);
+        s.suspension_direction = load3(&w.suspension_direction);
+        s.steering_axis = load3(&w.steering_axis);
+        s.wheel_up = load3(&w.wheel_up);
+        s.wheel_forward = load3(&w.wheel_forward);
+        s.suspension_min_length = w.suspension_min_length;
+        s.suspension_max_length = w.suspension_max_length;
+        s.suspension_preload_length = w.suspension_preload_length;
+        s.suspension_spring.mode = @enumFromInt(@as(u8, @truncate(w.suspension_spring_mode))); // ESpringMode: a uint8 enum
+        s.suspension_spring.frequency = w.suspension_frequency;
+        s.suspension_spring.damping = w.suspension_damping;
+        s.radius = w.radius;
+        s.width = w.width;
+        s.enable_suspension_force_point = w.enable_suspension_force_point != 0;
+    }
+
+    /// The new wheel settings of a description (SimMakeWheelSettings, no reference yet): WheelSettingsWV here,
+    /// WheelSettingsTV through the hook of the vehicle variants
+    fn makeWheelSettings(allocator: Allocator, scene: *const SimSceneDesc, w: *const SimVehicleWheel) !*WheelSettings {
+        if (w.kind != @intFromEnum(VehicleWheelKind.wv))
+            return TrackedVehicleSlot.makeWheelSettings(allocator, scene, w);
+        const wv = try WheelSettingsWV.create(allocator);
+        errdefer {
+            wv.base.addRef();
+            wv.base.release();
+        }
+        fillWheelSettings(w, &wv.base);
+        wv.inertia = w.inertia;
+        wv.angular_damping = w.angular_damping;
+        wv.max_steer_angle = w.max_steer_angle;
+        if (w.longitudinal_friction != invalid_handle)
+            try loadCurve(allocator, scene, w.longitudinal_friction, w.num_longitudinal_friction, &wv.longitudinal_friction);
+        if (w.lateral_friction != invalid_handle)
+            try loadCurve(allocator, scene, w.lateral_friction, w.num_lateral_friction, &wv.lateral_friction);
+        wv.max_brake_torque = w.max_brake_torque;
+        wv.max_hand_brake_torque = w.max_hand_brake_torque;
+        return &wv.base;
+    }
+
+    /// SimMakeVehicleSettings: the VehicleConstraintSettings of a vehicle description
+    fn makeVehicleSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !Ref(ConstraintSettings) {
+        const s = try VehicleConstraintSettings.create(allocator);
+        var result = Ref(ConstraintSettings).init(s.asSettings());
+        errdefer result.deinit();
+        s.base.enabled = v.enabled != 0;
+        s.base.constraint_priority = v.constraint_priority;
+        s.base.num_velocity_steps_override = v.num_velocity_steps_override;
+        s.base.num_position_steps_override = v.num_position_steps_override;
+        s.base.draw_constraint_size = v.draw_constraint_size;
+        s.base.user_data = v.user_data;
+        s.up = load3(&v.up);
+        s.forward = load3(&v.forward);
+        s.max_pitch_roll_angle = v.max_pitch_roll_angle;
+        for (scene.vehicle_wheels[v.first_wheel..][0..v.num_wheels]) |*w| {
+            var wheel = Ref(WheelSettings).init(try makeWheelSettings(allocator, scene, w));
+            defer wheel.deinit();
+            try s.addWheel(wheel.ptr.?);
+        }
+        for (scene.vehicle_anti_roll_bars[v.first_anti_roll_bar..][0..v.num_anti_roll_bars]) |*bar|
+            try s.addAntiRollBar(fillAntiRollBar(bar));
+        var controller = Ref(VehicleControllerSettings).init(try makeControllerSettings(allocator, scene, v));
+        defer controller.deinit();
+        s.setController(controller.ptr);
+        return result;
+    }
+
+    /// SimMakeTester: a new collision tester (no reference yet)
+    fn makeTester(allocator: Allocator, kind: u32, object_layer: u32, up: Vec3, max_slope_angle: f32, radius: f32, convex_radius_fraction: f32) !*VehicleCollisionTester {
+        const layer: ObjectLayer = @truncate(object_layer);
+        return switch (std.enums.fromInt(VehicleTesterKind, kind) orelse return error.SceneError) {
+            .ray => &(try zolt.VehicleCollisionTesterRay.create(allocator, layer, .{ .up = up, .max_slope_angle = max_slope_angle })).base,
+            .cast_sphere => &(try zolt.VehicleCollisionTesterCastSphere.create(allocator, layer, radius, .{ .up = up, .max_slope_angle = max_slope_angle })).base,
+            .cast_cylinder => &(try zolt.VehicleCollisionTesterCastCylinder.create(allocator, layer, .{ .convex_radius_fraction = convex_radius_fraction })).base,
+        };
+    }
+
+    fn controllerKind(v: *const SimVehicle) !VehicleControllerKind {
+        return std.enums.fromInt(VehicleControllerKind, v.controller) orelse error.SceneError;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The callbacks (SetVehicleCallbacks, SimVehicleCombineFriction, SimVehicleTireMaxImpulse of the .cpp)
+
+    /// SimVehicleRecord: the vehicle handle and body, the step, the wheels with a contact and the hash of the suspension
+    /// length, angular velocity and steer angle of every wheel
+    fn record(kind: RecordKind, handle: u32, v: *const VehicleConstraint, context: *const PhysicsStepListenerContext) SimRecord {
+        var contacts: u32 = 0;
+        var hash = SimScenes.hash_seed;
+        for (v.getWheels(), 0..) |wheel, w| {
+            if (wheel.hasContact())
+                contacts |= @as(u32, 1) << @intCast(w);
+            hash = VehicleRecords.hashWheel(hash, wheel.getSuspensionLength(), wheel.getAngularVelocity(), wheel.getSteerAngle());
+        }
+        return VehicleRecords.record(kind, handle, v.getVehicleBody().getID(), context, contacts, hash);
+    }
+
+    fn preStep(self: *Vehicle, v: *VehicleConstraint, context: *const PhysicsStepListenerContext) void {
+        if ((self.callbacks & VehicleCallbacks.pre_step) != 0)
+            self.world.recorder.add(record(.vehicle_pre_step, self.handle, v, context));
+        if ((self.callbacks & VehicleCallbacks.steer) != 0 and self.controller != .tracked) {
+            const c = zolt.virtual.downcast(WheeledVehicleController, v.getControllerMut());
+            c.setRightInput(if (c.getRightInput() > 0.0) -0.25 else 0.5);
+        }
+    }
+
+    fn postCollide(self: *Vehicle, v: *VehicleConstraint, context: *const PhysicsStepListenerContext) void {
+        self.world.recorder.add(record(.vehicle_post_collide, self.handle, v, context));
+    }
+
+    fn postStep(self: *Vehicle, v: *VehicleConstraint, context: *const PhysicsStepListenerContext) void {
+        self.world.recorder.add(record(.vehicle_post_step, self.handle, v, context));
+    }
+
+    /// SetVehicleCallbacks: the step callbacks of VehicleCallbacks bits `callbacks`
+    fn setCallbacks(self: *Vehicle, callbacks: u32) void {
+        const v = self.get();
+        self.callbacks = callbacks;
+        v.setPreStepCallback(if ((callbacks & (VehicleCallbacks.pre_step | VehicleCallbacks.steer)) != 0) VehicleConstraint.StepCallback.init(self, preStep) else null);
+        v.setPostCollideCallback(if ((callbacks & VehicleCallbacks.post_collide) != 0) VehicleConstraint.StepCallback.init(self, postCollide) else null);
+        v.setPostStepCallback(if ((callbacks & VehicleCallbacks.post_step) != 0) VehicleConstraint.StepCallback.init(self, postStep) else null);
+    }
+
+    /// VehicleCombineFriction.custom (SimVehicleCombineFriction)
+    fn customCombineFriction(context: ?*anyopaque, wheel_index: u32, longitudinal_friction: *f32, lateral_friction: *f32, body2: *const Body, sub_shape_id2: SubShapeID) void {
+        _ = .{ context, sub_shape_id2 };
+        const body_friction = body2.getFriction();
+        longitudinal_friction.* = 0.5 * (longitudinal_friction.* + body_friction);
+        lateral_friction.* = zolt.math.min(lateral_friction.*, body_friction);
+        if ((wheel_index & 1) != 0) {
+            longitudinal_friction.* *= 0.9;
+            lateral_friction.* *= 0.9;
+        }
+    }
+
+    /// VehicleTireMaxImpulse.custom (SimVehicleTireMaxImpulse)
+    fn customTireMaxImpulse(context: ?*anyopaque, wheel_index: u32, longitudinal_impulse: *f32, lateral_impulse: *f32, suspension_impulse: f32, longitudinal_friction: f32, lateral_friction: f32, longitudinal_slip: f32, lateral_slip: f32, delta_time: f32) void {
+        _ = .{ context, longitudinal_slip, lateral_slip, delta_time };
+        longitudinal_impulse.* = 0.9 * longitudinal_friction * suspension_impulse;
+        lateral_impulse.* = lateral_friction * suspension_impulse;
+        if (wheel_index == 0) {
+            longitudinal_impulse.* *= 0.5;
+            lateral_impulse.* *= 0.5;
+        }
+    }
+
+    /// SetVehicleCombineFriction
+    fn setCombineFriction(self: *Vehicle, mode: u32) void {
+        self.get().setCombineFriction(if (mode == 1) .{ .function = customCombineFriction } else self.default_combine_friction);
+    }
+
+    /// SetVehicleTireMaxImpulse (`op` null: from the description)
+    fn setTireMaxImpulse(self: *Vehicle, mode: u32, op: ?*const SimOp) !void {
+        if (self.controller == .tracked) {
+            if (mode == 0 and op == null)
+                return; // A tracked vehicle has no tire callback, its description has the default
+            std.debug.print("SimulationParity: tire max impulse callback on the tracked vehicle handle {d}\n", .{self.handle});
+            return error.SceneError;
+        }
+        wheeled(self.get()).setTireMaxImpulseCallback(if (mode == 1) .{ .function = customTireMaxImpulse } else self.default_tire_max_impulse);
+    }
+
+    /// The wheeled controller of a wheeled or motorcycle vehicle (a MotorcycleController is a WheeledVehicleController)
+    fn wheeled(v: *VehicleConstraint) *WheeledVehicleController {
+        return zolt.virtual.downcast(WheeledVehicleController, v.getControllerMut());
+    }
+
+    /// GetWheeledController of the .cpp: a wheeled operation on a tracked vehicle is a scene error
+    fn wheeledOf(self: *const Vehicle, op: *const SimOp) !*WheeledVehicleController {
+        if (self.controller == .tracked) {
+            std.debug.print("SimulationParity: wheeled operation {d} on the tracked vehicle handle {d}\n", .{ op.kind, op.index });
+            return error.SceneError;
+        }
+        return wheeled(self.get());
+    }
+
+    /// GetEngine / GetTransmission of the .cpp (every controller kind has them; the tracked controller's through the hooks)
+    fn engineOf(self: *const Vehicle) !*VehicleEngine {
+        return if (self.controller == .tracked) TrackedVehicleSlot.engine(self.get()) else wheeled(self.get()).getEngineMut();
+    }
+
+    fn transmissionOf(self: *const Vehicle) !*VehicleTransmission {
+        return if (self.controller == .tracked) TrackedVehicleSlot.transmission(self.get()) else wheeled(self.get()).getTransmissionMut();
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The slot
+
+    /// create_vehicle (ApplyVehicleOp of the .cpp): the vehicle of the next handle; returns the number of constraints
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const storage = &world.phase7.vehicles;
+        const d = &world.desc.vehicles[op.index];
+        try storage.vehicles.ensureUnusedCapacity(allocator, 1);
+        var settings = try makeVehicleSettings(allocator, world.desc, d);
+        defer settings.deinit();
+
+        const constraint = blk: {
+            var lock: zolt.BodyLockWrite = .init(world.system.getBodyLockInterface(), world.getHandle(d.body));
+            defer lock.deinit();
+            if (!lock.succeeded()) {
+                std.debug.print("SimulationParity: vehicle description {d}: the body handle {d} does not exist\n", .{ op.index, d.body });
+                return error.SceneError;
+            }
+            break :blk try VehicleConstraint.create(allocator, lock.getBody(), zolt.virtual.downcast(VehicleConstraintSettings, settings.get().?));
+        };
+        var constraint_ref = Ref(Constraint).init(&constraint.base);
+        errdefer constraint_ref.deinit();
+        var tester = Ref(VehicleCollisionTester).init(try makeTester(allocator, d.tester.kind, d.tester.object_layer, load3(&d.tester.up), d.tester.max_slope_angle, d.tester.radius, d.tester.convex_radius_fraction));
+        errdefer tester.deinit();
+
+        const v = try allocator.create(Vehicle);
+        errdefer allocator.destroy(v);
+        v.* = .{ .world = world, .constraint = constraint_ref, .tester = tester, .handle = @intCast(storage.vehicles.items.len), .controller = try controllerKind(d) };
+        constraint.setVehicleCollisionTester(v.tester.ptr);
+        v.default_combine_friction = constraint.getCombineFriction();
+        if (v.controller != .tracked)
+            v.default_tire_max_impulse = wheeled(constraint).getTireMaxImpulseCallback();
+        setCallbacks(v, d.callbacks);
+        setCombineFriction(v, d.combine_friction);
+        try setTireMaxImpulse(v, d.tire_max_impulse, null);
+        try world.system.addConstraint(&constraint.base);
+        errdefer world.system.removeConstraint(&constraint.base);
+        try world.system.addStepListener(constraint.stepListener());
+        v.added = true;
+        storage.vehicles.appendAssumeCapacity(v);
+        return world.system.constraint_manager.getNumConstraints();
+    }
+
+    /// The vehicle of a handle (GetVehicle of the .cpp)
+    fn getVehicle(world: *ZoltWorld, handle: u32) !*Vehicle {
+        const vehicles = world.phase7.vehicles.vehicles.items;
+        if (handle >= vehicles.len) {
+            std.debug.print("SimulationParity: operation on vehicle handle {d} that does not exist\n", .{handle});
+            return error.SceneError;
+        }
+        return vehicles[handle];
+    }
+
+    fn vehicle(world: *ZoltWorld, handle: u32) !*VehicleConstraint {
+        return (try getVehicle(world, handle)).get();
+    }
+
+    /// SimConstraintState of the vehicle constraint
+    fn constraintState(v: *VehicleConstraint) u32 {
+        return @as(u32, @intFromBool(v.base.getEnabled())) | (@as(u32, @intFromBool(v.base.isActive())) << 1);
+    }
+
+    /// The SaveBinaryState bytes of settings as a hash (HashBinaryState of the .cpp)
+    fn hashBinaryState(allocator: Allocator, settings: anytype) !u32 {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+        settings.saveBinaryState(wrapper.streamOut());
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        return SimScenes.hashBytes(SimScenes.hash_seed, out.written());
+    }
+
+    /// The operations of Phase7OpRange.vehicle but create_vehicle (ApplyVehicleOp of the .cpp)
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const i = &op.i;
+        const f = &op.f;
+        const v = try getVehicle(world, op.index);
+        const c = v.get();
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .vehicle_remove => {
+                world.system.removeStepListener(c.stepListener());
+                world.system.removeConstraint(&c.base);
+                v.added = false;
+                return world.system.constraint_manager.getNumConstraints();
+            },
+            .vehicle_add => {
+                try world.system.addConstraint(&c.base);
+                errdefer world.system.removeConstraint(&c.base);
+                try world.system.addStepListener(c.stepListener());
+                v.added = true;
+                return world.system.constraint_manager.getNumConstraints();
+            },
+            .vehicle_set_max_pitch_roll_angle => c.setMaxPitchRollAngle(f[0]),
+            .vehicle_override_gravity => c.overrideGravity(load3(f[0..3])),
+            .vehicle_reset_gravity_override => c.resetGravityOverride(),
+            .vehicle_set_num_steps_between_collision_test_active => c.setNumStepsBetweenCollisionTestActive(i[0]),
+            .vehicle_set_num_steps_between_collision_test_inactive => c.setNumStepsBetweenCollisionTestInactive(i[0]),
+            .vehicle_set_collision_tester => {
+                const tester = Ref(VehicleCollisionTester).init(try makeTester(allocator, i[0], i[1], load3(f[0..3]), f[3], f[4], f[5]));
+                v.tester.deinit();
+                v.tester = tester;
+                c.setVehicleCollisionTester(v.tester.ptr);
+            },
+            .vehicle_tester_set_object_layer => v.tester.ptr.?.setObjectLayer(@truncate(i[0])),
+            .vehicle_tester_set_filters => {
+                const tester = v.tester.ptr.?;
+                if (i[0] == 0) {
+                    tester.setBroadPhaseLayerFilter(null);
+                    tester.setObjectLayerFilter(null);
+                    tester.setBodyFilter(null);
+                } else {
+                    const layer: ObjectLayer = @truncate(i[1]);
+                    const broad_phase_layer_filter = try allocator.create(zolt.DefaultBroadPhaseLayerFilter);
+                    errdefer allocator.destroy(broad_phase_layer_filter);
+                    broad_phase_layer_filter.* = .init(&world.object_vs_broad_phase_layer_filter.base, layer);
+                    const object_layer_filter = try allocator.create(zolt.DefaultObjectLayerFilter);
+                    errdefer allocator.destroy(object_layer_filter);
+                    object_layer_filter.* = .init(&world.object_layer_pair_filter.base, layer);
+                    const body_filter = try allocator.create(zolt.IgnoreMultipleBodiesFilter);
+                    errdefer allocator.destroy(body_filter);
+                    body_filter.* = .init(allocator);
+                    errdefer body_filter.deinit();
+                    try body_filter.ignoreBody(c.getVehicleBody().getID());
+                    const ignored = world.getHandle(op.body);
+                    if (!ignored.isInvalid())
+                        try body_filter.ignoreBody(ignored);
+
+                    // Replace the filters (std::unique_ptr::operator=)
+                    freeFilters(allocator, v.broad_phase_layer_filter, v.object_layer_filter, v.body_filter);
+                    v.broad_phase_layer_filter = broad_phase_layer_filter;
+                    v.object_layer_filter = object_layer_filter;
+                    v.body_filter = body_filter;
+                    tester.setBroadPhaseLayerFilter(&broad_phase_layer_filter.base);
+                    tester.setObjectLayerFilter(&object_layer_filter.base);
+                    tester.setBodyFilter(&body_filter.base);
+                }
+            },
+            .vehicle_set_combine_friction => setCombineFriction(v, i[0]),
+            .vehicle_set_callbacks => setCallbacks(v, i[0]),
+            .vehicle_wheel_set_angular_velocity => c.getWheelMut(i[0]).setAngularVelocity(f[0]),
+            .vehicle_wheel_set_rotation_angle => c.getWheelMut(i[0]).setRotationAngle(f[0]),
+            .vehicle_wheel_set_steer_angle => c.getWheelMut(i[0]).setSteerAngle(f[0]),
+            .vehicle_set_anti_roll_bar => {
+                const bar = &c.getAntiRollBarsMut().items[i[0]];
+                bar.left_wheel = @bitCast(i[1]);
+                bar.right_wheel = @bitCast(i[2]);
+                bar.stiffness = f[0];
+            },
+            .vehicle_settings_hash => {
+                var settings = try c.base.getConstraintSettings();
+                defer settings.deinit();
+                return hashBinaryState(allocator, settings.get().?);
+            },
+            .vehicle_controller_settings_hash => {
+                var settings = try c.getController().getSettings();
+                defer settings.deinit();
+                return hashBinaryState(allocator, settings.get().?);
+            },
+            .vehicle_expect_wheel_contacts => {
+                // Changes nothing, the driver checks the result
+                var bits: u32 = 0;
+                for (c.getWheels(), 0..) |wheel, w| {
+                    if (wheel.hasContact())
+                        bits |= @as(u32, 1) << @intCast(w);
+                }
+                return bits;
+            },
+            .vehicle_engine_set_current_rpm => (try engineOf(v)).setCurrentRPM(f[0]),
+            .vehicle_engine_set_settings => {
+                const engine = try engineOf(v);
+                engine.base.max_torque = f[0];
+                engine.base.min_rpm = f[1];
+                engine.base.max_rpm = f[2];
+                engine.base.inertia = f[3];
+                engine.base.angular_damping = f[4];
+            },
+            .vehicle_engine_set_torque_curve => try loadCurve(c.getController().allocator, world.desc, i[0], i[1], &(try engineOf(v)).base.normalized_torque),
+            .vehicle_transmission_set => (try transmissionOf(v)).set(@bitCast(i[0]), f[0]),
+            .vehicle_transmission_set_settings => {
+                const transmission = try transmissionOf(v);
+                transmission.base.mode = @enumFromInt(@as(u8, @truncate(i[0])));
+                transmission.base.switch_time = f[0];
+                transmission.base.clutch_release_time = f[1];
+                transmission.base.switch_latency = f[2];
+                transmission.base.shift_up_rpm = f[3];
+                transmission.base.shift_down_rpm = f[4];
+                transmission.base.clutch_strength = f[5];
+            },
+            .vehicle_transmission_set_gear_ratios => {
+                // Both arrays are replaced (build both first: an allocation failure changes nothing)
+                const controller_allocator = c.getController().allocator;
+                const transmission = try transmissionOf(v);
+                var gear_ratios: std.ArrayList(f32) = .empty;
+                errdefer gear_ratios.deinit(controller_allocator);
+                try loadFloats(controller_allocator, world.desc, i[0], i[1], &gear_ratios);
+                var reverse_gear_ratios: std.ArrayList(f32) = .empty;
+                try loadFloats(controller_allocator, world.desc, i[2], i[3], &reverse_gear_ratios);
+                transmission.base.gear_ratios.deinit(controller_allocator);
+                transmission.base.gear_ratios = gear_ratios;
+                transmission.base.reverse_gear_ratios.deinit(controller_allocator);
+                transmission.base.reverse_gear_ratios = reverse_gear_ratios;
+            },
+            .wheeled_set_driver_input => (try wheeledOf(v, op)).setDriverInput(f[0], f[1], f[2], f[3]),
+            .wheeled_set_forward_input => (try wheeledOf(v, op)).setForwardInput(f[0]),
+            .wheeled_set_right_input => (try wheeledOf(v, op)).setRightInput(f[0]),
+            .wheeled_set_brake_input => (try wheeledOf(v, op)).setBrakeInput(f[0]),
+            .wheeled_set_hand_brake_input => (try wheeledOf(v, op)).setHandBrakeInput(f[0]),
+            .wheeled_set_differential => {
+                const d = &(try wheeledOf(v, op)).getDifferentialsMut()[i[0]];
+                d.left_wheel = @bitCast(i[1]);
+                d.right_wheel = @bitCast(i[2]);
+                d.differential_ratio = f[0];
+                d.left_right_split = f[1];
+                d.limited_slip_ratio = f[2];
+                d.engine_torque_ratio = f[3];
+            },
+            .wheeled_set_differential_limited_slip_ratio => (try wheeledOf(v, op)).setDifferentialLimitedSlipRatio(f[0]),
+            .wheeled_set_tire_max_impulse_callback => try setTireMaxImpulse(v, i[0], op),
+
+            // The Constraint interface of the VehicleConstraint (a vehicle is not a constraint handle)
+            .vehicle_set_enabled => c.base.setEnabled(i[0] != 0),
+            .vehicle_reset_warm_start => c.base.resetWarmStart(),
+            .vehicle_set_constraint_priority => c.base.setConstraintPriority(i[0]),
+            .vehicle_set_steps_override => {
+                c.base.setNumVelocityStepsOverride(i[0]);
+                c.base.setNumPositionStepsOverride(i[1]);
+            },
+            .vehicle_set_user_data => c.base.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32)),
+            .vehicle_expect_constraint_state => {
+                // Changes nothing, the driver checks the result: a disabled vehicle whose body is active runs OnStep (its
+                // callbacks, the wheel collision tests) but is not solved (IsActive includes mEnabled)
+                return VehicleSlot.constraintState(c) | (@as(u32, @intFromBool(world.system.getBodyInterface().isActive(c.getVehicleBody().getID()))) << 2);
+            },
+            .vehicle_wheel_wv_apply_torque => {
+                _ = try wheeledOf(v, op);
+                zolt.virtual.downcast(WheelWV, c.getWheelMut(i[0])).applyTorque(f[0], f[1]);
+            },
+            .vehicle_engine_apply_torque => (try engineOf(v)).applyTorque(f[0], f[1]),
+            .vehicle_engine_apply_damping => (try engineOf(v)).applyDamping(f[0]),
+            else => {
+                std.debug.print("SimulationParity: unknown vehicle operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+        return VehicleSlot.constraintState(c);
+    }
+
+    /// WriteEngineState of the .cpp: the vehicle_engine field of an engine (also for the tracked controller)
+    fn writeEngineState(w: *ObjectStateWriter, handle: u32, engine: *const VehicleEngine) !void {
+        try w.begin(.vehicle_engine, handle, 0);
+        try w.value(engine.getCurrentRPM());
+        try w.value(engine.getAngularVelocity());
+        try w.value(engine.getTorque(1.0));
+        try w.boolean(engine.allowSleep());
+        try w.value(engine.base.max_torque);
+        try w.value(engine.base.min_rpm);
+        try w.value(engine.base.max_rpm);
+        try w.value(engine.base.inertia);
+        try w.value(engine.base.angular_damping);
+        w.end();
+    }
+
+    /// WriteTransmissionState of the .cpp: the vehicle_transmission field of a transmission (also for the tracked
+    /// controller)
+    fn writeTransmissionState(w: *ObjectStateWriter, handle: u32, transmission: *const VehicleTransmission) !void {
+        try w.begin(.vehicle_transmission, handle, 0);
+        try w.value(transmission.getCurrentGear());
+        try w.value(transmission.getClutchFriction());
+        try w.boolean(transmission.isSwitchingGear());
+        try w.value(transmission.getCurrentRatio());
+        try w.boolean(transmission.allowSleep());
+        try w.value(@as(u32, @intFromEnum(transmission.base.mode)));
+        w.end();
+    }
+
+    /// WriteVehicleState of the .cpp for every vehicle in handle order
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        for (world.phase7.vehicles.vehicles.items) |v|
+            try writeVehicleState(world, w, v);
+    }
+
+    fn writeVehicleState(world: *ZoltWorld, w: *ObjectStateWriter, v: *const Vehicle) !void {
+        const h = v.handle;
+        const c = v.get();
+        const num_wheels: u32 = @intCast(c.getWheels().len);
+
+        try w.begin(.vehicle_properties, h, 0);
+        try w.boolean(c.base.isActive());
+        try w.boolean(c.base.getEnabled());
+        try w.value(c.getNumStepsBetweenCollisionTestActive());
+        try w.value(c.getNumStepsBetweenCollisionTestInactive());
+        try w.value(c.getMaxPitchRollAngle());
+        try w.boolean(c.isGravityOverridden());
+        try w.vec3(c.getGravityOverride());
+        try w.vec3(c.getLocalForward());
+        try w.vec3(c.getLocalUp());
+        try w.vec3(c.getWorldUp());
+        try w.value(num_wheels);
+        try w.value(c.getVehicleBody().getID().getIndexAndSequenceNumber());
+        try w.value(c.base.getConstraintPriority());
+        try w.value(c.base.getNumVelocityStepsOverride());
+        try w.value(c.base.getNumPositionStepsOverride());
+        try w.value(c.base.getUserData());
+        w.end();
+
+        for (c.getWheels(), 0..) |wheel, index| {
+            const item: u32 = @intCast(index);
+            try w.begin(.vehicle_wheel, h, item);
+            try w.value(wheel.getAngularVelocity());
+            try w.value(wheel.getRotationAngle());
+            try w.value(wheel.getSteerAngle());
+            try w.boolean(wheel.hasContact());
+            try w.value(wheel.getContactBodyID().getIndexAndSequenceNumber());
+            try w.value(wheel.getContactSubShapeID().getValue());
+            try w.value(wheel.getSuspensionLength());
+            try w.boolean(wheel.hasHitHardPoint());
+            try w.value(wheel.getSuspensionLambda());
+            try w.value(wheel.getLongitudinalLambda());
+            try w.value(wheel.getLateralLambda());
+            w.end();
+
+            if (wheel.hasContact()) {
+                try w.begin(.vehicle_wheel_contact, h, item);
+                try w.rvec3(wheel.getContactPosition());
+                try w.vec3(wheel.getContactPointVelocity());
+                try w.vec3(wheel.getContactNormal());
+                try w.vec3(wheel.getContactLongitudinal());
+                try w.vec3(wheel.getContactLateral());
+                w.end();
+            }
+
+            const basis = c.getWheelLocalBasis(wheel);
+            try w.begin(.vehicle_wheel_transform, h, item);
+            try w.vec3(basis.forward);
+            try w.vec3(basis.up);
+            try w.vec3(basis.right);
+            try w.mat44(c.getWheelLocalTransform(item, Vec3.axisY(), Vec3.axisX()));
+            try w.rmat44(c.getWheelWorldTransform(item, Vec3.axisY(), Vec3.axisX()));
+            w.end();
+
+            if (v.controller == .tracked) {
+                try TrackedVehicleSlot.writeWheelState(world, w, h, item, wheel);
+            } else {
+                const wv = zolt.virtual.downcast(WheelWV, wheel);
+                try w.begin(.vehicle_wheel_wv, h, item);
+                try w.value(wv.longitudinal_slip);
+                try w.value(wv.lateral_slip);
+                try w.value(wv.combined_longitudinal_friction);
+                try w.value(wv.combined_lateral_friction);
+                try w.value(wv.brake_impulse);
+                w.end();
+            }
+        }
+
+        for (c.getAntiRollBars(), 0..) |bar, b| {
+            try w.begin(.vehicle_anti_roll_bar, h, @intCast(b));
+            try w.value(bar.left_wheel);
+            try w.value(bar.right_wheel);
+            try w.value(bar.stiffness);
+            w.end();
+        }
+
+        if (v.controller == .tracked) {
+            try TrackedVehicleSlot.writeControllerState(world, w, h, c);
+            return;
+        }
+
+        const controller = zolt.virtual.downcast(WheeledVehicleController, c.getController());
+        try writeEngineState(w, h, controller.getEngine());
+        try writeTransmissionState(w, h, controller.getTransmission());
+        try w.begin(.vehicle_wheeled, h, 0);
+        try w.value(controller.getForwardInput());
+        try w.value(controller.getRightInput());
+        try w.value(controller.getBrakeInput());
+        try w.value(controller.getHandBrakeInput());
+        try w.value(controller.getDifferentialLimitedSlipRatio());
+        try w.value(controller.getWheelSpeedAtClutch());
+        w.end();
+
+        for (controller.getDifferentials(), 0..) |*d, index| {
+            const left_angular_velocity: f32 = if (d.left_wheel != -1) c.getWheel(@intCast(d.left_wheel)).getAngularVelocity() else 0.0;
+            const right_angular_velocity: f32 = if (d.right_wheel != -1) c.getWheel(@intCast(d.right_wheel)).getAngularVelocity() else 0.0;
+            const ratio = d.calculateTorqueRatio(left_angular_velocity, right_angular_velocity);
+            try w.begin(.vehicle_differential, h, @intCast(index));
+            try w.value(d.left_wheel);
+            try w.value(d.right_wheel);
+            try w.value(d.differential_ratio);
+            try w.value(d.left_right_split);
+            try w.value(d.limited_slip_ratio);
+            try w.value(d.engine_torque_ratio);
+            try w.value(ratio.left);
+            try w.value(ratio.right);
+            w.end();
+        }
+
+        if (v.controller == .motorcycle)
+            try MotorcycleSlot.writeControllerState(world, w, h, c);
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder }; // Vehicles have no character state
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    /// ~SimWorld of the .cpp: remove the vehicles that are in the system, release them, free the storage
+    fn destroyAll(world: *ZoltWorld) void {
+        const allocator = world.allocator;
+        const storage = &world.phase7.vehicles;
+        for (storage.vehicles.items) |v| {
+            if (v.added) {
+                const c = v.get();
+                world.system.removeStepListener(c.stepListener());
+                world.system.removeConstraint(&c.base);
+            }
+            v.destroy(allocator);
+        }
+        storage.vehicles.deinit(allocator);
+        storage.* = .{};
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The settings round trips (SimVehicleSettingsPart of the .cpp)
+
+    /// SaveBinaryState of `object` into `out`
+    fn saveInto(allocator: Allocator, object: anytype, out: *std.ArrayList(u8)) !void {
+        var data: std.Io.Writer.Allocating = .init(allocator);
+        defer data.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&data.writer);
+        object.saveBinaryState(wrapper.streamOut());
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        out.clearRetainingCapacity();
+        try out.appendSlice(allocator, data.written());
+    }
+
+    /// SimReadCompletely: true when the stream was read without error and completely (the stream sets EOF only on a
+    /// read past the end: one more byte is read, which must fail at the end)
+    fn readCompletely(wrapper: *zolt.StreamInWrapper) bool {
+        const read = !wrapper.isFailed();
+        var extra: u8 = 0;
+        wrapper.streamIn().read(&extra);
+        return read and wrapper.isEOF();
+    }
+
+    /// The stream of SimRestoreBinaryState (initialized in place: the wrapper points to the reader)
+    const RestoreStream = struct {
+        reader: std.Io.Reader,
+        wrapper: zolt.StreamInWrapper,
+
+        fn init(self: *RestoreStream, bytes: []const u8) void {
+            self.reader = .fixed(bytes);
+            self.wrapper = .init(&self.reader);
+        }
+
+        fn stream(self: *RestoreStream) zolt.StreamIn {
+            return self.wrapper.streamIn();
+        }
+
+        /// True when every byte was read (SimReadCompletely)
+        fn completely(self: *RestoreStream) bool {
+            return readCompletely(&self.wrapper);
+        }
+    };
+
+    /// The bytes of a part of vehicle description `index` (jolt_sim_vehicle_settings_part): without `restore_from` the
+    /// SaveBinaryState bytes of the part as `create` makes it, with it a default object of the part's class restores the
+    /// bytes (every byte read) and is saved again. False: the part does not exist (an item out of range, a part of another
+    /// controller kind, the restore of `settings`: Jolt's VehicleConstraintSettings::RestoreBinaryState dereferences null
+    /// wheel settings, CharacterVehicleArchitecture E6) or the restore failed.
+    fn settingsPart(allocator: Allocator, scene: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const v = &scene.vehicles[index];
+        out.clearRetainingCapacity();
+        switch (part) {
+            .settings => {
+                if (item != 0 or restore_from != null)
+                    return false;
+                var s = try makeVehicleSettings(allocator, scene, v);
+                defer s.deinit();
+                try saveInto(allocator, s.get().?, out);
+            },
+            .settings_without_wheels => {
+                if (item != 0)
+                    return false;
+                if (restore_from) |bytes| {
+                    // The RTTI hash, then VehicleConstraintSettings::RestoreBinaryState (the controller from its hash)
+                    var reader: std.Io.Reader = .fixed(bytes);
+                    var wrapper = zolt.StreamInWrapper.init(&reader);
+                    var result = try ConstraintSettings.restoreFromBinaryState(allocator, wrapper.streamIn());
+                    defer result.deinit();
+                    if (result.hasError() or !readCompletely(&wrapper))
+                        return false;
+                    try saveInto(allocator, result.get().get().?, out);
+                } else {
+                    var s = try makeVehicleSettings(allocator, scene, v);
+                    defer s.deinit();
+                    const vs = zolt.virtual.downcast(VehicleConstraintSettings, s.get().?);
+                    for (vs.wheels.items) |*w| w.deinit();
+                    vs.wheels.clearRetainingCapacity();
+                    try saveInto(allocator, s.get().?, out);
+                }
+            },
+            .controller => {
+                if (item != 0)
+                    return false;
+                var s = Ref(VehicleControllerSettings).init(if (restore_from == null)
+                    try makeControllerSettings(allocator, scene, v)
+                else switch (try controllerKind(v)) {
+                    .wheeled => &(try WheeledVehicleControllerSettings.create(allocator)).base,
+                    .tracked => try TrackedVehicleSlot.makeControllerSettings(allocator, scene, &SimVehicle.defaults(.tracked)),
+                    .motorcycle => try MotorcycleSlot.makeControllerSettings(allocator, scene, &SimVehicle.defaults(.motorcycle)),
+                });
+                defer s.deinit();
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.get().?.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                }
+                try saveInto(allocator, s.get().?, out);
+            },
+            .wheel => {
+                if (item >= v.num_wheels)
+                    return false;
+                const w = &scene.vehicle_wheels[v.first_wheel + item];
+                var s = Ref(WheelSettings).init(if (restore_from == null)
+                    try makeWheelSettings(allocator, scene, w)
+                else if (w.kind == @intFromEnum(VehicleWheelKind.wv))
+                    &(try WheelSettingsWV.create(allocator)).base
+                else
+                    try TrackedVehicleSlot.makeWheelSettings(allocator, scene, &SimVehicleWheel.defaults(.tv)));
+                defer s.deinit();
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.get().?.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                }
+                try saveInto(allocator, s.get().?, out);
+            },
+            .engine => {
+                if (item != 0)
+                    return false;
+                var s = try VehicleEngineSettings.init(allocator);
+                defer s.deinit(allocator);
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.restoreBinaryState(allocator, in.stream());
+                    if (!in.completely())
+                        return false;
+                } else try fillEngine(allocator, scene, &v.engine, &s);
+                try saveInto(allocator, &s, out);
+            },
+            .transmission => {
+                if (item != 0)
+                    return false;
+                var s = try VehicleTransmissionSettings.init(allocator);
+                defer s.deinit(allocator);
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.restoreBinaryState(allocator, in.stream());
+                    if (!in.completely())
+                        return false;
+                } else try fillTransmission(allocator, scene, &v.transmission, &s);
+                try saveInto(allocator, &s, out);
+            },
+            .track => {
+                if (v.controller != @intFromEnum(VehicleControllerKind.tracked) or item >= 2)
+                    return false;
+                var s: VehicleTrackSettings = .{}; // mDrivenWheel: 0 (uninitialized in Jolt)
+                defer s.deinit(allocator);
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.restoreBinaryState(allocator, in.stream());
+                    if (!in.completely())
+                        return false;
+                } else try fillTrack(allocator, scene, &v.tracks[item], &s);
+                try saveInto(allocator, &s, out);
+            },
+            .differential => {
+                if (v.controller == @intFromEnum(VehicleControllerKind.tracked) or item >= v.num_differentials)
+                    return false;
+                var s: VehicleDifferentialSettings = .{};
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    s.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                } else s = fillDifferential(&scene.vehicle_differentials[v.first_differential + item]);
+                try saveInto(allocator, &s, out);
+            },
+            .anti_roll_bar => {
+                if (item >= v.num_anti_roll_bars)
+                    return false;
+                var s: VehicleAntiRollBar = .{};
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    s.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                } else s = fillAntiRollBar(&scene.vehicle_anti_roll_bars[v.first_anti_roll_bar + item]);
+                try saveInto(allocator, &s, out);
+            },
+        }
+        return true;
+    }
+};
 
 // ---- SLOT tracked_vehicle: TrackedVehicleController, WheelSettingsTV (Phase7OpRange.vehicle_tracked 570..579,
 // Blocker.tracked_vehicles) ----

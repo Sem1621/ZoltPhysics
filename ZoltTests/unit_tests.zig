@@ -102,4 +102,5 @@ test {
     _ = @import("Physics/SwingTwistConstraintTests.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
+    _ = @import("Physics/WheeledVehicleTests.zig");
 }
