@@ -2767,6 +2767,15 @@ pub const scenes = [_]SceneEntry{
     // (append the CharacterVirtual scenes here)
     // ---- Ragdoll ----
     .{ .name = "ragdoll_ops", .build = buildRagdollOps, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 10 } },
+    .{ .name = "ragdoll_pile", .build = buildRagdollPile, .blocked_by = .ragdolls, .sweep_stride = 25, .expect = .{ .contacts = true, .ccd_hits = true, .active_constraints = 176 } },
+    .{ .name = "ragdoll_chain_splitter", .build = buildRagdollChainSplitter, .blocked_by = .ragdolls, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .active_constraints = 95 } },
+    .{ .name = "ragdoll_motors_animation", .build = buildRagdollMotorsAnimation, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 44 } },
+    .{ .name = "ragdoll_kinematic", .build = buildRagdollKinematic, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .sleeping = true, .active_constraints = 22 } },
+    .{ .name = "ragdoll_sleep_wake", .build = buildRagdollSleepWake, .blocked_by = .ragdolls, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .update_activations = 1, .active_constraints = 22 } },
+    .{ .name = "ragdoll_collision_groups", .build = buildRagdollCollisionGroups, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 66 } },
+    .{ .name = "ragdoll_save_restore", .build = buildRagdollSaveRestore, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 22 } },
+    .{ .name = "ragdoll_far_from_origin", .build = buildRagdollFarFromOrigin, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .active_constraints = 33 } },
+    .{ .name = "ragdoll_add_activation", .build = buildRagdollAddActivation, .blocked_by = .ragdolls, .sweep_stride = 20, .expect = .{ .contacts = true, .sleeping = true, .update_activations = 1, .active_constraints = 45 } },
     // (append the Ragdoll scenes here)
     // ---- Vehicles ----
     .{ .name = "vehicle_wheeled_ops", .build = buildVehicleWheeledOps, .blocked_by = .wheeled_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
@@ -12788,6 +12797,605 @@ fn buildRagdollOps(b: *SceneBuilder) Allocator.Error!void {
     try b.objectOp(.ragdoll_drive_to_pose_using_kinematics_matrices, rag3, .{ .i = &.{ bent_more, 0, 0, 1 }, .f = &.{b.delta_time} });
     b.at(60);
     try b.objectOp(.ragdoll_drive_to_pose_using_motors, rag3, .{ .i = &.{bind} });
+}
+
+/// The humanoid of the Ragdoll scenes below: the 12 parts of `addRagdoll` (RagdollShapes, a small gap at every joint)
+/// on a skeleton of 12 joints (the joint of a part is its body: the body transforms are the joint matrices), swing twists
+/// at the lower back, the chest, the neck (cone swing), the shoulders (cone swing) and the hips (pyramid swing), hinges at
+/// the elbows and the knees (DriveToPoseUsingMotors drives both classes)
+const Humanoid = struct {
+    const num_joints = 12;
+    /// The parent of each joint (parents before children): pelvis, spine, chest, head, upper arms, lower arms, upper
+    /// legs, lower legs (left before right)
+    const parents = [num_joints]i32{ -1, 0, 1, 2, 2, 2, 4, 5, 0, 0, 8, 9 };
+    /// The position of each part relative to the pelvis, upright (`addRagdoll`'s offsets)
+    const offsets = [num_joints][3]f32{
+        .{ 0, 0, 0 },         .{ 0, 0.25, 0 },     .{ 0, 0.52, 0 },      .{ 0, 0.8, 0 },
+        .{ -0.3, 0.48, 0 },   .{ 0.3, 0.48, 0 },   .{ -0.3, 0.16, 0 },   .{ 0.3, 0.16, 0 },
+        .{ -0.09, -0.33, 0 }, .{ 0.09, -0.33, 0 }, .{ -0.09, -0.76, 0 }, .{ 0.09, -0.76, 0 },
+    };
+    const lower_arm_left = 6;
+    const lower_arm_right = 7;
+
+    fn shape(shapes: RagdollShapes, joint: usize) u32 {
+        return switch (joint) {
+            0 => shapes.pelvis,
+            1 => shapes.spine,
+            2 => shapes.chest,
+            3 => shapes.head,
+            4, 5 => shapes.upper_arm,
+            6, 7 => shapes.lower_arm,
+            8, 9 => shapes.upper_leg,
+            else => shapes.lower_leg,
+        };
+    }
+
+    /// The local translation of a joint in the bind pose (relative to its parent; the root's is 0)
+    fn bindTranslation(joint: usize) [3]f32 {
+        const parent = parents[joint];
+        if (parent < 0) return .{ 0, 0, 0 };
+        const p = offsets[@intCast(parent)];
+        const o = offsets[joint];
+        return .{ o[0] - p[0], o[1] - p[1], o[2] - p[2] };
+    }
+
+    /// A pose of local joint states: the bind translations, the rotation of the root and of every other joint
+    fn pose(rotations: [num_joints][4]f32) [num_joints][7]f32 {
+        var joints: [num_joints][7]f32 = undefined;
+        for (&joints, rotations, 0..) |*j, q, index| {
+            const t = bindTranslation(index);
+            j.* = .{ t[0], t[1], t[2], q[0], q[1], q[2], q[3] };
+        }
+        return joints;
+    }
+
+    /// The model space joint matrices of the bind pose turned by `rotation` around the pelvis (the `_matrices` ragdoll
+    /// operations take them as rotation and translation)
+    fn modelPose(rotation: [4]f32) [num_joints][7]f32 {
+        var joints: [num_joints][7]f32 = undefined;
+        for (&joints, offsets) |*j, o| {
+            const t = quatRotate(rotation, o);
+            j.* = .{ t[0], t[1], t[2], rotation[0], rotation[1], rotation[2], rotation[3] };
+        }
+        return joints;
+    }
+};
+
+const HumanoidOptions = struct {
+    /// Lying on its back (a quarter turn around X, `ragdollPlace`) instead of upright
+    lying: bool = false,
+    /// SimBody.motion_type of the pelvis and of the other parts (a static part is in the NON_MOVING layer)
+    pelvis_motion_type: u32 = 2,
+    motion_type: u32 = 2,
+    /// SimBody.motion_quality of the parts
+    motion_quality: u32 = 0,
+    /// SimBody.allow_sleeping of the parts (DriveToPoseUsingMotors does not wake a ragdoll up)
+    allow_sleeping: bool = true,
+    /// The motors of the joints: spring FrequencyAndDamping 4 Hz, damping 1, these torque limits (0: Jolt's default
+    /// motor settings, no limits)
+    motor_torque: f32 = 0,
+};
+
+/// The joints of a humanoid with its pelvis at `base` (`out`: the body descriptions of its parts and the constraint
+/// descriptions to their parents), its joint indices from `first` (the ragdoll's skeleton can hold several humanoids)
+fn addHumanoidJoints(b: *SceneBuilder, shapes: RagdollShapes, base: [3]Real, opts: HumanoidOptions, first: i32, out: *[Humanoid.num_joints]SimRagdollJoint) Allocator.Error!void {
+    const turned = opts.lying;
+    const rotation: [4]f32 = if (turned) axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi) else identity_rotation;
+    for (out, 0..) |*joint, j| {
+        const motion_type = if (j == 0) opts.pelvis_motion_type else opts.motion_type;
+        const body_desc = try b.addBodyDesc(.{
+            .position = ragdollPlace(base, Humanoid.offsets[j], turned),
+            .rotation = rotation,
+            .shape = Humanoid.shape(shapes, j),
+            .motion_type = motion_type,
+            .motion_quality = opts.motion_quality,
+            .allow_sleeping = @intFromBool(opts.allow_sleeping),
+            .linear_damping = 0.3,
+            .angular_damping = 0.6,
+            .object_layer = if (motion_type == 0) Layers.non_moving else Layers.moving,
+        });
+        const parent = Humanoid.parents[j];
+        joint.* = .{ .parent = if (parent < 0) -1 else first + parent, .body = body_desc };
+    }
+
+    const up = turnVector(.{ 0, 1, 0 }, turned);
+    const down = turnVector(.{ 0, -1, 0 }, turned);
+    const right = turnVector(.{ 1, 0, 0 }, turned);
+    const forward = turnVector(.{ 0, 0, 1 }, turned);
+    const motor: ?[6]f32 = if (opts.motor_torque > 0) .{ 4, 1, -flt_max, flt_max, -opts.motor_torque, opts.motor_torque } else null;
+    const add = struct {
+        fn swingTwist(bb: *SceneBuilder, origin: [3]Real, t: bool, point: [3]f32, twist: [3]f32, plane: [3]f32, limits: [4]f32, swing_type: u32, friction: f32, m: ?[6]f32) Allocator.Error!u32 {
+            var c = swingTwistDesc(invalid_handle, invalid_handle, ragdollPlace(origin, point, t), twist, plane, limits, swing_type, friction);
+            if (m) |values| {
+                setSwingTwistMotor(&c, false, SpringModeValue.frequency_and_damping, values);
+                setSwingTwistMotor(&c, true, SpringModeValue.frequency_and_damping, values);
+            }
+            return bb.addConstraint(c);
+        }
+        fn hinge(bb: *SceneBuilder, origin: [3]Real, t: bool, point: [3]f32, axis: [3]f32, normal: [3]f32, min: f32, max: f32, m: ?[6]f32) Allocator.Error!u32 {
+            var c = Desc.hinge(invalid_handle, invalid_handle, ragdollPlace(origin, point, t), axis, normal);
+            c.f[12] = min;
+            c.f[13] = max;
+            if (m) |values| Desc.setMotor(&c, 2, 17, SpringModeValue.frequency_and_damping, values);
+            return bb.addConstraint(c);
+        }
+    };
+    out[1].to_parent = try add.swingTwist(b, base, turned, .{ 0, 0.115, 0 }, up, right, .{ 0.3, 0.2, -0.2, 0.2 }, 0, 0, motor);
+    out[2].to_parent = try add.swingTwist(b, base, turned, .{ 0, 0.385, 0 }, up, right, .{ 0.15, 0.1, -0.1, 0.1 }, 0, 0, motor);
+    out[3].to_parent = try add.swingTwist(b, base, turned, .{ 0, 0.67, 0 }, up, right, .{ 0.5, 0.5, -0.4, 0.4 }, 0, 0, motor);
+    for (0..2) |side| {
+        const s: f32 = if (side == 0) -1 else 1;
+        out[4 + side].to_parent = try add.swingTwist(b, base, turned, .{ 0.21 * s, 0.6, 0 }, down, right, .{ 0.9, 0.6, -0.6, 0.6 }, 0, 0.3, motor);
+        out[6 + side].to_parent = try add.hinge(b, base, turned, .{ 0.3 * s, 0.32, 0 }, right, down, -1.8, 0.1, motor);
+        out[8 + side].to_parent = try add.swingTwist(b, base, turned, .{ 0.09 * s, -0.115, 0 }, down, forward, .{ 0.7, 0.4, -0.3, 0.3 }, 1, 0, motor);
+        out[10 + side].to_parent = try add.hinge(b, base, turned, .{ 0.09 * s, -0.545, 0 }, right, down, -0.1, 1.8, motor);
+    }
+}
+
+/// A ragdoll description of one humanoid with its pelvis at `base`, returns the description index
+fn addHumanoidRagdoll(b: *SceneBuilder, shapes: RagdollShapes, base: [3]Real, opts: HumanoidOptions, desc_value: SimRagdoll) Allocator.Error!u32 {
+    var joints: [Humanoid.num_joints]SimRagdollJoint = undefined;
+    try addHumanoidJoints(b, shapes, base, opts, 0, &joints);
+    return b.addRagdoll(desc_value, &joints, &.{});
+}
+
+/// The keyframe angles of `addAnimationPoses` at phase `p` (0..4, a quarter of the cycle each)
+fn humanoidAnimationKey(joint: usize, p: usize) [4]f32 {
+    const s = [5]f64{ 0, 1, 0, -1, 0 }; // sin of the phase
+    const c = [5]f64{ 1, 0, -1, 0, 1 }; // cos of the phase
+    return switch (joint) {
+        0 => identity_rotation,
+        1 => axisAngle(.{ 0, 0, 1 }, 0.15 * s[p]), // The spine sways
+        2 => axisAngle(.{ 0, 1, 0 }, 0.1 * s[p]), // The chest turns
+        3 => axisAngle(.{ 1, 0, 0 }, 0.2 * c[p]), // The head nods
+        4 => axisAngle(.{ 1, 0, 0 }, 0.8 * s[p]), // The arms swing in opposite phases
+        5 => axisAngle(.{ 1, 0, 0 }, -0.8 * s[p]),
+        6, 7 => axisAngle(.{ 1, 0, 0 }, -0.5 - 0.4 * c[p]), // The elbows bend
+        8 => axisAngle(.{ 1, 0, 0 }, -0.6 * s[p]), // The legs swing against the arms
+        9 => axisAngle(.{ 1, 0, 0 }, 0.6 * s[p]),
+        else => axisAngle(.{ 1, 0, 0 }, 0.4 + 0.3 * c[p]), // The knees bend
+    };
+}
+
+/// A looping SkeletalAnimation of the humanoid skeleton (one second, 5 keyframes per joint, `humanoidAnimationKey`: the
+/// arms and legs swing, the elbows and knees bend, the spine, chest and head sway; the root keeps the bind pose) sampled
+/// at `times` (SkeletalAnimation::Sample: binary search and slerp): the local joint states of each sample as a ragdoll
+/// pose with the root offset `root_offsets[k]` and the root rotation `root_rotation` (Jolt's PoweredRigTest and
+/// KinematicRigTest drive their ragdolls to the samples of an animation, PerformanceTest's RagdollScene drops its
+/// ragdolls in a sampled pose). `out[k]`: the pose indices.
+fn addAnimationPoses(b: *SceneBuilder, root_offsets: []const [3]Real, root_rotation: [4]f32, times: []const f32, out: []u32) Allocator.Error!void {
+    const allocator = b.allocator;
+    var skeleton = zolt.Ref(zolt.Skeleton).init(try zolt.Skeleton.create(allocator));
+    defer skeleton.deinit();
+    var animation = zolt.SkeletalAnimation.init(allocator);
+    defer animation.deinit();
+    const animated_joints = animation.getAnimatedJointsMut();
+    try animated_joints.ensureTotalCapacity(allocator, Humanoid.num_joints);
+    for (0..Humanoid.num_joints) |j| {
+        var name: [16]u8 = undefined;
+        const joint_name = std.fmt.bufPrint(&name, "Joint{d}", .{j}) catch unreachable;
+        _ = try skeleton.get().?.addJointWithParentIndex(joint_name, Humanoid.parents[j]);
+        var animated: zolt.SkeletalAnimation.AnimatedJoint = .{ .joint_name = try allocator.dupe(u8, joint_name) };
+        errdefer animated.deinit(allocator);
+        const t = Humanoid.bindTranslation(j);
+        for (0..5) |p| {
+            const q = humanoidAnimationKey(j, p);
+            try animated.keyframes.append(allocator, .{ .base = .{ .rotation = zolt.Quat.init(q[0], q[1], q[2], q[3]), .translation = zolt.Vec3.init(t[0], t[1], t[2]) }, .time = 0.25 * @as(f32, @floatFromInt(p)) });
+        }
+        animated_joints.appendAssumeCapacity(animated);
+    }
+
+    var pose = zolt.SkeletonPose.init(allocator);
+    defer pose.deinit();
+    try pose.setSkeleton(skeleton.get().?);
+    for (root_offsets, times, out) |root_offset, time, *pose_index| {
+        animation.sample(time, &pose);
+        var joints: [Humanoid.num_joints][7]f32 = undefined;
+        for (&joints, pose.getJoints()) |*j, state| {
+            const t = state.translation;
+            const q = state.rotation;
+            j.* = .{ t.getX(), t.getY(), t.getZ(), q.getX(), q.getY(), q.getZ(), q.getW() };
+        }
+        joints[0] = .{ 0, 0, 0, root_rotation[0], root_rotation[1], root_rotation[2], root_rotation[3] };
+        pose_index.* = try b.addRagdollPose(root_offset, &joints);
+    }
+}
+
+/// PerformanceTest's RagdollScene (Ragdoll / RagdollSinglePile), smaller: 2 x 2 piles of 4 humanoids dropped on a mesh
+/// terrain in the dead pose (a sample of the animation, lying) turned around Y by 2 pi i / 4 per level, each ragdoll
+/// with a group ID of its own (SetGroupID: CreateRagdoll's group ID comes from the description), SetPose +
+/// DriveToPoseUsingMotors + AddToPhysicsSystem. The settings are prepared like the PerformanceTest's (Stabilize, the
+/// tables) plus the constraint priorities and DisableParentChildCollisions of the dead pose; two piles are LinearCast.
+/// The motors hold the dead pose while the ragdolls tumble onto each other and the terrain.
+fn buildRagdollPile(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 100;
+    b.max_contact_constraints = 4096;
+    const terrain = try addMeshTerrain(b, 12, 1.0, false);
+    _ = try b.body(.{ .shape = terrain, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving }, .dont_activate);
+
+    const lying = axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi);
+    var dead: [1]u32 = undefined;
+    try addAnimationPoses(b, &.{.{ 0, 0, 0 }}, lying, &.{0.3}, &dead);
+    const dead_joints = b.floats.items[b.ragdoll_poses.items[dead[0]].data..][0 .. 7 * Humanoid.num_joints];
+    var dead_pose: [Humanoid.num_joints][7]f32 = undefined;
+    for (&dead_pose, 0..) |*j, index| @memcpy(j, dead_joints[7 * index ..][0..7]);
+
+    var descs: [2]u32 = undefined;
+    for (&descs, 0..) |*d, quality|
+        d.* = try addHumanoidRagdoll(b, shapes, .{ 0, 1, 0 }, .{ .motor_torque = 30, .motion_quality = @intCast(quality) }, .{ .stabilize = 1, .calculate_constraint_priorities = 1, .base_priority = 1, .disable_parent_child_collisions = 2, .pose = dead[0], .min_separation_distance = 0.05, .collision_group = 1 });
+
+    const pile_size = 4;
+    const vertical_separation = 0.4;
+    var group_id: u32 = 1;
+    for (0..2) |row| {
+        for (0..2) |col| {
+            const x: f32 = 4.0 * (@as(f32, @floatFromInt(col)) - 0.5);
+            const z: f32 = 4.0 * (@as(f32, @floatFromInt(row)) - 0.5);
+            const start: [3]Real = .{ real(x), real(terrainHeight(x, z) + 0.15), real(z) };
+            for (0..pile_size) |i| {
+                var joints = dead_pose;
+                const turn = quatMul(axisAngle(.{ 0, 1, 0 }, 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / pile_size), lying);
+                joints[0] = .{ 0, vertical_separation * @as(f32, @floatFromInt(i + 1)), 0, turn[0], turn[1], turn[2], turn[3] };
+                const pose = try b.addRagdollPose(start, &joints);
+                const ragdoll = try b.createRagdoll(descs[(row + col) % 2]);
+                try b.objectOp(.ragdoll_set_group_id, ragdoll, .{ .i = &.{group_id} });
+                group_id += 1;
+                try b.objectOp(.ragdoll_set_pose, ragdoll, .{ .i = &.{pose} });
+                try b.objectOp(.ragdoll_drive_to_pose_using_motors, ragdoll, .{ .i = &.{pose} });
+                try b.objectOp(.ragdoll_add_to_physics_system, ragdoll, .{});
+            }
+        }
+    }
+    b.at(60);
+    try b.objectOp(.ragdoll_get_pose_hash, 5, .{});
+    try b.objectOp(.ragdoll_settings_hash, 0, .{ .i = &.{ 1, 1 } });
+}
+
+/// One ragdoll of 8 humanoids lying on their backs in a row, holding hands (additional cone constraints between the
+/// lower arms of neighbours; a skeleton with 8 roots, Stabilize starts a chain at every root, the constraint priorities
+/// over 8 skeletons): one island of 95 constraints and the floor contacts that the LargeIslandSplitter splits, which
+/// settles and falls asleep from the final batch of a split island (the ragdoll is inactive then); AddImpulse wakes it up
+/// again
+fn buildRagdollChainSplitter(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 110;
+    b.max_contact_constraints = 4096;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const count = 8;
+    var joints: [count * Humanoid.num_joints]SimRagdollJoint = undefined;
+    var additional: [count - 1]SimRagdollAdditionalConstraint = undefined;
+    for (0..count) |h| {
+        const base: [3]Real = .{ 0.75 * real(h) - 2.625, 0.2, 0 };
+        try addHumanoidJoints(b, shapes, base, .{ .lying = true }, @intCast(h * Humanoid.num_joints), joints[h * Humanoid.num_joints ..][0..Humanoid.num_joints]);
+        if (h > 0) additional[h - 1] = .{
+            .body1 = @intCast((h - 1) * Humanoid.num_joints + Humanoid.lower_arm_right),
+            .body2 = @intCast(h * Humanoid.num_joints + Humanoid.lower_arm_left),
+            .constraint = try b.addConstraint(Desc.cone(invalid_handle, invalid_handle, .{ base[0] - 0.375, 0.2, 0.16 }, .{ 1, 0, 0 }, 0.4)),
+        };
+    }
+    const desc = try b.addRagdoll(.{ .stabilize = 1, .calculate_constraint_priorities = 1, .base_priority = 5, .disable_parent_child_collisions = 1, .collision_group = 3 }, &joints, &additional);
+    const ragdoll = try b.createRagdoll(desc);
+    try b.objectOp(.ragdoll_add_to_physics_system, ragdoll, .{});
+    b.at(95);
+    try b.expectRagdollActive(ragdoll, false);
+    try b.objectOp(.ragdoll_add_impulse, ragdoll, .{ .f = &.{ 0, 4, 0 } });
+    try b.expectRagdollActive(ragdoll, true);
+}
+
+/// Jolt's PoweredRigTest: humanoids driven by their motors to the samples of the animation every other update, the
+/// motors of the swing twists and the hinges in Position mode: DriveToPoseUsingMotors on a humanoid that stands on the
+/// floor and falls over, the velocity variant (the previous sample, the sample, the time between them) on one lying on
+/// the floor (both never sleep), the motors of one whose kinematic pelvis hangs in the air (its limbs swing below it;
+/// Activate every tenth update: the motors do not wake a ragdoll up), and of one with Jolt's default motor settings (no
+/// torque limits) every fourth update
+fn buildRagdollMotorsAnimation(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 80;
+    _ = try addFloor(b, 20, 0);
+    const prepared: SimRagdoll = .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 1 };
+    const standing = try addHumanoidRagdoll(b, shapes, .{ -2, 1, 0 }, .{ .allow_sleeping = false, .motor_torque = 25 }, prepared);
+    const lying = try addHumanoidRagdoll(b, shapes, .{ 0, 0.2, 0 }, .{ .lying = true, .allow_sleeping = false, .motor_torque = 25 }, prepared);
+    const puppet = try addHumanoidRagdoll(b, shapes, .{ 2, 2, 0 }, .{ .pelvis_motion_type = 1, .motor_torque = 15 }, prepared);
+    const default_motors = try addHumanoidRagdoll(b, shapes, .{ 4, 1, 0 }, .{}, .{ .disable_parent_child_collisions = 1 });
+
+    const num_samples = 40;
+    var times: [num_samples]f32 = undefined;
+    for (&times, 0..) |*t, k| t.* = 2 * b.delta_time * @as(f32, @floatFromInt(k));
+    var poses: [num_samples]u32 = undefined;
+    try addAnimationPoses(b, &([_][3]Real{.{ 0, 0, 0 }} ** num_samples), identity_rotation, &times, &poses);
+
+    var ragdolls: [4]u32 = undefined;
+    for (&ragdolls, [_]u32{ standing, lying, puppet, default_motors }) |*r, d| {
+        r.* = try b.createRagdoll(d);
+        try b.objectOp(.ragdoll_add_to_physics_system, r.*, .{});
+    }
+    for (poses, 0..) |pose, k| {
+        b.at(@intCast(2 * k));
+        try b.objectOp(.ragdoll_drive_to_pose_using_motors, ragdolls[0], .{ .i = &.{pose} });
+        try b.objectOp(.ragdoll_drive_to_pose_using_motors_velocity, ragdolls[1], .{ .i = &.{ pose, poses[if (k == 0) 0 else k - 1] }, .f = &.{2 * b.delta_time} });
+        try b.objectOp(.ragdoll_drive_to_pose_using_motors, ragdolls[2], .{ .i = &.{pose} });
+        if (k % 5 == 0) try b.objectOp(.ragdoll_activate, ragdolls[2], .{ .i = &.{ 0, 0, 0, @intFromBool(k % 10 == 0) } });
+        if (k % 2 == 0) try b.objectOp(.ragdoll_drive_to_pose_using_motors, ragdolls[3], .{ .i = &.{pose} });
+    }
+}
+
+/// Jolt's KinematicRigTest: a kinematic humanoid walks through a heap of boxes, DriveToPoseUsingKinematics to the
+/// samples of the animation with a root offset that moves every update (MoveKinematic: it pushes the boxes) and SetPose
+/// back to its start; a dynamic humanoid held in the air by DriveToPoseUsingKinematics of model space joint matrices that
+/// turn around Y, then released (it falls); a humanoid with a static pelvis whose limbs hang (Stabilize starts its chains
+/// below the static part) hit by a falling box
+fn buildRagdollKinematic(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 80;
+    _ = try addFloor(b, 20, 0);
+    const kinematic = try addHumanoidRagdoll(b, shapes, .{ -3, 0.97, -1 }, .{ .pelvis_motion_type = 1, .motion_type = 1 }, .{ .stabilize = 1, .disable_parent_child_collisions = 1 });
+    const held = try addHumanoidRagdoll(b, shapes, .{ 2, 2, 1 }, .{}, .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 2 });
+    const hanging = try addHumanoidRagdoll(b, shapes, .{ -1, 1.7, 2 }, .{ .pelvis_motion_type = 0 }, .{ .stabilize = 1, .calculate_constraint_priorities = 1, .disable_parent_child_collisions = 1, .collision_group = 3 });
+    for (0..3) |i| {
+        for (0..3) |k| {
+            const position: [3]Real = .{ -1.4 + 0.45 * real(i), 0.2 + 0.41 * real(k), -1 + 0.1 * real(i) };
+            _ = try b.body(.{ .position = position, .shape = box, .object_layer = Layers.moving }, .activate);
+        }
+    }
+
+    const num_walk = 60;
+    var root_offsets: [num_walk][3]Real = undefined;
+    var times: [num_walk]f32 = undefined;
+    for (&root_offsets, &times, 0..) |*r, *t, k| {
+        r.* = .{ -3 + 0.05 * real(k), 0.97, -1 };
+        t.* = b.delta_time * @as(f32, @floatFromInt(k));
+    }
+    var walk: [num_walk]u32 = undefined;
+    try addAnimationPoses(b, &root_offsets, identity_rotation, &times, &walk);
+    const num_turns = 20;
+    var turns: [num_turns]u32 = undefined;
+    for (&turns, 0..) |*t, k|
+        t.* = try b.addRagdollPose(.{ 2, 2, 1 }, &Humanoid.modelPose(axisAngle(.{ 0, 1, 0 }, 0.05 * @as(f64, @floatFromInt(k)))));
+
+    const kinematic_ragdoll = try b.createRagdoll(kinematic);
+    try b.objectOp(.ragdoll_add_to_physics_system, kinematic_ragdoll, .{});
+    const held_ragdoll = try b.createRagdoll(held);
+    try b.objectOp(.ragdoll_add_to_physics_system, held_ragdoll, .{ .i = &no_lock });
+    const hanging_ragdoll = try b.createRagdoll(hanging);
+    try b.objectOp(.ragdoll_add_to_physics_system, hanging_ragdoll, .{});
+    for (0..b.num_updates) |u| {
+        b.at(@intCast(u));
+        const step = if (u < 40) u else u - 40;
+        try b.objectOp(.ragdoll_drive_to_pose_using_kinematics, kinematic_ragdoll, .{ .i = &.{ walk[step], 0, 0, @intFromBool(u % 2 == 1) }, .f = &.{b.delta_time} });
+        if (u < num_turns)
+            try b.objectOp(.ragdoll_drive_to_pose_using_kinematics_matrices, held_ragdoll, .{ .i = &.{ turns[u], 0, 0, @intFromBool(u % 3 == 0) }, .f = &.{b.delta_time} });
+        if (u == 30) {
+            _ = try b.body(.{ .position = .{ -1.3, 2.8, 2 }, .shape = box, .object_layer = Layers.moving }, .activate);
+            try b.objectOp(.ragdoll_get_pose_hash, kinematic_ragdoll, .{});
+        }
+        if (u == 40) try b.objectOp(.ragdoll_set_pose, kinematic_ragdoll, .{ .i = &.{walk[0]} }); // Back to the start
+    }
+}
+
+/// Ragdolls that fall asleep and are woken up: three humanoids lying on the floor (added with Activate with and without
+/// locking, and DontActivate: that one sleeps from the start), all inactive at update 60; one woken by Activate, one by
+/// AddImpulse without locking, one by a box that falls on it (activated from inside an update by the contact, its other
+/// bodies by its constraints); a zero SetLinearVelocity does not wake a ragdoll; all asleep again at the end
+fn buildRagdollSleepWake(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 160;
+    b.settings.time_before_sleep = 0.25;
+    _ = try addFloor(b, 20, 0);
+    const prepared: SimRagdoll = .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 4 };
+    var ragdolls: [3]u32 = undefined;
+    for (&ragdolls, 0..) |*r, i| {
+        r.* = try b.createRagdoll(try addHumanoidRagdoll(b, shapes, .{ 1.5 * real(i) - 1.5, if (i == 2) 0.1 else 0.25, 0 }, .{ .lying = true }, prepared));
+        switch (i) {
+            0 => try b.objectOp(.ragdoll_add_to_physics_system, r.*, .{}),
+            1 => try b.objectOp(.ragdoll_add_to_physics_system, r.*, .{ .i = &no_lock }),
+            else => try b.objectOp(.ragdoll_add_to_physics_system, r.*, .{ .activation = .dont_activate }),
+        }
+    }
+    try b.expectRagdollActive(ragdolls[2], false);
+    b.at(60);
+    for (ragdolls) |r| try b.expectRagdollActive(r, false);
+    try b.objectOp(.ragdoll_set_linear_velocity, ragdolls[0], .{ .f = &.{ 0, 0, 0 } });
+    try b.expectRagdollActive(ragdolls[0], false);
+    try b.objectOp(.ragdoll_activate, ragdolls[0], .{});
+    try b.expectRagdollActive(ragdolls[0], true);
+    try b.objectOp(.ragdoll_add_impulse, ragdolls[1], .{ .f = &.{ 0, 2, 0.5 }, .i = &no_lock });
+    try b.expectRagdollActive(ragdolls[1], true);
+    _ = try b.body(.{ .position = .{ 1.5, 1.2, 0.5 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    try b.objectOp(.ragdoll_is_active, ragdolls[2], .{ .i = &no_lock });
+    b.at(95);
+    try b.expectRagdollActive(ragdolls[2], true);
+    b.at(155);
+    for (ragdolls) |r| try b.expectRagdollActive(r, false);
+}
+
+/// Collision groups: humanoids dropped onto each other. Two with the group filter of DisableParentChildCollisions (of a
+/// pose, with a min separation) and the same group ID: the part pairs of the filter (parent and child sub group IDs) do
+/// not collide across the ragdolls either, until SetGroupID gives the upper one another group (without locking); two of
+/// the same description with different group IDs from the start; two without group filter (no
+/// DisableParentChildCollisions) in the same group: all their parts collide
+fn buildRagdollCollisionGroups(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 90;
+    _ = try addFloor(b, 20, 0);
+    const bind = try b.addRagdollPose(.{ 0, 0, 0 }, &Humanoid.pose([_][4]f32{identity_rotation} ** Humanoid.num_joints));
+    const filtered = try addHumanoidRagdoll(b, shapes, .{ 0, 1, 0 }, .{}, .{ .disable_parent_child_collisions = 2, .pose = bind, .min_separation_distance = 0.08, .collision_group = 1 });
+    const unfiltered = try addHumanoidRagdoll(b, shapes, .{ -3, 1, 0 }, .{}, .{ .collision_group = 1 });
+    const upper = try addHumanoidRagdoll(b, shapes, .{ 0.1, 2.5, 0.05 }, .{ .lying = true }, .{ .disable_parent_child_collisions = 2, .pose = bind, .min_separation_distance = 0.08, .collision_group = 1 });
+    const upper_unfiltered = try addHumanoidRagdoll(b, shapes, .{ -2.9, 2.5, 0.05 }, .{ .lying = true }, .{ .collision_group = 1 });
+
+    // The same group: the filter
+    const rag0 = try b.createRagdoll(filtered);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag0, .{});
+    const rag1 = try b.createRagdoll(upper);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag1, .{});
+    // Different groups
+    const rag2 = try b.createRagdoll(filtered);
+    try b.objectOp(.ragdoll_set_group_id, rag2, .{ .i = &.{2} });
+    const shifted = try b.addRagdollPose(.{ 3, 1, 0 }, &Humanoid.pose([_][4]f32{identity_rotation} ** Humanoid.num_joints));
+    try b.objectOp(.ragdoll_set_pose, rag2, .{ .i = &.{shifted} });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag2, .{});
+    const rag3 = try b.createRagdoll(upper);
+    try b.objectOp(.ragdoll_set_group_id, rag3, .{ .i = &.{ 3, 0, 0, 1 } });
+    const lying_pose = try b.addRagdollPose(.{ 3.1, 2.5, 0.05 }, &Humanoid.pose([_][4]f32{axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi)} ++ [_][4]f32{identity_rotation} ** (Humanoid.num_joints - 1)));
+    try b.objectOp(.ragdoll_set_pose, rag3, .{ .i = &.{ lying_pose, 0, 0, 1 } });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag3, .{});
+    // No group filter
+    const rag4 = try b.createRagdoll(unfiltered);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag4, .{});
+    const rag5 = try b.createRagdoll(upper_unfiltered);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag5, .{ .i = &no_lock });
+    b.at(50);
+    try b.objectOp(.ragdoll_set_group_id, rag1, .{ .i = &.{ 7, 0, 0, 1 } });
+    try b.objectOp(.ragdoll_add_linear_velocity, rag1, .{ .f = &.{ 0, -1, 0 } });
+}
+
+/// Cross save / restore with ragdolls (their bodies and constraints are in the PhysicsSystem state, the motor states and
+/// targets in the constraint states): a humanoid driven by its motors (velocity variant), a kinematic one driven by
+/// kinematics, one falling; a full snapshot restored after more motor targets, kinematic moves and impulses; a snapshot
+/// of the bodies and constraints only, restored twice in a row
+fn buildRagdollSaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 80;
+    _ = try addFloor(b, 20, 0);
+    const motors = try addHumanoidRagdoll(b, shapes, .{ -2, 0.2, 0 }, .{ .lying = true, .motor_torque = 20 }, .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 1 });
+    const kinematic = try addHumanoidRagdoll(b, shapes, .{ 0, 1, 0 }, .{ .pelvis_motion_type = 1, .motion_type = 1 }, .{ .disable_parent_child_collisions = 1, .collision_group = 2 });
+    const falling = try addHumanoidRagdoll(b, shapes, .{ 0.2, 2.5, 0.3 }, .{ .lying = true }, .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 3 });
+
+    const num_samples = 70;
+    var root_offsets: [num_samples][3]Real = undefined;
+    var times: [num_samples]f32 = undefined;
+    for (&root_offsets, &times, 0..) |*r, *t, k| {
+        r.* = .{ 0.02 * real(k), 1, 0 };
+        t.* = b.delta_time * @as(f32, @floatFromInt(k));
+    }
+    var poses: [num_samples]u32 = undefined;
+    try addAnimationPoses(b, &root_offsets, identity_rotation, &times, &poses);
+
+    const rag0 = try b.createRagdoll(motors);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag0, .{});
+    const rag1 = try b.createRagdoll(kinematic);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag1, .{});
+    const rag2 = try b.createRagdoll(falling);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag2, .{});
+    for (0..num_samples) |k| {
+        b.at(@intCast(k));
+        try b.objectOp(.ragdoll_drive_to_pose_using_motors_velocity, rag0, .{ .i = &.{ poses[k], poses[if (k == 0) 0 else k - 1] }, .f = &.{b.delta_time} });
+        try b.objectOp(.ragdoll_drive_to_pose_using_kinematics, rag1, .{ .i = &.{poses[k]}, .f = &.{b.delta_time} });
+        switch (k) {
+            10 => try b.sysOp(.snapshot, .{ .index = 0 }),
+            20 => try b.objectOp(.ragdoll_add_impulse, rag2, .{ .f = &.{ 1, 3, 0 } }),
+            30 => try b.sysOp(.restore_cross, .{ .index = 0 }), // Back to update 10
+            40 => try b.sysOp(.snapshot, .{ .index = 1, .i = &.{2 | 8} }), // Bodies and constraints
+            45 => try b.objectOp(.ragdoll_set_linear_and_angular_velocity, rag2, .{ .f = &.{ 0, 2, 0, 1, 0, 0 } }),
+            55 => {
+                try b.sysOp(.restore_cross, .{ .index = 1 });
+                try b.sysOp(.restore_cross, .{ .index = 1 }); // Twice in a row
+            },
+            else => {},
+        }
+    }
+}
+
+/// Ragdolls far from the origin (Real precision: the root offsets and the joint matrices of the poses): a humanoid that
+/// falls over, one driven by its motors to the animation, a kinematic one driven by kinematics, one placed with SetPose
+/// of model space matrices
+fn buildRagdollFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    b.num_updates = 70;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 10, 1, 10 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving }, .dont_activate);
+    const plain = try addHumanoidRagdoll(b, shapes, .{ o[0] - 2, o[1] + 1, o[2] }, .{}, .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 1 });
+    const motors = try addHumanoidRagdoll(b, shapes, .{ o[0], o[1] + 0.2, o[2] }, .{ .lying = true, .motor_torque = 25 }, .{ .stabilize = 1, .disable_parent_child_collisions = 1, .collision_group = 2 });
+    const kinematic = try addHumanoidRagdoll(b, shapes, .{ o[0] + 2, o[1] + 1, o[2] }, .{ .pelvis_motion_type = 1, .motion_type = 1 }, .{ .disable_parent_child_collisions = 1, .collision_group = 3 });
+
+    const num_samples = 60;
+    var root_offsets: [num_samples][3]Real = undefined;
+    var times: [num_samples]f32 = undefined;
+    for (&root_offsets, &times, 0..) |*r, *t, k| {
+        r.* = .{ o[0] + 2, o[1] + 1, o[2] + 0.03 * real(k) };
+        t.* = b.delta_time * @as(f32, @floatFromInt(k));
+    }
+    var poses: [num_samples]u32 = undefined;
+    try addAnimationPoses(b, &root_offsets, identity_rotation, &times, &poses);
+    const placed = try b.addRagdollPose(.{ o[0] - 4, o[1] + 1.5, o[2] + 1 }, &Humanoid.modelPose(axisAngle(.{ 0, 0, 1 }, 0.4)));
+
+    const rag0 = try b.createRagdoll(plain);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag0, .{});
+    const rag1 = try b.createRagdoll(motors);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag1, .{});
+    const rag2 = try b.createRagdoll(kinematic);
+    try b.objectOp(.ragdoll_add_to_physics_system, rag2, .{});
+    const rag3 = try b.createRagdoll(plain);
+    try b.objectOp(.ragdoll_set_pose_matrices, rag3, .{ .i = &.{placed} });
+    try b.objectOp(.ragdoll_add_to_physics_system, rag3, .{});
+    for (0..num_samples) |k| {
+        b.at(@intCast(k));
+        if (k % 3 == 0) try b.objectOp(.ragdoll_drive_to_pose_using_motors, rag1, .{ .i = &.{poses[k]} });
+        try b.objectOp(.ragdoll_drive_to_pose_using_kinematics, rag2, .{ .i = &.{poses[k]}, .f = &.{b.delta_time} });
+        if (k % 20 == 10) try b.objectOp(.ragdoll_get_pose_hash, rag0, .{});
+    }
+}
+
+/// Ragdoll::AddToPhysicsSystem in every combination of EActivation and inLockBodies: Zolt adds the constraints between
+/// AddBodiesPrepare and AddBodiesFinalize (Jolt after AddBodiesFinalize), the state after the call must be Jolt's. Four
+/// humanoids (two descriptions) added Activate / DontActivate with and without locking into a system that already has a
+/// constraint and a sleeping body (the inactive ones float in the air), a constraint created after them; two removed and
+/// added again in the other combinations (the constraint indices change); the inactive ones woken by a falling box and
+/// by Activate; one removed and destroyed
+fn buildRagdollAddActivation(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try RagdollShapes.add(b);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    b.num_updates = 70;
+    _ = try addFloor(b, 20, 0);
+    const pendulum = try b.body(.{ .position = .{ 5, 2, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.point(pendulum, invalid_handle, ConstraintSpace.world_space, .{ 5, 3, 0 }, .{ 5, 3, 0 }));
+    _ = try b.body(.{ .position = .{ -5, 0.2, 0 }, .shape = box, .object_layer = Layers.moving }, .dont_activate);
+    const a = try addHumanoidRagdoll(b, shapes, .{ 0, 1.5, 0 }, .{}, .{ .stabilize = 1, .calculate_constraint_priorities = 1, .base_priority = 3, .disable_parent_child_collisions = 1, .collision_group = 1 });
+    const c = try addHumanoidRagdoll(b, shapes, .{ 0, 1.5, 0 }, .{ .motor_torque = 10 }, .{ .disable_parent_child_collisions = 1, .collision_group = 2 });
+    var places: [4]u32 = undefined;
+    for (&places, 0..) |*p, i|
+        p.* = try b.addRagdollPose(.{ 1.5 * real(i) - 2.25, 1.5, 0 }, &Humanoid.pose([_][4]f32{identity_rotation} ** Humanoid.num_joints));
+
+    // (activation, no lock) of the four ragdolls
+    const Mode = struct { activation: SceneBuilder.Activation, no_lock: bool };
+    const modes = [4]Mode{ .{ .activation = .activate, .no_lock = false }, .{ .activation = .activate, .no_lock = true }, .{ .activation = .dont_activate, .no_lock = false }, .{ .activation = .dont_activate, .no_lock = true } };
+    var ragdolls: [4]u32 = undefined;
+    for (&ragdolls, modes, places, 0..) |*r, mode, place, i| {
+        r.* = try b.createRagdoll(if (i % 2 == 0) a else c);
+        try b.objectOp(.ragdoll_set_pose, r.*, .{ .i = &.{place} });
+        try b.objectOp(.ragdoll_add_to_physics_system, r.*, .{ .activation = mode.activation, .i = &.{ 0, 0, 0, @intFromBool(mode.no_lock) } });
+        try b.expectRagdollActive(r.*, mode.activation == .activate);
+    }
+    const left = try b.body(.{ .position = .{ 4, 1, 3 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    const right_box = try b.body(.{ .position = .{ 4.5, 1, 3 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    _ = try b.constraint(Desc.point(left, right_box, ConstraintSpace.world_space, .{ 4.25, 1, 3 }, .{ 4.25, 1, 3 }));
+
+    b.at(10);
+    try b.objectOp(.ragdoll_remove_from_physics_system, ragdolls[0], .{ .i = &no_lock });
+    try b.objectOp(.ragdoll_remove_from_physics_system, ragdolls[2], .{});
+    b.at(11);
+    try b.objectOp(.ragdoll_add_to_physics_system, ragdolls[2], .{ .i = &no_lock });
+    try b.expectRagdollActive(ragdolls[2], true);
+    try b.objectOp(.ragdoll_set_pose, ragdolls[0], .{ .i = &.{places[0]} });
+    try b.objectOp(.ragdoll_add_to_physics_system, ragdolls[0], .{ .activation = .dont_activate });
+    try b.expectRagdollActive(ragdolls[0], false);
+    b.at(20);
+    _ = try b.body(.{ .position = .{ 2.25, 3, 0 }, .shape = box, .object_layer = Layers.moving }, .activate); // Above ragdolls[3]
+    b.at(25);
+    try b.expectRagdollActive(ragdolls[0], false);
+    try b.objectOp(.ragdoll_activate, ragdolls[0], .{ .i = &no_lock });
+    try b.expectRagdollActive(ragdolls[0], true);
+    b.at(50);
+    try b.expectRagdollActive(ragdolls[3], true);
+    b.at(55);
+    try b.objectOp(.ragdoll_remove_from_physics_system, ragdolls[1], .{});
+    b.at(56);
+    try b.objectOp(.ragdoll_destroy, ragdolls[1], .{});
 }
 
 // (append the Ragdoll scenes here)

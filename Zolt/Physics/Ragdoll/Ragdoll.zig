@@ -170,10 +170,6 @@ fn twoBodySettingsOf(ref: Ref(ConstraintSettings)) ?*TwoBodyConstraintSettings {
 pub const RagdollSettings = struct {
     // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, RagdollSettings)
 
-    /// TEMPORARY (Ragdoll group, removed with the simulation parity slot): the class is ported, but the scenes of
-    /// `Blocker.ragdolls` stay skipped until RagdollSlot of SimulationParity.zig is filled
-    pub const is_stub = true;
-
     pub const RagdollResult = Result(Ref(RagdollSettings));
 
     /// std::pair<int, int>: the indices of the two bodies of a constraint (index in mBodyIDs)
