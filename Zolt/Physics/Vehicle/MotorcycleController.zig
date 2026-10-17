@@ -884,8 +884,24 @@ test "MotorcycleController lean spring integration" {
         try testing.expect(!w.hasContact());
     const in_air = c.lean_spring_integrated_delta_angle;
     try testing.expect(in_air != 0.0);
+
+    // Integrated further: PreCollide of the next step adds the angle between the body's up axis (the rotation that it
+    // sees is the one after this step) and the new target lean times the time step, then
+    // SolveLongitudinalAndLateralConstraints decays it once (the wheels are still in the air: no part of the vehicle
+    // constraint applies an impulse, so the velocity iterations of the island stop after the first one). Without the
+    // integration only the decay would remain and the value would shrink.
+    const rotation = constraint.getVehicleBody().getRotation();
     try world.simulate(1.0 / 60.0);
-    try testing.expect(math.sign(c.lean_spring_integrated_delta_angle) == math.sign(in_air)); // Integrated further
+    for (constraint.getWheels()) |w|
+        try testing.expect(!w.hasContact());
+    const dt: f32 = 1.0 / 60.0;
+    const forward = rotation.mulVec3(constraint.getLocalForward());
+    const up = rotation.mulVec3(constraint.getLocalUp());
+    const d_angle = -math.sign(c.target_lean.cross(up).dot(forward)) * Trigonometry.acos(c.target_lean.dot(up));
+    var expected = in_air + d_angle * dt;
+    expected *= math.max(@as(f32, 0.0), 1.0 - c.getLeanSpringIntegrationCoefficientDecay() * dt);
+    try testing.expectEqual(expected, c.lean_spring_integrated_delta_angle);
+    try testing.expect(@abs(c.lean_spring_integrated_delta_angle) > @abs(in_air));
 
     // A faster decay
     c.setLeanSpringIntegrationCoefficientDecay(1000.0);
