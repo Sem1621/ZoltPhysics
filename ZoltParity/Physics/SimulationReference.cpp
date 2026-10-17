@@ -977,6 +977,7 @@ enum class ESimOp : uint32
 	CharacterCheckCollision = 419,
 	CharacterExpectGroundState = 420,
 	CharacterBodyHash = 421,
+	CharacterExpectBodyState = 422,
 	// Phase7OpRange.character_virtual
 	CreateCharacterVirtual = 430,
 	CVDestroy = 431,
@@ -3005,6 +3006,8 @@ public:
 				h.U32(GetShapeIndex(shape.mShape));
 				return h.mHash;
 			}
+
+		case ESimOp::CharacterExpectBodyState:				break; // Changes nothing, the driver checks the BodyState bits
 
 		default:
 			Trace("SimulationReference: unknown character operation %u", inOp.mKind);

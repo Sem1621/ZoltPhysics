@@ -864,6 +864,11 @@ const ZoltWorld = struct {
 
     fn destroy(self: *ZoltWorld) void {
         const allocator = self.allocator;
+        // The records of the destruction are not compared: the body activation listener goes first, so that removing the
+        // active bodies of the Phase 7 objects (OnBodyDeactivated) allocates no record. Otherwise the creation sweep sees
+        // the failed allocation of such a record as a swallowed out of memory error (nothing checks the recorder after
+        // the destruction).
+        self.system.setBodyActivationListener(null);
         // Phase 7 objects first (~SimWorld of the .cpp): they remove their bodies and constraints from the system
         self.destroyPhase7();
         for (self.step_listeners, self.step_listener_added) |*listener, added| {
@@ -2671,7 +2676,7 @@ const RunStats = struct {
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
 fn isPhase7Expectation(kind: OpKind) bool {
     return switch (kind) {
-        .character_expect_ground_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
+        .character_expect_ground_state, .character_expect_body_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
         else => false,
     };
 }
@@ -3671,7 +3676,311 @@ const Phase7StubSlot = struct {
 };
 
 // ---- SLOT character: Character (Phase7OpRange.character, Blocker.characters) ----
-const CharacterSlot = Phase7StubSlot;
+/// The Zolt side of Character: ApplyCharacterOp, WriteCharacterState, SaveCharacterStates / RestoreCharacterStates (the
+/// characters) and ~SimWorld (the characters) of SimulationReference.cpp
+const CharacterSlot = struct {
+    /// The characters of the character handles, one reference each (Jolt: Array<Ref<Character>>; an empty reference is
+    /// a destroyed character)
+    const Storage = struct {
+        characters: std.ArrayList(Ref(zolt.CharacterBase)) = .empty,
+    };
+
+    /// FNV-1a over values (SimHasher of SimulationReference.cpp)
+    const Hasher = struct {
+        hash: u32 = SimScenes.hash_seed,
+
+        fn value(h: *Hasher, v: anytype) void {
+            h.hash = SimScenes.hashBytes(h.hash, std.mem.asBytes(&v));
+        }
+
+        fn boolean(h: *Hasher, v: bool) void {
+            h.value(@as(u32, @intFromBool(v)));
+        }
+
+        fn vec3(h: *Hasher, v: Vec3) void {
+            h.value([3]f32{ v.getX(), v.getY(), v.getZ() });
+        }
+
+        fn rvec3(h: *Hasher, v: RVec3) void {
+            h.value([3]Real{ v.getX(), v.getY(), v.getZ() });
+        }
+
+        fn quat(h: *Hasher, q: Quat) void {
+            h.value([4]f32{ q.getX(), q.getY(), q.getZ(), q.getW() });
+        }
+
+        fn plane(h: *Hasher, p: zolt.Plane) void {
+            h.vec3(p.getNormal());
+            h.value(p.getConstant());
+        }
+
+        fn rmat44(h: *Hasher, m: zolt.RMat44) void {
+            for (0..3) |c| {
+                const col = m.getColumn4(@intCast(c));
+                h.value([4]f32{ col.getX(), col.getY(), col.getZ(), col.getW() });
+            }
+            h.rvec3(m.getTranslation());
+        }
+    };
+
+    /// The collector of character_check_collision (SimCheckCollisionCollector of SimulationReference.cpp): the hash of
+    /// the hits in their order. Character::CheckCollision never sets user data (only CharacterVsCharacterCollisionSimple
+    /// passes the other character, which the CharacterVirtual operations use), so the character ID is always invalid.
+    const CheckCollisionCollector = struct {
+        pub const overrides = .{ .addHit, .setUserData };
+
+        base: zolt.CollideShapeCollector = .init(CheckCollisionCollector),
+        hasher: Hasher = .{},
+        num_hits: u32 = 0,
+        user_data: u64 = 0,
+
+        pub fn setUserData(self: *CheckCollisionCollector, user_data: u64) void {
+            self.user_data = user_data;
+        }
+
+        pub fn addHit(self: *CheckCollisionCollector, result: *const CollideShapeResult) void {
+            const h = &self.hasher;
+            h.vec3(result.contact_point_on1);
+            h.vec3(result.contact_point_on2);
+            h.vec3(result.penetration_axis);
+            h.value(result.penetration_depth);
+            h.value(result.sub_shape_id1.getValue());
+            h.value(result.sub_shape_id2.getValue());
+            h.value(result.body_id2.getIndexAndSequenceNumber());
+            h.value(zolt.CharacterID.invalid_character_id);
+            self.num_hits += 1;
+        }
+
+        fn finish(self: *CheckCollisionCollector) !u32 {
+            if (self.user_data != 0) return error.SceneNotSupported; // A character virtual's ID: not for Character
+            self.hasher.value(self.num_hits);
+            return self.hasher.hash;
+        }
+    };
+
+    /// The character of a handle (a handle that does not exist or a destroyed character is an error of the scene)
+    fn character(world: *ZoltWorld, handle: u32) !*zolt.Character {
+        const characters = world.phase7.characters.characters.items;
+        if (handle >= characters.len) return error.SceneError;
+        const base = characters[handle].get() orelse return error.SceneError;
+        return zolt.virtual.downcast(zolt.Character, base);
+    }
+
+    /// GetShapeIndex of SimulationReference.cpp (invalid_handle: not a shape of the scene, or null)
+    fn shapeIndex(world: *const ZoltWorld, shape: ?*const Shape) u32 {
+        for (world.shapes.items, 0..) |s, i| {
+            if (s.get() == shape) return @intCast(i);
+        }
+        return invalid_handle;
+    }
+
+    /// The shape of a shape index (a scene must not pass invalid_handle where Jolt dereferences the shape)
+    fn shapeOf(world: *const ZoltWorld, index: u32) !*const Shape {
+        if (index >= world.shapes.items.len) return error.SceneError;
+        return world.shapes.items[index].get().?;
+    }
+
+    /// SimFillCharacterBaseSettings of SimulationReference.cpp
+    fn fillBaseSettings(world: *const ZoltWorld, d: *const SimScenes.SimCharacterBase, out: *zolt.CharacterBaseSettings) void {
+        out.up = load3(&d.up);
+        out.supporting_volume = zolt.Plane.init(load3(d.supporting_volume[0..3]), d.supporting_volume[3]);
+        out.max_slope_angle = d.max_slope_angle;
+        out.enhanced_internal_edge_removal = d.enhanced_internal_edge_removal != 0;
+        out.shape.set(if (d.shape != invalid_handle) world.shapes.items[d.shape].get() else null);
+    }
+
+    /// GetBodyState of SimulationReference.cpp: IsActive | IsAdded << 1 through the locking BodyInterface
+    fn bodyState(world: *ZoltWorld, body_id: BodyID) u32 {
+        const bi = world.system.getBodyInterface();
+        return @as(u32, @intFromBool(bi.isActive(body_id))) | (@as(u32, @intFromBool(bi.isAdded(body_id))) << 1);
+    }
+
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const d = &world.desc.characters[op.index];
+        try world.phase7.characters.characters.ensureUnusedCapacity(allocator, 1);
+        const settings = try zolt.CharacterSettings.create(allocator);
+        var settings_ref = RefConst(zolt.CharacterBaseSettings).init(&settings.base);
+        defer settings_ref.deinit();
+        fillBaseSettings(world, &d.base, &settings.base);
+        settings.layer = @intCast(d.layer);
+        settings.mass = d.mass;
+        settings.friction = d.friction;
+        settings.gravity_factor = d.gravity_factor;
+        settings.allowed_dofs = .fromInt(@intCast(d.allowed_dofs));
+        const c = try zolt.Character.create(allocator, settings, loadR3(&d.position), loadQuat(&d.rotation), d.user_data, &world.system);
+        world.phase7.characters.characters.appendAssumeCapacity(.init(&c.base));
+        return c.getBodyID().getIndexAndSequenceNumber();
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const i = &op.i;
+        const f = &op.f;
+        const r = loadR3(&op.r);
+        const lock_bodies = i[3] == 0;
+        const lock: zolt.Character.LockOptions = .{ .lock_bodies = lock_bodies };
+        const activation: zolt.Character.ActivationOptions = .{ .activation = if (op.activation == 0) .activate else .dont_activate, .lock_bodies = lock_bodies };
+        const c = try character(world, op.index);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .character_add_to_physics_system => try c.addToPhysicsSystem(activation),
+            .character_remove_from_physics_system => c.removeFromPhysicsSystem(lock),
+            .character_activate => c.activate(lock),
+            .character_post_simulation => {
+                c.postSimulation(f[0], lock);
+                return @bitCast(@intFromEnum(c.base.getGroundState()));
+            },
+            .character_set_linear_and_angular_velocity => c.setLinearAndAngularVelocity(load3(f[0..3]), load3(f[3..6]), lock),
+            .character_set_linear_velocity => c.setLinearVelocity(load3(f[0..3]), lock),
+            .character_add_linear_velocity => c.addLinearVelocity(load3(f[0..3]), lock),
+            .character_add_impulse => c.addImpulse(load3(f[0..3]), lock),
+            .character_set_position_and_rotation => c.setPositionAndRotation(r, loadQuat(f[0..4]), activation),
+            .character_set_position => c.setPosition(r, activation),
+            .character_set_rotation => c.setRotation(loadQuat(f[0..4]), activation),
+            .character_set_layer => try c.setLayer(@intCast(i[0]), lock),
+            .character_set_shape => return @intFromBool(try c.setShape(try shapeOf(world, i[0]), f[0], lock)),
+            .character_set_max_slope_angle => c.base.setMaxSlopeAngle(f[0]),
+            .character_set_up => c.base.setUp(load3(f[0..3])),
+            .character_set_supporting_volume => c.base.setSupportingVolume(zolt.Plane.init(load3(f[0..3]), f[3])),
+
+            .character_destroy => {
+                world.phase7.characters.characters.items[op.index].deinit(); // The last reference: destroys the body
+                return 0;
+            },
+
+            .character_settings_hash => {
+                var s = c.getCharacterSettings(lock);
+                defer s.base.deinit();
+                var h: Hasher = .{};
+                h.vec3(s.base.up);
+                h.plane(s.base.supporting_volume);
+                h.value(s.base.max_slope_angle);
+                h.boolean(s.base.enhanced_internal_edge_removal);
+                h.value(shapeIndex(world, s.base.shape.get()));
+                h.value(@as(u32, s.layer));
+                h.value(s.mass);
+                h.value(s.friction);
+                h.value(s.gravity_factor);
+                h.value(@as(u32, s.allowed_dofs.toInt()));
+                return h.hash;
+            },
+
+            .character_check_collision => {
+                var collector: CheckCollisionCollector = .{};
+                c.checkCollision(r, loadQuat(f[0..4]), load3(f[4..7]), f[7], try shapeOf(world, i[0]), r, &collector.base, lock);
+                return collector.finish();
+            },
+
+            .character_expect_ground_state => return @bitCast(@intFromEnum(c.base.getGroundState())), // Changes nothing, the driver checks the result
+            .character_expect_body_state => {}, // Changes nothing, the driver checks the BodyState bits
+
+            .character_body_hash => {
+                var h: Hasher = .{};
+                h.vec3(c.getLinearVelocity(lock));
+                const pr = c.getPositionAndRotation(lock);
+                h.rvec3(pr.position);
+                h.quat(pr.rotation);
+                h.rvec3(c.getPosition(lock));
+                h.quat(c.getRotation(lock));
+                h.rvec3(c.getCenterOfMassPosition(lock));
+                h.rmat44(c.getWorldTransform(lock));
+                var ts = c.getTransformedShape(lock);
+                defer ts.deinit();
+                h.rvec3(ts.shape_position_com);
+                h.quat(ts.shape_rotation);
+                h.vec3(ts.getShapeScale());
+                h.value(ts.body_id.getIndexAndSequenceNumber());
+                h.value(shapeIndex(world, ts.shape.get()));
+                return h.hash;
+            },
+
+            else => return error.SceneError,
+        }
+        return bodyState(world, c.getBodyID());
+    }
+
+    /// WriteCharacterState of SimulationReference.cpp for every character in handle order
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        for (world.phase7.characters.characters.items, 0..) |*ref, handle| {
+            const base = ref.get() orelse continue;
+            const c = zolt.virtual.downcast(zolt.Character, base);
+            const h: u32 = @intCast(handle);
+
+            var recorder = StateRecorderImpl.init(world.allocator);
+            defer recorder.deinit();
+            c.base.saveState(recorder.recorder());
+            if (recorder.isFailed()) return error.OutOfMemory;
+            try w.begin(.character_save_state, h, 0);
+            try w.raw(recorder.getData());
+            w.end();
+
+            try w.begin(.character_properties, h, 0);
+            try w.value(c.getBodyID().getIndexAndSequenceNumber());
+            try w.value(@as(u32, c.getLayer()));
+            try w.value(shapeIndex(world, c.base.getShape()));
+            try w.boolean(c.base.isSupported());
+            try w.value(SimScenes.materialHash(c.base.getGroundMaterial().getDebugName()));
+            try w.value(c.base.getGroundUserData());
+            w.end();
+
+            try w.begin(.character_base, h, 0);
+            try w.vec3(c.base.getUp());
+            try w.value(c.base.getCosMaxSlopeAngle());
+            const plane = c.base.getSupportingVolume();
+            try w.vec3(plane.getNormal());
+            try w.value(plane.getConstant());
+            w.end();
+
+            // The body (a character without body: out of bodies)
+            if (c.getBodyID().isInvalid())
+                continue;
+            try w.begin(.character_body, h, 0);
+            try w.rvec3(c.getPosition(.{}));
+            try w.quat(c.getRotation(.{}));
+            try w.rvec3(c.getCenterOfMassPosition(.{}));
+            try w.vec3(c.getLinearVelocity(.{}));
+            try w.rmat44(c.getWorldTransform(.{}));
+            w.end();
+
+            var ts = c.getTransformedShape(.{});
+            defer ts.deinit();
+            try w.begin(.character_transformed_shape, h, 0);
+            try w.rvec3(ts.shape_position_com);
+            try w.quat(ts.shape_rotation);
+            try w.vec3(ts.getShapeScale());
+            try w.value(ts.body_id.getIndexAndSequenceNumber());
+            try w.value(shapeIndex(world, ts.shape.get()));
+            w.end();
+        }
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.characters.characters.items) |*ref| {
+            if (ref.get()) |base| base.saveState(recorder.recorder());
+        }
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.characters.characters.items) |*ref| {
+            if (ref.get()) |base| base.restoreState(recorder.recorder());
+        }
+    }
+
+    /// ~SimWorld: remove the characters that are in the system (Jolt asserts that a destroyed body is not in the broad
+    /// phase), then release them while the system exists (the destructor destroys the body)
+    fn destroyAll(world: *ZoltWorld) void {
+        const storage = &world.phase7.characters;
+        const bi = world.system.getBodyInterface();
+        for (storage.characters.items) |*ref| {
+            const base = ref.get() orelse continue;
+            const c = zolt.virtual.downcast(zolt.Character, base);
+            if (!c.getBodyID().isInvalid() and bi.isAdded(c.getBodyID()))
+                c.removeFromPhysicsSystem(.{});
+        }
+        for (storage.characters.items) |*ref| ref.deinit();
+        storage.characters.deinit(world.allocator);
+        storage.* = .{};
+    }
+};
 
 // ---- SLOT character_virtual: CharacterVirtual, CharacterVsCharacterCollisionSimple and the CharacterContactListener
 // (Phase7OpRange.character_virtual, Blocker.character_virtuals) ----
