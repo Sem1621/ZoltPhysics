@@ -3487,7 +3487,9 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 // - `saveStates(world, recorder: *StateRecorderImpl) !void` / `restoreStates(world, recorder) !void`: SaveState /
 //   RestoreState of its characters in handle order (CharacterSlot, CharacterVirtualSlot; the others do nothing).
 // - `destroyAll(world: *ZoltWorld) void`: remove its objects from the system, destroy them and free its Storage (~SimWorld
-//   of the .cpp; ZoltWorld.destroy calls it before the system is destroyed).
+//   of the .cpp; ZoltWorld.destroy calls it before the system is destroyed). It must not allocate, also not through a
+//   listener record (OnBodyDeactivated of a removed active body): the creation sweep counts an allocation of the
+//   teardown that fails as a swallowed error.OutOfMemory (see RagdollSlot.destroyAll).
 //
 // CharacterVirtualSlot also (the CharacterVirtual group):
 // - `characterIdSequence(world, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void`: the CharacterID

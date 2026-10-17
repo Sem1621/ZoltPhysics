@@ -13005,8 +13005,9 @@ fn addAnimationPoses(b: *SceneBuilder, root_offsets: []const [3]Real, root_rotat
 /// terrain in the dead pose (a sample of the animation, lying) turned around Y by 2 pi i / 4 per level, each ragdoll
 /// with a group ID of its own (SetGroupID: CreateRagdoll's group ID comes from the description), SetPose +
 /// DriveToPoseUsingMotors + AddToPhysicsSystem. The settings are prepared like the PerformanceTest's (Stabilize, the
-/// tables) plus the constraint priorities and DisableParentChildCollisions of the dead pose; two piles are LinearCast.
-/// The motors hold the dead pose while the ragdolls tumble onto each other and the terrain.
+/// tables) plus the constraint priorities and DisableParentChildCollisions of the dead pose; two piles are LinearCast
+/// (the PerformanceTest's -q=LinearCast: CCD hits). The motors hold the dead pose while the ragdolls tumble onto each
+/// other and the terrain.
 fn buildRagdollPile(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try RagdollShapes.add(b);
     b.num_updates = 100;
