@@ -208,7 +208,7 @@ pub const CharacterVirtualScene = struct {
         defer standing_shape.deinit();
         var inner_standing_shape = try createCapsule(allocator, 0.5 * character_height_standing + character_radius_standing, 0.5 * inner_shape_fraction * character_height_standing, inner_shape_fraction * character_radius_standing);
         defer inner_standing_shape.deinit();
-        errdefer self.releaseCharacters();
+        errdefer self.stopTest(physics_system); // Out of the character vs character collision, then released
         try self.characters.ensureTotalCapacity(allocator, num_characters_x * num_characters_y);
         try self.character_vs_character_collision.characters.ensureTotalCapacity(allocator, num_characters_x * num_characters_y);
         for (0..num_characters_y) |y| {
@@ -352,3 +352,38 @@ pub const CharacterVirtualScene = struct {
         HashCombine.hashCombine(&self.hash, sub_shape_id2.getValue());
     }
 };
+
+test "CharacterVirtualScene: an allocation failure in StartTest leaves no character behind" {
+    const allocator = std.testing.allocator;
+    const LayersFile = @import("Layers.zig");
+    const self = try CharacterVirtualScene.create(allocator);
+    defer self.destroy();
+    try std.testing.expect(try self.load(""));
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+    const scene_interface = self.scene();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var physics_system: PhysicsSystem = .empty;
+        try physics_system.init(allocator, std.testing.io, scene_interface.getMaxBodies(), 0, scene_interface.getMaxBodyPairs(), scene_interface.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+        defer physics_system.deinit();
+
+        // Every allocation of the scene in StartTest fails once (the FailingAllocator frees through the same allocator)
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        self.allocator = failing.allocator();
+        defer self.allocator = allocator;
+        self.startTest(&physics_system, .discrete) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), self.characters.items.len);
+            try std.testing.expectEqual(@as(usize, 0), self.character_vs_character_collision.characters.items.len);
+            continue;
+        };
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, CharacterVirtualScene.num_characters_x * CharacterVirtualScene.num_characters_y), self.character_vs_character_collision.characters.items.len);
+        self.stopTest(&physics_system);
+        try std.testing.expect(fail_index > CharacterVirtualScene.num_characters_x * CharacterVirtualScene.num_characters_y); // Every character was created under the sweep
+        break;
+    }
+}
