@@ -29,7 +29,11 @@
 //! scenes with thousands of bodies, for which it is quadratic). The InvalidateContactCache flags that the operations
 //! before the update set (SetShape, SetUseManifoldReduction, ...) are not saved state, in Jolt neither: every swept update
 //! starts from the snapshot with them set again (`restoreZoltBeforeUpdate`), while the recovery after a failed update
-//! relies on PhysicsSystem.update putting them back (scenes physics_tests_switch_use_manifold_reduction_1 and _2).
+//! relies on PhysicsSystem.update putting them back (scenes physics_tests_switch_use_manifold_reduction_1 and _2). The
+//! failed updates change the layout of the broad phase trees, which the saved state does not hold: scenes with
+//! `SceneEntry.restore_broad_phase` (the object operations query the broad phase in hit order) redo the update after the
+//! sweeps from the snapshot and the broad phase layout of that instant (`BroadPhaseSnapshot`), the other scenes keep the
+//! free running layout (the physics pipeline does not depend on it).
 //!
 //! The PerformanceTest scenes (`perf_*`, milestone M6) are the exact setup of ZoltPerformanceTest's Pyramid,
 //! ConvexVsMesh and HighSpeed scenes with -q=LinearCast, compared after every update for their first 50 / 80 / 20
@@ -1468,6 +1472,114 @@ const ZoltWorld = struct {
         CharacterVirtualSlot.destroyAll(self);
         RagdollSlot.destroyAll(self);
     }
+
+    /// The BroadPhaseQuadTree of the system (the worlds use Jolt's default broad phase)
+    fn broadPhase(self: *ZoltWorld) *zolt.BroadPhaseQuadTree {
+        return @alignCast(@fieldParentPtr("base", self.system.broad_phase.?));
+    }
+};
+
+/// The layout of the Zolt broad phase at one instant, for the D12 sweeps of the scenes with
+/// SceneEntry.restore_broad_phase: the node pages (BroadPhaseQuadTree.initBroadPhase commits all of them), the state of
+/// the node free list, the tracking of every body, the state of every tree (number of bodies, roots, dirty flag, the
+/// batch of nodes to free) and the next tree to update. The failed updates of the sweeps change all of these, and none
+/// is part of the saved state. Captured and restored between updates (no thread uses the broad phase); the sweeps
+/// restore it together with the saved state, so that the bodies and the trees match again.
+const BroadPhaseSnapshot = struct {
+    const BroadPhaseQuadTree = zolt.BroadPhaseQuadTree;
+    const QuadTree = zolt.QuadTree;
+    const NodeAllocator = QuadTree.NodeAllocator;
+    const FreeListState = @FieldType(NodeAllocator, "free_list");
+
+    const Layer = struct {
+        tree_state: QuadTree.TreeState,
+        free_node_batch: NodeAllocator.Batch,
+    };
+
+    allocator: Allocator,
+    /// The bytes of the allocated node pages (object storage: the node and its free list link)
+    pages: []u8,
+    num_objects_allocated: u32,
+    allocation_tag: u32,
+    first_free_object_and_tag: u64,
+    first_free_object_in_new_page: u32,
+    num_free_objects: @FieldType(FreeListState, "num_free_objects"),
+    tracking: []QuadTree.Tracking,
+    layers: []Layer,
+    next_layer_to_update: u32,
+    query_lock_idx: u32,
+
+    fn pageBytes(nodes: *const NodeAllocator) usize {
+        return @as(usize, nodes.page_size) * NodeAllocator.object_storage_size;
+    }
+
+    fn numPages(nodes: *const NodeAllocator) usize {
+        return nodes.num_objects_allocated.load(.monotonic) / nodes.page_size;
+    }
+
+    fn capture(allocator: Allocator, bp: *const BroadPhaseQuadTree) Allocator.Error!BroadPhaseSnapshot {
+        const nodes = &bp.node_allocator;
+        const page_bytes = pageBytes(nodes);
+        const num_pages = numPages(nodes);
+        const pages = try allocator.alloc(u8, num_pages * page_bytes);
+        errdefer allocator.free(pages);
+        for (0..num_pages) |p| {
+            const page: [*]const u8 = @ptrCast(nodes.pages.?[p]);
+            @memcpy(pages[p * page_bytes ..][0..page_bytes], page[0..page_bytes]);
+        }
+        const tracking = try allocator.dupe(QuadTree.Tracking, bp.tracking);
+        errdefer allocator.free(tracking);
+        const layers = try allocator.alloc(Layer, bp.layers.len);
+        for (layers, bp.layers) |*l, *tree|
+            l.* = .{ .tree_state = tree.tree_state, .free_node_batch = tree.free_node_batch };
+        const free_list = &nodes.free_list;
+        return .{
+            .allocator = allocator,
+            .pages = pages,
+            .num_objects_allocated = nodes.num_objects_allocated.load(.monotonic),
+            .allocation_tag = free_list.allocation_tag.load(.monotonic),
+            .first_free_object_and_tag = free_list.first_free_object_and_tag.load(.monotonic),
+            .first_free_object_in_new_page = free_list.first_free_object_in_new_page.load(.monotonic),
+            .num_free_objects = free_list.num_free_objects,
+            .tracking = tracking,
+            .layers = layers,
+            .next_layer_to_update = bp.next_layer_to_update,
+            .query_lock_idx = bp.query_lock_idx.load(.monotonic),
+        };
+    }
+
+    /// Write the layout back (error.SceneError when the broad phase allocated node pages since the capture: it commits
+    /// all of them in initBroadPhase)
+    fn restore(self: *const BroadPhaseSnapshot, bp: *BroadPhaseQuadTree) !void {
+        const nodes = &bp.node_allocator;
+        if (nodes.num_objects_allocated.load(.monotonic) != self.num_objects_allocated or bp.tracking.len != self.tracking.len or bp.layers.len != self.layers.len) {
+            std.debug.print("SimulationParity: the broad phase changed its node pages, bodies or layers since the snapshot\n", .{});
+            return error.SceneError;
+        }
+        const page_bytes = pageBytes(nodes);
+        for (0..numPages(nodes)) |p| {
+            const page: [*]u8 = @ptrCast(nodes.pages.?[p]);
+            @memcpy(page[0..page_bytes], self.pages[p * page_bytes ..][0..page_bytes]);
+        }
+        const free_list = &nodes.free_list;
+        free_list.allocation_tag.store(self.allocation_tag, .monotonic);
+        free_list.first_free_object_and_tag.store(self.first_free_object_and_tag, .monotonic);
+        free_list.first_free_object_in_new_page.store(self.first_free_object_in_new_page, .monotonic);
+        free_list.num_free_objects = self.num_free_objects;
+        @memcpy(bp.tracking, self.tracking);
+        for (bp.layers, self.layers) |*tree, *l| {
+            tree.tree_state = l.tree_state;
+            tree.free_node_batch = l.free_node_batch;
+        }
+        bp.next_layer_to_update = self.next_layer_to_update;
+        bp.query_lock_idx.store(self.query_lock_idx, .monotonic);
+    }
+
+    fn deinit(self: *BroadPhaseSnapshot) void {
+        self.allocator.free(self.pages);
+        self.allocator.free(self.tracking);
+        self.allocator.free(self.layers);
+    }
 };
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -2532,6 +2644,10 @@ const Run = struct {
         defer snapshot.deinit(allocator);
         try zw.saveState(.all, &snapshot);
 
+        // SceneEntry.restore_broad_phase: the layout of the broad phase at the snapshot (the C++ side updates this tree)
+        var broad_phase_snapshot: ?BroadPhaseSnapshot = if (self.entry.restore_broad_phase) try BroadPhaseSnapshot.capture(allocator, zw.broadPhase()) else null;
+        defer if (broad_phase_snapshot) |*s| s.deinit();
+
         // The bodies whose contact cache is invalid (the operations before the update flagged them): the flags are not
         // part of the saved state (in Jolt neither), every update that starts from the snapshot gets them again
         const pending_invalid = try allocator.dupe(BodyID, zw.system.body_manager.bodies_cache_invalid.items);
@@ -2595,6 +2711,17 @@ const Run = struct {
             }
             if (!zw.temp.isEmpty()) return self.fail("createJob {d} failed: the temp allocator is not empty", .{fail_index});
             if (failing.has_induced_failure.load(.monotonic)) self.stats.num_job_failures += 1;
+        }
+
+        // SceneEntry.restore_broad_phase: the failed updates changed the layout of the broad phase trees; one more update
+        // from the snapshot and the broad phase of that instant leaves the trees of the C++ update, so that the queries of
+        // the Phase 7 objects after this update find their hits in the C++ order
+        if (broad_phase_snapshot) |*s| {
+            try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
+            try s.restore(zw.broadPhase());
+            _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), zw.jobSystem());
+            if (!zw.temp.isEmpty()) return self.fail("the update from the broad phase snapshot: the temp allocator is not empty", .{});
+            try self.expectZoltState(reference.items, "after the update from the broad phase snapshot");
         }
 
         // The Zolt side is at the reference state again: drop the records of the sweeps, restore the listener counters
@@ -3551,7 +3678,10 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 //   sweeps them in its own tests. Jolt's non-validating RestoreState keeps the members that it does not restore
 //   (mIsBackFacingContact, ...) of the contacts that mActiveContacts.resize keeps (CharacterVirtual.cpp:1977-1981): the
 //   object state compares them (cv_active_contact is_back_facing_contact). `mutable mMaxHitsExceeded`
-//   (CharacterVirtual.h:752) falls under Rule M (PortingGuide section 5).
+//   (CharacterVirtual.h:752) falls under Rule M (PortingGuide section 5). The CharacterVirtual scenes set
+//   `restore_broad_phase`: the character queries find their hits in the order of the broad phase layout, which the
+//   failed updates of the D12 sweeps change (BroadPhaseSnapshot restores it after the sweeps). Any slot whose operations
+//   query the broad phase in hit order (vehicle testers that keep the first hit, ragdoll queries) can use it too.
 // - The vehicle slots: the callbacks (VehicleCallbacks, VehicleCombineFriction, VehicleTireMaxImpulse) add
 //   `VehicleRecords` to world.recorder; the custom friction uses the Math min helper (not @min). Wheel's contact members
 //   are zero-initialized in Zolt (the reference zero-fills its allocations, see the rules of the SimScenes header).
@@ -6006,7 +6136,7 @@ fn runEntry(entry: *const SceneEntry) !void {
         num_spawned_jobs += s.num_spawned_jobs;
         num_large_island_deactivations += s.num_large_island_deactivations;
     }
-    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0);
+    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0 or try observeSpawnedJobs(allocator, &builder));
     if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
     if (expect.full_manifolds) {
         try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
@@ -6034,6 +6164,42 @@ fn runEntry(entry: *const SceneEntry) !void {
 
     if (entry.creation_sweep)
         try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
+}
+
+/// The number of Zolt-only runs of observeSpawnedJobs
+const max_spawn_observations = 10;
+
+/// Expect.spawned_jobs when no configuration of the thread matrix spawned a FindCollisions job from inside a job: a job
+/// spawns another one when it finishes while the others still find body pairs, which depends on the scheduling (on a
+/// loaded machine the workers can run the jobs one after the other, then none spawns: contacts_many_bodies in
+/// ReleaseFast next to other builds). The scene runs again on the Zolt side alone (no comparison) with 3 and 7 workers,
+/// up to max_spawn_observations times, until a job spawns one: the scene reaches the path, the scheduling decides when.
+fn observeSpawnedJobs(allocator: Allocator, builder: *const SceneBuilder) !bool {
+    const desc = builder.desc();
+    for (0..max_spawn_observations) |attempt| {
+        const zw = try ZoltWorld.create(allocator, &desc, .{ .thread_pool = if (attempt % 2 == 0) 3 else 7 });
+        defer zw.destroy();
+        var delta_time = builder.delta_time;
+        var collision_steps = builder.collision_steps;
+        var op_index: usize = 0;
+        for (0..builder.num_updates) |update| {
+            while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
+                const op = &builder.ops.items[op_index];
+                switch (@as(OpKind, @enumFromInt(op.kind))) {
+                    .set_update => {
+                        delta_time = op.f[0];
+                        collision_steps = op.count;
+                    },
+                    .snapshot, .restore_cross => {},
+                    else => _ = try zw.applyOp(op),
+                }
+            }
+            _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), zw.jobSystem());
+            zw.discardRecords();
+            if (zw.counting_jobs.num_spawned_find_collisions.load(.monotonic) > 0) return true;
+        }
+    }
+    return false;
 }
 
 fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !void {

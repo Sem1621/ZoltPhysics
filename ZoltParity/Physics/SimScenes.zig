@@ -150,6 +150,15 @@
 //!   order. `snapshot` / `restore_cross` include the SaveState of every character and character virtual (every byte must
 //!   be read). The test "SimulationParity CharacterID consumption" compares which constructions consume a CharacterID
 //!   (`characterIdSequence`, M8 depends on it).
+//! - **D12 sweeps and the broad phase.** The failed updates of the D12 sweeps change the layout of the Zolt broad phase
+//!   trees (not part of the saved state, in Jolt neither): the physics pipeline does not depend on it, but an object
+//!   operation that queries the broad phase can (CharacterVirtual: ContactCastCollector keeps the first of equal hits,
+//!   OnContactValidate / OnAdjustBodyVelocity and the reduction at mMaxNumHits run in hit order; without the restore
+//!   character_virtual_characters and character_virtual_crowd differ after a sweep). A scene with such operations sets
+//!   `SceneEntry.restore_broad_phase`: after the sweeps of an update the driver restores the snapshot and the broad
+//!   phase layout of that instant (BroadPhaseSnapshot of SimulationParity.zig, the C++ side is not involved) and redoes
+//!   the update, which leaves the trees of the C++ update. The other scenes keep the free running layout. A scene with
+//!   sweeps needs an active body (PhysicsSystem.update allocates nothing without one; `addBystander`).
 //! - **Listener modes.** `CharacterListenerMode` record / modify: in modify mode the `CharacterFlags` in the upper 32
 //!   bits of the user data of a body, another character or the character itself reject contacts, stop pushing, stop
 //!   impulses, make a conveyor belt and slow the solved velocity (the same code on both sides). The vehicle callbacks
@@ -2466,6 +2475,8 @@ pub const Expect = struct {
     /// Bodies are asleep after some update
     sleeping: bool = false,
     /// FindCollisions jobs are spawned from inside jobs (TrySpawnJobFindCollisions) in a multi threaded configuration
+    /// (it depends on the scheduling: when no configuration of the thread matrix shows one, SimulationParity's
+    /// observeSpawnedJobs runs the scene again on the Zolt side alone until one does)
     spawned_jobs: bool = false,
     /// Bodies are put to sleep from the final batch of a split island (Zolt side: the LargeIslandSplitter has split
     /// islands when OnBodyDeactivated is called from SolvePositionConstraints)
@@ -2533,6 +2544,14 @@ pub const SceneEntry = struct {
     /// D12 sweeps (every temp allocation and every createJob of the update fails once) before every
     /// `sweep_stride`-th update and before the first one, 0: none
     sweep_stride: u32 = 25,
+    /// After the D12 sweeps of an update, the Zolt broad phase gets back the layout it had before the update (its node
+    /// pages, free list, tracking and trees, SimulationParity's BroadPhaseSnapshot) and redoes the update from there, so
+    /// that it holds the trees of the C++ update. For the Phase 7 scenes whose object operations query the broad phase
+    /// in hit order (CharacterVirtual: ContactCastCollector keeps the first hit, OnContactValidate / OnAdjustBodyVelocity
+    /// and the reduction at mMaxNumHits run in hit order): the failed updates of the sweeps change the layout of the
+    /// trees (UpdatePrepare / UpdateFinalize, the AABB updates of every restore), which is not part of the saved state.
+    /// Off for the scenes of the physics pipeline, which prove that its results do not depend on the layout.
+    restore_broad_phase: bool = false,
     /// Creating the scene runs under std.testing.checkAllAllocationFailures (D12). Its cost is quadratic in the number
     /// of bodies: false for the PerformanceTest scenes with thousands of bodies, whose creation runs the same code as
     /// the other scenes.
@@ -2803,33 +2822,31 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "character_many", .build = buildCharacterMany, .blocked_by = .characters, .sweep_stride = 30, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
     // (append the Character scenes here)
     // ---- CharacterVirtual ----
-    // No D12 sweeps in the CharacterVirtual scenes (`sweep_stride = 0`): the swept updates rebuild the Zolt broad phase
-    // trees (BroadPhaseQuadTree's UpdatePrepare / UpdateFinalize also run in an update that fails later, every restore of
-    // the snapshot marks all bodies as changed), which then get another layout than the C++ trees: the layout depends on
-    // the history and is not part of the saved state. A CharacterVirtual query receives its hits in the order of the
-    // layout, and Jolt calls OnAdjustBodyVelocity / OnContactValidate (ContactCastCollector) in that order, before it
-    // sorts the contacts, so the character records (compared in call order) and the cv_check_collision hashes differ after
-    // a sweep (character_virtual_characters with sweeps: record 40 of update 37 adjusts body 300 in Jolt and body
-    // 0x00800002 in Zolt, both are hit by the same query). Without sweeps both sides have the same history (restore_cross
-    // too: both sides restore).
-    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
-    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
-    .{ .name = "character_virtual_stairs_slopes", .build = buildCharacterVirtualStairsSlopes, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.on_steep_ground) | groundStateBit(GroundState.in_air) } },
-    .{ .name = "character_virtual_platforms", .build = buildCharacterVirtualPlatforms, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_crowd", .build = buildCharacterVirtualCrowd, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_inner_body", .build = buildCharacterVirtualInnerBody, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_contact_limits", .build = buildCharacterVirtualContactLimits, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_penetration", .build = buildCharacterVirtualPenetration, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_set_shape", .build = buildCharacterVirtualSetShape, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_internal_edges", .build = buildCharacterVirtualInternalEdges, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_terrain", .build = buildCharacterVirtualTerrain, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
-    .{ .name = "character_virtual_cross_restore", .build = buildCharacterVirtualCrossRestore, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
-    .{ .name = "character_virtual_far_from_origin", .build = buildCharacterVirtualFarFromOrigin, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_listener_none", .build = buildCharacterVirtualListener(.none), .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_listener_record", .build = buildCharacterVirtualListener(.record), .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_virtual_listener_modify", .build = buildCharacterVirtualListener(.modify), .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    // The CharacterVirtual scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`): a
+    // CharacterVirtual query receives its hits in the order of the broad phase layout, and Jolt keeps the first hit of a
+    // ContactCastCollector, calls OnContactValidate / OnAdjustBodyVelocity and reduces the hits at mMaxNumHits in that
+    // order. The failed updates of the sweeps change the layout of the Zolt trees (it is not part of the saved state):
+    // without the restore, character_virtual_characters differs after a sweep (record 40 of update 37 adjusts body 300
+    // in Jolt and body 0x00800002 in Zolt, both hit by the same query).
+    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
+    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
+    .{ .name = "character_virtual_stairs_slopes", .build = buildCharacterVirtualStairsSlopes, .blocked_by = .character_virtuals, .sweep_stride = 40, .restore_broad_phase = true, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.on_steep_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_virtual_platforms", .build = buildCharacterVirtualPlatforms, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_crowd", .build = buildCharacterVirtualCrowd, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_inner_body", .build = buildCharacterVirtualInnerBody, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_contact_limits", .build = buildCharacterVirtualContactLimits, .blocked_by = .character_virtuals, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_penetration", .build = buildCharacterVirtualPenetration, .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_set_shape", .build = buildCharacterVirtualSetShape, .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_internal_edges", .build = buildCharacterVirtualInternalEdges, .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_terrain", .build = buildCharacterVirtualTerrain, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_virtual_cross_restore", .build = buildCharacterVirtualCrossRestore, .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .contacts = true, .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_virtual_far_from_origin", .build = buildCharacterVirtualFarFromOrigin, .blocked_by = .character_virtuals, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_listener_none", .build = buildCharacterVirtualListener(.none), .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_listener_record", .build = buildCharacterVirtualListener(.record), .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_listener_modify", .build = buildCharacterVirtualListener(.modify), .blocked_by = .character_virtuals, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
     // PerformanceTest's CharacterVirtualScene (milestone M8), exactly as ZoltPerformanceTest sets it up
     .{ .name = "perf_character_virtual", .build = buildPerfCharacterVirtual, .blocked_by = .character_virtuals, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true, .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_shapes", .build = buildCharacterVirtualShapes, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
     // (append the CharacterVirtual scenes here)
     // ---- Ragdoll ----
     .{ .name = "ragdoll_ops", .build = buildRagdollOps, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 10 } },
@@ -13191,6 +13208,14 @@ fn stepCharacterVirtual(b: *SceneBuilder, handle: u32, input: [3]f32, jump: f32,
         try b.characterVirtualQuery(.cv_update, handle, query, .{ .f = &([_]f32{b.delta_time} ++ character_gravity) });
 }
 
+/// A kinematic sphere that moves far away from the characters and never sleeps: the scenes without other active bodies
+/// get a PhysicsSystem.update that allocates, runs jobs and changes the broad phase, for the D12 sweeps and the broad
+/// phase restore after them
+fn addBystander(b: *SceneBuilder) Allocator.Error!void {
+    const shape = try b.sphere(0.5);
+    _ = try b.body(.{ .position = .{ 0, 20, 60 }, .linear_velocity = .{ 0.5, 0, 0.25 }, .shape = shape, .motion_type = 1, .allow_sleeping = 0, .object_layer = Layers.moving }, .activate);
+}
+
 /// The triangles of a staircase of `num_steps` steps of `step_height` that rises along +z from z = 0, 4 m wide (the
 /// stairs of TestWalkStairs in CharacterVirtualTests.cpp)
 fn stairsTriangles(allocator: Allocator, num_steps: u32, step_height: f32) Allocator.Error![][9]f32 {
@@ -13220,6 +13245,7 @@ fn stairsTriangles(allocator: Allocator, num_steps: u32, step_height: f32) Alloc
 /// that it sticks to (StickToFloor), then walks up again.
 fn buildCharacterVirtualStairsSlopes(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
     b.num_updates = 170;
     const floor = try addFloor(b, 30, 0);
 
@@ -13394,6 +13420,7 @@ fn buildCharacterVirtualInnerBody(b: *SceneBuilder) Allocator.Error!void {
 /// (the collector gives up when full); character 1 walks next to the cylinder
 fn buildCharacterVirtualContactLimits(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
     b.num_updates = 100;
     _ = try addFloor(b, 20, 0);
 
@@ -13461,6 +13488,7 @@ fn buildCharacterVirtualContactLimits(b: *SceneBuilder) Allocator.Error!void {
 /// (TestInitiallyIntersecting2) is driven upwards, then walks out of them
 fn buildCharacterVirtualPenetration(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
     b.num_updates = 60;
     _ = try addFloor(b, 20, 0);
     const speeds = [_]f32{ 0.0, 0.5, 1.0 };
@@ -13537,6 +13565,7 @@ fn buildCharacterVirtualSetShape(b: *SceneBuilder) Allocator.Error!void {
 /// (CollideShapeWithInternalEdgeRemoval), character 1 without, they swap at update 40 (SetEnhancedInternalEdgeRemoval)
 fn buildCharacterVirtualInternalEdges(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
     b.num_updates = 80;
     const floor = try addMeshTerrain(b, 12, 1.0, true);
     _ = try b.body(.{ .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
@@ -13564,6 +13593,7 @@ fn buildCharacterVirtualInternalEdges(b: *SceneBuilder) Allocator.Error!void {
 /// every 30 updates; one of each has enhanced internal edge removal
 fn buildCharacterVirtualTerrain(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
     b.num_updates = 120;
     const height_field = try addHeightFieldTerrain(b, 17, 1.0);
     _ = try b.body(.{ .shape = height_field, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
@@ -13664,8 +13694,8 @@ fn buildCharacterVirtualFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
 /// One scene per CharacterListenerMode (none, record, modify) on the same setup: a floor that is a conveyor belt in
 /// modify mode, a post that it rejects, a crate that cannot push / receive impulses, a free crate; character 0 walks
 /// into them (it hits the post off center and slides around it unless the post is rejected), characters 1 and 2 walk
-/// into each other inside a sensor and apart again (character 2's user data stops it from pushing, the slowed solves
-/// of character 1)
+/// into each other inside a sensor and apart again (character 2's user data stops it from pushing and, from update 30
+/// to 45, makes character 1 reject their contact; the slowed solves of character 1)
 fn buildCharacterVirtualListener(comptime mode: CharacterListenerMode) fn (b: *SceneBuilder) Allocator.Error!void {
     return struct {
         fn build(b: *SceneBuilder) Allocator.Error!void {
@@ -13697,6 +13727,10 @@ fn buildCharacterVirtualListener(comptime mode: CharacterListenerMode) fn (b: *S
                 }
                 if (u == 22) try b.objectOp(.cv_finish_tracking_contact_changes, cv0, .{});
                 if (u == 24) try b.objectOp(.cv_finish_tracking_contact_changes, cv0, .{});
+                // Character 1 rejects its contact with character 2 for a while (OnCharacterContactValidate returns false in
+                // modify mode)
+                if (u == 30) try b.objectOp(.cv_set_user_data, cv2, .{ .i = &.{ 2, CharacterFlags.cannot_push | CharacterFlags.reject } });
+                if (u == 45) try b.objectOp(.cv_set_user_data, cv2, .{ .i = &.{ 2, CharacterFlags.cannot_push } });
             }
         }
     }.build;
@@ -13786,6 +13820,59 @@ fn buildPerfCharacterVirtual(b: *SceneBuilder) Allocator.Error!void {
             try b.characterVirtualQuery(.cv_perf_update, h, .{ .layer = Layers.moving }, .{ .f = &.{b.delta_time} });
             b.ops.items[b.ops.items.len - 1].count = @intCast(count); // UpdateTest's counter (Jolt's uint64)
             count += 1;
+        }
+    }
+}
+
+/// The character shapes of sCorrectFractionForCharacterPadding (when the cast of ValidateMovement hits a face, the
+/// fraction is corrected for the character padding through the character's shape): character 1 a uniformly scaled
+/// capsule (a capsule takes only uniform scales), character 2 a box scaled non-uniformly, character 3 a
+/// StaticCompoundShape of a capsule and a box turned by 45 degrees, character 4 a box in a RotatedTranslatedShape turned
+/// by 30 degrees. They run at 20 m/s (more than the predictive contact distance per update, so the cast hits a wall
+/// before a contact does) back and forth between two walls, at an angle; character 0 switches from its capsule to the
+/// compound shape (with a max penetration depth) and back to the capsule (without).
+fn buildCharacterVirtualShapes(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
+    b.num_updates = 120;
+    _ = try addFloor(b, 40, 0);
+
+    const scaled_capsule = try b.scaled(try b.rotatedTranslated(try b.capsule(0.5, 0.25), .{ 0, 0.75, 0 }, identity_rotation), .{ 1.2, 1.2, 1.2 });
+    const scaled_box = try b.scaled(try b.rotatedTranslated(try b.box(.{ 0.25, 0.5, 0.25 }, 0.05), .{ 0, 0.5, 0 }, identity_rotation), .{ 1.2, 1.4, 0.8 });
+    const compound = try b.compound(.static_compound, &.{
+        .{ .shape = try b.capsule(0.45, 0.3), .position = .{ 0, 1.05, 0 } },
+        .{ .shape = try b.box(.{ 0.3, 0.15, 0.3 }, 0.05), .position = .{ 0, 0.15, 0 }, .rotation = axisAngle(.{ 0, 1, 0 }, std.math.pi / 4.0) },
+    });
+    const rotated_box = try b.rotatedTranslated(try b.box(.{ 0.25, 0.6, 0.35 }, 0.05), .{ 0, 0.6, 0 }, axisAngle(.{ 0, 1, 0 }, std.math.pi / 6.0));
+
+    // One lane per character: walls at x = -4 and x = 4
+    const character_shapes = [_]u32{ shapes.standing, scaled_capsule, scaled_box, compound, rotated_box };
+    var handles: [character_shapes.len]u32 = undefined;
+    for (&handles, character_shapes, 0..) |*h, shape, i| {
+        const z = 5 * real(i);
+        for ([_]Real{ -4, 4 }) |x|
+            _ = try addStaticBox(b, .{ 0.25, 1.0, 2.5 }, .{ x, 1.0, z }, identity_rotation, 0);
+        // The start of character 4 makes its first approach end in a cast hit (its steps of 1/3 m would end within the
+        // predictive contact distance of the wall otherwise)
+        h.* = try b.characterVirtual(.{ .base = .{ .shape = shape }, .position = .{ if (i == 4) -0.15 else 0, 0, z } });
+    }
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const direction: f32 = if ((u / 25) % 2 == 0) 1 else -1;
+        for (handles, 0..) |h, i|
+            try stepCharacterVirtual(b, h, .{ 20 * direction, 0, if (i % 2 == 0) 3 else -3 }, 0, if (i % 2 == 0) .{} else null, cv_query);
+        switch (u) {
+            5 => {
+                try b.characterVirtualQuery(.cv_set_shape, handles[0], cv_query, .{ .f = &.{0.05}, .i3 = compound });
+                try b.expectCharacterVirtualValue(handles[0], .shape, compound, .{});
+            },
+            70 => {
+                try b.characterVirtualQuery(.cv_set_shape, handles[0], cv_query, .{ .f = &.{flt_max}, .i3 = shapes.standing });
+                try b.expectCharacterVirtualValue(handles[0], .shape, shapes.standing, .{});
+            },
+            else => {},
         }
     }
 }
