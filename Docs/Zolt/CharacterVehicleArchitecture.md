@@ -143,8 +143,10 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
   - `Ragdoll.addToPhysicsSystem` uses `addBodiesPrepare` / `addBodiesFinalize` and `PhysicsSystem.addConstraints`, as
     Jolt does.
   - The `inLockBodies` flag selects the locking or the no-lock BodyLockInterface.
-- **Driving to a pose.** `driveToPoseUsingMotors` sets SwingTwist / SixDOF motor targets
-  (`SwingTwistConstraint.setTargetOrientationBS`, ...). `driveToPoseUsingKinematics` calls `moveKinematic`.
+- **Driving to a pose.** `driveToPoseUsingMotors` sets SwingTwist / Hinge motor targets
+  (`SwingTwistConstraint.setTargetOrientationBS`, `HingeConstraint.setTargetOrientationBS` /
+  `setTargetAngularVelocity`). Other constraint classes are a `JPH_ASSERT` in Jolt: Zolt asserts in safe builds and
+  ignores them in release builds. `driveToPoseUsingKinematics` calls `moveKinematic`.
 - **Stabilization and collision filtering.** `stabilize` and `disableParentChildCollisions` are numeric and compared
   bit for bit. `disableParentChildCollisions` uses CollideShape and fills the GroupFilterTable.
 
