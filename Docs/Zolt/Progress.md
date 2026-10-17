@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 78.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
+**Library: 78.7%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -22,7 +22,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
-| `Jolt/Physics/Character` | 17% | 2 | 0 | 2 | 0 | 0 | 0 | 2997 |
+| `Jolt/Physics/Character` | 30% | 3 | 0 | 1 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 75 | 1 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
@@ -283,11 +283,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Character — 17%</summary>
+<details><summary>Jolt/Physics/Character — 30%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `Character.cpp`, `Character.h` | 414 | ⚪ stub | `Zolt/Physics/Character/Character.zig` |
+| `Character.cpp`, `Character.h` | 414 | ✅ complete | `Zolt/Physics/Character/Character.zig` |
 | `CharacterBase.cpp`, `CharacterBase.h` | 170 | ✅ complete | `Zolt/Physics/Character/CharacterBase.zig` |
 | `CharacterID.h` | 79 | ✅ complete | `Zolt/Physics/Character/CharacterID.zig` |
 | `CharacterVirtual.cpp`, `CharacterVirtual.h` | 2334 | ⚪ stub | `Zolt/Physics/Character/CharacterVirtual.zig` |

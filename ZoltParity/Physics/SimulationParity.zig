@@ -3677,7 +3677,17 @@ const Phase7StubSlot = struct {
 
 // ---- SLOT character: Character (Phase7OpRange.character, Blocker.characters) ----
 /// The Zolt side of Character: ApplyCharacterOp, WriteCharacterState, SaveCharacterStates / RestoreCharacterStates (the
-/// characters) and ~SimWorld (the characters) of SimulationReference.cpp
+/// characters) and ~SimWorld (the characters) of SimulationReference.cpp. Proof that the Character scenes bite (each
+/// breakage of Zolt/Physics/Character/Character.zig, then reverted): taking the ground position from contact_point_on1
+/// in PostSimulation's collector is reported as "scene character_ops ... update 1: ... object state differs at byte 24
+/// ...: character_save_state (object handle 0, item 0) ground_position.y zolt 0x3c8d88e0 jolt 0x0"; subtracting the
+/// centers of mass the other way round in the check of SetShape as "scene character_crouch_stand ... update 12: operation
+/// 50 (character_set_shape on object handle / description 0) returned 0 in zolt and 1 in jolt" (and in
+/// character_far_from_origin); EActiveEdgeMode::CollideWithAll in CheckCollision as "scene
+/// character_ground_states_meshes ... update 7: ... character_save_state (object handle 5, item 0) ground_normal.y zolt
+/// 0x3ebeaa9e jolt 0x3ebeaa9f"; the ground velocity at the character's position instead of the ground position as
+/// "scene character_moving_platforms ... update 1: ... character_save_state (object handle 1, item 0) ground_velocity.x
+/// zolt 0x00000000 jolt 0x2fbdb005" (and in character_many).
 const CharacterSlot = struct {
     /// The characters of the character handles, one reference each (Jolt: Array<Ref<Character>>; an empty reference is
     /// a destroyed character)
