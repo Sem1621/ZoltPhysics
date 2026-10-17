@@ -227,7 +227,7 @@
 //! operations, 100..102 driver operations, 200..399 constraint operations in ranges of 20 (`ConstraintOpRange`):
 //! 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279 Hinge, 280..299 Slider, 300..319
 //! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare; 400..599 the
-//! Phase 7 operations (`Phase7OpRange`): 400..429 Character (422..429 free), 430..489 CharacterVirtual (468..489 free),
+//! Phase 7 operations (`Phase7OpRange`): 400..429 Character (422..429 free), 430..489 CharacterVirtual (471..489 free),
 //! 490..519 Ragdoll (511..519 free), 520..569 the vehicle core group (563..569 free), 570..579 TrackedVehicleController
 //! (576..579 free), 580..589 MotorcycleController (587..589 free), 590..599 spare. RecordKind: 0..6 bodies, steps and
 //! contacts, 7..17 the CharacterContactListener (call order), 18..20 the vehicle callbacks; blocks for new kinds: 21..29
@@ -733,6 +733,24 @@ pub const CharacterShapeFilter = enum(u32) {
     all = 0,
     /// ShouldCollide is false when shape 2 is a SphereShape
     no_spheres = 1,
+};
+
+/// The value of a character virtual that OpKind.cv_expect_value checks (i[0])
+pub const CharacterVirtualValue = enum(u32) {
+    /// GetMaxHitsExceeded() (1 / 0)
+    max_hits_exceeded = 0,
+    /// The number of GetActiveContacts()
+    num_active_contacts = 1,
+    /// The number of active contacts with mHadCollision
+    num_colliding_contacts = 2,
+    /// The number of active contacts with mHadCollision and another character (mCharacterB != nullptr)
+    num_colliding_character_contacts = 3,
+    /// GetGroundBodyID() is the body of body handle op.body (1 / 0)
+    ground_body_is = 4,
+    /// GetGroundVelocity() is not zero (!IsNearZero(1.0e-6f): 1 / 0)
+    ground_velocity_not_zero = 5,
+    /// The shape index of GetShape()
+    shape = 6,
 };
 
 /// A ragdoll (OpKind.create_ragdoll). The RagdollSettings of a description is built at the first create_ragdoll of
@@ -1570,7 +1588,20 @@ pub const OpKind = enum(u32) {
     /// SaveState into a StateRecorderImpl, then RestoreState from it (i[0] != 0: a validating recorder, which drops the
     /// active contacts without mHadCollision); returns the hash of the bytes
     cv_save_restore_state = 467,
-    // 468..489: free for CharacterVirtual operations
+    /// Check: the value of the character that i[0] selects (`CharacterVirtualValue`) must be `count`; `body` is the body
+    /// handle of CharacterVirtualValue.ground_body_is
+    cv_expect_value = 468,
+    /// The velocity of Character::Step of CharacterVirtualTests.cpp: on the ground and not moving away from it (vertical
+    /// velocity - vertical ground velocity < 0.1) GetGroundVelocity() + (0, jump speed f[7], 0), else the vertical
+    /// component of GetLinearVelocity(); plus gravity f[3..6] * delta time f[6], plus the input f[0..3]; then
+    /// SetLinearVelocity
+    cv_set_step_velocity = 469,
+    /// The step of a character in CharacterVirtualScene::UpdateTest of PerformanceTest: the new velocity from the ground
+    /// state, GetLinearVelocity, GetPosition and the deterministic random input of UpdateTest's counter `count` (delta
+    /// time f[0], PhysicsSystem::GetGravity()), then ExtendedUpdate (Jolt's default settings) with the filters of
+    /// op.i[0..3] and the world's TempAllocator
+    cv_perf_update = 470,
+    // 471..489: free for CharacterVirtual operations
 
     // ---- Phase7OpRange.ragdoll (490..519): Ragdoll, RagdollSettings ----
     /// ragdolls[index]: the RagdollSettings (built at the first creation of the description) CreateRagdoll (the next
@@ -2762,8 +2793,33 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "character_ops", .build = buildCharacterOps, .blocked_by = .characters, .sweep_stride = 20, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
     // (append the Character scenes here)
     // ---- CharacterVirtual ----
-    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 30, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
-    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 25, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
+    // No D12 sweeps in the CharacterVirtual scenes (`sweep_stride = 0`): the swept updates rebuild the Zolt broad phase
+    // trees (BroadPhaseQuadTree's UpdatePrepare / UpdateFinalize also run in an update that fails later, every restore of
+    // the snapshot marks all bodies as changed), which then get another layout than the C++ trees: the layout depends on
+    // the history and is not part of the saved state. A CharacterVirtual query receives its hits in the order of the
+    // layout, and Jolt calls OnAdjustBodyVelocity / OnContactValidate (ContactCastCollector) in that order, before it
+    // sorts the contacts, so the character records (compared in call order) and the cv_check_collision hashes differ after
+    // a sweep (character_virtual_characters with sweeps: record 40 of update 37 adjusts body 300 in Jolt and body
+    // 0x00800002 in Zolt, both are hit by the same query). Without sweeps both sides have the same history (restore_cross
+    // too: both sides restore).
+    .{ .name = "character_virtual_ops", .build = buildCharacterVirtualOps, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = all_ground_states } },
+    .{ .name = "character_virtual_characters", .build = buildCharacterVirtualCharacters, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records } },
+    .{ .name = "character_virtual_stairs_slopes", .build = buildCharacterVirtualStairsSlopes, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.on_steep_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_virtual_platforms", .build = buildCharacterVirtualPlatforms, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_crowd", .build = buildCharacterVirtualCrowd, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_inner_body", .build = buildCharacterVirtualInnerBody, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_contact_limits", .build = buildCharacterVirtualContactLimits, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_penetration", .build = buildCharacterVirtualPenetration, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_set_shape", .build = buildCharacterVirtualSetShape, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_internal_edges", .build = buildCharacterVirtualInternalEdges, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_terrain", .build = buildCharacterVirtualTerrain, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_virtual_cross_restore", .build = buildCharacterVirtualCrossRestore, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_virtual_far_from_origin", .build = buildCharacterVirtualFarFromOrigin, .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_listener_none", .build = buildCharacterVirtualListener(.none), .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_listener_record", .build = buildCharacterVirtualListener(.record), .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_virtual_listener_modify", .build = buildCharacterVirtualListener(.modify), .blocked_by = .character_virtuals, .sweep_stride = 0, .expect = .{ .contacts = true, .character_records = character_body_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    // PerformanceTest's CharacterVirtualScene (milestone M8), exactly as ZoltPerformanceTest sets it up
+    .{ .name = "perf_character_virtual", .build = buildPerfCharacterVirtual, .blocked_by = .character_virtuals, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true, .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
     // (append the CharacterVirtual scenes here)
     // ---- Ragdoll ----
     .{ .name = "ragdoll_ops", .build = buildRagdollOps, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 10 } },
@@ -2785,6 +2841,8 @@ const character_body_records = recordBit(.character_contact_validate) | recordBi
 
 /// Expect.character_records: the callbacks of character virtuals that touch each other
 const character_vs_character_records = recordBit(.character_vs_character_contact_validate) | recordBit(.character_vs_character_contact_added) | recordBit(.character_vs_character_contact_persisted) | recordBit(.character_vs_character_contact_removed) | recordBit(.character_vs_character_contact_solve);
+/// The CharacterContactListener callbacks of the body contacts that every character on a floor gets (no OnContactRemoved)
+const character_body_contact_records = recordBit(.character_contact_validate) | recordBit(.character_contact_added) | recordBit(.character_contact_persisted) | recordBit(.character_contact_solve) | recordBit(.character_adjust_body_velocity);
 
 /// A built scene: the description plus the operations and the update parameters (the memory is owned by the builder)
 pub const SceneBuilder = struct {
@@ -3329,6 +3387,12 @@ pub const SceneBuilder = struct {
     /// Check: the ground state of character virtual handle `handle` (GroundState) at this point
     pub fn expectCharacterVirtualGroundState(self: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
         return self.objectOp(.cv_expect_ground_state, handle, .{ .count = state });
+    }
+
+    /// Check: a value of character virtual handle `handle` (`CharacterVirtualValue`) at this point; `body`: the body
+    /// handle of `ground_body_is`
+    pub fn expectCharacterVirtualValue(self: *SceneBuilder, handle: u32, value: CharacterVirtualValue, expected: u32, args: struct { body: u32 = invalid_handle }) Allocator.Error!void {
+        return self.objectOp(.cv_expect_value, handle, .{ .i = &.{@intFromEnum(value)}, .count = expected, .body = args.body });
     }
 
     /// Check: Ragdoll::IsActive of ragdoll handle `handle` at this point
@@ -12666,6 +12730,615 @@ fn buildCharacterVirtualCharacters(b: *SceneBuilder) Allocator.Error!void {
                 d_alive = false;
             },
             else => {},
+        }
+    }
+}
+
+/// cv_set_step_velocity (Character::Step of the unit tests: the ground velocity when on the ground, a jump, gravity,
+/// the `input` velocity), then ExtendedUpdate with `extended` (null: Update) and the filters of `query`
+fn stepCharacterVirtual(b: *SceneBuilder, handle: u32, input: [3]f32, jump: f32, extended: ?SceneBuilder.ExtendedUpdateSettings, query: SceneBuilder.CharacterQuery) Allocator.Error!void {
+    try b.objectOp(.cv_set_step_velocity, handle, .{ .f = &(input ++ character_gravity ++ [_]f32{ b.delta_time, jump }) });
+    if (extended) |settings|
+        try b.extendedUpdate(handle, b.delta_time, character_gravity, settings, query)
+    else
+        try b.characterVirtualQuery(.cv_update, handle, query, .{ .f = &([_]f32{b.delta_time} ++ character_gravity) });
+}
+
+/// The triangles of a staircase of `num_steps` steps of `step_height` that rises along +z from z = 0, 4 m wide (the
+/// stairs of TestWalkStairs in CharacterVirtualTests.cpp)
+fn stairsTriangles(allocator: Allocator, num_steps: u32, step_height: f32) Allocator.Error![][9]f32 {
+    const triangles = try allocator.alloc([9]f32, 4 * num_steps);
+    for (0..num_steps) |i| {
+        const h = step_height;
+        const y = step_height * @as(f32, @floatFromInt(i));
+        // Start of step: base (0, y, y); left side b1, s1, p1, right side b2, s2, p2 (4 m to -x)
+        const b1 = [3]f32{ 2, y, y };
+        const s1 = [3]f32{ 2, y + h, y };
+        const p1 = [3]f32{ 2, y + h, y + h };
+        const b2 = [3]f32{ -2, y, y };
+        const s2 = [3]f32{ -2, y + h, y };
+        const p2 = [3]f32{ -2, y + h, y + h };
+        triangles[4 * i + 0] = s1 ++ b1 ++ s2;
+        triangles[4 * i + 1] = b1 ++ b2 ++ s2;
+        triangles[4 * i + 2] = s1 ++ p2 ++ p1;
+        triangles[4 * i + 3] = s1 ++ s2 ++ p2;
+    }
+    return triangles;
+}
+
+/// Stairs and slopes: character 0 climbs five box steps with ExtendedUpdate (WalkStairs, StickToFloor), crosses a
+/// platform and drops off its edge (InAir, then OnGround on the floor); character 1 climbs a staircase of triangles (a mesh) with
+/// custom ExtendedUpdateSettings and explicit CanWalkStairs / WalkStairs / StickToFloor, then walks off its top;
+/// character 2 lands on a 60 degree slope and slides off it (OnSteepGround); character 3 runs down a 30 degree slope
+/// that it sticks to (StickToFloor), then walks up again.
+fn buildCharacterVirtualStairsSlopes(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 170;
+    const floor = try addFloor(b, 30, 0);
+
+    // Lane 0 (z = 0): five box steps of 0.2 m from x = 1 up to a platform at 1 m height that ends at x = 5
+    for (0..5) |s| {
+        const fs: f32 = @floatFromInt(s);
+        _ = try addStaticBox(b, .{ 0.3, 0.1 + 0.1 * fs, 1.0 }, .{ 1.3 + 0.6 * fs, 0.1 + 0.1 * fs, 0 }, identity_rotation, 0);
+    }
+    const platform = try addStaticBox(b, .{ 0.5, 0.5, 1.0 }, .{ 4.5, 0.5, 0 }, identity_rotation, 0);
+
+    // Lane 1 (x = -10): a staircase mesh of six steps of 0.3 m from z = 2
+    const stairs = try stairsTriangles(b.allocator, 6, 0.3);
+    defer b.allocator.free(stairs);
+    const stairs_mesh = try b.mesh(stairs);
+    const stairs_body = try b.body(.{ .position = .{ -10, 0, 2 }, .shape = stairs_mesh, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+
+    // Lane 2 (z = -6): a slab tilted by 60 degrees (rising towards +x), lane 3 (z = -12): one tilted by 30 degrees
+    const slab = try addStaticBox(b, .{ 1.5, 0.1, 1.5 }, .{ 0, 1.5, -6 }, axisAngle(.{ 0, 0, 1 }, std.math.pi / 3.0), 0);
+    const ramp = try addStaticBox(b, .{ 3.0, 0.1, 1.5 }, .{ 3, 1.5, -12 }, axisAngle(.{ 0, 0, 1 }, std.math.pi / 6.0), 0);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 0 } });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -10, 0, 0 } });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0.3, 3.0, -6 } });
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 5.0, 3.0, -12 } });
+    const stairs_settings: SceneBuilder.ExtendedUpdateSettings = .{ .walk_stairs_step_down_extra = .{ 0, -0.1, 0 }, .walk_stairs_cos_angle_forward_contact = 0.5, .walk_stairs_min_step_forward = 0.05 };
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        try stepCharacterVirtual(b, cv0, .{ 2.5, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ 0, 0, 2.5 }, 0, stairs_settings, cv_query);
+        try stepCharacterVirtual(b, cv2, .{ 0, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv3, if (u < 80) .{ -4, 0, 0 } else .{ 3, 0, 0 }, 0, .{}, cv_query);
+        switch (u) {
+            16 => {
+                try b.objectOp(.cv_can_walk_stairs, cv1, .{ .f = &.{ 0, 0, 2.5 } });
+                try b.characterVirtualQuery(.cv_walk_stairs, cv1, cv_query, .{ .f = &.{ b.delta_time, 0, 0.4, 0, 0, 0, 0.05, 0, 0, 0.15, 0, -0.1, 0 } });
+                try b.objectOp(.cv_has_collided_with_body, cv1, .{ .body = stairs_body });
+            },
+            30 => try b.expectCharacterVirtualValue(cv2, .ground_body_is, 1, .{ .body = slab }), // On steep ground
+            40 => try b.expectCharacterVirtualValue(cv3, .ground_body_is, 1, .{ .body = ramp }),
+            60 => try b.characterVirtualQuery(.cv_stick_to_floor, cv1, cv_query, .{ .f = &.{ 0, -0.5, 0 } }),
+            120 => try b.expectCharacterVirtualValue(cv0, .ground_body_is, 1, .{ .body = platform }),
+            165 => try b.expectCharacterVirtualValue(cv0, .ground_body_is, 1, .{ .body = floor }), // Dropped off the platform
+            else => {},
+        }
+    }
+}
+
+/// Moving and rotating platforms (kinematic bodies): character 0 rides an elevator up and down, character 1 a turntable
+/// (the ground velocity of a rotating body, CalculateCharacterGroundVelocity), character 2 a platform that slides back
+/// and forth, character 3 walks towards the center of the turntable. Every character takes the velocity of its ground
+/// (cv_set_step_velocity) before ExtendedUpdate; UpdateGroundVelocity in between.
+fn buildCharacterVirtualPlatforms(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 120;
+    _ = try addFloor(b, 30, 0);
+    const platform_shape = try b.box(.{ 1.5, 0.2, 1.5 }, 0.05);
+    const turntable_shape = try b.box(.{ 3.0, 0.2, 3.0 }, 0.05);
+    const elevator = try b.body(.{ .position = .{ 0, 0.25, 0 }, .shape = platform_shape, .motion_type = 1, .object_layer = Layers.moving, .allow_sleeping = 0 }, .activate);
+    const turntable = try b.body(.{ .position = .{ 8, 0.25, 0 }, .angular_velocity = .{ 0, 1, 0 }, .shape = turntable_shape, .motion_type = 1, .object_layer = Layers.moving, .allow_sleeping = 0 }, .activate);
+    const slider = try b.body(.{ .position = .{ -8, 0.25, 0 }, .shape = platform_shape, .motion_type = 1, .object_layer = Layers.moving, .allow_sleeping = 0 }, .activate);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0.45, 0 } });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 10, 0.45, 0 } });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ -8, 0.45, 0 } });
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 8, 0.45, 2.5 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        switch (u) {
+            10 => {
+                try b.op(.set_linear_velocity, elevator, .{ .f = &.{ 0, 0.6, 0 } });
+                try b.op(.set_linear_velocity, slider, .{ .f = &.{ 1.5, 0, 0 } });
+            },
+            50 => try b.op(.set_linear_velocity, elevator, .{ .f = &.{ 0, -0.6, 0 } }),
+            60 => try b.op(.set_linear_velocity, slider, .{ .f = &.{ -1.5, 0, 0 } }),
+            85 => try b.op(.set_linear_velocity, elevator, .{ .f = &.{ 0, 0, 0 } }),
+            100 => try b.op(.set_angular_velocity, turntable, .{ .f = &.{ 0, -2, 0 } }),
+            else => {},
+        }
+        try stepCharacterVirtual(b, cv0, .{ 0, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ 0, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv2, .{ 0, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv3, if (u < 40) .{ 0, 0, -0.5 } else .{ 0, 0, 0 }, 0, null, cv_query);
+        switch (u) {
+            30 => {
+                try b.expectCharacterVirtualValue(cv0, .ground_body_is, 1, .{ .body = elevator });
+                try b.expectCharacterVirtualValue(cv0, .ground_velocity_not_zero, 1, .{});
+                try b.expectCharacterVirtualValue(cv1, .ground_body_is, 1, .{ .body = turntable });
+                try b.expectCharacterVirtualValue(cv1, .ground_velocity_not_zero, 1, .{});
+                try b.expectCharacterVirtualValue(cv2, .ground_body_is, 1, .{ .body = slider });
+                try b.objectOp(.cv_update_ground_velocity, cv1, .{});
+            },
+            70 => {
+                try b.objectOp(.cv_update_ground_velocity, cv0, .{});
+                try b.objectOp(.cv_update_ground_velocity, cv3, .{});
+            },
+            else => {},
+        }
+    }
+}
+
+/// Many characters in two CharacterVsCharacterCollisionSimple groups: 16 characters on a circle walk to its center
+/// (Update and ExtendedUpdate), push each other and the inner bodies of every fourth one, then walk back
+fn buildCharacterVirtualCrowd(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 90;
+    _ = try addFloor(b, 20, 0);
+    const n = 16;
+    var handles: [n]u32 = undefined;
+    var directions: [n][3]f32 = undefined;
+    for (&handles, &directions, 0..) |*h, *d, k| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(k)) / n;
+        d.* = .{ @floatCast(@cos(angle)), 0, @floatCast(@sin(angle)) };
+        h.* = try b.characterVirtual(.{
+            .base = .{ .shape = if (k % 3 == 0) shapes.crouching else shapes.standing },
+            .position = .{ 2.0 * d[0], 0, 2.0 * d[2] },
+            .collision_group = @intCast(k % 2),
+            .inner_body_shape = if (k % 4 == 0) shapes.inner else invalid_handle,
+            .inner_body_layer = Layers.moving,
+            .character_padding = if (k % 5 == 0) 0.04 else 0.02,
+        });
+    }
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const speed: f32 = if (u < 45) -2.0 else 2.0;
+        for (handles, directions, 0..) |h, d, k|
+            try stepCharacterVirtual(b, h, .{ speed * d[0], 0, speed * d[2] }, 0, if (k % 2 == 0) .{} else null, cv_query);
+        if (u == 40) {
+            try b.expectCharacterVirtualValue(handles[0], .num_colliding_character_contacts, 2, .{});
+            try b.objectOp(.cv_has_collided_with_character, handles[0], .{ .i = &.{handles[2]} });
+        }
+    }
+}
+
+/// The inner bodies push and are pushed: character 0 pushes three crates (HandleContact impulses, its inner body
+/// collides with them in the simulation), a ball rolls into the inner body of standing character 1 (the character
+/// sees the ball approach and gets pushed), character 2 stands on a big crate (Update adds its weight as an impulse to
+/// the crate) and walks off it
+fn buildCharacterVirtualInnerBody(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 120;
+    _ = try addFloor(b, 30, 0);
+    const crate_shape = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    for (0..3) |i|
+        _ = try b.body(.{ .position = .{ 1.5 + 0.61 * real(i), 0.3, 0 }, .shape = crate_shape, .friction = 0.5, .object_layer = Layers.moving }, .activate);
+    const ball_shape = try b.sphere(0.25);
+    _ = try b.body(.{ .position = .{ 4, 0.25, 4 }, .linear_velocity = .{ -6, 0, 0 }, .shape = ball_shape, .object_layer = Layers.moving }, .activate);
+    const big_shape = try b.box(.{ 0.8, 0.4, 0.8 }, 0.05);
+    const big = try b.body(.{ .position = .{ 0, 0.4, -4 }, .shape = big_shape, .friction = 0.8, .object_layer = Layers.moving }, .activate);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 0 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .max_strength = 500 });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 4 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0.82, -4 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .mass = 150 });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        try stepCharacterVirtual(b, cv0, if (u < 90) .{ 1.5, 0, 0 } else .{ -1.5, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ 0, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv2, if (u < 60) .{ 0, 0, 0 } else .{ 0, 0, 2 }, 0, if (u < 60) null else .{}, cv_query);
+        if (u == 30) try b.expectCharacterVirtualValue(cv2, .ground_body_is, 1, .{ .body = big });
+    }
+}
+
+/// The contact limits of TestContactPointLimit: character 0 walks in a half cylinder of 2 x 128 segments with
+/// mMaxNumHits 32 (the hit reduction merges similar contacts, GetMaxHitsExceeded), from update 50 without hit reduction
+/// (the collector gives up when full); character 1 walks next to the cylinder
+fn buildCharacterVirtualContactLimits(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 100;
+    _ = try addFloor(b, 20, 0);
+
+    // The half cylinder (its first and last segments are walls) with end caps
+    const character_radius: f32 = 0.3 + 0.02;
+    const pos_segments = 2;
+    const angle_segments = 128;
+    const cylinder_length: f32 = 2.0;
+    var vertices: [pos_segments * angle_segments][3]f32 = undefined;
+    var triangles: std.ArrayList([3]u32) = .empty;
+    defer triangles.deinit(b.allocator);
+    for (0..pos_segments) |pos| {
+        for (0..angle_segments) |angle| {
+            const start: u32 = @intCast(pos * angle_segments + angle);
+            const radius = character_radius + 0.01;
+            const angle_rad = (-0.5 + @as(f32, @floatFromInt(angle)) / angle_segments) * zolt.math.pi;
+            const s = zolt.trigonometry.sin(angle_rad);
+            const c = zolt.trigonometry.cos(angle_rad);
+            const x = cylinder_length * (-0.5 + @as(f32, @floatFromInt(pos)) / (pos_segments - 1));
+            const y = if (angle == 0 or angle == angle_segments - 1) 0.5 else (1.0 - c) * radius;
+            vertices[start] = .{ x, y, s * radius };
+            if (pos > 0 and angle > 0) {
+                try triangles.append(b.allocator, .{ start, start - 1, start - angle_segments });
+                try triangles.append(b.allocator, .{ start - 1, start - angle_segments - 1, start - angle_segments });
+            }
+        }
+    }
+    const end: u32 = angle_segments * (pos_segments - 1);
+    for (0..angle_segments - 1) |angle_usize| {
+        const angle: u32 = @intCast(angle_usize);
+        try triangles.append(b.allocator, .{ 0, angle + 1, angle });
+        try triangles.append(b.allocator, .{ end, end + angle, end + angle + 1 });
+    }
+    const cylinder = try b.indexedMesh(&vertices, triangles.items, 8);
+    _ = try b.body(.{ .position = .{ 0, 1, 0 }, .shape = cylinder, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 1, 0 }, .max_num_hits = 32 });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 1 }, .max_num_hits = 32 });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const vx: f32 = if (u < 30 or (u >= 50 and u < 75)) 2.0 else -2.0;
+        try stepCharacterVirtual(b, cv0, .{ vx, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ vx, 0, 0 }, 0, null, cv_query);
+        switch (u) {
+            10 => {
+                try b.expectCharacterVirtualValue(cv0, .max_hits_exceeded, 1, .{});
+                try b.expectCharacterVirtualValue(cv1, .max_hits_exceeded, 0, .{});
+            },
+            50 => try b.objectOp(.cv_set_hit_reduction_cos_max_angle, cv0, .{ .f = &.{-1} }),
+            60 => {
+                try b.expectCharacterVirtualValue(cv0, .max_hits_exceeded, 1, .{});
+                try b.expectCharacterVirtualValue(cv0, .num_active_contacts, 32, .{});
+            },
+            80 => try b.objectOp(.cv_set_max_num_hits, cv0, .{ .i = &.{256} }),
+            else => {},
+        }
+    }
+}
+
+/// Penetration recovery: three characters start inside a box (turned by 30 degrees, so that the contact normals have
+/// no zero components) with penetration recovery speeds 0, 0.5 and 1 (TestInitiallyIntersecting; the first one changes
+/// to 0.75 later), a fourth one with speed 0.75 between two 75 degree slabs that intersect it
+/// (TestInitiallyIntersecting2) is driven upwards, then walks out of them
+fn buildCharacterVirtualPenetration(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 60;
+    _ = try addFloor(b, 20, 0);
+    const speeds = [_]f32{ 0.0, 0.5, 1.0 };
+    var handles: [3]u32 = undefined;
+    for (&handles, speeds, 0..) |*h, speed, i| {
+        const z = 3 * real(i);
+        _ = try addStaticBox(b, .{ 0.5, 0.5, 0.5 }, .{ -0.5, 0.5, z }, axisAngle(.{ 0, 1, 0 }, std.math.pi / 6.0), 0);
+        h.* = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, z }, .penetration_recovery_speed = speed });
+    }
+    _ = try addStaticBox(b, .{ 1.0, 0.1, 1.0 }, .{ 0, 0, -4 }, axisAngle(.{ 0, 0, 1 }, 75.0 * std.math.pi / 180.0), 0);
+    _ = try addStaticBox(b, .{ 1.0, 0.1, 1.0 }, .{ 0, 0, -4 }, axisAngle(.{ 0, 0, 1 }, -75.0 * std.math.pi / 180.0), 0);
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, -4 }, .penetration_recovery_speed = 0.75 });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        for (handles) |h|
+            try stepCharacterVirtual(b, h, .{ 0, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv3, if (u < 20) .{ 0, 0, 0 } else .{ 2, 0, 0 }, 0, null, cv_query);
+        switch (u) {
+            5 => try b.expectCharacterVirtualValue(handles[0], .num_colliding_contacts, 2, .{}),
+            20 => try b.objectOp(.cv_set_penetration_recovery_speed, handles[0], .{ .f = &.{0.75} }),
+            else => {},
+        }
+    }
+}
+
+/// SetShape with and without a max penetration depth under a low ceiling: character 0 cannot stand up under it (the
+/// switch fails), walks out and stands up; character 1 stands up without the check (it penetrates the ceiling) and
+/// gets a new inner body shape; character 2 switches to no shape (fails) and back to its own shape (succeeds)
+fn buildCharacterVirtualSetShape(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 80;
+    _ = try addFloor(b, 20, 0);
+    _ = try addStaticBox(b, .{ 1.0, 0.25, 1.5 }, .{ 0, 1.7, 0 }, identity_rotation, 0); // A ceiling 1.45 m above the floor
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 0, 0, -0.7 } });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 0, 0, 0.7 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 4, 0, 0 } });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        try stepCharacterVirtual(b, cv0, if (u >= 10 and u < 40) .{ 3, 0, 0 } else .{ 0, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ 0, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv2, .{ 0, 0, 0 }, 0, .{}, cv_query);
+        switch (u) {
+            5 => {
+                try b.characterVirtualQuery(.cv_set_shape, cv0, cv_query, .{ .f = &.{0.05}, .i3 = shapes.standing });
+                try b.expectCharacterVirtualValue(cv0, .shape, shapes.crouching, .{});
+                try b.characterVirtualQuery(.cv_set_shape, cv1, cv_query, .{ .f = &.{flt_max}, .i3 = shapes.standing });
+                try b.expectCharacterVirtualValue(cv1, .shape, shapes.standing, .{});
+                try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{0.05}, .i3 = invalid_handle });
+                try b.expectCharacterVirtualValue(cv2, .shape, shapes.standing, .{});
+            },
+            10 => try b.objectOp(.cv_set_inner_body_shape, cv1, .{ .i = &.{shapes.standing} }),
+            45 => {
+                try b.characterVirtualQuery(.cv_set_shape, cv0, cv_query, .{ .f = &.{0.05}, .i3 = shapes.standing });
+                try b.expectCharacterVirtualValue(cv0, .shape, shapes.standing, .{});
+                try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{0.05}, .i3 = shapes.crouching });
+                try b.expectCharacterVirtualValue(cv2, .shape, shapes.crouching, .{});
+            },
+            50 => {
+                try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{flt_max}, .i3 = shapes.big });
+                try b.characterVirtualQuery(.cv_set_shape, cv1, cv_query, .{ .f = &.{0.05}, .i3 = shapes.crouching });
+            },
+            else => {},
+        }
+    }
+}
+
+/// Enhanced internal edge removal: two characters slide over a mesh floor of 1 m quads with a row of small bumps,
+/// pressed onto it (Update with a downward velocity); character 0 starts with mEnhancedInternalEdgeRemoval
+/// (CollideShapeWithInternalEdgeRemoval), character 1 without, they swap at update 40 (SetEnhancedInternalEdgeRemoval)
+fn buildCharacterVirtualInternalEdges(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 80;
+    const floor = try addMeshTerrain(b, 12, 1.0, true);
+    _ = try b.body(.{ .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    // Bumps: thin boxes 2 cm high across the lanes
+    for (0..4) |i|
+        _ = try addStaticBox(b, .{ 0.05, 0.01, 3.0 }, .{ -2.0 + 1.5 * real(i), 0.01, 0 }, identity_rotation, 0);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing, .enhanced_internal_edge_removal = 1 }, .position = .{ -4, 0, -1 } });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -4, 0, 1 } });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const vx: f32 = if (u < 50) 3.0 else -3.0;
+        try moveCharacterVirtual(b, cv0, .{ vx, -1.0, 0.2 }, false, cv_query);
+        try moveCharacterVirtual(b, cv1, .{ vx, -1.0, -0.2 }, u >= 60, cv_query);
+        if (u == 40) {
+            try b.objectOp(.cv_set_enhanced_internal_edge_removal, cv0, .{ .i = &.{0} });
+            try b.objectOp(.cv_set_enhanced_internal_edge_removal, cv1, .{ .i = &.{1} });
+        }
+    }
+}
+
+/// Terrain: two characters walk over a height field terrain and two over a mesh terrain with ExtendedUpdate, turning
+/// every 30 updates; one of each has enhanced internal edge removal
+fn buildCharacterVirtualTerrain(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 120;
+    const height_field = try addHeightFieldTerrain(b, 17, 1.0);
+    _ = try b.body(.{ .shape = height_field, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const mesh = try addMeshTerrain(b, 16, 1.0, false);
+    _ = try b.body(.{ .position = .{ 20, 0, 0 }, .shape = mesh, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+
+    const handles = [_]u32{
+        try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -3, 1, -2 } }),
+        try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching, .enhanced_internal_edge_removal = 1 }, .position = .{ 2, 1, 3 } }),
+        try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 17, 1, -2 } }),
+        try b.characterVirtual(.{ .base = .{ .shape = shapes.standing, .enhanced_internal_edge_removal = 1 }, .position = .{ 22, 1, 3 } }),
+    };
+    const directions = [_][3]f32{ .{ 2, 0, 0 }, .{ 0, 0, 2 }, .{ -2, 0, 0 }, .{ 0, 0, -2 } };
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        for (handles, 0..) |h, k|
+            try stepCharacterVirtual(b, h, directions[(k + u / 30) % 4], 0, .{}, cv_query);
+    }
+}
+
+/// Cross save / restore of the character states: snapshots while the characters touch the stairs (character 0), a
+/// crate (character 1) and each other (characters 3 and 4, they walk apart again from update 45), and while character
+/// 2 jumps (no contacts); restore_cross back to them (twice in a row once, every restore sets the scene back by 10
+/// updates); SaveState / RestoreState of single characters, validating too
+fn buildCharacterVirtualCrossRestore(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 80;
+    _ = try addFloor(b, 20, 0);
+    for (0..3) |s| {
+        const fs: f32 = @floatFromInt(s);
+        _ = try addStaticBox(b, .{ 0.3, 0.1 + 0.1 * fs, 1.0 }, .{ 1.3 + 0.6 * fs, 0.1 + 0.1 * fs, 0 }, identity_rotation, 0);
+    }
+    const crate_shape = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    _ = try b.body(.{ .position = .{ 1.2, 0.3, -3 }, .shape = crate_shape, .object_layer = Layers.moving }, .activate);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 0 }, .collision_group = 0 });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0.2, 0, -3 }, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving, .collision_group = 0 });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 0, 0, -1.5 }, .collision_group = 0, .listener = @intFromEnum(CharacterListenerMode.modify) });
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ -0.65, 0, 3 }, .collision_group = 0 });
+    const cv4 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 0.65, 0, 3 }, .collision_group = 0 });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        switch (u) {
+            10 => try b.sysOp(.snapshot, .{ .index = 0 }),
+            20 => try b.sysOp(.restore_cross, .{ .index = 0 }),
+            30 => try b.sysOp(.snapshot, .{ .index = 1 }),
+            40 => try b.sysOp(.restore_cross, .{ .index = 1 }),
+            41 => try b.sysOp(.restore_cross, .{ .index = 1 }),
+            50 => {
+                try b.objectOp(.cv_save_restore_state, cv0, .{ .i = &.{0} });
+                try b.objectOp(.cv_save_restore_state, cv1, .{ .i = &.{1} });
+            },
+            else => {},
+        }
+        try stepCharacterVirtual(b, cv0, .{ 2, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ 1.5, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv2, .{ 0, 0, -0.5 }, if (u == 28) 4.0 else 0.0, null, cv_query);
+        try stepCharacterVirtual(b, cv3, if (u < 45) .{ 1.5, 0, 0 } else .{ -1.5, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv4, if (u < 45) .{ -1.5, 0, 0 } else .{ 1.5, 0, 0 }, 0, null, cv_query);
+    }
+}
+
+/// Far from the origin (the base offsets of the character queries are the character's position; in double precision
+/// the positions keep their precision): stairs, a slope and two characters that walk into each other and apart again
+fn buildCharacterVirtualFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    b.num_updates = 100;
+    const o: [3]Real = .{ 5000, 200, -12000 };
+    const floor = try b.box(.{ 20, 1, 20 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    for (0..3) |s| {
+        const fs: f32 = @floatFromInt(s);
+        _ = try addStaticBox(b, .{ 0.3, 0.1 + 0.1 * fs, 1.0 }, .{ o[0] + real(1.3 + 0.6 * fs), o[1] + real(0.1 + 0.1 * fs), o[2] }, identity_rotation, 0);
+    }
+    _ = try addStaticBox(b, .{ 3.0, 0.1, 1.5 }, .{ o[0] + 3, o[1] + 1.5, o[2] - 6 }, axisAngle(.{ 0, 0, 1 }, std.math.pi / 6.0), 0);
+
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = o, .collision_group = 0, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ o[0] + 5, o[1] + 2.5, o[2] - 6 }, .collision_group = 0 });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ o[0] - 2, o[1], o[2] + 4 }, .collision_group = 0 });
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ o[0] + 2, o[1], o[2] + 4 }, .collision_group = 0 });
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        try stepCharacterVirtual(b, cv0, .{ 2.5, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv1, .{ -3, 0, 0 }, 0, .{}, cv_query);
+        try stepCharacterVirtual(b, cv2, if (u < 60) .{ 2, 0, 0 } else .{ -2, 0, 0 }, 0, null, cv_query);
+        try stepCharacterVirtual(b, cv3, if (u < 60) .{ -2, 0, 0 } else .{ 2, 0, 0 }, 0, .{}, cv_query);
+        if (u == 30)
+            try b.characterVirtualQuery(.cv_check_collision, cv2, cv_query, .{ .r = .{ o[0] - 0.5, o[1], o[2] + 4 }, .f = &.{ 0, 0, 0, 1, 1, 0, 0, 0.2 }, .i3 = shapes.standing });
+    }
+}
+
+/// One scene per CharacterListenerMode (none, record, modify) on the same setup: a floor that is a conveyor belt in
+/// modify mode, a post that it rejects, a crate that cannot push / receive impulses, a free crate; character 0 walks
+/// into them (it hits the post off center and slides around it unless the post is rejected), characters 1 and 2 walk
+/// into each other inside a sensor and apart again (character 2's user data stops it from pushing, the slowed solves
+/// of character 1)
+fn buildCharacterVirtualListener(comptime mode: CharacterListenerMode) fn (b: *SceneBuilder) Allocator.Error!void {
+    return struct {
+        fn build(b: *SceneBuilder) Allocator.Error!void {
+            const shapes = try CharacterShapes.add(b);
+            b.num_updates = 70;
+            const floor = try addFloor(b, 20, 0);
+            try b.op(.set_user_data, floor, .{ .index = 0, .count = CharacterFlags.conveyor });
+            _ = try addStaticBox(b, .{ 0.1, 0.5, 0.1 }, .{ 0.8, 0.5, 0 }, identity_rotation, CharacterFlags.userData(CharacterFlags.reject, 2));
+            const crate_shape = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+            _ = try b.body(.{ .position = .{ 1.8, 0.3, 0 }, .shape = crate_shape, .object_layer = Layers.moving, .user_data = CharacterFlags.userData(CharacterFlags.cannot_push | CharacterFlags.no_impulses, 1) }, .activate);
+            _ = try b.body(.{ .position = .{ 2.8, 0.3, 0.1 }, .shape = crate_shape, .object_layer = Layers.moving }, .activate);
+            const sensor_shape = try b.box(.{ 0.2, 0.5, 0.5 }, 0.05);
+            _ = try b.body(.{ .position = .{ 0.75, 0.5, -3 }, .shape = sensor_shape, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+
+            const m: u32 = @intFromEnum(mode);
+            const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, 0.25 }, .listener = m, .inner_body_shape = shapes.inner, .inner_body_layer = Layers.moving });
+            const cv1 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = .{ 0, 0, -3 }, .listener = m, .collision_group = 0, .user_data = CharacterFlags.userData(CharacterFlags.slow_solve, 1) });
+            const cv2 = try b.characterVirtual(.{ .base = .{ .shape = shapes.crouching }, .position = .{ 1.5, 0, -3 }, .listener = m, .collision_group = 0, .user_data = CharacterFlags.userData(CharacterFlags.cannot_push, 2) });
+
+            for (0..b.num_updates) |update| {
+                const u: u32 = @intCast(update);
+                b.at(u);
+                try stepCharacterVirtual(b, cv0, .{ 1.5, 0, 0 }, 0, .{}, cv_query);
+                try stepCharacterVirtual(b, cv1, if (u < 50) .{ 1.5, 0, 0 } else .{ -1.5, 0, 0 }, 0, null, cv_query);
+                try stepCharacterVirtual(b, cv2, if (u < 50) .{ -1.5, 0, 0 } else .{ 1.5, 0, 0 }, 0, .{}, cv_query);
+                if (u == 20) {
+                    try b.objectOp(.cv_start_tracking_contact_changes, cv0, .{});
+                    try b.objectOp(.cv_start_tracking_contact_changes, cv0, .{});
+                }
+                if (u == 22) try b.objectOp(.cv_finish_tracking_contact_changes, cv0, .{});
+                if (u == 24) try b.objectOp(.cv_finish_tracking_contact_changes, cv0, .{});
+            }
+        }
+    }.build;
+}
+
+/// PerformanceTest's CharacterVirtualScene (milestone M8, -q=Discrete): the terrain, the stairs, the wall and the 100
+/// boxes of Load, the 100 characters with inner bodies in one CharacterVsCharacterCollisionSimple of StartTest (IDs 1 to
+/// 100 like after CharacterID::sSetNextCharacterID), OptimizeBroadPhase, and UpdateTest's character steps
+/// (cv_perf_update with UpdateTest's counter) before every update, compared after every update for the first 100. The
+/// listener records the callbacks instead of hashing them (a listener that changes nothing behaves like the scene's).
+fn buildPerfCharacterVirtual(b: *SceneBuilder) Allocator.Error!void {
+    perfSystem(b);
+    b.num_updates = 100;
+
+    // Load: the mesh terrain
+    const n = 100;
+    const cell_size: f32 = 0.5;
+    const max_height: f32 = 2.0;
+    const center: f32 = @as(f32, n) * cell_size / 2;
+    const vertices = try b.allocator.alloc([3]f32, (n + 1) * (n + 1));
+    defer b.allocator.free(vertices);
+    for (0..n + 1) |x| {
+        for (0..n + 1) |z| {
+            const fx: f32 = @floatFromInt(x);
+            const fz: f32 = @floatFromInt(z);
+            const height = zolt.trigonometry.sin(fx * 20.0 / @as(f32, n)) * zolt.trigonometry.cos(fz * 20.0 / @as(f32, n));
+            vertices[z * (n + 1) + x] = .{ cell_size * fx, max_height * height, cell_size * fz };
+        }
+    }
+    const triangles = try b.allocator.alloc([3]u32, n * n * 2);
+    defer b.allocator.free(triangles);
+    var next: usize = 0;
+    for (0..n) |x| {
+        for (0..n) |z| {
+            const start: u32 = @intCast((n + 1) * z + x);
+            triangles[next] = .{ start, start + n + 1, start + 1 };
+            triangles[next + 1] = .{ start + 1, start + n + 1, start + n + 2 };
+            next += 2;
+        }
+    }
+    const mesh = try b.indexedMesh(vertices, triangles, 8);
+    _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ -center, 0, -center }, .shape = mesh, .motion_type = 0, .object_layer = Layers.non_moving }), .dont_activate);
+
+    // Load: the pyramid stairs
+    const stairs_step_height: f32 = 0.3;
+    for (0..10) |i| {
+        const fi: f32 = @floatFromInt(i);
+        const width = 4.0 - 0.4 * fi;
+        const step = try b.box(.{ width, 0.5 * stairs_step_height, width }, 0.05);
+        _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ -4.0, -1.0 + @as(Real, fi * stairs_step_height), 0 }, .shape = step, .motion_type = 0, .object_layer = Layers.non_moving }), .dont_activate);
+    }
+
+    // Load: the wall of vertical pillars
+    const wall = try b.box(.{ 0.1, 2.5, 0.1 }, 0.0);
+    for (0..10) |z|
+        _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ 2.0, 1.0, 2.0 + 0.2 * real(z) }, .shape = wall, .motion_type = 0, .object_layer = Layers.non_moving }), .dont_activate);
+
+    // Load: the dynamic boxes (CalculateInertia, mass 1)
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    for (0..10) |x| {
+        for (0..10) |z|
+            _ = try b.createAndAddBody(try b.addBodyDesc(.{ .position = .{ 4.0 * real(x) - 20.0, 5.0, 4.0 * real(z) - 20.0 }, .shape = box, .object_layer = Layers.moving, .override_mass_properties = 1, .mass = 1.0 }), .activate);
+    }
+
+    // StartTest: the characters
+    const character_height_standing: f32 = 1.35;
+    const character_radius_standing: f32 = 0.3;
+    const inner_shape_fraction: f32 = 0.9;
+    const standing_shape = try b.rotatedTranslated(try b.capsule(0.5 * character_height_standing, character_radius_standing), .{ 0, 0.5 * character_height_standing + character_radius_standing, 0 }, identity_rotation);
+    const inner_standing_shape = try b.rotatedTranslated(try b.capsule(0.5 * inner_shape_fraction * character_height_standing, inner_shape_fraction * character_radius_standing), .{ 0, 0.5 * character_height_standing + character_radius_standing, 0 }, identity_rotation);
+    var handles: [100]u32 = undefined;
+    for (0..10) |y| {
+        for (0..10) |x|
+            handles[10 * y + x] = try b.characterVirtual(.{ .base = .{ .shape = standing_shape, .supporting_volume = .{ 0, 1, 0, -character_radius_standing } }, .position = .{ 4.0 * real(x) - 20.0, 2.0, 4.0 * real(y) - 20.0 }, .inner_body_shape = inner_standing_shape, .inner_body_layer = Layers.moving, .collision_group = 0 });
+    }
+
+    // Optimize the broadphase to prevent an expensive first frame (PerformanceTest.cpp)
+    try b.sysOp(.optimize_broad_phase, .{});
+
+    // UpdateTest: change direction every 2 seconds
+    var time: f32 = 0.0;
+    for (0..b.num_updates) |update| {
+        b.at(@intCast(update));
+        time += b.delta_time;
+        var count: u64 = @as(u64, @intFromFloat(time / 2.0)) * 100;
+        for (handles) |h| {
+            try b.characterVirtualQuery(.cv_perf_update, h, .{ .layer = Layers.moving }, .{ .f = &.{b.delta_time} });
+            b.ops.items[b.ops.items.len - 1].count = @intCast(count); // UpdateTest's counter (Jolt's uint64)
+            count += 1;
         }
     }
 }

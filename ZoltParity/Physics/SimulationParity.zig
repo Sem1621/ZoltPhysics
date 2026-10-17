@@ -864,6 +864,9 @@ const ZoltWorld = struct {
 
     fn destroy(self: *ZoltWorld) void {
         const allocator = self.allocator;
+        // The records of the teardown are not compared: an allocation failure of the activation listener there (the
+        // bodies the Phase 7 objects remove are deactivated) would be swallowed and fail the creation sweep
+        self.system.setBodyActivationListener(null);
         // Phase 7 objects first (~SimWorld of the .cpp): they remove their bodies and constraints from the system
         self.destroyPhase7();
         for (self.step_listeners, self.step_listener_added) |*listener, added| {
@@ -2671,7 +2674,7 @@ const RunStats = struct {
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
 fn isPhase7Expectation(kind: OpKind) bool {
     return switch (kind) {
-        .character_expect_ground_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
+        .character_expect_ground_state, .cv_expect_ground_state, .cv_expect_value, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
         else => false,
     };
 }
@@ -3675,7 +3678,691 @@ const CharacterSlot = Phase7StubSlot;
 
 // ---- SLOT character_virtual: CharacterVirtual, CharacterVsCharacterCollisionSimple and the CharacterContactListener
 // (Phase7OpRange.character_virtual, Blocker.character_virtuals) ----
-const CharacterVirtualSlot = Phase7StubSlot;
+const CharacterVirtualSlot = struct {
+    const CharacterVirtual = zolt.CharacterVirtual;
+    const CharacterVirtualSettings = zolt.CharacterVirtualSettings;
+    const CharacterContact = zolt.CharacterContact;
+    const CharacterContactSettings = zolt.CharacterContactSettings;
+    const CharacterContactListener = zolt.CharacterContactListener;
+    const CharacterVsCharacterCollisionSimple = zolt.CharacterVsCharacterCollisionSimple;
+    const CharacterID = zolt.CharacterID;
+    const PhysicsMaterial = zolt.PhysicsMaterial;
+    const CharacterFlags = SimScenes.CharacterFlags;
+    const SimCharacterVirtual = SimScenes.SimCharacterVirtual;
+
+    const Storage = struct {
+        /// The character virtuals of the handles (one reference each, null: destroyed)
+        characters: std.ArrayList(?*CharacterVirtual) = .empty,
+        /// The CharacterVsCharacterCollisionSimple objects (`collision_group`), initialized by the first creation
+        groups: [SimScenes.num_character_collision_groups]CharacterVsCharacterCollisionSimple = undefined,
+        groups_initialized: bool = false,
+        /// CharacterListenerMode.record / modify
+        record_listener: SimCharacterContactListener = .{},
+        modify_listener: SimCharacterContactListener = .{ .modify = true },
+    };
+
+    /// SimCharacterContactListener of SimulationReference.cpp: records every callback in call order, in modify mode acts
+    /// on the CharacterFlags
+    const SimCharacterContactListener = struct {
+        recorder: *Recorder = undefined,
+        modify: bool = false,
+
+        fn flags(user_data: u64) u32 {
+            return @truncate(user_data >> 32);
+        }
+
+        pub fn onAdjustBodyVelocity(self: *SimCharacterContactListener, character: *const CharacterVirtual, body2: *const Body, linear_velocity: *Vec3, angular_velocity: *Vec3) void {
+            const linear_in = linear_velocity.*;
+            const angular_in = angular_velocity.*;
+            if (self.modify and (flags(body2.getUserData()) & CharacterFlags.conveyor) != 0) {
+                linear_velocity.* = linear_velocity.add(Vec3.init(1.5, 0.0, 0.0));
+                angular_velocity.* = angular_velocity.add(Vec3.init(0.0, 0.5, 0.0));
+            }
+            self.recorder.add(CharacterRecords.adjustBodyVelocity(character.getID().getValue(), body2.getID(), linear_in, angular_in, linear_velocity.*, angular_velocity.*));
+        }
+
+        pub fn onContactValidate(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+            return self.validate(.character_contact_validate, character, contact);
+        }
+
+        pub fn onContactAdded(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_contact_added, character, contact, settings);
+        }
+
+        pub fn onContactPersisted(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_contact_persisted, character, contact, settings);
+        }
+
+        pub fn onContactRemoved(self: *SimCharacterContactListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID) void {
+            self.recorder.add(CharacterRecords.removed(.character_contact_removed, character.getID().getValue(), body_id2, CharacterID.invalid_character_id, sub_shape_id2));
+        }
+
+        pub fn onCharacterContactValidate(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+            return self.validate(.character_vs_character_contact_validate, character, contact);
+        }
+
+        pub fn onCharacterContactAdded(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_vs_character_contact_added, character, contact, settings);
+        }
+
+        pub fn onCharacterContactPersisted(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_vs_character_contact_persisted, character, contact, settings);
+        }
+
+        pub fn onCharacterContactRemoved(self: *SimCharacterContactListener, character: *const CharacterVirtual, other_character_id: CharacterID, sub_shape_id2: SubShapeID) void {
+            self.recorder.add(CharacterRecords.removed(.character_vs_character_contact_removed, character.getID().getValue(), .invalid, other_character_id.getValue(), sub_shape_id2));
+        }
+
+        pub fn onContactSolve(self: *SimCharacterContactListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+            self.solve(.character_contact_solve, character, body_id2, CharacterID.invalid_character_id, sub_shape_id2, contact_position, contact_normal, contact_velocity, contact_material, character_velocity, new_character_velocity);
+        }
+
+        pub fn onCharacterContactSolve(self: *SimCharacterContactListener, character: *const CharacterVirtual, other_character: *const CharacterVirtual, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+            self.solve(.character_vs_character_contact_solve, character, .invalid, other_character.getID().getValue(), sub_shape_id2, contact_position, contact_normal, contact_velocity, contact_material, character_velocity, new_character_velocity);
+        }
+
+        /// A contact record (ContactRecord of the .cpp)
+        fn contactRecord(kind: RecordKind, character: *const CharacterVirtual, contact: *const CharacterContact, settings_in: u32, result: u32) SimRecord {
+            const flag_bits = CharacterRecords.contactFlags(@intFromEnum(contact.motion_type_b), contact.is_sensor_b, contact.had_collision, contact.was_discarded, contact.can_push_character, contact.is_back_facing_contact, contact.character_b != null);
+            const p = contact.position;
+            const v = contact.linear_velocity;
+            const n = contact.surface_normal;
+            const hash = SimScenes.hashCharacterContact(.{ p.getX(), p.getY(), p.getZ() }, .{ v.getX(), v.getY(), v.getZ() }, .{ n.getX(), n.getY(), n.getZ() }, contact.user_data, materialHash(contact.material));
+            return CharacterRecords.contact(kind, character.getID().getValue(), contact.base.body_b, contact.base.character_id_b.getValue(), contact.base.sub_shape_id_b, contact.contact_normal, contact.distance, contact.fraction, flag_bits, settings_in, hash, result);
+        }
+
+        fn validate(self: *SimCharacterContactListener, kind: RecordKind, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+            const result = !(self.modify and (flags(contact.user_data) & CharacterFlags.reject) != 0);
+            self.recorder.add(contactRecord(kind, character, contact, 0, @intFromBool(result)));
+            return result;
+        }
+
+        fn settingsCallback(self: *SimCharacterContactListener, kind: RecordKind, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            const settings_in = CharacterRecords.settingsBits(settings.can_push_character, settings.can_receive_impulses);
+            if (self.modify) {
+                const f = flags(contact.user_data);
+                if ((f & CharacterFlags.cannot_push) != 0)
+                    settings.can_push_character = false;
+                if ((f & CharacterFlags.no_impulses) != 0)
+                    settings.can_receive_impulses = false;
+            }
+            self.recorder.add(contactRecord(kind, character, contact, settings_in, CharacterRecords.settingsBits(settings.can_push_character, settings.can_receive_impulses)));
+        }
+
+        fn solve(self: *SimCharacterContactListener, kind: RecordKind, character: *const CharacterVirtual, body_id2: BodyID, character_id2: u32, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+            const new_velocity_in = new_character_velocity.*;
+            if (self.modify and (flags(character.getUserData()) & CharacterFlags.slow_solve) != 0)
+                new_character_velocity.* = new_character_velocity.mulScalar(0.5);
+            self.recorder.add(CharacterRecords.solve(kind, character.getID().getValue(), body_id2, character_id2, sub_shape_id2, contact_position, contact_normal, contact_velocity, materialHash(contact_material), character_velocity, new_velocity_in, new_character_velocity.*));
+        }
+    };
+
+    /// SimMaterialHash: the hash of the debug name ("null" for no material)
+    fn materialHash(material: ?*const PhysicsMaterial) u32 {
+        return SimScenes.materialHash(if (material) |m| m.getDebugName() else "null");
+    }
+
+    /// SimHasher of the .cpp (FNV-1a over the values in order)
+    const Hasher = struct {
+        hash: u32 = SimScenes.hash_seed,
+
+        fn value(self: *Hasher, v: anytype) void {
+            self.hash = SimScenes.hashBytes(self.hash, std.mem.asBytes(&v));
+        }
+
+        fn boolean(self: *Hasher, v: bool) void {
+            self.value(@as(u32, @intFromBool(v)));
+        }
+
+        fn vec3(self: *Hasher, v: Vec3) void {
+            self.value([3]f32{ v.getX(), v.getY(), v.getZ() });
+        }
+
+        fn plane(self: *Hasher, p: zolt.Plane) void {
+            self.vec3(p.getNormal());
+            self.value(p.getConstant());
+        }
+    };
+
+    /// CharacterShapeFilter.no_spheres (SimNoSpheresShapeFilter): shape 2 must not be a sphere
+    const NoSpheresShapeFilter = struct {
+        pub const overrides = .{ .shouldCollide, .shouldCollidePair };
+
+        base: zolt.ShapeFilter = .init(NoSpheresShapeFilter),
+
+        pub fn shouldCollide(self: *const NoSpheresShapeFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ self, sub_shape_id_of_shape2 };
+            return shape2.getSubType() != .sphere;
+        }
+
+        pub fn shouldCollidePair(self: *const NoSpheresShapeFilter, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ self, shape1, sub_shape_id_of_shape1, sub_shape_id_of_shape2 };
+            return shape2.getSubType() != .sphere;
+        }
+    };
+
+    /// SimCharacterFilters: the filters of a character virtual query (CharacterQueryFilter, op.i[0..3] and op.body); must
+    /// not move while a query uses it
+    const Filters = struct {
+        layer: u32,
+        body_filter_kind: u32,
+        shape_filter_kind: u32,
+        all_broad_phase_layers: zolt.BroadPhaseLayerFilter = .{},
+        all_object_layers: zolt.ObjectLayerFilter = .{},
+        default_broad_phase_layer_filter: zolt.DefaultBroadPhaseLayerFilter,
+        default_object_layer_filter: zolt.DefaultObjectLayerFilter,
+        all_bodies: zolt.BodyFilter = .{},
+        ignore_body: zolt.IgnoreSingleBodyFilter,
+        ignore_inner_body: zolt.IgnoreSingleBodyFilter,
+        no_spheres: NoSpheresShapeFilter = .{},
+
+        fn init(world: *const ZoltWorld, op: *const SimOp, inner_body: BodyID) Filters {
+            const layer: ObjectLayer = if (op.i[0] == invalid_handle) 0 else @intCast(op.i[0]);
+            return .{
+                .layer = op.i[0],
+                .body_filter_kind = op.i[1],
+                .shape_filter_kind = op.i[2],
+                .default_broad_phase_layer_filter = .init(&world.object_vs_broad_phase_layer_filter.base, layer),
+                .default_object_layer_filter = .init(&world.object_layer_pair_filter.base, layer),
+                .ignore_body = .init(world.getHandle(op.body)),
+                .ignore_inner_body = .init(inner_body),
+            };
+        }
+
+        fn broadPhase(self: *const Filters) *const zolt.BroadPhaseLayerFilter {
+            return if (self.layer == invalid_handle) &self.all_broad_phase_layers else &self.default_broad_phase_layer_filter.base;
+        }
+
+        fn objectLayers(self: *const Filters) *const zolt.ObjectLayerFilter {
+            return if (self.layer == invalid_handle) &self.all_object_layers else &self.default_object_layer_filter.base;
+        }
+
+        fn bodies(self: *const Filters) *const zolt.BodyFilter {
+            return switch (self.body_filter_kind) {
+                1 => &self.ignore_body.base,
+                2 => &self.ignore_inner_body.base,
+                else => &self.all_bodies,
+            };
+        }
+
+        /// null: the accept-all ShapeFilter
+        fn shapes(self: *Filters) ?*zolt.ShapeFilter {
+            return if (self.shape_filter_kind == 1) &self.no_spheres.base else null;
+        }
+    };
+
+    /// SimCheckCollisionCollector: the hash of the hits in their order, with the ID of the character that
+    /// CharacterVsCharacterCollisionSimple passes through SetUserData
+    const CheckCollisionCollector = struct {
+        pub const overrides = .{ .setUserData, .addHit };
+
+        base: zolt.CollideShapeCollector = .init(CheckCollisionCollector),
+        hash: Hasher = .{},
+        num_hits: u32 = 0,
+        other_character: ?*const CharacterVirtual = null,
+
+        pub fn setUserData(self: *CheckCollisionCollector, user_data: u64) void {
+            self.other_character = @ptrFromInt(user_data);
+        }
+
+        pub fn addHit(self: *CheckCollisionCollector, result: *const CollideShapeResult) void {
+            self.hash.vec3(result.contact_point_on1);
+            self.hash.vec3(result.contact_point_on2);
+            self.hash.vec3(result.penetration_axis);
+            self.hash.value(result.penetration_depth);
+            self.hash.value(result.sub_shape_id1.getValue());
+            self.hash.value(result.sub_shape_id2.getValue());
+            self.hash.value(result.body_id2.getIndexAndSequenceNumber());
+            self.hash.value(if (self.other_character) |c| c.getID().getValue() else CharacterID.invalid_character_id);
+            self.num_hits += 1;
+        }
+
+        fn finish(self: *CheckCollisionCollector) u32 {
+            self.hash.value(self.num_hits);
+            return self.hash.hash;
+        }
+    };
+
+    /// The shape of a shape index (GetShape of the .cpp, `invalid_handle`: null)
+    fn getShape(world: *const ZoltWorld, index: u32) ?*const Shape {
+        return if (index != invalid_handle) world.shapes.items[index].get().? else null;
+    }
+
+    /// GetShapeIndex of the .cpp (`invalid_handle` for a shape that is not a scene shape)
+    fn getShapeIndex(world: *const ZoltWorld, shape: ?*const Shape) u32 {
+        for (world.shapes.items, 0..) |s, i| {
+            if (s.get() == shape) return @intCast(i);
+        }
+        return invalid_handle;
+    }
+
+    /// GetObject of the .cpp: the character of a handle (a scene that uses a destroyed or unknown handle is an error)
+    fn getCharacter(world: *ZoltWorld, index: u32) !*CharacterVirtual {
+        const characters = world.phase7.character_virtuals.characters.items;
+        if (index >= characters.len or characters[index] == null) {
+            std.debug.print("SimulationParity: operation on character virtual handle {d} that does not exist\n", .{index});
+            return error.InvalidScene;
+        }
+        return characters[index].?;
+    }
+
+    /// GetCharacterListener of the .cpp
+    fn getListener(world: *ZoltWorld, mode: u32) !?CharacterContactListener {
+        const storage = &world.phase7.character_virtuals;
+        storage.record_listener.recorder = &world.character_recorder;
+        storage.modify_listener.recorder = &world.character_recorder;
+        return switch (mode) {
+            0 => null,
+            1 => CharacterContactListener.init(&storage.record_listener),
+            2 => CharacterContactListener.init(&storage.modify_listener),
+            else => {
+                std.debug.print("SimulationParity: unknown character listener mode {d}\n", .{mode});
+                return error.InvalidScene;
+            },
+        };
+    }
+
+    /// The CharacterVsCharacterCollisionSimple of a collision group
+    fn getGroup(world: *ZoltWorld, index: u32) *CharacterVsCharacterCollisionSimple {
+        const storage = &world.phase7.character_virtuals;
+        if (!storage.groups_initialized) {
+            for (&storage.groups) |*g| g.* = .init(world.allocator);
+            storage.groups_initialized = true;
+        }
+        return &storage.groups[index];
+    }
+
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const d: *const SimCharacterVirtual = &world.desc.character_virtuals[op.index];
+        var settings = CharacterVirtualSettings.init(allocator);
+        defer settings.deinit();
+        settings.base.up = load3(&d.base.up);
+        settings.base.supporting_volume = zolt.Plane.init(load3(d.base.supporting_volume[0..3]), d.base.supporting_volume[3]);
+        settings.base.max_slope_angle = d.base.max_slope_angle;
+        settings.base.enhanced_internal_edge_removal = d.base.enhanced_internal_edge_removal != 0;
+        settings.base.shape.set(getShape(world, d.base.shape));
+        settings.id = CharacterID.init(d.id);
+        settings.mass = d.mass;
+        settings.max_strength = d.max_strength;
+        settings.shape_offset = load3(&d.shape_offset);
+        settings.back_face_mode = @enumFromInt(d.back_face_mode);
+        settings.predictive_contact_distance = d.predictive_contact_distance;
+        settings.max_collision_iterations = d.max_collision_iterations;
+        settings.max_constraint_iterations = d.max_constraint_iterations;
+        settings.min_time_remaining = d.min_time_remaining;
+        settings.collision_tolerance = d.collision_tolerance;
+        settings.character_padding = d.character_padding;
+        settings.max_num_hits = d.max_num_hits;
+        settings.hit_reduction_cos_max_angle = d.hit_reduction_cos_max_angle;
+        settings.penetration_recovery_speed = d.penetration_recovery_speed;
+        settings.inner_body_shape.set(getShape(world, d.inner_body_shape));
+        settings.inner_body_id_override = BodyID.init(d.inner_body_id_override);
+        settings.inner_body_layer = @intCast(d.inner_body_layer);
+
+        const storage = &world.phase7.character_virtuals;
+        try storage.characters.ensureUnusedCapacity(allocator, 1);
+        const character = try CharacterVirtual.create(allocator, &settings, loadR3(&d.position), loadQuat(&d.rotation), d.user_data, &world.system);
+        character.base.addRef();
+        storage.characters.appendAssumeCapacity(character);
+        character.setListener(try getListener(world, d.listener));
+        if (d.collision_group != invalid_handle) {
+            const group = getGroup(world, d.collision_group);
+            try group.add(character);
+            character.setCharacterVsCharacterCollision(group.characterVsCharacterCollision());
+        }
+        return character.getInnerBodyID().getIndexAndSequenceNumber();
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const i = &op.i;
+        const f = &op.f;
+        const r = loadR3(&op.r);
+        const temp = world.temp.tempAllocator();
+
+        const c = try getCharacter(world, op.index);
+        var filters = Filters.init(world, op, c.getInnerBodyID());
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .cv_destroy => {
+                const storage = &world.phase7.character_virtuals;
+                if (storage.groups_initialized) {
+                    for (&storage.groups) |*g| g.remove(c);
+                }
+                storage.characters.items[op.index] = null;
+                c.base.release();
+                return 0;
+            },
+            .cv_set_linear_velocity => c.setLinearVelocity(load3(f[0..3])),
+            .cv_set_position => c.setPosition(r),
+            .cv_set_rotation => c.setRotation(loadQuat(f[0..4])),
+            .cv_set_up => c.base.setUp(load3(f[0..3])),
+            .cv_set_max_slope_angle => c.base.setMaxSlopeAngle(f[0]),
+            .cv_set_supporting_volume => c.base.setSupportingVolume(zolt.Plane.init(load3(f[0..3]), f[3])),
+            .cv_set_mass => c.setMass(f[0]),
+            .cv_set_max_strength => c.setMaxStrength(f[0]),
+            .cv_set_penetration_recovery_speed => c.setPenetrationRecoverySpeed(f[0]),
+            .cv_set_enhanced_internal_edge_removal => c.setEnhancedInternalEdgeRemoval(i[0] != 0),
+            .cv_set_max_num_hits => c.setMaxNumHits(i[0]),
+            .cv_set_hit_reduction_cos_max_angle => c.setHitReductionCosMaxAngle(f[0]),
+            .cv_set_shape_offset => c.setShapeOffset(load3(f[0..3])),
+            .cv_set_user_data => c.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32)),
+            .cv_set_listener => c.setListener(try getListener(world, i[0])),
+            .cv_set_character_vs_character_collision => c.setCharacterVsCharacterCollision(if (i[0] != invalid_handle) getGroup(world, i[0]).characterVsCharacterCollision() else null),
+            .cv_add_to_collision_group => try getGroup(world, i[0]).add(c),
+            .cv_remove_from_collision_group => getGroup(world, i[0]).remove(c),
+            .cv_update => try c.update(f[0], load3(f[1..4]), filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp),
+            .cv_extended_update => {
+                // SimLoadExtendedUpdateSettings(f + 4)
+                const s: CharacterVirtual.ExtendedUpdateSettings = .{
+                    .stick_to_floor_step_down = load3(f[4..7]),
+                    .walk_stairs_step_up = load3(f[7..10]),
+                    .walk_stairs_min_step_forward = f[10],
+                    .walk_stairs_step_forward_test = f[11],
+                    .walk_stairs_cos_angle_forward_contact = f[12],
+                    .walk_stairs_step_down_extra = load3(f[13..16]),
+                };
+                try c.extendedUpdate(f[0], load3(f[1..4]), &s, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp);
+            },
+            .cv_stick_to_floor => return @intFromBool(try c.stickToFloor(load3(f[0..3]), filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp)),
+            .cv_walk_stairs => return @intFromBool(try c.walkStairs(f[0], load3(f[1..4]), load3(f[4..7]), load3(f[7..10]), load3(f[10..13]), filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp)),
+            .cv_can_walk_stairs => return @intFromBool(c.canWalkStairs(load3(f[0..3]))),
+            .cv_refresh_contacts => try c.refreshContacts(filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp),
+            .cv_update_ground_velocity => c.updateGroundVelocity(),
+            .cv_set_shape => return @intFromBool(try c.setShape(getShape(world, i[3]), f[0], filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp)),
+            .cv_set_inner_body_shape => try c.setInnerBodyShape(getShape(world, i[0]).?),
+            .cv_cancel_velocity_towards_steep_slopes => {
+                var h: Hasher = .{};
+                h.vec3(c.cancelVelocityTowardsSteepSlopes(load3(f[0..3])));
+                return h.hash;
+            },
+            .cv_start_tracking_contact_changes => try c.startTrackingContactChanges(),
+            .cv_finish_tracking_contact_changes => c.finishTrackingContactChanges(),
+            .cv_check_collision => {
+                var collector: CheckCollisionCollector = .{};
+                try c.checkCollision(r, loadQuat(f[0..4]), load3(f[4..7]), f[7], getShape(world, i[3]).?, r, &collector.base, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes());
+                return collector.finish();
+            },
+            .cv_settings_hash => {
+                var s = c.getCharacterVirtualSettings();
+                defer s.deinit();
+                var h: Hasher = .{};
+                h.vec3(s.base.up);
+                h.plane(s.base.supporting_volume);
+                h.value(s.base.max_slope_angle);
+                h.boolean(s.base.enhanced_internal_edge_removal);
+                h.value(getShapeIndex(world, s.base.shape.get()));
+                h.value(s.id.getValue());
+                h.value(s.mass);
+                h.value(s.max_strength);
+                h.vec3(s.shape_offset);
+                h.value(@as(u32, @intFromEnum(s.back_face_mode)));
+                h.value(s.predictive_contact_distance);
+                h.value(s.max_collision_iterations);
+                h.value(s.max_constraint_iterations);
+                h.value(s.min_time_remaining);
+                h.value(s.collision_tolerance);
+                h.value(s.character_padding);
+                h.value(s.max_num_hits);
+                h.value(s.hit_reduction_cos_max_angle);
+                h.value(s.penetration_recovery_speed);
+                h.value(getShapeIndex(world, s.inner_body_shape.get()));
+                h.value(s.inner_body_id_override.getIndexAndSequenceNumber());
+                h.value(@as(u32, s.inner_body_layer));
+                return h.hash;
+            },
+            .cv_has_collided_with_body => return @intFromBool(c.hasCollidedWith(world.getHandle(op.body))),
+            .cv_has_collided_with_character => {
+                const other = try getCharacter(world, i[0]);
+                return @as(u32, @intFromBool(c.hasCollidedWithCharacterID(other.getID()))) | (@as(u32, @intFromBool(c.hasCollidedWithCharacter(other))) << 1);
+            },
+            .cv_expect_ground_state => return @bitCast(@intFromEnum(c.base.getGroundState())), // Changes nothing, the driver checks the result
+            .cv_save_restore_state => {
+                var recorder = StateRecorderImpl.init(world.allocator);
+                defer recorder.deinit();
+                c.saveState(recorder.recorder());
+                if (recorder.isFailed()) return error.OutOfMemory;
+                const hash = SimScenes.hashBytes(SimScenes.hash_seed, recorder.getData());
+                recorder.rewind();
+                recorder.recorder().setValidating(i[0] != 0);
+                try c.restoreState(recorder.recorder());
+                return hash;
+            },
+            .cv_expect_value => return switch (i[0]) { // Changes nothing, the driver checks the result
+                0 => @intFromBool(c.getMaxHitsExceeded()),
+                1 => @intCast(c.getActiveContacts().len),
+                2, 3 => blk: {
+                    var n: u32 = 0;
+                    for (c.getActiveContacts()) |*contact| {
+                        if (contact.had_collision and (i[0] == 2 or contact.character_b != null))
+                            n += 1;
+                    }
+                    break :blk n;
+                },
+                4 => @intFromBool(c.base.getGroundBodyID().eql(world.getHandle(op.body))),
+                5 => @intFromBool(!c.base.getGroundVelocity().isNearZero(.{ .max_dist_sq = 1.0e-6 })),
+                6 => getShapeIndex(world, c.getShape()),
+                else => {
+                    std.debug.print("SimulationParity: unknown character virtual value {d}\n", .{i[0]});
+                    return error.InvalidScene;
+                },
+            },
+            .cv_set_step_velocity => {
+                // Character::Step of CharacterVirtualTests.cpp
+                const current_vertical_velocity = Vec3.init(0, c.getLinearVelocity().getY(), 0);
+                const ground_velocity = c.base.getGroundVelocity();
+                var new_velocity: Vec3 = undefined;
+                if (c.base.getGroundState() == .on_ground and // If on ground
+                    (current_vertical_velocity.getY() - ground_velocity.getY()) < 0.1) // And not moving away from ground
+                {
+                    // Assume velocity of ground when on ground
+                    new_velocity = ground_velocity;
+
+                    // Jump
+                    new_velocity = new_velocity.add(Vec3.init(0, f[7], 0));
+                } else new_velocity = current_vertical_velocity;
+
+                // Gravity
+                new_velocity = new_velocity.add(load3(f[3..6]).mulScalar(f[6]));
+
+                // Player input
+                new_velocity = new_velocity.add(load3(f[0..3]));
+
+                c.setLinearVelocity(new_velocity);
+            },
+            .cv_perf_update => {
+                // The step of a character in CharacterVirtualScene::UpdateTest of PerformanceTest
+
+                // Calculate new vertical velocity
+                var new_velocity: Vec3 = undefined;
+                if (c.base.getGroundState() == .on_ground and // If on ground
+                    c.getLinearVelocity().getY() < 0.1) // And not moving away from ground
+                    new_velocity = Vec3.zero()
+                else
+                    new_velocity = c.getLinearVelocity().mul(Vec3.init(0, 1, 0));
+                new_velocity = new_velocity.add(world.system.getGravity().mulScalar(f[0]));
+
+                // Deterministic random input
+                const count: u64 = op.count;
+                const hash = zolt.HashCombine.hash(count);
+                const x: i32 = @intCast(hash % 10);
+                const y: i32 = @intCast((hash / 10) % 10);
+                const speed: i32 = @intCast((hash / 100) % 10);
+
+                // Determine target position
+                const target = RVec3.init(4.0 * @as(Real, @floatFromInt(x)) - 20.0, 5.0, 4.0 * @as(Real, @floatFromInt(y)) - 20.0);
+
+                // Determine new character velocity
+                var direction = target.sub(c.getPosition()).toVec3().normalizedOr(Vec3.zero());
+                direction.setY(0);
+                new_velocity = new_velocity.add(direction.mulScalar(5.0 + 0.5 * @as(f32, @floatFromInt(speed))));
+                c.setLinearVelocity(new_velocity);
+
+                // Update the character position
+                const update_settings: CharacterVirtual.ExtendedUpdateSettings = .{};
+                try c.extendedUpdate(f[0], world.system.getGravity(), &update_settings, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp);
+            },
+            else => |kind| {
+                std.debug.print("SimulationParity: unknown character virtual operation {t}\n", .{kind});
+                return error.InvalidScene;
+            },
+        }
+        return 0;
+    }
+
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        for (world.phase7.character_virtuals.characters.items, 0..) |maybe_character, index| {
+            const c = maybe_character orelse continue;
+            const h: u32 = @intCast(index);
+
+            // The SaveState bytes (WriteSaveState)
+            var recorder = StateRecorderImpl.init(world.allocator);
+            defer recorder.deinit();
+            c.saveState(recorder.recorder());
+            if (recorder.isFailed()) return error.OutOfMemory;
+            try w.begin(.cv_save_state, h, 0);
+            try w.raw(recorder.getData());
+            w.end();
+
+            try w.begin(.cv_properties, h, 0);
+            try w.value(c.getID().getValue());
+            try w.value(c.getUserData());
+            try w.value(c.getInnerBodyID().getIndexAndSequenceNumber());
+            try w.value(getShapeIndex(world, c.getShape()));
+            try w.value(c.getMass());
+            try w.value(c.getMaxStrength());
+            try w.value(c.getPenetrationRecoverySpeed());
+            try w.boolean(c.getEnhancedInternalEdgeRemoval());
+            try w.value(c.getCharacterPadding());
+            try w.value(c.getMaxNumHits());
+            try w.value(c.getHitReductionCosMaxAngle());
+            try w.boolean(c.getMaxHitsExceeded());
+            try w.vec3(c.getShapeOffset());
+            w.end();
+
+            try w.begin(.cv_base, h, 0);
+            try w.vec3(c.base.getUp());
+            try w.value(c.base.getCosMaxSlopeAngle());
+            const supporting_volume = c.base.getSupportingVolume();
+            try w.vec3(supporting_volume.getNormal());
+            try w.value(supporting_volume.getConstant());
+            try w.value(materialHash(c.base.getGroundMaterial()));
+            try w.value(c.base.getGroundUserData());
+            try w.boolean(c.base.isSupported());
+            try w.boolean(c.canWalkStairs(c.getLinearVelocity()));
+            w.end();
+
+            try w.begin(.cv_transforms, h, 0);
+            try w.rvec3(c.getCenterOfMassPosition());
+            try w.rmat44(c.getWorldTransform());
+            try w.rmat44(c.getCenterOfMassTransform());
+            w.end();
+
+            // WriteTransformedShape
+            var ts = c.getTransformedShape();
+            defer ts.deinit();
+            try w.begin(.cv_transformed_shape, h, 0);
+            try w.rvec3(ts.shape_position_com);
+            try w.quat(ts.shape_rotation);
+            try w.vec3(ts.getShapeScale());
+            try w.value(ts.body_id.getIndexAndSequenceNumber());
+            try w.value(getShapeIndex(world, ts.shape.get()));
+            w.end();
+
+            const contacts = c.getActiveContacts();
+            try w.begin(.cv_num_active_contacts, h, 0);
+            try w.value(@as(u32, @intCast(contacts.len)));
+            w.end();
+            for (contacts, 0..) |*contact, item| {
+                try w.begin(.cv_active_contact, h, @intCast(item));
+                try w.value(contact.base.body_b.getIndexAndSequenceNumber());
+                try w.value(contact.base.character_id_b.getValue());
+                try w.value(contact.base.sub_shape_id_b.getValue());
+                try w.rvec3(contact.position);
+                try w.vec3(contact.linear_velocity);
+                try w.vec3(contact.contact_normal);
+                try w.vec3(contact.surface_normal);
+                try w.value(contact.distance);
+                try w.value(contact.fraction);
+                try w.value(@as(u32, @intFromEnum(contact.motion_type_b)));
+                try w.boolean(contact.is_sensor_b);
+                try w.boolean(contact.character_b != null);
+                try w.value(contact.user_data);
+                try w.value(materialHash(contact.material));
+                try w.boolean(contact.had_collision);
+                try w.boolean(contact.was_discarded);
+                try w.boolean(contact.can_push_character);
+                try w.boolean(contact.is_back_facing_contact);
+                w.end();
+            }
+        }
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.character_virtuals.characters.items) |maybe_character| {
+            if (maybe_character) |c| c.saveState(recorder.recorder());
+        }
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.character_virtuals.characters.items) |maybe_character| {
+            if (maybe_character) |c| try c.restoreState(recorder.recorder());
+        }
+    }
+
+    /// ~SimWorld: the group lists are cleared, then the character virtuals released in handle order (each removes and
+    /// destroys its inner body)
+    fn destroyAll(world: *ZoltWorld) void {
+        const storage = &world.phase7.character_virtuals;
+        if (storage.groups_initialized) {
+            for (&storage.groups) |*g| g.deinit();
+            storage.groups_initialized = false;
+        }
+        for (storage.characters.items) |maybe_character| {
+            if (maybe_character) |c| c.base.release();
+        }
+        storage.characters.deinit(world.allocator);
+        storage.characters = .empty;
+    }
+
+    /// The CharacterID test (jolt_sim_character_id_sequence of the .cpp): which constructions consume an ID
+    fn characterIdSequence(world: *ZoltWorld, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void {
+        const allocator = world.allocator;
+        const next = struct {
+            fn next() u32 {
+                const value = CharacterID.nextCharacterID().getValue();
+                CharacterID.setNextCharacterID(.{ .next_value = value });
+                return value;
+            }
+        }.next;
+        CharacterID.setNextCharacterID(.{ .next_value = first_id });
+        defer CharacterID.setNextCharacterID(.{});
+        var a = CharacterVirtualSettings.init(allocator);
+        defer a.deinit();
+        a.base.shape.set(getShape(world, 0));
+        out[0] = a.id.getValue();
+        out[1] = next();
+        var b = CharacterVirtualSettings.initCopy(allocator, &a);
+        defer b.deinit();
+        out[2] = b.id.getValue();
+        out[3] = next();
+        var c = CharacterVirtualSettings.init(allocator);
+        defer c.deinit();
+        c.assign(&a);
+        out[4] = c.id.getValue();
+        out[5] = next();
+        {
+            const character = try CharacterVirtual.create(allocator, &a, RVec3.zero(), Quat.identity(), 0, &world.system);
+            character.base.addRef();
+            defer character.base.release();
+            out[6] = character.getID().getValue();
+            out[7] = next();
+            var s = character.getCharacterVirtualSettings();
+            defer s.deinit();
+            out[8] = s.id.getValue();
+            out[9] = next();
+        }
+    }
+};
 
 // ---- SLOT ragdoll: Ragdoll, RagdollSettings (Phase7OpRange.ragdoll, Blocker.ragdolls) ----
 const RagdollSlot = Phase7StubSlot;

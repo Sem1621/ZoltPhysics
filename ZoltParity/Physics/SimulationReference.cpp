@@ -1016,6 +1016,9 @@ enum class ESimOp : uint32
 	CVHasCollidedWithCharacter = 465,
 	CVExpectGroundState = 466,
 	CVSaveRestoreState = 467,
+	CVExpectValue = 468,
+	CVSetStepVelocity = 469,
+	CVPerfUpdate = 470,
 	// Phase7OpRange.ragdoll
 	CreateRagdoll = 490,
 	RagdollAddToPhysicsSystem = 491,
@@ -3158,6 +3161,91 @@ public:
 				recorder.SetValidating(i[0] != 0);
 				c->RestoreState(recorder);
 				return SimHashBytes(2166136261u, data.data(), data.size());
+			}
+
+		case ESimOp::CVExpectValue:											// Changes nothing, the driver checks the result
+			switch (i[0])
+			{
+			case 0:		return c->GetMaxHitsExceeded()? 1 : 0;
+			case 1:		return uint32(c->GetActiveContacts().size());
+			case 2:
+			case 3:
+				{
+					uint32 n = 0;
+					for (const CharacterContact &contact : c->GetActiveContacts())
+						if (contact.mHadCollision && (i[0] == 2 || contact.mCharacterB != nullptr))
+							++n;
+					return n;
+				}
+			case 4:		return c->GetGroundBodyID() == GetHandle(inOp.mBody)? 1 : 0;
+			case 5:		return c->GetGroundVelocity().IsNearZero(1.0e-6f)? 0 : 1;
+			case 6:		return GetShapeIndex(c->GetShape());
+			default:
+				Trace("SimulationReference: unknown character virtual value %u", i[0]);
+				abort();
+			}
+
+		case ESimOp::CVSetStepVelocity:
+			{
+				// Character::Step of CharacterVirtualTests.cpp
+				Vec3 current_vertical_velocity = Vec3(0, c->GetLinearVelocity().GetY(), 0);
+				Vec3 ground_velocity = c->GetGroundVelocity();
+				Vec3 new_velocity;
+				if (c->GetGroundState() == CharacterBase::EGroundState::OnGround // If on ground
+					&& (current_vertical_velocity.GetY() - ground_velocity.GetY()) < 0.1f) // And not moving away from ground
+				{
+					// Assume velocity of ground when on ground
+					new_velocity = ground_velocity;
+
+					// Jump
+					new_velocity += Vec3(0, f[7], 0);
+				}
+				else
+					new_velocity = current_vertical_velocity;
+
+				// Gravity
+				new_velocity += SimLoad3(f + 3) * f[6];
+
+				// Player input
+				new_velocity += SimLoad3(f);
+
+				c->SetLinearVelocity(new_velocity);
+				break;
+			}
+
+		case ESimOp::CVPerfUpdate:
+			{
+				// The step of a character in CharacterVirtualScene::UpdateTest of PerformanceTest
+
+				// Calculate new vertical velocity
+				Vec3 new_velocity;
+				if (c->GetGroundState() == CharacterVirtual::EGroundState::OnGround	// If on ground
+					&& c->GetLinearVelocity().GetY() < 0.1f)						// And not moving away from ground
+					new_velocity = Vec3::sZero();
+				else
+					new_velocity = c->GetLinearVelocity() * Vec3(0, 1, 0);
+				new_velocity += mSystem.GetGravity() * f[0];
+
+				// Deterministic random input
+				uint64 count = inOp.mCount;
+				uint64 hash = Hash<uint64> {} (count);
+				int x = int(hash % 10);
+				int y = int((hash / 10) % 10);
+				int speed = int((hash / 100) % 10);
+
+				// Determine target position
+				RVec3 target = RVec3(Real(4.0) * x - Real(20.0), Real(5.0), Real(4.0) * y - Real(20.0)); // PerformanceTest: RVec3(4.0_r * x - 20.0_r, 5.0_r, 4.0_r * y - 20.0_r)
+
+				// Determine new character velocity
+				Vec3 direction = Vec3(target - c->GetPosition()).NormalizedOr(Vec3::sZero());
+				direction.SetY(0);
+				new_velocity += (5.0f + 0.5f * speed) * direction;
+				c->SetLinearVelocity(new_velocity);
+
+				// Update the character position
+				CharacterVirtual::ExtendedUpdateSettings update_settings;
+				c->ExtendedUpdate(f[0], mSystem.GetGravity(), update_settings, filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator);
+				break;
 			}
 
 		default:

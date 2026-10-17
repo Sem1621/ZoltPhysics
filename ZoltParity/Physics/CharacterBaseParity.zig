@@ -235,7 +235,7 @@ test "CharacterBase SaveState bytes and cross RestoreState" {
         defer restore.deinit();
         restore.writeBytes(jolt_bytes[0..size]);
         restore.rewind();
-        other.base.restoreState(restore.recorder());
+        try other.base.restoreState(restore.recorder());
         try std.testing.expect(!restore.isFailed());
         zolt_restore_checker.check(ground.state, getGround(&other.base), ground);
         zolt_restore_checker.check(ground.state, @as(u32, @intFromBool(other.base.getGroundUserData() == 0 and other.base.getGroundMaterial() == PhysicsMaterial.default)), 1);

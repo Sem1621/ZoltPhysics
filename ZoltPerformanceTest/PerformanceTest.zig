@@ -1,15 +1,15 @@
 //! Port of: PerformanceTest/PerformanceTest.cpp
 //! Status: partial
 //! Missing: RagdollScene (-s=Ragdoll, -s=RagdollSinglePile and the default scene: Skeleton, Ragdoll, the constraints and
-//! the ObjectStream loading of Assets/, Phases 6 to 8) and CharacterVirtualScene (-s=CharacterVirtual: CharacterVirtual,
-//! Phase 7). Selecting one of them prints an error and returns 1.
+//! the ObjectStream loading of Assets/, Phases 6 to 8). Selecting one of them prints an error and returns 1.
 //! Not ported: -r (JPH_DEBUG_RENDERER, DebugRendererRecorder: TODO(debug_renderer); like a Jolt build without the debug
 //! renderer the argument is ignored), the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are
 //! compiled out as in Jolt's Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
 //!
 //! Milestone M6 (SimulationArchitecture section 3): `zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast
 //! -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892` must print Jolt's published hash (determinism_check.yml), in
-//! both precisions and for every thread count.
+//! both precisions and for every thread count. Milestone M8 (CharacterVehicleArchitecture section 4): the same for
+//! `-q=Discrete -t=max -s=CharacterVirtual -validate_hash=0xc1d4e05b164b1221` (0xa0b16727aa16fdb0 in double precision).
 //!
 //! The program is a statement by statement port of PerformanceTest.cpp, with the same arguments, the same output text
 //! and the same hash:
@@ -44,6 +44,7 @@ const PyramidScene = @import("PyramidScene.zig").PyramidScene;
 const LargeMeshScene = @import("LargeMeshScene.zig").LargeMeshScene;
 const MaxBodiesScene = @import("MaxBodiesScene.zig").MaxBodiesScene;
 const HighSpeedScene = @import("HighSpeedScene.zig").HighSpeedScene;
+const CharacterVirtualScene = @import("CharacterVirtualScene.zig").CharacterVirtualScene;
 
 const Allocator = std.mem.Allocator;
 const Real = zolt.Real;
@@ -257,7 +258,6 @@ fn sceneNotPorted(name: []const u8, needs: []const u8) u8 {
 }
 
 const ragdoll_needs = "Skeleton, Ragdoll, the constraints and the ObjectStream loading of Assets/ (Phases 6 to 8)";
-const character_virtual_needs = "CharacterVirtual (Phase 7)";
 
 /// Replace the scene (unique_ptr assignment: the old scene is destroyed)
 fn setScene(scene: *?PerformanceTestScene, new_scene: PerformanceTestScene) void {
@@ -307,7 +307,7 @@ pub fn main(init: std.process.Init) !u8 {
             else if (std.mem.eql(u8, name, "LargeMesh"))
                 setScene(&scene, (try LargeMeshScene.create(allocator, io)).scene())
             else if (std.mem.eql(u8, name, "CharacterVirtual"))
-                return sceneNotPorted("CharacterVirtual", character_virtual_needs)
+                setScene(&scene, (try CharacterVirtualScene.create(allocator)).scene())
             else if (std.mem.eql(u8, name, "MaxBodies"))
                 setScene(&scene, (try MaxBodiesScene.create(allocator)).scene())
             else if (std.mem.eql(u8, name, "HighSpeed"))
@@ -475,6 +475,7 @@ pub fn main(init: std.process.Init) !u8 {
 
                 // Start test scene
                 try s.startTest(&physics_system, motion_quality);
+                errdefer s.stopTest(&physics_system); // Zolt: on an error the scene's objects leave the system before it is destroyed
 
                 // Disable sleeping if requested
                 if (disable_sleep) {
@@ -752,6 +753,7 @@ test "PerformanceTest scenes give Jolt's hashes after a few updates" {
     try std.testing.expectEqual(@as(u64, if (dp) 0x6b13f19597ad79f4 else 0xbb1738ab6ae53857), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .discrete, 100));
     try std.testing.expectEqual(@as(u64, if (dp) 0x2b4f1c7cf1a90e26 else 0x93894e4298eed8e1), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
     try std.testing.expectEqual(@as(u64, if (dp) 0x5109b031ac53c66e else 0x375628eabc094b31), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
+    try std.testing.expectEqual(@as(u64, if (dp) 0x4ca08591ebc72ba2 else 0xcb05430a62f9c7f), try runSceneForTest((try CharacterVirtualScene.create(allocator)).scene(), .discrete, 10));
 }
 
 test "validateState: -vs fails on a state that differs or ends early" {
