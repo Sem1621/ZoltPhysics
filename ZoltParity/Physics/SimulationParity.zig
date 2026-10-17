@@ -3980,7 +3980,7 @@ const CharacterSlot = struct {
 
     fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
         for (world.phase7.characters.characters.items) |*ref| {
-            if (ref.get()) |base| base.restoreState(recorder.recorder());
+            if (ref.get()) |base| try base.restoreState(recorder.recorder());
         }
     }
 

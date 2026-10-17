@@ -977,7 +977,7 @@ test "Character: an embedded character, SaveState / RestoreState are CharacterBa
     character.postSimulation(0.05, .{});
     try testing.expectEqual(CharacterBase.GroundState.in_air, character.base.getGroundState());
     recorder.rewind();
-    character.base.restoreState(recorder.recorder());
+    try character.base.restoreState(recorder.recorder());
     try testing.expect(!recorder.isFailed());
     var restored = ground;
     restored.user_data = 0;
