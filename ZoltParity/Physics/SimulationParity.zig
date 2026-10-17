@@ -4909,8 +4909,15 @@ const RagdollSlot = struct {
         s.skeleton = .init(try Skeleton.create(allocator));
         const skeleton = s.skeleton.get().?;
         for (joints, 0..) |*joint, j| {
-            var name: [32]u8 = undefined;
-            _ = try skeleton.addJointWithParentIndex(try std.fmt.bufPrint(&name, "Joint{d}", .{j}), joint.parent);
+            var name_buffer: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "Joint{d}", .{j});
+            if (joint.parent < @as(i32, @intCast(j))) {
+                _ = try skeleton.addJointWithParentIndex(name, joint.parent);
+            } else {
+                // A joint that is its own parent: the parent index is set directly (as the .cpp does)
+                _ = try skeleton.addJoint(name, .{});
+                skeleton.getJointMut(j).parent_joint_index = joint.parent;
+            }
         }
 
         try s.parts.ensureTotalCapacity(allocator, joints.len);

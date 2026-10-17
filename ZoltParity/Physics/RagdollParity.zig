@@ -811,7 +811,26 @@ const Stats = struct {
     valid_truncations: u32 = 0,
     truncation_errors: u32 = 0,
     restored_without_parts: u32 = 0,
+    /// CalculateConstraintPriorities with a base priority that overflows (Jolt asserts "Base priority is too high and
+    /// will cause overflows": release only)
+    priority_base_overflows: u32 = 0,
+    /// CalculateConstraintPriorities of a skeleton whose joints are not ordered (Jolt asserts AreJointsCorrectlyOrdered:
+    /// release only)
+    priority_unordered_skeletons: u32 = 0,
 };
+
+/// Count the CalculateConstraintPriorities operations of a description that Jolt's debug build asserts on
+fn countPriorityBranches(desc: *const Desc, stats: *Stats) void {
+    var ordered = true;
+    for (desc.parts[0..desc.num_joints], 0..) |p, j| {
+        if (p.parent >= @as(i32, @intCast(j))) ordered = false;
+    }
+    for (desc.ops[0..desc.num_ops]) |op| {
+        if (op.kind != @intFromEnum(OpKind.calculate_constraint_priorities)) continue;
+        if (op.base_priority +% desc.num_joints <= op.base_priority) stats.priority_base_overflows += 1;
+        if (!ordered) stats.priority_unordered_skeletons += 1;
+    }
+}
 
 /// Compare two results field by field: the first differing field (and element) is reported with both values
 fn checkResult(checker: *Checker, case: usize, what: []const u8, z: *const Result, j: *const Result) void {
@@ -894,6 +913,7 @@ fn runCases(seed: u32, num_cases: usize, release_only: bool) !Stats {
         const tables = test_tables.tables();
         const max_num_joints: usize = if (case < 40) 6 else max_joints;
         const desc = g.desc(tables.num_shapes, tables.num_filters, tables.num_constraints, max_num_joints, release_only);
+        countPriorityBranches(&desc, &stats);
 
         // Both sides build the settings, apply the operations and save them
         var jolt_result = std.mem.zeroes(Result);
@@ -955,10 +975,17 @@ test "Ragdoll parity: RagdollSettings" {
     try std.testing.expect(stats.valid_truncations > 100);
     try std.testing.expect(stats.truncation_errors > 1000);
     try std.testing.expect(stats.restored_without_parts > 0);
+    // The cases that Jolt asserts on are left to the release only test
+    try std.testing.expectEqual(@as(u32, 0), stats.priority_base_overflows);
+    try std.testing.expectEqual(@as(u32, 0), stats.priority_unordered_skeletons);
 }
 
 test "Ragdoll parity: RagdollSettings (release only)" {
     if (Core.enable_asserts) return error.SkipZigTest;
     const stats = try runCases(0x0badcafe, 200, true);
+    // The cases reach the branches that Jolt asserts on: a NaN inertia that Stabilize cannot decompose,
+    // CalculateConstraintPriorities with an overflowing base priority and of an unordered skeleton
     try std.testing.expect(stats.stabilize_false > 5);
+    try std.testing.expect(stats.priority_base_overflows > 0);
+    try std.testing.expect(stats.priority_unordered_skeletons > 0);
 }

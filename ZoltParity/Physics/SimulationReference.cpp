@@ -2290,7 +2290,16 @@ static Ref<RagdollSettings> SimMakeRagdollSettings(const SimSceneDesc &inDesc, c
 	for (uint32 j = 0; j < inRagdoll.mNumJoints; ++j)
 	{
 		std::string name = "Joint" + std::to_string(j);
-		skeleton->AddJoint(name, inDesc.mRagdollJoints[inRagdoll.mFirstJoint + j].mParent);
+		int parent = inDesc.mRagdollJoints[inRagdoll.mFirstJoint + j].mParent;
+		if (parent < int(j))
+			skeleton->AddJoint(name, parent);
+		else
+		{
+			// A joint that is its own parent (degenerate input that CreateRagdoll accepts): AddJoint(name, parent)
+			// would read the name of a joint that does not exist yet, the parent index is set directly
+			skeleton->AddJoint(name);
+			skeleton->GetJoints().back().mParentJointIndex = parent;
+		}
 	}
 
 	Ref<RagdollSettings> settings = new RagdollSettings;
