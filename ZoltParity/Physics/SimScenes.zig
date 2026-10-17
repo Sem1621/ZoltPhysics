@@ -227,7 +227,7 @@
 //! operations, 100..102 driver operations, 200..399 constraint operations in ranges of 20 (`ConstraintOpRange`):
 //! 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279 Hinge, 280..299 Slider, 300..319
 //! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare; 400..599 the
-//! Phase 7 operations (`Phase7OpRange`): 400..429 Character (423..429 free), 430..489 CharacterVirtual (471..489 free),
+//! Phase 7 operations (`Phase7OpRange`): 400..429 Character (424..429 free), 430..489 CharacterVirtual (471..489 free),
 //! 490..519 Ragdoll (511..519 free), 520..569 the vehicle core group (563..569 free), 570..579 TrackedVehicleController
 //! (576..579 free), 580..589 MotorcycleController (587..589 free), 590..599 spare. RecordKind: 0..6 bodies, steps and
 //! contacts, 7..17 the CharacterContactListener (call order), 18..20 the vehicle callbacks; blocks for new kinds: 21..29
@@ -634,6 +634,18 @@ pub const SimCharacter = extern struct {
     position: [3]Real = @splat(0),
     rotation: [4]f32 = .{ 0, 0, 0, 1 },
     user_data: u64 = 0,
+};
+
+/// The value of a character that OpKind.character_expect_value checks (i[0])
+pub const CharacterValue = enum(u32) {
+    /// The shape index of GetShape() (the result of a SetShape: switched or not)
+    shape = 0,
+    /// The shape index of the shape of the character's body (BodyInterface::GetShape(GetBodyID()))
+    body_shape = 1,
+    /// GetLayer()
+    layer = 2,
+    /// GetGroundBodyID() is the body of body handle op.body (1 / 0)
+    ground_body_is = 3,
 };
 
 /// A CharacterVirtual (OpKind.create_character_virtual): CharacterVirtualSettings (Jolt's defaults), the constructor
@@ -1119,7 +1131,7 @@ pub fn characterIdSequence(first: u32) [character_id_sequence_len]u32 {
 /// The reserved OpKind ranges of the Phase 7 operations (see the file header): every worker group adds operations in
 /// its own range only. ZoltWorld.applyPhase7Op of SimulationParity.zig routes each range to its slot.
 pub const Phase7OpRange = enum(u32) {
-    /// Character (400..429, 423..429 free)
+    /// Character (400..429, 424..429 free)
     character = 400,
     /// CharacterVirtual and CharacterVsCharacterCollisionSimple (430..489, 468..489 free)
     character_virtual = 430,
@@ -1505,7 +1517,10 @@ pub const OpKind = enum(u32) {
     /// Check: the BodyState bits (IsActive | IsAdded << 1) of the character's body must be `count`
     /// (`SceneBuilder.expectCharacterBodyState`: a character asleep before an operation that must not wake it)
     character_expect_body_state = 422,
-    // 423..429: free for Character operations
+    /// Check: the value of the character that i[0] selects (`CharacterValue`) must be `count`; `body` is the body handle
+    /// of CharacterValue.ground_body_is (`SceneBuilder.expectCharacterValue`)
+    character_expect_value = 423,
+    // 424..429: free for Character operations
 
     // ---- Phase7OpRange.character_virtual (430..489): CharacterVirtual, CharacterVsCharacterCollisionSimple ----
     /// new CharacterVirtual(character_virtuals[index], system) plus the harness setup of the description (the next
@@ -3399,13 +3414,19 @@ pub const SceneBuilder = struct {
         return self.objectOp(.character_expect_ground_state, handle, .{ .count = state });
     }
 
-    /// Check: the ground state of character virtual handle `handle` (GroundState) at this point
-    /// The body of a character must be in BodyState `state` (`BodyState.sleeping`, `BodyState.awake`) at this point: the
-    /// driver checks it on both sides
+    /// Check: the body of character handle `handle` is in BodyState `state` (`BodyState.sleeping`, `BodyState.awake`) at
+    /// this point
     pub fn expectCharacterBodyState(self: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
         return self.objectOp(.character_expect_body_state, handle, .{ .count = state });
     }
 
+    /// Check: a value of character handle `handle` (`CharacterValue`) at this point; `body`: the body handle of
+    /// `ground_body_is`
+    pub fn expectCharacterValue(self: *SceneBuilder, handle: u32, value: CharacterValue, expected: u32, args: struct { body: u32 = invalid_handle }) Allocator.Error!void {
+        return self.objectOp(.character_expect_value, handle, .{ .i = &.{@intFromEnum(value)}, .count = expected, .body = args.body });
+    }
+
+    /// Check: the ground state of character virtual handle `handle` (GroundState) at this point
     pub fn expectCharacterVirtualGroundState(self: *SceneBuilder, handle: u32, state: u32) Allocator.Error!void {
         return self.objectOp(.cv_expect_ground_state, handle, .{ .count = state });
     }
@@ -12483,7 +12504,7 @@ fn buildCharacterOps(b: *SceneBuilder) Allocator.Error!void {
                 try b.objectOp(.character_settings_hash, c1, .{ .i = &no_lock });
             },
             14 => try b.objectOp(.character_set_layer, c1, .{ .i = &.{ Layers.moving2, 0, 0, 1 } }),
-            16 => try b.objectOp(.character_set_shape, c1, .{ .i = &.{ shapes.crouching, 0, 0, 1 }, .f = &.{flt_max} }),
+            16 => try setShapeChecked(b, c1, shapes.crouching, flt_max, true, shapes.crouching),
             18 => try b.objectOp(.character_set_position_and_rotation, c1, .{ .r = .{ 3, 0.05, 3 }, .f = &axisAngle(.{ 0, 1, 0 }, 0.4), .i = &no_lock }),
             20 => try b.objectOp(.character_set_position, c1, .{ .r = .{ 3.5, 0.05, 3 }, .activation = .dont_activate }),
             22 => {
@@ -12515,10 +12536,10 @@ fn buildCharacterOps(b: *SceneBuilder) Allocator.Error!void {
             36 => {
                 try b.expectCharacterGroundState(c0, GroundState.on_ground);
                 // A shape that reaches 0.2 into the floor: the switch fails, then one that fits
-                try b.objectOp(.character_set_shape, c0, .{ .i = &.{shapes.big}, .f = &.{0.1} });
-                try b.objectOp(.character_set_shape, c0, .{ .i = &.{shapes.crouching}, .f = &.{0.1} });
+                try setShapeChecked(b, c0, shapes.big, 0.1, false, shapes.standing);
+                try setShapeChecked(b, c0, shapes.crouching, 0.1, false, shapes.crouching);
             },
-            40 => try b.objectOp(.character_set_shape, c0, .{ .i = &.{shapes.standing}, .f = &.{flt_max} }),
+            40 => try setShapeChecked(b, c0, shapes.standing, flt_max, false, shapes.standing),
             44 => try b.objectOp(.character_remove_from_physics_system, c1, .{ .i = &no_lock }),
             48 => try b.objectOp(.character_add_to_physics_system, c1, .{}),
             50 => {
@@ -12589,11 +12610,12 @@ const Slope = struct {
 /// InAir); one slides down a 60 degree slope (OnSteepGround) onto the floor; one jumps under a low ceiling (NotSupported:
 /// only the ceiling is in reach) and one along a wall that leans over it (NotSupported: the wall touches the top of the
 /// capsule). The walkers set their velocity every update like CharacterTest (the vertical component is not kept); the
-/// queries with and without locking; a snapshot in the middle of the jumps restored cross
+/// walker crosses a static sensor (CharacterBodyFilter ignores it); the queries with and without locking; a snapshot in
+/// the middle of the jumps restored cross
 fn buildCharacterGroundStatesBoxes(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
     b.num_updates = 150;
-    _ = try addFloor(b, 30, 0);
+    const floor = try addFloor(b, 30, 0);
     const zero: [3]Real = @splat(0);
     _ = try Slope.add(b, .{ 2.5, 0.25, 1.5 }, .{ 5.165, 1.25, 0 }, 30, zero, 1); // From x = 3 (on the floor) up to y = 2.5
     const slope = try Slope.add(b, .{ 2.5, 0.25, 1.5 }, .{ -6, 2.5, 4 }, 60, zero, 2);
@@ -12610,11 +12632,35 @@ fn buildCharacterGroundStatesBoxes(b: *SceneBuilder) Allocator.Error!void {
     const all = [_]u32{ walker, edge_walker, slider, jumper, wall_jumper };
     for (all, 0..) |c, n|
         try b.objectOp(.character_add_to_physics_system, c, .{ .i = lockIf(n % 2 != 0) });
+    // A static sensor on the walker's way to the ramp: PostSimulation's body filter ignores it (the ground stays the floor)
+    const sensor_shape = try b.box(.{ 0.5, 1, 1 }, 0.05);
+    _ = try b.body(.{ .position = .{ 2.4, 1, 0 }, .shape = sensor_shape, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor, .user_data = 6 }, .dont_activate);
 
     for (1..b.num_updates) |update| {
         const u: u32 = @intCast(update);
         b.at(u);
         try postSimulateCharacters(b, &all, if (u < 100) 0.05 else 0.1);
+        // What the characters reach (checked on both sides; their initial state InAir is not a result of PostSimulation)
+        switch (u) {
+            14, 33 => try b.expectCharacterGroundState(jumper, GroundState.in_air),
+            22, 82 => try b.expectCharacterGroundState(jumper, GroundState.not_supported), // Only the ceiling is in reach
+            110 => try b.expectCharacterGroundState(jumper, GroundState.on_ground),
+            19 => try b.expectCharacterGroundState(wall_jumper, GroundState.not_supported), // Only the leaning wall
+            40, 95 => try b.expectCharacterGroundState(wall_jumper, GroundState.in_air),
+            20 => {
+                // Inside the sensor: the ground is the floor
+                try b.expectCharacterGroundState(walker, GroundState.on_ground);
+                try b.expectCharacterValue(walker, .ground_body_is, 1, .{ .body = floor });
+            },
+            100 => try b.expectCharacterGroundState(walker, GroundState.in_air),
+            140 => try b.expectCharacterGroundState(walker, GroundState.on_ground),
+            52 => try b.expectCharacterGroundState(edge_walker, GroundState.in_air), // Walked off the platform
+            120 => {
+                try b.expectCharacterGroundState(edge_walker, GroundState.on_ground);
+                try b.expectCharacterGroundState(slider, GroundState.on_ground);
+            },
+            else => {},
+        }
         if (u <= 70) try b.objectOp(.character_set_linear_velocity, walker, .{ .f = &.{ 2.5, 0, 0 }, .i = lockIf(u % 3 == 0) });
         if (u <= 35) try b.objectOp(.character_set_linear_velocity, edge_walker, .{ .f = &.{ 2, 0, 0 } });
         switch (u) {
@@ -12708,11 +12754,27 @@ fn buildCharacterGroundStatesMeshes(b: *SceneBuilder) Allocator.Error!void {
         const u: u32 = @intCast(update);
         b.at(u);
         try postSimulateCharacters(b, &all, 0.05);
-        if (u >= 20 and u < 120) {
-            try b.objectOp(.character_set_linear_velocity, hill_walker, .{ .f = &.{ 2, 0, 0.5 } });
-            try b.objectOp(.character_set_linear_velocity, edge_walker, .{ .f = &.{ 2, 0, -0.5 }, .i = &no_lock });
+        if (u >= 20 and u < 100) {
+            // The walkers press down (the vertical velocity is set too, a free fall would only start from 0 every update)
+            try b.objectOp(.character_set_linear_velocity, hill_walker, .{ .f = &.{ 2, -1.5, 0.5 } });
+            try b.objectOp(.character_set_linear_velocity, edge_walker, .{ .f = &.{ 2, -1.5, -0.5 }, .i = &no_lock });
         }
         if (u >= 10 and u < 60) try b.objectOp(.character_set_linear_velocity, cliff_walker, .{ .f = &.{ -2, 0, 0 } });
+        // What the characters reach (checked on both sides; their initial state InAir is not a result of PostSimulation)
+        switch (u) {
+            18 => try b.expectCharacterGroundState(cliff_slider, GroundState.on_steep_ground),
+            19 => try b.expectCharacterGroundState(ceiling_jumper, GroundState.in_air),
+            20 => try b.expectCharacterGroundState(ramp_slider, GroundState.on_steep_ground),
+            26, 91 => try b.expectCharacterGroundState(ceiling_jumper, GroundState.not_supported), // Only the mesh ceiling
+            70 => for ([_]u32{ hill_walker, edge_walker, ramp_slider, ceiling_jumper, cliff_slider }) |c|
+                try b.expectCharacterGroundState(c, GroundState.on_ground),
+            80 => try b.expectCharacterGroundState(cliff_walker, GroundState.in_air), // Walked off the cliff
+            120 => {
+                try b.expectCharacterGroundState(hill_walker, GroundState.in_air); // Jumped at update 100
+                try b.expectCharacterGroundState(cliff_walker, GroundState.on_ground);
+            },
+            else => {},
+        }
         switch (u) {
             15, 80 => try b.objectOp(.character_add_linear_velocity, ceiling_jumper, .{ .f = &.{ 0, 4.5, 0 } }),
             60 => {
@@ -12768,6 +12830,12 @@ fn buildCharacterMovingPlatforms(b: *SceneBuilder) Allocator.Error!void {
                 try b.expectCharacterGroundState(spinner, GroundState.on_ground);
             },
             90 => try b.objectOp(.character_add_linear_velocity, rider, .{ .f = &.{ 0, 3, 0 } }),
+            105 => try b.expectCharacterGroundState(rider, GroundState.in_air),
+            140 => {
+                try b.expectCharacterGroundState(rider, GroundState.on_ground);
+                try b.expectCharacterGroundState(rafter, GroundState.on_ground);
+                try b.expectCharacterGroundState(pusher, GroundState.on_ground);
+            },
             100 => try b.op(.set_linear_velocity, raft, .{ .f = &.{ -2, 0, 0 } }),
             else => {},
         }
@@ -12780,6 +12848,14 @@ fn buildCharacterMovingPlatforms(b: *SceneBuilder) Allocator.Error!void {
 /// out from under the ceiling while it tries to stand up every 5 updates (rejected below the ceiling, accepted outside); a
 /// third one switches shapes in the open, to a sphere that reaches into the floor (rejected) and then forced (FLT_MAX: no
 /// check, the solver pushes it out)
+/// character_set_shape(shape, max penetration depth, the no-lock interfaces when `no_lock_bodies`), then the checks of
+/// the shape of the character and of its body (`expected`: the new shape when the switch succeeds, else the old one)
+fn setShapeChecked(b: *SceneBuilder, character: u32, shape: u32, max_penetration_depth: f32, no_lock_bodies: bool, expected: u32) Allocator.Error!void {
+    try b.objectOp(.character_set_shape, character, .{ .i = &.{ shape, 0, 0, @intFromBool(no_lock_bodies) }, .f = &.{max_penetration_depth} });
+    try b.expectCharacterValue(character, .shape, expected, .{});
+    try b.expectCharacterValue(character, .body_shape, expected, .{});
+}
+
 fn buildCharacterCrouchStand(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
     b.num_updates = 120;
@@ -12800,19 +12876,26 @@ fn buildCharacterCrouchStand(b: *SceneBuilder) Allocator.Error!void {
         if (u >= 10 and u < 70) try b.objectOp(.character_set_linear_velocity, leaver, .{ .f = &.{ 2.5, 0, 0 } });
         if (u >= 10 and u % 5 == 0 and u < 100) try b.objectOp(.character_set_shape, leaver, .{ .i = &.{ shapes.standing, 0, 0, u % 2 }, .f = &.{0.05} });
         switch (u) {
-            5 => try b.objectOp(.character_set_shape, squeezed, .{ .i = &.{shapes.standing}, .f = &.{0.1} }), // Rejected: 0.2 m into the ceiling
-            8 => try b.objectOp(.character_set_shape, squeezed, .{ .i = &.{ shapes.standing, 0, 0, 1 }, .f = &.{0.0} }), // Rejected
-            12 => try b.objectOp(.character_set_shape, squeezed, .{ .i = &.{ shapes.standing, 0, 0, 1 }, .f = &.{0.3} }), // Allowed
-            30 => try b.objectOp(.character_set_shape, squeezed, .{ .i = &.{shapes.crouching}, .f = &.{flt_max} }),
+            5 => try setShapeChecked(b, squeezed, shapes.standing, 0.1, false, shapes.crouching), // Rejected: 0.2 m into the ceiling
+            8 => try setShapeChecked(b, squeezed, shapes.standing, 0.0, true, shapes.crouching), // Rejected
+            12 => try setShapeChecked(b, squeezed, shapes.standing, 0.3, true, shapes.standing), // Allowed
+            30 => try setShapeChecked(b, squeezed, shapes.crouching, flt_max, false, shapes.crouching),
             32 => try b.objectOp(.character_check_collision, squeezed, .{ .i = &.{shapes.standing}, .r = .{ -2, 0, -1 }, .f = &.{ 0, 0, 0, 1, 0, 1, 0, 0.0 } }),
-            15 => try b.objectOp(.character_set_shape, switcher, .{ .i = &.{shapes.crouching}, .f = &.{0.05} }), // Allowed
-            20 => try b.objectOp(.character_set_shape, switcher, .{ .i = &.{ shapes.big, 0, 0, 1 }, .f = &.{0.1} }), // Rejected: 0.2 m into the floor
-            25 => try b.objectOp(.character_set_shape, switcher, .{ .i = &.{shapes.big}, .f = &.{flt_max} }), // Forced
-            40 => try b.objectOp(.character_set_shape, switcher, .{ .i = &.{ shapes.standing, 0, 0, 1 }, .f = &.{0.05} }),
+            15 => try setShapeChecked(b, switcher, shapes.crouching, 0.05, false, shapes.crouching), // Allowed
+            20 => try setShapeChecked(b, switcher, shapes.big, 0.1, true, shapes.crouching), // Rejected: 0.2 m into the floor
+            25 => try setShapeChecked(b, switcher, shapes.big, flt_max, false, shapes.big), // Forced
+            40 => try setShapeChecked(b, switcher, shapes.standing, 0.05, true, shapes.standing), // The big sphere was pushed out
             41 => try b.objectOp(.character_settings_hash, switcher, .{ .i = &no_lock }),
+            // The leaver tries to stand up every 5 updates: still below the ceiling, then outside (x > 0.3)
+            55 => try b.expectCharacterValue(leaver, .shape, shapes.crouching, .{}),
+            80 => {
+                try b.expectCharacterValue(leaver, .shape, shapes.standing, .{});
+                try b.expectCharacterValue(leaver, .body_shape, shapes.standing, .{});
+            },
             60 => try b.sysOp(.snapshot, .{ .index = 0 }),
-            65 => try b.objectOp(.character_set_shape, switcher, .{ .i = &.{shapes.crouching}, .f = &.{flt_max} }),
+            65 => try setShapeChecked(b, switcher, shapes.crouching, flt_max, false, shapes.crouching),
             68 => try b.sysOp(.restore_cross, .{ .index = 0 }), // The shapes of the characters are not part of the state: the switcher stays crouched
+            70 => try b.expectCharacterValue(switcher, .shape, shapes.crouching, .{}),
             else => {},
         }
     }
@@ -12825,7 +12908,7 @@ fn buildCharacterCrouchStand(b: *SceneBuilder) Allocator.Error!void {
 /// Activate, AddImpulse and SetLinearVelocity wake it up; a snapshot of the sleeping character restored cross
 fn buildCharacterLayersSleepWake(b: *SceneBuilder) Allocator.Error!void {
     const shapes = try CharacterShapes.add(b);
-    b.num_updates = 260;
+    b.num_updates = 340;
     _ = try addFloor(b, 20, 0);
     const crate_shape = try b.box(.{ 0.4, 0.4, 0.4 }, 0.05);
     for (0..3) |i|
@@ -12846,10 +12929,14 @@ fn buildCharacterLayersSleepWake(b: *SceneBuilder) Allocator.Error!void {
         switch (u) {
             55 => try b.objectOp(.character_set_layer, walker, .{ .i = &.{Layers.moving2} }), // Walks through the crates
             85 => try b.objectOp(.character_set_layer, walker, .{ .i = &.{ Layers.moving, 0, 0, 1 } }), // Inside a crate
-            20 => try b.objectOp(.character_set_layer, diver, .{ .i = &.{ Layers.unused1, 0, 0, 1 } }), // Falls through the floor
+            20 => {
+                try b.objectOp(.character_set_layer, diver, .{ .i = &.{ Layers.unused1, 0, 0, 1 } }); // Falls through the floor
+                try b.expectCharacterValue(diver, .layer, Layers.unused1, .{});
+            },
+            70 => try b.expectCharacterGroundState(diver, GroundState.on_ground), // Back on the floor
             40 => {
                 try b.expectCharacterGroundState(diver, GroundState.in_air);
-                try b.objectOp(.character_set_position, diver, .{ .r = .{ -4, 0.5, 4 } });
+                try b.objectOp(.character_set_position, diver, .{ .r = .{ -4, 0.5, 4 }, .i = &no_lock });
                 try b.objectOp(.character_set_linear_velocity, diver, .{ .f = &.{ 0, 0, 0 } });
                 try b.objectOp(.character_set_layer, diver, .{ .i = &.{Layers.moving} });
             },
@@ -12869,11 +12956,17 @@ fn buildCharacterLayersSleepWake(b: *SceneBuilder) Allocator.Error!void {
             99 => try b.expectCharacterBodyState(sleeper, BodyState.sleeping),
             100 => try b.objectOp(.character_activate, sleeper, .{}),
             180 => {
+                // SetShape activates the body
+                try b.expectCharacterBodyState(sleeper, BodyState.sleeping);
+                try setShapeChecked(b, sleeper, shapes.crouching, 0.05, false, shapes.crouching);
+                try b.expectCharacterBodyState(sleeper, BodyState.awake);
+            },
+            250 => {
                 try b.expectCharacterBodyState(sleeper, BodyState.sleeping);
                 try b.objectOp(.character_add_impulse, sleeper, .{ .f = &.{ 20, 0, 0 } });
                 try b.expectCharacterBodyState(sleeper, BodyState.awake);
             },
-            250 => {
+            320 => {
                 try b.expectCharacterBodyState(sleeper, BodyState.sleeping);
                 try b.objectOp(.character_set_linear_velocity, sleeper, .{ .f = &.{ 0, 0, 1 }, .i = &no_lock });
                 try b.expectCharacterBodyState(sleeper, BodyState.awake);
@@ -12921,6 +13014,11 @@ fn buildCharacterFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
             50 => try b.sysOp(.restore_cross, .{ .index = 0 }),
             70 => try b.objectOp(.character_add_linear_velocity, walker, .{ .f = &.{ -1, 4, 0 } }),
             80 => try b.objectOp(.character_settings_hash, slider, .{}),
+            // What the characters reach (checked on both sides; their initial state InAir is not a result of PostSimulation)
+            20 => try b.expectCharacterGroundState(slider, GroundState.on_steep_ground),
+            60 => try b.expectCharacterGroundState(rider, GroundState.on_ground),
+            90 => try b.expectCharacterGroundState(walker, GroundState.in_air),
+            100 => try b.expectCharacterGroundState(slider, GroundState.on_ground),
             else => {},
         }
     }
@@ -12956,22 +13054,33 @@ fn buildCharacterMany(b: *SceneBuilder) Allocator.Error!void {
         try b.objectOp(.character_add_to_physics_system, c.*, .{ .i = lockIf(i % 3 == 0) });
     }
 
+    // The walkers press down while they walk (the vertical velocity is set too); a jump frees the character for 40 updates
     var velocities: [40][3]f32 = @splat(.{ 0, 0, 0 });
+    var free_until: [40]u32 = @splat(0);
     for (1..b.num_updates) |update| {
         const u: u32 = @intCast(update);
         b.at(u);
         try postSimulateCharacters(b, &characters, 0.05);
         if (u % 20 == 1) {
-            for (&velocities) |*v| v.* = .{ b.float(-2, 2), 0, b.float(-2, 2) };
+            for (&velocities) |*v| v.* = .{ b.float(-2, 2), -1.5, b.float(-2, 2) };
         }
-        for (characters, velocities, 0..) |c, v, i| {
-            if (u >= 10 and (u + i) % 2 == 0)
+        for (characters, velocities, &free_until, 0..) |c, v, *free, i| {
+            if (u >= 40 and u >= free.* and (u + i) % 2 == 0)
                 try b.objectOp(.character_set_linear_velocity, c, .{ .f = &v, .i = lockIf(i % 4 == 0) });
-            if (b.oneIn(150))
-                try b.objectOp(.character_add_linear_velocity, c, .{ .f = &.{ 0, 4, 0 } });
+            if (u >= 40 and u >= free.* and b.oneIn(60)) {
+                try b.objectOp(.character_add_linear_velocity, c, .{ .f = &.{ 0, 5, 0 } });
+                free.* = u + 40;
+            }
         }
         if (u == 60) try b.sysOp(.snapshot, .{ .index = 0 });
         if (u == 66) try b.sysOp(.restore_cross, .{ .index = 0 });
+        // What some of them reach (checked on both sides; their initial state InAir is not a result of PostSimulation)
+        if (u == 70) {
+            try b.expectCharacterGroundState(characters[0], GroundState.on_ground);
+            try b.expectCharacterGroundState(characters[21], GroundState.on_ground);
+        }
+        if (u == 90) try b.expectCharacterGroundState(characters[14], GroundState.in_air);
+        if (u == 103) try b.expectCharacterGroundState(characters[6], GroundState.in_air);
     }
 }
 

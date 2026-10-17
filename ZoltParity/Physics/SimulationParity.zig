@@ -2685,7 +2685,7 @@ const RunStats = struct {
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
 fn isPhase7Expectation(kind: OpKind) bool {
     return switch (kind) {
-        .character_expect_ground_state, .character_expect_body_state, .cv_expect_ground_state, .cv_expect_value, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
+        .character_expect_ground_state, .character_expect_body_state, .character_expect_value, .cv_expect_ground_state, .cv_expect_value, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
         else => false,
     };
 }
@@ -3691,12 +3691,16 @@ const Phase7StubSlot = struct {
 /// in PostSimulation's collector is reported as "scene character_ops ... update 1: ... object state differs at byte 24
 /// ...: character_save_state (object handle 0, item 0) ground_position.y zolt 0x3c8d88e0 jolt 0x0"; subtracting the
 /// centers of mass the other way round in the check of SetShape as "scene character_crouch_stand ... update 12: operation
-/// 50 (character_set_shape on object handle / description 0) returned 0 in zolt and 1 in jolt" (and in
+/// 54 (character_set_shape on object handle / description 0) returned 0 in zolt and 1 in jolt" (and in
 /// character_far_from_origin); EActiveEdgeMode::CollideWithAll in CheckCollision as "scene
 /// character_ground_states_meshes ... update 7: ... character_save_state (object handle 5, item 0) ground_normal.y zolt
 /// 0x3ebeaa9e jolt 0x3ebeaa9f"; the ground velocity at the character's position instead of the ground position as
 /// "scene character_moving_platforms ... update 1: ... character_save_state (object handle 1, item 0) ground_velocity.x
-/// zolt 0x00000000 jolt 0x2fbdb005" (and in character_many).
+/// zolt 0x00000000 jolt 0x2fbdb005" (and in character_many); CharacterBodyFilter not ignoring sensors as "scene
+/// character_ground_states_boxes ... update 30: operation 238 (character_check_collision on object handle / description
+/// 0) returned 862843812 in zolt and 1268118805 in jolt" (the walker's check next to the sensor box it crosses).
+/// Gap: SimShape has no materials, so GetGroundMaterial (character_properties.ground_material) is only compared as
+/// PhysicsMaterial::sDefault (the material of a shape without one); a ground with a non-default material is not tested.
 const CharacterSlot = struct {
     /// The characters of the character handles, one reference each (Jolt: Array<Ref<Character>>; an empty reference is
     /// a destroyed character)
@@ -3891,6 +3895,17 @@ const CharacterSlot = struct {
 
             .character_expect_ground_state => return @bitCast(@intFromEnum(c.base.getGroundState())), // Changes nothing, the driver checks the result
             .character_expect_body_state => {}, // Changes nothing, the driver checks the BodyState bits
+            .character_expect_value => return switch (i[0]) { // Changes nothing, the driver checks the result
+                @intFromEnum(SimScenes.CharacterValue.shape) => shapeIndex(world, c.base.getShape()),
+                @intFromEnum(SimScenes.CharacterValue.body_shape) => blk: {
+                    var body_shape = world.system.getBodyInterface().getShape(c.getBodyID());
+                    defer body_shape.deinit();
+                    break :blk shapeIndex(world, body_shape.get());
+                },
+                @intFromEnum(SimScenes.CharacterValue.layer) => @as(u32, c.getLayer()),
+                @intFromEnum(SimScenes.CharacterValue.ground_body_is) => @intFromBool(c.base.getGroundBodyID().eql(world.getHandle(op.body))),
+                else => error.SceneError,
+            },
 
             .character_body_hash => {
                 var h: Hasher = .{};

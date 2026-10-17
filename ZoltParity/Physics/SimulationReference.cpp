@@ -978,6 +978,7 @@ enum class ESimOp : uint32
 	CharacterExpectGroundState = 420,
 	CharacterBodyHash = 421,
 	CharacterExpectBodyState = 422,
+	CharacterExpectValue = 423,
 	// Phase7OpRange.character_virtual
 	CreateCharacterVirtual = 430,
 	CVDestroy = 431,
@@ -3011,6 +3012,18 @@ public:
 			}
 
 		case ESimOp::CharacterExpectBodyState:				break; // Changes nothing, the driver checks the BodyState bits
+
+		case ESimOp::CharacterExpectValue: // Changes nothing, the driver checks the result (CharacterValue of SimScenes.zig)
+			switch (i[0])
+			{
+			case 0:		return GetShapeIndex(c->GetShape());
+			case 1:		return GetShapeIndex(mSystem.GetBodyInterface().GetShape(c->GetBodyID()).GetPtr());
+			case 2:		return uint32(c->GetLayer());
+			case 3:		return c->GetGroundBodyID() == GetHandle(inOp.mBody)? 1 : 0;
+			default:
+				Trace("SimulationReference: unknown character value %u", i[0]);
+				abort();
+			}
 
 		default:
 			Trace("SimulationReference: unknown character operation %u", inOp.mKind);

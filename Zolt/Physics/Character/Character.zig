@@ -10,9 +10,9 @@
 //! - `Character` embeds `base: CharacterBase` (pattern A with `ref_count`). `create(allocator, settings, position,
 //!   rotation, user_data, system)` is `new Character(...)` (reference count 0: the last `release` of a
 //!   `RefConst(CharacterBase)` runs the destructor, which destroys the body), `init` is the same constructor for a
-//!   character on the stack or in a member (`base.deinit()`). Character overrides no virtual function: SaveState /
-//!   RestoreState are CharacterBase's (`character.base.saveState(recorder)`), and so are the ground getters
-//!   (`character.base.getGroundState()`).
+//!   character on the stack or in a member (`base.setEmbedded()` before taking references, `base.deinit()`).
+//!   Character overrides no virtual function: SaveState / RestoreState are CharacterBase's
+//!   (`character.base.saveState(recorder)`), and so are the ground getters (`character.base.getGroundState()`).
 //! - Jolt's defaulted arguments are options: `EActivation inActivationMode = EActivation::Activate` is `.activation`,
 //!   `bool inLockBodies = true` is `.lock_bodies` (`character.setPosition(position, .{ .activation = .dont_activate,
 //!   .lock_bodies = false })`). `lock_bodies` selects the locking or the no-lock BodyInterface, BodyLockInterface and
@@ -24,7 +24,8 @@
 //!   The local classes of Character.cpp (the body filter of CheckCollision, the collectors of PostSimulation and
 //!   SetShape) are pattern A structs (CollisionArchitecture D5, D7).
 //! - `getTransformedShape` and `getCharacterSettings` return values that hold a reference to the shape: the caller
-//!   `deinit`s the transformed shape and `base.deinit()`s the settings (the settings use the character's allocator).
+//!   `deinit`s the transformed shape and `base.deinit()`s the settings (the settings use the character's allocator;
+//!   `base.setEmbedded()` before taking references to them).
 //!
 //! Errors (Zolt):
 //! - `create` / `init` return `CreateBodyError`: allocation failure, or settings without a shape (Jolt dereferences the
@@ -200,7 +201,8 @@ pub const Character = struct {
         return self;
     }
 
-    /// Constructor of a character on the stack or in a member (`base.deinit()` destroys its body). See `create`.
+    /// Constructor of a character on the stack or in a member: `base.setEmbedded()` before taking references,
+    /// `base.deinit()` at the end (destroys its body). See `create`.
     pub fn init(allocator: Allocator, settings: *const CharacterSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) CreateBodyError!Character {
         var self: Character = .{
             .base = .init(Character, allocator, &settings.base, system),
@@ -480,7 +482,8 @@ pub const Character = struct {
     }
 
     /// Get the character settings that can recreate this character
-    /// (a value with the character's allocator that holds a reference to the shape: `base.deinit()` it)
+    /// (a value with the character's allocator that holds a reference to the shape: `base.setEmbedded()` before taking
+    /// references to it, `base.deinit()` at the end)
     pub fn getCharacterSettings(self: *const Character, opts: LockOptions) CharacterSettings {
         var lock: BodyLockRead = .init(characterGetBodyLockInterface(self.base.system, opts.lock_bodies), self.body_id);
         defer lock.deinit();
@@ -612,9 +615,11 @@ const TestLayers = struct {
     const non_moving: ObjectLayer = 0;
     /// Dynamic and kinematic bodies (broad phase layer 1)
     const moving: ObjectLayer = 1;
-    /// Collides with nothing (broad phase layer 1)
+    /// Collides with nothing (broad phase layer 2: a change between moving and ghost moves the body to another tree of
+    /// the broad phase, which allocates)
     const ghost: ObjectLayer = 2;
     const count = 3;
+    const num_broad_phase_layers = 3;
 };
 
 /// A physics system with the test layers, a temp allocator and a job system (in place: it must not move)
@@ -627,16 +632,16 @@ const TestWorld = struct {
     jobs: JobSystemSingleThreaded,
 
     fn init(self: *TestWorld, allocator: Allocator, max_bodies: u32) !void {
-        self.layer_interface = try .init(allocator, TestLayers.count, 2);
+        self.layer_interface = try .init(allocator, TestLayers.count, TestLayers.num_broad_phase_layers);
         errdefer self.layer_interface.deinit();
         self.layer_interface.mapObjectToBroadPhaseLayer(TestLayers.non_moving, .init(0));
         self.layer_interface.mapObjectToBroadPhaseLayer(TestLayers.moving, .init(1));
-        self.layer_interface.mapObjectToBroadPhaseLayer(TestLayers.ghost, .init(1));
+        self.layer_interface.mapObjectToBroadPhaseLayer(TestLayers.ghost, .init(2));
         self.pair_filter = try .init(allocator, TestLayers.count);
         errdefer self.pair_filter.deinit();
         self.pair_filter.enableCollision(TestLayers.non_moving, TestLayers.moving);
         self.pair_filter.enableCollision(TestLayers.moving, TestLayers.moving);
-        self.ovb_filter = try .init(allocator, &self.layer_interface.base, 2, &self.pair_filter.base, TestLayers.count);
+        self.ovb_filter = try .init(allocator, &self.layer_interface.base, TestLayers.num_broad_phase_layers, &self.pair_filter.base, TestLayers.count);
         errdefer self.ovb_filter.deinit();
         self.system = .empty;
         try self.system.init(allocator, testing.io, max_bodies, 0, 256, 256, &self.layer_interface.base, &self.ovb_filter.base, &self.pair_filter.base, .{});
@@ -1633,8 +1638,9 @@ test "Character: settings without a shape (Jolt crashes in CreateBody) return er
     try testing.expectEqual(@as(u32, 0), world.system.getNumBodies());
 }
 
-/// Everything that allocates: the creation of the character (with the world), adding it, a layer change, shape
-/// switches, updates, GetCharacterSettings, the removal and the destruction
+/// Everything that allocates: the creation of the character (with the world), adding it, the layer changes (moving and
+/// ghost are in different broad phase layers: BroadPhaseQuadTree.notifyBodiesLayerChanged allocates to move the body to
+/// the other tree), shape switches, updates, GetCharacterSettings, the removal and the destruction
 fn characterAllocationRun(allocator: Allocator) !void {
     var world: TestWorld = undefined;
     try world.init(allocator, 8);
@@ -1667,12 +1673,17 @@ fn characterAllocationRun(allocator: Allocator) !void {
             return err;
         };
         character.setLayer(TestLayers.ghost, .{}) catch |err| {
-            // Nothing changed
+            // Nothing changed (the character's layer is restored, Zolt's errdefer)
             try testing.expectEqual(TestLayers.moving, character.getLayer());
             try testing.expectEqual(TestLayers.moving, bi.getObjectLayer(id));
             return err;
         };
-        try character.setLayer(TestLayers.moving, .{ .lock_bodies = false });
+        try testing.expectEqual(TestLayers.ghost, bi.getObjectLayer(id));
+        character.setLayer(TestLayers.moving, .{ .lock_bodies = false }) catch |err| {
+            try testing.expectEqual(TestLayers.ghost, character.getLayer());
+            try testing.expectEqual(TestLayers.ghost, bi.getObjectLayer(id));
+            return err;
+        };
         _ = character.setShape(shapes.crouching.get().?, 0.1, .{}) catch |err| {
             // Nothing changed
             try testing.expect(character.base.getShape().? == shapes.standing.get().?);
