@@ -2163,7 +2163,7 @@ test "Ragdoll: createRagdoll with a joint that is its own parent" {
     s.skeleton.get().?.getJointMut(2).parent_joint_index = 2;
     for (s.parts.items[1..], 1..) |*part, i| {
         const fixed = try FixedConstraintSettings.create(allocator);
-        fixed.point1 = Vec3.init(0.5 * @as(f32, @floatFromInt(i)) - 0.25, 0, 0);
+        fixed.point1 = RVec3.init(0.5 * @as(Real, @floatFromInt(i)) - 0.25, 0, 0);
         fixed.point2 = fixed.point1;
         part.setToParent(fixed.asTwoBodySettings());
     }
