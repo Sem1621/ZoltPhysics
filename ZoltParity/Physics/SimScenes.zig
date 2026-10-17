@@ -2845,6 +2845,16 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "vehicle_wheeled_pushing_boxes", .build = buildVehicleWheeledPushingBoxes, .blocked_by = .wheeled_vehicles, .sweep_stride = 80, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .wheel_contacts = true, .active_constraints = 1, .update_activations = 80 } },
     .{ .name = "vehicle_wheeled_sleep_and_wake", .build = buildVehicleWheeledSleepAndWake, .blocked_by = .wheeled_vehicles, .sweep_stride = 30, .expect = .{ .sleeping = true, .wheel_contacts = true, .active_constraints = 1 } },
     .{ .name = "vehicle_wheeled_far_from_origin", .build = buildVehicleWheeledFarFromOrigin, .blocked_by = .wheeled_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 3 } },
+    // The vehicle variants group (tracked vehicles and motorcycles)
+    .{ .name = "vehicle_tracked_terrains", .build = buildVehicleTrackedTerrains, .blocked_by = .tracked_vehicles, .sweep_stride = 35, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
+    .{ .name = "vehicle_tracked_layouts", .build = buildVehicleTrackedLayouts, .blocked_by = .tracked_vehicles, .sweep_stride = 30, .expect = .{ .wheel_contacts = true, .active_constraints = 3 } },
+    .{ .name = "vehicle_tracked_pushing_boxes", .build = buildVehicleTrackedPushingBoxes, .blocked_by = .tracked_vehicles, .sweep_stride = 75, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .wheel_contacts = true, .active_constraints = 1, .update_activations = 30 } },
+    .{ .name = "vehicle_tracked_sleep_and_wake", .build = buildVehicleTrackedSleepAndWake, .blocked_by = .tracked_vehicles, .sweep_stride = 30, .expect = .{ .sleeping = true, .wheel_contacts = true, .active_constraints = 1 } },
+    .{ .name = "vehicle_tracked_far_from_origin", .build = buildVehicleTrackedFarFromOrigin, .blocked_by = .tracked_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
+    .{ .name = "vehicle_motorcycle_turns", .build = buildVehicleMotorcycleTurns, .blocked_by = .motorcycles, .sweep_stride = 40, .expect = .{ .wheel_contacts = true, .active_constraints = 3 } },
+    .{ .name = "vehicle_motorcycle_slopes_and_braking", .build = buildVehicleMotorcycleSlopesAndBraking, .blocked_by = .motorcycles, .sweep_stride = 30, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
+    .{ .name = "vehicle_motorcycle_lean_integration_slope", .build = buildVehicleMotorcycleLeanIntegrationSlope, .blocked_by = .motorcycles, .sweep_stride = 0, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
+    .{ .name = "vehicle_motorcycle_far_from_origin", .build = buildVehicleMotorcycleFarFromOrigin, .blocked_by = .motorcycles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     // (append the vehicle scenes here)
 };
 
@@ -14444,6 +14454,427 @@ fn buildVehicleWheeledFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
     b.at(60);
     try b.objectOp(.wheeled_set_right_input, cars[1], .{ .f = &.{-0.5} });
     try b.objectOp(.wheeled_set_hand_brake_input, cars[2], .{ .f = &.{0.6} });
+}
+
+// ---- The vehicle variants group's scenes (tracked vehicles and motorcycles) ----
+
+/// The options of `addTank`
+const TankOptions = struct {
+    rotation: [4]f32 = identity_rotation,
+    /// The half extent and the mass of the body
+    half_extent: [3]f32 = .{ 1.2, 0.4, 2.0 },
+    mass: f32 = 4000,
+    /// The wheels of each track, from the front (z = (n - 1) / 2 * spacing) to the back; wheel i of track t is wheel
+    /// t * wheels_per_track + i of the vehicle (the left track is at x = half_extent[0])
+    wheels_per_track: u32 = 4,
+    spacing: f32 = 1.0,
+    /// The driven wheel of each track (an index into its wheels)
+    driven: [2]u32 = .{ 3, 3 },
+    /// The radius of the first and the last wheel of a track (a sprocket and an idler), the others have the default 0.3
+    end_radius: f32 = 0.3,
+    /// WheelSettingsTV's frictions of every wheel
+    longitudinal_friction: f32 = 4.0,
+    lateral_friction: f32 = 2.0,
+};
+
+/// A tank of the vehicle variants group's scenes, returns the vehicle handle (the wheels touch the floor at y = 0 in the
+/// first update when `position` is 0.95 above it). The tracks of `desc_value` get their wheels and driven wheels here,
+/// their other members are the description's.
+fn addTank(b: *SceneBuilder, position: [3]Real, desc_value: SimVehicle, options: TankOptions) Allocator.Error!u32 {
+    var v = desc_value;
+    v.body = try addVehicleBody(b, options.half_extent, options.mass, position, options.rotation);
+    var wheels: [2 * 8]SimVehicleWheel = undefined;
+    const n = options.wheels_per_track;
+    std.debug.assert(n <= 8);
+    for (0..2) |t| {
+        var indices: [8]u32 = undefined;
+        for (0..n) |i| {
+            const end = i == 0 or i == n - 1;
+            const z = (0.5 * @as(f32, @floatFromInt(n - 1)) - @as(f32, @floatFromInt(i))) * options.spacing;
+            wheels[t * n + i] = .{
+                .kind = @intFromEnum(VehicleWheelKind.tv),
+                .position = .{ if (t == 0) options.half_extent[0] else -options.half_extent[0], -0.3, z },
+                .suspension_frequency = 1.0,
+                .radius = if (end) options.end_radius else 0.3,
+                .longitudinal_friction_tv = options.longitudinal_friction,
+                .lateral_friction_tv = options.lateral_friction,
+            };
+            indices[i] = @intCast(t * n + i);
+        }
+        v.tracks[t].wheels = try b.addUints(indices[0..n]);
+        v.tracks[t].num_wheels = n;
+        v.tracks[t].driven_wheel = indices[options.driven[t]];
+    }
+    return b.createVehicle(try b.addVehicle(v, wheels[0 .. 2 * n], &.{}, &.{}));
+}
+
+/// The description of a tank of the variants' scenes: Jolt's tracked defaults, the tester in the moving layer
+fn tankDesc(tester: VehicleTesterKind) SimVehicle {
+    var v = SimVehicle.defaults(.tracked);
+    v.tester = .{ .kind = @intFromEnum(tester), .object_layer = Layers.moving };
+    v.max_pitch_roll_angle = zolt.math.degreesToRadians(60.0);
+    return v;
+}
+
+/// Tanks on terrain: one with the cast cylinder tester on a wavy mesh, one with the cast sphere tester on a height field.
+/// They start in the air with the gas pressed, land and drive off, steer with the track ratios (one track slower: the sync of the tracks keeps the ratio of their angular
+/// velocities, SyncLeftRightTracks' same direction branch), turn on the spot (opposite ratios: the other branch, the
+/// transmission does not shift up while the product of the ratios is negative), drive on, brake until the tracks lock
+/// (the brake impulse spread over the wheels with a contact) and back up with the brake partly pressed
+fn buildVehicleTrackedTerrains(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 170;
+    const mesh = try addMeshTerrain(b, 20, 1.5, false);
+    _ = try b.body(.{ .position = .{ -25, 0, 0 }, .shape = mesh, .motion_type = 0, .friction = 0.8, .object_layer = Layers.non_moving }, .dont_activate);
+    const height_field = try addHeightFieldTerrain(b, 33, 1.0);
+    _ = try b.body(.{ .position = .{ 25, 0, 0 }, .shape = height_field, .motion_type = 0, .friction = 0.6, .object_layer = Layers.non_moving }, .dont_activate);
+
+    var on_mesh_desc = tankDesc(.cast_cylinder);
+    on_mesh_desc.tester.convex_radius_fraction = 0.2;
+    on_mesh_desc.callbacks = VehicleCallbacks.post_collide;
+    const on_mesh = try addTank(b, .{ -25, 1.8, -6 }, on_mesh_desc, .{ .end_radius = 0.35 });
+    var on_height_field_desc = tankDesc(.cast_sphere);
+    on_height_field_desc.tester.radius = 0.3;
+    on_height_field_desc.callbacks = VehicleCallbacks.post_step;
+    on_height_field_desc.combine_friction = @intFromEnum(VehicleCombineFriction.custom);
+    const on_height_field = try addTank(b, .{ 25, 1.8, -6 }, on_height_field_desc, .{});
+    const tanks = [_]u32{ on_mesh, on_height_field };
+
+    b.at(1);
+    for (tanks) |tank| {
+        try b.expectWheelContacts(tank, 0); // In the air: no friction, the engine revs against the tracks alone
+        try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 1.0, 1.0, 1.0, 0 } });
+    }
+    b.at(45);
+    try b.objectOp(.tracked_set_right_ratio, on_mesh, .{ .f = &.{0.6} }); // Steer right
+    try b.objectOp(.tracked_set_left_ratio, on_height_field, .{ .f = &.{0.5} }); // Steer left
+    b.at(75);
+    try b.objectOp(.tracked_set_driver_input, on_mesh, .{ .f = &.{ 1.0, -1.0, 1.0, 0 } }); // Turn left on the spot
+    try b.objectOp(.tracked_set_driver_input, on_height_field, .{ .f = &.{ 0.8, 1.0, -0.8, 0 } }); // Turn right on the spot
+    b.at(105);
+    for (tanks) |tank|
+        try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0.6, 1.0, 1.0, 0 } });
+    b.at(125);
+    for (tanks) |tank|
+        try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0, 1.0, 1.0, 1.0 } }); // Lock the tracks
+    b.at(150);
+    try b.objectOp(.tracked_set_driver_input, on_mesh, .{ .f = &.{ -0.7, 1.0, 1.0, 0.05 } }); // Reverse against the brakes
+    try b.objectOp(.tracked_set_driver_input, on_height_field, .{ .f = &.{ -1.0, 1.0, 0.7, 0 } });
+}
+
+/// Tanks with other track layouts, two collision steps per update: five wheels per track driven by the front wheel with
+/// bigger end wheels, asymmetric tracks (inertia, damping, differential ratio) and a manual transmission (the engine revs
+/// in neutral with the gas pressed, then gears with a slipping clutch and reverse); six wheels per track driven by a
+/// middle wheel (a different one on each side), automatic transmission into reverse; three wheels per track on a tank
+/// that faces +x, with the step callbacks and a gravity override, whose tracks are changed while it drives
+fn buildVehicleTrackedLayouts(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 150;
+    b.collision_steps = 2;
+    _ = try addFloor(b, 50, 0);
+
+    var manual_desc = tankDesc(.ray);
+    manual_desc.transmission.mode = 1;
+    manual_desc.transmission.clutch_strength = 4.0;
+    manual_desc.tracks[0].inertia = 8.0;
+    manual_desc.tracks[1].inertia = 14.0;
+    manual_desc.tracks[0].differential_ratio = 6.0;
+    manual_desc.tracks[1].differential_ratio = 5.0;
+    manual_desc.tracks[1].angular_damping = 1.5;
+    const manual = try addTank(b, .{ -12, 0.95, -10 }, manual_desc, .{ .wheels_per_track = 5, .spacing = 0.9, .driven = .{ 0, 0 }, .end_radius = 0.35, .longitudinal_friction = 3.0, .lateral_friction = 1.5 });
+
+    var middle_desc = tankDesc(.cast_sphere);
+    middle_desc.tester.radius = 0.25;
+    middle_desc.engine.max_torque = 650.0;
+    middle_desc.tracks[0].max_brake_torque = 9000.0;
+    middle_desc.combine_friction = @intFromEnum(VehicleCombineFriction.custom);
+    const middle = try addTank(b, .{ 0, 0.95, -10 }, middle_desc, .{ .half_extent = .{ 1.2, 0.4, 2.4 }, .wheels_per_track = 6, .spacing = 0.8, .driven = .{ 2, 3 } });
+
+    var sideways_desc = tankDesc(.ray);
+    sideways_desc.callbacks = VehicleCallbacks.pre_step | VehicleCallbacks.post_collide | VehicleCallbacks.post_step;
+    const sideways = try addTank(b, .{ 12, 0.95, -6 }, sideways_desc, .{ .rotation = axisAngle(.{ 0, 1, 0 }, std.math.pi / 2.0), .half_extent = .{ 1.0, 0.4, 1.4 }, .mass = 2500, .wheels_per_track = 3, .spacing = 1.1, .driven = .{ 2, 2 } });
+
+    b.at(1);
+    try b.expectWheelContacts(manual, 0x3ff);
+    try b.expectWheelContacts(middle, 0xfff);
+    try b.expectWheelContacts(sideways, 0x3f);
+    try b.objectOp(.tracked_set_forward_input, manual, .{ .f = &.{1.0} }); // Neutral: the engine revs
+    try b.objectOp(.tracked_set_driver_input, middle, .{ .f = &.{ 1.0, 1.0, 1.0, 0 } });
+    try b.objectOp(.tracked_set_driver_input, sideways, .{ .f = &.{ 0.7, 1.0, 1.0, 0 } });
+    b.at(10);
+    try b.objectOp(.vehicle_transmission_set, manual, .{ .i = &.{1}, .f = &.{1.0} });
+    b.at(30);
+    try b.objectOp(.vehicle_transmission_set, manual, .{ .i = &.{2}, .f = &.{0.4} }); // A slipping clutch
+    try b.objectOp(.tracked_set_track, sideways, .{ .i = &.{1}, .f = &.{ 3.0, 6.0, 0.2, 5000, 7.0 } });
+    try b.objectOp(.vehicle_override_gravity, sideways, .{ .f = &.{ 0, -7, 0 } });
+    b.at(50);
+    try b.objectOp(.tracked_set_driver_input, middle, .{ .f = &.{ 1.0, 0.7, 1.0, 0 } });
+    try b.objectOp(.vehicle_reset_gravity_override, sideways, .{});
+    b.at(60);
+    try b.objectOp(.vehicle_transmission_set, manual, .{ .i = &.{3}, .f = &.{1.0} });
+    try b.objectOp(.tracked_set_left_ratio, manual, .{ .f = &.{0.8} });
+    b.at(80);
+    try b.objectOp(.tracked_set_driver_input, middle, .{ .f = &.{ -1.0, 1.0, 1.0, 0 } }); // Reverse while rolling forward
+    try b.objectOp(.tracked_set_driver_input, sideways, .{ .f = &.{ 0.7, -0.5, 1.0, 0 } });
+    b.at(100);
+    try b.objectOp(.vehicle_transmission_set, manual, .{ .i = &.{@bitCast(@as(i32, -1))}, .f = &.{1.0} }); // Reverse
+    try b.objectOp(.tracked_set_brake_input, sideways, .{ .f = &.{0.4} });
+    b.at(125);
+    try b.objectOp(.vehicle_transmission_set, manual, .{ .i = &.{0}, .f = &.{0.0} }); // Neutral
+    try b.objectOp(.tracked_set_brake_input, manual, .{ .f = &.{1.0} });
+    try b.objectOp(.vehicle_controller_settings_hash, middle, .{});
+}
+
+/// A tank pushes a wall of 64 boxes that are asleep (the wheels and the body wake them, the vehicle constraint links the
+/// boxes under its wheels into its island, a large island that the LargeIslandSplitter splits), steers while it pushes,
+/// then brakes; the boxes come to rest and fall asleep
+fn buildVehicleTrackedPushingBoxes(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 300;
+    b.max_contact_constraints = 4096;
+    _ = try addFloor(b, 40, 0);
+    var desc = tankDesc(.ray);
+    desc.callbacks = VehicleCallbacks.post_step;
+    const tank = try addTank(b, .{ 0, 0.95, -8 }, desc, .{});
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    for (0..8) |y| {
+        for (0..8) |x|
+            _ = try b.body(.{ .position = .{ real(x) * 0.5 - 1.75, 0.25 + 0.5 * real(y), 1.0 }, .shape = box, .object_layer = Layers.moving, .friction = 0.5 }, .dont_activate);
+    }
+    const plank = try b.box(.{ 1.5, 0.05, 0.3 }, 0.02);
+    _ = try b.body(.{ .position = .{ 0, 0.05, -3.5 }, .shape = plank, .object_layer = Layers.moving, .friction = 0.6 }, .dont_activate); // Under the wheels
+
+    b.at(1);
+    try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0.8, 1.0, 1.0, 0 } });
+    b.at(120);
+    try b.objectOp(.tracked_set_right_ratio, tank, .{ .f = &.{0.6} });
+    b.at(170);
+    try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0, 1.0, 1.0, 1.0 } });
+}
+
+/// Sleeping and waking: a tank without input comes to rest and falls asleep (the engine idles, the transmission shifts
+/// to neutral; the collision tests of the inactive vehicle every third step, the constraint inactive), is woken up by
+/// ActivateBody and drives off turning; a snapshot while it drives is restored cross; it is disabled for a few updates
+/// while it drives (OnStep runs, it is not solved); it brakes and falls asleep again without collision tests (0 inactive
+/// steps)
+fn buildVehicleTrackedSleepAndWake(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 300;
+    _ = try addFloor(b, 40, 0);
+    var desc = tankDesc(.cast_sphere);
+    desc.callbacks = VehicleCallbacks.post_collide;
+    const tank = try addTank(b, .{ 0, 1.0, 0 }, desc, .{});
+    const body = b.num_handles - 1; // The vehicle body (the last body handle)
+
+    b.at(1);
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_inactive, tank, .{ .i = &.{3} });
+    b.at(90);
+    try b.expectSleeping(body);
+    try b.expectVehicleConstraintState(tank, ConstraintState.inactive, false);
+    b.at(95);
+    try b.op(.activate_body, body, .{});
+    try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0.8, 1.0, 0.7, 0 } });
+    b.at(100);
+    try b.expectVehicleConstraintState(tank, ConstraintState.enabled | ConstraintState.active, true);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(110);
+    try b.objectOp(.vehicle_set_enabled, tank, .{ .i = &.{0} });
+    b.at(114);
+    try b.objectOp(.vehicle_set_enabled, tank, .{ .i = &.{1} });
+    b.at(120);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 100
+    b.at(140);
+    try b.objectOp(.tracked_set_driver_input, tank, .{ .f = &.{ 0, 1.0, 1.0, 1.0 } });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_inactive, tank, .{ .i = &.{0} });
+    b.at(299);
+    try b.expectSleeping(body);
+}
+
+/// Far from the origin (the positions are Real: in double precision the wheel contacts keep their precision): two tanks
+/// with the ray and the cast cylinder tester on a floor with a ramp, steering, turning on the spot, a snapshot restored
+/// cross
+fn buildVehicleTrackedFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 110;
+    const o: [3]Real = .{ -7000, 150, 9000 };
+    _ = try addStaticBox(b, .{ 30, 0.5, 30 }, .{ o[0], o[1] - 0.5, o[2] }, identity_rotation, 0);
+    _ = try addStaticBox(b, .{ 3, 0.5, 4 }, .{ o[0] - 6, o[1] - 0.3, o[2] + 3 }, axisAngle(.{ 1, 0, 0 }, -0.2), 0);
+    const ray = try addTank(b, .{ o[0] - 6, o[1] + 0.95, o[2] - 6 }, tankDesc(.ray), .{});
+    const cylinder = try addTank(b, .{ o[0] + 6, o[1] + 0.95, o[2] - 6 }, tankDesc(.cast_cylinder), .{ .end_radius = 0.33 });
+
+    b.at(1);
+    try b.objectOp(.tracked_set_driver_input, ray, .{ .f = &.{ 1.0, 1.0, 1.0, 0 } });
+    try b.objectOp(.tracked_set_driver_input, cylinder, .{ .f = &.{ 0.8, 1.0, 0.6, 0 } });
+    b.at(30);
+    try b.expectWheelContacts(ray, 0xff);
+    try b.expectWheelContacts(cylinder, 0xff);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(50);
+    try b.objectOp(.tracked_set_driver_input, cylinder, .{ .f = &.{ 0.8, 1.0, -1.0, 0 } });
+    b.at(60);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 30
+    b.at(90);
+    try b.objectOp(.tracked_set_driver_input, ray, .{ .f = &.{ 0, 1.0, 1.0, 1.0 } });
+}
+
+/// The description of a motorcycle of the variants' scenes: the motorcycle controller with Jolt's defaults (the lean
+/// spring integration coefficient stays 0 in scenes with D12 sweeps or restores: MotorcycleController::SaveState does
+/// not save the integrated angle), the tester in the moving layer
+fn motorcycleDesc(tester: VehicleTesterKind) SimVehicle {
+    var v = SimVehicle.defaults(.motorcycle);
+    v.tester = .{ .kind = @intFromEnum(tester), .object_layer = Layers.moving, .radius = 0.05 };
+    v.max_pitch_roll_angle = zolt.math.degreesToRadians(60.0);
+    return v;
+}
+
+/// Motorcycles leaning into turns at different speeds with different lean springs: the default lean spring at half
+/// throttle; a small max lean angle (the target lean is clamped) with a softer, less damped spring and less smoothing at
+/// full throttle; a strongly smoothed spring whose lean steering limit is switched off while it is fast (the front wheel
+/// steers its full angle) and on again, and whose lean controller is off for a few updates (the target lean is the world
+/// up, the integrated angle is reset). They turn right and left at speed, then roll out.
+fn buildVehicleMotorcycleTurns(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 200;
+    _ = try addFloor(b, 70, 0);
+    const default_bike = try addTestMotorcycle(b, .{ -12, 0.9, -40 }, identity_rotation, motorcycleDesc(.cast_sphere));
+    var clamped_desc = motorcycleDesc(.ray);
+    clamped_desc.max_lean_angle = zolt.math.degreesToRadians(8.0);
+    clamped_desc.lean_spring_constant = 3000.0;
+    clamped_desc.lean_spring_damping = 600.0;
+    clamped_desc.lean_smoothing_factor = 0.5;
+    clamped_desc.callbacks = VehicleCallbacks.post_step;
+    const clamped = try addTestMotorcycle(b, .{ 0, 0.9, -40 }, identity_rotation, clamped_desc);
+    var smooth_desc = motorcycleDesc(.cast_cylinder);
+    smooth_desc.lean_smoothing_factor = 0.95;
+    smooth_desc.lean_spring_constant = 7000.0;
+    smooth_desc.tire_max_impulse = @intFromEnum(VehicleTireMaxImpulse.custom);
+    const smooth = try addTestMotorcycle(b, .{ 12, 0.9, -40 }, identity_rotation, smooth_desc);
+
+    b.at(1);
+    try b.expectWheelContacts(default_bike, 0b11);
+    try b.objectOp(.wheeled_set_driver_input, default_bike, .{ .f = &.{ 0.5, 0, 0, 0 } });
+    try b.objectOp(.wheeled_set_driver_input, clamped, .{ .f = &.{ 1.0, 0, 0, 0 } });
+    try b.objectOp(.wheeled_set_driver_input, smooth, .{ .f = &.{ 0.8, 0, 0, 0 } });
+    b.at(60);
+    try b.objectOp(.wheeled_set_right_input, default_bike, .{ .f = &.{0.4} });
+    try b.objectOp(.wheeled_set_right_input, clamped, .{ .f = &.{0.6} });
+    try b.objectOp(.motorcycle_enable_lean_steering_limit, smooth, .{ .i = &.{0} });
+    try b.objectOp(.wheeled_set_right_input, smooth, .{ .f = &.{0.15} });
+    b.at(75);
+    try b.objectOp(.motorcycle_enable_lean_steering_limit, smooth, .{ .i = &.{1} });
+    try b.objectOp(.wheeled_set_right_input, smooth, .{ .f = &.{0.5} });
+    b.at(100);
+    try b.objectOp(.motorcycle_enable_lean_controller, smooth, .{ .i = &.{0} });
+    b.at(104);
+    try b.objectOp(.motorcycle_enable_lean_controller, smooth, .{ .i = &.{1} });
+    b.at(120);
+    try b.objectOp(.wheeled_set_right_input, default_bike, .{ .f = &.{-0.4} });
+    try b.objectOp(.wheeled_set_right_input, clamped, .{ .f = &.{-0.5} });
+    try b.objectOp(.wheeled_set_right_input, smooth, .{ .f = &.{-0.3} });
+    b.at(170);
+    for ([_]u32{ default_bike, clamped, smooth }) |bike|
+        try b.objectOp(.wheeled_set_driver_input, bike, .{ .f = &.{ 0, 0, 0, 0 } });
+}
+
+/// A ramp for the motorcycle scenes: a static box of half extent (4, 0.5, 12) rotated by -0.15 rad around x whose top
+/// rises from the floor (y = 0) at z = 0 to y = 3.6 at z = 23.8 (x: the center)
+fn addMotorcycleRamp(b: *SceneBuilder, x: Real) Allocator.Error!u32 {
+    return addStaticBox(b, .{ 4, 0.5, 12 }, .{ x, 1.2986, 12 }, axisAngle(.{ 1, 0, 0 }, -0.15), 0);
+}
+
+/// Motorcycles on a slope and braking: one rides up a ramp, steers on it and brakes until it stands on the slope (the
+/// lean target from the ground impulses on a slope); one brakes and hand brakes in a turn on the flat floor with a
+/// gravity override (the max steer angle factor uses the overridden gravity) and its lean steering limit only active at
+/// speed; a snapshot in the turn is restored cross
+fn buildVehicleMotorcycleSlopesAndBraking(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 180;
+    _ = try addFloor(b, 50, 0);
+    _ = try addMotorcycleRamp(b, 0);
+    var climber_desc = motorcycleDesc(.cast_sphere);
+    climber_desc.callbacks = VehicleCallbacks.post_collide;
+    const climber = try addTestMotorcycle(b, .{ 0, 0.9, -2 }, identity_rotation, climber_desc);
+    var braker_desc = motorcycleDesc(.ray);
+    braker_desc.lean_spring_damping = 1300.0;
+    const braker = try addTestMotorcycle(b, .{ 14, 0.9, -20 }, identity_rotation, braker_desc);
+
+    b.at(1);
+    try b.expectWheelContacts(climber, 0b11);
+    try b.objectOp(.wheeled_set_driver_input, climber, .{ .f = &.{ 0.7, 0, 0, 0 } });
+    try b.objectOp(.wheeled_set_driver_input, braker, .{ .f = &.{ 1.0, 0, 0, 0 } });
+    b.at(40);
+    try b.objectOp(.vehicle_override_gravity, braker, .{ .f = &.{ 0, -7.5, 0 } });
+    try b.objectOp(.wheeled_set_right_input, braker, .{ .f = &.{0.5} });
+    b.at(60);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    try b.objectOp(.wheeled_set_right_input, climber, .{ .f = &.{-0.2} });
+    b.at(75);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 60
+    b.at(80);
+    try b.objectOp(.wheeled_set_driver_input, braker, .{ .f = &.{ 0, 0.4, 0.8, 0.5 } }); // Brake and hand brake in the turn
+    b.at(100);
+    try b.objectOp(.wheeled_set_driver_input, climber, .{ .f = &.{ 0, 0.1, 1.0, 0 } }); // Brake on the slope
+    try b.objectOp(.vehicle_reset_gravity_override, braker, .{});
+    b.at(130);
+    try b.objectOp(.wheeled_set_driver_input, braker, .{ .f = &.{ 0.6, -0.3, 0, 0 } });
+}
+
+/// The lean spring integration on a slope (no D12 sweeps and no restore, `sweep_stride = 0`: MotorcycleController::
+/// SaveState does not save the integrated angle): a motorcycle with a non-zero integration coefficient rides up the ramp
+/// and turns left and right on it (the target lean follows the ground impulses of the sloped contact), its lean
+/// controller is off for a few updates (the integrated angle is reset), the coefficient and its decay change, it brakes
+/// on the slope; a second one drops from above the floor rolled to the side (the integrated angle decays while its
+/// wheels are in the air) and rides off
+fn buildVehicleMotorcycleLeanIntegrationSlope(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 150;
+    _ = try addFloor(b, 50, 0);
+    _ = try addMotorcycleRamp(b, 0);
+    var climber_desc = motorcycleDesc(.cast_sphere);
+    climber_desc.lean_spring_integration_coefficient = 1500.0;
+    climber_desc.lean_spring_integration_coefficient_decay = 3.0;
+    climber_desc.callbacks = VehicleCallbacks.post_step;
+    const climber = try addTestMotorcycle(b, .{ 0, 0.9, -2 }, identity_rotation, climber_desc);
+    var dropped_desc = motorcycleDesc(.ray);
+    dropped_desc.lean_spring_integration_coefficient = 800.0;
+    const dropped = try addTestMotorcycle(b, .{ 14, 1.4, -10 }, axisAngle(.{ 0, 0, 1 }, -0.2), dropped_desc);
+
+    b.at(1);
+    try b.expectWheelContacts(dropped, 0); // In the air
+    try b.objectOp(.wheeled_set_driver_input, climber, .{ .f = &.{ 0.8, 0, 0, 0 } });
+    try b.objectOp(.wheeled_set_driver_input, dropped, .{ .f = &.{ 0.5, 0, 0, 0 } });
+    b.at(40);
+    try b.expectWheelContacts(dropped, 0b11);
+    try b.objectOp(.wheeled_set_right_input, climber, .{ .f = &.{-0.4} });
+    try b.objectOp(.wheeled_set_right_input, dropped, .{ .f = &.{0.3} });
+    b.at(60);
+    try b.objectOp(.wheeled_set_right_input, climber, .{ .f = &.{0.4} });
+    try b.objectOp(.motorcycle_set_lean_spring_integration_coefficient, climber, .{ .f = &.{2500.0} });
+    b.at(75);
+    try b.objectOp(.motorcycle_enable_lean_controller, dropped, .{ .i = &.{0} }); // Resets the integrated angle
+    b.at(79);
+    try b.objectOp(.motorcycle_enable_lean_controller, dropped, .{ .i = &.{1} });
+    try b.objectOp(.motorcycle_set_lean_spring_integration_coefficient_decay, dropped, .{ .f = &.{8.0} });
+    b.at(110);
+    try b.objectOp(.wheeled_set_driver_input, climber, .{ .f = &.{ 0, 0, 1.0, 0 } });
+    try b.objectOp(.wheeled_set_right_input, dropped, .{ .f = &.{-0.3} });
+}
+
+/// Far from the origin: a motorcycle rides up a ramp and turns, another leans into a turn on the floor; a snapshot
+/// restored cross
+fn buildVehicleMotorcycleFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 120;
+    const o: [3]Real = .{ 6000, -80, -11000 };
+    _ = try addStaticBox(b, .{ 40, 0.5, 40 }, .{ o[0], o[1] - 0.5, o[2] }, identity_rotation, 0);
+    _ = try addStaticBox(b, .{ 4, 0.5, 12 }, .{ o[0], o[1] + 1.2986, o[2] + 12 }, axisAngle(.{ 1, 0, 0 }, -0.15), 0);
+    const climber = try addTestMotorcycle(b, .{ o[0], o[1] + 0.9, o[2] - 2 }, identity_rotation, motorcycleDesc(.cast_sphere));
+    const turner = try addTestMotorcycle(b, .{ o[0] + 15, o[1] + 0.9, o[2] - 20 }, identity_rotation, motorcycleDesc(.cast_cylinder));
+
+    b.at(1);
+    try b.objectOp(.wheeled_set_driver_input, climber, .{ .f = &.{ 0.7, 0, 0, 0 } });
+    try b.objectOp(.wheeled_set_driver_input, turner, .{ .f = &.{ 0.8, 0, 0, 0 } });
+    b.at(40);
+    try b.expectWheelContacts(turner, 0b11);
+    try b.objectOp(.wheeled_set_right_input, turner, .{ .f = &.{0.4} });
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(55);
+    try b.objectOp(.wheeled_set_right_input, climber, .{ .f = &.{0.2} });
+    b.at(65);
+    try b.sysOp(.restore_cross, .{ .index = 0 }); // Back to update 40
+    b.at(90);
+    try b.objectOp(.wheeled_set_driver_input, climber, .{ .f = &.{ 0, 0, 1.0, 0 } });
 }
 
 // (append the vehicle scenes here)
