@@ -27,6 +27,7 @@
 #include <Jolt/Core/Mutex.h>
 
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -187,7 +188,7 @@ class Recorder
 public:
 	void						Add(const HelloWorldRecord &inRecord)
 	{
-		UniqueLock lock(mMutex);
+		std::lock_guard<Mutex> lock(mMutex); // Not UniqueLock: it takes a lock context in a build with JPH_ENABLE_ASSERTS
 		mRecords.push_back(inRecord);
 	}
 
@@ -479,7 +480,7 @@ uint32 jolt_hello_world_save_state(void *inWorld, uint8 *outBytes, uint32 inCapa
 uint32 jolt_hello_world_take_records(void *inWorld, HelloWorldRecord *outRecords, uint32 inCapacity)
 {
 	HelloWorld *world = static_cast<HelloWorld *>(inWorld);
-	UniqueLock lock(world->mRecorder.mMutex);
+	std::lock_guard<Mutex> lock(world->mRecorder.mMutex);
 	uint32 count = uint32(world->mRecorder.mRecords.size());
 	if (count <= inCapacity)
 	{

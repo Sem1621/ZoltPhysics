@@ -101,23 +101,42 @@
 //! that the states do not hold), a mismatch is decoded to the field, the object handle, the item and the component
 //! (`describeObjectStateDifference`, the SaveState fields with the members of CharacterBase / CharacterVirtual /
 //! CharacterContact::SaveState); the CharacterContactListener records (RecordKind 7..17) are compared in call order
-//! (they are the callbacks of the user thread's character operations); `snapshot` / `restore_cross` include the
-//! SaveState of every character; the `expect_*` operations of Phase 7 must return the scene's `count`. Until the classes
-//! are ported the Phase 7 scenes run on the C++ side ("SimScenes blocked scenes run on the C++ side": the object states
-//! of the worlds with 0 and 3 threads are identical, decode completely and stay finite, the character records are
-//! identical in call order). Proof that it bites: flipping a bit of the object state that the C++ world with 3 threads
-//! writes is reported as "scene character_ops, update 0: the C++ worlds with 0 and 3 threads differ: object state
-//! differs at byte 316 (3 threads 616 bytes, 0 threads 616 bytes): character_save_state (object handle 1, item 0)
-//! ground_state 3 threads 0x00000002 0 threads 0x00000003"; swapping its first two character records as "scene
-//! character_virtual_ops, update 0: character listener record 0 of 14 (call order) differs between the C++ worlds with
-//! 0 and 3 threads" (character_adjust_body_velocity against character_contact_validate); a Zolt object state field
-//! that the C++ side does not write as "object state differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more,
-//! starting with ragdoll_properties (object handle 0, item 0)"; a supported Blocker whose classes are stubs as "scene
-//! character_ops creates Character objects, whose Zolt classes are still stubs, but its blocker .characters is
-//! supported"; a ported class (no `is_stub`) with a stub slot as "the Character classes are ported but their slot in
-//! SimulationParity.zig is still Phase7StubSlot" (and the test "SimulationParity Phase 7 slots follow the ported
-//! classes" fails). CharacterBaseParity.zig compares CharacterBase's SaveState bytes: writing the ground normal in
-//! place of the ground velocity fails it.
+//! (they are the callbacks of the user thread's character operations; a record that cannot be stored fails the
+//! operation that made the callback); `snapshot` / `restore_cross` include the SaveState of every character, and a
+//! restore must read every byte; the `expect_*` operations of Phase 7 must return the scene's `count`. Before a scene
+//! runs, checkPhase7Settings compares the binary state of the vehicle and ragdoll settings that the filled slots make
+//! with the C++ settings, the round trips (each side restores the other side's bytes and saves again) and the
+//! RagdollSettings tables. The test "SimulationParity CharacterID consumption" compares which constructions consume a
+//! CharacterID. Until the classes are ported the Phase 7 scenes run on the C++ side ("SimScenes blocked scenes run on
+//! the C++ side": the object states of the worlds with 0 and 3 threads are identical, decode completely and stay finite,
+//! the character records are identical in call order, the C++ settings round trips give the same bytes). With a
+//! reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene fails when its C++ side
+//! hits a Jolt assert (the release_only scenes excepted).
+//!
+//! Proof that the Phase 7 checks bite: flipping a bit of the object state that the C++ world with 3 threads writes is
+//! reported as "scene character_ops, update 0: the C++ worlds with 0 and 3 threads differ: object state differs at byte
+//! 316 (3 threads 616 bytes, 0 threads 616 bytes): character_save_state (object handle 1, item 0) ground_state 3 threads
+//! 0x00000002 0 threads 0x00000003"; swapping its first two character records as "scene character_virtual_ops, update
+//! 0: character listener record 0 of 14 (call order) differs between the C++ worlds with 0 and 3 threads"
+//! (character_adjust_body_velocity against character_contact_validate); a Zolt object state field that the C++ side
+//! does not write as "object state differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more, starting with
+//! ragdoll_properties (object handle 0, item 0)"; a supported Blocker whose classes are stubs as "scene character_ops
+//! creates Character objects, whose Zolt classes are still stubs, but its blocker .characters is supported"; a ported
+//! class (no `is_stub`) with a stub slot as "the Character classes are ported but their slot in SimulationParity.zig is
+//! still Phase7StubSlot" (and the test "SimulationParity Phase 7 slots follow the ported classes" fails).
+//! CharacterBaseParity.zig compares CharacterBase's SaveState bytes: writing the ground normal in place of the ground
+//! velocity fails it. The checks of the foundation review: a character state restore that does not check that every
+//! byte was read (the check before the review) is reported as "scene character_ops, update 27: restore_cross: a C++
+//! world does not restore the character states of the other one (a read failed or bytes are left)" on the C++ side and
+//! fails "SimulationParity restoring the character states reads every byte" on the Zolt side; an applyOp that ignores
+//! the character recorder fails "SimulationParity a character record that cannot be stored fails the operation"
+//! ("expected error.OutOfMemory, found 0"); a C++ round trip that changes the engine settings is reported as "scene
+//! vehicle_wheeled_ops, vehicle description 0, part engine, item 0: restoring the C++ bytes and saving them again
+//! changes them (restored true, byte 1 of 40)", one that changes the friction of a ragdoll part as "scene ragdoll_ops,
+//! ragdoll description 0: restoring the C++ RagdollSettings bytes and saving them again changes them (restored true,
+//! byte 170 of 1572)"; a copy of CharacterVirtualSettings that consumes an ID (default construction and assignment in
+//! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
+//! 3").
 //!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
@@ -207,8 +226,18 @@ const ObjectFieldHeader = SimScenes.ObjectFieldHeader;
 const ObjectComponent = SimScenes.ObjectComponent;
 const ObjectStateWriter = SimScenes.ObjectStateWriter;
 const VehicleControllerKind = SimScenes.VehicleControllerKind;
+const VehicleSettingsPart = SimScenes.VehicleSettingsPart;
+const SimVehicle = SimScenes.SimVehicle;
+const SimVehicleWheel = SimScenes.SimVehicleWheel;
+const VehicleConstraint = zolt.VehicleConstraint;
+const VehicleControllerSettings = zolt.VehicleControllerSettings;
+const WheelSettings = zolt.WheelSettings;
+const Wheel = zolt.Wheel;
 
 const io = std.testing.io;
+
+/// The result of a C function of SimulationReference.cpp that has no bytes for its arguments (cNoBytes)
+const no_bytes: u32 = 0xffffffff;
 
 /// The C++ reference functions, see SimulationReference.cpp
 const jolt = struct {
@@ -240,7 +269,14 @@ const jolt = struct {
     extern fn jolt_sim_default_extended_update(out_floats: *[12]f32) void;
     extern fn jolt_sim_default_vehicle(kind: u32, out_vehicle: *SimScenes.SimVehicle) void;
     extern fn jolt_sim_default_vehicle_wheel(kind: u32, out_wheel: *SimScenes.SimVehicleWheel) void;
-    extern fn jolt_sim_vehicle_settings_save(desc: *const SimSceneDesc, index: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_vehicle_settings_part(desc: *const SimSceneDesc, index: u32, part: u32, item: u32, restore: u32, bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_ragdoll_settings_bytes(world: *anyopaque, index: u32, restore: u32, bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_ragdoll_settings_info(world: *anyopaque, index: u32, out_values: [*]u32, capacity: u32) u32;
+    extern fn jolt_sim_character_id_sequence(world: *anyopaque, first_id: u32, out_values: *[SimScenes.character_id_sequence_len]u32) void;
+    extern fn jolt_sim_zero_filling_check() u32;
+    extern fn jolt_sim_reference_assert_count() u32;
+    extern fn jolt_sim_reference_has_asserts() u32;
+    extern fn jolt_sim_test_assert_hook(out_before: *u32, out_after: *u32) void;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -987,10 +1023,13 @@ const ZoltWorld = struct {
         return ids;
     }
 
-    /// ApplyOp of SimulationReference.cpp
+    /// ApplyOp of SimulationReference.cpp. A record of a callback of the operation that could not be stored (out of
+    /// memory: the callbacks cannot return errors, Recorder.add latches the failure) fails the operation, also when the
+    /// records are not taken afterwards (createScene under checkAllAllocationFailures).
     fn applyOp(self: *ZoltWorld, op: *const SimOp) !u32 {
         const result = try self.applyOpInner(op);
         try self.recorder.checkError();
+        try self.character_recorder.checkError();
         return result;
     }
 
@@ -1328,21 +1367,26 @@ const ZoltWorld = struct {
     // ---------------------------------------------------------------------------------------------------------------
     // Phase 7: characters, ragdolls and vehicles (the slots, see "Characters, ragdolls and vehicles" below)
 
-    /// A Phase 7 operation (ApplyObjectOp of SimulationReference.cpp): the slot of its Phase7OpRange
+    /// A Phase 7 operation (ApplyObjectOp of SimulationReference.cpp): the slot of its Phase7OpRange. The operations of
+    /// the vehicle variants get the vehicle of their handle from VehicleSlot and return its ConstraintState
+    /// (ApplyVehicleOp of the .cpp)
     fn applyPhase7Op(self: *ZoltWorld, op: *const SimOp) !u32 {
         const kind: OpKind = @enumFromInt(op.kind);
         return switch (Phase7OpRange.of(op.kind).?) {
             .character => if (kind == .create_character) CharacterSlot.create(self, op) else CharacterSlot.applyOp(self, op),
             .character_virtual => if (kind == .create_character_virtual) CharacterVirtualSlot.create(self, op) else CharacterVirtualSlot.applyOp(self, op),
             .ragdoll => if (kind == .create_ragdoll) RagdollSlot.create(self, op) else RagdollSlot.applyOp(self, op),
-            .vehicle => if (kind == .create_vehicle)
-                VehicleSlot.create(self, op)
-            else if (op.kind >= @intFromEnum(OpKind.tracked_set_driver_input) and op.kind <= @intFromEnum(OpKind.tracked_set_track))
-                TrackedVehicleSlot.applyOp(self, op)
-            else if (op.kind >= @intFromEnum(OpKind.motorcycle_enable_lean_controller) and op.kind <= @intFromEnum(OpKind.motorcycle_set_lean_smoothing_factor))
-                MotorcycleSlot.applyOp(self, op)
-            else
-                VehicleSlot.applyOp(self, op),
+            .vehicle => if (kind == .create_vehicle) VehicleSlot.create(self, op) else VehicleSlot.applyOp(self, op),
+            .vehicle_tracked => {
+                const vehicle = try VehicleSlot.vehicle(self, op.index);
+                try TrackedVehicleSlot.applyVehicleOp(self, op, vehicle);
+                return VehicleSlot.constraintState(vehicle);
+            },
+            .vehicle_motorcycle => {
+                const vehicle = try VehicleSlot.vehicle(self, op.index);
+                try MotorcycleSlot.applyVehicleOp(self, op, vehicle);
+                return VehicleSlot.constraintState(vehicle);
+            },
             .spare => error.SceneNotSupported,
         };
     }
@@ -1370,8 +1414,17 @@ const ZoltWorld = struct {
         try out.appendSlice(self.allocator, recorder.getData());
     }
 
-    /// RestoreState of every character and character virtual from the bytes of `saveCharacterStates` (of either side)
+    /// RestoreState of every character and character virtual from the bytes of `saveCharacterStates` (of either side):
+    /// true when the bytes were read without error and completely (jolt_sim_restore_character_states of the .cpp: the
+    /// stream sets eof only on a read past the end, so one more byte is read, which must fail at the end; no bytes: true
+    /// when there are no characters)
     fn restoreCharacterStates(self: *ZoltWorld, bytes: []const u8) !bool {
+        if (bytes.len == 0) {
+            var states: std.ArrayList(u8) = .empty;
+            defer states.deinit(self.allocator);
+            try self.saveCharacterStates(&states);
+            return states.items.len == 0;
+        }
         var recorder = StateRecorderImpl.init(self.allocator);
         defer recorder.deinit();
         recorder.writeBytes(bytes);
@@ -1379,7 +1432,10 @@ const ZoltWorld = struct {
         recorder.rewind();
         try CharacterSlot.restoreStates(self, &recorder);
         try CharacterVirtualSlot.restoreStates(self, &recorder);
-        return !recorder.isFailed();
+        const read = !recorder.isFailed();
+        var extra: [1]u8 = undefined;
+        recorder.readBytes(&extra); // Fails at the end of the bytes
+        return read and recorder.isEOF();
     }
 
     fn takeCharacterRecords(self: *ZoltWorld, out: *std.ArrayList(SimRecord)) !void {
@@ -1491,6 +1547,53 @@ const CppWorld = struct {
         const taken = jolt.jolt_sim_take_character_records(self.handle, unused.ptr, @intCast(unused.len));
         std.debug.assert(taken <= unused.len);
         out.items.len += taken;
+    }
+
+    /// Phase 7: the bytes of a part of vehicle description `index` (jolt_sim_vehicle_settings_part: SaveBinaryState of
+    /// the part, or with `restore_from` a default object of its class restores those bytes and is saved again); false:
+    /// no such part, or the restore failed
+    fn vehicleSettingsPart(allocator: Allocator, desc: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const bytes = restore_from orelse &.{};
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_vehicle_settings_part(desc, index, @intFromEnum(part), item, @intFromBool(restore_from != null), bytes.ptr, @intCast(bytes.len), out.items.ptr, @intCast(out.capacity));
+            if (size == no_bytes) return false;
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return true;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
+    }
+
+    /// Phase 7: the SaveBinaryState bytes of the RagdollSettings of ragdoll description `index` (with the shapes and the
+    /// group filter), or with `restore_from` of RagdollSettings::sRestoreFromBinaryState of those bytes; false: the
+    /// restore failed
+    fn ragdollSettingsBytes(self: CppWorld, allocator: Allocator, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const bytes = restore_from orelse &.{};
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_ragdoll_settings_bytes(self.handle, index, @intFromBool(restore_from != null), bytes.ptr, @intCast(bytes.len), out.items.ptr, @intCast(out.capacity));
+            if (size == no_bytes) return false;
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return true;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
+    }
+
+    /// Phase 7: the tables of the RagdollSettings of ragdoll description `index` (jolt_sim_ragdoll_settings_info)
+    fn ragdollSettingsInfo(self: CppWorld, allocator: Allocator, index: u32, out: *std.ArrayList(u32)) !void {
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_ragdoll_settings_info(self.handle, index, out.items.ptr, @intCast(out.capacity));
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
     }
 
     /// The bytes of a C function that returns their size and copies them when they fit
@@ -2293,9 +2396,9 @@ const Run = struct {
                         return self.fail("jolt could not restore the zolt state of slot {d}", .{op.index});
                     const character_slot = &self.character_snapshots[op.index];
                     if (!try self.zw.restoreCharacterStates(character_slot[1].items))
-                        return self.fail("zolt could not restore the jolt character states of slot {d}", .{op.index});
+                        return self.fail("zolt could not restore the jolt character states of slot {d} (a read failed or bytes are left)", .{op.index});
                     if (!self.cw.restoreCharacterStates(character_slot[0].items))
-                        return self.fail("jolt could not restore the zolt character states of slot {d}", .{op.index});
+                        return self.fail("jolt could not restore the zolt character states of slot {d} (a read failed or bytes are left)", .{op.index});
                     try self.compareStates(.all, "after restore_cross");
                     try self.compareObjectStates("after restore_cross");
                 },
@@ -2533,7 +2636,7 @@ const Run = struct {
 /// What a scene did (the sanity checks of runEntry, printed with `verbose`)
 const RunStats = struct {
     /// Number of listener records per RecordKind
-    records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0),
+    records: [SimScenes.num_record_kinds]u32 = @splat(0),
     num_temp_failures: u32 = 0,
     num_job_failures: u32 = 0,
     /// Largest number of active bodies after an update
@@ -2568,17 +2671,17 @@ const RunStats = struct {
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
 fn isPhase7Expectation(kind: OpKind) bool {
     return switch (kind) {
-        .character_expect_ground_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts => true,
+        .character_expect_ground_state, .cv_expect_ground_state, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
         else => false,
     };
 }
 
 /// True when `records` (counts per RecordKind) has every RecordKind of the bits (Expect.character_records); the missing
 /// kinds are printed
-fn recordsReach(records: []const u32, bits: u32) bool {
+fn recordsReach(records: []const u32, bits: u128) bool {
     var reached = true;
     for (records, 0..) |count, kind| {
-        if (kind < 32 and (bits & (@as(u32, 1) << @intCast(kind))) != 0 and count == 0) {
+        if (kind < 128 and (bits & (@as(u128, 1) << @intCast(kind))) != 0 and count == 0) {
             std.debug.print("SimulationParity: no {t} records\n", .{@as(RecordKind, @enumFromInt(kind))});
             reached = false;
         }
@@ -3358,29 +3461,106 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 
 // -------------------------------------------------------------------------------------------------------------------
 // Characters, ragdolls and vehicles (Phase 7): the Zolt side of the classes, one slot per class group (the recipe is in
-// the SimScenes header; the C++ side, SimulationReference.cpp, covers every class and operation). A slot is a struct
-// with
-// - `Storage`: what the world keeps of the objects of its handles (a field of ZoltWorld.phase7, initialized with .{});
+// the SimScenes header; the C++ side, SimulationReference.cpp, covers every class and operation). `Phase7StubSlot` is
+// the slot of a group whose classes are not ported yet and declares every function of every slot below; a filled slot
+// implements the functions of its own list (the driver and VehicleSlot call nothing else on it).
+//
+// Every slot:
+// - `Storage`: what the world keeps of the objects of its handles (a field of ZoltWorld.phase7, initialized with .{};
+//   VehicleSlot's holds the vehicles of all three vehicle slots).
 // - `create(world: *ZoltWorld, op: *const SimOp) !u32`: the create operation of the slot (create_character,
-//   create_character_virtual, create_ragdoll, create_vehicle): the object of the next handle, the result of
-//   ApplyObjectOp in SimulationReference.cpp;
-// - `applyOp(world, op) !u32`: the other operations of its Phase7OpRange (TrackedVehicleSlot: 554..559, MotorcycleSlot:
-//   560..566, VehicleSlot: the rest of 520..579; the variants find their vehicle in VehicleSlot's storage), exactly the
-//   ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp of the .cpp (lock: i[3] == 0, the
-//   filters of SimCharacterFilters, the world's temp allocator for the character virtual queries);
+//   create_character_virtual, create_ragdoll, create_vehicle: VehicleSlot creates the tracked and motorcycle vehicles too,
+//   with the hooks of the variants): the object of the next handle, the result of ApplyObjectOp in
+//   SimulationReference.cpp.
+// - `applyOp(world, op) !u32`: the other operations of its Phase7OpRange (CharacterSlot, CharacterVirtualSlot,
+//   RagdollSlot, VehicleSlot), exactly ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp of the
+//   .cpp (lock: i[3] == 0, the filters of SimCharacterFilters, the world's temp allocator for the character virtual
+//   queries).
 // - `writeState(world, w: *ObjectStateWriter) !void`: the object state of its objects in handle order, the fields of
-//   SimScenes.objectFieldLayout in the order of WriteObjectState of the .cpp (VehicleSlot writes the controller fields of
-//   the tracked and motorcycle controllers through their slots);
+//   SimScenes.objectFieldLayout in the order of WriteObjectState of the .cpp (CharacterSlot, CharacterVirtualSlot,
+//   RagdollSlot, VehicleSlot; VehicleSlot writes the parts of the tracked and motorcycle controllers with their hooks).
 // - `saveStates(world, recorder: *StateRecorderImpl) !void` / `restoreStates(world, recorder) !void`: SaveState /
-//   RestoreState of its characters in handle order (CharacterSlot, CharacterVirtualSlot; the other slots do nothing);
-// - `destroyAll(world: *ZoltWorld) void`: remove its objects from the system and destroy them (~SimWorld of the .cpp).
-// The listener of CharacterVirtualSlot is the port of SimCharacterContactListener (CharacterListenerMode record / modify,
-// the CharacterFlags): it adds `CharacterRecords` to world.character_recorder; the vehicle callbacks (VehicleCallbacks,
-// VehicleCombineFriction, VehicleTireMaxImpulse) add `VehicleRecords` to world.recorder. A slot whose classes are not
-// ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes are skipped through their Blocker, and a
-// supported scene that creates its objects fails (checkPhase7Slots).
+//   RestoreState of its characters in handle order (CharacterSlot, CharacterVirtualSlot; the others do nothing).
+// - `destroyAll(world: *ZoltWorld) void`: remove its objects from the system, destroy them and free its Storage (~SimWorld
+//   of the .cpp; ZoltWorld.destroy calls it before the system is destroyed).
+//
+// CharacterVirtualSlot also (the CharacterVirtual group):
+// - `characterIdSequence(world, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void`: the CharacterID
+//   test (jolt_sim_character_id_sequence, with shape 0 of the world), compared by the test "SimulationParity CharacterID
+//   consumption" (M8 depends on which constructions consume an ID).
+// RagdollSlot also (the Ragdoll group):
+// - `settingsBytes(world, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool`: the SaveBinaryState
+//   bytes (with the shapes and the group filter) of the RagdollSettings of ragdoll description `index` as `create` builds
+//   them, or RagdollSettings.restoreFromBinaryState of `restore_from` (every byte read) saved again; false when the
+//   restore failed (jolt_sim_ragdoll_settings_bytes).
+// - `settingsInfo(world, index: u32, out: *std.ArrayList(u32)) !void`: the result of Stabilize (1 / 0, 2: not called),
+//   the number of parts and GetBodyIndexToConstraintIndex, the number of constraints and the pairs of
+//   GetConstraintIndexToBodyIdxPair (jolt_sim_ragdoll_settings_info).
+// VehicleSlot also (the vehicle core group):
+// - `vehicle(world, handle: u32) !*VehicleConstraint`: the vehicle of a vehicle handle (for the variants' operations).
+// - `constraintState(vehicle: *VehicleConstraint) u32`: its ConstraintState bits (the result of the vehicle operations).
+// - `settingsPart(allocator, scene: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32,
+//   restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool`: the bytes of a part of vehicle description `index`
+//   (jolt_sim_vehicle_settings_part: SaveBinaryState of the part as `create` makes it, or a default object of the part's
+//   class restores `restore_from`, every byte read, and saves again; false: no such part, or the restore failed). The
+//   classes of the variants come from their hooks (`makeControllerSettings` / `makeWheelSettings` of the description, of
+//   `SimVehicle.defaults(kind)` / `SimVehicleWheel.defaults(kind)` for a default object), their bytes from the virtual
+//   saveBinaryState / restoreBinaryState of the settings classes.
+// - For the variants (called only by the filled variant slots, so not part of Phase7StubSlot): the vehicle_engine and
+//   vehicle_transmission fields of an engine / transmission (WriteEngineState / WriteTransmissionState of the .cpp: the
+//   tracked controller writes its own engine and transmission with them) and the wheeled members of controller settings
+//   (SimFillWheeled: MotorcycleControllerSettings is a WheeledVehicleControllerSettings).
+// TrackedVehicleSlot and MotorcycleSlot also (the vehicle variants group; VehicleSlot and the driver call them, so that
+// the variants never edit VehicleSlot):
+// - `makeControllerSettings(allocator, scene: *const SimSceneDesc, vehicle: *const SimVehicle) !*VehicleControllerSettings`:
+//   new controller settings of a description (no reference yet, like the `create` functions of the library;
+//   SimMakeTrackedControllerSettings / SimMakeMotorcycleControllerSettings of the .cpp).
+// - `makeWheelSettings(allocator, scene, wheel: *const SimVehicleWheel) !*WheelSettings`: TrackedVehicleSlot only: new
+//   WheelSettingsTV of a wheel of kind tv (SimMakeWheelSettingsTV).
+// - `applyVehicleOp(world, op, vehicle: *VehicleConstraint) !void`: the operations of its range (ApplyTrackedOp /
+//   ApplyMotorcycleOp of the .cpp); the driver returns VehicleSlot.constraintState(vehicle).
+// - `writeWheelState(world, w, handle: u32, index: u32, wheel: *const Wheel) !void`: TrackedVehicleSlot only: the
+//   vehicle_wheel_tv field of wheel `index` (WriteTrackedWheelState), where VehicleSlot writes vehicle_wheel_wv.
+// - `writeControllerState(world, w, handle: u32, vehicle: *const VehicleConstraint) !void`: the controller's fields
+//   (WriteTrackedControllerState: the engine and the transmission, the inputs, the tracks;
+//   WriteMotorcycleControllerState: vehicle_motorcycle, after the wheeled fields that VehicleSlot writes).
+// - `engine(vehicle: *VehicleConstraint) !*VehicleEngine` / `transmission(vehicle) !*VehicleTransmission`:
+//   TrackedVehicleSlot only: the engine / transmission of the TrackedVehicleController, for VehicleSlot's engine and
+//   transmission operations on a tracked vehicle (GetEngine / GetTransmission of the .cpp; a motorcycle controller is a
+//   wheeled controller, VehicleSlot reaches its engine itself).
+//
+// Notes for the groups:
+// - CharacterVirtualSlot: its listener is the port of SimCharacterContactListener (CharacterListenerMode record /
+//   modify, the CharacterFlags) and adds `CharacterRecords` to world.character_recorder (a record that cannot be stored
+//   fails the operation, see ZoltWorld.applyOp). The driver does not sweep the temp allocations of the character virtual
+//   operations (they run between the updates, the D12 sweeps cover PhysicsSystem.update): the CharacterVirtual group
+//   sweeps them in its own tests. Jolt's non-validating RestoreState keeps the members that it does not restore
+//   (mIsBackFacingContact, ...) of the contacts that mActiveContacts.resize keeps (CharacterVirtual.cpp:1977-1981): the
+//   object state compares them (cv_active_contact is_back_facing_contact). `mutable mMaxHitsExceeded`
+//   (CharacterVirtual.h:752) falls under Rule M (PortingGuide section 5).
+// - The vehicle slots: the callbacks (VehicleCallbacks, VehicleCombineFriction, VehicleTireMaxImpulse) add
+//   `VehicleRecords` to world.recorder; the custom friction uses the Math min helper (not @min). Wheel's contact members
+//   are zero-initialized in Zolt (the reference zero-fills its allocations, see the rules of the SimScenes header).
+// A slot whose classes are not ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes are skipped through
+// their Blocker, and a supported scene that creates its objects fails (checkPhase7Slots).
+//
+// The interface changes of the foundation review (for a group that started on the earlier interface):
+// - TrackedVehicleSlot / MotorcycleSlot: `applyOp(world, op) !u32` is now `applyVehicleOp(world, op, vehicle) !void`
+//   (the driver finds the vehicle with VehicleSlot.vehicle and returns VehicleSlot.constraintState). The ranges are
+//   routed by Phase7OpRange: the vehicle core 520..569, tracked 570..579, motorcycle 580..589 (were 554..559 and
+//   560..566; the variant operations are renumbered on both sides). New hooks of the variants: makeControllerSettings,
+//   makeWheelSettings, writeWheelState, writeControllerState, engine, transmission (VehicleSlot calls them in create,
+//   writeState, settingsPart and its engine / transmission operations, so the variants never edit VehicleSlot).
+// - New functions: CharacterVirtualSlot.characterIdSequence, RagdollSlot.settingsBytes / settingsInfo,
+//   VehicleSlot.vehicle / constraintState / settingsPart (the CharacterID test and checkPhase7Settings call them).
+// - New operations: character_body_hash (421), the vehicle core operations 554..562 (the Constraint interface of
+//   VehicleConstraint, vehicle_expect_constraint_state, WheelWV::ApplyTorque, VehicleEngine::ApplyTorque /
+//   ApplyDamping); SimScenes.ObjectField.vehicle_properties holds the constraint priority, the step overrides and the
+//   user data of a vehicle; a character state restore must read every byte (ZoltWorld.restoreCharacterStates);
+//   destroyAll frees the slot's Storage too.
 
-/// The slot of a class group whose classes are not ported yet: every operation returns error.SceneNotSupported
+/// The slot of a class group whose classes are not ported yet: the functions of every slot, every operation returns
+/// error.SceneNotSupported
 const Phase7StubSlot = struct {
     pub const is_stub = true;
 
@@ -3411,6 +3591,83 @@ const Phase7StubSlot = struct {
     fn destroyAll(world: *ZoltWorld) void {
         _ = world;
     }
+
+    // CharacterVirtualSlot
+
+    fn characterIdSequence(world: *ZoltWorld, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void {
+        _ = .{ world, first_id, out };
+        return error.SceneNotSupported;
+    }
+
+    // RagdollSlot
+
+    fn settingsBytes(world: *ZoltWorld, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        _ = .{ world, index, restore_from, out };
+        return error.SceneNotSupported;
+    }
+
+    fn settingsInfo(world: *ZoltWorld, index: u32, out: *std.ArrayList(u32)) !void {
+        _ = .{ world, index, out };
+        return error.SceneNotSupported;
+    }
+
+    // VehicleSlot
+
+    fn vehicle(world: *ZoltWorld, handle: u32) !*VehicleConstraint {
+        _ = .{ world, handle };
+        return error.SceneNotSupported;
+    }
+
+    fn constraintState(v: *VehicleConstraint) u32 {
+        _ = v;
+        return 0;
+    }
+
+    fn settingsPart(allocator: Allocator, scene: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        _ = .{ allocator, scene, index, part, item, restore_from, out };
+        return error.SceneNotSupported;
+    }
+
+    // TrackedVehicleSlot, MotorcycleSlot
+
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        _ = .{ allocator, scene, v };
+        return error.SceneNotSupported;
+    }
+
+    fn makeWheelSettings(allocator: Allocator, scene: *const SimSceneDesc, wheel: *const SimVehicleWheel) !*WheelSettings {
+        _ = .{ allocator, scene, wheel };
+        return error.SceneNotSupported;
+    }
+
+    fn applyVehicleOp(world: *ZoltWorld, op: *const SimOp, v: *VehicleConstraint) !void {
+        _ = .{ world, op, v };
+        return error.SceneNotSupported;
+    }
+
+    fn writeWheelState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, index: u32, wheel: *const Wheel) !void {
+        _ = .{ world, w, handle, index, wheel };
+        return error.SceneNotSupported;
+    }
+
+    fn writeControllerState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, v: *const VehicleConstraint) !void {
+        _ = .{ world, w, handle, v };
+        return error.SceneNotSupported;
+    }
+
+    // TrackedVehicleSlot: the engine and the transmission of a tracked vehicle for VehicleSlot's operations. The return
+    // types name the classes of the vehicle core group, which are not ported yet: Zig analyzes these functions only when
+    // a filled VehicleSlot calls them, when the classes exist.
+
+    fn engine(v: *VehicleConstraint) !*zolt.VehicleEngine {
+        _ = v;
+        return error.SceneNotSupported;
+    }
+
+    fn transmission(v: *VehicleConstraint) !*zolt.VehicleTransmission {
+        _ = v;
+        return error.SceneNotSupported;
+    }
 };
 
 // ---- SLOT character: Character (Phase7OpRange.character, Blocker.characters) ----
@@ -3423,14 +3680,15 @@ const CharacterVirtualSlot = Phase7StubSlot;
 // ---- SLOT ragdoll: Ragdoll, RagdollSettings (Phase7OpRange.ragdoll, Blocker.ragdolls) ----
 const RagdollSlot = Phase7StubSlot;
 
-// ---- SLOT vehicle: VehicleConstraint, the collision testers, WheeledVehicleController (OpKind 520..553 and 567..579,
-// Blocker.wheeled_vehicles) ----
+// ---- SLOT vehicle: VehicleConstraint, the collision testers, the wheels, the engine, the transmission, the anti-roll
+// bars, WheeledVehicleController (Phase7OpRange.vehicle 520..569, Blocker.wheeled_vehicles) ----
 const VehicleSlot = Phase7StubSlot;
 
-// ---- SLOT tracked_vehicle: TrackedVehicleController (OpKind 554..559, Blocker.tracked_vehicles) ----
+// ---- SLOT tracked_vehicle: TrackedVehicleController, WheelSettingsTV (Phase7OpRange.vehicle_tracked 570..579,
+// Blocker.tracked_vehicles) ----
 const TrackedVehicleSlot = Phase7StubSlot;
 
-// ---- SLOT motorcycle: MotorcycleController (OpKind 560..566, Blocker.motorcycles) ----
+// ---- SLOT motorcycle: MotorcycleController (Phase7OpRange.vehicle_motorcycle 580..589, Blocker.motorcycles) ----
 const MotorcycleSlot = Phase7StubSlot;
 
 // ---- end of the Phase 7 slots ----
@@ -3571,6 +3829,140 @@ fn checkPhase7Slots(entry: *const SceneEntry, builder: *const SceneBuilder) !voi
     };
 }
 
+/// Byte buffers of the settings checks of Phase 7
+const SettingsBuffers = struct {
+    allocator: Allocator,
+    zolt: std.ArrayList(u8) = .empty,
+    jolt: std.ArrayList(u8) = .empty,
+    zolt_round_trip: std.ArrayList(u8) = .empty,
+    jolt_round_trip: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *SettingsBuffers) void {
+        self.zolt.deinit(self.allocator);
+        self.jolt.deinit(self.allocator);
+        self.zolt_round_trip.deinit(self.allocator);
+        self.jolt_round_trip.deinit(self.allocator);
+    }
+};
+
+/// Phase 7, before a scene runs (the foundation review M3): the binary state of the settings that the filled Zolt slots
+/// make from the scene's vehicle and ragdoll descriptions is the C++ one, each side restores the other side's bytes and
+/// saves them unchanged (every round-tripping VehicleSettingsPart; RagdollSettings with the shapes and the group
+/// filter), and the tables of the RagdollSettings are the C++ ones. A mismatch is an error of the slot or of the
+/// library's binary state functions, reported before the simulation. The C++ round trips alone run in "SimScenes
+/// blocked scenes run on the C++ side" (checkCppSettingsRoundTrips).
+fn checkPhase7Settings(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    const desc = builder.desc();
+    var buffers: SettingsBuffers = .{ .allocator = allocator };
+    defer buffers.deinit();
+
+    if (!@hasDecl(VehicleSlot, "is_stub")) {
+        for (builder.vehicles.items, 0..) |*v, i| {
+            const index: u32 = @intCast(i);
+            for (std.enums.values(VehicleSettingsPart)) |part| {
+                for (0..part.numItems(v)) |n| {
+                    const item: u32 = @intCast(n);
+                    const has_zolt = try VehicleSlot.settingsPart(allocator, &desc, index, part, item, null, &buffers.zolt);
+                    const has_jolt = try CppWorld.vehicleSettingsPart(allocator, &desc, index, part, item, null, &buffers.jolt);
+                    if (!has_zolt or !has_jolt or !std.mem.eql(u8, buffers.zolt.items, buffers.jolt.items)) {
+                        std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: the binary state of the Zolt slot differs from SimVehicleSettingsPart (byte {?d} of {d})\n", .{ entry.name, index, part, item, std.mem.indexOfDiff(u8, buffers.zolt.items, buffers.jolt.items), buffers.jolt.items.len });
+                        return error.ParityMismatch;
+                    }
+                    if (!part.roundTrips()) continue;
+                    const zolt_restored = try VehicleSlot.settingsPart(allocator, &desc, index, part, item, buffers.jolt.items, &buffers.zolt_round_trip);
+                    const jolt_restored = try CppWorld.vehicleSettingsPart(allocator, &desc, index, part, item, buffers.zolt.items, &buffers.jolt_round_trip);
+                    if (!zolt_restored or !std.mem.eql(u8, buffers.zolt_round_trip.items, buffers.jolt.items)) {
+                        std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: Zolt does not restore the C++ bytes (restored {}, saved again: byte {?d} differs)\n", .{ entry.name, index, part, item, zolt_restored, std.mem.indexOfDiff(u8, buffers.zolt_round_trip.items, buffers.jolt.items) });
+                        return error.ParityMismatch;
+                    }
+                    if (!jolt_restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.zolt.items)) {
+                        std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: Jolt does not restore the Zolt bytes (restored {}, saved again: byte {?d} differs)\n", .{ entry.name, index, part, item, jolt_restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.zolt.items) });
+                        return error.ParityMismatch;
+                    }
+                }
+            }
+        }
+    }
+
+    if (builder.ragdolls.items.len > 0 and !@hasDecl(RagdollSlot, "is_stub")) {
+        // The parts of a ragdoll use the shapes of a world
+        const cw = CppWorld.init(&desc, 0);
+        defer cw.deinit();
+        const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+        defer zw.destroy();
+        var zolt_info: std.ArrayList(u32) = .empty;
+        defer zolt_info.deinit(allocator);
+        var jolt_info: std.ArrayList(u32) = .empty;
+        defer jolt_info.deinit(allocator);
+        for (0..builder.ragdolls.items.len) |i| {
+            const index: u32 = @intCast(i);
+            const has_zolt = try RagdollSlot.settingsBytes(zw, index, null, &buffers.zolt);
+            const has_jolt = try cw.ragdollSettingsBytes(allocator, index, null, &buffers.jolt);
+            if (!has_zolt or !has_jolt or !std.mem.eql(u8, buffers.zolt.items, buffers.jolt.items)) {
+                std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the binary state of the Zolt RagdollSettings differs (byte {?d} of {d})\n", .{ entry.name, index, std.mem.indexOfDiff(u8, buffers.zolt.items, buffers.jolt.items), buffers.jolt.items.len });
+                return error.ParityMismatch;
+            }
+            const zolt_restored = try RagdollSlot.settingsBytes(zw, index, buffers.jolt.items, &buffers.zolt_round_trip);
+            const jolt_restored = try cw.ragdollSettingsBytes(allocator, index, buffers.zolt.items, &buffers.jolt_round_trip);
+            if (!zolt_restored or !jolt_restored or !std.mem.eql(u8, buffers.zolt_round_trip.items, buffers.jolt.items) or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.zolt.items)) {
+                std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the RagdollSettings round trips differ (Zolt restored {}, Jolt restored {})\n", .{ entry.name, index, zolt_restored, jolt_restored });
+                return error.ParityMismatch;
+            }
+            try RagdollSlot.settingsInfo(zw, index, &zolt_info);
+            try cw.ragdollSettingsInfo(allocator, index, &jolt_info);
+            if (!std.mem.eql(u32, zolt_info.items, jolt_info.items)) {
+                std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the RagdollSettings tables differ (Stabilize, GetBodyIndexToConstraintIndex, GetConstraintIndexToBodyIdxPair)\n  zolt {any}\n  jolt {any}\n", .{ entry.name, index, zolt_info.items, jolt_info.items });
+                return error.ParityMismatch;
+            }
+        }
+    }
+}
+
+/// The C++ side of checkPhase7Settings ("SimScenes blocked scenes run on the C++ side"): every round-tripping part of
+/// the vehicle descriptions and the RagdollSettings of the ragdoll descriptions (with the shapes of world `cw`) come back
+/// unchanged from a C++ restore
+fn checkCppSettingsRoundTrips(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder, desc: *const SimSceneDesc, cw: CppWorld) !void {
+    var buffers: SettingsBuffers = .{ .allocator = allocator };
+    defer buffers.deinit();
+    for (builder.vehicles.items, 0..) |*v, i| {
+        const index: u32 = @intCast(i);
+        for (std.enums.values(VehicleSettingsPart)) |part| {
+            for (0..part.numItems(v)) |n| {
+                const item: u32 = @intCast(n);
+                if (!try CppWorld.vehicleSettingsPart(allocator, desc, index, part, item, null, &buffers.jolt)) {
+                    std.debug.print("SimulationParity: scene {s}, vehicle description {d}: no {t} {d}\n", .{ entry.name, index, part, item });
+                    return error.TestUnexpectedResult;
+                }
+                if (!part.roundTrips()) continue;
+                const restored = try CppWorld.vehicleSettingsPart(allocator, desc, index, part, item, buffers.jolt.items, &buffers.jolt_round_trip);
+                if (!restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.jolt.items)) {
+                    std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: restoring the C++ bytes and saving them again changes them (restored {}, byte {?d} of {d})\n", .{ entry.name, index, part, item, restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.jolt.items), buffers.jolt.items.len });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+    for (0..builder.ragdolls.items.len) |i| {
+        const index: u32 = @intCast(i);
+        try std.testing.expect(try cw.ragdollSettingsBytes(allocator, index, null, &buffers.jolt));
+        const restored = try cw.ragdollSettingsBytes(allocator, index, buffers.jolt.items, &buffers.jolt_round_trip);
+        if (!restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.jolt.items)) {
+            std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: restoring the C++ RagdollSettings bytes and saving them again changes them (restored {}, byte {?d} of {d})\n", .{ entry.name, index, restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.jolt.items), buffers.jolt.items.len });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// Phase 7: the Jolt asserts that the C++ side hit since `before` (a reference built with
+/// `-Dreference_asserts=true` prints them to stderr; without asserts the count stays 0)
+fn checkReferenceAsserts(entry: *const SceneEntry, before: u32) !void {
+    const after = jolt.jolt_sim_reference_assert_count();
+    if (after != before) {
+        std.debug.print("SimulationParity: scene {s}: the C++ side hit {d} Jolt asserts (printed above): the scene violates what Jolt asserts\n", .{ entry.name, after - before });
+        return error.TestUnexpectedResult;
+    }
+}
+
 fn checkPhase7Slot(entry: *const SceneEntry, what: []const u8, ported: bool, slot_filled: bool) !void {
     if (!ported) {
         std.debug.print("SimulationParity: scene {s} creates {s} objects, whose Zolt classes are still stubs, but its blocker .{t} is supported (declare the Blocker of the class)\n", .{ entry.name, what, entry.blocked_by });
@@ -3592,10 +3984,14 @@ fn runEntry(entry: *const SceneEntry) !void {
     try entry.build(&builder);
     try checkConstraintDescriptions(allocator, entry, &builder);
     try checkPhase7Slots(entry, &builder);
+    try checkPhase7Settings(allocator, entry, &builder);
 
+    const asserts_before = jolt.jolt_sim_reference_assert_count();
     var stats: [configs.len]RunStats = undefined;
     for (configs, &stats) |config, *s|
         s.* = try runScene(allocator, entry, &builder, config);
+    if (entry.blocked_by != .release_only)
+        try checkReferenceAsserts(entry, asserts_before);
 
     if (verbose)
         std.debug.print("{s}: {any}\n", .{ entry.name, stats[0] });
@@ -3711,14 +4107,16 @@ test "SimScenes blocked scenes run on the C++ side" {
         defer builder.deinit();
         try entry.build(&builder);
         const desc = builder.desc();
+        const asserts_before = jolt.jolt_sim_reference_assert_count();
         const a = CppWorld.init(&desc, 0);
         defer a.deinit();
         const b = CppWorld.init(&desc, 3);
         defer b.deinit();
+        try checkCppSettingsRoundTrips(allocator, entry, &builder, &desc, a);
 
         var delta_time = builder.delta_time;
         var collision_steps = builder.collision_steps;
-        var records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0);
+        var records: [SimScenes.num_record_kinds]u32 = @splat(0);
         var max_active_constraints: u32 = 0;
         var objects: ObjectStats = .{};
         var op_index: usize = 0;
@@ -3740,8 +4138,10 @@ test "SimScenes blocked scenes run on the C++ side" {
                     .restore_cross => {
                         try std.testing.expect(a.restoreState(snapshots[op.index][1].items));
                         try std.testing.expect(b.restoreState(snapshots[op.index][0].items));
-                        try std.testing.expect(a.restoreCharacterStates(character_snapshots[op.index][1].items));
-                        try std.testing.expect(b.restoreCharacterStates(character_snapshots[op.index][0].items));
+                        if (!a.restoreCharacterStates(character_snapshots[op.index][1].items) or !b.restoreCharacterStates(character_snapshots[op.index][0].items)) {
+                            std.debug.print("SimulationParity: scene {s}, update {d}: restore_cross: a C++ world does not restore the character states of the other one (a read failed or bytes are left)\n", .{ entry.name, update });
+                            return error.TestUnexpectedResult;
+                        }
                     },
                     else => |kind| {
                         const result = a.applyOp(op);
@@ -3845,6 +4245,7 @@ test "SimScenes blocked scenes run on the C++ side" {
 
         if (verbose)
             std.debug.print("{s} (C++ side): records {any}, max active constraints {d}, objects {any}\n", .{ entry.name, records, max_active_constraints, objects });
+        try checkReferenceAsserts(entry, asserts_before);
 
         // Phase 7: a scene with a Phase 7 blocker creates the objects of its classes and reaches its Expect fields
         switch (entry.blocked_by) {
@@ -4193,6 +4594,85 @@ test "SimulationParity Phase 7 slots follow the ported classes" {
     try std.testing.expectEqual(Phase7Classes.wheeledVehicles(), !@hasDecl(VehicleSlot, "is_stub"));
     try std.testing.expectEqual(Phase7Classes.trackedVehicles(), !@hasDecl(TrackedVehicleSlot, "is_stub"));
     try std.testing.expectEqual(Phase7Classes.motorcycles(), !@hasDecl(MotorcycleSlot, "is_stub"));
+}
+
+test "SimulationParity CharacterID consumption" {
+    // CharacterVirtualSettings' default initializer and CharacterVirtual::GetCharacterVirtualSettings consume a
+    // CharacterID, the copy constructor and the assignment do not (CharacterVehicleArchitecture "Settled in the foundation
+    // review"; the IDs of the M8 scene depend on it): Jolt gives SimScenes.characterIdSequence, and the Zolt side of
+    // CharacterVirtualSlot the same once the class is ported
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildCharacterIdTestScene(&builder);
+    const desc = builder.desc();
+    const first_id = 100;
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    var jolt_values: [SimScenes.character_id_sequence_len]u32 = undefined;
+    jolt.jolt_sim_character_id_sequence(cw.handle, first_id, &jolt_values);
+    try std.testing.expectEqual(SimScenes.characterIdSequence(first_id), jolt_values);
+    if (!@hasDecl(CharacterVirtualSlot, "is_stub")) {
+        const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+        defer zw.destroy();
+        var zolt_values: [SimScenes.character_id_sequence_len]u32 = undefined;
+        try CharacterVirtualSlot.characterIdSequence(zw, first_id, &zolt_values);
+        try std.testing.expectEqual(jolt_values, zolt_values);
+    }
+}
+
+test "SimulationParity a character record that cannot be stored fails the operation" {
+    // The CharacterContactListener callbacks run inside the character virtual operations and cannot return errors:
+    // Recorder.add latches an out of memory, and ZoltWorld.applyOp reports it, also when nobody takes the character
+    // records afterwards (createScene under std.testing.checkAllAllocationFailures)
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildCharacterIdTestScene(&builder);
+    const desc = builder.desc();
+    const world = try ZoltWorld.create(allocator, &desc, .single_threaded);
+    defer world.destroy();
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    world.character_recorder.allocator = failing.allocator();
+    world.character_recorder.add(.{ .kind = @intFromEnum(RecordKind.character_contact_added) });
+    world.character_recorder.allocator = allocator;
+    const op: SimOp = .{ .update = 0, .kind = @intFromEnum(OpKind.set_gravity), .f = .{ 0, -9.81, 0 } ++ @as([13]f32, @splat(0)) };
+    try std.testing.expectError(error.OutOfMemory, world.applyOp(&op));
+}
+
+test "SimulationParity restoring the character states reads every byte" {
+    // restore_cross restores the character states of the other side: a restore that leaves bytes unread fails on both
+    // sides (a stream sets eof only on a read past the end, so both read one more byte); no bytes restore a world
+    // without characters
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildCharacterIdTestScene(&builder);
+    const desc = builder.desc();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+    defer zw.destroy();
+    const unread = [_]u8{ 1, 2, 3 };
+    try std.testing.expect(!cw.restoreCharacterStates(&unread));
+    try std.testing.expect(!try zw.restoreCharacterStates(&unread));
+    try std.testing.expect(cw.restoreCharacterStates(&.{}));
+    try std.testing.expect(try zw.restoreCharacterStates(&.{}));
+}
+
+test "SimulationParity the reference counts its asserts" {
+    // With -Dreference_asserts=true the hook of SimulationReference.cpp prints and counts a failed Jolt assert (the
+    // scenes check the count), without asserts nothing is counted
+    var before: u32 = undefined;
+    var after: u32 = undefined;
+    jolt.jolt_sim_test_assert_hook(&before, &after);
+    try std.testing.expectEqual(before + jolt.jolt_sim_reference_has_asserts(), after);
+}
+
+test "SimulationParity the reference zero-fills its allocations" {
+    // The allocation hooks of the parity process (SimInstallHooks of SimulationReference.cpp): Jolt's members that are
+    // never initialized (Wheel's contact members before the first contact) are 0, as Zolt zero-initializes them
+    try std.testing.expectEqual(@as(u32, 1), jolt.jolt_sim_zero_filling_check());
 }
 
 test "SimulationParity Phase 7 record helpers" {
