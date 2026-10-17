@@ -436,28 +436,16 @@ const Resaved = struct {
     }
 };
 
-/// StreamUtils::RestoreObject of ConstraintSettings::sRestoreFromBinaryState, the error as a number (see Resaved.err)
-/// TODO(vehicle slot): ConstraintSettings.restoreFromBinaryState once VehicleConstraintSettings is not a stub anymore
+/// ConstraintSettings.restoreFromBinaryState (StreamUtils::RestoreObject), the error as a number (see Resaved.err)
 fn restoreConstraintSettings(allocator: Allocator, stream: StreamIn, out: *Resaved) !?Ref(ConstraintSettings) {
-    var hash: u32 = 0;
-    stream.read(&hash);
-    if (stream.isEOF() or stream.isFailed()) {
-        out.err = 1;
+    var result = try ConstraintSettings.restoreFromBinaryState(allocator, stream);
+    defer result.deinit();
+    if (result.hasError()) {
+        const message = result.getError();
+        out.err = if (std.mem.eql(u8, message, "Failed to read type hash")) 1 else if (std.mem.eql(u8, message, "Failed to create instance of type")) 2 else if (std.mem.eql(u8, message, "Failed to restore object")) 3 else 4;
         return null;
     }
-    if (hash != comptime ConstraintSettings.rttiHash(VehicleConstraintSettings.rtti_name)) {
-        out.err = 2;
-        return null;
-    }
-    var ref = Ref(ConstraintSettings).init((try VehicleConstraintSettings.createDefault(allocator)).asSettings());
-    errdefer ref.deinit();
-    try ref.get().?.restoreBinaryState(stream);
-    if (stream.isEOF() or stream.isFailed()) {
-        out.err = 3;
-        ref.deinit();
-        return null;
-    }
-    return ref;
+    return result.get().clone();
 }
 
 /// jolt_vp_resave on the Zolt side

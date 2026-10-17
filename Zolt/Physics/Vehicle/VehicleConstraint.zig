@@ -103,10 +103,6 @@ pub const VehicleConstraintSettings = struct {
     pub const rtti_name = "VehicleConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 
-    /// Zolt marker of a class whose simulation parity slot is not filled yet: ConstraintSettings.restoreFromBinaryState
-    /// does not create it and the simulation parity skips the scenes that need it (removed with the VehicleSlot)
-    pub const is_stub = true;
-
     base: ConstraintSettings,
 
     /// Vector indicating the up direction of the vehicle (in local space to the body)

@@ -487,15 +487,14 @@ test "WheeledVehicle: constraint and controller settings, binary state of the se
     var out_wrapper: zolt.StreamOutWrapper = .init(&out.writer);
     s.saveBinaryState(out_wrapper.streamOut());
 
-    var restored = VehicleConstraintSettings.init(testing_allocator);
-    defer restored.asSettings().deinit();
+    // ConstraintSettings::sRestoreFromBinaryState creates the class from its RTTI hash (RegisterTypes)
     var reader: std.Io.Reader = .fixed(out.written());
     var in_wrapper: zolt.StreamInWrapper = .init(&reader);
-    var hash: u32 = 0;
-    in_wrapper.streamIn().read(&hash); // Read by sRestoreFromBinaryState
-    try expect(hash == ConstraintSettings.rttiHash("VehicleConstraintSettings"));
-    try restored.restoreBinaryState(in_wrapper.streamIn());
-    try expect(!in_wrapper.isEOF() and !in_wrapper.isFailed());
+    var result = try ConstraintSettings.restoreFromBinaryState(testing_allocator, in_wrapper.streamIn());
+    defer result.deinit();
+    try expect(result.isValid() and !in_wrapper.isEOF() and !in_wrapper.isFailed());
+    const restored = virtual.downcast(VehicleConstraintSettings, result.getPtr().?);
+    try expect(restored.base.getRTTIHash() == ConstraintSettings.rttiHash("VehicleConstraintSettings"));
     try expect(restored.anti_roll_bars.items.len == 2);
     const rcs = virtual.downcast(WheeledVehicleControllerSettings, restored.controller.ptr.?);
     try expect(rcs.differentials.items.len == 2 and rcs.differentials.items[1].left_wheel == bl_wheel);
