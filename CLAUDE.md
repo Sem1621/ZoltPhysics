@@ -25,6 +25,7 @@ zig build test -Ddouble_precision=true      # same with JPH_DOUBLE_PRECISION sem
 zig build test -Dtest-filter=TestVec3Cross  # run matching tests only
 zig build check                             # compile only (fast)
 zig build parity                            # compare with the C++ Jolt library bit for bit (first build ~4 min)
+zig build parity -Dreference_asserts=true -Dtest-filter="blocked scenes run on the C++ side"  # new scenes vs an asserting Jolt build
 zig build hello-world-check                 # C++ HelloWorld and its port must print the same bytes
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892
 zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig  # format (CI checks this)

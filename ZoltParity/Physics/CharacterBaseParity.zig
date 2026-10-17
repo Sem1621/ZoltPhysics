@@ -205,7 +205,8 @@ test "CharacterBase SaveState bytes and cross RestoreState" {
     for (0..fw.iterations / 10) |_| {
         const ground: CBGround = .{
             .state = rng.intRange(u32, 0, 3),
-            .body_id = rng.next(),
+            // A BodyID value: bit 31 (BodyID::cBroadPhaseBit) only in the invalid ID (BodyID(uint32) asserts it)
+            .body_id = if (rng.intRange(u32, 0, 7) == 0) 0xffffffff else rng.next() & 0x7fffffff,
             .sub_shape_id = rng.next(),
             .position = .{ rng.float(-1.0e4, 1.0e4), rng.float(-1.0e4, 1.0e4), rng.float(-1.0e4, 1.0e4) },
             .normal = randomUnit(&rng),

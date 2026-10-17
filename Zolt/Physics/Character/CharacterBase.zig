@@ -4,10 +4,11 @@
 //! CharacterVehicleArchitecture E2 / E4:
 //! - `CharacterBaseSettings` (base of CharacterSettings and CharacterVirtualSettings) is a pattern A root with
 //!   `ref_count` and the allocator that frees it. Jolt's only virtual function is the destructor, so its VTable has the
-//!   generated `deinit` / `destroy` entries only. Jolt's class can be instantiated, Zolt's is abstract like
-//!   ConstraintSettings (`impl` is empty): a derived class sets `.base = .init(@This(), allocator)` and lists its
-//!   (empty) `overrides`. The defaulted copy constructor / assignment are `initCopy`, which takes a reference to the
-//!   shape like Jolt's `RefConst` copy; the destructor (`destruct`) releases it.
+//!   generated `deinit` / `destroy` entries only (`impl` is empty). Jolt's class can be instantiated and so can Zolt's:
+//!   `init(CharacterBaseSettings, allocator)` gives settings of this class; a derived class sets
+//!   `.base = .init(@This(), allocator)` and lists its (empty) `overrides`. The defaulted copy constructor / assignment
+//!   are `initCopy` / `assign`, which take a reference to the shape like Jolt's `RefConst` copy; the destructor
+//!   (`destruct`) releases it.
 //! - `CharacterBase` (base of Character and CharacterVirtual) is a pattern A root with `ref_count`: `saveState` /
 //!   `restoreState` are virtual (CharacterVirtual overrides them), the destructor is generated. Its constructor is
 //!   `init(T, allocator, settings, system)` with the most derived type `T`, it takes references to the shape and to the
@@ -500,6 +501,21 @@ test "CharacterBaseSettings: Jolt's defaults, copy, references to the shape" {
     try testing.expectEqual(@as(u32, 3), shape.getRefCount());
     heap.base.release();
     try testing.expectEqual(@as(u32, 2), shape.getRefCount());
+}
+
+test "CharacterBaseSettings: settings of the class itself" {
+    // Jolt's CharacterBaseSettings has no pure virtual function: it can be instantiated, on the stack and on the heap
+    const allocator = testing.allocator;
+    var settings: CharacterBaseSettings = .init(CharacterBaseSettings, allocator);
+    defer settings.deinit();
+    try testing.expectEqual(@as(f32, 50.0) * (math.pi / 180.0), settings.max_slope_angle);
+
+    const heap = try allocator.create(CharacterBaseSettings);
+    heap.* = .init(CharacterBaseSettings, allocator);
+    heap.assign(&settings);
+    heap.addRef();
+    try testing.expectEqual(@as(u32, 1), heap.getRefCount());
+    heap.release(); // Destroys it through the vtable
 }
 
 test "CharacterBase: construction, slope check, up vector, supporting volume, ground getters" {
