@@ -14611,46 +14611,54 @@ fn buildVehicleWheeledPitchRollLimit(b: *SceneBuilder) Allocator.Error!void {
 /// The paths of the collision testers: collision tests every second / third step (PredictContactProperties of the ray,
 /// cast sphere and cast cylinder testers on a ramp, a height field and a mesh, and every step without full tests while
 /// inactive); the body under a wheel removed (a valid body, predicted) and destroyed (TryGetBody fails: the contact is
-/// forgotten) between full tests; a sensor under the wheels (the testers skip it); testers whose max slope angle (15
-/// degrees) rejects a 20 degree ramp
+/// forgotten) between full tests (the inactive steps are 3 too: the car is asleep by then); a car with each tester
+/// parked over a sensor (the testers skip it); testers whose max slope angle (15 degrees) rejects a 20 degree ramp
 fn buildVehicleWheeledTesterPaths(b: *SceneBuilder) Allocator.Error!void {
     b.num_updates = 150;
-    _ = try addStaticBox(b, .{ 50, 0.5, 30 }, .{ 0, -0.5, 0 }, identity_rotation, 0);
+    _ = try addStaticBox(b, .{ 60, 0.5, 30 }, .{ 0, -0.5, 0 }, identity_rotation, 0);
     const height_field = try addHeightFieldTerrain(b, 17, 1.0);
     _ = try b.body(.{ .position = .{ -30, 0.01, 0 }, .shape = height_field, .motion_type = 0, .friction = 0.7, .object_layer = Layers.non_moving }, .dont_activate);
     const mesh = try addMeshTerrain(b, 12, 1.5, false);
     _ = try b.body(.{ .position = .{ -10, 0.01, 0 }, .shape = mesh, .motion_type = 0, .friction = 0.8, .object_layer = Layers.non_moving }, .dont_activate);
     _ = try addStaticBox(b, .{ 3, 0.5, 3 }, .{ 10, -0.4, 3 }, axisAngle(.{ 1, 0, 0 }, -0.35), 0); // A 20 degree ramp
     _ = try addStaticBox(b, .{ 3, 0.5, 3 }, .{ 30, -0.4, 3 }, axisAngle(.{ 1, 0, 0 }, -0.35), 0); // Another one
-    // Two static planks under the car of lane x = 20 (one is removed, one destroyed later) and a sensor in its path
+    // Two static planks under the car of lane x = 20 (one is removed, one destroyed later), sensors under the cars of
+    // lanes x = 38, 44, 50 (below their bodies)
     const plank = try b.box(.{ 1.3, 0.05, 1.0 }, 0.02);
     const removed_plank = try b.body(.{ .position = .{ 20, 0.05, 1.4 }, .shape = plank, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
     const destroyed_plank = try b.body(.{ .position = .{ 20, 0.05, -1.4 }, .shape = plank, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
-    const sensor_shape = try b.box(.{ 2, 0.3, 1.5 }, 0.05);
-    _ = try b.body(.{ .position = .{ 20, 0.25, 4.2 }, .shape = sensor_shape, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.non_moving }, .dont_activate);
+    const sensor_shape = try b.box(.{ 1.5, 0.15, 2.6 }, 0.05);
+    for (0..3) |i|
+        _ = try b.body(.{ .position = .{ 38 + 6 * real(i), 0.15, 0 }, .shape = sensor_shape, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.non_moving }, .dont_activate);
 
     const sphere = try addCar(b, .{ -30, 1.4, -3 }, .{ .tester = .{ .kind = @intFromEnum(VehicleTesterKind.cast_sphere), .object_layer = Layers.moving } }, .{});
     const cylinder = try addCar(b, .{ -10, 1.4, -3 }, .{ .tester = .{ .kind = @intFromEnum(VehicleTesterKind.cast_cylinder), .object_layer = Layers.moving } }, .{});
     const ray = try addCar(b, .{ 10, 0.85, -0.5 }, .{ .tester = .{ .object_layer = Layers.moving } }, .{});
     const planks = try addCar(b, .{ 20, 0.95, 0 }, .{ .tester = .{ .object_layer = Layers.moving } }, .{});
     const steep = try addCar(b, .{ 30, 0.85, -0.5 }, .{ .tester = .{ .kind = @intFromEnum(VehicleTesterKind.cast_sphere), .object_layer = Layers.moving, .max_slope_angle = zolt.math.degreesToRadians(15.0) } }, .{});
+    var over_sensors: [3]u32 = undefined;
+    for (&over_sensors, 0..) |*car, i|
+        car.* = try addCar(b, .{ 38 + 6 * real(i), 0.85, 0 }, .{ .tester = .{ .kind = @intCast(i), .object_layer = Layers.moving } }, .{});
 
     b.at(1);
     try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, sphere, .{ .i = &.{3} });
     try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, cylinder, .{ .i = &.{2} });
     try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, ray, .{ .i = &.{2} });
     try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, planks, .{ .i = &.{3} });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_inactive, planks, .{ .i = &.{3} });
     for ([_]u32{ sphere, cylinder, ray, steep }) |car|
         try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 0.8, 0, 0, 0 } });
     b.at(30);
     try b.expectWheelContacts(planks, 0b1111);
+    for (over_sensors) |car|
+        try b.expectWheelContacts(car, 0b1111); // On the floor below the sensor
     b.at(40);
     try b.op(.remove_body, removed_plank, .{}); // Still a valid body: its contacts are predicted until the next full test
     try b.op(.remove_body, destroyed_plank, .{});
     try b.op(.destroy_body, destroyed_plank, .{}); // TryGetBody fails: the contacts are forgotten
     b.at(60);
     try b.objectOp(.vehicle_set_num_steps_between_collision_test_inactive, sphere, .{ .i = &.{0} });
-    try b.objectOp(.wheeled_set_driver_input, planks, .{ .f = &.{ 0.6, 0, 0, 0 } }); // Over the sensor
+    try b.objectOp(.wheeled_set_driver_input, planks, .{ .f = &.{ 0.6, 0, 0, 0 } });
     try b.objectOp(.vehicle_set_collision_tester, ray, .{ .i = &.{ @intFromEnum(VehicleTesterKind.ray), Layers.moving }, .f = &.{ 0, 1, 0, zolt.math.degreesToRadians(15.0), 0, 0 } }); // Rejects the ramp
     b.at(110);
     for ([_]u32{ sphere, cylinder, ray, planks, steep }) |car|
