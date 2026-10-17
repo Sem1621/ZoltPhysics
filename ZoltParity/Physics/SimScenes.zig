@@ -228,7 +228,7 @@
 //! 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279 Hinge, 280..299 Slider, 300..319
 //! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare; 400..599 the
 //! Phase 7 operations (`Phase7OpRange`): 400..429 Character (424..429 free), 430..489 CharacterVirtual (471..489 free),
-//! 490..519 Ragdoll (511..519 free), 520..569 the vehicle core group (563..569 free), 570..579 TrackedVehicleController
+//! 490..519 Ragdoll (511..519 free), 520..569 the vehicle core group (564..569 free), 570..579 TrackedVehicleController
 //! (576..579 free), 580..589 MotorcycleController (587..589 free), 590..599 spare. RecordKind: 0..6 bodies, steps and
 //! contacts, 7..17 the CharacterContactListener (call order), 18..20 the vehicle callbacks; blocks for new kinds: 21..29
 //! Character, 30..39 CharacterVirtual (call order), 40..49 Ragdoll, 50..59 vehicle core, 60..69 vehicle variants, 70..79
@@ -1138,7 +1138,7 @@ pub const Phase7OpRange = enum(u32) {
     /// Ragdoll (490..519, 511..519 free)
     ragdoll = 490,
     /// The vehicle core group (VehicleSlot): VehicleConstraint, the collision testers, the wheels, the engine, the
-    /// transmission, the anti-roll bars and the wheeled controller (520..569, 563..569 free)
+    /// transmission, the anti-roll bars and the wheeled controller (520..569, 564..569 free)
     vehicle = 520,
     /// The vehicle variants group: TrackedVehicleController (TrackedVehicleSlot, 570..579, 576..579 free)
     vehicle_tracked = 570,
@@ -1768,7 +1768,10 @@ pub const OpKind = enum(u32) {
     vehicle_engine_apply_torque = 561,
     /// Engine: ApplyDamping(delta time f[0])
     vehicle_engine_apply_damping = 562,
-    // 563..569: free for vehicle core operations
+    /// Wheeled / motorcycle: GetDifferentials() = the `i[1]` differentials vehicle_differentials[i[0]..] (Zolt:
+    /// WheeledVehicleController.setDifferentials; the number of differentials changes)
+    wheeled_set_differentials = 563,
+    // 564..569: free for vehicle core operations
 
     // ---- Phase7OpRange.vehicle_tracked (570..579): TrackedVehicleController (the vehicle variants group,
     // TrackedVehicleSlot) ----
@@ -2516,7 +2519,19 @@ pub const Expect = struct {
     ground_states: u32 = 0,
     /// Some wheel of a vehicle has a contact after some update
     wheel_contacts: bool = false,
+    /// The vehicles reach each of these transmission gears (bit `gear + 8`, `gearBit`) after some update (from the
+    /// vehicle_transmission field of the object state)
+    vehicle_gears: u32 = 0,
+    /// At least this many forward shifts up (gear g >= 1 to g + 1) / down (g >= 2 to g - 1) between the object states of
+    /// two consecutive updates of a vehicle
+    vehicle_up_shifts: u32 = 0,
+    vehicle_down_shifts: u32 = 0,
 };
+
+/// The bit of a transmission gear (-8 .. 23) in `Expect.vehicle_gears`
+pub fn gearBit(gear: i32) u32 {
+    return @as(u32, 1) << @intCast(gear + 8);
+}
 
 /// The bit of a RecordKind in `Expect.character_records`
 pub fn recordBit(kind: RecordKind) u128 {
@@ -2856,7 +2871,12 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "vehicle_motorcycle_lean_integration", .build = buildVehicleMotorcycleLeanIntegration, .blocked_by = .motorcycles, .sweep_stride = 0, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
     .{ .name = "vehicle_wheeled_in_air", .build = buildVehicleWheeledInAir, .blocked_by = .wheeled_vehicles, .sweep_stride = 15, .expect = .{ .wheel_contacts = true, .active_constraints = 1 } },
     .{ .name = "vehicle_wheeled_terrains", .build = buildVehicleWheeledTerrains, .blocked_by = .wheeled_vehicles, .sweep_stride = 35, .expect = .{ .wheel_contacts = true, .active_constraints = 3 } },
-    .{ .name = "vehicle_wheeled_driving", .build = buildVehicleWheeledDriving, .blocked_by = .wheeled_vehicles, .sweep_stride = 40, .expect = .{ .wheel_contacts = true, .active_constraints = 4 } },
+    .{ .name = "vehicle_wheeled_driving", .build = buildVehicleWheeledDriving, .blocked_by = .wheeled_vehicles, .sweep_stride = 40, .expect = .{ .wheel_contacts = true, .active_constraints = 4, .vehicle_gears = gearBit(-1) | gearBit(0) | gearBit(1) | gearBit(2) | gearBit(3), .vehicle_up_shifts = 3, .vehicle_down_shifts = 1 } },
+    .{ .name = "vehicle_wheeled_pitch_roll_limit", .build = buildVehicleWheeledPitchRollLimit, .blocked_by = .wheeled_vehicles, .sweep_stride = 20, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
+    .{ .name = "vehicle_wheeled_tester_paths", .build = buildVehicleWheeledTesterPaths, .blocked_by = .wheeled_vehicles, .sweep_stride = 30, .expect = .{ .contacts = true, .wheel_contacts = true, .active_constraints = 5 } },
+    .{ .name = "vehicle_wheeled_suspensions_and_axes", .build = buildVehicleWheeledSuspensionsAndAxes, .blocked_by = .wheeled_vehicles, .sweep_stride = 30, .expect = .{ .wheel_contacts = true, .active_constraints = 5 } },
+    .{ .name = "vehicle_wheeled_on_bodies", .build = buildVehicleWheeledOnBodies, .blocked_by = .wheeled_vehicles, .sweep_stride = 50, .expect = .{ .contacts = true, .sleeping = true, .wheel_contacts = true, .active_constraints = 2, .update_activations = 1 } },
+    .{ .name = "vehicle_wheeled_many_differentials", .build = buildVehicleWheeledManyDifferentials, .blocked_by = .wheeled_vehicles, .sweep_stride = 30, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     .{ .name = "vehicle_wheeled_pushing_boxes", .build = buildVehicleWheeledPushingBoxes, .blocked_by = .wheeled_vehicles, .sweep_stride = 80, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .wheel_contacts = true, .active_constraints = 1, .update_activations = 80 } },
     .{ .name = "vehicle_wheeled_sleep_and_wake", .build = buildVehicleWheeledSleepAndWake, .blocked_by = .wheeled_vehicles, .sweep_stride = 30, .expect = .{ .sleeping = true, .wheel_contacts = true, .active_constraints = 1 } },
     .{ .name = "vehicle_wheeled_far_from_origin", .build = buildVehicleWheeledFarFromOrigin, .blocked_by = .wheeled_vehicles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 3 } },
@@ -14408,12 +14428,14 @@ fn buildVehicleWheeledTerrains(b: *SceneBuilder) Allocator.Error!void {
 }
 
 /// Driving with two collision steps per update: a four wheel drive car with limited slip differentials and the automatic
-/// transmission shifts up under full throttle, brakes (shifts down), backs up and hand brakes in a turn; a car with the
-/// manual transmission goes through its gears (with a slipping clutch), into reverse and neutral; two rear wheel drive
-/// cars on split friction (the left wheels on ice), one with open differentials and one with a limited slip
+/// transmission shifts up under full throttle, brakes gently (shifts down), backs up and hand brakes in a turn; a car
+/// with the manual transmission goes through its gears (with a slipping clutch), into reverse and neutral; two rear wheel
+/// drive cars on split friction (the left wheels on ice), one with open differentials and one with a limited slip
 /// differential, steer hard with stiff anti-roll bars. The step callbacks see the first and the last collision step.
+/// Expect.vehicle_gears / vehicle_up_shifts / vehicle_down_shifts check the gears (the only shift down from a gear >= 2
+/// is the automatic one).
 fn buildVehicleWheeledDriving(b: *SceneBuilder) Allocator.Error!void {
-    b.num_updates = 240;
+    b.num_updates = 270;
     b.collision_steps = 2;
     _ = try addStaticBox(b, .{ 18, 0.5, 30 }, .{ 0, -0.5, 0 }, identity_rotation, 0); // The lanes of the first two cars
     // The split friction lanes: ice on the left (x < lane), asphalt on the right
@@ -14426,8 +14448,10 @@ fn buildVehicleWheeledDriving(b: *SceneBuilder) Allocator.Error!void {
 
     var auto_desc: SimVehicle = .{ .tester = .{ .object_layer = Layers.moving }, .callbacks = VehicleCallbacks.pre_step | VehicleCallbacks.post_collide | VehicleCallbacks.post_step, .differential_limited_slip_ratio = 1.6 };
     auto_desc.engine.max_torque = 300;
-    auto_desc.transmission.shift_up_rpm = 2000; // With the grippy tires the wheels slip less than 0.1: it shifts up
-    auto_desc.transmission.shift_down_rpm = 1300;
+    // A shift up needs the driven wheels to slip less than 0.1 (WheeledVehicleController::PostCollide's can_shift_up):
+    // the grippy tires and the weaker engine get there at 2000 RPM in the second gear
+    auto_desc.transmission.shift_up_rpm = 2000;
+    auto_desc.transmission.shift_down_rpm = 1500;
     const grippy = try b.addFloats(&.{ 0, 0, 0.02, 1.5, 0.2, 1.2 });
     const auto = try addCar(b, .{ -8, 0.85, -20 }, auto_desc, .{
         .longitudinal_friction = grippy,
@@ -14465,10 +14489,10 @@ fn buildVehicleWheeledDriving(b: *SceneBuilder) Allocator.Error!void {
     b.at(140);
     try b.objectOp(.wheeled_set_driver_input, open, .{ .f = &.{ 0, 0, 0.5, 1.0 } });
     b.at(170);
-    try b.objectOp(.wheeled_set_driver_input, auto, .{ .f = &.{ 0, 0, 1.0, 0 } });
-    b.at(200);
+    try b.objectOp(.wheeled_set_driver_input, auto, .{ .f = &.{ 0, 0, 0.25, 0 } }); // Gentle braking: it shifts down
+    b.at(230);
     try b.objectOp(.wheeled_set_driver_input, auto, .{ .f = &.{ -1.0, 0, 0, 0 } });
-    b.at(220);
+    b.at(250);
     try b.objectOp(.wheeled_set_driver_input, auto, .{ .f = &.{ 0.6, -0.8, 0, 1.0 } });
 }
 
@@ -14553,6 +14577,217 @@ fn buildVehicleWheeledFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
     b.at(60);
     try b.objectOp(.wheeled_set_right_input, cars[1], .{ .f = &.{-0.5} });
     try b.objectOp(.wheeled_set_hand_brake_input, cars[2], .{ .f = &.{0.6} });
+}
+
+/// The pitch / roll limit (VehicleConstraint::CalculatePitchRollConstraintProperties): a car starts rolled by 40 degrees
+/// with a limit of 25 degrees (the constraint part is active until the car is upright again); a car starts exactly
+/// upside down (vehicle up = -world up while it falls: the rotation axis has length 0 and the axis of the previous step
+/// is kept) with a limit of 60 degrees, lands on its roof and rolls over to its side (the axis is the cross product
+/// again), an angular impulse later; snapshots while the parts are active are restored cross
+fn buildVehicleWheeledPitchRollLimit(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 160;
+    _ = try addFloor(b, 40, 0);
+    const rolled = try addCar(b, .{ -6, 1.4, 0 }, .{ .tester = .{ .object_layer = Layers.moving }, .max_pitch_roll_angle = zolt.math.degreesToRadians(25.0) }, .{ .rotation = axisAngle(.{ 0, 0, 1 }, 0.7) });
+    const upside_down = try addCar(b, .{ 6, 1.0, 0 }, .{ .tester = .{ .object_layer = Layers.moving }, .max_pitch_roll_angle = zolt.math.degreesToRadians(60.0) }, .{ .rotation = .{ 1, 0, 0, 0 } }); // 180 degrees around X, exactly
+    const upside_down_body = b.num_handles - 1;
+
+    b.at(1);
+    try b.objectOp(.wheeled_set_driver_input, rolled, .{ .f = &.{ 0.5, 0, 0, 0 } });
+    try b.expectWheelContacts(upside_down, 0);
+    b.at(20);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(30);
+    try b.sysOp(.restore_cross, .{ .index = 0 });
+    b.at(60);
+    try b.op(.add_angular_impulse, upside_down_body, .{ .f = &.{ 0, 0, 1200 } });
+    b.at(90);
+    try b.sysOp(.snapshot, .{ .index = 1 });
+    b.at(100);
+    try b.sysOp(.restore_cross, .{ .index = 1 });
+    b.at(130);
+    try b.objectOp(.wheeled_set_driver_input, rolled, .{ .f = &.{ 0, 0.8, 0, 1.0 } });
+}
+
+/// The paths of the collision testers: collision tests every second / third step (PredictContactProperties of the ray,
+/// cast sphere and cast cylinder testers on a ramp, a height field and a mesh, and every step without full tests while
+/// inactive); the body under a wheel removed (a valid body, predicted) and destroyed (TryGetBody fails: the contact is
+/// forgotten) between full tests; a sensor under the wheels (the testers skip it); testers whose max slope angle (15
+/// degrees) rejects a 20 degree ramp
+fn buildVehicleWheeledTesterPaths(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 150;
+    _ = try addStaticBox(b, .{ 50, 0.5, 30 }, .{ 0, -0.5, 0 }, identity_rotation, 0);
+    const height_field = try addHeightFieldTerrain(b, 17, 1.0);
+    _ = try b.body(.{ .position = .{ -30, 0.01, 0 }, .shape = height_field, .motion_type = 0, .friction = 0.7, .object_layer = Layers.non_moving }, .dont_activate);
+    const mesh = try addMeshTerrain(b, 12, 1.5, false);
+    _ = try b.body(.{ .position = .{ -10, 0.01, 0 }, .shape = mesh, .motion_type = 0, .friction = 0.8, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try addStaticBox(b, .{ 3, 0.5, 3 }, .{ 10, -0.4, 3 }, axisAngle(.{ 1, 0, 0 }, -0.35), 0); // A 20 degree ramp
+    _ = try addStaticBox(b, .{ 3, 0.5, 3 }, .{ 30, -0.4, 3 }, axisAngle(.{ 1, 0, 0 }, -0.35), 0); // Another one
+    // Two static planks under the car of lane x = 20 (one is removed, one destroyed later) and a sensor in its path
+    const plank = try b.box(.{ 1.3, 0.05, 1.0 }, 0.02);
+    const removed_plank = try b.body(.{ .position = .{ 20, 0.05, 1.4 }, .shape = plank, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const destroyed_plank = try b.body(.{ .position = .{ 20, 0.05, -1.4 }, .shape = plank, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const sensor_shape = try b.box(.{ 2, 0.3, 1.5 }, 0.05);
+    _ = try b.body(.{ .position = .{ 20, 0.25, 4.2 }, .shape = sensor_shape, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.non_moving }, .dont_activate);
+
+    const sphere = try addCar(b, .{ -30, 1.4, -3 }, .{ .tester = .{ .kind = @intFromEnum(VehicleTesterKind.cast_sphere), .object_layer = Layers.moving } }, .{});
+    const cylinder = try addCar(b, .{ -10, 1.4, -3 }, .{ .tester = .{ .kind = @intFromEnum(VehicleTesterKind.cast_cylinder), .object_layer = Layers.moving } }, .{});
+    const ray = try addCar(b, .{ 10, 0.85, -0.5 }, .{ .tester = .{ .object_layer = Layers.moving } }, .{});
+    const planks = try addCar(b, .{ 20, 0.95, 0 }, .{ .tester = .{ .object_layer = Layers.moving } }, .{});
+    const steep = try addCar(b, .{ 30, 0.85, -0.5 }, .{ .tester = .{ .kind = @intFromEnum(VehicleTesterKind.cast_sphere), .object_layer = Layers.moving, .max_slope_angle = zolt.math.degreesToRadians(15.0) } }, .{});
+
+    b.at(1);
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, sphere, .{ .i = &.{3} });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, cylinder, .{ .i = &.{2} });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, ray, .{ .i = &.{2} });
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_active, planks, .{ .i = &.{3} });
+    for ([_]u32{ sphere, cylinder, ray, steep }) |car|
+        try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 0.8, 0, 0, 0 } });
+    b.at(30);
+    try b.expectWheelContacts(planks, 0b1111);
+    b.at(40);
+    try b.op(.remove_body, removed_plank, .{}); // Still a valid body: its contacts are predicted until the next full test
+    try b.op(.remove_body, destroyed_plank, .{});
+    try b.op(.destroy_body, destroyed_plank, .{}); // TryGetBody fails: the contacts are forgotten
+    b.at(60);
+    try b.objectOp(.vehicle_set_num_steps_between_collision_test_inactive, sphere, .{ .i = &.{0} });
+    try b.objectOp(.wheeled_set_driver_input, planks, .{ .f = &.{ 0.6, 0, 0, 0 } }); // Over the sensor
+    try b.objectOp(.vehicle_set_collision_tester, ray, .{ .i = &.{ @intFromEnum(VehicleTesterKind.ray), Layers.moving }, .f = &.{ 0, 1, 0, zolt.math.degreesToRadians(15.0), 0, 0 } }); // Rejects the ramp
+    b.at(110);
+    for ([_]u32{ sphere, cylinder, ray, planks, steep }) |car|
+        try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 0, 0, 1.0, 0 } });
+}
+
+/// Suspension springs and axes: a car with StiffnessAndDamping springs and a preload, one with
+/// MassNormalizedStiffnessAndDamping springs, one with a rigid wheel (min == max suspension length) and a wheel with its
+/// suspension force point, a car whose body frame has up = +Z and forward = -Y (its wheels in that frame), and a car
+/// with a left only, a right only and an unconnected differential (both wheels -1)
+fn buildVehicleWheeledSuspensionsAndAxes(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 140;
+    _ = try addFloor(b, 50, 0);
+    var stiffness_wheels: [4]SimVehicleWheel = undefined;
+    var normalized_wheels: [4]SimVehicleWheel = undefined;
+    var mixed_wheels: [4]SimVehicleWheel = undefined;
+    for (0..4) |i| {
+        const position: [3]f32 = .{ if (i % 2 == 0) 0.9 else -0.9, -0.18, if (i < 2) 1.4 else -1.4 };
+        const steer: f32 = if (i < 2) zolt.math.degreesToRadians(30.0) else 0;
+        stiffness_wheels[i] = .{ .position = position, .max_steer_angle = steer, .suspension_spring_mode = 1, .suspension_frequency = 40000, .suspension_damping = 3000, .suspension_preload_length = 0.05 };
+        normalized_wheels[i] = .{ .position = position, .max_steer_angle = steer, .suspension_spring_mode = 2, .suspension_frequency = 90, .suspension_damping = 9 };
+        mixed_wheels[i] = .{ .position = position, .max_steer_angle = steer };
+    }
+    mixed_wheels[1].suspension_min_length = 0.4; // A rigid wheel
+    mixed_wheels[1].suspension_max_length = 0.4;
+    mixed_wheels[2].enable_suspension_force_point = 1;
+    mixed_wheels[2].suspension_force_point = .{ 0.7, 0.05, -1.4 };
+    const differentials = [_]SimVehicleDifferential{ .{ .left_wheel = 0, .right_wheel = 1, .engine_torque_ratio = 0.5 }, .{ .left_wheel = 2, .right_wheel = 3, .engine_torque_ratio = 0.5 } };
+    const anti_roll_bars = [_]SimVehicleAntiRollBar{ .{ .left_wheel = 0, .right_wheel = 1 }, .{ .left_wheel = 2, .right_wheel = 3 } };
+    var cars: [5]u32 = undefined;
+    const tester: SimVehicleTester = .{ .object_layer = Layers.moving };
+    for ([_]*const [4]SimVehicleWheel{ &stiffness_wheels, &normalized_wheels, &mixed_wheels }, 0..) |wheels, i| {
+        const body = try addVehicleBody(b, .{ 0.9, 0.2, 2.0 }, 1500, .{ -24 + 12 * real(i), 0.9, 0 }, identity_rotation);
+        cars[i] = try b.createVehicle(try b.addVehicle(.{ .body = body, .tester = tester }, wheels, &differentials, &anti_roll_bars));
+    }
+
+    // Up = +Z, forward = -Y: the body box and the wheels in that frame, the body rotated -90 degrees around X so that its
+    // +Z points up and its -Y forward (world +Z)
+    {
+        const shape = try b.offsetCenterOfMass(try b.box(.{ 0.9, 2.0, 0.2 }, 0.05), .{ 0, 0, -0.2 });
+        const body = try b.body(.{ .position = .{ 12, 0.9, 0 }, .rotation = axisAngle(.{ 1, 0, 0 }, -0.5 * std.math.pi), .shape = shape, .object_layer = Layers.moving, .override_mass_properties = 1, .mass = 1500 }, .activate);
+        var wheels: [4]SimVehicleWheel = undefined;
+        for (&wheels, 0..) |*w, i| {
+            w.* = .{
+                .position = .{ if (i % 2 == 0) 0.9 else -0.9, if (i < 2) -1.4 else 1.4, -0.18 },
+                .suspension_direction = .{ 0, 0, -1 },
+                .steering_axis = .{ 0, 0, 1 },
+                .wheel_up = .{ 0, 0, 1 },
+                .wheel_forward = .{ 0, -1, 0 },
+                .max_steer_angle = if (i < 2) zolt.math.degreesToRadians(30.0) else 0,
+            };
+        }
+        cars[3] = try b.createVehicle(try b.addVehicle(.{ .body = body, .tester = tester, .up = .{ 0, 0, 1 }, .forward = .{ 0, -1, 0 } }, &wheels, &differentials, &anti_roll_bars));
+    }
+
+    // One sided and unconnected differentials (the driven ones split the engine torque)
+    cars[4] = try addCar(b, .{ 24, 0.9, 0 }, .{ .tester = tester }, .{ .differentials = &.{ .{ .left_wheel = 2, .right_wheel = -1, .engine_torque_ratio = 0.5 }, .{ .left_wheel = -1, .right_wheel = 3, .engine_torque_ratio = 0.5 }, .{ .left_wheel = -1, .right_wheel = -1, .engine_torque_ratio = 0 } } });
+
+    b.at(1);
+    for (cars) |car|
+        try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 0.8, 0, 0, 0 } });
+    b.at(30);
+    for (cars) |car|
+        try b.expectWheelContacts(car, 0b1111);
+    b.at(60);
+    for (cars) |car|
+        try b.objectOp(.wheeled_set_right_input, car, .{ .f = &.{0.5} });
+    b.at(100);
+    for (cars) |car|
+        try b.objectOp(.wheeled_set_driver_input, car, .{ .f = &.{ 0, -0.5, 0.6, 0 } });
+}
+
+/// Vehicles on other bodies: a car asleep on a dynamic platform is woken by VehicleConstraint::BuildIslands when the
+/// platform is pushed (the wheels touch an active body, the vehicle constraint becomes active and activates the vehicle
+/// body); a car on a kinematic platform that moves (the contact point velocity of the wheels), with a snapshot restored
+/// cross
+fn buildVehicleWheeledOnBodies(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 260;
+    _ = try addFloor(b, 40, 0);
+    const platform_shape = try b.box(.{ 2.5, 0.25, 4 }, 0.05);
+    const dynamic_platform = try b.body(.{ .position = .{ -8, 0.25, 0 }, .shape = platform_shape, .object_layer = Layers.moving, .friction = 0.8 }, .activate);
+    const kinematic_platform = try b.body(.{ .position = .{ 8, 0.25, 0 }, .shape = platform_shape, .motion_type = 1, .object_layer = Layers.moving, .friction = 0.8 }, .activate);
+    const sleeper = try addCar(b, .{ -8, 1.35, 0 }, .{ .tester = .{ .object_layer = Layers.moving } }, .{});
+    const sleeper_body = b.num_handles - 1;
+    const rider = try addCar(b, .{ 8, 1.35, 0 }, .{ .tester = .{ .object_layer = Layers.moving }, .callbacks = VehicleCallbacks.post_collide }, .{});
+
+    b.at(1);
+    try b.op(.set_linear_velocity, kinematic_platform, .{ .f = &.{ 0.6, 0, 0.3 } });
+    b.at(30);
+    try b.expectWheelContacts(rider, 0b1111);
+    b.at(60);
+    try b.sysOp(.snapshot, .{ .index = 0 });
+    b.at(70);
+    try b.objectOp(.wheeled_set_driver_input, rider, .{ .f = &.{ 0.3, 0.4, 0, 0 } });
+    b.at(80);
+    try b.sysOp(.restore_cross, .{ .index = 0 });
+    b.at(200);
+    try b.expectSleeping(sleeper_body);
+    try b.expectSleeping(dynamic_platform);
+    try b.op(.add_impulse, dynamic_platform, .{ .f = &.{ 0, 4000, 0 } }); // Wakes the platform only
+    b.at(202);
+    try b.expectAwake(sleeper_body); // BuildIslands of the vehicle constraint activated the vehicle body
+    try b.expectVehicleConstraintState(sleeper, ConstraintState.enabled | ConstraintState.active, true);
+}
+
+/// Differentials: a car with 130 differentials (their wheels repeat: 260 driven wheels, the implicit Euler step of
+/// WheeledVehicleController::PostCollide solves 261 equations; Jolt has no limit on their number) for a few updates (then
+/// it is removed from the system: the solve is O(n^3)), and a car whose differentials are replaced while it drives
+/// (GetDifferentials() = ...: 2, then the 130, then 1)
+fn buildVehicleWheeledManyDifferentials(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 45;
+    _ = try addFloor(b, 40, 0);
+    var many: [130]SimVehicleDifferential = undefined;
+    for (&many, 0..) |*d, i| // 128 differentials split the engine torque exactly, 2 get none
+        d.* = .{ .left_wheel = @intCast(i % 4), .right_wheel = @intCast((i + 1) % 4), .engine_torque_ratio = if (i < 128) 1.0 / 128.0 else 0.0, .limited_slip_ratio = 1.2 + 0.01 * @as(f32, @floatFromInt(i % 7)) };
+    const first_many = try addDifferentials(b, &many);
+    const first_rear = try addDifferentials(b, &.{.{ .left_wheel = 2, .right_wheel = 3 }});
+    const tester: SimVehicleTester = .{ .object_layer = Layers.moving };
+    const changing = try addCar(b, .{ 6, 0.85, 0 }, .{ .tester = tester, .differential_limited_slip_ratio = flt_max }, .{});
+
+    b.at(1);
+    const many_car = try addCar(b, .{ -6, 0.85, 0 }, .{ .tester = tester, .differential_limited_slip_ratio = flt_max }, .{ .differentials = &many });
+    try b.objectOp(.wheeled_set_driver_input, many_car, .{ .f = &.{ 1.0, 0, 0, 0 } });
+    try b.objectOp(.wheeled_set_driver_input, changing, .{ .f = &.{ 1.0, 0, 0, 0 } });
+    b.at(7);
+    try b.objectOp(.vehicle_remove, many_car, .{});
+    b.at(10);
+    try b.objectOp(.wheeled_set_differentials, changing, .{ .i = &.{ first_many, many.len } });
+    b.at(16);
+    try b.objectOp(.wheeled_set_differentials, changing, .{ .i = &.{ first_rear, 1 } });
+}
+
+/// Append differentials to the pool of the scene (for wheeled_set_differentials), returns the index of the first
+fn addDifferentials(b: *SceneBuilder, differentials: []const SimVehicleDifferential) Allocator.Error!u32 {
+    const first: u32 = @intCast(b.vehicle_differentials.items.len);
+    try b.vehicle_differentials.appendSlice(b.allocator, differentials);
+    return first;
 }
 
 // (append the vehicle scenes here)

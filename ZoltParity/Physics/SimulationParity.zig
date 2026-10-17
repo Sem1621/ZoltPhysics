@@ -2178,12 +2178,21 @@ pub fn describeObjectStateDifference(allocator: Allocator, zolt_bytes: []const u
     return try out.toOwnedSlice();
 }
 
-/// What the object states of a run show (Expect.ground_states, Expect.wheel_contacts)
+/// What the object states of a run show (Expect.ground_states, Expect.wheel_contacts, Expect.vehicle_*)
 const ObjectStats = struct {
     /// The ground states (bit `1 << EGroundState`) of the characters and character virtuals after some update
     ground_states: u32 = 0,
     /// Some wheel had a contact after some update
     wheel_contacts: bool = false,
+    /// The transmission gears of the vehicles (SimScenes.gearBit) after some update
+    vehicle_gears: u32 = 0,
+    /// Forward shifts up / down between two consecutive object states of a vehicle
+    vehicle_up_shifts: u32 = 0,
+    vehicle_down_shifts: u32 = 0,
+    /// The gear of each vehicle handle in the previous object state (null: none yet)
+    previous_gears: [max_tracked_vehicles]?i32 = @splat(null),
+
+    const max_tracked_vehicles = 16;
 };
 
 /// Add what an object state shows to `stats`
@@ -2198,6 +2207,18 @@ fn scanObjectState(bytes: []const u8, stats: *ObjectStats) !void {
             },
             .vehicle_wheel => if (data.len >= 16 and std.mem.readInt(u32, data[12..16], .little) != 0) {
                 stats.wheel_contacts = true;
+            },
+            .vehicle_transmission => if (data.len >= 4) {
+                const gear = std.mem.readInt(i32, data[0..4], .little);
+                if (gear >= -8 and gear < 24) stats.vehicle_gears |= SimScenes.gearBit(gear);
+                const handle = view.header.handle;
+                if (handle < ObjectStats.max_tracked_vehicles) {
+                    if (stats.previous_gears[handle]) |previous| {
+                        if (previous >= 1 and gear == previous + 1) stats.vehicle_up_shifts += 1;
+                        if (previous >= 2 and gear == previous - 1) stats.vehicle_down_shifts += 1;
+                    }
+                    stats.previous_gears[handle] = gear;
+                }
             },
             else => {},
         }
@@ -5314,6 +5335,14 @@ const VehicleSlot = struct {
             },
             .vehicle_engine_apply_torque => (try engineOf(v)).applyTorque(f[0], f[1]),
             .vehicle_engine_apply_damping => (try engineOf(v)).applyDamping(f[0]),
+            .wheeled_set_differentials => {
+                const controller = try wheeledOf(v, op);
+                const differentials = try allocator.alloc(VehicleDifferentialSettings, i[1]);
+                defer allocator.free(differentials);
+                for (differentials, world.desc.vehicle_differentials[i[0]..][0..i[1]]) |*d, *desc|
+                    d.* = fillDifferential(desc);
+                try controller.setDifferentials(differentials);
+            },
             else => {
                 std.debug.print("SimulationParity: unknown vehicle operation {d}\n", .{op.kind});
                 return error.SceneError;
@@ -6037,6 +6066,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (expect.character_records != 0) try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(records, expect.character_records));
     if (expect.ground_states != 0) try expectReached(entry, "the ground states of Expect.ground_states", (stats[0].objects.ground_states & expect.ground_states) == expect.ground_states);
     if (expect.wheel_contacts) try expectReached(entry, "wheel contacts", stats[0].objects.wheel_contacts);
+    try expectVehicleGears(entry, &stats[0].objects);
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
@@ -6268,7 +6298,19 @@ test "SimScenes blocked scenes run on the C++ side" {
             try expectReached(entry, "the ground states of Expect.ground_states", (objects.ground_states & entry.expect.ground_states) == entry.expect.ground_states);
         if (entry.expect.wheel_contacts)
             try expectReached(entry, "wheel contacts", objects.wheel_contacts);
+        try expectVehicleGears(entry, &objects);
     }
+}
+
+/// Expect.vehicle_gears / vehicle_up_shifts / vehicle_down_shifts
+fn expectVehicleGears(entry: *const SceneEntry, objects: *const ObjectStats) !void {
+    const expect = &entry.expect;
+    if (expect.vehicle_gears != 0)
+        try expectReached(entry, "the transmission gears of Expect.vehicle_gears", (objects.vehicle_gears & expect.vehicle_gears) == expect.vehicle_gears);
+    if (expect.vehicle_up_shifts > 0)
+        try expectReached(entry, "the forward shifts up of Expect.vehicle_up_shifts", objects.vehicle_up_shifts >= expect.vehicle_up_shifts);
+    if (expect.vehicle_down_shifts > 0)
+        try expectReached(entry, "the forward shifts down of Expect.vehicle_down_shifts", objects.vehicle_down_shifts >= expect.vehicle_down_shifts);
 }
 
 test "SimScenes struct layout matches SimulationReference.cpp" {

@@ -3,10 +3,11 @@
 
 const std = @import("std");
 
-/// Maximum dimension N of a runtime sized matrix (e.g. DynMatrix) passed to `gaussianElimination`.
-/// Jolt allocates the pivot bookkeeping array on the stack with JPH_STACK_ALLOC (alloca), which Zig
-/// doesn't have. Matrices with a comptime known size (Matrix) use an array of exactly N elements,
-/// runtime sized matrices use a fixed size stack buffer of this many elements.
+/// Maximum dimension N of a runtime sized matrix (e.g. DynMatrix) passed to `gaussianElimination` without a caller
+/// pivot buffer. Jolt allocates the pivot bookkeeping array on the stack with JPH_STACK_ALLOC (alloca), which Zig
+/// doesn't have. Matrices with a comptime known size (Matrix) use an array of exactly N elements, runtime sized
+/// matrices use a fixed size stack buffer of this many elements, or the caller's buffer `opts.ipiv` (any N, e.g. the
+/// scratch buffer of WheeledVehicleController, whose N has no limit in Jolt).
 pub const max_dynamic_size: u32 = 256;
 
 /// This function performs Gauss-Jordan elimination to solve a matrix equation.
@@ -20,8 +21,9 @@ pub const max_dynamic_size: u32 = 256;
 /// Taken and adapted from Numerical Recipes in C paragraph 2.1
 ///
 /// `a` and `b` are pointers to matrices (Matrix, DynMatrix) that provide `getRows()`, `getCols()`,
-/// `get(row, col)` and `set(row, col, value)`.
-pub fn gaussianElimination(a: anytype, b: anytype, opts: struct { tolerance: f32 = 1.0e-16 }) bool {
+/// `get(row, col)` and `set(row, col, value)`. `opts.ipiv`: the pivot bookkeeping array (at least N elements, its
+/// contents are overwritten), null: a stack buffer (N <= max_dynamic_size for a runtime sized matrix).
+pub fn gaussianElimination(a: anytype, b: anytype, opts: struct { tolerance: f32 = 1.0e-16, ipiv: ?[]i32 = null }) bool {
     const MatrixA = @typeInfo(@TypeOf(a)).pointer.child;
 
     // Get problem dimensions
@@ -34,9 +36,14 @@ pub fn gaussianElimination(a: anytype, b: anytype, opts: struct { tolerance: f32
 
     // Create array for bookkeeping on pivoting
     const max_n: u32 = if (@hasDecl(MatrixA, "col_count")) MatrixA.col_count else max_dynamic_size;
-    std.debug.assert(n <= max_n);
     var ipiv_buffer: [max_n]i32 = undefined;
-    const ipiv = ipiv_buffer[0..n];
+    const ipiv = if (opts.ipiv) |buffer| blk: {
+        std.debug.assert(buffer.len >= n);
+        break :blk buffer[0..n];
+    } else blk: {
+        std.debug.assert(n <= max_n);
+        break :blk ipiv_buffer[0..n];
+    };
     @memset(ipiv, 0);
 
     var i: u32 = 0;
@@ -183,4 +190,46 @@ test "gaussianElimination" {
         try expect(gaussianElimination(&a_copy, &b_copy, .{}));
         try expect(!gaussianElimination(&a, &b, .{ .tolerance = 1.0e-2 }));
     }
+}
+
+test "gaussianElimination with a caller pivot buffer: runtime sized matrices larger than max_dynamic_size" {
+    const DynMatrix = @import("DynMatrix.zig").DynMatrix;
+    const allocator = std.testing.allocator;
+    const n: u32 = max_dynamic_size + 45;
+
+    // A diagonally dominant system with the solution x(i) = i - 7
+    var a = try DynMatrix.init(allocator, n, n);
+    defer a.deinit();
+    var b = try DynMatrix.init(allocator, n, 1);
+    defer b.deinit();
+    for (0..n) |r| {
+        var sum: f32 = 0.0;
+        for (0..n) |c| {
+            const value: f32 = if (r == c) 4.0 * @as(f32, @floatFromInt(n)) else @as(f32, @floatFromInt((r * 7 + c * 3) % 5)) - 2.0;
+            a.set(@intCast(r), @intCast(c), value);
+            sum += value * (@as(f32, @floatFromInt(c)) - 7.0);
+        }
+        b.set(@intCast(r), 0, sum);
+    }
+    const ipiv = try allocator.alloc(i32, n + 3); // Larger than N is fine
+    defer allocator.free(ipiv);
+    try std.testing.expect(gaussianElimination(&a, &b, .{ .ipiv = ipiv }));
+    for (0..n) |r|
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(r)) - 7.0, b.get(@intCast(r), 0), 1.0e-2);
+
+    // The same small system with and without a caller buffer gives the same bits (the buffer only holds bookkeeping)
+    var a1 = try DynMatrix.init(allocator, 3, 3);
+    defer a1.deinit();
+    var b1 = try DynMatrix.init(allocator, 3, 1);
+    defer b1.deinit();
+    const values = [9]f32{ 2, 1, -1, -3, -1, 2, -2, 1, 2 };
+    @memcpy(a1.elements, &values);
+    @memcpy(b1.elements, &[3]f32{ 8, -11, -3 });
+    var a2 = try a1.clone();
+    defer a2.deinit();
+    var b2 = try b1.clone();
+    defer b2.deinit();
+    try std.testing.expect(gaussianElimination(&a1, &b1, .{}));
+    try std.testing.expect(gaussianElimination(&a2, &b2, .{ .ipiv = ipiv }));
+    try std.testing.expectEqualSlices(f32, b1.elements, b2.elements);
 }
