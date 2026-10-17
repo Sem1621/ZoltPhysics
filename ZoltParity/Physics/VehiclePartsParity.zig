@@ -3,14 +3,14 @@
 //! itself (VehicleConstraint, the collision testers, the wheeled controller) is compared by the simulation parity
 //! (SimulationParity.zig, the vehicle scenes).
 //!
-//! - VehicleEngine: random settings (torque curves with 0 to 8 points, sorted or not; RPM ranges with min > max,
-//!   zero inertia, negative damping) run random scripts of SetCurrentRPM, ApplyTorque, ApplyDamping, GetTorque,
+//! - VehicleEngine: random settings (torque curves with 0 to 8 points, sorted or not, in about 1 of 8 points a duplicate
+//!   x, a NaN or infinite x or y, or -0; RPM ranges with min > max, zero inertia, negative damping) run random scripts of SetCurrentRPM, ApplyTorque, ApplyDamping, GetTorque,
 //!   GetAngularVelocity, AllowSleep, ClampRPM and the RPM conversion `cAngularVelocityToRPM`; the current RPM and the
 //!   result are compared after every call. The defaults that the binary state does not hold (mInertia,
 //!   mAngularDamping, the initial current RPM) are compared too.
 //! - VehicleTransmission: random settings (auto, manual and unknown mode bytes, 1 to 8 gear ratios each way, zero times)
 //!   run random scripts of Update (delta times, RPMs around the shift points, forward / reverse / no input, can shift up
-//!   or not) and Set (gears in range, clutch frictions); after every call the gear, clutch friction, ratio,
+//!   or not; in about 1 of 8 updates a special delta time, RPM or input: NaN, infinite, -0, huge, negative) and Set (gears in range, clutch frictions); after every call the gear, clutch friction, ratio,
 //!   IsSwitchingGear, AllowSleep and the SaveState bytes (the timers) are compared.
 //! - VehicleDifferentialSettings::CalculateTorqueRatio: random settings (open and limited slip differentials) and wheel
 //!   speeds (zero, tiny, negative, huge, infinite, NaN). Release only (Jolt asserts on the settings, Zolt checks the same
@@ -595,6 +595,19 @@ fn randomCurve(rng: *Rng, opts: struct { max: u32 = max_points, sorted: bool = f
             x = if (opts.sorted or rng.next() % 4 != 0) x + rng.float(0.0, 0.5) else rng.float(-0.5, 1.5);
             c.points[2 * i] = x;
             c.points[2 * i + 1] = rng.float(0.0, 1.5);
+            if (!opts.sorted and rng.next() % 8 == 0) {
+                // A special point (the curve keeps its order otherwise)
+                switch (rng.next() % 6) {
+                    0 => if (i > 0) {
+                        c.points[2 * i] = c.points[2 * (i - 1)]; // A duplicate x
+                    },
+                    1 => c.points[2 * i] = std.math.nan(f32),
+                    2 => c.points[2 * i] = if (rng.next() % 2 == 0) std.math.inf(f32) else -std.math.inf(f32),
+                    3 => c.points[2 * i + 1] = std.math.nan(f32),
+                    4 => c.points[2 * i + 1] = if (rng.next() % 2 == 0) std.math.inf(f32) else -std.math.inf(f32),
+                    else => c.points[2 * i] = -0.0,
+                }
+            }
         }
     }
     return c;
@@ -872,6 +885,16 @@ test "VehicleParts: VehicleTransmission gear switching, clutch and timers" {
                 .gear = rng.intRange(i32, -@as(i32, @intCast(desc.num_reverse_gear_ratios)), @intCast(desc.num_gear_ratios)),
                 .clutch_friction = rng.float(0.0, 1.0),
             };
+            if (op.kind == 0 and rng.next() % 8 == 0) {
+                // A special delta time, RPM or input
+                const specials = [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), -0.0, 1.0e30, -1.0e30, -0.1 };
+                const value = specials[rng.next() % specials.len];
+                switch (rng.next() % 3) {
+                    0 => op.delta_time = value,
+                    1 => op.rpm = value,
+                    else => op.forward = value,
+                }
+            }
         }
 
         var jolt_results: [max_ops]VPTransmissionResult = undefined;
