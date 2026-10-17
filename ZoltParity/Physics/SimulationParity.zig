@@ -140,7 +140,12 @@
 //! ragdoll description 0: restoring the C++ RagdollSettings bytes and saving them again changes them (restored true,
 //! byte 170 of 1572)"; a copy of CharacterVirtualSettings that consumes an ID (default construction and assignment in
 //! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
-//! 3").
+//! 3"). The Ragdoll group: computing the body 1 to body 2 rotation in Ragdoll.driveToPoseUsingMotorsWithVelocity the
+//! other way around (body 1 conjugated times body 2) is reported as "scene ragdoll_motors_animation, ... update 2: after
+//! the update, state f: state differs at byte 1667 ...: bodies[13] (id 0x0080000d) position.x zolt 0x394972b8 ... jolt
+//! 0x3945ee04" (and ragdoll_save_restore at update 1); finalizing the bodies of Ragdoll.addToPhysicsSystem with Activate
+//! whenever it does not lock as "scene ragdoll_add_activation, ... update 0: operation 18
+//! (ragdoll_add_to_physics_system on object handle / description 3) returned 1 in zolt and 0 in jolt" (and ragdoll_ops).
 //!
 //! Proof that the vehicle scenes bite (VehicleSlot, the vehicle core group): multiplying WheelWV's lateral slip angle by
 //! 1.0001 is reported as "scene vehicle_wheeled_ops, ... update 11: ... state differs at byte 92 ...: bodies[2] (id
@@ -3623,7 +3628,9 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 // - `saveStates(world, recorder: *StateRecorderImpl) !void` / `restoreStates(world, recorder) !void`: SaveState /
 //   RestoreState of its characters in handle order (CharacterSlot, CharacterVirtualSlot; the others do nothing).
 // - `destroyAll(world: *ZoltWorld) void`: remove its objects from the system, destroy them and free its Storage (~SimWorld
-//   of the .cpp; ZoltWorld.destroy calls it before the system is destroyed).
+//   of the .cpp; ZoltWorld.destroy calls it before the system is destroyed). It must not allocate, also not through a
+//   listener record (OnBodyDeactivated of a removed active body): the creation sweep counts an allocation of the
+//   teardown that fails as a swallowed error.OutOfMemory (see RagdollSlot.destroyAll).
 //
 // CharacterVirtualSlot also (the CharacterVirtual group):
 // - `characterIdSequence(world, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void`: the CharacterID
@@ -4836,7 +4843,397 @@ const CharacterVirtualSlot = struct {
 };
 
 // ---- SLOT ragdoll: Ragdoll, RagdollSettings (Phase7OpRange.ragdoll, Blocker.ragdolls) ----
-const RagdollSlot = Phase7StubSlot;
+const RagdollSlot = struct {
+    const Ragdoll = zolt.Ragdoll;
+    const RagdollSettings = zolt.RagdollSettings;
+    const Skeleton = zolt.Skeleton;
+    const SkeletonPose = zolt.SkeletonPose;
+    const TwoBodyConstraintSettings = zolt.TwoBodyConstraintSettings;
+
+    /// mRagdollSettings and mRagdolls of SimWorld
+    const Storage = struct {
+        /// Per ragdoll description, built at its first create_ragdoll (.empty: not built yet)
+        settings: std.ArrayList(Ref(RagdollSettings)) = .empty,
+        /// The ragdolls of the ragdoll handles (.empty: destroyed or out of bodies)
+        ragdolls: std.ArrayList(Ref(Ragdoll)) = .empty,
+    };
+
+    /// The TwoBodyConstraintSettings in the settings of a constraint description (every ConstraintKind is a two body
+    /// constraint)
+    fn twoBody(settings: Ref(ConstraintSettings)) ?*TwoBodyConstraintSettings {
+        return zolt.virtual.downcast(TwoBodyConstraintSettings, settings.get().?);
+    }
+
+    /// SimMakePose of SimulationReference.cpp: the SkeletonPose of a pose description (the joint states, then
+    /// CalculateJointMatrices)
+    fn makePose(desc: *const SimSceneDesc, skeleton: *const Skeleton, pose_index: u32, out_pose: *SkeletonPose) !void {
+        const p = &desc.ragdoll_poses[pose_index];
+        try out_pose.setSkeleton(skeleton);
+        out_pose.setRootOffset(loadR3(&p.root_offset));
+        var j: usize = 0;
+        while (j < p.count and j < out_pose.getJointCount()) : (j += 1) {
+            const f = desc.floats[p.data + 7 * j ..][0..7];
+            const state = out_pose.getJointMut(j);
+            state.translation = load3(f[0..3]);
+            state.rotation = loadQuat(f[3..7]);
+        }
+        out_pose.calculateJointMatrices();
+    }
+
+    /// SimMakePoseMatrices of SimulationReference.cpp: the joint matrices of a pose description taken as model space
+    /// transforms (the `_matrices` operations; the caller frees them)
+    fn makePoseMatrices(allocator: Allocator, desc: *const SimSceneDesc, pose_index: u32, num_joints: usize) ![]Mat44 {
+        const p = &desc.ragdoll_poses[pose_index];
+        const matrices = try allocator.alloc(Mat44, num_joints);
+        @memset(matrices, Mat44.identity());
+        var j: usize = 0;
+        while (j < p.count and j < num_joints) : (j += 1) {
+            const f = desc.floats[p.data + 7 * j ..][0..7];
+            matrices[j] = Mat44.rotationTranslation(loadQuat(f[3..7]), load3(f[0..3]));
+        }
+        return matrices;
+    }
+
+    /// SimWorld::MakeRagdollSettings / SimMakeRagdollSettings of SimulationReference.cpp: the RagdollSettings of ragdoll
+    /// description `index` (one reference owned by the caller); `out_stabilize`: the result of Stabilize (1 / 0, 2: not
+    /// called)
+    fn makeSettings(world: *const ZoltWorld, index: u32, out_stabilize: ?*u32) !Ref(RagdollSettings) {
+        const allocator = world.allocator;
+        const desc = world.desc;
+        const rd = &desc.ragdolls[index];
+        const joints = desc.ragdoll_joints[rd.first_joint..][0..rd.num_joints];
+
+        var settings = Ref(RagdollSettings).init(try RagdollSettings.create(allocator));
+        errdefer settings.deinit();
+        const s = settings.get().?;
+        s.skeleton = .init(try Skeleton.create(allocator));
+        const skeleton = s.skeleton.get().?;
+        for (joints, 0..) |*joint, j| {
+            var name: [32]u8 = undefined;
+            _ = try skeleton.addJointWithParentIndex(try std.fmt.bufPrint(&name, "Joint{d}", .{j}), joint.parent);
+        }
+
+        try s.parts.ensureTotalCapacity(allocator, joints.len);
+        for (joints) |*joint| {
+            var part_settings = world.makeBodyCreationSettings(&desc.bodies[joint.body]);
+            defer part_settings.deinit();
+            var to_parent: Ref(ConstraintSettings) = .empty;
+            defer to_parent.deinit();
+            if (joint.to_parent != invalid_handle)
+                to_parent = try makeConstraintSettings(allocator, &desc.constraints[joint.to_parent]);
+            s.parts.appendAssumeCapacity(.init(&part_settings, if (to_parent.get() != null) twoBody(to_parent) else null));
+        }
+        try s.additional_constraints.ensureTotalCapacity(allocator, rd.num_additional);
+        for (desc.ragdoll_additional_constraints[rd.first_additional..][0..rd.num_additional]) |*c| {
+            var constraint = try makeConstraintSettings(allocator, &desc.constraints[c.constraint]);
+            defer constraint.deinit();
+            s.additional_constraints.appendAssumeCapacity(.init(c.body1, c.body2, twoBody(constraint)));
+        }
+
+        // The preparation, in the order of the members of SimRagdoll
+        var stabilize: u32 = 2;
+        if (rd.stabilize != 0)
+            stabilize = @intFromBool(try s.stabilize());
+        if (out_stabilize) |out| out.* = stabilize;
+        if (rd.calculate_constraint_priorities != 0)
+            try s.calculateConstraintPriorities(.{ .base_priority = rd.base_priority });
+        if (rd.disable_parent_child_collisions == 1) {
+            try s.disableParentChildCollisions(.{});
+        } else if (rd.disable_parent_child_collisions == 2) {
+            var pose = SkeletonPose.init(allocator);
+            defer pose.deinit();
+            try makePose(desc, skeleton, rd.pose, &pose);
+            try s.disableParentChildCollisions(.{ .joint_matrices = pose.getJointMatrices(), .min_separation_distance = rd.min_separation_distance });
+        }
+        try s.calculateBodyIndexToConstraintIndex();
+        try s.calculateConstraintIndexToBodyIdxPair();
+        return settings;
+    }
+
+    /// GetObject of SimulationReference.cpp (which aborts on a handle without ragdoll)
+    fn ragdoll(world: *ZoltWorld, op: *const SimOp) !*Ragdoll {
+        const ragdolls = world.phase7.ragdolls.ragdolls.items;
+        if (op.index < ragdolls.len) {
+            if (ragdolls[op.index].get()) |r| return r;
+        }
+        std.debug.print("SimulationParity: operation {d} on ragdoll handle {d} that does not exist\n", .{ op.kind, op.index });
+        return error.SceneError;
+    }
+
+    /// The hash of the SaveBinaryState bytes of settings (ragdoll_settings_hash)
+    fn settingsHash(allocator: Allocator, settings: *const RagdollSettings, save_shapes: bool, save_group_filter: bool) !u32 {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+        try settings.saveBinaryState(wrapper.streamOut(), save_shapes, save_group_filter);
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        return SimScenes.hashBytes(2166136261, out.written());
+    }
+
+    /// The create_ragdoll operation (ApplyRagdollOp of SimulationReference.cpp)
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const storage = &world.phase7.ragdolls;
+
+        // The settings of the description, built at its first creation and shared by its ragdolls
+        const d = op.index;
+        if (storage.settings.items.len < world.desc.num_ragdolls)
+            try storage.settings.appendNTimes(allocator, .empty, world.desc.num_ragdolls - storage.settings.items.len);
+        try storage.ragdolls.ensureUnusedCapacity(allocator, 1);
+        if (storage.settings.items[d].get() == null)
+            storage.settings.items[d] = try makeSettings(world, d, null);
+        const rd = &world.desc.ragdolls[d];
+        const new_ragdoll = try storage.settings.items[d].get().?.createRagdoll(rd.collision_group, rd.user_data, &world.system);
+        storage.ragdolls.appendAssumeCapacity(.init(new_ragdoll));
+        return if (new_ragdoll) |r| @intCast(r.getBodyCount()) else 0;
+    }
+
+    /// ApplyRagdollOp of SimulationReference.cpp: the operations return IsActive() unless noted
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const desc = world.desc;
+        const i = &op.i;
+        const f = &op.f;
+        const activation: Activation = if (op.activation == 0) .activate else .dont_activate;
+        const lock = i[3] == 0;
+
+        const rag = try ragdoll(world, op);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .ragdoll_add_to_physics_system => try rag.addToPhysicsSystem(activation, .{ .lock_bodies = lock }),
+            .ragdoll_remove_from_physics_system => try rag.removeFromPhysicsSystem(.{ .lock_bodies = lock }),
+            .ragdoll_activate => rag.activate(.{ .lock_bodies = lock }),
+            .ragdoll_is_active => return @intFromBool(rag.isActive(.{ .lock_bodies = lock })),
+            .ragdoll_set_group_id => rag.setGroupID(i[0], .{ .lock_bodies = lock }),
+
+            .ragdoll_set_pose => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, rag.getRagdollSettings().?.getSkeleton().?, i[0], &pose);
+                rag.setPose(&pose, .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_set_pose_matrices => {
+                const matrices = try makePoseMatrices(allocator, desc, i[0], rag.getBodyCount());
+                defer allocator.free(matrices);
+                rag.setPoseMatrices(loadR3(&desc.ragdoll_poses[i[0]].root_offset), matrices, .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_reset_warm_start => rag.resetWarmStart(),
+
+            .ragdoll_drive_to_pose_using_kinematics => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, rag.getRagdollSettings().?.getSkeleton().?, i[0], &pose);
+                rag.driveToPoseUsingKinematics(&pose, f[0], .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_drive_to_pose_using_kinematics_matrices => {
+                const matrices = try makePoseMatrices(allocator, desc, i[0], rag.getBodyCount());
+                defer allocator.free(matrices);
+                rag.driveToPoseUsingKinematicsMatrices(loadR3(&desc.ragdoll_poses[i[0]].root_offset), matrices, f[0], .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_drive_to_pose_using_motors => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, rag.getRagdollSettings().?.getSkeleton().?, i[0], &pose);
+                rag.driveToPoseUsingMotors(&pose);
+            },
+
+            .ragdoll_drive_to_pose_using_motors_velocity => {
+                const skeleton = rag.getRagdollSettings().?.getSkeleton().?;
+                var prev_pose = SkeletonPose.init(allocator);
+                defer prev_pose.deinit();
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, skeleton, i[1], &prev_pose);
+                try makePose(desc, skeleton, i[0], &pose);
+                rag.driveToPoseUsingMotorsWithVelocity(&prev_pose, &pose, f[0]);
+            },
+
+            .ragdoll_set_linear_and_angular_velocity => rag.setLinearAndAngularVelocity(load3(f[0..3]), load3(f[3..6]), .{ .lock_bodies = lock }),
+            .ragdoll_set_linear_velocity => rag.setLinearVelocity(load3(f[0..3]), .{ .lock_bodies = lock }),
+            .ragdoll_add_linear_velocity => rag.addLinearVelocity(load3(f[0..3]), .{ .lock_bodies = lock }),
+            .ragdoll_add_impulse => rag.addImpulse(load3(f[0..3]), .{ .lock_bodies = lock }),
+
+            .ragdoll_destroy => {
+                world.phase7.ragdolls.ragdolls.items[op.index].deinit();
+                return 0;
+            },
+
+            .ragdoll_settings_hash => return try settingsHash(allocator, rag.getRagdollSettings().?, i[0] != 0, i[1] != 0),
+
+            .ragdoll_get_pose_hash => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try pose.setSkeleton(rag.getRagdollSettings().?.getSkeleton().?);
+                rag.getPose(&pose, .{ .lock_bodies = lock });
+                const root_offset = pose.getRootOffset();
+                const offset = [3]Real{ root_offset.getX(), root_offset.getY(), root_offset.getZ() };
+                var hash = SimScenes.hashBytes(2166136261, std.mem.asBytes(&offset));
+                for (pose.getJointMatrices()) |m| {
+                    for (0..4) |col| {
+                        const v = m.getColumn4(@intCast(col));
+                        const values = [4]f32{ v.getX(), v.getY(), v.getZ(), v.getW() };
+                        hash = SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+                    }
+                }
+                return hash;
+            },
+
+            .ragdoll_expect_active => {}, // Changes nothing, the driver checks the result
+
+            else => {
+                std.debug.print("SimulationParity: unknown ragdoll operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+        return @intFromBool(rag.isActive(.{}));
+    }
+
+    /// WriteRagdollState of SimulationReference.cpp for every ragdoll in handle order (the destroyed ones skipped)
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        const allocator = world.allocator;
+        for (world.phase7.ragdolls.ragdolls.items, 0..) |r_ref, handle_index| {
+            const r = r_ref.get() orelse continue;
+            const handle: u32 = @intCast(handle_index);
+            const num_bodies = r.getBodyCount();
+            try w.begin(.ragdoll_properties, handle, 0);
+            try w.value(@as(u32, @intCast(num_bodies)));
+            try w.value(@as(u32, @intCast(r.getConstraintCount())));
+            try w.boolean(r.isActive(.{}));
+            w.end();
+
+            for (0..num_bodies) |b| {
+                try w.begin(.ragdoll_body, handle, @intCast(b));
+                try w.value(r.getBodyID(b).getIndexAndSequenceNumber());
+                w.end();
+            }
+
+            const root = r.getRootTransform(.{});
+            try w.begin(.ragdoll_root_transform, handle, 0);
+            try w.rvec3(root.position);
+            try w.quat(root.rotation);
+            w.end();
+
+            var root_offset: RVec3 = undefined;
+            const joints = try allocator.alloc(Mat44, num_bodies);
+            defer allocator.free(joints);
+            r.getPoseMatrices(&root_offset, joints, .{});
+            try w.begin(.ragdoll_pose_root_offset, handle, 0);
+            try w.rvec3(root_offset);
+            w.end();
+            for (joints, 0..) |m, b| {
+                try w.begin(.ragdoll_pose_joint, handle, @intCast(b));
+                try w.mat44(m);
+                w.end();
+            }
+
+            const bounds = r.getWorldSpaceBounds(.{});
+            try w.begin(.ragdoll_bounds, handle, 0);
+            try w.vec3(bounds.min);
+            try w.vec3(bounds.max);
+            w.end();
+
+            for (0..r.getConstraintCount()) |c| {
+                const constraint = r.getConstraint(c);
+                try w.begin(.ragdoll_constraint, handle, @intCast(c));
+                try w.value(@as(u32, @intFromEnum(constraint.base.getSubType())));
+                try w.value(constraint.base.getConstraintPriority());
+                try w.boolean(constraint.base.getEnabled());
+                try w.boolean(constraint.base.isActive());
+                try w.value(constraint.getBody1().getID().getIndexAndSequenceNumber());
+                try w.value(constraint.getBody2().getID().getIndexAndSequenceNumber());
+                w.end();
+            }
+        }
+    }
+
+    /// Ragdolls have no SaveState of their own (their bodies and constraints are in the PhysicsSystem state)
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    /// ~SimWorld of SimulationReference.cpp: the ragdolls that are in the system are removed, then all are released
+    /// (which destroys their bodies), then the settings. Nothing is compared afterwards, and nothing may allocate here:
+    /// under the creation sweep (std.testing.checkAllAllocationFailures) an allocation of the teardown that fails would
+    /// be swallowed (error.SwallowedOutOfMemoryError). So the constraints and the bodies are removed one by one
+    /// (RemoveFromPhysicsSystem allocates the copy of the body IDs and the constraint list) and the activation listener
+    /// is detached first (OnBodyDeactivated of a removed active body adds a record, which can allocate).
+    fn destroyAll(world: *ZoltWorld) void {
+        const allocator = world.allocator;
+        const storage = &world.phase7.ragdolls;
+        const bi = world.system.getBodyInterfaceMut();
+        world.system.setBodyActivationListener(null);
+        for (storage.ragdolls.items) |r_ref| {
+            const r = r_ref.get() orelse continue;
+            if (!bi.isAdded(r.getBodyID(0))) continue;
+            for (r.constraints.items) |c| world.system.removeConstraint(c.get().?);
+            for (r.body_ids.items) |id| bi.removeBody(id);
+        }
+        for (storage.ragdolls.items) |*r| r.deinit();
+        storage.ragdolls.deinit(allocator);
+        for (storage.settings.items) |*s| s.deinit();
+        storage.settings.deinit(allocator);
+        storage.* = .{};
+    }
+
+    /// jolt_sim_ragdoll_settings_bytes of SimulationReference.cpp
+    fn settingsBytes(world: *ZoltWorld, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const allocator = world.allocator;
+        var settings: Ref(RagdollSettings) = .empty;
+        defer settings.deinit();
+        if (restore_from) |bytes| {
+            var reader: std.Io.Reader = .fixed(bytes);
+            var wrapper = zolt.StreamInWrapper.init(&reader);
+            const stream = wrapper.streamIn();
+            var result = try RagdollSettings.restoreFromBinaryState(allocator, stream);
+            defer result.deinit();
+            if (result.hasError()) return false;
+            // SimReadCompletely: the stream sets eof only on a read past the end, so one more byte is read
+            const read = !stream.isFailed();
+            var extra: [1]u8 = undefined;
+            stream.readBytes(&extra);
+            if (!read or !stream.isEOF()) return false;
+            settings.set(result.getPtr().?);
+        } else {
+            settings = try makeSettings(world, index, null);
+        }
+        var bytes: std.Io.Writer.Allocating = .init(allocator);
+        defer bytes.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&bytes.writer);
+        try settings.get().?.saveBinaryState(wrapper.streamOut(), true, true);
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        out.clearRetainingCapacity();
+        try out.appendSlice(allocator, bytes.written());
+        return true;
+    }
+
+    /// jolt_sim_ragdoll_settings_info of SimulationReference.cpp
+    fn settingsInfo(world: *ZoltWorld, index: u32, out: *std.ArrayList(u32)) !void {
+        const allocator = world.allocator;
+        var stabilize: u32 = 2;
+        var settings = try makeSettings(world, index, &stabilize);
+        defer settings.deinit();
+        const s = settings.get().?;
+        out.clearRetainingCapacity();
+        try out.append(allocator, stabilize);
+        const body_to_constraint = s.getBodyIndexToConstraintIndex();
+        try out.append(allocator, @intCast(body_to_constraint.len));
+        for (body_to_constraint) |c|
+            try out.append(allocator, @bitCast(c));
+        const pairs = s.getConstraintIndexToBodyIdxPair();
+        try out.append(allocator, @intCast(pairs.len));
+        for (pairs) |p| {
+            try out.append(allocator, @bitCast(p.first));
+            try out.append(allocator, @bitCast(p.second));
+        }
+    }
+};
 
 // ---- SLOT vehicle: VehicleConstraint, the collision testers, the wheels, the engine, the transmission, the anti-roll
 // bars, WheeledVehicleController (Phase7OpRange.vehicle 520..569, Blocker.wheeled_vehicles) ----
