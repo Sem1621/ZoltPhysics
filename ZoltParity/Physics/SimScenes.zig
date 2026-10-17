@@ -14144,7 +14144,9 @@ fn addTestMotorcycle(b: *SceneBuilder, position: [3]Real, rotation_value: [4]f32
 /// Every operation of the motorcycle controller: a motorcycle drives off and leans into a turn (the lean controller and
 /// the lean steering limit switched off and on, every lean parameter changed; the integration coefficient stays 0:
 /// Jolt's MotorcycleController::SaveState does not save mLeanSpringIntegratedDeltaAngle, the D12 sweeps and the cross
-/// restores would see it), the wheeled operations on it, a snapshot restored cross
+/// restores would see it), the wheeled operations on it, a snapshot restored cross. The lean steering limit is off
+/// while the motorcycle is slow (below 3 m/s, the clamp of its 9 degree steer angle needs 11 m/s): only the object state
+/// sees that toggle, vehicle_motorcycle_turns switches the limit off while it clamps the steering.
 fn buildVehicleMotorcycleOps(b: *SceneBuilder) Allocator.Error!void {
     b.num_updates = 100;
     _ = try addFloor(b, 40, 0);
@@ -14723,10 +14725,12 @@ fn motorcycleDesc(tester: VehicleTesterKind) SimVehicle {
 }
 
 /// Motorcycles leaning into turns at different speeds with different lean springs: the default lean spring at half
-/// throttle; a small max lean angle (the target lean is clamped) with a softer, less damped spring and less smoothing at
-/// full throttle; a strongly smoothed spring whose lean steering limit is switched off while it is fast (the front wheel
-/// steers its full angle) and on again, and whose lean controller is off for a few updates (the target lean is the world
-/// up, the integrated angle is reset). They turn right and left at speed, then roll out.
+/// throttle; a small max lean angle (8 degrees: the target lean is clamped, and the lean steering limit clamps the 18
+/// degree steer angle from the start of the turn, above 2.9 m/s) with a softer, less damped spring and less smoothing
+/// at full throttle, whose lean steering limit is switched off for updates 66 to 71 of the turn (the front wheel steers
+/// its full 0.31 rad instead of the clamped 0.11 to 0.12 rad) and on again; a strongly smoothed spring whose lean
+/// controller is off for a few updates (the target lean is the world up, the integrated angle is reset). They turn
+/// right and left at speed, then roll out.
 fn buildVehicleMotorcycleTurns(b: *SceneBuilder) Allocator.Error!void {
     b.num_updates = 200;
     _ = try addFloor(b, 70, 0);
@@ -14752,10 +14756,12 @@ fn buildVehicleMotorcycleTurns(b: *SceneBuilder) Allocator.Error!void {
     b.at(60);
     try b.objectOp(.wheeled_set_right_input, default_bike, .{ .f = &.{0.4} });
     try b.objectOp(.wheeled_set_right_input, clamped, .{ .f = &.{0.6} });
-    try b.objectOp(.motorcycle_enable_lean_steering_limit, smooth, .{ .i = &.{0} });
     try b.objectOp(.wheeled_set_right_input, smooth, .{ .f = &.{0.15} });
+    b.at(66);
+    try b.objectOp(.motorcycle_enable_lean_steering_limit, clamped, .{ .i = &.{0} });
+    b.at(72);
+    try b.objectOp(.motorcycle_enable_lean_steering_limit, clamped, .{ .i = &.{1} });
     b.at(75);
-    try b.objectOp(.motorcycle_enable_lean_steering_limit, smooth, .{ .i = &.{1} });
     try b.objectOp(.wheeled_set_right_input, smooth, .{ .f = &.{0.5} });
     b.at(100);
     try b.objectOp(.motorcycle_enable_lean_controller, smooth, .{ .i = &.{0} });
@@ -14777,9 +14783,11 @@ fn addMotorcycleRamp(b: *SceneBuilder, x: Real) Allocator.Error!u32 {
 }
 
 /// Motorcycles on a slope and braking: one rides up a ramp, steers on it and brakes until it stands on the slope (the
-/// lean target from the ground impulses on a slope); one brakes and hand brakes in a turn on the flat floor with a
-/// gravity override (the max steer angle factor uses the overridden gravity) and its lean steering limit only active at
-/// speed; a snapshot in the turn is restored cross
+/// lean target from the ground impulses on a slope); one with a small max lean angle (10 degrees) brakes and hand brakes
+/// in a turn on the flat floor with a gravity override: its lean steering limit clamps the steer angle while it is fast
+/// (updates 47 to 90, above 3.1 m/s) with a max steer angle factor of the overridden gravity (the gravity of the system
+/// would give a larger angle) and lets the front wheel steer its full angle once it is slow; a snapshot in the turn is
+/// restored cross
 fn buildVehicleMotorcycleSlopesAndBraking(b: *SceneBuilder) Allocator.Error!void {
     b.num_updates = 180;
     _ = try addFloor(b, 50, 0);
@@ -14789,6 +14797,7 @@ fn buildVehicleMotorcycleSlopesAndBraking(b: *SceneBuilder) Allocator.Error!void
     const climber = try addTestMotorcycle(b, .{ 0, 0.9, -2 }, identity_rotation, climber_desc);
     var braker_desc = motorcycleDesc(.ray);
     braker_desc.lean_spring_damping = 1300.0;
+    braker_desc.max_lean_angle = zolt.math.degreesToRadians(10.0);
     const braker = try addTestMotorcycle(b, .{ 14, 0.9, -20 }, identity_rotation, braker_desc);
 
     b.at(1);

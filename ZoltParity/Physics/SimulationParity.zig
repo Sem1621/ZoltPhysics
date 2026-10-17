@@ -5810,14 +5810,21 @@ const TrackedVehicleSlot = struct {
 /// WheeledVehicleController: VehicleSlot reaches its wheeled parts itself. Proof that the motorcycle scenes bite (each
 /// breakage of Zolt/Physics/Vehicle/MotorcycleController.zig, then reverted): no lean steering limit (a max steer angle
 /// 10 rad higher) is reported as "scene vehicle_motorcycle_turns ... update 60: after the update, state f: state
-/// differs at byte 193 ...: bodies[2] (id 0x00800002) position.x zolt 0xba28cdaa jolt 0xba36e5cf"; clamping the target
-/// lean to the other side (`-Sign(w_angle) * mMaxLeanAngle`) as "scene vehicle_motorcycle_turns ... update 62: ...
-/// bodies[2] (id 0x00800002) position.x zolt 0xbbd38af5 jolt 0xbc1755c0" (the clamp is reached); subtracting the
-/// integration term of the lean impulse as "scene vehicle_motorcycle_lean_integration ... update 13: ... bodies[1] (id
-/// 0x00800001) position.x zolt 0x3d358665 jolt 0x3d35d8f6" (and in vehicle_motorcycle_lean_integration_slope); copying
-/// the controller's lean spring damping in GetSettings (Jolt assigns the settings' own value) as "scene
-/// vehicle_motorcycle_ops ... update 40: operation 19 (vehicle_settings_hash on object handle / description 0) returned
-/// 869730697 in zolt and 4196340125 in jolt" (and VehiclePartsParity's controller test).
+/// differs at byte 193 ...: bodies[2] (id 0x00800002) position.x zolt 0xba28cdaa jolt 0xba36e5cf" (and in
+/// vehicle_motorcycle_slopes_and_braking); clamping the steer angle while the lean steering limit is disabled
+/// (PreCollide ignoring mEnableLeanSteeringLimit) as "scene vehicle_motorcycle_turns ... update 66: ... bodies[2] (id
+/// 0x00800002) position.x zolt 0xbd1e8f1f jolt 0xbd236fc2"; the gravity of the system instead of the overridden gravity
+/// in the max steer angle factor as "scene vehicle_motorcycle_slopes_and_braking ... update 47: ... bodies[3] (id
+/// 0x00800003) position.x zolt 0x415f15dd jolt 0x415f1658" (these two passed every scene while the limit was only
+/// switched off on motorcycles too slow to be clamped and the braker was too slow for its 45 degree max lean angle);
+/// clamping the target lean to the other side (`-Sign(w_angle) * mMaxLeanAngle`) as "scene vehicle_motorcycle_turns ...
+/// update 62: ... bodies[2] (id 0x00800002) position.x zolt 0xbbd38af5 jolt 0xbc1755c0" (the clamp is reached; and in
+/// vehicle_motorcycle_slopes_and_braking); subtracting the integration term of the lean impulse as "scene
+/// vehicle_motorcycle_lean_integration ... update 13: ... bodies[1] (id 0x00800001) position.x zolt 0x3d358665 jolt
+/// 0x3d35d8f6" (and in vehicle_motorcycle_lean_integration_slope); copying the controller's lean spring damping in
+/// GetSettings (Jolt assigns the settings' own value) as "scene vehicle_motorcycle_ops ... update 40: operation 19
+/// (vehicle_settings_hash on object handle / description 0) returned 869730697 in zolt and 4196340125 in jolt" (and
+/// VehiclePartsParity's controller test).
 const MotorcycleSlot = struct {
     const MotorcycleController = zolt.MotorcycleController;
     const MotorcycleControllerSettings = zolt.MotorcycleControllerSettings;
