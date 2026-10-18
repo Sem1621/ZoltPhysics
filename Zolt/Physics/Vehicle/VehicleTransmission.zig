@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleTransmissionSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//!   `rtti` with Jolt's attributes.
 //! - `VehicleTransmission : VehicleTransmissionSettings` (non-virtual inheritance) embeds its parent as `base`
 //!   (CharacterVehicleArchitecture E2).
 //! - The gear ratio arrays are `std.ArrayList(f32)`: the default constructor `init(allocator)` allocates Jolt's default
@@ -37,9 +37,18 @@ pub const VehicleTransmissionSettings = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "VehicleTransmissionSettings",
         .kind = .non_virtual,
+        .attributes = &.{
+            .enumAttr("mMode", .mode),
+            .attr("mGearRatios", .gear_ratios),
+            .attr("mReverseGearRatios", .reverse_gear_ratios),
+            .attr("mSwitchTime", .switch_time),
+            .attr("mClutchReleaseTime", .clutch_release_time),
+            .attr("mSwitchLatency", .switch_latency),
+            .attr("mShiftUpRPM", .shift_up_rpm),
+            .attr("mShiftDownRPM", .shift_down_rpm),
+            .attr("mClutchStrength", .clutch_strength),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Jolt's default gear ratios
     pub const default_gear_ratios = [_]f32{ 2.66, 1.78, 1.3, 1.0, 0.74 };

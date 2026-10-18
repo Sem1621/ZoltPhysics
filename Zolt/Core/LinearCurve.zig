@@ -1,6 +1,8 @@
 //! Port of: Jolt/Core/LinearCurve.h, Jolt/Core/LinearCurve.cpp
-//! Status: partial
-//! Missing: JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL (ObjectStream, Phase 8)
+//! Status: complete
+//!
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(LinearCurve, LinearCurve::Point):
+//! `rtti` with Jolt's attributes.
 //!
 //! `mPoints` is a `std.ArrayList(Point)`: the functions that allocate take the allocator, `deinit` frees the points
 //! and `clone` replaces the C++ copy constructor.
@@ -18,9 +20,8 @@ pub const LinearCurve = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "LinearCurve",
         .kind = .non_virtual,
+        .attributes = &.{.attr("mPoints", .points)},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// A point on the curve
     pub const Point = extern struct {
@@ -28,9 +29,8 @@ pub const LinearCurve = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "LinearCurve::Point",
             .kind = .non_virtual,
+            .attributes = &.{ .attr("mX", .x), .attr("mY", .y) },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         x: f32 = 0.0,
         y: f32 = 0.0,

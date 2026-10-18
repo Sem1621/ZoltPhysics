@@ -1,9 +1,8 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleController.h, Jolt/Physics/Vehicle/VehicleController.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings): `rtti`, its
-//!   attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported).
+//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings): `rtti`. Jolt
+//!   adds no attributes, only the base class SerializableObject.
 //! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `VehicleControllerSettings` is an abstract pattern A root with `ref_count` (RefTarget<VehicleControllerSettings>):
@@ -46,8 +45,6 @@ pub const VehicleControllerSettings = struct {
         .kind = .abstract,
         .bases = &.{SerializableObject},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {

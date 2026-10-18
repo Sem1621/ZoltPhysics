@@ -1,14 +1,15 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleTrack.h, Jolt/Physics/Vehicle/VehicleTrack.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleTrackSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleTrackSettings): `rtti` with
+//!   Jolt's attributes.
 //! - `VehicleTrack : VehicleTrackSettings` (non-virtual inheritance) embeds its parent as `base`
 //!   (CharacterVehicleArchitecture E2). `VehicleTracks` (`VehicleTrack[ETrackSide::Num]`) is `[2]VehicleTrack`.
 //! - `mWheels` is a `std.ArrayList(u32)`: the functions that allocate take the allocator (`deinit`, `clone`, `assign`,
 //!   `restoreBinaryState`), the owner (the tracked controller and its settings) passes its own.
 //! - Deviation (CharacterVehicleArchitecture, "Settled in the foundation review"): Jolt leaves `mDrivenWheel`
-//!   uninitialized, Zolt defaults it to 0 (an undefined value has nothing to reproduce).
+//!   uninitialized, Zolt defaults it to 0 (an undefined value has nothing to reproduce). An object stream therefore
+//!   writes 0 for a default track (SerializationArchitecture.md D9).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -30,9 +31,15 @@ pub const VehicleTrackSettings = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "VehicleTrackSettings",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mDrivenWheel", .driven_wheel),
+            .attr("mWheels", .wheels),
+            .attr("mInertia", .inertia),
+            .attr("mAngularDamping", .angular_damping),
+            .attr("mMaxBrakeTorque", .max_brake_torque),
+            .attr("mDifferentialRatio", .differential_ratio),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Which wheel on the track is connected to the engine (Zolt: 0 by default, Jolt leaves it uninitialized)
     driven_wheel: u32 = 0,
