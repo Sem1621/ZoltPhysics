@@ -26,7 +26,8 @@
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of PhysicsScene and
 //!   ConnectedConstraint (SerializationArchitecture.md S17). PhysicsScene declares "mBodies" and "mConstraints", not
 //!   Jolt's "mSoftBodies" (Phase 9). A scene without soft bodies (Assets/terrain2.bof) is read exactly. A stream with
-//!   soft bodies fails to read. Zolt writes a scene without "mSoftBodies". "mSettings" is declared as Jolt's
+//!   soft bodies fails to read: the skip of a soft body reads the identifier of its Ref "mSettings" as class data
+//!   (S15). Zolt writes a scene without "mSoftBodies". "mSettings" is declared as Jolt's
 //!   `TwoBodyConstraintSettings` (`.attrAs`): a link accepts only objects of that class.
 
 const std = @import("std");
@@ -1044,31 +1045,257 @@ test "PhysicsScene: object stream links, soft bodies (S17)" {
         try testing.expectEqual(@as(u32, 5), constraints[0].body2);
     }
 
-    // A scene that Jolt writes without soft bodies is read: the empty mSoftBodies array is skipped
-    const no_soft_bodies =
-        \\TOS 1.00
-        \\declare PhysicsScene 3
-        \\  mBodies array instance BodyCreationSettings
-        \\  mConstraints array instance PhysicsScene::ConnectedConstraint
-        \\  mSoftBodies array instance SoftBodyCreationSettings
-        \\declare SoftBodyCreationSettings 1
-        \\  mSettings instance SoftBodySharedSettings
-        \\object PhysicsScene 00000001
-        \\  0
-        \\  0
-        \\  0
-    ;
+    // Jolt declares the soft body classes also for a scene without soft bodies (S11). Jolt writes such a scene as the
+    // stream below up to its soft body count, which is 0. The empty mSoftBodies array is skipped: the scene is read.
+    const soft_body_count = "object PhysicsScene 00000001\n  0\n  0\n  ";
+    const count_at = std.mem.indexOf(u8, jolt_soft_body_scene, soft_body_count).? + soft_body_count.len;
+    try testing.expectEqualStrings("1", jolt_soft_body_scene[count_at..][0..1]);
+    const no_soft_bodies = try std.mem.concat(allocator, u8, &.{ jolt_soft_body_scene[0..count_at], "0" });
+    defer allocator.free(no_soft_bodies);
     {
         var read = try readScene(allocator, no_soft_bodies);
         defer read.deinit();
         try testing.expectEqual(@as(usize, 0), read.get().?.getNumBodies());
     }
 
-    // With a soft body the Ref "mSettings" is skipped as class data: the stream is misread and cannot be read
-    const with_soft_body = try std.mem.concat(allocator, u8, &.{ no_soft_bodies[0 .. no_soft_bodies.len - 1], "1 00000002" });
-    defer allocator.free(with_soft_body);
-    try testing.expectError(error.InvalidObjectStream, readScene(allocator, with_soft_body));
+    // With a soft body, the Ref "mSettings" is skipped as class data of SoftBodySharedSettings (S15). Its identifier
+    // 00000002 is read as the number of vertices. The words of the soft body that follow are read as vertices and
+    // faces, until a word is not a number. So the stream is misread and cannot be read.
+    try testing.expectError(error.InvalidObjectStream, readScene(allocator, jolt_soft_body_scene));
 }
+
+/// The text stream that Jolt writes for a PhysicsScene with one soft body (with "\n" line ends, without the space at
+/// the end of a line). The C++ code:
+///     Ref<SoftBodySharedSettings> shared = new SoftBodySharedSettings;
+///     shared->mVertices.push_back(SoftBodySharedSettings::Vertex(Float3(0, 0, 0)));
+///     shared->mVertices.push_back(SoftBodySharedSettings::Vertex(Float3(1, 0, 0)));
+///     shared->mEdgeConstraints.push_back(SoftBodySharedSettings::Edge(0, 1));
+///     scene->AddSoftBody(SoftBodyCreationSettings(shared, RVec3(0, 2, 0), Quat::sIdentity(), 1));
+///     ObjectStreamOut::sWriteObject(stream, ObjectStream::EStreamType::Text, *scene);
+const jolt_soft_body_scene =
+    \\TOS 1.00
+    \\
+    \\declare PhysicsScene 3
+    \\  mBodies array instance BodyCreationSettings
+    \\  mConstraints array instance PhysicsScene::ConnectedConstraint
+    \\  mSoftBodies array instance SoftBodyCreationSettings
+    \\
+    \\declare BodyCreationSettings 30
+    \\  mPosition vec3
+    \\  mRotation quat
+    \\  mLinearVelocity vec3
+    \\  mAngularVelocity vec3
+    \\  mUserData uint64
+    \\  mShape instance ShapeSettings
+    \\  mCollisionGroup instance CollisionGroup
+    \\  mObjectLayer uint32
+    \\  mMotionType uint32
+    \\  mAllowedDOFs uint32
+    \\  mAllowDynamicOrKinematic bool
+    \\  mIsSensor bool
+    \\  mSensorDetectsStatic bool
+    \\  mUseManifoldReduction bool
+    \\  mApplyGyroscopicForce bool
+    \\  mMotionQuality uint32
+    \\  mEnhancedInternalEdgeRemoval bool
+    \\  mAllowSleeping bool
+    \\  mFriction float
+    \\  mRestitution float
+    \\  mLinearDamping float
+    \\  mAngularDamping float
+    \\  mMaxLinearVelocity float
+    \\  mMaxAngularVelocity float
+    \\  mGravityFactor float
+    \\  mNumVelocityStepsOverride uint32
+    \\  mNumPositionStepsOverride uint32
+    \\  mOverrideMassProperties uint32
+    \\  mInertiaMultiplier float
+    \\  mMassPropertiesOverride instance MassProperties
+    \\
+    \\declare PhysicsScene::ConnectedConstraint 3
+    \\  mSettings instance TwoBodyConstraintSettings
+    \\  mBody1 uint32
+    \\  mBody2 uint32
+    \\
+    \\declare SoftBodyCreationSettings 18
+    \\  mSettings instance SoftBodySharedSettings
+    \\  mPosition vec3
+    \\  mRotation quat
+    \\  mUserData uint64
+    \\  mObjectLayer uint32
+    \\  mCollisionGroup instance CollisionGroup
+    \\  mNumIterations uint32
+    \\  mLinearDamping float
+    \\  mMaxLinearVelocity float
+    \\  mRestitution float
+    \\  mFriction float
+    \\  mPressure float
+    \\  mGravityFactor float
+    \\  mVertexRadius float
+    \\  mUpdatePosition bool
+    \\  mMakeRotationIdentity bool
+    \\  mAllowSleeping bool
+    \\  mFacesDoubleSided bool
+    \\
+    \\declare ShapeSettings 1
+    \\  mUserData uint64
+    \\
+    \\declare CollisionGroup 3
+    \\  mGroupFilter instance GroupFilter
+    \\  mGroupID uint32
+    \\  mSubGroupID uint32
+    \\
+    \\declare MassProperties 2
+    \\  mMass float
+    \\  mInertia mat44
+    \\
+    \\declare TwoBodyConstraintSettings 6
+    \\  mEnabled bool
+    \\  mDrawConstraintSize float
+    \\  mConstraintPriority uint32
+    \\  mNumVelocityStepsOverride uint32
+    \\  mNumPositionStepsOverride uint32
+    \\  mUserData uint64
+    \\
+    \\declare SoftBodySharedSettings 11
+    \\  mVertices array instance SoftBodySharedSettings::Vertex
+    \\  mFaces array instance SoftBodySharedSettings::Face
+    \\  mEdgeConstraints array instance SoftBodySharedSettings::Edge
+    \\  mDihedralBendConstraints array instance SoftBodySharedSettings::DihedralBend
+    \\  mVolumeConstraints array instance SoftBodySharedSettings::Volume
+    \\  mSkinnedConstraints array instance SoftBodySharedSettings::Skinned
+    \\  mInvBindMatrices array instance SoftBodySharedSettings::InvBind
+    \\  mLRAConstraints array instance SoftBodySharedSettings::LRA
+    \\  mRodStretchShearConstraints array instance SoftBodySharedSettings::RodStretchShear
+    \\  mRodBendTwistConstraints array instance SoftBodySharedSettings::RodBendTwist
+    \\  mMaterials array instance PhysicsMaterial
+    \\
+    \\declare GroupFilter 0
+    \\
+    \\declare SoftBodySharedSettings::Vertex 3
+    \\  mPosition float3
+    \\  mVelocity float3
+    \\  mInvMass float
+    \\
+    \\declare SoftBodySharedSettings::Face 2
+    \\  mVertex array uint32
+    \\  mMaterialIndex uint32
+    \\
+    \\declare SoftBodySharedSettings::Edge 3
+    \\  mVertex array uint32
+    \\  mRestLength float
+    \\  mCompliance float
+    \\
+    \\declare SoftBodySharedSettings::DihedralBend 3
+    \\  mVertex array uint32
+    \\  mCompliance float
+    \\  mInitialAngle float
+    \\
+    \\declare SoftBodySharedSettings::Volume 3
+    \\  mVertex array uint32
+    \\  mSixRestVolume float
+    \\  mCompliance float
+    \\
+    \\declare SoftBodySharedSettings::Skinned 5
+    \\  mVertex uint32
+    \\  mWeights array instance SoftBodySharedSettings::SkinWeight
+    \\  mMaxDistance float
+    \\  mBackStopDistance float
+    \\  mBackStopRadius float
+    \\
+    \\declare SoftBodySharedSettings::InvBind 2
+    \\  mJointIndex uint32
+    \\  mInvBind mat44
+    \\
+    \\declare SoftBodySharedSettings::LRA 2
+    \\  mVertex array uint32
+    \\  mMaxDistance float
+    \\
+    \\declare SoftBodySharedSettings::RodStretchShear 5
+    \\  mVertex array uint32
+    \\  mLength float
+    \\  mInvMass float
+    \\  mCompliance float
+    \\  mBishop quat
+    \\
+    \\declare SoftBodySharedSettings::RodBendTwist 3
+    \\  mRod array uint32
+    \\  mCompliance float
+    \\  mOmega0 quat
+    \\
+    \\declare PhysicsMaterial 0
+    \\
+    \\declare SoftBodySharedSettings::SkinWeight 2
+    \\  mInvBindIndex uint32
+    \\  mWeight float
+    \\
+    \\object PhysicsScene 00000001
+    \\  0
+    \\  0
+    \\  1
+    \\      00000002
+    \\      0 2 0
+    \\      0 0 0 1
+    \\      0
+    \\      1
+    \\        00000000
+    \\        4294967295
+    \\        4294967295
+    \\      5
+    \\      0.100000001
+    \\      500
+    \\      0
+    \\      0.200000003
+    \\      0
+    \\      1
+    \\      0
+    \\      true
+    \\      true
+    \\      true
+    \\      false
+    \\
+    \\object SoftBodySharedSettings 00000002
+    \\  2
+    \\      0 0 0
+    \\      0 0 0
+    \\      1
+    \\      1 0 0
+    \\      0 0 0
+    \\      1
+    \\  0
+    \\  1
+    \\      2
+    \\        0
+    \\        1
+    \\      1
+    \\      0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  1
+    \\    00000003
+    \\
+    \\declare PhysicsMaterialSimple 2
+    \\  mDebugName string
+    \\  mDebugColor instance Color
+    \\
+    \\declare Color 4
+    \\  r uint8
+    \\  g uint8
+    \\  b uint8
+    \\  a uint8
+    \\
+    \\object PhysicsMaterialSimple 00000003
+    \\  "Default"
+    \\    128
+    \\    128
+    \\    128
+    \\    255
+;
 
 fn writeReadScene(allocator: Allocator) !void {
     var scene: PhysicsScene = .init(allocator);
