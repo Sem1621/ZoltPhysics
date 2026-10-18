@@ -70,9 +70,8 @@ pub const OffsetCenterOfMassShapeSettings = struct {
         .name = "OffsetCenterOfMassShapeSettings",
         .kind = .virtual,
         .bases = &.{DecoratedShapeSettings},
+        .attributes = &.{.attr("mOffset", .offset)},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

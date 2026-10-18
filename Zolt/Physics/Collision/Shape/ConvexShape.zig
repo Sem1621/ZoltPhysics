@@ -101,9 +101,11 @@ pub const ConvexShapeSettings = struct {
         .name = "ConvexShapeSettings",
         .kind = .abstract,
         .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mDensity", .density),
+            .attr("mMaterial", .material),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     base: ShapeSettings,
 

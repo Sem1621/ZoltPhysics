@@ -8,9 +8,11 @@
 //! - Constructors: `initDefault` (default constructor), `initFromSettings` (D3), `init` / `create`
 //!   (RotatedTranslatedShape(Vec3Arg, QuatArg, const Shape *), on the stack / `new`). The two settings constructors are
 //!   `init` (const ShapeSettings *) and `initPtr` (const Shape *), with `create` / `createPtr` for `new`.
-//! - Members that Jolt leaves uninitialized (`mPosition` / `mRotation` of the settings, `mCenterOfMass`, `mRotation` and
-//!   `mIsRotationIdentity` of a default constructed shape) are zero / identity here; the constructors and the restore
-//!   set them like in Jolt.
+//! - Members that Jolt leaves uninitialized:
+//!   - `mPosition` and `mRotation` of the settings are zero (SerializationArchitecture.md D9). So default settings
+//!     write the bytes of Jolt's zero filled settings.
+//!   - A default constructed shape has a zero `mCenterOfMass`, an identity `mRotation` and `mIsRotationIdentity` true.
+//!   - The constructors and the restore set them like in Jolt.
 //! - `sRegister` is `register` (D4): the collide / cast functions with a rotated translated shape on either side (and
 //!   on both sides) forward to the inner shape with the rotation applied, private like in Jolt.
 //! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace and the `inBaseOffset` parameter of
@@ -72,18 +74,20 @@ pub const RotatedTranslatedShapeSettings = struct {
         .name = "RotatedTranslatedShapeSettings",
         .kind = .virtual,
         .bases = &.{DecoratedShapeSettings},
+        .attributes = &.{
+            .attr("mPosition", .position),
+            .attr("mRotation", .rotation),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
 
     base: DecoratedShapeSettings,
-    /// Position of the sub shape (uninitialized in Jolt)
+    /// Position of the sub shape (uninitialized in Jolt, zero here: SerializationArchitecture.md D9)
     position: Vec3 = Vec3.zero(),
-    /// Rotation of the sub shape (uninitialized in Jolt)
-    rotation: Quat = Quat.identity(),
+    /// Rotation of the sub shape (uninitialized in Jolt, zero here: SerializationArchitecture.md D9)
+    rotation: Quat = Quat.zero(),
 
     /// Constructor (the default constructor, for deserialization)
     pub fn initDefault(allocator: Allocator) RotatedTranslatedShapeSettings {
@@ -585,7 +589,7 @@ test "RotatedTranslatedShape: settings, Jolt's error texts, cached results and o
     {
         var settings = RotatedTranslatedShapeSettings.initDefault(allocator);
         defer settings.deinit();
-        try expect(settings.position.eql(Vec3.zero()) and settings.rotation.eql(Quat.identity()));
+        try expect(settings.position.eql(Vec3.zero()) and settings.rotation.eql(Quat.zero()));
         var result = try settings.asShapeSettings().createShape(allocator);
         defer result.deinit();
         try testing.expectEqualStrings("Inner shape is null!", result.getError());

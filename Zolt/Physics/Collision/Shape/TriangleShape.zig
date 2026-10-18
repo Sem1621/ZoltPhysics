@@ -75,9 +75,13 @@ pub const TriangleShapeSettings = struct {
         .name = "TriangleShapeSettings",
         .kind = .virtual,
         .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mV1", .v1),
+            .attr("mV2", .v2),
+            .attr("mV3", .v3),
+            .attr("mConvexRadius", .convex_radius),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

@@ -56,9 +56,8 @@ pub const EmptyShapeSettings = struct {
         .name = "EmptyShapeSettings",
         .kind = .virtual,
         .bases = &.{ShapeSettings},
+        .attributes = &.{.attr("mCenterOfMass", .center_of_mass)},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

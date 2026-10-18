@@ -223,9 +223,8 @@ pub const ShapeSettings = struct {
         .name = "ShapeSettings",
         .kind = .abstract,
         .bases = &.{SerializableObject},
+        .attributes = &.{.attr("mUserData", .user_data)},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {

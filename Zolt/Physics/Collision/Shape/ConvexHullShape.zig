@@ -89,9 +89,13 @@ pub const ConvexHullShapeSettings = struct {
         .name = "ConvexHullShapeSettings",
         .kind = .virtual,
         .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mPoints", .points),
+            .attr("mMaxConvexRadius", .max_convex_radius),
+            .attr("mMaxErrorConvexRadius", .max_error_convex_radius),
+            .attr("mHullTolerance", .hull_tolerance),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
