@@ -26,7 +26,8 @@
 //!     constraint (`body_ids_scratch`).
 //!   - Deviation: `getWheelsMut()` gives the wheels as a slice (Jolt's writable `GetWheels()` returns the array): the
 //!     wheels are created from the settings by the controller and their number cannot change after creation, because
-//!     the scratch buffers of the constraint and its controller are sized for it.
+//!     `body_ids_scratch` (the number of wheels + 1) is allocated with the constraint. (The number of differentials of a
+//!     WheeledVehicleController is a separate matter: its `setDifferentials` changes it, see WheeledVehicleController.zig.)
 //! - `GetWheelLocalBasis(wheel, outForward, outUp, outRight)` returns `WheelLocalBasis{ .forward, .up, .right }`,
 //!   `CalculateSuspensionForcePoint` a `SuspensionForcePoint{ .r1_plus_u, .r2 }` (out parameters).
 //! - `CombineFunction` and `StepCallback` (std::function) are a function pointer + context with `init(context,

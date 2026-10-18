@@ -8,7 +8,8 @@
 //!
 //! Zolt tests after the ported ones: the three collision testers, the settings and controller settings that the
 //! constraint gives back, SaveState / RestoreState in the middle of a drive, the thread count independence of the
-//! simulation, and allocation failure sweeps of the creation and of GetConstraintSettings.
+//! simulation, allocation failure sweeps of the creation and of GetConstraintSettings, more than 128 differentials and
+//! setDifferentials (Zolt's replacement of the differentials, all or nothing).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -615,4 +616,64 @@ test "WheeledVehicle: creation, settings and controller settings out of memory" 
         }
     };
     try std.testing.checkAllAllocationFailures(testing_allocator, S.run, .{ body, &settings });
+}
+
+test "WheeledVehicle: more than 128 differentials and setDifferentials" {
+    var c: PhysicsTestContext = undefined;
+    try c.init(testing_allocator, .{});
+    defer c.deinit();
+    _ = try c.createFloor();
+    const settings: VehicleSettings = .{};
+    const constraint = try addVehicle(&c, &settings);
+    const controller = wheeledController(constraint);
+    try simulate(&c, 0.5);
+    try expect(controller.getDifferentials().len == 1);
+
+    // 130 differentials whose wheels repeat: 260 driven wheels, PostCollide solves 261 equations (more than
+    // GaussianElimination's stack buffer, Jolt has no limit). 128 of them split the engine torque exactly.
+    var differentials: [130]zolt.VehicleDifferentialSettings = undefined;
+    for (&differentials, 0..) |*d, i|
+        d.* = .{ .left_wheel = @intCast(i % 4), .right_wheel = @intCast((i + 1) % 4), .engine_torque_ratio = if (i < 128) 1.0 / 128.0 else 0.0 };
+    try controller.setDifferentials(&differentials);
+    controller.setDifferentialLimitedSlipRatio(math.flt_max);
+    try expect(controller.getDifferentials().len == 130);
+    controller.setDriverInput(1.0, 0.0, 0.0, 0.0);
+    c.getBodyInterface().activateBody(constraint.getVehicleBody().getID());
+    try simulate(&c, 1.0);
+    // Driving forward, slowly: the engine drives the inertia of 260 wheels (each wheel 65 times)
+    try expect(constraint.getVehicleBody().getPosition().getZ() > 0.0);
+    for (constraint.getWheels()) |w|
+        try expect(w.getAngularVelocity() > 0.0);
+
+    // Back to one differential
+    try controller.setDifferentials(differentials[0..1]);
+    controller.getDifferentialsMut()[0].engine_torque_ratio = 1.0;
+    try simulate(&c, 0.1);
+    try expect(controller.getDifferentials().len == 1);
+}
+
+test "WheeledVehicle: setDifferentials out of memory keeps the old differentials" {
+    const S = struct {
+        fn run(allocator: Allocator) !void {
+            const settings = try WheeledVehicleControllerSettings.create(allocator);
+            var settings_ref = Ref(VehicleControllerSettings).init(&settings.base);
+            defer settings_ref.deinit();
+            try settings.differentials.append(allocator, .{ .left_wheel = 0, .right_wheel = 1 });
+
+            // The controller only keeps a pointer to its constraint (not used here)
+            var constraint: VehicleConstraint = undefined;
+            const controller = try WheeledVehicleController.create(allocator, settings, &constraint);
+            defer controller.base.destroy();
+
+            var differentials: [5]zolt.VehicleDifferentialSettings = @splat(.{ .left_wheel = 0, .right_wheel = 1, .engine_torque_ratio = 0.2 });
+            controller.setDifferentials(&differentials) catch |err| {
+                try expect(controller.getDifferentials().len == 1); // Unchanged
+                return err;
+            };
+            try expect(controller.getDifferentials().len == 5);
+            differentials[0].left_wheel = -1;
+            try expect(controller.getDifferentials()[0].left_wheel == 0); // A copy
+        }
+    };
+    try std.testing.checkAllAllocationFailures(testing_allocator, S.run, .{});
 }

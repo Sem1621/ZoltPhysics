@@ -19,13 +19,14 @@
 //! - Allocation (E2): `create`, `getSettings` and `constructController` / `constructWheel` return `Allocator.Error` and
 //!   leave nothing behind. PostCollide and SolveLongitudinalAndLateralConstraints run inside the physics update (step
 //!   listener and solver jobs, no error channel), so they never allocate:
-//!   - PostCollide's `Array<DrivenDifferential>`, `Array<DrivenWheel>` and the two DynMatrix of the implicit Euler step
-//!     use scratch buffers that the constructor allocates for the number of differentials (at most one driven
-//!     differential per differential, at most two driven wheels per differential, a matrix of (2 * differentials + 1)^2
-//!     plus a vector). Deviation: `getDifferentialsMut()` therefore gives the differentials as a slice (their values can
-//!     be changed, their number is fixed after creation; Jolt's writable GetDifferentials returns the array). The
-//!     matrix dimension is bounded by GaussianElimination's `max_dynamic_size` (256, Jolt's JPH_STACK_ALLOC is
-//!     unbounded): at most 127 differentials.
+//!   - PostCollide's `Array<DrivenDifferential>`, `Array<DrivenWheel>`, the two DynMatrix of the implicit Euler step and
+//!     GaussianElimination's JPH_STACK_ALLOC pivot array use scratch buffers (`Scratch`) that are allocated for the
+//!     number of differentials D (at most D driven differentials, at most 2 * D driven wheels: the wheel indices of the
+//!     differentials may repeat, a matrix of (2 * D + 1)^2 plus a vector, 2 * D + 1 pivots). There is no limit on D, like
+//!     in Jolt. Deviation: `getDifferentialsMut()` gives the differentials as a slice (their values can be changed, their
+//!     number cannot: the scratch buffers are sized for it); Jolt's writable GetDifferentials returns the array, whose
+//!     size can change. The Zolt function `setDifferentials` replaces the differentials (any number) on the user thread:
+//!     it allocates the new array and scratch buffers first, so a failure leaves the old ones.
 //!   - SolveLongitudinalAndLateralConstraints' `JPH_STACK_ALLOC(mWheels.size() * sizeof(float))` array of lateral
 //!     impulses is the Zolt field `WheelWV.max_lateral_friction_impulse` (one value per wheel, written in the first loop
 //!     and read in the second, like the array entries).
@@ -462,11 +463,39 @@ pub const WheeledVehicleController = struct {
     /// Callback that calculates the max impulse that the tire can apply to the ground
     tire_max_impulse_callback: TireMaxImpulseCallback = .default,
 
-    /// Zolt: PostCollide's driven differentials, driven wheels and matrices, allocated for the number of differentials
-    /// (see the file comment)
-    driven_differentials_scratch: []DrivenDifferential = &.{},
-    driven_wheels_scratch: []DrivenWheel = &.{},
-    matrix_scratch: []f32 = &.{},
+    /// Zolt: PostCollide's driven differentials, driven wheels, matrices and pivots, allocated for the number of
+    /// differentials (see the file comment)
+    scratch: Scratch = .{},
+
+    /// The scratch buffers of PostCollide for D differentials (see the file comment)
+    const Scratch = struct {
+        driven_differentials: []DrivenDifferential = &.{},
+        driven_wheels: []DrivenWheel = &.{},
+        /// The matrix a (n x n) followed by the vector b (n x 1) for the largest n = 2 * D + 1
+        matrix: []f32 = &.{},
+        /// GaussianElimination's pivot bookkeeping (n)
+        ipiv: []i32 = &.{},
+
+        /// Allocate the buffers for `num_differentials` differentials, all or nothing
+        fn init(allocator: Allocator, num_differentials: usize) Allocator.Error!Scratch {
+            const max_n = 2 * num_differentials + 1;
+            var result: Scratch = .{};
+            errdefer result.deinit(allocator);
+            result.driven_differentials = try allocator.alloc(DrivenDifferential, num_differentials);
+            result.driven_wheels = try allocator.alloc(DrivenWheel, 2 * num_differentials);
+            result.matrix = try allocator.alloc(f32, max_n * max_n + max_n);
+            result.ipiv = try allocator.alloc(i32, max_n);
+            return result;
+        }
+
+        fn deinit(self: *Scratch, allocator: Allocator) void {
+            allocator.free(self.driven_differentials);
+            allocator.free(self.driven_wheels);
+            allocator.free(self.matrix);
+            allocator.free(self.ipiv);
+            self.* = .{};
+        }
+    };
 
     /// Constructor of the base part of a class T derived from WheeledVehicleController (MotorcycleController). On
     /// failure nothing is left allocated.
@@ -511,11 +540,7 @@ pub const WheeledVehicleController = struct {
         if (Core.enable_asserts) std.debug.assert(self.differential_limited_slip_ratio > 1.0);
 
         // Zolt: the scratch buffers of PostCollide
-        const num_differentials = self.differentials.items.len;
-        const max_n = 2 * num_differentials + 1;
-        self.driven_differentials_scratch = try allocator.alloc(DrivenDifferential, num_differentials);
-        self.driven_wheels_scratch = try allocator.alloc(DrivenWheel, 2 * num_differentials);
-        self.matrix_scratch = try allocator.alloc(f32, max_n * max_n + max_n);
+        self.scratch = try .init(allocator, self.differentials.items.len);
 
         return self;
     }
@@ -539,9 +564,7 @@ pub const WheeledVehicleController = struct {
         self.engine.deinit(allocator);
         self.transmission.deinit(allocator);
         self.differentials.deinit(allocator);
-        allocator.free(self.driven_differentials_scratch);
-        allocator.free(self.driven_wheels_scratch);
-        allocator.free(self.matrix_scratch);
+        self.scratch.deinit(allocator);
     }
 
     /// Upcasts (implicit in C++)
@@ -627,9 +650,26 @@ pub const WheeledVehicleController = struct {
     }
 
     /// Get the differentials this vehicle has (writable interface, allows you to make changes to the configuration which will take effect the next time step)
-    /// (Zolt: the differentials, not the array: their number is fixed, see the file comment)
+    /// (Zolt: the differentials, not the array: their number is fixed, `setDifferentials` changes it, see the file comment)
     pub fn getDifferentialsMut(self: *WheeledVehicleController) []VehicleDifferentialSettings {
         return self.differentials.items;
+    }
+
+    /// Zolt: replace the differentials (Jolt: assigning or resizing the array of the writable GetDifferentials), any
+    /// number. Call it on the user thread, not during the physics update. The new array and the scratch buffers of
+    /// PostCollide are allocated first: on failure the old differentials and buffers are kept.
+    pub fn setDifferentials(self: *WheeledVehicleController, differentials: []const VehicleDifferentialSettings) Allocator.Error!void {
+        const allocator = self.base.allocator;
+        var new_differentials: Differentials = .empty;
+        errdefer new_differentials.deinit(allocator);
+        try new_differentials.appendSlice(allocator, differentials);
+        const new_scratch: Scratch = try .init(allocator, differentials.len);
+        errdefer comptime unreachable;
+
+        self.differentials.deinit(allocator);
+        self.differentials = new_differentials;
+        self.scratch.deinit(allocator);
+        self.scratch = new_scratch;
     }
 
     /// Ratio max / min average wheel speed of each differential (measured at the clutch).
@@ -737,7 +777,7 @@ pub const WheeledVehicleController = struct {
 
         // Collect driven differentials and their speeds (Array<DrivenDifferential> in Jolt: the scratch buffer)
         var num_driven_differentials: usize = 0;
-        const driven_differentials = self.driven_differentials_scratch;
+        const driven_differentials = self.scratch.driven_differentials;
         var differential_omega_min: f32 = math.flt_max;
         var differential_omega_max: f32 = 0.0;
         for (self.differentials.items) |*d| {
@@ -800,7 +840,7 @@ pub const WheeledVehicleController = struct {
         }
 
         // Collect driven wheels (Array<DrivenWheel> in Jolt: the scratch buffer)
-        const driven_wheels = self.driven_wheels_scratch;
+        const driven_wheels = self.scratch.driven_wheels;
         var num_driven_wheels: usize = 0;
         const transmission_ratio = self.transmission.getCurrentRatio();
         for (driven_differentials[0..num_driven_differentials]) |*dd| {
@@ -905,8 +945,8 @@ pub const WheeledVehicleController = struct {
             const engine = n - 1;
 
             // Define a and b (DynMatrix a(n, n), b(n, 1): views on the scratch buffer)
-            var a: DynMatrix = .{ .rows = n, .cols = n, .elements = self.matrix_scratch[0 .. n * n], .allocator = self.base.allocator };
-            var b: DynMatrix = .{ .rows = n, .cols = 1, .elements = self.matrix_scratch[n * n ..][0..n], .allocator = self.base.allocator };
+            var a: DynMatrix = .{ .rows = n, .cols = n, .elements = self.scratch.matrix[0 .. n * n], .allocator = self.base.allocator };
+            var b: DynMatrix = .{ .rows = n, .cols = 1, .elements = self.scratch.matrix[n * n ..][0..n], .allocator = self.base.allocator };
 
             // Get number of driven wheels as a float
             const num_driven_wheels_float: f32 = @floatFromInt(num_driven_wheels);
@@ -984,7 +1024,7 @@ pub const WheeledVehicleController = struct {
             b.set(engine, 0, w_engine + dt_div_ie * engine_torque);
 
             // Solve the linear equation
-            if (gaussianElimination(&a, &b, .{})) {
+            if (gaussianElimination(&a, &b, .{ .ipiv = self.scratch.ipiv })) {
                 // Update the angular velocities for the wheels
                 for (driven_wheels[0..num_driven_wheels], 0..) |*w_i, ii| {
                     const i: u32 = @intCast(ii);

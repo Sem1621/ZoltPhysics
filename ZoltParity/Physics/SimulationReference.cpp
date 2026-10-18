@@ -1087,6 +1087,7 @@ enum class ESimOp : uint32
 	VehicleWheelWVApplyTorque = 560,
 	VehicleEngineApplyTorque = 561,
 	VehicleEngineApplyDamping = 562,
+	WheeledSetDifferentials = 563,
 	// Phase7OpRange.vehicle_tracked
 	TrackedSetDriverInput = 570,
 	TrackedSetForwardInput = 571,
@@ -3800,6 +3801,19 @@ public:
 
 		case ESimOp::VehicleEngineApplyTorque:				GetEngine(v).ApplyTorque(f[0], f[1]); break;
 		case ESimOp::VehicleEngineApplyDamping:				GetEngine(v).ApplyDamping(f[0]); break;
+
+		case ESimOp::WheeledSetDifferentials:
+			{
+				WheeledVehicleController::Differentials &differentials = GetWheeledController(v, inOp).GetDifferentials();
+				differentials.clear();
+				for (uint32 d = 0; d < i[1]; ++d)
+				{
+					VehicleDifferentialSettings diff;
+					SimFillDifferential(mDesc.mVehicleDifferentials[i[0] + d], diff);
+					differentials.push_back(diff);
+				}
+				break;
+			}
 
 		default:
 			Trace("SimulationReference: unknown vehicle operation %u", inOp.mKind);
