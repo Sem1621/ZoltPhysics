@@ -72,8 +72,9 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
   compares them where Jolt exposes them.
 - **Allocation failure.**
   - Every Zolt function that allocates returns `Allocator.Error` (or a `Result`) instead of crashing.
-  - A failed creation leaves nothing behind: a ragdoll with half of its bodies, a vehicle without its controller or a
-    character without its inner body is never left in the system.
+  - A creation that fails with an error leaves nothing behind: a ragdoll with half of its bodies, a vehicle without
+    its controller or a character without its inner body is never left in the system. (Out of bodies is not an error,
+    as in Jolt: `createRagdoll` returns null, a Character has no body and a CharacterVirtual no inner body, E5.)
   - Each group sweeps its creation and update functions with `FailingAllocator` (SimulationArchitecture D5, D12).
 
 ### E3 Registries
@@ -133,15 +134,15 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
   - Zolt panics there with a message, as it does for Path's null path. Document this in the file header. The parity
     does not restore vehicle settings with wheels; settings without wheels restore and compare.
 - **Collision testers.** VehicleCollisionTesterRay, CastSphere and CastCylinder go through NarrowPhaseQuery `castRay`
-  / `castShape`. CastCylinder builds its cylinder shape on the stack, which Zolt embeds (`is_static`, as for the Phase
-  5 fixed-to-world body).
+  / `castShape`. CastSphere and CastCylinder build their query shape on the stack and embed it like Jolt
+  (`setEmbedded`, `deinit` at the end of the query).
 
 ### E7 Ragdoll
 
 - **Building a ragdoll.** `RagdollSettings.createRagdoll` creates the bodies with `BodyInterface.createBody` and the
   constraints with `TwoBodyConstraintSettings.createConstraint`.
   - `Ragdoll.addToPhysicsSystem` uses `addBodiesPrepare` / `addBodiesFinalize` and `PhysicsSystem.addConstraints`, as
-    Jolt does.
+    Jolt does. Zolt adds the constraints between the two body calls (section 6).
   - The `inLockBodies` flag selects the locking or the no-lock BodyLockInterface.
 - **Driving to a pose.** `driveToPoseUsingMotors` sets SwingTwist / Hinge motor targets
   (`SwingTwistConstraint.setTargetOrientationBS`, `HingeConstraint.setTargetOrientationBS` /
@@ -169,13 +170,17 @@ class fills.
   - A ragdoll description is a procedurally built skeleton plus parts.
   - The ragdoll's parts and constraints reuse the existing shape and constraint descriptions.
 - **Reserved numbers.**
-  - `OpKind` 400..599:
+  - `OpKind` 400..599, one `Phase7OpRange` per group:
     - 400..429 Character;
     - 430..489 CharacterVirtual;
     - 490..519 Ragdoll;
-    - 520..579 Vehicle;
-    - 580..599 spare.
-  - New `RecordKind`s for the character contact callbacks.
+    - 520..569 vehicle core (554..559 the Constraint interface of a vehicle, 560..562 wheel and engine torque, 563
+      `wheeled_set_differentials`);
+    - 570..579 TrackedVehicleController;
+    - 580..589 MotorcycleController;
+    - 590..599 spare.
+  - `RecordKind` 7..17 for the character contact callbacks, 18..20 for the vehicle callbacks, then one block per group
+    for new kinds (21..79).
   - New `Blocker`s: `characters`, `character_virtuals`, `ragdolls`, `wheeled_vehicles`, `tracked_vehicles`,
     `motorcycles`. They flip automatically when the class is ported (its settings no longer declare `is_stub`), as
     the Phase 6 constraint blockers do.
@@ -183,11 +188,13 @@ class fills.
   - The physics system's `saveState` bytes, which include ragdoll bodies and constraints and the VehicleConstraint
     state.
   - Each Character's and CharacterVirtual's `saveState` bytes.
-  - The character contact listener records: sorted when they come from parallel jobs; in call order when the user
-    thread makes the calls, because the order is part of the M8 hash.
+  - The character contact listener records, in call order: the character operations run on the user thread, and the
+    order is part of the M8 hash. The vehicle callbacks come from the step listener jobs and are sorted with the other
+    records.
   - The getters that are not in the state: CharacterVirtual's active contacts, ground state, ground body and sub
     shape, and `canWalkStairs`; a ragdoll's root transform and pose; per-wheel contact information.
-- **Runs.** These scenes run in the existing thread matrix and D12 failure sweeps.
+- **Runs.** These scenes run in the existing thread matrix and D12 failure sweeps. Section 6 lists the three scenes
+  without sweeps and the broad phase restore of the CharacterVirtual scenes.
 - **Character updates happen between `PhysicsSystem.update` calls.** That is where PerformanceTest and the unit tests
   call them, through operations that run before an update. A character op that needs the temp allocator uses the
   world's.
@@ -256,3 +263,92 @@ A group edits only its own region, slot, files and registry lines.
   - `zig build parity` in Debug, double precision and ReleaseFast;
   - `zig fmt --check`;
   - `python3 tools/port_status.py --write`.
+
+## 6. Settled in the Phase 7 groups
+
+Each group was reviewed after its port. A second reviewer checked every finding against the Jolt source, and the group
+fixed the real ones before its merge. The reviews found no result difference from Jolt in library code. They found
+crashes on input that Jolt accepts, one missing API, coverage gaps and wrong docs. These points were settled on the
+way. They add to "Settled in the foundation review" and bind later phases that change these classes. The file headers
+have the details.
+
+| Jolt behavior | Decision |
+|---|---|
+| `CharacterVirtual::RestoreState` resizes `mActiveContacts`, the only allocation of a restore | `CharacterBase.restoreState` returns `Allocator.Error!void` (E2), also for Character. The Character tests and the harness slots call it with `try` |
+| CharacterVirtual gets no inner body when `CreateBody` / `CreateBodyWithID` returns null (out of bodies, an override ID that is out of range or taken); nothing asserts | The same in Zolt (E5). The scene `character_virtual_inner_body` has a character whose override ID is taken |
+| CharacterVirtual: `RestoreState` does not restore `mIsBackFacingContact`; a listener contact that is added twice in one tracking session gets `OnContactPersisted`; the `SolveConstraints` tie breaker orders by descending motion type (its comment says static first); `MoveToContact` matches contacts by body and sub shape only; `UpdateSupportingContact` solves its support test with a delta time of 1 | Reproduce exactly. The object state compares the stale back facing flag |
+| A Character without a body (out of bodies): `~Character` calls `DestroyBody` with the invalid ID, `GetCharacterSettings` dereferences the missing body | Undefined in Jolt. Zolt's destructor skips the invalid ID, `getCharacterSettings` panics with a message. The functions that go through the BodyInterface do nothing, as in Jolt |
+| `SkeletonMapper::Map` loops with a signed `j < size - 1`, so chains of 1 or 2 joints (added through the writable `GetChains`) work | The same in Zolt (`while (j + 1 < len)`; the first port overflowed). An empty chain panics: Jolt reads `front()` / `back()` of an empty array |
+| `SkeletalAnimation::Sample` asserts that the keyframe fraction is in [0, 1] | Unsorted keyframes are valid input: the binary search always ends on two keyframes that bracket the time. Only a NaN fraction (times near the end of the float range) breaks the assert, which Zolt checks in safe builds only |
+| `CreateRagdoll` stores the body of a part before it reads the parent's slot, so a joint that is its own parent connects its body with itself | The same in Zolt (the first port panicked). Zolt panics only for a parent index that is negative or greater than the joint's own: there Jolt reads outside its array or an uninitialized slot. Scene `ragdoll_self_parented_joint` |
+| `Ragdoll::DriveToPoseUsingMotors` sets the motor states and targets but does not activate the bodies | Reproduce: the motors do not wake a sleeping ragdoll. `ragdoll_motors_animation` activates its hanging ragdoll every tenth update |
+| `WheeledVehicleController::PostCollide` allocates its arrays and matrices on every step, and the pivots of GaussianElimination are a `JPH_STACK_ALLOC(n)`: there is no limit on the number of differentials | No limit in Zolt either. The scratch for D differentials (at most 2 * D driven wheels, a matrix of 2 * D + 1 rows and columns, 2 * D + 1 pivots) is allocated with the controller, and `gaussianElimination` takes the caller's pivot buffer (`opts.ipiv`). The first port had a fixed buffer of 256 pivots, which 128 differentials with two wheels each overflowed |
+| The writable `GetDifferentials()` returns the array, so the number of differentials can change between steps | `getDifferentialsMut()` returns a slice: values only. The Zolt function `setDifferentials` replaces the differentials on the user thread. It allocates the new array and scratch first, so a failure keeps the old ones. Harness operation 563 `wheeled_set_differentials` |
+| The writable `VehicleConstraint::GetWheels()` returns the array | `getWheelsMut()` returns a slice: the number of wheels is fixed at creation, because the body ID buffer of BuildIslands (`body_ids_scratch`, wheels + 1) is allocated with the constraint |
+| `VehicleConstraint::IsActive` reads `mIsActive`, which OnStep computes and SaveState does not save; OnStep sets the gravity factor of the vehicle body to 0 while the gravity override is on | Reproduce: a restore keeps the `is_active` of the restoring constraint |
+| `MotorcycleController::GetSettings` assigns `mLeanSpringDamping` to itself | Reproduce: the returned settings have the default damping of 1000. VehiclePartsParity compares the GetSettings bytes |
+| `MotorcycleController::SaveState` / `RestoreState` cover only `mTargetLean`, not the integrated lean angle or `mAppliedImpulse` | Reproduce. A restore keeps the integrated angle of the restoring controller, so a restored run with an integration coefficient other than 0 diverges, in Jolt too. Scenes with restores or sweeps keep the coefficient at 0. The two integration scenes run without sweeps (`sweep_stride = 0`) and without restores |
+| A tracked vehicle wheel in no track keeps `mTrackIndex = -1`, and Jolt indexes `mTracks[-1]` | Undefined in Jolt. Zolt's safe builds panic in the index cast; ReleaseFast stays undefined, as in C++. The same for track wheel indices and driven wheels outside the wheels. The scenes put every wheel in a track |
+| `VehicleTrackSettings::mDrivenWheel` is uninitialized (foundation review: Zolt defaults it to 0) | The C++ reference helpers set it to 0, so both sides start equal |
+| The determinism log of `MotorcycleController::PreCollide` uses the label `WheeledVehicleController::PreCollide: mTargetLean: ` | Zolt keeps Jolt's string |
+
+**Zolt error paths that change the order of Jolt's steps.** A failed call changes nothing. A successful call gives
+Jolt's result:
+- `Ragdoll.addToPhysicsSystem` adds the constraints between `addBodiesPrepare` and `addBodiesFinalize` (Jolt:
+  AddBodiesFinalize, then AddConstraints), so that a failure can abort the prepared bodies. The constraint manager does
+  not read the bodies, and the constraints get Jolt's indices. During the call another thread may see the constraints
+  before the bodies are in the broad phase. Jolt's call has an in-between state too, so the review accepted the order.
+- `RagdollSettings.createRagdoll` stores the ID of a new body right after its creation (Jolt: after its constraint),
+  so that a failing constraint creation destroys that body too.
+- `RagdollSettings.stabilize` calculates the mass properties before it changes the first part.
+  `disableParentChildCollisions` creates the shapes of the parts before it assigns the group filter.
+- `Character.setShape` sets the shape of the body before the character's (Jolt: the character's first; the reference
+  counts end the same). `Character.setLayer` restores the character's layer when the broad phase fails.
+- CharacterVirtual enters a contact in the listener bookkeeping before its `OnContactAdded` callback. The listener
+  cannot see the order, and the bookkeeping keeps Jolt's iteration order.
+
+**Undefined behavior in Jolt that Zolt does not reproduce.** Zolt panics with a message, also in optimized builds,
+unless noted:
+- Skeleton: an animated joint that is not in the pose's skeleton or has no keyframes, a pose without a skeleton,
+  LockAllTranslations before Initialize, Map with a locked joint that has no parent (Jolt reads index -1).
+- Ragdoll: a null skeleton, null ragdoll settings or a null additional constraint, a body that cannot be locked. A
+  pose of a ragdoll without bodies gets a zero root offset (Jolt: uninitialized).
+- CharacterVirtual: FinishTrackingContactChanges skips an untracked active contact, where Jolt writes through an
+  `end()` iterator. A restored motion type byte that is not valid becomes Static (no panic in either case).
+- Vehicles: no controller settings, a null wheel settings `Ref`, OnStep without a collision tester.
+
+**Harness rules.**
+- **Broad phase layout.** A CharacterVirtual query gets its hits in the order in which the quad tree returns bodies.
+  Jolt keeps the first of equal hits (ContactCastCollector), calls OnContactValidate / OnAdjustBodyVelocity in hit
+  order and reduces the hits at `mMaxNumHits` in hit order. So the results depend on the layout of the broad phase
+  trees, in Jolt too, and the layout is not part of the saved state. The D12 sweeps fail Zolt updates and restore the
+  saved state, while the C++ side runs each update once. The failed updates change the Zolt trees: without a fix,
+  `character_virtual_characters` and `character_virtual_crowd` differ after a sweep.
+  - Scenes with `SceneEntry.restore_broad_phase` capture the Zolt broad phase with the snapshot of a swept update
+    (`BroadPhaseSnapshot` in SimulationParity.zig: the node pages, the free list, the tracking, the trees and the next
+    tree to update). After the sweeps the driver restores both and runs the update once more. This leaves the trees of
+    the C++ update.
+  - This is a harness rule, not a library deviation. Zolt builds its trees as Jolt does, so the same updates give the
+    same trees. Only the failure injection gives Zolt updates that the C++ side never ran. The C++ side is unchanged.
+  - Every CharacterVirtual scene with sweeps sets it. The physics scenes keep the free running layout: they show that
+    the physics pipeline does not depend on it.
+- **Character records.** The CharacterContactListener records are compared one by one in call order, not sorted
+  (section 3), after every update and after the sweeps.
+- **An active body for the sweeps.** PhysicsSystem.update allocates nothing without an active body. Scenes without one
+  get a kinematic bystander that never sleeps (`addBystander`), so that the sweeps and the broad phase restore have
+  work to do.
+- **What the driver does not sweep.** The D12 sweeps cover the scene creation and `PhysicsSystem.update`. The object
+  operations between the updates (the CharacterVirtual queries, the ragdoll and vehicle calls) are swept by the inline
+  tests of the classes. Three scenes run without sweeps: `perf_character_virtual` (like the other `perf_*` scenes) and
+  the two motorcycle lean integration scenes.
+- **Teardown.** The `destroyAll` of a slot must not allocate. `ZoltWorld.destroy` removes the body activation listener
+  before it removes the Phase 7 objects: a teardown record whose allocation fails would show up in the creation sweep
+  as a swallowed `error.OutOfMemory`.
+- **Spawned jobs.** Whether a FindCollisions job is spawned from inside a job depends on the scheduling
+  (`contacts_many_bodies` in ReleaseFast on a loaded machine). When no run of the thread matrix spawned one,
+  `observeSpawnedJobs` runs the scene again on the Zolt side alone, with 3 and 7 workers in turn, up to 10 times, until
+  one does.
+- **Asserting reference.** New scenes are checked against an asserting reference (`zig build parity
+  -Dreference_asserts=true`, see the rules in the SimScenes header). The groups found no Jolt assert in their scenes.
+- **Known gap.** `SimShape` has no materials, so the ground material of a character is only compared as the default
+  material.

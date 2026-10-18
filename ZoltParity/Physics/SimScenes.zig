@@ -1149,7 +1149,7 @@ pub fn characterIdSequence(first: u32) [character_id_sequence_len]u32 {
 pub const Phase7OpRange = enum(u32) {
     /// Character (400..429, 424..429 free)
     character = 400,
-    /// CharacterVirtual and CharacterVsCharacterCollisionSimple (430..489, 468..489 free)
+    /// CharacterVirtual and CharacterVsCharacterCollisionSimple (430..489, 471..489 free)
     character_virtual = 430,
     /// Ragdoll (490..519, 511..519 free)
     ragdoll = 490,
