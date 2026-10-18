@@ -390,8 +390,8 @@ def render_serialization(status):
     counts = {k: sum(1 for _, _, s in status if s == k) for k in SERIALIZATION_ICON}
     out.append(f"Jolt's {len(status)} serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes")
     out.append("of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see")
-    out.append("[SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and")
-    out.append(f"every class that reaches one. ✅ {counts['declared']} declared · 🟡 {counts['pending']} pending "
+    out.append("[SerializationArchitecture.md](SerializationArchitecture.md) S18). `port_status.py --check` and the parity harness")
+    out.append(f"fail on a pending or undeclared class. ✅ {counts['declared']} declared · 🟡 {counts['pending']} pending "
                f"(`serialization_pending`) · ❌ {counts['missing']} not declared")
     out.append("")
     out.append("<details><summary>Serializable classes</summary>")

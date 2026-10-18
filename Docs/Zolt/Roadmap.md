@@ -70,9 +70,9 @@ Prefetch, plus five groups ported in parallel:
   STLTempAllocator, STLLocalAllocator (as `std.mem.Allocator` adapters), ByteBuffer, StridedPtr.
 - Misc: StringTools, TickCounter, FPControlWord, FPFlushDenormals, StreamIn/StreamOut/StreamWrapper
   (over std.Io.Reader/Writer), LinearCurve, ConfigurationString.
-Partial: `Core.zig` (only what ported code needs) and LinearCurve (its ObjectStream serialization comes
-with Phase 8). Deferred: Profiler (developer tooling, compiled out in the Distribution configuration),
-RTTI, Factory and StreamUtils (serialization support, ported with ObjectStream in Phase 8).
+Partial: `Core.zig` (only what ported code needs). Deferred: Profiler (developer tooling, compiled out in
+the Distribution configuration). RTTI, Factory, StreamUtils and the ObjectStream declarations of LinearCurve
+came with Phase 8.
 **Milestone M2:** `UnitTests/Core` passes, including JobSystemTest. ✅ Reached: all of `UnitTests/Core`
 passes in both precisions. Parity tests against the C++ library cover the sorts, BinaryHeap, the hashes,
 Mt19937, the hash containers, FixedSizeFreeList, LockFreeHashMap, MutexArray, Semaphore, the streams,
@@ -177,7 +177,8 @@ exceeded:
 Fixed, Point, Distance, Hinge, Slider, Cone, SwingTwist, SixDOF, Path (+ PathConstraintPath,
 Hermite), Gear, RackAndPinion, Pulley. MotorSettings, SpringSettings, every ConstraintPart and
 CalculateSolverSteps were ported in Phase 5. The concrete classes declare `overrides` (D8). Their
-settings types go into a comptime `constraint_settings_types` list until the Phase 8 Factory.
+settings types went into a comptime `constraint_settings_types` list; Phase 8 replaced it with
+`RegisterTypes.factory`.
 **Milestone M7:** the constraint unit tests and the constraint cases of PhysicsTests pass. The
 simulation parity scene `constraints_chain`, and the constraint part of the PhysicsScene parity, run
 bit exact. (The HighSpeed and ConvexVsMesh hashes already match since M6.) ✅ Reached and exceeded:
@@ -226,22 +227,56 @@ Design, groups and harness plan: [CharacterVehicleArchitecture.md](CharacterVehi
   documented before the merges. A last audit of the merged phase against the Jolt headers found no missing API. It
   found one more Zolt-only bug (`createRagdoll` read its settings after releasing them when out of bodies) and doc
   errors, which are fixed.
-- The Ragdoll hash stays M9: PerformanceTest's RagdollScene loads `Assets/Human.tof` through ObjectStream (Phase 8).
+- The Ragdoll hash stayed M9: PerformanceTest's RagdollScene loads `Assets/Human.tof` through ObjectStream (Phase 8).
   The Ragdoll class itself is complete and compared.
 - Settled points, the Jolt bugs that are reproduced on purpose and the harness rules:
   [CharacterVehicleArchitecture.md](CharacterVehicleArchitecture.md), section 6.
 
-### Phase 8: ObjectStream and serialization (`Jolt/ObjectStream`)
-RTTI, Factory, SerializableObject, ObjectStreamIn/Out (text and binary), TypeDeclarations,
-`SaveBinaryState` / `sRestoreFromBinaryState` of shapes, constraints and settings. Prefer comptime
-reflection over Jolt's macro-generated RTTI tables, but keep the file formats identical so that
-`Assets/*.tof` / `*.bof` load.
+### Phase 8: ObjectStream and serialization (`Jolt/ObjectStream`) ✅
+RTTI, Factory, StreamUtils, SerializableObject, ObjectStreamIn/Out (text and binary), TypeDeclarations and
+the serializable declarations of every class. Each class declares its stream schema next to its fields, with
+Jolt's names, order and aliases (SerializationArchitecture S5). Reflection over all fields was rejected (its
+section 9). The file formats are Jolt's, so `Assets/*.tof` / `*.bof` load.
 Design, groups and harness plan: [SerializationArchitecture.md](SerializationArchitecture.md).
-**Milestone M9:** **Ragdoll** hash matches → all 5 determinism hashes match. The port is exact.
+**Milestone M9:** **Ragdoll** hash matches → all 5 determinism hashes match. The port is exact. ✅ Reached:
+- `Jolt/ObjectStream` (14 files), RTTI, Factory and StreamUtils are complete, and so is the port of
+  ObjectStreamTest. All 81 serializable classes outside SoftBody and Hair are declared, in 64 Zig files, and
+  RegisterTypes has Jolt's Factory (`RegisterTypes.factory`). Every restore by RTTI hash goes through it.
+- ZoltPerformanceTest runs PerformanceTest's Ragdoll scene, which loads `Assets/Human.tof`,
+  `Assets/Human/dead_pose1.tof` and `Assets/terrain2.bof` through ObjectStreamIn. With `-q=LinearCast` it gives
+  Jolt's hashes `0x3be6ea76c07a2ac8` (single precision) and `0x8dd6bc501859a228` (double precision), with
+  `-t=max`, `-t=1` and `-t=2`. Zolt's CI checks them. First it runs the C++ PerformanceTest of the parity reference
+  (`zig build jolt-performance-test`), which must give the same hashes.
+- All 5 determinism hashes of `determinism_check.yml` now match, in both precisions and with 1, 2 and all
+  threads.
+- The parity layers P1 to P10 compare Zolt with the C++ library built with `JPH_OBJECT_STREAM`, in both
+  precisions: the schema of every class and the IsKindOf matrix, the defaults, random streams, old schemas,
+  truncated streams, more than 10^5 number words, the three assets, the object of ObjectStreamTest, the
+  existing binary state parity, and `perf_ragdoll` (the loaded Ragdoll scene and its first updates in a thread
+  matrix).
+- The Zolt-only sweeps Z1 to Z4 write and read every creatable class, fail allocations, read truncated streams
+  and mutate them: no leak, no crash. Zolt-only tests pin Zolt's defined behavior where Jolt is undefined (D1
+  to D17).
+- During the groups, the parity found one result difference in library code: the number parser read words just
+  below the smallest normal number, which glibc rejects (P6). The tests and reviews of the groups found a double
+  free when a writer fails, a stack overflow on a class that contains itself, stream values that reach undefined
+  behavior (the constraint step overrides), a C++ harness that ran without its allocation hooks, and doc
+  errors. Each was fixed before the merge.
+- A last audit of the merged phase against the Jolt sources confirmed 37 findings. Among them were Jolt
+  behaviors on input that no generator produces (class names with a NUL, a second write on one stream, string
+  lengths above 4 GB), a class that uses its parent's RTTI written from the wrong address, abstract classes that
+  could not be destroyed, a main object of a derived class freed with the wrong size (D17), missing compile
+  checks, and a harness and a CI check that let a pending class pass. Each was fixed or documented.
+- Phase 9 boundary: the SoftBody and Hair schemas (SoftBodyCreationSettings, SoftBodySharedSettings with its 11
+  nested classes, the 10 Hair classes) and `PhysicsScene.mSoftBodies`. A scene stream with soft bodies fails to
+  read until then.
+- Settled points, the Jolt bugs that are reproduced on purpose and the harness rules:
+  [SerializationArchitecture.md](SerializationArchitecture.md), sections 11 and 12.
 
 ### Phase 9: Remaining features
-SoftBody, Hair (CPU path), debug renderer interface (`Jolt/Renderer`, behind a build option),
-`ConfigurationString`, remaining unit tests (all of `UnitTests/` ported).
+SoftBody (with its ObjectStream schemas and `PhysicsScene.mSoftBodies`), Hair (CPU path, with its schemas),
+debug renderer interface (`Jolt/Renderer`, behind a build option), remaining unit tests (all of `UnitTests/`
+ported).
 **Milestone M10:** 100% of `UnitTests/` ported and passing.
 
 ### Deferred / out of scope for now
