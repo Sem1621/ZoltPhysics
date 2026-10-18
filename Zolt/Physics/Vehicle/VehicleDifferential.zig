@@ -9,13 +9,20 @@
 //!   build computes.
 
 const std = @import("std");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 
 pub const VehicleDifferentialSettings = extern struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, VehicleDifferentialSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleDifferentialSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleDifferentialSettings",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// Index (in mWheels) that represents the left wheel of this differential (can be -1 to indicate no wheel)
     left_wheel: i32 = -1,

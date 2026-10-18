@@ -16,7 +16,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 90% | 37 | 4 | 0 | 0 | 12 | 2 | 6645 |
+| `Jolt/Core` | 90% | 38 | 4 | 0 | 0 | 12 | 1 | 6785 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 88% | 13 | 1 | 0 | 0 | 0 | 0 | 2841 |
@@ -143,7 +143,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `StaticArray.h` | 271 | ✅ complete | `Zolt/Core/StaticArray.zig` |
 | `StreamIn.h` | 103 | ✅ complete | `Zolt/Core/StreamIn.zig` |
 | `StreamOut.h` | 82 | ✅ complete | `Zolt/Core/StreamOut.zig` |
-| `StreamUtils.h` | 140 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
+| `StreamUtils.h` | 140 | ✅ complete | `Zolt/Core/StreamUtils.zig` |
 | `StreamWrapper.h` | 39 | ✅ complete | `Zolt/Core/StreamWrapper.zig` |
 | `StridedPtr.h` | 50 | ✅ complete | `Zolt/Core/StridedPtr.zig` |
 | `StringTools.cpp`, `StringTools.h` | 107 | ✅ complete | `Zolt/Core/StringTools.zig` |

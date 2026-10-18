@@ -396,7 +396,9 @@ def main():
         if stale:
             print("Docs/Zolt/Progress.md is stale, run: python3 tools/port_status.py --write", file=sys.stderr)
         untidy = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "tidy_registry.py"), "--check"]).returncode != 0
-        if stale or lint or untidy:
+        # The RTTI declarations against Jolt's sCreateRTTI blocks (SerializationArchitecture.md section 4, F2)
+        undeclared = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_serializable.py"), "--check"]).returncode != 0
+        if stale or lint or untidy or undeclared:
             sys.exit(1)
 
 

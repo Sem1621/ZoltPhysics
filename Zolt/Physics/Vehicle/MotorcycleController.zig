@@ -1,11 +1,12 @@
 //! Port of: Jolt/Physics/Vehicle/MotorcycleController.h, Jolt/Physics/Vehicle/MotorcycleController.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings): `rtti`, its
+//!   attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
+//!   ported).
 //!   JPH_DEBUG_RENDERER (`Draw`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2: `MotorcycleControllerSettings` embeds `base: WheeledVehicleControllerSettings`
-//!   (`rtti_name`, the settings class of `RegisterTypes.vehicle_controller_settings_types`, E3), `MotorcycleController`
+//!   (`rtti`, a class of `RegisterTypes.factory`, E3), `MotorcycleController`
 //!   embeds `base: WheeledVehicleController`: a level under the wheeled classes, built with their `initDerived`. Jolt's
 //!   `WheeledVehicleController::PreCollide(...)` / `WheeledVehicleControllerSettings::SaveBinaryState(...)` are the
 //!   static calls `self.base.preCollide(...)` / `self.base.saveBinaryState(...)`. The overrides that the motorcycle does
@@ -24,6 +25,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const virtual = @import("../../Core/Virtual.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -47,10 +49,15 @@ const WheelWV = WheeledVehicleControllerFile.WheelWV;
 /// Settings of a two wheeled motorcycle (adds a spring to balance the motorcycle)
 /// Note: The motor cycle controller is still in development and may need a lot of tweaks/hacks to work properly!
 pub const MotorcycleControllerSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, MotorcycleControllerSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "MotorcycleControllerSettings",
+        .kind = .virtual,
+        .bases = &.{WheeledVehicleControllerSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "MotorcycleControllerSettings";
     pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
 
     base: WheeledVehicleControllerSettings,
@@ -706,7 +713,7 @@ test "MotorcycleControllerSettings defaults, RTTI hash and binary state" {
     try testing.expectEqual(@as(f32, 0.8), settings.lean_smoothing_factor);
     try testing.expectEqual(@as(usize, 5), settings.base.transmission.gear_ratios.items.len); // The wheeled defaults
     try testing.expectEqual(@as(f32, 1.4), settings.base.differential_limited_slip_ratio);
-    try testing.expectEqual(VehicleControllerSettings.rttiHash("MotorcycleControllerSettings"), settings.base.base.getRTTIHash());
+    try testing.expectEqual(RTTI.hashName("MotorcycleControllerSettings"), settings.base.base.getRTTIHash());
     try testing.expect(settings.asControllerSettingsConst() == &settings.base.base);
 
     // The binary state (through the base class): the wheeled settings, then the six lean members
@@ -774,7 +781,7 @@ test "MotorcycleControllerSettings restored by VehicleConstraintSettings from it
     defer result.deinit();
     try testing.expect(!result.hasError());
     const restored = virtual.downcast(VehicleConstraintSettings, result.get().get().?).controller.ptr.?;
-    try testing.expectEqualStrings("MotorcycleControllerSettings", restored.vtable.rtti_name);
+    try testing.expectEqualStrings("MotorcycleControllerSettings", restored.vtable.rtti.name);
     try testing.expectEqual(@as(f32, 4321.0), virtual.downcast(MotorcycleControllerSettings, restored).lean_spring_constant);
 }
 
@@ -941,7 +948,7 @@ test "MotorcycleController getters, setters, settings and state" {
     c.base.setDifferentialLimitedSlipRatio(1.7);
     var settings = try constraint.getController().getSettings();
     defer settings.deinit();
-    try testing.expectEqualStrings("MotorcycleControllerSettings", settings.get().?.vtable.rtti_name);
+    try testing.expectEqualStrings("MotorcycleControllerSettings", settings.get().?.vtable.rtti.name);
     const motorcycle = virtual.downcast(MotorcycleControllerSettings, settings.get().?);
     try testing.expectEqual(@as(f32, 6000.0), motorcycle.lean_spring_constant);
     try testing.expectEqual(@as(f32, 1000.0), motorcycle.lean_spring_damping);

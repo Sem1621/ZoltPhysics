@@ -543,7 +543,7 @@ fn createGroupFilterTable(n: u32, ops: []const u32) !*GroupFilterTable {
 /// must pass the groups in the right order. Must match OrderedGroupFilter in FiltersReference.cpp.
 const OrderedGroupFilter = struct {
     pub const overrides = .{.canCollide};
-    pub const rtti_name = "OrderedGroupFilter";
+    pub const rtti = GroupFilter.rtti; // No JPH_RTTI of its own (like the C++ class)
 
     base: GroupFilter,
 
@@ -741,7 +741,7 @@ test "CollisionGroup / GroupFilterTable binary state parity" {
     {
         var j: [2]u32 = undefined;
         jolt.jolt_group_filter_rtti_hashes(&j);
-        rtti.check("rtti", [2]u32{ GroupFilter.rttiHash("GroupFilter"), GroupFilter.rttiHash(GroupFilterTable.rtti_name) }, j);
+        rtti.check("rtti", [2]u32{ zolt.RTTI.hashName("GroupFilter"), GroupFilterTable.rtti.hash }, j);
     }
 
     // GroupFilterTable: save (the table or a copy of it), then restore from intact, truncated or corrupted bytes

@@ -11,9 +11,8 @@
 //!   `RefConst<TwoBodyConstraintSettings>`; a concrete class has no addRef / release of its own, guide section 5),
 //!   `getSettings()` returns the TwoBodyConstraintSettings.
 //! - The constraints of a restored scene are created by ConstraintSettings.restoreFromBinaryState, which knows the
-//!   classes in `RegisterTypes.constraint_settings_types` (until the Factory of Phase 8): Jolt's settings classes that
-//!   are ported (FixedConstraintSettings, PointConstraintSettings, ...) and user / test constraint settings; a stub
-//!   class or an unknown type gives Jolt's "Failed to create instance of type".
+//!   classes of `RegisterTypes.factory`: Jolt's settings classes and the user's. An unknown type gives Jolt's "Failed
+//!   to create instance of type".
 //! - Soft bodies (Phase 9): `saveBinaryState` writes Jolt's soft body count (always 0), `restoreFromBinaryState`
 //!   reports the Zolt error "Soft bodies are not supported" for a stream that contains soft bodies.
 //! - Errors (Zolt): functions that allocate return `Allocator.Error`. Where Jolt dereferences the null shape of a body
@@ -28,6 +27,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../Core/RTTI.zig").RTTI;
 const Core = @import("../Core/Core.zig");
 const virtual = @import("../Core/Virtual.zig");
 const ReferenceFile = @import("../Core/Reference.zig");
@@ -55,14 +55,26 @@ const PhysicsSystem = @import("PhysicsSystem.zig").PhysicsSystem;
 
 /// Contains the creation settings of a set of bodies
 pub const PhysicsScene = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, PhysicsScene)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PhysicsScene)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PhysicsScene",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// Body constant to use to indicate that the constraint is attached to the fixed world
     pub const fixed_to_world: u32 = 0xffffffff;
 
     /// A constraint and how it is connected to the bodies in the scene
     pub const ConnectedConstraint = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, ConnectedConstraint)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PhysicsScene::ConnectedConstraint)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "PhysicsScene::ConnectedConstraint",
+            .kind = .non_virtual,
+        });
+        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+        pub const serialization_pending = true;
 
         /// Constraint settings (a TwoBodyConstraintSettings, see `getSettings`)
         settings: RefConst(ConstraintSettings) = .empty,
@@ -117,6 +129,9 @@ pub const PhysicsScene = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new PhysicsScene (RTTI create)
+    pub const createDefault = create;
 
     /// Destructor: releases the references of the bodies and constraints and frees the arrays
     pub fn deinit(self: *PhysicsScene) void {
@@ -462,16 +477,10 @@ pub const PhysicsScene = struct {
         }
     }
 
-    /// Jolt's StaticCast<TwoBodyConstraintSettings> asserts the RTTI: true when `settings` is one of the registered
-    /// constraint settings classes that derive from TwoBodyConstraintSettings
+    /// Jolt's StaticCast<TwoBodyConstraintSettings> asserts the RTTI: true when the class of `settings` derives from
+    /// TwoBodyConstraintSettings
     fn isTwoBodyConstraintSettings(settings: *const ConstraintSettings) bool {
-        const hash = settings.getRTTIHash();
-        inline for (ConstraintSettings.constraint_settings_types) |T| {
-            if (comptime virtual.isDerivedFrom(T, TwoBodyConstraintSettings)) {
-                if (hash == comptime ConstraintSettings.rttiHash(T.rtti_name)) return true;
-            }
-        }
-        return false;
+        return settings.vtable.rtti.isKindOf(TwoBodyConstraintSettings.rtti);
     }
 
     fn releaseList(allocator: Allocator, list: anytype) void {

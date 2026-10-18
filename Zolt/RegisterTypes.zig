@@ -10,58 +10,76 @@
 //!   stub). Shape porters never edit this list.
 //! - `registry` = `Registry.build(registration_order ++ user registrations)`: later registrations override earlier
 //!   ones exactly like in Jolt (`Registry.build` runs CollisionDispatch::sInit first).
+//! - `factory_types` lists the types of RegisterTypes.cpp in Jolt's order (`const RTTI *types[]`), without
+//!   SoftBodyCreationSettings (Phase 9). `factory` = `Factory.init(factory_types ++ user serializable types)` is
+//!   `Factory::sInstance` after RegisterTypes() (Docs/Zolt/SerializationArchitecture.md S8).
 //! - User shapes (User1..8, UserConvex1..8), a replacement for the default material (Jolt: "If you implement your own
-//!   default material (PhysicsMaterial::sDefault) make sure to initialize it before this function") and user material
-//!   types come from the module `zolt_user_types`. build.zig wires an empty default module; an application replaces it
-//!   with `zolt_module.addImport("zolt_user_types", my_module)` (a module import cycle, which Zig allows). The module
-//!   may declare:
+//!   default material (PhysicsMaterial::sDefault) make sure to initialize it before this function") and user
+//!   serializable classes come from the module `zolt_user_types`. build.zig wires an empty default module; an
+//!   application replaces it with `zolt_module.addImport("zolt_user_types", my_module)` (a module import cycle, which Zig
+//!   allows). The module may declare:
 //!   - `registrations`: a tuple of types with `pub fn register(comptime r: *zolt.CollisionDispatch.Registry) void`,
 //!     run after Jolt's registrations (so they override them);
 //!   - `default_material: *const zolt.PhysicsMaterial` (a static material, see PhysicsMaterial.initStatic);
-//!   - `material_types`: a tuple of material classes that PhysicsMaterial.restoreFromBinaryState can create;
-//!   - `group_filter_types`: a tuple of GroupFilter classes that GroupFilter.restoreFromBinaryState can create;
-//!   - `constraint_settings_types`: a tuple of ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState
-//!     can create;
-//!   - `path_constraint_path_types`: a tuple of PathConstraintPath classes that PathConstraintPath.restoreFromBinaryState
-//!     can create;
-//!   - `vehicle_controller_settings_types`: a tuple of VehicleControllerSettings classes that
-//!     VehicleConstraintSettings.restoreBinaryState can create.
+//!   - `serializable_types`: a tuple of classes with an RTTI (`pub const rtti`) that `factory` registers after Jolt's
+//!     (Jolt: `Factory::sInstance->Register(JPH_RTTI(MyClass))`). The binary state restores (StreamUtils.restoreObject)
+//!     and ObjectStreamIn create them.
 //!
 //! Not needed in Zolt: RegisterTypesInternal / UnregisterTypes (nothing to register or unregister at runtime) and
 //! VerifyJoltVersionID (Zig compiles the library together with the application, so the ABI cannot mismatch).
-//! TODO(serialization): the Factory registration of the RTTI types (`Factory::sInstance->Register(types, ...)`),
-//! with ObjectStream (Phase 8).
 
+const Factory = @import("Core/Factory.zig").Factory;
 const PhysicsMaterial = @import("Physics/Collision/PhysicsMaterial.zig").PhysicsMaterial;
 const PhysicsMaterialSimple = @import("Physics/Collision/PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+const GroupFilter = @import("Physics/Collision/GroupFilter.zig").GroupFilter;
 const GroupFilterTable = @import("Physics/Collision/GroupFilterTable.zig").GroupFilterTable;
 const Registry = @import("Physics/Collision/CollisionDispatch.zig").Registry;
-const BoxShape = @import("Physics/Collision/Shape/BoxShape.zig").BoxShape;
-const CapsuleShape = @import("Physics/Collision/Shape/CapsuleShape.zig").CapsuleShape;
-const CompoundShape = @import("Physics/Collision/Shape/CompoundShape.zig").CompoundShape;
-const ConvexHullShape = @import("Physics/Collision/Shape/ConvexHullShape.zig").ConvexHullShape;
+const BoxShapeFile = @import("Physics/Collision/Shape/BoxShape.zig");
+const CapsuleShapeFile = @import("Physics/Collision/Shape/CapsuleShape.zig");
+const CompoundShapeFile = @import("Physics/Collision/Shape/CompoundShape.zig");
+const ConvexHullShapeFile = @import("Physics/Collision/Shape/ConvexHullShape.zig");
+const CylinderShapeFile = @import("Physics/Collision/Shape/CylinderShape.zig");
+const EmptyShapeFile = @import("Physics/Collision/Shape/EmptyShape.zig");
+const HeightFieldShapeFile = @import("Physics/Collision/Shape/HeightFieldShape.zig");
+const MeshShapeFile = @import("Physics/Collision/Shape/MeshShape.zig");
+const MutableCompoundShapeFile = @import("Physics/Collision/Shape/MutableCompoundShape.zig");
+const OffsetCenterOfMassShapeFile = @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig");
+const PlaneShapeFile = @import("Physics/Collision/Shape/PlaneShape.zig");
+const RotatedTranslatedShapeFile = @import("Physics/Collision/Shape/RotatedTranslatedShape.zig");
+const ScaledShapeFile = @import("Physics/Collision/Shape/ScaledShape.zig");
+const SphereShapeFile = @import("Physics/Collision/Shape/SphereShape.zig");
+const StaticCompoundShapeFile = @import("Physics/Collision/Shape/StaticCompoundShape.zig");
+const TaperedCapsuleShapeFile = @import("Physics/Collision/Shape/TaperedCapsuleShape.zig");
+const TaperedCylinderShapeFile = @import("Physics/Collision/Shape/TaperedCylinderShape.zig");
+const TriangleShapeFile = @import("Physics/Collision/Shape/TriangleShape.zig");
+const BoxShape = BoxShapeFile.BoxShape;
+const CapsuleShape = CapsuleShapeFile.CapsuleShape;
+const CompoundShape = CompoundShapeFile.CompoundShape;
+const ConvexHullShape = ConvexHullShapeFile.ConvexHullShape;
 const ConvexShape = @import("Physics/Collision/Shape/ConvexShape.zig").ConvexShape;
-const CylinderShape = @import("Physics/Collision/Shape/CylinderShape.zig").CylinderShape;
-const EmptyShape = @import("Physics/Collision/Shape/EmptyShape.zig").EmptyShape;
-const HeightFieldShape = @import("Physics/Collision/Shape/HeightFieldShape.zig").HeightFieldShape;
-const MeshShape = @import("Physics/Collision/Shape/MeshShape.zig").MeshShape;
-const MutableCompoundShape = @import("Physics/Collision/Shape/MutableCompoundShape.zig").MutableCompoundShape;
-const OffsetCenterOfMassShape = @import("Physics/Collision/Shape/OffsetCenterOfMassShape.zig").OffsetCenterOfMassShape;
-const PlaneShape = @import("Physics/Collision/Shape/PlaneShape.zig").PlaneShape;
-const RotatedTranslatedShape = @import("Physics/Collision/Shape/RotatedTranslatedShape.zig").RotatedTranslatedShape;
-const ScaledShape = @import("Physics/Collision/Shape/ScaledShape.zig").ScaledShape;
-const SphereShape = @import("Physics/Collision/Shape/SphereShape.zig").SphereShape;
-const StaticCompoundShape = @import("Physics/Collision/Shape/StaticCompoundShape.zig").StaticCompoundShape;
-const TaperedCapsuleShape = @import("Physics/Collision/Shape/TaperedCapsuleShape.zig").TaperedCapsuleShape;
-const TaperedCylinderShape = @import("Physics/Collision/Shape/TaperedCylinderShape.zig").TaperedCylinderShape;
-const TriangleShape = @import("Physics/Collision/Shape/TriangleShape.zig").TriangleShape;
+const CylinderShape = CylinderShapeFile.CylinderShape;
+const EmptyShape = EmptyShapeFile.EmptyShape;
+const HeightFieldShape = HeightFieldShapeFile.HeightFieldShape;
+const MeshShape = MeshShapeFile.MeshShape;
+const MutableCompoundShape = MutableCompoundShapeFile.MutableCompoundShape;
+const OffsetCenterOfMassShape = OffsetCenterOfMassShapeFile.OffsetCenterOfMassShape;
+const PlaneShape = PlaneShapeFile.PlaneShape;
+const RotatedTranslatedShape = RotatedTranslatedShapeFile.RotatedTranslatedShape;
+const ScaledShape = ScaledShapeFile.ScaledShape;
+const SphereShape = SphereShapeFile.SphereShape;
+const StaticCompoundShape = StaticCompoundShapeFile.StaticCompoundShape;
+const TaperedCapsuleShape = TaperedCapsuleShapeFile.TaperedCapsuleShape;
+const TaperedCylinderShape = TaperedCylinderShapeFile.TaperedCylinderShape;
+const TriangleShape = TriangleShapeFile.TriangleShape;
 const SoftBodyShape = @import("Physics/SoftBody/SoftBodyShape.zig").SoftBodyShape;
 const ConeConstraintSettings = @import("Physics/Constraints/ConeConstraint.zig").ConeConstraintSettings;
 const DistanceConstraintSettings = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraintSettings;
 const FixedConstraintSettings = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraintSettings;
 const GearConstraintSettings = @import("Physics/Constraints/GearConstraint.zig").GearConstraintSettings;
 const HingeConstraintSettings = @import("Physics/Constraints/HingeConstraint.zig").HingeConstraintSettings;
+const MotorSettings = @import("Physics/Constraints/MotorSettings.zig").MotorSettings;
 const PathConstraintSettings = @import("Physics/Constraints/PathConstraint.zig").PathConstraintSettings;
+const PathConstraintPath = @import("Physics/Constraints/PathConstraintPath.zig").PathConstraintPath;
 const PathConstraintPathHermite = @import("Physics/Constraints/PathConstraintPathHermite.zig").PathConstraintPathHermite;
 const PointConstraintSettings = @import("Physics/Constraints/PointConstraint.zig").PointConstraintSettings;
 const PulleyConstraintSettings = @import("Physics/Constraints/PulleyConstraint.zig").PulleyConstraintSettings;
@@ -70,9 +88,14 @@ const SixDOFConstraintSettings = @import("Physics/Constraints/SixDOFConstraint.z
 const SliderConstraintSettings = @import("Physics/Constraints/SliderConstraint.zig").SliderConstraintSettings;
 const SwingTwistConstraintSettings = @import("Physics/Constraints/SwingTwistConstraint.zig").SwingTwistConstraintSettings;
 const VehicleConstraintSettings = @import("Physics/Vehicle/VehicleConstraint.zig").VehicleConstraintSettings;
-const WheeledVehicleControllerSettings = @import("Physics/Vehicle/WheeledVehicleController.zig").WheeledVehicleControllerSettings;
-const TrackedVehicleControllerSettings = @import("Physics/Vehicle/TrackedVehicleController.zig").TrackedVehicleControllerSettings;
+const WheeledVehicleControllerFile = @import("Physics/Vehicle/WheeledVehicleController.zig");
+const TrackedVehicleControllerFile = @import("Physics/Vehicle/TrackedVehicleController.zig");
 const MotorcycleControllerSettings = @import("Physics/Vehicle/MotorcycleController.zig").MotorcycleControllerSettings;
+const BodyCreationSettings = @import("Physics/Body/BodyCreationSettings.zig").BodyCreationSettings;
+const PhysicsScene = @import("Physics/PhysicsScene.zig").PhysicsScene;
+const RagdollSettings = @import("Physics/Ragdoll/Ragdoll.zig").RagdollSettings;
+const Skeleton = @import("Skeleton/Skeleton.zig").Skeleton;
+const SkeletalAnimation = @import("Skeleton/SkeletalAnimation.zig").SkeletalAnimation;
 
 /// The user types module (see the file comment), an empty module unless the application provides one
 pub const user_types = @import("zolt_user_types");
@@ -119,20 +142,29 @@ pub const registry: Registry = .build(registration_order ++ user_registrations);
 /// (`new PhysicsMaterialSimple("Default", Color::sGrey)`, a compile time constant here)
 pub const default_material: *const PhysicsMaterial = if (@hasDecl(user_types, "default_material")) user_types.default_material else &PhysicsMaterialSimple.default_material.base;
 
-/// The material classes that PhysicsMaterial.restoreFromBinaryState can create (the material part of the Factory
-/// registration, until the Factory of Phase 8): Jolt's PhysicsMaterial and PhysicsMaterialSimple plus the user's
-pub const material_types = .{ PhysicsMaterial, PhysicsMaterialSimple } ++ (if (@hasDecl(user_types, "material_types")) user_types.material_types else .{});
-
-/// The GroupFilter classes that GroupFilter.restoreFromBinaryState can create (the group filter part of the Factory
-/// registration, until the Factory of Phase 8): Jolt's GroupFilterTable plus the user's
-pub const group_filter_types = .{GroupFilterTable} ++ (if (@hasDecl(user_types, "group_filter_types")) user_types.group_filter_types else .{});
-
-/// The ConstraintSettings classes that ConstraintSettings.restoreFromBinaryState can create (the constraint part of the
-/// Factory registration, until the Factory of Phase 8): Jolt's settings classes in the order of RegisterTypes.cpp plus
-/// the user's. The classes that are still stubs declare `pub const is_stub = true`: restoreFromBinaryState
-/// skips them (their hash gives Jolt's "Failed to create instance of type", as for a type the Factory does not know), so
-/// a porter only removes the marker and never edits this list.
-pub const constraint_settings_types = .{
+/// Create list of all types (RegisterTypesInternal's `const RTTI *types[]`, without SoftBodyCreationSettings: Phase 9)
+pub const factory_types: []const type = &.{
+    SkeletalAnimation,
+    Skeleton,
+    CompoundShapeFile.CompoundShapeSettings,
+    StaticCompoundShapeFile.StaticCompoundShapeSettings,
+    MutableCompoundShapeFile.MutableCompoundShapeSettings,
+    TriangleShapeFile.TriangleShapeSettings,
+    PlaneShapeFile.PlaneShapeSettings,
+    SphereShapeFile.SphereShapeSettings,
+    BoxShapeFile.BoxShapeSettings,
+    CapsuleShapeFile.CapsuleShapeSettings,
+    TaperedCapsuleShapeFile.TaperedCapsuleShapeSettings,
+    CylinderShapeFile.CylinderShapeSettings,
+    TaperedCylinderShapeFile.TaperedCylinderShapeSettings,
+    ScaledShapeFile.ScaledShapeSettings,
+    MeshShapeFile.MeshShapeSettings,
+    ConvexHullShapeFile.ConvexHullShapeSettings,
+    HeightFieldShapeFile.HeightFieldShapeSettings,
+    RotatedTranslatedShapeFile.RotatedTranslatedShapeSettings,
+    OffsetCenterOfMassShapeFile.OffsetCenterOfMassShapeSettings,
+    EmptyShapeFile.EmptyShapeSettings,
+    RagdollSettings,
     PointConstraintSettings,
     SixDOFConstraintSettings,
     SliderConstraintSettings,
@@ -142,30 +174,49 @@ pub const constraint_settings_types = .{
     FixedConstraintSettings,
     ConeConstraintSettings,
     PathConstraintSettings,
-    VehicleConstraintSettings, // Phase 7 (Vehicle core group)
+    VehicleConstraintSettings,
+    WheeledVehicleControllerFile.WheeledVehicleControllerSettings,
+    WheeledVehicleControllerFile.WheelSettingsWV,
+    TrackedVehicleControllerFile.TrackedVehicleControllerSettings,
+    TrackedVehicleControllerFile.WheelSettingsTV,
+    MotorcycleControllerSettings,
+    PathConstraintPath,
+    PathConstraintPathHermite,
     RackAndPinionConstraintSettings,
     GearConstraintSettings,
     PulleyConstraintSettings,
-} ++ (if (@hasDecl(user_types, "constraint_settings_types")) user_types.constraint_settings_types else .{});
+    MotorSettings,
+    PhysicsScene,
+    PhysicsMaterial,
+    PhysicsMaterialSimple,
+    GroupFilter,
+    GroupFilterTable,
+    BodyCreationSettings,
+};
 
-/// The PathConstraintPath classes that PathConstraintPath.restoreFromBinaryState can create (the path part of the Factory
-/// registration, until the Factory of Phase 8): Jolt's PathConstraintPathHermite (PathConstraintPath itself is abstract)
-/// plus the user's (`path_constraint_path_types` of `zolt_user_types`). A stub declares `is_stub` (see above).
-pub const path_constraint_path_types = .{PathConstraintPathHermite} ++ (if (@hasDecl(user_types, "path_constraint_path_types")) user_types.path_constraint_path_types else .{});
+/// The serializable classes of the user (`serializable_types` of the user types module)
+pub const user_serializable_types: []const type = if (@hasDecl(user_types, "serializable_types")) typeList(user_types.serializable_types) else &.{};
 
-/// The VehicleControllerSettings classes that VehicleConstraintSettings.restoreBinaryState can create from the RTTI hash
-/// of its controller (`Factory::sInstance->Find(hash)`, the vehicle part of the Factory registration until the Factory of
-/// Phase 8, CharacterVehicleArchitecture E3): Jolt's controller settings classes in the order of RegisterTypes.cpp plus
-/// the user's (`vehicle_controller_settings_types` of `zolt_user_types`). Each one declares `rtti_name` and
-/// `createDefault(allocator) Allocator.Error!*T`. A class that is still a stub declares `is_stub`: the restore skips it
-/// (its hash is unknown, which panics like Jolt's null dereference, see VehicleConstraint.zig).
-pub const vehicle_controller_settings_types = .{
-    WheeledVehicleControllerSettings,
-    TrackedVehicleControllerSettings, // Phase 7 (Vehicle variants group)
-    MotorcycleControllerSettings, // Phase 7 (Vehicle variants group)
-} ++ (if (@hasDecl(user_types, "vehicle_controller_settings_types")) user_types.vehicle_controller_settings_types else .{});
+/// Factory::sInstance after RegisterTypes(): Jolt's types, then the user's
+pub const factory: Factory = .init(factory_types ++ user_serializable_types);
 
-test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
+comptime {
+    // The lists of the binary state restores before the Factory existed (removed without a transition period,
+    // SerializationArchitecture.md section 11)
+    for ([_][]const u8{ "material_types", "group_filter_types", "constraint_settings_types", "path_constraint_path_types", "vehicle_controller_settings_types" }) |name| {
+        if (@hasDecl(user_types, name))
+            @compileError("zolt_user_types." ++ name ++ " is no longer used: list the classes in `pub const serializable_types` (RegisterTypes.factory, Docs/Zolt/SerializationArchitecture.md S9)");
+    }
+}
+
+/// A tuple, an array or a slice of types as a slice
+fn typeList(comptime types: anytype) []const type {
+    var list: []const type = &.{};
+    for (types) |T| list = list ++ &[_]type{T};
+    return list;
+}
+
+test "RegisterTypes: Jolt's registration order, the user hook and the default material" {
     const std = @import("std");
     const testing = std.testing;
     const CollisionDispatch = @import("Physics/Collision/CollisionDispatch.zig");
@@ -199,56 +250,70 @@ test "RegisterTypes: Jolt's registration order, the user hook, the default mater
     try testing.expect(overridden.getCollideShape(.user1, .user1) == &CollisionDispatch.reversedCollideShape);
     try testing.expect(overridden.shape_functions[@intFromEnum(@import("Physics/Collision/Shape/Shape.zig").ShapeSubType.user1)].construct == null);
 
-    // The default material is Jolt's (the tests do not replace it), user material types are added to Jolt's
+    // The default material is Jolt's (the tests do not replace it)
     try testing.expect(default_material == &PhysicsMaterialSimple.default_material.base);
     try testing.expect(PhysicsMaterial.default == default_material);
     try testing.expectEqualStrings("Default", default_material.getDebugName());
-    try testing.expectEqual(@as(usize, 3), material_types.len);
-    try testing.expect(material_types[0] == PhysicsMaterial and material_types[1] == PhysicsMaterialSimple and material_types[2] == TestShapes.TestMaterial);
 }
 
-test "RegisterTypes: the constraint settings and path classes in Jolt's order, stubs are marked" {
+test "RegisterTypes: the factory has Jolt's types in Jolt's order, then the user's" {
     const std = @import("std");
     const testing = std.testing;
+    const RTTI = @import("Core/RTTI.zig").RTTI;
+    const TestShapes = @import("Physics/Collision/Shape/TestShapes.zig");
     const TestConstraints = @import("Physics/Constraints/TestConstraints.zig");
-    const ConstraintSettings = @import("Physics/Constraints/Constraint.zig").ConstraintSettings;
 
-    // RegisterTypesInternal's order of the constraint settings, then the user's (the inline tests register
-    // TestConstraintSettings through zolt_user_types)
-    const expected = [_][]const u8{ "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "VehicleConstraintSettings", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "TestConstraintSettings" };
-    try testing.expectEqual(expected.len, constraint_settings_types.len);
-    inline for (constraint_settings_types, expected) |T, name| {
-        try testing.expectEqualStrings(name, T.rtti_name);
-        try testing.expect(std.mem.endsWith(u8, @typeName(T), "." ++ name));
+    // RegisterTypesInternal's `types[]` without SoftBodyCreationSettings (Phase 9)
+    const expected = [_][]const u8{ "SkeletalAnimation", "Skeleton", "CompoundShapeSettings", "StaticCompoundShapeSettings", "MutableCompoundShapeSettings", "TriangleShapeSettings", "PlaneShapeSettings", "SphereShapeSettings", "BoxShapeSettings", "CapsuleShapeSettings", "TaperedCapsuleShapeSettings", "CylinderShapeSettings", "TaperedCylinderShapeSettings", "ScaledShapeSettings", "MeshShapeSettings", "ConvexHullShapeSettings", "HeightFieldShapeSettings", "RotatedTranslatedShapeSettings", "OffsetCenterOfMassShapeSettings", "EmptyShapeSettings", "RagdollSettings", "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "VehicleConstraintSettings", "WheeledVehicleControllerSettings", "WheelSettingsWV", "TrackedVehicleControllerSettings", "WheelSettingsTV", "MotorcycleControllerSettings", "PathConstraintPath", "PathConstraintPathHermite", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "MotorSettings", "PhysicsScene", "PhysicsMaterial", "PhysicsMaterialSimple", "GroupFilter", "GroupFilterTable", "BodyCreationSettings" };
+    try testing.expectEqual(expected.len, factory_types.len);
+    inline for (factory_types, expected) |T, name| {
+        try testing.expectEqualStrings(name, RTTI.of(T).name);
+        try testing.expect(factory.find(name) == RTTI.of(T));
+        try testing.expect(factory.findHash(RTTI.hashName(name)) == RTTI.of(T));
     }
-    try testing.expect(constraint_settings_types[constraint_settings_types.len - 1] == TestConstraints.TestConstraintSettings);
 
-    // The ported classes can be created by restoreFromBinaryState, the stubs are marked (no RTTI hash collisions)
-    inline for (constraint_settings_types, 0..) |T, i| {
-        if (!@hasDecl(T, "is_stub")) try testing.expect(@hasDecl(T, "createDefault"));
-        inline for (constraint_settings_types, 0..) |U, j| {
-            if (i != j) try testing.expect(ConstraintSettings.rttiHash(T.rtti_name) != ConstraintSettings.rttiHash(U.rtti_name));
-        }
+    // The first registered class is Jolt's first type, the bases follow the class that names them (Factory::Register)
+    try testing.expect(factory.getAllClasses()[0] == RTTI.of(factory_types[0]));
+    try testing.expect(factory.find("ShapeSettings") != null and factory.find("SerializableObject") != null);
+    try testing.expect(factory.find("TwoBodyConstraintSettings").?.isAbstract());
+    try testing.expect(factory.find("ConstraintSettings").? == @import("Physics/Constraints/Constraint.zig").ConstraintSettings.rtti);
+    try testing.expect(!factory.find("ConstraintSettings").?.isAbstract()); // Jolt: JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL
+    try testing.expect(factory.find("SoftBodyCreationSettings") == null);
+
+    // The inline tests register their test classes through zolt_user_types.serializable_types (see build.zig)
+    try testing.expectEqual(@as(usize, 2), user_serializable_types.len);
+    try testing.expect(user_serializable_types[0] == TestShapes.TestMaterial);
+    try testing.expect(user_serializable_types[1] == TestConstraints.TestConstraintSettings);
+    try testing.expect(factory.find("TestMaterial") == TestShapes.TestMaterial.rtti);
+    try testing.expect(factory.find("TestConstraintSettings") == TestConstraints.TestConstraintSettings.rtti);
+
+    // Every class of the factory is found by its name and its hash
+    for (factory.getAllClasses()) |rtti| {
+        try testing.expect(factory.find(rtti.name) == rtti);
+        try testing.expect(factory.findHash(rtti.hash) == rtti);
     }
-    try testing.expect(!@hasDecl(constraint_settings_types[0], "is_stub")); // Point
-    try testing.expect(!@hasDecl(constraint_settings_types[6], "is_stub")); // Fixed
 
-    try testing.expectEqual(@as(usize, 1), path_constraint_path_types.len);
-    try testing.expectEqualStrings("PathConstraintPathHermite", path_constraint_path_types[0].rtti_name);
+    // A factory of a test or an application: Jolt's types and some more (Jolt: Factory::sInstance->Register)
+    const Extra = struct {
+        pub const rtti = RTTI.declare(@This(), .{ .name = "Extra", .kind = .non_virtual });
+        value: u32 = 0,
+    };
+    const extended: Factory = comptime .init(factory_types ++ &[_]type{Extra});
+    try testing.expect(extended.find("Extra") == Extra.rtti and factory.find("Extra") == null);
+    try testing.expect(extended.find("BodyCreationSettings") == BodyCreationSettings.rtti);
 }
 
-test "RegisterTypes: the vehicle controller settings classes in Jolt's order" {
+test "RegisterTypes: every creatable class of the factory can be created and destroyed" {
     const std = @import("std");
-    const testing = std.testing;
-    const VehicleControllerSettings = @import("Physics/Vehicle/VehicleController.zig").VehicleControllerSettings;
-
-    const expected = [_][]const u8{ "WheeledVehicleControllerSettings", "TrackedVehicleControllerSettings", "MotorcycleControllerSettings" };
-    try testing.expectEqual(expected.len, vehicle_controller_settings_types.len);
-    inline for (vehicle_controller_settings_types, expected, 0..) |T, name, i| {
-        try testing.expectEqualStrings(name, T.rtti_name);
-        if (!@hasDecl(T, "is_stub")) try testing.expect(@hasDecl(T, "createDefault"));
-        inline for (vehicle_controller_settings_types, 0..) |U, j| {
-            if (i != j) try testing.expect(VehicleControllerSettings.rttiHash(T.rtti_name) != VehicleControllerSettings.rttiHash(U.rtti_name));
-        }
+    const RTTI = @import("Core/RTTI.zig").RTTI;
+    for (factory.getAllClasses()) |rtti| {
+        if (rtti.isAbstract()) continue;
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+            fn f(allocator: std.mem.Allocator, r: *const RTTI) !void {
+                const object = (try r.createObject(allocator)).?;
+                if (r.ref_count) |refCount| try std.testing.expectEqual(@as(u32, 0), refCount(object).get()); // `new T`
+                r.destructObject(object, allocator);
+            }
+        }.f, .{rtti});
     }
 }

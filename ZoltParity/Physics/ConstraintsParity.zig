@@ -22,7 +22,7 @@
 //! the kind (`recordGetters`), and at the start and the end the SaveBinaryState bytes of GetConstraintSettings with the
 //! base class values (`CSOutput`, compared value by value, NaNs equal). Besides the scenario the settings binary state is
 //! compared: the bytes of SaveBinaryState, each side restores the other side's bytes (ConstraintSettings::
-//! sRestoreFromBinaryState through RegisterTypes.constraint_settings_types) and saves them again, truncated streams give
+//! sRestoreFromBinaryState through RegisterTypes.factory) and saves them again, truncated streams give
 //! the same error text.
 //!
 //! The test "Constraint parity: <kind>" runs a kind; it returns error.SkipZigTest (visible in the build summary) while

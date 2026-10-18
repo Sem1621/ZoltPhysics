@@ -7,17 +7,30 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("RTTI.zig").RTTI;
 const quickSort = @import("QuickSort.zig").quickSort;
 const StreamIn = @import("StreamIn.zig").StreamIn;
 const StreamOut = @import("StreamOut.zig").StreamOut;
 
 // A set of points (x, y) that form a linear curve
 pub const LinearCurve = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, LinearCurve)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(LinearCurve)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "LinearCurve",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// A point on the curve
     pub const Point = extern struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Point)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(LinearCurve::Point)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "LinearCurve::Point",
+            .kind = .non_virtual,
+        });
+        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+        pub const serialization_pending = true;
 
         x: f32 = 0.0,
         y: f32 = 0.0,

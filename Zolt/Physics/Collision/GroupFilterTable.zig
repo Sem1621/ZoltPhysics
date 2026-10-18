@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const GroupFilter = @import("GroupFilter.zig").GroupFilter;
@@ -44,12 +45,16 @@ const CollisionGroup = @import("CollisionGroup.zig").CollisionGroup;
 ///
 /// The total number of bits we need to store is (N * (N - 1)) / 2
 pub const GroupFilterTable = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, GroupFilterTable)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(GroupFilterTable)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "GroupFilterTable",
+        .kind = .virtual,
+        .bases = &.{GroupFilter},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     pub const overrides = .{ .canCollide, .saveBinaryState, .restoreBinaryState };
-
-    /// Name of the class for Jolt's RTTI hash (JPH_RTTI)
-    pub const rtti_name = "GroupFilterTable";
 
     const GroupID = CollisionGroup.GroupID;
     const SubGroupID = CollisionGroup.SubGroupID;
@@ -262,8 +267,8 @@ test "GroupFilterTable: binary state, copy" {
     var buffer: [64]u8 = undefined;
     const bytes = saveToBuffer(filter.asGroupFilter(), &buffer);
     try std.testing.expectEqual(@as(usize, 4 + 4 + 4 + 6), bytes.len);
-    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&GroupFilter.rttiHash("GroupFilterTable")), bytes[0..4]);
-    try std.testing.expectEqual(GroupFilter.rttiHash("GroupFilterTable"), filter.asGroupFilter().getRTTIHash());
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&RTTI.hashName("GroupFilterTable")), bytes[0..4]);
+    try std.testing.expectEqual(RTTI.hashName("GroupFilterTable"), filter.asGroupFilter().getRTTIHash());
 
     var restored = try restoreFromBuffer(allocator, bytes);
     defer restored.deinit();

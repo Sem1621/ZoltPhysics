@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -66,10 +67,15 @@ const SwingType = SwingTwistConstraintPartFile.SwingType;
 
 /// 6 Degree Of Freedom Constraint setup structure. Allows control over each of the 6 degrees of freedom.
 pub const SixDOFConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, SixDOFConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SixDOFConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "SixDOFConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "SixDOFConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     /// Constraint is split up into translation/rotation around X, Y and Z axis.
@@ -1354,7 +1360,7 @@ test "SixDOFConstraintSettings: defaults, axis helpers, binary state, restoreFro
         for (settings.limits_spring_settings) |s| try testing.expectEqual(SpringSettings{}, s);
         try testing.expectEqual(@as(usize, 6), SixDOFConstraintSettings.Axis.num);
         try testing.expectEqual(@as(usize, 3), SixDOFConstraintSettings.Axis.num_translation);
-        try testing.expectEqualStrings("SixDOFConstraintSettings", settings.asSettings().vtable.rtti_name);
+        try testing.expectEqualStrings("SixDOFConstraintSettings", settings.asSettings().vtable.rtti.name);
 
         // The axis helpers
         settings.makeFixedAxis(.translation_y);
@@ -1388,7 +1394,7 @@ test "SixDOFConstraintSettings: defaults, axis helpers, binary state, restoreFro
     defer allocator.free(bytes);
     const after_axes = 25 + 2 * 3 * @sizeOf(Real) + 4 * 12;
     try testing.expectEqual(@as(usize, after_axes + 24 + 1 + 2 * 24 + 3 * 9 + 6 * (9 + 16)), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("SixDOFConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("SixDOFConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), std.mem.readInt(u32, bytes[after_axes..][0..4], .little)); // Max friction
     try testing.expectEqual(@as(u8, 1), bytes[after_axes + 24]); // Swing type: Pyramid
@@ -1396,7 +1402,7 @@ test "SixDOFConstraintSettings: defaults, axis helpers, binary state, restoreFro
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, 1.25))), std.mem.readInt(u32, bytes[after_axes + 25 + 44 ..][0..4], .little)); // Limit max of rotation Z
     try testing.expectEqual(@as(u8, 1), bytes[after_axes + 73]); // Limits spring 0: StiffnessAndDamping
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

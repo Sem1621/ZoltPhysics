@@ -3,7 +3,7 @@
 //! Status: complete
 //!
 //! Only used by tests: `zolt.test_constraints` is this file in test builds (`builtin.is_test`), and build.zig gives the
-//! inline tests a `zolt_user_types` module that registers `constraint_settings_types` of this file, so that
+//! inline tests a `zolt_user_types` module that registers `serializable_types` of this file, so that
 //! ConstraintSettings.restoreFromBinaryState can create `TestConstraintSettings` (the unit tests use the default, empty
 //! module). The F2 tests (written before Jolt's constraint types of Phase 6) need a concrete TwoBodyConstraint with
 //! observable solver calls to instantiate the virtual function machinery (SimulationArchitecture D8): `TestConstraintSettings` (a TwoBodyConstraintSettings
@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ref = @import("../../Core/Reference.zig").Ref;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
@@ -29,12 +30,13 @@ const TwoBodyConstraintFile = @import("TwoBodyConstraint.zig");
 const TwoBodyConstraint = TwoBodyConstraintFile.TwoBodyConstraint;
 const TwoBodyConstraintSettings = TwoBodyConstraintFile.TwoBodyConstraintSettings;
 
-/// The settings classes that the inline tests register through `zolt_user_types` (see build.zig)
-pub const constraint_settings_types = .{TestConstraintSettings};
+/// The serializable classes that the inline tests register through `zolt_user_types` (see build.zig)
+pub const serializable_types = .{TestConstraintSettings};
 
 /// Settings of TestConstraint
 pub const TestConstraintSettings = struct {
-    pub const rtti_name = "TestConstraintSettings";
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TestConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{ .name = "TestConstraintSettings", .kind = .virtual, .bases = &.{TwoBodyConstraintSettings} });
     pub const overrides = .{ .createConstraint, .saveBinaryState, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -49,7 +51,7 @@ pub const TestConstraintSettings = struct {
         return self;
     }
 
-    /// Default constructor on the heap (for ConstraintSettings.restoreFromBinaryState)
+    /// Default constructor on the heap (RTTI create, used by ConstraintSettings.restoreFromBinaryState)
     pub fn createDefault(allocator: Allocator) Allocator.Error!*TestConstraintSettings {
         return create(allocator);
     }
@@ -205,8 +207,8 @@ test "ConstraintSettings: binary state, restoreFromBinaryState and the copy cons
         settings.asSettings().saveBinaryState(out.streamOut());
     }
     try std.testing.expectEqual(@as(usize, 4 + 1 + 4 + 4 + 4 + 4 + 4), buffer.items.len);
-    try std.testing.expectEqual(ConstraintSettings.rttiHash("TestConstraintSettings"), std.mem.readInt(u32, buffer.items[0..4], .little));
-    try std.testing.expectEqual(settings.asSettings().getRTTIHash(), ConstraintSettings.rttiHash("TestConstraintSettings"));
+    try std.testing.expectEqual(RTTI.hashName("TestConstraintSettings"), std.mem.readInt(u32, buffer.items[0..4], .little));
+    try std.testing.expectEqual(settings.asSettings().getRTTIHash(), RTTI.hashName("TestConstraintSettings"));
 
     // Round trip through the registered type list
     {

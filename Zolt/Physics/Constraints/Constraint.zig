@@ -4,21 +4,20 @@
 //! SimulationArchitecture D8: pattern A with `virtual.make`, one level per C++ class (the mechanism of Shape and
 //! ShapeSettings, CollisionArchitecture D1 / D2):
 //! - `ConstraintSettings` and `Constraint` are RefTarget roots that hold Jolt's data, the reference count and the
-//!   allocator that frees the most derived object. Both are abstract in Zolt (Jolt's constructors are protected /
-//!   GetSubType is pure virtual), so they keep the bodies of their virtual functions in `impl`.
+//!   allocator that frees the most derived object. They keep the bodies of their virtual functions in `impl` (Jolt's
+//!   constructors are protected, GetSubType is pure virtual). ConstraintSettings can still be created, like Jolt's
+//!   JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL: `createDefault` (SerializationArchitecture.md S9).
 //! - A derived class embeds its parent as `base` and constructs it with the most derived type:
 //!   `.base = .init(T, allocator, &settings)` (Constraint) / `.init(T, allocator)` (ConstraintSettings). Two body
 //!   constraints go through TwoBodyConstraint, whose VTable extends this one.
 //! - `Constraint.VTable` follows Jolt's declaration order: `buildIslands(index, *IslandBuilder, *BodyManager)` and
 //!   `buildIslandSplits(*LargeIslandSplitter)` are entries, `getConstraintSettings` returns `Allocator.Error` (it
 //!   allocates the settings).
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings): TODO(serialization).
-//!   The binary state is ported like GroupFilter's (CollisionArchitecture D8): `SaveBinaryState` writes the RTTI hash
-//!   of `rtti_name` (a vtable data entry that every concrete settings class declares), and `restoreFromBinaryState`
-//!   (StreamUtils::RestoreObject) finds the class in the comptime list `RegisterTypes.constraint_settings_types`
-//!   until the Factory of Phase 8 (D8). The list holds Jolt's settings classes in RegisterTypes.cpp order; a class
-//!   whose port is still a stub (`pub const is_stub = true`) is skipped, its hash gives Jolt's "Failed to create
-//!   instance of type".
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings): `rtti`, its attributes
+//!   are TODO(serialization). The binary state is ported like GroupFilter's (CollisionArchitecture D8):
+//!   `SaveBinaryState` writes the RTTI hash of the most derived class (the `rtti` vtable data entry that every concrete
+//!   settings class declares), and `restoreFromBinaryState` (StreamUtils::RestoreObject) finds the class in
+//!   `RegisterTypes.factory`. An unknown hash gives Jolt's "Failed to create instance of type".
 //! - `ConstraintSpace` is an `enum(i32)` that accepts every value: Jolt's binary state writes the enum as its
 //!   underlying int and reads back any value (a value other than world space means local space).
 //! - JPH_DEBUG_RENDERER (`mDrawConstraintSize`, `DrawConstraint`, `DrawConstraintLimits`,
@@ -29,20 +28,21 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
+const SerializableObject = @import("../../ObjectStream/SerializableObject.zig").SerializableObject;
 const virtual = @import("../../Core/Virtual.zig");
-const HashCombine = @import("../../Core/HashCombine.zig");
 const RefCount = @import("../../Core/Reference.zig").RefCount;
 const Ref = @import("../../Core/Reference.zig").Ref;
 const Result = @import("../../Core/Result.zig").Result;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
+const StreamUtils = @import("../../Core/StreamUtils.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const BodyManager = @import("../Body/BodyManager.zig").BodyManager;
 const IslandBuilder = @import("../IslandBuilder.zig").IslandBuilder;
 const LargeIslandSplitter = @import("../LargeIslandSplitter.zig").LargeIslandSplitter;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
-const RegisterTypes = @import("../../RegisterTypes.zig");
 
 /// Enum to identify constraint type
 pub const ConstraintType = enum {
@@ -88,14 +88,21 @@ pub const ConstraintSpace = enum(i32) {
 
 /// Class used to store the configuration of a constraint. Allows run-time creation of constraints.
 pub const ConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, ConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "ConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{SerializableObject},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     pub const ConstraintResult = Result(Ref(ConstraintSettings));
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {
-        /// Class name of the most derived class (JPH_RTTI, data entry: every concrete class declares `rtti_name`)
-        rtti_name: []const u8,
+        /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
+        rtti: *const RTTI,
         /// Virtual destructor (generated destructor chain)
         deinit: *const fn (self: *ConstraintSettings) void,
         /// delete this (generated)
@@ -133,13 +140,16 @@ pub const ConstraintSettings = struct {
     /// User data value (can be used by application)
     user_data: u64 = 0,
 
-    /// Settings classes that restoreFromBinaryState can create (Factory::sInstance until Phase 8). Each one declares
-    /// `rtti_name` and `createDefault(allocator) Allocator.Error!*T` (its default constructor on the heap).
-    pub const constraint_settings_types = RegisterTypes.constraint_settings_types;
-
     /// Constructor (protected in Jolt), called by derived classes with their most derived type
     pub fn init(comptime T: type, allocator: Allocator) ConstraintSettings {
         return .{ .vtable = vtableFor(T), .allocator = allocator };
+    }
+
+    /// new ConstraintSettings (RTTI create, Jolt's protected default constructor): reference count 0
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*ConstraintSettings {
+        const self = try allocator.create(ConstraintSettings);
+        self.* = .init(ConstraintSettings, allocator);
+        return self;
     }
 
     /// Construct from a vtable (used by the constructors of derived classes that add virtual functions)
@@ -201,50 +211,13 @@ pub const ConstraintSettings = struct {
     }
 
     /// Creates a constraint of the correct type and restores its contents from the binary stream inStream.
-    /// (StreamUtils::RestoreObject with the comptime type list `constraint_settings_types` instead of the Factory)
     pub fn restoreFromBinaryState(allocator: Allocator, stream: StreamIn) Allocator.Error!ConstraintResult {
-        var result: ConstraintResult = .empty;
-
-        // Read the hash of the type
-        var hash: u32 = 0;
-        stream.read(&hash);
-        if (stream.isEOF() or stream.isFailed()) {
-            result.setError("Failed to read type hash");
-            return result;
-        }
-
-        // Get the RTTI for the type and construct it (Zolt: a class that is still a stub, `is_stub`, is not known yet)
-        const object: *ConstraintSettings = inline for (constraint_settings_types) |T| {
-            if (comptime @hasDecl(T, "is_stub")) continue;
-            if (hash == comptime rttiHash(T.rtti_name)) break virtual.upcast(ConstraintSettings, try T.createDefault(allocator));
-        } else {
-            result.setError("Failed to create instance of type");
-            return result;
-        };
-
-        // Read the data of the type
-        var ref = Ref(ConstraintSettings).init(object);
-        defer ref.deinit();
-        try object.restoreBinaryState(stream);
-        if (stream.isEOF() or stream.isFailed()) {
-            result.setError("Failed to restore object");
-            return result;
-        }
-
-        result.set(ref.clone());
-        return result;
+        return StreamUtils.restoreObject(ConstraintSettings, allocator, stream, ConstraintSettings.restoreBinaryState);
     }
 
     /// GetRTTI()->GetHash() of the most derived class
     pub fn getRTTIHash(self: *const ConstraintSettings) u32 {
-        return rttiHash(self.vtable.rtti_name);
-    }
-
-    /// RTTI::GetHash: FNV-1a hash of the class name, folded from 64 to 32 bits
-    pub fn rttiHash(name: []const u8) u32 {
-        // Perform diffusion step to get from 64 to 32 bits (see https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
-        const hash = HashCombine.hashString(name);
-        return @truncate(hash ^ (hash >> 32));
+        return self.vtable.rtti.hash;
     }
 
     /// The bodies of the virtual functions of ConstraintSettings
@@ -552,3 +525,33 @@ pub const Constraint = struct {
         }
     };
 };
+
+test "ConstraintSettings: creatable like Jolt's JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL, restored from its own hash" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const StreamWrapper = @import("../../Core/StreamWrapper.zig");
+
+    const settings = try ConstraintSettings.createDefault(allocator);
+    var ref = Ref(ConstraintSettings).init(settings);
+    defer ref.deinit();
+    try testing.expect(settings.vtable.rtti == ConstraintSettings.rtti);
+    settings.constraint_priority = 3;
+    settings.enabled = false;
+
+    // The base class binary state: the RTTI hash, then Jolt's members (21 bytes)
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var out_wrapper = StreamWrapper.StreamOutWrapper.init(&out.writer);
+    settings.saveBinaryState(out_wrapper.streamOut());
+    try testing.expectEqual(@as(usize, 21), out.written().len);
+    try testing.expectEqual(RTTI.hashName("ConstraintSettings"), std.mem.readInt(u32, out.written()[0..4], .little));
+
+    // RegisterTypes.factory creates a ConstraintSettings for this hash
+    var reader: std.Io.Reader = .fixed(out.written());
+    var in_wrapper = StreamWrapper.StreamInWrapper.init(&reader);
+    var restored = try ConstraintSettings.restoreFromBinaryState(allocator, in_wrapper.streamIn());
+    defer restored.deinit();
+    try testing.expect(restored.getPtr().?.vtable.rtti == ConstraintSettings.rtti);
+    try testing.expectEqual(@as(u32, 3), restored.getPtr().?.constraint_priority);
+    try testing.expect(!restored.getPtr().?.enabled);
+}

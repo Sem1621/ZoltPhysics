@@ -9,6 +9,7 @@
 //! - `sInvalid` is the compile time constant `invalid`.
 
 const std = @import("std");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const RefConst = @import("../../Core/Reference.zig").RefConst;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -19,7 +20,13 @@ const GroupFilter = @import("GroupFilter.zig").GroupFilter;
 /// - The first group filter says that the objects can collide
 /// - Or if there's no filter for the first object, the second group filter says the objects can collide
 pub const CollisionGroup = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, CollisionGroup)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(CollisionGroup)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "CollisionGroup",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     pub const GroupID = u32;
     pub const SubGroupID = u32;

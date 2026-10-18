@@ -3,12 +3,12 @@
 //! Not ported: JPH_TRACE_VEHICLE_STATS (a developer switch that is commented out in Jolt)
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheeledVehicleControllerSettings,
-//!   WheelSettingsWV): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
+//!   WheelSettingsWV): `rtti`, the attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture
+//!   E1; the binary state is ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsWV` embeds `base: WheelSettings` and overrides its binary state; `WheelWV` embeds `base: Wheel`.
-//!   - `WheeledVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti_name`, the settings class of
-//!     `RegisterTypes.vehicle_controller_settings_types`, E3); `WheeledVehicleController` embeds `base:
+//!   - `WheeledVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti`, a class of
+//!     `RegisterTypes.factory`, E3); `WheeledVehicleController` embeds `base:
 //!     VehicleController`. Both are concrete classes that MotorcycleController(Settings) derive from: `initDerived(T,
 //!     ...)` builds them as the base of class T, their overrides are top-level functions (Jolt's
 //!     `WheeledVehicleController::PreCollide(...)` from a derived class is `self.base.preCollide(...)`).
@@ -40,6 +40,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const LinearCurve = @import("../../Core/LinearCurve.zig").LinearCurve;
@@ -70,12 +71,15 @@ const VehicleDifferentialSettings = @import("VehicleDifferential.zig").VehicleDi
 
 /// WheelSettings object specifically for WheeledVehicleController
 pub const WheelSettingsWV = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, WheelSettingsWV)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettingsWV)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "WheelSettingsWV",
+        .kind = .virtual,
+        .bases = &.{WheelSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// JPH_RTTI(WheelSettingsWV)
-    pub const rtti: *const WheelSettings.RTTI = &.{ .name = rtti_name, .base = WheelSettings.rtti };
-    /// Class name (JPH_RTTI)
-    pub const rtti_name = "WheelSettingsWV";
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 
     base: WheelSettings,
@@ -125,6 +129,9 @@ pub const WheelSettingsWV = struct {
         self.* = try .init(allocator);
         return self;
     }
+
+    /// new WheelSettingsWV (RTTI create)
+    pub const createDefault = create;
 
     /// ~WheelSettingsWV: frees the friction curves
     pub fn destruct(self: *WheelSettingsWV) void {
@@ -275,10 +282,15 @@ pub const WheelWV = struct {
 /// The properties in this controller are largely based on "Car Physics for Games" by Marco Monster.
 /// See: https://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html
 pub const WheeledVehicleControllerSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, WheeledVehicleControllerSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheeledVehicleControllerSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "WheeledVehicleControllerSettings",
+        .kind = .virtual,
+        .bases = &.{VehicleControllerSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "WheeledVehicleControllerSettings";
     pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
 
     base: VehicleControllerSettings,
@@ -1277,7 +1289,7 @@ test "WheeledVehicleControllerSettings defaults, RTTI hash and binary state" {
     try testing.expectEqual(@as(usize, 1), settings.transmission.reverse_gear_ratios.items.len);
     try testing.expectEqual(@as(usize, 0), settings.differentials.items.len);
     try testing.expectEqual(@as(f32, 1.4), settings.differential_limited_slip_ratio);
-    try testing.expectEqual(VehicleControllerSettings.rttiHash("WheeledVehicleControllerSettings"), settings.base.getRTTIHash());
+    try testing.expectEqual(RTTI.hashName("WheeledVehicleControllerSettings"), settings.base.getRTTIHash());
 
     // The binary state (through the base class), new differentials are default constructed by the restore
     try settings.differentials.append(allocator, .{ .left_wheel = 2, .right_wheel = 3, .engine_torque_ratio = 0.25 });

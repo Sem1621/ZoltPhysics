@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
@@ -25,7 +26,13 @@ pub const TrackSide = enum(u32) {
 
 /// Generic properties for tank tracks
 pub const VehicleTrackSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, VehicleTrackSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleTrackSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleTrackSettings",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// Which wheel on the track is connected to the engine (Zolt: 0 by default, Jolt leaves it uninitialized)
     driven_wheel: u32 = 0,

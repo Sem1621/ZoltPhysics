@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const LinearCurve = @import("../../Core/LinearCurve.zig").LinearCurve;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -24,7 +25,13 @@ const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
 
 /// Generic properties for a vehicle engine
 pub const VehicleEngineSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, VehicleEngineSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleEngineSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleEngineSettings",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// Max amount of torque (Nm) that the engine can deliver
     max_torque: f32 = 500.0,
@@ -49,6 +56,9 @@ pub const VehicleEngineSettings = struct {
         try self.normalized_torque.addPoint(allocator, 1.0, 0.8);
         return self;
     }
+
+    /// Jolt's default constructor, used by RTTI create (Lifetime.defaultValue, SerializationArchitecture.md S7)
+    pub const initDefault = init;
 
     /// Destructor: frees the torque curve
     pub fn deinit(self: *VehicleEngineSettings, allocator: Allocator) void {

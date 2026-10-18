@@ -1,14 +1,15 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleController.h, Jolt/Physics/Vehicle/VehicleController.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings): `rtti`, its
+//!   attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
+//!   ported).
 //! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `VehicleControllerSettings` is an abstract pattern A root with `ref_count` (RefTarget<VehicleControllerSettings>):
 //!     `saveBinaryState`, `restoreBinaryState` and `constructController` are pure virtual. The settings classes declare
-//!     `pub const rtti_name` (a vtable data entry): VehicleConstraintSettings writes the RTTI hash of the controller
-//!     settings and restores the class through `RegisterTypes.vehicle_controller_settings_types` (E3).
+//!     `pub const rtti` (the `rtti` vtable data entry, SerializationArchitecture.md S3): VehicleConstraintSettings
+//!     writes the RTTI hash of the controller settings and finds the class in `RegisterTypes.factory` (E3).
 //!   - `VehicleController` is a pattern A root without `ref_count`: VehicleConstraint owns its controller
 //!     (`delete mController` is `controller.destroy()`, like BroadPhase). It keeps Jolt's `VehicleConstraint &mConstraint`
 //!     as `constraint: *VehicleConstraint`, so a controller must not outlive (or move away from) its constraint.
@@ -22,8 +23,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
+const SerializableObject = @import("../../ObjectStream/SerializableObject.zig").SerializableObject;
 const virtual = @import("../../Core/Virtual.zig");
-const HashCombine = @import("../../Core/HashCombine.zig");
 const ReferenceFile = @import("../../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
 const RefCount = ReferenceFile.RefCount;
@@ -38,12 +40,19 @@ const WheelSettings = WheelFile.WheelSettings;
 
 /// Basic settings object for interface that controls acceleration / deceleration of the vehicle
 pub const VehicleControllerSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, VehicleControllerSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleControllerSettings",
+        .kind = .abstract,
+        .bases = &.{SerializableObject},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {
-        /// Class name of the most derived class (JPH_RTTI, data entry: every concrete class declares `rtti_name`)
-        rtti_name: []const u8,
+        /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
+        rtti: *const RTTI,
         /// Virtual destructor (generated destructor chain)
         deinit: *const fn (self: *VehicleControllerSettings) void,
         /// delete this (generated)
@@ -120,14 +129,7 @@ pub const VehicleControllerSettings = struct {
 
     /// GetRTTI()->GetHash() of the most derived class
     pub fn getRTTIHash(self: *const VehicleControllerSettings) u32 {
-        return rttiHash(self.vtable.rtti_name);
-    }
-
-    /// RTTI::GetHash: FNV-1a hash of the class name, folded from 64 to 32 bits
-    pub fn rttiHash(name: []const u8) u32 {
-        // Perform diffusion step to get from 64 to 32 bits (see https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
-        const hash = HashCombine.hashString(name);
-        return @truncate(hash ^ (hash >> 32));
+        return self.vtable.rtti.hash;
     }
 
     /// Abstract: every virtual function is pure virtual
@@ -248,7 +250,8 @@ pub const VehicleController = struct {
 
 /// A user controller (settings, controller and wheel classes) for the tests of the virtual functions
 const TestControllerSettings = struct {
-    pub const rtti_name = "TestControllerSettings";
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TestControllerSettings)
+    pub const rtti = RTTI.declare(@This(), .{ .name = "TestControllerSettings", .kind = .virtual, .bases = &.{VehicleControllerSettings} });
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState, .constructController };
 
     base: VehicleControllerSettings,
@@ -258,6 +261,11 @@ const TestControllerSettings = struct {
         const self = try allocator.create(TestControllerSettings);
         self.* = .{ .base = .init(TestControllerSettings, allocator), .value = value };
         return self;
+    }
+
+    /// new TestControllerSettings (RTTI create)
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*TestControllerSettings {
+        return create(allocator, 1.0);
     }
 
     pub fn saveBinaryState(self: *const TestControllerSettings, stream: StreamOut) void {
@@ -335,7 +343,7 @@ test "VehicleControllerSettings and VehicleController dispatch through their vta
     const settings = try TestControllerSettings.create(allocator, 3.0);
     var settings_ref = Ref(VehicleControllerSettings).init(&settings.base);
     defer settings_ref.deinit();
-    try testing.expectEqual(VehicleControllerSettings.rttiHash("TestControllerSettings"), settings.base.getRTTIHash());
+    try testing.expectEqual(RTTI.hashName("TestControllerSettings"), settings.base.getRTTIHash());
 
     // The controller keeps a pointer to its constraint (not used by this controller)
     var constraint: VehicleConstraint = undefined;
