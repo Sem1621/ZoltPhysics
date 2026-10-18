@@ -23,7 +23,11 @@
 //! - A constraint whose GetConstraintSettings returns nullptr (PathConstraint, reached with asserts off) becomes a
 //!   ConnectedConstraint without settings in `fromPhysicsSystem`, like Jolt's AddConstraint(nullptr, ...);
 //!   `createBodies` and `saveBinaryState` panic on it where Jolt dereferences the null pointer.
-//! - TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL (PhysicsScene, ConnectedConstraint).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of PhysicsScene and
+//!   ConnectedConstraint (SerializationArchitecture.md S17). PhysicsScene declares "mBodies" and "mConstraints", not
+//!   Jolt's "mSoftBodies" (Phase 9). A scene without soft bodies (Assets/terrain2.bof) is read exactly. A stream with
+//!   soft bodies fails to read. Zolt writes a scene without "mSoftBodies". "mSettings" is declared as Jolt's
+//!   `TwoBodyConstraintSettings` (`.attrAs`): a link accepts only objects of that class.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -59,9 +63,12 @@ pub const PhysicsScene = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "PhysicsScene",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mBodies", .bodies),
+            .attr("mConstraints", .constraints),
+            // Jolt's third attribute "mSoftBodies" comes with the soft bodies in Phase 9 (SerializationArchitecture.md S17)
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Body constant to use to indicate that the constraint is attached to the fixed world
     pub const fixed_to_world: u32 = 0xffffffff;
@@ -72,9 +79,12 @@ pub const PhysicsScene = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "PhysicsScene::ConnectedConstraint",
             .kind = .non_virtual,
+            .attributes = &.{
+                .attrAs("mSettings", .settings, TwoBodyConstraintSettings), // Jolt's RefConst<TwoBodyConstraintSettings>
+                .attr("mBody1", .body1),
+                .attr("mBody2", .body2),
+            },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// Constraint settings (a TwoBodyConstraintSettings, see `getSettings`)
         settings: RefConst(ConstraintSettings) = .empty,
@@ -906,4 +916,172 @@ fn fixInvalidScalesOutOfMemory(allocator: Allocator) !void {
 
 test "PhysicsScene: out of memory in fixInvalidScales" {
     try testing.checkAllAllocationFailures(testing.allocator, fixInvalidScalesOutOfMemory, .{});
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests of the object stream (the declarations `rtti`)
+
+const ObjectStreamIn = @import("../ObjectStream/ObjectStreamIn.zig").ObjectStreamIn;
+const ObjectStreamOut = @import("../ObjectStream/ObjectStreamOut.zig").ObjectStreamOut;
+const StreamType = @import("../ObjectStream/ObjectStream.zig").StreamType;
+
+/// Two bodies that share shape settings (one with a group filter), a constraint between them and one to the world
+fn buildStreamScene(allocator: Allocator, scene: *PhysicsScene) !void {
+    const sphere = try SphereShapeSettings.create(allocator, 0.5, .{});
+    var sphere_ref = Ref(ShapeSettings).init(sphere.asShapeSettings());
+    defer sphere_ref.deinit();
+    const filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 4 });
+    var filter_ref = RefConst(GroupFilter).init(filter.asGroupFilter());
+    defer filter_ref.deinit();
+    filter.disableCollision(0, 2);
+
+    var ball: BodyCreationSettings = .initWithSettings(sphere.asShapeSettings(), RVec3.init(0, 5, 0), Quat.identity(), .dynamic, 0);
+    defer ball.deinit();
+    ball.collision_group = .init(filter.asGroupFilter(), 1, 2);
+    try scene.addBody(&ball);
+    var other: BodyCreationSettings = .initWithSettings(sphere.asShapeSettings(), RVec3.init(3, 5, 0), Quat.identity(), .kinematic, 0);
+    defer other.deinit();
+    other.user_data = 42;
+    try scene.addBody(&other);
+
+    const c = try TestConstraintSettings.create(allocator);
+    var c_ref = Ref(ConstraintSettings).init(c.asSettings());
+    defer c_ref.deinit();
+    try scene.addConstraint(&c.base, 0, 1);
+    try scene.addConstraint(&c.base, PhysicsScene.fixed_to_world, 1);
+}
+
+/// sWriteObject of `scene` with the stream's `allocator`. The bytes are allocated with testing.allocator (free them
+/// with it): the out of memory test fails the allocations of the stream, not those of the writer.
+fn writeScene(allocator: Allocator, scene: *const PhysicsScene, stream_type: StreamType) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try ObjectStreamOut.sWriteObject(PhysicsScene, allocator, &out.writer, stream_type, scene);
+    return out.toOwnedSlice();
+}
+
+/// sReadObject of `bytes` into a Ref
+fn readScene(allocator: Allocator, bytes: []const u8) ObjectStreamIn.Error!Ref(PhysicsScene) {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return ObjectStreamIn.sReadObjectRef(PhysicsScene, allocator, &reader, .{});
+}
+
+test "PhysicsScene: object stream with shared shape settings, a group filter and constraints" {
+    const allocator = testing.allocator;
+    var scene: PhysicsScene = .init(allocator);
+    defer scene.deinit();
+    try buildStreamScene(allocator, &scene);
+
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeScene(allocator, &scene, stream_type);
+        defer allocator.free(bytes);
+        var read = try readScene(allocator, bytes);
+        defer read.deinit();
+        const s = read.get().?;
+        try testing.expectEqual(@as(u32, 1), s.getRefCount());
+        try testing.expectEqual(@as(usize, 2), s.getNumBodies());
+        try testing.expectEqual(@as(usize, 2), s.getNumConstraints());
+
+        // The bodies share one new shape settings object (one reference per body)
+        const bodies = s.getBodies();
+        const shape = bodies[0].getShapeSettings().?;
+        try testing.expect(shape == bodies[1].getShapeSettings().?);
+        try testing.expect(RTTI.getRTTI(ShapeSettings, shape) == SphereShapeSettings.rtti);
+        try testing.expectEqual(@as(u32, 2), shape.getRefCount());
+        for (bodies, scene.getBodies()) |*b, *original| {
+            var expected = original.clone();
+            defer expected.deinit();
+            expected.setShapeSettings(b.getShapeSettings());
+            expected.collision_group.setGroupFilter(b.collision_group.getGroupFilter());
+            try testing.expect(b.eql(&expected));
+        }
+        const filter = virtual.downcast(GroupFilterTable, bodies[0].collision_group.getGroupFilter().?);
+        try testing.expect(!filter.isCollisionEnabled(0, 2) and filter.isCollisionEnabled(1, 2));
+
+        // The constraints share one settings object of the class that was written
+        const constraints = s.getConstraints();
+        const settings = constraints[0].settings.get().?;
+        try testing.expect(settings == constraints[1].settings.get().?);
+        try testing.expect(settings.vtable.rtti == TestConstraintSettings.rtti);
+        try testing.expectEqual(@as(u32, 2), settings.getRefCount());
+        for (constraints, scene.getConstraints()) |*c, *original| {
+            try testing.expectEqual(original.body1, c.body1);
+            try testing.expectEqual(original.body2, c.body2);
+        }
+
+        // The same bytes again
+        const again = try writeScene(allocator, s, stream_type);
+        defer allocator.free(again);
+        try testing.expectEqualSlices(u8, bytes, again);
+    }
+}
+
+test "PhysicsScene: object stream links, soft bodies (S17)" {
+    const allocator = testing.allocator;
+
+    // "mSettings" is declared as TwoBodyConstraintSettings: a link to other constraint settings becomes null
+    {
+        const stream =
+            \\TOS 1.00
+            \\declare PhysicsScene 1
+            \\  mConstraints array instance PhysicsScene::ConnectedConstraint
+            \\declare PhysicsScene::ConnectedConstraint 3
+            \\  mSettings instance TwoBodyConstraintSettings
+            \\  mBody1 uint32
+            \\  mBody2 uint32
+            \\declare VehicleConstraintSettings 0
+            \\object PhysicsScene 00000001
+            \\  1
+            \\  00000002 4 5
+            \\object VehicleConstraintSettings 00000002
+        ;
+        var read = try readScene(allocator, stream);
+        defer read.deinit();
+        const constraints = read.get().?.getConstraints();
+        try testing.expectEqual(@as(usize, 1), constraints.len);
+        try testing.expect(constraints[0].settings.get() == null);
+        try testing.expectEqual(@as(u32, 4), constraints[0].body1);
+        try testing.expectEqual(@as(u32, 5), constraints[0].body2);
+    }
+
+    // A scene that Jolt writes without soft bodies is read: the empty mSoftBodies array is skipped
+    const no_soft_bodies =
+        \\TOS 1.00
+        \\declare PhysicsScene 3
+        \\  mBodies array instance BodyCreationSettings
+        \\  mConstraints array instance PhysicsScene::ConnectedConstraint
+        \\  mSoftBodies array instance SoftBodyCreationSettings
+        \\declare SoftBodyCreationSettings 1
+        \\  mSettings instance SoftBodySharedSettings
+        \\object PhysicsScene 00000001
+        \\  0
+        \\  0
+        \\  0
+    ;
+    {
+        var read = try readScene(allocator, no_soft_bodies);
+        defer read.deinit();
+        try testing.expectEqual(@as(usize, 0), read.get().?.getNumBodies());
+    }
+
+    // With a soft body the Ref "mSettings" is skipped as class data: the stream is misread and cannot be read
+    const with_soft_body = try std.mem.concat(allocator, u8, &.{ no_soft_bodies[0 .. no_soft_bodies.len - 1], "1 00000002" });
+    defer allocator.free(with_soft_body);
+    try testing.expectError(error.InvalidObjectStream, readScene(allocator, with_soft_body));
+}
+
+fn writeReadScene(allocator: Allocator) !void {
+    var scene: PhysicsScene = .init(allocator);
+    defer scene.deinit();
+    try buildStreamScene(allocator, &scene);
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeScene(allocator, &scene, stream_type);
+        defer testing.allocator.free(bytes);
+        var read = try readScene(allocator, bytes);
+        read.deinit();
+    }
+}
+
+test "PhysicsScene: out of memory in the object stream" {
+    try testing.checkAllAllocationFailures(testing.allocator, writeReadScene, .{});
 }

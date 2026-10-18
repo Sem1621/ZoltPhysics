@@ -20,6 +20,8 @@
 //!   count) are part of the derived classes' copy functions, e.g. `GroupFilterTable.clone`.
 //! - User group filter classes register through `serializable_types` of the `zolt_user_types` module (Jolt: the
 //!   Factory registration of the application).
+//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT_BASE: `rtti`. It has the base
+//!   SerializableObject and no attributes, like Jolt's.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -42,8 +44,6 @@ pub const GroupFilter = struct {
         .kind = .abstract,
         .bases = &.{SerializableObject},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const VTable = struct {
         /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)

@@ -12,6 +12,9 @@
 //!
 //! The bit index arithmetic is done in `u32` with wrapping operations like Jolt's unsigned arithmetic (GetBit returns
 //! an `int` in Jolt, every index inside the table is below 2^31 so the value is the same).
+//!
+//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL: `rtti`. An object stream creates the filter
+//! with `createDefault` and reads the table into `table`, with the stream's allocator (the filter's allocator).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -50,9 +53,11 @@ pub const GroupFilterTable = struct {
         .name = "GroupFilterTable",
         .kind = .virtual,
         .bases = &.{GroupFilter},
+        .attributes = &.{
+            .attr("mNumSubGroups", .num_sub_groups),
+            .attr("mTable", .table),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .canCollide, .saveBinaryState, .restoreBinaryState };
 

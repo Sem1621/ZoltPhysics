@@ -21,6 +21,8 @@
 //!   are values in the result.
 //! - `default` comes from RegisterTypes.zig (`RegisterTypes.default_material`), where the `zolt_user_types` module can
 //!   replace the default material (D4, D8). User material classes register through its `serializable_types`.
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL: `rtti`. It has the base SerializableObject
+//!   and no attributes, like Jolt's. The class is creatable (`createDefault`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -50,8 +52,6 @@ pub const PhysicsMaterial = struct {
         .kind = .virtual,
         .bases = &.{SerializableObject},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const VTable = struct {
         /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
