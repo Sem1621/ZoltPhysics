@@ -3,7 +3,7 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings):
 //!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
-//! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): TODO(debug renderer).
+//! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2 and the porter template of FixedConstraint.zig:
 //!   - `VehicleConstraintSettings` embeds `base: ConstraintSettings` (rtti_name, overrides, `create` / `createDefault`
 //!     for `RegisterTypes.constraint_settings_types`, E3). Its wheels are `Ref(WheelSettings)`, its controller a
@@ -1180,7 +1180,7 @@ pub const VehicleConstraint = struct {
         return impulse;
     }
 
-    // TODO(debug renderer): DrawConstraint (mController->Draw), DrawConstraintLimits
+    // TODO(debug_renderer): DrawConstraint (mController->Draw), DrawConstraintLimits
 
     pub fn saveState(self: *const VehicleConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(&self.base, stream);

@@ -1,7 +1,7 @@
 //! Port of: PerformanceTest/CharacterVirtualScene.h
 //! Status: complete
 //!
-//! Milestone M8 (CharacterVehicleArchitecture section 4): `zig build performance-test -Doptimize=ReleaseFast --
+//! Milestone M8 (CharacterVehicleArchitecture section 1): `zig build performance-test -Doptimize=ReleaseFast --
 //! -q=Discrete -t=max -s=CharacterVirtual -validate_hash=0xc1d4e05b164b1221` (0xa0b16727aa16fdb0 with
 //! -Ddouble_precision=true) prints Jolt's hash for every thread count.
 //! - `new CharacterVirtualScene` is `CharacterVirtualScene.create(allocator)`; the scene is used through the
