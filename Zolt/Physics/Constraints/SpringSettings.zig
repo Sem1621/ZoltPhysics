@@ -11,9 +11,11 @@
 //!   RestoreBinaryState stores whatever byte the stream holds. `SpringMode` is therefore a non-exhaustive `enum(u8)`:
 //!   a restored mode byte of 3..255 is a valid (unnamed) value, and a switch on the mode handles it with a `_` prong
 //!   that does what Jolt's switch does when no case matches.
-//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: TODO(serialization).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` (the mode is an enum
+//!   attribute: uint32 in a stream).
 
 const std = @import("std");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 
@@ -31,7 +33,16 @@ pub const SpringMode = enum(u8) {
 
 /// Settings for a linear or angular spring
 pub const SpringSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, SpringSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(SpringSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "SpringSettings",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .enumAttr("mMode", .mode),
+            .attr("mFrequency", .frequency),
+            .attr("mDamping", .damping),
+        },
+    });
 
     /// Selects the way in which the spring is defined. See the descriptions of the mFrequency, mStiffness and mDamping properties.
     mode: SpringMode = .frequency_and_damping,

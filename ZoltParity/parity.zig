@@ -24,6 +24,7 @@ test {
     _ = @import("Geometry/PrimitivesParity.zig");
     _ = @import("Geometry/QueriesParity.zig");
     _ = @import("Math/MathParity.zig");
+    _ = @import("ObjectStream/ObjectStreamParity.zig");
     _ = @import("ParityFramework.zig");
     _ = @import("Physics/BasicsParity.zig");
     _ = @import("Physics/BodyInterfaceParity.zig");

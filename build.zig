@@ -9,6 +9,7 @@
 //!   zig build performance-test -- <args>   Run ZoltPerformanceTest (the port of PerformanceTest/, see its -h)
 //!   zig build hello-world  Run ZoltHelloWorld (the port of HelloWorld/HelloWorld.cpp, milestone M5)
 //!   zig build hello-world-check  Run the C++ HelloWorld and its port, fail unless their stdout is identical (part of parity)
+//!   zig build jolt-performance-test -- <args>   Run the C++ PerformanceTest built like the parity reference (the M9 oracle)
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
@@ -221,8 +222,13 @@ pub fn build(b: *std.Build) void {
     // JPH_ENABLE_ASSERTS: a failed Jolt assert is printed and counted (SimulationReference.cpp's hooks), and the
     // simulation parity fails a scene whose C++ side hit one (the check that scenes keep away from Jolt's asserts).
     const reference_asserts = b.option(bool, "reference_asserts", "Build the C++ reference of the parity tests with JPH_ENABLE_ASSERTS (scenes that hit a Jolt assert fail)") orelse false;
+    // JPH_OBJECT_STREAM: Jolt's CMake option ENABLE_OBJECT_STREAM (ON by default, also in the build of the determinism
+    // hashes). It adds the attribute tables to the RTTI, makes Factory::Register also register the attribute types and
+    // compiles ObjectStream/*.cpp, which Phase 8 compares with Zolt (Docs/Zolt/SerializationArchitecture.md S1). Every
+    // C++ translation unit of the parity build (Jolt, the references, HelloWorld, PerformanceTest) must agree on it: it
+    // changes the RTTI layout and JPH_VERSION_ID.
     var cpp_flags: std.ArrayList([]const u8) = .empty;
-    cpp_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-ffp-contract=off", "-DJPH_CROSS_PLATFORM_DETERMINISTIC" }) catch @panic("OOM");
+    cpp_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-ffp-contract=off", "-DJPH_CROSS_PLATFORM_DETERMINISTIC", "-DJPH_OBJECT_STREAM" }) catch @panic("OOM");
     if (double_precision) cpp_flags.append(b.allocator, "-DJPH_DOUBLE_PRECISION") catch @panic("OOM");
     cpp_flags.append(b.allocator, b.fmt("-DJPH_OBJECT_LAYER_BITS={d}", .{object_layer_bits})) catch @panic("OOM");
     if (reference_asserts) cpp_flags.append(b.allocator, "-DJPH_ENABLE_ASSERTS") catch @panic("OOM");
@@ -282,6 +288,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The classes of the ObjectStream unit test (ZoltTests/ObjectStream/ObjectStreamTest.zig), whose streams the
+    // ObjectStream parity compares with the C++ library's. The parity tests import it as "objectstream_test".
+    const parity_objectstream_test_module = b.createModule(.{
+        .root_source_file = b.path("ZoltTests/ObjectStream/ObjectStreamTest.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zolt", .module = zolt_for_parity },
+        },
+    });
+
     const parity_tests = b.addTest(.{
         .name = "zolt-parity",
         .root_module = b.createModule(.{
@@ -292,6 +309,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zolt", .module = zolt_for_parity },
                 .{ .name = "parity_user_types", .module = parity_user_types_module },
                 .{ .name = "test_layers", .module = parity_layers_module },
+                .{ .name = "objectstream_test", .module = parity_objectstream_test_module },
             },
         }),
         .filters = test_filters,
@@ -300,7 +318,9 @@ pub fn build(b: *std.Build) void {
     parity_tests.root_module.linkLibrary(jolt_cpp);
 
     const parity_step = b.step("parity", "Compare Zolt bit for bit with the C++ Jolt library");
-    parity_step.dependOn(&b.addRunArtifact(parity_tests).step);
+    const run_parity_tests = b.addRunArtifact(parity_tests);
+    run_parity_tests.setCwd(b.path(".")); // The ObjectStream parity reads Assets/ (relative to the repository root)
+    parity_step.dependOn(&run_parity_tests.step);
 
     // Port of HelloWorld/HelloWorld.cpp (milestone M5): installed with the library, `zig build hello-world` runs it.
     const hello_world = b.addExecutable(.{
@@ -350,4 +370,26 @@ pub fn build(b: *std.Build) void {
     const hello_world_check_step = b.step("hello-world-check", "Fail unless HelloWorld/HelloWorld.cpp and its Zig port print the same bytes");
     hello_world_check_step.dependOn(&run_compare_output.step);
     parity_step.dependOn(&run_compare_output.step);
+
+    // `zig build jolt-performance-test -- <arguments>`: the C++ PerformanceTest (PerformanceTest/PerformanceTest.cpp),
+    // built against the C++ library of the parity tests (same flags, with JPH_OBJECT_STREAM, so it has the Ragdoll scene).
+    // It is the oracle of milestone M9: it must give the hashes of determinism_check.yml, and its short runs
+    // (-i=<updates>) give the expected values of ZoltPerformanceTest's inline test.
+    const jolt_performance_test = b.addExecutable(.{
+        .name = "JoltPerformanceTest",
+        .root_module = b.createModule(.{
+            .target = reference_target,
+            .optimize = .ReleaseFast,
+            .link_libcpp = true,
+            .sanitize_c = .off,
+        }),
+    });
+    jolt_performance_test.root_module.addIncludePath(b.path("."));
+    jolt_performance_test.root_module.addCSourceFile(.{ .file = b.path("PerformanceTest/PerformanceTest.cpp"), .flags = cpp_flags.items });
+    jolt_performance_test.root_module.linkLibrary(jolt_cpp);
+    const run_jolt_performance_test = b.addRunArtifact(jolt_performance_test);
+    run_jolt_performance_test.setCwd(b.path("."));
+    if (b.args) |args| run_jolt_performance_test.addArgs(args);
+    const jolt_performance_test_step = b.step("jolt-performance-test", "Run the C++ PerformanceTest built like the parity reference (arguments after --)");
+    jolt_performance_test_step.dependOn(&run_jolt_performance_test.step);
 }

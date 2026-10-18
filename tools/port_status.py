@@ -36,8 +36,6 @@ DEFERRED = {
     "Jolt/Shaders": "GPU shaders for Jolt/Compute",
     "Jolt/Renderer": "debug renderer interface, ported with the debug renderer phase",
     "Jolt/Core/Profiler": "developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration",
-    "Jolt/Core/RTTI": "serialization support, ported with ObjectStream (Phase 8)",
-    "Jolt/Core/Factory": "serialization support, ported with ObjectStream (Phase 8)",
     "Jolt/Core/StreamUtils": "serialization support, ported with ObjectStream (Phase 8)",
 }
 
