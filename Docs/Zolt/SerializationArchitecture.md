@@ -727,3 +727,17 @@ What the prototype shows against the C++ library built with `JPH_OBJECT_STREAM`,
 With the define, a filtered sample of the existing parity still passes unchanged: the 42 tests whose names contain
 "binary state", "sRestoreFromBinaryState" or "struct" (the binary states, the struct layouts), and the HelloWorld
 comparison. The full parity run with the define is F1's.
+
+## 11. Settled after the synthesis
+
+The lead settled the open questions of the synthesis:
+- **Exhaustive body enums.** MotionType, MotionQuality and OverrideMassProperties stay exhaustive with D3. They are
+  never written with an unnamed value, and the binary state of BodyCreationSettings already treats them this way.
+- **The old user hooks go.** F2 removes `material_types`, `group_filter_types`, `constraint_settings_types`,
+  `path_constraint_path_types` and `vehicle_controller_settings_types` without a transition period. No module outside
+  this repository uses them. The compile error that names `serializable_types` stays.
+- **M9 without soft bodies.** M9 only reads PhysicsScene, so the missing `mSoftBodies` (S17) does not block it.
+- **D11, D12 and D14 stay.** They only change streams that Jolt cannot read safely, or that no writer produces.
+- **F2 is one generated change.** No other branch edits the class files during F2, so it is not split.
+- **Jolt's stale errno (D7).** It is a Jolt bug. The harness works around it. It may be reported upstream; that is not
+  part of this port.
