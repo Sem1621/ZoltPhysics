@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 88.9%** of 85995 lines in scope · **Unit tests: 94.8%** of 18321 lines
+**Library: 88.9%** of 86135 lines in scope · **Unit tests: 94.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 

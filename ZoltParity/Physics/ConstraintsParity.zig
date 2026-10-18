@@ -3189,8 +3189,7 @@ test "Constraint parity: pulley" {
 
 // Every kind runs on the C++ side already (twice, in two worlds: the records must be equal), so the descriptions, the
 // generators and the C++ wrappers are checked before the Zolt class exists. The settings bytes of every kind survive a
-// C++ restore + save, and a description with the RTTI hash of a stub class is "Failed to create instance of type" in
-// Zolt (the Factory does not know it yet).
+// C++ restore + save, and a Zolt restore + save once the slot is filled.
 test "Constraint parity: the C++ side of every kind" {
     const allocator = std.testing.allocator;
     const world_a = jolt.jolt_cs_world_create();
@@ -3231,13 +3230,12 @@ test "Constraint parity: the C++ side of every kind" {
             if (j.err) |e| std.debug.print("{s}: C++ restore failed: {s}\n", .{ field.name, e });
             try std.testing.expect(j.err == null and std.mem.eql(u8, j.bytes.items, bytes));
 
-            // Zolt: a stub class is unknown, a ported class restores
-            var z: Resaved = .{};
-            defer z.deinit(allocator);
-            try zoltResave(allocator, bytes, &z);
-            if (comptime isStubSlot(Slot(kind))) {
-                try std.testing.expectEqualStrings("Failed to create instance of type", z.err.?);
-            } else {
+            // Zolt: a filled slot restores and saves the same bytes. A stub slot skips this. RegisterTypes.factory knows
+            // every class, but a stub class does not read its values yet.
+            if (comptime !isStubSlot(Slot(kind))) {
+                var z: Resaved = .{};
+                defer z.deinit(allocator);
+                try zoltResave(allocator, bytes, &z);
                 try std.testing.expect(z.err == null and std.mem.eql(u8, z.bytes.items, bytes));
             }
         }

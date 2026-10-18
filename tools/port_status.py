@@ -36,7 +36,6 @@ DEFERRED = {
     "Jolt/Shaders": "GPU shaders for Jolt/Compute",
     "Jolt/Renderer": "debug renderer interface, ported with the debug renderer phase",
     "Jolt/Core/Profiler": "developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration",
-    "Jolt/Core/StreamUtils": "serialization support, ported with ObjectStream (Phase 8)",
 }
 
 
@@ -183,6 +182,12 @@ def collect():
                         if extern_bool.search(line):
                             rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
                             lint.append(f"{rel}:{line_no}: bool parameter in an extern fn, pass c_int instead")
+
+    # A DEFERRED entry is stale once Zig files port all of its units
+    for prefix in DEFERRED:
+        units = [u for u in jolt_units if u == prefix or u.startswith(prefix + "/")]
+        if units and all(any(f in cpp_status for f in jolt_units[u]) for u in units):
+            lint.append(f"tools/port_status.py: DEFERRED lists '{prefix}', which Zig files port: remove the entry")
 
     def unit_status(files):
         statuses = [cpp_status.get(f) for f in files]

@@ -371,7 +371,7 @@ the field `base` (one level per C++ class). The machinery is `Core/Virtual.zig` 
   is `Base.impl.foo(&self.base, ...)` (abstract base) or `self.base.foo(...)` (concrete base); a
   static `self.foo()` only in `final` classes;
 - `deinit` (destructor chain over each level's `destruct`) and `destroy` (`delete this`) are
-  generated entries; per-class constants (`rtti_name`) are data entries;
+  generated entries; per-class constants (`rtti`) are data entries;
 - casts: `virtual.upcast` / `virtual.downcast`, and checked casts such as `shape.cast(SphereShape)`;
 - a root without `ref_count` (`BroadPhaseQuery` → `BroadPhase` → `BroadPhaseQuadTree`, which Jolt deletes through a
   plain pointer) is owned through a plain pointer and freed with the generated `destroy`: `delete mBroadPhase` is
