@@ -23,7 +23,11 @@
 //!   tag integers and the bools as bytes (`!= 0`). Jolt stores any byte; a byte that is not a value of the Zig enum
 //!   leaves the field unchanged, and `restoreWithChildren` then reports Jolt's "Error reading body creation settings"
 //!   (only a corrupt stream does this, Jolt would continue with an invalid enum value).
-//! - TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL.
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` (SerializationArchitecture.md
+//!   S5 and S13). The attribute "mShape" is the custom accessor `ShapeAttribute` over the union `shape`. It writes the
+//!   shape settings (null for a Shape) and reads into `.settings`. ObjectLayer (an integer) and AllowedDOFs (a packed
+//!   struct) are enum attributes, written as uint32. MotionType, MotionQuality and OverrideMassProperties stay
+//!   exhaustive: an unnamed value in a stream keeps the member's value (D3).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -80,9 +84,60 @@ pub const BodyCreationSettings = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "BodyCreationSettings",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mPosition", .position),
+            .attr("mRotation", .rotation),
+            .attr("mLinearVelocity", .linear_velocity),
+            .attr("mAngularVelocity", .angular_velocity),
+            .attr("mUserData", .user_data),
+            .custom("mShape", ShapeAttribute), // Jolt's RefConst<ShapeSettings> mShape is the union `shape`
+            .attr("mCollisionGroup", .collision_group),
+            .enumAttr("mObjectLayer", .object_layer), // ObjectLayer is an integer: uint32, truncated when read
+            .enumAttr("mMotionType", .motion_type), // Exhaustive enum(u8): an unnamed value keeps the member (D3)
+            .enumAttr("mAllowedDOFs", .allowed_dofs), // Packed struct(u8): its 8 bits
+            .attr("mAllowDynamicOrKinematic", .allow_dynamic_or_kinematic),
+            .attr("mIsSensor", .is_sensor),
+            .alias("mSensorDetectsStatic", .collide_kinematic_vs_non_dynamic), // This is the old name to keep backwards compatibility
+            .attr("mUseManifoldReduction", .use_manifold_reduction),
+            .attr("mApplyGyroscopicForce", .apply_gyroscopic_force),
+            .enumAttr("mMotionQuality", .motion_quality), // Exhaustive enum(u8), D3
+            .attr("mEnhancedInternalEdgeRemoval", .enhanced_internal_edge_removal),
+            .attr("mAllowSleeping", .allow_sleeping),
+            .attr("mFriction", .friction),
+            .attr("mRestitution", .restitution),
+            .attr("mLinearDamping", .linear_damping),
+            .attr("mAngularDamping", .angular_damping),
+            .attr("mMaxLinearVelocity", .max_linear_velocity),
+            .attr("mMaxAngularVelocity", .max_angular_velocity),
+            .attr("mGravityFactor", .gravity_factor),
+            .attr("mNumVelocityStepsOverride", .num_velocity_steps_override),
+            .attr("mNumPositionStepsOverride", .num_position_steps_override),
+            .enumAttr("mOverrideMassProperties", .override_mass_properties), // Exhaustive enum(u8), D3
+            .attr("mInertiaMultiplier", .inertia_multiplier),
+            .attr("mMassPropertiesOverride", .mass_properties_override),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
+
+    /// The attribute "mShape" (SerializationArchitecture.md S5): Jolt's `RefConst<ShapeSettings> mShape`, which Zolt
+    /// keeps in the union `shape`. The stream sees `instance ShapeSettings`.
+    const ShapeAttribute = struct {
+        pub const Member = Ref(ShapeSettings);
+
+        /// What is written: the shape settings, or null when there are none (also for a Shape, which cannot be
+        /// serialized). The reference is borrowed.
+        pub fn get(self: *const BodyCreationSettings) Member {
+            return switch (self.shape) {
+                .settings => |s| .{ .ptr = s.ptr },
+                else => .empty,
+            };
+        }
+
+        /// Link resolution: store the settings (one more reference), or null for a link to a wrong object. A null
+        /// identifier does not call this, so the union keeps `.none`, like Jolt's untouched member.
+        pub fn set(self: *BodyCreationSettings, settings: ?*ShapeSettings) void {
+            self.setShapeSettings(settings);
+        }
+    };
 
     pub const GroupFilterToIDMap = ObjectToIDMap(GroupFilter);
     pub const IDToGroupFilterMap = IDToObjectMap(GroupFilter);
@@ -859,4 +914,150 @@ fn saveRestoreChildren(allocator: Allocator) !void {
 
 test "BodyCreationSettings: out of memory in saveWithChildren / restoreWithChildren" {
     try testing.checkAllAllocationFailures(testing.allocator, saveRestoreChildren, .{});
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests of the object stream (the declaration `rtti`)
+
+const ObjectStreamIn = @import("../../ObjectStream/ObjectStreamIn.zig").ObjectStreamIn;
+const ObjectStreamOut = @import("../../ObjectStream/ObjectStreamOut.zig").ObjectStreamOut;
+const StreamType = @import("../../ObjectStream/ObjectStream.zig").StreamType;
+
+/// sWriteObject of `settings` with the stream's `allocator`. The bytes are allocated with testing.allocator (free them
+/// with it): the out of memory tests fail the allocations of the stream, not those of the writer.
+fn writeObject(allocator: Allocator, settings: *const BodyCreationSettings, stream_type: StreamType) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try ObjectStreamOut.sWriteObject(BodyCreationSettings, allocator, &out.writer, stream_type, settings);
+    return out.toOwnedSlice();
+}
+
+/// sReadObject of `bytes` (destroy it with `RTTI.of(BodyCreationSettings).destructObject`)
+fn readObject(allocator: Allocator, bytes: []const u8) ObjectStreamIn.Error!*BodyCreationSettings {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return ObjectStreamIn.sReadObject(BodyCreationSettings, allocator, &reader, .{});
+}
+
+test "BodyCreationSettings: object stream with shape settings, a group filter and every attribute" {
+    const allocator = testing.allocator;
+    const filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 5 });
+    filter.disableCollision(1, 3);
+    const sphere = try SphereShapeSettings.create(allocator, 0.5, .{});
+    var settings = testSettings();
+    defer settings.deinit();
+    settings.user_data = 0x0123_4567_89ab_cdef;
+    settings.setShapeSettings(sphere.asShapeSettings());
+    settings.collision_group.setGroupFilter(filter.asGroupFilter());
+
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeObject(allocator, &settings, stream_type);
+        defer allocator.free(bytes);
+        const read = try readObject(allocator, bytes);
+        defer RTTI.of(BodyCreationSettings).destructObject(read, allocator);
+
+        // The values, with a new shape settings object and a new group filter that the settings hold (one reference)
+        const read_shape = read.getShapeSettings().?;
+        const read_filter = read.collision_group.getGroupFilter().?;
+        try testing.expect(read_shape != sphere.asShapeSettings() and read_filter != filter.asGroupFilter());
+        try testing.expect(RTTI.getRTTI(ShapeSettings, read_shape) == SphereShapeSettings.rtti);
+        try testing.expectEqual(@as(u32, 1), read_shape.getRefCount());
+        try testing.expectEqual(@as(u32, 1), read_filter.getRefCount());
+        const read_table = virtual.downcast(GroupFilterTable, read_filter);
+        try testing.expect(!read_table.isCollisionEnabled(1, 3) and read_table.isCollisionEnabled(1, 2));
+        var expected = settings.clone();
+        defer expected.deinit();
+        expected.setShapeSettings(read_shape);
+        expected.collision_group.setGroupFilter(read_filter);
+        try testing.expect(read.eql(&expected));
+
+        // The same bytes again, in both formats
+        const again = try writeObject(allocator, read, stream_type);
+        defer allocator.free(again);
+        try testing.expectEqualSlices(u8, bytes, again);
+    }
+
+    // The old name of mCollideKinematicVsNonDynamic is the stream name
+    const text = try writeObject(allocator, &settings, .text);
+    defer allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "mSensorDetectsStatic bool") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "mCollideKinematicVsNonDynamic") == null);
+}
+
+test "BodyCreationSettings: object stream with a shape (not serializable) or without a shape" {
+    const allocator = testing.allocator;
+    const box = try BoxShape.create(allocator, Vec3.init(1, 2, 3), .{});
+    var with_shape: BodyCreationSettings = .initWithShape(box.asShape(), RVec3.init(1, 2, 3), Quat.identity(), .static, 1);
+    defer with_shape.deinit();
+    var without: BodyCreationSettings = .{};
+    defer without.deinit();
+    without.position = RVec3.init(1, 2, 3);
+    without.motion_type = .static;
+    without.object_layer = 1;
+
+    // A Shape is written as a null mShape, like Jolt's mShapePtr that is not serialized
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeObject(allocator, &with_shape, stream_type);
+        defer allocator.free(bytes);
+        const expected = try writeObject(allocator, &without, stream_type);
+        defer allocator.free(expected);
+        try testing.expectEqualSlices(u8, expected, bytes);
+        const read = try readObject(allocator, bytes);
+        defer RTTI.of(BodyCreationSettings).destructObject(read, allocator);
+        try testing.expect(read.shape == .none);
+        try testing.expect(read.eql(&without));
+    }
+}
+
+test "BodyCreationSettings: object stream enum attributes (truncated integers, bit flags, unnamed values, D3)" {
+    const allocator = testing.allocator;
+    const stream =
+        \\TOS 1.00
+        \\declare BodyCreationSettings 6
+        \\  mObjectLayer uint32
+        \\  mMotionType uint32
+        \\  mAllowedDOFs uint32
+        \\  mSensorDetectsStatic bool
+        \\  mMotionQuality uint32
+        \\  mOverrideMassProperties uint32
+        \\object BodyCreationSettings 00000001
+        \\  74565
+        \\  7
+        \\  511
+        \\  true
+        \\  1
+        \\  2
+    ;
+    const read = try readObject(allocator, stream);
+    defer RTTI.of(BodyCreationSettings).destructObject(read, allocator);
+    // static_cast: the object layer and the allowed DOFs are truncated
+    try testing.expectEqual(@as(ObjectLayer, @truncate(@as(u32, 74565))), read.object_layer);
+    try testing.expectEqual(@as(u8, 0xff), @as(u8, @bitCast(read.allowed_dofs)));
+    // 7 is not a MotionType: the member keeps its default (Zolt, D3)
+    try testing.expect(read.motion_type == .dynamic);
+    // The old name of mCollideKinematicVsNonDynamic
+    try testing.expect(read.collide_kinematic_vs_non_dynamic);
+    try testing.expect(read.motion_quality == .linear_cast);
+    try testing.expect(read.override_mass_properties == .mass_and_inertia_provided);
+    // Attributes that the stream does not have keep their defaults
+    try testing.expectEqual(@as(f32, 0.2), read.friction);
+    try testing.expect(read.shape == .none);
+}
+
+fn writeReadObject(allocator: Allocator) !void {
+    const sphere = try SphereShapeSettings.create(allocator, 0.5, .{});
+    var settings = testSettings();
+    defer settings.deinit();
+    settings.setShapeSettings(sphere.asShapeSettings());
+    const filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 3 });
+    settings.collision_group.setGroupFilter(filter.asGroupFilter());
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeObject(allocator, &settings, stream_type);
+        defer testing.allocator.free(bytes);
+        const read = try readObject(allocator, bytes);
+        RTTI.of(BodyCreationSettings).destructObject(read, allocator);
+    }
+}
+
+test "BodyCreationSettings: out of memory in the object stream" {
+    try testing.checkAllAllocationFailures(testing.allocator, writeReadObject, .{});
 }

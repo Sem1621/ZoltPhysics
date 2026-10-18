@@ -685,17 +685,17 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
 of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
 [SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and
-every class that reaches one. ✅ 31 declared · 🟡 50 pending (`serialization_pending`) · ❌ 0 not declared
+every class that reaches one. ✅ 40 declared · 🟡 41 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 
 | Class | Status | Zig |
 |-------|--------|-----|
 | `AABox` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
-| `BodyCreationSettings` | 🟡 pending | `Zolt/Physics/Body/BodyCreationSettings.zig` |
+| `BodyCreationSettings` | ✅ declared | `Zolt/Physics/Body/BodyCreationSettings.zig` |
 | `BoxShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
 | `CapsuleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
-| `CollisionGroup` | 🟡 pending | `Zolt/Physics/Collision/CollisionGroup.zig` |
+| `CollisionGroup` | ✅ declared | `Zolt/Physics/Collision/CollisionGroup.zig` |
 | `Color` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `CompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
 | `CompoundShapeSettings::SubShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
@@ -709,15 +709,15 @@ every class that reaches one. ✅ 31 declared · 🟡 50 pending (`serialization
 | `EmptyShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
 | `FixedConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/FixedConstraint.zig` |
 | `GearConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/GearConstraint.zig` |
-| `GroupFilter` | 🟡 pending | `Zolt/Physics/Collision/GroupFilter.zig` |
-| `GroupFilterTable` | 🟡 pending | `Zolt/Physics/Collision/GroupFilterTable.zig` |
+| `GroupFilter` | ✅ declared | `Zolt/Physics/Collision/GroupFilter.zig` |
+| `GroupFilterTable` | ✅ declared | `Zolt/Physics/Collision/GroupFilterTable.zig` |
 | `HeightFieldShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/HeightFieldShape.zig` |
 | `HingeConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/HingeConstraint.zig` |
 | `IndexedTriangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `IndexedTriangleNoMaterial` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `LinearCurve` | 🟡 pending | `Zolt/Core/LinearCurve.zig` |
 | `LinearCurve::Point` | 🟡 pending | `Zolt/Core/LinearCurve.zig` |
-| `MassProperties` | 🟡 pending | `Zolt/Physics/Body/MassProperties.zig` |
+| `MassProperties` | ✅ declared | `Zolt/Physics/Body/MassProperties.zig` |
 | `MeshShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
 | `MotorSettings` | ✅ declared | `Zolt/Physics/Constraints/MotorSettings.zig` |
 | `MotorcycleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
@@ -727,10 +727,10 @@ every class that reaches one. ✅ 31 declared · 🟡 50 pending (`serialization
 | `PathConstraintPathHermite` | 🟡 pending | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
 | `PathConstraintPathHermite::Point` | 🟡 pending | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
 | `PathConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/PathConstraint.zig` |
-| `PhysicsMaterial` | 🟡 pending | `Zolt/Physics/Collision/PhysicsMaterial.zig` |
-| `PhysicsMaterialSimple` | 🟡 pending | `Zolt/Physics/Collision/PhysicsMaterialSimple.zig` |
-| `PhysicsScene` | 🟡 pending | `Zolt/Physics/PhysicsScene.zig` |
-| `PhysicsScene::ConnectedConstraint` | 🟡 pending | `Zolt/Physics/PhysicsScene.zig` |
+| `PhysicsMaterial` | ✅ declared | `Zolt/Physics/Collision/PhysicsMaterial.zig` |
+| `PhysicsMaterialSimple` | ✅ declared | `Zolt/Physics/Collision/PhysicsMaterialSimple.zig` |
+| `PhysicsScene` | ✅ declared | `Zolt/Physics/PhysicsScene.zig` |
+| `PhysicsScene::ConnectedConstraint` | ✅ declared | `Zolt/Physics/PhysicsScene.zig` |
 | `Plane` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `PlaneShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/PlaneShape.zig` |
 | `PointConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/PointConstraint.zig` |

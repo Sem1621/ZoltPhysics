@@ -6,7 +6,8 @@
 //! - Zig has no copy constructor: `clone()` copies (adds a reference to the filter), `assign(&other)` is the copy
 //!   assignment, `deinit()` the destructor (releases the filter) and a plain `=` moves;
 //! - `operator ==` is `eql` (`!=` is `!a.eql(b)`);
-//! - `sInvalid` is the compile time constant `invalid`.
+//! - `sInvalid` is the compile time constant `invalid`;
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti`.
 
 const std = @import("std");
 const RTTI = @import("../../Core/RTTI.zig").RTTI;
@@ -24,9 +25,12 @@ pub const CollisionGroup = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "CollisionGroup",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mGroupFilter", .group_filter),
+            .attr("mGroupID", .group_id),
+            .attr("mSubGroupID", .sub_group_id),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const GroupID = u32;
     pub const SubGroupID = u32;

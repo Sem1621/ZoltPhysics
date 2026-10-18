@@ -7,6 +7,7 @@
 //! - `sGetEquivalentSolidBoxSize` is `getEquivalentSolidBoxSize`, `Scale(inScale)` is `scale(scale_value)`.
 //! - `operator ==` is `eql` (`!=` is `!a.eql(b)`).
 //! - Binary state: the mass (4 bytes) and the inertia tensor (a Mat44, 64 bytes), like Jolt.
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti`.
 
 const std = @import("std");
 const RTTI = @import("../../Core/RTTI.zig").RTTI;
@@ -28,9 +29,11 @@ pub const MassProperties = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "MassProperties",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mMass", .mass),
+            .attr("mInertia", .inertia),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Mass of the shape (kg)
     mass: f32 = 0.0,

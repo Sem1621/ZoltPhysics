@@ -25,6 +25,9 @@
 //! const m = try allocator.create(MyMaterial);
 //! m.* = .{ .base = try .initDerived(MyMaterial, allocator, "Slippery", Color.red), .friction = 0.1, .restitution = 0 };
 //! ```
+//!
+//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL: `rtti`. An object stream creates the
+//! material with `createDefault` and reads the name with the stream's allocator (the material's allocator).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -41,9 +44,11 @@ pub const PhysicsMaterialSimple = struct {
         .name = "PhysicsMaterialSimple",
         .kind = .virtual,
         .bases = &.{PhysicsMaterial},
+        .attributes = &.{
+            .attr("mDebugName", .debug_name),
+            .attr("mDebugColor", .debug_color),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .getDebugName, .getDebugColor, .saveBinaryState, .restoreBinaryState };
 
