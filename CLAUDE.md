@@ -28,7 +28,7 @@ zig build parity                            # compare with the C++ Jolt library 
 zig build parity -Dreference_asserts=true -Dtest-filter="blocked scenes run on the C++ side"  # new scenes vs an asserting Jolt build
 zig build hello-world-check                 # C++ HelloWorld and its port must print the same bytes
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892
-zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig  # format (CI checks this)
+zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon  # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
 python3 tools/port_status.py --write        # regenerate Docs/Zolt/Progress.md
 python3 tools/port_status.py --next         # what can be ported now (dependencies done)
@@ -54,7 +54,7 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
 - Port the matching Jolt unit tests with the same names and values, and add parity tests
   (`ZoltParity/`) for every function that computes numbers.
 - Before finishing: `zig build test`, `zig build test -Ddouble_precision=true`, `zig build parity`,
-  `zig fmt --check Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig`,
+  `zig fmt --check Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon`,
   `python3 tools/port_status.py --write`.
 
 ## Plan and status
