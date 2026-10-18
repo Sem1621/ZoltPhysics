@@ -15,6 +15,7 @@ Usage:
     python3 tools/port_status.py --write    # also regenerate Docs/Zolt/Progress.md
     python3 tools/port_status.py --check    # exit 1 if Progress.md is stale or lint fails (CI)
     python3 tools/port_status.py --next     # list unported C++ units whose dependencies are all ported
+    python3 tools/port_status.py --no-pending  # exit 1 while a serializable class is pending or not declared (Phase 8)
 """
 import argparse
 import os
@@ -259,7 +260,7 @@ def percent(done, total):
     return 100.0 * done / total if total else 100.0
 
 
-def render_markdown(lib_rows, test_rows):
+def render_markdown(lib_rows, test_rows, serialization):
     out = []
     out.append("# Zolt Port Progress")
     out.append("")
@@ -310,7 +311,94 @@ def render_markdown(lib_rows, test_rows):
             out.append("")
             out.append("</details>")
             out.append("")
+    out.extend(render_serialization(serialization))
     return "\n".join(out).rstrip() + "\n"
+
+
+# Phase 8 (Docs/Zolt/SerializationArchitecture.md S18): Jolt's serializable classes and their Zolt declarations. A
+# declaration without its attributes carries `pub const serialization_pending = true;`. Phase 9 owns the SoftBody and
+# Hair classes.
+JOLT_SERIALIZABLE = re.compile(r"JPH_IMPLEMENT_SERIALIZABLE_[A-Z_]+\(\s*([\w:]+)\s*\)")
+ZOLT_RTTI_NAME = re.compile(r'\.name\s*=\s*"([^"]+)"')
+ZOLT_PENDING = re.compile(r"^(\s*)pub const serialization_pending\s*=\s*true\s*;")
+PHASE9_SERIALIZABLE = ("SoftBody", "Hair")
+
+
+def serialization_status():
+    """[(jolt class, zolt file or None, 'declared' | 'pending' | 'missing')] for Jolt's serializable classes"""
+    jolt = set()
+    for dirpath, _, filenames in os.walk(os.path.join(ROOT, "Jolt")):
+        for name in filenames:
+            if name.endswith(".cpp"):
+                with open(os.path.join(dirpath, name), encoding="utf-8", errors="replace") as f:
+                    jolt.update(JOLT_SERIALIZABLE.findall(f.read()))
+    jolt = {c for c in jolt if not c.startswith(PHASE9_SERIALIZABLE)}
+
+    # Zolt: every `RTTI.declare(` with the `.name` that follows it, and the markers. A marker belongs to the nearest
+    # declaration with the same indentation (both are at the top of the struct).
+    declared = {}
+    for dirpath, _, filenames in os.walk(os.path.join(ROOT, "Zolt")):
+        for name in sorted(filenames):
+            if not name.endswith(".zig"):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            declarations = []
+            markers = []
+            for i, line in enumerate(lines):
+                if line.lstrip().startswith("//"):
+                    continue
+                if "RTTI.declare(" in line:
+                    for following in lines[i:i + 5]:
+                        m = ZOLT_RTTI_NAME.search(following)
+                        if m:
+                            indent = len(line) - len(line.lstrip())
+                            declarations.append((m.group(1), i, indent))
+                            break
+                m = ZOLT_PENDING.match(line)
+                if m:
+                    markers.append((i, len(m.group(1))))
+            pending = set()
+            for line_no, indent in markers:
+                candidates = [d for d in declarations if d[2] == indent]
+                if candidates:
+                    pending.add(min(candidates, key=lambda d: abs(d[1] - line_no))[0])
+            for class_name, _, _ in declarations:
+                declared.setdefault(class_name, (rel(path), class_name in pending))
+
+    result = []
+    for c in sorted(jolt):
+        if c in declared:
+            zig, is_pending = declared[c]
+            result.append((c, zig, "pending" if is_pending else "declared"))
+        else:
+            result.append((c, None, "missing"))
+    return result
+
+
+SERIALIZATION_ICON = {"declared": "✅", "pending": "🟡", "missing": "❌"}
+
+
+def render_serialization(status):
+    out = ["## Serialization (Phase 8)", ""]
+    counts = {k: sum(1 for _, _, s in status if s == k) for k in SERIALIZATION_ICON}
+    out.append(f"Jolt's {len(status)} serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes")
+    out.append("of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see")
+    out.append("[SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and")
+    out.append(f"every class that reaches one. ✅ {counts['declared']} declared · 🟡 {counts['pending']} pending "
+               f"(`serialization_pending`) · ❌ {counts['missing']} not declared")
+    out.append("")
+    out.append("<details><summary>Serializable classes</summary>")
+    out.append("")
+    out.append("| Class | Status | Zig |")
+    out.append("|-------|--------|-----|")
+    for c, zig, s in status:
+        label = "not declared" if s == "missing" else s
+        out.append(f"| `{c}` | {SERIALIZATION_ICON[s]} {label} | {f'`{zig}`' if zig else ''} |")
+    out.append("")
+    out.append("</details>")
+    return out
 
 
 INCLUDE = re.compile(r'^\s*#\s*include\s*<(Jolt/[^>]+)>', re.MULTILINE)
@@ -364,6 +452,8 @@ def main():
     ap.add_argument("--check", action="store_true", help="fail if Progress.md is stale or lint finds problems")
     ap.add_argument("--next", action="store_true", help="list unported units whose dependencies are ported")
     ap.add_argument("--verbose", action="store_true", help="with --next: also list blocked units")
+    ap.add_argument("--no-pending", action="store_true",
+                    help="fail while a serializable class is pending or not declared (the final check of Phase 8)")
     args = ap.parse_args()
 
     lib_rows, test_rows, lint = collect()
@@ -373,7 +463,8 @@ def main():
             for unit, missing in blocked:
                 print(f"  {unit}: needs {', '.join(m.removeprefix('Jolt/') for m in missing)}")
         return
-    markdown = render_markdown(lib_rows, test_rows)
+    serialization = serialization_status()
+    markdown = render_markdown(lib_rows, test_rows, serialization)
 
     for title, rows in (("Library", lib_rows), ("Unit tests", test_rows)):
         print(f"{title}:")
@@ -382,6 +473,8 @@ def main():
             progress = "deferred" if reason else f"{percent(done, total):5.1f}%"
             print(f"  {group:<32} {progress:>8}  ({counts['complete']} complete, {counts['partial']} partial, "
                   f"{counts['stub']} stub, {counts['todo']} todo, {counts['n/a']} n/a, {counts['deferred']} deferred, {total} lines)")
+    counts = {k: sum(1 for _, _, s in serialization if s == k) for k in SERIALIZATION_ICON}
+    print(f"Serialization: {counts['declared']} declared, {counts['pending']} pending, {counts['missing']} not declared")
     for message in lint:
         print(f"lint: {message}", file=sys.stderr)
 
@@ -397,6 +490,13 @@ def main():
             print("Docs/Zolt/Progress.md is stale, run: python3 tools/port_status.py --write", file=sys.stderr)
         untidy = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "tidy_registry.py"), "--check"]).returncode != 0
         if stale or lint or untidy:
+            sys.exit(1)
+
+    if args.no_pending:
+        left = [(c, s) for c, _, s in serialization if s != "declared"]
+        for c, s in left:
+            print(f"serialization: {c} is {'pending' if s == 'pending' else 'not declared'}", file=sys.stderr)
+        if left:
             sys.exit(1)
 
 

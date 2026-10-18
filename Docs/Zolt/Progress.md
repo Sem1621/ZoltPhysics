@@ -679,3 +679,98 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `WheeledVehicleTests.cpp` | 304 | ✅ complete | `ZoltTests/Physics/WheeledVehicleTests.zig` |
 
 </details>
+
+## Serialization (Phase 8)
+
+Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
+of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
+[SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and
+every class that reaches one. ✅ 9 declared · 🟡 0 pending (`serialization_pending`) · ❌ 72 not declared
+
+<details><summary>Serializable classes</summary>
+
+| Class | Status | Zig |
+|-------|--------|-----|
+| `AABox` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `BodyCreationSettings` | ❌ not declared |  |
+| `BoxShapeSettings` | ❌ not declared |  |
+| `CapsuleShapeSettings` | ❌ not declared |  |
+| `CollisionGroup` | ❌ not declared |  |
+| `Color` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `CompoundShapeSettings` | ❌ not declared |  |
+| `CompoundShapeSettings::SubShapeSettings` | ❌ not declared |  |
+| `ConeConstraintSettings` | ❌ not declared |  |
+| `ConstraintSettings` | ❌ not declared |  |
+| `ConvexHullShapeSettings` | ❌ not declared |  |
+| `ConvexShapeSettings` | ❌ not declared |  |
+| `CylinderShapeSettings` | ❌ not declared |  |
+| `DecoratedShapeSettings` | ❌ not declared |  |
+| `DistanceConstraintSettings` | ❌ not declared |  |
+| `EmptyShapeSettings` | ❌ not declared |  |
+| `FixedConstraintSettings` | ❌ not declared |  |
+| `GearConstraintSettings` | ❌ not declared |  |
+| `GroupFilter` | ❌ not declared |  |
+| `GroupFilterTable` | ❌ not declared |  |
+| `HeightFieldShapeSettings` | ❌ not declared |  |
+| `HingeConstraintSettings` | ❌ not declared |  |
+| `IndexedTriangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `IndexedTriangleNoMaterial` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `LinearCurve` | ❌ not declared |  |
+| `LinearCurve::Point` | ❌ not declared |  |
+| `MassProperties` | ❌ not declared |  |
+| `MeshShapeSettings` | ❌ not declared |  |
+| `MotorSettings` | ✅ declared | `Zolt/Physics/Constraints/MotorSettings.zig` |
+| `MotorcycleControllerSettings` | ❌ not declared |  |
+| `MutableCompoundShapeSettings` | ❌ not declared |  |
+| `OffsetCenterOfMassShapeSettings` | ❌ not declared |  |
+| `PathConstraintPath` | ❌ not declared |  |
+| `PathConstraintPathHermite` | ❌ not declared |  |
+| `PathConstraintPathHermite::Point` | ❌ not declared |  |
+| `PathConstraintSettings` | ❌ not declared |  |
+| `PhysicsMaterial` | ❌ not declared |  |
+| `PhysicsMaterialSimple` | ❌ not declared |  |
+| `PhysicsScene` | ❌ not declared |  |
+| `PhysicsScene::ConnectedConstraint` | ❌ not declared |  |
+| `Plane` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `PlaneShapeSettings` | ❌ not declared |  |
+| `PointConstraintSettings` | ❌ not declared |  |
+| `PulleyConstraintSettings` | ❌ not declared |  |
+| `RackAndPinionConstraintSettings` | ❌ not declared |  |
+| `RagdollSettings` | ❌ not declared |  |
+| `RagdollSettings::AdditionalConstraint` | ❌ not declared |  |
+| `RagdollSettings::Part` | ❌ not declared |  |
+| `RotatedTranslatedShapeSettings` | ❌ not declared |  |
+| `ScaledShapeSettings` | ❌ not declared |  |
+| `SerializableObject` | ✅ declared | `Zolt/ObjectStream/SerializableObject.zig` |
+| `ShapeSettings` | ❌ not declared |  |
+| `SixDOFConstraintSettings` | ❌ not declared |  |
+| `SkeletalAnimation` | ❌ not declared |  |
+| `SkeletalAnimation::AnimatedJoint` | ❌ not declared |  |
+| `SkeletalAnimation::JointState` | ❌ not declared |  |
+| `SkeletalAnimation::Keyframe` | ❌ not declared |  |
+| `Skeleton` | ❌ not declared |  |
+| `Skeleton::Joint` | ❌ not declared |  |
+| `SliderConstraintSettings` | ❌ not declared |  |
+| `SphereShapeSettings` | ❌ not declared |  |
+| `SpringSettings` | ✅ declared | `Zolt/Physics/Constraints/SpringSettings.zig` |
+| `StaticCompoundShapeSettings` | ❌ not declared |  |
+| `SwingTwistConstraintSettings` | ❌ not declared |  |
+| `TaperedCapsuleShapeSettings` | ❌ not declared |  |
+| `TaperedCylinderShapeSettings` | ❌ not declared |  |
+| `TrackedVehicleControllerSettings` | ❌ not declared |  |
+| `Triangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `TriangleShapeSettings` | ❌ not declared |  |
+| `TwoBodyConstraintSettings` | ❌ not declared |  |
+| `VehicleAntiRollBar` | ❌ not declared |  |
+| `VehicleConstraintSettings` | ❌ not declared |  |
+| `VehicleControllerSettings` | ❌ not declared |  |
+| `VehicleDifferentialSettings` | ❌ not declared |  |
+| `VehicleEngineSettings` | ❌ not declared |  |
+| `VehicleTrackSettings` | ❌ not declared |  |
+| `VehicleTransmissionSettings` | ❌ not declared |  |
+| `WheelSettings` | ❌ not declared |  |
+| `WheelSettingsTV` | ❌ not declared |  |
+| `WheelSettingsWV` | ❌ not declared |  |
+| `WheeledVehicleControllerSettings` | ❌ not declared |  |
+
+</details>
