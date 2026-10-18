@@ -1,9 +1,9 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleConstraint.h, Jolt/Physics/Vehicle/VehicleConstraint.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings): `rtti`, its
-//!   attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported).
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings): `rtti` with
+//!   Jolt's attributes. The binary state does not write the class of each wheel (E6). An object stream does, so it reads
+//!   settings with wheels back.
 //! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2 and the porter template of FixedConstraint.zig:
 //!   - `VehicleConstraintSettings` embeds `base: ConstraintSettings` (`rtti`, overrides, `create` / `createDefault`
@@ -105,9 +105,15 @@ pub const VehicleConstraintSettings = struct {
         .name = "VehicleConstraintSettings",
         .kind = .virtual,
         .bases = &.{ConstraintSettings},
+        .attributes = &.{
+            .attr("mUp", .up),
+            .attr("mForward", .forward),
+            .attr("mMaxPitchRollAngle", .max_pitch_roll_angle),
+            .attr("mWheels", .wheels),
+            .attr("mAntiRollBars", .anti_roll_bars),
+            .attr("mController", .controller),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 

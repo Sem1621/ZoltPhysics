@@ -1,8 +1,8 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleAntiRollBar.h, Jolt/Physics/Vehicle/VehicleAntiRollBar.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleAntiRollBar):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleAntiRollBar): `rtti` with
+//!   Jolt's attributes.
 //! - `VehicleAntiRollBars` (`Array<VehicleAntiRollBar>`) is `std.ArrayList(VehicleAntiRollBar)`.
 
 const std = @import("std");
@@ -17,9 +17,12 @@ pub const VehicleAntiRollBar = extern struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "VehicleAntiRollBar",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mLeftWheel", .left_wheel),
+            .attr("mRightWheel", .right_wheel),
+            .attr("mStiffness", .stiffness),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Index (in mWheels) that represents the left wheel of this anti-rollbar
     left_wheel: i32 = 0,

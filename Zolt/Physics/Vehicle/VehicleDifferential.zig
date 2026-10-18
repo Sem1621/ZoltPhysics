@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleDifferentialSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//!   `rtti` with Jolt's attributes.
 //! - `CalculateTorqueRatio(left, right, outLeft, outRight)` returns `TorqueRatio{ .left, .right }` (out parameters).
 //!   Jolt's asserts on the settings (`mLimitedSlipRatio > 1`, the fractions add up to 1) are user input checks: they are
 //!   evaluated in safe builds only (`if (Core.enable_asserts)`), so that optimized builds compute what Jolt's release
@@ -20,9 +20,15 @@ pub const VehicleDifferentialSettings = extern struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "VehicleDifferentialSettings",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mLeftWheel", .left_wheel),
+            .attr("mRightWheel", .right_wheel),
+            .attr("mDifferentialRatio", .differential_ratio),
+            .attr("mLeftRightSplit", .left_right_split),
+            .attr("mLimitedSlipRatio", .limited_slip_ratio),
+            .attr("mEngineTorqueRatio", .engine_torque_ratio),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Index (in mWheels) that represents the left wheel of this differential (can be -1 to indicate no wheel)
     left_wheel: i32 = -1,

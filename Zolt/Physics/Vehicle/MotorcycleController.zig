@@ -1,10 +1,8 @@
 //! Port of: Jolt/Physics/Vehicle/MotorcycleController.h, Jolt/Physics/Vehicle/MotorcycleController.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings): `rtti`, its
-//!   attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported).
-//!   JPH_DEBUG_RENDERER (`Draw`): TODO(debug_renderer).
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings): `rtti` with
+//!   Jolt's attributes. JPH_DEBUG_RENDERER (`Draw`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2: `MotorcycleControllerSettings` embeds `base: WheeledVehicleControllerSettings`
 //!   (`rtti`, a class of `RegisterTypes.factory`, E3), `MotorcycleController`
 //!   embeds `base: WheeledVehicleController`: a level under the wheeled classes, built with their `initDerived`. Jolt's
@@ -54,9 +52,15 @@ pub const MotorcycleControllerSettings = struct {
         .name = "MotorcycleControllerSettings",
         .kind = .virtual,
         .bases = &.{WheeledVehicleControllerSettings},
+        .attributes = &.{
+            .attr("mMaxLeanAngle", .max_lean_angle),
+            .attr("mLeanSpringConstant", .lean_spring_constant),
+            .attr("mLeanSpringDamping", .lean_spring_damping),
+            .attr("mLeanSpringIntegrationCoefficient", .lean_spring_integration_coefficient),
+            .attr("mLeanSpringIntegrationCoefficientDecay", .lean_spring_integration_coefficient_decay),
+            .attr("mLeanSmoothingFactor", .lean_smoothing_factor),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
 

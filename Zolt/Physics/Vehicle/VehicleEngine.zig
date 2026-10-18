@@ -1,8 +1,9 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleEngine.h, Jolt/Physics/Vehicle/VehicleEngine.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleEngineSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleEngineSettings): `rtti` with
+//!   Jolt's attributes. Jolt does not declare `mInertia` and `mAngularDamping`, so the object stream keeps their
+//!   defaults.
 //! - JPH_DEBUG_RENDERER (`ConvertRPMToAngle`, `DrawRPM`): TODO(debug_renderer).
 //! - `VehicleEngine : VehicleEngineSettings` (non-virtual inheritance) embeds its parent as `base`
 //!   (CharacterVehicleArchitecture E2).
@@ -29,9 +30,13 @@ pub const VehicleEngineSettings = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "VehicleEngineSettings",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mMaxTorque", .max_torque),
+            .attr("mMinRPM", .min_rpm),
+            .attr("mMaxRPM", .max_rpm),
+            .attr("mNormalizedTorque", .normalized_torque),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Max amount of torque (Nm) that the engine can deliver
     max_torque: f32 = 500.0,

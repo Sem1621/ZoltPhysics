@@ -16,7 +16,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 94% | 40 | 2 | 0 | 0 | 12 | 1 | 6785 |
+| `Jolt/Core` | 95% | 41 | 1 | 0 | 0 | 12 | 1 | 6785 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
@@ -94,7 +94,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Core — 94%</summary>
+<details><summary>Jolt/Core — 95%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -120,7 +120,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `JobSystemThreadPool.cpp`, `JobSystemThreadPool.h` | 359 | ✅ complete | `Zolt/Core/JobSystemThreadPool.zig` |
 | `JobSystemWithBarrier.cpp`, `JobSystemWithBarrier.h` | 259 | ✅ complete | `Zolt/Core/JobSystemWithBarrier.zig` |
 | `LSANSuppressions.h` | 15 | ➖ n/a | sanitizer configuration |
-| `LinearCurve.cpp`, `LinearCurve.h` | 88 | 🟡 partial | `Zolt/Core/LinearCurve.zig` |
+| `LinearCurve.cpp`, `LinearCurve.h` | 88 | ✅ complete | `Zolt/Core/LinearCurve.zig` |
 | `LockFreeHashMap.h`, `LockFreeHashMap.inl` | 454 | ✅ complete | `Zolt/Core/LockFreeHashMap.zig` |
 | `Memory.cpp`, `Memory.h` | 138 | ➖ n/a | global allocation hooks, Zolt passes std.mem.Allocator explicitly |
 | `Mutex.h` | 183 | ✅ complete | `Zolt/Core/Mutex.zig` |
@@ -685,7 +685,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
 of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
 [SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and
-every class that reaches one. ✅ 57 declared · 🟡 24 pending (`serialization_pending`) · ❌ 0 not declared
+every class that reaches one. ✅ 72 declared · 🟡 9 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 
@@ -715,12 +715,12 @@ every class that reaches one. ✅ 57 declared · 🟡 24 pending (`serialization
 | `HingeConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/HingeConstraint.zig` |
 | `IndexedTriangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `IndexedTriangleNoMaterial` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
-| `LinearCurve` | 🟡 pending | `Zolt/Core/LinearCurve.zig` |
-| `LinearCurve::Point` | 🟡 pending | `Zolt/Core/LinearCurve.zig` |
+| `LinearCurve` | ✅ declared | `Zolt/Core/LinearCurve.zig` |
+| `LinearCurve::Point` | ✅ declared | `Zolt/Core/LinearCurve.zig` |
 | `MassProperties` | ✅ declared | `Zolt/Physics/Body/MassProperties.zig` |
 | `MeshShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
 | `MotorSettings` | ✅ declared | `Zolt/Physics/Constraints/MotorSettings.zig` |
-| `MotorcycleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
+| `MotorcycleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
 | `MutableCompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MutableCompoundShape.zig` |
 | `OffsetCenterOfMassShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/OffsetCenterOfMassShape.zig` |
 | `PathConstraintPath` | ✅ declared | `Zolt/Physics/Constraints/PathConstraintPath.zig` |
@@ -757,20 +757,20 @@ every class that reaches one. ✅ 57 declared · 🟡 24 pending (`serialization
 | `SwingTwistConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SwingTwistConstraint.zig` |
 | `TaperedCapsuleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
 | `TaperedCylinderShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
-| `TrackedVehicleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
+| `TrackedVehicleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
 | `Triangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `TriangleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TriangleShape.zig` |
 | `TwoBodyConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/TwoBodyConstraint.zig` |
-| `VehicleAntiRollBar` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
-| `VehicleConstraintSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |
-| `VehicleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleController.zig` |
-| `VehicleDifferentialSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleDifferential.zig` |
-| `VehicleEngineSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleEngine.zig` |
-| `VehicleTrackSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleTrack.zig` |
-| `VehicleTransmissionSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleTransmission.zig` |
-| `WheelSettings` | 🟡 pending | `Zolt/Physics/Vehicle/Wheel.zig` |
-| `WheelSettingsTV` | 🟡 pending | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
-| `WheelSettingsWV` | 🟡 pending | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
-| `WheeledVehicleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
+| `VehicleAntiRollBar` | ✅ declared | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
+| `VehicleConstraintSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |
+| `VehicleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleController.zig` |
+| `VehicleDifferentialSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleDifferential.zig` |
+| `VehicleEngineSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleEngine.zig` |
+| `VehicleTrackSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleTrack.zig` |
+| `VehicleTransmissionSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleTransmission.zig` |
+| `WheelSettings` | ✅ declared | `Zolt/Physics/Vehicle/Wheel.zig` |
+| `WheelSettingsTV` | ✅ declared | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
+| `WheelSettingsWV` | ✅ declared | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
+| `WheeledVehicleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
 
 </details>

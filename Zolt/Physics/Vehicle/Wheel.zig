@@ -1,8 +1,9 @@
 //! Port of: Jolt/Physics/Vehicle/Wheel.h, Jolt/Physics/Vehicle/Wheel.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettings): `rtti`, its attributes are
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettings): `rtti` with Jolt's
+//!   attributes. Jolt adds no base class, so WheelSettings is not kind of SerializableObject (SerializationArchitecture.md
+//!   S15).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettings` is a concrete pattern A root with `ref_count` (RefTarget<WheelSettings>): its virtual functions
 //!     `saveBinaryState` / `restoreBinaryState` keep their bodies in `impl` (so that WheelSettings itself can be created,
@@ -51,9 +52,24 @@ pub const WheelSettings = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "WheelSettings",
         .kind = .virtual,
+        .attributes = &.{
+            .attr("mSuspensionForcePoint", .suspension_force_point),
+            .attr("mPosition", .position),
+            .attr("mSuspensionDirection", .suspension_direction),
+            .attr("mSteeringAxis", .steering_axis),
+            .attr("mWheelForward", .wheel_forward),
+            .attr("mWheelUp", .wheel_up),
+            .attr("mSuspensionMinLength", .suspension_min_length),
+            .attr("mSuspensionMaxLength", .suspension_max_length),
+            .attr("mSuspensionPreloadLength", .suspension_preload_length),
+            .enumAlias("mSuspensionSpringMode", .{ .suspension_spring, .mode }),
+            .alias("mSuspensionFrequency", .{ .suspension_spring, .frequency }), // Renaming attributes to stay compatible with old versions of the library
+            .alias("mSuspensionDamping", .{ .suspension_spring, .damping }),
+            .attr("mRadius", .radius),
+            .attr("mWidth", .width),
+            .attr("mEnableSuspensionForcePoint", .enable_suspension_force_point),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {

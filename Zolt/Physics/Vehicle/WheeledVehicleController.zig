@@ -3,8 +3,8 @@
 //! Not ported: JPH_TRACE_VEHICLE_STATS (a developer switch that is commented out in Jolt)
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheeledVehicleControllerSettings,
-//!   WheelSettingsWV): `rtti`, the attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture
-//!   E1; the binary state is ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
+//!   WheelSettingsWV): `rtti` with Jolt's attributes. JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`,
+//!   `mRPMMeterSize`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsWV` embeds `base: WheelSettings` and overrides its binary state; `WheelWV` embeds `base: Wheel`.
 //!   - `WheeledVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti`, a class of
@@ -76,9 +76,16 @@ pub const WheelSettingsWV = struct {
         .name = "WheelSettingsWV",
         .kind = .virtual,
         .bases = &.{WheelSettings},
+        .attributes = &.{
+            .attr("mInertia", .inertia),
+            .attr("mAngularDamping", .angular_damping),
+            .attr("mMaxSteerAngle", .max_steer_angle),
+            .attr("mLongitudinalFriction", .longitudinal_friction),
+            .attr("mLateralFriction", .lateral_friction),
+            .attr("mMaxBrakeTorque", .max_brake_torque),
+            .attr("mMaxHandBrakeTorque", .max_hand_brake_torque),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 
@@ -287,9 +294,13 @@ pub const WheeledVehicleControllerSettings = struct {
         .name = "WheeledVehicleControllerSettings",
         .kind = .virtual,
         .bases = &.{VehicleControllerSettings},
+        .attributes = &.{
+            .attr("mEngine", .engine),
+            .attr("mTransmission", .transmission),
+            .attr("mDifferentials", .differentials),
+            .attr("mDifferentialLimitedSlipRatio", .differential_limited_slip_ratio),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
 

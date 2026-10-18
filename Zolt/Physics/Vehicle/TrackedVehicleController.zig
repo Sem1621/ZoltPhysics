@@ -2,8 +2,9 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TrackedVehicleControllerSettings,
-//!   WheelSettingsTV): `rtti`, the attributes are TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture
-//!   E1; the binary state is ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
+//!   WheelSettingsTV): `rtti` with Jolt's attributes. `mTracks` is the C array `[2]VehicleTrackSettings`: a stream must
+//!   have exactly 2 tracks. JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`):
+//!   TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsTV` embeds `base: WheelSettings` and overrides its binary state; `WheelTV` embeds `base: Wheel`.
 //!   - `TrackedVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti`, a class of
@@ -69,9 +70,11 @@ pub const WheelSettingsTV = struct {
         .name = "WheelSettingsTV",
         .kind = .virtual,
         .bases = &.{WheelSettings},
+        .attributes = &.{
+            .attr("mLongitudinalFriction", .longitudinal_friction),
+            .attr("mLateralFriction", .lateral_friction),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 
@@ -209,9 +212,12 @@ pub const TrackedVehicleControllerSettings = struct {
         .name = "TrackedVehicleControllerSettings",
         .kind = .virtual,
         .bases = &.{VehicleControllerSettings},
+        .attributes = &.{
+            .attr("mEngine", .engine),
+            .attr("mTransmission", .transmission),
+            .attr("mTracks", .tracks),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
 
