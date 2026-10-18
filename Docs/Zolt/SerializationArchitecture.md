@@ -324,7 +324,8 @@ The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference
 - The failure of a skipped object is ignored.
 - Static attribute classes are declared even when they are abstract or unused.
 - WheelSettings has no RTTI base, so it is not kind of SerializableObject.
-- Binary strings are cut at the first NUL. The empty string never enters the string table.
+- Binary strings are cut at the first NUL. The empty string never enters the string table. The writers write the
+  whole string, so a string with a NUL does not survive a binary round trip, in Jolt either.
 - A C array needs exactly N elements; a StaticArray at most N.
 
 ### S16 Zolt's defined behavior where Jolt is undefined
@@ -363,6 +364,9 @@ None of these cases occurs in a stream that Jolt or Zolt writes.
   soft bodies fails to read, because skipping their `mSettings` Ref misreads the stream (S15).
 - Writing a PhysicsScene lacks Jolt's `mSoftBodies` and the soft body declarations. Its parity is a cross-read: the C++
   side reads Zolt's stream and must write what it writes for the same scene.
+  - A string with a NUL (a PhysicsMaterialSimple debug name in a text stream) is cut when Jolt reads binary bytes
+    (S15), its own bytes too. When a string has a NUL, the binary comparison takes the bytes that Jolt writes after
+    reading its own binary bytes. Without a NUL, and in text, the bytes must equal Jolt's first write.
 - P1 has an explicit exclusion list of these 13 classes. Phase 9 removes it.
 
 ### S18 Pending declarations during the phase

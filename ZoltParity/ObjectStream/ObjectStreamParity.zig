@@ -24,7 +24,9 @@
 //!
 //! Comparing bytes: both sides read a stream as the requested class and write the main object in both formats; the
 //! result (read or not) and the bytes must be equal. A class that reaches a Phase 9 class (PhysicsScene.mSoftBodies,
-//! S17) is compared by cross-reading: the C++ side reads Zolt's bytes and must write its own bytes again.
+//! S17) is compared by cross-reading: the C++ side reads Zolt's bytes and must write its own bytes again. In binary,
+//! when a string has a NUL, these are the bytes it writes after reading its own binary bytes: Jolt's binary reader cuts
+//! a string at its first NUL (S15), its own bytes included.
 //!
 //! The C++ side of P2 to P7 reads with the Factory after RegisterTypes and with allocation hooks that zero every block
 //! and defer frees until the call returns. Every such call checks that its hooks were still installed at the end (-5
@@ -200,11 +202,20 @@ fn roundTrip(allocator: Allocator, bytes: []const u8, class: [:0]const u8, ctx_i
     for (formats) |f| {
         if (!cross) {
             try expectSame(ctx, if (f == .text) "written again as text" else "written again as binary", zz.get(f), j.get(f));
-        } else {
-            const c2 = try mustResave(allocator, .jolt, zz.get(f), class, ctx);
-            defer c2.deinit(allocator);
-            try expectSame(ctx, "Jolt reads Zolt's bytes", c2.get(f), j.get(f));
+            continue;
         }
+        const c2 = try mustResave(allocator, .jolt, zz.get(f), class, ctx);
+        defer c2.deinit(allocator);
+        // Binary with a string that has a NUL (a NUL byte in a text stream is always inside a string): Jolt's binary
+        // reader cuts the string (S15), also in Jolt's own binary bytes. Then the C++ side must write what it writes
+        // after reading its own binary bytes. The text comparison keeps the whole string.
+        if (f == .binary and !std.mem.eql(u8, c2.binary, j.binary) and std.mem.indexOfScalar(u8, j.text, 0) != null) {
+            const c3 = try mustResave(allocator, .jolt, j.binary, class, ctx);
+            defer c3.deinit(allocator);
+            try expectSame(ctx, "Jolt reads Zolt's bytes (and its own binary bytes, a string has a NUL)", c2.binary, c3.binary);
+            continue;
+        }
+        try expectSame(ctx, "Jolt reads Zolt's bytes", c2.get(f), j.get(f));
     }
     if (depth == .first) return true;
 
