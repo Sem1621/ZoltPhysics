@@ -27,12 +27,18 @@
 //!   stream (Jolt reads the member twice: a reallocated array leaves dangling links, a Ref leaks);
 //! - D12: references (Ref / RefConst) that form a cycle are an invalid stream (Jolt reads the objects and leaks them);
 //! - D15: class data nested deeper than `max_nesting_depth` levels is an invalid stream (Jolt recurses until the stack
-//!   overflows, also on a skipped class that contains itself, which nests without end).
+//!   overflows, also on a skipped class that contains itself, which nests without end);
+//! - D17: `sReadObject(T)` of a T without a virtual destructor needs a main object of exactly class T (Jolt returns an
+//!   object of a derived class, which the caller then deletes through a `T *`: undefined).
+//!
+//! Class names in text are whole words. Where Jolt looks a name up as a `const char *` (the factory, the class of an
+//! attribute, the class of a skipped instance), the name ends at the first NUL, like in Jolt.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Reader = std.Io.Reader;
-const RTTI = @import("../Core/RTTI.zig").RTTI;
+const rtti_file = @import("../Core/RTTI.zig");
+const RTTI = rtti_file.RTTI;
 const Factory = @import("../Core/Factory.zig").Factory;
 const Ref = @import("../Core/Reference.zig").Ref;
 const ObjectStream = @import("ObjectStream.zig");
@@ -125,12 +131,35 @@ pub const ObjectStreamIn = struct {
     };
 
     /// Main function to read an object from a stream (sReadObject(istream &, T *&)): the first object of the stream,
-    /// which must be a T, with the reference count that the stream's links gave it (usually 0)
+    /// which must be a T, with the reference count that the stream's links gave it (usually 0).
+    ///
+    /// Zolt: when T has no virtual destructor, the main object must be exactly a T, because the caller frees it as a T
+    /// (D17). A main object of a derived class is destroyed and the read fails with error.InvalidObjectStream. T cannot
+    /// be a class that uses the RTTI of its parent (a compile error, the object would be a parent).
     pub fn sReadObject(comptime T: type, allocator: Allocator, reader: *Reader, options: Options) Error!*T {
+        comptime rtti_file.checkOwnRTTI(T, "ObjectStreamIn.sReadObject");
+        const rtti = RTTI.of(T);
         var stream = try open(allocator, reader, options.factory);
         defer stream.deinit();
-        const main = try stream.read(RTTI.of(T));
-        return @ptrCast(@alignCast(main.rtti.castTo(main.instance, RTTI.of(T)).?));
+        const main = try stream.read(rtti);
+        if (comptime rtti_file.VTableRoot(T) == null) {
+            if (main.rtti != rtti) {
+                // Jolt deletes it through a T * later, which is undefined (the wrong size, the derived part leaks)
+                log.info("ObjectStreamIn: Main object of different type. Expected {s}, but found {s}.", .{ rtti.name, main.rtti.name });
+                releaseMainObject(main, allocator);
+                return error.InvalidObjectStream;
+            }
+        }
+        return @ptrCast(@alignCast(main.rtti.castTo(main.instance, rtti).?));
+    }
+
+    /// Release a main object that `read` returned: destroy it, unless a link of another object holds a reference to
+    /// it (that object owns it then, as it would after a successful read)
+    fn releaseMainObject(main: MainObject, allocator: Allocator) void {
+        if (main.rtti.ref_count) |ref_count| {
+            if (ref_count(main.instance).get() != 0) return;
+        }
+        main.rtti.destructObject(main.instance, allocator);
     }
 
     /// sReadObject(istream &, Ref<T> &): the main object wrapped in a Ref (one more reference)
@@ -357,7 +386,9 @@ pub const ObjectStreamIn = struct {
 
         // Get class description
         const class_entry = self.class_descriptions.getEntry(class_name) orelse {
-            // Jolt does not read the identifier: the next word is not a data type and the read ends
+            // Jolt does not read the identifier, so the next read takes it as a data type. In text it is no data type
+            // word and the read ends. In binary, identifier 0 or 1 reads on as `declare` / `object` (a misread), and
+            // any other identifier is an out of place token (a fatal error).
             log.info("ObjectStreamIn: Found object of unknown class {s}.", .{class_name});
             return null;
         };
@@ -547,8 +578,8 @@ pub const ObjectStreamIn = struct {
 
         // Read data for all items
         if (data_type == .instance) {
-            // Get the class description
-            const class_desc = self.class_descriptions.getPtr(class_name) orelse {
+            // Get the class description (Jolt looks it up with a `const char *`: the name ends at the first NUL)
+            const class_desc = self.class_descriptions.getPtr(std.mem.sliceTo(class_name, 0)) orelse {
                 log.info("ObjectStreamIn: Found instance of unknown class {s}.", .{class_name});
                 return error.InvalidObjectStream;
             };
@@ -604,13 +635,14 @@ pub const ObjectStreamIn = struct {
         }
     }
 
+    /// ReadPrimitiveData of a primitive (the String overload is `readString`)
     pub fn readPrimitive(self: *ObjectStreamIn, comptime T: type, value: *T) Error!void {
         switch (self.format) {
             inline else => |*f| return f.readPrimitive(self.allocator, T, value),
         }
     }
 
-    /// A String value, owned by the stream's allocator
+    /// ReadPrimitiveData(String &): a String value, owned by the stream's allocator
     pub fn readString(self: *ObjectStreamIn) Error![]u8 {
         switch (self.format) {
             inline else => |*f| return f.readString(self.allocator),

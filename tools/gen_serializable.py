@@ -14,15 +14,16 @@ Zolt declares the same class next to its fields, with `pub const rtti = RTTI.dec
 Usage:
     python3 tools/gen_serializable.py --list     # print Jolt's classes (kind, bases, number of attributes)
     python3 tools/gen_serializable.py --write    # add a pending declaration to every class that has none
-    python3 tools/gen_serializable.py --check    # compare the Zolt declarations with Jolt's blocks (CI)
-    python3 tools/gen_serializable.py --check --complete   # also fail while a declaration is pending
+    python3 tools/gen_serializable.py --check    # compare the Zolt declarations with Jolt's blocks
+    python3 tools/gen_serializable.py --check --complete   # also fail while a declaration is pending (CI)
 
 `--write` gives a class without a declaration Jolt's name, kind and bases, and the marker
 `pub const serialization_pending = true;` (S18). A group then adds the attributes and removes the marker.
 
 `--check` compares every declaration with Jolt's block: the name, the kind (from the IMPLEMENT macro), the bases (in
 order) and the attributes (in order: the stream name, alias or not, enum or not, and the member path of an alias). A
-pending declaration is only checked for its name, kind and bases. port_status.py --check runs this check.
+pending declaration is only checked for its name, kind and bases. port_status.py --check runs this check with
+`--complete`: Phase 8 is done, so a pending declaration fails CI.
 
 The classes of Phase 9 (Physics/SoftBody, Physics/Hair) are skipped (S17). So is the attribute "mSoftBodies" of
 PhysicsScene: Zolt declares it in Phase 9 (S17).

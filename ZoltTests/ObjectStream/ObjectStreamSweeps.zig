@@ -12,10 +12,8 @@
 //!   crashes, leaks or hits a safety check. One fixed word mutation of Human.tof makes a class contain itself (D15).
 //!
 //! The sweeps take the classes from the factory at run time (`getAllClasses`), so they pick up every class that is
-//! declared later. An asset is read as the class of its main object, found by name in the factory.
-//! - While the factory lacks that class, or a declaration of the zolt module is pending (S18), the asset may fail to
-//!   read. The sweeps then skip its binary form and accept the failure.
-//! - Once the class is there and no declaration is pending, the asset must read: a failure fails the sweep.
+//! declared later. An asset is read as the class of its main object, found by name in the factory. Phase 8 is done, so
+//! every asset must read: a failure fails the sweep.
 //!
 //! The assets are read relative to the working directory, so the sweeps need the repository root as working
 //! directory. build.zig gives the unit test run no working directory (only the parity run and the test run of
@@ -34,7 +32,7 @@
 //!   reach the links (their resolution, the cycle check, the objects that nothing references) before the assets can
 //!   be read.
 //!
-//! A group that makes the sweeps much slower (more classes in the assets) adjusts the limits below.
+//! A change that makes the sweeps much slower (more classes in the assets) adjusts the limits below.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -154,33 +152,6 @@ const assets = [_]Asset{
     .{ .path = "Assets/terrain2.bof", .class_name = "PhysicsScene" },
 };
 
-/// True while a class of the zolt module has a pending declaration (S18: `serialization_pending`, no attributes
-/// yet). The classes are the struct types that the module exports and the classes nested in them (like
-/// RagdollSettings.Part).
-const declarations_pending: bool = blk: {
-    @setEvalBranchQuota(1_000_000);
-    for (@typeInfo(zolt).@"struct".decls) |d| {
-        const T = @field(zolt, d.name);
-        if (@TypeOf(T) != type or !isClass(T)) continue;
-        if (@hasDecl(T, "serialization_pending")) break :blk true;
-        for (@typeInfo(T).@"struct".decls) |nd| {
-            const N = @field(T, nd.name);
-            if (@TypeOf(N) == type and isClass(N) and @hasDecl(N, "serialization_pending")) break :blk true;
-        }
-    }
-    break :blk false;
-};
-
-/// A struct that declares an RTTI
-fn isClass(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "rtti");
-}
-
-/// The asset must be read: the factory has its class and no declaration is pending
-fn assetRequired(asset: Asset) bool {
-    return !declarations_pending and factory.find(asset.class_name) != null;
-}
-
 const debug = builtin.mode == .Debug;
 
 /// Z2 on an asset with more allocations tests this many of them
@@ -246,9 +217,12 @@ fn isSweepClass(rtti: *const RTTI) bool {
     return rtti.kind != .primitive and !rtti.isAbstract();
 }
 
-/// The class to read an asset as: `class_name` from the factory, SerializableObject while the factory lacks it
-fn mainClass(class_name: []const u8) *const RTTI {
-    return factory.find(class_name) orelse RTTI.of(zolt.SerializableObject);
+/// The class to read an asset as: `class_name` from the factory
+fn mainClass(class_name: []const u8) error{UnknownClass}!*const RTTI {
+    return factory.find(class_name) orelse {
+        std.debug.print("{s} is not in the factory\n", .{class_name});
+        return error.UnknownClass;
+    };
 }
 
 /// The bytes of a file in the repository (owned by the testing allocator)
@@ -366,18 +340,16 @@ fn roundTripLinked(allocator: Allocator, stream_type: StreamType) !void {
     try std.testing.expectEqualSlices(u8, bytes, bytes2);
 }
 
-/// Z2 of an asset: read it and write it in both formats. A stream that the factory cannot read yet is a success,
-/// unless the asset is `required`.
-fn readWriteAsset(allocator: Allocator, bytes: []const u8, rtti: *const RTTI, required: bool) !void {
+/// Z2 of an asset: read it and write it in both formats
+fn readWriteAsset(allocator: Allocator, bytes: []const u8, rtti: *const RTTI) !void {
     var limited: LimitedAllocator = .{ .child = allocator };
     const a = limited.allocator();
     const object = read(a, &factory, bytes, rtti) catch |err| switch (err) {
-        error.InvalidObjectStream => if (required) return err else return,
+        error.InvalidObjectStream, error.ReadFailed => return err,
         error.OutOfMemory => {
             if (limited.refused) return;
             return err;
         },
-        error.ReadFailed => return err,
     };
     defer destroy(a, object);
     for ([_]StreamType{ .text, .binary }) |stream_type|
@@ -450,19 +422,16 @@ test "ObjectStream Z2: every allocation failure while reading and writing" {
     for (assets) |asset| {
         const bytes = try loadAsset(asset.path);
         defer std.testing.allocator.free(bytes);
-        checkAllocationFailures(readWriteAsset, .{ bytes, mainClass(asset.class_name), assetRequired(asset) }, max_asset_runs) catch |err| {
+        checkAllocationFailures(readWriteAsset, .{ bytes, try mainClass(asset.class_name) }, max_asset_runs) catch |err| {
             std.debug.print("Z2: {s}\n", .{asset.path});
             return err;
         };
     }
 }
 
-test "ObjectStream Z2: an asset that must be read fails the sweep when it cannot be read" {
-    // While the asset is optional a failed read is a success, once it is required (assetRequired) it is an error
+test "ObjectStream Z2: an asset that cannot be read fails the sweep" {
     const bytes = "TOS 1.00\ndeclare Unknown 0\nobject Unknown 00000001\n";
-    const rtti = RTTI.of(zolt.SerializableObject);
-    try readWriteAsset(std.testing.allocator, bytes, rtti, false);
-    try std.testing.expectError(error.InvalidObjectStream, readWriteAsset(std.testing.allocator, bytes, rtti, true));
+    try std.testing.expectError(error.InvalidObjectStream, readWriteAsset(std.testing.allocator, bytes, RTTI.of(zolt.SerializableObject)));
 }
 
 /// Z3 of one stream: read every `prefix_step`-th prefix and the whole stream
@@ -480,14 +449,11 @@ fn readPrefixes(bytes: []const u8, rtti: *const RTTI) !void {
 test "ObjectStream Z3: every prefix of Human.tof and of its binary form" {
     const text = try loadAsset(assets[0].path);
     defer std.testing.allocator.free(text);
-    const rtti = mainClass(assets[0].class_name);
+    const rtti = try mainClass(assets[0].class_name);
     try readPrefixes(text, rtti);
 
-    // The binary form, once the factory can read the asset
-    const object = read(std.testing.allocator, &factory, text, rtti) catch |err| {
-        if (assetRequired(assets[0])) return err;
-        return;
-    };
+    // The binary form
+    const object = try read(std.testing.allocator, &factory, text, rtti);
     defer destroy(std.testing.allocator, object);
     const binary = try write(std.testing.allocator, object.instance, object.rtti, .binary);
     defer std.testing.allocator.free(binary);
@@ -590,17 +556,14 @@ test "ObjectStream Z4: mutated streams never crash or leak" {
     var prng: std.Random.DefaultPrng = .init(0x5a4f4c54);
     const random = prng.random();
 
-    // The text assets and their binary forms (once the factory can read them)
+    // The text assets and their binary forms
     for (assets[0..2]) |asset| {
         const text = try loadAsset(asset.path);
         defer std.testing.allocator.free(text);
-        const rtti = mainClass(asset.class_name);
+        const rtti = try mainClass(asset.class_name);
         try readMutations(random, text, rtti, asset_mutations);
 
-        const object = read(std.testing.allocator, &factory, text, rtti) catch |err| {
-            if (assetRequired(asset)) return err;
-            continue;
-        };
+        const object = try read(std.testing.allocator, &factory, text, rtti);
         defer destroy(std.testing.allocator, object);
         const binary = try write(std.testing.allocator, object.instance, object.rtti, .binary);
         defer std.testing.allocator.free(binary);
@@ -633,15 +596,14 @@ test "ObjectStream Z4: mutated streams never crash or leak" {
 
 test "ObjectStream Z4: Human.tof with a class that contains itself" {
     // A word of the stream that makes RagdollSettings contain itself (D15): skipping mSkeleton skips a RagdollSettings
-    // again (Jolt: a stack overflow). The asset is read as SerializableObject until the factory has RagdollSettings,
-    // which skips the object, then as RagdollSettings, which skips mSkeleton (a Ref(Skeleton) is not an instance of
-    // RagdollSettings). Either way the stream is invalid.
+    // again (Jolt: a stack overflow). It is read as RagdollSettings, which skips mSkeleton (a Ref(Skeleton) is not an
+    // instance of RagdollSettings). The stream is invalid.
     const text = try loadAsset(assets[0].path);
     defer std.testing.allocator.free(text);
     const mutated = try std.mem.replaceOwned(u8, std.testing.allocator, text, "mSkeleton instance Skeleton", "mSkeleton instance RagdollSettings");
     defer std.testing.allocator.free(mutated);
     try std.testing.expect(mutated.len != text.len); // The asset has the declaration
-    const rtti = mainClass(assets[0].class_name);
+    const rtti = try mainClass(assets[0].class_name);
     try std.testing.expectError(error.InvalidObjectStream, read(std.testing.allocator, &factory, mutated, rtti));
     try readAnything(std.testing.allocator, mutated, rtti);
 }

@@ -100,8 +100,10 @@ pub const ObjectStreamOut = struct {
     /// Write an object to the stream: `object` is the most derived object of class `rtti`. Writes everything it
     /// references too.
     pub fn write(self: *ObjectStreamOut, object: *const anyopaque, rtti: *const RTTI) Error!void {
-        // Assign a new identifier to the object and write it
-        try self.identifier_map.put(self.allocator, object, .{ .identifier = self.next_identifier, .rtti = rtti });
+        // Assign a new identifier to the object and write it (try_emplace: an object that already has an identifier
+        // keeps it and its class, the counter still goes up)
+        const entry = try self.identifier_map.getOrPut(self.allocator, object);
+        if (!entry.found_existing) entry.value_ptr.* = .{ .identifier = self.next_identifier, .rtti = rtti };
         self.next_identifier += 1;
         try self.writeObject(object);
 
@@ -228,12 +230,14 @@ pub const ObjectStreamOut = struct {
         }
     }
 
+    /// WritePrimitiveData of a primitive (the String overload is `writeString`)
     pub fn writePrimitive(self: *ObjectStreamOut, comptime T: type, value: T) Error!void {
         switch (self.format) {
             inline else => |*f| try f.writePrimitive(T, value),
         }
     }
 
+    /// WritePrimitiveData(const String &)
     pub fn writeString(self: *ObjectStreamOut, value: []const u8) Error!void {
         switch (self.format) {
             .text => |*f| try f.writeString(value),

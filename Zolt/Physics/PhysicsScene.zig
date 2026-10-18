@@ -12,7 +12,8 @@
 //!   `getSettings()` returns the TwoBodyConstraintSettings.
 //! - The constraints of a restored scene are created by ConstraintSettings.restoreFromBinaryState, which knows the
 //!   classes of `RegisterTypes.factory`: Jolt's settings classes and the user's. An unknown type gives Jolt's "Failed
-//!   to create instance of type".
+//!   to create instance of type". So does a class that is not a TwoBodyConstraintSettings, such as ConstraintSettings
+//!   itself (Jolt's StaticCast does not check the class; SerializationArchitecture.md D8).
 //! - Soft bodies (Phase 9): `saveBinaryState` writes Jolt's soft body count (always 0), `restoreFromBinaryState`
 //!   reports the Zolt error "Soft bodies are not supported" for a stream that contains soft bodies.
 //! - Errors (Zolt): functions that allocate return `Allocator.Error`. Where Jolt dereferences the null shape of a body
@@ -33,7 +34,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../Core/RTTI.zig").RTTI;
-const Core = @import("../Core/Core.zig");
 const virtual = @import("../Core/Virtual.zig");
 const ReferenceFile = @import("../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
@@ -399,11 +399,16 @@ pub const PhysicsScene = struct {
                 result.setError(c_result.getError());
                 return result;
             }
+            // Jolt: StaticCast<TwoBodyConstraintSettings>, which does not check the class. Zolt: a class that is not a
+            // TwoBodyConstraintSettings (ConstraintSettings itself, VehicleConstraintSettings) gives the error of D8.
+            if (!isTwoBodyConstraintSettings(c_result.getPtr().?)) {
+                result.setError("Failed to create instance of type");
+                return result;
+            }
             // Jolt: mConstraints.resize(len) default-constructs the elements, mBody1 / mBody2 stay uninitialized when the
             // stream ends inside them (the reads below do not check the stream); Zolt: 0
             var cc: ConnectedConstraint = .{};
-            cc.settings.set(c_result.getPtr()); // Jolt: StaticCast<TwoBodyConstraintSettings>
-            if (Core.enable_asserts) std.debug.assert(isTwoBodyConstraintSettings(cc.settings.get().?));
+            cc.settings.set(c_result.getPtr());
             stream.read(&cc.body1);
             stream.read(&cc.body2);
             s.constraints.appendAssumeCapacity(cc);
@@ -488,8 +493,7 @@ pub const PhysicsScene = struct {
         }
     }
 
-    /// Jolt's StaticCast<TwoBodyConstraintSettings> asserts the RTTI: true when the class of `settings` derives from
-    /// TwoBodyConstraintSettings
+    /// True when the class of `settings` derives from TwoBodyConstraintSettings
     fn isTwoBodyConstraintSettings(settings: *const ConstraintSettings) bool {
         return settings.vtable.rtti.isKindOf(TwoBodyConstraintSettings.rtti);
     }
@@ -833,6 +837,14 @@ test "PhysicsScene: restoreFromBinaryState errors" {
     const unknown_bytes = try allocator.dupe(u8, try saveScene(&unknown, &out2, true, true));
     defer allocator.free(unknown_bytes);
     std.mem.writeInt(u32, unknown_bytes[8..12], 0x12345678, .little); // The RTTI hash after the body and constraint counts
+    {
+        var result = try restoreScene(allocator, unknown_bytes);
+        defer result.deinit();
+        try testing.expectEqualStrings("Failed to create instance of type", result.getError());
+    }
+
+    // ConstraintSettings itself is creatable, but it is not a TwoBodyConstraintSettings (Jolt: an unchecked StaticCast)
+    std.mem.writeInt(u32, unknown_bytes[8..12], ConstraintSettings.rtti.hash, .little);
     {
         var result = try restoreScene(allocator, unknown_bytes);
         defer result.deinit();

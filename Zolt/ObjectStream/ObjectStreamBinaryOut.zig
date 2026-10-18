@@ -96,11 +96,28 @@ pub const ObjectStreamBinaryOut = struct {
         self.next_string_id += 1;
 
         // Write string
-        const len: u32 = @intCast(@min(value.len, 0x7fffffff));
+        const len = stringLength(value.len);
         try self.writeCount(len);
         try self.writer.writeAll(value[0..len]);
     }
 };
+
+/// The length that is written for a string of `size` bytes: `min((uint32)size, (uint32)0x7fffffff)`. Like Jolt, the
+/// size is truncated to 32 bits first.
+fn stringLength(size: usize) u32 {
+    return @min(@as(u32, @truncate(size)), 0x7fffffff);
+}
+
+test "ObjectStreamBinaryOut: the string length is truncated to 32 bits, then capped" {
+    try std.testing.expectEqual(@as(u32, 5), stringLength(5));
+    try std.testing.expectEqual(@as(u32, 0x7fffffff), stringLength(0x80000000));
+    try std.testing.expectEqual(@as(u32, 0x7fffffff), stringLength(0xffffffff));
+    if (@bitSizeOf(usize) > 32) {
+        // Strings of 4 GiB or more: Jolt's `(uint32)inPrimitive.size()` drops the high bits
+        try std.testing.expectEqual(@as(u32, 5), stringLength((1 << 32) + 5));
+        try std.testing.expectEqual(@as(u32, 0), stringLength(1 << 32));
+    }
+}
 
 test "ObjectStreamBinaryOut: a string whose bytes cannot be written stays owned by the string table" {
     // The header (8 bytes) and the string's count (4 bytes) fit, the string's bytes do not: the key is already in the

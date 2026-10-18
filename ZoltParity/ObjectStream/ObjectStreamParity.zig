@@ -4,13 +4,12 @@
 //! number words NumberWords.zig.
 //!
 //! The harness has no code for one class. It takes every class of the C++ Factory after RegisterTypes and the Zolt
-//! factory (`RegisterTypes.factory`; a stand-in until the migration adds it, see ObjectStreamSchema.zig). A layer skips
-//! a class that is pending (`serialization_pending`, S18) or that reaches a pending class, and picks the class up as
-//! soon as its group removes the marker.
+//! factory (`RegisterTypes.factory`). Phase 8 is done, so every class but the Phase 9 classes is declared in full. P1
+//! fails when a class is missing, pending (`serialization_pending`, S18) or reaches a pending class. So the other
+//! layers compare every class, and a class that is not ready fails them too.
 //!
 //! - P1 schema: every class against the Zolt factory (name, hash, abstract flag, bases, attributes with their declared
-//!   types and primitive types); a pending class by name, hash, abstract flag and bases only. The Phase 9 classes are
-//!   excluded (S17). The IsKindOf matrix.
+//!   types and primitive types). The Phase 9 classes are excluded (S17). The IsKindOf matrix.
 //! - P2 defaults: every creatable class, C++ CreateObject and write against Zolt create and write, text and binary.
 //! - P3 random streams from the C++ schema, both formats; each side reads the other's output.
 //! - P4 old schemas: mutations of P3 streams (dropped, reordered, renamed and retyped attributes, vec3 / dvec3, a class
@@ -19,7 +18,7 @@
 //! - P5 truncation: every prefix of the default and random streams (up to 64 KB), 2000 prefixes of terrain2.bof.
 //! - P6 number words: more than 10^5 words through C++'s ObjectStreamTextIn and Zolt's.
 //! - P7 assets: Human.tof, dead_pose1.tof and terrain2.bof read by both sides, written again in both formats, and the
-//!   SaveBinaryState bytes of the loaded objects. Skipped while a class they need is pending.
+//!   SaveBinaryState bytes of the loaded objects.
 //! - P8 the object of UnitTests/ObjectStream/ObjectStreamTest.cpp in both formats and both directions.
 //!
 //! Comparing bytes: both sides read a stream as the requested class and write the main object in both formats; the
@@ -27,6 +26,8 @@
 //! S17) is compared by cross-reading: the C++ side reads Zolt's bytes and must write its own bytes again. In binary,
 //! when a string has a NUL, these are the bytes it writes after reading its own binary bytes: Jolt's binary reader cuts
 //! a string at its first NUL (S15), its own bytes included.
+//!
+//! P3 and P4 go on with the next class after a mismatch, and list the classes that failed at the end.
 //!
 //! The C++ side of P2 to P7 reads with the Factory after RegisterTypes and with allocation hooks that zero every block
 //! and defer frees until the call returns. Every such call checks that its hooks were still installed at the end (-5
@@ -312,35 +313,25 @@ fn expectedSchema(allocator: Allocator, c: *const Class) ![]u8 {
     return line.toOwnedSlice();
 }
 
-fn schemaHeader(line: []const u8) []const u8 {
-    return line[0 .. std.mem.indexOf(u8, line, " attributes=[") orelse line.len];
-}
-
 test "ObjectStream P1: the schema of every class of the C++ Factory after RegisterTypes, and IsKindOf" {
     const allocator = std.testing.allocator;
     const schema = try schema_mod.get();
     var mismatches: usize = 0;
     var compared: usize = 0;
-    // The classes that are not compared in full, printed at the end (log.info would not show in a test run)
-    var pending_classes: std.ArrayList([]const u8) = .empty;
-    defer pending_classes.deinit(allocator);
-    var reached_by_pending: std.ArrayList([]const u8) = .empty;
-    defer reached_by_pending.deinit(allocator);
-    const only_pending = try reachedOnlyByPending(allocator, schema);
-    defer allocator.free(only_pending);
-    for (schema.classes, 0..) |*c, index| {
+    for (schema.classes) |*c| {
         if (c.phase9) continue;
         const rtti = c.zolt orelse {
-            if (only_pending[index]) {
-                // Jolt's Register reaches it through the attributes of pending classes, which have no attributes yet
-                try reached_by_pending.append(allocator, c.name);
-            } else {
-                std.debug.print("{s} is not in RegisterTypes.factory\n", .{c.name});
-                mismatches += 1;
-            }
+            std.debug.print("{s} is not in RegisterTypes.factory\n", .{c.name});
+            mismatches += 1;
             continue;
         };
         compared += 1;
+
+        // Phase 8 is done: no class is pending or reaches a pending class (S18). The other layers rely on it.
+        if (c.waits_for) |p| {
+            if (p == rtti) std.debug.print("{s} is pending (`serialization_pending`): declare its attributes\n", .{c.name}) else std.debug.print("{s} reaches the pending class {s}\n", .{ c.name, p.name });
+            mismatches += 1;
+        }
         if (rtti.hash != c.hash) {
             std.debug.print("hash of {s}: zolt {x:0>8}, jolt {x:0>8}\n", .{ c.name, rtti.hash, c.hash });
             mismatches += 1;
@@ -356,12 +347,8 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
         defer allocator.free(zolt_line);
         const jolt_line = try expectedSchema(allocator, c);
         defer allocator.free(jolt_line);
-        // A pending class (or a class with a pending base) has no attributes yet: name, hash, kind and bases only
-        const pending = schema_mod.hasPendingBase(rtti);
-        if (pending) try pending_classes.append(allocator, c.name);
-        const same = if (pending) std.mem.eql(u8, schemaHeader(zolt_line), schemaHeader(jolt_line)) else std.mem.eql(u8, zolt_line, jolt_line);
-        if (!same) {
-            std.debug.print("schema of {s}{s}\n  zolt: {s}\n  jolt: {s}\n", .{ c.name, if (pending) " (pending)" else "", zolt_line, jolt_line });
+        if (!std.mem.eql(u8, zolt_line, jolt_line)) {
+            std.debug.print("schema of {s}\n  zolt: {s}\n  jolt: {s}\n", .{ c.name, zolt_line, jolt_line });
             mismatches += 1;
         }
     }
@@ -385,52 +372,8 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
             }
         }
     }
-    printNames("P1: pending, compared by name, hash, kind and bases only", pending_classes.items);
-    printNames("P1: registered by Jolt only through pending classes, not compared", reached_by_pending.items);
     try std.testing.expect(compared > 0);
     try std.testing.expectEqual(@as(usize, 0), mismatches);
-}
-
-/// For every C++ class that the Zolt factory lacks: true when Jolt's Factory registers it only because a class that is
-/// pending in Zolt (or another such class) names it as a base or as the primitive type of an attribute. A pending class
-/// has no attributes yet, so Zolt's factory cannot reach these classes until the groups declare them. A lacking class
-/// that nothing names (a class of RegisterTypes.cpp itself) or that a complete class names stays a mismatch.
-fn reachedOnlyByPending(allocator: Allocator, schema: *const schema_mod.Schema) ![]bool {
-    const n = schema.classes.len;
-    const result = try allocator.alloc(bool, n);
-    @memset(result, false);
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (schema.classes, 0..) |*m, mi| {
-            if (m.zolt != null or m.phase9 or result[mi]) continue;
-            var referrers: usize = 0;
-            var all_pending = true;
-            for (schema.classes, 0..) |*r, ri| {
-                if (ri == mi or r.phase9) continue;
-                const names = blk: {
-                    for (r.bases) |b| {
-                        if (std.mem.eql(u8, b, m.name)) break :blk true;
-                    }
-                    for (r.attributes) |a| {
-                        if (a.primitive) |p| {
-                            if (std.mem.eql(u8, p, m.name)) break :blk true;
-                        }
-                    }
-                    break :blk false;
-                };
-                if (!names) continue;
-                referrers += 1;
-                const referrer_pending = if (r.zolt) |rr| schema_mod.hasPendingBase(rr) else result[ri];
-                if (!referrer_pending) all_pending = false;
-            }
-            if (referrers > 0 and all_pending) {
-                result[mi] = true;
-                changed = true;
-            }
-        }
-    }
-    return result;
 }
 
 fn printNames(label: []const u8, names: []const []const u8) void {
@@ -512,9 +455,9 @@ test "ObjectStream P2: the defaults of every creatable class, text and binary" {
     var compared: usize = 0;
     for (schema.classes) |*c| {
         // The outside classes use the global new, which leaves members that C++ does not initialize as garbage
-        if (c.abstract or c.phase9 or c.outside or !c.ready()) continue;
-        const rtti = c.zolt.?;
+        if (c.abstract or c.phase9 or c.outside) continue;
         const ctx: Context = .{ .layer = "P2", .class = c.name };
+        const rtti = try readyClass(ctx, c);
         compared += 1;
 
         try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_default_write(c.name)));
@@ -548,16 +491,26 @@ test "ObjectStream P2: the defaults of every creatable class, text and binary" {
 
 // P3 ----------------------------------------------------------------------------------------------------------------
 
-/// The classes that the generators use as the main object: creatable and ready
-fn mainClasses(schema: *const Schema, list: []usize) []usize {
+/// The classes that the generators use as the main object: the creatable classes (all ready, P1)
+fn mainClasses(schema: *const Schema, list: []usize) ![]usize {
     var n: usize = 0;
     for (schema.classes, 0..) |*c, i| {
-        if (c.creatable() and c.ready()) {
+        if (c.creatable()) {
+            _ = try readyClass(.{ .layer = "P3/P4", .class = c.name }, c);
             list[n] = i;
             n += 1;
         }
     }
     return list[0..n];
+}
+
+/// The Zolt class of `c`. A class that is not ready is a mismatch: Phase 8 is done (P1 says why).
+fn readyClass(ctx: Context, c: *const Class) error{ParityMismatch}!*const RTTI {
+    if (!c.ready()) {
+        ctx.report("the class is not ready: it is missing in the Zolt factory, pending or reaches a pending class (see P1)");
+        return error.ParityMismatch;
+    }
+    return c.zolt.?;
 }
 
 const streams_per_class = 12;
@@ -566,25 +519,38 @@ test "ObjectStream P3: random streams from the C++ schema, both formats, both di
     const allocator = std.testing.allocator;
     const schema = try schema_mod.get();
     var buffer: [512]usize = undefined;
-    const classes = mainClasses(schema, &buffer);
+    const classes = try mainClasses(schema, &buffer);
     try std.testing.expect(classes.len > 0);
+    var failed: std.ArrayList([]const u8) = .empty;
+    defer failed.deinit(allocator);
     for (classes) |class| {
-        const c = &schema.classes[class];
-        for (0..streams_per_class) |s| {
-            for (formats) |f| {
-                const seed = (@as(u64, c.hash) << 16) ^ (s * 2 + @intFromEnum(f));
-                var prng: std.Random.DefaultPrng = .init(seed);
-                var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-                defer arena.deinit();
-                const g = try gen.Generator.init(arena.allocator(), schema, prng.random(), class);
-                const bytes = try gen.write(arena.allocator(), g.doc, f, prng.random());
-                const ctx: Context = .{ .layer = "P3", .class = c.name, .detail = @tagName(f), .seed = seed };
-                if (!try roundTrip(allocator, bytes, g.doc.request, ctx, .full)) {
-                    var failed = ctx;
-                    failed.stream = bytes;
-                    failed.report("neither library reads a generated stream (a generator error)");
-                    return error.ParityMismatch;
-                }
+        // A mismatch is printed; the other classes are still compared
+        randomStreams(allocator, schema, class) catch |err| switch (err) {
+            error.ParityMismatch => try failed.append(allocator, schema.classes[class].name),
+            else => |e| return e,
+        };
+    }
+    printNames("P3: classes with a mismatch", failed.items);
+    try std.testing.expectEqual(@as(usize, 0), failed.items.len);
+}
+
+/// P3 of one main class
+fn randomStreams(allocator: Allocator, schema: *const Schema, class: usize) !void {
+    const c = &schema.classes[class];
+    for (0..streams_per_class) |s| {
+        for (formats) |f| {
+            const seed = (@as(u64, c.hash) << 16) ^ (s * 2 + @intFromEnum(f));
+            var prng: std.Random.DefaultPrng = .init(seed);
+            var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+            defer arena.deinit();
+            const g = try gen.Generator.init(arena.allocator(), schema, prng.random(), class);
+            const bytes = try gen.write(arena.allocator(), g.doc, f, prng.random());
+            const ctx: Context = .{ .layer = "P3", .class = c.name, .detail = @tagName(f), .seed = seed };
+            if (!try roundTrip(allocator, bytes, g.doc.request, ctx, .full)) {
+                var failed = ctx;
+                failed.stream = bytes;
+                failed.report("neither library reads a generated stream (a generator error)");
+                return error.ParityMismatch;
             }
         }
     }
@@ -592,44 +558,63 @@ test "ObjectStream P3: random streams from the C++ schema, both formats, both di
 
 // P4 ----------------------------------------------------------------------------------------------------------------
 
+const MutationCounts = struct {
+    applied: std.EnumArray(gen.Generator.Mutation, usize) = .initFill(0),
+    read: std.EnumArray(gen.Generator.Mutation, usize) = .initFill(0),
+};
+
+/// P4 of one main class
+fn mutatedStreams(allocator: Allocator, schema: *const Schema, class: usize, counts: *MutationCounts) !void {
+    const c = &schema.classes[class];
+    for (std.enums.values(gen.Generator.Mutation)) |mutation| {
+        for (0..2) |s| {
+            for (formats) |f| {
+                // An object of an undeclared class ends the read of a text stream only (binary misreads the rest)
+                if (mutation == .undeclared_object and f == .binary) continue;
+                const seed = (@as(u64, c.hash) << 24) ^ (@as(u64, @intFromEnum(mutation)) << 8) ^ (s * 2 + @intFromEnum(f));
+                var prng: std.Random.DefaultPrng = .init(seed);
+                const r = prng.random();
+                var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+                defer arena.deinit();
+                var g = try gen.Generator.init(arena.allocator(), schema, r, class);
+                if (!try g.mutate(mutation)) continue;
+                counts.applied.getPtr(mutation).* += 1;
+                // Sometimes more changes on top
+                for (0..r.uintLessThan(usize, 3)) |_| {
+                    const other = r.enumValue(gen.Generator.Mutation);
+                    if (other == .undeclared_object and f == .binary) continue;
+                    _ = try g.mutate(other);
+                }
+                try g.finish();
+                const bytes = try gen.write(arena.allocator(), g.doc, f, r);
+                const ctx: Context = .{ .layer = "P4", .class = c.name, .detail = @tagName(mutation), .seed = seed };
+                if (try roundTrip(allocator, bytes, g.doc.request, ctx, .full)) counts.read.getPtr(mutation).* += 1;
+            }
+        }
+    }
+}
+
 test "ObjectStream P4: old schemas and odd streams (mutations of random streams)" {
     const allocator = std.testing.allocator;
     const schema = try schema_mod.get();
     var buffer: [512]usize = undefined;
-    const classes = mainClasses(schema, &buffer);
+    const classes = try mainClasses(schema, &buffer);
     try std.testing.expect(classes.len > 0);
     // Per mutation: how often it was applied, and how often both libraries read the stream
-    var applied: std.EnumArray(gen.Generator.Mutation, usize) = .initFill(0);
-    var read: std.EnumArray(gen.Generator.Mutation, usize) = .initFill(0);
+    var counts: MutationCounts = .{};
+    var failed: std.ArrayList([]const u8) = .empty;
+    defer failed.deinit(allocator);
     for (classes) |class| {
-        const c = &schema.classes[class];
-        for (std.enums.values(gen.Generator.Mutation)) |mutation| {
-            for (0..2) |s| {
-                for (formats) |f| {
-                    // An object of an undeclared class ends the read of a text stream only (binary misreads the rest)
-                    if (mutation == .undeclared_object and f == .binary) continue;
-                    const seed = (@as(u64, c.hash) << 24) ^ (@as(u64, @intFromEnum(mutation)) << 8) ^ (s * 2 + @intFromEnum(f));
-                    var prng: std.Random.DefaultPrng = .init(seed);
-                    const r = prng.random();
-                    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-                    defer arena.deinit();
-                    var g = try gen.Generator.init(arena.allocator(), schema, r, class);
-                    if (!try g.mutate(mutation)) continue;
-                    applied.getPtr(mutation).* += 1;
-                    // Sometimes more changes on top
-                    for (0..r.uintLessThan(usize, 3)) |_| {
-                        const other = r.enumValue(gen.Generator.Mutation);
-                        if (other == .undeclared_object and f == .binary) continue;
-                        _ = try g.mutate(other);
-                    }
-                    try g.finish();
-                    const bytes = try gen.write(arena.allocator(), g.doc, f, r);
-                    const ctx: Context = .{ .layer = "P4", .class = c.name, .detail = @tagName(mutation), .seed = seed };
-                    if (try roundTrip(allocator, bytes, g.doc.request, ctx, .full)) read.getPtr(mutation).* += 1;
-                }
-            }
-        }
+        // A mismatch is printed; the other classes are still compared
+        mutatedStreams(allocator, schema, class, &counts) catch |err| switch (err) {
+            error.ParityMismatch => try failed.append(allocator, schema.classes[class].name),
+            else => |e| return e,
+        };
     }
+    printNames("P4: classes with a mismatch", failed.items);
+    try std.testing.expectEqual(@as(usize, 0), failed.items.len);
+    const applied = counts.applied;
+    const read = counts.read;
 
     // The test must be able to fail. A generator error could make every mutated stream unreadable, and both sides would
     // agree. So a mutation that keeps the main object readable must be read at least once, and a main object of the
@@ -655,7 +640,7 @@ test "ObjectStream P4: old schemas and odd streams (mutations of random streams)
     try std.testing.expectEqual(@as(usize, 0), weak);
 }
 
-/// Old and odd streams of the prototype (SerializationArchitecture.md section 10), read as `class` when it is ready
+/// Old and odd streams of the prototype (SerializationArchitecture.md section 10), read as `class`
 const pinned_streams = [_]struct { class: [:0]const u8, stream: []const u8 }{
     // The old schema of Assets/Human.tof: "mFrequency" / "mDamping" are aliases of the spring settings, no mode
     .{ .class = "MotorSettings", .stream = "TOS 1.00\n\ndeclare MotorSettings 6\n  mFrequency float\n  mDamping float\n  mMinForceLimit float\n  mMaxForceLimit float\n  mMinTorqueLimit float\n  mMaxTorqueLimit float\n\nobject MotorSettings 00000001\n  20\n  0.899999976\n  -3.40282347e+38\n  3.40282347e+38\n  -100\n  100" },
@@ -685,9 +670,10 @@ test "ObjectStream P4: the old and odd streams of the prototype" {
     var compared: usize = 0;
     for (pinned_streams) |p| {
         const c = try schema.get(p.class);
-        if (!c.ready()) continue;
+        const ctx: Context = .{ .layer = "P4 pinned", .class = p.class };
+        _ = try readyClass(ctx, c);
         compared += 1;
-        _ = try roundTrip(allocator, p.stream, p.class, .{ .layer = "P4 pinned", .class = p.class }, .full);
+        _ = try roundTrip(allocator, p.stream, p.class, ctx, .full);
     }
     try std.testing.expect(compared > 0);
 }
@@ -707,7 +693,7 @@ test "ObjectStream P5: every prefix of the default and random streams" {
     const allocator = std.testing.allocator;
     const schema = try schema_mod.get();
     var buffer: [512]usize = undefined;
-    const classes = mainClasses(schema, &buffer);
+    const classes = try mainClasses(schema, &buffer);
     try std.testing.expect(classes.len > 0);
     for (classes) |class| {
         const c = &schema.classes[class];
@@ -745,9 +731,8 @@ const assets = [_]Asset{
     .{ .path = "Assets/terrain2.bof", .class = "PhysicsScene" },
 };
 
-/// The bytes of an asset, null while a class that the asset declares is pending or not declared in Zolt (the test is
-/// then skipped: it starts comparing as soon as the groups land)
-fn loadAsset(allocator: Allocator, asset: Asset) !?[]u8 {
+/// The bytes of an asset. Every class that the asset declares must be ready in Zolt (a mismatch otherwise).
+fn loadAsset(allocator: Allocator, asset: Asset) ![]u8 {
     const schema = try schema_mod.get();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, asset.path, allocator, .limited(64 << 20));
     errdefer allocator.free(bytes);
@@ -760,30 +745,15 @@ fn loadAsset(allocator: Allocator, asset: Asset) !?[]u8 {
     defer jolt.deinit(allocator);
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    var waiting = false;
     for (try declaredClasses(arena.allocator(), jolt.text)) |name| {
         if (schema_mod.isPhase9(name)) continue;
-        const c = try schema.get(name);
-        if (c.ready()) continue;
-        // Printed (log.info would not show in a test run): the test is skipped while a class it needs is pending
-        if (!waiting) std.debug.print("{s} is pending, skipped until these classes are ready:", .{asset.path});
-        waiting = true;
-        if (c.zolt == null) {
-            std.debug.print(" {s} (not declared)", .{name});
-        } else if (c.waits_for) |p| {
-            if (std.mem.eql(u8, p.name, name)) std.debug.print(" {s}", .{name}) else std.debug.print(" {s} (reaches {s})", .{ name, p.name });
-        }
-    }
-    if (waiting) {
-        std.debug.print("\n", .{});
-        allocator.free(bytes);
-        return null;
+        _ = try readyClass(.{ .layer = "P7", .class = name, .detail = asset.path }, try schema.get(name));
     }
     return bytes;
 }
 
-/// SaveBinaryState of the object that Zolt reads from an asset (null when the class has no saveBinaryState)
-fn zoltBinaryState(allocator: Allocator, bytes: []const u8, class: []const u8) !?[]u8 {
+/// SaveBinaryState of the object that Zolt reads from an asset
+fn zoltBinaryState(allocator: Allocator, bytes: []const u8, class: []const u8) ![]u8 {
     const rtti = schema_mod.factory.find(class) orelse return error.HarnessError;
     var reader: std.Io.Reader = .fixed(bytes);
     var in = try ObjectStreamIn.open(allocator, &reader, schema_mod.factory);
@@ -791,29 +761,28 @@ fn zoltBinaryState(allocator: Allocator, bytes: []const u8, class: []const u8) !
     const main = try in.read(rtti);
     defer main.rtti.destructObject(main.instance, allocator);
     inline for (.{ zolt.RagdollSettings, zolt.SkeletalAnimation, zolt.PhysicsScene }) |T| {
-        if (comptime schema_mod.isSerializable(T)) {
-            if (main.rtti == T.rtti) {
-                const object: *T = @ptrCast(@alignCast(main.instance));
-                var out: std.Io.Writer.Allocating = .init(allocator);
-                errdefer out.deinit();
-                var wrapper = zolt.StreamOutWrapper.init(&out.writer);
-                const Save = @TypeOf(T.saveBinaryState);
-                const result = if (@typeInfo(Save).@"fn".params.len == 2)
-                    object.saveBinaryState(wrapper.streamOut())
-                else
-                    object.saveBinaryState(wrapper.streamOut(), true, true);
-                if (@typeInfo(@TypeOf(result)) == .error_union) try result;
-                return try out.toOwnedSlice();
-            }
+        if (main.rtti == T.rtti) {
+            const object: *T = @ptrCast(@alignCast(main.instance));
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            errdefer out.deinit();
+            var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+            const Save = @TypeOf(T.saveBinaryState);
+            const result = if (@typeInfo(Save).@"fn".params.len == 2)
+                object.saveBinaryState(wrapper.streamOut())
+            else
+                object.saveBinaryState(wrapper.streamOut(), true, true);
+            if (@typeInfo(@TypeOf(result)) == .error_union) try result;
+            return try out.toOwnedSlice();
         }
     }
-    return null;
+    std.debug.print("{s}: no SaveBinaryState for the main object of class {s}\n", .{ class, main.rtti.name });
+    return error.HarnessError;
 }
 
 fn assetTest(comptime index: usize) !void {
     const allocator = std.testing.allocator;
     const asset = assets[index];
-    const bytes = (try loadAsset(allocator, asset)) orelse return error.SkipZigTest;
+    const bytes = try loadAsset(allocator, asset);
     defer allocator.free(bytes);
     const ctx: Context = .{ .layer = "P7", .class = asset.class, .detail = asset.path };
     if (!try roundTrip(allocator, bytes, asset.class, ctx, .full)) {
@@ -822,29 +791,28 @@ fn assetTest(comptime index: usize) !void {
     }
 
     // SaveBinaryState of the loaded object
-    if (try zoltBinaryState(allocator, bytes, asset.class)) |zolt_state| {
-        defer allocator.free(zolt_state);
-        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_asset_binary_state(bytes.ptr, bytes.len, asset.class)));
-        try expectSame(ctx, "SaveBinaryState", zolt_state, cppResult(2));
-    }
+    const zolt_state = try zoltBinaryState(allocator, bytes, asset.class);
+    defer allocator.free(zolt_state);
+    try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_asset_binary_state(bytes.ptr, bytes.len, asset.class)));
+    try expectSame(ctx, "SaveBinaryState", zolt_state, cppResult(2));
 }
 
-test "ObjectStream P7: Assets/Human.tof (skipped while RagdollSettings or a class it reaches is pending)" {
+test "ObjectStream P7: Assets/Human.tof" {
     try assetTest(0);
 }
 
-test "ObjectStream P7: Assets/Human/dead_pose1.tof (skipped while SkeletalAnimation or a class it reaches is pending)" {
+test "ObjectStream P7: Assets/Human/dead_pose1.tof" {
     try assetTest(1);
 }
 
-test "ObjectStream P7: Assets/terrain2.bof (skipped while PhysicsScene or a class it reaches is pending)" {
+test "ObjectStream P7: Assets/terrain2.bof" {
     try assetTest(2);
 }
 
-test "ObjectStream P5: 2000 prefixes of Assets/terrain2.bof (skipped while PhysicsScene or a class it reaches is pending)" {
+test "ObjectStream P5: 2000 prefixes of Assets/terrain2.bof" {
     const allocator = std.testing.allocator;
     const asset = assets[2];
-    const bytes = (try loadAsset(allocator, asset)) orelse return error.SkipZigTest;
+    const bytes = try loadAsset(allocator, asset);
     defer allocator.free(bytes);
     // The first 1500 prefixes (the declarations and the first objects), then 500 spread over the whole file
     for (0..2000) |i| {

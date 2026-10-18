@@ -102,12 +102,13 @@ pub const SerializableAttribute = struct {
         return self.member_type.primitive_rtti;
     }
 
-    /// Check if this attribute is of a specific type (OSIsType)
+    /// Check if this attribute is of a specific type (OSIsType). Like Jolt's `strcmp`, the class name ends at the first
+    /// NUL byte.
     pub fn isType(self: *const SerializableAttribute, array_depth: u32, data_type: OSDataType, class_name: []const u8) bool {
         const m = self.member_type;
         if (array_depth != m.array_depth or data_type != m.data_type) return false;
         return switch (data_type) {
-            .instance, .pointer => std.mem.eql(u8, class_name, m.class_rtti.?.name),
+            .instance, .pointer => std.mem.eql(u8, std.mem.sliceTo(class_name, 0), m.class_rtti.?.name),
             else => true, // Primitives and enums ignore the class name
         };
     }
@@ -178,7 +179,8 @@ pub const AttributeDecl = struct {
         return .{ .name = name, .path = toPath(member) };
     }
 
-    /// JPH_ADD_ENUM_ATTRIBUTE(Class, member)
+    /// JPH_ADD_ENUM_ATTRIBUTE(Class, member). An integer member that Jolt declares this way (ObjectLayer) needs it too:
+    /// `.attr` cannot see the difference and declares the integer's own type.
     pub fn enumAttr(comptime name: []const u8, comptime member: anytype) AttributeDecl {
         return .{ .name = name, .path = toPath(member), .enumeration = true };
     }

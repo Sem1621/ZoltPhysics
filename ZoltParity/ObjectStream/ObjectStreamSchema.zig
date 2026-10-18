@@ -5,8 +5,8 @@
 //! - The Zolt side: the class in the Zolt factory, the `serialization_pending` marker (S18) and the values of the enum
 //!   attributes, found at compile time from the Zig types that the `zolt` module exports.
 //!
-//! Nothing here is written for one class. A class that a group declares, or whose marker a group removes, is picked up
-//! by every layer without a change here.
+//! Nothing here is written for one class. A class that is added to Jolt and Zolt is picked up by every layer without a
+//! change here.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -67,7 +67,9 @@ pub const phase9_classes = [_][]const u8{
 };
 
 /// JPH_IMPLEMENT_SERIALIZABLE_OUTSIDE_CLASS: CreateObject uses the global new, which the allocation hooks of the C++ side
-/// do not zero, so P2 skips their defaults (they are compared inside the classes that hold them)
+/// do not zero, so P2 skips their defaults. The defaults of Plane, IndexedTriangleNoMaterial and IndexedTriangle are
+/// compared inside PlaneShapeSettings and MeshShapeSettings. No Jolt class holds an AABox, a Triangle or a default
+/// Color, so Zolt-only tests pin those defaults (ObjectStreamZoltTests.zig).
 pub const outside_classes = [_][]const u8{ "Color", "AABox", "Triangle", "IndexedTriangleNoMaterial", "IndexedTriangle", "Plane" };
 
 /// The primitives of ObjectStreamTypes.h (their RTTI names)
@@ -216,17 +218,8 @@ pub fn isPending(rtti: *const RTTI) bool {
     return c.pending;
 }
 
-/// True when the class or a class in its base chain is pending: its attribute list is not complete
-pub fn hasPendingBase(rtti: *const RTTI) bool {
-    if (isPending(rtti)) return true;
-    for (rtti.bases) |b| {
-        if (hasPendingBase(b.rtti)) return true;
-    }
-    return false;
-}
-
 /// The first pending class that `rtti` reaches through its bases and attribute classes (transitively), null when none.
-/// A layer skips a class that reaches a pending class (S18): writing it declares that class.
+/// P1 fails for such a class (S18): writing it declares that class.
 pub fn reachesPending(rtti: *const RTTI) ?*const RTTI {
     var visited: [256]*const RTTI = undefined;
     var count: usize = 0;
@@ -306,7 +299,8 @@ pub const Class = struct {
     /// The C++ class reaches a Phase 9 class (PhysicsScene.mSoftBodies): bytes are compared by cross-reading (S17)
     cross: bool = false,
 
-    /// Zolt declares the class and everything it reaches: every layer compares it
+    /// Zolt declares the class and everything it reaches: every layer compares it. Phase 8 is done, so every class
+    /// but the Phase 9 classes is ready (P1 fails otherwise).
     pub fn ready(self: *const Class) bool {
         return self.zolt != null and self.waits_for == null and !self.phase9;
     }

@@ -2,7 +2,9 @@
 //! object stream may hold them, valid or not. ObjectStreamParity.zig reads every word with C++'s ObjectStreamTextIn
 //! (`IStringStream >> T`, `strtoul` for identifiers) and with Zolt's reader.
 //!
-//! The words avoid D14: a hexadecimal float whose value is a subnormal of the read type (glibc reads an exact one).
+//! The words avoid D14: a float word whose value is exactly a subnormal of the read type (glibc reads it, Zolt does not).
+//! A hexadecimal word is never a subnormal of the read type. A decimal word has at most 25 significant digits, and an
+//! exact subnormal needs many more (105 for the smallest float).
 
 const std = @import("std");
 

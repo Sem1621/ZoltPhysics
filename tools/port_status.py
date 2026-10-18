@@ -13,9 +13,9 @@ files without a header, and library files that are not registered in Zolt/zolt.z
 Usage:
     python3 tools/port_status.py            # print summary + lint warnings
     python3 tools/port_status.py --write    # also regenerate Docs/Zolt/Progress.md
-    python3 tools/port_status.py --check    # exit 1 if Progress.md is stale or lint fails (CI)
+    python3 tools/port_status.py --check    # exit 1 if Progress.md is stale, lint fails or a declaration is pending (CI)
     python3 tools/port_status.py --next     # list unported C++ units whose dependencies are all ported
-    python3 tools/port_status.py --no-pending  # exit 1 while a serializable class is pending or not declared (Phase 8)
+    python3 tools/port_status.py --no-pending  # exit 1 while a serializable class is pending or not declared
 """
 import argparse
 import os
@@ -454,11 +454,12 @@ def print_next(lib_rows):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--write", action="store_true", help="regenerate Docs/Zolt/Progress.md")
-    ap.add_argument("--check", action="store_true", help="fail if Progress.md is stale or lint finds problems")
+    ap.add_argument("--check", action="store_true",
+                    help="fail if Progress.md is stale, lint finds problems or a serializable class is pending")
     ap.add_argument("--next", action="store_true", help="list unported units whose dependencies are ported")
     ap.add_argument("--verbose", action="store_true", help="with --next: also list blocked units")
     ap.add_argument("--no-pending", action="store_true",
-                    help="fail while a serializable class is pending or not declared (the final check of Phase 8)")
+                    help="fail while a serializable class is pending or not declared (--check includes it)")
     args = ap.parse_args()
 
     lib_rows, test_rows, lint = collect()
@@ -494,17 +495,24 @@ def main():
         if stale:
             print("Docs/Zolt/Progress.md is stale, run: python3 tools/port_status.py --write", file=sys.stderr)
         untidy = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "tidy_registry.py"), "--check"]).returncode != 0
-        # The RTTI declarations against Jolt's sCreateRTTI blocks (SerializationArchitecture.md section 4, F2)
-        undeclared = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_serializable.py"), "--check"]).returncode != 0
-        if stale or lint or untidy or undeclared:
+        # The RTTI declarations against Jolt's sCreateRTTI blocks (SerializationArchitecture.md section 4, F2). Phase 8
+        # is done, so a pending declaration fails too (S18, the final check).
+        undeclared = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_serializable.py"), "--check",
+                                     "--complete"]).returncode != 0
+        pending = not serialization_complete(serialization)
+        if stale or lint or untidy or undeclared or pending:
             sys.exit(1)
 
-    if args.no_pending:
-        left = [(c, s) for c, _, s in serialization if s != "declared"]
-        for c, s in left:
-            print(f"serialization: {c} is {'pending' if s == 'pending' else 'not declared'}", file=sys.stderr)
-        if left:
-            sys.exit(1)
+    if args.no_pending and not serialization_complete(serialization):
+        sys.exit(1)
+
+
+def serialization_complete(serialization):
+    """True when every serializable class of Jolt (without Phase 9) has a complete declaration; prints the others"""
+    left = [(c, s) for c, _, s in serialization if s != "declared"]
+    for c, s in left:
+        print(f"serialization: {c} is {'pending' if s == 'pending' else 'not declared'}", file=sys.stderr)
+    return not left
 
 
 if __name__ == "__main__":

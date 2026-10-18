@@ -13,6 +13,8 @@
 //! the default factory of ObjectStreamIn.
 //!
 //! GetAllClasses returns the registration order; Jolt's returns its hash map order (nothing depends on it).
+//!
+//! `find` and `createObject` take Jolt's `const char *` as a slice: the name ends at the first NUL byte, like in Jolt.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -93,11 +95,13 @@ pub const Factory = struct {
         return null;
     }
 
-    /// Find type info for a specific class by name, null if not found
+    /// Find type info for a specific class by name, null if not found. The name ends at the first NUL byte (Jolt's
+    /// `const char *`).
     pub fn find(self: *const Factory, name: []const u8) ?*const RTTI {
+        const c_name = std.mem.sliceTo(name, 0);
         // The hashes of a factory are unique: the class with the hash of the name, if it has the name
-        const rtti = self.findHash(RTTI.hashName(name)) orelse return null;
-        return if (std.mem.eql(u8, rtti.name, name)) rtti else null;
+        const rtti = self.findHash(RTTI.hashName(c_name)) orelse return null;
+        return if (std.mem.eql(u8, rtti.name, c_name)) rtti else null;
     }
 
     /// Create an object of the class `name` (CreateObject), null if the class is unknown or abstract
@@ -122,4 +126,10 @@ test "Factory: Jolt's registration order, find by name and hash" {
     try std.testing.expectEqual(RTTI.of(Color), factory.find("Color").?);
     try std.testing.expectEqual(RTTI.of(Color), factory.findHash(0xa7d2746c).?);
     try std.testing.expect(factory.find("Colour") == null and factory.find("float") == null);
+
+    // Jolt looks names up as `const char *`: they end at the first NUL
+    try std.testing.expectEqual(RTTI.of(Color), factory.find("Color\x00ful").?);
+    try std.testing.expect(factory.find("\x00Color") == null);
+    const color: *Color = @ptrCast(@alignCast((try factory.createObject(std.testing.allocator, "Color\x00")).?));
+    RTTI.of(Color).destructObject(color, std.testing.allocator);
 }
