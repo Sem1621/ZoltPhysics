@@ -16,7 +16,11 @@
 //! - StopTest returns `Error!void`, because Ragdoll.removeFromPhysicsSystem allocates. When a ragdoll cannot be removed,
 //!   the ragdolls before it are released and the others stay in the list, so that a second call removes them.
 //! - StartTest reserves the slot in `ragdolls` before it creates a ragdoll, so that a ragdoll in the system always has
-//!   its reference. When StartTest fails, the ragdolls that it added are removed again.
+//!   its reference. When StartTest fails, it removes the ragdolls that it added again. That removal can run out of
+//!   memory too. The ragdolls then stay in the list, and a second StopTest removes them.
+//! - Destroy leaks the ragdolls that are still in the list. Their release would destroy their bodies, and main destroys
+//!   the physics system before the scene. This only happens when StopTest ran out of memory and was not called again.
+//!   Only a non-allocating Ragdoll.removeFromPhysicsSystem could avoid this leak.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -82,7 +86,8 @@ pub const RagdollScene = struct {
     }
 
     pub fn destroy(self: *RagdollScene) void {
-        std.debug.assert(self.ragdolls.items.len == 0); // StopTest released them (their bodies are in a system)
+        // Zolt: StopTest released the ragdolls. A ragdoll is only left when StopTest ran out of memory and was not called
+        // again. It is leaked then: its release would destroy its bodies, and their physics system may be gone.
         self.ragdolls.deinit(self.allocator);
         self.background.deinit();
         self.pose.deinit();

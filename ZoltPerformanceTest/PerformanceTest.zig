@@ -893,6 +893,27 @@ test "RagdollScene: out of memory while loading, starting and stopping" {
     try startAndStopForTest(scene, &world.system);
 }
 
+test "RagdollScene: destroy leaks the ragdolls that a failed StopTest left behind" {
+    // Zolt test: StopTest runs out of memory and is not called again, like in main after an error. The physics system
+    // is destroyed first, then the scene. Destroy must not release the ragdolls, because their bodies were in that
+    // system, and it must not crash. An arena frees the leaked memory at the end.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var failing = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    const ragdoll_scene = try RagdollScene.create(failing.allocator(), std.testing.io, 2, 2, 0.4);
+    const scene = ragdoll_scene.scene();
+    defer scene.destroy();
+    try std.testing.expect(try scene.load("Assets/"));
+    const world = try TestPhysicsSystem.create(scene);
+    defer world.destroy();
+    try scene.startTest(&world.system, .linear_cast);
+
+    // Every later allocation fails: StopTest cannot remove the first ragdoll, so all 2 x 2 x 2 ragdolls stay
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, scene.stopTest(&world.system));
+    try std.testing.expectEqual(8, ragdoll_scene.ragdolls.items.len);
+}
+
 test {
     _ = LayersFile;
     _ = CharacterVirtualScene;

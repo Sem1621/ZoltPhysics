@@ -18,8 +18,9 @@
 //! - Once the class is there and no declaration is pending, the asset must read: a failure fails the sweep.
 //!
 //! The assets are read relative to the working directory, so the sweeps need the repository root as working
-//! directory. build.zig gives the test runs no working directory (only the parity run has one), so `zig build test`
-//! must be started in the repository root. Started elsewhere, Z2 to Z4 fail with error.FileNotFound.
+//! directory. build.zig gives the unit test run no working directory (only the parity run and the test run of
+//! ZoltPerformanceTest have one), so `zig build test` must be started in the repository root. Started elsewhere, Z2 to
+//! Z4 fail with error.FileNotFound.
 //!
 //! Limits of the sweeps (a read in Debug is about 10 times slower than in ReleaseFast, and both run in CI):
 //! - Z2 makes every allocation of the Z1 defaults, of the object of ObjectStreamTest and of the linked objects fail.
