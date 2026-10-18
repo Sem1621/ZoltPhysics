@@ -9,10 +9,10 @@
 //!     for `RegisterTypes.constraint_settings_types`, E3). Its wheels are `Ref(WheelSettings)`, its controller a
 //!     `Ref(VehicleControllerSettings)`; `destruct` releases them.
 //!   - `VehicleConstraint` is a pattern A level directly under `Constraint` (Jolt: `Constraint, PhysicsStepListener`): it
-//!     adds no virtual functions and lists its Constraint overrides. Jolt's private PhysicsStepListener base is
+//!     adds no virtual functions and lists its Constraint overrides. Jolt's public PhysicsStepListener base is
 //!     `stepListener()`, the pattern B `PhysicsStepListener` for `PhysicsSystem.addStepListener` /
 //!     `removeStepListener` (the same `ptr` every time, so removing finds it). `onStep` is `pub` for that interface
-//!     (private in Jolt).
+//!     (Jolt's `OnStep` override is private).
 //!   - The constraint owns its controller and its wheels (`destroy()` in `destruct`, Jolt's `delete`). The controller
 //!     keeps a pointer to the constraint, so a VehicleConstraint is built in place: `create(allocator, body, settings)`
 //!     (`new VehicleConstraint`, reference count 0) or `init(self, ...)` for an embedded constraint (`setEmbedded`,

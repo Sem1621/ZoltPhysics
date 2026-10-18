@@ -196,7 +196,7 @@ class fills.
     records.
   - The getters that are not in the state:
     - CharacterVirtual's active contacts (its `SaveState` writes only the contacts with a collision, without the back
-      facing flag, the user data and the material);
+      facing flag, the character B pointer, the user data and the material);
     - the ground material and the ground user data of both character classes (`CharacterBase::SaveState` does not
       write them);
     - `canWalkStairs`;
@@ -348,6 +348,11 @@ unless noted:
     same trees. Only the failure injection gives Zolt updates that the C++ side never ran. The C++ side is unchanged.
   - Every Character and CharacterVirtual scene with sweeps sets it. The physics scenes keep the free running layout:
     they show that the physics pipeline does not depend on it.
+  - The vehicle testers are the exception in the pipeline. They query the broad phase in `PhysicsSystem::Update`,
+    through the VehicleConstraint step listener. They keep the first of equal hits (strict `<` in
+    VehicleCollisionTester.cpp). So a vehicle can depend on the layout when two bodies give the same hit. The vehicle
+    scenes do not set `restore_broad_phase`: they are bit exact after the sweeps without it, so no wheel in them meets
+    such a tie. A vehicle scene that differs only after a sweep sets it.
 - **Character records.** The CharacterContactListener records are compared one by one in call order, not sorted
   (section 3), after every update and after the sweeps.
 - **An active body for the sweeps.** PhysicsSystem.update allocates nothing without an active body. Scenes without one
