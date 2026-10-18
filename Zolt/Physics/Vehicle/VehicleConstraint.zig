@@ -2,8 +2,8 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings): `rtti` with
-//!   Jolt's attributes. Unlike the binary state, an object stream writes the class of every wheel and of the controller,
-//!   so it reads settings with wheels back.
+//!   Jolt's attributes. The binary state does not write the class of each wheel (E6). An object stream does, so it reads
+//!   settings with wheels back.
 //! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2 and the porter template of FixedConstraint.zig:
 //!   - `VehicleConstraintSettings` embeds `base: ConstraintSettings` (`rtti`, overrides, `create` / `createDefault`
