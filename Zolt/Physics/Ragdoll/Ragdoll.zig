@@ -42,7 +42,9 @@
 //! - `createRagdoll` allocates the ragdoll, its arrays and its constraints with the settings' allocator (Jolt: `new`)
 //!   and returns `CreateBodyError!?*Ragdoll`: null when out of bodies (Jolt's soft failure, it deletes the ragdoll,
 //!   which destroys the bodies it created), `error.InvalidShape` for a part without a shape (Jolt crashes in
-//!   CreateBody) and `error.OutOfMemory`; on an error the bodies and constraints it created are destroyed. The body ID
+//!   CreateBody) and `error.OutOfMemory`; on an error the bodies and constraints it created are destroyed. Deleting the
+//!   ragdoll releases its reference to the settings, so settings that nobody else references are destroyed then (as in
+//!   Jolt) and `createRagdoll` reads nothing of them afterwards. The body ID
 //!   of a new body is stored right after its creation (Jolt: after its constraint), so that a failing constraint
 //!   creation destroys that body too (nothing reads the ID list in between).
 //! - `addToPhysicsSystem` allocates first, then prepares the bodies (QuadTree's AddBodiesPrepare allocates), then adds
@@ -759,9 +761,15 @@ pub const RagdollSettings = struct {
     /// @return Newly created ragdoll or null when out of bodies
     /// (Zolt: the ragdoll has reference count 0 like Jolt's `new`, put it in a `Ref`. It, its arrays and its constraints
     /// are allocated with the settings' allocator. `error.InvalidShape` for a part without a shape, error.OutOfMemory:
-    /// the bodies and constraints that were created are destroyed again.)
+    /// the bodies and constraints that were created are destroyed again. The ragdoll holds a reference to these
+    /// settings. As in Jolt, a null result releases it again (`delete r`), so settings that nobody else references are
+    /// destroyed. An error does the same, unless it is the allocation of the ragdoll itself. Hold a reference to keep
+    /// the settings.)
     pub fn createRagdoll(self: *const RagdollSettings, collision_group: CollisionGroup.GroupID, user_data: u64, system: *PhysicsSystem) CreateBodyError!?*Ragdoll {
-        const r = try Ragdoll.create(self.allocator, system);
+        // Zolt: `r.destroy()` can destroy these settings, so nothing reads `self` after it (the deferred free of
+        // `bodies` uses this copy of the allocator)
+        const allocator = self.allocator;
+        const r = try Ragdoll.create(allocator, system);
         errdefer r.destroy(); // delete r: destroys the bodies and releases the constraints that were created
         r.ragdoll_settings.set(self);
         try r.body_ids.ensureTotalCapacity(r.allocator, self.parts.items.len);
@@ -769,8 +777,8 @@ pub const RagdollSettings = struct {
 
         // Create bodies and constraints
         const bi = system.getBodyInterfaceMut();
-        const bodies = try self.allocator.alloc(*Body, self.parts.items.len); // JPH_STACK_ALLOC
-        defer self.allocator.free(bodies);
+        const bodies = try allocator.alloc(*Body, self.parts.items.len); // JPH_STACK_ALLOC
+        defer allocator.free(bodies);
         for (self.parts.items, 0..) |*p, joint_idx| {
             const body2 = (try bi.createBody(&p.base)) orelse {
                 // Out of bodies, failed to create ragdoll
@@ -793,7 +801,7 @@ pub const RagdollSettings = struct {
                 if (parent < 0 or parent > @as(i32, @intCast(joint_idx)))
                     @panic("RagdollSettings.createRagdoll: a part is connected to a parent joint that is negative (Jolt reads before its body pointers) or greater than its own index (Jolt reads an uninitialized body pointer)");
                 const body1 = bodies[@intCast(parent)];
-                const constraint = try to_parent.createConstraint(self.allocator, body1, body2);
+                const constraint = try to_parent.createConstraint(allocator, body1, body2);
                 r.constraints.appendAssumeCapacity(.init(&constraint.base));
             }
         }
@@ -803,7 +811,7 @@ pub const RagdollSettings = struct {
             const body1 = bodies[@intCast(c.body_idx[0])];
             const body2 = bodies[@intCast(c.body_idx[1])];
             const settings = c.getConstraint() orelse @panic("RagdollSettings.createRagdoll: an additional constraint without settings (Jolt dereferences a null pointer)");
-            const constraint = try settings.createConstraint(self.allocator, body1, body2);
+            const constraint = try settings.createConstraint(allocator, body1, body2);
             r.constraints.appendAssumeCapacity(.init(&constraint.base));
         }
 
@@ -2146,6 +2154,66 @@ test "Ragdoll: createRagdoll out of bodies and with a part without a shape" {
     defer world2.deinit();
     settings.get().?.parts.items[6].base.setShape(null);
     try testing.expectError(error.InvalidShape, settings.get().?.createRagdoll(1, 0, &world2.system));
+    try testing.expectEqual(@as(u32, 0), world2.system.getNumBodies());
+}
+
+/// An allocator that overwrites memory with 0xaa before it frees it, so that a read after the free finds garbage
+/// (testing.allocator keeps the old bytes)
+const ScribblingAllocator = struct {
+    child: Allocator,
+
+    fn allocator(self: *ScribblingAllocator) Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ScribblingAllocator = @ptrCast(@alignCast(context));
+        return self.child.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ScribblingAllocator = @ptrCast(@alignCast(context));
+        return self.child.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ScribblingAllocator = @ptrCast(@alignCast(context));
+        return self.child.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ScribblingAllocator = @ptrCast(@alignCast(context));
+        @memset(memory, 0xaa);
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "Ragdoll: createRagdoll with settings that only the ragdoll references" {
+    // As in Jolt, the ragdoll holds a reference to its settings and deleting it releases that reference. For settings
+    // that nobody else references this destroys them, so createRagdoll must not read the settings after it deleted the
+    // ragdoll (the first port freed its body pointers with the allocator of the destroyed settings, which crashes with
+    // the scribbling allocator)
+    var world: TestWorld = undefined;
+    try world.init(testing.allocator, 6);
+    defer world.deinit();
+    _ = try world.addFloor();
+    var scribbling: ScribblingAllocator = .{ .child = testing.allocator };
+    const allocator = scribbling.allocator();
+
+    // Room for 5 of the 11 parts: null, the settings are destroyed with the ragdoll (else testing.allocator reports a
+    // leak)
+    const settings = try buildHumanoid(allocator, .{});
+    try testing.expectEqual(@as(u32, 0), settings.getRefCount());
+    try testing.expect(try settings.createRagdoll(1, 0, &world.system) == null);
+    try testing.expectEqual(@as(u32, 1), world.system.getNumBodies());
+
+    // An error after the ragdoll was created does the same (a part without a shape)
+    var world2: TestWorld = undefined;
+    try world2.init(testing.allocator, 64);
+    defer world2.deinit();
+    const settings2 = try buildHumanoid(allocator, .{});
+    settings2.parts.items[6].base.setShape(null);
+    try testing.expectError(error.InvalidShape, settings2.createRagdoll(1, 0, &world2.system));
     try testing.expectEqual(@as(u32, 0), world2.system.getNumBodies());
 }
 
