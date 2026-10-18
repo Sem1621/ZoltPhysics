@@ -87,9 +87,12 @@ pub const ObjectStreamBinaryOut = struct {
         if (self.string_table.get(value)) |id| return self.writeCount(id);
 
         // Insert string in table
+        // Once the table owns the key, deinit frees it: only a failed insert frees it here
         const key = try allocator.dupe(u8, value);
-        errdefer allocator.free(key);
-        try self.string_table.putNoClobber(allocator, key, self.next_string_id);
+        self.string_table.putNoClobber(allocator, key, self.next_string_id) catch |err| {
+            allocator.free(key);
+            return err;
+        };
         self.next_string_id += 1;
 
         // Write string
@@ -98,3 +101,14 @@ pub const ObjectStreamBinaryOut = struct {
         try self.writer.writeAll(value[0..len]);
     }
 };
+
+test "ObjectStreamBinaryOut: a string whose bytes cannot be written stays owned by the string table" {
+    // The header (8 bytes) and the string's count (4 bytes) fit, the string's bytes do not: the key is already in the
+    // table when the write fails, so only deinit frees it (no double free)
+    var buffer: [14]u8 = undefined;
+    var writer: Writer = .fixed(&buffer);
+    var out = try ObjectStreamBinaryOut.init(&writer);
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expectError(error.WriteFailed, out.writeString(std.testing.allocator, "abcdef"));
+    try std.testing.expectEqual(@as(u32, 1), out.string_table.count());
+}

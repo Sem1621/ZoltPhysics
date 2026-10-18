@@ -347,6 +347,8 @@ None of these cases occurs in a stream that Jolt or Zolt writes.
 | D12 | Ref / RefConst links that form a cycle | reads the objects and leaks them | `InvalidObjectStream` |
 | D13 | an I/O error of the reader | ends the read like the end of the stream | `error.ReadFailed` |
 | D14 | a hexadecimal float word that is an exact subnormal | glibc reads it | fails like every subnormal |
+| D15 | class data nested deeper than `max_nesting_depth` (a class that contains itself by value in a crafted stream) | recurses until the stack overflows | `InvalidObjectStream` |
+| D16 | a MeshShapeSettings build quality without a name (S13) | `JPH_ASSERT(false)`, then a call through a null splitter | a panic with a message when the shape is created |
 
 - D11: no Jolt class has two attributes in one place, and a writer declares each attribute once.
 - D12: a Ref cycle is useless for Jolt's classes; a compound shape that contains itself recurses forever in CreateShape.
