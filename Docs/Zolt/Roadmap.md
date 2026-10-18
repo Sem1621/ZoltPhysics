@@ -234,14 +234,14 @@ Design, groups and harness plan: [CharacterVehicleArchitecture.md](CharacterVehi
 
 ### Phase 8: ObjectStream and serialization (`Jolt/ObjectStream`) ✅
 RTTI, Factory, StreamUtils, SerializableObject, ObjectStreamIn/Out (text and binary), TypeDeclarations and
-the serializable declarations of every class. Each class declares its stream schema next to its fields, with
-Jolt's names, order and aliases (SerializationArchitecture S5). Reflection over all fields was rejected (its
-section 9). The file formats are Jolt's, so `Assets/*.tof` / `*.bof` load.
+the serializable declarations of every class outside SoftBody and Hair. Each class declares its stream schema
+next to its fields, with Jolt's names, order and aliases (SerializationArchitecture S5). Reflection over all
+fields was rejected (its section 9). The file formats are Jolt's, so `Assets/*.tof` / `*.bof` load.
 Design, groups and harness plan: [SerializationArchitecture.md](SerializationArchitecture.md).
 **Milestone M9:** **Ragdoll** hash matches → all 5 determinism hashes match. The port is exact. ✅ Reached:
-- `Jolt/ObjectStream` (14 files), RTTI, Factory and StreamUtils are complete, and so is the port of
-  ObjectStreamTest. All 81 serializable classes outside SoftBody and Hair are declared, in 64 Zig files, and
-  RegisterTypes has Jolt's Factory (`RegisterTypes.factory`). Every restore by RTTI hash goes through it.
+- The 14 Zig files of `Zolt/ObjectStream` (one per Jolt header), RTTI, Factory and StreamUtils are complete, and so
+  is the port of ObjectStreamTest. All 81 serializable classes outside SoftBody and Hair are declared, in 64 Zig
+  files, and RegisterTypes has Jolt's Factory (`RegisterTypes.factory`). Every restore by RTTI hash goes through it.
 - ZoltPerformanceTest runs PerformanceTest's Ragdoll scene, which loads `Assets/Human.tof`,
   `Assets/Human/dead_pose1.tof` and `Assets/terrain2.bof` through ObjectStreamIn. With `-q=LinearCast` it gives
   Jolt's hashes `0x3be6ea76c07a2ac8` (single precision) and `0x8dd6bc501859a228` (double precision), with
@@ -257,15 +257,16 @@ Design, groups and harness plan: [SerializationArchitecture.md](SerializationArc
 - The Zolt-only sweeps Z1 to Z4 write and read every creatable class, fail allocations, read truncated streams
   and mutate them: no leak, no crash. Zolt-only tests pin Zolt's defined behavior where Jolt is undefined (D1
   to D17).
-- During the groups, the parity found one result difference in library code: the number parser read words just
-  below the smallest normal number, which glibc rejects (P6). The tests and reviews of the groups found a double
-  free when a writer fails, a stack overflow on a class that contains itself, stream values that reach undefined
-  behavior (the constraint step overrides), a C++ harness that ran without its allocation hooks, and doc
-  errors. Each was fixed before the merge.
+- During the groups, the parity found one result difference in library code: the number parser accepted words
+  just below the smallest normal number, which glibc rejects (P6). The fix came with the F3 merge. The reviews
+  found a stack overflow on a class that contains itself, stream values that reach undefined behavior (the
+  constraint step overrides), a C++ harness that ran without its allocation hooks, and doc errors. Each was fixed
+  before its group merged. G2's allocation failure tests found a double free when a writer fails. It was fixed
+  with a test after G2 merged.
 - A last audit of the merged phase against the Jolt sources confirmed 37 findings. Among them were Jolt
   behaviors on input that no generator produces (class names with a NUL, a second write on one stream, string
-  lengths above 4 GB), a class that uses its parent's RTTI written from the wrong address, abstract classes that
-  could not be destroyed, a main object of a derived class freed with the wrong size (D17), missing compile
+  lengths of 4 GB or more), a class that uses its parent's RTTI written from the wrong address, abstract classes
+  that could not be destroyed, a main object of a derived class freed with the wrong size (D17), missing compile
   checks, and a harness and a CI check that let a pending class pass. Each was fixed or documented.
 - Phase 9 boundary: the SoftBody and Hair schemas (SoftBodyCreationSettings, SoftBodySharedSettings with its 11
   nested classes, the 10 Hair classes) and `PhysicsScene.mSoftBodies`. A scene stream with soft bodies fails to

@@ -1112,9 +1112,11 @@ on the way and bind later phases that add constraints (VehicleConstraint, Ragdol
 - The settings classes and PathConstraintPathHermite are in `RegisterTypes.factory_types`, in Jolt's
   RegisterTypes.cpp order (SerializationArchitecture.md S8). A user adds classes through
   `zolt_user_types.serializable_types`.
-- A class that is not ported yet is a stub file whose settings declare `pub const is_stub = true`.
-  `restoreFromBinaryState` skips stubs, and the parity harnesses skip the scenes and kinds that
-  need them; removing `is_stub` turns them on. No stub is left after Phase 6.
+- During Phase 6, a class that was not ported yet was a stub file whose settings declared
+  `pub const is_stub = true`. `restoreFromBinaryState` skipped stubs, and the parity harnesses
+  skipped the scenes and kinds that needed them; removing `is_stub` turned them on. No stub was
+  left after Phase 6. Since Phase 8, a restore goes through `StreamUtils.restoreObject` and
+  `RegisterTypes.factory`, which have no stub check.
 - Enums that the binary state restores (an `enum class` has a fixed underlying type)
   (`ConstraintSpace`, `SpringMode`, `MotorState`, `SwingType`, `PathRotationConstraintType`) are
   non-exhaustive Zig enums. A stream can hold any value, and the code must treat unknown values as

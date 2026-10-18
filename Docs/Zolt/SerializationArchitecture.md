@@ -3,7 +3,8 @@
 This is the binding design for Phase 8:
 - `Jolt/Core/RTTI`, `Jolt/Core/Factory` and `Jolt/Core/StreamUtils`;
 - `Jolt/ObjectStream` (text and binary streams);
-- the serializable declarations of every class (`JPH_DECLARE_SERIALIZABLE_*` / `JPH_IMPLEMENT_SERIALIZABLE_*`);
+- the serializable declarations of every class outside SoftBody and Hair (`JPH_DECLARE_SERIALIZABLE_*` /
+  `JPH_IMPLEMENT_SERIALIZABLE_*`; the rest is Phase 9, S17);
 - `UnitTests/ObjectStream/ObjectStreamTest.cpp`;
 - milestone M9.
 
@@ -304,8 +305,8 @@ pub const Options = struct { factory: *const Factory = &RegisterTypes.factory };
     NUL: in the factory (`find`, `createObject`), for the class of an attribute (`IsType`, a `strcmp`) and for the
     class of a skipped instance. The key of a class description and the class of an `object` use the whole word, like
     Jolt.
-  - The first object that is created is the main object. It must be kind of the requested class. When the requested
-    class has no vtable, it must be exactly that class (D17).
+  - The first object that is created is the main object. It must be kind of the requested class. `sReadObject` also
+    requires exactly that class when the class has no vtable (D17).
   - An object whose data cannot be read is destroyed, and the read goes on.
   - Links resolve after the whole stream, in read order.
   - Objects that no link references are destroyed, except the main object.
@@ -858,10 +859,11 @@ The lead settled the open questions of the synthesis:
 
 ## 12. Settled in the Phase 8 groups
 
-Reviews of the groups found bugs and doc errors, which were fixed before the merges. After the last merge, a
-completeness audit checked the whole phase against the Jolt sources. It confirmed 37 findings, and each one was fixed or
-documented. These points were settled on the way. They add to section 11 and bind later phases that change these
-classes (Phase 9 adds the SoftBody and Hair schemas). The file headers have the details.
+Reviews and tests of the groups found bugs and doc errors. Most were fixed before their group merged, the others before
+the phase ended (see "Bugs found on the way"). After the last merge, a completeness audit checked the whole phase
+against the Jolt sources. It confirmed 37 findings, and each one was fixed or documented. These points were settled on
+the way. They add to section 11 and bind later phases that change these classes (Phase 9 adds the SoftBody and Hair
+schemas). The file headers have the details.
 
 | Jolt behavior | Decision |
 |---|---|
@@ -879,13 +881,14 @@ classes (Phase 9 adds the SoftBody and Hair schemas). The file headers have the 
 | glibc reads a float word whose exact value is a subnormal | Zolt fails it like every subnormal (D14, widened by the audit to decimal words) |
 
 **Bugs found on the way.** Each was fixed with a test that failed before:
-- F3's P6 found that the number parser read words just below the smallest normal number, which glibc rejects (tininess
-  after rounding, S12). `ObjectStreamTextIn.parseFloat` follows glibc now.
+- F3's P6 found that the number parser accepted words just below the smallest normal number, which glibc rejects
+  (tininess after rounding, S12). `ObjectStreamTextIn.parseFloat` follows glibc since the F3 merge.
 - The F1 review found that a skipped class that contains itself recursed until the stack overflowed (D15).
 - The F3 review found that the C++ side of P2 to P7 ran without its allocation hooks: its factory setup installed Jolt's
   allocator again. Every hooked call now checks that its hooks are still installed.
 - G2's allocation failure tests found a double free in the binary `writeString`. When the writer failed after the
-  string entered the string table, its `errdefer` freed the key, and `deinit` freed it again.
+  string entered the string table, its `errdefer` freed the key, and `deinit` freed it again. The fix came after the
+  G2 merge.
 - G5 and G6 found that `RagdollScene.destroy` asserted after a StopTest that ran out of memory (see below).
 - The audit found the rows of the table marked "audit", missing compile checks (S5), a harness and a CI check that let
   a pending class pass (S18), CI path filters without `PerformanceTest/**` and `Assets/**`, and stale docs.
