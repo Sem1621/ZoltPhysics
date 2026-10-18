@@ -3,7 +3,10 @@
 // VehicleDifferentialSettings::CalculateTorqueRatio, the default curves, and the binary state of every vehicle settings
 // class (VehicleEngineSettings, VehicleTransmissionSettings, VehicleDifferentialSettings, VehicleAntiRollBar,
 // VehicleTrackSettings, WheelSettings, WheelSettingsWV, WheeledVehicleControllerSettings and VehicleConstraintSettings
-// without wheels). ZoltParity/Physics/VehiclePartsParity.zig calls these and checks that Zolt produces the same bits.
+// without wheels, and the vehicle variants' WheelSettingsTV, TrackedVehicleControllerSettings and
+// MotorcycleControllerSettings), the TrackedVehicleController / MotorcycleController constructed from settings (GetSettings
+// and SaveState) and TrackedVehicleController::SyncLeftRightTracks. ZoltParity/Physics/VehiclePartsParity.zig calls these
+// and checks that Zolt produces the same bits.
 //
 // The settings are built from descriptions (VP* structs, must match the extern structs of VehiclePartsParity.zig).
 // Booleans are passed as uint32 (never bool, see the porting guide). All C functions have the prefix jolt_vp_. Functions
@@ -22,6 +25,8 @@
 #include <Jolt/Physics/Vehicle/VehicleTransmission.h>
 #include <Jolt/Physics/Vehicle/Wheel.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
+#include <Jolt/Physics/Vehicle/TrackedVehicleController.h>
+#include <Jolt/Physics/Vehicle/MotorcycleController.h>
 
 #include <cstring>
 #include <sstream>
@@ -166,6 +171,35 @@ struct VPConstraint
 	VPController		mController;
 };
 
+// Must match VPWheelTV in VehiclePartsParity.zig: WheelSettings (the WheelSettingsWV members of mWheel are not used) and
+// the members of WheelSettingsTV
+struct VPWheelTV
+{
+	VPWheel				mWheel;
+	float				mLongitudinalFriction;
+	float				mLateralFriction;
+};
+
+// Must match VPTracked in VehiclePartsParity.zig: TrackedVehicleControllerSettings
+struct VPTracked
+{
+	VPEngine			mEngine;
+	VPTransmission		mTransmission;
+	VPTrack				mTracks[2];
+};
+
+// Must match VPMotorcycle in VehiclePartsParity.zig: MotorcycleControllerSettings
+struct VPMotorcycle
+{
+	VPController		mController;
+	float				mMaxLeanAngle;
+	float				mLeanSpringConstant;
+	float				mLeanSpringDamping;
+	float				mLeanSpringIntegrationCoefficient;
+	float				mLeanSpringIntegrationCoefficientDecay;
+	float				mLeanSmoothingFactor;
+};
+
 // The settings classes of jolt_vp_save / jolt_vp_resave (must match VPKind in VehiclePartsParity.zig)
 enum class VPKind : uint32
 {
@@ -178,6 +212,9 @@ enum class VPKind : uint32
 	WheelSettingsWV,
 	Controller,
 	Constraint,
+	WheelSettingsTV,												///< A VPWheelTV
+	TrackedController,												///< A VPTracked
+	MotorcycleController,											///< A VPMotorcycle
 };
 
 // Must match VPEngineOp in VehiclePartsParity.zig
@@ -314,6 +351,41 @@ static void VPMakeController(const VPController &inDesc, WheeledVehicleControlle
 	outSettings.mDifferentialLimitedSlipRatio = inDesc.mDifferentialLimitedSlipRatio;
 }
 
+static void VPMakeWheelTV(const VPWheelTV &inDesc, WheelSettingsTV &outSettings)
+{
+	VPMakeWheel(inDesc.mWheel, outSettings);
+	outSettings.mLongitudinalFriction = inDesc.mLongitudinalFriction;
+	outSettings.mLateralFriction = inDesc.mLateralFriction;
+}
+
+static void VPMakeTracked(const VPTracked &inDesc, TrackedVehicleControllerSettings &outSettings)
+{
+	VPMakeEngine(inDesc.mEngine, outSettings.mEngine);
+	VPMakeTransmission(inDesc.mTransmission, outSettings.mTransmission);
+	for (int t = 0; t < 2; ++t)
+		VPMakeTrack(inDesc.mTracks[t], outSettings.mTracks[t]);
+}
+
+static void VPMakeMotorcycle(const VPMotorcycle &inDesc, MotorcycleControllerSettings &outSettings)
+{
+	VPMakeController(inDesc.mController, outSettings);
+	outSettings.mMaxLeanAngle = inDesc.mMaxLeanAngle;
+	outSettings.mLeanSpringConstant = inDesc.mLeanSpringConstant;
+	outSettings.mLeanSpringDamping = inDesc.mLeanSpringDamping;
+	outSettings.mLeanSpringIntegrationCoefficient = inDesc.mLeanSpringIntegrationCoefficient;
+	outSettings.mLeanSpringIntegrationCoefficientDecay = inDesc.mLeanSpringIntegrationCoefficientDecay;
+	outSettings.mLeanSmoothingFactor = inDesc.mLeanSmoothingFactor;
+}
+
+// A new TrackedVehicleControllerSettings (mDrivenWheel of its tracks is uninitialized in Jolt: 0, Zolt's default)
+static Ref<TrackedVehicleControllerSettings> VPNewTracked()
+{
+	Ref<TrackedVehicleControllerSettings> s = new TrackedVehicleControllerSettings;
+	for (VehicleTrackSettings &t : s->mTracks)
+		t.mDrivenWheel = 0;
+	return s;
+}
+
 static void VPMakeConstraint(const VPConstraint &inDesc, VehicleConstraintSettings &outSettings)
 {
 	outSettings.mEnabled = inDesc.mEnabled != 0;
@@ -431,8 +503,53 @@ static void VPWithObject(VPKind inKind, const void *inDesc, const F &inFunction)
 	case VPKind::Constraint:
 		JPH_ASSERT(false); // Restored through sRestoreFromBinaryState, see jolt_vp_resave
 		break;
+
+	case VPKind::WheelSettingsTV:
+		{
+			Ref<WheelSettingsTV> s = new WheelSettingsTV;
+			if (inDesc != nullptr)
+				VPMakeWheelTV(*static_cast<const VPWheelTV *>(inDesc), *s);
+			inFunction(*s);
+			break;
+		}
+
+	case VPKind::TrackedController:
+		{
+			Ref<TrackedVehicleControllerSettings> s = VPNewTracked();
+			if (inDesc != nullptr)
+				VPMakeTracked(*static_cast<const VPTracked *>(inDesc), *s);
+			inFunction(*s);
+			break;
+		}
+
+	case VPKind::MotorcycleController:
+		{
+			Ref<MotorcycleControllerSettings> s = new MotorcycleControllerSettings;
+			if (inDesc != nullptr)
+				VPMakeMotorcycle(*static_cast<const VPMotorcycle *>(inDesc), *s);
+			inFunction(*s);
+			break;
+		}
 	}
 }
+
+// A vehicle constraint for the controller constructors, which only keep a reference to it (VehicleController), and for
+// GetSettings, SaveState and SyncLeftRightTracks, which do not access it
+static VehicleConstraint &VPDummyConstraint()
+{
+	alignas(VehicleConstraint) static uint8 sBuffer[sizeof(VehicleConstraint)];
+	return *reinterpret_cast<VehicleConstraint *>(sBuffer);
+}
+
+// TrackedVehicleController with the protected members that the tests use
+class VPTrackedController : public TrackedVehicleController
+{
+public:
+	using TrackedVehicleController::TrackedVehicleController;
+	using TrackedVehicleController::SyncLeftRightTracks;
+
+	void						SetRatiosUnchecked(float inLeft, float inRight)	{ mLeftRatio = inLeft; mRightRatio = inRight; } ///< Without SetLeftRatio's assert on 0
+};
 
 extern "C"
 {
@@ -452,6 +569,9 @@ void jolt_vp_struct_sizes(uint32 *outSizes)
 	outSizes[9] = uint32(sizeof(VPEngineOp));
 	outSizes[10] = uint32(sizeof(VPTransmissionOp));
 	outSizes[11] = uint32(sizeof(VPTransmissionResult));
+	outSizes[12] = uint32(sizeof(VPWheelTV));
+	outSizes[13] = uint32(sizeof(VPTracked));
+	outSizes[14] = uint32(sizeof(VPMotorcycle));
 }
 
 // SaveBinaryState of the object of class inKind built from inDesc (null: the default constructed object), returns the
@@ -600,6 +720,73 @@ void jolt_vp_default_curves(const float *inX, uint32 inCount, float *outValues)
 		outValues[3 * i] = wheel->mLongitudinalFriction.GetValue(inX[i]);
 		outValues[3 * i + 1] = wheel->mLateralFriction.GetValue(inX[i]);
 		outValues[3 * i + 2] = engine.mNormalizedTorque.GetValue(inX[i]);
+	}
+}
+
+// A TrackedVehicleController (inKind TrackedController, inDesc a VPTracked) or MotorcycleController (MotorcycleController,
+// a VPMotorcycle) constructed from the settings of inDesc for a vehicle constraint that it does not access: the
+// SaveBinaryState bytes of GetSettings() in outSettings (returns their size), the SaveState bytes of the new controller in
+// outState (their size in outStateSize)
+uint32 jolt_vp_controller(uint32 inKind, const void *inDesc, uint8 *outSettings, uint32 inSettingsCapacity, uint8 *outState, uint32 inStateCapacity, uint32 *outStateSize)
+{
+	VPEnsureFactory();
+	Ref<VehicleControllerSettings> settings;
+	if (VPKind(inKind) == VPKind::TrackedController)
+	{
+		Ref<TrackedVehicleControllerSettings> s = VPNewTracked();
+		VPMakeTracked(*static_cast<const VPTracked *>(inDesc), *s);
+		settings = s.GetPtr();
+	}
+	else
+	{
+		Ref<MotorcycleControllerSettings> s = new MotorcycleControllerSettings;
+		VPMakeMotorcycle(*static_cast<const VPMotorcycle *>(inDesc), *s);
+		settings = s.GetPtr();
+	}
+
+	// VehicleController's SaveState is protected, the constraint (a friend) calls it: call it through the derived class
+	class Controller : public VehicleController
+	{
+	public:
+		static void				sSaveState(const VehicleController &inController, StateRecorder &inStream)
+		{
+			void (VehicleController::*save_state)(StateRecorder &) const = &Controller::SaveState;
+			(inController.*save_state)(inStream); // A virtual call
+		}
+	};
+
+	VehicleController *controller = settings->ConstructController(VPDummyConstraint());
+	std::string bytes = VPSave(*controller->GetSettings());
+	StateRecorderImpl recorder;
+	Controller::sSaveState(*controller, recorder);
+	std::string state = recorder.GetData();
+	delete controller;
+
+	*outStateSize = uint32(state.size());
+	memcpy(outState, state.data(), std::min(*outStateSize, inStateCapacity));
+	return VPCopyBytes(bytes, outSettings, inSettingsCapacity);
+}
+
+// TrackedVehicleController::SyncLeftRightTracks of the cases inCases (6 floats each: left ratio, right ratio, left and
+// right track angular velocity, left and right track inertia), the angular velocities of the left and right track after
+// it in outVelocities (2 floats per case)
+void jolt_vp_tracked_sync(const float *inCases, uint32 inCount, float *outVelocities)
+{
+	VPEnsureFactory();
+	Ref<TrackedVehicleControllerSettings> settings = VPNewTracked();
+	VPTrackedController controller(*settings, VPDummyConstraint());
+	VehicleTracks &tracks = controller.GetTracks();
+	for (uint32 i = 0; i < inCount; ++i)
+	{
+		const float *c = inCases + 6 * i;
+		controller.SetRatiosUnchecked(c[0], c[1]);
+		tracks[0].mAngularVelocity = c[2];
+		tracks[1].mAngularVelocity = c[3];
+		tracks[0].mInertia = c[4];
+		tracks[1].mInertia = c[5];
+		controller.SyncLeftRightTracks();
+		outVelocities[2 * i] = tracks[0].mAngularVelocity;
+		outVelocities[2 * i + 1] = tracks[1].mAngularVelocity;
 	}
 }
 

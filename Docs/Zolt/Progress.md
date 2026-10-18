@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 85.3%** of 85391 lines in scope · **Unit tests: 93.6%** of 18321 lines
+**Library: 86.3%** of 85391 lines in scope · **Unit tests: 93.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -28,7 +28,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
-| `Jolt/Physics/Vehicle` | 79% | 10 | 0 | 2 | 0 | 0 | 0 | 3942 |
+| `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
 | `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
 | `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
@@ -453,12 +453,12 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Vehicle — 79%</summary>
+<details><summary>Jolt/Physics/Vehicle — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `MotorcycleController.cpp`, `MotorcycleController.h` | 337 | ⚪ stub | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
-| `TrackedVehicleController.cpp`, `TrackedVehicleController.h` | 584 | ⚪ stub | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
+| `MotorcycleController.cpp`, `MotorcycleController.h` | 337 | ✅ complete | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
+| `TrackedVehicleController.cpp`, `TrackedVehicleController.h` | 584 | ✅ complete | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
 | `VehicleAntiRollBar.cpp`, `VehicleAntiRollBar.h` | 50 | ✅ complete | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
 | `VehicleCollisionTester.cpp`, `VehicleCollisionTester.h` | 433 | ✅ complete | `Zolt/Physics/Vehicle/VehicleCollisionTester.zig` |
 | `VehicleConstraint.cpp`, `VehicleConstraint.h` | 806 | ✅ complete | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |

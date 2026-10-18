@@ -6257,10 +6257,219 @@ const VehicleSlot = struct {
 
 // ---- SLOT tracked_vehicle: TrackedVehicleController, WheelSettingsTV (Phase7OpRange.vehicle_tracked 570..579,
 // Blocker.tracked_vehicles) ----
-const TrackedVehicleSlot = Phase7StubSlot;
+
+/// The vehicle variants group, tracked vehicles: the hooks that VehicleSlot calls (SimMakeTrackedControllerSettings,
+/// SimMakeWheelSettingsTV, WriteTrackedWheelState, WriteTrackedControllerState, GetEngine / GetTransmission of a
+/// tracked vehicle) and ApplyTrackedOp of SimulationReference.cpp. Proof that the tracked scenes bite (each breakage of
+/// Zolt/Physics/Vehicle/TrackedVehicleController.zig, then reverted): reassociating PostCollide's
+/// `differential_torque * delta_time / inertia` as `differential_torque * (delta_time / inertia)` is reported as "scene
+/// vehicle_tracked_ops ... update 2: after the update, state f: state differs at byte 59 ...: bodies[1] (id 0x00800001)
+/// position.x zolt 0x2fd23654 jolt 0x2fcecaea"; `-=` instead of `+=` for the right track in SyncLeftRightTracks' branch
+/// of opposite ratios as "scene vehicle_tracked_terrains ... update 75: ... bodies[2] (id 0x00800002) position.x zolt
+/// 0xc1c6f3ff jolt 0xc1c6f2d7" (turning on the spot; VehiclePartsParity's SyncLeftRightTracks test fails too); summing
+/// the radius of every wheel of a braking track instead of those with a contact as "scene vehicle_tracked_terrains ...
+/// update 125: ... bodies[3] (id 0x00800003) position.x zolt 0x41cccda3 jolt 0x41cccd22" (and in
+/// vehicle_tracked_pushing_boxes and vehicle_tracked_far_from_origin, the scenes that brake with wheels in the air).
+const TrackedVehicleSlot = struct {
+    const TrackedVehicleController = zolt.TrackedVehicleController;
+    const TrackedVehicleControllerSettings = zolt.TrackedVehicleControllerSettings;
+    const WheelSettingsTV = zolt.WheelSettingsTV;
+    const WheelTV = zolt.WheelTV;
+
+    /// SimMakeTrackedControllerSettings: the engine, the transmission and the tracks of a description (no reference yet)
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        const s = try TrackedVehicleControllerSettings.create(allocator);
+        errdefer {
+            s.base.addRef();
+            s.base.release();
+        }
+        try VehicleSlot.fillEngine(allocator, scene, &v.engine, &s.engine);
+        try VehicleSlot.fillTransmission(allocator, scene, &v.transmission, &s.transmission);
+        for (&s.tracks, &v.tracks) |*track, *d|
+            try VehicleSlot.fillTrack(allocator, scene, d, track);
+        return &s.base;
+    }
+
+    /// SimMakeWheelSettingsTV: the WheelSettingsTV of a wheel description (no reference yet)
+    fn makeWheelSettings(allocator: Allocator, scene: *const SimSceneDesc, w: *const SimVehicleWheel) !*WheelSettings {
+        _ = scene;
+        const tv = try WheelSettingsTV.create(allocator);
+        VehicleSlot.fillWheelSettings(w, &tv.base);
+        tv.longitudinal_friction = w.longitudinal_friction_tv;
+        tv.lateral_friction = w.lateral_friction_tv;
+        return &tv.base;
+    }
+
+    /// The tracked controller of a vehicle
+    fn controller(v: *VehicleConstraint) *TrackedVehicleController {
+        return zolt.virtual.downcast(TrackedVehicleController, v.getControllerMut());
+    }
+
+    /// GetEngine of the .cpp for a tracked vehicle
+    fn engine(v: *VehicleConstraint) !*zolt.VehicleEngine {
+        return controller(v).getEngineMut();
+    }
+
+    /// GetTransmission of the .cpp for a tracked vehicle
+    fn transmission(v: *VehicleConstraint) !*zolt.VehicleTransmission {
+        return controller(v).getTransmissionMut();
+    }
+
+    /// ApplyTrackedOp (GetTrackedController: an operation on a vehicle of another controller kind is a scene error)
+    fn applyVehicleOp(world: *ZoltWorld, op: *const SimOp, v: *VehicleConstraint) !void {
+        const f = &op.f;
+        if ((try VehicleSlot.getVehicle(world, op.index)).controller != .tracked) {
+            std.debug.print("SimulationParity: tracked operation {d} on the vehicle handle {d}\n", .{ op.kind, op.index });
+            return error.SceneError;
+        }
+        const c = controller(v);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .tracked_set_driver_input => c.setDriverInput(f[0], f[1], f[2], f[3]),
+            .tracked_set_forward_input => c.setForwardInput(f[0]),
+            .tracked_set_left_ratio => c.setLeftRatio(f[0]),
+            .tracked_set_right_ratio => c.setRightRatio(f[0]),
+            .tracked_set_brake_input => c.setBrakeInput(f[0]),
+            .tracked_set_track => {
+                const track = &c.getTracksMut()[op.i[0]];
+                track.angular_velocity = f[0];
+                track.base.inertia = f[1];
+                track.base.angular_damping = f[2];
+                track.base.max_brake_torque = f[3];
+                track.base.differential_ratio = f[4];
+            },
+            else => {
+                std.debug.print("SimulationParity: unknown tracked vehicle operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+    }
+
+    /// WriteTrackedWheelState: the vehicle_wheel_tv field of a wheel
+    fn writeWheelState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, index: u32, wheel: *const Wheel) !void {
+        _ = world;
+        const tv = zolt.virtual.downcast(WheelTV, wheel);
+        try w.begin(.vehicle_wheel_tv, handle, index);
+        try w.value(tv.track_index);
+        try w.value(tv.combined_longitudinal_friction);
+        try w.value(tv.combined_lateral_friction);
+        try w.value(tv.brake_impulse);
+        w.end();
+    }
+
+    /// WriteTrackedControllerState: the engine and the transmission (VehicleSlot's functions), the inputs, the tracks
+    fn writeControllerState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, v: *const VehicleConstraint) !void {
+        _ = world;
+        const tracked = zolt.virtual.downcast(TrackedVehicleController, v.getController());
+        try VehicleSlot.writeEngineState(w, handle, tracked.getEngine());
+        try VehicleSlot.writeTransmissionState(w, handle, tracked.getTransmission());
+        try w.begin(.vehicle_tracked, handle, 0);
+        try w.value(tracked.getForwardInput());
+        try w.value(tracked.getLeftRatio());
+        try w.value(tracked.getRightRatio());
+        try w.value(tracked.getBrakeInput());
+        w.end();
+        for (tracked.getTracks(), 0..) |*track, t| {
+            try w.begin(.vehicle_track, handle, @intCast(t));
+            try w.value(track.angular_velocity);
+            try w.value(track.base.driven_wheel);
+            try w.value(@as(u32, @intCast(track.base.wheels.items.len)));
+            try w.value(track.base.inertia);
+            try w.value(track.base.angular_damping);
+            try w.value(track.base.max_brake_torque);
+            try w.value(track.base.differential_ratio);
+            w.end();
+        }
+    }
+};
 
 // ---- SLOT motorcycle: MotorcycleController (Phase7OpRange.vehicle_motorcycle 580..589, Blocker.motorcycles) ----
-const MotorcycleSlot = Phase7StubSlot;
+
+/// The vehicle variants group, motorcycles: the hooks that VehicleSlot calls (SimMakeMotorcycleControllerSettings,
+/// WriteMotorcycleControllerState) and ApplyMotorcycleOp of SimulationReference.cpp. A MotorcycleController is a
+/// WheeledVehicleController: VehicleSlot reaches its wheeled parts itself. Proof that the motorcycle scenes bite (each
+/// breakage of Zolt/Physics/Vehicle/MotorcycleController.zig, then reverted): no lean steering limit (a max steer angle
+/// 10 rad higher) is reported as "scene vehicle_motorcycle_turns ... update 60: after the update, state f: state
+/// differs at byte 193 ...: bodies[2] (id 0x00800002) position.x zolt 0xba28cdaa jolt 0xba36e5cf" (and in
+/// vehicle_motorcycle_slopes_and_braking); clamping the steer angle while the lean steering limit is disabled
+/// (PreCollide ignoring mEnableLeanSteeringLimit) as "scene vehicle_motorcycle_turns ... update 66: ... bodies[2] (id
+/// 0x00800002) position.x zolt 0xbd1e8f1f jolt 0xbd236fc2"; the gravity of the system instead of the overridden gravity
+/// in the max steer angle factor as "scene vehicle_motorcycle_slopes_and_braking ... update 47: ... bodies[3] (id
+/// 0x00800003) position.x zolt 0x415f15dd jolt 0x415f1658" (these two passed every scene while the limit was only
+/// switched off on motorcycles too slow to be clamped and the braker was too slow for its 45 degree max lean angle);
+/// clamping the target lean to the other side (`-Sign(w_angle) * mMaxLeanAngle`) as "scene vehicle_motorcycle_turns ...
+/// update 62: ... bodies[2] (id 0x00800002) position.x zolt 0xbbd38af5 jolt 0xbc1755c0" (the clamp is reached; and in
+/// vehicle_motorcycle_slopes_and_braking); subtracting the integration term of the lean impulse as "scene
+/// vehicle_motorcycle_lean_integration ... update 13: ... bodies[1] (id 0x00800001) position.x zolt 0x3d358665 jolt
+/// 0x3d35d8f6" (and in vehicle_motorcycle_lean_integration_slope); copying the controller's lean spring damping in
+/// GetSettings (Jolt assigns the settings' own value) as "scene vehicle_motorcycle_ops ... update 40: operation 19
+/// (vehicle_settings_hash on object handle / description 0) returned 869730697 in zolt and 4196340125 in jolt" (and
+/// VehiclePartsParity's controller test).
+const MotorcycleSlot = struct {
+    const MotorcycleController = zolt.MotorcycleController;
+    const MotorcycleControllerSettings = zolt.MotorcycleControllerSettings;
+
+    /// SimMakeMotorcycleControllerSettings: the wheeled members (VehicleSlot.fillWheeled), then the lean members (no
+    /// reference yet)
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        const s = try MotorcycleControllerSettings.create(allocator);
+        errdefer {
+            s.asControllerSettings().addRef();
+            s.asControllerSettings().release();
+        }
+        try VehicleSlot.fillWheeled(scene, v, &s.base);
+        s.max_lean_angle = v.max_lean_angle;
+        s.lean_spring_constant = v.lean_spring_constant;
+        s.lean_spring_damping = v.lean_spring_damping;
+        s.lean_spring_integration_coefficient = v.lean_spring_integration_coefficient;
+        s.lean_spring_integration_coefficient_decay = v.lean_spring_integration_coefficient_decay;
+        s.lean_smoothing_factor = v.lean_smoothing_factor;
+        return s.asControllerSettings();
+    }
+
+    /// The motorcycle controller of a vehicle
+    fn controller(v: *VehicleConstraint) *MotorcycleController {
+        return zolt.virtual.downcast(MotorcycleController, v.getControllerMut());
+    }
+
+    /// ApplyMotorcycleOp (GetMotorcycleController: an operation on a vehicle of another controller kind is a scene error)
+    fn applyVehicleOp(world: *ZoltWorld, op: *const SimOp, v: *VehicleConstraint) !void {
+        const f = &op.f;
+        if ((try VehicleSlot.getVehicle(world, op.index)).controller != .motorcycle) {
+            std.debug.print("SimulationParity: motorcycle operation {d} on the vehicle handle {d}\n", .{ op.kind, op.index });
+            return error.SceneError;
+        }
+        const c = controller(v);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .motorcycle_enable_lean_controller => c.enableLeanController(op.i[0] != 0),
+            .motorcycle_enable_lean_steering_limit => c.enableLeanSteeringLimit(op.i[0] != 0),
+            .motorcycle_set_lean_spring_constant => c.setLeanSpringConstant(f[0]),
+            .motorcycle_set_lean_spring_damping => c.setLeanSpringDamping(f[0]),
+            .motorcycle_set_lean_spring_integration_coefficient => c.setLeanSpringIntegrationCoefficient(f[0]),
+            .motorcycle_set_lean_spring_integration_coefficient_decay => c.setLeanSpringIntegrationCoefficientDecay(f[0]),
+            .motorcycle_set_lean_smoothing_factor => c.setLeanSmoothingFactor(f[0]),
+            else => {
+                std.debug.print("SimulationParity: unknown motorcycle operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+    }
+
+    /// WriteMotorcycleControllerState: the vehicle_motorcycle field (after the wheeled fields that VehicleSlot writes)
+    fn writeControllerState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, v: *const VehicleConstraint) !void {
+        _ = world;
+        const motorcycle = zolt.virtual.downcast(MotorcycleController, v.getController());
+        try w.begin(.vehicle_motorcycle, handle, 0);
+        try w.value(motorcycle.getWheelBase());
+        try w.boolean(motorcycle.isLeanControllerEnabled());
+        try w.boolean(motorcycle.isLeanSteeringLimitEnabled());
+        try w.value(motorcycle.getLeanSpringConstant());
+        try w.value(motorcycle.getLeanSpringDamping());
+        try w.value(motorcycle.getLeanSpringIntegrationCoefficient());
+        try w.value(motorcycle.getLeanSpringIntegrationCoefficientDecay());
+        try w.value(motorcycle.getLeanSmoothingFactor());
+        w.end();
+    }
+};
 
 // ---- end of the Phase 7 slots ----
 
