@@ -4,11 +4,13 @@
 //! - The file variants of sReadObject / sWriteObject and the default factory (SerializationArchitecture.md S10).
 //! - Pins of Zolt's defined behavior where Jolt's behavior is undefined (S16). Jolt cannot run these streams safely,
 //!   so the parity tests never generate them. D8 (binary state hashes) belongs to Core/StreamUtils. D10 (allocation
-//!   failure) is the Z2 sweep of ObjectStreamSweeps.zig.
+//!   failure) is the Z2 sweep of ObjectStreamSweeps.zig. D15 (class data nested too deep) is new: S16 does not list
+//!   it yet.
 
 const std = @import("std");
 const zolt = @import("zolt");
 const ost = @import("ObjectStreamTest.zig");
+const LimitedAllocator = @import("ObjectStreamSweeps.zig").LimitedAllocator;
 
 const Allocator = std.mem.Allocator;
 const RTTI = zolt.RTTI;
@@ -233,7 +235,13 @@ test "ObjectStream D6: a binary string length beyond the stream fails" {
     defer testing.allocator.free(bytes);
     const at = std.mem.indexOf(u8, bytes, &[_]u8{ 3, 0, 0, 0, 'a', 'b', 'c' }).?;
     std.mem.writeInt(u32, bytes[at..][0..4], 0x7fffffff, .little); // Jolt: JPH_STACK_ALLOC(len + 1), a stack overflow
-    try testing.expectError(error.InvalidObjectStream, readNode(bytes));
+
+    // Zolt reads the string in chunks. The allocator refuses requests above 64 KB, so a reader that allocated the
+    // corrupt length up front would fail with error.OutOfMemory. (The testing allocator would hand out the 2 GB.)
+    var limited: LimitedAllocator = .{ .child = testing.allocator, .limit = 64 << 10 };
+    var reader: std.Io.Reader = .fixed(bytes);
+    try testing.expectError(error.InvalidObjectStream, ObjectStreamIn.sReadObject(Node, limited.allocator(), &reader, .{ .factory = &node_factory }));
+    try testing.expect(!limited.refused);
 }
 
 test "ObjectStream D7: a text identifier after an ERANGE of an earlier read" {
@@ -318,4 +326,105 @@ test "ObjectStream D14: a hexadecimal float that is exactly subnormal fails like
     );
     defer RTTI.of(Node).destructObject(node, testing.allocator);
     try testing.expectEqual(std.math.floatMin(f32), node.scale);
+}
+
+/// A value class that holds its children by value, so its data nests as deep as the stream says
+const Tree = struct {
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "Tree",
+        .kind = .non_virtual,
+        .attributes = &.{.attr("mKids", .kids)},
+    });
+
+    kids: std.ArrayList(Tree) = .empty,
+
+    pub fn deinit(self: *Tree, allocator: Allocator) void {
+        for (self.kids.items) |*kid| kid.deinit(allocator);
+        self.kids.deinit(allocator);
+    }
+
+    /// The number of levels of the first branch
+    fn depth(self: *const Tree) usize {
+        var levels: usize = 1;
+        var tree = self;
+        while (tree.kids.items.len > 0) : (levels += 1) tree = &tree.kids.items[0];
+        return levels;
+    }
+};
+
+const tree_factory: Factory = .init(&.{ Node, Tree });
+
+/// A text stream with `levels` levels of class data:
+/// - `skip = false`: the main object is a Tree with one child per level;
+/// - `skip = true`: the main Node links to object 2. Then an object of the unknown class V is skipped, whose data
+///   nests `levels` levels. Object 2 follows, so the link resolves only when the skip succeeds.
+fn deepStream(levels: usize, skip: bool) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
+    if (skip)
+        try w.writeAll(
+            \\TOS 1.00
+            \\declare Node 2 mChild instance Node mValue uint32
+            \\declare A 1 mKids array instance A
+            \\declare V 1 mOther array instance A
+            \\object Node 00000001 00000002 1
+            \\object V 00000003
+        )
+    else
+        try w.writeAll(
+            \\TOS 1.00
+            \\declare Tree 1 mKids array instance Tree
+            \\object Tree 00000001
+        );
+    for (1..levels) |_| try w.writeAll(" 1"); // The count of each level but the last opens the next level
+    try w.writeAll(" 0\n");
+    if (skip) try w.writeAll("object Node 00000002 00000000 2\n");
+    return out.toOwnedSlice();
+}
+
+fn readTree(bytes: []const u8) ObjectStreamIn.Error!*Tree {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return ObjectStreamIn.sReadObject(Tree, testing.allocator, &reader, .{ .factory = &tree_factory });
+}
+
+test "ObjectStream D15: class data nested too deep is an invalid stream" {
+    // Jolt: a stack overflow. V is not in the factory, so its object is skipped, and skipping mOther skips a V again.
+    try testing.expectError(error.InvalidObjectStream, readNode(
+        \\TOS 1.00
+        \\declare V 1 mOther instance V
+        \\object V 00000001
+    ));
+    // The same with a known class: Node has no attribute mOther, so it is skipped as an instance of Node, which has
+    // the attribute mOther again
+    try testing.expectError(error.InvalidObjectStream, readNode(
+        \\TOS 1.00
+        \\declare Node 1 mOther instance Node
+        \\object Node 00000001
+    ));
+
+    // A skipped object: up to the limit the skip succeeds and the read goes on to object 2. One level more fails the
+    // skip, and the read ends at the next word (Jolt: a stack overflow for a deep enough stream).
+    const max = ObjectStreamIn.max_nesting_depth;
+    for ([_]usize{ max, max + 1 }) |levels| {
+        const bytes = try deepStream(levels, true);
+        defer testing.allocator.free(bytes);
+        const node = try readNode(bytes);
+        defer RTTI.of(Node).destructObject(node, testing.allocator);
+        try testing.expectEqual(levels == max, node.child.ptr != null);
+    }
+
+    // An object that is read: a Tree with `max` levels is read, one level more is an invalid stream
+    {
+        const bytes = try deepStream(max, false);
+        defer testing.allocator.free(bytes);
+        const tree = try readTree(bytes);
+        defer RTTI.of(Tree).destructObject(tree, testing.allocator);
+        try testing.expectEqual(max, tree.depth());
+    }
+    {
+        const bytes = try deepStream(max + 1, false);
+        defer testing.allocator.free(bytes);
+        try testing.expectError(error.InvalidObjectStream, readTree(bytes));
+    }
 }

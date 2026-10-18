@@ -1,5 +1,7 @@
 //! Port of: Jolt/Core/Factory.h, Jolt/Core/Factory.cpp
-//! Status: complete
+//! Status: partial
+//! Missing: `RegisterTypes.factory` holds a minimal list (MotorSettings) instead of Jolt's 49 types of RegisterTypes(),
+//! and the binary state restores do not go through it yet (group F2, Docs/Zolt/SerializationArchitecture.md S8 and S9).
 //!
 //! Jolt's Factory is a global singleton (`Factory::sInstance`) filled at startup by RegisterTypes() and looked up by
 //! name (ObjectStreamIn) and by hash (StreamUtils::RestoreObject). Zolt's Factory is a value built at compile time,

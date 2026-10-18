@@ -4,26 +4,34 @@
 //!
 //! - Z1: every creatable class of the factory. A default object is written as text, read, written as binary, read and
 //!   written as text again. The bytes do not change.
-//! - Z2: every allocation of reading and writing fails once: the assets, the object of ObjectStreamTest and every Z1
-//!   default. The result is error.OutOfMemory, and nothing leaks.
+//! - Z2: every allocation of reading and writing fails once: the assets, the object of ObjectStreamTest, the linked
+//!   objects and every Z1 default. The result is error.OutOfMemory, and nothing leaks.
 //! - Z3: every prefix of Assets/Human.tof and of its binary form is read, and every prefix of the streams of the
-//!   object of ObjectStreamTest. The result is an error or a success, and nothing leaks.
+//!   object of ObjectStreamTest and of the linked objects. The result is an error or a success, and nothing leaks.
 //! - Z4: byte and word mutations of the streams are read with an allocator that refuses large requests. Nothing
-//!   crashes, leaks or hits a safety check.
+//!   crashes, leaks or hits a safety check. One fixed word mutation of Human.tof makes a class contain itself (D15).
 //!
 //! The sweeps take the classes from the factory at run time (`getAllClasses`), so they pick up every class that is
-//! declared later. An asset is read as the class of its main object, found by name in the factory. While the factory
-//! lacks that class, the read fails and the asset has no binary form yet.
+//! declared later. An asset is read as the class of its main object, found by name in the factory.
+//! - While the factory lacks that class, or a declaration of the zolt module is pending (S18), the asset may fail to
+//!   read. The sweeps then skip its binary form and accept the failure.
+//! - Once the class is there and no declaration is pending, the asset must read: a failure fails the sweep.
 //!
-//! The assets are read relative to the working directory. `zig build test` runs the tests in the repository root.
+//! The assets are read relative to the working directory, so the sweeps need the repository root as working
+//! directory. build.zig gives the test runs no working directory (only the parity run has one), so `zig build test`
+//! must be started in the repository root. Started elsewhere, Z2 to Z4 fail with error.FileNotFound.
 //!
 //! Limits of the sweeps (a read in Debug is about 10 times slower than in ReleaseFast, and both run in CI):
-//! - Z2 makes every allocation of the Z1 defaults and of the object of ObjectStreamTest fail. For an asset it makes at
-//!   most `max_asset_runs` allocations fail, spread evenly over all of them, because every run reads the whole asset.
+//! - Z2 makes every allocation of the Z1 defaults, of the object of ObjectStreamTest and of the linked objects fail.
+//!   For an asset it makes at most `max_asset_runs` allocations fail, spread evenly over all of them, because every
+//!   run reads the whole asset.
 //! - Z3 reads every prefix in an optimized build, and every `prefix_step`-th prefix in Debug. It counts the bytes of
 //!   a fast allocator to find leaks: the testing allocator would make it 5 times slower.
 //! - Z4 does not mutate the object of ObjectStreamTest. Its raw pointer `mPointer` does not own its object, as in
 //!   Jolt, so a mutated stream can leave an object that only a raw pointer reaches. That is a leak in Jolt too.
+//!   Z4 mutates the streams of `Linked` objects instead: they link to each other through Refs only, so the mutations
+//!   reach the links (their resolution, the cycle check, the objects that nothing references) before the assets can
+//!   be read.
 //!
 //! A group that makes the sweeps much slower (more classes in the assets) adjusts the limits below.
 
@@ -38,10 +46,99 @@ const Factory = zolt.Factory;
 const ObjectStreamIn = zolt.ObjectStreamIn;
 const ObjectStreamOut = zolt.ObjectStreamOut;
 const StreamType = zolt.ObjectStream.StreamType;
+const Ref = zolt.Ref;
+const RefConst = zolt.RefConst;
+const RefCount = zolt.RefCount;
 
-/// The classes of RegisterTypes and of ObjectStreamTest, plus SpringSettings and the classes that Jolt declares outside
-/// the class (TypeDeclarations). Jolt's classes reach the last ones through their attributes.
-const factory: Factory = .init(zolt.RegisterTypes.factory_types ++ &[_]type{ ost.TestSerializable, zolt.SpringSettings, zolt.Color, zolt.AABox, zolt.Triangle, zolt.IndexedTriangle, zolt.Plane });
+/// The classes of RegisterTypes and of ObjectStreamTest, Linked, plus SpringSettings and the classes that Jolt declares
+/// outside the class (TypeDeclarations). Jolt's classes reach the last ones through their attributes.
+const factory: Factory = .init(zolt.RegisterTypes.factory_types ++ &[_]type{ ost.TestSerializable, Linked, zolt.SpringSettings, zolt.Color, zolt.AABox, zolt.Triangle, zolt.IndexedTriangle, zolt.Plane });
+
+/// Zolt: a reference counted class whose objects link to each other through Refs only. Raw pointers are left out: an
+/// object that only raw pointers reach is never released, in Jolt too.
+const Linked = struct {
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "Linked",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mValue", .value),
+            .attr("mFirst", .first),
+            .attr("mSecond", .second),
+            .attr("mList", .list),
+            .attr("mName", .name),
+        },
+    });
+
+    ref_count: RefCount = .{},
+    allocator: Allocator,
+    value: u32 = 0,
+    first: Ref(Linked) = .empty,
+    second: RefConst(Linked) = .empty,
+    list: std.ArrayList(Ref(Linked)) = .empty,
+    /// Owned by `allocator`
+    name: []u8 = &.{},
+
+    /// new Linked (reference count 0)
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*Linked {
+        const self = try allocator.create(Linked);
+        self.* = .{ .allocator = allocator };
+        return self;
+    }
+
+    pub fn deinit(self: *Linked) void {
+        self.first.deinit();
+        self.second.deinit();
+        for (self.list.items) |*r| r.deinit();
+        self.list.deinit(self.allocator);
+        self.allocator.free(self.name);
+    }
+
+    pub fn addRef(self: *const Linked) void {
+        self.ref_count.addRef();
+    }
+
+    pub fn release(self: *const Linked) void {
+        if (self.ref_count.release()) {
+            const self_mut: *Linked = @constCast(self);
+            const allocator = self_mut.allocator;
+            self_mut.deinit();
+            allocator.destroy(self_mut);
+        }
+    }
+
+    /// A new object with `value`, held by `holder` (so that the holder frees it)
+    fn add(holder: *Ref(Linked), allocator: Allocator, value: u32) Allocator.Error!*Linked {
+        const object = try createDefault(allocator);
+        object.value = value;
+        holder.set(object);
+        return object;
+    }
+
+    /// Five objects with shared references: root -> a, b and [a, c, b], a -> c, b -> [c], c -> d. The root has
+    /// reference count 0, `RTTI.of(Linked).destructObject` frees all of them.
+    fn createGraph(allocator: Allocator) Allocator.Error!*Linked {
+        const root = try createDefault(allocator);
+        errdefer RTTI.of(Linked).destructObject(root, allocator);
+        root.value = 1;
+        root.name = try allocator.dupe(u8, "root \"of\" the graph");
+        const a = try add(&root.first, allocator, 2);
+        var b_ref: Ref(Linked) = .empty;
+        defer b_ref.deinit();
+        const b = try add(&b_ref, allocator, 3);
+        root.second.set(b);
+        const c = try add(&a.first, allocator, 4);
+        try root.list.ensureTotalCapacityPrecise(allocator, 3);
+        for ([_]*Linked{ a, c, b }) |o| root.list.appendAssumeCapacity(.init(o));
+        try b.list.ensureTotalCapacityPrecise(allocator, 1);
+        b.list.appendAssumeCapacity(.init(c));
+        var d_ref: Ref(Linked) = .empty;
+        defer d_ref.deinit();
+        const d = try add(&d_ref, allocator, 5);
+        d.name = try allocator.dupe(u8, "d");
+        c.second.set(d);
+        return root;
+    }
+};
 
 const Asset = struct {
     path: []const u8,
@@ -56,6 +153,33 @@ const assets = [_]Asset{
     .{ .path = "Assets/terrain2.bof", .class_name = "PhysicsScene" },
 };
 
+/// True while a class of the zolt module has a pending declaration (S18: `serialization_pending`, no attributes
+/// yet). The classes are the struct types that the module exports and the classes nested in them (like
+/// RagdollSettings.Part).
+const declarations_pending: bool = blk: {
+    @setEvalBranchQuota(1_000_000);
+    for (@typeInfo(zolt).@"struct".decls) |d| {
+        const T = @field(zolt, d.name);
+        if (@TypeOf(T) != type or !isClass(T)) continue;
+        if (@hasDecl(T, "serialization_pending")) break :blk true;
+        for (@typeInfo(T).@"struct".decls) |nd| {
+            const N = @field(T, nd.name);
+            if (@TypeOf(N) == type and isClass(N) and @hasDecl(N, "serialization_pending")) break :blk true;
+        }
+    }
+    break :blk false;
+};
+
+/// A struct that declares an RTTI
+fn isClass(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "rtti");
+}
+
+/// The asset must be read: the factory has its class and no declaration is pending
+fn assetRequired(asset: Asset) bool {
+    return !declarations_pending and factory.find(asset.class_name) != null;
+}
+
 const debug = builtin.mode == .Debug;
 
 /// Z2 on an asset with more allocations tests this many of them
@@ -64,21 +188,22 @@ const max_asset_runs: usize = if (debug) 64 else 256;
 /// Z3 in Debug reads every `prefix_step`-th prefix (a prime, so the cuts fall on every position of the words)
 const prefix_step: usize = if (debug) 23 else 1;
 
-/// Z4: the number of mutated streams per asset stream and per Z1 stream
+/// Z4: the number of mutated streams per asset stream, per Z1 stream and per stream of the linked objects
 const asset_mutations: usize = if (debug) 64 else 256;
 const default_mutations: usize = 16;
+const linked_mutations: usize = if (debug) 512 else 2048;
 
 /// Z3 and Z4: the allocator refuses requests above this size (a corrupt count must not exhaust the machine)
 const sweep_limit = 16 << 20;
 
 /// An allocator that refuses requests above `limit` bytes and remembers that it did
-const LimitedAllocator = struct {
+pub const LimitedAllocator = struct {
     child: Allocator,
     limit: usize = 256 << 20,
     /// A request was refused
     refused: bool = false,
 
-    fn allocator(self: *LimitedAllocator) Allocator {
+    pub fn allocator(self: *LimitedAllocator) Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
 
@@ -127,7 +252,10 @@ fn mainClass(class_name: []const u8) *const RTTI {
 
 /// The bytes of a file in the repository (owned by the testing allocator)
 fn loadAsset(path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(64 << 20));
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(64 << 20)) catch |err| {
+        if (err == error.FileNotFound) std.debug.print("{s} not found: start `zig build test` in the repository root\n", .{path});
+        return err;
+    };
 }
 
 /// Write `object` (the most derived object of class `rtti`) with `allocator`. The bytes are owned by the testing
@@ -222,12 +350,28 @@ fn roundTripTestObject(allocator: Allocator, stream_type: StreamType) !void {
     try std.testing.expectEqualSlices(u8, bytes, bytes2);
 }
 
-/// Z2 of an asset: read it and write it in both formats. A stream that the factory cannot read yet is a success.
-fn readWriteAsset(allocator: Allocator, bytes: []const u8, rtti: *const RTTI) !void {
+/// Z2 of the linked objects: create, write, read, write again
+fn roundTripLinked(allocator: Allocator, stream_type: StreamType) !void {
+    const root = try Linked.createGraph(allocator);
+    defer RTTI.of(Linked).destructObject(root, allocator);
+    const rtti = RTTI.of(Linked);
+    const bytes = try write(allocator, root, rtti, stream_type);
+    defer std.testing.allocator.free(bytes);
+
+    const read_object = try read(allocator, &factory, bytes, rtti);
+    defer destroy(allocator, read_object);
+    const bytes2 = try write(allocator, read_object.instance, read_object.rtti, stream_type);
+    defer std.testing.allocator.free(bytes2);
+    try std.testing.expectEqualSlices(u8, bytes, bytes2);
+}
+
+/// Z2 of an asset: read it and write it in both formats. A stream that the factory cannot read yet is a success,
+/// unless the asset is `required`.
+fn readWriteAsset(allocator: Allocator, bytes: []const u8, rtti: *const RTTI, required: bool) !void {
     var limited: LimitedAllocator = .{ .child = allocator };
     const a = limited.allocator();
     const object = read(a, &factory, bytes, rtti) catch |err| switch (err) {
-        error.InvalidObjectStream => return,
+        error.InvalidObjectStream => if (required) return err else return,
         error.OutOfMemory => {
             if (limited.refused) return;
             return err;
@@ -295,19 +439,29 @@ test "ObjectStream Z2: every allocation failure while reading and writing" {
         };
     }
 
-    // The object of ObjectStreamTest
-    for ([_]StreamType{ .text, .binary }) |stream_type|
+    // The object of ObjectStreamTest and the linked objects
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
         try checkAllocationFailures(roundTripTestObject, .{stream_type}, null);
+        try checkAllocationFailures(roundTripLinked, .{stream_type}, null);
+    }
 
     // The assets
     for (assets) |asset| {
         const bytes = try loadAsset(asset.path);
         defer std.testing.allocator.free(bytes);
-        checkAllocationFailures(readWriteAsset, .{ bytes, mainClass(asset.class_name) }, max_asset_runs) catch |err| {
+        checkAllocationFailures(readWriteAsset, .{ bytes, mainClass(asset.class_name), assetRequired(asset) }, max_asset_runs) catch |err| {
             std.debug.print("Z2: {s}\n", .{asset.path});
             return err;
         };
     }
+}
+
+test "ObjectStream Z2: an asset that must be read fails the sweep when it cannot be read" {
+    // While the asset is optional a failed read is a success, once it is required (assetRequired) it is an error
+    const bytes = "TOS 1.00\ndeclare Unknown 0\nobject Unknown 00000001\n";
+    const rtti = RTTI.of(zolt.SerializableObject);
+    try readWriteAsset(std.testing.allocator, bytes, rtti, false);
+    try std.testing.expectError(error.InvalidObjectStream, readWriteAsset(std.testing.allocator, bytes, rtti, true));
 }
 
 /// Z3 of one stream: read every `prefix_step`-th prefix and the whole stream
@@ -329,23 +483,30 @@ test "ObjectStream Z3: every prefix of Human.tof and of its binary form" {
     try readPrefixes(text, rtti);
 
     // The binary form, once the factory can read the asset
-    const object = read(std.testing.allocator, &factory, text, rtti) catch return;
+    const object = read(std.testing.allocator, &factory, text, rtti) catch |err| {
+        if (assetRequired(assets[0])) return err;
+        return;
+    };
     defer destroy(std.testing.allocator, object);
     const binary = try write(std.testing.allocator, object.instance, object.rtti, .binary);
     defer std.testing.allocator.free(binary);
     try readPrefixes(binary, rtti);
 }
 
-test "ObjectStream Z3: every prefix of the object of ObjectStreamTest" {
-    // Zolt: the streams of the unit test have every kind of member and two objects, which Human.tof only has once
-    // its classes are declared
+test "ObjectStream Z3: every prefix of the object of ObjectStreamTest and of the linked objects" {
+    // Zolt: the streams of the unit test have every kind of member and two objects, the linked objects have five
+    // objects with shared references. Human.tof only has these once its classes are declared.
     const object = try ost.createTestObject(std.testing.allocator);
     defer object.destroy();
-    const rtti = RTTI.of(ost.TestSerializable);
+    const root = try Linked.createGraph(std.testing.allocator);
+    defer RTTI.of(Linked).destructObject(root, std.testing.allocator);
     for ([_]StreamType{ .text, .binary }) |stream_type| {
-        const bytes = try write(std.testing.allocator, object, rtti, stream_type);
+        const bytes = try write(std.testing.allocator, object, RTTI.of(ost.TestSerializable), stream_type);
         defer std.testing.allocator.free(bytes);
-        try readPrefixes(bytes, rtti);
+        try readPrefixes(bytes, RTTI.of(ost.TestSerializable));
+        const linked = try write(std.testing.allocator, root, RTTI.of(Linked), stream_type);
+        defer std.testing.allocator.free(linked);
+        try readPrefixes(linked, RTTI.of(Linked));
     }
 }
 
@@ -435,11 +596,25 @@ test "ObjectStream Z4: mutated streams never crash or leak" {
         const rtti = mainClass(asset.class_name);
         try readMutations(random, text, rtti, asset_mutations);
 
-        const object = read(std.testing.allocator, &factory, text, rtti) catch continue;
+        const object = read(std.testing.allocator, &factory, text, rtti) catch |err| {
+            if (assetRequired(asset)) return err;
+            continue;
+        };
         defer destroy(std.testing.allocator, object);
         const binary = try write(std.testing.allocator, object.instance, object.rtti, .binary);
         defer std.testing.allocator.free(binary);
         try readMutations(random, binary, rtti, asset_mutations);
+    }
+
+    // The linked objects: the mutations reach the links (D1, D2, D4, D12)
+    {
+        const root = try Linked.createGraph(std.testing.allocator);
+        defer RTTI.of(Linked).destructObject(root, std.testing.allocator);
+        for ([_]StreamType{ .text, .binary }) |stream_type| {
+            const bytes = try write(std.testing.allocator, root, RTTI.of(Linked), stream_type);
+            defer std.testing.allocator.free(bytes);
+            try readMutations(random, bytes, RTTI.of(Linked), linked_mutations);
+        }
     }
 
     // The streams of every Z1 default
@@ -453,4 +628,19 @@ test "ObjectStream Z4: mutated streams never crash or leak" {
             try readMutations(random, bytes, rtti, default_mutations);
         }
     }
+}
+
+test "ObjectStream Z4: Human.tof with a class that contains itself" {
+    // A word of the stream that makes RagdollSettings contain itself (D15): skipping mSkeleton skips a RagdollSettings
+    // again (Jolt: a stack overflow). The asset is read as SerializableObject until the factory has RagdollSettings,
+    // which skips the object, then as RagdollSettings, which skips mSkeleton (a Ref(Skeleton) is not an instance of
+    // RagdollSettings). Either way the stream is invalid.
+    const text = try loadAsset(assets[0].path);
+    defer std.testing.allocator.free(text);
+    const mutated = try std.mem.replaceOwned(u8, std.testing.allocator, text, "mSkeleton instance Skeleton", "mSkeleton instance RagdollSettings");
+    defer std.testing.allocator.free(mutated);
+    try std.testing.expect(mutated.len != text.len); // The asset has the declaration
+    const rtti = mainClass(assets[0].class_name);
+    try std.testing.expectError(error.InvalidObjectStream, read(std.testing.allocator, &factory, mutated, rtti));
+    try readAnything(std.testing.allocator, mutated, rtti);
 }

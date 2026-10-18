@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 89.7%** of 85995 lines in scope · **Unit tests: 94.8%** of 18321 lines
+**Library: 89.3%** of 85995 lines in scope · **Unit tests: 94.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -16,7 +16,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 94% | 39 | 2 | 0 | 0 | 12 | 2 | 6645 |
+| `Jolt/Core` | 90% | 37 | 4 | 0 | 0 | 12 | 2 | 6645 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
@@ -94,7 +94,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Core — 94%</summary>
+<details><summary>Jolt/Core — 90%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -108,7 +108,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `FPControlWord.h` | 113 | ✅ complete | `Zolt/Core/FPControlWord.zig` |
 | `FPException.h` | 61 | ➖ n/a | Zolt never enables floating point exceptions |
 | `FPFlushDenormals.h` | 27 | ✅ complete | `Zolt/Core/FPFlushDenormals.zig` |
-| `Factory.cpp`, `Factory.h` | 110 | ✅ complete | `Zolt/Core/Factory.zig` |
+| `Factory.cpp`, `Factory.h` | 110 | 🟡 partial | `Zolt/Core/Factory.zig` |
 | `FixedSizeFreeList.h`, `FixedSizeFreeList.inl` | 275 | ✅ complete | `Zolt/Core/FixedSizeFreeList.zig` |
 | `HashCombine.h` | 208 | ✅ complete | `Zolt/Core/HashCombine.zig` |
 | `HashTable.h` | 738 | ✅ complete | `Zolt/Core/HashTable.zig` |
@@ -131,7 +131,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ⏸ deferred | developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration |
 | `QuickSort.h` | 109 | ✅ complete | `Zolt/Core/QuickSort.zig` |
 | `RISCVVector.h` | 88 | ➖ n/a | RVV intrinsic helpers, Zolt uses @Vector |
-| `RTTI.cpp`, `RTTI.h` | 494 | ✅ complete | `Zolt/Core/RTTI.zig` |
+| `RTTI.cpp`, `RTTI.h` | 494 | 🟡 partial | `Zolt/Core/RTTI.zig` |
 | `Reference.h` | 205 | ✅ complete | `Zolt/Core/Reference.zig` |
 | `Result.h` | 134 | ✅ complete | `Zolt/Core/Result.zig` |
 | `STLAlignedAllocator.h` | 56 | ➖ n/a | STL allocator adapter, Zolt uses std.mem.Allocator |

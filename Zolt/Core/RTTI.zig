@@ -1,5 +1,8 @@
 //! Port of: Jolt/Core/RTTI.h, Jolt/Core/RTTI.cpp
-//! Status: complete
+//! Status: partial
+//! Missing: the `rtti` data entry in the root vtables of ShapeSettings, PhysicsMaterial, GroupFilter,
+//! ConstraintSettings, PathConstraintPath, VehicleControllerSettings and WheelSettings (group F2,
+//! Docs/Zolt/SerializationArchitecture.md S3).
 //!
 //! Jolt builds one `RTTI` object per class at startup (a function local static that `sCreateRTTI` fills with
 //! JPH_ADD_BASE_CLASS / JPH_ADD_ATTRIBUTE). Zolt builds the same record at compile time from a declaration next to the
@@ -32,9 +35,8 @@
 //! | JPH_RENAME_CLASS (unused in Jolt)                    | `.renamed = true` and the new name                                |
 //!
 //! The dynamic type of a `.virtual` / `.abstract` class is the data entry `rtti: *const RTTI` of its pattern A root
-//! vtable (Jolt's virtual GetRTTI). The serializable roots declare it: ShapeSettings, PhysicsMaterial, GroupFilter,
-//! ConstraintSettings, PathConstraintPath, VehicleControllerSettings and WheelSettings
-//! (Docs/Zolt/SerializationArchitecture.md S3).
+//! vtable (Jolt's virtual GetRTTI). Group F2 adds this entry to the 7 serializable roots (see Missing). A class
+//! without a vtable gets its static RTTI from `getRTTI`.
 //!
 //! Differences from Jolt:
 //! - The creatability comes from the `kind`, which is Jolt's IMPLEMENT macro (not the DECLARE macro): PhysicsMaterial,

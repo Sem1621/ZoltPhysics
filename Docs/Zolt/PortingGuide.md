@@ -449,7 +449,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `JPH_NAMESPACE_BEGIN/END`, `JPH_EXPORT`, `JPH_SUPPRESS_WARNINGS*` | dropped                               |
 | `JPH_DECLARE_SERIALIZABLE_*` + `JPH_IMPLEMENT_SERIALIZABLE_*` (the `sCreateRTTI` body) | `pub const rtti = RTTI.declare(@This(), .{ .name, .kind, .bases, .attributes })`, the first declaration of the struct. The kind comes from the IMPLEMENT macro. Recipe and rules: [SerializationArchitecture.md](SerializationArchitecture.md) sections 2 and 3 |
 | `JPH_ADD_BASE_CLASS`, `JPH_ADD_ATTRIBUTE`, `JPH_ADD_ENUM_ATTRIBUTE` (and `_WITH_ALIAS`) | `.bases = &.{B}`, `.attr("mFoo", .foo)`, `.enumAttr("mFoo", .foo)`, `.alias("mX", .{ .a, .b })`, `.enumAlias(...)`: Jolt's names, order and aliases, copied verbatim |
-| `JPH_RTTI(C)`                               | `RTTI.of(C)` (`C.rtti`)                                     |
+| `JPH_RTTI(C)`, `GetRTTIOfType(static_cast<C *>(nullptr))` (the static RTTI) | `RTTI.of(C)` (`C.rtti`)                   |
 | `JPH_CACHE_LINE_SIZE` alignment             | `align(Core.cache_line_size)`                               |
 | `static_assert`                             | `comptime { std.debug.assert(...); }` or `@compileError`    |
 | `JPH_MAKE_HASHABLE(T, a, b)`                | `pub fn getHash(self: T) u64 { return HashCombine.hashCombineArgs(.{ a, b }); }` |
@@ -853,7 +853,7 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `Character::GetPositionAndRotation(outPosition, outRotation, lock)`, the private `Character::CheckCollision(RMat44, ..)` / `CheckCollision(shape, ..)` overloads | `getPositionAndRotation(.{ .lock_bodies }) BodyInterface.PositionAndRotation`, `checkCollisionWithTransform` / `checkCollisionAtBody` (the public overload keeps `checkCollision`) | out parameters, overloads |
 | `CharacterVirtual::HasCollidedWith(const BodyID &)` / `HasCollidedWith(const CharacterID &)` / `HasCollidedWith(const CharacterVirtual *)`, `CharacterContactKey(BodyID, SubShapeID)` / `CharacterContactKey(CharacterID, SubShapeID)` | `hasCollidedWith` / `hasCollidedWithCharacterID` / `hasCollidedWithCharacter`, `CharacterContactKey.fromBody` / `fromCharacter` | overloads |
 | `CharacterVsCharacterCollisionSimple : CharacterVsCharacterCollision` | `characterVsCharacterCollision()` gives the pattern B interface for `CharacterVirtual.setCharacterVsCharacterCollision` | inheritance |
-| `GetRTTI(ptr)`, the virtual `GetRTTI()`, `GetRTTIOfType` | `RTTI.getRTTI(C, ptr)`: the `rtti` vtable entry of the root (virtual classes) or `RTTI.of(C)` | free function, virtual function |
+| `GetRTTI(ptr)`, the virtual `GetRTTI()` | `RTTI.getRTTI(C, ptr)`: the `rtti` vtable entry of the root (virtual classes) or `RTTI.of(C)` (`GetRTTIOfType` is `RTTI.of(C)`, see section 7) | free function, virtual function |
 | `IsType(ptr, rtti)` / `IsKindOf(ptr, rtti)` (also the `Ref` / `RefConst` overloads), `RTTI::IsKindOf(rtti)` | `RTTI.isType(C, ptr, rtti)` / `RTTI.isKindOfObject(C, ptr, rtti)` (pass `ref.ptr`), `rtti.isKindOf(other)` | overloads, a name clash with the member |
 | `DynamicCast<To>(ptr)`, `StaticCast<To>(ptr)`, `RTTI::CastTo(object, rtti)` | `RTTI.dynamicCast(To, From, ptr)`, `virtual.upcast` / `virtual.downcast`, `rtti.castTo(object, to)` (Zolt adds `rtti.baseOffset(to)` and `RTTI.mostDerived(C, ptr)`) | templates |
 | `RTTI::CreateObject()` / `DestructObject(object)` | `rtti.createObject(allocator)` / `rtti.destructObject(object, allocator)` | allocator |

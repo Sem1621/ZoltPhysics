@@ -25,7 +25,9 @@
 //!   only an unreferenced object references and returns a dangling pointer);
 //! - D11: two stream attributes that map to the same attribute of a class (a repeated declaration) are an invalid
 //!   stream (Jolt reads the member twice: a reallocated array leaves dangling links, a Ref leaks);
-//! - D12: references (Ref / RefConst) that form a cycle are an invalid stream (Jolt reads the objects and leaks them).
+//! - D12: references (Ref / RefConst) that form a cycle are an invalid stream (Jolt reads the objects and leaks them);
+//! - D15: class data nested deeper than `max_nesting_depth` levels is an invalid stream (Jolt recurses until the stack
+//!   overflows, also on a skipped class that contains itself, which nests without end).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -109,6 +111,13 @@ pub const ObjectStreamIn = struct {
     unresolved_links: std.ArrayList(Link) = .empty,
     /// The identifier of the object that is being read (the owner of the links)
     current_object: Identifier = ObjectStream.null_identifier,
+    /// Zolt: the number of class data levels that are being read or skipped (D15)
+    nesting_depth: u32 = 0,
+
+    /// Zolt: class data (an object, an instance by value, a skipped instance) nests at most this deep (D15). Jolt's
+    /// classes nest fewer than 10 levels. At the limit the reader uses about 350 KB of stack in Debug and 150 KB in
+    /// ReleaseFast (x86_64), so it also fits the small stacks of secondary threads.
+    pub const max_nesting_depth = 256;
 
     const Format = union(StreamType) {
         text: ObjectStreamTextIn,
@@ -489,6 +498,15 @@ pub const ObjectStreamIn = struct {
     /// Read the attributes of an object or by value instance (null: skip them), in the order of the stream's
     /// description (ReadClassData(const ClassDescription &, void *))
     fn readDescribedClassData(self: *ObjectStreamIn, class_desc: *const ClassDescription, instance: ?*anyopaque) Error!void {
+        // Zolt: limit the nesting (D15). Every level of class data passes here: objects, instances by value
+        // (readClassData) and skipped instances (skipAttributeData).
+        if (self.nesting_depth == max_nesting_depth) {
+            log.info("ObjectStreamIn: Class data nested deeper than {d} levels.", .{max_nesting_depth});
+            return error.InvalidObjectStream;
+        }
+        self.nesting_depth += 1;
+        defer self.nesting_depth -= 1;
+
         for (class_desc.attributes.items) |attr_desc| {
             // Read or skip the attribute data
             if (attr_desc.index) |idx| {
