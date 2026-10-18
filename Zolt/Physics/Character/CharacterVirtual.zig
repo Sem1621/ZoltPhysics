@@ -56,8 +56,9 @@
 //!   from SaveState never holds one). Jolt asserts that are reachable with user input (an invalid CharacterID, a listener
 //!   changed between StartTrackingContactChanges and FinishTrackingContactChanges, more Finish than Start calls, a
 //!   character shape that sCorrectFractionForCharacterPadding does not support) only assert with asserts enabled; the
-//!   release behavior is Jolt's (an untracked active contact in FinishTrackingContactChanges is skipped where Jolt writes
-//!   through an end() iterator).
+//!   release behavior is Jolt's. One exception: an untracked active contact in FinishTrackingContactChanges is a panic
+//!   in safe builds (Jolt asserts) and is skipped in ReleaseFast / ReleaseSmall, where Jolt writes through an end()
+//!   iterator.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

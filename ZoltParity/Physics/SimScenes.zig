@@ -163,7 +163,7 @@
 //!   vehicle testers also query the broad phase in hit order (in PhysicsSystem.update, through the VehicleConstraint
 //!   step listener) and keep the first of equal hits (strict `<` in VehicleCollisionTester.cpp), so a tie between two
 //!   bodies would make a vehicle depend on the layout too. The vehicle scenes do not set `restore_broad_phase`: they
-//!   are bit exact after their sweeps without it, so no wheel in them meets such a tie. A vehicle scene that differs
+//!   are bit exact after their sweeps without it, so no tie in them changes a result. A vehicle scene that differs
 //!   only after a sweep sets it. A scene with sweeps needs an active body (PhysicsSystem.update allocates nothing
 //!   without one; `addBystander`).
 //! - **Listener modes.** `CharacterListenerMode` record / modify: in modify mode the `CharacterFlags` in the upper 32
@@ -2600,8 +2600,8 @@ pub const SceneEntry = struct {
     /// the trees (UpdatePrepare / UpdateFinalize, the AABB updates of every restore), which is not part of the saved
     /// state. Off for the scenes of the physics pipeline, which prove that its results do not depend on the layout. Off
     /// for the vehicle scenes too: their testers also keep the first of equal hits (strict `<` in
-    /// VehicleCollisionTester.cpp), but they are bit exact after the sweeps without it, so no wheel in them meets a tie
-    /// between two bodies (a vehicle scene that differs only after a sweep sets it).
+    /// VehicleCollisionTester.cpp), but they are bit exact after the sweeps without it, so no tie between two bodies
+    /// changes a result in them (a vehicle scene that differs only after a sweep sets it).
     restore_broad_phase: bool = false,
     /// Creating the scene runs under std.testing.checkAllAllocationFailures (D12). Its cost is quadratic in the number
     /// of bodies: false for the PerformanceTest scenes with thousands of bodies, whose creation runs the same code as

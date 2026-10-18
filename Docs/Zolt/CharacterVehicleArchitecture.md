@@ -201,8 +201,9 @@ class fills.
       write them);
     - `canWalkStairs`;
     - a ragdoll's root transform and pose;
-    - the wheel contact members that `VehicleConstraint::SaveState` does not write (sub shape, point velocity,
-      longitudinal direction).
+    - the wheel values that no `SaveState` writes: the steer angle and the hard point flag; the contact's sub shape,
+      point velocity and longitudinal direction; the slip, friction and brake impulse of `WheelWV` and `WheelTV`; the
+      wheel transforms (VehicleSlot.writeState of SimulationParity.zig lists them all).
 - **Runs.** These scenes run in the existing thread matrix and D12 failure sweeps. Section 6 lists the three scenes
   without sweeps and the broad phase restore of the Character and CharacterVirtual scenes.
 - **Character updates happen between `PhysicsSystem.update` calls.** That is where PerformanceTest and the unit tests
@@ -351,8 +352,8 @@ unless noted:
   - The vehicle testers are the exception in the pipeline. They query the broad phase in `PhysicsSystem::Update`,
     through the VehicleConstraint step listener. They keep the first of equal hits (strict `<` in
     VehicleCollisionTester.cpp). So a vehicle can depend on the layout when two bodies give the same hit. The vehicle
-    scenes do not set `restore_broad_phase`: they are bit exact after the sweeps without it, so no wheel in them meets
-    such a tie. A vehicle scene that differs only after a sweep sets it.
+    scenes do not set `restore_broad_phase`: they are bit exact after the sweeps without it, so no tie in them changes a
+    result. A vehicle scene that differs only after a sweep sets it.
 - **Character records.** The CharacterContactListener records are compared one by one in call order, not sorted
   (section 3), after every update and after the sweeps.
 - **An active body for the sweeps.** PhysicsSystem.update allocates nothing without an active body. Scenes without one
