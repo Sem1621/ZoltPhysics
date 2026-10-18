@@ -37,6 +37,7 @@ const Result = @import("../../Core/Result.zig").Result;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const StreamUtils = @import("../../Core/StreamUtils.zig");
+const Core = @import("../../Core/Core.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const BodyManager = @import("../Body/BodyManager.zig").BodyManager;
@@ -337,14 +338,16 @@ pub const Constraint = struct {
 
     /// Constructor with the vtable of the most derived class (used by TwoBodyConstraint, whose VTable extends this one)
     pub fn initWithVTable(vtable: *const VTable, allocator: Allocator, settings: *const ConstraintSettings) Constraint {
-        std.debug.assert(settings.num_velocity_steps_override < 256);
-        std.debug.assert(settings.num_position_steps_override < 256);
+        // An object stream or a binary state can hold any uint32 here.
+        // Jolt asserts only with JPH_ENABLE_ASSERTS. Its release build keeps the low 8 bits (uint8).
+        if (Core.enable_asserts) std.debug.assert(settings.num_velocity_steps_override < 256);
+        if (Core.enable_asserts) std.debug.assert(settings.num_position_steps_override < 256);
         return .{
             .vtable = vtable,
             .allocator = allocator,
             .constraint_priority = settings.constraint_priority,
-            .num_velocity_steps_override = @intCast(settings.num_velocity_steps_override),
-            .num_position_steps_override = @intCast(settings.num_position_steps_override),
+            .num_velocity_steps_override = @truncate(settings.num_velocity_steps_override),
+            .num_position_steps_override = @truncate(settings.num_position_steps_override),
             .enabled = settings.enabled,
             .user_data = settings.user_data,
         };
@@ -405,8 +408,8 @@ pub const Constraint = struct {
 
     /// Used only when the constraint is active. Override for the number of solver velocity iterations to run, 0 means use the default in PhysicsSettings::mNumVelocitySteps. The number of iterations to use is the max of all contacts and constraints in the island.
     pub fn setNumVelocityStepsOverride(self: *Constraint, n: u32) void {
-        std.debug.assert(n < 256);
-        self.num_velocity_steps_override = @intCast(n);
+        if (Core.enable_asserts) std.debug.assert(n < 256); // Jolt's release build keeps the low 8 bits
+        self.num_velocity_steps_override = @truncate(n);
     }
 
     pub fn getNumVelocityStepsOverride(self: *const Constraint) u32 {
@@ -415,8 +418,8 @@ pub const Constraint = struct {
 
     /// Used only when the constraint is active. Override for the number of solver position iterations to run, 0 means use the default in PhysicsSettings::mNumPositionSteps. The number of iterations to use is the max of all contacts and constraints in the island.
     pub fn setNumPositionStepsOverride(self: *Constraint, n: u32) void {
-        std.debug.assert(n < 256);
-        self.num_position_steps_override = @intCast(n);
+        if (Core.enable_asserts) std.debug.assert(n < 256); // Jolt's release build keeps the low 8 bits
+        self.num_position_steps_override = @truncate(n);
     }
 
     pub fn getNumPositionStepsOverride(self: *const Constraint) u32 {
@@ -560,4 +563,29 @@ test "ConstraintSettings: creatable like Jolt's JPH_IMPLEMENT_SERIALIZABLE_VIRTU
     try testing.expect(restored.getPtr().?.vtable.rtti == ConstraintSettings.rtti);
     try testing.expectEqual(@as(u32, 3), restored.getPtr().?.constraint_priority);
     try testing.expect(!restored.getPtr().?.enabled);
+}
+
+test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in builds without asserts" {
+    // An object stream or a binary state can hold any uint32 in the settings.
+    // Jolt asserts only with JPH_ENABLE_ASSERTS. Its release build keeps the low 8 bits.
+    if (Core.enable_asserts) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var velocity_steps: u32 = 300;
+    var position_steps: u32 = 513;
+    _ = .{ &velocity_steps, &position_steps };
+    const settings = try ConstraintSettings.createDefault(testing.allocator);
+    var ref = Ref(ConstraintSettings).init(settings);
+    defer ref.deinit();
+    settings.num_velocity_steps_override = velocity_steps;
+    settings.num_position_steps_override = position_steps;
+    const vtable: Constraint.VTable = undefined; // Not called
+    var constraint = Constraint.initWithVTable(&vtable, testing.allocator, settings);
+    try testing.expectEqual(@as(u32, 44), constraint.getNumVelocityStepsOverride());
+    try testing.expectEqual(@as(u32, 1), constraint.getNumPositionStepsOverride());
+
+    constraint.setNumVelocityStepsOverride(velocity_steps + 1);
+    constraint.setNumPositionStepsOverride(position_steps + 1);
+    try testing.expectEqual(@as(u32, 45), constraint.getNumVelocityStepsOverride());
+    try testing.expectEqual(@as(u32, 2), constraint.getNumPositionStepsOverride());
 }
