@@ -684,8 +684,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
 of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
-[SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and
-every class that reaches one. ✅ 81 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
+[SerializationArchitecture.md](SerializationArchitecture.md) S18). `port_status.py --check` and the parity harness
+fail on a pending or undeclared class. ✅ 81 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 

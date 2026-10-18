@@ -12,7 +12,9 @@
 //! - a float collects the characters of num_get's stage 2 ("0123456789abcdefABCDEFxX+-pP" and one '.'), which must
 //!   then form a whole decimal or hexadecimal number ("1.5abc" fails); the result is rounded once, directly to f32 /
 //!   f64, and an overflow, a subnormal result or a nonzero number that rounds to zero fails (strtof's ERANGE). So a
-//!   subnormal that Jolt writes cannot be read back, on this platform also in Jolt;
+//!   subnormal that Jolt writes cannot be read back, on this platform also in Jolt. glibc gives no ERANGE for a word
+//!   whose value is exactly a subnormal (a hexadecimal word, or a decimal word with all its digits); Zolt fails it too
+//!   (divergence D14, no writer produces such a word);
 //! - an identifier is `strtoul(word, 16)` truncated to 32 bits; only a 64 bit overflow fails (Jolt also tests a stale
 //!   errno, divergence D7).
 //! The token parity test of the foundation (P6) pins these rules against the C++ library.
@@ -267,7 +269,7 @@ fn parseFloat(comptime T: type, word: []const u8) Error!T {
     // Zig's parseFloat accepts the same decimal and hexadecimal numbers as strtof for this alphabet (no '_', 'i', 'n')
     const value = std.fmt.parseFloat(T, collected) catch return error.InvalidObjectStream;
 
-    // ERANGE: overflow to infinity, underflow to a subnormal or to zero
+    // ERANGE: overflow to infinity, underflow to a subnormal or to zero (Zolt: also an exact subnormal, D14)
     if (std.math.isInf(value)) return error.InvalidObjectStream;
     if (value != 0 and @abs(value) < std.math.floatMin(T)) return error.InvalidObjectStream;
     if (value == 0 and hasNonzeroMantissa(collected)) return error.InvalidObjectStream;

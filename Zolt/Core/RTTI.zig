@@ -43,6 +43,13 @@
 //!   them like Jolt's CastTo; Jolt's ObjectStreamIn assumes offset 0, Zolt's casts.
 //! - RTTI identity is the address of the constant, like Jolt's `operator ==`. Every RTTI of a factory has its own name
 //!   (a compile error otherwise), so no two RTTIs have the same contents.
+//! - A class that uses the RTTI of its parent (`pub const rtti = Parent.rtti`, S3) is written as that parent. Zolt
+//!   writes the parent's sub object, which need not be at offset 0 (`mostDerived`, by value members).
+//! - Nothing tells an object of such a class from an object of its parent. So Zolt makes these a compile error, where
+//!   Jolt returns an object of the parent as the class: `dynamicCast` to the class, `ObjectStreamIn.sReadObject` of the
+//!   class, and a Ref or a pointer to the class as a member.
+//! - SerializableObject has no vtable, so `destructObject` panics for it (Jolt deletes through the virtual destructor).
+//!   Every other abstract class is deleted through its virtual destructor, like in Jolt.
 //!
 //! Compile time checks (each a readable @compileError): the name is the class's name, the kind fits the class (a
 //! virtual class has the `rtti` vtable entry, a creatable class that owns an allocator declares `createDefault`), every
@@ -79,8 +86,9 @@ pub const RTTI = struct {
     /// `new T` (null: abstract). Objects are owned by `allocator`; classes that keep an allocator (pattern A roots,
     /// RefTargets) keep this one. Reference counted objects start with reference count 0.
     create: ?*const fn (allocator: Allocator) Allocator.Error!*anyopaque,
-    /// `delete (T *)object` (null: abstract). A value class is freed with `allocator` (the allocator that created it), a
-    /// class that keeps its allocator uses its own.
+    /// `delete (T *)object`, through the virtual destructor for a class with a vtable (also an abstract class, like
+    /// Jolt). A value class is freed with `allocator` (the allocator that created it), a class that keeps its allocator
+    /// uses its own. Null only for an abstract class without a vtable (SerializableObject).
     destroy: ?*const fn (object: *anyopaque, allocator: Allocator) void,
     /// The reference count of an object of a reference counted class (Jolt: sInternalGetRefCountOffset), null for other
     /// classes
@@ -162,15 +170,21 @@ pub const RTTI = struct {
     /// The address of the most derived object (the object of `getRTTI(T, object)`) that contains `object`. Zolt
     /// identifies objects by this address (Jolt by the `T *`, the same address for Jolt's classes).
     pub fn mostDerived(comptime T: type, object: *const T) *anyopaque {
-        const dynamic = getRTTI(T, object);
-        // The `rtti` vtable entry of a class derived from T is a class derived from T (unless a class declares the RTTI
-        // of an unrelated class, a programming error that would make the pointer arithmetic wrong)
-        const offset = dynamic.baseOffset(of(T)) orelse std.debug.panic("{s} is not a {s}: wrong `rtti` declaration", .{ dynamic.name, of(T).name });
-        return @ptrFromInt(@intFromPtr(object) - offset);
+        // A class that uses the RTTI of its parent (S3) is written as that parent. So start at the parent's sub object.
+        // Zig may put `base` after other fields (in C++ `&inObject` is also the address of the parent).
+        const Owner = RTTIOwner(T);
+        const owner = virtual.upcast(Owner, object);
+        const dynamic = getRTTI(Owner, owner);
+        // The `rtti` vtable entry of a class derived from Owner is a class derived from Owner (unless a class declares
+        // the RTTI of an unrelated class, a programming error that would make the pointer arithmetic wrong)
+        const offset = dynamic.baseOffset(of(Owner)) orelse std.debug.panic("{s} is not a {s}: wrong `rtti` declaration", .{ dynamic.name, of(Owner).name });
+        return @ptrFromInt(@intFromPtr(owner) - offset);
     }
 
-    /// DynamicCast<To>(object): null in, null out; null when the object is not a To
+    /// DynamicCast<To>(object): null in, null out; null when the object is not a To. Zolt: To has an RTTI of its own
+    /// (a compile error otherwise; Jolt returns any object of the parent as a To).
     pub fn dynamicCast(comptime To: type, comptime From: type, object: ?*From) ?*To {
+        comptime checkOwnRTTI(To, "RTTI.dynamicCast");
         const o = object orelse return null;
         const result = getRTTI(From, o).castTo(mostDerived(From, o), of(To)) orelse return null;
         return @ptrCast(@alignCast(result));
@@ -207,9 +221,9 @@ pub const RTTI = struct {
         return self.size;
     }
 
-    /// Check if this class can be constructed
+    /// True when this class cannot be created (createObject returns null)
     pub fn isAbstract(self: *const RTTI) bool {
-        return self.create == null;
+        return self.create == null or self.destroy == null;
     }
 
     pub fn getBaseClassCount(self: *const RTTI) usize {
@@ -255,9 +269,13 @@ pub const RTTI = struct {
         return try create(allocator);
     }
 
-    /// Destruct object of this type (an object that createObject returned, with reference count 0)
+    /// Destruct object of this type (does nothing if the object is abstract)
+    ///
+    /// Zolt: like Jolt's code (not its comment), an object of an abstract class is deleted through its virtual
+    /// destructor. SerializableObject has no vtable, so Zolt panics for it. The object has reference count 0.
     pub fn destructObject(self: *const RTTI, object: *anyopaque, allocator: Allocator) void {
-        self.destroy.?(object, allocator);
+        const destroy = self.destroy orelse std.debug.panic("{s} cannot be destructed: it has no vtable", .{self.name});
+        destroy(object, allocator);
     }
 };
 
@@ -271,6 +289,28 @@ pub fn VTableRoot(comptime T: type) ?type {
         if (!@hasField(L, "base")) return null;
         L = virtual.Parent(L);
     }
+}
+
+/// The class whose RTTI T uses. This is T itself, unless T uses the RTTI of a class in its `base` chain
+/// (`pub const rtti = Parent.rtti`, S3). Then it is the class nearest the root with that RTTI: the class that
+/// declared it.
+pub fn RTTIOwner(comptime T: type) type {
+    if (!(@typeInfo(T) == .@"struct" and @hasDecl(T, "rtti"))) return T;
+    var Owner = T;
+    var L = T;
+    while (@typeInfo(L) == .@"struct" and @hasField(L, "base")) {
+        L = virtual.Parent(L);
+        if (@typeInfo(L) == .@"struct" and @hasDecl(L, "rtti") and L.rtti == T.rtti) Owner = L;
+    }
+    return Owner;
+}
+
+/// A compile error when T uses the RTTI of its parent (S3). An object of T cannot be told from an object of that
+/// parent, so a function that must return a T cannot work. `what` names that function.
+pub fn checkOwnRTTI(comptime T: type, comptime what: []const u8) void {
+    const Owner = RTTIOwner(T);
+    if (Owner != T)
+        @compileError(what ++ ": " ++ @typeName(T) ++ " uses the RTTI of " ++ @typeName(Owner) ++ ", so its objects cannot be told from those of " ++ @typeName(Owner) ++ " (use " ++ @typeName(Owner) ++ ")");
 }
 
 /// True when objects of T free themselves with their own allocator (a field `allocator` in T or in its `base` chain:
@@ -309,7 +349,7 @@ fn build(comptime T: type, comptime decl: RTTI.Declaration) RTTI {
         .bases = bases,
         .attributes = buildAttributes(T, decl, bases),
         .create = if (decl.kind == .abstract) null else createFn(T),
-        .destroy = if (decl.kind == .abstract) null else destroyFn(T),
+        .destroy = if (decl.kind == .abstract and VTableRoot(T) == null) null else destroyFn(T),
         .ref_count = refCountFn(T),
     };
 }

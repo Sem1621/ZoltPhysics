@@ -550,8 +550,8 @@ A concrete settings class lists it in `overrides`:
 - ConstraintPart files are value structs. Jolt's template motion types become comptime parameters
   with `inline else` dispatch.
 - `SpringSettings` / `MotorSettings` keep a byte-compatible binary state.
-- Phase 6 concrete classes declare `overrides`. Their settings types go into a comptime
-  `constraint_settings_types` list until the Phase 8 Factory.
+- Phase 6 concrete classes declare `overrides`. Their settings classes declare `rtti` and are restored by
+  hash through `RegisterTypes.factory` (SerializationArchitecture.md S8 and S9).
 
 ### D9 Broad phase
 
@@ -1109,12 +1109,14 @@ on the way and bind later phases that add constraints (VehicleConstraint, Ragdol
 - The header of `FixedConstraint.zig` is the porter template for a constraint class: pattern A with
   `overrides`, the settings with `createConstraint`, the binary state, the state recorder layout and
   the parity slots to fill.
-- `RegisterTypes.constraint_settings_types` follows Jolt's RegisterTypes.cpp order (VehicleConstraint
-  goes after Path in Phase 7). `path_constraint_path_types` holds PathConstraintPathHermite. A user
-  adds classes through `zolt_user_types`.
-- A class that is not ported yet is a stub file whose settings declare `pub const is_stub = true`.
-  `restoreFromBinaryState` skips stubs, and the parity harnesses skip the scenes and kinds that
-  need them; removing `is_stub` turns them on. No stub is left after Phase 6.
+- The settings classes and PathConstraintPathHermite are in `RegisterTypes.factory_types`, in Jolt's
+  RegisterTypes.cpp order (SerializationArchitecture.md S8). A user adds classes through
+  `zolt_user_types.serializable_types`.
+- During Phase 6, a class that was not ported yet was a stub file whose settings declared
+  `pub const is_stub = true`. `restoreFromBinaryState` skipped stubs, and the parity harnesses
+  skipped the scenes and kinds that needed them; removing `is_stub` turned them on. No stub was
+  left after Phase 6. Since Phase 8, a restore goes through `StreamUtils.restoreObject` and
+  `RegisterTypes.factory`, which have no stub check.
 - Enums that the binary state restores (an `enum class` has a fixed underlying type)
   (`ConstraintSpace`, `SpringMode`, `MotorState`, `SwingType`, `PathRotationConstraintType`) are
   non-exhaustive Zig enums. A stream can hold any value, and the code must treat unknown values as

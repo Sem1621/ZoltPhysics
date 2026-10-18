@@ -33,22 +33,22 @@ The lines are `wc -l` of the `.h`, `.inl` and `.cpp` files in the "Jolt files" c
 The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The scene needs no assets.
 
 `PerformanceTest/RagdollScene.h` loads `Assets/Human.tof` through ObjectStreamIn. The Ragdoll hash is therefore M9
-(Phase 8); Phase 7 ports and checks the Ragdoll class without it.
+(Phase 8); Phase 7 ports and checks the Ragdoll class without it. M9 was reached in Phase 8.
 
 ## 2. Decisions
 
 ### E1 Serialization
 
-- ObjectStream is Phase 8. `JPH_DECLARE_SERIALIZABLE_*` / `JPH_IMPLEMENT_SERIALIZABLE_*` become a
-  `// TODO(serialization)` comment at the same place, as in the earlier phases.
-- `port_status.py --next` lists the ObjectStream includes as blockers. Ignore that for these groups.
+- ObjectStream was Phase 8. In Phase 7 `JPH_DECLARE_SERIALIZABLE_*` / `JPH_IMPLEMENT_SERIALIZABLE_*` became a
+  `// TODO(serialization)` comment, which Phase 8 replaced with a `pub const rtti = RTTI.declare(...)` declaration.
+  New code declares `rtti` at once ([SerializationArchitecture.md](SerializationArchitecture.md) sections 2 and 3).
 - Everything Jolt streams through `StreamOut` / `StreamIn` is ported now, byte compatible:
   - `SaveBinaryState`, `RestoreBinaryState`, `sRestoreFromBinaryState` of Skeleton, SkeletalAnimation,
     RagdollSettings, VehicleConstraintSettings, the controller and wheel settings, engine, transmission,
     differential, track and anti-roll bar.
   - Everything Jolt records through `StateRecorder` (`SaveState` / `RestoreState`).
-- Restoring a class by its RTTI hash goes through comptime registries in `RegisterTypes.zig`, in the order of Jolt's
-  `RegisterTypes.cpp` (E3).
+- Restoring a class by its RTTI hash goes through `RegisterTypes.factory`, in the order of Jolt's `RegisterTypes.cpp`
+  (E3).
 
 ### E2 Class patterns
 
@@ -81,13 +81,15 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
 
 ### E3 Registries
 
-- **`constraint_settings_types`:** `VehicleConstraintSettings` takes its marked place after Path ("VehicleConstraintSettings
-  follows here").
-- **`vehicle_controller_settings_types` (new):** WheeledVehicleControllerSettings, TrackedVehicleControllerSettings,
-  MotorcycleControllerSettings (Jolt's order), plus the user's (`zolt_user_types`). They are the classes that
-  `VehicleConstraintSettings.restoreBinaryState` creates from the RTTI hash (`Factory::sInstance->Find(hash)`).
-- **Skeleton, SkeletalAnimation, RagdollSettings, WheelSettingsWV and WheelSettingsTV:** Jolt registers them only for
-  ObjectStream. Their registration is Phase 8.
+- Phase 7 used comptime lists in `RegisterTypes.zig`: `constraint_settings_types` and the new
+  `vehicle_controller_settings_types`. Phase 8 replaced them with `RegisterTypes.factory`
+  ([SerializationArchitecture.md](SerializationArchitecture.md) S8 and S9).
+- `factory_types` has Jolt's `RegisterTypes.cpp` order: `VehicleConstraintSettings` after `PathConstraintSettings`,
+  then WheeledVehicleControllerSettings, WheelSettingsWV, TrackedVehicleControllerSettings, WheelSettingsTV and
+  MotorcycleControllerSettings. Skeleton, SkeletalAnimation and RagdollSettings are in it too.
+- `VehicleConstraintSettings.restoreBinaryState` creates the controller settings from the RTTI hash with
+  `RegisterTypes.factory.findHash` (`Factory::sInstance->Find(hash)`). A user adds classes through
+  `zolt_user_types.serializable_types`.
 
 ### E4 Character base and the CharacterID counter
 
@@ -260,7 +262,9 @@ A group edits only its own region, slot, files and registry lines.
 - File headers:
   - `//! Port of: <C++ files>` and `//! Status: complete|partial|stub`.
   - Keep Jolt's doc and implementation comments.
-  - Deviations from Jolt go into the file header (`TODO(serialization)`, `TODO(debug_renderer)` for `Draw*`).
+  - Deviations from Jolt go into the file header (`TODO(debug_renderer)` for `Draw*`).
+  - A serializable class declares `pub const rtti` ([SerializationArchitecture.md](SerializationArchitecture.md)
+    section 3).
 - Unit tests: port them with the same names and values. Add inline tests for allocation failure and for the asserts
   Zolt keeps.
 - Parity:

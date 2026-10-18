@@ -20,10 +20,25 @@
 //!
 //! Jolt declares a Ref as `instance C` although its data is an identifier, so a reader cannot tell a Ref from a by
 //! value instance without the member's type (SkipAttributeData misreads a Ref that it has to skip; reproduced).
+//!
+//! Negative compile checks. Zig cannot test that code does not compile, so each was verified by hand and then
+//! reverted. Keep the messages when changing this file (C is the class, X a class that uses the RTTI of its parent P):
+//!
+//! | Mistake                                                    | Error                                                 |
+//! |------------------------------------------------------------|-------------------------------------------------------|
+//! | `.attrAs` on a primitive, a String or an array of them     | `C.mFoo: .attrAs is only for references and pointers` |
+//! | a pointer to a primitive or a String (`?*f32`, `?*[]u8`)   | `C.mFoo: a pointer to f32 has no stream type (only a class can be pointed to)` |
+//! | a Ref or a pointer to X                                    | `C.mFoo: X uses the RTTI of P, so its objects cannot be told from those of P (use P)` |
+//! | `RTTI.dynamicCast` to X, `ObjectStreamIn.sReadObject` of X | `RTTI.dynamicCast: X uses the RTTI of P, ...`         |
+//!
+//! `.attr` on an integer that Jolt declares with JPH_ADD_ENUM_ATTRIBUTE (BodyCreationSettings.mObjectLayer) is no
+//! compile error: the integer type cannot tell. `tools/gen_serializable.py --check` catches it for Jolt's classes, and
+//! parity P1 compares the declared types.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const RTTI = @import("../Core/RTTI.zig").RTTI;
+const rtti_file = @import("../Core/RTTI.zig");
+const RTTI = rtti_file.RTTI;
 const virtual = @import("../Core/Virtual.zig");
 const Lifetime = @import("../Core/Lifetime.zig");
 const Reference = @import("../Core/Reference.zig");
@@ -51,20 +66,24 @@ pub const null_identifier: Identifier = 0;
 /// `array_depth`, `data_type`, `class_rtti`, `primitive_rtti`, `read(in, *M, source)` and `write(out, *const M)`.
 /// `declared` is the class of `.attrAs` (Jolt's member points to it, Zolt's to one of its base classes).
 pub fn Codec(comptime M: type, comptime declared: ?type, comptime where: []const u8) type {
-    if (comptime TypeDeclarations.primitiveDataType(M) != null) return PrimitiveCodec(M);
-    if (comptime isString(M)) return StringCodec(M);
+    // Containers and references first: they are the only types that `.attrAs` may name
     if (comptime ArrayListElement(M)) |E| return ArrayCodec(M, E, .dynamic, 0, declared, where);
     if (comptime StaticArrayElement(M)) |E| return ArrayCodec(M, E, .static, M.capacity, declared, where);
-    if (comptime RefTarget(M)) |Target| return ReferenceCodec(M, Target, .instance, declared);
+    if (comptime RefTarget(M)) |Target| return ReferenceCodec(M, Target, .instance, declared, where);
     switch (@typeInfo(M)) {
         .array => |a| return ArrayCodec(M, a.child, .fixed, a.len, declared, where),
         .optional => |o| if (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .one)
-            return ReferenceCodec(M, @typeInfo(o.child).pointer.child, .pointer, declared),
+            return ReferenceCodec(M, @typeInfo(o.child).pointer.child, .pointer, declared, where),
+        else => {},
+    }
+    if (declared != null) @compileError(where ++ ": .attrAs is only for references and pointers");
+    if (comptime TypeDeclarations.primitiveDataType(M) != null) return PrimitiveCodec(M);
+    if (comptime isString(M)) return StringCodec(M);
+    switch (@typeInfo(M)) {
         .@"enum" => @compileError(where ++ " is an enum: use .enumAttr (JPH_ADD_ENUM_ATTRIBUTE)"),
         .@"struct" => |s| if (s.layout == .@"packed") @compileError(where ++ " is a packed struct (bit flags): use .enumAttr (JPH_ADD_ENUM_ATTRIBUTE)"),
         else => {},
     }
-    if (declared != null) @compileError(where ++ ": .attrAs is only for references and pointers");
     return InstanceCodec(M);
 }
 
@@ -153,7 +172,12 @@ fn StringCodec(comptime M: type) type {
 
 /// Ref(C) / RefConst(C) (Jolt: declared as `instance C`, the data is an identifier) and `?*C` (the `C *` functions of
 /// JPH_IMPLEMENT_SERIALIZATION_FUNCTIONS: `pointer C`)
-fn ReferenceCodec(comptime M: type, comptime Target: type, comptime kind: OSDataType, comptime declared: ?type) type {
+fn ReferenceCodec(comptime M: type, comptime Target: type, comptime kind: OSDataType, comptime declared: ?type, comptime where: []const u8) type {
+    // Jolt declares the `T *` functions only for classes (JPH_DECLARE_PRIMITIVE has none)
+    if (TypeDeclarations.primitiveDataType(Target) != null or isString(Target))
+        @compileError(where ++ ": a pointer to " ++ @typeName(Target) ++ " has no stream type (only a class can be pointed to)");
+    // A link to a class that uses the RTTI of its parent would store an object of the parent (S3)
+    rtti_file.checkOwnRTTI(Target, where);
     const Declared = declared orelse Target;
     // A type level check (the RTTI of a class that refers to itself is not built yet)
     if (!virtual.isDerivedFrom(Declared, Target))

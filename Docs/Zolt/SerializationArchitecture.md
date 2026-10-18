@@ -3,7 +3,8 @@
 This is the binding design for Phase 8:
 - `Jolt/Core/RTTI`, `Jolt/Core/Factory` and `Jolt/Core/StreamUtils`;
 - `Jolt/ObjectStream` (text and binary streams);
-- the serializable declarations of every class (`JPH_DECLARE_SERIALIZABLE_*` / `JPH_IMPLEMENT_SERIALIZABLE_*`);
+- the serializable declarations of every class outside SoftBody and Hair (`JPH_DECLARE_SERIALIZABLE_*` /
+  `JPH_IMPLEMENT_SERIALIZABLE_*`; the rest is Phase 9, S17);
 - `UnitTests/ObjectStream/ObjectStreamTest.cpp`;
 - milestone M9.
 
@@ -13,8 +14,11 @@ read those first. Every decision below is an instruction for porters. A porter w
 the evidence instead of working around it.
 
 The design was chosen from three competing prototypes (fidelity, Zig design, delivery), two judges and a synthesis. The
-synthesis prototype is in the tree (section 10): the RTTI, the Factory, the streams, two real classes and the port of
-ObjectStreamTest. It writes Jolt's exact bytes and reads them back.
+synthesis prototype became the foundation (section 10): the RTTI, the Factory, the streams, two real classes and the
+port of ObjectStreamTest. It wrote Jolt's exact bytes and read them back.
+
+Phase 8 is done. The groups of section 4 are merged, all 81 classes are declared and milestone M9 is reached (section
+10). Section 12 collects what the groups and the final audit settled on the way.
 
 ## 1. Scope
 
@@ -25,23 +29,24 @@ ObjectStreamTest. It writes Jolt's exact bytes and reads them back.
 | ObjectStream core | `ObjectStream/ObjectStream`, `ObjectStreamTypes`, `SerializableAttribute`, `SerializableAttributeTyped`, `SerializableAttributeEnum`, `GetPrimitiveTypeOfType`, `SerializableObject`, `TypeDeclarations` | `UnitTests/ObjectStream/ObjectStreamTest.cpp` | 993 |
 | Writers | `ObjectStream/ObjectStreamOut`, `ObjectStreamTextOut`, `ObjectStreamBinaryOut` | (same) | 806 |
 | Readers | `ObjectStream/ObjectStreamIn`, `ObjectStreamTextIn`, `ObjectStreamBinaryIn` | (same) | 1565 |
-| Declarations | the `sCreateRTTI` bodies of 81 classes in 62 `.cpp` files (Hair and SoftBody excluded) | (none) | (part of their files) |
+| Declarations | the `sCreateRTTI` bodies of 81 classes in 64 `.cpp` files (Hair and SoftBody excluded) | (none) | (part of their files) |
 | M9 | `PerformanceTest/RagdollScene.h` | (none) | 144 |
 
 - The lines are `wc -l` of the `.h`, `.inl` and `.cpp` files in the "Jolt files" column. The test (257 lines) is not
   counted.
 - The 81 declarations: 6 TypeDeclarations classes, SerializableObject, LinearCurve (2), bodies and collision (7), the
   scene (2), shapes (22), constraints (19), vehicles (13), skeleton and ragdoll (9).
-- Before the prototype the declarations were `// TODO(serialization)` comments: 111 lines in 65 Zolt files. 107 lines
-  in 63 files remain.
+- Zolt declares them in 64 Zig files.
+- Before Phase 8 the declarations were `// TODO(serialization)` comments: 111 lines in 65 Zolt files. One line is left,
+  in `SoftBodyCreationSettings.zig` (Phase 9).
 
 **Milestone M9.** ZoltPerformanceTest runs `PerformanceTest/RagdollScene.h`. It reproduces the hashes of
 `determinism_check.yml` with `-q=LinearCast -t=max -s=Ragdoll`:
 - `0x3be6ea76c07a2ac8` in single precision;
 - `0x8dd6bc501859a228` in double precision.
 
-The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The scene loads three assets through
-ObjectStreamIn:
+The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. M9 is reached: both hashes hold with
+`-t=max`, `-t=1` and `-t=2` (section 10). The scene loads three assets through ObjectStreamIn:
 - `Assets/Human.tof` (text, a RagdollSettings);
 - `Assets/Human/dead_pose1.tof` (text, a SkeletalAnimation);
 - `Assets/terrain2.bof` (binary, a PhysicsScene).
@@ -59,7 +64,7 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
 - The parity tests run with the repository root as working directory, so that they can read `Assets/`.
 - New step `zig build jolt-performance-test -- <args>`: the C++ PerformanceTest linked against the parity reference
   library. It is the M9 oracle. A prototype showed that it gives both published Ragdoll hashes, so the reference toolchain
-  (zig c++, libc++, glibc) is exact for M9.
+  (zig c++, libc++, glibc) is exact for M9. Zolt's CI runs it in both precisions, before the Ragdoll steps of Zolt.
 - Consequences of the define:
   - the C++ Factory also registers the attribute classes: 104 classes in single precision, 105 in double precision;
   - Jolt's configuration string gains "(ObjectStream) "; Zolt's `ConfigurationString.zig` adds it unconditionally;
@@ -107,6 +112,13 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
 - A user class that has no RTTI of its own in Jolt (for example FrictionPerTriangleTest's material) declares the RTTI
   of its parent: `pub const rtti = PhysicsMaterialSimple.rtti;`. It is then written and created as the parent, exactly
   like Jolt.
+  - Such a class is written from its parent's sub object, which need not be at offset 0. `RTTI.mostDerived` and by
+    value members start there (`RTTI.RTTIOwner`). This is the address that C++ uses: it converts the object to
+    `Parent &`.
+  - Nothing tells an object of such a class from an object of its parent. So these are compile errors:
+    `RTTI.dynamicCast` to the class, `ObjectStreamIn.sReadObject` of it, and a Ref or a pointer member to it. The
+    message is "X uses the RTTI of P, so its objects cannot be told from those of P (use P)". Jolt returns or stores an
+    object of the parent as X.
 
 ### S4 Bases, offsets and casts
 
@@ -148,15 +160,23 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
   - a base is neither a field nor a flattened prefix;
   - an attribute names a missing member;
   - `.attr` names a member whose name is not the Jolt name (`mHalfExtent` is `half_extent`, `r` is `r`);
-  - `.attr` on an enum, a packed struct or an integer that Jolt declares with JPH_ADD_ENUM_ATTRIBUTE;
+  - `.attr` on an enum or a packed struct;
   - an enum whose tag type is not 8, 16 or 32 bits wide;
   - a String member whose default is not `""`;
   - `.attrAs` with a class that does not derive from the member's class;
+  - `.attrAs` on a primitive, a String or an array of them ("`.attrAs` is only for references and pointers");
+  - a pointer to a primitive or a String, for example `?*f32` ("a pointer to f32 has no stream type");
+  - a Ref or a pointer to a class that uses the RTTI of its parent (S3);
   - more than 32 attributes or more than 4 bases (Jolt's StaticArrays);
   - one attribute name twice, also between a base and the class;
   - two attributes that share memory;
   - a member type without a stream type;
   - two classes with one name or one hash in a factory.
+- Zig cannot test that code does not compile, so these checks were verified by hand. The header of
+  `Zolt/ObjectStream/ObjectStream.zig` lists the messages of the `.attrAs`, pointer and Ref checks.
+- An integer that Jolt declares with JPH_ADD_ENUM_ATTRIBUTE (`mObjectLayer`) needs `.enumAttr`. `.attr` on it is no
+  compile error, because the integer type cannot tell. `tools/gen_serializable.py --check` catches it for Jolt's
+  classes, and P1 compares the declared types. A user class must be checked by hand (section 7).
 
 ### S6 Member types
 
@@ -190,6 +210,11 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
     allocates (VehicleEngineSettings, VehicleTransmissionSettings).
 - `rtti.destroy` is Jolt's `delete`: the generated `vtable.destroy`, or `deinit()` and a free with the object's own
   allocator, or `Lifetime.destruct` and a free.
+  - An abstract class with a vtable has `destroy` too. `destructObject` deletes it through the virtual destructor, like
+    Jolt.
+  - Only SerializableObject has no `destroy`, because Zolt's SerializableObject has no vtable. `destructObject` panics
+    for it, where Jolt deletes through the virtual destructor.
+  - `isAbstract()` is Jolt's `create == null or destroy == null`.
 - New objects have reference count 0, like `new T`.
 - `Core/Lifetime.zig` (a Zolt addition) holds `defaultValue`, `defaultConstruct`, `destruct` and `hasDestructor`.
   Core/StreamIn.zig switches from its private copies to it, so the binary state and the object streams share one
@@ -201,11 +226,13 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
 - `Zolt/Core/Factory.zig` holds `Factory`, a value built at compile time: `Factory.init(&.{ T, ... })`.
 - `init` replays Jolt's `Register`: the class, then its bases, then the classes of its attributes, each once, in
   pre-order.
-- `find(name)`, `findHash(hash)` and `createObject(allocator, name)` are Jolt's. `getAllClasses()` returns the
-  registration order; Jolt returns its hash map order, and nothing depends on it.
+- `find(name)`, `findHash(hash)` and `createObject(allocator, name)` are Jolt's. A name ends at the first NUL, like
+  Jolt's `const char *` key. `getAllClasses()` returns the registration order; Jolt returns its hash map order, and
+  nothing depends on it.
 - There is no global, no `sInstance`, no run time `Register` and no `Clear`.
 - `RegisterTypes.zig` gets:
-  - `factory_types`: Jolt's 49 types of `RegisterTypes.cpp`, in that order, without SoftBodyCreationSettings (Phase 9);
+  - `factory_types`: the types of `RegisterTypes.cpp`, in that order. Jolt has 49; Zolt has 48, without
+    SoftBodyCreationSettings (Phase 9);
   - `factory = Factory.init(factory_types ++ user_types.serializable_types)`.
 - Tests and applications build their own factory when they need other classes:
   `Factory.init(RegisterTypes.factory_types ++ &[_]type{MyClass})`. This is Jolt's
@@ -220,6 +247,8 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
   `path_constraint_path_types`, `vehicle_controller_settings_types`) and the five copies of `rttiHash`.
 - Results are Jolt's for every hash on which Jolt is defined. A hash of another hierarchy or of an abstract class is
   undefined in Jolt; Zolt reports the error (D8).
+- `PhysicsScene.restoreFromBinaryState` reports the same error for constraint settings that are not a
+  TwoBodyConstraintSettings, such as ConstraintSettings itself. Jolt does an unchecked StaticCast there (D8).
 - ConstraintSettings becomes creatable (`.virtual`, `createDefault`), like Jolt.
 - User classes register through `zolt_user_types.serializable_types`. A user module that still declares one of the five
   old list names gets a compile error that names the new hook.
@@ -236,8 +265,8 @@ pub fn sReadObjectRef(comptime T: type, allocator: Allocator, reader: *std.Io.Re
 pub const Options = struct { factory: *const Factory = &RegisterTypes.factory };
 ```
 
-- The foundation adds the file variants. They take `io: std.Io` and a path, and they read and write through a buffered
-  `std.Io.File` reader or writer.
+- The file variants `sReadObjectFromFile`, `sReadObjectRefFromFile` and `sWriteObjectToFile` take `io: std.Io` and a
+  path. They read and write through a buffered `std.Io.File` reader or writer.
 - Text and binary are a closed set of final classes, so `ObjectStreamIn` and `ObjectStreamOut` hold a tagged union
   `format` (guide section 6). `IObjectStreamIn` and `IObjectStreamOut` disappear: codecs take the concrete streams.
 - Errors:
@@ -247,27 +276,37 @@ pub const Options = struct { factory: *const Factory = &RegisterTypes.factory };
 - Jolt's Trace texts go to `std.log.scoped(.zolt).info`.
 - A value class read as the main object is freed with `RTTI.of(T).destructObject(p, allocator)`. A RefTarget is wrapped
   in a Ref (`sReadObjectRef`).
+- This free is always safe. When T has no vtable, `sReadObject(T)` accepts only a main object of exactly class T (D17).
+  When T has one, `destructObject` deletes through the virtual destructor.
 
 ### S11 Reading and writing follow Jolt statement by statement
 
-The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference. In short:
+`ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference. In short:
 
 - **Writer.**
   - The header is `TOS 1.00` or `BOS 1.00`.
   - The main object gets identifier 1. Other objects get the next identifier when a reference to them is first written.
     They are written in that order (a FIFO queue).
+  - `write` keeps the identifier and class of an object that already has one (Jolt's `try_emplace`). The counter still
+    goes up, so a second `write` on one stream skips an identifier, like Jolt.
   - A class is declared once, right before the first object that needs it. Its attribute classes are queued, also
     abstract ones. Bases and primitives are never declared.
   - Objects are identified by the address of the most derived object (S4).
   - Text: `\r\n` and two spaces per indentation level, `%08X` identifiers, floats `%.9g`, doubles `%.17g`
     (`StringTools.writeFloatPrecision`), Jolt's string escapes.
-  - Binary: little endian, Vec3 as 12 bytes, DMat44 as 72 bytes, one string table for names and values.
+  - Binary: little endian, Vec3 as 12 bytes, DMat44 as 72 bytes, one string table for names and values. A string
+    length is Jolt's `min((uint32)size, 0x7fffffff)`: truncated to 32 bits first, then capped.
 - **Reader.**
   - The main loop reads `declare` and `object` tokens. It ends when no data type can be read: at the end of the
     stream, or on an unknown word in a text stream.
   - Attributes match by name (the first match in the flattened list). The type must match exactly; `vec3` and `dvec3`
     convert into each other. Unmatched attributes are skipped. Missing attributes keep their defaults.
-  - The first object that is created is the main object. It must be kind of the requested class.
+  - Class names in text are whole words. Where Jolt looks a name up as a `const char *`, the name ends at the first
+    NUL: in the factory (`find`, `createObject`), for the class of an attribute (`IsType`, a `strcmp`) and for the
+    class of a skipped instance. The key of a class description and the class of an `object` use the whole word, like
+    Jolt.
+  - The first object that is created is the main object. It must be kind of the requested class. `sReadObject` also
+    requires exactly that class when the class has no vtable (D17).
   - An object whose data cannot be read is destroyed, and the read goes on.
   - Links resolve after the whole stream, in read order.
   - Objects that no link references are destroyed, except the main object.
@@ -289,11 +328,18 @@ The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference
   modulo 2^n (`-1` is 4294967295). Out of range fails. uint8 and uint16 are read as uint32 and truncated.
 - Floats: num_get collects the characters `0-9a-fA-FxX+-pP` and one `.`; they must form a whole decimal or hexadecimal
   number (`1.5abc` fails, `1.2.3` is 1.2). The value is rounded once, directly to f32 or f64. Overflow, a subnormal
-  result and a nonzero number that rounds to zero fail (ERANGE). glibc detects tininess after rounding: a word whose
-  exact value is below the smallest normal number fails even when it rounds up to it (`1.1754943e-38` for float). So a
-  subnormal float in a text stream cannot be read back, in Jolt too.
+  result and a nonzero number that rounds to zero fail (ERANGE).
+- glibc detects tininess after rounding. It rounds the exact value to T's precision with an unbounded exponent, then
+  compares the result with the smallest normal number.
+  - So a word fails when its exact value is below the smallest normal number by more than half an ulp at that
+    precision. For float the ulp just below FLT_MIN is 2^-150, so the limit is FLT_MIN - 2^-151. For double the limit
+    is DBL_MIN - 2^-1076.
+  - Such a word fails even when it rounds to the smallest normal number: `1.1754943e-38` fails. `1.17549435e-38` is
+    within the limit, so it is read as FLT_MIN.
+  - A subnormal float in a text stream cannot be read back, in Jolt too. The writers never write the exact value of a
+    subnormal, which glibc would read (D14).
 - Identifiers are `strtoul(word, 16)` truncated to 32 bits.
-- The prototype implements these rules (`ObjectStreamTextIn.zig`). Parity test P6 pins them.
+- `ObjectStreamTextIn.zig` implements these rules. Parity test P6 pins them.
 
 ### S13 Enums
 
@@ -304,7 +350,8 @@ The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference
   ETransmissionMode, EConstraintSpace and EPathRotationConstraintType already follow it. BuildQuality follows it too.
 - MotionType, MotionQuality and OverrideMassProperties stay exhaustive, like the binary state of BodyCreationSettings.
   An unnamed value keeps the member's value, logs a trace and the read goes on (D3).
-- `AllowedDOFs` (a packed struct) takes all 8 bits. `ObjectLayer` (an integer) is truncated.
+- `AllowedDOFs` (a packed struct) takes all 8 bits. `ObjectLayer` (an integer) is truncated. An integer needs
+  `.enumAttr` by hand (S5).
 
 ### S14 Precision
 
@@ -320,7 +367,10 @@ The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference
   reads class data instead, so the stream is misread.
 - A null identifier leaves the member untouched.
 - A second `declare` of a class appends its attributes to the first.
-- An object of an undeclared class is not skipped; the next word ends the read.
+- An object of an undeclared class is not skipped. Its identifier is read as the next data type.
+  - In text that word is no data type, so the read ends.
+  - In binary, identifier 0 or 1 reads on as `declare` or `object` (a misread). Any other value is a fatal "out of place
+    token", which also destroys the main object.
 - The failure of a skipped object is ignored.
 - Static attribute classes are declared even when they are abstract or unused.
 - WheelSettings has no RTTI base, so it is not kind of SerializableObject.
@@ -330,7 +380,8 @@ The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference
 
 ### S16 Zolt's defined behavior where Jolt is undefined
 
-None of these cases occurs in a stream that Jolt or Zolt writes.
+None of these cases occurs in a stream that Jolt or Zolt writes. D8 is about a binary state, D10 about the allocator
+and D17 about the class that the caller requests.
 
 | # | Input | Jolt | Zolt |
 |---|---|---|---|
@@ -341,19 +392,26 @@ None of these cases occurs in a stream that Jolt or Zolt writes.
 | D5 | a binary bool byte other than 0 or 1 | undefined | true |
 | D6 | a binary string length beyond the stream | `alloca(len)`, a stack overflow | reads in chunks, fails at the end |
 | D7 | a text identifier after a stale ERANGE | may fail | only a 64 bit overflow fails |
-| D8 | a binary state hash of another hierarchy or of an abstract class | a wrong `static_cast` or a null dereference | "Failed to create instance of type" |
+| D8 | a binary state hash of another hierarchy or of an abstract class; PhysicsScene constraint settings that are not a TwoBodyConstraintSettings (ConstraintSettings itself, VehicleConstraintSettings) | a wrong `static_cast` or a null dereference; an unchecked StaticCast | "Failed to create instance of type" |
 | D9 | members that C++ leaves indeterminate (`new Color`) | garbage | zero |
 | D10 | allocation failure | abort | `error.OutOfMemory`, nothing leaked |
 | D11 | two stream attributes that map to one attribute of a class | reads the member twice: dangling links into a reallocated array, leaked references | `InvalidObjectStream` |
 | D12 | Ref / RefConst links that form a cycle | reads the objects and leaks them | `InvalidObjectStream` |
 | D13 | an I/O error of the reader | ends the read like the end of the stream | `error.ReadFailed` |
-| D14 | a hexadecimal float word that is an exact subnormal | glibc reads it | fails like every subnormal |
+| D14 | a float word whose exact value is a subnormal of T (hexadecimal, or decimal with all its digits) | glibc reads it without ERANGE | fails like every subnormal |
 | D15 | class data nested deeper than `max_nesting_depth` (a class that contains itself by value in a crafted stream) | recurses until the stack overflows | `InvalidObjectStream` |
-| D16 | a MeshShapeSettings build quality without a name (S13) | `JPH_ASSERT(false)`, then a call through a null splitter | a panic with a message when the shape is created |
+| D16 | a MeshShapeSettings build quality without a name (S13) | `JPH_ASSERT(false)`, then a call through a null splitter | the value is read, kept and written back; creating the shape panics with a message |
+| D17 | `sReadObject(T)` where T has no vtable, and a main object of a derived class (RagdollSettings::Part read as BodyCreationSettings, IndexedTriangle as IndexedTriangleNoMaterial) | returns the derived object, which the caller deletes through a `T *`: the wrong size, the derived part leaks | logs Jolt's "Main object of different type", releases the object (unless a Ref of another object holds it) and returns `InvalidObjectStream` |
 
 - D11: no Jolt class has two attributes in one place, and a writer declares each attribute once.
 - D12: a Ref cycle is useless for Jolt's classes; a compound shape that contains itself recurses forever in CreateShape.
-- The parity generators never produce these inputs. Zolt-only tests pin them.
+- D14: accepting an exact subnormal word needs arbitrary precision. The writers never produce one (S12).
+- D17: `ObjectStreamIn.read` is unchanged and returns the dynamic class. Only `sReadObject` checks it, because its
+  caller frees the object as a T (S10).
+- The parity generators never produce these inputs. Zolt-only tests pin them:
+  - `ZoltTests/ObjectStream/ObjectStreamZoltTests.zig` pins D1 to D7, D9 and D11 to D17;
+  - D8 is pinned by the inline tests of `Core/StreamUtils.zig` and `Physics/PhysicsScene.zig`, D10 by the sweep Z2;
+  - D16 is pinned on the read side only: the panic cannot be tested in process.
 
 ### S17 Phase 9 boundary
 
@@ -367,15 +425,22 @@ None of these cases occurs in a stream that Jolt or Zolt writes.
   - A string with a NUL (a PhysicsMaterialSimple debug name in a text stream) is cut when Jolt reads binary bytes
     (S15), its own bytes too. When a string has a NUL, the binary comparison takes the bytes that Jolt writes after
     reading its own binary bytes. Without a NUL, and in text, the bytes must equal Jolt's first write.
-- P1 has an explicit exclusion list of these 13 classes. Phase 9 removes it.
+- P1 has an explicit exclusion list of the 13 SoftBody classes (`phase9_classes` in `ObjectStreamSchema.zig`).
+  `tools/gen_serializable.py` skips the SoftBody and Hair directories and PhysicsScene's "mSoftBodies". Phase 9 removes
+  these exclusions.
 
 ### S18 Pending declarations during the phase
 
-- The foundation gives every one of the 81 classes a declaration from day one: the name, the kind, the bases and, where
-  needed, `createDefault`. A declaration without its attributes carries `pub const serialization_pending = true;`.
-- A group adds the attributes and removes the marker. The final check requires that no marker is left.
-- The parity layers skip a pending class and every class whose attributes reach one.
-- This keeps the `rtti` vtable entry non-null from the start, and every group depends only on the foundation.
+- F2 gave every one of the 81 classes a declaration: the name, the kind, the bases and, where needed, `createDefault`.
+  A declaration without its attributes carried `pub const serialization_pending = true;`.
+- Each group added the attributes and removed the marker. No marker is left.
+- During the phase the parity layers skipped a pending class and every class whose attributes reach one.
+- This kept the `rtti` vtable entry non-null from the start, and every group depended only on the foundation.
+- The final check is permanent:
+  - `python3 tools/port_status.py --check` (the lint step of CI) runs `tools/gen_serializable.py --check --complete`. It
+    fails on any pending or undeclared class. `--no-pending` remains as a flag of its own.
+  - P1 fails for a missing or pending class and for a class that reaches a pending one. P2 to P7 fail instead of
+    skipping such a class.
 
 ## 3. Recipe: the declaration of each class pattern
 
@@ -523,7 +588,7 @@ pub const RagdollSettings = struct {
 **Enum, flag and integer attributes** (BodyCreationSettings, excerpt):
 
 ```zig
-    .enumAttr("mObjectLayer", .object_layer), // ObjectLayer is an integer: uint32, truncated when read
+    .enumAttr("mObjectLayer", .object_layer), // an integer: uint32, truncated when read; .attr would compile (S5)
     .enumAttr("mMotionType", .motion_type), // exhaustive enum(u8): an unnamed value keeps the member (D3)
     .enumAttr("mAllowedDOFs", .allowed_dofs), // packed struct(u8): its 8 bits
     .alias("mSensorDetectsStatic", .collide_kinematic_vs_non_dynamic), // This is the old name to keep backwards compatibility
@@ -562,6 +627,10 @@ const ShapeAttribute = struct {
 6. Run P1 and P2 for the class (section 5). Make one attribute wrong on purpose and see them fail.
 
 ## 4. Groups and order
+
+All groups are done. F1, F2 and F3, then G1 to G6, are merged. G7 was a completeness audit of the merged phase, its
+fixes and the final doc pass. The table and the notes below are the plan as it was run. Section 12 has what the groups
+settled.
 
 | Group | Classes | Files (owned) | Starts after |
 |---|---|---|---|
@@ -638,14 +707,28 @@ single and double precision.
   quarantine). So members that C++ leaves indeterminate are 0, as in Zolt (D9), and Jolt's use-after-free paths stay
   harmless.
 - Exception: the six outside classes (Color, AABox, Triangle, IndexedTriangle, IndexedTriangleNoMaterial, Plane) use the
-  global `new`, which the hooks do not see. P2 skips their defaults.
+  global `new`, which the hooks do not see. P2 skips their defaults. The defaults of Plane, IndexedTriangleNoMaterial
+  and IndexedTriangle are compared inside PlaneShapeSettings and MeshShapeSettings. Zolt-only tests pin the defaults of
+  AABox, Triangle and Color.
 - Every C++ read starts with `errno = 0`. Jolt's `ReadIdentifier` tests errno without clearing it, so an ERANGE of an
   earlier read fails the next identifier (D7). The prototype's parity met this case: a subnormal float in one stream
   made the next stream fail on the C++ side.
 - Generators never change counts or string lengths (Jolt allocates without bound), never write bool bytes other than 0
-  and 1, never form Ref cycles and never declare one attribute twice. Cases with a divergence (D1 to D14) are pinned by
+  and 1, never form Ref cycles and never declare one attribute twice. Cases with a divergence (S16) are pinned by
   Zolt-only tests.
 - Trace order is not compared. Jolt destroys unreferenced objects in hash map order, Zolt in creation order.
+
+**The harness at the end of Phase 8.**
+- P1 fails for a missing or pending class and for a class that reaches a pending one (S18). P2 to P7 fail instead of
+  skipping such a class.
+- P3 and P4 go on after a mismatch and list the classes that failed at the end.
+- P7 always compares the SaveBinaryState bytes of the loaded objects.
+- P10 (`perf_ragdoll`) runs the scene code itself on both sides (section 12). Stage 2 runs 4 thread configurations: the
+  first runs 40 steps, the others 20.
+- The sweeps Z2 to Z4 require every asset to read.
+- `ObjectStreamZoltTests.zig` also pins Jolt behavior that the generators never produce: class names with a NUL byte in
+  text, a second `write` on one output stream, an object of an undeclared class in binary, the defaults of AABox,
+  Triangle and Color, and the classes that use the RTTI of their parent (S3).
 
 **Zolt-only sweeps.**
 - Z1: every creatable class of the factory: default, text, read, binary, read, text. The bytes must not change.
@@ -675,13 +758,15 @@ The first parity build after the change recompiles the C++ library (about 4 minu
 - Kind from the IMPLEMENT macro. `createDefault` for creatable classes that own an allocator.
 - No new `.attrAs` or `.custom` without a decision in this document.
 - Enums: Jolt's width (S13).
+- An integer that Jolt declares with JPH_ADD_ENUM_ATTRIBUTE needs `.enumAttr`. `.attr` compiles (S5), so check a user
+  class by hand. `tools/gen_serializable.py --check` and P1 check Jolt's classes.
 - Parity: P1 and P2 for every class, P3 and P4 through the generic harness. A bite proof.
 - Done criteria (CLAUDE.md):
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
   - `zig build parity` in Debug and double precision, filtered to `ObjectStream` and the area's binary state tests during
     the work; the full parity at the end of F1, F2 and G7 (30 to 40 minutes);
   - `zig fmt --check`;
-  - `python3 tools/port_status.py --write`.
+  - `python3 tools/port_status.py --write`, then `--check` (it also runs `gen_serializable.py --check --complete`).
 - Delete the worktree's `.zig-cache` at the end.
 
 ## 8. Out of scope (Phase 9)
@@ -698,7 +783,7 @@ The first parity build after the change recompiles the C++ library (about 4 minu
   gives the same lookups and finds collisions at compile time.
 - **Names derived from Zig names or `@typeName`.** They fail for `r g b a`, the aliases, acronyms and nested classes.
 - **Reflection over all fields.** Jolt serializes a chosen subset, in a chosen order, with aliases.
-- **A nullable `rtti` vtable entry during the migration.** Pending declarations keep it non-null (S18).
+- **A nullable `rtti` vtable entry during the migration.** Pending declarations kept it non-null (S18).
 - **Exact emulation of every Jolt bug on malformed input** (repeated attributes, Ref cycles). It means use-after-free and
   leaks; D11 and D12 reject such streams instead.
 - **A strict number grammar.** It would reject words that Jolt reads ("12abc"). S12 models the reference platform.
@@ -706,34 +791,57 @@ The first parity build after the change recompiles the C++ library (about 4 minu
   rest of SoftBody.
 - **Comparing trace order.** It needs Jolt's hash map order for no result.
 
-## 10. The foundation prototype in the tree
+## 10. The foundation prototype and the final state
+
+**The final state (end of Phase 8).**
 
 | File | Status |
 |---|---|
-| `Zolt/Core/RTTI.zig` | partial: the `rtti` vtable entries of the 7 roots are F2's |
-| `Zolt/Core/Factory.zig` | partial: `RegisterTypes.factory` is F2's |
-| `Zolt/Core/Lifetime.zig` | complete (StreamIn switches in F1) |
-| `Zolt/ObjectStream/ObjectStreamIn.zig` | partial: the file variant and the default factory are F1's |
+| `Zolt/Core/RTTI.zig`, `Factory.zig`, `Lifetime.zig` (Zolt addition), `StreamUtils.zig` | complete |
+| the 14 `Zolt/ObjectStream/*.zig` files | complete |
+| `Zolt/Core/LinearCurve.zig`, `Zolt/ConfigurationString.zig` | complete |
+| the declarations of the 81 classes, in 64 Zig files | complete: none pending, none missing (Progress.md, section Serialization) |
+| `Zolt/RegisterTypes.zig` | `factory_types` (48 types) and `factory` |
+| `Zolt/Physics/PhysicsScene.zig` | partial: `mSoftBodies` is Phase 9 (S17) |
+| `ZoltTests/ObjectStream/ObjectStreamTest.zig` | the port of ObjectStreamTest.cpp (both tests) |
+| `ZoltTests/ObjectStream/ObjectStreamZoltTests.zig`, `ObjectStreamSweeps.zig` | the pins of S16 and the sweeps Z1 to Z4 |
+| `ZoltParity/ObjectStream/*` | P1 to P8 |
+| `ZoltParity/Physics/PerfRagdollParity.zig` + `PerfRagdollReference.cpp` | P10 (`perf_ragdoll`) |
+| `ZoltPerformanceTest/RagdollScene.zig` | the port of PerformanceTest/RagdollScene.h (M9) |
+| `tools/gen_serializable.py` | `--write` (pending declarations) and `--check [--complete]` |
+
+M9 is reached. ZoltPerformanceTest gives Jolt's Ragdoll hashes with `-q=LinearCast` and `-t=max`, `-t=1` and `-t=2`:
+`0x3be6ea76c07a2ac8` in single precision and `0x8dd6bc501859a228` in double precision. Zolt's CI checks the six runs,
+after the oracle step (S1). All five determinism hashes of `determinism_check.yml` now match.
+
+**The prototype (at the design commit).**
+
+| File | Status then |
+|---|---|
+| `Zolt/Core/RTTI.zig` | partial: the `rtti` vtable entries of the 7 roots were F2's |
+| `Zolt/Core/Factory.zig` | partial: `RegisterTypes.factory` was F2's |
+| `Zolt/Core/Lifetime.zig` | complete (StreamIn switched in F1) |
+| `Zolt/ObjectStream/ObjectStreamIn.zig` | partial: the file variant and the default factory were F1's |
 | the 13 other `Zolt/ObjectStream/*.zig` files | complete |
 | `SpringSettings.zig`, `MotorSettings.zig` | declarations complete |
 | `ZoltTests/ObjectStream/ObjectStreamTest.zig` | the port of ObjectStreamTest.cpp (both tests) |
-| `ZoltParity/ObjectStream/ObjectStreamParity.zig` + `ObjectStreamReference.cpp` | the seed of P1, P3 and P4; P8 is done |
+| `ZoltParity/ObjectStream/ObjectStreamParity.zig` + `ObjectStreamReference.cpp` | the seed of P1, P3 and P4; P8 was done |
 
-What the prototype shows against the C++ library built with `JPH_OBJECT_STREAM`, in single and double precision:
+What the prototype showed against the C++ library built with `JPH_OBJECT_STREAM`, in single and double precision:
 - the schemas (names, hashes, abstract flags, bases, attributes with their declared types) and the IsKindOf matrix of
-  31 classes equal Jolt's;
-- MotorSettings with 300 random value sets: Zolt writes Jolt's text and binary bytes; each side reads the other's bytes
-  and writes them again unchanged, in both formats;
+  31 classes equaled Jolt's;
+- MotorSettings with 300 random value sets: Zolt wrote Jolt's text and binary bytes; each side read the other's bytes
+  and wrote them again unchanged, in both formats;
 - the object of ObjectStreamTest.cpp (all primitives, Array, StaticArray, C arrays, nested arrays, a raw pointer, a Ref
   and a RefConst to one shared object, two bases with the second at a non-zero offset): the same in both directions,
   with reference count 2 and correct casts on both sides;
 - ten old or odd MotorSettings streams (Human.tof's old schema, retyped, unknown and missing attributes, partial number
-  words, a garbage word, a float that does not parse, another version, a skipped object, a class declared twice) give the
-  same result and bytes on both sides.
+  words, a garbage word, a float that does not parse, another version, a skipped object, a class declared twice) gave
+  the same result and bytes on both sides.
 
-With the define, a filtered sample of the existing parity still passes unchanged: the 42 tests whose names contain
+With the define, a filtered sample of the existing parity still passed unchanged: the 42 tests whose names contain
 "binary state", "sRestoreFromBinaryState" or "struct" (the binary states, the struct layouts), and the HelloWorld
-comparison. The full parity run with the define is F1's.
+comparison. The full parity run with the define was F1's.
 
 ## 11. Settled after the synthesis
 
@@ -748,3 +856,74 @@ The lead settled the open questions of the synthesis:
 - **F2 is one generated change.** No other branch edits the class files during F2, so it is not split.
 - **Jolt's stale errno (D7).** It is a Jolt bug. The harness works around it. It may be reported upstream; that is not
   part of this port.
+
+## 12. Settled in the Phase 8 groups
+
+Reviews and tests of the groups found bugs and doc errors. Most were fixed before their group merged, the others before
+the phase ended (see "Bugs found on the way"). After the last merge, a completeness audit checked the whole phase
+against the Jolt sources. It confirmed 37 findings, and each one was fixed or documented. These points were settled on
+the way. They add to section 11 and bind later phases that change these classes (Phase 9 adds the SoftBody and Hair
+schemas). The file headers have the details.
+
+| Jolt behavior | Decision |
+|---|---|
+| `RotatedTranslatedShapeSettings` and `CompoundShapeSettings::SubShapeSettings` leave `mPosition` and `mRotation` uninitialized; `PathConstraintPathHermite::Point` leaves its members uninitialized | Zero (D9), so a default object writes the bytes of Jolt's zero filled object. For the two shape settings that means a zero rotation, not identity; their constructors with arguments still set both members (G1, G3) |
+| `MeshShapeSettings::EBuildQuality` is an `int` enum; a value without a name asserts, then calls through a null splitter | `BuildQuality` is a non-exhaustive `enum(i32)` (S13). A stream can hold any value: it is read, kept and written back. Creating the shape panics with a message (D16, G1) |
+| `Constraint` stores the step overrides as `uint8(inN)` and asserts `inN < 256` only when asserts are on | The same: the assert is guarded by `Core.enable_asserts`, and the value is truncated like Jolt's release build. Since G3 an object stream can set these settings to any uint32. The first port's unguarded assert and `@intCast` were undefined in ReleaseFast for 256 or more (G3 review) |
+| `BodyCreationSettings` streams `mShape` (the settings), not `mShapePtr` | The custom accessor `ShapeAttribute` over the union `shape` (S5): settings are written, a Shape is written as null, a link stores the settings (G2) |
+| `sReadObject<T>` returns a main object of any class derived from T; the caller deletes it through a `T *` | When T has no vtable, the main object must be exactly a T (D17). `ObjectStreamIn.read` still returns the dynamic class (audit) |
+| A class without an RTTI of its own uses its parent's, and C++ writes it through a `Parent &` | Zolt writes the parent's sub object (`RTTI.RTTIOwner`), which need not be at offset 0. A cast to such a class, a read of it and a link to it are compile errors (S3, audit) |
+| `RTTI::DestructObject` of an abstract class deletes through the virtual destructor; `IsAbstract` is `mCreate == nullptr \|\| mDestruct == nullptr` | The same. Only SerializableObject, which has no vtable in Zolt, cannot be destructed: a panic (S7, audit) |
+| Jolt looks some class names up as a `const char *`, so they end at the first NUL | The same: the factory, the class of an attribute and the class of a skipped instance. The other lookups use the whole word (S11, audit) |
+| `ObjectStreamOut::Write` uses `try_emplace` and always advances the identifier counter | The same: a second write of an object keeps its identifier (S11, audit) |
+| The binary string length is `min((uint32)size, 0x7fffffff)` | The same: truncated to 32 bits first, then capped (S11, audit) |
+| PhysicsScene's restore does an unchecked StaticCast of the constraint settings to TwoBodyConstraintSettings | "Failed to create instance of type" (D8, audit) |
+| glibc reads a float word whose exact value is a subnormal | Zolt fails it like every subnormal (D14, widened by the audit to decimal words) |
+
+**Bugs found on the way.** Each was fixed with a test that failed before:
+- F3's P6 found that the number parser accepted words just below the smallest normal number, which glibc rejects
+  (tininess after rounding, S12). `ObjectStreamTextIn.parseFloat` follows glibc since the F3 merge.
+- The F1 review found that a skipped class that contains itself recursed until the stack overflowed (D15).
+- The F3 review found that the C++ side of P2 to P7 ran without its allocation hooks: its factory setup installed Jolt's
+  allocator again. Every hooked call now checks that its hooks are still installed.
+- G2's allocation failure tests found a double free in the binary `writeString`. When the writer failed after the
+  string entered the string table, its `errdefer` freed the key, and `deinit` freed it again. The fix came after the
+  G2 merge.
+- G5 and G6 found that `RagdollScene.destroy` asserted after a StopTest that ran out of memory (see below).
+- The audit found the rows of the table marked "audit", missing compile checks (S5), a harness and a CI check that let
+  a pending class pass (S18), CI path filters without `PerformanceTest/**` and `Assets/**`, and stale docs.
+
+**RagdollScene (G6).** In addition to the interface changes of section 4:
+- `new RagdollScene(...)` is `RagdollScene.create(allocator, io, ...)`. `io` reads the three assets through the file
+  variants of ObjectStreamIn. A file that cannot be read prints Jolt's message, and Load returns false. Only running
+  out of memory is an error.
+- StartTest reserves the slot of a ragdoll before it creates the ragdoll, so a ragdoll in the system always has its
+  reference. A failed StartTest removes the ragdolls that it added.
+- A StopTest that cannot remove a ragdoll releases the ragdolls before it and keeps the others in the list, so that a
+  second call removes them.
+- `destroy` leaks the ragdolls that are still in the list. Their release would destroy their bodies, and main destroys
+  the physics system before the scene. This only happens when StopTest ran out of memory and was not called again.
+
+**Harness rules.**
+- **P1 while classes were pending.** P1 compared a pending class by its header only. A class that only the attributes
+  of pending classes reach was reported as such, not as missing, and P2 to P7 skipped such classes. The audit made the
+  rule strict (S18).
+- **The NUL rule of the cross-read.** A PhysicsScene is compared by cross-reading (S17). Jolt's binary reader cuts a
+  string at its first NUL, also in Jolt's own bytes (S15). So when Jolt's text has a NUL byte and the direct binary
+  comparison fails, the binary bytes must equal what Jolt writes after reading its own binary bytes. Text, and binary
+  without a NUL, keep the direct comparison. P4 found the case after G1 to G3 merged: a PhysicsMaterialSimple debug
+  name with a NUL.
+- **perf_ragdoll (P10).** Both sides run the scene code itself:
+  - The C++ side includes `PerformanceTest/Layers.h`, `PerformanceTestScene.h` and `RagdollScene.h` in the namespace
+    `PerfRagdoll`. PerformanceTest's Layers.h defines the same class names as UnitTests/Layers.h, which other references
+    of the parity library include.
+  - The test reads private members of the scene, so `private` is defined as `public` (`#define private public`) while
+    RagdollScene.h is included. All Jolt headers are included before that.
+  - The Zig side imports `ZoltPerformanceTest/RagdollScene.zig` as the module `perf_ragdoll_scene` (build.zig).
+- **The working directory.** The parity run and the test run of ZoltPerformanceTest start in the repository root, so
+  that they find `Assets/`. The unit test run has no working directory of its own, so `zig build test` must be started
+  in the repository root for the sweeps Z2 to Z4.
+- **The inline hash test.** ZoltPerformanceTest's inline hash test has a Ragdoll row of 5 updates. Its values come from
+  the oracle (`zig build jolt-performance-test -- -q=LinearCast -t=1 -s=Ragdoll -i=5`).
+- **The final check.** `tools/gen_serializable.py` skips PhysicsScene's "mSoftBodies" (S17). `port_status.py --check`
+  fails on a pending or undeclared class (S18).

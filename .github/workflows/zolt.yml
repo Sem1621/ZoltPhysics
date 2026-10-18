@@ -10,6 +10,10 @@ on:
       - 'ZoltPerformanceTest/**'
       - 'ZoltHelloWorld/**'
       - 'HelloWorld/**'
+      - 'PerformanceTest/**'
+      - 'Assets/**'
+      - 'Jolt/**'
+      - 'UnitTests/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -23,6 +27,10 @@ on:
       - 'ZoltPerformanceTest/**'
       - 'ZoltHelloWorld/**'
       - 'HelloWorld/**'
+      - 'PerformanceTest/**'
+      - 'Assets/**'
+      - 'Jolt/**'
+      - 'UnitTests/**'
       - 'build.zig'
       - 'build.zig.zon'
       - 'tools/**'
@@ -46,7 +54,7 @@ jobs:
         version: ${{ env.ZIG_VERSION }}
     - name: Check formatting
       run: zig fmt --check Zolt ZoltTests ZoltParity ZoltPerformanceTest ZoltHelloWorld build.zig build.zig.zon
-    - name: Check that Docs/Zolt/Progress.md is up to date and the port headers are valid
+    - name: Check that Docs/Zolt/Progress.md is up to date, the port headers are valid and no declaration is pending
       run: python3 tools/port_status.py --check
 
   test:

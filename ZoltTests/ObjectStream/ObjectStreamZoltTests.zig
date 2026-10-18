@@ -3,9 +3,13 @@
 //!
 //! - The file variants of sReadObject / sWriteObject and the default factory (SerializationArchitecture.md S10).
 //! - Pins of Zolt's defined behavior where Jolt's behavior is undefined (S16). Jolt cannot run these streams safely,
-//!   so the parity tests never generate them. D8 (binary state hashes) belongs to Core/StreamUtils. D10 (allocation
-//!   failure) is the Z2 sweep of ObjectStreamSweeps.zig. D15 (class data nested too deep) is new: S16 does not list
-//!   it yet.
+//!   so the parity tests never generate them. D8 (binary state hashes) belongs to Core/StreamUtils and PhysicsScene.
+//!   D10 (allocation failure) is the Z2 sweep of ObjectStreamSweeps.zig. D16 is pinned on the read side only: the
+//!   panic when the shape is created cannot be tested in process.
+//! - Pins of Jolt's behavior that the parity generators never produce: class names with a NUL byte in text, a second
+//!   `write` on one output stream, an object of an undeclared class in binary, the defaults of the outside classes
+//!   that no Jolt class holds by value.
+//! - Classes that use the RTTI of their parent (S3).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -312,12 +316,18 @@ test "ObjectStream D13: an I/O error of the reader is error.ReadFailed" {
     }
 }
 
-test "ObjectStream D14: a hexadecimal float that is exactly subnormal fails like every subnormal" {
+test "ObjectStream D14: a float word that is exactly subnormal fails like every subnormal" {
     // glibc reads it, Jolt's ObjectStreamTextIn too
     try testing.expectError(error.InvalidObjectStream, readNode(
         \\TOS 1.00
         \\declare Node 1 mScale float
         \\object Node 00000001 0x1p-140
+    ));
+    // The same for a decimal word with all the digits of 2^-149 (glibc's strtof gives 0x00000001 without ERANGE)
+    try testing.expectError(error.InvalidObjectStream, readNode(
+        \\TOS 1.00
+        \\declare Node 1 mScale float
+        \\object Node 00000001 1.40129846432481707092372958328991613128026194187651577175706828388979108268586060148663818836212158203125e-45
     ));
     const node = try readNode(
         \\TOS 1.00
@@ -426,5 +436,264 @@ test "ObjectStream D15: class data nested too deep is an invalid stream" {
         const bytes = try deepStream(max + 1, false);
         defer testing.allocator.free(bytes);
         try testing.expectError(error.InvalidObjectStream, readTree(bytes));
+    }
+}
+
+test "ObjectStream D16: a MeshShapeSettings build quality without a name is kept" {
+    // Jolt: JPH_ASSERT(false), then a call through a null splitter when the shape is created. Zolt panics there, which
+    // cannot be tested in process. The read keeps the value, and a write gives it back.
+    const allocator = testing.allocator;
+    const MeshShapeSettings = zolt.MeshShapeSettings;
+    var reader: std.Io.Reader = .fixed(
+        \\TOS 1.00
+        \\declare MeshShapeSettings 1 mBuildQuality uint32
+        \\object MeshShapeSettings 00000001 7
+    );
+    const settings = try ObjectStreamIn.sReadObject(MeshShapeSettings, allocator, &reader, .{});
+    defer RTTI.of(MeshShapeSettings).destructObject(settings, allocator);
+    try testing.expectEqual(@as(i32, 7), @intFromEnum(settings.build_quality));
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try ObjectStreamOut.sWriteObject(MeshShapeSettings, allocator, &out.writer, stream_type, settings);
+        var reader2: std.Io.Reader = .fixed(out.written());
+        const again = try ObjectStreamIn.sReadObject(MeshShapeSettings, allocator, &reader2, .{});
+        defer RTTI.of(MeshShapeSettings).destructObject(again, allocator);
+        try testing.expectEqual(@as(i32, 7), @intFromEnum(again.build_quality));
+    }
+}
+
+test "ObjectStream D17: sReadObject of a class without a virtual destructor needs a main object of that class" {
+    const allocator = testing.allocator;
+
+    // RagdollSettings::Part derives from BodyCreationSettings, which has no virtual destructor. Jolt returns the part
+    // as a BodyCreationSettings, and the caller deletes it with the wrong type and size.
+    {
+        var reader: std.Io.Reader = .fixed(
+            \\TOS 1.00
+            \\declare RagdollSettings::Part 0
+            \\object RagdollSettings::Part 00000001
+        );
+        try testing.expectError(error.InvalidObjectStream, ObjectStreamIn.sReadObject(zolt.BodyCreationSettings, allocator, &reader, .{}));
+    }
+
+    // The same for a flattened base: IndexedTriangle starts with the fields of IndexedTriangleNoMaterial
+    const triangle_stream =
+        \\TOS 1.00
+        \\declare IndexedTriangle 0
+        \\object IndexedTriangle 00000001
+    ;
+    {
+        var reader: std.Io.Reader = .fixed(triangle_stream);
+        try testing.expectError(error.InvalidObjectStream, ObjectStreamIn.sReadObject(zolt.IndexedTriangleNoMaterial, allocator, &reader, .{}));
+    }
+
+    // A main object of exactly the requested class is read
+    {
+        var reader: std.Io.Reader = .fixed(triangle_stream);
+        const triangle = try ObjectStreamIn.sReadObject(zolt.IndexedTriangle, allocator, &reader, .{});
+        RTTI.of(zolt.IndexedTriangle).destructObject(triangle, allocator);
+    }
+
+    // A class with a virtual destructor accepts a main object of a derived class, like Jolt: it is deleted through
+    // the vtable
+    {
+        var reader: std.Io.Reader = .fixed(
+            \\TOS 1.00
+            \\declare GroupFilterTable 0
+            \\object GroupFilterTable 00000001
+        );
+        const filter = try ObjectStreamIn.sReadObject(zolt.GroupFilter, allocator, &reader, .{});
+        try testing.expectEqual(RTTI.of(zolt.GroupFilterTable), RTTI.getRTTI(zolt.GroupFilter, filter));
+        RTTI.of(zolt.GroupFilter).destructObject(filter, allocator);
+    }
+}
+
+test "RTTI: an object of an abstract class is deleted through its virtual destructor" {
+    // Jolt's JPH_RTTI(GroupFilter)->DestructObject(p) deletes any group filter (its comment says that it does nothing)
+    const allocator = testing.allocator;
+    try testing.expect(RTTI.of(zolt.GroupFilter).isAbstract());
+    try testing.expect(RTTI.of(zolt.SerializableObject).isAbstract());
+    try testing.expect(!RTTI.of(zolt.GroupFilterTable).isAbstract());
+    const created = (try RTTI.of(zolt.GroupFilterTable).createObject(allocator)).?;
+    const filter = RTTI.of(zolt.GroupFilterTable).castTo(created, RTTI.of(zolt.GroupFilter)).?;
+    RTTI.of(zolt.GroupFilter).destructObject(filter, allocator);
+}
+
+test "ObjectStream: a class name in text ends at the first NUL where Jolt looks it up as a const char *" {
+    // The factory (Jolt: Factory::Find(class_name.c_str())). The object finds its description by the whole word.
+    {
+        const node = try readNode("TOS 1.00\ndeclare Node\x00x 1 mValue uint32\nobject Node\x00x 00000001 7\n");
+        defer RTTI.of(Node).destructObject(node, testing.allocator);
+        try testing.expectEqual(@as(u32, 7), node.value);
+    }
+    // The class of an attribute (Jolt: OSIsType compares with strcmp)
+    {
+        const node = try readNode("TOS 1.00\ndeclare Node 2 mChild instance Node\x00x mValue uint32\nobject Node 00000001 00000002 1\nobject Node 00000002 00000000 2\n");
+        defer RTTI.of(Node).destructObject(node, testing.allocator);
+        try testing.expectEqual(@as(u32, 2), node.child.ptr.?.value);
+    }
+    // The class of a skipped instance (Jolt: SkipAttributeData finds the description with a const char *)
+    {
+        const node = try readNode("TOS 1.00\ndeclare V 0\ndeclare Node 2 mOther instance V\x00x mValue uint32\nobject Node 00000001 3\n");
+        defer RTTI.of(Node).destructObject(node, testing.allocator);
+        try testing.expectEqual(@as(u32, 3), node.value);
+    }
+    // A name that starts with a NUL is empty for the factory
+    try testing.expectError(error.InvalidObjectStream, readNode("TOS 1.00\ndeclare \x00Node 1 mValue uint32\nobject \x00Node 00000001 7\n"));
+}
+
+test "ObjectStream: an object of an undeclared class ends a text read, its identifier is a data type in binary" {
+    // Jolt does not read the identifier of such an object, so the next read takes it as a data type
+    const object = try Node.createDefault(testing.allocator);
+    defer RTTI.of(Node).destructObject(object, testing.allocator);
+    object.value = 5;
+
+    // Text: "00000002" is no data type word, so the read ends with the main object
+    {
+        const text = try writeNode(object, .text);
+        defer testing.allocator.free(text);
+        const bytes = try std.mem.concat(testing.allocator, u8, &.{ text, "\nobject V 00000002\n" });
+        defer testing.allocator.free(bytes);
+        const node = try readNode(bytes);
+        defer RTTI.of(Node).destructObject(node, testing.allocator);
+        try testing.expectEqual(@as(u32, 5), node.value);
+    }
+
+    // Binary: `object`, the new string "V" and identifier 2, which is the data type `instance`: an out of place token
+    // (fatal, the main object is destroyed too)
+    {
+        const binary = try writeNode(object, .binary);
+        defer testing.allocator.free(binary);
+        const tail = [_]u8{ 1, 0, 0, 0, 1, 0, 0, 0, 'V', 2, 0, 0, 0 };
+        const bytes = try std.mem.concat(testing.allocator, u8, &.{ binary, &tail });
+        defer testing.allocator.free(bytes);
+        try testing.expectError(error.InvalidObjectStream, readNode(bytes));
+    }
+}
+
+test "ObjectStreamOut: a second write keeps the identifier of an object that was written before (try_emplace)" {
+    const allocator = testing.allocator;
+    const a = try Node.createDefault(allocator);
+    var a_ref = Ref(Node).init(a);
+    defer a_ref.deinit();
+    const b = try Node.createDefault(allocator);
+    a.child.set(b);
+    a.value = 1;
+    b.value = 2;
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    {
+        var stream = try ObjectStreamOut.open(allocator, &out.writer, .text);
+        defer stream.deinit();
+        try stream.write(a, RTTI.of(Node)); // A is 00000001, B is 00000002
+        try stream.write(b, RTTI.of(Node)); // B keeps 00000002, the counter still goes up
+    }
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "object Node 00000002"));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "00000003") == null);
+}
+
+test "ObjectStream: the defaults of the outside classes that no Jolt class holds by value" {
+    // P2 cannot compare them (the C++ side creates them with the global new), and no Jolt class has a member of these
+    // classes, so their defaults never reach a stream of the parity tests
+    const allocator = testing.allocator;
+
+    // AABox(): mMin = FLT_MAX, mMax = -FLT_MAX
+    const box: *zolt.AABox = @ptrCast(@alignCast((try RTTI.of(zolt.AABox).createObject(allocator)).?));
+    defer RTTI.of(zolt.AABox).destructObject(box, allocator);
+    try testing.expect(box.min.eql(.replicate(std.math.floatMax(f32))));
+    try testing.expect(box.max.eql(.replicate(-std.math.floatMax(f32))));
+
+    // Triangle(): mMaterialIndex = 0, mUserData = 0, mV is indeterminate (zero, D9)
+    const triangle: *zolt.Triangle = @ptrCast(@alignCast((try RTTI.of(zolt.Triangle).createObject(allocator)).?));
+    defer RTTI.of(zolt.Triangle).destructObject(triangle, allocator);
+    for (triangle.v) |v| try testing.expect(v.eql(.{ .x = 0, .y = 0, .z = 0 }));
+    try testing.expectEqual(@as(u32, 0), triangle.material_index);
+    try testing.expectEqual(@as(u32, 0), triangle.user_data);
+
+    // new Color: indeterminate (zero, D9, pinned above)
+}
+
+/// Jolt's FrictionPerTriangleTest::MyMaterial with a member that is aligned to 16 bytes. Zig puts that member first, so
+/// `base` is not at offset 0 (S4). The class has no RTTI of its own (S3).
+const TintedMaterial = struct {
+    pub const overrides = .{};
+    pub const rtti = zolt.PhysicsMaterialSimple.rtti;
+
+    base: zolt.PhysicsMaterialSimple,
+    tint: zolt.Vec3,
+};
+
+test "ObjectStream: a class that uses the RTTI of its parent is written as its parent" {
+    const allocator = testing.allocator;
+    try testing.expect(@offsetOf(TintedMaterial, "base") != 0); // Otherwise this test shows nothing
+
+    var tinted: TintedMaterial = .{ .base = try .initDerived(TintedMaterial, allocator, "Tinted", zolt.Color.red), .tint = .replicate(0.5) };
+    tinted.base.base.setEmbedded();
+    defer tinted.base.base.deinit();
+    var plain = try zolt.PhysicsMaterialSimple.init(allocator, "Tinted", zolt.Color.red);
+    plain.base.setEmbedded();
+    defer plain.base.deinit();
+
+    // The object is the parent's sub object (in C++ `&inObject` is also the address of the parent)
+    try testing.expectEqual(@as(*anyopaque, &tinted.base), RTTI.mostDerived(TintedMaterial, &tinted));
+    try testing.expectEqual(@as(?*zolt.PhysicsMaterialSimple, &tinted.base), RTTI.dynamicCast(zolt.PhysicsMaterialSimple, TintedMaterial, &tinted));
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        var expected: std.Io.Writer.Allocating = .init(allocator);
+        defer expected.deinit();
+        try ObjectStreamOut.sWriteObject(zolt.PhysicsMaterialSimple, allocator, &expected.writer, stream_type, &plain);
+        var actual: std.Io.Writer.Allocating = .init(allocator);
+        defer actual.deinit();
+        try ObjectStreamOut.sWriteObject(TintedMaterial, allocator, &actual.writer, stream_type, &tinted);
+        try testing.expectEqualSlices(u8, expected.written(), actual.written());
+    }
+}
+
+/// MotorSettings with a member that is aligned to 16 bytes, so `base` is not at offset 0. It has no RTTI of its own.
+const TaggedMotor = struct {
+    pub const rtti = MotorSettings.rtti;
+
+    base: MotorSettings = .{},
+    tag: zolt.Vec3 = .replicate(7),
+};
+
+/// A class with a TaggedMotor by value
+const MotorHolder = struct {
+    pub const rtti = RTTI.declare(@This(), .{ .name = "MotorHolder", .kind = .non_virtual, .attributes = &.{.attr("mMotor", .motor)} });
+
+    motor: TaggedMotor = .{},
+};
+
+/// The same class with a plain MotorSettings: what Jolt writes for MotorHolder
+const PlainMotorHolder = struct {
+    pub const rtti = RTTI.declare(@This(), .{ .name = "MotorHolder", .kind = .non_virtual, .renamed = true, .attributes = &.{.attr("mMotor", .motor)} });
+
+    motor: MotorSettings = .{},
+};
+
+test "ObjectStream: a member by value of a class that uses the RTTI of its parent is its parent's sub object" {
+    const allocator = testing.allocator;
+    try testing.expect(@offsetOf(TaggedMotor, "base") != 0); // Otherwise this test shows nothing
+    const motor: MotorSettings = .initModeLimits(.stiffness_and_damping, 3.5, 0.25, 100.0, 200.0);
+    const holder: MotorHolder = .{ .motor = .{ .base = motor } };
+    const plain: PlainMotorHolder = .{ .motor = motor };
+    const holder_factory: Factory = comptime .init(&.{MotorHolder});
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        // Written as a MotorSettings (C++ converts the member to a `MotorSettings &`)
+        var expected: std.Io.Writer.Allocating = .init(allocator);
+        defer expected.deinit();
+        try ObjectStreamOut.sWriteObject(PlainMotorHolder, allocator, &expected.writer, stream_type, &plain);
+        var actual: std.Io.Writer.Allocating = .init(allocator);
+        defer actual.deinit();
+        try ObjectStreamOut.sWriteObject(MotorHolder, allocator, &actual.writer, stream_type, &holder);
+        try testing.expectEqualSlices(u8, expected.written(), actual.written());
+
+        // Read into the MotorSettings sub object, the rest keeps its default
+        var reader: std.Io.Reader = .fixed(actual.written());
+        const read = try ObjectStreamIn.sReadObject(MotorHolder, allocator, &reader, .{ .factory = &holder_factory });
+        defer RTTI.of(MotorHolder).destructObject(read, allocator);
+        try testing.expectEqual(motor, read.motor.base);
+        try testing.expect(read.motor.tag.eql(.replicate(7)));
     }
 }
