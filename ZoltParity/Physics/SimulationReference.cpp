@@ -11,6 +11,21 @@
 // SimMakeConstraintSettings: the layout of CSMakeSettings in ConstraintsReference.cpp plus the SetRatio helpers of Gear /
 // RackAndPinion) and applies every setter of every class (ApplyConstraintOp, one block per ConstraintOpRange of
 // SimScenes.zig). A later worker group only adds a new operation here, in its own range.
+//
+// Characters, ragdolls and vehicles (Phase 7): this side creates Character, CharacterVirtual (with the
+// CharacterContactListener of SimCharacterContactListener and CharacterVsCharacterCollisionSimple), Ragdoll and
+// VehicleConstraint (wheeled, tracked and motorcycle controllers, the three collision testers) from their descriptions and
+// applies every setter and action (ApplyObjectOp, one block per Phase7OpRange). After every update the driver compares
+// the object state (WriteObjectState: the SaveState bytes of the characters and the getters that the state does not
+// hold) and the character listener records in call order; snapshot / restore_cross include the character states.
+// The functions of the vehicle variants (tracked, motorcycle: SimMakeTrackedControllerSettings, ApplyTrackedOp,
+// WriteTrackedControllerState, ...) are separate, like their slots in SimulationParity.zig. The binary state round
+// trips of the vehicle and ragdoll settings (jolt_sim_vehicle_settings_part, jolt_sim_ragdoll_settings_bytes) and the
+// CharacterID test (jolt_sim_character_id_sequence) are compared before a scene runs.
+//
+// The process hooks (SimInstallHooks): zero-filled allocations (Jolt leaves members uninitialized that its states hold),
+// a Trace that prints, and with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) an AssertFailed that
+// prints and counts: the simulation parity fails a scene whose C++ side hit an assert.
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -62,10 +77,25 @@
 #include <Jolt/Physics/Constraints/GearConstraint.h>
 #include <Jolt/Physics/Constraints/RackAndPinionConstraint.h>
 #include <Jolt/Physics/Constraints/PulleyConstraint.h>
+#include <Jolt/Physics/Character/Character.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Ragdoll/Ragdoll.h>
+#include <Jolt/Skeleton/Skeleton.h>
+#include <Jolt/Skeleton/SkeletonPose.h>
+#include <Jolt/Physics/Vehicle/VehicleConstraint.h>
+#include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
+#include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
+#include <Jolt/Physics/Vehicle/TrackedVehicleController.h>
+#include <Jolt/Physics/Vehicle/MotorcycleController.h>
 
+#include <atomic>
+#include <cstdarg>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -75,11 +105,111 @@ using namespace JPH;
 // ObjectVsBroadPhaseLayerFilterImpl), mirrored by ZoltTests/Layers.zig
 #include <UnitTests/Layers.h>
 
-// Jolt's Array / String allocate through the Allocate / Free hooks and the shapes need the Factory (same guard as
-// BasicsReference.cpp, RegisterTypes() runs once for the whole parity binary)
+// The hooks of the parity process: Jolt's allocation functions, Trace and AssertFailed. SimInstallHooks runs before
+// main (sSimHooksInstalled below, so before any Jolt allocation of the process) and again in SimEnsureFactory.
+//
+// Allocation: Jolt's allocator (malloc / realloc / posix_memalign / free), but every allocation is zero-filled. Jolt
+// leaves members uninitialized that its states hold: Wheel's mContactPosition, mContactPointVelocity, mContactNormal,
+// mContactLongitudinal, mContactLateral and mAxlePlaneConstant until the first contact of the wheel (Wheel uses
+// JPH_OVERRIDE_NEW_DELETE), which VehicleConstraint::SaveState writes. With the zero-filled allocations they are 0 in
+// both C++ worlds, and Zolt zero-initializes them (a documented deviation, CharacterVehicleArchitecture.md "Settled in
+// the foundation review"), so a vehicle that starts in the air compares too. The other reference files call
+// RegisterDefaultAllocator(), which installs Jolt's allocator again: it is compatible (both free with free), and zero
+// filling changes nothing that is defined; SimEnsureFactory installs the hooks again before a world is created.
+//
+// Trace: printed to stderr (Jolt's default does nothing in a build without asserts, so the "Trace(...); abort();"
+// diagnostics of this file would abort silently).
+//
+// AssertFailed (a reference built with JPH_ENABLE_ASSERTS: `zig build parity -Dreference_asserts=true`): printed to
+// stderr and counted (jolt_sim_reference_assert_count), execution continues like Jolt's build without asserts. The
+// simulation parity fails a scene whose C++ side hit an assert.
+
+static void *SimZeroAllocate(size_t inSize)
+{
+	return calloc(1, inSize);
+}
+
+static void *SimZeroReallocate(void *inBlock, size_t inOldSize, size_t inNewSize)
+{
+	void *block = realloc(inBlock, inNewSize);
+	if (block != nullptr && inNewSize > inOldSize)
+		memset(static_cast<uint8 *>(block) + inOldSize, 0, inNewSize - inOldSize);
+	return block;
+}
+
+static void SimFree(void *inBlock)
+{
+	free(inBlock);
+}
+
+static void *SimZeroAlignedAllocate(size_t inSize, size_t inAlignment)
+{
+#if defined(JPH_PLATFORM_WINDOWS)
+	void *block = _aligned_malloc(inSize, inAlignment);
+#else
+	void *block = nullptr;
+	if (posix_memalign(&block, inAlignment, inSize) != 0)
+		block = nullptr;
+#endif
+	if (block != nullptr)
+		memset(block, 0, inSize);
+	return block;
+}
+
+static void SimAlignedFree(void *inBlock)
+{
+#if defined(JPH_PLATFORM_WINDOWS)
+	_aligned_free(inBlock);
+#else
+	free(inBlock);
+#endif
+}
+
+static void SimTrace(const char *inFMT, ...)
+{
+	va_list list;
+	va_start(list, inFMT);
+	char buffer[1024];
+	vsnprintf(buffer, sizeof(buffer), inFMT, list);
+	va_end(list);
+	fprintf(stderr, "Jolt: %s\n", buffer);
+	fflush(stderr);
+}
+
+#ifdef JPH_ENABLE_ASSERTS
+
+// The number of Jolt asserts that failed in this process (jolt_sim_reference_assert_count)
+static std::atomic<uint32> sSimAssertCount { 0 };
+
+static bool SimAssertFailed(const char *inExpression, const char *inMessage, const char *inFile, uint inLine)
+{
+	++sSimAssertCount;
+	fprintf(stderr, "Jolt assert failed: %s:%u: (%s) %s\n", inFile, inLine, inExpression, inMessage != nullptr? inMessage : "");
+	fflush(stderr);
+	return false; // No breakpoint: continue like Jolt's build without asserts, the driver fails the scene
+}
+
+#endif // JPH_ENABLE_ASSERTS
+
+static void SimInstallHooks()
+{
+	Allocate = SimZeroAllocate;
+	Reallocate = SimZeroReallocate;
+	Free = SimFree;
+	AlignedAllocate = SimZeroAlignedAllocate;
+	AlignedFree = SimAlignedFree;
+	Trace = SimTrace;
+	JPH_IF_ENABLE_ASSERTS(AssertFailed = SimAssertFailed;)
+}
+
+// Before main: before any Jolt allocation of the parity process
+[[maybe_unused]] static const bool sSimHooksInstalled = (SimInstallHooks(), true);
+
+// The hooks (another reference file may have installed Jolt's allocator since) and the Factory that the shapes need
+// (same guard as BasicsReference.cpp, RegisterTypes() runs once for the whole parity binary)
 static void SimEnsureFactory()
 {
-	RegisterDefaultAllocator();
+	SimInstallHooks();
 	if (Factory::sInstance == nullptr)
 	{
 		Factory::sInstance = new Factory();
@@ -218,6 +348,239 @@ struct SimOp
 	Real				mR[3];
 };
 
+// Phase 7 (SimScenes.zig "Characters, ragdolls and vehicles"): the descriptions of the characters, ragdolls and vehicles
+
+// Must match SimCharacterBase in SimScenes.zig: the CharacterBaseSettings members
+struct SimCharacterBase
+{
+	float				mUp[3];
+	float				mSupportingVolume[4];						// Normal xyz, constant
+	float				mMaxSlopeAngle;
+	uint32				mEnhancedInternalEdgeRemoval;
+	uint32				mShape;										// Shape index, cInvalidHandle: none
+};
+
+// Must match SimCharacter in SimScenes.zig
+struct SimCharacter
+{
+	SimCharacterBase	mBase;
+	uint32				mLayer;
+	float				mMass;
+	float				mFriction;
+	float				mGravityFactor;
+	uint32				mAllowedDOFs;
+	Real				mPosition[3];
+	float				mRotation[4];
+	uint64				mUserData;
+};
+
+// Must match SimCharacterVirtual in SimScenes.zig
+struct SimCharacterVirtual
+{
+	SimCharacterBase	mBase;
+	uint32				mID;
+	float				mMass;
+	float				mMaxStrength;
+	float				mShapeOffset[3];
+	uint32				mBackFaceMode;
+	float				mPredictiveContactDistance;
+	uint32				mMaxCollisionIterations;
+	uint32				mMaxConstraintIterations;
+	float				mMinTimeRemaining;
+	float				mCollisionTolerance;
+	float				mCharacterPadding;
+	uint32				mMaxNumHits;
+	float				mHitReductionCosMaxAngle;
+	float				mPenetrationRecoverySpeed;
+	uint32				mInnerBodyShape;							// Shape index, cInvalidHandle: no inner body
+	uint32				mInnerBodyIDOverride;
+	uint32				mInnerBodyLayer;
+	Real				mPosition[3];
+	float				mRotation[4];
+	uint64				mUserData;
+	uint32				mListener;									// CharacterListenerMode of SimScenes.zig
+	uint32				mCollisionGroup;							// CharacterVsCharacterCollisionSimple index, cInvalidHandle: none
+};
+
+// Must match SimRagdoll in SimScenes.zig
+struct SimRagdoll
+{
+	uint32				mFirstJoint;
+	uint32				mNumJoints;
+	uint32				mFirstAdditional;
+	uint32				mNumAdditional;
+	uint32				mStabilize;
+	uint32				mCalculateConstraintPriorities;
+	uint32				mBasePriority;
+	uint32				mDisableParentChildCollisions;
+	uint32				mPose;
+	float				mMinSeparationDistance;
+	uint32				mCollisionGroup;
+	uint64				mUserData;
+};
+
+// Must match SimRagdollJoint in SimScenes.zig
+struct SimRagdollJoint
+{
+	int32				mParent;
+	uint32				mBody;
+	uint32				mToParent;
+};
+
+// Must match SimRagdollAdditionalConstraint in SimScenes.zig
+struct SimRagdollAdditionalConstraint
+{
+	int32				mBody1;
+	int32				mBody2;
+	uint32				mConstraint;
+};
+
+// Must match SimRagdollPose in SimScenes.zig
+struct SimRagdollPose
+{
+	Real				mRootOffset[3];
+	uint32				mData;
+	uint32				mCount;
+};
+
+// Must match SimVehicleEngine in SimScenes.zig
+struct SimVehicleEngine
+{
+	float				mMaxTorque;
+	float				mMinRPM;
+	float				mMaxRPM;
+	uint32				mTorquePoints;								// Offset in mFloats, cInvalidHandle: the constructor's curve
+	uint32				mNumTorquePoints;
+	float				mInertia;
+	float				mAngularDamping;
+};
+
+// Must match SimVehicleTransmission in SimScenes.zig
+struct SimVehicleTransmission
+{
+	uint32				mMode;
+	uint32				mGearRatios;								// Offset in mFloats, cInvalidHandle: the constructor's ratios
+	uint32				mNumGearRatios;
+	uint32				mReverseGearRatios;
+	uint32				mNumReverseGearRatios;
+	float				mSwitchTime;
+	float				mClutchReleaseTime;
+	float				mSwitchLatency;
+	float				mShiftUpRPM;
+	float				mShiftDownRPM;
+	float				mClutchStrength;
+};
+
+// Must match SimVehicleTrack in SimScenes.zig
+struct SimVehicleTrack
+{
+	uint32				mDrivenWheel;
+	uint32				mWheels;									// Offset in mUints
+	uint32				mNumWheels;
+	float				mInertia;
+	float				mAngularDamping;
+	float				mMaxBrakeTorque;
+	float				mDifferentialRatio;
+};
+
+// Must match SimVehicleDifferential in SimScenes.zig
+struct SimVehicleDifferential
+{
+	int32				mLeftWheel;
+	int32				mRightWheel;
+	float				mDifferentialRatio;
+	float				mLeftRightSplit;
+	float				mLimitedSlipRatio;
+	float				mEngineTorqueRatio;
+};
+
+// Must match SimVehicleAntiRollBar in SimScenes.zig
+struct SimVehicleAntiRollBar
+{
+	int32				mLeftWheel;
+	int32				mRightWheel;
+	float				mStiffness;
+};
+
+// Must match SimVehicleWheel in SimScenes.zig
+struct SimVehicleWheel
+{
+	uint32				mKind;										// VehicleWheelKind: 0 WV, 1 TV
+	float				mPosition[3];
+	float				mSuspensionForcePoint[3];
+	float				mSuspensionDirection[3];
+	float				mSteeringAxis[3];
+	float				mWheelUp[3];
+	float				mWheelForward[3];
+	float				mSuspensionMinLength;
+	float				mSuspensionMaxLength;
+	float				mSuspensionPreloadLength;
+	uint32				mSuspensionSpringMode;
+	float				mSuspensionFrequency;
+	float				mSuspensionDamping;
+	float				mRadius;
+	float				mWidth;
+	uint32				mEnableSuspensionForcePoint;
+	float				mInertia;
+	float				mAngularDamping;
+	float				mMaxSteerAngle;
+	uint32				mLongitudinalFriction;						// Offset in mFloats, cInvalidHandle: the constructor's curve
+	uint32				mNumLongitudinalFriction;
+	uint32				mLateralFriction;
+	uint32				mNumLateralFriction;
+	float				mMaxBrakeTorque;
+	float				mMaxHandBrakeTorque;
+	float				mLongitudinalFrictionTV;
+	float				mLateralFrictionTV;
+};
+
+// Must match SimVehicleTester in SimScenes.zig
+struct SimVehicleTester
+{
+	uint32				mKind;										// VehicleTesterKind: 0 ray, 1 cast sphere, 2 cast cylinder
+	uint32				mObjectLayer;
+	float				mUp[3];
+	float				mMaxSlopeAngle;
+	float				mRadius;
+	float				mConvexRadiusFraction;
+};
+
+// Must match SimVehicle in SimScenes.zig
+struct SimVehicle
+{
+	uint32				mBody;
+	uint32				mEnabled;
+	uint32				mConstraintPriority;
+	uint32				mNumVelocityStepsOverride;
+	uint32				mNumPositionStepsOverride;
+	float				mDrawConstraintSize;
+	uint64				mUserData;
+	float				mUp[3];
+	float				mForward[3];
+	float				mMaxPitchRollAngle;
+	uint32				mFirstWheel;
+	uint32				mNumWheels;
+	uint32				mFirstAntiRollBar;
+	uint32				mNumAntiRollBars;
+	uint32				mController;								// VehicleControllerKind: 0 wheeled, 1 tracked, 2 motorcycle
+	SimVehicleEngine	mEngine;
+	SimVehicleTransmission mTransmission;
+	uint32				mFirstDifferential;
+	uint32				mNumDifferentials;
+	float				mDifferentialLimitedSlipRatio;
+	SimVehicleTrack		mTracks[2];
+	float				mMaxLeanAngle;
+	float				mLeanSpringConstant;
+	float				mLeanSpringDamping;
+	float				mLeanSpringIntegrationCoefficient;
+	float				mLeanSpringIntegrationCoefficientDecay;
+	float				mLeanSmoothingFactor;
+	SimVehicleTester	mTester;
+	uint32				mCallbacks;									// VehicleCallbacks bits
+	uint32				mCombineFriction;							// VehicleCombineFriction
+	uint32				mTireMaxImpulse;							// VehicleTireMaxImpulse
+};
+
 // Must match SimSceneDesc in SimScenes.zig
 struct SimSceneDesc
 {
@@ -246,6 +609,29 @@ struct SimSceneDesc
 	uint32						mSimShapeFilterMode;
 	uint32						mTempAllocatorSize;
 	uint32						mSimCollideMode;
+	// Phase 7
+	const SimCharacter *		mCharacters;
+	uint32						mNumCharacters;
+	const SimCharacterVirtual *	mCharacterVirtuals;
+	uint32						mNumCharacterVirtuals;
+	const SimRagdoll *			mRagdolls;
+	uint32						mNumRagdolls;
+	const SimRagdollJoint *		mRagdollJoints;
+	uint32						mNumRagdollJoints;
+	const SimRagdollAdditionalConstraint *mRagdollAdditionalConstraints;
+	uint32						mNumRagdollAdditionalConstraints;
+	const SimRagdollPose *		mRagdollPoses;
+	uint32						mNumRagdollPoses;
+	const SimVehicle *			mVehicles;
+	uint32						mNumVehicles;
+	const SimVehicleWheel *		mVehicleWheels;
+	uint32						mNumVehicleWheels;
+	const SimVehicleDifferential *mVehicleDifferentials;
+	uint32						mNumVehicleDifferentials;
+	const SimVehicleAntiRollBar *mVehicleAntiRollBars;
+	uint32						mNumVehicleAntiRollBars;
+	const uint32 *				mUints;
+	uint32						mNumUints;
 };
 
 // Must match ContactFlags in SimScenes.zig (bits in the upper 32 bits of the user data of a body)
@@ -414,6 +800,22 @@ enum class ESimRecordKind : uint32
 	ContactAdded = 4,
 	ContactPersisted = 5,
 	ContactRemoved = 6,
+	// Phase 7: the CharacterContactListener (compared in call order)
+	CharacterContactValidate = 7,
+	CharacterContactAdded = 8,
+	CharacterContactPersisted = 9,
+	CharacterContactRemoved = 10,
+	CharacterVsCharacterContactValidate = 11,
+	CharacterVsCharacterContactAdded = 12,
+	CharacterVsCharacterContactPersisted = 13,
+	CharacterVsCharacterContactRemoved = 14,
+	CharacterContactSolve = 15,
+	CharacterVsCharacterContactSolve = 16,
+	CharacterAdjustBodyVelocity = 17,
+	// Phase 7: the step callbacks of the vehicles (compared sorted)
+	VehiclePreStep = 18,
+	VehiclePostCollide = 19,
+	VehiclePostStep = 20,
 };
 
 // Must match OpKind in SimScenes.zig
@@ -550,7 +952,223 @@ enum class ESimOp : uint32
 	// ConstraintOpRange.gear_rack_and_pinion
 	GearSetConstraints = 360,
 	RackAndPinionSetConstraints = 370,
+
+	// Phase 7 operations, in the reserved ranges of Phase7OpRange (SimScenes.zig)
+	// Phase7OpRange.character
+	CreateCharacter = 400,
+	CharacterAddToPhysicsSystem = 401,
+	CharacterRemoveFromPhysicsSystem = 402,
+	CharacterActivate = 403,
+	CharacterPostSimulation = 404,
+	CharacterSetLinearAndAngularVelocity = 405,
+	CharacterSetLinearVelocity = 406,
+	CharacterAddLinearVelocity = 407,
+	CharacterAddImpulse = 408,
+	CharacterSetPositionAndRotation = 409,
+	CharacterSetPosition = 410,
+	CharacterSetRotation = 411,
+	CharacterSetLayer = 412,
+	CharacterSetShape = 413,
+	CharacterSetMaxSlopeAngle = 414,
+	CharacterSetUp = 415,
+	CharacterSetSupportingVolume = 416,
+	CharacterDestroy = 417,
+	CharacterSettingsHash = 418,
+	CharacterCheckCollision = 419,
+	CharacterExpectGroundState = 420,
+	CharacterBodyHash = 421,
+	CharacterExpectBodyState = 422,
+	CharacterExpectValue = 423,
+	// Phase7OpRange.character_virtual
+	CreateCharacterVirtual = 430,
+	CVDestroy = 431,
+	CVSetLinearVelocity = 432,
+	CVSetPosition = 433,
+	CVSetRotation = 434,
+	CVSetUp = 435,
+	CVSetMaxSlopeAngle = 436,
+	CVSetSupportingVolume = 437,
+	CVSetMass = 438,
+	CVSetMaxStrength = 439,
+	CVSetPenetrationRecoverySpeed = 440,
+	CVSetEnhancedInternalEdgeRemoval = 441,
+	CVSetMaxNumHits = 442,
+	CVSetHitReductionCosMaxAngle = 443,
+	CVSetShapeOffset = 444,
+	CVSetUserData = 445,
+	CVSetListener = 446,
+	CVSetCharacterVsCharacterCollision = 447,
+	CVAddToCollisionGroup = 448,
+	CVRemoveFromCollisionGroup = 449,
+	CVUpdate = 450,
+	CVExtendedUpdate = 451,
+	CVStickToFloor = 452,
+	CVWalkStairs = 453,
+	CVCanWalkStairs = 454,
+	CVRefreshContacts = 455,
+	CVUpdateGroundVelocity = 456,
+	CVSetShape = 457,
+	CVSetInnerBodyShape = 458,
+	CVCancelVelocityTowardsSteepSlopes = 459,
+	CVStartTrackingContactChanges = 460,
+	CVFinishTrackingContactChanges = 461,
+	CVCheckCollision = 462,
+	CVSettingsHash = 463,
+	CVHasCollidedWithBody = 464,
+	CVHasCollidedWithCharacter = 465,
+	CVExpectGroundState = 466,
+	CVSaveRestoreState = 467,
+	CVExpectValue = 468,
+	CVSetStepVelocity = 469,
+	CVPerfUpdate = 470,
+	// Phase7OpRange.ragdoll
+	CreateRagdoll = 490,
+	RagdollAddToPhysicsSystem = 491,
+	RagdollRemoveFromPhysicsSystem = 492,
+	RagdollActivate = 493,
+	RagdollIsActive = 494,
+	RagdollSetGroupID = 495,
+	RagdollSetPose = 496,
+	RagdollSetPoseMatrices = 497,
+	RagdollResetWarmStart = 498,
+	RagdollDriveToPoseUsingKinematics = 499,
+	RagdollDriveToPoseUsingKinematicsMatrices = 500,
+	RagdollDriveToPoseUsingMotors = 501,
+	RagdollDriveToPoseUsingMotorsVelocity = 502,
+	RagdollSetLinearAndAngularVelocity = 503,
+	RagdollSetLinearVelocity = 504,
+	RagdollAddLinearVelocity = 505,
+	RagdollAddImpulse = 506,
+	RagdollDestroy = 507,
+	RagdollSettingsHash = 508,
+	RagdollGetPoseHash = 509,
+	RagdollExpectActive = 510,
+	// Phase7OpRange.vehicle
+	CreateVehicle = 520,
+	VehicleRemove = 521,
+	VehicleAdd = 522,
+	VehicleSetMaxPitchRollAngle = 523,
+	VehicleOverrideGravity = 524,
+	VehicleResetGravityOverride = 525,
+	VehicleSetNumStepsBetweenCollisionTestActive = 526,
+	VehicleSetNumStepsBetweenCollisionTestInactive = 527,
+	VehicleSetCollisionTester = 528,
+	VehicleTesterSetObjectLayer = 529,
+	VehicleTesterSetFilters = 530,
+	VehicleSetCombineFriction = 531,
+	VehicleSetCallbacks = 532,
+	VehicleWheelSetAngularVelocity = 533,
+	VehicleWheelSetRotationAngle = 534,
+	VehicleWheelSetSteerAngle = 535,
+	VehicleSetAntiRollBar = 536,
+	VehicleSettingsHash = 537,
+	VehicleControllerSettingsHash = 538,
+	VehicleExpectWheelContacts = 539,
+	VehicleEngineSetCurrentRPM = 540,
+	VehicleEngineSetSettings = 541,
+	VehicleEngineSetTorqueCurve = 542,
+	VehicleTransmissionSet = 543,
+	VehicleTransmissionSetSettings = 544,
+	VehicleTransmissionSetGearRatios = 545,
+	WheeledSetDriverInput = 546,
+	WheeledSetForwardInput = 547,
+	WheeledSetRightInput = 548,
+	WheeledSetBrakeInput = 549,
+	WheeledSetHandBrakeInput = 550,
+	WheeledSetDifferential = 551,
+	WheeledSetDifferentialLimitedSlipRatio = 552,
+	WheeledSetTireMaxImpulseCallback = 553,
+	VehicleSetEnabled = 554,
+	VehicleResetWarmStart = 555,
+	VehicleSetConstraintPriority = 556,
+	VehicleSetStepsOverride = 557,
+	VehicleSetUserData = 558,
+	VehicleExpectConstraintState = 559,
+	VehicleWheelWVApplyTorque = 560,
+	VehicleEngineApplyTorque = 561,
+	VehicleEngineApplyDamping = 562,
+	WheeledSetDifferentials = 563,
+	// Phase7OpRange.vehicle_tracked
+	TrackedSetDriverInput = 570,
+	TrackedSetForwardInput = 571,
+	TrackedSetLeftRatio = 572,
+	TrackedSetRightRatio = 573,
+	TrackedSetBrakeInput = 574,
+	TrackedSetTrack = 575,
+	// Phase7OpRange.vehicle_motorcycle
+	MotorcycleEnableLeanController = 580,
+	MotorcycleEnableLeanSteeringLimit = 581,
+	MotorcycleSetLeanSpringConstant = 582,
+	MotorcycleSetLeanSpringDamping = 583,
+	MotorcycleSetLeanSpringIntegrationCoefficient = 584,
+	MotorcycleSetLeanSpringIntegrationCoefficientDecay = 585,
+	MotorcycleSetLeanSmoothingFactor = 586,
 };
+
+// Phase7OpRange of SimScenes.zig: the Phase 7 operations are 400 .. 599 (400 character, 430 character virtual, 490
+// ragdoll, 520 vehicle core, 570 tracked, 580 motorcycle, 590 spare)
+static constexpr uint32 cFirstPhase7Op = 400;
+static constexpr uint32 cFirstTrackedOp = 570;
+static constexpr uint32 cFirstMotorcycleOp = 580;
+static constexpr uint32 cFirstSparePhase7Op = 590;
+static constexpr uint32 cEndPhase7Op = 600;
+
+// Must match ObjectField in SimScenes.zig: the fields of the object state
+enum class ESimObjectField : uint16
+{
+	CharacterSaveState = 1,
+	CharacterProperties = 2,
+	CharacterBase = 3,
+	CharacterBody = 4,
+	CharacterTransformedShape = 5,
+	CVSaveState = 10,
+	CVProperties = 11,
+	CVBase = 12,
+	CVTransforms = 13,
+	CVTransformedShape = 14,
+	CVNumActiveContacts = 15,
+	CVActiveContact = 16,
+	RagdollProperties = 20,
+	RagdollBody = 21,
+	RagdollRootTransform = 22,
+	RagdollPoseRootOffset = 23,
+	RagdollPoseJoint = 24,
+	RagdollBounds = 25,
+	RagdollConstraint = 26,
+	VehicleProperties = 30,
+	VehicleWheel = 31,
+	VehicleWheelContact = 32,
+	VehicleWheelTransform = 33,
+	VehicleWheelWV = 34,
+	VehicleWheelTV = 35,
+	VehicleAntiRollBar = 36,
+	VehicleEngine = 37,
+	VehicleTransmission = 38,
+	VehicleWheeled = 39,
+	VehicleDifferential = 40,
+	VehicleTracked = 41,
+	VehicleTrack = 42,
+	VehicleMotorcycle = 43,
+};
+
+// Must match the bits of CharacterFlags in SimScenes.zig (in the upper 32 bits of a user data value)
+namespace SimCharacterFlags
+{
+	static constexpr uint32 cReject = 1 << 16;
+	static constexpr uint32 cCannotPush = 1 << 17;
+	static constexpr uint32 cNoImpulses = 1 << 18;
+	static constexpr uint32 cConveyor = 1 << 19;
+	static constexpr uint32 cSlowSolve = 1 << 20;
+}
+
+// Must match VehicleCallbacks of SimScenes.zig
+namespace SimVehicleCallbacks
+{
+	static constexpr uint32 cPreStep = 1 << 0;
+	static constexpr uint32 cPostCollide = 1 << 1;
+	static constexpr uint32 cPostStep = 1 << 2;
+	static constexpr uint32 cSteer = 1 << 3;
+}
 
 // ConstraintOpRange of SimScenes.zig: the constraint operations are 200 .. 399 (20 numbers per range)
 static constexpr uint32 cFirstConstraintOp = 200;
@@ -923,13 +1541,14 @@ static void SimFromPhysicsSettings(const PhysicsSettings &inS, SimPhysicsSetting
 
 class SimWorld;
 
-// Records the callbacks of the listeners (callbacks come from the worker threads)
+// Records the callbacks of the listeners (callbacks come from the worker threads). The locks are std::lock_guard:
+// Jolt's UniqueLock (PhysicsLock.h) takes a lock context in a build with JPH_ENABLE_ASSERTS.
 class SimRecorder
 {
 public:
 	void						Add(const SimRecord &inRecord)
 	{
-		UniqueLock lock(mMutex);
+		std::lock_guard<Mutex> lock(mMutex);
 		mRecords.push_back(inRecord);
 	}
 
@@ -1094,6 +1713,753 @@ public:
 	uint32						mNumCalls = 0;
 };
 
+// -------------------------------------------------------------------------------------------------------------------
+// Phase 7 helpers: characters, ragdolls and vehicles
+
+// FNV-1a over values (hashBytes of SimScenes.zig, the hash results of the Phase 7 operations)
+class SimHasher
+{
+public:
+	void						Bytes(const void *inData, size_t inSize)	{ mHash = SimHashBytes(mHash, inData, inSize); }
+	template <class T> void		Value(const T &inValue)						{ Bytes(&inValue, sizeof(T)); }
+	void						U32(uint32 inValue)							{ Value(inValue); }
+	void						F32(float inValue)							{ Value(inValue); }
+	void						Bool(bool inValue)							{ U32(inValue? 1u : 0u); }
+	void						Vec3(Vec3Arg inV)							{ float v[3] = { inV.GetX(), inV.GetY(), inV.GetZ() }; Value(v); }
+	void						RVec3(RVec3Arg inV)							{ Real v[3] = { inV.GetX(), inV.GetY(), inV.GetZ() }; Value(v); }
+	void						Quat(QuatArg inQ)							{ float v[4] = { inQ.GetX(), inQ.GetY(), inQ.GetZ(), inQ.GetW() }; Value(v); }
+	void						Plane(const JPH::Plane &inPlane)			{ Vec3(inPlane.GetNormal()); F32(inPlane.GetConstant()); }
+	void						Vec4(Vec4Arg inV)							{ float v[4] = { inV.GetX(), inV.GetY(), inV.GetZ(), inV.GetW() }; Value(v); }
+	void						RMat44(RMat44Arg inM)						{ for (int c = 0; c < 3; ++c) Vec4(inM.GetColumn4(c)); RVec3(inM.GetTranslation()); }
+
+	uint32						mHash = 2166136261u;
+};
+
+// The identity of a material in the records and the object state: the hash of its debug name (materialHash of SimScenes.zig)
+static uint32 SimMaterialHash(const PhysicsMaterial *inMaterial)
+{
+	const char *name = inMaterial != nullptr? inMaterial->GetDebugName() : "null";
+	return SimHashBytes(2166136261u, name, strlen(name));
+}
+
+// Writes the object state (ObjectStateWriter of SimScenes.zig): fields [field u16][handle u16][item u16][size u16][bytes]
+class SimObjectStateWriter
+{
+public:
+	void						Begin(ESimObjectField inField, uint32 inHandle, uint32 inItem)
+	{
+		mStart = mBytes.size();
+		uint16 header[4] = { uint16(inField), uint16(inHandle), uint16(inItem), 0 };
+		mBytes.append(reinterpret_cast<const char *>(header), sizeof(header));
+	}
+
+	void						End()
+	{
+		uint16 size = uint16(mBytes.size() - mStart - 4 * sizeof(uint16));
+		memcpy(&mBytes[mStart + 3 * sizeof(uint16)], &size, sizeof(size));
+	}
+
+	void						Raw(const void *inData, size_t inSize)		{ mBytes.append(static_cast<const char *>(inData), inSize); }
+	template <class T> void		Value(const T &inValue)						{ Raw(&inValue, sizeof(T)); }
+	void						U32(uint32 inValue)							{ Value(inValue); }
+	void						I32(int32 inValue)							{ Value(inValue); }
+	void						U64(uint64 inValue)							{ Value(inValue); }
+	void						F32(float inValue)							{ Value(inValue); }
+	void						Bool(bool inValue)							{ U32(inValue? 1u : 0u); }
+	void						Vec3(Vec3Arg inV)							{ float v[3] = { inV.GetX(), inV.GetY(), inV.GetZ() }; Value(v); }
+	void						RVec3(RVec3Arg inV)							{ Real v[3] = { inV.GetX(), inV.GetY(), inV.GetZ() }; Value(v); }
+	void						Quat(QuatArg inQ)							{ float v[4] = { inQ.GetX(), inQ.GetY(), inQ.GetZ(), inQ.GetW() }; Value(v); }
+	void						Plane(const JPH::Plane &inPlane)			{ Vec3(inPlane.GetNormal()); F32(inPlane.GetConstant()); }
+	void						Vec4(Vec4Arg inV)							{ float v[4] = { inV.GetX(), inV.GetY(), inV.GetZ(), inV.GetW() }; Value(v); }
+	void						Mat44(Mat44Arg inM)							{ for (int c = 0; c < 4; ++c) Vec4(inM.GetColumn4(c)); }
+	void						RMat44(RMat44Arg inM)						{ for (int c = 0; c < 3; ++c) Vec4(inM.GetColumn4(c)); RVec3(inM.GetTranslation()); }
+
+	std::string					mBytes;
+
+private:
+	size_t						mStart = 0;
+};
+
+// hashCharacterContact of SimScenes.zig: the members of a CharacterContact that a contact record does not hold directly
+static uint32 SimHashCharacterContact(const CharacterContact &inContact)
+{
+	SimHasher h;
+	h.RVec3(inContact.mPosition);
+	h.Vec3(inContact.mLinearVelocity);
+	h.Vec3(inContact.mSurfaceNormal);
+	h.Value(inContact.mUserData);
+	h.U32(SimMaterialHash(inContact.mMaterial));
+	return h.mHash;
+}
+
+// The flags of a contact record (RecordKind of SimScenes.zig)
+static uint32 SimCharacterContactFlags(const CharacterContact &inContact)
+{
+	return uint32(inContact.mMotionTypeB)
+		| ((inContact.mIsSensorB? 1u : 0u) << 8)
+		| ((inContact.mHadCollision? 1u : 0u) << 9)
+		| ((inContact.mWasDiscarded? 1u : 0u) << 10)
+		| ((inContact.mCanPushCharacter? 1u : 0u) << 11)
+		| ((inContact.mIsBackFacingContact? 1u : 0u) << 12)
+		| ((inContact.mCharacterB != nullptr? 1u : 0u) << 13);
+}
+
+static uint32 SimCharacterContactSettingsBits(const CharacterContactSettings &inSettings)
+{
+	return (inSettings.mCanPushCharacter? 1u : 0u) | ((inSettings.mCanReceiveImpulses? 1u : 0u) << 1);
+}
+
+// The CharacterContactListener of the character virtuals (CharacterListenerMode record / modify of SimScenes.zig): records
+// every callback in call order, in modify mode acts on the CharacterFlags
+class SimCharacterContactListener final : public CharacterContactListener
+{
+public:
+	virtual void				OnAdjustBodyVelocity(const CharacterVirtual *inCharacter, const Body &inBody2, Vec3 &ioLinearVelocity, Vec3 &ioAngularVelocity) override
+	{
+		SimRecord r = { };
+		r.mKind = uint32(ESimRecordKind::CharacterAdjustBodyVelocity);
+		r.mIDs[0] = inCharacter->GetID().GetValue();
+		r.mIDs[1] = inBody2.GetID().GetIndexAndSequenceNumber();
+		SetVec3(r.mData, ioLinearVelocity);
+		SetVec3(r.mData + 3, ioAngularVelocity);
+		if (mModify && (Flags(inBody2.GetUserData()) & SimCharacterFlags::cConveyor) != 0)
+		{
+			ioLinearVelocity += Vec3(1.5f, 0.0f, 0.0f);
+			ioAngularVelocity += Vec3(0.0f, 0.5f, 0.0f);
+		}
+		SimHasher h;
+		h.Vec3(ioLinearVelocity);
+		h.Vec3(ioAngularVelocity);
+		r.mData[6] = h.mHash;
+		mRecorder->Add(r);
+	}
+
+	virtual bool				OnContactValidate(const CharacterVirtual *inCharacter, const CharacterContact &inContact) override
+	{
+		return Validate(ESimRecordKind::CharacterContactValidate, inCharacter, inContact);
+	}
+
+	virtual void				OnContactAdded(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+	{
+		Settings(ESimRecordKind::CharacterContactAdded, inCharacter, inContact, ioSettings);
+	}
+
+	virtual void				OnContactPersisted(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+	{
+		Settings(ESimRecordKind::CharacterContactPersisted, inCharacter, inContact, ioSettings);
+	}
+
+	virtual void				OnContactRemoved(const CharacterVirtual *inCharacter, const BodyID &inBodyID2, const SubShapeID &inSubShapeID2) override
+	{
+		Removed(ESimRecordKind::CharacterContactRemoved, inCharacter, inBodyID2, CharacterID(), inSubShapeID2);
+	}
+
+	virtual bool				OnCharacterContactValidate(const CharacterVirtual *inCharacter, const CharacterContact &inContact) override
+	{
+		return Validate(ESimRecordKind::CharacterVsCharacterContactValidate, inCharacter, inContact);
+	}
+
+	virtual void				OnCharacterContactAdded(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+	{
+		Settings(ESimRecordKind::CharacterVsCharacterContactAdded, inCharacter, inContact, ioSettings);
+	}
+
+	virtual void				OnCharacterContactPersisted(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+	{
+		Settings(ESimRecordKind::CharacterVsCharacterContactPersisted, inCharacter, inContact, ioSettings);
+	}
+
+	virtual void				OnCharacterContactRemoved(const CharacterVirtual *inCharacter, const CharacterID &inOtherCharacterID, const SubShapeID &inSubShapeID2) override
+	{
+		Removed(ESimRecordKind::CharacterVsCharacterContactRemoved, inCharacter, BodyID(), inOtherCharacterID, inSubShapeID2);
+	}
+
+	virtual void				OnContactSolve(const CharacterVirtual *inCharacter, const BodyID &inBodyID2, const SubShapeID &inSubShapeID2, RVec3Arg inContactPosition, Vec3Arg inContactNormal, Vec3Arg inContactVelocity, const PhysicsMaterial *inContactMaterial, Vec3Arg inCharacterVelocity, Vec3 &ioNewCharacterVelocity) override
+	{
+		Solve(ESimRecordKind::CharacterContactSolve, inCharacter, inBodyID2, CharacterID(), inSubShapeID2, inContactPosition, inContactNormal, inContactVelocity, inContactMaterial, inCharacterVelocity, ioNewCharacterVelocity);
+	}
+
+	virtual void				OnCharacterContactSolve(const CharacterVirtual *inCharacter, const CharacterVirtual *inOtherCharacter, const SubShapeID &inSubShapeID2, RVec3Arg inContactPosition, Vec3Arg inContactNormal, Vec3Arg inContactVelocity, const PhysicsMaterial *inContactMaterial, Vec3Arg inCharacterVelocity, Vec3 &ioNewCharacterVelocity) override
+	{
+		Solve(ESimRecordKind::CharacterVsCharacterContactSolve, inCharacter, BodyID(), inOtherCharacter->GetID(), inSubShapeID2, inContactPosition, inContactNormal, inContactVelocity, inContactMaterial, inCharacterVelocity, ioNewCharacterVelocity);
+	}
+
+	SimRecorder *				mRecorder = nullptr;
+	bool						mModify = false;
+
+private:
+	static uint32				Flags(uint64 inUserData)					{ return uint32(inUserData >> 32); }
+
+	static void					SetVec3(uint32 *outData, Vec3Arg inV)
+	{
+		outData[0] = SimFloatBits(inV.GetX());
+		outData[1] = SimFloatBits(inV.GetY());
+		outData[2] = SimFloatBits(inV.GetZ());
+	}
+
+	// A contact record (RecordKind of SimScenes.zig)
+	static SimRecord			ContactRecord(ESimRecordKind inKind, const CharacterVirtual *inCharacter, const CharacterContact &inContact, uint32 inSettingsIn, uint32 inResult)
+	{
+		SimRecord r = { };
+		r.mKind = uint32(inKind);
+		r.mIDs[0] = inCharacter->GetID().GetValue();
+		r.mIDs[1] = inContact.mBodyB.GetIndexAndSequenceNumber();
+		r.mIDs[2] = inContact.mCharacterIDB.GetValue();
+		r.mIDs[3] = inContact.mSubShapeIDB.GetValue();
+		SetVec3(r.mData, inContact.mContactNormal);
+		r.mData[3] = SimFloatBits(inContact.mDistance);
+		r.mData[4] = SimFloatBits(inContact.mFraction);
+		r.mData[5] = SimCharacterContactFlags(inContact) | (inSettingsIn << 16);
+		r.mData[6] = SimHashCharacterContact(inContact);
+		r.mData[7] = inResult;
+		return r;
+	}
+
+	bool						Validate(ESimRecordKind inKind, const CharacterVirtual *inCharacter, const CharacterContact &inContact)
+	{
+		bool result = !(mModify && (Flags(inContact.mUserData) & SimCharacterFlags::cReject) != 0);
+		mRecorder->Add(ContactRecord(inKind, inCharacter, inContact, 0, result? 1 : 0));
+		return result;
+	}
+
+	void						Settings(ESimRecordKind inKind, const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings)
+	{
+		uint32 settings_in = SimCharacterContactSettingsBits(ioSettings);
+		if (mModify)
+		{
+			uint32 flags = Flags(inContact.mUserData);
+			if (flags & SimCharacterFlags::cCannotPush)
+				ioSettings.mCanPushCharacter = false;
+			if (flags & SimCharacterFlags::cNoImpulses)
+				ioSettings.mCanReceiveImpulses = false;
+		}
+		mRecorder->Add(ContactRecord(inKind, inCharacter, inContact, settings_in, SimCharacterContactSettingsBits(ioSettings)));
+	}
+
+	void						Removed(ESimRecordKind inKind, const CharacterVirtual *inCharacter, const BodyID &inBodyID2, const CharacterID &inCharacterID2, const SubShapeID &inSubShapeID2)
+	{
+		SimRecord r = { };
+		r.mKind = uint32(inKind);
+		r.mIDs[0] = inCharacter->GetID().GetValue();
+		r.mIDs[1] = inBodyID2.GetIndexAndSequenceNumber();
+		r.mIDs[2] = inCharacterID2.GetValue();
+		r.mIDs[3] = inSubShapeID2.GetValue();
+		mRecorder->Add(r);
+	}
+
+	void						Solve(ESimRecordKind inKind, const CharacterVirtual *inCharacter, const BodyID &inBodyID2, const CharacterID &inCharacterID2, const SubShapeID &inSubShapeID2, RVec3Arg inContactPosition, Vec3Arg inContactNormal, Vec3Arg inContactVelocity, const PhysicsMaterial *inContactMaterial, Vec3Arg inCharacterVelocity, Vec3 &ioNewCharacterVelocity)
+	{
+		SimRecord r = { };
+		r.mKind = uint32(inKind);
+		r.mIDs[0] = inCharacter->GetID().GetValue();
+		r.mIDs[1] = inBodyID2.GetIndexAndSequenceNumber();
+		r.mIDs[2] = inCharacterID2.GetValue();
+		r.mIDs[3] = inSubShapeID2.GetValue();
+		SetVec3(r.mData, ioNewCharacterVelocity);
+		SetVec3(r.mData + 3, inCharacterVelocity);
+		SimHasher h;
+		h.RVec3(inContactPosition);
+		h.Vec3(inContactNormal);
+		h.Vec3(inContactVelocity);
+		h.U32(SimMaterialHash(inContactMaterial));
+		r.mData[6] = h.mHash;
+		if (mModify && (Flags(inCharacter->GetUserData()) & SimCharacterFlags::cSlowSolve) != 0)
+			ioNewCharacterVelocity *= 0.5f;
+		SimHasher h2;
+		h2.Vec3(ioNewCharacterVelocity);
+		r.mData[7] = h2.mHash;
+		mRecorder->Add(r);
+	}
+};
+
+// CharacterShapeFilter.no_spheres of SimScenes.zig: shape 2 must not be a sphere
+class SimNoSpheresShapeFilter final : public ShapeFilter
+{
+public:
+	virtual bool				ShouldCollide(const Shape *inShape2, const SubShapeID &inSubShapeIDOfShape2) const override
+	{
+		return inShape2->GetSubType() != EShapeSubType::Sphere;
+	}
+
+	virtual bool				ShouldCollide(const Shape *inShape1, const SubShapeID &inSubShapeIDOfShape1, const Shape *inShape2, const SubShapeID &inSubShapeIDOfShape2) const override
+	{
+		return inShape2->GetSubType() != EShapeSubType::Sphere;
+	}
+};
+
+// The collector of the CheckCollision operations: the hash of the hits in their order, with the ID of the character that
+// CharacterVsCharacterCollisionSimple passes through SetUserData
+class SimCheckCollisionCollector final : public CollideShapeCollector
+{
+public:
+	virtual void				SetUserData(uint64 inUserData) override		{ mOtherCharacter = reinterpret_cast<const CharacterVirtual *>(inUserData); }
+
+	virtual void				AddHit(const CollideShapeResult &inResult) override
+	{
+		mHash.Vec3(inResult.mContactPointOn1);
+		mHash.Vec3(inResult.mContactPointOn2);
+		mHash.Vec3(inResult.mPenetrationAxis);
+		mHash.F32(inResult.mPenetrationDepth);
+		mHash.U32(inResult.mSubShapeID1.GetValue());
+		mHash.U32(inResult.mSubShapeID2.GetValue());
+		mHash.U32(inResult.mBodyID2.GetIndexAndSequenceNumber());
+		mHash.U32(mOtherCharacter != nullptr? mOtherCharacter->GetID().GetValue() : CharacterID::cInvalidCharacterID);
+		++mNumHits;
+	}
+
+	uint32						Result()
+	{
+		mHash.U32(mNumHits);
+		return mHash.mHash;
+	}
+
+	SimHasher					mHash;
+	uint32						mNumHits = 0;
+	const CharacterVirtual *	mOtherCharacter = nullptr;
+};
+
+// The CharacterBaseSettings members of a description
+static void SimFillCharacterBaseSettings(const SimCharacterBase &inBase, const Array<RefConst<Shape>> &inShapes, CharacterBaseSettings &outSettings)
+{
+	outSettings.mUp = SimLoad3(inBase.mUp);
+	outSettings.mSupportingVolume = Plane(SimLoad3(inBase.mSupportingVolume), inBase.mSupportingVolume[3]);
+	outSettings.mMaxSlopeAngle = inBase.mMaxSlopeAngle;
+	outSettings.mEnhancedInternalEdgeRemoval = inBase.mEnhancedInternalEdgeRemoval != 0;
+	outSettings.mShape = inBase.mShape != cInvalidHandle? inShapes[inBase.mShape] : nullptr;
+}
+
+// A LinearCurve from (x, y) points in the float pool (the curve is replaced)
+static void SimLoadCurve(const SimSceneDesc &inDesc, uint32 inOffset, uint32 inNumPoints, LinearCurve &outCurve)
+{
+	outCurve.Clear();
+	for (uint32 p = 0; p < inNumPoints; ++p)
+		outCurve.AddPoint(inDesc.mFloats[inOffset + 2 * p], inDesc.mFloats[inOffset + 2 * p + 1]);
+}
+
+// An array of floats from the float pool
+static Array<float> SimLoadFloats(const SimSceneDesc &inDesc, uint32 inOffset, uint32 inCount)
+{
+	return Array<float>(inDesc.mFloats + inOffset, inDesc.mFloats + inOffset + inCount);
+}
+
+// VehicleEngineSettings of a description (the curve is replaced when the description has one)
+static void SimFillEngine(const SimSceneDesc &inDesc, const SimVehicleEngine &inEngine, VehicleEngineSettings &outEngine)
+{
+	outEngine.mMaxTorque = inEngine.mMaxTorque;
+	outEngine.mMinRPM = inEngine.mMinRPM;
+	outEngine.mMaxRPM = inEngine.mMaxRPM;
+	if (inEngine.mTorquePoints != cInvalidHandle)
+		SimLoadCurve(inDesc, inEngine.mTorquePoints, inEngine.mNumTorquePoints, outEngine.mNormalizedTorque);
+	outEngine.mInertia = inEngine.mInertia;
+	outEngine.mAngularDamping = inEngine.mAngularDamping;
+}
+
+// VehicleTransmissionSettings of a description (the ratios are replaced when the description has them)
+static void SimFillTransmission(const SimSceneDesc &inDesc, const SimVehicleTransmission &inTransmission, VehicleTransmissionSettings &outTransmission)
+{
+	outTransmission.mMode = ETransmissionMode(inTransmission.mMode);
+	if (inTransmission.mGearRatios != cInvalidHandle)
+		outTransmission.mGearRatios = SimLoadFloats(inDesc, inTransmission.mGearRatios, inTransmission.mNumGearRatios);
+	if (inTransmission.mReverseGearRatios != cInvalidHandle)
+		outTransmission.mReverseGearRatios = SimLoadFloats(inDesc, inTransmission.mReverseGearRatios, inTransmission.mNumReverseGearRatios);
+	outTransmission.mSwitchTime = inTransmission.mSwitchTime;
+	outTransmission.mClutchReleaseTime = inTransmission.mClutchReleaseTime;
+	outTransmission.mSwitchLatency = inTransmission.mSwitchLatency;
+	outTransmission.mShiftUpRPM = inTransmission.mShiftUpRPM;
+	outTransmission.mShiftDownRPM = inTransmission.mShiftDownRPM;
+	outTransmission.mClutchStrength = inTransmission.mClutchStrength;
+}
+
+// VehicleTrackSettings of a track description
+static void SimFillTrack(const SimSceneDesc &inDesc, const SimVehicleTrack &inTrack, VehicleTrackSettings &outTrack)
+{
+	outTrack.mDrivenWheel = inTrack.mDrivenWheel;
+	outTrack.mWheels.assign(inDesc.mUints + inTrack.mWheels, inDesc.mUints + inTrack.mWheels + inTrack.mNumWheels);
+	outTrack.mInertia = inTrack.mInertia;
+	outTrack.mAngularDamping = inTrack.mAngularDamping;
+	outTrack.mMaxBrakeTorque = inTrack.mMaxBrakeTorque;
+	outTrack.mDifferentialRatio = inTrack.mDifferentialRatio;
+}
+
+// VehicleDifferentialSettings of a differential description
+static void SimFillDifferential(const SimVehicleDifferential &inDifferential, VehicleDifferentialSettings &outDifferential)
+{
+	outDifferential.mLeftWheel = inDifferential.mLeftWheel;
+	outDifferential.mRightWheel = inDifferential.mRightWheel;
+	outDifferential.mDifferentialRatio = inDifferential.mDifferentialRatio;
+	outDifferential.mLeftRightSplit = inDifferential.mLeftRightSplit;
+	outDifferential.mLimitedSlipRatio = inDifferential.mLimitedSlipRatio;
+	outDifferential.mEngineTorqueRatio = inDifferential.mEngineTorqueRatio;
+}
+
+// VehicleAntiRollBar of an anti-roll bar description
+static void SimFillAntiRollBar(const SimVehicleAntiRollBar &inBar, VehicleAntiRollBar &outBar)
+{
+	outBar.mLeftWheel = inBar.mLeftWheel;
+	outBar.mRightWheel = inBar.mRightWheel;
+	outBar.mStiffness = inBar.mStiffness;
+}
+
+// The wheeled controller members of a description (WheeledVehicleControllerSettings, also the base of the motorcycle)
+static void SimFillWheeled(const SimSceneDesc &inDesc, const SimVehicle &inVehicle, WheeledVehicleControllerSettings &outSettings)
+{
+	SimFillEngine(inDesc, inVehicle.mEngine, outSettings.mEngine);
+	SimFillTransmission(inDesc, inVehicle.mTransmission, outSettings.mTransmission);
+	for (uint32 d = 0; d < inVehicle.mNumDifferentials; ++d)
+	{
+		VehicleDifferentialSettings diff;
+		SimFillDifferential(inDesc.mVehicleDifferentials[inVehicle.mFirstDifferential + d], diff);
+		outSettings.mDifferentials.push_back(diff);
+	}
+	outSettings.mDifferentialLimitedSlipRatio = inVehicle.mDifferentialLimitedSlipRatio;
+}
+
+// The tracked controller settings of a vehicle description (the part of the vehicle variants group:
+// TrackedVehicleSlot.makeControllerSettings of SimulationParity.zig)
+static Ref<VehicleControllerSettings> SimMakeTrackedControllerSettings(const SimSceneDesc &inDesc, const SimVehicle &inVehicle)
+{
+	TrackedVehicleControllerSettings *s = new TrackedVehicleControllerSettings;
+	SimFillEngine(inDesc, inVehicle.mEngine, s->mEngine);
+	SimFillTransmission(inDesc, inVehicle.mTransmission, s->mTransmission);
+	for (int t = 0; t < 2; ++t)
+		SimFillTrack(inDesc, inVehicle.mTracks[t], s->mTracks[t]);
+	return s;
+}
+
+// The motorcycle controller settings of a vehicle description (MotorcycleSlot.makeControllerSettings: the wheeled
+// members with SimFillWheeled, VehicleSlot's, then the lean members)
+static Ref<VehicleControllerSettings> SimMakeMotorcycleControllerSettings(const SimSceneDesc &inDesc, const SimVehicle &inVehicle)
+{
+	MotorcycleControllerSettings *s = new MotorcycleControllerSettings;
+	SimFillWheeled(inDesc, inVehicle, *s);
+	s->mMaxLeanAngle = inVehicle.mMaxLeanAngle;
+	s->mLeanSpringConstant = inVehicle.mLeanSpringConstant;
+	s->mLeanSpringDamping = inVehicle.mLeanSpringDamping;
+	s->mLeanSpringIntegrationCoefficient = inVehicle.mLeanSpringIntegrationCoefficient;
+	s->mLeanSpringIntegrationCoefficientDecay = inVehicle.mLeanSpringIntegrationCoefficientDecay;
+	s->mLeanSmoothingFactor = inVehicle.mLeanSmoothingFactor;
+	return s;
+}
+
+// The controller settings of a vehicle description (VehicleControllerKind of SimScenes.zig): the wheeled settings
+// (VehicleSlot), the tracked and motorcycle ones through the functions of the vehicle variants
+static Ref<VehicleControllerSettings> SimMakeControllerSettings(const SimSceneDesc &inDesc, const SimVehicle &inVehicle)
+{
+	switch (inVehicle.mController)
+	{
+	case 0: // wheeled
+		{
+			WheeledVehicleControllerSettings *s = new WheeledVehicleControllerSettings;
+			SimFillWheeled(inDesc, inVehicle, *s);
+			return s;
+		}
+
+	case 1:		return SimMakeTrackedControllerSettings(inDesc, inVehicle);
+	case 2:		return SimMakeMotorcycleControllerSettings(inDesc, inVehicle);
+
+	default:
+		Trace("SimulationReference: unknown vehicle controller kind %u", inVehicle.mController);
+		abort();
+	}
+}
+
+// The WheelSettings members of a wheel description
+static void SimFillWheelSettings(const SimVehicleWheel &inWheel, WheelSettings &outSettings)
+{
+	outSettings.mPosition = SimLoad3(inWheel.mPosition);
+	outSettings.mSuspensionForcePoint = SimLoad3(inWheel.mSuspensionForcePoint);
+	outSettings.mSuspensionDirection = SimLoad3(inWheel.mSuspensionDirection);
+	outSettings.mSteeringAxis = SimLoad3(inWheel.mSteeringAxis);
+	outSettings.mWheelUp = SimLoad3(inWheel.mWheelUp);
+	outSettings.mWheelForward = SimLoad3(inWheel.mWheelForward);
+	outSettings.mSuspensionMinLength = inWheel.mSuspensionMinLength;
+	outSettings.mSuspensionMaxLength = inWheel.mSuspensionMaxLength;
+	outSettings.mSuspensionPreloadLength = inWheel.mSuspensionPreloadLength;
+	outSettings.mSuspensionSpring.mMode = ESpringMode(inWheel.mSuspensionSpringMode);
+	outSettings.mSuspensionSpring.mFrequency = inWheel.mSuspensionFrequency;
+	outSettings.mSuspensionSpring.mDamping = inWheel.mSuspensionDamping;
+	outSettings.mRadius = inWheel.mRadius;
+	outSettings.mWidth = inWheel.mWidth;
+	outSettings.mEnableSuspensionForcePoint = inWheel.mEnableSuspensionForcePoint != 0;
+}
+
+// WheelSettingsTV of a wheel description (TrackedVehicleSlot.makeWheelSettings)
+static Ref<WheelSettings> SimMakeWheelSettingsTV(const SimVehicleWheel &inWheel)
+{
+	WheelSettingsTV *tv = new WheelSettingsTV;
+	SimFillWheelSettings(inWheel, *tv);
+	tv->mLongitudinalFriction = inWheel.mLongitudinalFrictionTV;
+	tv->mLateralFriction = inWheel.mLateralFrictionTV;
+	return tv;
+}
+
+// The wheel settings of a description (VehicleWheelKind of SimScenes.zig): WheelSettingsWV (VehicleSlot), WheelSettingsTV
+// through the function of the vehicle variants
+static Ref<WheelSettings> SimMakeWheelSettings(const SimSceneDesc &inDesc, const SimVehicleWheel &inWheel)
+{
+	if (inWheel.mKind != 0)
+		return SimMakeWheelSettingsTV(inWheel);
+	WheelSettingsWV *wv = new WheelSettingsWV;
+	SimFillWheelSettings(inWheel, *wv);
+	wv->mInertia = inWheel.mInertia;
+	wv->mAngularDamping = inWheel.mAngularDamping;
+	wv->mMaxSteerAngle = inWheel.mMaxSteerAngle;
+	if (inWheel.mLongitudinalFriction != cInvalidHandle)
+		SimLoadCurve(inDesc, inWheel.mLongitudinalFriction, inWheel.mNumLongitudinalFriction, wv->mLongitudinalFriction);
+	if (inWheel.mLateralFriction != cInvalidHandle)
+		SimLoadCurve(inDesc, inWheel.mLateralFriction, inWheel.mNumLateralFriction, wv->mLateralFriction);
+	wv->mMaxBrakeTorque = inWheel.mMaxBrakeTorque;
+	wv->mMaxHandBrakeTorque = inWheel.mMaxHandBrakeTorque;
+	return wv;
+}
+
+// The VehicleConstraintSettings of a vehicle description
+static Ref<VehicleConstraintSettings> SimMakeVehicleSettings(const SimSceneDesc &inDesc, const SimVehicle &inVehicle)
+{
+	Ref<VehicleConstraintSettings> s = new VehicleConstraintSettings;
+	s->mEnabled = inVehicle.mEnabled != 0;
+	s->mConstraintPriority = inVehicle.mConstraintPriority;
+	s->mNumVelocityStepsOverride = inVehicle.mNumVelocityStepsOverride;
+	s->mNumPositionStepsOverride = inVehicle.mNumPositionStepsOverride;
+	s->mDrawConstraintSize = inVehicle.mDrawConstraintSize;
+	s->mUserData = inVehicle.mUserData;
+	s->mUp = SimLoad3(inVehicle.mUp);
+	s->mForward = SimLoad3(inVehicle.mForward);
+	s->mMaxPitchRollAngle = inVehicle.mMaxPitchRollAngle;
+	for (uint32 w = 0; w < inVehicle.mNumWheels; ++w)
+		s->mWheels.push_back(SimMakeWheelSettings(inDesc, inDesc.mVehicleWheels[inVehicle.mFirstWheel + w]));
+	for (uint32 a = 0; a < inVehicle.mNumAntiRollBars; ++a)
+	{
+		VehicleAntiRollBar bar;
+		SimFillAntiRollBar(inDesc.mVehicleAntiRollBars[inVehicle.mFirstAntiRollBar + a], bar);
+		s->mAntiRollBars.push_back(bar);
+	}
+	s->mController = SimMakeControllerSettings(inDesc, inVehicle);
+	return s;
+}
+
+// A collision tester (VehicleTesterKind of SimScenes.zig)
+static Ref<VehicleCollisionTester> SimMakeTester(uint32 inKind, uint32 inObjectLayer, Vec3Arg inUp, float inMaxSlopeAngle, float inRadius, float inConvexRadiusFraction)
+{
+	switch (inKind)
+	{
+	case 0:		return new VehicleCollisionTesterRay(ObjectLayer(inObjectLayer), inUp, inMaxSlopeAngle);
+	case 1:		return new VehicleCollisionTesterCastSphere(ObjectLayer(inObjectLayer), inRadius, inUp, inMaxSlopeAngle);
+	case 2:		return new VehicleCollisionTesterCastCylinder(ObjectLayer(inObjectLayer), inConvexRadiusFraction);
+	default:
+		Trace("SimulationReference: unknown vehicle collision tester kind %u", inKind);
+		abort();
+	}
+}
+
+// The ragdoll settings of a description (SimRagdoll of SimScenes.zig); outStabilize: the result of Stabilize (1 / 0,
+// 2: not called)
+static Ref<RagdollSettings> SimMakeRagdollSettings(const SimSceneDesc &inDesc, const SimRagdoll &inRagdoll, const Array<BodyCreationSettings> &inParts, uint32 *outStabilize = nullptr);
+
+// The SkeletonPose of a pose description (the joint states, then CalculateJointMatrices)
+static void SimMakePose(const SimSceneDesc &inDesc, const Skeleton *inSkeleton, uint32 inPose, SkeletonPose &outPose)
+{
+	const SimRagdollPose &p = inDesc.mRagdollPoses[inPose];
+	outPose.SetSkeleton(inSkeleton);
+	outPose.SetRootOffset(SimLoadR3(p.mRootOffset));
+	for (uint32 j = 0; j < p.mCount && j < outPose.GetJointCount(); ++j)
+	{
+		const float *f = inDesc.mFloats + p.mData + 7 * j;
+		SkeletonPose::JointState &state = outPose.GetJoint(int(j));
+		state.mTranslation = SimLoad3(f);
+		state.mRotation = SimLoadQuat(f + 3);
+	}
+	outPose.CalculateJointMatrices();
+}
+
+// The joint matrices of a pose description taken as model space transforms (the `_matrices` ragdoll operations)
+static Array<Mat44> SimMakePoseMatrices(const SimSceneDesc &inDesc, uint32 inPose, uint32 inNumJoints)
+{
+	const SimRagdollPose &p = inDesc.mRagdollPoses[inPose];
+	Array<Mat44> matrices(inNumJoints, Mat44::sIdentity());
+	for (uint32 j = 0; j < p.mCount && j < inNumJoints; ++j)
+	{
+		const float *f = inDesc.mFloats + p.mData + 7 * j;
+		matrices[j] = Mat44::sRotationTranslation(SimLoadQuat(f + 3), SimLoad3(f));
+	}
+	return matrices;
+}
+
+static Ref<RagdollSettings> SimMakeRagdollSettings(const SimSceneDesc &inDesc, const SimRagdoll &inRagdoll, const Array<BodyCreationSettings> &inParts, uint32 *outStabilize)
+{
+	Ref<Skeleton> skeleton = new Skeleton;
+	for (uint32 j = 0; j < inRagdoll.mNumJoints; ++j)
+	{
+		std::string name = "Joint" + std::to_string(j);
+		int parent = inDesc.mRagdollJoints[inRagdoll.mFirstJoint + j].mParent;
+		if (parent < int(j))
+			skeleton->AddJoint(name, parent);
+		else
+		{
+			// A joint that is its own parent (degenerate input that CreateRagdoll accepts): AddJoint(name, parent)
+			// would read the name of a joint that does not exist yet, the parent index is set directly
+			skeleton->AddJoint(name);
+			skeleton->GetJoints().back().mParentJointIndex = parent;
+		}
+	}
+
+	Ref<RagdollSettings> settings = new RagdollSettings;
+	settings->mSkeleton = skeleton;
+	settings->mParts.resize(inRagdoll.mNumJoints);
+	for (uint32 j = 0; j < inRagdoll.mNumJoints; ++j)
+	{
+		const SimRagdollJoint &joint = inDesc.mRagdollJoints[inRagdoll.mFirstJoint + j];
+		RagdollSettings::Part &part = settings->mParts[j];
+		static_cast<BodyCreationSettings &>(part) = inParts[j];
+		if (joint.mToParent != cInvalidHandle)
+			part.mToParent = SimMakeConstraintSettings(inDesc.mConstraints[joint.mToParent]);
+	}
+	for (uint32 a = 0; a < inRagdoll.mNumAdditional; ++a)
+	{
+		const SimRagdollAdditionalConstraint &c = inDesc.mRagdollAdditionalConstraints[inRagdoll.mFirstAdditional + a];
+		settings->mAdditionalConstraints.push_back(RagdollSettings::AdditionalConstraint(c.mBody1, c.mBody2, SimMakeConstraintSettings(inDesc.mConstraints[c.mConstraint])));
+	}
+
+	// The preparation, in the order of the members of SimRagdoll
+	uint32 stabilize = 2;
+	if (inRagdoll.mStabilize != 0)
+		stabilize = settings->Stabilize()? 1 : 0;
+	if (outStabilize != nullptr)
+		*outStabilize = stabilize;
+	if (inRagdoll.mCalculateConstraintPriorities != 0)
+		settings->CalculateConstraintPriorities(inRagdoll.mBasePriority);
+	if (inRagdoll.mDisableParentChildCollisions == 1)
+		settings->DisableParentChildCollisions();
+	else if (inRagdoll.mDisableParentChildCollisions == 2)
+	{
+		SkeletonPose pose;
+		SimMakePose(inDesc, skeleton, inRagdoll.mPose, pose);
+		settings->DisableParentChildCollisions(pose.GetJointMatrices().data(), inRagdoll.mMinSeparationDistance);
+	}
+	settings->CalculateBodyIndexToConstraintIndex();
+	settings->CalculateConstraintIndexToBodyIdxPair();
+	return settings;
+}
+
+// The number of CharacterVsCharacterCollisionSimple objects of a world (num_character_collision_groups of SimScenes.zig)
+static constexpr uint32 cNumCharacterCollisionGroups = 4;
+
+// The filters of a CharacterVirtual query (CharacterQueryFilter of SimScenes.zig): op.i[0] the object layer of the
+// default filters (cInvalidHandle: accept all), op.i[1] the CharacterBodyFilter, op.i[2] the CharacterShapeFilter, op.body
+// the body of CharacterBodyFilter.ignore_body
+class SimCharacterFilters
+{
+public:
+								SimCharacterFilters(const ObjectVsBroadPhaseLayerFilter &inObjectVsBroadPhaseLayerFilter, const ObjectLayerPairFilter &inObjectLayerPairFilter, const SimOp &inOp, const BodyID &inBody, const BodyID &inInnerBody) :
+		mLayer(inOp.mI[0]),
+		mBodyFilterKind(inOp.mI[1]),
+		mShapeFilterKind(inOp.mI[2]),
+		mDefaultBroadPhaseLayerFilter(inObjectVsBroadPhaseLayerFilter, ObjectLayer(inOp.mI[0] == cInvalidHandle? 0 : inOp.mI[0])),
+		mDefaultObjectLayerFilter(inObjectLayerPairFilter, ObjectLayer(inOp.mI[0] == cInvalidHandle? 0 : inOp.mI[0])),
+		mIgnoreBody(inBody),
+		mIgnoreInnerBody(inInnerBody)
+	{
+	}
+
+	const BroadPhaseLayerFilter &BroadPhase() const				{ return mLayer == cInvalidHandle? mAllBroadPhaseLayers : static_cast<const BroadPhaseLayerFilter &>(mDefaultBroadPhaseLayerFilter); }
+	const ObjectLayerFilter &	ObjectLayers() const			{ return mLayer == cInvalidHandle? mAllObjectLayers : static_cast<const ObjectLayerFilter &>(mDefaultObjectLayerFilter); }
+	const BodyFilter &			Bodies() const					{ return mBodyFilterKind == 1? static_cast<const BodyFilter &>(mIgnoreBody) : mBodyFilterKind == 2? static_cast<const BodyFilter &>(mIgnoreInnerBody) : mAllBodies; }
+	const ShapeFilter &			Shapes() const					{ return mShapeFilterKind == 1? static_cast<const ShapeFilter &>(mNoSpheres) : mAllShapes; }
+
+private:
+	uint32						mLayer;
+	uint32						mBodyFilterKind;
+	uint32						mShapeFilterKind;
+	BroadPhaseLayerFilter		mAllBroadPhaseLayers;
+	ObjectLayerFilter			mAllObjectLayers;
+	DefaultBroadPhaseLayerFilter mDefaultBroadPhaseLayerFilter;
+	DefaultObjectLayerFilter	mDefaultObjectLayerFilter;
+	BodyFilter					mAllBodies;
+	IgnoreSingleBodyFilter		mIgnoreBody;
+	IgnoreSingleBodyFilter		mIgnoreInnerBody;
+	ShapeFilter					mAllShapes;
+	SimNoSpheresShapeFilter		mNoSpheres;
+};
+
+// The CharacterVirtual::ExtendedUpdateSettings of f[4..16] of cv_extended_update
+static CharacterVirtual::ExtendedUpdateSettings SimLoadExtendedUpdateSettings(const float *inF)
+{
+	CharacterVirtual::ExtendedUpdateSettings s;
+	s.mStickToFloorStepDown = SimLoad3(inF);
+	s.mWalkStairsStepUp = SimLoad3(inF + 3);
+	s.mWalkStairsMinStepForward = inF[6];
+	s.mWalkStairsStepForwardTest = inF[7];
+	s.mWalkStairsCosAngleForwardContact = inF[8];
+	s.mWalkStairsStepDownExtra = SimLoad3(inF + 9);
+	return s;
+}
+
+// VehicleCombineFriction.custom of SimScenes.zig
+static void SimVehicleCombineFriction(uint inWheelIndex, float &ioLongitudinalFriction, float &ioLateralFriction, const Body &inBody2, const SubShapeID &inSubShapeID2)
+{
+	float body_friction = inBody2.GetFriction();
+	ioLongitudinalFriction = 0.5f * (ioLongitudinalFriction + body_friction);
+	ioLateralFriction = min(ioLateralFriction, body_friction);
+	if ((inWheelIndex & 1) != 0)
+	{
+		ioLongitudinalFriction *= 0.9f;
+		ioLateralFriction *= 0.9f;
+	}
+}
+
+// VehicleTireMaxImpulse.custom of SimScenes.zig
+static void SimVehicleTireMaxImpulse(uint inWheelIndex, float &outLongitudinalImpulse, float &outLateralImpulse, float inSuspensionImpulse, float inLongitudinalFriction, float inLateralFriction, float inLongitudinalSlip, float inLateralSlip, float inDeltaTime)
+{
+	outLongitudinalImpulse = 0.9f * inLongitudinalFriction * inSuspensionImpulse;
+	outLateralImpulse = inLateralFriction * inSuspensionImpulse;
+	if (inWheelIndex == 0)
+	{
+		outLongitudinalImpulse *= 0.5f;
+		outLateralImpulse *= 0.5f;
+	}
+}
+
+// A vehicle record (RecordKind.vehicle_* of SimScenes.zig): the vehicle handle and body, the step, the wheels with a
+// contact and the hash of the suspension length, angular velocity and steer angle of every wheel
+static SimRecord SimVehicleRecord(ESimRecordKind inKind, uint32 inHandle, const VehicleConstraint &inVehicle, const PhysicsStepListenerContext &inContext)
+{
+	SimRecord r = { };
+	r.mKind = uint32(inKind);
+	r.mIDs[0] = inHandle;
+	r.mIDs[1] = inVehicle.GetVehicleBody()->GetID().GetIndexAndSequenceNumber();
+	r.mData[0] = SimFloatBits(inContext.mDeltaTime);
+	r.mData[1] = inContext.mIsFirstStep? 1 : 0;
+	r.mData[2] = inContext.mIsLastStep? 1 : 0;
+	SimHasher h;
+	for (uint w = 0; w < uint(inVehicle.GetWheels().size()); ++w)
+	{
+		const Wheel *wheel = inVehicle.GetWheel(w);
+		if (wheel->HasContact())
+			r.mData[3] |= 1u << w;
+		h.F32(wheel->GetSuspensionLength());
+		h.F32(wheel->GetAngularVelocity());
+		h.F32(wheel->GetSteerAngle());
+	}
+	r.mData[4] = h.mHash;
+	return r;
+}
+
+// A vehicle of the world: the constraint, its tester, the defaults of its callbacks and the filters of
+// vehicle_tester_set_filters (the tester keeps pointers to them)
+struct SimVehicleData
+{
+	Ref<VehicleConstraint>		mConstraint;
+	Ref<VehicleCollisionTester>	mTester;
+	uint32						mHandle = 0;
+	uint32						mController = 0;						// VehicleControllerKind of SimScenes.zig
+	bool						mAdded = false;
+	VehicleConstraint::CombineFunction mDefaultCombineFriction;
+	WheeledVehicleController::TireMaxImpulseCallback mDefaultTireMaxImpulse;
+	std::unique_ptr<DefaultBroadPhaseLayerFilter> mBroadPhaseLayerFilter;
+	std::unique_ptr<DefaultObjectLayerFilter> mObjectLayerFilter;
+	std::unique_ptr<IgnoreMultipleBodiesFilter> mBodyFilter;
+};
+
 class SimWorld
 {
 public:
@@ -1135,10 +2501,41 @@ public:
 			listener->mIndex = i;
 			mStepListeners.push_back(listener);
 		}
+
+		// Phase 7: the character listeners record into their own recorder (compared in call order)
+		mCharacterRecordListener.mRecorder = &mCharacterRecorder;
+		mCharacterModifyListener.mRecorder = &mCharacterRecorder;
+		mCharacterModifyListener.mModify = true;
 	}
 
 								~SimWorld()
 	{
+		// Phase 7 objects: remove what is in the system (Jolt asserts that a destroyed body is not in the broad phase),
+		// then release them while the system exists (their destructors destroy their bodies)
+		for (SimVehicleData *v : mVehicles)
+		{
+			if (v->mAdded)
+			{
+				mSystem.RemoveStepListener(v->mConstraint);
+				mSystem.RemoveConstraint(v->mConstraint);
+			}
+			delete v;
+		}
+		mVehicles.clear();
+		BodyInterface &bi = mSystem.GetBodyInterface();
+		for (Ref<Character> &c : mCharacters)
+			if (c != nullptr && !c->GetBodyID().IsInvalid() && bi.IsAdded(c->GetBodyID()))
+				c->RemoveFromPhysicsSystem();
+		mCharacters.clear();
+		for (CharacterVsCharacterCollisionSimple &g : mCharacterGroups)
+			g.mCharacters.clear();
+		mCharacterVirtuals.clear();
+		for (Ref<Ragdoll> &r : mRagdolls)
+			if (r != nullptr && bi.IsAdded(r->GetBodyID(0)))
+				r->RemoveFromPhysicsSystem();
+		mRagdolls.clear();
+		mRagdollSettings.clear();
+
 		for (uint32 i = 0; i < uint32(mStepListeners.size()); ++i)
 			if (mStepListenerAdded.size() > i && mStepListenerAdded[i])
 				mSystem.RemoveStepListener(mStepListeners[i]);
@@ -1462,6 +2859,1417 @@ public:
 		return SimConstraintState(*c);
 	}
 
+	// -------------------------------------------------------------------------------------------------------------------
+	// Phase 7: characters, ragdolls and vehicles
+
+	// The index of a shape in mShapes (cInvalidHandle: nullptr or a shape that the scene did not create)
+	uint32						GetShapeIndex(const Shape *inShape) const
+	{
+		for (uint32 i = 0; i < uint32(mShapes.size()); ++i)
+			if (mShapes[i] == inShape)
+				return i;
+		return cInvalidHandle;
+	}
+
+	// The shape of a shape index (cInvalidHandle: nullptr)
+	const Shape *				GetShape(uint32 inIndex) const
+	{
+		return inIndex != cInvalidHandle? mShapes[inIndex].GetPtr() : nullptr;
+	}
+
+	// The object of a handle (a scene that uses a handle that does not exist or that was destroyed is an error of the scene)
+	template <class T>
+	T *							GetObject(const Array<Ref<T>> &inObjects, const SimOp &inOp) const
+	{
+		if (inOp.mIndex >= inObjects.size() || inObjects[inOp.mIndex] == nullptr)
+		{
+			Trace("SimulationReference: operation %u on object handle %u that does not exist", inOp.mKind, inOp.mIndex);
+			abort();
+		}
+		return inObjects[inOp.mIndex].GetPtr();
+	}
+
+	// The BodyState bits of a body (the result of the character operations)
+	uint32						GetBodyState(const BodyID &inBodyID)
+	{
+		BodyInterface &bi = mSystem.GetBodyInterface();
+		return (bi.IsActive(inBodyID)? 1 : 0) | (bi.IsAdded(inBodyID)? 2 : 0);
+	}
+
+	// The listener of a CharacterListenerMode
+	CharacterContactListener *	GetCharacterListener(uint32 inMode)
+	{
+		switch (inMode)
+		{
+		case 0:		return nullptr;
+		case 1:		return &mCharacterRecordListener;
+		case 2:		return &mCharacterModifyListener;
+		default:
+			Trace("SimulationReference: unknown character listener mode %u", inMode);
+			abort();
+		}
+	}
+
+	// A Phase 7 operation (OpKind 400..599 in SimScenes.zig), see the ranges of Phase7OpRange
+	uint32						ApplyObjectOp(const SimOp &inOp)
+	{
+		if (inOp.mKind < 430)
+			return ApplyCharacterOp(inOp);
+		if (inOp.mKind < 490)
+			return ApplyCharacterVirtualOp(inOp);
+		if (inOp.mKind < 520)
+			return ApplyRagdollOp(inOp);
+		if (inOp.mKind < cFirstSparePhase7Op)
+			return ApplyVehicleOp(inOp);
+		Trace("SimulationReference: unknown operation %u", inOp.mKind);
+		abort();
+	}
+
+	// Phase7OpRange.character
+	uint32						ApplyCharacterOp(const SimOp &inOp)
+	{
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+		RVec3 r = SimLoadR3(inOp.mR);
+		EActivation activation = inOp.mActivation == 0? EActivation::Activate : EActivation::DontActivate;
+		bool lock = i[3] == 0;
+
+		if (ESimOp(inOp.mKind) == ESimOp::CreateCharacter)
+		{
+			const SimCharacter &d = mDesc.mCharacters[inOp.mIndex];
+			Ref<CharacterSettings> settings = new CharacterSettings;
+			SimFillCharacterBaseSettings(d.mBase, mShapes, *settings);
+			settings->mLayer = ObjectLayer(d.mLayer);
+			settings->mMass = d.mMass;
+			settings->mFriction = d.mFriction;
+			settings->mGravityFactor = d.mGravityFactor;
+			settings->mAllowedDOFs = EAllowedDOFs(d.mAllowedDOFs);
+			Ref<Character> character = new Character(settings, SimLoadR3(d.mPosition), SimLoadQuat(d.mRotation), d.mUserData, &mSystem);
+			mCharacters.push_back(character);
+			return character->GetBodyID().GetIndexAndSequenceNumber();
+		}
+
+		Character *c = GetObject(mCharacters, inOp);
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::CharacterAddToPhysicsSystem:			c->AddToPhysicsSystem(activation, lock); break;
+		case ESimOp::CharacterRemoveFromPhysicsSystem:		c->RemoveFromPhysicsSystem(lock); break;
+		case ESimOp::CharacterActivate:						c->Activate(lock); break;
+		case ESimOp::CharacterPostSimulation:				c->PostSimulation(f[0], lock); return uint32(c->GetGroundState());
+		case ESimOp::CharacterSetLinearAndAngularVelocity:	c->SetLinearAndAngularVelocity(SimLoad3(f), SimLoad3(f + 3), lock); break;
+		case ESimOp::CharacterSetLinearVelocity:			c->SetLinearVelocity(SimLoad3(f), lock); break;
+		case ESimOp::CharacterAddLinearVelocity:			c->AddLinearVelocity(SimLoad3(f), lock); break;
+		case ESimOp::CharacterAddImpulse:					c->AddImpulse(SimLoad3(f), lock); break;
+		case ESimOp::CharacterSetPositionAndRotation:		c->SetPositionAndRotation(r, SimLoadQuat(f), activation, lock); break;
+		case ESimOp::CharacterSetPosition:					c->SetPosition(r, activation, lock); break;
+		case ESimOp::CharacterSetRotation:					c->SetRotation(SimLoadQuat(f), activation, lock); break;
+		case ESimOp::CharacterSetLayer:						c->SetLayer(ObjectLayer(i[0]), lock); break;
+		case ESimOp::CharacterSetShape:						return c->SetShape(GetShape(i[0]), f[0], lock)? 1 : 0;
+		case ESimOp::CharacterSetMaxSlopeAngle:				c->SetMaxSlopeAngle(f[0]); break;
+		case ESimOp::CharacterSetUp:						c->SetUp(SimLoad3(f)); break;
+		case ESimOp::CharacterSetSupportingVolume:			c->SetSupportingVolume(Plane(SimLoad3(f), f[3])); break;
+
+		case ESimOp::CharacterDestroy:
+			mCharacters[inOp.mIndex] = nullptr;
+			return 0;
+
+		case ESimOp::CharacterSettingsHash:
+			{
+				CharacterSettings s = c->GetCharacterSettings(lock);
+				SimHasher h;
+				h.Vec3(s.mUp);
+				h.Plane(s.mSupportingVolume);
+				h.F32(s.mMaxSlopeAngle);
+				h.Bool(s.mEnhancedInternalEdgeRemoval);
+				h.U32(GetShapeIndex(s.mShape));
+				h.U32(s.mLayer);
+				h.F32(s.mMass);
+				h.F32(s.mFriction);
+				h.F32(s.mGravityFactor);
+				h.U32(uint32(s.mAllowedDOFs));
+				return h.mHash;
+			}
+
+		case ESimOp::CharacterCheckCollision:
+			{
+				SimCheckCollisionCollector collector;
+				c->CheckCollision(r, SimLoadQuat(f), SimLoad3(f + 4), f[7], GetShape(i[0]), r, collector, lock);
+				return collector.Result();
+			}
+
+		case ESimOp::CharacterExpectGroundState:			return uint32(c->GetGroundState()); // Changes nothing, the driver checks the result
+
+		case ESimOp::CharacterBodyHash:
+			{
+				SimHasher h;
+				h.Vec3(c->GetLinearVelocity(lock));
+				RVec3 position;
+				Quat rotation;
+				c->GetPositionAndRotation(position, rotation, lock);
+				h.RVec3(position);
+				h.Quat(rotation);
+				h.RVec3(c->GetPosition(lock));
+				h.Quat(c->GetRotation(lock));
+				h.RVec3(c->GetCenterOfMassPosition(lock));
+				h.RMat44(c->GetWorldTransform(lock));
+				TransformedShape shape = c->GetTransformedShape(lock);
+				h.RVec3(shape.mShapePositionCOM);
+				h.Quat(shape.mShapeRotation);
+				h.Vec3(shape.GetShapeScale());
+				h.U32(shape.mBodyID.GetIndexAndSequenceNumber());
+				h.U32(GetShapeIndex(shape.mShape));
+				return h.mHash;
+			}
+
+		case ESimOp::CharacterExpectBodyState:				break; // Changes nothing, the driver checks the BodyState bits
+
+		case ESimOp::CharacterExpectValue: // Changes nothing, the driver checks the result (CharacterValue of SimScenes.zig)
+			switch (i[0])
+			{
+			case 0:		return GetShapeIndex(c->GetShape());
+			case 1:		return GetShapeIndex(mSystem.GetBodyInterface().GetShape(c->GetBodyID()).GetPtr());
+			case 2:		return uint32(c->GetLayer());
+			case 3:		return c->GetGroundBodyID() == GetHandle(inOp.mBody)? 1 : 0;
+			default:
+				Trace("SimulationReference: unknown character value %u", i[0]);
+				abort();
+			}
+
+		default:
+			Trace("SimulationReference: unknown character operation %u", inOp.mKind);
+			abort();
+		}
+		return GetBodyState(c->GetBodyID());
+	}
+
+	// Phase7OpRange.character_virtual
+	uint32						ApplyCharacterVirtualOp(const SimOp &inOp)
+	{
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+		RVec3 r = SimLoadR3(inOp.mR);
+
+		if (ESimOp(inOp.mKind) == ESimOp::CreateCharacterVirtual)
+		{
+			const SimCharacterVirtual &d = mDesc.mCharacterVirtuals[inOp.mIndex];
+			Ref<CharacterVirtualSettings> settings = new CharacterVirtualSettings;
+			SimFillCharacterBaseSettings(d.mBase, mShapes, *settings);
+			settings->mID = CharacterID(d.mID);
+			settings->mMass = d.mMass;
+			settings->mMaxStrength = d.mMaxStrength;
+			settings->mShapeOffset = SimLoad3(d.mShapeOffset);
+			settings->mBackFaceMode = EBackFaceMode(d.mBackFaceMode);
+			settings->mPredictiveContactDistance = d.mPredictiveContactDistance;
+			settings->mMaxCollisionIterations = d.mMaxCollisionIterations;
+			settings->mMaxConstraintIterations = d.mMaxConstraintIterations;
+			settings->mMinTimeRemaining = d.mMinTimeRemaining;
+			settings->mCollisionTolerance = d.mCollisionTolerance;
+			settings->mCharacterPadding = d.mCharacterPadding;
+			settings->mMaxNumHits = d.mMaxNumHits;
+			settings->mHitReductionCosMaxAngle = d.mHitReductionCosMaxAngle;
+			settings->mPenetrationRecoverySpeed = d.mPenetrationRecoverySpeed;
+			settings->mInnerBodyShape = GetShape(d.mInnerBodyShape);
+			settings->mInnerBodyIDOverride = BodyID(d.mInnerBodyIDOverride);
+			settings->mInnerBodyLayer = ObjectLayer(d.mInnerBodyLayer);
+			Ref<CharacterVirtual> character = new CharacterVirtual(settings, SimLoadR3(d.mPosition), SimLoadQuat(d.mRotation), d.mUserData, &mSystem);
+			character->SetListener(GetCharacterListener(d.mListener));
+			if (d.mCollisionGroup != cInvalidHandle)
+			{
+				mCharacterGroups[d.mCollisionGroup].Add(character);
+				character->SetCharacterVsCharacterCollision(&mCharacterGroups[d.mCollisionGroup]);
+			}
+			mCharacterVirtuals.push_back(character);
+			return character->GetInnerBodyID().GetIndexAndSequenceNumber();
+		}
+
+		CharacterVirtual *c = GetObject(mCharacterVirtuals, inOp);
+		SimCharacterFilters filters(mObjectVsBroadPhaseLayerFilter, mObjectLayerPairFilter, inOp, GetHandle(inOp.mBody), c->GetInnerBodyID());
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::CVDestroy:
+			for (CharacterVsCharacterCollisionSimple &g : mCharacterGroups)
+				g.Remove(c);
+			mCharacterVirtuals[inOp.mIndex] = nullptr;
+			return 0;
+
+		case ESimOp::CVSetLinearVelocity:					c->SetLinearVelocity(SimLoad3(f)); break;
+		case ESimOp::CVSetPosition:							c->SetPosition(r); break;
+		case ESimOp::CVSetRotation:							c->SetRotation(SimLoadQuat(f)); break;
+		case ESimOp::CVSetUp:								c->SetUp(SimLoad3(f)); break;
+		case ESimOp::CVSetMaxSlopeAngle:					c->SetMaxSlopeAngle(f[0]); break;
+		case ESimOp::CVSetSupportingVolume:					c->SetSupportingVolume(Plane(SimLoad3(f), f[3])); break;
+		case ESimOp::CVSetMass:								c->SetMass(f[0]); break;
+		case ESimOp::CVSetMaxStrength:						c->SetMaxStrength(f[0]); break;
+		case ESimOp::CVSetPenetrationRecoverySpeed:			c->SetPenetrationRecoverySpeed(f[0]); break;
+		case ESimOp::CVSetEnhancedInternalEdgeRemoval:		c->SetEnhancedInternalEdgeRemoval(i[0] != 0); break;
+		case ESimOp::CVSetMaxNumHits:						c->SetMaxNumHits(i[0]); break;
+		case ESimOp::CVSetHitReductionCosMaxAngle:			c->SetHitReductionCosMaxAngle(f[0]); break;
+		case ESimOp::CVSetShapeOffset:						c->SetShapeOffset(SimLoad3(f)); break;
+		case ESimOp::CVSetUserData:							c->SetUserData(uint64(i[0]) | (uint64(i[1]) << 32)); break;
+		case ESimOp::CVSetListener:							c->SetListener(GetCharacterListener(i[0])); break;
+		case ESimOp::CVSetCharacterVsCharacterCollision:	c->SetCharacterVsCharacterCollision(i[0] != cInvalidHandle? &mCharacterGroups[i[0]] : nullptr); break;
+		case ESimOp::CVAddToCollisionGroup:					mCharacterGroups[i[0]].Add(c); break;
+		case ESimOp::CVRemoveFromCollisionGroup:			mCharacterGroups[i[0]].Remove(c); break;
+		case ESimOp::CVUpdate:								c->Update(f[0], SimLoad3(f + 1), filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator); break;
+		case ESimOp::CVExtendedUpdate:						c->ExtendedUpdate(f[0], SimLoad3(f + 1), SimLoadExtendedUpdateSettings(f + 4), filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator); break;
+		case ESimOp::CVStickToFloor:						return c->StickToFloor(SimLoad3(f), filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator)? 1 : 0;
+		case ESimOp::CVWalkStairs:							return c->WalkStairs(f[0], SimLoad3(f + 1), SimLoad3(f + 4), SimLoad3(f + 7), SimLoad3(f + 10), filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator)? 1 : 0;
+		case ESimOp::CVCanWalkStairs:						return c->CanWalkStairs(SimLoad3(f))? 1 : 0;
+		case ESimOp::CVRefreshContacts:						c->RefreshContacts(filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator); break;
+		case ESimOp::CVUpdateGroundVelocity:				c->UpdateGroundVelocity(); break;
+		case ESimOp::CVSetShape:							return c->SetShape(GetShape(i[3]), f[0], filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator)? 1 : 0;
+		case ESimOp::CVSetInnerBodyShape:					c->SetInnerBodyShape(GetShape(i[0])); break;
+
+		case ESimOp::CVCancelVelocityTowardsSteepSlopes:
+			{
+				SimHasher h;
+				h.Vec3(c->CancelVelocityTowardsSteepSlopes(SimLoad3(f)));
+				return h.mHash;
+			}
+
+		case ESimOp::CVStartTrackingContactChanges:			c->StartTrackingContactChanges(); break;
+		case ESimOp::CVFinishTrackingContactChanges:		c->FinishTrackingContactChanges(); break;
+
+		case ESimOp::CVCheckCollision:
+			{
+				SimCheckCollisionCollector collector;
+				c->CheckCollision(r, SimLoadQuat(f), SimLoad3(f + 4), f[7], GetShape(i[3]), r, collector, filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes());
+				return collector.Result();
+			}
+
+		case ESimOp::CVSettingsHash:
+			{
+				CharacterVirtualSettings s = c->GetCharacterVirtualSettings();
+				SimHasher h;
+				h.Vec3(s.mUp);
+				h.Plane(s.mSupportingVolume);
+				h.F32(s.mMaxSlopeAngle);
+				h.Bool(s.mEnhancedInternalEdgeRemoval);
+				h.U32(GetShapeIndex(s.mShape));
+				h.U32(s.mID.GetValue());
+				h.F32(s.mMass);
+				h.F32(s.mMaxStrength);
+				h.Vec3(s.mShapeOffset);
+				h.U32(uint32(s.mBackFaceMode));
+				h.F32(s.mPredictiveContactDistance);
+				h.U32(s.mMaxCollisionIterations);
+				h.U32(s.mMaxConstraintIterations);
+				h.F32(s.mMinTimeRemaining);
+				h.F32(s.mCollisionTolerance);
+				h.F32(s.mCharacterPadding);
+				h.U32(s.mMaxNumHits);
+				h.F32(s.mHitReductionCosMaxAngle);
+				h.F32(s.mPenetrationRecoverySpeed);
+				h.U32(GetShapeIndex(s.mInnerBodyShape));
+				h.U32(s.mInnerBodyIDOverride.GetIndexAndSequenceNumber());
+				h.U32(s.mInnerBodyLayer);
+				return h.mHash;
+			}
+
+		case ESimOp::CVHasCollidedWithBody:					return c->HasCollidedWith(GetHandle(inOp.mBody))? 1 : 0;
+
+		case ESimOp::CVHasCollidedWithCharacter:
+			{
+				SimOp other_op = inOp;
+				other_op.mIndex = i[0];
+				const CharacterVirtual *other = GetObject(mCharacterVirtuals, other_op);
+				return (c->HasCollidedWith(other->GetID())? 1 : 0) | (c->HasCollidedWith(other)? 2 : 0);
+			}
+
+		case ESimOp::CVExpectGroundState:					return uint32(c->GetGroundState()); // Changes nothing, the driver checks the result
+
+		case ESimOp::CVSaveRestoreState:
+			{
+				StateRecorderImpl recorder;
+				c->SaveState(recorder);
+				std::string data = recorder.GetData();
+				recorder.Rewind();
+				recorder.SetValidating(i[0] != 0);
+				c->RestoreState(recorder);
+				return SimHashBytes(2166136261u, data.data(), data.size());
+			}
+
+		case ESimOp::CVExpectValue:											// Changes nothing, the driver checks the result
+			switch (i[0])
+			{
+			case 0:		return c->GetMaxHitsExceeded()? 1 : 0;
+			case 1:		return uint32(c->GetActiveContacts().size());
+			case 2:
+			case 3:
+				{
+					uint32 n = 0;
+					for (const CharacterContact &contact : c->GetActiveContacts())
+						if (contact.mHadCollision && (i[0] == 2 || contact.mCharacterB != nullptr))
+							++n;
+					return n;
+				}
+			case 4:		return c->GetGroundBodyID() == GetHandle(inOp.mBody)? 1 : 0;
+			case 5:		return c->GetGroundVelocity().IsNearZero(1.0e-6f)? 0 : 1;
+			case 6:		return GetShapeIndex(c->GetShape());
+			case 7:		return c->GetInnerBodyID().IsInvalid()? 0 : 1;
+			default:
+				Trace("SimulationReference: unknown character virtual value %u", i[0]);
+				abort();
+			}
+
+		case ESimOp::CVSetStepVelocity:
+			{
+				// Character::Step of CharacterVirtualTests.cpp
+				Vec3 current_vertical_velocity = Vec3(0, c->GetLinearVelocity().GetY(), 0);
+				Vec3 ground_velocity = c->GetGroundVelocity();
+				Vec3 new_velocity;
+				if (c->GetGroundState() == CharacterBase::EGroundState::OnGround // If on ground
+					&& (current_vertical_velocity.GetY() - ground_velocity.GetY()) < 0.1f) // And not moving away from ground
+				{
+					// Assume velocity of ground when on ground
+					new_velocity = ground_velocity;
+
+					// Jump
+					new_velocity += Vec3(0, f[7], 0);
+				}
+				else
+					new_velocity = current_vertical_velocity;
+
+				// Gravity
+				new_velocity += SimLoad3(f + 3) * f[6];
+
+				// Player input
+				new_velocity += SimLoad3(f);
+
+				c->SetLinearVelocity(new_velocity);
+				break;
+			}
+
+		case ESimOp::CVPerfUpdate:
+			{
+				// The step of a character in CharacterVirtualScene::UpdateTest of PerformanceTest
+
+				// Calculate new vertical velocity
+				Vec3 new_velocity;
+				if (c->GetGroundState() == CharacterVirtual::EGroundState::OnGround	// If on ground
+					&& c->GetLinearVelocity().GetY() < 0.1f)						// And not moving away from ground
+					new_velocity = Vec3::sZero();
+				else
+					new_velocity = c->GetLinearVelocity() * Vec3(0, 1, 0);
+				new_velocity += mSystem.GetGravity() * f[0];
+
+				// Deterministic random input
+				uint64 count = inOp.mCount;
+				uint64 hash = Hash<uint64> {} (count);
+				int x = int(hash % 10);
+				int y = int((hash / 10) % 10);
+				int speed = int((hash / 100) % 10);
+
+				// Determine target position
+				RVec3 target = RVec3(Real(4.0) * x - Real(20.0), Real(5.0), Real(4.0) * y - Real(20.0)); // PerformanceTest: RVec3(4.0_r * x - 20.0_r, 5.0_r, 4.0_r * y - 20.0_r)
+
+				// Determine new character velocity
+				Vec3 direction = Vec3(target - c->GetPosition()).NormalizedOr(Vec3::sZero());
+				direction.SetY(0);
+				new_velocity += (5.0f + 0.5f * speed) * direction;
+				c->SetLinearVelocity(new_velocity);
+
+				// Update the character position
+				CharacterVirtual::ExtendedUpdateSettings update_settings;
+				c->ExtendedUpdate(f[0], mSystem.GetGravity(), update_settings, filters.BroadPhase(), filters.ObjectLayers(), filters.Bodies(), filters.Shapes(), mTempAllocator);
+				break;
+			}
+
+		default:
+			Trace("SimulationReference: unknown character virtual operation %u", inOp.mKind);
+			abort();
+		}
+		return 0;
+	}
+
+	// The RagdollSettings of ragdoll description inIndex (the parts from the body descriptions of the joints, the shapes of
+	// this world); outStabilize: the result of Stabilize (1 / 0, 2: not called)
+	Ref<RagdollSettings>		MakeRagdollSettings(uint32 inIndex, uint32 *outStabilize = nullptr) const
+	{
+		const SimRagdoll &rd = mDesc.mRagdolls[inIndex];
+		Array<BodyCreationSettings> parts;
+		for (uint32 j = 0; j < rd.mNumJoints; ++j)
+			parts.push_back(MakeBodyCreationSettings(mDesc.mBodies[mDesc.mRagdollJoints[rd.mFirstJoint + j].mBody]));
+		return SimMakeRagdollSettings(mDesc, rd, parts, outStabilize);
+	}
+
+	// The SkeletonPose of pose description inPose for a ragdoll
+	void						MakeRagdollPose(const Ragdoll &inRagdoll, uint32 inPose, SkeletonPose &outPose) const
+	{
+		SimMakePose(mDesc, inRagdoll.GetRagdollSettings()->GetSkeleton(), inPose, outPose);
+	}
+
+	// Phase7OpRange.ragdoll
+	uint32						ApplyRagdollOp(const SimOp &inOp)
+	{
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+		EActivation activation = inOp.mActivation == 0? EActivation::Activate : EActivation::DontActivate;
+		bool lock = i[3] == 0;
+
+		if (ESimOp(inOp.mKind) == ESimOp::CreateRagdoll)
+		{
+			// The settings of the description, built at its first creation and shared by its ragdolls
+			uint32 d = inOp.mIndex;
+			if (mRagdollSettings.size() < mDesc.mNumRagdolls)
+				mRagdollSettings.resize(mDesc.mNumRagdolls);
+			if (mRagdollSettings[d] == nullptr)
+				mRagdollSettings[d] = MakeRagdollSettings(d);
+			const SimRagdoll &rd = mDesc.mRagdolls[d];
+			Ref<Ragdoll> ragdoll = mRagdollSettings[d]->CreateRagdoll(CollisionGroup::GroupID(rd.mCollisionGroup), rd.mUserData, &mSystem);
+			mRagdolls.push_back(ragdoll);
+			return ragdoll != nullptr? uint32(ragdoll->GetBodyCount()) : 0;
+		}
+
+		Ragdoll *rag = GetObject(mRagdolls, inOp);
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::RagdollAddToPhysicsSystem:				rag->AddToPhysicsSystem(activation, lock); break;
+		case ESimOp::RagdollRemoveFromPhysicsSystem:		rag->RemoveFromPhysicsSystem(lock); break;
+		case ESimOp::RagdollActivate:						rag->Activate(lock); break;
+		case ESimOp::RagdollIsActive:						return rag->IsActive(lock)? 1 : 0;
+		case ESimOp::RagdollSetGroupID:						rag->SetGroupID(CollisionGroup::GroupID(i[0]), lock); break;
+
+		case ESimOp::RagdollSetPose:
+			{
+				SkeletonPose pose;
+				MakeRagdollPose(*rag, i[0], pose);
+				rag->SetPose(pose, lock);
+				break;
+			}
+
+		case ESimOp::RagdollSetPoseMatrices:
+			{
+				Array<Mat44> matrices = SimMakePoseMatrices(mDesc, i[0], uint32(rag->GetBodyCount()));
+				rag->SetPose(SimLoadR3(mDesc.mRagdollPoses[i[0]].mRootOffset), matrices.data(), lock);
+				break;
+			}
+
+		case ESimOp::RagdollResetWarmStart:					rag->ResetWarmStart(); break;
+
+		case ESimOp::RagdollDriveToPoseUsingKinematics:
+			{
+				SkeletonPose pose;
+				MakeRagdollPose(*rag, i[0], pose);
+				rag->DriveToPoseUsingKinematics(pose, f[0], lock);
+				break;
+			}
+
+		case ESimOp::RagdollDriveToPoseUsingKinematicsMatrices:
+			{
+				Array<Mat44> matrices = SimMakePoseMatrices(mDesc, i[0], uint32(rag->GetBodyCount()));
+				rag->DriveToPoseUsingKinematics(SimLoadR3(mDesc.mRagdollPoses[i[0]].mRootOffset), matrices.data(), f[0], lock);
+				break;
+			}
+
+		case ESimOp::RagdollDriveToPoseUsingMotors:
+			{
+				SkeletonPose pose;
+				MakeRagdollPose(*rag, i[0], pose);
+				rag->DriveToPoseUsingMotors(pose);
+				break;
+			}
+
+		case ESimOp::RagdollDriveToPoseUsingMotorsVelocity:
+			{
+				SkeletonPose prev_pose, pose;
+				MakeRagdollPose(*rag, i[1], prev_pose);
+				MakeRagdollPose(*rag, i[0], pose);
+				rag->DriveToPoseUsingMotors(prev_pose, pose, f[0]);
+				break;
+			}
+
+		case ESimOp::RagdollSetLinearAndAngularVelocity:	rag->SetLinearAndAngularVelocity(SimLoad3(f), SimLoad3(f + 3), lock); break;
+		case ESimOp::RagdollSetLinearVelocity:				rag->SetLinearVelocity(SimLoad3(f), lock); break;
+		case ESimOp::RagdollAddLinearVelocity:				rag->AddLinearVelocity(SimLoad3(f), lock); break;
+		case ESimOp::RagdollAddImpulse:						rag->AddImpulse(SimLoad3(f), lock); break;
+
+		case ESimOp::RagdollDestroy:
+			mRagdolls[inOp.mIndex] = nullptr;
+			return 0;
+
+		case ESimOp::RagdollSettingsHash:
+			{
+				std::stringstream data;
+				StreamOutWrapper stream(data);
+				rag->GetRagdollSettings()->SaveBinaryState(stream, i[0] != 0, i[1] != 0);
+				std::string bytes = data.str();
+				return SimHashBytes(2166136261u, bytes.data(), bytes.size());
+			}
+
+		case ESimOp::RagdollGetPoseHash:
+			{
+				SkeletonPose pose;
+				pose.SetSkeleton(rag->GetRagdollSettings()->GetSkeleton());
+				rag->GetPose(pose, lock);
+				SimHasher h;
+				h.RVec3(pose.GetRootOffset());
+				for (const Mat44 &m : pose.GetJointMatrices())
+					for (int col = 0; col < 4; ++col)
+					{
+						Vec4 v = m.GetColumn4(col);
+						float values[4] = { v.GetX(), v.GetY(), v.GetZ(), v.GetW() };
+						h.Value(values);
+					}
+				return h.mHash;
+			}
+
+		case ESimOp::RagdollExpectActive:					break; // Changes nothing, the driver checks the result
+
+		default:
+			Trace("SimulationReference: unknown ragdoll operation %u", inOp.mKind);
+			abort();
+		}
+		return rag->IsActive()? 1 : 0;
+	}
+
+	// The vehicle of a handle
+	SimVehicleData *			GetVehicle(const SimOp &inOp) const
+	{
+		if (inOp.mIndex >= mVehicles.size())
+		{
+			Trace("SimulationReference: operation %u on vehicle handle %u that does not exist", inOp.mKind, inOp.mIndex);
+			abort();
+		}
+		return mVehicles[inOp.mIndex];
+	}
+
+	// The wheeled controller of a vehicle (a wheeled or motorcycle controller, a scene error otherwise)
+	static WheeledVehicleController &GetWheeledController(SimVehicleData &inVehicle, const SimOp &inOp)
+	{
+		if (inVehicle.mController == 1)
+		{
+			Trace("SimulationReference: wheeled operation %u on the tracked vehicle handle %u", inOp.mKind, inOp.mIndex);
+			abort();
+		}
+		return *static_cast<WheeledVehicleController *>(inVehicle.mConstraint->GetController());
+	}
+
+	static TrackedVehicleController &GetTrackedController(SimVehicleData &inVehicle, const SimOp &inOp)
+	{
+		if (inVehicle.mController != 1)
+		{
+			Trace("SimulationReference: tracked operation %u on the vehicle handle %u", inOp.mKind, inOp.mIndex);
+			abort();
+		}
+		return *static_cast<TrackedVehicleController *>(inVehicle.mConstraint->GetController());
+	}
+
+	static MotorcycleController &GetMotorcycleController(SimVehicleData &inVehicle, const SimOp &inOp)
+	{
+		if (inVehicle.mController != 2)
+		{
+			Trace("SimulationReference: motorcycle operation %u on the vehicle handle %u", inOp.mKind, inOp.mIndex);
+			abort();
+		}
+		return *static_cast<MotorcycleController *>(inVehicle.mConstraint->GetController());
+	}
+
+	// The engine / transmission of the controller of a vehicle (every controller kind has them)
+	static VehicleEngine &		GetEngine(SimVehicleData &inVehicle)
+	{
+		VehicleController *c = inVehicle.mConstraint->GetController();
+		return inVehicle.mController == 1? static_cast<TrackedVehicleController *>(c)->GetEngine() : static_cast<WheeledVehicleController *>(c)->GetEngine();
+	}
+
+	static VehicleTransmission &GetTransmission(SimVehicleData &inVehicle)
+	{
+		VehicleController *c = inVehicle.mConstraint->GetController();
+		return inVehicle.mController == 1? static_cast<TrackedVehicleController *>(c)->GetTransmission() : static_cast<WheeledVehicleController *>(c)->GetTransmission();
+	}
+
+	// The step callbacks of a vehicle (VehicleCallbacks bits of SimScenes.zig)
+	void						SetVehicleCallbacks(SimVehicleData &ioVehicle, uint32 inCallbacks)
+	{
+		uint32 handle = ioVehicle.mHandle;
+		uint32 controller = ioVehicle.mController;
+		VehicleConstraint &v = *ioVehicle.mConstraint;
+		if ((inCallbacks & (SimVehicleCallbacks::cPreStep | SimVehicleCallbacks::cSteer)) != 0)
+			v.SetPreStepCallback([this, handle, controller, inCallbacks](VehicleConstraint &inVehicle, const PhysicsStepListenerContext &inContext) {
+				if ((inCallbacks & SimVehicleCallbacks::cPreStep) != 0)
+					mRecorder.Add(SimVehicleRecord(ESimRecordKind::VehiclePreStep, handle, inVehicle, inContext));
+				if ((inCallbacks & SimVehicleCallbacks::cSteer) != 0 && controller != 1)
+				{
+					WheeledVehicleController *c = static_cast<WheeledVehicleController *>(inVehicle.GetController());
+					c->SetRightInput(c->GetRightInput() > 0.0f? -0.25f : 0.5f);
+				}
+			});
+		else
+			v.SetPreStepCallback(nullptr);
+		if ((inCallbacks & SimVehicleCallbacks::cPostCollide) != 0)
+			v.SetPostCollideCallback([this, handle](VehicleConstraint &inVehicle, const PhysicsStepListenerContext &inContext) {
+				mRecorder.Add(SimVehicleRecord(ESimRecordKind::VehiclePostCollide, handle, inVehicle, inContext));
+			});
+		else
+			v.SetPostCollideCallback(nullptr);
+		if ((inCallbacks & SimVehicleCallbacks::cPostStep) != 0)
+			v.SetPostStepCallback([this, handle](VehicleConstraint &inVehicle, const PhysicsStepListenerContext &inContext) {
+				mRecorder.Add(SimVehicleRecord(ESimRecordKind::VehiclePostStep, handle, inVehicle, inContext));
+			});
+		else
+			v.SetPostStepCallback(nullptr);
+	}
+
+	// VehicleCombineFriction / VehicleTireMaxImpulse of SimScenes.zig
+	static void					SetVehicleCombineFriction(SimVehicleData &ioVehicle, uint32 inMode)
+	{
+		ioVehicle.mConstraint->SetCombineFriction(inMode == 1? VehicleConstraint::CombineFunction(SimVehicleCombineFriction) : ioVehicle.mDefaultCombineFriction);
+	}
+
+	static void					SetVehicleTireMaxImpulse(SimVehicleData &ioVehicle, uint32 inMode, const SimOp *inOp)
+	{
+		if (ioVehicle.mController == 1)
+		{
+			if (inMode == 0 && inOp == nullptr)
+				return; // A tracked vehicle has no tire callback, its description has the default
+			Trace("SimulationReference: tire max impulse callback on the tracked vehicle handle %u", ioVehicle.mHandle);
+			abort();
+		}
+		WheeledVehicleController *c = static_cast<WheeledVehicleController *>(ioVehicle.mConstraint->GetController());
+		c->SetTireMaxImpulseCallback(inMode == 1? WheeledVehicleController::TireMaxImpulseCallback(SimVehicleTireMaxImpulse) : ioVehicle.mDefaultTireMaxImpulse);
+	}
+
+	// The SaveBinaryState bytes of settings, as a hash
+	template <class T>
+	static uint32				HashBinaryState(const T &inSettings)
+	{
+		std::stringstream data;
+		StreamOutWrapper stream(data);
+		inSettings.SaveBinaryState(stream);
+		std::string bytes = data.str();
+		return SimHashBytes(2166136261u, bytes.data(), bytes.size());
+	}
+
+	// Phase7OpRange.vehicle_tracked (TrackedVehicleSlot.applyVehicleOp of SimulationParity.zig)
+	static void					ApplyTrackedOp(SimVehicleData &ioVehicle, const SimOp &inOp)
+	{
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+		TrackedVehicleController &controller = GetTrackedController(ioVehicle, inOp);
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::TrackedSetDriverInput:					controller.SetDriverInput(f[0], f[1], f[2], f[3]); break;
+		case ESimOp::TrackedSetForwardInput:				controller.SetForwardInput(f[0]); break;
+		case ESimOp::TrackedSetLeftRatio:					controller.SetLeftRatio(f[0]); break;
+		case ESimOp::TrackedSetRightRatio:					controller.SetRightRatio(f[0]); break;
+		case ESimOp::TrackedSetBrakeInput:					controller.SetBrakeInput(f[0]); break;
+
+		case ESimOp::TrackedSetTrack:
+			{
+				VehicleTrack &track = controller.GetTracks()[i[0]];
+				track.mAngularVelocity = f[0];
+				track.mInertia = f[1];
+				track.mAngularDamping = f[2];
+				track.mMaxBrakeTorque = f[3];
+				track.mDifferentialRatio = f[4];
+				break;
+			}
+
+		default:
+			Trace("SimulationReference: unknown tracked vehicle operation %u", inOp.mKind);
+			abort();
+		}
+	}
+
+	// Phase7OpRange.vehicle_motorcycle (MotorcycleSlot.applyVehicleOp of SimulationParity.zig)
+	static void					ApplyMotorcycleOp(SimVehicleData &ioVehicle, const SimOp &inOp)
+	{
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+		MotorcycleController &controller = GetMotorcycleController(ioVehicle, inOp);
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::MotorcycleEnableLeanController:		controller.EnableLeanController(i[0] != 0); break;
+		case ESimOp::MotorcycleEnableLeanSteeringLimit:		controller.EnableLeanSteeringLimit(i[0] != 0); break;
+		case ESimOp::MotorcycleSetLeanSpringConstant:		controller.SetLeanSpringConstant(f[0]); break;
+		case ESimOp::MotorcycleSetLeanSpringDamping:		controller.SetLeanSpringDamping(f[0]); break;
+		case ESimOp::MotorcycleSetLeanSpringIntegrationCoefficient: controller.SetLeanSpringIntegrationCoefficient(f[0]); break;
+		case ESimOp::MotorcycleSetLeanSpringIntegrationCoefficientDecay: controller.SetLeanSpringIntegrationCoefficientDecay(f[0]); break;
+		case ESimOp::MotorcycleSetLeanSmoothingFactor:		controller.SetLeanSmoothingFactor(f[0]); break;
+
+		default:
+			Trace("SimulationReference: unknown motorcycle operation %u", inOp.mKind);
+			abort();
+		}
+	}
+
+	// Phase7OpRange.vehicle (and the routing of vehicle_tracked / vehicle_motorcycle: the vehicle of the handle, the
+	// operation of the variant, the ConstraintState of the vehicle, like ZoltWorld.applyPhase7Op of SimulationParity.zig)
+	uint32						ApplyVehicleOp(const SimOp &inOp)
+	{
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+
+		if (inOp.mKind >= cFirstTrackedOp)
+		{
+			SimVehicleData &v = *GetVehicle(inOp);
+			if (inOp.mKind >= cFirstMotorcycleOp)
+				ApplyMotorcycleOp(v, inOp);
+			else
+				ApplyTrackedOp(v, inOp);
+			return SimConstraintState(*v.mConstraint);
+		}
+
+		if (ESimOp(inOp.mKind) == ESimOp::CreateVehicle)
+		{
+			const SimVehicle &d = mDesc.mVehicles[inOp.mIndex];
+			Ref<VehicleConstraintSettings> settings = SimMakeVehicleSettings(mDesc, d);
+			SimVehicleData *v = new SimVehicleData;
+			v->mHandle = uint32(mVehicles.size());
+			v->mController = d.mController;
+			{
+				BodyLockWrite lock(mSystem.GetBodyLockInterface(), GetHandle(d.mBody));
+				if (!lock.Succeeded())
+				{
+					Trace("SimulationReference: vehicle description %u: the body handle %u does not exist", inOp.mIndex, d.mBody);
+					abort();
+				}
+				v->mConstraint = new VehicleConstraint(lock.GetBody(), *settings);
+			}
+			v->mTester = SimMakeTester(d.mTester.mKind, d.mTester.mObjectLayer, SimLoad3(d.mTester.mUp), d.mTester.mMaxSlopeAngle, d.mTester.mRadius, d.mTester.mConvexRadiusFraction);
+			v->mConstraint->SetVehicleCollisionTester(v->mTester);
+			v->mDefaultCombineFriction = v->mConstraint->GetCombineFriction();
+			if (v->mController != 1)
+				v->mDefaultTireMaxImpulse = static_cast<WheeledVehicleController *>(v->mConstraint->GetController())->GetTireMaxImpulseCallback();
+			SetVehicleCallbacks(*v, d.mCallbacks);
+			SetVehicleCombineFriction(*v, d.mCombineFriction);
+			SetVehicleTireMaxImpulse(*v, d.mTireMaxImpulse, nullptr);
+			mSystem.AddConstraint(v->mConstraint);
+			mSystem.AddStepListener(v->mConstraint);
+			v->mAdded = true;
+			mVehicles.push_back(v);
+			return GetNumConstraints();
+		}
+
+		SimVehicleData &v = *GetVehicle(inOp);
+		VehicleConstraint &c = *v.mConstraint;
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::VehicleRemove:
+			mSystem.RemoveStepListener(&c);
+			mSystem.RemoveConstraint(&c);
+			v.mAdded = false;
+			return GetNumConstraints();
+
+		case ESimOp::VehicleAdd:
+			mSystem.AddConstraint(&c);
+			mSystem.AddStepListener(&c);
+			v.mAdded = true;
+			return GetNumConstraints();
+
+		case ESimOp::VehicleSetMaxPitchRollAngle:			c.SetMaxPitchRollAngle(f[0]); break;
+		case ESimOp::VehicleOverrideGravity:				c.OverrideGravity(SimLoad3(f)); break;
+		case ESimOp::VehicleResetGravityOverride:			c.ResetGravityOverride(); break;
+		case ESimOp::VehicleSetNumStepsBetweenCollisionTestActive: c.SetNumStepsBetweenCollisionTestActive(i[0]); break;
+		case ESimOp::VehicleSetNumStepsBetweenCollisionTestInactive: c.SetNumStepsBetweenCollisionTestInactive(i[0]); break;
+
+		case ESimOp::VehicleSetCollisionTester:
+			v.mTester = SimMakeTester(i[0], i[1], SimLoad3(f), f[3], f[4], f[5]);
+			c.SetVehicleCollisionTester(v.mTester);
+			break;
+
+		case ESimOp::VehicleTesterSetObjectLayer:			v.mTester->SetObjectLayer(ObjectLayer(i[0])); break;
+
+		case ESimOp::VehicleTesterSetFilters:
+			if (i[0] == 0)
+			{
+				v.mTester->SetBroadPhaseLayerFilter(nullptr);
+				v.mTester->SetObjectLayerFilter(nullptr);
+				v.mTester->SetBodyFilter(nullptr);
+			}
+			else
+			{
+				v.mBroadPhaseLayerFilter = std::make_unique<DefaultBroadPhaseLayerFilter>(mObjectVsBroadPhaseLayerFilter, ObjectLayer(i[1]));
+				v.mObjectLayerFilter = std::make_unique<DefaultObjectLayerFilter>(mObjectLayerPairFilter, ObjectLayer(i[1]));
+				v.mBodyFilter = std::make_unique<IgnoreMultipleBodiesFilter>();
+				v.mBodyFilter->IgnoreBody(c.GetVehicleBody()->GetID());
+				BodyID ignored = GetHandle(inOp.mBody);
+				if (!ignored.IsInvalid())
+					v.mBodyFilter->IgnoreBody(ignored);
+				v.mTester->SetBroadPhaseLayerFilter(v.mBroadPhaseLayerFilter.get());
+				v.mTester->SetObjectLayerFilter(v.mObjectLayerFilter.get());
+				v.mTester->SetBodyFilter(v.mBodyFilter.get());
+			}
+			break;
+
+		case ESimOp::VehicleSetCombineFriction:				SetVehicleCombineFriction(v, i[0]); break;
+		case ESimOp::VehicleSetCallbacks:					SetVehicleCallbacks(v, i[0]); break;
+		case ESimOp::VehicleWheelSetAngularVelocity:		c.GetWheel(i[0])->SetAngularVelocity(f[0]); break;
+		case ESimOp::VehicleWheelSetRotationAngle:			c.GetWheel(i[0])->SetRotationAngle(f[0]); break;
+		case ESimOp::VehicleWheelSetSteerAngle:				c.GetWheel(i[0])->SetSteerAngle(f[0]); break;
+
+		case ESimOp::VehicleSetAntiRollBar:
+			{
+				VehicleAntiRollBar &bar = c.GetAntiRollBars()[i[0]];
+				bar.mLeftWheel = int(i[1]);
+				bar.mRightWheel = int(i[2]);
+				bar.mStiffness = f[0];
+				break;
+			}
+
+		case ESimOp::VehicleSettingsHash:					return HashBinaryState(*c.GetConstraintSettings());
+		case ESimOp::VehicleControllerSettingsHash:			return HashBinaryState(*c.GetController()->GetSettings());
+
+		case ESimOp::VehicleExpectWheelContacts:
+			{
+				uint32 bits = 0;
+				for (uint w = 0; w < uint(c.GetWheels().size()); ++w)
+					if (c.GetWheel(w)->HasContact())
+						bits |= 1u << w;
+				return bits; // Changes nothing, the driver checks the result
+			}
+
+		case ESimOp::VehicleEngineSetCurrentRPM:			GetEngine(v).SetCurrentRPM(f[0]); break;
+
+		case ESimOp::VehicleEngineSetSettings:
+			{
+				VehicleEngine &engine = GetEngine(v);
+				engine.mMaxTorque = f[0];
+				engine.mMinRPM = f[1];
+				engine.mMaxRPM = f[2];
+				engine.mInertia = f[3];
+				engine.mAngularDamping = f[4];
+				break;
+			}
+
+		case ESimOp::VehicleEngineSetTorqueCurve:			SimLoadCurve(mDesc, i[0], i[1], GetEngine(v).mNormalizedTorque); break;
+		case ESimOp::VehicleTransmissionSet:				GetTransmission(v).Set(int(i[0]), f[0]); break;
+
+		case ESimOp::VehicleTransmissionSetSettings:
+			{
+				VehicleTransmission &transmission = GetTransmission(v);
+				transmission.mMode = ETransmissionMode(i[0]);
+				transmission.mSwitchTime = f[0];
+				transmission.mClutchReleaseTime = f[1];
+				transmission.mSwitchLatency = f[2];
+				transmission.mShiftUpRPM = f[3];
+				transmission.mShiftDownRPM = f[4];
+				transmission.mClutchStrength = f[5];
+				break;
+			}
+
+		case ESimOp::VehicleTransmissionSetGearRatios:
+			{
+				VehicleTransmission &transmission = GetTransmission(v);
+				transmission.mGearRatios = SimLoadFloats(mDesc, i[0], i[1]);
+				transmission.mReverseGearRatios = SimLoadFloats(mDesc, i[2], i[3]);
+				break;
+			}
+
+		case ESimOp::WheeledSetDriverInput:					GetWheeledController(v, inOp).SetDriverInput(f[0], f[1], f[2], f[3]); break;
+		case ESimOp::WheeledSetForwardInput:				GetWheeledController(v, inOp).SetForwardInput(f[0]); break;
+		case ESimOp::WheeledSetRightInput:					GetWheeledController(v, inOp).SetRightInput(f[0]); break;
+		case ESimOp::WheeledSetBrakeInput:					GetWheeledController(v, inOp).SetBrakeInput(f[0]); break;
+		case ESimOp::WheeledSetHandBrakeInput:				GetWheeledController(v, inOp).SetHandBrakeInput(f[0]); break;
+
+		case ESimOp::WheeledSetDifferential:
+			{
+				VehicleDifferentialSettings &d = GetWheeledController(v, inOp).GetDifferentials()[i[0]];
+				d.mLeftWheel = int(i[1]);
+				d.mRightWheel = int(i[2]);
+				d.mDifferentialRatio = f[0];
+				d.mLeftRightSplit = f[1];
+				d.mLimitedSlipRatio = f[2];
+				d.mEngineTorqueRatio = f[3];
+				break;
+			}
+
+		case ESimOp::WheeledSetDifferentialLimitedSlipRatio: GetWheeledController(v, inOp).SetDifferentialLimitedSlipRatio(f[0]); break;
+		case ESimOp::WheeledSetTireMaxImpulseCallback:		SetVehicleTireMaxImpulse(v, i[0], &inOp); break;
+
+		// The Constraint interface of the VehicleConstraint (a vehicle is not a constraint handle)
+		case ESimOp::VehicleSetEnabled:						c.SetEnabled(i[0] != 0); break;
+		case ESimOp::VehicleResetWarmStart:					c.ResetWarmStart(); break;
+		case ESimOp::VehicleSetConstraintPriority:			c.SetConstraintPriority(i[0]); break;
+
+		case ESimOp::VehicleSetStepsOverride:
+			c.SetNumVelocityStepsOverride(i[0]);
+			c.SetNumPositionStepsOverride(i[1]);
+			break;
+
+		case ESimOp::VehicleSetUserData:					c.SetUserData(uint64(i[0]) | (uint64(i[1]) << 32)); break;
+
+		case ESimOp::VehicleExpectConstraintState:
+			// Changes nothing, the driver checks the result: a disabled vehicle whose body is active runs OnStep (its
+			// callbacks, the wheel collision tests) but is not solved (IsActive includes mEnabled)
+			return SimConstraintState(c) | (mSystem.GetBodyInterface().IsActive(c.GetVehicleBody()->GetID())? 4u : 0u);
+
+		case ESimOp::VehicleWheelWVApplyTorque:
+			GetWheeledController(v, inOp);
+			static_cast<WheelWV *>(c.GetWheel(i[0]))->ApplyTorque(f[0], f[1]);
+			break;
+
+		case ESimOp::VehicleEngineApplyTorque:				GetEngine(v).ApplyTorque(f[0], f[1]); break;
+		case ESimOp::VehicleEngineApplyDamping:				GetEngine(v).ApplyDamping(f[0]); break;
+
+		case ESimOp::WheeledSetDifferentials:
+			{
+				WheeledVehicleController::Differentials &differentials = GetWheeledController(v, inOp).GetDifferentials();
+				differentials.clear();
+				for (uint32 d = 0; d < i[1]; ++d)
+				{
+					VehicleDifferentialSettings diff;
+					SimFillDifferential(mDesc.mVehicleDifferentials[i[0] + d], diff);
+					differentials.push_back(diff);
+				}
+				break;
+			}
+
+		default:
+			Trace("SimulationReference: unknown vehicle operation %u", inOp.mKind);
+			abort();
+		}
+		return SimConstraintState(c);
+	}
+
+	// The object state (ObjectField of SimScenes.zig): every character, character virtual, ragdoll and vehicle in handle
+	// order, the destroyed ones skipped
+	void						WriteObjectState(SimObjectStateWriter &ioWriter)
+	{
+		for (uint32 h = 0; h < uint32(mCharacters.size()); ++h)
+			if (mCharacters[h] != nullptr)
+				WriteCharacterState(ioWriter, h, *mCharacters[h]);
+		for (uint32 h = 0; h < uint32(mCharacterVirtuals.size()); ++h)
+			if (mCharacterVirtuals[h] != nullptr)
+				WriteCharacterVirtualState(ioWriter, h, *mCharacterVirtuals[h]);
+		for (uint32 h = 0; h < uint32(mRagdolls.size()); ++h)
+			if (mRagdolls[h] != nullptr)
+				WriteRagdollState(ioWriter, h, *mRagdolls[h]);
+		for (SimVehicleData *v : mVehicles)
+			WriteVehicleState(ioWriter, *v);
+	}
+
+	// The SaveState bytes of a character
+	static void					WriteSaveState(SimObjectStateWriter &ioWriter, ESimObjectField inField, uint32 inHandle, const CharacterBase &inCharacter)
+	{
+		StateRecorderImpl recorder;
+		inCharacter.SaveState(recorder);
+		std::string data = recorder.GetData();
+		ioWriter.Begin(inField, inHandle, 0);
+		ioWriter.Raw(data.data(), data.size());
+		ioWriter.End();
+	}
+
+	void						WriteTransformedShape(SimObjectStateWriter &ioWriter, ESimObjectField inField, uint32 inHandle, const TransformedShape &inShape) const
+	{
+		ioWriter.Begin(inField, inHandle, 0);
+		ioWriter.RVec3(inShape.mShapePositionCOM);
+		ioWriter.Quat(inShape.mShapeRotation);
+		ioWriter.Vec3(inShape.GetShapeScale());
+		ioWriter.U32(inShape.mBodyID.GetIndexAndSequenceNumber());
+		ioWriter.U32(GetShapeIndex(inShape.mShape));
+		ioWriter.End();
+	}
+
+	void						WriteCharacterState(SimObjectStateWriter &ioWriter, uint32 inHandle, const Character &inCharacter) const
+	{
+		WriteSaveState(ioWriter, ESimObjectField::CharacterSaveState, inHandle, inCharacter);
+
+		ioWriter.Begin(ESimObjectField::CharacterProperties, inHandle, 0);
+		ioWriter.U32(inCharacter.GetBodyID().GetIndexAndSequenceNumber());
+		ioWriter.U32(inCharacter.GetLayer());
+		ioWriter.U32(GetShapeIndex(inCharacter.GetShape()));
+		ioWriter.Bool(inCharacter.IsSupported());
+		ioWriter.U32(SimMaterialHash(inCharacter.GetGroundMaterial()));
+		ioWriter.U64(inCharacter.GetGroundUserData());
+		ioWriter.End();
+
+		ioWriter.Begin(ESimObjectField::CharacterBase, inHandle, 0);
+		ioWriter.Vec3(inCharacter.GetUp());
+		ioWriter.F32(inCharacter.GetCosMaxSlopeAngle());
+		ioWriter.Plane(inCharacter.GetSupportingVolume());
+		ioWriter.End();
+
+		// The body (a character without body: out of bodies)
+		if (inCharacter.GetBodyID().IsInvalid())
+			return;
+		ioWriter.Begin(ESimObjectField::CharacterBody, inHandle, 0);
+		ioWriter.RVec3(inCharacter.GetPosition());
+		ioWriter.Quat(inCharacter.GetRotation());
+		ioWriter.RVec3(inCharacter.GetCenterOfMassPosition());
+		ioWriter.Vec3(inCharacter.GetLinearVelocity());
+		ioWriter.RMat44(inCharacter.GetWorldTransform());
+		ioWriter.End();
+
+		WriteTransformedShape(ioWriter, ESimObjectField::CharacterTransformedShape, inHandle, inCharacter.GetTransformedShape());
+	}
+
+	void						WriteCharacterVirtualState(SimObjectStateWriter &ioWriter, uint32 inHandle, const CharacterVirtual &inCharacter) const
+	{
+		WriteSaveState(ioWriter, ESimObjectField::CVSaveState, inHandle, inCharacter);
+
+		ioWriter.Begin(ESimObjectField::CVProperties, inHandle, 0);
+		ioWriter.U32(inCharacter.GetID().GetValue());
+		ioWriter.U64(inCharacter.GetUserData());
+		ioWriter.U32(inCharacter.GetInnerBodyID().GetIndexAndSequenceNumber());
+		ioWriter.U32(GetShapeIndex(inCharacter.GetShape()));
+		ioWriter.F32(inCharacter.GetMass());
+		ioWriter.F32(inCharacter.GetMaxStrength());
+		ioWriter.F32(inCharacter.GetPenetrationRecoverySpeed());
+		ioWriter.Bool(inCharacter.GetEnhancedInternalEdgeRemoval());
+		ioWriter.F32(inCharacter.GetCharacterPadding());
+		ioWriter.U32(inCharacter.GetMaxNumHits());
+		ioWriter.F32(inCharacter.GetHitReductionCosMaxAngle());
+		ioWriter.Bool(inCharacter.GetMaxHitsExceeded());
+		ioWriter.Vec3(inCharacter.GetShapeOffset());
+		ioWriter.End();
+
+		ioWriter.Begin(ESimObjectField::CVBase, inHandle, 0);
+		ioWriter.Vec3(inCharacter.GetUp());
+		ioWriter.F32(inCharacter.GetCosMaxSlopeAngle());
+		ioWriter.Plane(inCharacter.GetSupportingVolume());
+		ioWriter.U32(SimMaterialHash(inCharacter.GetGroundMaterial()));
+		ioWriter.U64(inCharacter.GetGroundUserData());
+		ioWriter.Bool(inCharacter.IsSupported());
+		ioWriter.Bool(inCharacter.CanWalkStairs(inCharacter.GetLinearVelocity()));
+		ioWriter.End();
+
+		ioWriter.Begin(ESimObjectField::CVTransforms, inHandle, 0);
+		ioWriter.RVec3(inCharacter.GetCenterOfMassPosition());
+		ioWriter.RMat44(inCharacter.GetWorldTransform());
+		ioWriter.RMat44(inCharacter.GetCenterOfMassTransform());
+		ioWriter.End();
+
+		WriteTransformedShape(ioWriter, ESimObjectField::CVTransformedShape, inHandle, inCharacter.GetTransformedShape());
+
+		const CharacterVirtual::ContactList &contacts = inCharacter.GetActiveContacts();
+		ioWriter.Begin(ESimObjectField::CVNumActiveContacts, inHandle, 0);
+		ioWriter.U32(uint32(contacts.size()));
+		ioWriter.End();
+		for (uint32 c = 0; c < uint32(contacts.size()); ++c)
+		{
+			const CharacterContact &contact = contacts[c];
+			ioWriter.Begin(ESimObjectField::CVActiveContact, inHandle, c);
+			ioWriter.U32(contact.mBodyB.GetIndexAndSequenceNumber());
+			ioWriter.U32(contact.mCharacterIDB.GetValue());
+			ioWriter.U32(contact.mSubShapeIDB.GetValue());
+			ioWriter.RVec3(contact.mPosition);
+			ioWriter.Vec3(contact.mLinearVelocity);
+			ioWriter.Vec3(contact.mContactNormal);
+			ioWriter.Vec3(contact.mSurfaceNormal);
+			ioWriter.F32(contact.mDistance);
+			ioWriter.F32(contact.mFraction);
+			ioWriter.U32(uint32(contact.mMotionTypeB));
+			ioWriter.Bool(contact.mIsSensorB);
+			ioWriter.Bool(contact.mCharacterB != nullptr);
+			ioWriter.U64(contact.mUserData);
+			ioWriter.U32(SimMaterialHash(contact.mMaterial));
+			ioWriter.Bool(contact.mHadCollision);
+			ioWriter.Bool(contact.mWasDiscarded);
+			ioWriter.Bool(contact.mCanPushCharacter);
+			ioWriter.Bool(contact.mIsBackFacingContact);
+			ioWriter.End();
+		}
+	}
+
+	void						WriteRagdollState(SimObjectStateWriter &ioWriter, uint32 inHandle, Ragdoll &ioRagdoll) const
+	{
+		uint32 num_bodies = uint32(ioRagdoll.GetBodyCount());
+		ioWriter.Begin(ESimObjectField::RagdollProperties, inHandle, 0);
+		ioWriter.U32(num_bodies);
+		ioWriter.U32(uint32(ioRagdoll.GetConstraintCount()));
+		ioWriter.Bool(ioRagdoll.IsActive());
+		ioWriter.End();
+
+		for (uint32 b = 0; b < num_bodies; ++b)
+		{
+			ioWriter.Begin(ESimObjectField::RagdollBody, inHandle, b);
+			ioWriter.U32(ioRagdoll.GetBodyID(int(b)).GetIndexAndSequenceNumber());
+			ioWriter.End();
+		}
+
+		RVec3 position;
+		Quat rotation;
+		ioRagdoll.GetRootTransform(position, rotation);
+		ioWriter.Begin(ESimObjectField::RagdollRootTransform, inHandle, 0);
+		ioWriter.RVec3(position);
+		ioWriter.Quat(rotation);
+		ioWriter.End();
+
+		RVec3 root_offset;
+		Array<Mat44> joints(num_bodies);
+		ioRagdoll.GetPose(root_offset, joints.data());
+		ioWriter.Begin(ESimObjectField::RagdollPoseRootOffset, inHandle, 0);
+		ioWriter.RVec3(root_offset);
+		ioWriter.End();
+		for (uint32 b = 0; b < num_bodies; ++b)
+		{
+			ioWriter.Begin(ESimObjectField::RagdollPoseJoint, inHandle, b);
+			ioWriter.Mat44(joints[b]);
+			ioWriter.End();
+		}
+
+		AABox bounds = ioRagdoll.GetWorldSpaceBounds();
+		ioWriter.Begin(ESimObjectField::RagdollBounds, inHandle, 0);
+		ioWriter.Vec3(bounds.mMin);
+		ioWriter.Vec3(bounds.mMax);
+		ioWriter.End();
+
+		for (uint32 c = 0; c < uint32(ioRagdoll.GetConstraintCount()); ++c)
+		{
+			const TwoBodyConstraint *constraint = ioRagdoll.GetConstraint(int(c));
+			ioWriter.Begin(ESimObjectField::RagdollConstraint, inHandle, c);
+			ioWriter.U32(uint32(constraint->GetSubType()));
+			ioWriter.U32(constraint->GetConstraintPriority());
+			ioWriter.Bool(constraint->GetEnabled());
+			ioWriter.Bool(constraint->IsActive());
+			ioWriter.U32(constraint->GetBody1()->GetID().GetIndexAndSequenceNumber());
+			ioWriter.U32(constraint->GetBody2()->GetID().GetIndexAndSequenceNumber());
+			ioWriter.End();
+		}
+	}
+
+	// The engine of a vehicle (VehicleSlot.writeEngineState of SimulationParity.zig, also for the tracked controller)
+	static void					WriteEngineState(SimObjectStateWriter &ioWriter, uint32 inHandle, const VehicleEngine &inEngine)
+	{
+		ioWriter.Begin(ESimObjectField::VehicleEngine, inHandle, 0);
+		ioWriter.F32(inEngine.GetCurrentRPM());
+		ioWriter.F32(inEngine.GetAngularVelocity());
+		ioWriter.F32(inEngine.GetTorque(1.0f));
+		ioWriter.Bool(inEngine.AllowSleep());
+		ioWriter.F32(inEngine.mMaxTorque);
+		ioWriter.F32(inEngine.mMinRPM);
+		ioWriter.F32(inEngine.mMaxRPM);
+		ioWriter.F32(inEngine.mInertia);
+		ioWriter.F32(inEngine.mAngularDamping);
+		ioWriter.End();
+	}
+
+	// The transmission of a vehicle (VehicleSlot.writeTransmissionState, also for the tracked controller)
+	static void					WriteTransmissionState(SimObjectStateWriter &ioWriter, uint32 inHandle, const VehicleTransmission &inTransmission)
+	{
+		ioWriter.Begin(ESimObjectField::VehicleTransmission, inHandle, 0);
+		ioWriter.I32(inTransmission.GetCurrentGear());
+		ioWriter.F32(inTransmission.GetClutchFriction());
+		ioWriter.Bool(inTransmission.IsSwitchingGear());
+		ioWriter.F32(inTransmission.GetCurrentRatio());
+		ioWriter.Bool(inTransmission.AllowSleep());
+		ioWriter.U32(uint32(inTransmission.mMode));
+		ioWriter.End();
+	}
+
+	// The tracked part of the object state of a wheel (TrackedVehicleSlot.writeWheelState)
+	static void					WriteTrackedWheelState(SimObjectStateWriter &ioWriter, uint32 inHandle, uint32 inIndex, const Wheel &inWheel)
+	{
+		const WheelTV &tv = static_cast<const WheelTV &>(inWheel);
+		ioWriter.Begin(ESimObjectField::VehicleWheelTV, inHandle, inIndex);
+		ioWriter.I32(tv.mTrackIndex);
+		ioWriter.F32(tv.mCombinedLongitudinalFriction);
+		ioWriter.F32(tv.mCombinedLateralFriction);
+		ioWriter.F32(tv.mBrakeImpulse);
+		ioWriter.End();
+	}
+
+	// The tracked controller part of the object state (TrackedVehicleSlot.writeControllerState): the engine and the
+	// transmission (VehicleSlot's functions), the inputs, the tracks
+	static void					WriteTrackedControllerState(SimObjectStateWriter &ioWriter, uint32 inHandle, const VehicleConstraint &inVehicle)
+	{
+		const TrackedVehicleController *tracked = static_cast<const TrackedVehicleController *>(inVehicle.GetController());
+		WriteEngineState(ioWriter, inHandle, tracked->GetEngine());
+		WriteTransmissionState(ioWriter, inHandle, tracked->GetTransmission());
+		ioWriter.Begin(ESimObjectField::VehicleTracked, inHandle, 0);
+		ioWriter.F32(tracked->GetForwardInput());
+		ioWriter.F32(tracked->GetLeftRatio());
+		ioWriter.F32(tracked->GetRightRatio());
+		ioWriter.F32(tracked->GetBrakeInput());
+		ioWriter.End();
+		for (uint32 t = 0; t < uint32(ETrackSide::Num); ++t)
+		{
+			const VehicleTrack &track = tracked->GetTracks()[t];
+			ioWriter.Begin(ESimObjectField::VehicleTrack, inHandle, t);
+			ioWriter.F32(track.mAngularVelocity);
+			ioWriter.U32(track.mDrivenWheel);
+			ioWriter.U32(uint32(track.mWheels.size()));
+			ioWriter.F32(track.mInertia);
+			ioWriter.F32(track.mAngularDamping);
+			ioWriter.F32(track.mMaxBrakeTorque);
+			ioWriter.F32(track.mDifferentialRatio);
+			ioWriter.End();
+		}
+	}
+
+	// The motorcycle part of the object state (MotorcycleSlot.writeControllerState, after the wheeled fields)
+	static void					WriteMotorcycleControllerState(SimObjectStateWriter &ioWriter, uint32 inHandle, const VehicleConstraint &inVehicle)
+	{
+		const MotorcycleController *motorcycle = static_cast<const MotorcycleController *>(inVehicle.GetController());
+		ioWriter.Begin(ESimObjectField::VehicleMotorcycle, inHandle, 0);
+		ioWriter.F32(motorcycle->GetWheelBase());
+		ioWriter.Bool(motorcycle->IsLeanControllerEnabled());
+		ioWriter.Bool(motorcycle->IsLeanSteeringLimitEnabled());
+		ioWriter.F32(motorcycle->GetLeanSpringConstant());
+		ioWriter.F32(motorcycle->GetLeanSpringDamping());
+		ioWriter.F32(motorcycle->GetLeanSpringIntegrationCoefficient());
+		ioWriter.F32(motorcycle->GetLeanSpringIntegrationCoefficientDecay());
+		ioWriter.F32(motorcycle->GetLeanSmoothingFactor());
+		ioWriter.End();
+	}
+
+	// The object state of a vehicle (VehicleSlot.writeState; the parts of the tracked and motorcycle controllers through
+	// the functions of the vehicle variants above)
+	void						WriteVehicleState(SimObjectStateWriter &ioWriter, SimVehicleData &ioVehicle) const
+	{
+		uint32 h = ioVehicle.mHandle;
+		const VehicleConstraint &c = *ioVehicle.mConstraint;
+		uint32 num_wheels = uint32(c.GetWheels().size());
+
+		ioWriter.Begin(ESimObjectField::VehicleProperties, h, 0);
+		ioWriter.Bool(c.IsActive());
+		ioWriter.Bool(c.GetEnabled());
+		ioWriter.U32(c.GetNumStepsBetweenCollisionTestActive());
+		ioWriter.U32(c.GetNumStepsBetweenCollisionTestInactive());
+		ioWriter.F32(c.GetMaxPitchRollAngle());
+		ioWriter.Bool(c.IsGravityOverridden());
+		ioWriter.Vec3(c.GetGravityOverride());
+		ioWriter.Vec3(c.GetLocalForward());
+		ioWriter.Vec3(c.GetLocalUp());
+		ioWriter.Vec3(c.GetWorldUp());
+		ioWriter.U32(num_wheels);
+		ioWriter.U32(c.GetVehicleBody()->GetID().GetIndexAndSequenceNumber());
+		ioWriter.U32(c.GetConstraintPriority());
+		ioWriter.U32(c.GetNumVelocityStepsOverride());
+		ioWriter.U32(c.GetNumPositionStepsOverride());
+		ioWriter.U64(c.GetUserData());
+		ioWriter.End();
+
+		for (uint32 w = 0; w < num_wheels; ++w)
+		{
+			const Wheel *wheel = c.GetWheel(w);
+			ioWriter.Begin(ESimObjectField::VehicleWheel, h, w);
+			ioWriter.F32(wheel->GetAngularVelocity());
+			ioWriter.F32(wheel->GetRotationAngle());
+			ioWriter.F32(wheel->GetSteerAngle());
+			ioWriter.Bool(wheel->HasContact());
+			ioWriter.U32(wheel->GetContactBodyID().GetIndexAndSequenceNumber());
+			ioWriter.U32(wheel->GetContactSubShapeID().GetValue());
+			ioWriter.F32(wheel->GetSuspensionLength());
+			ioWriter.Bool(wheel->HasHitHardPoint());
+			ioWriter.F32(wheel->GetSuspensionLambda());
+			ioWriter.F32(wheel->GetLongitudinalLambda());
+			ioWriter.F32(wheel->GetLateralLambda());
+			ioWriter.End();
+
+			if (wheel->HasContact())
+			{
+				ioWriter.Begin(ESimObjectField::VehicleWheelContact, h, w);
+				ioWriter.RVec3(wheel->GetContactPosition());
+				ioWriter.Vec3(wheel->GetContactPointVelocity());
+				ioWriter.Vec3(wheel->GetContactNormal());
+				ioWriter.Vec3(wheel->GetContactLongitudinal());
+				ioWriter.Vec3(wheel->GetContactLateral());
+				ioWriter.End();
+			}
+
+			Vec3 forward, up, right;
+			c.GetWheelLocalBasis(wheel, forward, up, right);
+			ioWriter.Begin(ESimObjectField::VehicleWheelTransform, h, w);
+			ioWriter.Vec3(forward);
+			ioWriter.Vec3(up);
+			ioWriter.Vec3(right);
+			ioWriter.Mat44(c.GetWheelLocalTransform(w, Vec3::sAxisY(), Vec3::sAxisX()));
+			ioWriter.RMat44(c.GetWheelWorldTransform(w, Vec3::sAxisY(), Vec3::sAxisX()));
+			ioWriter.End();
+
+			if (ioVehicle.mController == 1)
+				WriteTrackedWheelState(ioWriter, h, w, *wheel);
+			else
+			{
+				const WheelWV *wv = static_cast<const WheelWV *>(wheel);
+				ioWriter.Begin(ESimObjectField::VehicleWheelWV, h, w);
+				ioWriter.F32(wv->mLongitudinalSlip);
+				ioWriter.F32(wv->mLateralSlip);
+				ioWriter.F32(wv->mCombinedLongitudinalFriction);
+				ioWriter.F32(wv->mCombinedLateralFriction);
+				ioWriter.F32(wv->mBrakeImpulse);
+				ioWriter.End();
+			}
+		}
+
+		const VehicleAntiRollBars &bars = c.GetAntiRollBars();
+		for (uint32 b = 0; b < uint32(bars.size()); ++b)
+		{
+			ioWriter.Begin(ESimObjectField::VehicleAntiRollBar, h, b);
+			ioWriter.I32(bars[b].mLeftWheel);
+			ioWriter.I32(bars[b].mRightWheel);
+			ioWriter.F32(bars[b].mStiffness);
+			ioWriter.End();
+		}
+
+		if (ioVehicle.mController == 1)
+		{
+			WriteTrackedControllerState(ioWriter, h, c);
+			return;
+		}
+
+		const WheeledVehicleController *wheeled = static_cast<const WheeledVehicleController *>(c.GetController());
+		WriteEngineState(ioWriter, h, wheeled->GetEngine());
+		WriteTransmissionState(ioWriter, h, wheeled->GetTransmission());
+		ioWriter.Begin(ESimObjectField::VehicleWheeled, h, 0);
+		ioWriter.F32(wheeled->GetForwardInput());
+		ioWriter.F32(wheeled->GetRightInput());
+		ioWriter.F32(wheeled->GetBrakeInput());
+		ioWriter.F32(wheeled->GetHandBrakeInput());
+		ioWriter.F32(wheeled->GetDifferentialLimitedSlipRatio());
+		ioWriter.F32(wheeled->GetWheelSpeedAtClutch());
+		ioWriter.End();
+
+		const WheeledVehicleController::Differentials &differentials = wheeled->GetDifferentials();
+		for (uint32 d = 0; d < uint32(differentials.size()); ++d)
+		{
+			const VehicleDifferentialSettings &diff = differentials[d];
+			float left_angular_velocity = diff.mLeftWheel != -1? c.GetWheel(diff.mLeftWheel)->GetAngularVelocity() : 0.0f;
+			float right_angular_velocity = diff.mRightWheel != -1? c.GetWheel(diff.mRightWheel)->GetAngularVelocity() : 0.0f;
+			float left_fraction, right_fraction;
+			diff.CalculateTorqueRatio(left_angular_velocity, right_angular_velocity, left_fraction, right_fraction);
+			ioWriter.Begin(ESimObjectField::VehicleDifferential, h, d);
+			ioWriter.I32(diff.mLeftWheel);
+			ioWriter.I32(diff.mRightWheel);
+			ioWriter.F32(diff.mDifferentialRatio);
+			ioWriter.F32(diff.mLeftRightSplit);
+			ioWriter.F32(diff.mLimitedSlipRatio);
+			ioWriter.F32(diff.mEngineTorqueRatio);
+			ioWriter.F32(left_fraction);
+			ioWriter.F32(right_fraction);
+			ioWriter.End();
+		}
+
+		if (ioVehicle.mController == 2)
+			WriteMotorcycleControllerState(ioWriter, h, c);
+	}
+
+	// The SaveState of every character and character virtual in handle order (part of snapshot / restore_cross: the
+	// PhysicsSystem state does not hold them)
+	void						SaveCharacterStates(StateRecorder &ioStream) const
+	{
+		for (const Ref<Character> &c : mCharacters)
+			if (c != nullptr)
+				c->SaveState(ioStream);
+		for (const Ref<CharacterVirtual> &c : mCharacterVirtuals)
+			if (c != nullptr)
+				c->SaveState(ioStream);
+	}
+
+	// True when a character or character virtual exists (that has a state)
+	bool						HasCharacters() const
+	{
+		for (const Ref<Character> &c : mCharacters)
+			if (c != nullptr)
+				return true;
+		for (const Ref<CharacterVirtual> &c : mCharacterVirtuals)
+			if (c != nullptr)
+				return true;
+		return false;
+	}
+
+	void						RestoreCharacterStates(StateRecorder &ioStream)
+	{
+		for (Ref<Character> &c : mCharacters)
+			if (c != nullptr)
+				c->RestoreState(ioStream);
+		for (Ref<CharacterVirtual> &c : mCharacterVirtuals)
+			if (c != nullptr)
+				c->RestoreState(ioStream);
+	}
+
 	// Apply an operation, see OpKind in SimScenes.zig
 	uint32						ApplyOp(const SimOp &inOp)
 	{
@@ -1473,6 +4281,8 @@ public:
 
 		if (inOp.mKind >= cFirstConstraintOp && inOp.mKind < cEndConstraintOp)
 			return ApplyConstraintOp(inOp);
+		if (inOp.mKind >= cFirstPhase7Op && inOp.mKind < cEndPhase7Op)
+			return ApplyObjectOp(inOp);
 
 		switch (ESimOp(inOp.mKind))
 		{
@@ -1654,6 +4464,17 @@ public:
 	Array<SimStepListenerImpl *> mStepListeners;
 	Array<bool>					mStepListenerAdded;
 	Array<Ref<TwoBodyConstraint>> mConstraintHandles;			// The constraints of the constraint handles (also the ones not in the system)
+
+	// Phase 7 (declared after mSystem: the destructor releases them while the system exists)
+	SimRecorder					mCharacterRecorder;							// The CharacterContactListener records (compared in call order)
+	SimCharacterContactListener	mCharacterRecordListener;					// CharacterListenerMode.record
+	SimCharacterContactListener	mCharacterModifyListener;					// CharacterListenerMode.modify
+	CharacterVsCharacterCollisionSimple mCharacterGroups[cNumCharacterCollisionGroups];
+	Array<Ref<Character>>		mCharacters;								// The characters of the character handles (nullptr: destroyed)
+	Array<Ref<CharacterVirtual>> mCharacterVirtuals;						// The character virtuals of the handles (nullptr: destroyed)
+	Array<Ref<RagdollSettings>>	mRagdollSettings;							// Per ragdoll description, built at its first create_ragdoll
+	Array<Ref<Ragdoll>>			mRagdolls;									// The ragdolls of the ragdoll handles (nullptr: destroyed or out of bodies)
+	Array<SimVehicleData *>		mVehicles;									// The vehicles of the vehicle handles
 };
 
 void SimStepListenerImpl::OnStep(const PhysicsStepListenerContext &inContext)
@@ -1682,6 +4503,207 @@ void SimStepListenerImpl::OnStep(const PhysicsStepListenerContext &inContext)
 	case 2:		bi.AddLinearVelocity(id, delta); break;
 	default:	break;
 	}
+}
+
+// The binary state round trips of the Phase 7 settings (the foundation review M3)
+
+// The result of a C function that has no bytes for its arguments
+static constexpr uint32 cNoBytes = 0xffffffff;
+
+// Must match VehicleSettingsPart in SimScenes.zig
+enum class ESimVehicleSettingsPart : uint32
+{
+	Settings = 0,
+	SettingsWithoutWheels = 1,
+	Controller = 2,
+	Wheel = 3,
+	Engine = 4,
+	Transmission = 5,
+	Track = 6,
+	Differential = 7,
+	AntiRollBar = 8,
+};
+
+// The SaveBinaryState bytes of an object
+template <class T>
+static std::string SimSaveBinaryState(const T &inObject)
+{
+	std::stringstream data;
+	StreamOutWrapper stream(data);
+	inObject.SaveBinaryState(stream);
+	return data.str();
+}
+
+// True when a stream was read without error and completely (the stream sets eof only on a read past the end: one more
+// byte is read, which must fail at the end)
+static bool SimReadCompletely(StreamIn &ioStream)
+{
+	bool read = !ioStream.IsFailed();
+	uint8 extra;
+	ioStream.Read(extra);
+	return read && ioStream.IsEOF();
+}
+
+// RestoreBinaryState of an object from bytes, true when every byte was read
+template <class T>
+static bool SimRestoreBinaryState(T &ioObject, const uint8 *inBytes, uint32 inSize)
+{
+	std::stringstream data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
+	StreamInWrapper stream(data);
+	ioObject.RestoreBinaryState(stream);
+	return SimReadCompletely(stream);
+}
+
+// Copy bytes to a caller provided buffer when they fit, returns the size
+static uint32 SimCopyBytes(const std::string &inData, uint8 *outBytes, uint32 inCapacity)
+{
+	uint32 size = uint32(inData.size());
+	if (size <= inCapacity && size > 0)
+		memcpy(outBytes, inData.data(), size);
+	return size;
+}
+
+// The bytes of a part of vehicle description inVehicle (VehicleSettingsPart, item inItem): without inRestore the
+// SaveBinaryState bytes of the part as SimMakeVehicleSettings makes it, with inRestore a default object of the part's
+// class restores inBytes (every byte read) and is saved again. False: the part does not exist (an item out of range,
+// a part of another controller kind, the restore of Settings: Jolt's VehicleConstraintSettings::RestoreBinaryState
+// dereferences null wheel settings, CharacterVehicleArchitecture E6) or the restore failed.
+static bool SimVehicleSettingsPart(const SimSceneDesc &inDesc, const SimVehicle &inVehicle, uint32 inPart, uint32 inItem, bool inRestore, const uint8 *inBytes, uint32 inSize, std::string &outData)
+{
+	switch (ESimVehicleSettingsPart(inPart))
+	{
+	case ESimVehicleSettingsPart::Settings:
+		if (inItem != 0 || inRestore)
+			return false;
+		outData = SimSaveBinaryState(*SimMakeVehicleSettings(inDesc, inVehicle));
+		return true;
+
+	case ESimVehicleSettingsPart::SettingsWithoutWheels:
+		if (inItem != 0)
+			return false;
+		if (inRestore)
+		{
+			// The RTTI hash, then VehicleConstraintSettings::RestoreBinaryState (the controller from its hash)
+			std::stringstream data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
+			StreamInWrapper stream(data);
+			ConstraintSettings::ConstraintResult result = ConstraintSettings::sRestoreFromBinaryState(stream);
+			if (result.HasError() || !SimReadCompletely(stream))
+				return false;
+			outData = SimSaveBinaryState(*result.Get());
+		}
+		else
+		{
+			Ref<VehicleConstraintSettings> s = SimMakeVehicleSettings(inDesc, inVehicle);
+			s->mWheels.clear();
+			outData = SimSaveBinaryState(*s);
+		}
+		return true;
+
+	case ESimVehicleSettingsPart::Controller:
+		{
+			if (inItem != 0)
+				return false;
+			Ref<VehicleControllerSettings> s;
+			if (!inRestore)
+				s = SimMakeControllerSettings(inDesc, inVehicle);
+			else
+				switch (inVehicle.mController)
+				{
+				case 0:		s = new WheeledVehicleControllerSettings; break;
+				case 1:		s = new TrackedVehicleControllerSettings; break;
+				default:	s = new MotorcycleControllerSettings; break;
+				}
+			if (inRestore && !SimRestoreBinaryState(*s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(*s);
+			return true;
+		}
+
+	case ESimVehicleSettingsPart::Wheel:
+		{
+			if (inItem >= inVehicle.mNumWheels)
+				return false;
+			const SimVehicleWheel &w = inDesc.mVehicleWheels[inVehicle.mFirstWheel + inItem];
+			Ref<WheelSettings> s;
+			if (!inRestore)
+				s = SimMakeWheelSettings(inDesc, w);
+			else if (w.mKind == 0)
+				s = new WheelSettingsWV;
+			else
+				s = new WheelSettingsTV;
+			if (inRestore && !SimRestoreBinaryState(*s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(*s);
+			return true;
+		}
+
+	case ESimVehicleSettingsPart::Engine:
+		{
+			if (inItem != 0)
+				return false;
+			VehicleEngineSettings s;
+			if (!inRestore)
+				SimFillEngine(inDesc, inVehicle.mEngine, s);
+			else if (!SimRestoreBinaryState(s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(s);
+			return true;
+		}
+
+	case ESimVehicleSettingsPart::Transmission:
+		{
+			if (inItem != 0)
+				return false;
+			VehicleTransmissionSettings s;
+			if (!inRestore)
+				SimFillTransmission(inDesc, inVehicle.mTransmission, s);
+			else if (!SimRestoreBinaryState(s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(s);
+			return true;
+		}
+
+	case ESimVehicleSettingsPart::Track:
+		{
+			if (inVehicle.mController != 1 || inItem >= 2)
+				return false;
+			VehicleTrackSettings s;
+			s.mDrivenWheel = 0; // Uninitialized in Jolt
+			if (!inRestore)
+				SimFillTrack(inDesc, inVehicle.mTracks[inItem], s);
+			else if (!SimRestoreBinaryState(s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(s);
+			return true;
+		}
+
+	case ESimVehicleSettingsPart::Differential:
+		{
+			if (inVehicle.mController == 1 || inItem >= inVehicle.mNumDifferentials)
+				return false;
+			VehicleDifferentialSettings s;
+			if (!inRestore)
+				SimFillDifferential(inDesc.mVehicleDifferentials[inVehicle.mFirstDifferential + inItem], s);
+			else if (!SimRestoreBinaryState(s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(s);
+			return true;
+		}
+
+	case ESimVehicleSettingsPart::AntiRollBar:
+		{
+			if (inItem >= inVehicle.mNumAntiRollBars)
+				return false;
+			VehicleAntiRollBar s;
+			if (!inRestore)
+				SimFillAntiRollBar(inDesc.mVehicleAntiRollBars[inVehicle.mFirstAntiRollBar + inItem], s);
+			else if (!SimRestoreBinaryState(s, inBytes, inSize))
+				return false;
+			outData = SimSaveBinaryState(s);
+			return true;
+		}
+	}
+	return false;
 }
 
 extern "C"
@@ -1804,7 +4826,7 @@ uint32 jolt_sim_restore_state_filtered(void *inWorld, const uint8 *inBytes, uint
 uint32 jolt_sim_take_records(void *inWorld, SimRecord *outRecords, uint32 inCapacity)
 {
 	SimWorld *world = static_cast<SimWorld *>(inWorld);
-	UniqueLock lock(world->mRecorder.mMutex);
+	std::lock_guard<Mutex> lock(world->mRecorder.mMutex);
 	uint32 n = uint32(world->mRecorder.mRecords.size());
 	if (n <= inCapacity)
 	{
@@ -1888,6 +4910,470 @@ uint32 jolt_sim_constraint_sub_type(void *inWorld, uint32 inIndex)
 	SimWorld *world = static_cast<SimWorld *>(inWorld);
 	Constraints constraints = world->mSystem.GetConstraints();
 	return inIndex < constraints.size()? uint32(constraints[inIndex]->GetSubType()) : 0xffffffff;
+}
+
+// Phase 7: the sizes and some offsets of the structs shared with SimScenes.zig
+void jolt_sim_phase7_struct_sizes(uint32 *outSizes)
+{
+	outSizes[0] = sizeof(SimCharacterBase);
+	outSizes[1] = sizeof(SimCharacter);
+	outSizes[2] = sizeof(SimCharacterVirtual);
+	outSizes[3] = sizeof(SimRagdoll);
+	outSizes[4] = sizeof(SimRagdollJoint);
+	outSizes[5] = sizeof(SimRagdollAdditionalConstraint);
+	outSizes[6] = sizeof(SimRagdollPose);
+	outSizes[7] = sizeof(SimVehicleEngine);
+	outSizes[8] = sizeof(SimVehicleTransmission);
+	outSizes[9] = sizeof(SimVehicleTrack);
+	outSizes[10] = sizeof(SimVehicleDifferential);
+	outSizes[11] = sizeof(SimVehicleAntiRollBar);
+	outSizes[12] = sizeof(SimVehicleWheel);
+	outSizes[13] = sizeof(SimVehicleTester);
+	outSizes[14] = sizeof(SimVehicle);
+	outSizes[15] = offsetof(SimCharacter, mPosition);
+	outSizes[16] = offsetof(SimCharacter, mUserData);
+	outSizes[17] = offsetof(SimCharacterVirtual, mPosition);
+	outSizes[18] = offsetof(SimCharacterVirtual, mUserData);
+	outSizes[19] = offsetof(SimCharacterVirtual, mCollisionGroup);
+	outSizes[20] = offsetof(SimRagdoll, mUserData);
+	outSizes[21] = offsetof(SimVehicle, mUserData);
+	outSizes[22] = offsetof(SimVehicle, mEngine);
+	outSizes[23] = offsetof(SimVehicle, mTracks);
+	outSizes[24] = offsetof(SimVehicle, mTester);
+	outSizes[25] = offsetof(SimVehicle, mTireMaxImpulse);
+	outSizes[26] = offsetof(SimVehicleWheel, mLateralFrictionTV);
+	outSizes[27] = offsetof(SimSceneDesc, mCharacters);
+	outSizes[28] = offsetof(SimSceneDesc, mVehicles);
+	outSizes[29] = offsetof(SimSceneDesc, mUints);
+	outSizes[30] = sizeof(SimSceneDesc);
+	outSizes[31] = offsetof(SimRagdollPose, mData);
+}
+
+// The object state (ObjectField of SimScenes.zig), returns the size (the bytes are copied when they fit)
+uint32 jolt_sim_object_state(void *inWorld, uint8 *outBytes, uint32 inCapacity)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	SimObjectStateWriter writer;
+	world->WriteObjectState(writer);
+	uint32 size = uint32(writer.mBytes.size());
+	if (size <= inCapacity && size > 0)
+		memcpy(outBytes, writer.mBytes.data(), size);
+	return size;
+}
+
+// Returns the number of character listener records; when they fit in inCapacity they are copied (in call order) and
+// removed
+uint32 jolt_sim_take_character_records(void *inWorld, SimRecord *outRecords, uint32 inCapacity)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	std::lock_guard<Mutex> lock(world->mCharacterRecorder.mMutex);
+	uint32 n = uint32(world->mCharacterRecorder.mRecords.size());
+	if (n <= inCapacity)
+	{
+		if (n > 0)
+			memcpy(outRecords, world->mCharacterRecorder.mRecords.data(), n * sizeof(SimRecord));
+		world->mCharacterRecorder.mRecords.clear();
+	}
+	return n;
+}
+
+// The SaveState bytes of every character and character virtual in handle order, returns the size (the bytes are copied
+// when they fit)
+uint32 jolt_sim_save_character_states(void *inWorld, uint8 *outBytes, uint32 inCapacity)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	StateRecorderImpl recorder;
+	world->SaveCharacterStates(recorder);
+	std::string data = recorder.GetData();
+	uint32 size = uint32(data.size());
+	if (size <= inCapacity && size > 0)
+		memcpy(outBytes, data.data(), size);
+	return size;
+}
+
+// RestoreState of every character and character virtual from the bytes of jolt_sim_save_character_states (not
+// validating), returns 1 when the bytes were read without error and completely (the stream sets eof only on a read
+// past the end: one more byte is read, which must fail at the end; ZoltWorld.restoreCharacterStates does the same)
+uint32 jolt_sim_restore_character_states(void *inWorld, const uint8 *inBytes, uint32 inSize)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	if (inSize == 0)
+		return world->HasCharacters()? 0 : 1; // An empty std::stringstream fails to rewind
+	StateRecorderImpl recorder;
+	recorder.WriteBytes(inBytes, inSize);
+	recorder.Rewind();
+	world->RestoreCharacterStates(recorder);
+	bool read = !recorder.IsFailed();
+	uint8 extra;
+	recorder.Read(extra); // Fails at the end of the bytes
+	return read && recorder.IsEOF()? 1 : 0;
+}
+
+// Jolt's CharacterSettings defaults as a SimCharacter (the constructor arguments of the harness: SimScenes' defaults)
+void jolt_sim_default_character(SimCharacter *outCharacter)
+{
+	SimEnsureFactory();
+	CharacterSettings s;
+	SimCharacter &c = *outCharacter;
+	s.mUp.StoreFloat3(reinterpret_cast<Float3 *>(c.mBase.mUp));
+	s.mSupportingVolume.GetNormal().StoreFloat3(reinterpret_cast<Float3 *>(c.mBase.mSupportingVolume));
+	c.mBase.mSupportingVolume[3] = s.mSupportingVolume.GetConstant();
+	c.mBase.mMaxSlopeAngle = s.mMaxSlopeAngle;
+	c.mBase.mEnhancedInternalEdgeRemoval = s.mEnhancedInternalEdgeRemoval? 1 : 0;
+	c.mBase.mShape = s.mShape == nullptr? cInvalidHandle : 0;
+	c.mLayer = s.mLayer;
+	c.mMass = s.mMass;
+	c.mFriction = s.mFriction;
+	c.mGravityFactor = s.mGravityFactor;
+	c.mAllowedDOFs = uint32(s.mAllowedDOFs);
+	c.mPosition[0] = c.mPosition[1] = c.mPosition[2] = 0;
+	c.mRotation[0] = c.mRotation[1] = c.mRotation[2] = 0;
+	c.mRotation[3] = 1;
+	c.mUserData = 0;
+}
+
+// Jolt's CharacterVirtualSettings defaults as a SimCharacterVirtual (mID and the harness members: SimScenes' defaults)
+void jolt_sim_default_character_virtual(SimCharacterVirtual *outCharacter)
+{
+	SimEnsureFactory();
+	CharacterVirtualSettings s;
+	SimCharacterVirtual &c = *outCharacter;
+	s.mUp.StoreFloat3(reinterpret_cast<Float3 *>(c.mBase.mUp));
+	s.mSupportingVolume.GetNormal().StoreFloat3(reinterpret_cast<Float3 *>(c.mBase.mSupportingVolume));
+	c.mBase.mSupportingVolume[3] = s.mSupportingVolume.GetConstant();
+	c.mBase.mMaxSlopeAngle = s.mMaxSlopeAngle;
+	c.mBase.mEnhancedInternalEdgeRemoval = s.mEnhancedInternalEdgeRemoval? 1 : 0;
+	c.mBase.mShape = s.mShape == nullptr? cInvalidHandle : 0;
+	c.mID = cInvalidHandle;
+	c.mMass = s.mMass;
+	c.mMaxStrength = s.mMaxStrength;
+	s.mShapeOffset.StoreFloat3(reinterpret_cast<Float3 *>(c.mShapeOffset));
+	c.mBackFaceMode = uint32(s.mBackFaceMode);
+	c.mPredictiveContactDistance = s.mPredictiveContactDistance;
+	c.mMaxCollisionIterations = s.mMaxCollisionIterations;
+	c.mMaxConstraintIterations = s.mMaxConstraintIterations;
+	c.mMinTimeRemaining = s.mMinTimeRemaining;
+	c.mCollisionTolerance = s.mCollisionTolerance;
+	c.mCharacterPadding = s.mCharacterPadding;
+	c.mMaxNumHits = s.mMaxNumHits;
+	c.mHitReductionCosMaxAngle = s.mHitReductionCosMaxAngle;
+	c.mPenetrationRecoverySpeed = s.mPenetrationRecoverySpeed;
+	c.mInnerBodyShape = s.mInnerBodyShape == nullptr? cInvalidHandle : 0;
+	c.mInnerBodyIDOverride = s.mInnerBodyIDOverride.GetIndexAndSequenceNumber();
+	c.mInnerBodyLayer = s.mInnerBodyLayer;
+	c.mPosition[0] = c.mPosition[1] = c.mPosition[2] = 0;
+	c.mRotation[0] = c.mRotation[1] = c.mRotation[2] = 0;
+	c.mRotation[3] = 1;
+	c.mUserData = 0;
+	c.mListener = 1;
+	c.mCollisionGroup = cInvalidHandle;
+}
+
+// CharacterVirtual::ExtendedUpdateSettings defaults (f[4..16] of cv_extended_update)
+void jolt_sim_default_extended_update(float *outFloats)
+{
+	CharacterVirtual::ExtendedUpdateSettings s;
+	s.mStickToFloorStepDown.StoreFloat3(reinterpret_cast<Float3 *>(outFloats));
+	s.mWalkStairsStepUp.StoreFloat3(reinterpret_cast<Float3 *>(outFloats + 3));
+	outFloats[6] = s.mWalkStairsMinStepForward;
+	outFloats[7] = s.mWalkStairsStepForwardTest;
+	outFloats[8] = s.mWalkStairsCosAngleForwardContact;
+	s.mWalkStairsStepDownExtra.StoreFloat3(reinterpret_cast<Float3 *>(outFloats + 9));
+}
+
+// The engine / transmission members of SimVehicle from Jolt's settings (the curves and ratios: cInvalidHandle, the
+// constructor's)
+static void SimFromEngine(const VehicleEngineSettings &inEngine, SimVehicleEngine &outEngine)
+{
+	outEngine.mMaxTorque = inEngine.mMaxTorque;
+	outEngine.mMinRPM = inEngine.mMinRPM;
+	outEngine.mMaxRPM = inEngine.mMaxRPM;
+	outEngine.mTorquePoints = cInvalidHandle;
+	outEngine.mNumTorquePoints = 0;
+	outEngine.mInertia = inEngine.mInertia;
+	outEngine.mAngularDamping = inEngine.mAngularDamping;
+}
+
+static void SimFromTransmission(const VehicleTransmissionSettings &inTransmission, SimVehicleTransmission &outTransmission)
+{
+	outTransmission.mMode = uint32(inTransmission.mMode);
+	outTransmission.mGearRatios = cInvalidHandle;
+	outTransmission.mNumGearRatios = 0;
+	outTransmission.mReverseGearRatios = cInvalidHandle;
+	outTransmission.mNumReverseGearRatios = 0;
+	outTransmission.mSwitchTime = inTransmission.mSwitchTime;
+	outTransmission.mClutchReleaseTime = inTransmission.mClutchReleaseTime;
+	outTransmission.mSwitchLatency = inTransmission.mSwitchLatency;
+	outTransmission.mShiftUpRPM = inTransmission.mShiftUpRPM;
+	outTransmission.mShiftDownRPM = inTransmission.mShiftDownRPM;
+	outTransmission.mClutchStrength = inTransmission.mClutchStrength;
+}
+
+// Jolt's VehicleConstraintSettings defaults with the controller settings defaults of VehicleControllerKind inKind as a
+// SimVehicle (the members of the other kinds: the wheeled defaults; the tester and the harness members: SimScenes'
+// defaults; VehicleTrackSettings::mDrivenWheel has no default in Jolt: 0)
+void jolt_sim_default_vehicle(uint32 inKind, SimVehicle *outVehicle)
+{
+	SimEnsureFactory();
+	VehicleConstraintSettings s;
+	WheeledVehicleControllerSettings wheeled;
+	SimVehicle &v = *outVehicle;
+	v.mBody = cInvalidHandle;
+	v.mEnabled = s.mEnabled? 1 : 0;
+	v.mConstraintPriority = s.mConstraintPriority;
+	v.mNumVelocityStepsOverride = s.mNumVelocityStepsOverride;
+	v.mNumPositionStepsOverride = s.mNumPositionStepsOverride;
+	v.mDrawConstraintSize = s.mDrawConstraintSize;
+	v.mUserData = s.mUserData;
+	s.mUp.StoreFloat3(reinterpret_cast<Float3 *>(v.mUp));
+	s.mForward.StoreFloat3(reinterpret_cast<Float3 *>(v.mForward));
+	v.mMaxPitchRollAngle = s.mMaxPitchRollAngle;
+	v.mFirstWheel = v.mNumWheels = v.mFirstAntiRollBar = v.mNumAntiRollBars = 0;
+	v.mController = inKind;
+	v.mFirstDifferential = v.mNumDifferentials = 0;
+	v.mDifferentialLimitedSlipRatio = wheeled.mDifferentialLimitedSlipRatio;
+	MotorcycleControllerSettings motorcycle;
+	v.mMaxLeanAngle = motorcycle.mMaxLeanAngle;
+	v.mLeanSpringConstant = motorcycle.mLeanSpringConstant;
+	v.mLeanSpringDamping = motorcycle.mLeanSpringDamping;
+	v.mLeanSpringIntegrationCoefficient = motorcycle.mLeanSpringIntegrationCoefficient;
+	v.mLeanSpringIntegrationCoefficientDecay = motorcycle.mLeanSpringIntegrationCoefficientDecay;
+	v.mLeanSmoothingFactor = motorcycle.mLeanSmoothingFactor;
+	TrackedVehicleControllerSettings tracked;
+	for (int t = 0; t < 2; ++t)
+	{
+		const VehicleTrackSettings &track = tracked.mTracks[t];
+		SimVehicleTrack &st = v.mTracks[t];
+		st.mDrivenWheel = 0;
+		st.mWheels = 0;
+		st.mNumWheels = uint32(track.mWheels.size());
+		st.mInertia = track.mInertia;
+		st.mAngularDamping = track.mAngularDamping;
+		st.mMaxBrakeTorque = track.mMaxBrakeTorque;
+		st.mDifferentialRatio = track.mDifferentialRatio;
+	}
+	switch (inKind)
+	{
+	case 1:
+		SimFromEngine(tracked.mEngine, v.mEngine);
+		SimFromTransmission(tracked.mTransmission, v.mTransmission);
+		break;
+	case 2:
+		SimFromEngine(motorcycle.mEngine, v.mEngine);
+		SimFromTransmission(motorcycle.mTransmission, v.mTransmission);
+		break;
+	default:
+		SimFromEngine(wheeled.mEngine, v.mEngine);
+		SimFromTransmission(wheeled.mTransmission, v.mTransmission);
+		break;
+	}
+	v.mTester.mKind = 0;
+	v.mTester.mObjectLayer = 0;
+	v.mTester.mUp[0] = 0; v.mTester.mUp[1] = 1; v.mTester.mUp[2] = 0;
+	v.mTester.mMaxSlopeAngle = DegreesToRadians(80.0f);						// The default arguments of the tester constructors
+	v.mTester.mRadius = 0.3f;												// The harness' choice: inRadius of the cast sphere tester has no default
+	v.mTester.mConvexRadiusFraction = 0.1f;
+	v.mCallbacks = 0;
+	v.mCombineFriction = 0;
+	v.mTireMaxImpulse = 0;
+}
+
+// Jolt's WheelSettingsWV (inKind 0) / WheelSettingsTV (inKind 1) defaults as a SimVehicleWheel (the members of the other
+// class: SimScenes' defaults)
+void jolt_sim_default_vehicle_wheel(uint32 inKind, SimVehicleWheel *outWheel)
+{
+	SimEnsureFactory();
+	WheelSettingsWV wv;
+	WheelSettingsTV tv;
+	const WheelSettings &s = inKind == 0? static_cast<const WheelSettings &>(wv) : static_cast<const WheelSettings &>(tv);
+	SimVehicleWheel &w = *outWheel;
+	w.mKind = inKind;
+	s.mPosition.StoreFloat3(reinterpret_cast<Float3 *>(w.mPosition));
+	s.mSuspensionForcePoint.StoreFloat3(reinterpret_cast<Float3 *>(w.mSuspensionForcePoint));
+	s.mSuspensionDirection.StoreFloat3(reinterpret_cast<Float3 *>(w.mSuspensionDirection));
+	s.mSteeringAxis.StoreFloat3(reinterpret_cast<Float3 *>(w.mSteeringAxis));
+	s.mWheelUp.StoreFloat3(reinterpret_cast<Float3 *>(w.mWheelUp));
+	s.mWheelForward.StoreFloat3(reinterpret_cast<Float3 *>(w.mWheelForward));
+	w.mSuspensionMinLength = s.mSuspensionMinLength;
+	w.mSuspensionMaxLength = s.mSuspensionMaxLength;
+	w.mSuspensionPreloadLength = s.mSuspensionPreloadLength;
+	w.mSuspensionSpringMode = uint32(s.mSuspensionSpring.mMode);
+	w.mSuspensionFrequency = s.mSuspensionSpring.mFrequency;
+	w.mSuspensionDamping = s.mSuspensionSpring.mDamping;
+	w.mRadius = s.mRadius;
+	w.mWidth = s.mWidth;
+	w.mEnableSuspensionForcePoint = s.mEnableSuspensionForcePoint? 1 : 0;
+	w.mInertia = wv.mInertia;
+	w.mAngularDamping = wv.mAngularDamping;
+	w.mMaxSteerAngle = wv.mMaxSteerAngle;
+	w.mLongitudinalFriction = cInvalidHandle;
+	w.mNumLongitudinalFriction = 0;
+	w.mLateralFriction = cInvalidHandle;
+	w.mNumLateralFriction = 0;
+	w.mMaxBrakeTorque = wv.mMaxBrakeTorque;
+	w.mMaxHandBrakeTorque = wv.mMaxHandBrakeTorque;
+	w.mLongitudinalFrictionTV = tv.mLongitudinalFriction;
+	w.mLateralFrictionTV = tv.mLateralFriction;
+}
+
+// The bytes of part inPart (VehicleSettingsPart of SimScenes.zig) item inItem of vehicle description inIndex, see
+// SimVehicleSettingsPart: inRestore != 0 restores inBytes into a default object of the part's class and saves it again.
+// Returns the size (the bytes are copied when they fit), cNoBytes when the part does not exist or the restore failed.
+uint32 jolt_sim_vehicle_settings_part(const SimSceneDesc *inDesc, uint32 inIndex, uint32 inPart, uint32 inItem, uint32 inRestore, const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity)
+{
+	SimEnsureFactory();
+	std::string data;
+	if (!SimVehicleSettingsPart(*inDesc, inDesc->mVehicles[inIndex], inPart, inItem, inRestore != 0, inBytes, inSize, data))
+		return cNoBytes;
+	return SimCopyBytes(data, outBytes, inCapacity);
+}
+
+// The SaveBinaryState bytes (with the shapes and the group filter) of the RagdollSettings of ragdoll description inIndex
+// as the world builds them (SimWorld::MakeRagdollSettings, the shapes of the world), or with inRestore != 0
+// RagdollSettings::sRestoreFromBinaryState of inBytes (every byte read) saved again. Returns the size (the bytes are
+// copied when they fit), cNoBytes when the restore failed.
+uint32 jolt_sim_ragdoll_settings_bytes(void *inWorld, uint32 inIndex, uint32 inRestore, const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	Ref<RagdollSettings> settings;
+	if (inRestore != 0)
+	{
+		std::stringstream data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
+		StreamInWrapper stream(data);
+		RagdollSettings::RagdollResult result = RagdollSettings::sRestoreFromBinaryState(stream);
+		if (result.HasError() || !SimReadCompletely(stream))
+			return cNoBytes;
+		settings = result.Get();
+	}
+	else
+		settings = world->MakeRagdollSettings(inIndex);
+	std::stringstream data;
+	StreamOutWrapper stream(data);
+	settings->SaveBinaryState(stream, true, true);
+	return SimCopyBytes(data.str(), outBytes, inCapacity);
+}
+
+// The tables of the RagdollSettings of ragdoll description inIndex (SimWorld::MakeRagdollSettings): the result of
+// Stabilize (1 / 0, 2: not called), the number of parts and GetBodyIndexToConstraintIndex, the number of constraints
+// and GetConstraintIndexToBodyIdxPair (2 values each). Returns the number of values (copied when they fit).
+uint32 jolt_sim_ragdoll_settings_info(void *inWorld, uint32 inIndex, uint32 *outValues, uint32 inCapacity)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	uint32 stabilize = 2;
+	Ref<RagdollSettings> settings = world->MakeRagdollSettings(inIndex, &stabilize);
+	Array<uint32> values;
+	values.push_back(stabilize);
+	const Array<int> &body_to_constraint = settings->GetBodyIndexToConstraintIndex();
+	values.push_back(uint32(body_to_constraint.size()));
+	for (int c : body_to_constraint)
+		values.push_back(uint32(c));
+	const Array<RagdollSettings::BodyIdxPair> &pairs = settings->GetConstraintIndexToBodyIdxPair();
+	values.push_back(uint32(pairs.size()));
+	for (const RagdollSettings::BodyIdxPair &p : pairs)
+	{
+		values.push_back(uint32(p.first));
+		values.push_back(uint32(p.second));
+	}
+	uint32 size = uint32(values.size());
+	if (size <= inCapacity)
+		memcpy(outValues, values.data(), size * sizeof(uint32));
+	return size;
+}
+
+// The CharacterID test (character_id_sequence_len values of SimScenes.zig; the counter is set back to 1 afterwards):
+// sSetNextCharacterID(inFirstID); a default constructed CharacterVirtualSettings a (its mID, then the next ID), a copy
+// b of a (mID, next), c default constructed then assigned from a (mID, next), a CharacterVirtual of a with shape 0 of
+// the world at the origin (GetID, next), GetCharacterVirtualSettings of it (mID, next). "next" is the ID that
+// sNextCharacterID would return (read without consuming it: sNextCharacterID, then sSetNextCharacterID back).
+void jolt_sim_character_id_sequence(void *inWorld, uint32 inFirstID, uint32 *outValues)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	auto next = []() {
+		uint32 value = CharacterID::sNextCharacterID().GetValue();
+		CharacterID::sSetNextCharacterID(value);
+		return value;
+	};
+	CharacterID::sSetNextCharacterID(inFirstID);
+	CharacterVirtualSettings a;
+	a.mShape = world->mShapes[0];
+	outValues[0] = a.mID.GetValue();
+	outValues[1] = next();
+	CharacterVirtualSettings b(a);
+	outValues[2] = b.mID.GetValue();
+	outValues[3] = next();
+	CharacterVirtualSettings c;
+	c = a;
+	outValues[4] = c.mID.GetValue();
+	outValues[5] = next();
+	{
+		Ref<CharacterVirtual> character = new CharacterVirtual(&a, RVec3::sZero(), Quat::sIdentity(), 0, &world->mSystem);
+		outValues[6] = character->GetID().GetValue();
+		outValues[7] = next();
+		CharacterVirtualSettings s = character->GetCharacterVirtualSettings();
+		outValues[8] = s.mID.GetValue();
+		outValues[9] = next();
+	}
+	CharacterID::sSetNextCharacterID();
+}
+
+// 1 when the allocation hooks of the parity process zero-fill (SimInstallHooks): a block that was filled and freed
+// comes back as zeros from Allocate and AlignedAllocate, Reallocate keeps the old bytes and zeroes the new ones
+uint32 jolt_sim_zero_filling_check()
+{
+	SimEnsureFactory();
+	uint32 ok = 1;
+	for (uint32 i = 0; i < 8; ++i)
+	{
+		size_t size = size_t(48) << i;
+		uint8 *dirty = static_cast<uint8 *>(Allocate(size));
+		memset(dirty, 0xab, size);
+		Free(dirty);
+		uint8 *block = static_cast<uint8 *>(Allocate(size));
+		for (size_t j = 0; j < size; ++j)
+			ok &= block[j] == 0? 1 : 0;
+		memset(block, 0xcd, size);
+		uint8 *grown = static_cast<uint8 *>(Reallocate(block, size, 2 * size));
+		for (size_t j = 0; j < 2 * size; ++j)
+			ok &= grown[j] == (j < size? 0xcd : 0)? 1 : 0;
+		Free(grown);
+		uint8 *aligned_dirty = static_cast<uint8 *>(AlignedAllocate(size, 64));
+		memset(aligned_dirty, 0xef, size);
+		AlignedFree(aligned_dirty);
+		uint8 *aligned = static_cast<uint8 *>(AlignedAllocate(size, 64));
+		for (size_t j = 0; j < size; ++j)
+			ok &= aligned[j] == 0? 1 : 0;
+		AlignedFree(aligned);
+	}
+	return ok;
+}
+
+// The number of Jolt asserts that failed in this process (SimAssertFailed; always 0 without JPH_ENABLE_ASSERTS)
+uint32 jolt_sim_reference_assert_count()
+{
+#ifdef JPH_ENABLE_ASSERTS
+	return sSimAssertCount.load();
+#else
+	return 0;
+#endif
+}
+
+// Fails a JPH_ASSERT on purpose (the test of the assert hook): the number of failed asserts before and after it
+void jolt_sim_test_assert_hook(uint32 *outBefore, uint32 *outAfter)
+{
+	SimEnsureFactory();
+	*outBefore = jolt_sim_reference_assert_count();
+	JPH_ASSERT(false, "SimulationParity: the test of the assert hook (expected)");
+	*outAfter = jolt_sim_reference_assert_count();
+}
+
+// 1 when the reference library is built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`)
+uint32 jolt_sim_reference_has_asserts()
+{
+#ifdef JPH_ENABLE_ASSERTS
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 } // extern "C"

@@ -29,7 +29,11 @@
 //! scenes with thousands of bodies, for which it is quadratic). The InvalidateContactCache flags that the operations
 //! before the update set (SetShape, SetUseManifoldReduction, ...) are not saved state, in Jolt neither: every swept update
 //! starts from the snapshot with them set again (`restoreZoltBeforeUpdate`), while the recovery after a failed update
-//! relies on PhysicsSystem.update putting them back (scenes physics_tests_switch_use_manifold_reduction_1 and _2).
+//! relies on PhysicsSystem.update putting them back (scenes physics_tests_switch_use_manifold_reduction_1 and _2). The
+//! failed updates change the layout of the broad phase trees, which the saved state does not hold: scenes with
+//! `SceneEntry.restore_broad_phase` (the object operations query the broad phase in hit order) redo the update after the
+//! sweeps from the snapshot and the broad phase layout of that instant (`BroadPhaseSnapshot`), the other scenes keep the
+//! free running layout (the physics pipeline does not depend on it).
 //!
 //! The PerformanceTest scenes (`perf_*`, milestone M6) are the exact setup of ZoltPerformanceTest's Pyramid,
 //! ConvexVsMesh and HighSpeed scenes with -q=LinearCast, compared after every update for their first 50 / 80 / 20
@@ -91,6 +95,66 @@
 //! states differ at byte 1979" (scene constraints_random_1); reading axis Y2 of a fixed constraint description from
 //! f[6..9] in the slot fails "SimScenes constraint descriptions are ConstraintsParity's" and every fixed constraint scene
 //! before it runs ("constraint description 1 (fixed): the settings of the Zolt slot differ from SimMakeConstraintSettings").
+//!
+//! Characters, ragdolls and vehicles (Phase 7, the recipe for a worker is in the SimScenes header): both worlds keep
+//! their characters, character virtuals, ragdolls and vehicles by handle. The Zolt side of each class group is a slot
+//! (`CharacterSlot`, `CharacterVirtualSlot`, `RagdollSlot`, `VehicleSlot`, `TrackedVehicleSlot`, `MotorcycleSlot`;
+//! `Phase7StubSlot` until the group is ported: the scenes of its Blocker are skipped, a supported scene with a stub slot
+//! fails in checkPhase7Slots). After every update (and after the D12 sweeps and every restore_cross) the object states
+//! are compared (SimScenes.ObjectField: the SaveState bytes of the characters and character virtuals and the getters
+//! that the states do not hold), a mismatch is decoded to the field, the object handle, the item and the component
+//! (`describeObjectStateDifference`, the SaveState fields with the members of CharacterBase / CharacterVirtual /
+//! CharacterContact::SaveState); the CharacterContactListener records (RecordKind 7..17) are compared in call order
+//! (they are the callbacks of the user thread's character operations; a record that cannot be stored fails the
+//! operation that made the callback); `snapshot` / `restore_cross` include the SaveState of every character, and a
+//! restore must read every byte; the `expect_*` operations of Phase 7 must return the scene's `count`. Before a scene
+//! runs, checkPhase7Settings compares the binary state of the vehicle and ragdoll settings that the filled slots make
+//! with the C++ settings, the round trips (each side restores the other side's bytes and saves again) and the
+//! RagdollSettings tables. The test "SimulationParity CharacterID consumption" compares which constructions consume a
+//! CharacterID. Until the classes are ported the Phase 7 scenes run on the C++ side ("SimScenes blocked scenes run on
+//! the C++ side": the object states of the worlds with 0 and 3 threads are identical, decode completely and stay finite,
+//! the character records are identical in call order, the C++ settings round trips give the same bytes). With a
+//! reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene fails when its C++ side
+//! hits a Jolt assert (the release_only scenes excepted).
+//!
+//! Proof that the Phase 7 checks bite: flipping a bit of the object state that the C++ world with 3 threads writes is
+//! reported as "scene character_ops, update 0: the C++ worlds with 0 and 3 threads differ: object state differs at byte
+//! 316 (3 threads 616 bytes, 0 threads 616 bytes): character_save_state (object handle 1, item 0) ground_state 3 threads
+//! 0x00000002 0 threads 0x00000003"; swapping its first two character records as "scene character_virtual_ops, update
+//! 0: character listener record 0 of 14 (call order) differs between the C++ worlds with 0 and 3 threads"
+//! (character_adjust_body_velocity against character_contact_validate); a Zolt object state field that the C++ side
+//! does not write as "object state differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more, starting with
+//! ragdoll_properties (object handle 0, item 0)"; a supported Blocker whose classes are stubs as "scene character_ops
+//! creates Character objects, whose Zolt classes are still stubs, but its blocker .characters is supported"; a ported
+//! class (no `is_stub`) with a stub slot as "the Character classes are ported but their slot in SimulationParity.zig is
+//! still Phase7StubSlot" (and the test "SimulationParity Phase 7 slots follow the ported classes" fails).
+//! CharacterBaseParity.zig compares CharacterBase's SaveState bytes: writing the ground normal in place of the ground
+//! velocity fails it. The checks of the foundation review: a character state restore that does not check that every
+//! byte was read (the check before the review) is reported as "scene character_ops, update 27: restore_cross: a C++
+//! world does not restore the character states of the other one (a read failed or bytes are left)" on the C++ side and
+//! fails "SimulationParity restoring the character states reads every byte" on the Zolt side; an applyOp that ignores
+//! the character recorder fails "SimulationParity a character record that cannot be stored fails the operation"
+//! ("expected error.OutOfMemory, found 0"); a C++ round trip that changes the engine settings is reported as "scene
+//! vehicle_wheeled_ops, vehicle description 0, part engine, item 0: restoring the C++ bytes and saving them again
+//! changes them (restored true, byte 1 of 40)", one that changes the friction of a ragdoll part as "scene ragdoll_ops,
+//! ragdoll description 0: restoring the C++ RagdollSettings bytes and saving them again changes them (restored true,
+//! byte 170 of 1572)"; a copy of CharacterVirtualSettings that consumes an ID (default construction and assignment in
+//! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
+//! 3"). The Ragdoll group: computing the body 1 to body 2 rotation in Ragdoll.driveToPoseUsingMotorsWithVelocity the
+//! other way around (body 1 conjugated times body 2) is reported as "scene ragdoll_motors_animation, ... update 2: after
+//! the update, state f: state differs at byte 1667 ...: bodies[13] (id 0x0080000d) position.x zolt 0x394972b8 ... jolt
+//! 0x3945ee04" (and ragdoll_save_restore at update 1); finalizing the bodies of Ragdoll.addToPhysicsSystem with Activate
+//! whenever it does not lock as "scene ragdoll_add_activation, ... update 0: operation 18
+//! (ragdoll_add_to_physics_system on object handle / description 3) returned 1 in zolt and 0 in jolt" (and ragdoll_ops).
+//!
+//! Proof that the vehicle scenes bite (VehicleSlot, the vehicle core group): multiplying WheelWV's lateral slip angle by
+//! 1.0001 is reported as "scene vehicle_wheeled_ops, ... update 11: ... state differs at byte 92 ...: bodies[2] (id
+//! 0x00800002) position.x zolt 0xbaa3b604 jolt 0xbaa3b60b" (and vehicle_wheeled_in_air at update 28); the convex radius
+//! of VehicleCollisionTesterCastCylinder from the larger instead of the smaller of the wheel's half width and radius as
+//! "scene vehicle_wheeled_ops, ... update 35: ... bodies[2] (id 0x00800002) position.x" (the scene switches to the cast
+//! cylinder tester at update 35); a WheeledVehicleController::GetWheelSpeedAtClutch that is 1.0001 times Jolt's (only the
+//! object state sees it) as "update 1: ... object state differs at byte 1516 ...: vehicle_wheeled (object handle 0, item 0)
+//! wheel_speed_at_clutch".
 //!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
@@ -173,8 +237,25 @@ const Color = zolt.Color;
 const RecordKind = SimScenes.RecordKind;
 const StepListenerMode = SimScenes.StepListenerMode;
 const invalid_handle = SimScenes.invalid_handle;
+const Phase7OpRange = SimScenes.Phase7OpRange;
+const Phase7Classes = SimScenes.Phase7Classes;
+const ObjectField = SimScenes.ObjectField;
+const ObjectFieldHeader = SimScenes.ObjectFieldHeader;
+const ObjectComponent = SimScenes.ObjectComponent;
+const ObjectStateWriter = SimScenes.ObjectStateWriter;
+const VehicleControllerKind = SimScenes.VehicleControllerKind;
+const VehicleSettingsPart = SimScenes.VehicleSettingsPart;
+const SimVehicle = SimScenes.SimVehicle;
+const SimVehicleWheel = SimScenes.SimVehicleWheel;
+const VehicleConstraint = zolt.VehicleConstraint;
+const VehicleControllerSettings = zolt.VehicleControllerSettings;
+const WheelSettings = zolt.WheelSettings;
+const Wheel = zolt.Wheel;
 
 const io = std.testing.io;
+
+/// The result of a C function of SimulationReference.cpp that has no bytes for its arguments (cNoBytes)
+const no_bytes: u32 = 0xffffffff;
 
 /// The C++ reference functions, see SimulationReference.cpp
 const jolt = struct {
@@ -195,6 +276,25 @@ const jolt = struct {
     extern fn jolt_sim_num_active_constraints(world: *anyopaque) u32;
     extern fn jolt_sim_default_constraint_settings_save(kind: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_sim_constraint_settings_save(constraint: *const SimConstraint, out_bytes: [*]u8, capacity: u32) u32;
+    // Phase 7: characters, ragdolls and vehicles
+    extern fn jolt_sim_phase7_struct_sizes(out_sizes: *[32]u32) void;
+    extern fn jolt_sim_object_state(world: *anyopaque, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_take_character_records(world: *anyopaque, out_records: [*]SimRecord, capacity: u32) u32;
+    extern fn jolt_sim_save_character_states(world: *anyopaque, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_restore_character_states(world: *anyopaque, bytes: [*]const u8, size: u32) u32;
+    extern fn jolt_sim_default_character(out_character: *SimScenes.SimCharacter) void;
+    extern fn jolt_sim_default_character_virtual(out_character: *SimScenes.SimCharacterVirtual) void;
+    extern fn jolt_sim_default_extended_update(out_floats: *[12]f32) void;
+    extern fn jolt_sim_default_vehicle(kind: u32, out_vehicle: *SimScenes.SimVehicle) void;
+    extern fn jolt_sim_default_vehicle_wheel(kind: u32, out_wheel: *SimScenes.SimVehicleWheel) void;
+    extern fn jolt_sim_vehicle_settings_part(desc: *const SimSceneDesc, index: u32, part: u32, item: u32, restore: u32, bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_ragdoll_settings_bytes(world: *anyopaque, index: u32, restore: u32, bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_ragdoll_settings_info(world: *anyopaque, index: u32, out_values: [*]u32, capacity: u32) u32;
+    extern fn jolt_sim_character_id_sequence(world: *anyopaque, first_id: u32, out_values: *[SimScenes.character_id_sequence_len]u32) void;
+    extern fn jolt_sim_zero_filling_check() u32;
+    extern fn jolt_sim_reference_assert_count() u32;
+    extern fn jolt_sim_reference_has_asserts() u32;
+    extern fn jolt_sim_test_assert_hook(out_before: *u32, out_after: *u32) void;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -714,6 +814,11 @@ const ZoltWorld = struct {
     step_listener_added: []bool = &.{},
     /// The constraints of the constraint handles (one reference each, also for constraints that are not in the system)
     constraint_handles: std.ArrayList(Ref(Constraint)) = .empty,
+    /// Phase 7: the CharacterContactListener records of the character virtuals (`CharacterRecords` builds them, compared
+    /// in call order)
+    character_recorder: Recorder,
+    /// Phase 7: the objects of the slots (characters, character virtuals, ragdolls, vehicles)
+    phase7: Phase7Storage = .{},
 
     fn create(allocator: Allocator, desc: *const SimSceneDesc, job_kind: JobKind) !*ZoltWorld {
         const self = try allocator.create(ZoltWorld);
@@ -724,9 +829,11 @@ const ZoltWorld = struct {
             .temp = try .init(allocator, desc.temp_allocator_size),
             .broad_phase_layer_interface = .init(),
             .recorder = .{ .allocator = allocator },
+            .character_recorder = .{ .allocator = allocator },
         };
         errdefer self.temp.deinit();
         errdefer self.recorder.deinit();
+        errdefer self.character_recorder.deinit();
         try self.jobs.init(allocator, job_kind);
         errdefer self.jobs.deinit();
 
@@ -775,6 +882,13 @@ const ZoltWorld = struct {
 
     fn destroy(self: *ZoltWorld) void {
         const allocator = self.allocator;
+        // The records of the destruction are not compared: the body activation listener goes first, so that removing the
+        // active bodies of the Phase 7 objects (OnBodyDeactivated) allocates no record. Otherwise the creation sweep sees
+        // the failed allocation of such a record as a swallowed out of memory error (nothing checks the recorder after
+        // the destruction).
+        self.system.setBodyActivationListener(null);
+        // Phase 7 objects first (~SimWorld of the .cpp): they remove their bodies and constraints from the system
+        self.destroyPhase7();
         for (self.step_listeners, self.step_listener_added) |*listener, added| {
             if (added) self.system.removeStepListener(.init(listener));
         }
@@ -788,6 +902,7 @@ const ZoltWorld = struct {
         allocator.free(self.step_listener_added);
         self.jobs.deinit();
         self.recorder.deinit();
+        self.character_recorder.deinit();
         self.temp.deinit();
         allocator.destroy(self);
     }
@@ -931,10 +1046,13 @@ const ZoltWorld = struct {
         return ids;
     }
 
-    /// ApplyOp of SimulationReference.cpp
+    /// ApplyOp of SimulationReference.cpp. A record of a callback of the operation that could not be stored (out of
+    /// memory: the callbacks cannot return errors, Recorder.add latches the failure) fails the operation, also when the
+    /// records are not taken afterwards (createScene under checkAllAllocationFailures).
     fn applyOp(self: *ZoltWorld, op: *const SimOp) !u32 {
         const result = try self.applyOpInner(op);
         try self.recorder.checkError();
+        try self.character_recorder.checkError();
         return result;
     }
 
@@ -1096,12 +1214,16 @@ const ZoltWorld = struct {
 
             .set_update, .snapshot, .restore_cross => unreachable, // Driver operations
 
-            // The constraint operations (Phase 6): every OpKind in a ConstraintOpRange, without a list that the worker
-            // groups would extend at the same place
+            // The constraint operations (Phase 6) and the character, ragdoll and vehicle operations (Phase 7): every OpKind
+            // in a ConstraintOpRange / Phase7OpRange, without a list that the worker groups would extend at the same place
             inline else => |k| {
-                if (comptime ConstraintOpRange.of(@intFromEnum(k)) == null)
+                if (comptime ConstraintOpRange.of(@intFromEnum(k)) != null) {
+                    return self.applyConstraintOp(op);
+                } else if (comptime Phase7OpRange.of(@intFromEnum(k)) != null) {
+                    return self.applyPhase7Op(op);
+                } else {
                     @compileError("operation without prong: " ++ @tagName(k));
-                return self.applyConstraintOp(op);
+                }
             },
         }
 
@@ -1264,6 +1386,205 @@ const ZoltWorld = struct {
         }
         return n;
     }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Phase 7: characters, ragdolls and vehicles (the slots, see "Characters, ragdolls and vehicles" below)
+
+    /// A Phase 7 operation (ApplyObjectOp of SimulationReference.cpp): the slot of its Phase7OpRange. The operations of
+    /// the vehicle variants get the vehicle of their handle from VehicleSlot and return its ConstraintState
+    /// (ApplyVehicleOp of the .cpp)
+    fn applyPhase7Op(self: *ZoltWorld, op: *const SimOp) !u32 {
+        const kind: OpKind = @enumFromInt(op.kind);
+        return switch (Phase7OpRange.of(op.kind).?) {
+            .character => if (kind == .create_character) CharacterSlot.create(self, op) else CharacterSlot.applyOp(self, op),
+            .character_virtual => if (kind == .create_character_virtual) CharacterVirtualSlot.create(self, op) else CharacterVirtualSlot.applyOp(self, op),
+            .ragdoll => if (kind == .create_ragdoll) RagdollSlot.create(self, op) else RagdollSlot.applyOp(self, op),
+            .vehicle => if (kind == .create_vehicle) VehicleSlot.create(self, op) else VehicleSlot.applyOp(self, op),
+            .vehicle_tracked => {
+                const vehicle = try VehicleSlot.vehicle(self, op.index);
+                try TrackedVehicleSlot.applyVehicleOp(self, op, vehicle);
+                return VehicleSlot.constraintState(vehicle);
+            },
+            .vehicle_motorcycle => {
+                const vehicle = try VehicleSlot.vehicle(self, op.index);
+                try MotorcycleSlot.applyVehicleOp(self, op, vehicle);
+                return VehicleSlot.constraintState(vehicle);
+            },
+            .spare => error.SceneNotSupported,
+        };
+    }
+
+    /// The object state (WriteObjectState of SimulationReference.cpp): every character, character virtual, ragdoll and
+    /// vehicle in handle order, the destroyed ones skipped
+    fn writeObjectState(self: *ZoltWorld, out: *std.ArrayList(u8)) !void {
+        var writer: ObjectStateWriter = .{ .allocator = self.allocator, .bytes = out.* };
+        defer out.* = writer.bytes;
+        writer.bytes.clearRetainingCapacity();
+        try CharacterSlot.writeState(self, &writer);
+        try CharacterVirtualSlot.writeState(self, &writer);
+        try RagdollSlot.writeState(self, &writer);
+        try VehicleSlot.writeState(self, &writer);
+    }
+
+    /// The SaveState bytes of every character and character virtual in handle order (SaveCharacterStates of the .cpp)
+    fn saveCharacterStates(self: *ZoltWorld, out: *std.ArrayList(u8)) !void {
+        var recorder = StateRecorderImpl.init(self.allocator);
+        defer recorder.deinit();
+        try CharacterSlot.saveStates(self, &recorder);
+        try CharacterVirtualSlot.saveStates(self, &recorder);
+        if (recorder.isFailed()) return error.OutOfMemory;
+        out.clearRetainingCapacity();
+        try out.appendSlice(self.allocator, recorder.getData());
+    }
+
+    /// RestoreState of every character and character virtual from the bytes of `saveCharacterStates` (of either side):
+    /// true when the bytes were read without error and completely (jolt_sim_restore_character_states of the .cpp: the
+    /// stream sets eof only on a read past the end, so one more byte is read, which must fail at the end; no bytes: true
+    /// when there are no characters)
+    fn restoreCharacterStates(self: *ZoltWorld, bytes: []const u8) !bool {
+        if (bytes.len == 0) {
+            var states: std.ArrayList(u8) = .empty;
+            defer states.deinit(self.allocator);
+            try self.saveCharacterStates(&states);
+            return states.items.len == 0;
+        }
+        var recorder = StateRecorderImpl.init(self.allocator);
+        defer recorder.deinit();
+        recorder.writeBytes(bytes);
+        if (recorder.isFailed()) return error.OutOfMemory;
+        recorder.rewind();
+        try CharacterSlot.restoreStates(self, &recorder);
+        try CharacterVirtualSlot.restoreStates(self, &recorder);
+        const read = !recorder.isFailed();
+        var extra: [1]u8 = undefined;
+        recorder.readBytes(&extra); // Fails at the end of the bytes
+        return read and recorder.isEOF();
+    }
+
+    fn takeCharacterRecords(self: *ZoltWorld, out: *std.ArrayList(SimRecord)) !void {
+        try self.character_recorder.checkError();
+        self.character_recorder.mutex.lock(io);
+        defer self.character_recorder.mutex.unlock(io);
+        try out.appendSlice(self.allocator, self.character_recorder.records.items);
+        self.character_recorder.records.clearRetainingCapacity();
+    }
+
+    /// Destroy the Phase 7 objects (before the system, ~SimWorld of the .cpp: vehicles, characters, character virtuals,
+    /// ragdolls)
+    fn destroyPhase7(self: *ZoltWorld) void {
+        VehicleSlot.destroyAll(self);
+        CharacterSlot.destroyAll(self);
+        CharacterVirtualSlot.destroyAll(self);
+        RagdollSlot.destroyAll(self);
+    }
+
+    /// The BroadPhaseQuadTree of the system (the worlds use Jolt's default broad phase)
+    fn broadPhase(self: *ZoltWorld) *zolt.BroadPhaseQuadTree {
+        return @alignCast(@fieldParentPtr("base", self.system.broad_phase.?));
+    }
+};
+
+/// The layout of the Zolt broad phase at one instant, for the D12 sweeps of the scenes with
+/// SceneEntry.restore_broad_phase: the node pages (BroadPhaseQuadTree.initBroadPhase commits all of them), the state of
+/// the node free list, the tracking of every body, the state of every tree (number of bodies, roots, dirty flag, the
+/// batch of nodes to free) and the next tree to update. The failed updates of the sweeps change all of these, and none
+/// is part of the saved state. Captured and restored between updates (no thread uses the broad phase); the sweeps
+/// restore it together with the saved state, so that the bodies and the trees match again.
+const BroadPhaseSnapshot = struct {
+    const BroadPhaseQuadTree = zolt.BroadPhaseQuadTree;
+    const QuadTree = zolt.QuadTree;
+    const NodeAllocator = QuadTree.NodeAllocator;
+    const FreeListState = @FieldType(NodeAllocator, "free_list");
+
+    const Layer = struct {
+        tree_state: QuadTree.TreeState,
+        free_node_batch: NodeAllocator.Batch,
+    };
+
+    allocator: Allocator,
+    /// The bytes of the allocated node pages (object storage: the node and its free list link)
+    pages: []u8,
+    num_objects_allocated: u32,
+    allocation_tag: u32,
+    first_free_object_and_tag: u64,
+    first_free_object_in_new_page: u32,
+    num_free_objects: @FieldType(FreeListState, "num_free_objects"),
+    tracking: []QuadTree.Tracking,
+    layers: []Layer,
+    next_layer_to_update: u32,
+    query_lock_idx: u32,
+
+    fn pageBytes(nodes: *const NodeAllocator) usize {
+        return @as(usize, nodes.page_size) * NodeAllocator.object_storage_size;
+    }
+
+    fn numPages(nodes: *const NodeAllocator) usize {
+        return nodes.num_objects_allocated.load(.monotonic) / nodes.page_size;
+    }
+
+    fn capture(allocator: Allocator, bp: *const BroadPhaseQuadTree) Allocator.Error!BroadPhaseSnapshot {
+        const nodes = &bp.node_allocator;
+        const page_bytes = pageBytes(nodes);
+        const num_pages = numPages(nodes);
+        const pages = try allocator.alloc(u8, num_pages * page_bytes);
+        errdefer allocator.free(pages);
+        for (0..num_pages) |p| {
+            const page: [*]const u8 = @ptrCast(nodes.pages.?[p]);
+            @memcpy(pages[p * page_bytes ..][0..page_bytes], page[0..page_bytes]);
+        }
+        const tracking = try allocator.dupe(QuadTree.Tracking, bp.tracking);
+        errdefer allocator.free(tracking);
+        const layers = try allocator.alloc(Layer, bp.layers.len);
+        for (layers, bp.layers) |*l, *tree|
+            l.* = .{ .tree_state = tree.tree_state, .free_node_batch = tree.free_node_batch };
+        const free_list = &nodes.free_list;
+        return .{
+            .allocator = allocator,
+            .pages = pages,
+            .num_objects_allocated = nodes.num_objects_allocated.load(.monotonic),
+            .allocation_tag = free_list.allocation_tag.load(.monotonic),
+            .first_free_object_and_tag = free_list.first_free_object_and_tag.load(.monotonic),
+            .first_free_object_in_new_page = free_list.first_free_object_in_new_page.load(.monotonic),
+            .num_free_objects = free_list.num_free_objects,
+            .tracking = tracking,
+            .layers = layers,
+            .next_layer_to_update = bp.next_layer_to_update,
+            .query_lock_idx = bp.query_lock_idx.load(.monotonic),
+        };
+    }
+
+    /// Write the layout back (error.SceneError when the broad phase allocated node pages since the capture: it commits
+    /// all of them in initBroadPhase)
+    fn restore(self: *const BroadPhaseSnapshot, bp: *BroadPhaseQuadTree) !void {
+        const nodes = &bp.node_allocator;
+        if (nodes.num_objects_allocated.load(.monotonic) != self.num_objects_allocated or bp.tracking.len != self.tracking.len or bp.layers.len != self.layers.len) {
+            std.debug.print("SimulationParity: the broad phase changed its node pages, bodies or layers since the snapshot\n", .{});
+            return error.SceneError;
+        }
+        const page_bytes = pageBytes(nodes);
+        for (0..numPages(nodes)) |p| {
+            const page: [*]u8 = @ptrCast(nodes.pages.?[p]);
+            @memcpy(page[0..page_bytes], self.pages[p * page_bytes ..][0..page_bytes]);
+        }
+        const free_list = &nodes.free_list;
+        free_list.allocation_tag.store(self.allocation_tag, .monotonic);
+        free_list.first_free_object_and_tag.store(self.first_free_object_and_tag, .monotonic);
+        free_list.first_free_object_in_new_page.store(self.first_free_object_in_new_page, .monotonic);
+        free_list.num_free_objects = self.num_free_objects;
+        @memcpy(bp.tracking, self.tracking);
+        for (bp.layers, self.layers) |*tree, *l| {
+            tree.tree_state = l.tree_state;
+            tree.free_node_batch = l.free_node_batch;
+        }
+        bp.next_layer_to_update = self.next_layer_to_update;
+        bp.query_lock_idx.store(self.query_lock_idx, .monotonic);
+    }
+
+    fn deinit(self: *BroadPhaseSnapshot) void {
+        self.allocator.free(self.pages);
+        self.allocator.free(self.tracking);
+        self.allocator.free(self.layers);
+    }
 };
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -1332,6 +1653,91 @@ const CppWorld = struct {
     /// The number of constraints of the system whose IsActive() is true
     fn numActiveConstraints(self: CppWorld) u32 {
         return jolt.jolt_sim_num_active_constraints(self.handle);
+    }
+
+    /// Phase 7: the object state (WriteObjectState)
+    fn objectState(self: CppWorld, allocator: Allocator, out: *std.ArrayList(u8)) !void {
+        try getBytes(allocator, out, self.handle, &jolt.jolt_sim_object_state);
+    }
+
+    /// Phase 7: the SaveState bytes of every character and character virtual in handle order
+    fn saveCharacterStates(self: CppWorld, allocator: Allocator, out: *std.ArrayList(u8)) !void {
+        try getBytes(allocator, out, self.handle, &jolt.jolt_sim_save_character_states);
+    }
+
+    fn restoreCharacterStates(self: CppWorld, bytes: []const u8) bool {
+        return jolt.jolt_sim_restore_character_states(self.handle, bytes.ptr, @intCast(bytes.len)) != 0;
+    }
+
+    /// Phase 7: the CharacterContactListener records in call order
+    fn takeCharacterRecords(self: CppWorld, allocator: Allocator, out: *std.ArrayList(SimRecord)) !void {
+        const n = jolt.jolt_sim_take_character_records(self.handle, out.items.ptr, 0);
+        if (n == 0) return;
+        try out.ensureUnusedCapacity(allocator, n);
+        const unused = out.unusedCapacitySlice();
+        const taken = jolt.jolt_sim_take_character_records(self.handle, unused.ptr, @intCast(unused.len));
+        std.debug.assert(taken <= unused.len);
+        out.items.len += taken;
+    }
+
+    /// Phase 7: the bytes of a part of vehicle description `index` (jolt_sim_vehicle_settings_part: SaveBinaryState of
+    /// the part, or with `restore_from` a default object of its class restores those bytes and is saved again); false:
+    /// no such part, or the restore failed
+    fn vehicleSettingsPart(allocator: Allocator, desc: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const bytes = restore_from orelse &.{};
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_vehicle_settings_part(desc, index, @intFromEnum(part), item, @intFromBool(restore_from != null), bytes.ptr, @intCast(bytes.len), out.items.ptr, @intCast(out.capacity));
+            if (size == no_bytes) return false;
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return true;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
+    }
+
+    /// Phase 7: the SaveBinaryState bytes of the RagdollSettings of ragdoll description `index` (with the shapes and the
+    /// group filter), or with `restore_from` of RagdollSettings::sRestoreFromBinaryState of those bytes; false: the
+    /// restore failed
+    fn ragdollSettingsBytes(self: CppWorld, allocator: Allocator, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const bytes = restore_from orelse &.{};
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_ragdoll_settings_bytes(self.handle, index, @intFromBool(restore_from != null), bytes.ptr, @intCast(bytes.len), out.items.ptr, @intCast(out.capacity));
+            if (size == no_bytes) return false;
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return true;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
+    }
+
+    /// Phase 7: the tables of the RagdollSettings of ragdoll description `index` (jolt_sim_ragdoll_settings_info)
+    fn ragdollSettingsInfo(self: CppWorld, allocator: Allocator, index: u32, out: *std.ArrayList(u32)) !void {
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_ragdoll_settings_info(self.handle, index, out.items.ptr, @intCast(out.capacity));
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
+    }
+
+    /// The bytes of a C function that returns their size and copies them when they fit
+    fn getBytes(allocator: Allocator, out: *std.ArrayList(u8), handle: *anyopaque, function: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32) !void {
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = function(handle, out.items.ptr, @intCast(out.capacity));
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
     }
 };
 
@@ -1611,6 +2017,332 @@ pub fn describeStateDifference(allocator: Allocator, zolt_bytes: []const u8, jol
 }
 
 // -------------------------------------------------------------------------------------------------------------------
+// Phase 7: the object state decoder. The object state (SimScenes.ObjectField, written by the slots' `writeState` and
+// WriteObjectState of SimulationReference.cpp) is a list of fields; a mismatch is reported with the field, the object
+// handle, the item (contact, wheel, joint, ...) and the component, the SaveState fields with the members of
+// CharacterBase / CharacterVirtual / CharacterContact::SaveState.
+
+/// A field of an object state: its header and the offset of the header in the bytes
+const ObjectFieldView = struct {
+    header: ObjectFieldHeader,
+    offset: usize,
+
+    fn data(self: ObjectFieldView, bytes: []const u8) []const u8 {
+        return bytes[self.offset + @sizeOf(ObjectFieldHeader) ..][0..self.header.size];
+    }
+
+    fn field(self: ObjectFieldView) ?ObjectField {
+        return std.enums.fromInt(ObjectField, self.header.field);
+    }
+};
+
+/// Iterates the fields of an object state (error.InvalidObjectState when a field does not fit in the bytes)
+const ObjectFieldIterator = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *ObjectFieldIterator) !?ObjectFieldView {
+        if (self.pos == self.bytes.len) return null;
+        if (self.pos + @sizeOf(ObjectFieldHeader) > self.bytes.len) return error.InvalidObjectState;
+        const header = std.mem.bytesToValue(ObjectFieldHeader, self.bytes[self.pos..][0..@sizeOf(ObjectFieldHeader)]);
+        const end = self.pos + @sizeOf(ObjectFieldHeader) + header.size;
+        if (end > self.bytes.len) return error.InvalidObjectState;
+        const view: ObjectFieldView = .{ .header = header, .offset = self.pos };
+        self.pos = end;
+        return view;
+    }
+};
+
+/// The members of CharacterBase::SaveState (the start of the `*_save_state` fields)
+const character_base_save_state = [_]ObjectComponent{
+    .{ .name = "ground_state", .kind = .u32 },
+    .{ .name = "ground_body_id", .kind = .u32 },
+    .{ .name = "ground_body_sub_shape_id", .kind = .u32 },
+    .{ .name = "ground_position", .kind = .real, .count = 3 },
+    .{ .name = "ground_normal", .kind = .f32, .count = 3 },
+    .{ .name = "ground_velocity", .kind = .f32, .count = 3 },
+};
+
+/// The members of CharacterVirtual::SaveState after CharacterBase's (then `num_contacts` contacts)
+const character_virtual_save_state = [_]ObjectComponent{
+    .{ .name = "position", .kind = .real, .count = 3 },
+    .{ .name = "rotation", .kind = .f32, .count = 4 },
+    .{ .name = "linear_velocity", .kind = .f32, .count = 3 },
+    .{ .name = "last_delta_time", .kind = .f32 },
+    .{ .name = "max_hits_exceeded", .kind = .u8 },
+    .{ .name = "num_contacts", .kind = .u32 },
+};
+
+/// The members of CharacterContact::SaveState (the contacts with mHadCollision of CharacterVirtual::SaveState)
+const character_contact_save_state = [_]ObjectComponent{
+    .{ .name = "contact.body_b", .kind = .u32 },
+    .{ .name = "contact.character_id_b", .kind = .u32 },
+    .{ .name = "contact.sub_shape_id_b", .kind = .u32 },
+    .{ .name = "contact.position", .kind = .real, .count = 3 },
+    .{ .name = "contact.linear_velocity", .kind = .f32, .count = 3 },
+    .{ .name = "contact.contact_normal", .kind = .f32, .count = 3 },
+    .{ .name = "contact.surface_normal", .kind = .f32, .count = 3 },
+    .{ .name = "contact.distance", .kind = .f32 },
+    .{ .name = "contact.fraction", .kind = .f32 },
+    .{ .name = "contact.motion_type_b", .kind = .u8 },
+    .{ .name = "contact.is_sensor_b", .kind = .u8 },
+    .{ .name = "contact.had_collision", .kind = .u8 },
+    .{ .name = "contact.was_discarded", .kind = .u8 },
+    .{ .name = "contact.can_push_character", .kind = .u8 },
+};
+
+fn componentsSize(components: []const ObjectComponent) usize {
+    var size: usize = 0;
+    for (components) |c| size += SimScenes.objectComponentSize(c.kind) * c.count;
+    return size;
+}
+
+/// The components of a field of an object state (the caller frees the slice; null: an unknown field number)
+fn objectFieldComponents(allocator: Allocator, view: ObjectFieldView, bytes: []const u8) !?[]ObjectComponent {
+    const field = view.field() orelse return null;
+    var list: std.ArrayList(ObjectComponent) = .empty;
+    errdefer list.deinit(allocator);
+    switch (field) {
+        .character_save_state => try list.appendSlice(allocator, &character_base_save_state),
+        .cv_save_state => {
+            try list.appendSlice(allocator, &character_base_save_state);
+            try list.appendSlice(allocator, &character_virtual_save_state);
+            const data = view.data(bytes);
+            const offset = componentsSize(list.items) - 4;
+            if (offset + 4 <= data.len) {
+                // The contacts (bounded by the size of the field, the number may be garbage in a mismatch)
+                const num_contacts = std.mem.readInt(u32, data[offset..][0..4], .little);
+                const max_contacts = (data.len - offset - 4) / componentsSize(&character_contact_save_state);
+                for (0..@min(num_contacts, max_contacts)) |_|
+                    try list.appendSlice(allocator, &character_contact_save_state);
+            }
+        },
+        else => try list.appendSlice(allocator, SimScenes.objectFieldLayout(field).?),
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
+/// A value of an object state
+const ObjectValue = struct {
+    offset: usize,
+    kind: SimScenes.ObjectComponentKind,
+    header: ObjectFieldHeader,
+    name: []const u8,
+    /// The element of a vector / matrix component (null: a scalar)
+    index: ?u8 = null,
+};
+
+/// The values of an object state (the layout of the C++ bytes). `complete` is false when a field is unknown or its
+/// components do not add up to its size.
+const ObjectStateLayout = struct {
+    allocator: Allocator,
+    values: std.ArrayList(ObjectValue) = .empty,
+    complete: bool = true,
+
+    fn deinit(self: *ObjectStateLayout) void {
+        self.values.deinit(self.allocator);
+    }
+
+    fn decode(self: *ObjectStateLayout, bytes: []const u8) !void {
+        var it: ObjectFieldIterator = .{ .bytes = bytes };
+        while (true) {
+            const view = (it.next() catch {
+                self.complete = false;
+                return;
+            }) orelse return;
+            const components = (try objectFieldComponents(self.allocator, view, bytes)) orelse {
+                self.complete = false;
+                continue;
+            };
+            defer self.allocator.free(components);
+            var offset = view.offset + @sizeOf(ObjectFieldHeader);
+            const end = offset + view.header.size;
+            components: for (components) |c| {
+                const size = SimScenes.objectComponentSize(c.kind);
+                for (0..c.count) |k| {
+                    if (offset + size > end) {
+                        self.complete = false;
+                        break :components;
+                    }
+                    try self.values.append(self.allocator, .{ .offset = offset, .kind = c.kind, .header = view.header, .name = c.name, .index = if (c.count > 1) @intCast(k) else null });
+                    offset += size;
+                }
+            }
+            if (offset != end) self.complete = false;
+        }
+    }
+
+    /// The first value that is not finite (a float or Real)
+    fn firstNotFinite(self: *const ObjectStateLayout, bytes: []const u8) ?*const ObjectValue {
+        for (self.values.items) |*v| {
+            const finite = switch (v.kind) {
+                .f32 => std.math.isFinite(std.mem.bytesToValue(f32, bytes[v.offset..][0..4])),
+                .real => std.math.isFinite(std.mem.bytesToValue(Real, bytes[v.offset..][0..@sizeOf(Real)])),
+                else => true,
+            };
+            if (!finite) return v;
+        }
+        return null;
+    }
+};
+
+fn writeObjectFieldName(w: *std.Io.Writer, header: ObjectFieldHeader) !void {
+    if (std.enums.fromInt(ObjectField, header.field)) |field|
+        try w.print("{t}", .{field})
+    else
+        try w.print("field {d}", .{header.field});
+    try w.print(" (object handle {d}, item {d})", .{ header.handle, header.item });
+}
+
+fn writeObjectValueName(w: *std.Io.Writer, value: *const ObjectValue) !void {
+    try writeObjectFieldName(w, value.header);
+    try w.print(" {s}", .{value.name});
+    if (value.index) |i| {
+        if (i < 4) try w.print(".{c}", .{"xyzw"[i]}) else try w.print("[{d}]", .{i});
+    }
+}
+
+fn writeObjectValue(w: *std.Io.Writer, value: *const ObjectValue, bytes: []const u8) !void {
+    const size = SimScenes.objectComponentSize(value.kind);
+    if (value.offset + size > bytes.len) {
+        try w.writeAll("(missing)");
+        return;
+    }
+    const b = bytes[value.offset..][0..size];
+    switch (value.kind) {
+        .u8 => try w.print("{d}", .{b[0]}),
+        .u32 => try w.print("0x{x:0>8}", .{std.mem.bytesToValue(u32, b[0..4])}),
+        .i32 => try w.print("{d}", .{std.mem.bytesToValue(i32, b[0..4])}),
+        .u64 => try w.print("0x{x:0>16}", .{std.mem.bytesToValue(u64, b[0..8])}),
+        .f32 => {
+            const v = std.mem.bytesToValue(f32, b[0..4]);
+            try w.print("0x{x:0>8} ({e})", .{ @as(u32, @bitCast(v)), v });
+        },
+        .real => {
+            const v = std.mem.bytesToValue(Real, b[0..@sizeOf(Real)]);
+            try w.print("0x{x} ({e})", .{ @as(std.meta.Int(.unsigned, @bitSizeOf(Real)), @bitCast(v)), v });
+        },
+    }
+}
+
+/// The names of the two object states that `describeObjectStateDifference` compares: the checked one and the reference,
+/// whose layout decodes the bytes ("SimScenes blocked scenes run on the C++ side" compares two C++ worlds)
+pub const ObjectStateSides = struct {
+    checked: []const u8 = "zolt",
+    reference: []const u8 = "jolt",
+};
+
+/// Describe where the Zolt object state differs from the Jolt one (null when they are equal), the caller owns the text
+pub fn describeObjectStateDifference(allocator: Allocator, zolt_bytes: []const u8, jolt_bytes: []const u8, sides: ObjectStateSides) !?[]u8 {
+    const first = std.mem.indexOfDiff(u8, zolt_bytes, jolt_bytes) orelse return null;
+
+    var layout: ObjectStateLayout = .{ .allocator = allocator };
+    defer layout.deinit();
+    try layout.decode(jolt_bytes);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.print("object state differs at byte {d} ({s} {d} bytes, {s} {d} bytes)", .{ first, sides.checked, zolt_bytes.len, sides.reference, jolt_bytes.len });
+
+    // Zolt writes more: the fields after the end of the jolt bytes
+    if (first == jolt_bytes.len) {
+        try w.print(": {s} writes more, starting with ", .{sides.checked});
+        if (first + @sizeOf(ObjectFieldHeader) <= zolt_bytes.len)
+            try writeObjectFieldName(w, std.mem.bytesToValue(ObjectFieldHeader, zolt_bytes[first..][0..@sizeOf(ObjectFieldHeader)]))
+        else
+            try w.writeAll("a truncated field");
+        return try out.toOwnedSlice();
+    }
+
+    // A field header: the sides write other fields or objects here
+    var it: ObjectFieldIterator = .{ .bytes = jolt_bytes };
+    while (it.next() catch null) |view| {
+        if (first >= view.offset + @sizeOf(ObjectFieldHeader)) continue;
+        if (first < view.offset) break;
+        try w.print(": the fields differ, {s} ", .{sides.reference});
+        try writeObjectFieldName(w, view.header);
+        try w.print(" of {d} bytes, {s} ", .{ view.header.size, sides.checked });
+        if (view.offset + @sizeOf(ObjectFieldHeader) <= zolt_bytes.len) {
+            const zolt_header = std.mem.bytesToValue(ObjectFieldHeader, zolt_bytes[view.offset..][0..@sizeOf(ObjectFieldHeader)]);
+            try writeObjectFieldName(w, zolt_header);
+            try w.print(" of {d} bytes", .{zolt_header.size});
+        } else try w.writeAll("nothing");
+        return try out.toOwnedSlice();
+    }
+
+    // The first differing values
+    var listed: u32 = 0;
+    for (layout.values.items) |*value| {
+        const size = SimScenes.objectComponentSize(value.kind);
+        if (value.offset + size <= first) continue;
+        const differs = value.offset + size > zolt_bytes.len or !std.mem.eql(u8, zolt_bytes[value.offset..][0..size], jolt_bytes[value.offset..][0..size]);
+        if (!differs) continue;
+        switch (listed) {
+            0 => try w.writeAll(": "),
+            1 => try w.print("\n  further differing values ({s} layout):\n    ", .{sides.reference}),
+            else => try w.writeAll("\n    "),
+        }
+        try writeObjectValueName(w, value);
+        try w.print(" {s} ", .{sides.checked});
+        try writeObjectValue(w, value, zolt_bytes);
+        try w.print(" {s} ", .{sides.reference});
+        try writeObjectValue(w, value, jolt_bytes);
+        listed += 1;
+        if (listed == 12) break;
+    }
+    if (listed == 0) try w.writeAll(": past the decoded values");
+    return try out.toOwnedSlice();
+}
+
+/// What the object states of a run show (Expect.ground_states, Expect.wheel_contacts, Expect.vehicle_*)
+const ObjectStats = struct {
+    /// The ground states (bit `1 << EGroundState`) of the characters and character virtuals after some update
+    ground_states: u32 = 0,
+    /// Some wheel had a contact after some update
+    wheel_contacts: bool = false,
+    /// The transmission gears of the vehicles (SimScenes.gearBit) after some update
+    vehicle_gears: u32 = 0,
+    /// Forward shifts up / down between two consecutive object states of a vehicle
+    vehicle_up_shifts: u32 = 0,
+    vehicle_down_shifts: u32 = 0,
+    /// The gear of each vehicle handle in the previous object state (null: none yet)
+    previous_gears: [max_tracked_vehicles]?i32 = @splat(null),
+
+    const max_tracked_vehicles = 16;
+};
+
+/// Add what an object state shows to `stats`
+fn scanObjectState(bytes: []const u8, stats: *ObjectStats) !void {
+    var it: ObjectFieldIterator = .{ .bytes = bytes };
+    while (try it.next()) |view| {
+        const data = view.data(bytes);
+        switch (view.field() orelse continue) {
+            .character_save_state, .cv_save_state => if (data.len >= 4) {
+                const ground_state = std.mem.readInt(u32, data[0..4], .little);
+                if (ground_state < 32) stats.ground_states |= @as(u32, 1) << @intCast(ground_state);
+            },
+            .vehicle_wheel => if (data.len >= 16 and std.mem.readInt(u32, data[12..16], .little) != 0) {
+                stats.wheel_contacts = true;
+            },
+            .vehicle_transmission => if (data.len >= 4) {
+                const gear = std.mem.readInt(i32, data[0..4], .little);
+                if (gear >= -8 and gear < 24) stats.vehicle_gears |= SimScenes.gearBit(gear);
+                const handle = view.header.handle;
+                if (handle < ObjectStats.max_tracked_vehicles) {
+                    if (stats.previous_gears[handle]) |previous| {
+                        if (previous >= 1 and gear == previous + 1) stats.vehicle_up_shifts += 1;
+                        if (previous >= 2 and gear == previous - 1) stats.vehicle_down_shifts += 1;
+                    }
+                    stats.previous_gears[handle] = gear;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------------------------
 // The driver
 
 const Config = struct {
@@ -1658,6 +2390,12 @@ const Run = struct {
     zolt_records: std.ArrayList(SimRecord) = .empty,
     jolt_records: std.ArrayList(SimRecord) = .empty,
     snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty }),
+    /// Phase 7: the object states, the character listener records and the character states of the snapshots
+    zolt_objects: std.ArrayList(u8) = .empty,
+    jolt_objects: std.ArrayList(u8) = .empty,
+    zolt_character_records: std.ArrayList(SimRecord) = .empty,
+    jolt_character_records: std.ArrayList(SimRecord) = .empty,
+    character_snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty }),
     /// Statistics for the sanity checks of the test
     stats: RunStats = .{},
 
@@ -1670,6 +2408,43 @@ const Run = struct {
             s[0].deinit(self.allocator);
             s[1].deinit(self.allocator);
         }
+        self.zolt_objects.deinit(self.allocator);
+        self.jolt_objects.deinit(self.allocator);
+        self.zolt_character_records.deinit(self.allocator);
+        self.jolt_character_records.deinit(self.allocator);
+        for (&self.character_snapshots) |*s| {
+            s[0].deinit(self.allocator);
+            s[1].deinit(self.allocator);
+        }
+    }
+
+    /// Phase 7: compare the object states of both sides (`what` describes the moment)
+    fn compareObjectStates(self: *Run, what: []const u8) !void {
+        try self.zw.writeObjectState(&self.zolt_objects);
+        try self.cw.objectState(self.allocator, &self.jolt_objects);
+        if (try describeObjectStateDifference(self.allocator, self.zolt_objects.items, self.jolt_objects.items, .{})) |message| {
+            defer self.allocator.free(message);
+            return self.fail("{s}: {s}", .{ what, message });
+        }
+        try scanObjectState(self.jolt_objects.items, &self.stats.objects);
+    }
+
+    /// Phase 7: compare the CharacterContactListener records since the last comparison in call order (the user thread
+    /// calls them in Jolt's deterministic order: the character operations run between the updates)
+    fn compareCharacterRecords(self: *Run) !void {
+        self.zolt_character_records.clearRetainingCapacity();
+        self.jolt_character_records.clearRetainingCapacity();
+        try self.zw.takeCharacterRecords(&self.zolt_character_records);
+        try self.cw.takeCharacterRecords(self.allocator, &self.jolt_character_records);
+        for (self.jolt_character_records.items) |r|
+            self.stats.records[r.kind] += 1;
+        const n = @min(self.zolt_character_records.items.len, self.jolt_character_records.items.len);
+        for (self.zolt_character_records.items[0..n], self.jolt_character_records.items[0..n], 0..) |z, j, i| {
+            if (!std.meta.eql(z, j))
+                return self.fail("character listener record {d} of {d} (call order) differs:\n  zolt {f}\n  jolt {f}", .{ i, self.jolt_character_records.items.len, RecordText{ .record = z }, RecordText{ .record = j } });
+        }
+        if (self.zolt_character_records.items.len != self.jolt_character_records.items.len)
+            return self.fail("{d} character listener records in zolt, {d} in jolt", .{ self.zolt_character_records.items.len, self.jolt_character_records.items.len });
     }
 
     fn fail(self: *const Run, comptime fmt: []const u8, args: anytype) error{ParityMismatch} {
@@ -1756,6 +2531,10 @@ const Run = struct {
                     const state = snapshotState(op);
                     try self.zw.saveState(state, &slot[0]);
                     try self.cw.saveState(self.allocator, state, &slot[1]);
+                    // Phase 7: the characters are not part of the PhysicsSystem state
+                    const character_slot = &self.character_snapshots[op.index];
+                    try self.zw.saveCharacterStates(&character_slot[0]);
+                    try self.cw.saveCharacterStates(self.allocator, &character_slot[1]);
                 },
                 .restore_cross => {
                     // Zolt restores the C++ state, C++ the Zolt state
@@ -1767,7 +2546,13 @@ const Run = struct {
                         return self.fail("zolt could not restore the jolt state of slot {d}", .{op.index});
                     if (!self.cw.restoreState(slot[0].items))
                         return self.fail("jolt could not restore the zolt state of slot {d}", .{op.index});
+                    const character_slot = &self.character_snapshots[op.index];
+                    if (!try self.zw.restoreCharacterStates(character_slot[1].items))
+                        return self.fail("zolt could not restore the jolt character states of slot {d} (a read failed or bytes are left)", .{op.index});
+                    if (!self.cw.restoreCharacterStates(character_slot[0].items))
+                        return self.fail("jolt could not restore the zolt character states of slot {d} (a read failed or bytes are left)", .{op.index});
                     try self.compareStates(.all, "after restore_cross");
+                    try self.compareObjectStates("after restore_cross");
                 },
                 else => |kind| {
                     const zolt_result = try self.zw.applyOp(op);
@@ -1775,7 +2560,14 @@ const Run = struct {
                     if (zolt_result != jolt_result) {
                         if (ConstraintOpRange.of(op.kind) != null)
                             return self.fail("operation {d} ({t} on constraint handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.index, zolt_result, jolt_result });
+                        if (Phase7OpRange.of(op.kind) != null)
+                            return self.fail("operation {d} ({t} on object handle / description {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.index, zolt_result, jolt_result });
                         return self.fail("operation {d} ({t} on handle {d}) returned {d} in zolt and {d} in jolt", .{ op_index.*, kind, op.body, zolt_result, jolt_result });
+                    }
+                    if (isPhase7Expectation(kind)) {
+                        if (jolt_result != op.count)
+                            return self.fail("operation {d}: the scene expects {t} of object handle {d} to be {d}, it is {d} on both sides (the scene does not reach what it is written for)", .{ op_index.*, kind, op.index, op.count, jolt_result });
+                        self.stats.num_expectations += 1;
                     }
                     if (kind == .expect_body_state) {
                         if (jolt_result != op.index)
@@ -1811,6 +2603,8 @@ const Run = struct {
         try self.compareStates(.all, "after the update");
         try self.countCCDManifolds();
         try self.compareRecords();
+        try self.compareObjectStates("after the update");
+        try self.compareCharacterRecords();
         self.updateStats();
     }
 
@@ -1875,6 +2669,10 @@ const Run = struct {
         var snapshot: std.ArrayList(u8) = .empty;
         defer snapshot.deinit(allocator);
         try zw.saveState(.all, &snapshot);
+
+        // SceneEntry.restore_broad_phase: the layout of the broad phase at the snapshot (the C++ side updates this tree)
+        var broad_phase_snapshot: ?BroadPhaseSnapshot = if (self.entry.restore_broad_phase) try BroadPhaseSnapshot.capture(allocator, zw.broadPhase()) else null;
+        defer if (broad_phase_snapshot) |*s| s.deinit();
 
         // The bodies whose contact cache is invalid (the operations before the update flagged them): the flags are not
         // part of the saved state (in Jolt neither), every update that starts from the snapshot gets them again
@@ -1941,6 +2739,17 @@ const Run = struct {
             if (failing.has_induced_failure.load(.monotonic)) self.stats.num_job_failures += 1;
         }
 
+        // SceneEntry.restore_broad_phase: the failed updates changed the layout of the broad phase trees; one more update
+        // from the snapshot and the broad phase of that instant leaves the trees of the C++ update, so that the queries of
+        // the Phase 7 objects after this update find their hits in the C++ order
+        if (broad_phase_snapshot) |*s| {
+            try self.restoreZoltBeforeUpdate(snapshot.items, pending_invalid);
+            try s.restore(zw.broadPhase());
+            _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), zw.jobSystem());
+            if (!zw.temp.isEmpty()) return self.fail("the update from the broad phase snapshot: the temp allocator is not empty", .{});
+            try self.expectZoltState(reference.items, "after the update from the broad phase snapshot");
+        }
+
         // The Zolt side is at the reference state again: drop the records of the sweeps, restore the listener counters
         zw.discardRecords();
         for (zw.step_listeners, step_calls) |*l, c| l.num_calls = c;
@@ -1951,6 +2760,9 @@ const Run = struct {
         try self.zolt_records.appendSlice(allocator, zolt_records.items);
         try self.cw.takeRecords(allocator, &self.jolt_records);
         try self.compareTakenRecords();
+        // Phase 7: the objects after the last update of the sweeps (a full update from the snapshot, like the C++ one)
+        try self.compareObjectStates("after the sweeps");
+        try self.compareCharacterRecords();
         self.updateStats();
     }
 
@@ -1991,7 +2803,7 @@ const Run = struct {
 /// What a scene did (the sanity checks of runEntry, printed with `verbose`)
 const RunStats = struct {
     /// Number of listener records per RecordKind
-    records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0),
+    records: [SimScenes.num_record_kinds]u32 = @splat(0),
     num_temp_failures: u32 = 0,
     num_job_failures: u32 = 0,
     /// Largest number of active bodies after an update
@@ -2019,7 +2831,30 @@ const RunStats = struct {
     max_manifolds_per_body_pair: u32 = 0,
     /// Largest number of active constraints before an update (Zolt side, Expect.active_constraints)
     max_active_constraints: u32 = 0,
+    /// Phase 7: what the object states after the updates show (Expect.ground_states, Expect.wheel_contacts)
+    objects: ObjectStats = .{},
 };
+
+/// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
+fn isPhase7Expectation(kind: OpKind) bool {
+    return switch (kind) {
+        .character_expect_ground_state, .character_expect_body_state, .character_expect_value, .cv_expect_ground_state, .cv_expect_value, .ragdoll_expect_active, .vehicle_expect_wheel_contacts, .vehicle_expect_constraint_state => true,
+        else => false,
+    };
+}
+
+/// True when `records` (counts per RecordKind) has every RecordKind of the bits (Expect.character_records); the missing
+/// kinds are printed
+fn recordsReach(records: []const u32, bits: u128) bool {
+    var reached = true;
+    for (records, 0..) |count, kind| {
+        if (kind < 128 and (bits & (@as(u128, 1) << @intCast(kind))) != 0 and count == 0) {
+            std.debug.print("SimulationParity: no {t} records\n", .{@as(RecordKind, @enumFromInt(kind))});
+            reached = false;
+        }
+    }
+    return reached;
+}
 
 /// The largest number of OnContactAdded + OnContactPersisted records of one body pair in `records` (Expect.full_manifolds)
 fn maxManifoldsPerBodyPair(allocator: Allocator, records: []const SimRecord) Allocator.Error!u32 {
@@ -2791,6 +3626,3134 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
     }
 }
 
+// -------------------------------------------------------------------------------------------------------------------
+// Characters, ragdolls and vehicles (Phase 7): the Zolt side of the classes, one slot per class group (the recipe is in
+// the SimScenes header; the C++ side, SimulationReference.cpp, covers every class and operation). `Phase7StubSlot` is
+// the slot of a group whose classes are not ported yet and declares every function of every slot below; a filled slot
+// implements the functions of its own list (the driver and VehicleSlot call nothing else on it).
+//
+// Every slot:
+// - `Storage`: what the world keeps of the objects of its handles (a field of ZoltWorld.phase7, initialized with .{};
+//   VehicleSlot's holds the vehicles of all three vehicle slots).
+// - `create(world: *ZoltWorld, op: *const SimOp) !u32`: the create operation of the slot (create_character,
+//   create_character_virtual, create_ragdoll, create_vehicle: VehicleSlot creates the tracked and motorcycle vehicles too,
+//   with the hooks of the variants): the object of the next handle, the result of ApplyObjectOp in
+//   SimulationReference.cpp.
+// - `applyOp(world, op) !u32`: the other operations of its Phase7OpRange (CharacterSlot, CharacterVirtualSlot,
+//   RagdollSlot, VehicleSlot), exactly ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp of the
+//   .cpp (lock: i[3] == 0, the filters of SimCharacterFilters, the world's temp allocator for the character virtual
+//   queries).
+// - `writeState(world, w: *ObjectStateWriter) !void`: the object state of its objects in handle order, the fields of
+//   SimScenes.objectFieldLayout in the order of WriteObjectState of the .cpp (CharacterSlot, CharacterVirtualSlot,
+//   RagdollSlot, VehicleSlot; VehicleSlot writes the parts of the tracked and motorcycle controllers with their hooks).
+// - `saveStates(world, recorder: *StateRecorderImpl) !void` / `restoreStates(world, recorder) !void`: SaveState /
+//   RestoreState of its characters in handle order (CharacterSlot, CharacterVirtualSlot; the others do nothing).
+// - `destroyAll(world: *ZoltWorld) void`: remove its objects from the system, destroy them and free its Storage (~SimWorld
+//   of the .cpp; ZoltWorld.destroy calls it before the system is destroyed). It must not allocate, also not through a
+//   listener record (OnBodyDeactivated of a removed active body): the creation sweep counts an allocation of the
+//   teardown that fails as a swallowed error.OutOfMemory (see RagdollSlot.destroyAll).
+//
+// CharacterVirtualSlot also (the CharacterVirtual group):
+// - `characterIdSequence(world, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void`: the CharacterID
+//   test (jolt_sim_character_id_sequence, with shape 0 of the world), compared by the test "SimulationParity CharacterID
+//   consumption" (M8 depends on which constructions consume an ID).
+// RagdollSlot also (the Ragdoll group):
+// - `settingsBytes(world, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool`: the SaveBinaryState
+//   bytes (with the shapes and the group filter) of the RagdollSettings of ragdoll description `index` as `create` builds
+//   them, or RagdollSettings.restoreFromBinaryState of `restore_from` (every byte read) saved again; false when the
+//   restore failed (jolt_sim_ragdoll_settings_bytes).
+// - `settingsInfo(world, index: u32, out: *std.ArrayList(u32)) !void`: the result of Stabilize (1 / 0, 2: not called),
+//   the number of parts and GetBodyIndexToConstraintIndex, the number of constraints and the pairs of
+//   GetConstraintIndexToBodyIdxPair (jolt_sim_ragdoll_settings_info).
+// VehicleSlot also (the vehicle core group):
+// - `vehicle(world, handle: u32) !*VehicleConstraint`: the vehicle of a vehicle handle (for the variants' operations).
+// - `constraintState(vehicle: *VehicleConstraint) u32`: its ConstraintState bits (the result of the vehicle operations).
+// - `settingsPart(allocator, scene: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32,
+//   restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool`: the bytes of a part of vehicle description `index`
+//   (jolt_sim_vehicle_settings_part: SaveBinaryState of the part as `create` makes it, or a default object of the part's
+//   class restores `restore_from`, every byte read, and saves again; false: no such part, or the restore failed). The
+//   classes of the variants come from their hooks (`makeControllerSettings` / `makeWheelSettings` of the description, of
+//   `SimVehicle.defaults(kind)` / `SimVehicleWheel.defaults(kind)` for a default object), their bytes from the virtual
+//   saveBinaryState / restoreBinaryState of the settings classes.
+// - For the variants (called only by the filled variant slots, so not part of Phase7StubSlot): the vehicle_engine and
+//   vehicle_transmission fields of an engine / transmission (WriteEngineState / WriteTransmissionState of the .cpp: the
+//   tracked controller writes its own engine and transmission with them) and the wheeled members of controller settings
+//   (SimFillWheeled: MotorcycleControllerSettings is a WheeledVehicleControllerSettings).
+// TrackedVehicleSlot and MotorcycleSlot also (the vehicle variants group; VehicleSlot and the driver call them, so that
+// the variants never edit VehicleSlot):
+// - `makeControllerSettings(allocator, scene: *const SimSceneDesc, vehicle: *const SimVehicle) !*VehicleControllerSettings`:
+//   new controller settings of a description (no reference yet, like the `create` functions of the library;
+//   SimMakeTrackedControllerSettings / SimMakeMotorcycleControllerSettings of the .cpp).
+// - `makeWheelSettings(allocator, scene, wheel: *const SimVehicleWheel) !*WheelSettings`: TrackedVehicleSlot only: new
+//   WheelSettingsTV of a wheel of kind tv (SimMakeWheelSettingsTV).
+// - `applyVehicleOp(world, op, vehicle: *VehicleConstraint) !void`: the operations of its range (ApplyTrackedOp /
+//   ApplyMotorcycleOp of the .cpp); the driver returns VehicleSlot.constraintState(vehicle).
+// - `writeWheelState(world, w, handle: u32, index: u32, wheel: *const Wheel) !void`: TrackedVehicleSlot only: the
+//   vehicle_wheel_tv field of wheel `index` (WriteTrackedWheelState), where VehicleSlot writes vehicle_wheel_wv.
+// - `writeControllerState(world, w, handle: u32, vehicle: *const VehicleConstraint) !void`: the controller's fields
+//   (WriteTrackedControllerState: the engine and the transmission, the inputs, the tracks;
+//   WriteMotorcycleControllerState: vehicle_motorcycle, after the wheeled fields that VehicleSlot writes).
+// - `engine(vehicle: *VehicleConstraint) !*VehicleEngine` / `transmission(vehicle) !*VehicleTransmission`:
+//   TrackedVehicleSlot only: the engine / transmission of the TrackedVehicleController, for VehicleSlot's engine and
+//   transmission operations on a tracked vehicle (GetEngine / GetTransmission of the .cpp; a motorcycle controller is a
+//   wheeled controller, VehicleSlot reaches its engine itself).
+//
+// Notes for the groups:
+// - CharacterVirtualSlot: its listener is the port of SimCharacterContactListener (CharacterListenerMode record /
+//   modify, the CharacterFlags) and adds `CharacterRecords` to world.character_recorder (a record that cannot be stored
+//   fails the operation, see ZoltWorld.applyOp). The driver does not sweep the temp allocations of the character virtual
+//   operations (they run between the updates, the D12 sweeps cover PhysicsSystem.update): the CharacterVirtual group
+//   sweeps them in its own tests. Jolt's non-validating RestoreState keeps the members that it does not restore
+//   (mIsBackFacingContact, ...) of the contacts that mActiveContacts.resize keeps (CharacterVirtual.cpp:1977-1981): the
+//   object state compares them (cv_active_contact is_back_facing_contact). `mutable mMaxHitsExceeded`
+//   (CharacterVirtual.h:752) falls under Rule M (PortingGuide section 5). The CharacterVirtual and Character scenes set
+//   `restore_broad_phase`: the character queries find their hits in the order of the broad phase layout, which the
+//   failed updates of the D12 sweeps change (BroadPhaseSnapshot restores it after the sweeps). Any slot whose operations
+//   query the broad phase in hit order (vehicle testers that keep the first hit, ragdoll queries) can use it too.
+// - The vehicle slots: the callbacks (VehicleCallbacks, VehicleCombineFriction, VehicleTireMaxImpulse) add
+//   `VehicleRecords` to world.recorder; the custom friction uses the Math min helper (not @min). Wheel's contact members
+//   are zero-initialized in Zolt (the reference zero-fills its allocations, see the rules of the SimScenes header).
+// A slot whose classes are not ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes are skipped through
+// their Blocker, and a supported scene that creates its objects fails (checkPhase7Slots).
+//
+// The interface changes of the foundation review (for a group that started on the earlier interface):
+// - TrackedVehicleSlot / MotorcycleSlot: `applyOp(world, op) !u32` is now `applyVehicleOp(world, op, vehicle) !void`
+//   (the driver finds the vehicle with VehicleSlot.vehicle and returns VehicleSlot.constraintState). The ranges are
+//   routed by Phase7OpRange: the vehicle core 520..569, tracked 570..579, motorcycle 580..589 (were 554..559 and
+//   560..566; the variant operations are renumbered on both sides). New hooks of the variants: makeControllerSettings,
+//   makeWheelSettings, writeWheelState, writeControllerState, engine, transmission (VehicleSlot calls them in create,
+//   writeState, settingsPart and its engine / transmission operations, so the variants never edit VehicleSlot).
+// - New functions: CharacterVirtualSlot.characterIdSequence, RagdollSlot.settingsBytes / settingsInfo,
+//   VehicleSlot.vehicle / constraintState / settingsPart (the CharacterID test and checkPhase7Settings call them).
+// - New operations: character_body_hash (421), the vehicle core operations 554..562 (the Constraint interface of
+//   VehicleConstraint, vehicle_expect_constraint_state, WheelWV::ApplyTorque, VehicleEngine::ApplyTorque /
+//   ApplyDamping); SimScenes.ObjectField.vehicle_properties holds the constraint priority, the step overrides and the
+//   user data of a vehicle; a character state restore must read every byte (ZoltWorld.restoreCharacterStates);
+//   destroyAll frees the slot's Storage too.
+
+/// The slot of a class group whose classes are not ported yet: the functions of every slot, every operation returns
+/// error.SceneNotSupported
+const Phase7StubSlot = struct {
+    pub const is_stub = true;
+
+    const Storage = struct {};
+
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        _ = .{ world, op };
+        return error.SceneNotSupported;
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        _ = .{ world, op };
+        return error.SceneNotSupported;
+    }
+
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        _ = .{ world, w };
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    fn destroyAll(world: *ZoltWorld) void {
+        _ = world;
+    }
+
+    // CharacterVirtualSlot
+
+    fn characterIdSequence(world: *ZoltWorld, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void {
+        _ = .{ world, first_id, out };
+        return error.SceneNotSupported;
+    }
+
+    // RagdollSlot
+
+    fn settingsBytes(world: *ZoltWorld, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        _ = .{ world, index, restore_from, out };
+        return error.SceneNotSupported;
+    }
+
+    fn settingsInfo(world: *ZoltWorld, index: u32, out: *std.ArrayList(u32)) !void {
+        _ = .{ world, index, out };
+        return error.SceneNotSupported;
+    }
+
+    // VehicleSlot
+
+    fn vehicle(world: *ZoltWorld, handle: u32) !*VehicleConstraint {
+        _ = .{ world, handle };
+        return error.SceneNotSupported;
+    }
+
+    fn constraintState(v: *VehicleConstraint) u32 {
+        _ = v;
+        return 0;
+    }
+
+    fn settingsPart(allocator: Allocator, scene: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        _ = .{ allocator, scene, index, part, item, restore_from, out };
+        return error.SceneNotSupported;
+    }
+
+    // TrackedVehicleSlot, MotorcycleSlot
+
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        _ = .{ allocator, scene, v };
+        return error.SceneNotSupported;
+    }
+
+    fn makeWheelSettings(allocator: Allocator, scene: *const SimSceneDesc, wheel: *const SimVehicleWheel) !*WheelSettings {
+        _ = .{ allocator, scene, wheel };
+        return error.SceneNotSupported;
+    }
+
+    fn applyVehicleOp(world: *ZoltWorld, op: *const SimOp, v: *VehicleConstraint) !void {
+        _ = .{ world, op, v };
+        return error.SceneNotSupported;
+    }
+
+    fn writeWheelState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, index: u32, wheel: *const Wheel) !void {
+        _ = .{ world, w, handle, index, wheel };
+        return error.SceneNotSupported;
+    }
+
+    fn writeControllerState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, v: *const VehicleConstraint) !void {
+        _ = .{ world, w, handle, v };
+        return error.SceneNotSupported;
+    }
+
+    // TrackedVehicleSlot: the engine and the transmission of a tracked vehicle for VehicleSlot's operations. The return
+    // types name the classes of the vehicle core group, which are not ported yet: Zig analyzes these functions only when
+    // a filled VehicleSlot calls them, when the classes exist.
+
+    fn engine(v: *VehicleConstraint) !*zolt.VehicleEngine {
+        _ = v;
+        return error.SceneNotSupported;
+    }
+
+    fn transmission(v: *VehicleConstraint) !*zolt.VehicleTransmission {
+        _ = v;
+        return error.SceneNotSupported;
+    }
+};
+
+// ---- SLOT character: Character (Phase7OpRange.character, Blocker.characters) ----
+/// The Zolt side of Character: ApplyCharacterOp, WriteCharacterState, SaveCharacterStates / RestoreCharacterStates (the
+/// characters) and ~SimWorld (the characters) of SimulationReference.cpp. Proof that the Character scenes bite (each
+/// breakage of Zolt/Physics/Character/Character.zig, then reverted): taking the ground position from contact_point_on1
+/// in PostSimulation's collector is reported as "scene character_ops ... update 1: ... object state differs at byte 24
+/// ...: character_save_state (object handle 0, item 0) ground_position.y zolt 0x3c8d88e0 jolt 0x0"; subtracting the
+/// centers of mass the other way round in the check of SetShape as "scene character_crouch_stand ... update 12: operation
+/// 54 (character_set_shape on object handle / description 0) returned 0 in zolt and 1 in jolt" (and in
+/// character_far_from_origin); EActiveEdgeMode::CollideWithAll in CheckCollision as "scene
+/// character_ground_states_meshes ... update 7: ... character_save_state (object handle 5, item 0) ground_normal.y zolt
+/// 0x3ebeaa9e jolt 0x3ebeaa9f"; the ground velocity at the character's position instead of the ground position as
+/// "scene character_moving_platforms ... update 1: ... character_save_state (object handle 1, item 0) ground_velocity.x
+/// zolt 0x00000000 jolt 0x2fbdb005" (and in character_many); CharacterBodyFilter not ignoring sensors as "scene
+/// character_ground_states_boxes ... update 30: operation 238 (character_check_collision on object handle / description
+/// 0) returned 862843812 in zolt and 1268118805 in jolt" (the walker's check next to the sensor box it crosses).
+/// Gap: SimShape has no materials, so GetGroundMaterial (character_properties.ground_material) is only compared as
+/// PhysicsMaterial::sDefault (the material of a shape without one); a ground with a non-default material is not tested.
+const CharacterSlot = struct {
+    /// The characters of the character handles, one reference each (Jolt: Array<Ref<Character>>; an empty reference is
+    /// a destroyed character)
+    const Storage = struct {
+        characters: std.ArrayList(Ref(zolt.CharacterBase)) = .empty,
+    };
+
+    /// FNV-1a over values (SimHasher of SimulationReference.cpp)
+    const Hasher = struct {
+        hash: u32 = SimScenes.hash_seed,
+
+        fn value(h: *Hasher, v: anytype) void {
+            h.hash = SimScenes.hashBytes(h.hash, std.mem.asBytes(&v));
+        }
+
+        fn boolean(h: *Hasher, v: bool) void {
+            h.value(@as(u32, @intFromBool(v)));
+        }
+
+        fn vec3(h: *Hasher, v: Vec3) void {
+            h.value([3]f32{ v.getX(), v.getY(), v.getZ() });
+        }
+
+        fn rvec3(h: *Hasher, v: RVec3) void {
+            h.value([3]Real{ v.getX(), v.getY(), v.getZ() });
+        }
+
+        fn quat(h: *Hasher, q: Quat) void {
+            h.value([4]f32{ q.getX(), q.getY(), q.getZ(), q.getW() });
+        }
+
+        fn plane(h: *Hasher, p: zolt.Plane) void {
+            h.vec3(p.getNormal());
+            h.value(p.getConstant());
+        }
+
+        fn rmat44(h: *Hasher, m: zolt.RMat44) void {
+            for (0..3) |c| {
+                const col = m.getColumn4(@intCast(c));
+                h.value([4]f32{ col.getX(), col.getY(), col.getZ(), col.getW() });
+            }
+            h.rvec3(m.getTranslation());
+        }
+    };
+
+    /// The collector of character_check_collision (SimCheckCollisionCollector of SimulationReference.cpp): the hash of
+    /// the hits in their order. Character::CheckCollision never sets user data (only CharacterVsCharacterCollisionSimple
+    /// passes the other character, which the CharacterVirtual operations use), so the character ID is always invalid.
+    const CheckCollisionCollector = struct {
+        pub const overrides = .{ .addHit, .setUserData };
+
+        base: zolt.CollideShapeCollector = .init(CheckCollisionCollector),
+        hasher: Hasher = .{},
+        num_hits: u32 = 0,
+        user_data: u64 = 0,
+
+        pub fn setUserData(self: *CheckCollisionCollector, user_data: u64) void {
+            self.user_data = user_data;
+        }
+
+        pub fn addHit(self: *CheckCollisionCollector, result: *const CollideShapeResult) void {
+            const h = &self.hasher;
+            h.vec3(result.contact_point_on1);
+            h.vec3(result.contact_point_on2);
+            h.vec3(result.penetration_axis);
+            h.value(result.penetration_depth);
+            h.value(result.sub_shape_id1.getValue());
+            h.value(result.sub_shape_id2.getValue());
+            h.value(result.body_id2.getIndexAndSequenceNumber());
+            h.value(zolt.CharacterID.invalid_character_id);
+            self.num_hits += 1;
+        }
+
+        fn finish(self: *CheckCollisionCollector) !u32 {
+            if (self.user_data != 0) return error.SceneNotSupported; // A character virtual's ID: not for Character
+            self.hasher.value(self.num_hits);
+            return self.hasher.hash;
+        }
+    };
+
+    /// The character of a handle (a handle that does not exist or a destroyed character is an error of the scene)
+    fn character(world: *ZoltWorld, handle: u32) !*zolt.Character {
+        const characters = world.phase7.characters.characters.items;
+        if (handle >= characters.len) return error.SceneError;
+        const base = characters[handle].get() orelse return error.SceneError;
+        return zolt.virtual.downcast(zolt.Character, base);
+    }
+
+    /// GetShapeIndex of SimulationReference.cpp (invalid_handle: not a shape of the scene, or null)
+    fn shapeIndex(world: *const ZoltWorld, shape: ?*const Shape) u32 {
+        for (world.shapes.items, 0..) |s, i| {
+            if (s.get() == shape) return @intCast(i);
+        }
+        return invalid_handle;
+    }
+
+    /// The shape of a shape index (a scene must not pass invalid_handle where Jolt dereferences the shape)
+    fn shapeOf(world: *const ZoltWorld, index: u32) !*const Shape {
+        if (index >= world.shapes.items.len) return error.SceneError;
+        return world.shapes.items[index].get().?;
+    }
+
+    /// SimFillCharacterBaseSettings of SimulationReference.cpp
+    fn fillBaseSettings(world: *const ZoltWorld, d: *const SimScenes.SimCharacterBase, out: *zolt.CharacterBaseSettings) void {
+        out.up = load3(&d.up);
+        out.supporting_volume = zolt.Plane.init(load3(d.supporting_volume[0..3]), d.supporting_volume[3]);
+        out.max_slope_angle = d.max_slope_angle;
+        out.enhanced_internal_edge_removal = d.enhanced_internal_edge_removal != 0;
+        out.shape.set(if (d.shape != invalid_handle) world.shapes.items[d.shape].get() else null);
+    }
+
+    /// GetBodyState of SimulationReference.cpp: IsActive | IsAdded << 1 through the locking BodyInterface
+    fn bodyState(world: *ZoltWorld, body_id: BodyID) u32 {
+        const bi = world.system.getBodyInterface();
+        return @as(u32, @intFromBool(bi.isActive(body_id))) | (@as(u32, @intFromBool(bi.isAdded(body_id))) << 1);
+    }
+
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const d = &world.desc.characters[op.index];
+        try world.phase7.characters.characters.ensureUnusedCapacity(allocator, 1);
+        const settings = try zolt.CharacterSettings.create(allocator);
+        var settings_ref = RefConst(zolt.CharacterBaseSettings).init(&settings.base);
+        defer settings_ref.deinit();
+        fillBaseSettings(world, &d.base, &settings.base);
+        settings.layer = @intCast(d.layer);
+        settings.mass = d.mass;
+        settings.friction = d.friction;
+        settings.gravity_factor = d.gravity_factor;
+        settings.allowed_dofs = .fromInt(@intCast(d.allowed_dofs));
+        const c = try zolt.Character.create(allocator, settings, loadR3(&d.position), loadQuat(&d.rotation), d.user_data, &world.system);
+        world.phase7.characters.characters.appendAssumeCapacity(.init(&c.base));
+        return c.getBodyID().getIndexAndSequenceNumber();
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const i = &op.i;
+        const f = &op.f;
+        const r = loadR3(&op.r);
+        const lock_bodies = i[3] == 0;
+        const lock: zolt.Character.LockOptions = .{ .lock_bodies = lock_bodies };
+        const activation: zolt.Character.ActivationOptions = .{ .activation = if (op.activation == 0) .activate else .dont_activate, .lock_bodies = lock_bodies };
+        const c = try character(world, op.index);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .character_add_to_physics_system => try c.addToPhysicsSystem(activation),
+            .character_remove_from_physics_system => c.removeFromPhysicsSystem(lock),
+            .character_activate => c.activate(lock),
+            .character_post_simulation => {
+                c.postSimulation(f[0], lock);
+                return @bitCast(@intFromEnum(c.base.getGroundState()));
+            },
+            .character_set_linear_and_angular_velocity => c.setLinearAndAngularVelocity(load3(f[0..3]), load3(f[3..6]), lock),
+            .character_set_linear_velocity => c.setLinearVelocity(load3(f[0..3]), lock),
+            .character_add_linear_velocity => c.addLinearVelocity(load3(f[0..3]), lock),
+            .character_add_impulse => c.addImpulse(load3(f[0..3]), lock),
+            .character_set_position_and_rotation => c.setPositionAndRotation(r, loadQuat(f[0..4]), activation),
+            .character_set_position => c.setPosition(r, activation),
+            .character_set_rotation => c.setRotation(loadQuat(f[0..4]), activation),
+            .character_set_layer => try c.setLayer(@intCast(i[0]), lock),
+            .character_set_shape => return @intFromBool(try c.setShape(try shapeOf(world, i[0]), f[0], lock)),
+            .character_set_max_slope_angle => c.base.setMaxSlopeAngle(f[0]),
+            .character_set_up => c.base.setUp(load3(f[0..3])),
+            .character_set_supporting_volume => c.base.setSupportingVolume(zolt.Plane.init(load3(f[0..3]), f[3])),
+
+            .character_destroy => {
+                world.phase7.characters.characters.items[op.index].deinit(); // The last reference: destroys the body
+                return 0;
+            },
+
+            .character_settings_hash => {
+                var s = c.getCharacterSettings(lock);
+                defer s.base.deinit();
+                var h: Hasher = .{};
+                h.vec3(s.base.up);
+                h.plane(s.base.supporting_volume);
+                h.value(s.base.max_slope_angle);
+                h.boolean(s.base.enhanced_internal_edge_removal);
+                h.value(shapeIndex(world, s.base.shape.get()));
+                h.value(@as(u32, s.layer));
+                h.value(s.mass);
+                h.value(s.friction);
+                h.value(s.gravity_factor);
+                h.value(@as(u32, s.allowed_dofs.toInt()));
+                return h.hash;
+            },
+
+            .character_check_collision => {
+                var collector: CheckCollisionCollector = .{};
+                c.checkCollision(r, loadQuat(f[0..4]), load3(f[4..7]), f[7], try shapeOf(world, i[0]), r, &collector.base, lock);
+                return collector.finish();
+            },
+
+            .character_expect_ground_state => return @bitCast(@intFromEnum(c.base.getGroundState())), // Changes nothing, the driver checks the result
+            .character_expect_body_state => {}, // Changes nothing, the driver checks the BodyState bits
+            .character_expect_value => return switch (i[0]) { // Changes nothing, the driver checks the result
+                @intFromEnum(SimScenes.CharacterValue.shape) => shapeIndex(world, c.base.getShape()),
+                @intFromEnum(SimScenes.CharacterValue.body_shape) => blk: {
+                    var body_shape = world.system.getBodyInterface().getShape(c.getBodyID());
+                    defer body_shape.deinit();
+                    break :blk shapeIndex(world, body_shape.get());
+                },
+                @intFromEnum(SimScenes.CharacterValue.layer) => @as(u32, c.getLayer()),
+                @intFromEnum(SimScenes.CharacterValue.ground_body_is) => @intFromBool(c.base.getGroundBodyID().eql(world.getHandle(op.body))),
+                else => error.SceneError,
+            },
+
+            .character_body_hash => {
+                var h: Hasher = .{};
+                h.vec3(c.getLinearVelocity(lock));
+                const pr = c.getPositionAndRotation(lock);
+                h.rvec3(pr.position);
+                h.quat(pr.rotation);
+                h.rvec3(c.getPosition(lock));
+                h.quat(c.getRotation(lock));
+                h.rvec3(c.getCenterOfMassPosition(lock));
+                h.rmat44(c.getWorldTransform(lock));
+                var ts = c.getTransformedShape(lock);
+                defer ts.deinit();
+                h.rvec3(ts.shape_position_com);
+                h.quat(ts.shape_rotation);
+                h.vec3(ts.getShapeScale());
+                h.value(ts.body_id.getIndexAndSequenceNumber());
+                h.value(shapeIndex(world, ts.shape.get()));
+                return h.hash;
+            },
+
+            else => return error.SceneError,
+        }
+        return bodyState(world, c.getBodyID());
+    }
+
+    /// WriteCharacterState of SimulationReference.cpp for every character in handle order
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        for (world.phase7.characters.characters.items, 0..) |*ref, handle| {
+            const base = ref.get() orelse continue;
+            const c = zolt.virtual.downcast(zolt.Character, base);
+            const h: u32 = @intCast(handle);
+
+            var recorder = StateRecorderImpl.init(world.allocator);
+            defer recorder.deinit();
+            c.base.saveState(recorder.recorder());
+            if (recorder.isFailed()) return error.OutOfMemory;
+            try w.begin(.character_save_state, h, 0);
+            try w.raw(recorder.getData());
+            w.end();
+
+            try w.begin(.character_properties, h, 0);
+            try w.value(c.getBodyID().getIndexAndSequenceNumber());
+            try w.value(@as(u32, c.getLayer()));
+            try w.value(shapeIndex(world, c.base.getShape()));
+            try w.boolean(c.base.isSupported());
+            try w.value(SimScenes.materialHash(c.base.getGroundMaterial().getDebugName()));
+            try w.value(c.base.getGroundUserData());
+            w.end();
+
+            try w.begin(.character_base, h, 0);
+            try w.vec3(c.base.getUp());
+            try w.value(c.base.getCosMaxSlopeAngle());
+            const plane = c.base.getSupportingVolume();
+            try w.vec3(plane.getNormal());
+            try w.value(plane.getConstant());
+            w.end();
+
+            // The body (a character without body: out of bodies)
+            if (c.getBodyID().isInvalid())
+                continue;
+            try w.begin(.character_body, h, 0);
+            try w.rvec3(c.getPosition(.{}));
+            try w.quat(c.getRotation(.{}));
+            try w.rvec3(c.getCenterOfMassPosition(.{}));
+            try w.vec3(c.getLinearVelocity(.{}));
+            try w.rmat44(c.getWorldTransform(.{}));
+            w.end();
+
+            var ts = c.getTransformedShape(.{});
+            defer ts.deinit();
+            try w.begin(.character_transformed_shape, h, 0);
+            try w.rvec3(ts.shape_position_com);
+            try w.quat(ts.shape_rotation);
+            try w.vec3(ts.getShapeScale());
+            try w.value(ts.body_id.getIndexAndSequenceNumber());
+            try w.value(shapeIndex(world, ts.shape.get()));
+            w.end();
+        }
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.characters.characters.items) |*ref| {
+            if (ref.get()) |base| base.saveState(recorder.recorder());
+        }
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.characters.characters.items) |*ref| {
+            if (ref.get()) |base| try base.restoreState(recorder.recorder());
+        }
+    }
+
+    /// ~SimWorld: remove the characters that are in the system (Jolt asserts that a destroyed body is not in the broad
+    /// phase), then release them while the system exists (the destructor destroys the body)
+    fn destroyAll(world: *ZoltWorld) void {
+        const storage = &world.phase7.characters;
+        const bi = world.system.getBodyInterface();
+        for (storage.characters.items) |*ref| {
+            const base = ref.get() orelse continue;
+            const c = zolt.virtual.downcast(zolt.Character, base);
+            if (!c.getBodyID().isInvalid() and bi.isAdded(c.getBodyID()))
+                c.removeFromPhysicsSystem(.{});
+        }
+        for (storage.characters.items) |*ref| ref.deinit();
+        storage.characters.deinit(world.allocator);
+        storage.* = .{};
+    }
+};
+
+// ---- SLOT character_virtual: CharacterVirtual, CharacterVsCharacterCollisionSimple and the CharacterContactListener
+// (Phase7OpRange.character_virtual, Blocker.character_virtuals) ----
+const CharacterVirtualSlot = struct {
+    const CharacterVirtual = zolt.CharacterVirtual;
+    const CharacterVirtualSettings = zolt.CharacterVirtualSettings;
+    const CharacterContact = zolt.CharacterContact;
+    const CharacterContactSettings = zolt.CharacterContactSettings;
+    const CharacterContactListener = zolt.CharacterContactListener;
+    const CharacterVsCharacterCollisionSimple = zolt.CharacterVsCharacterCollisionSimple;
+    const CharacterID = zolt.CharacterID;
+    const PhysicsMaterial = zolt.PhysicsMaterial;
+    const CharacterFlags = SimScenes.CharacterFlags;
+    const SimCharacterVirtual = SimScenes.SimCharacterVirtual;
+
+    const Storage = struct {
+        /// The character virtuals of the handles (one reference each, null: destroyed)
+        characters: std.ArrayList(?*CharacterVirtual) = .empty,
+        /// The CharacterVsCharacterCollisionSimple objects (`collision_group`), initialized by the first creation
+        groups: [SimScenes.num_character_collision_groups]CharacterVsCharacterCollisionSimple = undefined,
+        groups_initialized: bool = false,
+        /// CharacterListenerMode.record / modify
+        record_listener: SimCharacterContactListener = .{},
+        modify_listener: SimCharacterContactListener = .{ .modify = true },
+    };
+
+    /// SimCharacterContactListener of SimulationReference.cpp: records every callback in call order, in modify mode acts
+    /// on the CharacterFlags
+    const SimCharacterContactListener = struct {
+        recorder: *Recorder = undefined,
+        modify: bool = false,
+
+        fn flags(user_data: u64) u32 {
+            return @truncate(user_data >> 32);
+        }
+
+        pub fn onAdjustBodyVelocity(self: *SimCharacterContactListener, character: *const CharacterVirtual, body2: *const Body, linear_velocity: *Vec3, angular_velocity: *Vec3) void {
+            const linear_in = linear_velocity.*;
+            const angular_in = angular_velocity.*;
+            if (self.modify and (flags(body2.getUserData()) & CharacterFlags.conveyor) != 0) {
+                linear_velocity.* = linear_velocity.add(Vec3.init(1.5, 0.0, 0.0));
+                angular_velocity.* = angular_velocity.add(Vec3.init(0.0, 0.5, 0.0));
+            }
+            self.recorder.add(CharacterRecords.adjustBodyVelocity(character.getID().getValue(), body2.getID(), linear_in, angular_in, linear_velocity.*, angular_velocity.*));
+        }
+
+        pub fn onContactValidate(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+            return self.validate(.character_contact_validate, character, contact);
+        }
+
+        pub fn onContactAdded(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_contact_added, character, contact, settings);
+        }
+
+        pub fn onContactPersisted(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_contact_persisted, character, contact, settings);
+        }
+
+        pub fn onContactRemoved(self: *SimCharacterContactListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID) void {
+            self.recorder.add(CharacterRecords.removed(.character_contact_removed, character.getID().getValue(), body_id2, CharacterID.invalid_character_id, sub_shape_id2));
+        }
+
+        pub fn onCharacterContactValidate(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+            return self.validate(.character_vs_character_contact_validate, character, contact);
+        }
+
+        pub fn onCharacterContactAdded(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_vs_character_contact_added, character, contact, settings);
+        }
+
+        pub fn onCharacterContactPersisted(self: *SimCharacterContactListener, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            self.settingsCallback(.character_vs_character_contact_persisted, character, contact, settings);
+        }
+
+        pub fn onCharacterContactRemoved(self: *SimCharacterContactListener, character: *const CharacterVirtual, other_character_id: CharacterID, sub_shape_id2: SubShapeID) void {
+            self.recorder.add(CharacterRecords.removed(.character_vs_character_contact_removed, character.getID().getValue(), .invalid, other_character_id.getValue(), sub_shape_id2));
+        }
+
+        pub fn onContactSolve(self: *SimCharacterContactListener, character: *const CharacterVirtual, body_id2: BodyID, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+            self.solve(.character_contact_solve, character, body_id2, CharacterID.invalid_character_id, sub_shape_id2, contact_position, contact_normal, contact_velocity, contact_material, character_velocity, new_character_velocity);
+        }
+
+        pub fn onCharacterContactSolve(self: *SimCharacterContactListener, character: *const CharacterVirtual, other_character: *const CharacterVirtual, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+            self.solve(.character_vs_character_contact_solve, character, .invalid, other_character.getID().getValue(), sub_shape_id2, contact_position, contact_normal, contact_velocity, contact_material, character_velocity, new_character_velocity);
+        }
+
+        /// A contact record (ContactRecord of the .cpp)
+        fn contactRecord(kind: RecordKind, character: *const CharacterVirtual, contact: *const CharacterContact, settings_in: u32, result: u32) SimRecord {
+            const flag_bits = CharacterRecords.contactFlags(@intFromEnum(contact.motion_type_b), contact.is_sensor_b, contact.had_collision, contact.was_discarded, contact.can_push_character, contact.is_back_facing_contact, contact.character_b != null);
+            const p = contact.position;
+            const v = contact.linear_velocity;
+            const n = contact.surface_normal;
+            const hash = SimScenes.hashCharacterContact(.{ p.getX(), p.getY(), p.getZ() }, .{ v.getX(), v.getY(), v.getZ() }, .{ n.getX(), n.getY(), n.getZ() }, contact.user_data, materialHash(contact.material));
+            return CharacterRecords.contact(kind, character.getID().getValue(), contact.base.body_b, contact.base.character_id_b.getValue(), contact.base.sub_shape_id_b, contact.contact_normal, contact.distance, contact.fraction, flag_bits, settings_in, hash, result);
+        }
+
+        fn validate(self: *SimCharacterContactListener, kind: RecordKind, character: *const CharacterVirtual, contact: *const CharacterContact) bool {
+            const result = !(self.modify and (flags(contact.user_data) & CharacterFlags.reject) != 0);
+            self.recorder.add(contactRecord(kind, character, contact, 0, @intFromBool(result)));
+            return result;
+        }
+
+        fn settingsCallback(self: *SimCharacterContactListener, kind: RecordKind, character: *const CharacterVirtual, contact: *const CharacterContact, settings: *CharacterContactSettings) void {
+            const settings_in = CharacterRecords.settingsBits(settings.can_push_character, settings.can_receive_impulses);
+            if (self.modify) {
+                const f = flags(contact.user_data);
+                if ((f & CharacterFlags.cannot_push) != 0)
+                    settings.can_push_character = false;
+                if ((f & CharacterFlags.no_impulses) != 0)
+                    settings.can_receive_impulses = false;
+            }
+            self.recorder.add(contactRecord(kind, character, contact, settings_in, CharacterRecords.settingsBits(settings.can_push_character, settings.can_receive_impulses)));
+        }
+
+        fn solve(self: *SimCharacterContactListener, kind: RecordKind, character: *const CharacterVirtual, body_id2: BodyID, character_id2: u32, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, contact_material: *const PhysicsMaterial, character_velocity: Vec3, new_character_velocity: *Vec3) void {
+            const new_velocity_in = new_character_velocity.*;
+            if (self.modify and (flags(character.getUserData()) & CharacterFlags.slow_solve) != 0)
+                new_character_velocity.* = new_character_velocity.mulScalar(0.5);
+            self.recorder.add(CharacterRecords.solve(kind, character.getID().getValue(), body_id2, character_id2, sub_shape_id2, contact_position, contact_normal, contact_velocity, materialHash(contact_material), character_velocity, new_velocity_in, new_character_velocity.*));
+        }
+    };
+
+    /// SimMaterialHash: the hash of the debug name ("null" for no material)
+    fn materialHash(material: ?*const PhysicsMaterial) u32 {
+        return SimScenes.materialHash(if (material) |m| m.getDebugName() else "null");
+    }
+
+    /// SimHasher of the .cpp (FNV-1a over the values in order)
+    const Hasher = struct {
+        hash: u32 = SimScenes.hash_seed,
+
+        fn value(self: *Hasher, v: anytype) void {
+            self.hash = SimScenes.hashBytes(self.hash, std.mem.asBytes(&v));
+        }
+
+        fn boolean(self: *Hasher, v: bool) void {
+            self.value(@as(u32, @intFromBool(v)));
+        }
+
+        fn vec3(self: *Hasher, v: Vec3) void {
+            self.value([3]f32{ v.getX(), v.getY(), v.getZ() });
+        }
+
+        fn plane(self: *Hasher, p: zolt.Plane) void {
+            self.vec3(p.getNormal());
+            self.value(p.getConstant());
+        }
+    };
+
+    /// CharacterShapeFilter.no_spheres (SimNoSpheresShapeFilter): shape 2 must not be a sphere
+    const NoSpheresShapeFilter = struct {
+        pub const overrides = .{ .shouldCollide, .shouldCollidePair };
+
+        base: zolt.ShapeFilter = .init(NoSpheresShapeFilter),
+
+        pub fn shouldCollide(self: *const NoSpheresShapeFilter, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ self, sub_shape_id_of_shape2 };
+            return shape2.getSubType() != .sphere;
+        }
+
+        pub fn shouldCollidePair(self: *const NoSpheresShapeFilter, shape1: *const Shape, sub_shape_id_of_shape1: SubShapeID, shape2: *const Shape, sub_shape_id_of_shape2: SubShapeID) bool {
+            _ = .{ self, shape1, sub_shape_id_of_shape1, sub_shape_id_of_shape2 };
+            return shape2.getSubType() != .sphere;
+        }
+    };
+
+    /// SimCharacterFilters: the filters of a character virtual query (CharacterQueryFilter, op.i[0..3] and op.body); must
+    /// not move while a query uses it
+    const Filters = struct {
+        layer: u32,
+        body_filter_kind: u32,
+        shape_filter_kind: u32,
+        all_broad_phase_layers: zolt.BroadPhaseLayerFilter = .{},
+        all_object_layers: zolt.ObjectLayerFilter = .{},
+        default_broad_phase_layer_filter: zolt.DefaultBroadPhaseLayerFilter,
+        default_object_layer_filter: zolt.DefaultObjectLayerFilter,
+        all_bodies: zolt.BodyFilter = .{},
+        ignore_body: zolt.IgnoreSingleBodyFilter,
+        ignore_inner_body: zolt.IgnoreSingleBodyFilter,
+        no_spheres: NoSpheresShapeFilter = .{},
+
+        fn init(world: *const ZoltWorld, op: *const SimOp, inner_body: BodyID) Filters {
+            const layer: ObjectLayer = if (op.i[0] == invalid_handle) 0 else @intCast(op.i[0]);
+            return .{
+                .layer = op.i[0],
+                .body_filter_kind = op.i[1],
+                .shape_filter_kind = op.i[2],
+                .default_broad_phase_layer_filter = .init(&world.object_vs_broad_phase_layer_filter.base, layer),
+                .default_object_layer_filter = .init(&world.object_layer_pair_filter.base, layer),
+                .ignore_body = .init(world.getHandle(op.body)),
+                .ignore_inner_body = .init(inner_body),
+            };
+        }
+
+        fn broadPhase(self: *const Filters) *const zolt.BroadPhaseLayerFilter {
+            return if (self.layer == invalid_handle) &self.all_broad_phase_layers else &self.default_broad_phase_layer_filter.base;
+        }
+
+        fn objectLayers(self: *const Filters) *const zolt.ObjectLayerFilter {
+            return if (self.layer == invalid_handle) &self.all_object_layers else &self.default_object_layer_filter.base;
+        }
+
+        fn bodies(self: *const Filters) *const zolt.BodyFilter {
+            return switch (self.body_filter_kind) {
+                1 => &self.ignore_body.base,
+                2 => &self.ignore_inner_body.base,
+                else => &self.all_bodies,
+            };
+        }
+
+        /// null: the accept-all ShapeFilter
+        fn shapes(self: *Filters) ?*zolt.ShapeFilter {
+            return if (self.shape_filter_kind == 1) &self.no_spheres.base else null;
+        }
+    };
+
+    /// SimCheckCollisionCollector: the hash of the hits in their order, with the ID of the character that
+    /// CharacterVsCharacterCollisionSimple passes through SetUserData
+    const CheckCollisionCollector = struct {
+        pub const overrides = .{ .setUserData, .addHit };
+
+        base: zolt.CollideShapeCollector = .init(CheckCollisionCollector),
+        hash: Hasher = .{},
+        num_hits: u32 = 0,
+        other_character: ?*const CharacterVirtual = null,
+
+        pub fn setUserData(self: *CheckCollisionCollector, user_data: u64) void {
+            self.other_character = @ptrFromInt(user_data);
+        }
+
+        pub fn addHit(self: *CheckCollisionCollector, result: *const CollideShapeResult) void {
+            self.hash.vec3(result.contact_point_on1);
+            self.hash.vec3(result.contact_point_on2);
+            self.hash.vec3(result.penetration_axis);
+            self.hash.value(result.penetration_depth);
+            self.hash.value(result.sub_shape_id1.getValue());
+            self.hash.value(result.sub_shape_id2.getValue());
+            self.hash.value(result.body_id2.getIndexAndSequenceNumber());
+            self.hash.value(if (self.other_character) |c| c.getID().getValue() else CharacterID.invalid_character_id);
+            self.num_hits += 1;
+        }
+
+        fn finish(self: *CheckCollisionCollector) u32 {
+            self.hash.value(self.num_hits);
+            return self.hash.hash;
+        }
+    };
+
+    /// The shape of a shape index (GetShape of the .cpp, `invalid_handle`: null)
+    fn getShape(world: *const ZoltWorld, index: u32) ?*const Shape {
+        return if (index != invalid_handle) world.shapes.items[index].get().? else null;
+    }
+
+    /// GetShapeIndex of the .cpp (`invalid_handle` for a shape that is not a scene shape)
+    fn getShapeIndex(world: *const ZoltWorld, shape: ?*const Shape) u32 {
+        for (world.shapes.items, 0..) |s, i| {
+            if (s.get() == shape) return @intCast(i);
+        }
+        return invalid_handle;
+    }
+
+    /// GetObject of the .cpp: the character of a handle (a scene that uses a destroyed or unknown handle is an error)
+    fn getCharacter(world: *ZoltWorld, index: u32) !*CharacterVirtual {
+        const characters = world.phase7.character_virtuals.characters.items;
+        if (index >= characters.len or characters[index] == null) {
+            std.debug.print("SimulationParity: operation on character virtual handle {d} that does not exist\n", .{index});
+            return error.InvalidScene;
+        }
+        return characters[index].?;
+    }
+
+    /// GetCharacterListener of the .cpp
+    fn getListener(world: *ZoltWorld, mode: u32) !?CharacterContactListener {
+        const storage = &world.phase7.character_virtuals;
+        storage.record_listener.recorder = &world.character_recorder;
+        storage.modify_listener.recorder = &world.character_recorder;
+        return switch (mode) {
+            0 => null,
+            1 => CharacterContactListener.init(&storage.record_listener),
+            2 => CharacterContactListener.init(&storage.modify_listener),
+            else => {
+                std.debug.print("SimulationParity: unknown character listener mode {d}\n", .{mode});
+                return error.InvalidScene;
+            },
+        };
+    }
+
+    /// The CharacterVsCharacterCollisionSimple of a collision group
+    fn getGroup(world: *ZoltWorld, index: u32) *CharacterVsCharacterCollisionSimple {
+        const storage = &world.phase7.character_virtuals;
+        if (!storage.groups_initialized) {
+            for (&storage.groups) |*g| g.* = .init(world.allocator);
+            storage.groups_initialized = true;
+        }
+        return &storage.groups[index];
+    }
+
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const d: *const SimCharacterVirtual = &world.desc.character_virtuals[op.index];
+        var settings = CharacterVirtualSettings.init(allocator);
+        defer settings.deinit();
+        settings.base.up = load3(&d.base.up);
+        settings.base.supporting_volume = zolt.Plane.init(load3(d.base.supporting_volume[0..3]), d.base.supporting_volume[3]);
+        settings.base.max_slope_angle = d.base.max_slope_angle;
+        settings.base.enhanced_internal_edge_removal = d.base.enhanced_internal_edge_removal != 0;
+        settings.base.shape.set(getShape(world, d.base.shape));
+        settings.id = CharacterID.init(d.id);
+        settings.mass = d.mass;
+        settings.max_strength = d.max_strength;
+        settings.shape_offset = load3(&d.shape_offset);
+        settings.back_face_mode = @enumFromInt(d.back_face_mode);
+        settings.predictive_contact_distance = d.predictive_contact_distance;
+        settings.max_collision_iterations = d.max_collision_iterations;
+        settings.max_constraint_iterations = d.max_constraint_iterations;
+        settings.min_time_remaining = d.min_time_remaining;
+        settings.collision_tolerance = d.collision_tolerance;
+        settings.character_padding = d.character_padding;
+        settings.max_num_hits = d.max_num_hits;
+        settings.hit_reduction_cos_max_angle = d.hit_reduction_cos_max_angle;
+        settings.penetration_recovery_speed = d.penetration_recovery_speed;
+        settings.inner_body_shape.set(getShape(world, d.inner_body_shape));
+        settings.inner_body_id_override = BodyID.init(d.inner_body_id_override);
+        settings.inner_body_layer = @intCast(d.inner_body_layer);
+
+        const storage = &world.phase7.character_virtuals;
+        try storage.characters.ensureUnusedCapacity(allocator, 1);
+        const character = try CharacterVirtual.create(allocator, &settings, loadR3(&d.position), loadQuat(&d.rotation), d.user_data, &world.system);
+        character.base.addRef();
+        storage.characters.appendAssumeCapacity(character);
+        character.setListener(try getListener(world, d.listener));
+        if (d.collision_group != invalid_handle) {
+            const group = getGroup(world, d.collision_group);
+            try group.add(character);
+            character.setCharacterVsCharacterCollision(group.characterVsCharacterCollision());
+        }
+        return character.getInnerBodyID().getIndexAndSequenceNumber();
+    }
+
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const i = &op.i;
+        const f = &op.f;
+        const r = loadR3(&op.r);
+        const temp = world.temp.tempAllocator();
+
+        const c = try getCharacter(world, op.index);
+        var filters = Filters.init(world, op, c.getInnerBodyID());
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .cv_destroy => {
+                const storage = &world.phase7.character_virtuals;
+                if (storage.groups_initialized) {
+                    for (&storage.groups) |*g| g.remove(c);
+                }
+                storage.characters.items[op.index] = null;
+                c.base.release();
+                return 0;
+            },
+            .cv_set_linear_velocity => c.setLinearVelocity(load3(f[0..3])),
+            .cv_set_position => c.setPosition(r),
+            .cv_set_rotation => c.setRotation(loadQuat(f[0..4])),
+            .cv_set_up => c.base.setUp(load3(f[0..3])),
+            .cv_set_max_slope_angle => c.base.setMaxSlopeAngle(f[0]),
+            .cv_set_supporting_volume => c.base.setSupportingVolume(zolt.Plane.init(load3(f[0..3]), f[3])),
+            .cv_set_mass => c.setMass(f[0]),
+            .cv_set_max_strength => c.setMaxStrength(f[0]),
+            .cv_set_penetration_recovery_speed => c.setPenetrationRecoverySpeed(f[0]),
+            .cv_set_enhanced_internal_edge_removal => c.setEnhancedInternalEdgeRemoval(i[0] != 0),
+            .cv_set_max_num_hits => c.setMaxNumHits(i[0]),
+            .cv_set_hit_reduction_cos_max_angle => c.setHitReductionCosMaxAngle(f[0]),
+            .cv_set_shape_offset => c.setShapeOffset(load3(f[0..3])),
+            .cv_set_user_data => c.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32)),
+            .cv_set_listener => c.setListener(try getListener(world, i[0])),
+            .cv_set_character_vs_character_collision => c.setCharacterVsCharacterCollision(if (i[0] != invalid_handle) getGroup(world, i[0]).characterVsCharacterCollision() else null),
+            .cv_add_to_collision_group => try getGroup(world, i[0]).add(c),
+            .cv_remove_from_collision_group => getGroup(world, i[0]).remove(c),
+            .cv_update => try c.update(f[0], load3(f[1..4]), filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp),
+            .cv_extended_update => {
+                // SimLoadExtendedUpdateSettings(f + 4)
+                const s: CharacterVirtual.ExtendedUpdateSettings = .{
+                    .stick_to_floor_step_down = load3(f[4..7]),
+                    .walk_stairs_step_up = load3(f[7..10]),
+                    .walk_stairs_min_step_forward = f[10],
+                    .walk_stairs_step_forward_test = f[11],
+                    .walk_stairs_cos_angle_forward_contact = f[12],
+                    .walk_stairs_step_down_extra = load3(f[13..16]),
+                };
+                try c.extendedUpdate(f[0], load3(f[1..4]), &s, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp);
+            },
+            .cv_stick_to_floor => return @intFromBool(try c.stickToFloor(load3(f[0..3]), filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp)),
+            .cv_walk_stairs => return @intFromBool(try c.walkStairs(f[0], load3(f[1..4]), load3(f[4..7]), load3(f[7..10]), load3(f[10..13]), filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp)),
+            .cv_can_walk_stairs => return @intFromBool(c.canWalkStairs(load3(f[0..3]))),
+            .cv_refresh_contacts => try c.refreshContacts(filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp),
+            .cv_update_ground_velocity => c.updateGroundVelocity(),
+            .cv_set_shape => return @intFromBool(try c.setShape(getShape(world, i[3]), f[0], filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp)),
+            .cv_set_inner_body_shape => try c.setInnerBodyShape(getShape(world, i[0]).?),
+            .cv_cancel_velocity_towards_steep_slopes => {
+                var h: Hasher = .{};
+                h.vec3(c.cancelVelocityTowardsSteepSlopes(load3(f[0..3])));
+                return h.hash;
+            },
+            .cv_start_tracking_contact_changes => try c.startTrackingContactChanges(),
+            .cv_finish_tracking_contact_changes => c.finishTrackingContactChanges(),
+            .cv_check_collision => {
+                var collector: CheckCollisionCollector = .{};
+                try c.checkCollision(r, loadQuat(f[0..4]), load3(f[4..7]), f[7], getShape(world, i[3]).?, r, &collector.base, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes());
+                return collector.finish();
+            },
+            .cv_settings_hash => {
+                var s = c.getCharacterVirtualSettings();
+                defer s.deinit();
+                var h: Hasher = .{};
+                h.vec3(s.base.up);
+                h.plane(s.base.supporting_volume);
+                h.value(s.base.max_slope_angle);
+                h.boolean(s.base.enhanced_internal_edge_removal);
+                h.value(getShapeIndex(world, s.base.shape.get()));
+                h.value(s.id.getValue());
+                h.value(s.mass);
+                h.value(s.max_strength);
+                h.vec3(s.shape_offset);
+                h.value(@as(u32, @intFromEnum(s.back_face_mode)));
+                h.value(s.predictive_contact_distance);
+                h.value(s.max_collision_iterations);
+                h.value(s.max_constraint_iterations);
+                h.value(s.min_time_remaining);
+                h.value(s.collision_tolerance);
+                h.value(s.character_padding);
+                h.value(s.max_num_hits);
+                h.value(s.hit_reduction_cos_max_angle);
+                h.value(s.penetration_recovery_speed);
+                h.value(getShapeIndex(world, s.inner_body_shape.get()));
+                h.value(s.inner_body_id_override.getIndexAndSequenceNumber());
+                h.value(@as(u32, s.inner_body_layer));
+                return h.hash;
+            },
+            .cv_has_collided_with_body => return @intFromBool(c.hasCollidedWith(world.getHandle(op.body))),
+            .cv_has_collided_with_character => {
+                const other = try getCharacter(world, i[0]);
+                return @as(u32, @intFromBool(c.hasCollidedWithCharacterID(other.getID()))) | (@as(u32, @intFromBool(c.hasCollidedWithCharacter(other))) << 1);
+            },
+            .cv_expect_ground_state => return @bitCast(@intFromEnum(c.base.getGroundState())), // Changes nothing, the driver checks the result
+            .cv_save_restore_state => {
+                var recorder = StateRecorderImpl.init(world.allocator);
+                defer recorder.deinit();
+                c.saveState(recorder.recorder());
+                if (recorder.isFailed()) return error.OutOfMemory;
+                const hash = SimScenes.hashBytes(SimScenes.hash_seed, recorder.getData());
+                recorder.rewind();
+                recorder.recorder().setValidating(i[0] != 0);
+                try c.restoreState(recorder.recorder());
+                return hash;
+            },
+            .cv_expect_value => return switch (i[0]) { // Changes nothing, the driver checks the result
+                0 => @intFromBool(c.getMaxHitsExceeded()),
+                1 => @intCast(c.getActiveContacts().len),
+                2, 3 => blk: {
+                    var n: u32 = 0;
+                    for (c.getActiveContacts()) |*contact| {
+                        if (contact.had_collision and (i[0] == 2 or contact.character_b != null))
+                            n += 1;
+                    }
+                    break :blk n;
+                },
+                4 => @intFromBool(c.base.getGroundBodyID().eql(world.getHandle(op.body))),
+                5 => @intFromBool(!c.base.getGroundVelocity().isNearZero(.{ .max_dist_sq = 1.0e-6 })),
+                6 => getShapeIndex(world, c.getShape()),
+                7 => @intFromBool(!c.getInnerBodyID().isInvalid()),
+                else => {
+                    std.debug.print("SimulationParity: unknown character virtual value {d}\n", .{i[0]});
+                    return error.InvalidScene;
+                },
+            },
+            .cv_set_step_velocity => {
+                // Character::Step of CharacterVirtualTests.cpp
+                const current_vertical_velocity = Vec3.init(0, c.getLinearVelocity().getY(), 0);
+                const ground_velocity = c.base.getGroundVelocity();
+                var new_velocity: Vec3 = undefined;
+                if (c.base.getGroundState() == .on_ground and // If on ground
+                    (current_vertical_velocity.getY() - ground_velocity.getY()) < 0.1) // And not moving away from ground
+                {
+                    // Assume velocity of ground when on ground
+                    new_velocity = ground_velocity;
+
+                    // Jump
+                    new_velocity = new_velocity.add(Vec3.init(0, f[7], 0));
+                } else new_velocity = current_vertical_velocity;
+
+                // Gravity
+                new_velocity = new_velocity.add(load3(f[3..6]).mulScalar(f[6]));
+
+                // Player input
+                new_velocity = new_velocity.add(load3(f[0..3]));
+
+                c.setLinearVelocity(new_velocity);
+            },
+            .cv_perf_update => {
+                // The step of a character in CharacterVirtualScene::UpdateTest of PerformanceTest
+
+                // Calculate new vertical velocity
+                var new_velocity: Vec3 = undefined;
+                if (c.base.getGroundState() == .on_ground and // If on ground
+                    c.getLinearVelocity().getY() < 0.1) // And not moving away from ground
+                    new_velocity = Vec3.zero()
+                else
+                    new_velocity = c.getLinearVelocity().mul(Vec3.init(0, 1, 0));
+                new_velocity = new_velocity.add(world.system.getGravity().mulScalar(f[0]));
+
+                // Deterministic random input
+                const count: u64 = op.count;
+                const hash = zolt.HashCombine.hash(count);
+                const x: i32 = @intCast(hash % 10);
+                const y: i32 = @intCast((hash / 10) % 10);
+                const speed: i32 = @intCast((hash / 100) % 10);
+
+                // Determine target position
+                const target = RVec3.init(4.0 * @as(Real, @floatFromInt(x)) - 20.0, 5.0, 4.0 * @as(Real, @floatFromInt(y)) - 20.0);
+
+                // Determine new character velocity
+                var direction = target.sub(c.getPosition()).toVec3().normalizedOr(Vec3.zero());
+                direction.setY(0);
+                new_velocity = new_velocity.add(direction.mulScalar(5.0 + 0.5 * @as(f32, @floatFromInt(speed))));
+                c.setLinearVelocity(new_velocity);
+
+                // Update the character position
+                const update_settings: CharacterVirtual.ExtendedUpdateSettings = .{};
+                try c.extendedUpdate(f[0], world.system.getGravity(), &update_settings, filters.broadPhase(), filters.objectLayers(), filters.bodies(), filters.shapes(), temp);
+            },
+            else => |kind| {
+                std.debug.print("SimulationParity: unknown character virtual operation {t}\n", .{kind});
+                return error.InvalidScene;
+            },
+        }
+        return 0;
+    }
+
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        for (world.phase7.character_virtuals.characters.items, 0..) |maybe_character, index| {
+            const c = maybe_character orelse continue;
+            const h: u32 = @intCast(index);
+
+            // The SaveState bytes (WriteSaveState)
+            var recorder = StateRecorderImpl.init(world.allocator);
+            defer recorder.deinit();
+            c.saveState(recorder.recorder());
+            if (recorder.isFailed()) return error.OutOfMemory;
+            try w.begin(.cv_save_state, h, 0);
+            try w.raw(recorder.getData());
+            w.end();
+
+            try w.begin(.cv_properties, h, 0);
+            try w.value(c.getID().getValue());
+            try w.value(c.getUserData());
+            try w.value(c.getInnerBodyID().getIndexAndSequenceNumber());
+            try w.value(getShapeIndex(world, c.getShape()));
+            try w.value(c.getMass());
+            try w.value(c.getMaxStrength());
+            try w.value(c.getPenetrationRecoverySpeed());
+            try w.boolean(c.getEnhancedInternalEdgeRemoval());
+            try w.value(c.getCharacterPadding());
+            try w.value(c.getMaxNumHits());
+            try w.value(c.getHitReductionCosMaxAngle());
+            try w.boolean(c.getMaxHitsExceeded());
+            try w.vec3(c.getShapeOffset());
+            w.end();
+
+            try w.begin(.cv_base, h, 0);
+            try w.vec3(c.base.getUp());
+            try w.value(c.base.getCosMaxSlopeAngle());
+            const supporting_volume = c.base.getSupportingVolume();
+            try w.vec3(supporting_volume.getNormal());
+            try w.value(supporting_volume.getConstant());
+            try w.value(materialHash(c.base.getGroundMaterial()));
+            try w.value(c.base.getGroundUserData());
+            try w.boolean(c.base.isSupported());
+            try w.boolean(c.canWalkStairs(c.getLinearVelocity()));
+            w.end();
+
+            try w.begin(.cv_transforms, h, 0);
+            try w.rvec3(c.getCenterOfMassPosition());
+            try w.rmat44(c.getWorldTransform());
+            try w.rmat44(c.getCenterOfMassTransform());
+            w.end();
+
+            // WriteTransformedShape
+            var ts = c.getTransformedShape();
+            defer ts.deinit();
+            try w.begin(.cv_transformed_shape, h, 0);
+            try w.rvec3(ts.shape_position_com);
+            try w.quat(ts.shape_rotation);
+            try w.vec3(ts.getShapeScale());
+            try w.value(ts.body_id.getIndexAndSequenceNumber());
+            try w.value(getShapeIndex(world, ts.shape.get()));
+            w.end();
+
+            const contacts = c.getActiveContacts();
+            try w.begin(.cv_num_active_contacts, h, 0);
+            try w.value(@as(u32, @intCast(contacts.len)));
+            w.end();
+            for (contacts, 0..) |*contact, item| {
+                try w.begin(.cv_active_contact, h, @intCast(item));
+                try w.value(contact.base.body_b.getIndexAndSequenceNumber());
+                try w.value(contact.base.character_id_b.getValue());
+                try w.value(contact.base.sub_shape_id_b.getValue());
+                try w.rvec3(contact.position);
+                try w.vec3(contact.linear_velocity);
+                try w.vec3(contact.contact_normal);
+                try w.vec3(contact.surface_normal);
+                try w.value(contact.distance);
+                try w.value(contact.fraction);
+                try w.value(@as(u32, @intFromEnum(contact.motion_type_b)));
+                try w.boolean(contact.is_sensor_b);
+                try w.boolean(contact.character_b != null);
+                try w.value(contact.user_data);
+                try w.value(materialHash(contact.material));
+                try w.boolean(contact.had_collision);
+                try w.boolean(contact.was_discarded);
+                try w.boolean(contact.can_push_character);
+                try w.boolean(contact.is_back_facing_contact);
+                w.end();
+            }
+        }
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.character_virtuals.characters.items) |maybe_character| {
+            if (maybe_character) |c| c.saveState(recorder.recorder());
+        }
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        for (world.phase7.character_virtuals.characters.items) |maybe_character| {
+            if (maybe_character) |c| try c.restoreState(recorder.recorder());
+        }
+    }
+
+    /// ~SimWorld: the group lists are cleared, then the character virtuals released in handle order (each removes and
+    /// destroys its inner body)
+    fn destroyAll(world: *ZoltWorld) void {
+        const storage = &world.phase7.character_virtuals;
+        if (storage.groups_initialized) {
+            for (&storage.groups) |*g| g.deinit();
+            storage.groups_initialized = false;
+        }
+        for (storage.characters.items) |maybe_character| {
+            if (maybe_character) |c| c.base.release();
+        }
+        storage.characters.deinit(world.allocator);
+        storage.characters = .empty;
+    }
+
+    /// The CharacterID test (jolt_sim_character_id_sequence of the .cpp): which constructions consume an ID
+    fn characterIdSequence(world: *ZoltWorld, first_id: u32, out: *[SimScenes.character_id_sequence_len]u32) !void {
+        const allocator = world.allocator;
+        const next = struct {
+            fn next() u32 {
+                const value = CharacterID.nextCharacterID().getValue();
+                CharacterID.setNextCharacterID(.{ .next_value = value });
+                return value;
+            }
+        }.next;
+        CharacterID.setNextCharacterID(.{ .next_value = first_id });
+        defer CharacterID.setNextCharacterID(.{});
+        var a = CharacterVirtualSettings.init(allocator);
+        defer a.deinit();
+        a.base.shape.set(getShape(world, 0));
+        out[0] = a.id.getValue();
+        out[1] = next();
+        var b = CharacterVirtualSettings.initCopy(allocator, &a);
+        defer b.deinit();
+        out[2] = b.id.getValue();
+        out[3] = next();
+        var c = CharacterVirtualSettings.init(allocator);
+        defer c.deinit();
+        c.assign(&a);
+        out[4] = c.id.getValue();
+        out[5] = next();
+        {
+            const character = try CharacterVirtual.create(allocator, &a, RVec3.zero(), Quat.identity(), 0, &world.system);
+            character.base.addRef();
+            defer character.base.release();
+            out[6] = character.getID().getValue();
+            out[7] = next();
+            var s = character.getCharacterVirtualSettings();
+            defer s.deinit();
+            out[8] = s.id.getValue();
+            out[9] = next();
+        }
+    }
+};
+
+// ---- SLOT ragdoll: Ragdoll, RagdollSettings (Phase7OpRange.ragdoll, Blocker.ragdolls) ----
+const RagdollSlot = struct {
+    const Ragdoll = zolt.Ragdoll;
+    const RagdollSettings = zolt.RagdollSettings;
+    const Skeleton = zolt.Skeleton;
+    const SkeletonPose = zolt.SkeletonPose;
+    const TwoBodyConstraintSettings = zolt.TwoBodyConstraintSettings;
+
+    /// mRagdollSettings and mRagdolls of SimWorld
+    const Storage = struct {
+        /// Per ragdoll description, built at its first create_ragdoll (.empty: not built yet)
+        settings: std.ArrayList(Ref(RagdollSettings)) = .empty,
+        /// The ragdolls of the ragdoll handles (.empty: destroyed or out of bodies)
+        ragdolls: std.ArrayList(Ref(Ragdoll)) = .empty,
+    };
+
+    /// The TwoBodyConstraintSettings in the settings of a constraint description (every ConstraintKind is a two body
+    /// constraint)
+    fn twoBody(settings: Ref(ConstraintSettings)) ?*TwoBodyConstraintSettings {
+        return zolt.virtual.downcast(TwoBodyConstraintSettings, settings.get().?);
+    }
+
+    /// SimMakePose of SimulationReference.cpp: the SkeletonPose of a pose description (the joint states, then
+    /// CalculateJointMatrices)
+    fn makePose(desc: *const SimSceneDesc, skeleton: *const Skeleton, pose_index: u32, out_pose: *SkeletonPose) !void {
+        const p = &desc.ragdoll_poses[pose_index];
+        try out_pose.setSkeleton(skeleton);
+        out_pose.setRootOffset(loadR3(&p.root_offset));
+        var j: usize = 0;
+        while (j < p.count and j < out_pose.getJointCount()) : (j += 1) {
+            const f = desc.floats[p.data + 7 * j ..][0..7];
+            const state = out_pose.getJointMut(j);
+            state.translation = load3(f[0..3]);
+            state.rotation = loadQuat(f[3..7]);
+        }
+        out_pose.calculateJointMatrices();
+    }
+
+    /// SimMakePoseMatrices of SimulationReference.cpp: the joint matrices of a pose description taken as model space
+    /// transforms (the `_matrices` operations; the caller frees them)
+    fn makePoseMatrices(allocator: Allocator, desc: *const SimSceneDesc, pose_index: u32, num_joints: usize) ![]Mat44 {
+        const p = &desc.ragdoll_poses[pose_index];
+        const matrices = try allocator.alloc(Mat44, num_joints);
+        @memset(matrices, Mat44.identity());
+        var j: usize = 0;
+        while (j < p.count and j < num_joints) : (j += 1) {
+            const f = desc.floats[p.data + 7 * j ..][0..7];
+            matrices[j] = Mat44.rotationTranslation(loadQuat(f[3..7]), load3(f[0..3]));
+        }
+        return matrices;
+    }
+
+    /// SimWorld::MakeRagdollSettings / SimMakeRagdollSettings of SimulationReference.cpp: the RagdollSettings of ragdoll
+    /// description `index` (one reference owned by the caller); `out_stabilize`: the result of Stabilize (1 / 0, 2: not
+    /// called)
+    fn makeSettings(world: *const ZoltWorld, index: u32, out_stabilize: ?*u32) !Ref(RagdollSettings) {
+        const allocator = world.allocator;
+        const desc = world.desc;
+        const rd = &desc.ragdolls[index];
+        const joints = desc.ragdoll_joints[rd.first_joint..][0..rd.num_joints];
+
+        var settings = Ref(RagdollSettings).init(try RagdollSettings.create(allocator));
+        errdefer settings.deinit();
+        const s = settings.get().?;
+        s.skeleton = .init(try Skeleton.create(allocator));
+        const skeleton = s.skeleton.get().?;
+        for (joints, 0..) |*joint, j| {
+            var name_buffer: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "Joint{d}", .{j});
+            if (joint.parent < @as(i32, @intCast(j))) {
+                _ = try skeleton.addJointWithParentIndex(name, joint.parent);
+            } else {
+                // A joint that is its own parent: the parent index is set directly (as the .cpp does)
+                _ = try skeleton.addJoint(name, .{});
+                skeleton.getJointMut(j).parent_joint_index = joint.parent;
+            }
+        }
+
+        try s.parts.ensureTotalCapacity(allocator, joints.len);
+        for (joints) |*joint| {
+            var part_settings = world.makeBodyCreationSettings(&desc.bodies[joint.body]);
+            defer part_settings.deinit();
+            var to_parent: Ref(ConstraintSettings) = .empty;
+            defer to_parent.deinit();
+            if (joint.to_parent != invalid_handle)
+                to_parent = try makeConstraintSettings(allocator, &desc.constraints[joint.to_parent]);
+            s.parts.appendAssumeCapacity(.init(&part_settings, if (to_parent.get() != null) twoBody(to_parent) else null));
+        }
+        try s.additional_constraints.ensureTotalCapacity(allocator, rd.num_additional);
+        for (desc.ragdoll_additional_constraints[rd.first_additional..][0..rd.num_additional]) |*c| {
+            var constraint = try makeConstraintSettings(allocator, &desc.constraints[c.constraint]);
+            defer constraint.deinit();
+            s.additional_constraints.appendAssumeCapacity(.init(c.body1, c.body2, twoBody(constraint)));
+        }
+
+        // The preparation, in the order of the members of SimRagdoll
+        var stabilize: u32 = 2;
+        if (rd.stabilize != 0)
+            stabilize = @intFromBool(try s.stabilize());
+        if (out_stabilize) |out| out.* = stabilize;
+        if (rd.calculate_constraint_priorities != 0)
+            try s.calculateConstraintPriorities(.{ .base_priority = rd.base_priority });
+        if (rd.disable_parent_child_collisions == 1) {
+            try s.disableParentChildCollisions(.{});
+        } else if (rd.disable_parent_child_collisions == 2) {
+            var pose = SkeletonPose.init(allocator);
+            defer pose.deinit();
+            try makePose(desc, skeleton, rd.pose, &pose);
+            try s.disableParentChildCollisions(.{ .joint_matrices = pose.getJointMatrices(), .min_separation_distance = rd.min_separation_distance });
+        }
+        try s.calculateBodyIndexToConstraintIndex();
+        try s.calculateConstraintIndexToBodyIdxPair();
+        return settings;
+    }
+
+    /// GetObject of SimulationReference.cpp (which aborts on a handle without ragdoll)
+    fn ragdoll(world: *ZoltWorld, op: *const SimOp) !*Ragdoll {
+        const ragdolls = world.phase7.ragdolls.ragdolls.items;
+        if (op.index < ragdolls.len) {
+            if (ragdolls[op.index].get()) |r| return r;
+        }
+        std.debug.print("SimulationParity: operation {d} on ragdoll handle {d} that does not exist\n", .{ op.kind, op.index });
+        return error.SceneError;
+    }
+
+    /// The hash of the SaveBinaryState bytes of settings (ragdoll_settings_hash)
+    fn settingsHash(allocator: Allocator, settings: *const RagdollSettings, save_shapes: bool, save_group_filter: bool) !u32 {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+        try settings.saveBinaryState(wrapper.streamOut(), save_shapes, save_group_filter);
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        return SimScenes.hashBytes(2166136261, out.written());
+    }
+
+    /// The create_ragdoll operation (ApplyRagdollOp of SimulationReference.cpp)
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const storage = &world.phase7.ragdolls;
+
+        // The settings of the description, built at its first creation and shared by its ragdolls
+        const d = op.index;
+        if (storage.settings.items.len < world.desc.num_ragdolls)
+            try storage.settings.appendNTimes(allocator, .empty, world.desc.num_ragdolls - storage.settings.items.len);
+        try storage.ragdolls.ensureUnusedCapacity(allocator, 1);
+        if (storage.settings.items[d].get() == null)
+            storage.settings.items[d] = try makeSettings(world, d, null);
+        const rd = &world.desc.ragdolls[d];
+        const new_ragdoll = try storage.settings.items[d].get().?.createRagdoll(rd.collision_group, rd.user_data, &world.system);
+        storage.ragdolls.appendAssumeCapacity(.init(new_ragdoll));
+        return if (new_ragdoll) |r| @intCast(r.getBodyCount()) else 0;
+    }
+
+    /// ApplyRagdollOp of SimulationReference.cpp: the operations return IsActive() unless noted
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const desc = world.desc;
+        const i = &op.i;
+        const f = &op.f;
+        const activation: Activation = if (op.activation == 0) .activate else .dont_activate;
+        const lock = i[3] == 0;
+
+        const rag = try ragdoll(world, op);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .ragdoll_add_to_physics_system => try rag.addToPhysicsSystem(activation, .{ .lock_bodies = lock }),
+            .ragdoll_remove_from_physics_system => try rag.removeFromPhysicsSystem(.{ .lock_bodies = lock }),
+            .ragdoll_activate => rag.activate(.{ .lock_bodies = lock }),
+            .ragdoll_is_active => return @intFromBool(rag.isActive(.{ .lock_bodies = lock })),
+            .ragdoll_set_group_id => rag.setGroupID(i[0], .{ .lock_bodies = lock }),
+
+            .ragdoll_set_pose => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, rag.getRagdollSettings().?.getSkeleton().?, i[0], &pose);
+                rag.setPose(&pose, .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_set_pose_matrices => {
+                const matrices = try makePoseMatrices(allocator, desc, i[0], rag.getBodyCount());
+                defer allocator.free(matrices);
+                rag.setPoseMatrices(loadR3(&desc.ragdoll_poses[i[0]].root_offset), matrices, .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_reset_warm_start => rag.resetWarmStart(),
+
+            .ragdoll_drive_to_pose_using_kinematics => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, rag.getRagdollSettings().?.getSkeleton().?, i[0], &pose);
+                rag.driveToPoseUsingKinematics(&pose, f[0], .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_drive_to_pose_using_kinematics_matrices => {
+                const matrices = try makePoseMatrices(allocator, desc, i[0], rag.getBodyCount());
+                defer allocator.free(matrices);
+                rag.driveToPoseUsingKinematicsMatrices(loadR3(&desc.ragdoll_poses[i[0]].root_offset), matrices, f[0], .{ .lock_bodies = lock });
+            },
+
+            .ragdoll_drive_to_pose_using_motors => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, rag.getRagdollSettings().?.getSkeleton().?, i[0], &pose);
+                rag.driveToPoseUsingMotors(&pose);
+            },
+
+            .ragdoll_drive_to_pose_using_motors_velocity => {
+                const skeleton = rag.getRagdollSettings().?.getSkeleton().?;
+                var prev_pose = SkeletonPose.init(allocator);
+                defer prev_pose.deinit();
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try makePose(desc, skeleton, i[1], &prev_pose);
+                try makePose(desc, skeleton, i[0], &pose);
+                rag.driveToPoseUsingMotorsWithVelocity(&prev_pose, &pose, f[0]);
+            },
+
+            .ragdoll_set_linear_and_angular_velocity => rag.setLinearAndAngularVelocity(load3(f[0..3]), load3(f[3..6]), .{ .lock_bodies = lock }),
+            .ragdoll_set_linear_velocity => rag.setLinearVelocity(load3(f[0..3]), .{ .lock_bodies = lock }),
+            .ragdoll_add_linear_velocity => rag.addLinearVelocity(load3(f[0..3]), .{ .lock_bodies = lock }),
+            .ragdoll_add_impulse => rag.addImpulse(load3(f[0..3]), .{ .lock_bodies = lock }),
+
+            .ragdoll_destroy => {
+                world.phase7.ragdolls.ragdolls.items[op.index].deinit();
+                return 0;
+            },
+
+            .ragdoll_settings_hash => return try settingsHash(allocator, rag.getRagdollSettings().?, i[0] != 0, i[1] != 0),
+
+            .ragdoll_get_pose_hash => {
+                var pose = SkeletonPose.init(allocator);
+                defer pose.deinit();
+                try pose.setSkeleton(rag.getRagdollSettings().?.getSkeleton().?);
+                rag.getPose(&pose, .{ .lock_bodies = lock });
+                const root_offset = pose.getRootOffset();
+                const offset = [3]Real{ root_offset.getX(), root_offset.getY(), root_offset.getZ() };
+                var hash = SimScenes.hashBytes(2166136261, std.mem.asBytes(&offset));
+                for (pose.getJointMatrices()) |m| {
+                    for (0..4) |col| {
+                        const v = m.getColumn4(@intCast(col));
+                        const values = [4]f32{ v.getX(), v.getY(), v.getZ(), v.getW() };
+                        hash = SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+                    }
+                }
+                return hash;
+            },
+
+            .ragdoll_expect_active => {}, // Changes nothing, the driver checks the result
+
+            else => {
+                std.debug.print("SimulationParity: unknown ragdoll operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+        return @intFromBool(rag.isActive(.{}));
+    }
+
+    /// WriteRagdollState of SimulationReference.cpp for every ragdoll in handle order (the destroyed ones skipped)
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        const allocator = world.allocator;
+        for (world.phase7.ragdolls.ragdolls.items, 0..) |r_ref, handle_index| {
+            const r = r_ref.get() orelse continue;
+            const handle: u32 = @intCast(handle_index);
+            const num_bodies = r.getBodyCount();
+            try w.begin(.ragdoll_properties, handle, 0);
+            try w.value(@as(u32, @intCast(num_bodies)));
+            try w.value(@as(u32, @intCast(r.getConstraintCount())));
+            try w.boolean(r.isActive(.{}));
+            w.end();
+
+            for (0..num_bodies) |b| {
+                try w.begin(.ragdoll_body, handle, @intCast(b));
+                try w.value(r.getBodyID(b).getIndexAndSequenceNumber());
+                w.end();
+            }
+
+            const root = r.getRootTransform(.{});
+            try w.begin(.ragdoll_root_transform, handle, 0);
+            try w.rvec3(root.position);
+            try w.quat(root.rotation);
+            w.end();
+
+            var root_offset: RVec3 = undefined;
+            const joints = try allocator.alloc(Mat44, num_bodies);
+            defer allocator.free(joints);
+            r.getPoseMatrices(&root_offset, joints, .{});
+            try w.begin(.ragdoll_pose_root_offset, handle, 0);
+            try w.rvec3(root_offset);
+            w.end();
+            for (joints, 0..) |m, b| {
+                try w.begin(.ragdoll_pose_joint, handle, @intCast(b));
+                try w.mat44(m);
+                w.end();
+            }
+
+            const bounds = r.getWorldSpaceBounds(.{});
+            try w.begin(.ragdoll_bounds, handle, 0);
+            try w.vec3(bounds.min);
+            try w.vec3(bounds.max);
+            w.end();
+
+            for (0..r.getConstraintCount()) |c| {
+                const constraint = r.getConstraint(c);
+                try w.begin(.ragdoll_constraint, handle, @intCast(c));
+                try w.value(@as(u32, @intFromEnum(constraint.base.getSubType())));
+                try w.value(constraint.base.getConstraintPriority());
+                try w.boolean(constraint.base.getEnabled());
+                try w.boolean(constraint.base.isActive());
+                try w.value(constraint.getBody1().getID().getIndexAndSequenceNumber());
+                try w.value(constraint.getBody2().getID().getIndexAndSequenceNumber());
+                w.end();
+            }
+        }
+    }
+
+    /// Ragdolls have no SaveState of their own (their bodies and constraints are in the PhysicsSystem state)
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    /// ~SimWorld of SimulationReference.cpp: the ragdolls that are in the system are removed, then all are released
+    /// (which destroys their bodies), then the settings. Nothing is compared afterwards, and nothing may allocate here:
+    /// under the creation sweep (std.testing.checkAllAllocationFailures) an allocation of the teardown that fails would
+    /// be swallowed (error.SwallowedOutOfMemoryError). So the constraints and the bodies are removed one by one
+    /// (RemoveFromPhysicsSystem allocates the copy of the body IDs and the constraint list) and the activation listener
+    /// is detached first (OnBodyDeactivated of a removed active body adds a record, which can allocate).
+    fn destroyAll(world: *ZoltWorld) void {
+        const allocator = world.allocator;
+        const storage = &world.phase7.ragdolls;
+        const bi = world.system.getBodyInterfaceMut();
+        world.system.setBodyActivationListener(null);
+        for (storage.ragdolls.items) |r_ref| {
+            const r = r_ref.get() orelse continue;
+            if (!bi.isAdded(r.getBodyID(0))) continue;
+            for (r.constraints.items) |c| world.system.removeConstraint(c.get().?);
+            for (r.body_ids.items) |id| bi.removeBody(id);
+        }
+        for (storage.ragdolls.items) |*r| r.deinit();
+        storage.ragdolls.deinit(allocator);
+        for (storage.settings.items) |*s| s.deinit();
+        storage.settings.deinit(allocator);
+        storage.* = .{};
+    }
+
+    /// jolt_sim_ragdoll_settings_bytes of SimulationReference.cpp
+    fn settingsBytes(world: *ZoltWorld, index: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const allocator = world.allocator;
+        var settings: Ref(RagdollSettings) = .empty;
+        defer settings.deinit();
+        if (restore_from) |bytes| {
+            var reader: std.Io.Reader = .fixed(bytes);
+            var wrapper = zolt.StreamInWrapper.init(&reader);
+            const stream = wrapper.streamIn();
+            var result = try RagdollSettings.restoreFromBinaryState(allocator, stream);
+            defer result.deinit();
+            if (result.hasError()) return false;
+            // SimReadCompletely: the stream sets eof only on a read past the end, so one more byte is read
+            const read = !stream.isFailed();
+            var extra: [1]u8 = undefined;
+            stream.readBytes(&extra);
+            if (!read or !stream.isEOF()) return false;
+            settings.set(result.getPtr().?);
+        } else {
+            settings = try makeSettings(world, index, null);
+        }
+        var bytes: std.Io.Writer.Allocating = .init(allocator);
+        defer bytes.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&bytes.writer);
+        try settings.get().?.saveBinaryState(wrapper.streamOut(), true, true);
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        out.clearRetainingCapacity();
+        try out.appendSlice(allocator, bytes.written());
+        return true;
+    }
+
+    /// jolt_sim_ragdoll_settings_info of SimulationReference.cpp
+    fn settingsInfo(world: *ZoltWorld, index: u32, out: *std.ArrayList(u32)) !void {
+        const allocator = world.allocator;
+        var stabilize: u32 = 2;
+        var settings = try makeSettings(world, index, &stabilize);
+        defer settings.deinit();
+        const s = settings.get().?;
+        out.clearRetainingCapacity();
+        try out.append(allocator, stabilize);
+        const body_to_constraint = s.getBodyIndexToConstraintIndex();
+        try out.append(allocator, @intCast(body_to_constraint.len));
+        for (body_to_constraint) |c|
+            try out.append(allocator, @bitCast(c));
+        const pairs = s.getConstraintIndexToBodyIdxPair();
+        try out.append(allocator, @intCast(pairs.len));
+        for (pairs) |p| {
+            try out.append(allocator, @bitCast(p.first));
+            try out.append(allocator, @bitCast(p.second));
+        }
+    }
+};
+
+// ---- SLOT vehicle: VehicleConstraint, the collision testers, the wheels, the engine, the transmission, the anti-roll
+// bars, WheeledVehicleController (Phase7OpRange.vehicle 520..569, Blocker.wheeled_vehicles) ----
+
+/// The vehicle core group: the vehicles of all three controller kinds (the tracked and motorcycle parts through the hooks
+/// of TrackedVehicleSlot / MotorcycleSlot). The port of the vehicle code of SimulationReference.cpp: SimMakeVehicleSettings
+/// and its helpers (`makeVehicleSettings`, `fillWheeled`, ...), SimVehicleData (`Vehicle`), ApplyVehicleOp (`create`,
+/// `applyOp`), WriteVehicleState (`writeState`), SimVehicleSettingsPart (`settingsPart`), the callbacks of
+/// SetVehicleCallbacks, SimVehicleCombineFriction and SimVehicleTireMaxImpulse.
+const VehicleSlot = struct {
+    const WheeledVehicleController = zolt.WheeledVehicleController;
+    const WheeledVehicleControllerSettings = zolt.WheeledVehicleControllerSettings;
+    const WheelSettingsWV = zolt.WheelSettingsWV;
+    const WheelWV = zolt.WheelWV;
+    const VehicleConstraintSettings = zolt.VehicleConstraintSettings;
+    const VehicleCollisionTester = zolt.VehicleCollisionTester;
+    const VehicleEngine = zolt.VehicleEngine;
+    const VehicleEngineSettings = zolt.VehicleEngineSettings;
+    const VehicleTransmission = zolt.VehicleTransmission;
+    const VehicleTransmissionSettings = zolt.VehicleTransmissionSettings;
+    const VehicleTrackSettings = zolt.VehicleTrackSettings;
+    const VehicleDifferentialSettings = zolt.VehicleDifferentialSettings;
+    const VehicleAntiRollBar = zolt.VehicleAntiRollBar;
+    const LinearCurve = zolt.LinearCurve;
+    const SimVehicleEngine = SimScenes.SimVehicleEngine;
+    const SimVehicleTransmission = SimScenes.SimVehicleTransmission;
+    const SimVehicleTrack = SimScenes.SimVehicleTrack;
+    const SimVehicleDifferential = SimScenes.SimVehicleDifferential;
+    const SimVehicleAntiRollBar = SimScenes.SimVehicleAntiRollBar;
+    const VehicleWheelKind = SimScenes.VehicleWheelKind;
+    const VehicleTesterKind = SimScenes.VehicleTesterKind;
+    const VehicleCallbacks = SimScenes.VehicleCallbacks;
+
+    /// A vehicle of the world (SimVehicleData of the .cpp): the constraint, its tester, the defaults of its callbacks and
+    /// the filters of vehicle_tester_set_filters (the tester keeps pointers to them). Heap allocated: the step callbacks
+    /// get it as their context.
+    const Vehicle = struct {
+        world: *ZoltWorld,
+        /// The harness' reference (Ref<VehicleConstraint> mConstraint)
+        constraint: Ref(Constraint),
+        tester: Ref(VehicleCollisionTester) = .empty,
+        handle: u32,
+        controller: VehicleControllerKind,
+        added: bool = false,
+        /// The VehicleCallbacks bits of the step callbacks (the value that the lambdas of SetVehicleCallbacks capture: the
+        /// callbacks are set again whenever it changes)
+        callbacks: u32 = 0,
+        default_combine_friction: VehicleConstraint.CombineFunction = .default,
+        default_tire_max_impulse: WheeledVehicleController.TireMaxImpulseCallback = .default,
+        broad_phase_layer_filter: ?*zolt.DefaultBroadPhaseLayerFilter = null,
+        object_layer_filter: ?*zolt.DefaultObjectLayerFilter = null,
+        body_filter: ?*zolt.IgnoreMultipleBodiesFilter = null,
+
+        fn get(self: *const Vehicle) *VehicleConstraint {
+            return zolt.virtual.downcast(VehicleConstraint, self.constraint.ptr.?);
+        }
+
+        /// ~SimVehicleData: releases the constraint and the tester, frees the filters
+        fn destroy(self: *Vehicle, allocator: Allocator) void {
+            self.constraint.deinit();
+            self.tester.deinit();
+            freeFilters(allocator, self.broad_phase_layer_filter, self.object_layer_filter, self.body_filter);
+            allocator.destroy(self);
+        }
+    };
+
+    const Storage = struct {
+        /// The vehicles of the vehicle handles
+        vehicles: std.ArrayList(*Vehicle) = .empty,
+    };
+
+    fn freeFilters(allocator: Allocator, broad_phase_layer_filter: ?*zolt.DefaultBroadPhaseLayerFilter, object_layer_filter: ?*zolt.DefaultObjectLayerFilter, body_filter: ?*zolt.IgnoreMultipleBodiesFilter) void {
+        if (broad_phase_layer_filter) |f| allocator.destroy(f);
+        if (object_layer_filter) |f| allocator.destroy(f);
+        if (body_filter) |f| {
+            f.deinit();
+            allocator.destroy(f);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The settings of a description (SimFillEngine, SimFillTransmission, ... of the .cpp)
+
+    /// SimLoadCurve: a LinearCurve from (x, y) points of the float pool (the curve is replaced; built aside first so that
+    /// an allocation failure leaves the curve unchanged)
+    fn loadCurve(allocator: Allocator, scene: *const SimSceneDesc, offset: u32, num_points: u32, curve: *LinearCurve) !void {
+        var new: LinearCurve = .{};
+        errdefer new.deinit(allocator);
+        for (0..num_points) |p|
+            try new.addPoint(allocator, scene.floats[offset + 2 * p], scene.floats[offset + 2 * p + 1]);
+        curve.deinit(allocator);
+        curve.* = new;
+    }
+
+    /// SimLoadFloats: an array of floats of the float pool (the array is replaced)
+    fn loadFloats(allocator: Allocator, scene: *const SimSceneDesc, offset: u32, count: u32, array: *std.ArrayList(f32)) !void {
+        var new: std.ArrayList(f32) = .empty;
+        try new.appendSlice(allocator, scene.floats[offset..][0..count]);
+        array.deinit(allocator);
+        array.* = new;
+    }
+
+    /// SimFillEngine (the curve is replaced when the description has one; `allocator` is the allocator of the settings)
+    fn fillEngine(allocator: Allocator, scene: *const SimSceneDesc, d: *const SimVehicleEngine, engine_settings: *VehicleEngineSettings) !void {
+        engine_settings.max_torque = d.max_torque;
+        engine_settings.min_rpm = d.min_rpm;
+        engine_settings.max_rpm = d.max_rpm;
+        if (d.torque_points != invalid_handle)
+            try loadCurve(allocator, scene, d.torque_points, d.num_torque_points, &engine_settings.normalized_torque);
+        engine_settings.inertia = d.inertia;
+        engine_settings.angular_damping = d.angular_damping;
+    }
+
+    /// SimFillTransmission (the ratios are replaced when the description has them)
+    fn fillTransmission(allocator: Allocator, scene: *const SimSceneDesc, d: *const SimVehicleTransmission, transmission_settings: *VehicleTransmissionSettings) !void {
+        transmission_settings.mode = @enumFromInt(@as(u8, @truncate(d.mode))); // ETransmissionMode(uint32): a uint8 enum
+        if (d.gear_ratios != invalid_handle)
+            try loadFloats(allocator, scene, d.gear_ratios, d.num_gear_ratios, &transmission_settings.gear_ratios);
+        if (d.reverse_gear_ratios != invalid_handle)
+            try loadFloats(allocator, scene, d.reverse_gear_ratios, d.num_reverse_gear_ratios, &transmission_settings.reverse_gear_ratios);
+        transmission_settings.switch_time = d.switch_time;
+        transmission_settings.clutch_release_time = d.clutch_release_time;
+        transmission_settings.switch_latency = d.switch_latency;
+        transmission_settings.shift_up_rpm = d.shift_up_rpm;
+        transmission_settings.shift_down_rpm = d.shift_down_rpm;
+        transmission_settings.clutch_strength = d.clutch_strength;
+    }
+
+    /// SimFillTrack
+    fn fillTrack(allocator: Allocator, scene: *const SimSceneDesc, d: *const SimVehicleTrack, track: *VehicleTrackSettings) !void {
+        track.driven_wheel = d.driven_wheel;
+        track.wheels.clearRetainingCapacity();
+        try track.wheels.appendSlice(allocator, scene.uints[d.wheels..][0..d.num_wheels]);
+        track.inertia = d.inertia;
+        track.angular_damping = d.angular_damping;
+        track.max_brake_torque = d.max_brake_torque;
+        track.differential_ratio = d.differential_ratio;
+    }
+
+    /// SimFillDifferential
+    fn fillDifferential(d: *const SimVehicleDifferential) VehicleDifferentialSettings {
+        return .{ .left_wheel = d.left_wheel, .right_wheel = d.right_wheel, .differential_ratio = d.differential_ratio, .left_right_split = d.left_right_split, .limited_slip_ratio = d.limited_slip_ratio, .engine_torque_ratio = d.engine_torque_ratio };
+    }
+
+    /// SimFillAntiRollBar
+    fn fillAntiRollBar(d: *const SimVehicleAntiRollBar) VehicleAntiRollBar {
+        return .{ .left_wheel = d.left_wheel, .right_wheel = d.right_wheel, .stiffness = d.stiffness };
+    }
+
+    /// SimFillWheeled: the wheeled controller members of a description (WheeledVehicleControllerSettings, also the base
+    /// of MotorcycleControllerSettings: MotorcycleSlot.makeControllerSettings calls it). The arrays are allocated with the
+    /// settings' allocator.
+    fn fillWheeled(scene: *const SimSceneDesc, v: *const SimVehicle, settings: *WheeledVehicleControllerSettings) !void {
+        const allocator = settings.base.allocator;
+        try fillEngine(allocator, scene, &v.engine, &settings.engine);
+        try fillTransmission(allocator, scene, &v.transmission, &settings.transmission);
+        try settings.differentials.ensureUnusedCapacity(allocator, v.num_differentials);
+        for (scene.vehicle_differentials[v.first_differential..][0..v.num_differentials]) |*d|
+            settings.differentials.appendAssumeCapacity(fillDifferential(d));
+        settings.differential_limited_slip_ratio = v.differential_limited_slip_ratio;
+    }
+
+    /// The new controller settings of a description (SimMakeControllerSettings, no reference yet): the wheeled settings
+    /// here, the tracked and motorcycle ones through the hooks of the vehicle variants
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        return switch (try controllerKind(v)) {
+            .wheeled => {
+                const s = try WheeledVehicleControllerSettings.create(allocator);
+                errdefer {
+                    s.base.addRef();
+                    s.base.release();
+                }
+                try fillWheeled(scene, v, s);
+                return &s.base;
+            },
+            .tracked => TrackedVehicleSlot.makeControllerSettings(allocator, scene, v),
+            .motorcycle => MotorcycleSlot.makeControllerSettings(allocator, scene, v),
+        };
+    }
+
+    /// SimFillWheelSettings: the WheelSettings members of a wheel description
+    fn fillWheelSettings(w: *const SimVehicleWheel, s: *WheelSettings) void {
+        s.position = load3(&w.position);
+        s.suspension_force_point = load3(&w.suspension_force_point);
+        s.suspension_direction = load3(&w.suspension_direction);
+        s.steering_axis = load3(&w.steering_axis);
+        s.wheel_up = load3(&w.wheel_up);
+        s.wheel_forward = load3(&w.wheel_forward);
+        s.suspension_min_length = w.suspension_min_length;
+        s.suspension_max_length = w.suspension_max_length;
+        s.suspension_preload_length = w.suspension_preload_length;
+        s.suspension_spring.mode = @enumFromInt(@as(u8, @truncate(w.suspension_spring_mode))); // ESpringMode: a uint8 enum
+        s.suspension_spring.frequency = w.suspension_frequency;
+        s.suspension_spring.damping = w.suspension_damping;
+        s.radius = w.radius;
+        s.width = w.width;
+        s.enable_suspension_force_point = w.enable_suspension_force_point != 0;
+    }
+
+    /// The new wheel settings of a description (SimMakeWheelSettings, no reference yet): WheelSettingsWV here,
+    /// WheelSettingsTV through the hook of the vehicle variants
+    fn makeWheelSettings(allocator: Allocator, scene: *const SimSceneDesc, w: *const SimVehicleWheel) !*WheelSettings {
+        if (w.kind != @intFromEnum(VehicleWheelKind.wv))
+            return TrackedVehicleSlot.makeWheelSettings(allocator, scene, w);
+        const wv = try WheelSettingsWV.create(allocator);
+        errdefer {
+            wv.base.addRef();
+            wv.base.release();
+        }
+        fillWheelSettings(w, &wv.base);
+        wv.inertia = w.inertia;
+        wv.angular_damping = w.angular_damping;
+        wv.max_steer_angle = w.max_steer_angle;
+        if (w.longitudinal_friction != invalid_handle)
+            try loadCurve(allocator, scene, w.longitudinal_friction, w.num_longitudinal_friction, &wv.longitudinal_friction);
+        if (w.lateral_friction != invalid_handle)
+            try loadCurve(allocator, scene, w.lateral_friction, w.num_lateral_friction, &wv.lateral_friction);
+        wv.max_brake_torque = w.max_brake_torque;
+        wv.max_hand_brake_torque = w.max_hand_brake_torque;
+        return &wv.base;
+    }
+
+    /// SimMakeVehicleSettings: the VehicleConstraintSettings of a vehicle description
+    fn makeVehicleSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !Ref(ConstraintSettings) {
+        const s = try VehicleConstraintSettings.create(allocator);
+        var result = Ref(ConstraintSettings).init(s.asSettings());
+        errdefer result.deinit();
+        s.base.enabled = v.enabled != 0;
+        s.base.constraint_priority = v.constraint_priority;
+        s.base.num_velocity_steps_override = v.num_velocity_steps_override;
+        s.base.num_position_steps_override = v.num_position_steps_override;
+        s.base.draw_constraint_size = v.draw_constraint_size;
+        s.base.user_data = v.user_data;
+        s.up = load3(&v.up);
+        s.forward = load3(&v.forward);
+        s.max_pitch_roll_angle = v.max_pitch_roll_angle;
+        for (scene.vehicle_wheels[v.first_wheel..][0..v.num_wheels]) |*w| {
+            var wheel = Ref(WheelSettings).init(try makeWheelSettings(allocator, scene, w));
+            defer wheel.deinit();
+            try s.addWheel(wheel.ptr.?);
+        }
+        for (scene.vehicle_anti_roll_bars[v.first_anti_roll_bar..][0..v.num_anti_roll_bars]) |*bar|
+            try s.addAntiRollBar(fillAntiRollBar(bar));
+        var controller = Ref(VehicleControllerSettings).init(try makeControllerSettings(allocator, scene, v));
+        defer controller.deinit();
+        s.setController(controller.ptr);
+        return result;
+    }
+
+    /// SimMakeTester: a new collision tester (no reference yet)
+    fn makeTester(allocator: Allocator, kind: u32, object_layer: u32, up: Vec3, max_slope_angle: f32, radius: f32, convex_radius_fraction: f32) !*VehicleCollisionTester {
+        const layer: ObjectLayer = @truncate(object_layer);
+        return switch (std.enums.fromInt(VehicleTesterKind, kind) orelse return error.SceneError) {
+            .ray => &(try zolt.VehicleCollisionTesterRay.create(allocator, layer, .{ .up = up, .max_slope_angle = max_slope_angle })).base,
+            .cast_sphere => &(try zolt.VehicleCollisionTesterCastSphere.create(allocator, layer, radius, .{ .up = up, .max_slope_angle = max_slope_angle })).base,
+            .cast_cylinder => &(try zolt.VehicleCollisionTesterCastCylinder.create(allocator, layer, .{ .convex_radius_fraction = convex_radius_fraction })).base,
+        };
+    }
+
+    fn controllerKind(v: *const SimVehicle) !VehicleControllerKind {
+        return std.enums.fromInt(VehicleControllerKind, v.controller) orelse error.SceneError;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The callbacks (SetVehicleCallbacks, SimVehicleCombineFriction, SimVehicleTireMaxImpulse of the .cpp)
+
+    /// SimVehicleRecord: the vehicle handle and body, the step, the wheels with a contact and the hash of the suspension
+    /// length, angular velocity and steer angle of every wheel
+    fn record(kind: RecordKind, handle: u32, v: *const VehicleConstraint, context: *const PhysicsStepListenerContext) SimRecord {
+        var contacts: u32 = 0;
+        var hash = SimScenes.hash_seed;
+        for (v.getWheels(), 0..) |wheel, w| {
+            if (wheel.hasContact())
+                contacts |= @as(u32, 1) << @intCast(w);
+            hash = VehicleRecords.hashWheel(hash, wheel.getSuspensionLength(), wheel.getAngularVelocity(), wheel.getSteerAngle());
+        }
+        return VehicleRecords.record(kind, handle, v.getVehicleBody().getID(), context, contacts, hash);
+    }
+
+    fn preStep(self: *Vehicle, v: *VehicleConstraint, context: *const PhysicsStepListenerContext) void {
+        if ((self.callbacks & VehicleCallbacks.pre_step) != 0)
+            self.world.recorder.add(record(.vehicle_pre_step, self.handle, v, context));
+        if ((self.callbacks & VehicleCallbacks.steer) != 0 and self.controller != .tracked) {
+            const c = zolt.virtual.downcast(WheeledVehicleController, v.getControllerMut());
+            c.setRightInput(if (c.getRightInput() > 0.0) -0.25 else 0.5);
+        }
+    }
+
+    fn postCollide(self: *Vehicle, v: *VehicleConstraint, context: *const PhysicsStepListenerContext) void {
+        self.world.recorder.add(record(.vehicle_post_collide, self.handle, v, context));
+    }
+
+    fn postStep(self: *Vehicle, v: *VehicleConstraint, context: *const PhysicsStepListenerContext) void {
+        self.world.recorder.add(record(.vehicle_post_step, self.handle, v, context));
+    }
+
+    /// SetVehicleCallbacks: the step callbacks of VehicleCallbacks bits `callbacks`
+    fn setCallbacks(self: *Vehicle, callbacks: u32) void {
+        const v = self.get();
+        self.callbacks = callbacks;
+        v.setPreStepCallback(if ((callbacks & (VehicleCallbacks.pre_step | VehicleCallbacks.steer)) != 0) VehicleConstraint.StepCallback.init(self, preStep) else null);
+        v.setPostCollideCallback(if ((callbacks & VehicleCallbacks.post_collide) != 0) VehicleConstraint.StepCallback.init(self, postCollide) else null);
+        v.setPostStepCallback(if ((callbacks & VehicleCallbacks.post_step) != 0) VehicleConstraint.StepCallback.init(self, postStep) else null);
+    }
+
+    /// VehicleCombineFriction.custom (SimVehicleCombineFriction)
+    fn customCombineFriction(context: ?*anyopaque, wheel_index: u32, longitudinal_friction: *f32, lateral_friction: *f32, body2: *const Body, sub_shape_id2: SubShapeID) void {
+        _ = .{ context, sub_shape_id2 };
+        const body_friction = body2.getFriction();
+        longitudinal_friction.* = 0.5 * (longitudinal_friction.* + body_friction);
+        lateral_friction.* = zolt.math.min(lateral_friction.*, body_friction);
+        if ((wheel_index & 1) != 0) {
+            longitudinal_friction.* *= 0.9;
+            lateral_friction.* *= 0.9;
+        }
+    }
+
+    /// VehicleTireMaxImpulse.custom (SimVehicleTireMaxImpulse)
+    fn customTireMaxImpulse(context: ?*anyopaque, wheel_index: u32, longitudinal_impulse: *f32, lateral_impulse: *f32, suspension_impulse: f32, longitudinal_friction: f32, lateral_friction: f32, longitudinal_slip: f32, lateral_slip: f32, delta_time: f32) void {
+        _ = .{ context, longitudinal_slip, lateral_slip, delta_time };
+        longitudinal_impulse.* = 0.9 * longitudinal_friction * suspension_impulse;
+        lateral_impulse.* = lateral_friction * suspension_impulse;
+        if (wheel_index == 0) {
+            longitudinal_impulse.* *= 0.5;
+            lateral_impulse.* *= 0.5;
+        }
+    }
+
+    /// SetVehicleCombineFriction
+    fn setCombineFriction(self: *Vehicle, mode: u32) void {
+        self.get().setCombineFriction(if (mode == 1) .{ .function = customCombineFriction } else self.default_combine_friction);
+    }
+
+    /// SetVehicleTireMaxImpulse (`op` null: from the description)
+    fn setTireMaxImpulse(self: *Vehicle, mode: u32, op: ?*const SimOp) !void {
+        if (self.controller == .tracked) {
+            if (mode == 0 and op == null)
+                return; // A tracked vehicle has no tire callback, its description has the default
+            std.debug.print("SimulationParity: tire max impulse callback on the tracked vehicle handle {d}\n", .{self.handle});
+            return error.SceneError;
+        }
+        wheeled(self.get()).setTireMaxImpulseCallback(if (mode == 1) .{ .function = customTireMaxImpulse } else self.default_tire_max_impulse);
+    }
+
+    /// The wheeled controller of a wheeled or motorcycle vehicle (a MotorcycleController is a WheeledVehicleController)
+    fn wheeled(v: *VehicleConstraint) *WheeledVehicleController {
+        return zolt.virtual.downcast(WheeledVehicleController, v.getControllerMut());
+    }
+
+    /// GetWheeledController of the .cpp: a wheeled operation on a tracked vehicle is a scene error
+    fn wheeledOf(self: *const Vehicle, op: *const SimOp) !*WheeledVehicleController {
+        if (self.controller == .tracked) {
+            std.debug.print("SimulationParity: wheeled operation {d} on the tracked vehicle handle {d}\n", .{ op.kind, op.index });
+            return error.SceneError;
+        }
+        return wheeled(self.get());
+    }
+
+    /// GetEngine / GetTransmission of the .cpp (every controller kind has them; the tracked controller's through the hooks)
+    fn engineOf(self: *const Vehicle) !*VehicleEngine {
+        return if (self.controller == .tracked) TrackedVehicleSlot.engine(self.get()) else wheeled(self.get()).getEngineMut();
+    }
+
+    fn transmissionOf(self: *const Vehicle) !*VehicleTransmission {
+        return if (self.controller == .tracked) TrackedVehicleSlot.transmission(self.get()) else wheeled(self.get()).getTransmissionMut();
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The slot
+
+    /// create_vehicle (ApplyVehicleOp of the .cpp): the vehicle of the next handle; returns the number of constraints
+    fn create(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const storage = &world.phase7.vehicles;
+        const d = &world.desc.vehicles[op.index];
+        try storage.vehicles.ensureUnusedCapacity(allocator, 1);
+        var settings = try makeVehicleSettings(allocator, world.desc, d);
+        defer settings.deinit();
+
+        const constraint = blk: {
+            var lock: zolt.BodyLockWrite = .init(world.system.getBodyLockInterface(), world.getHandle(d.body));
+            defer lock.deinit();
+            if (!lock.succeeded()) {
+                std.debug.print("SimulationParity: vehicle description {d}: the body handle {d} does not exist\n", .{ op.index, d.body });
+                return error.SceneError;
+            }
+            break :blk try VehicleConstraint.create(allocator, lock.getBody(), zolt.virtual.downcast(VehicleConstraintSettings, settings.get().?));
+        };
+        var constraint_ref = Ref(Constraint).init(&constraint.base);
+        errdefer constraint_ref.deinit();
+        var tester = Ref(VehicleCollisionTester).init(try makeTester(allocator, d.tester.kind, d.tester.object_layer, load3(&d.tester.up), d.tester.max_slope_angle, d.tester.radius, d.tester.convex_radius_fraction));
+        errdefer tester.deinit();
+
+        const v = try allocator.create(Vehicle);
+        errdefer allocator.destroy(v);
+        v.* = .{ .world = world, .constraint = constraint_ref, .tester = tester, .handle = @intCast(storage.vehicles.items.len), .controller = try controllerKind(d) };
+        constraint.setVehicleCollisionTester(v.tester.ptr);
+        v.default_combine_friction = constraint.getCombineFriction();
+        if (v.controller != .tracked)
+            v.default_tire_max_impulse = wheeled(constraint).getTireMaxImpulseCallback();
+        setCallbacks(v, d.callbacks);
+        setCombineFriction(v, d.combine_friction);
+        try setTireMaxImpulse(v, d.tire_max_impulse, null);
+        try world.system.addConstraint(&constraint.base);
+        errdefer world.system.removeConstraint(&constraint.base);
+        try world.system.addStepListener(constraint.stepListener());
+        v.added = true;
+        storage.vehicles.appendAssumeCapacity(v);
+        return world.system.constraint_manager.getNumConstraints();
+    }
+
+    /// The vehicle of a handle (GetVehicle of the .cpp)
+    fn getVehicle(world: *ZoltWorld, handle: u32) !*Vehicle {
+        const vehicles = world.phase7.vehicles.vehicles.items;
+        if (handle >= vehicles.len) {
+            std.debug.print("SimulationParity: operation on vehicle handle {d} that does not exist\n", .{handle});
+            return error.SceneError;
+        }
+        return vehicles[handle];
+    }
+
+    fn vehicle(world: *ZoltWorld, handle: u32) !*VehicleConstraint {
+        return (try getVehicle(world, handle)).get();
+    }
+
+    /// SimConstraintState of the vehicle constraint
+    fn constraintState(v: *VehicleConstraint) u32 {
+        return @as(u32, @intFromBool(v.base.getEnabled())) | (@as(u32, @intFromBool(v.base.isActive())) << 1);
+    }
+
+    /// The SaveBinaryState bytes of settings as a hash (HashBinaryState of the .cpp)
+    fn hashBinaryState(allocator: Allocator, settings: anytype) !u32 {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+        settings.saveBinaryState(wrapper.streamOut());
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        return SimScenes.hashBytes(SimScenes.hash_seed, out.written());
+    }
+
+    /// The operations of Phase7OpRange.vehicle but create_vehicle (ApplyVehicleOp of the .cpp)
+    fn applyOp(world: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = world.allocator;
+        const i = &op.i;
+        const f = &op.f;
+        const v = try getVehicle(world, op.index);
+        const c = v.get();
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .vehicle_remove => {
+                world.system.removeStepListener(c.stepListener());
+                world.system.removeConstraint(&c.base);
+                v.added = false;
+                return world.system.constraint_manager.getNumConstraints();
+            },
+            .vehicle_add => {
+                try world.system.addConstraint(&c.base);
+                errdefer world.system.removeConstraint(&c.base);
+                try world.system.addStepListener(c.stepListener());
+                v.added = true;
+                return world.system.constraint_manager.getNumConstraints();
+            },
+            .vehicle_set_max_pitch_roll_angle => c.setMaxPitchRollAngle(f[0]),
+            .vehicle_override_gravity => c.overrideGravity(load3(f[0..3])),
+            .vehicle_reset_gravity_override => c.resetGravityOverride(),
+            .vehicle_set_num_steps_between_collision_test_active => c.setNumStepsBetweenCollisionTestActive(i[0]),
+            .vehicle_set_num_steps_between_collision_test_inactive => c.setNumStepsBetweenCollisionTestInactive(i[0]),
+            .vehicle_set_collision_tester => {
+                const tester = Ref(VehicleCollisionTester).init(try makeTester(allocator, i[0], i[1], load3(f[0..3]), f[3], f[4], f[5]));
+                v.tester.deinit();
+                v.tester = tester;
+                c.setVehicleCollisionTester(v.tester.ptr);
+            },
+            .vehicle_tester_set_object_layer => v.tester.ptr.?.setObjectLayer(@truncate(i[0])),
+            .vehicle_tester_set_filters => {
+                const tester = v.tester.ptr.?;
+                if (i[0] == 0) {
+                    tester.setBroadPhaseLayerFilter(null);
+                    tester.setObjectLayerFilter(null);
+                    tester.setBodyFilter(null);
+                } else {
+                    const layer: ObjectLayer = @truncate(i[1]);
+                    const broad_phase_layer_filter = try allocator.create(zolt.DefaultBroadPhaseLayerFilter);
+                    errdefer allocator.destroy(broad_phase_layer_filter);
+                    broad_phase_layer_filter.* = .init(&world.object_vs_broad_phase_layer_filter.base, layer);
+                    const object_layer_filter = try allocator.create(zolt.DefaultObjectLayerFilter);
+                    errdefer allocator.destroy(object_layer_filter);
+                    object_layer_filter.* = .init(&world.object_layer_pair_filter.base, layer);
+                    const body_filter = try allocator.create(zolt.IgnoreMultipleBodiesFilter);
+                    errdefer allocator.destroy(body_filter);
+                    body_filter.* = .init(allocator);
+                    errdefer body_filter.deinit();
+                    try body_filter.ignoreBody(c.getVehicleBody().getID());
+                    const ignored = world.getHandle(op.body);
+                    if (!ignored.isInvalid())
+                        try body_filter.ignoreBody(ignored);
+
+                    // Replace the filters (std::unique_ptr::operator=)
+                    freeFilters(allocator, v.broad_phase_layer_filter, v.object_layer_filter, v.body_filter);
+                    v.broad_phase_layer_filter = broad_phase_layer_filter;
+                    v.object_layer_filter = object_layer_filter;
+                    v.body_filter = body_filter;
+                    tester.setBroadPhaseLayerFilter(&broad_phase_layer_filter.base);
+                    tester.setObjectLayerFilter(&object_layer_filter.base);
+                    tester.setBodyFilter(&body_filter.base);
+                }
+            },
+            .vehicle_set_combine_friction => setCombineFriction(v, i[0]),
+            .vehicle_set_callbacks => setCallbacks(v, i[0]),
+            .vehicle_wheel_set_angular_velocity => c.getWheelMut(i[0]).setAngularVelocity(f[0]),
+            .vehicle_wheel_set_rotation_angle => c.getWheelMut(i[0]).setRotationAngle(f[0]),
+            .vehicle_wheel_set_steer_angle => c.getWheelMut(i[0]).setSteerAngle(f[0]),
+            .vehicle_set_anti_roll_bar => {
+                const bar = &c.getAntiRollBarsMut().items[i[0]];
+                bar.left_wheel = @bitCast(i[1]);
+                bar.right_wheel = @bitCast(i[2]);
+                bar.stiffness = f[0];
+            },
+            .vehicle_settings_hash => {
+                var settings = try c.base.getConstraintSettings();
+                defer settings.deinit();
+                return hashBinaryState(allocator, settings.get().?);
+            },
+            .vehicle_controller_settings_hash => {
+                var settings = try c.getController().getSettings();
+                defer settings.deinit();
+                return hashBinaryState(allocator, settings.get().?);
+            },
+            .vehicle_expect_wheel_contacts => {
+                // Changes nothing, the driver checks the result
+                var bits: u32 = 0;
+                for (c.getWheels(), 0..) |wheel, w| {
+                    if (wheel.hasContact())
+                        bits |= @as(u32, 1) << @intCast(w);
+                }
+                return bits;
+            },
+            .vehicle_engine_set_current_rpm => (try engineOf(v)).setCurrentRPM(f[0]),
+            .vehicle_engine_set_settings => {
+                const engine = try engineOf(v);
+                engine.base.max_torque = f[0];
+                engine.base.min_rpm = f[1];
+                engine.base.max_rpm = f[2];
+                engine.base.inertia = f[3];
+                engine.base.angular_damping = f[4];
+            },
+            .vehicle_engine_set_torque_curve => try loadCurve(c.getController().allocator, world.desc, i[0], i[1], &(try engineOf(v)).base.normalized_torque),
+            .vehicle_transmission_set => (try transmissionOf(v)).set(@bitCast(i[0]), f[0]),
+            .vehicle_transmission_set_settings => {
+                const transmission = try transmissionOf(v);
+                transmission.base.mode = @enumFromInt(@as(u8, @truncate(i[0])));
+                transmission.base.switch_time = f[0];
+                transmission.base.clutch_release_time = f[1];
+                transmission.base.switch_latency = f[2];
+                transmission.base.shift_up_rpm = f[3];
+                transmission.base.shift_down_rpm = f[4];
+                transmission.base.clutch_strength = f[5];
+            },
+            .vehicle_transmission_set_gear_ratios => {
+                // Both arrays are replaced (build both first: an allocation failure changes nothing)
+                const controller_allocator = c.getController().allocator;
+                const transmission = try transmissionOf(v);
+                var gear_ratios: std.ArrayList(f32) = .empty;
+                errdefer gear_ratios.deinit(controller_allocator);
+                try loadFloats(controller_allocator, world.desc, i[0], i[1], &gear_ratios);
+                var reverse_gear_ratios: std.ArrayList(f32) = .empty;
+                try loadFloats(controller_allocator, world.desc, i[2], i[3], &reverse_gear_ratios);
+                transmission.base.gear_ratios.deinit(controller_allocator);
+                transmission.base.gear_ratios = gear_ratios;
+                transmission.base.reverse_gear_ratios.deinit(controller_allocator);
+                transmission.base.reverse_gear_ratios = reverse_gear_ratios;
+            },
+            .wheeled_set_driver_input => (try wheeledOf(v, op)).setDriverInput(f[0], f[1], f[2], f[3]),
+            .wheeled_set_forward_input => (try wheeledOf(v, op)).setForwardInput(f[0]),
+            .wheeled_set_right_input => (try wheeledOf(v, op)).setRightInput(f[0]),
+            .wheeled_set_brake_input => (try wheeledOf(v, op)).setBrakeInput(f[0]),
+            .wheeled_set_hand_brake_input => (try wheeledOf(v, op)).setHandBrakeInput(f[0]),
+            .wheeled_set_differential => {
+                const d = &(try wheeledOf(v, op)).getDifferentialsMut()[i[0]];
+                d.left_wheel = @bitCast(i[1]);
+                d.right_wheel = @bitCast(i[2]);
+                d.differential_ratio = f[0];
+                d.left_right_split = f[1];
+                d.limited_slip_ratio = f[2];
+                d.engine_torque_ratio = f[3];
+            },
+            .wheeled_set_differential_limited_slip_ratio => (try wheeledOf(v, op)).setDifferentialLimitedSlipRatio(f[0]),
+            .wheeled_set_tire_max_impulse_callback => try setTireMaxImpulse(v, i[0], op),
+
+            // The Constraint interface of the VehicleConstraint (a vehicle is not a constraint handle)
+            .vehicle_set_enabled => c.base.setEnabled(i[0] != 0),
+            .vehicle_reset_warm_start => c.base.resetWarmStart(),
+            .vehicle_set_constraint_priority => c.base.setConstraintPriority(i[0]),
+            .vehicle_set_steps_override => {
+                c.base.setNumVelocityStepsOverride(i[0]);
+                c.base.setNumPositionStepsOverride(i[1]);
+            },
+            .vehicle_set_user_data => c.base.setUserData(@as(u64, i[0]) | (@as(u64, i[1]) << 32)),
+            .vehicle_expect_constraint_state => {
+                // Changes nothing, the driver checks the result: a disabled vehicle whose body is active runs OnStep (its
+                // callbacks, the wheel collision tests) but is not solved (IsActive includes mEnabled)
+                return VehicleSlot.constraintState(c) | (@as(u32, @intFromBool(world.system.getBodyInterface().isActive(c.getVehicleBody().getID()))) << 2);
+            },
+            .vehicle_wheel_wv_apply_torque => {
+                _ = try wheeledOf(v, op);
+                zolt.virtual.downcast(WheelWV, c.getWheelMut(i[0])).applyTorque(f[0], f[1]);
+            },
+            .vehicle_engine_apply_torque => (try engineOf(v)).applyTorque(f[0], f[1]),
+            .vehicle_engine_apply_damping => (try engineOf(v)).applyDamping(f[0]),
+            .wheeled_set_differentials => {
+                const controller = try wheeledOf(v, op);
+                const differentials = try allocator.alloc(VehicleDifferentialSettings, i[1]);
+                defer allocator.free(differentials);
+                for (differentials, world.desc.vehicle_differentials[i[0]..][0..i[1]]) |*d, *desc|
+                    d.* = fillDifferential(desc);
+                try controller.setDifferentials(differentials);
+            },
+            else => {
+                std.debug.print("SimulationParity: unknown vehicle operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+        return VehicleSlot.constraintState(c);
+    }
+
+    /// WriteEngineState of the .cpp: the vehicle_engine field of an engine (also for the tracked controller)
+    fn writeEngineState(w: *ObjectStateWriter, handle: u32, engine: *const VehicleEngine) !void {
+        try w.begin(.vehicle_engine, handle, 0);
+        try w.value(engine.getCurrentRPM());
+        try w.value(engine.getAngularVelocity());
+        try w.value(engine.getTorque(1.0));
+        try w.boolean(engine.allowSleep());
+        try w.value(engine.base.max_torque);
+        try w.value(engine.base.min_rpm);
+        try w.value(engine.base.max_rpm);
+        try w.value(engine.base.inertia);
+        try w.value(engine.base.angular_damping);
+        w.end();
+    }
+
+    /// WriteTransmissionState of the .cpp: the vehicle_transmission field of a transmission (also for the tracked
+    /// controller)
+    fn writeTransmissionState(w: *ObjectStateWriter, handle: u32, transmission: *const VehicleTransmission) !void {
+        try w.begin(.vehicle_transmission, handle, 0);
+        try w.value(transmission.getCurrentGear());
+        try w.value(transmission.getClutchFriction());
+        try w.boolean(transmission.isSwitchingGear());
+        try w.value(transmission.getCurrentRatio());
+        try w.boolean(transmission.allowSleep());
+        try w.value(@as(u32, @intFromEnum(transmission.base.mode)));
+        w.end();
+    }
+
+    /// WriteVehicleState of the .cpp for every vehicle in handle order
+    fn writeState(world: *ZoltWorld, w: *ObjectStateWriter) !void {
+        for (world.phase7.vehicles.vehicles.items) |v|
+            try writeVehicleState(world, w, v);
+    }
+
+    fn writeVehicleState(world: *ZoltWorld, w: *ObjectStateWriter, v: *const Vehicle) !void {
+        const h = v.handle;
+        const c = v.get();
+        const num_wheels: u32 = @intCast(c.getWheels().len);
+
+        try w.begin(.vehicle_properties, h, 0);
+        try w.boolean(c.base.isActive());
+        try w.boolean(c.base.getEnabled());
+        try w.value(c.getNumStepsBetweenCollisionTestActive());
+        try w.value(c.getNumStepsBetweenCollisionTestInactive());
+        try w.value(c.getMaxPitchRollAngle());
+        try w.boolean(c.isGravityOverridden());
+        try w.vec3(c.getGravityOverride());
+        try w.vec3(c.getLocalForward());
+        try w.vec3(c.getLocalUp());
+        try w.vec3(c.getWorldUp());
+        try w.value(num_wheels);
+        try w.value(c.getVehicleBody().getID().getIndexAndSequenceNumber());
+        try w.value(c.base.getConstraintPriority());
+        try w.value(c.base.getNumVelocityStepsOverride());
+        try w.value(c.base.getNumPositionStepsOverride());
+        try w.value(c.base.getUserData());
+        w.end();
+
+        for (c.getWheels(), 0..) |wheel, index| {
+            const item: u32 = @intCast(index);
+            try w.begin(.vehicle_wheel, h, item);
+            try w.value(wheel.getAngularVelocity());
+            try w.value(wheel.getRotationAngle());
+            try w.value(wheel.getSteerAngle());
+            try w.boolean(wheel.hasContact());
+            try w.value(wheel.getContactBodyID().getIndexAndSequenceNumber());
+            try w.value(wheel.getContactSubShapeID().getValue());
+            try w.value(wheel.getSuspensionLength());
+            try w.boolean(wheel.hasHitHardPoint());
+            try w.value(wheel.getSuspensionLambda());
+            try w.value(wheel.getLongitudinalLambda());
+            try w.value(wheel.getLateralLambda());
+            w.end();
+
+            if (wheel.hasContact()) {
+                try w.begin(.vehicle_wheel_contact, h, item);
+                try w.rvec3(wheel.getContactPosition());
+                try w.vec3(wheel.getContactPointVelocity());
+                try w.vec3(wheel.getContactNormal());
+                try w.vec3(wheel.getContactLongitudinal());
+                try w.vec3(wheel.getContactLateral());
+                w.end();
+            }
+
+            const basis = c.getWheelLocalBasis(wheel);
+            try w.begin(.vehicle_wheel_transform, h, item);
+            try w.vec3(basis.forward);
+            try w.vec3(basis.up);
+            try w.vec3(basis.right);
+            try w.mat44(c.getWheelLocalTransform(item, Vec3.axisY(), Vec3.axisX()));
+            try w.rmat44(c.getWheelWorldTransform(item, Vec3.axisY(), Vec3.axisX()));
+            w.end();
+
+            if (v.controller == .tracked) {
+                try TrackedVehicleSlot.writeWheelState(world, w, h, item, wheel);
+            } else {
+                const wv = zolt.virtual.downcast(WheelWV, wheel);
+                try w.begin(.vehicle_wheel_wv, h, item);
+                try w.value(wv.longitudinal_slip);
+                try w.value(wv.lateral_slip);
+                try w.value(wv.combined_longitudinal_friction);
+                try w.value(wv.combined_lateral_friction);
+                try w.value(wv.brake_impulse);
+                w.end();
+            }
+        }
+
+        for (c.getAntiRollBars(), 0..) |bar, b| {
+            try w.begin(.vehicle_anti_roll_bar, h, @intCast(b));
+            try w.value(bar.left_wheel);
+            try w.value(bar.right_wheel);
+            try w.value(bar.stiffness);
+            w.end();
+        }
+
+        if (v.controller == .tracked) {
+            try TrackedVehicleSlot.writeControllerState(world, w, h, c);
+            return;
+        }
+
+        const controller = zolt.virtual.downcast(WheeledVehicleController, c.getController());
+        try writeEngineState(w, h, controller.getEngine());
+        try writeTransmissionState(w, h, controller.getTransmission());
+        try w.begin(.vehicle_wheeled, h, 0);
+        try w.value(controller.getForwardInput());
+        try w.value(controller.getRightInput());
+        try w.value(controller.getBrakeInput());
+        try w.value(controller.getHandBrakeInput());
+        try w.value(controller.getDifferentialLimitedSlipRatio());
+        try w.value(controller.getWheelSpeedAtClutch());
+        w.end();
+
+        for (controller.getDifferentials(), 0..) |*d, index| {
+            const left_angular_velocity: f32 = if (d.left_wheel != -1) c.getWheel(@intCast(d.left_wheel)).getAngularVelocity() else 0.0;
+            const right_angular_velocity: f32 = if (d.right_wheel != -1) c.getWheel(@intCast(d.right_wheel)).getAngularVelocity() else 0.0;
+            const ratio = d.calculateTorqueRatio(left_angular_velocity, right_angular_velocity);
+            try w.begin(.vehicle_differential, h, @intCast(index));
+            try w.value(d.left_wheel);
+            try w.value(d.right_wheel);
+            try w.value(d.differential_ratio);
+            try w.value(d.left_right_split);
+            try w.value(d.limited_slip_ratio);
+            try w.value(d.engine_torque_ratio);
+            try w.value(ratio.left);
+            try w.value(ratio.right);
+            w.end();
+        }
+
+        if (v.controller == .motorcycle)
+            try MotorcycleSlot.writeControllerState(world, w, h, c);
+    }
+
+    fn saveStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder }; // Vehicles have no character state
+    }
+
+    fn restoreStates(world: *ZoltWorld, recorder: *StateRecorderImpl) !void {
+        _ = .{ world, recorder };
+    }
+
+    /// ~SimWorld of the .cpp: remove the vehicles that are in the system, release them, free the storage
+    fn destroyAll(world: *ZoltWorld) void {
+        const allocator = world.allocator;
+        const storage = &world.phase7.vehicles;
+        for (storage.vehicles.items) |v| {
+            if (v.added) {
+                const c = v.get();
+                world.system.removeStepListener(c.stepListener());
+                world.system.removeConstraint(&c.base);
+            }
+            v.destroy(allocator);
+        }
+        storage.vehicles.deinit(allocator);
+        storage.* = .{};
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // The settings round trips (SimVehicleSettingsPart of the .cpp)
+
+    /// SaveBinaryState of `object` into `out`
+    fn saveInto(allocator: Allocator, object: anytype, out: *std.ArrayList(u8)) !void {
+        var data: std.Io.Writer.Allocating = .init(allocator);
+        defer data.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&data.writer);
+        object.saveBinaryState(wrapper.streamOut());
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        out.clearRetainingCapacity();
+        try out.appendSlice(allocator, data.written());
+    }
+
+    /// SimReadCompletely: true when the stream was read without error and completely (the stream sets EOF only on a
+    /// read past the end: one more byte is read, which must fail at the end)
+    fn readCompletely(wrapper: *zolt.StreamInWrapper) bool {
+        const read = !wrapper.isFailed();
+        var extra: u8 = 0;
+        wrapper.streamIn().read(&extra);
+        return read and wrapper.isEOF();
+    }
+
+    /// The stream of SimRestoreBinaryState (initialized in place: the wrapper points to the reader)
+    const RestoreStream = struct {
+        reader: std.Io.Reader,
+        wrapper: zolt.StreamInWrapper,
+
+        fn init(self: *RestoreStream, bytes: []const u8) void {
+            self.reader = .fixed(bytes);
+            self.wrapper = .init(&self.reader);
+        }
+
+        fn stream(self: *RestoreStream) zolt.StreamIn {
+            return self.wrapper.streamIn();
+        }
+
+        /// True when every byte was read (SimReadCompletely)
+        fn completely(self: *RestoreStream) bool {
+            return readCompletely(&self.wrapper);
+        }
+    };
+
+    /// The bytes of a part of vehicle description `index` (jolt_sim_vehicle_settings_part): without `restore_from` the
+    /// SaveBinaryState bytes of the part as `create` makes it, with it a default object of the part's class restores the
+    /// bytes (every byte read) and is saved again. False: the part does not exist (an item out of range, a part of another
+    /// controller kind, the restore of `settings`: Jolt's VehicleConstraintSettings::RestoreBinaryState dereferences null
+    /// wheel settings, CharacterVehicleArchitecture E6) or the restore failed.
+    fn settingsPart(allocator: Allocator, scene: *const SimSceneDesc, index: u32, part: VehicleSettingsPart, item: u32, restore_from: ?[]const u8, out: *std.ArrayList(u8)) !bool {
+        const v = &scene.vehicles[index];
+        out.clearRetainingCapacity();
+        switch (part) {
+            .settings => {
+                if (item != 0 or restore_from != null)
+                    return false;
+                var s = try makeVehicleSettings(allocator, scene, v);
+                defer s.deinit();
+                try saveInto(allocator, s.get().?, out);
+            },
+            .settings_without_wheels => {
+                if (item != 0)
+                    return false;
+                if (restore_from) |bytes| {
+                    // The RTTI hash, then VehicleConstraintSettings::RestoreBinaryState (the controller from its hash)
+                    var reader: std.Io.Reader = .fixed(bytes);
+                    var wrapper = zolt.StreamInWrapper.init(&reader);
+                    var result = try ConstraintSettings.restoreFromBinaryState(allocator, wrapper.streamIn());
+                    defer result.deinit();
+                    if (result.hasError() or !readCompletely(&wrapper))
+                        return false;
+                    try saveInto(allocator, result.get().get().?, out);
+                } else {
+                    var s = try makeVehicleSettings(allocator, scene, v);
+                    defer s.deinit();
+                    const vs = zolt.virtual.downcast(VehicleConstraintSettings, s.get().?);
+                    for (vs.wheels.items) |*w| w.deinit();
+                    vs.wheels.clearRetainingCapacity();
+                    try saveInto(allocator, s.get().?, out);
+                }
+            },
+            .controller => {
+                if (item != 0)
+                    return false;
+                var s = Ref(VehicleControllerSettings).init(if (restore_from == null)
+                    try makeControllerSettings(allocator, scene, v)
+                else switch (try controllerKind(v)) {
+                    .wheeled => &(try WheeledVehicleControllerSettings.create(allocator)).base,
+                    .tracked => try TrackedVehicleSlot.makeControllerSettings(allocator, scene, &SimVehicle.defaults(.tracked)),
+                    .motorcycle => try MotorcycleSlot.makeControllerSettings(allocator, scene, &SimVehicle.defaults(.motorcycle)),
+                });
+                defer s.deinit();
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.get().?.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                }
+                try saveInto(allocator, s.get().?, out);
+            },
+            .wheel => {
+                if (item >= v.num_wheels)
+                    return false;
+                const w = &scene.vehicle_wheels[v.first_wheel + item];
+                var s = Ref(WheelSettings).init(if (restore_from == null)
+                    try makeWheelSettings(allocator, scene, w)
+                else if (w.kind == @intFromEnum(VehicleWheelKind.wv))
+                    &(try WheelSettingsWV.create(allocator)).base
+                else
+                    try TrackedVehicleSlot.makeWheelSettings(allocator, scene, &SimVehicleWheel.defaults(.tv)));
+                defer s.deinit();
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.get().?.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                }
+                try saveInto(allocator, s.get().?, out);
+            },
+            .engine => {
+                if (item != 0)
+                    return false;
+                var s = try VehicleEngineSettings.init(allocator);
+                defer s.deinit(allocator);
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.restoreBinaryState(allocator, in.stream());
+                    if (!in.completely())
+                        return false;
+                } else try fillEngine(allocator, scene, &v.engine, &s);
+                try saveInto(allocator, &s, out);
+            },
+            .transmission => {
+                if (item != 0)
+                    return false;
+                var s = try VehicleTransmissionSettings.init(allocator);
+                defer s.deinit(allocator);
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.restoreBinaryState(allocator, in.stream());
+                    if (!in.completely())
+                        return false;
+                } else try fillTransmission(allocator, scene, &v.transmission, &s);
+                try saveInto(allocator, &s, out);
+            },
+            .track => {
+                if (v.controller != @intFromEnum(VehicleControllerKind.tracked) or item >= 2)
+                    return false;
+                var s: VehicleTrackSettings = .{}; // mDrivenWheel: 0 (uninitialized in Jolt)
+                defer s.deinit(allocator);
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    try s.restoreBinaryState(allocator, in.stream());
+                    if (!in.completely())
+                        return false;
+                } else try fillTrack(allocator, scene, &v.tracks[item], &s);
+                try saveInto(allocator, &s, out);
+            },
+            .differential => {
+                if (v.controller == @intFromEnum(VehicleControllerKind.tracked) or item >= v.num_differentials)
+                    return false;
+                var s: VehicleDifferentialSettings = .{};
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    s.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                } else s = fillDifferential(&scene.vehicle_differentials[v.first_differential + item]);
+                try saveInto(allocator, &s, out);
+            },
+            .anti_roll_bar => {
+                if (item >= v.num_anti_roll_bars)
+                    return false;
+                var s: VehicleAntiRollBar = .{};
+                if (restore_from) |bytes| {
+                    var in: RestoreStream = undefined;
+                    in.init(bytes);
+                    s.restoreBinaryState(in.stream());
+                    if (!in.completely())
+                        return false;
+                } else s = fillAntiRollBar(&scene.vehicle_anti_roll_bars[v.first_anti_roll_bar + item]);
+                try saveInto(allocator, &s, out);
+            },
+        }
+        return true;
+    }
+};
+
+// ---- SLOT tracked_vehicle: TrackedVehicleController, WheelSettingsTV (Phase7OpRange.vehicle_tracked 570..579,
+// Blocker.tracked_vehicles) ----
+
+/// The vehicle variants group, tracked vehicles: the hooks that VehicleSlot calls (SimMakeTrackedControllerSettings,
+/// SimMakeWheelSettingsTV, WriteTrackedWheelState, WriteTrackedControllerState, GetEngine / GetTransmission of a
+/// tracked vehicle) and ApplyTrackedOp of SimulationReference.cpp. Proof that the tracked scenes bite (each breakage of
+/// Zolt/Physics/Vehicle/TrackedVehicleController.zig, then reverted): reassociating PostCollide's
+/// `differential_torque * delta_time / inertia` as `differential_torque * (delta_time / inertia)` is reported as "scene
+/// vehicle_tracked_ops ... update 2: after the update, state f: state differs at byte 59 ...: bodies[1] (id 0x00800001)
+/// position.x zolt 0x2fd23654 jolt 0x2fcecaea"; `-=` instead of `+=` for the right track in SyncLeftRightTracks' branch
+/// of opposite ratios as "scene vehicle_tracked_terrains ... update 75: ... bodies[2] (id 0x00800002) position.x zolt
+/// 0xc1c6f3ff jolt 0xc1c6f2d7" (turning on the spot; VehiclePartsParity's SyncLeftRightTracks test fails too); summing
+/// the radius of every wheel of a braking track instead of those with a contact as "scene vehicle_tracked_terrains ...
+/// update 125: ... bodies[3] (id 0x00800003) position.x zolt 0x41cccda3 jolt 0x41cccd22" (and in
+/// vehicle_tracked_pushing_boxes and vehicle_tracked_far_from_origin, the scenes that brake with wheels in the air).
+const TrackedVehicleSlot = struct {
+    const TrackedVehicleController = zolt.TrackedVehicleController;
+    const TrackedVehicleControllerSettings = zolt.TrackedVehicleControllerSettings;
+    const WheelSettingsTV = zolt.WheelSettingsTV;
+    const WheelTV = zolt.WheelTV;
+
+    /// SimMakeTrackedControllerSettings: the engine, the transmission and the tracks of a description (no reference yet)
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        const s = try TrackedVehicleControllerSettings.create(allocator);
+        errdefer {
+            s.base.addRef();
+            s.base.release();
+        }
+        try VehicleSlot.fillEngine(allocator, scene, &v.engine, &s.engine);
+        try VehicleSlot.fillTransmission(allocator, scene, &v.transmission, &s.transmission);
+        for (&s.tracks, &v.tracks) |*track, *d|
+            try VehicleSlot.fillTrack(allocator, scene, d, track);
+        return &s.base;
+    }
+
+    /// SimMakeWheelSettingsTV: the WheelSettingsTV of a wheel description (no reference yet)
+    fn makeWheelSettings(allocator: Allocator, scene: *const SimSceneDesc, w: *const SimVehicleWheel) !*WheelSettings {
+        _ = scene;
+        const tv = try WheelSettingsTV.create(allocator);
+        VehicleSlot.fillWheelSettings(w, &tv.base);
+        tv.longitudinal_friction = w.longitudinal_friction_tv;
+        tv.lateral_friction = w.lateral_friction_tv;
+        return &tv.base;
+    }
+
+    /// The tracked controller of a vehicle
+    fn controller(v: *VehicleConstraint) *TrackedVehicleController {
+        return zolt.virtual.downcast(TrackedVehicleController, v.getControllerMut());
+    }
+
+    /// GetEngine of the .cpp for a tracked vehicle
+    fn engine(v: *VehicleConstraint) !*zolt.VehicleEngine {
+        return controller(v).getEngineMut();
+    }
+
+    /// GetTransmission of the .cpp for a tracked vehicle
+    fn transmission(v: *VehicleConstraint) !*zolt.VehicleTransmission {
+        return controller(v).getTransmissionMut();
+    }
+
+    /// ApplyTrackedOp (GetTrackedController: an operation on a vehicle of another controller kind is a scene error)
+    fn applyVehicleOp(world: *ZoltWorld, op: *const SimOp, v: *VehicleConstraint) !void {
+        const f = &op.f;
+        if ((try VehicleSlot.getVehicle(world, op.index)).controller != .tracked) {
+            std.debug.print("SimulationParity: tracked operation {d} on the vehicle handle {d}\n", .{ op.kind, op.index });
+            return error.SceneError;
+        }
+        const c = controller(v);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .tracked_set_driver_input => c.setDriverInput(f[0], f[1], f[2], f[3]),
+            .tracked_set_forward_input => c.setForwardInput(f[0]),
+            .tracked_set_left_ratio => c.setLeftRatio(f[0]),
+            .tracked_set_right_ratio => c.setRightRatio(f[0]),
+            .tracked_set_brake_input => c.setBrakeInput(f[0]),
+            .tracked_set_track => {
+                const track = &c.getTracksMut()[op.i[0]];
+                track.angular_velocity = f[0];
+                track.base.inertia = f[1];
+                track.base.angular_damping = f[2];
+                track.base.max_brake_torque = f[3];
+                track.base.differential_ratio = f[4];
+            },
+            else => {
+                std.debug.print("SimulationParity: unknown tracked vehicle operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+    }
+
+    /// WriteTrackedWheelState: the vehicle_wheel_tv field of a wheel
+    fn writeWheelState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, index: u32, wheel: *const Wheel) !void {
+        _ = world;
+        const tv = zolt.virtual.downcast(WheelTV, wheel);
+        try w.begin(.vehicle_wheel_tv, handle, index);
+        try w.value(tv.track_index);
+        try w.value(tv.combined_longitudinal_friction);
+        try w.value(tv.combined_lateral_friction);
+        try w.value(tv.brake_impulse);
+        w.end();
+    }
+
+    /// WriteTrackedControllerState: the engine and the transmission (VehicleSlot's functions), the inputs, the tracks
+    fn writeControllerState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, v: *const VehicleConstraint) !void {
+        _ = world;
+        const tracked = zolt.virtual.downcast(TrackedVehicleController, v.getController());
+        try VehicleSlot.writeEngineState(w, handle, tracked.getEngine());
+        try VehicleSlot.writeTransmissionState(w, handle, tracked.getTransmission());
+        try w.begin(.vehicle_tracked, handle, 0);
+        try w.value(tracked.getForwardInput());
+        try w.value(tracked.getLeftRatio());
+        try w.value(tracked.getRightRatio());
+        try w.value(tracked.getBrakeInput());
+        w.end();
+        for (tracked.getTracks(), 0..) |*track, t| {
+            try w.begin(.vehicle_track, handle, @intCast(t));
+            try w.value(track.angular_velocity);
+            try w.value(track.base.driven_wheel);
+            try w.value(@as(u32, @intCast(track.base.wheels.items.len)));
+            try w.value(track.base.inertia);
+            try w.value(track.base.angular_damping);
+            try w.value(track.base.max_brake_torque);
+            try w.value(track.base.differential_ratio);
+            w.end();
+        }
+    }
+};
+
+// ---- SLOT motorcycle: MotorcycleController (Phase7OpRange.vehicle_motorcycle 580..589, Blocker.motorcycles) ----
+
+/// The vehicle variants group, motorcycles: the hooks that VehicleSlot calls (SimMakeMotorcycleControllerSettings,
+/// WriteMotorcycleControllerState) and ApplyMotorcycleOp of SimulationReference.cpp. A MotorcycleController is a
+/// WheeledVehicleController: VehicleSlot reaches its wheeled parts itself. Proof that the motorcycle scenes bite (each
+/// breakage of Zolt/Physics/Vehicle/MotorcycleController.zig, then reverted): no lean steering limit (a max steer angle
+/// 10 rad higher) is reported as "scene vehicle_motorcycle_turns ... update 60: after the update, state f: state
+/// differs at byte 193 ...: bodies[2] (id 0x00800002) position.x zolt 0xba28cdaa jolt 0xba36e5cf" (and in
+/// vehicle_motorcycle_slopes_and_braking); clamping the steer angle while the lean steering limit is disabled
+/// (PreCollide ignoring mEnableLeanSteeringLimit) as "scene vehicle_motorcycle_turns ... update 66: ... bodies[2] (id
+/// 0x00800002) position.x zolt 0xbd1e8f1f jolt 0xbd236fc2"; the gravity of the system instead of the overridden gravity
+/// in the max steer angle factor as "scene vehicle_motorcycle_slopes_and_braking ... update 47: ... bodies[3] (id
+/// 0x00800003) position.x zolt 0x415f15dd jolt 0x415f1658" (these two passed every scene while the limit was only
+/// switched off on motorcycles too slow to be clamped and the braker was too slow for its 45 degree max lean angle);
+/// clamping the target lean to the other side (`-Sign(w_angle) * mMaxLeanAngle`) as "scene vehicle_motorcycle_turns ...
+/// update 62: ... bodies[2] (id 0x00800002) position.x zolt 0xbbd38af5 jolt 0xbc1755c0" (the clamp is reached; and in
+/// vehicle_motorcycle_slopes_and_braking); subtracting the integration term of the lean impulse as "scene
+/// vehicle_motorcycle_lean_integration ... update 13: ... bodies[1] (id 0x00800001) position.x zolt 0x3d358665 jolt
+/// 0x3d35d8f6" (and in vehicle_motorcycle_lean_integration_slope); copying the controller's lean spring damping in
+/// GetSettings (Jolt assigns the settings' own value) as "scene vehicle_motorcycle_ops ... update 40: operation 19
+/// (vehicle_settings_hash on object handle / description 0) returned 869730697 in zolt and 4196340125 in jolt" (and
+/// VehiclePartsParity's controller test).
+const MotorcycleSlot = struct {
+    const MotorcycleController = zolt.MotorcycleController;
+    const MotorcycleControllerSettings = zolt.MotorcycleControllerSettings;
+
+    /// SimMakeMotorcycleControllerSettings: the wheeled members (VehicleSlot.fillWheeled), then the lean members (no
+    /// reference yet)
+    fn makeControllerSettings(allocator: Allocator, scene: *const SimSceneDesc, v: *const SimVehicle) !*VehicleControllerSettings {
+        const s = try MotorcycleControllerSettings.create(allocator);
+        errdefer {
+            s.asControllerSettings().addRef();
+            s.asControllerSettings().release();
+        }
+        try VehicleSlot.fillWheeled(scene, v, &s.base);
+        s.max_lean_angle = v.max_lean_angle;
+        s.lean_spring_constant = v.lean_spring_constant;
+        s.lean_spring_damping = v.lean_spring_damping;
+        s.lean_spring_integration_coefficient = v.lean_spring_integration_coefficient;
+        s.lean_spring_integration_coefficient_decay = v.lean_spring_integration_coefficient_decay;
+        s.lean_smoothing_factor = v.lean_smoothing_factor;
+        return s.asControllerSettings();
+    }
+
+    /// The motorcycle controller of a vehicle
+    fn controller(v: *VehicleConstraint) *MotorcycleController {
+        return zolt.virtual.downcast(MotorcycleController, v.getControllerMut());
+    }
+
+    /// ApplyMotorcycleOp (GetMotorcycleController: an operation on a vehicle of another controller kind is a scene error)
+    fn applyVehicleOp(world: *ZoltWorld, op: *const SimOp, v: *VehicleConstraint) !void {
+        const f = &op.f;
+        if ((try VehicleSlot.getVehicle(world, op.index)).controller != .motorcycle) {
+            std.debug.print("SimulationParity: motorcycle operation {d} on the vehicle handle {d}\n", .{ op.kind, op.index });
+            return error.SceneError;
+        }
+        const c = controller(v);
+        switch (@as(OpKind, @enumFromInt(op.kind))) {
+            .motorcycle_enable_lean_controller => c.enableLeanController(op.i[0] != 0),
+            .motorcycle_enable_lean_steering_limit => c.enableLeanSteeringLimit(op.i[0] != 0),
+            .motorcycle_set_lean_spring_constant => c.setLeanSpringConstant(f[0]),
+            .motorcycle_set_lean_spring_damping => c.setLeanSpringDamping(f[0]),
+            .motorcycle_set_lean_spring_integration_coefficient => c.setLeanSpringIntegrationCoefficient(f[0]),
+            .motorcycle_set_lean_spring_integration_coefficient_decay => c.setLeanSpringIntegrationCoefficientDecay(f[0]),
+            .motorcycle_set_lean_smoothing_factor => c.setLeanSmoothingFactor(f[0]),
+            else => {
+                std.debug.print("SimulationParity: unknown motorcycle operation {d}\n", .{op.kind});
+                return error.SceneError;
+            },
+        }
+    }
+
+    /// WriteMotorcycleControllerState: the vehicle_motorcycle field (after the wheeled fields that VehicleSlot writes)
+    fn writeControllerState(world: *ZoltWorld, w: *ObjectStateWriter, handle: u32, v: *const VehicleConstraint) !void {
+        _ = world;
+        const motorcycle = zolt.virtual.downcast(MotorcycleController, v.getController());
+        try w.begin(.vehicle_motorcycle, handle, 0);
+        try w.value(motorcycle.getWheelBase());
+        try w.boolean(motorcycle.isLeanControllerEnabled());
+        try w.boolean(motorcycle.isLeanSteeringLimitEnabled());
+        try w.value(motorcycle.getLeanSpringConstant());
+        try w.value(motorcycle.getLeanSpringDamping());
+        try w.value(motorcycle.getLeanSpringIntegrationCoefficient());
+        try w.value(motorcycle.getLeanSpringIntegrationCoefficientDecay());
+        try w.value(motorcycle.getLeanSmoothingFactor());
+        w.end();
+    }
+};
+
+// ---- end of the Phase 7 slots ----
+
+/// The objects of the Phase 7 slots (ZoltWorld.phase7; the vehicle variants keep their vehicles in VehicleSlot's)
+const Phase7Storage = struct {
+    characters: CharacterSlot.Storage = .{},
+    character_virtuals: CharacterVirtualSlot.Storage = .{},
+    ragdolls: RagdollSlot.Storage = .{},
+    vehicles: VehicleSlot.Storage = .{},
+};
+
+/// A record in a failure message (`{f}`): the kind by name, the ids and the data; "nothing" when a side has no record
+const RecordText = struct {
+    record: ?SimRecord,
+
+    pub fn format(self: RecordText, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const r = self.record orelse return w.writeAll("nothing");
+        if (std.enums.fromInt(RecordKind, r.kind)) |kind|
+            try w.print("{t}", .{kind})
+        else
+            try w.print("kind {d}", .{r.kind});
+        try w.print(" ids {any} data {any}", .{ r.ids, r.data });
+    }
+};
+
+/// The CharacterContactListener records of the Zolt side (SimCharacterContactListener of SimulationReference.cpp, the
+/// layouts of RecordKind 7..17): the listener of CharacterVirtualSlot adds them to world.character_recorder
+const CharacterRecords = struct {
+    fn vec3Bits(v: Vec3) [3]u32 {
+        return .{ floatBits(v.getX()), floatBits(v.getY()), floatBits(v.getZ()) };
+    }
+
+    fn hashVec3(hash: u32, v: Vec3) u32 {
+        const values = [3]f32{ v.getX(), v.getY(), v.getZ() };
+        return SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+    }
+
+    fn hashRVec3(hash: u32, v: RVec3) u32 {
+        const values = [3]Real{ v.getX(), v.getY(), v.getZ() };
+        return SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+    }
+
+    /// The flags of a contact record (SimCharacterContactFlags): mMotionTypeB | mIsSensorB << 8 | mHadCollision << 9 |
+    /// mWasDiscarded << 10 | mCanPushCharacter << 11 | mIsBackFacingContact << 12 | (mCharacterB != null) << 13
+    pub fn contactFlags(motion_type_b: u32, is_sensor_b: bool, had_collision: bool, was_discarded: bool, can_push_character: bool, is_back_facing_contact: bool, has_character_b: bool) u32 {
+        return motion_type_b |
+            (@as(u32, @intFromBool(is_sensor_b)) << 8) |
+            (@as(u32, @intFromBool(had_collision)) << 9) |
+            (@as(u32, @intFromBool(was_discarded)) << 10) |
+            (@as(u32, @intFromBool(can_push_character)) << 11) |
+            (@as(u32, @intFromBool(is_back_facing_contact)) << 12) |
+            (@as(u32, @intFromBool(has_character_b)) << 13);
+    }
+
+    /// The bits of CharacterContactSettings (SimCharacterContactSettingsBits): mCanPushCharacter | mCanReceiveImpulses << 1
+    pub fn settingsBits(can_push_character: bool, can_receive_impulses: bool) u32 {
+        return @as(u32, @intFromBool(can_push_character)) | (@as(u32, @intFromBool(can_receive_impulses)) << 1);
+    }
+
+    /// A contact record (validate / added / persisted and the character versions): `flags` from contactFlags, `settings_in`
+    /// the settingsBits passed in (added / persisted, else 0), `hash` SimScenes.hashCharacterContact of the contact,
+    /// `result` the return value of validate (1 / 0) or the settingsBits after the callback
+    pub fn contact(kind: RecordKind, character_id: u32, body_b: BodyID, character_id_b: u32, sub_shape_id_b: SubShapeID, contact_normal: Vec3, distance: f32, fraction: f32, flags: u32, settings_in: u32, hash: u32, result: u32) SimRecord {
+        const n = vec3Bits(contact_normal);
+        return .{
+            .kind = @intFromEnum(kind),
+            .ids = .{ character_id, body_b.getIndexAndSequenceNumber(), character_id_b, sub_shape_id_b.getValue() },
+            .data = .{ n[0], n[1], n[2], floatBits(distance), floatBits(fraction), flags | (settings_in << 16), hash, result },
+        };
+    }
+
+    /// OnContactRemoved (body_id2, invalid character ID) / OnCharacterContactRemoved (invalid BodyID, character_id2)
+    pub fn removed(kind: RecordKind, character_id: u32, body_id2: BodyID, character_id2: u32, sub_shape_id2: SubShapeID) SimRecord {
+        return .{ .kind = @intFromEnum(kind), .ids = .{ character_id, body_id2.getIndexAndSequenceNumber(), character_id2, sub_shape_id2.getValue() } };
+    }
+
+    /// OnContactSolve (body_id2, invalid character ID) / OnCharacterContactSolve (invalid BodyID, the other character's
+    /// ID): the new velocity as passed in and after the callback
+    pub fn solve(kind: RecordKind, character_id: u32, body_id2: BodyID, character_id2: u32, sub_shape_id2: SubShapeID, contact_position: RVec3, contact_normal: Vec3, contact_velocity: Vec3, material_hash: u32, character_velocity: Vec3, new_velocity_in: Vec3, new_velocity_out: Vec3) SimRecord {
+        const v_in = vec3Bits(new_velocity_in);
+        const v_character = vec3Bits(character_velocity);
+        var h = hashRVec3(SimScenes.hash_seed, contact_position);
+        h = hashVec3(h, contact_normal);
+        h = hashVec3(h, contact_velocity);
+        h = SimScenes.hashBytes(h, std.mem.asBytes(&material_hash));
+        return .{
+            .kind = @intFromEnum(kind),
+            .ids = .{ character_id, body_id2.getIndexAndSequenceNumber(), character_id2, sub_shape_id2.getValue() },
+            .data = .{ v_in[0], v_in[1], v_in[2], v_character[0], v_character[1], v_character[2], h, hashVec3(SimScenes.hash_seed, new_velocity_out) },
+        };
+    }
+
+    /// OnAdjustBodyVelocity: the velocities as passed in and after the callback
+    pub fn adjustBodyVelocity(character_id: u32, body_id2: BodyID, linear_in: Vec3, angular_in: Vec3, linear_out: Vec3, angular_out: Vec3) SimRecord {
+        const l = vec3Bits(linear_in);
+        const a = vec3Bits(angular_in);
+        return .{
+            .kind = @intFromEnum(RecordKind.character_adjust_body_velocity),
+            .ids = .{ character_id, body_id2.getIndexAndSequenceNumber(), 0, 0 },
+            .data = .{ l[0], l[1], l[2], a[0], a[1], a[2], hashVec3(hashVec3(SimScenes.hash_seed, linear_out), angular_out), 0 },
+        };
+    }
+};
+
+/// The step callback records of a vehicle (SimVehicleRecord of SimulationReference.cpp, RecordKind 18..20)
+const VehicleRecords = struct {
+    /// The hash of the wheels of a record: per wheel in order (from SimScenes.hash_seed) GetSuspensionLength,
+    /// GetAngularVelocity and GetSteerAngle
+    pub fn hashWheel(hash: u32, suspension_length: f32, angular_velocity: f32, steer_angle: f32) u32 {
+        const values = [3]f32{ suspension_length, angular_velocity, steer_angle };
+        return SimScenes.hashBytes(hash, std.mem.asBytes(&values));
+    }
+
+    /// A record of a vehicle callback: `wheel_contacts` the bits of the wheels with HasContact(), `wheel_hash` from hashWheel
+    pub fn record(kind: RecordKind, handle: u32, body_id: BodyID, context: *const PhysicsStepListenerContext, wheel_contacts: u32, wheel_hash: u32) SimRecord {
+        return .{
+            .kind = @intFromEnum(kind),
+            .ids = .{ handle, body_id.getIndexAndSequenceNumber(), 0, 0 },
+            .data = .{ floatBits(context.delta_time), @intFromBool(context.is_first_step), @intFromBool(context.is_last_step), wheel_contacts, wheel_hash, 0, 0, 0 },
+        };
+    }
+};
+
+/// Before a scene runs: the Phase 7 classes that it creates are ported (a supported Blocker must cover them) and their
+/// slots are no longer stubs
+fn checkPhase7Slots(entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    if (builder.characters.items.len > 0)
+        try checkPhase7Slot(entry, "Character", Phase7Classes.characters(), !@hasDecl(CharacterSlot, "is_stub"));
+    if (builder.character_virtuals.items.len > 0)
+        try checkPhase7Slot(entry, "CharacterVirtual", Phase7Classes.characterVirtuals(), !@hasDecl(CharacterVirtualSlot, "is_stub"));
+    if (builder.ragdolls.items.len > 0)
+        try checkPhase7Slot(entry, "Ragdoll", Phase7Classes.ragdolls(), !@hasDecl(RagdollSlot, "is_stub"));
+    for (builder.vehicles.items) |*v| switch (@as(VehicleControllerKind, @enumFromInt(v.controller))) {
+        .wheeled => try checkPhase7Slot(entry, "wheeled vehicle", Phase7Classes.wheeledVehicles(), !@hasDecl(VehicleSlot, "is_stub")),
+        .tracked => try checkPhase7Slot(entry, "tracked vehicle", Phase7Classes.trackedVehicles(), !@hasDecl(VehicleSlot, "is_stub") and !@hasDecl(TrackedVehicleSlot, "is_stub")),
+        .motorcycle => try checkPhase7Slot(entry, "motorcycle", Phase7Classes.motorcycles(), !@hasDecl(VehicleSlot, "is_stub") and !@hasDecl(MotorcycleSlot, "is_stub")),
+    };
+}
+
+/// Byte buffers of the settings checks of Phase 7
+const SettingsBuffers = struct {
+    allocator: Allocator,
+    zolt: std.ArrayList(u8) = .empty,
+    jolt: std.ArrayList(u8) = .empty,
+    zolt_round_trip: std.ArrayList(u8) = .empty,
+    jolt_round_trip: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *SettingsBuffers) void {
+        self.zolt.deinit(self.allocator);
+        self.jolt.deinit(self.allocator);
+        self.zolt_round_trip.deinit(self.allocator);
+        self.jolt_round_trip.deinit(self.allocator);
+    }
+};
+
+/// Phase 7, before a scene runs (the foundation review M3): the binary state of the settings that the filled Zolt slots
+/// make from the scene's vehicle and ragdoll descriptions is the C++ one, each side restores the other side's bytes and
+/// saves them unchanged (every round-tripping VehicleSettingsPart; RagdollSettings with the shapes and the group
+/// filter), and the tables of the RagdollSettings are the C++ ones. A mismatch is an error of the slot or of the
+/// library's binary state functions, reported before the simulation. The C++ round trips alone run in "SimScenes
+/// blocked scenes run on the C++ side" (checkCppSettingsRoundTrips).
+fn checkPhase7Settings(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    const desc = builder.desc();
+    var buffers: SettingsBuffers = .{ .allocator = allocator };
+    defer buffers.deinit();
+
+    if (!@hasDecl(VehicleSlot, "is_stub")) {
+        for (builder.vehicles.items, 0..) |*v, i| {
+            const index: u32 = @intCast(i);
+            for (std.enums.values(VehicleSettingsPart)) |part| {
+                for (0..part.numItems(v)) |n| {
+                    const item: u32 = @intCast(n);
+                    const has_zolt = try VehicleSlot.settingsPart(allocator, &desc, index, part, item, null, &buffers.zolt);
+                    const has_jolt = try CppWorld.vehicleSettingsPart(allocator, &desc, index, part, item, null, &buffers.jolt);
+                    if (!has_zolt or !has_jolt or !std.mem.eql(u8, buffers.zolt.items, buffers.jolt.items)) {
+                        std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: the binary state of the Zolt slot differs from SimVehicleSettingsPart (byte {?d} of {d})\n", .{ entry.name, index, part, item, std.mem.indexOfDiff(u8, buffers.zolt.items, buffers.jolt.items), buffers.jolt.items.len });
+                        return error.ParityMismatch;
+                    }
+                    if (!part.roundTrips()) continue;
+                    const zolt_restored = try VehicleSlot.settingsPart(allocator, &desc, index, part, item, buffers.jolt.items, &buffers.zolt_round_trip);
+                    const jolt_restored = try CppWorld.vehicleSettingsPart(allocator, &desc, index, part, item, buffers.zolt.items, &buffers.jolt_round_trip);
+                    if (!zolt_restored or !std.mem.eql(u8, buffers.zolt_round_trip.items, buffers.jolt.items)) {
+                        std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: Zolt does not restore the C++ bytes (restored {}, saved again: byte {?d} differs)\n", .{ entry.name, index, part, item, zolt_restored, std.mem.indexOfDiff(u8, buffers.zolt_round_trip.items, buffers.jolt.items) });
+                        return error.ParityMismatch;
+                    }
+                    if (!jolt_restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.zolt.items)) {
+                        std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: Jolt does not restore the Zolt bytes (restored {}, saved again: byte {?d} differs)\n", .{ entry.name, index, part, item, jolt_restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.zolt.items) });
+                        return error.ParityMismatch;
+                    }
+                }
+            }
+        }
+    }
+
+    if (builder.ragdolls.items.len > 0 and !@hasDecl(RagdollSlot, "is_stub")) {
+        // The parts of a ragdoll use the shapes of a world
+        const cw = CppWorld.init(&desc, 0);
+        defer cw.deinit();
+        const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+        defer zw.destroy();
+        var zolt_info: std.ArrayList(u32) = .empty;
+        defer zolt_info.deinit(allocator);
+        var jolt_info: std.ArrayList(u32) = .empty;
+        defer jolt_info.deinit(allocator);
+        for (0..builder.ragdolls.items.len) |i| {
+            const index: u32 = @intCast(i);
+            const has_zolt = try RagdollSlot.settingsBytes(zw, index, null, &buffers.zolt);
+            const has_jolt = try cw.ragdollSettingsBytes(allocator, index, null, &buffers.jolt);
+            if (!has_zolt or !has_jolt or !std.mem.eql(u8, buffers.zolt.items, buffers.jolt.items)) {
+                std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the binary state of the Zolt RagdollSettings differs (byte {?d} of {d})\n", .{ entry.name, index, std.mem.indexOfDiff(u8, buffers.zolt.items, buffers.jolt.items), buffers.jolt.items.len });
+                return error.ParityMismatch;
+            }
+            const zolt_restored = try RagdollSlot.settingsBytes(zw, index, buffers.jolt.items, &buffers.zolt_round_trip);
+            const jolt_restored = try cw.ragdollSettingsBytes(allocator, index, buffers.zolt.items, &buffers.jolt_round_trip);
+            if (!zolt_restored or !jolt_restored or !std.mem.eql(u8, buffers.zolt_round_trip.items, buffers.jolt.items) or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.zolt.items)) {
+                std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the RagdollSettings round trips differ (Zolt restored {}, Jolt restored {})\n", .{ entry.name, index, zolt_restored, jolt_restored });
+                return error.ParityMismatch;
+            }
+            try RagdollSlot.settingsInfo(zw, index, &zolt_info);
+            try cw.ragdollSettingsInfo(allocator, index, &jolt_info);
+            if (!std.mem.eql(u32, zolt_info.items, jolt_info.items)) {
+                std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the RagdollSettings tables differ (Stabilize, GetBodyIndexToConstraintIndex, GetConstraintIndexToBodyIdxPair)\n  zolt {any}\n  jolt {any}\n", .{ entry.name, index, zolt_info.items, jolt_info.items });
+                return error.ParityMismatch;
+            }
+        }
+    }
+}
+
+/// The C++ side of checkPhase7Settings ("SimScenes blocked scenes run on the C++ side"): every round-tripping part of
+/// the vehicle descriptions and the RagdollSettings of the ragdoll descriptions (with the shapes of world `cw`) come back
+/// unchanged from a C++ restore
+fn checkCppSettingsRoundTrips(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder, desc: *const SimSceneDesc, cw: CppWorld) !void {
+    var buffers: SettingsBuffers = .{ .allocator = allocator };
+    defer buffers.deinit();
+    for (builder.vehicles.items, 0..) |*v, i| {
+        const index: u32 = @intCast(i);
+        for (std.enums.values(VehicleSettingsPart)) |part| {
+            for (0..part.numItems(v)) |n| {
+                const item: u32 = @intCast(n);
+                if (!try CppWorld.vehicleSettingsPart(allocator, desc, index, part, item, null, &buffers.jolt)) {
+                    std.debug.print("SimulationParity: scene {s}, vehicle description {d}: no {t} {d}\n", .{ entry.name, index, part, item });
+                    return error.TestUnexpectedResult;
+                }
+                if (!part.roundTrips()) continue;
+                const restored = try CppWorld.vehicleSettingsPart(allocator, desc, index, part, item, buffers.jolt.items, &buffers.jolt_round_trip);
+                if (!restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.jolt.items)) {
+                    std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: restoring the C++ bytes and saving them again changes them (restored {}, byte {?d} of {d})\n", .{ entry.name, index, part, item, restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.jolt.items), buffers.jolt.items.len });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+    for (0..builder.ragdolls.items.len) |i| {
+        const index: u32 = @intCast(i);
+        try std.testing.expect(try cw.ragdollSettingsBytes(allocator, index, null, &buffers.jolt));
+        const restored = try cw.ragdollSettingsBytes(allocator, index, buffers.jolt.items, &buffers.jolt_round_trip);
+        if (!restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.jolt.items)) {
+            std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: restoring the C++ RagdollSettings bytes and saving them again changes them (restored {}, byte {?d} of {d})\n", .{ entry.name, index, restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.jolt.items), buffers.jolt.items.len });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// Phase 7: the Jolt asserts that the C++ side hit since `before` (a reference built with
+/// `-Dreference_asserts=true` prints them to stderr; without asserts the count stays 0)
+fn checkReferenceAsserts(entry: *const SceneEntry, before: u32) !void {
+    const after = jolt.jolt_sim_reference_assert_count();
+    if (after != before) {
+        std.debug.print("SimulationParity: scene {s}: the C++ side hit {d} Jolt asserts (printed above): the scene violates what Jolt asserts\n", .{ entry.name, after - before });
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn checkPhase7Slot(entry: *const SceneEntry, what: []const u8, ported: bool, slot_filled: bool) !void {
+    if (!ported) {
+        std.debug.print("SimulationParity: scene {s} creates {s} objects, whose Zolt classes are still stubs, but its blocker .{t} is supported (declare the Blocker of the class)\n", .{ entry.name, what, entry.blocked_by });
+        return error.TestUnexpectedResult;
+    }
+    if (!slot_filled) {
+        std.debug.print("SimulationParity: scene {s}: the {s} classes are ported but their slot in SimulationParity.zig is still Phase7StubSlot\n", .{ entry.name, what });
+        return error.SceneNotSupported;
+    }
+}
+
 fn runEntry(entry: *const SceneEntry) !void {
     if (!entry.blocked_by.isSupported())
         return error.SkipZigTest;
@@ -2800,10 +6763,15 @@ fn runEntry(entry: *const SceneEntry) !void {
     defer builder.deinit();
     try entry.build(&builder);
     try checkConstraintDescriptions(allocator, entry, &builder);
+    try checkPhase7Slots(entry, &builder);
+    try checkPhase7Settings(allocator, entry, &builder);
 
+    const asserts_before = jolt.jolt_sim_reference_assert_count();
     var stats: [configs.len]RunStats = undefined;
     for (configs, &stats) |config, *s|
         s.* = try runScene(allocator, entry, &builder, config);
+    if (entry.blocked_by != .release_only)
+        try checkReferenceAsserts(entry, asserts_before);
 
     if (verbose)
         std.debug.print("{s}: {any}\n", .{ entry.name, stats[0] });
@@ -2826,7 +6794,7 @@ fn runEntry(entry: *const SceneEntry) !void {
         num_spawned_jobs += s.num_spawned_jobs;
         num_large_island_deactivations += s.num_large_island_deactivations;
     }
-    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0);
+    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0 or try observeSpawnedJobs(allocator, &builder));
     if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
     if (expect.full_manifolds) {
         try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
@@ -2839,9 +6807,14 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (expect.update_activations > 0) try expectReached(entry, "bodies activated from inside one update", stats[0].max_update_activations >= expect.update_activations);
     if (expect.active_constraints > 0) try expectReached(entry, "active constraints", stats[0].max_active_constraints >= expect.active_constraints);
     if (builder.constraints.items.len > 0) try expectReached(entry, "constraints that are solved (every scene with constraints)", stats[0].max_active_constraints > 0);
+    if (expect.character_records != 0) try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(records, expect.character_records));
+    if (expect.ground_states != 0) try expectReached(entry, "the ground states of Expect.ground_states", (stats[0].objects.ground_states & expect.ground_states) == expect.ground_states);
+    if (expect.wheel_contacts) try expectReached(entry, "wheel contacts", stats[0].objects.wheel_contacts);
+    try expectVehicleGears(entry, &stats[0].objects);
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
+        try std.testing.expectEqual(stats[0].objects, s.objects);
         if (config.sweeps and entry.sweep_stride != 0) {
             try std.testing.expect(s.num_temp_failures > 0);
             try std.testing.expect(s.num_job_failures > 0);
@@ -2850,6 +6823,42 @@ fn runEntry(entry: *const SceneEntry) !void {
 
     if (entry.creation_sweep)
         try std.testing.checkAllAllocationFailures(allocator, createScene, .{&builder});
+}
+
+/// The number of Zolt-only runs of observeSpawnedJobs
+const max_spawn_observations = 10;
+
+/// Expect.spawned_jobs when no configuration of the thread matrix spawned a FindCollisions job from inside a job: a job
+/// spawns another one when it finishes while the others still find body pairs, which depends on the scheduling (on a
+/// loaded machine the workers can run the jobs one after the other, then none spawns: contacts_many_bodies in
+/// ReleaseFast next to other builds). The scene runs again on the Zolt side alone (no comparison) with 3 and 7 workers,
+/// up to max_spawn_observations times, until a job spawns one: the scene reaches the path, the scheduling decides when.
+fn observeSpawnedJobs(allocator: Allocator, builder: *const SceneBuilder) !bool {
+    const desc = builder.desc();
+    for (0..max_spawn_observations) |attempt| {
+        const zw = try ZoltWorld.create(allocator, &desc, .{ .thread_pool = if (attempt % 2 == 0) 3 else 7 });
+        defer zw.destroy();
+        var delta_time = builder.delta_time;
+        var collision_steps = builder.collision_steps;
+        var op_index: usize = 0;
+        for (0..builder.num_updates) |update| {
+            while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
+                const op = &builder.ops.items[op_index];
+                switch (@as(OpKind, @enumFromInt(op.kind))) {
+                    .set_update => {
+                        delta_time = op.f[0];
+                        collision_steps = op.count;
+                    },
+                    .snapshot, .restore_cross => {},
+                    else => _ = try zw.applyOp(op),
+                }
+            }
+            _ = try zw.update(delta_time, collision_steps, zw.temp.tempAllocator(), zw.jobSystem());
+            zw.discardRecords();
+            if (zw.counting_jobs.num_spawned_find_collisions.load(.monotonic) > 0) return true;
+        }
+    }
+    return false;
 }
 
 fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !void {
@@ -2880,8 +6889,10 @@ test {
 
 // The scenes of the later waves run on the C++ side already, with 0 and 3 worker threads in lockstep: their
 // descriptions build, Jolt is deterministic on them, and they reach what they are written for (contact callbacks,
-// active constraints, the expect_body_state / expect_constraint_state checks). When a wave lands only the Zolt side is
-// new. `restore_cross` restores the snapshot of the other world in each world.
+// active constraints, the expect_* checks, the Phase 7 Expect fields). When a wave lands only the Zolt side is new.
+// `restore_cross` restores the snapshot of the other world in each world (with the character states). Phase 7: the
+// object states of both worlds are identical after every update and decode completely, the character listener records
+// are identical in call order.
 test "SimScenes blocked scenes run on the C++ side" {
     const allocator = std.testing.allocator;
     var a_state: std.ArrayList(u8) = .empty;
@@ -2892,8 +6903,17 @@ test "SimScenes blocked scenes run on the C++ side" {
     defer a_records.deinit(allocator);
     var b_records: std.ArrayList(SimRecord) = .empty;
     defer b_records.deinit(allocator);
+    var a_objects: std.ArrayList(u8) = .empty;
+    defer a_objects.deinit(allocator);
+    var b_objects: std.ArrayList(u8) = .empty;
+    defer b_objects.deinit(allocator);
     var snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
     defer for (&snapshots) |*s| {
+        s[0].deinit(allocator);
+        s[1].deinit(allocator);
+    };
+    var character_snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
+    defer for (&character_snapshots) |*s| {
         s[0].deinit(allocator);
         s[1].deinit(allocator);
     };
@@ -2904,15 +6924,18 @@ test "SimScenes blocked scenes run on the C++ side" {
         defer builder.deinit();
         try entry.build(&builder);
         const desc = builder.desc();
+        const asserts_before = jolt.jolt_sim_reference_assert_count();
         const a = CppWorld.init(&desc, 0);
         defer a.deinit();
         const b = CppWorld.init(&desc, 3);
         defer b.deinit();
+        try checkCppSettingsRoundTrips(allocator, entry, &builder, &desc, a);
 
         var delta_time = builder.delta_time;
         var collision_steps = builder.collision_steps;
-        var records: [@typeInfo(RecordKind).@"enum".fields.len]u32 = @splat(0);
+        var records: [SimScenes.num_record_kinds]u32 = @splat(0);
         var max_active_constraints: u32 = 0;
+        var objects: ObjectStats = .{};
         var op_index: usize = 0;
         for (0..builder.num_updates) |update| {
             while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
@@ -2926,10 +6949,16 @@ test "SimScenes blocked scenes run on the C++ side" {
                         const state = snapshotState(op);
                         try a.saveState(allocator, state, &snapshots[op.index][0]);
                         try b.saveState(allocator, state, &snapshots[op.index][1]);
+                        try a.saveCharacterStates(allocator, &character_snapshots[op.index][0]);
+                        try b.saveCharacterStates(allocator, &character_snapshots[op.index][1]);
                     },
                     .restore_cross => {
                         try std.testing.expect(a.restoreState(snapshots[op.index][1].items));
                         try std.testing.expect(b.restoreState(snapshots[op.index][0].items));
+                        if (!a.restoreCharacterStates(character_snapshots[op.index][1].items) or !b.restoreCharacterStates(character_snapshots[op.index][0].items)) {
+                            std.debug.print("SimulationParity: scene {s}, update {d}: restore_cross: a C++ world does not restore the character states of the other one (a read failed or bytes are left)\n", .{ entry.name, update });
+                            return error.TestUnexpectedResult;
+                        }
                     },
                     else => |kind| {
                         const result = a.applyOp(op);
@@ -2938,6 +6967,12 @@ test "SimScenes blocked scenes run on the C++ side" {
                             try std.testing.expectEqual(op.index, result);
                         if (kind == .expect_constraint_state)
                             try std.testing.expectEqual(op.i[0], result);
+                        if (isPhase7Expectation(kind)) {
+                            if (result != op.count) {
+                                std.debug.print("SimulationParity: scene {s}, operation {d}: the scene expects {t} of object handle {d} to be {d}, it is {d}\n", .{ entry.name, op_index, kind, op.index, op.count, result });
+                                return error.TestUnexpectedResult;
+                            }
+                        }
                     },
                 }
             }
@@ -2955,6 +6990,44 @@ test "SimScenes blocked scenes run on the C++ side" {
             std.sort.pdq(SimRecord, b_records.items, {}, SimRecord.lessThan);
             try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a_records.items), std.mem.sliceAsBytes(b_records.items));
             for (a_records.items) |r| records[r.kind] += 1;
+
+            // Phase 7: the object states, the character listener records in call order
+            try a.objectState(allocator, &a_objects);
+            try b.objectState(allocator, &b_objects);
+            if (try describeObjectStateDifference(allocator, b_objects.items, a_objects.items, .{ .checked = "3 threads", .reference = "0 threads" })) |message| {
+                defer allocator.free(message);
+                std.debug.print("SimulationParity: scene {s}, update {d}: the C++ worlds with 0 and 3 threads differ: {s}\n", .{ entry.name, update, message });
+                return error.TestUnexpectedResult;
+            }
+            try scanObjectState(a_objects.items, &objects);
+            a_records.clearRetainingCapacity();
+            b_records.clearRetainingCapacity();
+            try a.takeCharacterRecords(allocator, &a_records);
+            try b.takeCharacterRecords(allocator, &b_records);
+            for (a_records.items, 0..) |r, i| {
+                if (i >= b_records.items.len or !std.meta.eql(r, b_records.items[i])) {
+                    std.debug.print("SimulationParity: scene {s}, update {d}: character listener record {d} of {d} (call order) differs between the C++ worlds with 0 and 3 threads:\n  0 threads {f}\n  3 threads {f}\n", .{ entry.name, update, i, a_records.items.len, RecordText{ .record = r }, RecordText{ .record = if (i < b_records.items.len) b_records.items[i] else null } });
+                    return error.TestUnexpectedResult;
+                }
+            }
+            try std.testing.expectEqual(a_records.items.len, b_records.items.len);
+            for (a_records.items) |r| records[r.kind] += 1;
+
+            // The object state decodes completely and stays finite
+            var object_layout: ObjectStateLayout = .{ .allocator = allocator };
+            defer object_layout.deinit();
+            try object_layout.decode(a_objects.items);
+            if (!object_layout.complete) {
+                std.debug.print("SimulationParity: scene {s}, update {d}: the object state does not decode (SimScenes.objectFieldLayout and WriteObjectState of SimulationReference.cpp differ)\n", .{ entry.name, update });
+                return error.TestUnexpectedResult;
+            }
+            if (object_layout.firstNotFinite(a_objects.items)) |value| {
+                var buffer: [256]u8 = undefined;
+                var w: std.Io.Writer = .fixed(&buffer);
+                try writeObjectValueName(&w, value);
+                std.debug.print("SimulationParity: scene {s}, update {d}: an object value is not finite: {s}\n", .{ entry.name, update, w.buffered() });
+                return error.TestUnexpectedResult;
+            }
         }
 
         // The state decodes completely and stays finite (a scene that blows up is no test: Zolt's asserts would fire on
@@ -2986,7 +7059,38 @@ test "SimScenes blocked scenes run on the C++ side" {
             try expectReached(entry, "constraints that are solved (every scene with constraints)", max_active_constraints > 0);
         if (entry.expect.active_constraints > 0)
             try expectReached(entry, "active constraints", max_active_constraints >= entry.expect.active_constraints);
+
+        if (verbose)
+            std.debug.print("{s} (C++ side): records {any}, max active constraints {d}, objects {any}\n", .{ entry.name, records, max_active_constraints, objects });
+        try checkReferenceAsserts(entry, asserts_before);
+
+        // Phase 7: a scene with a Phase 7 blocker creates the objects of its classes and reaches its Expect fields
+        switch (entry.blocked_by) {
+            .characters => try expectReached(entry, "characters", builder.characters.items.len > 0),
+            .character_virtuals => try expectReached(entry, "character virtuals", builder.character_virtuals.items.len > 0),
+            .ragdolls => try expectReached(entry, "ragdolls", builder.ragdolls.items.len > 0),
+            .wheeled_vehicles, .tracked_vehicles, .motorcycles => try expectReached(entry, "vehicles", builder.vehicles.items.len > 0),
+            else => {},
+        }
+        if (entry.expect.character_records != 0)
+            try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(&records, entry.expect.character_records));
+        if (entry.expect.ground_states != 0)
+            try expectReached(entry, "the ground states of Expect.ground_states", (objects.ground_states & entry.expect.ground_states) == entry.expect.ground_states);
+        if (entry.expect.wheel_contacts)
+            try expectReached(entry, "wheel contacts", objects.wheel_contacts);
+        try expectVehicleGears(entry, &objects);
     }
+}
+
+/// Expect.vehicle_gears / vehicle_up_shifts / vehicle_down_shifts
+fn expectVehicleGears(entry: *const SceneEntry, objects: *const ObjectStats) !void {
+    const expect = &entry.expect;
+    if (expect.vehicle_gears != 0)
+        try expectReached(entry, "the transmission gears of Expect.vehicle_gears", (objects.vehicle_gears & expect.vehicle_gears) == expect.vehicle_gears);
+    if (expect.vehicle_up_shifts > 0)
+        try expectReached(entry, "the forward shifts up of Expect.vehicle_up_shifts", objects.vehicle_up_shifts >= expect.vehicle_up_shifts);
+    if (expect.vehicle_down_shifts > 0)
+        try expectReached(entry, "the forward shifts down of Expect.vehicle_down_shifts", objects.vehicle_down_shifts >= expect.vehicle_down_shifts);
 }
 
 test "SimScenes struct layout matches SimulationReference.cpp" {
@@ -3209,4 +7313,290 @@ test "SimulationParity state decoder: constraints" {
     const message = (try describeStateDifference(allocator, copy, bytes.items, cw)).?;
     defer allocator.free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "constraints[1] (id 0x00000001) rotation_constraint_part.total_lambda.z") != null);
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Phase 7
+
+test "SimScenes Phase 7 struct layout matches SimulationReference.cpp" {
+    var sizes: [32]u32 = undefined;
+    jolt.jolt_sim_phase7_struct_sizes(&sizes);
+    const S = SimScenes;
+    const expected = [32]u32{
+        @sizeOf(S.SimCharacterBase),
+        @sizeOf(S.SimCharacter),
+        @sizeOf(S.SimCharacterVirtual),
+        @sizeOf(S.SimRagdoll),
+        @sizeOf(S.SimRagdollJoint),
+        @sizeOf(S.SimRagdollAdditionalConstraint),
+        @sizeOf(S.SimRagdollPose),
+        @sizeOf(S.SimVehicleEngine),
+        @sizeOf(S.SimVehicleTransmission),
+        @sizeOf(S.SimVehicleTrack),
+        @sizeOf(S.SimVehicleDifferential),
+        @sizeOf(S.SimVehicleAntiRollBar),
+        @sizeOf(S.SimVehicleWheel),
+        @sizeOf(S.SimVehicleTester),
+        @sizeOf(S.SimVehicle),
+        @offsetOf(S.SimCharacter, "position"),
+        @offsetOf(S.SimCharacter, "user_data"),
+        @offsetOf(S.SimCharacterVirtual, "position"),
+        @offsetOf(S.SimCharacterVirtual, "user_data"),
+        @offsetOf(S.SimCharacterVirtual, "collision_group"),
+        @offsetOf(S.SimRagdoll, "user_data"),
+        @offsetOf(S.SimVehicle, "user_data"),
+        @offsetOf(S.SimVehicle, "engine"),
+        @offsetOf(S.SimVehicle, "tracks"),
+        @offsetOf(S.SimVehicle, "tester"),
+        @offsetOf(S.SimVehicle, "tire_max_impulse"),
+        @offsetOf(S.SimVehicleWheel, "lateral_friction_tv"),
+        @offsetOf(SimSceneDesc, "characters"),
+        @offsetOf(SimSceneDesc, "vehicles"),
+        @offsetOf(SimSceneDesc, "uints"),
+        @sizeOf(SimSceneDesc),
+        @offsetOf(S.SimRagdollPose, "data"),
+    };
+    try std.testing.expectEqualSlices(u32, &expected, &sizes);
+    // The header of an object state field: four u16 (SimObjectStateWriter)
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(ObjectFieldHeader));
+}
+
+/// Compare two extern structs field by field (the bytes of the values, not the padding)
+fn expectEqualFields(comptime T: type, expected: T, actual: T) !void {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const e = @field(expected, field.name);
+        const a = @field(actual, field.name);
+        switch (@typeInfo(field.type)) {
+            .@"struct" => try expectEqualFields(field.type, e, a),
+            .array => |info| if (@typeInfo(info.child) == .@"struct") {
+                for (e, a) |ee, aa| try expectEqualFields(info.child, ee, aa);
+            } else if (!std.mem.eql(u8, std.mem.asBytes(&e), std.mem.asBytes(&a))) {
+                std.debug.print("{s}.{s}: expected {any}, got {any}\n", .{ @typeName(T), field.name, e, a });
+                return error.TestExpectedEqual;
+            },
+            else => if (!std.mem.eql(u8, std.mem.asBytes(&e), std.mem.asBytes(&a))) {
+                std.debug.print("{s}.{s}: expected {any}, got {any}\n", .{ @typeName(T), field.name, e, a });
+                return error.TestExpectedEqual;
+            },
+        }
+    }
+}
+
+test "SimScenes Phase 7 description defaults are Jolt's" {
+    // The descriptions that the scenes start from have the defaults of Jolt's settings classes (CharacterSettings,
+    // CharacterVirtualSettings, VehicleConstraintSettings with the controller settings of each kind, WheelSettingsWV /
+    // TV, ExtendedUpdateSettings), bit for bit
+    var character: SimScenes.SimCharacter = undefined;
+    jolt.jolt_sim_default_character(&character);
+    try expectEqualFields(SimScenes.SimCharacter, .{}, character);
+    var character_virtual: SimScenes.SimCharacterVirtual = undefined;
+    jolt.jolt_sim_default_character_virtual(&character_virtual);
+    try expectEqualFields(SimScenes.SimCharacterVirtual, .{}, character_virtual);
+    var extended_update: [12]f32 = undefined;
+    jolt.jolt_sim_default_extended_update(&extended_update);
+    const zolt_extended_update = (SceneBuilder.ExtendedUpdateSettings{}).toFloats();
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&extended_update), std.mem.asBytes(&zolt_extended_update));
+    for (std.enums.values(VehicleControllerKind)) |kind| {
+        var vehicle: SimScenes.SimVehicle = undefined;
+        jolt.jolt_sim_default_vehicle(@intFromEnum(kind), &vehicle);
+        expectEqualFields(SimScenes.SimVehicle, SimScenes.SimVehicle.defaults(kind), vehicle) catch |err| {
+            std.debug.print("SimVehicle.defaults({t}) is not Jolt's default\n", .{kind});
+            return err;
+        };
+    }
+    for (std.enums.values(SimScenes.VehicleWheelKind)) |kind| {
+        var wheel: SimScenes.SimVehicleWheel = undefined;
+        jolt.jolt_sim_default_vehicle_wheel(@intFromEnum(kind), &wheel);
+        expectEqualFields(SimScenes.SimVehicleWheel, SimScenes.SimVehicleWheel.defaults(kind), wheel) catch |err| {
+            std.debug.print("SimVehicleWheel.defaults({t}) is not Jolt's default\n", .{kind});
+            return err;
+        };
+    }
+}
+
+test "SimulationParity Phase 7 slots follow the ported classes" {
+    // A slot is filled when the classes of its group are ported: removing `is_stub` from a class requires its slot
+    // (the recipe in the SimScenes header), and a filled slot needs the ported classes
+    try std.testing.expectEqual(Phase7Classes.characters(), !@hasDecl(CharacterSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.characterVirtuals(), !@hasDecl(CharacterVirtualSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.ragdolls(), !@hasDecl(RagdollSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.wheeledVehicles(), !@hasDecl(VehicleSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.trackedVehicles(), !@hasDecl(TrackedVehicleSlot, "is_stub"));
+    try std.testing.expectEqual(Phase7Classes.motorcycles(), !@hasDecl(MotorcycleSlot, "is_stub"));
+}
+
+test "SimulationParity CharacterID consumption" {
+    // CharacterVirtualSettings' default initializer and CharacterVirtual::GetCharacterVirtualSettings consume a
+    // CharacterID, the copy constructor and the assignment do not (CharacterVehicleArchitecture "Settled in the foundation
+    // review"; the IDs of the M8 scene depend on it): Jolt gives SimScenes.characterIdSequence, and the Zolt side of
+    // CharacterVirtualSlot the same once the class is ported
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildCharacterIdTestScene(&builder);
+    const desc = builder.desc();
+    const first_id = 100;
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    var jolt_values: [SimScenes.character_id_sequence_len]u32 = undefined;
+    jolt.jolt_sim_character_id_sequence(cw.handle, first_id, &jolt_values);
+    try std.testing.expectEqual(SimScenes.characterIdSequence(first_id), jolt_values);
+    if (!@hasDecl(CharacterVirtualSlot, "is_stub")) {
+        const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+        defer zw.destroy();
+        var zolt_values: [SimScenes.character_id_sequence_len]u32 = undefined;
+        try CharacterVirtualSlot.characterIdSequence(zw, first_id, &zolt_values);
+        try std.testing.expectEqual(jolt_values, zolt_values);
+    }
+}
+
+test "SimulationParity a character record that cannot be stored fails the operation" {
+    // The CharacterContactListener callbacks run inside the character virtual operations and cannot return errors:
+    // Recorder.add latches an out of memory, and ZoltWorld.applyOp reports it, also when nobody takes the character
+    // records afterwards (createScene under std.testing.checkAllAllocationFailures)
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildCharacterIdTestScene(&builder);
+    const desc = builder.desc();
+    const world = try ZoltWorld.create(allocator, &desc, .single_threaded);
+    defer world.destroy();
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    world.character_recorder.allocator = failing.allocator();
+    world.character_recorder.add(.{ .kind = @intFromEnum(RecordKind.character_contact_added) });
+    world.character_recorder.allocator = allocator;
+    const op: SimOp = .{ .update = 0, .kind = @intFromEnum(OpKind.set_gravity), .f = .{ 0, -9.81, 0 } ++ @as([13]f32, @splat(0)) };
+    try std.testing.expectError(error.OutOfMemory, world.applyOp(&op));
+}
+
+test "SimulationParity restoring the character states reads every byte" {
+    // restore_cross restores the character states of the other side: a restore that leaves bytes unread fails on both
+    // sides (a stream sets eof only on a read past the end, so both read one more byte); no bytes restore a world
+    // without characters
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildCharacterIdTestScene(&builder);
+    const desc = builder.desc();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+    defer zw.destroy();
+    const unread = [_]u8{ 1, 2, 3 };
+    try std.testing.expect(!cw.restoreCharacterStates(&unread));
+    try std.testing.expect(!try zw.restoreCharacterStates(&unread));
+    try std.testing.expect(cw.restoreCharacterStates(&.{}));
+    try std.testing.expect(try zw.restoreCharacterStates(&.{}));
+}
+
+test "SimulationParity the reference counts its asserts" {
+    // With -Dreference_asserts=true the hook of SimulationReference.cpp prints and counts a failed Jolt assert (the
+    // scenes check the count), without asserts nothing is counted
+    var before: u32 = undefined;
+    var after: u32 = undefined;
+    jolt.jolt_sim_test_assert_hook(&before, &after);
+    try std.testing.expectEqual(before + jolt.jolt_sim_reference_has_asserts(), after);
+}
+
+test "SimulationParity the reference zero-fills its allocations" {
+    // The allocation hooks of the parity process (SimInstallHooks of SimulationReference.cpp): Jolt's members that are
+    // never initialized (Wheel's contact members before the first contact) are 0, as Zolt zero-initializes them
+    try std.testing.expectEqual(@as(u32, 1), jolt.jolt_sim_zero_filling_check());
+}
+
+test "SimulationParity Phase 7 record helpers" {
+    // The layouts of RecordKind 7..20 (SimCharacterContactListener / SimVehicleRecord of SimulationReference.cpp)
+    try std.testing.expectEqual(@as(u32, 2 | (1 << 8) | (1 << 13)), CharacterRecords.contactFlags(2, true, false, false, false, false, true));
+    try std.testing.expectEqual(@as(u32, (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12)), CharacterRecords.contactFlags(0, false, true, true, true, true, false));
+    try std.testing.expectEqual(@as(u32, 2), CharacterRecords.settingsBits(false, true));
+    const contact = CharacterRecords.contact(.character_contact_added, 1, .invalid, 2, .empty, Vec3.init(0, 1, 0), -0.01, 0.5, 9, 3, 77, 1);
+    try std.testing.expectEqual(@as(u32, 8), contact.kind);
+    try std.testing.expectEqual([4]u32{ 1, 0xffffffff, 2, 0xffffffff }, contact.ids);
+    try std.testing.expectEqual(@as(u32, 9 | (3 << 16)), contact.data[5]);
+    try std.testing.expectEqual(@as(u32, 0x3f800000), contact.data[1]);
+    const removed = CharacterRecords.removed(.character_vs_character_contact_removed, 1, .invalid, 4, .empty);
+    try std.testing.expectEqual([4]u32{ 1, 0xffffffff, 4, 0xffffffff }, removed.ids);
+    var buffer: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{f}", .{RecordText{ .record = removed }});
+    try std.testing.expect(std.mem.startsWith(u8, text, "character_vs_character_contact_removed ids { 1, 4294967295, 4, 4294967295 } data "));
+    try std.testing.expectEqualStrings("nothing", try std.fmt.bufPrint(&buffer, "{f}", .{RecordText{ .record = null }}));
+    const v = Vec3.init(1, 2, 3);
+    const solve = CharacterRecords.solve(.character_contact_solve, 1, .invalid, 0xffffffff, .empty, RVec3.init(1, 0, 0), v, v, 5, v, v, v);
+    try std.testing.expectEqual(solve.data[7], CharacterRecords.hashVec3(SimScenes.hash_seed, v));
+    const adjust = CharacterRecords.adjustBodyVelocity(1, .invalid, v, v, v, v);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(RecordKind.character_adjust_body_velocity)), adjust.kind);
+    const context: PhysicsStepListenerContext = .{ .delta_time = 0.5, .is_first_step = true, .is_last_step = false, .physics_system = undefined };
+    const record = VehicleRecords.record(.vehicle_post_step, 3, .invalid, &context, 0b101, VehicleRecords.hashWheel(SimScenes.hash_seed, 0.4, 2, 0));
+    try std.testing.expectEqual([8]u32{ 0x3f000000, 1, 0, 0b101, record.data[4], 0, 0, 0 }, record.data);
+}
+
+test "SimulationParity object state decoder" {
+    // The object state of a C++ world with every kind of object decodes completely (the layouts of objectFieldLayout and
+    // the SaveState fields add up to the sizes of the fields that SimulationReference.cpp writes); a byte changed in a
+    // value of the Zolt copy is reported with the field, the object handle, the item and the component
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try SimScenes.buildObjectStateTestScene(&builder);
+    const desc = builder.desc();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    for (builder.ops.items) |*op| _ = cw.applyOp(op);
+    for (0..3) |_| _ = cw.update(1.0 / 60.0, 1);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try cw.objectState(allocator, &bytes);
+
+    var layout: ObjectStateLayout = .{ .allocator = allocator };
+    defer layout.deinit();
+    try layout.decode(bytes.items);
+    try std.testing.expect(layout.complete);
+    try std.testing.expect(layout.firstNotFinite(bytes.items) == null);
+
+    // Every field kind of the scene is there
+    var seen: std.EnumSet(ObjectField) = .initEmpty();
+    var it: ObjectFieldIterator = .{ .bytes = bytes.items };
+    while (try it.next()) |view| seen.insert(view.field().?);
+    for ([_]ObjectField{ .character_save_state, .character_properties, .character_base, .character_body, .character_transformed_shape, .cv_save_state, .cv_properties, .cv_base, .cv_transforms, .cv_transformed_shape, .cv_num_active_contacts, .cv_active_contact, .ragdoll_properties, .ragdoll_body, .ragdoll_root_transform, .ragdoll_pose_root_offset, .ragdoll_pose_joint, .ragdoll_bounds, .ragdoll_constraint, .vehicle_properties, .vehicle_wheel, .vehicle_wheel_contact, .vehicle_wheel_transform, .vehicle_wheel_wv, .vehicle_anti_roll_bar, .vehicle_engine, .vehicle_transmission, .vehicle_wheeled, .vehicle_differential }) |field| {
+        if (!seen.contains(field)) {
+            std.debug.print("the object state has no {t} field\n", .{field});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // A changed contact normal of the active contact of the character virtual
+    const copy = try allocator.dupe(u8, bytes.items);
+    defer allocator.free(copy);
+    var target: ?*const ObjectValue = null;
+    for (layout.values.items) |*value| {
+        if (value.header.field == @intFromEnum(ObjectField.cv_active_contact) and std.mem.eql(u8, value.name, "contact_normal") and value.index == 1)
+            target = value;
+    }
+    copy[target.?.offset] ^= 1;
+    const message = (try describeObjectStateDifference(allocator, copy, bytes.items, .{})).?;
+    defer allocator.free(message);
+    try std.testing.expect(std.mem.indexOf(u8, message, "cv_active_contact (object handle 0, item 0) contact_normal.y zolt ") != null);
+
+    // A changed ground state in the SaveState bytes of the character
+    @memcpy(copy, bytes.items);
+    var save_state: ?*const ObjectValue = null;
+    for (layout.values.items) |*value| {
+        if (value.header.field == @intFromEnum(ObjectField.character_save_state) and std.mem.eql(u8, value.name, "ground_state"))
+            save_state = value;
+    }
+    copy[save_state.?.offset] ^= 2;
+    const message2 = (try describeObjectStateDifference(allocator, copy, bytes.items, .{ .checked = "3 threads", .reference = "0 threads" })).?;
+    defer allocator.free(message2);
+    try std.testing.expect(std.mem.indexOf(u8, message2, "character_save_state (object handle 0, item 0) ground_state 3 threads ") != null);
+
+    // A missing field
+    const message3 = (try describeObjectStateDifference(allocator, bytes.items[0 .. bytes.items.len - 1], bytes.items, .{})).?;
+    defer allocator.free(message3);
+    try std.testing.expect(try describeObjectStateDifference(allocator, bytes.items, bytes.items, .{}) == null);
+
+    // The scan for the Expect fields
+    var stats: ObjectStats = .{};
+    try scanObjectState(bytes.items, &stats);
+    try std.testing.expect(stats.wheel_contacts);
+    try std.testing.expect(stats.ground_states != 0);
 }

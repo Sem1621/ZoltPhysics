@@ -30,6 +30,7 @@ test {
     _ = @import("Physics/BodyParity.zig");
     _ = @import("Physics/BroadPhaseQuadTreeParity.zig");
     _ = @import("Physics/CapsulesParity.zig");
+    _ = @import("Physics/CharacterBaseParity.zig");
     _ = @import("Physics/CompositeParity.zig");
     _ = @import("Physics/CompoundsParity.zig");
     _ = @import("Physics/ConstraintPartsParity.zig");
@@ -48,8 +49,11 @@ test {
     _ = @import("Physics/PairwiseParity.zig");
     _ = @import("Physics/PathConstraintPathParity.zig");
     _ = @import("Physics/PlaneEmptyParity.zig");
+    _ = @import("Physics/RagdollParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");
     _ = @import("Physics/SimulationParity.zig");
+    _ = @import("Physics/SkeletonParity.zig");
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");
+    _ = @import("Physics/VehiclePartsParity.zig");
 }

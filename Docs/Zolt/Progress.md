@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 76.2%** of 85391 lines in scope · **Unit tests: 87.0%** of 18321 lines
+**Library: 86.3%** of 85391 lines in scope · **Unit tests: 93.6%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -22,16 +22,16 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
-| `Jolt/Physics/Character` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2997 |
+| `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 75 | 1 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
-| `Jolt/Physics/Ragdoll` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 861 |
+| `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
-| `Jolt/Physics/Vehicle` | 0% | 0 | 0 | 0 | 12 | 0 | 0 | 3942 |
+| `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
 | `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
-| `Jolt/Skeleton` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 780 |
+| `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
 
 <details><summary>Jolt — 100%</summary>
@@ -283,14 +283,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Character — 0%</summary>
+<details><summary>Jolt/Physics/Character — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `Character.cpp`, `Character.h` | 414 | ❌ todo |  |
-| `CharacterBase.cpp`, `CharacterBase.h` | 170 | ❌ todo |  |
-| `CharacterID.h` | 79 | ❌ todo |  |
-| `CharacterVirtual.cpp`, `CharacterVirtual.h` | 2334 | ❌ todo |  |
+| `Character.cpp`, `Character.h` | 414 | ✅ complete | `Zolt/Physics/Character/Character.zig` |
+| `CharacterBase.cpp`, `CharacterBase.h` | 170 | ✅ complete | `Zolt/Physics/Character/CharacterBase.zig` |
+| `CharacterID.h` | 79 | ✅ complete | `Zolt/Physics/Character/CharacterID.zig` |
+| `CharacterVirtual.cpp`, `CharacterVirtual.h` | 2334 | ✅ complete | `Zolt/Physics/Character/CharacterVirtual.zig` |
 
 </details>
 
@@ -430,11 +430,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Ragdoll — 0%</summary>
+<details><summary>Jolt/Physics/Ragdoll — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `Ragdoll.cpp`, `Ragdoll.h` | 861 | ❌ todo |  |
+| `Ragdoll.cpp`, `Ragdoll.h` | 861 | ✅ complete | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
 
 </details>
 
@@ -453,22 +453,22 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Vehicle — 0%</summary>
+<details><summary>Jolt/Physics/Vehicle — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `MotorcycleController.cpp`, `MotorcycleController.h` | 337 | ❌ todo |  |
-| `TrackedVehicleController.cpp`, `TrackedVehicleController.h` | 584 | ❌ todo |  |
-| `VehicleAntiRollBar.cpp`, `VehicleAntiRollBar.h` | 50 | ❌ todo |  |
-| `VehicleCollisionTester.cpp`, `VehicleCollisionTester.h` | 433 | ❌ todo |  |
-| `VehicleConstraint.cpp`, `VehicleConstraint.h` | 806 | ❌ todo |  |
-| `VehicleController.cpp`, `VehicleController.h` | 77 | ❌ todo |  |
-| `VehicleDifferential.cpp`, `VehicleDifferential.h` | 98 | ❌ todo |  |
-| `VehicleEngine.cpp`, `VehicleEngine.h` | 173 | ❌ todo |  |
-| `VehicleTrack.cpp`, `VehicleTrack.h` | 87 | ❌ todo |  |
-| `VehicleTransmission.cpp`, `VehicleTransmission.h` | 215 | ❌ todo |  |
-| `Wheel.cpp`, `Wheel.h` | 193 | ❌ todo |  |
-| `WheeledVehicleController.cpp`, `WheeledVehicleController.h` | 889 | ❌ todo |  |
+| `MotorcycleController.cpp`, `MotorcycleController.h` | 337 | ✅ complete | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
+| `TrackedVehicleController.cpp`, `TrackedVehicleController.h` | 584 | ✅ complete | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
+| `VehicleAntiRollBar.cpp`, `VehicleAntiRollBar.h` | 50 | ✅ complete | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
+| `VehicleCollisionTester.cpp`, `VehicleCollisionTester.h` | 433 | ✅ complete | `Zolt/Physics/Vehicle/VehicleCollisionTester.zig` |
+| `VehicleConstraint.cpp`, `VehicleConstraint.h` | 806 | ✅ complete | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |
+| `VehicleController.cpp`, `VehicleController.h` | 77 | ✅ complete | `Zolt/Physics/Vehicle/VehicleController.zig` |
+| `VehicleDifferential.cpp`, `VehicleDifferential.h` | 98 | ✅ complete | `Zolt/Physics/Vehicle/VehicleDifferential.zig` |
+| `VehicleEngine.cpp`, `VehicleEngine.h` | 173 | ✅ complete | `Zolt/Physics/Vehicle/VehicleEngine.zig` |
+| `VehicleTrack.cpp`, `VehicleTrack.h` | 87 | ✅ complete | `Zolt/Physics/Vehicle/VehicleTrack.zig` |
+| `VehicleTransmission.cpp`, `VehicleTransmission.h` | 215 | ✅ complete | `Zolt/Physics/Vehicle/VehicleTransmission.zig` |
+| `Wheel.cpp`, `Wheel.h` | 193 | ✅ complete | `Zolt/Physics/Vehicle/Wheel.zig` |
+| `WheeledVehicleController.cpp`, `WheeledVehicleController.h` | 889 | ✅ complete | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
 
 </details>
 
@@ -521,14 +521,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Skeleton — 0%</summary>
+<details><summary>Jolt/Skeleton — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `SkeletalAnimation.cpp`, `SkeletalAnimation.h` | 206 | ❌ todo |  |
-| `Skeleton.cpp`, `Skeleton.h` | 121 | ❌ todo |  |
-| `SkeletonMapper.cpp`, `SkeletonMapper.h` | 318 | ❌ todo |  |
-| `SkeletonPose.cpp`, `SkeletonPose.h` | 135 | ❌ todo |  |
+| `SkeletalAnimation.cpp`, `SkeletalAnimation.h` | 206 | ✅ complete | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `Skeleton.cpp`, `Skeleton.h` | 121 | ✅ complete | `Zolt/Skeleton/Skeleton.zig` |
+| `SkeletonMapper.cpp`, `SkeletonMapper.h` | 318 | ✅ complete | `Zolt/Skeleton/SkeletonMapper.zig` |
+| `SkeletonPose.cpp`, `SkeletonPose.h` | 135 | ✅ complete | `Zolt/Skeleton/SkeletonPose.zig` |
 
 </details>
 
@@ -546,21 +546,21 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 65% | 4 | 1 | 0 | 2 | 1 | 0 | 1185 |
+| `UnitTests` | 77% | 5 | 1 | 0 | 1 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 88% | 30 | 0 | 0 | 3 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 98% | 32 | 0 | 0 | 1 | 0 | 0 | 11009 |
 
-<details><summary>UnitTests — 65%</summary>
+<details><summary>UnitTests — 77%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `Layers.h` | 142 | ✅ complete | `ZoltTests/Layers.zig` |
 | `LoggingBodyActivationListener.h` | 51 | ✅ complete | `ZoltTests/LoggingBodyActivationListener.zig` |
-| `LoggingCharacterContactListener.h` | 143 | ❌ todo |  |
+| `LoggingCharacterContactListener.h` | 143 | ✅ complete | `ZoltTests/LoggingCharacterContactListener.zig` |
 | `LoggingContactListener.h` | 118 | ✅ complete | `ZoltTests/LoggingContactListener.zig` |
 | `LoggingSoftBodyContactListener.h` | 81 | ❌ todo |  |
 | `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ✅ complete | `ZoltTests/PhysicsTestContext.zig` |
@@ -640,14 +640,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 88%</summary>
+<details><summary>UnitTests/Physics — 98%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `ActiveEdgesTests.cpp` | 317 | ✅ complete | `ZoltTests/Physics/ActiveEdgesTests.zig` |
 | `BroadPhaseTests.cpp` | 100 | ✅ complete | `ZoltTests/Physics/BroadPhaseTests.zig` |
 | `CastShapeTests.cpp` | 543 | ✅ complete | `ZoltTests/Physics/CastShapeTests.zig` |
-| `CharacterVirtualTests.cpp` | 763 | ❌ todo |  |
+| `CharacterVirtualTests.cpp` | 763 | ✅ complete | `ZoltTests/Physics/CharacterVirtualTests.zig` |
 | `CollidePointTests.cpp` | 361 | ✅ complete | `ZoltTests/Physics/CollidePointTests.zig` |
 | `CollideShapeTests.cpp` | 471 | ✅ complete | `ZoltTests/Physics/CollideShapeTests.zig` |
 | `CollisionGroupTests.cpp` | 74 | ✅ complete | `ZoltTests/Physics/CollisionGroupTests.zig` |
@@ -676,6 +676,6 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `SubShapeIDTest.cpp` | 59 | ✅ complete | `ZoltTests/Physics/SubShapeIDTest.zig` |
 | `TaperedCylinderShapeTests.cpp` | 83 | ✅ complete | `ZoltTests/Physics/TaperedCylinderShapeTests.zig` |
 | `TransformedShapeTests.cpp` | 90 | ✅ complete | `ZoltTests/Physics/TransformedShapeTests.zig` |
-| `WheeledVehicleTests.cpp` | 304 | ❌ todo |  |
+| `WheeledVehicleTests.cpp` | 304 | ✅ complete | `ZoltTests/Physics/WheeledVehicleTests.zig` |
 
 </details>

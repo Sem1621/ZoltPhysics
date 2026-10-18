@@ -7,6 +7,7 @@
 test {
     _ = @import("Layers.zig");
     _ = @import("LoggingBodyActivationListener.zig");
+    _ = @import("LoggingCharacterContactListener.zig");
     _ = @import("LoggingContactListener.zig");
     _ = @import("PhysicsTestContext.zig");
     _ = @import("UnitTestFramework.zig");
@@ -59,6 +60,7 @@ test {
     _ = @import("Physics/BroadPhaseQuadTreeTests.zig");
     _ = @import("Physics/BroadPhaseTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
+    _ = @import("Physics/CharacterVirtualTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
     _ = @import("Physics/CollisionGroupTests.zig");
@@ -100,4 +102,5 @@ test {
     _ = @import("Physics/SwingTwistConstraintTests.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
+    _ = @import("Physics/WheeledVehicleTests.zig");
 }

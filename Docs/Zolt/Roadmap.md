@@ -199,10 +199,37 @@ bit exact. (The HighSpeed and ConvexVsMesh hashes already match since M6.) ✅ R
 - Settled points, the Jolt bugs that are reproduced on purpose and the degenerate cases that the
   harnesses avoid: [SimulationArchitecture.md](SimulationArchitecture.md), section 9.
 
-### Phase 7: Character, Skeleton, Ragdoll, Vehicles
+### Phase 7: Character, Skeleton, Ragdoll, Vehicles ✅
 Character, CharacterVirtual, CharacterBase, Skeleton, SkeletalAnimation, SkeletonMapper,
 SkeletonPose, Ragdoll, Vehicle* (wheeled, tracked, motorcycle).
-**Milestone M8:** **CharacterVirtual** hash matches.
+Design, groups and harness plan: [CharacterVehicleArchitecture.md](CharacterVehicleArchitecture.md).
+**Milestone M8:** **CharacterVirtual** hash matches. ✅ Reached and exceeded:
+- All 21 files of the phase are ported: `Jolt/Skeleton` (4 files), `Jolt/Physics/Character` (4),
+  `Jolt/Physics/Ragdoll` (1) and `Jolt/Physics/Vehicle` (12) are complete.
+- ZoltPerformanceTest runs PerformanceTest's CharacterVirtual scene. With `-q=Discrete` it gives Jolt's hashes
+  `0xc1d4e05b164b1221` (single precision) and `0xa0b16727aa16fdb0` (double precision), with `-t=max`, `-t=1` and
+  `-t=2`. Zolt's CI checks them.
+- CharacterVirtualTests and WheeledVehicleTests are ported, with LoggingCharacterContactListener. Jolt has no unit
+  tests for the other classes. Zolt adds inline tests for every class, with allocation failure sweeps.
+- SkeletonParity, CharacterBaseParity, RagdollParity and VehiclePartsParity compare the pure functions with the C++
+  library bit for bit: animation sampling, poses and skeleton mapping; the character base; the ragdoll settings with
+  Stabilize, the constraint priorities and the collision filtering; the engine, transmission, differentials, track
+  syncing and the binary state of every settings class.
+- The simulation parity runs 62 scenes with characters, character virtuals, ragdolls and wheeled, tracked and
+  motorcycle vehicles. They run bit exact in the thread matrix, all but three with the D12 sweeps, and hit no Jolt
+  assert (`-Dreference_asserts=true`). After every update the parity also compares each object's state (its SaveState
+  bytes and getters) and the character listener records in call order. `perf_character_virtual` compares the first 100
+  updates of the M8 scene.
+- The reviews found no result difference from Jolt in library code. They found crashes on input that Jolt accepts (a
+  ragdoll joint that is its own parent, SkeletonMapper chains of 1 or 2 joints, a wheeled vehicle with many
+  differentials), no way to change the number of differentials, coverage gaps and wrong docs. Each was fixed or
+  documented before the merges. A last audit of the merged phase against the Jolt headers found no missing API. It
+  found one more Zolt-only bug (`createRagdoll` read its settings after releasing them when out of bodies) and doc
+  errors, which are fixed.
+- The Ragdoll hash stays M9: PerformanceTest's RagdollScene loads `Assets/Human.tof` through ObjectStream (Phase 8).
+  The Ragdoll class itself is complete and compared.
+- Settled points, the Jolt bugs that are reproduced on purpose and the harness rules:
+  [CharacterVehicleArchitecture.md](CharacterVehicleArchitecture.md), section 6.
 
 ### Phase 8: ObjectStream and serialization (`Jolt/ObjectStream`)
 RTTI, Factory, SerializableObject, ObjectStreamIn/Out (text and binary), TypeDeclarations,
