@@ -9,10 +9,13 @@
 //!   `initMode(mode, frequency, damping)`, `initLimits(frequency, damping, force_limit, torque_limit)` and
 //!   `initModeLimits(mode, frequency, damping, force_limit, torque_limit)`; the default constructor is `.{}`.
 //! - The binary state is Jolt's bytes (the spring settings, then the four limits).
-//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: TODO(serialization).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti`. The first three attributes are
+//!   Jolt's aliases into the nested spring settings ("mFrequency" and "mDamping" are the old attribute names, which
+//!   Assets/Human.tof still uses).
 
 const std = @import("std");
 const Core = @import("../../Core/Core.zig");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const math = @import("../../Math/Math.zig");
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -57,7 +60,20 @@ comptime {
 /// Class that contains the settings for a constraint motor.
 /// See the main page of the API documentation for more information on how to configure a motor.
 pub const MotorSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, MotorSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(MotorSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "MotorSettings",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .enumAlias("mSpringMode", .{ .spring_settings, .mode }),
+            .alias("mFrequency", .{ .spring_settings, .frequency }), // Renaming attributes to stay compatible with old versions of the library
+            .alias("mDamping", .{ .spring_settings, .damping }),
+            .attr("mMinForceLimit", .min_force_limit),
+            .attr("mMaxForceLimit", .max_force_limit),
+            .attr("mMinTorqueLimit", .min_torque_limit),
+            .attr("mMaxTorqueLimit", .max_torque_limit),
+        },
+    });
 
     // Settings
     /// Settings for the spring that is used to drive to the position target (not used when motor is a velocity motor).

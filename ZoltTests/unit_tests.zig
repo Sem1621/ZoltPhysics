@@ -50,6 +50,9 @@ test {
     _ = @import("Math/Vec4Tests.zig");
     _ = @import("Math/VectorTests.zig");
 
+    // ObjectStream
+    _ = @import("ObjectStream/ObjectStreamTest.zig");
+
     // Physics
     _ = @import("Physics/ActiveEdgesTests.zig");
     _ = @import("Physics/BodyInterfaceTests.zig");

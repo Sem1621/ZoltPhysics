@@ -236,6 +236,7 @@ RTTI, Factory, SerializableObject, ObjectStreamIn/Out (text and binary), TypeDec
 `SaveBinaryState` / `sRestoreFromBinaryState` of shapes, constraints and settings. Prefer comptime
 reflection over Jolt's macro-generated RTTI tables, but keep the file formats identical so that
 `Assets/*.tof` / `*.bof` load.
+Design, groups and harness plan: [SerializationArchitecture.md](SerializationArchitecture.md).
 **Milestone M9:** **Ragdoll** hash matches → all 5 determinism hashes match. The port is exact.
 
 ### Phase 9: Remaining features
