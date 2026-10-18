@@ -1,7 +1,5 @@
 //! Port of: Jolt/Core/Factory.h, Jolt/Core/Factory.cpp
-//! Status: partial
-//! Missing: `RegisterTypes.factory` (Jolt's RegisterTypes() list of 49 types plus `zolt_user_types.serializable_types`)
-//! and the binary state restores through it (Phase 8 foundation, Docs/Zolt/SerializationArchitecture.md S8 and S9).
+//! Status: complete
 //!
 //! Jolt's Factory is a global singleton (`Factory::sInstance`) filled at startup by RegisterTypes() and looked up by
 //! name (ObjectStreamIn) and by hash (StreamUtils::RestoreObject). Zolt's Factory is a value built at compile time,
@@ -10,6 +8,9 @@
 //! are a compile error (Jolt: "Hash collision registering type!"). There is no global, no Register at run time and no
 //! Clear: ObjectStreamIn takes the factory as an option, so a test or an application can read with another one
 //! (`Factory.init(RegisterTypes.factory_types ++ &[_]type{MyClass})`, Jolt's `Factory::sInstance->Register(...)`).
+//!
+//! Factory::sInstance after RegisterTypes() is `RegisterTypes.factory` (Docs/Zolt/SerializationArchitecture.md S8). It is
+//! the default factory of ObjectStreamIn.
 //!
 //! GetAllClasses returns the registration order; Jolt's returns its hash map order (nothing depends on it).
 

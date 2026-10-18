@@ -44,6 +44,7 @@ fn primitiveRTTI(comptime T: type, comptime name: []const u8) *const RTTI {
     return &struct {
         const value: RTTI = .{
             .name = name,
+            .size = @sizeOf(Value),
             .hash = RTTI.hashName(name),
             .kind = .primitive,
             .bases = &.{},

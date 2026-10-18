@@ -165,6 +165,27 @@ pub const vehicle_controller_settings_types = .{
     MotorcycleControllerSettings, // Phase 7 (Vehicle variants group)
 } ++ (if (@hasDecl(user_types, "vehicle_controller_settings_types")) user_types.vehicle_controller_settings_types else .{});
 
+// ---- Phase 8 foundation (group F1): a minimal Factory registration. Group F2 replaces this whole block. ----------
+// F2 lists Jolt's 49 types of RegisterTypes.cpp (Docs/Zolt/SerializationArchitecture.md S8). Until then the list holds
+// the classes of that list that have an RTTI declaration: only MotorSettings.
+
+const Factory = @import("Core/Factory.zig").Factory;
+const MotorSettings = @import("Physics/Constraints/MotorSettings.zig").MotorSettings;
+
+/// The classes that RegisterTypes() registers with the Factory (`types[]` of RegisterTypes.cpp), in Jolt's order.
+/// Tests and applications that need more classes build their own factory:
+/// `Factory.init(RegisterTypes.factory_types ++ &[_]type{MyClass})`.
+pub const factory_types: []const type = &.{MotorSettings};
+
+/// The serializable classes of the user (`serializable_types` of `zolt_user_types`, a slice of types)
+const user_serializable_types: []const type = if (@hasDecl(user_types, "serializable_types")) user_types.serializable_types else &.{};
+
+/// Factory::sInstance after RegisterTypes(): Jolt's classes, then the user's (a compile time constant). It is the
+/// default factory of ObjectStreamIn.
+pub const factory: Factory = .init(factory_types ++ user_serializable_types);
+
+// ---- End of the F1 block ------------------------------------------------------------------------------------------
+
 test "RegisterTypes: Jolt's registration order, the user hook, the default material and material types" {
     const std = @import("std");
     const testing = std.testing;

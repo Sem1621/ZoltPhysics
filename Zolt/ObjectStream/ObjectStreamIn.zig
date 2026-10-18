@@ -1,10 +1,10 @@
 //! Port of: Jolt/ObjectStream/ObjectStreamIn.h, Jolt/ObjectStream/ObjectStreamIn.cpp
-//! Status: partial
-//! Missing: `sReadObject` from a file (`std.Io`), and `RegisterTypes.factory` as the default factory (Phase 8
-//! foundation, Docs/Zolt/SerializationArchitecture.md).
+//! Status: complete
 //!
-//! `sReadObject(T, allocator, reader, .{ .factory })` reads the first object of the stream and everything it
-//! references.
+//! `sReadObject(T, allocator, reader, .{})` reads the first object of the stream and everything it references.
+//! - The classes come from `options.factory`, by default `RegisterTypes.factory` (Jolt: Factory::sInstance).
+//! - `sReadObjectFromFile(T, allocator, io, path, .{})` reads a file through a buffered `std.Io.File` reader. A file
+//!   that cannot be opened is an error of `std.Io.File.OpenError` (Jolt: false).
 //! - Ownership: every object and all memory it owns are allocated with `allocator` (objects that keep an allocator,
 //!   the RefTargets, keep this one). The result has the reference count that the stream's links gave it (0 unless an
 //!   object of the stream references it): `sReadObjectRef` wraps a RefTarget in a Ref, a value class is freed with
@@ -40,6 +40,7 @@ const OSDataType = @import("SerializableAttribute.zig").OSDataType;
 const PrimitiveType = @import("ObjectStreamTypes.zig").PrimitiveType;
 const ObjectStreamTextIn = @import("ObjectStreamTextIn.zig").ObjectStreamTextIn;
 const ObjectStreamBinaryIn = @import("ObjectStreamBinaryIn.zig").ObjectStreamBinaryIn;
+const RegisterTypes = @import("../RegisterTypes.zig");
 
 const log = std.log.scoped(.zolt);
 
@@ -48,13 +49,15 @@ const log = std.log.scoped(.zolt);
 pub const ObjectStreamIn = struct {
     pub const Error = error{ OutOfMemory, ReadFailed, InvalidObjectStream };
 
+    /// The errors of the file variants: the errors of opening the file, then those of the read
+    pub const FileError = std.Io.File.OpenError || Error;
+
     /// Link resolution: make the member point to `object` (of class `object_rtti`), or to nothing
     pub const StoreFn = *const fn (member: *anyopaque, object: ?*anyopaque, object_rtti: *const RTTI) void;
 
     pub const Options = struct {
-        /// The classes that the stream may declare (Jolt: Factory::sInstance). Phase 8 foundation: defaults to
-        /// `&RegisterTypes.factory`.
-        factory: *const Factory,
+        /// The classes that the stream may declare (Jolt: Factory::sInstance after RegisterTypes())
+        factory: *const Factory = &RegisterTypes.factory,
     };
 
     /// Description of an attribute in the stream
@@ -125,6 +128,24 @@ pub const ObjectStreamIn = struct {
     pub fn sReadObjectRef(comptime T: type, allocator: Allocator, reader: *Reader, options: Options) Error!Ref(T) {
         return .init(try sReadObject(T, allocator, reader, options));
     }
+
+    /// Main function to read an object from a file (sReadObject(const char *, T *&)). `path` is absolute or relative to
+    /// the current working directory.
+    pub fn sReadObjectFromFile(comptime T: type, allocator: Allocator, io: std.Io, path: []const u8, options: Options) FileError!*T {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var buffer: [file_buffer_size]u8 = undefined;
+        var file_reader = file.reader(io, &buffer);
+        return sReadObject(T, allocator, &file_reader.interface, options);
+    }
+
+    /// sReadObject(const char *, Ref<T> &): the main object of a file wrapped in a Ref (one more reference)
+    pub fn sReadObjectRefFromFile(comptime T: type, allocator: Allocator, io: std.Io, path: []const u8, options: Options) FileError!Ref(T) {
+        return .init(try sReadObjectFromFile(T, allocator, io, path, options));
+    }
+
+    /// The buffer of the file reader (on the stack)
+    const file_buffer_size = 4096;
 
     /// Check the header ("TOS 1.00" / "BOS 1.00", GetInfo) and create a stream of that type (Open)
     pub fn open(allocator: Allocator, reader: *Reader, factory: *const Factory) Error!ObjectStreamIn {
@@ -513,6 +534,9 @@ pub const ObjectStreamIn = struct {
                 log.info("ObjectStreamIn: Found instance of unknown class {s}.", .{class_name});
                 return error.InvalidObjectStream;
             };
+            // Zolt: a class without attributes has no data, so the loop would read nothing (Jolt runs it `count` times,
+            // up to 2^32 times for a corrupt count)
+            if (class_desc.attributes.items.len == 0) return;
             for (0..count) |_| try self.readDescribedClassData(class_desc, null);
             return;
         }

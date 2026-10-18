@@ -1,8 +1,5 @@
 //! Port of: Jolt/Core/RTTI.h, Jolt/Core/RTTI.cpp
-//! Status: partial
-//! Missing: the `rtti` data entry in the root vtables of ShapeSettings, PhysicsMaterial, GroupFilter,
-//! ConstraintSettings, PathConstraintPath, VehicleControllerSettings and WheelSettings (Phase 8 foundation, see
-//! Docs/Zolt/SerializationArchitecture.md S3).
+//! Status: complete
 //!
 //! Jolt builds one `RTTI` object per class at startup (a function local static that `sCreateRTTI` fills with
 //! JPH_ADD_BASE_CLASS / JPH_ADD_ATTRIBUTE). Zolt builds the same record at compile time from a declaration next to the
@@ -34,6 +31,11 @@
 //! | RTTI::CreateObject / DestructObject                  | `rtti.createObject(allocator)` / `rtti.destructObject(object, allocator)` |
 //! | JPH_RENAME_CLASS (unused in Jolt)                    | `.renamed = true` and the new name                                |
 //!
+//! The dynamic type of a `.virtual` / `.abstract` class is the data entry `rtti: *const RTTI` of its pattern A root
+//! vtable (Jolt's virtual GetRTTI). The serializable roots declare it: ShapeSettings, PhysicsMaterial, GroupFilter,
+//! ConstraintSettings, PathConstraintPath, VehicleControllerSettings and WheelSettings
+//! (Docs/Zolt/SerializationArchitecture.md S3).
+//!
 //! Differences from Jolt:
 //! - The creatability comes from the `kind`, which is Jolt's IMPLEMENT macro (not the DECLARE macro): PhysicsMaterial,
 //!   ConstraintSettings and WheelSettings are `.virtual`, DecoratedShapeSettings is `.abstract`.
@@ -64,6 +66,8 @@ const TypeDeclarations = @import("../ObjectStream/TypeDeclarations.zig");
 pub const RTTI = struct {
     /// Class name (Jolt's: the stringified macro argument, "Outer::Inner" for nested classes)
     name: []const u8,
+    /// Class size (of the Zig type)
+    size: usize,
     /// GetHash(): HashString(name) folded to 32 bits, computed at compile time
     hash: u32,
     /// How the class was declared
@@ -199,6 +203,10 @@ pub const RTTI = struct {
         return self.hash;
     }
 
+    pub fn getSize(self: *const RTTI) usize {
+        return self.size;
+    }
+
     /// Check if this class can be constructed
     pub fn isAbstract(self: *const RTTI) bool {
         return self.create == null;
@@ -295,6 +303,7 @@ fn build(comptime T: type, comptime decl: RTTI.Declaration) RTTI {
     const bases = buildBases(T, decl.bases);
     return .{
         .name = decl.name,
+        .size = @sizeOf(T),
         .hash = RTTI.hashName(decl.name),
         .kind = decl.kind,
         .bases = bases,
@@ -469,6 +478,7 @@ test "RTTI: hashes, bases with real offsets, casts, create / destroy" {
         base2: B = .{},
     };
     const c_rtti = RTTI.of(C);
+    try testing.expectEqual(@as(usize, @sizeOf(C)), c_rtti.getSize());
     try testing.expectEqualStrings("mA", c_rtti.attributes[0].name);
     try testing.expectEqualStrings("mB", c_rtti.attributes[1].name);
     try testing.expectEqualStrings("mC", c_rtti.attributes[2].name);

@@ -1,4 +1,5 @@
 //! Port of: UnitTests/ObjectStream/ObjectStreamTest.cpp
+//! Status: complete
 //!
 //! The test classes are `pub`: the ObjectStream parity test (ZoltParity/ObjectStream/ObjectStreamParity.zig) imports
 //! this file as the module "objectstream_test" and compares their streams with the C++ library's bytes. This file
@@ -246,9 +247,9 @@ pub fn createTestObject(allocator: Allocator) Allocator.Error!*TestSerializable 
     return test_object;
 }
 
-/// The factory of the test: Jolt registers TestSerializable after RegisterTypes() (Phase 8 foundation: with
-/// RegisterTypes.factory_types)
-pub const factory: Factory = .init(&.{TestSerializable});
+/// The factory of the test: Jolt registers TestSerializable after RegisterTypes()
+/// (`Factory::sInstance->Register(JPH_RTTI(TestSerializable))`)
+pub const factory: Factory = .init(zolt.RegisterTypes.factory_types ++ &[_]type{TestSerializable});
 
 fn compareObjects(input: *const TestSerializable, output: *const TestSerializable) !void {
     const testing = std.testing;
