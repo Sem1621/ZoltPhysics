@@ -1,8 +1,9 @@
 //! Port of: Jolt/Skeleton/Skeleton.h, Jolt/Skeleton/Skeleton.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL (Skeleton, Skeleton::Joint):
-//! TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of Skeleton and
+//! Skeleton::Joint (SerializationArchitecture.md). The stream holds the names only. A joint read from a stream has
+//! parent joint index -1, like Jolt's: call calculateParentJointIndices.
 //!
 //! CharacterVehicleArchitecture E2: a RefTarget without virtual functions, like PhysicsScene. The skeleton keeps the
 //! allocator that owns it, its joint array and the joint names: `create(allocator)` is `new Skeleton` (reference count
@@ -36,9 +37,8 @@ pub const Skeleton = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "Skeleton",
         .kind = .non_virtual,
+        .attributes = &.{.attr("mJoints", .joints)},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const SkeletonResult = Result(Ref(Skeleton));
 
@@ -48,9 +48,11 @@ pub const Skeleton = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "Skeleton::Joint",
             .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mName", .name),
+                .attr("mParentName", .parent_name),
+            },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// Name of the joint (owned, allocated with the skeleton's allocator)
         name: []u8 = &.{},

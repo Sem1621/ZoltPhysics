@@ -100,7 +100,7 @@ jobs:
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }}
 
   determinism:
-    # Milestones M6 and M8: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
+    # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
     # arguments), and the hash does not depend on the thread count
     runs-on: ubuntu-latest
     name: Determinism check double_precision=${{ matrix.double_precision }}
@@ -149,3 +149,10 @@ jobs:
       run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=Discrete -t=1 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
     - name: Test CharacterVirtual with 2 threads
       run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=Discrete -t=2 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
+    # Milestone M9: the Ragdoll scene loads its assets through ObjectStreamIn
+    - name: Test Ragdoll
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=max -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}
+    - name: Test Ragdoll with 1 thread
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=1 -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}
+    - name: Test Ragdoll with 2 threads
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -- -q=LinearCast -t=2 -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}

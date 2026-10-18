@@ -1,8 +1,5 @@
 //! Port of: PerformanceTest/PerformanceTest.cpp
-//! Status: partial
-//! Missing: RagdollScene (-s=Ragdoll, -s=RagdollSinglePile and the default scene: the ObjectStream loading of its assets
-//! Human.tof, Human/dead_pose1.tof and terrain2.bof, Phase 8, milestone M9). Selecting one of them prints an error and
-//! returns 1.
+//! Status: complete
 //! Not ported: -r (JPH_DEBUG_RENDERER, DebugRendererRecorder: TODO(debug_renderer); like a Jolt build without the debug
 //! renderer the argument is ignored), the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are
 //! compiled out as in Jolt's Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
@@ -11,6 +8,9 @@
 //! -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892` must print Jolt's published hash (determinism_check.yml), in
 //! both precisions and for every thread count. Milestone M8 (CharacterVehicleArchitecture section 1): the same for
 //! `-q=Discrete -t=max -s=CharacterVirtual -validate_hash=0xc1d4e05b164b1221` (0xa0b16727aa16fdb0 in double precision).
+//! Milestone M9 (SerializationArchitecture section 1): the same for `-q=LinearCast -t=max -s=Ragdoll
+//! -validate_hash=0x3be6ea76c07a2ac8` (0x8dd6bc501859a228 in double precision). Ragdoll is the default scene, like in
+//! a Jolt build with JPH_OBJECT_STREAM.
 //!
 //! The program is a statement by statement port of PerformanceTest.cpp, with the same arguments, the same output text
 //! and the same hash:
@@ -46,6 +46,7 @@ const LargeMeshScene = @import("LargeMeshScene.zig").LargeMeshScene;
 const MaxBodiesScene = @import("MaxBodiesScene.zig").MaxBodiesScene;
 const HighSpeedScene = @import("HighSpeedScene.zig").HighSpeedScene;
 const CharacterVirtualScene = @import("CharacterVirtualScene.zig").CharacterVirtualScene;
+const RagdollScene = @import("RagdollScene.zig").RagdollScene;
 
 const Allocator = std.mem.Allocator;
 const Real = zolt.Real;
@@ -252,13 +253,11 @@ fn validateState(allocator: Allocator, physics_system: *PhysicsSystem, data: []c
     return validator.num_mismatches != 0 or validator.isFailed();
 }
 
-/// The scenes that need later phases: an error instead of the scene (Jolt creates them)
-fn sceneNotPorted(name: []const u8, needs: []const u8) u8 {
-    log.info("Scene {s} is not ported to Zolt yet, it needs {s}", .{ name, needs });
-    return 1;
+/// The helper of main that creates the default scene: a RagdollScene(4, 10, 0.6f) (Jolt: with JPH_OBJECT_STREAM, which
+/// Zolt always has, SerializationArchitecture S1)
+fn createRagdollScene(allocator: Allocator, io: std.Io) Allocator.Error!PerformanceTestScene {
+    return (try RagdollScene.create(allocator, io, 4, 10, 0.6)).scene();
 }
-
-const ragdoll_needs = "the ObjectStream loading of Human.tof, Human/dead_pose1.tof and terrain2.bof from Assets/ (Phase 8)";
 
 /// Replace the scene (unique_ptr assignment: the old scene is destroyed)
 fn setScene(scene: *?PerformanceTestScene, new_scene: PerformanceTestScene) void {
@@ -277,8 +276,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     // Register allocation hook (Zolt: the allocator is passed explicitly)
 
-    // Helper function that creates the default scene (Jolt: a RagdollScene(4, 10, 0.6f) with JPH_OBJECT_STREAM, else a
-    // ConvexVsMeshScene): see sceneNotPorted
+    // Helper function that creates the default scene: createRagdollScene
 
     // Parse command line parameters
     var specified_quality: i32 = -1;
@@ -298,9 +296,9 @@ pub fn main(init: std.process.Init) !u8 {
             // Parse scene
             const name = arg[3..];
             if (std.mem.eql(u8, name, "Ragdoll"))
-                return sceneNotPorted("Ragdoll", ragdoll_needs)
+                setScene(&scene, try createRagdollScene(allocator, io))
             else if (std.mem.eql(u8, name, "RagdollSinglePile"))
-                return sceneNotPorted("RagdollSinglePile", ragdoll_needs)
+                setScene(&scene, (try RagdollScene.create(allocator, io, 1, 160, 0.4)).scene())
             else if (std.mem.eql(u8, name, "ConvexVsMesh"))
                 setScene(&scene, (try ConvexVsMeshScene.create(allocator)).scene())
             else if (std.mem.eql(u8, name, "Pyramid"))
@@ -380,7 +378,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     // If no scene was specified use the default scene
     if (scene == null)
-        return sceneNotPorted("Ragdoll", ragdoll_needs);
+        scene = try createRagdollScene(allocator, io);
     const s = scene.?;
 
     // Output scene we're running
@@ -476,7 +474,7 @@ pub fn main(init: std.process.Init) !u8 {
 
                 // Start test scene
                 try s.startTest(&physics_system, motion_quality);
-                errdefer s.stopTest(&physics_system); // Zolt: on an error the scene's objects leave the system before it is destroyed
+                errdefer s.stopTest(&physics_system) catch {}; // Zolt: on an error the scene's objects leave the system before it is destroyed
 
                 // Disable sleeping if requested
                 if (disable_sleep) {
@@ -628,7 +626,7 @@ pub fn main(init: std.process.Init) !u8 {
                 defer allocator.free(hash_str);
 
                 // Stop test scene
-                s.stopTest(&physics_system);
+                try s.stopTest(&physics_system);
 
                 // Trace stat line
                 log.info("{s}, {d}, {f}, {s}", .{ motion_quality_str, num_threads + 1, PrintfFloat{ .value = @as(f64, @floatFromInt(max_iterations)) / (1.0e-9 * @as(f64, @floatFromInt(total_duration))) }, hash_str });
@@ -700,12 +698,13 @@ test "PrintfFloat" {
     try std.testing.expectEqualStrings("-nan", try std.fmt.bufPrint(&buffer, "{f}", .{PrintfFloat{ .value = -std.math.nan(f64) }}));
 }
 
-/// Zolt test: load a scene, run `num_updates` updates like `main` (with an extra worker thread) and return the hash
+/// Zolt test: load a scene, run `num_updates` updates like `main` (with an extra worker thread) and return the hash.
+/// The tests run in the repository root (build.zig), so the assets are in "Assets/".
 fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, num_updates: u32) !u64 {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     defer scene.destroy();
-    try std.testing.expect(try scene.load(""));
+    try std.testing.expect(try scene.load("Assets/"));
 
     var temp_allocator = try TempAllocatorImpl.init(allocator, scene.getTempAllocatorSizeMB() * 1024 * 1024);
     defer temp_allocator.deinit();
@@ -719,7 +718,7 @@ fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, n
     try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
     defer physics_system.deinit();
     try scene.startTest(&physics_system, motion_quality);
-    errdefer scene.stopTest(&physics_system);
+    errdefer scene.stopTest(&physics_system) catch {};
     try physics_system.optimizeBroadPhase();
     for (0..num_updates) |_| {
         try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
@@ -739,7 +738,7 @@ fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, n
         hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&rot), hash);
     }
     scene.updateHash(&hash);
-    scene.stopTest(&physics_system);
+    try scene.stopTest(&physics_system);
     return hash;
 }
 
@@ -748,7 +747,7 @@ test "PerformanceTest scenes give Jolt's hashes after a few updates" {
     // .github/workflows/zolt.yml), a few updates each, in Debug and on every platform of the test CI job. The expected
     // values are the hashes that the C++ PerformanceTest prints with the same arguments (-s=<scene> -q=<quality>
     // -i=<updates>), built from Jolt/ with CROSS_PLATFORM_DETERMINISTIC. The testing allocator also checks that the
-    // scenes release all their shapes and settings.
+    // scenes release all their shapes and settings (for Ragdoll also the objects read from the assets).
     const allocator = std.testing.allocator;
     const dp = zolt.Core.double_precision;
     try std.testing.expectEqual(@as(u64, if (dp) 0x874b972e6c896604 else 0x8ae6dee69e292017), try runSceneForTest((try PyramidScene.create(allocator)).scene(), .linear_cast, 10));
@@ -756,6 +755,8 @@ test "PerformanceTest scenes give Jolt's hashes after a few updates" {
     try std.testing.expectEqual(@as(u64, if (dp) 0x2b4f1c7cf1a90e26 else 0x93894e4298eed8e1), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
     try std.testing.expectEqual(@as(u64, if (dp) 0x5109b031ac53c66e else 0x375628eabc094b31), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
     try std.testing.expectEqual(@as(u64, if (dp) 0x4ca08591ebc72ba2 else 0xcb05430a62f9c7f), try runSceneForTest((try CharacterVirtualScene.create(allocator)).scene(), .discrete, 10));
+    // The oracle: zig build jolt-performance-test [-Ddouble_precision=true] -- -q=LinearCast -t=1 -s=Ragdoll -i=5
+    try std.testing.expectEqual(@as(u64, if (dp) 0x5430d55461b5bdc6 else 0x47fe0db54d0cdb27), try runSceneForTest(try createRagdollScene(allocator, std.testing.io), .linear_cast, 5));
 }
 
 test "validateState: -vs fails on a state that differs or ends early" {
@@ -780,7 +781,7 @@ test "validateState: -vs fails on a state that differs or ends early" {
     try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
     defer physics_system.deinit();
     try scene.startTest(&physics_system, .linear_cast);
-    defer scene.stopTest(&physics_system);
+    defer scene.stopTest(&physics_system) catch unreachable; // PyramidScene has no StopTest
     try physics_system.optimizeBroadPhase();
     for (0..3) |_| {
         try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
@@ -806,6 +807,90 @@ test "validateState: -vs fails on a state that differs or ends early" {
         _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
         try std.testing.expect(try validateState(allocator, &physics_system, data));
     }
+}
+
+/// Zolt test helper: a physics system for a scene, with the testing allocator (heap allocated, it must not move)
+const TestPhysicsSystem = struct {
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl,
+    object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+
+    fn create(scene: PerformanceTestScene) !*TestPhysicsSystem {
+        const allocator = std.testing.allocator;
+        const self = try allocator.create(TestPhysicsSystem);
+        errdefer allocator.destroy(self);
+        self.* = .{ .broad_phase_layer_interface = .init() };
+        try self.system.init(allocator, std.testing.io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &self.broad_phase_layer_interface.base, &self.object_vs_broadphase_layer_filter.base, &self.object_vs_object_layer_filter.base, .{});
+        return self;
+    }
+
+    fn destroy(self: *TestPhysicsSystem) void {
+        self.system.deinit();
+        std.testing.allocator.destroy(self);
+    }
+};
+
+/// Zolt test helper: StartTest, OptimizeBroadPhase and StopTest
+fn startAndStopForTest(scene: PerformanceTestScene, physics_system: *PhysicsSystem) !void {
+    try scene.startTest(physics_system, .linear_cast);
+    try physics_system.optimizeBroadPhase();
+    try scene.stopTest(physics_system);
+}
+
+test "RagdollScene: out of memory while loading, starting and stopping" {
+    // Zolt test (porting guide section 10): the allocations of the scene (the objects read from the assets, the
+    // ragdolls, the copies of the pose, the lists of RemoveFromPhysicsSystem) fail one at a time. The error must arrive
+    // and nothing may leak. Loading allocates thousands of times, so every 997th allocation of Load fails; every
+    // allocation of StartTest and StopTest fails. A small scene of 2 x 2 piles of 2 ragdolls keeps it short.
+    const io = std.testing.io;
+
+    // Load fails
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    {
+        const scene = (try RagdollScene.create(counting.allocator(), io, 2, 2, 0.4)).scene();
+        defer scene.destroy();
+        try std.testing.expect(try scene.load("Assets/"));
+    }
+    const num_load_allocations = counting.alloc_index;
+    try std.testing.expect(num_load_allocations > 1000);
+    var fail_index: usize = 0;
+    while (fail_index < num_load_allocations) : (fail_index += 997) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const scene = (RagdollScene.create(failing.allocator(), io, 2, 2, 0.4) catch continue).scene();
+        defer scene.destroy();
+        try std.testing.expectError(error.OutOfMemory, scene.load("Assets/"));
+    }
+
+    // StartTest and StopTest fail: the scene is loaded once, then the allocator fails from a later index on
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const scene = (try RagdollScene.create(failing.allocator(), io, 2, 2, 0.4)).scene();
+    defer scene.destroy();
+    try std.testing.expect(try scene.load("Assets/"));
+    var num_start_stop_allocations: usize = 0;
+    for (0..2) |_| { // The first run creates the shapes of the settings, which the later runs reuse
+        const world = try TestPhysicsSystem.create(scene);
+        defer world.destroy();
+        const start = failing.alloc_index;
+        try startAndStopForTest(scene, &world.system);
+        num_start_stop_allocations = failing.alloc_index - start;
+    }
+    try std.testing.expect(num_start_stop_allocations > 0);
+    for (0..num_start_stop_allocations) |i| {
+        const world = try TestPhysicsSystem.create(scene);
+        defer world.destroy();
+        failing.fail_index = failing.alloc_index + i;
+        try std.testing.expectError(error.OutOfMemory, startAndStopForTest(scene, &world.system));
+        failing.fail_index = std.math.maxInt(usize);
+
+        // A StopTest that failed keeps the ragdolls that are still in the system: a second StopTest removes them
+        try scene.stopTest(&world.system);
+    }
+
+    // The scene still works
+    const world = try TestPhysicsSystem.create(scene);
+    defer world.destroy();
+    try startAndStopForTest(scene, &world.system);
 }
 
 test {

@@ -35,6 +35,7 @@ pub const files = [_][]const u8{
     "Physics/NarrowPhaseQueryReference.cpp",
     "Physics/PairwiseReference.cpp",
     "Physics/PathConstraintPathReference.cpp",
+    "Physics/PerfRagdollReference.cpp",
     "Physics/PlaneEmptyReference.cpp",
     "Physics/RagdollReference.cpp",
     "Physics/ShapeCoreReference.cpp",

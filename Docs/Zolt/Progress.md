@@ -685,7 +685,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
 of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
 [SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and
-every class that reaches one. ✅ 57 declared · 🟡 24 pending (`serialization_pending`) · ❌ 0 not declared
+every class that reaches one. ✅ 66 declared · 🟡 15 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 
@@ -736,20 +736,20 @@ every class that reaches one. ✅ 57 declared · 🟡 24 pending (`serialization
 | `PointConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/PointConstraint.zig` |
 | `PulleyConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/PulleyConstraint.zig` |
 | `RackAndPinionConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/RackAndPinionConstraint.zig` |
-| `RagdollSettings` | 🟡 pending | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
-| `RagdollSettings::AdditionalConstraint` | 🟡 pending | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
-| `RagdollSettings::Part` | 🟡 pending | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `RagdollSettings` | ✅ declared | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `RagdollSettings::AdditionalConstraint` | ✅ declared | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `RagdollSettings::Part` | ✅ declared | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
 | `RotatedTranslatedShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/RotatedTranslatedShape.zig` |
 | `ScaledShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ScaledShape.zig` |
 | `SerializableObject` | ✅ declared | `Zolt/ObjectStream/SerializableObject.zig` |
 | `ShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/Shape.zig` |
 | `SixDOFConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SixDOFConstraint.zig` |
-| `SkeletalAnimation` | 🟡 pending | `Zolt/Skeleton/SkeletalAnimation.zig` |
-| `SkeletalAnimation::AnimatedJoint` | 🟡 pending | `Zolt/Skeleton/SkeletalAnimation.zig` |
-| `SkeletalAnimation::JointState` | 🟡 pending | `Zolt/Skeleton/SkeletalAnimation.zig` |
-| `SkeletalAnimation::Keyframe` | 🟡 pending | `Zolt/Skeleton/SkeletalAnimation.zig` |
-| `Skeleton` | 🟡 pending | `Zolt/Skeleton/Skeleton.zig` |
-| `Skeleton::Joint` | 🟡 pending | `Zolt/Skeleton/Skeleton.zig` |
+| `SkeletalAnimation` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `SkeletalAnimation::AnimatedJoint` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `SkeletalAnimation::JointState` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `SkeletalAnimation::Keyframe` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `Skeleton` | ✅ declared | `Zolt/Skeleton/Skeleton.zig` |
+| `Skeleton::Joint` | ✅ declared | `Zolt/Skeleton/Skeleton.zig` |
 | `SliderConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SliderConstraint.zig` |
 | `SphereShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
 | `SpringSettings` | ✅ declared | `Zolt/Physics/Constraints/SpringSettings.zig` |

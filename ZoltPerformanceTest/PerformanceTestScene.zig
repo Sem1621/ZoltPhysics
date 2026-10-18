@@ -8,7 +8,7 @@
 //! `destroy` is the virtual destructor plus `delete` (every scene is created on the heap with its `create`).
 //!
 //! Functions that allocate return `Error` (out of memory, or a body whose shape could not be created: Jolt crashes on
-//! both).
+//! both). StopTest is one of them, because RagdollScene's Ragdoll.removeFromPhysicsSystem allocates.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -57,7 +57,7 @@ pub const PerformanceTestScene = struct {
         updateHash: ?*const fn (ptr: *anyopaque, hash: *u64) void = null,
 
         /// Stop a test and remove objects from physics_system (null: nothing)
-        stopTest: ?*const fn (ptr: *anyopaque, physics_system: *PhysicsSystem) void = null,
+        stopTest: ?*const fn (ptr: *anyopaque, physics_system: *PhysicsSystem) Error!void = null,
     };
 
     /// Wrap a heap allocated `*T` (the interface owns it): `T` declares `destroy`, `getName` and `startTest`, and
@@ -110,8 +110,8 @@ pub const PerformanceTestScene = struct {
                 cast(ptr).updateHash(hash);
             }
 
-            fn stopTestThunk(ptr: *anyopaque, physics_system: *PhysicsSystem) void {
-                cast(ptr).stopTest(physics_system);
+            fn stopTestThunk(ptr: *anyopaque, physics_system: *PhysicsSystem) Error!void {
+                return cast(ptr).stopTest(physics_system);
             }
 
             const vtable: VTable = .{
@@ -187,7 +187,7 @@ pub const PerformanceTestScene = struct {
     }
 
     /// Stop a test and remove objects from physics_system
-    pub fn stopTest(self: PerformanceTestScene, physics_system: *PhysicsSystem) void {
-        if (self.vtable.stopTest) |f| f(self.ptr, physics_system);
+    pub fn stopTest(self: PerformanceTestScene, physics_system: *PhysicsSystem) Error!void {
+        if (self.vtable.stopTest) |f| return f(self.ptr, physics_system);
     }
 };

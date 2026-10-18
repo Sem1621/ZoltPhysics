@@ -198,14 +198,16 @@ pub fn build(b: *std.Build) void {
     performance_test_step.dependOn(&run_performance_test.step);
     check_step.dependOn(&performance_test.step);
 
-    // The inline tests of ZoltPerformanceTest/
+    // The inline tests of ZoltPerformanceTest/ (the Ragdoll scene reads Assets/, relative to the repository root)
     const performance_test_tests = b.addTest(.{
         .name = "zolt-performance-test-tests",
         .root_module = performance_test.root_module,
         .filters = test_filters,
         .use_llvm = use_llvm,
     });
-    test_step.dependOn(&b.addRunArtifact(performance_test_tests).step);
+    const run_performance_test_tests = b.addRunArtifact(performance_test_tests);
+    run_performance_test_tests.setCwd(b.path("."));
+    test_step.dependOn(&run_performance_test_tests.step);
     check_step.dependOn(&performance_test_tests.step);
 
     const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
@@ -298,6 +300,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // ZoltPerformanceTest's RagdollScene (milestone M9), which the parity test perf_ragdoll runs against
+    // PerformanceTest/RagdollScene.h (ZoltParity/Physics/PerfRagdollParity.zig). The parity tests import it as
+    // "perf_ragdoll_scene".
+    const parity_perf_ragdoll_module = b.createModule(.{
+        .root_source_file = b.path("ZoltPerformanceTest/RagdollScene.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zolt", .module = zolt_for_parity },
+        },
+    });
+
     const parity_tests = b.addTest(.{
         .name = "zolt-parity",
         .root_module = b.createModule(.{
@@ -309,6 +323,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "parity_user_types", .module = parity_user_types_module },
                 .{ .name = "test_layers", .module = parity_layers_module },
                 .{ .name = "objectstream_test", .module = parity_objectstream_test_module },
+                .{ .name = "perf_ragdoll_scene", .module = parity_perf_ragdoll_module },
             },
         }),
         .filters = test_filters,

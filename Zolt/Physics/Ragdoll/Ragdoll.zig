@@ -1,9 +1,10 @@
 //! Port of: Jolt/Physics/Ragdoll/Ragdoll.h, Jolt/Physics/Ragdoll/Ragdoll.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL (RagdollSettings, Part,
-//! AdditionalConstraint): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary
-//! state is ported). JPH_OVERRIDE_NEW_DELETE: dropped.
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of RagdollSettings, Part and
+//! AdditionalConstraint (SerializationArchitecture.md). "mToParent" and "mConstraint" are declared as Jolt's
+//! `TwoBodyConstraintSettings` (`.attrAs`): a link accepts only objects of that class. A stream holds no tables: call
+//! the `calculate*` functions after a read, like Jolt. JPH_OVERRIDE_NEW_DELETE: dropped.
 //!
 //! CharacterVehicleArchitecture E2 / E7:
 //! - `RagdollSettings` and `Ragdoll` are RefTargets without virtual functions, like PhysicsScene: they keep the
@@ -167,9 +168,12 @@ pub const RagdollSettings = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "RagdollSettings",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mSkeleton", .skeleton),
+            .attr("mParts", .parts),
+            .attr("mAdditionalConstraints", .additional_constraints),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const RagdollResult = Result(Ref(RagdollSettings));
 
@@ -186,9 +190,8 @@ pub const RagdollSettings = struct {
             .name = "RagdollSettings::Part",
             .kind = .non_virtual,
             .bases = &.{BodyCreationSettings},
+            .attributes = &.{.attrAs("mToParent", .to_parent, TwoBodyConstraintSettings)}, // Jolt's Ref<TwoBodyConstraintSettings>
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// BodyCreationSettings (the C++ base class)
         base: BodyCreationSettings = .{},
@@ -233,9 +236,11 @@ pub const RagdollSettings = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "RagdollSettings::AdditionalConstraint",
             .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mBodyIdx", .body_idx),
+                .attrAs("mConstraint", .constraint, TwoBodyConstraintSettings), // Jolt's Ref<TwoBodyConstraintSettings>
+            },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// Indices of the bodies that this constraint connects (Jolt's default constructor leaves them uninitialized,
         /// Zolt: 0)

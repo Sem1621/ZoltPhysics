@@ -1,9 +1,8 @@
 //! Port of: Jolt/Skeleton/SkeletalAnimation.h, Jolt/Skeleton/SkeletalAnimation.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL (SkeletalAnimation, JointState,
-//! Keyframe, AnimatedJoint): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary
-//! state is ported).
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of SkeletalAnimation,
+//! JointState, Keyframe and AnimatedJoint (SerializationArchitecture.md).
 //!
 //! CharacterVehicleArchitecture E2: a RefTarget without virtual functions, like PhysicsScene. The animation keeps the
 //! allocator that owns it, its animated joints, their names and keyframes: `create(allocator)` is `new
@@ -48,9 +47,11 @@ pub const SkeletalAnimation = struct {
     pub const rtti = RTTI.declare(@This(), .{
         .name = "SkeletalAnimation",
         .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mAnimatedJoints", .animated_joints),
+            .attr("mIsLooping", .is_looping),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// Contains the current state of a joint, a local space transformation relative to its parent joint
     pub const JointState = struct {
@@ -58,9 +59,11 @@ pub const SkeletalAnimation = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "SkeletalAnimation::JointState",
             .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mRotation", .rotation),
+                .attr("mTranslation", .translation),
+            },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// Local space rotation of the joint
         rotation: Quat = Quat.identity(),
@@ -86,9 +89,8 @@ pub const SkeletalAnimation = struct {
             .name = "SkeletalAnimation::Keyframe",
             .kind = .non_virtual,
             .bases = &.{JointState},
+            .attributes = &.{.attr("mTime", .time)},
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// JointState (the C++ base class)
         base: JointState = .{},
@@ -104,9 +106,11 @@ pub const SkeletalAnimation = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "SkeletalAnimation::AnimatedJoint",
             .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mJointName", .joint_name),
+                .attr("mKeyframes", .keyframes),
+            },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// Name of the joint (owned, allocated with the animation's allocator)
         joint_name: []u8 = &.{},
