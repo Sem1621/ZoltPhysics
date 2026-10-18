@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SixDOFConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SixDOFConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - `SixDOFConstraintSettings::EAxis` is `SixDOFConstraintSettings.Axis` (also `SixDOFConstraint.Axis`, Jolt's `using
@@ -72,9 +72,22 @@ pub const SixDOFConstraintSettings = struct {
         .name = "SixDOFConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPosition1", .position1),
+            .attr("mAxisX1", .axis_x1),
+            .attr("mAxisY1", .axis_y1),
+            .attr("mPosition2", .position2),
+            .attr("mAxisX2", .axis_x2),
+            .attr("mAxisY2", .axis_y2),
+            .attr("mMaxFriction", .max_friction),
+            .enumAttr("mSwingType", .swing_type),
+            .attr("mLimitMin", .limit_min),
+            .attr("mLimitMax", .limit_max),
+            .attr("mLimitsSpringSettings", .limits_spring_settings),
+            .attr("mMotorSettings", .motor_settings),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

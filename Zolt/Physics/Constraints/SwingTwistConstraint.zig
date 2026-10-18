@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SwingTwistConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SwingTwistConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - The non-const overloads `MotorSettings &GetSwingMotorSettings()` / `GetTwistMotorSettings()` are
@@ -60,9 +60,24 @@ pub const SwingTwistConstraintSettings = struct {
         .name = "SwingTwistConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPosition1", .position1),
+            .attr("mTwistAxis1", .twist_axis1),
+            .attr("mPlaneAxis1", .plane_axis1),
+            .attr("mPosition2", .position2),
+            .attr("mTwistAxis2", .twist_axis2),
+            .attr("mPlaneAxis2", .plane_axis2),
+            .enumAttr("mSwingType", .swing_type),
+            .attr("mNormalHalfConeAngle", .normal_half_cone_angle),
+            .attr("mPlaneHalfConeAngle", .plane_half_cone_angle),
+            .attr("mTwistMinAngle", .twist_min_angle),
+            .attr("mTwistMaxAngle", .twist_max_angle),
+            .attr("mMaxFrictionTorque", .max_friction_torque),
+            .attr("mSwingMotorSettings", .swing_motor_settings),
+            .attr("mTwistMotorSettings", .twist_motor_settings),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

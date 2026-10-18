@@ -1,9 +1,9 @@
 //! Port of: Jolt/Physics/Constraints/PathConstraintPath.h, Jolt/Physics/Constraints/PathConstraintPath.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(PathConstraintPath): `rtti`, its attributes
-//! are TODO(serialization) (the binary state is ported). JPH_DEBUG_RENDERER (DrawPath with its helpers sTransformPathPoint / sDrawPathSegment):
-//! TODO(debug_renderer).
+//! JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(PathConstraintPath): `rtti`. Jolt adds no
+//! attributes, only the base class: `mIsLooping` is not in the object stream (the binary state has it).
+//! JPH_DEBUG_RENDERER (DrawPath with its helpers sTransformPathPoint / sDrawPathSegment): TODO(debug_renderer).
 //!
 //! Pattern A RefTarget root like GroupFilter (Docs/Zolt/CollisionArchitecture.md, D1, D2, D7 and D8): the vtable, the
 //! atomic reference count, the allocator that frees the most derived object (and the memory it owns) and Jolt's data.
@@ -45,8 +45,6 @@ pub const PathConstraintPath = struct {
         .kind = .abstract,
         .bases = &.{SerializableObject},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const PathResult = Result(Ref(PathConstraintPath));
 

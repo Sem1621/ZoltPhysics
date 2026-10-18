@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - The const and non-const overloads of `GetLimitsSpringSettings` are `getLimitsSpringSettings` (`*const`) and
@@ -46,9 +46,17 @@ pub const DistanceConstraintSettings = struct {
         .name = "DistanceConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPoint1", .point1),
+            .attr("mPoint2", .point2),
+            .attr("mMinDistance", .min_distance),
+            .attr("mMaxDistance", .max_distance),
+            .enumAlias("mSpringMode", .{ .limits_spring_settings, .mode }),
+            .alias("mFrequency", .{ .limits_spring_settings, .frequency }), // Renaming attributes to stay compatible with old versions of the library
+            .alias("mDamping", .{ .limits_spring_settings, .damping }),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

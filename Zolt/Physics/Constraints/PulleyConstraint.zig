@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PulleyConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PulleyConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - `SetLength` asserts `inMinLength >= 0.0f && inMinLength <= inMaxLength`, which user input can violate: the
@@ -50,9 +50,17 @@ pub const PulleyConstraintSettings = struct {
         .name = "PulleyConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mBodyPoint1", .body_point1),
+            .attr("mFixedPoint1", .fixed_point1),
+            .attr("mBodyPoint2", .body_point2),
+            .attr("mFixedPoint2", .fixed_point2),
+            .attr("mRatio", .ratio),
+            .attr("mMinLength", .min_length),
+            .attr("mMaxLength", .max_length),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

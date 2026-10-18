@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - The settings own a reference to their path (`path: RefConst(PathConstraintPath)`, Jolt's
@@ -105,9 +105,16 @@ pub const PathConstraintSettings = struct {
         .name = "PathConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .attr("mPath", .path),
+            .attr("mPathPosition", .path_position),
+            .attr("mPathRotation", .path_rotation),
+            .attr("mPathFraction", .path_fraction),
+            .attr("mMaxFrictionForce", .max_friction_force),
+            .attr("mPositionMotorSettings", .position_motor_settings),
+            .enumAttr("mRotationConstraintType", .rotation_constraint_type),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
