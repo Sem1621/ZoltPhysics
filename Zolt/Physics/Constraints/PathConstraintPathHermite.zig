@@ -3,7 +3,8 @@
 //!
 //! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintPathHermite) and
 //! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PathConstraintPathHermite::Point):
-//! TODO(serialization) (the binary state is ported). JPH_PROFILE_FUNCTION: Zolt has no profiler.
+//! `rtti` with Jolt's attributes. `new Point` leaves the three Vec3 indeterminate in C++; Zolt zero fills them
+//! (SerializationArchitecture.md D9). JPH_PROFILE_FUNCTION: Zolt has no profiler.
 //!
 //! - A final PathConstraintPath (pattern A, see PathConstraintPath.zig): `create(allocator)` is `new
 //!   PathConstraintPathHermite` (reference count 0, put it in a `Ref` / `RefConst(PathConstraintPath)` through
@@ -201,9 +202,8 @@ pub const PathConstraintPathHermite = struct {
         .name = "PathConstraintPathHermite",
         .kind = .virtual,
         .bases = &.{PathConstraintPath},
+        .attributes = &.{.attr("mPoints", .points)},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .getPathMaxFraction, .getClosestPoint, .getPointOnPath, .saveBinaryState, .restoreBinaryState };
 
@@ -212,9 +212,12 @@ pub const PathConstraintPathHermite = struct {
         pub const rtti = RTTI.declare(@This(), .{
             .name = "PathConstraintPathHermite::Point",
             .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mPosition", .position),
+                .attr("mTangent", .tangent),
+                .attr("mNormal", .normal),
+            },
         });
-        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-        pub const serialization_pending = true;
 
         /// Position on the path
         position: Vec3,

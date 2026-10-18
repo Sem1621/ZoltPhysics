@@ -13,8 +13,8 @@
 //! - `Constraint.VTable` follows Jolt's declaration order: `buildIslands(index, *IslandBuilder, *BodyManager)` and
 //!   `buildIslandSplits(*LargeIslandSplitter)` are entries, `getConstraintSettings` returns `Allocator.Error` (it
 //!   allocates the settings).
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings): `rtti`, its attributes
-//!   are TODO(serialization). The binary state is ported like GroupFilter's (CollisionArchitecture D8):
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings): `rtti` with Jolt's
+//!   attributes. The binary state is ported like GroupFilter's (CollisionArchitecture D8):
 //!   `SaveBinaryState` writes the RTTI hash of the most derived class (the `rtti` vtable data entry that every concrete
 //!   settings class declares), and `restoreFromBinaryState` (StreamUtils::RestoreObject) finds the class in
 //!   `RegisterTypes.factory`. An unknown hash gives Jolt's "Failed to create instance of type".
@@ -93,9 +93,15 @@ pub const ConstraintSettings = struct {
         .name = "ConstraintSettings",
         .kind = .virtual,
         .bases = &.{SerializableObject},
+        .attributes = &.{
+            .attr("mEnabled", .enabled),
+            .attr("mDrawConstraintSize", .draw_constraint_size),
+            .attr("mConstraintPriority", .constraint_priority),
+            .attr("mNumVelocityStepsOverride", .num_velocity_steps_override),
+            .attr("mNumPositionStepsOverride", .num_position_steps_override),
+            .attr("mUserData", .user_data),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const ConstraintResult = Result(Ref(ConstraintSettings));
 

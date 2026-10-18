@@ -1,8 +1,8 @@
 //! Port of: Jolt/Physics/Constraints/FixedConstraint.h, Jolt/Physics/Constraints/FixedConstraint.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(FixedConstraintSettings): `rtti`, its
-//! attributes are TODO(serialization) (the binary state is ported). JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(FixedConstraintSettings): `rtti` with Jolt's
+//! attributes. JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! # Porter template: a Phase 6 constraint file
 //!
@@ -125,9 +125,17 @@ pub const FixedConstraintSettings = struct {
         .name = "FixedConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mAutoDetectPoint", .auto_detect_point),
+            .attr("mPoint1", .point1),
+            .attr("mAxisX1", .axis_x1),
+            .attr("mAxisY1", .axis_y1),
+            .attr("mPoint2", .point2),
+            .attr("mAxisX2", .axis_x2),
+            .attr("mAxisY2", .axis_y2),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

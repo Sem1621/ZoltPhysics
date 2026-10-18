@@ -2,8 +2,8 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(RackAndPinionConstraintSettings): TODO(serialization) (the binary state is
-//! ported). JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(RackAndPinionConstraintSettings): `rtti` with Jolt's attributes.
+//! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - `mPinionConstraint` / `mRackConstraint` (`RefConst<Constraint>`) are `RefConst(Constraint)` members that the
 //!   destructor (`destruct`, run by the generated destructor chain) releases. `SetConstraints(const Constraint *, const
@@ -49,9 +49,13 @@ pub const RackAndPinionConstraintSettings = struct {
         .name = "RackAndPinionConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mHingeAxis", .hinge_axis),
+            .attr("mSliderAxis", .slider_axis),
+            .attr("mRatio", .ratio),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

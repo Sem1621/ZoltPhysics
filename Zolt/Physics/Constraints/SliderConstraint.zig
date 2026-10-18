@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SliderConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SliderConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - The const and non-const overloads `GetMotorSettings()` / `GetLimitsSpringSettings()` are `getMotorSettings` /
@@ -58,9 +58,24 @@ pub const SliderConstraintSettings = struct {
         .name = "SliderConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mAutoDetectPoint", .auto_detect_point),
+            .attr("mPoint1", .point1),
+            .attr("mSliderAxis1", .slider_axis1),
+            .attr("mNormalAxis1", .normal_axis1),
+            .attr("mPoint2", .point2),
+            .attr("mSliderAxis2", .slider_axis2),
+            .attr("mNormalAxis2", .normal_axis2),
+            .attr("mLimitsMin", .limits_min),
+            .attr("mLimitsMax", .limits_max),
+            .enumAlias("mSpringMode", .{ .limits_spring_settings, .mode }),
+            .alias("mFrequency", .{ .limits_spring_settings, .frequency }), // Renaming attributes to stay compatible with old versions of the library
+            .alias("mDamping", .{ .limits_spring_settings, .damping }),
+            .attr("mMaxFrictionForce", .max_friction_force),
+            .attr("mMotorSettings", .motor_settings),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

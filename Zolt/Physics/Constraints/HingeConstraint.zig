@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(HingeConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(HingeConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - The const and non-const overloads of `GetMotorSettings` / `GetLimitsSpringSettings` are `getMotorSettings` /
@@ -57,9 +57,21 @@ pub const HingeConstraintSettings = struct {
         .name = "HingeConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPoint1", .point1),
+            .attr("mHingeAxis1", .hinge_axis1),
+            .attr("mNormalAxis1", .normal_axis1),
+            .attr("mPoint2", .point2),
+            .attr("mHingeAxis2", .hinge_axis2),
+            .attr("mNormalAxis2", .normal_axis2),
+            .attr("mLimitsMin", .limits_min),
+            .attr("mLimitsMax", .limits_max),
+            .attr("mLimitsSpringSettings", .limits_spring_settings),
+            .attr("mMaxFrictionTorque", .max_friction_torque),
+            .attr("mMotorSettings", .motor_settings),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 

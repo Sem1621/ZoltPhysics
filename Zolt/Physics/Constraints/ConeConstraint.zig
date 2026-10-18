@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConeConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConeConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - `SetHalfConeAngle` asserts that the angle is in [0, pi] (user input): the assert only runs with
@@ -42,9 +42,15 @@ pub const ConeConstraintSettings = struct {
         .name = "ConeConstraintSettings",
         .kind = .virtual,
         .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPoint1", .point1),
+            .attr("mTwistAxis1", .twist_axis1),
+            .attr("mPoint2", .point2),
+            .attr("mTwistAxis2", .twist_axis2),
+            .attr("mHalfConeAngle", .half_cone_angle),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
