@@ -271,6 +271,12 @@ fn parseFloat(comptime T: type, word: []const u8) Error!T {
     if (std.math.isInf(value)) return error.InvalidObjectStream;
     if (value != 0 and @abs(value) < std.math.floatMin(T)) return error.InvalidObjectStream;
     if (value == 0 and hasNonzeroMantissa(collected)) return error.InvalidObjectStream;
+    // glibc detects tininess after rounding: a word whose exact value lies below the smallest normal number after
+    // rounding to T's precision with an unbounded exponent is ERANGE, even when it rounds up to the smallest normal
+    // number ("1.1754943e-38" for float). The exact value is taken in f128, the threshold is half an ulp below it.
+    const exact = std.fmt.parseFloat(f128, collected) catch return error.InvalidObjectStream;
+    const threshold: f128 = @as(f128, std.math.floatMin(T)) - std.math.ldexp(@as(f128, 1), std.math.floatExponentMin(T) - std.math.floatMantissaBits(T) - 2);
+    if (exact != 0 and @abs(exact) < threshold) return error.InvalidObjectStream;
     return value;
 }
 

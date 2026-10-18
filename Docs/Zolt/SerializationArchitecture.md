@@ -289,8 +289,9 @@ The prototype's `ObjectStreamIn.zig` and `ObjectStreamOut.zig` are the reference
   modulo 2^n (`-1` is 4294967295). Out of range fails. uint8 and uint16 are read as uint32 and truncated.
 - Floats: num_get collects the characters `0-9a-fA-FxX+-pP` and one `.`; they must form a whole decimal or hexadecimal
   number (`1.5abc` fails, `1.2.3` is 1.2). The value is rounded once, directly to f32 or f64. Overflow, a subnormal
-  result and a nonzero number that rounds to zero fail (ERANGE). So a subnormal float in a text stream cannot be read
-  back, in Jolt too.
+  result and a nonzero number that rounds to zero fail (ERANGE). glibc detects tininess after rounding: a word whose
+  exact value is below the smallest normal number fails even when it rounds up to it (`1.1754943e-38` for float). So a
+  subnormal float in a text stream cannot be read back, in Jolt too.
 - Identifiers are `strtoul(word, 16)` truncated to 32 bits.
 - The prototype implements these rules (`ObjectStreamTextIn.zig`). Parity test P6 pins them.
 
