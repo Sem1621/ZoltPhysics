@@ -969,7 +969,7 @@ test "PhysicsMaterial / PhysicsMaterialSimple parity" {
     {
         var j: [2]u32 = undefined;
         jolt.jolt_physics_material_rtti_hashes(&j);
-        const z = [2]u32{ PhysicsMaterial.rttiHash(PhysicsMaterial.rtti_name), PhysicsMaterial.rttiHash(PhysicsMaterialSimple.rtti_name) };
+        const z = [2]u32{ PhysicsMaterial.rtti.hash, PhysicsMaterialSimple.rtti.hash };
         rtti.check("rtti", z, j);
     }
 

@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -57,7 +58,14 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs a CapsuleShape
 pub const CapsuleShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, CapsuleShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(CapsuleShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "CapsuleShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -69,6 +77,13 @@ pub const CapsuleShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) CapsuleShapeSettings {
         return .{ .base = .init(CapsuleShapeSettings, allocator, null) };
+    }
+
+    /// new CapsuleShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*CapsuleShapeSettings {
+        const self = try allocator.create(CapsuleShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a capsule centered around the origin with one sphere cap at (0, -half_height_of_cylinder, 0) and the other at (0, half_height_of_cylinder, 0)

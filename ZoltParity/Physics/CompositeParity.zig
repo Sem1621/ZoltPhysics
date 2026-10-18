@@ -765,6 +765,7 @@ const CompositeChild = struct {
 
 /// Settings of CompositeChild
 const CompositeChildSettings = struct {
+    pub const rtti = ShapeSettings.rtti; // No JPH_RTTI of its own (like the C++ class)
     pub const overrides = .{.createShape};
 
     base: ShapeSettings,
@@ -835,6 +836,7 @@ const ParityShapeFilter = struct {
 
 /// Settings of ParityCompoundShape
 const ParityCompoundShapeSettings = struct {
+    pub const rtti = CompoundShapeSettings.rtti; // No JPH_RTTI of its own (like the C++ class)
     pub const overrides = .{.createShape};
 
     base: CompoundShapeSettings,
@@ -1005,6 +1007,7 @@ const ParityCompoundShape = struct {
 
 /// Settings of ParityDecoratedShape
 const ParityDecoratedShapeSettings = struct {
+    pub const rtti = DecoratedShapeSettings.rtti; // No JPH_RTTI of its own (like the C++ class)
     pub const overrides = .{.createShape};
 
     base: DecoratedShapeSettings,

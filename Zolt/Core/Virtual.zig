@@ -19,7 +19,7 @@
 //! | pure virtual not overridden                  | compile error in `make`                                              |
 //! | `virtual ~A()` + `delete this`               | generated vtable entries `deinit` (destructor chain: `destruct` of every level, derived first) and `destroy` (`deinit` + free with the root's `allocator`) |
 //! | `static_cast<C *>(a)` / derived to base      | `virtual.downcast(C, a)` / `virtual.upcast(A, c)`                    |
-//! | JPH_RTTI (class name for the RTTI hash)      | a data entry `rtti_name: []const u8` in the VTable, every concrete class declares `pub const rtti_name` |
+//! | JPH_RTTI (GetRTTI)                           | a data entry `rtti: *const RTTI` in the root VTable, every concrete class declares `pub const rtti` (SerializationArchitecture.md S3) |
 //!
 //! Rules enforced at compile time by `make`:
 //! - every virtual function has an implementation somewhere in the chain T -> ... -> introducing class
@@ -54,7 +54,7 @@
 //! | top-level virtual name in an abstract class     | `ConvexShape.getVolume has the name of a virtual function: an abstract class keeps its implementation in ConvexShape.impl (a top-level function would be called statically)` |
 //! | neither `overrides` nor `impl`                  | ``X must declare `pub const overrides = .{ ... }` (the virtual functions it overrides, C++ `override`)`` |
 //! | both `overrides` and `impl`                     | ``X declares both `overrides` (concrete class) and `impl` (abstract class)`` |
-//! | data entry not declared (e.g. `rtti_name`)      | ``X must declare `pub const rtti_name` `` |
+//! | data entry not declared (e.g. `rtti`)           | ``X must declare `pub const rtti` `` |
 //! | virtual function with more than 12 parameters   | `virtual functions with more than 12 parameters (including self) are not supported, add a thunk to Virtual.zig` |
 //! | `downcast` to a type that does not derive       | `X does not derive from Y`                                     |
 //! | `checkPrefix` field mismatch                    | `Derived.field does not match the base field Base.field`       |
@@ -146,7 +146,7 @@ fn makeTable(comptime VTable: type, comptime T: type) VTable {
         } else if (std.mem.eql(u8, field.name, "destroy")) {
             @field(vt, field.name) = destroyFn(Introducer(field.type), T);
         } else if (@typeInfo(field.type) != .pointer or @typeInfo(@typeInfo(field.type).pointer.child) != .@"fn") {
-            // Data entry (e.g. `rtti_name`, JPH_RTTI): every concrete class declares its own value
+            // Data entry (e.g. `rtti`, JPH_RTTI): every concrete class declares its own value
             if (!@hasDecl(T, field.name)) @compileError(@typeName(T) ++ " must declare `pub const " ++ field.name ++ "`");
             @field(vt, field.name) = @field(T, field.name);
         } else {

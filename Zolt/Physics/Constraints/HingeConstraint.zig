@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -51,10 +52,15 @@ const RotationEulerConstraintPart = @import("ConstraintPart/RotationEulerConstra
 
 /// Hinge constraint settings, used to create a hinge constraint
 pub const HingeConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, HingeConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(HingeConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "HingeConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "HingeConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -765,7 +771,7 @@ test "HingeConstraintSettings: defaults, binary state, restoreFromBinaryState th
         try testing.expectEqual(SpringSettings{}, settings.limits_spring_settings);
         try testing.expectEqual(@as(f32, 0.0), settings.max_friction_torque);
         try testing.expectEqual(MotorSettings{}, settings.motor_settings);
-        try testing.expectEqualStrings("HingeConstraintSettings", settings.asSettings().vtable.rtti_name);
+        try testing.expectEqualStrings("HingeConstraintSettings", settings.asSettings().vtable.rtti.name);
     }
 
     var settings = testSettings(allocator);
@@ -777,14 +783,14 @@ test "HingeConstraintSettings: defaults, binary state, restoreFromBinaryState th
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 2 * 3 * @sizeOf(Real) + 4 * 12 + 3 * 4 + 9 + 9 + 4 * 4), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("HingeConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("HingeConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     const after_axes = 25 + 2 * 3 * @sizeOf(Real) + 4 * 12;
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, -1.25))), std.mem.readInt(u32, bytes[after_axes..][0..4], .little));
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, 2.5))), std.mem.readInt(u32, bytes[after_axes + 8 ..][0..4], .little)); // Friction before the springs
     try testing.expectEqual(@as(u8, 1), bytes[after_axes + 12]); // Limits spring mode: StiffnessAndDamping
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

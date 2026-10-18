@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
@@ -40,6 +41,7 @@ const ObjectToIDMap = @import("../../Core/ObjectToIDMap.zig").ObjectToIDMap;
 const IDToObjectMap = @import("../../Core/ObjectToIDMap.zig").IDToObjectMap;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
+const StreamUtils = @import("../../Core/StreamUtils.zig");
 const ShapeFile = @import("../Collision/Shape/Shape.zig");
 const Shape = ShapeFile.Shape;
 const ShapeSettings = ShapeFile.ShapeSettings;
@@ -74,7 +76,13 @@ pub const OverrideMassProperties = enum(u8) {
 
 /// Settings for constructing a rigid body
 pub const BodyCreationSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(BodyCreationSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "BodyCreationSettings",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     pub const GroupFilterToIDMap = ObjectToIDMap(GroupFilter);
     pub const IDToGroupFilterMap = IDToObjectMap(GroupFilter);
@@ -431,7 +439,7 @@ pub const BodyCreationSettings = struct {
             stream.write(~@as(u32, 0));
 
         // Save group filter
-        try ShapeFile.saveObjectReference(GroupFilter, allocator, stream, self.collision_group.getGroupFilter(), group_filter_map);
+        try StreamUtils.saveObjectReference(GroupFilter, allocator, stream, self.collision_group.getGroupFilter(), group_filter_map);
     }
 
     /// Restore body creation settings, its shape, materials and group filter. Pass in an empty map in shape_map / material_map / group_filter_map or reuse the same map while reading multiple shapes from the same stream in order to restore duplicates.
@@ -458,7 +466,7 @@ pub const BodyCreationSettings = struct {
         settings.setShape(shape_result.getPtr());
 
         // Read group filter
-        var gfresult = try ShapeFile.restoreObjectReference(GroupFilter, allocator, stream, group_filter_map);
+        var gfresult = try StreamUtils.restoreObjectReference(GroupFilter, allocator, stream, group_filter_map);
         defer gfresult.deinit();
         if (gfresult.hasError()) {
             result.setError(gfresult.getError());
@@ -802,7 +810,7 @@ test "BodyCreationSettings: restoreWithChildren errors" {
 
     // A group filter of an unknown type: the RTTI hash follows the filter ID 0 at the end of the stream
     const filter_hash_offset = blk: {
-        const hash = GroupFilter.rttiHash(GroupFilterTable.rtti_name);
+        const hash = GroupFilterTable.rtti.hash;
         var i: usize = bytes.len - 4;
         while (i > binary_state_size) : (i -= 1)
             if (std.mem.readInt(u32, bytes[i..][0..4], .little) == hash and std.mem.readInt(u32, bytes[i - 4 ..][0..4], .little) == 0) break :blk i;

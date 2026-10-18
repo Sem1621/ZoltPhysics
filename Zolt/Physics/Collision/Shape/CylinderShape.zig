@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -50,7 +51,14 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs a CylinderShape
 pub const CylinderShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, CylinderShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(CylinderShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "CylinderShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -63,6 +71,13 @@ pub const CylinderShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) CylinderShapeSettings {
         return .{ .base = .init(CylinderShapeSettings, allocator, null) };
+    }
+
+    /// new CylinderShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*CylinderShapeSettings {
+        const self = try allocator.create(CylinderShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a shape centered around the origin with one top at (0, -half_height, 0) and the other at (0, half_height, 0) and radius radius.

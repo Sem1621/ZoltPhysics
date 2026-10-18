@@ -38,6 +38,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const ReferenceFile = @import("../../../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
@@ -83,10 +84,23 @@ const Visitors = @import("CompoundShapeVisitors.zig");
 
 /// Base class settings to construct a compound shape
 pub const CompoundShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, CompoundShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(CompoundShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "CompoundShapeSettings",
+        .kind = .abstract,
+        .bases = &.{ShapeSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     pub const SubShapeSettings = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, SubShapeSettings)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(CompoundShapeSettings::SubShapeSettings)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "CompoundShapeSettings::SubShapeSettings",
+            .kind = .non_virtual,
+        });
+        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+        pub const serialization_pending = true;
 
         /// Sub shape (either this or shape_ptr needs to be filled up). Jolt: RefConst<ShapeSettings>, a Ref here
         /// because creating the child writes its cache (Rule M).
@@ -831,6 +845,7 @@ const TestMaterial = TestShapes.TestMaterial;
 
 /// Settings of LinearCompoundShape (a concrete class derived from CompoundShapeSettings)
 const LinearCompoundShapeSettings = struct {
+    pub const rtti = CompoundShapeSettings.rtti; // No JPH_RTTI of its own
     pub const overrides = .{.createShape};
 
     base: CompoundShapeSettings,

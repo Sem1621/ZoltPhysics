@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../Core/RTTI.zig").RTTI;
 const ReferenceFile = @import("../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
 const RefCount = ReferenceFile.RefCount;
@@ -31,13 +32,25 @@ const StreamOut = @import("../Core/StreamOut.zig").StreamOut;
 
 /// Resource that contains the joint hierarchy for a skeleton
 pub const Skeleton = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Skeleton)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(Skeleton)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "Skeleton",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     pub const SkeletonResult = Result(Ref(Skeleton));
 
     /// Declare internal structure for a joint
     pub const Joint = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Joint)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(Skeleton::Joint)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "Skeleton::Joint",
+            .kind = .non_virtual,
+        });
+        /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+        pub const serialization_pending = true;
 
         /// Name of the joint (owned, allocated with the skeleton's allocator)
         name: []u8 = &.{},
@@ -84,6 +97,9 @@ pub const Skeleton = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new Skeleton (RTTI create)
+    pub const createDefault = create;
 
     /// Destructor: frees the joints and their names
     pub fn deinit(self: *Skeleton) void {

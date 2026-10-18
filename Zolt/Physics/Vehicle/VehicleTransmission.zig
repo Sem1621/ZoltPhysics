@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
@@ -32,7 +33,13 @@ pub const TransmissionMode = enum(u8) {
 
 /// Configuration for the transmission of a vehicle (gear box)
 pub const VehicleTransmissionSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, VehicleTransmissionSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleTransmissionSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleTransmissionSettings",
+        .kind = .non_virtual,
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// Jolt's default gear ratios
     pub const default_gear_ratios = [_]f32{ 2.66, 1.78, 1.3, 1.0, 0.74 };
@@ -66,6 +73,9 @@ pub const VehicleTransmissionSettings = struct {
         try self.reverse_gear_ratios.appendSlice(allocator, &default_reverse_gear_ratios);
         return self;
     }
+
+    /// Jolt's default constructor, used by RTTI create (Lifetime.defaultValue, SerializationArchitecture.md S7)
+    pub const initDefault = init;
 
     /// Destructor: frees the gear ratio arrays
     pub fn deinit(self: *VehicleTransmissionSettings, allocator: Allocator) void {

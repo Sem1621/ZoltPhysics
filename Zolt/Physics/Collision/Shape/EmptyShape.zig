@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
 const Plane = @import("../../../Geometry/Plane.zig").Plane;
@@ -50,7 +51,14 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs an EmptyShape
 pub const EmptyShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, EmptyShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(EmptyShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "EmptyShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ShapeSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -62,6 +70,13 @@ pub const EmptyShapeSettings = struct {
     /// Default constructor (EmptyShapeSettings() = default)
     pub fn initDefault(allocator: Allocator) EmptyShapeSettings {
         return .{ .base = .init(ShapeSettings.vtableFor(EmptyShapeSettings), allocator) };
+    }
+
+    /// new EmptyShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*EmptyShapeSettings {
+        const self = try allocator.create(EmptyShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// EmptyShapeSettings(inCenterOfMass) (settings on the stack: `defer settings.deinit()`)

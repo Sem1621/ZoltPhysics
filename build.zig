@@ -48,11 +48,11 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "determinism_log", determinism_log);
     const options_module = options.createModule();
 
-    // User shape registrations, default material and material types (Zolt/RegisterTypes.zig): an empty module by
+    // User shape registrations, default material and serializable classes (Zolt/RegisterTypes.zig): an empty module by
     // default. An application replaces it with `zolt_module.addImport("zolt_user_types", my_module)`, where
-    // `my_module` may declare `registrations`, `default_material` and `material_types` (and import "zolt" itself).
+    // `my_module` may declare `registrations`, `default_material` and `serializable_types` (and import "zolt" itself).
     const user_types_source = b.addWriteFiles().add("zolt_user_types.zig",
-        \\//! Default (empty) `zolt_user_types` module: no user shapes, Jolt's default material, no user material types.
+        \\//! Default (empty) `zolt_user_types` module: no user shapes, Jolt's default material, no user serializable classes.
         \\pub const registrations = .{};
         \\
     );
@@ -84,16 +84,15 @@ pub fn build(b: *std.Build) void {
 
     // Inline tests that live next to the code inside Zolt/. They run on their own instance of the library module whose
     // `zolt_user_types` registers the test shapes of the shape core (Zolt/Physics/Collision/Shape/TestShapes.zig) and
-    // a test material type through the user hook, exactly like an application would (a module import cycle). The
-    // library and the unit tests use the default (empty) module, the parity tests have their own (see below).
+    // the test classes of the factory through the user hook, exactly like an application would (a module import
+    // cycle). The library and the unit tests use the default (empty) module, the parity tests have their own.
     const test_user_types_module = b.createModule(.{
         .root_source_file = b.addWriteFiles().add("zolt_user_types.zig",
             \\//! `zolt_user_types` of the inline tests: the test shapes, the test material and the test constraint of Zolt
             \\//! (only declared in tests).
-            \\const test_shapes = @import("zolt").test_shapes;
-            \\pub const registrations = test_shapes.registrations;
-            \\pub const material_types = test_shapes.material_types;
-            \\pub const constraint_settings_types = @import("zolt").test_constraints.constraint_settings_types;
+            \\const zolt = @import("zolt");
+            \\pub const registrations = zolt.test_shapes.registrations;
+            \\pub const serializable_types = zolt.test_shapes.serializable_types ++ zolt.test_constraints.serializable_types;
             \\
         ),
         .target = target,

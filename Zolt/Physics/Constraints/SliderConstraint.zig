@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -52,10 +53,15 @@ const AxisConstraintPart = @import("ConstraintPart/AxisConstraintPart.zig").Axis
 
 /// Slider constraint settings, used to create a slider constraint
 pub const SliderConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, SliderConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SliderConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "SliderConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "SliderConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -762,7 +768,7 @@ test "SliderConstraintSettings: defaults, binary state, restoreFromBinaryState t
     try testing.expectEqual(SpringSettings{}, settings.limits_spring_settings);
     try testing.expectEqual(@as(f32, 0.0), settings.max_friction_force);
     try testing.expectEqual(MotorSettings{}, settings.motor_settings);
-    try testing.expectEqualStrings("SliderConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("SliderConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // SetSliderAxis: both slider axes and a perpendicular normal axis on both bodies
     const axis = Vec3.init(1, 2, -2).normalized();
@@ -797,14 +803,14 @@ test "SliderConstraintSettings: defaults, binary state, restoreFromBinaryState t
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 1 + 2 * 3 * @sizeOf(Real) + 4 * 12 + 3 * 4 + 9 + 25), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("SliderConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("SliderConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     const limits_offset = 21 + 4 + 1 + 2 * 3 * @sizeOf(Real) + 4 * 12;
     try testing.expectEqual(@as(f32, -1.5), @as(f32, @bitCast(std.mem.readInt(u32, bytes[limits_offset..][0..4], .little))));
     try testing.expectEqual(@as(f32, 7.0), @as(f32, @bitCast(std.mem.readInt(u32, bytes[limits_offset + 8 ..][0..4], .little))));
     try testing.expectEqual(@as(u8, 1), bytes[limits_offset + 12]); // StiffnessAndDamping
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

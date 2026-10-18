@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -28,10 +29,15 @@ const PointConstraintPart = @import("ConstraintPart/PointConstraintPart.zig").Po
 
 /// Point constraint settings, used to create a point constraint
 pub const PointConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PointConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PointConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PointConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "PointConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -294,17 +300,6 @@ fn testSaveSettings(allocator: Allocator, settings: *const ConstraintSettings) !
     return data.toOwnedSlice();
 }
 
-/// The RTTI names of the settings classes of RegisterTypes.constraint_settings_types that are still stubs (`is_stub`)
-const stub_settings_names = blk: {
-    var names: []const []const u8 = &.{};
-    for (@import("../../RegisterTypes.zig").constraint_settings_types) |T| {
-        if (@hasDecl(T, "is_stub")) names = names ++ .{T.rtti_name};
-    }
-    var result: [names.len][]const u8 = undefined;
-    @memcpy(&result, names);
-    break :blk result;
-};
-
 /// ConstraintSettings.restoreFromBinaryState of bytes
 fn testRestoreSettings(allocator: Allocator, bytes: []const u8) Allocator.Error!ConstraintSettings.ConstraintResult {
     var reader: std.Io.Reader = .fixed(bytes);
@@ -320,7 +315,7 @@ test "PointConstraintSettings: defaults, binary state, restoreFromBinaryState th
     defer settings.asSettings().deinit();
     try testing.expectEqual(ConstraintSpace.world_space, settings.space);
     try testing.expect(settings.point1.eql(RVec3.zero()) and settings.point2.eql(RVec3.zero()));
-    try testing.expectEqualStrings("PointConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("PointConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     settings.base.base.constraint_priority = 5;
     settings.base.base.user_data = 1234; // Not part of the binary state (Jolt)
@@ -332,7 +327,7 @@ test "PointConstraintSettings: defaults, binary state, restoreFromBinaryState th
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 2 * 3 * @sizeOf(Real)), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("PointConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("PointConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();
@@ -358,11 +353,12 @@ test "PointConstraintSettings: defaults, binary state, restoreFromBinaryState th
         try testing.expectEqualSlices(u8, odd, resaved);
     }
 
-    // An unknown type and every class that is still a stub (Phase 6) are Jolt's "Failed to create instance of type"
-    for ([_][]const u8{"UnknownConstraintSettings"} ++ stub_settings_names) |name| {
+    // An unknown type is Jolt's "Failed to create instance of type". Zolt (D8): so are an abstract class and a class of
+    // another hierarchy, which RegisterTypes.factory knows.
+    for ([_][]const u8{ "UnknownConstraintSettings", "TwoBodyConstraintSettings", "PathConstraintPathHermite" }) |name| {
         var odd = try allocator.dupe(u8, bytes);
         defer allocator.free(odd);
-        std.mem.writeInt(u32, odd[0..4], ConstraintSettings.rttiHash(name), .little);
+        std.mem.writeInt(u32, odd[0..4], RTTI.hashName(name), .little);
         var result = try testRestoreSettings(allocator, odd);
         defer result.deinit();
         try testing.expectEqualStrings("Failed to create instance of type", result.getError());

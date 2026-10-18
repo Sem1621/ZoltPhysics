@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
@@ -43,10 +44,15 @@ const RackAndPinionConstraintPart = @import("ConstraintPart/RackAndPinionConstra
 
 /// Rack and pinion constraint (slider & gear) settings
 pub const RackAndPinionConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, RackAndPinionConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(RackAndPinionConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "RackAndPinionConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "RackAndPinionConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -422,7 +428,7 @@ test "RackAndPinionConstraintSettings: defaults, SetRatio, binary state, restore
     try testing.expectEqual(ConstraintSpace.world_space, settings.space);
     try testing.expect(settings.hinge_axis.eql(Vec3.axisX()) and settings.slider_axis.eql(Vec3.axisX()));
     try testing.expectEqual(@as(f32, 1.0), settings.ratio);
-    try testing.expectEqualStrings("RackAndPinionConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("RackAndPinionConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // SetRatio: 2 pi * (teeth of the rack) / (rack length * teeth of the pinion), in Jolt's order of operations
     var two_pi: f32 = 2.0 * math.pi;
@@ -457,11 +463,11 @@ test "RackAndPinionConstraintSettings: defaults, SetRatio, binary state, restore
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 2 * 12 + 4), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("RackAndPinionConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("RackAndPinionConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, 12.5))), std.mem.readInt(u32, bytes[49..53], .little));
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

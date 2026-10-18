@@ -495,7 +495,7 @@ test "WheeledVehicle: constraint and controller settings, binary state of the se
     defer result.deinit();
     try expect(result.isValid() and !in_wrapper.isEOF() and !in_wrapper.isFailed());
     const restored = virtual.downcast(VehicleConstraintSettings, result.getPtr().?);
-    try expect(restored.base.getRTTIHash() == ConstraintSettings.rttiHash("VehicleConstraintSettings"));
+    try expect(restored.base.getRTTIHash() == zolt.RTTI.hashName("VehicleConstraintSettings"));
     try expect(restored.anti_roll_bars.items.len == 2);
     const rcs = virtual.downcast(WheeledVehicleControllerSettings, restored.controller.ptr.?);
     try expect(rcs.differentials.items.len == 2 and rcs.differentials.items[1].left_wheel == bl_wheel);

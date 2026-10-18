@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -31,7 +32,14 @@ const ConstraintType = ConstraintFile.ConstraintType;
 
 /// Base class for settings for all constraints that involve 2 bodies
 pub const TwoBodyConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, TwoBodyConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(TwoBodyConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "TwoBodyConstraintSettings",
+        .kind = .abstract,
+        .bases = &.{ConstraintSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// The virtual function that TwoBodyConstraintSettings adds
     pub const VTable = struct {

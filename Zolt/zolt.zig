@@ -70,6 +70,7 @@ pub const STLLocalAllocator = @import("Core/STLLocalAllocator.zig").STLLocalAllo
 pub const STLTempAllocator = @import("Core/STLTempAllocator.zig").STLTempAllocator;
 pub const StreamIn = @import("Core/StreamIn.zig").StreamIn;
 pub const StreamOut = @import("Core/StreamOut.zig").StreamOut;
+pub const StreamUtils = @import("Core/StreamUtils.zig");
 pub const StreamInWrapper = @import("Core/StreamWrapper.zig").StreamInWrapper;
 pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
 pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
@@ -609,6 +610,7 @@ const source_files = .{
     @import("Core/STLTempAllocator.zig"),
     @import("Core/StreamIn.zig"),
     @import("Core/StreamOut.zig"),
+    @import("Core/StreamUtils.zig"),
     @import("Core/StreamWrapper.zig"),
     @import("Core/StridedPtr.zig"),
     @import("Core/StringTools.zig"),

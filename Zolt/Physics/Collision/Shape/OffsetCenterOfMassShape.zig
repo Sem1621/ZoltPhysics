@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -64,7 +65,14 @@ const Registry = CollisionDispatch.Registry;
 
 /// Class that constructs an OffsetCenterOfMassShape
 pub const OffsetCenterOfMassShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, OffsetCenterOfMassShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(OffsetCenterOfMassShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "OffsetCenterOfMassShapeSettings",
+        .kind = .virtual,
+        .bases = &.{DecoratedShapeSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -76,6 +84,13 @@ pub const OffsetCenterOfMassShapeSettings = struct {
     /// Constructor (the default constructor, for deserialization)
     pub fn initDefault(allocator: Allocator) OffsetCenterOfMassShapeSettings {
         return .{ .base = .initDefault(OffsetCenterOfMassShapeSettings, allocator) };
+    }
+
+    /// new OffsetCenterOfMassShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*OffsetCenterOfMassShapeSettings {
+        const self = try allocator.create(OffsetCenterOfMassShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Construct with shape settings, can be serialized (settings on the stack: `defer settings.deinit()`).

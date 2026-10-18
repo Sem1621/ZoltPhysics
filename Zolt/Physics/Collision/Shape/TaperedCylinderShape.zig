@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const Ref = @import("../../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -68,7 +69,14 @@ const tapered_cylinder_face = [_]Vec3{
 
 /// Class that constructs a TaperedCylinderShape
 pub const TaperedCylinderShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, TaperedCylinderShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TaperedCylinderShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "TaperedCylinderShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+    });
+    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
+    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -82,6 +90,13 @@ pub const TaperedCylinderShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) TaperedCylinderShapeSettings {
         return .{ .base = .init(TaperedCylinderShapeSettings, allocator, null) };
+    }
+
+    /// new TaperedCylinderShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*TaperedCylinderShapeSettings {
+        const self = try allocator.create(TaperedCylinderShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a tapered cylinder centered around the origin with bottom at (0, -half_height_of_tapered_cylinder, 0) with radius bottom_radius and top at (0, half_height_of_tapered_cylinder, 0) with radius top_radius
