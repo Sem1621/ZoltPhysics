@@ -27,7 +27,8 @@
 //! S17) is compared by cross-reading: the C++ side reads Zolt's bytes and must write its own bytes again.
 //!
 //! The C++ side of P2 to P7 reads with the Factory after RegisterTypes and with allocation hooks that zero every block
-//! and defer frees until the call returns. Every C++ read starts with errno = 0 (D7).
+//! and defer frees until the call returns. Every such call checks that its hooks were still installed at the end (-5
+//! otherwise, a harness error). Every C++ read starts with errno = 0 (D7).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -45,8 +46,6 @@ const StreamType = zolt.ObjectStream.StreamType;
 const Schema = schema_mod.Schema;
 const Class = schema_mod.Class;
 const cppResult = schema_mod.cppResult;
-
-const log = std.log.scoped(.zolt_parity);
 
 // Reading and writing on both sides --------------------------------------------------------------------------------
 
@@ -69,7 +68,7 @@ const formats = [_]gen.Format{ .text, .binary };
 
 /// C++: sReadObject of `bytes` as `class`, sWriteObject of the main object in both formats (null: the read failed)
 fn cppResave(allocator: Allocator, bytes: []const u8, class: [:0]const u8) !?Resaved {
-    const result = schema_mod.jolt_os_resave(bytes.ptr, bytes.len, class);
+    const result = try schema_mod.quarantined(schema_mod.jolt_os_resave(bytes.ptr, bytes.len, class));
     if (result == -1) return null;
     if (result != 0) return error.HarnessError;
     const text = try allocator.dupe(u8, cppResult(0));
@@ -246,6 +245,18 @@ fn mustResave(allocator: Allocator, side: enum { jolt, zolt }, bytes: []const u8
     };
 }
 
+// The harness itself ------------------------------------------------------------------------------------------------
+
+test {
+    // The tests of the generator rules (StreamGenerator.zig)
+    _ = gen;
+}
+
+test "ObjectStream harness: the C++ allocation quarantine stays installed, zero fills blocks and defers frees" {
+    // -5: the hooks are lost after the class lookup of the entry points, -6: the RegisterTypes Factory gained classes
+    try std.testing.expectEqual(@as(c_int, 0), schema_mod.jolt_os_quarantine_check());
+}
+
 // P1 ----------------------------------------------------------------------------------------------------------------
 
 /// The schema line of `rtti` in the format of jolt_os_class_schema
@@ -299,6 +310,11 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
     const schema = try schema_mod.get();
     var mismatches: usize = 0;
     var compared: usize = 0;
+    // The classes that are not compared in full, printed at the end (log.info would not show in a test run)
+    var not_declared: std.ArrayList([]const u8) = .empty;
+    defer not_declared.deinit(allocator);
+    var pending_classes: std.ArrayList([]const u8) = .empty;
+    defer pending_classes.deinit(allocator);
     for (schema.classes) |*c| {
         if (c.phase9) continue;
         const rtti = c.zolt orelse {
@@ -306,7 +322,7 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
             if (schema_mod.has_register_types_factory) {
                 std.debug.print("{s} is not in RegisterTypes.factory\n", .{c.name});
                 mismatches += 1;
-            } else log.info("P1: {s} is not declared yet", .{c.name});
+            } else try not_declared.append(allocator, c.name);
             continue;
         };
         compared += 1;
@@ -327,7 +343,7 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
         defer allocator.free(jolt_line);
         // A pending class (or a class with a pending base) has no attributes yet: name, hash, kind and bases only
         const pending = schema_mod.hasPendingBase(rtti);
-        if (pending) log.info("P1: {s} is pending: name, hash, kind and bases only", .{c.name});
+        if (pending) try pending_classes.append(allocator, c.name);
         const same = if (pending) std.mem.eql(u8, schemaHeader(zolt_line), schemaHeader(jolt_line)) else std.mem.eql(u8, zolt_line, jolt_line);
         if (!same) {
             std.debug.print("schema of {s}{s}\n  zolt: {s}\n  jolt: {s}\n", .{ c.name, if (pending) " (pending)" else "", zolt_line, jolt_line });
@@ -354,8 +370,17 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
             }
         }
     }
+    printNames("P1: not declared yet, not compared", not_declared.items);
+    printNames("P1: pending, compared by name, hash, kind and bases only", pending_classes.items);
     try std.testing.expect(compared > 0);
     try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+fn printNames(label: []const u8, names: []const []const u8) void {
+    if (names.len == 0) return;
+    std.debug.print("{s} ({d}):", .{ label, names.len });
+    for (names) |name| std.debug.print(" {s}", .{name});
+    std.debug.print("\n", .{});
 }
 
 /// The classes outside RegisterTypes that the C++ side registers too (EnsureFactory): every primitive, the
@@ -435,11 +460,14 @@ test "ObjectStream P2: the defaults of every creatable class, text and binary" {
         const ctx: Context = .{ .layer = "P2", .class = c.name };
         compared += 1;
 
-        try std.testing.expectEqual(@as(c_int, 0), schema_mod.jolt_os_default_write(c.name));
+        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_default_write(c.name)));
         const jolt: Resaved = .{ .text = try allocator.dupe(u8, cppResult(0)), .binary = try allocator.dupe(u8, cppResult(1)) };
         defer jolt.deinit(allocator);
 
-        const object = (try rtti.createObject(allocator)).?;
+        const object = (try rtti.createObject(allocator)) orelse {
+            ctx.report("Jolt creates the class, Zolt cannot (is its kind right?)");
+            return error.ParityMismatch;
+        };
         defer rtti.destructObject(object, allocator);
         const z: Resaved = .{ .text = try zoltWrite(allocator, object, rtti, .text), .binary = try zoltWrite(allocator, object, rtti, .binary) };
         defer z.deinit(allocator);
@@ -513,7 +541,9 @@ test "ObjectStream P4: old schemas and odd streams (mutations of random streams)
     var buffer: [512]usize = undefined;
     const classes = mainClasses(schema, &buffer);
     try std.testing.expect(classes.len > 0);
-    var applied: usize = 0;
+    // Per mutation: how often it was applied, and how often both libraries read the stream
+    var applied: std.EnumArray(gen.Generator.Mutation, usize) = .initFill(0);
+    var read: std.EnumArray(gen.Generator.Mutation, usize) = .initFill(0);
     for (classes) |class| {
         const c = &schema.classes[class];
         for (std.enums.values(gen.Generator.Mutation)) |mutation| {
@@ -528,7 +558,7 @@ test "ObjectStream P4: old schemas and odd streams (mutations of random streams)
                     defer arena.deinit();
                     var g = try gen.Generator.init(arena.allocator(), schema, r, class);
                     if (!try g.mutate(mutation)) continue;
-                    applied += 1;
+                    applied.getPtr(mutation).* += 1;
                     // Sometimes more changes on top
                     for (0..r.uintLessThan(usize, 3)) |_| {
                         const other = r.enumValue(gen.Generator.Mutation);
@@ -538,12 +568,34 @@ test "ObjectStream P4: old schemas and odd streams (mutations of random streams)
                     try g.finish();
                     const bytes = try gen.write(arena.allocator(), g.doc, f, r);
                     const ctx: Context = .{ .layer = "P4", .class = c.name, .detail = @tagName(mutation), .seed = seed };
-                    _ = try roundTrip(allocator, bytes, g.doc.request, ctx, .full);
+                    if (try roundTrip(allocator, bytes, g.doc.request, ctx, .full)) read.getPtr(mutation).* += 1;
                 }
             }
         }
     }
-    try std.testing.expect(applied > 0);
+
+    // The test must be able to fail. A generator error could make every mutated stream unreadable, and both sides would
+    // agree. So a mutation that keeps the main object readable must be read at least once, and a main object of the
+    // wrong class must make a read fail at least once. (extra_object, undeclared_object and main_null_identifier can put
+    // an object of another class first, so they may fail every time.)
+    var total: usize = 0;
+    var weak: usize = 0;
+    for (std.enums.values(gen.Generator.Mutation)) |mutation| {
+        const n = applied.get(mutation);
+        total += n;
+        if (n == 0) continue;
+        const bites = switch (mutation) {
+            .extra_object, .undeclared_object, .main_null_identifier => true,
+            .wrong_main_class => read.get(mutation) < n,
+            else => read.get(mutation) > 0,
+        };
+        if (!bites) {
+            std.debug.print("P4 {s}: applied {d} times, both libraries read {d} of the streams\n", .{ @tagName(mutation), n, read.get(mutation) });
+            weak += 1;
+        }
+    }
+    try std.testing.expect(total > 0);
+    try std.testing.expectEqual(@as(usize, 0), weak);
 }
 
 /// Old and odd streams of the prototype (SerializationArchitecture.md section 10), read as `class` when it is ready
@@ -604,7 +656,7 @@ test "ObjectStream P5: every prefix of the default and random streams" {
         const c = &schema.classes[class];
 
         // The defaults (C++ bytes)
-        try std.testing.expectEqual(@as(c_int, 0), schema_mod.jolt_os_default_write(c.name));
+        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_default_write(c.name)));
         const defaults: Resaved = .{ .text = try allocator.dupe(u8, cppResult(0)), .binary = try allocator.dupe(u8, cppResult(1)) };
         defer defaults.deinit(allocator);
         for (formats) |f| {
@@ -655,12 +707,18 @@ fn loadAsset(allocator: Allocator, asset: Asset) !?[]u8 {
     for (try declaredClasses(arena.allocator(), jolt.text)) |name| {
         if (schema_mod.isPhase9(name)) continue;
         const c = try schema.get(name);
-        if (!c.ready()) {
-            log.info("{s}: pending, {s} is not declared or reaches a pending class", .{ asset.path, name });
-            waiting = true;
+        if (c.ready()) continue;
+        // Printed (log.info would not show in a test run): the test is skipped while a class it needs is pending
+        if (!waiting) std.debug.print("{s} is pending, skipped until these classes are ready:", .{asset.path});
+        waiting = true;
+        if (c.zolt == null) {
+            std.debug.print(" {s} (not declared)", .{name});
+        } else if (c.waits_for) |p| {
+            if (std.mem.eql(u8, p.name, name)) std.debug.print(" {s}", .{name}) else std.debug.print(" {s} (reaches {s})", .{ name, p.name });
         }
     }
     if (waiting) {
+        std.debug.print("\n", .{});
         allocator.free(bytes);
         return null;
     }
@@ -709,7 +767,7 @@ fn assetTest(comptime index: usize) !void {
     // SaveBinaryState of the loaded object
     if (try zoltBinaryState(allocator, bytes, asset.class)) |zolt_state| {
         defer allocator.free(zolt_state);
-        try std.testing.expectEqual(@as(c_int, 0), schema_mod.jolt_os_asset_binary_state(bytes.ptr, bytes.len, asset.class));
+        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_asset_binary_state(bytes.ptr, bytes.len, asset.class)));
         try expectSame(ctx, "SaveBinaryState", zolt_state, cppResult(2));
     }
 }

@@ -5,7 +5,8 @@
 // SaveBinaryState (a function of the asset's class) and the classes of UnitTests/ObjectStream/ObjectStreamTest.cpp (P8).
 //
 // Results that are bytes stay in a result slot (jolt_os_result) until the next call. Return values: 0 or more success,
-// -1 read failed (Jolt's sReadObject returns false), -2 write failed, -4 unknown class or not creatable.
+// -1 read failed (Jolt's sReadObject returns false), -2 write failed, -4 unknown class or not creatable, -5 the allocation
+// quarantine was lost during the call (a harness error), -6 the RegisterTypes Factory gained classes (a harness error).
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -31,8 +32,8 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
-#include <vector>
 
 using namespace JPH;
 
@@ -193,9 +194,14 @@ static TestSerializable *CreateTestObject()
 
 // The global Factory: RegisterTypes() and the classes that it does not reach (the unit test classes, AABox, Triangle and
 // the primitives that no registered class uses). Schemas (P1) are looked up here, so the extra classes can be compared.
+// Never call it inside a UseRegisterTypesFactory or Quarantine scope: it registers into Factory::sInstance, which is then
+// the RegisterTypes Factory.
 static void EnsureFactory()
 {
-	RegisterDefaultAllocator();
+	// Jolt's allocator, unless one is installed already (SimulationReference.cpp installs its own before main). Installing
+	// it again would remove the hooks of a Quarantine.
+	if (Allocate == nullptr)
+		RegisterDefaultAllocator();
 	if (Factory::sInstance == nullptr)
 	{
 		Factory::sInstance = new Factory();
@@ -220,9 +226,9 @@ static Array<const RTTI *> *sRegisterTypesClasses = nullptr;
 
 static Factory *GetRegisterTypesFactory()
 {
-	EnsureFactory();
 	if (sRegisterTypesFactory == nullptr)
 	{
+		EnsureFactory(); // Jolt's allocator and the global Factory, before Factory::sInstance changes below
 		Factory *saved = Factory::sInstance;
 		sRegisterTypesFactory = new Factory();
 		Factory::sInstance = sRegisterTypesFactory;
@@ -236,7 +242,8 @@ static Factory *GetRegisterTypesFactory()
 	return sRegisterTypesFactory;
 }
 
-// Makes the RegisterTypes Factory Factory::sInstance for the lifetime of the scope
+// Makes the RegisterTypes Factory Factory::sInstance for the lifetime of the scope. Inside the scope, use
+// sRegisterTypesFactory directly (the constructor made it), never EnsureFactory.
 class UseRegisterTypesFactory
 {
 public:
@@ -279,6 +286,21 @@ public:
 		for (void *block : sBlocks)
 			free(block);
 		sBlocks.clear();
+		sDoubleFrees = 0;
+	}
+
+	/// The return value of a quarantined call: inResult, or -5 when the hooks were replaced during the call or a block
+	/// was freed twice. Every entry point returns through it, so a lost quarantine cannot go unnoticed.
+	static int					sCheck(int inResult)
+	{
+		bool installed = Allocate == sAllocate && Reallocate == sReallocate && Free == sFree && AlignedAllocate == sAlignedAllocate && AlignedFree == sAlignedFree;
+		return installed && sDoubleFrees == 0? inResult : -5;
+	}
+
+	/// True when inBlock was freed in this scope: it is kept until the scope ends
+	static bool					sIsDeferred(void *inBlock)
+	{
+		return sBlocks.count(inBlock) > 0;
 	}
 
 private:
@@ -303,8 +325,9 @@ private:
 
 	static void					sFree(void *inBlock)
 	{
-		if (inBlock != nullptr)
-			sBlocks.push_back(inBlock);
+		// A block that is freed twice is counted (and freed once): sCheck reports it
+		if (inBlock != nullptr && !sBlocks.insert(inBlock).second)
+			++sDoubleFrees;
 	}
 
 	static void *				sAlignedAllocate(size_t inSize, size_t inAlignment)
@@ -321,8 +344,9 @@ private:
 		sFree(inBlock);
 	}
 
-	// std::vector allocates with the global new, outside of the hooks
-	static inline std::vector<void *> sBlocks;
+	// std::unordered_set allocates with the global new, outside of the hooks
+	static inline std::unordered_set<void *> sBlocks;
+	static inline int			sDoubleFrees = 0;
 
 	AllocateFunction			mSavedAllocate;
 	ReallocateFunction			mSavedReallocate;
@@ -380,9 +404,10 @@ static bool WriteObject(std::string &outBytes, const void *inObject, const RTTI 
 	return ok;
 }
 
+// A creatable class of the RegisterTypes Factory (inside a UseRegisterTypesFactory scope)
 static const RTTI *FindCreatable(const char *inName)
 {
-	const RTTI *rtti = GetRegisterTypesFactory()->Find(inName);
+	const RTTI *rtti = sRegisterTypesFactory->Find(inName);
 	return rtti != nullptr && !rtti->IsAbstract()? rtti : nullptr;
 }
 
@@ -589,7 +614,7 @@ int jolt_os_probe_attribute(const char *inName, int inIndex, int *outElement, ui
 		*outElement = element_size > 0? 1 : 0;
 		if (depth > 0)
 			*outCounts = probe_counts(element_size);
-		return 0;
+		return Quarantine::sCheck(0);
 	}
 
 	// An instance: an identifier (4 bytes) or class data (nothing, the class is declared without attributes)
@@ -600,7 +625,7 @@ int jolt_os_probe_attribute(const char *inName, int inIndex, int *outElement, ui
 		bool reference = ProbeRead(rtti, attr, class_name, identifier);
 		bool value = ProbeRead(rtti, attr, class_name, std::string());
 		*outElement = reference && !value? 2 : (value && !reference? 3 : 0);
-		return 0;
+		return Quarantine::sCheck(0);
 	}
 	uint64 reference_counts = probe_counts(4);
 	uint64 value_counts = probe_counts(0);
@@ -608,7 +633,7 @@ int jolt_os_probe_attribute(const char *inName, int inIndex, int *outElement, ui
 	bool value = (value_counts & ~uint64(1)) != 0;
 	*outElement = reference && !value? 2 : (value && !reference? 3 : 0);
 	*outCounts = reference? reference_counts : value_counts;
-	return 0;
+	return Quarantine::sCheck(0);
 }
 
 // P2: CreateObject of class inName, written in text (result slot 0) and binary (slot 1)
@@ -622,7 +647,7 @@ int jolt_os_default_write(const char *inName)
 	void *object = rtti->CreateObject();
 	bool ok = WriteObject(sResults[0], object, rtti, 0) && WriteObject(sResults[1], object, rtti, 1);
 	rtti->DestructObject(object);
-	return ok? 0 : -2;
+	return Quarantine::sCheck(ok? 0 : -2);
 }
 
 // P3 to P5, P7: sReadObject of inData as an object of class inName (the main object must be exactly of that class),
@@ -631,15 +656,15 @@ int jolt_os_resave(const uint8 *inData, size_t inSize, const char *inName)
 {
 	UseRegisterTypesFactory use_factory;
 	Quarantine quarantine;
-	const RTTI *rtti = GetRegisterTypesFactory()->Find(inName);
+	const RTTI *rtti = sRegisterTypesFactory->Find(inName);
 	if (rtti == nullptr)
 		return -4;
 	void *object = ReadObject(std::string((const char *)inData, inSize), rtti);
 	if (object == nullptr)
-		return -1;
+		return Quarantine::sCheck(-1);
 	bool ok = WriteObject(sResults[0], object, rtti, 0) && WriteObject(sResults[1], object, rtti, 1);
 	rtti->DestructObject(object);
-	return ok? 0 : -2;
+	return Quarantine::sCheck(ok? 0 : -2);
 }
 
 // P6: one word read as type inType by ObjectStreamTextIn (IStringStream >> T, strtoul for identifiers): 0 uint8,
@@ -673,12 +698,12 @@ int jolt_os_asset_binary_state(const uint8 *inData, size_t inSize, const char *i
 {
 	UseRegisterTypesFactory use_factory;
 	Quarantine quarantine;
-	const RTTI *rtti = GetRegisterTypesFactory()->Find(inName);
+	const RTTI *rtti = sRegisterTypesFactory->Find(inName);
 	if (rtti == nullptr)
 		return -4;
 	void *object = ReadObject(std::string((const char *)inData, inSize), rtti);
 	if (object == nullptr)
-		return -1;
+		return Quarantine::sCheck(-1);
 	std::stringstream data;
 	StreamOutWrapper stream(data);
 	int result = 0;
@@ -692,7 +717,25 @@ int jolt_os_asset_binary_state(const uint8 *inData, size_t inSize, const char *i
 		result = -4;
 	sResults[2] = data.str();
 	rtti->DestructObject(object);
-	return result;
+	return Quarantine::sCheck(result);
+}
+
+// Checks the harness itself, the way every entry point of P2 to P7 runs: the RegisterTypes Factory, the hooks, then the
+// class lookup. The hooks must still be installed, zero fill a block and defer its free, and the RegisterTypes Factory
+// must hold the classes of RegisterTypes only. Returns 0, -5 (the quarantine) or -6 (the Factory).
+int jolt_os_quarantine_check()
+{
+	UseRegisterTypesFactory use_factory;
+	Quarantine quarantine;
+	FindCreatable((*sRegisterTypesClasses)[0]->GetName());
+	uint8 *block = static_cast<uint8 *>(Allocate(64));
+	bool zero_filled = block != nullptr && std::all_of(block, block + 64, [](uint8 inByte) { return inByte == 0; });
+	Free(block);
+	if (!zero_filled || !Quarantine::sIsDeferred(block))
+		return -5;
+	if (sRegisterTypesFactory->GetAllClasses().size() != sRegisterTypesClasses->size())
+		return -6;
+	return Quarantine::sCheck(0);
 }
 
 // P8, TestObjectStreamLoadSave*: writes the test object of ObjectStreamTest.cpp (result slot 0)

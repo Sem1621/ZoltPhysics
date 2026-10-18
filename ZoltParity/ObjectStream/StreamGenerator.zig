@@ -8,14 +8,17 @@
 //!
 //! The rules of section 5 hold for every document:
 //! - counts and string lengths always match the data that follows (Jolt allocates without bound);
-//! - binary bools are 0 or 1, floats are finite and normal (or zero), enums have named values (the Zolt enum's, any
-//!   value for bit flags and integers);
+//! - binary bools are 0 or 1, floats are finite and normal (or zero), also after the reader converts a dvec3 to a Vec3;
+//!   enums have named values (the Zolt enum's, any value for bit flags and integers);
 //! - references form no cycle (an object only references objects that were complete before it), and no reference
-//!   points to the main object (D4);
+//!   points to the object that the reader takes as the main object (D4): the main object is never complete for the
+//!   objects that mutations add, and finish() makes a reference to another first object null;
 //! - no attribute is declared twice for one class (D11), no identifier is used twice (D2);
-//! - an object other than the main object is never of a class derived from the main object's class, so a read that
-//!   succeeds always returns an object of the requested class (the C++ side writes it as that class);
-//! - an attribute whose data is an identifier (a Ref) is never skipped by name (Jolt then reads class data: S15);
+//! - an object other than the main object is never of a class derived from the main object's class, and finish() gives
+//!   the request the class of the object that the reader takes as the main object when that class derives from it. So a
+//!   read that succeeds always returns an object of the requested class (the C++ side writes it as that class);
+//! - an attribute whose data is an identifier (a Ref) is never skipped: not by name, and not inside an object or a class
+//!   by value that the reader skips (Jolt then reads class data: S15);
 //! - nested arrays are never skipped: Jolt's SkipAttributeData reads the counts of all levels first and multiplies
 //!   them, so it misreads a nested array (Zolt does the same); the misread lengths make Jolt allocate without bound;
 //! - raw pointers stay null: an object that only a raw pointer holds leaks in both libraries.
@@ -136,7 +139,7 @@ pub const Generator = struct {
     /// The class of the main object
     main: usize,
     main_object: *Object = undefined,
-    /// Objects whose data is complete (they may be referenced, no cycle can form)
+    /// Objects whose data is complete (they may be referenced, no cycle can form). Never the main object.
     complete: std.ArrayList(*Object) = .empty,
     identifiers: std.AutoHashMapUnmanaged(u32, void) = .empty,
     names: u32 = 0,
@@ -150,6 +153,10 @@ pub const Generator = struct {
         doc.* = .{ .request = schema.classes[main].name };
         var self: Generator = .{ .arena = arena, .schema = schema, .random = random, .doc = doc, .main = main };
         self.main_object = try self.newObject(main, 0);
+        // Objects that mutations add never reference the main object: Jolt deletes a main object that only an
+        // unreferenced object references (D4). The main object is the last object that newObject completed.
+        const last = self.complete.pop();
+        std.debug.assert(last == self.main_object);
 
         // The main object first, the others in creation order or shuffled
         const rest = try arena.dupe(*Object, self.doc.objects.items[1..]);
@@ -354,9 +361,18 @@ pub const Generator = struct {
                 // At most one array level: Jolt skips nested arrays wrongly
                 const depth: u32 = if (r.uintLessThan(u32, 4) == 0) r.uintLessThan(u32, 2) else @min(a.depth, 1);
                 if (data_type == a.data_type and depth == a.depth) return false;
+                // The member that the reader matches by name. Its own type is no retype (an earlier mutation may have
+                // changed the declaration), and an enum member would get a value without a name.
+                const member = self.classAttribute(d.class, a.name);
+                if (member) |m| {
+                    if (data_type == m.data_type and depth == m.depth) return false;
+                }
+                // The reader converts a dvec3 to a Vec3 member and a vec3 to a DVec3 member (S11): doubles in the range
+                // of a float, like convert_vec3
+                const float_range = if (member) |m| depth == 0 and m.depth == 0 and isVec3Type(m.data_type) and isVec3Type(data_type) else false;
                 const key = try self.uniqueName("$retyped");
-                try self.addValues(d.class, key, depth, data_type, false);
-                a.* = .{ .name = a.name, .key = key, .depth = depth, .data_type = data_type, .class_name = "", .element = .primitive };
+                try self.addValues(d.class, key, depth, data_type, float_range);
+                a.* = .{ .name = a.name, .key = key, .depth = depth, .data_type = data_type, .class_name = "", .element = .primitive, .float_range = float_range };
             },
             .convert_vec3 => {
                 const Candidate = struct { declaration: *Declaration, attribute: *AttributeDecl };
@@ -462,19 +478,8 @@ pub const Generator = struct {
             .main_null_identifier => {
                 const main = self.main_object;
                 if (main.identifier == 0 or !self.skippable(main.class)) return false;
-                // The first other object that is created becomes the main object. If it is of the main class, nothing may
-                // reference it: Jolt deletes a main object that only an unreferenced object references (D4).
-                for (self.doc.objects.items) |o| {
-                    if (o == main or o.identifier == 0) continue;
-                    const i = self.schema.find(o.class) orelse continue;
-                    if (!self.schema.classes[i].creatable()) continue;
-                    if (i == self.main) {
-                        for (self.doc.references.items) |s| {
-                            if (s.slot.* == o.identifier) return false;
-                        }
-                    }
-                    break;
-                }
+                // The first other object that is created becomes the main object. finish() makes the references to it
+                // null (D4).
                 main.identifier = 0;
             },
             .dangling_identifier => {
@@ -505,8 +510,14 @@ pub const Generator = struct {
         return true;
     }
 
-    /// After the mutations: give every instance a value for each attribute that its class declares (an instance created
-    /// after a retyped or extra attribute was added has none yet)
+    /// After the mutations:
+    /// - give every instance a value for each attribute that its class declares (an instance created after a retyped or
+    ///   extra attribute was added has none yet);
+    /// - a mutation can put another object first (extra_object, main_null_identifier). When the class of the object that
+    ///   the reader takes as the main object derives from the requested class, request its class: the C++ side writes
+    ///   the main object as the requested class, Jolt's sWriteObject would use its own class;
+    /// - make every reference to that object null: Jolt deletes a main object that only an unreferenced object
+    ///   references (D4).
     pub fn finish(self: *Generator) !void {
         for (self.doc.declarations.items) |d| {
             for (d.attributes.items) |a| {
@@ -519,6 +530,38 @@ pub const Generator = struct {
                 }
             }
         }
+
+        const main = self.readMainObject() orelse return;
+        const class = try self.classIndex(main.class);
+        const request = try self.classIndex(self.doc.request);
+        if (class != request and self.schema.isKindOf(class, request)) self.doc.request = self.schema.classes[class].name;
+        for (self.doc.references.items) |s| {
+            if (s.slot.* == main.identifier) s.slot.* = 0;
+        }
+    }
+
+    /// The object that the reader takes as the main object: the first object that it creates (ObjectStreamIn::Read). It
+    /// skips objects with the null identifier, of an unknown class or of an abstract class, and stops at an object of an
+    /// undeclared class.
+    fn readMainObject(self: *const Generator) ?*Object {
+        for (self.doc.objects.items, 0..) |o, index| {
+            if (self.doc.undeclared_at == index) return null;
+            if (o.identifier == 0) continue;
+            const i = self.schema.find(o.class) orelse continue;
+            if (self.schema.classes[i].abstract) continue;
+            return o;
+        }
+        return null;
+    }
+
+    /// The attribute of `class` that the reader matches with the stream attribute `name` (the first one, S11), null for
+    /// an unknown class or name
+    fn classAttribute(self: *const Generator, class: []const u8, name: []const u8) ?*const Attribute {
+        const index = self.schema.find(class) orelse return null;
+        for (self.schema.classes[index].attributes) |*a| {
+            if (std.mem.eql(u8, a.name, name)) return a;
+        }
+        return null;
     }
 
     fn pickDeclaration(self: *Generator, min_attributes: usize) ?*Declaration {
@@ -543,12 +586,17 @@ pub const Generator = struct {
         return candidates.items[self.random.uintLessThan(usize, candidates.items.len)];
     }
 
-    /// True when the reader can skip the data of `class` (by value, transitively) without misreading the stream: Jolt's
-    /// SkipAttributeData reads every count of a nested array first and multiplies them, which misreads nested arrays
+    /// True when the reader can skip the data of `class` (by value, transitively) without misreading the stream:
+    /// - Jolt's SkipAttributeData reads every count of a nested array first and multiplies them, which misreads nested
+    ///   arrays;
+    /// - a Ref is declared `instance X` but its data is an identifier: skipping it reads class data of X (S15). With X
+    ///   undeclared the skip stops before the identifier, and a binary stream then misreads the rest (D6).
     pub fn skippable(self: *const Generator, class: []const u8) bool {
         const index = self.schema.find(class) orelse return true; // A primitive name, an unknown class
         for (self.schema.classes[index].attributes) |a| {
             if (a.depth >= 2) return false;
+            // An attribute that was not probed (an abstract or Phase 9 class) can be a Ref too
+            if (a.element == .reference or a.element == .unknown) return false;
             if (a.element == .value and !std.mem.eql(u8, a.class_name, class) and !self.skippable(a.class_name)) return false;
         }
         return true;
@@ -581,6 +629,10 @@ pub const Generator = struct {
         out.* = if (data_type == .t_string) .{ .string = try randomString(self.arena, self.random) } else .{ .primitive = randomPrimitive(self.random, data_type, float_range) };
     }
 };
+
+fn isVec3Type(data_type: OSDataType) bool {
+    return data_type == .t_vec3 or data_type == .t_dvec3;
+}
 
 fn enumValue(r: std.Random, a: *const Attribute) u32 {
     const e = a.enum_values orelse return r.uintLessThan(u32, 2);
@@ -619,7 +671,9 @@ fn randomFloatAsDouble(r: std.Random) f64 {
 fn randomInt(r: std.Random, comptime T: type) T {
     const specials = [_]T{ 0, 1, std.math.maxInt(T), std.math.minInt(T) };
     if (r.uintLessThan(u32, 4) == 0) return specials[r.uintLessThan(usize, specials.len)];
-    return if (r.boolean()) r.int(T) else @intCast(r.uintLessThan(u32, 1000));
+    // A small value (below 256 for a uint8)
+    const small: u32 = @min(1000, std.math.maxInt(T));
+    return if (r.boolean()) r.int(T) else @intCast(r.uintLessThan(u32, small));
 }
 
 pub fn randomPrimitive(r: std.Random, data_type: OSDataType, float_range: bool) Primitive {
@@ -890,3 +944,179 @@ const StreamWriter = struct {
         } else try self.writer.print("{e}", .{value});
     }
 };
+
+// Tests of the generator rules: hand made schemas, no C++ side ------------------------------------------------------
+
+const TestClass = struct {
+    name: [:0]const u8,
+    bases: []const []const u8 = &.{},
+    attributes: []const Attribute = &.{},
+};
+
+/// A schema of creatable classes that Zolt declares. IsKindOf follows `bases`.
+fn testSchema(arena: Allocator, classes: []const TestClass) !Schema {
+    const n = classes.len;
+    const list = try arena.alloc(Class, n);
+    for (classes, list) |t, *c| c.* = .{
+        .name = t.name,
+        .line = "",
+        .hash = 0,
+        .abstract = false,
+        .bases = t.bases,
+        .attributes = try arena.dupe(Attribute, t.attributes),
+        .phase9 = false,
+        .outside = false,
+        .primitive = false,
+        .zolt = zolt.RTTI.of(zolt.SpringSettings), // Any RTTI: the class is declared and ready
+    };
+    const kind_of = try arena.alloc(bool, n * n);
+    for (0..n) |i| {
+        for (0..n) |j| kind_of[i * n + j] = testDerives(classes, i, classes[j].name);
+    }
+    return .{ .classes = list, .kind_of = kind_of };
+}
+
+fn testDerives(classes: []const TestClass, index: usize, base: []const u8) bool {
+    if (std.mem.eql(u8, classes[index].name, base)) return true;
+    for (classes[index].bases) |b| {
+        for (classes, 0..) |c, j| {
+            if (std.mem.eql(u8, c.name, b) and testDerives(classes, j, base)) return true;
+        }
+    }
+    return false;
+}
+
+fn testAttribute(name: []const u8, data_type: OSDataType, element: Element, class_name: []const u8) Attribute {
+    return .{ .name = name, .type_text = "", .primitive = if (class_name.len > 0) class_name else "", .depth = 0, .data_type = data_type, .class_name = class_name, .element = element };
+}
+
+/// The object that the reader takes as the main object: the first object that it creates (ObjectStreamIn::Read). A copy
+/// of Generator.readMainObject, so that the tests do not rely on the code that they check.
+fn testReadMain(schema: *const Schema, doc: *const Document) ?*Object {
+    for (doc.objects.items, 0..) |o, index| {
+        if (doc.undeclared_at == index) return null;
+        if (o.identifier == 0) continue;
+        const i = schema.find(o.class) orelse continue;
+        if (schema.classes[i].abstract) continue;
+        return o;
+    }
+    return null;
+}
+
+test "ObjectStream harness: random values of every primitive type (floats finite and normal or zero)" {
+    for (0..2000) |seed| {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        for (schema_mod.primitive_data_types) |data_type| {
+            if (data_type == .t_string) continue;
+            switch (randomPrimitive(prng.random(), data_type, false)) {
+                .float => |x| try std.testing.expect(x == 0 or std.math.isNormal(x)),
+                .double => |x| try std.testing.expect(x == 0 or std.math.isNormal(x)),
+                inline .float3, .float4, .vec3, .vec4, .quat, .mat44, .double3, .dvec3 => |v| for (v) |x| try std.testing.expect(x == 0 or std.math.isNormal(x)),
+                .dmat44 => |v| {
+                    for (v.columns) |x| try std.testing.expect(x == 0 or std.math.isNormal(x));
+                    for (v.translation) |x| try std.testing.expect(x == 0 or std.math.isNormal(x));
+                },
+                else => {},
+            }
+        }
+    }
+}
+
+test "ObjectStream harness: the generator never skips a Ref, also not inside a skipped object or class by value" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema = try testSchema(arena, &.{
+        .{ .name = "Target", .attributes = &.{testAttribute("mValue", .t_float, .primitive, "")} },
+        .{ .name = "Holder", .attributes = &.{ testAttribute("mValue", .t_float, .primitive, ""), testAttribute("mTarget", .instance, .reference, "Target") } },
+        .{ .name = "Outer", .attributes = &.{testAttribute("mHolder", .instance, .value, "Holder")} },
+        .{ .name = "Plain", .attributes = &.{ testAttribute("mValue", .t_float, .primitive, ""), testAttribute("mTarget", .instance, .value, "Target") } },
+    });
+    var prng: std.Random.DefaultPrng = .init(1);
+    const g = try Generator.init(arena, &schema, prng.random(), 3);
+    try std.testing.expect(g.skippable("Target"));
+    try std.testing.expect(g.skippable("Plain"));
+    // A Ref is declared `instance Target` but its data is an identifier: skipping it reads class data (S15)
+    try std.testing.expect(!g.skippable("Holder"));
+    try std.testing.expect(!g.skippable("Outer"));
+}
+
+test "ObjectStream harness: a vec3 member retyped to dvec3 gets doubles in the range of a float (the reader converts them)" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema = try testSchema(arena, &.{
+        .{ .name = "Body", .attributes = &.{ testAttribute("mPosition", .t_vec3, .primitive, ""), testAttribute("mRadius", .t_float, .primitive, "") } },
+    });
+    var converted: usize = 0;
+    for (0..400) |seed| {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        var g = try Generator.init(arena, &schema, prng.random(), 0);
+        if (!try g.mutate(.retype_attribute)) continue;
+        try g.finish();
+        for (g.doc.declarations.items) |d| {
+            for (d.attributes.items) |a| {
+                if (!std.mem.eql(u8, a.name, "mPosition") or a.depth != 0 or a.data_type != .t_dvec3) continue;
+                converted += 1;
+                try std.testing.expect(a.float_range);
+                for (g.doc.instances.items) |instance| {
+                    const value = instance.get(a.key) orelse continue;
+                    for (value.primitive.dvec3) |x| {
+                        const f: f32 = @floatCast(x);
+                        try std.testing.expect(std.math.isFinite(f) and (f == 0 or std.math.isNormal(f)));
+                    }
+                }
+            }
+        }
+    }
+    try std.testing.expect(converted > 0);
+}
+
+test "ObjectStream harness: no reference points to the object that the reader takes as the main object (D4)" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema = try testSchema(arena, &.{
+        .{ .name = "Node", .attributes = &.{ testAttribute("mValue", .t_float, .primitive, ""), testAttribute("mChild", .instance, .reference, "Node") } },
+        .{ .name = "Leaf", .attributes = &.{testAttribute("mNode", .instance, .reference, "Node")} },
+    });
+    const mutations = [_]Generator.Mutation{ .extra_object, .null_identifier_object, .main_null_identifier, .wrong_type_identifier };
+    var checked: usize = 0;
+    for (0..300) |seed| {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const r = prng.random();
+        var g = try Generator.init(arena, &schema, r, 0);
+        for (0..1 + r.uintLessThan(usize, 3)) |_| _ = try g.mutate(mutations[r.uintLessThan(usize, mutations.len)]);
+        try g.finish();
+        const main = testReadMain(&schema, g.doc) orelse continue;
+        checked += 1;
+        for (g.doc.references.items) |s| try std.testing.expect(s.slot.* != main.identifier);
+    }
+    try std.testing.expect(checked > 0);
+}
+
+test "ObjectStream harness: the object that the reader takes as the main object is of the requested class, or not kind of it" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema = try testSchema(arena, &.{
+        .{ .name = "A", .attributes = &.{testAttribute("mValue", .t_float, .primitive, "")} },
+        .{ .name = "B", .attributes = &.{testAttribute("mValue", .t_float, .primitive, "")} },
+        .{ .name = "C", .bases = &.{"B"}, .attributes = &.{ testAttribute("mValue", .t_float, .primitive, ""), testAttribute("mExtra", .t_float, .primitive, "") } },
+    });
+    const mutations = [_]Generator.Mutation{ .wrong_main_class, .extra_object, .main_null_identifier };
+    var checked: usize = 0;
+    for (0..300) |seed| {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const r = prng.random();
+        var g = try Generator.init(arena, &schema, r, 0);
+        for (0..2 + r.uintLessThan(usize, 2)) |_| _ = try g.mutate(mutations[r.uintLessThan(usize, mutations.len)]);
+        try g.finish();
+        const main = testReadMain(&schema, g.doc) orelse continue;
+        // Not kind of the request: the read fails on both sides
+        if (!schema.isKindOf(schema.find(main.class).?, schema.find(g.doc.request).?)) continue;
+        checked += 1;
+        try std.testing.expectEqualStrings(g.doc.request, main.class);
+    }
+    try std.testing.expect(checked > 0);
+}

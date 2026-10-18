@@ -28,12 +28,23 @@ pub extern fn jolt_os_read_word(word: [*]const u8, size: usize, word_type: c_int
 pub extern fn jolt_os_asset_binary_state(data: [*]const u8, size: usize, name: [*:0]const u8) c_int;
 pub extern fn jolt_os_unit_test_write(binary: c_int) c_int;
 pub extern fn jolt_os_unit_test_resave(data: [*]const u8, size: usize, binary: c_int, ref_count: *u32, casts_ok: *c_int) c_int;
+pub extern fn jolt_os_quarantine_check() c_int;
 
 /// The bytes of a C++ result slot (valid until the next C++ call)
 pub fn cppResult(index: c_int) []const u8 {
     var size: usize = 0;
     const data = jolt_os_result(index, &size);
     return data[0..size];
+}
+
+/// The result of a C++ call that runs in the allocation quarantine (P2 to P7). -5 means that the quarantine was lost
+/// during the call: its hooks were replaced, or a block was freed twice. That is a harness error.
+pub fn quarantined(result: c_int) error{HarnessError}!c_int {
+    if (result == -5) {
+        std.debug.print("the C++ allocation quarantine was lost during a call (its hooks were replaced or a block was freed twice)\n", .{});
+        return error.HarnessError;
+    }
+    return result;
 }
 
 /// Phase 9 (S17): SoftBodyCreationSettings, SoftBodySharedSettings and its 11 nested classes. P1 skips them and drops
@@ -390,7 +401,7 @@ fn build(arena: Allocator) !Schema {
             for (c.attributes, 0..) |*a, index| {
                 var element: c_int = 0;
                 var counts: u64 = 0;
-                if (jolt_os_probe_attribute(c.name, @intCast(index), &element, &counts) != 0) return error.HarnessError;
+                if (try quarantined(jolt_os_probe_attribute(c.name, @intCast(index), &element, &counts)) != 0) return error.HarnessError;
                 a.counts = counts;
                 a.element = switch (element) {
                     1 => if (a.data_type == .pointer) .pointer else if (a.primitive == null) .enumeration else .primitive,
