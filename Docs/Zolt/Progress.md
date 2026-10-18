@@ -685,7 +685,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
 of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
 [SerializationArchitecture.md](SerializationArchitecture.md) S18). The parity harness skips a pending class and
-every class that reaches one. ✅ 9 declared · 🟡 72 pending (`serialization_pending`) · ❌ 0 not declared
+every class that reaches one. ✅ 31 declared · 🟡 50 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 
@@ -693,36 +693,36 @@ every class that reaches one. ✅ 9 declared · 🟡 72 pending (`serialization_
 |-------|--------|-----|
 | `AABox` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `BodyCreationSettings` | 🟡 pending | `Zolt/Physics/Body/BodyCreationSettings.zig` |
-| `BoxShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
-| `CapsuleShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
+| `BoxShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
+| `CapsuleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
 | `CollisionGroup` | 🟡 pending | `Zolt/Physics/Collision/CollisionGroup.zig` |
 | `Color` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
-| `CompoundShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
-| `CompoundShapeSettings::SubShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
+| `CompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
+| `CompoundShapeSettings::SubShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
 | `ConeConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/ConeConstraint.zig` |
 | `ConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/Constraint.zig` |
-| `ConvexHullShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/ConvexHullShape.zig` |
-| `ConvexShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/ConvexShape.zig` |
-| `CylinderShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/CylinderShape.zig` |
-| `DecoratedShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/DecoratedShape.zig` |
+| `ConvexHullShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ConvexHullShape.zig` |
+| `ConvexShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ConvexShape.zig` |
+| `CylinderShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CylinderShape.zig` |
+| `DecoratedShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/DecoratedShape.zig` |
 | `DistanceConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/DistanceConstraint.zig` |
-| `EmptyShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
+| `EmptyShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
 | `FixedConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/FixedConstraint.zig` |
 | `GearConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/GearConstraint.zig` |
 | `GroupFilter` | 🟡 pending | `Zolt/Physics/Collision/GroupFilter.zig` |
 | `GroupFilterTable` | 🟡 pending | `Zolt/Physics/Collision/GroupFilterTable.zig` |
-| `HeightFieldShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/HeightFieldShape.zig` |
+| `HeightFieldShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/HeightFieldShape.zig` |
 | `HingeConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/HingeConstraint.zig` |
 | `IndexedTriangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `IndexedTriangleNoMaterial` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
 | `LinearCurve` | 🟡 pending | `Zolt/Core/LinearCurve.zig` |
 | `LinearCurve::Point` | 🟡 pending | `Zolt/Core/LinearCurve.zig` |
 | `MassProperties` | 🟡 pending | `Zolt/Physics/Body/MassProperties.zig` |
-| `MeshShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
+| `MeshShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
 | `MotorSettings` | ✅ declared | `Zolt/Physics/Constraints/MotorSettings.zig` |
 | `MotorcycleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
-| `MutableCompoundShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/MutableCompoundShape.zig` |
-| `OffsetCenterOfMassShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/OffsetCenterOfMassShape.zig` |
+| `MutableCompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MutableCompoundShape.zig` |
+| `OffsetCenterOfMassShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/OffsetCenterOfMassShape.zig` |
 | `PathConstraintPath` | 🟡 pending | `Zolt/Physics/Constraints/PathConstraintPath.zig` |
 | `PathConstraintPathHermite` | 🟡 pending | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
 | `PathConstraintPathHermite::Point` | 🟡 pending | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
@@ -732,17 +732,17 @@ every class that reaches one. ✅ 9 declared · 🟡 72 pending (`serialization_
 | `PhysicsScene` | 🟡 pending | `Zolt/Physics/PhysicsScene.zig` |
 | `PhysicsScene::ConnectedConstraint` | 🟡 pending | `Zolt/Physics/PhysicsScene.zig` |
 | `Plane` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
-| `PlaneShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/PlaneShape.zig` |
+| `PlaneShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/PlaneShape.zig` |
 | `PointConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/PointConstraint.zig` |
 | `PulleyConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/PulleyConstraint.zig` |
 | `RackAndPinionConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/RackAndPinionConstraint.zig` |
 | `RagdollSettings` | 🟡 pending | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
 | `RagdollSettings::AdditionalConstraint` | 🟡 pending | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
 | `RagdollSettings::Part` | 🟡 pending | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
-| `RotatedTranslatedShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/RotatedTranslatedShape.zig` |
-| `ScaledShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/ScaledShape.zig` |
+| `RotatedTranslatedShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/RotatedTranslatedShape.zig` |
+| `ScaledShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ScaledShape.zig` |
 | `SerializableObject` | ✅ declared | `Zolt/ObjectStream/SerializableObject.zig` |
-| `ShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/Shape.zig` |
+| `ShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/Shape.zig` |
 | `SixDOFConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/SixDOFConstraint.zig` |
 | `SkeletalAnimation` | 🟡 pending | `Zolt/Skeleton/SkeletalAnimation.zig` |
 | `SkeletalAnimation::AnimatedJoint` | 🟡 pending | `Zolt/Skeleton/SkeletalAnimation.zig` |
@@ -751,15 +751,15 @@ every class that reaches one. ✅ 9 declared · 🟡 72 pending (`serialization_
 | `Skeleton` | 🟡 pending | `Zolt/Skeleton/Skeleton.zig` |
 | `Skeleton::Joint` | 🟡 pending | `Zolt/Skeleton/Skeleton.zig` |
 | `SliderConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/SliderConstraint.zig` |
-| `SphereShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
+| `SphereShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
 | `SpringSettings` | ✅ declared | `Zolt/Physics/Constraints/SpringSettings.zig` |
-| `StaticCompoundShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/StaticCompoundShape.zig` |
+| `StaticCompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/StaticCompoundShape.zig` |
 | `SwingTwistConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/SwingTwistConstraint.zig` |
-| `TaperedCapsuleShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
-| `TaperedCylinderShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
+| `TaperedCapsuleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
+| `TaperedCylinderShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
 | `TrackedVehicleControllerSettings` | 🟡 pending | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
 | `Triangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
-| `TriangleShapeSettings` | 🟡 pending | `Zolt/Physics/Collision/Shape/TriangleShape.zig` |
+| `TriangleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TriangleShape.zig` |
 | `TwoBodyConstraintSettings` | 🟡 pending | `Zolt/Physics/Constraints/TwoBodyConstraint.zig` |
 | `VehicleAntiRollBar` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
 | `VehicleConstraintSettings` | 🟡 pending | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |

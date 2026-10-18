@@ -84,9 +84,12 @@ pub const PlaneShapeSettings = struct {
         .name = "PlaneShapeSettings",
         .kind = .virtual,
         .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mPlane", .plane),
+            .attr("mMaterial", .material),
+            .attr("mHalfExtent", .half_extent),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

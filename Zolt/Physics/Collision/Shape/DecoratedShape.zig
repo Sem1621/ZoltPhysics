@@ -43,9 +43,8 @@ pub const DecoratedShapeSettings = struct {
         .name = "DecoratedShapeSettings",
         .kind = .abstract,
         .bases = &.{ShapeSettings},
+        .attributes = &.{.attr("mInnerShape", .inner_shape)}, // Ref(ShapeSettings): `instance ShapeSettings`, like Jolt's RefConst
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     base: ShapeSettings,
 

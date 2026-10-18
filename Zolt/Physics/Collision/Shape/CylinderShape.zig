@@ -56,9 +56,12 @@ pub const CylinderShapeSettings = struct {
         .name = "CylinderShapeSettings",
         .kind = .virtual,
         .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mHalfHeight", .half_height),
+            .attr("mRadius", .radius),
+            .attr("mConvexRadius", .convex_radius),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

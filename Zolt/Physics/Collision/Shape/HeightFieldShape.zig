@@ -219,9 +219,21 @@ pub const HeightFieldShapeSettings = struct {
         .name = "HeightFieldShapeSettings",
         .kind = .virtual,
         .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mHeightSamples", .height_samples),
+            .attr("mOffset", .offset),
+            .attr("mScale", .scale),
+            .attr("mMinHeightValue", .min_height_value),
+            .attr("mMaxHeightValue", .max_height_value),
+            .attr("mMaterialsCapacity", .materials_capacity),
+            .attr("mSampleCount", .sample_count),
+            .attr("mBlockSize", .block_size),
+            .attr("mBitsPerSample", .bits_per_sample),
+            .attr("mMaterialIndices", .material_indices),
+            .attr("mMaterials", .materials),
+            .attr("mActiveEdgeCosThresholdAngle", .active_edge_cos_threshold_angle),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

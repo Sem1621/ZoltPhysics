@@ -56,9 +56,11 @@ pub const BoxShapeSettings = struct {
         .name = "BoxShapeSettings",
         .kind = .virtual,
         .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mHalfExtent", .half_extent),
+            .attr("mConvexRadius", .convex_radius),
+        },
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};

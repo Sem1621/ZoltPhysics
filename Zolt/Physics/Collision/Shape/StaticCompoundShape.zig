@@ -97,8 +97,6 @@ pub const StaticCompoundShapeSettings = struct {
         .kind = .virtual,
         .bases = &.{CompoundShapeSettings},
     });
-    /// TODO(serialization): the attributes of Jolt's sCreateRTTI (SerializationArchitecture.md S18)
-    pub const serialization_pending = true;
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
