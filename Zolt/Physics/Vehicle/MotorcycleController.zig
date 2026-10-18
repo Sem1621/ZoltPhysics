@@ -3,7 +3,7 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings):
 //!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
-//!   JPH_DEBUG_RENDERER (`Draw`): TODO(debug renderer).
+//!   JPH_DEBUG_RENDERER (`Draw`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2: `MotorcycleControllerSettings` embeds `base: WheeledVehicleControllerSettings`
 //!   (`rtti_name`, the settings class of `RegisterTypes.vehicle_controller_settings_types`, E3), `MotorcycleController`
 //!   embeds `base: WheeledVehicleController`: a level under the wheeled classes, built with their `initDerived`. Jolt's
@@ -472,7 +472,7 @@ pub const MotorcycleController = struct {
         stream.read(&self.target_lean);
     }
 
-    // TODO(debug renderer): Draw
+    // TODO(debug_renderer): Draw
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

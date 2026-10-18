@@ -3,7 +3,7 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TrackedVehicleControllerSettings,
 //!   WheelSettingsTV): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug renderer).
+//!   ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsTV` embeds `base: WheelSettings` and overrides its binary state; `WheelTV` embeds `base: Wheel`.
 //!   - `TrackedVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti_name`, the settings class of
@@ -321,7 +321,7 @@ pub const TrackedVehicleController = struct {
     /// Tracks of the vehicle
     tracks: VehicleTracks = .{ .{}, .{} },
 
-    // TODO(debug renderer): mRPMMeterPosition, mRPMMeterSize
+    // TODO(debug_renderer): mRPMMeterPosition, mRPMMeterSize
 
     /// Constructor of the base part of a class T derived from TrackedVehicleController. On failure nothing is left
     /// allocated.
@@ -476,7 +476,7 @@ pub const TrackedVehicleController = struct {
         return &self.tracks;
     }
 
-    // TODO(debug renderer): SetRPMMeter
+    // TODO(debug_renderer): SetRPMMeter
 
     // See: VehicleController
     pub fn getSettings(self: *const TrackedVehicleController) Allocator.Error!Ref(VehicleControllerSettings) {
@@ -738,7 +738,7 @@ pub const TrackedVehicleController = struct {
         return impulse;
     }
 
-    // TODO(debug renderer): Draw
+    // TODO(debug_renderer): Draw
 
     pub fn saveState(self: *const TrackedVehicleController, stream: *StateRecorder) void {
         stream.write(self.forward_input);

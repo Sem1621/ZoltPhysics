@@ -3706,7 +3706,7 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 //   sweeps them in its own tests. Jolt's non-validating RestoreState keeps the members that it does not restore
 //   (mIsBackFacingContact, ...) of the contacts that mActiveContacts.resize keeps (CharacterVirtual.cpp:1977-1981): the
 //   object state compares them (cv_active_contact is_back_facing_contact). `mutable mMaxHitsExceeded`
-//   (CharacterVirtual.h:752) falls under Rule M (PortingGuide section 5). The CharacterVirtual scenes set
+//   (CharacterVirtual.h:752) falls under Rule M (PortingGuide section 5). The CharacterVirtual and Character scenes set
 //   `restore_broad_phase`: the character queries find their hits in the order of the broad phase layout, which the
 //   failed updates of the D12 sweeps change (BroadPhaseSnapshot restores it after the sweeps). Any slot whose operations
 //   query the broad phase in hit order (vehicle testers that keep the first hit, ragdoll queries) can use it too.

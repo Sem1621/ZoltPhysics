@@ -3,7 +3,7 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleEngineSettings):
 //!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
-//! - JPH_DEBUG_RENDERER (`ConvertRPMToAngle`, `DrawRPM`): TODO(debug renderer).
+//! - JPH_DEBUG_RENDERER (`ConvertRPMToAngle`, `DrawRPM`): TODO(debug_renderer).
 //! - `VehicleEngine : VehicleEngineSettings` (non-virtual inheritance) embeds its parent as `base`
 //!   (CharacterVehicleArchitecture E2).
 //! - The settings own a LinearCurve (`mNormalizedTorque`), so like LinearCurve the functions that allocate take the
@@ -153,7 +153,7 @@ pub const VehicleEngine = struct {
         self.clampRPM();
     }
 
-    // TODO(debug renderer): ConvertRPMToAngle, DrawRPM (JPH_DEBUG_RENDERER)
+    // TODO(debug_renderer): ConvertRPMToAngle, DrawRPM (JPH_DEBUG_RENDERER)
 
     /// If the engine is idle we allow the vehicle to sleep
     pub fn allowSleep(self: *const VehicleEngine) bool {

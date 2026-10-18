@@ -3,7 +3,7 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings):
 //!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
-//! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): TODO(debug renderer).
+//! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `VehicleControllerSettings` is an abstract pattern A root with `ref_count` (RefTarget<VehicleControllerSettings>):
 //!     `saveBinaryState`, `restoreBinaryState` and `constructController` are pure virtual. The settings classes declare
@@ -167,7 +167,7 @@ pub const VehicleController = struct {
         saveState: *const fn (self: *const VehicleController, stream: *StateRecorder) void,
         restoreState: *const fn (self: *VehicleController, stream: *StateRecorder) void,
 
-        // TODO(debug renderer): Draw (pure virtual, JPH_DEBUG_RENDERER)
+        // TODO(debug_renderer): Draw (pure virtual, JPH_DEBUG_RENDERER)
     };
 
     vtable: *const VTable,

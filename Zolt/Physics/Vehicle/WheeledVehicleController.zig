@@ -4,7 +4,7 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheeledVehicleControllerSettings,
 //!   WheelSettingsWV): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug renderer).
+//!   ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsWV` embeds `base: WheelSettings` and overrides its binary state; `WheelWV` embeds `base: Wheel`.
 //!   - `WheeledVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti_name`, the settings class of
@@ -705,7 +705,7 @@ pub const WheeledVehicleController = struct {
         self.tire_max_impulse_callback = callback;
     }
 
-    // TODO(debug renderer): SetRPMMeter
+    // TODO(debug_renderer): SetRPMMeter
 
     // See: VehicleController
     pub fn getSettings(self: *const WheeledVehicleController) Allocator.Error!Ref(VehicleControllerSettings) {
@@ -1172,7 +1172,7 @@ pub const WheeledVehicleController = struct {
         return impulse;
     }
 
-    // TODO(debug renderer): Draw
+    // TODO(debug_renderer): Draw
 
     pub fn saveState(self: *const WheeledVehicleController, stream: *StateRecorder) void {
         stream.write(self.forward_input);

@@ -1,7 +1,7 @@
 //! Port of: Jolt/Physics/Character/CharacterVirtual.h, Jolt/Physics/Character/CharacterVirtual.cpp
 //! Status: complete
 //! Not ported: JPH_DEBUG_RENDERER (sDrawConstraints, sDrawWalkStairs, sDrawStickToFloor, sDrawSupportingVolume and the
-//! drawing in Update, MoveShape, SolveConstraints, WalkStairs and StickToFloor: TODO(debug renderer))
+//! drawing in Update, MoveShape, SolveConstraints, WalkStairs and StickToFloor: TODO(debug_renderer))
 //!
 //! Docs/Zolt/CharacterVehicleArchitecture.md E2 / E5:
 //! - `CharacterVirtualSettings` (a CharacterBaseSettings) and `CharacterVirtual` (a CharacterBase) are pattern A levels
@@ -25,7 +25,8 @@
 //!   some uninitialized, the code always writes them before they are read).
 //! - The contacts, constraints and ignored contacts of Jolt's `Array<T, STLTempAllocator<T>>` are `TempList(T)`: one block
 //!   of the caller's TempAllocator, allocated where Jolt reserves (`reserve(0)` allocates nothing, like Jolt) and freed at
-//!   the end of the C++ scope (LIFO, also on the error paths).
+//!   the end of the C++ scope (LIFO, also on the error paths). Jolt's public alias `TempContactList` is not exposed: no
+//!   public function takes it (only private functions and the private collectors use `TempList(CharacterContact)`).
 //! - The listener bookkeeping `ListenerContacts` is Jolt's `UnorderedMap<CharacterContactKey, ListenerContactValue>`, the
 //!   ported HashTable: FinishTrackingContactChanges calls the removal callbacks in its iteration order, which depends on
 //!   the hash of the keys and the bucket count, exactly like Jolt.
@@ -55,8 +56,9 @@
 //!   from SaveState never holds one). Jolt asserts that are reachable with user input (an invalid CharacterID, a listener
 //!   changed between StartTrackingContactChanges and FinishTrackingContactChanges, more Finish than Start calls, a
 //!   character shape that sCorrectFractionForCharacterPadding does not support) only assert with asserts enabled; the
-//!   release behavior is Jolt's (an untracked active contact in FinishTrackingContactChanges is skipped where Jolt writes
-//!   through an end() iterator).
+//!   release behavior is Jolt's. One exception: an untracked active contact in FinishTrackingContactChanges is a panic
+//!   in safe builds (Jolt asserts) and is skipped in ReleaseFast / ReleaseSmall, where Jolt writes through an end()
+//!   iterator.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -1304,7 +1306,7 @@ pub const CharacterVirtual = struct {
         if (delta_time <= 0.0)
             return;
 
-        // TODO(debug renderer): draw the supporting volume pre movement (sDrawSupportingVolume)
+        // TODO(debug_renderer): draw the supporting volume pre movement (sDrawSupportingVolume)
 
         try self.startTrackingContactChanges();
         defer self.finishTrackingContactChanges();
@@ -1390,7 +1392,7 @@ pub const CharacterVirtual = struct {
         }
         const up_position = self.position.addVec3(up);
 
-        // TODO(debug renderer): draw sweep up (sDrawWalkStairs)
+        // TODO(debug_renderer): draw sweep up (sDrawWalkStairs)
 
         // Collect normals of steep slopes that we would like to walk stairs on.
         // We need to do this before calling MoveShape because it will update mActiveContacts.
@@ -1438,7 +1440,7 @@ pub const CharacterVirtual = struct {
         if (!made_progress)
             return false;
 
-        // TODO(debug renderer): draw horizontal sweep (sDrawWalkStairs)
+        // TODO(debug_renderer): draw horizontal sweep (sDrawWalkStairs)
 
         // Move down towards the floor.
         // Note that we travel the same amount down as we traveled up with the specified extra
@@ -1450,7 +1452,7 @@ pub const CharacterVirtual = struct {
         var surface_normal = contact.surface_normal;
         var too_steep = self.base.isSlopeTooSteep(surface_normal);
 
-        // TODO(debug renderer): draw sweep down (sDrawWalkStairs)
+        // TODO(debug_renderer): draw sweep down (sDrawWalkStairs)
 
         // Test for floor that will support the character
         if (too_steep) {
@@ -1467,7 +1469,7 @@ pub const CharacterVirtual = struct {
             if (test_horizontal_movement_sq <= horizontal_movement_sq + 1.0e-8)
                 return false; // We didn't move any further than in the previous test
 
-            // TODO(debug renderer): draw 2nd sweep horizontal (sDrawWalkStairs)
+            // TODO(debug_renderer): draw 2nd sweep horizontal (sDrawWalkStairs)
 
             // Then sweep down
             var test_contact: CharacterContact = .{};
@@ -1477,7 +1479,7 @@ pub const CharacterVirtual = struct {
             surface_normal = test_contact.surface_normal;
             too_steep = self.base.isSlopeTooSteep(surface_normal);
 
-            // TODO(debug renderer): draw 2nd sweep down (sDrawWalkStairs)
+            // TODO(debug_renderer): draw 2nd sweep down (sDrawWalkStairs)
 
             if (too_steep)
                 return false;
@@ -1523,7 +1525,7 @@ pub const CharacterVirtual = struct {
         // Calculate new position
         const new_position = self.position.addVec3(step_down.mulScalar(contact.fraction));
 
-        // TODO(debug renderer): draw sweep down (sDrawStickToFloor)
+        // TODO(debug_renderer): draw sweep down (sDrawStickToFloor)
 
         // Move the character to the new location
         try self.moveToContact(new_position, &contact, filters, temp_allocator);
@@ -2158,7 +2160,7 @@ pub const CharacterVirtual = struct {
             defer constraints.free(temp_allocator);
             self.determineConstraints(contacts.items(), delta_time, &constraints);
 
-            // TODO(debug renderer): draw the constraints of iteration 0 (sDrawConstraints)
+            // TODO(debug_renderer): draw the constraints of iteration 0 (sDrawConstraints)
 
             // Solve the displacement using these constraints
             const solved = try self.solveConstraints(velocity, delta_time, time_remaining, &constraints, &ignored_contacts, temp_allocator);
@@ -2528,7 +2530,7 @@ pub const CharacterVirtual = struct {
                     listener.onContactSolve(self, c.base.body_b, c.base.sub_shape_id_b, c.position, c.contact_normal, c.linear_velocity, c.material, velocity, &new_velocity);
             }
 
-            // TODO(debug renderer): draw the constraint planes and the velocities (inDrawConstraints)
+            // TODO(debug_renderer): draw the constraint planes and the velocities (inDrawConstraints)
 
             // Update the velocity
             velocity = new_velocity;

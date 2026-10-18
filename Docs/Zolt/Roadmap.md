@@ -216,13 +216,16 @@ Design, groups and harness plan: [CharacterVehicleArchitecture.md](CharacterVehi
   Stabilize, the constraint priorities and the collision filtering; the engine, transmission, differentials, track
   syncing and the binary state of every settings class.
 - The simulation parity runs 62 scenes with characters, character virtuals, ragdolls and wheeled, tracked and
-  motorcycle vehicles. They run bit exact in the thread matrix, all but three with the D12 sweeps. After every update
-  the parity also compares each object's state (its SaveState bytes and getters) and the character listener records
-  in call order. `perf_character_virtual` compares the first 100 updates of the M8 scene.
+  motorcycle vehicles. They run bit exact in the thread matrix, all but three with the D12 sweeps, and hit no Jolt
+  assert (`-Dreference_asserts=true`). After every update the parity also compares each object's state (its SaveState
+  bytes and getters) and the character listener records in call order. `perf_character_virtual` compares the first 100
+  updates of the M8 scene.
 - The reviews found no result difference from Jolt in library code. They found crashes on input that Jolt accepts (a
   ragdoll joint that is its own parent, SkeletonMapper chains of 1 or 2 joints, a wheeled vehicle with many
   differentials), no way to change the number of differentials, coverage gaps and wrong docs. Each was fixed or
-  documented before the merges.
+  documented before the merges. A last audit of the merged phase against the Jolt headers found no missing API. It
+  found one more Zolt-only bug (`createRagdoll` read its settings after releasing them when out of bodies) and doc
+  errors, which are fixed.
 - The Ragdoll hash stays M9: PerformanceTest's RagdollScene loads `Assets/Human.tof` through ObjectStream (Phase 8).
   The Ragdoll class itself is complete and compared.
 - Settled points, the Jolt bugs that are reproduced on purpose and the harness rules:

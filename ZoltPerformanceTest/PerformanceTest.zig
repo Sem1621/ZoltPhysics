@@ -1,14 +1,15 @@
 //! Port of: PerformanceTest/PerformanceTest.cpp
 //! Status: partial
-//! Missing: RagdollScene (-s=Ragdoll, -s=RagdollSinglePile and the default scene: Skeleton, Ragdoll, the constraints and
-//! the ObjectStream loading of Assets/, Phases 6 to 8). Selecting one of them prints an error and returns 1.
+//! Missing: RagdollScene (-s=Ragdoll, -s=RagdollSinglePile and the default scene: the ObjectStream loading of its assets
+//! Human.tof, Human/dead_pose1.tof and terrain2.bof, Phase 8, milestone M9). Selecting one of them prints an error and
+//! returns 1.
 //! Not ported: -r (JPH_DEBUG_RENDERER, DebugRendererRecorder: TODO(debug_renderer); like a Jolt build without the debug
 //! renderer the argument is ignored), the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are
 //! compiled out as in Jolt's Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
 //!
 //! Milestone M6 (SimulationArchitecture section 3): `zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast
 //! -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892` must print Jolt's published hash (determinism_check.yml), in
-//! both precisions and for every thread count. Milestone M8 (CharacterVehicleArchitecture section 4): the same for
+//! both precisions and for every thread count. Milestone M8 (CharacterVehicleArchitecture section 1): the same for
 //! `-q=Discrete -t=max -s=CharacterVirtual -validate_hash=0xc1d4e05b164b1221` (0xa0b16727aa16fdb0 in double precision).
 //!
 //! The program is a statement by statement port of PerformanceTest.cpp, with the same arguments, the same output text
@@ -257,7 +258,7 @@ fn sceneNotPorted(name: []const u8, needs: []const u8) u8 {
     return 1;
 }
 
-const ragdoll_needs = "Skeleton, Ragdoll, the constraints and the ObjectStream loading of Assets/ (Phases 6 to 8)";
+const ragdoll_needs = "the ObjectStream loading of Human.tof, Human/dead_pose1.tof and terrain2.bof from Assets/ (Phase 8)";
 
 /// Replace the scene (unique_ptr assignment: the old scene is destroyed)
 fn setScene(scene: *?PerformanceTestScene, new_scene: PerformanceTestScene) void {

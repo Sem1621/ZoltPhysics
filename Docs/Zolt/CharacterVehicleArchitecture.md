@@ -13,15 +13,17 @@ A porter who finds a decision wrong reports it with the evidence instead of work
 
 ## 1. Scope
 
-| Group | Jolt files | Tests | Lines (C++) |
+| Group | Jolt files | Tests | Lines (C++, `wc -l`) |
 |---|---|---|---|
-| Skeleton | `Skeleton/Skeleton`, `SkeletalAnimation`, `SkeletonPose`, `SkeletonMapper` | (none in UnitTests) | 1100 |
-| Ragdoll | `Physics/Ragdoll/Ragdoll` | (none in UnitTests) | 1040 |
-| Character base | `Physics/Character/CharacterID`, `CharacterBase` | (none) | 320 |
-| Character | `Physics/Character/Character` | (none) | 510 |
-| CharacterVirtual | `Physics/Character/CharacterVirtual` | `UnitTests/Physics/CharacterVirtualTests.cpp`, `UnitTests/LoggingCharacterContactListener.h` | 2780 |
-| Vehicle core | `Physics/Vehicle/VehicleEngine`, `VehicleTransmission`, `VehicleDifferential`, `VehicleTrack`, `VehicleAntiRollBar`, `Wheel`, `VehicleController`, `VehicleConstraint`, `VehicleCollisionTester`, `WheeledVehicleController` | `UnitTests/Physics/WheeledVehicleTests.cpp` | 3620 |
-| Vehicle variants | `Physics/Vehicle/TrackedVehicleController`, `MotorcycleController` | (none) | 1140 |
+| Skeleton | `Skeleton/Skeleton`, `SkeletalAnimation`, `SkeletonPose`, `SkeletonMapper` | (none in UnitTests) | 962 |
+| Ragdoll | `Physics/Ragdoll/Ragdoll` | (none in UnitTests) | 1038 |
+| Character base | `Physics/Character/CharacterID`, `CharacterBase` | (none) | 318 |
+| Character | `Physics/Character/Character` | (none) | 513 |
+| CharacterVirtual | `Physics/Character/CharacterVirtual` | `UnitTests/Physics/CharacterVirtualTests.cpp`, `UnitTests/LoggingCharacterContactListener.h` | 2778 |
+| Vehicle core | `Physics/Vehicle/VehicleEngine`, `VehicleTransmission`, `VehicleDifferential`, `VehicleTrack`, `VehicleAntiRollBar`, `Wheel`, `VehicleController`, `VehicleConstraint`, `VehicleCollisionTester`, `WheeledVehicleController` | `UnitTests/Physics/WheeledVehicleTests.cpp` | 3662 |
+| Vehicle variants | `Physics/Vehicle/TrackedVehicleController`, `MotorcycleController` | (none) | 1141 |
+
+The lines are `wc -l` of the `.h`, `.inl` and `.cpp` files in the "Jolt files" column. The tests are not counted.
 
 **Milestone M8.** ZoltPerformanceTest runs `PerformanceTest/CharacterVirtualScene.h`. It reproduces the hashes of
 `determinism_check.yml` with `-q=Discrete -t=max -s=CharacterVirtual`:
@@ -104,7 +106,7 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
 - **Calls run where the user makes them.** CharacterVirtual runs outside `PhysicsSystem.update`, on the thread that
   calls it (`update`, `extendedUpdate`, `stickToFloor`, `walkStairs`, `refreshContacts`, `setShape`, `canWalkStairs`).
   Its queries go through `PhysicsSystem.getNarrowPhaseQuery` with the caller's `TempAllocator`. It must lock exactly
-  what Jolt locks (`BodyLockRead` / `BodyLockMultiWrite`), because step listeners and the user may call it while the
+  what Jolt locks (`BodyLockRead` / `BodyLockWrite`), because step listeners and the user may call it while the
   system is not updating.
 - **Contact order is deterministic.** The contacts and listener callbacks happen in Jolt's sorted order
   (`ContactOrderingPredicate`, sorted by `CharacterContactKey`).
@@ -116,7 +118,8 @@ The hashes must also hold with `-t=1` and `-t=2`, and Zolt's CI checks them. The
   It passes the other character through `setUserData(@intFromPtr(character))`, as Jolt passes
   `reinterpret_cast<uint64>`.
 - **Inner body.** The inner body (`mInnerBodyID`) is a kinematic body that CharacterVirtual creates, moves and
-  destroys through the BodyInterface. Its user data and object layer come from the settings. Its creation can fail
+  destroys through the BodyInterface. Its shape and object layer come from the settings (`mInnerBodyShape`,
+  `mInnerBodyLayer`). Its user data is the `inUserData` argument of the constructor. Its creation can fail
   ("out of bodies", or an override ID that is out of range or in use); then the character has no inner body, exactly
   like Jolt, which does not assert there.
 
@@ -191,10 +194,18 @@ class fills.
   - The character contact listener records, in call order: the character operations run on the user thread, and the
     order is part of the M8 hash. The vehicle callbacks come from the step listener jobs and are sorted with the other
     records.
-  - The getters that are not in the state: CharacterVirtual's active contacts, ground state, ground body and sub
-    shape, and `canWalkStairs`; a ragdoll's root transform and pose; per-wheel contact information.
+  - The getters that are not in the state:
+    - CharacterVirtual's active contacts (its `SaveState` writes only the contacts with a collision, without the back
+      facing flag, the character B pointer, the user data and the material);
+    - the ground material and the ground user data of both character classes (`CharacterBase::SaveState` does not
+      write them);
+    - `canWalkStairs`;
+    - a ragdoll's root transform and pose;
+    - the wheel values that no `SaveState` writes: the steer angle and the hard point flag; the contact's sub shape,
+      point velocity and longitudinal direction; the slip, friction and brake impulse of `WheelWV` and `WheelTV`; the
+      wheel transforms (VehicleSlot.writeState of SimulationParity.zig lists them all).
 - **Runs.** These scenes run in the existing thread matrix and D12 failure sweeps. Section 6 lists the three scenes
-  without sweeps and the broad phase restore of the CharacterVirtual scenes.
+  without sweeps and the broad phase restore of the Character and CharacterVirtual scenes.
 - **Character updates happen between `PhysicsSystem.update` calls.** That is where PerformanceTest and the unit tests
   call them, through operations that run before an update. A character op that needs the temp allocator uses the
   world's.
@@ -249,7 +260,7 @@ A group edits only its own region, slot, files and registry lines.
 - File headers:
   - `//! Port of: <C++ files>` and `//! Status: complete|partial|stub`.
   - Keep Jolt's doc and implementation comments.
-  - Deviations from Jolt go into the file header (`TODO(serialization)`, `TODO(debug renderer)` for `Draw*`).
+  - Deviations from Jolt go into the file header (`TODO(serialization)`, `TODO(debug_renderer)` for `Draw*`).
 - Unit tests: port them with the same names and values. Add inline tests for allocation failure and for the asserts
   Zolt keeps.
 - Parity:
@@ -313,14 +324,20 @@ unless noted:
   LockAllTranslations before Initialize, Map with a locked joint that has no parent (Jolt reads index -1).
 - Ragdoll: a null skeleton, null ragdoll settings or a null additional constraint, a body that cannot be locked. A
   pose of a ragdoll without bodies gets a zero root offset (Jolt: uninitialized).
-- CharacterVirtual: FinishTrackingContactChanges skips an untracked active contact, where Jolt writes through an
-  `end()` iterator. A restored motion type byte that is not valid becomes Static (no panic in either case).
+- CharacterVirtual:
+  - FinishTrackingContactChanges with an active contact that is not tracked: Jolt asserts there. Without asserts it
+    writes through an `end()` iterator. Zolt panics in safe builds (Debug, ReleaseSafe), like Jolt's assert.
+    ReleaseFast and ReleaseSmall skip the contact.
+  - A restored motion type byte that is not valid becomes Static in every build, without a panic. Jolt keeps the
+    invalid value.
 - Vehicles: no controller settings, a null wheel settings `Ref`, OnStep without a collision tester.
 
 **Harness rules.**
 - **Broad phase layout.** A CharacterVirtual query gets its hits in the order in which the quad tree returns bodies.
   Jolt keeps the first of equal hits (ContactCastCollector), calls OnContactValidate / OnAdjustBodyVelocity in hit
-  order and reduces the hits at `mMaxNumHits` in hit order. So the results depend on the layout of the broad phase
+  order and reduces the hits at `mMaxNumHits` in hit order. The Character queries do the same:
+  `Character::PostSimulation` keeps the first of equal hits (`dot > mBestDot`), and the harness operation
+  `character_check_collision` hashes the hits in call order. So the results depend on the layout of the broad phase
   trees, in Jolt too, and the layout is not part of the saved state. The D12 sweeps fail Zolt updates and restore the
   saved state, while the C++ side runs each update once. The failed updates change the Zolt trees: without a fix,
   `character_virtual_characters` and `character_virtual_crowd` differ after a sweep.
@@ -330,8 +347,13 @@ unless noted:
     the C++ update.
   - This is a harness rule, not a library deviation. Zolt builds its trees as Jolt does, so the same updates give the
     same trees. Only the failure injection gives Zolt updates that the C++ side never ran. The C++ side is unchanged.
-  - Every CharacterVirtual scene with sweeps sets it. The physics scenes keep the free running layout: they show that
-    the physics pipeline does not depend on it.
+  - Every Character and CharacterVirtual scene with sweeps sets it. The physics scenes keep the free running layout:
+    they show that the physics pipeline does not depend on it.
+  - The vehicle testers are the exception in the pipeline. They query the broad phase in `PhysicsSystem::Update`,
+    through the VehicleConstraint step listener. They keep the first of equal hits (strict `<` in
+    VehicleCollisionTester.cpp). So a vehicle can depend on the layout when two bodies give the same hit. The vehicle
+    scenes do not set `restore_broad_phase`: they are bit exact after the sweeps without it, so no tie in them changes a
+    result. A vehicle scene that differs only after a sweep sets it.
 - **Character records.** The CharacterContactListener records are compared one by one in call order, not sorted
   (section 3), after every update and after the sweeps.
 - **An active body for the sweeps.** PhysicsSystem.update allocates nothing without an active body. Scenes without one
@@ -349,6 +371,7 @@ unless noted:
   `observeSpawnedJobs` runs the scene again on the Zolt side alone, with 3 and 7 workers in turn, up to 10 times, until
   one does.
 - **Asserting reference.** New scenes are checked against an asserting reference (`zig build parity
-  -Dreference_asserts=true`, see the rules in the SimScenes header). The groups found no Jolt assert in their scenes.
+  -Dreference_asserts=true`, see the rules in the SimScenes header). At the end of Phase 7 the full asserting parity run
+  passes: no scene hits a Jolt assert.
 - **Known gap.** `SimShape` has no materials, so the ground material of a character is only compared as the default
   material.
