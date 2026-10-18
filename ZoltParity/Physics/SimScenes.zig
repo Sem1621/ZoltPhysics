@@ -154,11 +154,13 @@
 //!   trees (not part of the saved state, in Jolt neither): the physics pipeline does not depend on it, but an object
 //!   operation that queries the broad phase can (CharacterVirtual: ContactCastCollector keeps the first of equal hits,
 //!   OnContactValidate / OnAdjustBodyVelocity and the reduction at mMaxNumHits run in hit order; without the restore
-//!   character_virtual_characters and character_virtual_crowd differ after a sweep). A scene with such operations sets
-//!   `SceneEntry.restore_broad_phase`: after the sweeps of an update the driver restores the snapshot and the broad
-//!   phase layout of that instant (BroadPhaseSnapshot of SimulationParity.zig, the C++ side is not involved) and redoes
-//!   the update, which leaves the trees of the C++ update. The other scenes keep the free running layout. A scene with
-//!   sweeps needs an active body (PhysicsSystem.update allocates nothing without one; `addBystander`).
+//!   character_virtual_characters and character_virtual_crowd differ after a sweep; Character: PostSimulation keeps the
+//!   first of equal hits, character_check_collision hashes the hits in call order). A scene with such operations sets
+//!   `SceneEntry.restore_broad_phase`: every Character and CharacterVirtual scene with sweeps does. After the sweeps of
+//!   an update the driver restores the snapshot and the broad phase layout of that instant (BroadPhaseSnapshot of
+//!   SimulationParity.zig, the C++ side is not involved) and redoes the update, which leaves the trees of the C++
+//!   update. The other scenes keep the free running layout. A scene with sweeps needs an active body
+//!   (PhysicsSystem.update allocates nothing without one; `addBystander`).
 //! - **Listener modes.** `CharacterListenerMode` record / modify: in modify mode the `CharacterFlags` in the upper 32
 //!   bits of the user data of a body, another character or the character itself reject contacts, stop pushing, stop
 //!   impulses, make a conveyor belt and slow the solved velocity (the same code on both sides). The vehicle callbacks
@@ -188,9 +190,11 @@
 //!     MotorcycleController::SaveState does not save mLeanSpringIntegratedDeltaAngle; vehicle_motorcycle_lean_integration
 //!     covers the coefficient without sweeps and restores);
 //!   - the Zolt port of the custom friction callback (SimVehicleCombineFriction) uses the Math min helper, not @min;
-//!   - a Character has a shape, is removed before it is destroyed; a CharacterVirtual's shape is convex, decorated or
-//!     compound (sCorrectFractionForCharacterPadding asserts on other shapes), its listener does not change between
-//!     StartTrackingContactChanges and FinishTrackingContactChanges, its inner body is never removed by a body operation;
+//!   - a Character has a shape, is removed before it is destroyed; a CharacterVirtual's shape is a convex shape, a
+//!     RotatedTranslatedShape, a ScaledShape or a compound shape, whose inner shape or sub shapes follow the same rule
+//!     (sCorrectFractionForCharacterPadding asserts on other shapes, OffsetCenterOfMassShape included), its listener
+//!     does not change between StartTrackingContactChanges and FinishTrackingContactChanges, its inner body is never
+//!     removed by a body operation;
 //!   - a ragdoll's joints list the parents before the children (a joint may be its own parent: CreateRagdoll connects
 //!     its body with itself; its ragdoll then has no DisableParentChildCollisions, GroupFilterTable asserts on a pair of
 //!     equal sub groups, no CalculateConstraintPriorities and no SkeletonPose operations, which assert on the order), its
@@ -221,9 +225,10 @@
 //! 3. Run `zig build parity -Dtest-filter=<scene>`: the C++ scenes of the group (`character_ops`,
 //!    `character_virtual_ops`, `character_virtual_characters`, `ragdoll_ops`, `vehicle_wheeled_ops`,
 //!    `vehicle_wheeled_in_air`, `vehicle_tracked_ops`, `vehicle_motorcycle_ops`, `vehicle_motorcycle_lean_integration`)
-//!    now run against Zolt, bit exact in the whole thread matrix with the D12 sweeps; a mismatch names the field of the
-//!    object state ("object state differs at byte ...: cv_active_contact (object handle 0, item 2) contact_normal.y zolt
-//!    ... jolt ...") or the first differing character record.
+//!    now run against Zolt, bit exact in the whole thread matrix, with the D12 sweeps (vehicle_motorcycle_lean_integration
+//!    has none, `sweep_stride = 0`, see the motorcycle rule above); a mismatch names the field of the object state
+//!    ("object state differs at byte ...: cv_active_contact (object handle 0, item 2) contact_normal.y zolt ... jolt
+//!    ...") or the first differing character record.
 //! 4. Add scenes of the group in its regions (builders in "---- <group> ----" below, entries in the scene table):
 //!    stairs and slopes, moving platforms, many characters, ragdolls in piles and LargeIslandSplitter islands, vehicles
 //!    on meshes and height fields, cross save / restore, far from the origin. The CharacterVirtual group also does
@@ -2585,9 +2590,10 @@ pub const SceneEntry = struct {
     /// pages, free list, tracking and trees, SimulationParity's BroadPhaseSnapshot) and redoes the update from there, so
     /// that it holds the trees of the C++ update. For the Phase 7 scenes whose object operations query the broad phase
     /// in hit order (CharacterVirtual: ContactCastCollector keeps the first hit, OnContactValidate / OnAdjustBodyVelocity
-    /// and the reduction at mMaxNumHits run in hit order): the failed updates of the sweeps change the layout of the
-    /// trees (UpdatePrepare / UpdateFinalize, the AABB updates of every restore), which is not part of the saved state.
-    /// Off for the scenes of the physics pipeline, which prove that its results do not depend on the layout.
+    /// and the reduction at mMaxNumHits run in hit order; Character: PostSimulation keeps the first of equal hits,
+    /// character_check_collision hashes the hits in call order): the failed updates of the sweeps change the layout of
+    /// the trees (UpdatePrepare / UpdateFinalize, the AABB updates of every restore), which is not part of the saved
+    /// state. Off for the scenes of the physics pipeline, which prove that its results do not depend on the layout.
     restore_broad_phase: bool = false,
     /// Creating the scene runs under std.testing.checkAllAllocationFailures (D12). Its cost is quadratic in the number
     /// of bodies: false for the PerformanceTest scenes with thousands of bodies, whose creation runs the same code as
@@ -2849,14 +2855,17 @@ pub const scenes = [_]SceneEntry{
     // Characters, ragdolls and vehicles (Phase 7), one region per worker group (append a group's scenes at the end of its
     // region only)
     // ---- Character ----
-    .{ .name = "character_ops", .build = buildCharacterOps, .blocked_by = .characters, .sweep_stride = 20, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
-    .{ .name = "character_ground_states_boxes", .build = buildCharacterGroundStatesBoxes, .blocked_by = .characters, .sweep_stride = 25, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
-    .{ .name = "character_ground_states_meshes", .build = buildCharacterGroundStatesMeshes, .blocked_by = .characters, .sweep_stride = 25, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
-    .{ .name = "character_moving_platforms", .build = buildCharacterMovingPlatforms, .blocked_by = .characters, .sweep_stride = 25, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
-    .{ .name = "character_crouch_stand", .build = buildCharacterCrouchStand, .blocked_by = .characters, .sweep_stride = 20, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) } },
-    .{ .name = "character_layers_sleep_wake", .build = buildCharacterLayersSleepWake, .blocked_by = .characters, .sweep_stride = 40, .expect = .{ .contacts = true, .sleeping = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
-    .{ .name = "character_far_from_origin", .build = buildCharacterFarFromOrigin, .blocked_by = .characters, .sweep_stride = 30, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.on_steep_ground) | groundStateBit(GroundState.in_air) } },
-    .{ .name = "character_many", .build = buildCharacterMany, .blocked_by = .characters, .sweep_stride = 30, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    // The Character scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`): PostSimulation and
+    // CheckCollision get their hits in the order of the broad phase layout, PostSimulation keeps the first of equal hits
+    // (`dot > mBestDot`) and character_check_collision hashes the hits in call order.
+    .{ .name = "character_ops", .build = buildCharacterOps, .blocked_by = .characters, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
+    .{ .name = "character_ground_states_boxes", .build = buildCharacterGroundStatesBoxes, .blocked_by = .characters, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
+    .{ .name = "character_ground_states_meshes", .build = buildCharacterGroundStatesMeshes, .blocked_by = .characters, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = all_ground_states } },
+    .{ .name = "character_moving_platforms", .build = buildCharacterMovingPlatforms, .blocked_by = .characters, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_crouch_stand", .build = buildCharacterCrouchStand, .blocked_by = .characters, .sweep_stride = 20, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) } },
+    .{ .name = "character_layers_sleep_wake", .build = buildCharacterLayersSleepWake, .blocked_by = .characters, .sweep_stride = 40, .restore_broad_phase = true, .expect = .{ .contacts = true, .sleeping = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_far_from_origin", .build = buildCharacterFarFromOrigin, .blocked_by = .characters, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.on_steep_ground) | groundStateBit(GroundState.in_air) } },
+    .{ .name = "character_many", .build = buildCharacterMany, .blocked_by = .characters, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .contacts = true, .ground_states = groundStateBit(GroundState.on_ground) | groundStateBit(GroundState.in_air) } },
     // (append the Character scenes here)
     // ---- CharacterVirtual ----
     // The CharacterVirtual scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`): a
