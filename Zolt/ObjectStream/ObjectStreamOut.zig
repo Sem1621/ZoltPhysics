@@ -6,6 +6,9 @@
 //! - `sWriteObject(T, allocator, writer, stream_type, object)`: `allocator` holds the identifier map, the queues and the
 //!   binary string table for the duration of the call; the caller flushes `writer`. Errors: `error.OutOfMemory` and
 //!   the writer's `error.WriteFailed` (Jolt returns `!mStream.fail()`).
+//! - `sWriteObjectToFile(T, allocator, io, path, stream_type, object)` creates or truncates the file and writes through
+//!   a buffered `std.Io.File` writer, which it flushes. A file that cannot be created is an error of
+//!   `std.Io.File.OpenError` (Jolt: false).
 //! - Objects are identified by the address of their most derived object (Jolt: by the `T *` that is written, the same
 //!   address for every class of Jolt, which has single inheritance at offset 0 only), so that an object reached through
 //!   two different base classes is written once.
@@ -27,6 +30,9 @@ const ObjectStreamBinaryOut = @import("ObjectStreamBinaryOut.zig").ObjectStreamB
 /// streams (ObjectStreamBinaryOut and ObjectStreamTextOut).
 pub const ObjectStreamOut = struct {
     pub const Error = Allocator.Error || Writer.Error;
+
+    /// The errors of the file variant: the errors of creating the file, then those of the write
+    pub const FileError = std.Io.File.OpenError || Error;
 
     const ObjectInfo = struct {
         identifier: Identifier,
@@ -57,6 +63,20 @@ pub const ObjectStreamOut = struct {
         defer stream.deinit();
         try stream.write(RTTI.mostDerived(T, object), RTTI.getRTTI(T, object));
     }
+
+    /// Main function to write an object to a file (sWriteObject(const char *, ...)). `path` is absolute or relative to
+    /// the current working directory; an existing file is truncated.
+    pub fn sWriteObjectToFile(comptime T: type, allocator: Allocator, io: std.Io, path: []const u8, stream_type: StreamType, object: *const T) FileError!void {
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        var buffer: [file_buffer_size]u8 = undefined;
+        var file_writer = file.writer(io, &buffer);
+        try sWriteObject(T, allocator, &file_writer.interface, stream_type, object);
+        try file_writer.interface.flush();
+    }
+
+    /// The buffer of the file writer (on the stack)
+    const file_buffer_size = 4096;
 
     /// Static constructor (Open): writes the header
     pub fn open(allocator: Allocator, writer: *Writer, stream_type: StreamType) Writer.Error!ObjectStreamOut {

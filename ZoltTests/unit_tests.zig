@@ -51,7 +51,9 @@ test {
     _ = @import("Math/VectorTests.zig");
 
     // ObjectStream
+    _ = @import("ObjectStream/ObjectStreamSweeps.zig");
     _ = @import("ObjectStream/ObjectStreamTest.zig");
+    _ = @import("ObjectStream/ObjectStreamZoltTests.zig");
 
     // Physics
     _ = @import("Physics/ActiveEdgesTests.zig");

@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 88.9%** of 86135 lines in scope · **Unit tests: 94.8%** of 18321 lines
+**Library: 89.3%** of 85995 lines in scope · **Unit tests: 94.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -16,10 +16,10 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 90% | 38 | 4 | 0 | 0 | 12 | 1 | 6785 |
+| `Jolt/Core` | 90% | 37 | 4 | 0 | 0 | 12 | 2 | 6645 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
-| `Jolt/ObjectStream` | 88% | 13 | 1 | 0 | 0 | 0 | 0 | 2841 |
+| `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
@@ -143,7 +143,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `StaticArray.h` | 271 | ✅ complete | `Zolt/Core/StaticArray.zig` |
 | `StreamIn.h` | 103 | ✅ complete | `Zolt/Core/StreamIn.zig` |
 | `StreamOut.h` | 82 | ✅ complete | `Zolt/Core/StreamOut.zig` |
-| `StreamUtils.h` | 140 | ✅ complete | `Zolt/Core/StreamUtils.zig` |
+| `StreamUtils.h` | 140 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
 | `StreamWrapper.h` | 39 | ✅ complete | `Zolt/Core/StreamWrapper.zig` |
 | `StridedPtr.h` | 50 | ✅ complete | `Zolt/Core/StridedPtr.zig` |
 | `StringTools.cpp`, `StringTools.h` | 107 | ✅ complete | `Zolt/Core/StringTools.zig` |
@@ -217,7 +217,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/ObjectStream — 88%</summary>
+<details><summary>Jolt/ObjectStream — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -225,7 +225,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ObjectStream.cpp`, `ObjectStream.h` | 315 | ✅ complete | `Zolt/ObjectStream/ObjectStream.zig` |
 | `ObjectStreamBinaryIn.cpp`, `ObjectStreamBinaryIn.h` | 263 | ✅ complete | `Zolt/ObjectStream/ObjectStreamBinaryIn.zig` |
 | `ObjectStreamBinaryOut.cpp`, `ObjectStreamBinaryOut.h` | 176 | ✅ complete | `Zolt/ObjectStream/ObjectStreamBinaryOut.zig` |
-| `ObjectStreamIn.cpp`, `ObjectStreamIn.h` | 683 | 🟡 partial | `Zolt/ObjectStream/ObjectStreamIn.zig` |
+| `ObjectStreamIn.cpp`, `ObjectStreamIn.h` | 683 | ✅ complete | `Zolt/ObjectStream/ObjectStreamIn.zig` |
 | `ObjectStreamOut.cpp`, `ObjectStreamOut.h` | 219 | ✅ complete | `Zolt/ObjectStream/ObjectStreamOut.zig` |
 | `ObjectStreamTextIn.cpp`, `ObjectStreamTextIn.h` | 411 | ✅ complete | `Zolt/ObjectStream/ObjectStreamTextIn.zig` |
 | `ObjectStreamTextOut.cpp`, `ObjectStreamTextOut.h` | 269 | ✅ complete | `Zolt/ObjectStream/ObjectStreamTextOut.zig` |

@@ -1,10 +1,10 @@
 //! Port of: Jolt/ObjectStream/ObjectStreamIn.h, Jolt/ObjectStream/ObjectStreamIn.cpp
-//! Status: partial
-//! Missing: `sReadObject` from a file (`std.Io`), and `RegisterTypes.factory` as the default factory (Phase 8
-//! foundation, Docs/Zolt/SerializationArchitecture.md).
+//! Status: complete
 //!
-//! `sReadObject(T, allocator, reader, .{ .factory })` reads the first object of the stream and everything it
-//! references.
+//! `sReadObject(T, allocator, reader, .{})` reads the first object of the stream and everything it references.
+//! - The classes come from `options.factory`, by default `RegisterTypes.factory` (Jolt: Factory::sInstance).
+//! - `sReadObjectFromFile(T, allocator, io, path, .{})` reads a file through a buffered `std.Io.File` reader. A file
+//!   that cannot be opened is an error of `std.Io.File.OpenError` (Jolt: false).
 //! - Ownership: every object and all memory it owns are allocated with `allocator` (objects that keep an allocator,
 //!   the RefTargets, keep this one). The result has the reference count that the stream's links gave it (0 unless an
 //!   object of the stream references it): `sReadObjectRef` wraps a RefTarget in a Ref, a value class is freed with
@@ -25,7 +25,9 @@
 //!   only an unreferenced object references and returns a dangling pointer);
 //! - D11: two stream attributes that map to the same attribute of a class (a repeated declaration) are an invalid
 //!   stream (Jolt reads the member twice: a reallocated array leaves dangling links, a Ref leaks);
-//! - D12: references (Ref / RefConst) that form a cycle are an invalid stream (Jolt reads the objects and leaks them).
+//! - D12: references (Ref / RefConst) that form a cycle are an invalid stream (Jolt reads the objects and leaks them);
+//! - D15: class data nested deeper than `max_nesting_depth` levels is an invalid stream (Jolt recurses until the stack
+//!   overflows, also on a skipped class that contains itself, which nests without end).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -40,6 +42,7 @@ const OSDataType = @import("SerializableAttribute.zig").OSDataType;
 const PrimitiveType = @import("ObjectStreamTypes.zig").PrimitiveType;
 const ObjectStreamTextIn = @import("ObjectStreamTextIn.zig").ObjectStreamTextIn;
 const ObjectStreamBinaryIn = @import("ObjectStreamBinaryIn.zig").ObjectStreamBinaryIn;
+const RegisterTypes = @import("../RegisterTypes.zig");
 
 const log = std.log.scoped(.zolt);
 
@@ -48,13 +51,15 @@ const log = std.log.scoped(.zolt);
 pub const ObjectStreamIn = struct {
     pub const Error = error{ OutOfMemory, ReadFailed, InvalidObjectStream };
 
+    /// The errors of the file variants: the errors of opening the file, then those of the read
+    pub const FileError = std.Io.File.OpenError || Error;
+
     /// Link resolution: make the member point to `object` (of class `object_rtti`), or to nothing
     pub const StoreFn = *const fn (member: *anyopaque, object: ?*anyopaque, object_rtti: *const RTTI) void;
 
     pub const Options = struct {
-        /// The classes that the stream may declare (Jolt: Factory::sInstance). Phase 8 foundation: defaults to
-        /// `&RegisterTypes.factory`.
-        factory: *const Factory,
+        /// The classes that the stream may declare (Jolt: Factory::sInstance after RegisterTypes())
+        factory: *const Factory = &RegisterTypes.factory,
     };
 
     /// Description of an attribute in the stream
@@ -106,6 +111,13 @@ pub const ObjectStreamIn = struct {
     unresolved_links: std.ArrayList(Link) = .empty,
     /// The identifier of the object that is being read (the owner of the links)
     current_object: Identifier = ObjectStream.null_identifier,
+    /// Zolt: the number of class data levels that are being read or skipped (D15)
+    nesting_depth: u32 = 0,
+
+    /// Zolt: class data (an object, an instance by value, a skipped instance) nests at most this deep (D15). Jolt's
+    /// classes nest fewer than 10 levels. At the limit the reader uses about 350 KB of stack in Debug and 150 KB in
+    /// ReleaseFast (x86_64), so it also fits the small stacks of secondary threads.
+    pub const max_nesting_depth = 256;
 
     const Format = union(StreamType) {
         text: ObjectStreamTextIn,
@@ -125,6 +137,24 @@ pub const ObjectStreamIn = struct {
     pub fn sReadObjectRef(comptime T: type, allocator: Allocator, reader: *Reader, options: Options) Error!Ref(T) {
         return .init(try sReadObject(T, allocator, reader, options));
     }
+
+    /// Main function to read an object from a file (sReadObject(const char *, T *&)). `path` is absolute or relative to
+    /// the current working directory.
+    pub fn sReadObjectFromFile(comptime T: type, allocator: Allocator, io: std.Io, path: []const u8, options: Options) FileError!*T {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var buffer: [file_buffer_size]u8 = undefined;
+        var file_reader = file.reader(io, &buffer);
+        return sReadObject(T, allocator, &file_reader.interface, options);
+    }
+
+    /// sReadObject(const char *, Ref<T> &): the main object of a file wrapped in a Ref (one more reference)
+    pub fn sReadObjectRefFromFile(comptime T: type, allocator: Allocator, io: std.Io, path: []const u8, options: Options) FileError!Ref(T) {
+        return .init(try sReadObjectFromFile(T, allocator, io, path, options));
+    }
+
+    /// The buffer of the file reader (on the stack)
+    const file_buffer_size = 4096;
 
     /// Check the header ("TOS 1.00" / "BOS 1.00", GetInfo) and create a stream of that type (Open)
     pub fn open(allocator: Allocator, reader: *Reader, factory: *const Factory) Error!ObjectStreamIn {
@@ -468,6 +498,15 @@ pub const ObjectStreamIn = struct {
     /// Read the attributes of an object or by value instance (null: skip them), in the order of the stream's
     /// description (ReadClassData(const ClassDescription &, void *))
     fn readDescribedClassData(self: *ObjectStreamIn, class_desc: *const ClassDescription, instance: ?*anyopaque) Error!void {
+        // Zolt: limit the nesting (D15). Every level of class data passes here: objects, instances by value
+        // (readClassData) and skipped instances (skipAttributeData).
+        if (self.nesting_depth == max_nesting_depth) {
+            log.info("ObjectStreamIn: Class data nested deeper than {d} levels.", .{max_nesting_depth});
+            return error.InvalidObjectStream;
+        }
+        self.nesting_depth += 1;
+        defer self.nesting_depth -= 1;
+
         for (class_desc.attributes.items) |attr_desc| {
             // Read or skip the attribute data
             if (attr_desc.index) |idx| {
@@ -513,6 +552,9 @@ pub const ObjectStreamIn = struct {
                 log.info("ObjectStreamIn: Found instance of unknown class {s}.", .{class_name});
                 return error.InvalidObjectStream;
             };
+            // Zolt: a class without attributes has no data, so the loop would read nothing (Jolt runs it `count` times,
+            // up to 2^32 times for a corrupt count)
+            if (class_desc.attributes.items.len == 0) return;
             for (0..count) |_| try self.readDescribedClassData(class_desc, null);
             return;
         }
