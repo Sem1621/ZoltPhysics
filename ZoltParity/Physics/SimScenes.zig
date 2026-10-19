@@ -181,7 +181,7 @@
 //! - **Rules.** Avoid what Jolt asserts or leaves undefined:
 //!   - Wheel leaves its contact members (mContactPosition, mContactPointVelocity, mContactNormal, mContactLongitudinal,
 //!     mContactLateral, mAxlePlaneConstant) uninitialized until the first contact, and VehicleConstraint::SaveState
-//!     writes some of them: the reference zero-fills every allocation (SimInstallHooks of SimulationReference.cpp) and
+//!     writes some of them: the reference zero-fills every allocation (ZoltParity/ParityHooks.h) and
 //!     Zolt zero-initializes these members (a documented deviation), so a vehicle may start in the air
 //!     (vehicle_wheeled_in_air);
 //!   - the body of a vehicle stays in the system while the vehicle exists, vehicles do not drive on each other (their

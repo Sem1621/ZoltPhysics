@@ -23,9 +23,9 @@
 // trips of the vehicle and ragdoll settings (jolt_sim_vehicle_settings_part, jolt_sim_ragdoll_settings_bytes) and the
 // CharacterID test (jolt_sim_character_id_sequence) are compared before a scene runs.
 //
-// The process hooks (SimInstallHooks): zero-filled allocations (Jolt leaves members uninitialized that its states hold),
-// a Trace that prints, and with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) an AssertFailed that
-// prints and counts: the simulation parity fails a scene whose C++ side hit an assert.
+// The process hooks (ZoltParity/ParityHooks.h): zero-filled allocations (Jolt leaves members uninitialized that its
+// states hold), a Trace that prints, and with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) an
+// AssertFailed that prints and counts: the simulation parity fails a scene whose C++ side hit an assert.
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -105,111 +105,17 @@ using namespace JPH;
 // ObjectVsBroadPhaseLayerFilterImpl), mirrored by ZoltTests/Layers.zig
 #include <UnitTests/Layers.h>
 
-// The hooks of the parity process: Jolt's allocation functions, Trace and AssertFailed. SimInstallHooks runs before
-// main (sSimHooksInstalled below, so before any Jolt allocation of the process) and again in SimEnsureFactory.
-//
-// Allocation: Jolt's allocator (malloc / realloc / posix_memalign / free), but every allocation is zero-filled. Jolt
-// leaves members uninitialized that its states hold: Wheel's mContactPosition, mContactPointVelocity, mContactNormal,
-// mContactLongitudinal, mContactLateral and mAxlePlaneConstant until the first contact of the wheel (Wheel uses
-// JPH_OVERRIDE_NEW_DELETE), which VehicleConstraint::SaveState writes. With the zero-filled allocations they are 0 in
-// both C++ worlds, and Zolt zero-initializes them (a documented deviation, CharacterVehicleArchitecture.md "Settled in
-// the foundation review"), so a vehicle that starts in the air compares too. The other reference files call
-// RegisterDefaultAllocator(), which installs Jolt's allocator again: it is compatible (both free with free), and zero
-// filling changes nothing that is defined; SimEnsureFactory installs the hooks again before a world is created.
-//
-// Trace: printed to stderr (Jolt's default does nothing in a build without asserts, so the "Trace(...); abort();"
-// diagnostics of this file would abort silently).
-//
-// AssertFailed (a reference built with JPH_ENABLE_ASSERTS: `zig build parity -Dreference_asserts=true`): printed to
-// stderr and counted (jolt_sim_reference_assert_count), execution continues like Jolt's build without asserts. The
-// simulation parity fails a scene whose C++ side hit an assert.
-
-static void *SimZeroAllocate(size_t inSize)
-{
-	return calloc(1, inSize);
-}
-
-static void *SimZeroReallocate(void *inBlock, size_t inOldSize, size_t inNewSize)
-{
-	void *block = realloc(inBlock, inNewSize);
-	if (block != nullptr && inNewSize > inOldSize)
-		memset(static_cast<uint8 *>(block) + inOldSize, 0, inNewSize - inOldSize);
-	return block;
-}
-
-static void SimFree(void *inBlock)
-{
-	free(inBlock);
-}
-
-static void *SimZeroAlignedAllocate(size_t inSize, size_t inAlignment)
-{
-#if defined(JPH_PLATFORM_WINDOWS)
-	void *block = _aligned_malloc(inSize, inAlignment);
-#else
-	void *block = nullptr;
-	if (posix_memalign(&block, inAlignment, inSize) != 0)
-		block = nullptr;
-#endif
-	if (block != nullptr)
-		memset(block, 0, inSize);
-	return block;
-}
-
-static void SimAlignedFree(void *inBlock)
-{
-#if defined(JPH_PLATFORM_WINDOWS)
-	_aligned_free(inBlock);
-#else
-	free(inBlock);
-#endif
-}
-
-static void SimTrace(const char *inFMT, ...)
-{
-	va_list list;
-	va_start(list, inFMT);
-	char buffer[1024];
-	vsnprintf(buffer, sizeof(buffer), inFMT, list);
-	va_end(list);
-	fprintf(stderr, "Jolt: %s\n", buffer);
-	fflush(stderr);
-}
-
-#ifdef JPH_ENABLE_ASSERTS
-
-// The number of Jolt asserts that failed in this process (jolt_sim_reference_assert_count)
-static std::atomic<uint32> sSimAssertCount { 0 };
-
-static bool SimAssertFailed(const char *inExpression, const char *inMessage, const char *inFile, uint inLine)
-{
-	++sSimAssertCount;
-	fprintf(stderr, "Jolt assert failed: %s:%u: (%s) %s\n", inFile, inLine, inExpression, inMessage != nullptr? inMessage : "");
-	fflush(stderr);
-	return false; // No breakpoint: continue like Jolt's build without asserts, the driver fails the scene
-}
-
-#endif // JPH_ENABLE_ASSERTS
-
-static void SimInstallHooks()
-{
-	Allocate = SimZeroAllocate;
-	Reallocate = SimZeroReallocate;
-	Free = SimFree;
-	AlignedAllocate = SimZeroAlignedAllocate;
-	AlignedFree = SimAlignedFree;
-	Trace = SimTrace;
-	JPH_IF_ENABLE_ASSERTS(AssertFailed = SimAssertFailed;)
-}
-
-// Before main: before any Jolt allocation of the parity process
-[[maybe_unused]] static const bool sSimHooksInstalled = (SimInstallHooks(), true);
+// The hooks of the parity process (ZoltParity/ParityHooks.h): Jolt's allocation functions with zero-filled blocks, Trace
+// and AssertFailed. The header installs them before main, so before any Jolt allocation of the process, and
+// SimEnsureFactory installs them again. The other reference files call RegisterDefaultAllocator(), which installs Jolt's
+// allocator again: it is compatible (both free with free), and zero filling changes nothing that is defined.
+#include <ZoltParity/ParityHooks.h>
 
 // The hooks (another reference file may have installed Jolt's allocator since) and the Factory that the shapes need
 // (same guard as BasicsReference.cpp, RegisterTypes() runs once for the whole parity binary)
 static void SimEnsureFactory()
 {
-	SimInstallHooks();
+	ParityInstallHooks();
 	if (Factory::sInstance == nullptr)
 	{
 		Factory::sInstance = new Factory();
@@ -5316,7 +5222,7 @@ void jolt_sim_character_id_sequence(void *inWorld, uint32 inFirstID, uint32 *out
 	CharacterID::sSetNextCharacterID();
 }
 
-// 1 when the allocation hooks of the parity process zero-fill (SimInstallHooks): a block that was filled and freed
+// 1 when the allocation hooks of the parity process zero-fill (ParityHooks.h): a block that was filled and freed
 // comes back as zeros from Allocate and AlignedAllocate, Reallocate keeps the old bytes and zeroes the new ones
 uint32 jolt_sim_zero_filling_check()
 {
@@ -5347,14 +5253,10 @@ uint32 jolt_sim_zero_filling_check()
 	return ok;
 }
 
-// The number of Jolt asserts that failed in this process (SimAssertFailed; always 0 without JPH_ENABLE_ASSERTS)
+// The number of Jolt asserts that failed in this process (ParityAssertFailed; always 0 without JPH_ENABLE_ASSERTS)
 uint32 jolt_sim_reference_assert_count()
 {
-#ifdef JPH_ENABLE_ASSERTS
-	return sSimAssertCount.load();
-#else
-	return 0;
-#endif
+	return ParityAssertCount();
 }
 
 // Fails a JPH_ASSERT on purpose (the test of the assert hook): the number of failed asserts before and after it

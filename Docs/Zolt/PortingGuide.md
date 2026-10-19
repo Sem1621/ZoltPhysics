@@ -626,7 +626,11 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   `ZoltParity/<Dir>/<Name>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Name>Reference.cpp` the
   C ABI wrappers around Jolt (one pair per ported area, e.g. `Geometry/QueriesParity.zig`); shared helpers (input generator, bit comparison, `Checker`) are in
   `ZoltParity/ParityFramework.zig`. Register test files in `ZoltParity/parity.zig` and .cpp files in
-  `ZoltParity/reference_sources.zig`. For each ported function, call both implementations on ~100k
+  `ZoltParity/reference_sources.zig`. A new reference file includes `ZoltParity/ParityHooks.h` and calls
+  `ParityInstallHooks()` at the start of every exported function that allocates through Jolt; it never calls
+  `RegisterDefaultAllocator()`. The hooks zero-fill Jolt's allocations, print Jolt's `Trace` and count Jolt's asserts
+  (with `-Dreference_asserts=true`). A filtered parity run links only the reference objects that its tests use, so a
+  file cannot rely on the hooks of another file. For each ported function, call both implementations on ~100k
   generated inputs (random values mixed with special values) and require identical bits (NaN
   payloads excepted). For containers and algorithms with an observable order (hash table iteration,
   sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug

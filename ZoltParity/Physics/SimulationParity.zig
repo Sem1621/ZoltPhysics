@@ -7499,7 +7499,7 @@ test "SimulationParity the reference counts its asserts" {
 }
 
 test "SimulationParity the reference zero-fills its allocations" {
-    // The allocation hooks of the parity process (SimInstallHooks of SimulationReference.cpp): Jolt's members that are
+    // The allocation hooks of the parity process (ZoltParity/ParityHooks.h): Jolt's members that are
     // never initialized (Wheel's contact members before the first contact) are 0, as Zolt zero-initializes them
     try std.testing.expectEqual(@as(u32, 1), jolt.jolt_sim_zero_filling_check());
 }
