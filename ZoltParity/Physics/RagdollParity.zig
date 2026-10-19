@@ -26,9 +26,10 @@
 //!   sides, or the same restored settings (Jolt does not check the stream after the part count, the group filter ID of
 //!   a part, the has-constraint flag and the additional constraint count, so some truncations restore settings with
 //!   fewer parts, a last part without group filter or constraint, or no additional constraints).
-//! Release only (`-Doptimize=ReleaseFast`, Jolt asserts in its debug build and so does Zolt in safe builds): Stabilize of
-//! an inertia tensor with NaNs (it returns false), CalculateConstraintPriorities on skeletons whose parents come after
-//! their children and with a base priority that overflows.
+//! Release only (Jolt asserts on these inputs in its debug build, its release build continues): Stabilize of an inertia
+//! tensor with NaNs (it returns false), CalculateConstraintPriorities on skeletons whose parents come after their
+//! children and with a base priority that overflows. They run in every build: Zolt's asserts at these sites are
+//! recoverable, and the asserts of both sides are counted per case (R8, ParityHooks.ReleaseAsserts).
 
 const std = @import("std");
 const zolt = @import("zolt");

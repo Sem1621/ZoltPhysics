@@ -13,8 +13,9 @@
 //!   or not; in about 1 of 8 updates a special delta time, RPM or input: NaN, infinite, -0, huge, negative) and Set (gears in range, clutch frictions); after every call the gear, clutch friction, ratio,
 //!   IsSwitchingGear, AllowSleep and the SaveState bytes (the timers) are compared.
 //! - VehicleDifferentialSettings::CalculateTorqueRatio: random settings (open and limited slip differentials) and wheel
-//!   speeds (zero, tiny, negative, huge, infinite, NaN). Release only (Jolt asserts on the settings, Zolt checks the same
-//!   asserts in safe builds): splits outside [0, 1], limited slip ratios <= 1 and both speeds infinite.
+//!   speeds (zero, tiny, negative, huge, infinite, NaN). Release only (Jolt asserts on the settings, its release build
+//!   continues): splits outside [0, 1], limited slip ratios <= 1 and both speeds infinite. They run in every build:
+//!   Zolt's asserts are recoverable, and the asserts of both sides are counted per case (R8, ParityHooks.ReleaseAsserts).
 //! - The default curves (WheelSettingsWV's longitudinal and lateral friction, VehicleEngineSettings' normalized torque)
 //!   at random x.
 //! - The binary state of every settings class: VehicleEngineSettings, VehicleTransmissionSettings,
