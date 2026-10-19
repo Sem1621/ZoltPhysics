@@ -3,6 +3,8 @@
 
 pub const files = [_][]const u8{
     "AABBTree/AABBTreeReference.cpp",
+    "Compute/ComputeReference.cpp",
+    "Compute/ShaderHelpersReference.cpp",
     "Core/ConcurrencyReference.cpp",
     "Core/ContainersReference.cpp",
     "Core/CoreReference.cpp",

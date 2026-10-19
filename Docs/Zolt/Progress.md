@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 86.6%** of 90565 lines in scope · **Unit tests: 95.9%** of 18321 lines
+**Library: 88.0%** of 90565 lines in scope · **Unit tests: 97.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -15,7 +15,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
-| `Jolt/Compute` | 20% | 4 | 0 | 0 | 9 | 0 | 19 | 1069 |
+| `Jolt/Compute` | 100% | 13 | 0 | 0 | 0 | 0 | 19 | 1069 |
 | `Jolt/Core` | 95% | 42 | 1 | 0 | 0 | 11 | 1 | 6829 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
@@ -30,7 +30,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | 48% | 1 | 1 | 0 | 2 | 0 | 0 | 1754 |
-| `Jolt/Shaders` | 0% | 0 | 0 | 0 | 44 | 0 | 0 | 1563 |
+| `Jolt/Shaders` | 31% | 13 | 0 | 0 | 31 | 0 | 0 | 1563 |
 | `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
 
@@ -55,19 +55,19 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Compute — 20%</summary>
+<details><summary>Jolt/Compute — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ComputeBufferCPU.cpp`, `ComputeBufferCPU.h` | 51 | ❌ todo |  |
-| `ComputeQueueCPU.cpp`, `ComputeQueueCPU.h` | 111 | ❌ todo |  |
-| `ComputeShaderCPU.h` | 30 | ❌ todo |  |
-| `ComputeSystemCPU.cpp`, `ComputeSystemCPU.h` | 82 | ❌ todo |  |
-| `HLSLToCPP.h` | 419 | ❌ todo |  |
-| `ShaderWrapper.h` | 20 | ❌ todo |  |
-| `WrapShaderBegin.h` | 57 | ❌ todo |  |
-| `WrapShaderBindings.h` | 32 | ❌ todo |  |
-| `WrapShaderEnd.h` | 51 | ❌ todo |  |
+| `ComputeBufferCPU.cpp`, `ComputeBufferCPU.h` | 51 | ✅ complete | `Zolt/Compute/CPU/ComputeBufferCPU.zig` |
+| `ComputeQueueCPU.cpp`, `ComputeQueueCPU.h` | 111 | ✅ complete | `Zolt/Compute/CPU/ComputeQueueCPU.zig` |
+| `ComputeShaderCPU.h` | 30 | ✅ complete | `Zolt/Compute/CPU/ComputeShaderCPU.zig` |
+| `ComputeSystemCPU.cpp`, `ComputeSystemCPU.h` | 82 | ✅ complete | `Zolt/Compute/CPU/ComputeSystemCPU.zig` |
+| `HLSLToCPP.h` | 419 | ✅ complete | `Zolt/Compute/CPU/HLSLToCPP.zig` |
+| `ShaderWrapper.h` | 20 | ✅ complete | `Zolt/Compute/CPU/ShaderWrapper.zig` |
+| `WrapShaderBegin.h` | 57 | ✅ complete | `Zolt/Compute/CPU/ShaderWrapper.zig` |
+| `WrapShaderBindings.h` | 32 | ✅ complete | `Zolt/Compute/CPU/ShaderWrapper.zig` |
+| `WrapShaderEnd.h` | 51 | ✅ complete | `Zolt/Compute/CPU/ShaderWrapper.zig` |
 | `ComputeBuffer.h` | 55 | ✅ complete | `Zolt/Compute/ComputeBuffer.zig` |
 | `ComputeQueue.h` | 65 | ✅ complete | `Zolt/Compute/ComputeQueue.zig` |
 | `ComputeShader.h` | 32 | ✅ complete | `Zolt/Compute/ComputeShader.zig` |
@@ -483,7 +483,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Shaders — 0%</summary>
+<details><summary>Jolt/Shaders — 31%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -495,7 +495,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HairCalculateCollisionPlanesBindings.h` | 11 | ❌ todo |  |
 | `HairCalculateRenderPositions.h`, `HairCalculateRenderPositions.hlsl` | 33 | ❌ todo |  |
 | `HairCalculateRenderPositionsBindings.h` | 13 | ❌ todo |  |
-| `HairCommon.h` | 46 | ❌ todo |  |
+| `HairCommon.h` | 46 | ✅ complete | `Zolt/Shaders/HairCommon.zig` |
 | `HairGridAccumulate.hlsl` | 44 | ❌ todo |  |
 | `HairGridAccumulateBindings.h` | 10 | ❌ todo |  |
 | `HairGridClear.hlsl` | 14 | ❌ todo |  |
@@ -508,7 +508,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HairSkinRootsBindings.h` | 20 | ❌ todo |  |
 | `HairSkinVertices.hlsl` | 23 | ❌ todo |  |
 | `HairSkinVerticesBindings.h` | 10 | ❌ todo |  |
-| `HairStructs.h` | 102 | ❌ todo |  |
+| `HairStructs.h` | 102 | ✅ complete | `Zolt/Shaders/HairStructs.zig` |
 | `HairTeleport.hlsl` | 24 | ❌ todo |  |
 | `HairTeleportBindings.h` | 10 | ❌ todo |  |
 | `HairUpdateRoots.hlsl` | 25 | ❌ todo |  |
@@ -520,17 +520,17 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HairUpdateVelocityIntegrate.hlsl` | 38 | ❌ todo |  |
 | `HairUpdateVelocityIntegrateBindings.h` | 19 | ❌ todo |  |
 | `HairWrapper.cpp`, `HairWrapper.h` | 127 | ❌ todo |  |
-| `ShaderCore.h` | 68 | ❌ todo |  |
-| `ShaderMat44.h` | 11 | ❌ todo |  |
-| `ShaderMath.h` | 14 | ❌ todo |  |
-| `ShaderPlane.h` | 15 | ❌ todo |  |
-| `ShaderQuat.h` | 103 | ❌ todo |  |
-| `ShaderVec3.h` | 23 | ❌ todo |  |
-| `TestCompute.hlsl` | 22 | ❌ todo |  |
-| `TestCompute2.hlsl` | 19 | ❌ todo |  |
-| `TestCompute2Bindings.h` | 21 | ❌ todo |  |
-| `TestComputeBindings.h` | 17 | ❌ todo |  |
-| `TestComputeWrapper.cpp` | 18 | ❌ todo |  |
+| `ShaderCore.h` | 68 | ✅ complete | `Zolt/Shaders/ShaderCore.zig` |
+| `ShaderMat44.h` | 11 | ✅ complete | `Zolt/Shaders/ShaderMat44.zig` |
+| `ShaderMath.h` | 14 | ✅ complete | `Zolt/Shaders/ShaderMath.zig` |
+| `ShaderPlane.h` | 15 | ✅ complete | `Zolt/Shaders/ShaderPlane.zig` |
+| `ShaderQuat.h` | 103 | ✅ complete | `Zolt/Shaders/ShaderQuat.zig` |
+| `ShaderVec3.h` | 23 | ✅ complete | `Zolt/Shaders/ShaderVec3.zig` |
+| `TestCompute.hlsl` | 22 | ✅ complete | `Zolt/Shaders/TestCompute.zig` |
+| `TestCompute2.hlsl` | 19 | ✅ complete | `Zolt/Shaders/TestCompute2.zig` |
+| `TestCompute2Bindings.h` | 21 | ✅ complete | `Zolt/Shaders/TestCompute2.zig` |
+| `TestComputeBindings.h` | 17 | ✅ complete | `Zolt/Shaders/TestCompute.zig` |
+| `TestComputeWrapper.cpp` | 18 | ✅ complete | `Zolt/Shaders/TestComputeWrapper.zig` |
 
 </details>
 
@@ -560,7 +560,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
 | `UnitTests` | 93% | 6 | 0 | 0 | 1 | 1 | 0 | 1185 |
-| `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
+| `UnitTests/Compute` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
@@ -582,11 +582,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Compute — 0%</summary>
+<details><summary>UnitTests/Compute — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ComputeTests.cpp` | 349 | ❌ todo |  |
+| `ComputeTests.cpp` | 349 | ✅ complete | `ZoltTests/Compute/ComputeTests.zig` |
 
 </details>
 

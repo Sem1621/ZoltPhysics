@@ -23,6 +23,12 @@ pub const ComputeQueue = @import("Compute/ComputeQueue.zig").ComputeQueue;
 pub const ComputeShader = @import("Compute/ComputeShader.zig").ComputeShader;
 pub const ComputeSystem = @import("Compute/ComputeSystem.zig").ComputeSystem;
 pub const createComputeSystem = @import("Compute/ComputeSystem.zig").createComputeSystem;
+pub const ComputeBufferCPU = @import("Compute/CPU/ComputeBufferCPU.zig").ComputeBufferCPU;
+pub const ComputeQueueCPU = @import("Compute/CPU/ComputeQueueCPU.zig").ComputeQueueCPU;
+pub const ComputeShaderCPU = @import("Compute/CPU/ComputeShaderCPU.zig").ComputeShaderCPU;
+pub const ComputeSystemCPU = @import("Compute/CPU/ComputeSystemCPU.zig").ComputeSystemCPU;
+pub const HLSLToCPP = @import("Compute/CPU/HLSLToCPP.zig");
+pub const ShaderWrapper = @import("Compute/CPU/ShaderWrapper.zig").ShaderWrapper;
 
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
@@ -570,6 +576,20 @@ pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Co
 pub const DebugRenderer = @import("Renderer/DebugRenderer.zig").DebugRenderer;
 pub const DebugRendererRecorder = @import("Renderer/DebugRendererRecorder.zig").DebugRendererRecorder;
 
+// Shaders (the namespaces of the shader files, Docs/Zolt/RemainingFeaturesArchitecture.md R12)
+pub const HairCommon = @import("Shaders/HairCommon.zig");
+pub const HairStructs = @import("Shaders/HairStructs.zig");
+pub const ShaderCore = @import("Shaders/ShaderCore.zig");
+pub const ShaderMat44 = @import("Shaders/ShaderMat44.zig");
+pub const ShaderMath = @import("Shaders/ShaderMath.zig");
+pub const ShaderPlane = @import("Shaders/ShaderPlane.zig");
+pub const ShaderQuat = @import("Shaders/ShaderQuat.zig");
+pub const ShaderVec3 = @import("Shaders/ShaderVec3.zig");
+pub const TestCompute = @import("Shaders/TestCompute.zig");
+pub const TestCompute2 = @import("Shaders/TestCompute2.zig");
+pub const registerTestCompute = @import("Shaders/TestComputeWrapper.zig").registerTestCompute;
+pub const registerTestCompute2 = @import("Shaders/TestComputeWrapper.zig").registerTestCompute2;
+
 // Skeleton
 pub const SkeletalAnimation = @import("Skeleton/SkeletalAnimation.zig").SkeletalAnimation;
 pub const Skeleton = @import("Skeleton/Skeleton.zig").Skeleton;
@@ -592,6 +612,12 @@ const source_files = .{
     @import("Compute/ComputeQueue.zig"),
     @import("Compute/ComputeShader.zig"),
     @import("Compute/ComputeSystem.zig"),
+    @import("Compute/CPU/ComputeBufferCPU.zig"),
+    @import("Compute/CPU/ComputeQueueCPU.zig"),
+    @import("Compute/CPU/ComputeShaderCPU.zig"),
+    @import("Compute/CPU/ComputeSystemCPU.zig"),
+    @import("Compute/CPU/HLSLToCPP.zig"),
+    @import("Compute/CPU/ShaderWrapper.zig"),
     @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
@@ -871,6 +897,17 @@ const source_files = .{
     @import("RegisterTypes.zig"),
     @import("Renderer/DebugRenderer.zig"),
     @import("Renderer/DebugRendererRecorder.zig"),
+    @import("Shaders/HairCommon.zig"),
+    @import("Shaders/HairStructs.zig"),
+    @import("Shaders/ShaderCore.zig"),
+    @import("Shaders/ShaderMat44.zig"),
+    @import("Shaders/ShaderMath.zig"),
+    @import("Shaders/ShaderPlane.zig"),
+    @import("Shaders/ShaderQuat.zig"),
+    @import("Shaders/ShaderVec3.zig"),
+    @import("Shaders/TestCompute.zig"),
+    @import("Shaders/TestCompute2.zig"),
+    @import("Shaders/TestComputeWrapper.zig"),
     @import("Skeleton/SkeletalAnimation.zig"),
     @import("Skeleton/Skeleton.zig"),
     @import("Skeleton/SkeletonMapper.zig"),
