@@ -560,7 +560,7 @@ pub const PathConstraint = struct {
 
     pub fn getConstraintSettings(self: *const PathConstraint) Allocator.Error!Ref(ConstraintSettings) {
         _ = self;
-        if (Core.enable_asserts) std.debug.assert(false); // Not implemented yet
+        if (Core.enable_asserts) Core.assertFailed("Not implemented yet", @src());
         return .empty;
     }
 
@@ -1036,9 +1036,13 @@ test "PathConstraint: virtual dispatch, the path frames, setters, solver, settin
     try testing.expect(attachment.getAxisZ().isClose(path_to_world.multiply3x3(point.normal), .{ .max_dist_sq = 1.0e-10 }));
 
     // GetConstraintSettings is not implemented in Jolt (it asserts and returns nullptr)
-    if (!Core.enable_asserts) {
+    {
+        var expect_assert: @import("../../Core/IssueReporting.zig").ExpectAssert = undefined;
+        expect_assert.init(1);
+        errdefer expect_assert.restore();
         var copy = try base.getConstraintSettings();
         defer copy.deinit();
+        try expect_assert.finish();
         try testing.expect(copy.get() == null);
     }
 

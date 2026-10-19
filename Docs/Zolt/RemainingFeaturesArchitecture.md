@@ -268,6 +268,19 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
 
 - Each unlocked test runs with `ExpectAssert(n)`, where n is the number of Jolt asserts. A conversion that would continue
   into a Zig safety check stays a panic, and its test stays skipped with the reason in a comment.
+- Settled in F0: the tests above reach these asserts, and each one is a single converted line (`Core.assertRecoverable`
+  / `Core.assertFailed`, re-exported from `IssueReporting`): PathConstraint `GetConstraintSettings`; `jobIntegrateVelocity`
+  inner radius; Constraint's two constructor and two setter step overrides; SkeletonMapper "Should not be initialized
+  yet", "Skeleton 1 should be the low detail skeleton!", the two `AreJointsCorrectlyOrdered` and "Joints must be
+  ordered"; SkeletonPose "Joints must be ordered"; SkeletalAnimation `inTime >= 0`, the fraction and the sampled
+  rotation; Ragdoll "Failed to decompose the inertia tensor!", the base priority overflow and the joint order;
+  EigenValueSymmetric "Too many iterations" (reached by the NaN inertia before the Ragdoll assert); VehicleDifferential's
+  three asserts; MotionProperties' dynamic checks of `GetInverseMass`, `MultiplyWorldSpaceInverseInertiaByVector`,
+  `ApplyLinearVelocityStep` and `ApplyAngularVelocityStep` (the kinematic gear and rack). None continues into a Zig safety
+  check, so no test stays skipped.
+- The parity tests of Jolt's release behavior count the asserts of both sides (`ZoltParity/ParityHooks.zig`
+  `ReleaseAsserts`, Zolt's `IssueReporting.CountAsserts`). With `-Dreference_asserts=true` every case and every run of
+  a release_only scene hits as many asserts on both sides. Without it they check that the cases reach an assert.
 - The two `release_only` scenes run in safe builds too. SimulationParity installs a counting handler. With
   `-Dreference_asserts=true` it compares Zolt's count with `jolt_sim_reference_assert_count`.
 - All other asserts stay. Invariant asserts (`std.debug.assert`) guard Zig undefined behavior: there is no release path

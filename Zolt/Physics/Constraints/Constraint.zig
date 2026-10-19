@@ -343,8 +343,8 @@ pub const Constraint = struct {
     pub fn initWithVTable(vtable: *const VTable, allocator: Allocator, settings: *const ConstraintSettings) Constraint {
         // An object stream or a binary state can hold any uint32 here.
         // Jolt asserts only with JPH_ENABLE_ASSERTS. Its release build keeps the low 8 bits (uint8).
-        if (Core.enable_asserts) std.debug.assert(settings.num_velocity_steps_override < 256);
-        if (Core.enable_asserts) std.debug.assert(settings.num_position_steps_override < 256);
+        if (Core.enable_asserts) Core.assertRecoverable(settings.num_velocity_steps_override < 256, "inSettings.mNumVelocityStepsOverride < 256", @src());
+        if (Core.enable_asserts) Core.assertRecoverable(settings.num_position_steps_override < 256, "inSettings.mNumPositionStepsOverride < 256", @src());
         return .{
             .vtable = vtable,
             .allocator = allocator,
@@ -412,7 +412,7 @@ pub const Constraint = struct {
 
     /// Used only when the constraint is active. Override for the number of solver velocity iterations to run, 0 means use the default in PhysicsSettings::mNumVelocitySteps. The number of iterations to use is the max of all contacts and constraints in the island.
     pub fn setNumVelocityStepsOverride(self: *Constraint, n: u32) void {
-        if (Core.enable_asserts) std.debug.assert(n < 256); // Jolt's release build keeps the low 8 bits
+        if (Core.enable_asserts) Core.assertRecoverable(n < 256, "inN < 256", @src()); // Jolt's release build keeps the low 8 bits
         self.num_velocity_steps_override = @truncate(n);
     }
 
@@ -422,7 +422,7 @@ pub const Constraint = struct {
 
     /// Used only when the constraint is active. Override for the number of solver position iterations to run, 0 means use the default in PhysicsSettings::mNumPositionSteps. The number of iterations to use is the max of all contacts and constraints in the island.
     pub fn setNumPositionStepsOverride(self: *Constraint, n: u32) void {
-        if (Core.enable_asserts) std.debug.assert(n < 256); // Jolt's release build keeps the low 8 bits
+        if (Core.enable_asserts) Core.assertRecoverable(n < 256, "inN < 256", @src()); // Jolt's release build keeps the low 8 bits
         self.num_position_steps_override = @truncate(n);
     }
 
@@ -581,11 +581,13 @@ test "ConstraintSettings: creatable like Jolt's JPH_IMPLEMENT_SERIALIZABLE_VIRTU
     try testing.expect(!restored.getPtr().?.enabled);
 }
 
-test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in builds without asserts" {
+test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in its release build" {
     // An object stream or a binary state can hold any uint32 in the settings.
     // Jolt asserts only with JPH_ENABLE_ASSERTS. Its release build keeps the low 8 bits.
-    if (Core.enable_asserts) return error.SkipZigTest;
     const testing = std.testing;
+    var expect_assert: @import("../../Core/IssueReporting.zig").ExpectAssert = undefined;
+    expect_assert.init(4); // The two of the constructor, one per setter
+    errdefer expect_assert.restore();
 
     var velocity_steps: u32 = 300;
     var position_steps: u32 = 513;
@@ -602,6 +604,7 @@ test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in bu
 
     constraint.setNumVelocityStepsOverride(velocity_steps + 1);
     constraint.setNumPositionStepsOverride(position_steps + 1);
+    try expect_assert.finish();
     try testing.expectEqual(@as(u32, 45), constraint.getNumVelocityStepsOverride());
     try testing.expectEqual(@as(u32, 2), constraint.getNumPositionStepsOverride());
 }

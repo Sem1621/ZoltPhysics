@@ -12,6 +12,7 @@ pub const files = [_][]const u8{
     "Geometry/QueriesReference.cpp",
     "Math/MathReference.cpp",
     "ObjectStream/ObjectStreamReference.cpp",
+    "ParityHooks.cpp",
     "Physics/BasicsReference.cpp",
     "Physics/BodyInterfaceReference.cpp",
     "Physics/BodyReference.cpp",

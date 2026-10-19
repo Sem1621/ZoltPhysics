@@ -17,6 +17,10 @@
 //!   runs (`ExpectAssert` does this from the test thread).
 //! - `ExpectAssert` (Jolt's UnitTests/UnitTestFramework.h) is a test helper here, like `FailingTempAllocator`, so that
 //!   the inline tests of the library can use it too. ZoltTests/UnitTestFramework.zig re-exports it.
+//! - `CountAsserts` (Zolt addition) counts the failed asserts instead of expecting a number. The parity tests of Jolt's
+//!   release behavior compare its count with the count of the C++ reference (ZoltParity/ParityHooks.zig).
+//! - Core.zig re-exports `assertRecoverable` and `assertFailed`, so a converted assert is one line at its site:
+//!   `if (Core.enable_asserts) Core.assertRecoverable(ok, "message", @src());`.
 
 const std = @import("std");
 const Core = @import("Core.zig");
@@ -110,6 +114,46 @@ pub const ExpectAssert = struct {
     }
 };
 
+/// A Zolt test helper next to ExpectAssert: it counts the failed asserts and lets the code continue, like Jolt's
+/// release build. A test of Jolt's release behavior whose assert count is only known on the C++ side (a parity test)
+/// compares this count with the count of the C++ reference (ZoltParity/ParityHooks.h). Initialize in place, it must not
+/// move until `restore`. Without asserts it counts nothing.
+pub const CountAsserts = struct {
+    handler: AssertHandler = .{ .assertFailed = onAssertFailed },
+    /// Number of asserts that failed since `init`
+    count: std.atomic.Value(u32) = .init(0),
+    /// Previous assert handler
+    previous: ?*AssertHandler = null,
+    installed: bool = false,
+
+    /// Install the counting handler
+    pub fn init(self: *CountAsserts) void {
+        self.* = .{};
+        if (!Core.enable_asserts) return;
+        self.previous = setAssertHandler(&self.handler);
+        self.installed = true;
+    }
+
+    /// Number of asserts that failed since `init`
+    pub fn get(self: *const CountAsserts) u32 {
+        return self.count.load(.seq_cst);
+    }
+
+    /// Put the previous handler back (idempotent)
+    pub fn restore(self: *CountAsserts) void {
+        if (!self.installed) return;
+        _ = setAssertHandler(self.previous);
+        self.installed = false;
+    }
+
+    fn onAssertFailed(handler: *AssertHandler, message: []const u8, src: std.builtin.SourceLocation) bool {
+        _ = .{ message, src };
+        const self: *CountAsserts = @fieldParentPtr("handler", handler);
+        _ = self.count.fetchAdd(1, .seq_cst);
+        return false;
+    }
+};
+
 test "IssueReporting: ExpectAssert accepts the expected asserts and restores the handler" {
     var expect_assert: ExpectAssert = undefined;
     expect_assert.init(2);
@@ -130,6 +174,29 @@ test "IssueReporting: ExpectAssert accepts the expected asserts and restores the
         try std.testing.expectError(error.TestUnexpectedResult, too_few.finish())
     else
         try too_few.finish();
+}
+
+test "IssueReporting: CountAsserts counts and restores the handler" {
+    var expect_assert: ExpectAssert = undefined;
+    expect_assert.init(1);
+    errdefer expect_assert.restore();
+
+    // A counter on top of another handler: it gets the asserts until it is restored
+    var counter: CountAsserts = undefined;
+    counter.init();
+    errdefer counter.restore();
+    if (Core.enable_asserts) {
+        assertFailed("counted", @src());
+        assertRecoverable(false, "counted", @src());
+        assertRecoverable(true, "not failed", @src());
+    }
+    try std.testing.expectEqual(@as(u32, if (Core.enable_asserts) 2 else 0), counter.get());
+    counter.restore();
+    counter.restore();
+
+    // The previous handler is back
+    if (Core.enable_asserts) assertFailed("expected", @src());
+    try expect_assert.finish();
 }
 
 test "IssueReporting: asserts from several threads reach the handler" {

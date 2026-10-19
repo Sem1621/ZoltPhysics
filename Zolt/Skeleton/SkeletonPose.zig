@@ -168,7 +168,7 @@ pub const SkeletonPose = struct {
 
             const parent = self.skeletonOfJoints().getJoint(i).parent_joint_index;
             if (parent >= 0) {
-                if (Core.enable_asserts) std.debug.assert(parent < @as(i32, @intCast(i))); // Joints must be ordered: parents first
+                if (Core.enable_asserts) Core.assertRecoverable(parent < @as(i32, @intCast(i)), "Joints must be ordered: parents first", @src());
                 matrices[i] = matrices[@intCast(parent)].mul(matrices[i]);
             }
         }

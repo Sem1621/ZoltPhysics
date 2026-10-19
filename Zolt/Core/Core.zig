@@ -49,6 +49,14 @@ pub const default_allocate_alignment = 16;
 /// (the equivalent of JPH_IF_ENABLE_ASSERTS).
 pub const enable_asserts = std.debug.runtime_safety;
 
+/// JPH_ASSERT at a site that Jolt's release build continues after, for the asserts that a test expects to fail
+/// (Core/IssueReporting.zig, Docs/Zolt/RemainingFeaturesArchitecture.md R8). Re-exported here, so that a converted assert
+/// stays one line: `if (Core.enable_asserts) Core.assertRecoverable(ok, "message", @src());`
+pub const assertRecoverable = @import("IssueReporting.zig").assertRecoverable;
+
+/// JPH_ASSERT(false, message) on a path that Jolt's release build continues on (see `assertRecoverable`)
+pub const assertFailed = @import("IssueReporting.zig").assertFailed;
+
 test "configuration" {
     try std.testing.expect(object_layer_bits == 16 or object_layer_bits == 32);
 }

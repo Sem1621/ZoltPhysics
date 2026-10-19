@@ -41,6 +41,7 @@
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
+const ParityHooks = @import("../ParityHooks.zig");
 
 const Checker = fw.Checker;
 const Allocator = std.mem.Allocator;
@@ -1417,11 +1418,25 @@ test "SkeletonMapper parity: Initialize and MapReverse with parents after their 
 }
 
 test "Skeleton parity (release only): Sample at negative times and with NaN fractions, SkeletonPose with parents after their children, SkeletonMapper initialized twice, with a larger skeleton 1, with parents after their children" {
-    // Jolt asserts on these inputs, Zolt checks the same asserts in safe builds; Jolt's release build continues
-    if (zolt.Core.enable_asserts) return error.SkipZigTest;
+    // Jolt asserts on these inputs and its release build continues. Zolt's asserts are recoverable and counted on both
+    // sides, per run (R8).
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("Skeleton parity (release only)");
+    defer asserts.deinit();
+    asserts.begin();
     try runAnimations(0x5E1E7008, 1500, .{ .negative_times = true });
+    asserts.end(0);
+    asserts.begin();
     try runAnimations(0x5E1E7009, 1500, .{ .huge_times = true });
+    asserts.end(1);
+    asserts.begin();
     try runPoses(0x5E1E700A, 1500, true);
+    asserts.end(2);
+    asserts.begin();
     try runMappers(0x5E1E700B, 1500, .{ .release_only = true });
+    asserts.end(3);
+    asserts.begin();
     try runMappers(0x5E1E700C, 1500, .{ .unordered = true, .release_only = true });
+    asserts.end(4);
+    try asserts.finish();
 }

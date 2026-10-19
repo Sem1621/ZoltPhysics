@@ -166,7 +166,7 @@ pub fn eigenValueSymmetric(matrix: anytype, eig_vec: *@TypeOf(matrix), eig_val: 
     // Failure
     // JPH_ASSERT(false, "Too many iterations"). Not std.debug.assert(false): that is undefined behavior in
     // ReleaseFast, while this path is reachable (e.g. NaN input) and Jolt returns false when asserts are disabled.
-    if (Core.enable_asserts) @panic("Too many iterations");
+    if (Core.enable_asserts) Core.assertFailed("Too many iterations", @src());
     return false;
 }
 
