@@ -8,6 +8,11 @@
 
 using namespace JPH;
 
+// Recorded during the static initialization of this file, after the one of ParityHooks.h (it is defined later in the
+// same file, so it is initialized later). Read by jolt_parity_hooks_installed_before_main: later, the older reference
+// files may have installed Jolt's allocator again.
+static const bool sParityHooksInstalledBeforeMain = ParityHooksInstalled();
+
 extern "C"
 {
 
@@ -27,10 +32,22 @@ uint32 jolt_parity_reference_has_asserts()
 #endif
 }
 
-// 1 when the hooks of ParityHooks.h are installed
-uint32 jolt_parity_hooks_installed()
+// 1 when the hooks of ParityHooks.h were installed before main
+uint32 jolt_parity_hooks_installed_before_main()
 {
-	return ParityHooksInstalled()? 1 : 0;
+	return sParityHooksInstalledBeforeMain? 1 : 0;
+}
+
+// 1 when ParityInstallHooks() installs the hooks again after RegisterDefaultAllocator() (what the older reference files
+// call) and a second call keeps them. The hooks stay installed.
+uint32 jolt_parity_reinstall_check()
+{
+	RegisterDefaultAllocator();
+	bool replaced = !ParityHooksInstalled();
+	ParityInstallHooks();
+	bool installed = ParityHooksInstalled();
+	ParityInstallHooks();
+	return replaced && installed && ParityHooksInstalled()? 1 : 0;
 }
 
 // Fails a JPH_ASSERT on purpose (the test of the assert hook): the number of failed asserts before and after it

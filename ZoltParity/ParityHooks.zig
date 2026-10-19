@@ -14,7 +14,8 @@ const zolt = @import("zolt");
 
 extern fn jolt_parity_assert_count() u32;
 extern fn jolt_parity_reference_has_asserts() u32;
-extern fn jolt_parity_hooks_installed() u32;
+extern fn jolt_parity_hooks_installed_before_main() u32;
+extern fn jolt_parity_reinstall_check() u32;
 extern fn jolt_parity_test_assert_hook(out_before: *u32, out_after: *u32) void;
 extern fn jolt_parity_zero_filling_check() u32;
 
@@ -101,7 +102,12 @@ pub const ReleaseAsserts = struct {
 };
 
 test "ParityHooks: the hooks are installed before main" {
-    try std.testing.expectEqual(@as(u32, 1), jolt_parity_hooks_installed());
+    try std.testing.expectEqual(@as(u32, 1), jolt_parity_hooks_installed_before_main());
+}
+
+test "ParityHooks: ParityInstallHooks installs the hooks again and is idempotent" {
+    // The older reference files call RegisterDefaultAllocator(), which replaces the allocation hooks
+    try std.testing.expectEqual(@as(u32, 1), jolt_parity_reinstall_check());
 }
 
 test "ParityHooks: the reference counts its asserts" {
