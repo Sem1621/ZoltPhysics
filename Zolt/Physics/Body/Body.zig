@@ -12,8 +12,8 @@
 //!   constructor on a zero initialized static) whose dummy shape is a static EmptyShape (never reference counted). It is
 //!   the one audited `@constCast` of Phase 5: constraints store `*Body` like Jolt's `Body &`, nothing writes a static
 //!   body, and a stray write faults instead of changing state that all physics systems share.
-//! - Soft body branches are ported; `SoftBodyMotionProperties` is a Phase 9 stub, unreachable because no soft body can
-//!   be created before Phase 9.
+//! - Soft body branches are ported. `applySoftBodyCreationSettings` returns `Allocator.Error`: the motion properties
+//!   allocate their vertices, rod states and skin states (RemainingFeaturesArchitecture.md R16).
 //! - Const / non-const overloads: `getMotionProperties` / `getMotionPropertiesMut`, `getMotionPropertiesUnchecked` /
 //!   `getMotionPropertiesUncheckedMut`, `getCollisionGroup` / `getCollisionGroupMut`.
 //! - Overloads: `AddForce(force, position)` is `addForceAtPosition`, `AddImpulse(impulse, position)` is
@@ -968,7 +968,9 @@ pub const Body = struct {
     }
 
     /// Function to overwrite current body state with soft_body_creation_settings. Can only be done when the body is not in the physics system and cannot add MotionProperties if the body was created without one.
-    pub fn applySoftBodyCreationSettings(self: *Body, soft_body_creation_settings: *const SoftBodyCreationSettings, bpl_interface: *const BroadPhaseLayerInterface) void {
+    /// Zolt: `error.OutOfMemory` when the motion properties cannot allocate their arrays. They are unchanged then, the
+    /// body members that Jolt sets before (user data, friction, ...) have the new values.
+    pub fn applySoftBodyCreationSettings(self: *Body, soft_body_creation_settings: *const SoftBodyCreationSettings, bpl_interface: *const BroadPhaseLayerInterface) Allocator.Error!void {
         std.debug.assert(self.isSoftBody() and !self.isInBroadPhase());
 
         self.user_data = soft_body_creation_settings.user_data;
@@ -990,7 +992,7 @@ pub const Body = struct {
         mp.base.allow_sleeping = soft_body_creation_settings.allow_sleeping;
         if (Core.enable_asserts) mp.base.cached_body_type = self.body_type;
         if (Core.enable_asserts) mp.base.cached_motion_type = self.motion_type;
-        mp.initialize(soft_body_creation_settings);
+        try mp.initialize(soft_body_creation_settings);
 
         self.setPositionAndRotationInternal(soft_body_creation_settings.position, if (soft_body_creation_settings.make_rotation_identity) Quat.identity() else soft_body_creation_settings.rotation, .{});
     }

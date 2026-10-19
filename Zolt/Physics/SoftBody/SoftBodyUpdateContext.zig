@@ -14,6 +14,7 @@
 const std = @import("std");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const RMat44 = @import("../../Math/Real.zig").RMat44;
+const rvector_alignment = @import("../../Math/Real.zig").rvector_alignment;
 const Body = @import("../Body/Body.zig").Body;
 const CanSleep = @import("../Body/MotionProperties.zig").CanSleep;
 const SimShapeFilter = @import("../Collision/SimShapeFilter.zig").SimShapeFilter;
@@ -84,6 +85,12 @@ pub const SoftBodyUpdateContext = struct {
     delta_position: Vec3 = undefined,
     /// Can the body sleep? Should be applied after the update
     can_sleep: CanSleep = undefined,
+
+    comptime {
+        // The contexts live in a TempArray (PhysicsUpdateContext.soft_body_update_contexts), whose blocks are only
+        // rvector_alignment aligned (RemainingFeaturesArchitecture.md R15)
+        std.debug.assert(@alignOf(SoftBodyUpdateContext) <= rvector_alignment);
+    }
 };
 
 test "SoftBodyUpdateContext: default construction and state" {
@@ -93,7 +100,7 @@ test "SoftBodyUpdateContext: default construction and state" {
 
     // new (sb_ctx) SoftBodyUpdateContext, then the input is filled in
     var body: Body = .{ .id = .init(3) };
-    var motion_properties: SoftBodyMotionProperties = .{};
+    var motion_properties: SoftBodyMotionProperties = .{ .allocator = std.testing.allocator };
     var ctx: SoftBodyUpdateContext = .{};
     ctx.body = &body;
     ctx.motion_properties = &motion_properties;

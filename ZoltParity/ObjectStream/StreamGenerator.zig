@@ -227,8 +227,8 @@ pub const Generator = struct {
 
     /// A count that the array accepts (C++ probe): 0 to 3 elements, or the size of a C array
     fn pickCount(self: *Generator, a: *const Attribute) !usize {
-        // Phase 9 classes are never created (PhysicsScene.mSoftBodies stays empty)
-        if (a.element == .value and schema_mod.isPhase9(a.class_name)) {
+        // The arrays of a Phase 9 attribute stay empty (PhysicsScene.mSoftBodies, until group S2)
+        if (a.phase9) {
             if (a.counts & 1 == 0) return error.HarnessError;
             return 0;
         }
@@ -444,7 +444,7 @@ pub const Generator = struct {
             .abstract_object => {
                 var abstract: std.ArrayList(usize) = .empty;
                 for (self.schema.classes, 0..) |c, i| {
-                    if (c.abstract and !c.phase9 and self.findDeclaration(c.name) == null) try abstract.append(self.arena, i);
+                    if (c.abstract and self.findDeclaration(c.name) == null) try abstract.append(self.arena, i);
                 }
                 if (abstract.items.len == 0) return false;
                 const c = &self.schema.classes[abstract.items[r.uintLessThan(usize, abstract.items.len)]];
@@ -964,7 +964,6 @@ fn testSchema(arena: Allocator, classes: []const TestClass) !Schema {
         .abstract = false,
         .bases = t.bases,
         .attributes = try arena.dupe(Attribute, t.attributes),
-        .phase9 = false,
         .outside = false,
         .primitive = false,
         .zolt = zolt.RTTI.of(zolt.SpringSettings), // Any RTTI: the class is declared and ready

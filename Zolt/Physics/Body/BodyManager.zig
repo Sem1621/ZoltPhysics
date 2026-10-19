@@ -1,7 +1,13 @@
 //! Port of: Jolt/Physics/Body/BodyManager.h, Jolt/Physics/Body/BodyManager.cpp
-//! Status: partial
-//! Missing: AllocateSoftBody (Phase 9, SimulationArchitecture D1: no soft body can be created before Phase 9)
+//! Status: complete
 //! Not ported: ReportSimulationStats (JPH_TRACK_SIMULATION_STATS + JPH_PROFILE_ENABLED, dropped with the profiler)
+//!
+//! RemainingFeaturesArchitecture.md R16: `allocateSoftBody` is one allocation, like Jolt's `new
+//! SoftBodyWithMotionPropertiesAndShape`: the body, its SoftBodyMotionProperties and its embedded SoftBodyShape. It
+//! returns `CreateBodyError` (out of memory: the half built soft body is deleted again). `deleteBody` deletes a soft
+//! body like Jolt's destructor chain: it releases the body's shape reference, deinits the motion properties (Jolt's
+//! `~SoftBodyMotionProperties`: the arrays, the shared settings, the leaf shapes), checks that the embedded shape has no
+//! reference left and releases the collision group.
 //!
 //! SimulationArchitecture D2 / D3:
 //! - Initialized in place (`var bm: BodyManager = .empty; try bm.init(allocator, io, ...)`), because the lock
@@ -62,6 +68,8 @@ const CreateBodyError = BodyCreationSettingsFile.CreateBodyError;
 const BodyActivationListener = @import("BodyActivationListener.zig").BodyActivationListener;
 const SoftBodyMotionProperties = @import("../SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
 const SoftBodyShape = @import("../SoftBody/SoftBodyShape.zig").SoftBodyShape;
+const SoftBodyCreationSettings = @import("../SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
+const SoftBodySharedSettings = @import("../SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
 const StateRecorderFile = @import("../StateRecorder.zig");
 const StateRecorder = StateRecorderFile.StateRecorder;
 const StateRecorderFilter = StateRecorderFile.StateRecorderFilter;
@@ -81,11 +89,17 @@ pub const BodyWithMotionProperties = struct {
     motion_properties: MotionProperties = .{},
 };
 
-/// Helper class that combines a soft body its motion properties and shape (the members are Phase 9 stubs)
+/// Helper class that combines a soft body its motion properties and shape
 pub const SoftBodyWithMotionPropertiesAndShape = struct {
     body: Body = .{},
-    motion_properties: SoftBodyMotionProperties = .{},
-    shape: SoftBodyShape = .{},
+    motion_properties: SoftBodyMotionProperties,
+    shape: SoftBodyShape,
+
+    /// Constructor: the motion properties allocate with `allocator` (the body manager's). The shape is marked embedded
+    /// by BodyManager.allocateSoftBody, once it points to the motion properties.
+    pub fn init(allocator: Allocator) SoftBodyWithMotionPropertiesAndShape {
+        return .{ .motion_properties = .{ .allocator = allocator }, .shape = .init(allocator) };
+    }
 };
 
 /// Class that contains all bodies
@@ -385,6 +399,26 @@ pub const BodyManager = struct {
         errdefer self.deleteBody(body);
         body.body_type = .rigid_body;
         try body.applyBodyCreationSettings(self.allocator, body_creation_settings, self.broad_phase_layer_interface.?);
+
+        return body;
+    }
+
+    /// Create a soft body using creation settings. The returned body will not be part of the body manager yet.
+    /// Zolt: `error.OutOfMemory` when the soft body or its arrays cannot be allocated, nothing is left behind then.
+    pub fn allocateSoftBody(self: *const BodyManager, soft_body_creation_settings: *const SoftBodyCreationSettings) CreateBodyError!*Body {
+        // Fill in basic properties
+        const bmp = try self.allocator.create(SoftBodyWithMotionPropertiesAndShape);
+        bmp.* = .init(self.allocator);
+        const mp = &bmp.motion_properties;
+        const shape = &bmp.shape;
+        const body = &bmp.body;
+        shape.motion_properties = mp;
+        shape.asShape().setEmbedded(); // Jolt: the constructor of SoftBodyWithMotionPropertiesAndShape
+        body.body_type = .soft_body;
+        body.motion_properties = &mp.base;
+        body.shape = .init(shape.asShape());
+        errdefer self.deleteBody(body);
+        try body.applySoftBodyCreationSettings(soft_body_creation_settings, self.broad_phase_layer_interface.?);
 
         return body;
     }
@@ -1271,8 +1305,10 @@ pub const BodyManager = struct {
             if (Core.enable_asserts) body.motion_properties = null;
             if (body.isSoftBody()) {
                 body.shape.deinit(); // Release the shape to avoid assertion on shape destruction because of embedded object with refcount > 0
-                body.collision_group.deinit();
                 const soft_body: *SoftBodyWithMotionPropertiesAndShape = @fieldParentPtr("body", body);
+                soft_body.motion_properties.deinit(); // ~SoftBodyMotionProperties
+                soft_body.shape.asShapeMut().deinit(); // ~SoftBodyShape: asserts that no reference to the embedded shape is left
+                body.collision_group.deinit();
                 self.allocator.destroy(soft_body);
             } else {
                 body.shape.deinit();
@@ -1342,4 +1378,132 @@ test "BodyManager: the contact cache flags of an update that runs out of memory 
     for (bodies) |b|
         try expect(!b.isCollisionCacheInvalid());
     try std.testing.expectEqual(@as(usize, 0), bm.bodies_cache_invalid.items.len);
+}
+
+/// Shared settings that `SoftBodyMotionProperties.initialize` accepts: 3 vertices, a face, a rod, a skinned vertex and
+/// one update group (Optimize is group S1). Reference count 0: the creation settings hold it.
+fn testSoftBodySettings(allocator: Allocator) Allocator.Error!*SoftBodySharedSettings {
+    const s = try SoftBodySharedSettings.create(allocator);
+    errdefer {
+        s.deinit();
+        allocator.destroy(s);
+    }
+    try s.vertices.append(allocator, .init(.{ .x = 1, .y = 0, .z = 0 }, .{}));
+    try s.vertices.append(allocator, .init(.{ .x = 0, .y = 1, .z = 0 }, .{ .inv_mass = 0.5 }));
+    try s.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 1 }, .{ .inv_mass = 2.0 }));
+    try s.addFace(.init(0, 1, 2, .{}));
+    try s.rod_stretch_shear_constraints.append(allocator, .init(0, 1, .{}));
+    try s.skinned_constraints.append(allocator, .init(2, 0.5, 0.25, 1.0));
+    try s.update_groups.append(allocator, .{ .edge_end_index = 0, .lra_end_index = 0, .rod_stretch_shear_end_index = 1, .rod_bend_twist_end_index = 0, .dihedral_bend_end_index = 0, .volume_end_index = 0, .skinned_end_index = 1 });
+    return s;
+}
+
+/// One broad phase layer for every object layer
+const TestSoftBodyLayers = struct {
+    const ObjectLayer = @import("../Collision/ObjectLayer.zig").ObjectLayer;
+    const BroadPhaseLayer = @import("../Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
+    pub const overrides = .{ .getNumBroadPhaseLayers, .getBroadPhaseLayer };
+    base: BroadPhaseLayerInterface = .init(@This()),
+    pub fn getNumBroadPhaseLayers(_: *const @This()) u32 {
+        return 1;
+    }
+    pub fn getBroadPhaseLayer(_: *const @This(), _: ObjectLayer) BroadPhaseLayer {
+        return .init(0);
+    }
+};
+
+test "BodyManager: allocateSoftBody is one allocation, deleteBody releases everything (R16)" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+    const expectEqual = std.testing.expectEqual;
+    const Quat = @import("../../Math/Quat.zig").Quat;
+    const RVec3 = @import("../../Math/Real.zig").RVec3;
+    const RefCount = @import("../../Core/Reference.zig").RefCount;
+    const GroupFilterTable = @import("../Collision/GroupFilterTable.zig").GroupFilterTable;
+
+    const layers: TestSoftBodyLayers = .{};
+    var bm: BodyManager = .empty;
+    try bm.init(allocator, std.testing.io, 4, 0, &layers.base);
+    defer bm.deinit();
+
+    const shared = try testSoftBodySettings(allocator);
+    const filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 2 });
+    var settings: SoftBodyCreationSettings = .init(shared, RVec3.init(1, 2, 3), Quat.rotation(Vec3.axisY(), 0.5), 0);
+    defer settings.deinit();
+    settings.collision_group = .init(&filter.base, 1, 0);
+    settings.user_data = 42;
+    settings.friction = 0.75;
+    settings.vertex_radius = 0.01;
+    try expectEqual(@as(u32, 1), shared.getRefCount());
+    try expectEqual(@as(u32, 1), filter.base.getRefCount());
+
+    // The body, the motion properties and the shape are one object
+    const body = try bm.allocateSoftBody(&settings);
+    try expect(body.isSoftBody() and body.isDynamic());
+    const soft_body: *SoftBodyWithMotionPropertiesAndShape = @fieldParentPtr("body", body);
+    try expect(body.getMotionPropertiesUnchecked().? == &soft_body.motion_properties.base);
+    try expect(body.getShape() == soft_body.shape.asShape());
+    try expect(soft_body.shape.motion_properties == &soft_body.motion_properties);
+    try expectEqual(@as(u32, RefCount.embedded + 1), body.getShape().getRefCount());
+    try expectEqual(@as(u32, 2), shared.getRefCount()); // The motion properties hold the shared settings
+    try expectEqual(@as(u32, 2), filter.base.getRefCount()); // The body holds the group filter
+    try expectEqual(@as(u64, 42), body.getUserData());
+    try expectEqual(@as(f32, 0.75), body.getFriction());
+    try expect(body.getRotation().eql(Quat.identity())); // mMakeRotationIdentity: the rotation is in the vertices
+    try expect(body.getPosition().eql(RVec3.init(1, 2, 3)));
+    try expectEqual(@as(usize, 3), soft_body.motion_properties.getVertices().len);
+    try expectEqual(@as(f32, 0.01), soft_body.motion_properties.getVertexRadius());
+
+    // GetSoftBodyCreationSettings: the shared settings and the group filter of the body
+    var back = body.getSoftBodyCreationSettings();
+    try expect(back.settings.get() == shared and back.collision_group.group_filter.get() == &filter.base);
+    try expectEqual(@as(u64, 42), back.user_data);
+    back.deinit();
+
+    // A second ApplySoftBodyCreationSettings resizes the arrays and leaks nothing
+    const other = try testSoftBodySettings(allocator);
+    try other.vertices.append(allocator, .init(.{ .x = 3, .y = 0, .z = 0 }, .{}));
+    var other_settings: SoftBodyCreationSettings = .init(other, RVec3.zero(), Quat.identity(), 0);
+    defer other_settings.deinit();
+    try body.applySoftBodyCreationSettings(&other_settings, &layers.base);
+    try expectEqual(@as(usize, 4), soft_body.motion_properties.getVertices().len);
+    try expectEqual(@as(u32, 1), shared.getRefCount());
+    try expectEqual(@as(u32, 2), other.getRefCount());
+    try expectEqual(@as(u32, 1), filter.base.getRefCount()); // The other settings have no group filter
+
+    // Destroy through the body manager: the references are released, nothing leaks (testing allocator)
+    try expect(bm.addBody(body));
+    bm.destroyBodies(&.{body.getID()});
+    try expectEqual(@as(u32, 1), other.getRefCount());
+
+    // freeBody of a soft body without an ID, and a soft body that is still alive when the manager is destroyed
+    bm.freeBody(try bm.allocateSoftBody(&settings));
+    try expectEqual(@as(u32, 1), shared.getRefCount());
+    try expectEqual(@as(u32, 1), filter.base.getRefCount());
+    try expect(bm.addBody(try bm.allocateSoftBody(&settings)));
+    try expectEqual(@as(u32, 2), shared.getRefCount());
+}
+
+test "BodyManager: allocateSoftBody and deleteBody out of memory leak nothing" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            const Quat = @import("../../Math/Quat.zig").Quat;
+            const RVec3 = @import("../../Math/Real.zig").RVec3;
+            const layers: TestSoftBodyLayers = .{};
+            var bm: BodyManager = .empty;
+            try bm.init(allocator, std.testing.io, 2, 0, &layers.base);
+            defer bm.deinit();
+            var settings: SoftBodyCreationSettings = .init(try testSoftBodySettings(allocator), RVec3.zero(), Quat.identity(), 0);
+            defer settings.deinit();
+            const body = try bm.allocateSoftBody(&settings);
+            if (!bm.addBody(body)) {
+                bm.freeBody(body);
+                return error.TestUnexpectedResult;
+            }
+            // A second ApplySoftBodyCreationSettings with the same sizes does not allocate (the body is not in the
+            // broad phase); the soft body is destroyed with the manager
+            try body.applySoftBodyCreationSettings(&settings, &layers.base);
+            try std.testing.expectEqual(@as(usize, 3), SoftBodyMotionProperties.fromBaseConst(body.getMotionPropertiesUnchecked().?).getVertices().len);
+        }
+    }.f, .{});
 }

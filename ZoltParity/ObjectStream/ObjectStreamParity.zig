@@ -4,12 +4,13 @@
 //! number words NumberWords.zig.
 //!
 //! The harness has no code for one class. It takes every class of the C++ Factory after RegisterTypes and the Zolt
-//! factory (`RegisterTypes.factory`). Phase 8 is done, so every class but the Phase 9 classes is declared in full. P1
-//! fails when a class is missing, pending (`serialization_pending`, S18) or reaches a pending class. So the other
-//! layers compare every class, and a class that is not ready fails them too.
+//! factory (`RegisterTypes.factory`). Phase 8 is done and the soft body classes are declared (Phase 9 group S0), so
+//! every class is declared in full. P1 fails when a class is missing, pending (`serialization_pending`, S18) or reaches
+//! a pending class. So the other layers compare every class, and a class that is not ready fails them too.
 //!
 //! - P1 schema: every class against the Zolt factory (name, hash, abstract flag, bases, attributes with their declared
-//!   types and primitive types). The Phase 9 classes are excluded (S17). The IsKindOf matrix.
+//!   types and primitive types). The Phase 9 attributes are dropped (PhysicsScene.mSoftBodies, S17, until group S2).
+//!   The IsKindOf matrix.
 //! - P2 defaults: every creatable class, C++ CreateObject and write against Zolt create and write, text and binary.
 //! - P3 random streams from the C++ schema, both formats; each side reads the other's output.
 //! - P4 old schemas: mutations of P3 streams (dropped, reordered, renamed and retyped attributes, vec3 / dvec3, a class
@@ -22,7 +23,7 @@
 //! - P8 the object of UnitTests/ObjectStream/ObjectStreamTest.cpp in both formats and both directions.
 //!
 //! Comparing bytes: both sides read a stream as the requested class and write the main object in both formats; the
-//! result (read or not) and the bytes must be equal. A class that reaches a Phase 9 class (PhysicsScene.mSoftBodies,
+//! result (read or not) and the bytes must be equal. A class that reaches a Phase 9 attribute (PhysicsScene.mSoftBodies,
 //! S17) is compared by cross-reading: the C++ side reads Zolt's bytes and must write its own bytes again. In binary,
 //! when a string has a NUL, these are the bytes it writes after reading its own binary bytes: Jolt's binary reader cuts
 //! a string at its first NUL (S15), its own bytes included.
@@ -126,13 +127,14 @@ fn declaredClasses(arena: Allocator, text: []const u8) ![]const []const u8 {
     return names.items;
 }
 
-/// True when the C++ bytes declare a Phase 9 class: Zolt's cannot (S17), they are compared by cross-reading
+/// True when the C++ bytes declare a class with a Phase 9 attribute (PhysicsScene.mSoftBodies): Zolt's bytes lack the
+/// attribute (S17, until group S2), they are compared by cross-reading
 fn declaresPhase9(text: []const u8) bool {
     var words = std.mem.tokenizeAny(u8, text, " \r\n\t");
     while (words.next()) |w| {
         if (std.mem.eql(u8, w, "declare")) {
             if (words.next()) |name| {
-                if (schema_mod.isPhase9(name)) return true;
+                if (schema_mod.hasPhase9Attribute(name)) return true;
             }
         }
     }
@@ -295,7 +297,7 @@ fn zoltSchema(allocator: Allocator, rtti: *const RTTI) ![]u8 {
     return line.toOwnedSlice();
 }
 
-/// The C++ schema line without the attributes whose class is a Phase 9 class (PhysicsScene.mSoftBodies, S17)
+/// The C++ schema line without the Phase 9 attributes (PhysicsScene.mSoftBodies, S17, until group S2)
 fn expectedSchema(allocator: Allocator, c: *const Class) ![]u8 {
     var line: std.Io.Writer.Allocating = .init(allocator);
     errdefer line.deinit();
@@ -303,9 +305,7 @@ fn expectedSchema(allocator: Allocator, c: *const Class) ![]u8 {
     try line.writer.print("{s} attributes=[", .{c.line[0..header_end]});
     var first = true;
     for (c.attributes) |a| {
-        if (a.primitive) |p| {
-            if (schema_mod.isPhase9(p)) continue;
-        }
+        if (a.phase9) continue;
         try line.writer.print("{s}{s}:{s}({s})", .{ if (first) "" else ";", a.name, a.type_text, a.primitive orelse "-" });
         first = false;
     }
@@ -319,7 +319,6 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
     var mismatches: usize = 0;
     var compared: usize = 0;
     for (schema.classes) |*c| {
-        if (c.phase9) continue;
         const rtti = c.zolt orelse {
             std.debug.print("{s} is not in RegisterTypes.factory\n", .{c.name});
             mismatches += 1;
@@ -455,7 +454,7 @@ test "ObjectStream P2: the defaults of every creatable class, text and binary" {
     var compared: usize = 0;
     for (schema.classes) |*c| {
         // The outside classes use the global new, which leaves members that C++ does not initialize as garbage
-        if (c.abstract or c.phase9 or c.outside) continue;
+        if (c.abstract or c.outside) continue;
         const ctx: Context = .{ .layer = "P2", .class = c.name };
         const rtti = try readyClass(ctx, c);
         compared += 1;
@@ -746,7 +745,6 @@ fn loadAsset(allocator: Allocator, asset: Asset) ![]u8 {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     for (try declaredClasses(arena.allocator(), jolt.text)) |name| {
-        if (schema_mod.isPhase9(name)) continue;
         _ = try readyClass(.{ .layer = "P7", .class = name, .detail = asset.path }, try schema.get(name));
     }
     return bytes;
