@@ -1,23 +1,36 @@
 //! Port of: Jolt/Core/LinearCurve.h, Jolt/Core/LinearCurve.cpp
-//! Status: partial
-//! Missing: JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL (ObjectStream, Phase 8)
+//! Status: complete
+//!
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(LinearCurve, LinearCurve::Point):
+//! `rtti` with Jolt's attributes.
 //!
 //! `mPoints` is a `std.ArrayList(Point)`: the functions that allocate take the allocator, `deinit` frees the points
 //! and `clone` replaces the C++ copy constructor.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("RTTI.zig").RTTI;
 const quickSort = @import("QuickSort.zig").quickSort;
 const StreamIn = @import("StreamIn.zig").StreamIn;
 const StreamOut = @import("StreamOut.zig").StreamOut;
 
 // A set of points (x, y) that form a linear curve
 pub const LinearCurve = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, LinearCurve)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(LinearCurve)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "LinearCurve",
+        .kind = .non_virtual,
+        .attributes = &.{.attr("mPoints", .points)},
+    });
 
     /// A point on the curve
     pub const Point = extern struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Point)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(LinearCurve::Point)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "LinearCurve::Point",
+            .kind = .non_virtual,
+            .attributes = &.{ .attr("mX", .x), .attr("mY", .y) },
+        });
 
         x: f32 = 0.0,
         y: f32 = 0.0,

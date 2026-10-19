@@ -26,6 +26,7 @@ pub const ByteBuffer = @import("Core/ByteBuffer.zig").ByteBuffer;
 pub const ByteBufferVector = @import("Core/ByteBuffer.zig").ByteBufferVector;
 pub const Color = @import("Core/Color.zig").Color;
 pub const Core = @import("Core/Core.zig");
+pub const Factory = @import("Core/Factory.zig").Factory;
 pub const FixedSizeFreeList = @import("Core/FixedSizeFreeList.zig").FixedSizeFreeList;
 pub const FPControlWord = @import("Core/FPControlWord.zig").FPControlWord;
 pub const FPFlushDenormals = @import("Core/FPFlushDenormals.zig").FPFlushDenormals;
@@ -39,6 +40,7 @@ pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
 pub const JobSystemSingleThreaded = @import("Core/JobSystemSingleThreaded.zig").JobSystemSingleThreaded;
 pub const JobSystemThreadPool = @import("Core/JobSystemThreadPool.zig").JobSystemThreadPool;
 pub const JobSystemWithBarrier = @import("Core/JobSystemWithBarrier.zig").JobSystemWithBarrier;
+pub const Lifetime = @import("Core/Lifetime.zig");
 pub const LinearCurve = @import("Core/LinearCurve.zig").LinearCurve;
 pub const LFHMAllocator = @import("Core/LockFreeHashMap.zig").LFHMAllocator;
 pub const LFHMAllocatorContext = @import("Core/LockFreeHashMap.zig").LFHMAllocatorContext;
@@ -61,12 +63,14 @@ pub const RefCount = @import("Core/Reference.zig").RefCount;
 pub const RefTargetVirtual = @import("Core/Reference.zig").RefTargetVirtual;
 pub const ErrorString = @import("Core/Result.zig").ErrorString;
 pub const Result = @import("Core/Result.zig").Result;
+pub const RTTI = @import("Core/RTTI.zig").RTTI;
 pub const Semaphore = @import("Core/Semaphore.zig").Semaphore;
 pub const StaticArray = @import("Core/StaticArray.zig").StaticArray;
 pub const STLLocalAllocator = @import("Core/STLLocalAllocator.zig").STLLocalAllocator;
 pub const STLTempAllocator = @import("Core/STLTempAllocator.zig").STLTempAllocator;
 pub const StreamIn = @import("Core/StreamIn.zig").StreamIn;
 pub const StreamOut = @import("Core/StreamOut.zig").StreamOut;
+pub const StreamUtils = @import("Core/StreamUtils.zig");
 pub const StreamInWrapper = @import("Core/StreamWrapper.zig").StreamInWrapper;
 pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
 pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
@@ -188,6 +192,15 @@ pub const UVec4 = @import("Math/UVec4.zig").UVec4;
 pub const Vec3 = @import("Math/Vec3.zig").Vec3;
 pub const Vec4 = @import("Math/Vec4.zig").Vec4;
 pub const Vector = @import("Math/Vector.zig").Vector;
+
+// ObjectStream
+pub const ObjectStream = @import("ObjectStream/ObjectStream.zig");
+pub const ObjectStreamIn = @import("ObjectStream/ObjectStreamIn.zig").ObjectStreamIn;
+pub const ObjectStreamOut = @import("ObjectStream/ObjectStreamOut.zig").ObjectStreamOut;
+pub const AttributeDecl = @import("ObjectStream/SerializableAttribute.zig").AttributeDecl;
+pub const OSDataType = @import("ObjectStream/SerializableAttribute.zig").OSDataType;
+pub const SerializableAttribute = @import("ObjectStream/SerializableAttribute.zig").SerializableAttribute;
+pub const SerializableObject = @import("ObjectStream/SerializableObject.zig").SerializableObject;
 
 // Physics
 pub const AllowedDOFs = @import("Physics/Body/AllowedDOFs.zig").AllowedDOFs;
@@ -567,6 +580,7 @@ const source_files = .{
     @import("Core/ByteBuffer.zig"),
     @import("Core/Color.zig"),
     @import("Core/Core.zig"),
+    @import("Core/Factory.zig"),
     @import("Core/FixedSizeFreeList.zig"),
     @import("Core/FPControlWord.zig"),
     @import("Core/FPFlushDenormals.zig"),
@@ -577,6 +591,7 @@ const source_files = .{
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),
     @import("Core/JobSystemWithBarrier.zig"),
+    @import("Core/Lifetime.zig"),
     @import("Core/LinearCurve.zig"),
     @import("Core/LockFreeHashMap.zig"),
     @import("Core/Mt19937.zig"),
@@ -588,12 +603,14 @@ const source_files = .{
     @import("Core/QuickSort.zig"),
     @import("Core/Reference.zig"),
     @import("Core/Result.zig"),
+    @import("Core/RTTI.zig"),
     @import("Core/Semaphore.zig"),
     @import("Core/StaticArray.zig"),
     @import("Core/STLLocalAllocator.zig"),
     @import("Core/STLTempAllocator.zig"),
     @import("Core/StreamIn.zig"),
     @import("Core/StreamOut.zig"),
+    @import("Core/StreamUtils.zig"),
     @import("Core/StreamWrapper.zig"),
     @import("Core/StridedPtr.zig"),
     @import("Core/StringTools.zig"),
@@ -649,6 +666,20 @@ const source_files = .{
     @import("Math/Vec3.zig"),
     @import("Math/Vec4.zig"),
     @import("Math/Vector.zig"),
+    @import("ObjectStream/GetPrimitiveTypeOfType.zig"),
+    @import("ObjectStream/ObjectStream.zig"),
+    @import("ObjectStream/ObjectStreamBinaryIn.zig"),
+    @import("ObjectStream/ObjectStreamBinaryOut.zig"),
+    @import("ObjectStream/ObjectStreamIn.zig"),
+    @import("ObjectStream/ObjectStreamOut.zig"),
+    @import("ObjectStream/ObjectStreamTextIn.zig"),
+    @import("ObjectStream/ObjectStreamTextOut.zig"),
+    @import("ObjectStream/ObjectStreamTypes.zig"),
+    @import("ObjectStream/SerializableAttribute.zig"),
+    @import("ObjectStream/SerializableAttributeEnum.zig"),
+    @import("ObjectStream/SerializableAttributeTyped.zig"),
+    @import("ObjectStream/SerializableObject.zig"),
+    @import("ObjectStream/TypeDeclarations.zig"),
     @import("Physics/Body/AllowedDOFs.zig"),
     @import("Physics/Body/Body.zig"),
     @import("Physics/Body/BodyAccess.zig"),

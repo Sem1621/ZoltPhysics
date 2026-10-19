@@ -11,7 +11,7 @@ const Vec4 = @import("../Math/Vec4.zig").Vec4;
 
 /// An infinite plane described by the formula X . Normal + Constant = 0.
 pub const Plane = extern struct {
-    // TODO(serialization): JPH_OBJECT_STREAM friend CreateRTTIPlane (JPH_IMPLEMENT_SERIALIZABLE_OUTSIDE_CLASS)
+    // JPH_OBJECT_STREAM friend CreateRTTIPlane (JPH_IMPLEMENT_SERIALIZABLE_OUTSIDE_CLASS): ObjectStream/TypeDeclarations.zig
 
     /// XYZ = normal, W = constant, plane: x . normal + constant = 0
     normal_and_constant: Vec4,

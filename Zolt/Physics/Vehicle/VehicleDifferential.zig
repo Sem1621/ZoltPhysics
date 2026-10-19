@@ -2,20 +2,33 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleDifferentialSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//!   `rtti` with Jolt's attributes.
 //! - `CalculateTorqueRatio(left, right, outLeft, outRight)` returns `TorqueRatio{ .left, .right }` (out parameters).
 //!   Jolt's asserts on the settings (`mLimitedSlipRatio > 1`, the fractions add up to 1) are user input checks: they are
 //!   evaluated in safe builds only (`if (Core.enable_asserts)`), so that optimized builds compute what Jolt's release
 //!   build computes.
 
 const std = @import("std");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 
 pub const VehicleDifferentialSettings = extern struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, VehicleDifferentialSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleDifferentialSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleDifferentialSettings",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mLeftWheel", .left_wheel),
+            .attr("mRightWheel", .right_wheel),
+            .attr("mDifferentialRatio", .differential_ratio),
+            .attr("mLeftRightSplit", .left_right_split),
+            .attr("mLimitedSlipRatio", .limited_slip_ratio),
+            .attr("mEngineTorqueRatio", .engine_torque_ratio),
+        },
+    });
 
     /// Index (in mWheels) that represents the left wheel of this differential (can be -1 to indicate no wheel)
     left_wheel: i32 = -1,

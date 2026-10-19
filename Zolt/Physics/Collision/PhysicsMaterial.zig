@@ -5,7 +5,8 @@
 //! count, the allocator that frees the object (and the memory it owns) and `is_static`.
 //!
 //! - A derived material embeds `base: PhysicsMaterial = .init(@This(), allocator)` (the base class constructor), lists
-//!   its `overrides` and declares `pub const rtti_name` (JPH_RTTI). `new X(...)` is `X.create(allocator, ...)`
+//!   its `overrides` and declares `pub const rtti` (JPH_RTTI, SerializationArchitecture.md S3). `new X(...)` is
+//!   `X.create(allocator, ...)`
 //!   (reference count 0, put it in a `Ref` / `RefConst`), the last `release()` destroys it through the vtable.
 //!   A material on the stack or embedded in another object calls `setEmbedded()` before references are taken and
 //!   `deinit()` at the end.
@@ -14,24 +15,27 @@
 //!   RegisterTypes creates). Static materials (`is_static`) are never reference counted (addRef / release do
 //!   nothing), so `RefConst(PhysicsMaterial).init(PhysicsMaterial.default)` is legal and nothing writes to read-only
 //!   memory.
-//! - SaveBinaryState writes Jolt's RTTI hash of the class name (`rtti_name` is a vtable data entry);
-//!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in the comptime list `material_types` (the
-//!   Factory of Phase 8 replaces it). Restoring allocates, so it returns `Allocator.Error!PhysicsMaterialResult`;
-//!   Jolt's errors ("Failed to read type hash", ...) are values in the result.
-//! - `default` and `material_types` come from RegisterTypes.zig (`RegisterTypes.default_material` /
-//!   `RegisterTypes.material_types`), where the `zolt_user_types` module can replace the default material and add
-//!   material types (D4, D8).
+//! - SaveBinaryState writes Jolt's RTTI hash of the most derived class (the `rtti` vtable data entry).
+//!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in `RegisterTypes.factory`. Restoring
+//!   allocates, so it returns `Allocator.Error!PhysicsMaterialResult`. Jolt's errors ("Failed to read type hash", ...)
+//!   are values in the result.
+//! - `default` comes from RegisterTypes.zig (`RegisterTypes.default_material`), where the `zolt_user_types` module can
+//!   replace the default material (D4, D8). User material classes register through its `serializable_types`.
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL: `rtti`. It has the base SerializableObject
+//!   and no attributes, like Jolt's. The class is creatable (`createDefault`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
+const SerializableObject = @import("../../ObjectStream/SerializableObject.zig").SerializableObject;
 const Color = @import("../../Core/Color.zig").Color;
-const HashCombine = @import("../../Core/HashCombine.zig");
 const RefCount = @import("../../Core/Reference.zig").RefCount;
 const Ref = @import("../../Core/Reference.zig").Ref;
 const RefConst = @import("../../Core/Reference.zig").RefConst;
 const Result = @import("../../Core/Result.zig").Result;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
+const StreamUtils = @import("../../Core/StreamUtils.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const PhysicsMaterialSimple = @import("PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
 const RegisterTypes = @import("../../RegisterTypes.zig");
@@ -42,11 +46,16 @@ const RegisterTypes = @import("../../RegisterTypes.zig");
 ///
 /// If you inherit from this material, don't forget to create a suitable default material in sDefault
 pub const PhysicsMaterial = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PhysicsMaterial)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PhysicsMaterial)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PhysicsMaterial",
+        .kind = .virtual,
+        .bases = &.{SerializableObject},
+    });
 
     pub const VTable = struct {
-        /// Class name of the most derived class (JPH_RTTI, data entry: every concrete class declares `rtti_name`)
-        rtti_name: []const u8,
+        /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
+        rtti: *const RTTI,
         /// Destructor chain (generated, virtual ~PhysicsMaterial)
         deinit: *const fn (self: *PhysicsMaterial) void,
         /// delete this (generated)
@@ -60,9 +69,6 @@ pub const PhysicsMaterial = struct {
         restoreBinaryState: *const fn (self: *PhysicsMaterial, stream: StreamIn) Allocator.Error!void,
     };
 
-    /// Name of the class for Jolt's RTTI hash (JPH_RTTI)
-    pub const rtti_name = "PhysicsMaterial";
-
     vtable: *const VTable,
     /// Reference count (RefTarget<PhysicsMaterial>)
     ref_count: RefCount = .{},
@@ -73,10 +79,6 @@ pub const PhysicsMaterial = struct {
 
     /// Default material that is used when a shape has no materials defined (PhysicsMaterial::sDefault)
     pub const default: *const PhysicsMaterial = RegisterTypes.default_material;
-
-    /// Material classes that restoreFromBinaryState can create (Factory::sInstance until Phase 8). Each one declares
-    /// `rtti_name` and `createDefault(allocator) Allocator.Error!*T` (its default constructor on the heap).
-    pub const material_types = RegisterTypes.material_types;
 
     pub const PhysicsMaterialResult = Result(Ref(PhysicsMaterial));
 
@@ -97,7 +99,7 @@ pub const PhysicsMaterial = struct {
         return self;
     }
 
-    /// new PhysicsMaterial (the default constructor, used by restoreFromBinaryState)
+    /// new PhysicsMaterial (RTTI create, used by restoreFromBinaryState)
     pub const createDefault = create;
 
     /// The vtable of material class T
@@ -156,49 +158,13 @@ pub const PhysicsMaterial = struct {
     }
 
     /// Creates a PhysicsMaterial of the correct type and restores its contents from the binary stream inStream.
-    /// (StreamUtils::RestoreObject with the comptime type list `material_types` instead of the Factory)
     pub fn restoreFromBinaryState(allocator: Allocator, stream: StreamIn) Allocator.Error!PhysicsMaterialResult {
-        var result: PhysicsMaterialResult = .empty;
-
-        // Read the hash of the type
-        var hash: u32 = 0;
-        stream.read(&hash);
-        if (stream.isEOF() or stream.isFailed()) {
-            result.setError("Failed to read type hash");
-            return result;
-        }
-
-        // Get the RTTI for the type and construct it
-        const object: *PhysicsMaterial = inline for (material_types) |T| {
-            if (hash == comptime rttiHash(T.rtti_name)) break virtual.upcast(PhysicsMaterial, try T.createDefault(allocator));
-        } else {
-            result.setError("Failed to create instance of type");
-            return result;
-        };
-
-        // Read the data of the type
-        var ref = Ref(PhysicsMaterial).init(object);
-        defer ref.deinit();
-        try object.restoreBinaryState(stream);
-        if (stream.isEOF() or stream.isFailed()) {
-            result.setError("Failed to restore object");
-            return result;
-        }
-
-        result.set(ref.clone());
-        return result;
+        return StreamUtils.restoreObject(PhysicsMaterial, allocator, stream, PhysicsMaterial.restoreBinaryState);
     }
 
     /// GetRTTI()->GetHash() of the most derived class
     pub fn getRTTIHash(self: *const PhysicsMaterial) u32 {
-        return rttiHash(self.vtable.rtti_name);
-    }
-
-    /// RTTI::GetHash: FNV-1a hash of the class name, folded from 64 to 32 bits
-    pub fn rttiHash(name: []const u8) u32 {
-        // Perform diffusion step to get from 64 to 32 bits (see https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
-        const hash = HashCombine.hashString(name);
-        return @truncate(hash ^ (hash >> 32));
+        return self.vtable.rtti.hash;
     }
 
     /// Implementations of the virtual functions in PhysicsMaterial
@@ -268,7 +234,7 @@ test "PhysicsMaterial: default material, reference counting, base class" {
     try std.testing.expectEqualStrings("Unknown", material.getDebugName());
     try expect(material.getDebugColor().eql(Color.grey));
     try std.testing.expectEqual(@as(u32, 1), material.getRefCount());
-    try std.testing.expectEqual(PhysicsMaterial.rttiHash("PhysicsMaterial"), material.getRTTIHash());
+    try std.testing.expectEqual(RTTI.hashName("PhysicsMaterial"), material.getRTTIHash());
 
     // Its binary state is only the RTTI hash
     var buffer: [64]u8 = undefined;
@@ -310,7 +276,7 @@ test "PhysicsMaterial: restore errors" {
     try std.testing.expectEqualStrings("Failed to create instance of type", r2.getError());
 
     // Truncated data of a PhysicsMaterialSimple (the object is created, restoring hits EOF, nothing leaks)
-    const hash = PhysicsMaterial.rttiHash("PhysicsMaterialSimple");
+    const hash = RTTI.hashName("PhysicsMaterialSimple");
     var r3 = try restoreFromBuffer(allocator, std.mem.asBytes(&hash));
     defer r3.deinit();
     try std.testing.expectEqualStrings("Failed to restore object", r3.getError());

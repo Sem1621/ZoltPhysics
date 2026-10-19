@@ -66,6 +66,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -213,7 +214,26 @@ fn clearMaterials(list: *PhysicsMaterialList) void {
 
 /// Class that constructs a HeightFieldShape
 pub const HeightFieldShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, HeightFieldShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(HeightFieldShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "HeightFieldShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mHeightSamples", .height_samples),
+            .attr("mOffset", .offset),
+            .attr("mScale", .scale),
+            .attr("mMinHeightValue", .min_height_value),
+            .attr("mMaxHeightValue", .max_height_value),
+            .attr("mMaterialsCapacity", .materials_capacity),
+            .attr("mSampleCount", .sample_count),
+            .attr("mBlockSize", .block_size),
+            .attr("mBitsPerSample", .bits_per_sample),
+            .attr("mMaterialIndices", .material_indices),
+            .attr("mMaterials", .materials),
+            .attr("mActiveEdgeCosThresholdAngle", .active_edge_cos_threshold_angle),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -283,6 +303,13 @@ pub const HeightFieldShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) HeightFieldShapeSettings {
         return .{ .base = .init(ShapeSettings.vtableFor(HeightFieldShapeSettings), allocator) };
+    }
+
+    /// new HeightFieldShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*HeightFieldShapeSettings {
+        const self = try allocator.create(HeightFieldShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a height field shape of sample_count * sample_count vertices.

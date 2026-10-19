@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Only used by the inline tests: `zolt.test_shapes` is this file in test builds (`builtin.is_test`), and build.zig
-//! gives the inline tests a `zolt_user_types` module that registers `registrations` and `material_types` of this file
+//! gives the inline tests a `zolt_user_types` module that registers `registrations` and `serializable_types` of this file
 //! through the D4 user hook (Docs/Zolt/CollisionArchitecture.md), exactly like an application. The library and the
 //! unit tests use the default (empty) user types module, the parity tests their own
 //! (ZoltParity/Physics/ShapeCoreUserTypes.zig).
@@ -15,7 +15,7 @@
 //!   material); overrides most virtual functions, keeps the defaults of the others.
 //! - `TestSphereShape` (User2): a sphere; uses `Shape.collidePointUsingRayCast` and a uniform scale.
 //! - `TestCompoundShape` (User3): two child shapes at offsets (1 sub shape ID bit), owns its children.
-//! - `TestMaterial`: a material class registered through `material_types`.
+//! - `TestMaterial`: a material class registered through `serializable_types`.
 //!
 //! Registered collision functions: box vs box, sphere vs box (and the reversed box vs sphere through
 //! CollisionDispatch.reversedCollideShape / reversedCastShape), compound vs any and any vs compound (recursing through
@@ -24,6 +24,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Color = @import("../../../Core/Color.zig").Color;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Ref = @import("../../../Core/Reference.zig").Ref;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -83,13 +84,14 @@ const GetTrianglesContextMultiVertexList = GetTrianglesContextFile.GetTrianglesC
 /// The user registrations of the inline tests (see build.zig)
 pub const registrations = .{TestShapeRegistration};
 
-/// The user material types of the inline tests (see build.zig)
-pub const material_types = .{TestMaterial};
+/// The serializable classes of the inline tests (see build.zig)
+pub const serializable_types = .{TestMaterial};
 
-/// A material class that only exists in the tests (restored through RegisterTypes.material_types)
+/// A material class that only exists in the tests (restored through RegisterTypes.factory)
 pub const TestMaterial = struct {
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TestMaterial)
+    pub const rtti = RTTI.declare(@This(), .{ .name = "TestMaterial", .kind = .virtual, .bases = &.{PhysicsMaterial} });
     pub const overrides = .{ .getDebugName, .saveBinaryState, .restoreBinaryState };
-    pub const rtti_name = "TestMaterial";
 
     base: PhysicsMaterial,
     value: u32 = 0,
@@ -101,7 +103,7 @@ pub const TestMaterial = struct {
         return self;
     }
 
-    /// Default constructor on the heap (used by PhysicsMaterial.restoreFromBinaryState)
+    /// Default constructor on the heap (RTTI create, used by PhysicsMaterial.restoreFromBinaryState)
     pub fn createDefault(allocator: Allocator) Allocator.Error!*TestMaterial {
         return create(allocator, 0);
     }
@@ -157,6 +159,7 @@ pub const half_unit_sphere_bottom: StaticArray(Vec3, 48) = blk: {
 
 /// Settings of TestBoxShape (a settings class with a material reference)
 pub const TestBoxShapeSettings = struct {
+    pub const rtti = ShapeSettings.rtti; // No JPH_RTTI of its own
     pub const overrides = .{.createShape};
 
     base: ShapeSettings,
@@ -195,6 +198,7 @@ pub const TestBoxShapeSettings = struct {
 
 /// Settings of TestCompoundShape: holds child settings (Ref(ShapeSettings), creating a child writes its cache)
 pub const TestCompoundShapeSettings = struct {
+    pub const rtti = ShapeSettings.rtti; // No JPH_RTTI of its own
     pub const overrides = .{.createShape};
 
     pub const ChildSettings = struct {

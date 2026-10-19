@@ -1,8 +1,8 @@
 //! Port of: Jolt/Physics/Constraints/FixedConstraint.h, Jolt/Physics/Constraints/FixedConstraint.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(FixedConstraintSettings): TODO(serialization)
-//! (the binary state is ported). JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(FixedConstraintSettings): `rtti` with Jolt's
+//! attributes. JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! # Porter template: a Phase 6 constraint file
 //!
@@ -14,16 +14,16 @@
 //! - `base: TwoBodyConstraintSettings`, then Jolt's public members with Jolt's defaults and doc comments
 //!   (`mSpace` -> `space: ConstraintSpace = .world_space`, `mAutoDetectPoint` -> `auto_detect_point`, `RVec3` points,
 //!   `Vec3` axes, SpringSettings / MotorSettings values, arrays as Zig arrays).
-//! - `pub const rtti_name = "XConstraintSettings";` (the RTTI hash of the binary state is
-//!   `ConstraintSettings.rttiHash(rtti_name)`, Jolt's `GetRTTI()->GetHash()`, written by ConstraintSettings.impl).
+//! - `pub const rtti = RTTI.declare(@This(), .{ ... })` (JPH_RTTI, SerializationArchitecture.md section 3). The RTTI
+//!   hash of the binary state is `rtti.hash`, Jolt's `GetRTTI()->GetHash()`, written by ConstraintSettings.impl.
 //! - `pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };` in Jolt's declaration
 //!   order: compare with the `override` list of the C++ class one by one, an omitted override silently uses the base
 //!   class version.
 //! - Constructors: `init(allocator)` (the default constructor, for settings on the stack or in a member; the owner
 //!   calls `asSettings().deinit()`), `create(allocator) !*X` (`new XConstraintSettings`, reference count 0: wrap it in a
 //!   `Ref(ConstraintSettings)` or hand it to a function that takes a reference), `createDefault` (= `create`, the
-//!   default constructor that `ConstraintSettings.restoreFromBinaryState` calls through
-//!   `RegisterTypes.constraint_settings_types`), `initCopy(allocator, other)` (Jolt's implicit copy constructor: copies
+//!   default constructor that `ConstraintSettings.restoreFromBinaryState` calls through `RegisterTypes.factory`),
+//!   `initCopy(allocator, other)` (Jolt's implicit copy constructor: copies
 //!   the settings, not the reference count, and adds references to what the settings hold, e.g. a path).
 //!   Helper functions of the C++ class (`SetSliderAxis`, `SetRatio`, `MakeFreeAxis`, ...) are methods.
 //! - Upcasts: `asSettings() *ConstraintSettings`, `asTwoBodySettings() *TwoBodyConstraintSettings` (+ `Const`
@@ -66,10 +66,8 @@
 //!   downcast from a `*Constraint` is `virtual.downcast(XConstraint, two_body)` after checking `getSubType()`.
 //!
 //! **Registration.** Zolt/zolt.zig re-exports the public types (the stub file is already in `source_files`), and
-//! `RegisterTypes.constraint_settings_types` already lists the settings class in Jolt's RegisterTypes.cpp order: the
-//! porter only removes `pub const is_stub = true;` from the settings (ConstraintSettings.restoreFromBinaryState skips
-//! stubs, they give Jolt's "Failed to create instance of type"). Set `//! Status:` and `//! Missing:`, regenerate
-//! Docs/Zolt/Progress.md.
+//! `RegisterTypes.factory_types` already lists the settings class in Jolt's RegisterTypes.cpp order. Set `//! Status:`
+//! and `//! Missing:`, regenerate Docs/Zolt/Progress.md.
 //!
 //! **Harnesses.**
 //! - ZoltParity/Physics/ConstraintsParity.zig (+ ConstraintsReference.cpp, whose C++ side exists for every kind): fill
@@ -96,6 +94,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -121,10 +120,23 @@ const PointConstraintPart = @import("ConstraintPart/PointConstraintPart.zig").Po
 
 /// Fixed constraint settings, used to create a fixed constraint
 pub const FixedConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, FixedConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(FixedConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "FixedConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mAutoDetectPoint", .auto_detect_point),
+            .attr("mPoint1", .point1),
+            .attr("mAxisX1", .axis_x1),
+            .attr("mAxisY1", .axis_y1),
+            .attr("mPoint2", .point2),
+            .attr("mAxisX2", .axis_x2),
+            .attr("mAxisY2", .axis_y2),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "FixedConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -456,7 +468,7 @@ test "FixedConstraintSettings: defaults, binary state, restoreFromBinaryState th
     try testing.expect(settings.point1.eql(RVec3.zero()) and settings.point2.eql(RVec3.zero()));
     try testing.expect(settings.axis_x1.eql(Vec3.axisX()) and settings.axis_y1.eql(Vec3.axisY()));
     try testing.expect(settings.axis_x2.eql(Vec3.axisX()) and settings.axis_y2.eql(Vec3.axisY()));
-    try testing.expectEqualStrings("FixedConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("FixedConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // Non default values in every field
     settings.base.base.enabled = false;
@@ -478,10 +490,10 @@ test "FixedConstraintSettings: defaults, binary state, restoreFromBinaryState th
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 1 + 2 * 3 * @sizeOf(Real) + 4 * 12), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("FixedConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("FixedConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

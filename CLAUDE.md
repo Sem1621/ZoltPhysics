@@ -13,9 +13,9 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 | `ZoltTests/`         | Port of `UnitTests/`, root: `ZoltTests/unit_tests.zig`                |
 | `ZoltParity/`        | Bit-for-bit comparison of Zolt with the C++ library (`zig build parity`) |
 | `ZoltHelloWorld/`    | Port of `HelloWorld/HelloWorld.cpp` (milestone M5)                      |
-| `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestone M6) |
+| `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestones M6, M8 and M9) |
 | `Docs/Zolt/`         | Porting docs: **read `PortingGuide.md` before writing any Zig code**  |
-| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`)                    |
+| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`) |
 
 ## Commands
 
@@ -28,10 +28,14 @@ zig build parity                            # compare with the C++ Jolt library 
 zig build parity -Dreference_asserts=true -Dtest-filter="blocked scenes run on the C++ side"  # new scenes vs an asserting Jolt build
 zig build hello-world-check                 # C++ HelloWorld and its port must print the same bytes
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892
+zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Ragdoll -validate_hash=0x3be6ea76c07a2ac8  # M9 (double: 0x8dd6bc501859a228)
+zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
 zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon  # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
 python3 tools/port_status.py --write        # regenerate Docs/Zolt/Progress.md
 python3 tools/port_status.py --next         # what can be ported now (dependencies done)
+python3 tools/port_status.py --check        # CI: Progress.md is up to date, valid headers, no pending declaration
+python3 tools/gen_serializable.py --check [--complete]  # the RTTI declarations against Jolt's sCreateRTTI blocks
 python3 tools/tidy_registry.py              # sort/dedupe registry files after merging branches
 ```
 

@@ -10,6 +10,9 @@
 //!   `initIndexed(allocator, vertices, triangles, .{ .materials })` (they copy the arrays instead of moving them,
 //!   `materials` adds a reference to each material) and return `Allocator.Error` because they allocate (Indexify and
 //!   Sanitize); `sanitize()` allocates its set of triangles and returns `Allocator.Error` too.
+//! - `EBuildQuality` is `BuildQuality`, a non-exhaustive `enum(i32)` (SerializationArchitecture.md S13): an object
+//!   stream can hold any int. Creating the shape with another value panics. Jolt asserts and then calls through a null
+//!   splitter.
 //! - The tree is a `ByteBuffer` built with AABBTreeBuilder + AABBTreeToBuffer(TriangleCodecIndexed8BitPackSOA4Flags,
 //!   NodeCodecQuadTreeHalfFloat), owned by the shape (allocated with the shape's allocator). The splitter, builder and
 //!   the other temporary arrays of the constructor use the allocator passed to `initFromSettings`.
@@ -40,6 +43,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const ByteBuffer = @import("../../../Core/ByteBuffer.zig").ByteBuffer;
 const Color = @import("../../../Core/Color.zig").Color;
@@ -142,16 +146,33 @@ fn getTriangleHeader(tree: *const ByteBuffer) *const TriangleCodec.TriangleHeade
 
 /// Class that constructs a MeshShape
 pub const MeshShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, MeshShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MeshShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "MeshShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mTriangleVertices", .triangle_vertices),
+            .attr("mIndexedTriangles", .indexed_triangles),
+            .attr("mMaterials", .materials),
+            .attr("mMaxTrianglesPerLeaf", .max_triangles_per_leaf),
+            .attr("mActiveEdgeCosThresholdAngle", .active_edge_cos_threshold_angle),
+            .attr("mPerTriangleUserData", .per_triangle_user_data),
+            .enumAttr("mBuildQuality", .build_quality),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
 
-    pub const BuildQuality = enum {
+    /// EBuildQuality: Jolt's enum class has the underlying type int. A stream can hold any value (S13).
+    pub const BuildQuality = enum(i32) {
         /// Favor runtime performance, takes more time to build the MeshShape but performs better
         favor_runtime_performance,
         /// Favor build speed, build the tree faster but the MeshShape will be slower
         favor_build_speed,
+        /// Any other int value
+        _,
     };
 
     /// Optional arguments of the constructors (the `PhysicsMaterialList inMaterials = PhysicsMaterialList()` argument)
@@ -201,6 +222,13 @@ pub const MeshShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) MeshShapeSettings {
         return .{ .base = .init(ShapeSettings.vtableFor(MeshShapeSettings), allocator) };
+    }
+
+    /// new MeshShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*MeshShapeSettings {
+        const self = try allocator.create(MeshShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a mesh shape (MeshShapeSettings(const TriangleList &inTriangles, PhysicsMaterialList inMaterials)): the
@@ -441,6 +469,9 @@ pub const MeshShape = struct {
                 mean = try TriangleSplitterMean.init(allocator, vertices, indexed_triangles.items);
                 break :blk mean.splitter();
             },
+
+            // Jolt: JPH_ASSERT(false), then a call through the null splitter
+            _ => std.debug.panic("MeshShapeSettings: {d} is not a valid build quality", .{@intFromEnum(settings.build_quality)}),
         };
 
         // Build tree

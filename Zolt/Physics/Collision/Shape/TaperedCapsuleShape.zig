@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const Ref = @import("../../../Core/Reference.zig").Ref;
@@ -45,7 +46,17 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs a TaperedCapsuleShape
 pub const TaperedCapsuleShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, TaperedCapsuleShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TaperedCapsuleShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "TaperedCapsuleShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mHalfHeightOfTaperedCylinder", .half_height_of_tapered_cylinder),
+            .attr("mTopRadius", .top_radius),
+            .attr("mBottomRadius", .bottom_radius),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -58,6 +69,13 @@ pub const TaperedCapsuleShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) TaperedCapsuleShapeSettings {
         return .{ .base = .init(TaperedCapsuleShapeSettings, allocator, null) };
+    }
+
+    /// new TaperedCapsuleShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*TaperedCapsuleShapeSettings {
+        const self = try allocator.create(TaperedCapsuleShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a tapered capsule centered around the origin with one sphere cap at (0, -half_height_of_tapered_cylinder, 0) with radius bottom_radius and the other at (0, half_height_of_tapered_cylinder, 0) with radius top_radius

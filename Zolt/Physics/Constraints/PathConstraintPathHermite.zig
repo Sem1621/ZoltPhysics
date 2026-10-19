@@ -3,7 +3,8 @@
 //!
 //! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintPathHermite) and
 //! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PathConstraintPathHermite::Point):
-//! TODO(serialization) (the binary state is ported). JPH_PROFILE_FUNCTION: Zolt has no profiler.
+//! `rtti` with Jolt's attributes. `new Point` leaves the three Vec3 indeterminate in C++; Zolt zero fills them
+//! (SerializationArchitecture.md D9). JPH_PROFILE_FUNCTION: Zolt has no profiler.
 //!
 //! - A final PathConstraintPath (pattern A, see PathConstraintPath.zig): `create(allocator)` is `new
 //!   PathConstraintPathHermite` (reference count 0, put it in a `Ref` / `RefConst(PathConstraintPath)` through
@@ -27,6 +28,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const math = @import("../../Math/Math.zig");
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -195,14 +197,27 @@ fn truncToInt(value: f32) i32 {
 
 /// A path that follows a Hermite spline
 pub const PathConstraintPathHermite = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PathConstraintPathHermite)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintPathHermite)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PathConstraintPathHermite",
+        .kind = .virtual,
+        .bases = &.{PathConstraintPath},
+        .attributes = &.{.attr("mPoints", .points)},
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "PathConstraintPathHermite";
     pub const overrides = .{ .getPathMaxFraction, .getClosestPoint, .getPointOnPath, .saveBinaryState, .restoreBinaryState };
 
     pub const Point = extern struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Point)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PathConstraintPathHermite::Point)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "PathConstraintPathHermite::Point",
+            .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mPosition", .position),
+                .attr("mTangent", .tangent),
+                .attr("mNormal", .normal),
+            },
+        });
 
         /// Position on the path
         position: Vec3,
@@ -458,7 +473,7 @@ test "PathConstraintPathHermite: defaults, max fraction, the points" {
     path.base.setEmbedded();
     defer path.deinit();
     try testing.expect(!path.base.isLooping());
-    try testing.expectEqualStrings("PathConstraintPathHermite", path.base.vtable.rtti_name);
+    try testing.expectEqualStrings("PathConstraintPathHermite", path.base.vtable.rtti.name);
 
     // An empty non looping path: size_t wraps around like in Jolt
     try testing.expectEqual(@as(f32, 18446744073709551615.0), path.asPathConst().getPathMaxFraction());
@@ -560,12 +575,12 @@ test "PathConstraintPathHermite: binary state, restoreFromBinaryState through th
     const bytes = try testSavePath(allocator, path.asPathConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 4 + 1 + 4 + 5 * 48), bytes.len);
-    try testing.expectEqual(PathConstraintPath.rttiHash("PathConstraintPathHermite"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("PathConstraintPathHermite"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(u8, 1), bytes[4]);
     try testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, bytes[5..9], .little));
     try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(path.points.items), bytes[9..]);
 
-    // Restore through RegisterTypes.path_constraint_path_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestorePath(allocator, bytes);
         defer result.deinit();

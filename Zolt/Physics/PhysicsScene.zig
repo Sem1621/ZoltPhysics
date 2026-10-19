@@ -11,9 +11,9 @@
 //!   `RefConst<TwoBodyConstraintSettings>`; a concrete class has no addRef / release of its own, guide section 5),
 //!   `getSettings()` returns the TwoBodyConstraintSettings.
 //! - The constraints of a restored scene are created by ConstraintSettings.restoreFromBinaryState, which knows the
-//!   classes in `RegisterTypes.constraint_settings_types` (until the Factory of Phase 8): Jolt's settings classes that
-//!   are ported (FixedConstraintSettings, PointConstraintSettings, ...) and user / test constraint settings; a stub
-//!   class or an unknown type gives Jolt's "Failed to create instance of type".
+//!   classes of `RegisterTypes.factory`: Jolt's settings classes and the user's. An unknown type gives Jolt's "Failed
+//!   to create instance of type". So does a class that is not a TwoBodyConstraintSettings, such as ConstraintSettings
+//!   itself (Jolt's StaticCast does not check the class; SerializationArchitecture.md D8).
 //! - Soft bodies (Phase 9): `saveBinaryState` writes Jolt's soft body count (always 0), `restoreFromBinaryState`
 //!   reports the Zolt error "Soft bodies are not supported" for a stream that contains soft bodies.
 //! - Errors (Zolt): functions that allocate return `Allocator.Error`. Where Jolt dereferences the null shape of a body
@@ -24,11 +24,16 @@
 //! - A constraint whose GetConstraintSettings returns nullptr (PathConstraint, reached with asserts off) becomes a
 //!   ConnectedConstraint without settings in `fromPhysicsSystem`, like Jolt's AddConstraint(nullptr, ...);
 //!   `createBodies` and `saveBinaryState` panic on it where Jolt dereferences the null pointer.
-//! - TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL (PhysicsScene, ConnectedConstraint).
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of PhysicsScene and
+//!   ConnectedConstraint (SerializationArchitecture.md S17). PhysicsScene declares "mBodies" and "mConstraints", not
+//!   Jolt's "mSoftBodies" (Phase 9). A scene without soft bodies (Assets/terrain2.bof) is read exactly. A stream with
+//!   soft bodies fails to read: the skip of a soft body reads the identifier of its Ref "mSettings" as class data
+//!   (S15). Zolt writes a scene without "mSoftBodies". "mSettings" is declared as Jolt's
+//!   `TwoBodyConstraintSettings` (`.attrAs`): a link accepts only objects of that class.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Core = @import("../Core/Core.zig");
+const RTTI = @import("../Core/RTTI.zig").RTTI;
 const virtual = @import("../Core/Virtual.zig");
 const ReferenceFile = @import("../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
@@ -55,14 +60,32 @@ const PhysicsSystem = @import("PhysicsSystem.zig").PhysicsSystem;
 
 /// Contains the creation settings of a set of bodies
 pub const PhysicsScene = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, PhysicsScene)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PhysicsScene)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PhysicsScene",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mBodies", .bodies),
+            .attr("mConstraints", .constraints),
+            // Jolt's third attribute "mSoftBodies" comes with the soft bodies in Phase 9 (SerializationArchitecture.md S17)
+        },
+    });
 
     /// Body constant to use to indicate that the constraint is attached to the fixed world
     pub const fixed_to_world: u32 = 0xffffffff;
 
     /// A constraint and how it is connected to the bodies in the scene
     pub const ConnectedConstraint = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, ConnectedConstraint)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PhysicsScene::ConnectedConstraint)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "PhysicsScene::ConnectedConstraint",
+            .kind = .non_virtual,
+            .attributes = &.{
+                .attrAs("mSettings", .settings, TwoBodyConstraintSettings), // Jolt's RefConst<TwoBodyConstraintSettings>
+                .attr("mBody1", .body1),
+                .attr("mBody2", .body2),
+            },
+        });
 
         /// Constraint settings (a TwoBodyConstraintSettings, see `getSettings`)
         settings: RefConst(ConstraintSettings) = .empty,
@@ -117,6 +140,9 @@ pub const PhysicsScene = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new PhysicsScene (RTTI create)
+    pub const createDefault = create;
 
     /// Destructor: releases the references of the bodies and constraints and frees the arrays
     pub fn deinit(self: *PhysicsScene) void {
@@ -373,11 +399,16 @@ pub const PhysicsScene = struct {
                 result.setError(c_result.getError());
                 return result;
             }
+            // Jolt: StaticCast<TwoBodyConstraintSettings>, which does not check the class. Zolt: a class that is not a
+            // TwoBodyConstraintSettings (ConstraintSettings itself, VehicleConstraintSettings) gives the error of D8.
+            if (!isTwoBodyConstraintSettings(c_result.getPtr().?)) {
+                result.setError("Failed to create instance of type");
+                return result;
+            }
             // Jolt: mConstraints.resize(len) default-constructs the elements, mBody1 / mBody2 stay uninitialized when the
             // stream ends inside them (the reads below do not check the stream); Zolt: 0
             var cc: ConnectedConstraint = .{};
-            cc.settings.set(c_result.getPtr()); // Jolt: StaticCast<TwoBodyConstraintSettings>
-            if (Core.enable_asserts) std.debug.assert(isTwoBodyConstraintSettings(cc.settings.get().?));
+            cc.settings.set(c_result.getPtr());
             stream.read(&cc.body1);
             stream.read(&cc.body2);
             s.constraints.appendAssumeCapacity(cc);
@@ -462,16 +493,9 @@ pub const PhysicsScene = struct {
         }
     }
 
-    /// Jolt's StaticCast<TwoBodyConstraintSettings> asserts the RTTI: true when `settings` is one of the registered
-    /// constraint settings classes that derive from TwoBodyConstraintSettings
+    /// True when the class of `settings` derives from TwoBodyConstraintSettings
     fn isTwoBodyConstraintSettings(settings: *const ConstraintSettings) bool {
-        const hash = settings.getRTTIHash();
-        inline for (ConstraintSettings.constraint_settings_types) |T| {
-            if (comptime virtual.isDerivedFrom(T, TwoBodyConstraintSettings)) {
-                if (hash == comptime ConstraintSettings.rttiHash(T.rtti_name)) return true;
-            }
-        }
-        return false;
+        return settings.vtable.rtti.isKindOf(TwoBodyConstraintSettings.rtti);
     }
 
     fn releaseList(allocator: Allocator, list: anytype) void {
@@ -819,6 +843,14 @@ test "PhysicsScene: restoreFromBinaryState errors" {
         try testing.expectEqualStrings("Failed to create instance of type", result.getError());
     }
 
+    // ConstraintSettings itself is creatable, but it is not a TwoBodyConstraintSettings (Jolt: an unchecked StaticCast)
+    std.mem.writeInt(u32, unknown_bytes[8..12], ConstraintSettings.rtti.hash, .little);
+    {
+        var result = try restoreScene(allocator, unknown_bytes);
+        defer result.deinit();
+        try testing.expectEqualStrings("Failed to create instance of type", result.getError());
+    }
+
     // A body without a shape cannot be saved with its shape (Jolt dereferences null)
     var no_shape: BodyCreationSettings = .{};
     defer no_shape.deinit();
@@ -897,4 +929,398 @@ fn fixInvalidScalesOutOfMemory(allocator: Allocator) !void {
 
 test "PhysicsScene: out of memory in fixInvalidScales" {
     try testing.checkAllAllocationFailures(testing.allocator, fixInvalidScalesOutOfMemory, .{});
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tests of the object stream (the declarations `rtti`)
+
+const ObjectStreamIn = @import("../ObjectStream/ObjectStreamIn.zig").ObjectStreamIn;
+const ObjectStreamOut = @import("../ObjectStream/ObjectStreamOut.zig").ObjectStreamOut;
+const StreamType = @import("../ObjectStream/ObjectStream.zig").StreamType;
+
+/// Two bodies that share shape settings (one with a group filter), a constraint between them and one to the world
+fn buildStreamScene(allocator: Allocator, scene: *PhysicsScene) !void {
+    const sphere = try SphereShapeSettings.create(allocator, 0.5, .{});
+    var sphere_ref = Ref(ShapeSettings).init(sphere.asShapeSettings());
+    defer sphere_ref.deinit();
+    const filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 4 });
+    var filter_ref = RefConst(GroupFilter).init(filter.asGroupFilter());
+    defer filter_ref.deinit();
+    filter.disableCollision(0, 2);
+
+    var ball: BodyCreationSettings = .initWithSettings(sphere.asShapeSettings(), RVec3.init(0, 5, 0), Quat.identity(), .dynamic, 0);
+    defer ball.deinit();
+    ball.collision_group = .init(filter.asGroupFilter(), 1, 2);
+    try scene.addBody(&ball);
+    var other: BodyCreationSettings = .initWithSettings(sphere.asShapeSettings(), RVec3.init(3, 5, 0), Quat.identity(), .kinematic, 0);
+    defer other.deinit();
+    other.user_data = 42;
+    try scene.addBody(&other);
+
+    const c = try TestConstraintSettings.create(allocator);
+    var c_ref = Ref(ConstraintSettings).init(c.asSettings());
+    defer c_ref.deinit();
+    try scene.addConstraint(&c.base, 0, 1);
+    try scene.addConstraint(&c.base, PhysicsScene.fixed_to_world, 1);
+}
+
+/// sWriteObject of `scene` with the stream's `allocator`. The bytes are allocated with testing.allocator (free them
+/// with it): the out of memory test fails the allocations of the stream, not those of the writer.
+fn writeScene(allocator: Allocator, scene: *const PhysicsScene, stream_type: StreamType) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try ObjectStreamOut.sWriteObject(PhysicsScene, allocator, &out.writer, stream_type, scene);
+    return out.toOwnedSlice();
+}
+
+/// sReadObject of `bytes` into a Ref
+fn readScene(allocator: Allocator, bytes: []const u8) ObjectStreamIn.Error!Ref(PhysicsScene) {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return ObjectStreamIn.sReadObjectRef(PhysicsScene, allocator, &reader, .{});
+}
+
+test "PhysicsScene: object stream with shared shape settings, a group filter and constraints" {
+    const allocator = testing.allocator;
+    var scene: PhysicsScene = .init(allocator);
+    defer scene.deinit();
+    try buildStreamScene(allocator, &scene);
+
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeScene(allocator, &scene, stream_type);
+        defer allocator.free(bytes);
+        var read = try readScene(allocator, bytes);
+        defer read.deinit();
+        const s = read.get().?;
+        try testing.expectEqual(@as(u32, 1), s.getRefCount());
+        try testing.expectEqual(@as(usize, 2), s.getNumBodies());
+        try testing.expectEqual(@as(usize, 2), s.getNumConstraints());
+
+        // The bodies share one new shape settings object (one reference per body)
+        const bodies = s.getBodies();
+        const shape = bodies[0].getShapeSettings().?;
+        try testing.expect(shape == bodies[1].getShapeSettings().?);
+        try testing.expect(RTTI.getRTTI(ShapeSettings, shape) == SphereShapeSettings.rtti);
+        try testing.expectEqual(@as(u32, 2), shape.getRefCount());
+        for (bodies, scene.getBodies()) |*b, *original| {
+            var expected = original.clone();
+            defer expected.deinit();
+            expected.setShapeSettings(b.getShapeSettings());
+            expected.collision_group.setGroupFilter(b.collision_group.getGroupFilter());
+            try testing.expect(b.eql(&expected));
+        }
+        const filter = virtual.downcast(GroupFilterTable, bodies[0].collision_group.getGroupFilter().?);
+        try testing.expect(!filter.isCollisionEnabled(0, 2) and filter.isCollisionEnabled(1, 2));
+
+        // The constraints share one settings object of the class that was written
+        const constraints = s.getConstraints();
+        const settings = constraints[0].settings.get().?;
+        try testing.expect(settings == constraints[1].settings.get().?);
+        try testing.expect(settings.vtable.rtti == TestConstraintSettings.rtti);
+        try testing.expectEqual(@as(u32, 2), settings.getRefCount());
+        for (constraints, scene.getConstraints()) |*c, *original| {
+            try testing.expectEqual(original.body1, c.body1);
+            try testing.expectEqual(original.body2, c.body2);
+        }
+
+        // The same bytes again
+        const again = try writeScene(allocator, s, stream_type);
+        defer allocator.free(again);
+        try testing.expectEqualSlices(u8, bytes, again);
+    }
+}
+
+test "PhysicsScene: object stream links, soft bodies (S17)" {
+    const allocator = testing.allocator;
+
+    // "mSettings" is declared as TwoBodyConstraintSettings: a link to other constraint settings becomes null
+    {
+        const stream =
+            \\TOS 1.00
+            \\declare PhysicsScene 1
+            \\  mConstraints array instance PhysicsScene::ConnectedConstraint
+            \\declare PhysicsScene::ConnectedConstraint 3
+            \\  mSettings instance TwoBodyConstraintSettings
+            \\  mBody1 uint32
+            \\  mBody2 uint32
+            \\declare VehicleConstraintSettings 0
+            \\object PhysicsScene 00000001
+            \\  1
+            \\  00000002 4 5
+            \\object VehicleConstraintSettings 00000002
+        ;
+        var read = try readScene(allocator, stream);
+        defer read.deinit();
+        const constraints = read.get().?.getConstraints();
+        try testing.expectEqual(@as(usize, 1), constraints.len);
+        try testing.expect(constraints[0].settings.get() == null);
+        try testing.expectEqual(@as(u32, 4), constraints[0].body1);
+        try testing.expectEqual(@as(u32, 5), constraints[0].body2);
+    }
+
+    // Jolt declares the soft body classes also for a scene without soft bodies (S11). Jolt writes such a scene as the
+    // stream below up to its soft body count, which is 0. The empty mSoftBodies array is skipped: the scene is read.
+    const soft_body_count = "object PhysicsScene 00000001\n  0\n  0\n  ";
+    const count_at = std.mem.indexOf(u8, jolt_soft_body_scene, soft_body_count).? + soft_body_count.len;
+    try testing.expectEqualStrings("1", jolt_soft_body_scene[count_at..][0..1]);
+    const no_soft_bodies = try std.mem.concat(allocator, u8, &.{ jolt_soft_body_scene[0..count_at], "0" });
+    defer allocator.free(no_soft_bodies);
+    {
+        var read = try readScene(allocator, no_soft_bodies);
+        defer read.deinit();
+        try testing.expectEqual(@as(usize, 0), read.get().?.getNumBodies());
+    }
+
+    // With a soft body, the Ref "mSettings" is skipped as class data of SoftBodySharedSettings (S15). Its identifier
+    // 00000002 is read as the number of vertices. The words of the soft body that follow are read as vertices and
+    // faces, until a word is not a number. So the stream is misread and cannot be read.
+    try testing.expectError(error.InvalidObjectStream, readScene(allocator, jolt_soft_body_scene));
+}
+
+/// The text stream that Jolt writes for a PhysicsScene with one soft body (with "\n" line ends, without the space at
+/// the end of a line). The C++ code:
+///     Ref<SoftBodySharedSettings> shared = new SoftBodySharedSettings;
+///     shared->mVertices.push_back(SoftBodySharedSettings::Vertex(Float3(0, 0, 0)));
+///     shared->mVertices.push_back(SoftBodySharedSettings::Vertex(Float3(1, 0, 0)));
+///     shared->mEdgeConstraints.push_back(SoftBodySharedSettings::Edge(0, 1));
+///     scene->AddSoftBody(SoftBodyCreationSettings(shared, RVec3(0, 2, 0), Quat::sIdentity(), 1));
+///     ObjectStreamOut::sWriteObject(stream, ObjectStream::EStreamType::Text, *scene);
+const jolt_soft_body_scene =
+    \\TOS 1.00
+    \\
+    \\declare PhysicsScene 3
+    \\  mBodies array instance BodyCreationSettings
+    \\  mConstraints array instance PhysicsScene::ConnectedConstraint
+    \\  mSoftBodies array instance SoftBodyCreationSettings
+    \\
+    \\declare BodyCreationSettings 30
+    \\  mPosition vec3
+    \\  mRotation quat
+    \\  mLinearVelocity vec3
+    \\  mAngularVelocity vec3
+    \\  mUserData uint64
+    \\  mShape instance ShapeSettings
+    \\  mCollisionGroup instance CollisionGroup
+    \\  mObjectLayer uint32
+    \\  mMotionType uint32
+    \\  mAllowedDOFs uint32
+    \\  mAllowDynamicOrKinematic bool
+    \\  mIsSensor bool
+    \\  mSensorDetectsStatic bool
+    \\  mUseManifoldReduction bool
+    \\  mApplyGyroscopicForce bool
+    \\  mMotionQuality uint32
+    \\  mEnhancedInternalEdgeRemoval bool
+    \\  mAllowSleeping bool
+    \\  mFriction float
+    \\  mRestitution float
+    \\  mLinearDamping float
+    \\  mAngularDamping float
+    \\  mMaxLinearVelocity float
+    \\  mMaxAngularVelocity float
+    \\  mGravityFactor float
+    \\  mNumVelocityStepsOverride uint32
+    \\  mNumPositionStepsOverride uint32
+    \\  mOverrideMassProperties uint32
+    \\  mInertiaMultiplier float
+    \\  mMassPropertiesOverride instance MassProperties
+    \\
+    \\declare PhysicsScene::ConnectedConstraint 3
+    \\  mSettings instance TwoBodyConstraintSettings
+    \\  mBody1 uint32
+    \\  mBody2 uint32
+    \\
+    \\declare SoftBodyCreationSettings 18
+    \\  mSettings instance SoftBodySharedSettings
+    \\  mPosition vec3
+    \\  mRotation quat
+    \\  mUserData uint64
+    \\  mObjectLayer uint32
+    \\  mCollisionGroup instance CollisionGroup
+    \\  mNumIterations uint32
+    \\  mLinearDamping float
+    \\  mMaxLinearVelocity float
+    \\  mRestitution float
+    \\  mFriction float
+    \\  mPressure float
+    \\  mGravityFactor float
+    \\  mVertexRadius float
+    \\  mUpdatePosition bool
+    \\  mMakeRotationIdentity bool
+    \\  mAllowSleeping bool
+    \\  mFacesDoubleSided bool
+    \\
+    \\declare ShapeSettings 1
+    \\  mUserData uint64
+    \\
+    \\declare CollisionGroup 3
+    \\  mGroupFilter instance GroupFilter
+    \\  mGroupID uint32
+    \\  mSubGroupID uint32
+    \\
+    \\declare MassProperties 2
+    \\  mMass float
+    \\  mInertia mat44
+    \\
+    \\declare TwoBodyConstraintSettings 6
+    \\  mEnabled bool
+    \\  mDrawConstraintSize float
+    \\  mConstraintPriority uint32
+    \\  mNumVelocityStepsOverride uint32
+    \\  mNumPositionStepsOverride uint32
+    \\  mUserData uint64
+    \\
+    \\declare SoftBodySharedSettings 11
+    \\  mVertices array instance SoftBodySharedSettings::Vertex
+    \\  mFaces array instance SoftBodySharedSettings::Face
+    \\  mEdgeConstraints array instance SoftBodySharedSettings::Edge
+    \\  mDihedralBendConstraints array instance SoftBodySharedSettings::DihedralBend
+    \\  mVolumeConstraints array instance SoftBodySharedSettings::Volume
+    \\  mSkinnedConstraints array instance SoftBodySharedSettings::Skinned
+    \\  mInvBindMatrices array instance SoftBodySharedSettings::InvBind
+    \\  mLRAConstraints array instance SoftBodySharedSettings::LRA
+    \\  mRodStretchShearConstraints array instance SoftBodySharedSettings::RodStretchShear
+    \\  mRodBendTwistConstraints array instance SoftBodySharedSettings::RodBendTwist
+    \\  mMaterials array instance PhysicsMaterial
+    \\
+    \\declare GroupFilter 0
+    \\
+    \\declare SoftBodySharedSettings::Vertex 3
+    \\  mPosition float3
+    \\  mVelocity float3
+    \\  mInvMass float
+    \\
+    \\declare SoftBodySharedSettings::Face 2
+    \\  mVertex array uint32
+    \\  mMaterialIndex uint32
+    \\
+    \\declare SoftBodySharedSettings::Edge 3
+    \\  mVertex array uint32
+    \\  mRestLength float
+    \\  mCompliance float
+    \\
+    \\declare SoftBodySharedSettings::DihedralBend 3
+    \\  mVertex array uint32
+    \\  mCompliance float
+    \\  mInitialAngle float
+    \\
+    \\declare SoftBodySharedSettings::Volume 3
+    \\  mVertex array uint32
+    \\  mSixRestVolume float
+    \\  mCompliance float
+    \\
+    \\declare SoftBodySharedSettings::Skinned 5
+    \\  mVertex uint32
+    \\  mWeights array instance SoftBodySharedSettings::SkinWeight
+    \\  mMaxDistance float
+    \\  mBackStopDistance float
+    \\  mBackStopRadius float
+    \\
+    \\declare SoftBodySharedSettings::InvBind 2
+    \\  mJointIndex uint32
+    \\  mInvBind mat44
+    \\
+    \\declare SoftBodySharedSettings::LRA 2
+    \\  mVertex array uint32
+    \\  mMaxDistance float
+    \\
+    \\declare SoftBodySharedSettings::RodStretchShear 5
+    \\  mVertex array uint32
+    \\  mLength float
+    \\  mInvMass float
+    \\  mCompliance float
+    \\  mBishop quat
+    \\
+    \\declare SoftBodySharedSettings::RodBendTwist 3
+    \\  mRod array uint32
+    \\  mCompliance float
+    \\  mOmega0 quat
+    \\
+    \\declare PhysicsMaterial 0
+    \\
+    \\declare SoftBodySharedSettings::SkinWeight 2
+    \\  mInvBindIndex uint32
+    \\  mWeight float
+    \\
+    \\object PhysicsScene 00000001
+    \\  0
+    \\  0
+    \\  1
+    \\      00000002
+    \\      0 2 0
+    \\      0 0 0 1
+    \\      0
+    \\      1
+    \\        00000000
+    \\        4294967295
+    \\        4294967295
+    \\      5
+    \\      0.100000001
+    \\      500
+    \\      0
+    \\      0.200000003
+    \\      0
+    \\      1
+    \\      0
+    \\      true
+    \\      true
+    \\      true
+    \\      false
+    \\
+    \\object SoftBodySharedSettings 00000002
+    \\  2
+    \\      0 0 0
+    \\      0 0 0
+    \\      1
+    \\      1 0 0
+    \\      0 0 0
+    \\      1
+    \\  0
+    \\  1
+    \\      2
+    \\        0
+    \\        1
+    \\      1
+    \\      0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  0
+    \\  1
+    \\    00000003
+    \\
+    \\declare PhysicsMaterialSimple 2
+    \\  mDebugName string
+    \\  mDebugColor instance Color
+    \\
+    \\declare Color 4
+    \\  r uint8
+    \\  g uint8
+    \\  b uint8
+    \\  a uint8
+    \\
+    \\object PhysicsMaterialSimple 00000003
+    \\  "Default"
+    \\    128
+    \\    128
+    \\    128
+    \\    255
+;
+
+fn writeReadScene(allocator: Allocator) !void {
+    var scene: PhysicsScene = .init(allocator);
+    defer scene.deinit();
+    try buildStreamScene(allocator, &scene);
+    for ([_]StreamType{ .text, .binary }) |stream_type| {
+        const bytes = try writeScene(allocator, &scene, stream_type);
+        defer testing.allocator.free(bytes);
+        var read = try readScene(allocator, bytes);
+        read.deinit();
+    }
+}
+
+test "PhysicsScene: out of memory in the object stream" {
+    try testing.checkAllAllocationFailures(testing.allocator, writeReadScene, .{});
 }

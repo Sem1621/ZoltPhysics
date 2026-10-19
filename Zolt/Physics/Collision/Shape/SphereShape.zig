@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -52,7 +53,13 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs a SphereShape
 pub const SphereShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, SphereShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SphereShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "SphereShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+        .attributes = &.{.attr("mRadius", .radius)},
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -63,6 +70,13 @@ pub const SphereShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) SphereShapeSettings {
         return .{ .base = .init(SphereShapeSettings, allocator, null) };
+    }
+
+    /// new SphereShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*SphereShapeSettings {
+        const self = try allocator.create(SphereShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a sphere with radius `radius` (settings on the stack: `defer settings.deinit()`)

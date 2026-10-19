@@ -10,12 +10,13 @@
 //!   `IsActive`, `BuildIslands` and `BuildIslandSplits` in `impl` (it is abstract).
 //! - The bodies are `*Body` like Jolt's `Body *`, also when a body is `Body.fixedToWorld()` (read-only memory): the
 //!   solver only writes dynamic bodies.
-//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(TwoBodyConstraintSettings):
-//!   TODO(serialization).
+//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(TwoBodyConstraintSettings): `rtti`. Jolt
+//!   adds no attributes, only the base class.
 //! - JPH_DEBUG_RENDERER (`DrawConstraintReferenceFrame`): TODO(debug_renderer).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -31,7 +32,12 @@ const ConstraintType = ConstraintFile.ConstraintType;
 
 /// Base class for settings for all constraints that involve 2 bodies
 pub const TwoBodyConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, TwoBodyConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(TwoBodyConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "TwoBodyConstraintSettings",
+        .kind = .abstract,
+        .bases = &.{ConstraintSettings},
+    });
 
     /// The virtual function that TwoBodyConstraintSettings adds
     pub const VTable = struct {

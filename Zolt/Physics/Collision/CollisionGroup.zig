@@ -6,9 +6,11 @@
 //! - Zig has no copy constructor: `clone()` copies (adds a reference to the filter), `assign(&other)` is the copy
 //!   assignment, `deinit()` the destructor (releases the filter) and a plain `=` moves;
 //! - `operator ==` is `eql` (`!=` is `!a.eql(b)`);
-//! - `sInvalid` is the compile time constant `invalid`.
+//! - `sInvalid` is the compile time constant `invalid`;
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti`.
 
 const std = @import("std");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const RefConst = @import("../../Core/Reference.zig").RefConst;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -19,7 +21,16 @@ const GroupFilter = @import("GroupFilter.zig").GroupFilter;
 /// - The first group filter says that the objects can collide
 /// - Or if there's no filter for the first object, the second group filter says the objects can collide
 pub const CollisionGroup = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, CollisionGroup)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(CollisionGroup)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "CollisionGroup",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mGroupFilter", .group_filter),
+            .attr("mGroupID", .group_id),
+            .attr("mSubGroupID", .sub_group_id),
+        },
+    });
 
     pub const GroupID = u32;
     pub const SubGroupID = u32;

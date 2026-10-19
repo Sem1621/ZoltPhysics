@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PulleyConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PulleyConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - `SetLength` asserts `inMinLength >= 0.0f && inMinLength <= inMaxLength`, which user input can violate: the
@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -44,10 +45,23 @@ const IndependentAxisConstraintPart = @import("ConstraintPart/IndependentAxisCon
 /// The constraint keeps the two line segments constrained so that
 /// MinDistance <= Length1 + Ratio * Length2 <= MaxDistance
 pub const PulleyConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PulleyConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PulleyConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PulleyConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mBodyPoint1", .body_point1),
+            .attr("mFixedPoint1", .fixed_point1),
+            .attr("mBodyPoint2", .body_point2),
+            .attr("mFixedPoint2", .fixed_point2),
+            .attr("mRatio", .ratio),
+            .attr("mMinLength", .min_length),
+            .attr("mMaxLength", .max_length),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "PulleyConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -461,7 +475,7 @@ test "PulleyConstraintSettings: defaults, binary state, restoreFromBinaryState t
     try testing.expectEqual(@as(f32, 1.0), settings.ratio);
     try testing.expectEqual(@as(f32, 0.0), settings.min_length);
     try testing.expectEqual(@as(f32, -1.0), settings.max_length);
-    try testing.expectEqualStrings("PulleyConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("PulleyConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // Non default values in every field
     settings.base.base.enabled = false;
@@ -484,7 +498,7 @@ test "PulleyConstraintSettings: defaults, binary state, restoreFromBinaryState t
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 4 * 3 * @sizeOf(Real) + 3 * 4), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("PulleyConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("PulleyConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     const after_points = 25 + 4 * 3 * @sizeOf(Real);
     try testing.expectEqual(@as(f32, 2.5), @as(f32, @bitCast(bytes[after_points..][0..4].*)));
@@ -492,7 +506,7 @@ test "PulleyConstraintSettings: defaults, binary state, restoreFromBinaryState t
     try testing.expectEqual(@as(f32, 9.0), @as(f32, @bitCast(bytes[after_points + 8 ..][0..4].*)));
     try testing.expectEqual(@as(Real, 7), @as(Real, @bitCast(bytes[25 + 4 * @sizeOf(Real) ..][0..@sizeOf(Real)].*))); // Fixed point 1 Y
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

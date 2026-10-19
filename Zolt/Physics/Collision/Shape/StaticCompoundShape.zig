@@ -36,6 +36,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const Ref = @import("../../../Core/Reference.zig").Ref;
@@ -90,7 +91,12 @@ const Registry = CollisionDispatch.Registry;
 
 /// Class that constructs a StaticCompoundShape. Note that if you only want a compound of 1 shape, use a RotatedTranslatedShape instead.
 pub const StaticCompoundShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, StaticCompoundShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(StaticCompoundShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "StaticCompoundShapeSettings",
+        .kind = .virtual,
+        .bases = &.{CompoundShapeSettings},
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -108,6 +114,9 @@ pub const StaticCompoundShapeSettings = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new StaticCompoundShapeSettings (RTTI create)
+    pub const createDefault = create;
 
     /// Upcast (mutable: createShape writes the cache)
     pub fn asShapeSettings(self: *StaticCompoundShapeSettings) *ShapeSettings {

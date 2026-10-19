@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - The settings own a reference to their path (`path: RefConst(PathConstraintPath)`, Jolt's
@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const RefConst = @import("../../Core/Reference.zig").RefConst;
@@ -99,10 +100,22 @@ fn mulRMat44Mat44(a: RMat44, b: Mat44) RMat44 {
 ///
 /// The reason for all this is that the constraint acts like a slider constraint with the sliding axis being the tangent vector (the assumption here is that delta time will be small enough so that the path is linear for that delta time).
 pub const PathConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PathConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PathConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .attr("mPath", .path),
+            .attr("mPathPosition", .path_position),
+            .attr("mPathRotation", .path_rotation),
+            .attr("mPathFraction", .path_fraction),
+            .attr("mMaxFrictionForce", .max_friction_force),
+            .attr("mPositionMotorSettings", .position_motor_settings),
+            .enumAttr("mRotationConstraintType", .rotation_constraint_type),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "PathConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -871,7 +884,7 @@ test "PathConstraintSettings: defaults, binary state, restoreFromBinaryState thr
     try testing.expectEqual(-math.flt_max, settings.position_motor_settings.min_force_limit);
     try testing.expectEqual(math.flt_max, settings.position_motor_settings.max_torque_limit);
     try testing.expectEqual(PathRotationConstraintType.free, settings.rotation_constraint_type);
-    try testing.expectEqualStrings("PathConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("PathConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // Non default values in every field
     const path = try testPath(allocator, 4, true);
@@ -895,11 +908,11 @@ test "PathConstraintSettings: defaults, binary state, restoreFromBinaryState thr
     defer allocator.free(bytes);
     const path_size = 4 + 1 + 4 + 4 * 48;
     try testing.expectEqual(@as(usize, 21 + path_size + 12 + 16 + 4 + 4 + 4 + 25), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("PathConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
-    try testing.expectEqual(PathConstraintPath.rttiHash("PathConstraintPathHermite"), std.mem.readInt(u32, bytes[21..25], .little));
+    try testing.expectEqual(RTTI.hashName("PathConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("PathConstraintPathHermite"), std.mem.readInt(u32, bytes[21..25], .little));
     try testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bytes[21 + path_size + 36 ..][0..4], .little)); // ConstrainToPath
 
-    // Restore through RegisterTypes.constraint_settings_types (and path_constraint_path_types for the path)
+    // Restore through RegisterTypes.factory (the settings and the path)
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

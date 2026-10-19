@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
@@ -78,7 +79,17 @@ const track_narrowphase_stats = NarrowPhaseStats.track_narrowphase_stats;
 
 /// Class that constructs a PlaneShape
 pub const PlaneShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PlaneShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PlaneShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PlaneShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mPlane", .plane),
+            .attr("mMaterial", .material),
+            .attr("mHalfExtent", .half_extent),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -98,6 +109,13 @@ pub const PlaneShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) PlaneShapeSettings {
         return .{ .base = .init(ShapeSettings.vtableFor(PlaneShapeSettings), allocator) };
+    }
+
+    /// new PlaneShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*PlaneShapeSettings {
+        const self = try allocator.create(PlaneShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a plane shape (settings on the stack: `defer settings.deinit()`)

@@ -1,9 +1,10 @@
 //! Port of: Jolt/Physics/Ragdoll/Ragdoll.h, Jolt/Physics/Ragdoll/Ragdoll.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL (RagdollSettings, Part,
-//! AdditionalConstraint): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary
-//! state is ported). JPH_OVERRIDE_NEW_DELETE: dropped.
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of RagdollSettings, Part and
+//! AdditionalConstraint (SerializationArchitecture.md). "mToParent" and "mConstraint" are declared as Jolt's
+//! `TwoBodyConstraintSettings` (`.attrAs`): a link accepts only objects of that class. A stream holds no tables: call
+//! the `calculate*` functions after a read, like Jolt. JPH_OVERRIDE_NEW_DELETE: dropped.
 //!
 //! CharacterVehicleArchitecture E2 / E7:
 //! - `RagdollSettings` and `Ragdoll` are RefTargets without virtual functions, like PhysicsScene: they keep the
@@ -63,10 +64,9 @@
 //!   of the parts before it are written then). `restoreFromBinaryState` (Jolt: sRestoreFromBinaryState) returns
 //!   Jolt's `RagdollResult` with Jolt's error texts, only allocation failure is a Zig error (a part or constraint count
 //!   that cannot be allocated, a corrupt stream where Jolt's resize aborts, is error.OutOfMemory).
-//! - Jolt's `DynamicCast<TwoBodyConstraintSettings>` of a restored constraint is `asTwoBodyConstraintSettings`: the
-//!   restored class must derive from TwoBodyConstraintSettings (checked with the RTTI hash against
-//!   `RegisterTypes.constraint_settings_types`), otherwise the part has no constraint (Jolt's null), like Jolt for a
-//!   VehicleConstraintSettings in the stream.
+//! - Jolt's `DynamicCast<TwoBodyConstraintSettings>` of a restored constraint is `asTwoBodyConstraintSettings`
+//!   (`RTTI.dynamicCast`): the restored class must derive from TwoBodyConstraintSettings, otherwise the part has no
+//!   constraint (Jolt's null), like Jolt for a VehicleConstraintSettings in the stream.
 //! - The has-constraint flag that Jolt reads into a `bool` is read as a byte (`!= 0`), like BodyCreationSettings' bools.
 //!
 //! Where Jolt has undefined behavior or dereferences null, Zolt panics with a message (also in optimized builds): a
@@ -90,6 +90,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const math = @import("../../Math/Math.zig");
@@ -149,18 +150,10 @@ fn ragdollGetBodyLockInterface(system: *const PhysicsSystem, lock_bodies: bool) 
     return if (lock_bodies) system.getBodyLockInterface() else system.getBodyLockInterfaceNoLock();
 }
 
-/// Jolt's `DynamicCast<TwoBodyConstraintSettings>` of a restored constraint: null unless the class of `settings` (a
-/// class that ConstraintSettings.restoreFromBinaryState can create, `RegisterTypes.constraint_settings_types`) derives
-/// from TwoBodyConstraintSettings
+/// Jolt's `DynamicCast<TwoBodyConstraintSettings>` of a restored constraint: null unless the class of `settings`
+/// derives from TwoBodyConstraintSettings
 fn asTwoBodyConstraintSettings(settings: *ConstraintSettings) ?*TwoBodyConstraintSettings {
-    const hash = settings.getRTTIHash();
-    inline for (ConstraintSettings.constraint_settings_types) |T| {
-        if (comptime @hasDecl(T, "rtti_name") and virtual.isDerivedFrom(T, TwoBodyConstraintSettings)) {
-            if (hash == comptime ConstraintSettings.rttiHash(T.rtti_name))
-                return virtual.downcast(TwoBodyConstraintSettings, settings);
-        }
-    }
-    return null;
+    return RTTI.dynamicCast(TwoBodyConstraintSettings, ConstraintSettings, settings);
 }
 
 /// A `Ref(ConstraintSettings)` that holds a TwoBodyConstraintSettings (Jolt's `Ref<TwoBodyConstraintSettings>`)
@@ -171,7 +164,16 @@ fn twoBodySettingsOf(ref: Ref(ConstraintSettings)) ?*TwoBodyConstraintSettings {
 
 /// Contains the structure of a ragdoll
 pub const RagdollSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, RagdollSettings)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(RagdollSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "RagdollSettings",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mSkeleton", .skeleton),
+            .attr("mParts", .parts),
+            .attr("mAdditionalConstraints", .additional_constraints),
+        },
+    });
 
     pub const RagdollResult = Result(Ref(RagdollSettings));
 
@@ -183,7 +185,13 @@ pub const RagdollSettings = struct {
 
     /// A single rigid body sub part of the ragdoll
     pub const Part = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Part)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(RagdollSettings::Part)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "RagdollSettings::Part",
+            .kind = .non_virtual,
+            .bases = &.{BodyCreationSettings},
+            .attributes = &.{.attrAs("mToParent", .to_parent, TwoBodyConstraintSettings)}, // Jolt's Ref<TwoBodyConstraintSettings>
+        });
 
         /// BodyCreationSettings (the C++ base class)
         base: BodyCreationSettings = .{},
@@ -224,7 +232,15 @@ pub const RagdollSettings = struct {
 
     /// A constraint that connects two bodies in a ragdoll (for non parent child related constraints)
     pub const AdditionalConstraint = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, AdditionalConstraint)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(RagdollSettings::AdditionalConstraint)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "RagdollSettings::AdditionalConstraint",
+            .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mBodyIdx", .body_idx),
+                .attrAs("mConstraint", .constraint, TwoBodyConstraintSettings), // Jolt's Ref<TwoBodyConstraintSettings>
+            },
+        });
 
         /// Indices of the bodies that this constraint connects (Jolt's default constructor leaves them uninitialized,
         /// Zolt: 0)
@@ -293,6 +309,9 @@ pub const RagdollSettings = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new RagdollSettings (RTTI create)
+    pub const createDefault = create;
 
     /// Destructor: releases the skeleton and the references of the parts and additional constraints, frees the arrays
     pub fn deinit(self: *RagdollSettings) void {
@@ -2025,7 +2044,7 @@ test "RagdollSettings: restoreFromBinaryState of the registered and unknown cons
     }
 
     // An unknown type hash gives Jolt's error
-    const hash = ConstraintSettings.rttiHash(TestConstraintSettings.rtti_name);
+    const hash = TestConstraintSettings.rtti.hash;
     const at = std.mem.indexOf(u8, bytes, std.mem.asBytes(&hash)).?;
     const corrupt = try allocator.dupe(u8, bytes);
     defer allocator.free(corrupt);

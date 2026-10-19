@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const Ref = @import("../../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -77,7 +78,12 @@ const Registry = CollisionDispatch.Registry;
 
 /// Class that constructs a MutableCompoundShape.
 pub const MutableCompoundShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, MutableCompoundShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MutableCompoundShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "MutableCompoundShapeSettings",
+        .kind = .virtual,
+        .bases = &.{CompoundShapeSettings},
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -95,6 +101,9 @@ pub const MutableCompoundShapeSettings = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new MutableCompoundShapeSettings (RTTI create)
+    pub const createDefault = create;
 
     /// Upcast (mutable: createShape writes the cache)
     pub fn asShapeSettings(self: *MutableCompoundShapeSettings) *ShapeSettings {

@@ -10,6 +10,10 @@
 //! - `readArrayWith(T, allocator, &list, context, readElement)`: Array<T> with a custom function to read the elements
 //! Like in C++ the destination is an in/out parameter: implementations that validate (StateRecorderImpl) compare
 //! the bytes that are read with the current value.
+//!
+//! Array elements are constructed and destructed with Core/Lifetime.zig, the definition that the object streams use
+//! too. Difference from C++: a new element of a trivially constructible type is zero (Jolt leaves it indeterminate
+//! until the stream overwrites it).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -17,6 +21,7 @@ const Vec3 = @import("../Math/Vec3.zig").Vec3;
 const Vec4 = @import("../Math/Vec4.zig").Vec4;
 const DVec3 = @import("../Math/DVec3.zig").DVec3;
 const DMat44 = @import("../Math/DMat44.zig").DMat44;
+const Lifetime = @import("Lifetime.zig");
 const checkTriviallyCopyable = @import("StreamOut.zig").checkTriviallyCopyable;
 const hasUnusedComponents = @import("StreamOut.zig").hasUnusedComponents;
 
@@ -153,9 +158,9 @@ pub const StreamIn = struct {
     /// Read a vector of primitives from the binary stream using a custom function to read the elements
     /// (Read(Array<T> &, const F &inReadElement)). `readElement(context, stream, element)` reads one element, it can
     /// allocate (e.g. a LinearCurve member), pass the allocator through the context.
-    /// Like Array<T>::resize / clear, new elements are default constructed (see `defaultConstruct`) and elements that
-    /// are removed are destructed with `allocator` (see `destruct`), so T must not hold resources in fields that are
-    /// not default constructed or destructed that way.
+    /// Like Array<T>::resize / clear, new elements are default constructed (`Lifetime.defaultConstruct`) and elements
+    /// that are removed are destructed with `allocator` (`Lifetime.destruct`), so T must not hold resources in fields
+    /// that are not default constructed or destructed that way.
     pub fn readArrayWith(
         self: StreamIn,
         comptime T: type,
@@ -185,99 +190,22 @@ fn DestinationType(comptime P: type) type {
 /// Resize `list` to `len` elements (Array<T>::resize): the elements that are removed are destructed, new elements
 /// are default constructed
 fn resize(comptime T: type, allocator: Allocator, list: *std.ArrayList(T), len: u32) Allocator.Error!void {
-    if (comptime hasDestructor(T))
+    if (comptime Lifetime.hasDestructor(T))
         if (len < list.items.len)
             for (list.items[len..]) |*item|
-                destruct(T, allocator, item);
+                Lifetime.destruct(T, allocator, item);
     const old_len = list.items.len;
     try list.resize(allocator, len);
-    if (comptime hasDefaultConstructor(T))
-        for (list.items[@min(old_len, len)..]) |*item|
-            defaultConstruct(T, item);
+    for (list.items[@min(old_len, len)..]) |*item|
+        Lifetime.defaultConstruct(T, item);
 }
 
 /// Destruct all elements and set the length to zero (Array<T>::clear)
 fn clear(comptime T: type, allocator: Allocator, list: *std.ArrayList(T)) void {
-    if (comptime hasDestructor(T))
+    if (comptime Lifetime.hasDestructor(T))
         for (list.items) |*item|
-            destruct(T, allocator, item);
+            Lifetime.destruct(T, allocator, item);
     list.clearRetainingCapacity();
-}
-
-/// True when `T` declares `pub const empty: T` (std.ArrayList, std.HashMapUnmanaged, StaticArray, ...), the Zig
-/// equivalent of a default constructed container
-fn hasEmptyValue(comptime T: type) bool {
-    return @hasDecl(T, "empty") and @TypeOf(T.empty) == T;
-}
-
-/// The Zolt equivalent of `!std::is_trivially_constructible<T>()`: true when `defaultConstruct` initializes
-/// something in T
-fn hasDefaultConstructor(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .@"struct" => |s| hasEmptyValue(T) or for (s.fields) |field| {
-            if (!field.is_comptime and (field.default_value_ptr != null or (s.layout != .@"packed" and hasDefaultConstructor(field.type))))
-                break true;
-        } else false,
-        .array => |a| hasDefaultConstructor(a.child),
-        else => false,
-    };
-}
-
-/// Default construct an element like `new (element) T` in Array<T>::resize: a type that declares `empty` is set to
-/// it, otherwise fields with a default value get that value and struct / array fields are default constructed
-/// recursively (like the members of a C++ class). Everything else (trivially constructible) is left undefined.
-fn defaultConstruct(comptime T: type, element: *T) void {
-    switch (@typeInfo(T)) {
-        .@"struct" => |s| if (comptime hasEmptyValue(T)) {
-            element.* = T.empty;
-        } else inline for (s.fields) |field| {
-            if (comptime field.is_comptime) continue;
-            if (comptime field.default_value_ptr != null)
-                @field(element, field.name) = comptime field.defaultValue().?
-            else if (comptime s.layout != .@"packed" and hasDefaultConstructor(field.type))
-                defaultConstruct(field.type, &@field(element, field.name));
-        },
-        .array => |a| if (comptime hasDefaultConstructor(a.child)) {
-            for (element) |*item|
-                defaultConstruct(a.child, item);
-        },
-        else => {},
-    }
-}
-
-/// True when `destruct` does something for T (the C++ type has a non-trivial destructor)
-fn hasDestructor(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .@"struct" => |s| @hasDecl(T, "deinit") or (s.layout != .@"packed" and for (s.fields) |field| {
-            if (!field.is_comptime and hasDestructor(field.type))
-                break true;
-        } else false),
-        .array => |a| hasDestructor(a.child),
-        else => false,
-    };
-}
-
-/// Destruct an element that is removed from the array, like the `element->~T()` call in Array<T>::destruct: calls
-/// `deinit()` or `deinit(allocator)` when T declares it (the Zolt destructor, see the porting guide), otherwise
-/// destructs the struct / array fields recursively (like an implicit C++ destructor)
-fn destruct(comptime T: type, allocator: Allocator, element: *T) void {
-    switch (@typeInfo(T)) {
-        .@"struct" => |s| if (comptime @hasDecl(T, "deinit")) {
-            switch (@typeInfo(@TypeOf(T.deinit)).@"fn".params.len) {
-                1 => element.deinit(),
-                2 => element.deinit(allocator),
-                else => @compileError("StreamIn: " ++ @typeName(T) ++ ".deinit must take no arguments or an allocator"),
-            }
-        } else inline for (s.fields) |field| {
-            if (comptime !field.is_comptime and s.layout != .@"packed" and hasDestructor(field.type))
-                destruct(field.type, allocator, &@field(element, field.name));
-        },
-        .array => |a| if (comptime hasDestructor(a.child)) {
-            for (element) |*item|
-                destruct(a.child, allocator, item);
-        },
-        else => {},
-    }
 }
 
 /// Reads from a byte slice, for the tests
@@ -491,7 +419,7 @@ test "StreamIn default constructs new array elements and destructs removed ones 
         list.deinit(allocator);
     }
 
-    // New elements are default constructed, even when not all fields have a default value
+    // New elements are default constructed, even when not all fields have a default value (the others are zero)
     {
         const bytes = std.mem.toBytes(@as(u32, 3)) ++ std.mem.toBytes([3]u32{ 10, 11, 12 });
         var impl: TestStream = .{ .bytes = &bytes };
@@ -502,6 +430,7 @@ test "StreamIn default constructs new array elements and destructs removed ones 
             try std.testing.expectEqual(@as(?*u32, null), element.owner);
             try std.testing.expectEqual(@as(u32, @intCast(user_data)), element.user_data);
             try std.testing.expectEqual(@as(u8, 5), element.nested.a);
+            try std.testing.expectEqual(@as(u8, 0), element.nested.b); // Zero (C++: indeterminate)
             try std.testing.expectEqual(@as(usize, 0), element.points.items.len);
             try std.testing.expectEqual(@as(?*u32, null), element.counted[0].counter);
             try std.testing.expectEqual(@as(?*u32, null), element.counted[1].counter);

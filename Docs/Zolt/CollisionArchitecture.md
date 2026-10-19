@@ -93,7 +93,7 @@ pub const ConvexShape = struct {
 - Out parameters become a returned struct (`getLeafShape -> LeafShape{ shape, remainder }`) or a
   `*T` parameter.
 - `deinit` (destructor chain) and `destroy` (`delete this`) are generated entries.
-- Data entries hold per-class constants, e.g. `rtti_name` in `PhysicsMaterial.VTable`.
+- Data entries hold per-class constants, e.g. `rtti` in `PhysicsMaterial.VTable` (SerializationArchitecture.md S3).
 - `make` builds thunks for up to 12 parameters including `self`; a longer function needs a new
   thunk in Virtual.zig.
 
@@ -306,7 +306,8 @@ parameter) and read `RegisterTypes.registry`.
 - `build.zig` wires an empty default module. An application calls
   `zolt.addImport("zolt_user_types", mine)`; a cyclic module import works in Zig 0.16.
 - The module may declare `registrations` (types with `register`, run after Jolt's, so they
-  override), `default_material` and `material_types`.
+  override), `default_material` and `serializable_types` (the user's classes in `RegisterTypes.factory`,
+  SerializationArchitecture.md S8 and S9).
 - UserConvex shapes already get every convex function from `ConvexShape.register`. The prototype
   test builds a user registry and checks that it overrides.
 
@@ -433,9 +434,8 @@ pub fn addRef(self: *const PhysicsMaterial) void {
 reference counted, so `RefConst(PhysicsMaterial).init(PhysicsMaterial.default)` is legal and
 nothing is mutable.
 
-**Binary state.** It writes Jolt's RTTI hash. `rtti_name` is a vtable data entry, hashed with
-`HashCombine.hashString` folded to 32 bits. `restoreFromBinaryState` finds the class in the
-comptime `RegisterTypes.material_types` list until the Phase 8 Factory replaces it.
+**Binary state.** It writes Jolt's RTTI hash, `vtable.rtti.hash` (`getRTTIHash()`). `restoreFromBinaryState` finds
+the class in `RegisterTypes.factory` (`StreamUtils.restoreObject`, SerializationArchitecture.md S9).
 
 ### D9 Support functions
 
@@ -551,7 +551,13 @@ Skeleton:
 //! Missing: <C++ functions not ported yet, e.g. JPH_DEBUG_RENDERER (Draw)>
 
 pub const XShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(XShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{     // Jolt's sCreateRTTI (SerializationArchitecture.md section 3)
+        .name = "XShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+        .attributes = &.{.attr("mField", .field)},
+    });
     pub const overrides = .{.createShape};
 
     base: ConvexShapeSettings,            // or DecoratedShapeSettings / CompoundShapeSettings / ShapeSettings
@@ -560,6 +566,7 @@ pub const XShapeSettings = struct {
     pub fn initDefault(allocator: Allocator) XShapeSettings { ... }                 // default constructor
     pub fn init(allocator: Allocator, <C++ args>, opts: struct { <defaulted C++ args> }) XShapeSettings { ... }
     pub fn create(allocator: Allocator, ...) Allocator.Error!*XShapeSettings { ... } // new XShapeSettings(...)
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*XShapeSettings { ... } // RTTI create
     pub fn asShapeSettings(self: *XShapeSettings) *ShapeSettings { return &self.base.base; }
     pub fn deinit(self: *XShapeSettings) void { self.asShapeSettings().deinit(); }
 
@@ -621,8 +628,9 @@ Variants:
 ## 3. Checklist for porting a shape
 
 1. **Header.** `Port of`, `Status`, `Missing`. Keep Jolt's doc and implementation comments.
-2. **Settings.** Field defaults are Jolt's; provide `initDefault` / `init` / `create`;
-   `createShape` is `createCached`, or custom code ending in `constructShape`.
+2. **Settings.** Field defaults are Jolt's; provide `initDefault` / `init` / `create` / `createDefault`;
+   `createShape` is `createCached`, or custom code ending in `constructShape`. The `rtti` declaration copies
+   Jolt's `sCreateRTTI` (SerializationArchitecture.md section 3).
 3. **Overrides.** `overrides` lists exactly the C++ `override`s that are ported, in header
    order. A function not ported yet falls back to the base class, so list it under `Missing`.
 4. **Signatures.** Const C++ methods take `*const Self`; mutable ones (`restore*`, setters) take
@@ -784,8 +792,8 @@ needs only the `Body` pointer type from the F1 stub.
   distances for the ray and cast visitors, UVec4 masks for the others) and `visitShape`. Jolt's
   derived visitors (`struct Visitor : public CastRayVisitor`) embed the base visitor as `base` and
   forward the protocol (`CompoundShapeVisitors.zig` header).
-- **Registered types from the user module** (`zolt_user_types`): `registrations`, `default_material`,
-  `material_types` and `group_filter_types` (`RegisterTypes.zig`).
+- **Registered types from the user module** (`zolt_user_types`): `registrations`, `default_material` and
+  `serializable_types` (`RegisterTypes.zig`; the last since Phase 8, SerializationArchitecture.md S9).
 - **Test-only shapes.** `Zolt/Physics/Collision/Shape/TestShapes.zig` (only compiled in tests) registers
   User1..3 test shapes and a test material for the library's inline tests; the parity build has its
   own user types module (`ZoltParity/Physics/ShapeCoreUserTypes.zig`). Wave A/B parity tests use the

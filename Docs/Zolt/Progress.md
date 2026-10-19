@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 86.3%** of 85391 lines in scope · **Unit tests: 93.6%** of 18321 lines
+**Library: 89.7%** of 86135 lines in scope · **Unit tests: 94.8%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -16,10 +16,10 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
 | `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 94% | 37 | 2 | 0 | 0 | 12 | 4 | 6041 |
+| `Jolt/Core` | 95% | 41 | 1 | 0 | 0 | 12 | 1 | 6785 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
-| `Jolt/ObjectStream` | 0% | 0 | 0 | 0 | 14 | 0 | 0 | 2841 |
+| `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
@@ -94,7 +94,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Core — 94%</summary>
+<details><summary>Jolt/Core — 95%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -108,7 +108,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `FPControlWord.h` | 113 | ✅ complete | `Zolt/Core/FPControlWord.zig` |
 | `FPException.h` | 61 | ➖ n/a | Zolt never enables floating point exceptions |
 | `FPFlushDenormals.h` | 27 | ✅ complete | `Zolt/Core/FPFlushDenormals.zig` |
-| `Factory.cpp`, `Factory.h` | 110 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
+| `Factory.cpp`, `Factory.h` | 110 | ✅ complete | `Zolt/Core/Factory.zig` |
 | `FixedSizeFreeList.h`, `FixedSizeFreeList.inl` | 275 | ✅ complete | `Zolt/Core/FixedSizeFreeList.zig` |
 | `HashCombine.h` | 208 | ✅ complete | `Zolt/Core/HashCombine.zig` |
 | `HashTable.h` | 738 | ✅ complete | `Zolt/Core/HashTable.zig` |
@@ -120,7 +120,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `JobSystemThreadPool.cpp`, `JobSystemThreadPool.h` | 359 | ✅ complete | `Zolt/Core/JobSystemThreadPool.zig` |
 | `JobSystemWithBarrier.cpp`, `JobSystemWithBarrier.h` | 259 | ✅ complete | `Zolt/Core/JobSystemWithBarrier.zig` |
 | `LSANSuppressions.h` | 15 | ➖ n/a | sanitizer configuration |
-| `LinearCurve.cpp`, `LinearCurve.h` | 88 | 🟡 partial | `Zolt/Core/LinearCurve.zig` |
+| `LinearCurve.cpp`, `LinearCurve.h` | 88 | ✅ complete | `Zolt/Core/LinearCurve.zig` |
 | `LockFreeHashMap.h`, `LockFreeHashMap.inl` | 454 | ✅ complete | `Zolt/Core/LockFreeHashMap.zig` |
 | `Memory.cpp`, `Memory.h` | 138 | ➖ n/a | global allocation hooks, Zolt passes std.mem.Allocator explicitly |
 | `Mutex.h` | 183 | ✅ complete | `Zolt/Core/Mutex.zig` |
@@ -131,7 +131,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Profiler.cpp`, `Profiler.h`, `Profiler.inl` | 887 | ⏸ deferred | developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration |
 | `QuickSort.h` | 109 | ✅ complete | `Zolt/Core/QuickSort.zig` |
 | `RISCVVector.h` | 88 | ➖ n/a | RVV intrinsic helpers, Zolt uses @Vector |
-| `RTTI.cpp`, `RTTI.h` | 494 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
+| `RTTI.cpp`, `RTTI.h` | 494 | ✅ complete | `Zolt/Core/RTTI.zig` |
 | `Reference.h` | 205 | ✅ complete | `Zolt/Core/Reference.zig` |
 | `Result.h` | 134 | ✅ complete | `Zolt/Core/Result.zig` |
 | `STLAlignedAllocator.h` | 56 | ➖ n/a | STL allocator adapter, Zolt uses std.mem.Allocator |
@@ -143,7 +143,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `StaticArray.h` | 271 | ✅ complete | `Zolt/Core/StaticArray.zig` |
 | `StreamIn.h` | 103 | ✅ complete | `Zolt/Core/StreamIn.zig` |
 | `StreamOut.h` | 82 | ✅ complete | `Zolt/Core/StreamOut.zig` |
-| `StreamUtils.h` | 140 | ⏸ deferred | serialization support, ported with ObjectStream (Phase 8) |
+| `StreamUtils.h` | 140 | ✅ complete | `Zolt/Core/StreamUtils.zig` |
 | `StreamWrapper.h` | 39 | ✅ complete | `Zolt/Core/StreamWrapper.zig` |
 | `StridedPtr.h` | 50 | ✅ complete | `Zolt/Core/StridedPtr.zig` |
 | `StringTools.cpp`, `StringTools.h` | 107 | ✅ complete | `Zolt/Core/StringTools.zig` |
@@ -217,24 +217,24 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/ObjectStream — 0%</summary>
+<details><summary>Jolt/ObjectStream — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `GetPrimitiveTypeOfType.h` | 43 | ❌ todo |  |
-| `ObjectStream.cpp`, `ObjectStream.h` | 315 | ❌ todo |  |
-| `ObjectStreamBinaryIn.cpp`, `ObjectStreamBinaryIn.h` | 263 | ❌ todo |  |
-| `ObjectStreamBinaryOut.cpp`, `ObjectStreamBinaryOut.h` | 176 | ❌ todo |  |
-| `ObjectStreamIn.cpp`, `ObjectStreamIn.h` | 683 | ❌ todo |  |
-| `ObjectStreamOut.cpp`, `ObjectStreamOut.h` | 219 | ❌ todo |  |
-| `ObjectStreamTextIn.cpp`, `ObjectStreamTextIn.h` | 411 | ❌ todo |  |
-| `ObjectStreamTextOut.cpp`, `ObjectStreamTextOut.h` | 269 | ❌ todo |  |
-| `ObjectStreamTypes.h` | 24 | ❌ todo |  |
-| `SerializableAttribute.h` | 87 | ❌ todo |  |
-| `SerializableAttributeEnum.h` | 55 | ❌ todo |  |
-| `SerializableAttributeTyped.h` | 48 | ❌ todo |  |
-| `SerializableObject.cpp`, `SerializableObject.h` | 151 | ❌ todo |  |
-| `TypeDeclarations.cpp`, `TypeDeclarations.h` | 97 | ❌ todo |  |
+| `GetPrimitiveTypeOfType.h` | 43 | ✅ complete | `Zolt/ObjectStream/GetPrimitiveTypeOfType.zig` |
+| `ObjectStream.cpp`, `ObjectStream.h` | 315 | ✅ complete | `Zolt/ObjectStream/ObjectStream.zig` |
+| `ObjectStreamBinaryIn.cpp`, `ObjectStreamBinaryIn.h` | 263 | ✅ complete | `Zolt/ObjectStream/ObjectStreamBinaryIn.zig` |
+| `ObjectStreamBinaryOut.cpp`, `ObjectStreamBinaryOut.h` | 176 | ✅ complete | `Zolt/ObjectStream/ObjectStreamBinaryOut.zig` |
+| `ObjectStreamIn.cpp`, `ObjectStreamIn.h` | 683 | ✅ complete | `Zolt/ObjectStream/ObjectStreamIn.zig` |
+| `ObjectStreamOut.cpp`, `ObjectStreamOut.h` | 219 | ✅ complete | `Zolt/ObjectStream/ObjectStreamOut.zig` |
+| `ObjectStreamTextIn.cpp`, `ObjectStreamTextIn.h` | 411 | ✅ complete | `Zolt/ObjectStream/ObjectStreamTextIn.zig` |
+| `ObjectStreamTextOut.cpp`, `ObjectStreamTextOut.h` | 269 | ✅ complete | `Zolt/ObjectStream/ObjectStreamTextOut.zig` |
+| `ObjectStreamTypes.h` | 24 | ✅ complete | `Zolt/ObjectStream/ObjectStreamTypes.zig` |
+| `SerializableAttribute.h` | 87 | ✅ complete | `Zolt/ObjectStream/SerializableAttribute.zig` |
+| `SerializableAttributeEnum.h` | 55 | ✅ complete | `Zolt/ObjectStream/SerializableAttributeEnum.zig` |
+| `SerializableAttributeTyped.h` | 48 | ✅ complete | `Zolt/ObjectStream/SerializableAttributeTyped.zig` |
+| `SerializableObject.cpp`, `SerializableObject.h` | 151 | ✅ complete | `Zolt/ObjectStream/SerializableObject.zig` |
+| `TypeDeclarations.cpp`, `TypeDeclarations.h` | 97 | ✅ complete | `Zolt/ObjectStream/TypeDeclarations.zig` |
 
 </details>
 
@@ -551,7 +551,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
-| `UnitTests/ObjectStream` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 220 |
+| `UnitTests/ObjectStream` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 220 |
 | `UnitTests/Physics` | 98% | 32 | 0 | 0 | 1 | 0 | 0 | 11009 |
 
 <details><summary>UnitTests — 77%</summary>
@@ -632,11 +632,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/ObjectStream — 0%</summary>
+<details><summary>UnitTests/ObjectStream — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ObjectStreamTest.cpp` | 220 | ❌ todo |  |
+| `ObjectStreamTest.cpp` | 220 | ✅ complete | `ZoltTests/ObjectStream/ObjectStreamTest.zig` |
 
 </details>
 
@@ -677,5 +677,100 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `TaperedCylinderShapeTests.cpp` | 83 | ✅ complete | `ZoltTests/Physics/TaperedCylinderShapeTests.zig` |
 | `TransformedShapeTests.cpp` | 90 | ✅ complete | `ZoltTests/Physics/TransformedShapeTests.zig` |
 | `WheeledVehicleTests.cpp` | 304 | ✅ complete | `ZoltTests/Physics/WheeledVehicleTests.zig` |
+
+</details>
+
+## Serialization (Phase 8)
+
+Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
+of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
+[SerializationArchitecture.md](SerializationArchitecture.md) S18). `port_status.py --check` and the parity harness
+fail on a pending or undeclared class. ✅ 81 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
+
+<details><summary>Serializable classes</summary>
+
+| Class | Status | Zig |
+|-------|--------|-----|
+| `AABox` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `BodyCreationSettings` | ✅ declared | `Zolt/Physics/Body/BodyCreationSettings.zig` |
+| `BoxShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/BoxShape.zig` |
+| `CapsuleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CapsuleShape.zig` |
+| `CollisionGroup` | ✅ declared | `Zolt/Physics/Collision/CollisionGroup.zig` |
+| `Color` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `CompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
+| `CompoundShapeSettings::SubShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CompoundShape.zig` |
+| `ConeConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/ConeConstraint.zig` |
+| `ConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/Constraint.zig` |
+| `ConvexHullShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ConvexHullShape.zig` |
+| `ConvexShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ConvexShape.zig` |
+| `CylinderShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/CylinderShape.zig` |
+| `DecoratedShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/DecoratedShape.zig` |
+| `DistanceConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/DistanceConstraint.zig` |
+| `EmptyShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/EmptyShape.zig` |
+| `FixedConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/FixedConstraint.zig` |
+| `GearConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/GearConstraint.zig` |
+| `GroupFilter` | ✅ declared | `Zolt/Physics/Collision/GroupFilter.zig` |
+| `GroupFilterTable` | ✅ declared | `Zolt/Physics/Collision/GroupFilterTable.zig` |
+| `HeightFieldShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/HeightFieldShape.zig` |
+| `HingeConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/HingeConstraint.zig` |
+| `IndexedTriangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `IndexedTriangleNoMaterial` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `LinearCurve` | ✅ declared | `Zolt/Core/LinearCurve.zig` |
+| `LinearCurve::Point` | ✅ declared | `Zolt/Core/LinearCurve.zig` |
+| `MassProperties` | ✅ declared | `Zolt/Physics/Body/MassProperties.zig` |
+| `MeshShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MeshShape.zig` |
+| `MotorSettings` | ✅ declared | `Zolt/Physics/Constraints/MotorSettings.zig` |
+| `MotorcycleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/MotorcycleController.zig` |
+| `MutableCompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/MutableCompoundShape.zig` |
+| `OffsetCenterOfMassShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/OffsetCenterOfMassShape.zig` |
+| `PathConstraintPath` | ✅ declared | `Zolt/Physics/Constraints/PathConstraintPath.zig` |
+| `PathConstraintPathHermite` | ✅ declared | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
+| `PathConstraintPathHermite::Point` | ✅ declared | `Zolt/Physics/Constraints/PathConstraintPathHermite.zig` |
+| `PathConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/PathConstraint.zig` |
+| `PhysicsMaterial` | ✅ declared | `Zolt/Physics/Collision/PhysicsMaterial.zig` |
+| `PhysicsMaterialSimple` | ✅ declared | `Zolt/Physics/Collision/PhysicsMaterialSimple.zig` |
+| `PhysicsScene` | ✅ declared | `Zolt/Physics/PhysicsScene.zig` |
+| `PhysicsScene::ConnectedConstraint` | ✅ declared | `Zolt/Physics/PhysicsScene.zig` |
+| `Plane` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `PlaneShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/PlaneShape.zig` |
+| `PointConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/PointConstraint.zig` |
+| `PulleyConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/PulleyConstraint.zig` |
+| `RackAndPinionConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/RackAndPinionConstraint.zig` |
+| `RagdollSettings` | ✅ declared | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `RagdollSettings::AdditionalConstraint` | ✅ declared | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `RagdollSettings::Part` | ✅ declared | `Zolt/Physics/Ragdoll/Ragdoll.zig` |
+| `RotatedTranslatedShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/RotatedTranslatedShape.zig` |
+| `ScaledShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/ScaledShape.zig` |
+| `SerializableObject` | ✅ declared | `Zolt/ObjectStream/SerializableObject.zig` |
+| `ShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/Shape.zig` |
+| `SixDOFConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SixDOFConstraint.zig` |
+| `SkeletalAnimation` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `SkeletalAnimation::AnimatedJoint` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `SkeletalAnimation::JointState` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `SkeletalAnimation::Keyframe` | ✅ declared | `Zolt/Skeleton/SkeletalAnimation.zig` |
+| `Skeleton` | ✅ declared | `Zolt/Skeleton/Skeleton.zig` |
+| `Skeleton::Joint` | ✅ declared | `Zolt/Skeleton/Skeleton.zig` |
+| `SliderConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SliderConstraint.zig` |
+| `SphereShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
+| `SpringSettings` | ✅ declared | `Zolt/Physics/Constraints/SpringSettings.zig` |
+| `StaticCompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/StaticCompoundShape.zig` |
+| `SwingTwistConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SwingTwistConstraint.zig` |
+| `TaperedCapsuleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TaperedCapsuleShape.zig` |
+| `TaperedCylinderShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TaperedCylinderShape.zig` |
+| `TrackedVehicleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
+| `Triangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |
+| `TriangleShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/TriangleShape.zig` |
+| `TwoBodyConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/TwoBodyConstraint.zig` |
+| `VehicleAntiRollBar` | ✅ declared | `Zolt/Physics/Vehicle/VehicleAntiRollBar.zig` |
+| `VehicleConstraintSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleConstraint.zig` |
+| `VehicleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleController.zig` |
+| `VehicleDifferentialSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleDifferential.zig` |
+| `VehicleEngineSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleEngine.zig` |
+| `VehicleTrackSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleTrack.zig` |
+| `VehicleTransmissionSettings` | ✅ declared | `Zolt/Physics/Vehicle/VehicleTransmission.zig` |
+| `WheelSettings` | ✅ declared | `Zolt/Physics/Vehicle/Wheel.zig` |
+| `WheelSettingsTV` | ✅ declared | `Zolt/Physics/Vehicle/TrackedVehicleController.zig` |
+| `WheelSettingsWV` | ✅ declared | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
+| `WheeledVehicleControllerSettings` | ✅ declared | `Zolt/Physics/Vehicle/WheeledVehicleController.zig` |
 
 </details>

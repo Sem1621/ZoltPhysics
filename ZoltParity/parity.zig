@@ -24,6 +24,7 @@ test {
     _ = @import("Geometry/PrimitivesParity.zig");
     _ = @import("Geometry/QueriesParity.zig");
     _ = @import("Math/MathParity.zig");
+    _ = @import("ObjectStream/ObjectStreamParity.zig");
     _ = @import("ParityFramework.zig");
     _ = @import("Physics/BasicsParity.zig");
     _ = @import("Physics/BodyInterfaceParity.zig");
@@ -48,6 +49,7 @@ test {
     _ = @import("Physics/NarrowPhaseQueryParity.zig");
     _ = @import("Physics/PairwiseParity.zig");
     _ = @import("Physics/PathConstraintPathParity.zig");
+    _ = @import("Physics/PerfRagdollParity.zig");
     _ = @import("Physics/PlaneEmptyParity.zig");
     _ = @import("Physics/RagdollParity.zig");
     _ = @import("Physics/ShapeCoreParity.zig");

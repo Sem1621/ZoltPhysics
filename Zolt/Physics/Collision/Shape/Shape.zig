@@ -46,6 +46,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
+const SerializableObject = @import("../../../ObjectStream/SerializableObject.zig").SerializableObject;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const PlacementBuffer = @import("../../../Core/PlacementBuffer.zig").PlacementBuffer;
@@ -57,6 +59,7 @@ const Result = @import("../../../Core/Result.zig").Result;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
+const StreamUtils = @import("../../../Core/StreamUtils.zig");
 const ObjectToIDMapFile = @import("../../../Core/ObjectToIDMap.zig");
 const ObjectToIDMap = ObjectToIDMapFile.ObjectToIDMap;
 const IDToObjectMap = ObjectToIDMapFile.IDToObjectMap;
@@ -215,10 +218,18 @@ pub const ShapeResult = Result(Ref(Shape));
 /// Pattern A RefTarget root (D3). Settings on the stack: `X.init(allocator, ...)` + `defer s.deinit()`; on the heap:
 /// `X.create(allocator, ...)` (reference count 0, put it in a Ref, the last release() frees it).
 pub const ShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, ShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT_BASE(ShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "ShapeSettings",
+        .kind = .abstract,
+        .bases = &.{SerializableObject},
+        .attributes = &.{.attr("mUserData", .user_data)},
+    });
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {
+        /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
+        rtti: *const RTTI,
         /// Destructor chain (generated)
         deinit: *const fn (self: *ShapeSettings) void,
         /// delete this (generated)
@@ -910,7 +921,7 @@ pub const Shape = struct {
         var materials: PhysicsMaterialList = .empty;
         defer releaseList(PhysicsMaterial, allocator, &materials);
         try self.saveMaterialState(allocator, &materials);
-        try saveObjectArray(PhysicsMaterial, allocator, stream, materials.items, material_map);
+        try StreamUtils.saveObjectArray(PhysicsMaterial, allocator, stream, materials.items, material_map);
     }
 
     /// Restore a shape, all its children and materials. Pass in an empty map in shape_map / material_map or reuse the same map while reading multiple shapes from the same stream in order to restore duplicates.
@@ -970,7 +981,7 @@ pub const Shape = struct {
         // Read the materials
         var materials: PhysicsMaterialList = .empty;
         defer releaseList(PhysicsMaterial, allocator, &materials);
-        var mlresult = try restoreObjectArray(PhysicsMaterial, allocator, stream, material_map, &materials);
+        var mlresult = try StreamUtils.restoreObjectArray(PhysicsMaterial, allocator, stream, material_map, &materials);
         defer mlresult.deinit();
         if (mlresult.hasError()) {
             result.setError(mlresult.getError());
@@ -1184,94 +1195,6 @@ pub const Shape = struct {
 fn releaseList(comptime T: type, allocator: Allocator, list: *std.ArrayList(RefConst(T))) void {
     for (list.items) |*item| item.deinit();
     list.deinit(allocator);
-}
-
-/// StreamUtils::SaveObjectReference: save an object reference to a stream. Uses a map to map objects to IDs which is also used to prevent writing duplicates.
-/// (Zolt: Jolt/Core/StreamUtils.h is deferred to the ObjectStream phase, the helpers that Shape uses live here; public
-/// for BodyCreationSettings, which saves its group filter with them)
-pub fn saveObjectReference(comptime T: type, allocator: Allocator, stream: StreamOut, object: ?*const T, object_to_id_map: ?*ObjectToIDMap(T)) Allocator.Error!void {
-    if (object_to_id_map == null or object == null) {
-        // Write null ID
-        stream.write(~@as(u32, 0));
-    } else if (object_to_id_map.?.find(object.?)) |id| {
-        // Existing object, write ID
-        stream.write(id.value);
-    } else {
-        // New object, write the ID
-        const new_id: u32 = object_to_id_map.?.count();
-        (try object_to_id_map.?.getOrPutValue(allocator, object.?, 0)).* = new_id;
-        stream.write(new_id);
-
-        // Write the object
-        object.?.saveBinaryState(stream);
-    }
-}
-
-/// StreamUtils::RestoreObjectReference: restore an object reference from stream.
-pub fn restoreObjectReference(comptime T: type, allocator: Allocator, stream: StreamIn, id_to_object_map: *IDToObjectMap(T)) Allocator.Error!Result(Ref(T)) {
-    var result: Result(Ref(T)) = .empty;
-    errdefer result.deinit();
-
-    // Read id
-    var id: u32 = ~@as(u32, 0);
-    stream.read(&id);
-
-    // Check null
-    if (id == ~@as(u32, 0)) {
-        result.set(.empty);
-        return result;
-    }
-
-    // Check if it already exists
-    if (id >= id_to_object_map.items.len) {
-        // New object, restore it
-        result.assignMove(try T.restoreFromBinaryState(allocator, stream));
-        if (result.hasError())
-            return result;
-        if (Core.enable_asserts) std.debug.assert(id == id_to_object_map.items.len); // A corrupt stream can violate this
-        try id_to_object_map.ensureUnusedCapacity(allocator, 1);
-        id_to_object_map.appendAssumeCapacity(result.get().clone());
-    } else {
-        // Existing object filter
-        result.set(id_to_object_map.items[id].clone());
-    }
-
-    return result;
-}
-
-/// StreamUtils::SaveObjectArray: save an array of objects to a stream.
-fn saveObjectArray(comptime T: type, allocator: Allocator, stream: StreamOut, array: []const RefConst(T), object_to_id_map: ?*ObjectToIDMap(T)) Allocator.Error!void {
-    const len: u32 = @intCast(array.len);
-    stream.write(len);
-    for (array) |value|
-        try saveObjectReference(T, allocator, stream, value.get(), object_to_id_map);
-}
-
-/// StreamUtils::RestoreObjectArray: restore an array of objects from a stream. The objects are appended to the empty
-/// list `out_values` (Jolt returns Result<ArrayType>), the returned result holds Jolt's error text on failure.
-fn restoreObjectArray(comptime T: type, allocator: Allocator, stream: StreamIn, id_to_object_map: *IDToObjectMap(T), out_values: *std.ArrayList(RefConst(T))) Allocator.Error!Result(void) {
-    var result: Result(void) = .empty;
-
-    var len: u32 = 0;
-    stream.read(&len);
-    if (stream.isEOF() or stream.isFailed()) {
-        result.setError("Failed to read stream");
-        return result;
-    }
-
-    try out_values.ensureTotalCapacity(allocator, len);
-    for (0..len) |_| {
-        var value = try restoreObjectReference(T, allocator, stream, id_to_object_map);
-        defer value.deinit();
-        if (value.hasError()) {
-            result.setError(value.getError());
-            return result;
-        }
-        try out_values.append(allocator, .init(value.getPtr()));
-    }
-
-    result.set({});
-    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

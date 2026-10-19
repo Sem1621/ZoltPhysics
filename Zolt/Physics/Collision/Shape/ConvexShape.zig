@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const PlacementBuffer = @import("../../../Core/PlacementBuffer.zig").PlacementBuffer;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
@@ -95,7 +96,16 @@ const track_narrowphase_stats = NarrowPhaseStats.track_narrowphase_stats;
 
 /// Class that constructs a ConvexShape (abstract)
 pub const ConvexShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, ConvexShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(ConvexShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "ConvexShapeSettings",
+        .kind = .abstract,
+        .bases = &.{ShapeSettings},
+        .attributes = &.{
+            .attr("mDensity", .density),
+            .attr("mMaterial", .material),
+        },
+    });
 
     base: ShapeSettings,
 

@@ -1,8 +1,9 @@
 //! Port of: Jolt/Skeleton/Skeleton.h, Jolt/Skeleton/Skeleton.cpp
 //! Status: complete
 //!
-//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL (Skeleton, Skeleton::Joint):
-//! TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of Skeleton and
+//! Skeleton::Joint (SerializationArchitecture.md). The stream holds the names only. A joint read from a stream has
+//! parent joint index -1, like Jolt's: call calculateParentJointIndices.
 //!
 //! CharacterVehicleArchitecture E2: a RefTarget without virtual functions, like PhysicsScene. The skeleton keeps the
 //! allocator that owns it, its joint array and the joint names: `create(allocator)` is `new Skeleton` (reference count
@@ -22,6 +23,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../Core/RTTI.zig").RTTI;
 const ReferenceFile = @import("../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
 const RefCount = ReferenceFile.RefCount;
@@ -31,13 +33,26 @@ const StreamOut = @import("../Core/StreamOut.zig").StreamOut;
 
 /// Resource that contains the joint hierarchy for a skeleton
 pub const Skeleton = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Skeleton)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(Skeleton)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "Skeleton",
+        .kind = .non_virtual,
+        .attributes = &.{.attr("mJoints", .joints)},
+    });
 
     pub const SkeletonResult = Result(Ref(Skeleton));
 
     /// Declare internal structure for a joint
     pub const Joint = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, Joint)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(Skeleton::Joint)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "Skeleton::Joint",
+            .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mName", .name),
+                .attr("mParentName", .parent_name),
+            },
+        });
 
         /// Name of the joint (owned, allocated with the skeleton's allocator)
         name: []u8 = &.{},
@@ -84,6 +99,9 @@ pub const Skeleton = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new Skeleton (RTTI create)
+    pub const createDefault = create;
 
     /// Destructor: frees the joints and their names
     pub fn deinit(self: *Skeleton) void {

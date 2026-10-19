@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConeConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConeConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - `SetHalfConeAngle` asserts that the angle is in [0, pi] (user input): the assert only runs with
@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -36,10 +37,21 @@ const AngleConstraintPart = @import("ConstraintPart/AngleConstraintPart.zig").An
 
 /// Cone constraint settings, used to create a cone constraint
 pub const ConeConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, ConeConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConeConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "ConeConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPoint1", .point1),
+            .attr("mTwistAxis1", .twist_axis1),
+            .attr("mPoint2", .point2),
+            .attr("mTwistAxis2", .twist_axis2),
+            .attr("mHalfConeAngle", .half_cone_angle),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "ConeConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -421,7 +433,7 @@ test "ConeConstraintSettings: defaults, binary state, restoreFromBinaryState thr
     try testing.expect(settings.point1.eql(RVec3.zero()) and settings.point2.eql(RVec3.zero()));
     try testing.expect(settings.twist_axis1.eql(Vec3.axisX()) and settings.twist_axis2.eql(Vec3.axisX()));
     try testing.expectEqual(@as(f32, 0.0), settings.half_cone_angle);
-    try testing.expectEqualStrings("ConeConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("ConeConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // Non default values in every field
     settings.base.base.enabled = false;
@@ -442,11 +454,11 @@ test "ConeConstraintSettings: defaults, binary state, restoreFromBinaryState thr
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 2 * 3 * @sizeOf(Real) + 2 * 12 + 4), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("ConeConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("ConeConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, 0.75))), std.mem.readInt(u32, bytes[bytes.len - 4 ..][0..4], .little));
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

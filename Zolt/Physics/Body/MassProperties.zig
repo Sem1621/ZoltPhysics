@@ -7,8 +7,10 @@
 //! - `sGetEquivalentSolidBoxSize` is `getEquivalentSolidBoxSize`, `Scale(inScale)` is `scale(scale_value)`.
 //! - `operator ==` is `eql` (`!=` is `!a.eql(b)`).
 //! - Binary state: the mass (4 bytes) and the inertia tensor (a Mat44, 64 bytes), like Jolt.
+//! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti`.
 
 const std = @import("std");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const insertionSort = @import("../../Core/InsertionSort.zig").insertionSort;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -23,7 +25,15 @@ const Vector = @import("../../Math/Vector.zig").Vector;
 
 /// Describes the mass and inertia properties of a body. Used during body construction only.
 pub const MassProperties = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, MassProperties)
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(MassProperties)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "MassProperties",
+        .kind = .non_virtual,
+        .attributes = &.{
+            .attr("mMass", .mass),
+            .attr("mInertia", .inertia),
+        },
+    });
 
     /// Mass of the shape (kg)
     mass: f32 = 0.0,

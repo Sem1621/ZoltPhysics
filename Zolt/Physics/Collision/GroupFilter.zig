@@ -6,42 +6,48 @@
 //!
 //! - GroupFilter is abstract (`CanCollide` is pure virtual), so it keeps the bodies of its other virtual functions in
 //!   `impl`. A derived filter has a field `base: GroupFilter` and its constructor sets `.base = .init(@This(),
-//!   allocator)` (the protected base class constructor). It lists its `overrides` and declares `pub const rtti_name`
-//!   (JPH_RTTI). `new X(...)` is `X.create(allocator, ...)` (reference count 0, put it in a `Ref` / `RefConst`), the
-//!   last `release()` destroys it through the vtable. A filter on the stack or embedded in another object calls
-//!   `setEmbedded()` before references are taken and `deinit()` at the end.
-//! - SaveBinaryState writes Jolt's RTTI hash of the class name (`rtti_name` is a vtable data entry).
-//!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in the comptime list `group_filter_types`
-//!   (the Factory of Phase 8 replaces it). Restoring allocates, so it returns `Allocator.Error!GroupFilterResult`;
-//!   Jolt's errors ("Failed to read type hash", ...) are values in the result. A hash that is not in the list
-//!   (including the hash of the abstract GroupFilter itself, or of a registered class that is not a group filter, on
-//!   which Jolt dereferences a null pointer or reinterprets an unrelated object) gives "Failed to create instance of
-//!   type".
+//!   allocator)` (the protected base class constructor). It lists its `overrides` and declares `pub const rtti`
+//!   (JPH_RTTI, SerializationArchitecture.md S3). `new X(...)` is `X.create(allocator, ...)` (reference count 0, put
+//!   it in a `Ref` / `RefConst`), the last `release()` destroys it through the vtable. A filter on the stack or
+//!   embedded in another object calls `setEmbedded()` before references are taken and `deinit()` at the end.
+//! - SaveBinaryState writes Jolt's RTTI hash of the most derived class (the `rtti` vtable data entry).
+//!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in `RegisterTypes.factory`. Restoring
+//!   allocates, so it returns `Allocator.Error!GroupFilterResult`. Jolt's errors ("Failed to read type hash", ...) are
+//!   values in the result. An unknown hash, the hash of the abstract GroupFilter itself and the hash of a registered
+//!   class that is not a group filter (Jolt dereferences a null pointer or reinterprets an unrelated object) give
+//!   "Failed to create instance of type" (D8).
 //! - The copy constructor and copy assignment of the C++ base class (protected, they do not copy the reference
 //!   count) are part of the derived classes' copy functions, e.g. `GroupFilterTable.clone`.
-//! - The classes that restoreFromBinaryState can create come from RegisterTypes.zig (`RegisterTypes.group_filter_types`
-//!   = Jolt's GroupFilterTable plus the optional `group_filter_types` of the `zolt_user_types` module, D4), like the
-//!   material classes (D8). In Jolt an application registers its own GroupFilter classes with the Factory instead.
+//! - User group filter classes register through `serializable_types` of the `zolt_user_types` module (Jolt: the
+//!   Factory registration of the application).
+//! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT_BASE: `rtti`. It has the base
+//!   SerializableObject and no attributes, like Jolt's.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const HashCombine = @import("../../Core/HashCombine.zig");
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
+const SerializableObject = @import("../../ObjectStream/SerializableObject.zig").SerializableObject;
 const RefCount = @import("../../Core/Reference.zig").RefCount;
 const Ref = @import("../../Core/Reference.zig").Ref;
 const Result = @import("../../Core/Result.zig").Result;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
+const StreamUtils = @import("../../Core/StreamUtils.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const CollisionGroup = @import("CollisionGroup.zig").CollisionGroup;
-const RegisterTypes = @import("../../RegisterTypes.zig");
 
 /// Abstract class that checks if two CollisionGroups collide
 pub const GroupFilter = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, GroupFilter)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT_BASE(GroupFilter)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "GroupFilter",
+        .kind = .abstract,
+        .bases = &.{SerializableObject},
+    });
 
     pub const VTable = struct {
-        /// Class name of the most derived class (JPH_RTTI, data entry: every concrete class declares `rtti_name`)
-        rtti_name: []const u8,
+        /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
+        rtti: *const RTTI,
         /// Virtual destructor (generated destructor chain)
         deinit: *const fn (self: *GroupFilter) void,
         /// delete this (generated)
@@ -61,11 +67,6 @@ pub const GroupFilter = struct {
     allocator: Allocator,
 
     pub const GroupFilterResult = Result(Ref(GroupFilter));
-
-    /// Group filter classes that restoreFromBinaryState can create (Factory::sInstance until Phase 8). Each one declares
-    /// `rtti_name` and `createDefault(allocator) Allocator.Error!*T` (its default constructor on the heap).
-    /// Jolt's GroupFilterTable plus the user's (RegisterTypes.group_filter_types, see the file comment).
-    pub const group_filter_types = RegisterTypes.group_filter_types;
 
     /// Constructor (protected in Jolt), called by derived classes with their most derived type
     pub fn init(comptime T: type, allocator: Allocator) GroupFilter {
@@ -121,49 +122,13 @@ pub const GroupFilter = struct {
     }
 
     /// Creates a GroupFilter of the correct type and restores its contents from the binary stream inStream.
-    /// (StreamUtils::RestoreObject with the comptime type list `group_filter_types` instead of the Factory)
     pub fn restoreFromBinaryState(allocator: Allocator, stream: StreamIn) Allocator.Error!GroupFilterResult {
-        var result: GroupFilterResult = .empty;
-
-        // Read the hash of the type
-        var hash: u32 = 0;
-        stream.read(&hash);
-        if (stream.isEOF() or stream.isFailed()) {
-            result.setError("Failed to read type hash");
-            return result;
-        }
-
-        // Get the RTTI for the type
-        const object: *GroupFilter = inline for (group_filter_types) |T| {
-            if (hash == comptime rttiHash(T.rtti_name)) break virtual.upcast(GroupFilter, try T.createDefault(allocator));
-        } else {
-            result.setError("Failed to create instance of type");
-            return result;
-        };
-
-        // Construct and read the data of the type
-        var ref = Ref(GroupFilter).init(object);
-        defer ref.deinit();
-        try object.restoreBinaryState(stream);
-        if (stream.isEOF() or stream.isFailed()) {
-            result.setError("Failed to restore object");
-            return result;
-        }
-
-        result.set(ref.clone());
-        return result;
+        return StreamUtils.restoreObject(GroupFilter, allocator, stream, GroupFilter.restoreBinaryState);
     }
 
     /// GetRTTI()->GetHash() of the most derived class
     pub fn getRTTIHash(self: *const GroupFilter) u32 {
-        return rttiHash(self.vtable.rtti_name);
-    }
-
-    /// RTTI::GetHash: FNV-1a hash of the class name, folded from 64 to 32 bits
-    pub fn rttiHash(name: []const u8) u32 {
-        // Perform diffusion step to get from 64 to 32 bits (see https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
-        const hash = HashCombine.hashString(name);
-        return @truncate(hash ^ (hash >> 32));
+        return self.vtable.rtti.hash;
     }
 
     /// Implementations of the virtual functions in GroupFilter (CanCollide is pure virtual)
@@ -196,20 +161,26 @@ test "GroupFilter: a user group filter, the base class implementations" {
 
     // A user filter that only lets even group IDs collide, it keeps the base class SaveBinaryState
     const EvenFilter = struct {
+        /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(EvenFilter)
+        pub const rtti = RTTI.declare(@This(), .{ .name = "EvenFilter", .kind = .virtual, .bases = &.{GroupFilter} });
         pub const overrides = .{.canCollide};
-        pub const rtti_name = "EvenFilter";
 
         base: GroupFilter,
-        destructed: *u32,
+        destructed: ?*u32 = null,
 
-        fn create(a: Allocator, destructed: *u32) Allocator.Error!*@This() {
+        fn create(a: Allocator, destructed: ?*u32) Allocator.Error!*@This() {
             const self = try a.create(@This());
             self.* = .{ .base = .init(@This(), a), .destructed = destructed };
             return self;
         }
 
+        /// new EvenFilter (RTTI create)
+        pub fn createDefault(a: Allocator) Allocator.Error!*@This() {
+            return create(a, null);
+        }
+
         pub fn destruct(self: *@This()) void {
-            self.destructed.* += 1;
+            if (self.destructed) |d| d.* += 1;
         }
 
         pub fn canCollide(self: *const @This(), group1: *const CollisionGroup, group2: *const CollisionGroup) bool {
@@ -241,10 +212,10 @@ test "GroupFilter: a user group filter, the base class implementations" {
     var writer: std.Io.Writer = .fixed(&buffer);
     var out = StreamOutWrapper.init(&writer);
     filter.base.saveBinaryState(out.streamOut());
-    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&GroupFilter.rttiHash("EvenFilter")), writer.buffered());
-    try std.testing.expectEqual(GroupFilter.rttiHash("EvenFilter"), filter.base.getRTTIHash());
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&RTTI.hashName("EvenFilter")), writer.buffered());
+    try std.testing.expectEqual(RTTI.hashName("EvenFilter"), filter.base.getRTTIHash());
 
-    // The class is not in group_filter_types, so it cannot be restored
+    // The class is not in RegisterTypes.factory, so it cannot be restored
     var restored = try restoreFromBuffer(allocator, writer.buffered());
     defer restored.deinit();
     try std.testing.expectEqualStrings("Failed to create instance of type", restored.getError());
@@ -269,8 +240,8 @@ test "GroupFilter: CollisionGroup.canCollide passes the group with the filter fi
 
     // A user filter that is not symmetric, it records the order of the groups it gets
     const OrderFilter = struct {
+        pub const rtti = GroupFilter.rtti; // No JPH_RTTI of its own
         pub const overrides = .{.canCollide};
-        pub const rtti_name = "OrderFilter";
 
         base: GroupFilter,
         last_call: *[2]?*const CollisionGroup,
@@ -325,13 +296,13 @@ test "GroupFilter: restore errors" {
     var r3 = try restoreFromBuffer(allocator, &.{ 1, 2, 3, 4 });
     defer r3.deinit();
     try std.testing.expectEqualStrings("Failed to create instance of type", r3.getError());
-    const abstract_hash = GroupFilter.rttiHash("GroupFilter");
+    const abstract_hash = RTTI.hashName("GroupFilter");
     var r4 = try restoreFromBuffer(allocator, std.mem.asBytes(&abstract_hash));
     defer r4.deinit();
     try std.testing.expectEqualStrings("Failed to create instance of type", r4.getError());
 
     // Truncated data of a GroupFilterTable (the object is created, restoring hits EOF, nothing leaks)
-    const hash = GroupFilter.rttiHash("GroupFilterTable");
+    const hash = RTTI.hashName("GroupFilterTable");
     var r5 = try restoreFromBuffer(allocator, std.mem.asBytes(&hash));
     defer r5.deinit();
     try std.testing.expectEqualStrings("Failed to restore object", r5.getError());

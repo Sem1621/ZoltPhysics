@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -50,7 +51,16 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs a BoxShape
 pub const BoxShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, BoxShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(BoxShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "BoxShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mHalfExtent", .half_extent),
+            .attr("mConvexRadius", .convex_radius),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -63,6 +73,13 @@ pub const BoxShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) BoxShapeSettings {
         return .{ .base = .init(BoxShapeSettings, allocator, null) };
+    }
+
+    /// new BoxShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*BoxShapeSettings {
+        const self = try allocator.create(BoxShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a box with half edge length half_extent and convex radius convex_radius.

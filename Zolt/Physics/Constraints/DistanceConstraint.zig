@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
 //!
 //! - The const and non-const overloads of `GetLimitsSpringSettings` are `getLimitsSpringSettings` (`*const`) and
@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -40,10 +41,23 @@ const AxisConstraintPart = @import("ConstraintPart/AxisConstraintPart.zig").Axis
 
 /// Distance constraint settings, used to create a distance constraint
 pub const DistanceConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, DistanceConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "DistanceConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPoint1", .point1),
+            .attr("mPoint2", .point2),
+            .attr("mMinDistance", .min_distance),
+            .attr("mMaxDistance", .max_distance),
+            .enumAlias("mSpringMode", .{ .limits_spring_settings, .mode }),
+            .alias("mFrequency", .{ .limits_spring_settings, .frequency }), // Renaming attributes to stay compatible with old versions of the library
+            .alias("mDamping", .{ .limits_spring_settings, .damping }),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "DistanceConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -447,7 +461,7 @@ test "DistanceConstraintSettings: defaults, binary state, restoreFromBinaryState
     try testing.expectEqual(@as(f32, -1.0), settings.min_distance);
     try testing.expectEqual(@as(f32, -1.0), settings.max_distance);
     try testing.expectEqual(SpringSettings{}, settings.limits_spring_settings);
-    try testing.expectEqualStrings("DistanceConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("DistanceConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // Non default values in every field
     settings.base.base.enabled = false;
@@ -468,14 +482,14 @@ test "DistanceConstraintSettings: defaults, binary state, restoreFromBinaryState
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, 21 + 4 + 2 * 3 * @sizeOf(Real) + 2 * 4 + 1 + 2 * 4), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("DistanceConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("DistanceConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     const after_points = 25 + 2 * 3 * @sizeOf(Real);
     try testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(bytes[after_points..][0..4].*)));
     try testing.expectEqual(@as(f32, 2.5), @as(f32, @bitCast(bytes[after_points + 4 ..][0..4].*)));
     try testing.expectEqual(@as(u8, 1), bytes[after_points + 8]); // StiffnessAndDamping
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

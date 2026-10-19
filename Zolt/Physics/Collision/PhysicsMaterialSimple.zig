@@ -17,7 +17,7 @@
 //! ```zig
 //! const MyMaterial = struct {
 //!     pub const overrides = .{};
-//!     pub const rtti_name = PhysicsMaterialSimple.rtti_name; // No JPH_RTTI of its own
+//!     pub const rtti = PhysicsMaterialSimple.rtti; // No JPH_RTTI of its own (SerializationArchitecture.md S3)
 //!     base: PhysicsMaterialSimple,
 //!     friction: f32,
 //!     restitution: f32,
@@ -25,9 +25,13 @@
 //! const m = try allocator.create(MyMaterial);
 //! m.* = .{ .base = try .initDerived(MyMaterial, allocator, "Slippery", Color.red), .friction = 0.1, .restitution = 0 };
 //! ```
+//!
+//! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL: `rtti`. An object stream creates the
+//! material with `createDefault` and reads the name with the stream's allocator (the material's allocator).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Color = @import("../../Core/Color.zig").Color;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
@@ -35,12 +39,18 @@ const PhysicsMaterial = @import("PhysicsMaterial.zig").PhysicsMaterial;
 
 /// Sample implementation of PhysicsMaterial that just holds the needed properties directly
 pub const PhysicsMaterialSimple = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, PhysicsMaterialSimple)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PhysicsMaterialSimple)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "PhysicsMaterialSimple",
+        .kind = .virtual,
+        .bases = &.{PhysicsMaterial},
+        .attributes = &.{
+            .attr("mDebugName", .debug_name),
+            .attr("mDebugColor", .debug_color),
+        },
+    });
 
     pub const overrides = .{ .getDebugName, .getDebugColor, .saveBinaryState, .restoreBinaryState };
-
-    /// Name of the class for Jolt's RTTI hash (JPH_RTTI)
-    pub const rtti_name = "PhysicsMaterialSimple";
 
     base: PhysicsMaterial,
     /// Name of the material, used for debugging purposes (owned by base.allocator unless the material is static)
@@ -62,7 +72,7 @@ pub const PhysicsMaterialSimple = struct {
         return .{ .base = .init(T, allocator) };
     }
 
-    /// new PhysicsMaterialSimple() (used by PhysicsMaterial.restoreFromBinaryState)
+    /// new PhysicsMaterialSimple() (RTTI create, used by PhysicsMaterial.restoreFromBinaryState)
     pub fn createDefault(allocator: Allocator) Allocator.Error!*PhysicsMaterialSimple {
         const self = try allocator.create(PhysicsMaterialSimple);
         self.* = .initDefault(allocator);
@@ -156,7 +166,7 @@ test "PhysicsMaterialSimple: owned name, binary state" {
     defer ice_ref.deinit();
     try std.testing.expectEqualStrings("Ice", ice.material().getDebugName());
     try expect(ice.material().getDebugColor().eql(Color.cyan));
-    try std.testing.expectEqual(PhysicsMaterial.rttiHash("PhysicsMaterialSimple"), ice.material().getRTTIHash());
+    try std.testing.expectEqual(RTTI.hashName("PhysicsMaterialSimple"), ice.material().getRTTIHash());
 
     // Binary state: Jolt's RTTI hash, then the name and the color
     var buffer: [256]u8 = undefined;
@@ -216,7 +226,7 @@ test "PhysicsMaterialSimple: derived material" {
     // Jolt's FrictionPerTriangleTest::MyMaterial: adds data, overrides nothing and has no JPH_RTTI of its own
     const MyMaterial = struct {
         pub const overrides = .{};
-        pub const rtti_name = PhysicsMaterialSimple.rtti_name;
+        pub const rtti = PhysicsMaterialSimple.rtti;
 
         base: PhysicsMaterialSimple,
         friction: f32,
@@ -238,15 +248,16 @@ test "PhysicsMaterialSimple: derived material" {
     try expect(slippery.base.base.vtable == PhysicsMaterial.vtableFor(MyMaterial));
     try std.testing.expectEqualStrings("Slippery", slippery_ref.get().?.getDebugName());
     try expect(slippery_ref.get().?.getDebugColor().eql(Color.red));
-    try std.testing.expectEqual(PhysicsMaterial.rttiHash("PhysicsMaterialSimple"), slippery_ref.get().?.getRTTIHash());
+    try std.testing.expectEqual(RTTI.hashName("PhysicsMaterialSimple"), slippery_ref.get().?.getRTTIHash());
     const my_material: *const MyMaterial = virtual.downcast(MyMaterial, slippery_ref.get().?);
     try std.testing.expectEqual(@as(f32, 0.1), my_material.friction);
     try std.testing.expectEqual(@as(f32, 0.25), my_material.restitution);
 
-    // A derived class with overrides and a destructor of its own: both destructors run, derived first
+    // A derived class with overrides and a destructor of its own: both destructors run, derived first. It has no
+    // JPH_RTTI of its own either.
     const Tinted = struct {
         pub const overrides = .{.getDebugColor};
-        pub const rtti_name = "Tinted";
+        pub const rtti = PhysicsMaterialSimple.rtti;
 
         base: PhysicsMaterialSimple,
         tag: []u8,
@@ -269,7 +280,7 @@ test "PhysicsMaterialSimple: derived material" {
     var tinted_ref = RefConst(PhysicsMaterial).init(&tinted.base.base);
     try std.testing.expectEqualStrings("Tinted", tinted_ref.get().?.getDebugName());
     try expect(tinted_ref.get().?.getDebugColor().eql(Color.green));
-    try std.testing.expectEqual(PhysicsMaterial.rttiHash("Tinted"), tinted_ref.get().?.getRTTIHash());
+    try std.testing.expect(tinted_ref.get().?.vtable.rtti == PhysicsMaterialSimple.rtti);
     tinted_ref.deinit();
     try std.testing.expectEqual(@as(u32, 1), destructed);
 

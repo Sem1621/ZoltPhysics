@@ -35,6 +35,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const Core = @import("../../../Core/Core.zig");
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
@@ -83,7 +84,18 @@ const Registry = @import("../CollisionDispatch.zig").Registry;
 
 /// Class that constructs a ConvexHullShape
 pub const ConvexHullShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, ConvexHullShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConvexHullShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "ConvexHullShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mPoints", .points),
+            .attr("mMaxConvexRadius", .max_convex_radius),
+            .attr("mMaxErrorConvexRadius", .max_error_convex_radius),
+            .attr("mHullTolerance", .hull_tolerance),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -102,6 +114,13 @@ pub const ConvexHullShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) ConvexHullShapeSettings {
         return .{ .base = .init(ConvexHullShapeSettings, allocator, null) };
+    }
+
+    /// new ConvexHullShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*ConvexHullShapeSettings {
+        const self = try allocator.create(ConvexHullShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a convex hull from points and maximum convex radius max_convex_radius, the radius is automatically lowered if the hull requires it.

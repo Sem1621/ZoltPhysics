@@ -1,18 +1,17 @@
 //! Port of: Jolt/Physics/Vehicle/Wheel.h, Jolt/Physics/Vehicle/Wheel.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettings): TODO(serialization)
-//!   (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported). The Factory registration of
-//!   WheelSettingsWV / WheelSettingsTV is Phase 8 too (E3).
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettings): `rtti` with Jolt's
+//!   attributes. Jolt adds no base class, so WheelSettings is not kind of SerializableObject (SerializationArchitecture.md
+//!   S15).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettings` is a concrete pattern A root with `ref_count` (RefTarget<WheelSettings>): its virtual functions
 //!     `saveBinaryState` / `restoreBinaryState` keep their bodies in `impl` (so that WheelSettings itself can be created,
 //!     `create(allocator)` is `new WheelSettings`), derived classes (WheelSettingsWV, WheelSettingsTV, user classes)
 //!     embed it as `base` and list their `overrides`. `restoreBinaryState` uses the allocator of the root (the derived
 //!     classes restore LinearCurves).
-//!   - `WheelSettings.RTTI` is the part of JPH_RTTI that `IsKindOf` needs: the class name and the base class (Jolt's
-//!     `JPH_ADD_BASE_CLASS`). Every concrete class declares `pub const rtti: *const WheelSettings.RTTI`, a vtable data
-//!     entry. `isKindOf(T)` / `cast(T)` are Jolt's `IsKindOf(&settings, JPH_RTTI(T))` and the checked static cast.
+//!   - Every concrete class declares `pub const rtti` (JPH_RTTI, the `rtti` vtable data entry, SerializationArchitecture.md
+//!     S3). `isKindOf(T)` / `cast(T)` are Jolt's `IsKindOf(&settings, JPH_RTTI(T))` and the checked static cast.
 //!   - `Wheel` is a pattern A root without `ref_count`: VehicleConstraint owns its wheels (`delete w` is
 //!     `w.destroy()`, the generated `destroy` frees the most derived wheel with the allocator of the root). Its only
 //!     virtual function is the destructor, so `Wheel.VTable` has the generated entries only. WheelWV / WheelTV embed it
@@ -28,6 +27,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const ReferenceFile = @import("../../Core/Reference.zig");
@@ -48,27 +48,32 @@ const VehicleConstraint = @import("VehicleConstraint.zig").VehicleConstraint;
 
 /// Base class for wheel settings, each VehicleController can implement a derived class of this
 pub const WheelSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, WheelSettings)
-
-    /// The part of JPH_RTTI that IsKindOf needs: the class name and its base class (JPH_ADD_BASE_CLASS)
-    pub const RTTI = struct {
-        /// Name of the class
-        name: []const u8,
-        /// RTTI of the base class (null for WheelSettings)
-        base: ?*const RTTI = null,
-
-        /// True when this class is `other` or derives from it
-        pub fn isKindOf(self: *const RTTI, other: *const RTTI) bool {
-            var r: ?*const RTTI = self;
-            while (r) |x| : (r = x.base)
-                if (std.mem.eql(u8, x.name, other.name)) return true;
-            return false;
-        }
-    };
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "WheelSettings",
+        .kind = .virtual,
+        .attributes = &.{
+            .attr("mSuspensionForcePoint", .suspension_force_point),
+            .attr("mPosition", .position),
+            .attr("mSuspensionDirection", .suspension_direction),
+            .attr("mSteeringAxis", .steering_axis),
+            .attr("mWheelForward", .wheel_forward),
+            .attr("mWheelUp", .wheel_up),
+            .attr("mSuspensionMinLength", .suspension_min_length),
+            .attr("mSuspensionMaxLength", .suspension_max_length),
+            .attr("mSuspensionPreloadLength", .suspension_preload_length),
+            .enumAlias("mSuspensionSpringMode", .{ .suspension_spring, .mode }),
+            .alias("mSuspensionFrequency", .{ .suspension_spring, .frequency }), // Renaming attributes to stay compatible with old versions of the library
+            .alias("mSuspensionDamping", .{ .suspension_spring, .damping }),
+            .attr("mRadius", .radius),
+            .attr("mWidth", .width),
+            .attr("mEnableSuspensionForcePoint", .enable_suspension_force_point),
+        },
+    });
 
     /// One entry per C++ virtual function, in declaration order
     pub const VTable = struct {
-        /// JPH_RTTI of the most derived class (data entry: every concrete class declares `pub const rtti`)
+        /// GetRTTI(): JPH_RTTI of the most derived class (a data entry: every concrete class declares `rtti`)
         rtti: *const RTTI,
         /// Virtual destructor (generated destructor chain)
         deinit: *const fn (self: *WheelSettings) void,
@@ -81,9 +86,6 @@ pub const WheelSettings = struct {
         /// Restores the contents in binary form to inStream.
         restoreBinaryState: *const fn (self: *WheelSettings, stream: StreamIn) Allocator.Error!void,
     };
-
-    /// JPH_RTTI(WheelSettings)
-    pub const rtti: *const RTTI = &.{ .name = "WheelSettings" };
 
     vtable: *const VTable,
     /// Reference count (RefTarget<WheelSettings>)
@@ -130,6 +132,9 @@ pub const WheelSettings = struct {
         return self;
     }
 
+    /// new WheelSettings (RTTI create)
+    pub const createDefault = create;
+
     /// The vtable of wheel settings class T
     pub fn vtableFor(comptime T: type) *const VTable {
         return virtual.vtablePtr(VTable, T);
@@ -165,7 +170,7 @@ pub const WheelSettings = struct {
 
     /// IsKindOf(this, JPH_RTTI(T)): true when these settings are a T or a class derived from T
     pub fn isKindOf(self: *const WheelSettings, comptime T: type) bool {
-        return self.vtable.rtti.isKindOf(T.rtti);
+        return self.vtable.rtti.isKindOf(RTTI.of(T));
     }
 
     /// Checked downcast (IsKindOf + static_cast<const T *>): asserts the dynamic type in safe builds
@@ -446,18 +451,22 @@ const testing = std.testing;
 /// A wheel settings class derived from WheelSettings with a member and its own binary state (tests the virtual calls,
 /// the destructor chain and IsKindOf)
 const TestWheelSettings = struct {
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TestWheelSettings)
+    pub const rtti = RTTI.declare(@This(), .{ .name = "TestWheelSettings", .kind = .virtual, .bases = &.{WheelSettings} });
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
-    pub const rtti: *const WheelSettings.RTTI = &.{ .name = "TestWheelSettings", .base = WheelSettings.rtti };
 
     base: WheelSettings,
     extra: f32 = 2.0,
     destructed: ?*bool = null,
 
-    fn create(allocator: Allocator) !*TestWheelSettings {
+    fn create(allocator: Allocator) Allocator.Error!*TestWheelSettings {
         const self = try allocator.create(TestWheelSettings);
         self.* = .{ .base = .init(TestWheelSettings, allocator) };
         return self;
     }
+
+    /// new TestWheelSettings (RTTI create)
+    pub const createDefault = create;
 
     pub fn destruct(self: *TestWheelSettings) void {
         if (self.destructed) |d| d.* = true;

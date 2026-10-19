@@ -1,12 +1,13 @@
 //! Port of: Jolt/Physics/Vehicle/VehicleConstraint.h, Jolt/Physics/Vehicle/VehicleConstraint.cpp
 //! Status: complete
 //!
-//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings):
-//!   TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is ported).
+//! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings): `rtti` with
+//!   Jolt's attributes. The binary state does not write the class of each wheel (E6). An object stream does, so it reads
+//!   settings with wheels back.
 //! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2 and the porter template of FixedConstraint.zig:
-//!   - `VehicleConstraintSettings` embeds `base: ConstraintSettings` (rtti_name, overrides, `create` / `createDefault`
-//!     for `RegisterTypes.constraint_settings_types`, E3). Its wheels are `Ref(WheelSettings)`, its controller a
+//!   - `VehicleConstraintSettings` embeds `base: ConstraintSettings` (`rtti`, overrides, `create` / `createDefault`
+//!     for `RegisterTypes.factory`, E3). Its wheels are `Ref(WheelSettings)`, its controller a
 //!     `Ref(VehicleControllerSettings)`; `destruct` releases them.
 //!   - `VehicleConstraint` is a pattern A level directly under `Constraint` (Jolt: `Constraint, PhysicsStepListener`): it
 //!     adds no virtual functions and lists its Constraint overrides. Jolt's public PhysicsStepListener base is
@@ -40,13 +41,14 @@
 //!   resizes `mWheels` with null `Ref`s and calls `RestoreBinaryState` on them, so every restore of settings with wheels
 //!   dereferences a null pointer (the stream does not say whether a wheel is a WheelSettingsWV or WheelSettingsTV). Zolt
 //!   panics there with a message. The same for a controller hash that is not a registered class
-//!   (`Factory::sInstance->Find(hash)` returns null, Jolt dereferences it; a class that is still a Zolt stub, `is_stub`,
-//!   counts as unknown): Zolt panics with a message. Settings without wheels restore and compare (parity).
+//!   (`Factory::sInstance->Find(hash)` returns null, Jolt dereferences it) and for a registered class that cannot be
+//!   created or is not a VehicleControllerSettings (Jolt's reinterpret_cast is undefined): Zolt panics with a message. Settings without wheels restore and compare (parity).
 //! - Where Jolt dereferences a null pointer that the user did not set (no controller settings, a null wheel settings
 //!   Ref, OnStep without a collision tester) Zolt panics with a message.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const HashCombine = @import("../../Core/HashCombine.zig");
@@ -98,10 +100,21 @@ const RegisterTypes = @import("../../RegisterTypes.zig");
 /// The properties in this constraint are largely based on "Car Physics for Games" by Marco Monster.
 /// See: https://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html
 pub const VehicleConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, VehicleConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "VehicleConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{ConstraintSettings},
+        .attributes = &.{
+            .attr("mUp", .up),
+            .attr("mForward", .forward),
+            .attr("mMaxPitchRollAngle", .max_pitch_roll_angle),
+            .attr("mWheels", .wheels),
+            .attr("mAntiRollBars", .anti_roll_bars),
+            .attr("mController", .controller),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "VehicleConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 
     base: ConstraintSettings,
@@ -242,10 +255,12 @@ pub const VehicleConstraintSettings = struct {
 
         var hash: u32 = 0;
         stream.read(&hash);
-        const controller: *VehicleControllerSettings = inline for (RegisterTypes.vehicle_controller_settings_types) |T| {
-            if (comptime @hasDecl(T, "is_stub")) continue;
-            if (hash == comptime VehicleControllerSettings.rttiHash(T.rtti_name)) break virtual.upcast(VehicleControllerSettings, try T.createDefault(allocator));
-        } else @panic("VehicleConstraintSettings.restoreBinaryState: unknown controller settings hash (Jolt dereferences the null RTTI that Factory::Find returns)");
+        const controller_rtti = RegisterTypes.factory.findHash(hash) orelse
+            @panic("VehicleConstraintSettings.restoreBinaryState: unknown controller settings hash (Jolt dereferences the null RTTI that Factory::Find returns)");
+        if (controller_rtti.isAbstract() or !controller_rtti.isKindOf(VehicleControllerSettings.rtti))
+            @panic("VehicleConstraintSettings.restoreBinaryState: the hash is not a controller settings class (Jolt's reinterpret_cast is undefined)");
+        const created = (try controller_rtti.createObject(allocator)).?;
+        const controller: *VehicleControllerSettings = @ptrCast(@alignCast(controller_rtti.castTo(created, VehicleControllerSettings.rtti).?));
         self.controller.set(controller);
         try controller.restoreBinaryState(stream);
     }
@@ -1270,7 +1285,7 @@ test "VehicleConstraintSettings defaults, copies and binary state without wheels
     try testing.expect(settings.forward.eql(Vec3.init(0, 0, 1)));
     try testing.expectEqual(math.pi, settings.max_pitch_roll_angle);
     try testing.expect(settings.wheels.items.len == 0 and settings.anti_roll_bars.items.len == 0 and settings.controller.ptr == null);
-    try testing.expectEqual(ConstraintSettings.rttiHash("VehicleConstraintSettings"), settings.asSettings().getRTTIHash());
+    try testing.expectEqual(RTTI.hashName("VehicleConstraintSettings"), settings.asSettings().getRTTIHash());
 
     const wheel = try WheeledVehicleControllerFile.WheelSettingsWV.create(allocator);
     try settings.addWheel(&wheel.base);
@@ -1323,13 +1338,13 @@ test "VehicleConstraintSettings defaults, copies and binary state without wheels
             var in_wrapper: StreamWrapper.StreamInWrapper = .init(&reader);
             var hash: u32 = 0;
             in_wrapper.streamIn().read(&hash); // Read by sRestoreFromBinaryState
-            try testing.expectEqual(ConstraintSettings.rttiHash("VehicleConstraintSettings"), hash);
+            try testing.expectEqual(RTTI.hashName("VehicleConstraintSettings"), hash);
             try restored.restoreBinaryState(in_wrapper.streamIn());
             try testing.expect(!in_wrapper.isEOF() and !in_wrapper.isFailed());
             try testing.expectEqual(@as(f32, 1.0), restored.max_pitch_roll_angle);
             try testing.expectEqual(@as(usize, 1), restored.anti_roll_bars.items.len);
             try testing.expectEqual(@as(i32, 3), restored.anti_roll_bars.items[0].right_wheel);
-            try testing.expectEqual(VehicleControllerSettings.rttiHash("WheeledVehicleControllerSettings"), restored.controller.ptr.?.getRTTIHash());
+            try testing.expectEqual(RTTI.hashName("WheeledVehicleControllerSettings"), restored.controller.ptr.?.getRTTIHash());
 
             // Saved again: the same bytes
             var again: std.Io.Writer.Allocating = .init(a);

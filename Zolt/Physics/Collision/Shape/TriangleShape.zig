@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -69,7 +70,18 @@ const Registry = CollisionDispatch.Registry;
 
 /// Class that constructs a TriangleShape
 pub const TriangleShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, TriangleShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TriangleShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "TriangleShapeSettings",
+        .kind = .virtual,
+        .bases = &.{ConvexShapeSettings},
+        .attributes = &.{
+            .attr("mV1", .v1),
+            .attr("mV2", .v2),
+            .attr("mV3", .v3),
+            .attr("mConvexRadius", .convex_radius),
+        },
+    });
 
     /// The virtual functions this class overrides (C++ `override`)
     pub const overrides = .{.createShape};
@@ -83,6 +95,13 @@ pub const TriangleShapeSettings = struct {
     /// Default constructor for deserialization
     pub fn initDefault(allocator: Allocator) TriangleShapeSettings {
         return .{ .base = .init(TriangleShapeSettings, allocator, null) };
+    }
+
+    /// new TriangleShapeSettings (RTTI create): reference count 0, the last release() destroys it
+    pub fn createDefault(allocator: Allocator) Allocator.Error!*TriangleShapeSettings {
+        const self = try allocator.create(TriangleShapeSettings);
+        self.* = .initDefault(allocator);
+        return self;
     }
 
     /// Create a triangle with points (v1, v2, v3) (counter clockwise) and convex radius convex_radius.

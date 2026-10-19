@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const ReferenceFile = @import("../../../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
@@ -37,7 +38,13 @@ const PhysicsMaterial = @import("../PhysicsMaterial.zig").PhysicsMaterial;
 
 /// Class that constructs a DecoratedShape
 pub const DecoratedShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, DecoratedShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(DecoratedShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "DecoratedShapeSettings",
+        .kind = .abstract,
+        .bases = &.{ShapeSettings},
+        .attributes = &.{.attr("mInnerShape", .inner_shape)}, // Ref(ShapeSettings): `instance ShapeSettings`, like Jolt's RefConst
+    });
 
     base: ShapeSettings,
 
@@ -245,6 +252,7 @@ const TestMaterial = TestShapes.TestMaterial;
 
 /// Settings of TestDecoratedShape (a concrete class derived from DecoratedShapeSettings)
 const TestDecoratedShapeSettings = struct {
+    pub const rtti = DecoratedShapeSettings.rtti; // No JPH_RTTI of its own
     pub const overrides = .{.createShape};
 
     base: DecoratedShapeSettings,

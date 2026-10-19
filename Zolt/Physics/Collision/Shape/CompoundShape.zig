@@ -14,6 +14,9 @@
 //!   child writes its cache, Rule M) and its sub shape array is allocated with the settings' allocator
 //!   (`base.allocator`), so `addShape` / `addShapePtr` return `Allocator.Error`.
 //! - D11: the binary state reads the sub shape array, so restoreBinaryState returns `Allocator.Error!void`.
+//! - The object stream sees `mShape` (a `Ref(ShapeSettings)`) as `instance ShapeSettings`, like Jolt's RefConst.
+//!   `mPosition` and `mRotation` of SubShapeSettings are uninitialized in Jolt. They are zero here
+//!   (SerializationArchitecture.md D9).
 //! - The visitors of CompoundShapeVisitors.h (protected nested structs in Jolt) are in CompoundShapeVisitors.zig and
 //!   re-exported here (`CompoundShape.CastRayVisitor`, ...).
 //!
@@ -38,6 +41,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const ReferenceFile = @import("../../../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
@@ -83,20 +87,36 @@ const Visitors = @import("CompoundShapeVisitors.zig");
 
 /// Base class settings to construct a compound shape
 pub const CompoundShapeSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_ABSTRACT(JPH_EXPORT, CompoundShapeSettings)
+    /// JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(CompoundShapeSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "CompoundShapeSettings",
+        .kind = .abstract,
+        .bases = &.{ShapeSettings},
+        .attributes = &.{.attr("mSubShapes", .sub_shapes)},
+    });
 
     pub const SubShapeSettings = struct {
-        // TODO(serialization): JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL(JPH_EXPORT, SubShapeSettings)
+        /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(CompoundShapeSettings::SubShapeSettings)
+        pub const rtti = RTTI.declare(@This(), .{
+            .name = "CompoundShapeSettings::SubShapeSettings",
+            .kind = .non_virtual,
+            .attributes = &.{
+                .attr("mShape", .shape), // Ref(ShapeSettings): `instance ShapeSettings`, like Jolt's RefConst
+                .attr("mPosition", .position),
+                .attr("mRotation", .rotation),
+                .attr("mUserData", .user_data),
+            },
+        });
 
         /// Sub shape (either this or shape_ptr needs to be filled up). Jolt: RefConst<ShapeSettings>, a Ref here
         /// because creating the child writes its cache (Rule M).
         shape: Ref(ShapeSettings) = .empty,
         /// Sub shape (either this or shape needs to be filled up)
         shape_ptr: RefConst(Shape) = .empty,
-        /// Position of the sub shape (uninitialized in Jolt)
+        /// Position of the sub shape (uninitialized in Jolt, zero here: SerializationArchitecture.md D9)
         position: Vec3 = Vec3.zero(),
-        /// Rotation of the sub shape (uninitialized in Jolt)
-        rotation: Quat = Quat.identity(),
+        /// Rotation of the sub shape (uninitialized in Jolt, zero here: SerializationArchitecture.md D9)
+        rotation: Quat = Quat.zero(),
 
         /// User data value (can be used by the application for any purpose).
         /// Note this value can be retrieved through GetSubShape(...).user_data, not through GetSubShapeUserData(...) as that returns Shape::GetUserData() of the leaf shape.
@@ -831,6 +851,7 @@ const TestMaterial = TestShapes.TestMaterial;
 
 /// Settings of LinearCompoundShape (a concrete class derived from CompoundShapeSettings)
 const LinearCompoundShapeSettings = struct {
+    pub const rtti = CompoundShapeSettings.rtti; // No JPH_RTTI of its own
     pub const overrides = .{.createShape};
 
     base: CompoundShapeSettings,

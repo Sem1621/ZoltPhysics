@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
-//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SwingTwistConstraintSettings): TODO(serialization) (the binary state is ported).
+//! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SwingTwistConstraintSettings): `rtti` with Jolt's attributes.
 //! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
 //!
 //! - The non-const overloads `MotorSettings &GetSwingMotorSettings()` / `GetTwistMotorSettings()` are
@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -54,10 +55,30 @@ const SwingType = SwingTwistConstraintPartFile.SwingType;
 /// This image describes the limit settings:
 /// @image html Docs/SwingTwistConstraint.png
 pub const SwingTwistConstraintSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, SwingTwistConstraintSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SwingTwistConstraintSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "SwingTwistConstraintSettings",
+        .kind = .virtual,
+        .bases = &.{TwoBodyConstraintSettings},
+        .attributes = &.{
+            .enumAttr("mSpace", .space),
+            .attr("mPosition1", .position1),
+            .attr("mTwistAxis1", .twist_axis1),
+            .attr("mPlaneAxis1", .plane_axis1),
+            .attr("mPosition2", .position2),
+            .attr("mTwistAxis2", .twist_axis2),
+            .attr("mPlaneAxis2", .plane_axis2),
+            .enumAttr("mSwingType", .swing_type),
+            .attr("mNormalHalfConeAngle", .normal_half_cone_angle),
+            .attr("mPlaneHalfConeAngle", .plane_half_cone_angle),
+            .attr("mTwistMinAngle", .twist_min_angle),
+            .attr("mTwistMaxAngle", .twist_max_angle),
+            .attr("mMaxFrictionTorque", .max_friction_torque),
+            .attr("mSwingMotorSettings", .swing_motor_settings),
+            .attr("mTwistMotorSettings", .twist_motor_settings),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "SwingTwistConstraintSettings";
     pub const overrides = .{ .saveBinaryState, .createConstraint, .restoreBinaryState };
 
     base: TwoBodyConstraintSettings,
@@ -863,7 +884,7 @@ test "SwingTwistConstraintSettings: defaults, binary state, restoreFromBinarySta
     const default_motor: MotorSettings = .{};
     try testing.expectEqual(default_motor, settings.swing_motor_settings);
     try testing.expectEqual(default_motor, settings.twist_motor_settings);
-    try testing.expectEqualStrings("SwingTwistConstraintSettings", settings.asSettings().vtable.rtti_name);
+    try testing.expectEqualStrings("SwingTwistConstraintSettings", settings.asSettings().vtable.rtti.name);
 
     // Non default values in every field
     settings.base.base.enabled = false;
@@ -892,13 +913,13 @@ test "SwingTwistConstraintSettings: defaults, binary state, restoreFromBinarySta
     const bytes = try testSaveSettings(allocator, settings.asSettingsConst());
     defer allocator.free(bytes);
     try testing.expectEqual(@as(usize, settings_size), bytes.len);
-    try testing.expectEqual(ConstraintSettings.rttiHash("SwingTwistConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
+    try testing.expectEqual(RTTI.hashName("SwingTwistConstraintSettings"), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(@as(i32, 0), std.mem.readInt(i32, bytes[21..25], .little)); // LocalToBodyCOM
     try testing.expectEqual(@as(u8, 1), bytes[swing_type_offset]); // ESwingType::Pyramid
     try testing.expectEqual(@as(u32, @bitCast(@as(f32, 12.0))), std.mem.readInt(u32, bytes[swing_type_offset + 17 ..][0..4], .little));
     try testing.expectEqual(@as(u8, 1), bytes[swing_type_offset + 21]); // The spring mode of the swing motor
 
-    // Restore through RegisterTypes.constraint_settings_types
+    // Restore through RegisterTypes.factory
     {
         var result = try testRestoreSettings(allocator, bytes);
         defer result.deinit();

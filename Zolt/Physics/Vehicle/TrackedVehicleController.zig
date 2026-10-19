@@ -2,12 +2,13 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TrackedVehicleControllerSettings,
-//!   WheelSettingsTV): TODO(serialization) (ObjectStream is Phase 8, CharacterVehicleArchitecture E1; the binary state is
-//!   ported). JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`): TODO(debug_renderer).
+//!   WheelSettingsTV): `rtti` with Jolt's attributes. `mTracks` is the C array `[2]VehicleTrackSettings`: a stream must
+//!   have exactly 2 tracks. JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`):
+//!   TODO(debug_renderer).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsTV` embeds `base: WheelSettings` and overrides its binary state; `WheelTV` embeds `base: Wheel`.
-//!   - `TrackedVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti_name`, the settings class of
-//!     `RegisterTypes.vehicle_controller_settings_types`, E3); `TrackedVehicleController` embeds `base:
+//!   - `TrackedVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti`, a class of
+//!     `RegisterTypes.factory`, E3); `TrackedVehicleController` embeds `base:
 //!     VehicleController`. Both are concrete classes that a user class may derive from (`initDerived(T, ...)`).
 //!   - `ConstructWheel`'s `JPH_ASSERT(IsKindOf(&inWheel, JPH_RTTI(WheelSettingsTV)))` + static_cast is the checked
 //!     `wheel.cast(WheelSettingsTV)`.
@@ -30,6 +31,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
@@ -63,12 +65,17 @@ const num_tracks = @intFromEnum(TrackSide.num);
 
 /// WheelSettings object specifically for TrackedVehicleController
 pub const WheelSettingsTV = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, WheelSettingsTV)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(WheelSettingsTV)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "WheelSettingsTV",
+        .kind = .virtual,
+        .bases = &.{WheelSettings},
+        .attributes = &.{
+            .attr("mLongitudinalFriction", .longitudinal_friction),
+            .attr("mLateralFriction", .lateral_friction),
+        },
+    });
 
-    /// JPH_RTTI(WheelSettingsTV)
-    pub const rtti: *const WheelSettings.RTTI = &.{ .name = rtti_name, .base = WheelSettings.rtti };
-    /// Class name (JPH_RTTI)
-    pub const rtti_name = "WheelSettingsTV";
     pub const overrides = .{ .saveBinaryState, .restoreBinaryState };
 
     base: WheelSettings,
@@ -94,6 +101,9 @@ pub const WheelSettingsTV = struct {
         self.* = .init(allocator);
         return self;
     }
+
+    /// new WheelSettingsTV (RTTI create)
+    pub const createDefault = create;
 
     /// Upcasts (implicit in C++)
     pub fn asWheelSettings(self: *WheelSettingsTV) *WheelSettings {
@@ -197,10 +207,18 @@ pub const WheelTV = struct {
 /// Default settings are based around what I could find about the M1 Abrams tank.
 /// Note to avoid issues with very heavy objects vs very light objects the mass of the tank should be a lot lower (say 10x) than that of a real tank. That means that the engine/brake torque is also 10x less.
 pub const TrackedVehicleControllerSettings = struct {
-    // TODO(serialization): JPH_DECLARE_SERIALIZABLE_VIRTUAL(JPH_EXPORT, TrackedVehicleControllerSettings)
+    /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TrackedVehicleControllerSettings)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "TrackedVehicleControllerSettings",
+        .kind = .virtual,
+        .bases = &.{VehicleControllerSettings},
+        .attributes = &.{
+            .attr("mEngine", .engine),
+            .attr("mTransmission", .transmission),
+            .attr("mTracks", .tracks),
+        },
+    });
 
-    /// Class name for the RTTI hash of the binary state (JPH_RTTI)
-    pub const rtti_name = "TrackedVehicleControllerSettings";
     pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
 
     base: VehicleControllerSettings,
@@ -1020,7 +1038,7 @@ test "TrackedVehicleControllerSettings defaults, RTTI hash and binary state" {
         try testing.expectEqual(@as(usize, 0), t.wheels.items.len);
         try testing.expectEqual(@as(f32, 10.0), t.inertia);
     }
-    try testing.expectEqual(VehicleControllerSettings.rttiHash("TrackedVehicleControllerSettings"), settings.base.getRTTIHash());
+    try testing.expectEqual(RTTI.hashName("TrackedVehicleControllerSettings"), settings.base.getRTTIHash());
     try testing.expect(settings.asControllerSettingsConst() == &settings.base);
 
     // The binary state (through the base class): the engine, the transmission and the two tracks
@@ -1087,7 +1105,7 @@ test "TrackedVehicleControllerSettings restored by VehicleConstraintSettings fro
     try testing.expect(!result.hasError());
     const restored = virtual.downcast(VehicleConstraintSettings, result.get().get().?);
     const restored_controller = restored.controller.ptr.?;
-    try testing.expectEqualStrings("TrackedVehicleControllerSettings", restored_controller.vtable.rtti_name);
+    try testing.expectEqualStrings("TrackedVehicleControllerSettings", restored_controller.vtable.rtti.name);
     const tracked = virtual.downcast(TrackedVehicleControllerSettings, restored_controller);
     try testing.expectEqualSlices(u32, &.{ 0, 1 }, tracked.tracks[0].wheels.items);
     try testing.expectEqual(@as(f32, 5.0), tracked.tracks[0].differential_ratio);
@@ -1253,7 +1271,7 @@ test "TrackedVehicleController getters, setters, settings and state" {
     var copy = try constraint.asConstraint().getConstraintSettings();
     defer copy.deinit();
     const copy_controller = virtual.downcast(VehicleConstraintSettings, copy.get().?).controller.ptr.?;
-    try testing.expectEqualStrings("TrackedVehicleControllerSettings", copy_controller.vtable.rtti_name);
+    try testing.expectEqualStrings("TrackedVehicleControllerSettings", copy_controller.vtable.rtti.name);
     var settings_bytes: std.Io.Writer.Allocating = .init(allocator);
     defer settings_bytes.deinit();
     testSave(settings.get().?, &settings_bytes);
