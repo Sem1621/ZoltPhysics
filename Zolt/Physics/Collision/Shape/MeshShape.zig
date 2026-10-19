@@ -45,6 +45,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
+const IssueReporting = @import("../../../Core/IssueReporting.zig");
 const ByteBuffer = @import("../../../Core/ByteBuffer.zig").ByteBuffer;
 const Color = @import("../../../Core/Color.zig").Color;
 const HashCombine = @import("../../../Core/HashCombine.zig");
@@ -1186,7 +1187,7 @@ pub const MeshShape = struct {
     // See Shape::GetSubmergedVolume
     pub fn getSubmergedVolume(self: *const MeshShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
         _ = .{ self, center_of_mass_transform, scale, surface };
-        if (Core.enable_asserts) @panic("Not supported");
+        IssueReporting.assertFailed("Not supported", @src());
 
         // Jolt leaves the out parameters untouched
         return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
@@ -2178,16 +2179,18 @@ test "MeshShape: null entries in the material list" {
 }
 
 test "MeshShape: GetSubmergedVolume is not supported" {
-    // Jolt asserts, Zolt panics with asserts enabled (not testable) and returns zeros otherwise
-    if (Core.enable_asserts) return error.SkipZigTest;
-
+    // Jolt asserts and its release build continues: Zolt returns zeros (RemainingFeaturesArchitecture.md R8: the assert is expected with ExpectAssert)
     const allocator = testing.allocator;
     var box_triangles = boxTriangles(0);
     var settings = try MeshShapeSettings.init(allocator, &box_triangles, .{});
     defer settings.deinit();
     var result = try createMesh(&settings, allocator);
     defer result.deinit();
+    var expect_assert: IssueReporting.ExpectAssert = undefined;
+    expect_assert.init(1);
+    errdefer expect_assert.restore();
     const v = result.getPtr().?.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 0.0));
+    try expect_assert.finish();
     try testing.expectEqual(@as(f32, 0.0), v.total_volume);
     try testing.expectEqual(@as(f32, 0.0), v.submerged_volume);
     try testing.expect(v.center_of_buoyancy.eql(Vec3.zero()));

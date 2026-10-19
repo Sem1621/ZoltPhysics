@@ -23,6 +23,12 @@ pub const object_layer_bits: u8 = options.object_layer_bits;
 /// Physics/DeterminismLog.zig), set with `-Ddeterminism_log=true`
 pub const determinism_log: bool = options.determinism_log;
 
+/// Compile the debug renderer hooks into the library (JPH_DEBUG_RENDERER), set with `-Ddebug_renderer=true`. Without it
+/// every hook is `void`: the draw vtable entries, the draw functions, the debug-only members and parameters
+/// (Renderer/DebugRenderer.zig, Docs/Zolt/RemainingFeaturesArchitecture.md R2). The compiler then proves that drawing
+/// cannot change a result. The parity reference gets the define with the option (R1).
+pub const debug_renderer: bool = options.debug_renderer;
+
 /// Cache line size, used to avoid false sharing (JPH_CACHE_LINE_SIZE)
 pub const cache_line_size = 64;
 

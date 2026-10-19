@@ -28,6 +28,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
+const IssueReporting = @import("../../../Core/IssueReporting.zig");
 const Color = @import("../../../Core/Color.zig").Color;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -501,7 +502,7 @@ pub const PlaneShape = struct {
     // See Shape::GetSubmergedVolume
     pub fn getSubmergedVolume(self: *const PlaneShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
         _ = .{ self, center_of_mass_transform, scale, surface };
-        if (Core.enable_asserts) @panic("Not supported");
+        IssueReporting.assertFailed("Not supported", @src());
 
         // Jolt's release build leaves the out parameters untouched, Zolt returns zeros (see the file comment)
         return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
@@ -1069,13 +1070,17 @@ test "PlaneShape: GetTrianglesStart / Next" {
 }
 
 test "PlaneShape: GetSubmergedVolume is not supported (release builds return zeros)" {
-    if (Core.enable_asserts) return error.SkipZigTest; // Asserts "Not supported" like Jolt
-
     const allocator = testing.allocator;
     var plane = PlaneShape.init(allocator, test_plane, .{});
     plane.asShape().setEmbedded();
     defer plane.asShapeMut().deinit();
+
+    // Asserts "Not supported" like Jolt, then continues on Jolt's release path (RemainingFeaturesArchitecture.md R8)
+    var expect_assert: IssueReporting.ExpectAssert = undefined;
+    expect_assert.init(1);
+    errdefer expect_assert.restore();
     const r = plane.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), test_plane);
+    try expect_assert.finish();
     try testing.expectEqual(@as(f32, 0.0), r.total_volume);
     try testing.expectEqual(@as(f32, 0.0), r.submerged_volume);
     try testing.expect(r.center_of_buoyancy.eql(Vec3.zero()));

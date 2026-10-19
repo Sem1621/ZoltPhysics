@@ -77,6 +77,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Core = @import("../Core/Core.zig");
+const IssueReporting = @import("../Core/IssueReporting.zig");
 const DeterminismLog = @import("DeterminismLog.zig");
 const math = @import("../Math/Math.zig");
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
@@ -956,7 +957,7 @@ pub const PhysicsSystem = struct {
 
         // Return any errors
         const errors = PhysicsUpdateError.fromInt(context.errors.load(.acquire));
-        if (Core.enable_asserts) std.debug.assert(errors.isNone()); // An error occurred during the physics update, see EPhysicsUpdateError for more information
+        if (Core.enable_asserts) IssueReporting.assertRecoverable(errors.isNone(), "An error occurred during the physics update, see EPhysicsUpdateError for more information", @src());
         return errors;
     }
 

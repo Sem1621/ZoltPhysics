@@ -1964,10 +1964,13 @@ test "TestOutOfContactConstraints" {
     _ = try c.createBox(RVec3.init(24.0, 0.9, 0), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.one(), .{ .activation = .activate });
 
     // Step
-    // Not ported: relies on ExpectAssert (with asserts, Jolt's update asserts that no error occurred, a Zig assert
-    // panics), the step only runs without asserts
-    if (Core.enable_asserts) return;
-    errors = try c.simulateSingleStep();
+    {
+        var expect_assert: fw.ExpectAssert = undefined;
+        expect_assert.init(1); // JPH_IF_ENABLE_ASSERTS(ExpectAssert expect_assert(1);)
+        errdefer expect_assert.restore();
+        errors = try c.simulateSingleStep();
+        try expect_assert.finish();
+    }
     try expect(!errors.bitAnd(.{ .contact_constraints_full = true }).isNone());
 }
 

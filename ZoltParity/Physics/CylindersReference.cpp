@@ -565,7 +565,7 @@ void jolt_cylinders_submerged_volume(const ShapeDesc *inDesc, const float *inTra
 	Ref<Shape> shape = CreateShape(*inDesc);
 	float total_volume, submerged_volume;
 	Vec3 center_of_buoyancy;
-	shape->GetSubmergedVolume(LoadMat44(inTransform), Load3(inScale), Plane(Load4(inPlane)), total_volume, submerged_volume, center_of_buoyancy);
+	shape->GetSubmergedVolume(LoadMat44(inTransform), Load3(inScale), Plane(Load4(inPlane)), total_volume, submerged_volume, center_of_buoyancy JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	outValues[0] = total_volume;
 	outValues[1] = submerged_volume;
 	Store3(center_of_buoyancy, outValues + 2);

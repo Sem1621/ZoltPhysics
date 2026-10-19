@@ -27,15 +27,19 @@ from collections import defaultdict
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 PROGRESS_MD = os.path.join(ROOT, "Docs", "Zolt", "Progress.md")
-CPP_EXTENSIONS = (".h", ".inl", ".cpp")
+# `.hlsl`: the shaders of Jolt/Shaders are ported to Zig (Docs/Zolt/RemainingFeaturesArchitecture.md R12). A shader
+# `X.hlsl` is its own unit next to `XBindings.h` (and `X.h` when it has one); one Zig file ports them together.
+CPP_EXTENSIONS = (".h", ".inl", ".cpp", ".hlsl")
 STATUSES = ("complete", "partial", "stub")
 
 # Directories and files that are intentionally postponed (see Docs/Zolt/Roadmap.md). They are listed
 # with status "deferred" and do not count towards the progress percentage until a Zig file ports them.
+# Phase 9 (Docs/Zolt/RemainingFeaturesArchitecture.md R21) ports the compute interfaces, the CPU backend, the shaders and
+# the debug renderer; only the GPU backends and the profiler stay deferred.
 DEFERRED = {
-    "Jolt/Compute": "GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only",
-    "Jolt/Shaders": "GPU shaders for Jolt/Compute",
-    "Jolt/Renderer": "debug renderer interface, ported with the debug renderer phase",
+    "Jolt/Compute/DX12": "GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend",
+    "Jolt/Compute/MTL": "GPU compute backend (Metal), Zolt runs hair on the CPU backend",
+    "Jolt/Compute/VK": "GPU compute backend (Vulkan), Zolt runs hair on the CPU backend",
     "Jolt/Core/Profiler": "developer tooling, JPH_PROFILE is compiled out in the deterministic Distribution configuration",
 }
 
@@ -54,7 +58,6 @@ NOT_APPLICABLE = {
     "Jolt/Core/STLAlignedAllocator": "STL allocator adapter, Zolt uses std.mem.Allocator",
     "Jolt/Core/NonCopyable": "Zig has no copy constructors",
     "Jolt/Core/ScopeExit": "Zig `defer`",
-    "Jolt/Core/IssueReporting": "std.debug.assert and std.log",
     "Jolt/Core/Array": "std.ArrayList",
     "Jolt/Core/UnorderedMapFwd": "forward declarations",
     "Jolt/Core/UnorderedSetFwd": "forward declarations",

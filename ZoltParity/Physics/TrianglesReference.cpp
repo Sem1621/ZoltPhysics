@@ -490,9 +490,9 @@ void jolt_triangles_manifold(const ManifoldInput *inInput, ManifoldOutput *outOu
 		points2.push_back(Load3(inInput->mExisting2 + 3 * i));
 	}
 	Vec3 axis = Load3(inInput->mPenetrationAxis);
-	ManifoldBetweenTwoFaces(Load3(inInput->mContactPoint1), Load3(inInput->mContactPoint2), axis, inInput->mMaxContactDistance, face1, face2, points1, points2);
+	ManifoldBetweenTwoFaces(Load3(inInput->mContactPoint1), Load3(inInput->mContactPoint2), axis, inInput->mMaxContactDistance, face1, face2, points1, points2 JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	if (inInput->mPrune != 0 && points1.size() > 4)
-		PruneContactPoints(axis.Normalized(), points1, points2);
+		PruneContactPoints(axis.Normalized(), points1, points2 JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	outOutput->mCount1 = uint32(points1.size());
 	outOutput->mCount2 = uint32(points2.size());
 	for (uint32 i = 0; i < outOutput->mCount1; ++i)
@@ -511,7 +511,7 @@ void jolt_triangles_prune(const float *inAxis, uint32 inCount, const float *inPo
 		points1.push_back(Load3(inPoints1 + 3 * i));
 		points2.push_back(Load3(inPoints2 + 3 * i));
 	}
-	PruneContactPoints(Load3(inAxis), points1, points2);
+	PruneContactPoints(Load3(inAxis), points1, points2 JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	outOutput->mCount1 = uint32(points1.size());
 	outOutput->mCount2 = uint32(points2.size());
 	for (uint32 i = 0; i < outOutput->mCount1; ++i)

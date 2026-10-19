@@ -176,12 +176,15 @@ public:
 	virtual MassProperties	GetMassProperties() const override									{ return MassProperties(); }
 	virtual const PhysicsMaterial *GetMaterial(const SubShapeID &inSubShapeID) const override	{ return mMaterial != nullptr? mMaterial.GetPtr() : PhysicsMaterial::sDefault.GetPtr(); }
 	virtual Vec3			GetSurfaceNormal(const SubShapeID &inSubShapeID, Vec3Arg inLocalSurfacePosition) const override { return inLocalSurfacePosition.NormalizedOr(Vec3::sAxisY()); }
-	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy) const override { outTotalVolume = outSubmergedVolume = 0.0f; outCenterOfBuoyancy = Vec3::sZero(); }
+	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy JPH_IF_DEBUG_RENDERER(, RVec3Arg inBaseOffset)) const override { outTotalVolume = outSubmergedVolume = 0.0f; outCenterOfBuoyancy = Vec3::sZero(); }
 	virtual bool			CastRay(const RayCast &inRay, const SubShapeIDCreator &inSubShapeIDCreator, RayCastResult &ioHit) const override { mRecord->mLastRay = inRay; ioHit.mFraction = 0.5f; ioHit.mSubShapeID2 = inSubShapeIDCreator.GetID(); return true; }
 	virtual void			CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const CollideSoftBodyVertexIterator &inVertices, uint inNumVertices, int inCollidingShapeIndex) const override { }
 	virtual int				GetTrianglesNext(GetTrianglesContext &ioContext, int inMaxTrianglesRequested, Float3 *outTriangleVertices, const PhysicsMaterial **outMaterials = nullptr) const override { return 0; }
 	virtual Stats			GetStats() const override											{ return Stats(sizeof(*this), 0); }
 	virtual float			GetVolume() const override											{ return 1.0f; }
+#ifdef JPH_DEBUG_RENDERER
+	virtual void			Draw(DebugRenderer *, RMat44Arg, Vec3Arg, ColorArg, bool, bool) const override { } // Parity shapes are never drawn
+#endif // JPH_DEBUG_RENDERER
 	virtual Vec3			MakeScaleValid(Vec3Arg inScale) const override						{ Vec3 scale = Shape::MakeScaleValid(inScale); return mUniformScale? ScaleHelpers::MakeUniformScale(scale) : scale; }
 
 	virtual void			GetSupportingFace(const SubShapeID &inSubShapeID, Vec3Arg inDirection, Vec3Arg inScale, Mat44Arg inCenterOfMassTransform, SupportingFace &outVertices) const override

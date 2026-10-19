@@ -41,12 +41,16 @@
 //!   (with the shape's allocator).
 //! - `sRestoreFromBinaryState` validates the sub shape type read from the stream (Jolt indexes the table with it and
 //!   calls a null `mConstruct`): an invalid value or a type without constructor is "Failed to read type id".
-//! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace, sDrawSubmergedVolumes and the
-//!   inBaseOffset parameter of GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER: Draw, DrawGetSupportFunction and DrawGetSupportingFace are option-gated vtable entries
+//!   (`virtual.OptionalVirtual(Core.debug_renderer, ...)`, `void` without `-Ddebug_renderer`;
+//!   RemainingFeaturesArchitecture.md R2). `Shape.impl.draw` is a temporary placeholder until every shape implements
+//!   Draw (group D2), then it is removed and Draw is pure again. sDrawSubmergedVolumes and the inBaseOffset parameter of
+//!   GetSubmergedVolume are not ported yet: TODO(debug_renderer).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const SerializableObject = @import("../../../ObjectStream/SerializableObject.zig").SerializableObject;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
@@ -72,6 +76,7 @@ const Float3 = @import("../../../Math/Float3.zig").Float3;
 const Mat44 = @import("../../../Math/Mat44.zig").Mat44;
 const Quat = @import("../../../Math/Quat.zig").Quat;
 const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
 const Vec3 = @import("../../../Math/Vec3.zig").Vec3;
 const RegisterTypes = @import("../../../RegisterTypes.zig");
 const MassProperties = @import("../../Body/MassProperties.zig").MassProperties;
@@ -395,7 +400,12 @@ pub const Shape = struct {
         getSubShapeTransformedShape: *const fn (self: *const Shape, sub_shape_id: SubShapeID, position_com: Vec3, rotation: Quat, scale: Vec3) SubShapeTransformedShape,
         /// Gets the properties needed to do buoyancy calculations for a body using this shape
         getSubmergedVolume: *const fn (self: *const Shape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) SubmergedVolume,
-        // TODO(debug_renderer): Draw, DrawGetSupportFunction, DrawGetSupportingFace (JPH_DEBUG_RENDERER)
+        /// Draw the shape at a particular location with a particular color (debugging purposes) (JPH_DEBUG_RENDERER)
+        draw: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void),
+        /// Draw the results of the GetSupportFunction with the convex radius added back on to show any errors introduced by this process (only relevant for convex shapes) (JPH_DEBUG_RENDERER)
+        drawGetSupportFunction: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void),
+        /// Draw the results of the GetSupportingFace function to show any errors introduced by this process (only relevant for convex shapes) (JPH_DEBUG_RENDERER)
+        drawGetSupportingFace: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void),
         /// Cast a ray against this shape, returns true if it finds a hit closer than hit.fraction and updates that fraction. Otherwise hit is left untouched and the function returns false.
         castRay: *const fn (self: *const Shape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool,
         /// Cast a ray against this shape. Allows returning multiple hits through collector.
@@ -701,6 +711,25 @@ pub const Shape = struct {
     /// @return The total volume of the shape, the submerged volume of the shape and the world space center of mass of the submerged volume
     pub fn getSubmergedVolume(self: *const Shape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) SubmergedVolume {
         return self.vtable.getSubmergedVolume(self, center_of_mass_transform, scale, surface);
+    }
+
+    /// Draw the shape at a particular location with a particular color (debugging purposes). Only with
+    /// `-Ddebug_renderer=true` (a `void` declaration otherwise).
+    pub const draw = if (Core.debug_renderer) drawDispatch else {};
+    fn drawDispatch(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        self.vtable.draw(self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe);
+    }
+
+    /// Draw the results of the GetSupportFunction with the convex radius added back on to show any errors introduced by this process (only relevant for convex shapes)
+    pub const drawGetSupportFunction = if (Core.debug_renderer) drawGetSupportFunctionDispatch else {};
+    fn drawGetSupportFunctionDispatch(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+        self.vtable.drawGetSupportFunction(self, renderer, center_of_mass_transform, scale, color, draw_support_direction);
+    }
+
+    /// Draw the results of the GetSupportingFace function to show any errors introduced by this process (only relevant for convex shapes)
+    pub const drawGetSupportingFace = if (Core.debug_renderer) drawGetSupportingFaceDispatch else {};
+    fn drawGetSupportingFaceDispatch(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+        self.vtable.drawGetSupportingFace(self, renderer, center_of_mass_transform, scale);
     }
 
     /// Cast a ray against this shape, returns true if it finds a hit closer than hit.fraction and updates that fraction. Otherwise hit is left untouched and the function returns false.
@@ -1077,6 +1106,23 @@ pub const Shape = struct {
     /// Implementations of the virtual functions in Shape (C++ Shape::Foo bodies). C++'s explicit base calls
     /// (`Shape::SaveBinaryState(inStream)`) are `Shape.impl.saveBinaryState(self.asShape(), stream)`.
     pub const impl = struct {
+        /// Zolt placeholder (RemainingFeaturesArchitecture.md R2): Draw is pure in Jolt. It stays here until every shape
+        /// implements Draw (group D2), so that all shapes compile with `-Ddebug_renderer=true` in the meantime.
+        pub fn draw(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+            _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+            @panic("TODO(debug_renderer): Draw of this shape is not ported yet");
+        }
+
+        pub fn drawGetSupportFunction(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+            // Nothing (only relevant for convex shapes)
+            _ = .{ self, renderer, center_of_mass_transform, scale, color, draw_support_direction };
+        }
+
+        pub fn drawGetSupportingFace(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+            // Nothing (only relevant for convex shapes)
+            _ = .{ self, renderer, center_of_mass_transform, scale };
+        }
+
         pub fn mustBeStatic(self: *const Shape) bool {
             _ = self;
             return false;

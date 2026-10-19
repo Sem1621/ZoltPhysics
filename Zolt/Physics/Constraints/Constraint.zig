@@ -20,9 +20,11 @@
 //!   `RegisterTypes.factory`. An unknown hash gives Jolt's "Failed to create instance of type".
 //! - `ConstraintSpace` is an `enum(i32)` that accepts every value: Jolt's binary state writes the enum as its
 //!   underlying int and reads back any value (a value other than world space means local space).
-//! - JPH_DEBUG_RENDERER (`mDrawConstraintSize`, `DrawConstraint`, `DrawConstraintLimits`,
-//!   `DrawConstraintReferenceFrame`, `Get/SetDrawConstraintSize`): TODO(debug_renderer). ConstraintSettings keeps its
-//!   public `mDrawConstraintSize` (it is serialized).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R1, R2): `draw_constraint_size` (mDrawConstraintSize) is
+//!   `void` without `-Ddebug_renderer`. With it the constructor copies it from the settings and `ToConstraintSettings`
+//!   copies it back, like Jolt: this changes `GetConstraintSettings`, so the parity reference gets the define too.
+//!   `DrawConstraint`, `DrawConstraintLimits`, `DrawConstraintReferenceFrame`: TODO(debug_renderer) (group D3).
+//!   ConstraintSettings keeps its public `mDrawConstraintSize` in every build (it is serialized).
 //! - The protected copy constructor and assignment of ConstraintSettings (they do not copy the reference count) are
 //!   `initCopy`, used by the copy functions of derived settings.
 
@@ -311,7 +313,8 @@ pub const Constraint = struct {
     /// Frees this constraint (heap constraints) and the memory it owns
     allocator: Allocator,
 
-    // TODO(debug_renderer): mDrawConstraintSize (Size of constraint when drawing it through the debug renderer)
+    /// Size of constraint when drawing it through the debug renderer (JPH_DEBUG_RENDERER only, `void` without it)
+    draw_constraint_size: if (Core.debug_renderer) f32 else void = if (Core.debug_renderer) 1.0 else {},
 
     /// Index in the mConstraints list of the ConstraintManager for easy finding (private in Jolt, ConstraintManager is a friend)
     constraint_index: u32 = invalid_constraint_index,
@@ -350,6 +353,7 @@ pub const Constraint = struct {
             .num_position_steps_override = @truncate(settings.num_position_steps_override),
             .enabled = settings.enabled,
             .user_data = settings.user_data,
+            .draw_constraint_size = if (Core.debug_renderer) settings.draw_constraint_size else {},
         };
     }
 
@@ -448,6 +452,18 @@ pub const Constraint = struct {
         self.user_data = user_data;
     }
 
+    /// Size of constraint when drawing it through the debug renderer (JPH_DEBUG_RENDERER only: a gated declaration,
+    /// RemainingFeaturesArchitecture.md R2)
+    pub const getDrawConstraintSize = if (Core.debug_renderer) getDrawConstraintSizeImpl else {};
+    fn getDrawConstraintSizeImpl(self: *const Constraint) f32 {
+        return self.draw_constraint_size;
+    }
+
+    pub const setDrawConstraintSize = if (Core.debug_renderer) setDrawConstraintSizeImpl else {};
+    fn setDrawConstraintSizeImpl(self: *Constraint, size: f32) void {
+        self.draw_constraint_size = size;
+    }
+
     /// Notify the constraint that the shape of a body has changed (see VTable.notifyShapeChanged)
     pub fn notifyShapeChanged(self: *Constraint, body_id: BodyID, delta_com: Vec3) void {
         self.vtable.notifyShapeChanged(self, body_id, delta_com);
@@ -511,7 +527,7 @@ pub const Constraint = struct {
         out_settings.num_velocity_steps_override = self.num_velocity_steps_override;
         out_settings.num_position_steps_override = self.num_position_steps_override;
         out_settings.user_data = self.user_data;
-        // TODO(debug_renderer): outSettings.mDrawConstraintSize = mDrawConstraintSize;
+        if (Core.debug_renderer) out_settings.draw_constraint_size = self.draw_constraint_size; // JPH_IF_DEBUG_RENDERER
     }
 
     /// The bodies of the virtual functions of Constraint that have a default implementation

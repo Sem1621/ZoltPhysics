@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 89.7%** of 86135 lines in scope · **Unit tests: 94.8%** of 18321 lines
+**Library: 86.6%** of 90565 lines in scope · **Unit tests: 95.9%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -15,8 +15,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
 | `Jolt` | 100% | 2 | 0 | 0 | 0 | 1 | 0 | 320 |
 | `Jolt/AABBTree` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1295 |
-| `Jolt/Compute` | deferred | 0 | 0 | 0 | 0 | 0 | 32 | 0 |
-| `Jolt/Core` | 95% | 41 | 1 | 0 | 0 | 12 | 1 | 6785 |
+| `Jolt/Compute` | 20% | 4 | 0 | 0 | 9 | 0 | 19 | 1069 |
+| `Jolt/Core` | 95% | 42 | 1 | 0 | 0 | 11 | 1 | 6829 |
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
@@ -29,8 +29,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
-| `Jolt/Renderer` | deferred | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
-| `Jolt/Shaders` | deferred | 0 | 0 | 0 | 0 | 0 | 31 | 0 |
+| `Jolt/Renderer` | 48% | 1 | 1 | 0 | 2 | 0 | 0 | 1754 |
+| `Jolt/Shaders` | 0% | 0 | 0 | 0 | 44 | 0 | 0 | 1563 |
 | `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
 
@@ -55,42 +55,42 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Compute — deferred: GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only</summary>
+<details><summary>Jolt/Compute — 20%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `ComputeBufferCPU.cpp`, `ComputeBufferCPU.h` | 51 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeQueueCPU.cpp`, `ComputeQueueCPU.h` | 111 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeShaderCPU.h` | 30 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemCPU.cpp`, `ComputeSystemCPU.h` | 82 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `HLSLToCPP.h` | 419 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ShaderWrapper.h` | 20 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `WrapShaderBegin.h` | 57 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `WrapShaderBindings.h` | 32 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `WrapShaderEnd.h` | 51 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeBuffer.h` | 55 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeQueue.h` | 65 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeShader.h` | 32 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystem.cpp`, `ComputeSystem.h` | 64 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeBufferDX12.cpp`, `ComputeBufferDX12.h` | 171 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeQueueDX12.cpp`, `ComputeQueueDX12.h` | 221 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeShaderDX12.h` | 41 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemDX12.cpp`, `ComputeSystemDX12.h` | 247 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemDX12Impl.cpp`, `ComputeSystemDX12Impl.h` | 153 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `IncludeDX12.h` | 39 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeBufferMTL.h` | 26 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeQueueMTL.h` | 36 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeShaderMTL.h` | 27 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemMTL.h` | 28 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemMTLImpl.h` | 19 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `BufferVK.h` | 35 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeBufferVK.cpp`, `ComputeBufferVK.h` | 150 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeQueueVK.cpp`, `ComputeQueueVK.h` | 294 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeShaderVK.cpp`, `ComputeShaderVK.h` | 242 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemVK.cpp`, `ComputeSystemVK.h` | 222 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemVKImpl.cpp`, `ComputeSystemVKImpl.h` | 403 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `ComputeSystemVKWithAllocator.cpp`, `ComputeSystemVKWithAllocator.h` | 204 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
-| `IncludeVK.h` | 30 | ⏸ deferred | GPU compute backends (DX12/Vulkan/Metal), needed for GPU hair only |
+| `ComputeBufferCPU.cpp`, `ComputeBufferCPU.h` | 51 | ❌ todo |  |
+| `ComputeQueueCPU.cpp`, `ComputeQueueCPU.h` | 111 | ❌ todo |  |
+| `ComputeShaderCPU.h` | 30 | ❌ todo |  |
+| `ComputeSystemCPU.cpp`, `ComputeSystemCPU.h` | 82 | ❌ todo |  |
+| `HLSLToCPP.h` | 419 | ❌ todo |  |
+| `ShaderWrapper.h` | 20 | ❌ todo |  |
+| `WrapShaderBegin.h` | 57 | ❌ todo |  |
+| `WrapShaderBindings.h` | 32 | ❌ todo |  |
+| `WrapShaderEnd.h` | 51 | ❌ todo |  |
+| `ComputeBuffer.h` | 55 | ✅ complete | `Zolt/Compute/ComputeBuffer.zig` |
+| `ComputeQueue.h` | 65 | ✅ complete | `Zolt/Compute/ComputeQueue.zig` |
+| `ComputeShader.h` | 32 | ✅ complete | `Zolt/Compute/ComputeShader.zig` |
+| `ComputeSystem.cpp`, `ComputeSystem.h` | 64 | ✅ complete | `Zolt/Compute/ComputeSystem.zig` |
+| `ComputeBufferDX12.cpp`, `ComputeBufferDX12.h` | 171 | ⏸ deferred | GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend |
+| `ComputeQueueDX12.cpp`, `ComputeQueueDX12.h` | 221 | ⏸ deferred | GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend |
+| `ComputeShaderDX12.h` | 41 | ⏸ deferred | GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend |
+| `ComputeSystemDX12.cpp`, `ComputeSystemDX12.h` | 247 | ⏸ deferred | GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend |
+| `ComputeSystemDX12Impl.cpp`, `ComputeSystemDX12Impl.h` | 153 | ⏸ deferred | GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend |
+| `IncludeDX12.h` | 39 | ⏸ deferred | GPU compute backend (DirectX 12), Zolt runs hair on the CPU backend |
+| `ComputeBufferMTL.h` | 26 | ⏸ deferred | GPU compute backend (Metal), Zolt runs hair on the CPU backend |
+| `ComputeQueueMTL.h` | 36 | ⏸ deferred | GPU compute backend (Metal), Zolt runs hair on the CPU backend |
+| `ComputeShaderMTL.h` | 27 | ⏸ deferred | GPU compute backend (Metal), Zolt runs hair on the CPU backend |
+| `ComputeSystemMTL.h` | 28 | ⏸ deferred | GPU compute backend (Metal), Zolt runs hair on the CPU backend |
+| `ComputeSystemMTLImpl.h` | 19 | ⏸ deferred | GPU compute backend (Metal), Zolt runs hair on the CPU backend |
+| `BufferVK.h` | 35 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `ComputeBufferVK.cpp`, `ComputeBufferVK.h` | 150 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `ComputeQueueVK.cpp`, `ComputeQueueVK.h` | 294 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `ComputeShaderVK.cpp`, `ComputeShaderVK.h` | 242 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `ComputeSystemVK.cpp`, `ComputeSystemVK.h` | 222 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `ComputeSystemVKImpl.cpp`, `ComputeSystemVKImpl.h` | 403 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `ComputeSystemVKWithAllocator.cpp`, `ComputeSystemVKWithAllocator.h` | 204 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
+| `IncludeVK.h` | 30 | ⏸ deferred | GPU compute backend (Vulkan), Zolt runs hair on the CPU backend |
 
 </details>
 
@@ -114,7 +114,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HashTable.h` | 738 | ✅ complete | `Zolt/Core/HashTable.zig` |
 | `IncludeWindows.h` | 27 | ➖ n/a | Windows headers |
 | `InsertionSort.h` | 50 | ✅ complete | `Zolt/Core/InsertionSort.zig` |
-| `IssueReporting.cpp`, `IssueReporting.h` | 44 | ➖ n/a | std.debug.assert and std.log |
+| `IssueReporting.cpp`, `IssueReporting.h` | 44 | ✅ complete | `Zolt/Core/IssueReporting.zig` |
 | `JobSystem.h`, `JobSystem.inl` | 302 | ✅ complete | `Zolt/Core/JobSystem.zig` |
 | `JobSystemSingleThreaded.cpp`, `JobSystemSingleThreaded.h` | 98 | ✅ complete | `Zolt/Core/JobSystemSingleThreaded.zig` |
 | `JobSystemThreadPool.cpp`, `JobSystemThreadPool.h` | 359 | ✅ complete | `Zolt/Core/JobSystemThreadPool.zig` |
@@ -472,52 +472,65 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Renderer — deferred: debug renderer interface, ported with the debug renderer phase</summary>
+<details><summary>Jolt/Renderer — 48%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `DebugRenderer.cpp`, `DebugRenderer.h` | 1219 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
-| `DebugRendererPlayback.cpp`, `DebugRendererPlayback.h` | 169 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
-| `DebugRendererRecorder.cpp`, `DebugRendererRecorder.h` | 229 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
-| `DebugRendererSimple.cpp`, `DebugRendererSimple.h` | 137 | ⏸ deferred | debug renderer interface, ported with the debug renderer phase |
+| `DebugRenderer.cpp`, `DebugRenderer.h` | 1219 | 🟡 partial | `Zolt/Renderer/DebugRenderer.zig` |
+| `DebugRendererPlayback.cpp`, `DebugRendererPlayback.h` | 169 | ❌ todo |  |
+| `DebugRendererRecorder.cpp`, `DebugRendererRecorder.h` | 229 | ✅ complete | `Zolt/Renderer/DebugRendererRecorder.zig` |
+| `DebugRendererSimple.cpp`, `DebugRendererSimple.h` | 137 | ❌ todo |  |
 
 </details>
 
-<details><summary>Jolt/Shaders — deferred: GPU shaders for Jolt/Compute</summary>
+<details><summary>Jolt/Shaders — 0%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `HairApplyDeltaTransformBindings.h` | 12 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairApplyGlobalPose.h` | 17 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairApplyGlobalPoseBindings.h` | 14 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairCalculateCollisionPlanesBindings.h` | 11 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairCalculateRenderPositions.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairCalculateRenderPositionsBindings.h` | 13 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairCommon.h` | 46 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairGridAccumulateBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairGridClearBindings.h` | 7 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairGridNormalizeBindings.h` | 7 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairIntegrate.h` | 73 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairIntegrateBindings.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairSkinRootsBindings.h` | 20 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairSkinVerticesBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairStructs.h` | 102 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairTeleportBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairUpdateRootsBindings.h` | 10 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairUpdateStrandsBindings.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairUpdateVelocity.h` | 54 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairUpdateVelocityBindings.h` | 18 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairUpdateVelocityIntegrateBindings.h` | 19 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `HairWrapper.cpp`, `HairWrapper.h` | 127 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `ShaderCore.h` | 68 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `ShaderMat44.h` | 11 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `ShaderMath.h` | 14 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `ShaderPlane.h` | 15 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `ShaderQuat.h` | 103 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `ShaderVec3.h` | 23 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `TestCompute2Bindings.h` | 21 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `TestComputeBindings.h` | 17 | ⏸ deferred | GPU shaders for Jolt/Compute |
-| `TestComputeWrapper.cpp` | 18 | ⏸ deferred | GPU shaders for Jolt/Compute |
+| `HairApplyDeltaTransform.hlsl` | 34 | ❌ todo |  |
+| `HairApplyDeltaTransformBindings.h` | 12 | ❌ todo |  |
+| `HairApplyGlobalPose.h`, `HairApplyGlobalPose.hlsl` | 49 | ❌ todo |  |
+| `HairApplyGlobalPoseBindings.h` | 14 | ❌ todo |  |
+| `HairCalculateCollisionPlanes.hlsl` | 100 | ❌ todo |  |
+| `HairCalculateCollisionPlanesBindings.h` | 11 | ❌ todo |  |
+| `HairCalculateRenderPositions.h`, `HairCalculateRenderPositions.hlsl` | 33 | ❌ todo |  |
+| `HairCalculateRenderPositionsBindings.h` | 13 | ❌ todo |  |
+| `HairCommon.h` | 46 | ❌ todo |  |
+| `HairGridAccumulate.hlsl` | 44 | ❌ todo |  |
+| `HairGridAccumulateBindings.h` | 10 | ❌ todo |  |
+| `HairGridClear.hlsl` | 14 | ❌ todo |  |
+| `HairGridClearBindings.h` | 7 | ❌ todo |  |
+| `HairGridNormalize.hlsl` | 23 | ❌ todo |  |
+| `HairGridNormalizeBindings.h` | 7 | ❌ todo |  |
+| `HairIntegrate.h`, `HairIntegrate.hlsl` | 102 | ❌ todo |  |
+| `HairIntegrateBindings.h` | 15 | ❌ todo |  |
+| `HairSkinRoots.hlsl` | 38 | ❌ todo |  |
+| `HairSkinRootsBindings.h` | 20 | ❌ todo |  |
+| `HairSkinVertices.hlsl` | 23 | ❌ todo |  |
+| `HairSkinVerticesBindings.h` | 10 | ❌ todo |  |
+| `HairStructs.h` | 102 | ❌ todo |  |
+| `HairTeleport.hlsl` | 24 | ❌ todo |  |
+| `HairTeleportBindings.h` | 10 | ❌ todo |  |
+| `HairUpdateRoots.hlsl` | 25 | ❌ todo |  |
+| `HairUpdateRootsBindings.h` | 10 | ❌ todo |  |
+| `HairUpdateStrands.hlsl` | 131 | ❌ todo |  |
+| `HairUpdateStrandsBindings.h` | 15 | ❌ todo |  |
+| `HairUpdateVelocity.h`, `HairUpdateVelocity.hlsl` | 88 | ❌ todo |  |
+| `HairUpdateVelocityBindings.h` | 18 | ❌ todo |  |
+| `HairUpdateVelocityIntegrate.hlsl` | 38 | ❌ todo |  |
+| `HairUpdateVelocityIntegrateBindings.h` | 19 | ❌ todo |  |
+| `HairWrapper.cpp`, `HairWrapper.h` | 127 | ❌ todo |  |
+| `ShaderCore.h` | 68 | ❌ todo |  |
+| `ShaderMat44.h` | 11 | ❌ todo |  |
+| `ShaderMath.h` | 14 | ❌ todo |  |
+| `ShaderPlane.h` | 15 | ❌ todo |  |
+| `ShaderQuat.h` | 103 | ❌ todo |  |
+| `ShaderVec3.h` | 23 | ❌ todo |  |
+| `TestCompute.hlsl` | 22 | ❌ todo |  |
+| `TestCompute2.hlsl` | 19 | ❌ todo |  |
+| `TestCompute2Bindings.h` | 21 | ❌ todo |  |
+| `TestComputeBindings.h` | 17 | ❌ todo |  |
+| `TestComputeWrapper.cpp` | 18 | ❌ todo |  |
 
 </details>
 
@@ -546,7 +559,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 77% | 5 | 1 | 0 | 1 | 1 | 0 | 1185 |
+| `UnitTests` | 93% | 6 | 0 | 0 | 1 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
@@ -554,7 +567,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests/ObjectStream` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 220 |
 | `UnitTests/Physics` | 98% | 32 | 0 | 0 | 1 | 0 | 0 | 11009 |
 
-<details><summary>UnitTests — 77%</summary>
+<details><summary>UnitTests — 93%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -564,7 +577,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `LoggingContactListener.h` | 118 | ✅ complete | `ZoltTests/LoggingContactListener.zig` |
 | `LoggingSoftBodyContactListener.h` | 81 | ❌ todo |  |
 | `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ✅ complete | `ZoltTests/PhysicsTestContext.zig` |
-| `UnitTestFramework.cpp`, `UnitTestFramework.h` | 382 | 🟡 partial | `ZoltTests/UnitTestFramework.zig` |
+| `UnitTestFramework.cpp`, `UnitTestFramework.h` | 382 | ✅ complete | `ZoltTests/UnitTestFramework.zig` |
 | `doctest.h` | 7301 | ➖ n/a | test framework, Zolt uses Zig's test runner |
 
 </details>

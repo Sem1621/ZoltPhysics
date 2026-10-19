@@ -20,6 +20,7 @@
 //! | `virtual ~A()` + `delete this`               | generated vtable entries `deinit` (destructor chain: `destruct` of every level, derived first) and `destroy` (`deinit` + free with the root's `allocator`) |
 //! | `static_cast<C *>(a)` / derived to base      | `virtual.downcast(C, a)` / `virtual.upcast(A, c)`                    |
 //! | JPH_RTTI (GetRTTI)                           | a data entry `rtti: *const RTTI` in the root VTable, every concrete class declares `pub const rtti` (SerializationArchitecture.md S3) |
+//! | `#ifdef JPH_DEBUG_RENDERER virtual ...`      | an option-gated entry `draw: OptionalVirtual(Core.debug_renderer, *const fn ...)`: the function pointer type when the build option is on, `void` when it is off (no slot, no code) |
 //!
 //! Rules enforced at compile time by `make`:
 //! - every virtual function has an implementation somewhere in the chain T -> ... -> introducing class
@@ -36,6 +37,14 @@
 //! Overrides are looked up in every level of the chain (not only in the most derived class), so a class that
 //! derives from a concrete class (e.g. a user collector derived from ClosestHitPerBodyCollisionCollector) inherits
 //! its parent's overrides exactly like in C++.
+//!
+//! Option-gated virtual functions (Zolt, RemainingFeaturesArchitecture.md R2). A virtual function that only exists
+//! with a build option (Jolt's `#ifdef JPH_DEBUG_RENDERER` virtuals: Shape::Draw, Constraint::DrawConstraint, ...) is
+//! an entry of type `OptionalVirtual(enabled, FnPtr)`. When the option is on it is an ordinary entry with all the rules
+//! above. When it is off the entry is `void`: it occupies no slot and `make` stores `{}`. The dispatcher and every
+//! override are gated declarations, `pub const draw = if (Core.debug_renderer) drawImpl else {};` with a private
+//! `fn drawImpl`: the override is listed in `overrides` in both configurations, and without the option its body is
+//! never analyzed, so it may read members that are `void` then (`DebugRenderer.If(T)`) and no code is generated.
 //!
 //! Negative compile checks. Zig cannot test that code does not compile, so these were each verified by hand (in the
 //! architecture prototype, with a user convex shape `UserConvexShape : ConvexShape : Shape`) and then reverted. The
@@ -74,6 +83,13 @@ pub fn isDerivedFrom(comptime Derived: type, comptime Base: type) bool {
         if (!@hasField(X, "base")) return false;
         X = Parent(X);
     }
+}
+
+/// The type of a vtable entry that only exists when `enabled` (a build option, e.g. `Core.debug_renderer`): `FnPtr`
+/// when on, `void` when off. `make` treats a `void` entry as a virtual function that is compiled out (see the file
+/// header).
+pub fn OptionalVirtual(comptime enabled: bool, comptime FnPtr: type) type {
+    return if (enabled) FnPtr else void;
 }
 
 /// Pointer to `To` with the constness of the pointer type `P`
@@ -141,6 +157,9 @@ fn makeTable(comptime VTable: type, comptime T: type) VTable {
     for (@typeInfo(VTable).@"struct".fields) |field| {
         if (isBaseTable(field)) {
             @field(vt, field.name) = makeTable(field.type, T);
+        } else if (field.type == void) {
+            // Option-gated virtual function that is compiled out (OptionalVirtual): no slot, no code
+            @field(vt, field.name) = {};
         } else if (std.mem.eql(u8, field.name, "deinit")) {
             @field(vt, field.name) = deinitChain(Introducer(field.type), T);
         } else if (std.mem.eql(u8, field.name, "destroy")) {
@@ -182,7 +201,7 @@ fn isVirtual(comptime VTable: type, comptime name: []const u8) bool {
     for (@typeInfo(VTable).@"struct".fields) |field| {
         if (isBaseTable(field)) {
             if (isVirtual(field.type, name)) return true;
-        } else if (std.mem.eql(u8, field.name, name) and isFunctionEntry(field)) {
+        } else if (std.mem.eql(u8, field.name, name) and (isFunctionEntry(field) or field.type == void)) {
             return true;
         }
     }
@@ -236,7 +255,7 @@ fn checkTopLevel(comptime Full: type, comptime VTable: type, comptime L: type) v
     for (@typeInfo(VTable).@"struct".fields) |field| {
         if (isBaseTable(field)) {
             checkTopLevel(Full, field.type, L);
-        } else if (isFunctionEntry(field) and @hasDecl(L, field.name) and !introduces(L, field.name)) {
+        } else if ((isFunctionEntry(field) or field.type == void) and @hasDecl(L, field.name) and !introduces(L, field.name)) {
             if (@hasDecl(L, "overrides")) {
                 if (!isListed(L, field.name))
                     @compileError(@typeName(L) ++ "." ++ field.name ++ " overrides a virtual function: add ." ++ field.name ++ " to " ++ @typeName(L) ++ ".overrides (or rename it if it is not an override)");
@@ -620,4 +639,64 @@ test "Virtual: checkPrefix" {
     comptime checkPrefix(Base, Derived);
     try std.testing.expect(isDerivedFrom(Derived, Derived));
     try std.testing.expect(!isDerivedFrom(Derived, Base)); // Flattened value types are not derived
+}
+
+test "Virtual: option-gated virtual functions (OptionalVirtual)" {
+    // A root with a virtual function that only exists with a build option, built both ways (on and off)
+    inline for (.{ true, false }) |enabled| {
+        const Root = struct {
+            const Self = @This();
+            pub const VTable = struct {
+                get: *const fn (self: *const Self) i32,
+                draw: OptionalVirtual(enabled, *const fn (self: *const Self, out: *i32) void),
+            };
+            vtable: *const VTable,
+
+            pub fn get(self: *const Self) i32 {
+                return self.vtable.get(self);
+            }
+            /// The dispatcher only exists when the option is on (a `void` declaration otherwise)
+            pub const draw = if (enabled) drawDispatch else {};
+            fn drawDispatch(self: *const Self, out: *i32) void {
+                self.vtable.draw(self, out);
+            }
+            pub const impl = struct {
+                pub fn get(self: *const Self) i32 {
+                    _ = self;
+                    return 1;
+                }
+            };
+        };
+        // The concrete class lists the override in both configurations. It is a gated declaration: without the option
+        // the body is not analyzed, so it can read a member that only exists with the option (`void` otherwise).
+        const Concrete = struct {
+            const Self = @This();
+            pub const overrides = .{ .get, .draw };
+            base: Root,
+            draw_scale: if (enabled) i32 else void = if (enabled) 10 else {},
+
+            pub fn get(self: *const Self) i32 {
+                _ = self;
+                return 2;
+            }
+            pub const draw = if (enabled) drawImpl else {};
+            fn drawImpl(self: *const Self, out: *i32) void {
+                out.* = self.get() * self.draw_scale;
+            }
+        };
+
+        var c: Concrete = .{ .base = .{ .vtable = vtablePtr(Root.VTable, Concrete) } };
+        try std.testing.expectEqual(@as(i32, 2), c.base.get());
+        if (enabled) {
+            var out: i32 = 0;
+            c.base.draw(&out);
+            try std.testing.expectEqual(@as(i32, 20), out);
+            try std.testing.expect(@sizeOf(Root.VTable) == 2 * @sizeOf(usize));
+        } else {
+            // Compiled out: no slot in the table and no dispatcher
+            try std.testing.expect(@FieldType(Root.VTable, "draw") == void);
+            try std.testing.expect(@sizeOf(Root.VTable) == @sizeOf(usize));
+            try std.testing.expect(@TypeOf(Root.draw) == void);
+        }
+    }
 }

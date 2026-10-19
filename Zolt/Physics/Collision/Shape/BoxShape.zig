@@ -4,12 +4,17 @@
 //! Follows the porter template of Docs/Zolt/CollisionArchitecture.md (section 2, SphereShape.zig is the reference):
 //! `overrides` lists every C++ `override` in header order, the support class `Box` is constructed in the caller's
 //! SupportBuffer (D9), the static `sUnitBoxTriangles` is a comptime table (D10). GetSubmergedVolume is ConvexShape's.
-//! JPH_DEBUG_RENDERER (Draw) is not ported yet: TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (Docs/Zolt/RemainingFeaturesArchitecture.md R2, the recipe of a Draw site): `draw` is a gated
+//! declaration listed in `overrides`; without `-Ddebug_renderer` it is `void`, the vtable has no draw entry and the
+//! body of `drawImpl` is never analyzed.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
@@ -133,7 +138,7 @@ pub const BoxShape = struct {
     pub const shape_sub_type: ShapeSubType = .box;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .restoreBinaryState };
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .restoreBinaryState };
 
     base: ConvexShape,
     /// Half the size of the box (including convex radius)
@@ -284,7 +289,13 @@ pub const BoxShape = struct {
         }
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const BoxShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+        const matrix = if (Core.double_precision) center_of_mass_transform.mulMat44(Mat44.scaleVec3(scale.abs())) else center_of_mass_transform.mul(Mat44.scaleVec3(scale.abs()));
+        renderer.drawBoxMatrix(matrix, self.getLocalBounds(), if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{ .cast_shadow = .on, .draw_mode = draw_mode });
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const BoxShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {

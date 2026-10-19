@@ -275,13 +275,18 @@ Design, groups and harness plan: [SerializationArchitecture.md](SerializationArc
   [SerializationArchitecture.md](SerializationArchitecture.md), sections 11 and 12.
 
 ### Phase 9: Remaining features
-SoftBody (with its ObjectStream schemas and `PhysicsScene.mSoftBodies`), Hair (CPU path, with its schemas),
-debug renderer interface (`Jolt/Renderer`, behind a build option), remaining unit tests (all of `UnitTests/`
-ported).
-**Milestone M10:** 100% of `UnitTests/` ported and passing.
+SoftBody (with its ObjectStream schemas and `PhysicsScene.mSoftBodies`), the compute interfaces and the CPU compute
+backend with the shaders as Zig (`Jolt/Compute`, `Jolt/Compute/CPU`, `Jolt/Shaders`), Hair (CPU path, with its
+schemas), the debug renderer (`Jolt/Renderer` and the `JPH_DEBUG_RENDERER` code, behind `-Ddebug_renderer`),
+recoverable asserts with `ExpectAssert`, and the remaining unit tests (all of `UnitTests/` ported).
+Design, decisions (R1 to R22), groups and harness plan: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md).
+**Milestone M10:** 100% of `UnitTests/` ported and passing (`port_status.py --check-m10`), in Debug, ReleaseSafe,
+ReleaseFast, double precision, `-Duse_llvm=false` and `-Ddebug_renderer=true`.
 
 ### Deferred / out of scope for now
-- `Jolt/Compute`, `Jolt/Shaders`: GPU compute backends (DX12/Vulkan/Metal), only used for GPU hair.
+- `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).
+  Zolt runs hair on the CPU backend (RemainingFeaturesArchitecture.md R21).
+- `Jolt/Core/Profiler`: developer tooling, compiled out in the Distribution configuration.
 - Samples, JoltViewer, TestFramework: application code; a Zig sample app may come later.
 - A C API (`zolt.h`) for use from other languages.
 

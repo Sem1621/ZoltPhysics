@@ -17,6 +17,13 @@ pub const AABBTreeToBuffer = @import("AABBTree/AABBTreeToBuffer.zig").AABBTreeTo
 pub const NodeCodecQuadTreeHalfFloat = @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig").NodeCodecQuadTreeHalfFloat;
 pub const TriangleCodecIndexed8BitPackSOA4Flags = @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig").TriangleCodecIndexed8BitPackSOA4Flags;
 
+// Compute
+pub const ComputeBuffer = @import("Compute/ComputeBuffer.zig").ComputeBuffer;
+pub const ComputeQueue = @import("Compute/ComputeQueue.zig").ComputeQueue;
+pub const ComputeShader = @import("Compute/ComputeShader.zig").ComputeShader;
+pub const ComputeSystem = @import("Compute/ComputeSystem.zig").ComputeSystem;
+pub const createComputeSystem = @import("Compute/ComputeSystem.zig").createComputeSystem;
+
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
@@ -34,6 +41,9 @@ pub const HashCombine = @import("Core/HashCombine.zig");
 pub const HashTable = @import("Core/HashTable.zig").HashTable;
 pub const HashTableOptions = @import("Core/HashTable.zig").HashTableOptions;
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
+pub const AssertHandler = @import("Core/IssueReporting.zig").AssertHandler;
+pub const ExpectAssert = @import("Core/IssueReporting.zig").ExpectAssert;
+pub const IssueReporting = @import("Core/IssueReporting.zig");
 pub const FailingJobSystem = @import("Core/JobSystem.zig").FailingJobSystem;
 pub const JobHandle = @import("Core/JobSystem.zig").JobSystem.JobHandle;
 pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
@@ -556,6 +566,10 @@ pub const test_shapes = if (@import("builtin").is_test) @import("Physics/Collisi
 /// build.zig for the inline tests (only in test builds)
 pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Constraints/TestConstraints.zig") else struct {};
 
+// Renderer
+pub const DebugRenderer = @import("Renderer/DebugRenderer.zig").DebugRenderer;
+pub const DebugRendererRecorder = @import("Renderer/DebugRendererRecorder.zig").DebugRendererRecorder;
+
 // Skeleton
 pub const SkeletalAnimation = @import("Skeleton/SkeletalAnimation.zig").SkeletalAnimation;
 pub const Skeleton = @import("Skeleton/Skeleton.zig").Skeleton;
@@ -574,6 +588,10 @@ const source_files = .{
     @import("AABBTree/AABBTreeToBuffer.zig"),
     @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig"),
     @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig"),
+    @import("Compute/ComputeBuffer.zig"),
+    @import("Compute/ComputeQueue.zig"),
+    @import("Compute/ComputeShader.zig"),
+    @import("Compute/ComputeSystem.zig"),
     @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
@@ -587,6 +605,7 @@ const source_files = .{
     @import("Core/HashCombine.zig"),
     @import("Core/HashTable.zig"),
     @import("Core/InsertionSort.zig"),
+    @import("Core/IssueReporting.zig"),
     @import("Core/JobSystem.zig"),
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),
@@ -850,6 +869,8 @@ const source_files = .{
     @import("Physics/Vehicle/Wheel.zig"),
     @import("Physics/Vehicle/WheeledVehicleController.zig"),
     @import("RegisterTypes.zig"),
+    @import("Renderer/DebugRenderer.zig"),
+    @import("Renderer/DebugRendererRecorder.zig"),
     @import("Skeleton/SkeletalAnimation.zig"),
     @import("Skeleton/Skeleton.zig"),
     @import("Skeleton/SkeletonMapper.zig"),

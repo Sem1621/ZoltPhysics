@@ -83,7 +83,7 @@ Inside the library always import by relative path, never through `zolt.zig`.
 | member function `GetFoo()`            | camelCase                             | `GetLinearVelocity` → `getLinearVelocity`     |
 | static function `sFoo()`              | drop `s`, camelCase                   | `Vec3::sZero()` → `Vec3.zero()`               |
 | member variable `mFoo`                | snake_case, drop `m`                  | `mLinearVelocity` → `linear_velocity`         |
-| static member variable `sFoo`         | snake_case `pub var`                  | `sDrawConstraints` → `draw_constraints`       |
+| static member variable `sFoo`         | snake_case `pub var` (debug draw flags: RemainingFeaturesArchitecture.md R4) | `CharacterID::sNextID` → `CharacterID.next_id`; `MeshShape::sDrawTriangleGroups` → `renderer.flags.mesh_shape.draw_triangle_groups` |
 | constant `cFoo` / `constexpr`         | snake_case `const`                    | `cLargeFloat` → `large_float`                 |
 | parameter `inFoo`, `outFoo`, `ioFoo`  | snake_case, drop prefix (output containers that stay parameters keep `out_`: `out_vertices`; `io_` may stay when the plain name clashes with a local) | `inVelocity` → `velocity`                     |
 | macro constant `JPH_FOO`              | snake_case `const`                    | `JPH_PI` → `math.pi`                          |
@@ -441,7 +441,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | members (and `thread_local` state) that only exist with `JPH_ENABLE_ASSERTS` | typed `void` without asserts: `cached_motion_type: if (Core.enable_asserts) MotionType else void = if (Core.enable_asserts) .static else {}`, so the compiler proves they cannot influence release results |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
-| `#ifdef JPH_DEBUG_RENDERER`                 | not ported yet: leave `// TODO(debug_renderer): ...` where code is skipped |
+| `#ifdef JPH_DEBUG_RENDERER`                 | `Core.debug_renderer` (`-Ddebug_renderer`): members `if (Core.debug_renderer) T else void`, virtuals `virtual.OptionalVirtual(Core.debug_renderer, *const fn ...)`, functions and overrides `pub const draw = if (Core.debug_renderer) drawImpl else {};`, `JPH_IF_DEBUG_RENDERER(x)` at a call site `if (Core.debug_renderer) x else {}`. Rules and recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Code not ported yet keeps `// TODO(debug_renderer): ...` |
 | developer debug switches that are commented out in Jolt (`JPH_GJK_DEBUG`, `JPH_EPA_PENETRATION_DEPTH_DEBUG`, `JPH_EPA_CONVEX_BUILDER_DRAW`, `JPH_EPA_CONVEX_BUILDER_VALIDATE`, `JPH_CONVEX_BUILDER_DEBUG`, `JPH_CONVEX_BUILDER_DUMP_SHAPE`, `JPH_CONVEX_BUILDER_2D_DEBUG`, ...) | not ported: list them in a `//! Not ported: ...` header line. They do not affect the Status (a file without them is `complete`) |
 | `#ifdef JPH_CPU_BIG_ENDIAN`                 | `if (builtin.cpu.arch.endian() == .big)` (comptime); port both branches |
 | `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped for now (a profiler may come later)                 |
@@ -588,8 +588,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   expected value first); `CHECK_APPROX_EQUAL(a, b, tol)` → `try checkApproxEqual(a, b, .{ .tolerance = tol })`
   from `ZoltTests/UnitTestFramework.zig`.
 - Keep the exact input values and expected values of the C++ test.
-- `ExpectAssert` (tests that trigger asserts) cannot be ported: Zig asserts panic. Skip those
-  checks with a comment `// Not ported: relies on ExpectAssert`.
+- `ExpectAssert` (tests that trigger asserts): the assert that the test expects must be a recoverable assert
+  (`IssueReporting.assertRecoverable` / `assertFailed`); the test uses `ExpectAssert` of `Core/IssueReporting.zig`
+  (re-exported by `ZoltTests/UnitTestFramework.zig`). Rules: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R8.
 - Small tests of Zolt-specific code (helpers that have no Jolt counterpart) go inline in the
   source file as `test` blocks.
 - **Memory.** Tests allocate with `std.testing.allocator`, which reports leaks. Every path that allocates gets a

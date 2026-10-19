@@ -16,6 +16,10 @@
 //!   -Dobject_layer_bits=16|32   JPH_OBJECT_LAYER_BITS
 //!   -Ddeterminism_log=true      JPH_ENABLE_DETERMINISM_LOG: Zolt/Physics/DeterminismLog.zig exists at run time (the
 //!                               `test` step always also runs the DeterminismLog unit tests with it enabled)
+//!   -Ddebug_renderer=true       JPH_DEBUG_RENDERER: compile the debug renderer hooks into the library (the draw vtable
+//!                               entries, the draw functions, the debug-only members and parameters). Off by default:
+//!                               then every hook is `void`. The C++ reference of `zig build parity` gets the define too
+//!                               (Docs/Zolt/RemainingFeaturesArchitecture.md R1).
 //!   -Dtest-filter=<substring>   Only run tests whose name contains the substring (repeatable)
 //!   -Dreference_asserts=true    Build the C++ reference of `zig build parity` with JPH_ENABLE_ASSERTS: the simulation
 //!                               parity fails a scene whose C++ side hits a Jolt assert
@@ -32,6 +36,7 @@ pub fn build(b: *std.Build) void {
     const double_precision = b.option(bool, "double_precision", "Use f64 for world space positions (JPH_DOUBLE_PRECISION)") orelse false;
     const object_layer_bits = b.option(u8, "object_layer_bits", "Number of bits in ObjectLayer, 16 or 32 (JPH_OBJECT_LAYER_BITS)") orelse 16;
     const determinism_log = b.option(bool, "determinism_log", "Log the simulation state to find determinism issues (JPH_ENABLE_DETERMINISM_LOG)") orelse false;
+    const debug_renderer = b.option(bool, "debug_renderer", "Compile the debug renderer hooks into the library and the C++ reference (JPH_DEBUG_RENDERER)") orelse false;
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
     // Zig 0.16's self-hosted x86_64 backend (the default for Debug builds) miscompiles some vector operations
     // (e.g. @bitCast of @Vector(4, bool)), so default to LLVM. Use -Duse_llvm=false for faster Debug compiles.
@@ -46,6 +51,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "double_precision", double_precision);
     options.addOption(u8, "object_layer_bits", object_layer_bits);
     options.addOption(bool, "determinism_log", determinism_log);
+    options.addOption(bool, "debug_renderer", debug_renderer);
     const options_module = options.createModule();
 
     // User shape registrations, default material and serializable classes (Zolt/RegisterTypes.zig): an empty module by
@@ -143,6 +149,7 @@ pub fn build(b: *std.Build) void {
         det_log_options.addOption(bool, "double_precision", double_precision);
         det_log_options.addOption(u8, "object_layer_bits", object_layer_bits);
         det_log_options.addOption(bool, "determinism_log", true);
+        det_log_options.addOption(bool, "debug_renderer", debug_renderer);
         const zolt_det_log = b.createModule(.{
             .root_source_file = b.path("Zolt/zolt.zig"),
             .target = target,
@@ -218,8 +225,8 @@ pub fn build(b: *std.Build) void {
     }).step);
 
     // Parity tests: the C++ library is the reference. It is compiled in the configuration that Zolt
-    // follows (JPH_CROSS_PLATFORM_DETERMINISTIC, no FP contraction, no asserts / debug renderer /
-    // profiler, like the Distribution build used for Jolt's determinism hashes). -Dreference_asserts=true adds
+    // follows (JPH_CROSS_PLATFORM_DETERMINISTIC, no FP contraction, no asserts / profiler, and no debug renderer unless
+    // -Ddebug_renderer=true, like the Distribution build used for Jolt's determinism hashes). -Dreference_asserts=true adds
     // JPH_ENABLE_ASSERTS: a failed Jolt assert is printed and counted (SimulationReference.cpp's hooks), and the
     // simulation parity fails a scene whose C++ side hit one (the check that scenes keep away from Jolt's asserts).
     const reference_asserts = b.option(bool, "reference_asserts", "Build the C++ reference of the parity tests with JPH_ENABLE_ASSERTS (scenes that hit a Jolt assert fail)") orelse false;
@@ -233,6 +240,16 @@ pub fn build(b: *std.Build) void {
     if (double_precision) cpp_flags.append(b.allocator, "-DJPH_DOUBLE_PRECISION") catch @panic("OOM");
     cpp_flags.append(b.allocator, b.fmt("-DJPH_OBJECT_LAYER_BITS={d}", .{object_layer_bits})) catch @panic("OOM");
     if (reference_asserts) cpp_flags.append(b.allocator, "-DJPH_ENABLE_ASSERTS") catch @panic("OOM");
+    // JPH_USE_CPU_COMPUTE: Jolt's CMake option USE_CPU_COMPUTE (ON by default). It compiles the CPU compute backend
+    // (Compute/CPU/*.cpp) and the HLSL shaders as C++ (Shaders/HairWrapper.cpp, TestComputeWrapper.cpp), which Phase 9
+    // compares with Zolt (Docs/Zolt/RemainingFeaturesArchitecture.md R1). It is not a JPH_VERSION_ID feature bit; only
+    // the compute, shader and hair translation units preprocess differently with it, so no other result changes.
+    cpp_flags.append(b.allocator, "-DJPH_USE_CPU_COMPUTE") catch @panic("OOM");
+    // JPH_DEBUG_RENDERER follows -Ddebug_renderer (Zolt's Core.debug_renderer). It is bit 6 of JPH_VERSION_ID and it
+    // changes Jolt's results that the parity sees (Constraint::GetConstraintSettings copies mDrawConstraintSize, the
+    // configuration string), so Zolt and every C++ translation unit (Jolt, the references, HelloWorld, PerformanceTest)
+    // must agree on it.
+    if (debug_renderer) cpp_flags.append(b.allocator, "-DJPH_DEBUG_RENDERER") catch @panic("OOM");
 
     // On x86_64 the reference is pinned to x86-64-v3 (SSE4.2/AVX/AVX2/F16C/LZCNT/TZCNT, no AVX-512), which
     // matches the default ISA options of Jolt's CMake build, so parity results don't depend on the host CPU.

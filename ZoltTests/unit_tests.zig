@@ -108,4 +108,7 @@ test {
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
     _ = @import("Physics/WheeledVehicleTests.zig");
+
+    // Renderer
+    _ = @import("Renderer/DebugRendererZoltTests.zig");
 }
