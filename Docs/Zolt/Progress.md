@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 86.6%** of 90565 lines in scope · **Unit tests: 95.9%** of 18321 lines
+**Library: 86.6%** of 90565 lines in scope · **Unit tests: 96.4%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -562,7 +562,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `UnitTests` | 93% | 6 | 0 | 0 | 1 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 0% | 0 | 0 | 0 | 1 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
-| `UnitTests/Geometry` | 88% | 6 | 1 | 0 | 0 | 0 | 0 | 854 |
+| `UnitTests/Geometry` | 100% | 7 | 0 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 220 |
 | `UnitTests/Physics` | 98% | 32 | 0 | 0 | 1 | 0 | 0 | 11009 |
@@ -610,7 +610,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Geometry — 88%</summary>
+<details><summary>UnitTests/Geometry — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -618,7 +618,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ConvexHullBuilderTest.cpp` | 220 | ✅ complete | `ZoltTests/Geometry/ConvexHullBuilderTest.zig` |
 | `EPATests.cpp` | 189 | ✅ complete | `ZoltTests/Geometry/EPATests.zig` |
 | `EllipseTest.cpp` | 29 | ✅ complete | `ZoltTests/Geometry/EllipseTest.zig` |
-| `GJKTests.cpp` | 209 | 🟡 partial | `ZoltTests/Geometry/GJKTests.zig` |
+| `GJKTests.cpp` | 209 | ✅ complete | `ZoltTests/Geometry/GJKTests.zig` |
 | `PlaneTests.cpp` | 42 | ✅ complete | `ZoltTests/Geometry/PlaneTests.zig` |
 | `RayAABoxTests.cpp` | 77 | ✅ complete | `ZoltTests/Geometry/RayAABoxTests.zig` |
 

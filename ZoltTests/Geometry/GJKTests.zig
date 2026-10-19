@@ -1,7 +1,7 @@
 //! Port of: UnitTests/Geometry/GJKTests.cpp
-//! Status: partial
-//! Missing: TestGJKRay*Shape (need Phase 4 convex shapes)
+//! Status: complete
 
+const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../UnitTestFramework.zig");
 
@@ -17,6 +17,13 @@ const RayInvDirection = zolt.RayInvDirection;
 const Sphere = zolt.Sphere;
 const TriangleConvexSupport = zolt.TriangleConvexSupport;
 const Vec3 = zolt.Vec3;
+const ConvexShape = zolt.ConvexShape;
+const SphereShape = zolt.SphereShape;
+const BoxShape = zolt.BoxShape;
+const CapsuleShape = zolt.CapsuleShape;
+const CylinderShape = zolt.CylinderShape;
+
+const allocator = std.testing.allocator;
 
 test "TestGJKIntersectSphere" {
     var gjk: GJKClosestPoint = .{};
@@ -193,7 +200,18 @@ test "TestGJKRaySphere" {
     }.compare);
 }
 
-// Not ported: TestGJKRaySphereShape, needs SphereShape (Phase 4 convex shapes)
+test "TestGJKRaySphereShape" {
+    var sphere_shape = SphereShape.init(allocator, 1.1, .{});
+    sphere_shape.asShape().setEmbedded();
+    defer sphere_shape.asShapeMut().deinit();
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const support = sphere_shape.base.getSupportFunction(.include_convex_radius, &buffer, Vec3.one());
+    try testRay(support, &sphere_shape, struct {
+        fn compare(sphere: *const SphereShape, ray_origin: Vec3, ray_direction: Vec3) f32 {
+            return zolt.raySphere(ray_origin, ray_direction, Vec3.zero(), sphere.getRadius());
+        }
+    }.compare);
+}
 
 test "TestGJKRayBox" {
     const box = AABox.init(Vec3.init(-0.9, -1.0, -1.1), Vec3.init(0.8, 0.9, 1.0));
@@ -205,11 +223,45 @@ test "TestGJKRayBox" {
     }.compare);
 }
 
-// Not ported: TestGJKRayBoxShape, needs BoxShape (Phase 4 convex shapes)
+test "TestGJKRayBoxShape" {
+    var box_shape = BoxShape.init(allocator, Vec3.init(0.9, 1.0, 1.1), .{ .convex_radius = 0.0 });
+    box_shape.asShape().setEmbedded();
+    defer box_shape.asShapeMut().deinit();
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const support = box_shape.base.getSupportFunction(.include_convex_radius, &buffer, Vec3.one());
+    try testRay(support, &box_shape, struct {
+        fn compare(box: *const BoxShape, ray_origin: Vec3, ray_direction: Vec3) f32 {
+            const fraction = zolt.rayAABox(ray_origin, RayInvDirection.init(ray_direction), box.getHalfExtent().negate(), box.getHalfExtent());
+            return math.max(fraction, 0.0);
+        }
+    }.compare);
+}
 
-// Not ported: TestGJKRayCapsuleShape, needs CapsuleShape (Phase 4 convex shapes)
+test "TestGJKRayCapsuleShape" {
+    var capsule_shape = CapsuleShape.init(allocator, 1.1, 0.6, .{});
+    capsule_shape.asShape().setEmbedded();
+    defer capsule_shape.asShapeMut().deinit();
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const support = capsule_shape.base.getSupportFunction(.include_convex_radius, &buffer, Vec3.one());
+    try testRay(support, &capsule_shape, struct {
+        fn compare(capsule: *const CapsuleShape, ray_origin: Vec3, ray_direction: Vec3) f32 {
+            return zolt.rayCapsule(ray_origin, ray_direction, capsule.getHalfHeightOfCylinder(), capsule.getRadius());
+        }
+    }.compare);
+}
 
-// Not ported: TestGJKRayCylinderShape, needs CylinderShape (Phase 4 convex shapes)
+test "TestGJKRayCylinderShape" {
+    var cylinder_shape = CylinderShape.init(allocator, 1.5, 0.6, .{ .convex_radius = 0.0 });
+    cylinder_shape.asShape().setEmbedded();
+    defer cylinder_shape.asShapeMut().deinit();
+    var buffer: ConvexShape.SupportBuffer = .{};
+    const support = cylinder_shape.base.getSupportFunction(.include_convex_radius, &buffer, Vec3.one());
+    try testRay(support, &cylinder_shape, struct {
+        fn compare(cylinder: *const CylinderShape, ray_origin: Vec3, ray_direction: Vec3) f32 {
+            return zolt.rayCylinder(ray_origin, ray_direction, cylinder.getHalfHeight(), cylinder.getRadius());
+        }
+    }.compare);
+}
 
 test "TestGJKRayTriangle" {
     const triangle = TriangleConvexSupport.init(Vec3.init(0.1, 0.9, 0.3), Vec3.init(-0.9, -0.5, 0.2), Vec3.init(0.7, -0.3, -0.1));
