@@ -2756,7 +2756,8 @@ const Run = struct {
         const system = &self.zw.system;
         const num_active = system.getNumActiveBodies(.rigid_body);
         self.stats.max_active_bodies = @max(self.stats.max_active_bodies, num_active);
-        if (system.getBodyStats().num_bodies_dynamic + system.getBodyStats().num_bodies_kinematic > num_active)
+        const body_stats = system.getBodyStats();
+        if (body_stats.num_bodies_dynamic + body_stats.num_bodies_kinematic > num_active or body_stats.num_soft_bodies > body_stats.num_active_soft_bodies) // Phase 9: soft bodies sleep too
             self.stats.updates_with_sleeping_bodies += 1;
         if (system.body_manager.getNumActiveCCDBodies() > 0)
             self.stats.updates_with_ccd_bodies += 1;

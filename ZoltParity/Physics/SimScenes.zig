@@ -276,7 +276,14 @@
 //! - **Blocker.** `.soft_bodies` is supported as soon as Zolt simulates soft bodies: SoftBodyMotionProperties.is_stub
 //!   (group S4) and PhysicsSystem.soft_body_jobs_pending (group S5) are gone (`SoftBodyClasses.simulated`). Until then
 //!   the scenes run on the C++ side alone ("SimScenes blocked scenes run on the C++ side"), and their settings bytes are
-//!   compared with Zolt's.
+//!   compared with Zolt's. Both are gone: the soft body scenes run against Zolt.
+//! - **Scenes** (group S5, the list of RemainingFeaturesArchitecture.md section 4): the 3 cases of SoftBodyTests
+//!   (`soft_body_test_*`), linear cast spheres against cubes and cloths in every listener mode (the CCD response against
+//!   a soft body face), cloths with LRA, dihedral bends and fixed corners, pressure spheres, rod chains, skinned cloths
+//!   with back stops, sensors, sleeping and waking through ProcessBodyPair, UpdatePosition false, several soft bodies on
+//!   one dynamic body (the BodyID order of SoftBodyFinalize), save and cross restore, 2 collision steps, a 30 x 30 cloth
+//!   (4 parallel constraint groups and a non-parallel group of 308 edges), vertex counts around 64 and every kind of
+//!   rigid shape.
 //! - **D12 sweeps.** Jolt's SaveState does not hold mSkinStatePreviousPositionValid. SkinVertices sets it, the update
 //!   clears it, and it selects the skin interpolation factor. Every update that starts from the snapshot of a sweep gets
 //!   the value of the snapshot again, like the InvalidateContactCache flags (SimulationParity.zig, `SkinFlags`). The
@@ -3200,11 +3207,31 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "vehicle_motorcycle_lean_integration_slope", .build = buildVehicleMotorcycleLeanIntegrationSlope, .blocked_by = .motorcycles, .sweep_stride = 0, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     .{ .name = "vehicle_motorcycle_far_from_origin", .build = buildVehicleMotorcycleFarFromOrigin, .blocked_by = .motorcycles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     // (append the vehicle scenes here)
-    // ---- Soft bodies (Phase 9: the harness scenes; group S5 writes the scene list) ----
+    // ---- Soft bodies (Phase 9: the harness scenes of group SH, then the scene list of group S5) ----
     // The soft body scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`). DetermineCollidingShapes
     // gets the colliding bodies in the order of the broad phase layout. A vertex keeps the first of equal penetrations.
     .{ .name = "soft_body_cube_on_floor", .build = buildSoftBodyCubeOnFloor, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    .{ .name = "soft_body_test_bend_constraint", .build = buildSoftBodyTestBendConstraint, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true },
+    .{ .name = "soft_body_test_apply_force", .build = buildSoftBodyTestApplyForce, .blocked_by = .soft_bodies, .sweep_stride = 40, .restore_broad_phase = true },
+    .{ .name = "soft_body_test_linear_cast_sphere", .build = buildSoftBodyTestLinearCastSphere, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_ccd_cube_listener_modes", .build = buildSoftBodyCcdCube, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_ccd_cloth_listener_modes", .build = buildSoftBodyCcdCloth, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_cloth_lra", .build = buildSoftBodyClothLRA, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_cloth_dihedral", .build = buildSoftBodyClothDihedral, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true },
+    .{ .name = "soft_body_pressure_sphere", .build = buildSoftBodyPressureSphere, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_rod_chain", .build = buildSoftBodyRodChain, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_skinned_back_stops", .build = buildSoftBodySkinnedBackStops, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_sensor", .build = buildSoftBodySensor, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    .{ .name = "soft_body_sleep_and_wake", .build = buildSoftBodySleepAndWake, .blocked_by = .soft_bodies, .sweep_stride = 50, .restore_broad_phase = true, .expect = .{ .sleeping = true, .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_update_position_false", .build = buildSoftBodyUpdatePositionFalse, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_several_on_one_body", .build = buildSoftBodySeveralOnOneBody, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_save_restore", .build = buildSoftBodySaveRestore, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_collision_steps_2", .build = buildSoftBodyCollisionSteps2, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    // Creating the 30 x 30 cloth (CreateConstraints, Optimize) allocates thousands of times: no creation sweep
+    .{ .name = "soft_body_large_cloth", .build = buildSoftBodyLargeCloth, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .creation_sweep = false, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_partial_batches", .build = buildSoftBodyPartialBatches, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_shapes", .build = buildSoftBodyShapes, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     // (append the soft body scenes here)
 };
 
@@ -16376,7 +16403,7 @@ fn buildVehicleMotorcycleFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
 
 // (append the vehicle scenes here)
 
-// ---- Soft bodies (Phase 9, Blocker.soft_bodies; the scene list is group S5's) ----
+// ---- Soft bodies (Phase 9, Blocker.soft_bodies: the harness scenes of group SH, the scene list of group S5) ----
 
 /// The smoke scene of the soft body harness: the cube of SoftBodyTests (sCreateCube(6, 0.2)) dropped rotated onto a
 /// floor with the recording soft body contact listener, and a box dropped onto the cube
@@ -16508,6 +16535,423 @@ fn buildSoftBodyOps(b: *SceneBuilder) Allocator.Error!void {
         }
     }
 }
+
+/// TestBendConstraint of SoftBodyTests: two triangles with a shared edge, three locked vertices and a free vertex x3, an
+/// edge constraint per edge and a dihedral bend constraint, one soft body for each of the 6 values of x3 of the test
+/// (x3 = (0, 0, -1) lies on x2, like in the test). Every 15 updates (0.25 s) vertex 3 is perturbed by rotating it around
+/// X by 0, 90, 180 and 270 degrees, and the bend constraint brings it back.
+fn buildSoftBodyTestBendConstraint(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 60;
+    const x3_values = [_][3]f32{
+        .{ 0, 0, 1 }, // forming flat plane
+        .{ 0, 0, -1 }, // overlapping
+        .{ 0, 1, 0 }, // 90 degrees concave
+        .{ 0, -1, 0 }, // 90 degrees convex
+        .{ 0, 1, 1 }, // 45 degrees concave
+        .{ 0, -1, -1 }, // 135 degrees convex
+    };
+    var handles: [x3_values.len]u32 = undefined;
+    for (x3_values, &handles, 0..) |x3, *handle, i| {
+        const settings = try b.explicitSoftBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.explicit), .shear_compliance = std.math.floatMax(f32), .bend_compliance = 0, .bend_type = 2 }, &.{
+            .{ -1, 0, 0, 0, 0, 0, 0 },
+            .{ 1, 0, 0, 0, 0, 0, 0 },
+            .{ 0, 0, -1, 0, 0, 0, 0 },
+            .{ x3[0], x3[1], x3[2], 0, 0, 0, 1 },
+        }, &.{ .{ 0, 1, 2 }, .{ 0, 3, 1 } }, &.{});
+        handle.* = try b.softBody(.{ .settings = settings, .position = .{ 4 * real(i), 0, 0 }, .gravity_factor = 0, .allow_sleeping = 0, .update_position = 0, .object_layer = Layers.moving }, .activate);
+    }
+    for ([_]f64{ 0, 90, 180, 270 }, 0..) |angle, a| {
+        b.at(@intCast(15 * a));
+        const c = @cos(angle * std.math.pi / 180.0);
+        const s = @sin(angle * std.math.pi / 180.0);
+        for (x3_values, handles) |x3, handle| {
+            // 0.5 * (Mat44::sRotationX(DegreesToRadians(angle)) * x3)
+            const y: f32 = @floatCast(0.5 * (c * x3[1] - s * x3[2]));
+            const z: f32 = @floatCast(0.5 * (s * x3[1] + c * x3[2]));
+            try b.softBodyOp(.soft_body_set_vertex_position, handle, .{ .i = &.{3}, .f = &.{ 0.5 * x3[0], y, z } });
+        }
+    }
+}
+
+/// TestApplyForce of SoftBodyTests: the cube of the test (sCreateCube(6, 0.2), 216 kg, no gravity, no damping) and a
+/// rigid box of the same size and mass, the same force on both every update
+fn buildSoftBodyTestApplyForce(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 120;
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 6, .spacing = 0.2 });
+    const soft_body = try b.softBody(.{ .settings = cube, .gravity_factor = 0, .linear_damping = 0, .object_layer = Layers.moving }, .activate);
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const rigid_body = try b.body(.{ .position = .{ 0, 2, 0 }, .shape = box, .gravity_factor = 0, .linear_damping = 0, .override_mass_properties = 1, .mass = 216, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |u| {
+        b.at(@intCast(u));
+        try b.op(.add_force, soft_body, .{ .f = &.{ 10000, 0, 0 } });
+        try b.op(.add_force, rigid_body, .{ .f = &.{ 10000, 0, 0 } });
+    }
+}
+
+/// A sphere (radius 1, 200 kg, no damping) that moves 5 m in one update towards a soft body target at `target_position`
+/// from 2 m along the direction `-direction`, with motion quality `motion_quality` (0 discrete, 1 linear cast)
+fn shootSphere(b: *SceneBuilder, sphere: u32, target_position: [3]Real, direction: [3]f32, motion_quality: u32) Allocator.Error!u32 {
+    const speed: f32 = 5.0 * 60.0;
+    return b.body(.{
+        .position = .{ target_position[0] - 2 * direction[0], target_position[1] - 2 * direction[1], target_position[2] - 2 * direction[2] },
+        .shape = sphere,
+        .motion_quality = motion_quality,
+        .override_mass_properties = 1,
+        .mass = 200,
+        .linear_velocity = .{ speed * direction[0], speed * direction[1], speed * direction[2] },
+        .linear_damping = 0,
+        .object_layer = Layers.moving,
+    }, .activate);
+}
+
+/// TestLinearCastSphereVsSoftBody of SoftBodyTests: a sphere that tunnels through the cube of the test in one update, for
+/// each listener of the test (accepting, none, rejecting) with linear cast and discrete motion quality. The six pairs are
+/// 10 m apart and start 6 updates apart, each with its listener. The linear cast sphere stops at the cube (the CCD
+/// response against a soft body face) unless the listener rejects the contact.
+fn buildSoftBodyTestLinearCastSphere(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 36;
+    b.gravity = .{ 0, 0, 0 };
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 6, .spacing = 0.2 });
+    const sphere = try b.sphere(1.0);
+    for ([_]SoftBodyListenerMode{ .accept, .accept, .none, .none, .reject, .reject }, 0..) |mode, i| {
+        b.at(@intCast(6 * i));
+        try b.softBodyListener(mode);
+        const position: [3]Real = .{ 0, 0, 10 * real(i) };
+        _ = try b.softBody(.{ .settings = cube, .position = position, .object_layer = Layers.moving }, .activate);
+        _ = try shootSphere(b, sphere, position, .{ -1, 0, 0 }, @intFromBool(i % 2 == 0));
+    }
+}
+
+/// Linear cast and discrete spheres against soft body cubes in every listener mode (the CCD response against a soft body
+/// face, OnSoftBodyContactValidate from JobFindCCDContacts with its mass scales and sensor flag). The cubes of the
+/// accepting and the sensor listener sleep when they are hit (dont_activate): the CCD response or ProcessBodyPair wakes
+/// them.
+fn buildSoftBodyCcdCube(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 5, .spacing = 0.25 });
+    const sphere = try b.sphere(0.6);
+    const modes = [_]SoftBodyListenerMode{ .none, .accept, .reject, .sensor, .mass_scales };
+    for (0..2 * modes.len) |i| {
+        b.at(@intCast(4 * i));
+        try b.softBodyListener(modes[i / 2]);
+        const position: [3]Real = .{ 0, 0, 8 * real(i) };
+        _ = try b.softBody(.{ .settings = cube, .position = position, .rotation = axisAngle(.{ 0, 1, 0 }, 0.2 * @as(f64, @floatFromInt(i))), .friction = 0.4, .restitution = 0.3, .object_layer = Layers.moving }, if ((i / 2) % 2 == 1) .dont_activate else .activate);
+        _ = try shootSphere(b, sphere, position, .{ -1, 0, 0 }, @intFromBool(i % 2 == 0));
+    }
+}
+
+/// Linear cast spheres against horizontal cloths with fixed corners in every listener mode: from above (front faces) and
+/// from below, where only a double sided cloth stops them
+fn buildSoftBodyCcdCloth(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cloth), .count_x = 11, .count_z = 11, .spacing = 0.15, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .kinematic = 1 });
+    const sphere = try b.sphere(0.3);
+    const modes = [_]SoftBodyListenerMode{ .none, .accept, .reject, .sensor, .mass_scales };
+    for (0..2 * modes.len) |i| {
+        b.at(@intCast(4 * i));
+        try b.softBodyListener(modes[i / 2]);
+        const from_below = i % 2 == 1;
+        const position: [3]Real = .{ 4 * real(i), 3, 0 };
+        _ = try b.softBody(.{ .settings = cloth, .position = position, .faces_double_sided = @intFromBool(from_below and i % 4 == 1), .object_layer = Layers.moving }, .activate);
+        _ = try shootSphere(b, sphere, position, if (from_below) .{ 0, 1, 0 } else .{ 0, -1, 0 }, 1);
+    }
+}
+
+/// A cloth with fixed corners and LRA constraints (Euclidean and geodesic) that sags onto a sphere
+fn buildSoftBodyClothLRA(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const ball = try b.sphere(0.5);
+    const euclidean = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 15, .count_z = 15, .spacing = 0.1, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-4, .lra_type = 1, .lra_max_distance_multiplier = 1.03, .kinematic = 1 });
+    const geodesic = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 15, .count_z = 15, .spacing = 0.1, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-4, .lra_type = 2, .lra_max_distance_multiplier = 1.05, .kinematic = 2 });
+    try b.softBodyListener(.accept);
+    for ([_]u32{ euclidean, geodesic }, 0..) |settings, i| {
+        const x = 4 * real(i);
+        _ = try b.body(.{ .position = .{ x, 0.5, 0 }, .shape = ball, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.softBody(.{ .settings = settings, .position = .{ x, 1.2, 0 }, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Free cloths with dihedral bends, distance bends and no bends draped over a box, without a soft body contact listener
+fn buildSoftBodyClothDihedral(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const block = try b.box(.{ 0.3, 0.5, 1.0 }, 0.05);
+    for ([_]u32{ 2, 1, 0 }, 0..) |bend_type, i| {
+        const x = 4 * real(i);
+        const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 12, .count_z = 12, .spacing = 0.1, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .bend_type = bend_type });
+        _ = try b.body(.{ .position = .{ x, 0.5, 0 }, .shape = block, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.softBody(.{ .settings = cloth, .position = .{ x, 1.3, 0.1 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .friction = 0.5, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Pressurized spheres on a floor, a box falls onto one of them; the pressure changes and the listener scales the masses
+fn buildSoftBodyPressureSphere(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    const sphere = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.sphere), .count_x = 8, .count_z = 10, .spacing = 0.5, .compliance = 1.0e-4, .shear_compliance = 1.0e-4, .bend_compliance = 1.0e-3 });
+    try b.softBodyListener(.accept);
+    const inflated = try b.softBody(.{ .settings = sphere, .position = .{ 0, 0.8, 0 }, .pressure = 2000, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = sphere, .position = .{ 3, 0.8, 0 }, .pressure = 0, .object_layer = Layers.moving }, .activate);
+    b.at(15);
+    _ = try b.body(.{ .position = .{ 0.1, 2.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    b.at(30);
+    try b.softBodyListener(.mass_scales);
+    b.at(45);
+    try b.softBodyOp(.soft_body_set_pressure, inflated, .{ .f = &.{500} });
+}
+
+/// Cosserat rod chains with a fixed end (and one without) that swing into a static capsule and a dynamic sphere
+fn buildSoftBodyRodChain(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const capsule = try b.capsule(0.5, 0.15);
+    const ball = try b.sphere(0.25);
+    const fixed = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 16, .spacing = 0.3, .height = 1.5, .compliance = 1.0e-5, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const free = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 12, .spacing = 0.25, .height = 1.0, .compliance = 1.0e-4, .shear_compliance = 1.0e-3 });
+    try b.softBodyListener(.accept);
+    _ = try b.body(.{ .position = .{ 0.2, 1.0, 0 }, .rotation = axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi), .shape = capsule, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.softBody(.{ .settings = fixed, .position = .{ 0, 2.5, 0 }, .num_iterations = 6, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = free, .position = .{ 3, 2, 0 }, .rotation = axisAngle(normalize3(.{ 1, 0, 1 }), 0.8), .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3, 0.25, 0 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+}
+
+/// Skinned cloths whose joints move (SkinVertices every update), with back stops and without, and a ball that falls onto
+/// the first one
+fn buildSoftBodySkinnedBackStops(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const ball = try b.sphere(0.2);
+    const back_stop = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 8, .count_z = 9, .count_extra = 4, .spacing = 0.15, .compliance = 1.0e-4, .shear_compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.2, .back_stop_distance = 0.02, .back_stop_radius = 0.5 });
+    const no_back_stop = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 8, .count_z = 9, .count_extra = 4, .spacing = 0.15, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3 });
+    try b.softBodyListener(.accept);
+    const skinned = [_]u32{
+        try b.softBody(.{ .settings = back_stop, .position = .{ 0, 1, 0 }, .object_layer = Layers.moving }, .activate),
+        try b.softBody(.{ .settings = no_back_stop, .position = .{ 3, 1, 0 }, .faces_double_sided = 1, .object_layer = Layers.moving }, .activate),
+    };
+    _ = try b.body(.{ .position = .{ 0.05, 2, 0.1 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const pose = skinnedClothPose(4, -0.6, 0.4, @as(f64, @floatFromInt(u)) / 60.0);
+        const joints = try b.addJointMatrices(&pose);
+        for (skinned) |handle|
+            try b.softBodyOp(.soft_body_skin_vertices, handle, .{ .i = &.{ joints, 4, @intFromBool(u == 0) } });
+        if (u == 40)
+            try b.softBodyOp(.soft_body_set_skinned_max_distance_multiplier, skinned[0], .{ .f = &.{2.0} });
+    }
+}
+
+/// Soft bodies that fall through a static sensor and a moving kinematic sensor onto a floor, with the listener in the
+/// modes that record the sensor contacts (accept), turn the contacts into sensor contacts (sensor) and ignore the
+/// sensors (none)
+fn buildSoftBodySensor(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const sensor_box = try b.box(.{ 0.8, 0.4, 0.8 }, 0);
+    const sensor_ball = try b.sphere(0.5);
+    _ = try b.body(.{ .position = .{ 0, 1.2, 0 }, .shape = sensor_box, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 2, 0.6, -2 }, .shape = sensor_ball, .motion_type = 1, .is_sensor = 1, .linear_velocity = .{ 0, 0, 2 }, .object_layer = Layers.sensor }, .activate);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.15 });
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 8, .count_z = 8, .spacing = 0.1, .compliance = 1.0e-4 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 0, 2.2, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 2, 0.4, 0 }, .object_layer = Layers.moving }, .activate);
+    b.at(25);
+    try b.softBodyListener(.sensor);
+    b.at(35);
+    try b.softBodyListener(.none);
+    b.at(45);
+    try b.softBodyListener(.accept);
+}
+
+/// Soft bodies that fall asleep on a floor; a box that falls onto one wakes it through ProcessBodyPair (the soft body is
+/// body 2 of the pair), ActivateBody wakes the other one
+fn buildSoftBodySleepAndWake(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 200;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 4, .spacing = 0.2 });
+    try b.softBodyListener(.accept);
+    const hit = try b.softBody(.{ .settings = cube, .position = .{ 0, 0.4, 0 }, .object_layer = Layers.moving }, .activate);
+    const woken = try b.softBody(.{ .settings = cube, .position = .{ 3, 0.4, 0 }, .object_layer = Layers.moving }, .activate);
+    b.at(150);
+    try b.expectSleeping(hit);
+    try b.expectSleeping(woken);
+    _ = try b.body(.{ .position = .{ 0.05, 1.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    try b.op(.activate_body, woken, .{});
+    b.at(185);
+    try b.expectAwake(hit);
+}
+
+/// Soft bodies with UpdatePosition false: a cloth that falls onto a sphere and a cube that falls onto the floor keep
+/// their body position (the vertices move); the cube switches UpdatePosition on later
+fn buildSoftBodyUpdatePositionFalse(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const ball = try b.sphere(0.4);
+    _ = try b.body(.{ .position = .{ 0, 0.4, 0 }, .shape = ball, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 10, .count_z = 10, .spacing = 0.12, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3 });
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.2 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.2, 0 }, .update_position = 0, .object_layer = Layers.moving }, .activate);
+    const c = try b.softBody(.{ .settings = cube, .position = .{ 3, 1, 0 }, .rotation = axisAngle(normalize3(.{ 1, 0, 1 }), 0.3), .update_position = 0, .object_layer = Layers.moving }, .activate);
+    b.at(40);
+    try b.softBodyOp(.soft_body_set_update_position, c, .{ .i = &.{1} });
+}
+
+/// Several soft bodies on one dynamic platform: SoftBodyFinalize adds their velocity changes to the platform in BodyID
+/// order. The soft bodies are activated in another order than their IDs, so JobSoftBodyPrepare must sort them.
+fn buildSoftBodySeveralOnOneBody(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const platform = try b.box(.{ 1.5, 0.1, 1.5 }, 0.05);
+    _ = try b.body(.{ .position = .{ 0, 0.1, 0 }, .shape = platform, .friction = 0.6, .object_layer = Layers.moving }, .activate);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 4, .spacing = 0.15 });
+    try b.softBodyListener(.mass_scales);
+    var handles: [4]u32 = undefined;
+    for (&handles, 0..) |*handle, i| {
+        const x = -0.8 + 0.55 * real(i);
+        handle.* = try b.softBody(.{ .settings = cube, .position = .{ x, 0.6 + 0.1 * real(i), 0.2 * real(i % 2) }, .rotation = axisAngle(normalize3(.{ 1, 1, 0 }), 0.2 * @as(f64, @floatFromInt(i))), .object_layer = Layers.moving }, .dont_activate);
+    }
+    for ([_]usize{ 3, 1, 0, 2 }) |i|
+        try b.op(.activate_body, handles[i], .{});
+    b.at(30);
+    try b.softBodyListener(.accept);
+}
+
+/// Save and cross restore with soft bodies of every kind (vertices, rod states, skin states): a snapshot of the full
+/// state and one of the bodies only
+fn buildSoftBodySaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    const state_bodies: u32 = 2; // EStateRecorderState::Bodies
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.2 });
+    const rods = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 10, .spacing = 0.2, .height = 1, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const skinned = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 6, .count_z = 7, .count_extra = 3, .spacing = 0.2, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3, .back_stop_distance = 0.05, .back_stop_radius = 10 });
+    try b.softBodyListener(.accept);
+    const c = try b.softBody(.{ .settings = cube, .position = .{ 0, 1, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = rods, .position = .{ 3, 2.5, 0 }, .object_layer = Layers.moving }, .activate);
+    const sk = try b.softBody(.{ .settings = skinned, .position = .{ -3, 1.5, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0.1, 2, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const pose = skinnedClothPose(3, -0.6, 0.6, @as(f64, @floatFromInt(u)) / 60.0);
+        try b.softBodyOp(.soft_body_skin_vertices, sk, .{ .i = &.{ try b.addJointMatrices(&pose), 3, @intFromBool(u == 0) } });
+        switch (u) {
+            12 => try b.sysOp(.snapshot, .{ .index = 0 }),
+            18 => try b.softBodyOp(.soft_body_set_vertex_velocity, c, .{ .i = &.{5}, .f = &.{ 0, 3, 0 } }),
+            25 => try b.sysOp(.restore_cross, .{ .index = 0 }),
+            35 => try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_bodies} }),
+            42 => try b.sysOp(.restore_cross, .{ .index = 1 }),
+            else => {},
+        }
+    }
+}
+
+/// Soft bodies with 2 collision steps per update: a skinned cloth (SkinVertices before every update, the skin flag
+/// restore of the sweeps), a cube and a rod chain
+fn buildSoftBodyCollisionSteps2(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 50;
+    b.collision_steps = 2;
+    _ = try addFloor(b, 10, 0);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 5, .spacing = 0.15 });
+    const rods = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 8, .spacing = 0.2, .height = 0.8, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const skinned = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 6, .count_z = 7, .count_extra = 3, .spacing = 0.2, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3, .back_stop_distance = 0.05, .back_stop_radius = 10 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 0, 1, 0 }, .rotation = axisAngle(normalize3(.{ 0, 1, 1 }), 0.4), .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = rods, .position = .{ 3, 2, 0 }, .object_layer = Layers.moving }, .activate);
+    const sk = try b.softBody(.{ .settings = skinned, .position = .{ -3, 1.5, 0 }, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const pose = skinnedClothPose(3, -0.6, 0.6, @as(f64, @floatFromInt(u)) / 60.0);
+        try b.softBodyOp(.soft_body_skin_vertices, sk, .{ .i = &.{ try b.addJointMatrices(&pose), 3, @intFromBool(u == 0) } });
+    }
+}
+
+/// A 30 x 30 cloth (900 vertices: several parallel constraint groups, a non-empty non-parallel group and a partial last
+/// vertex batch) with fixed corners, LRA and dihedral bends, with a box falling onto it
+fn buildSoftBodyLargeCloth(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.15, 0.15, 0.15 }, 0.05);
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cloth), .count_x = 30, .count_z = 30, .spacing = 0.05, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .lra_type = 1, .lra_max_distance_multiplier = 1.03, .bend_type = 2, .kinematic = 1 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.5, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0.1, 2.2, -0.05 }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// Soft bodies whose vertex counts are just below, at and just above a multiple of the collision batch (64): 63, 64, 65,
+/// 125 vertices, on a floor with a box
+fn buildSoftBodyPartialBatches(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 50;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const settings = [_]u32{
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 9, .count_z = 7, .spacing = 0.1, .compliance = 1.0e-4 }),
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.15 }),
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 13, .count_z = 5, .spacing = 0.1, .compliance = 1.0e-4, .bend_type = 2, .bend_compliance = 1.0e-3 }),
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 5, .spacing = 0.12 }),
+    };
+    try b.softBodyListener(.accept);
+    for (settings, 0..) |s, i|
+        _ = try b.softBody(.{ .settings = s, .position = .{ 2 * real(i), 0.8, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.25), .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 2, 1.6, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// Cloths and cubes that fall onto every kind of shape: a static compound, a mesh, a height field, a convex hull, a
+/// scaled and a rotated translated shape, a kinematic box that moves under a cloth and dynamic shapes they push
+fn buildSoftBodyShapes(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 15, 0);
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const ball = try b.sphere(0.3);
+    const compound = try b.compound(.static_compound, &.{
+        .{ .shape = box, .position = .{ -0.3, 0.3, 0 } },
+        .{ .shape = ball, .position = .{ 0.4, 0.3, 0 } },
+    });
+    const mesh = try b.mesh(&.{
+        .{ -1, 0.2, -1, -1, 0.4, 1, 1, 0.2, 1 },
+        .{ -1, 0.2, -1, 1, 0.2, 1, 1, 0.6, -1 },
+    });
+    var samples: [16]f32 = undefined;
+    for (&samples, 0..) |*s, i| s.* = 0.1 * @as(f32, @floatFromInt((i * 7) % 5));
+    const height_field = try b.heightField(&samples, 4, .{ -1, 0.1, -1 }, .{ 0.67, 1, 0.67 });
+    const hull = try b.convexHull(&.{ .{ -0.4, 0, -0.4 }, .{ 0.4, 0, -0.4 }, .{ 0, 0, 0.5 }, .{ 0, 0.6, 0 } }, 0.05);
+    const scaled = try b.scaled(box, .{ 1.5, 0.5, 1.5 });
+    const rotated = try b.rotatedTranslated(box, .{ 0, 0.3, 0 }, axisAngle(.{ 0, 1, 0 }, 0.6));
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 9, .count_z = 9, .spacing = 0.15, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3 });
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.15 });
+    try b.softBodyListener(.accept);
+    const statics = [_]u32{ compound, mesh, height_field, hull, scaled, rotated };
+    for (statics, 0..) |shape, i| {
+        const x = 3 * real(i) - 7.5;
+        _ = try b.body(.{ .position = .{ x, 0, 0 }, .shape = shape, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.softBody(.{ .settings = if (i % 2 == 0) cloth else cube, .position = .{ x, 1.5, 0.05 }, .object_layer = Layers.moving }, .activate);
+    }
+    // A kinematic box that moves under a cloth and a dynamic ball that a cube falls onto
+    _ = try b.body(.{ .position = .{ -1, 0.5, 3 }, .shape = box, .motion_type = 1, .linear_velocity = .{ 1, 0, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.2, 3 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3, 0.3, 3 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 3, 1.2, 3 }, .object_layer = Layers.moving }, .activate);
+}
+
+// (append the soft body scenes here)
 
 /// The scene of the test "SimulationParity object state decoder": a character, a character virtual on the floor (an
 /// active contact after its first update), a ragdoll and a car (every object state field but the tracked and the
