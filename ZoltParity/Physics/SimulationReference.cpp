@@ -23,6 +23,13 @@
 // trips of the vehicle and ragdoll settings (jolt_sim_vehicle_settings_part, jolt_sim_ragdoll_settings_bytes) and the
 // CharacterID test (jolt_sim_character_id_sequence) are compared before a scene runs.
 //
+// Soft bodies (Phase 9, group SH): this side generates the shared settings of every SimSoftBodySettings
+// (SimMakeSoftBodySettings: the same generators as makeSoftBodySettings of SimulationParity.zig, whose SaveBinaryState
+// bytes jolt_sim_soft_body_settings_bytes returns for the comparison before a scene runs), creates the soft bodies from
+// their SimSoftBody descriptions and applies every soft body operation (ApplySoftBodyOp). The soft body contact listener
+// (SimSoftBodyContactListener, SoftBodyListenerMode) records into the recorder of the other listeners. The state decoder
+// of SimulationParity.zig learns the array sizes of each soft body from jolt_sim_soft_body_info.
+//
 // The process hooks (ZoltParity/ParityHooks.h): zero-filled allocations (Jolt leaves members uninitialized that its
 // states hold), a Trace that prints, and with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) an
 // AssertFailed that prints and counts: the simulation parity fails a scene whose C++ side hit an assert.
@@ -87,7 +94,13 @@
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 #include <Jolt/Physics/Vehicle/TrackedVehicleController.h>
 #include <Jolt/Physics/Vehicle/MotorcycleController.h>
+#include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
+#include <Jolt/Physics/SoftBody/SoftBodyContactListener.h>
+#include <Jolt/Physics/SoftBody/SoftBodyManifold.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstddef>
@@ -487,6 +500,54 @@ struct SimVehicle
 	uint32				mTireMaxImpulse;							// VehicleTireMaxImpulse
 };
 
+// Phase 9: must match SimSoftBodySettings in SimScenes.zig (a generator of shared settings, see SimMakeSoftBodySettings)
+struct SimSoftBodySettings
+{
+	uint32				mKind;										// SoftBodySettingsKind
+	uint32				mCountX;
+	uint32				mCountZ;
+	uint32				mCountExtra;
+	float				mSpacing;
+	float				mHeight;
+	float				mCompliance;
+	float				mShearCompliance;
+	float				mBendCompliance;
+	uint32				mLRAType;
+	float				mLRAMaxDistanceMultiplier;
+	uint32				mBendType;
+	uint32				mOptimize;
+	uint32				mKinematic;
+	float				mSkinMaxDistance;
+	float				mBackStopDistance;
+	float				mBackStopRadius;
+	uint32				mFloats;
+	uint32				mUints;
+};
+
+// Phase 9: must match SimSoftBody in SimScenes.zig (SoftBodyCreationSettings)
+struct SimSoftBody
+{
+	uint64				mUserData;
+	Real				mPosition[3];
+	float				mRotation[4];
+	uint32				mSettings;									// Index of the SimSoftBodySettings
+	uint32				mObjectLayer;
+	uint32				mCollisionGroupID;
+	uint32				mCollisionSubGroupID;
+	uint32				mNumIterations;
+	float				mLinearDamping;
+	float				mMaxLinearVelocity;
+	float				mRestitution;
+	float				mFriction;
+	float				mPressure;
+	float				mGravityFactor;
+	float				mVertexRadius;
+	uint32				mUpdatePosition;
+	uint32				mMakeRotationIdentity;
+	uint32				mAllowSleeping;
+	uint32				mFacesDoubleSided;
+};
+
 // Must match SimSceneDesc in SimScenes.zig
 struct SimSceneDesc
 {
@@ -538,6 +599,11 @@ struct SimSceneDesc
 	uint32						mNumVehicleAntiRollBars;
 	const uint32 *				mUints;
 	uint32						mNumUints;
+	// Phase 9
+	const SimSoftBodySettings *	mSoftBodySettings;
+	uint32						mNumSoftBodySettings;
+	const SimSoftBody *			mSoftBodies;
+	uint32						mNumSoftBodies;
 };
 
 // Must match ContactFlags in SimScenes.zig (bits in the upper 32 bits of the user data of a body)
@@ -722,6 +788,11 @@ enum class ESimRecordKind : uint32
 	VehiclePreStep = 18,
 	VehiclePostCollide = 19,
 	VehiclePostStep = 20,
+	// Phase 9: the soft body contact listener (compared sorted)
+	SoftBodyContactValidate = 70,
+	SoftBodyContactAdded = 71,
+	SoftBodyContactBody = 72,
+	SoftBodySensorContact = 73,
 };
 
 // Must match OpKind in SimScenes.zig
@@ -780,6 +851,25 @@ enum class ESimOp : uint32
 	ApplyBodyCreationSettings = 50,
 	WereBodiesInContact = 51,
 	SetCollideKinematicVsNonDynamic = 52,
+
+	// Phase 9: the soft body operations (53..69, ApplySoftBodyOp)
+	CreateSoftBody = 53,
+	CreateAndAddSoftBody = 54,
+	CreateSoftBodyNoAdd = 55,
+	SoftBodySetVertexPosition = 56,
+	SoftBodySetVertexVelocity = 57,
+	SoftBodySetVertexInvMass = 58,
+	SoftBodySetPressure = 59,
+	SoftBodySetNumIterations = 60,
+	SoftBodySetUpdatePosition = 61,
+	SoftBodySetFacesDoubleSided = 62,
+	SoftBodySetVertexRadius = 63,
+	SoftBodySetEnableSkinConstraints = 64,
+	SoftBodySetSkinnedMaxDistanceMultiplier = 65,
+	SoftBodySkinVertices = 66,
+	SoftBodyCustomUpdate = 67,
+	SoftBodyCreationSettingsHash = 68,
+	SetSoftBodyContactListener = 69,
 
 	// Constraint operations (Phase 6), in the reserved ranges of ConstraintOpRange (SimScenes.zig)
 	// ConstraintOpRange.generic
@@ -1018,6 +1108,10 @@ static constexpr uint32 cFirstTrackedOp = 570;
 static constexpr uint32 cFirstMotorcycleOp = 580;
 static constexpr uint32 cFirstSparePhase7Op = 590;
 static constexpr uint32 cEndPhase7Op = 600;
+
+// The soft body operations of SimScenes.zig (isSoftBodyOp): 53 .. 69
+static constexpr uint32 cFirstSoftBodyOp = 53;
+static constexpr uint32 cEndSoftBodyOp = 70;
 
 // Must match ObjectField in SimScenes.zig: the fields of the object state
 enum class ESimObjectField : uint16
@@ -2350,6 +2444,343 @@ static SimRecord SimVehicleRecord(ESimRecordKind inKind, uint32 inHandle, const 
 	return r;
 }
 
+// -------------------------------------------------------------------------------------------------------------------
+// Phase 9: soft bodies (makeSoftBodySettings, SoftBodyListenerImpl and hashSoftBody of SimulationParity.zig run the same
+// code on the Zolt side)
+
+// The vertices and faces of a cloth (SoftBodySettingsKind.cloth: SoftBodyCreator::CreateCloth without its functions)
+static void SimAddCloth(SoftBodySharedSettings &ioSettings, const SimSoftBodySettings &inS)
+{
+	const float offset_x = -0.5f * inS.mSpacing * float(inS.mCountX - 1);
+	const float offset_z = -0.5f * inS.mSpacing * float(inS.mCountZ - 1);
+	for (uint32 z = 0; z < inS.mCountZ; ++z)
+		for (uint32 x = 0; x < inS.mCountX; ++x)
+		{
+			SoftBodySharedSettings::Vertex v;
+			v.mPosition = Float3(offset_x + float(x) * inS.mSpacing, 0.0f, offset_z + float(z) * inS.mSpacing);
+			bool first_or_last_row = z == 0 || z == inS.mCountZ - 1;
+			bool kinematic = inS.mKinematic == 1? first_or_last_row && (x == 0 || x == inS.mCountX - 1) : inS.mKinematic == 2 && first_or_last_row;
+			v.mInvMass = kinematic? 0.0f : 1.0f;
+			ioSettings.mVertices.push_back(v);
+		}
+	for (uint32 z = 0; z + 1 < inS.mCountZ; ++z)
+		for (uint32 x = 0; x + 1 < inS.mCountX; ++x)
+		{
+			uint32 i = x + z * inS.mCountX;
+			ioSettings.AddFace(SoftBodySharedSettings::Face(i, i + inS.mCountX, i + inS.mCountX + 1));
+			ioSettings.AddFace(SoftBodySharedSettings::Face(i, i + inS.mCountX + 1, i + 1));
+		}
+}
+
+// The joints, the inverse bind matrices and the skinned constraints of a skinned cloth (SoftBodySettingsKind.skinned_cloth,
+// SoftBodySkinnedConstraintTest::Initialize)
+static void SimAddSkin(SoftBodySharedSettings &ioSettings, const SimSoftBodySettings &inS)
+{
+	const uint32 num_joints = inS.mCountExtra;
+	const float offset_z = -0.5f * inS.mSpacing * float(inS.mCountZ - 1);
+	const float step = float(inS.mCountZ - 1) * inS.mSpacing / float(num_joints - 1);
+	Array<float> joint_z;
+	for (uint32 j = 0; j < num_joints; ++j)
+	{
+		float z = offset_z + float(j) * step;
+		joint_z.push_back(z);
+		ioSettings.mInvBindMatrices.push_back(SoftBodySharedSettings::InvBind(j, Mat44::sTranslation(Vec3(0, 0, z)).Inversed()));
+	}
+	for (uint32 v = 0; v < uint32(ioSettings.mVertices.size()); ++v)
+	{
+		const SoftBodySharedSettings::Vertex &vertex = ioSettings.mVertices[v];
+		SoftBodySharedSettings::Skinned skinned(v, vertex.mInvMass > 0.0f? inS.mSkinMaxDistance : 0.0f, inS.mBackStopDistance, inS.mBackStopRadius);
+
+		// Find the two closest joints
+		uint32 closest = 0, prev_closest = 0;
+		float closest_dist = FLT_MAX, prev_closest_dist = FLT_MAX;
+		for (uint32 j = 0; j < num_joints; ++j)
+		{
+			float dist = std::abs(vertex.mPosition.z - joint_z[j]);
+			if (dist < closest_dist)
+			{
+				prev_closest = closest;
+				prev_closest_dist = closest_dist;
+				closest = j;
+				closest_dist = dist;
+			}
+			else if (dist < prev_closest_dist)
+			{
+				prev_closest = j;
+				prev_closest_dist = dist;
+			}
+		}
+		if (closest_dist == 0.0f)
+		{
+			// Hard skin to the closest joint
+			skinned.mWeights[0] = SoftBodySharedSettings::SkinWeight(closest, 1.0f);
+		}
+		else
+		{
+			// Skin to the two closest joints
+			skinned.mWeights[0] = SoftBodySharedSettings::SkinWeight(closest, 1.0f / closest_dist);
+			skinned.mWeights[1] = SoftBodySharedSettings::SkinWeight(prev_closest, 1.0f / prev_closest_dist);
+			skinned.NormalizeWeights();
+		}
+		ioSettings.mSkinnedConstraints.push_back(skinned);
+	}
+}
+
+// The shared settings of a SimSoftBodySettings (SoftBodySettingsKind of SimScenes.zig; makeSoftBodySettings of
+// SimulationParity.zig runs the same code)
+static Ref<SoftBodySharedSettings> SimMakeSoftBodySettings(const SimSceneDesc &inDesc, const SimSoftBodySettings &inS)
+{
+	SoftBodySharedSettings::VertexAttributes attributes(inS.mCompliance, inS.mShearCompliance, inS.mBendCompliance, SoftBodySharedSettings::ELRAType(inS.mLRAType), inS.mLRAMaxDistanceMultiplier);
+	SoftBodySharedSettings::EBendType bend_type = SoftBodySharedSettings::EBendType(inS.mBendType);
+	Ref<SoftBodySharedSettings> settings = new SoftBodySharedSettings;
+	switch (inS.mKind)
+	{
+	case 0: // Cube
+		return SoftBodySharedSettings::sCreateCube(inS.mCountX, inS.mSpacing);
+
+	case 1: // Cloth
+	case 4: // Skinned cloth
+		SimAddCloth(*settings, inS);
+		settings->CreateConstraints(&attributes, 1, bend_type);
+		if (inS.mOptimize != 0)
+			settings->Optimize();
+		if (inS.mKind == 4)
+		{
+			SimAddSkin(*settings, inS);
+			settings->CalculateSkinnedConstraintNormals();
+			if (inS.mOptimize != 0)
+				settings->Optimize();
+		}
+		return settings;
+
+	case 2: // Sphere (SoftBodyCreator::CreateSphere)
+		{
+			const float radius = inS.mSpacing;
+			const uint32 num_theta = inS.mCountX, num_phi = inS.mCountZ;
+			SoftBodySharedSettings::Vertex v;
+			(radius * Vec3::sUnitSpherical(0, 0)).StoreFloat3(&v.mPosition);
+			settings->mVertices.push_back(v);
+			(radius * Vec3::sUnitSpherical(JPH_PI, 0)).StoreFloat3(&v.mPosition);
+			settings->mVertices.push_back(v);
+			for (uint32 theta = 1; theta < num_theta - 1; ++theta)
+				for (uint32 phi = 0; phi < num_phi; ++phi)
+				{
+					(radius * Vec3::sUnitSpherical(JPH_PI * float(theta) / float(num_theta - 1), 2.0f * JPH_PI * float(phi) / float(num_phi))).StoreFloat3(&v.mPosition);
+					settings->mVertices.push_back(v);
+				}
+			auto vertex_index = [num_theta, num_phi](uint32 inTheta, uint32 inPhi) -> uint32
+			{
+				if (inTheta == 0)
+					return 0;
+				else if (inTheta == num_theta - 1)
+					return 1;
+				else
+					return 2 + (inTheta - 1) * num_phi + inPhi % num_phi;
+			};
+			SoftBodySharedSettings::Face f;
+			for (uint32 phi = 0; phi < num_phi; ++phi)
+			{
+				for (uint32 theta = 0; theta < num_theta - 2; ++theta)
+				{
+					f.mVertex[0] = vertex_index(theta, phi);
+					f.mVertex[1] = vertex_index(theta + 1, phi);
+					f.mVertex[2] = vertex_index(theta + 1, phi + 1);
+					settings->AddFace(f);
+					if (theta > 0)
+					{
+						f.mVertex[1] = vertex_index(theta + 1, phi + 1);
+						f.mVertex[2] = vertex_index(theta, phi + 1);
+						settings->AddFace(f);
+					}
+				}
+				f.mVertex[0] = vertex_index(num_theta - 2, phi + 1);
+				f.mVertex[1] = vertex_index(num_theta - 2, phi);
+				f.mVertex[2] = vertex_index(num_theta - 1, 0);
+				settings->AddFace(f);
+			}
+			settings->CreateConstraints(&attributes, 1, bend_type);
+			if (inS.mOptimize != 0)
+				settings->Optimize();
+			return settings;
+		}
+
+	case 3: // Rod chain (the helix of SoftBodyCosseratRodConstraintTest)
+		for (uint32 i = 0; i < inS.mCountX; ++i)
+		{
+			float fraction = float(i) / float(inS.mCountX - 1);
+			float alpha = 4.0f * JPH_PI * fraction;
+			SoftBodySharedSettings::Vertex v;
+			v.mPosition = Float3(inS.mSpacing * Sin(alpha), inS.mHeight * (0.5f - fraction), inS.mSpacing * Cos(alpha));
+			v.mInvMass = i == 0 && inS.mKinematic != 0? 0.0f : 1.0f;
+			settings->mVertices.push_back(v);
+			if (i > 0)
+				settings->mRodStretchShearConstraints.push_back(SoftBodySharedSettings::RodStretchShear(i - 1, i, inS.mCompliance));
+			if (i > 1)
+				settings->mRodBendTwistConstraints.push_back(SoftBodySharedSettings::RodBendTwist(i - 2, i - 1, inS.mShearCompliance));
+		}
+		settings->CalculateRodProperties();
+		if (inS.mOptimize != 0)
+			settings->Optimize();
+		return settings;
+
+	case 5: // Explicit
+		{
+			const float *f = inDesc.mFloats + inS.mFloats;
+			for (uint32 i = 0; i < inS.mCountX; ++i, f += 7)
+				settings->mVertices.push_back(SoftBodySharedSettings::Vertex(Float3(f[0], f[1], f[2]), Float3(f[3], f[4], f[5]), f[6]));
+			const uint32 *u = inDesc.mUints + inS.mUints;
+			for (uint32 i = 0; i < inS.mCountZ; ++i, u += 3)
+				settings->AddFace(SoftBodySharedSettings::Face(u[0], u[1], u[2]));
+			for (uint32 i = 0; i < inS.mCountExtra; ++i, u += 4)
+				settings->mVolumeConstraints.push_back(SoftBodySharedSettings::Volume(u[0], u[1], u[2], u[3], inS.mCompliance));
+			if (!settings->mFaces.empty())
+				settings->CreateConstraints(&attributes, 1, bend_type);
+			if (!settings->mVolumeConstraints.empty())
+				settings->CalculateVolumeConstraintVolumes();
+			if (inS.mOptimize != 0)
+				settings->Optimize();
+			return settings;
+		}
+
+	default:
+		Trace("SimulationReference: unknown soft body settings kind %u", inS.mKind);
+		abort();
+	}
+}
+
+// The SaveBinaryState bytes of shared settings
+static std::string SimSaveSoftBodySettings(const SoftBodySharedSettings &inSettings)
+{
+	std::stringstream data;
+	StreamOutWrapper stream(data);
+	inSettings.SaveBinaryState(stream);
+	return data.str();
+}
+
+// The result of the soft body operations 56..67 (OpKind of SimScenes.zig, hashSoftBody of SimulationParity.zig): the
+// hash of Body::SaveState, then of the values that the state does not hold
+static uint32 SimHashSoftBody(const Body &inBody)
+{
+	StateRecorderImpl recorder;
+	inBody.SaveState(recorder);
+	std::string data = recorder.GetData();
+	SimHasher h;
+	h.Bytes(data.data(), data.size());
+	const SoftBodyMotionProperties *mp = static_cast<const SoftBodyMotionProperties *>(inBody.GetMotionProperties());
+	h.U32(mp->GetNumIterations());
+	h.F32(mp->GetPressure());
+	h.Bool(mp->GetUpdatePosition());
+	h.Bool(mp->GetFacesDoubleSided());
+	h.Bool(mp->GetEnableSkinConstraints());
+	h.F32(mp->GetSkinnedMaxDistanceMultiplier());
+	h.F32(mp->GetVertexRadius());
+	for (const SoftBodyVertex &v : mp->GetVertices())
+		h.F32(v.mInvMass);
+	return h.mHash;
+}
+
+// The soft body contact listener (SoftBodyListenerMode of SimScenes.zig, SoftBodyListenerImpl of SimulationParity.zig):
+// records the callbacks (RecordKind 70..73, called from the soft body jobs), then OnSoftBodyContactValidate acts
+class SimSoftBodyContactListener final : public SoftBodyContactListener
+{
+public:
+	virtual SoftBodyValidateResult	OnSoftBodyContactValidate(const Body &inSoftBody, const Body &inOtherBody, SoftBodyContactSettings &ioSettings) override
+	{
+		SimRecord r = { };
+		r.mKind = uint32(ESimRecordKind::SoftBodyContactValidate);
+		r.mIDs[0] = inSoftBody.GetID().GetIndexAndSequenceNumber();
+		r.mIDs[1] = inOtherBody.GetID().GetIndexAndSequenceNumber();
+		SettingsBits(ioSettings, r.mData);
+		SoftBodyValidateResult result = SoftBodyValidateResult::AcceptContact;
+		switch (mMode)
+		{
+		case 2:		result = SoftBodyValidateResult::RejectContact; break;
+		case 3:		ioSettings.mIsSensor = true; break;
+		case 4:		ioSettings.mInvMassScale1 = 0.5f; ioSettings.mInvMassScale2 = 2.0f; ioSettings.mInvInertiaScale2 = 1.5f; break;
+		default:	break;
+		}
+		r.mIDs[2] = result == SoftBodyValidateResult::AcceptContact? 0 : 1;
+		SettingsBits(ioSettings, r.mData + 4);
+		mRecorder->Add(r);
+		return result;
+	}
+
+	virtual void					OnSoftBodyContactAdded(const Body &inSoftBody, const SoftBodyManifold &inManifold) override
+	{
+		const uint32 soft_body = inSoftBody.GetID().GetIndexAndSequenceNumber();
+		const Array<SoftBodyVertex> &vertices = inManifold.GetVertices();
+
+		// The call
+		SimRecord r = { };
+		r.mKind = uint32(ESimRecordKind::SoftBodyContactAdded);
+		r.mIDs[0] = soft_body;
+		r.mIDs[1] = uint32(vertices.size());
+		uint32 hash = 2166136261u, num_contacts = 0;
+		for (const SoftBodyVertex &v : vertices)
+		{
+			uint32 has_contact = inManifold.HasContact(v)? 1 : 0;
+			hash = SimHashBytes(hash, &has_contact, sizeof(has_contact));
+			num_contacts += has_contact;
+		}
+		r.mIDs[2] = num_contacts;
+		r.mIDs[3] = inManifold.GetNumSensorContacts();
+		r.mData[0] = hash;
+		mRecorder->Add(r);
+
+		// One record per body that vertices have a contact with
+		Array<BodyID> bodies;
+		for (const SoftBodyVertex &v : vertices)
+			if (inManifold.HasContact(v))
+			{
+				BodyID id = inManifold.GetContactBodyID(v);
+				if (std::find(bodies.begin(), bodies.end(), id) == bodies.end())
+					bodies.push_back(id);
+			}
+		for (const BodyID &id : bodies)
+		{
+			SimRecord b = { };
+			b.mKind = uint32(ESimRecordKind::SoftBodyContactBody);
+			b.mIDs[0] = soft_body;
+			b.mIDs[1] = id.GetIndexAndSequenceNumber();
+			uint32 body_hash = 2166136261u, count = 0;
+			for (const SoftBodyVertex &v : vertices)
+				if (inManifold.HasContact(v) && inManifold.GetContactBodyID(v) == id)
+				{
+					Vec3 p = inManifold.GetLocalContactPoint(v);
+					Vec3 n = inManifold.GetContactNormal(v);
+					float values[6] = { p.GetX(), p.GetY(), p.GetZ(), n.GetX(), n.GetY(), n.GetZ() };
+					body_hash = SimHashBytes(body_hash, values, sizeof(values));
+					++count;
+				}
+			b.mIDs[2] = count;
+			b.mData[0] = body_hash;
+			mRecorder->Add(b);
+		}
+
+		// The sensor contacts (the order of the sensors depends on the broad phase: not recorded)
+		for (uint i = 0; i < inManifold.GetNumSensorContacts(); ++i)
+		{
+			SimRecord s = { };
+			s.mKind = uint32(ESimRecordKind::SoftBodySensorContact);
+			s.mIDs[0] = soft_body;
+			s.mIDs[1] = inManifold.GetSensorContactBodyID(i).GetIndexAndSequenceNumber();
+			mRecorder->Add(s);
+		}
+	}
+
+	SimRecorder *					mRecorder = nullptr;
+	uint32							mMode = 0;								// SoftBodyListenerMode
+
+private:
+	static void						SettingsBits(const SoftBodyContactSettings &inSettings, uint32 *outData)
+	{
+		outData[0] = SimFloatBits(inSettings.mInvMassScale1);
+		outData[1] = SimFloatBits(inSettings.mInvMassScale2);
+		outData[2] = SimFloatBits(inSettings.mInvInertiaScale2);
+		outData[3] = inSettings.mIsSensor? 1 : 0;
+	}
+};
+
 // A vehicle of the world: the constraint, its tester, the defaults of its callbacks and the filters of
 // vehicle_tester_set_filters (the tester keeps pointers to them)
 struct SimVehicleData
@@ -2412,6 +2843,12 @@ public:
 		mCharacterRecordListener.mRecorder = &mCharacterRecorder;
 		mCharacterModifyListener.mRecorder = &mCharacterRecorder;
 		mCharacterModifyListener.mModify = true;
+
+		// Phase 9: the shared settings of every SimSoftBodySettings (the soft bodies of a description share them), the
+		// soft body contact listener records with the other listeners (installed by set_soft_body_contact_listener)
+		for (uint32 i = 0; i < inDesc.mNumSoftBodySettings; ++i)
+			mSoftBodySettings.push_back(SimMakeSoftBodySettings(inDesc, inDesc.mSoftBodySettings[i]));
+		mSoftBodyListener.mRecorder = &mRecorder;
 	}
 
 								~SimWorld()
@@ -4176,6 +4613,149 @@ public:
 				c->RestoreState(ioStream);
 	}
 
+	// -------------------------------------------------------------------------------------------------------------------
+	// Phase 9: soft bodies
+
+	// MakeSoftBodyCreationSettings of SimulationParity.zig
+	SoftBodyCreationSettings	MakeSoftBodyCreationSettings(const SimSoftBody &inSoftBody) const
+	{
+		SoftBodyCreationSettings s(mSoftBodySettings[inSoftBody.mSettings], SimLoadR3(inSoftBody.mPosition), SimLoadQuat(inSoftBody.mRotation), ObjectLayer(inSoftBody.mObjectLayer));
+		s.mUserData = inSoftBody.mUserData;
+		s.mCollisionGroup = CollisionGroup(nullptr, inSoftBody.mCollisionGroupID, inSoftBody.mCollisionSubGroupID);
+		s.mNumIterations = inSoftBody.mNumIterations;
+		s.mLinearDamping = inSoftBody.mLinearDamping;
+		s.mMaxLinearVelocity = inSoftBody.mMaxLinearVelocity;
+		s.mRestitution = inSoftBody.mRestitution;
+		s.mFriction = inSoftBody.mFriction;
+		s.mPressure = inSoftBody.mPressure;
+		s.mGravityFactor = inSoftBody.mGravityFactor;
+		s.mVertexRadius = inSoftBody.mVertexRadius;
+		s.mUpdatePosition = inSoftBody.mUpdatePosition != 0;
+		s.mMakeRotationIdentity = inSoftBody.mMakeRotationIdentity != 0;
+		s.mAllowSleeping = inSoftBody.mAllowSleeping != 0;
+		s.mFacesDoubleSided = inSoftBody.mFacesDoubleSided != 0;
+		return s;
+	}
+
+	// The result of soft_body_creation_settings_hash (OpKind of SimScenes.zig): every member of the settings, the index of
+	// the shared settings among the world's settings objects and their SaveBinaryState bytes
+	uint32						HashSoftBodyCreationSettings(const SoftBodyCreationSettings &inSettings) const
+	{
+		SimHasher h;
+		h.RVec3(inSettings.mPosition);
+		h.Quat(inSettings.mRotation);
+		h.Value(inSettings.mUserData);
+		h.U32(uint32(inSettings.mObjectLayer));
+		h.U32(inSettings.mCollisionGroup.GetGroupID());
+		h.U32(inSettings.mCollisionGroup.GetSubGroupID());
+		h.Bool(inSettings.mCollisionGroup.GetGroupFilter() != nullptr);
+		h.U32(inSettings.mNumIterations);
+		h.F32(inSettings.mLinearDamping);
+		h.F32(inSettings.mMaxLinearVelocity);
+		h.F32(inSettings.mRestitution);
+		h.F32(inSettings.mFriction);
+		h.F32(inSettings.mPressure);
+		h.F32(inSettings.mGravityFactor);
+		h.F32(inSettings.mVertexRadius);
+		h.Bool(inSettings.mUpdatePosition);
+		h.Bool(inSettings.mMakeRotationIdentity);
+		h.Bool(inSettings.mAllowSleeping);
+		h.Bool(inSettings.mFacesDoubleSided);
+		uint32 index = cInvalidHandle;
+		for (uint32 i = 0; i < uint32(mSoftBodySettings.size()) && index == cInvalidHandle; ++i)
+			if (mSoftBodySettings[i] == inSettings.mSettings)
+				index = i;
+		h.U32(index);
+		std::string bytes = SimSaveSoftBodySettings(*inSettings.mSettings);
+		h.Bytes(bytes.data(), bytes.size());
+		return h.mHash;
+	}
+
+	// A soft body operation (OpKind 53..69 in SimScenes.zig)
+	uint32						ApplySoftBodyOp(const SimOp &inOp)
+	{
+		BodyInterface &bi = mSystem.GetBodyInterface();
+		EActivation activation = inOp.mActivation == 0? EActivation::Activate : EActivation::DontActivate;
+		const uint32 *i = inOp.mI;
+		const float *f = inOp.mF;
+
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::CreateSoftBody:
+		case ESimOp::CreateAndAddSoftBody:
+		case ESimOp::CreateSoftBodyNoAdd:
+			{
+				SoftBodyCreationSettings settings = MakeSoftBodyCreationSettings(mDesc.mSoftBodies[inOp.mIndex]);
+				BodyID new_id;
+				if (ESimOp(inOp.mKind) == ESimOp::CreateAndAddSoftBody)
+					new_id = bi.CreateAndAddSoftBody(settings, activation);
+				else
+				{
+					Body *body = bi.CreateSoftBody(settings);
+					if (body != nullptr)
+					{
+						new_id = body->GetID();
+						if (ESimOp(inOp.mKind) == ESimOp::CreateSoftBody)
+							bi.AddBody(new_id, activation);
+					}
+				}
+				mHandles.push_back(new_id);
+				return new_id.GetIndexAndSequenceNumber();
+			}
+
+		case ESimOp::SetSoftBodyContactListener:
+			mSoftBodyListener.mMode = inOp.mIndex;
+			mSystem.SetSoftBodyContactListener(inOp.mIndex == 0? nullptr : &mSoftBodyListener);
+			return 0;
+
+		default:
+			break;
+		}
+
+		// The soft body of the body handle. The operations run between the updates: the no-lock interface (CustomUpdate
+		// locks the bodies it collides with).
+		Body *body = mSystem.GetBodyLockInterfaceNoLock().TryGetBody(GetHandle(inOp.mBody));
+		if (body == nullptr || !body->IsSoftBody())
+		{
+			Trace("SimulationReference: soft body operation %u on body handle %u, which is not a soft body", inOp.mKind, inOp.mBody);
+			abort();
+		}
+		SoftBodyMotionProperties *mp = static_cast<SoftBodyMotionProperties *>(body->GetMotionProperties());
+		switch (ESimOp(inOp.mKind))
+		{
+		case ESimOp::SoftBodySetVertexPosition:					mp->GetVertex(i[0]).mPosition = SimLoad3(f); break;
+		case ESimOp::SoftBodySetVertexVelocity:					mp->GetVertex(i[0]).mVelocity = SimLoad3(f); break;
+		case ESimOp::SoftBodySetVertexInvMass:					mp->GetVertex(i[0]).mInvMass = f[0]; break;
+		case ESimOp::SoftBodySetPressure:						mp->SetPressure(f[0]); break;
+		case ESimOp::SoftBodySetNumIterations:					mp->SetNumIterations(i[0]); break;
+		case ESimOp::SoftBodySetUpdatePosition:					mp->SetUpdatePosition(i[0] != 0); break;
+		case ESimOp::SoftBodySetFacesDoubleSided:				mp->SetFacesDoubleSided(i[0] != 0); break;
+		case ESimOp::SoftBodySetVertexRadius:					mp->SetVertexRadius(f[0]); break;
+		case ESimOp::SoftBodySetEnableSkinConstraints:			mp->SetEnableSkinConstraints(i[0] != 0); break;
+		case ESimOp::SoftBodySetSkinnedMaxDistanceMultiplier:	mp->SetSkinnedMaxDistanceMultiplier(f[0]); break;
+
+		case ESimOp::SoftBodySkinVertices:
+			{
+				Array<Mat44> joints;
+				for (uint32 j = 0; j < i[1]; ++j)
+				{
+					const float *m = mDesc.mFloats + i[0] + 16 * j;
+					joints.push_back(Mat44(Vec4(m[0], m[1], m[2], m[3]), Vec4(m[4], m[5], m[6], m[7]), Vec4(m[8], m[9], m[10], m[11]), Vec4(m[12], m[13], m[14], m[15])));
+				}
+				mp->SkinVertices(body->GetCenterOfMassTransform(), joints.data(), uint(joints.size()), i[2] != 0, mTempAllocator);
+				break;
+			}
+
+		case ESimOp::SoftBodyCustomUpdate:						mp->CustomUpdate(f[0], *body, mSystem); break;
+		case ESimOp::SoftBodyCreationSettingsHash:				return HashSoftBodyCreationSettings(body->GetSoftBodyCreationSettings());
+
+		default:
+			Trace("SimulationReference: unknown soft body operation %u", inOp.mKind);
+			abort();
+		}
+		return SimHashSoftBody(*body);
+	}
+
 	// Apply an operation, see OpKind in SimScenes.zig
 	uint32						ApplyOp(const SimOp &inOp)
 	{
@@ -4189,6 +4769,8 @@ public:
 			return ApplyConstraintOp(inOp);
 		if (inOp.mKind >= cFirstPhase7Op && inOp.mKind < cEndPhase7Op)
 			return ApplyObjectOp(inOp);
+		if (inOp.mKind >= cFirstSoftBodyOp && inOp.mKind < cEndSoftBodyOp)
+			return ApplySoftBodyOp(inOp);
 
 		switch (ESimOp(inOp.mKind))
 		{
@@ -4381,6 +4963,10 @@ public:
 	Array<Ref<RagdollSettings>>	mRagdollSettings;							// Per ragdoll description, built at its first create_ragdoll
 	Array<Ref<Ragdoll>>			mRagdolls;									// The ragdolls of the ragdoll handles (nullptr: destroyed or out of bodies)
 	Array<SimVehicleData *>		mVehicles;									// The vehicles of the vehicle handles
+
+	// Phase 9
+	Array<Ref<SoftBodySharedSettings>> mSoftBodySettings;					// The shared settings of the SimSoftBodySettings
+	SimSoftBodyContactListener	mSoftBodyListener;							// Installed by set_soft_body_contact_listener
 };
 
 void SimStepListenerImpl::OnStep(const PhysicsStepListenerContext &inContext)
@@ -5276,6 +5862,131 @@ uint32 jolt_sim_reference_has_asserts()
 #else
 	return 0;
 #endif
+}
+
+// Phase 9: the sizes and some offsets of the soft body structs shared with SimScenes.zig
+void jolt_sim_soft_body_struct_sizes(uint32 *outSizes)
+{
+	outSizes[0] = sizeof(SimSoftBodySettings);
+	outSizes[1] = sizeof(SimSoftBody);
+	outSizes[2] = offsetof(SimSoftBody, mPosition);
+	outSizes[3] = offsetof(SimSoftBody, mSettings);
+	outSizes[4] = offsetof(SimSoftBody, mFacesDoubleSided);
+	outSizes[5] = offsetof(SimSoftBodySettings, mBackStopRadius);
+	outSizes[6] = offsetof(SimSceneDesc, mSoftBodySettings);
+	outSizes[7] = sizeof(SimSceneDesc);
+}
+
+// Jolt's defaults of SoftBodyCreationSettings (SimSoftBody; mSettings is 0)
+void jolt_sim_default_soft_body(SimSoftBody *outSoftBody)
+{
+	SoftBodyCreationSettings s;
+	SimSoftBody &o = *outSoftBody;
+	o.mUserData = s.mUserData;
+	o.mPosition[0] = s.mPosition.GetX();
+	o.mPosition[1] = s.mPosition.GetY();
+	o.mPosition[2] = s.mPosition.GetZ();
+	o.mRotation[0] = s.mRotation.GetX();
+	o.mRotation[1] = s.mRotation.GetY();
+	o.mRotation[2] = s.mRotation.GetZ();
+	o.mRotation[3] = s.mRotation.GetW();
+	o.mSettings = 0;
+	o.mObjectLayer = s.mObjectLayer;
+	o.mCollisionGroupID = s.mCollisionGroup.GetGroupID();
+	o.mCollisionSubGroupID = s.mCollisionGroup.GetSubGroupID();
+	o.mNumIterations = s.mNumIterations;
+	o.mLinearDamping = s.mLinearDamping;
+	o.mMaxLinearVelocity = s.mMaxLinearVelocity;
+	o.mRestitution = s.mRestitution;
+	o.mFriction = s.mFriction;
+	o.mPressure = s.mPressure;
+	o.mGravityFactor = s.mGravityFactor;
+	o.mVertexRadius = s.mVertexRadius;
+	o.mUpdatePosition = s.mUpdatePosition? 1 : 0;
+	o.mMakeRotationIdentity = s.mMakeRotationIdentity? 1 : 0;
+	o.mAllowSleeping = s.mAllowSleeping? 1 : 0;
+	o.mFacesDoubleSided = s.mFacesDoubleSided? 1 : 0;
+}
+
+// Jolt's defaults in SimSoftBodySettings: VertexAttributes, the bend type of CreateConstraints, Skinned (the other
+// members are the generator's and stay as they are)
+void jolt_sim_default_soft_body_settings(SimSoftBodySettings *outSettings)
+{
+	SoftBodySharedSettings::VertexAttributes attributes;
+	outSettings->mCompliance = attributes.mCompliance;
+	outSettings->mShearCompliance = attributes.mShearCompliance;
+	outSettings->mBendCompliance = attributes.mBendCompliance;
+	outSettings->mLRAType = uint32(attributes.mLRAType);
+	outSettings->mLRAMaxDistanceMultiplier = attributes.mLRAMaxDistanceMultiplier;
+	outSettings->mBendType = uint32(SoftBodySharedSettings::EBendType::Distance); // The default argument of CreateConstraints
+	SoftBodySharedSettings::Skinned skinned;
+	outSettings->mSkinMaxDistance = skinned.mMaxDistance;
+	outSettings->mBackStopDistance = skinned.mBackStopDistance;
+	outSettings->mBackStopRadius = skinned.mBackStopRadius;
+}
+
+// The SaveBinaryState bytes of the shared settings that SimMakeSoftBodySettings generates from soft body settings
+// description inIndex; returns the size (the bytes are copied when they fit)
+uint32 jolt_sim_soft_body_settings_bytes(const SimSceneDesc *inDesc, uint32 inIndex, uint8 *outBytes, uint32 inCapacity)
+{
+	SimEnsureFactory();
+	Ref<SoftBodySharedSettings> settings = SimMakeSoftBodySettings(*inDesc, inDesc->mSoftBodySettings[inIndex]);
+	return SimCopyBytes(SimSaveSoftBodySettings(*settings), outBytes, inCapacity);
+}
+
+// For the state decoder: 1 when body inBodyID is a soft body, outCounts gets the sizes of the arrays that
+// SoftBodyMotionProperties::SaveState writes: the vertices, the rod states (one per rod stretch shear constraint) and
+// the skin states (one per vertex when there are skinned constraints), as Initialize sizes them
+uint32 jolt_sim_soft_body_info(void *inWorld, uint32 inBodyID, uint32 *outCounts)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	BodyLockRead lock(world->mSystem.GetBodyLockInterfaceNoLock(), BodyID(inBodyID));
+	if (!lock.Succeeded() || !lock.GetBody().IsSoftBody())
+		return 0;
+	const SoftBodyMotionProperties *mp = static_cast<const SoftBodyMotionProperties *>(lock.GetBody().GetMotionProperties());
+	const SoftBodySharedSettings *settings = mp->GetSettings();
+	outCounts[0] = uint32(mp->GetVertices().size());
+	outCounts[1] = uint32(settings->mRodStretchShearConstraints.size());
+	outCounts[2] = settings->mSkinnedConstraints.empty()? 0 : uint32(mp->GetVertices().size());
+	return 1;
+}
+
+// For the test of the state decoder: of soft body inBodyID per vertex the local position and velocity (6 floats), per
+// rod the rotation and the angular velocity (7 floats), then the local bounds (6 floats); returns the number of floats
+// (copied when they fit), 0 when the body is not a soft body
+uint32 jolt_sim_soft_body_values(void *inWorld, uint32 inBodyID, float *outValues, uint32 inCapacity)
+{
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	BodyLockRead lock(world->mSystem.GetBodyLockInterfaceNoLock(), BodyID(inBodyID));
+	if (!lock.Succeeded() || !lock.GetBody().IsSoftBody())
+		return 0;
+	const SoftBodyMotionProperties *mp = static_cast<const SoftBodyMotionProperties *>(lock.GetBody().GetMotionProperties());
+	Array<float> values;
+	for (const SoftBodyVertex &v : mp->GetVertices())
+		for (Vec3 x : { v.mPosition, v.mVelocity })
+		{
+			values.push_back(x.GetX());
+			values.push_back(x.GetY());
+			values.push_back(x.GetZ());
+		}
+	for (uint r = 0; r < uint(mp->GetSettings()->mRodStretchShearConstraints.size()); ++r)
+	{
+		Quat q = mp->GetRodRotation(r);
+		Vec3 w = mp->GetRodAngularVelocity(r);
+		for (float x : { q.GetX(), q.GetY(), q.GetZ(), q.GetW(), w.GetX(), w.GetY(), w.GetZ() })
+			values.push_back(x);
+	}
+	const AABox &bounds = mp->GetLocalBounds();
+	for (Vec3 x : { bounds.mMin, bounds.mMax })
+	{
+		values.push_back(x.GetX());
+		values.push_back(x.GetY());
+		values.push_back(x.GetZ());
+	}
+	uint32 size = uint32(values.size());
+	if (size <= inCapacity)
+		memcpy(outValues, values.data(), size * sizeof(float));
+	return size;
 }
 
 } // extern "C"

@@ -223,6 +223,11 @@ pub const PhysicsSystem = struct {
     const JobMask = PhysicsUpdateContext.JobMask;
     const ContactAllocator = ContactConstraintManager.ContactAllocator;
 
+    /// Zolt (Phase 9): the soft body jobs (JobSoftBodyCollide, Simulate, Finalize) and the CCD response on a soft body
+    /// face are not ported yet. The simulation parity harness blocks the soft body scenes while this is declared
+    /// (RemainingFeaturesArchitecture.md section 4). Group S5 removes it.
+    pub const soft_body_jobs_pending = true;
+
     /// The maximum value that can be passed to Init for inMaxBodies.
     pub const max_bodies_limit: u32 = BodyID.max_body_index + 1;
 
