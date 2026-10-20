@@ -159,6 +159,18 @@
 //! object state sees it) as "update 1: ... object state differs at byte 1516 ...: vehicle_wheeled (object handle 0, item 0)
 //! wheel_speed_at_clutch".
 //!
+//! Soft bodies (Phase 9, group SH; see "Soft bodies" in the SimScenes header): both worlds generate the shared settings
+//! of every SimSoftBodySettings with the same code (SoftBodySlot.makeSettings here, SimMakeSoftBodySettings in the .cpp).
+//! Before a scene runs, checkSoftBodySettings compares their SaveBinaryState bytes, for the blocked scenes too. A soft
+//! body gets a body handle. SoftBodySlot applies the soft body operations, SoftBodyListenerImpl records the callbacks of
+//! the soft body contact listener (RecordKind 70..73, compared sorted with the other records). The state decoder reads a
+//! soft body's SaveState with the array sizes of jolt_sim_soft_body_info ("soft_body.vertices[5].velocity.y"); the test
+//! "SimulationParity state decoder: soft bodies" checks it against the C++ getters, because Zolt's
+//! SoftBodyMotionProperties::SaveState is group S4's. The D12 sweeps give every update that starts from the snapshot the
+//! skin flags of the snapshot again (`SkinFlags`). Until Zolt simulates soft bodies (SimScenes.SoftBodyClasses) the
+//! soft body scenes run on the C++ side alone, and a supported scene that creates soft bodies fails
+//! (checkSoftBodyBlocker).
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
@@ -298,6 +310,13 @@ const jolt = struct {
     extern fn jolt_sim_reference_assert_count() u32;
     extern fn jolt_sim_reference_has_asserts() u32;
     extern fn jolt_sim_test_assert_hook(out_before: *u32, out_after: *u32) void;
+    // Phase 9: soft bodies
+    extern fn jolt_sim_soft_body_struct_sizes(out_sizes: *[8]u32) void;
+    extern fn jolt_sim_default_soft_body(out_soft_body: *SimScenes.SimSoftBody) void;
+    extern fn jolt_sim_default_soft_body_settings(out_settings: *SimScenes.SimSoftBodySettings) void;
+    extern fn jolt_sim_soft_body_settings_bytes(desc: *const SimSceneDesc, index: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_sim_soft_body_info(world: *anyopaque, body_id: u32, out_counts: *[3]u32) u32;
+    extern fn jolt_sim_soft_body_values(world: *anyopaque, body_id: u32, out_values: [*]f32, capacity: u32) u32;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -822,6 +841,8 @@ const ZoltWorld = struct {
     character_recorder: Recorder,
     /// Phase 7: the objects of the slots (characters, character virtuals, ragdolls, vehicles)
     phase7: Phase7Storage = .{},
+    /// Phase 9: the shared settings of the soft body descriptions and the soft body contact listener
+    soft_body: SoftBodyStorage = .{},
 
     fn create(allocator: Allocator, desc: *const SimSceneDesc, job_kind: JobKind) !*ZoltWorld {
         const self = try allocator.create(ZoltWorld);
@@ -874,6 +895,14 @@ const ZoltWorld = struct {
         for (desc.shapes[0..desc.num_shapes]) |*shape|
             self.shapes.appendAssumeCapacity(try self.makeShape(shape));
 
+        // Phase 9: the shared settings of every SimSoftBodySettings (the soft bodies of a description share them), the
+        // soft body contact listener records with the other listeners (installed by set_soft_body_contact_listener)
+        errdefer self.soft_body.deinit(allocator);
+        try self.soft_body.settings.ensureTotalCapacity(allocator, desc.num_soft_body_settings);
+        for (desc.soft_body_settings[0..desc.num_soft_body_settings]) |*s|
+            self.soft_body.settings.appendAssumeCapacity(try SoftBodySlot.makeSettings(allocator, desc, s));
+        self.soft_body.listener = .{ .recorder = &self.recorder };
+
         self.step_listeners = try allocator.alloc(StepListenerImpl, desc.num_step_listeners);
         errdefer allocator.free(self.step_listeners);
         for (self.step_listeners, 0..) |*l, i|
@@ -896,6 +925,7 @@ const ZoltWorld = struct {
             if (added) self.system.removeStepListener(.init(listener));
         }
         self.system.deinit();
+        self.soft_body.deinit(allocator); // The soft bodies released their references with the system
         for (self.constraint_handles.items) |*c| c.deinit();
         self.constraint_handles.deinit(allocator);
         for (self.shapes.items) |*s| s.deinit();
@@ -1224,6 +1254,8 @@ const ZoltWorld = struct {
                     return self.applyConstraintOp(op);
                 } else if (comptime Phase7OpRange.of(@intFromEnum(k)) != null) {
                     return self.applyPhase7Op(op);
+                } else if (comptime SimScenes.isSoftBodyOp(@intFromEnum(k))) {
+                    return SoftBodySlot.applyOp(self, op);
                 } else {
                     @compileError("operation without prong: " ++ @tagName(k));
                 }
@@ -1658,6 +1690,27 @@ const CppWorld = struct {
         return jolt.jolt_sim_num_active_constraints(self.handle);
     }
 
+    /// Phase 9, for the state decoder: the numbers of vertices, rod states and skin states of soft body `body_id` (null:
+    /// not a soft body)
+    fn softBodyInfo(self: CppWorld, body_id: u32) ?[3]u32 {
+        var counts: [3]u32 = undefined;
+        return if (jolt.jolt_sim_soft_body_info(self.handle, body_id, &counts) != 0) counts else null;
+    }
+
+    /// Phase 9: the SaveBinaryState bytes of the shared settings that SimMakeSoftBodySettings generates from soft body
+    /// settings description `index` of `desc`
+    fn softBodySettingsBytes(allocator: Allocator, desc: *const SimSceneDesc, index: u32, out: *std.ArrayList(u8)) !void {
+        out.clearRetainingCapacity();
+        while (true) {
+            const size = jolt.jolt_sim_soft_body_settings_bytes(desc, index, out.items.ptr, @intCast(out.capacity));
+            if (size <= out.capacity) {
+                out.items.len = size;
+                return;
+            }
+            try out.ensureTotalCapacity(allocator, size);
+        }
+    }
+
     /// Phase 7: the object state (WriteObjectState)
     fn objectState(self: CppWorld, allocator: Allocator, out: *std.ArrayList(u8)) !void {
         try getBytes(allocator, out, self.handle, &jolt.jolt_sim_object_state);
@@ -1760,6 +1813,9 @@ const Field = struct {
     id: ?u32 = null,
     name: []const u8,
     component: ?u8 = null,
+    /// Phase 9: the index of an element of the field (a vertex, rod or skin state of a soft body) and its member
+    sub_item: ?usize = null,
+    member: []const u8 = "",
 };
 
 /// Walks the bytes of a saved state like PhysicsSystem::RestoreState reads them. `cpp` (a CppWorld, or the C++ world of
@@ -1807,6 +1863,40 @@ pub fn StateLayoutFor(comptime Cpp: type) type {
                 try self.add(if (T == f64) .f64 else .f32, @sizeOf(T), section, item, id, name, @intCast(c));
         }
 
+        /// The floats of member `member` of element `sub_item` of `name` of body `item` (Phase 9: soft bodies)
+        fn elementVector(self: *Self, n: u8, item: usize, id: u32, name: []const u8, sub_item: usize, member: []const u8) !void {
+            for (0..n) |c| {
+                try self.add(.f32, 4, "bodies", item, id, name, @intCast(c));
+                if (!self.truncated) {
+                    const field = &self.fields.items[self.fields.items.len - 1];
+                    field.sub_item = sub_item;
+                    field.member = member;
+                }
+            }
+        }
+
+        /// SoftBodyMotionProperties::SaveState after the MotionProperties part: the position and velocity of every
+        /// vertex, the rotation and angular velocity of every rod, the previous position, position and normal of every
+        /// skin state, the local bounds and the local predicted bounds. `counts`: the numbers of vertices, rod states
+        /// and skin states (jolt_sim_soft_body_info).
+        fn softBodyFields(self: *Self, item: usize, id: u32, counts: [3]u32) !void {
+            for (0..counts[0]) |v| {
+                try self.elementVector(3, item, id, "soft_body.vertices", v, "position");
+                try self.elementVector(3, item, id, "soft_body.vertices", v, "velocity");
+            }
+            for (0..counts[1]) |r| {
+                try self.elementVector(4, item, id, "soft_body.rod_states", r, "rotation");
+                try self.elementVector(3, item, id, "soft_body.rod_states", r, "angular_velocity");
+            }
+            for (0..counts[2]) |s| {
+                try self.elementVector(3, item, id, "soft_body.skin_state", s, "previous_position");
+                try self.elementVector(3, item, id, "soft_body.skin_state", s, "position");
+                try self.elementVector(3, item, id, "soft_body.skin_state", s, "normal");
+            }
+            for ([_][]const u8{ "soft_body.local_bounds.min", "soft_body.local_bounds.max", "soft_body.local_predicted_bounds.min", "soft_body.local_predicted_bounds.max" }) |name|
+                try self.vector(f32, 3, "bodies", item, id, name);
+        }
+
         fn read(self: *const Self, comptime T: type) ?T {
             if (self.pos + @sizeOf(T) > self.bytes.len) return null;
             return std.mem.bytesToValue(T, self.bytes[self.pos..][0..@sizeOf(T)]);
@@ -1844,6 +1934,11 @@ pub fn StateLayoutFor(comptime Cpp: type) type {
                         }
                         try self.scalar(f32, "bodies", i, id, "motion_properties.sleep_test_timer");
                         try self.scalar(bool, "bodies", i, id, "motion_properties.allow_sleeping");
+                        // Phase 9: a soft body continues with its arrays and bounds (`softBodyInfo` of the C++ world)
+                        if (comptime @hasDecl(Cpp, "softBodyInfo")) {
+                            if (self.cpp.softBodyInfo(id)) |counts|
+                                try self.softBodyFields(i, id, counts);
+                        }
                     }
                 }
             }
@@ -1972,6 +2067,8 @@ fn writeField(w: *std.Io.Writer, field: *const Field) !void {
     if (field.item) |item| try w.print("[{d}]", .{item});
     if (field.id) |id| try w.print(" (id 0x{x:0>8})", .{id});
     try w.print(" {s}", .{field.name});
+    if (field.sub_item) |s| try w.print("[{d}]", .{s});
+    if (field.member.len > 0) try w.print(".{s}", .{field.member});
     if (field.component) |c| try w.print(".{c}", .{"xyzw"[c]});
 }
 
@@ -2405,8 +2502,11 @@ const Run = struct {
     /// updates that only Zolt runs (the D12 sweeps), which are not compared with the C++ side
     asserts: ?*zolt.IssueReporting.CountAsserts = null,
     uncompared_asserts: u32 = 0,
+    /// Phase 9: the unsaved skin flags of the soft bodies at the snapshot of a D12 sweep (restoreZolt puts them back)
+    skin_flags: SkinFlags = .{},
 
     fn deinit(self: *Run) void {
+        self.skin_flags.deinit(self.allocator);
         self.zolt_state.deinit(self.allocator);
         self.jolt_state.deinit(self.allocator);
         self.zolt_records.deinit(self.allocator);
@@ -2686,6 +2786,10 @@ const Run = struct {
         const pending_invalid = try allocator.dupe(BodyID, zw.system.body_manager.bodies_cache_invalid.items);
         defer allocator.free(pending_invalid);
 
+        // Phase 9: the same for mSkinStatePreviousPositionValid of the soft bodies (restoreZolt puts it back)
+        try self.skin_flags.capture(allocator, zw);
+        defer self.skin_flags.clear();
+
         // C++ first: the reference bytes after the update
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         var reference: std.ArrayList(u8) = .empty;
@@ -2775,9 +2879,12 @@ const Run = struct {
         self.updateStats();
     }
 
+    /// Restore the snapshot of a sweep, with the skin flags of the soft bodies at the snapshot (Phase 9: Jolt's SaveState
+    /// does not hold them, see SkinFlags)
     fn restoreZolt(self: *Run, snapshot: []const u8) !void {
         if (!try self.zw.restoreState(snapshot))
             return self.fail("zolt could not restore its snapshot", .{});
+        self.skin_flags.restore(self.zw);
     }
 
     /// Restore the snapshot and flag the contact caches that were invalid when it was taken (the first update after the
@@ -6753,6 +6860,550 @@ fn checkCppSettingsRoundTrips(allocator: Allocator, entry: *const SceneEntry, bu
 
 /// Phase 7: the Jolt asserts that the C++ side hit since `before` (a reference built with
 /// `-Dreference_asserts=true` prints them to stderr; without asserts the count stays 0)
+// -------------------------------------------------------------------------------------------------------------------
+// Soft bodies (Phase 9, group SH; see "Soft bodies" in the SimScenes header): the Zolt side of the soft body
+// descriptions, operations and listener records, the same code as the soft body parts of SimulationReference.cpp
+
+/// The soft body objects of a world: the shared settings of every SimSoftBodySettings (made once, the soft bodies of a
+/// description share them) and the soft body contact listener
+const SoftBodyStorage = struct {
+    settings: std.ArrayList(Ref(zolt.SoftBodySharedSettings)) = .empty,
+    listener: SoftBodyListenerImpl = undefined,
+
+    fn deinit(self: *SoftBodyStorage, allocator: Allocator) void {
+        for (self.settings.items) |*s| s.deinit();
+        self.settings.deinit(allocator);
+    }
+};
+
+/// FNV-1a over the bytes of a value (the hashes of the soft body operations)
+fn hashValue(hash: u32, value: anytype) u32 {
+    return SimScenes.hashBytes(hash, std.mem.asBytes(&value));
+}
+
+/// SimSoftBodyContactListener of SimulationReference.cpp: records the callbacks (RecordKind 70..73, called from the soft
+/// body jobs), then OnSoftBodyContactValidate acts in its SoftBodyListenerMode
+const SoftBodyListenerImpl = struct {
+    recorder: *Recorder,
+    mode: SimScenes.SoftBodyListenerMode = .none,
+
+    fn settingsBits(settings: *const zolt.SoftBodyContactSettings) [4]u32 {
+        return .{ floatBits(settings.inv_mass_scale1), floatBits(settings.inv_mass_scale2), floatBits(settings.inv_inertia_scale2), @intFromBool(settings.is_sensor) };
+    }
+
+    pub fn onSoftBodyContactValidate(self: *SoftBodyListenerImpl, soft_body: *const Body, other_body: *const Body, settings: *zolt.SoftBodyContactSettings) zolt.SoftBodyValidateResult {
+        var r: SimRecord = .{ .kind = @intFromEnum(RecordKind.soft_body_contact_validate) };
+        r.ids[0] = soft_body.getID().getIndexAndSequenceNumber();
+        r.ids[1] = other_body.getID().getIndexAndSequenceNumber();
+        r.data[0..4].* = settingsBits(settings);
+        var result: zolt.SoftBodyValidateResult = .accept_contact;
+        switch (self.mode) {
+            .reject => result = .reject_contact,
+            .sensor => settings.is_sensor = true,
+            .mass_scales => {
+                settings.inv_mass_scale1 = 0.5;
+                settings.inv_mass_scale2 = 2.0;
+                settings.inv_inertia_scale2 = 1.5;
+            },
+            .none, .accept => {},
+        }
+        r.ids[2] = @intFromBool(result != .accept_contact);
+        r.data[4..8].* = settingsBits(settings);
+        self.recorder.add(r);
+        return result;
+    }
+
+    pub fn onSoftBodyContactAdded(self: *SoftBodyListenerImpl, soft_body: *const Body, manifold: *const zolt.SoftBodyManifold) void {
+        const id = soft_body.getID().getIndexAndSequenceNumber();
+        const vertices = manifold.getVertices();
+
+        // The call
+        var r: SimRecord = .{ .kind = @intFromEnum(RecordKind.soft_body_contact_added) };
+        var hash = SimScenes.hash_seed;
+        var num_contacts: u32 = 0;
+        for (vertices) |*v| {
+            const has_contact: u32 = @intFromBool(manifold.hasContact(v));
+            hash = hashValue(hash, has_contact);
+            num_contacts += has_contact;
+        }
+        r.ids = .{ id, @intCast(vertices.len), num_contacts, manifold.getNumSensorContacts() };
+        r.data[0] = hash;
+        self.recorder.add(r);
+
+        // One record per body that vertices have a contact with (its first vertex makes the record)
+        for (vertices, 0..) |*v, first| {
+            if (!manifold.hasContact(v)) continue;
+            const body_id = manifold.getContactBodyID(v);
+            const seen = for (vertices[0..first]) |*w| {
+                if (manifold.hasContact(w) and manifold.getContactBodyID(w).eql(body_id)) break true;
+            } else false;
+            if (seen) continue;
+            var b: SimRecord = .{ .kind = @intFromEnum(RecordKind.soft_body_contact_body) };
+            var body_hash = SimScenes.hash_seed;
+            var count: u32 = 0;
+            for (vertices[first..]) |*w| {
+                if (manifold.hasContact(w) and manifold.getContactBodyID(w).eql(body_id)) {
+                    const p = manifold.getLocalContactPoint(w);
+                    const n = manifold.getContactNormal(w);
+                    body_hash = hashValue(body_hash, [6]f32{ p.getX(), p.getY(), p.getZ(), n.getX(), n.getY(), n.getZ() });
+                    count += 1;
+                }
+            }
+            b.ids = .{ id, body_id.getIndexAndSequenceNumber(), count, 0 };
+            b.data[0] = body_hash;
+            self.recorder.add(b);
+        }
+
+        // The sensor contacts (the order of the sensors depends on the broad phase: not recorded)
+        for (0..manifold.getNumSensorContacts()) |i| {
+            var s: SimRecord = .{ .kind = @intFromEnum(RecordKind.soft_body_sensor_contact) };
+            s.ids[0] = id;
+            s.ids[1] = manifold.getSensorContactBodyID(@intCast(i)).getIndexAndSequenceNumber();
+            self.recorder.add(s);
+        }
+    }
+};
+
+/// The soft body operations and the generators of the shared settings (the soft body parts of SimulationReference.cpp)
+const SoftBodySlot = struct {
+    const S = zolt.SoftBodySharedSettings;
+    const SimSoftBodySettings = SimScenes.SimSoftBodySettings;
+
+    /// SimMakeSoftBodySettings of SimulationReference.cpp: the shared settings of a SimSoftBodySettings
+    /// (SoftBodySettingsKind)
+    fn makeSettings(allocator: Allocator, desc: *const SimSceneDesc, s: *const SimSoftBodySettings) !Ref(S) {
+        const attributes = [1]S.VertexAttributes{.init(s.compliance, s.shear_compliance, s.bend_compliance, .{ .lra_type = @enumFromInt(s.lra_type), .lra_max_distance_multiplier = s.lra_max_distance_multiplier })};
+        const bend_type: S.BendType = @enumFromInt(s.bend_type);
+        const kind: SimScenes.SoftBodySettingsKind = @enumFromInt(s.kind);
+        if (kind == .cube)
+            return S.createCube(allocator, s.count_x, s.spacing);
+
+        var ref: Ref(S) = .init(try S.create(allocator));
+        errdefer ref.deinit();
+        const settings = ref.get().?;
+        switch (kind) {
+            .cube => unreachable,
+
+            .cloth, .skinned_cloth => {
+                try addCloth(settings, s);
+                try settings.createConstraints(&attributes, .{ .bend_type = bend_type });
+                if (s.optimize != 0)
+                    try settings.optimize();
+                if (kind == .skinned_cloth) {
+                    try addSkin(settings, s);
+                    try settings.calculateSkinnedConstraintNormals();
+                    if (s.optimize != 0)
+                        try settings.optimize();
+                }
+            },
+
+            // SoftBodyCreator::CreateSphere
+            .sphere => {
+                const radius = s.spacing;
+                const num_theta = s.count_x;
+                const num_phi = s.count_z;
+                var v: S.Vertex = .{};
+                Vec3.unitSpherical(0, 0).mulScalar(radius).storeFloat3(&v.position);
+                try settings.vertices.append(allocator, v);
+                Vec3.unitSpherical(zolt.math.pi, 0).mulScalar(radius).storeFloat3(&v.position);
+                try settings.vertices.append(allocator, v);
+                for (1..num_theta - 1) |theta| {
+                    for (0..num_phi) |phi| {
+                        const t = zolt.math.pi * @as(f32, @floatFromInt(theta)) / @as(f32, @floatFromInt(num_theta - 1));
+                        const p = 2.0 * zolt.math.pi * @as(f32, @floatFromInt(phi)) / @as(f32, @floatFromInt(num_phi));
+                        Vec3.unitSpherical(t, p).mulScalar(radius).storeFloat3(&v.position);
+                        try settings.vertices.append(allocator, v);
+                    }
+                }
+                const vertexIndex = struct {
+                    fn get(n_theta: u32, n_phi: u32, theta: u32, phi: u32) u32 {
+                        if (theta == 0) return 0;
+                        if (theta == n_theta - 1) return 1;
+                        return 2 + (theta - 1) * n_phi + phi % n_phi;
+                    }
+                }.get;
+                for (0..num_phi) |phi_index| {
+                    const phi: u32 = @intCast(phi_index);
+                    for (0..num_theta - 2) |theta_index| {
+                        const theta: u32 = @intCast(theta_index);
+                        var f: S.Face = .init(vertexIndex(num_theta, num_phi, theta, phi), vertexIndex(num_theta, num_phi, theta + 1, phi), vertexIndex(num_theta, num_phi, theta + 1, phi + 1), .{});
+                        try settings.addFace(f);
+                        if (theta > 0) {
+                            f.vertex[1] = vertexIndex(num_theta, num_phi, theta + 1, phi + 1);
+                            f.vertex[2] = vertexIndex(num_theta, num_phi, theta, phi + 1);
+                            try settings.addFace(f);
+                        }
+                    }
+                    try settings.addFace(.init(vertexIndex(num_theta, num_phi, num_theta - 2, phi + 1), vertexIndex(num_theta, num_phi, num_theta - 2, phi), vertexIndex(num_theta, num_phi, num_theta - 1, 0), .{}));
+                }
+                try settings.createConstraints(&attributes, .{ .bend_type = bend_type });
+                if (s.optimize != 0)
+                    try settings.optimize();
+            },
+
+            // The helix of SoftBodyCosseratRodConstraintTest
+            .rod_chain => {
+                for (0..s.count_x) |index| {
+                    const i: u32 = @intCast(index);
+                    const fraction = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(s.count_x - 1));
+                    const alpha = 4.0 * zolt.math.pi * fraction;
+                    const inv_mass: f32 = if (i == 0 and s.kinematic != 0) 0.0 else 1.0;
+                    try settings.vertices.append(allocator, .init(.{ .x = s.spacing * zolt.trigonometry.sin(alpha), .y = s.height * (0.5 - fraction), .z = s.spacing * zolt.trigonometry.cos(alpha) }, .{ .inv_mass = inv_mass }));
+                    if (i > 0)
+                        try settings.rod_stretch_shear_constraints.append(allocator, .init(i - 1, i, .{ .compliance = s.compliance }));
+                    if (i > 1)
+                        try settings.rod_bend_twist_constraints.append(allocator, .init(i - 2, i - 1, .{ .compliance = s.shear_compliance }));
+                }
+                try settings.calculateRodProperties();
+                if (s.optimize != 0)
+                    try settings.optimize();
+            },
+
+            .explicit => {
+                const f = desc.floats[s.floats..][0 .. 7 * @as(usize, s.count_x)];
+                for (0..s.count_x) |i| {
+                    const p = f[7 * i ..][0..7];
+                    try settings.vertices.append(allocator, .init(.{ .x = p[0], .y = p[1], .z = p[2] }, .{ .velocity = .{ .x = p[3], .y = p[4], .z = p[5] }, .inv_mass = p[6] }));
+                }
+                const u = desc.uints[s.uints..][0 .. 3 * @as(usize, s.count_z) + 4 * @as(usize, s.count_extra)];
+                for (0..s.count_z) |i|
+                    try settings.addFace(.init(u[3 * i], u[3 * i + 1], u[3 * i + 2], .{}));
+                const t = u[3 * @as(usize, s.count_z) ..];
+                for (0..s.count_extra) |i|
+                    try settings.volume_constraints.append(allocator, .init(t[4 * i], t[4 * i + 1], t[4 * i + 2], t[4 * i + 3], .{ .compliance = s.compliance }));
+                if (settings.faces.items.len > 0)
+                    try settings.createConstraints(&attributes, .{ .bend_type = bend_type });
+                if (settings.volume_constraints.items.len > 0)
+                    settings.calculateVolumeConstraintVolumes();
+                if (s.optimize != 0)
+                    try settings.optimize();
+            },
+        }
+        return ref;
+    }
+
+    /// SimAddCloth of SimulationReference.cpp: the vertices and faces of a cloth (SoftBodyCreator::CreateCloth)
+    fn addCloth(settings: *S, s: *const SimSoftBodySettings) !void {
+        const allocator = settings.allocator;
+        const offset_x = -0.5 * s.spacing * @as(f32, @floatFromInt(s.count_x - 1));
+        const offset_z = -0.5 * s.spacing * @as(f32, @floatFromInt(s.count_z - 1));
+        for (0..s.count_z) |z| {
+            for (0..s.count_x) |x| {
+                const first_or_last_row = z == 0 or z == s.count_z - 1;
+                const kinematic = if (s.kinematic == 1) first_or_last_row and (x == 0 or x == s.count_x - 1) else s.kinematic == 2 and first_or_last_row;
+                const position: zolt.Float3 = .{ .x = offset_x + @as(f32, @floatFromInt(x)) * s.spacing, .y = 0.0, .z = offset_z + @as(f32, @floatFromInt(z)) * s.spacing };
+                try settings.vertices.append(allocator, .init(position, .{ .inv_mass = if (kinematic) 0.0 else 1.0 }));
+            }
+        }
+        for (0..s.count_z - 1) |z| {
+            for (0..s.count_x - 1) |x| {
+                const i: u32 = @intCast(x + z * s.count_x);
+                try settings.addFace(.init(i, i + s.count_x, i + s.count_x + 1, .{}));
+                try settings.addFace(.init(i, i + s.count_x + 1, i + 1, .{}));
+            }
+        }
+    }
+
+    /// SimAddSkin of SimulationReference.cpp: the joints, the inverse bind matrices and the skinned constraints of a
+    /// skinned cloth (SoftBodySkinnedConstraintTest::Initialize)
+    fn addSkin(settings: *S, s: *const SimSoftBodySettings) !void {
+        const allocator = settings.allocator;
+        const num_joints = s.count_extra;
+        const offset_z = -0.5 * s.spacing * @as(f32, @floatFromInt(s.count_z - 1));
+        const step = @as(f32, @floatFromInt(s.count_z - 1)) * s.spacing / @as(f32, @floatFromInt(num_joints - 1));
+        const joint_z = try allocator.alloc(f32, num_joints);
+        defer allocator.free(joint_z);
+        for (joint_z, 0..) |*z, j| {
+            z.* = offset_z + @as(f32, @floatFromInt(j)) * step;
+            try settings.inv_bind_matrices.append(allocator, .init(@intCast(j), Mat44.translation(Vec3.init(0, 0, z.*)).inversed()));
+        }
+        for (0..settings.vertices.items.len) |v| {
+            const vertex = settings.vertices.items[v];
+            var skinned: S.Skinned = .init(@intCast(v), if (vertex.inv_mass > 0.0) s.skin_max_distance else 0.0, s.back_stop_distance, s.back_stop_radius);
+
+            // Find the two closest joints
+            var closest: u32 = 0;
+            var prev_closest: u32 = 0;
+            var closest_dist: f32 = zolt.math.flt_max;
+            var prev_closest_dist: f32 = zolt.math.flt_max;
+            for (joint_z, 0..) |jz, j| {
+                const dist = @abs(vertex.position.z - jz);
+                if (dist < closest_dist) {
+                    prev_closest = closest;
+                    prev_closest_dist = closest_dist;
+                    closest = @intCast(j);
+                    closest_dist = dist;
+                } else if (dist < prev_closest_dist) {
+                    prev_closest = @intCast(j);
+                    prev_closest_dist = dist;
+                }
+            }
+            if (closest_dist == 0.0) {
+                // Hard skin to the closest joint
+                skinned.weights[0] = .init(closest, 1.0);
+            } else {
+                // Skin to the two closest joints
+                skinned.weights[0] = .init(closest, 1.0 / closest_dist);
+                skinned.weights[1] = .init(prev_closest, 1.0 / prev_closest_dist);
+                skinned.normalizeWeights();
+            }
+            try settings.skinned_constraints.append(allocator, skinned);
+        }
+    }
+
+    /// MakeSoftBodyCreationSettings of SimulationReference.cpp (the caller deinits the result)
+    fn makeCreationSettings(zw: *const ZoltWorld, b: *const SimScenes.SimSoftBody) zolt.SoftBodyCreationSettings {
+        var s: zolt.SoftBodyCreationSettings = .init(zw.soft_body.settings.items[b.settings].get().?, loadR3(&b.position), loadQuat(&b.rotation), @intCast(b.object_layer));
+        s.user_data = b.user_data;
+        s.collision_group = .init(null, b.collision_group_id, b.collision_sub_group_id);
+        s.num_iterations = b.num_iterations;
+        s.linear_damping = b.linear_damping;
+        s.max_linear_velocity = b.max_linear_velocity;
+        s.restitution = b.restitution;
+        s.friction = b.friction;
+        s.pressure = b.pressure;
+        s.gravity_factor = b.gravity_factor;
+        s.vertex_radius = b.vertex_radius;
+        s.update_position = b.update_position != 0;
+        s.make_rotation_identity = b.make_rotation_identity != 0;
+        s.allow_sleeping = b.allow_sleeping != 0;
+        s.faces_double_sided = b.faces_double_sided != 0;
+        return s;
+    }
+
+    /// SimHashSoftBody of SimulationReference.cpp: the result of the soft body operations 56..67 (the hash of
+    /// Body::SaveState, then of the values that the state does not hold)
+    fn hashSoftBody(allocator: Allocator, body: *const Body) !u32 {
+        var recorder = StateRecorderImpl.init(allocator);
+        defer recorder.deinit();
+        body.saveState(recorder.recorder());
+        if (recorder.isFailed()) return error.OutOfMemory;
+        var h = SimScenes.hashBytes(SimScenes.hash_seed, recorder.getData());
+        const mp = zolt.SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties());
+        h = hashValue(h, mp.getNumIterations());
+        h = hashValue(h, mp.getPressure());
+        h = hashValue(h, @as(u32, @intFromBool(mp.getUpdatePosition())));
+        h = hashValue(h, @as(u32, @intFromBool(mp.getFacesDoubleSided())));
+        h = hashValue(h, @as(u32, @intFromBool(mp.getEnableSkinConstraints())));
+        h = hashValue(h, mp.getSkinnedMaxDistanceMultiplier());
+        h = hashValue(h, mp.getVertexRadius());
+        for (mp.getVertices()) |*v|
+            h = hashValue(h, v.inv_mass);
+        return h;
+    }
+
+    /// HashSoftBodyCreationSettings of SimulationReference.cpp: the result of soft_body_creation_settings_hash
+    fn hashCreationSettings(zw: *const ZoltWorld, s: *const zolt.SoftBodyCreationSettings) !u32 {
+        var h = SimScenes.hash_seed;
+        h = hashValue(h, [3]Real{ s.position.getX(), s.position.getY(), s.position.getZ() });
+        h = hashValue(h, [4]f32{ s.rotation.getX(), s.rotation.getY(), s.rotation.getZ(), s.rotation.getW() });
+        h = hashValue(h, s.user_data);
+        h = hashValue(h, @as(u32, s.object_layer));
+        h = hashValue(h, @as(u32, s.collision_group.getGroupID()));
+        h = hashValue(h, @as(u32, s.collision_group.getSubGroupID()));
+        h = hashValue(h, @as(u32, @intFromBool(s.collision_group.getGroupFilter() != null)));
+        h = hashValue(h, s.num_iterations);
+        for ([_]f32{ s.linear_damping, s.max_linear_velocity, s.restitution, s.friction, s.pressure, s.gravity_factor, s.vertex_radius }) |v|
+            h = hashValue(h, v);
+        for ([_]bool{ s.update_position, s.make_rotation_identity, s.allow_sleeping, s.faces_double_sided }) |v|
+            h = hashValue(h, @as(u32, @intFromBool(v)));
+        const shared = s.settings.get().?;
+        var index: u32 = invalid_handle;
+        for (zw.soft_body.settings.items, 0..) |ref, i| {
+            if (@intFromPtr(ref.get().?) == @intFromPtr(shared)) {
+                index = @intCast(i);
+                break;
+            }
+        }
+        h = hashValue(h, index);
+        var out: std.Io.Writer.Allocating = .init(zw.allocator);
+        defer out.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+        shared.saveBinaryState(wrapper.streamOut());
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        return SimScenes.hashBytes(h, out.written());
+    }
+
+    /// ApplySoftBodyOp of SimulationReference.cpp: a soft body operation (OpKind 53..69)
+    fn applyOp(zw: *ZoltWorld, op: *const SimOp) !u32 {
+        const allocator = zw.allocator;
+        const bi = zw.system.getBodyInterfaceMut();
+        const activation: Activation = if (op.activation == 0) .activate else .dont_activate;
+        const kind: OpKind = @enumFromInt(op.kind);
+        const i = &op.i;
+        const f = &op.f;
+
+        switch (kind) {
+            .create_soft_body, .create_and_add_soft_body, .create_soft_body_no_add => {
+                try zw.handles.ensureUnusedCapacity(allocator, 1);
+                var settings = makeCreationSettings(zw, &zw.desc.soft_bodies[op.index]);
+                defer settings.deinit();
+                var new_id: BodyID = .invalid;
+                if (kind == .create_and_add_soft_body) {
+                    new_id = try bi.createAndAddSoftBody(&settings, activation);
+                } else if (try bi.createSoftBody(&settings)) |body| {
+                    new_id = body.getID();
+                    if (kind == .create_soft_body)
+                        bi.addBody(new_id, activation) catch |err| {
+                            bi.destroyBody(new_id);
+                            return err;
+                        };
+                }
+                zw.handles.appendAssumeCapacity(new_id);
+                return new_id.getIndexAndSequenceNumber();
+            },
+            .set_soft_body_contact_listener => {
+                zw.soft_body.listener.mode = @enumFromInt(op.index);
+                zw.system.setSoftBodyContactListener(if (op.index == 0) null else .init(&zw.soft_body.listener));
+                return 0;
+            },
+            else => {},
+        }
+
+        // The soft body of the body handle. The operations run between the updates: the no-lock interface (CustomUpdate
+        // locks the bodies it collides with).
+        const body = zw.system.body_manager.tryGetBodyMut(zw.getHandle(op.body)) orelse return error.SceneError;
+        if (!body.isSoftBody()) return error.SceneError;
+        const mp = zolt.SoftBodyMotionProperties.fromBase(body.getMotionPropertiesMut());
+        switch (kind) {
+            .soft_body_set_vertex_position => mp.getVertexMut(i[0]).position = load3(f[0..3]),
+            .soft_body_set_vertex_velocity => mp.getVertexMut(i[0]).velocity = load3(f[0..3]),
+            .soft_body_set_vertex_inv_mass => mp.getVertexMut(i[0]).inv_mass = f[0],
+            .soft_body_set_pressure => mp.setPressure(f[0]),
+            .soft_body_set_num_iterations => mp.setNumIterations(i[0]),
+            .soft_body_set_update_position => mp.setUpdatePosition(i[0] != 0),
+            .soft_body_set_faces_double_sided => mp.setFacesDoubleSided(i[0] != 0),
+            .soft_body_set_vertex_radius => mp.setVertexRadius(f[0]),
+            .soft_body_set_enable_skin_constraints => mp.setEnableSkinConstraints(i[0] != 0),
+            .soft_body_set_skinned_max_distance_multiplier => mp.setSkinnedMaxDistanceMultiplier(f[0]),
+            .soft_body_skin_vertices => {
+                const joints = try allocator.alloc(Mat44, i[1]);
+                defer allocator.free(joints);
+                for (joints, 0..) |*m, j| {
+                    const v = zw.desc.floats[i[0] + 16 * j ..][0..16];
+                    m.* = Mat44.init(Vec4.init(v[0], v[1], v[2], v[3]), Vec4.init(v[4], v[5], v[6], v[7]), Vec4.init(v[8], v[9], v[10], v[11]), Vec4.init(v[12], v[13], v[14], v[15]));
+                }
+                try mp.skinVertices(body.getCenterOfMassTransform(), joints, i[2] != 0, zw.temp.tempAllocator());
+            },
+            .soft_body_custom_update => try mp.customUpdate(f[0], body, &zw.system),
+            .soft_body_creation_settings_hash => {
+                var settings = body.getSoftBodyCreationSettings();
+                defer settings.deinit();
+                return hashCreationSettings(zw, &settings);
+            },
+            else => return error.SceneError,
+        }
+        return hashSoftBody(allocator, body);
+    }
+};
+
+/// The unsaved soft body state of a D12 sweep (see "D12 sweeps" in the soft body section of the SimScenes header):
+/// mSkinStatePreviousPositionValid of every soft body at the snapshot. SkinVertices sets it, the update clears it, and
+/// Jolt's SaveState does not hold it. Every update that starts from the snapshot of a sweep gets the values of the
+/// snapshot again (Run.restoreZolt), like the InvalidateContactCache flags (restoreZoltBeforeUpdate).
+const SkinFlags = struct {
+    const Flag = struct { id: BodyID, valid: bool };
+
+    flags: std.ArrayList(Flag) = .empty,
+
+    fn deinit(self: *SkinFlags, allocator: Allocator) void {
+        self.flags.deinit(allocator);
+    }
+
+    fn clear(self: *SkinFlags) void {
+        self.flags.clearRetainingCapacity();
+    }
+
+    /// The flags of the soft bodies of the body handles now
+    fn capture(self: *SkinFlags, allocator: Allocator, zw: *ZoltWorld) !void {
+        self.clear();
+        for (zw.handles.items) |id| {
+            const body = zw.system.body_manager.tryGetBody(id) orelse continue;
+            if (!body.isSoftBody()) continue;
+            const mp = zolt.SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties());
+            try self.flags.append(allocator, .{ .id = id, .valid = mp.skin_state_previous_position_valid });
+        }
+    }
+
+    /// Put the captured flags back
+    fn restore(self: *const SkinFlags, zw: *ZoltWorld) void {
+        for (self.flags.items) |flag| {
+            const body = zw.system.body_manager.tryGetBodyMut(flag.id) orelse continue;
+            zolt.SoftBodyMotionProperties.fromBase(body.getMotionPropertiesMut()).skin_state_previous_position_valid = flag.valid;
+        }
+    }
+};
+
+/// Phase 9, before a scene runs: the SaveBinaryState bytes of every shared settings object that makeSoftBodySettings
+/// generates are the bytes of SimMakeSoftBodySettings (C++). A mismatch is an error of a generator or of
+/// SoftBodySharedSettings, reported before the simulation. It runs for the blocked scenes too (SoftBodySharedSettings
+/// is complete).
+fn checkSoftBodySettings(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    const desc = builder.desc();
+    var jolt_bytes: std.ArrayList(u8) = .empty;
+    defer jolt_bytes.deinit(allocator);
+    for (builder.soft_body_settings.items, 0..) |*s, i| {
+        var settings = try SoftBodySlot.makeSettings(allocator, &desc, s);
+        defer settings.deinit();
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+        settings.get().?.saveBinaryState(wrapper.streamOut());
+        if (wrapper.isFailed()) return error.OutOfMemory;
+        try CppWorld.softBodySettingsBytes(allocator, &desc, @intCast(i), &jolt_bytes);
+        if (std.mem.indexOfDiff(u8, out.written(), jolt_bytes.items)) |first| {
+            std.debug.print("SimulationParity: scene {s}, soft body settings description {d} ({t}): the Zolt settings differ from SimMakeSoftBodySettings at byte {d} (zolt {d} bytes, jolt {d} bytes)\n", .{ entry.name, i, @as(SimScenes.SoftBodySettingsKind, @enumFromInt(s.kind)), first, out.written().len, jolt_bytes.items.len });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// The soft body listener records of one update agree with each other (a check of SimSoftBodyContactListener while the
+/// soft body scenes run on the C++ side alone): per soft body, the vertices with a contact of its soft_body_contact_added
+/// records are the vertices of its soft_body_contact_body records, and its sensor contacts are its
+/// soft_body_sensor_contact records (summed over the collision steps of the update)
+fn checkSoftBodyRecords(allocator: Allocator, entry: *const SceneEntry, update: usize, records: []const SimRecord) !void {
+    // Per soft body: vertices with a contact, sensor contacts (soft_body_contact_added); vertices of the body records,
+    // sensor records
+    var counts: std.AutoArrayHashMapUnmanaged(u32, [4]u32) = .empty;
+    defer counts.deinit(allocator);
+    for (records) |r| {
+        const index: usize = switch (r.kind) {
+            @intFromEnum(RecordKind.soft_body_contact_added) => 0,
+            @intFromEnum(RecordKind.soft_body_contact_body) => 2,
+            @intFromEnum(RecordKind.soft_body_sensor_contact) => 3,
+            else => continue,
+        };
+        const entry_value = try counts.getOrPutValue(allocator, r.ids[0], @splat(0));
+        const c = entry_value.value_ptr;
+        switch (index) {
+            0 => {
+                c[0] += r.ids[2];
+                c[1] += r.ids[3];
+            },
+            2 => c[2] += r.ids[2],
+            else => c[3] += 1,
+        }
+    }
+    var it = counts.iterator();
+    while (it.next()) |kv| {
+        const c = kv.value_ptr.*;
+        if (c[0] != c[2] or c[1] != c[3]) {
+            std.debug.print("SimulationParity: scene {s}, update {d}: the soft body listener records of soft body 0x{x:0>8} do not agree: {d} vertices with a contact and {d} sensor contacts in OnSoftBodyContactAdded, {d} vertices in the body records, {d} sensor records\n", .{ entry.name, update, kv.key_ptr.*, c[0], c[1], c[2], c[3] });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// A supported scene that creates soft bodies needs Blocker.soft_bodies (until Zolt simulates soft bodies, a scene with
+/// another blocker would run them)
+fn checkSoftBodyBlocker(entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    if (builder.soft_bodies.items.len > 0 and !SimScenes.SoftBodyClasses.simulated()) {
+        std.debug.print("SimulationParity: scene {s} creates soft bodies, which Zolt cannot simulate yet, but its blocker .{t} is supported (declare Blocker.soft_bodies)\n", .{ entry.name, entry.blocked_by });
+        return error.TestUnexpectedResult;
+    }
+}
+
 fn checkReferenceAsserts(entry: *const SceneEntry, before: u32) !void {
     const after = jolt.jolt_sim_reference_assert_count();
     if (after != before) {
@@ -6798,6 +7449,8 @@ fn runEntry(entry: *const SceneEntry) !void {
     try checkConstraintDescriptions(allocator, entry, &builder);
     try checkPhase7Slots(entry, &builder);
     try checkPhase7Settings(allocator, entry, &builder);
+    try checkSoftBodyBlocker(entry, &builder);
+    try checkSoftBodySettings(allocator, entry, &builder);
 
     // R8: a release_only scene runs with a handler that counts Zolt's asserts and lets the code continue (also during
     // the creation sweep below)
@@ -6853,6 +7506,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (expect.ground_states != 0) try expectReached(entry, "the ground states of Expect.ground_states", (stats[0].objects.ground_states & expect.ground_states) == expect.ground_states);
     if (expect.wheel_contacts) try expectReached(entry, "wheel contacts", stats[0].objects.wheel_contacts);
     try expectVehicleGears(entry, &stats[0].objects);
+    if (expect.soft_body_records != 0) try expectReached(entry, "the soft body listener callbacks of Expect.soft_body_records", recordsReach(records, expect.soft_body_records));
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
@@ -6972,6 +7626,8 @@ test "SimScenes blocked scenes run on the C++ side" {
         const b = CppWorld.init(&desc, 3);
         defer b.deinit();
         try checkCppSettingsRoundTrips(allocator, entry, &builder, &desc, a);
+        // Phase 9: the generated soft body settings are Zolt's already (SoftBodySharedSettings is complete)
+        try checkSoftBodySettings(allocator, entry, &builder);
 
         var delta_time = builder.delta_time;
         var collision_steps = builder.collision_steps;
@@ -7032,6 +7688,7 @@ test "SimScenes blocked scenes run on the C++ side" {
             std.sort.pdq(SimRecord, b_records.items, {}, SimRecord.lessThan);
             try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a_records.items), std.mem.sliceAsBytes(b_records.items));
             for (a_records.items) |r| records[r.kind] += 1;
+            try checkSoftBodyRecords(allocator, entry, update, a_records.items);
 
             // Phase 7: the object states, the character listener records in call order
             try a.objectState(allocator, &a_objects);
@@ -7112,8 +7769,11 @@ test "SimScenes blocked scenes run on the C++ side" {
             .character_virtuals => try expectReached(entry, "character virtuals", builder.character_virtuals.items.len > 0),
             .ragdolls => try expectReached(entry, "ragdolls", builder.ragdolls.items.len > 0),
             .wheeled_vehicles, .tracked_vehicles, .motorcycles => try expectReached(entry, "vehicles", builder.vehicles.items.len > 0),
+            .soft_bodies => try expectReached(entry, "soft bodies", builder.soft_bodies.items.len > 0),
             else => {},
         }
+        if (entry.expect.soft_body_records != 0)
+            try expectReached(entry, "the soft body listener callbacks of Expect.soft_body_records", recordsReach(&records, entry.expect.soft_body_records));
         if (entry.expect.character_records != 0)
             try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(&records, entry.expect.character_records));
         if (entry.expect.ground_states != 0)
@@ -7641,4 +8301,267 @@ test "SimulationParity object state decoder" {
     try scanObjectState(bytes.items, &stats);
     try std.testing.expect(stats.wheel_contacts);
     try std.testing.expect(stats.ground_states != 0);
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Phase 9: soft bodies
+
+test "SimScenes soft body struct layout matches SimulationReference.cpp" {
+    var sizes: [8]u32 = undefined;
+    jolt.jolt_sim_soft_body_struct_sizes(&sizes);
+    const expected = [8]u32{
+        @sizeOf(SimScenes.SimSoftBodySettings),
+        @sizeOf(SimScenes.SimSoftBody),
+        @offsetOf(SimScenes.SimSoftBody, "position"),
+        @offsetOf(SimScenes.SimSoftBody, "settings"),
+        @offsetOf(SimScenes.SimSoftBody, "faces_double_sided"),
+        @offsetOf(SimScenes.SimSoftBodySettings, "back_stop_radius"),
+        @offsetOf(SimSceneDesc, "soft_body_settings"),
+        @sizeOf(SimSceneDesc),
+    };
+    try std.testing.expectEqualSlices(u32, &expected, &sizes);
+}
+
+test "SimScenes soft body description defaults are Jolt's" {
+    // SoftBodyCreationSettings, and the VertexAttributes, the bend type of CreateConstraints and Skinned of the generators
+    var soft_body: SimScenes.SimSoftBody = undefined;
+    jolt.jolt_sim_default_soft_body(&soft_body);
+    try expectEqualFields(SimScenes.SimSoftBody, .{}, soft_body);
+    var settings: SimScenes.SimSoftBodySettings = .{ .kind = 0 };
+    jolt.jolt_sim_default_soft_body_settings(&settings);
+    try expectEqualFields(SimScenes.SimSoftBodySettings, .{ .kind = 0 }, settings);
+}
+
+/// A scene of the table by name
+fn sceneByName(name: []const u8) *const SceneEntry {
+    for (&SimScenes.scenes) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry;
+    }
+    unreachable;
+}
+
+test "SimulationParity state decoder: soft bodies" {
+    // soft_body_ops on the C++ side (soft bodies with vertices, rod states and skin states) for a few updates: the decoder
+    // reads every byte of the state with the array sizes of jolt_sim_soft_body_info, its soft body fields hold the values
+    // of the C++ getters (vertices, rod states, local bounds), and a changed byte is reported with its vertex and member.
+    // Zolt's SaveState of a soft body is group S4's: the decoder is checked against the C++ bytes only.
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try sceneByName("soft_body_ops").build(&builder);
+    const desc = builder.desc();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+    for (0..3) |update| {
+        for (builder.ops.items) |*op| {
+            if (op.update != update) continue;
+            switch (@as(OpKind, @enumFromInt(op.kind))) {
+                .set_update, .snapshot, .restore_cross => {},
+                else => _ = cw.applyOp(op),
+            }
+        }
+        _ = cw.update(builder.delta_time, builder.collision_steps);
+    }
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try cw.saveState(allocator, .all, &bytes);
+    var layout: StateLayout = .{ .allocator = allocator, .bytes = bytes.items, .cpp = cw };
+    defer layout.deinit();
+    try layout.decode();
+    try std.testing.expect(!layout.truncated);
+    try std.testing.expectEqual(bytes.items.len, layout.pos);
+
+    // Every soft body: the decoded vertices, rod states and local bounds are the values of the C++ getters
+    var num_soft_bodies: u32 = 0;
+    var arrays_reached: [3]bool = @splat(false);
+    var decoded: std.ArrayList(f32) = .empty;
+    defer decoded.deinit(allocator);
+    var values: std.ArrayList(f32) = .empty;
+    defer values.deinit(allocator);
+    for (layout.fields.items) |*id_field| {
+        if (!std.mem.eql(u8, id_field.section, "bodies") or !std.mem.eql(u8, id_field.name, "id")) continue;
+        const id = id_field.id.?;
+        const counts = cw.softBodyInfo(id) orelse continue;
+        num_soft_bodies += 1;
+        for (counts, &arrays_reached) |count, *reached| reached.* = reached.* or count > 0;
+        decoded.clearRetainingCapacity();
+        for (layout.fields.items) |*field| {
+            if (field.id != id or !std.mem.startsWith(u8, field.name, "soft_body.")) continue;
+            if (std.mem.eql(u8, field.name, "soft_body.skin_state") or std.mem.startsWith(u8, field.name, "soft_body.local_predicted_bounds")) continue;
+            try decoded.append(allocator, std.mem.bytesToValue(f32, bytes.items[field.offset..][0..4]));
+        }
+        const size = jolt.jolt_sim_soft_body_values(cw.handle, id, values.items.ptr, 0);
+        try values.resize(allocator, size);
+        try std.testing.expectEqual(size, jolt.jolt_sim_soft_body_values(cw.handle, id, values.items.ptr, size));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(values.items), std.mem.sliceAsBytes(decoded.items));
+    }
+    try std.testing.expectEqual(@as(u32, 5), num_soft_bodies); // The sphere of CustomUpdate is not in the system
+    try std.testing.expect(arrays_reached[0] and arrays_reached[1] and arrays_reached[2]);
+
+    // A changed byte of the velocity of vertex 5 of the first soft body
+    const copy = try allocator.dupe(u8, bytes.items);
+    defer allocator.free(copy);
+    var target: ?*const Field = null;
+    for (layout.fields.items) |*field| {
+        if (target == null and std.mem.eql(u8, field.name, "soft_body.vertices") and field.sub_item == 5 and std.mem.eql(u8, field.member, "velocity") and field.component == 1)
+            target = field;
+    }
+    copy[target.?.offset] ^= 1;
+    const message = (try describeStateDifference(allocator, copy, bytes.items, cw)).?;
+    defer allocator.free(message);
+    try std.testing.expect(std.mem.indexOf(u8, message, "soft_body.vertices[5].velocity.y zolt ") != null);
+}
+
+test "SimulationParity soft body listener records" {
+    // The Zolt listener on a hand-made manifold (the C++ listener makes the same records from the same callbacks; the
+    // soft body scenes compare them once Zolt simulates soft bodies): vertices 0 and 3 touch body 9 through colliding
+    // shape 1, vertex 1 has a CCD contact with body 5, vertex 2 none; one sensor (body 11)
+    const allocator = std.testing.allocator;
+    var recorder: Recorder = .{ .allocator = allocator };
+    defer recorder.deinit();
+    var listener: SoftBodyListenerImpl = .{ .recorder = &recorder, .mode = .accept };
+
+    var vertices: [4]zolt.SoftBodyVertex = @splat(std.mem.zeroes(zolt.SoftBodyVertex));
+    for (&vertices) |*v| v.resetCollision();
+    for ([_]usize{ 0, 3 }) |i| {
+        vertices[i].position = Vec3.init(2, 3, @floatFromInt(i));
+        vertices[i].collision_plane = zolt.Plane.init(Vec3.axisY(), -1.0);
+        vertices[i].colliding_shape_index = 1;
+        vertices[i].has_contact = true;
+    }
+    vertices[1].markCCDContact(.init(5), zolt.Plane.init(Vec3.axisX(), 0.0));
+    const CollidingShape = zolt.SoftBodyMotionProperties.CollidingShape;
+    const shape: CollidingShape = .{ .center_of_mass_transform = Mat44.identity(), .body_id = .init(7), .motion_type = .dynamic, .inv_mass = 1, .friction = 0, .restitution = 0, .soft_body_inv_mass_scale = 1, .update_velocities = false, .inv_inertia = Mat44.identity(), .linear_velocity = .zero(), .angular_velocity = .zero(), .original_linear_velocity = .zero(), .original_angular_velocity = .zero() };
+    var shapes = [_]CollidingShape{ shape, shape };
+    shapes[1].body_id = .init(9);
+    const sensors = [_]zolt.SoftBodyMotionProperties.CollidingSensor{.{ .center_of_mass_transform = Mat44.identity(), .body_id = .init(11), .has_contact = true }};
+    const manifold: zolt.SoftBodyManifold = .{ .vertices = &vertices, .colliding_shapes = &shapes, .colliding_sensors = &sensors };
+    const soft_body: Body = .{ .id = .init(3) };
+    const other_body: Body = .{ .id = .init(9) };
+
+    listener.onSoftBodyContactAdded(&soft_body, &manifold);
+    const records = recorder.records.items;
+    try std.testing.expectEqual(@as(usize, 4), records.len);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(RecordKind.soft_body_contact_added)), records[0].kind);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 4, 3, 1 }, &records[0].ids);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(RecordKind.soft_body_contact_body)), records[1].kind);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 9, 2, 0 }, &records[1].ids); // Vertices 0 and 3
+    try std.testing.expectEqualSlices(u32, &.{ 3, 5, 1, 0 }, &records[2].ids); // The CCD contact of vertex 1
+    try std.testing.expectEqual(@as(u32, @intFromEnum(RecordKind.soft_body_sensor_contact)), records[3].kind);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 11, 0, 0 }, &records[3].ids);
+    // The hash of body 9 holds the local contact point (2, 1, z) and the normal (0, -1, 0) of vertex 0, then of vertex 3
+    var expected_hash = SimScenes.hash_seed;
+    for ([_]usize{ 0, 3 }) |i| {
+        const p = manifold.getLocalContactPoint(&vertices[i]);
+        const n = manifold.getContactNormal(&vertices[i]);
+        try std.testing.expect(p.eql(Vec3.init(2, 1, @floatFromInt(i))) and n.eql(Vec3.init(0, -1, 0)));
+        expected_hash = hashValue(expected_hash, [6]f32{ p.getX(), p.getY(), p.getZ(), n.getX(), n.getY(), n.getZ() });
+    }
+    try std.testing.expectEqual(expected_hash, records[1].data[0]);
+
+    // OnSoftBodyContactValidate in every mode: the settings before and after, the result
+    const one = floatBits(1.0);
+    for ([_]SimScenes.SoftBodyListenerMode{ .accept, .reject, .sensor, .mass_scales }) |mode| {
+        recorder.records.clearRetainingCapacity();
+        listener.mode = mode;
+        var settings: zolt.SoftBodyContactSettings = .{ .is_sensor = false };
+        const result = listener.onSoftBodyContactValidate(&soft_body, &other_body, &settings);
+        const r = recorder.records.items[0];
+        try std.testing.expectEqual(@as(u32, @intFromEnum(RecordKind.soft_body_contact_validate)), r.kind);
+        try std.testing.expectEqualSlices(u32, &.{ 3, 9, @intFromBool(mode == .reject), 0 }, &r.ids);
+        try std.testing.expectEqual(mode == .reject, result == .reject_contact);
+        try std.testing.expectEqualSlices(u32, &.{ one, one, one, 0 }, r.data[0..4]);
+        const after: [4]u32 = switch (mode) {
+            .sensor => .{ one, one, one, 1 },
+            .mass_scales => .{ floatBits(0.5), floatBits(2.0), floatBits(1.5), 0 },
+            else => .{ one, one, one, 0 },
+        };
+        try std.testing.expectEqualSlices(u32, &after, r.data[4..8]);
+    }
+}
+
+test "SimulationParity soft body settings generators" {
+    // Every generator kind and option makes the bytes of SimMakeSoftBodySettings, also for settings that are not optimized
+    // and for every bend type and LRA type (checkSoftBodySettings of every soft body scene runs the same comparison)
+    const allocator = std.testing.allocator;
+    const K = SimScenes.SoftBodySettingsKind;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    for ([_]u32{ 0, 1 }) |optimize| {
+        for ([_]u32{ 0, 1, 2 }) |variant| {
+            _ = try builder.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 5, .count_z = 4, .spacing = 0.25, .compliance = 1.0e-4, .shear_compliance = 2.0e-4, .bend_compliance = 1.0e-3, .lra_type = variant, .lra_max_distance_multiplier = 1.1, .bend_type = variant, .optimize = optimize, .kinematic = variant });
+            _ = try builder.softBodySettings(.{ .kind = @intFromEnum(K.sphere), .count_x = 5, .count_z = 7, .spacing = 0.6, .compliance = 1.0e-4, .bend_compliance = 1.0e-2, .bend_type = variant, .optimize = optimize });
+        }
+        _ = try builder.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 7, .spacing = 0.3, .height = 2, .compliance = 1.0e-5, .shear_compliance = 1.0e-3, .kinematic = optimize, .optimize = optimize });
+        _ = try builder.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 4, .count_z = 9, .count_extra = 4, .spacing = 0.15, .kinematic = 2, .skin_max_distance = 0.2, .back_stop_distance = 0.01, .back_stop_radius = 5, .optimize = optimize });
+        _ = try builder.explicitSoftBodySettings(.{ .kind = @intFromEnum(K.explicit), .compliance = 1.0e-3, .bend_type = 2, .lra_type = 2, .optimize = optimize }, &.{
+            .{ 0, 0, 0, 0, 0, 0, 0 },
+            .{ 1, 0, 0, 0, 1, 0, 1 },
+            .{ 0, 0, 1, 0, 0, 0, 1 },
+            .{ 1, 0.2, 1, 0, 0, 1, 2 },
+            .{ 0.5, 1, 0.5, 0, 0, 0, 1 },
+        }, &.{ .{ 0, 1, 2 }, .{ 1, 3, 2 }, .{ 0, 4, 1 } }, &.{ .{ 0, 1, 2, 4 }, .{ 1, 3, 2, 4 } });
+    }
+    _ = try builder.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 3, .spacing = 0.5 });
+    try checkSoftBodySettings(allocator, sceneByName("soft_body_cube_on_floor"), &builder);
+}
+
+test "SimulationParity soft body creation, creation settings and skin flags" {
+    // The parts of the soft body harness that run before Zolt simulates soft bodies, in both worlds of soft_body_ops: the
+    // three create operations and the listener operation of update 0 (the same body IDs), the
+    // GetSoftBodyCreationSettings round trip of every soft body (the same hash), the state of the soft bodies in the
+    // system (the PhysicsSystem state holds them once SoftBodyMotionProperties::SaveState is ported), and SkinFlags puts
+    // the skin flags of a capture back
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try sceneByName("soft_body_ops").build(&builder);
+    const desc = builder.desc();
+    const zw = try ZoltWorld.create(allocator, &desc, .single_threaded);
+    defer zw.destroy();
+    const cw = CppWorld.init(&desc, 0);
+    defer cw.deinit();
+
+    var num_soft_bodies: u32 = 0;
+    for (builder.ops.items) |*op| {
+        if (op.update != 0) break;
+        const kind: OpKind = @enumFromInt(op.kind);
+        switch (kind) {
+            .create_soft_body, .create_and_add_soft_body, .create_soft_body_no_add => num_soft_bodies += 1,
+            .create_body, .set_soft_body_contact_listener => {},
+            else => continue, // The other soft body operations return the hash of the SaveState of the soft body (S4)
+        }
+        try std.testing.expectEqual(cw.applyOp(op), try zw.applyOp(op));
+    }
+    try std.testing.expectEqual(@as(u32, 6), num_soft_bodies);
+    try std.testing.expectEqual(SimScenes.SoftBodyListenerMode.accept, zw.soft_body.listener.mode);
+
+    // GetSoftBodyCreationSettings of every soft body (the soft bodies use 6 of the 7 settings objects)
+    var num_hashes: u32 = 0;
+    for (zw.handles.items, 0..) |id, handle| {
+        const body = zw.system.body_manager.tryGetBody(id) orelse continue;
+        if (!body.isSoftBody()) continue;
+        const op: SimOp = .{ .update = 0, .kind = @intFromEnum(OpKind.soft_body_creation_settings_hash), .body = @intCast(handle) };
+        try std.testing.expectEqual(cw.applyOp(&op), try zw.applyOp(&op));
+        num_hashes += 1;
+    }
+    try std.testing.expectEqual(num_soft_bodies, num_hashes);
+
+    // The skin flags: captured, changed, put back
+    var flags: SkinFlags = .{};
+    defer flags.deinit(allocator);
+    var skinned: ?*Body = null;
+    for (zw.handles.items) |id| {
+        const body = zw.system.body_manager.tryGetBodyMut(id) orelse continue;
+        if (body.isSoftBody() and zolt.SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties()).skin_state.items.len > 0)
+            skinned = body;
+    }
+    const mp = zolt.SoftBodyMotionProperties.fromBase(skinned.?.getMotionPropertiesMut());
+    mp.skin_state_previous_position_valid = true;
+    try flags.capture(allocator, zw);
+    try std.testing.expectEqual(@as(usize, 6), flags.flags.items.len);
+    mp.skin_state_previous_position_valid = false;
+    flags.restore(zw);
+    try std.testing.expect(mp.skin_state_previous_position_valid);
 }
