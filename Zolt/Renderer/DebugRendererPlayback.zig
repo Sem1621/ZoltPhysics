@@ -373,13 +373,20 @@ const CountingRenderer = struct {
     }
 };
 
-/// Two frames written by Zolt's recorder (the recorder's bytes equal Jolt's, see the debug renderer parity)
+/// Two frames written by Zolt's recorder (the recorder's bytes equal Jolt's, see the debug renderer parity). Of the 25
+/// predefined batches that the recorder writes first, the stream keeps only the box (the first one, the frames draw
+/// it), so that the tests below stay small.
 fn recordTestStream(allocator: Allocator, out: *std.Io.Writer.Allocating) !void {
+    const start = out.written().len;
     var wrapper: StreamWrapper.StreamOutWrapper = .init(&out.writer);
     var recorder: DebugRendererRecorder = undefined;
     try recorder.init(allocator, std.testing.io, wrapper.streamOut());
     defer recorder.deinit();
     const r = recorder.debugRenderer();
+
+    // Drop the predefined batches after the box: create batch command, ID, vertex count, vertices, index count, indices
+    const box_len = 1 + 4 + 4 + 24 * @sizeOf(Vertex) + 4 + 36 * 4;
+    out.shrinkRetainingCapacity(start + box_len);
 
     // A geometry with two LODs of a triangle list
     const t = Triangle.init(Vec3.zero(), Vec3.axisX(), Vec3.axisY(), Color.white);
@@ -416,13 +423,13 @@ test "DebugRendererPlayback: replays the frames of a recorder" {
     var renderer: CountingRenderer = undefined;
     try renderer.init(allocator);
     defer renderer.base.deinit();
-    try std.testing.expectEqual(@as(u32, 1), renderer.num_batches); // The box of initialize
+    try std.testing.expectEqual(@as(u32, 25), renderer.num_batches); // The predefined geometry of initialize
 
     var playback = DebugRendererPlayback.init(allocator, &renderer.base);
     defer playback.deinit();
     try parseBytes(&playback, out.written());
     try std.testing.expectEqual(@as(u32, 2), playback.getNumFrames());
-    try std.testing.expectEqual(@as(u32, 3), renderer.num_batches); // The box of the recorder and the LOD batch
+    try std.testing.expectEqual(@as(u32, 27), renderer.num_batches); // The box of the recorder and the LOD batch
 
     playback.drawFrame(0);
     try std.testing.expectEqual(@as(u32, 1), renderer.num_lines);
