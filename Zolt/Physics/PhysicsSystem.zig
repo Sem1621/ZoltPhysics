@@ -44,15 +44,16 @@
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
 //!   order. Every C++ lambda is an inline `struct { fn call(...) }.call` closure at the lambda's position whose captures
 //!   are the lambda's captures (`[&context, &step]` -> `.{ context, step }`). Jobs created inside jobs
-//!   (TrySpawnJobFindCollisions, the FindCCDContacts jobs) are added to the barrier, as in Jolt.
+//!   (TrySpawnJobFindCollisions, the FindCCDContacts jobs, the soft body jobs of JobSoftBodyPrepare) are added to the
+//!   barrier, as in Jolt.
 //! - Start gate (D4): the first step's root jobs get one dependency (Jolt: 0) that `kickStep` (the kick of StartNextStep)
 //!   removes after the whole graph exists, so a failing createJob while building has no side effect.
 //! - Out of memory (D5): `update` returns `error{OutOfMemory}!PhysicsUpdateError`. A failure while building the jobs (or
 //!   in the allocations before) changes nothing. Inside a job an allocation failure sets the latch of the context; a
 //!   poisoned job skips its work and allocations but always does its frees, its commits and its dependency bookkeeping,
 //!   and the protocol jobs (BroadPhasePrepare, UpdateBroadPhaseFinalize, FindCollisions, PostIntegrateVelocity,
-//!   ResolveCCDContacts, ContactRemovedCallbacks, StartNextStep, SoftBodyPrepare) follow D5's table. A job that cannot be
-//!   created from inside a job is not an error. Temp memory is `TempArray`, freed at Jolt's positions.
+//!   ResolveCCDContacts, ContactRemovedCallbacks, StartNextStep, SoftBodyPrepare, SoftBodyFinalize) follow D5's table. A
+//!   job that cannot be created from inside a job is not an error. Temp memory is `TempArray`, freed at Jolt's positions.
 //! - Debug grants (BodyAccess.Grant, GrantActiveBodiesAccess) end before a job kicks other jobs: JobFindCollisions and
 //!   JobSoftBodyPrepare remove their dependencies after the scope of their grants (Jolt: inside it). With
 //!   JobSystemSingleThreaded the kicked jobs run inside the call and their grants assert that no grant is active on the
