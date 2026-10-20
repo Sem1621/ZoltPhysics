@@ -1381,7 +1381,7 @@ test "BodyManager: the contact cache flags of an update that runs out of memory 
 }
 
 /// Shared settings that `SoftBodyMotionProperties.initialize` accepts: 3 vertices, a face, a rod, a skinned vertex and
-/// one update group (Optimize is group S1). Reference count 0: the creation settings hold it.
+/// one hand-made update group. Reference count 0: the creation settings hold it.
 fn testSoftBodySettings(allocator: Allocator) Allocator.Error!*SoftBodySharedSettings {
     const s = try SoftBodySharedSettings.create(allocator);
     errdefer {

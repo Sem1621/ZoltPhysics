@@ -35,6 +35,19 @@
 //! - `sCreateCube(inGridSize, inGridSpacing)` is `createCube(allocator, grid_size, grid_spacing)`.
 //! - Asserts on the input (two vertices at the same position, a rod of zero length, constraints that use a vertex
 //!   twice) are `if (Core.enable_asserts)` asserts: Jolt's release build continues there.
+//! - Inputs where Jolt is undefined that the UB table of R20 does not list yet (reported to the lead). In safe builds
+//!   Zolt stops there with a bounds check or an assert, like Jolt's debug build. In ReleaseFast it is undefined, like
+//!   Jolt's release build:
+//!   - CreateConstraints with an empty `vertex_attributes` and at least one face: Jolt's `attr` reads
+//!     `inVertexAttributes[min(v, 0u - 1)]`.
+//!   - CreateConstraints with an LRA type, or Optimize, after vertices were added or removed while the closest
+//!     kinematic cache was filled. The cache then has another size than `vertices`, and Jolt reads past the end of one
+//!     of them.
+//!   - Optimize with a vertex that no group reaches: its position is NaN, +inf or FLT_MAX, so it is never a start
+//!     vertex, and no open group connects to it. Jolt asserts. Its release build reads `groups[-1]` for a constraint
+//!     with no vertex in a group and for a skinned constraint on that vertex. A constraint with only some vertices in
+//!     a group goes to the non-parallel group there, but Zolt's assert is a plain `std.debug.assert`, so ReleaseFast is
+//!     undefined for it too.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -2599,6 +2612,65 @@ test "SoftBodySharedSettings: optimize leaves the settings unchanged when an all
             defer allocator.free(after);
             try std.testing.expectEqualSlices(u8, before, after);
             try std.testing.expectEqual(num_closest, s.closest_kinematic.items.len);
+        }
+    }
+}
+
+test "SoftBodySharedSettings: optimize and calculateClosestKinematic free the cache they filled when an allocation fails" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+
+    // Without LRA createConstraints does not fill the closest kinematic cache, so optimize fills it itself. An
+    // allocation that fails after that must free it again.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var cloth = try createTestCloth(allocator, 8, 0.1);
+        defer cloth.deinit();
+        const s = cloth.get().?;
+        const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{})};
+        try s.createConstraints(&attributes, .{ .bend_type = .dihedral });
+        try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len);
+        const before = try saveBytes(allocator, s);
+        defer allocator.free(before);
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        s.allocator = failing.allocator();
+        var results: S.OptimizationResults = .{};
+        const result = s.optimizeWithResults(&results);
+        s.allocator = allocator;
+        results.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len); // Optimize also frees it when it succeeds
+        if (result) |_| {
+            try std.testing.expect(fail_index > 10);
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            const after = try saveBytes(allocator, s);
+            defer allocator.free(after);
+            try std.testing.expectEqualSlices(u8, before, after);
+        }
+    }
+
+    // calculateClosestKinematic called directly caches nothing when it fails
+    fail_index = 0;
+    while (true) : (fail_index += 1) {
+        var cloth = try createTestCloth(allocator, 5, 0.1);
+        defer cloth.deinit();
+        const s = cloth.get().?;
+        const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{})};
+        try s.createConstraints(&attributes, .{});
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        s.allocator = failing.allocator();
+        const result = s.calculateClosestKinematic();
+        s.allocator = allocator;
+        if (result) |_| {
+            try std.testing.expect(fail_index > 2);
+            try std.testing.expectEqual(s.vertices.items.len, s.closest_kinematic.items.len);
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len);
         }
     }
 }

@@ -17,6 +17,9 @@
 //!   of 3 and more faces per edge, back to back and duplicated faces, fans of more than 32 faces on one edge) and
 //!   lattice graphs (equal distances from several kinematic vertices: ties in Dijkstra's heap). Vertex attributes per
 //!   case or per vertex, with zero, FLT_MAX and other compliances and every LRA type.
+//! - A separate test lays out 33 to 44 copies of a few cloths. Each copy becomes one parallel group, so the group size
+//!   sort of Optimize gets more than 32 groups, many of equal size: QuickSort partitions them, its insertion sort does
+//!   not decide their order alone.
 //! - Coverage: the test fails unless the generators reached the hard cases (counted on the Zolt side, which equals the
 //!   Jolt side when the transcripts are equal).
 //! - The generators stay away from Jolt's asserts (no two vertices at the same position, no constraint that uses a
@@ -565,6 +568,71 @@ fn genGraph(b: *Builder) !void {
     }
 }
 
+/// Copies of 1 to 3 cloths side by side along x. A copy has 132 to 196 vertices: more than half and less than all of
+/// a parallel group (SoftBodyUpdateContext.vertex_constraint_batch), and no constraint joins two copies, so Optimize
+/// makes one parallel group per copy. Copies of one cloth get the same constraints, so their groups have equal size.
+fn genCopies(b: *Builder) !void {
+    const g = b.g;
+    const shapes = [_][2]u32{ .{ 12, 12 }, .{ 11, 13 }, .{ 13, 12 }, .{ 13, 13 }, .{ 14, 14 }, .{ 12, 16 } };
+    var copy_shapes: [3][2]u32 = undefined;
+    const num_shapes = g.int(1, 3);
+    for (copy_shapes[0..num_shapes]) |*shape| shape.* = shapes[g.int(0, shapes.len - 1)];
+    const num_copies = g.int(33, 44);
+    const spacing: f32 = if (g.chance(50)) 0.5 else 1.0; // Exact positions: the copies are equal up to a translation
+    const kinematic_mode = g.int(0, 2); // A corner, the first row or none
+    const alternating = g.chance(50); // Alternating or equal diagonals
+    var x0: u32 = 0;
+    for (0..num_copies) |_| {
+        const shape = copy_shapes[g.int(0, num_shapes - 1)];
+        const nx = shape[0];
+        const nz = shape[1];
+        const first = b.numVertices();
+        for (0..nz) |z| for (0..nx) |x| {
+            const kinematic = switch (kinematic_mode) {
+                0 => x == 0 and z == 0,
+                1 => z == 0,
+                else => false,
+            };
+            _ = try b.vertex(spacing * @as(f32, @floatFromInt(x0 + x)), 0.0, spacing * @as(f32, @floatFromInt(z)), g.invMass(kinematic));
+        };
+        for (0..nz - 1) |z| for (0..nx - 1) |x| {
+            const v0: u32 = first + @as(u32, @intCast(z * nx + x));
+            const v1 = v0 + 1;
+            const v2 = v0 + nx;
+            const v3 = v2 + 1;
+            if (alternating and (x + z) % 2 == 0) {
+                try b.face(v0, v2, v1);
+                try b.face(v1, v2, v3);
+            } else {
+                try b.face(v0, v3, v1);
+                try b.face(v0, v2, v3);
+            }
+        };
+        x0 += nx + 2;
+    }
+}
+
+/// A case of `genCopies`: one attribute for all vertices (so copies of one cloth get the same constraints),
+/// CreateConstraints, then Optimize
+fn generateCopies(allocator: Allocator, g: *Gen) !Case {
+    var c: Case = .{ .kind = .cloth };
+    errdefer c.deinit(allocator);
+    var settings: Ref(S) = .init(try S.create(allocator));
+    defer settings.deinit();
+    var b: Builder = .{ .allocator = allocator, .s = settings.get().?, .g = g };
+    try genCopies(&b);
+    var empty: Ref(S) = .init(try S.create(allocator));
+    defer empty.deinit();
+    try genAttributes(allocator, &c, g, 1);
+    try c.ops.append(allocator, createConstraintsOp(g));
+    if (g.chance(30)) try c.ops.append(allocator, .{ .kind = .clone });
+    try c.ops.append(allocator, .{ .kind = if (g.chance(75)) .optimize else .optimize_no_results });
+    if (g.chance(30)) try c.ops.append(allocator, .{ .kind = .optimize }); // Again on the sorted constraints
+    c.settings_bytes = try saveBytes(allocator, b.s);
+    c.extra_bytes = try saveBytes(allocator, empty.get().?);
+    return c;
+}
+
 /// Constraints that exist before the operations (CreateConstraints clears the edges and appends to the others)
 fn addExistingConstraints(b: *Builder) !void {
     const g = b.g;
@@ -768,6 +836,8 @@ const Coverage = struct {
     multi_group_optimizes: u32 = 0,
     non_parallel_constraints: u32 = 0,
     group_size_ties: u32 = 0,
+    /// Optimize sorted more than 32 parallel groups, some of equal size (QuickSort partitions them, the copies test)
+    group_size_ties_over_32: u32 = 0,
     /// Optimize used a closest kinematic cache that was filled before (by CreateConstraints or the private function)
     cached_optimizes: u32 = 0,
     /// Constraints were appended after the cache was filled, then Optimize used it
@@ -921,6 +991,7 @@ const Coverage = struct {
         for (1..groups.len - 1) |i| {
             if (size(groups, i) == size(groups, i - 1)) {
                 self.group_size_ties += 1;
+                if (groups.len - 1 > 32) self.group_size_ties_over_32 += 1;
                 break;
             }
         }
@@ -1131,4 +1202,24 @@ test "SoftBodySettings parity: createCube for grid sizes 2 to 8" {
     };
     try checker.finish();
     try expect(coverage.cube_cases == 35);
+}
+
+test "SoftBodySettings parity: Optimize sorts more than 32 parallel groups of equal size" {
+    const allocator = std.testing.allocator;
+    var checker: TranscriptChecker = .{ .name = "SoftBodySettings copies" };
+    var coverage: Coverage = .{};
+    var g: Gen = .{ .rng = .{ .state = 0x9a7c0b1e } };
+    const buffer = try allocator.alloc(u8, transcript_capacity);
+    defer allocator.free(buffer);
+    const num_copies_cases = 8;
+    var num_optimizes: u32 = 0;
+    for (0..num_copies_cases) |index| {
+        var c = try generateCopies(allocator, &g);
+        defer c.deinit(allocator);
+        for (c.ops.items) |op| num_optimizes += @intFromBool(op.kind == .optimize or op.kind == .optimize_no_results);
+        try runCase(allocator, &checker, &coverage, &c, index, buffer);
+    }
+    try checker.finish();
+    std.debug.print("SoftBodySettings copies coverage: {d} optimizes, {d} with more than 32 parallel groups and ties\n", .{ num_optimizes, coverage.group_size_ties_over_32 });
+    try expect(coverage.group_size_ties_over_32 == num_optimizes);
 }
