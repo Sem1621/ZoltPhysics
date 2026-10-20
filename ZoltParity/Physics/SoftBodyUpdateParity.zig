@@ -4,22 +4,33 @@
 //!
 //! - A case is a PhysicsSystem with a few rigid bodies (boxes, spheres, capsules, a mesh, a compound, a scaled box,
 //!   sensors, kinematic and dynamic bodies, a body in a layer that does not collide) and one soft body, and a list of
-//!   operations: customUpdate with random delta times, skinVertices (hard skin all or not), the setters (iterations,
-//!   update position, double sided, pressure, vertex radius, skin constraints and the max distance multiplier, gravity
-//!   factor, linear damping), a force, a vertex velocity and inverse mass, calculateMassAndInertia, SaveState / an update
-//!   / RestoreState, the contact listener mode (none, accept, reject, sensor, mass scales) and rigid body velocities and
-//!   positions.
+//!   operations: customUpdate with random delta times (whole or staged, see below), skinVertices (hard skin all or
+//!   not), the setters (iterations, update position, double sided, pressure, vertex radius, skin constraints and the max
+//!   distance multiplier, gravity factor, linear damping), a force, a vertex velocity and inverse mass,
+//!   calculateMassAndInertia, SaveState / an update / RestoreState, the contact listener mode (none, accept, reject,
+//!   sensor, mass scales that are sometimes exactly 0) and rigid body velocities and positions.
+//! - Some rigid bodies and the soft body have a collision group: one group filter table with 4 sub groups and random
+//!   disabled pairs, or a group without a filter, so that CanCollide rejects some bodies.
 //! - The soft bodies come from generators like those of the SoftBodySettings layer (group S1): a cube (sCreateCube), a
 //!   cloth with fixed corners and LRA constraints, a cloth with dihedral bends, a pressure sphere, a rod chain, a skinned
 //!   cloth with back stops, and a 30 x 30 cloth (several parallel groups and a non-empty non-parallel group, 900
 //!   vertices: a partial last batch of 64). The Zolt side builds the settings, both sides restore their
 //!   SaveBinaryState bytes.
 //! - Each side writes a transcript: after every operation the soft body (position, rotation, bounds, the motion
-//!   properties, every vertex with its collision plane, colliding shape index, contact flag and largest penetration,
-//!   every rod and skin state, the local and predicted bounds, the volume, the private flags), its SaveState bytes and
-//!   the rigid bodies (position, rotation, velocities, active). The contact listener writes its calls when they happen:
-//!   the validate arguments and results, and the manifold of OnSoftBodyContactAdded. The transcripts must be equal byte
+//!   properties, every vertex, rod and skin state, the local and predicted bounds, the volume, the private flags), its
+//!   SaveState bytes and the rigid bodies (position, rotation, velocities, active). The transcripts must be equal byte
 //!   for byte; a mismatch is reported with the operation and the field.
+//! - After a whole operation the collision data of the vertices (colliding shape index, contact flag, largest
+//!   penetration) and the lists of colliding shapes and sensors always have their reset values: UpdateSoftBodyState
+//!   resets the vertices and UpdateRigidBodyVelocities clears the lists. So they are also written where they carry
+//!   information:
+//!   - The staged update is CustomUpdate step by step. After DetermineCollidingShapes it writes the colliding shapes
+//!     and sensors: every member that Jolt initializes (the body, the motion type, the transform, friction,
+//!     restitution, the mass scale, the leaf shapes, and for a dynamic body its inverse mass, inertia and velocities).
+//!     After the collision phase it writes the collision data of every vertex and the sensor contacts. When the update
+//!     is done it writes the colliding shapes again (the velocities and update flags of the collision response).
+//!   - The contact listener writes its calls when they happen: the validate arguments and results, and the manifold of
+//!     OnSoftBodyContactAdded with the collision data of every vertex.
 //! - Coverage: the test fails unless the cases reached the hard paths (counted on the Zolt side, which equals the Jolt
 //!   side when the transcripts are equal).
 //! - The generators stay away from Jolt's asserts. With `-Dreference_asserts=true` a case fails when its C++ side hits a
@@ -68,6 +79,12 @@ const SoftBodyValidateResult = zolt.SoftBodyValidateResult;
 const SoftBodyManifold = zolt.SoftBodyManifold;
 const SoftBodyCreationSettings = zolt.SoftBodyCreationSettings;
 const SoftBodyMotionProperties = zolt.SoftBodyMotionProperties;
+const SoftBodyUpdateContext = zolt.SoftBodyUpdateContext;
+const SoftBodyVertex = zolt.SoftBodyVertex;
+const RefConst = zolt.RefConst;
+const GroupFilter = zolt.GroupFilter;
+const GroupFilterTable = zolt.GroupFilterTable;
+const CollisionGroup = zolt.CollisionGroup;
 const S = zolt.SoftBodySharedSettings;
 const Layers = TestLayers.Layers;
 const flt_max = zolt.math.flt_max;
@@ -86,6 +103,8 @@ const World = extern struct {
     num_bodies: u32,
     optimize_broad_phase: u32,
     sim_shape_filter: u32,
+    /// The pairs of sub groups (`group_filter_pairs`) whose collision the group filter table disables, one bit per pair
+    group_filter_disabled: u32,
 };
 
 /// The shapes of the rigid bodies (SBURigidBodyDesc::mShape)
@@ -107,7 +126,8 @@ const RigidBody = extern struct {
     user_data: u32,
     first_triangle: u32,
     num_triangles: u32,
-    padding: u32 = 0,
+    /// The collision group (see `makeCollisionGroup`)
+    group: u32 = 0,
 };
 
 /// SBUSoftBodyDesc of SoftBodyUpdateReference.cpp
@@ -128,6 +148,9 @@ const SoftBody = extern struct {
     faces_double_sided: u32,
     allow_sleeping: u32,
     add_to_system: u32,
+    /// The collision group (see `makeCollisionGroup`)
+    group: u32 = 0,
+    padding: u32 = 0,
 };
 
 /// SBUOpKind of SoftBodyUpdateReference.cpp
@@ -142,6 +165,7 @@ const OpKind = enum(u32) {
     set_listener,
     set_body_velocity,
     set_body_position,
+    staged_update,
 };
 
 /// SBUOp of SoftBodyUpdateReference.cpp
@@ -152,9 +176,9 @@ const Op = extern struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(World) == 24);
+    std.debug.assert(@sizeOf(World) == 28);
     std.debug.assert(@sizeOf(RigidBody) == 136);
-    std.debug.assert(@sizeOf(SoftBody) == 96);
+    std.debug.assert(@sizeOf(SoftBody) == 104);
     std.debug.assert(@sizeOf(Op) == 52);
 }
 
@@ -162,12 +186,30 @@ comptime {
 const tag_op: u32 = 0x5B000000;
 const tag_validate: u32 = 0x5B100000;
 const tag_added: u32 = 0x5B200000;
+const tag_staged: u32 = 0x5B300000;
 
 /// The operation index of the state before the first operation
 const initial_op: u32 = 0xFFFFF;
 
 /// The capacity of the transcript buffer of the C++ side
 const transcript_capacity = 64 << 20;
+
+/// The pairs of sub groups that World.group_filter_disabled can disable (cSBUGroupFilterPairs of
+/// SoftBodyUpdateReference.cpp). The group filter table has 4 sub groups.
+const group_filter_pairs = [_][2]u32{ .{ 0, 1 }, .{ 0, 2 }, .{ 0, 3 }, .{ 1, 2 }, .{ 1, 3 }, .{ 2, 3 } };
+
+/// RigidBody.group and SoftBody.group: 0 is the default collision group. Otherwise bit 31 is set, bits 0 to 7 are the
+/// sub group, bits 8 to 15 the group (0xFF: the invalid group) and bit 16 selects the group filter table.
+fn encodeGroup(group: u32, sub_group: u32, with_filter: bool) u32 {
+    return 0x80000000 | (@as(u32, @intFromBool(with_filter)) << 16) | (group << 8) | sub_group;
+}
+
+/// The collision group of RigidBody.group and SoftBody.group (SBUMakeCollisionGroup of SoftBodyUpdateReference.cpp)
+fn makeCollisionGroup(group: u32, filter: *const GroupFilter) CollisionGroup {
+    if (group == 0) return .{};
+    const id = (group >> 8) & 0xFF;
+    return .init(if ((group & 0x10000) != 0) filter else null, if (id == 0xFF) CollisionGroup.invalid_group else id, group & 0xFF);
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The transcript
@@ -293,6 +335,9 @@ const Listener = struct {
         self.coverage.validate_calls += 1;
         if (result == .reject_contact) self.coverage.rejected += 1;
         if (settings.is_sensor) self.coverage.sensor_validates += 1;
+        // DetermineCollidingShapes' "Check if there will be any interaction" returns
+        if (result == .accept_contact and !settings.is_sensor and settings.inv_mass_scale1 == 0.0 and (other_body.getMotionType() != .dynamic or settings.inv_mass_scale2 == 0.0))
+            self.coverage.no_interaction += 1;
         return result;
     }
 
@@ -313,6 +358,9 @@ const Listener = struct {
                 t.v3(manifold.getContactNormal(v));
                 self.coverage.vertex_contacts += 1;
             }
+            // The collision data of the vertex before UpdateSoftBodyState resets it
+            t.label("added vertex collision", @intCast(i));
+            dumpVertexCollision(t, v);
         }
         t.label("added sensors", 0);
         t.u32v(manifold.getNumSensorContacts());
@@ -505,6 +553,77 @@ fn dumpState(t: *Transcript, op_index: u32, soft_body: *const Body, bodies: []co
     if (t.failed) return error.OutOfMemory;
 }
 
+/// The collision data of a vertex (SBUDumpVertexCollision of SoftBodyUpdateReference.cpp)
+fn dumpVertexCollision(t: *Transcript, v: *const SoftBodyVertex) void {
+    t.v3(v.collision_plane.getNormal());
+    t.f32v(v.collision_plane.getConstant());
+    t.u32v(@bitCast(v.colliding_shape_index));
+    t.boolean(v.has_contact);
+    t.f32v(v.largest_penetration);
+}
+
+/// The 3x3 part and the translation of a matrix (SBUTranscript::Mat of SoftBodyUpdateReference.cpp)
+fn dumpMat(t: *Transcript, m: Mat44, num_columns: u32) void {
+    for (0..num_columns) |i| t.v3(m.getColumn3(@intCast(i)));
+}
+
+/// The leaf shapes of a colliding shape or sensor
+fn dumpLeafShapes(t: *Transcript, shapes: []const SoftBodyMotionProperties.LeafShape) void {
+    t.u32v(@intCast(shapes.len));
+    for (shapes) |*l| {
+        dumpMat(t, l.transform, 4);
+        t.v3(l.scale);
+        t.u32v(@intFromEnum(l.shape.get().?.getSubType()));
+    }
+}
+
+/// The colliding shapes and sensors of the motion properties (SBUDumpColliding of SoftBodyUpdateReference.cpp). The
+/// members that Jolt leaves uninitialized are skipped: the dynamic members of a body that is not dynamic, and the contact
+/// flag of a sensor before DetermineSensorCollisions (`sensor_contacts` false).
+fn dumpColliding(t: *Transcript, mp: *const SoftBodyMotionProperties, sensor_contacts: bool) void {
+    t.label("staged colliding shapes", 0);
+    t.u32v(@intCast(mp.colliding_shapes.items.len));
+    for (mp.colliding_shapes.items, 0..) |*cs, i| {
+        const item: u32 = @intCast(i);
+        t.label("staged colliding shape", item);
+        t.u32v(cs.body_id.getIndexAndSequenceNumber());
+        t.u32v(@intFromEnum(cs.motion_type));
+        dumpMat(t, cs.center_of_mass_transform, 4);
+        t.f32v(cs.friction);
+        t.f32v(cs.restitution);
+        t.f32v(cs.soft_body_inv_mass_scale);
+        t.boolean(cs.update_velocities);
+        t.label("staged colliding shape leaf shapes", item);
+        dumpLeafShapes(t, cs.shapes.items);
+        if (cs.motion_type == .dynamic) {
+            t.label("staged colliding shape mass and velocities", item);
+            t.f32v(cs.inv_mass);
+            dumpMat(t, cs.inv_inertia, 3);
+            t.v3(cs.linear_velocity);
+            t.v3(cs.angular_velocity);
+            t.v3(cs.original_linear_velocity);
+            t.v3(cs.original_angular_velocity);
+        }
+    }
+    t.label("staged colliding sensors", 0);
+    t.u32v(@intCast(mp.colliding_sensors.items.len));
+    for (mp.colliding_sensors.items, 0..) |*cs, i| {
+        t.label("staged colliding sensor", @intCast(i));
+        t.u32v(cs.body_id.getIndexAndSequenceNumber());
+        dumpMat(t, cs.center_of_mass_transform, 4);
+        dumpLeafShapes(t, cs.shapes.items);
+        if (sensor_contacts) t.boolean(cs.has_contact);
+    }
+}
+
+/// The world space bounds that DetermineCollidingShapes queries the broad phase with
+fn queryBounds(mp: *const SoftBodyMotionProperties, soft_body: *const Body) AABox {
+    var local_bounds = mp.getLocalBounds();
+    local_bounds.encapsulate(mp.local_predicted_bounds);
+    local_bounds.expandBy(Vec3.replicate(mp.getVertexRadius()));
+    return local_bounds.transformedRMat44(soft_body.getCenterOfMassTransform());
+}
+
 /// RestoreBinaryState of `bytes` into new settings
 fn restoreSettings(allocator: Allocator, bytes: []const u8) !Ref(S) {
     var ref: Ref(S) = .init(try S.create(allocator));
@@ -514,6 +633,82 @@ fn restoreSettings(allocator: Allocator, bytes: []const u8) !Ref(S) {
     try ref.get().?.restoreBinaryState(in.streamIn());
     if (in.isFailed()) return error.RestoreFailed;
     return ref;
+}
+
+/// Coverage: the rigid bodies in the query bounds of the soft body whose collision group does not collide with the soft
+/// body's (the false branch of CanCollide in DetermineCollidingShapes)
+fn countGroupFiltered(mp: *const SoftBodyMotionProperties, soft_body: *const Body, bodies: []const *Body, descs: []const RigidBody, coverage: *Coverage) void {
+    const bounds = queryBounds(mp, soft_body);
+    for (bodies, descs) |b, *d| {
+        if (d.object_layer != Layers.lq_debris and bounds.overlaps(b.getWorldSpaceBounds().*) and !soft_body.getCollisionGroup().canCollide(b.getCollisionGroup()))
+            coverage.group_filtered += 1;
+    }
+}
+
+/// SBUStagedUpdate of SoftBodyUpdateReference.cpp: CustomUpdate with the state written after DetermineCollidingShapes
+/// (stage 0), after the collision phase (stage 1, the vertex collision data and the sensor contacts) and when the
+/// update is done (stage 2, before UpdateRigidBodyVelocities clears the colliding shapes)
+fn stagedUpdate(t: *Transcript, mp: *SoftBodyMotionProperties, delta_time: f32, soft_body: *Body, system: *PhysicsSystem, coverage: *Coverage) !void {
+    // Create update context
+    var context: SoftBodyUpdateContext = .{};
+    mp.initializeUpdateContext(delta_time, soft_body, system, &context);
+
+    // Determine bodies we're colliding with
+    try mp.determineCollidingShapes(&context, system, system.getBodyLockInterface());
+    t.label("staged stage 0", 0);
+    t.u32v(tag_staged | 0);
+    t.v3(context.gravity);
+    t.v3(context.displacement_due_to_gravity);
+    t.f32v(context.sub_step_delta_time);
+    t.u32v(mp.num_sensors.load(.monotonic));
+    dumpColliding(t, mp, false);
+    for (mp.colliding_shapes.items) |*cs| {
+        if (cs.motion_type == .dynamic) coverage.staged_dynamic_shapes += 1;
+    }
+
+    // The collision phase: the collision planes, then the sensors
+    const settings = system.getPhysicsSettings();
+    while (true) {
+        const state = context.state.load(.acquire);
+        if (state != .determine_collision_planes and state != .determine_sensor_collisions) break;
+        if (mp.parallelUpdate(&context, settings) != .did_work) return error.NoProgress;
+    }
+    t.label("staged stage 1", 0);
+    t.u32v(tag_staged | 1);
+    t.u32v(@intFromEnum(context.state.load(.acquire)));
+    for (mp.getVertices(), 0..) |*v, i| {
+        t.label("staged vertex collision", @intCast(i));
+        dumpVertexCollision(t, v);
+        if (v.colliding_shape_index >= 0) coverage.staged_vertex_hits += 1;
+    }
+    t.label("staged sensor contacts", 0);
+    for (mp.colliding_sensors.items) |*cs| {
+        t.boolean(cs.has_contact);
+        if (cs.has_contact) coverage.staged_sensor_contacts += 1;
+    }
+    t.boolean(mp.need_contact_callback.load(.monotonic));
+
+    // Call the internal update until it finishes
+    var status = mp.parallelUpdate(&context, settings);
+    while (status == .did_work)
+        status = mp.parallelUpdate(&context, settings);
+    if (status != .done) return error.NoProgress;
+    t.label("staged stage 2", 0);
+    t.u32v(tag_staged | 2);
+    t.v3(context.delta_position);
+    t.u32v(@intFromEnum(context.can_sleep));
+    dumpColliding(t, mp, true);
+    for (mp.colliding_shapes.items) |*cs| {
+        if (cs.update_velocities) coverage.staged_pushed += 1;
+        if (cs.update_velocities and cs.soft_body_inv_mass_scale == 0.0) coverage.zero_scale_pushes += 1;
+    }
+
+    // Update the state of the bodies we've collided with
+    mp.updateRigidBodyVelocities(&context, system.getBodyInterfaceMut());
+
+    // Update position of the soft body
+    if (mp.getUpdatePosition())
+        system.getBodyInterfaceMut().setPosition(soft_body.getID(), soft_body.getPosition().addVec3(context.delta_position), .dont_activate);
 }
 
 /// jolt_sbu_run of SoftBodyUpdateReference.cpp on Zolt
@@ -536,6 +731,15 @@ fn zoltRun(allocator: Allocator, c: *const Case, t: *Transcript, coverage: *Cove
     var listener: Listener = .{ .transcript = t, .coverage = coverage };
     const bi = system.getBodyInterfaceMut();
 
+    // The group filter of the collision groups
+    const group_filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 4 });
+    var group_filter_ref: RefConst(GroupFilter) = .init(group_filter.asGroupFilter());
+    defer group_filter_ref.deinit();
+    for (group_filter_pairs, 0..) |pair, k| {
+        if (((c.world.group_filter_disabled >> @intCast(k)) & 1) != 0)
+            group_filter.disableCollision(pair[0], pair[1]);
+    }
+
     // The rigid bodies
     var bodies: std.ArrayList(*Body) = .empty;
     defer bodies.deinit(allocator);
@@ -553,6 +757,7 @@ fn zoltRun(allocator: Allocator, c: *const Case, t: *Transcript, coverage: *Cove
         s.friction = d.friction;
         s.restitution = d.restitution;
         s.user_data = d.user_data;
+        s.collision_group = makeCollisionGroup(d.group, group_filter.asGroupFilter());
         const body = (try bi.createBody(&s)) orelse return error.NoBody;
         try bodies.append(allocator, body);
         try bi.addBody(body.getID(), if (d.motion_type == @intFromEnum(zolt.MotionType.static)) .dont_activate else .activate);
@@ -574,6 +779,7 @@ fn zoltRun(allocator: Allocator, c: *const Case, t: *Transcript, coverage: *Cove
     ss.update_position = sd.update_position != 0;
     ss.faces_double_sided = sd.faces_double_sided != 0;
     ss.allow_sleeping = sd.allow_sleeping != 0;
+    ss.collision_group = makeCollisionGroup(sd.group, group_filter.asGroupFilter());
     const soft_body = (try bi.createSoftBody(&ss)) orelse return error.NoBody;
     const soft_body_id = soft_body.getID();
     defer {
@@ -594,13 +800,21 @@ fn zoltRun(allocator: Allocator, c: *const Case, t: *Transcript, coverage: *Cove
     for (c.ops.items, 0..) |*op, op_index| {
         t.op = @intCast(op_index);
         switch (op.kind) {
-            .custom_update => {
-                // Coverage: the rigid bodies that the soft body pushes
+            .custom_update, .staged_update => {
+                // Coverage: the bodies that the collision group filters out, the rigid bodies that the soft body pushes
+                countGroupFiltered(mp, soft_body, bodies.items, c.bodies.items, coverage);
                 var velocities: [max_bodies]Vec3 = undefined;
                 for (bodies.items, 0..) |b, i| velocities[i] = b.getLinearVelocity();
-                try mp.customUpdate(op.f[0], soft_body, &system);
+                if (op.kind == .custom_update)
+                    try mp.customUpdate(op.f[0], soft_body, &system)
+                else
+                    try stagedUpdate(t, mp, op.f[0], soft_body, &system, coverage);
                 for (bodies.items, 0..) |b, i| {
-                    if (!b.getLinearVelocity().eql(velocities[i])) coverage.pushed_bodies += 1;
+                    if (!b.getLinearVelocity().eql(velocities[i])) {
+                        coverage.pushed_bodies += 1;
+                        // An infinitely heavy soft body pushes a dynamic body (vertex_inv_mass 0; stagedUpdate counts its own)
+                        if (op.kind == .custom_update and listener.mode == 4 and listener.scales[0] == 0.0 and listener.scales[1] != 0.0) coverage.zero_scale_pushes += 1;
+                    }
                 }
                 coverage.updates += 1;
             },
@@ -964,6 +1178,13 @@ fn genBody(allocator: Allocator, g: *Gen, c: *Case, index: usize) !RigidBody {
         d.motion_type = g.int(0, 1);
     }
     d.object_layer = if (d.is_sensor != 0) Layers.sensor else if (g.chance(8)) Layers.lq_debris else if (d.motion_type == 0) Layers.non_moving else Layers.moving;
+
+    // A collision group: the soft body's group 0 (sub group 0), another group or the invalid group, with or without the
+    // group filter table
+    if (g.chance(50)) {
+        const r = g.int(0, 99);
+        d.group = encodeGroup(if (r < 60) 0 else if (r < 85) 1 else 0xFF, g.int(0, 3), g.chance(80));
+    }
     if (d.motion_type != 0) {
         d.linear_velocity = .{ g.float(-1, 1), g.float(-1, 1), g.float(-1, 1) };
         d.angular_velocity = .{ g.float(-1, 1), g.float(-1, 1), g.float(-1, 1) };
@@ -996,11 +1217,16 @@ fn genDeltaTime(g: *Gen) f32 {
     };
 }
 
+/// A mass scale of listener mode 4: exactly zero ("infinite mass", no interaction) or in [0, 2)
+fn genScale(g: *Gen) f32 {
+    return if (g.chance(25)) 0.0 else g.float(0.0, 2.0);
+}
+
 /// Generates a case of `kind`
 fn generate(allocator: Allocator, g: *Gen, kind: Kind) !Case {
     var c: Case = .{
         .kind = kind,
-        .world = .{ .gravity = .{ g.float(-1, 1), g.float(-12, -2), g.float(-1, 1) }, .num_bodies = 0, .optimize_broad_phase = @intFromBool(g.chance(30)), .sim_shape_filter = @intFromBool(g.chance(30)) },
+        .world = .{ .gravity = .{ g.float(-1, 1), g.float(-12, -2), g.float(-1, 1) }, .num_bodies = 0, .optimize_broad_phase = @intFromBool(g.chance(30)), .sim_shape_filter = @intFromBool(g.chance(30)), .group_filter_disabled = g.int(0, 63) },
         .soft_body = undefined,
     };
     errdefer c.deinit(allocator);
@@ -1037,6 +1263,7 @@ fn generate(allocator: Allocator, g: *Gen, kind: Kind) !Case {
         .faces_double_sided = @intFromBool(g.chance(50)),
         .allow_sleeping = @intFromBool(g.chance(50)),
         .add_to_system = @intFromBool(g.chance(50)),
+        .group = if (g.chance(60)) encodeGroup(if (g.chance(80)) 0 else 0xFF, 0, g.chance(70)) else 0,
     };
 
     // The rigid bodies
@@ -1049,7 +1276,7 @@ fn generate(allocator: Allocator, g: *Gen, kind: Kind) !Case {
     const skinned = kind == .skinned_cloth;
     var phase: f32 = 0.0;
     if (g.chance(70))
-        try c.ops.append(allocator, .{ .kind = .set_listener, .u = .{ g.int(1, 4), 0, 0, 0 }, .f = .{ g.float(0.0, 2.0), g.float(0.0, 2.0), g.float(0.0, 2.0), 0, 0, 0, 0, 0 } });
+        try c.ops.append(allocator, .{ .kind = .set_listener, .u = .{ g.int(1, 4), 0, 0, 0 }, .f = .{ genScale(g), genScale(g), genScale(g), 0, 0, 0, 0, 0 } });
     if (skinned) {
         // The skin states start as NaN: the first SkinVertices hard skins all vertices (like Jolt's samples), a second
         // one sometimes gives a valid previous position without hard skinning
@@ -1065,7 +1292,7 @@ fn generate(allocator: Allocator, g: *Gen, kind: Kind) !Case {
                 phase += 0.3;
                 try c.ops.append(allocator, .{ .kind = .skin_vertices, .u = .{ try appendJoints(allocator, g, &c, phase), 3, @intFromBool(g.chance(10)), 0 } });
             }
-            try c.ops.append(allocator, .{ .kind = .custom_update, .f = .{ genDeltaTime(g), 0, 0, 0, 0, 0, 0, 0 } });
+            try c.ops.append(allocator, .{ .kind = if (g.chance(35)) .staged_update else .custom_update, .f = .{ genDeltaTime(g), 0, 0, 0, 0, 0, 0, 0 } });
         } else if (r < 58) {
             try c.ops.append(allocator, .{ .kind = .set_options, .u = .{ g.int(1, 6), @intFromBool(g.chance(70)), @intFromBool(g.chance(50)), @intFromBool(g.chance(70)) }, .f = .{ if (kind == .pressure_sphere or g.chance(20)) g.float(0.0, 1000.0) else 0.0, if (g.chance(50)) 0.0 else g.float(0.0, 0.05), if (g.chance(50)) 1.0 else g.float(0.0, 2.0), g.float(0.0, 2.0), g.float(0.0, 1.0), 0, 0, 0 } });
         } else if (r < 64) {
@@ -1078,7 +1305,7 @@ fn generate(allocator: Allocator, g: *Gen, kind: Kind) !Case {
         } else if (r < 82) {
             try c.ops.append(allocator, .{ .kind = .set_vertex, .u = .{ g.int(0, c.num_vertices - 1), 0, 0, 0 }, .f = .{ g.float(-2, 2), g.float(-2, 2), g.float(-2, 2), if (g.chance(20)) 0.0 else g.float(0.5, 2.0), 0, 0, 0, 0 } });
         } else if (r < 88) {
-            try c.ops.append(allocator, .{ .kind = .set_listener, .u = .{ g.int(0, 4), 0, 0, 0 }, .f = .{ g.float(0.0, 2.0), g.float(0.0, 2.0), g.float(0.0, 2.0), 0, 0, 0, 0, 0 } });
+            try c.ops.append(allocator, .{ .kind = .set_listener, .u = .{ g.int(0, 4), 0, 0, 0 }, .f = .{ genScale(g), genScale(g), genScale(g), 0, 0, 0, 0, 0 } });
         } else if (r < 94) {
             try c.ops.append(allocator, .{ .kind = .set_body_velocity, .u = .{ g.int(0, num_bodies - 1), 0, 0, 0 }, .f = .{ g.float(-2, 2), g.float(-2, 2), g.float(-2, 2), g.float(-1, 1), g.float(-1, 1), g.float(-1, 1), 0, 0 } });
         } else {
@@ -1105,6 +1332,18 @@ const Coverage = struct {
     vertex_contacts: u32 = 0,
     sensor_contacts: u32 = 0,
     pushed_bodies: u32 = 0,
+    /// Staged updates: dynamic colliding shapes, vertices with a colliding shape and sensors with a contact after the
+    /// collision phase, colliding shapes whose velocities the update changed
+    staged_dynamic_shapes: u32 = 0,
+    staged_vertex_hits: u32 = 0,
+    staged_sensor_contacts: u32 = 0,
+    staged_pushed: u32 = 0,
+    /// Validated contacts without any interaction (zero mass scales)
+    no_interaction: u32 = 0,
+    /// Dynamic bodies pushed by an infinitely heavy soft body (soft body inverse mass scale 0)
+    zero_scale_pushes: u32 = 0,
+    /// Rigid bodies in range whose collision group does not collide with the soft body
+    group_filtered: u32 = 0,
     /// Cases with more than 64 vertices that are not a multiple of 64 (a partial last batch)
     partial_batches: u32 = 0,
     /// Cases with several parallel groups and a non-empty non-parallel group
@@ -1194,7 +1433,8 @@ test "SoftBodyUpdate parity: customUpdate and skinVertices of cubes, cloths, sph
         }
     }
 
-    std.debug.print("SoftBodyUpdate parity: {d} cases ({any} per kind), {d} updates, {d} skins, {d} restores, {d} validates ({d} rejected, {d} sensors), {d} contact callbacks, {d} vertex contacts, {d} sensor contacts, {d} pushed bodies, {d} partial batches, {d} cases with parallel and serial groups, {d} transcript bytes\n", .{ coverage.cases, coverage.kinds, coverage.updates, coverage.skins, coverage.restores, coverage.validate_calls, coverage.rejected, coverage.sensor_validates, coverage.added_calls, coverage.vertex_contacts, coverage.sensor_contacts, coverage.pushed_bodies, coverage.partial_batches, coverage.parallel_and_serial_groups, coverage.bytes });
+    std.debug.print("SoftBodyUpdate parity: {d} cases ({any} per kind), {d} updates, {d} skins, {d} restores, {d} validates ({d} rejected, {d} sensors, {d} without interaction), {d} contact callbacks, {d} vertex contacts, {d} sensor contacts, {d} pushed bodies ({d} by a soft body with mass scale 0), {d} bodies filtered by the collision group, {d} partial batches, {d} cases with parallel and serial groups, {d} transcript bytes\n", .{ coverage.cases, coverage.kinds, coverage.updates, coverage.skins, coverage.restores, coverage.validate_calls, coverage.rejected, coverage.sensor_validates, coverage.no_interaction, coverage.added_calls, coverage.vertex_contacts, coverage.sensor_contacts, coverage.pushed_bodies, coverage.zero_scale_pushes, coverage.group_filtered, coverage.partial_batches, coverage.parallel_and_serial_groups, coverage.bytes });
+    std.debug.print("SoftBodyUpdate parity: staged updates: {d} dynamic colliding shapes, {d} vertices with a colliding shape and {d} sensors with a contact after the collision phase, {d} colliding shapes with new velocities\n", .{ coverage.staged_dynamic_shapes, coverage.staged_vertex_hits, coverage.staged_sensor_contacts, coverage.staged_pushed });
 
     // The cases reach the hard paths
     try expect(coverage.rejected > 0);
@@ -1206,4 +1446,11 @@ test "SoftBodyUpdate parity: customUpdate and skinVertices of cubes, cloths, sph
     try expect(coverage.skins > 0);
     try expect(coverage.partial_batches > 0);
     try expect(coverage.parallel_and_serial_groups > 0);
+    try expect(coverage.no_interaction > 0);
+    try expect(coverage.zero_scale_pushes > 0);
+    try expect(coverage.group_filtered > 0);
+    try expect(coverage.staged_dynamic_shapes > 0);
+    try expect(coverage.staged_vertex_hits > 0);
+    try expect(coverage.staged_sensor_contacts > 0);
+    try expect(coverage.staged_pushed > 0);
 }

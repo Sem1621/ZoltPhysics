@@ -7,7 +7,9 @@
 // - The shared settings come as SaveBinaryState bytes (both sides restore them).
 // - The transcript holds per operation: the soft body (position, rotation, bounds, the motion properties, every
 //   vertex, rod and skin state, the local and predicted bounds, the volume, the private flags), its SaveState bytes and
-//   the rigid bodies (position, rotation, velocities, active). The contact listener writes its calls when they happen.
+//   the rigid bodies (position, rotation, velocities, active). The contact listener writes its calls when they happen,
+//   with the collision data of every vertex. The staged update (SBUStagedUpdate) also writes the colliding shapes and
+//   sensors and the collision data of the vertices in the middle of CustomUpdate, where they are not reset yet.
 // - Values are written as their bytes: u32, f32, and RVec3 as 3 Real (f64 with JPH_DOUBLE_PRECISION).
 //
 // The structs below must match the extern structs in SoftBodyUpdateParity.zig. Booleans are passed as uint32. All C
@@ -21,6 +23,7 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/SimShapeFilter.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
@@ -32,6 +35,7 @@
 #include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
 #include <Jolt/Physics/SoftBody/SoftBodyContactListener.h>
 #include <Jolt/Physics/SoftBody/SoftBodyManifold.h>
+#include <Jolt/Physics/SoftBody/SoftBodyUpdateContext.h>
 
 #include <cstring>
 #include <sstream>
@@ -64,6 +68,7 @@ SBU_ROB(SBUNeedContactCallback, SoftBodyMotionProperties::mNeedContactCallback)
 SBU_ROB(SBUCollidingShapes, SoftBodyMotionProperties::mCollidingShapes)
 SBU_ROB(SBUCollidingSensors, SoftBodyMotionProperties::mCollidingSensors)
 SBU_ROB(SBUSkinnedMaxDistanceMultiplier, SoftBodyMotionProperties::mSkinnedMaxDistanceMultiplier)
+SBU_ROB(SBUNumSensors, SoftBodyMotionProperties::mNumSensors)
 
 /// The world of a case (SBUWorld in SoftBodyUpdateParity.zig)
 struct SBUWorldDesc
@@ -72,6 +77,7 @@ struct SBUWorldDesc
 	uint32			mNumBodies;
 	uint32			mOptimizeBroadPhase;	///< 1: PhysicsSystem::OptimizeBroadPhase after adding the bodies
 	uint32			mSimShapeFilter;		///< 1: install SBUSimShapeFilter
+	uint32			mGroupFilterDisabled;	///< The pairs of sub groups (cSBUGroupFilterPairs) whose collision the group filter table disables, one bit per pair
 };
 
 /// A rigid body (SBURigidBody in SoftBodyUpdateParity.zig)
@@ -91,7 +97,7 @@ struct SBURigidBodyDesc
 	uint32			mUserData;
 	uint32			mFirstTriangle;			///< Mesh: index of its first triangle in the triangle pool (9 floats per triangle)
 	uint32			mNumTriangles;
-	uint32			mPadding;
+	uint32			mGroup;					///< The collision group (see SBUMakeCollisionGroup)
 };
 
 /// The soft body (SBUSoftBody in SoftBodyUpdateParity.zig)
@@ -113,6 +119,8 @@ struct SBUSoftBodyDesc
 	uint32			mFacesDoubleSided;
 	uint32			mAllowSleeping;
 	uint32			mAddToSystem;			///< 1: BodyInterface::AddBody after BodyInterface::CreateSoftBody
+	uint32			mGroup;					///< The collision group (see SBUMakeCollisionGroup)
+	uint32			mPadding;
 };
 
 /// An operation (SBUOp in SoftBodyUpdateParity.zig)
@@ -136,12 +144,17 @@ enum class SBUOpKind : uint32
 	SetListener,			///< mode mU[0] (0 none, 1 accept, 2 reject odd body indices, 3 odd body indices are sensors, 4 the mass scales mF[0..2])
 	SetBodyVelocity,		///< rigid body mU[0]: BodyInterface::SetLinearAndAngularVelocity(mF[0..2], mF[3..5])
 	SetBodyPosition,		///< rigid body mU[0]: BodyInterface::SetPosition(mF[0..2], DontActivate)
+	StagedUpdate,			///< CustomUpdate(mF[0]) step by step, with the state written in between (SBUStagedUpdate)
 };
 
 // Tags of the transcript (must match SoftBodyUpdateParity.zig)
 static constexpr uint32 cSBUTagOp = 0x5B000000;
 static constexpr uint32 cSBUTagValidate = 0x5B100000;
 static constexpr uint32 cSBUTagAdded = 0x5B200000;
+static constexpr uint32 cSBUTagStaged = 0x5B300000;
+
+/// The pairs of sub groups that SBUWorldDesc::mGroupFilterDisabled can disable (the group filter table has 4 sub groups)
+static constexpr uint32 cSBUGroupFilterPairs[6][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
 
 /// The transcript: the bytes of the written values, in order
 class SBUTranscript
@@ -167,12 +180,23 @@ public:
 	void				Q(QuatArg inValue)				{ F32(inValue.GetX()); F32(inValue.GetY()); F32(inValue.GetZ()); F32(inValue.GetW()); }
 	void				R3(RVec3Arg inValue)			{ R(inValue.GetX()); R(inValue.GetY()); R(inValue.GetZ()); }
 	void				Box(const AABox &inValue)		{ V3(inValue.mMin); V3(inValue.mMax); }
+	void				Mat(Mat44Arg inValue, uint inNumColumns) { for (uint i = 0; i < inNumColumns; ++i) V3(inValue.GetColumn3(i)); } ///< The 3x3 part (and the translation with 4 columns)
 
 	uint8 *				mBuffer;
 	uint32				mCapacity;
 	uint32				mSize = 0;
 	bool				mOverflow = false;
 };
+
+/// The collision data of a vertex (DumpVertexCollision of SoftBodyUpdateParity.zig)
+static void SBUDumpVertexCollision(SBUTranscript &t, const SoftBodyVertex &inVertex)
+{
+	t.V3(inVertex.mCollisionPlane.GetNormal());
+	t.F32(inVertex.mCollisionPlane.GetConstant());
+	t.U32(uint32(inVertex.mCollidingShapeIndex));
+	t.U32(inVertex.mHasContact? 1 : 0);
+	t.F32(inVertex.mLargestPenetration);
+}
 
 /// The contact listener: writes its calls to the transcript
 class SBUListener : public SoftBodyContactListener
@@ -235,6 +259,9 @@ public:
 				t.V3(inManifold.GetLocalContactPoint(v));
 				t.V3(inManifold.GetContactNormal(v));
 			}
+
+			// The collision data of the vertex before UpdateSoftBodyState resets it
+			SBUDumpVertexCollision(t, v);
 		}
 		t.U32(inManifold.GetNumSensorContacts());
 		for (uint i = 0; i < inManifold.GetNumSensorContacts(); ++i)
@@ -391,6 +418,125 @@ static void SBUDumpState(SBUTranscript &t, uint32 inOpIndex, const Body &inSoftB
 	}
 }
 
+/// The leaf shapes of a colliding shape or sensor (DumpLeafShapes of SoftBodyUpdateParity.zig)
+template <class LeafShapes>
+static void SBUDumpLeafShapes(SBUTranscript &t, const LeafShapes &inShapes)
+{
+	t.U32(uint32(inShapes.size()));
+	for (const auto &l : inShapes)
+	{
+		t.Mat(l.mTransform, 4);
+		t.V3(l.mScale);
+		t.U32(uint32(l.mShape->GetSubType()));
+	}
+}
+
+/// The colliding shapes and sensors of the motion properties (DumpColliding of SoftBodyUpdateParity.zig). The members
+/// that Jolt leaves uninitialized are skipped: the dynamic members of a body that is not dynamic, and the contact flag of
+/// a sensor before DetermineSensorCollisions (inSensorContacts false).
+static void SBUDumpColliding(SBUTranscript &t, const SoftBodyMotionProperties &inMP, bool inSensorContacts)
+{
+	const auto &shapes = inMP.*SBUGet(SBUCollidingShapes());
+	t.U32(uint32(shapes.size()));
+	for (const auto &cs : shapes)
+	{
+		t.U32(cs.mBodyID.GetIndexAndSequenceNumber());
+		t.U32(uint32(cs.mMotionType));
+		t.Mat(cs.mCenterOfMassTransform, 4);
+		t.F32(cs.mFriction);
+		t.F32(cs.mRestitution);
+		t.F32(cs.mSoftBodyInvMassScale);
+		t.U32(cs.mUpdateVelocities? 1 : 0);
+		SBUDumpLeafShapes(t, cs.mShapes);
+		if (cs.mMotionType == EMotionType::Dynamic)
+		{
+			t.F32(cs.mInvMass);
+			t.Mat(cs.mInvInertia, 3);
+			t.V3(cs.mLinearVelocity);
+			t.V3(cs.mAngularVelocity);
+			t.V3(cs.mOriginalLinearVelocity);
+			t.V3(cs.mOriginalAngularVelocity);
+		}
+	}
+	const auto &sensors = inMP.*SBUGet(SBUCollidingSensors());
+	t.U32(uint32(sensors.size()));
+	for (const auto &cs : sensors)
+	{
+		t.U32(cs.mBodyID.GetIndexAndSequenceNumber());
+		t.Mat(cs.mCenterOfMassTransform, 4);
+		SBUDumpLeafShapes(t, cs.mShapes);
+		if (inSensorContacts)
+			t.U32(cs.mHasContact? 1 : 0);
+	}
+}
+
+/// SoftBodyMotionProperties::CustomUpdate with the state written after DetermineCollidingShapes (stage 0), after the
+/// collision phase (stage 1, the vertex collision data and the sensor contacts) and when the update is done (stage 2,
+/// before UpdateRigidBodyVelocities clears the colliding shapes). StagedUpdate of SoftBodyUpdateParity.zig.
+static bool SBUStagedUpdate(SBUTranscript &t, SoftBodyMotionProperties &ioMP, float inDeltaTime, Body &ioSoftBody, PhysicsSystem &inSystem)
+{
+	// Create update context
+	SoftBodyUpdateContext context;
+	ioMP.InitializeUpdateContext(inDeltaTime, ioSoftBody, inSystem, context);
+
+	// Determine bodies we're colliding with
+	ioMP.DetermineCollidingShapes(context, inSystem, inSystem.GetBodyLockInterface());
+	t.U32(cSBUTagStaged | 0);
+	t.V3(context.mGravity);
+	t.V3(context.mDisplacementDueToGravity);
+	t.F32(context.mSubStepDeltaTime);
+	t.U32(ioMP.*SBUGet(SBUNumSensors()));
+	SBUDumpColliding(t, ioMP, false);
+
+	// The collision phase: the collision planes, then the sensors
+	const PhysicsSettings &settings = inSystem.GetPhysicsSettings();
+	for (;;)
+	{
+		SoftBodyUpdateContext::EState state = context.mState.load(memory_order_acquire);
+		if (state != SoftBodyUpdateContext::EState::DetermineCollisionPlanes && state != SoftBodyUpdateContext::EState::DetermineSensorCollisions)
+			break;
+		if (ioMP.ParallelUpdate(context, settings) != SoftBodyMotionProperties::EStatus::DidWork)
+			return false;
+	}
+	t.U32(cSBUTagStaged | 1);
+	t.U32(uint32(context.mState.load(memory_order_acquire)));
+	for (const SoftBodyVertex &v : ioMP.GetVertices())
+		SBUDumpVertexCollision(t, v);
+	for (const auto &cs : ioMP.*SBUGet(SBUCollidingSensors()))
+		t.U32(cs.mHasContact? 1 : 0);
+	t.U32((ioMP.*SBUGet(SBUNeedContactCallback())).load(memory_order_relaxed)? 1 : 0);
+
+	// Call the internal update until it finishes
+	SoftBodyMotionProperties::EStatus status;
+	while ((status = ioMP.ParallelUpdate(context, settings)) == SoftBodyMotionProperties::EStatus::DidWork)
+		continue;
+	if (status != SoftBodyMotionProperties::EStatus::Done)
+		return false;
+	t.U32(cSBUTagStaged | 2);
+	t.V3(context.mDeltaPosition);
+	t.U32(uint32(context.mCanSleep));
+	SBUDumpColliding(t, ioMP, true);
+
+	// Update the state of the bodies we've collided with
+	ioMP.UpdateRigidBodyVelocities(context, inSystem.GetBodyInterface());
+
+	// Update position of the soft body
+	if (ioMP.GetUpdatePosition())
+		inSystem.GetBodyInterface().SetPosition(ioSoftBody.GetID(), ioSoftBody.GetPosition() + context.mDeltaPosition, EActivation::DontActivate);
+	return true;
+}
+
+/// The collision group of SBURigidBodyDesc::mGroup and SBUSoftBodyDesc::mGroup (MakeCollisionGroup of
+/// SoftBodyUpdateParity.zig): 0 is the default group. Otherwise bits 0 to 7 are the sub group, bits 8 to 15 the group
+/// (0xFF: cInvalidGroup) and bit 16 selects the group filter table.
+static CollisionGroup SBUMakeCollisionGroup(uint32 inGroup, const GroupFilter *inFilter)
+{
+	if (inGroup == 0)
+		return CollisionGroup();
+	uint32 id = (inGroup >> 8) & 0xff;
+	return CollisionGroup((inGroup & 0x10000) != 0? inFilter : nullptr, id == 0xff? CollisionGroup::cInvalidGroup : id, inGroup & 0xff);
+}
+
 extern "C"
 {
 
@@ -436,6 +582,12 @@ uint32 jolt_sbu_run(const SBUWorldDesc *inWorld, const SBURigidBodyDesc *inBodie
 	listener.mTranscript = &t;
 	BodyInterface &bi = system.GetBodyInterface();
 
+	// The group filter of the collision groups
+	Ref<GroupFilterTable> group_filter = new GroupFilterTable(4);
+	for (uint32 k = 0; k < 6; ++k)
+		if ((inWorld->mGroupFilterDisabled >> k) & 1)
+			group_filter->DisableCollision(cSBUGroupFilterPairs[k][0], cSBUGroupFilterPairs[k][1]);
+
 	// The rigid bodies
 	Array<Body *> bodies;
 	for (uint32 i = 0; i < inWorld->mNumBodies; ++i)
@@ -448,6 +600,7 @@ uint32 jolt_sbu_run(const SBUWorldDesc *inWorld, const SBURigidBodyDesc *inBodie
 		s.mFriction = d.mFriction;
 		s.mRestitution = d.mRestitution;
 		s.mUserData = d.mUserData;
+		s.mCollisionGroup = SBUMakeCollisionGroup(d.mGroup, group_filter);
 		Body *body = bi.CreateBody(s);
 		if (body == nullptr)
 			return 0xFFFFFFFF;
@@ -470,6 +623,7 @@ uint32 jolt_sbu_run(const SBUWorldDesc *inWorld, const SBURigidBodyDesc *inBodie
 	ss.mUpdatePosition = sd.mUpdatePosition != 0;
 	ss.mFacesDoubleSided = sd.mFacesDoubleSided != 0;
 	ss.mAllowSleeping = sd.mAllowSleeping != 0;
+	ss.mCollisionGroup = SBUMakeCollisionGroup(sd.mGroup, group_filter);
 	Body *soft_body = bi.CreateSoftBody(ss);
 	if (soft_body == nullptr)
 		return 0xFFFFFFFF;
@@ -556,6 +710,11 @@ uint32 jolt_sbu_run(const SBUWorldDesc *inWorld, const SBURigidBodyDesc *inBodie
 
 		case SBUOpKind::SetBodyPosition:
 			bi.SetPosition(bodies[op.mU[0]]->GetID(), RVec3(SBULoad3(op.mF)), EActivation::DontActivate);
+			break;
+
+		case SBUOpKind::StagedUpdate:
+			if (!SBUStagedUpdate(t, *mp, op.mF[0], *soft_body, system))
+				return 0xFFFFFFFF;
 			break;
 		}
 
