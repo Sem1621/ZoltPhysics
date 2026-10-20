@@ -6858,8 +6858,6 @@ fn checkCppSettingsRoundTrips(allocator: Allocator, entry: *const SceneEntry, bu
     }
 }
 
-/// Phase 7: the Jolt asserts that the C++ side hit since `before` (a reference built with
-/// `-Dreference_asserts=true` prints them to stderr; without asserts the count stays 0)
 // -------------------------------------------------------------------------------------------------------------------
 // Soft bodies (Phase 9, group SH; see "Soft bodies" in the SimScenes header): the Zolt side of the soft body
 // descriptions, operations and listener records, the same code as the soft body parts of SimulationReference.cpp
@@ -7404,6 +7402,8 @@ fn checkSoftBodyBlocker(entry: *const SceneEntry, builder: *const SceneBuilder) 
     }
 }
 
+/// Phase 7: the Jolt asserts that the C++ side hit since `before` (a reference built with
+/// `-Dreference_asserts=true` prints them to stderr; without asserts the count stays 0)
 fn checkReferenceAsserts(entry: *const SceneEntry, before: u32) !void {
     const after = jolt.jolt_sim_reference_assert_count();
     if (after != before) {
@@ -8507,6 +8507,29 @@ test "SimulationParity soft body settings generators" {
     try checkSoftBodySettings(allocator, "(the generators test)", &builder);
 }
 
+/// The bits of the soft body operations in `ops` (bit k for OpKind k). The other operations of a soft body scene
+/// (constraint and object operations from 200 on) do not fit in the mask, so they are skipped.
+fn softBodyOpBits(ops: []const SimOp) u128 {
+    var bits: u128 = 0;
+    for (ops) |op| {
+        if (SimScenes.isSoftBodyOp(op.kind)) bits |= @as(u128, 1) << @intCast(op.kind);
+    }
+    return bits;
+}
+
+test "SimScenes softBodyOpBits skips the other operations" {
+    // A soft body scene may hold body, constraint, object and driver operations too.
+    const ops = [_]SimOp{
+        .{ .update = 0, .kind = @intFromEnum(OpKind.create_body) },
+        .{ .update = 0, .kind = @intFromEnum(OpKind.create_soft_body) },
+        .{ .update = 0, .kind = @intFromEnum(OpKind.create_constraint_no_add) },
+        .{ .update = 1, .kind = @intFromEnum(OpKind.set_soft_body_contact_listener) },
+        .{ .update = 1, .kind = @intFromEnum(OpKind.motorcycle_set_lean_smoothing_factor) },
+    };
+    const expected = (@as(u128, 1) << @intFromEnum(OpKind.create_soft_body)) | (@as(u128, 1) << @intFromEnum(OpKind.set_soft_body_contact_listener));
+    try std.testing.expectEqual(expected, softBodyOpBits(&ops));
+}
+
 test "SimScenes the soft body scenes use every soft body operation and record" {
     // The soft body scenes run on the C++ side before Zolt simulates soft bodies.
     // Together they use every soft body OpKind and expect every soft body RecordKind.
@@ -8518,7 +8541,7 @@ test "SimScenes the soft body scenes use every soft body operation and record" {
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);
-        for (builder.ops.items) |op| ops |= @as(u128, 1) << @intCast(op.kind);
+        ops |= softBodyOpBits(builder.ops.items);
         records |= entry.expect.soft_body_records;
     }
     for (@intFromEnum(OpKind.create_soft_body)..@intFromEnum(OpKind.set_soft_body_contact_listener) + 1) |k| {

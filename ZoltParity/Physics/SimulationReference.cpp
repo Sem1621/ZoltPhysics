@@ -2444,8 +2444,6 @@ static SimRecord SimVehicleRecord(ESimRecordKind inKind, uint32 inHandle, const 
 	return r;
 }
 
-// A vehicle of the world: the constraint, its tester, the defaults of its callbacks and the filters of
-// vehicle_tester_set_filters (the tester keeps pointers to them)
 // -------------------------------------------------------------------------------------------------------------------
 // Phase 9: soft bodies (makeSoftBodySettings, SoftBodyListenerImpl and hashSoftBody of SimulationParity.zig run the same
 // code on the Zolt side)
@@ -2783,6 +2781,8 @@ private:
 	}
 };
 
+// A vehicle of the world: the constraint, its tester, the defaults of its callbacks and the filters of
+// vehicle_tester_set_filters (the tester keeps pointers to them)
 struct SimVehicleData
 {
 	Ref<VehicleConstraint>		mConstraint;

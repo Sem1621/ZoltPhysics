@@ -290,7 +290,8 @@
 //!   - SkinVertices needs skinned settings and a joint matrix for every joint of the inverse bind matrices; the
 //!     vertex radius is never negative; a vertex index is below the number of vertices;
 //!   - every soft body operation acts on a soft body handle; CustomUpdate is for a soft body that is not in the system
-//!     (create_soft_body_no_add: its SetPosition does nothing, like Jolt);
+//!     (create_soft_body_no_add). Its SetPosition moves the body, like Jolt. It notifies no broad phase and activates
+//!     nothing, because the body is not in the broad phase;
 //!   - no soft body is created or destroyed between a snapshot and its restore_cross.
 //!
 //! ## Reserved numbers
