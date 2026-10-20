@@ -457,14 +457,6 @@ static void BICopyError(const String &inError, char *outError, uint32 inCapacity
 	outError[n] = 0;
 }
 
-// SaveState without the soft bodies: Zolt's SoftBodyMotionProperties.saveState comes with group S4 (SoftBodyParity.zig
-// and SimulationParity.zig compare the soft body state)
-class BIRigidBodiesOnly : public StateRecorderFilter
-{
-public:
-	virtual bool				ShouldSaveBody(const Body &inBody) const override			{ return !inBody.IsSoftBody(); }
-};
-
 // A BodyManager, a BroadPhaseBruteForce and a BodyInterface on top of them
 class BIWorld
 {
@@ -1034,8 +1026,7 @@ uint32 jolt_bi_scene_create_bodies(const uint8 *inBytes, uint32 inSize, uint32 i
 	for (uint32 a : active_soft_bodies)
 		recorder.Write(a);
 
-	BIRigidBodiesOnly rigid_bodies_only;
-	system.SaveState(recorder, EStateRecorderState::Bodies | EStateRecorderState::Constraints, &rigid_bodies_only);
+	system.SaveState(recorder, EStateRecorderState::Bodies | EStateRecorderState::Constraints);
 
 	// The system back to a scene (the constraints through GetConstraintSettings)
 	Ref<PhysicsScene> from_system = new PhysicsScene;

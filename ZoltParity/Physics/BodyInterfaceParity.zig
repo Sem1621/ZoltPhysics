@@ -34,10 +34,10 @@
 //!   parity: soft bodies created through BodyInterface" creates soft bodies with the four creation functions in a world
 //!   that can run out of bodies, and compares the IDs, IsActive, IsAdded and the SaveWithChildren bytes of
 //!   GetSoftBodyCreationSettings, with and without the maps. The scenes of "PhysicsScene parity" have soft bodies:
-//!   SaveBinaryState (soft bodies always save their shared settings and materials), sRestoreFromBinaryState, CreateBodies
-//!   (the active soft bodies; SaveState skips the soft bodies, whose state SoftBodyParity.zig and SimulationParity.zig
-//!   compare) and FromPhysicsSystem. Constraints also connect soft bodies. FromPhysicsSystem stores the index of the
-//!   next rigid body for a soft body (Jolt's quirk, R20), so its bytes compare that index.
+//!   SaveBinaryState (soft bodies always save their shared settings and materials), sRestoreFromBinaryState,
+//!   CreateBodies (the active soft bodies, and SaveState with the state of the soft bodies) and FromPhysicsSystem.
+//!   Constraints also connect soft bodies. FromPhysicsSystem stores the index of the next rigid body for a soft body
+//!   (Jolt's quirk, R20), so its bytes compare that index.
 //! The DeterminismLog text is not compared here: the C++ library is built without JPH_ENABLE_DETERMINISM_LOG (see
 //! ZoltTests/Physics/DeterminismLogTests.zig).
 
@@ -96,7 +96,6 @@ const StreamInWrapper = zolt.StreamInWrapper;
 const StreamOutWrapper = zolt.StreamOutWrapper;
 const SoftBodySharedSettings = zolt.SoftBodySharedSettings;
 const SoftBodyCreationSettings = zolt.SoftBodyCreationSettings;
-const StateRecorderFilter = zolt.StateRecorderFilter;
 
 const io = std.testing.io;
 
@@ -2022,18 +2021,6 @@ test "SoftBodyCreationSettings parity: soft bodies created through BodyInterface
 // ---------------------------------------------------------------------------------------------------------------------
 // PhysicsScene
 
-/// BIRigidBodiesOnly of BodyInterfaceReference.cpp: SaveState without the soft bodies (SoftBodyMotionProperties.saveState
-/// comes with group S4; SoftBodyParity.zig and SimulationParity.zig compare the soft body state)
-const RigidBodiesOnly = struct {
-    pub const overrides = .{.shouldSaveBody};
-    base: StateRecorderFilter = .init(@This()),
-
-    pub fn shouldSaveBody(self: *const @This(), body: *const Body) bool {
-        _ = self;
-        return !body.isSoftBody();
-    }
-};
-
 /// The snapshot of a Zolt PhysicsSystem after FixInvalidScales + CreateBodies (jolt_bi_scene_create_bodies)
 fn zoltSceneCreateBodies(allocator: Allocator, bytes: []const u8, max_bodies: u32, out_result: *u32, out: *StateRecorderImpl) !void {
     var reader: std.Io.Reader = .fixed(bytes);
@@ -2090,8 +2077,7 @@ fn zoltSceneCreateBodies(allocator: Allocator, bytes: []const u8, max_bodies: u3
     out.recorder().write(@as(u32, @intCast(active_soft_bodies.items.len)));
     for (active_soft_bodies.items) |a| out.recorder().write(a);
 
-    const rigid_bodies_only: RigidBodiesOnly = .{};
-    try system.saveState(out.recorder(), .{ .state = .{ .bodies = true, .constraints = true }, .filter = &rigid_bodies_only.base });
+    try system.saveState(out.recorder(), .{ .state = .{ .bodies = true, .constraints = true } });
 
     // The system back to a scene (the constraints through getConstraintSettings)
     var from_system = Ref(PhysicsScene).init(try PhysicsScene.create(allocator));

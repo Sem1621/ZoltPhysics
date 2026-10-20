@@ -54,6 +54,13 @@
 //! ActivateConstraint, ResetWarmStart, SetPoint1 / SetPoint2, NotifyShapeChanged). Determinism against thread pools of
 //! 0, 1, 3 and 7 workers, and the D12 sweeps (every temp allocation and createJob fails) on the updates right after the
 //! operations.
+//!
+//! The soft body scene (Phase 9, the D5 rows of RemainingFeaturesArchitecture.md R17): soft bodies on a floor, on a
+//! static compound and in a sensor, with a soft body contact listener. The heap runs out at every allocation of an
+//! update (the leaf shapes and colliding shapes of the SoftBodyCollide jobs among them), every temp allocation fails in
+//! turn (the soft body contexts among them), every createJob fails in turn (the soft body jobs that JobSoftBodyPrepare
+//! creates: Finalize, Simulate and Collide). The update returns error.OutOfMemory or, for a soft body job, the results
+//! of the update with all jobs; the colliding shapes are released, the temp allocator is empty, the system recovers.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -82,6 +89,10 @@ const BodyLockMultiWrite = zolt.BodyLockMultiWrite;
 const BoxShape = zolt.BoxShape;
 const BoxShapeSettings = zolt.BoxShapeSettings;
 const SphereShapeSettings = zolt.SphereShapeSettings;
+const StaticCompoundShapeSettings = zolt.StaticCompoundShapeSettings;
+const SoftBodySharedSettings = zolt.SoftBodySharedSettings;
+const SoftBodyCreationSettings = zolt.SoftBodyCreationSettings;
+const SoftBodyMotionProperties = zolt.SoftBodyMotionProperties;
 const Constraint = zolt.Constraint;
 const PhysicsSystem = zolt.PhysicsSystem;
 const PhysicsStepListenerContext = zolt.PhysicsStepListenerContext;
@@ -3471,6 +3482,410 @@ test "PhysicsSystem constraint operations: out of memory creating the scene" {
     const Ctx = struct {
         fn build(allocator: Allocator) !void {
             const scene = try allocator.create(ConstraintOpsScene);
+            defer allocator.destroy(scene);
+            try scene.init(allocator);
+            scene.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Ctx.build, .{});
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Soft bodies (Phase 9): the soft body jobs and their D5 rows (RemainingFeaturesArchitecture.md R17)
+
+/// Counts the soft body contact listener callbacks (called from the soft body jobs: atomics)
+const SoftBodyCounter = struct {
+    num_validated: std.atomic.Value(u32) = .init(0),
+    num_added: std.atomic.Value(u32) = .init(0),
+    num_sensor_contacts: std.atomic.Value(u32) = .init(0),
+
+    pub fn onSoftBodyContactValidate(self: *SoftBodyCounter, soft_body: *const Body, other_body: *const Body, settings: *zolt.SoftBodyContactSettings) zolt.SoftBodyValidateResult {
+        _ = .{ soft_body, other_body, settings };
+        _ = self.num_validated.fetchAdd(1, .monotonic);
+        return .accept_contact;
+    }
+
+    pub fn onSoftBodyContactAdded(self: *SoftBodyCounter, soft_body: *const Body, manifold: *const zolt.SoftBodyManifold) void {
+        _ = soft_body;
+        _ = self.num_added.fetchAdd(1, .monotonic);
+        _ = self.num_sensor_contacts.fetchAdd(manifold.getNumSensorContacts(), .monotonic);
+    }
+};
+
+/// A cloth of n x n vertices `spacing` apart in the XZ plane with fixed corners and its edge constraints, optimized
+fn createSoftBodyCloth(allocator: Allocator, n: u32, spacing: f32) !Ref(SoftBodySharedSettings) {
+    var result: Ref(SoftBodySharedSettings) = .init(try SoftBodySharedSettings.create(allocator));
+    errdefer result.deinit();
+    const s = result.get().?;
+    const offset = 0.5 * spacing * f(n - 1);
+    for (0..n) |z| for (0..n) |x| {
+        const corner = (x == 0 or x == n - 1) and (z == 0 or z == n - 1);
+        try s.vertices.append(allocator, .init(.{ .x = spacing * f(@intCast(x)) - offset, .y = 0, .z = spacing * f(@intCast(z)) - offset }, .{ .inv_mass = if (corner) 0.0 else 1.0 }));
+    };
+    for (0..n - 1) |z| for (0..n - 1) |x| {
+        const v0: u32 = @intCast(z * n + x);
+        try s.addFace(.init(v0, v0 + n, v0 + n + 1, .{}));
+        try s.addFace(.init(v0, v0 + n + 1, v0 + 1, .{}));
+    };
+    try s.createConstraints(&.{.init(1.0e-5, 1.0e-5, 1.0e-4, .{})}, .{});
+    try s.optimize();
+    return result;
+}
+
+/// Soft bodies on rigid bodies, with a soft body contact listener: a cube (sCreateCube) on the floor, a cloth with fixed
+/// corners on a static compound of two boxes (two leaf shapes), a cube in a sensor on a dynamic box. Every update
+/// collects colliding shapes, leaf shapes and a sensor in the SoftBodyCollide jobs (heap allocations inside a job).
+const SoftBodyScene = struct {
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+    object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+    listener: SoftBodyCounter = .{},
+    soft_bodies: [3]BodyID = @splat(.invalid),
+
+    /// Builds the scene in place (the physics system must not move)
+    fn init(self: *SoftBodyScene, allocator: Allocator) !void {
+        self.* = .{};
+        try self.system.init(allocator, io, 1024, 0, 4096, 1024, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
+        errdefer self.system.deinit();
+        self.system.setSoftBodyContactListener(.init(&self.listener));
+        const bi = self.system.getBodyInterfaceMut();
+
+        // Floor, its top at y = 0
+        const floor_shape = try BoxShape.create(allocator, Vec3.init(20, 1, 20), .{ .convex_radius = 0.0 });
+        var floor_settings = BodyCreationSettings.initWithShape(floor_shape.asShape(), RVec3.init(0, -1, 0), Quat.identity(), .static, Layers.non_moving);
+        defer floor_settings.deinit();
+        _ = try bi.createAndAddBody(&floor_settings, .dont_activate);
+
+        // A static compound of two boxes
+        var compound_settings: StaticCompoundShapeSettings = .init(allocator);
+        defer compound_settings.deinit();
+        var child: zolt.RefConst(zolt.Shape) = .init((try BoxShape.create(allocator, Vec3.init(0.3, 0.4, 0.3), .{})).asShape());
+        defer child.deinit();
+        for ([_]f32{ -0.4, 0.4 }) |z|
+            try compound_settings.base.addShapePtr(Vec3.init(0, 0, z), Quat.identity(), child.get().?, .{});
+        var compound = try compound_settings.asShapeSettings().createShape(allocator);
+        defer compound.deinit();
+        var compound_body = BodyCreationSettings.initWithShape(compound.getPtr().?, RVec3.init(4, 0.4, 0), Quat.identity(), .static, Layers.non_moving);
+        defer compound_body.deinit();
+        _ = try bi.createAndAddBody(&compound_body, .dont_activate);
+
+        // A static sensor over a dynamic box
+        var sensor_settings = BodyCreationSettings.initWithShape((try BoxShape.create(allocator, Vec3.replicate(0.5), .{ .convex_radius = 0.0 })).asShape(), RVec3.init(-4, 1.5, 0), Quat.identity(), .static, Layers.sensor);
+        defer sensor_settings.deinit();
+        sensor_settings.is_sensor = true;
+        _ = try bi.createAndAddBody(&sensor_settings, .dont_activate);
+        var box_settings = BodyCreationSettings.initWithShape((try BoxShape.create(allocator, Vec3.replicate(0.3), .{})).asShape(), RVec3.init(-4, 0.3, 0), Quat.identity(), .dynamic, Layers.moving);
+        defer box_settings.deinit();
+        _ = try bi.createAndAddBody(&box_settings, .activate);
+
+        // The soft bodies, their bounds overlap the bodies under them from the start
+        var cube = try SoftBodySharedSettings.createCube(allocator, 4, 0.2);
+        defer cube.deinit();
+        var cloth = try createSoftBodyCloth(allocator, 8, 0.15);
+        defer cloth.deinit();
+        const settings = [_]*const SoftBodySharedSettings{ cube.get().?, cloth.get().?, cube.get().? };
+        const positions = [_]RVec3{ RVec3.init(0, 0.32, 0), RVec3.init(4, 0.85, 0), RVec3.init(-4, 1.25, 0) };
+        for (settings, positions, &self.soft_bodies) |s, position, *id| {
+            var sb_settings = SoftBodyCreationSettings.init(s, position, Quat.identity(), Layers.moving);
+            defer sb_settings.deinit();
+            id.* = try bi.createAndAddSoftBody(&sb_settings, .activate);
+            try expect(!id.isInvalid());
+        }
+    }
+
+    fn deinit(self: *SoftBodyScene) void {
+        self.system.deinit();
+    }
+
+    /// Every update (also one that ran out of memory) releases the colliding shapes and sensors of the soft bodies
+    fn expectNoCollidingShapes(self: *SoftBodyScene) !void {
+        for (self.soft_bodies) |id| {
+            const mp = SoftBodyMotionProperties.fromBaseConst(self.system.body_manager.getBody(id).getMotionProperties());
+            try expectEqual(@as(usize, 0), mp.colliding_shapes.items.len + mp.colliding_sensors.items.len);
+        }
+    }
+
+    fn expectState(self: *SoftBodyScene, expected: *StateRecorderImpl) !void {
+        var state = StateRecorderImpl.init(std.testing.allocator);
+        defer state.deinit();
+        try self.system.saveState(state.recorder(), .{});
+        try expect(state.isEqual(expected));
+    }
+
+    fn restore(self: *SoftBodyScene, snapshot: *StateRecorderImpl) !void {
+        snapshot.rewind();
+        try expect(try self.system.restoreState(snapshot.recorder(), .{}));
+    }
+
+    /// Restore `snapshot`, run one update with enough memory and compare with `reference`
+    fn expectRecovery(self: *SoftBodyScene, snapshot: *StateRecorderImpl, reference: *StateRecorderImpl, temp: *TempAllocatorImpl, job_system: JobSystem) !void {
+        try self.restore(snapshot);
+        _ = try self.system.update(delta_time, collision_steps, temp.tempAllocator(), job_system);
+        try expect(temp.isEmpty());
+        try self.expectState(reference);
+    }
+
+    /// Runs the scene until the soft bodies touch the bodies under them and the sensor, then saves the snapshot
+    fn warmUp(self: *SoftBodyScene, temp: *TempAllocatorImpl, job_system: JobSystem, snapshot: *StateRecorderImpl) !void {
+        for (0..10) |_| _ = try self.system.update(delta_time, collision_steps, temp.tempAllocator(), job_system);
+        try expect(self.listener.num_added.load(.monotonic) > 0);
+        try expect(self.listener.num_sensor_contacts.load(.monotonic) > 0);
+        try self.system.saveState(snapshot.recorder(), .{});
+    }
+};
+
+fn softBodyOutOfHeapMemory(kind: JobSystemKind) !void {
+    var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
+    const allocator = heap.allocator();
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(std.testing.allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(std.testing.allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try std.testing.allocator.create(SoftBodyScene);
+    defer std.testing.allocator.destroy(scene);
+    try scene.init(allocator);
+    defer scene.deinit();
+    var snapshot = StateRecorderImpl.init(std.testing.allocator);
+    defer snapshot.deinit();
+    try scene.warmUp(&temp, jobs.jobSystem(), &snapshot);
+
+    // Reference: count the heap allocations of one update. The SoftBodyCollide jobs allocate the leaf shape lists of the
+    // floor, the compound, the sensor and the box in every step.
+    const before = heap.num_allocations.load(.monotonic);
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expect(num_allocations >= collision_steps * 4);
+    try scene.expectNoCollidingShapes();
+    var reference = StateRecorderImpl.init(std.testing.allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    // The heap runs out at every allocation in turn: the Collide jobs latch the error and stop claiming, the Simulate
+    // jobs do nothing, Finalize releases the colliding shapes and frees the contexts (R17)
+    for (0..num_allocations) |i| {
+        try scene.restore(&snapshot);
+        heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
+        heap.fail_from.store(std.math.maxInt(u32), .monotonic);
+        try expect(temp.isEmpty());
+        try scene.expectNoCollidingShapes();
+        try scene.expectRecovery(&snapshot, &reference, &temp, jobs.jobSystem());
+    }
+}
+
+test "PhysicsSystem soft bodies: out of heap memory inside a job (DetermineCollidingShapes), single threaded" {
+    try softBodyOutOfHeapMemory(.single_threaded);
+}
+
+test "PhysicsSystem soft bodies: out of heap memory inside a job (DetermineCollidingShapes), multi threaded" {
+    try softBodyOutOfHeapMemory(.{ .thread_pool = 3 });
+}
+
+fn softBodyFailingTempAndJobs(kind: JobSystemKind) !void {
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(SoftBodyScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator);
+    defer scene.deinit();
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.warmUp(&temp, jobs.jobSystem(), &snapshot);
+
+    // Reference: one update, counting the temp allocations and the jobs
+    var counting_temp: FailingTempAllocator = .init(temp.tempAllocator(), .{});
+    var counting_jobs: FailingJobSystem = .init(jobs.jobSystem(), .{});
+    _ = try scene.system.update(delta_time, collision_steps, counting_temp.tempAllocator(), counting_jobs.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    // Every temp allocation fails in turn (the soft body contexts of each step among them): error.OutOfMemory, the temp
+    // allocator is empty, the colliding shapes are released, the system recovers
+    for (0..counting_temp.num_allocations) |fail_index| {
+        try scene.restore(&snapshot);
+        var failing: FailingTempAllocator = .init(temp.tempAllocator(), .{ .fail_index = @intCast(fail_index) });
+        try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, failing.tempAllocator(), jobs.jobSystem()));
+        try expect(temp.isEmpty());
+        try scene.expectNoCollidingShapes();
+        try scene.expectRecovery(&snapshot, &reference, &temp, jobs.jobSystem());
+    }
+
+    // Every createJob fails in turn: a job of the job graph fails the update without side effects, a soft body job that
+    // JobSoftBodyPrepare cannot create is not an error (Prepare does its work) and changes no result
+    var num_spawn_failures: u32 = 0;
+    for (0..counting_jobs.num_created.load(.monotonic) + 4) |fail_index| {
+        try scene.restore(&snapshot);
+        var failing: FailingJobSystem = .init(jobs.jobSystem(), .{ .fail_index = @intCast(fail_index) });
+        if (scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem())) |errors| {
+            try expect(errors.isNone());
+            if (failing.has_induced_failure.load(.monotonic)) num_spawn_failures += 1;
+            try scene.expectState(&reference);
+        } else |err| {
+            try expectEqual(error.OutOfMemory, err);
+            try scene.expectState(&snapshot); // Nothing changed
+            try scene.expectRecovery(&snapshot, &reference, &temp, jobs.jobSystem());
+        }
+        try expect(temp.isEmpty());
+        try scene.expectNoCollidingShapes();
+    }
+
+    // Per step JobSoftBodyPrepare creates Finalize, then N Simulate and N Collide jobs (N = the concurrency)
+    const concurrency: u32 = @intCast(@min(jobs.jobSystem().getMaxConcurrency(), zolt.PhysicsUpdateContext.max_concurrency));
+    const num_soft_body_jobs = collision_steps * (1 + 2 * concurrency);
+    if (kind == .single_threaded)
+        try expectEqual(num_soft_body_jobs, num_spawn_failures) // No other job is created inside a job
+    else
+        try expect(num_spawn_failures >= num_soft_body_jobs);
+}
+
+test "PhysicsSystem soft bodies: out of temp memory and failing soft body jobs, single threaded" {
+    try softBodyFailingTempAndJobs(.single_threaded);
+}
+
+test "PhysicsSystem soft bodies: out of temp memory and failing soft body jobs, multi threaded" {
+    try softBodyFailingTempAndJobs(.{ .thread_pool = 3 });
+}
+
+/// Wraps a job system and fails the createJob calls of the soft body jobs by name: call k of the jobs named `names[j]`
+/// (counted per name from 0) fails when bit k of `masks[j]` is set. FailingJobSystem fails one call, so with N > 1
+/// Simulate and Collide jobs per step its sweeps never reach the D5 rows of R17 that need several missing jobs.
+const SoftBodyJobFailures = struct {
+    const names = [_][]const u8{ "SoftBodyFinalize", "SoftBodySimulate", "SoftBodyCollide" };
+
+    inner: JobSystem,
+    masks: [names.len]u64,
+    /// The createJob calls and the failed calls per name
+    num_calls: [names.len]std.atomic.Value(u32) = @splat(.init(0)),
+    num_failures: [names.len]std.atomic.Value(u32) = @splat(.init(0)),
+
+    fn jobSystem(self: *SoftBodyJobFailures) JobSystem {
+        return .init(self);
+    }
+
+    pub fn getMaxConcurrency(self: *const SoftBodyJobFailures) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    pub fn createJob(self: *SoftBodyJobFailures, job_name: []const u8, color: zolt.Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        for (names, 0..) |name, j| {
+            if (!std.mem.eql(u8, job_name, name)) continue;
+            const k = self.num_calls[j].fetchAdd(1, .monotonic);
+            if (k < 64 and (self.masks[j] >> @intCast(k)) & 1 != 0) {
+                _ = self.num_failures[j].fetchAdd(1, .monotonic);
+                return error.OutOfMemory;
+            }
+        }
+        return self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+    }
+
+    pub fn createBarrier(self: *SoftBodyJobFailures) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    pub fn destroyBarrier(self: *SoftBodyJobFailures, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    pub fn waitForJobs(self: *SoftBodyJobFailures, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    // The jobs belong to `inner` and queue themselves there: not reached
+    pub fn queueJob(self: *SoftBodyJobFailures, job: *JobSystem.Job) void {
+        self.inner.vtable.queueJob(self.inner.ptr, job);
+    }
+
+    pub fn queueJobs(self: *SoftBodyJobFailures, jobs: []const *JobSystem.Job) void {
+        self.inner.vtable.queueJobs(self.inner.ptr, jobs);
+    }
+
+    pub fn freeJob(self: *SoftBodyJobFailures, job: *JobSystem.Job) void {
+        self.inner.vtable.freeJob(self.inner.ptr, job);
+    }
+};
+
+test "PhysicsSystem soft bodies: several soft body jobs missing in one step (N = 4)" {
+    // The D5 rows of R17 with several failed creations per step: JobSoftBodyPrepare removes the Finalize dependencies
+    // of every missing Simulate job, creates no Collide job when no Simulate job exists and releases the Simulate jobs
+    // from the dependencies of every missing Collide job. A wrong count leaves Finalize or a Simulate job waiting: the
+    // update hangs.
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, .{ .thread_pool = 3 });
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(SoftBodyScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator);
+    defer scene.deinit();
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.warmUp(&temp, jobs.jobSystem(), &snapshot);
+
+    // Reference: one update with all jobs
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    // N = 4 Simulate and Collide jobs per step: the calls of step 2 are bits 4..7 of a mask (when step 1 created them)
+    try expectEqual(@as(i32, 4), jobs.jobSystem().getMaxConcurrency());
+    comptime std.debug.assert(collision_steps == 2);
+    const all: u64 = std.math.maxInt(u64);
+    const Case = struct {
+        /// The masks of SoftBodyFinalize, SoftBodySimulate, SoftBodyCollide
+        masks: [3]u64,
+        /// The expected createJob calls and failures of SoftBodySimulate and SoftBodyCollide
+        simulate: [2]u32,
+        collide: [2]u32,
+    };
+    const cases = [_]Case{
+        // No Simulate job in either step: no Collide job, Prepare collides and simulates, Finalize loses 4 dependencies
+        .{ .masks = .{ 0, all, 0 }, .simulate = .{ 8, 8 }, .collide = .{ 0, 0 } },
+        // No Collide job in either step: Prepare collides, every Simulate job loses 4 dependencies
+        .{ .masks = .{ 0, 0, all }, .simulate = .{ 8, 0 }, .collide = .{ 8, 8 } },
+        // Two Simulate jobs missing in each step: Finalize loses 2 dependencies
+        .{ .masks = .{ 0, 0b1001_0110, 0 }, .simulate = .{ 8, 4 }, .collide = .{ 8, 0 } },
+        // Two Collide jobs missing in each step: every Simulate job loses 2 dependencies
+        .{ .masks = .{ 0, 0, 0b1100_0011 }, .simulate = .{ 8, 0 }, .collide = .{ 8, 4 } },
+        // Three Simulate jobs missing in step 1, three Collide jobs missing in step 2
+        .{ .masks = .{ 0, 0b0111, 0b1110_0000 }, .simulate = .{ 8, 3 }, .collide = .{ 8, 3 } },
+        // No Simulate job in step 1 (no Collide job), no Collide job in step 2
+        .{ .masks = .{ 0, 0b1111, 0b1111 }, .simulate = .{ 8, 4 }, .collide = .{ 4, 4 } },
+        // No Finalize job: Prepare runs the whole update in both steps
+        .{ .masks = .{ all, 0, 0 }, .simulate = .{ 0, 0 }, .collide = .{ 0, 0 } },
+    };
+    for (cases) |case| {
+        try scene.restore(&snapshot);
+        var failing: SoftBodyJobFailures = .{ .inner = jobs.jobSystem(), .masks = case.masks };
+        const errors = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem());
+        try expect(errors.isNone()); // Not an error
+        try expectEqual(case.simulate[0], failing.num_calls[1].load(.monotonic));
+        try expectEqual(case.simulate[1], failing.num_failures[1].load(.monotonic));
+        try expectEqual(case.collide[0], failing.num_calls[2].load(.monotonic));
+        try expectEqual(case.collide[1], failing.num_failures[2].load(.monotonic));
+        try expectEqual(@as(u32, if (case.masks[0] != 0) 2 else 0), failing.num_failures[0].load(.monotonic));
+        try scene.expectState(&reference);
+        try expect(temp.isEmpty());
+        try scene.expectNoCollidingShapes();
+    }
+}
+
+test "PhysicsSystem soft bodies: out of memory creating the scene" {
+    const Ctx = struct {
+        fn build(allocator: Allocator) !void {
+            const scene = try allocator.create(SoftBodyScene);
             defer allocator.destroy(scene);
             try scene.init(allocator);
             scene.deinit();

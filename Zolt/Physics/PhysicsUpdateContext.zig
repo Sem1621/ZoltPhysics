@@ -313,6 +313,7 @@ pub const PhysicsUpdateContext = struct {
     pub fn deinit(self: *PhysicsUpdateContext) void {
         std.debug.assert(self.body_pairs.isEmpty());
         std.debug.assert(self.active_constraints.isEmpty());
+        std.debug.assert(self.soft_body_update_contexts.isEmpty()); // SoftBodyFinalize (or SoftBodyPrepare) freed them
 
         for (self.steps.items) |*step|
             step.deinit();

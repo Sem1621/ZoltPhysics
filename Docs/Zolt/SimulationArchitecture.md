@@ -386,6 +386,7 @@ the latch itself:
 | ContactRemovedCallbacks | discards the write cache instead of swapping (D10) |
 | StartNextStep | always runs `resetIslands`, the splitter reset and the kick; skips `prepareContactConstraints` |
 | SoftBodyPrepare | the active soft body list stays empty, so its "nothing to do" path kicks StartNextStep |
+| SoftBodyFinalize | skips the velocity, position, bounds and sleep updates; always clears the colliding shapes and sensors of every context and frees the contexts (see the soft body rows below) |
 
 **Where to check the latch.** Only at job entry, or before a claim (an atomic batch counter, a
 queue read, an island claim). Never check it between a claim and its completion. In particular,
@@ -431,8 +432,32 @@ result:
 - When no FindCCDContacts job could be created at all, PostIntegrateVelocity does the work itself,
   because the created jobs take bodies until `next_ccd_body` runs out.
 
-**Heap allocation inside a job.** `BroadPhase.updatePrepare` is the one heap allocation inside a
-job (QuadTree's `new NodeID[]`, D9). It is latched:
+**Soft body jobs (Phase 9, RemainingFeaturesArchitecture.md R17).** JobSoftBodyPrepare creates the
+other soft body jobs inside a job: Finalize, then N Simulate jobs, then N Collide jobs (N =
+`getMaxConcurrency()`). The Collide jobs start at creation. The rows:
+
+| Event | Handling |
+|---|---|
+| Prepare cannot copy the active bodies or allocate the contexts | latch, take the "no active soft bodies" path (kick StartNextStep). Error (allocation) |
+| Finalize cannot be created (it is the first) | Prepare runs the whole update inline: the collide claim loop, the simulate loop (`parallelUpdate` over all contexts until every one is Done), the finalize body, each under the grants of the job it replaces. Then it kicks StartNextStep. Not an error |
+| Simulate job k cannot be created | remove one Finalize dependency for it. Its handle stays invalid; Collide jobs skip invalid handles. Not an error while one Simulate job exists: each one loops until every context is Done |
+| no Simulate job could be created | create **no** Collide job. Prepare runs the collide claim loop, then the simulate loop, inline, then removes the N Finalize dependencies. Not an error. (A Collide job that started could still be filling `colliding_shapes` while an inline simulate reads it: a race) |
+| Collide job k cannot be created | after the creations, Prepare runs the collide claim loop itself under the Collide grant (Read, Read), until `soft_body_to_collide` runs out. Then it removes the dependencies of the missing Collide jobs from every Simulate job. Not an error |
+| `determineCollidingShapes` cannot allocate (in a Collide job or in Prepare's inline loop) | latch and stop claiming; partial colliding lists are fine. Error (allocation) |
+| Simulate (job or inline loop) | checks the latch at entry only, never inside `parallelUpdate`: other Simulate jobs wait for claimed batches. A poisoned Simulate only removes its Finalize dependency. Simulate never allocates |
+| Finalize when poisoned | skips `updateRigidBodyVelocities`, the position update and the bounds and sleep batches (the contexts may not be Done). Always clears every context's colliding shapes and sensors (shape references) and frees the contexts at Jolt's position (LIFO) |
+
+- The FailingJobSystem and FailingTempAllocator sweeps of the soft body scenes need no special
+  case: every failed creation must give the reference bytes. A FailingHeapAllocator test over a soft
+  body scene (PhysicsSystemTests) covers the heap allocation of `determineCollidingShapes`.
+- FailingJobSystem fails one call, so with N > 1 its sweeps never miss several Simulate or Collide
+  jobs in one step. The test "several soft body jobs missing in one step" (PhysicsSystemTests, N = 4)
+  fails the soft body jobs by name: no Simulate job, no Collide job, some of each. A wrong
+  dependency count hangs it.
+
+**Heap allocation inside a job.** `BroadPhase.updatePrepare` is a heap allocation inside a job
+(QuadTree's `new NodeID[]`, D9). `determineCollidingShapes` of the soft body Collide jobs is
+another one (Phase 9, the rows above). They are latched:
 
 ```zig
                     if (!c.isOutOfMemory())
