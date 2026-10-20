@@ -7193,18 +7193,15 @@ const SoftBodySlot = struct {
     /// HashSoftBodyCreationSettings of SimulationReference.cpp: the result of soft_body_creation_settings_hash
     fn hashCreationSettings(zw: *const ZoltWorld, s: *const zolt.SoftBodyCreationSettings) !u32 {
         var h = SimScenes.hash_seed;
-        h = hashValue(h, [3]Real{ s.position.getX(), s.position.getY(), s.position.getZ() });
-        h = hashValue(h, [4]f32{ s.rotation.getX(), s.rotation.getY(), s.rotation.getZ(), s.rotation.getW() });
-        h = hashValue(h, s.user_data);
-        h = hashValue(h, @as(u32, s.object_layer));
-        h = hashValue(h, @as(u32, s.collision_group.getGroupID()));
-        h = hashValue(h, @as(u32, s.collision_group.getSubGroupID()));
+        {
+            var out: std.Io.Writer.Allocating = .init(zw.allocator);
+            defer out.deinit();
+            var wrapper = zolt.StreamOutWrapper.init(&out.writer);
+            s.saveBinaryState(wrapper.streamOut());
+            if (wrapper.isFailed()) return error.OutOfMemory;
+            h = SimScenes.hashBytes(h, out.written());
+        }
         h = hashValue(h, @as(u32, @intFromBool(s.collision_group.getGroupFilter() != null)));
-        h = hashValue(h, s.num_iterations);
-        for ([_]f32{ s.linear_damping, s.max_linear_velocity, s.restitution, s.friction, s.pressure, s.gravity_factor, s.vertex_radius }) |v|
-            h = hashValue(h, v);
-        for ([_]bool{ s.update_position, s.make_rotation_identity, s.allow_sleeping, s.faces_double_sided }) |v|
-            h = hashValue(h, @as(u32, @intFromBool(v)));
         const shared = s.settings.get().?;
         var index: u32 = invalid_handle;
         for (zw.soft_body.settings.items, 0..) |ref, i| {

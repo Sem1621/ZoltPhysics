@@ -4637,30 +4637,20 @@ public:
 		return s;
 	}
 
-	// The result of soft_body_creation_settings_hash (OpKind of SimScenes.zig): every member of the settings, the index of
-	// the shared settings among the world's settings objects and their SaveBinaryState bytes
+	// The result of soft_body_creation_settings_hash (OpKind of SimScenes.zig): the SaveBinaryState bytes of the settings,
+	// whether the collision group has a group filter, the index of the shared settings among the world's settings objects
+	// and their SaveBinaryState bytes
 	uint32						HashSoftBodyCreationSettings(const SoftBodyCreationSettings &inSettings) const
 	{
 		SimHasher h;
-		h.RVec3(inSettings.mPosition);
-		h.Quat(inSettings.mRotation);
-		h.Value(inSettings.mUserData);
-		h.U32(uint32(inSettings.mObjectLayer));
-		h.U32(inSettings.mCollisionGroup.GetGroupID());
-		h.U32(inSettings.mCollisionGroup.GetSubGroupID());
+		{
+			std::stringstream data;
+			StreamOutWrapper stream(data);
+			inSettings.SaveBinaryState(stream);
+			std::string settings_bytes = data.str();
+			h.Bytes(settings_bytes.data(), settings_bytes.size());
+		}
 		h.Bool(inSettings.mCollisionGroup.GetGroupFilter() != nullptr);
-		h.U32(inSettings.mNumIterations);
-		h.F32(inSettings.mLinearDamping);
-		h.F32(inSettings.mMaxLinearVelocity);
-		h.F32(inSettings.mRestitution);
-		h.F32(inSettings.mFriction);
-		h.F32(inSettings.mPressure);
-		h.F32(inSettings.mGravityFactor);
-		h.F32(inSettings.mVertexRadius);
-		h.Bool(inSettings.mUpdatePosition);
-		h.Bool(inSettings.mMakeRotationIdentity);
-		h.Bool(inSettings.mAllowSleeping);
-		h.Bool(inSettings.mFacesDoubleSided);
 		uint32 index = cInvalidHandle;
 		for (uint32 i = 0; i < uint32(mSoftBodySettings.size()) && index == cInvalidHandle; ++i)
 			if (mSoftBodySettings[i] == inSettings.mSettings)

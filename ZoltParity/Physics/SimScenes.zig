@@ -1524,11 +1524,9 @@ pub const OpKind = enum(u32) {
     soft_body_skin_vertices = 66,
     /// CustomUpdate(delta time f[0], the body, the system)
     soft_body_custom_update = 67,
-    /// Body::GetSoftBodyCreationSettings; returns the FNV-1a hash of every member (instead of the hash of the soft body):
-    /// mPosition (3 Real), mRotation (4 floats), mUserData (u64), mObjectLayer, the group ID, sub group ID and whether
-    /// there is a group filter of mCollisionGroup, mNumIterations (u32 each), mLinearDamping, mMaxLinearVelocity,
-    /// mRestitution, mFriction, mPressure, mGravityFactor, mVertexRadius (floats), mUpdatePosition, mMakeRotationIdentity,
-    /// mAllowSleeping, mFacesDoubleSided (u32 each), the index of mSettings among the settings objects of the world
+    /// Body::GetSoftBodyCreationSettings; returns the FNV-1a hash of the settings (instead of the hash of the soft body):
+    /// the SoftBodyCreationSettings::SaveBinaryState bytes (every member but mSettings and the group filter), whether
+    /// mCollisionGroup has a group filter (u32), the index of mSettings among the settings objects of the world
     /// (invalid_handle: none of them), then the SaveBinaryState bytes of mSettings
     soft_body_creation_settings_hash = 68,
     /// PhysicsSystem::SetSoftBodyContactListener of SoftBodyListenerMode `index` (none: nullptr); returns 0
