@@ -807,7 +807,7 @@ fn genSettings(allocator: Allocator, g: *Gen, kind: Kind, c: *Case) !Ref(S) {
 
     var ref: Ref(S) = .init(try S.create(allocator));
     errdefer ref.deinit();
-    const s = ref.getMut().?;
+    const s = ref.get().?;
     switch (kind) {
         .cube => unreachable,
         .cloth_lra, .dihedral_cloth, .big_cloth => {
@@ -1050,8 +1050,13 @@ fn generate(allocator: Allocator, g: *Gen, kind: Kind) !Case {
     var phase: f32 = 0.0;
     if (g.chance(70))
         try c.ops.append(allocator, .{ .kind = .set_listener, .u = .{ g.int(1, 4), 0, 0, 0 }, .f = .{ g.float(0.0, 2.0), g.float(0.0, 2.0), g.float(0.0, 2.0), 0, 0, 0, 0, 0 } });
-    if (skinned)
-        try c.ops.append(allocator, .{ .kind = .skin_vertices, .u = .{ try appendJoints(allocator, g, &c, phase), 3, @intFromBool(g.chance(70)), 0 } });
+    if (skinned) {
+        // The skin states start as NaN: the first SkinVertices hard skins all vertices (like Jolt's samples), a second
+        // one sometimes gives a valid previous position without hard skinning
+        try c.ops.append(allocator, .{ .kind = .skin_vertices, .u = .{ try appendJoints(allocator, g, &c, phase), 3, 1, 0 } });
+        if (g.chance(30))
+            try c.ops.append(allocator, .{ .kind = .skin_vertices, .u = .{ try appendJoints(allocator, g, &c, phase), 3, 0, 0 } });
+    }
     const num_ops = if (kind == .big_cloth) g.int(2, 5) else g.int(3, 14);
     for (0..num_ops) |_| {
         const r = g.int(0, 99);
