@@ -227,11 +227,6 @@ pub const Generator = struct {
 
     /// A count that the array accepts (C++ probe): 0 to 3 elements, or the size of a C array
     fn pickCount(self: *Generator, a: *const Attribute) !usize {
-        // The arrays of a Phase 9 attribute stay empty (PhysicsScene.mSoftBodies, until group S2)
-        if (a.phase9) {
-            if (a.counts & 1 == 0) return error.HarnessError;
-            return 0;
-        }
         const small = a.counts & 0xf;
         if (small != 0) {
             while (true) {
