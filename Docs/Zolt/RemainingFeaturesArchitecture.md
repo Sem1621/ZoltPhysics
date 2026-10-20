@@ -569,6 +569,9 @@ tests pin them.
 | UB9 | an allocation failure in a draw | abort | the primitive is dropped and latched (R5) |
 | UB10 | two threads draw the same uncached shape | a data race on the cache | a mutex: one cached geometry (R6) |
 | UB11 | `uint3(float3)` of NaN or of a value outside the `uint32` range (settled in C0) | the result depends on clang's vectorization at the call site: three scalar 64-bit conversions in HairGridAccumulate, a `cvttps2dq` pair for x and y in the `ApplyGrid` of HairIntegrate and HairUpdateVelocityIntegrate | the scalar conversion of porting guide rule 12 for every component (`uint3.fromFloat3`), pinned by a Zolt-only test. The dispatch parity and the hair scenes never produce such grid positions: no zero-size bounds axis without padding, no NaN positions, no diverging scenes |
+| UB12 | `createConstraints` with an LRA type, or `optimize`, after vertices were added or removed while the closest kinematic cache was filled (settled in S1) | reads `mClosestKinematic` or `mVertices` out of bounds | panics with "SoftBodySharedSettings: vertices were added or removed after the closest kinematic vertices were cached" when the cache is not empty and its size is not `vertices.len`, at the LRA block of `createConstraints` and before the sorts of `optimize` (S2 implements it) |
+| UB13 | `createConstraints` with an empty `vertex_attributes` slice and at least one face (settled in S1) | `inVertexAttributes[min(v, 0u - 1)]` reads out of bounds | panics with "SoftBodySharedSettings.createConstraints: no vertex attributes" (S2 implements it) |
+| UB14 | `optimize` with a vertex that no group reaches (a NaN, infinite or `FLT_MAX` position; settled in S1) | a constraint with no grouped vertex, or a skinned constraint on an ungrouped vertex, reads `groups[-1]`; a constraint with some grouped vertices goes to the non-parallel group | the mixed case stays on Jolt's release path (`if (Core.enable_asserts)` asserts); a constraint without a grouped vertex and a skinned constraint on an ungrouped vertex panic with a message (S2 implements it) |
 
 ### R21 Port status and scope
 
@@ -817,6 +820,11 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | 7 | D4 | H3 | – |
 | 8 | A | – | – |
 
+- Settled in wave 2: DebugRendererPlayback (UB7): a LOD batch ID 0 is `Batch.empty` unless the stream defined a
+  batch with ID 0; an unknown batch ID, a geometry ID that the stream never defines (checked at the end of `parse`,
+  because Jolt looks IDs up in `DrawFrame`) and a stream that ends inside a command are `error.InvalidStream`; a stream
+  that ends between commands is complete; the frames that Jolt replays with defined behavior stay after an error.
+  `TwoBodyConstraint.impl.drawConstraintReferenceFrame` is a placeholder until D3, like `Constraint.impl.drawConstraint`.
 - Settled in wave 1: S0 ported `initialize`, `calculateMassAndInertia`, `getVolume` and the trivial SoftBodyShape
   overrides, because R16's fallible creation needs them; the creation parity layer covers them. S4 does not port them
   again. `SoftBodyReference.cpp` is S0's file (C prefix `jolt_sb_`); S4 and SH add their parts in their own regions.
