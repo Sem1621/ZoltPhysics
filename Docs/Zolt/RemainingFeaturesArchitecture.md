@@ -168,8 +168,8 @@ parity and the five determinism hashes pass in both renderer configurations.
 - `DebugRendererSimple` is an abstract level (pattern A, `impl`). It implements the batches as triangle lists and
   `drawGeometry` with Jolt's LOD selection (LOD 0 until `setCameraPos`). It takes no lock, like Jolt.
 - `DebugRendererPlayback` is a plain struct: `init(allocator, renderer)`, `parse(stream) !void`, `getNumFrames`,
-  `drawFrame(i)`. Jolt replays lines, then triangles, then texts, then geometries. A batch ID 0 is an empty batch; an
-  unknown ID is `error.InvalidStream` (UB7).
+  `drawFrame(i)`. Jolt replays lines, then triangles, then texts, then geometries. A batch or geometry ID that the
+  stream does not define and a stream cut short follow UB7.
 
 ### R4 No `sInstance`, no static draw flags
 
@@ -564,7 +564,7 @@ tests pin them.
 | UB4 | padding vertices of short strands (`InitCompute`'s `resize`), RW compute buffers, `ComputeBufferCPU` without data | uninitialized memory, read by HairGridAccumulate | zero (the reference runs with zero-filling hooks too) |
 | UB5 | a constant buffer larger than the shader's block | overwrites the members after the block | asserts, copies the block size |
 | UB6 | `SaveWithChildren` with a null `mSettings` and both maps | null dereference | panics with a message |
-| UB7 | playback of an unknown batch ID | `find()->second` of `end()` | `error.InvalidStream`; ID 0 is an empty batch |
+| UB7 | playback of a batch or geometry ID that the stream does not define, or of a stream that ends inside a command | `find()->second` of `end()`; uninitialized locals, and frame elements that stay uninitialized | an unknown batch ID is `error.InvalidStream`, except ID 0, which is an empty batch; `drawFrame` skips an unknown geometry ID (Jolt looks it up only there); a cut stream is `error.InvalidStream` and keeps every frame Jolt keeps, each with the elements read in full |
 | UB8 | `mSimulationStrandsFraction > 1` on the last material run | reads past the index array | panics with a message (the other runs are defined: literal) |
 | UB9 | an allocation failure in a draw | abort | the primitive is dropped and latched (R5) |
 | UB10 | two threads draw the same uncached shape | a data race on the cache | a mutex: one cached geometry (R6) |

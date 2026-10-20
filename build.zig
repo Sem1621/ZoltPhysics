@@ -10,6 +10,8 @@
 //!   zig build hello-world  Run ZoltHelloWorld (the port of HelloWorld/HelloWorld.cpp, milestone M5)
 //!   zig build hello-world-check  Run the C++ HelloWorld and its port, fail unless their stdout is identical (part of parity)
 //!   zig build jolt-performance-test -- <args>   Run the C++ PerformanceTest built like the parity reference (the M9 oracle)
+//!   zig build debug-renderer-check -Ddebug_renderer=true   Record the determinism scenes with the C++ PerformanceTest and
+//!                          ZoltPerformanceTest (-r), fail unless the .jor bytes are equal (the Zolt side comes with group D3)
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
@@ -426,4 +428,30 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_jolt_performance_test.addArgs(args);
     const jolt_performance_test_step = b.step("jolt-performance-test", "Run the C++ PerformanceTest built like the parity reference (arguments after --)");
     jolt_performance_test_step.dependOn(&run_jolt_performance_test.step);
+
+    // `zig build debug-renderer-check -Ddebug_renderer=true` (Docs/Zolt/RemainingFeaturesArchitecture.md section 4, ".jor
+    // bytes"): the C++ PerformanceTest and ZoltPerformanceTest record the 5 scenes of the determinism check with
+    // `-r -i=20`, and ZoltParity/Renderer/DebugRendererCheck.zig fails unless the .jor bytes are equal. ZoltPerformanceTest
+    // records once group D3 ports `-r` and BodyManager.draw; until then the check records the C++ side, lets Zolt's
+    // DebugRendererPlayback read every .jor and reports that the Zolt side is not ported yet.
+    const debug_renderer_check = b.addExecutable(.{
+        .name = "DebugRendererCheck",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("ZoltParity/Renderer/DebugRendererCheck.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = zolt },
+            },
+        }),
+        .use_llvm = use_llvm,
+    });
+    check_step.dependOn(&debug_renderer_check.step);
+    const run_debug_renderer_check = b.addRunArtifact(debug_renderer_check);
+    run_debug_renderer_check.addArtifactArg(jolt_performance_test);
+    run_debug_renderer_check.addArtifactArg(performance_test);
+    _ = run_debug_renderer_check.addOutputDirectoryArg("debug-renderer-check");
+    run_debug_renderer_check.stdio = .inherit;
+    const debug_renderer_check_step = b.step("debug-renderer-check", "Fail unless the C++ PerformanceTest and ZoltPerformanceTest record the same .jor bytes (needs -Ddebug_renderer=true)");
+    debug_renderer_check_step.dependOn(&run_debug_renderer_check.step);
 }

@@ -68,7 +68,9 @@
 //!   `optimizeBroadPhase`).
 //! - JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER
 //!   (sDrawMotionQualityLinearCast, DrawBodies, DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame):
-//!   TODO(debug_renderer).
+//!   TODO(debug_renderer). The renderer that the simulation draws into is `debug_renderer` (Jolt's
+//!   `DebugRenderer::sInstance`, RemainingFeaturesArchitecture.md R4): `void` without `-Ddebug_renderer`, set it with
+//!   `setDebugRenderer` between updates.
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
@@ -88,6 +90,7 @@ const RVec3 = RealFile.RVec3;
 const AABox = @import("../Geometry/AABox.zig").AABox;
 const RayAABoxFile = @import("../Geometry/RayAABox.zig");
 const Color = @import("../Core/Color.zig").Color;
+const DebugRenderer = @import("../Renderer/DebugRenderer.zig").DebugRenderer;
 const Mutex = @import("../Core/Mutex.zig").Mutex;
 const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
 const quickSort = @import("../Core/QuickSort.zig").quickSort;
@@ -367,6 +370,11 @@ pub const PhysicsSystem = struct {
     /// Previous frame's delta time of one sub step to allow scaling previous frame's constraint impulses
     previous_step_delta_time: f32 = 0.0,
 
+    /// Zolt (RemainingFeaturesArchitecture.md R4): the renderer that the simulation draws into, Jolt's
+    /// `DebugRenderer::sInstance` (the CCD draws, the contact point and manifold draws). Only with -Ddebug_renderer
+    /// (`void` otherwise). Null draws nothing.
+    debug_renderer: if (Core.debug_renderer) ?*DebugRenderer else void = if (Core.debug_renderer) null else {},
+
     /// Not initialized (Jolt's constructor), call init
     pub const empty: PhysicsSystem = .{};
 
@@ -475,6 +483,15 @@ pub const PhysicsSystem = struct {
 
     pub fn getSoftBodyContactListener(self: *const Self) ?SoftBodyContactListener {
         return self.soft_body_contact_listener;
+    }
+
+    /// Zolt (RemainingFeaturesArchitecture.md R4): set the renderer that the simulation draws into (Jolt's
+    /// `DebugRenderer::sInstance`, set by the constructor of a renderer). The draw flags are the fields of
+    /// `renderer.flags`. Set the renderer and its flags between updates: the simulation reads them from its job threads.
+    /// Only with -Ddebug_renderer (a `void` declaration otherwise).
+    pub const setDebugRenderer = if (Core.debug_renderer) setDebugRendererImpl else {};
+    fn setDebugRendererImpl(self: *Self, renderer: ?*DebugRenderer) void {
+        self.debug_renderer = renderer;
     }
 
     /// Set the function that combines the friction of two bodies and returns it

@@ -2,7 +2,8 @@
 //! R5). UnitTests/ has no debug renderer test.
 //! Status: complete
 //!
-//! - The debug renderer hooks are option-gated vtable entries that compile away without `-Ddebug_renderer=true`.
+//! - The debug renderer hooks are option-gated vtable entries that compile away without `-Ddebug_renderer=true`: the
+//!   shape, constraint and vehicle controller vtables keep their size, PhysicsSystem.debug_renderer is `void`.
 //! - Zolt's recorder writes the bytes that Jolt's DebugRendererRecorder writes for the same calls. The golden files in
 //!   `golden/` were written by Jolt (built like the parity reference plus JPH_DEBUG_RENDERER, single precision) in the
 //!   Zig design prototype of Phase 9. The debug renderer parity (R1, group D0) compares with the C++ library directly;
@@ -45,6 +46,69 @@ test "DebugRenderer: the hooks compile away without -Ddebug_renderer" {
 
     // A debug-only member is void without the option (Constraint::mDrawConstraintSize)
     try expect((@FieldType(zolt.Constraint, "draw_constraint_size") == void) == !on);
+}
+
+/// The number of function pointer slots of a vtable (its void entries have none, the base table counts)
+fn numSlots(comptime VTable: type) comptime_int {
+    var n: comptime_int = 0;
+    for (@typeInfo(VTable).@"struct".fields) |f| {
+        if (@typeInfo(f.type) == .@"struct") {
+            n += numSlots(f.type);
+        } else if (f.type != void) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+test "DebugRenderer: the constraint and vehicle controller draw hooks compile away without -Ddebug_renderer" {
+    const on = zolt.Core.debug_renderer;
+
+    // Constraint: DrawConstraint, DrawConstraintLimits, DrawConstraintReferenceFrame
+    inline for (.{ "drawConstraint", "drawConstraintLimits", "drawConstraintReferenceFrame" }) |name| {
+        try expect((@FieldType(zolt.Constraint.VTable, name) == void) == !on);
+        try expect((@TypeOf(@field(zolt.Constraint, name)) == void) == !on);
+        try expect((@TypeOf(@field(zolt.Constraint.impl, name)) == void) == !on);
+    }
+    try expect((@TypeOf(zolt.TwoBodyConstraint.impl.drawConstraintReferenceFrame) == void) == !on);
+
+    // VehicleController: Draw
+    try expect((@FieldType(zolt.VehicleController.VTable, "draw") == void) == !on);
+    try expect((@TypeOf(zolt.VehicleController.draw) == void) == !on);
+    try expect((@TypeOf(zolt.VehicleController.impl.draw) == void) == !on);
+
+    // Without the option the vtables keep their size from before Phase 9 (16 slots for Constraint, 2 more for
+    // TwoBodyConstraint, 10 for VehicleController), the option adds one slot per draw function
+    const extra_constraint = if (on) 3 else 0;
+    try expectEqual(@as(usize, 16 + extra_constraint), numSlots(zolt.Constraint.VTable));
+    try expectEqual(numSlots(zolt.Constraint.VTable) * @sizeOf(usize), @sizeOf(zolt.Constraint.VTable));
+    try expectEqual(@as(usize, 18 + extra_constraint), numSlots(zolt.TwoBodyConstraint.VTable));
+    try expectEqual(numSlots(zolt.TwoBodyConstraint.VTable) * @sizeOf(usize), @sizeOf(zolt.TwoBodyConstraint.VTable));
+    const extra_controller = if (on) 1 else 0;
+    try expectEqual(@as(usize, 10 + extra_controller), numSlots(zolt.VehicleController.VTable));
+    try expectEqual(numSlots(zolt.VehicleController.VTable) * @sizeOf(usize), @sizeOf(zolt.VehicleController.VTable));
+
+    // The renderer of the physics system (Jolt's DebugRenderer::sInstance, R4)
+    try expect((@FieldType(zolt.PhysicsSystem, "debug_renderer") == void) == !on);
+    try expect((@TypeOf(zolt.PhysicsSystem.setDebugRenderer) == void) == !on);
+}
+
+test "DebugRenderer: PhysicsSystem.setDebugRenderer" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // The field only exists with the option
+
+    const allocator = std.testing.allocator;
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    try expect(c.system.debug_renderer == null);
+
+    var renderer: LoggingRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.base.deinit();
+    c.system.setDebugRenderer(&renderer.base);
+    try expect(c.system.debug_renderer == &renderer.base);
+    c.system.setDebugRenderer(null);
+    try expect(c.system.debug_renderer == null);
 }
 
 test "DebugRenderer: GetConstraintSettings copies the draw size only with the option (R1)" {

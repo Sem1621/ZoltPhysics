@@ -64,4 +64,6 @@ test {
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");
     _ = @import("Physics/VehiclePartsParity.zig");
+    _ = @import("Renderer/DebugRendererParity.zig");
+    _ = @import("Renderer/ParityRenderer.zig");
 }

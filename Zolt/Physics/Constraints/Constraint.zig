@@ -23,7 +23,10 @@
 //! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R1, R2): `draw_constraint_size` (mDrawConstraintSize) is
 //!   `void` without `-Ddebug_renderer`. With it the constructor copies it from the settings and `ToConstraintSettings`
 //!   copies it back, like Jolt: this changes `GetConstraintSettings`, so the parity reference gets the define too.
-//!   `DrawConstraint`, `DrawConstraintLimits`, `DrawConstraintReferenceFrame`: TODO(debug_renderer) (group D3).
+//!   `DrawConstraint`, `DrawConstraintLimits` and `DrawConstraintReferenceFrame` are option-gated vtable entries
+//!   (`virtual.OptionalVirtual`, no slot without the option) with gated dispatchers. `DrawConstraint` is pure virtual in
+//!   Jolt: until group D3 ports every override, `impl.drawConstraint` is a placeholder that panics (R2). The other two
+//!   have Jolt's empty default bodies.
 //!   ConstraintSettings keeps its public `mDrawConstraintSize` in every build (it is serialized).
 //! - The protected copy constructor and assignment of ConstraintSettings (they do not copy the reference count) are
 //!   `initCopy`, used by the copy functions of derived settings.
@@ -41,6 +44,7 @@ const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const StreamUtils = @import("../../Core/StreamUtils.zig");
 const Core = @import("../../Core/Core.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const BodyManager = @import("../Body/BodyManager.zig").BodyManager;
 const IslandBuilder = @import("../IslandBuilder.zig").IslandBuilder;
@@ -294,7 +298,10 @@ pub const Constraint = struct {
         /// Link bodies that are connected by this constraint in the same split. Returns the split index.
         buildIslandSplits: *const fn (self: *const Constraint, splitter: *LargeIslandSplitter) u32,
 
-        // TODO(debug_renderer): DrawConstraint (pure virtual), DrawConstraintLimits, DrawConstraintReferenceFrame
+        // Drawing interface (JPH_DEBUG_RENDERER: no slot without -Ddebug_renderer)
+        drawConstraint: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Constraint, renderer: *DebugRenderer) void),
+        drawConstraintLimits: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Constraint, renderer: *DebugRenderer) void),
+        drawConstraintReferenceFrame: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Constraint, renderer: *DebugRenderer) void),
 
         /// Saving state for replay
         saveState: *const fn (self: *const Constraint, stream: *StateRecorder) void,
@@ -452,6 +459,22 @@ pub const Constraint = struct {
         self.user_data = user_data;
     }
 
+    // Drawing interface (JPH_DEBUG_RENDERER only: gated dispatchers, `void` without -Ddebug_renderer)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintDispatch else {};
+    fn drawConstraintDispatch(self: *const Constraint, renderer: *DebugRenderer) void {
+        self.vtable.drawConstraint(self, renderer);
+    }
+
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsDispatch else {};
+    fn drawConstraintLimitsDispatch(self: *const Constraint, renderer: *DebugRenderer) void {
+        self.vtable.drawConstraintLimits(self, renderer);
+    }
+
+    pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameDispatch else {};
+    fn drawConstraintReferenceFrameDispatch(self: *const Constraint, renderer: *DebugRenderer) void {
+        self.vtable.drawConstraintReferenceFrame(self, renderer);
+    }
+
     /// Size of constraint when drawing it through the debug renderer (JPH_DEBUG_RENDERER only: a gated declaration,
     /// RemainingFeaturesArchitecture.md R2)
     pub const getDrawConstraintSize = if (Core.debug_renderer) getDrawConstraintSizeImpl else {};
@@ -539,6 +562,25 @@ pub const Constraint = struct {
 
         pub fn isActive(self: *const Constraint) bool {
             return self.enabled;
+        }
+
+        /// Zolt placeholder (RemainingFeaturesArchitecture.md R2): DrawConstraint is pure virtual in Jolt. It stays here
+        /// until every constraint implements it (group D3), so that all constraints compile with -Ddebug_renderer=true in
+        /// the meantime.
+        pub const drawConstraint = if (Core.debug_renderer) drawConstraintPlaceholder else {};
+        fn drawConstraintPlaceholder(self: *const Constraint, renderer: *DebugRenderer) void {
+            _ = .{ self, renderer };
+            @panic("TODO(debug_renderer): DrawConstraint of this constraint is not ported yet");
+        }
+
+        pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+        fn drawConstraintLimitsImpl(self: *const Constraint, renderer: *DebugRenderer) void {
+            _ = .{ self, renderer };
+        }
+
+        pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameImpl else {};
+        fn drawConstraintReferenceFrameImpl(self: *const Constraint, renderer: *DebugRenderer) void {
+            _ = .{ self, renderer };
         }
 
         pub fn saveState(self: *const Constraint, stream: *StateRecorder) void {

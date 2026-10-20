@@ -349,6 +349,9 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
   error texts built with `%g`) must use `StringTools.cppFloat` (`{f}`), never Zig's `{d}`:
   `std::ostream` prints floats with precision 6 and `%g` rules, which `{d}` (shortest round trip)
   does not. `writeFloatPrecision` is the `%.*g` variant. NaN prints as `nan` / `-nan` like glibc.
+- Text that Jolt formats with printf's fixed notation (`StringFormat("%.2f", value)`, the draw texts) uses
+  `StringTools.cppFixed(value, 2)` (`{f}`) or `writeFloatFixed`: the exact decimal expansion rounded half to even, like
+  glibc ([RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R7).
 
 ## 6. Polymorphism (virtual functions)
 

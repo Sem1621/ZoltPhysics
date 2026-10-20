@@ -490,6 +490,14 @@ uint32 jolt_snprintf_g(double inValue, int inPrecision, char *outChars, uint32 i
 	return size < 0? 0 : uint32(size);
 }
 
+// The C library's printf("%.*f", inDecimals, inValue): Jolt's draw texts format numbers with "%.0f" to "%.3f" (a float
+// argument is converted to double), see StringTools.writeFloatFixed
+uint32 jolt_snprintf_f(double inValue, int inDecimals, char *outChars, uint32 inCapacity)
+{
+	int size = snprintf(outChars, inCapacity, "%.*f", inDecimals, inValue);
+	return size < 0? 0 : uint32(size);
+}
+
 // A std::ostream with precision inPrecision (std::setprecision) and the default float field printing a float / double
 uint32 jolt_ostream_float(float inValue, int inPrecision, char *outChars, uint32 inCapacity)
 {

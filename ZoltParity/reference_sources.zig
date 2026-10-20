@@ -49,4 +49,5 @@ pub const files = [_][]const u8{
     "Physics/TriangleShapeReference.cpp",
     "Physics/TrianglesReference.cpp",
     "Physics/VehiclePartsReference.cpp",
+    "Renderer/DebugRendererReference.cpp",
 };

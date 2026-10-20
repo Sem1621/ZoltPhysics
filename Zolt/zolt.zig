@@ -92,6 +92,8 @@ pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
 pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
 pub const StridedPtrConst = @import("Core/StridedPtr.zig").StridedPtrConst;
 pub const convertToString = @import("Core/StringTools.zig").convertToString;
+pub const CppFixed = @import("Core/StringTools.zig").CppFixed;
+pub const cppFixed = @import("Core/StringTools.zig").cppFixed;
 pub const CppFloat = @import("Core/StringTools.zig").CppFloat;
 pub const cppFloat = @import("Core/StringTools.zig").cppFloat;
 pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
@@ -100,6 +102,7 @@ pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
 pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
 pub const toLower = @import("Core/StringTools.zig").toLower;
 pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
+pub const writeFloatFixed = @import("Core/StringTools.zig").writeFloatFixed;
 pub const writeFloatGeneral = @import("Core/StringTools.zig").writeFloatGeneral;
 pub const writeFloatPrecision = @import("Core/StringTools.zig").writeFloatPrecision;
 pub const FailingTempAllocator = @import("Core/TempAllocator.zig").FailingTempAllocator;
@@ -575,7 +578,9 @@ pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Co
 
 // Renderer
 pub const DebugRenderer = @import("Renderer/DebugRenderer.zig").DebugRenderer;
+pub const DebugRendererPlayback = @import("Renderer/DebugRendererPlayback.zig").DebugRendererPlayback;
 pub const DebugRendererRecorder = @import("Renderer/DebugRendererRecorder.zig").DebugRendererRecorder;
+pub const DebugRendererSimple = @import("Renderer/DebugRendererSimple.zig").DebugRendererSimple;
 
 // Shaders (the namespaces of the shader files, Docs/Zolt/RemainingFeaturesArchitecture.md R12)
 pub const HairCommon = @import("Shaders/HairCommon.zig");
@@ -898,7 +903,9 @@ const source_files = .{
     @import("Physics/Vehicle/WheeledVehicleController.zig"),
     @import("RegisterTypes.zig"),
     @import("Renderer/DebugRenderer.zig"),
+    @import("Renderer/DebugRendererPlayback.zig"),
     @import("Renderer/DebugRendererRecorder.zig"),
+    @import("Renderer/DebugRendererSimple.zig"),
     @import("Shaders/HairCommon.zig"),
     @import("Shaders/HairStructs.zig"),
     @import("Shaders/ShaderCore.zig"),
