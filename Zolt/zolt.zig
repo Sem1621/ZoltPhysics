@@ -196,6 +196,7 @@ pub const Float4 = @import("Math/Float4.zig").Float4;
 pub const gaussianElimination = @import("Math/GaussianElimination.zig").gaussianElimination;
 pub const half_float = @import("Math/HalfFloat.zig");
 pub const HalfFloat = @import("Math/HalfFloat.zig").HalfFloat;
+pub const LibM = @import("Math/LibM.zig");
 pub const Mat44 = @import("Math/Mat44.zig").Mat44;
 pub const math = @import("Math/Math.zig");
 pub const Matrix = @import("Math/Matrix.zig").Matrix;
@@ -501,6 +502,9 @@ pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstr
 pub const DeterminismLog = @import("Physics/DeterminismLog.zig");
 pub const Activation = @import("Physics/EActivation.zig").Activation;
 pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
+pub const HairSettings = @import("Physics/Hair/HairSettings.zig").HairSettings;
+pub const HairShaders = @import("Physics/Hair/HairShaders.zig").HairShaders;
+pub const RegisterHair = @import("Physics/Hair/RegisterHair.zig");
 pub const IslandBuilder = @import("Physics/IslandBuilder.zig").IslandBuilder;
 pub const LargeIslandSplitter = @import("Physics/LargeIslandSplitter.zig").LargeIslandSplitter;
 pub const PhysicsLock = @import("Physics/PhysicsLock.zig").PhysicsLock;
@@ -716,6 +720,7 @@ const source_files = .{
     @import("Math/Float4.zig"),
     @import("Math/GaussianElimination.zig"),
     @import("Math/HalfFloat.zig"),
+    @import("Math/LibM.zig"),
     @import("Math/Mat44.zig"),
     @import("Math/Math.zig"),
     @import("Math/Matrix.zig"),
@@ -880,6 +885,9 @@ const source_files = .{
     @import("Physics/DeterminismLog.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
+    @import("Physics/Hair/HairSettings.zig"),
+    @import("Physics/Hair/HairShaders.zig"),
+    @import("Physics/Hair/RegisterHair.zig"),
     @import("Physics/IslandBuilder.zig"),
     @import("Physics/LargeIslandSplitter.zig"),
     @import("Physics/PhysicsLock.zig"),

@@ -328,12 +328,11 @@ def render_markdown(lib_rows, test_rows, serialization):
 
 
 # Phase 8 (Docs/Zolt/SerializationArchitecture.md S18): Jolt's serializable classes and their Zolt declarations. A
-# declaration without its attributes carries `pub const serialization_pending = true;`. The SoftBody classes are
-# declared (Phase 9 group S0); the Hair classes come with group H1.
+# declaration without its attributes carries `pub const serialization_pending = true;`. The SoftBody classes (Phase 9
+# group S0) and the Hair classes (Phase 9 group H1) are declared.
 JOLT_SERIALIZABLE = re.compile(r"JPH_IMPLEMENT_SERIALIZABLE_[A-Z_]+\(\s*([\w:]+)\s*\)")
 ZOLT_RTTI_NAME = re.compile(r'\.name\s*=\s*"([^"]+)"')
 ZOLT_PENDING = re.compile(r"^(\s*)pub const serialization_pending\s*=\s*true\s*;")
-PHASE9_SERIALIZABLE = ("Hair",)
 
 
 def serialization_status():
@@ -344,7 +343,6 @@ def serialization_status():
             if name.endswith(".cpp"):
                 with open(os.path.join(dirpath, name), encoding="utf-8", errors="replace") as f:
                     jolt.update(JOLT_SERIALIZABLE.findall(f.read()))
-    jolt = {c for c in jolt if not c.startswith(PHASE9_SERIALIZABLE)}
 
     # Zolt: every `RTTI.declare(` with the `.name` that follows it, and the markers. A marker belongs to the nearest
     # declaration with the same indentation (both are at the top of the struct).
@@ -395,8 +393,8 @@ SERIALIZATION_ICON = {"declared": "✅", "pending": "🟡", "missing": "❌"}
 def render_serialization(status):
     out = ["## Serialization (Phase 8)", ""]
     counts = {k: sum(1 for _, _, s in status if s == k) for k in SERIALIZATION_ICON}
-    out.append(f"Jolt's {len(status)} serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the Hair classes")
-    out.append("of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see")
+    out.append(f"Jolt's {len(status)} serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`) and their Zolt declarations")
+    out.append("(`pub const rtti = RTTI.declare(...)`, see")
     out.append("[SerializationArchitecture.md](SerializationArchitecture.md) S18). `port_status.py --check` and the parity harness")
     out.append(f"fail on a pending or undeclared class. ✅ {counts['declared']} declared · 🟡 {counts['pending']} pending "
                f"(`serialization_pending`) · ❌ {counts['missing']} not declared")
