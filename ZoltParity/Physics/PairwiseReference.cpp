@@ -11,6 +11,10 @@
 // doubles, booleans as int (never bool, see the porting guide). The catalogue is created once (pw_catalogue_create returns
 // a handle that holds a reference to every node shape) and queried by handle. Everything except the C ABI is in an
 // anonymous namespace (other reference files have classes with the same names). All functions are prefixed with pw_.
+//
+// Soft bodies (cSoftBody): the shape of a soft body like BodyManager::AllocateSoftBody makes it, without a body
+// (SoftBodyMotionProperties::Initialize, then the private mSoftBodyMotionProperties of a new SoftBodyShape points to the
+// motion properties). The catalogue owns the motion properties and deletes them after the shapes.
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -43,6 +47,10 @@
 #include <Jolt/Physics/Collision/Shape/TaperedCapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/TaperedCylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/TriangleShape.h>
+#include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
+#include <Jolt/Physics/SoftBody/SoftBodyShape.h>
+#include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
 
 #include <cstring>
 #include <string>
@@ -94,6 +102,7 @@ enum : uint32
 	cMutableCompound,
 	cMesh,
 	cHeightField,
+	cSoftBody,
 };
 
 void EnsureFactory()
@@ -193,16 +202,16 @@ struct NodeDesc
 {
 	uint32					mKind;
 	uint32					mMaterial;				// 0: no material, i + 1: GetMaterials()[i]
-	float					mF[16];					// Parameters of the kind (see PairwiseParity.zig)
+	float					mF[16];					// Parameters of the kind (see PairwiseParity.zig), soft body: mF[0] is the vertex radius, mF[1..5] the rotation
 	float					mConvexRadius;
 	uint32					mChild;					// Decorators: the inner node
-	uint32					mFirst;					// Compounds: first sub, hull: first float of the points, mesh: first float of the vertices, height field: first float of the samples
-	uint32					mCount;					// Number of subs / points / vertices, height field: sample count
-	uint32					mFirst2;				// Mesh: first triangle, height field: first byte of the material indices
-	uint32					mCount2;				// Mesh: number of triangles, height field: number of material indices
-	uint32					mNumMaterials;			// Mesh / height field: the first mNumMaterials of GetMaterials()
-	uint32					mParam0;				// Mesh: max triangles per leaf, height field: block size
-	uint32					mParam1;				// Mesh: per triangle user data, height field: bits per sample
+	uint32					mFirst;					// Compounds: first sub, hull: first float of the points, mesh / soft body: first float of the vertices, height field: first float of the samples
+	uint32					mCount;					// Number of subs / points / vertices (also soft body), height field: sample count
+	uint32					mFirst2;				// Mesh: first triangle, height field: first byte of the material indices, soft body: first face
+	uint32					mCount2;				// Mesh: number of triangles, height field: number of material indices, soft body: number of faces
+	uint32					mNumMaterials;			// Mesh / height field: the first mNumMaterials of GetMaterials(), soft body: the same, 0 keeps the default material list
+	uint32					mParam0;				// Mesh: max triangles per leaf, height field: block size, soft body: faces double sided
+	uint32					mParam1;				// Mesh: per triangle user data, height field: bits per sample, soft body: make rotation identity
 	uint32					mUserData;
 };
 
@@ -227,7 +236,16 @@ struct CatalogueInput
 class Catalogue
 {
 public:
+	// The soft body shapes point to the motion properties: release the shapes first
+							~Catalogue()
+	{
+		mShapes.clear();
+		for (SoftBodyMotionProperties *motion_properties : mSoftBodies)
+			delete motion_properties;
+	}
+
 	Array<RefConst<Shape>>	mShapes;
+	Array<SoftBodyMotionProperties *> mSoftBodies;			// The motion properties of the soft body nodes
 };
 
 Shape::ShapeResult CreateNode(const CatalogueInput &inInput, const Array<RefConst<Shape>> &inShapes, uint32 inIndex)
@@ -602,6 +620,57 @@ struct CastTableTag
 template struct Rob<CollideTableTag, &CollisionDispatch::sCollideShape>;
 template struct Rob<CastTableTag, &CollisionDispatch::sCastShape>;
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Soft bodies
+
+struct SoftBodyMotionPropertiesTag
+{
+	using type = const SoftBodyMotionProperties *SoftBodyShape::*;
+	friend type Get(SoftBodyMotionPropertiesTag);
+};
+
+template struct Rob<SoftBodyMotionPropertiesTag, &SoftBodyShape::mSoftBodyMotionProperties>;
+
+// A soft body node (cSoftBody, see NodeKind in PairwiseParity.zig)
+Shape::ShapeResult CreateSoftBody(const CatalogueInput &inInput, Catalogue &ioCatalogue, uint32 inIndex)
+{
+	const NodeDesc &n = inInput.mNodes[inIndex];
+	Ref<SoftBodySharedSettings> settings = new SoftBodySharedSettings;
+	for (uint32 i = 0; i < n.mCount; ++i)
+	{
+		const float *v = inInput.mFloats + n.mFirst + 3 * i;
+		settings->mVertices.push_back(SoftBodySharedSettings::Vertex(Float3(v[0], v[1], v[2])));
+	}
+	for (uint32 i = 0; i < n.mCount2; ++i)
+	{
+		const IndexedTriangle &t = inInput.mTriangles[n.mFirst2 + i];
+		settings->AddFace(SoftBodySharedSettings::Face(t.mIdx[0], t.mIdx[1], t.mIdx[2], t.mMaterialIndex));
+	}
+	if (n.mNumMaterials > 0)
+	{
+		settings->mMaterials.clear();
+		for (uint i = 0; i < n.mNumMaterials; ++i)
+			settings->mMaterials.push_back(GetMaterials()[i % cNumMaterials]);
+	}
+
+	SoftBodyCreationSettings creation(settings, RVec3::sZero(), LoadQuat(n.mF + 1), 0);
+	creation.mFacesDoubleSided = n.mParam0 != 0;
+	creation.mMakeRotationIdentity = n.mParam1 != 0;
+	creation.mVertexRadius = n.mF[0];
+
+	SoftBodyMotionProperties *motion_properties = new SoftBodyMotionProperties;
+	ioCatalogue.mSoftBodies.push_back(motion_properties);
+	motion_properties->Initialize(creation);
+
+	SoftBodyShape *shape = new SoftBodyShape;
+	shape->*Get(SoftBodyMotionPropertiesTag()) = motion_properties;
+	shape->SetUserData(n.mUserData);
+
+	Shape::ShapeResult result;
+	result.Set(shape);
+	return result;
+}
+
 } // namespace
 
 extern "C"
@@ -618,7 +687,7 @@ void *pw_catalogue_create(const CatalogueInput *inInput, uint32 *outData, uint32
 	bool valid = true;
 	for (uint32 i = 0; i < inInput->mNumNodes; ++i)
 	{
-		Shape::ShapeResult result = CreateNode(*inInput, catalogue->mShapes, i);
+		Shape::ShapeResult result = inInput->mNodes[i].mKind == cSoftBody? CreateSoftBody(*inInput, *catalogue, i) : CreateNode(*inInput, catalogue->mShapes, i);
 		out.U(cMarkerProperties);
 		if (result.HasError())
 		{
