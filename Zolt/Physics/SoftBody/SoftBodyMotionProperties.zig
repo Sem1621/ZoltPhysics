@@ -246,12 +246,12 @@ pub const SoftBodyMotionProperties = struct {
 
     /// static_cast<SoftBodyMotionProperties *>(MotionProperties *)
     pub fn fromBase(mp: *MotionProperties) *SoftBodyMotionProperties {
-        return @fieldParentPtr("base", mp);
+        return @alignCast(@fieldParentPtr("base", mp)); // RMat44 (skin_state_transform) can align this above its base
     }
 
     /// static_cast<const SoftBodyMotionProperties *>(const MotionProperties *)
     pub fn fromBaseConst(mp: *const MotionProperties) *const SoftBodyMotionProperties {
-        return @fieldParentPtr("base", mp);
+        return @alignCast(@fieldParentPtr("base", mp));
     }
 
     /// Destructor (~SoftBodyMotionProperties): frees the arrays, releases the shared settings and the leaf shapes
