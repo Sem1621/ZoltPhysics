@@ -3755,6 +3755,133 @@ test "PhysicsSystem soft bodies: out of temp memory and failing soft body jobs, 
     try softBodyFailingTempAndJobs(.{ .thread_pool = 3 });
 }
 
+/// Wraps a job system and fails the createJob calls of the soft body jobs by name: call k of the jobs named `names[j]`
+/// (counted per name from 0) fails when bit k of `masks[j]` is set. FailingJobSystem fails one call, so with N > 1
+/// Simulate and Collide jobs per step its sweeps never reach the D5 rows of R17 that need several missing jobs.
+const SoftBodyJobFailures = struct {
+    const names = [_][]const u8{ "SoftBodyFinalize", "SoftBodySimulate", "SoftBodyCollide" };
+
+    inner: JobSystem,
+    masks: [names.len]u64,
+    /// The createJob calls and the failed calls per name
+    num_calls: [names.len]std.atomic.Value(u32) = @splat(.init(0)),
+    num_failures: [names.len]std.atomic.Value(u32) = @splat(.init(0)),
+
+    fn jobSystem(self: *SoftBodyJobFailures) JobSystem {
+        return .init(self);
+    }
+
+    pub fn getMaxConcurrency(self: *const SoftBodyJobFailures) i32 {
+        return self.inner.getMaxConcurrency();
+    }
+
+    pub fn createJob(self: *SoftBodyJobFailures, job_name: []const u8, color: zolt.Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
+        for (names, 0..) |name, j| {
+            if (!std.mem.eql(u8, job_name, name)) continue;
+            const k = self.num_calls[j].fetchAdd(1, .monotonic);
+            if (k < 64 and (self.masks[j] >> @intCast(k)) & 1 != 0) {
+                _ = self.num_failures[j].fetchAdd(1, .monotonic);
+                return error.OutOfMemory;
+            }
+        }
+        return self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+    }
+
+    pub fn createBarrier(self: *SoftBodyJobFailures) ?*JobSystem.Barrier {
+        return self.inner.createBarrier();
+    }
+
+    pub fn destroyBarrier(self: *SoftBodyJobFailures, barrier: *JobSystem.Barrier) void {
+        self.inner.destroyBarrier(barrier);
+    }
+
+    pub fn waitForJobs(self: *SoftBodyJobFailures, barrier: *JobSystem.Barrier) void {
+        self.inner.waitForJobs(barrier);
+    }
+
+    // The jobs belong to `inner` and queue themselves there: not reached
+    pub fn queueJob(self: *SoftBodyJobFailures, job: *JobSystem.Job) void {
+        self.inner.vtable.queueJob(self.inner.ptr, job);
+    }
+
+    pub fn queueJobs(self: *SoftBodyJobFailures, jobs: []const *JobSystem.Job) void {
+        self.inner.vtable.queueJobs(self.inner.ptr, jobs);
+    }
+
+    pub fn freeJob(self: *SoftBodyJobFailures, job: *JobSystem.Job) void {
+        self.inner.vtable.freeJob(self.inner.ptr, job);
+    }
+};
+
+test "PhysicsSystem soft bodies: several soft body jobs missing in one step (N = 4)" {
+    // The D5 rows of R17 with several failed creations per step: JobSoftBodyPrepare removes the Finalize dependencies of
+    // every missing Simulate job, creates no Collide job when no Simulate job exists and releases the Simulate jobs
+    // from the dependencies of every missing Collide job. A wrong count leaves Finalize or a Simulate job waiting: the
+    // update hangs.
+    const allocator = std.testing.allocator;
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, .{ .thread_pool = 3 });
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+
+    const scene = try allocator.create(SoftBodyScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator);
+    defer scene.deinit();
+    var snapshot = StateRecorderImpl.init(allocator);
+    defer snapshot.deinit();
+    try scene.warmUp(&temp, jobs.jobSystem(), &snapshot);
+
+    // Reference: one update with all jobs
+    _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    var reference = StateRecorderImpl.init(allocator);
+    defer reference.deinit();
+    try scene.system.saveState(reference.recorder(), .{});
+
+    // N = 4 Simulate and Collide jobs per step: the calls of step 2 are bits 4..7 of a mask (when step 1 created them)
+    try expectEqual(@as(i32, 4), jobs.jobSystem().getMaxConcurrency());
+    comptime std.debug.assert(collision_steps == 2);
+    const all: u64 = std.math.maxInt(u64);
+    const Case = struct {
+        /// The masks of SoftBodyFinalize, SoftBodySimulate, SoftBodyCollide
+        masks: [3]u64,
+        /// The expected createJob calls and failures of SoftBodySimulate and SoftBodyCollide
+        simulate: [2]u32,
+        collide: [2]u32,
+    };
+    const cases = [_]Case{
+        // No Simulate job in either step: no Collide job, Prepare collides and simulates, Finalize loses 4 dependencies
+        .{ .masks = .{ 0, all, 0 }, .simulate = .{ 8, 8 }, .collide = .{ 0, 0 } },
+        // No Collide job in either step: Prepare collides, every Simulate job loses 4 dependencies
+        .{ .masks = .{ 0, 0, all }, .simulate = .{ 8, 0 }, .collide = .{ 8, 8 } },
+        // Two Simulate jobs missing in each step: Finalize loses 2 dependencies
+        .{ .masks = .{ 0, 0b1001_0110, 0 }, .simulate = .{ 8, 4 }, .collide = .{ 8, 0 } },
+        // Two Collide jobs missing in each step: every Simulate job loses 2 dependencies
+        .{ .masks = .{ 0, 0, 0b1100_0011 }, .simulate = .{ 8, 0 }, .collide = .{ 8, 4 } },
+        // Three Simulate jobs missing in step 1, three Collide jobs missing in step 2
+        .{ .masks = .{ 0, 0b0111, 0b1110_0000 }, .simulate = .{ 8, 3 }, .collide = .{ 8, 3 } },
+        // No Simulate job in step 1 (no Collide job), no Collide job in step 2
+        .{ .masks = .{ 0, 0b1111, 0b1111 }, .simulate = .{ 8, 4 }, .collide = .{ 4, 4 } },
+        // No Finalize job: Prepare runs the whole update in both steps
+        .{ .masks = .{ all, 0, 0 }, .simulate = .{ 0, 0 }, .collide = .{ 0, 0 } },
+    };
+    for (cases) |case| {
+        try scene.restore(&snapshot);
+        var failing: SoftBodyJobFailures = .{ .inner = jobs.jobSystem(), .masks = case.masks };
+        const errors = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), failing.jobSystem());
+        try expect(errors.isNone()); // Not an error
+        try expectEqual(case.simulate[0], failing.num_calls[1].load(.monotonic));
+        try expectEqual(case.simulate[1], failing.num_failures[1].load(.monotonic));
+        try expectEqual(case.collide[0], failing.num_calls[2].load(.monotonic));
+        try expectEqual(case.collide[1], failing.num_failures[2].load(.monotonic));
+        try expectEqual(@as(u32, if (case.masks[0] != 0) 2 else 0), failing.num_failures[0].load(.monotonic));
+        try scene.expectState(&reference);
+        try expect(temp.isEmpty());
+        try scene.expectNoCollidingShapes();
+    }
+}
+
 test "PhysicsSystem soft bodies: out of memory creating the scene" {
     const Ctx = struct {
         fn build(allocator: Allocator) !void {
