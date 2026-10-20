@@ -34,10 +34,10 @@
 //!   parity: soft bodies created through BodyInterface" creates soft bodies with the four creation functions in a world
 //!   that can run out of bodies, and compares the IDs, IsActive, IsAdded and the SaveWithChildren bytes of
 //!   GetSoftBodyCreationSettings, with and without the maps. The scenes of "PhysicsScene parity" have soft bodies:
-//!   SaveBinaryState (soft bodies always save their shared settings and materials), sRestoreFromBinaryState, CreateBodies
-//!   (the active soft bodies, and SaveState with the state of the soft bodies) and FromPhysicsSystem. Constraints also
-//!   connect soft bodies. FromPhysicsSystem stores the index of the next rigid body for a soft body (Jolt's quirk, R20),
-//!   so its bytes compare that index.
+//!   SaveBinaryState (soft bodies always save their shared settings and materials), sRestoreFromBinaryState,
+//!   CreateBodies (the active soft bodies, and SaveState with the state of the soft bodies) and FromPhysicsSystem.
+//!   Constraints also connect soft bodies. FromPhysicsSystem stores the index of the next rigid body for a soft body
+//!   (Jolt's quirk, R20), so its bytes compare that index.
 //! The DeterminismLog text is not compared here: the C++ library is built without JPH_ENABLE_DETERMINISM_LOG (see
 //! ZoltTests/Physics/DeterminismLogTests.zig).
 

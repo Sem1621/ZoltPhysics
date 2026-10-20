@@ -278,14 +278,14 @@
 //!   the scenes run on the C++ side alone ("SimScenes blocked scenes run on the C++ side"), and their settings bytes are
 //!   compared with Zolt's. Both are gone: the soft body scenes run against Zolt.
 //! - **Scenes** (group S5, the list of RemainingFeaturesArchitecture.md section 4): the 3 cases of SoftBodyTests
-//!   (`soft_body_test_*`), linear cast spheres against cubes and cloths in every listener mode (the CCD response against
-//!   a soft body face, `Expect.soft_body_ccd`), linear cast spheres against faces with fixed vertices of rotated cloths
-//!   (MakeRotationIdentity false), cloths with LRA, dihedral bends and fixed corners, pressure spheres, rod chains,
-//!   skinned cloths with back stops, sensors, sleeping and waking through ProcessBodyPair, UpdatePosition false, several
-//!   soft bodies on one dynamic body (the BodyID order of SoftBodyFinalize), save and cross restore, 2 collision steps, a
-//!   30 x 30 cloth (4 parallel constraint groups and a non-parallel group of 308 edges, `Expect.soft_body_groups`),
-//!   vertex counts around 64, every kind of rigid shape, and 70 soft bodies that go to sleep in the same update (the
-//!   batches of SoftBodyFinalize, `Expect.update_deactivations`).
+//!   (`soft_body_test_*`), linear cast spheres against cubes and cloths in every listener mode (the CCD response
+//!   against a soft body face, `Expect.soft_body_ccd`), linear cast spheres against faces with fixed vertices of
+//!   rotated cloths (MakeRotationIdentity false), cloths with LRA, dihedral bends and fixed corners, pressure spheres,
+//!   rod chains, skinned cloths with back stops, sensors, sleeping and waking through ProcessBodyPair, UpdatePosition
+//!   false, several soft bodies on one dynamic body (the BodyID order of SoftBodyFinalize), save and cross restore, 2
+//!   collision steps, a 30 x 30 cloth (4 parallel constraint groups and a non-parallel group of 308 edges,
+//!   `Expect.soft_body_groups`), vertex counts around 64, every kind of rigid shape, and 70 soft bodies that go to
+//!   sleep in the same update (the batches of SoftBodyFinalize, `Expect.update_deactivations`).
 //! - **D12 sweeps.** Jolt's SaveState does not hold mSkinStatePreviousPositionValid. SkinVertices sets it, the update
 //!   clears it, and it selects the skin interpolation factor. Every update that starts from the snapshot of a sweep gets
 //!   the value of the snapshot again, like the InvalidateContactCache flags (SimulationParity.zig, `SkinFlags`). The
@@ -2827,9 +2827,9 @@ pub const Expect = struct {
     /// A shared settings object of the scene has at least 2 parallel update groups and a non-parallel group with
     /// constraints (Zolt side: SoftBodySharedSettings.update_groups after Optimize)
     soft_body_groups: bool = false,
-    /// At least this many bodies are deactivated from inside one update (OnBodyDeactivated during PhysicsSystem::Update,
-    /// Zolt side, not by the operations before it). More than 64 soft bodies that go to sleep in one update fill the
-    /// batch of JobSoftBodyFinalize.
+    /// At least this many bodies are deactivated from inside one update (OnBodyDeactivated during
+    /// PhysicsSystem::Update, Zolt side, not by the operations before it). More than 64 soft bodies that go to sleep in
+    /// one update fill the batch of JobSoftBodyFinalize.
     update_deactivations: u32 = 0,
 };
 
@@ -16692,11 +16692,11 @@ fn shootSphereAtFace(b: *SceneBuilder, sphere: u32, target: [3]Real, normal: [3]
 
 /// Linear cast spheres against cloths with fixed rows (inverse mass 0) that keep their rotation (MakeRotationIdentity
 /// false: the inverse transform of the CCD response rotates). A light sphere hits a face with a fixed vertex and two
-/// free vertices that move (the barycentric velocity of the face). A heavy sphere hits a face whose 3 vertices are fixed
-/// (the mass 1e10 of a fixed vertex: the inverse mass 1 / 3e10 of the face is visible next to the inverse mass 1e-5 of
-/// the sphere). The spheres hit at update 0 with the accepting listener (a fixed vertex keeps its CCD contact mark until
-/// OnSoftBodyContactAdded, so the records hash the local contact plane) and at update 25 without a listener. Both are
-/// sweep updates.
+/// free vertices that move (the barycentric velocity of the face). A heavy sphere hits a face whose 3 vertices are
+/// fixed (the mass 1e10 of a fixed vertex: the inverse mass 1 / 3e10 of the face is visible next to the inverse mass
+/// 1e-5 of the sphere). The spheres hit at update 0 with the accepting listener (a fixed vertex keeps its CCD contact
+/// mark until OnSoftBodyContactAdded, so the records hash the local contact plane) and at update 25 without a listener.
+/// Both are sweep updates.
 fn buildSoftBodyCcdFixedAndRotated(b: *SceneBuilder) Allocator.Error!void {
     b.num_updates = 40;
     b.gravity = .{ 0, 0, 0 };

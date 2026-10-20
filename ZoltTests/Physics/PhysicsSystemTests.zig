@@ -3814,8 +3814,8 @@ const SoftBodyJobFailures = struct {
 };
 
 test "PhysicsSystem soft bodies: several soft body jobs missing in one step (N = 4)" {
-    // The D5 rows of R17 with several failed creations per step: JobSoftBodyPrepare removes the Finalize dependencies of
-    // every missing Simulate job, creates no Collide job when no Simulate job exists and releases the Simulate jobs
+    // The D5 rows of R17 with several failed creations per step: JobSoftBodyPrepare removes the Finalize dependencies
+    // of every missing Simulate job, creates no Collide job when no Simulate job exists and releases the Simulate jobs
     // from the dependencies of every missing Collide job. A wrong count leaves Finalize or a Simulate job waiting: the
     // update hangs.
     const allocator = std.testing.allocator;

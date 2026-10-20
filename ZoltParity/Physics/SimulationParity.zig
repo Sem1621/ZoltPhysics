@@ -171,6 +171,24 @@
 //! soft body scenes run on the C++ side alone, and a supported scene that creates soft bodies fails
 //! (checkSoftBodyBlocker).
 //!
+//! Soft body scenes against Zolt (group S5): the Zolt side also counts the steps in which the CCD response changes a
+//! soft body (Expect.soft_body_ccd, SpawnCountingJobSystem), checks the update groups of the shared settings
+//! (Expect.soft_body_groups) and counts the bodies deactivated in one update (Expect.update_deactivations). Proof that
+//! it bites (the first difference, single threaded):
+//! - JobSoftBodyPrepare skips the collide claim loop for the missing Collide jobs: soft_body_cube_on_floor, the sweep
+//!   of update 30, "a job could not be spawned: ... bodies[1] (id 0x00800001) position.x";
+//! - JobSoftBodyPrepare does not sort the active soft bodies by BodyID: soft_body_several_on_one_body, update 17,
+//!   bodies[1] motion_properties.linear_velocity.x (1 ULP);
+//! - the CCD face response computes inv_m2 without vertex 2: the CCD scenes, update 0, bodies[0] position.x;
+//! - the mass of a fixed vertex is 1e9 instead of 1e10, or vertex 1 tests `inv_mass >= 0`:
+//!   soft_body_ccd_fixed_and_rotated, update 0, bodies[3] (the heavy sphere) motion_properties.linear_velocity.x;
+//! - v2 rotates with Multiply3x3 instead of Multiply3x3Transposed, or delta_v2 with Multiply3x3Transposed:
+//!   soft_body_ccd_fixed_and_rotated, update 0, bodies[0] position.x;
+//! - local_normal rotates with Multiply3x3Transposed: soft_body_ccd_fixed_and_rotated, update 0, the
+//!   soft_body_contact_body record of the fixed vertices (they keep their CCD contact marks);
+//! - the in-loop flush of SoftBodyFinalize's sleep batch deactivates one body less: soft_body_many_go_to_sleep, update
+//!   31, bodies[64] is_active.
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
@@ -7431,9 +7449,9 @@ fn checkSoftBodySettings(allocator: Allocator, name: []const u8, builder: *const
     }
 }
 
-/// Phase 9, Expect.soft_body_groups: some shared settings object of the scene has at least 2 parallel update groups and a
-/// non-parallel group with constraints (the last group of SoftBodySharedSettings.update_groups, as Optimize builds them
-/// on the Zolt side; the bytes are Jolt's, see checkSoftBodySettings)
+/// Phase 9, Expect.soft_body_groups: some shared settings object of the scene has at least 2 parallel update groups and
+/// a non-parallel group with constraints (the last group of SoftBodySharedSettings.update_groups, as Optimize builds
+/// them on the Zolt side; the bytes are Jolt's, see checkSoftBodySettings)
 fn checkSoftBodyGroups(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
     if (!entry.expect.soft_body_groups) return;
     const desc = builder.desc();
@@ -7442,7 +7460,7 @@ fn checkSoftBodyGroups(allocator: Allocator, entry: *const SceneEntry, builder: 
         defer settings.deinit();
         const groups = settings.get().?.update_groups.items;
         if (groups.len < 3) continue; // At least 2 parallel groups and the non-parallel group
-        // The non-parallel group has constraints: one of its end indices differs from the one of the last parallel group
+        // The non-parallel group has constraints: an end index differs from the one of the last parallel group
         const last_parallel = &groups[groups.len - 2];
         const non_parallel = &groups[groups.len - 1];
         if (!std.mem.eql(u8, std.mem.asBytes(last_parallel), std.mem.asBytes(non_parallel))) return;
