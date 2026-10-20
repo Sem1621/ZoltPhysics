@@ -1837,3 +1837,247 @@ test "SoftBodyMotionProperties: initialize out of memory leaves the state unchan
         }
     }.f, .{});
 }
+
+/// A physics system with one object layer for the update tests (in place: it must not move)
+const TestWorld = struct {
+    const BroadPhaseLayerInterfaceTable = @import("../Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+    const ObjectVsBroadPhaseLayerFilterTable = @import("../Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
+    const ObjectLayerPairFilterTable = @import("../Collision/ObjectLayerPairFilterTable.zig").ObjectLayerPairFilterTable;
+    const BodyCreationSettings = @import("../Body/BodyCreationSettings.zig").BodyCreationSettings;
+    const BoxShape = @import("../Collision/Shape/BoxShape.zig").BoxShape;
+    const RVec3 = @import("../../Math/Real.zig").RVec3;
+
+    layer_interface: BroadPhaseLayerInterfaceTable,
+    pair_filter: ObjectLayerPairFilterTable,
+    ovb_filter: ObjectVsBroadPhaseLayerFilterTable,
+    system: PhysicsSystem,
+
+    fn init(self: *TestWorld, allocator: Allocator) !void {
+        self.layer_interface = try .init(allocator, 1, 1);
+        errdefer self.layer_interface.deinit();
+        self.layer_interface.mapObjectToBroadPhaseLayer(0, .init(0));
+        self.pair_filter = try .init(allocator, 1);
+        errdefer self.pair_filter.deinit();
+        self.pair_filter.enableCollision(0, 0);
+        self.ovb_filter = try .init(allocator, &self.layer_interface.base, 1, &self.pair_filter.base, 1);
+        errdefer self.ovb_filter.deinit();
+        self.system = .empty;
+        try self.system.init(allocator, std.testing.io, 16, 0, 64, 64, &self.layer_interface.base, &self.ovb_filter.base, &self.pair_filter.base, .{});
+    }
+
+    fn deinit(self: *TestWorld) void {
+        self.system.deinit();
+        self.ovb_filter.deinit();
+        self.pair_filter.deinit();
+        self.layer_interface.deinit();
+    }
+
+    /// A box body added to the system
+    fn addBox(self: *TestWorld, half_extent: Vec3, position: RVec3, motion_type: MotionType) !BodyID {
+        const box = try BoxShape.create(self.system.allocator, half_extent, .{});
+        var settings: BodyCreationSettings = .initWithShape(box.asShape(), position, Quat.identity(), motion_type, 0);
+        defer settings.deinit();
+        const id = try self.system.getBodyInterfaceMut().createAndAddBody(&settings, .dont_activate);
+        try std.testing.expect(!id.isInvalid());
+        return id;
+    }
+
+    /// A soft body that is not added to the system (BodyInterface::CreateSoftBody)
+    fn createSoftBody(self: *TestWorld, shared: *const SoftBodySharedSettings, position: RVec3) !*Body {
+        var settings: SoftBodyCreationSettings = .init(shared, position, Quat.identity(), 0);
+        defer settings.deinit();
+        settings.allow_sleeping = false;
+        return (try self.system.getBodyInterfaceMut().createSoftBody(&settings)).?;
+    }
+};
+
+/// A horizontal cloth of n x n vertices with distance constraints, optimized (reference count 0)
+fn testCloth(allocator: Allocator, n: u32, spacing: f32) !*SoftBodySharedSettings {
+    const s = try SoftBodySharedSettings.create(allocator);
+    errdefer {
+        s.deinit();
+        allocator.destroy(s);
+    }
+    const offset = 0.5 * spacing * @as(f32, @floatFromInt(n - 1));
+    for (0..n) |z| for (0..n) |x| {
+        try s.vertices.append(allocator, .init(.{ .x = spacing * @as(f32, @floatFromInt(x)) - offset, .y = 0, .z = spacing * @as(f32, @floatFromInt(z)) - offset }, .{}));
+    };
+    for (0..n - 1) |z| for (0..n - 1) |x| {
+        const v0: u32 = @intCast(z * n + x);
+        try s.addFace(.init(v0, v0 + n, v0 + 1, .{}));
+        try s.addFace(.init(v0 + 1, v0 + n, v0 + n + 1, .{}));
+    };
+    try s.createConstraints(&.{.init(1.0e-5, 1.0e-5, 1.0e-4, .{})}, .{});
+    try s.optimize();
+    return s;
+}
+
+test "SoftBodyMotionProperties: customUpdate drops a cloth on a box, SaveState and RestoreState" {
+    const allocator = std.testing.allocator;
+    const RVec3 = TestWorld.RVec3;
+    const StateRecorderImpl = @import("../StateRecorderImpl.zig").StateRecorderImpl;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    _ = try world.addBox(Vec3.init(2, 0.5, 2), RVec3.init(0, -1, 0), .static);
+
+    const body = try world.createSoftBody(try testCloth(allocator, 6, 0.2), RVec3.init(0, 0.25, 0));
+    defer world.system.getBodyInterfaceMut().destroyBody(body.getID());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+    try std.testing.expectEqual(@as(usize, 36), mp.getVertices().len);
+
+    // Fall for a second: the cloth comes to rest on the top of the box at y = -0.5
+    for (0..60) |_| {
+        try mp.customUpdate(1.0 / 60.0, body, &world.system);
+        try std.testing.expectEqual(@as(usize, 0), mp.colliding_shapes.items.len);
+        try std.testing.expectEqual(@as(usize, 0), mp.colliding_sensors.items.len);
+    }
+    const com = body.getCenterOfMassTransform();
+    for (mp.getVertices()) |*v| {
+        const y = com.mulVec3(v.position).getY();
+        try std.testing.expect(y > -0.55 and y < -0.3);
+        try std.testing.expectEqual(@as(i32, -1), v.colliding_shape_index); // ResetCollision after the update
+    }
+
+    // SaveState, an update, RestoreState: the state of before the update
+    var before: StateRecorderImpl = .init(allocator);
+    defer before.deinit();
+    mp.saveState(before.recorder());
+    try mp.customUpdate(1.0 / 30.0, body, &world.system);
+    before.rewind();
+    mp.restoreState(before.recorder());
+    var after: StateRecorderImpl = .init(allocator);
+    defer after.deinit();
+    mp.saveState(after.recorder());
+    try std.testing.expectEqualSlices(u8, before.getData(), after.getData());
+}
+
+test "SoftBodyMotionProperties: a soft body without vertices advances its state (R20 UB1)" {
+    const allocator = std.testing.allocator;
+    const RVec3 = TestWorld.RVec3;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    _ = try world.addBox(Vec3.replicate(1), RVec3.init(0, -2, 0), .static);
+
+    // A body with one kinematic vertex, then emptied: Jolt's SetMassProperties asserts when a body without vertices
+    // is created (its mass is 0)
+    const shared = try SoftBodySharedSettings.create(allocator);
+    try shared.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }));
+    try shared.update_groups.append(allocator, std.mem.zeroes(SoftBodySharedSettings.UpdateGroup));
+    const body = try world.createSoftBody(shared, RVec3.init(0, 0, 0));
+    defer world.system.getBodyInterfaceMut().destroyBody(body.getID());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+    mp.vertices.clearRetainingCapacity();
+    mp.local_bounds = .empty;
+    mp.local_predicted_bounds = .empty;
+
+    // The empty local bounds become the whole world: the box is a colliding shape
+    var context: SoftBodyUpdateContext = .{};
+    mp.initializeUpdateContext(1.0 / 60.0, body, &world.system, &context);
+    try mp.determineCollidingShapes(&context, &world.system, world.system.getBodyLockInterface());
+    try std.testing.expectEqual(@as(usize, 1), mp.colliding_shapes.items.len);
+
+    // The first claimant of the empty vertex range advances the state (Jolt never leaves DetermineCollisionPlanes)
+    try std.testing.expectEqual(SoftBodyMotionProperties.Status.did_work, mp.parallelUpdate(&context, world.system.getPhysicsSettings()));
+    try std.testing.expectEqual(SoftBodyUpdateContext.State.apply_constraints, context.state.load(.acquire));
+    var num_calls: u32 = 1;
+    while (mp.parallelUpdate(&context, world.system.getPhysicsSettings()) == .did_work) : (num_calls += 1)
+        try std.testing.expect(num_calls < 100);
+    try std.testing.expectEqual(SoftBodyUpdateContext.State.done, context.state.load(.acquire));
+    try std.testing.expect(context.delta_position.eql(Vec3.zero()));
+    mp.updateRigidBodyVelocities(&context, world.system.getBodyInterfaceMut());
+    try std.testing.expectEqual(@as(usize, 0), mp.colliding_shapes.items.len);
+
+    // customUpdate finishes too and does not move the body
+    try mp.customUpdate(1.0 / 60.0, body, &world.system);
+    try std.testing.expect(body.getPosition().eql(RVec3.zero()));
+}
+
+test "SoftBodyMotionProperties: customUpdate out of memory releases the colliding shapes and changes no vertex" {
+    const RVec3 = TestWorld.RVec3;
+    const allocator = std.testing.allocator;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    for (0..3) |i|
+        _ = try world.addBox(Vec3.init(0.5, 0.5, 0.5), RVec3.init(@as(f32, @floatFromInt(i)) - 1.0, -0.4, 0), .static);
+
+    const body = try world.createSoftBody(try testCloth(allocator, 4, 0.5), RVec3.init(0, 0, 0));
+    defer world.system.getBodyInterfaceMut().destroyBody(body.getID());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+
+    // Fail every allocation of the motion properties in turn: the colliding shape array, the leaf shape arrays
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        mp.colliding_shapes.clearAndFree(allocator); // The same allocations in every round
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        mp.allocator = failing.allocator();
+        defer mp.allocator = allocator;
+        const vertices_before = try allocator.dupe(SoftBodyVertex, mp.getVertices());
+        defer allocator.free(vertices_before);
+        mp.customUpdate(1.0 / 60.0, body, &world.system) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), mp.colliding_shapes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), mp.colliding_sensors.items.len);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(vertices_before), std.mem.sliceAsBytes(mp.getVertices()));
+            continue;
+        };
+        try std.testing.expect(fail_index > 3); // The array of 3 colliding shapes and 3 leaf shape arrays
+        break;
+    }
+}
+
+test "SoftBodyMotionProperties: skinVertices, hard skinning and out of memory" {
+    const allocator = std.testing.allocator;
+    const RVec3 = TestWorld.RVec3;
+    const TempAllocatorImpl = TempAllocatorFile.TempAllocatorImpl;
+    const FailingTempAllocator = TempAllocatorFile.FailingTempAllocator;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+
+    // A cloth with every vertex skinned to joint 1 through the second inverse bind matrix
+    const shared = try testCloth(allocator, 3, 0.5);
+    try shared.inv_bind_matrices.append(allocator, .init(0, Mat44.identity()));
+    try shared.inv_bind_matrices.append(allocator, .init(1, Mat44.translation(Vec3.init(0, -1, 0))));
+    for (0..shared.vertices.items.len) |v| {
+        var skinned: SoftBodySharedSettings.Skinned = .init(@intCast(v), 0.1, 0.0, 1.0);
+        skinned.weights[0] = .init(1, 1.0);
+        try shared.skinned_constraints.append(allocator, skinned);
+    }
+    try shared.calculateSkinnedConstraintNormals();
+    try shared.optimize();
+    const body = try world.createSoftBody(shared, RVec3.init(0, 0, 0));
+    defer world.system.getBodyInterfaceMut().destroyBody(body.getID());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+
+    var temp: TempAllocatorImpl = try .init(allocator, 4096);
+    defer temp.deinit();
+    const joints = [_]Mat44{ Mat44.identity(), Mat44.translation(Vec3.init(0, 3, 0)) };
+
+    // Out of memory: nothing changes
+    var failing: FailingTempAllocator = .init(temp.tempAllocator(), .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, mp.skinVertices(body.getCenterOfMassTransform(), &joints, true, failing.tempAllocator()));
+    try std.testing.expect(!mp.skin_state_previous_position_valid);
+    try std.testing.expect(mp.skin_state.items[0].position.isNaN());
+
+    // Hard skin all: every vertex moves up by 3 - 1 = 2, the normals point up (the faces are counter clockwise seen from above)
+    try mp.skinVertices(body.getCenterOfMassTransform(), &joints, true, temp.tempAllocator());
+    try std.testing.expect(temp.isEmpty());
+    try std.testing.expect(mp.skin_state_previous_position_valid);
+    for (mp.getVertices(), shared.vertices.items, mp.skin_state.items) |*v, *in_v, *s| {
+        try std.testing.expect(v.position.isClose(Vec3.loadFloat3Unsafe(&in_v.position).add(Vec3.init(0, 2, 0)), .{}));
+        try std.testing.expect(v.velocity.eql(Vec3.zero()));
+        try std.testing.expect(s.previous_position.eql(s.position));
+        try std.testing.expect(s.normal.isClose(Vec3.axisY(), .{}) or s.normal.isClose(Vec3.axisY().negate(), .{}));
+    }
+
+    // An update clears the flag (UpdateSoftBodyState)
+    try mp.customUpdate(1.0 / 60.0, body, &world.system);
+    try std.testing.expect(!mp.skin_state_previous_position_valid);
+}
