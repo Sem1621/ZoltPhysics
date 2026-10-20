@@ -10,8 +10,8 @@
 //!   stub). Shape porters never edit this list.
 //! - `registry` = `Registry.build(registration_order ++ user registrations)`: later registrations override earlier
 //!   ones exactly like in Jolt (`Registry.build` runs CollisionDispatch::sInit first).
-//! - `factory_types` lists the types of RegisterTypes.cpp in Jolt's order (`const RTTI *types[]`), without
-//!   SoftBodyCreationSettings (Phase 9). `factory` = `Factory.init(factory_types ++ user serializable types)` is
+//! - `factory_types` lists the 49 types of RegisterTypes.cpp in Jolt's order (`const RTTI *types[]`).
+//!   `factory` = `Factory.init(factory_types ++ user serializable types)` is
 //!   `Factory::sInstance` after RegisterTypes() (Docs/Zolt/SerializationArchitecture.md S8).
 //! - User shapes (User1..8, UserConvex1..8), a replacement for the default material (Jolt: "If you implement your own
 //!   default material (PhysicsMaterial::sDefault) make sure to initialize it before this function") and user
@@ -92,6 +92,7 @@ const WheeledVehicleControllerFile = @import("Physics/Vehicle/WheeledVehicleCont
 const TrackedVehicleControllerFile = @import("Physics/Vehicle/TrackedVehicleController.zig");
 const MotorcycleControllerSettings = @import("Physics/Vehicle/MotorcycleController.zig").MotorcycleControllerSettings;
 const BodyCreationSettings = @import("Physics/Body/BodyCreationSettings.zig").BodyCreationSettings;
+const SoftBodyCreationSettings = @import("Physics/SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
 const PhysicsScene = @import("Physics/PhysicsScene.zig").PhysicsScene;
 const RagdollSettings = @import("Physics/Ragdoll/Ragdoll.zig").RagdollSettings;
 const Skeleton = @import("Skeleton/Skeleton.zig").Skeleton;
@@ -142,7 +143,7 @@ pub const registry: Registry = .build(registration_order ++ user_registrations);
 /// (`new PhysicsMaterialSimple("Default", Color::sGrey)`, a compile time constant here)
 pub const default_material: *const PhysicsMaterial = if (@hasDecl(user_types, "default_material")) user_types.default_material else &PhysicsMaterialSimple.default_material.base;
 
-/// Create list of all types (RegisterTypesInternal's `const RTTI *types[]`, without SoftBodyCreationSettings: Phase 9)
+/// Create list of all types (RegisterTypesInternal's `const RTTI *types[]`)
 pub const factory_types: []const type = &.{
     SkeletalAnimation,
     Skeleton,
@@ -192,6 +193,7 @@ pub const factory_types: []const type = &.{
     GroupFilter,
     GroupFilterTable,
     BodyCreationSettings,
+    SoftBodyCreationSettings,
 };
 
 /// The serializable classes of the user (`serializable_types` of the user types module)
@@ -263,8 +265,9 @@ test "RegisterTypes: the factory has Jolt's types in Jolt's order, then the user
     const TestShapes = @import("Physics/Collision/Shape/TestShapes.zig");
     const TestConstraints = @import("Physics/Constraints/TestConstraints.zig");
 
-    // RegisterTypesInternal's `types[]` without SoftBodyCreationSettings (Phase 9)
-    const expected = [_][]const u8{ "SkeletalAnimation", "Skeleton", "CompoundShapeSettings", "StaticCompoundShapeSettings", "MutableCompoundShapeSettings", "TriangleShapeSettings", "PlaneShapeSettings", "SphereShapeSettings", "BoxShapeSettings", "CapsuleShapeSettings", "TaperedCapsuleShapeSettings", "CylinderShapeSettings", "TaperedCylinderShapeSettings", "ScaledShapeSettings", "MeshShapeSettings", "ConvexHullShapeSettings", "HeightFieldShapeSettings", "RotatedTranslatedShapeSettings", "OffsetCenterOfMassShapeSettings", "EmptyShapeSettings", "RagdollSettings", "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "VehicleConstraintSettings", "WheeledVehicleControllerSettings", "WheelSettingsWV", "TrackedVehicleControllerSettings", "WheelSettingsTV", "MotorcycleControllerSettings", "PathConstraintPath", "PathConstraintPathHermite", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "MotorSettings", "PhysicsScene", "PhysicsMaterial", "PhysicsMaterialSimple", "GroupFilter", "GroupFilterTable", "BodyCreationSettings" };
+    // RegisterTypesInternal's `types[]`
+    const expected = [_][]const u8{ "SkeletalAnimation", "Skeleton", "CompoundShapeSettings", "StaticCompoundShapeSettings", "MutableCompoundShapeSettings", "TriangleShapeSettings", "PlaneShapeSettings", "SphereShapeSettings", "BoxShapeSettings", "CapsuleShapeSettings", "TaperedCapsuleShapeSettings", "CylinderShapeSettings", "TaperedCylinderShapeSettings", "ScaledShapeSettings", "MeshShapeSettings", "ConvexHullShapeSettings", "HeightFieldShapeSettings", "RotatedTranslatedShapeSettings", "OffsetCenterOfMassShapeSettings", "EmptyShapeSettings", "RagdollSettings", "PointConstraintSettings", "SixDOFConstraintSettings", "SliderConstraintSettings", "SwingTwistConstraintSettings", "DistanceConstraintSettings", "HingeConstraintSettings", "FixedConstraintSettings", "ConeConstraintSettings", "PathConstraintSettings", "VehicleConstraintSettings", "WheeledVehicleControllerSettings", "WheelSettingsWV", "TrackedVehicleControllerSettings", "WheelSettingsTV", "MotorcycleControllerSettings", "PathConstraintPath", "PathConstraintPathHermite", "RackAndPinionConstraintSettings", "GearConstraintSettings", "PulleyConstraintSettings", "MotorSettings", "PhysicsScene", "PhysicsMaterial", "PhysicsMaterialSimple", "GroupFilter", "GroupFilterTable", "BodyCreationSettings", "SoftBodyCreationSettings" };
+    try testing.expectEqual(@as(usize, 49), expected.len);
     try testing.expectEqual(expected.len, factory_types.len);
     inline for (factory_types, expected) |T, name| {
         try testing.expectEqualStrings(name, RTTI.of(T).name);
@@ -278,7 +281,10 @@ test "RegisterTypes: the factory has Jolt's types in Jolt's order, then the user
     try testing.expect(factory.find("TwoBodyConstraintSettings").?.isAbstract());
     try testing.expect(factory.find("ConstraintSettings").? == @import("Physics/Constraints/Constraint.zig").ConstraintSettings.rtti);
     try testing.expect(!factory.find("ConstraintSettings").?.isAbstract()); // Jolt: JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL
-    try testing.expect(factory.find("SoftBodyCreationSettings") == null);
+    // The soft body classes: SoftBodyCreationSettings, then the classes its attributes reach
+    try testing.expect(factory.find("SoftBodySharedSettings") == @import("Physics/SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings.rtti);
+    try testing.expect(factory.find("SoftBodySharedSettings::Skinned") != null and factory.find("SoftBodySharedSettings::SkinWeight") != null);
+    try testing.expect(!factory.find("SoftBodySharedSettings").?.isAbstract());
 
     // The inline tests register their test classes through zolt_user_types.serializable_types (see build.zig)
     try testing.expectEqual(@as(usize, 2), user_serializable_types.len);

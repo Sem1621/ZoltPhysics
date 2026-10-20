@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 86.6%** of 90565 lines in scope · **Unit tests: 96.4%** of 18321 lines
+**Library: 89.7%** of 90565 lines in scope · **Unit tests: 96.4%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -21,13 +21,13 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
 | `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
-| `Jolt/Physics/Body` | 76% | 16 | 2 | 0 | 0 | 0 | 0 | 5146 |
+| `Jolt/Physics/Body` | 100% | 18 | 0 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
-| `Jolt/Physics/Collision` | 100% | 75 | 1 | 0 | 0 | 0 | 0 | 21948 |
+| `Jolt/Physics/Collision` | 100% | 76 | 0 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
-| `Jolt/Physics/SoftBody` | 12% | 2 | 0 | 5 | 1 | 0 | 0 | 3880 |
+| `Jolt/Physics/SoftBody` | 53% | 4 | 4 | 0 | 0 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | 48% | 1 | 1 | 0 | 2 | 0 | 0 | 1754 |
 | `Jolt/Shaders` | 0% | 0 | 0 | 0 | 44 | 0 | 0 | 1563 |
@@ -258,7 +258,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Body — 76%</summary>
+<details><summary>Jolt/Physics/Body — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -269,11 +269,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `BodyCreationSettings.cpp`, `BodyCreationSettings.h` | 347 | ✅ complete | `Zolt/Physics/Body/BodyCreationSettings.zig` |
 | `BodyFilter.h` | 108 | ✅ complete | `Zolt/Physics/Body/BodyFilter.zig` |
 | `BodyID.h` | 82 | ✅ complete | `Zolt/Physics/Body/BodyID.zig` |
-| `BodyInterface.cpp`, `BodyInterface.h` | 1199 | 🟡 partial | `Zolt/Physics/Body/BodyInterface.zig` |
+| `BodyInterface.cpp`, `BodyInterface.h` | 1199 | ✅ complete | `Zolt/Physics/Body/BodyInterface.zig` |
 | `BodyLock.h` | 96 | ✅ complete | `Zolt/Physics/Body/BodyLock.zig` |
 | `BodyLockInterface.h` | 109 | ✅ complete | `Zolt/Physics/Body/BodyLockInterface.zig` |
 | `BodyLockMulti.h` | 104 | ✅ complete | `Zolt/Physics/Body/BodyLockMulti.zig` |
-| `BodyManager.cpp`, `BodyManager.h` | 1266 | 🟡 partial | `Zolt/Physics/Body/BodyManager.zig` |
+| `BodyManager.cpp`, `BodyManager.h` | 1266 | ✅ complete | `Zolt/Physics/Body/BodyManager.zig` |
 | `BodyPair.h` | 25 | ✅ complete | `Zolt/Physics/Body/BodyPair.zig` |
 | `BodyType.h` | 14 | ✅ complete | `Zolt/Physics/Body/BodyType.zig` |
 | `MassProperties.cpp`, `MassProperties.h` | 206 | ✅ complete | `Zolt/Physics/Body/MassProperties.zig` |
@@ -320,7 +320,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `CollidePointResult.h` | 18 | ✅ complete | `Zolt/Physics/Collision/CollidePointResult.zig` |
 | `CollideShape.h` | 88 | ✅ complete | `Zolt/Physics/Collision/CollideShape.zig` |
 | `CollideShapeVsShapePerLeaf.h` | 80 | ✅ complete | `Zolt/Physics/Collision/CollideShapeVsShapePerLeaf.zig` |
-| `CollideSoftBodyVertexIterator.h` | 93 | 🟡 partial | `Zolt/Physics/Collision/CollideSoftBodyVertexIterator.zig` |
+| `CollideSoftBodyVertexIterator.h` | 93 | ✅ complete | `Zolt/Physics/Collision/CollideSoftBodyVertexIterator.zig` |
 | `CollideSoftBodyVerticesVsTriangles.h` | 90 | ✅ complete | `Zolt/Physics/Collision/CollideSoftBodyVerticesVsTriangles.zig` |
 | `CollideSphereVsTriangles.cpp`, `CollideSphereVsTriangles.h` | 144 | ✅ complete | `Zolt/Physics/Collision/CollideSphereVsTriangles.zig` |
 | `CollisionCollector.h` | 83 | ✅ complete | `Zolt/Physics/Collision/CollisionCollector.zig` |
@@ -438,18 +438,18 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/SoftBody — 12%</summary>
+<details><summary>Jolt/Physics/SoftBody — 53%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `SoftBodyContactListener.h` | 46 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyContactListener.zig` |
-| `SoftBodyCreationSettings.cpp`, `SoftBodyCreationSettings.h` | 170 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodyCreationSettings.zig` |
-| `SoftBodyManifold.h` | 65 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodyManifold.zig` |
-| `SoftBodyMotionProperties.cpp`, `SoftBodyMotionProperties.h` | 1553 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodyMotionProperties.zig` |
-| `SoftBodyShape.cpp`, `SoftBodyShape.h` | 345 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodyShape.zig` |
-| `SoftBodySharedSettings.cpp`, `SoftBodySharedSettings.h` | 1611 | ⚪ stub | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodyCreationSettings.cpp`, `SoftBodyCreationSettings.h` | 170 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodyCreationSettings.zig` |
+| `SoftBodyManifold.h` | 65 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyManifold.zig` |
+| `SoftBodyMotionProperties.cpp`, `SoftBodyMotionProperties.h` | 1553 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodyMotionProperties.zig` |
+| `SoftBodyShape.cpp`, `SoftBodyShape.h` | 345 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodyShape.zig` |
+| `SoftBodySharedSettings.cpp`, `SoftBodySharedSettings.h` | 1611 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
 | `SoftBodyUpdateContext.h` | 53 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyUpdateContext.zig` |
-| `SoftBodyVertex.h` | 37 | ❌ todo |  |
+| `SoftBodyVertex.h` | 37 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyVertex.zig` |
 
 </details>
 
@@ -695,10 +695,10 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 ## Serialization (Phase 8)
 
-Jolt's 81 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the SoftBody and Hair classes
+Jolt's 94 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the Hair classes
 of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
 [SerializationArchitecture.md](SerializationArchitecture.md) S18). `port_status.py --check` and the parity harness
-fail on a pending or undeclared class. ✅ 81 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
+fail on a pending or undeclared class. ✅ 94 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 
@@ -764,6 +764,19 @@ fail on a pending or undeclared class. ✅ 81 declared · 🟡 0 pending (`seria
 | `Skeleton` | ✅ declared | `Zolt/Skeleton/Skeleton.zig` |
 | `Skeleton::Joint` | ✅ declared | `Zolt/Skeleton/Skeleton.zig` |
 | `SliderConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/SliderConstraint.zig` |
+| `SoftBodyCreationSettings` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodyCreationSettings.zig` |
+| `SoftBodySharedSettings` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::DihedralBend` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::Edge` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::Face` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::InvBind` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::LRA` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::RodBendTwist` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::RodStretchShear` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::SkinWeight` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::Skinned` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::Vertex` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings::Volume` | ✅ declared | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
 | `SphereShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/SphereShape.zig` |
 | `SpringSettings` | ✅ declared | `Zolt/Physics/Constraints/SpringSettings.zig` |
 | `StaticCompoundShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/StaticCompoundShape.zig` |

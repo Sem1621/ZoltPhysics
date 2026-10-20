@@ -1,10 +1,10 @@
 //! Port of: Jolt/Physics/Collision/CollideSoftBodyVertexIterator.h
-//! Status: partial
-//! Missing: the constructor from a SoftBodyVertex array (CollideSoftBodyVertexIterator(SoftBodyVertex *), needs
-//!   SoftBodyVertex, Phase 9)
+//! Status: complete
 //!
 //! Declared by the shape core (Phase 4, foundation part 2) because `Shape.collideSoftBodyVertices` takes it; the
 //! iterator operations were added with the first shapes that implement CollideSoftBodyVertices (SphereShape, BoxShape).
+//! The constructor from a SoftBodyVertex array is `initFromVertices` (RemainingFeaturesArchitecture.md R15): the five
+//! strided pointers into the vertices, with stride `@sizeOf(SoftBodyVertex)`.
 //!
 //! Operators: `++it` is `increment()`, `it + offset` is `add(offset)` (only sets the position, used for the end
 //! iterator), `it != end` is `!it.eql(end)` (compares the position only). The copy constructor / assignment are plain
@@ -16,6 +16,7 @@ const Plane = @import("../../Geometry/Plane.zig").Plane;
 const StridedPtrFile = @import("../../Core/StridedPtr.zig");
 const StridedPtr = StridedPtrFile.StridedPtr;
 const StridedPtrConst = StridedPtrFile.StridedPtrConst;
+const SoftBodyVertex = @import("../SoftBody/SoftBodyVertex.zig").SoftBodyVertex;
 
 /// Class that allows iterating over the vertices of a soft body.
 /// It tracks the largest penetration and allows storing the resulting collision in a different structure than the soft body vertex itself.
@@ -37,6 +38,18 @@ pub const CollideSoftBodyVertexIterator = struct {
             .collision_plane = collision_plane,
             .largest_penetration = largest_penetration,
             .colliding_shape_index = colliding_shape_index,
+        };
+    }
+
+    /// Construct using a soft body vertex (CollideSoftBodyVertexIterator(SoftBodyVertex *))
+    pub fn initFromVertices(vertices: [*]SoftBodyVertex) CollideSoftBodyVertexIterator {
+        const stride: i32 = @sizeOf(SoftBodyVertex);
+        return .{
+            .position = .init(&vertices[0].position, .{ .stride = stride }),
+            .inv_mass = .init(&vertices[0].inv_mass, .{ .stride = stride }),
+            .collision_plane = .init(&vertices[0].collision_plane, .{ .stride = stride }),
+            .largest_penetration = .init(&vertices[0].largest_penetration, .{ .stride = stride }),
+            .colliding_shape_index = .init(&vertices[0].colliding_shape_index, .{ .stride = stride }),
         };
     }
 
@@ -120,4 +133,37 @@ test "CollideSoftBodyVertexIterator: iterate, update penetration, set collision"
         try std.testing.expectEqual(@as(i32, 7), vertex.colliding_shape_index);
         try std.testing.expectEqual(@as(f32, 2.0), vertex.plane.getConstant());
     }
+}
+
+test "CollideSoftBodyVertexIterator: initFromVertices strides over SoftBodyVertex" {
+    const std = @import("std");
+    var vertices: [3]SoftBodyVertex = undefined;
+    for (&vertices, 0..) |*v, i| {
+        const f: f32 = @floatFromInt(i);
+        v.position = Vec3.init(f, 2.0 * f, 3.0 * f);
+        v.inv_mass = 1.0 + f;
+        v.resetCollision();
+    }
+
+    const begin = CollideSoftBodyVertexIterator.initFromVertices(&vertices);
+    const end = begin.add(vertices.len);
+    var v = begin;
+    var i: usize = 0;
+    while (!v.eql(&end)) : (v.increment()) {
+        try std.testing.expect(v.getPosition().eql(vertices[i].position));
+        try std.testing.expectEqual(vertices[i].inv_mass, v.getInvMass());
+        if (i == 1) {
+            try std.testing.expect(v.updatePenetration(0.25));
+            v.setCollision(Plane.init(Vec3.axisX(), 0.5), 4);
+        }
+        i += 1;
+    }
+    try std.testing.expectEqual(vertices.len, i);
+
+    // Only the second vertex has a collision
+    try std.testing.expectEqual(@as(i32, -1), vertices[0].colliding_shape_index);
+    try std.testing.expectEqual(@as(i32, 4), vertices[1].colliding_shape_index);
+    try std.testing.expectEqual(@as(f32, 0.25), vertices[1].largest_penetration);
+    try std.testing.expectEqual(@as(f32, 0.5), vertices[1].collision_plane.getConstant());
+    try std.testing.expectEqual(@as(i32, -1), vertices[2].colliding_shape_index);
 }

@@ -100,7 +100,8 @@ test "SoftBodyContactListener: defaults and an implementation" {
     const body2: Body = .{ .id = .init(2) };
     var settings: SoftBodyContactSettings = .{ .is_sensor = false };
     try expect(settings.inv_mass_scale1 == 1.0 and settings.inv_mass_scale2 == 1.0 and settings.inv_inertia_scale2 == 1.0);
-    const manifold: *const SoftBodyManifold = @ptrCast(&body2); // Only passed through
+    const empty_manifold: SoftBodyManifold = .{ .vertices = &.{}, .colliding_shapes = &.{}, .colliding_sensors = &.{} };
+    const manifold = &empty_manifold; // Only passed through
 
     const Nothing = struct {};
     var nothing: Nothing = .{};

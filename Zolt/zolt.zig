@@ -516,6 +516,7 @@ pub const SoftBodyManifold = @import("Physics/SoftBody/SoftBodyManifold.zig").So
 pub const SoftBodyMotionProperties = @import("Physics/SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
 pub const SoftBodySharedSettings = @import("Physics/SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
 pub const SoftBodyUpdateContext = @import("Physics/SoftBody/SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
+pub const SoftBodyVertex = @import("Physics/SoftBody/SoftBodyVertex.zig").SoftBodyVertex;
 pub const StateRecorder = @import("Physics/StateRecorder.zig").StateRecorder;
 pub const StateRecorderFilter = @import("Physics/StateRecorder.zig").StateRecorderFilter;
 pub const StateRecorderState = @import("Physics/StateRecorder.zig").StateRecorderState;
@@ -854,6 +855,7 @@ const source_files = .{
     @import("Physics/SoftBody/SoftBodyShape.zig"),
     @import("Physics/SoftBody/SoftBodySharedSettings.zig"),
     @import("Physics/SoftBody/SoftBodyUpdateContext.zig"),
+    @import("Physics/SoftBody/SoftBodyVertex.zig"),
     @import("Physics/StateRecorder.zig"),
     @import("Physics/StateRecorderImpl.zig"),
     @import("Physics/Vehicle/MotorcycleController.zig"),

@@ -47,23 +47,15 @@ pub fn quarantined(result: c_int) error{HarnessError}!c_int {
     return result;
 }
 
-/// Phase 9 (S17): SoftBodyCreationSettings, SoftBodySharedSettings and its 11 nested classes. P1 skips them and drops
-/// the attributes of other classes whose class is one of them (PhysicsScene.mSoftBodies); classes that reach them are
-/// compared by cross-reading. Phase 9 removes this list.
-pub const phase9_classes = [_][]const u8{
-    "SoftBodyCreationSettings",
-    "SoftBodySharedSettings",
-    "SoftBodySharedSettings::Vertex",
-    "SoftBodySharedSettings::Face",
-    "SoftBodySharedSettings::Edge",
-    "SoftBodySharedSettings::RodStretchShear",
-    "SoftBodySharedSettings::RodBendTwist",
-    "SoftBodySharedSettings::DihedralBend",
-    "SoftBodySharedSettings::Volume",
-    "SoftBodySharedSettings::InvBind",
-    "SoftBodySharedSettings::SkinWeight",
-    "SoftBodySharedSettings::Skinned",
-    "SoftBodySharedSettings::LRA",
+/// An attribute of a C++ class that Zolt does not declare yet
+pub const Phase9Attribute = struct { class: []const u8, attribute: []const u8 };
+
+/// S17, until group S2 (RemainingFeaturesArchitecture.md R19): Zolt's PhysicsScene does not declare Jolt's
+/// "mSoftBodies" yet. P1 drops this attribute, the generators keep its arrays empty, and the classes that reach a class
+/// with such an attribute are compared by cross-reading. The 13 soft body classes themselves are compared like every
+/// other class. Group S2 removes this list.
+pub const phase9_attributes = [_]Phase9Attribute{
+    .{ .class = "PhysicsScene", .attribute = "mSoftBodies" },
 };
 
 /// JPH_IMPLEMENT_SERIALIZABLE_OUTSIDE_CLASS: CreateObject uses the global new, which the allocation hooks of the C++ side
@@ -82,8 +74,20 @@ fn contains(list: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-pub fn isPhase9(name: []const u8) bool {
-    return contains(&phase9_classes, name);
+/// True when attribute `attribute` of class `class` is in `phase9_attributes`
+pub fn isPhase9Attribute(class: []const u8, attribute: []const u8) bool {
+    for (phase9_attributes) |a| {
+        if (std.mem.eql(u8, a.class, class) and std.mem.eql(u8, a.attribute, attribute)) return true;
+    }
+    return false;
+}
+
+/// True when class `class` has an attribute of `phase9_attributes` (Zolt's bytes of the class lack it)
+pub fn hasPhase9Attribute(class: []const u8) bool {
+    for (phase9_attributes) |a| {
+        if (std.mem.eql(u8, a.class, class)) return true;
+    }
+    return false;
 }
 
 // The Zolt side ------------------------------------------------------------------------------------------------------
@@ -279,6 +283,8 @@ pub const Attribute = struct {
     counts: u64 = 0,
     /// The values of an enum attribute (Zolt)
     enum_values: ?*const EnumAttribute = null,
+    /// An attribute that Zolt does not declare yet (`phase9_attributes`): P1 drops it, its arrays stay empty
+    phase9: bool = false,
 };
 
 pub const Class = struct {
@@ -289,25 +295,25 @@ pub const Class = struct {
     abstract: bool,
     bases: []const []const u8,
     attributes: []Attribute,
-    phase9: bool,
     outside: bool,
     primitive: bool,
     /// The class in the Zolt factory
     zolt: ?*const RTTI = null,
     /// Zolt: the first pending class that this class reaches, null when none
     waits_for: ?*const RTTI = null,
-    /// The C++ class reaches a Phase 9 class (PhysicsScene.mSoftBodies): bytes are compared by cross-reading (S17)
+    /// The C++ class reaches a class with a Phase 9 attribute (PhysicsScene.mSoftBodies): bytes are compared by
+    /// cross-reading (S17)
     cross: bool = false,
 
-    /// Zolt declares the class and everything it reaches: every layer compares it. Phase 8 is done, so every class
-    /// but the Phase 9 classes is ready (P1 fails otherwise).
+    /// Zolt declares the class and everything it reaches: every layer compares it. Phase 8 is done and the soft body
+    /// classes are declared, so every class is ready (P1 fails otherwise).
     pub fn ready(self: *const Class) bool {
-        return self.zolt != null and self.waits_for == null and !self.phase9;
+        return self.zolt != null and self.waits_for == null;
     }
 
     /// A class whose objects the generators create and whose defaults P2 compares
     pub fn creatable(self: *const Class) bool {
-        return !self.abstract and !self.phase9 and !self.outside and !self.primitive;
+        return !self.abstract and !self.outside and !self.primitive;
     }
 };
 
@@ -362,7 +368,7 @@ fn build(arena: Allocator) !Schema {
 
     for (classes) |*c| {
         // How the attributes store their data (every class with objects, also the outside classes as by value members)
-        if (!c.abstract and !c.phase9 and !c.primitive) {
+        if (!c.abstract and !c.primitive) {
             for (c.attributes, 0..) |*a, index| {
                 var element: c_int = 0;
                 var counts: u64 = 0;
@@ -391,14 +397,14 @@ fn build(arena: Allocator) !Schema {
         }
     }
 
-    // Classes that reach a Phase 9 class through their bases and attribute classes (C++)
+    // Classes that reach a class with a Phase 9 attribute through their bases and attribute classes (C++)
     for (classes, 0..) |*c, i| c.cross = reachesPhase9(&schema, i, 0);
     return schema;
 }
 
 fn reachesPhase9(schema: *const Schema, index: usize, depth: u32) bool {
     const c = &schema.classes[index];
-    if (c.phase9) return true;
+    if (hasPhase9Attribute(c.name)) return true;
     if (depth > 32) return false;
     for (c.bases) |b| {
         if (schema.find(b)) |j| {
@@ -434,7 +440,11 @@ fn parseLine(arena: Allocator, name: [:0]const u8, line: []const u8) !Class {
     var attributes: std.ArrayList(Attribute) = .empty;
     if (attributes_text.len > 0) {
         var it = std.mem.splitScalar(u8, attributes_text, ';');
-        while (it.next()) |entry| try attributes.append(arena, try parseAttribute(entry));
+        while (it.next()) |entry| {
+            var attribute = try parseAttribute(entry);
+            attribute.phase9 = isPhase9Attribute(name, attribute.name);
+            try attributes.append(arena, attribute);
+        }
     }
     return .{
         .name = name,
@@ -443,7 +453,6 @@ fn parseLine(arena: Allocator, name: [:0]const u8, line: []const u8) !Class {
         .abstract = abstract,
         .bases = bases.items,
         .attributes = attributes.items,
-        .phase9 = isPhase9(name),
         .outside = contains(&outside_classes, name),
         .primitive = contains(&primitive_names, name),
     };
