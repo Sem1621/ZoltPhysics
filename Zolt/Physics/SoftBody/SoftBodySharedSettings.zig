@@ -1,9 +1,6 @@
 //! Port of: Jolt/Physics/SoftBody/SoftBodySharedSettings.h, Jolt/Physics/SoftBody/SoftBodySharedSettings.cpp
 //! Status: partial
-//! Missing: CreateConstraints, CalculateEdgeLengths, CalculateRodProperties, CalculateLRALengths,
-//!   CalculateBendConstraintConstants, CalculateVolumeConstraintVolumes, CalculateSkinnedConstraintNormals, Optimize,
-//!   sCreateCube, CalculateClosestKinematic (stubs that panic, group S1); SaveWithMaterials, sRestoreWithMaterials
-//!   (group S2)
+//! Missing: SaveWithMaterials, sRestoreWithMaterials (group S2)
 //!
 //! RemainingFeaturesArchitecture.md R15, R19:
 //! - A RefTarget without virtual functions, like PhysicsScene. It keeps the allocator that owns it and its arrays:
@@ -22,6 +19,22 @@
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of the class and of its 11
 //!   nested classes, with Jolt's names (`"SoftBodySharedSettings::Vertex"`). `mVertex`, `mRod` and `mWeights` are fixed
 //!   arrays.
+//!
+//! RemainingFeaturesArchitecture.md R20, the algorithms (group S1). They are Jolt's, statement by statement, with Jolt's
+//! quirks:
+//! - CreateConstraints adds the last shared edge of a closed mesh twice: when the equal keys run to the end of the
+//!   sorted list, the inner loop ends without `break`, so the outer loop processes the duplicate again.
+//! - The edge sort, the group size sort and the sorts in Optimize use Zolt's `quickSort`. Equal keys keep the tie order
+//!   of Jolt's QuickSort. Dijkstra in CalculateClosestKinematic uses `binaryHeapPush` / `binaryHeapPop`, so ties
+//!   between kinematic vertices are broken like Jolt's heap.
+//! - CalculateClosestKinematic caches its result. Optimize uses the cache that CreateConstraints filled, even when
+//!   constraints were added after, and frees it at the end.
+//! - Zolt: the functions that allocate return `Allocator.Error` (Jolt aborts). After a failure Optimize and
+//!   CalculateClosestKinematic leave the settings as they were. CreateConstraints, CalculateRodProperties and
+//!   CalculateSkinnedConstraintNormals may leave part of their result: call them again.
+//! - `sCreateCube(inGridSize, inGridSpacing)` is `createCube(allocator, grid_size, grid_spacing)`.
+//! - Asserts on the input (two vertices at the same position, a rod of zero length, constraints that use a vertex
+//!   twice) are `if (Core.enable_asserts)` asserts: Jolt's release build continues there.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -33,10 +46,21 @@ const RefConst = ReferenceFile.RefConst;
 const RefCount = ReferenceFile.RefCount;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
+const quickSort = @import("../../Core/QuickSort.zig").quickSort;
+const BinaryHeap = @import("../../Core/BinaryHeap.zig");
+const binaryHeapPush = BinaryHeap.binaryHeapPush;
+const binaryHeapPop = BinaryHeap.binaryHeapPop;
+const UnorderedSet = @import("../../Core/UnorderedSet.zig").UnorderedSet;
+const UnorderedMap = @import("../../Core/UnorderedMap.zig").UnorderedMap;
 const math = @import("../../Math/Math.zig");
+const trigonometry = @import("../../Math/Trigonometry.zig");
 const Float3 = @import("../../Math/Float3.zig").Float3;
+const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const AABox = @import("../../Geometry/AABox.zig").AABox;
+const SoftBodyUpdateContext = @import("SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
 const PhysicsMaterialFile = @import("../Collision/PhysicsMaterial.zig");
 const PhysicsMaterial = PhysicsMaterialFile.PhysicsMaterial;
 const PhysicsMaterialList = PhysicsMaterialFile.PhysicsMaterialList;
@@ -660,54 +684,1100 @@ pub const SoftBodySharedSettings = struct {
     /// @param vertex_attributes A list of attributes for each vertex (1-on-1 with mVertices, note that if the list is smaller than mVertices the last element will be repeated). This defines the properties of the constraints that are created.
     /// @param opts.bend_type The type of bend constraint to create
     /// @param opts.angle_tolerance Shear edges are created when two connected triangles form a quad (are roughly in the same plane and form a square with roughly 90 degree angles). This defines the tolerance (in radians).
+    /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The settings stay memory safe, but the
+    /// constraint arrays may hold part of the result: create the constraints again from the start.
     pub fn createConstraints(self: *SoftBodySharedSettings, vertex_attributes: []const VertexAttributes, opts: struct { bend_type: BendType = .distance, angle_tolerance: f32 = math.degreesToRadians(8.0) }) Allocator.Error!void {
-        _ = .{ self, vertex_attributes, opts };
-        @panic("SoftBodySharedSettings.createConstraints: not ported yet (Phase 9 group S1)");
+        const allocator = self.allocator;
+
+        // Create list of all edges
+        var edges: std.ArrayList(EdgeHelper) = .empty;
+        defer edges.deinit(allocator);
+        try edges.ensureTotalCapacity(allocator, self.faces.items.len * 3);
+        for (self.faces.items, 0..) |f, face_index| {
+            for (0..3) |i| {
+                const v0 = f.vertex[i];
+                const v1 = f.vertex[(i + 1) % 3];
+
+                edges.appendAssumeCapacity(.{
+                    .vertex = .{ @min(v0, v1), @max(v0, v1) },
+                    .edge_idx = @as(u32, @intCast(face_index)) * 3 + @as(u32, @intCast(i)),
+                });
+            }
+        }
+
+        // Sort the edges
+        quickSort(EdgeHelper, edges.items, {}, EdgeHelper.lessThan);
+
+        // Helper function to get the attributes of a vertex
+        const num_attributes: u32 = @intCast(vertex_attributes.len);
+        const Attr = struct {
+            attributes: []const VertexAttributes,
+            num_attributes: u32,
+
+            fn get(a: @This(), vertex: u32) VertexAttributes {
+                return a.attributes[@min(vertex, a.num_attributes -% 1)];
+            }
+        };
+        const attr: Attr = .{ .attributes = vertex_attributes, .num_attributes = num_attributes };
+
+        // Create the constraints
+        const sq_sin_tolerance = math.square(trigonometry.sin(opts.angle_tolerance));
+        const sq_cos_tolerance = math.square(trigonometry.cos(opts.angle_tolerance));
+        self.edge_constraints.clearRetainingCapacity();
+        try self.edge_constraints.ensureTotalCapacity(allocator, edges.items.len);
+        var i: usize = 0;
+        while (i < edges.items.len) : (i += 1) {
+            const e0 = edges.items[i];
+
+            // Get attributes for the vertices of the edge
+            const a0 = attr.get(e0.vertex[0]);
+            const a1 = attr.get(e0.vertex[1]);
+
+            // Flag that indicates if this edge is a shear edge (if 2 triangles form a quad-like shape and this edge is on the diagonal)
+            var is_shear = false;
+
+            // Test if there are any shared edges
+            var j = i + 1;
+            while (j < edges.items.len) : (j += 1) {
+                const e1 = edges.items[j];
+                if (e0.vertex[0] == e1.vertex[0] and e0.vertex[1] == e1.vertex[1]) {
+                    // Get opposing vertices
+                    const f0 = self.faces.items[e0.edge_idx / 3];
+                    const f1 = self.faces.items[e1.edge_idx / 3];
+                    const vopposite0 = f0.vertex[(e0.edge_idx + 2) % 3];
+                    const vopposite1 = f1.vertex[(e1.edge_idx + 2) % 3];
+                    const a_opposite0 = attr.get(vopposite0);
+                    const a_opposite1 = attr.get(vopposite1);
+
+                    // If the opposite vertices happen to be the same vertex then we have 2 triangles back to back and we skip creating shear / bend constraints
+                    if (vopposite0 == vopposite1)
+                        continue;
+
+                    // Faces should be roughly in a plane
+                    const n0 = self.vertexPosition(f0.vertex[2]).sub(self.vertexPosition(f0.vertex[0])).cross(self.vertexPosition(f0.vertex[1]).sub(self.vertexPosition(f0.vertex[0])));
+                    const n1 = self.vertexPosition(f1.vertex[2]).sub(self.vertexPosition(f1.vertex[0])).cross(self.vertexPosition(f1.vertex[1]).sub(self.vertexPosition(f1.vertex[0])));
+                    const n0_dot_n1 = n0.dot(n1);
+                    if (n0_dot_n1 > 0.0 and math.square(n0_dot_n1) > sq_cos_tolerance * n0.lengthSq() * n1.lengthSq()) {
+                        // Faces should approximately form a quad
+                        const e0_dir = self.vertexPosition(vopposite0).sub(self.vertexPosition(e0.vertex[0]));
+                        const e1_dir = self.vertexPosition(vopposite1).sub(self.vertexPosition(e0.vertex[0]));
+                        if (math.square(e0_dir.dot(e1_dir)) < sq_sin_tolerance * e0_dir.lengthSq() * e1_dir.lengthSq()) {
+                            // Shear constraint
+                            try self.addEdge(vopposite0, vopposite1, a_opposite0.shear_compliance, a_opposite1.shear_compliance);
+                            is_shear = true;
+                        }
+                    }
+
+                    // Bend constraint
+                    switch (opts.bend_type) {
+                        .none => {
+                            // Do nothing
+                        },
+
+                        .distance => {
+                            // Create an edge constraint to represent the bend constraint
+                            // Use the bend compliance of the shared edge
+                            if (!is_shear)
+                                try self.addEdge(vopposite0, vopposite1, a0.bend_compliance, a1.bend_compliance);
+                        },
+
+                        .dihedral => {
+                            // Test if both opposite vertices are free to move
+                            if ((self.vertices.items[vopposite0].inv_mass > 0.0 or self.vertices.items[vopposite1].inv_mass > 0.0) and
+                                a0.bend_compliance < math.flt_max and a1.bend_compliance < math.flt_max)
+                            {
+                                // Create a bend constraint
+                                // Use the bend compliance of the shared edge
+                                try self.dihedral_bend_constraints.append(allocator, .init(e0.vertex[0], e0.vertex[1], vopposite0, vopposite1, .{ .compliance = 0.5 * (a0.bend_compliance + a1.bend_compliance) }));
+                            }
+                        },
+                    }
+                } else {
+                    // Start iterating from the first non-shared edge
+                    i = j - 1;
+                    break;
+                }
+            }
+
+            // Create a edge constraint for the current edge
+            try self.addEdge(e0.vertex[0], e0.vertex[1], if (is_shear) a0.shear_compliance else a0.compliance, if (is_shear) a1.shear_compliance else a1.compliance);
+        }
+        self.edge_constraints.shrinkAndFree(allocator, self.edge_constraints.items.len);
+
+        // Calculate the initial angle for all bend constraints
+        self.calculateBendConstraintConstants();
+
+        // Check if any vertices have LRA constraints
+        var has_lra_constraints = false;
+        for (vertex_attributes) |va| {
+            if (va.lra_type != .none) {
+                has_lra_constraints = true;
+                break;
+            }
+        }
+        if (has_lra_constraints) {
+            // Ensure we have calculated the closest kinematic vertex for each vertex
+            try self.calculateClosestKinematic();
+
+            // Find non-kinematic vertices
+            var v: u32 = 0;
+            while (v < @as(u32, @intCast(self.vertices.items.len))) : (v += 1) {
+                if (self.vertices.items[v].inv_mass > 0.0) {
+                    // Check if a closest vertex was found
+                    const closest = self.closest_kinematic.items[v].vertex;
+                    if (closest != 0xffffffff) {
+                        // Check which LRA constraint to create
+                        const va = attr.get(v);
+                        switch (va.lra_type) {
+                            .none => {},
+
+                            .euclidean_distance => try self.lra_constraints.append(allocator, .init(closest, v, va.lra_max_distance_multiplier * self.vertexPosition(closest).sub(self.vertexPosition(v)).length())),
+
+                            .geodesic_distance => try self.lra_constraints.append(allocator, .init(closest, v, va.lra_max_distance_multiplier * self.closest_kinematic.items[v].distance)),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// An edge of a face, used by CreateConstraints (EdgeHelper)
+    const EdgeHelper = struct {
+        vertex: [2]u32,
+        edge_idx: u32,
+
+        /// The comparator of the edge sort. Two faces that share an edge give equal keys: their order is the tie order
+        /// of Jolt's QuickSort (RemainingFeaturesArchitecture.md R20).
+        fn lessThan(_: void, lhs: EdgeHelper, rhs: EdgeHelper) bool {
+            return lhs.vertex[0] < rhs.vertex[0] or (lhs.vertex[0] == rhs.vertex[0] and lhs.vertex[1] < rhs.vertex[1]);
+        }
+    };
+
+    /// Only add edges if one of the vertices is movable (the add_edge lambda of CreateConstraints)
+    fn addEdge(self: *SoftBodySharedSettings, vtx1: u32, vtx2: u32, compliance1: f32, compliance2: f32) Allocator.Error!void {
+        if ((self.vertices.items[vtx1].inv_mass > 0.0 or self.vertices.items[vtx2].inv_mass > 0.0) and
+            compliance1 < math.flt_max and compliance2 < math.flt_max)
+        {
+            var temp_edge: Edge = .{ .vertex = .{ vtx1, vtx2 } };
+            temp_edge.compliance = 0.5 * (compliance1 + compliance2);
+            temp_edge.rest_length = self.vertexPosition(vtx2).sub(self.vertexPosition(vtx1)).length();
+            if (Core.enable_asserts) std.debug.assert(temp_edge.rest_length > 0.0); // Two vertices at the same position: Jolt's release build continues
+            try self.edge_constraints.append(self.allocator, temp_edge);
+        }
+    }
+
+    /// Vec3(mVertices[inVertex].mPosition)
+    fn vertexPosition(self: *const SoftBodySharedSettings, vertex: u32) Vec3 {
+        return Vec3.fromFloat3(self.vertices.items[vertex].position);
     }
 
     /// Calculate the initial lengths of all springs of the edges of this soft body (if you use CreateConstraint, this is already done)
     pub fn calculateEdgeLengths(self: *SoftBodySharedSettings) void {
-        _ = self;
-        @panic("SoftBodySharedSettings.calculateEdgeLengths: not ported yet (Phase 9 group S1)");
+        for (self.edge_constraints.items) |*e| {
+            if (Core.enable_asserts) std.debug.assert(e.vertex[0] != e.vertex[1]); // Edges need to connect 2 different vertices
+            e.rest_length = self.vertexPosition(e.vertex[1]).sub(self.vertexPosition(e.vertex[0])).length();
+            if (Core.enable_asserts) std.debug.assert(e.rest_length > 0.0);
+        }
     }
 
     /// Calculate the properties of the rods
     /// Note that this can swap mVertex of the RodStretchShear constraints if two rods are connected through a RodBendTwist constraint but point in opposite directions.
+    /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The rods may then be partially updated.
     pub fn calculateRodProperties(self: *SoftBodySharedSettings) Allocator.Error!void {
-        _ = self;
-        @panic("SoftBodySharedSettings.calculateRodProperties: not ported yet (Phase 9 group S1)");
+        const allocator = self.allocator;
+        const rods = self.rod_stretch_shear_constraints.items;
+
+        // Mark connections through bend twist constraints
+        const connections = try allocator.alloc(std.ArrayList(u32), rods.len);
+        @memset(connections, .empty);
+        defer freeLists(u32, allocator, connections);
+        for (self.rod_bend_twist_constraints.items) |c| {
+            if (Core.enable_asserts) std.debug.assert(c.rod[0] != c.rod[1]); // A bend twist constraint needs to be attached to different rods
+            try connections[c.rod[1]].append(allocator, c.rod[0]);
+            try connections[c.rod[0]].append(allocator, c.rod[1]);
+        }
+
+        // Now calculate the Bishop frames for all rods
+        const Entry = struct {
+            /// Rod we're coming from
+            from: u32,
+            /// Rod we're going to
+            to: u32,
+        };
+        var stack: std.ArrayList(Entry) = .empty;
+        defer stack.deinit(allocator);
+        try stack.ensureTotalCapacity(allocator, rods.len);
+        var r0_idx: u32 = 0;
+        while (r0_idx < @as(u32, @intCast(rods.len))) : (r0_idx += 1) {
+            const r0 = &rods[r0_idx];
+
+            // Do not calculate a 2nd time
+            if (r0.bishop.eql(Quat.zero())) {
+                // Calculate the frame for this rod
+                {
+                    var tangent = self.vertexPosition(r0.vertex[1]).sub(self.vertexPosition(r0.vertex[0]));
+                    r0.length = tangent.length();
+                    if (Core.enable_asserts) std.debug.assert(r0.length > 0.0); // Rods of zero length are not supported!
+                    tangent = tangent.divScalar(r0.length);
+                    const normal = tangent.getNormalizedPerpendicular();
+                    const binormal = tangent.cross(normal);
+                    r0.bishop = Mat44.init(Vec4.fromVec3W(normal, 0), Vec4.fromVec3W(binormal, 0), Vec4.fromVec3W(tangent, 0), Vec4.init(0, 0, 0, 1)).getQuaternion().normalized();
+                }
+
+                // Add connected rods to the stack if they haven't been calculated yet
+                for (connections[r0_idx].items) |r1_idx| {
+                    if (rods[r1_idx].bishop.eql(Quat.zero()))
+                        try stack.append(allocator, .{ .from = r0_idx, .to = r1_idx });
+                }
+
+                // Now connect the bishop frame for all connected rods on the stack
+                // This follows the procedure outlined in "Discrete Elastic Rods" - M. Bergou et al.
+                // See: https://www.cs.columbia.edu/cg/pdfs/143-rods.pdf
+                while (stack.items.len != 0) {
+                    const r1_idx = stack.getLast().from;
+                    const r2_idx = stack.getLast().to;
+                    _ = stack.pop();
+
+                    const r1 = &rods[r1_idx];
+                    const r2 = &rods[r2_idx];
+
+                    // Get the normal and tangent of the first rod's Bishop frame (that was already calculated)
+                    const r1_frame = Mat44.rotationQuat(r1.bishop);
+                    const tangent1 = r1_frame.getAxisZ();
+                    const normal1 = r1_frame.getAxisX();
+
+                    // Calculate the Bishop frame for the 2nd rod
+                    var tangent2 = self.vertexPosition(r2.vertex[1]).sub(self.vertexPosition(r2.vertex[0]));
+                    if (tangent1.dot(tangent2) < 0.0) {
+                        // Edge is oriented in the opposite direction of the previous edge, flip it
+                        std.mem.swap(u32, &r2.vertex[0], &r2.vertex[1]);
+                        tangent2 = tangent2.negate();
+                    }
+                    r2.length = tangent2.length();
+                    if (Core.enable_asserts) std.debug.assert(r2.length > 0.0); // Rods of zero length are not supported!
+                    tangent2 = tangent2.divScalar(r2.length);
+                    var t1_cross_t2 = tangent1.cross(tangent2);
+                    const sin_angle = t1_cross_t2.length();
+                    var normal2 = normal1;
+                    if (sin_angle > 1.0e-6) {
+                        t1_cross_t2 = t1_cross_t2.divScalar(sin_angle);
+                        normal2 = Quat.rotation(t1_cross_t2, trigonometry.asin(sin_angle)).mulVec3(normal2);
+                    }
+                    const binormal2 = tangent2.cross(normal2);
+                    r2.bishop = Mat44.init(Vec4.fromVec3W(normal2, 0), Vec4.fromVec3W(binormal2, 0), Vec4.fromVec3W(tangent2, 0), Vec4.init(0, 0, 0, 1)).getQuaternion().normalized();
+
+                    // Add connected rods to the stack if they haven't been calculated yet
+                    for (connections[r2_idx].items) |r3_idx| {
+                        if (rods[r3_idx].bishop.eql(Quat.zero()))
+                            try stack.append(allocator, .{ .from = r2_idx, .to = r3_idx });
+                    }
+                }
+            }
+        }
+
+        // Calculate inverse mass for all rods by taking the minimum inverse mass (aka the heaviest vertex) of both vertices
+        for (rods) |*r| {
+            if (Core.enable_asserts) std.debug.assert(r.vertex[0] != r.vertex[1]); // A rod stretch shear constraint requires two different vertices
+            r.inv_mass = math.min(self.vertices.items[r.vertex[0]].inv_mass, self.vertices.items[r.vertex[1]].inv_mass);
+        }
+
+        // Calculate the initial rotation between the rods
+        for (self.rod_bend_twist_constraints.items) |*r|
+            r.omega0 = rods[r.rod[0]].bishop.conjugated().mul(rods[r.rod[1]].bishop).normalized();
     }
 
     /// Calculate the max lengths for the long range attachment constraints based on Euclidean distance (if you use CreateConstraints, this is already done)
     /// @param opts.max_distance_multiplier Multiplier for the max distance of the LRA constraint, e.g. 1.01 means the max distance is 1% longer than the calculated distance in the rest pose.
     pub fn calculateLRALengths(self: *SoftBodySharedSettings, opts: struct { max_distance_multiplier: f32 = 1.0 }) void {
-        _ = .{ self, opts };
-        @panic("SoftBodySharedSettings.calculateLRALengths: not ported yet (Phase 9 group S1)");
+        for (self.lra_constraints.items) |*l| {
+            if (Core.enable_asserts) std.debug.assert(l.vertex[0] != l.vertex[1]); // LRA constraints need to connect 2 different vertices
+            l.max_distance = opts.max_distance_multiplier * self.vertexPosition(l.vertex[1]).sub(self.vertexPosition(l.vertex[0])).length();
+            if (Core.enable_asserts) std.debug.assert(l.max_distance > 0.0);
+        }
     }
 
     /// Calculate the constants for the bend constraints (if you use CreateConstraints, this is already done)
     pub fn calculateBendConstraintConstants(self: *SoftBodySharedSettings) void {
-        _ = self;
-        @panic("SoftBodySharedSettings.calculateBendConstraintConstants: not ported yet (Phase 9 group S1)");
+        for (self.dihedral_bend_constraints.items) |*b| {
+            // Bend constraints need 4 different vertices
+            if (Core.enable_asserts) std.debug.assert(b.vertex[0] != b.vertex[1] and b.vertex[0] != b.vertex[2] and b.vertex[0] != b.vertex[3] and
+                b.vertex[1] != b.vertex[2] and b.vertex[1] != b.vertex[3] and
+                b.vertex[2] != b.vertex[3]);
+
+            // Get positions
+            const x0 = self.vertexPosition(b.vertex[0]);
+            const x1 = self.vertexPosition(b.vertex[1]);
+            const x2 = self.vertexPosition(b.vertex[2]);
+            const x3 = self.vertexPosition(b.vertex[3]);
+
+            //    x2
+            // e1/  \e3
+            //  /    \
+            // x0----x1
+            //  \ e0 /
+            // e2\  /e4
+            //    x3
+
+            // Calculate edges
+            const e0 = x1.sub(x0);
+            const e1 = x2.sub(x0);
+            const e2 = x3.sub(x0);
+
+            // Normals of both triangles
+            const n1 = e0.cross(e1);
+            const n2 = e2.cross(e0);
+            const denom = @sqrt(n1.lengthSq() * n2.lengthSq());
+            if (denom < 1.0e-12) {
+                b.initial_angle = 0.0;
+            } else {
+                const sign = math.sign(n2.cross(n1).dot(e0));
+                b.initial_angle = sign * trigonometry.acosApproximate(n1.dot(n2) / denom); // Runtime uses the approximation too
+            }
+        }
     }
 
     /// Calculates the initial volume of all tetrahedra of this soft body
     pub fn calculateVolumeConstraintVolumes(self: *SoftBodySharedSettings) void {
-        _ = self;
-        @panic("SoftBodySharedSettings.calculateVolumeConstraintVolumes: not ported yet (Phase 9 group S1)");
+        for (self.volume_constraints.items) |*v| {
+            // Volume constraints need 4 different vertices
+            if (Core.enable_asserts) std.debug.assert(v.vertex[0] != v.vertex[1] and v.vertex[0] != v.vertex[2] and v.vertex[0] != v.vertex[3] and
+                v.vertex[1] != v.vertex[2] and v.vertex[1] != v.vertex[3] and
+                v.vertex[2] != v.vertex[3]);
+
+            const x1 = self.vertexPosition(v.vertex[0]);
+            const x2 = self.vertexPosition(v.vertex[1]);
+            const x3 = self.vertexPosition(v.vertex[2]);
+            const x4 = self.vertexPosition(v.vertex[3]);
+
+            const x1x2 = x2.sub(x1);
+            const x1x3 = x3.sub(x1);
+            const x1x4 = x4.sub(x1);
+
+            v.six_rest_volume = @abs(x1x2.cross(x1x3).dot(x1x4));
+        }
     }
 
     /// Calculate information needed to be able to calculate the skinned constraint normals at run-time
+    /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The normals may then be incomplete: call it
+    /// again.
     pub fn calculateSkinnedConstraintNormals(self: *SoftBodySharedSettings) Allocator.Error!void {
-        _ = self;
-        @panic("SoftBodySharedSettings.calculateSkinnedConstraintNormals: not ported yet (Phase 9 group S1)");
+        const allocator = self.allocator;
+
+        // Clear any previous results
+        self.skinned_constraint_normals.clearRetainingCapacity();
+
+        // If there are no skinned constraints, we're done
+        if (self.skinned_constraints.items.len == 0)
+            return;
+
+        // First collect all vertices that are skinned
+        const VertexIndexSet = UnorderedSet(u32, .{});
+        var skinned_vertices: VertexIndexSet = .empty;
+        defer skinned_vertices.deinit(allocator);
+        try skinned_vertices.ensureTotalCapacity(allocator, @intCast(self.skinned_constraints.items.len));
+        for (self.skinned_constraints.items) |s|
+            _ = try skinned_vertices.insert(allocator, s.vertex);
+
+        // Now collect all faces that connect only to skinned vertices
+        const ConnectedFacesMap = UnorderedMap(u32, VertexIndexSet, .{});
+        var connected_faces: ConnectedFacesMap = .empty;
+        defer {
+            var it = connected_faces.iterator();
+            while (it.next()) |kv| kv.value.deinit(allocator);
+            connected_faces.deinit(allocator);
+        }
+        try connected_faces.ensureTotalCapacity(allocator, @intCast(self.vertices.items.len));
+        for (self.faces.items, 0..) |f, face_index| {
+            // Must connect to only skinned vertices
+            var valid = true;
+            for (f.vertex) |v|
+                valid = valid and skinned_vertices.find(v) != null;
+            if (!valid)
+                continue;
+
+            // Store faces that connect to vertices
+            for (f.vertex) |v| {
+                const faces = try connected_faces.getOrPutValue(allocator, v, .empty);
+                _ = try faces.insert(allocator, @intCast(face_index));
+            }
+        }
+
+        // Populate the list of connecting faces per skinned vertex
+        try self.skinned_constraint_normals.ensureTotalCapacity(allocator, self.faces.items.len);
+        for (self.skinned_constraints.items) |*s| {
+            const start: u32 = @intCast(self.skinned_constraint_normals.items.len);
+            if (Core.enable_asserts) std.debug.assert((start >> 24) == 0);
+            if (connected_faces.find(s.vertex)) |connected_faces_it| {
+                const faces = &connected_faces_it.value;
+                const num: u32 = faces.count();
+                if (Core.enable_asserts) std.debug.assert(num < 256);
+                var it = faces.constIterator();
+                while (it.next()) |face|
+                    try self.skinned_constraint_normals.append(allocator, face.*);
+                quickSort(u32, self.skinned_constraint_normals.items[start .. start + num], {}, std.sort.asc(u32));
+                s.normal_info = start +% (num << 24);
+            } else s.normal_info = 0;
+        }
+        self.skinned_constraint_normals.shrinkAndFree(allocator, self.skinned_constraint_normals.items.len);
     }
 
     /// Optimize the soft body settings for simulation. This will reorder constraints so they can be executed in parallel.
     /// `results` holds arrays allocated with the allocator of the settings (`results.deinit(settings.allocator)`).
+    /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The settings are then unchanged: the new
+    /// constraint arrays and the remaps are allocated before anything moves, and the update groups are cleared after
+    /// that (Jolt clears them first, which only matters when Jolt aborts). The remaps may be resized.
     pub fn optimizeWithResults(self: *SoftBodySharedSettings, results: *OptimizationResults) Allocator.Error!void {
-        _ = .{ self, results };
-        @panic("SoftBodySharedSettings.optimizeWithResults: not ported yet (Phase 9 group S1)");
+        const allocator = self.allocator;
+        const num_vertices = self.vertices.items.len;
+        const batch = SoftBodyUpdateContext.vertex_constraint_batch;
+
+        // Create a list of connected vertices
+        var connectivity = try allocator.alloc(std.ArrayList(Connection), num_vertices);
+        @memset(connectivity, .empty);
+        defer freeLists(Connection, allocator, connectivity);
+        for (self.edge_constraints.items) |c|
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[1]);
+        for (self.lra_constraints.items) |c|
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[1]);
+        for (self.rod_stretch_shear_constraints.items) |c|
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[1]);
+        const rods = self.rod_stretch_shear_constraints.items;
+        for (self.rod_bend_twist_constraints.items) |c| {
+            try addConnection(allocator, connectivity, rods[c.rod[0]].vertex[0], rods[c.rod[1]].vertex[0]);
+            try addConnection(allocator, connectivity, rods[c.rod[0]].vertex[1], rods[c.rod[1]].vertex[0]);
+            try addConnection(allocator, connectivity, rods[c.rod[0]].vertex[0], rods[c.rod[1]].vertex[1]);
+            try addConnection(allocator, connectivity, rods[c.rod[0]].vertex[1], rods[c.rod[1]].vertex[1]);
+        }
+        for (self.dihedral_bend_constraints.items) |c| {
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[1]);
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[2]);
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[3]);
+            try addConnection(allocator, connectivity, c.vertex[1], c.vertex[2]);
+            try addConnection(allocator, connectivity, c.vertex[1], c.vertex[3]);
+            try addConnection(allocator, connectivity, c.vertex[2], c.vertex[3]);
+        }
+        for (self.volume_constraints.items) |c| {
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[1]);
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[2]);
+            try addConnection(allocator, connectivity, c.vertex[0], c.vertex[3]);
+            try addConnection(allocator, connectivity, c.vertex[1], c.vertex[2]);
+            try addConnection(allocator, connectivity, c.vertex[1], c.vertex[3]);
+            try addConnection(allocator, connectivity, c.vertex[2], c.vertex[3]);
+        }
+        // Skinned constraints only update 1 vertex, so we don't need special logic here
+
+        // Maps each of the vertices to a group index
+        const group_idx = try allocator.alloc(i32, num_vertices);
+        defer allocator.free(group_idx);
+        @memset(group_idx, -1);
+
+        // Which group we are currently filling and its vertices
+        var current_group_idx: i32 = 0;
+        var current_group: std.ArrayList(u32) = .empty;
+        defer current_group.deinit(allocator);
+
+        // Start greedy algorithm to group vertices
+        while (true) {
+            // Find the bounding box of the ungrouped vertices
+            var bounds: AABox = .empty;
+            for (0..num_vertices) |i| {
+                if (group_idx[i] == -1)
+                    bounds.encapsulateVec3(Vec3.fromFloat3(self.vertices.items[i].position));
+            }
+
+            // If the bounds are invalid, it means that there were no ungrouped vertices
+            if (!bounds.isValid())
+                break;
+
+            // Determine longest and shortest axis
+            const bounds_size = bounds.getSize();
+            const max_axis = bounds_size.getHighestComponentIndex();
+            var min_axis = bounds_size.getLowestComponentIndex();
+            if (min_axis == max_axis)
+                min_axis = (min_axis + 1) % 3;
+            const mid_axis = 3 - min_axis - max_axis;
+
+            // Find the vertex that has the lowest value on the axis with the largest extent
+            var current_vertex: u32 = std.math.maxInt(u32);
+            var current_vertex_position: Float3 = .init(math.flt_max, math.flt_max, math.flt_max);
+            for (0..num_vertices) |i| {
+                if (group_idx[i] == -1) {
+                    const vertex_position = self.vertices.items[i].position;
+                    const max_axis_value = vertex_position.getComponent(max_axis);
+                    const mid_axis_value = vertex_position.getComponent(mid_axis);
+                    const min_axis_value = vertex_position.getComponent(min_axis);
+
+                    if (max_axis_value < current_vertex_position.getComponent(max_axis) or
+                        (max_axis_value == current_vertex_position.getComponent(max_axis) and
+                            (mid_axis_value < current_vertex_position.getComponent(mid_axis) or
+                                (mid_axis_value == current_vertex_position.getComponent(mid_axis) and
+                                    min_axis_value < current_vertex_position.getComponent(min_axis)))))
+                    {
+                        current_vertex_position = self.vertices.items[i].position;
+                        current_vertex = @intCast(i);
+                    }
+                }
+            }
+            if (current_vertex == std.math.maxInt(u32))
+                break;
+
+            // Initialize the current group with 1 vertex
+            try current_group.append(allocator, current_vertex);
+            group_idx[current_vertex] = current_group_idx;
+
+            // Fill up the group
+            while (true) {
+                // Find the vertex that is most connected to the current group
+                var best_vertex: u32 = std.math.maxInt(u32);
+                var best_num_connections: u32 = 0;
+                var best_dist_sq: f32 = math.flt_max;
+                for (current_group.items) |group_vertex| { // For all vertices in the current group
+                    for (connectivity[group_vertex].items) |c| { // For all connections to other vertices
+                        const v = c.vertex;
+                        if (group_idx[v] == -1) { // Ungrouped vertices only
+                            // Count the number of connections to this group
+                            var num_connections: u32 = 0;
+                            for (connectivity[v].items) |v2| {
+                                if (group_idx[v2.vertex] == current_group_idx)
+                                    num_connections +%= v2.count;
+                            }
+
+                            // Calculate distance to group centroid
+                            const dist_sq = self.vertexPosition(v).sub(self.vertexPosition(current_group.items[0])).lengthSq();
+
+                            if (best_vertex == std.math.maxInt(u32) or
+                                num_connections > best_num_connections or
+                                (num_connections == best_num_connections and dist_sq < best_dist_sq))
+                            {
+                                best_vertex = v;
+                                best_num_connections = num_connections;
+                                best_dist_sq = dist_sq;
+                            }
+                        }
+                    }
+                }
+
+                // Add the best vertex to the current group
+                if (best_vertex != std.math.maxInt(u32)) {
+                    try current_group.append(allocator, best_vertex);
+                    group_idx[best_vertex] = current_group_idx;
+                }
+
+                // Create a new group?
+                if (current_group.items.len >= batch // If full, yes
+                or (current_group.items.len > batch / 2 and best_vertex == std.math.maxInt(u32))) // If half full and we found no connected vertex, yes
+                {
+                    current_group.clearRetainingCapacity();
+                    current_group_idx += 1;
+                    break;
+                }
+
+                // If we didn't find a connected vertex, we need to find a new starting vertex
+                if (best_vertex == std.math.maxInt(u32))
+                    break;
+            }
+        }
+
+        // If the last group is more than half full, we'll keep it as a separate group, otherwise we merge it with the 'non parallel' group
+        if (current_group.items.len > batch / 2)
+            current_group_idx += 1;
+
+        // We no longer need the current group array, free the memory
+        current_group.clearAndFree(allocator);
+
+        // We're done with the connectivity list, free the memory
+        freeLists(Connection, allocator, connectivity);
+        connectivity = &.{};
+
+        // Assign the constraints to their groups
+        const groups = try allocator.alloc(Group, @as(usize, @intCast(current_group_idx)) + 1); // + non parallel group
+        @memset(groups, .{});
+        defer {
+            for (groups) |*group| group.deinit(allocator);
+            allocator.free(groups);
+        }
+        const non_parallel_group = &groups[groups.len - 1];
+        for (self.edge_constraints.items, 0..) |e, index| {
+            const g1 = group_idx[e.vertex[0]];
+            const g2 = group_idx[e.vertex[1]];
+            std.debug.assert(g1 >= 0 and g2 >= 0);
+            if (g1 == g2) // In the same group
+                try groups[@intCast(g1)].edge_constraints.append(allocator, @intCast(index))
+            else // In different groups -> parallel group
+                try non_parallel_group.edge_constraints.append(allocator, @intCast(index));
+        }
+        for (self.lra_constraints.items, 0..) |l, index| {
+            const g1 = group_idx[l.vertex[0]];
+            const g2 = group_idx[l.vertex[1]];
+            std.debug.assert(g1 >= 0 and g2 >= 0);
+            if (g1 == g2) // In the same group
+                try groups[@intCast(g1)].lra_constraints.append(allocator, @intCast(index))
+            else // In different groups -> parallel group
+                try non_parallel_group.lra_constraints.append(allocator, @intCast(index));
+        }
+        for (self.rod_stretch_shear_constraints.items, 0..) |r, index| {
+            const g1 = group_idx[r.vertex[0]];
+            const g2 = group_idx[r.vertex[1]];
+            std.debug.assert(g1 >= 0 and g2 >= 0);
+            if (g1 == g2) // In the same group
+                try groups[@intCast(g1)].rod_stretch_shear_constraints.append(allocator, @intCast(index))
+            else // In different groups -> parallel group
+                try non_parallel_group.rod_stretch_shear_constraints.append(allocator, @intCast(index));
+        }
+        for (self.rod_bend_twist_constraints.items, 0..) |r, index| {
+            const g1 = group_idx[rods[r.rod[0]].vertex[0]];
+            const g2 = group_idx[rods[r.rod[0]].vertex[1]];
+            const g3 = group_idx[rods[r.rod[1]].vertex[0]];
+            const g4 = group_idx[rods[r.rod[1]].vertex[1]];
+            std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
+            if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
+                try groups[@intCast(g1)].rod_bend_twist_constraints.append(allocator, @intCast(index))
+            else // In different groups -> parallel group
+                try non_parallel_group.rod_bend_twist_constraints.append(allocator, @intCast(index));
+        }
+        for (self.dihedral_bend_constraints.items, 0..) |d, index| {
+            const g1 = group_idx[d.vertex[0]];
+            const g2 = group_idx[d.vertex[1]];
+            const g3 = group_idx[d.vertex[2]];
+            const g4 = group_idx[d.vertex[3]];
+            std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
+            if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
+                try groups[@intCast(g1)].dihedral_bend_constraints.append(allocator, @intCast(index))
+            else // In different groups -> parallel group
+                try non_parallel_group.dihedral_bend_constraints.append(allocator, @intCast(index));
+        }
+        for (self.volume_constraints.items, 0..) |v, index| {
+            const g1 = group_idx[v.vertex[0]];
+            const g2 = group_idx[v.vertex[1]];
+            const g3 = group_idx[v.vertex[2]];
+            const g4 = group_idx[v.vertex[3]];
+            std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
+            if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
+                try groups[@intCast(g1)].volume_constraints.append(allocator, @intCast(index))
+            else // In different groups -> parallel group
+                try non_parallel_group.volume_constraints.append(allocator, @intCast(index));
+        }
+        for (self.skinned_constraints.items, 0..) |s, index| {
+            const g1 = group_idx[s.vertex];
+            std.debug.assert(g1 >= 0);
+            try groups[@intCast(g1)].skinned_constraints.append(allocator, @intCast(index));
+        }
+
+        // Sort the parallel groups from big to small (this means the big groups will be scheduled first and have more time to complete)
+        quickSort(Group, groups[0 .. groups.len - 1], {}, Group.greaterSize);
+
+        // Make sure we know the closest kinematic vertex so we can sort
+        // (Zolt: a cache that this call fills is cleared again when the call fails, a cache from CreateConstraints stays)
+        const had_closest_kinematic = self.closest_kinematic.items.len != 0;
+        errdefer if (!had_closest_kinematic) self.closest_kinematic.clearAndFree(allocator);
+        try self.calculateClosestKinematic();
+
+        // Sort within each group
+        const sort_context: *const SoftBodySharedSettings = self;
+        for (groups) |*group| {
+            // Sort the edge constraints
+            quickSort(u32, group.edge_constraints.items, sort_context, edgeLessThan);
+
+            // Sort the LRA constraints
+            quickSort(u32, group.lra_constraints.items, sort_context, lraLessThan);
+
+            // Sort the rod stretch shear constraints
+            quickSort(u32, group.rod_stretch_shear_constraints.items, sort_context, rodStretchShearLessThan);
+
+            // Sort the rod bend twist constraints
+            quickSort(u32, group.rod_bend_twist_constraints.items, sort_context, rodBendTwistLessThan);
+
+            // Bilateral interleaving, see figure 4 of "Position and Orientation Based Cosserat Rods" - Kugelstadt and Schoemer - SIGGRAPH 2016
+            // Keeping the twist constraints sorted often results in an unstable simulation
+            {
+                const items = group.rod_bend_twist_constraints.items;
+                const s = items.len;
+                const s2 = s >> 1;
+                var i: usize = 1;
+                while (i < s2) : (i += 2)
+                    std.mem.swap(u32, &items[i], &items[s - i]);
+            }
+
+            // Sort the dihedral bend constraints
+            quickSort(u32, group.dihedral_bend_constraints.items, sort_context, dihedralBendLessThan);
+
+            // Sort the volume constraints
+            quickSort(u32, group.volume_constraints.items, sort_context, volumeLessThan);
+
+            // Sort the skinned constraints
+            quickSort(u32, group.skinned_constraints.items, sort_context, skinnedLessThan);
+        }
+
+        // Temporary store constraints as we reorder them. Zolt: every allocation comes first (see the doc comment), the
+        // swaps with the constraint arrays follow below.
+        var temp_edges: std.ArrayList(Edge) = .empty;
+        defer temp_edges.deinit(allocator);
+        try temp_edges.ensureTotalCapacityPrecise(allocator, self.edge_constraints.items.len);
+        try resizeRemap(allocator, &results.edge_remap, self.edge_constraints.items.len);
+
+        var temp_lra: std.ArrayList(LRA) = .empty;
+        defer temp_lra.deinit(allocator);
+        try temp_lra.ensureTotalCapacityPrecise(allocator, self.lra_constraints.items.len);
+        try resizeRemap(allocator, &results.lra_remap, self.lra_constraints.items.len);
+
+        var temp_rod_stretch_shear: std.ArrayList(RodStretchShear) = .empty;
+        defer temp_rod_stretch_shear.deinit(allocator);
+        try temp_rod_stretch_shear.ensureTotalCapacityPrecise(allocator, self.rod_stretch_shear_constraints.items.len);
+        try resizeRemap(allocator, &results.rod_stretch_shear_constraint_remap, self.rod_stretch_shear_constraints.items.len);
+
+        var temp_rod_bend_twist: std.ArrayList(RodBendTwist) = .empty;
+        defer temp_rod_bend_twist.deinit(allocator);
+        try temp_rod_bend_twist.ensureTotalCapacityPrecise(allocator, self.rod_bend_twist_constraints.items.len);
+        try resizeRemap(allocator, &results.rod_bend_twist_constraint_remap, self.rod_bend_twist_constraints.items.len);
+
+        var temp_dihedral_bend: std.ArrayList(DihedralBend) = .empty;
+        defer temp_dihedral_bend.deinit(allocator);
+        try temp_dihedral_bend.ensureTotalCapacityPrecise(allocator, self.dihedral_bend_constraints.items.len);
+        try resizeRemap(allocator, &results.dihedral_bend_remap, self.dihedral_bend_constraints.items.len);
+
+        var temp_volume: std.ArrayList(Volume) = .empty;
+        defer temp_volume.deinit(allocator);
+        try temp_volume.ensureTotalCapacityPrecise(allocator, self.volume_constraints.items.len);
+        try resizeRemap(allocator, &results.volume_remap, self.volume_constraints.items.len);
+
+        var temp_skinned: std.ArrayList(Skinned) = .empty;
+        defer temp_skinned.deinit(allocator);
+        try temp_skinned.ensureTotalCapacityPrecise(allocator, self.skinned_constraints.items.len);
+        try resizeRemap(allocator, &results.skinned_remap, self.skinned_constraints.items.len);
+
+        // Clear any previous results (Jolt does this first)
+        self.update_groups.clearRetainingCapacity();
+        try self.update_groups.ensureTotalCapacity(allocator, groups.len);
+
+        // Nothing fails from here on. temp_x.swap(mX): the temp arrays get the old constraints, the constraint arrays
+        // get the reserved memory.
+        std.mem.swap(std.ArrayList(Edge), &temp_edges, &self.edge_constraints);
+        std.mem.swap(std.ArrayList(LRA), &temp_lra, &self.lra_constraints);
+        std.mem.swap(std.ArrayList(RodStretchShear), &temp_rod_stretch_shear, &self.rod_stretch_shear_constraints);
+        std.mem.swap(std.ArrayList(RodBendTwist), &temp_rod_bend_twist, &self.rod_bend_twist_constraints);
+        std.mem.swap(std.ArrayList(DihedralBend), &temp_dihedral_bend, &self.dihedral_bend_constraints);
+        std.mem.swap(std.ArrayList(Volume), &temp_volume, &self.volume_constraints);
+        std.mem.swap(std.ArrayList(Skinned), &temp_skinned, &self.skinned_constraints);
+
+        // Finalize update groups
+        for (groups) |group| {
+            // Reorder edge constraints for this group
+            for (group.edge_constraints.items) |idx| {
+                results.edge_remap.items[idx] = @intCast(self.edge_constraints.items.len);
+                self.edge_constraints.appendAssumeCapacity(temp_edges.items[idx]);
+            }
+
+            // Reorder LRA constraints for this group
+            for (group.lra_constraints.items) |idx| {
+                results.lra_remap.items[idx] = @intCast(self.lra_constraints.items.len);
+                self.lra_constraints.appendAssumeCapacity(temp_lra.items[idx]);
+            }
+
+            // Reorder rod stretch shear constraints for this group
+            for (group.rod_stretch_shear_constraints.items) |idx| {
+                results.rod_stretch_shear_constraint_remap.items[idx] = @intCast(self.rod_stretch_shear_constraints.items.len);
+                self.rod_stretch_shear_constraints.appendAssumeCapacity(temp_rod_stretch_shear.items[idx]);
+            }
+
+            // Reorder rod bend twist constraints for this group
+            for (group.rod_bend_twist_constraints.items) |idx| {
+                results.rod_bend_twist_constraint_remap.items[idx] = @intCast(self.rod_bend_twist_constraints.items.len);
+                self.rod_bend_twist_constraints.appendAssumeCapacity(temp_rod_bend_twist.items[idx]);
+            }
+
+            // Reorder dihedral bend constraints for this group
+            for (group.dihedral_bend_constraints.items) |idx| {
+                results.dihedral_bend_remap.items[idx] = @intCast(self.dihedral_bend_constraints.items.len);
+                self.dihedral_bend_constraints.appendAssumeCapacity(temp_dihedral_bend.items[idx]);
+            }
+
+            // Reorder volume constraints for this group
+            for (group.volume_constraints.items) |idx| {
+                results.volume_remap.items[idx] = @intCast(self.volume_constraints.items.len);
+                self.volume_constraints.appendAssumeCapacity(temp_volume.items[idx]);
+            }
+
+            // Reorder skinned constraints for this group
+            for (group.skinned_constraints.items) |idx| {
+                results.skinned_remap.items[idx] = @intCast(self.skinned_constraints.items.len);
+                self.skinned_constraints.appendAssumeCapacity(temp_skinned.items[idx]);
+            }
+
+            // Store end indices
+            self.update_groups.appendAssumeCapacity(.{
+                .edge_end_index = @intCast(self.edge_constraints.items.len),
+                .lra_end_index = @intCast(self.lra_constraints.items.len),
+                .rod_stretch_shear_end_index = @intCast(self.rod_stretch_shear_constraints.items.len),
+                .rod_bend_twist_end_index = @intCast(self.rod_bend_twist_constraints.items.len),
+                .dihedral_bend_end_index = @intCast(self.dihedral_bend_constraints.items.len),
+                .volume_end_index = @intCast(self.volume_constraints.items.len),
+                .skinned_end_index = @intCast(self.skinned_constraints.items.len),
+            });
+        }
+
+        // Remap bend twist indices because mRodStretchShearConstraints has been reordered
+        for (self.rod_bend_twist_constraints.items) |*r| {
+            for (&r.rod) |*rod|
+                rod.* = results.rod_stretch_shear_constraint_remap.items[rod.*];
+        }
+
+        // Free closest kinematic buffer
+        self.closest_kinematic.clearAndFree(allocator);
+    }
+
+    /// A connection of a vertex in Optimize (Connection)
+    const Connection = struct {
+        vertex: u32,
+        count: u32,
+    };
+
+    /// The add_connection lambda of Optimize
+    fn addConnection(allocator: Allocator, connectivity: []std.ArrayList(Connection), v1_in: u32, v2_in: u32) Allocator.Error!void {
+        var v1 = v1_in;
+        var v2 = v2_in;
+        for (0..2) |_| {
+            var found = false;
+            for (connectivity[v1].items) |*c| {
+                if (c.vertex == v2) {
+                    c.count += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                try connectivity[v1].append(allocator, .{ .vertex = v2, .count = 1 });
+
+            std.mem.swap(u32, &v1, &v2);
+        }
+    }
+
+    /// The constraints of one update group in Optimize (Group)
+    const Group = struct {
+        edge_constraints: std.ArrayList(u32) = .empty,
+        lra_constraints: std.ArrayList(u32) = .empty,
+        rod_stretch_shear_constraints: std.ArrayList(u32) = .empty,
+        rod_bend_twist_constraints: std.ArrayList(u32) = .empty,
+        dihedral_bend_constraints: std.ArrayList(u32) = .empty,
+        volume_constraints: std.ArrayList(u32) = .empty,
+        skinned_constraints: std.ArrayList(u32) = .empty,
+
+        fn getSize(self: *const Group) u32 {
+            return @as(u32, @intCast(self.edge_constraints.items.len)) +% @as(u32, @intCast(self.lra_constraints.items.len)) +% @as(u32, @intCast(self.rod_stretch_shear_constraints.items.len)) +% @as(u32, @intCast(self.rod_bend_twist_constraints.items.len)) +% @as(u32, @intCast(self.dihedral_bend_constraints.items.len)) +% @as(u32, @intCast(self.volume_constraints.items.len)) +% @as(u32, @intCast(self.skinned_constraints.items.len));
+        }
+
+        /// The comparator of the group sort: big groups first. Groups of equal size keep the tie order of Jolt's
+        /// QuickSort (RemainingFeaturesArchitecture.md R20).
+        fn greaterSize(_: void, lhs: Group, rhs: Group) bool {
+            return lhs.getSize() > rhs.getSize();
+        }
+
+        fn deinit(self: *Group, allocator: Allocator) void {
+            self.edge_constraints.deinit(allocator);
+            self.lra_constraints.deinit(allocator);
+            self.rod_stretch_shear_constraints.deinit(allocator);
+            self.rod_bend_twist_constraints.deinit(allocator);
+            self.dihedral_bend_constraints.deinit(allocator);
+            self.volume_constraints.deinit(allocator);
+            self.skinned_constraints.deinit(allocator);
+        }
+    };
+
+    /// Sort the edge constraints (the comparator of Optimize)
+    fn edgeLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const e1 = self.edge_constraints.items[lhs];
+        const e2 = self.edge_constraints.items[rhs];
+        const ck = self.closest_kinematic.items;
+
+        // First sort so that the edge with the smallest distance to a kinematic vertex comes first
+        const d1 = math.min(ck[e1.vertex[0]].distance, ck[e1.vertex[1]].distance);
+        const d2 = math.min(ck[e2.vertex[0]].distance, ck[e2.vertex[1]].distance);
+        if (d1 != d2)
+            return d1 < d2;
+
+        // Order the edges so that the ones with the smallest index go first (hoping to get better cache locality when we process the edges).
+        // Note we could also re-order the vertices but that would be much more of a burden to the end user
+        const m1 = e1.getMinVertexIndex();
+        const m2 = e2.getMinVertexIndex();
+        if (m1 != m2)
+            return m1 < m2;
+
+        return lhs < rhs;
+    }
+
+    /// Sort the LRA constraints (the comparator of Optimize)
+    fn lraLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const l1 = self.lra_constraints.items[lhs];
+        const l2 = self.lra_constraints.items[rhs];
+
+        // First sort so that the longest constraint comes first (meaning the shortest constraint has the most influence on the end result)
+        // Most of the time there will be a single LRA constraint per vertex and since the LRA constraint only modifies a single vertex,
+        // updating one constraint will not violate another constraint.
+        if (l1.max_distance != l2.max_distance)
+            return l1.max_distance > l2.max_distance;
+
+        // Order constraints so that the ones with the smallest index go first
+        const m1 = l1.getMinVertexIndex();
+        const m2 = l2.getMinVertexIndex();
+        if (m1 != m2)
+            return m1 < m2;
+
+        return lhs < rhs;
+    }
+
+    /// Sort the rod stretch shear constraints (the comparator of Optimize)
+    fn rodStretchShearLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const r1 = self.rod_stretch_shear_constraints.items[lhs];
+        const r2 = self.rod_stretch_shear_constraints.items[rhs];
+        const ck = self.closest_kinematic.items;
+
+        // First sort so that the rod with the smallest distance to a kinematic vertex comes first
+        const d1 = math.min(ck[r1.vertex[0]].distance, ck[r1.vertex[1]].distance);
+        const d2 = math.min(ck[r2.vertex[0]].distance, ck[r2.vertex[1]].distance);
+        if (d1 != d2)
+            return d1 < d2;
+
+        // Then sort on the rod that connects to the smallest kinematic vertex
+        var m1 = @min(ck[r1.vertex[0]].vertex, ck[r1.vertex[1]].vertex);
+        var m2 = @min(ck[r2.vertex[0]].vertex, ck[r2.vertex[1]].vertex);
+        if (m1 != m2)
+            return m1 < m2;
+
+        // Order the rods so that the ones with the smallest index go first (hoping to get better cache locality when we process the rods).
+        m1 = r1.getMinVertexIndex();
+        m2 = r2.getMinVertexIndex();
+        if (m1 != m2)
+            return m1 < m2;
+
+        return lhs < rhs;
+    }
+
+    /// Sort the rod bend twist constraints (the comparator of Optimize)
+    fn rodBendTwistLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const rods = self.rod_stretch_shear_constraints.items;
+        const ck = self.closest_kinematic.items;
+
+        const b1 = self.rod_bend_twist_constraints.items[lhs];
+        const b1_r1 = rods[b1.rod[0]];
+        const b1_r2 = rods[b1.rod[1]];
+
+        const b2 = self.rod_bend_twist_constraints.items[rhs];
+        const b2_r1 = rods[b2.rod[0]];
+        const b2_r2 = rods[b2.rod[1]];
+
+        // First sort so that the rod with the smallest number of hops to a kinematic vertex comes first.
+        // Note that we don't use distance because of the bilateral interleaving below.
+        var m1 = @min(
+            @min(ck[b1_r1.vertex[0]].hops, ck[b1_r1.vertex[1]].hops),
+            @min(ck[b1_r2.vertex[0]].hops, ck[b1_r2.vertex[1]].hops),
+        );
+        var m2 = @min(
+            @min(ck[b2_r1.vertex[0]].hops, ck[b2_r1.vertex[1]].hops),
+            @min(ck[b2_r2.vertex[0]].hops, ck[b2_r2.vertex[1]].hops),
+        );
+        if (m1 != m2)
+            return m1 < m2;
+
+        // Then sort on the rod that connects to the kinematic vertex with lowest index.
+        // This ensures that we consistently order the rods that are attached to other kinematic constraints.
+        // Again, this helps bilateral interleaving below.
+        m1 = @min(
+            @min(ck[b1_r1.vertex[0]].vertex, ck[b1_r1.vertex[1]].vertex),
+            @min(ck[b1_r2.vertex[0]].vertex, ck[b1_r2.vertex[1]].vertex),
+        );
+        m2 = @min(
+            @min(ck[b2_r1.vertex[0]].vertex, ck[b2_r1.vertex[1]].vertex),
+            @min(ck[b2_r2.vertex[0]].vertex, ck[b2_r2.vertex[1]].vertex),
+        );
+        if (m1 != m2)
+            return m1 < m2;
+
+        // Finally order so that the smallest vertex index goes first
+        m1 = @min(b1_r1.getMinVertexIndex(), b1_r2.getMinVertexIndex());
+        m2 = @min(b2_r1.getMinVertexIndex(), b2_r2.getMinVertexIndex());
+        if (m1 != m2)
+            return m1 < m2;
+
+        return lhs < rhs;
+    }
+
+    /// Sort the dihedral bend constraints (the comparator of Optimize)
+    fn dihedralBendLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const b1 = self.dihedral_bend_constraints.items[lhs];
+        const b2 = self.dihedral_bend_constraints.items[rhs];
+        const ck = self.closest_kinematic.items;
+
+        // First sort so that the constraint with the smallest distance to a kinematic vertex comes first
+        const d1 = math.min(
+            math.min(ck[b1.vertex[0]].distance, ck[b1.vertex[1]].distance),
+            math.min(ck[b1.vertex[2]].distance, ck[b1.vertex[3]].distance),
+        );
+        const d2 = math.min(
+            math.min(ck[b2.vertex[0]].distance, ck[b2.vertex[1]].distance),
+            math.min(ck[b2.vertex[2]].distance, ck[b2.vertex[3]].distance),
+        );
+        if (d1 != d2)
+            return d1 < d2;
+
+        // Finally order so that the smallest vertex index goes first
+        const m1 = b1.getMinVertexIndex();
+        const m2 = b2.getMinVertexIndex();
+        if (m1 != m2)
+            return m1 < m2;
+
+        return lhs < rhs;
+    }
+
+    /// Sort the volume constraints (the comparator of Optimize)
+    fn volumeLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const v1 = self.volume_constraints.items[lhs];
+        const v2 = self.volume_constraints.items[rhs];
+        const ck = self.closest_kinematic.items;
+
+        // First sort so that the constraint with the smallest distance to a kinematic vertex comes first
+        const d1 = math.min(
+            math.min(ck[v1.vertex[0]].distance, ck[v1.vertex[1]].distance),
+            math.min(ck[v1.vertex[2]].distance, ck[v1.vertex[3]].distance),
+        );
+        const d2 = math.min(
+            math.min(ck[v2.vertex[0]].distance, ck[v2.vertex[1]].distance),
+            math.min(ck[v2.vertex[2]].distance, ck[v2.vertex[3]].distance),
+        );
+        if (d1 != d2)
+            return d1 < d2;
+
+        // Order constraints so that the ones with the smallest index go first
+        const m1 = v1.getMinVertexIndex();
+        const m2 = v2.getMinVertexIndex();
+        if (m1 != m2)
+            return m1 < m2;
+
+        return lhs < rhs;
+    }
+
+    /// Sort the skinned constraints (the comparator of Optimize)
+    fn skinnedLessThan(self: *const SoftBodySharedSettings, lhs: u32, rhs: u32) bool {
+        const s1 = self.skinned_constraints.items[lhs];
+        const s2 = self.skinned_constraints.items[rhs];
+
+        // Order the skinned constraints so that the ones with the smallest index go first (hoping to get better cache locality when we process the edges).
+        if (s1.vertex != s2.vertex)
+            return s1.vertex < s2.vertex;
+
+        return lhs < rhs;
+    }
+
+    /// `outResults.mXRemap.resize(inSize, ~uint(0))`: the existing elements stay, the new ones are ~0
+    fn resizeRemap(allocator: Allocator, remap: *std.ArrayList(u32), size: usize) Allocator.Error!void {
+        const old_len = remap.items.len;
+        try remap.resize(allocator, size);
+        if (size > old_len)
+            @memset(remap.items[old_len..], ~@as(u32, 0));
+    }
+
+    /// Frees an array of arrays (Array<Array<T>>)
+    fn freeLists(comptime T: type, allocator: Allocator, lists: []std.ArrayList(T)) void {
+        for (lists) |*list| list.deinit(allocator);
+        allocator.free(lists);
     }
 
     /// Optimize the soft body settings without results
@@ -831,8 +1901,160 @@ pub const SoftBodySharedSettings = struct {
     /// @param grid_size Number of points along each axis
     /// @param grid_spacing Distance between points
     pub fn createCube(allocator: Allocator, grid_size: u32, grid_spacing: f32) Allocator.Error!Ref(SoftBodySharedSettings) {
-        _ = .{ allocator, grid_size, grid_spacing };
-        @panic("SoftBodySharedSettings.createCube: not ported yet (Phase 9 group S1)");
+        const offset = Vec3.replicate(-0.5 * grid_spacing * @as(f32, @floatFromInt(grid_size - 1)));
+
+        // Create settings
+        var ref: Ref(SoftBodySharedSettings) = .init(try create(allocator));
+        errdefer ref.deinit();
+        const settings = ref.get().?;
+        for (0..grid_size) |z| {
+            for (0..grid_size) |y| {
+                for (0..grid_size) |x| {
+                    var v: Vertex = .{};
+                    offset.add(Vec3.replicate(grid_spacing).mul(Vec3.init(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z)))).storeFloat3(&v.position);
+                    try settings.vertices.append(allocator, v);
+                }
+            }
+        }
+
+        // Function to get the vertex index of a point on the cube
+        const Grid = struct {
+            grid_size: u32,
+
+            fn vertexIndex(g: @This(), x: u32, y: u32, z: u32) u32 {
+                return x + y * g.grid_size + z * g.grid_size * g.grid_size;
+            }
+        };
+        const grid: Grid = .{ .grid_size = grid_size };
+
+        // Create edges
+        var z: u32 = 0;
+        while (z < grid_size) : (z += 1) {
+            var y: u32 = 0;
+            while (y < grid_size) : (y += 1) {
+                var x: u32 = 0;
+                while (x < grid_size) : (x += 1) {
+                    var e: Edge = .{ .vertex = .{ grid.vertexIndex(x, y, z), undefined } };
+                    if (x < grid_size - 1) {
+                        e.vertex[1] = grid.vertexIndex(x + 1, y, z);
+                        try settings.edge_constraints.append(allocator, e);
+                    }
+                    if (y < grid_size - 1) {
+                        e.vertex[1] = grid.vertexIndex(x, y + 1, z);
+                        try settings.edge_constraints.append(allocator, e);
+                    }
+                    if (z < grid_size - 1) {
+                        e.vertex[1] = grid.vertexIndex(x, y, z + 1);
+                        try settings.edge_constraints.append(allocator, e);
+                    }
+                }
+            }
+        }
+        settings.calculateEdgeLengths();
+
+        // Tetrahedrons to fill a cube
+        const tetra_indices = [6][4][3]u32{
+            .{ .{ 0, 0, 0 }, .{ 0, 1, 1 }, .{ 0, 0, 1 }, .{ 1, 1, 1 } },
+            .{ .{ 0, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 1 }, .{ 1, 1, 1 } },
+            .{ .{ 0, 0, 0 }, .{ 0, 0, 1 }, .{ 1, 0, 1 }, .{ 1, 1, 1 } },
+            .{ .{ 0, 0, 0 }, .{ 1, 0, 1 }, .{ 1, 0, 0 }, .{ 1, 1, 1 } },
+            .{ .{ 0, 0, 0 }, .{ 1, 1, 0 }, .{ 0, 1, 0 }, .{ 1, 1, 1 } },
+            .{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 1, 1, 0 }, .{ 1, 1, 1 } },
+        };
+
+        // Create volume constraints
+        z = 0;
+        while (z < grid_size - 1) : (z += 1) {
+            var y: u32 = 0;
+            while (y < grid_size - 1) : (y += 1) {
+                var x: u32 = 0;
+                while (x < grid_size - 1) : (x += 1) {
+                    for (tetra_indices) |tetra| {
+                        var v: Volume = .{ .vertex = undefined };
+                        for (0..4) |i|
+                            v.vertex[i] = grid.vertexIndex(x + tetra[i][0], y + tetra[i][1], z + tetra[i][2]);
+                        try settings.volume_constraints.append(allocator, v);
+                    }
+                }
+            }
+        }
+
+        settings.calculateVolumeConstraintVolumes();
+
+        // Create faces
+        const last = grid_size - 1;
+        var y: u32 = 0;
+        while (y < grid_size - 1) : (y += 1) {
+            var x: u32 = 0;
+            while (x < grid_size - 1) : (x += 1) {
+                var f: Face = .{ .vertex = undefined };
+
+                // Face 1
+                f.vertex[0] = grid.vertexIndex(x, y, 0);
+                f.vertex[1] = grid.vertexIndex(x, y + 1, 0);
+                f.vertex[2] = grid.vertexIndex(x + 1, y + 1, 0);
+                try settings.addFace(f);
+
+                f.vertex[1] = grid.vertexIndex(x + 1, y + 1, 0);
+                f.vertex[2] = grid.vertexIndex(x + 1, y, 0);
+                try settings.addFace(f);
+
+                // Face 2
+                f.vertex[0] = grid.vertexIndex(x, y, last);
+                f.vertex[1] = grid.vertexIndex(x + 1, y + 1, last);
+                f.vertex[2] = grid.vertexIndex(x, y + 1, last);
+                try settings.addFace(f);
+
+                f.vertex[1] = grid.vertexIndex(x + 1, y, last);
+                f.vertex[2] = grid.vertexIndex(x + 1, y + 1, last);
+                try settings.addFace(f);
+
+                // Face 3
+                f.vertex[0] = grid.vertexIndex(x, 0, y);
+                f.vertex[1] = grid.vertexIndex(x + 1, 0, y + 1);
+                f.vertex[2] = grid.vertexIndex(x, 0, y + 1);
+                try settings.addFace(f);
+
+                f.vertex[1] = grid.vertexIndex(x + 1, 0, y);
+                f.vertex[2] = grid.vertexIndex(x + 1, 0, y + 1);
+                try settings.addFace(f);
+
+                // Face 4
+                f.vertex[0] = grid.vertexIndex(x, last, y);
+                f.vertex[1] = grid.vertexIndex(x, last, y + 1);
+                f.vertex[2] = grid.vertexIndex(x + 1, last, y + 1);
+                try settings.addFace(f);
+
+                f.vertex[1] = grid.vertexIndex(x + 1, last, y + 1);
+                f.vertex[2] = grid.vertexIndex(x + 1, last, y);
+                try settings.addFace(f);
+
+                // Face 5
+                f.vertex[0] = grid.vertexIndex(0, x, y);
+                f.vertex[1] = grid.vertexIndex(0, x, y + 1);
+                f.vertex[2] = grid.vertexIndex(0, x + 1, y + 1);
+                try settings.addFace(f);
+
+                f.vertex[1] = grid.vertexIndex(0, x + 1, y + 1);
+                f.vertex[2] = grid.vertexIndex(0, x + 1, y);
+                try settings.addFace(f);
+
+                // Face 6
+                f.vertex[0] = grid.vertexIndex(last, x, y);
+                f.vertex[1] = grid.vertexIndex(last, x + 1, y + 1);
+                f.vertex[2] = grid.vertexIndex(last, x, y + 1);
+                try settings.addFace(f);
+
+                f.vertex[1] = grid.vertexIndex(last, x + 1, y);
+                f.vertex[2] = grid.vertexIndex(last, x + 1, y + 1);
+                try settings.addFace(f);
+            }
+        }
+
+        // Optimize the settings
+        try settings.optimize();
+
+        return ref;
     }
 
     /// Add a face to this soft body
@@ -842,9 +2064,87 @@ pub const SoftBodySharedSettings = struct {
     }
 
     /// Calculate the closest kinematic vertex array (private in Jolt)
+    /// The result is cached: it is calculated again only after Optimize freed it (RemainingFeaturesArchitecture.md R20).
+    /// Zolt: an allocation failure returns `error.OutOfMemory` and caches nothing.
     pub fn calculateClosestKinematic(self: *SoftBodySharedSettings) Allocator.Error!void {
-        _ = self;
-        @panic("SoftBodySharedSettings.calculateClosestKinematic: not ported yet (Phase 9 group S1)");
+        // Check if we already calculated this
+        if (self.closest_kinematic.items.len != 0)
+            return;
+
+        const allocator = self.allocator;
+        const num_vertices = self.vertices.items.len;
+
+        // Reserve output size
+        try self.closest_kinematic.appendNTimes(allocator, .{}, num_vertices);
+        errdefer self.closest_kinematic.clearAndFree(allocator);
+        const closest_kinematic = self.closest_kinematic.items;
+
+        // Create a list of connected vertices
+        const connectivity = try allocator.alloc(std.ArrayList(u32), num_vertices);
+        @memset(connectivity, .empty);
+        defer freeLists(u32, allocator, connectivity);
+        for (self.edge_constraints.items) |e| {
+            try connectivity[e.vertex[0]].append(allocator, e.vertex[1]);
+            try connectivity[e.vertex[1]].append(allocator, e.vertex[0]);
+        }
+        for (self.rod_stretch_shear_constraints.items) |r| {
+            try connectivity[r.vertex[0]].append(allocator, r.vertex[1]);
+            try connectivity[r.vertex[1]].append(allocator, r.vertex[0]);
+        }
+
+        // Use Dijkstra's algorithm to find the closest kinematic vertex for each vertex
+        // See: https://en.wikipedia.org/wiki/Dijkstra's_algorithm
+        //
+        // An element in the open list
+        const Open = struct {
+            vertex: u32,
+            distance: f32,
+
+            /// Order so that we get the shortest distance first (operator <)
+            fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
+                return lhs.distance > rhs.distance;
+            }
+        };
+
+        // Start with all kinematic elements
+        var to_visit: std.ArrayList(Open) = .empty;
+        defer to_visit.deinit(allocator);
+        var v: u32 = 0;
+        while (v < @as(u32, @intCast(num_vertices))) : (v += 1) {
+            if (self.vertices.items[v].inv_mass == 0.0) {
+                closest_kinematic[v].vertex = v;
+                closest_kinematic[v].hops = 0;
+                closest_kinematic[v].distance = 0.0;
+                try to_visit.append(allocator, .{ .vertex = v, .distance = 0.0 });
+                binaryHeapPush(Open, to_visit.items, {}, Open.lessThan);
+            }
+        }
+
+        // Visit all vertices remembering the closest kinematic vertex and its distance
+        var last_closest: f32 = 0.0; // JPH_IF_ENABLE_ASSERTS
+        while (to_visit.items.len != 0) {
+            // Pop element from the open list
+            binaryHeapPop(Open, to_visit.items, {}, Open.lessThan);
+            const current = to_visit.pop().?;
+            if (Core.enable_asserts) {
+                std.debug.assert(current.distance >= last_closest);
+                last_closest = current.distance;
+            }
+
+            // Loop through all of its connected vertices
+            for (connectivity[current.vertex].items) |target| {
+                // Calculate distance from the current vertex to this target vertex and check if it is smaller
+                const new_distance = current.distance + self.vertexPosition(target).sub(self.vertexPosition(current.vertex)).length();
+                if (new_distance < closest_kinematic[target].distance) {
+                    // Remember new closest vertex
+                    closest_kinematic[target].vertex = closest_kinematic[current.vertex].vertex;
+                    closest_kinematic[target].hops = closest_kinematic[current.vertex].hops +% 1;
+                    closest_kinematic[target].distance = new_distance;
+                    try to_visit.append(allocator, .{ .vertex = target, .distance = new_distance });
+                    binaryHeapPush(Open, to_visit.items, {}, Open.lessThan);
+                }
+            }
+        }
     }
 };
 
@@ -1010,4 +2310,290 @@ test "SoftBodySharedSettings: out of memory in create, clone and restoreBinarySt
             try copy.get().?.restoreBinaryState(wrapper.streamIn());
         }
     }.f, .{});
+}
+
+/// The cloth of SoftBodyCreator::CreateClothWithFixatedCorners (Samples/Utils/SoftBodyCreator.cpp): a grid in the XZ
+/// plane, the 4 corners kinematic, 2 faces per quad (a test helper)
+fn createTestCloth(allocator: Allocator, grid_size: u32, spacing: f32) Allocator.Error!Ref(SoftBodySharedSettings) {
+    var ref: Ref(SoftBodySharedSettings) = .init(try SoftBodySharedSettings.create(allocator));
+    errdefer ref.deinit();
+    const s = ref.get().?;
+    const offset = -0.5 * spacing * @as(f32, @floatFromInt(grid_size - 1));
+    for (0..grid_size) |z| for (0..grid_size) |x| {
+        var v: SoftBodySharedSettings.Vertex = .{};
+        Vec3.init(offset + @as(f32, @floatFromInt(x)) * spacing, 0.0, offset + @as(f32, @floatFromInt(z)) * spacing).storeFloat3(&v.position);
+        const corner = (x == 0 or x == grid_size - 1) and (z == 0 or z == grid_size - 1);
+        v.inv_mass = if (corner) 0.0 else 1.0;
+        try s.vertices.append(allocator, v);
+    };
+    var z: u32 = 0;
+    while (z < grid_size - 1) : (z += 1) {
+        var x: u32 = 0;
+        while (x < grid_size - 1) : (x += 1) {
+            try s.addFace(.init(x + z * grid_size, x + (z + 1) * grid_size, x + 1 + (z + 1) * grid_size, .{}));
+            try s.addFace(.init(x + z * grid_size, x + 1 + (z + 1) * grid_size, x + 1 + z * grid_size, .{}));
+        }
+    }
+    return ref;
+}
+
+/// The surface of a tetrahedron, without constraints (a test helper)
+fn createTestTetrahedron(allocator: Allocator) Allocator.Error!Ref(SoftBodySharedSettings) {
+    var ref: Ref(SoftBodySharedSettings) = .init(try SoftBodySharedSettings.create(allocator));
+    errdefer ref.deinit();
+    const s = ref.get().?;
+    for ([_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 0, 1 }, .{ 0, 1, 0 } }) |p|
+        try s.vertices.append(allocator, .init(.init(p[0], p[1], p[2]), .{}));
+    for ([_][3]u32{ .{ 0, 1, 2 }, .{ 0, 3, 1 }, .{ 0, 2, 3 }, .{ 1, 3, 2 } }) |f|
+        try s.addFace(.init(f[0], f[1], f[2], .{}));
+    return ref;
+}
+
+/// True when `remap` maps 0..n-1 onto 0..n-1
+fn isPermutation(allocator: Allocator, remap: []const u32) !bool {
+    const seen = try allocator.alloc(bool, remap.len);
+    defer allocator.free(seen);
+    @memset(seen, false);
+    for (remap) |r| {
+        if (r >= remap.len or seen[r]) return false;
+        seen[r] = true;
+    }
+    return true;
+}
+
+test "SoftBodySharedSettings: createConstraints adds the last shared edge of a closed mesh twice" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+
+    // Without bend constraints: the 6 edges of the tetrahedron, the last one twice (Jolt's quirk, R20)
+    var no_bends = try createTestTetrahedron(allocator);
+    defer no_bends.deinit();
+    const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, math.flt_max, .{})};
+    try no_bends.get().?.createConstraints(&attributes, .{ .bend_type = .none });
+    const edges = no_bends.get().?.edge_constraints.items;
+    try std.testing.expectEqual(@as(usize, 7), edges.len);
+    try std.testing.expectEqual(edges[5].vertex, edges[6].vertex);
+    for (edges) |e| try std.testing.expect(e.rest_length > 0.0);
+
+    // With distance bends: a bend edge per shared edge, the duplicate adds no bend
+    var distance = try createTestTetrahedron(allocator);
+    defer distance.deinit();
+    const bend_attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{})};
+    try distance.get().?.createConstraints(&bend_attributes, .{ .bend_type = .distance });
+    try std.testing.expectEqual(@as(usize, 13), distance.get().?.edge_constraints.items.len);
+
+    // Dihedral bends: one per shared edge, all with an initial angle
+    var dihedral = try createTestTetrahedron(allocator);
+    defer dihedral.deinit();
+    try dihedral.get().?.createConstraints(&bend_attributes, .{ .bend_type = .dihedral });
+    try std.testing.expectEqual(@as(usize, 7), dihedral.get().?.edge_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 6), dihedral.get().?.dihedral_bend_constraints.items.len);
+    for (dihedral.get().?.dihedral_bend_constraints.items) |b| try std.testing.expect(b.initial_angle != 0.0);
+}
+
+test "SoftBodySharedSettings: createCube" {
+    // sCreateCube(6, ...): 216 vertices, 300 faces, 540 edges, 750 volumes. Optimize puts all vertices in parallel group
+    // 0, the non-parallel group (the last one) is empty. These are Jolt's values (SoftBodyParity.zig pins them).
+    var cube = try SoftBodySharedSettings.createCube(std.testing.allocator, 6, 0.2);
+    defer cube.deinit();
+    const s = cube.get().?;
+    try std.testing.expectEqual(@as(usize, 216), s.vertices.items.len);
+    try std.testing.expectEqual(@as(usize, 300), s.faces.items.len);
+    try std.testing.expectEqual(@as(usize, 540), s.edge_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 750), s.volume_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 2), s.update_groups.items.len);
+    try std.testing.expectEqual(s.update_groups.items[0], s.update_groups.items[1]);
+    try std.testing.expectEqual(@as(u32, 540), s.update_groups.items[0].edge_end_index);
+    try std.testing.expectEqual(@as(u32, 750), s.update_groups.items[0].volume_end_index);
+    try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len); // Optimize frees it
+    for (s.edge_constraints.items) |e| try std.testing.expectApproxEqAbs(@as(f32, 0.2), e.rest_length, 1.0e-6);
+    for (s.volume_constraints.items) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.008), v.six_rest_volume, 1.0e-6);
+}
+
+test "SoftBodySharedSettings: cloth with dihedral bends and LRA, optimize" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+
+    // A 10 x 10 cloth: 162 faces, 342 edges (stretch and shear), 225 dihedral bends, LRA constraints for the 96 movable
+    // vertices, too few vertices for a parallel group (Jolt's values, SoftBodyParity.zig pins them)
+    var cloth = try createTestCloth(allocator, 10, 0.1);
+    defer cloth.deinit();
+    const s = cloth.get().?;
+    const attributes = [_]S.VertexAttributes{.init(1.0e-5, 1.0e-5, 1.0e-5, .{ .lra_type = .euclidean_distance, .lra_max_distance_multiplier = 1.1 })};
+    try s.createConstraints(&attributes, .{ .bend_type = .dihedral });
+    try std.testing.expectEqual(@as(usize, 342), s.edge_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 225), s.dihedral_bend_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 96), s.lra_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 100), s.closest_kinematic.items.len); // Cached for Optimize
+
+    var results: S.OptimizationResults = .{};
+    defer results.deinit(allocator);
+    try s.optimizeWithResults(&results);
+    try std.testing.expectEqual(@as(usize, 1), s.update_groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len);
+    try std.testing.expect(try isPermutation(allocator, results.edge_remap.items));
+    try std.testing.expect(try isPermutation(allocator, results.lra_remap.items));
+    try std.testing.expect(try isPermutation(allocator, results.dihedral_bend_remap.items));
+    try std.testing.expectEqual(@as(usize, 342), results.edge_remap.items.len);
+
+    // The LRA constraints are sorted from long to short
+    const lras = s.lra_constraints.items;
+    for (lras[0 .. lras.len - 1], lras[1..]) |a, b| try std.testing.expect(a.max_distance >= b.max_distance);
+}
+
+test "SoftBodySharedSettings: optimize makes parallel groups for a large cloth" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+
+    // A 30 x 30 cloth has more vertices than a group holds: several parallel groups and a non-parallel group
+    var cloth = try createTestCloth(allocator, 30, 0.1);
+    defer cloth.deinit();
+    const s = cloth.get().?;
+    const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{ .lra_type = .geodesic_distance })};
+    try s.createConstraints(&attributes, .{ .bend_type = .distance });
+    const num_edges = s.edge_constraints.items.len;
+    try s.optimize();
+    const groups = s.update_groups.items;
+    try std.testing.expect(groups.len >= 4);
+    try std.testing.expectEqual(@as(u32, @intCast(num_edges)), groups[groups.len - 1].edge_end_index);
+    try std.testing.expect(groups[groups.len - 1].edge_end_index > groups[groups.len - 2].edge_end_index); // Non-parallel edges
+
+    // The end indices grow, every group is a range
+    for (groups[0 .. groups.len - 1], groups[1..]) |a, b| {
+        try std.testing.expect(a.edge_end_index <= b.edge_end_index);
+        try std.testing.expect(a.lra_end_index <= b.lra_end_index);
+    }
+}
+
+test "SoftBodySharedSettings: rods, bend twist constraints and the remap of their rods" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+
+    // A chain of 4 rods along a bent line, the second rod points backwards, vertex 0 is kinematic
+    var settings: S = try .init(allocator);
+    defer settings.deinit();
+    const s = &settings;
+    for ([_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 2, 0.5, 0 }, .{ 3, 0.5, 0.5 }, .{ 4, 1, 0.5 } }, 0..) |p, i|
+        try s.vertices.append(allocator, .init(.init(p[0], p[1], p[2]), .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
+    try s.rod_stretch_shear_constraints.append(allocator, .init(0, 1, .{}));
+    try s.rod_stretch_shear_constraints.append(allocator, .init(2, 1, .{})); // Opposite direction
+    try s.rod_stretch_shear_constraints.append(allocator, .init(2, 3, .{}));
+    try s.rod_stretch_shear_constraints.append(allocator, .init(3, 4, .{}));
+    for (0..3) |i| try s.rod_bend_twist_constraints.append(allocator, .init(@intCast(i), @intCast(i + 1), .{}));
+    try s.calculateRodProperties();
+
+    // The second rod was flipped to follow the first one
+    try std.testing.expectEqual([2]u32{ 1, 2 }, s.rod_stretch_shear_constraints.items[1].vertex);
+    for (s.rod_stretch_shear_constraints.items) |r| {
+        try std.testing.expect(!r.bishop.eql(Quat.zero()));
+        try std.testing.expect(r.bishop.isNormalized(.{}));
+        try std.testing.expect(r.length > 0.0);
+    }
+    try std.testing.expectEqual(@as(f32, 0.0), s.rod_stretch_shear_constraints.items[0].inv_mass);
+    try std.testing.expectEqual(@as(f32, 1.0), s.rod_stretch_shear_constraints.items[1].inv_mass);
+    for (s.rod_bend_twist_constraints.items) |b| try std.testing.expect(b.omega0.isNormalized(.{}));
+
+    // Optimize reorders the rods and remaps the rods of the bend twist constraints
+    const old_rods = try allocator.dupe(S.RodStretchShear, s.rod_stretch_shear_constraints.items);
+    defer allocator.free(old_rods);
+    const old_bends = try allocator.dupe(S.RodBendTwist, s.rod_bend_twist_constraints.items);
+    defer allocator.free(old_bends);
+    var results: S.OptimizationResults = .{};
+    defer results.deinit(allocator);
+    try s.optimizeWithResults(&results);
+    for (old_rods, 0..) |r, i|
+        try std.testing.expectEqual(r.vertex, s.rod_stretch_shear_constraints.items[results.rod_stretch_shear_constraint_remap.items[i]].vertex);
+    for (old_bends, 0..) |b, i| {
+        const new = s.rod_bend_twist_constraints.items[results.rod_bend_twist_constraint_remap.items[i]];
+        for (0..2) |k| try std.testing.expectEqual(results.rod_stretch_shear_constraint_remap.items[b.rod[k]], new.rod[k]);
+    }
+}
+
+test "SoftBodySharedSettings: calculateSkinnedConstraintNormals" {
+    const allocator = std.testing.allocator;
+
+    // A 3 x 3 cloth (8 faces), every vertex but vertex 8 skinned
+    var cloth = try createTestCloth(allocator, 3, 1.0);
+    defer cloth.deinit();
+    const s = cloth.get().?;
+    for (0..8) |v| try s.skinned_constraints.append(allocator, .init(@intCast(v), 0.1, 0.0, 1.0));
+    try s.calculateSkinnedConstraintNormals();
+
+    // The faces that use only skinned vertices: the faces without vertex 8, sorted per vertex
+    for (s.skinned_constraints.items) |c| {
+        const start = c.normal_info & 0xffffff;
+        const num = c.normal_info >> 24;
+        const faces = s.skinned_constraint_normals.items[start .. start + num];
+        for (faces) |f| {
+            try std.testing.expect(std.mem.indexOfScalar(u32, &s.faces.items[f].vertex, c.vertex) != null);
+            try std.testing.expect(std.mem.indexOfScalar(u32, &s.faces.items[f].vertex, 8) == null);
+        }
+        if (faces.len > 1)
+            for (faces[0 .. faces.len - 1], faces[1..]) |a, b| try std.testing.expect(a < b);
+    }
+    try std.testing.expectEqual(@as(u32, 2), s.skinned_constraints.items[0].normal_info >> 24); // Vertex 0: both faces of its quad
+    try std.testing.expectEqual(@as(u32, 1), s.skinned_constraints.items[2].normal_info >> 24); // Vertex 2: 1 face
+    try std.testing.expectEqual(@as(u32, 4), s.skinned_constraints.items[4].normal_info >> 24); // Vertex 4: 4 of its 6 faces
+
+    // A second call gives the same result
+    const first = try allocator.dupe(u32, s.skinned_constraint_normals.items);
+    defer allocator.free(first);
+    try s.calculateSkinnedConstraintNormals();
+    try std.testing.expectEqualSlices(u32, first, s.skinned_constraint_normals.items);
+}
+
+test "SoftBodySharedSettings: out of memory in the algorithms" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            const S = SoftBodySharedSettings;
+            var cloth = try createTestCloth(allocator, 4, 0.5);
+            defer cloth.deinit();
+            const s = cloth.get().?;
+            const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{ .lra_type = .geodesic_distance })};
+            try s.createConstraints(&attributes, .{ .bend_type = .dihedral });
+            for (0..4) |v| try s.skinned_constraints.append(allocator, .init(@intCast(v), 0.1, 0.0, 1.0));
+            try s.calculateSkinnedConstraintNormals();
+            try s.rod_stretch_shear_constraints.append(allocator, .init(1, 2, .{}));
+            try s.rod_stretch_shear_constraints.append(allocator, .init(2, 3, .{}));
+            try s.rod_bend_twist_constraints.append(allocator, .init(0, 1, .{}));
+            try s.calculateRodProperties();
+            try s.optimize();
+            var cube = try S.createCube(allocator, 3, 0.5);
+            defer cube.deinit();
+        }
+    }.f, .{});
+}
+
+test "SoftBodySharedSettings: optimize leaves the settings unchanged when an allocation fails" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var cloth = try createTestCloth(allocator, 20, 0.1);
+        defer cloth.deinit();
+        const s = cloth.get().?;
+        const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{ .lra_type = .euclidean_distance })};
+        try s.createConstraints(&attributes, .{ .bend_type = .dihedral });
+        for (0..10) |v| try s.skinned_constraints.append(allocator, .init(@intCast(v * 7), 0.1, 0.0, 1.0));
+        const before = try saveBytes(allocator, s);
+        defer allocator.free(before);
+        const num_closest = s.closest_kinematic.items.len;
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        s.allocator = failing.allocator();
+        var results: S.OptimizationResults = .{};
+        const result = s.optimizeWithResults(&results);
+        s.allocator = allocator;
+        results.deinit(allocator);
+        if (result) |_| {
+            try std.testing.expect(fail_index > 10);
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            const after = try saveBytes(allocator, s);
+            defer allocator.free(after);
+            try std.testing.expectEqualSlices(u8, before, after);
+            try std.testing.expectEqual(num_closest, s.closest_kinematic.items.len);
+        }
+    }
 }
