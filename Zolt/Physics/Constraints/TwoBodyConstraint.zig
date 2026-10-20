@@ -12,7 +12,9 @@
 //!   solver only writes dynamic bodies.
 //! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(TwoBodyConstraintSettings): `rtti`. Jolt
 //!   adds no attributes, only the base class.
-//! - JPH_DEBUG_RENDERER (`DrawConstraintReferenceFrame`): TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`DrawConstraintReferenceFrame`, an override of Constraint's): a gated declaration in `impl`.
+//!   Its body needs DebugRenderer.DrawCoordinateSystem (group D1), so it is a placeholder that panics until group D3
+//!   ports it (TODO(debug_renderer)).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -20,6 +22,7 @@ const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Body = @import("../Body/Body.zig").Body;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const BodyManager = @import("../Body/BodyManager.zig").BodyManager;
@@ -79,8 +82,6 @@ pub const TwoBodyConstraint = struct {
     /// The virtual functions that TwoBodyConstraint adds
     pub const VTable = struct {
         base: Constraint.VTable,
-
-        // TODO(debug_renderer): DrawConstraintReferenceFrame (an override of Constraint's)
 
         /// Calculates the transform that transforms from constraint space to body 1 space. The first column of the matrix is the primary constraint axis (e.g. the hinge axis / slider direction), second column the secondary etc.
         getConstraintToBody1Matrix: *const fn (self: *const TwoBodyConstraint) Mat44,
@@ -144,6 +145,14 @@ pub const TwoBodyConstraint = struct {
         /// Solver interface
         pub fn isActive(self: *const TwoBodyConstraint) bool {
             return Constraint.impl.isActive(&self.base) and (self.body1.isActive() or self.body2.isActive()) and (self.body2.isDynamic() or self.body1.isDynamic());
+        }
+
+        /// Zolt placeholder (JPH_DEBUG_RENDERER, RemainingFeaturesArchitecture.md R2): Jolt draws the two constraint
+        /// frames with DrawCoordinateSystem (group D1). Group D3 ports it.
+        pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFramePlaceholder else {};
+        fn drawConstraintReferenceFramePlaceholder(self: *const TwoBodyConstraint, renderer: *DebugRenderer) void {
+            _ = .{ self, renderer };
+            @panic("TODO(debug_renderer): TwoBodyConstraint.drawConstraintReferenceFrame is not ported yet");
         }
 
         /// Link bodies that are connected by this constraint in the island builder

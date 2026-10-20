@@ -53,12 +53,16 @@ const RMat44 = RealFile.RMat44;
 ///
 /// Note that an implementation that implements createTriangleBatch and drawGeometry is provided by DebugRendererSimple which can be used to start quickly.
 pub const DebugRenderer = struct {
-    /// Enum that determines if a shadow should be cast or not (Jolt: an `int` enum class)
+    // The three enums are `int` enum classes in Jolt. A `.jor` stream holds them as `int`, and DebugRendererPlayback
+    // passes any value on to the renderer, so they accept every value (porting guide: enums read from a stream).
+
+    /// Enum that determines if a shadow should be cast or not
     pub const CastShadow = enum(i32) {
         /// This shape should cast a shadow
         on,
         /// This shape should not cast a shadow
         off,
+        _,
     };
 
     /// Determines how triangles are drawn
@@ -67,6 +71,7 @@ pub const DebugRenderer = struct {
         solid,
         /// Draw as wireframe
         wireframe,
+        _,
     };
 
     /// Determines which polygons are culled
@@ -77,6 +82,7 @@ pub const DebugRenderer = struct {
         cull_front_face,
         /// Don't do culling and draw both sides
         off,
+        _,
     };
 
     /// Vertex format used by the triangle renderer
@@ -520,8 +526,11 @@ pub const DebugRenderer = struct {
             // Back
             try self.createQuad(&box_indices, &box_vertices, v0, v1, v5, v4);
 
-            const batch = self.createTriangleBatchIndexed(box_vertices.items, box_indices.items);
-            if (self.isOutOfMemory()) return error.OutOfMemory;
+            var batch = self.createTriangleBatchIndexed(box_vertices.items, box_indices.items);
+            if (self.isOutOfMemory()) {
+                batch.deinit(); // A renderer may return a batch and latch an allocation failure
+                return error.OutOfMemory;
+            }
             self.box.set(try Geometry.createWithBatch(self.allocator, batch, AABox.init(Vec3.init(-1, -1, -1), Vec3.init(1, 1, 1))));
         }
     }

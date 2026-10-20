@@ -275,6 +275,100 @@ pub fn cppFloat(value: anytype) CppFloat {
     } };
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The C++ compatible fixed notation formatter (a Zolt addition, RemainingFeaturesArchitecture.md R7: the draw texts of
+// the debug renderer)
+//
+// Jolt's draw texts use printf with "%.0f", "%.1f", "%.2f" and "%.3f" (a float argument is converted to double). glibc
+// and musl print the exact decimal expansion of the double:
+// - the value is rounded to `decimals` digits after the decimal point, exactly and with ties to even (in the default
+//   rounding mode): printf("%.0f", 2.5) is "2" and printf("%.2f", 0.125) is "0.12";
+// - the integer part has all its digits ("0" when it is 0), there is no exponent;
+// - the decimal point is left out when `decimals` is 0;
+// - the sign comes from the sign bit, also when the rounded value is 0 ("-0.00" for -0.001 and -0);
+// - the infinities print "inf" / "-inf" and NaN "nan" / "-nan" (by its sign bit, like glibc and musl).
+// std.fmt rounds differently on ties, so draw sites use this instead. ZoltParity/Core/CoreParity.zig compares it with the
+// C library's snprintf("%.*f").
+
+/// The largest number of decimals that `writeFloatFixed` supports (BigInt holds every double times 10^decimals)
+pub const max_fixed_decimals = 60;
+
+/// Write a double like printf("%.*f", decimals, value) does (see above). Use it where Jolt formats a number with
+/// "%.<decimals>f".
+pub fn writeFloatFixed(writer: *Writer, value: f64, decimals: u32) Writer.Error!void {
+    std.debug.assert(decimals <= max_fixed_decimals);
+
+    if (std.math.isNan(value))
+        return writer.writeAll(if (std.math.signbit(value)) "-nan" else "nan");
+    if (std.math.signbit(value))
+        try writer.writeByte('-');
+    const abs_value = @abs(value);
+    if (std.math.isInf(abs_value))
+        return writer.writeAll("inf");
+
+    // value = mantissa * 2^binary_exponent
+    const bits: u64 = @bitCast(abs_value);
+    const biased_exponent: i32 = @intCast(bits >> 52);
+    const fraction = bits & ((@as(u64, 1) << 52) - 1);
+    const mantissa: u64 = if (biased_exponent == 0) fraction else fraction | (@as(u64, 1) << 52);
+    const binary_exponent: i32 = (if (biased_exponent == 0) 1 else biased_exponent) - 1075;
+
+    // value * 10^decimals rounded to an integer, exact and with ties to even
+    const scaled: BigInt = @as(BigInt, mantissa) * powerOf10(decimals);
+    var rounded: BigInt = undefined;
+    if (binary_exponent >= 0) {
+        rounded = scaled << @intCast(binary_exponent);
+    } else {
+        const shift: std.math.Log2Int(BigInt) = @intCast(-binary_exponent);
+        rounded = scaled >> shift;
+        const remainder = scaled - (rounded << shift);
+        const half = @as(BigInt, 1) << (shift - 1);
+        if (remainder > half or (remainder == half and (rounded & 1) != 0))
+            rounded += 1;
+    }
+
+    // The decimal digits of the rounded value (a double below 2^1024 has at most 309 digits before the decimal point)
+    var digits_buffer: [309 + max_fixed_decimals + 1]u8 = undefined;
+    const digits = digits_buffer[0..std.fmt.printInt(&digits_buffer, rounded, 10, .lower, .{})];
+
+    if (digits.len > decimals) {
+        // Integer part, then the decimals
+        const num_integer_digits = digits.len - decimals;
+        try writer.writeAll(digits[0..num_integer_digits]);
+        if (decimals > 0) {
+            try writer.writeByte('.');
+            try writer.writeAll(digits[num_integer_digits..]);
+        }
+    } else {
+        // Integer part 0, leading zeros after the decimal point
+        try writer.writeAll("0.");
+        try writer.splatByteAll('0', decimals - digits.len);
+        try writer.writeAll(digits);
+    }
+}
+
+/// A float that prints like printf("%.*f", decimals, value) (see writeFloatFixed), for `{f}` in a format string:
+/// `stringFormat(allocator, "{f}", .{cppFixed(value, 2)})` is Jolt's `StringFormat("%.2f", value)`
+pub const CppFixed = struct {
+    value: f64,
+    /// The number of digits after the decimal point (the precision of "%.*f")
+    decimals: u32,
+
+    pub fn format(self: CppFixed, writer: *Writer) Writer.Error!void {
+        return writeFloatFixed(writer, self.value, self.decimals);
+    }
+};
+
+/// Wrap a float for `{f}` in fixed notation with `decimals` digits after the decimal point (an f32 is converted to f64
+/// like a printf argument)
+pub fn cppFixed(value: anytype, decimals: u32) CppFixed {
+    return .{ .value = switch (@typeInfo(@TypeOf(value))) {
+        .float => @floatCast(value),
+        .comptime_float => value,
+        else => @compileError("cppFixed: expected a float, got " ++ @typeName(@TypeOf(value))),
+    }, .decimals = decimals };
+}
+
 /// Replace substring with other string. `string` is owned by `allocator` and is reallocated when its length changes.
 pub fn stringReplace(allocator: Allocator, string: *[]u8, search: []const u8, replace: []const u8) Allocator.Error!void {
     // An empty search string would loop forever in the C++ version
@@ -474,6 +568,46 @@ test "writeFloatPrecision formats like printf(\"%.*g\")" {
         }
     };
     try expectConverted("<5>", Formattable{ .v = 5 });
+}
+
+fn expectFixed(expected: []const u8, value: f64, decimals: u32) !void {
+    var buffer: [512]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buffer, "{f}", .{CppFixed{ .value = value, .decimals = decimals }});
+    try std.testing.expectEqualStrings(expected, s);
+}
+
+test "writeFloatFixed formats like printf(\"%.*f\")" {
+    // Values checked against glibc printf
+    try expectFixed("0", 0.0, 0);
+    try expectFixed("-0", -0.0, 0);
+    try expectFixed("0.000", 0.0, 3);
+    try expectFixed("-0.00", -0.0, 2);
+    try expectFixed("-0.00", -0.001, 2); // Rounds to 0, keeps the sign
+    try expectFixed("2", 2.5, 0); // Tie, rounds to even
+    try expectFixed("4", 3.5, 0);
+    try expectFixed("0", 0.5, 0);
+    try expectFixed("2", 1.5, 0);
+    try expectFixed("0.12", 0.125, 2); // Tie, rounds to even
+    try expectFixed("0.38", 0.375, 2);
+    try expectFixed("0.1", 0.15, 1); // 0.1499999999999999944...: rounds the exact value
+    try expectFixed("0.2", 0.25, 1); // Exact tie, rounds to even
+    try expectFixed("1.000", 0.9995, 3); // 0.99950000000000005507...: just above the tie
+    try expectFixed("0.999", 0.99949999999999994, 3);
+    try expectFixed("123456789.000", 123456789.0, 3);
+    try expectFixed("100000002537764290115403776.0", @as(f32, 1.0e26), 1); // The exact value of the float
+    try expectFixed("1000000000000000019884624838656.00", 1.0e30, 2);
+    try expectFixed("0.000", 1.0e-30, 3);
+    try expectFixed("0.001", 0.0005000000000000001, 3);
+    try expectFixed("0.001", 0.0005, 3); // 0.000500000000000000010408...: just above the tie
+    try expectFixed("-9.81", @as(f32, -9.81), 2);
+    try expectFixed("inf", std.math.inf(f64), 2);
+    try expectFixed("-inf", -std.math.inf(f64), 0);
+    try expectFixed("nan", std.math.nan(f64), 1);
+    try expectFixed("-nan", -std.math.nan(f64), 3);
+
+    // cppFixed converts f32 to f64
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("RPM: 1000, 0.1", try std.fmt.bufPrint(&buffer, "RPM: {f}, {f}", .{ cppFixed(@as(f32, 999.5), 0), cppFixed(@as(f32, 0.1), 1) }));
 }
 
 test "stringReplace edge cases" {
