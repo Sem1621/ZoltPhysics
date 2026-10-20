@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 93.7%** of 90565 lines in scope · **Unit tests: 98.3%** of 18321 lines
+**Library: 95.2%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -20,7 +20,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
-| `Jolt/Physics` | 73% | 12 | 1 | 0 | 0 | 0 | 0 | 5053 |
+| `Jolt/Physics` | 100% | 13 | 0 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 100% | 18 | 0 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 76 | 0 | 0 | 0 | 0 | 0 | 21948 |
@@ -238,7 +238,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics — 73%</summary>
+<details><summary>Jolt/Physics — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -251,7 +251,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `PhysicsScene.cpp`, `PhysicsScene.h` | 298 | ✅ complete | `Zolt/Physics/PhysicsScene.zig` |
 | `PhysicsSettings.h` | 89 | ✅ complete | `Zolt/Physics/PhysicsSettings.zig` |
 | `PhysicsStepListener.h` | 30 | ✅ complete | `Zolt/Physics/PhysicsStepListener.zig` |
-| `PhysicsSystem.cpp`, `PhysicsSystem.h` | 2755 | 🟡 partial | `Zolt/Physics/PhysicsSystem.zig` |
+| `PhysicsSystem.cpp`, `PhysicsSystem.h` | 2755 | ✅ complete | `Zolt/Physics/PhysicsSystem.zig` |
 | `PhysicsUpdateContext.cpp`, `PhysicsUpdateContext.h` | 156 | ✅ complete | `Zolt/Physics/PhysicsUpdateContext.zig` |
 | `StateRecorder.h` | 109 | ✅ complete | `Zolt/Physics/StateRecorder.zig` |
 | `StateRecorderImpl.cpp`, `StateRecorderImpl.h` | 110 | ✅ complete | `Zolt/Physics/StateRecorderImpl.zig` |
@@ -559,15 +559,15 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 | Directory | Progress | ✅ | 🟡 | ⚪ | ❌ | ➖ | ⏸ | C++ lines |
 |-----------|---------:|---:|---:|---:|---:|---:|---:|----------:|
-| `UnitTests` | 93% | 6 | 0 | 0 | 1 | 1 | 0 | 1185 |
+| `UnitTests` | 100% | 7 | 0 | 0 | 0 | 1 | 0 | 1185 |
 | `UnitTests/Compute` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 349 |
 | `UnitTests/Core` | 100% | 11 | 0 | 0 | 0 | 2 | 0 | 1021 |
 | `UnitTests/Geometry` | 100% | 7 | 0 | 0 | 0 | 0 | 0 | 854 |
 | `UnitTests/Math` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 3683 |
 | `UnitTests/ObjectStream` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 220 |
-| `UnitTests/Physics` | 98% | 32 | 0 | 0 | 1 | 0 | 0 | 11009 |
+| `UnitTests/Physics` | 100% | 33 | 0 | 0 | 0 | 0 | 0 | 11009 |
 
-<details><summary>UnitTests — 93%</summary>
+<details><summary>UnitTests — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -575,7 +575,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `LoggingBodyActivationListener.h` | 51 | ✅ complete | `ZoltTests/LoggingBodyActivationListener.zig` |
 | `LoggingCharacterContactListener.h` | 143 | ✅ complete | `ZoltTests/LoggingCharacterContactListener.zig` |
 | `LoggingContactListener.h` | 118 | ✅ complete | `ZoltTests/LoggingContactListener.zig` |
-| `LoggingSoftBodyContactListener.h` | 81 | ❌ todo |  |
+| `LoggingSoftBodyContactListener.h` | 81 | ✅ complete | `ZoltTests/LoggingSoftBodyContactListener.zig` |
 | `PhysicsTestContext.cpp`, `PhysicsTestContext.h` | 268 | ✅ complete | `ZoltTests/PhysicsTestContext.zig` |
 | `UnitTestFramework.cpp`, `UnitTestFramework.h` | 382 | ✅ complete | `ZoltTests/UnitTestFramework.zig` |
 | `doctest.h` | 7301 | ➖ n/a | test framework, Zolt uses Zig's test runner |
@@ -653,7 +653,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>UnitTests/Physics — 98%</summary>
+<details><summary>UnitTests/Physics — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -685,7 +685,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `ShapeTests.cpp` | 950 | ✅ complete | `ZoltTests/Physics/ShapeTests.zig` |
 | `SixDOFConstraintTests.cpp` | 158 | ✅ complete | `ZoltTests/Physics/SixDOFConstraintTests.zig` |
 | `SliderConstraintTests.cpp` | 488 | ✅ complete | `ZoltTests/Physics/SliderConstraintTests.zig` |
-| `SoftBodyTests.cpp` | 222 | ❌ todo |  |
+| `SoftBodyTests.cpp` | 222 | ✅ complete | `ZoltTests/Physics/SoftBodyTests.zig` |
 | `SubShapeIDTest.cpp` | 59 | ✅ complete | `ZoltTests/Physics/SubShapeIDTest.zig` |
 | `TaperedCylinderShapeTests.cpp` | 83 | ✅ complete | `ZoltTests/Physics/TaperedCylinderShapeTests.zig` |
 | `TransformedShapeTests.cpp` | 90 | ✅ complete | `ZoltTests/Physics/TransformedShapeTests.zig` |
