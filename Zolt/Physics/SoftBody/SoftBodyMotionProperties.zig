@@ -583,8 +583,7 @@ pub const SoftBodyMotionProperties = struct {
     }
 };
 
-/// Optimized looking settings for the tests: one update group, so that `initialize` accepts them (Optimize is not
-/// ported yet, group S1)
+/// Optimized looking settings for the tests: one hand-made update group, so that `initialize` accepts them
 fn testSettings(allocator: Allocator, num_rods: usize, skinned: bool) !*SoftBodySharedSettings {
     const s = try SoftBodySharedSettings.create(allocator);
     errdefer {

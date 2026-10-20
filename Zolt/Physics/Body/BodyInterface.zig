@@ -1278,8 +1278,7 @@ const TestSoftBodyWorld = struct {
         self.layer_interface.deinit();
     }
 
-    /// Shared settings that SoftBodyMotionProperties.initialize accepts (one update group, Optimize is group S1),
-    /// reference count 0
+    /// Shared settings that SoftBodyMotionProperties.initialize accepts (one hand-made update group), reference count 0
     fn sharedSettings(allocator: Allocator) !*@import("../SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings {
         const SoftBodySharedSettings = @import("../SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
         const s = try SoftBodySharedSettings.create(allocator);
