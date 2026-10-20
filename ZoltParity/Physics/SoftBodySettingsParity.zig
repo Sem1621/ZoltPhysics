@@ -781,11 +781,9 @@ const Coverage = struct {
     clones: u32 = 0,
 
     fn check(self: *const Coverage) !void {
-        std.debug.print("SoftBodySettings coverage: cases {any}, cubes {d}, duplicated last edges {d}, QuickSorts with ties {d}, runs over 32 {d}, edges with 3+ faces {d}, dihedral bends {d}, LRAs {d}, multi group optimizes {d}, non-parallel constraints {d}, group size ties {d}, cached optimizes {d}, stale cache optimizes {d}, Dijkstra ties {d}, flipped rods {d}, skinned normals {d}, clones {d}\n", .{
-            self.cases,              self.cube_cases,       self.duplicated_last_edges, self.quick_sorts_with_ties, self.runs_over_32,
-            self.edges_with_3_faces, self.dihedral_bends,   self.lra_constraints,       self.multi_group_optimizes, self.non_parallel_constraints,
-            self.group_size_ties,    self.cached_optimizes, self.stale_cache_optimizes, self.dijkstra_ties,         self.flipped_rods,
-            self.skinned_normals,    self.clones,
+        // The cube test counts its cases itself (cube_cases)
+        std.debug.print("SoftBodySettings coverage: cases {any}, duplicated last edges {d}, QuickSorts with ties {d}, runs over 32 {d}, edges with 3+ faces {d}, dihedral bends {d}, LRAs {d}, multi group optimizes {d}, non-parallel constraints {d}, group size ties {d}, cached optimizes {d}, stale cache optimizes {d}, Dijkstra ties {d}, flipped rods {d}, skinned normals {d}, clones {d}\n", .{
+            self.cases, self.duplicated_last_edges, self.quick_sorts_with_ties, self.runs_over_32, self.edges_with_3_faces, self.dihedral_bends, self.lra_constraints, self.multi_group_optimizes, self.non_parallel_constraints, self.group_size_ties, self.cached_optimizes, self.stale_cache_optimizes, self.dijkstra_ties, self.flipped_rods, self.skinned_normals, self.clones,
         });
         try expect(self.duplicated_last_edges > 50);
         try expect(self.quick_sorts_with_ties > 500);

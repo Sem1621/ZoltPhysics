@@ -1124,8 +1124,8 @@ pub const SoftBodySharedSettings = struct {
     /// Optimize the soft body settings for simulation. This will reorder constraints so they can be executed in parallel.
     /// `results` holds arrays allocated with the allocator of the settings (`results.deinit(settings.allocator)`).
     /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The settings are then unchanged: the new
-    /// constraint arrays and the remaps are allocated before anything moves, and the update groups are cleared after
-    /// that (Jolt clears them first, which only matters when Jolt aborts). The remaps may be resized.
+    /// constraint arrays, the remaps and the update groups are allocated before anything moves, and the update groups
+    /// are cleared after that (Jolt clears them first, which only matters when Jolt aborts). The remaps may be resized.
     pub fn optimizeWithResults(self: *SoftBodySharedSettings, results: *OptimizationResults) Allocator.Error!void {
         const allocator = self.allocator;
         const num_vertices = self.vertices.items.len;
@@ -1445,9 +1445,10 @@ pub const SoftBodySharedSettings = struct {
         try temp_skinned.ensureTotalCapacityPrecise(allocator, self.skinned_constraints.items.len);
         try resizeRemap(allocator, &results.skinned_remap, self.skinned_constraints.items.len);
 
-        // Clear any previous results (Jolt does this first)
-        self.update_groups.clearRetainingCapacity();
+        // Clear any previous results (Jolt does this first). Zolt: the capacity comes first, so a failure keeps the old
+        // update groups.
         try self.update_groups.ensureTotalCapacity(allocator, groups.len);
+        self.update_groups.clearRetainingCapacity();
 
         // Nothing fails from here on. temp_x.swap(mX): the temp arrays get the old constraints, the constraint arrays
         // get the reserved memory.
@@ -2575,6 +2576,9 @@ test "SoftBodySharedSettings: optimize leaves the settings unchanged when an all
         const attributes = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{ .lra_type = .euclidean_distance })};
         try s.createConstraints(&attributes, .{ .bend_type = .dihedral });
         for (0..10) |v| try s.skinned_constraints.append(allocator, .init(@intCast(v * 7), 0.1, 0.0, 1.0));
+        // An old update group, which optimize replaces with more groups: a failure must keep it
+        try s.update_groups.ensureTotalCapacityPrecise(allocator, 1);
+        s.update_groups.appendAssumeCapacity(std.mem.zeroes(S.UpdateGroup));
         const before = try saveBytes(allocator, s);
         defer allocator.free(before);
         const num_closest = s.closest_kinematic.items.len;
@@ -2587,6 +2591,7 @@ test "SoftBodySharedSettings: optimize leaves the settings unchanged when an all
         results.deinit(allocator);
         if (result) |_| {
             try std.testing.expect(fail_index > 10);
+            try std.testing.expect(s.update_groups.items.len > 1); // So the old update group array had to grow
             break;
         } else |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
