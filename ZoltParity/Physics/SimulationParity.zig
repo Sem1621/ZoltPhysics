@@ -3035,7 +3035,7 @@ const RunStats = struct {
     num_spawned_jobs: u32 = 0,
     /// Number of OnBodyDeactivated calls from the final batch of a split island (Zolt side, also in the sweeps)
     num_large_island_deactivations: u32 = 0,
-    /// Phase 9: number of ResolveCCDContacts jobs that changed a soft body (Zolt side, also in the sweeps;
+    /// Phase 9: number of steps in which the CCD response changed a soft body (Zolt side, also in the sweeps;
     /// Expect.soft_body_ccd)
     num_soft_body_ccd_responses: u32 = 0,
     /// Largest number of manifolds of one body pair in one update (OnContactAdded + OnContactPersisted records)
