@@ -34,8 +34,10 @@
 //!   claimant of the empty vertex range advances the state, as the last batch would. The body simulates nothing.
 //! - `customUpdate` is literal: a single-threaded loop through the same state machine, with the locking interfaces. It
 //!   returns `error.OutOfMemory` when `determineCollidingShapes` cannot allocate. Then it clears the colliding shapes and
-//!   sensors and returns before the simulation: the vertices are unchanged. `SetPosition` on a body that was never added
-//!   does nothing, like Jolt.
+//!   sensors and returns before the simulation: the vertices are unchanged. Its `setPosition` is Jolt's. A body that was
+//!   created but never added has an ID, so the lock succeeds and the body moves. Only the broad phase update and the
+//!   activation need a body in the broad phase. A body without an ID (`createSoftBodyWithoutID`) does not move: the
+//!   lock fails.
 //! - `skinVertices` takes the joint matrices as a slice (Jolt: a pointer and `inNumJoints`, only used by an assert). It
 //!   returns `TempAllocator.Error` before it changes anything (Jolt's TempAllocatorImpl aborts).
 //! - `clearCollidingShapesAndSensors` (Zolt) is the end of UpdateRigidBodyVelocities: it releases the leaf shapes. The
@@ -85,6 +87,8 @@ const SoftBodySharedSettings = @import("SoftBodySharedSettings.zig").SoftBodySha
 const SoftBodyVertex = @import("SoftBodyVertex.zig").SoftBodyVertex;
 const SoftBodyUpdateContext = @import("SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
 const SoftBodyContactSettings = @import("SoftBodyContactListener.zig").SoftBodyContactSettings;
+const SoftBodyContactListener = @import("SoftBodyContactListener.zig").SoftBodyContactListener;
+const SoftBodyValidateResult = @import("SoftBodyContactListener.zig").SoftBodyValidateResult;
 const SoftBodyManifold = @import("SoftBodyManifold.zig").SoftBodyManifold;
 
 /// This class contains the runtime information of a soft body.
@@ -1875,8 +1879,14 @@ const TestWorld = struct {
     /// A box body added to the system
     fn addBox(self: *TestWorld, half_extent: Vec3, position: RVec3, motion_type: MotionType) !BodyID {
         const box = try BoxShape.create(self.system.allocator, half_extent, .{});
-        var settings: BodyCreationSettings = .initWithShape(box.asShape(), position, Quat.identity(), motion_type, 0);
+        return self.addBody(box.asShape(), position, .{ .motion_type = motion_type });
+    }
+
+    /// A body with `shape` added to the system (the body takes a reference to the shape)
+    fn addBody(self: *TestWorld, shape: *const Shape, position: RVec3, opts: struct { motion_type: MotionType = .static, is_sensor: bool = false }) !BodyID {
+        var settings: BodyCreationSettings = .initWithShape(shape, position, Quat.identity(), opts.motion_type, 0);
         defer settings.deinit();
+        settings.is_sensor = opts.is_sensor;
         const id = try self.system.getBodyInterfaceMut().createAndAddBody(&settings, .dont_activate);
         try std.testing.expect(!id.isInvalid());
         return id;
@@ -1996,6 +2006,115 @@ test "SoftBodyMotionProperties: a soft body without vertices advances its state 
     try std.testing.expect(body.getPosition().eql(RVec3.zero()));
 }
 
+/// A soft body contact listener for the tests: accepts every contact, counts the calls and remembers the last body that
+/// it validated
+const TestSoftBodyListener = struct {
+    num_validates: u32 = 0,
+    num_added: u32 = 0,
+    last_validated: BodyID = .invalid,
+
+    pub fn onSoftBodyContactValidate(self: *TestSoftBodyListener, soft_body: *const Body, other_body: *const Body, settings: *SoftBodyContactSettings) SoftBodyValidateResult {
+        _ = .{ soft_body, settings };
+        self.num_validates += 1;
+        self.last_validated = other_body.getID();
+        return .accept_contact;
+    }
+
+    pub fn onSoftBodyContactAdded(self: *TestSoftBodyListener, soft_body: *const Body, manifold: *const SoftBodyManifold) void {
+        _ = .{ soft_body, manifold };
+        self.num_added += 1;
+    }
+};
+
+test "SoftBodyMotionProperties: a soft body without vertices passes through the sensor state (R20 UB1)" {
+    const allocator = std.testing.allocator;
+    const RVec3 = TestWorld.RVec3;
+    const BoxShape = TestWorld.BoxShape;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    _ = try world.addBox(Vec3.replicate(1), RVec3.init(0, -2, 0), .static);
+    const sensor_id = try world.addBody((try BoxShape.create(allocator, Vec3.replicate(1), .{})).asShape(), RVec3.init(3, 0, 0), .{ .is_sensor = true });
+    var listener: TestSoftBodyListener = .{};
+    world.system.setSoftBodyContactListener(SoftBodyContactListener.init(&listener));
+
+    // A body with one kinematic vertex, then emptied (see the test above)
+    const shared = try SoftBodySharedSettings.create(allocator);
+    try shared.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }));
+    try shared.update_groups.append(allocator, std.mem.zeroes(SoftBodySharedSettings.UpdateGroup));
+    const body = try world.createSoftBody(shared, RVec3.init(0, 0, 0));
+    defer world.system.getBodyInterfaceMut().destroyBody(body.getID());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+    mp.vertices.clearRetainingCapacity();
+    mp.local_bounds = .empty;
+    mp.local_predicted_bounds = .empty;
+
+    // The empty local bounds become the whole world: the box and the sensor are validated and collected
+    var context: SoftBodyUpdateContext = .{};
+    mp.initializeUpdateContext(1.0 / 60.0, body, &world.system, &context);
+    try mp.determineCollidingShapes(&context, &world.system, world.system.getBodyLockInterface());
+    try std.testing.expectEqual(@as(u32, 2), listener.num_validates);
+    try std.testing.expectEqual(@as(usize, 1), mp.colliding_shapes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), mp.colliding_sensors.items.len);
+    try std.testing.expectEqual(@as(u32, 1), mp.num_sensors.load(.monotonic));
+    try std.testing.expect(mp.colliding_sensors.items[0].body_id.eql(sensor_id));
+
+    // The first claimant of the empty vertex range goes to the sensor state, the sensor collides 0 vertices
+    const settings = world.system.getPhysicsSettings();
+    try std.testing.expectEqual(SoftBodyMotionProperties.Status.did_work, mp.parallelUpdate(&context, settings));
+    try std.testing.expectEqual(SoftBodyUpdateContext.State.determine_sensor_collisions, context.state.load(.acquire));
+    try std.testing.expectEqual(SoftBodyMotionProperties.Status.did_work, mp.parallelUpdate(&context, settings));
+    try std.testing.expectEqual(SoftBodyUpdateContext.State.apply_constraints, context.state.load(.acquire));
+    try std.testing.expect(!mp.colliding_sensors.items[0].has_contact);
+    var num_calls: u32 = 2;
+    while (mp.parallelUpdate(&context, settings) == .did_work) : (num_calls += 1)
+        try std.testing.expect(num_calls < 100);
+    try std.testing.expectEqual(SoftBodyUpdateContext.State.done, context.state.load(.acquire));
+    try std.testing.expect(context.delta_position.eql(Vec3.zero()));
+    try std.testing.expect(!mp.need_contact_callback.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), listener.num_added);
+    mp.updateRigidBodyVelocities(&context, world.system.getBodyInterfaceMut());
+    try std.testing.expectEqual(@as(usize, 0), mp.colliding_shapes.items.len + mp.colliding_sensors.items.len);
+
+    // customUpdate finishes too and does not move the body
+    try mp.customUpdate(1.0 / 60.0, body, &world.system);
+    try std.testing.expectEqual(@as(u32, 4), listener.num_validates);
+    try std.testing.expectEqual(@as(u32, 0), listener.num_added);
+    try std.testing.expect(body.getPosition().eql(RVec3.zero()));
+}
+
+test "SoftBodyMotionProperties: customUpdate moves a soft body that was never added, not one without an ID" {
+    const allocator = std.testing.allocator;
+    const RVec3 = TestWorld.RVec3;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    const bi = world.system.getBodyInterfaceMut();
+
+    // Created, not added: it has an ID, so SetPosition moves it (without the broad phase, like Jolt)
+    const shared = try testCloth(allocator, 3, 0.5);
+    const body = try world.createSoftBody(shared, RVec3.init(0, 1, 0));
+    defer bi.destroyBody(body.getID());
+    try std.testing.expect(!body.isInBroadPhase());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+    try std.testing.expect(mp.getUpdatePosition());
+    try mp.customUpdate(1.0 / 60.0, body, &world.system);
+    try std.testing.expect(body.getPosition().getY() < 1.0);
+    try std.testing.expect(!body.isInBroadPhase());
+
+    // Without an ID the lock of SetPosition fails: the body stays where it is
+    var settings: SoftBodyCreationSettings = .init(shared, RVec3.init(0, 1, 0), Quat.identity(), 0);
+    defer settings.deinit();
+    const body2 = try bi.createSoftBodyWithoutID(&settings);
+    defer bi.destroyBodyWithoutID(body2);
+    try std.testing.expect(body2.getID().isInvalid());
+    const mp2 = SoftBodyMotionProperties.fromBase(body2.getMotionPropertiesUncheckedMut().?);
+    try mp2.customUpdate(1.0 / 60.0, body2, &world.system);
+    try std.testing.expect(body2.getPosition().eql(RVec3.init(0, 1, 0)));
+}
+
 test "SoftBodyMotionProperties: customUpdate out of memory releases the colliding shapes and changes no vertex" {
     const RVec3 = TestWorld.RVec3;
     const allocator = std.testing.allocator;
@@ -2029,6 +2148,87 @@ test "SoftBodyMotionProperties: customUpdate out of memory releases the collidin
         try std.testing.expect(fail_index > 3); // The array of 3 colliding shapes and 3 leaf shape arrays
         break;
     }
+}
+
+test "SoftBodyMotionProperties: out of memory with a sensor and a compound keeps the number of sensors and leaks nothing" {
+    const RVec3 = TestWorld.RVec3;
+    const BoxShape = TestWorld.BoxShape;
+    const StaticCompoundShapeSettings = @import("../Collision/Shape/StaticCompoundShape.zig").StaticCompoundShapeSettings;
+    const allocator = std.testing.allocator;
+
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    var listener: TestSoftBodyListener = .{};
+    world.system.setSoftBodyContactListener(SoftBodyContactListener.init(&listener));
+
+    // Under the cloth: a box (1 leaf shape), a compound of two boxes (2 leaf shapes) and a sensor (1 leaf shape)
+    const box_id = try world.addBox(Vec3.replicate(0.5), RVec3.init(-1, -0.4, 0), .static);
+    var compound_settings: StaticCompoundShapeSettings = .init(allocator);
+    defer compound_settings.deinit();
+    for ([_]f32{ -0.5, 0.5 }) |z|
+        try compound_settings.base.addShapePtr(Vec3.init(0, 0, z), Quat.identity(), (try BoxShape.create(allocator, Vec3.init(0.4, 0.5, 0.4), .{})).asShape(), .{});
+    var compound = try compound_settings.asShapeSettings().createShape(allocator);
+    defer compound.deinit();
+    const compound_id = try world.addBody(compound.getPtr().?, RVec3.init(0, -0.4, 0), .{});
+    const sensor_id = try world.addBody((try BoxShape.create(allocator, Vec3.replicate(0.5), .{})).asShape(), RVec3.init(1, -0.4, 0), .{ .is_sensor = true });
+
+    const body = try world.createSoftBody(try testCloth(allocator, 4, 0.5), RVec3.init(0, 0, 0));
+    defer world.system.getBodyInterfaceMut().destroyBody(body.getID());
+    const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesUncheckedMut().?);
+
+    // Fail every allocation of the motion properties in turn. Every growth allocates (no remap), so the second leaf
+    // shape of the compound has an allocation of its own: a failure there releases a list with one leaf shape.
+    var failures_after: [3]u32 = @splat(0); // The failures after the validation of the box, the compound and the sensor
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        // determineCollidingShapes stores the number of sensors that it kept, also after an error (R17)
+        mp.colliding_shapes.clearAndFree(allocator); // The same allocations in every round
+        mp.colliding_sensors.clearAndFree(allocator);
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+        mp.allocator = failing.allocator();
+        var context: SoftBodyUpdateContext = .{};
+        mp.initializeUpdateContext(1.0 / 60.0, body, &world.system, &context);
+        listener.last_validated = .invalid;
+        const result = mp.determineCollidingShapes(&context, &world.system, world.system.getBodyLockInterface());
+        try std.testing.expectEqual(@as(u32, @intCast(mp.colliding_sensors.items.len)), mp.num_sensors.load(.monotonic));
+        if (result) |_| {
+            try std.testing.expectEqual(@as(usize, 2), mp.colliding_shapes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), mp.colliding_sensors.items.len);
+            try std.testing.expectEqual(@as(usize, 3), mp.colliding_shapes.items[0].shapes.items.len + mp.colliding_shapes.items[1].shapes.items.len);
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            const last = listener.last_validated;
+            try std.testing.expect(last.eql(box_id) or last.eql(compound_id) or last.eql(sensor_id));
+            const which: usize = if (last.eql(box_id)) 0 else if (last.eql(compound_id)) 1 else 2;
+            failures_after[which] += 1;
+        }
+        mp.clearCollidingShapesAndSensors();
+        mp.allocator = allocator;
+
+        // customUpdate fails at the same allocation: it releases the colliding shapes and sensors, the vertices stay
+        mp.colliding_shapes.clearAndFree(allocator);
+        mp.colliding_sensors.clearAndFree(allocator);
+        var failing2: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+        mp.allocator = failing2.allocator();
+        defer mp.allocator = allocator;
+        const vertices_before = try allocator.dupe(SoftBodyVertex, mp.getVertices());
+        defer allocator.free(vertices_before);
+        mp.customUpdate(1.0 / 60.0, body, &world.system) catch |err| {
+            try std.testing.expect(std.meta.isError(result));
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), mp.colliding_shapes.items.len + mp.colliding_sensors.items.len);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(vertices_before), std.mem.sliceAsBytes(mp.getVertices()));
+            continue;
+        };
+        try std.testing.expect(!std.meta.isError(result));
+        break;
+    }
+
+    // The sensor fails twice (its leaf shape, the sensor list); the compound once more than the box (its second leaf shape)
+    try std.testing.expectEqual(@as(u32, 2), failures_after[2]);
+    try std.testing.expectEqual(failures_after[0] + 1, failures_after[1]);
+    try std.testing.expect(failures_after[0] > 0);
 }
 
 test "SoftBodyMotionProperties: skinVertices, hard skinning and out of memory" {
