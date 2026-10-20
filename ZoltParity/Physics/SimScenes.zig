@@ -279,11 +279,13 @@
 //!   compared with Zolt's. Both are gone: the soft body scenes run against Zolt.
 //! - **Scenes** (group S5, the list of RemainingFeaturesArchitecture.md section 4): the 3 cases of SoftBodyTests
 //!   (`soft_body_test_*`), linear cast spheres against cubes and cloths in every listener mode (the CCD response against
-//!   a soft body face), cloths with LRA, dihedral bends and fixed corners, pressure spheres, rod chains, skinned cloths
-//!   with back stops, sensors, sleeping and waking through ProcessBodyPair, UpdatePosition false, several soft bodies on
-//!   one dynamic body (the BodyID order of SoftBodyFinalize), save and cross restore, 2 collision steps, a 30 x 30 cloth
-//!   (4 parallel constraint groups and a non-parallel group of 308 edges), vertex counts around 64 and every kind of
-//!   rigid shape.
+//!   a soft body face, `Expect.soft_body_ccd`), linear cast spheres against faces with fixed vertices of rotated cloths
+//!   (MakeRotationIdentity false), cloths with LRA, dihedral bends and fixed corners, pressure spheres, rod chains,
+//!   skinned cloths with back stops, sensors, sleeping and waking through ProcessBodyPair, UpdatePosition false, several
+//!   soft bodies on one dynamic body (the BodyID order of SoftBodyFinalize), save and cross restore, 2 collision steps, a
+//!   30 x 30 cloth (4 parallel constraint groups and a non-parallel group of 308 edges, `Expect.soft_body_groups`),
+//!   vertex counts around 64, every kind of rigid shape, and 70 soft bodies that go to sleep in the same update (the
+//!   batches of SoftBodyFinalize, `Expect.update_deactivations`).
 //! - **D12 sweeps.** Jolt's SaveState does not hold mSkinStatePreviousPositionValid. SkinVertices sets it, the update
 //!   clears it, and it selects the skin interpolation factor. Every update that starts from the snapshot of a sweep gets
 //!   the value of the snapshot again, like the InvalidateContactCache flags (SimulationParity.zig, `SkinFlags`). The
@@ -2818,6 +2820,17 @@ pub const Expect = struct {
     /// The soft body contact listener records of the scene include each of these RecordKinds at least once (bit
     /// `1 << kind`, `recordBit`)
     soft_body_records: u128 = 0,
+    /// A linear cast body hits a soft body face and JobResolveCCDContacts takes its soft body branch (Zolt side: a
+    /// ResolveCCDContacts job changes the vertex velocities or the CCD contact marks of a soft body, in some
+    /// configuration). `ccd_hits` does not see these hits: Jolt adds no CCD manifold for a soft body.
+    soft_body_ccd: bool = false,
+    /// A shared settings object of the scene has at least 2 parallel update groups and a non-parallel group with
+    /// constraints (Zolt side: SoftBodySharedSettings.update_groups after Optimize)
+    soft_body_groups: bool = false,
+    /// At least this many bodies are deactivated from inside one update (OnBodyDeactivated during PhysicsSystem::Update,
+    /// Zolt side, not by the operations before it). More than 64 soft bodies that go to sleep in one update fill the
+    /// batch of JobSoftBodyFinalize.
+    update_deactivations: u32 = 0,
 };
 
 /// The bit of a transmission gear (-8 .. 23) in `Expect.vehicle_gears`
@@ -3214,9 +3227,10 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
     .{ .name = "soft_body_test_bend_constraint", .build = buildSoftBodyTestBendConstraint, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true },
     .{ .name = "soft_body_test_apply_force", .build = buildSoftBodyTestApplyForce, .blocked_by = .soft_bodies, .sweep_stride = 40, .restore_broad_phase = true },
-    .{ .name = "soft_body_test_linear_cast_sphere", .build = buildSoftBodyTestLinearCastSphere, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_ccd_cube_listener_modes", .build = buildSoftBodyCcdCube, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_ccd_cloth_listener_modes", .build = buildSoftBodyCcdCloth, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_test_linear_cast_sphere", .build = buildSoftBodyTestLinearCastSphere, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_cube_listener_modes", .build = buildSoftBodyCcdCube, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_cloth_listener_modes", .build = buildSoftBodyCcdCloth, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_fixed_and_rotated", .build = buildSoftBodyCcdFixedAndRotated, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
     .{ .name = "soft_body_cloth_lra", .build = buildSoftBodyClothLRA, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     .{ .name = "soft_body_cloth_dihedral", .build = buildSoftBodyClothDihedral, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true },
     .{ .name = "soft_body_pressure_sphere", .build = buildSoftBodyPressureSphere, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
@@ -3229,9 +3243,10 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "soft_body_save_restore", .build = buildSoftBodySaveRestore, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     .{ .name = "soft_body_collision_steps_2", .build = buildSoftBodyCollisionSteps2, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     // Creating the 30 x 30 cloth (CreateConstraints, Optimize) allocates thousands of times: no creation sweep
-    .{ .name = "soft_body_large_cloth", .build = buildSoftBodyLargeCloth, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .creation_sweep = false, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_large_cloth", .build = buildSoftBodyLargeCloth, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .creation_sweep = false, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_groups = true } },
     .{ .name = "soft_body_partial_batches", .build = buildSoftBodyPartialBatches, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     .{ .name = "soft_body_shapes", .build = buildSoftBodyShapes, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_many_go_to_sleep", .build = buildSoftBodyManyGoToSleep, .blocked_by = .soft_bodies, .sweep_stride = soft_body_many_sleep_update, .restore_broad_phase = true, .expect = .{ .sleeping = true, .update_deactivations = soft_body_many_count } },
     // (append the soft body scenes here)
 };
 
@@ -16658,6 +16673,68 @@ fn buildSoftBodyCcdCloth(b: *SceneBuilder) Allocator.Error!void {
     }
 }
 
+/// A linear cast sphere of mass `mass` (no damping) that starts 0.35 m in front of the point `target` of a soft body
+/// face with the normal `normal` and moves towards it with 20 m/s (one update moves it 0.33 m)
+fn shootSphereAtFace(b: *SceneBuilder, sphere: u32, target: [3]Real, normal: [3]f32, mass: f32) Allocator.Error!u32 {
+    const distance: f32 = 0.35;
+    const speed: f32 = 20.0;
+    return b.body(.{
+        .position = .{ target[0] + real(distance * normal[0]), target[1] + real(distance * normal[1]), target[2] + real(distance * normal[2]) },
+        .shape = sphere,
+        .motion_quality = 1,
+        .override_mass_properties = 1,
+        .mass = mass,
+        .linear_velocity = .{ -speed * normal[0], -speed * normal[1], -speed * normal[2] },
+        .linear_damping = 0,
+        .object_layer = Layers.moving,
+    }, .activate);
+}
+
+/// Linear cast spheres against cloths with fixed rows (inverse mass 0) that keep their rotation (MakeRotationIdentity
+/// false: the inverse transform of the CCD response rotates). A light sphere hits a face with a fixed vertex and two
+/// free vertices that move (the barycentric velocity of the face). A heavy sphere hits a face whose 3 vertices are fixed
+/// (the mass 1e10 of a fixed vertex: the inverse mass 1 / 3e10 of the face is visible next to the inverse mass 1e-5 of
+/// the sphere). The spheres hit at update 0 with the accepting listener (a fixed vertex keeps its CCD contact mark until
+/// OnSoftBodyContactAdded, so the records hash the local contact plane) and at update 25 without a listener. Both are
+/// sweep updates.
+fn buildSoftBodyCcdFixedAndRotated(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    const n = 7;
+    const spacing: f32 = 0.2;
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cloth), .count_x = n, .count_z = n, .spacing = spacing, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .kinematic = 2 });
+    const sphere = try b.sphere(0.15);
+    // The two faces of the quad x = 2, z = 0 (SoftBodySettingsKind.cloth, row z = 0 is fixed): face (2, 9, 10) has the
+    // fixed vertex 2 and the free vertices 9 and 10; face (2, 10, 3) has the fixed vertices 2 and 3, and the operations
+    // fix vertex 10. The spheres aim at the centroids (local X and Z).
+    const offset = -0.5 * spacing * @as(f32, n - 1);
+    const centroids = [2][2]f32{
+        .{ offset + spacing * 7.0 / 3.0, offset + spacing * 2.0 / 3.0 },
+        .{ offset + spacing * 8.0 / 3.0, offset + spacing * 1.0 / 3.0 },
+    };
+    for ([_]SoftBodyListenerMode{ .accept, .none }, 0..) |mode, wave| {
+        b.at(@intCast(25 * wave));
+        try b.softBodyListener(mode);
+        for (centroids, 0..) |centroid, k| {
+            const i = 2 * wave + k;
+            const position: [3]Real = .{ 3 * real(i), 2, 0 };
+            const rotation = axisAngle(normalize3(.{ 1, 0.4, -0.3 }), 0.5 + 0.35 * @as(f64, @floatFromInt(i)));
+            const handle = try b.softBody(.{ .settings = cloth, .position = position, .rotation = rotation, .make_rotation_identity = 0, .object_layer = Layers.moving }, .activate);
+            if (k == 0) {
+                // Local velocities of the free vertices
+                try b.softBodyOp(.soft_body_set_vertex_velocity, handle, .{ .i = &.{9}, .f = &.{ 0.6, -0.4, 0.3 } });
+                try b.softBodyOp(.soft_body_set_vertex_velocity, handle, .{ .i = &.{10}, .f = &.{ -0.3, 0.5, 0.2 } });
+            } else {
+                try b.softBodyOp(.soft_body_set_vertex_inv_mass, handle, .{ .i = &.{10}, .f = &.{0} });
+            }
+            const local = quatRotate(rotation, .{ centroid[0], 0, centroid[1] });
+            const normal = quatRotate(rotation, .{ 0, 1, 0 });
+            const target: [3]Real = .{ position[0] + real(local[0]), position[1] + real(local[1]), position[2] + real(local[2]) };
+            _ = try shootSphereAtFace(b, sphere, target, normal, if (k == 0) 0.5 else 1.0e5);
+        }
+    }
+}
+
 /// A cloth with fixed corners and LRA constraints (Euclidean and geodesic) that sags onto a sphere
 fn buildSoftBodyClothLRA(b: *SceneBuilder) Allocator.Error!void {
     const K = SoftBodySettingsKind;
@@ -16949,6 +17026,25 @@ fn buildSoftBodyShapes(b: *SceneBuilder) Allocator.Error!void {
     _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.2, 3 }, .object_layer = Layers.moving }, .activate);
     _ = try b.body(.{ .position = .{ 3, 0.3, 3 }, .shape = ball, .object_layer = Layers.moving }, .activate);
     _ = try b.softBody(.{ .settings = cube, .position = .{ 3, 1.2, 3 }, .object_layer = Layers.moving }, .activate);
+}
+
+/// The number of soft bodies of soft_body_many_go_to_sleep and the update in which they all go to sleep (its sweep
+/// stride: the sweep runs that update)
+const soft_body_many_count = 70;
+const soft_body_many_sleep_update = 31;
+
+/// More soft bodies than a batch of JobSoftBodyFinalize (64): small cubes (sCreateCube(2, 0.2), 8 vertices) on a floor.
+/// Every update notifies the bounds of more than 64 soft bodies, and they all go to sleep in the same update (a sweep
+/// update), so the deactivation batch is flushed inside the loop too.
+fn buildSoftBodyManyGoToSleep(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = soft_body_many_sleep_update + 5;
+    _ = try addFloor(b, 10, 0);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 2, .spacing = 0.2 });
+    for (0..soft_body_many_count) |i| {
+        const x = 0.5 * real(i % 10) - 2.25;
+        const z = 0.5 * real(i / 10) - 1.75;
+        _ = try b.softBody(.{ .settings = cube, .position = .{ x, 0.11, z }, .object_layer = Layers.moving }, .activate);
+    }
 }
 
 // (append the soft body scenes here)

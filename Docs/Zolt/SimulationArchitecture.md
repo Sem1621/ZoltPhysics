@@ -450,6 +450,10 @@ other soft body jobs inside a job: Finalize, then N Simulate jobs, then N Collid
 - The FailingJobSystem and FailingTempAllocator sweeps of the soft body scenes need no special
   case: every failed creation must give the reference bytes. A FailingHeapAllocator test over a soft
   body scene (PhysicsSystemTests) covers the heap allocation of `determineCollidingShapes`.
+- FailingJobSystem fails one call, so with N > 1 its sweeps never miss several Simulate or Collide
+  jobs in one step. The test "several soft body jobs missing in one step" (PhysicsSystemTests, N = 4)
+  fails the soft body jobs by name: no Simulate job, no Collide job, some of each. A wrong
+  dependency count hangs it.
 
 **Heap allocation inside a job.** `BroadPhase.updatePrepare` is a heap allocation inside a job
 (QuadTree's `new NodeID[]`, D9). `determineCollidingShapes` of the soft body Collide jobs is

@@ -696,11 +696,31 @@ const SimCollide = struct {
 
 /// Wraps the job system of a world and counts the FindCollisions jobs that are spawned from inside jobs
 /// (TrySpawnJobFindCollisions creates them without dependencies, the job graph with dependencies) and the
-/// FindCCDContacts jobs (PostIntegrateVelocity creates them from inside its job)
+/// FindCCDContacts jobs (PostIntegrateVelocity creates them from inside its job).
+/// Phase 9 (Expect.soft_body_ccd): in a world with soft bodies (`soft_bodies_of`), the ResolveCCDContacts and
+/// SoftBodyPrepare jobs run inside `runWrapped`. It counts the steps in which the soft bodies change between the start
+/// of ResolveCCDContacts and the start of SoftBodyPrepare. Only the CCD response against a soft body face writes the
+/// vertex velocities and the CCD contact marks there: the jobs in between (ContactRemovedCallbacks,
+/// SolvePositionConstraints, BodySetIslandIndex) do not touch the soft bodies. The end of ResolveCCDContacts is too
+/// late: its job releases SolvePositionConstraints, and the single threaded job system runs the jobs that follow
+/// inside that call.
 const SpawnCountingJobSystem = struct {
     inner: JobSystem,
     num_spawned_find_collisions: std.atomic.Value(u32) = .init(0),
     num_find_ccd_contacts: std.atomic.Value(u32) = .init(0),
+    /// Phase 9: the system whose soft bodies `runWrapped` looks at (null: the scene has no soft bodies)
+    soft_bodies_of: ?*const PhysicsSystem = null,
+    /// The functions of the ResolveCCDContacts and SoftBodyPrepare jobs that wait to run (rings: an update creates one
+    /// of each per collision step)
+    wrapped_functions: [wrapped_names.len][16]JobSystem.JobFunction = undefined,
+    num_wrapped: [wrapped_names.len]std.atomic.Value(u32) = @splat(.init(0)),
+    /// The hash of the soft bodies at the start of the last ResolveCCDContacts job (the steps run one after the other,
+    /// SoftBodyPrepare of a step depends on its ResolveCCDContacts)
+    soft_bodies_before_ccd: ?u32 = null,
+    /// Number of steps in which the CCD response changed a soft body
+    num_soft_body_ccd_responses: std.atomic.Value(u32) = .init(0),
+
+    const wrapped_names = [_][]const u8{ "ResolveCCDContacts", "SoftBodyPrepare" };
 
     fn jobSystem(self: *SpawnCountingJobSystem) JobSystem {
         return .init(self);
@@ -711,12 +731,51 @@ const SpawnCountingJobSystem = struct {
     }
 
     pub fn createJob(self: *SpawnCountingJobSystem, job_name: []const u8, color: Color, job_function: JobSystem.JobFunction, opts: struct { num_dependencies: u32 = 0 }) error{OutOfMemory}!JobSystem.JobHandle {
-        const handle = try self.inner.createJob(job_name, color, job_function, .{ .num_dependencies = opts.num_dependencies });
+        var function = job_function;
+        if (self.soft_bodies_of != null) {
+            for (wrapped_names, 0..) |name, kind| {
+                if (!std.mem.eql(u8, job_name, name)) continue;
+                const slot: u32 = self.num_wrapped[kind].fetchAdd(1, .monotonic) % @as(u32, self.wrapped_functions[kind].len);
+                self.wrapped_functions[kind][slot] = job_function;
+                function = .init(runWrapped, .{ self, @as(u32, @intCast(kind)), slot });
+            }
+        }
+        const handle = try self.inner.createJob(job_name, color, function, .{ .num_dependencies = opts.num_dependencies });
         if (opts.num_dependencies == 0 and std.mem.eql(u8, job_name, "FindCollisions"))
             _ = self.num_spawned_find_collisions.fetchAdd(1, .monotonic);
         if (std.mem.eql(u8, job_name, "FindCCDContacts"))
             _ = self.num_find_ccd_contacts.fetchAdd(1, .monotonic);
         return handle;
+    }
+
+    /// A wrapped job (`kind` indexes `wrapped_names`): ResolveCCDContacts hashes the soft bodies first, SoftBodyPrepare
+    /// first compares them with that hash
+    fn runWrapped(self: *SpawnCountingJobSystem, kind: u32, slot: u32) void {
+        if (kind == 0) {
+            self.soft_bodies_before_ccd = self.hashSoftBodies();
+        } else if (self.soft_bodies_before_ccd) |before| {
+            if (self.hashSoftBodies() != before)
+                _ = self.num_soft_body_ccd_responses.fetchAdd(1, .monotonic);
+            self.soft_bodies_before_ccd = null;
+        }
+        self.wrapped_functions[kind][slot].call();
+    }
+
+    /// A hash of what the CCD response writes to the soft bodies: the vertex velocities and the CCD contact marks
+    fn hashSoftBodies(self: *const SpawnCountingJobSystem) u32 {
+        var hash = SimScenes.hash_seed;
+        for (self.soft_bodies_of.?.body_manager.getBodies()) |slot| {
+            if (!slot.isValidBodyPointer()) continue;
+            const body = slot.getBody();
+            if (!body.isSoftBody()) continue;
+            for (zolt.SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties()).getVertices()) |*v| {
+                const velocity = [3]f32{ v.velocity.getX(), v.velocity.getY(), v.velocity.getZ() };
+                hash = SimScenes.hashBytes(hash, std.mem.asBytes(&velocity));
+                hash = SimScenes.hashBytes(hash, std.mem.asBytes(&v.colliding_shape_index));
+                hash = SimScenes.hashBytes(hash, std.mem.asBytes(&v.has_contact));
+            }
+        }
+        return hash;
     }
 
     pub fn createBarrier(self: *SpawnCountingJobSystem) ?*JobSystem.Barrier {
@@ -887,7 +946,7 @@ const ZoltWorld = struct {
             .per_leaf => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.perLeaf }),
             .per_body => self.system.setSimCollideBodyVsBody(.{ .function = SimCollide.perBody }),
         }
-        self.counting_jobs = .{ .inner = self.jobs.jobSystem() };
+        self.counting_jobs = .{ .inner = self.jobs.jobSystem(), .soft_bodies_of = if (desc.num_soft_bodies > 0) &self.system else null };
 
         errdefer self.shapes.deinit(allocator);
         errdefer for (self.shapes.items) |*s| s.deinit();
@@ -2700,9 +2759,11 @@ const Run = struct {
 
         const ccd_jobs_before = self.zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
         const activations_before = self.zw.countRecords(.body_activated);
+        const deactivations_before = self.zw.countRecords(.body_deactivated);
         const zolt_errors = try self.zw.update(delta_time, collision_steps, self.zw.temp.tempAllocator(), self.zw.jobSystem());
         self.countCCDJobs(ccd_jobs_before);
         self.countUpdateActivations(activations_before);
+        self.countUpdateDeactivations(deactivations_before);
         if (!self.zw.temp.isEmpty()) return self.fail("the temp allocator is not empty after the update", .{});
         const jolt_errors = self.cw.update(delta_time, collision_steps);
         if (zolt_errors != jolt_errors)
@@ -2729,6 +2790,13 @@ const Run = struct {
     fn countUpdateActivations(self: *Run, before: u32) void {
         const num_activations = self.zw.countRecords(.body_activated) - before;
         self.stats.max_update_activations = @max(self.stats.max_update_activations, num_activations);
+    }
+
+    /// Phase 9: the number of bodies deactivated from inside the update that just ran (Zolt side, `before`: the
+    /// deactivation records of the operations before it)
+    fn countUpdateDeactivations(self: *Run, before: u32) void {
+        const num_deactivations = self.zw.countRecords(.body_deactivated) - before;
+        self.stats.max_update_deactivations = @max(self.stats.max_update_deactivations, num_deactivations);
     }
 
     /// The number of FindCCDContacts jobs of the update that just ran (Zolt side)
@@ -2801,10 +2869,12 @@ const Run = struct {
         var counting: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{});
         const ccd_jobs_before = zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
         const activations_before = zw.countRecords(.body_activated);
+        const deactivations_before = zw.countRecords(.body_deactivated);
         const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobSystem());
         const compared_asserts = if (self.asserts) |a| a.get() else 0;
         self.countCCDJobs(ccd_jobs_before);
         self.countUpdateActivations(activations_before);
+        self.countUpdateDeactivations(deactivations_before);
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
@@ -2936,6 +3006,9 @@ const RunStats = struct {
     /// Largest number of bodies activated from inside one update (Zolt side, the activations of the operations before
     /// the update not counted)
     max_update_activations: u32 = 0,
+    /// Phase 9: largest number of bodies deactivated from inside one update (Zolt side, the deactivations of the
+    /// operations before the update not counted; Expect.update_deactivations)
+    max_update_deactivations: u32 = 0,
     /// Number of restore_cross operations that changed the state
     restores_changing_the_state: u32 = 0,
     /// Number of checked expect_body_state operations
@@ -2944,6 +3017,9 @@ const RunStats = struct {
     num_spawned_jobs: u32 = 0,
     /// Number of OnBodyDeactivated calls from the final batch of a split island (Zolt side, also in the sweeps)
     num_large_island_deactivations: u32 = 0,
+    /// Phase 9: number of ResolveCCDContacts jobs that changed a soft body (Zolt side, also in the sweeps;
+    /// Expect.soft_body_ccd)
+    num_soft_body_ccd_responses: u32 = 0,
     /// Largest number of manifolds of one body pair in one update (OnContactAdded + OnContactPersisted records)
     max_manifolds_per_body_pair: u32 = 0,
     /// Largest number of active constraints before an update (Zolt side, Expect.active_constraints)
@@ -3028,6 +3104,7 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
 
     run.stats.num_spawned_jobs = zw.counting_jobs.num_spawned_find_collisions.load(.monotonic);
     run.stats.num_large_island_deactivations = zw.num_large_island_deactivations.load(.monotonic);
+    run.stats.num_soft_body_ccd_responses = zw.counting_jobs.num_soft_body_ccd_responses.load(.monotonic);
     if (asserts) |a| run.stats.num_zolt_asserts = a.get() - zolt_asserts_before - run.uncompared_asserts;
     run.stats.num_jolt_asserts = jolt.jolt_sim_reference_assert_count() - jolt_asserts_before;
     return run.stats;
@@ -7354,6 +7431,25 @@ fn checkSoftBodySettings(allocator: Allocator, name: []const u8, builder: *const
     }
 }
 
+/// Phase 9, Expect.soft_body_groups: some shared settings object of the scene has at least 2 parallel update groups and a
+/// non-parallel group with constraints (the last group of SoftBodySharedSettings.update_groups, as Optimize builds them
+/// on the Zolt side; the bytes are Jolt's, see checkSoftBodySettings)
+fn checkSoftBodyGroups(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    if (!entry.expect.soft_body_groups) return;
+    const desc = builder.desc();
+    for (builder.soft_body_settings.items) |*s| {
+        var settings = try SoftBodySlot.makeSettings(allocator, &desc, s);
+        defer settings.deinit();
+        const groups = settings.get().?.update_groups.items;
+        if (groups.len < 3) continue; // At least 2 parallel groups and the non-parallel group
+        // The non-parallel group has constraints: one of its end indices differs from the one of the last parallel group
+        const last_parallel = &groups[groups.len - 2];
+        const non_parallel = &groups[groups.len - 1];
+        if (!std.mem.eql(u8, std.mem.asBytes(last_parallel), std.mem.asBytes(non_parallel))) return;
+    }
+    try expectReached(entry, "a shared settings object with several parallel update groups and a non-parallel group with constraints", false);
+}
+
 /// The soft body listener records of one update agree with each other (a check of SimSoftBodyContactListener while the
 /// soft body scenes run on the C++ side alone): per soft body, the vertices with a contact of its soft_body_contact_added
 /// records are the vertices of its soft_body_contact_body records, and its sensor contacts are its
@@ -7449,6 +7545,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     try checkPhase7Settings(allocator, entry, &builder);
     try checkSoftBodyBlocker(entry, &builder);
     try checkSoftBodySettings(allocator, entry.name, &builder);
+    try checkSoftBodyGroups(allocator, entry, &builder);
 
     // R8: a release_only scene runs with a handler that counts Zolt's asserts and lets the code continue (also during
     // the creation sweep below)
@@ -7505,6 +7602,10 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (expect.wheel_contacts) try expectReached(entry, "wheel contacts", stats[0].objects.wheel_contacts);
     try expectVehicleGears(entry, &stats[0].objects);
     if (expect.soft_body_records != 0) try expectReached(entry, "the soft body listener callbacks of Expect.soft_body_records", recordsReach(records, expect.soft_body_records));
+    var num_soft_body_ccd_responses: u32 = 0;
+    for (stats) |s| num_soft_body_ccd_responses += s.num_soft_body_ccd_responses;
+    if (expect.soft_body_ccd) try expectReached(entry, "the CCD response against a soft body face", num_soft_body_ccd_responses > 0);
+    if (expect.update_deactivations > 0) try expectReached(entry, "bodies deactivated from inside one update", stats[0].max_update_deactivations >= expect.update_deactivations);
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);
