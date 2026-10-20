@@ -858,7 +858,7 @@ const TestSystem = struct {
 };
 
 test "SoftBody parity: the reference counts its asserts" {
-    // With -Dreference_asserts=true the hook of SoftBodyReference.cpp prints and counts a failed Jolt assert (the
+    // With -Dreference_asserts=true the hook of ZoltParity/ParityHooks.h prints and counts a failed Jolt assert (the
     // creation layers check the count), without asserts nothing is counted
     var before: u32 = undefined;
     var after: u32 = undefined;

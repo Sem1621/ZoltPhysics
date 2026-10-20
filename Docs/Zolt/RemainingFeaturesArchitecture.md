@@ -568,6 +568,7 @@ tests pin them.
 | UB8 | `mSimulationStrandsFraction > 1` on the last material run | reads past the index array | panics with a message (the other runs are defined: literal) |
 | UB9 | an allocation failure in a draw | abort | the primitive is dropped and latched (R5) |
 | UB10 | two threads draw the same uncached shape | a data race on the cache | a mutex: one cached geometry (R6) |
+| UB11 | `uint3(float3)` of NaN or of a value outside the `uint32` range (settled in C0) | the result depends on clang's vectorization at the call site: three scalar 64-bit conversions in HairGridAccumulate, a `cvttps2dq` pair for x and y in the `ApplyGrid` of HairIntegrate and HairUpdateVelocityIntegrate | the scalar conversion of porting guide rule 12 for every component (`uint3.fromFloat3`), pinned by a Zolt-only test. The dispatch parity and the hair scenes never produce such grid positions: no zero-size bounds axis without padding, no NaN positions, no diverging scenes |
 
 ### R21 Port status and scope
 
@@ -788,7 +789,7 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | **S1** shared settings | R20's settings quirks: CreateConstraints, closest kinematic, rods, bends, volumes, skinned normals, Optimize, Clone, `createCube`; the SoftBodySettings layer | `SoftBodySharedSettings.zig` (algorithm region), `ZoltParity/Physics/SoftBodySettings*` | – | S0 | ~1235 |
 | **S3** soft body shape | `SoftBodyShape` (every override, the queries, `register`); the soft body part of PairwiseParity | `SoftBodyShape.zig` | `PairwiseParity.zig` / `PairwiseReference.cpp` (soft body region) | S0 | ~340 |
 | **D0** renderer foundation | the gated vtable entries and placeholders of Constraint and VehicleController; `PhysicsSystem.debug_renderer` and `setDebugRenderer`; DebugRendererSimple, DebugRendererPlayback; `writeFloatFixed` / `cppFixed` and their parity (R7); the call-log harness on both sides; the `debug-renderer-check` step | `Renderer/DebugRendererSimple.zig`, `Renderer/DebugRendererPlayback.zig`, `ZoltParity/Renderer/` | `Constraint.zig`, `VehicleController.zig` (vtable lines); `PhysicsSystem.zig` (field and setter); `StringTools.zig` (fixed region); `build.zig` (the step) | – | ~700 |
-| **S4** motion properties | initialize, mass and inertia, colliding shapes, collision planes, sensors, pressure, integration, the 7 solvers, collision response, `updateSoftBodyState`, `updateRigidBodyVelocities`, the state machine (UB1), `skinVertices`, `customUpdate`, Save/RestoreState; the SoftBodyUpdate layer | `SoftBodyMotionProperties.zig` | `SoftBodyReference.cpp` (customUpdate region) | S1, S3 | ~1310 |
+| **S4** motion properties | colliding shapes, collision planes, sensors, pressure, integration, the 7 solvers, collision response, `updateSoftBodyState`, `updateRigidBodyVelocities`, the state machine (UB1), `skinVertices`, `customUpdate`, Save/RestoreState; the SoftBodyUpdate layer | `SoftBodyMotionProperties.zig` | `SoftBodyReference.cpp` (customUpdate region) | S1, S3 | ~1310 |
 | **S2** soft body binary state and scene | creation settings binary state, `saveWithChildren` / `restoreWithChildren`, `saveWithMaterials` / `restoreWithMaterials`, `PhysicsScene.mSoftBodies`; the PhysicsScene exclusions; P7, P9, BodyInterfaceParity | `SoftBodyCreationSettings.zig`, `PhysicsScene.zig` | `SoftBodySharedSettings.zig` (with-materials region); the ObjectStream harness | S0 (S1 for `createCube` in tests) | ~410 |
 | **SH** soft body simulation harness | section 4: descriptions, generators on both sides, OpKind 53..69, RecordKind 70..74, the decoder, the skin flag in the sweeps, the `Blocker` flip, one smoke scene | – | `SimScenes.zig`, `SimulationReference.cpp`, `SimulationParity.zig` (soft body regions) | S0 | harness |
 | **S5** soft body integration | R17, R18: the 4 jobs and their D5 rows, the CCD face, LoggingSoftBodyContactListener, SoftBodyTests (**M10 at its merge**), the soft body scenes and their bites, the FailingHeapAllocator test | `ZoltTests/LoggingSoftBodyContactListener.zig`, `ZoltTests/Physics/SoftBodyTests.zig` | `PhysicsSystem.zig` (soft body jobs, CCD face); `SimScenes.zig` (soft body scene list); `SimulationArchitecture.md` (D5 rows) | S4, SH | ~260 + scenes |
@@ -816,6 +817,9 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | 7 | D4 | H3 | – |
 | 8 | A | – | – |
 
+- Settled in wave 1: S0 ported `initialize`, `calculateMassAndInertia`, `getVolume` and the trivial SoftBodyShape
+  overrides, because R16's fallible creation needs them; the creation parity layer covers them. S4 does not port them
+  again. `SoftBodyReference.cpp` is S0's file (C prefix `jolt_sb_`); S4 and SH add their parts in their own regions.
 - M10 needs F0, C0 and S5. S5 is on the critical path: F0 / S0, then S1 and S3, then S4 and SH, then S5.
 - F0, S0 and C0 share no file but the registries and `port_status.py` (different regions).
 - The two groups that edit `PhysicsSystem.zig` (S5, D3) and the three that edit `BodyManager.zig` (S0, D3, D4) run in

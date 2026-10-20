@@ -7,10 +7,9 @@
 // copies the RW buffers back. The Zig side runs the same calls on Zolt's ComputeSystemCPU and compares the bytes.
 //
 // The hooks: Jolt's ComputeBufferCPU leaves a buffer without data uninitialized (UB4 of R20), Zolt zero-fills it. So
-// this file installs zero-filling allocation hooks, before main and in every exported function that allocates. A
-// filtered parity run links only the reference objects that it uses, so the file cannot rely on another file's hooks.
-// ZoltParity/ParityHooks.h (group F0) holds the shared hooks; it was not merged when this file was written, so the same
-// hooks are inline here. Replace them with `#include <ZoltParity/ParityHooks.h>` and ParityInstallHooks() once it is.
+// this file uses the zero-filling hooks of ZoltParity/ParityHooks.h (R1), installed before main and again in every
+// exported function that allocates. A filtered parity run links only the reference objects that it uses, so the file
+// cannot rely on another file's hooks.
 //
 // Conventions: no bool parameters (porting guide section 10). ComputeBindingDesc must match the extern struct of
 // ComputeParity.zig. All functions are prefixed with jolt_compute_.
@@ -24,6 +23,7 @@
 #include <Jolt/Shaders/HairStructs.h>
 #include <Jolt/Shaders/TestComputeBindings.h>
 #include <Jolt/Shaders/TestCompute2Bindings.h>
+#include <ZoltParity/ParityHooks.h>
 
 #include <cstddef>
 #include <cstdlib>
@@ -34,51 +34,11 @@ JPH_DECLARE_REGISTER_SHADER(TestCompute2)
 
 using namespace JPH;
 
-// The zero-filling hooks (see the file header: the same as ZoltParity/ParityHooks.h of group F0)
-
-static void *ComputeZeroAllocate(size_t inSize)
-{
-	return calloc(1, inSize);
-}
-
-static void *ComputeZeroReallocate(void *inBlock, size_t inOldSize, size_t inNewSize)
-{
-	void *block = realloc(inBlock, inNewSize);
-	if (block != nullptr && inNewSize > inOldSize)
-		memset(static_cast<uint8 *>(block) + inOldSize, 0, inNewSize - inOldSize);
-	return block;
-}
-
-static void ComputeFree(void *inBlock)
-{
-	free(inBlock);
-}
-
-static void *ComputeZeroAlignedAllocate(size_t inSize, size_t inAlignment)
-{
-	void *block = nullptr;
-	if (posix_memalign(&block, inAlignment, inSize) != 0)
-		return nullptr;
-	memset(block, 0, inSize);
-	return block;
-}
-
-static void ComputeInstallHooks()
-{
-	Allocate = ComputeZeroAllocate;
-	Reallocate = ComputeZeroReallocate;
-	Free = ComputeFree;
-	AlignedAllocate = ComputeZeroAlignedAllocate;
-	AlignedFree = ComputeFree;
-}
-
-// Before main: before any Jolt allocation of the parity process
-[[maybe_unused]] static const bool sComputeHooksInstalled = (ComputeInstallHooks(), true);
 
 // The compute system of the process (never released)
 static ComputeSystemCPU *sGetSystem()
 {
-	ComputeInstallHooks();
+	ParityInstallHooks();
 
 	static ComputeSystemCPU *sSystem = []() {
 		ComputeSystemResult result = CreateComputeSystemCPU();
@@ -109,7 +69,7 @@ struct ComputeBindingDesc
 /// The IsKindOf checks of TestComputeCPU: ComputeSystem, ComputeSystemCPU, ShapeSettings (1 = true)
 void jolt_compute_is_kind_of(uint32 *outValues)
 {
-	ComputeInstallHooks();
+	ParityInstallHooks();
 	ComputeSystemResult result = CreateComputeSystemCPU();
 	Ref<ComputeSystem> system = result.Get();
 	outValues[0] = IsKindOf(system.GetPtr(), JPH_RTTI(ComputeSystem))? 1 : 0;

@@ -31,87 +31,10 @@ using namespace JPH;
 
 #include <UnitTests/Layers.h>
 
-// The hooks of ZoltParity/ParityHooks.h (Phase 9 group F0, R1), inline here until that header is on this branch:
-// - Allocation: Jolt's allocator, but every block is zero-filled.
-// - Trace: printed to stderr.
-// - AssertFailed (a reference built with JPH_ENABLE_ASSERTS: `zig build parity -Dreference_asserts=true`): printed to
-//   stderr and counted (jolt_sb_reference_assert_count). Execution continues like Jolt's build without asserts. Jolt's
-//   default handler breaks into the debugger instead, which stops the parity process.
-// A filtered parity run links only the reference objects that it uses, so this file installs all of these hooks
-// itself: before main (sSBHooksInstalled below) and again at the start of every exported function, because another
-// reference file may have installed its own hooks since.
-// TODO(F0): include <ZoltParity/ParityHooks.h> and call ParityInstallHooks() instead.
-static void *SBZeroAllocate(size_t inSize)
-{
-	return calloc(1, inSize);
-}
-
-static void *SBZeroReallocate(void *inBlock, size_t inOldSize, size_t inNewSize)
-{
-	void *block = realloc(inBlock, inNewSize);
-	if (block != nullptr && inNewSize > inOldSize)
-		memset(static_cast<uint8 *>(block) + inOldSize, 0, inNewSize - inOldSize);
-	return block;
-}
-
-static void SBFree(void *inBlock)
-{
-	free(inBlock);
-}
-
-static void *SBZeroAlignedAllocate(size_t inSize, size_t inAlignment)
-{
-	void *block = nullptr;
-	if (posix_memalign(&block, inAlignment, inSize) != 0)
-		return nullptr;
-	memset(block, 0, inSize);
-	return block;
-}
-
-static void SBAlignedFree(void *inBlock)
-{
-	free(inBlock);
-}
-
-static void SBTrace(const char *inFMT, ...)
-{
-	va_list list;
-	va_start(list, inFMT);
-	char buffer[1024];
-	vsnprintf(buffer, sizeof(buffer), inFMT, list);
-	va_end(list);
-	fprintf(stderr, "Jolt: %s\n", buffer);
-	fflush(stderr);
-}
-
-#ifdef JPH_ENABLE_ASSERTS
-
-// The number of Jolt asserts that failed while the hooks of this file were installed (jolt_sb_reference_assert_count)
-static std::atomic<uint32> sSBAssertCount { 0 };
-
-static bool SBAssertFailed(const char *inExpression, const char *inMessage, const char *inFile, uint inLine)
-{
-	++sSBAssertCount;
-	fprintf(stderr, "Jolt assert failed: %s:%u: (%s) %s\n", inFile, inLine, inExpression, inMessage != nullptr? inMessage : "");
-	fflush(stderr);
-	return false; // No breakpoint: continue like Jolt's build without asserts, the parity test fails the case
-}
-
-#endif // JPH_ENABLE_ASSERTS
-
-static void SBInstallHooks()
-{
-	Allocate = SBZeroAllocate;
-	Reallocate = SBZeroReallocate;
-	Free = SBFree;
-	AlignedAllocate = SBZeroAlignedAllocate;
-	AlignedFree = SBAlignedFree;
-	Trace = SBTrace;
-	JPH_IF_ENABLE_ASSERTS(AssertFailed = SBAssertFailed;)
-}
-
-// Before main: before any Jolt allocation of the parity process
-[[maybe_unused]] static const bool sSBHooksInstalled = (SBInstallHooks(), true);
+// The process hooks are ZoltParity/ParityHooks.h (R1): zero-filled allocations, a printing Trace and, with
+// JPH_ENABLE_ASSERTS, an AssertFailed that prints and counts. Every exported function that allocates through Jolt calls
+// ParityInstallHooks() first, because a filtered parity run links only the reference objects that it uses.
+#include <ZoltParity/ParityHooks.h>
 
 // Private access to the members of the motion properties that Jolt has no getter for (explicit instantiation ignores
 // access checks, `auto` avoids naming the private nested types)
@@ -614,7 +537,7 @@ extern "C"
 /// update groups are private).
 uint32 jolt_sb_settings_bytes(uint32 inKind, uint32 inSeed, uint8 *outBytes, uint32 inCapacity, uint32 *outCounts)
 {
-	SBInstallHooks();
+	ParityInstallHooks();
 	if (SBSettingsKind(inKind) == SBSettingsKind::Random)
 	{
 		std::string bytes;
@@ -644,7 +567,7 @@ uint32 jolt_sb_settings_bytes(uint32 inKind, uint32 inSeed, uint8 *outBytes, uin
 /// don't fit).
 uint32 jolt_sb_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint32 inCapacity, uint32 *outStreamState)
 {
-	SBInstallHooks();
+	ParityInstallHooks();
 	Ref<SoftBodySharedSettings> s = new SoftBodySharedSettings;
 	{
 		std::stringstream data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
@@ -667,7 +590,7 @@ uint32 jolt_sb_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint
 /// don't fit or no body was created).
 uint32 jolt_sb_create_body(const SBStep *inSteps, uint32 inNumSteps, SBBodyResult *outResult, SBVertexResult *outVertices, uint32 inVertexCapacity, SBRodResult *outRods, uint32 inRodCapacity, SBSkinResult *outSkinStates, uint32 inSkinCapacity)
 {
-	SBInstallHooks();
+	ParityInstallHooks();
 
 	// The creation settings of every step: only they hold a reference to their shared settings (like the Zolt side)
 	Array<SoftBodySharedSettings *> shared;
@@ -778,15 +701,10 @@ uint32 jolt_sb_create_body(const SBStep *inSteps, uint32 inNumSteps, SBBodyResul
 	return result;
 }
 
-/// The number of Jolt asserts that failed while the hooks of this file were installed (always 0 without
-/// JPH_ENABLE_ASSERTS)
+/// The number of Jolt asserts that failed in this process (always 0 without JPH_ENABLE_ASSERTS)
 uint32 jolt_sb_reference_assert_count()
 {
-#ifdef JPH_ENABLE_ASSERTS
-	return sSBAssertCount.load();
-#else
-	return 0;
-#endif
+	return ParityAssertCount();
 }
 
 /// 1 when the reference library is built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`)
@@ -802,7 +720,7 @@ uint32 jolt_sb_reference_has_asserts()
 /// Fails a JPH_ASSERT on purpose (the test of the assert hook): the number of failed asserts before and after it
 void jolt_sb_test_assert_hook(uint32 *outBefore, uint32 *outAfter)
 {
-	SBInstallHooks();
+	ParityInstallHooks();
 	*outBefore = jolt_sb_reference_assert_count();
 	JPH_ASSERT(false, "SoftBodyParity: the test of the assert hook (expected)");
 	*outAfter = jolt_sb_reference_assert_count();
