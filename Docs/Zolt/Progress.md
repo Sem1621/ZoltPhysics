@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 93.7%** of 90565 lines in scope · **Unit tests: 98.3%** of 18321 lines
+**Library: 94.4%** of 90565 lines in scope · **Unit tests: 98.3%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -29,7 +29,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 100% | 8 | 0 | 0 | 0 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
-| `Jolt/Renderer` | 65% | 3 | 1 | 0 | 0 | 0 | 0 | 1754 |
+| `Jolt/Renderer` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1754 |
 | `Jolt/Shaders` | 31% | 13 | 0 | 0 | 31 | 0 | 0 | 1563 |
 | `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
@@ -472,11 +472,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Renderer — 65%</summary>
+<details><summary>Jolt/Renderer — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `DebugRenderer.cpp`, `DebugRenderer.h` | 1219 | 🟡 partial | `Zolt/Renderer/DebugRenderer.zig` |
+| `DebugRenderer.cpp`, `DebugRenderer.h` | 1219 | ✅ complete | `Zolt/Renderer/DebugRenderer.zig` |
 | `DebugRendererPlayback.cpp`, `DebugRendererPlayback.h` | 169 | ✅ complete | `Zolt/Renderer/DebugRendererPlayback.zig` |
 | `DebugRendererRecorder.cpp`, `DebugRendererRecorder.h` | 229 | ✅ complete | `Zolt/Renderer/DebugRendererRecorder.zig` |
 | `DebugRendererSimple.cpp`, `DebugRendererSimple.h` | 137 | ✅ complete | `Zolt/Renderer/DebugRendererSimple.zig` |
