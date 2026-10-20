@@ -4,8 +4,9 @@
 //! Covers the Core code with observable numeric or ordering results: QuickSort / InsertionSort (order of equal
 //! keys), BinaryHeap, HashCombine, Mt19937 (std::mt19937), LinearCurve, the bytes written and read by
 //! StreamOut / StreamIn / StreamWrapper, and StringTools, including the C++ compatible float formatter
-//! (writeFloatPrecision / cppFloat, against the C library's snprintf("%.*g") and std::ostream) and the operator << of
-//! the Math types.
+//! (writeFloatPrecision / cppFloat, against the C library's snprintf("%.*g") and std::ostream), the fixed notation
+//! formatter of the draw texts (writeFloatFixed / cppFixed, against snprintf("%.*f"), RemainingFeaturesArchitecture.md
+//! R7) and the operator << of the Math types.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -141,6 +142,7 @@ const jolt = struct {
     extern fn jolt_convert_to_string_dvec3(v: *const [3]f64, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_convert_to_string_dmat44(cols: *const [12]f32, t: *const [3]f64, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_snprintf_g(value: f64, precision: c_int, chars: [*]u8, capacity: u32) u32;
+    extern fn jolt_snprintf_f(value: f64, decimals: c_int, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_ostream_float(value: f32, precision: c_int, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_ostream_double(value: f64, precision: c_int, chars: [*]u8, capacity: u32) u32;
     extern fn jolt_to_lower(chars: [*]const u8, size: u32, out: [*]u8, capacity: u32) u32;
@@ -1266,6 +1268,121 @@ test "Float formatter: special values at every precision" {
         for (floats) |f| {
             c.checkFloat(f, @intCast(precision));
             c.checkFloat(-f, @intCast(precision));
+        }
+    }
+    try c.finish();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The C++ compatible fixed notation formatter (StringTools.writeFloatFixed / cppFixed, used by the draw texts)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Compares Zolt's fixed notation formatter with the C library's snprintf("%.*f", decimals, value): Jolt's draw texts
+/// use "%.0f" to "%.3f" (StringFormat), a float argument is converted to double. NaN is compared too ("nan" / "-nan" by
+/// the sign bit on glibc and musl).
+const FixedFormatChecker = struct {
+    checker: Checker = .{ .name = "writeFloatFixed vs snprintf(\"%.*f\")" },
+    num_checks: usize = 0,
+
+    /// A double printed with `decimals` digits after the decimal point against snprintf
+    fn checkDouble(self: *FixedFormatChecker, value: f64, decimals: u32) void {
+        var zolt_chars: [400]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&zolt_chars);
+        zolt.writeFloatFixed(&writer, value, decimals) catch unreachable; // At most 1 + 309 + 1 + decimals characters
+        var c_chars: [400]u8 = undefined;
+        const input = .{ .value = value, .bits = @as(u64, @bitCast(value)), .decimals = decimals };
+        checkString(&self.checker, input, writer.buffered(), &c_chars, jolt.jolt_snprintf_f(value, @intCast(decimals), &c_chars, c_chars.len));
+        self.num_checks += 1;
+    }
+
+    /// A double with the 4 precisions of Jolt's draw texts, "%.0f" to "%.3f"
+    fn checkDrawPrecisions(self: *FixedFormatChecker, value: f64) void {
+        for (0..4) |decimals| self.checkDouble(value, @intCast(decimals));
+    }
+
+    fn finish(self: *const FixedFormatChecker) !void {
+        try self.checker.finish();
+    }
+};
+
+/// A random double whose magnitude is spread evenly over the decimal exponents [-8, 30]
+fn randomFixedValue(rng: *Rng) f64 {
+    const exponent: f64 = @floatFromInt(@as(i32, @intCast(rng.next() % 39)) - 8);
+    const mantissa = 1.0 + 9.0 * (@as(f64, @floatFromInt(next64(rng) >> 11)) / 9007199254740992.0); // [1, 10)
+    const value = mantissa * std.math.pow(f64, 10.0, exponent); // Test input only, any rounding will do
+    return if (rng.next() % 2 == 0) value else -value;
+}
+
+test "Fixed float formatter: %.0f to %.3f of random floats and doubles up to 1e30" {
+    var c: FixedFormatChecker = .{};
+    var rng: Rng = .{ .state = 0x0f1e2d3c };
+    for (0..iterations) |_| {
+        const d = randomFixedValue(&rng);
+        c.checkDrawPrecisions(d);
+        c.checkDrawPrecisions(@as(f32, @floatCast(d))); // A float argument of StringFormat
+    }
+    try std.testing.expectEqual(@as(usize, iterations * 8), c.num_checks);
+    try c.finish();
+}
+
+test "Fixed float formatter: ties and their neighbours" {
+    // The ties of `decimals` digits after the decimal point are (2m + 1) / 2^(decimals + 1): only those halves are
+    // doubles (0.5, 0.25, 0.125, 0.0625 and their odd multiples). They round to even. Their neighbours test the exact
+    // comparison with the half.
+    var c: FixedFormatChecker = .{};
+    var rng: Rng = .{ .state = 0x7ea5e75 };
+    for (0..4) |decimals| {
+        const scale = std.math.ldexp(@as(f64, 1.0), -@as(i32, @intCast(decimals + 1)));
+        for (0..iterations / 4) |i| {
+            // Small odd numerators first (all of them up to 2000), then random ones up to 2^52
+            const m: u64 = if (i < 1000) i else next64(&rng) >> @intCast(12 + rng.next() % 40);
+            const tie = @as(f64, @floatFromInt(2 * m + 1)) * scale;
+            var step: i64 = -2;
+            while (step <= 2) : (step += 1) {
+                const v = ulpStep(tie, step) orelse continue;
+                c.checkDouble(v, @intCast(decimals));
+                c.checkDouble(-v, @intCast(decimals));
+            }
+        }
+    }
+    try c.finish();
+}
+
+test "Fixed float formatter: special values, powers of 10 and every float exponent" {
+    var c: FixedFormatChecker = .{};
+    const doubles = [_]f64{
+        0.0,                    std.math.inf(f64),      std.math.nan(f64),       0.5,
+        1.5,                    2.5,                    0.05,                    0.15,
+        0.25,                   0.35,                   0.005,                   0.0005,
+        0.9995,                 9.9995,                 99.995,                  999.5,
+        1.0e30,                 1.0e22,                 1.0e23,                  123456789012345678.0,
+        std.math.floatMin(f64), std.math.floatMax(f64), 4.9406564584124654e-324, std.math.floatEps(f64),
+        1.0 / 3.0,              2.0 / 3.0,              9.81,                    100.0,
+    };
+    for (doubles) |d| {
+        for (0..18) |decimals| {
+            c.checkDouble(d, @intCast(decimals));
+            c.checkDouble(-d, @intCast(decimals));
+        }
+    }
+
+    // The powers of 10 and their neighbours up to 1e30
+    var text: [16]u8 = undefined;
+    var k: i32 = -10;
+    while (k <= 30) : (k += 1) {
+        const nearest = std.fmt.parseFloat(f64, std.fmt.bufPrint(&text, "1e{d}", .{k}) catch unreachable) catch unreachable;
+        var step: i64 = -2;
+        while (step <= 2) : (step += 1) {
+            if (ulpStep(nearest, step)) |v| c.checkDrawPrecisions(v);
+        }
+    }
+
+    // Every float exponent (a float argument converted to double)
+    var rng: Rng = .{ .state = 0x51ab0f1e };
+    for (0..256) |exponent| {
+        for (0..16) |_| {
+            const f: f32 = @bitCast(@as(u32, @intCast(exponent)) << 23 | (rng.next() & 0x807fffff));
+            c.checkDrawPrecisions(f);
         }
     }
     try c.finish();
