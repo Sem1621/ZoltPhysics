@@ -583,8 +583,18 @@ pub const DebugRendererRecorder = @import("Renderer/DebugRendererRecorder.zig").
 pub const DebugRendererSimple = @import("Renderer/DebugRendererSimple.zig").DebugRendererSimple;
 
 // Shaders (the namespaces of the shader files, Docs/Zolt/RemainingFeaturesArchitecture.md R12)
+pub const HairApplyDeltaTransform = @import("Shaders/HairApplyDeltaTransform.zig");
+pub const HairApplyGlobalPose = @import("Shaders/HairApplyGlobalPose.zig");
+pub const HairCalculateRenderPositions = @import("Shaders/HairCalculateRenderPositions.zig");
 pub const HairCommon = @import("Shaders/HairCommon.zig");
+pub const HairGridAccumulate = @import("Shaders/HairGridAccumulate.zig");
+pub const HairGridClear = @import("Shaders/HairGridClear.zig");
+pub const HairGridNormalize = @import("Shaders/HairGridNormalize.zig");
+pub const HairSkinRoots = @import("Shaders/HairSkinRoots.zig");
+pub const HairSkinVertices = @import("Shaders/HairSkinVertices.zig");
 pub const HairStructs = @import("Shaders/HairStructs.zig");
+pub const HairTeleport = @import("Shaders/HairTeleport.zig");
+pub const HairUpdateRoots = @import("Shaders/HairUpdateRoots.zig");
 pub const ShaderCore = @import("Shaders/ShaderCore.zig");
 pub const ShaderMat44 = @import("Shaders/ShaderMat44.zig");
 pub const ShaderMath = @import("Shaders/ShaderMath.zig");
@@ -906,8 +916,18 @@ const source_files = .{
     @import("Renderer/DebugRendererPlayback.zig"),
     @import("Renderer/DebugRendererRecorder.zig"),
     @import("Renderer/DebugRendererSimple.zig"),
+    @import("Shaders/HairApplyDeltaTransform.zig"),
+    @import("Shaders/HairApplyGlobalPose.zig"),
+    @import("Shaders/HairCalculateRenderPositions.zig"),
     @import("Shaders/HairCommon.zig"),
+    @import("Shaders/HairGridAccumulate.zig"),
+    @import("Shaders/HairGridClear.zig"),
+    @import("Shaders/HairGridNormalize.zig"),
+    @import("Shaders/HairSkinRoots.zig"),
+    @import("Shaders/HairSkinVertices.zig"),
     @import("Shaders/HairStructs.zig"),
+    @import("Shaders/HairTeleport.zig"),
+    @import("Shaders/HairUpdateRoots.zig"),
     @import("Shaders/ShaderCore.zig"),
     @import("Shaders/ShaderMat44.zig"),
     @import("Shaders/ShaderMath.zig"),
