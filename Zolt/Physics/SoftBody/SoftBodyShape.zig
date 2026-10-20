@@ -212,8 +212,9 @@ test "SoftBodyShape: the shape of a soft body" {
     try expectEqual(@as(u32, 3), shape.getFaceIndex(id));
     try expectEqual(@as(u32, 4), s.getStats().num_triangles);
 
-    // The tetrahedron has volume 1/6, its faces point inwards so the volume is negative
-    try std.testing.expect(@abs(@abs(s.getVolume()) - 1.0 / 6.0) < 1.0e-6);
+    // The tetrahedron has volume 1/6. Its faces point outwards, so the volume is positive. Only face (1, 3, 2) adds to
+    // it: (1, 0, 0) x (0, 1, 0) . (0, 0, 1) = 1, the other faces have vertex 0 at the origin.
+    try expectEqual(@as(f32, 1.0 / 6.0), s.getVolume());
 
     // The bits for 1 face and for no face at all (n - 1 wraps around, like Jolt's uint32)
     shared.faces.items.len = 1;

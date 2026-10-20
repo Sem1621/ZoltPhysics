@@ -14,7 +14,15 @@
 //!   Body.applySoftBodyCreationSettings, SoftBodyMotionProperties.initialize and calculateMassAndInertia) with random
 //!   creation settings, on the shared settings that each side restores from the same bytes: the body (position,
 //!   rotation, bounds, layers, filter, material values), the motion properties (mass, inertia, damping, the soft body
-//!   values, the volume, the reference count of the shared settings), every vertex and every rod.
+//!   values, the volume, the reference count of the shared settings), every vertex, every rod state and every skin
+//!   state, the local and predicted bounds.
+//! - Applying creation settings again: Body.applySoftBodyCreationSettings on the created body, 1 to 3 times, with other
+//!   settings (fewer or more vertices, with or without rods and skinned constraints). The same values after the last
+//!   call, which pin Jolt's quirks: the rod and skin states of earlier settings are kept when the new settings have
+//!   none, and the local bounds keep growing (the new vertices are added to the old bounds).
+//!
+//! The reference installs a counting AssertFailed (SoftBodyReference.cpp). With `-Dreference_asserts=true` a case
+//! fails when its C++ side hit a Jolt assert.
 //!
 //! The simulation of soft bodies (SaveState, the listener, thread counts) comes with groups SH and S5. The constraint
 //! creation and Optimize come with group S1 (its own SoftBodySettings layer).
@@ -47,7 +55,10 @@ const io = std.testing.io;
 const jolt = struct {
     extern fn jolt_sb_settings_bytes(kind: u32, seed: u32, out_bytes: [*]u8, capacity: u32, out_counts: *[11]u32) u32;
     extern fn jolt_sb_resave(bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32, out_stream_state: *u32) u32;
-    extern fn jolt_sb_create_body(settings_bytes: [*]const u8, size: u32, desc: *const CreateDesc, result: *BodyResult, vertices: [*]VertexResult, vertex_capacity: u32, rods: [*]RodResult, rod_capacity: u32) u32;
+    extern fn jolt_sb_create_body(steps: [*]const Step, num_steps: u32, result: *BodyResult, vertices: [*]VertexResult, vertex_capacity: u32, rods: [*]RodResult, rod_capacity: u32, skin_states: [*]SkinResult, skin_capacity: u32) u32;
+    extern fn jolt_sb_reference_assert_count() u32;
+    extern fn jolt_sb_reference_has_asserts() u32;
+    extern fn jolt_sb_test_assert_hook(out_before: *u32, out_after: *u32) void;
 };
 
 /// SBSettingsKind of SoftBodyReference.cpp
@@ -511,6 +522,19 @@ const CreateDesc = extern struct {
     pad: u32 = 0,
 };
 
+/// SBStep of SoftBodyReference.cpp: the bytes of the shared settings (restoreBinaryState) and the other fields of the
+/// creation settings of one step
+const Step = extern struct {
+    settings_bytes: [*]const u8,
+    size: u32,
+    pad: u32 = 0,
+    desc: CreateDesc,
+
+    fn bytes(self: *const Step) []const u8 {
+        return self.settings_bytes[0..self.size];
+    }
+};
+
 /// SBBodyResult of SoftBodyReference.cpp
 const BodyResult = extern struct {
     position: [3]f64,
@@ -519,6 +543,7 @@ const BodyResult = extern struct {
     rotation: [4]f32,
     world_bounds: [6]f32,
     local_bounds: [6]f32,
+    local_predicted_bounds: [6]f32,
     inv_mass: f32,
     inv_inertia_diagonal: [3]f32,
     inertia_rotation: [4]f32,
@@ -544,10 +569,19 @@ const BodyResult = extern struct {
     group_id: u32,
     sub_group_id: u32,
     num_vertices: u32,
+    /// The rods of the shared settings of the last step
     num_rods: u32,
+    /// The reference count of the shared settings of the last step
     settings_ref_count: u32,
     shape_sub_type: u32,
     enable_skin_constraints: u32,
+    /// The rod states of the motion properties
+    num_rod_states: u32,
+    /// The skin states of the motion properties
+    num_skin_states: u32,
+    /// The reference count of the shared settings of the first step
+    first_settings_ref_count: u32,
+    pad: u32,
 };
 
 /// SBVertexResult of SoftBodyReference.cpp (SoftBodyMotionProperties.Vertex)
@@ -568,10 +602,17 @@ const RodResult = extern struct {
     angular_velocity: [3]f32,
 };
 
+/// SBSkinResult of SoftBodyReference.cpp (SoftBodyMotionProperties.SkinState)
+const SkinResult = extern struct {
+    previous_position: [3]f32,
+    position: [3]f32,
+    normal: [3]f32,
+};
+
 comptime {
     // The C structs have the same sizes (no implicit padding differences)
-    std.debug.assert(@sizeOf(CreateDesc) == 112 and @sizeOf(BodyResult) == 256);
-    std.debug.assert(@sizeOf(VertexResult) == 68 and @sizeOf(RodResult) == 28);
+    std.debug.assert(@sizeOf(CreateDesc) == 112 and @sizeOf(Step) == 128 and @sizeOf(BodyResult) == 296);
+    std.debug.assert(@sizeOf(VertexResult) == 68 and @sizeOf(RodResult) == 28 and @sizeOf(SkinResult) == 36);
 }
 
 fn store3(v: Vec3) [3]f32 {
@@ -613,16 +654,17 @@ fn randomDesc(rng: *fw.Rng) CreateDesc {
 
 const max_vertices = 1024;
 const max_rods = 16;
+const max_steps = 4;
 
-/// BodyInterface.createSoftBody in `system` with the shared settings that Zolt restores from `bytes` (jolt_sb_create_body
-/// on the Zolt side). The body is destroyed again. Returns the number of vertices.
-fn zoltCreateBody(allocator: Allocator, system: *PhysicsSystem, bytes: []const u8, desc: *const CreateDesc, result: *BodyResult, vertices: []VertexResult, rods: []RodResult) !u32 {
-    // The shared settings: only the creation settings hold a reference (like the C++ side)
+/// The creation settings of a step, with the shared settings that Zolt restores from the step's bytes (only the
+/// creation settings hold a reference, like the C++ side)
+fn creationSettings(allocator: Allocator, step: *const Step) !SoftBodyCreationSettings {
+    const desc = &step.desc;
     const shared = try S.create(allocator);
     var settings: SoftBodyCreationSettings = .init(shared, RVec3.init(@floatCast(desc.position[0]), @floatCast(desc.position[1]), @floatCast(desc.position[2])), Quat.init(desc.rotation[0], desc.rotation[1], desc.rotation[2], desc.rotation[3]), @intCast(desc.object_layer));
-    defer settings.deinit();
+    errdefer settings.deinit();
     {
-        var reader: std.Io.Reader = .fixed(bytes);
+        var reader: std.Io.Reader = .fixed(step.bytes());
         var in = StreamInWrapper.init(&reader);
         try shared.restoreBinaryState(in.streamIn());
     }
@@ -640,14 +682,40 @@ fn zoltCreateBody(allocator: Allocator, system: *PhysicsSystem, bytes: []const u
     settings.make_rotation_identity = desc.make_rotation_identity != 0;
     settings.allow_sleeping = desc.allow_sleeping != 0;
     settings.faces_double_sided = desc.faces_double_sided != 0;
+    return settings;
+}
+
+/// The results of one case on one side
+const Results = struct {
+    body: BodyResult = undefined,
+    vertices: [max_vertices]VertexResult = undefined,
+    rods: [max_rods]RodResult = undefined,
+    skin_states: [max_vertices]SkinResult = undefined,
+};
+
+/// BodyInterface.createSoftBody in `system` with the creation settings of step 0, then
+/// Body.applySoftBodyCreationSettings on the created body with those of every other step (jolt_sb_create_body on the
+/// Zolt side). The results are the state after the last step, then the body is destroyed. Returns the number of
+/// vertices.
+fn zoltCreateBody(allocator: Allocator, system: *PhysicsSystem, bpl_interface: *const zolt.BroadPhaseLayerInterface, steps: []const Step, results: *Results) !u32 {
+    var settings: [max_steps]SoftBodyCreationSettings = undefined;
+    var num_settings: usize = 0;
+    defer for (settings[0..num_settings]) |*s| s.deinit();
+    for (steps) |*step| {
+        settings[num_settings] = try creationSettings(allocator, step);
+        num_settings += 1;
+    }
+    const first_shared = settings[0].settings.get().?;
+    const last_shared = settings[num_settings - 1].settings.get().?;
 
     const bi = system.getBodyInterfaceNoLockMut();
-    const body = (try bi.createSoftBody(&settings)) orelse return error.NoBody;
+    const body = (try bi.createSoftBody(&settings[0])) orelse return error.NoBody;
     defer bi.destroyBody(body.getID());
+    for (settings[1..num_settings]) |*s| try body.applySoftBodyCreationSettings(s, bpl_interface);
 
     const mp = SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties());
-    result.* = std.mem.zeroes(BodyResult);
-    const r = result;
+    results.body = std.mem.zeroes(BodyResult);
+    const r = &results.body;
     r.position = storeR3(body.getPosition());
     r.center_of_mass_position = storeR3(body.getCenterOfMassPosition());
     r.user_data = body.getUserData();
@@ -656,6 +724,8 @@ fn zoltCreateBody(allocator: Allocator, system: *PhysicsSystem, bytes: []const u
     r.world_bounds[3..6].* = store3(body.getWorldSpaceBounds().max);
     r.local_bounds[0..3].* = store3(mp.getLocalBounds().min);
     r.local_bounds[3..6].* = store3(mp.getLocalBounds().max);
+    r.local_predicted_bounds[0..3].* = store3(mp.local_predicted_bounds.min);
+    r.local_predicted_bounds[3..6].* = store3(mp.local_predicted_bounds.max);
     r.inv_mass = mp.base.getInverseMassUnchecked();
     r.inv_inertia_diagonal = store3(mp.base.getInverseInertiaDiagonal());
     r.inertia_rotation = storeQuat(mp.base.getInertiaRotation());
@@ -681,13 +751,16 @@ fn zoltCreateBody(allocator: Allocator, system: *PhysicsSystem, bytes: []const u
     r.group_id = body.getCollisionGroup().getGroupID();
     r.sub_group_id = body.getCollisionGroup().getSubGroupID();
     r.num_vertices = @intCast(mp.getVertices().len);
-    r.num_rods = @intCast(shared.rod_stretch_shear_constraints.items.len);
-    r.settings_ref_count = shared.getRefCount();
+    r.num_rods = @intCast(last_shared.rod_stretch_shear_constraints.items.len);
+    r.settings_ref_count = last_shared.getRefCount();
     r.shape_sub_type = @intFromEnum(body.getShape().getSubType());
     r.enable_skin_constraints = @intFromBool(mp.getEnableSkinConstraints());
+    r.num_rod_states = @intCast(mp.rod_states.items.len);
+    r.num_skin_states = @intCast(mp.skin_state.items.len);
+    r.first_settings_ref_count = first_shared.getRefCount();
 
-    if (r.num_vertices > vertices.len or r.num_rods > rods.len) return error.TooManyVertices;
-    for (mp.getVertices(), vertices[0..r.num_vertices]) |*v, *o| {
+    if (r.num_vertices > max_vertices or r.num_rod_states > max_rods or r.num_skin_states > max_vertices) return error.TooManyVertices;
+    for (mp.getVertices(), results.vertices[0..r.num_vertices]) |*v, *o| {
         o.* = .{
             .previous_position = store3(v.previous_position),
             .position = store3(v.position),
@@ -699,32 +772,113 @@ fn zoltCreateBody(allocator: Allocator, system: *PhysicsSystem, bytes: []const u
             .inv_mass = v.inv_mass,
         };
     }
-    for (rods[0..r.num_rods], 0..) |*o, i| {
+    for (results.rods[0..r.num_rod_states], 0..) |*o, i| {
         o.* = .{ .rotation = storeQuat(mp.getRodRotation(@intCast(i))), .angular_velocity = store3(mp.getRodAngularVelocity(@intCast(i))) };
+    }
+    for (mp.skin_state.items, results.skin_states[0..r.num_skin_states]) |*s, *o| {
+        o.* = .{ .previous_position = store3(s.previous_position), .position = store3(s.position), .normal = store3(s.normal) };
     }
     return r.num_vertices;
 }
 
-var zolt_vertices: [max_vertices]VertexResult = undefined;
-var jolt_vertices: [max_vertices]VertexResult = undefined;
+/// jolt_sb_create_body: the number of vertices and the number of Jolt asserts that failed during the call (always 0
+/// without `-Dreference_asserts=true`)
+fn joltCreateBody(steps: []const Step, results: *Results) !struct { u32, u32 } {
+    const asserts_before = jolt.jolt_sb_reference_assert_count();
+    const n = jolt.jolt_sb_create_body(steps.ptr, @intCast(steps.len), &results.body, &results.vertices, max_vertices, &results.rods, max_rods, &results.skin_states, max_vertices);
+    if (n == 0xFFFFFFFF) return error.JoltCreateBody;
+    return .{ n, jolt.jolt_sb_reference_assert_count() - asserts_before };
+}
+
+/// The checkers of the creation layers
+const CreationCheckers = struct {
+    body: fw.Checker,
+    vertices: fw.Checker,
+    rods: fw.Checker,
+    skin_states: fw.Checker,
+    asserts: fw.Checker,
+
+    fn init(comptime name: []const u8) CreationCheckers {
+        return .{
+            .body = .{ .name = name ++ ": body and motion properties" },
+            .vertices = .{ .name = name ++ ": vertices" },
+            .rods = .{ .name = name ++ ": rod states" },
+            .skin_states = .{ .name = name ++ ": skin states" },
+            .asserts = .{ .name = name ++ ": Jolt asserts that failed (the reference was built with asserts)" },
+        };
+    }
+
+    /// Compares the results of both sides
+    fn check(self: *CreationCheckers, input: anytype, zolt_n: u32, z: *const Results, jolt_n: u32, jolt_asserts: u32, j: *const Results) void {
+        self.asserts.check(input, @as(u32, 0), jolt_asserts);
+        self.body.check(input, z.body, j.body);
+        if (zolt_n == jolt_n) {
+            for (z.vertices[0..zolt_n], j.vertices[0..jolt_n], 0..) |zv, jv, v| self.vertices.check(.{ input, v }, zv, jv);
+        }
+        if (z.body.num_rod_states == j.body.num_rod_states) {
+            for (z.rods[0..z.body.num_rod_states], j.rods[0..j.body.num_rod_states], 0..) |zr, jr, r| self.rods.check(.{ input, r }, zr, jr);
+        }
+        if (z.body.num_skin_states == j.body.num_skin_states) {
+            for (z.skin_states[0..z.body.num_skin_states], j.skin_states[0..j.body.num_skin_states], 0..) |zs, js, s| self.skin_states.check(.{ input, s }, zs, js);
+        }
+    }
+
+    fn finish(self: *const CreationCheckers) !void {
+        try fw.finishAll(&.{ &self.body, &self.vertices, &self.rods, &self.skin_states, &self.asserts });
+    }
+};
+
+/// Settings whose inertia tensor is singular make Jolt's EigenValueSymmetric assert (see hasSingularInertia): a case
+/// with such settings is skipped when either side checks its asserts
+fn skipSingularInertia() bool {
+    return zolt.Core.enable_asserts or jolt.jolt_sb_reference_has_asserts() != 0;
+}
+
+var zolt_results: Results = .{};
+var jolt_results: Results = .{};
+
+/// A physics system with the layers of UnitTests/Layers.h, like the one of jolt_sb_create_body
+const TestSystem = struct {
+    layers: TestLayers.BPLayerInterfaceImpl,
+    object_vs_broad_phase: TestLayers.ObjectVsBroadPhaseLayerFilterImpl,
+    pairs: TestLayers.ObjectLayerPairFilterImpl,
+    system: PhysicsSystem,
+
+    fn init(self: *TestSystem, allocator: Allocator) !void {
+        self.layers = .init();
+        self.object_vs_broad_phase = .{};
+        self.pairs = .{};
+        self.system = .empty;
+        try self.system.init(allocator, io, 4, 0, 4, 4, &self.layers.base, &self.object_vs_broad_phase.base, &self.pairs.base, .{ .broad_phase = .brute_force });
+    }
+
+    fn deinit(self: *TestSystem) void {
+        self.system.deinit();
+    }
+};
+
+test "SoftBody parity: the reference counts its asserts" {
+    // With -Dreference_asserts=true the hook of SoftBodyReference.cpp prints and counts a failed Jolt assert (the
+    // creation layers check the count), without asserts nothing is counted
+    var before: u32 = undefined;
+    var after: u32 = undefined;
+    jolt.jolt_sb_test_assert_hook(&before, &after);
+    try expectEqual(before + jolt.jolt_sb_reference_has_asserts(), after);
+}
 
 test "SoftBody parity: creating a soft body (allocateSoftBody, applySoftBodyCreationSettings, initialize)" {
     const allocator = std.testing.allocator;
-    var layers: TestLayers.BPLayerInterfaceImpl = .init();
-    var object_vs_broad_phase: TestLayers.ObjectVsBroadPhaseLayerFilterImpl = .{};
-    var pairs: TestLayers.ObjectLayerPairFilterImpl = .{};
-    var system: PhysicsSystem = .empty;
-    try system.init(allocator, io, 4, 0, 4, 4, &layers.base, &object_vs_broad_phase.base, &pairs.base, .{ .broad_phase = .brute_force });
-    defer system.deinit();
+    var ts: TestSystem = undefined;
+    try ts.init(allocator);
+    defer ts.deinit();
 
-    var body_checker: fw.Checker = .{ .name = "SoftBody creation: body and motion properties" };
-    var vertex_checker: fw.Checker = .{ .name = "SoftBody creation: vertices" };
-    var rod_checker: fw.Checker = .{ .name = "SoftBody creation: rods" };
+    var checkers: CreationCheckers = .init("SoftBody creation");
     var rng: fw.Rng = .{};
     const bytes = try allocator.alloc(u8, jolt_buffer.len);
     defer allocator.free(bytes);
     var num_kinematic: u32 = 0;
     var num_rods: u32 = 0;
+    var num_skinned: u32 = 0;
     var num_skipped: u32 = 0;
     for (0..1500) |i| {
         // Random settings (rods, skinned constraints, kinematic vertices), cubes and cloths (kinematic corners)
@@ -737,39 +891,103 @@ test "SoftBody parity: creating a soft body (allocateSoftBody, applySoftBodyCrea
         var counts: [11]u32 = undefined;
         const jolt_bytes = try joltSettingsBytes(kind, seed, &counts);
         @memcpy(bytes[0..jolt_bytes.len], jolt_bytes);
-        const settings_bytes = bytes[0..jolt_bytes.len];
-        const desc = randomDesc(&rng);
-        const input = .{ kind, seed, desc };
-        if (zolt.Core.enable_asserts and hasSingularInertia(settings_bytes)) {
+        const step: Step = .{ .settings_bytes = bytes.ptr, .size = @intCast(jolt_bytes.len), .desc = randomDesc(&rng) };
+        const input = .{ kind, seed, step.desc };
+        if (skipSingularInertia() and hasSingularInertia(step.bytes())) {
             num_skipped += 1;
             continue;
         }
 
-        var zolt_result: BodyResult = undefined;
-        var zolt_rods: [max_rods]RodResult = undefined;
-        const zolt_n = try zoltCreateBody(allocator, &system, settings_bytes, &desc, &zolt_result, &zolt_vertices, &zolt_rods);
-
-        var jolt_result: BodyResult = undefined;
-        var jolt_rods: [max_rods]RodResult = undefined;
-        const jolt_n = jolt.jolt_sb_create_body(settings_bytes.ptr, @intCast(settings_bytes.len), &desc, &jolt_result, &jolt_vertices, max_vertices, &jolt_rods, max_rods);
-        try expect(jolt_n != 0xFFFFFFFF);
-
-        body_checker.check(input, zolt_result, jolt_result);
-        if (zolt_n == jolt_n) {
-            for (zolt_vertices[0..zolt_n], jolt_vertices[0..jolt_n], 0..) |z, j, v| vertex_checker.check(.{ input, v }, z, j);
-        }
-        if (zolt_result.num_rods == jolt_result.num_rods) {
-            for (zolt_rods[0..zolt_result.num_rods], jolt_rods[0..jolt_result.num_rods], 0..) |z, j, r| rod_checker.check(.{ input, r }, z, j);
-        }
-        if (jolt_result.inv_mass == 0) num_kinematic += 1;
-        num_rods += jolt_result.num_rods;
+        const zolt_n = try zoltCreateBody(allocator, &ts.system, &ts.layers.base, &.{step}, &zolt_results);
+        const jolt_n, const jolt_asserts = try joltCreateBody(&.{step}, &jolt_results);
+        checkers.check(input, zolt_n, &zolt_results, jolt_n, jolt_asserts, &jolt_results);
+        if (jolt_results.body.inv_mass == 0) num_kinematic += 1;
+        num_rods += jolt_results.body.num_rod_states;
+        if (jolt_results.body.num_skin_states != 0) num_skinned += 1;
     }
-    try fw.finishAll(&.{ &body_checker, &vertex_checker, &rod_checker });
+    try checkers.finish();
 
-    // The cases reach both mass paths and the rods
+    // The cases reach both mass paths, the rods and the skin states
     try expect(num_kinematic > 100 and num_kinematic < 1400);
     try expect(num_rods > 500);
+    try expect(num_skinned > 500);
     try expect(num_skipped < 300);
+}
+
+test "SoftBody parity: applying creation settings again (applySoftBodyCreationSettings on a created body)" {
+    const allocator = std.testing.allocator;
+    var ts: TestSystem = undefined;
+    try ts.init(allocator);
+    defer ts.deinit();
+
+    var checkers: CreationCheckers = .init("SoftBody re-applied settings");
+    var rng: fw.Rng = .{ .state = 0x5eed50f7 };
+    var num_kept_rod_states: u32 = 0;
+    var num_kept_skin_states: u32 = 0;
+    var num_grown_bounds: u32 = 0;
+    var num_fewer_vertices: u32 = 0;
+    var num_skipped: u32 = 0;
+    for (0..600) |i| {
+        // 2 to 4 steps of random settings, cubes and cloths: the vertex count goes up and down, rods and skinned
+        // constraints come and go
+        const num_steps = rng.intRange(usize, 2, max_steps);
+        var steps: [max_steps]Step = undefined;
+        var step_bytes: [max_steps][]u8 = undefined;
+        var step_counts: [max_steps][11]u32 = undefined;
+        var num_bytes: usize = 0;
+        defer for (step_bytes[0..num_bytes]) |b| allocator.free(b);
+        var inputs: [max_steps]struct { SettingsKind, u32 } = undefined;
+        var skip = false;
+        for (0..num_steps) |s| {
+            const kind: SettingsKind = switch (rng.intRange(u32, 0, 9)) {
+                0, 1 => .cube,
+                2, 3 => .cloth,
+                else => .random,
+            };
+            const seed: u32 = @intCast(100_000 + i * max_steps + s);
+            var counts: [11]u32 = undefined;
+            const jolt_bytes = try joltSettingsBytes(kind, seed, &counts);
+            step_bytes[s] = try allocator.dupe(u8, jolt_bytes);
+            num_bytes += 1;
+            step_counts[s] = try parseCounts(jolt_bytes);
+            steps[s] = .{ .settings_bytes = step_bytes[s].ptr, .size = @intCast(jolt_bytes.len), .desc = randomDesc(&rng) };
+            inputs[s] = .{ kind, seed };
+            // Every call computes the mass and inertia
+            if (skipSingularInertia() and hasSingularInertia(jolt_bytes)) skip = true;
+        }
+        if (skip) {
+            num_skipped += 1;
+            continue;
+        }
+        const input = .{ i, inputs[0..num_steps] };
+
+        const zolt_n = try zoltCreateBody(allocator, &ts.system, &ts.layers.base, steps[0..num_steps], &zolt_results);
+        const jolt_n, const jolt_asserts = try joltCreateBody(steps[0..num_steps], &jolt_results);
+        checkers.check(input, zolt_n, &zolt_results, jolt_n, jolt_asserts, &jolt_results);
+
+        // The cases reach Jolt's quirks: rod and skin states of earlier settings, bounds that keep the old vertices
+        const j = &jolt_results.body;
+        const last = &step_counts[num_steps - 1];
+        if (j.num_rod_states > j.num_rods) num_kept_rod_states += 1;
+        if (last[5] == 0 and j.num_skin_states != 0) num_kept_skin_states += 1;
+        var bounds: zolt.AABox = .empty;
+        for (jolt_results.vertices[0..jolt_n]) |v| bounds.encapsulateVec3(Vec3.init(v.position[0], v.position[1], v.position[2]));
+        const vertex_bounds = store3(bounds.min) ++ store3(bounds.max);
+        if (!std.mem.eql(f32, &vertex_bounds, &j.local_bounds)) num_grown_bounds += 1;
+        for (1..num_steps) |s| {
+            if (step_counts[s][0] < step_counts[s - 1][0]) {
+                num_fewer_vertices += 1;
+                break;
+            }
+        }
+    }
+    try checkers.finish();
+
+    try expect(num_kept_rod_states > 50);
+    try expect(num_kept_skin_states > 50);
+    try expect(num_grown_bounds > 300);
+    try expect(num_fewer_vertices > 150);
+    try expect(num_skipped < 200);
 }
 
 /// Settings with one dynamic vertex, or two on a line through the origin, and no kinematic vertex: their inertia

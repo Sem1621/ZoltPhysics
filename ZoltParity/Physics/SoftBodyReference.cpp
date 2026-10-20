@@ -1,8 +1,8 @@
 // Reference implementation for the soft body parity tests of group S0 (`zig build parity`): C ABI wrappers around the
 // C++ Jolt library's SoftBodySharedSettings (SaveBinaryState / RestoreBinaryState) and the creation of a soft body
 // (BodyInterface::CreateSoftBody: BodyManager::AllocateSoftBody, Body::ApplySoftBodyCreationSettings,
-// SoftBodyMotionProperties::Initialize). ZoltParity/Physics/SoftBodyParity.zig calls these and checks that Zolt
-// produces the same bits.
+// SoftBodyMotionProperties::Initialize), also with ApplySoftBodyCreationSettings called again on the created body.
+// ZoltParity/Physics/SoftBodyParity.zig calls these and checks that Zolt produces the same bits.
 //
 // Adapted from the delivery prototype of the Phase 9 design (commit 3759ab6). The simulation parts of the prototype
 // (worlds, SaveState, listener records) come with the soft body simulation harness (group SH).
@@ -18,7 +18,10 @@
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
 
+#include <atomic>
 #include <cfloat>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -28,9 +31,15 @@ using namespace JPH;
 
 #include <UnitTests/Layers.h>
 
-// The allocation hooks of ZoltParity/ParityHooks.h (Phase 9 group F0), inline here until that header is on this
-// branch: Jolt's allocator, but every block is zero-filled. A filtered parity run links only the reference objects that
-// it uses, so this file installs the hooks itself (it never relies on the hooks of another file).
+// The hooks of ZoltParity/ParityHooks.h (Phase 9 group F0, R1), inline here until that header is on this branch:
+// - Allocation: Jolt's allocator, but every block is zero-filled.
+// - Trace: printed to stderr.
+// - AssertFailed (a reference built with JPH_ENABLE_ASSERTS: `zig build parity -Dreference_asserts=true`): printed to
+//   stderr and counted (jolt_sb_reference_assert_count). Execution continues like Jolt's build without asserts. Jolt's
+//   default handler breaks into the debugger instead, which stops the parity process.
+// A filtered parity run links only the reference objects that it uses, so this file installs all of these hooks
+// itself: before main (sSBHooksInstalled below) and again at the start of every exported function, because another
+// reference file may have installed its own hooks since.
 // TODO(F0): include <ZoltParity/ParityHooks.h> and call ParityInstallHooks() instead.
 static void *SBZeroAllocate(size_t inSize)
 {
@@ -64,6 +73,32 @@ static void SBAlignedFree(void *inBlock)
 	free(inBlock);
 }
 
+static void SBTrace(const char *inFMT, ...)
+{
+	va_list list;
+	va_start(list, inFMT);
+	char buffer[1024];
+	vsnprintf(buffer, sizeof(buffer), inFMT, list);
+	va_end(list);
+	fprintf(stderr, "Jolt: %s\n", buffer);
+	fflush(stderr);
+}
+
+#ifdef JPH_ENABLE_ASSERTS
+
+// The number of Jolt asserts that failed while the hooks of this file were installed (jolt_sb_reference_assert_count)
+static std::atomic<uint32> sSBAssertCount { 0 };
+
+static bool SBAssertFailed(const char *inExpression, const char *inMessage, const char *inFile, uint inLine)
+{
+	++sSBAssertCount;
+	fprintf(stderr, "Jolt assert failed: %s:%u: (%s) %s\n", inFile, inLine, inExpression, inMessage != nullptr? inMessage : "");
+	fflush(stderr);
+	return false; // No breakpoint: continue like Jolt's build without asserts, the parity test fails the case
+}
+
+#endif // JPH_ENABLE_ASSERTS
+
 static void SBInstallHooks()
 {
 	Allocate = SBZeroAllocate;
@@ -71,7 +106,28 @@ static void SBInstallHooks()
 	Free = SBFree;
 	AlignedAllocate = SBZeroAlignedAllocate;
 	AlignedFree = SBAlignedFree;
+	Trace = SBTrace;
+	JPH_IF_ENABLE_ASSERTS(AssertFailed = SBAssertFailed;)
 }
+
+// Before main: before any Jolt allocation of the parity process
+[[maybe_unused]] static const bool sSBHooksInstalled = (SBInstallHooks(), true);
+
+// Private access to the members of the motion properties that Jolt has no getter for (explicit instantiation ignores
+// access checks, `auto` avoids naming the private nested types)
+template <typename Tag, auto M>
+struct SBRob
+{
+	friend auto SBGet(Tag) { return M; }
+};
+
+#define SB_ROB(Name, Member) \
+	struct Name { friend auto SBGet(Name); }; \
+	template struct SBRob<Name, &Member>;
+
+SB_ROB(SBRodStates, SoftBodyMotionProperties::mRodStates)
+SB_ROB(SBSkinState, SoftBodyMotionProperties::mSkinState)
+SB_ROB(SBLocalPredictedBounds, SoftBodyMotionProperties::mLocalPredictedBounds)
 
 // The settings kinds of jolt_sb_settings_bytes (must match SettingsKind in SoftBodyParity.zig)
 enum class SBSettingsKind : uint32
@@ -417,6 +473,16 @@ struct SBCreateDesc
 	uint32				mPad;
 };
 
+// Must match Step in SoftBodyParity.zig: the bytes of the shared settings (RestoreBinaryState) and the other fields of
+// the creation settings of one step
+struct SBStep
+{
+	const uint8 *		mSettingsBytes;
+	uint32				mSize;
+	uint32				mPad;
+	SBCreateDesc		mDesc;
+};
+
 // Must match BodyResult in SoftBodyParity.zig
 struct SBBodyResult
 {
@@ -426,6 +492,7 @@ struct SBBodyResult
 	float				mRotation[4];
 	float				mWorldBounds[6];
 	float				mLocalBounds[6];
+	float				mLocalPredictedBounds[6];
 	float				mInvMass;
 	float				mInvInertiaDiagonal[3];
 	float				mInertiaRotation[4];
@@ -451,10 +518,14 @@ struct SBBodyResult
 	uint32				mGroupID;
 	uint32				mSubGroupID;
 	uint32				mNumVertices;
-	uint32				mNumRods;
-	uint32				mSettingsRefCount;
+	uint32				mNumRods;					///< The rods of the shared settings of the last step
+	uint32				mSettingsRefCount;			///< The reference count of the shared settings of the last step
 	uint32				mShapeSubType;
 	uint32				mEnableSkinConstraints;
+	uint32				mNumRodStates;				///< The rod states of the motion properties (mRodStates)
+	uint32				mNumSkinStates;				///< The skin states of the motion properties (mSkinState)
+	uint32				mFirstSettingsRefCount;		///< The reference count of the shared settings of the first step
+	uint32				mPad;
 };
 
 // Must match VertexResult in SoftBodyParity.zig (SoftBodyMotionProperties::Vertex)
@@ -477,6 +548,14 @@ struct SBRodResult
 	float				mAngularVelocity[3];
 };
 
+// Must match SkinResult in SoftBodyParity.zig (SoftBodyMotionProperties::SkinState)
+struct SBSkinResult
+{
+	float				mPreviousPosition[3];
+	float				mPosition[3];
+	float				mNormal[3];
+};
+
 static void SBStore(Vec3Arg inV, float *outV)
 {
 	outV[0] = inV.GetX();
@@ -497,6 +576,33 @@ static void SBStore(RVec3Arg inV, double *outV)
 	outV[0] = double(inV.GetX());
 	outV[1] = double(inV.GetY());
 	outV[2] = double(inV.GetZ());
+}
+
+/// The creation settings of a step, with the shared settings that RestoreBinaryState makes of the step's bytes
+static SoftBodyCreationSettings SBCreationSettings(SoftBodySharedSettings *ioShared, const SBStep &inStep)
+{
+	{
+		std::stringstream data(std::string(reinterpret_cast<const char *>(inStep.mSettingsBytes), inStep.mSize));
+		StreamInWrapper in(data);
+		ioShared->RestoreBinaryState(in);
+	}
+	const SBCreateDesc *desc = &inStep.mDesc;
+	SoftBodyCreationSettings settings(ioShared, RVec3(Real(desc->mPosition[0]), Real(desc->mPosition[1]), Real(desc->mPosition[2])), Quat(desc->mRotation[0], desc->mRotation[1], desc->mRotation[2], desc->mRotation[3]), ObjectLayer(desc->mObjectLayer));
+	settings.mUserData = desc->mUserData;
+	settings.mCollisionGroup = CollisionGroup(nullptr, desc->mGroupID, desc->mSubGroupID);
+	settings.mNumIterations = desc->mNumIterations;
+	settings.mLinearDamping = desc->mLinearDamping;
+	settings.mMaxLinearVelocity = desc->mMaxLinearVelocity;
+	settings.mRestitution = desc->mRestitution;
+	settings.mFriction = desc->mFriction;
+	settings.mPressure = desc->mPressure;
+	settings.mGravityFactor = desc->mGravityFactor;
+	settings.mVertexRadius = desc->mVertexRadius;
+	settings.mUpdatePosition = desc->mUpdatePosition != 0;
+	settings.mMakeRotationIdentity = desc->mMakeRotationIdentity != 0;
+	settings.mAllowSleeping = desc->mAllowSleeping != 0;
+	settings.mFacesDoubleSided = desc->mFacesDoubleSided != 0;
+	return settings;
 }
 
 extern "C"
@@ -554,35 +660,23 @@ uint32 jolt_sb_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBytes, uint
 	return SBCopyBytes(data.str(), outBytes, inCapacity);
 }
 
-/// BodyInterface::CreateSoftBody in a new PhysicsSystem (the layers of UnitTests/Layers.h) with the shared settings
-/// that RestoreBinaryState makes of inSettingsBytes. The body is destroyed again. Returns the number of vertices
-/// (0xFFFFFFFF if the vertices or rods don't fit or no body was created).
-uint32 jolt_sb_create_body(const uint8 *inSettingsBytes, uint32 inSize, const SBCreateDesc *inDesc, SBBodyResult *outResult, SBVertexResult *outVertices, uint32 inVertexCapacity, SBRodResult *outRods, uint32 inRodCapacity)
+/// BodyInterface::CreateSoftBody in a new PhysicsSystem (the layers of UnitTests/Layers.h) with the creation settings
+/// of step 0, then Body::ApplySoftBodyCreationSettings on the created body with those of every other step. The shared
+/// settings of a step are what RestoreBinaryState makes of its bytes. The results are the state after the last step,
+/// then the body is destroyed. Returns the number of vertices (0xFFFFFFFF if the vertices, rod states or skin states
+/// don't fit or no body was created).
+uint32 jolt_sb_create_body(const SBStep *inSteps, uint32 inNumSteps, SBBodyResult *outResult, SBVertexResult *outVertices, uint32 inVertexCapacity, SBRodResult *outRods, uint32 inRodCapacity, SBSkinResult *outSkinStates, uint32 inSkinCapacity)
 {
 	SBInstallHooks();
 
-	// The shared settings: only the creation settings hold a reference (like the Zolt side)
-	SoftBodySharedSettings *shared = new SoftBodySharedSettings;
+	// The creation settings of every step: only they hold a reference to their shared settings (like the Zolt side)
+	Array<SoftBodySharedSettings *> shared;
+	Array<SoftBodyCreationSettings> settings;
+	for (uint32 s = 0; s < inNumSteps; ++s)
 	{
-		std::stringstream data(std::string(reinterpret_cast<const char *>(inSettingsBytes), inSize));
-		StreamInWrapper in(data);
-		shared->RestoreBinaryState(in);
+		shared.push_back(new SoftBodySharedSettings);
+		settings.push_back(SBCreationSettings(shared.back(), inSteps[s]));
 	}
-	SoftBodyCreationSettings settings(shared, RVec3(Real(inDesc->mPosition[0]), Real(inDesc->mPosition[1]), Real(inDesc->mPosition[2])), Quat(inDesc->mRotation[0], inDesc->mRotation[1], inDesc->mRotation[2], inDesc->mRotation[3]), ObjectLayer(inDesc->mObjectLayer));
-	settings.mUserData = inDesc->mUserData;
-	settings.mCollisionGroup = CollisionGroup(nullptr, inDesc->mGroupID, inDesc->mSubGroupID);
-	settings.mNumIterations = inDesc->mNumIterations;
-	settings.mLinearDamping = inDesc->mLinearDamping;
-	settings.mMaxLinearVelocity = inDesc->mMaxLinearVelocity;
-	settings.mRestitution = inDesc->mRestitution;
-	settings.mFriction = inDesc->mFriction;
-	settings.mPressure = inDesc->mPressure;
-	settings.mGravityFactor = inDesc->mGravityFactor;
-	settings.mVertexRadius = inDesc->mVertexRadius;
-	settings.mUpdatePosition = inDesc->mUpdatePosition != 0;
-	settings.mMakeRotationIdentity = inDesc->mMakeRotationIdentity != 0;
-	settings.mAllowSleeping = inDesc->mAllowSleeping != 0;
-	settings.mFacesDoubleSided = inDesc->mFacesDoubleSided != 0;
 
 	BPLayerInterfaceImpl layers;
 	ObjectVsBroadPhaseLayerFilterImpl object_vs_broad_phase;
@@ -590,11 +684,16 @@ uint32 jolt_sb_create_body(const uint8 *inSettingsBytes, uint32 inSize, const SB
 	PhysicsSystem system;
 	system.Init(4, 0, 4, 4, layers, object_vs_broad_phase, pairs);
 	BodyInterface &bi = system.GetBodyInterfaceNoLock();
-	Body *body = bi.CreateSoftBody(settings);
+	Body *body = bi.CreateSoftBody(settings[0]);
 	if (body == nullptr)
 		return 0xFFFFFFFF;
+	for (uint32 s = 1; s < inNumSteps; ++s)
+		body->ApplySoftBodyCreationSettings(settings[s], layers);
 
 	const SoftBodyMotionProperties *mp = static_cast<const SoftBodyMotionProperties *>(body->GetMotionProperties());
+	const auto &rod_states = mp->*SBGet(SBRodStates());
+	const auto &skin_state = mp->*SBGet(SBSkinState());
+	const AABox &local_predicted_bounds = mp->*SBGet(SBLocalPredictedBounds());
 	SBBodyResult &r = *outResult;
 	memset(&r, 0, sizeof(r));
 	SBStore(body->GetPosition(), r.mPosition);
@@ -605,6 +704,8 @@ uint32 jolt_sb_create_body(const uint8 *inSettingsBytes, uint32 inSize, const SB
 	SBStore(body->GetWorldSpaceBounds().mMax, r.mWorldBounds + 3);
 	SBStore(mp->GetLocalBounds().mMin, r.mLocalBounds);
 	SBStore(mp->GetLocalBounds().mMax, r.mLocalBounds + 3);
+	SBStore(local_predicted_bounds.mMin, r.mLocalPredictedBounds);
+	SBStore(local_predicted_bounds.mMax, r.mLocalPredictedBounds + 3);
 	r.mInvMass = mp->GetInverseMassUnchecked();
 	SBStore(mp->GetInverseInertiaDiagonal(), r.mInvInertiaDiagonal);
 	SBStore(mp->GetInertiaRotation(), r.mInertiaRotation);
@@ -630,13 +731,16 @@ uint32 jolt_sb_create_body(const uint8 *inSettingsBytes, uint32 inSize, const SB
 	r.mGroupID = body->GetCollisionGroup().GetGroupID();
 	r.mSubGroupID = body->GetCollisionGroup().GetSubGroupID();
 	r.mNumVertices = uint32(mp->GetVertices().size());
-	r.mNumRods = uint32(shared->mRodStretchShearConstraints.size());
-	r.mSettingsRefCount = shared->GetRefCount();
+	r.mNumRods = uint32(shared.back()->mRodStretchShearConstraints.size());
+	r.mSettingsRefCount = shared.back()->GetRefCount();
 	r.mShapeSubType = uint32(body->GetShape()->GetSubType());
 	r.mEnableSkinConstraints = mp->GetEnableSkinConstraints()? 1 : 0;
+	r.mNumRodStates = uint32(rod_states.size());
+	r.mNumSkinStates = uint32(skin_state.size());
+	r.mFirstSettingsRefCount = shared.front()->GetRefCount();
 
 	uint32 result = r.mNumVertices;
-	if (r.mNumVertices > inVertexCapacity || r.mNumRods > inRodCapacity)
+	if (r.mNumVertices > inVertexCapacity || r.mNumRodStates > inRodCapacity || r.mNumSkinStates > inSkinCapacity)
 		result = 0xFFFFFFFF;
 	else
 	{
@@ -655,16 +759,53 @@ uint32 jolt_sb_create_body(const uint8 *inSettingsBytes, uint32 inSize, const SB
 			o.mLargestPenetration = v.mLargestPenetration;
 			o.mInvMass = v.mInvMass;
 		}
-		for (uint32 i = 0; i < r.mNumRods; ++i)
+		for (uint32 i = 0; i < r.mNumRodStates; ++i)
 		{
 			SBRodResult &o = outRods[i];
 			SBStore(mp->GetRodRotation(i), o.mRotation);
 			SBStore(mp->GetRodAngularVelocity(i), o.mAngularVelocity);
 		}
+		for (uint32 i = 0; i < r.mNumSkinStates; ++i)
+		{
+			SBSkinResult &o = outSkinStates[i];
+			SBStore(skin_state[i].mPreviousPosition, o.mPreviousPosition);
+			SBStore(skin_state[i].mPosition, o.mPosition);
+			SBStore(skin_state[i].mNormal, o.mNormal);
+		}
 	}
 
 	bi.DestroyBody(body->GetID());
 	return result;
+}
+
+/// The number of Jolt asserts that failed while the hooks of this file were installed (always 0 without
+/// JPH_ENABLE_ASSERTS)
+uint32 jolt_sb_reference_assert_count()
+{
+#ifdef JPH_ENABLE_ASSERTS
+	return sSBAssertCount.load();
+#else
+	return 0;
+#endif
+}
+
+/// 1 when the reference library is built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`)
+uint32 jolt_sb_reference_has_asserts()
+{
+#ifdef JPH_ENABLE_ASSERTS
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+/// Fails a JPH_ASSERT on purpose (the test of the assert hook): the number of failed asserts before and after it
+void jolt_sb_test_assert_hook(uint32 *outBefore, uint32 *outAfter)
+{
+	SBInstallHooks();
+	*outBefore = jolt_sb_reference_assert_count();
+	JPH_ASSERT(false, "SoftBodyParity: the test of the assert hook (expected)");
+	*outAfter = jolt_sb_reference_assert_count();
 }
 
 } // extern "C"

@@ -595,7 +595,7 @@ pub const Generator = struct {
         const index = self.schema.find(class) orelse return true; // A primitive name, an unknown class
         for (self.schema.classes[index].attributes) |a| {
             if (a.depth >= 2) return false;
-            // An attribute that was not probed (an abstract or Phase 9 class) can be a Ref too
+            // An attribute that was not probed (of an abstract class) can be a Ref too
             if (a.element == .reference or a.element == .unknown) return false;
             if (a.element == .value and !std.mem.eql(u8, a.class_name, class) and !self.skippable(a.class_name)) return false;
         }

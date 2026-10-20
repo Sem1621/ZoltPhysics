@@ -199,8 +199,8 @@ fn roundTrip(allocator: Allocator, bytes: []const u8, class: [:0]const u8, ctx_i
     const j = jolt orelse return false;
     const zz = z.?;
 
-    // A class that reaches a Phase 9 class: the C++ bytes have attributes that Zolt's cannot have (S17). Then the C++
-    // side reads Zolt's bytes and must write its own bytes again.
+    // A class that reaches a class with a Phase 9 attribute (PhysicsScene.mSoftBodies): the C++ bytes have attributes
+    // that Zolt's cannot have (S17). Then the C++ side reads Zolt's bytes and must write its own bytes again.
     const cross = declaresPhase9(j.text);
     for (formats) |f| {
         if (!cross) {

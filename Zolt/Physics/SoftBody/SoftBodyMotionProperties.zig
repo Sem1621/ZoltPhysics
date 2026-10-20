@@ -657,8 +657,9 @@ test "SoftBodyMotionProperties: layout and initialize" {
     try expectEqual(@as(f32, 1.0 / 7.0), mp.base.getInverseMass());
 
     // A second call resizes: fewer vertices, no rods and no skinning keep the old rod and skin states (Jolt)
+    const bounds_before = mp.getLocalBounds();
     const smaller = try SoftBodySharedSettings.create(allocator);
-    try smaller.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }));
+    try smaller.vertices.append(allocator, .init(.{ .x = 2, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }));
     try smaller.update_groups.append(allocator, std.mem.zeroes(SoftBodySharedSettings.UpdateGroup));
     var creation2: SoftBodyCreationSettings = .init(smaller, .zero(), Quat.identity(), 0);
     defer creation2.deinit();
@@ -667,6 +668,12 @@ test "SoftBodyMotionProperties: layout and initialize" {
     try expectEqual(@as(usize, 2), mp.rod_states.items.len);
     try expectEqual(@as(usize, 3), mp.skin_state.items.len);
     try std.testing.expect(mp.getSettings() == smaller);
+    // Jolt does not reset the local bounds: the new vertex is added to the bounds of the old vertices
+    var expected_bounds = bounds_before;
+    expected_bounds.encapsulateVec3(Vec3.init(2, 0, 0));
+    try std.testing.expect(mp.getLocalBounds().eql(expected_bounds));
+    try std.testing.expect(mp.local_predicted_bounds.eql(expected_bounds));
+    try std.testing.expect(mp.getLocalBounds().min.getX() < -0.5); // The old vertex at (-1, 0, 0)
     // A kinematic vertex makes the mass infinite
     try expectEqual(@as(f32, 0.0), mp.base.getInverseMass());
 
