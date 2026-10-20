@@ -348,7 +348,7 @@ pub const MotionProperties = struct {
 
     /// Get inverse mass (1 / mass). Should only be called on a dynamic object (static or kinematic bodies have infinite mass so should be treated as 1 / mass = 0)
     pub fn getInverseMass(self: *const MotionProperties) f32 {
-        if (Core.enable_asserts) std.debug.assert(self.cached_motion_type == .dynamic);
+        if (Core.enable_asserts) Core.assertRecoverable(self.cached_motion_type == .dynamic, "mCachedMotionType == EMotionType::Dynamic", @src());
         return self.inv_mass;
     }
 
@@ -427,7 +427,7 @@ pub const MotionProperties = struct {
 
     /// Multiply a vector with the inverse world space inertia tensor (\f$I_{world}^{-1}\f$). Zero if object is static or kinematic.
     pub fn multiplyWorldSpaceInverseInertiaByVector(self: *const MotionProperties, body_rotation: Quat, v_in: Vec3) Vec3 {
-        if (Core.enable_asserts) std.debug.assert(self.cached_motion_type == .dynamic);
+        if (Core.enable_asserts) Core.assertRecoverable(self.cached_motion_type == .dynamic, "mCachedMotionType == EMotionType::Dynamic", @src());
 
         // Mask out columns of DOFs that are not allowed
         const angular_dofs_mask = Vec3.fromVec4(self.getAngularDOFsMask().reinterpretAsFloat());
@@ -539,7 +539,7 @@ pub const MotionProperties = struct {
     pub fn applyLinearVelocityStep(self: *MotionProperties, linear_velocity: Vec3) void {
         if (DeterminismLog.enabled) DeterminismLog.log(.{ "ApplyLinearVelocityStep: ", linear_velocity });
         BodyAccess.assertVelocityAccess(.read_write);
-        if (Core.enable_asserts) std.debug.assert(self.cached_motion_type == .dynamic);
+        if (Core.enable_asserts) Core.assertRecoverable(self.cached_motion_type == .dynamic, "mCachedMotionType == EMotionType::Dynamic", @src());
         if (Core.enable_asserts) std.debug.assert(!linear_velocity.isNaN());
         self.linear_velocity = self.lockTranslation(linear_velocity);
     }
@@ -555,7 +555,7 @@ pub const MotionProperties = struct {
     pub fn applyAngularVelocityStep(self: *MotionProperties, angular_velocity: Vec3) void {
         if (DeterminismLog.enabled) DeterminismLog.log(.{ "ApplyAngularVelocityStep: ", angular_velocity });
         BodyAccess.assertVelocityAccess(.read_write);
-        if (Core.enable_asserts) std.debug.assert(self.cached_motion_type == .dynamic);
+        if (Core.enable_asserts) Core.assertRecoverable(self.cached_motion_type == .dynamic, "mCachedMotionType == EMotionType::Dynamic", @src());
         if (Core.enable_asserts) std.debug.assert(!angular_velocity.isNaN());
         self.angular_velocity = angular_velocity;
     }

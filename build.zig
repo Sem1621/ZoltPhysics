@@ -22,7 +22,8 @@
 //!                               (Docs/Zolt/RemainingFeaturesArchitecture.md R1).
 //!   -Dtest-filter=<substring>   Only run tests whose name contains the substring (repeatable)
 //!   -Dreference_asserts=true    Build the C++ reference of `zig build parity` with JPH_ENABLE_ASSERTS: the simulation
-//!                               parity fails a scene whose C++ side hits a Jolt assert
+//!                               parity fails a scene whose C++ side hits a Jolt assert. The release_only scenes and
+//!                               the release only parity tests compare the counts of both sides instead (R8).
 //!   -Duse_llvm=true|false       Use the LLVM backend (default: true). Zig 0.16's self-hosted x86_64 backend,
 //!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
 const std = @import("std");
@@ -227,9 +228,11 @@ pub fn build(b: *std.Build) void {
     // Parity tests: the C++ library is the reference. It is compiled in the configuration that Zolt
     // follows (JPH_CROSS_PLATFORM_DETERMINISTIC, no FP contraction, no asserts / profiler, and no debug renderer unless
     // -Ddebug_renderer=true, like the Distribution build used for Jolt's determinism hashes). -Dreference_asserts=true adds
-    // JPH_ENABLE_ASSERTS: a failed Jolt assert is printed and counted (SimulationReference.cpp's hooks), and the
-    // simulation parity fails a scene whose C++ side hit one (the check that scenes keep away from Jolt's asserts).
-    const reference_asserts = b.option(bool, "reference_asserts", "Build the C++ reference of the parity tests with JPH_ENABLE_ASSERTS (scenes that hit a Jolt assert fail)") orelse false;
+    // JPH_ENABLE_ASSERTS: a failed Jolt assert is printed and counted (ZoltParity/ParityHooks.h), and the simulation
+    // parity fails a scene whose C++ side hit one (the check that scenes keep away from Jolt's asserts). The release_only
+    // scenes and the release only parity tests (ParityHooks.ReleaseAsserts) do not fail on them: they compare the count
+    // with Zolt's (Docs/Zolt/RemainingFeaturesArchitecture.md R8).
+    const reference_asserts = b.option(bool, "reference_asserts", "Build the C++ reference of the parity tests with JPH_ENABLE_ASSERTS (scenes that hit a Jolt assert fail, release only tests compare the assert counts)") orelse false;
     // JPH_OBJECT_STREAM: Jolt's CMake option ENABLE_OBJECT_STREAM (ON by default, also in the build of the determinism
     // hashes). It adds the attribute tables to the RTTI, makes Factory::Register also register the attribute types and
     // compiles ObjectStream/*.cpp, which Phase 8 compares with Zolt (Docs/Zolt/SerializationArchitecture.md S1). Every

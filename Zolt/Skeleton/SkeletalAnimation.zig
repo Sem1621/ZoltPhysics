@@ -218,7 +218,7 @@ pub const SkeletalAnimation = struct {
     /// Get the (interpolated) joint transforms at time inTime
     pub fn sample(self: *const SkeletalAnimation, time: f32, pose: *SkeletonPose) void {
         // Correct time when animation is looping
-        if (Core.enable_asserts) std.debug.assert(time >= 0.0); // Jolt's release build continues with a negative time
+        if (Core.enable_asserts) Core.assertRecoverable(time >= 0.0, "inTime >= 0.0f", @src()); // Jolt's release build continues with a negative time
         const duration = self.getDuration();
         const t = if (duration > 0.0 and self.is_looping) @rem(time, duration) else time;
 
@@ -256,13 +256,13 @@ pub const SkeletalAnimation = struct {
                 const s2 = &keyframes[@intCast(low + 1)];
 
                 const fraction = (t - s1.time) / (s2.time - s1.time);
-                if (Core.enable_asserts) std.debug.assert(fraction >= 0.0 and fraction <= 1.0); // Only a NaN fails it (times whose differences overflow), Jolt's release build continues
+                if (Core.enable_asserts) Core.assertRecoverable(fraction >= 0.0 and fraction <= 1.0, "fraction >= 0.0f && fraction <= 1.0f", @src()); // Only a NaN fails it (times whose differences overflow), Jolt's release build continues
 
                 state.translation = s1.base.translation.mulScalar(1.0 - fraction).add(s2.base.translation.mulScalar(fraction));
                 if (Core.enable_asserts) std.debug.assert(s1.base.rotation.isNormalized(.{}));
                 if (Core.enable_asserts) std.debug.assert(s2.base.rotation.isNormalized(.{}));
                 state.rotation = s1.base.rotation.slerp(s2.base.rotation, fraction);
-                if (Core.enable_asserts) std.debug.assert(state.rotation.isNormalized(.{}));
+                if (Core.enable_asserts) Core.assertRecoverable(state.rotation.isNormalized(.{}), "state.mRotation.IsNormalized()", @src());
             }
         }
     }

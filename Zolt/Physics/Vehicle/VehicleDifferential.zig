@@ -81,7 +81,7 @@ pub const VehicleDifferentialSettings = extern struct {
         var right_torque_fraction = self.left_right_split;
 
         if (self.limited_slip_ratio < math.flt_max) {
-            if (Core.enable_asserts) std.debug.assert(self.limited_slip_ratio > 1.0);
+            if (Core.enable_asserts) Core.assertRecoverable(self.limited_slip_ratio > 1.0, "mLimitedSlipRatio > 1.0f", @src());
 
             // This is a limited slip differential, adjust torque ratios according to wheel speeds
             const omega_l = math.max(@as(f32, 1.0e-3), @abs(left_angular_velocity)); // prevent div by zero by setting a minimum velocity and ignoring that the wheels may be rotating in different directions
@@ -91,7 +91,7 @@ pub const VehicleDifferentialSettings = extern struct {
 
             // Map into a value that is 0 when the wheels are turning at an equal rate and 1 when the wheels are turning at mLimitedSlipRotationRatio
             const alpha = math.min((omega_max / omega_min - 1.0) / (self.limited_slip_ratio - 1.0), @as(f32, 1.0));
-            if (Core.enable_asserts) std.debug.assert(alpha >= 0.0);
+            if (Core.enable_asserts) Core.assertRecoverable(alpha >= 0.0, "alpha >= 0.0f", @src());
             const one_min_alpha = 1.0 - alpha;
 
             if (omega_l < omega_r) {
@@ -106,7 +106,7 @@ pub const VehicleDifferentialSettings = extern struct {
         }
 
         // Assert the values add up to 1
-        if (Core.enable_asserts) std.debug.assert(@abs(left_torque_fraction + right_torque_fraction - 1.0) < 1.0e-6);
+        if (Core.enable_asserts) Core.assertRecoverable(@abs(left_torque_fraction + right_torque_fraction - 1.0) < 1.0e-6, "abs(outLeftTorqueFraction + outRightTorqueFraction - 1.0f) < 1.0e-6f", @src());
 
         return .{ .left = left_torque_fraction, .right = right_torque_fraction };
     }

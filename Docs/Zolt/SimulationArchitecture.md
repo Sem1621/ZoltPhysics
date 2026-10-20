@@ -1145,7 +1145,7 @@ test or a parity case:
   Jolt's debug build, without them it returns an empty `Ref` like the release build.
   `PhysicsScene.fromPhysicsSystem` then adds the constraint without settings, and `createBodies` /
   `saveBinaryState` panic where Jolt dereferences the null pointer. The test of this behavior runs
-  only without asserts.
+  in every build: the assert is recoverable and the test expects it (RemainingFeaturesArchitecture.md R8).
 - `PathConstraintSettings::RestoreBinaryState` ignores a failed path restore and keeps reading.
   `GetIndexAndT` maps fractions outside the int range or NaN to `INT_MIN`. Negative fractions on a
   looping path extrapolate instead of wrapping.
@@ -1175,8 +1175,9 @@ asserts the same and finds them. The generators avoid them instead of changing l
   perpendicular to the allowed ones (NaN), and SwingTwist's "swing parts should turn on / off
   together" assert with an axis aligned swing motor axis masked by AllowedDOFs. Both are compared in
   ReleaseFast only, where Jolt release and Zolt agree bit for bit, NaNs included.
-- Gear / RackAndPinion with a body that is not dynamic (Jolt asserts; compared in ReleaseFast
-  only), and Gear ratios that diverge.
+- Gear / RackAndPinion with a body that is not dynamic (Jolt asserts; the release_only scene
+  constraints_gear_kinematic_release compares it with recoverable asserts, RemainingFeaturesArchitecture.md
+  R8), and Gear ratios that diverge.
 - A Gear / RackAndPinion that references a hinge or slider in another island: SolvePositionConstraint
   reads bodies that a parallel job may be moving, so the result depends on thread timing, in Jolt
   too.

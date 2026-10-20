@@ -1434,9 +1434,8 @@ test "PhysicsSystem linear cast body without inner radius (Jolt's release behavi
     // movement longer than linear_cast_threshold * |r|. Zolt's ReleaseFast build does the same instead of reaching
     // undefined behavior (the assert in jobIntegrateVelocity was unconditional). Nothing is in the way, so the bodies
     // move exactly like their discrete twins. (SimulationParity compares this with Jolt in the scene
-    // linear_cast_without_inner_radius.)
-    if (Core.enable_asserts) return error.SkipZigTest;
-
+    // linear_cast_without_inner_radius.) With asserts the test expects Jolt's assert of each linear cast body in each
+    // collision step (RemainingFeaturesArchitecture.md R8).
     const allocator = std.testing.allocator;
     var c: PhysicsTestContext = undefined;
     try c.init(allocator, .{ .collision_steps = 2 });
@@ -1475,7 +1474,12 @@ test "PhysicsSystem linear cast body without inner radius (Jolt's release behavi
         try expect(step_movement * step_movement > threshold * threshold);
     }
 
+    // 30 updates of 2 collision steps, the inner radius of the 2 linear cast bodies is checked in every step
+    var expect_assert: zolt.ExpectAssert = undefined;
+    expect_assert.init(30 * 2 * 2); // Jolt asserts 120 times
+    errdefer expect_assert.restore();
     _ = try c.simulate(0.5, {});
+    try expect_assert.finish();
     for (0..2) |pair| {
         const cast = bodies[2 * pair].getPosition();
         const discrete = bodies[2 * pair + 1].getPosition();

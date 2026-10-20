@@ -479,7 +479,7 @@ pub const RagdollSettings = struct {
                     principals[i].child_sum = 0.0;
                 for (chain) |i| {
                     const decomposition = parts[i].base.mass_properties_override.decomposePrincipalMomentsOfInertia() orelse {
-                        if (Core.enable_asserts) @panic("Failed to decompose the inertia tensor!");
+                        if (Core.enable_asserts) Core.assertFailed("Failed to decompose the inertia tensor!", @src());
                         return false;
                     };
                     principals[i].rotation = decomposition.rotation;
@@ -527,8 +527,8 @@ pub const RagdollSettings = struct {
     pub fn calculateConstraintPriorities(self: *RagdollSettings, opts: struct { base_priority: u32 = 0 }) Allocator.Error!void {
         const base_priority = opts.base_priority;
         const num_parts = self.parts.items.len;
-        if (Core.enable_asserts) std.debug.assert(base_priority +% @as(u32, @truncate(num_parts)) > base_priority); // Base priority is too high and will cause overflows
-        if (Core.enable_asserts) std.debug.assert(self.skeletonOf().areJointsCorrectlyOrdered());
+        if (Core.enable_asserts) Core.assertRecoverable(base_priority +% @as(u32, @truncate(num_parts)) > base_priority, "Base priority is too high and will cause overflows", @src());
+        if (Core.enable_asserts) Core.assertRecoverable(self.skeletonOf().areJointsCorrectlyOrdered(), "mSkeleton->AreJointsCorrectlyOrdered()", @src());
 
         // Calculate priority for each part. Start with the base priority and increment towards the root
         const priorities = try self.allocator.alloc(u32, num_parts);
@@ -1864,16 +1864,20 @@ test "RagdollSettings: stabilize" {
         try testing.expect(parts[0].base.override_mass_properties == .calculate_inertia);
     }
 
-    // Release builds: an inertia tensor that cannot be decomposed (NaN) makes Stabilize return false (Jolt asserts in
-    // its debug build, so does Zolt in safe builds)
-    if (!Core.enable_asserts) {
+    // Jolt's release behavior: an inertia tensor that cannot be decomposed (NaN) makes Stabilize return false (Jolt
+    // asserts in its debug build, the test expects the assert)
+    {
         var settings = Ref(RagdollSettings).init(try buildChain(allocator, &.{ 1, 2 }, &.{ .dynamic, .dynamic }));
         defer settings.deinit();
         const parts = settings.get().?.parts.items;
         parts[1].base.override_mass_properties = .mass_and_inertia_provided;
         const nan = Vec4.replicate(std.math.nan(f32));
         parts[1].base.mass_properties_override = .{ .mass = 2, .inertia = Mat44.init(nan, nan, nan, Vec4.init(0, 0, 0, 1)) };
+        var expect_assert: @import("../../Core/IssueReporting.zig").ExpectAssert = undefined;
+        expect_assert.init(2); // "Too many iterations" (EigenValueSymmetric), then "Failed to decompose the inertia tensor!"
+        errdefer expect_assert.restore();
         try testing.expect(!try settings.get().?.stabilize());
+        try expect_assert.finish();
     }
 }
 

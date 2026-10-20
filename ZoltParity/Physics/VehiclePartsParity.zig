@@ -13,8 +13,9 @@
 //!   or not; in about 1 of 8 updates a special delta time, RPM or input: NaN, infinite, -0, huge, negative) and Set (gears in range, clutch frictions); after every call the gear, clutch friction, ratio,
 //!   IsSwitchingGear, AllowSleep and the SaveState bytes (the timers) are compared.
 //! - VehicleDifferentialSettings::CalculateTorqueRatio: random settings (open and limited slip differentials) and wheel
-//!   speeds (zero, tiny, negative, huge, infinite, NaN). Release only (Jolt asserts on the settings, Zolt checks the same
-//!   asserts in safe builds): splits outside [0, 1], limited slip ratios <= 1 and both speeds infinite.
+//!   speeds (zero, tiny, negative, huge, infinite, NaN). Release only (Jolt asserts on the settings, its release build
+//!   continues): splits outside [0, 1], limited slip ratios <= 1 and both speeds infinite. They run in every build:
+//!   Zolt's asserts are recoverable, and the asserts of both sides are counted per case (R8, ParityHooks.ReleaseAsserts).
 //! - The default curves (WheelSettingsWV's longitudinal and lateral friction, VehicleEngineSettings' normalized torque)
 //!   at random x.
 //! - The binary state of every settings class: VehicleEngineSettings, VehicleTransmissionSettings,
@@ -45,6 +46,7 @@
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
+const ParityHooks = @import("../ParityHooks.zig");
 
 const Checker = fw.Checker;
 const Allocator = std.mem.Allocator;
@@ -1100,9 +1102,11 @@ test "VehicleParts: VehicleTransmission gear switching, clutch and timers" {
     try checker.finish();
 }
 
-fn checkDifferentials(checker: *Checker, rng: *Rng, count: usize, release_only: bool) void {
+/// `asserts`: the release only inputs (Jolt asserts on them), with the asserts of both sides counted (R8)
+fn checkDifferentials(checker: *Checker, rng: *Rng, count: usize, asserts: ?*ParityHooks.ReleaseAsserts) void {
+    const release_only = asserts != null;
     const n = 64;
-    for (0..count) |_| {
+    for (0..count) |case| {
         const desc = randomDifferential(rng, .{ .release_only = release_only });
         var velocities: [2 * n]f32 = undefined;
         for (&velocities) |*v| {
@@ -1120,28 +1124,34 @@ fn checkDifferentials(checker: *Checker, rng: *Rng, count: usize, release_only: 
             }
         }
         var jolt_fractions: [2 * n]f32 = undefined;
+        if (asserts) |a| a.begin();
         jolt.jolt_vp_differential(&desc, &velocities, n, &jolt_fractions);
         const d = makeDifferential(&desc);
         for (0..n) |i| {
             const r = d.calculateTorqueRatio(velocities[2 * i], velocities[2 * i + 1]);
             checker.check(.{ desc, velocities[2 * i], velocities[2 * i + 1] }, [2]f32{ r.left, r.right }, jolt_fractions[2 * i ..][0..2].*);
         }
+        if (asserts) |a| a.end(case);
     }
 }
 
 test "VehicleParts: VehicleDifferentialSettings CalculateTorqueRatio" {
     var checker: Checker = .{ .name = "VehicleDifferential" };
     var rng: Rng = .{ .state = 0xd1ff_0003 };
-    checkDifferentials(&checker, &rng, 2_000, false);
+    checkDifferentials(&checker, &rng, 2_000, null);
     try checker.finish();
 }
 
 test "VehicleParts: VehicleDifferentialSettings CalculateTorqueRatio outside Jolt's asserts (release only)" {
-    if (zolt.Core.enable_asserts) return error.SkipZigTest; // Jolt asserts on these settings, Zolt checks the same asserts in safe builds
+    // Jolt asserts on these settings, Zolt's asserts are recoverable and counted on both sides (R8)
     var checker: Checker = .{ .name = "VehicleDifferential release only" };
     var rng: Rng = .{ .state = 0xd1ff_0004 };
-    checkDifferentials(&checker, &rng, 2_000, true);
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("VehicleDifferential release only");
+    defer asserts.deinit();
+    checkDifferentials(&checker, &rng, 2_000, &asserts);
     try checker.finish();
+    try asserts.finish();
 }
 
 /// Save, cross restore and truncated restores of one settings class. `random` makes a description, `template` the

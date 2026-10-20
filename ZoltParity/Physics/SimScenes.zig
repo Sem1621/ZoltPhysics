@@ -24,8 +24,9 @@
 //!    themselves), so the build summary counts it as "skipped", never silently. Meanwhile the test "SimScenes blocked
 //!    scenes run on the C++ side" runs it on the C++ side with 0 and 3 worker threads and checks that it reaches what it
 //!    is written for (contact callbacks, active constraints, its expect_* operations).
-//!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: it runs
-//!    without Zolt's asserts only (ReleaseFast).
+//!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: Zolt's
+//!    assert at that site is recoverable (RemainingFeaturesArchitecture.md R8), and SimulationParity runs the scene with
+//!    a handler that counts the asserts.
 //! 3. A scene with contacts needs nothing else (the C++ side and the Zolt side create every shape kind of `ShapeKind`,
 //!    and the contact listener records are compared already). A new shape kind is a new `ShapeKind` value plus its
 //!    creation in `SimulationReference.cpp` (MakeShape) and `SimulationParity.zig` (makeShapeSettings). Constraints:
@@ -181,7 +182,7 @@
 //! - **Rules.** Avoid what Jolt asserts or leaves undefined:
 //!   - Wheel leaves its contact members (mContactPosition, mContactPointVelocity, mContactNormal, mContactLongitudinal,
 //!     mContactLateral, mAxlePlaneConstant) uninitialized until the first contact, and VehicleConstraint::SaveState
-//!     writes some of them: the reference zero-fills every allocation (SimInstallHooks of SimulationReference.cpp) and
+//!     writes some of them: the reference zero-fills every allocation (ZoltParity/ParityHooks.h) and
 //!     Zolt zero-initializes these members (a documented deviation), so a vehicle may start in the air
 //!     (vehicle_wheeled_in_air);
 //!   - the body of a vehicle stays in the system while the vehicle exists, vehicles do not drive on each other (their
@@ -2399,7 +2400,8 @@ pub const Blocker = enum {
     /// Soft bodies (Phase 9)
     soft_bodies,
     /// The scene violates a JPH_ASSERT that Jolt's release build (the reference library is built without asserts)
-    /// ignores: it compares Jolt's release behavior and runs only without Zolt's asserts (ReleaseFast)
+    /// ignores: it compares Jolt's release behavior. Zolt's assert at that site is recoverable (R8), the scene runs with a
+    /// handler that counts the asserts
     release_only,
 
     // Phase 6, one blocker per constraint kind: supported as soon as the Zolt class is ported (ConstraintKind.isPorted,
@@ -2445,7 +2447,7 @@ pub const Blocker = enum {
             .tracked_vehicles => Phase7Classes.trackedVehicles(),
             .motorcycles => Phase7Classes.motorcycles(),
             .none, .contacts, .ccd_hits, .constraints => true,
-            .release_only => !zolt.Core.enable_asserts,
+            .release_only => true,
             .soft_bodies => false,
             .distance_constraints => ConstraintKind.distance.isPorted(),
             .pulley_constraints => ConstraintKind.pulley.isPorted(),

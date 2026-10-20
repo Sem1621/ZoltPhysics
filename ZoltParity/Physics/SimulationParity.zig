@@ -115,7 +115,10 @@
 //! the C++ side": the object states of the worlds with 0 and 3 threads are identical, decode completely and stay finite,
 //! the character records are identical in call order, the C++ settings round trips give the same bytes). With a
 //! reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene fails when its C++ side
-//! hits a Jolt assert (the release_only scenes excepted).
+//! hits a Jolt assert (the release_only scenes excepted). A release_only scene runs in every build: a handler counts
+//! Zolt's recoverable asserts and lets the code continue like Jolt's release build (RemainingFeaturesArchitecture.md
+//! R8). Every run must hit an assert, the same number in every configuration, and with -Dreference_asserts=true as many
+//! as the C++ side (checkReleaseAsserts).
 //!
 //! Proof that the Phase 7 checks bite: flipping a bit of the object state that the C++ world with 3 threads writes is
 //! reported as "scene character_ops, update 0: the C++ worlds with 0 and 3 threads differ: object state differs at byte
@@ -2398,6 +2401,10 @@ const Run = struct {
     character_snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty }),
     /// Statistics for the sanity checks of the test
     stats: RunStats = .{},
+    /// R8: the counting assert handler of a release_only scene (null for the other scenes), and the Zolt asserts of the
+    /// updates that only Zolt runs (the D12 sweeps), which are not compared with the C++ side
+    asserts: ?*zolt.IssueReporting.CountAsserts = null,
+    uncompared_asserts: u32 = 0,
 
     fn deinit(self: *Run) void {
         self.zolt_state.deinit(self.allocator);
@@ -2685,11 +2692,12 @@ const Run = struct {
         defer reference.deinit(allocator);
         try self.cw.saveState(allocator, .all, &reference);
 
-        // The update counting the temp allocations is the one that is compared (records included)
+        // The update counting the temp allocations is the one that is compared (records and asserts included)
         var counting: FailingTempAllocator = .init(zw.temp.tempAllocator(), .{});
         const ccd_jobs_before = zw.counting_jobs.num_find_ccd_contacts.load(.monotonic);
         const activations_before = zw.countRecords(.body_activated);
         const zolt_errors = try zw.update(delta_time, collision_steps, counting.tempAllocator(), zw.jobSystem());
+        const compared_asserts = if (self.asserts) |a| a.get() else 0;
         self.countCCDJobs(ccd_jobs_before);
         self.countUpdateActivations(activations_before);
         if (zolt_errors != jolt_errors)
@@ -2752,6 +2760,7 @@ const Run = struct {
 
         // The Zolt side is at the reference state again: drop the records of the sweeps, restore the listener counters
         zw.discardRecords();
+        if (self.asserts) |a| self.uncompared_asserts += a.get() - compared_asserts;
         for (zw.step_listeners, step_calls) |*l, c| l.num_calls = c;
         try self.expectZoltState(reference.items, "after the sweeps");
 
@@ -2833,6 +2842,10 @@ const RunStats = struct {
     max_active_constraints: u32 = 0,
     /// Phase 7: what the object states after the updates show (Expect.ground_states, Expect.wheel_contacts)
     objects: ObjectStats = .{},
+    /// R8, release_only scenes: the Zolt asserts of the run (the D12 sweeps not counted) and the C++ asserts of the run
+    /// (0 without -Dreference_asserts=true)
+    num_zolt_asserts: u32 = 0,
+    num_jolt_asserts: u32 = 0,
 };
 
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
@@ -2875,14 +2888,17 @@ fn maxManifoldsPerBodyPair(allocator: Allocator, records: []const SimRecord) All
 const verbose = false;
 
 /// Run a scene in one configuration
-fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder, config: Config) !RunStats {
+/// `asserts`: the counting assert handler of a release_only scene (R8), null for the other scenes
+fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder, config: Config, asserts: ?*zolt.IssueReporting.CountAsserts) !RunStats {
+    const zolt_asserts_before = if (asserts) |a| a.get() else 0;
+    const jolt_asserts_before = jolt.jolt_sim_reference_assert_count();
     const desc = builder.desc();
     const zw = try ZoltWorld.create(allocator, &desc, config.zolt);
     defer zw.destroy();
     const cw = CppWorld.init(&desc, config.cpp_threads);
     defer cw.deinit();
 
-    var run: Run = .{ .allocator = allocator, .entry = entry, .config = config, .builder = builder, .desc = &desc, .zw = zw, .cw = cw };
+    var run: Run = .{ .allocator = allocator, .entry = entry, .config = config, .builder = builder, .desc = &desc, .zw = zw, .cw = cw, .asserts = asserts };
     defer run.deinit();
 
     // The new system
@@ -2904,6 +2920,8 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
 
     run.stats.num_spawned_jobs = zw.counting_jobs.num_spawned_find_collisions.load(.monotonic);
     run.stats.num_large_island_deactivations = zw.num_large_island_deactivations.load(.monotonic);
+    if (asserts) |a| run.stats.num_zolt_asserts = a.get() - zolt_asserts_before - run.uncompared_asserts;
+    run.stats.num_jolt_asserts = jolt.jolt_sim_reference_assert_count() - jolt_asserts_before;
     return run.stats;
 }
 
@@ -6743,6 +6761,21 @@ fn checkReferenceAsserts(entry: *const SceneEntry, before: u32) !void {
     }
 }
 
+/// R8, a release_only scene: it violates a JPH_ASSERT that Jolt's release build ignores, and Zolt's assert at that site
+/// is recoverable (the counting handler of runEntry lets the code continue like Jolt's release build). Every run hits at
+/// least one Zolt assert (the scene reaches what it is written for), the same number in every configuration (no assert
+/// depends on the threads), and with -Dreference_asserts=true as many as the C++ side
+fn checkReleaseAsserts(entry: *const SceneEntry, stats: []const RunStats) !void {
+    if (!zolt.Core.enable_asserts) return;
+    const has_reference_asserts = jolt.jolt_sim_reference_has_asserts() != 0;
+    for (stats, 0..) |s, i| {
+        if (s.num_zolt_asserts == 0 or s.num_zolt_asserts != stats[0].num_zolt_asserts or (has_reference_asserts and s.num_zolt_asserts != s.num_jolt_asserts)) {
+            std.debug.print("SimulationParity: scene {s}, configuration {d}: Zolt hit {d} asserts (configuration 0: {d}), the C++ side {d} (counted: {})\n", .{ entry.name, i, s.num_zolt_asserts, stats[0].num_zolt_asserts, s.num_jolt_asserts, has_reference_asserts });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 fn checkPhase7Slot(entry: *const SceneEntry, what: []const u8, ported: bool, slot_filled: bool) !void {
     if (!ported) {
         std.debug.print("SimulationParity: scene {s} creates {s} objects, whose Zolt classes are still stubs, but its blocker .{t} is supported (declare the Blocker of the class)\n", .{ entry.name, what, entry.blocked_by });
@@ -6766,11 +6799,20 @@ fn runEntry(entry: *const SceneEntry) !void {
     try checkPhase7Slots(entry, &builder);
     try checkPhase7Settings(allocator, entry, &builder);
 
+    // R8: a release_only scene runs with a handler that counts Zolt's asserts and lets the code continue (also during
+    // the creation sweep below)
+    const release_only = entry.blocked_by == .release_only;
+    var asserts: zolt.IssueReporting.CountAsserts = undefined;
+    if (release_only) asserts.init();
+    defer if (release_only) asserts.restore();
+
     const asserts_before = jolt.jolt_sim_reference_assert_count();
     var stats: [configs.len]RunStats = undefined;
     for (configs, &stats) |config, *s|
-        s.* = try runScene(allocator, entry, &builder, config);
-    if (entry.blocked_by != .release_only)
+        s.* = try runScene(allocator, entry, &builder, config, if (release_only) &asserts else null);
+    if (release_only)
+        try checkReleaseAsserts(entry, &stats)
+    else
         try checkReferenceAsserts(entry, asserts_before);
 
     if (verbose)
@@ -7499,7 +7541,7 @@ test "SimulationParity the reference counts its asserts" {
 }
 
 test "SimulationParity the reference zero-fills its allocations" {
-    // The allocation hooks of the parity process (SimInstallHooks of SimulationReference.cpp): Jolt's members that are
+    // The allocation hooks of the parity process (ZoltParity/ParityHooks.h): Jolt's members that are
     // never initialized (Wheel's contact members before the first contact) are 0, as Zolt zero-initializes them
     try std.testing.expectEqual(@as(u32, 1), jolt.jolt_sim_zero_filling_check());
 }

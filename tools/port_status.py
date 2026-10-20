@@ -16,6 +16,10 @@ Usage:
     python3 tools/port_status.py --check    # exit 1 if Progress.md is stale, lint fails or a declaration is pending (CI)
     python3 tools/port_status.py --next     # list unported C++ units whose dependencies are all ported
     python3 tools/port_status.py --no-pending  # exit 1 while a serializable class is pending or not declared
+    python3 tools/port_status.py --check-m10   # exit 1 until milestone M10: every UnitTests/ unit complete or n/a,
+                                               # every TEST_CASE with a `test "<name>"` in the Zig file of its unit
+                                               # (the second of two equal names is `<name>2`; names in the file's
+                                               # `//! Not ported:` line are exempt)
 """
 import argparse
 import os
@@ -454,6 +458,67 @@ def print_next(lib_rows):
     return blocked
 
 
+# Milestone M10 (Docs/Zolt/RemainingFeaturesArchitecture.md R22): every TEST_CASE of UnitTests/ has a Zig test of the
+# same name in the Zig file that ports its unit.
+TEST_CASE = re.compile(r'^\s*TEST_CASE\(\s*"([^"]+)"\s*\)', re.MULTILINE)
+ZIG_TEST_NAME = re.compile(r'^\s*test\s+"((?:[^"\\]|\\.)*)"', re.MULTILINE)
+NOT_PORTED_LINE = re.compile(r"^//!\s*Not ported:\s*(.*)$")
+
+
+def zig_not_ported(source):
+    """The words of the file's `//! Not ported:` header lines (test names listed there are exempt)"""
+    words = set()
+    for line in source.splitlines():
+        if not line.startswith("//!"):
+            break
+        m = NOT_PORTED_LINE.match(line.strip())
+        if m:
+            words.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", m.group(1)))
+    return words
+
+
+def check_m10(test_rows):
+    """Print what M10 still misses; True when every UnitTests/ unit is complete or n/a and every TEST_CASE has its test"""
+    ports = defaultdict(list)  # UnitTests/ file -> the ZoltTests/ files that port it
+    for zig_file, (files, _) in read_zig_headers("ZoltTests").items():
+        for cpp in files or []:
+            ports[cpp].append(zig_file)
+
+    problems = []
+    for row in test_rows:
+        if row["status"] not in ("complete", "n/a"):
+            problems.append(f"{row['unit']}: {row['status']}, the unit must be complete or n/a")
+        if row["status"] == "n/a":
+            continue
+        for cpp in row["files"]:
+            if not cpp.endswith(".cpp"):
+                continue
+            with open(os.path.join(ROOT, cpp), encoding="utf-8", errors="replace") as f:
+                names = TEST_CASE.findall(f.read())
+            if not names:
+                continue
+            zig_files = sorted(set(ports.get(cpp, [])))
+            tests, not_ported = set(), set()
+            for zig_file in zig_files:
+                with open(os.path.join(ROOT, zig_file), encoding="utf-8") as f:
+                    source = f.read()
+                tests.update(ZIG_TEST_NAME.findall(source))
+                not_ported |= zig_not_ported(source)
+            seen = defaultdict(int)
+            for name in names:
+                seen[name] += 1
+                # A second TEST_CASE with the same name is `<name>2` in Zig (both run)
+                expected = name if seen[name] == 1 else f"{name}{seen[name]}"
+                if expected in tests or name in not_ported:
+                    continue
+                where = ", ".join(zig_files) if zig_files else "no Zig file ports it"
+                problems.append(f"{cpp}: TEST_CASE(\"{name}\") has no test \"{expected}\" ({where})")
+    for message in problems:
+        print(f"m10: {message}", file=sys.stderr)
+    print(f"M10: {len(problems)} missing" if problems else "M10: every UnitTests/ unit and TEST_CASE is ported")
+    return not problems
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--write", action="store_true", help="regenerate Docs/Zolt/Progress.md")
@@ -463,9 +528,13 @@ def main():
     ap.add_argument("--verbose", action="store_true", help="with --next: also list blocked units")
     ap.add_argument("--no-pending", action="store_true",
                     help="fail while a serializable class is pending or not declared (--check includes it)")
+    ap.add_argument("--check-m10", action="store_true",
+                    help="fail unless every UnitTests/ unit is complete or n/a and every TEST_CASE has its Zig test (M10)")
     args = ap.parse_args()
 
     lib_rows, test_rows, lint = collect()
+    if args.check_m10:
+        sys.exit(0 if check_m10(test_rows) else 1)
     if args.next:
         blocked = print_next(lib_rows)
         if args.verbose:
