@@ -747,13 +747,14 @@ test "HairShaderParity: HairGridClear, HairGridAccumulate, HairGridNormalize" {
             order_checker.check(.{ .round = round, .first_mismatching_byte = std.mem.indexOfDiff(u8, std.mem.sliceAsBytes(grid_forward), std.mem.sliceAsBytes(grid_reversed)) }, true, std.mem.eql(u8, std.mem.sliceAsBytes(grid_forward), std.mem.sliceAsBytes(grid_reversed)));
         }
 
-        // HairGridNormalize on the accumulated grid (the result holds float bits)
+        // HairGridNormalize on the accumulated grid. The cells then hold float bits. They are compared byte for byte:
+        // Normalize never makes a NaN, and the cells past cNumGridPoints keep their input bytes.
         const normalize = [_]BindingDesc{
             .of("gContext", .constant_buffer, HairUpdateContext, &context),
             iterationContextBinding(&rng, &iteration_context, false),
             .of("gVelocityAndDensity", .rw_buffer, int4, grid),
         };
-        try dispatchRandom(&dispatcher, &checker, &rng, zolt.HairGridNormalize, HairStructs.hair_per_grid_cell_batch, num_grid_points, &normalize, .floats);
+        try dispatchRandom(&dispatcher, &checker, &rng, zolt.HairGridNormalize, HairStructs.hair_per_grid_cell_batch, num_grid_points, &normalize, .bytes);
     }
     try fw.finishAll(&.{ &checker, &order_checker });
 }
@@ -783,7 +784,9 @@ test "HairShaderParity: HairGridNormalize on random cells" {
             g.w = switch (rng.next() % 8) {
                 0 => 0,
                 1 => -@as(i32, @intCast(rng.intRange(u32, 0, 5000))),
-                2 => @intCast(rng.intRange(u32, 1, 3)), // A density just above the threshold of 1e-12
+                // The smallest positive densities (1 to 3 / 1024). Fixed point densities never come near the 1e-12
+                // threshold.
+                2 => @intCast(rng.intRange(u32, 1, 3)),
                 3 => @bitCast(rng.next()),
                 else => @intCast(rng.intRange(u32, 1, 1 << 20)),
             };
@@ -795,12 +798,14 @@ test "HairShaderParity: HairGridNormalize on random cells" {
             }
         }
 
+        // The cells hold float bits after the dispatch. They are compared byte for byte: Normalize never makes a NaN
+        // (a positive density is at least 1 / 1024), and the cells past cNumGridPoints keep their input bytes.
         const bindings = [_]BindingDesc{
             .of("gContext", .constant_buffer, HairUpdateContext, &context),
             iterationContextBinding(&rng, &iteration_context, false),
             .of("gVelocityAndDensity", .rw_buffer, int4, grid),
         };
-        try dispatchRandom(&dispatcher, &checker, &rng, zolt.HairGridNormalize, HairStructs.hair_per_grid_cell_batch, num_grid_points, &bindings, .floats);
+        try dispatchRandom(&dispatcher, &checker, &rng, zolt.HairGridNormalize, HairStructs.hair_per_grid_cell_batch, num_grid_points, &bindings, .bytes);
     }
     try checker.finish();
 }
