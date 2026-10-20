@@ -60,7 +60,8 @@ pub const IndexAndFraction = struct {
     fraction: float3,
 };
 
-/// GridPositionToIndexAndFraction
+/// GridPositionToIndexAndFraction. `uint3(grid_pos)` is undefined in Jolt for a NaN grid position: a NaN position, or
+/// 0 * inf when the simulation bounds have a zero-size axis (see hlsl.uint3.fromFloat3). The parity keeps them out.
 pub fn gridPositionToIndexAndFraction(context: *const HairUpdateContext, position: float3) IndexAndFraction {
     // Get position in grid space
     const grid_pos = hlsl.min(hlsl.max(position.sub(context.grid_offset), float3.init(0, 0, 0)).mul(context.grid_scale), context.grid_size_min1);

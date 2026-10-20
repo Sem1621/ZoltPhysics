@@ -7,7 +7,9 @@
 //! The operations are numbered in three families. The C++ side exports the name of every operation, and the first test
 //! checks that the enums below match, so a reordered or missing operation fails.
 //! Undefined behavior in C++ is never generated: no integer division by zero, no signed overflow (the signed operands
-//! of the arithmetic are small), no negation of the smallest int.
+//! of the arithmetic are small), no negation of the smallest int, no `uint3(float3)` of NaN or of values outside the
+//! uint32 range (R20: Jolt's result depends on how clang compiles the call site). The scalar `int(f)` and `uint(f)` and
+//! the signed vector conversions get NaN and the range edges: porting guide section 8 rule 12 defines them.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -349,16 +351,42 @@ fn conversionFloat(rng: *fw.Rng) f32 {
     return if (rng.next() % 3 == 0) edges[rng.next() % edges.len] * (if (rng.next() % 2 == 0) @as(f32, 1) else -1) else specialFloat(rng, 1.0e4);
 }
 
+/// A float that `uint32(f)` converts with a defined result in C++: in (-1, 2^32), never NaN. The edges of that range,
+/// the int range and the float precision, denormals, otherwise uniform in [0, 2^32) or in [0, 10^4).
+fn uintFloat(rng: *fw.Rng) f32 {
+    const edges = [_]f32{ 0.0, -0.0, -0.99999994, -0.5, 0.99999994, 1.0, 0x1.fffffep30, 0x1p31, 0x1.000002p31, 0x1.fffffep31, 16777217.0, 2.5 };
+    return switch (rng.next() % 4) {
+        0 => edges[rng.next() % edges.len],
+        1 => @bitCast(rng.next() & 0x007fffff), // Denormal
+        2 => rng.float(0, 0x1p32),
+        else => rng.float(0, 1.0e4),
+    };
+}
+
 /// A signed operand without overflow in the arithmetic: |x| <= 2^14
 fn smallInt(rng: *fw.Rng) i32 {
     return rng.intRange(i32, -(1 << 14), 1 << 14);
 }
 
+/// The float operands of an operation
+const FloatOperands = enum {
+    /// inputFloat: arithmetic operands with special values
+    vector,
+    /// conversionFloat: NaN and the edges of the int, uint and int64 ranges
+    conversion,
+    /// uintFloat: only values that `uint32(f)` converts with a defined result
+    uint_range,
+};
+
 /// Random operands. `equal`: the second operand equals the first (for ==, != and the min / max ties).
-fn randomInput(rng: *fw.Rng, small_ints: bool, conversions: bool) HLSLOpInput {
+fn randomInput(rng: *fw.Rng, small_ints: bool, floats: FloatOperands) HLSLOpInput {
     var in: HLSLOpInput = undefined;
     for (&in.f) |*v| {
-        for (v) |*x| x.* = if (conversions) conversionFloat(rng) else inputFloat(rng, 100);
+        for (v) |*x| x.* = switch (floats) {
+            .vector => inputFloat(rng, 100),
+            .conversion => conversionFloat(rng),
+            .uint_range => uintFloat(rng),
+        };
     }
     for (&in.i) |*v| {
         for (v) |*x| x.* = if (small_ints) smallInt(rng) else @bitCast(rng.next());
@@ -427,7 +455,7 @@ test "HLSLToCPPParity: float2, float3 and float4 operators and functions" {
         for (0..@typeInfo(FloatVectorOp).@"enum".fields.len) |op_index| {
             const op: FloatVectorOp = @enumFromInt(op_index);
             for (inputs, zolt_out) |*in, *z| {
-                in.* = randomInput(&rng, false, false);
+                in.* = randomInput(&rng, false, .vector);
                 z.* = floatVectorOp(T, op, in.*);
             }
             @memset(jolt_out, .{});
@@ -460,7 +488,7 @@ test "HLSLToCPPParity: uint3, uint4, int3 and int4 operators and functions" {
                 else => true,
             };
             for (inputs, zolt_out) |*in, *z| {
-                in.* = randomInput(&rng, small, false);
+                in.* = randomInput(&rng, small, .vector);
                 switch (op) {
                     // No division by zero
                     .div, .div_assign, .div_scalar, .div_assign_scalar => {
@@ -497,13 +525,14 @@ test "HLSLToCPPParity: swizzles, constructors, conversions and scalar functions"
 
     for (0..@typeInfo(MiscOp).@"enum".fields.len) |op_index| {
         const op: MiscOp = @enumFromInt(op_index);
-        const conversions = switch (op) {
-            .to_int, .to_uint, .u3_from_float3, .i3_from_float3, .i4_from_float4 => true,
-            else => false,
+        const floats: FloatOperands = switch (op) {
+            .to_int, .to_uint, .i3_from_float3, .i4_from_float4 => .conversion,
+            .u3_from_float3 => .uint_range,
+            else => .vector,
         };
         for (inputs, zolt_out) |*in, *z| {
             // atomic_add_int: `fetch_add(v) + v` overflows an int for large operands (undefined in C++)
-            in.* = randomInput(&rng, op == .atomic_add_int, conversions);
+            in.* = randomInput(&rng, op == .atomic_add_int, floats);
             z.* = miscOp(op, in.*);
         }
         @memset(jolt_out, .{});

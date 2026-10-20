@@ -429,8 +429,10 @@ test "ComputeParity: TestCompute2 on 100k random inputs (HLSL Mat44 products, un
         .of("gInput", .buffer, TestCompute2.TestCompute2Input, inputs),
         .of("gOutput", .rw_buffer, TestCompute2.TestCompute2Output, outputs),
     };
-    // Group size 1 like the shader's, and 64 x 1 x 1 groups of other sizes: the global thread ID is the same
+    // Group size 1 like the shader's, and group size 100: the global thread ID is the same
     _ = try dispatcher.dispatchBoth(&checker, TestCompute2.name, .{ 1, 1, 1 }, .{ n, 1, 1 }, &bindings, .floats);
+    // dispatchBoth left Jolt's results in `outputs`: fill again, so every element must be written on both sides
+    @memset(std.mem.sliceAsBytes(outputs), 0xcd);
     _ = try dispatcher.dispatchBoth(&checker, TestCompute2.name, .{ 100, 1, 1 }, .{ n / 100, 1, 1 }, &bindings, .floats);
     try checker.finish();
 }

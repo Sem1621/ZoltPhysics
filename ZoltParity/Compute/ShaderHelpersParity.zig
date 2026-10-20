@@ -2,7 +2,8 @@
 //! ShaderVec3.zig, HairCommon.zig) with Jolt's HLSL helpers compiled in HLSLToCPP mode, as members of a shader wrapper
 //! class like every hair shader (Docs/Zolt/RemainingFeaturesArchitecture.md section 4, R12). C++ side:
 //! ShaderHelpersReference.cpp. Every helper runs on ~100k random inputs with special values; floats compare with
-//! `sameBits` (NaNs are equal).
+//! `sameBits` (NaNs are equal). The grid helper never gets a grid position whose `uint3(grid_pos)` is undefined in C++
+//! (R20, see `gridPositionDefined`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -49,6 +50,17 @@ const n = fw.iterations;
 
 fn randomFloat3(rng: *fw.Rng, range: f32) float3 {
     return .init(inputFloat(rng, range), inputFloat(rng, range), inputFloat(rng, range));
+}
+
+/// True when `uint3(grid_pos)` of GridPositionToIndexAndFraction is defined in C++: every component of the grid
+/// position is in (-1, 2^32), never NaN. For other values Jolt's result depends on how clang compiles the call site
+/// (R20, hlsl.uint3.fromFloat3).
+fn gridPositionDefined(context: *const HairUpdateContext, position: float3) bool {
+    const grid_pos = hlsl.min(hlsl.max(position.sub(context.grid_offset), float3.init(0, 0, 0)).mul(context.grid_scale), context.grid_size_min1);
+    for ([_]f32{ grid_pos.x, grid_pos.y, grid_pos.z }) |c| {
+        if (!(c > -1.0 and c < 0x1p32)) return false; // False for NaN
+    }
+    return true;
 }
 
 fn randomFloat4(rng: *fw.Rng, range: f32) float4 {
@@ -390,6 +402,7 @@ test "ShaderHelpersParity: HairCommon (packed bits and bytes, gradient sampler, 
     defer allocator.free(buffer_index2_z);
     const buffer_index2_j = try allocator.alloc(u32, per_grid);
     defer allocator.free(buffer_index2_j);
+    var num_compared: usize = 0;
     for (0..100) |grid| {
         var context = std.mem.zeroes(HairUpdateContext);
         // Garbage in the members the helpers do not read
@@ -401,30 +414,45 @@ test "ShaderHelpersParity: HairCommon (packed bits and bytes, gradient sampler, 
         context.grid_scale = .init(rng.float(0.1, 10), rng.float(0.1, 10), rng.float(0.1, 10));
         context.grid_stride = if (grid % 4 == 0) .init(rng.next(), rng.next(), rng.next()) else .init(1, size.x, size.x * size.y);
         if (grid % 10 == 0) {
-            // Any floats in the grid constants
+            // Any floats in the grid constants. A NaN offset or scale or a negative scale or size would make every grid
+            // position undefined: they become 0, 1 or positive.
             context.grid_offset = randomFloat3(&rng, 100);
             context.grid_scale = randomFloat3(&rng, 100);
             context.grid_size_min1 = randomFloat3(&rng, 100);
+            inline for (.{ "x", "y", "z" }) |c| {
+                if (std.math.isNan(@field(context.grid_offset, c))) @field(context.grid_offset, c) = 0;
+                @field(context.grid_scale, c) = if (std.math.isNan(@field(context.grid_scale, c))) 1 else @abs(@field(context.grid_scale, c));
+                @field(context.grid_size_min1, c) = @abs(@field(context.grid_size_min1, c)); // A NaN size is defined: min(v, NaN) is v
+            }
         }
-        for (positions, grid_indices) |*p, *gi| {
-            p.* = if (rng.next() % 8 == 0) randomFloat3(&rng, 100) else context.grid_offset.add(.init(rng.float(-1, 50), rng.float(-1, 50), rng.float(-1, 50)));
-            gi.* = .init(rng.next(), rng.next(), rng.next());
+        // Only positions with a defined grid index (R20), the others are drawn again
+        var num_positions: usize = 0;
+        var attempts: usize = 0;
+        while (num_positions < per_grid and attempts < 4 * per_grid) : (attempts += 1) {
+            const p = if (rng.next() % 8 == 0) randomFloat3(&rng, 100) else context.grid_offset.add(.init(rng.float(-1, 50), rng.float(-1, 50), rng.float(-1, 50)));
+            if (!gridPositionDefined(&context, p)) continue;
+            positions[num_positions] = p;
+            grid_indices[num_positions] = .init(rng.next(), rng.next(), rng.next());
+            num_positions += 1;
         }
-        for (positions, grid_indices, index_z, frac_z, buffer_index_z, buffer_index2_z) |p, gi, *iz, *fz, *bz, *b2z| {
+        num_compared += num_positions;
+        for (positions[0..num_positions], grid_indices[0..num_positions], index_z[0..num_positions], frac_z[0..num_positions], buffer_index_z[0..num_positions], buffer_index2_z[0..num_positions]) |p, gi, *iz, *fz, *bz, *b2z| {
             const r = HairCommon.gridPositionToIndexAndFraction(&context, p);
             iz.* = r.index;
             fz.* = r.fraction;
             bz.* = HairCommon.gridIndexToBufferIndex(&context, r.index);
             b2z.* = HairCommon.gridIndexToBufferIndex(&context, gi);
         }
-        jolt_shader_grid(&context, positions.ptr, grid_indices.ptr, index_j.ptr, frac_j.ptr, buffer_index_j.ptr, buffer_index2_j.ptr, @intCast(per_grid));
-        for (positions, 0..) |p, i| {
+        jolt_shader_grid(&context, positions.ptr, grid_indices.ptr, index_j.ptr, frac_j.ptr, buffer_index_j.ptr, buffer_index2_j.ptr, @intCast(num_positions));
+        for (positions[0..num_positions], 0..) |p, i| {
             checker.check(.{ .function = "gridPositionToIndexAndFraction (index)", .position = p }, index_z[i], index_j[i]);
             checker.check(.{ .function = "gridPositionToIndexAndFraction (fraction)", .position = p }, frac_z[i], frac_j[i]);
             checker.check(.{ .function = "gridIndexToBufferIndex", .position = p }, buffer_index_z[i], buffer_index_j[i]);
             checker.check(.{ .function = "gridIndexToBufferIndex", .index = grid_indices[i] }, buffer_index2_z[i], buffer_index2_j[i]);
         }
     }
+    // The filter keeps nearly every position
+    try std.testing.expect(num_compared * 10 >= 9 * 100 * per_grid);
 
     try checker.finish();
 }

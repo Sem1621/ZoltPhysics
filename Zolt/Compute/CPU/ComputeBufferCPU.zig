@@ -27,7 +27,9 @@ pub const ComputeBufferCPU = struct {
         const self = try allocator.create(ComputeBufferCPU);
         errdefer allocator.destroy(self);
 
-        const buffer_size = std.math.cast(usize, size * stride) orelse return error.OutOfMemory;
+        // Zolt: a size that does not fit fails like an allocation (Jolt's `size_t(mSize) * mStride` wraps, then the
+        // memcpy overruns the allocation)
+        const buffer_size = std.math.cast(usize, std.math.mul(u64, size, stride) catch return error.OutOfMemory) orelse return error.OutOfMemory;
         const memory = try allocator.alignedAlloc(u8, .@"16", buffer_size);
         if (data) |d|
             @memcpy(memory, d[0..buffer_size])
@@ -97,6 +99,10 @@ test "ComputeBufferCPU: zero fill, data, read back buffer, map" {
     defer buffer2.deinit();
     try testing.expectEqualSlices(u32, &data, buffer2.get().?.mapAs(u32, .read));
     buffer2.get().?.unmap();
+
+    // A size of more bytes than a u64 holds fails like an allocation (Jolt's `size_t(mSize) * mStride` wraps)
+    try testing.expectError(error.OutOfMemory, ComputeBufferCPU.create(allocator, .buffer, 1 << 62, 16, null));
+    try testing.expectError(error.OutOfMemory, ComputeBufferCPU.create(allocator, .rw_buffer, std.math.maxInt(u64), 2, null));
 
     // Allocation failures
     try testing.checkAllAllocationFailures(allocator, struct {

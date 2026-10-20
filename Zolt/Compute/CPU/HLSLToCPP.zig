@@ -24,10 +24,10 @@
 //! - `round` is `@round` (half away from zero, like `std::round`); `asint` is `@bitCast`;
 //! - `uint(f)` is the 64-bit truncation of `cvttss2si` cut to 32 bits; `int(f)` is the 32-bit `cvttss2si` (porting guide
 //!   section 8, rule 12): `toUint` and `toInt`. `float(uint)` and `float(int)` are correctly rounded (`@floatFromInt`);
-//! - `uint3(float3)` is not three scalar `uint(f)`: the reference build converts x and y as a vector pair, which gives
-//!   0x80000000 for NaN and for values of 2^32 and above (`toUintVectorized`), and z with the scalar conversion
-//!   (`toUint`). The parity found it (HLSLToCPPParity and the grid helper of HairCommon); R11 of the design only lists
-//!   the scalar conversion. The other conversions are the same for scalars and vectors;
+//! - `uint3(float3)` is `toUint` per component. For NaN and values outside the uint32 range Jolt's x86-64 result
+//!   depends on the call site: clang converts some sites with three scalar conversions (HairGridAccumulate) and others
+//!   with a vector pair for x and y (HairIntegrate's ApplyGrid), which gives 0x80000000 there. Zolt uses the scalar
+//!   conversion everywhere (R20: one defined behavior where Jolt is undefined). The parity never generates such inputs;
 //! - integer arithmetic wraps (`+%`, `*%`), like C++ unsigned arithmetic. Signed overflow is undefined in C++: Zolt
 //!   wraps too;
 //! - `JPH_AtomicAdd` on `int` is `@atomicRmw(.Add, .seq_cst)` plus the operand (`atomicAdd`).
@@ -406,11 +406,10 @@ pub const uint3 = extern struct {
         return .{ .x = x, .y = y, .z = z };
     }
 
-    /// explicit uint3(const float3 &inV): uint32(float) per component. The reference build (clang, x86-64-v3)
-    /// converts x and y together as a vector pair (`toUintVectorized`) and z alone (`toUint`). They differ for NaN, for
-    /// values of 2^32 and above and for values of -2^31 and below; in range both give C++'s value.
+    /// explicit uint3(const float3 &inV): uint32(float) per component (`toUint`). For NaN and values outside the
+    /// uint32 range Jolt's result depends on how clang compiles the call site; Zolt always uses `toUint` (R20).
     pub fn fromFloat3(v: float3) uint3 {
-        return .{ .x = toUintVectorized(v.x), .y = toUintVectorized(v.y), .z = toUint(v.z) };
+        return .{ .x = toUint(v.x), .y = toUint(v.y), .z = toUint(v.z) };
     }
 
     // Operators (the compound operators `+=`, `-=`, `*=` and `/=` compute the same: `a = a.add(b)`). The arithmetic
@@ -1008,18 +1007,6 @@ pub fn toUint(f: f32) u32 {
     return 0;
 }
 
-/// C++ `uint32(f)` of a vector component as Jolt's x86-64 build computes it when the compiler converts a whole vector
-/// (`uint3(const float3 &)`). x86-64-v3 has no unsigned vector conversion, so LLVM uses the signed one twice:
-/// `small = cvttps2dq(f)`, `big = cvttps2dq(f - 2^31)`, result `small | (big & (small >> 31))` (arithmetic shift).
-/// Values in [0, 2^32) and in (-2^31, 0] give the same as `toUint`; NaN, values of 2^32 and above and values of -2^31
-/// and below give 0x80000000.
-pub fn toUintVectorized(f: f32) u32 {
-    const small: u32 = @bitCast(toInt(f));
-    const big: u32 = @bitCast(toInt(f - 0x1p31));
-    const overflown: u32 = @bitCast(@as(i32, @bitCast(small)) >> 31);
-    return small | (big & overflown);
-}
-
 //////////////////////////////////////////////////////////////////////////////////////////
 // Bindings of a shader (WrapShaderBegin.h, RemainingFeaturesArchitecture.md R12). A shader's `Bindings` struct has one
 // field per binding, named like the HLSL binding. ShaderWrapper.Of(Shader) calls `bind` on the field whose name is
@@ -1251,17 +1238,12 @@ test "HLSLToCPP: float to int conversions follow the x86-64 build" {
     try testing.expectEqual(@as(u32, 0), toUint(std.math.nan(f32)));
     try testing.expectEqual(@as(u32, 0), toUint(std.math.inf(f32)));
 
-    // uint3(float3): x and y use the vectorized conversion (0x80000000 for NaN and for values of 2^32 and above), z the
-    // scalar one
-    try testing.expectEqual(@as(u32, 3000000000), toUintVectorized(3.0e9));
-    try testing.expectEqual(@as(u32, 0xffffffff), toUintVectorized(-1.0));
-    try testing.expectEqual(@as(u32, 0), toUintVectorized(-0.5));
-    try testing.expectEqual(@as(u32, 0x80000000), toUintVectorized(0x1p32));
-    try testing.expectEqual(@as(u32, 0x80000000), toUintVectorized(std.math.nan(f32)));
-    try testing.expectEqual(@as(u32, 0x80000000), toUintVectorized(-0x1p31));
-    try testing.expectEqual(@as(u32, 0x80000000), toUintVectorized(-std.math.inf(f32)));
-    try testing.expect(uint3.fromFloat3(float3.init(-1.0, 2.5, std.math.nan(f32))).eql(uint3.init(0xffffffff, 2, 0)));
-    try testing.expect(uint3.fromFloat3(float3.init(std.math.nan(f32), 0x1p33, 0x1.000002p32)).eql(uint3.init(0x80000000, 0x80000000, 512)));
+    // uint3(float3) is uint32(f) per component, the same as toUint. For NaN and values outside the uint32 range this is
+    // Zolt's defined behavior (R20): Jolt's result depends on how clang compiles the call site.
+    try testing.expect(uint3.fromFloat3(float3.init(0.99999994, 2.5, 0x1.fffffep31)).eql(uint3.init(0, 2, 4294967040)));
+    try testing.expect(uint3.fromFloat3(float3.init(-1.0, -0.5, std.math.nan(f32))).eql(uint3.init(0xffffffff, 0, 0)));
+    try testing.expect(uint3.fromFloat3(float3.init(std.math.nan(f32), 0x1p33, 0x1.000002p32)).eql(uint3.init(0, 0, 512)));
+    try testing.expect(uint3.fromFloat3(float3.init(-3.0e9, std.math.inf(f32), -std.math.inf(f32))).eql(uint3.init(1294967296, 0, 0)));
 
     // int4(float4) uses the signed conversion, which is the same for scalars and vectors
     try testing.expect(int4.fromFloat4(float4.init(-1.5, 2.5, 3.0e9, 0.0)).eql(int4.init(-1, 2, std.math.minInt(i32), 0)));
