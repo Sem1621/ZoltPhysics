@@ -7334,11 +7334,11 @@ const SkinFlags = struct {
     }
 };
 
-/// Phase 9, before a scene runs: the SaveBinaryState bytes of every shared settings object that makeSoftBodySettings
+/// Phase 9, before a scene runs: the SaveBinaryState bytes of every shared settings object that SoftBodySlot.makeSettings
 /// generates are the bytes of SimMakeSoftBodySettings (C++). A mismatch is an error of a generator or of
-/// SoftBodySharedSettings, reported before the simulation. It runs for the blocked scenes too (SoftBodySharedSettings
-/// is complete).
-fn checkSoftBodySettings(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+/// SoftBodySharedSettings, reported before the simulation. The blocked scenes test runs it too (SoftBodySharedSettings
+/// is complete). The name only labels the message.
+fn checkSoftBodySettings(allocator: Allocator, name: []const u8, builder: *const SceneBuilder) !void {
     const desc = builder.desc();
     var jolt_bytes: std.ArrayList(u8) = .empty;
     defer jolt_bytes.deinit(allocator);
@@ -7352,7 +7352,7 @@ fn checkSoftBodySettings(allocator: Allocator, entry: *const SceneEntry, builder
         if (wrapper.isFailed()) return error.OutOfMemory;
         try CppWorld.softBodySettingsBytes(allocator, &desc, @intCast(i), &jolt_bytes);
         if (std.mem.indexOfDiff(u8, out.written(), jolt_bytes.items)) |first| {
-            std.debug.print("SimulationParity: scene {s}, soft body settings description {d} ({t}): the Zolt settings differ from SimMakeSoftBodySettings at byte {d} (zolt {d} bytes, jolt {d} bytes)\n", .{ entry.name, i, @as(SimScenes.SoftBodySettingsKind, @enumFromInt(s.kind)), first, out.written().len, jolt_bytes.items.len });
+            std.debug.print("SimulationParity: scene {s}, soft body settings description {d} ({t}): the Zolt settings differ from SimMakeSoftBodySettings at byte {d} (zolt {d} bytes, jolt {d} bytes)\n", .{ name, i, @as(SimScenes.SoftBodySettingsKind, @enumFromInt(s.kind)), first, out.written().len, jolt_bytes.items.len });
             return error.TestUnexpectedResult;
         }
     }
@@ -7450,7 +7450,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     try checkPhase7Slots(entry, &builder);
     try checkPhase7Settings(allocator, entry, &builder);
     try checkSoftBodyBlocker(entry, &builder);
-    try checkSoftBodySettings(allocator, entry, &builder);
+    try checkSoftBodySettings(allocator, entry.name, &builder);
 
     // R8: a release_only scene runs with a handler that counts Zolt's asserts and lets the code continue (also during
     // the creation sweep below)
@@ -7627,7 +7627,7 @@ test "SimScenes blocked scenes run on the C++ side" {
         defer b.deinit();
         try checkCppSettingsRoundTrips(allocator, entry, &builder, &desc, a);
         // Phase 9: the generated soft body settings are Zolt's already (SoftBodySharedSettings is complete)
-        try checkSoftBodySettings(allocator, entry, &builder);
+        try checkSoftBodySettings(allocator, entry.name, &builder);
 
         var delta_time = builder.delta_time;
         var collision_steps = builder.collision_steps;
@@ -8504,15 +8504,39 @@ test "SimulationParity soft body settings generators" {
         }, &.{ .{ 0, 1, 2 }, .{ 1, 3, 2 }, .{ 0, 4, 1 } }, &.{ .{ 0, 1, 2, 4 }, .{ 1, 3, 2, 4 } });
     }
     _ = try builder.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 3, .spacing = 0.5 });
-    try checkSoftBodySettings(allocator, sceneByName("soft_body_cube_on_floor"), &builder);
+    try checkSoftBodySettings(allocator, "(the generators test)", &builder);
+}
+
+test "SimScenes the soft body scenes use every soft body operation and record" {
+    // The soft body scenes run on the C++ side before Zolt simulates soft bodies.
+    // Together they use every soft body OpKind and expect every soft body RecordKind.
+    const allocator = std.testing.allocator;
+    var ops: u128 = 0;
+    var records: u128 = 0;
+    for (&SimScenes.scenes) |*entry| {
+        if (entry.blocked_by != .soft_bodies) continue;
+        var builder: SceneBuilder = .init(allocator);
+        defer builder.deinit();
+        try entry.build(&builder);
+        for (builder.ops.items) |op| ops |= @as(u128, 1) << @intCast(op.kind);
+        records |= entry.expect.soft_body_records;
+    }
+    for (@intFromEnum(OpKind.create_soft_body)..@intFromEnum(OpKind.set_soft_body_contact_listener) + 1) |k| {
+        try std.testing.expect(SimScenes.isSoftBodyOp(@intCast(k)));
+        if (ops & (@as(u128, 1) << @intCast(k)) == 0) {
+            std.debug.print("SimScenes: no soft body scene uses OpKind {t}\n", .{@as(OpKind, @enumFromInt(k))});
+            return error.TestUnexpectedResult;
+        }
+    }
+    for ([_]RecordKind{ .soft_body_contact_validate, .soft_body_contact_added, .soft_body_contact_body, .soft_body_sensor_contact }) |kind|
+        try std.testing.expect(records & SimScenes.recordBit(kind) != 0);
 }
 
 test "SimulationParity soft body creation, creation settings and skin flags" {
-    // The parts of the soft body harness that run before Zolt simulates soft bodies, in both worlds of soft_body_ops: the
-    // three create operations and the listener operation of update 0 (the same body IDs), the
-    // GetSoftBodyCreationSettings round trip of every soft body (the same hash), the state of the soft bodies in the
-    // system (the PhysicsSystem state holds them once SoftBodyMotionProperties::SaveState is ported), and SkinFlags puts
-    // the skin flags of a capture back
+    // The parts of the soft body harness that run before Zolt simulates soft bodies, in both worlds of soft_body_ops.
+    // The create operations and the listener operation of update 0 give the same results.
+    // The GetSoftBodyCreationSettings round trip gives the same hash for every soft body.
+    // SkinFlags puts the skin flags of a capture back.
     const allocator = std.testing.allocator;
     var builder: SceneBuilder = .init(allocator);
     defer builder.deinit();

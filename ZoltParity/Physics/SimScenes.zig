@@ -253,7 +253,7 @@
 //! - **Descriptions.** A `SimSoftBodySettings` is a generator of shared settings (`SoftBodySettingsKind`: cube, cloth,
 //!   sphere, rod chain, skinned cloth, or explicit vertices, faces and tetrahedra from the float and integer pools) with
 //!   the VertexAttributes, the bend type and the Optimize call. The same generator runs on both sides
-//!   (SimMakeSoftBodySettings of SimulationReference.cpp, makeSoftBodySettings of SimulationParity.zig). Before a scene
+//!   (SimMakeSoftBodySettings of SimulationReference.cpp, SoftBodySlot.makeSettings of SimulationParity.zig). Before a scene
 //!   runs, the SaveBinaryState bytes of every generated settings object must be equal (checkSoftBodySettings, also for
 //!   the blocked scenes). A `SimSoftBody` holds every member of SoftBodyCreationSettings with Jolt's defaults (test
 //!   "SimScenes soft body description defaults are Jolt's"). Its `settings` is the index of a SimSoftBodySettings: each
@@ -279,7 +279,9 @@
 //!   compared with Zolt's.
 //! - **D12 sweeps.** Jolt's SaveState does not hold mSkinStatePreviousPositionValid. SkinVertices sets it, the update
 //!   clears it, and it selects the skin interpolation factor. Every update that starts from the snapshot of a sweep gets
-//!   the value of the snapshot again, like the InvalidateContactCache flags (SimulationParity.zig, `SkinFlags`).
+//!   the value of the snapshot again, like the InvalidateContactCache flags (SimulationParity.zig, `SkinFlags`). The
+//!   soft body scenes set `restore_broad_phase`. DetermineCollidingShapes gets the bodies in the order of the broad
+//!   phase layout, and a vertex keeps the first of equal penetrations.
 //! - **Rules.** Avoid what Jolt asserts or leaves undefined:
 //!   - a soft body needs optimized settings (`optimize`; Jolt asserts in ParallelApplyConstraints, Zolt panics: R20
 //!     UB2) and at least one vertex (UB1: Jolt hangs); settings without Optimize are only compared;
@@ -3200,8 +3202,10 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "vehicle_motorcycle_far_from_origin", .build = buildVehicleMotorcycleFarFromOrigin, .blocked_by = .motorcycles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     // (append the vehicle scenes here)
     // ---- Soft bodies (Phase 9: the harness scenes; group S5 writes the scene list) ----
-    .{ .name = "soft_body_cube_on_floor", .build = buildSoftBodyCubeOnFloor, .blocked_by = .soft_bodies, .sweep_stride = 30, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .blocked_by = .soft_bodies, .sweep_stride = 25, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    // The soft body scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`). DetermineCollidingShapes
+    // gets the colliding bodies in the order of the broad phase layout. A vertex keeps the first of equal penetrations.
+    .{ .name = "soft_body_cube_on_floor", .build = buildSoftBodyCubeOnFloor, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
     // (append the soft body scenes here)
 };
 
