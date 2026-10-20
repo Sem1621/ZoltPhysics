@@ -46,7 +46,7 @@
 //!     vertex, and no open group connects to it. Jolt asserts. Its release build puts a constraint with only some
 //!     vertices in a group into the non-parallel group: Zolt does the same, after an `if (Core.enable_asserts)` assert.
 //!     Jolt's release build reads `groups[-1]` for a constraint with no vertex in a group and for a skinned constraint
-//!     on that vertex: Zolt panics with a message.
+//!     on that vertex: Zolt panics with a message in every build (the assert does not come first).
 //!
 //! RemainingFeaturesArchitecture.md R19, the binary state with materials (group S2): `saveWithMaterials` /
 //! `restoreWithMaterials` (Jolt's SaveWithMaterials / sRestoreWithMaterials) write and read Jolt's bytes with the ID maps
@@ -1343,9 +1343,11 @@ pub const SoftBodySharedSettings = struct {
         freeLists(Connection, allocator, connectivity);
         connectivity = &.{};
 
-        // Assign the constraints to their groups. Zolt (R20 UB14): a constraint with only some vertices in a group goes
-        // to the non parallel group, like Jolt's release build (Jolt asserts). A constraint without a grouped vertex and a
-        // skinned constraint on an ungrouped vertex panic, where Jolt reads groups[-1].
+        // Assign the constraints to their groups. Zolt (R20 UB14): Jolt asserts that every vertex of a constraint is in a
+        // group. Its release build puts a constraint with only some vertices in a group in the non parallel group. Zolt
+        // does the same, and the assert moves into that branch. A constraint without a grouped vertex and a skinned
+        // constraint on an ungrouped vertex make Jolt read groups[-1]. There groupIndex panics with a message, in every
+        // build. (For a skinned constraint groupIndex has the condition of Jolt's assert.)
         const groups = try allocator.alloc(Group, @as(usize, @intCast(current_group_idx)) + 1); // + non parallel group
         @memset(groups, .{});
         defer {
@@ -1356,66 +1358,71 @@ pub const SoftBodySharedSettings = struct {
         for (self.edge_constraints.items, 0..) |e, index| {
             const g1 = group_idx[e.vertex[0]];
             const g2 = group_idx[e.vertex[1]];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
             if (g1 == g2) // In the same group
                 try groups[groupIndex(g1, no_grouped_vertex)].edge_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
                 try non_parallel_group.edge_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.lra_constraints.items, 0..) |l, index| {
             const g1 = group_idx[l.vertex[0]];
             const g2 = group_idx[l.vertex[1]];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
             if (g1 == g2) // In the same group
                 try groups[groupIndex(g1, no_grouped_vertex)].lra_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
                 try non_parallel_group.lra_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.rod_stretch_shear_constraints.items, 0..) |r, index| {
             const g1 = group_idx[r.vertex[0]];
             const g2 = group_idx[r.vertex[1]];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
             if (g1 == g2) // In the same group
                 try groups[groupIndex(g1, no_grouped_vertex)].rod_stretch_shear_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
                 try non_parallel_group.rod_stretch_shear_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.rod_bend_twist_constraints.items, 0..) |r, index| {
             const g1 = group_idx[rods[r.rod[0]].vertex[0]];
             const g2 = group_idx[rods[r.rod[0]].vertex[1]];
             const g3 = group_idx[rods[r.rod[1]].vertex[0]];
             const g4 = group_idx[rods[r.rod[1]].vertex[1]];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
             if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
                 try groups[groupIndex(g1, no_grouped_vertex)].rod_bend_twist_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
                 try non_parallel_group.rod_bend_twist_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.dihedral_bend_constraints.items, 0..) |d, index| {
             const g1 = group_idx[d.vertex[0]];
             const g2 = group_idx[d.vertex[1]];
             const g3 = group_idx[d.vertex[2]];
             const g4 = group_idx[d.vertex[3]];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
             if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
                 try groups[groupIndex(g1, no_grouped_vertex)].dihedral_bend_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
                 try non_parallel_group.dihedral_bend_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.volume_constraints.items, 0..) |v, index| {
             const g1 = group_idx[v.vertex[0]];
             const g2 = group_idx[v.vertex[1]];
             const g3 = group_idx[v.vertex[2]];
             const g4 = group_idx[v.vertex[3]];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
             if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
                 try groups[groupIndex(g1, no_grouped_vertex)].volume_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
                 try non_parallel_group.volume_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.skinned_constraints.items, 0..) |s, index| {
             const g1 = group_idx[s.vertex];
-            if (Core.enable_asserts) std.debug.assert(g1 >= 0);
             try groups[groupIndex(g1, skinned_ungrouped_vertex)].skinned_constraints.append(allocator, @intCast(index));
         }
 
@@ -3042,6 +3049,28 @@ test "SoftBodySharedSettings: optimize with a vertex that no group reaches and n
     const groups = s.update_groups.items;
     try std.testing.expect(groups.len >= 2);
     try std.testing.expectEqual(@as(u32, @intCast(num_edges)), groups[groups.len - 1].edge_end_index);
+}
+
+test "SoftBodySharedSettings: optimize with a vertex at FLT_MAX that a group reaches (next to R20 UB14)" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+    var settings: Ref(S) = .init(try S.create(allocator));
+    defer settings.deinit();
+    const s = settings.get().?;
+
+    // The far vertex is never a start vertex. But an edge connects it to a group that is not full, so the group takes it.
+    // Then its edge and its skinned constraint are in that group, and optimize works in every build. (Without the edge
+    // to vertex 0, the skinned constraint panics, UB14.)
+    for ([_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 }, .{ math.flt_max, math.flt_max, math.flt_max } }) |p|
+        try s.vertices.append(allocator, .init(.{ .x = p[0], .y = p[1], .z = p[2] }, .{}));
+    for (1..5) |v| try s.edge_constraints.append(allocator, .init(0, @intCast(v), .{}));
+    try s.skinned_constraints.append(allocator, .{ .vertex = 4 });
+    try s.optimize();
+
+    // One group, more than half empty: it is merged into the non parallel group
+    try std.testing.expectEqual(@as(usize, 1), s.update_groups.items.len);
+    try std.testing.expectEqual(@as(u32, 4), s.update_groups.items[0].edge_end_index);
+    try std.testing.expectEqual(@as(u32, 1), s.update_groups.items[0].skinned_end_index);
 }
 
 test "SoftBodySharedSettings: optimize with a constraint that has some vertices in a group (R20 UB14, Jolt's release path)" {
