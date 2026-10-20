@@ -79,3 +79,40 @@ pub fn main(b: *Bindings, tid: hlsl.uint3) void {
     atomicAddVelocityAndDensity(b, adr_010 +% stride.z, int4.fromFloat4(hlsl.round(velocity_and_density.mulScalar(a.x * ma.y * ma.z))));
     atomicAddVelocityAndDensity(b, adr_110 +% stride.z, int4.fromFloat4(hlsl.round(velocity_and_density.mulScalar(ma.x * ma.y * ma.z))));
 }
+
+test "HairGridAccumulate: a NaN position goes to the cells of index 0 (UB11)" {
+    const std = @import("std");
+
+    // A 3 x 3 x 3 grid with scale 1, one strand of 2 vertices: the root is skipped, vertex 1 has a NaN x coordinate
+    var context = std.mem.zeroes(HairStructs.HairUpdateContext);
+    context.num_strands = 1;
+    context.num_vertices = 2;
+    context.grid_size_min2 = .init(1, 1, 1);
+    context.grid_size_min1 = .init(2, 2, 2);
+    context.grid_scale = .init(1, 1, 1);
+    context.grid_stride = .init(1, 3, 9);
+    const context_bytes: [@sizeOf(HairStructs.HairUpdateContext)]u8 align(16) = @bitCast(context);
+    var fixed: [1]u32 align(16) = .{0};
+    var positions: [2]HairPosition align(16) = .{
+        .{ .position = .init(0, 0, 0), .rotation = .init(0, 0, 0, 1) },
+        .{ .position = .init(std.math.nan(f32), 0.5, 0.5), .rotation = .init(0, 0, 0, 1) },
+    };
+    var velocities: [2]HairVelocity align(16) = @splat(.{ .velocity = .init(1, 2, 3), .angular_velocity = .init(0, 0, 0) });
+    var grid: [27]int4 align(16) = @splat(.init(0, 0, 0, 0));
+
+    var b: Bindings = .{};
+    b.gContext.bind(&context_bytes);
+    b.gVerticesFixed.bind(std.mem.sliceAsBytes(&fixed));
+    b.gPositions.bind(std.mem.sliceAsBytes(&positions));
+    b.gVelocities.bind(std.mem.sliceAsBytes(&velocities));
+    b.gVelocityAndDensity.bind(std.mem.sliceAsBytes(&grid));
+    main(&b, .init(0, 0, 0));
+
+    // uint3(NaN) is 0 in Zolt (Jolt's result depends on the call site). The fraction is NaN, so every weight is NaN and
+    // int(round(NaN)) adds 0x80000000 to each component of the 8 cells around index (0, 0, 0).
+    const min = std.math.minInt(i32);
+    for (grid, 0..) |cell, i| {
+        const touched = i == 0 or i == 1 or i == 3 or i == 4 or i == 9 or i == 10 or i == 12 or i == 13;
+        try std.testing.expect(cell.eql(if (touched) int4.splat(min) else int4.splat(0)));
+    }
+}
