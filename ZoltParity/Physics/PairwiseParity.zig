@@ -48,6 +48,13 @@
 //! Both sides write their results into a stream of u32 (see `Stream`, the layout of every function is the same as in
 //! PairwiseReference.cpp) and the streams must be identical. The number of queries per pair depends on the cost of the
 //! pair, so that the sweep stays well below ~3 minutes in Debug.
+//!
+//! Soft bodies (SoftBodyShape, Phase 9 group S3): `makeSoftBodyCatalogue` adds soft bodies to the catalogue: cloths and
+//! closed spheres with single and double sided faces, materials, a vertex radius, a rotation, one face and no faces. Both
+//! sides create the shape like BodyManager does (SoftBodyMotionProperties::Initialize, then the shape points to the motion
+//! properties), without a body. The test "Pairwise parity: soft_body" sweeps every pair with a soft body (convex and
+//! sphere vs soft body in both directions, through decorators and compounds too) and the TransformedShape queries of the
+//! soft bodies. Soft bodies are not in `makeCatalogue`, because NarrowPhaseQueryParity puts its shapes in rigid bodies.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -108,6 +115,10 @@ const ShapeFilter = zolt.ShapeFilter;
 const ShapeResult = zolt.ShapeResult;
 const ShapeSettings = zolt.ShapeSettings;
 const ShapeSubType = zolt.ShapeSubType;
+const SoftBodyCreationSettings = zolt.SoftBodyCreationSettings;
+const SoftBodyMotionProperties = zolt.SoftBodyMotionProperties;
+const SoftBodyShape = zolt.SoftBodyShape;
+const SoftBodySharedSettings = zolt.SoftBodySharedSettings;
 const SphereShapeSettings = zolt.SphereShapeSettings;
 const StaticCompoundShapeSettings = zolt.StaticCompoundShapeSettings;
 const SubShapeID = zolt.SubShapeID;
@@ -200,6 +211,10 @@ pub const NodeKind = enum(u32) {
     /// num_materials, f[0..3]: offset, f[3..6]: scale, f[6]: active edge cos threshold angle, param0: block size,
     /// param1: bits per sample
     height_field,
+    /// floats[first..][0 .. 3 * count]: vertices, triangles[first2..][0..count2]: faces (the vertices and the material
+    /// index), num_materials (0: the default material list), param0: faces double sided, param1: make rotation
+    /// identity, f[0]: vertex radius, f[1..5]: rotation of the creation settings
+    soft_body,
 };
 
 /// Must match NodeDesc in PairwiseReference.cpp
@@ -577,19 +592,76 @@ fn createNode(allocator: Allocator, materials: *const Materials, in: *const Cata
             hf.active_edge_cos_threshold_angle = f[6];
             break :blk hf.asShapeSettings();
         },
+        .soft_body => unreachable, // createSoftBody
     });
     defer settings.deinit();
     settings.get().?.user_data = n.user_data;
     return settings.get().?.createShape(allocator);
 }
 
+/// A soft body node: the motion properties and the shape of a soft body, like BodyManager.allocateSoftBody makes them
+/// (without a body). The catalogue owns them and destroys them after the last reference to the shape.
+const SoftBodyNode = struct {
+    motion_properties: SoftBodyMotionProperties,
+    shape: SoftBodyShape,
+
+    fn destroy(self: *SoftBodyNode, allocator: Allocator) void {
+        self.shape.asShapeMut().deinit();
+        self.motion_properties.deinit();
+        allocator.destroy(self);
+    }
+};
+
+/// CreateSoftBody in C++ (NodeKind.soft_body)
+fn createSoftBody(allocator: Allocator, materials: *const Materials, in: *const CatalogueInput, index: usize, soft_bodies: *std.ArrayList(*SoftBodyNode)) !ShapeResult {
+    const n = &in.nodes[index];
+    var shared: Ref(SoftBodySharedSettings) = .init(try SoftBodySharedSettings.create(allocator));
+    defer shared.deinit();
+    const settings = shared.get().?;
+    for (0..n.count) |i| {
+        const v = in.floats[n.first + 3 * i ..][0..3];
+        try settings.vertices.append(allocator, .init(.{ .x = v[0], .y = v[1], .z = v[2] }, .{}));
+    }
+    for (in.triangles[n.first2..][0..n.count2]) |t|
+        try settings.addFace(.init(t.idx[0], t.idx[1], t.idx[2], .{ .material_index = t.material_index }));
+    if (n.num_materials > 0) {
+        for (settings.materials.items) |*m| m.deinit();
+        settings.materials.clearRetainingCapacity();
+        for (0..n.num_materials) |i| try settings.materials.append(allocator, .init(materials.ptrs[i % num_materials]));
+    }
+    // Zolt (UB2): initialize needs an update group (Jolt's Optimize is not needed for the shape queries)
+    try settings.update_groups.append(allocator, std.mem.zeroes(SoftBodySharedSettings.UpdateGroup));
+
+    var creation: SoftBodyCreationSettings = .init(settings, RVec3.zero(), quat(n.f[1..5].*), 0);
+    defer creation.deinit();
+    creation.faces_double_sided = n.param0 != 0;
+    creation.make_rotation_identity = n.param1 != 0;
+    creation.vertex_radius = n.f[0];
+
+    try soft_bodies.ensureUnusedCapacity(allocator, 1);
+    const node = try allocator.create(SoftBodyNode);
+    errdefer allocator.destroy(node);
+    node.motion_properties = .{ .allocator = allocator };
+    errdefer node.motion_properties.deinit();
+    try node.motion_properties.initialize(&creation);
+    node.shape = .init(allocator);
+    node.shape.motion_properties = &node.motion_properties;
+    node.shape.asShape().setEmbedded();
+    node.shape.asShapeMut().setUserData(n.user_data);
+    soft_bodies.appendAssumeCapacity(node);
+
+    var result: ShapeResult = .{};
+    result.set(.init(node.shape.asShapeMut()));
+    return result;
+}
+
 /// The catalogue shapes of Zolt (one per node) and their properties (jolt: pw_catalogue_create)
-fn zoltCatalogue(allocator: Allocator, materials: *const Materials, in: *const CatalogueInput, shapes: *std.ArrayList(RefConst(Shape)), s: *Stream) !bool {
+fn zoltCatalogue(allocator: Allocator, materials: *const Materials, in: *const CatalogueInput, shapes: *std.ArrayList(RefConst(Shape)), soft_bodies: *std.ArrayList(*SoftBodyNode), s: *Stream) !bool {
     var valid = true;
     for (0..in.num_nodes) |i| {
         // Reserve first so that out of memory never leaks a reference
         try shapes.ensureUnusedCapacity(allocator, 1);
-        var result = try createNode(allocator, materials, in, shapes.items, i);
+        var result = if (in.nodes[i].kind == .soft_body) try createSoftBody(allocator, materials, in, i, soft_bodies) else try createNode(allocator, materials, in, shapes.items, i);
         defer result.deinit();
         s.u(marker_properties);
         if (result.hasError()) {
@@ -1552,6 +1624,148 @@ fn makeRandomCatalogue(allocator: Allocator, seed: u32) !Catalogue {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Soft bodies
+
+const SoftBodyKind = enum { cloth, sphere, one_face, no_faces };
+
+/// A soft body: `layers` bumpy cloths of size * (size + 1) cells above each other, a closed sphere of size rings, one
+/// face or vertices without faces. The material indices are random below `num_materials` (0 for the default material
+/// list).
+fn addSoftBody(cat: *Catalogue, gen: *Gen, kind: SoftBodyKind, opts: struct { size: u32 = 4, layers: u32 = 1, num_materials: u32 = 0, double_sided: bool = false, vertex_radius: f32 = 0, rotation: Quat = Quat.identity(), make_rotation_identity: bool = true, user_data: u32 }) !NodeDesc {
+    const allocator = cat.allocator;
+    const first: u32 = @intCast(cat.floats.items.len);
+    const first2: u32 = @intCast(cat.triangles.items.len);
+    const num_face_materials = @max(opts.num_materials, 1);
+    var num_vertices: u32 = 0;
+    const Local = struct {
+        fn face(c: *Catalogue, g: *Gen, a: u32, b: u32, d: u32, m: u32) !void {
+            try c.triangles.append(c.allocator, .init(a, b, d, .{ .material_index = g.index(m) }));
+        }
+    };
+    switch (kind) {
+        .cloth => {
+            const nx = opts.size;
+            const nz = opts.size + 1;
+            const spacing = gen.float(0.3, 0.5);
+            for (0..opts.layers) |layer| {
+                const base = num_vertices;
+                const height = 0.5 * (@as(f32, @floatFromInt(layer)) - 0.5 * @as(f32, @floatFromInt(opts.layers - 1)));
+                for (0..nz + 1) |z|
+                    for (0..nx + 1) |x| {
+                        const fx: f32 = @floatFromInt(x);
+                        const fz: f32 = @floatFromInt(z);
+                        try cat.floats.appendSlice(allocator, &.{ (fx - 0.5 * @as(f32, @floatFromInt(nx))) * spacing, height + gen.float(-0.2, 0.2), (fz - 0.5 * @as(f32, @floatFromInt(nz))) * spacing });
+                        num_vertices += 1;
+                    };
+                for (0..nz) |z|
+                    for (0..nx) |x| {
+                        const v0: u32 = base + @as(u32, @intCast(z * (nx + 1) + x));
+                        const v1 = v0 + 1;
+                        const v2 = v0 + nx + 1;
+                        const v3 = v2 + 1;
+                        if (gen.chance(50)) {
+                            try Local.face(cat, gen, v0, v2, v1, num_face_materials);
+                            try Local.face(cat, gen, v1, v2, v3, num_face_materials);
+                        } else {
+                            try Local.face(cat, gen, v0, v2, v3, num_face_materials);
+                            try Local.face(cat, gen, v0, v3, v1, num_face_materials);
+                        }
+                    };
+            }
+        },
+        .sphere => {
+            // A pole, rings - 1 rings of segments vertices, a pole; the faces point outwards
+            const rings = opts.size;
+            const segments = opts.size + 2;
+            const radius = gen.float(0.6, 1.0);
+            const center = gen.vec(-0.2, 0.2);
+            var points: std.ArrayList(Vec3) = .empty;
+            defer points.deinit(allocator);
+            try points.append(allocator, center.add(Vec3.init(0, radius, 0)));
+            for (1..rings) |i| {
+                const theta = math.pi * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rings));
+                for (0..segments) |j| {
+                    const phi = 2.0 * math.pi * @as(f32, @floatFromInt(j)) / @as(f32, @floatFromInt(segments));
+                    const r = radius * gen.float(0.9, 1.1);
+                    try points.append(allocator, center.add(Vec3.init(@sin(theta) * @cos(phi), @cos(theta), @sin(theta) * @sin(phi)).mulScalar(r)));
+                }
+            }
+            try points.append(allocator, center.sub(Vec3.init(0, radius, 0)));
+            for (points.items) |p| try cat.floats.appendSlice(allocator, &arr3(p));
+            num_vertices = @intCast(points.items.len);
+
+            const bottom = num_vertices - 1;
+            var faces: std.ArrayList([3]u32) = .empty;
+            defer faces.deinit(allocator);
+            for (0..segments) |j_usize| {
+                const j: u32 = @intCast(j_usize);
+                const next = (j + 1) % segments;
+                try faces.append(allocator, .{ 0, 1 + j, 1 + next });
+                for (0..rings - 2) |i_usize| {
+                    const i: u32 = @intCast(i_usize);
+                    const a = 1 + i * segments + j;
+                    const b = 1 + i * segments + next;
+                    const c = a + segments;
+                    const d = b + segments;
+                    try faces.append(allocator, .{ a, c, b });
+                    try faces.append(allocator, .{ b, c, d });
+                }
+                const last = 1 + (rings - 2) * segments;
+                try faces.append(allocator, .{ bottom, last + next, last + j });
+            }
+            for (faces.items) |f| {
+                // Outwards: the normal points away from the center
+                const x1 = points.items[f[0]];
+                const x2 = points.items[f[1]];
+                const x3 = points.items[f[2]];
+                const outwards = x2.sub(x1).cross(x3.sub(x1)).dot(x1.add(x2).add(x3).sub(center.mulScalar(3))) > 0;
+                if (outwards)
+                    try Local.face(cat, gen, f[0], f[1], f[2], num_face_materials)
+                else
+                    try Local.face(cat, gen, f[0], f[2], f[1], num_face_materials);
+            }
+        },
+        .one_face, .no_faces => {
+            const count: u32 = if (kind == .one_face) 3 else 5;
+            for (0..count) |_| try cat.floats.appendSlice(allocator, &arr3(gen.vec(-0.9, 0.9)));
+            num_vertices = count;
+            if (kind == .one_face)
+                try Local.face(cat, gen, 0, 1, 2, num_face_materials);
+        },
+    }
+    const q = opts.rotation;
+    return .{
+        .kind = .soft_body,
+        .first = first,
+        .count = num_vertices,
+        .first2 = first2,
+        .count2 = @as(u32, @intCast(cat.triangles.items.len)) - first2,
+        .num_materials = opts.num_materials,
+        .param0 = @intFromBool(opts.double_sided),
+        .param1 = @intFromBool(opts.make_rotation_identity),
+        .f = Catalogue.params(.{ opts.vertex_radius, q.getX(), q.getY(), q.getZ(), q.getW() }),
+        .user_data = opts.user_data,
+    };
+}
+
+/// The catalogue of the soft body sweep: the catalogue of the sweep and soft bodies
+pub fn makeSoftBodyCatalogue(allocator: Allocator) !Catalogue {
+    var cat = try makeCatalogue(allocator);
+    errdefer cat.deinit();
+    var gen: Gen = .{ .rng = .{ .state = 0x50f7b0d7 } };
+    const rotation = Quat.rotation(Vec3.init(0.4, 1.0, -0.3).normalized(), 0.8);
+    _ = try cat.entry("soft body (cloth)", 4, try addSoftBody(&cat, &gen, .cloth, .{ .size = 5, .num_materials = 3, .user_data = 70 }));
+    _ = try cat.entry("soft body (cloth, double sided, vertex radius, rotated)", 4, try addSoftBody(&cat, &gen, .cloth, .{ .size = 4, .num_materials = 2, .double_sided = true, .vertex_radius = 0.05, .rotation = rotation, .user_data = 71 }));
+    _ = try cat.entry("soft body (sphere)", 4, try addSoftBody(&cat, &gen, .sphere, .{ .size = 6, .user_data = 72 }));
+    _ = try cat.entry("soft body (sphere, double sided, rotation not applied)", 4, try addSoftBody(&cat, &gen, .sphere, .{ .size = 4, .num_materials = 4, .double_sided = true, .rotation = rotation, .make_rotation_identity = false, .user_data = 73 }));
+    _ = try cat.entry("soft body (cloth, 3 layers, double sided)", 4, try addSoftBody(&cat, &gen, .cloth, .{ .size = 3, .layers = 3, .num_materials = 2, .double_sided = true, .user_data = 76 }));
+    // Few queries for the soft bodies that rarely or never hit anything (the sweep checks that enough queries hit)
+    _ = try cat.entry("soft body (1 face)", 8, try addSoftBody(&cat, &gen, .one_face, .{ .num_materials = 1, .user_data = 74 }));
+    _ = try cat.entry("soft body (no faces)", 16, try addSoftBody(&cat, &gen, .no_faces, .{ .user_data = 75 }));
+    return cat;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Comparison of the streams
 
 pub const Comparison = struct {
@@ -1611,6 +1825,8 @@ pub const Built = struct {
     /// collector of a collide or ray query can receive a second hit after forcing an early out, which Jolt asserts (and
     /// Zolt in safe builds). Casts are not affected (see the file header).
     multi_block: std.ArrayList(bool) = .empty,
+    /// The soft body nodes (destroyed after the last reference to their shapes)
+    soft_bodies: std.ArrayList(*SoftBodyNode) = .empty,
 
     /// Takes ownership of `cat` (also on error)
     pub fn init(allocator: Allocator, cat: Catalogue, buffer: []u32) !*Built {
@@ -1630,7 +1846,7 @@ pub const Built = struct {
         var zs: Stream = .{ .allocator = allocator };
         defer zs.deinit();
         errdefer self.deinitZoltShapes();
-        const zolt_valid = try zoltCatalogue(allocator, &self.materials, &input, &self.shapes, &zs);
+        const zolt_valid = try zoltCatalogue(allocator, &self.materials, &input, &self.shapes, &self.soft_bodies, &zs);
         var jolt_size: u32 = 0;
         const handle = jolt.pw_catalogue_create(&input, buffer.ptr, @intCast(buffer.len), &jolt_size);
         var cmp: Comparison = .{ .name = "Pairwise catalogue (shape properties)" };
@@ -1676,6 +1892,8 @@ pub const Built = struct {
     fn deinitZoltShapes(self: *Built) void {
         for (self.shapes.items) |*ref| ref.deinit();
         self.shapes.deinit(self.allocator);
+        for (self.soft_bodies.items) |node| node.destroy(self.allocator);
+        self.soft_bodies.deinit(self.allocator);
     }
 
     pub fn deinit(self: *Built) void {
@@ -1807,19 +2025,14 @@ fn isUserType(t: ShapeSubType) bool {
     return @intFromEnum(t) >= @intFromEnum(ShapeSubType.user1) and @intFromEnum(t) <= @intFromEnum(ShapeSubType.user_convex8);
 }
 
-/// SoftBodyShape is ported in Phase 9 (SoftBody): until then its register function is empty in Zolt
-fn isSoftBody(t: ShapeSubType) bool {
-    return t == .soft_body;
-}
-
 test "Pairwise parity: dispatch tables" {
     // Every pair of Jolt's sub types (user types excluded: the parity build registers some of them): unsupported and
     // reversed entries must be the same
     var mismatches: usize = 0;
     for (zolt.all_sub_shape_types) |t1| {
-        if (isUserType(t1) or isSoftBody(t1)) continue;
+        if (isUserType(t1)) continue;
         for (zolt.all_sub_shape_types) |t2| {
-            if (isUserType(t2) or isSoftBody(t2)) continue;
+            if (isUserType(t2)) continue;
 
             // Without asserts the unsupported functions and EmptyShape's functions all have empty bodies, which LLVM merges
             // into one function, so their addresses are the same: only the safe builds can tell them apart
@@ -1841,8 +2054,9 @@ test "Pairwise parity: dispatch tables" {
     if (mismatches > 0) return error.ParityMismatch;
 }
 
-/// Collide and cast every ordered pair of catalogue shapes (`base` queries per pair of cheap shapes)
-fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u32, base: usize) !void {
+/// Collide and cast every ordered pair of catalogue shapes (`base` queries per pair of cheap shapes). With `only`, only
+/// the pairs with a node of that kind (the soft body sweep).
+fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u32, base: usize, only: ?NodeKind) !void {
     var collide_cmp: Comparison = .{ .name = "Pairwise collide (CollisionDispatch / InternalEdgeRemovingCollector)" };
     var cast_cmp: Comparison = .{ .name = "Pairwise cast (CollisionDispatch)" };
     var collide_hits: usize = 0;
@@ -1855,6 +2069,8 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
     const entries = built.cat.entries.items;
     for (entries) |e1| {
         for (entries) |e2| {
+            if (only) |kind|
+                if (built.cat.nodes.items[e1.node].kind != kind and built.cat.nodes.items[e2.node].kind != kind) continue;
             var pair_collide_hits: usize = 0;
             var pair_cast_hits: usize = 0;
             const shape1 = built.shape(e1.node);
@@ -2034,13 +2250,16 @@ fn sweepPairs(allocator: Allocator, built: *const Built, buffer: []u32, seed: u3
     if (failed) return error.ParityMismatch;
 }
 
-/// The TransformedShape queries of every catalogue shape (`base` queries for a cheap shape)
-fn sweepTransformedShapes(allocator: Allocator, built: *const Built, buffer: []u32, seed: u32, base: usize) !void {
+/// The TransformedShape queries of every catalogue shape (`base` queries for a cheap shape). With `only`, only the nodes
+/// of that kind (the soft body sweep).
+fn sweepTransformedShapes(allocator: Allocator, built: *const Built, buffer: []u32, seed: u32, base: usize, only: ?NodeKind) !void {
     var cmp: Comparison = .{ .name = "Pairwise TransformedShape queries" };
     var gen: Gen = .{ .rng = .{ .state = seed } };
     var zs: Stream = .{ .allocator = allocator };
     defer zs.deinit();
     for (built.cat.entries.items) |e| {
+        if (only) |kind|
+            if (built.cat.nodes.items[e.node].kind != kind) continue;
         const shape = built.shape(e.node);
         const bits = shape.getSubShapeIDBitsRecursive();
         const n: usize = base / e.cost;
@@ -2124,7 +2343,7 @@ test "Pairwise parity: collide and cast" {
 
     const built = try Built.init(allocator, try makeCatalogue(allocator), buffer);
     defer built.deinit();
-    try sweepPairs(allocator, built, buffer, 0x12345678, if (builtin.mode == .Debug) 16 else 64);
+    try sweepPairs(allocator, built, buffer, 0x12345678, if (builtin.mode == .Debug) 16 else 64, null);
 }
 
 test "Pairwise parity: TransformedShape queries" {
@@ -2134,7 +2353,7 @@ test "Pairwise parity: TransformedShape queries" {
 
     const built = try Built.init(allocator, try makeCatalogue(allocator), buffer);
     defer built.deinit();
-    try sweepTransformedShapes(allocator, built, buffer, 0x7a5f00d, if (builtin.mode == .Debug) 2400 else 12000);
+    try sweepTransformedShapes(allocator, built, buffer, 0x7a5f00d, if (builtin.mode == .Debug) 2400 else 12000, null);
 }
 
 test "Pairwise parity: random catalogue" {
@@ -2144,6 +2363,17 @@ test "Pairwise parity: random catalogue" {
 
     const built = try Built.init(allocator, try makeRandomCatalogue(allocator, 0x9e3779b9), buffer);
     defer built.deinit();
-    try sweepPairs(allocator, built, buffer, 0x51ed270b, if (builtin.mode == .Debug) 8 else 32);
-    try sweepTransformedShapes(allocator, built, buffer, 0x2545f491, if (builtin.mode == .Debug) 800 else 8000);
+    try sweepPairs(allocator, built, buffer, 0x51ed270b, if (builtin.mode == .Debug) 8 else 32, null);
+    try sweepTransformedShapes(allocator, built, buffer, 0x2545f491, if (builtin.mode == .Debug) 800 else 8000, null);
+}
+
+test "Pairwise parity: soft_body (SoftBodyShape against the catalogue)" {
+    const allocator = std.testing.allocator;
+    const buffer = try allocator.alloc(u32, stream_capacity);
+    defer allocator.free(buffer);
+
+    const built = try Built.init(allocator, try makeSoftBodyCatalogue(allocator), buffer);
+    defer built.deinit();
+    try sweepPairs(allocator, built, buffer, 0x5b0d7a11, if (builtin.mode == .Debug) 16 else 64, .soft_body);
+    try sweepTransformedShapes(allocator, built, buffer, 0x5b0d7a12, if (builtin.mode == .Debug) 2400 else 12000, .soft_body);
 }
