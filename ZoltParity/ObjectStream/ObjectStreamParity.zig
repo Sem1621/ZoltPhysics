@@ -9,8 +9,7 @@
 //! a pending class. So the other layers compare every class, and a class that is not ready fails them too.
 //!
 //! - P1 schema: every class against the Zolt factory (name, hash, abstract flag, bases, attributes with their declared
-//!   types and primitive types). The Phase 9 attributes are dropped (PhysicsScene.mSoftBodies, S17, until group S2).
-//!   The IsKindOf matrix.
+//!   types and primitive types). The IsKindOf matrix.
 //! - P2 defaults: every creatable class, C++ CreateObject and write against Zolt create and write, text and binary.
 //! - P3 random streams from the C++ schema, both formats; each side reads the other's output.
 //! - P4 old schemas: mutations of P3 streams (dropped, reordered, renamed and retyped attributes, vec3 / dvec3, a class
@@ -19,14 +18,16 @@
 //! - P5 truncation: every prefix of the default and random streams (up to 64 KB), 2000 prefixes of terrain2.bof.
 //! - P6 number words: more than 10^5 words through C++'s ObjectStreamTextIn and Zolt's.
 //! - P7 assets: Human.tof, dead_pose1.tof and terrain2.bof read by both sides, written again in both formats, and the
-//!   SaveBinaryState bytes of the loaded objects.
+//!   SaveBinaryState bytes of the loaded objects. The same for random PhysicsScenes with soft bodies (P3's generator),
+//!   without the shapes (no asset has soft bodies).
+//! - P9 binary state: each side restores the SaveBinaryState bytes of those random scenes that the other side wrote
+//!   (PhysicsScene::sRestoreFromBinaryState) and writes the same bytes again. (The binary state parity of the other
+//!   layers, e.g. BodyInterfaceParity.zig, is P9 of SerializationArchitecture.md too.)
 //! - P8 the object of UnitTests/ObjectStream/ObjectStreamTest.cpp in both formats and both directions.
 //!
 //! Comparing bytes: both sides read a stream as the requested class and write the main object in both formats; the
-//! result (read or not) and the bytes must be equal. A class that reaches a Phase 9 attribute (PhysicsScene.mSoftBodies,
-//! S17) is compared by cross-reading: the C++ side reads Zolt's bytes and must write its own bytes again. In binary,
-//! when a string has a NUL, these are the bytes it writes after reading its own binary bytes: Jolt's binary reader cuts
-//! a string at its first NUL (S15), its own bytes included.
+//! result (read or not) and the bytes must be equal. Every class is compared this way, PhysicsScene with its soft bodies
+//! too (RemainingFeaturesArchitecture.md R19; until group S2 it was compared by cross-reading, S17).
 //!
 //! P3 and P4 go on with the next class after a mismatch, and list the classes that failed at the end.
 //!
@@ -127,20 +128,6 @@ fn declaredClasses(arena: Allocator, text: []const u8) ![]const []const u8 {
     return names.items;
 }
 
-/// True when the C++ bytes declare a class with a Phase 9 attribute (PhysicsScene.mSoftBodies): Zolt's bytes lack the
-/// attribute (S17, until group S2), they are compared by cross-reading
-fn declaresPhase9(text: []const u8) bool {
-    var words = std.mem.tokenizeAny(u8, text, " \r\n\t");
-    while (words.next()) |w| {
-        if (std.mem.eql(u8, w, "declare")) {
-            if (words.next()) |name| {
-                if (schema_mod.hasPhase9Attribute(name)) return true;
-            }
-        }
-    }
-    return false;
-}
-
 /// What a comparison was about, printed on a mismatch
 const Context = struct {
     layer: []const u8,
@@ -199,27 +186,8 @@ fn roundTrip(allocator: Allocator, bytes: []const u8, class: [:0]const u8, ctx_i
     const j = jolt orelse return false;
     const zz = z.?;
 
-    // A class that reaches a class with a Phase 9 attribute (PhysicsScene.mSoftBodies): the C++ bytes have attributes
-    // that Zolt's cannot have (S17). Then the C++ side reads Zolt's bytes and must write its own bytes again.
-    const cross = declaresPhase9(j.text);
-    for (formats) |f| {
-        if (!cross) {
-            try expectSame(ctx, if (f == .text) "written again as text" else "written again as binary", zz.get(f), j.get(f));
-            continue;
-        }
-        const c2 = try mustResave(allocator, .jolt, zz.get(f), class, ctx);
-        defer c2.deinit(allocator);
-        // Binary with a string that has a NUL (a NUL byte in a text stream is always inside a string): Jolt's binary
-        // reader cuts the string (S15), also in Jolt's own binary bytes. Then the C++ side must write what it writes
-        // after reading its own binary bytes. The text comparison keeps the whole string.
-        if (f == .binary and !std.mem.eql(u8, c2.binary, j.binary) and std.mem.indexOfScalar(u8, j.text, 0) != null) {
-            const c3 = try mustResave(allocator, .jolt, j.binary, class, ctx);
-            defer c3.deinit(allocator);
-            try expectSame(ctx, "Jolt reads Zolt's bytes (and its own binary bytes, a string has a NUL)", c2.binary, c3.binary);
-            continue;
-        }
-        try expectSame(ctx, "Jolt reads Zolt's bytes", c2.get(f), j.get(f));
-    }
+    for (formats) |f|
+        try expectSame(ctx, if (f == .text) "written again as text" else "written again as binary", zz.get(f), j.get(f));
     if (depth == .first) return true;
 
     // Each side reads the bytes that the other wrote, and both write the same bytes again. (Not always the bytes that
@@ -229,19 +197,8 @@ fn roundTrip(allocator: Allocator, bytes: []const u8, class: [:0]const u8, ctx_i
         defer c2.deinit(allocator);
         const z2 = try mustResave(allocator, .zolt, j.get(f), class, ctx);
         defer z2.deinit(allocator);
-        for (formats) |g| {
-            if (!cross) {
-                try expectSame(ctx, "each side reads the other's bytes", z2.get(g), c2.get(g));
-                continue;
-            }
-            // Cross-read: each side writes the same bytes again for both inputs
-            const c3 = try mustResave(allocator, .jolt, j.get(f), class, ctx);
-            defer c3.deinit(allocator);
-            try expectSame(ctx, "Jolt reads Zolt's bytes", c2.get(g), c3.get(g));
-            const z3 = try mustResave(allocator, .zolt, zz.get(f), class, ctx);
-            defer z3.deinit(allocator);
-            try expectSame(ctx, "Zolt reads Jolt's bytes", z2.get(g), z3.get(g));
-        }
+        for (formats) |g|
+            try expectSame(ctx, "each side reads the other's bytes", z2.get(g), c2.get(g));
     }
     return true;
 }
@@ -297,22 +254,6 @@ fn zoltSchema(allocator: Allocator, rtti: *const RTTI) ![]u8 {
     return line.toOwnedSlice();
 }
 
-/// The C++ schema line without the Phase 9 attributes (PhysicsScene.mSoftBodies, S17, until group S2)
-fn expectedSchema(allocator: Allocator, c: *const Class) ![]u8 {
-    var line: std.Io.Writer.Allocating = .init(allocator);
-    errdefer line.deinit();
-    const header_end = std.mem.indexOf(u8, c.line, " attributes=[").?;
-    try line.writer.print("{s} attributes=[", .{c.line[0..header_end]});
-    var first = true;
-    for (c.attributes) |a| {
-        if (a.phase9) continue;
-        try line.writer.print("{s}{s}:{s}({s})", .{ if (first) "" else ";", a.name, a.type_text, a.primitive orelse "-" });
-        first = false;
-    }
-    try line.writer.writeAll("]");
-    return line.toOwnedSlice();
-}
-
 test "ObjectStream P1: the schema of every class of the C++ Factory after RegisterTypes, and IsKindOf" {
     const allocator = std.testing.allocator;
     const schema = try schema_mod.get();
@@ -344,10 +285,8 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
 
         const zolt_line = try zoltSchema(allocator, rtti);
         defer allocator.free(zolt_line);
-        const jolt_line = try expectedSchema(allocator, c);
-        defer allocator.free(jolt_line);
-        if (!std.mem.eql(u8, zolt_line, jolt_line)) {
-            std.debug.print("schema of {s}\n  zolt: {s}\n  jolt: {s}\n", .{ c.name, zolt_line, jolt_line });
+        if (!std.mem.eql(u8, zolt_line, c.line)) {
+            std.debug.print("schema of {s}\n  zolt: {s}\n  jolt: {s}\n", .{ c.name, zolt_line, c.line });
             mismatches += 1;
         }
     }
@@ -471,19 +410,8 @@ test "ObjectStream P2: the defaults of every creatable class, text and binary" {
         const z: Resaved = .{ .text = try zoltWrite(allocator, object, rtti, .text), .binary = try zoltWrite(allocator, object, rtti, .binary) };
         defer z.deinit(allocator);
 
-        for (formats) |f| {
-            if (!c.cross) {
-                try expectSame(ctx, if (f == .text) "default, text" else "default, binary", z.get(f), jolt.get(f));
-                continue;
-            }
-            // Cross-read: Jolt reads Zolt's default and writes its own default again
-            const c2 = (try cppResave(allocator, z.get(f), c.name)) orelse {
-                ctx.report("Jolt cannot read Zolt's default");
-                return error.ParityMismatch;
-            };
-            defer c2.deinit(allocator);
-            try expectSame(ctx, "Jolt reads Zolt's default", c2.get(f), jolt.get(f));
-        }
+        for (formats) |f|
+            try expectSame(ctx, if (f == .text) "default, text" else "default, binary", z.get(f), jolt.get(f));
     }
     try std.testing.expect(compared > 0);
 }
@@ -805,6 +733,123 @@ test "ObjectStream P7: Assets/Human/dead_pose1.tof" {
 
 test "ObjectStream P7: Assets/terrain2.bof" {
     try assetTest(2);
+}
+
+// P7 and P9 of random PhysicsScenes with soft bodies ------------------------------------------------------------------
+
+/// True when SaveBinaryState can write the scene without its shapes: every constraint has settings (a path constraint
+/// also its path) and every soft body has shared settings. Jolt dereferences a null pointer otherwise (Zolt panics).
+fn saveableScene(scene: *const zolt.PhysicsScene) bool {
+    for (scene.getConstraints()) |*cc| {
+        const settings = cc.getSettings() orelse return false;
+        if (settings.base.vtable.rtti == zolt.PathConstraintSettings.rtti) {
+            if (zolt.virtual.downcast(zolt.PathConstraintSettings, settings).path.get() == null) return false;
+        }
+    }
+    for (scene.getSoftBodies()) |*b| {
+        if (b.settings.get() == null) return false;
+    }
+    return true;
+}
+
+/// The random scenes of P7 / P9 with soft bodies, and how many of them must have something
+const scene_streams = 240;
+
+test "ObjectStream P7 / P9: the binary state of random PhysicsScenes with soft bodies" {
+    const allocator = std.testing.allocator;
+    const schema = try schema_mod.get();
+    const class = schema.find("PhysicsScene") orelse return error.HarnessError;
+    _ = try readyClass(.{ .layer = "P7 scene", .class = "PhysicsScene" }, &schema.classes[class]);
+    var compared: usize = 0;
+    var num_soft_bodies: usize = 0;
+    var num_shared_settings_with_materials: usize = 0;
+    var num_shared_settings_reused: usize = 0;
+    for (0..scene_streams) |s| {
+        const f: gen.Format = if (s % 2 == 0) .text else .binary;
+        const seed = 0x5c3e_7009 ^ (@as(u64, s) << 8);
+        var prng: std.Random.DefaultPrng = .init(seed);
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        const g = try gen.Generator.init(arena.allocator(), schema, prng.random(), class);
+        const bytes = try gen.write(arena.allocator(), g.doc, f, prng.random());
+        var ctx: Context = .{ .layer = "P7 scene", .class = "PhysicsScene", .detail = @tagName(f), .seed = seed, .stream = bytes };
+
+        // Both libraries read the stream and write the same bytes (P3)
+        if (!try roundTrip(allocator, bytes, g.doc.request, ctx, .first)) {
+            ctx.report("neither library reads a generated stream (a generator error)");
+            return error.ParityMismatch;
+        }
+
+        // The scene that Zolt reads
+        var reader: std.Io.Reader = .fixed(bytes);
+        var in = try ObjectStreamIn.open(allocator, &reader, schema_mod.factory);
+        defer in.deinit();
+        const main = try in.read(zolt.PhysicsScene.rtti);
+        defer main.rtti.destructObject(main.instance, allocator);
+        const scene: *const zolt.PhysicsScene = @ptrCast(@alignCast(main.instance));
+        if (!saveableScene(scene)) continue;
+        compared += 1;
+        num_soft_bodies += scene.getNumSoftBodies();
+        for (scene.getSoftBodies(), 0..) |*b, i| {
+            const shared = b.settings.get().?;
+            for (shared.materials.items) |m| {
+                if (m.get() != null) {
+                    num_shared_settings_with_materials += 1;
+                    break;
+                }
+            }
+            for (scene.getSoftBodies()[0..i]) |*other| {
+                if (other.settings.get().? == shared) {
+                    num_shared_settings_reused += 1;
+                    break;
+                }
+            }
+        }
+
+        // P7: SaveBinaryState of the loaded scene (without the shapes: GetShape would create shapes from random
+        // settings), with and without the group filters
+        const save_group_filter = prng.random().boolean();
+        var zolt_state: std.Io.Writer.Allocating = .init(allocator);
+        defer zolt_state.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&zolt_state.writer);
+        try scene.saveBinaryState(wrapper.streamOut(), false, save_group_filter);
+        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_scene_binary_state(bytes.ptr, bytes.len, 0, @intFromBool(save_group_filter))));
+        try expectSame(ctx, "SaveBinaryState", zolt_state.written(), cppResult(2));
+
+        // P9: each side restores the other side's binary state and saves it again
+        ctx.layer = "P9 scene";
+        ctx.stream = zolt_state.written();
+        const jolt_state = try allocator.dupe(u8, cppResult(2));
+        defer allocator.free(jolt_state);
+        const jolt_result = try schema_mod.quarantined(schema_mod.jolt_os_scene_binary_resave(zolt_state.written().ptr, zolt_state.written().len, 0, @intFromBool(save_group_filter)));
+        if (jolt_result != 0) {
+            ctx.report("Jolt cannot restore Zolt's binary state");
+            std.debug.print("  {s}\n", .{cppResult(2)});
+            return error.ParityMismatch;
+        }
+        try expectSame(ctx, "Jolt restores Zolt's binary state and saves it again", cppResult(2), zolt_state.written());
+        var state_reader: std.Io.Reader = .fixed(jolt_state);
+        var state_in = zolt.StreamInWrapper.init(&state_reader);
+        var restored = try zolt.PhysicsScene.restoreFromBinaryState(allocator, state_in.streamIn());
+        defer restored.deinit();
+        if (restored.hasError()) {
+            ctx.report("Zolt cannot restore Jolt's binary state");
+            std.debug.print("  {s}\n", .{restored.getError()});
+            return error.ParityMismatch;
+        }
+        var resaved: std.Io.Writer.Allocating = .init(allocator);
+        defer resaved.deinit();
+        var resaved_wrapper = zolt.StreamOutWrapper.init(&resaved.writer);
+        try restored.getPtr().?.saveBinaryState(resaved_wrapper.streamOut(), false, save_group_filter);
+        try expectSame(ctx, "Zolt restores Jolt's binary state and saves it again", resaved.written(), jolt_state);
+    }
+
+    // The layer must reach soft bodies, their materials and shared settings that soft bodies share (seen: 86 of 240
+    // scenes compared, 84 soft bodies, 54 with materials, 18 that share their shared settings)
+    try std.testing.expect(compared >= scene_streams / 5);
+    try std.testing.expect(num_soft_bodies >= scene_streams / 4);
+    try std.testing.expect(num_shared_settings_with_materials >= 20);
+    try std.testing.expect(num_shared_settings_reused >= 5);
 }
 
 test "ObjectStream P5: 2000 prefixes of Assets/terrain2.bof" {

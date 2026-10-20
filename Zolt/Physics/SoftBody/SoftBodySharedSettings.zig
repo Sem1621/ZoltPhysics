@@ -1,6 +1,5 @@
 //! Port of: Jolt/Physics/SoftBody/SoftBodySharedSettings.h, Jolt/Physics/SoftBody/SoftBodySharedSettings.cpp
-//! Status: partial
-//! Missing: SaveWithMaterials, sRestoreWithMaterials (group S2)
+//! Status: complete
 //!
 //! RemainingFeaturesArchitecture.md R15, R19:
 //! - A RefTarget without virtual functions, like PhysicsScene. It keeps the allocator that owns it and its arrays:
@@ -35,19 +34,24 @@
 //! - `sCreateCube(inGridSize, inGridSpacing)` is `createCube(allocator, grid_size, grid_spacing)`.
 //! - Asserts on the input (two vertices at the same position, a rod of zero length, constraints that use a vertex
 //!   twice) are `if (Core.enable_asserts)` asserts: Jolt's release build continues there.
-//! - Inputs where Jolt is undefined that the UB table of R20 does not list yet (reported to the lead). In safe builds
-//!   Zolt stops there with a bounds check or an assert, like Jolt's debug build. In ReleaseFast it is undefined, like
-//!   Jolt's release build:
-//!   - CreateConstraints with an empty `vertex_attributes` and at least one face: Jolt's `attr` reads
-//!     `inVertexAttributes[min(v, 0u - 1)]`.
-//!   - CreateConstraints with an LRA type, or Optimize, after vertices were added or removed while the closest
+//! - Inputs where Jolt is undefined (R20, settled in S1, implemented in S2). Zolt-only tests pin the inputs next to
+//!   them:
+//!   - UB12: CreateConstraints with an LRA type, or Optimize, after vertices were added or removed while the closest
 //!     kinematic cache was filled. The cache then has another size than `vertices`, and Jolt reads past the end of one
-//!     of them.
-//!   - Optimize with a vertex that no group reaches: its position is NaN, +inf or FLT_MAX, so it is never a start
-//!     vertex, and no open group connects to it. Jolt asserts. Its release build reads `groups[-1]` for a constraint
-//!     with no vertex in a group and for a skinned constraint on that vertex. A constraint with only some vertices in
-//!     a group goes to the non-parallel group there, but Zolt's assert is a plain `std.debug.assert`, so ReleaseFast is
-//!     undefined for it too.
+//!     of them. Zolt panics ("vertices were added or removed after the closest kinematic vertices were cached") at the
+//!     LRA block of CreateConstraints and before the sorts of Optimize.
+//!   - UB13: CreateConstraints with an empty `vertex_attributes` and at least one face: Jolt's `attr` reads
+//!     `inVertexAttributes[min(v, 0u - 1)]`. Zolt panics ("no vertex attributes").
+//!   - UB14: Optimize with a vertex that no group reaches: its position is NaN, +inf or FLT_MAX, so it is never a start
+//!     vertex, and no open group connects to it. Jolt asserts. Its release build puts a constraint with only some
+//!     vertices in a group into the non-parallel group: Zolt does the same, after an `if (Core.enable_asserts)` assert.
+//!     Jolt's release build reads `groups[-1]` for a constraint with no vertex in a group and for a skinned constraint
+//!     on that vertex: Zolt panics with a message in every build (the assert does not come first).
+//!
+//! RemainingFeaturesArchitecture.md R19, the binary state with materials (group S2): `saveWithMaterials` /
+//! `restoreWithMaterials` (Jolt's SaveWithMaterials / sRestoreWithMaterials) write and read Jolt's bytes with the ID maps
+//! of StreamUtils. An ID at or above the size of the map creates new settings, like Jolt (no check). Jolt's error texts
+//! are Result values; allocation failure is `error.OutOfMemory`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -59,6 +63,10 @@ const RefConst = ReferenceFile.RefConst;
 const RefCount = ReferenceFile.RefCount;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
+const StreamUtils = @import("../../Core/StreamUtils.zig");
+const Result = @import("../../Core/Result.zig").Result;
+const ObjectToIDMap = @import("../../Core/ObjectToIDMap.zig").ObjectToIDMap;
+const IDToObjectMap = @import("../../Core/ObjectToIDMap.zig").IDToObjectMap;
 const quickSort = @import("../../Core/QuickSort.zig").quickSort;
 const BinaryHeap = @import("../../Core/BinaryHeap.zig");
 const binaryHeapPush = BinaryHeap.binaryHeapPush;
@@ -623,7 +631,12 @@ pub const SoftBodySharedSettings = struct {
     /// A list of indices in the mFaces array used by mSkinnedConstraints, calculated by CalculateSkinnedConstraintNormals (private in Jolt)
     skinned_constraint_normals: std.ArrayList(u32) = .empty,
 
-    pub const SettingsResult = @import("../../Core/Result.zig").Result(Ref(SoftBodySharedSettings));
+    pub const SharedSettingsToIDMap = ObjectToIDMap(SoftBodySharedSettings);
+    pub const IDToSharedSettingsMap = IDToObjectMap(SoftBodySharedSettings);
+    pub const MaterialToIDMap = ObjectToIDMap(PhysicsMaterial);
+    pub const IDToMaterialMap = IDToObjectMap(PhysicsMaterial);
+
+    pub const SettingsResult = Result(Ref(SoftBodySharedSettings));
 
     /// Constructor of settings that are not on the heap (`deinit` them). Allocates the material list
     /// (`mMaterials { PhysicsMaterial::sDefault }`).
@@ -701,6 +714,11 @@ pub const SoftBodySharedSettings = struct {
     /// constraint arrays may hold part of the result: create the constraints again from the start.
     pub fn createConstraints(self: *SoftBodySharedSettings, vertex_attributes: []const VertexAttributes, opts: struct { bend_type: BendType = .distance, angle_tolerance: f32 = math.degreesToRadians(8.0) }) Allocator.Error!void {
         const allocator = self.allocator;
+
+        // Zolt (R20 UB13): every edge of a face reads the attributes of its vertices. Jolt reads
+        // inVertexAttributes[min(v, 0u - 1)] when there are none.
+        if (vertex_attributes.len == 0 and self.faces.items.len > 0)
+            @panic("SoftBodySharedSettings.createConstraints: no vertex attributes");
 
         // Create list of all edges
         var edges: std.ArrayList(EdgeHelper) = .empty;
@@ -829,6 +847,9 @@ pub const SoftBodySharedSettings = struct {
             }
         }
         if (has_lra_constraints) {
+            // Zolt (R20 UB12): a cache of another size than the vertices makes Jolt read out of bounds
+            self.checkClosestKinematicCache();
+
             // Ensure we have calculated the closest kinematic vertex for each vertex
             try self.calculateClosestKinematic();
 
@@ -853,6 +874,26 @@ pub const SoftBodySharedSettings = struct {
             }
         }
     }
+
+    /// Zolt (R20 UB12): a filled closest kinematic cache must have one element per vertex. CalculateClosestKinematic
+    /// keeps a filled cache, so after vertices were added or removed Jolt reads mClosestKinematic or mVertices out of
+    /// bounds.
+    fn checkClosestKinematicCache(self: *const SoftBodySharedSettings) void {
+        const num_cached = self.closest_kinematic.items.len;
+        if (num_cached != 0 and num_cached != self.vertices.items.len)
+            @panic("SoftBodySharedSettings: vertices were added or removed after the closest kinematic vertices were cached");
+    }
+
+    /// Zolt (R20 UB14): the index in `groups` of a constraint whose vertices are all in group `g`. Jolt reads groups[-1]
+    /// when no vertex of the constraint is in a group (a vertex at a NaN, infinite or FLT_MAX position).
+    fn groupIndex(g: i32, comptime message: []const u8) usize {
+        if (g < 0)
+            @panic(message);
+        return @intCast(g);
+    }
+
+    const no_grouped_vertex = "SoftBodySharedSettings.optimize: a constraint has no vertex in a group (a vertex position is NaN, infinite or FLT_MAX)";
+    const skinned_ungrouped_vertex = "SoftBodySharedSettings.optimize: a skinned constraint is on a vertex that is not in a group (its position is NaN, infinite or FLT_MAX)";
 
     /// An edge of a face, used by CreateConstraints (EdgeHelper)
     const EdgeHelper = struct {
@@ -1302,7 +1343,11 @@ pub const SoftBodySharedSettings = struct {
         freeLists(Connection, allocator, connectivity);
         connectivity = &.{};
 
-        // Assign the constraints to their groups
+        // Assign the constraints to their groups. Zolt (R20 UB14): Jolt asserts that every vertex of a constraint is in a
+        // group. Its release build puts a constraint with only some vertices in a group in the non parallel group. Zolt
+        // does the same, and the assert moves into that branch. A constraint without a grouped vertex and a skinned
+        // constraint on an ungrouped vertex make Jolt read groups[-1]. There groupIndex panics with a message, in every
+        // build. (For a skinned constraint groupIndex has the condition of Jolt's assert.)
         const groups = try allocator.alloc(Group, @as(usize, @intCast(current_group_idx)) + 1); // + non parallel group
         @memset(groups, .{});
         defer {
@@ -1313,67 +1358,72 @@ pub const SoftBodySharedSettings = struct {
         for (self.edge_constraints.items, 0..) |e, index| {
             const g1 = group_idx[e.vertex[0]];
             const g2 = group_idx[e.vertex[1]];
-            std.debug.assert(g1 >= 0 and g2 >= 0);
             if (g1 == g2) // In the same group
-                try groups[@intCast(g1)].edge_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+                try groups[groupIndex(g1, no_grouped_vertex)].edge_constraints.append(allocator, @intCast(index))
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
                 try non_parallel_group.edge_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.lra_constraints.items, 0..) |l, index| {
             const g1 = group_idx[l.vertex[0]];
             const g2 = group_idx[l.vertex[1]];
-            std.debug.assert(g1 >= 0 and g2 >= 0);
             if (g1 == g2) // In the same group
-                try groups[@intCast(g1)].lra_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+                try groups[groupIndex(g1, no_grouped_vertex)].lra_constraints.append(allocator, @intCast(index))
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
                 try non_parallel_group.lra_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.rod_stretch_shear_constraints.items, 0..) |r, index| {
             const g1 = group_idx[r.vertex[0]];
             const g2 = group_idx[r.vertex[1]];
-            std.debug.assert(g1 >= 0 and g2 >= 0);
             if (g1 == g2) // In the same group
-                try groups[@intCast(g1)].rod_stretch_shear_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+                try groups[groupIndex(g1, no_grouped_vertex)].rod_stretch_shear_constraints.append(allocator, @intCast(index))
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0);
                 try non_parallel_group.rod_stretch_shear_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.rod_bend_twist_constraints.items, 0..) |r, index| {
             const g1 = group_idx[rods[r.rod[0]].vertex[0]];
             const g2 = group_idx[rods[r.rod[0]].vertex[1]];
             const g3 = group_idx[rods[r.rod[1]].vertex[0]];
             const g4 = group_idx[rods[r.rod[1]].vertex[1]];
-            std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
             if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
-                try groups[@intCast(g1)].rod_bend_twist_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+                try groups[groupIndex(g1, no_grouped_vertex)].rod_bend_twist_constraints.append(allocator, @intCast(index))
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
                 try non_parallel_group.rod_bend_twist_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.dihedral_bend_constraints.items, 0..) |d, index| {
             const g1 = group_idx[d.vertex[0]];
             const g2 = group_idx[d.vertex[1]];
             const g3 = group_idx[d.vertex[2]];
             const g4 = group_idx[d.vertex[3]];
-            std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
             if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
-                try groups[@intCast(g1)].dihedral_bend_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+                try groups[groupIndex(g1, no_grouped_vertex)].dihedral_bend_constraints.append(allocator, @intCast(index))
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
                 try non_parallel_group.dihedral_bend_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.volume_constraints.items, 0..) |v, index| {
             const g1 = group_idx[v.vertex[0]];
             const g2 = group_idx[v.vertex[1]];
             const g3 = group_idx[v.vertex[2]];
             const g4 = group_idx[v.vertex[3]];
-            std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
             if (g1 == g2 and g1 == g3 and g1 == g4) // In the same group
-                try groups[@intCast(g1)].volume_constraints.append(allocator, @intCast(index))
-            else // In different groups -> parallel group
+                try groups[groupIndex(g1, no_grouped_vertex)].volume_constraints.append(allocator, @intCast(index))
+            else { // In different groups -> parallel group
+                if (Core.enable_asserts) std.debug.assert(g1 >= 0 and g2 >= 0 and g3 >= 0 and g4 >= 0);
                 try non_parallel_group.volume_constraints.append(allocator, @intCast(index));
+            }
         }
         for (self.skinned_constraints.items, 0..) |s, index| {
             const g1 = group_idx[s.vertex];
-            std.debug.assert(g1 >= 0);
-            try groups[@intCast(g1)].skinned_constraints.append(allocator, @intCast(index));
+            try groups[groupIndex(g1, skinned_ungrouped_vertex)].skinned_constraints.append(allocator, @intCast(index));
         }
 
         // Sort the parallel groups from big to small (this means the big groups will be scheduled first and have more time to complete)
@@ -1384,6 +1434,9 @@ pub const SoftBodySharedSettings = struct {
         const had_closest_kinematic = self.closest_kinematic.items.len != 0;
         errdefer if (!had_closest_kinematic) self.closest_kinematic.clearAndFree(allocator);
         try self.calculateClosestKinematic();
+
+        // Zolt (R20 UB12): the sorts read the closest kinematic vertex of every constraint vertex
+        self.checkClosestKinematicCache();
 
         // Sort within each group
         const sort_context: *const SoftBodySharedSettings = self;
@@ -1910,6 +1963,84 @@ pub const SoftBodySharedSettings = struct {
         }.read);
     }
 
+    /// Save this shared settings and its materials. Pass in an empty map settings_map / material_map or reuse the same map while saving multiple settings objects to the same stream in order to avoid writing duplicates.
+    /// (Zolt: `allocator` grows the maps)
+    pub fn saveWithMaterials(self: *const SoftBodySharedSettings, allocator: Allocator, stream: StreamOut, settings_map: *SharedSettingsToIDMap, material_map: *MaterialToIDMap) Allocator.Error!void {
+        const settings_iter = settings_map.find(self);
+        if (settings_iter == null) {
+            // Write settings ID
+            const settings_id: u32 = settings_map.count();
+            (try settings_map.getOrPutValue(allocator, self, 0)).* = settings_id;
+            stream.write(settings_id);
+
+            // Write the settings
+            self.saveBinaryState(stream);
+
+            // Write materials
+            try StreamUtils.saveObjectArray(PhysicsMaterial, allocator, stream, self.materials.items, material_map);
+        } else {
+            // Known settings, just write the ID
+            stream.write(settings_iter.?.value);
+        }
+    }
+
+    /// Restore a shape and materials. Pass in an empty map in settings_map / material_map or reuse the same map while reading multiple settings objects from the same stream in order to restore duplicates.
+    /// (Jolt: sRestoreWithMaterials. New settings are allocated with `allocator`. The result holds a reference, `deinit`
+    /// it. An ID at or above the size of `settings_map` creates new settings, like Jolt: the ID is not checked.)
+    pub fn restoreWithMaterials(allocator: Allocator, stream: StreamIn, settings_map: *IDToSharedSettingsMap, material_map: *IDToMaterialMap) Allocator.Error!SettingsResult {
+        var result: SettingsResult = .empty;
+        errdefer result.deinit();
+
+        // Read settings id
+        var settings_id: u32 = 0;
+        stream.read(&settings_id);
+        if (stream.isEOF() or stream.isFailed()) {
+            result.setError("Failed to read settings id");
+            return result;
+        }
+
+        // Check nullptr settings
+        if (settings_id == ~@as(u32, 0)) {
+            result.set(.empty);
+            return result;
+        }
+
+        // Check if we already read this settings
+        if (settings_id < settings_map.items.len) {
+            result.set(settings_map.items[settings_id].clone());
+            return result;
+        }
+
+        // Create new object
+        var settings = Ref(SoftBodySharedSettings).init(try create(allocator));
+        defer settings.deinit();
+        const s = settings.get().?;
+
+        // Read state
+        try s.restoreBinaryState(stream);
+
+        // Read materials
+        var materials: PhysicsMaterialList = .empty;
+        defer {
+            for (materials.items) |*m| m.deinit();
+            materials.deinit(allocator);
+        }
+        var mlresult = try StreamUtils.restoreObjectArray(PhysicsMaterial, allocator, stream, material_map, &materials);
+        defer mlresult.deinit();
+        if (mlresult.hasError()) {
+            result.setError(mlresult.getError());
+            return result;
+        }
+        std.mem.swap(PhysicsMaterialList, &s.materials, &materials); // settings->mMaterials = mlresult.Get(), the defer releases the old list
+
+        // Add the settings to the map
+        try settings_map.ensureUnusedCapacity(allocator, 1);
+        settings_map.appendAssumeCapacity(settings.clone());
+
+        result.set(settings.clone());
+        return result;
+    }
+
     /// Create a cube. This can be used to create a simple soft body for testing purposes.
     /// It will contain edge constraints, volume constraints and faces.
     /// @param grid_size Number of points along each axis
@@ -2326,6 +2457,172 @@ test "SoftBodySharedSettings: out of memory in create, clone and restoreBinarySt
     }.f, .{});
 }
 
+/// The maps of a restore with materials, released by deinit (a test helper)
+const WithMaterialsRestoreMaps = struct {
+    settings: SoftBodySharedSettings.IDToSharedSettingsMap = .empty,
+    materials: SoftBodySharedSettings.IDToMaterialMap = .empty,
+
+    fn deinit(self: *WithMaterialsRestoreMaps, allocator: Allocator) void {
+        for (self.settings.items) |*s| s.deinit();
+        self.settings.deinit(allocator);
+        for (self.materials.items) |*m| m.deinit();
+        self.materials.deinit(allocator);
+    }
+};
+
+/// Two settings that share a material, the first also has the default material and a null material, written with
+/// saveWithMaterials as settings 0, 1 and 0 again (a test helper, returns the bytes)
+fn saveWithMaterialsBytes(allocator: Allocator, settings: *[2]Ref(SoftBodySharedSettings)) ![]u8 {
+    const StreamOutWrapper = @import("../../Core/StreamWrapper.zig").StreamOutWrapper;
+    const PhysicsMaterialSimple = @import("../Collision/PhysicsMaterialSimple.zig").PhysicsMaterialSimple;
+    const Color = @import("../../Core/Color.zig").Color;
+
+    for (settings) |*s| s.* = .init(try SoftBodySharedSettings.create(allocator));
+    const rubber = try PhysicsMaterialSimple.create(allocator, "Rubber", Color.init(1, 2, 3, 4));
+    var rubber_ref: RefConst(PhysicsMaterial) = .init(rubber.material());
+    defer rubber_ref.deinit();
+    const ice = try PhysicsMaterialSimple.create(allocator, "Ice", Color.init(5, 6, 7, 8));
+    var ice_ref: RefConst(PhysicsMaterial) = .init(ice.material());
+    defer ice_ref.deinit();
+    const s0 = settings[0].get().?;
+    try fillAllArrays(s0);
+    try s0.materials.ensureUnusedCapacity(allocator, 2);
+    s0.materials.appendAssumeCapacity(rubber_ref.clone());
+    s0.materials.appendAssumeCapacity(.empty);
+    const s1 = settings[1].get().?;
+    try s1.vertices.append(allocator, .init(.{ .x = 3, .y = 2, .z = 1 }, .{}));
+    try s1.materials.ensureUnusedCapacity(allocator, 1);
+    s1.materials.items[0].deinit();
+    s1.materials.items[0] = ice_ref.clone();
+    s1.materials.appendAssumeCapacity(rubber_ref.clone());
+
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
+    var wrapper: StreamOutWrapper = .init(&buffer.writer);
+    var settings_map: SoftBodySharedSettings.SharedSettingsToIDMap = .empty;
+    defer settings_map.deinit(allocator);
+    var material_map: SoftBodySharedSettings.MaterialToIDMap = .empty;
+    defer material_map.deinit(allocator);
+    for ([_]usize{ 0, 1, 0 }) |i|
+        try settings[i].get().?.saveWithMaterials(allocator, wrapper.streamOut(), &settings_map, &material_map);
+    if (wrapper.streamOut().isFailed()) return error.OutOfMemory; // The allocating writer only fails when it runs out of memory
+    try std.testing.expectEqual(@as(u32, 2), settings_map.count());
+    try std.testing.expectEqual(@as(u32, 3), material_map.count()); // The default, rubber and ice (null is not a material)
+    return buffer.toOwnedSlice();
+}
+
+/// restoreWithMaterials of the 3 settings that saveWithMaterialsBytes wrote (a test helper)
+fn restoreWithMaterialsBytes(allocator: Allocator, bytes: []const u8, maps: *WithMaterialsRestoreMaps, out: *[3]Ref(SoftBodySharedSettings)) !void {
+    const StreamInWrapper = @import("../../Core/StreamWrapper.zig").StreamInWrapper;
+    var reader: std.Io.Reader = .fixed(bytes);
+    var wrapper: StreamInWrapper = .init(&reader);
+    for (out) |*o| {
+        var result = try SoftBodySharedSettings.restoreWithMaterials(allocator, wrapper.streamIn(), &maps.settings, &maps.materials);
+        defer result.deinit();
+        if (!result.isValid()) return error.TestUnexpectedResult;
+        o.set(result.getPtr());
+    }
+}
+
+test "SoftBodySharedSettings: saveWithMaterials / restoreWithMaterials" {
+    const allocator = std.testing.allocator;
+    const StreamInWrapper = @import("../../Core/StreamWrapper.zig").StreamInWrapper;
+    var settings: [2]Ref(SoftBodySharedSettings) = @splat(.empty);
+    defer for (&settings) |*s| s.deinit();
+    const bytes = try saveWithMaterialsBytes(allocator, &settings);
+    defer allocator.free(bytes);
+
+    // Settings 0 again is its ID only: the bytes end with it
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, bytes[bytes.len - 4 ..][0..4], .little));
+
+    var maps: WithMaterialsRestoreMaps = .{};
+    defer maps.deinit(allocator);
+    var restored: [3]Ref(SoftBodySharedSettings) = @splat(.empty);
+    defer for (&restored) |*r| r.deinit();
+    try restoreWithMaterialsBytes(allocator, bytes, &maps, &restored);
+
+    // The sharing: the third settings are the first, the material is shared, the null material stays null
+    try std.testing.expectEqual(@as(usize, 2), maps.settings.items.len);
+    try std.testing.expectEqual(@as(usize, 3), maps.materials.items.len);
+    const r0 = restored[0].get().?;
+    const r1 = restored[1].get().?;
+    try std.testing.expect(restored[2].get().? == r0);
+    try std.testing.expect(r0 != settings[0].get().?);
+    try std.testing.expectEqual(@as(usize, 3), r0.materials.items.len);
+    try std.testing.expect(r0.materials.items[0].get().? != PhysicsMaterial.default); // A new PhysicsMaterial, like Jolt
+    try std.testing.expectEqualStrings("Rubber", r0.materials.items[1].get().?.getDebugName());
+    try std.testing.expect(r0.materials.items[2].get() == null);
+    try std.testing.expect(r1.materials.items[1].get().? == r0.materials.items[1].get().?);
+    try std.testing.expectEqualStrings("Ice", r1.materials.items[0].get().?.getDebugName());
+    for ([_]*const SoftBodySharedSettings{ r0, r1 }, &settings) |r, *original| {
+        const expected = try saveBytes(allocator, original.get().?);
+        defer allocator.free(expected);
+        const actual = try saveBytes(allocator, r);
+        defer allocator.free(actual);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
+
+    // The null ID gives no settings
+    {
+        const null_id = [_]u8{ 0xff, 0xff, 0xff, 0xff };
+        var reader: std.Io.Reader = .fixed(&null_id);
+        var wrapper: StreamInWrapper = .init(&reader);
+        var result = try SoftBodySharedSettings.restoreWithMaterials(allocator, wrapper.streamIn(), &maps.settings, &maps.materials);
+        defer result.deinit();
+        try std.testing.expect(result.isValid() and result.getPtr() == null);
+    }
+
+    // An ID at or above the size of the map creates new settings (Jolt does not check the ID)
+    {
+        var new_maps: WithMaterialsRestoreMaps = .{};
+        defer new_maps.deinit(allocator);
+        const moved = try allocator.dupe(u8, bytes);
+        defer allocator.free(moved);
+        std.mem.writeInt(u32, moved[0..4], 7, .little);
+        var reader: std.Io.Reader = .fixed(moved);
+        var wrapper: StreamInWrapper = .init(&reader);
+        var result = try SoftBodySharedSettings.restoreWithMaterials(allocator, wrapper.streamIn(), &new_maps.settings, &new_maps.materials);
+        defer result.deinit();
+        try std.testing.expect(result.isValid() and result.getPtr() == new_maps.settings.items[0].get().?);
+        try std.testing.expectEqual(@as(usize, 1), new_maps.settings.items.len);
+    }
+
+    // Truncated streams: Jolt's texts, no leak
+    for (0..bytes.len) |len| {
+        var new_maps: WithMaterialsRestoreMaps = .{};
+        defer new_maps.deinit(allocator);
+        var reader: std.Io.Reader = .fixed(bytes[0..len]);
+        var wrapper: StreamInWrapper = .init(&reader);
+        var failed = false;
+        for (0..3) |_| {
+            var result = try SoftBodySharedSettings.restoreWithMaterials(allocator, wrapper.streamIn(), &new_maps.settings, &new_maps.materials);
+            defer result.deinit();
+            if (result.hasError()) {
+                if (len < 4) try std.testing.expectEqualStrings("Failed to read settings id", result.getError());
+                failed = true;
+                break;
+            }
+        }
+        try std.testing.expect(failed);
+    }
+}
+
+test "SoftBodySharedSettings: out of memory in saveWithMaterials / restoreWithMaterials" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            var settings: [2]Ref(SoftBodySharedSettings) = @splat(.empty);
+            defer for (&settings) |*s| s.deinit();
+            const bytes = try saveWithMaterialsBytes(allocator, &settings);
+            defer allocator.free(bytes);
+            var maps: WithMaterialsRestoreMaps = .{};
+            defer maps.deinit(allocator);
+            var restored: [3]Ref(SoftBodySharedSettings) = @splat(.empty);
+            defer for (&restored) |*r| r.deinit();
+            try restoreWithMaterialsBytes(allocator, bytes, &maps, &restored);
+        }
+    }.f, .{});
+}
+
 /// The cloth of SoftBodyCreator::CreateClothWithFixatedCorners (Samples/Utils/SoftBodyCreator.cpp): a grid in the XZ
 /// plane, the 4 corners kinematic, 2 faces per quad (a test helper)
 fn createTestCloth(allocator: Allocator, grid_size: u32, spacing: f32) Allocator.Error!Ref(SoftBodySharedSettings) {
@@ -2673,4 +2970,133 @@ test "SoftBodySharedSettings: optimize and calculateClosestKinematic free the ca
             try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len);
         }
     }
+}
+
+test "SoftBodySharedSettings: createConstraints without vertex attributes and without faces (next to R20 UB13)" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+
+    // Without faces no edge reads the attributes: an empty attribute list is fine (with faces it panics, UB13)
+    var settings: Ref(S) = .init(try S.create(allocator));
+    defer settings.deinit();
+    const s = settings.get().?;
+    try s.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 0 }, .{}));
+    try s.vertices.append(allocator, .init(.{ .x = 1, .y = 0, .z = 0 }, .{}));
+    try s.createConstraints(&.{}, .{});
+    try std.testing.expectEqual(@as(usize, 0), s.edge_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 0), s.lra_constraints.items.len);
+
+    // One attribute is repeated for every vertex
+    try s.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 1 }, .{}));
+    try s.addFace(.init(0, 1, 2, .{}));
+    try s.createConstraints(&.{.init(0.5, 0.5, 0.5, .{})}, .{});
+    try std.testing.expectEqual(@as(usize, 3), s.edge_constraints.items.len);
+    for (s.edge_constraints.items) |e| try std.testing.expectEqual(@as(f32, 0.5), e.compliance);
+}
+
+test "SoftBodySharedSettings: closest kinematic cache of the right size (next to R20 UB12)" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+    const lra = [_]S.VertexAttributes{.init(0.0, 0.0, 0.0, .{ .lra_type = .euclidean_distance })};
+
+    var cloth = try createTestCloth(allocator, 4, 0.5);
+    defer cloth.deinit();
+    const s = cloth.get().?;
+
+    // createConstraints fills the cache, optimize uses and frees it
+    try s.createConstraints(&lra, .{});
+    try std.testing.expectEqual(@as(usize, 16), s.closest_kinematic.items.len);
+    try s.optimize();
+    try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len);
+
+    // A vertex added while the cache is empty: the next cache has its size
+    try s.vertices.append(allocator, .init(.{ .x = 2, .y = 0, .z = 0 }, .{}));
+    try s.addFace(.init(3, 16, 7, .{}));
+    try s.createConstraints(&lra, .{});
+    try std.testing.expectEqual(@as(usize, 17), s.closest_kinematic.items.len);
+
+    // A vertex added while the cache is filled: createConstraints without an LRA type does not read the cache. With a
+    // cache of the right size again (here: cleared), optimize works. (With the stale cache both panic, UB12.)
+    try s.vertices.append(allocator, .init(.{ .x = 2, .y = 0, .z = 0.5 }, .{}));
+    try s.addFace(.init(7, 16, 17, .{}));
+    try s.createConstraints(&.{.init(0.0, 0.0, 0.0, .{})}, .{});
+    try std.testing.expectEqual(@as(usize, 17), s.closest_kinematic.items.len);
+    s.closest_kinematic.clearAndFree(allocator);
+    try s.optimize();
+    try std.testing.expect(s.update_groups.items.len > 0);
+}
+
+/// A 20 x 20 cloth with its constraints and an extra vertex at FLT_MAX that no group reaches (a test helper)
+fn createClothWithFarVertex(allocator: Allocator) Allocator.Error!Ref(SoftBodySharedSettings) {
+    var cloth = try createTestCloth(allocator, 20, 0.1);
+    errdefer cloth.deinit();
+    const s = cloth.get().?;
+    try s.createConstraints(&.{.init(0.0, 0.0, 0.0, .{})}, .{ .bend_type = .distance });
+    try s.vertices.append(allocator, .init(.{ .x = math.flt_max, .y = math.flt_max, .z = math.flt_max }, .{}));
+    return cloth;
+}
+
+test "SoftBodySharedSettings: optimize with a vertex that no group reaches and no constraint uses (next to R20 UB14)" {
+    const allocator = std.testing.allocator;
+    var cloth = try createClothWithFarVertex(allocator);
+    defer cloth.deinit();
+    const s = cloth.get().?;
+    const num_edges = s.edge_constraints.items.len;
+
+    // The far vertex is never a start vertex and has no connection: it stays outside every group. No constraint reads
+    // its group, so optimize works in every build.
+    try s.optimize();
+    const groups = s.update_groups.items;
+    try std.testing.expect(groups.len >= 2);
+    try std.testing.expectEqual(@as(u32, @intCast(num_edges)), groups[groups.len - 1].edge_end_index);
+}
+
+test "SoftBodySharedSettings: optimize with a vertex at FLT_MAX that a group reaches (next to R20 UB14)" {
+    const allocator = std.testing.allocator;
+    const S = SoftBodySharedSettings;
+    var settings: Ref(S) = .init(try S.create(allocator));
+    defer settings.deinit();
+    const s = settings.get().?;
+
+    // The far vertex is never a start vertex. But an edge connects it to a group that is not full, so the group takes it.
+    // Then its edge and its skinned constraint are in that group, and optimize works in every build. (Without the edge
+    // to vertex 0, the skinned constraint panics, UB14.)
+    for ([_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 }, .{ math.flt_max, math.flt_max, math.flt_max } }) |p|
+        try s.vertices.append(allocator, .init(.{ .x = p[0], .y = p[1], .z = p[2] }, .{}));
+    for (1..5) |v| try s.edge_constraints.append(allocator, .init(0, @intCast(v), .{}));
+    try s.skinned_constraints.append(allocator, .{ .vertex = 4 });
+    try s.optimize();
+
+    // One group, more than half empty: it is merged into the non parallel group
+    try std.testing.expectEqual(@as(usize, 1), s.update_groups.items.len);
+    try std.testing.expectEqual(@as(u32, 4), s.update_groups.items[0].edge_end_index);
+    try std.testing.expectEqual(@as(u32, 1), s.update_groups.items[0].skinned_end_index);
+}
+
+test "SoftBodySharedSettings: optimize with a constraint that has some vertices in a group (R20 UB14, Jolt's release path)" {
+    // Jolt asserts: the builds with asserts stop there, like Jolt's debug build
+    if (Core.enable_asserts) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var cloth = try createClothWithFarVertex(allocator);
+    defer cloth.deinit();
+    const s = cloth.get().?;
+
+    // An edge from vertex 0 (the first start vertex) to the far vertex. The first group fills up with cloth vertices
+    // that are closer, and no later group connects to the far vertex: it stays outside every group.
+    const far: u32 = @intCast(s.vertices.items.len - 1);
+    try s.edge_constraints.append(allocator, .init(0, far, .{ .compliance = 0.25 }));
+    try s.optimize();
+
+    // Jolt's release build puts the edge in the non parallel group (the last update group)
+    const groups = s.update_groups.items;
+    try std.testing.expect(groups.len >= 3);
+    var found = false;
+    for (s.edge_constraints.items, 0..) |e, i| {
+        if (e.vertex[0] == far or e.vertex[1] == far) {
+            try std.testing.expect(i >= groups[groups.len - 2].edge_end_index);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }

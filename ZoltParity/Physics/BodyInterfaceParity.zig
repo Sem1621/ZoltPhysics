@@ -27,6 +27,17 @@
 //!   the system (the constraints through GetConstraintSettings); C++: a PhysicsSystem with its QuadTree, the active
 //!   bodies are compared sorted, because QuadTree's AddBodiesPrepare sorts the bodies by layer), also when the system
 //!   runs out of bodies.
+//! - Soft bodies (Phase 9 group S2): the shared settings of a test are SaveBinaryState bytes of settings that Zolt
+//!   builds (cubes, and cloths with createConstraints and optimize), with materials of the material table; both sides
+//!   restore them. "SoftBodyCreationSettings parity: binary state" is the BodyCreationSettings test for soft bodies
+//!   (SaveWithChildren with and without the maps, the cross restore, truncated streams). "SoftBodyCreationSettings
+//!   parity: soft bodies created through BodyInterface" creates soft bodies with the four creation functions in a world
+//!   that can run out of bodies, and compares the IDs, IsActive, IsAdded and the SaveWithChildren bytes of
+//!   GetSoftBodyCreationSettings, with and without the maps. The scenes of "PhysicsScene parity" have soft bodies:
+//!   SaveBinaryState (soft bodies always save their shared settings and materials), sRestoreFromBinaryState, CreateBodies
+//!   (the active soft bodies; SaveState skips the soft bodies, whose state SoftBodyParity.zig and SimulationParity.zig
+//!   compare) and FromPhysicsSystem. Constraints also connect soft bodies. FromPhysicsSystem stores the index of the
+//!   next rigid body for a soft body (Jolt's quirk, R20), so its bytes compare that index.
 //! The DeterminismLog text is not compared here: the C++ library is built without JPH_ENABLE_DETERMINISM_LOG (see
 //! ZoltTests/Physics/DeterminismLogTests.zig).
 
@@ -83,12 +94,15 @@ const StateRecorder = zolt.StateRecorder;
 const StateRecorderImpl = zolt.StateRecorderImpl;
 const StreamInWrapper = zolt.StreamInWrapper;
 const StreamOutWrapper = zolt.StreamOutWrapper;
+const SoftBodySharedSettings = zolt.SoftBodySharedSettings;
+const SoftBodyCreationSettings = zolt.SoftBodyCreationSettings;
+const StateRecorderFilter = zolt.StateRecorderFilter;
 
 const io = std.testing.io;
 
 /// The C++ reference functions, see BodyInterfaceReference.cpp
 const jolt = struct {
-    extern fn jolt_bi_struct_sizes(out_sizes: *[7]u32) void;
+    extern fn jolt_bi_struct_sizes(out_sizes: *[9]u32) void;
     extern fn jolt_bi_world_create(max_bodies: u32, num_body_mutexes: u32, tables: *const Tables) *anyopaque;
     extern fn jolt_bi_world_destroy(world: *anyopaque) void;
     extern fn jolt_bi_create_body(world: *anyopaque, desc: *const BodyDesc, mode: u32, custom_id: u32, activation: u32) u32;
@@ -96,9 +110,12 @@ const jolt = struct {
     extern fn jolt_bi_snapshot(world: *anyopaque, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_bi_bcs_save(tables: *const Tables, bodies: [*]const BodyDesc, num_bodies: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_bi_bcs_resave(bytes: [*]const u8, size: u32, num_bodies: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32, out_error: [*]u8, error_capacity: u32) u32;
-    extern fn jolt_bi_scene_save(tables: *const Tables, bodies: [*]const BodyDesc, num_bodies: u32, constraint_bodies: [*]const [2]u32, constraint_settings: [*]const ConstraintsParity.CSSettings, num_constraints: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_bi_scene_save(tables: *const Tables, bodies: [*]const BodyDesc, num_bodies: u32, constraint_bodies: [*]const [2]u32, constraint_settings: [*]const ConstraintsParity.CSSettings, num_constraints: u32, shared: [*]const SharedSettingsDesc, num_shared: u32, soft_bodies: [*]const SoftBodyDesc, num_soft_bodies: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_bi_scene_resave(bytes: [*]const u8, size: u32, save_shapes: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32, out_error: [*]u8, error_capacity: u32) u32;
     extern fn jolt_bi_scene_create_bodies(bytes: [*]const u8, size: u32, max_bodies: u32, out_result: *u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_bi_sb_save(tables: *const Tables, shared: [*]const SharedSettingsDesc, num_shared: u32, bodies: [*]const SoftBodyDesc, num_bodies: u32, save_settings: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
+    extern fn jolt_bi_sb_resave(bytes: [*]const u8, size: u32, num_bodies: u32, save_settings: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32, out_error: [*]u8, error_capacity: u32) u32;
+    extern fn jolt_bi_sb_create(tables: *const Tables, shared: [*]const SharedSettingsDesc, num_shared: u32, bodies: [*]const SoftBodyDesc, num_bodies: u32, max_bodies: u32, save_settings: u32, save_group_filters: u32, out_bytes: [*]u8, capacity: u32) u32;
 };
 
 /// No index (cBINone)
@@ -178,6 +195,47 @@ const BodyDesc = extern struct {
     sub_group_id: u32 = 0xffffffff,
 };
 
+/// Must match BISharedSettingsDesc in BodyInterfaceReference.cpp
+const SharedSettingsDesc = extern struct {
+    /// SoftBodySharedSettings::SaveBinaryState bytes (Zolt writes them, both sides restore them)
+    bytes: [*]const u8,
+    size: u32,
+    num_materials: u32 = 0,
+    /// Index in the material table, `default_material_index` (PhysicsMaterial::sDefault) or `none` (null)
+    materials: [4]u32 = @splat(none),
+};
+
+/// Must match BISoftBodyDesc in BodyInterfaceReference.cpp
+const SoftBodyDesc = extern struct {
+    user_data: u64 = 0,
+    position: [3]Real = @splat(0),
+    rotation: [4]f32 = .{ 0, 0, 0, 1 },
+    linear_damping: f32 = 0.1,
+    max_linear_velocity: f32 = 500.0,
+    restitution: f32 = 0.0,
+    friction: f32 = 0.2,
+    pressure: f32 = 0.0,
+    gravity_factor: f32 = 1.0,
+    vertex_radius: f32 = 0.0,
+    num_iterations: u32 = 5,
+    object_layer: u32 = 0,
+    update_position: u32 = 1,
+    make_rotation_identity: u32 = 1,
+    allow_sleeping: u32 = 1,
+    faces_double_sided: u32 = 0,
+    /// Index in the shared settings table or `none` (no shared settings)
+    shared: u32 = none,
+    group_filter: u32 = none,
+    group_id: u32 = 0xffffffff,
+    sub_group_id: u32 = 0xffffffff,
+    /// jolt_bi_sb_create: 0 createSoftBody + addBody, 1 createAndAddSoftBody, 2 createSoftBody, 3 createSoftBodyWithID +
+    /// addBody, 4 createSoftBodyWithoutID + assignBodyID + addBody
+    create_mode: u32 = 0,
+    /// The ID of mode 3
+    custom_id: u32 = 0,
+    activation: u32 = 0,
+};
+
 /// The kinds of the scene constraints: the EConstraintSubType values of the constraint parity (ConstraintsParity.Kind)
 const SceneConstraintKind = ConstraintsParity.Kind;
 
@@ -203,12 +261,13 @@ const scene_constraint_kinds: []const SceneConstraintKind = blk: {
 /// ConstraintsParity.makeDescriptionSettings, the slot of the kind). The C ABI passes the body indices and the
 /// descriptions as two arrays (`jolt_bi_scene_save`).
 const SceneConstraint = struct {
-    /// Index in the bodies of the scene or PhysicsScene.fixed_to_world
+    /// Index in the bodies of the scene or PhysicsScene.fixed_to_world. CreateBodies creates the soft bodies after the
+    /// bodies, so index `num_bodies + i` is soft body i.
     bodies: [2]u32,
     settings: ConstraintsParity.CSSettings,
 
     /// A random constraint of a random kind of `scene_constraint_kinds` between the bodies of a scene with `num_bodies`
-    /// bodies (and the world)
+    /// bodies and soft bodies together (and the world)
     fn random(rng: *Rng, num_bodies: u32) SceneConstraint {
         const kind = scene_constraint_kinds[rng.intRange(usize, 0, scene_constraint_kinds.len - 1)];
         const body2 = rng.intRange(u32, 0, num_bodies - 1);
@@ -456,6 +515,50 @@ const TableObjects = struct {
         return none;
     }
 
+    /// MakeSharedSettings of BodyInterfaceReference.cpp: the shared settings restored from their bytes, with their
+    /// materials (the caller releases them)
+    fn makeSharedSettings(self: *const TableObjects, descs: []const SharedSettingsDesc, out: *std.ArrayList(Ref(SoftBodySharedSettings))) !void {
+        const a = self.allocator;
+        for (descs) |*d| {
+            var ref: Ref(SoftBodySharedSettings) = .init(try SoftBodySharedSettings.create(a));
+            errdefer ref.deinit();
+            const shared = ref.get().?;
+            var reader: std.Io.Reader = .fixed(d.bytes[0..d.size]);
+            var in = StreamInWrapper.init(&reader);
+            try shared.restoreBinaryState(in.streamIn());
+            for (shared.materials.items) |*m| m.deinit();
+            shared.materials.clearRetainingCapacity();
+            try shared.materials.ensureTotalCapacity(a, d.num_materials);
+            for (d.materials[0..d.num_materials]) |m|
+                shared.materials.appendAssumeCapacity(.init(if (m == default_material_index) PhysicsMaterial.default else self.getMaterial(m)));
+            try out.append(a, ref);
+        }
+    }
+
+    /// MakeSoftBodyCreationSettings of BodyInterfaceReference.cpp (the caller deinits the result)
+    fn makeSoftBodyCreationSettings(self: *const TableObjects, desc: *const SoftBodyDesc, shared: []const Ref(SoftBodySharedSettings)) SoftBodyCreationSettings {
+        var s: SoftBodyCreationSettings = .{};
+        s.settings = .init(if (desc.shared < shared.len) shared[desc.shared].get() else null);
+        s.position = loadR3(&desc.position);
+        s.rotation = loadQuat(&desc.rotation);
+        s.user_data = desc.user_data;
+        s.object_layer = @intCast(desc.object_layer);
+        s.collision_group = .init(if (desc.group_filter < self.filters.items.len) self.filters.items[desc.group_filter].get() else null, desc.group_id, desc.sub_group_id);
+        s.num_iterations = desc.num_iterations;
+        s.linear_damping = desc.linear_damping;
+        s.max_linear_velocity = desc.max_linear_velocity;
+        s.restitution = desc.restitution;
+        s.friction = desc.friction;
+        s.pressure = desc.pressure;
+        s.gravity_factor = desc.gravity_factor;
+        s.vertex_radius = desc.vertex_radius;
+        s.update_position = desc.update_position != 0;
+        s.make_rotation_identity = desc.make_rotation_identity != 0;
+        s.allow_sleeping = desc.allow_sleeping != 0;
+        s.faces_double_sided = desc.faces_double_sided != 0;
+        return s;
+    }
+
     /// MakeBodyCreationSettings of BodyInterfaceReference.cpp (the caller deinits the result)
     fn makeBodyCreationSettings(self: *const TableObjects, desc: *const BodyDesc) !BodyCreationSettings {
         var s: BodyCreationSettings = .{};
@@ -506,9 +609,15 @@ fn writeBodies(allocator: Allocator, bodies: []const *const Body, active: []cons
     r.write(@as(u32, @intCast(bodies.len)));
     for (bodies) |body| {
         r.write(body.getID().getIndexAndSequenceNumber());
-        var settings = body.getBodyCreationSettings();
-        defer settings.deinit();
-        settings.saveBinaryState(r.streamOut());
+        if (body.isSoftBody()) {
+            var settings = body.getSoftBodyCreationSettings();
+            defer settings.deinit();
+            settings.saveBinaryState(r.streamOut());
+        } else {
+            var settings = body.getBodyCreationSettings();
+            defer settings.deinit();
+            settings.saveBinaryState(r.streamOut());
+        }
         r.write(body.getUserData());
         r.write(tables.shapeIndex(body.getShape()));
         r.write(@as(u8, @intFromBool(body.isActive())));
@@ -1246,9 +1355,9 @@ fn checkOut(checker: *Checker, kind: OpKind, zolt_out: *const Out, jolt_out: *co
 }
 
 test "BodyInterface parity: struct sizes" {
-    var sizes: [7]u32 = undefined;
+    var sizes: [9]u32 = undefined;
     jolt.jolt_bi_struct_sizes(&sizes);
-    try std.testing.expectEqual([7]u32{ @sizeOf(ShapeDesc), @sizeOf(MaterialDesc), @sizeOf(GroupFilterDesc), @sizeOf(Tables), @sizeOf(BodyDesc), @sizeOf(Op), @sizeOf(Out) }, sizes);
+    try std.testing.expectEqual([9]u32{ @sizeOf(ShapeDesc), @sizeOf(MaterialDesc), @sizeOf(GroupFilterDesc), @sizeOf(Tables), @sizeOf(BodyDesc), @sizeOf(Op), @sizeOf(Out), @sizeOf(SharedSettingsDesc), @sizeOf(SoftBodyDesc) }, sizes);
 }
 
 test "BodyInterface parity: random operations" {
@@ -1537,6 +1646,394 @@ test "BodyCreationSettings parity: binary state" {
     try std.testing.expect(num_errors > 100);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Soft bodies: the shared settings table, the descriptions and the binary state of SoftBodyCreationSettings
+
+/// A cloth of 2 x 2 to 5 x 5 vertices in the XZ plane with the constraints of createConstraints (random vertex
+/// attributes, bend type and kinematic corners), optimized
+fn randomCloth(allocator: Allocator, rng: *Rng) !Ref(SoftBodySharedSettings) {
+    const S = SoftBodySharedSettings;
+    var ref: Ref(S) = .init(try S.create(allocator));
+    errdefer ref.deinit();
+    const s = ref.get().?;
+    const grid_size = rng.intRange(u32, 2, 5);
+    const spacing = rng.float(0.1, 0.5);
+    const fixed_corners = rng.intRange(u32, 0, 1) == 0;
+    for (0..grid_size) |z| for (0..grid_size) |x| {
+        const corner = (x == 0 or x == grid_size - 1) and (z == 0 or z == grid_size - 1);
+        const position: zolt.Float3 = .{ .x = @as(f32, @floatFromInt(x)) * spacing, .y = 0, .z = @as(f32, @floatFromInt(z)) * spacing };
+        try s.vertices.append(allocator, .init(position, .{ .inv_mass = if (corner and fixed_corners) 0 else 1 }));
+    };
+    var z: u32 = 0;
+    while (z < grid_size - 1) : (z += 1) {
+        var x: u32 = 0;
+        while (x < grid_size - 1) : (x += 1) {
+            try s.addFace(.init(x + z * grid_size, x + (z + 1) * grid_size, x + 1 + (z + 1) * grid_size, .{}));
+            try s.addFace(.init(x + z * grid_size, x + 1 + (z + 1) * grid_size, x + 1 + z * grid_size, .{}));
+        }
+    }
+    const lra_types = [_]S.LRAType{ .none, .euclidean_distance, .geodesic_distance };
+    const bend_types = [_]S.BendType{ .none, .distance, .dihedral };
+    const attributes = [_]S.VertexAttributes{.init(rng.float(0, 1.0e-3), rng.float(0, 1.0e-3), rng.float(0, 1.0e-3), .{ .lra_type = lra_types[rng.intRange(usize, 0, 2)], .lra_max_distance_multiplier = rng.float(1, 1.2) })};
+    try s.createConstraints(&attributes, .{ .bend_type = bend_types[rng.intRange(usize, 0, 2)] });
+    try s.optimize();
+    return ref;
+}
+
+/// The shared settings of a test: SaveBinaryState bytes of settings that Zolt builds (cubes and cloths, optimized, so
+/// soft bodies can be created with them), with random materials of the material table (also the default material and
+/// null). Initialized in place: the descriptions point to the bytes.
+const SharedTable = struct {
+    bytes: [3][]u8 = undefined,
+    descs: [3]SharedSettingsDesc = undefined,
+    len: u32 = 0,
+
+    fn init(self: *SharedTable, allocator: Allocator, rng: *Rng, num_materials: u32) !void {
+        self.* = .{};
+        errdefer self.deinit(allocator);
+        const n = rng.intRange(u32, 1, self.descs.len);
+        for (0..n) |i| {
+            var settings = if (rng.intRange(u32, 0, 2) == 0)
+                try SoftBodySharedSettings.createCube(allocator, rng.intRange(u32, 2, 3), rng.float(0.2, 1.0))
+            else
+                try randomCloth(allocator, rng);
+            defer settings.deinit();
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            defer out.deinit();
+            var w = StreamOutWrapper.init(&out.writer);
+            settings.get().?.saveBinaryState(w.streamOut());
+            if (w.isFailed()) return error.OutOfMemory; // The allocating writer only fails when it runs out of memory
+            self.bytes[i] = try out.toOwnedSlice();
+            self.len += 1;
+            var d: SharedSettingsDesc = .{ .bytes = self.bytes[i].ptr, .size = @intCast(self.bytes[i].len), .num_materials = rng.intRange(u32, 1, 4) };
+            for (d.materials[0..d.num_materials]) |*m| {
+                const r = rng.intRange(u32, 0, num_materials + 1);
+                m.* = if (r < num_materials) r else if (r == num_materials) default_material_index else none;
+            }
+            self.descs[i] = d;
+        }
+    }
+
+    fn deinit(self: *SharedTable, allocator: Allocator) void {
+        for (self.bytes[0..self.len]) |b| allocator.free(b);
+        self.len = 0;
+    }
+
+    fn slice(self: *const SharedTable) []const SharedSettingsDesc {
+        return self.descs[0..self.len];
+    }
+};
+
+fn randomSoftBodyDesc(rng: *Rng, num_shared: u32, num_filters: u32, opts: struct { allow_no_shared: bool = false, max_bodies: u32 = 16 }) SoftBodyDesc {
+    var d: SoftBodyDesc = .{};
+    d.user_data = @as(u64, rng.next()) << 32 | rng.next();
+    storeR3(randomPosition(rng), &d.position);
+    storeQuat(randomQuat(rng), &d.rotation);
+    d.linear_damping = rng.float(0, 1);
+    d.max_linear_velocity = rng.float(10, 600);
+    d.restitution = rng.float(0, 1);
+    d.friction = rng.float(0, 1);
+    d.pressure = if (rng.intRange(u32, 0, 1) == 0) 0 else rng.float(0, 1000);
+    d.gravity_factor = rng.float(-2, 2);
+    d.vertex_radius = rng.float(0, 0.1);
+    d.num_iterations = rng.intRange(u32, 1, 10);
+    d.object_layer = rng.intRange(u32, 0, 10);
+    d.update_position = rng.intRange(u32, 0, 1);
+    d.make_rotation_identity = rng.intRange(u32, 0, 1);
+    d.allow_sleeping = rng.intRange(u32, 0, 1);
+    d.faces_double_sided = rng.intRange(u32, 0, 1);
+    d.shared = if (opts.allow_no_shared and rng.intRange(u32, 0, 4) == 0) none else rng.intRange(u32, 0, num_shared - 1);
+    d.group_filter = if (rng.intRange(u32, 0, 2) == 0) none else rng.intRange(u32, 0, num_filters - 1);
+    d.group_id = if (rng.intRange(u32, 0, 4) == 0) 0xffffffff else rng.intRange(u32, 0, 100);
+    d.sub_group_id = rng.intRange(u32, 0, 5);
+    d.create_mode = rng.intRange(u32, 0, 4);
+    d.custom_id = BodyID.fromIndexAndSequenceNumber(rng.intRange(u32, 0, opts.max_bodies + 2), @intCast(rng.intRange(u32, 0, 255))).getIndexAndSequenceNumber();
+    d.activation = randomActivation(rng);
+    return d;
+}
+
+/// The maps of a soft body restore, released by deinit
+const SoftBodyRestoreMaps = struct {
+    settings: SoftBodyCreationSettings.IDToSharedSettingsMap = .empty,
+    materials: SoftBodyCreationSettings.IDToMaterialMap = .empty,
+    group_filters: SoftBodyCreationSettings.IDToGroupFilterMap = .empty,
+
+    fn deinit(self: *SoftBodyRestoreMaps, allocator: Allocator) void {
+        for (self.settings.items) |*s| s.deinit();
+        self.settings.deinit(allocator);
+        for (self.materials.items) |*m| m.deinit();
+        self.materials.deinit(allocator);
+        for (self.group_filters.items) |*g| g.deinit();
+        self.group_filters.deinit(allocator);
+    }
+};
+
+/// The maps of a soft body save
+const SoftBodySaveMaps = struct {
+    settings: SoftBodyCreationSettings.SharedSettingsToIDMap = .empty,
+    materials: SoftBodyCreationSettings.MaterialToIDMap = .empty,
+    group_filters: SoftBodyCreationSettings.GroupFilterToIDMap = .empty,
+
+    fn deinit(self: *SoftBodySaveMaps, allocator: Allocator) void {
+        self.settings.deinit(allocator);
+        self.materials.deinit(allocator);
+        self.group_filters.deinit(allocator);
+    }
+
+    /// saveWithChildren of `settings` with these maps (`save_settings` / `save_filters` select them)
+    fn save(self: *SoftBodySaveMaps, allocator: Allocator, settings: *const SoftBodyCreationSettings, stream: zolt.StreamOut, save_settings: bool, save_filters: bool) !void {
+        try settings.saveWithChildren(allocator, stream, if (save_settings) &self.settings else null, if (save_settings) &self.materials else null, if (save_filters) &self.group_filters else null);
+    }
+};
+
+/// The shared settings of the table (SharedTable) on the Zolt side, released by deinit
+const SharedObjects = struct {
+    list: std.ArrayList(Ref(SoftBodySharedSettings)) = .empty,
+
+    fn deinit(self: *SharedObjects, allocator: Allocator) void {
+        for (self.list.items) |*s| s.deinit();
+        self.list.deinit(allocator);
+    }
+};
+
+/// SaveWithChildren of the soft body creation settings (jolt_bi_sb_save on the Zolt side)
+fn zoltSbSave(allocator: Allocator, settings: []const SoftBodyCreationSettings, save_settings: bool, save_filters: bool, out: *std.Io.Writer.Allocating) !void {
+    var maps: SoftBodySaveMaps = .{};
+    defer maps.deinit(allocator);
+    var wrapper = StreamOutWrapper.init(&out.writer);
+    for (settings) |*s| try maps.save(allocator, s, wrapper.streamOut(), save_settings, save_filters);
+}
+
+/// jolt_bi_sb_resave on the Zolt side
+fn zoltSbResave(allocator: Allocator, bytes: []const u8, num_bodies: u32, save_settings: bool, save_filters: bool, out: *Resaved) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var in = StreamInWrapper.init(&reader);
+    var maps: SoftBodyRestoreMaps = .{};
+    defer maps.deinit(allocator);
+    var bodies: std.ArrayList(SoftBodyCreationSettings) = .empty;
+    defer {
+        for (bodies.items) |*b| b.deinit();
+        bodies.deinit(allocator);
+    }
+    for (0..num_bodies) |_| {
+        var result = try SoftBodyCreationSettings.restoreWithChildren(allocator, in.streamIn(), &maps.settings, &maps.materials, &maps.group_filters);
+        defer result.deinit();
+        if (result.hasError()) {
+            out.setError(result.getError());
+            return;
+        }
+        try bodies.append(allocator, result.get().clone());
+    }
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+    try zoltSbSave(allocator, bodies.items, save_settings, save_filters, &writer);
+    try out.bytes.appendSlice(allocator, writer.written());
+}
+
+test "SoftBodyCreationSettings parity: binary state" {
+    const allocator = std.testing.allocator;
+    var rng: Rng = .{ .state = 0x50f7_b0d1 };
+    var save_checker: Checker = .{ .name = "SoftBodyCreationSettings parity (SaveWithChildren bytes)" };
+    var resave_checker: Checker = .{ .name = "SoftBodyCreationSettings parity (restore + save of the other side's bytes)" };
+    var error_checker: Checker = .{ .name = "SoftBodyCreationSettings parity (truncated streams)" };
+    var num_errors: u32 = 0;
+    var num_shared_saved: u32 = 0;
+
+    for (0..300) |iteration| {
+        const table_descs = TableDescs.random(&rng);
+        const tables = table_descs.tables();
+        var shared_table: SharedTable = undefined;
+        try shared_table.init(allocator, &rng, @intCast(table_descs.materials.len));
+        defer shared_table.deinit(allocator);
+        const shared_descs = shared_table.slice();
+        const save_settings = rng.intRange(u32, 0, 2) != 0;
+        const save_filters = rng.intRange(u32, 0, 1) != 0;
+        var descs: [8]SoftBodyDesc = undefined;
+        const num_bodies = rng.intRange(u32, 1, descs.len);
+        for (descs[0..num_bodies]) |*d| d.* = randomSoftBodyDesc(&rng, shared_table.len, @intCast(table_descs.filters.len), .{ .allow_no_shared = !save_settings });
+        if (save_settings) num_shared_saved += num_bodies;
+
+        // Zolt
+        var objects: TableObjects = undefined;
+        try objects.init(allocator, &tables);
+        defer objects.deinit();
+        var shared: SharedObjects = .{};
+        defer shared.deinit(allocator);
+        try objects.makeSharedSettings(shared_descs, &shared.list);
+        var bodies: std.ArrayList(SoftBodyCreationSettings) = .empty;
+        defer {
+            for (bodies.items) |*b| b.deinit();
+            bodies.deinit(allocator);
+        }
+        for (descs[0..num_bodies]) |*d| {
+            var settings = objects.makeSoftBodyCreationSettings(d, shared.list.items);
+            errdefer settings.deinit();
+            try bodies.append(allocator, settings);
+        }
+        var zolt_bytes: std.Io.Writer.Allocating = .init(allocator);
+        defer zolt_bytes.deinit();
+        try zoltSbSave(allocator, bodies.items, save_settings, save_filters, &zolt_bytes);
+
+        // C++
+        const jolt_size = jolt.jolt_bi_sb_save(&tables, shared_descs.ptr, @intCast(shared_descs.len), &descs, num_bodies, @intFromBool(save_settings), @intFromBool(save_filters), &big_buffer, big_buffer.len);
+        try std.testing.expect(jolt_size <= big_buffer.len);
+        const jolt_bytes = big_buffer[0..jolt_size];
+        save_checker.check(iteration, std.mem.eql(u8, zolt_bytes.written(), jolt_bytes), true);
+
+        // Each side restores the other side's bytes and saves them again
+        var err_buffer: [128]u8 = undefined;
+        var zolt_resaved: Resaved = .{};
+        defer zolt_resaved.deinit(allocator);
+        try zoltSbResave(allocator, jolt_bytes, num_bodies, save_settings, save_filters, &zolt_resaved);
+        var jolt_resaved: Resaved = .{};
+        defer jolt_resaved.deinit(allocator);
+        try joltResaved(allocator, jolt.jolt_bi_sb_resave(zolt_bytes.written().ptr, @intCast(zolt_bytes.written().len), num_bodies, @intFromBool(save_settings), @intFromBool(save_filters), &big_buffer2, big_buffer2.len, &err_buffer, err_buffer.len), &big_buffer2, &err_buffer, &jolt_resaved);
+        resave_checker.check(iteration, zolt_resaved.err == null and std.mem.eql(u8, zolt_resaved.bytes.items, jolt_bytes), true);
+        resave_checker.check(iteration, jolt_resaved.err == null and std.mem.eql(u8, jolt_resaved.bytes.items, zolt_bytes.written()), true);
+
+        // Truncated streams: the same error (or the same result) on both sides
+        for (0..4) |_| {
+            const len = rng.intRange(usize, 0, zolt_bytes.written().len);
+            var z: Resaved = .{};
+            defer z.deinit(allocator);
+            try zoltSbResave(allocator, zolt_bytes.written()[0..len], num_bodies, save_settings, save_filters, &z);
+            var j: Resaved = .{};
+            defer j.deinit(allocator);
+            try joltResaved(allocator, jolt.jolt_bi_sb_resave(zolt_bytes.written().ptr, @intCast(len), num_bodies, @intFromBool(save_settings), @intFromBool(save_filters), &big_buffer2, big_buffer2.len, &err_buffer, err_buffer.len), &big_buffer2, &err_buffer, &j);
+            if (z.err != null) num_errors += 1;
+            error_checker.check(.{ iteration, len, z.err orelse "", j.err orelse "" }, z.eql(&j), true);
+        }
+    }
+
+    try fw.finishAll(&.{ &save_checker, &resave_checker, &error_checker });
+    try std.testing.expect(num_errors > 100);
+    try std.testing.expect(num_shared_saved > 300);
+}
+
+/// jolt_bi_sb_create on the Zolt side
+fn zoltSbCreate(allocator: Allocator, tables: *const Tables, shared_descs: []const SharedSettingsDesc, descs: []const SoftBodyDesc, max_bodies: u32, save_settings: bool, save_filters: bool, out: *std.Io.Writer.Allocating) !void {
+    var objects: TableObjects = undefined;
+    try objects.init(allocator, tables);
+    defer objects.deinit();
+    var shared: SharedObjects = .{};
+    defer shared.deinit(allocator);
+    try objects.makeSharedSettings(shared_descs, &shared.list);
+
+    var layers: TestLayers.BPLayerInterfaceImpl = .init();
+    var object_vs_broad_phase: TestLayers.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    var pairs: TestLayers.ObjectLayerPairFilterImpl = .{};
+    var system: PhysicsSystem = .empty;
+    try system.init(allocator, io, max_bodies, 0, 64, 64, &layers.base, &object_vs_broad_phase.base, &pairs.base, .{ .broad_phase = .brute_force });
+    defer system.deinit();
+    const b = system.getBodyInterfaceMut();
+
+    var wrapper = StreamOutWrapper.init(&out.writer);
+    const stream = wrapper.streamOut();
+    var ids: std.ArrayList(BodyID) = .empty;
+    defer ids.deinit(allocator);
+    for (descs) |*d| {
+        var s = objects.makeSoftBodyCreationSettings(d, shared.list.items);
+        defer s.deinit();
+        const activation: Activation = @enumFromInt(d.activation);
+        var id: BodyID = .invalid;
+        switch (d.create_mode) {
+            0, 2 => if (try b.createSoftBody(&s)) |body| {
+                id = body.getID();
+                if (d.create_mode == 0)
+                    try b.addBody(id, activation);
+            },
+            1 => id = try b.createAndAddSoftBody(&s, activation),
+            3 => if (try b.createSoftBodyWithID(BodyID.init(d.custom_id), &s)) |body| {
+                id = body.getID();
+                try b.addBody(id, activation);
+            },
+            else => {
+                const body = try b.createSoftBodyWithoutID(&s);
+                if (b.assignBodyID(body)) {
+                    id = body.getID();
+                    try b.addBody(id, activation);
+                } else b.destroyBodyWithoutID(body);
+            },
+        }
+        try ids.append(allocator, id);
+        stream.write(id.getIndexAndSequenceNumber());
+        stream.write(@as(u8, @intFromBool(!id.isInvalid() and b.isActive(id))));
+        stream.write(@as(u8, @intFromBool(!id.isInvalid() and b.isAdded(id))));
+    }
+
+    var maps: SoftBodySaveMaps = .{};
+    defer maps.deinit(allocator);
+    for (ids.items) |id| {
+        if (id.isInvalid()) continue;
+        var lock: zolt.BodyLockRead = .init(system.getBodyLockInterface(), id);
+        defer lock.deinit();
+        var s = lock.getBody().getSoftBodyCreationSettings();
+        defer s.deinit();
+        try maps.save(allocator, &s, stream, save_settings, save_filters);
+    }
+    if (wrapper.isFailed()) return error.OutOfMemory; // The allocating writer only fails when it runs out of memory
+}
+
+test "SoftBodyCreationSettings parity: soft bodies created through BodyInterface" {
+    const allocator = std.testing.allocator;
+    var rng: Rng = .{ .state = 0xc4ea_7e5b };
+    var checker: Checker = .{ .name = "SoftBodyCreationSettings parity (created soft bodies)" };
+    var num_created: u32 = 0;
+    var num_failed: u32 = 0;
+    var mode_counts: [5]u32 = @splat(0);
+
+    for (0..150) |iteration| {
+        const table_descs = TableDescs.random(&rng);
+        const tables = table_descs.tables();
+        var shared_table: SharedTable = undefined;
+        try shared_table.init(allocator, &rng, @intCast(table_descs.materials.len));
+        defer shared_table.deinit(allocator);
+        const shared_descs = shared_table.slice();
+        const save_settings = rng.intRange(u32, 0, 1) != 0;
+        const save_filters = rng.intRange(u32, 0, 1) != 0;
+        var descs: [10]SoftBodyDesc = undefined;
+        const num_bodies = rng.intRange(u32, 1, descs.len);
+        const max_bodies = if (rng.intRange(u32, 0, 3) == 0) rng.intRange(u32, 1, num_bodies) else num_bodies + 2;
+        for (descs[0..num_bodies]) |*d| {
+            d.* = randomSoftBodyDesc(&rng, shared_table.len, @intCast(table_descs.filters.len), .{ .max_bodies = max_bodies });
+            mode_counts[d.create_mode] += 1;
+        }
+
+        var zolt_bytes: std.Io.Writer.Allocating = .init(allocator);
+        defer zolt_bytes.deinit();
+        try zoltSbCreate(allocator, &tables, shared_descs, descs[0..num_bodies], max_bodies, save_settings, save_filters, &zolt_bytes);
+        const jolt_size = jolt.jolt_bi_sb_create(&tables, shared_descs.ptr, @intCast(shared_descs.len), &descs, num_bodies, max_bodies, @intFromBool(save_settings), @intFromBool(save_filters), &big_buffer, big_buffer.len);
+        try std.testing.expect(jolt_size <= big_buffer.len);
+        checker.check(.{ iteration, save_settings, save_filters }, std.mem.eql(u8, zolt_bytes.written(), big_buffer[0..jolt_size]), true);
+
+        // Coverage: the IDs at the start of the bytes (4 bytes ID, 2 flags per description)
+        for (0..num_bodies) |k| {
+            const id = std.mem.readInt(u32, zolt_bytes.written()[6 * k ..][0..4], .little);
+            if (id == BodyID.invalid_body_id) num_failed += 1 else num_created += 1;
+        }
+    }
+
+    try fw.finishAll(&.{&checker});
+    try std.testing.expect(num_created > 300);
+    try std.testing.expect(num_failed > 30);
+    for (mode_counts) |c| try std.testing.expect(c > 50);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PhysicsScene
+
+/// BIRigidBodiesOnly of BodyInterfaceReference.cpp: SaveState without the soft bodies (SoftBodyMotionProperties.saveState
+/// comes with group S4; SoftBodyParity.zig and SimulationParity.zig compare the soft body state)
+const RigidBodiesOnly = struct {
+    pub const overrides = .{.shouldSaveBody};
+    base: StateRecorderFilter = .init(@This()),
+
+    pub fn shouldSaveBody(self: *const @This(), body: *const Body) bool {
+        _ = self;
+        return !body.isSoftBody();
+    }
+};
+
 /// The snapshot of a Zolt PhysicsSystem after FixInvalidScales + CreateBodies (jolt_bi_scene_create_bodies)
 fn zoltSceneCreateBodies(allocator: Allocator, bytes: []const u8, max_bodies: u32, out_result: *u32, out: *StateRecorderImpl) !void {
     var reader: std.Io.Reader = .fixed(bytes);
@@ -1581,7 +2078,20 @@ fn zoltSceneCreateBodies(allocator: Allocator, bytes: []const u8, max_bodies: u3
 
     const no_tables: TableObjects = .{ .allocator = allocator };
     writeBodies(allocator, bodies.items, active.items, &no_tables, out.recorder());
-    try system.saveState(out.recorder(), .{ .state = .{ .bodies = true, .constraints = true } });
+
+    // The active soft bodies, sorted like the rigid bodies
+    var active_soft_body_ids: BodyIDVector = .empty;
+    defer active_soft_body_ids.deinit(allocator);
+    try system.getActiveBodies(allocator, .soft_body, &active_soft_body_ids);
+    var active_soft_bodies: std.ArrayList(u32) = .empty;
+    defer active_soft_bodies.deinit(allocator);
+    for (active_soft_body_ids.items) |id| try active_soft_bodies.append(allocator, id.getIndexAndSequenceNumber());
+    std.mem.sort(u32, active_soft_bodies.items, {}, std.sort.asc(u32)); // Unique IDs: any sort gives the order of QuickSort
+    out.recorder().write(@as(u32, @intCast(active_soft_bodies.items.len)));
+    for (active_soft_bodies.items) |a| out.recorder().write(a);
+
+    const rigid_bodies_only: RigidBodiesOnly = .{};
+    try system.saveState(out.recorder(), .{ .state = .{ .bodies = true, .constraints = true }, .filter = &rigid_bodies_only.base });
 
     // The system back to a scene (the constraints through getConstraintSettings)
     var from_system = Ref(PhysicsScene).init(try PhysicsScene.create(allocator));
@@ -1606,6 +2116,9 @@ test "PhysicsScene parity: binary state and CreateBodies" {
     var num_out_of_bodies: u32 = 0;
     var num_invalid_scales: u32 = 0;
     var total_constraints: u32 = 0;
+    var total_soft_bodies: u32 = 0;
+    var num_created_soft_bodies: u32 = 0;
+    var num_created_soft_body_constraints: u32 = 0;
     var kind_counts: std.EnumArray(SceneConstraintKind, u32) = .initFill(0);
 
     for (0..300) |iteration| {
@@ -1618,16 +2131,37 @@ test "PhysicsScene parity: binary state and CreateBodies" {
         var descs: [10]BodyDesc = undefined;
         const num_bodies = rng.intRange(u32, 0, descs.len);
         for (descs[0..num_bodies]) |*d| d.* = randomBodyDesc(&rng, @intCast(table_descs.shapes.len), @intCast(table_descs.filters.len), .{ .allow_no_shape = !save_shapes });
+
+        // Soft bodies with shared settings (a scene always saves them)
+        var shared_table: SharedTable = undefined;
+        try shared_table.init(allocator, &rng, @intCast(table_descs.materials.len));
+        defer shared_table.deinit(allocator);
+        const shared_descs = shared_table.slice();
+        var soft_descs: [4]SoftBodyDesc = undefined;
+        const num_soft_bodies = rng.intRange(u32, 0, soft_descs.len);
+        for (soft_descs[0..num_soft_bodies]) |*d| d.* = randomSoftBodyDesc(&rng, shared_table.len, @intCast(table_descs.filters.len), .{});
+        total_soft_bodies += num_soft_bodies;
+
+        // Constraints between the bodies, the soft bodies and the world. For a soft body FromPhysicsSystem stores the
+        // index of the next rigid body (Jolt's quirk, R20), so the CreateBodies snapshot compares that index.
         var constraints: [6]SceneConstraint = undefined;
-        const num_constraints: u32 = if (num_bodies == 0) 0 else rng.intRange(u32, 0, constraints.len);
-        for (constraints[0..num_constraints]) |*c| c.* = SceneConstraint.random(&rng, num_bodies);
+        const num_scene_bodies = num_bodies + num_soft_bodies;
+        const num_constraints: u32 = if (num_scene_bodies == 0) 0 else rng.intRange(u32, 0, constraints.len);
+        for (constraints[0..num_constraints]) |*c| c.* = SceneConstraint.random(&rng, num_scene_bodies);
         total_constraints += num_constraints;
+        var num_soft_body_constraints: u32 = 0;
         var constraint_bodies: [constraints.len][2]u32 = undefined;
         var constraint_settings: [constraints.len]ConstraintsParity.CSSettings = undefined;
         for (constraints[0..num_constraints], 0..) |*c, k| {
             constraint_bodies[k] = c.bodies;
             constraint_settings[k] = c.settings;
             kind_counts.getPtr(@enumFromInt(c.settings.kind)).* += 1;
+            for (c.bodies) |b| {
+                if (b != PhysicsScene.fixed_to_world and b >= num_bodies) {
+                    num_soft_body_constraints += 1;
+                    break;
+                }
+            }
         }
 
         // Zolt
@@ -1646,13 +2180,32 @@ test "PhysicsScene parity: binary state and CreateBodies" {
             defer settings.deinit();
             try scene.get().?.addConstraint(zolt.virtual.downcast(zolt.TwoBodyConstraintSettings, settings.get().?), c.bodies[0], c.bodies[1]);
         }
+
+        // The end of the constraints: the bytes of the scene without its soft bodies, without the soft body count
+        var constraints_end: usize = 0;
+        {
+            var prefix: std.Io.Writer.Allocating = .init(allocator);
+            defer prefix.deinit();
+            var prefix_wrapper = StreamOutWrapper.init(&prefix.writer);
+            try scene.get().?.saveBinaryState(prefix_wrapper.streamOut(), save_shapes, save_filters);
+            constraints_end = prefix.written().len - 4;
+        }
+
+        var shared: SharedObjects = .{};
+        defer shared.deinit(allocator);
+        try objects.makeSharedSettings(shared_descs, &shared.list);
+        for (soft_descs[0..num_soft_bodies]) |*d| {
+            var settings = objects.makeSoftBodyCreationSettings(d, shared.list.items);
+            defer settings.deinit();
+            try scene.get().?.addSoftBody(&settings);
+        }
         var zolt_bytes: std.Io.Writer.Allocating = .init(allocator);
         defer zolt_bytes.deinit();
         var wrapper = StreamOutWrapper.init(&zolt_bytes.writer);
         try scene.get().?.saveBinaryState(wrapper.streamOut(), save_shapes, save_filters);
 
         // C++
-        const jolt_size = jolt.jolt_bi_scene_save(&tables, &descs, num_bodies, &constraint_bodies, &constraint_settings, num_constraints, @intFromBool(save_shapes), @intFromBool(save_filters), &big_buffer, big_buffer.len);
+        const jolt_size = jolt.jolt_bi_scene_save(&tables, &descs, num_bodies, &constraint_bodies, &constraint_settings, num_constraints, shared_descs.ptr, @intCast(shared_descs.len), &soft_descs, num_soft_bodies, @intFromBool(save_shapes), @intFromBool(save_filters), &big_buffer, big_buffer.len);
         try std.testing.expect(jolt_size <= big_buffer.len);
         const jolt_bytes = big_buffer[0..jolt_size];
         save_checker.check(iteration, std.mem.eql(u8, zolt_bytes.written(), jolt_bytes), true);
@@ -1704,8 +2257,8 @@ test "PhysicsScene parity: binary state and CreateBodies" {
             // Jolt's Array::resize default-constructs the ConnectedConstraints and mBody1 / mBody2 have no initializer:
             // when the stream ends inside the body indices of the last constraint (the 8 bytes before the soft body
             // count), Jolt keeps whatever was in memory in the bytes that were not read (undefined, Zolt: 0). Those
-            // bytes of the resaved scenes (the same place: body1, body2, soft body count at the end) are not compared.
-            const body_indices = zolt_bytes.written().len -| 12;
+            // bytes of the resaved scenes (the same place: body1, body2, soft body count 0 at the end) are not compared.
+            const body_indices = constraints_end -| 8;
             if (num_constraints > 0 and len >= body_indices and len < body_indices + 8 and z.err == null and j.err == null and z.bytes.items.len == j.bytes.items.len and z.bytes.items.len >= 12) {
                 const first_unread = z.bytes.items.len - 12 + (len - body_indices);
                 @memset(z.bytes.items[first_unread .. z.bytes.items.len - 4], 0);
@@ -1727,6 +2280,8 @@ test "PhysicsScene parity: binary state and CreateBodies" {
             create_checker.check(.{ iteration, max_bodies }, zolt_result, jolt_result);
             create_checker.check(.{ iteration, max_bodies }, std.mem.eql(u8, zolt_snapshot.getData(), big_buffer2[0..snapshot_size]), true);
             if (zolt_result & 1 == 0) num_out_of_bodies += 1;
+            if (zolt_result & 1 != 0) num_created_soft_bodies += num_soft_bodies;
+            if (zolt_result & 1 != 0) num_created_soft_body_constraints += num_soft_body_constraints;
             if (invalid_scale) {
                 for (descs[0..num_bodies]) |*d| {
                     if (d.shape == 7) {
@@ -1742,6 +2297,9 @@ test "PhysicsScene parity: binary state and CreateBodies" {
     try std.testing.expect(num_out_of_bodies > 10);
     try std.testing.expect(num_invalid_scales > 10);
     try std.testing.expect(total_constraints > 300);
+    try std.testing.expect(total_soft_bodies > 300);
+    try std.testing.expect(num_created_soft_bodies > 150);
+    try std.testing.expect(num_created_soft_body_constraints > 100);
     for (scene_constraint_kinds) |kind| {
         if (kind_counts.get(kind) < 300 / scene_constraint_kinds.len) {
             std.debug.print("PhysicsScene parity: {d} constraints of kind {t}\n", .{ kind_counts.get(kind), kind });

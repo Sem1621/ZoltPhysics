@@ -18,6 +18,10 @@
 //   The scenes have constraints (Phase 6: the kinds whose Zolt class is ported); each is two body indices and a
 //   description of the constraint parity (CSSettings of ConstraintsReference.cpp, created by its CSMakeConstraintSettings
 //   for every kind). CreateBodies creates them, and PhysicsScene::FromPhysicsSystem converts the system back.
+// - Soft bodies (Phase 9 group S2): the shared settings of a test come from SoftBodySharedSettings::SaveBinaryState bytes
+//   that both sides restore (BISharedSettingsDesc, with materials of the material table). jolt_bi_sb_save /
+//   jolt_bi_sb_resave are SaveWithChildren / sRestoreWithChildren of SoftBodyCreationSettings, jolt_bi_sb_create creates
+//   soft bodies through the BodyInterface and saves GetSoftBodyCreationSettings of each. The scenes have soft bodies too.
 //
 // The structs below must match the extern structs of BodyInterfaceParity.zig (checked by jolt_bi_struct_sizes).
 // Booleans are passed as uint32 (never bool, see the porting guide). All C functions have the prefix jolt_bi_.
@@ -45,6 +49,8 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
 
 #include <cstring>
 #include <sstream>
@@ -150,6 +156,43 @@ struct BIBodyDesc
 	uint32				mGroupFilter;		///< Index in the group filter table or cBINone
 	uint32				mGroupID;
 	uint32				mSubGroupID;
+};
+
+// Must match BISharedSettingsDesc in BodyInterfaceParity.zig
+struct BISharedSettingsDesc
+{
+	const uint8 *		mBytes;				///< SoftBodySharedSettings::SaveBinaryState bytes (Zolt writes them, both sides restore them)
+	uint32				mSize;
+	uint32				mNumMaterials;
+	uint32				mMaterials[4];		///< Index in the material table, cBIDefaultMaterial (PhysicsMaterial::sDefault) or cBINone (null)
+};
+
+// Must match BISoftBodyDesc in BodyInterfaceParity.zig
+struct BISoftBodyDesc
+{
+	uint64				mUserData;
+	Real				mPosition[3];
+	float				mRotation[4];
+	float				mLinearDamping;
+	float				mMaxLinearVelocity;
+	float				mRestitution;
+	float				mFriction;
+	float				mPressure;
+	float				mGravityFactor;
+	float				mVertexRadius;
+	uint32				mNumIterations;
+	uint32				mObjectLayer;
+	uint32				mUpdatePosition;
+	uint32				mMakeRotationIdentity;
+	uint32				mAllowSleeping;
+	uint32				mFacesDoubleSided;
+	uint32				mShared;			///< Index in the shared settings table or cBINone (no shared settings)
+	uint32				mGroupFilter;		///< Index in the group filter table or cBINone
+	uint32				mGroupID;
+	uint32				mSubGroupID;
+	uint32				mCreateMode;		///< jolt_bi_sb_create: 0 CreateSoftBody + AddBody, 1 CreateAndAddSoftBody, 2 CreateSoftBody, 3 CreateSoftBodyWithID + AddBody, 4 CreateSoftBodyWithoutID + AssignBodyID + AddBody
+	uint32				mCustomID;			///< The ID of mode 3
+	uint32				mActivation;
 };
 
 // The settings of the description inSettings[inIndex] of the constraint parity (an array of CSSettings, see
@@ -303,6 +346,50 @@ public:
 		return s;
 	}
 
+	// The shared settings of the table inShared: restored from their bytes, with their materials
+	Array<Ref<SoftBodySharedSettings>>	MakeSharedSettings(const BISharedSettingsDesc *inShared, uint32 inNumShared) const
+	{
+		Array<Ref<SoftBodySharedSettings>> shared;
+		for (uint32 i = 0; i < inNumShared; ++i)
+		{
+			const BISharedSettingsDesc &d = inShared[i];
+			Ref<SoftBodySharedSettings> s = new SoftBodySharedSettings;
+			std::stringstream data(std::string(reinterpret_cast<const char *>(d.mBytes), d.mSize));
+			StreamInWrapper in(data);
+			s->RestoreBinaryState(in);
+			s->mMaterials.clear();
+			for (uint32 m = 0; m < d.mNumMaterials; ++m)
+				s->mMaterials.push_back(d.mMaterials[m] == cBIDefaultMaterial? PhysicsMaterial::sDefault.GetPtr() : GetMaterial(d.mMaterials[m]));
+			shared.push_back(s);
+		}
+		return shared;
+	}
+
+	// MakeSoftBodyCreationSettings of BodyInterfaceParity.zig
+	SoftBodyCreationSettings	MakeSoftBodyCreationSettings(const BISoftBodyDesc &inDesc, const Array<Ref<SoftBodySharedSettings>> &inShared) const
+	{
+		SoftBodyCreationSettings s;
+		s.mSettings = inDesc.mShared < inShared.size()? inShared[inDesc.mShared].GetPtr() : nullptr;
+		s.mPosition = BILoadR3(inDesc.mPosition);
+		s.mRotation = BILoadQuat(inDesc.mRotation);
+		s.mUserData = inDesc.mUserData;
+		s.mObjectLayer = ObjectLayer(inDesc.mObjectLayer);
+		s.mCollisionGroup = CollisionGroup(inDesc.mGroupFilter < mFilters.size()? mFilters[inDesc.mGroupFilter].GetPtr() : nullptr, inDesc.mGroupID, inDesc.mSubGroupID);
+		s.mNumIterations = inDesc.mNumIterations;
+		s.mLinearDamping = inDesc.mLinearDamping;
+		s.mMaxLinearVelocity = inDesc.mMaxLinearVelocity;
+		s.mRestitution = inDesc.mRestitution;
+		s.mFriction = inDesc.mFriction;
+		s.mPressure = inDesc.mPressure;
+		s.mGravityFactor = inDesc.mGravityFactor;
+		s.mVertexRadius = inDesc.mVertexRadius;
+		s.mUpdatePosition = inDesc.mUpdatePosition != 0;
+		s.mMakeRotationIdentity = inDesc.mMakeRotationIdentity != 0;
+		s.mAllowSleeping = inDesc.mAllowSleeping != 0;
+		s.mFacesDoubleSided = inDesc.mFacesDoubleSided != 0;
+		return s;
+	}
+
 	Array<RefConst<PhysicsMaterial>>	mMaterials;
 	Array<Ref<GroupFilterTable>>		mFilters;
 	Array<RefConst<Shape>>				mShapes;
@@ -318,7 +405,10 @@ static void BIWriteBodies(const Array<const Body *> &inBodies, const Array<uint3
 	{
 		const Body &body = *b;
 		ioRecorder.Write(body.GetID().GetIndexAndSequenceNumber());
-		body.GetBodyCreationSettings().SaveBinaryState(ioRecorder);
+		if (body.IsSoftBody())
+			body.GetSoftBodyCreationSettings().SaveBinaryState(ioRecorder);
+		else
+			body.GetBodyCreationSettings().SaveBinaryState(ioRecorder);
 		ioRecorder.Write(body.GetUserData());
 		ioRecorder.Write(inTables.ShapeIndex(body.GetShape()));
 		ioRecorder.Write(uint8(body.IsActive()? 1 : 0));
@@ -366,6 +456,14 @@ static void BICopyError(const String &inError, char *outError, uint32 inCapacity
 	memcpy(outError, inError.data(), n);
 	outError[n] = 0;
 }
+
+// SaveState without the soft bodies: Zolt's SoftBodyMotionProperties.saveState comes with group S4 (SoftBodyParity.zig
+// and SimulationParity.zig compare the soft body state)
+class BIRigidBodiesOnly : public StateRecorderFilter
+{
+public:
+	virtual bool				ShouldSaveBody(const Body &inBody) const override			{ return !inBody.IsSoftBody(); }
+};
 
 // A BodyManager, a BroadPhaseBruteForce and a BodyInterface on top of them
 class BIWorld
@@ -499,6 +597,8 @@ void jolt_bi_struct_sizes(uint32 *outSizes)
 	outSizes[4] = sizeof(BIBodyDesc);
 	outSizes[5] = sizeof(BIOp);
 	outSizes[6] = sizeof(BIOut);
+	outSizes[7] = sizeof(BISharedSettingsDesc);
+	outSizes[8] = sizeof(BISoftBodyDesc);
 }
 
 void *jolt_bi_world_create(uint32 inMaxBodies, uint32 inNumBodyMutexes, const BITables *inTables)
@@ -833,16 +933,19 @@ uint32 jolt_bi_bcs_resave(const uint8 *inBytes, uint32 inSize, uint32 inNumBodie
 // PhysicsScene::SaveBinaryState of a scene with the bodies and the constraints (constraint c: the body indices
 // inConstraintBodies[2 * c], inConstraintBodies[2 * c + 1] and the CSSettings description inConstraintSettings[c]),
 // returns the size
-uint32 jolt_bi_scene_save(const BITables *inTables, const BIBodyDesc *inBodies, uint32 inNumBodies, const uint32 *inConstraintBodies, const void *inConstraintSettings, uint32 inNumConstraints, uint32 inSaveShapes, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity)
+uint32 jolt_bi_scene_save(const BITables *inTables, const BIBodyDesc *inBodies, uint32 inNumBodies, const uint32 *inConstraintBodies, const void *inConstraintSettings, uint32 inNumConstraints, const BISharedSettingsDesc *inShared, uint32 inNumShared, const BISoftBodyDesc *inSoftBodies, uint32 inNumSoftBodies, uint32 inSaveShapes, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity)
 {
 	BIEnsureFactory();
 	BITableObjects tables;
 	tables.Init(*inTables);
+	Array<Ref<SoftBodySharedSettings>> shared = tables.MakeSharedSettings(inShared, inNumShared);
 	Ref<PhysicsScene> scene = new PhysicsScene;
 	for (uint32 b = 0; b < inNumBodies; ++b)
 		scene->AddBody(tables.MakeBodyCreationSettings(inBodies[b]));
 	for (uint32 c = 0; c < inNumConstraints; ++c)
 		scene->AddConstraint(CSMakeConstraintSettings(inConstraintSettings, c), inConstraintBodies[2 * c], inConstraintBodies[2 * c + 1]);
+	for (uint32 b = 0; b < inNumSoftBodies; ++b)
+		scene->AddSoftBody(tables.MakeSoftBodyCreationSettings(inSoftBodies[b], shared));
 	std::stringstream data;
 	StreamOutWrapper out(data);
 	scene->SaveBinaryState(out, inSaveShapes != 0, inSaveGroupFilters != 0);
@@ -919,7 +1022,20 @@ uint32 jolt_bi_scene_create_bodies(const uint8 *inBytes, uint32 inSize, uint32 i
 
 	BITableObjects no_tables;
 	BIWriteBodies(bodies, active, no_tables, recorder);
-	system.SaveState(recorder, EStateRecorderState::Bodies | EStateRecorderState::Constraints);
+
+	// The active soft bodies, sorted like the rigid bodies
+	BodyIDVector active_soft_body_ids;
+	system.GetActiveBodies(EBodyType::SoftBody, active_soft_body_ids);
+	Array<uint32> active_soft_bodies;
+	for (const BodyID &id : active_soft_body_ids)
+		active_soft_bodies.push_back(id.GetIndexAndSequenceNumber());
+	QuickSort(active_soft_bodies.begin(), active_soft_bodies.end());
+	recorder.Write(uint32(active_soft_bodies.size()));
+	for (uint32 a : active_soft_bodies)
+		recorder.Write(a);
+
+	BIRigidBodiesOnly rigid_bodies_only;
+	system.SaveState(recorder, EStateRecorderState::Bodies | EStateRecorderState::Constraints, &rigid_bodies_only);
 
 	// The system back to a scene (the constraints through GetConstraintSettings)
 	Ref<PhysicsScene> from_system = new PhysicsScene;
@@ -932,6 +1048,138 @@ uint32 jolt_bi_scene_create_bodies(const uint8 *inBytes, uint32 inSize, uint32 i
 		recorder.WriteBytes(str.data(), str.size());
 	}
 	return BICopyBytes(recorder.GetData(), outBytes, inCapacity);
+}
+
+// SaveWithChildren of the soft body creation settings with shared maps (inSaveSettings / inSaveGroupFilters select the
+// maps), returns the size
+uint32 jolt_bi_sb_save(const BITables *inTables, const BISharedSettingsDesc *inShared, uint32 inNumShared, const BISoftBodyDesc *inBodies, uint32 inNumBodies, uint32 inSaveSettings, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity)
+{
+	BIEnsureFactory();
+	BITableObjects tables;
+	tables.Init(*inTables);
+	Array<Ref<SoftBodySharedSettings>> shared = tables.MakeSharedSettings(inShared, inNumShared);
+	SoftBodyCreationSettings::SharedSettingsToIDMap settings_map;
+	SoftBodyCreationSettings::MaterialToIDMap material_map;
+	SoftBodyCreationSettings::GroupFilterToIDMap filter_map;
+	std::stringstream data;
+	StreamOutWrapper out(data);
+	for (uint32 b = 0; b < inNumBodies; ++b)
+		tables.MakeSoftBodyCreationSettings(inBodies[b], shared).SaveWithChildren(out, inSaveSettings != 0? &settings_map : nullptr, inSaveSettings != 0? &material_map : nullptr, inSaveGroupFilters != 0? &filter_map : nullptr);
+	return BICopyBytes(data.str(), outBytes, inCapacity);
+}
+
+// sRestoreWithChildren of inNumBodies soft body creation settings from the bytes (shared maps), then SaveWithChildren of
+// the restored settings with new maps. Returns the size of the new bytes, or cBINone and Jolt's error text when a
+// restore failed.
+uint32 jolt_bi_sb_resave(const uint8 *inBytes, uint32 inSize, uint32 inNumBodies, uint32 inSaveSettings, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity, char *outError, uint32 inErrorCapacity)
+{
+	BIEnsureFactory();
+	std::stringstream in_data(std::string(reinterpret_cast<const char *>(inBytes), inSize));
+	StreamInWrapper in(in_data);
+	SoftBodyCreationSettings::IDToSharedSettingsMap id_to_settings;
+	SoftBodyCreationSettings::IDToMaterialMap id_to_material;
+	SoftBodyCreationSettings::IDToGroupFilterMap id_to_filter;
+	Array<SoftBodyCreationSettings> bodies;
+	for (uint32 b = 0; b < inNumBodies; ++b)
+	{
+		SoftBodyCreationSettings::SBCSResult result = SoftBodyCreationSettings::sRestoreWithChildren(in, id_to_settings, id_to_material, id_to_filter);
+		if (result.HasError())
+		{
+			BICopyError(result.GetError(), outError, inErrorCapacity);
+			return cBINone;
+		}
+		bodies.push_back(result.Get());
+	}
+
+	SoftBodyCreationSettings::SharedSettingsToIDMap settings_map;
+	SoftBodyCreationSettings::MaterialToIDMap material_map;
+	SoftBodyCreationSettings::GroupFilterToIDMap filter_map;
+	std::stringstream data;
+	StreamOutWrapper out(data);
+	for (const SoftBodyCreationSettings &b : bodies)
+		b.SaveWithChildren(out, inSaveSettings != 0? &settings_map : nullptr, inSaveSettings != 0? &material_map : nullptr, inSaveGroupFilters != 0? &filter_map : nullptr);
+	return BICopyBytes(data.str(), outBytes, inCapacity);
+}
+
+// Soft bodies created through the BodyInterface of a world with room for inMaxBodies bodies (BISoftBodyDesc::mCreateMode),
+// then SaveWithChildren of GetSoftBodyCreationSettings of every created body with shared maps (inSaveSettings /
+// inSaveGroupFilters select the maps). Returns the size of: per description the ID of the created body
+// (cInvalidBodyID when the creation failed), IsActive and IsAdded; then the settings of the created bodies in
+// description order.
+uint32 jolt_bi_sb_create(const BITables *inTables, const BISharedSettingsDesc *inShared, uint32 inNumShared, const BISoftBodyDesc *inBodies, uint32 inNumBodies, uint32 inMaxBodies, uint32 inSaveSettings, uint32 inSaveGroupFilters, uint8 *outBytes, uint32 inCapacity)
+{
+	BIEnsureFactory();
+	BIWorld w(inMaxBodies, 0, *inTables);
+	Array<Ref<SoftBodySharedSettings>> shared = w.mTables.MakeSharedSettings(inShared, inNumShared);
+	BodyInterface &bi = w.mBodyInterface;
+	std::stringstream data;
+	StreamOutWrapper out(data);
+	BodyIDVector ids;
+	for (uint32 b = 0; b < inNumBodies; ++b)
+	{
+		const BISoftBodyDesc &d = inBodies[b];
+		SoftBodyCreationSettings s = w.mTables.MakeSoftBodyCreationSettings(d, shared);
+		EActivation activation = EActivation(d.mActivation);
+		BodyID id;
+		switch (d.mCreateMode)
+		{
+		case 0:
+		case 2:
+			{
+				Body *body = bi.CreateSoftBody(s);
+				if (body != nullptr)
+				{
+					id = body->GetID();
+					if (d.mCreateMode == 0)
+						bi.AddBody(id, activation);
+				}
+			}
+			break;
+
+		case 1:
+			id = bi.CreateAndAddSoftBody(s, activation);
+			break;
+
+		case 3:
+			{
+				Body *body = bi.CreateSoftBodyWithID(BodyID(d.mCustomID), s);
+				if (body != nullptr)
+				{
+					id = body->GetID();
+					bi.AddBody(id, activation);
+				}
+			}
+			break;
+
+		default:
+			{
+				Body *body = bi.CreateSoftBodyWithoutID(s);
+				if (bi.AssignBodyID(body))
+				{
+					id = body->GetID();
+					bi.AddBody(id, activation);
+				}
+				else
+					bi.DestroyBodyWithoutID(body);
+			}
+			break;
+		}
+		ids.push_back(id);
+		out.Write(id.GetIndexAndSequenceNumber());
+		out.Write(uint8(!id.IsInvalid() && bi.IsActive(id)? 1 : 0));
+		out.Write(uint8(!id.IsInvalid() && bi.IsAdded(id)? 1 : 0));
+	}
+
+	SoftBodyCreationSettings::SharedSettingsToIDMap settings_map;
+	SoftBodyCreationSettings::MaterialToIDMap material_map;
+	SoftBodyCreationSettings::GroupFilterToIDMap filter_map;
+	for (const BodyID &id : ids)
+		if (!id.IsInvalid())
+		{
+			BodyLockRead lock(w.mLockInterface, id);
+			lock.GetBody().GetSoftBodyCreationSettings().SaveWithChildren(out, inSaveSettings != 0? &settings_map : nullptr, inSaveSettings != 0? &material_map : nullptr, inSaveGroupFilters != 0? &filter_map : nullptr);
+		}
+	return BICopyBytes(data.str(), outBytes, inCapacity);
 }
 
 } // extern "C"

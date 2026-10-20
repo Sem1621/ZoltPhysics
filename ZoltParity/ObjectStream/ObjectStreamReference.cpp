@@ -2,7 +2,8 @@
 // around Jolt's RTTI, Factory, ObjectStreamOut and ObjectStreamIn (requires JPH_OBJECT_STREAM, see build.zig).
 //
 // The harness knows classes only through Jolt's RTTI, by name. Nothing below is written for one class, except P7's
-// SaveBinaryState (a function of the asset's class) and the classes of UnitTests/ObjectStream/ObjectStreamTest.cpp (P8).
+// SaveBinaryState (a function of the asset's class), the PhysicsScene binary state of P7 and P9 and the classes of
+// UnitTests/ObjectStream/ObjectStreamTest.cpp (P8).
 //
 // Results that are bytes stay in a result slot (jolt_os_result) until the next call. Return values: 0 or more success,
 // -1 read failed (Jolt's sReadObject returns false), -2 write failed, -4 unknown class or not creatable, -5 the allocation
@@ -717,6 +718,53 @@ int jolt_os_asset_binary_state(const uint8 *inData, size_t inSize, const char *i
 		result = -4;
 	sResults[2] = data.str();
 	rtti->DestructObject(object);
+	return Quarantine::sCheck(result);
+}
+
+// P7 with soft bodies: sReadObject of a PhysicsScene stream, then PhysicsScene::SaveBinaryState(inSaveShapes,
+// inSaveGroupFilter) of the loaded scene (result slot 2). The caller passes only scenes that SaveBinaryState can write:
+// every constraint has settings (a path constraint also its path) and every soft body has shared settings.
+int jolt_os_scene_binary_state(const uint8 *inData, size_t inSize, int inSaveShapes, int inSaveGroupFilter)
+{
+	UseRegisterTypesFactory use_factory;
+	Quarantine quarantine;
+	const RTTI *rtti = JPH_RTTI(PhysicsScene);
+	void *object = ReadObject(std::string((const char *)inData, inSize), rtti);
+	if (object == nullptr)
+		return Quarantine::sCheck(-1);
+	std::stringstream data;
+	StreamOutWrapper stream(data);
+	static_cast<PhysicsScene *>(object)->SaveBinaryState(stream, inSaveShapes != 0, inSaveGroupFilter != 0);
+	sResults[2] = data.str();
+	rtti->DestructObject(object);
+	return Quarantine::sCheck(0);
+}
+
+// P9 with soft bodies: PhysicsScene::sRestoreFromBinaryState of the bytes, then SaveBinaryState(inSaveShapes,
+// inSaveGroupFilter) of the restored scene (result slot 2). Returns 1 with Jolt's error text in slot 2 when the restore
+// fails.
+int jolt_os_scene_binary_resave(const uint8 *inData, size_t inSize, int inSaveShapes, int inSaveGroupFilter)
+{
+	UseRegisterTypesFactory use_factory;
+	Quarantine quarantine;
+	int result = 0;
+	{
+		std::stringstream in_data(std::string((const char *)inData, inSize));
+		StreamInWrapper in(in_data);
+		PhysicsScene::PhysicsSceneResult scene = PhysicsScene::sRestoreFromBinaryState(in);
+		if (scene.HasError())
+		{
+			sResults[2] = std::string(scene.GetError().data(), scene.GetError().size());
+			result = 1;
+		}
+		else
+		{
+			std::stringstream data;
+			StreamOutWrapper out(data);
+			scene.Get()->SaveBinaryState(out, inSaveShapes != 0, inSaveGroupFilter != 0);
+			sResults[2] = data.str();
+		}
+	}
 	return Quarantine::sCheck(result);
 }
 

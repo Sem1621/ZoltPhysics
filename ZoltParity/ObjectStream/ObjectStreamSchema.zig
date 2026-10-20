@@ -26,6 +26,8 @@ pub extern fn jolt_os_default_write(name: [*:0]const u8) c_int;
 pub extern fn jolt_os_resave(data: [*]const u8, size: usize, name: [*:0]const u8) c_int;
 pub extern fn jolt_os_read_word(word: [*]const u8, size: usize, word_type: c_int, bits: *u64) c_int;
 pub extern fn jolt_os_asset_binary_state(data: [*]const u8, size: usize, name: [*:0]const u8) c_int;
+pub extern fn jolt_os_scene_binary_state(data: [*]const u8, size: usize, save_shapes: c_int, save_group_filter: c_int) c_int;
+pub extern fn jolt_os_scene_binary_resave(data: [*]const u8, size: usize, save_shapes: c_int, save_group_filter: c_int) c_int;
 pub extern fn jolt_os_unit_test_write(binary: c_int) c_int;
 pub extern fn jolt_os_unit_test_resave(data: [*]const u8, size: usize, binary: c_int, ref_count: *u32, casts_ok: *c_int) c_int;
 pub extern fn jolt_os_quarantine_check() c_int;
@@ -47,17 +49,6 @@ pub fn quarantined(result: c_int) error{HarnessError}!c_int {
     return result;
 }
 
-/// An attribute of a C++ class that Zolt does not declare yet
-pub const Phase9Attribute = struct { class: []const u8, attribute: []const u8 };
-
-/// S17, until group S2 (RemainingFeaturesArchitecture.md R19): Zolt's PhysicsScene does not declare Jolt's
-/// "mSoftBodies" yet. P1 drops this attribute, the generators keep its arrays empty, and the classes that reach a class
-/// with such an attribute are compared by cross-reading. The 13 soft body classes themselves are compared like every
-/// other class. Group S2 removes this list.
-pub const phase9_attributes = [_]Phase9Attribute{
-    .{ .class = "PhysicsScene", .attribute = "mSoftBodies" },
-};
-
 /// JPH_IMPLEMENT_SERIALIZABLE_OUTSIDE_CLASS: CreateObject uses the global new, which the allocation hooks of the C++ side
 /// do not zero, so P2 skips their defaults. The defaults of Plane, IndexedTriangleNoMaterial and IndexedTriangle are
 /// compared inside PlaneShapeSettings and MeshShapeSettings. No Jolt class holds an AABox, a Triangle or a default
@@ -70,22 +61,6 @@ pub const primitive_names = [_][]const u8{ "uint8", "uint16", "int", "uint32", "
 fn contains(list: []const []const u8, name: []const u8) bool {
     for (list) |n| {
         if (std.mem.eql(u8, n, name)) return true;
-    }
-    return false;
-}
-
-/// True when attribute `attribute` of class `class` is in `phase9_attributes`
-pub fn isPhase9Attribute(class: []const u8, attribute: []const u8) bool {
-    for (phase9_attributes) |a| {
-        if (std.mem.eql(u8, a.class, class) and std.mem.eql(u8, a.attribute, attribute)) return true;
-    }
-    return false;
-}
-
-/// True when class `class` has an attribute of `phase9_attributes` (Zolt's bytes of the class lack it)
-pub fn hasPhase9Attribute(class: []const u8) bool {
-    for (phase9_attributes) |a| {
-        if (std.mem.eql(u8, a.class, class)) return true;
     }
     return false;
 }
@@ -283,8 +258,6 @@ pub const Attribute = struct {
     counts: u64 = 0,
     /// The values of an enum attribute (Zolt)
     enum_values: ?*const EnumAttribute = null,
-    /// An attribute that Zolt does not declare yet (`phase9_attributes`): P1 drops it, its arrays stay empty
-    phase9: bool = false,
 };
 
 pub const Class = struct {
@@ -301,9 +274,6 @@ pub const Class = struct {
     zolt: ?*const RTTI = null,
     /// Zolt: the first pending class that this class reaches, null when none
     waits_for: ?*const RTTI = null,
-    /// The C++ class reaches a class with a Phase 9 attribute (PhysicsScene.mSoftBodies): bytes are compared by
-    /// cross-reading (S17)
-    cross: bool = false,
 
     /// Zolt declares the class and everything it reaches: every layer compares it. Phase 8 is done and the soft body
     /// classes are declared, so every class is ready (P1 fails otherwise).
@@ -396,29 +366,7 @@ fn build(arena: Allocator) !Schema {
             }
         }
     }
-
-    // Classes that reach a class with a Phase 9 attribute through their bases and attribute classes (C++)
-    for (classes, 0..) |*c, i| c.cross = reachesPhase9(&schema, i, 0);
     return schema;
-}
-
-fn reachesPhase9(schema: *const Schema, index: usize, depth: u32) bool {
-    const c = &schema.classes[index];
-    if (hasPhase9Attribute(c.name)) return true;
-    if (depth > 32) return false;
-    for (c.bases) |b| {
-        if (schema.find(b)) |j| {
-            if (reachesPhase9(schema, j, depth + 1)) return true;
-        }
-    }
-    for (c.attributes) |a| {
-        if (a.primitive) |p| {
-            if (schema.find(p)) |j| {
-                if (j != index and reachesPhase9(schema, j, depth + 1)) return true;
-            }
-        }
-    }
-    return false;
 }
 
 /// Parse "name hash abstract|creatable bases=[a,b] attributes=[n:type(primitive);...]"
@@ -440,11 +388,7 @@ fn parseLine(arena: Allocator, name: [:0]const u8, line: []const u8) !Class {
     var attributes: std.ArrayList(Attribute) = .empty;
     if (attributes_text.len > 0) {
         var it = std.mem.splitScalar(u8, attributes_text, ';');
-        while (it.next()) |entry| {
-            var attribute = try parseAttribute(entry);
-            attribute.phase9 = isPhase9Attribute(name, attribute.name);
-            try attributes.append(arena, attribute);
-        }
+        while (it.next()) |entry| try attributes.append(arena, try parseAttribute(entry));
     }
     return .{
         .name = name,
