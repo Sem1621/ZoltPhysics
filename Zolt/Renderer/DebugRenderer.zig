@@ -518,14 +518,14 @@ pub const DebugRenderer = struct {
 
     /// Destructor of this level (releases the caches and the predefined geometry, in reverse order of declaration)
     pub fn destruct(self: *DebugRenderer) void {
-        clearCache(SwingConeBatches, &self.prev_swing_cone_limits, self.allocator);
-        clearCache(SwingConeBatches, &self.swing_cone_limits, self.allocator);
-        clearCache(SwingPyramidBatches, &self.prev_swing_pyramid_limits, self.allocator);
-        clearCache(SwingPyramidBatches, &self.swing_pyramid_limits, self.allocator);
-        clearCache(PieBatches, &self.prev_pie_limits, self.allocator);
-        clearCache(PieBatches, &self.pie_limits, self.allocator);
         clearCache(TaperedCylinderBatches, &self.prev_tapered_cylinders, self.allocator);
         clearCache(TaperedCylinderBatches, &self.tapered_cylinders, self.allocator);
+        clearCache(PieBatches, &self.prev_pie_limits, self.allocator);
+        clearCache(PieBatches, &self.pie_limits, self.allocator);
+        clearCache(SwingPyramidBatches, &self.prev_swing_pyramid_limits, self.allocator);
+        clearCache(SwingPyramidBatches, &self.swing_pyramid_limits, self.allocator);
+        clearCache(SwingConeBatches, &self.prev_swing_cone_limits, self.allocator);
+        clearCache(SwingConeBatches, &self.swing_cone_limits, self.allocator);
         self.cylinder.deinit();
         self.open_cone.deinit();
         self.capsule_bottom.deinit();
@@ -1769,8 +1769,8 @@ fn rmat44FromColumns(c1: Vec4, c2: Vec4, c3: Vec4, c4: RVec3) RMat44 {
     return if (Core.double_precision) DMat44.init(c1, c2, c3, c4) else Mat44.fromColumnsTranslation(c1, c2, c3, c4);
 }
 
-/// A renderer for the tests: counts the calls (atomics: the lock test draws from several threads) and keeps the triangle
-/// count of each batch
+/// A renderer for the tests: counts the calls (atomics: the lock test draws from several threads), keeps the triangle
+/// count of each batch and can log the order in which the batches are released
 const TestRenderer = struct {
     pub const overrides = .{ .drawLine, .drawTriangle, .createTriangleBatch, .createTriangleBatchIndexed, .drawGeometry, .drawText3D };
 
@@ -1778,13 +1778,40 @@ const TestRenderer = struct {
         pub const overrides = .{};
         base: DebugRenderer.BatchTarget,
         num_triangles: usize,
+        /// The creation index of the batch
+        id: u32,
+        renderer: *TestRenderer,
+
+        pub fn destruct(self: *BatchImpl) void {
+            if (self.renderer.release_log) |log|
+                log.append(self.id);
+        }
+    };
+
+    /// The ids of the released batches, in release order
+    const ReleaseLog = struct {
+        ids: [64]u32 = undefined,
+        len: usize = 0,
+
+        fn append(self: *ReleaseLog, id: u32) void {
+            self.ids[self.len] = id;
+            self.len += 1;
+        }
+
+        fn slice(self: *const ReleaseLog) []const u32 {
+            return self.ids[0..self.len];
+        }
     };
 
     base: DebugRenderer,
     num_lines: std.atomic.Value(u32) = .init(0),
     num_batches: std.atomic.Value(u32) = .init(0),
     num_draws: std.atomic.Value(u32) = .init(0),
-    /// The last geometry drawn and its world space bounds and LOD scale (single threaded tests only)
+    /// When set, the released batches log their id here
+    release_log: ?*ReleaseLog = null,
+    /// When set, drawGeometry keeps the fields below. The threaded test clears it, the fields are not atomic.
+    record_last: bool = true,
+    /// The last geometry drawn and its world space bounds and LOD scale
     last_geometry: ?*const DebugRenderer.Geometry = null,
     last_world_space_bounds: AABox = .empty,
     last_lod_scale_sq: f32 = 0,
@@ -1813,10 +1840,12 @@ const TestRenderer = struct {
     pub fn drawGeometry(self: *TestRenderer, model_matrix: RMat44, world_space_bounds: AABox, lod_scale_sq: f32, model_color: Color, geometry: *const DebugRenderer.Geometry, cull_mode: DebugRenderer.CullMode, cast_shadow: DebugRenderer.CastShadow, draw_mode: DebugRenderer.DrawMode) void {
         _ = .{ model_matrix, model_color, cast_shadow, draw_mode };
         _ = self.num_draws.fetchAdd(1, .monotonic);
-        self.last_geometry = geometry;
-        self.last_world_space_bounds = world_space_bounds;
-        self.last_lod_scale_sq = lod_scale_sq;
-        self.last_cull_mode = cull_mode;
+        if (self.record_last) {
+            self.last_geometry = geometry;
+            self.last_world_space_bounds = world_space_bounds;
+            self.last_lod_scale_sq = lod_scale_sq;
+            self.last_cull_mode = cull_mode;
+        }
     }
     pub fn drawText3D(self: *TestRenderer, position: RVec3, string: []const u8, color: Color, height: f32) void {
         _ = .{ self, position, string, color, height };
@@ -1827,13 +1856,17 @@ const TestRenderer = struct {
             self.base.setOutOfMemory();
             return .empty;
         };
-        batch.* = .{ .base = .init(BatchImpl, self.base.allocator), .num_triangles = num_triangles };
-        _ = self.num_batches.fetchAdd(1, .monotonic);
+        const id = self.num_batches.fetchAdd(1, .monotonic);
+        batch.* = .{ .base = .init(BatchImpl, self.base.allocator), .num_triangles = num_triangles, .id = id, .renderer = self };
         return .init(&batch.base);
     }
 
     fn numTriangles(lod: DebugRenderer.LOD) usize {
         return @as(*const BatchImpl, @alignCast(@fieldParentPtr("base", lod.triangle_batch.get().?))).num_triangles;
+    }
+
+    fn batchId(lod: DebugRenderer.LOD) u32 {
+        return @as(*const BatchImpl, @alignCast(@fieldParentPtr("base", lod.triangle_batch.get().?))).id;
     }
 
     fn batches(self: *const TestRenderer) u32 {
@@ -1947,6 +1980,55 @@ test "DebugRenderer: the caches hit within a frame and in the next one, -0 is +0
     try std.testing.expectEqual(n + 3, r.batches());
 }
 
+test "DebugRenderer: the destructor releases the caches and the predefined geometry in Jolt's order" {
+    var r: TestRenderer = undefined;
+    try r.init(std.testing.allocator);
+    var alive = true;
+    defer if (alive) r.base.deinit();
+    const d = &r.base;
+    const m = RMat44.identity();
+
+    // A key of each cache in the previous frame and another key of each in the current frame. cached[c][0] is in the
+    // prev cache, cached[c][1] in the current one; c is the order of declaration: swing cone, swing pyramid, pie,
+    // tapered cylinder.
+    var cached: [4][2]*const DebugRenderer.Geometry = undefined;
+    for (0..2) |frame| {
+        const k: f32 = @floatFromInt(frame + 1);
+        d.drawSwingConeLimits(m, 0.5, 0.25 * k, 1, Color.white, .{});
+        cached[0][frame] = r.last_geometry.?;
+        d.drawSwingPyramidLimits(m, -0.5, 0.5, -0.25 * k, 0.25, 1, Color.white, .{});
+        cached[1][frame] = r.last_geometry.?;
+        d.drawPie(RVec3.zero(), 1, Vec3.axisY(), Vec3.axisX(), 0, k, Color.white, .{});
+        cached[2][frame] = r.last_geometry.?;
+        d.drawTaperedCylinder(m, k, -1, 0.5, 0.25, Color.white, .{});
+        cached[3][frame] = r.last_geometry.?;
+        if (frame == 0)
+            d.nextFrame();
+    }
+
+    // Jolt's ~DebugRenderer destroys the members in reverse order of declaration: mPrevTaperedCylinders,
+    // mTaperedCylinders, mPrevPieLimits, ..., mSwingConeLimits, then mCylinder, ..., mBox. A geometry releases its LODs
+    // in order.
+    var order: [15]*const DebugRenderer.Geometry = undefined;
+    for (0..4) |i| {
+        order[2 * i] = cached[3 - i][0];
+        order[2 * i + 1] = cached[3 - i][1];
+    }
+    order[8..].* = .{ r.base.cylinder.get().?, r.base.open_cone.get().?, r.base.capsule_bottom.get().?, r.base.capsule_mid.get().?, r.base.capsule_top.get().?, r.base.sphere.get().?, r.base.box.get().? };
+    var expected: TestRenderer.ReleaseLog = .{};
+    for (order) |geometry| {
+        for (geometry.lods.items) |lod|
+            expected.append(TestRenderer.batchId(lod));
+    }
+    try std.testing.expectEqual(@as(usize, r.batches()), expected.len);
+
+    var released: TestRenderer.ReleaseLog = .{};
+    r.release_log = &released;
+    alive = false;
+    r.base.deinit();
+    try std.testing.expectEqualSlices(u32, expected.slice(), released.slice());
+}
+
 test "DebugRenderer: helpers with the predefined geometry, wire helpers and batch helpers" {
     var r: TestRenderer = undefined;
     try r.init(std.testing.allocator);
@@ -2024,13 +2106,19 @@ test "DebugRenderer: allocation failures" {
             try std.testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
-        r.base.deinit();
+        defer r.base.deinit();
+        // The sweep ends only when no failure was injected: initialize must not swallow one (the renderer's latch
+        // included, R5)
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expect(!r.base.isOutOfMemory());
         break;
     }
 
     // Drawing: each allocation of a helper fails once, the primitive is dropped, the failure latched, nothing leaks
     const Helpers = struct {
-        fn draw(d: *DebugRenderer, i: usize) void {
+        /// Draws with helper `i`. Returns what the batch helpers (4 to 6) made: the number of LODs of the geometry, 1
+        /// for a batch, 0 when they returned an empty one. The draw helpers (0 to 3) return 0, their draws are counted.
+        fn draw(d: *DebugRenderer, i: usize) usize {
             const m = RMat44.identity();
             switch (i) {
                 0 => d.drawTaperedCylinder(m, 1, -1, 0.5, 0.25, Color.white, .{}),
@@ -2039,18 +2127,22 @@ test "DebugRenderer: allocation failures" {
                 3 => d.drawPie(RVec3.zero(), 1, Vec3.axisY(), Vec3.axisX(), 0, 1, Color.white, .{}),
                 4 => {
                     var g = d.createTriangleGeometryForConvex(.{ .function = testSphereSupport });
-                    g.deinit();
+                    defer g.deinit();
+                    return if (g.get()) |geometry| geometry.lods.items.len else 0;
                 },
                 5 => {
                     var b = d.createTriangleBatchForConvex(.{ .function = testSphereSupport }, 2, .{});
-                    b.deinit();
+                    defer b.deinit();
+                    return @intFromBool(b.get() != null);
                 },
                 6 => {
                     var b = d.createTriangleBatchVertexList(&.{ .init(0, 0, 0), .init(1, 0, 0), .init(0, 1, 0) }, &.{.init(0, 1, 2)});
-                    b.deinit();
+                    defer b.deinit();
+                    return @intFromBool(b.get() != null);
                 },
                 else => unreachable,
             }
+            return 0;
         }
     };
     for (0..7) |helper| {
@@ -2061,16 +2153,24 @@ test "DebugRenderer: allocation failures" {
         var offset: usize = 0;
         while (true) : (offset += 1) {
             failing.fail_index = failing.alloc_index + offset;
+            failing.has_induced_failure = false;
             const draws = r.num_draws.load(.monotonic);
-            Helpers.draw(&r.base, helper);
+            const made = Helpers.draw(&r.base, helper);
             failing.fail_index = std.math.maxInt(usize);
             r.base.nextFrame();
             r.base.nextFrame(); // Empty the caches, so that the next round misses again
             if (!r.base.isOutOfMemory()) {
-                try std.testing.expect(helper >= 4 or r.num_draws.load(.monotonic) == draws + 1);
+                // The sweep ends only when no failure was injected: a failure must not be dropped without the latch
+                try std.testing.expect(!failing.has_induced_failure);
+                if (helper < 4)
+                    try std.testing.expectEqual(draws + 1, r.num_draws.load(.monotonic))
+                else
+                    try std.testing.expectEqual(@as(usize, if (helper == 4) 4 else 1), made);
                 break;
             }
-            try std.testing.expectEqual(draws, r.num_draws.load(.monotonic)); // Dropped
+            // Dropped
+            try std.testing.expectEqual(draws, r.num_draws.load(.monotonic));
+            try std.testing.expectEqual(@as(usize, 0), made);
             r.base.out_of_memory.store(false, .monotonic);
         }
         try std.testing.expect(offset > 0);
@@ -2081,6 +2181,7 @@ test "DebugRenderer: the caches are locked, threads that draw the same shape cre
     var r: TestRenderer = undefined;
     try r.init(std.testing.allocator);
     defer r.base.deinit();
+    r.record_last = false; // The threads would race on the `last_*` fields
     const n = r.batches();
 
     const num_threads = 4;
