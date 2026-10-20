@@ -12,6 +12,8 @@ pub const files = [_][]const u8{
     "Geometry/GJKEPAReference.cpp",
     "Geometry/PrimitivesReference.cpp",
     "Geometry/QueriesReference.cpp",
+    "Hair/HairSettingsReference.cpp",
+    "Hair/LibMShuffleReference.cpp",
     "Math/MathReference.cpp",
     "ObjectStream/ObjectStreamReference.cpp",
     "ParityHooks.cpp",
@@ -51,4 +53,10 @@ pub const files = [_][]const u8{
     "Physics/TrianglesReference.cpp",
     "Physics/VehiclePartsReference.cpp",
     "Renderer/DebugRendererReference.cpp",
+};
+
+/// C files (relative to ZoltParity/), compiled as C11 with -ffp-contract=off: the libm pin of the reference
+/// (Docs/Zolt/RemainingFeaturesArchitecture.md R13)
+pub const c_files = [_][]const u8{
+    "Hair/LibMReference.c",
 };

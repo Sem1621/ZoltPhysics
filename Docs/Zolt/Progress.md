@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 96.4%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
+**Library: 97.7%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -25,7 +25,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 76 | 0 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
-| `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
+| `Jolt/Physics/Hair` | 51% | 3 | 0 | 0 | 1 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 100% | 8 | 0 | 0 | 0 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
@@ -419,14 +419,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Hair — 0%</summary>
+<details><summary>Jolt/Physics/Hair — 51%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `Hair.cpp`, `Hair.h` | 1129 | ❌ todo |  |
-| `HairSettings.cpp`, `HairSettings.h` | 1078 | ❌ todo |  |
-| `HairShaders.cpp`, `HairShaders.h` | 58 | ❌ todo |  |
-| `RegisterHair.cpp`, `RegisterHair.h` | 22 | ❌ todo |  |
+| `HairSettings.cpp`, `HairSettings.h` | 1078 | ✅ complete | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairShaders.cpp`, `HairShaders.h` | 58 | ✅ complete | `Zolt/Physics/Hair/HairShaders.zig` |
+| `RegisterHair.cpp`, `RegisterHair.h` | 22 | ✅ complete | `Zolt/Physics/Hair/RegisterHair.zig` |
 
 </details>
 
@@ -695,10 +695,10 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 ## Serialization (Phase 8)
 
-Jolt's 94 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`, without the Hair classes
-of Phase 9) and their Zolt declarations (`pub const rtti = RTTI.declare(...)`, see
+Jolt's 104 serializable classes (`JPH_IMPLEMENT_SERIALIZABLE_*`) and their Zolt declarations
+(`pub const rtti = RTTI.declare(...)`, see
 [SerializationArchitecture.md](SerializationArchitecture.md) S18). `port_status.py --check` and the parity harness
-fail on a pending or undeclared class. ✅ 94 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
+fail on a pending or undeclared class. ✅ 104 declared · 🟡 0 pending (`serialization_pending`) · ❌ 0 not declared
 
 <details><summary>Serializable classes</summary>
 
@@ -724,6 +724,16 @@ fail on a pending or undeclared class. ✅ 94 declared · 🟡 0 pending (`seria
 | `GearConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/GearConstraint.zig` |
 | `GroupFilter` | ✅ declared | `Zolt/Physics/Collision/GroupFilter.zig` |
 | `GroupFilterTable` | ✅ declared | `Zolt/Physics/Collision/GroupFilterTable.zig` |
+| `HairSettings` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::Gradient` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::Material` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::RStrand` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::RVertex` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::SStrand` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::SVertex` | ✅ declared | `Zolt/Physics/Hair/HairSettings.zig` |
+| `HairSettings::SVertexInfluence` | ✅ declared | `Zolt/Shaders/HairStructs.zig` |
+| `HairSettings::SkinPoint` | ✅ declared | `Zolt/Shaders/HairStructs.zig` |
+| `HairSettings::SkinWeight` | ✅ declared | `Zolt/Shaders/HairStructs.zig` |
 | `HeightFieldShapeSettings` | ✅ declared | `Zolt/Physics/Collision/Shape/HeightFieldShape.zig` |
 | `HingeConstraintSettings` | ✅ declared | `Zolt/Physics/Constraints/HingeConstraint.zig` |
 | `IndexedTriangle` | ✅ declared | `Zolt/ObjectStream/TypeDeclarations.zig` |

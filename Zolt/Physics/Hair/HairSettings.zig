@@ -13,8 +13,11 @@
 //! - Gradient::MakeStepDependent uses `LibM.powf` (Jolt: std::pow, R13).
 //! - The C++ GridSampler uses Vec3 min / max (the shader's GridPositionToIndexAndFraction uses std::min / std::max, each
 //!   keeps its own semantics, R14).
-//! - SaveBinaryState writes mSimulationBounds as the raw 32 byte AABox. Zolt's Vec3 keeps W = Z, so the bytes are
-//!   Jolt's.
+//! - SaveBinaryState writes mSimulationBounds as the raw 32 byte AABox. Zolt's Vec3 keeps W = Z (porting guide section
+//!   8, rule 9), so the bytes are Jolt's with one exception. Jolt's StreamIn::Read(Vec3) keeps the old W of
+//!   mSimulationBoundsPadding when JPH_FLOATING_POINT_EXCEPTIONS_ENABLED is not defined (Jolt's CMake defines it for
+//!   MSVC only). Init after RestoreBinaryState then expands the W lanes of the bounds by that old W. Zolt's W lanes are
+//!   Jolt's with floating point exceptions enabled. The parity layer models Jolt's W lanes (HairSettingsParity.zig).
 //! - SkinWeight, SkinPoint and SVertexInfluence are the extern structs of Shaders/HairStructs.zig (they derive from the
 //!   shader structs without adding members), which carry their RTTI. The other 7 serializable classes are declared
 //!   here with Jolt's nested names ("HairSettings::SVertex"). SStrand has the base RStrand (a flattened prefix).
@@ -1485,4 +1488,304 @@ fn truncToUint(value: f32) u32 {
     if (value >= -0x1p63 and value < 0x1p63) // False for NaN
         return @truncate(@as(u64, @bitCast(@as(i64, @intFromFloat(value)))));
     return 0;
+}
+
+// Tests ---------------------------------------------------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// A groom of `num_strands` straight strands of `num_vertices` vertices along -y, side by side in x, material
+/// `material_index`, the first vertex of each strand fixed
+fn testGroom(allocator: Allocator, num_strands: u32, num_vertices: u32, material_index: u32, vertices: *std.ArrayList(HairSettings.SVertex), strands: *std.ArrayList(HairSettings.SStrand)) Allocator.Error!void {
+    for (0..num_strands) |s| {
+        const first: u32 = @intCast(vertices.items.len);
+        for (0..num_vertices) |i| {
+            try vertices.append(allocator, .init(.{ .x = 0.01 * @as(f32, @floatFromInt(s)), .y = -0.02 * @as(f32, @floatFromInt(i)), .z = 0.001 * @as(f32, @floatFromInt(i * i)) }, .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
+        }
+        try strands.append(allocator, .init(first, first + num_vertices, material_index));
+    }
+}
+
+test "HairSettings: defaults of Jolt's constructors and the serializable classes" {
+    const settings = try HairSettings.create(testing.allocator);
+    var ref: Ref(HairSettings) = .init(settings);
+    defer ref.deinit();
+    try testing.expectEqual(@as(u32, 360), settings.num_iterations_per_second);
+    try testing.expectEqual(@as(f32, 1.0 / 30.0), settings.max_delta_time);
+    try testing.expect(settings.grid_size.eql(UVec4.init(32, 32, 32, 0)));
+    try testing.expect(settings.simulation_bounds.min.eql(Vec3.replicate(-1.0)) and settings.simulation_bounds.max.eql(Vec3.replicate(1.0)));
+
+    // RTTI create: SVertexInfluence has the values of Jolt's constructor, RVertex 3 of them
+    const influence: *HairSettings.SVertexInfluence = @ptrCast(@alignCast((try HairSettings.SVertexInfluence.rtti.createObject(testing.allocator)).?));
+    defer HairSettings.SVertexInfluence.rtti.destructObject(influence, testing.allocator);
+    try testing.expectEqual(HairSettings.no_influence, influence.vertex_index);
+    try testing.expectEqual(@as(f32, 0.0), influence.weight);
+    const vertex: HairSettings.RVertex = .{};
+    for (vertex.influences) |inf| try testing.expectEqual(HairSettings.no_influence, inf.vertex_index);
+
+    // The material and gradient defaults
+    const material: HairSettings.Material = .{};
+    try testing.expectEqual(@as(f32, 0.2), material.gravity_factor.min_fraction);
+    try testing.expect(material.needsGrid());
+    try testing.expect(!material.globalPoseOnly());
+    try testing.expectEqual(@as(f32, 1.0e-7), material.getBendCompliance(0.0));
+    try testing.expectEqual(@as(f32, 1.0e-7), material.getBendCompliance(1.0));
+    try testing.expectEqual(@as(f32, 100.0 * 1.0e-7), material.getBendCompliance(0.5));
+
+    // The names of the nested classes
+    try testing.expectEqualStrings("HairSettings::SkinWeight", HairSettings.SkinWeight.rtti.name);
+    try testing.expectEqualStrings("HairSettings::SStrand", HairSettings.SStrand.rtti.name);
+    try testing.expect(HairSettings.SStrand.rtti.isKindOf(HairSettings.RStrand.rtti));
+}
+
+test "HairSettings: initRenderAndSimulationStrands simulates a fraction, appends to the simulation arrays (Jolt's quirk)" {
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{ .simulation_strands_fraction = 0.25 });
+
+    var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+    defer vertices.deinit(allocator);
+    var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+    defer strands.deinit(allocator);
+    try testGroom(allocator, 8, 5, 0, &vertices, &strands);
+
+    try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
+    try testing.expectEqual(@as(usize, 2), settings.sim_strands.items.len); // ceil(0.25 * 8)
+    try testing.expectEqual(@as(usize, 10), settings.sim_vertices.items.len);
+    try testing.expectEqual(@as(usize, 8), settings.render_strands.items.len);
+    try testing.expectEqual(@as(usize, 40), settings.render_vertices.items.len);
+    for (settings.render_vertices.items) |v| try testing.expect(v.influences[0].vertex_index < 10);
+
+    // A second call keeps the render arrays' size and appends to the simulation arrays
+    try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
+    try testing.expectEqual(@as(usize, 4), settings.sim_strands.items.len);
+    try testing.expectEqual(@as(usize, 20), settings.sim_vertices.items.len);
+    try testing.expectEqual(@as(usize, 40), settings.render_vertices.items.len);
+}
+
+test "HairSettings: a simulation fraction of exactly 1 on the last material (next to R20 UB8)" {
+    // A fraction above 1 on the last material panics (Jolt reads past the index array). Exactly 1 simulates every
+    // strand, and a fraction above 1 on a material that is not the last runs into the next one (literal).
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{ .simulation_strands_fraction = 1.5 });
+    try settings.materials.append(allocator, .{ .simulation_strands_fraction = 1.0 });
+
+    var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+    defer vertices.deinit(allocator);
+    var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+    defer strands.deinit(allocator);
+    try testGroom(allocator, 2, 4, 0, &vertices, &strands);
+    try testGroom(allocator, 4, 4, 1, &vertices, &strands);
+
+    try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
+    // Material 0 simulates ceil(1.5 * 2) = 3 strands (one of material 1), material 1 then simulates its 4
+    try testing.expectEqual(@as(usize, 7), settings.sim_strands.items.len);
+    var num_material1: usize = 0;
+    for (settings.sim_strands.items) |s| num_material1 += s.material_index;
+    try testing.expectEqual(@as(usize, 5), num_material1);
+}
+
+test "HairSettings: init calculates the strand fractions, the rods, the Bishop frames and the grid" {
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{ .simulation_strands_fraction = 1.0 });
+    settings.grid_size = .init(4, 5, 6, 0);
+    try testGroom(allocator, 3, 4, 0, &settings.sim_vertices, &settings.sim_strands);
+    try settings.sim_strands.append(allocator, .init(12, 14, 0)); // A strand of 2 vertices
+    try settings.sim_vertices.append(allocator, .init(.{ .x = 1, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }));
+    try settings.sim_vertices.append(allocator, .init(.{ .x = 1, .y = 0.5, .z = 0 }, .{}));
+
+    try testing.expectEqual(@as(f32, 0.0), try settings.init());
+    try testing.expectEqual(@as(u32, 4), settings.max_vertices_per_strand);
+    try testing.expectEqual(@as(usize, 4 * 5 * 6), settings.neutral_density.items.len);
+    try testing.expect(settings.density_scale > 0.0);
+    for (settings.sim_strands.items) |strand| {
+        try testing.expectEqual(@as(f32, 0.0), settings.sim_vertices.items[strand.start_vtx].strand_fraction);
+        try testing.expectEqual(@as(f32, 1.0), settings.sim_vertices.items[strand.end_vtx - 1].strand_fraction);
+        var v = strand.start_vtx;
+        while (v < strand.end_vtx - 1) : (v += 1) {
+            const sv = settings.sim_vertices.items[v];
+            try testing.expect(sv.length > 0.0);
+            try testing.expect(Quat.fromFloat4(sv.bishop).isNormalized(.{}));
+        }
+    }
+
+    // The bounds hold every vertex with the padding
+    for (settings.sim_vertices.items) |v|
+        try testing.expect(settings.simulation_bounds.containsVec3(Vec3.fromFloat3(v.position)));
+
+    // The neutral density sums the masses of the vertices that are not fixed (1 each)
+    var total: f32 = 0;
+    for (settings.neutral_density.items) |d| total += d;
+    try testing.expectApproxEqAbs(@as(f32, 10.0), total, 1.0e-4);
+}
+
+test "HairSettings: init of a strand of 2 vertices, the smallest one" {
+    // Jolt reads x[1] past the rod arrays for a strand of 0 or 1 vertices: Zolt panics. A strand of 2 vertices, the
+    // smallest one, is fine.
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{});
+    try testGroom(allocator, 1, 2, 0, &settings.sim_vertices, &settings.sim_strands);
+    _ = try settings.init();
+    try testing.expectEqual(@as(u32, 2), settings.max_vertices_per_strand);
+}
+
+test "HairSettings: resample keeps the ends of the strands" {
+    const allocator = testing.allocator;
+    var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+    defer vertices.deinit(allocator);
+    var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+    defer strands.deinit(allocator);
+    try testGroom(allocator, 3, 7, 1, &vertices, &strands);
+    const first = vertices.items[0];
+    const last = vertices.items[6];
+
+    try HairSettings.resample(allocator, &vertices, &strands, 4);
+    try testing.expectEqual(@as(usize, 12), vertices.items.len);
+    try testing.expectEqual(@as(usize, 3), strands.items.len);
+    try testing.expectEqual(@as(u32, 4), strands.items[1].start_vtx);
+    try testing.expectEqual(@as(u32, 1), strands.items[2].material_index);
+    try testing.expectEqual(first.position, vertices.items[0].position);
+    try testing.expectEqual(last.position, vertices.items[3].position);
+    try testing.expectEqual(@as(f32, 0.0), vertices.items[0].inv_mass);
+    try testing.expectEqual(@as(f32, 1.0), vertices.items[1].inv_mass);
+}
+
+test "HairSettings: saveBinaryState / restoreBinaryState round trip" {
+    const allocator = testing.allocator;
+    const StreamWrapper = @import("../../Core/StreamWrapper.zig");
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{ .friction = 0.7, .global_pose = .init(0.5, 0.25, .{}) });
+    var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+    defer vertices.deinit(allocator);
+    var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+    defer strands.deinit(allocator);
+    try testGroom(allocator, 6, 5, 0, &vertices, &strands);
+    try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
+    _ = try settings.init();
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var out_wrapper = StreamWrapper.StreamOutWrapper.init(&out.writer);
+    settings.saveBinaryState(out_wrapper.streamOut());
+
+    var restored: HairSettings = .{ .allocator = allocator };
+    defer restored.deinit();
+    var reader: std.Io.Reader = .fixed(out.written());
+    var in_wrapper = StreamWrapper.StreamInWrapper.init(&reader);
+    try restored.restoreBinaryState(in_wrapper.streamIn());
+    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(settings.render_vertices.items), std.mem.sliceAsBytes(restored.render_vertices.items));
+    try testing.expectEqual(@as(f32, 0.7), restored.materials.items[0].friction);
+    try testing.expectEqual(settings.simulation_bounds, restored.simulation_bounds);
+
+    var again: std.Io.Writer.Allocating = .init(allocator);
+    defer again.deinit();
+    var again_wrapper = StreamWrapper.StreamOutWrapper.init(&again.writer);
+    restored.saveBinaryState(again_wrapper.streamOut());
+    try testing.expectEqualSlices(u8, out.written(), again.written());
+}
+
+test "HairSettings: initCompute transposes the vertices, the padding vertices are zero (R20 UB4)" {
+    const allocator = testing.allocator;
+    const ComputeSystemCPU = @import("../../Compute/CPU/ComputeSystemCPU.zig").ComputeSystemCPU;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{ .simulation_strands_fraction = 1.0 });
+    try testGroom(allocator, 1, 5, 0, &settings.sim_vertices, &settings.sim_strands);
+    try testGroom(allocator, 1, 3, 0, &settings.sim_vertices, &settings.sim_strands);
+    settings.sim_strands.items[1] = .init(5, 8, 0);
+    _ = try settings.init();
+
+    var system = try ComputeSystemCPU.create(allocator);
+    defer system.deinit();
+    try settings.initCompute(system.get().?);
+    try testing.expect(settings.scalp_triangles_cb.get() == null and settings.skin_points_cb.get() == null);
+
+    // 2 strands of at most 5 vertices: 10 vertices, vertex v of strand s at v * 2 + s
+    const positions = settings.vertices_position_cb.get().?;
+    try testing.expectEqual(@as(u64, 10), positions.getSize());
+    const p = positions.mapAs(Float3, .read);
+    try testing.expectEqual(settings.sim_vertices.items[5 + 2].position, p[2 * 2 + 1]);
+    for ([_]usize{ 7, 9 }) |padding| try testing.expectEqual(Float3{ .x = 0, .y = 0, .z = 0 }, p[padding]);
+    positions.unmap();
+
+    // The first vertices of both strands are fixed
+    const fixed = settings.vertices_fixed_cb.get().?.mapAs(u32, .read);
+    try testing.expectEqual(@as(u32, 0b11), fixed[0]);
+    settings.vertices_fixed_cb.get().?.unmap();
+
+    // Vertex counts as bytes, padded to a multiple of 4
+    const counts = settings.strand_vertex_counts_cb.get().?;
+    try testing.expectEqual(@as(u64, 1), counts.getSize());
+    const c = counts.map(.read);
+    try testing.expectEqualSlices(u8, &.{ 5, 3, 0, 0 }, c);
+    counts.unmap();
+}
+
+test "HairSettings: out of memory in initRenderAndSimulationStrands, init, initCompute and the binary state" {
+    const ComputeSystemCPU = @import("../../Compute/CPU/ComputeSystemCPU.zig").ComputeSystemCPU;
+    const StreamWrapper = @import("../../Core/StreamWrapper.zig");
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            const settings = try HairSettings.create(allocator);
+            var ref: Ref(HairSettings) = .init(settings);
+            defer ref.deinit();
+            try settings.materials.append(allocator, .{ .simulation_strands_fraction = 0.5, .gravity_preload_factor = 1.0 });
+            settings.grid_size = .init(4, 4, 4, 0);
+            try settings.scalp_vertices.appendSlice(allocator, &.{ .{ .x = -1, .y = 0, .z = -1 }, .{ .x = 1, .y = 0, .z = -1 }, .{ .x = 0, .y = 0, .z = 1 } });
+            try settings.scalp_triangles.append(allocator, .init(0, 2, 1));
+            var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+            defer vertices.deinit(allocator);
+            var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+            defer strands.deinit(allocator);
+            try testGroom(allocator, 4, 4, 0, &vertices, &strands);
+            try HairSettings.resample(allocator, &vertices, &strands, 5);
+            try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
+            _ = try settings.init();
+
+            var system = try ComputeSystemCPU.create(allocator);
+            defer system.deinit();
+            try settings.initCompute(system.get().?);
+
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            defer out.deinit();
+            var out_wrapper = StreamWrapper.StreamOutWrapper.init(&out.writer);
+            settings.saveBinaryState(out_wrapper.streamOut());
+            if (out_wrapper.isFailed()) return error.OutOfMemory; // The allocating writer only fails when it runs out of memory
+            var restored: HairSettings = .{ .allocator = allocator };
+            defer restored.deinit();
+            var reader: std.Io.Reader = .fixed(out.written());
+            var in_wrapper = StreamWrapper.StreamInWrapper.init(&reader);
+            try restored.restoreBinaryState(in_wrapper.streamIn());
+        }
+    }.f, .{});
+}
+
+test "HairSettings: skinScalpVertices and prepareForScalpSkinning" {
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.scalp_vertices.appendSlice(allocator, &.{ .{ .x = 1, .y = 0, .z = 0 }, .{ .x = 0, .y = 2, .z = 0 } });
+    try settings.scalp_inverse_bind_pose.appendSlice(allocator, &.{ Mat44.identity(), Mat44.translation(Vec3.init(0, -1, 0)) });
+    settings.scalp_num_skin_weights_per_vertex = 2;
+    try settings.scalp_skin_weights.appendSlice(allocator, &.{ .{ .joint_idx = 0, .weight = 1.0 }, .{ .joint_idx = 1, .weight = 0.0 }, .{ .joint_idx = 0, .weight = 0.5 }, .{ .joint_idx = 1, .weight = 0.5 } });
+    const joints = [_]Mat44{ Mat44.translation(Vec3.init(10, 0, 0)), Mat44.identity() };
+
+    var out: std.ArrayList(Vec3) = .empty;
+    defer out.deinit(allocator);
+    try settings.skinScalpVertices(allocator, Mat44.identity(), &joints, &out);
+    try testing.expect(out.items[0].eql(Vec3.init(11, 0, 0)));
+    // 0.5 * (10, 2, 0) + 0.5 * (0, 1, 0)
+    try testing.expect(out.items[1].eql(Vec3.init(5, 1.5, 0)));
+
+    var prepared: [2]Mat44 = undefined;
+    settings.prepareForScalpSkinning(Mat44.translation(Vec3.init(0, 0, 1)), &joints, &prepared);
+    try testing.expect(prepared[1].getTranslation().eql(Vec3.init(0, -1, 1)));
 }

@@ -27,6 +27,8 @@ test {
     _ = @import("Geometry/GJKEPAParity.zig");
     _ = @import("Geometry/PrimitivesParity.zig");
     _ = @import("Geometry/QueriesParity.zig");
+    _ = @import("Hair/HairSettingsParity.zig");
+    _ = @import("Hair/LibMParity.zig");
     _ = @import("Math/MathParity.zig");
     _ = @import("ObjectStream/ObjectStreamParity.zig");
     _ = @import("ParityFramework.zig");

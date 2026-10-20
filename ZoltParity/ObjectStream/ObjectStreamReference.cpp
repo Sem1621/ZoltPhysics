@@ -2,8 +2,11 @@
 // around Jolt's RTTI, Factory, ObjectStreamOut and ObjectStreamIn (requires JPH_OBJECT_STREAM, see build.zig).
 //
 // The harness knows classes only through Jolt's RTTI, by name. Nothing below is written for one class, except P7's
-// SaveBinaryState (a function of the asset's class), the PhysicsScene binary state of P7 and P9 and the classes of
-// UnitTests/ObjectStream/ObjectStreamTest.cpp (P8).
+// SaveBinaryState (a function of the asset's class), the PhysicsScene and HairSettings binary state of P7 and P9 and
+// the classes of UnitTests/ObjectStream/ObjectStreamTest.cpp (P8).
+//
+// The Factory is the Factory after RegisterTypes() and RegisterHair() (Docs/Zolt/RemainingFeaturesArchitecture.md R14):
+// the hair classes are compared like the others.
 //
 // Results that are bytes stay in a result slot (jolt_os_result) until the next call. Return values: 0 or more success,
 // -1 read failed (Jolt's sReadObject returns false), -2 write failed, -4 unknown class or not creatable, -5 the allocation
@@ -22,6 +25,8 @@
 #include <Jolt/ObjectStream/TypeDeclarations.h>
 #include <Jolt/Physics/Constraints/MotorSettings.h>
 #include <Jolt/Physics/Constraints/SpringSettings.h>
+#include <Jolt/Physics/Hair/HairSettings.h>
+#include <Jolt/Physics/Hair/RegisterHair.h>
 #include <Jolt/Physics/PhysicsScene.h>
 #include <Jolt/Physics/Ragdoll/Ragdoll.h>
 #include <Jolt/Skeleton/SkeletalAnimation.h>
@@ -208,6 +213,7 @@ static void EnsureFactory()
 		Factory::sInstance = new Factory();
 		RegisterTypes();
 	}
+	RegisterHair(); // Register returns early for a class that is already known
 
 	// Register returns early for a class that is already known (another reference file may have made the Factory)
 	const RTTI *extra[] = { JPH_RTTI(TestSerializable), JPH_RTTI(AABox), JPH_RTTI(Triangle), JPH_RTTI(uint8), JPH_RTTI(uint16),
@@ -219,7 +225,8 @@ static void EnsureFactory()
 }
 
 // "The C++ Factory after RegisterTypes" (SerializationArchitecture.md section 5): a Factory of its own, filled by
-// RegisterTypes() only. Every read of P2 to P7 uses it as Factory::sInstance, like Zolt's RegisterTypes.factory.
+// RegisterTypes() and RegisterHair() only. Every read of P2 to P7 uses it as Factory::sInstance, like Zolt's
+// RegisterTypes.factory with RegisterHair.serializable_types (ObjectStreamSchema.zig).
 // Running RegisterTypes() again is harmless: CollisionDispatch::sInit only fills empty entries, the shapes register the
 // same functions again (the user registrations of the other reference files stay) and the default material exists.
 static Factory *sRegisterTypesFactory = nullptr;
@@ -234,6 +241,7 @@ static Factory *GetRegisterTypesFactory()
 		sRegisterTypesFactory = new Factory();
 		Factory::sInstance = sRegisterTypesFactory;
 		RegisterTypes();
+		RegisterHair();
 		Factory::sInstance = saved;
 
 		// The classes sorted by name (GetAllClasses returns its hash map order)
@@ -714,6 +722,8 @@ int jolt_os_asset_binary_state(const uint8 *inData, size_t inSize, const char *i
 		static_cast<SkeletalAnimation *>(object)->SaveBinaryState(stream);
 	else if (rtti == JPH_RTTI(PhysicsScene))
 		static_cast<PhysicsScene *>(object)->SaveBinaryState(stream, true, true);
+	else if (rtti == JPH_RTTI(HairSettings))
+		static_cast<HairSettings *>(object)->SaveBinaryState(stream);
 	else
 		result = -4;
 	sResults[2] = data.str();
@@ -768,9 +778,28 @@ int jolt_os_scene_binary_resave(const uint8 *inData, size_t inSize, int inSaveSh
 	return Quarantine::sCheck(result);
 }
 
+// P9 with hair: HairSettings::RestoreBinaryState of the bytes into new settings, then SaveBinaryState of those (result
+// slot 2)
+int jolt_os_hair_binary_resave(const uint8 *inData, size_t inSize)
+{
+	UseRegisterTypesFactory use_factory;
+	Quarantine quarantine;
+	{
+		std::stringstream in_data(std::string((const char *)inData, inSize));
+		StreamInWrapper in(in_data);
+		Ref<HairSettings> settings = new HairSettings;
+		settings->RestoreBinaryState(in);
+		std::stringstream data;
+		StreamOutWrapper out(data);
+		settings->SaveBinaryState(out);
+		sResults[2] = data.str();
+	}
+	return Quarantine::sCheck(0);
+}
+
 // Checks the harness itself, the way every entry point of P2 to P7 runs: the RegisterTypes Factory, the hooks, then the
 // class lookup. The hooks must still be installed, zero fill a block and defer its free, and the RegisterTypes Factory
-// must hold the classes of RegisterTypes only. Returns 0, -5 (the quarantine) or -6 (the Factory).
+// must hold the classes of RegisterTypes and RegisterHair only. Returns 0, -5 (the quarantine) or -6 (the Factory).
 int jolt_os_quarantine_check()
 {
 	UseRegisterTypesFactory use_factory;
