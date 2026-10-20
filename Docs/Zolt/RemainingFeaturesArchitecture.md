@@ -572,6 +572,7 @@ tests pin them.
 | UB12 | `createConstraints` with an LRA type, or `optimize`, after vertices were added or removed while the closest kinematic cache was filled (settled in S1) | reads `mClosestKinematic` or `mVertices` out of bounds | panics with "SoftBodySharedSettings: vertices were added or removed after the closest kinematic vertices were cached" when the cache is not empty and its size is not `vertices.len`, at the LRA block of `createConstraints` and before the sorts of `optimize` (S2 implements it) |
 | UB13 | `createConstraints` with an empty `vertex_attributes` slice and at least one face (settled in S1) | `inVertexAttributes[min(v, 0u - 1)]` reads out of bounds | panics with "SoftBodySharedSettings.createConstraints: no vertex attributes" (S2 implements it) |
 | UB14 | `optimize` with a vertex that no group reaches (a NaN, infinite or `FLT_MAX` position; settled in S1) | a constraint with no grouped vertex, or a skinned constraint on an ungrouped vertex, reads `groups[-1]`; a constraint with some grouped vertices goes to the non-parallel group | the mixed case stays on Jolt's release path (`if (Core.enable_asserts)` asserts); a constraint without a grouped vertex and a skinned constraint on an ungrouped vertex panic with a message (S2 implements it) |
+| UB15 | `DrawPie` with a NaN or infinite angle range, or one that needs more than `maxInt(i32) / 3` parts (settled in D1) | converts NaN or an out-of-range float to `int`, then `JPH_STACK_ALLOC` with a negative or huge size | draws nothing; the empty cache entry stays, as after Jolt's early returns. Pinned by a Zolt-only test |
 
 ### R21 Port status and scope
 
@@ -820,6 +821,16 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | 7 | D4 | H3 | – |
 | 8 | A | – | – |
 
+- Settled in wave 4:
+  - D1 (R6): the cached helpers create their batches under the cache lock, so the cache lock is always taken before the
+    recorder's lock. The final `drawGeometry` call runs after the cache lock is released, with its own reference to the
+    geometry: the lock stays short, and a renderer whose `drawGeometry` draws a cached helper cannot deadlock.
+  - D1 (R5): when a renderer returns an empty batch and latches, the cached helpers and
+    `createTriangleGeometryForConvex` drop the geometry instead of caching one with an empty LOD. Callers (D2: the convex
+    shapes, GJK and EPA draws) skip the draw when the geometry or batch is empty.
+  - S5: the soft body scenes keep `blocked_by = .soft_bodies`; the blocker reports them supported now that
+    `SoftBodyMotionProperties.is_stub` and `PhysicsSystem.soft_body_jobs_pending` are gone. The audit removes the gate.
+  - M10 is reached with S5: `python3 tools/port_status.py --check-m10` passes.
 - Settled in wave 2: DebugRendererPlayback (UB7): a LOD batch ID 0 is `Batch.empty` unless the stream defined a
   batch with ID 0; an unknown batch ID, a geometry ID that the stream never defines (checked at the end of `parse`,
   because Jolt looks IDs up in `DrawFrame`) and a stream that ends inside a command are `error.InvalidStream`; a stream
