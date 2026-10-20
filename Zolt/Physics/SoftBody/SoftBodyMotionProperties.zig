@@ -1,12 +1,7 @@
 //! Port of: Jolt/Physics/SoftBody/SoftBodyMotionProperties.h, Jolt/Physics/SoftBody/SoftBodyMotionProperties.cpp
-//! Status: partial
-//! Missing: DetermineCollidingShapes, DetermineCollisionPlanes, DetermineSensorCollisions, ApplyPressure,
-//!   IntegratePositions, the Apply*Constraints solvers, ApplyCollisionConstraintsAndUpdateVelocities,
-//!   UpdateSoftBodyState, StartFirstIteration, StartNextIteration, the Parallel* functions, ProcessGroup,
-//!   InitializeUpdateContext, UpdateRigidBodyVelocities, SkinVertices, CustomUpdate, SaveState, RestoreState (stubs that
-//!   panic, group S4); the JPH_DEBUG_RENDERER draw functions (group D4)
+//! Status: complete
 //!
-//! RemainingFeaturesArchitecture.md R15, R16 and SimulationArchitecture D1:
+//! RemainingFeaturesArchitecture.md R15, R16, R17 and SimulationArchitecture D1:
 //! - `SoftBodyMotionProperties : public MotionProperties` embeds its base as `base` (the first field), then Jolt's
 //!   fields in Jolt's order. `fromBase` / `fromBaseConst` are Jolt's `static_cast<SoftBodyMotionProperties *>`.
 //! - `allocator` (Zolt) is the allocator of the BodyManager that created the soft body. It allocates the arrays.
@@ -14,10 +9,11 @@
 //!   shapes of the colliding shapes and sensors.
 //! - `RodState` is an extern struct with an extern union: IntegratePositions reuses the storage of the angular velocity
 //!   for the previous rotation, which is defined for an extern union.
-//! - `mSkinStateTransform` only exists with JPH_DEBUG_RENDERER: `skin_state_transform` is `void` without the option.
+//! - `mSkinStateTransform` only exists with JPH_DEBUG_RENDERER: `skin_state_transform` is `void` without the option. Its
+//!   two writes (SkinVertices, UpdateSoftBodyState) are `if (Core.debug_renderer)` statements.
 //! - `mNeedContactCallback` is a `std.atomic.Value(bool)`, Jolt's relaxed order is `.monotonic`. `mNumSensors` (Jolt's
 //!   TSAN workaround) is a `std.atomic.Value(u32)`; Jolt leaves it uninitialized until DetermineCollidingShapes, Zolt
-//!   starts it at 0.
+//!   starts it at 0. The update context's atomics use Jolt's memory orders (relaxed is `.monotonic`).
 //! - Const overloads: `getVertices` / `getVerticesMut` (a slice: the values can change, the number cannot),
 //!   `getVertex` / `getVertexMut`.
 //! - `initialize` returns `Allocator.Error`: it allocates the vertices, the rod states and the skin states. It reserves
@@ -29,20 +25,40 @@
 //!   Jolt dereferences the null pointer.
 //! - New vertices are zero before `initialize` fills them in: Jolt leaves `mCollisionPlane` uninitialized, the parity
 //!   reference zero-fills its allocations.
-//! - `is_stub`: soft bodies cannot be simulated yet. The simulation parity harness blocks the soft body scenes while it
-//!   is declared. Group S4 removes it.
+//! - `determineCollidingShapes` grows the colliding shape, sensor and leaf shape arrays with `allocator` (R16: a heap
+//!   allocation inside the SoftBodyCollide job). It returns `error.OutOfMemory` when an allocation fails: it stops the
+//!   broad phase query, keeps what it collected (the lists are valid but partial, R17) and still stores the number of
+//!   sensors. The PhysicsSystem latches the error.
+//! - Zolt (R20, UB1): a soft body without vertices. Jolt's state machine never leaves DetermineCollisionPlanes then (a
+//!   job spins forever, CustomUpdate asserts and continues with an uninitialized delta position). In Zolt the first
+//!   claimant of the empty vertex range advances the state, as the last batch would. The body simulates nothing.
+//! - `customUpdate` is literal: a single-threaded loop through the same state machine, with the locking interfaces. It
+//!   returns `error.OutOfMemory` when `determineCollidingShapes` cannot allocate. Then it clears the colliding shapes and
+//!   sensors and returns before the simulation: the vertices are unchanged. `SetPosition` on a body that was never added
+//!   does nothing, like Jolt.
+//! - `skinVertices` takes the joint matrices as a slice (Jolt: a pointer and `inNumJoints`, only used by an assert). It
+//!   returns `TempAllocator.Error` before it changes anything (Jolt's TempAllocatorImpl aborts).
+//! - `clearCollidingShapesAndSensors` (Zolt) is the end of UpdateRigidBodyVelocities: it releases the leaf shapes. The
+//!   SoftBodyFinalize job of a poisoned update calls it too (R17).
+//! - JPH_DEBUG_RENDERER (DrawVertices, DrawVertexVelocities, the Draw*Constraints functions, DrawRods, DrawRodStates,
+//!   DrawPredictedBounds and the DrawConstraints helper): TODO(debug_renderer), group D4.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Core = @import("../../Core/Core.zig");
 const math = @import("../../Math/Math.zig");
+const trig = @import("../../Math/Trigonometry.zig");
 const RefConst = @import("../../Core/Reference.zig").RefConst;
-const TempAllocator = @import("../../Core/TempAllocator.zig").TempAllocator;
+const TempAllocatorFile = @import("../../Core/TempAllocator.zig");
+const TempAllocator = TempAllocatorFile.TempAllocator;
+const TempArray = TempAllocatorFile.TempArray;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const RMat44 = @import("../../Math/Real.zig").RMat44;
 const AABox = @import("../../Geometry/AABox.zig").AABox;
+const Plane = @import("../../Geometry/Plane.zig").Plane;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const Body = @import("../Body/Body.zig").Body;
 const MotionType = @import("../Body/MotionType.zig").MotionType;
@@ -50,8 +66,17 @@ const MotionProperties = @import("../Body/MotionProperties.zig").MotionPropertie
 const MassProperties = @import("../Body/MassProperties.zig").MassProperties;
 const BodyInterface = @import("../Body/BodyInterface.zig").BodyInterface;
 const BodyLockInterface = @import("../Body/BodyLockInterface.zig").BodyLockInterface;
-const Shape = @import("../Collision/Shape/Shape.zig").Shape;
+const BodyLockRead = @import("../Body/BodyLock.zig").BodyLockRead;
+const ShapeFile = @import("../Collision/Shape/Shape.zig");
+const Shape = ShapeFile.Shape;
+const TransformedShapeCollector = ShapeFile.TransformedShapeCollector;
+const SubShapeIDCreator = @import("../Collision/Shape/SubShapeID.zig").SubShapeIDCreator;
+const TransformedShape = @import("../Collision/TransformedShape.zig").TransformedShape;
+const CollideShapeBodyCollector = @import("../Collision/BroadPhase/BroadPhaseQuery.zig").CollideShapeBodyCollector;
+const CollideSoftBodyVertexIterator = @import("../Collision/CollideSoftBodyVertexIterator.zig").CollideSoftBodyVertexIterator;
+const SimShapeFilterWrapper = @import("../Collision/SimShapeFilterWrapper.zig").SimShapeFilterWrapper;
 const PhysicsMaterial = @import("../Collision/PhysicsMaterial.zig").PhysicsMaterial;
+const ContactConstraintManager = @import("../Constraints/ContactConstraintManager.zig").ContactConstraintManager;
 const PhysicsSettings = @import("../PhysicsSettings.zig").PhysicsSettings;
 const PhysicsSystem = @import("../PhysicsSystem.zig").PhysicsSystem;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
@@ -59,16 +84,14 @@ const SoftBodyCreationSettings = @import("SoftBodyCreationSettings.zig").SoftBod
 const SoftBodySharedSettings = @import("SoftBodySharedSettings.zig").SoftBodySharedSettings;
 const SoftBodyVertex = @import("SoftBodyVertex.zig").SoftBodyVertex;
 const SoftBodyUpdateContext = @import("SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
+const SoftBodyContactSettings = @import("SoftBodyContactListener.zig").SoftBodyContactSettings;
+const SoftBodyManifold = @import("SoftBodyManifold.zig").SoftBodyManifold;
 
 /// This class contains the runtime information of a soft body.
 //
 // Based on: XPBD, Extended Position Based Dynamics, Matthias Muller, Ten Minute Physics
 // See: https://matthias-research.github.io/pages/tenMinutePhysics/09-xpbd.pdf
 pub const SoftBodyMotionProperties = struct {
-    /// Soft bodies cannot be simulated yet (the update is not ported, group S4). The simulation parity harness skips
-    /// the soft body scenes while this is declared.
-    pub const is_stub = true;
-
     pub const Vertex = SoftBodyVertex;
     pub const Edge = SoftBodySharedSettings.Edge;
     pub const RodStretchShear = SoftBodySharedSettings.RodStretchShear;
@@ -501,14 +524,54 @@ pub const SoftBodyMotionProperties = struct {
 
     /// Saving state for replay
     pub fn saveState(self: *const SoftBodyMotionProperties, stream: *StateRecorder) void {
-        _ = .{ self, stream };
-        @panic("SoftBodyMotionProperties.saveState: not ported yet (Phase 9 group S4)");
+        self.base.saveState(stream);
+
+        for (self.vertices.items) |*v| {
+            stream.write(v.position);
+            stream.write(v.velocity);
+        }
+
+        for (self.rod_states.items) |*r| {
+            stream.write(r.rotation);
+            stream.write(r.u.angular_velocity);
+        }
+
+        for (self.skin_state.items) |*s| {
+            stream.write(s.previous_position);
+            stream.write(s.position);
+            stream.write(s.normal);
+        }
+
+        stream.write(self.local_bounds.min);
+        stream.write(self.local_bounds.max);
+        stream.write(self.local_predicted_bounds.min);
+        stream.write(self.local_predicted_bounds.max);
     }
 
     /// Restoring state for replay
     pub fn restoreState(self: *SoftBodyMotionProperties, stream: *StateRecorder) void {
-        _ = .{ self, stream };
-        @panic("SoftBodyMotionProperties.restoreState: not ported yet (Phase 9 group S4)");
+        self.base.restoreState(stream);
+
+        for (self.vertices.items) |*v| {
+            stream.read(&v.position);
+            stream.read(&v.velocity);
+        }
+
+        for (self.rod_states.items) |*r| {
+            stream.read(&r.rotation);
+            stream.read(&r.u.angular_velocity);
+        }
+
+        for (self.skin_state.items) |*s| {
+            stream.read(&s.previous_position);
+            stream.read(&s.position);
+            stream.read(&s.normal);
+        }
+
+        stream.read(&self.local_bounds.min);
+        stream.read(&self.local_bounds.max);
+        stream.read(&self.local_predicted_bounds.min);
+        stream.read(&self.local_predicted_bounds.max);
     }
 
     /// Skin vertices to supplied joints, information is used by the skinned constraints.
@@ -517,8 +580,82 @@ pub const SoftBodyMotionProperties = struct {
     /// @param hard_skin_all Can be used to position all vertices on the skinned vertices and can be used to hard reset the soft body.
     /// @param temp_allocator Allocator.
     pub fn skinVertices(self: *SoftBodyMotionProperties, center_of_mass_transform: RMat44, joint_matrices: []const Mat44, hard_skin_all: bool, temp_allocator: TempAllocator) TempAllocator.Error!void {
-        _ = .{ self, center_of_mass_transform, joint_matrices, hard_skin_all, temp_allocator };
-        @panic("SoftBodyMotionProperties.skinVertices: not ported yet (Phase 9 group S4)");
+        const settings = self.settings.get().?;
+
+        // Calculate the skin matrices
+        const num_skin_matrices: u32 = @intCast(settings.inv_bind_matrices.items.len);
+        var skin_matrices = try TempArray(Mat44).alloc(temp_allocator, num_skin_matrices);
+        defer skin_matrices.free(temp_allocator);
+        for (skin_matrices.items, settings.inv_bind_matrices.items) |*s, *inv_bind_matrix| {
+            if (Core.enable_asserts) std.debug.assert(inv_bind_matrix.joint_index < joint_matrices.len);
+            s.* = joint_matrices[inv_bind_matrix.joint_index].mul(inv_bind_matrix.inv_bind);
+        }
+
+        // Skin the vertices
+        if (Core.debug_renderer) self.skin_state_transform = center_of_mass_transform;
+        const num_vertices: u32 = @intCast(settings.vertices.items.len);
+        if (Core.enable_asserts) std.debug.assert(self.skin_state.items.len == num_vertices);
+        const in_vertices = settings.vertices.items;
+        for (settings.skinned_constraints.items) |*s| {
+            // Get bind pose
+            if (Core.enable_asserts) std.debug.assert(s.vertex < num_vertices);
+            const bind_pos = Vec3.loadFloat3Unsafe(&in_vertices[s.vertex].position);
+
+            // Skin vertex
+            var pos = Vec3.zero();
+            for (s.weights) |w| {
+                // We assume that the first zero weight is the end of the list
+                if (w.weight == 0.0)
+                    break;
+
+                if (Core.enable_asserts) std.debug.assert(w.inv_bind_index < num_skin_matrices);
+                pos = pos.add(skin_matrices.items[w.inv_bind_index].mulVec3(bind_pos).mulScalar(w.weight));
+            }
+            const skin_state = &self.skin_state.items[s.vertex];
+            skin_state.previous_position = skin_state.position;
+            skin_state.position = pos;
+        }
+
+        // Calculate the normals
+        for (settings.skinned_constraints.items) |*s| {
+            var normal = Vec3.zero();
+            const num_faces = s.normal_info >> 24;
+            if (num_faces > 0) {
+                // Calculate normal
+                const first = s.normal_info & 0xffffff;
+                for (settings.skinned_constraint_normals.items[first .. first + num_faces]) |f| {
+                    const face = &settings.faces.items[f];
+                    const v0 = self.skin_state.items[face.vertex[0]].position;
+                    const v1 = self.skin_state.items[face.vertex[1]].position;
+                    const v2 = self.skin_state.items[face.vertex[2]].position;
+                    normal = normal.add(v1.sub(v0).cross(v2.sub(v0)).normalizedOr(Vec3.zero()));
+                }
+                normal = normal.normalizedOr(Vec3.zero());
+            }
+            self.skin_state.items[s.vertex].normal = normal;
+        }
+
+        if (hard_skin_all) {
+            // Hard skin all vertices and reset their velocities
+            for (settings.skinned_constraints.items) |*s| {
+                const vertex = &self.vertices.items[s.vertex];
+                const skin_state = &self.skin_state.items[s.vertex];
+                skin_state.previous_position = skin_state.position;
+                vertex.position = skin_state.position;
+                vertex.velocity = Vec3.zero();
+            }
+        } else if (!self.enable_skin_constraints) {
+            // Hard skin only the kinematic vertices as we will not solve the skin constraints later
+            for (settings.skinned_constraints.items) |*s| {
+                if (s.max_distance == 0.0) {
+                    const vertex = &self.vertices.items[s.vertex];
+                    vertex.position = self.skin_state.items[s.vertex].position;
+                }
+            }
+        }
+
+        // Indicate that the previous positions are valid for the coming update
+        self.skin_state_previous_position_valid = true;
     }
 
     /// This function allows you to update the soft body immediately without going through the PhysicsSystem.
@@ -532,9 +669,33 @@ pub const SoftBodyMotionProperties = struct {
     /// Note that this will bypass any sleep checks. Since the dynamic objects that the soft body touches
     /// will not move during this call, there can be simulation artifacts if you call this function multiple times
     /// without running the physics simulation step.
+    /// (Zolt: `error.OutOfMemory` when the colliding shapes cannot be stored. The colliding shapes are cleared then and
+    /// the soft body is not simulated.)
     pub fn customUpdate(self: *SoftBodyMotionProperties, delta_time: f32, soft_body: *Body, system: *PhysicsSystem) Allocator.Error!void {
-        _ = .{ self, delta_time, soft_body, system };
-        @panic("SoftBodyMotionProperties.customUpdate: not ported yet (Phase 9 group S4)");
+        // Create update context
+        var context: SoftBodyUpdateContext = .{};
+        self.initializeUpdateContext(delta_time, soft_body, system, &context);
+
+        // Determine bodies we're colliding with
+        self.determineCollidingShapes(&context, system, system.getBodyLockInterface()) catch |err| {
+            // Zolt: do not simulate with a partial list of colliding shapes, release their references
+            self.clearCollidingShapesAndSensors();
+            return err;
+        };
+
+        // Call the internal update until it finishes
+        const settings = system.getPhysicsSettings();
+        var status = self.parallelUpdate(&context, settings);
+        while (status == .did_work)
+            status = self.parallelUpdate(&context, settings);
+        if (Core.enable_asserts) std.debug.assert(status == .done);
+
+        // Update the state of the bodies we've collided with
+        self.updateRigidBodyVelocities(&context, system.getBodyInterfaceMut());
+
+        // Update position of the soft body
+        if (self.update_position)
+            system.getBodyInterfaceMut().setPosition(soft_body.getID(), soft_body.getPosition().addVec3(context.delta_position), .dont_activate);
     }
 
     ////////////////////////////////////////////////////////////
@@ -543,31 +704,1007 @@ pub const SoftBodyMotionProperties = struct {
 
     /// Initialize the update context. Not part of the public API.
     pub fn initializeUpdateContext(self: *SoftBodyMotionProperties, delta_time: f32, soft_body: *Body, system: *const PhysicsSystem, context: *SoftBodyUpdateContext) void {
-        _ = .{ self, delta_time, soft_body, system, context };
-        @panic("SoftBodyMotionProperties.initializeUpdateContext: not ported yet (Phase 9 group S4)");
+        // Store body
+        context.body = soft_body;
+        context.motion_properties = self;
+        context.contact_listener = system.getSoftBodyContactListener();
+        context.sim_shape_filter = system.getSimShapeFilter();
+
+        // Convert gravity to local space
+        context.center_of_mass_transform = soft_body.getCenterOfMassTransform();
+        context.gravity = context.center_of_mass_transform.multiply3x3Transposed(system.getGravity().mulScalar(self.base.getGravityFactor()));
+
+        // Calculate delta time for sub step
+        context.delta_time = delta_time;
+        context.sub_step_delta_time = delta_time / @as(f32, @floatFromInt(self.num_iterations));
+
+        // Calculate total displacement we'll have due to gravity over all sub steps
+        // The total displacement as produced by our integrator can be written as: Sum(i * g * dt^2, i = 0..mNumIterations).
+        // This is bigger than 0.5 * g * dt^2 because we first increment the velocity and then update the position
+        // Using Sum(i, i = 0..n) = n * (n + 1) / 2 we can write this as:
+        const num_iterations: f32 = @floatFromInt(self.num_iterations);
+        const num_iterations_plus_one: f32 = @floatFromInt(self.num_iterations +% 1);
+        context.displacement_due_to_gravity = context.gravity.mulScalar(0.5 * num_iterations * num_iterations_plus_one * math.square(context.sub_step_delta_time));
     }
 
     /// Do a broad phase check and collect all bodies that can possibly collide with this soft body. Not part of the public API.
+    /// (Zolt: `error.OutOfMemory` when the colliding shapes cannot be stored, the lists keep what was collected)
     pub fn determineCollidingShapes(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, system: *const PhysicsSystem, body_lock_interface: *const BodyLockInterface) Allocator.Error!void {
-        _ = .{ self, context, system, body_lock_interface };
-        @panic("SoftBodyMotionProperties.determineCollidingShapes: not ported yet (Phase 9 group S4)");
+        const Collector = struct {
+            pub const overrides = .{.addHit};
+
+            base: CollideShapeBodyCollector = .init(@This()),
+            context: *const SoftBodyUpdateContext,
+            inverse_transform: RMat44,
+            local_bounds: AABox,
+            world_bounds: AABox,
+            body_lock_interface: *const BodyLockInterface,
+            combine_friction: ContactConstraintManager.CombineFunction,
+            combine_restitution: ContactConstraintManager.CombineFunction,
+            shape_filter: *SimShapeFilterWrapper,
+            hits: *std.ArrayList(CollidingShape),
+            sensors: *std.ArrayList(CollidingSensor),
+            /// Zolt: grows the lists
+            allocator: Allocator,
+            /// Zolt: an allocation failed, the query stops
+            out_of_memory: bool = false,
+
+            pub fn addHit(c: *@This(), result: *const BodyID) void {
+                var lock: BodyLockRead = .init(c.body_lock_interface, result.*);
+                defer lock.deinit();
+                if (lock.succeeded()) {
+                    const soft_body: *const Body = c.context.body;
+                    const body = lock.getBody();
+                    if (body.isRigidBody() // TODO: We should support soft body vs soft body
+                    and soft_body.getCollisionGroup().canCollide(body.getCollisionGroup()) and c.world_bounds.overlaps(body.getWorldSpaceBounds().*)) // In the broadphase we widen the bounding box when a body moves, do a final check to see if the bounding boxes actually overlap
+                    {
+                        var settings: SoftBodyContactSettings = .{};
+                        settings.is_sensor = body.isSensor();
+
+                        if (c.context.contact_listener) |listener| {
+                            // Call the contact listener to see if we should accept this contact
+                            if (listener.onSoftBodyContactValidate(soft_body, body, &settings) != .accept_contact)
+                                return;
+
+                            // Check if there will be any interaction
+                            if (!settings.is_sensor and settings.inv_mass_scale1 == 0.0 and (body.getMotionType() != .dynamic or settings.inv_mass_scale2 == 0.0))
+                                return;
+                        } else {
+                            // If we have no contact listener, we can ignore sensors
+                            if (settings.is_sensor)
+                                return;
+                        }
+
+                        // Calculate transform of this body relative to the soft body
+                        const com = c.inverse_transform.mul(body.getCenterOfMassTransform()).toMat44();
+
+                        // Collect leaf shapes
+                        c.shape_filter.setBody2(body);
+                        const LeafShapeCollector = struct {
+                            pub const overrides = .{.addHit};
+
+                            base: TransformedShapeCollector = .init(@This()),
+                            hits: std.ArrayList(LeafShape) = .empty,
+                            /// Zolt: grows `hits`
+                            allocator: Allocator,
+                            /// Zolt: an allocation failed, the collection stops
+                            out_of_memory: bool = false,
+
+                            pub fn addHit(lc: *@This(), leaf: *const TransformedShape) void {
+                                lc.hits.ensureUnusedCapacity(lc.allocator, 1) catch {
+                                    lc.out_of_memory = true;
+                                    lc.base.forceEarlyOut();
+                                    return;
+                                };
+                                lc.hits.appendAssumeCapacity(.init(Mat44.rotationTranslation(leaf.shape_rotation, leaf.shape_position_com.toVec3()), leaf.getShapeScale(), leaf.shape.get().?));
+                            }
+                        };
+                        var collector: LeafShapeCollector = .{ .allocator = c.allocator };
+                        body.getShape().collectTransformedShapes(c.local_bounds, com.getTranslation(), com.getQuaternion(), Vec3.one(), .{}, &collector.base, c.shape_filter.getFilter());
+                        if (collector.out_of_memory) {
+                            c.outOfMemory(&collector.hits);
+                            return;
+                        }
+                        if (collector.hits.items.len == 0)
+                            return;
+
+                        if (settings.is_sensor) {
+                            c.sensors.ensureUnusedCapacity(c.allocator, 1) catch {
+                                c.outOfMemory(&collector.hits);
+                                return;
+                            };
+                            c.sensors.appendAssumeCapacity(.{
+                                .center_of_mass_transform = com,
+                                .shapes = collector.hits,
+                                .body_id = result.*,
+                                .has_contact = false, // Jolt leaves it uninitialized, DetermineSensorCollisions sets it
+                            });
+                        } else {
+                            c.hits.ensureUnusedCapacity(c.allocator, 1) catch {
+                                c.outOfMemory(&collector.hits);
+                                return;
+                            };
+                            // The members that Jolt leaves uninitialized for a body that is not dynamic are undefined
+                            var cs: CollidingShape = .{
+                                .center_of_mass_transform = com,
+                                .shapes = collector.hits,
+                                .body_id = result.*,
+                                .motion_type = body.getMotionType(),
+                                .inv_mass = undefined,
+                                .friction = c.combine_friction(soft_body, .empty, body, .empty),
+                                .restitution = c.combine_restitution(soft_body, .empty, body, .empty),
+                                .soft_body_inv_mass_scale = settings.inv_mass_scale1,
+                                .update_velocities = false,
+                                .inv_inertia = undefined,
+                                .linear_velocity = undefined,
+                                .angular_velocity = undefined,
+                                .original_linear_velocity = undefined,
+                                .original_angular_velocity = undefined,
+                            };
+                            if (cs.motion_type == .dynamic) {
+                                const mp = body.getMotionProperties();
+                                cs.inv_mass = settings.inv_mass_scale2 * mp.getInverseMass();
+                                cs.inv_inertia = mp.getInverseInertiaForRotation(cs.center_of_mass_transform.getRotation()).mulScalar(settings.inv_inertia_scale2);
+                                cs.linear_velocity = c.inverse_transform.multiply3x3(mp.getLinearVelocity());
+                                cs.original_linear_velocity = cs.linear_velocity;
+                                cs.angular_velocity = c.inverse_transform.multiply3x3(mp.getAngularVelocity());
+                                cs.original_angular_velocity = cs.angular_velocity;
+                            }
+                            c.hits.appendAssumeCapacity(cs);
+                        }
+                    }
+                }
+            }
+
+            /// Zolt: release the leaf shapes that could not be stored, latch the error and stop the query
+            fn outOfMemory(c: *@This(), leaf_shapes: *std.ArrayList(LeafShape)) void {
+                for (leaf_shapes.items) |*s| s.deinit();
+                leaf_shapes.deinit(c.allocator);
+                c.out_of_memory = true;
+                c.base.forceEarlyOut();
+            }
+        };
+
+        // Calculate local bounding box
+        var local_bounds = self.local_bounds;
+        local_bounds.encapsulate(self.local_predicted_bounds);
+        local_bounds.expandBy(Vec3.replicate(self.vertex_radius));
+
+        // Calculate world space bounding box
+        const world_bounds = local_bounds.transformedRMat44(context.center_of_mass_transform);
+
+        // Create shape filter
+        var shape_filter: SimShapeFilterWrapper = .init(context.sim_shape_filter, context.body);
+
+        var collector: Collector = .{
+            .context = context,
+            .inverse_transform = context.center_of_mass_transform.inversedRotationTranslation(),
+            .local_bounds = local_bounds,
+            .world_bounds = world_bounds,
+            .body_lock_interface = body_lock_interface,
+            .combine_friction = system.getCombineFriction(),
+            .combine_restitution = system.getCombineRestitution(),
+            .shape_filter = &shape_filter,
+            .hits = &self.colliding_shapes,
+            .sensors = &self.colliding_sensors,
+            .allocator = self.allocator,
+        };
+        const layer = context.body.getObjectLayer();
+        const broadphase_layer_filter = system.getDefaultBroadPhaseLayerFilter(layer);
+        const object_layer_filter = system.getDefaultLayerFilter(layer);
+        system.getBroadPhaseQuery().collideAABox(&world_bounds, &collector.base, .{ .broad_phase_layer_filter = &broadphase_layer_filter.base, .object_layer_filter = &object_layer_filter.base });
+        self.num_sensors.store(@intCast(self.colliding_sensors.items.len), .monotonic); // Workaround for TSAN false positive: store mCollidingSensors.size() in a separate variable.
+        if (collector.out_of_memory)
+            return error.OutOfMemory;
     }
 
     /// Update the soft body, will process a batch of work. Not part of the public API.
     pub fn parallelUpdate(self: *SoftBodyMotionProperties, context: *SoftBodyUpdateContext, physics_settings: *const PhysicsSettings) Status {
-        _ = .{ self, context, physics_settings };
-        @panic("SoftBodyMotionProperties.parallelUpdate: not ported yet (Phase 9 group S4)");
+        // Jolt's default case (JPH_ASSERT(false), NoWork) cannot happen: the switch covers every state
+        return switch (context.state.load(.acquire)) {
+            .determine_collision_planes => self.parallelDetermineCollisionPlanes(context),
+            .determine_sensor_collisions => self.parallelDetermineSensorCollisions(context),
+            .apply_constraints => self.parallelApplyConstraints(context, physics_settings),
+            .done => .done,
+        };
     }
 
     /// Update the velocities of all rigid bodies that we collided with. Not part of the public API.
     pub fn updateRigidBodyVelocities(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, body_interface: *BodyInterface) void {
-        _ = .{ self, context, body_interface };
-        @panic("SoftBodyMotionProperties.updateRigidBodyVelocities: not ported yet (Phase 9 group S4)");
+        // Write back velocity deltas
+        for (self.colliding_shapes.items) |*cs| {
+            if (cs.update_velocities)
+                body_interface.addLinearAndAngularVelocity(cs.body_id, context.center_of_mass_transform.multiply3x3(cs.linear_velocity.sub(cs.original_linear_velocity)), context.center_of_mass_transform.multiply3x3(cs.angular_velocity.sub(cs.original_angular_velocity)));
+        }
+
+        // Clear colliding shapes/sensors to avoid hanging on to references to shapes
+        self.clearCollidingShapesAndSensors();
+    }
+
+    /// Zolt: clear the colliding shapes and sensors and release their leaf shapes (`mCollidingShapes.clear();
+    /// mCollidingSensors.clear();`, the end of UpdateRigidBodyVelocities). Also used by the SoftBodyFinalize job of a
+    /// poisoned update (RemainingFeaturesArchitecture.md R17) and by customUpdate after an allocation failure.
+    pub fn clearCollidingShapesAndSensors(self: *SoftBodyMotionProperties) void {
+        for (self.colliding_shapes.items) |*cs| cs.deinit(self.allocator);
+        self.colliding_shapes.clearRetainingCapacity();
+        for (self.colliding_sensors.items) |*cs| cs.deinit(self.allocator);
+        self.colliding_sensors.clearRetainingCapacity();
     }
 
     /// Set a flag to indicate that the ContactListener::OnSoftBodyContactAdded should be called
     pub fn requestContactCallback(self: *SoftBodyMotionProperties) void {
         self.need_contact_callback.store(true, .monotonic);
+    }
+
+    /// Do a narrow phase check and determine the closest feature that we can collide with (private in Jolt)
+    fn determineCollisionPlanes(self: *SoftBodyMotionProperties, vertex_start: u32, num_vertices: u32) void {
+        // Generate collision planes
+        for (self.colliding_shapes.items, 0..) |*cs, cs_index| {
+            for (cs.shapes.items) |*shape| {
+                const vertices: CollideSoftBodyVertexIterator = .initFromVertices(self.vertices.items.ptr + vertex_start);
+                shape.shape.get().?.collideSoftBodyVertices(shape.transform, shape.scale, &vertices, num_vertices, @intCast(cs_index));
+            }
+        }
+    }
+
+    /// Do a narrow phase check between a single sensor and the soft body (private in Jolt)
+    fn determineSensorCollisions(self: *SoftBodyMotionProperties, sensor: *CollidingSensor) void {
+        var collision_plane: Plane = undefined;
+        var largest_penetration: f32 = -math.flt_max;
+        var colliding_shape_idx: i32 = -1;
+
+        // Collide sensor against all vertices (Jolt: &mVertices[0], also for an empty array: the pointer is not read then)
+        const vertices = self.vertices.items.ptr;
+        const vertex_iterator: CollideSoftBodyVertexIterator = .init(
+            .init(&vertices[0].position, .{ .stride = @sizeOf(SoftBodyVertex) }), // The position and mass come from the soft body vertex
+            .init(&vertices[0].inv_mass, .{ .stride = @sizeOf(SoftBodyVertex) }),
+            .init(&collision_plane, .{ .stride = 0 }), // We want all vertices to result in a single collision so we pass stride 0
+            .init(&largest_penetration, .{ .stride = 0 }),
+            .init(&colliding_shape_idx, .{ .stride = 0 }),
+        );
+        for (sensor.shapes.items) |*shape|
+            shape.shape.get().?.collideSoftBodyVertices(shape.transform, shape.scale, &vertex_iterator, @intCast(self.vertices.items.len), 0);
+        sensor.has_contact = largest_penetration > 0.0;
+
+        // We need a contact callback if one of the sensors collided
+        if (sensor.has_contact)
+            self.requestContactCallback();
+    }
+
+    /// Apply pressure force and update the vertex velocities (private in Jolt)
+    fn applyPressure(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext) void {
+        const dt = context.sub_step_delta_time;
+        const pressure_coefficient = self.pressure;
+        if (pressure_coefficient > 0.0) {
+            // Calculate total volume
+            const six_volume = self.getVolumeTimesSix();
+            if (six_volume > 0.0) {
+                // Apply pressure
+                // p = F / A = n R T / V (see https://en.wikipedia.org/wiki/Pressure)
+                // Our pressure coefficient is n R T so the impulse is:
+                // P = F dt = pressure_coefficient / V * A * dt
+                const coefficient = pressure_coefficient * dt / six_volume; // Need to still multiply by 6 for the volume
+                for (self.settings.get().?.faces.items) |*f| {
+                    const x1 = self.vertices.items[f.vertex[0]].position;
+                    const x2 = self.vertices.items[f.vertex[1]].position;
+                    const x3 = self.vertices.items[f.vertex[2]].position;
+
+                    const impulse = x2.sub(x1).cross(x3.sub(x1)).mulScalar(coefficient); // Area is half the cross product so need to still divide by 2
+                    for (f.vertex) |i| {
+                        const v = &self.vertices.items[i];
+                        v.velocity = v.velocity.add(impulse.mulScalar(v.inv_mass)); // Want to divide by 3 because we spread over 3 vertices
+                    }
+                }
+            }
+        }
+    }
+
+    /// Integrate the positions of all vertices by 1 sub step (private in Jolt)
+    fn integratePositions(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext) void {
+        const dt = context.sub_step_delta_time;
+        const linear_damping = math.max(@as(f32, 0.0), 1.0 - self.base.getLinearDamping() * dt); // See: MotionProperties::ApplyForceTorqueAndDragInternal
+
+        // Integrate
+        const sub_step_gravity = context.gravity.mulScalar(dt);
+        const sub_step_impulse = self.base.getAccumulatedForce().mulScalar(dt).divScalar(math.max(@as(f32, @floatFromInt(self.vertices.items.len)), 1.0));
+        for (self.vertices.items) |*v| {
+            if (v.inv_mass > 0.0) {
+                // Gravity
+                v.velocity = v.velocity.add(sub_step_gravity.add(sub_step_impulse.mulScalar(v.inv_mass)));
+
+                // Damping
+                v.velocity = v.velocity.mulScalar(linear_damping);
+            }
+
+            // Integrate
+            const position = v.position;
+            v.previous_position = position;
+            v.position = position.add(v.velocity.mulScalar(dt));
+        }
+
+        // Integrate rod orientations
+        const half_dt = 0.5 * dt;
+        for (self.rod_states.items) |*r| {
+            // Damping
+            r.u.angular_velocity = r.u.angular_velocity.mulScalar(linear_damping);
+
+            // Integrate
+            const rotation = r.rotation;
+            const delta_rotation = Quat.multiplyImaginary(r.u.angular_velocity, rotation).mulScalar(half_dt);
+            r.u = .{ .previous_rotation_internal = rotation }; // Overwrites mAngularVelocity
+            r.rotation = rotation.add(delta_rotation).normalized();
+        }
+    }
+
+    /// Enforce all bend constraints (private in Jolt)
+    fn applyDihedralBendConstraints(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, start_index: u32, end_index: u32) void {
+        const inv_dt_sq = 1.0 / math.square(context.sub_step_delta_time);
+
+        for (self.settings.get().?.dihedral_bend_constraints.items[start_index..end_index]) |*b| {
+            const v0 = &self.vertices.items[b.vertex[0]];
+            const v1 = &self.vertices.items[b.vertex[1]];
+            const v2 = &self.vertices.items[b.vertex[2]];
+            const v3 = &self.vertices.items[b.vertex[3]];
+
+            // Get positions
+            const x0 = v0.position;
+            const x1 = v1.position;
+            const x2 = v2.position;
+            const x3 = v3.position;
+
+            //    x2
+            // e1/  \e3
+            //  /    \
+            // x0----x1
+            //  \ e0 /
+            // e2\  /e4
+            //    x3
+
+            // Calculate the shared edge of the triangles
+            const e = x1.sub(x0);
+            const e_len = e.length();
+            if (e_len < 1.0e-6)
+                continue;
+
+            // Calculate the normals of the triangles
+            const x1x2 = x2.sub(x1);
+            const x1x3 = x3.sub(x1);
+            var n1 = x2.sub(x0).cross(x1x2);
+            var n2 = x1x3.cross(x3.sub(x0));
+            const n1_len_sq = n1.lengthSq();
+            const n2_len_sq = n2.lengthSq();
+            const n1_len_sq_n2_len_sq = n1_len_sq * n2_len_sq;
+            if (n1_len_sq_n2_len_sq < 1.0e-24)
+                continue;
+
+            // Calculate constraint equation
+            // As per "Strain Based Dynamics" Appendix A we need to negate the gradients when (n1 x n2) . e > 0, instead we make sure that the sign of the constraint equation is correct
+            const sign = math.sign(n2.cross(n1).dot(e));
+            const d = math.mulRSqrtApproximate(n1.dot(n2), n1_len_sq_n2_len_sq);
+            var c = sign * trig.acosApproximate(d) - b.initial_angle;
+
+            // Ensure the range is -PI to PI
+            if (c > math.pi) {
+                c -= 2.0 * math.pi;
+            } else if (c < -math.pi) {
+                c += 2.0 * math.pi;
+            }
+
+            // Calculate gradient of constraint equation
+            // Taken from "Strain Based Dynamics" - Matthias Muller et al. (Appendix A)
+            // with p1 = x2, p2 = x3, p3 = x0 and p4 = x1
+            // which in turn is based on "Simulation of Clothing with Folds and Wrinkles" - R. Bridson et al. (Section 4)
+            n1 = n1.divScalar(n1_len_sq);
+            n2 = n2.divScalar(n2_len_sq);
+            const d0c = n1.mulScalar(x1x2.dot(e)).add(n2.mulScalar(x1x3.dot(e))).divScalar(e_len);
+            const d2c = n1.mulScalar(e_len);
+            const d3c = n2.mulScalar(e_len);
+
+            // The sum of the gradients must be zero (see "Strain Based Dynamics" section 4)
+            const d1c = d0c.negate().sub(d2c).sub(d3c);
+
+            // Get masses
+            const w0 = v0.inv_mass;
+            const w1 = v1.inv_mass;
+            const w2 = v2.inv_mass;
+            const w3 = v3.inv_mass;
+
+            // Calculate -lambda
+            const denom = w0 * d0c.lengthSq() + w1 * d1c.lengthSq() + w2 * d2c.lengthSq() + w3 * d3c.lengthSq() + b.compliance * inv_dt_sq;
+            if (denom < 1.0e-12)
+                continue;
+            const minus_lambda = c / denom;
+
+            // Apply correction
+            v0.position = x0.sub(d0c.mulScalar(minus_lambda * w0));
+            v1.position = x1.sub(d1c.mulScalar(minus_lambda * w1));
+            v2.position = x2.sub(d2c.mulScalar(minus_lambda * w2));
+            v3.position = x3.sub(d3c.mulScalar(minus_lambda * w3));
+        }
+    }
+
+    /// Enforce all volume constraints (private in Jolt)
+    fn applyVolumeConstraints(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, start_index: u32, end_index: u32) void {
+        const inv_dt_sq = 1.0 / math.square(context.sub_step_delta_time);
+
+        // Satisfy volume constraints
+        for (self.settings.get().?.volume_constraints.items[start_index..end_index]) |*v| {
+            const v1 = &self.vertices.items[v.vertex[0]];
+            const v2 = &self.vertices.items[v.vertex[1]];
+            const v3 = &self.vertices.items[v.vertex[2]];
+            const v4 = &self.vertices.items[v.vertex[3]];
+
+            const x1 = v1.position;
+            const x2 = v2.position;
+            const x3 = v3.position;
+            const x4 = v4.position;
+
+            // Calculate constraint equation
+            const x1x2 = x2.sub(x1);
+            const x1x3 = x3.sub(x1);
+            const x1x4 = x4.sub(x1);
+            const c = @abs(x1x2.cross(x1x3).dot(x1x4)) - v.six_rest_volume;
+
+            // Calculate gradient of constraint equation
+            const d1c = x4.sub(x2).cross(x3.sub(x2));
+            const d2c = x1x3.cross(x1x4);
+            const d3c = x1x4.cross(x1x2);
+            const d4c = x1x2.cross(x1x3);
+
+            // Get masses
+            const w1 = v1.inv_mass;
+            const w2 = v2.inv_mass;
+            const w3 = v3.inv_mass;
+            const w4 = v4.inv_mass;
+
+            // Calculate -lambda
+            const denom = w1 * d1c.lengthSq() + w2 * d2c.lengthSq() + w3 * d3c.lengthSq() + w4 * d4c.lengthSq() + v.compliance * inv_dt_sq;
+            if (denom < 1.0e-12)
+                continue;
+            const minus_lambda = c / denom;
+
+            // Apply correction
+            v1.position = x1.sub(d1c.mulScalar(minus_lambda * w1));
+            v2.position = x2.sub(d2c.mulScalar(minus_lambda * w2));
+            v3.position = x3.sub(d3c.mulScalar(minus_lambda * w3));
+            v4.position = x4.sub(d4c.mulScalar(minus_lambda * w4));
+        }
+    }
+
+    /// Enforce all skin constraints (private in Jolt)
+    fn applySkinConstraints(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, start_index: u32, end_index: u32) void {
+        const settings = self.settings.get().?;
+
+        // Early out if nothing to do
+        if (settings.skinned_constraints.items.len == 0 or !self.enable_skin_constraints)
+            return;
+
+        // We're going to iterate multiple times over the skin constraints, update the skinned position accordingly.
+        // If we don't do this, the simulation will see a big jump and the first iteration will cause a big velocity change in the system.
+        const factor: f32 = if (self.skin_state_previous_position_valid) @as(f32, @floatFromInt(context.next_iteration.load(.monotonic))) / @as(f32, @floatFromInt(self.num_iterations)) else 1.0;
+        const prev_factor = 1.0 - factor;
+
+        // Apply the constraints
+        const vertices = self.vertices.items;
+        const skin_states = self.skin_state.items;
+        for (settings.skinned_constraints.items[start_index..end_index]) |*s| {
+            const vertex = &vertices[s.vertex];
+            const skin_state = &skin_states[s.vertex];
+            const max_distance = s.max_distance * self.skinned_max_distance_multiplier;
+
+            // Calculate the skinned position by interpolating from previous to current position
+            const skin_pos = skin_state.previous_position.mulScalar(prev_factor).add(skin_state.position.mulScalar(factor));
+
+            if (max_distance > 0.0) {
+                // Move vertex if it violated the back stop
+                if (s.back_stop_distance < max_distance) {
+                    // Center of the back stop sphere
+                    const center = skin_pos.sub(skin_state.normal.mulScalar(s.back_stop_distance + s.back_stop_radius));
+
+                    // Check if we're inside the back stop sphere
+                    const delta = vertex.position.sub(center);
+                    const delta_len_sq = delta.lengthSq();
+                    if (delta_len_sq < math.square(s.back_stop_radius)) {
+                        // Push the vertex to the surface of the back stop sphere
+                        const delta_len = @sqrt(delta_len_sq);
+                        vertex.position = if (delta_len > 0.0)
+                            center.add(delta.mulScalar(s.back_stop_radius / delta_len))
+                        else
+                            center.add(skin_state.normal.mulScalar(s.back_stop_radius));
+                    }
+                }
+
+                // Clamp vertex distance to max distance from skinned position
+                if (max_distance < math.flt_max) {
+                    const delta = vertex.position.sub(skin_pos);
+                    const delta_len_sq = delta.lengthSq();
+                    const max_distance_sq = math.square(max_distance);
+                    if (delta_len_sq > max_distance_sq)
+                        vertex.position = skin_pos.add(delta.mulScalar(@sqrt(max_distance_sq / delta_len_sq)));
+                }
+            } else {
+                // Kinematic: Just update the vertex position
+                vertex.position = skin_pos;
+            }
+        }
+    }
+
+    /// Enforce all edge constraints (private in Jolt)
+    fn applyEdgeConstraints(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, start_index: u32, end_index: u32) void {
+        const inv_dt_sq = 1.0 / math.square(context.sub_step_delta_time);
+
+        // Satisfy edge constraints
+        for (self.settings.get().?.edge_constraints.items[start_index..end_index]) |*e| {
+            const v0 = &self.vertices.items[e.vertex[0]];
+            const v1 = &self.vertices.items[e.vertex[1]];
+
+            // Get positions
+            const x0 = v0.position;
+            const x1 = v1.position;
+
+            // Calculate current length
+            const delta = x1.sub(x0);
+            const length = delta.length();
+
+            // Apply correction
+            const denom = length * (v0.inv_mass + v1.inv_mass + e.compliance * inv_dt_sq);
+            if (denom < 1.0e-12)
+                continue;
+            const correction = delta.mulScalar(length - e.rest_length).divScalar(denom);
+            v0.position = x0.add(correction.mulScalar(v0.inv_mass));
+            v1.position = x1.sub(correction.mulScalar(v1.inv_mass));
+        }
+    }
+
+    /// Enforce all rod stretch and shear constraints (private in Jolt)
+    fn applyRodStretchShearConstraints(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, start_index: u32, end_index: u32) void {
+        const inv_dt_sq = 1.0 / math.square(context.sub_step_delta_time);
+
+        for (self.settings.get().?.rod_stretch_shear_constraints.items[start_index..end_index], self.rod_states.items[start_index..end_index]) |*r, *rod_state| {
+            // Get positions
+            const v0 = &self.vertices.items[r.vertex[0]];
+            const v1 = &self.vertices.items[r.vertex[1]];
+
+            // Apply stretch and shear constraint
+            // Equation 37 from "Position and Orientation Based Cosserat Rods" - Kugelstadt and Schoemer - SIGGRAPH 2016
+            const denom = v0.inv_mass + v1.inv_mass + 4.0 * r.inv_mass * math.square(r.length) + r.compliance * inv_dt_sq;
+            if (denom < 1.0e-12)
+                continue;
+            const x0 = v0.position;
+            const x1 = v1.position;
+            var rotation = rod_state.rotation;
+            const d3 = rotation.rotateAxisZ();
+            const delta = x1.sub(x0).sub(d3.mulScalar(r.length)).divScalar(denom);
+            v0.position = x0.add(delta.mulScalar(v0.inv_mass));
+            v1.position = x1.sub(delta.mulScalar(v1.inv_mass));
+            // q * e3_bar = q * (0, 0, -1, 0) = [-qy, qx, -qw, qz]
+            const q_e3_bar = Quat.fromVec4(rotation.getXYZW().swizzle(.y, .x, .w, .z).flipSign(-1, 1, -1, 1));
+            rotation = rotation.add(Quat.multiplyImaginary(delta, q_e3_bar).mulScalar(2.0 * r.inv_mass * r.length));
+
+            // Renormalize
+            rod_state.rotation = rotation.normalized();
+        }
+    }
+
+    /// Enforce all rod bend and twist constraints (private in Jolt)
+    fn applyRodBendTwistConstraints(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, start_index: u32, end_index: u32) void {
+        const inv_dt_sq = 1.0 / math.square(context.sub_step_delta_time);
+
+        const settings = self.settings.get().?;
+        const rods = settings.rod_stretch_shear_constraints.items;
+
+        for (settings.rod_bend_twist_constraints.items[start_index..end_index]) |*r| {
+            const rod1_index = r.rod[0];
+            const rod2_index = r.rod[1];
+            const rod1 = &rods[rod1_index];
+            const rod2 = &rods[rod2_index];
+            const rod1_state = &self.rod_states.items[rod1_index];
+            const rod2_state = &self.rod_states.items[rod2_index];
+
+            // Apply bend and twist constraint
+            // Equation 40 from "Position and Orientation Based Cosserat Rods" - Kugelstadt and Schoemer - SIGGRAPH 2016
+            const denom = rod1.inv_mass + rod2.inv_mass + r.compliance * inv_dt_sq;
+            if (denom < 1.0e-12)
+                continue;
+            var rotation1 = rod1_state.rotation;
+            var rotation2 = rod2_state.rotation;
+            const omega = rotation1.conjugated().mul(rotation2);
+            const omega0 = r.omega0;
+            const omega_min_omega0 = omega.sub(omega0).getXYZW();
+            const omega_plus_omega0 = omega.add(omega0).getXYZW();
+            // Take the shortest of the two rotations
+            var delta_omega = Quat.fromVec4(Vec4.select(omega_min_omega0, omega_plus_omega0, Vec4.less(omega_plus_omega0.dotV(omega_plus_omega0), omega_min_omega0.dotV(omega_min_omega0))));
+            delta_omega = delta_omega.divScalar(denom);
+            delta_omega.setW(0.0); // Scalar part needs to be zero because the real part of the Darboux vector doesn't vanish, see text between eq. 39 and 40.
+            const delta_rod2 = rotation1.mulScalar(rod2.inv_mass).mul(delta_omega);
+            rotation1 = rotation1.add(rotation2.mulScalar(rod1.inv_mass).mul(delta_omega));
+            rotation2 = rotation2.sub(delta_rod2);
+
+            // Renormalize
+            rod1_state.rotation = rotation1.normalized();
+            rod2_state.rotation = rotation2.normalized();
+        }
+    }
+
+    /// Enforce all LRA constraints (private in Jolt)
+    fn applyLRAConstraints(self: *SoftBodyMotionProperties, start_index: u32, end_index: u32) void {
+        // Satisfy LRA constraints
+        const vertices = self.vertices.items;
+        for (self.settings.get().?.lra_constraints.items[start_index..end_index]) |*lra| {
+            if (Core.enable_asserts) std.debug.assert(lra.vertex[0] < vertices.len);
+            if (Core.enable_asserts) std.debug.assert(lra.vertex[1] < vertices.len);
+            const vertex0 = &vertices[lra.vertex[0]];
+            const vertex1 = &vertices[lra.vertex[1]];
+
+            const x0 = vertex0.position;
+            const delta = vertex1.position.sub(x0);
+            const delta_len_sq = delta.lengthSq();
+            if (delta_len_sq > math.square(lra.max_distance))
+                vertex1.position = x0.add(delta.mulScalar(math.mulRSqrtApproximate(lra.max_distance, delta_len_sq)));
+        }
+    }
+
+    /// Enforce all collision constraints & update all velocities according the XPBD algorithm (private in Jolt)
+    fn applyCollisionConstraintsAndUpdateVelocities(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext) void {
+        const dt = context.sub_step_delta_time;
+        const restitution_threshold = -2.0 * context.gravity.length() * dt;
+        const vertex_radius = self.vertex_radius;
+        for (self.vertices.items) |*v| {
+            if (v.inv_mass > 0.0) {
+                // Remember previous velocity for restitution calculations
+                const prev_v = v.velocity;
+
+                // XPBD velocity update
+                v.velocity = v.position.sub(v.previous_position).divScalar(dt);
+
+                // Satisfy collision constraint
+                comptime std.debug.assert(@as(i32, @bitCast(BodyID.broad_phase_bit)) < 0); // CCD contacts should be negative too (see: SoftBodyVertex::MarkCCDContact)
+                if (v.colliding_shape_index >= 0) {
+                    // Check if there is a collision
+                    const projected_distance = -v.collision_plane.signedDistance(v.position) + vertex_radius;
+                    if (projected_distance > 0.0) {
+                        // Remember that there was a collision
+                        v.has_contact = true;
+
+                        // We need a contact callback if one of the vertices collided
+                        self.requestContactCallback();
+
+                        // Note that we already calculated the velocity, so this does not affect the velocity (next iteration starts by setting previous position to current position)
+                        const cs = &self.colliding_shapes.items[@intCast(v.colliding_shape_index)];
+                        const contact_normal = v.collision_plane.getNormal();
+                        v.position = v.position.add(contact_normal.mulScalar(projected_distance));
+
+                        // Apply friction as described in Detailed Rigid Body Simulation with Extended Position Based Dynamics - Matthias Muller et al.
+                        // See section 3.6:
+                        // Inverse mass: w1 = 1 / m1, w2 = 1 / m2 + (r2 x n)^T I^-1 (r2 x n) = 0 for a static object
+                        // r2 are the contact point relative to the center of mass of body 2
+                        // Lagrange multiplier for contact: lambda = -c / (w1 + w2)
+                        // Where c is the constraint equation (the distance to the plane, negative because penetrating)
+                        // Contact normal force: fn = lambda / dt^2
+                        // Delta velocity due to friction dv = -vt / |vt| * min(dt * friction * fn * (w1 + w2), |vt|) = -vt * min(-friction * c / (|vt| * dt), 1)
+                        // Note that I think there is an error in the paper, I added a mass term, see: https://github.com/matthias-research/pages/issues/29
+                        // Relative velocity: vr = v1 - v2 - omega2 x r2
+                        // Normal velocity: vn = vr . contact_normal
+                        // Tangential velocity: vt = vr - contact_normal * vn
+                        // Impulse: p = dv / (w1 + w2)
+                        // Changes in particle velocities:
+                        // v1 = v1 + p / m1
+                        // v2 = v2 - p / m2 (no change when colliding with a static body)
+                        // w2 = w2 - I^-1 (r2 x p) (no change when colliding with a static body)
+                        if (cs.motion_type == .dynamic) {
+                            // Calculate normal and tangential velocity (equation 30)
+                            const r2 = v.position.sub(cs.center_of_mass_transform.getTranslation());
+                            const v2 = cs.getPointVelocity(r2);
+                            const relative_velocity = v.velocity.sub(v2);
+                            const v_normal = contact_normal.mulScalar(contact_normal.dot(relative_velocity));
+                            const v_tangential = relative_velocity.sub(v_normal);
+                            const v_tangential_length = v_tangential.length();
+
+                            // Calculate resulting inverse mass of vertex
+                            const vertex_inv_mass = cs.soft_body_inv_mass_scale * v.inv_mass;
+
+                            // Calculate inverse effective mass
+                            const r2_cross_n = r2.cross(contact_normal);
+                            const w2 = cs.inv_mass + r2_cross_n.dot(cs.inv_inertia.mulVec3(r2_cross_n));
+                            const w1_plus_w2 = vertex_inv_mass + w2;
+                            if (w1_plus_w2 > 0.0) {
+                                // Calculate delta relative velocity due to friction (modified equation 31)
+                                var dv: Vec3 = undefined;
+                                if (v_tangential_length > 0.0)
+                                    dv = v_tangential.mulScalar(math.min(cs.friction * projected_distance / (v_tangential_length * dt), 1.0))
+                                else
+                                    dv = Vec3.zero();
+
+                                // Calculate delta relative velocity due to restitution (equation 35)
+                                dv = dv.add(v_normal);
+                                const prev_v_normal = prev_v.sub(v2).dot(contact_normal);
+                                if (prev_v_normal < restitution_threshold)
+                                    dv = dv.add(contact_normal.mulScalar(cs.restitution * prev_v_normal));
+
+                                // Calculate impulse
+                                const p = dv.divScalar(w1_plus_w2);
+
+                                // Apply impulse to particle
+                                v.velocity = v.velocity.sub(p.mulScalar(vertex_inv_mass));
+
+                                // Apply impulse to rigid body
+                                cs.linear_velocity = cs.linear_velocity.add(p.mulScalar(cs.inv_mass));
+                                cs.angular_velocity = cs.angular_velocity.add(cs.inv_inertia.mulVec3(r2.cross(p)));
+
+                                // Mark that the velocities of the body we hit need to be updated
+                                cs.update_velocities = true;
+                            }
+                        } else if (cs.soft_body_inv_mass_scale > 0.0) {
+                            // Body is not movable, equations are simpler
+
+                            // Calculate normal and tangential velocity (equation 30)
+                            const v_normal = contact_normal.mulScalar(contact_normal.dot(v.velocity));
+                            const v_tangential = v.velocity.sub(v_normal);
+                            const v_tangential_length = v_tangential.length();
+
+                            // Apply friction (modified equation 31)
+                            if (v_tangential_length > 0.0)
+                                v.velocity = v.velocity.sub(v_tangential.mulScalar(math.min(cs.friction * projected_distance / (v_tangential_length * dt), 1.0)));
+
+                            // Apply restitution (equation 35)
+                            v.velocity = v.velocity.sub(v_normal);
+                            const prev_v_normal = prev_v.dot(contact_normal);
+                            if (prev_v_normal < restitution_threshold)
+                                v.velocity = v.velocity.sub(contact_normal.mulScalar(cs.restitution * prev_v_normal));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calculate the new angular velocity for all rods
+        const two_div_dt = 2.0 / dt;
+        for (self.rod_states.items) |*r|
+            r.u = .{ .angular_velocity = r.rotation.mul(r.u.previous_rotation_internal.conjugated()).getXYZ().mulScalar(two_div_dt) }; // Overwrites mPreviousRotationInternal
+    }
+
+    /// Update the state of the soft body (position, velocity, bounds) (private in Jolt)
+    fn updateSoftBodyState(self: *SoftBodyMotionProperties, context: *SoftBodyUpdateContext, physics_settings: *const PhysicsSettings) void {
+        // Contact callback
+        if (self.need_contact_callback.load(.monotonic)) {
+            if (context.contact_listener) |listener| {
+                // Remove non-colliding sensors from the list
+                var i = self.colliding_sensors.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    if (!self.colliding_sensors.items[i].has_contact) {
+                        // mCollidingSensors[i] = std::move(mCollidingSensors.back()); mCollidingSensors.pop_back();
+                        self.colliding_sensors.items[i].deinit(self.allocator);
+                        self.colliding_sensors.items[i] = self.colliding_sensors.items[self.colliding_sensors.items.len - 1];
+                        self.colliding_sensors.items.len -= 1;
+                    }
+                }
+
+                listener.onSoftBodyContactAdded(context.body, &SoftBodyManifold.init(self));
+
+                self.need_contact_callback.store(false, .monotonic);
+            }
+        }
+
+        // Loop through vertices once more to update the global state
+        const dt = context.delta_time;
+        const max_linear_velocity_sq = math.square(self.base.getMaxLinearVelocity());
+        var max_v_sq: f32 = 0.0;
+        var linear_velocity = Vec3.zero();
+        var angular_velocity = Vec3.zero();
+        self.local_bounds = .empty;
+        self.local_predicted_bounds = self.local_bounds;
+        for (self.vertices.items) |*v| {
+            // Calculate max square velocity
+            const v_sq = v.velocity.lengthSq();
+            max_v_sq = math.max(max_v_sq, v_sq);
+
+            // Clamp if velocity is too high
+            if (v_sq > max_linear_velocity_sq)
+                v.velocity = v.velocity.mulScalar(@sqrt(max_linear_velocity_sq / v_sq));
+
+            // Calculate local linear/angular velocity
+            linear_velocity = linear_velocity.add(v.velocity);
+            angular_velocity = angular_velocity.add(v.position.cross(v.velocity));
+
+            // Update local bounding box
+            self.local_bounds.encapsulateVec3(v.position);
+
+            // Create predicted position for the next frame in order to detect collisions before they happen
+            self.local_predicted_bounds.encapsulateVec3(v.position.add(v.velocity.mulScalar(dt)).add(context.displacement_due_to_gravity));
+
+            // Reset collision data for the next iteration
+            v.resetCollision();
+        }
+
+        // Calculate linear/angular velocity of the body by averaging all vertices and bringing the value to world space
+        const num_vertices_divider: f32 = @floatFromInt(@max(@as(i32, @intCast(self.vertices.items.len)), 1));
+        self.base.setLinearVelocityClamped(context.center_of_mass_transform.multiply3x3(linear_velocity.divScalar(num_vertices_divider)));
+        self.base.setAngularVelocity(context.center_of_mass_transform.multiply3x3(angular_velocity.divScalar(num_vertices_divider)));
+
+        if (self.update_position) {
+            // Shift the body so that the position is the center of the local bounds
+            const delta = self.local_bounds.getCenter();
+            context.delta_position = context.center_of_mass_transform.multiply3x3(delta);
+            for (self.vertices.items) |*v|
+                v.position = v.position.sub(delta);
+
+            // Update the skin state too since we will use this position as the previous position in the next update
+            for (self.skin_state.items) |*s|
+                s.position = s.position.sub(delta);
+            if (Core.debug_renderer) self.skin_state_transform.setTranslation(self.skin_state_transform.getTranslation().addVec3(context.delta_position));
+
+            // Offset bounds to match new position
+            self.local_bounds.translate(delta.negate());
+            self.local_predicted_bounds.translate(delta.negate());
+        } else context.delta_position = Vec3.zero();
+
+        // Test if we should go to sleep
+        if (self.base.getAllowSleeping()) {
+            if (max_v_sq > physics_settings.point_velocity_sleep_threshold) {
+                self.base.resetSleepTestTimer();
+                context.can_sleep = .cannot_sleep;
+            } else context.can_sleep = self.base.accumulateSleepTime(dt, physics_settings.time_before_sleep);
+        } else context.can_sleep = .cannot_sleep;
+
+        // If SkinVertices is not called after this then don't use the previous position as the skin is static
+        self.skin_state_previous_position_valid = false;
+
+        // Reset force accumulator
+        self.base.resetForce();
+    }
+
+    /// Start the first solver iteration (private in Jolt)
+    fn startFirstIteration(self: *SoftBodyMotionProperties, context: *SoftBodyUpdateContext) void {
+        // Start the first iteration
+        const iteration = context.next_iteration.fetchAdd(1, .monotonic);
+        if (Core.enable_asserts) std.debug.assert(iteration == 0);
+        self.startNextIteration(context);
+        context.state.store(.apply_constraints, .release);
+    }
+
+    /// Executes tasks that need to run on the start of an iteration (i.e. the stuff that can't run in parallel) (private in Jolt)
+    fn startNextIteration(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext) void {
+        self.applyPressure(context);
+
+        self.integratePositions(context);
+    }
+
+    /// Helper function for ParallelUpdate that works on batches of collision planes (private in Jolt)
+    fn parallelDetermineCollisionPlanes(self: *SoftBodyMotionProperties, context: *SoftBodyUpdateContext) Status {
+        const batch = SoftBodyUpdateContext.vertex_collision_batch;
+
+        // Do a relaxed read first to see if there is any work to do (this prevents us from doing expensive atomic operations and also prevents us from continuously incrementing the counter and overflowing it)
+        const num_vertices: u32 = @intCast(self.vertices.items.len);
+        if (hasVertexBatch(context.next_collision_vertex.load(.monotonic), num_vertices)) {
+            // Fetch next batch of vertices to process
+            const next_vertex = context.next_collision_vertex.fetchAdd(batch, .acquire);
+            if (hasVertexBatch(next_vertex, num_vertices)) {
+                // Process collision planes
+                const num_vertices_to_process = @min(batch, num_vertices - next_vertex);
+                if (num_vertices_to_process > 0) // Zolt (R20 UB1): an empty vertex range has nothing to collide
+                    self.determineCollisionPlanes(next_vertex, num_vertices_to_process);
+                const vertices_processed = context.num_collision_vertices_processed.fetchAdd(batch, .acq_rel) + num_vertices_to_process;
+                if (vertices_processed >= num_vertices) {
+                    // Determine next state
+                    if (self.colliding_sensors.items.len == 0)
+                        self.startFirstIteration(context)
+                    else
+                        context.state.store(.determine_sensor_collisions, .release);
+                }
+                return .did_work;
+            }
+        }
+
+        return .no_work;
+    }
+
+    /// Zolt: Jolt's `next_vertex < num_vertices`. Without vertices (R20 UB1) the first claimant of the empty vertex range
+    /// (next vertex 0) gets it too, so that it advances the state as the last batch would. Jolt never leaves the state.
+    fn hasVertexBatch(next_vertex: u32, num_vertices: u32) bool {
+        return next_vertex < num_vertices or (num_vertices == 0 and next_vertex == 0);
+    }
+
+    /// Helper function for ParallelUpdate that works on sensor collisions (private in Jolt)
+    fn parallelDetermineSensorCollisions(self: *SoftBodyMotionProperties, context: *SoftBodyUpdateContext) Status {
+        // Do a relaxed read to see if there are more sensors to process
+        const num_sensors = self.num_sensors.load(.monotonic);
+        if (context.next_sensor_index.load(.monotonic) < num_sensors) {
+            // Fetch next sensor to process
+            const sensor_index = context.next_sensor_index.fetchAdd(1, .acquire);
+            if (sensor_index < num_sensors) {
+                // Process this sensor
+                self.determineSensorCollisions(&self.colliding_sensors.items[sensor_index]);
+
+                // Determine next state
+                const sensors_processed = context.num_sensors_processed.fetchAdd(1, .acq_rel) + 1;
+                if (sensors_processed >= num_sensors)
+                    self.startFirstIteration(context);
+                return .did_work;
+            }
+        }
+
+        return .no_work;
+    }
+
+    /// Helper function for ParallelUpdate that works on batches of constraints (private in Jolt)
+    fn parallelApplyConstraints(self: *SoftBodyMotionProperties, context: *SoftBodyUpdateContext, physics_settings: *const PhysicsSettings) Status {
+        var num_groups: u32 = @intCast(self.settings.get().?.update_groups.items.len);
+        std.debug.assert(num_groups > 0); // SoftBodySharedSettings::Optimize should have been called! (initialize checks it, R20 UB2)
+        num_groups -= 1; // Last group is the non-parallel group, we don't want to execute it in parallel
+
+        // Do a relaxed read first to see if there is any work to do (this prevents us from doing expensive atomic operations and also prevents us from continuously incrementing the counter and overflowing it)
+        var next_group = context.next_constraint_group.load(.monotonic);
+        if (next_group < num_groups or (num_groups == 0 and next_group == 0)) {
+            // Fetch the next group process
+            next_group = context.next_constraint_group.fetchAdd(1, .acquire);
+            if (next_group < num_groups or (num_groups == 0 and next_group == 0)) {
+                var num_groups_processed: u32 = 0;
+                if (num_groups > 0) {
+                    // Process this group
+                    self.processGroup(context, next_group);
+
+                    // Increment total number of groups processed
+                    num_groups_processed = context.num_constraint_groups_processed.fetchAdd(1, .acq_rel) + 1;
+                }
+
+                if (num_groups_processed >= num_groups) {
+                    // Finish the iteration
+
+                    // Process non-parallel group
+                    self.processGroup(context, num_groups);
+
+                    self.applyCollisionConstraintsAndUpdateVelocities(context);
+
+                    const iteration = context.next_iteration.fetchAdd(1, .monotonic);
+                    if (iteration < self.num_iterations) {
+                        // Start a new iteration
+                        self.startNextIteration(context);
+
+                        // Reset group logic
+                        context.num_constraint_groups_processed.store(0, .release);
+                        context.next_constraint_group.store(0, .release);
+                    } else {
+                        // On final iteration we update the state
+                        self.updateSoftBodyState(context, physics_settings);
+
+                        context.state.store(.done, .release);
+                        return .done;
+                    }
+                }
+
+                return .did_work;
+            }
+        }
+        return .no_work;
+    }
+
+    /// Helper function to update a single group of constraints (private in Jolt)
+    fn processGroup(self: *SoftBodyMotionProperties, context: *const SoftBodyUpdateContext, group_index: u32) void {
+        // Determine start and end
+        const start: SoftBodySharedSettings.UpdateGroup = .{ .edge_end_index = 0, .lra_end_index = 0, .rod_stretch_shear_end_index = 0, .rod_bend_twist_end_index = 0, .dihedral_bend_end_index = 0, .volume_end_index = 0, .skinned_end_index = 0 };
+        const update_groups = self.settings.get().?.update_groups.items;
+        const prev = if (group_index > 0) &update_groups[group_index - 1] else &start;
+        const current = &update_groups[group_index];
+
+        // Process volume constraints
+        self.applyVolumeConstraints(context, prev.volume_end_index, current.volume_end_index);
+
+        // Process bend constraints
+        self.applyDihedralBendConstraints(context, prev.dihedral_bend_end_index, current.dihedral_bend_end_index);
+
+        // Process skinned constraints
+        self.applySkinConstraints(context, prev.skinned_end_index, current.skinned_end_index);
+
+        // Process edges
+        self.applyEdgeConstraints(context, prev.edge_end_index, current.edge_end_index);
+
+        // Process rods
+        self.applyRodStretchShearConstraints(context, prev.rod_stretch_shear_end_index, current.rod_stretch_shear_end_index);
+        self.applyRodBendTwistConstraints(context, prev.rod_bend_twist_end_index, current.rod_bend_twist_end_index);
+
+        // Process LRA constraints
+        self.applyLRAConstraints(prev.lra_end_index, current.lra_end_index);
     }
 
     /// Returns 6 times the volume of the soft body (private in Jolt)
