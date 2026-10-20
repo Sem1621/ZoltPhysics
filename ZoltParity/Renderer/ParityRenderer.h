@@ -32,6 +32,7 @@
 #include <Jolt/Renderer/DebugRenderer.h>
 #include <Jolt/Renderer/DebugRendererRecorder.h>
 #include <Jolt/Renderer/DebugRendererSimple.h>
+#include <Jolt/Geometry/OrientedBox.h>
 #include <ZoltParity/ParityHooks.h>
 
 #include <atomic>
@@ -329,9 +330,34 @@ private:
 /// The number of geometry slots of the op stream
 static constexpr uint32 cParityNumGeometrySlots = 16;
 
+/// The support function of the convex batch ops (D1): a box with rounded edges. ParityRenderer.zig has the same one.
+struct ParitySupport
+{
+	Vec3							GetSupport(Vec3Arg inDirection) const
+	{
+		Vec3 box(inDirection.GetX() < 0.0f? -mHalfExtent.GetX() : mHalfExtent.GetX(),
+				 inDirection.GetY() < 0.0f? -mHalfExtent.GetY() : mHalfExtent.GetY(),
+				 inDirection.GetZ() < 0.0f? -mHalfExtent.GetZ() : mHalfExtent.GetZ());
+		return box + mRadius * inDirection;
+	}
+
+	Vec3							mHalfExtent;
+	float							mRadius;
+};
+
+/// Read a support function of the op stream: Vec3 half extent, f32 radius
+inline ParitySupport ParityReadSupport(ParityOpReader &ioReader)
+{
+	ParitySupport support;
+	support.mHalfExtent = ioReader.ReadVec3();
+	support.mRadius = ioReader.Read<float>();
+	return support;
+}
+
 /// Executes the op stream of ParityRenderer.zig on inRenderer (D0's ops 1 to 15: the virtual functions and the helpers of
-/// DebugRenderer that D0 found ported). ioSimple and ioRecorder are the renderer as a DebugRendererSimple /
-/// DebugRendererRecorder (or null) for the ops that only they have.
+/// DebugRenderer that D0 found ported; D1's ops 16 to 36: the other helpers, NextFrame and the batch helpers). ioSimple
+/// and ioRecorder are the renderer as a DebugRendererSimple / DebugRendererRecorder (or null) for the ops that only they
+/// have.
 inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder)
 {
 	ParityOpReader r(inOps, inSize);
@@ -488,6 +514,258 @@ inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t i
 		case 15: // Create a batch and release it again
 			{
 				DebugRenderer::Batch batch = r.ReadAndCreateBatch(ioRenderer);
+				break;
+			}
+
+		// D1: the other helpers of DebugRenderer
+
+		case 16: // DrawWireBox(const OrientedBox &, ColorArg): 3 columns and the translation (Vec3), half extents
+			{
+				Vec3 c0 = r.ReadVec3();
+				Vec3 c1 = r.ReadVec3();
+				Vec3 c2 = r.ReadVec3();
+				Vec3 t = r.ReadVec3();
+				Vec3 half_extents = r.ReadVec3();
+				Color color = r.ReadColor();
+				ioRenderer.DrawWireBox(OrientedBox(Mat44(Vec4(c0, 0), Vec4(c1, 0), Vec4(c2, 0), Vec4(t, 1)), half_extents), color);
+				break;
+			}
+
+		case 17: // DrawCoordinateSystem
+			{
+				RMat44 transform = r.ReadRMat44();
+				float size = r.Read<float>();
+				ioRenderer.DrawCoordinateSystem(transform, size);
+				break;
+			}
+
+		case 18: // DrawPlane
+			{
+				RVec3 point = r.ReadRVec3();
+				Vec3 normal = r.ReadVec3();
+				Color color = r.ReadColor();
+				float size = r.Read<float>();
+				ioRenderer.DrawPlane(point, normal, color, size);
+				break;
+			}
+
+		case 19: // DrawWireTriangle
+			{
+				RVec3 v1 = r.ReadRVec3();
+				RVec3 v2 = r.ReadRVec3();
+				RVec3 v3 = r.ReadRVec3();
+				Color color = r.ReadColor();
+				ioRenderer.DrawWireTriangle(v1, v2, v3, color);
+				break;
+			}
+
+		case 20: // DrawWirePolygon: matrix, u32 count, count * Vec3, color, arrow size
+			{
+				RMat44 transform = r.ReadRMat44();
+				uint32 count = r.Read<uint32>();
+				Array<Vec3> vertices;
+				for (uint32 i = 0; i < count; ++i)
+					vertices.push_back(r.ReadVec3());
+				Color color = r.ReadColor();
+				float arrow_size = r.Read<float>();
+				ioRenderer.DrawWirePolygon(transform, vertices, color, arrow_size);
+				break;
+			}
+
+		case 21: // DrawWireSphere
+			{
+				RVec3 center = r.ReadRVec3();
+				float radius = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 level = r.Read<int32>();
+				ioRenderer.DrawWireSphere(center, radius, color, level);
+				break;
+			}
+
+		case 22: // DrawWireUnitSphere
+			{
+				RMat44 matrix = r.ReadRMat44();
+				Color color = r.ReadColor();
+				int32 level = r.Read<int32>();
+				ioRenderer.DrawWireUnitSphere(matrix, color, level);
+				break;
+			}
+
+		case 23: // DrawSphere
+			{
+				RVec3 center = r.ReadRVec3();
+				float radius = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawSphere(center, radius, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 24: // DrawUnitSphere
+			{
+				RMat44 matrix = r.ReadRMat44();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawUnitSphere(matrix, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 25: // DrawCapsule
+		case 26: // DrawCylinder
+			{
+				RMat44 matrix = r.ReadRMat44();
+				float half_height = r.Read<float>();
+				float radius = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				if (op == 25)
+					ioRenderer.DrawCapsule(matrix, half_height, radius, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				else
+					ioRenderer.DrawCylinder(matrix, half_height, radius, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 27: // DrawOpenCone
+			{
+				RVec3 top = r.ReadRVec3();
+				Vec3 axis = r.ReadVec3();
+				Vec3 perpendicular = r.ReadVec3();
+				float half_angle = r.Read<float>();
+				float length = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawOpenCone(top, axis, perpendicular, half_angle, length, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 28: // DrawSwingConeLimits
+			{
+				RMat44 matrix = r.ReadRMat44();
+				float swing_y_half_angle = r.Read<float>();
+				float swing_z_half_angle = r.Read<float>();
+				float edge_length = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawSwingConeLimits(matrix, swing_y_half_angle, swing_z_half_angle, edge_length, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 29: // DrawSwingPyramidLimits
+			{
+				RMat44 matrix = r.ReadRMat44();
+				float min_swing_y_angle = r.Read<float>();
+				float max_swing_y_angle = r.Read<float>();
+				float min_swing_z_angle = r.Read<float>();
+				float max_swing_z_angle = r.Read<float>();
+				float edge_length = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawSwingPyramidLimits(matrix, min_swing_y_angle, max_swing_y_angle, min_swing_z_angle, max_swing_z_angle, edge_length, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 30: // DrawPie
+			{
+				RVec3 center = r.ReadRVec3();
+				float radius = r.Read<float>();
+				Vec3 normal = r.ReadVec3();
+				Vec3 axis = r.ReadVec3();
+				float min_angle = r.Read<float>();
+				float max_angle = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawPie(center, radius, normal, axis, min_angle, max_angle, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 31: // DrawTaperedCylinder
+			{
+				RMat44 matrix = r.ReadRMat44();
+				float top = r.Read<float>();
+				float bottom = r.Read<float>();
+				float top_radius = r.Read<float>();
+				float bottom_radius = r.Read<float>();
+				Color color = r.ReadColor();
+				int32 cast_shadow = r.Read<int32>();
+				int32 draw_mode = r.Read<int32>();
+				ioRenderer.DrawTaperedCylinder(matrix, top, bottom, top_radius, bottom_radius, color, DebugRenderer::ECastShadow(cast_shadow), DebugRenderer::EDrawMode(draw_mode));
+				break;
+			}
+
+		case 32: // NextFrame
+			ioRenderer.NextFrame();
+			break;
+
+		case 33: // CreateTriangleBatch(const VertexList &, const IndexedTriangleNoMaterialList &), then release it
+			{
+				uint32 num_vertices = r.Read<uint32>();
+				VertexList vertices(num_vertices);
+				for (Float3 &v : vertices)
+				{
+					v.x = r.Read<float>();
+					v.y = r.Read<float>();
+					v.z = r.Read<float>();
+				}
+				uint32 num_triangles = r.Read<uint32>();
+				IndexedTriangleNoMaterialList triangles(num_triangles);
+				for (IndexedTriangleNoMaterial &t : triangles)
+					for (uint32 &idx : t.mIdx)
+						idx = r.Read<uint32>();
+				DebugRenderer::Batch batch = ioRenderer.CreateTriangleBatch(vertices, triangles);
+				break;
+			}
+
+		case 34: // CreateTriangleBatchForConvex: support, i32 level, u8 with bounds, u32 slot. With bounds the slot gets
+				 // new Geometry(batch, bounds), else the batch is released.
+			{
+				ParitySupport support = ParityReadSupport(r);
+				int32 level = r.Read<int32>();
+				uint8 with_bounds = r.Read<uint8>();
+				uint32 slot = r.Read<uint32>();
+				AABox bounds;
+				DebugRenderer::Batch batch = ioRenderer.CreateTriangleBatchForConvex([&support](Vec3Arg inDirection) { return support.GetSupport(inDirection); }, level, with_bounds != 0? &bounds : nullptr);
+				if (with_bounds != 0)
+					slots[slot] = new DebugRenderer::Geometry(batch, bounds);
+				break;
+			}
+
+		case 35: // CreateTriangleGeometryForConvex: support, u32 slot
+			{
+				ParitySupport support = ParityReadSupport(r);
+				uint32 slot = r.Read<uint32>();
+				slots[slot] = ioRenderer.CreateTriangleGeometryForConvex([&support](Vec3Arg inDirection) { return support.GetSupport(inDirection); });
+				break;
+			}
+
+		case 36: // Triangles made with both Triangle constructors: u32 count, per triangle u8 kind (1: with UV origin and
+				 // direction), Vec3 v1, v2, v3, Color [, Vec3 UV origin, Vec3 UV direction]. CreateTriangleBatch, then release.
+			{
+				uint32 count = r.Read<uint32>();
+				Array<DebugRenderer::Triangle> triangles;
+				for (uint32 i = 0; i < count; ++i)
+				{
+					uint8 kind = r.Read<uint8>();
+					Vec3 v1 = r.ReadVec3();
+					Vec3 v2 = r.ReadVec3();
+					Vec3 v3 = r.ReadVec3();
+					Color color = r.ReadColor();
+					if (kind == 0)
+						triangles.push_back(DebugRenderer::Triangle(v1, v2, v3, color));
+					else
+					{
+						Vec3 uv_origin = r.ReadVec3();
+						Vec3 uv_direction = r.ReadVec3();
+						triangles.push_back(DebugRenderer::Triangle(v1, v2, v3, color, uv_origin, uv_direction));
+					}
+				}
+				DebugRenderer::Batch batch = ioRenderer.CreateTriangleBatch(triangles);
 				break;
 			}
 

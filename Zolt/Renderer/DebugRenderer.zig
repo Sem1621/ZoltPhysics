@@ -18,7 +18,9 @@
 //!   fields of `flags` (`MeshShape::sDrawTriangleGroups` is `flags.mesh_shape.draw_triangle_groups`).
 //! - Drawing never fails for the caller (Jolt aborts on out of memory, its draw functions return void). An allocation
 //!   failure inside a draw call drops that primitive and sets the atomic `out_of_memory` latch, which the recorder
-//!   reports at `endFrame` (R5). Construction (`initialize`) returns `Allocator.Error`.
+//!   reports at `endFrame` (R5). A cached helper whose batch the renderer could not create (an empty Batch and the
+//!   latch) drops its geometry too, so that no incomplete geometry is cached. Construction (`initialize`) returns
+//!   `Allocator.Error`, also when the renderer latched a failure while it created a predefined batch.
 //! - The four caches (swing cone, swing pyramid, pie, tapered cylinder) and their `prev` twins are Zolt's port of Jolt's
 //!   UnorderedMap with Jolt's key hash and equality (R3). They are only searched, never iterated in a way that shows,
 //!   so a cache hit and a miss are Jolt's: -0 and +0 are the same key, a NaN key misses every time (also within a
