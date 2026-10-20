@@ -25,8 +25,8 @@ order) and the attributes (in order: the stream name, alias or not, enum or not,
 pending declaration is only checked for its name, kind and bases. port_status.py --check runs this check with
 `--complete`: Phase 8 is done, so a pending declaration fails CI.
 
-The Hair classes of Phase 9 (Physics/Hair) are skipped (S17). So is the attribute "mSoftBodies" of PhysicsScene:
-Zolt declares it in Phase 9 (S17, group S2). The SoftBody classes are checked (Phase 9 group S0).
+The Hair classes of Phase 9 (Physics/Hair) are skipped (S17). The SoftBody classes (Phase 9 group S0) and the
+attribute "mSoftBodies" of PhysicsScene (Phase 9 group S2) are checked.
 """
 import argparse
 import os
@@ -37,9 +37,6 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # Phase 9 (SerializationArchitecture.md S17): the Hair classes come with group H1
 EXCLUDED_DIRS = ("Jolt/Physics/Hair/",)
-
-# Attributes of Phase 9 classes in the classes of Phase 8 (class, stream name): Zolt declares them in Phase 9 (S17)
-EXCLUDED_ATTRIBUTES = {("PhysicsScene", "mSoftBodies")}
 
 # Classes that Jolt declares outside the class: Zolt declares them in this file (TypeDeclarations.zig)
 OUTSIDE_FILE = "Zolt/ObjectStream/TypeDeclarations.zig"
@@ -90,8 +87,6 @@ class JoltClass:
             function = ATTRIBUTE_MACROS[macro]
             member = parts[1].split(".")
             stream_name = parts[2].strip('"') if function in ("alias", "enumAlias") else parts[1]
-            if (name, stream_name) in EXCLUDED_ATTRIBUTES:
-                continue
             self.attributes.append((function, stream_name, member))
         self.declare = None
         if implement == "OUTSIDE_CLASS":
