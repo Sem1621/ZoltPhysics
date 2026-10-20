@@ -11,7 +11,7 @@
 //! - The op stream: `OpWriter` encodes the calls to make, `runOps` (and RunParityOps in ParityRenderer.h) executes
 //!   them on any renderer. Each group adds its ops in its own range of `Op`:
 //!     1..15     D0: the virtual functions and the helpers that D0 found ported
-//!     16..63    D1: the remaining helpers of DebugRenderer
+//!     16..63    D1: the remaining helpers of DebugRenderer (16..36 used)
 //!     64..95    D2: shapes
 //!     96..127   D3: constraints, bodies and the physics system
 //!     128..191  D4: characters, vehicles, skeletons, soft bodies
@@ -25,6 +25,9 @@ const zolt = @import("zolt");
 const Allocator = std.mem.Allocator;
 const AABox = zolt.AABox;
 const Color = zolt.Color;
+const Float3 = zolt.Float3;
+const IndexedTriangleNoMaterial = zolt.IndexedTriangleNoMaterial;
+const OrientedBox = zolt.OrientedBox;
 const DebugRenderer = zolt.DebugRenderer;
 const DebugRendererRecorder = zolt.DebugRendererRecorder;
 const DebugRendererSimple = zolt.DebugRendererSimple;
@@ -313,7 +316,76 @@ pub const Op = enum(u8) {
     set_camera_pos = 14,
     /// Create a batch and release it again: batch
     create_batch = 15,
+
+    // D1: the other helpers of DebugRenderer
+
+    /// DrawWireBox(OrientedBox): Vec3 columns 0..2, Vec3 translation, Vec3 half extents, Color
+    draw_wire_box_oriented = 16,
+    /// DrawCoordinateSystem: Affine, f32 size
+    draw_coordinate_system = 17,
+    /// DrawPlane: RVec3 point, Vec3 normal, Color, f32 size
+    draw_plane = 18,
+    /// DrawWireTriangle: RVec3 v1, v2, v3, Color
+    draw_wire_triangle = 19,
+    /// DrawWirePolygon: Affine, u32 count, count * Vec3, Color, f32 arrow size
+    draw_wire_polygon = 20,
+    /// DrawWireSphere: RVec3 center, f32 radius, Color, i32 level
+    draw_wire_sphere = 21,
+    /// DrawWireUnitSphere: Affine, Color, i32 level
+    draw_wire_unit_sphere = 22,
+    /// DrawSphere: RVec3 center, f32 radius, Color, i32 cast shadow, i32 draw mode
+    draw_sphere = 23,
+    /// DrawUnitSphere: Affine, Color, i32 cast shadow, i32 draw mode
+    draw_unit_sphere = 24,
+    /// DrawCapsule: Affine, f32 half height of the cylinder, f32 radius, Color, i32 cast shadow, i32 draw mode
+    draw_capsule = 25,
+    /// DrawCylinder: Affine, f32 half height, f32 radius, Color, i32 cast shadow, i32 draw mode
+    draw_cylinder = 26,
+    /// DrawOpenCone: RVec3 top, Vec3 axis, Vec3 perpendicular, f32 half angle, f32 length, Color, i32 cast shadow, i32 draw mode
+    draw_open_cone = 27,
+    /// DrawSwingConeLimits: Affine, f32 swing y half angle, f32 swing z half angle, f32 edge length, Color, i32 cast shadow, i32 draw mode
+    draw_swing_cone_limits = 28,
+    /// DrawSwingPyramidLimits: Affine, f32 min y, max y, min z, max z angle, f32 edge length, Color, i32 cast shadow, i32 draw mode
+    draw_swing_pyramid_limits = 29,
+    /// DrawPie: RVec3 center, f32 radius, Vec3 normal, Vec3 axis, f32 min angle, f32 max angle, Color, i32 cast shadow, i32 draw mode
+    draw_pie = 30,
+    /// DrawTaperedCylinder: Affine, f32 top, bottom, top radius, bottom radius, Color, i32 cast shadow, i32 draw mode
+    draw_tapered_cylinder = 31,
+    /// NextFrame
+    next_frame = 32,
+    /// CreateTriangleBatch(VertexList, IndexedTriangleNoMaterialList), then release it: u32 count, count * Float3, u32 count, count * 3 u32
+    create_batch_vertex_list = 33,
+    /// CreateTriangleBatchForConvex: support, i32 level, u8 with bounds, u32 slot (with bounds the slot gets
+    /// Geometry(batch, bounds), else the batch is released)
+    create_batch_for_convex = 34,
+    /// CreateTriangleGeometryForConvex: support, u32 slot
+    create_geometry_for_convex = 35,
+    /// Triangles made with both Triangle constructors, then CreateTriangleBatch and release: u32 count, per triangle u8 kind
+    /// (1: with UVs), Vec3 v1, v2, v3, Color [, Vec3 UV origin, Vec3 UV direction]
+    create_batch_triangles = 36,
     _,
+};
+
+/// The support function of the convex batch ops (ParitySupport in ParityRenderer.h): a box with rounded edges
+pub const Support = struct {
+    half_extent: Vec3,
+    radius: f32,
+
+    pub fn getSupport(self: *const Support, direction: Vec3) Vec3 {
+        const box = Vec3.init(
+            if (direction.getX() < 0.0) -self.half_extent.getX() else self.half_extent.getX(),
+            if (direction.getY() < 0.0) -self.half_extent.getY() else self.half_extent.getY(),
+            if (direction.getZ() < 0.0) -self.half_extent.getZ() else self.half_extent.getZ(),
+        );
+        return box.add(direction.mulScalar(self.radius));
+    }
+};
+
+/// A triangle of the op `create_batch_triangles`: made with Triangle.init, or Triangle.initUV when `uv` is set
+pub const TriangleData = struct {
+    v: [3]Vec3,
+    color: Color,
+    uv: ?struct { origin: Vec3, direction: Vec3 } = null,
 };
 
 /// The number of geometry slots of the op stream
@@ -529,6 +601,196 @@ pub const OpWriter = struct {
         try self.writeOp(.create_batch);
         try self.writeBatch(batch);
     }
+
+    // D1
+
+    fn writeModes(self: *OpWriter, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeRaw(cast_shadow);
+        try self.writeRaw(draw_mode);
+    }
+
+    fn writeSupport(self: *OpWriter, support: Support) Allocator.Error!void {
+        try self.writeVec3(support.half_extent);
+        try self.writeRaw(support.radius);
+    }
+
+    pub fn drawWireBoxOriented(self: *OpWriter, columns: [3]Vec3, translation: Vec3, half_extents: Vec3, color: Color) Allocator.Error!void {
+        try self.writeOp(.draw_wire_box_oriented);
+        for (columns) |c| try self.writeVec3(c);
+        try self.writeVec3(translation);
+        try self.writeVec3(half_extents);
+        try self.writeColor(color);
+    }
+
+    pub fn drawCoordinateSystem(self: *OpWriter, transform: Affine, size: f32) Allocator.Error!void {
+        try self.writeOp(.draw_coordinate_system);
+        try self.writeAffine(transform);
+        try self.writeRaw(size);
+    }
+
+    pub fn drawPlane(self: *OpWriter, point: RVec3, normal: Vec3, color: Color, size: f32) Allocator.Error!void {
+        try self.writeOp(.draw_plane);
+        try self.writeRVec3(point);
+        try self.writeVec3(normal);
+        try self.writeColor(color);
+        try self.writeRaw(size);
+    }
+
+    pub fn drawWireTriangle(self: *OpWriter, v1: RVec3, v2: RVec3, v3: RVec3, color: Color) Allocator.Error!void {
+        try self.writeOp(.draw_wire_triangle);
+        try self.writeRVec3(v1);
+        try self.writeRVec3(v2);
+        try self.writeRVec3(v3);
+        try self.writeColor(color);
+    }
+
+    pub fn drawWirePolygon(self: *OpWriter, transform: Affine, vertices: []const Vec3, color: Color, arrow_size: f32) Allocator.Error!void {
+        try self.writeOp(.draw_wire_polygon);
+        try self.writeAffine(transform);
+        try self.writeRaw(@as(u32, @intCast(vertices.len)));
+        for (vertices) |v| try self.writeVec3(v);
+        try self.writeColor(color);
+        try self.writeRaw(arrow_size);
+    }
+
+    pub fn drawWireSphere(self: *OpWriter, center: RVec3, radius: f32, color: Color, level: i32) Allocator.Error!void {
+        try self.writeOp(.draw_wire_sphere);
+        try self.writeRVec3(center);
+        try self.writeRaw(radius);
+        try self.writeColor(color);
+        try self.writeRaw(level);
+    }
+
+    pub fn drawWireUnitSphere(self: *OpWriter, matrix: Affine, color: Color, level: i32) Allocator.Error!void {
+        try self.writeOp(.draw_wire_unit_sphere);
+        try self.writeAffine(matrix);
+        try self.writeColor(color);
+        try self.writeRaw(level);
+    }
+
+    pub fn drawSphere(self: *OpWriter, center: RVec3, radius: f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_sphere);
+        try self.writeRVec3(center);
+        try self.writeRaw(radius);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn drawUnitSphere(self: *OpWriter, matrix: Affine, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_unit_sphere);
+        try self.writeAffine(matrix);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    /// DrawCapsule (op .draw_capsule) or DrawCylinder (op .draw_cylinder)
+    pub fn drawCapsuleOrCylinder(self: *OpWriter, op: Op, matrix: Affine, half_height: f32, radius: f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        std.debug.assert(op == .draw_capsule or op == .draw_cylinder);
+        try self.writeOp(op);
+        try self.writeAffine(matrix);
+        try self.writeRaw(half_height);
+        try self.writeRaw(radius);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn drawOpenCone(self: *OpWriter, top: RVec3, axis: Vec3, perpendicular: Vec3, half_angle: f32, length: f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_open_cone);
+        try self.writeRVec3(top);
+        try self.writeVec3(axis);
+        try self.writeVec3(perpendicular);
+        try self.writeRaw(half_angle);
+        try self.writeRaw(length);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn drawSwingConeLimits(self: *OpWriter, matrix: Affine, swing_y_half_angle: f32, swing_z_half_angle: f32, edge_length: f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_swing_cone_limits);
+        try self.writeAffine(matrix);
+        try self.writeRaw(swing_y_half_angle);
+        try self.writeRaw(swing_z_half_angle);
+        try self.writeRaw(edge_length);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn drawSwingPyramidLimits(self: *OpWriter, matrix: Affine, angles: [4]f32, edge_length: f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_swing_pyramid_limits);
+        try self.writeAffine(matrix);
+        for (angles) |a| try self.writeRaw(a);
+        try self.writeRaw(edge_length);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn drawPie(self: *OpWriter, center: RVec3, radius: f32, normal: Vec3, axis: Vec3, min_angle: f32, max_angle: f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_pie);
+        try self.writeRVec3(center);
+        try self.writeRaw(radius);
+        try self.writeVec3(normal);
+        try self.writeVec3(axis);
+        try self.writeRaw(min_angle);
+        try self.writeRaw(max_angle);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn drawTaperedCylinder(self: *OpWriter, matrix: Affine, key: [4]f32, color: Color, cast_shadow: i32, draw_mode: i32) Allocator.Error!void {
+        try self.writeOp(.draw_tapered_cylinder);
+        try self.writeAffine(matrix);
+        for (key) |k| try self.writeRaw(k);
+        try self.writeColor(color);
+        try self.writeModes(cast_shadow, draw_mode);
+    }
+
+    pub fn nextFrame(self: *OpWriter) Allocator.Error!void {
+        try self.writeOp(.next_frame);
+    }
+
+    pub fn createBatchVertexList(self: *OpWriter, vertices: []const Float3, triangles: []const IndexedTriangleNoMaterial) Allocator.Error!void {
+        try self.writeOp(.create_batch_vertex_list);
+        try self.writeRaw(@as(u32, @intCast(vertices.len)));
+        for (vertices) |v| {
+            try self.writeRaw(v.x);
+            try self.writeRaw(v.y);
+            try self.writeRaw(v.z);
+        }
+        try self.writeRaw(@as(u32, @intCast(triangles.len)));
+        for (triangles) |t| {
+            for (t.idx) |i| try self.writeRaw(i);
+        }
+    }
+
+    pub fn createBatchForConvex(self: *OpWriter, support: Support, level: i32, with_bounds: bool, slot: u32) Allocator.Error!void {
+        std.debug.assert(slot < num_geometry_slots);
+        try self.writeOp(.create_batch_for_convex);
+        try self.writeSupport(support);
+        try self.writeRaw(level);
+        try self.writeRaw(@as(u8, @intFromBool(with_bounds)));
+        try self.writeRaw(slot);
+    }
+
+    pub fn createGeometryForConvex(self: *OpWriter, support: Support, slot: u32) Allocator.Error!void {
+        std.debug.assert(slot < num_geometry_slots);
+        try self.writeOp(.create_geometry_for_convex);
+        try self.writeSupport(support);
+        try self.writeRaw(slot);
+    }
+
+    pub fn createBatchTriangles(self: *OpWriter, triangles: []const TriangleData) Allocator.Error!void {
+        try self.writeOp(.create_batch_triangles);
+        try self.writeRaw(@as(u32, @intCast(triangles.len)));
+        for (triangles) |t| {
+            try self.writeRaw(@as(u8, @intFromBool(t.uv != null)));
+            for (t.v) |v| try self.writeVec3(v);
+            try self.writeColor(t.color);
+            if (t.uv) |uv| {
+                try self.writeVec3(uv.origin);
+                try self.writeVec3(uv.direction);
+            }
+        }
+    }
 };
 
 /// Reads the op stream (the Zig twin of ParityOpReader)
@@ -571,6 +833,17 @@ const OpReader = struct {
         const min = self.readVec3();
         const max = self.readVec3();
         return AABox.init(min, max);
+    }
+
+    fn readSupport(self: *OpReader) Support {
+        const half_extent = self.readVec3();
+        return .{ .half_extent = half_extent, .radius = self.read(f32) };
+    }
+
+    fn readModes(self: *OpReader) DebugRenderer.SolidOptions {
+        const cast_shadow: CastShadow = @enumFromInt(self.read(i32));
+        const draw_mode: DrawMode = @enumFromInt(self.read(i32));
+        return .{ .cast_shadow = cast_shadow, .draw_mode = draw_mode };
     }
 
     fn readRMat44(self: *OpReader) RMat44 {
@@ -714,6 +987,174 @@ pub fn runOps(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, s
                 var batch = try r.readAndCreateBatch(allocator, renderer);
                 batch.deinit();
             },
+
+            // D1: the other helpers of DebugRenderer
+
+            .draw_wire_box_oriented => {
+                var columns: [3]Vec3 = undefined;
+                for (&columns) |*c| c.* = r.readVec3();
+                const t = r.readVec3();
+                const half_extents = r.readVec3();
+                const orientation = Mat44.init(Vec4.fromVec3W(columns[0], 0), Vec4.fromVec3W(columns[1], 0), Vec4.fromVec3W(columns[2], 0), Vec4.fromVec3W(t, 1));
+                renderer.drawWireBoxOriented(OrientedBox.init(orientation, half_extents), r.readColor());
+            },
+            .draw_coordinate_system => {
+                const transform = r.readRMat44();
+                renderer.drawCoordinateSystem(transform, .{ .size = r.read(f32) });
+            },
+            .draw_plane => {
+                const point = r.readRVec3();
+                const normal = r.readVec3();
+                const color = r.readColor();
+                renderer.drawPlane(point, normal, color, r.read(f32));
+            },
+            .draw_wire_triangle => {
+                const v1 = r.readRVec3();
+                const v2 = r.readRVec3();
+                const v3 = r.readRVec3();
+                renderer.drawWireTriangle(v1, v2, v3, r.readColor());
+            },
+            .draw_wire_polygon => {
+                const transform = r.readRMat44();
+                const count = r.read(u32);
+                const vertices = try allocator.alloc(Vec3, count);
+                defer allocator.free(vertices);
+                for (vertices) |*v| v.* = r.readVec3();
+                const color = r.readColor();
+                renderer.drawWirePolygon(transform, vertices, color, .{ .arrow_size = r.read(f32) });
+            },
+            .draw_wire_sphere => {
+                const center = r.readRVec3();
+                const radius = r.read(f32);
+                const color = r.readColor();
+                renderer.drawWireSphere(center, radius, color, .{ .level = @intCast(r.read(i32)) });
+            },
+            .draw_wire_unit_sphere => {
+                const matrix = r.readRMat44();
+                const color = r.readColor();
+                renderer.drawWireUnitSphere(matrix, color, .{ .level = @intCast(r.read(i32)) });
+            },
+            .draw_sphere => {
+                const center = r.readRVec3();
+                const radius = r.read(f32);
+                const color = r.readColor();
+                renderer.drawSphere(center, radius, color, r.readModes());
+            },
+            .draw_unit_sphere => {
+                const matrix = r.readRMat44();
+                const color = r.readColor();
+                renderer.drawUnitSphere(matrix, color, r.readModes());
+            },
+            .draw_capsule, .draw_cylinder => {
+                const matrix = r.readRMat44();
+                const half_height = r.read(f32);
+                const radius = r.read(f32);
+                const color = r.readColor();
+                const modes = r.readModes();
+                if (op == .draw_capsule)
+                    renderer.drawCapsule(matrix, half_height, radius, color, modes)
+                else
+                    renderer.drawCylinder(matrix, half_height, radius, color, modes);
+            },
+            .draw_open_cone => {
+                const top = r.readRVec3();
+                const axis = r.readVec3();
+                const perpendicular = r.readVec3();
+                const half_angle = r.read(f32);
+                const length = r.read(f32);
+                const color = r.readColor();
+                renderer.drawOpenCone(top, axis, perpendicular, half_angle, length, color, r.readModes());
+            },
+            .draw_swing_cone_limits => {
+                const matrix = r.readRMat44();
+                const swing_y_half_angle = r.read(f32);
+                const swing_z_half_angle = r.read(f32);
+                const edge_length = r.read(f32);
+                const color = r.readColor();
+                renderer.drawSwingConeLimits(matrix, swing_y_half_angle, swing_z_half_angle, edge_length, color, r.readModes());
+            },
+            .draw_swing_pyramid_limits => {
+                const matrix = r.readRMat44();
+                var angles: [4]f32 = undefined;
+                for (&angles) |*a| a.* = r.read(f32);
+                const edge_length = r.read(f32);
+                const color = r.readColor();
+                renderer.drawSwingPyramidLimits(matrix, angles[0], angles[1], angles[2], angles[3], edge_length, color, r.readModes());
+            },
+            .draw_pie => {
+                const center = r.readRVec3();
+                const radius = r.read(f32);
+                const normal = r.readVec3();
+                const axis = r.readVec3();
+                const min_angle = r.read(f32);
+                const max_angle = r.read(f32);
+                const color = r.readColor();
+                renderer.drawPie(center, radius, normal, axis, min_angle, max_angle, color, r.readModes());
+            },
+            .draw_tapered_cylinder => {
+                const matrix = r.readRMat44();
+                var key: [4]f32 = undefined;
+                for (&key) |*k| k.* = r.read(f32);
+                const color = r.readColor();
+                renderer.drawTaperedCylinder(matrix, key[0], key[1], key[2], key[3], color, r.readModes());
+            },
+            .next_frame => renderer.nextFrame(),
+            .create_batch_vertex_list => {
+                const vertices = try allocator.alloc(Float3, r.read(u32));
+                defer allocator.free(vertices);
+                for (vertices) |*v| {
+                    const x = r.read(f32);
+                    const y = r.read(f32);
+                    v.* = Float3.init(x, y, r.read(f32));
+                }
+                const triangles = try allocator.alloc(IndexedTriangleNoMaterial, r.read(u32));
+                defer allocator.free(triangles);
+                for (triangles) |*t| {
+                    for (&t.idx) |*i| i.* = r.read(u32);
+                }
+                var batch = renderer.createTriangleBatchVertexList(vertices, triangles);
+                batch.deinit();
+            },
+            .create_batch_for_convex => {
+                const support = r.readSupport();
+                const level = r.read(i32);
+                const with_bounds = r.read(u8) != 0;
+                const slot = r.read(u32);
+                var bounds: AABox = .empty;
+                const batch = renderer.createTriangleBatchForConvex(.init(&support, Support.getSupport), @intCast(level), .{ .out_bounds = if (with_bounds) &bounds else null });
+                if (with_bounds) {
+                    slots[slot].set(try Geometry.createWithBatch(allocator, batch, bounds));
+                } else {
+                    var b = batch;
+                    b.deinit();
+                }
+            },
+            .create_geometry_for_convex => {
+                const support = r.readSupport();
+                const slot = r.read(u32);
+                var geometry = renderer.createTriangleGeometryForConvex(.init(&support, Support.getSupport));
+                defer geometry.deinit();
+                slots[slot].set(geometry.get());
+            },
+            .create_batch_triangles => {
+                const triangles = try allocator.alloc(Triangle, r.read(u32));
+                defer allocator.free(triangles);
+                for (triangles) |*t| {
+                    const kind = r.read(u8);
+                    const v1 = r.readVec3();
+                    const v2 = r.readVec3();
+                    const v3 = r.readVec3();
+                    const color = r.readColor();
+                    if (kind == 0) {
+                        t.* = .init(v1, v2, v3, color);
+                    } else {
+                        const uv_origin = r.readVec3();
+                        t.* = .initUV(v1, v2, v3, color, uv_origin, r.readVec3());
+                    }
+                }
+                var batch = renderer.createTriangleBatch(triangles);
+                batch.deinit();
+            },
             _ => std.debug.panic("runOps: unknown op {d}", .{@intFromEnum(op)}),
         }
     }
@@ -786,12 +1227,6 @@ fn printRecord(side: []const u8, record: []const u8) void {
     const op_name = if (record.len == 0) "(end of log)" else if (std.enums.tagName(LogOp, @enumFromInt(record[0]))) |n| n else "(unknown op)";
     const shown = record[0..@min(record.len, 160)];
     std.debug.print("  {s}: {s} {x}{s}\n", .{ side, op_name, shown, if (shown.len < record.len) "..." else "" });
-}
-
-/// True when `prefix` is the start of `log` (D0: Zolt's initialize creates only the box, the first of Jolt's 25
-/// predefined batches; group D1 completes it)
-pub fn isPrefix(prefix: []const u8, log: []const u8) bool {
-    return std.mem.startsWith(u8, log, prefix);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

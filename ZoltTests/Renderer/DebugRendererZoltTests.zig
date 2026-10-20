@@ -136,7 +136,8 @@ test "DebugRenderer: GetConstraintSettings copies the draw size only with the op
 }
 
 /// Jolt's DebugRendererRecorder writes these bytes for the calls of the tests below
-/// (box_batch.jor: the first command that Jolt's Initialize writes, the box; Initialize then writes 24 more batches)
+/// (box_batch.jor: the first command that Jolt's Initialize writes, the box; Initialize then writes 24 more batches, the
+/// debug renderer parity compares all of them)
 const golden_box_batch = @embedFile("golden/box_batch.jor");
 const golden_frames = @embedFile("golden/box_draw_frames.jor");
 
@@ -150,9 +151,9 @@ test "DebugRenderer: the recorder writes Jolt's box batch of Initialize" {
     try recorder.init(allocator, std.testing.io, wrapper.streamOut());
     defer recorder.deinit();
 
-    // Jolt's Initialize writes 25 batches, the box first. Group D1 adds the other 24 (the box bytes stay the start of
-    // the stream). The vertices are Float3, so this holds in both precisions.
-    try expectEqualSlices(u8, golden_box_batch, out.written());
+    // Jolt's Initialize writes 25 batches, the box first. The vertices are Float3, so this holds in both precisions.
+    try expectEqualSlices(u8, golden_box_batch, out.written()[0..golden_box_batch.len]);
+    try expectEqual(@as(u32, 26), recorder.next_batch_id);
 }
 
 test "DebugRenderer: BoxShape.draw and the wire helpers write Jolt's .jor bytes" {
@@ -249,7 +250,7 @@ test "DebugRenderer: a user renderer receives the draw calls (bounds and LOD sca
     var renderer: LoggingRenderer = undefined;
     try renderer.init(std.testing.allocator);
     defer renderer.base.deinit();
-    try expectEqual(@as(u32, 1), renderer.num_batches); // The box of initialize
+    try expectEqual(@as(u32, 25), renderer.num_batches); // The predefined geometry of initialize
 
     renderer.base.drawWireBox(AABox.init(Vec3.zero(), Vec3.one()), Color.white);
     try expectEqual(@as(u32, 12), renderer.num_lines);
@@ -264,9 +265,9 @@ test "DebugRenderer: a user renderer receives the draw calls (bounds and LOD sca
 }
 
 test "DebugRenderer: an allocation failure while drawing is latched and reported by endFrame" {
-    var buffer: [4096]u8 = undefined;
-    var sink: std.Io.Writer = .fixed(&buffer);
-    var wrapper: zolt.StreamOutWrapper = .init(&sink);
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    var wrapper: zolt.StreamOutWrapper = .init(&sink.writer);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var recorder: zolt.DebugRendererRecorder = undefined;
     try recorder.init(failing.allocator(), std.testing.io, wrapper.streamOut());
