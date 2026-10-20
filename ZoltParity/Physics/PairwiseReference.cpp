@@ -202,16 +202,16 @@ struct NodeDesc
 {
 	uint32					mKind;
 	uint32					mMaterial;				// 0: no material, i + 1: GetMaterials()[i]
-	float					mF[16];					// Parameters of the kind (see PairwiseParity.zig)
+	float					mF[16];					// Parameters of the kind (see PairwiseParity.zig), soft body: mF[0] is the vertex radius, mF[1..5] the rotation
 	float					mConvexRadius;
 	uint32					mChild;					// Decorators: the inner node
-	uint32					mFirst;					// Compounds: first sub, hull: first float of the points, mesh: first float of the vertices, height field: first float of the samples
-	uint32					mCount;					// Number of subs / points / vertices, height field: sample count
-	uint32					mFirst2;				// Mesh: first triangle, height field: first byte of the material indices
-	uint32					mCount2;				// Mesh: number of triangles, height field: number of material indices
-	uint32					mNumMaterials;			// Mesh / height field: the first mNumMaterials of GetMaterials()
-	uint32					mParam0;				// Mesh: max triangles per leaf, height field: block size
-	uint32					mParam1;				// Mesh: per triangle user data, height field: bits per sample
+	uint32					mFirst;					// Compounds: first sub, hull: first float of the points, mesh / soft body: first float of the vertices, height field: first float of the samples
+	uint32					mCount;					// Number of subs / points / vertices (also soft body), height field: sample count
+	uint32					mFirst2;				// Mesh: first triangle, height field: first byte of the material indices, soft body: first face
+	uint32					mCount2;				// Mesh: number of triangles, height field: number of material indices, soft body: number of faces
+	uint32					mNumMaterials;			// Mesh / height field: the first mNumMaterials of GetMaterials(), soft body: the same, 0 keeps the default material list
+	uint32					mParam0;				// Mesh: max triangles per leaf, height field: block size, soft body: faces double sided
+	uint32					mParam1;				// Mesh: per triangle user data, height field: bits per sample, soft body: make rotation identity
 	uint32					mUserData;
 };
 
