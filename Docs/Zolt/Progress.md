@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 91.7%** of 90565 lines in scope · **Unit tests: 98.3%** of 18321 lines
+**Library: 92.9%** of 90565 lines in scope · **Unit tests: 98.3%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -20,14 +20,14 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Geometry` | 100% | 23 | 0 | 0 | 0 | 0 | 0 | 6307 |
 | `Jolt/Math` | 100% | 23 | 0 | 0 | 0 | 1 | 0 | 9290 |
 | `Jolt/ObjectStream` | 100% | 14 | 0 | 0 | 0 | 0 | 0 | 2841 |
-| `Jolt/Physics` | 70% | 11 | 2 | 0 | 0 | 0 | 0 | 5053 |
+| `Jolt/Physics` | 73% | 12 | 1 | 0 | 0 | 0 | 0 | 5053 |
 | `Jolt/Physics/Body` | 100% | 18 | 0 | 0 | 0 | 0 | 0 | 5146 |
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 76 | 0 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
 | `Jolt/Physics/Hair` | 0% | 0 | 0 | 0 | 4 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
-| `Jolt/Physics/SoftBody` | 57% | 5 | 3 | 0 | 0 | 0 | 0 | 3880 |
+| `Jolt/Physics/SoftBody` | 80% | 7 | 1 | 0 | 0 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | 65% | 3 | 1 | 0 | 0 | 0 | 0 | 1754 |
 | `Jolt/Shaders` | 31% | 13 | 0 | 0 | 31 | 0 | 0 | 1563 |
@@ -238,7 +238,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics — 70%</summary>
+<details><summary>Jolt/Physics — 73%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -248,7 +248,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `IslandBuilder.cpp`, `IslandBuilder.h` | 519 | ✅ complete | `Zolt/Physics/IslandBuilder.zig` |
 | `LargeIslandSplitter.cpp`, `LargeIslandSplitter.h` | 645 | ✅ complete | `Zolt/Physics/LargeIslandSplitter.zig` |
 | `PhysicsLock.h` | 144 | ✅ complete | `Zolt/Physics/PhysicsLock.zig` |
-| `PhysicsScene.cpp`, `PhysicsScene.h` | 298 | 🟡 partial | `Zolt/Physics/PhysicsScene.zig` |
+| `PhysicsScene.cpp`, `PhysicsScene.h` | 298 | ✅ complete | `Zolt/Physics/PhysicsScene.zig` |
 | `PhysicsSettings.h` | 89 | ✅ complete | `Zolt/Physics/PhysicsSettings.zig` |
 | `PhysicsStepListener.h` | 30 | ✅ complete | `Zolt/Physics/PhysicsStepListener.zig` |
 | `PhysicsSystem.cpp`, `PhysicsSystem.h` | 2755 | 🟡 partial | `Zolt/Physics/PhysicsSystem.zig` |
@@ -438,16 +438,16 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/SoftBody — 57%</summary>
+<details><summary>Jolt/Physics/SoftBody — 80%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
 | `SoftBodyContactListener.h` | 46 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyContactListener.zig` |
-| `SoftBodyCreationSettings.cpp`, `SoftBodyCreationSettings.h` | 170 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodyCreationSettings.zig` |
+| `SoftBodyCreationSettings.cpp`, `SoftBodyCreationSettings.h` | 170 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyCreationSettings.zig` |
 | `SoftBodyManifold.h` | 65 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyManifold.zig` |
 | `SoftBodyMotionProperties.cpp`, `SoftBodyMotionProperties.h` | 1553 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodyMotionProperties.zig` |
 | `SoftBodyShape.cpp`, `SoftBodyShape.h` | 345 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyShape.zig` |
-| `SoftBodySharedSettings.cpp`, `SoftBodySharedSettings.h` | 1611 | 🟡 partial | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
+| `SoftBodySharedSettings.cpp`, `SoftBodySharedSettings.h` | 1611 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodySharedSettings.zig` |
 | `SoftBodyUpdateContext.h` | 53 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyUpdateContext.zig` |
 | `SoftBodyVertex.h` | 37 | ✅ complete | `Zolt/Physics/SoftBody/SoftBodyVertex.zig` |
 
