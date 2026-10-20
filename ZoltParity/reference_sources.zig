@@ -46,6 +46,7 @@ pub const files = [_][]const u8{
     "Physics/SkeletonReference.cpp",
     "Physics/SoftBodyReference.cpp",
     "Physics/SoftBodySettingsReference.cpp",
+    "Physics/SoftBodyUpdateReference.cpp",
     "Physics/TriangleShapeReference.cpp",
     "Physics/TrianglesReference.cpp",
     "Physics/VehiclePartsReference.cpp",

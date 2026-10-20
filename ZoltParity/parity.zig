@@ -61,6 +61,7 @@ test {
     _ = @import("Physics/SkeletonParity.zig");
     _ = @import("Physics/SoftBodyParity.zig");
     _ = @import("Physics/SoftBodySettingsParity.zig");
+    _ = @import("Physics/SoftBodyUpdateParity.zig");
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");
     _ = @import("Physics/VehiclePartsParity.zig");
