@@ -36,7 +36,8 @@
 //!   GetSoftBodyCreationSettings, with and without the maps. The scenes of "PhysicsScene parity" have soft bodies:
 //!   SaveBinaryState (soft bodies always save their shared settings and materials), sRestoreFromBinaryState, CreateBodies
 //!   (the active soft bodies; SaveState skips the soft bodies, whose state SoftBodyParity.zig and SimulationParity.zig
-//!   compare) and FromPhysicsSystem.
+//!   compare) and FromPhysicsSystem. Constraints also connect soft bodies. FromPhysicsSystem stores the index of the
+//!   next rigid body for a soft body (Jolt's quirk, R20), so its bytes compare that index.
 //! The DeterminismLog text is not compared here: the C++ library is built without JPH_ENABLE_DETERMINISM_LOG (see
 //! ZoltTests/Physics/DeterminismLogTests.zig).
 
@@ -260,12 +261,13 @@ const scene_constraint_kinds: []const SceneConstraintKind = blk: {
 /// ConstraintsParity.makeDescriptionSettings, the slot of the kind). The C ABI passes the body indices and the
 /// descriptions as two arrays (`jolt_bi_scene_save`).
 const SceneConstraint = struct {
-    /// Index in the bodies of the scene or PhysicsScene.fixed_to_world
+    /// Index in the bodies of the scene or PhysicsScene.fixed_to_world. CreateBodies creates the soft bodies after the
+    /// bodies, so index `num_bodies + i` is soft body i.
     bodies: [2]u32,
     settings: ConstraintsParity.CSSettings,
 
     /// A random constraint of a random kind of `scene_constraint_kinds` between the bodies of a scene with `num_bodies`
-    /// bodies (and the world)
+    /// bodies and soft bodies together (and the world)
     fn random(rng: *Rng, num_bodies: u32) SceneConstraint {
         const kind = scene_constraint_kinds[rng.intRange(usize, 0, scene_constraint_kinds.len - 1)];
         const body2 = rng.intRange(u32, 0, num_bodies - 1);
@@ -2116,6 +2118,7 @@ test "PhysicsScene parity: binary state and CreateBodies" {
     var total_constraints: u32 = 0;
     var total_soft_bodies: u32 = 0;
     var num_created_soft_bodies: u32 = 0;
+    var num_created_soft_body_constraints: u32 = 0;
     var kind_counts: std.EnumArray(SceneConstraintKind, u32) = .initFill(0);
 
     for (0..300) |iteration| {
@@ -2128,17 +2131,6 @@ test "PhysicsScene parity: binary state and CreateBodies" {
         var descs: [10]BodyDesc = undefined;
         const num_bodies = rng.intRange(u32, 0, descs.len);
         for (descs[0..num_bodies]) |*d| d.* = randomBodyDesc(&rng, @intCast(table_descs.shapes.len), @intCast(table_descs.filters.len), .{ .allow_no_shape = !save_shapes });
-        var constraints: [6]SceneConstraint = undefined;
-        const num_constraints: u32 = if (num_bodies == 0) 0 else rng.intRange(u32, 0, constraints.len);
-        for (constraints[0..num_constraints]) |*c| c.* = SceneConstraint.random(&rng, num_bodies);
-        total_constraints += num_constraints;
-        var constraint_bodies: [constraints.len][2]u32 = undefined;
-        var constraint_settings: [constraints.len]ConstraintsParity.CSSettings = undefined;
-        for (constraints[0..num_constraints], 0..) |*c, k| {
-            constraint_bodies[k] = c.bodies;
-            constraint_settings[k] = c.settings;
-            kind_counts.getPtr(@enumFromInt(c.settings.kind)).* += 1;
-        }
 
         // Soft bodies with shared settings (a scene always saves them)
         var shared_table: SharedTable = undefined;
@@ -2149,6 +2141,28 @@ test "PhysicsScene parity: binary state and CreateBodies" {
         const num_soft_bodies = rng.intRange(u32, 0, soft_descs.len);
         for (soft_descs[0..num_soft_bodies]) |*d| d.* = randomSoftBodyDesc(&rng, shared_table.len, @intCast(table_descs.filters.len), .{});
         total_soft_bodies += num_soft_bodies;
+
+        // Constraints between the bodies, the soft bodies and the world. For a soft body FromPhysicsSystem stores the
+        // index of the next rigid body (Jolt's quirk, R20), so the CreateBodies snapshot compares that index.
+        var constraints: [6]SceneConstraint = undefined;
+        const num_scene_bodies = num_bodies + num_soft_bodies;
+        const num_constraints: u32 = if (num_scene_bodies == 0) 0 else rng.intRange(u32, 0, constraints.len);
+        for (constraints[0..num_constraints]) |*c| c.* = SceneConstraint.random(&rng, num_scene_bodies);
+        total_constraints += num_constraints;
+        var num_soft_body_constraints: u32 = 0;
+        var constraint_bodies: [constraints.len][2]u32 = undefined;
+        var constraint_settings: [constraints.len]ConstraintsParity.CSSettings = undefined;
+        for (constraints[0..num_constraints], 0..) |*c, k| {
+            constraint_bodies[k] = c.bodies;
+            constraint_settings[k] = c.settings;
+            kind_counts.getPtr(@enumFromInt(c.settings.kind)).* += 1;
+            for (c.bodies) |b| {
+                if (b != PhysicsScene.fixed_to_world and b >= num_bodies) {
+                    num_soft_body_constraints += 1;
+                    break;
+                }
+            }
+        }
 
         // Zolt
         var objects: TableObjects = undefined;
@@ -2267,6 +2281,7 @@ test "PhysicsScene parity: binary state and CreateBodies" {
             create_checker.check(.{ iteration, max_bodies }, std.mem.eql(u8, zolt_snapshot.getData(), big_buffer2[0..snapshot_size]), true);
             if (zolt_result & 1 == 0) num_out_of_bodies += 1;
             if (zolt_result & 1 != 0) num_created_soft_bodies += num_soft_bodies;
+            if (zolt_result & 1 != 0) num_created_soft_body_constraints += num_soft_body_constraints;
             if (invalid_scale) {
                 for (descs[0..num_bodies]) |*d| {
                     if (d.shape == 7) {
@@ -2284,6 +2299,7 @@ test "PhysicsScene parity: binary state and CreateBodies" {
     try std.testing.expect(total_constraints > 300);
     try std.testing.expect(total_soft_bodies > 300);
     try std.testing.expect(num_created_soft_bodies > 150);
+    try std.testing.expect(num_created_soft_body_constraints > 100);
     for (scene_constraint_kinds) |kind| {
         if (kind_counts.get(kind) < 300 / scene_constraint_kinds.len) {
             std.debug.print("PhysicsScene parity: {d} constraints of kind {t}\n", .{ kind_counts.get(kind), kind });
