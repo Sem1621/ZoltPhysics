@@ -9,9 +9,9 @@
 //!   translated hulls, a dynamic hull. Hair collects ConvexHullShape leaves only, so it must ignore the boxes, spheres
 //!   and capsules, a sensor hull, a hull in a layer that does not collide with the hair and a hull outside the bounds.
 //! - The settings: the procedural grooms of the HairSettings layer (HairSettingsParity.zig): straight and curly strands
-//!   of different lengths, several materials with a simulation fraction below 1, the scalp of Assets/face.bin with its
-//!   skin or without a scalp. The Zig side runs InitRenderAndSimulationStrands and Init, both sides restore the
-//!   SaveBinaryState bytes and run InitCompute.
+//!   of different lengths, or all of the same length (no padding vertices), several materials with a simulation fraction
+//!   below 1, the scalp of Assets/face.bin with its skin or without a scalp. The Zig side runs
+//!   InitRenderAndSimulationStrands and Init, both sides restore the SaveBinaryState bytes and run InitCompute.
 //! - One face scene gives the scalp vertices and triangles from outside (SetScalpVerticesCB, SetScalpTrianglesCB) and
 //!   moves them with SetScalpToHead.
 //! - The operations: Hair::Update with delta times 0, 1/60, 1/90, odd values and values above mMaxDeltaTime, with the
@@ -451,6 +451,8 @@ fn zoltRun(allocator: Allocator, scene: *const Scene, t: *Transcript, coverage: 
         var in = zolt.StreamInWrapper.init(&reader);
         try settings_ptr.restoreBinaryState(in.streamIn());
     }
+    if (settings_ptr.getNumVerticesPadded() == settings_ptr.sim_vertices.items.len)
+        coverage.uniform_scenes += 1;
 
     // The compute system, the shaders and the queue
     var compute_system = try ComputeSystemCPU.create(allocator);
@@ -606,6 +608,8 @@ const Coverage = struct {
     skinned_updates: u32 = 0,
     /// Updates that interpolated the roots to the skinned targets
     interpolated_updates: u32 = 0,
+    /// Scenes whose simulated strands all have the same number of vertices (no padding vertices)
+    uniform_scenes: u32 = 0,
 };
 
 /// After an update on the Zolt side: count the paths, and check that the scene stays away from Jolt's undefined
@@ -829,7 +833,7 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
     var rng: fw.Rng = .{ .state = 0x4a17_5ce1 };
     var coverage: Coverage = .{};
 
-    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, center: Vec3, rotation: Quat = .identity(), gravity: [3]f32 = .{ 0, -9.81, 0 }, optimize: bool = false, num_iterations_per_second: u32 = 360 };
+    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, center: Vec3, rotation: Quat = .identity(), gravity: [3]f32 = .{ 0, -9.81, 0 }, optimize: bool = false, num_iterations_per_second: u32 = 360, min_vertices: u32 = 3, max_vertices: u32 = 16 };
     const m3 = materials3();
     const setups = [_]Setup{
         .{ .name = "straight, 3 materials", .shape = .straight, .materials = &m3, .center = Vec3.zero() },
@@ -838,6 +842,7 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
         .{ .name = "global pose only and simulated", .shape = .curly, .materials = &.{ globalPoseOnlyMaterial(0.5), withFraction(variantMaterial(2), 0.5) }, .center = Vec3.zero() },
         .{ .name = "other gravity, 180 iterations", .shape = .curly, .materials = &.{ withFraction(variantMaterial(3), 0.8), withFraction(variantMaterial(1), 0.3) }, .center = Vec3.init(0.5, -1.0, 0.5), .gravity = .{ 2.0, -15.0, 1.0 }, .num_iterations_per_second = 180 },
         .{ .name = "no collision", .shape = .straight, .materials = &.{.{ .enable_collision = false, .simulation_strands_fraction = 0.5 }}, .center = Vec3.zero(), .rotation = Quat.rotation(Vec3.axisX(), -0.3) },
+        .{ .name = "uniform strands", .shape = .curly, .materials = &.{ withFraction(variantMaterial(2), 0.6), .{ .simulation_strands_fraction = 0.5 } }, .center = Vec3.init(0.3, 0.2, -0.4), .min_vertices = 10, .max_vertices = 10 },
     };
     for (setups) |setup| {
         var scene = try Scene.init(allocator, setup.name);
@@ -848,7 +853,7 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
         scene.hair.position = .{ c.getX(), c.getY(), c.getZ() };
         scene.hair.rotation = .{ setup.rotation.getX(), setup.rotation.getY(), setup.rotation.getZ(), setup.rotation.getW() };
 
-        var groom = try HairSettingsParity.makeGroom(allocator, &rng, null, setup.shape, 40, 3, 16, .{ .random = @intCast(setup.materials.len) });
+        var groom = try HairSettingsParity.makeGroom(allocator, &rng, null, setup.shape, 40, setup.min_vertices, setup.max_vertices, .{ .random = @intCast(setup.materials.len) });
         defer groom.deinit(allocator);
         scene.settings = try settingsBytes(allocator, null, setup.materials, &groom, .{ .num_iterations_per_second = setup.num_iterations_per_second });
         const body = try addBodies(allocator, &scene, &rng, c);
@@ -856,8 +861,8 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
         try runScene(allocator, &scene, &coverage);
     }
     try std.testing.expectEqual(@as(u32, setups.len), coverage.scenes);
-    // The paths of Update: collision against hulls, the grid, the global pose only path
-    try std.testing.expect(coverage.collision_updates > 10 and coverage.grid_updates > 10 and coverage.global_pose_only_updates > 5);
+    // The paths of Update: collision against hulls, the grid, the global pose only path, strands without padding vertices
+    try std.testing.expect(coverage.collision_updates > 10 and coverage.grid_updates > 10 and coverage.global_pose_only_updates > 5 and coverage.uniform_scenes == 1);
 }
 
 /// The 3 materials of HairSettingsParity.materials3 (fractions below 1, a gravity preload, a global pose only material)
@@ -887,7 +892,7 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
     var coverage: Coverage = .{};
 
     const Scalp = enum { skinned, no_inverse_bind_pose, external };
-    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, scalp: Scalp = .skinned, follow: bool = true };
+    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, scalp: Scalp = .skinned, follow: bool = true, min_vertices: u32 = 4, max_vertices: u32 = 14 };
     const m3 = materials3();
     const setups = [_]Setup{
         .{ .name = "face, 3 materials", .shape = .straight, .materials = &m3 },
@@ -896,6 +901,7 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
         .{ .name = "face, the hair stays", .shape = .straight, .materials = &.{ withFraction(variantMaterial(1), 0.5), withFraction(variantMaterial(3), 0.5) }, .follow = false },
         .{ .name = "face without inverse bind pose (no skinning)", .shape = .straight, .materials = &.{withFraction(variantMaterial(2), 0.5)}, .scalp = .no_inverse_bind_pose },
         .{ .name = "face with the scalp from outside", .shape = .curly, .materials = &.{ withFraction(variantMaterial(0), 0.5), withFraction(variantMaterial(2), 0.4) }, .scalp = .external },
+        .{ .name = "face, uniform strands", .shape = .straight, .materials = &.{ withFraction(variantMaterial(1), 0.5), withFraction(variantMaterial(3), 0.6) }, .min_vertices = 8, .max_vertices = 8 },
     };
     for (setups) |setup| {
         var scene = try Scene.init(allocator, setup.name);
@@ -908,7 +914,7 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
         scene.hair.position = .{ neck_position.getX(), neck_position.getY(), neck_position.getZ() };
         scene.hair.rotation = .{ neck_rotation.getX(), neck_rotation.getY(), neck_rotation.getZ(), neck_rotation.getW() };
 
-        var groom = try HairSettingsParity.makeGroom(allocator, &rng, &face, setup.shape, 60, 4, 14, .{ .random = @intCast(setup.materials.len) });
+        var groom = try HairSettingsParity.makeGroom(allocator, &rng, &face, setup.shape, 60, setup.min_vertices, setup.max_vertices, .{ .random = @intCast(setup.materials.len) });
         defer groom.deinit(allocator);
         var settings = try HairSettingsParity.baseSettings(allocator, &face, setup.materials);
         defer settings.deinit();
@@ -944,8 +950,9 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
         try runScene(allocator, &scene, &coverage);
     }
     try std.testing.expectEqual(@as(u32, setups.len), coverage.scenes);
-    // The paths of Update: skinning, the interpolation of the roots, collision, the global pose only path
-    try std.testing.expect(coverage.skinned_updates > 10 and coverage.interpolated_updates > 10 and coverage.collision_updates > 10 and coverage.global_pose_only_updates > 5);
+    // The paths of Update: skinning, the interpolation of the roots, collision, the global pose only path, strands without
+    // padding vertices
+    try std.testing.expect(coverage.skinned_updates > 10 and coverage.interpolated_updates > 10 and coverage.collision_updates > 10 and coverage.global_pose_only_updates > 5 and coverage.uniform_scenes == 1);
 }
 
 test "Hair scenes parity: random scenes" {
