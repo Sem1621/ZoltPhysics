@@ -584,6 +584,9 @@ tests pin them.
 | UB18 | `HeightFieldShape.clone` while another thread draws the same height field (settled in D2) | `Clone` copies `mGeometry` while `Draw` appends to it: a data race | the same race: `clone` has no `io` (porting guide section 9), so it copies the list of shared geometries without the cache lock. Caller rule, as in Jolt: do not clone a height field while another thread draws it |
 | UB19 | `HairSettings.init` with a simulated strand of 0 vertices, or of 1 vertex at vertex 0 or with no longer strand before it in `mSimStrands` order; `resample` with a strand of 0 or 1 vertices at the end (or 0 at the start) of the vertex array (settled in H1) | reads past the vertex array or wraps an index | panics with a message. A strand of 1 vertex after a longer strand follows Jolt's release path: it reads the kept `x[1]` after a recoverable assert (R8), pinned by an inline test with `ExpectAssert(2)` and a parity case against the asserting reference |
 | UB20 | `HairSettings.init` with a scalp when the settings already have more skin points than simulated strands (a second `init`, or `init` after restoring an initialized groom; settled in H1) | indexes `mSimStrands` out of bounds | panics with "HairSettings.init: the settings have more skin points than simulated strands (init called twice with a scalp?)" |
+| UB21 | `Hair.update` with a HairShaders that misses a shader (`HairShaders.init` on a compute system without `registerHairShaders`; settled in H2) | `HairShaders::Init` stores null, and `ComputeQueueCPU::SetShader` calls `CreateWrapper()` on it: a null dereference | panics with "Hair.update: a hair shader is missing (register the shaders with registerHairShaders before HairShaders.init)". Not pinned by a test (a Zig test cannot catch a panic) |
+| UB22 | IndependentAxisConstraintPart with a static (or fixed to world) body, e.g. a PulleyConstraint (settled in D3) | `CalculateConstraintProperties` writes `mR1xN1` / `mInvI1_R1xN1` only for a non-static body 1 and `mRatioR2xN2` / `mInvI2_RatioR2xN2` only for a non-static body 2; `SolveVelocityConstraint` multiplies the unset members by the static body's zero angular velocity, so a NaN or an infinity in that memory gives a NaN velocity | the four members start at zero, Jolt's result on zero-filled memory. Pinned by an inline test. Like UB4, the parity generates this input with a zero-filling C++ side (the constraint reference now installs the ParityHooks.h hooks) |
+| UB23 | a PathConstraint drawn before its first `SetupVelocityConstraint` (a new constraint, or one that is never active; settled in D3) | `DrawConstraint` reads `mR1`, `mR2` and the three path axes that only `CalculateConstraintProperties` writes | they start at zero: the anchors are drawn at the centers of mass and the arrows have zero length. Pinned by a DebugRendererZoltTests test; the draw parity steps every scenario before drawing it |
 
 ### R21 Port status and scope
 
@@ -851,6 +854,12 @@ The first parity build after the change recompiles the C++ library (about 5 minu
     `build.zig`) and forces it into the link with a marker call.
   - For H2: the hair scenes avoid UB16 (no last segment that leaves the float sum of the segment lengths unchanged
     together with a step gradient on the grid velocity factor) and UB11 (no NaN grid positions).
+- Settled in wave 6:
+  - D3: `ZoltPerformanceTest -r` records the bodies like PerformanceTest; `zig build debug-renderer-check
+    -Ddebug_renderer=true` compares Zolt's `.jor` bytes with Jolt's for the 5 scenes (CI runs it in ReleaseFast).
+  - D3: a filtered parity run analyzes only the tests it runs; groups must also run `zig build check` (which compiles
+    every parity test) in both renderer configurations before they report.
+  - H2: "uniform strands" means strands with the same number of vertices (no padding vertices); two scenes cover it.
 - Settled in wave 2: DebugRendererPlayback (UB7): a LOD batch ID 0 is `Batch.empty` unless the stream defined a
   batch with ID 0; an unknown batch ID, a geometry ID that the stream never defines (checked at the end of `parse`,
   because Jolt looks IDs up in `DrawFrame`) and a stream that ends inside a command are `error.InvalidStream`; a stream
