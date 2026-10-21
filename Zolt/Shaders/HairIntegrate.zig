@@ -3,9 +3,10 @@
 //!
 //! The hair shader that drives the velocity of every simulated vertex towards the grid, then integrates its velocity
 //! and its position (Docs/Zolt/RemainingFeaturesArchitecture.md R12).
-//! - `deltaDensity`, `applyGrid` and `integrate` port the helper header HairIntegrate.h. HairUpdateVelocityIntegrate.hlsl
-//!   includes that header too, so they are public. In Jolt they are members of the wrapper class and read the buffers
-//!   and constants directly; Zolt passes the bindings `b` of the shader (either shader's `Bindings`).
+//! - `deltaDensity`, `applyGrid` and `integrate` port the helper header HairIntegrate.h.
+//!   HairUpdateVelocityIntegrate.hlsl includes that header too, so they are public. In Jolt they are members of the
+//!   wrapper class and read the buffers and constants directly; Zolt passes the bindings `b` of the shader (either
+//!   shader's `Bindings`).
 //! - JPH_IN_OUT parameters are pointers: `pos` of `integrate` and `vel` of `applyGrid`.
 //! - `uint3(grid_pos)` in `applyGrid` is undefined in Jolt for a NaN grid position. Jolt's result depends on the call
 //!   site (UB11 of R20, see HLSLToCPP.zig and HairCommon.zig). Zolt uses the scalar conversion and the parity keeps NaN

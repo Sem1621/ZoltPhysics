@@ -24,7 +24,6 @@ const ComputeParity = @import("ComputeParity.zig");
 const C1a = @import("HairShaderParity.zig");
 
 const BindingDesc = ComputeParity.BindingDesc;
-const Dispatcher = ComputeParity.Dispatcher;
 const inputFloat = ComputeParity.inputFloat;
 const specialFloat = ComputeParity.specialFloat;
 const hlsl = zolt.HLSLToCPP;
@@ -40,7 +39,6 @@ const HairGlobalPoseTransform = HairStructs.HairGlobalPoseTransform;
 const HairCollisionPlane = HairStructs.HairCollisionPlane;
 const HairCollisionShape = HairStructs.HairCollisionShape;
 const Vec3 = zolt.Vec3;
-const Quat = zolt.Quat;
 
 const randomBits = C1a.randomBits;
 const randomGradient = C1a.randomGradient;
@@ -88,7 +86,8 @@ fn flag(rng: *fw.Rng) u32 {
 }
 
 /// A material with values for every member that the shaders of this file read. `clean`: the members that move a
-/// position before `applyGrid` are finite (global pose, skin global pose, hair radius). `grid`: the grid may be enabled.
+/// position before `applyGrid` are finite (global pose, skin global pose, hair radius). `grid`: the grid may be
+/// enabled.
 fn simulationMaterial(rng: *fw.Rng, clean: bool, grid: bool) HairMaterial {
     var m = randomBits(HairMaterial, rng);
     m.global_pose = gradient(rng, clean);

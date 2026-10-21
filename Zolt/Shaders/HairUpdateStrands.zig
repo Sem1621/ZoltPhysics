@@ -1,15 +1,17 @@
 //! Port of: Jolt/Shaders/HairUpdateStrands.hlsl, Jolt/Shaders/HairUpdateStrandsBindings.h
 //! Status: complete
 //!
-//! The hair shader that solves the constraints of a strand, one thread per strand (Docs/Zolt/RemainingFeaturesArchitecture.md
-//! R12): the long range attachments, the stretch and shear constraints and the bend and twist constraints of Cosserat
-//! rods.
+//! The hair shader that solves the constraints of a strand, one thread per strand
+//! (Docs/Zolt/RemainingFeaturesArchitecture.md R12): the long range attachments, the stretch and shear constraints and
+//! the bend and twist constraints of Cosserat rods.
 //! - JPH_IN_OUT parameters are pointers (`v0`, `v1`).
-//! - `inMaterial.mBendComplianceMultiplier[idx + 1]` reads past the float4 when the strand fraction of the middle vertex
-//!   is 1 (its byte is 255, so idx is 3). This is undefined in Jolt: HLSLToCPP's `operator []` is `(&x)[inIndex]`, so
-//!   Jolt reads the next float of JPH_HairMaterial, `mGridVelocityFactor.x`, and multiplies it by a fraction of 0. Zolt
-//!   reads that member too (`bendComplianceMultiplier`), pinned by a test. Hair never gives a vertex in the middle of a
-//!   strand the fraction 1, unless the last segment of the strand has no length. The parity does not generate it.
+//! - `inMaterial.mBendComplianceMultiplier[idx + 1]` reads past the float4 when the strand fraction of the middle
+//!   vertex is 1 (its byte is 255, so idx is 3). This is undefined in Jolt: HLSLToCPP's `operator []` is
+//!   `(&x)[inIndex]`, so Jolt's build reads the next float of JPH_HairMaterial, `mGridVelocityFactor.x`, and multiplies
+//!   it by a fraction of 0. Zolt reads that member too (`bendComplianceMultiplier`), pinned by a test. A one-off
+//!   dispatch on both sides gave the same bits for a finite and an infinite `mGridVelocityFactor.x`. Hair never gives a
+//!   vertex in the middle of a strand the fraction 1, unless the last segment of the strand has no length. The parity
+//!   does not generate it.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");
