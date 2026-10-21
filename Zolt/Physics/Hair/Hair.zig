@@ -2503,6 +2503,12 @@ fn onlyDraw(comptime field: []const u8) Hair.DrawSettings {
     return settings;
 }
 
+test "Hair: the draw declarations compile away without -Ddebug_renderer" {
+    try testing.expectEqual(!Core.debug_renderer, @TypeOf(Hair.draw) == void);
+    try testing.expectEqual(!Core.debug_renderer, Hair.DrawSettings == void);
+    try testing.expectEqual(!Core.debug_renderer, Hair.RenderStrandColor == void);
+}
+
 test "Hair: draw before initCompute and before the first read back draws nothing (proposed R20 row)" {
     if (!Core.debug_renderer) return error.SkipZigTest; // Hair.draw only exists with the option
 
