@@ -361,6 +361,11 @@ pub fn build(b: *std.Build) void {
     run_parity_tests.setCwd(b.path(".")); // The ObjectStream parity reads Assets/ (relative to the repository root)
     parity_step.dependOn(&run_parity_tests.step);
 
+    // Compile-only step of the parity tests: builds the C++ reference and every parity test without running them. A
+    // filtered parity run analyzes only the tests that it runs, so this catches compile errors in the others.
+    const parity_check_step = b.step("parity-check", "Compile the parity tests and the C++ reference without running them");
+    parity_check_step.dependOn(&parity_tests.step);
+
     // Port of HelloWorld/HelloWorld.cpp (milestone M5): installed with the library, `zig build hello-world` runs it.
     const hello_world = b.addExecutable(.{
         .name = "ZoltHelloWorld",

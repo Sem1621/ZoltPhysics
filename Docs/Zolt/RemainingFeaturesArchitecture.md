@@ -857,8 +857,8 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 - Settled in wave 6:
   - D3: `ZoltPerformanceTest -r` records the bodies like PerformanceTest; `zig build debug-renderer-check
     -Ddebug_renderer=true` compares Zolt's `.jor` bytes with Jolt's for the 5 scenes (CI runs it in ReleaseFast).
-  - D3: a filtered parity run analyzes only the tests it runs; groups must also run `zig build check` (which compiles
-    every parity test) in both renderer configurations before they report.
+  - D3: a filtered parity run analyzes only the tests it runs. `zig build parity-check` compiles every parity test and
+    the C++ reference without running them; groups run it in both renderer configurations before they report.
   - H2: "uniform strands" means strands with the same number of vertices (no padding vertices); two scenes cover it.
 - Settled in wave 2: DebugRendererPlayback (UB7): a LOD batch ID 0 is `Batch.empty` unless the stream defined a
   batch with ID 0; an unknown batch ID, a geometry ID that the stream never defines (checked at the end of `parse`,
