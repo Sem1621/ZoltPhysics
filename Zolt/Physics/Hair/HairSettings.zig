@@ -40,12 +40,16 @@
 //!   - UB19: resample with a strand of 1 vertex at the end of the vertex array, or a strand of 0 vertices at its start
 //!     or end. Jolt reads past the vertex array. Zolt panics ("HairSettings.resample: a strand of 0 or 1 vertices reads
 //!     past the vertex array").
-//!   - UB30: Init with a GridSize below 2 on X, Y or Z. Jolt's GridSampler subtracts 2 from the size, which wraps, and
-//!     Init and the grid shaders then index past the grid. Zolt panics ("HairSettings.init: the grid size must be at
-//!     least 2 on X, Y and Z"), also when no vertex samples the grid. Hair.initCompute checks restored settings too.
-//!   - UB31: InitRenderAndSimulationStrands with a simulated strand of 0 vertices at the end of mSimVertices. The search
-//!     for the closest simulated strand of the other strands of its material reads past mSimVertices in Jolt. Zolt
-//!     panics at that read ("HairSettings.initRenderAndSimulationStrands: a simulated strand of 0 vertices reads past
+//!   - UB30: a vertex samples a grid with a GridSize below 2 on X, Y or Z. Jolt's GridSampler subtracts 2 from the
+//!     size, which wraps, and every sample indexes past the grid. Init samples each vertex with an inv mass above 0.
+//!     Zolt panics there ("HairSettings.init: a vertex samples a grid that is smaller than 2 on X, Y or Z").
+//!     Hair.update panics where the grid shaders would sample (see Hair.zig). Without such a sample a small grid is
+//!     literal: Init, InitCompute, Hair.update and Hair.draw work (a groom whose vertices are all fixed, or no
+//!     simulated strands).
+//!   - UB31: InitRenderAndSimulationStrands with a simulated strand of 0 vertices at the end of mSimVertices, or at its
+//!     start (its last vertex index wraps, so the walk along the strand can pass the end). The search for the closest
+//!     simulated strand of the other strands of its material then can read past mSimVertices in Jolt. Zolt panics at a
+//!     read past the array ("HairSettings.initRenderAndSimulationStrands: a simulated strand of 0 vertices reads past
 //!     mSimVertices"). The reads inside the array are literal (Init then panics for the strand, UB19).
 //!   - UB33: InitCompute before Init (or after a change of the strands): a strand has more vertices than
 //!     mMaxVerticesPerStrand, and Jolt writes past the transposed vertex arrays. Zolt panics ("HairSettings.initCompute:
@@ -940,9 +944,6 @@ pub const HairSettings = struct {
     /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts); the settings may then be partly
     /// initialized.
     pub fn init(self: *HairSettings) Allocator.Error!f32 {
-        // Zolt (R20 UB30): the grid sampler subtracts 2 from the grid size, Jolt indexes past the grid below 2
-        self.checkGridSize("HairSettings.init");
-
         const allocator = self.allocator;
         var max_dist_sq_hair_to_scalp: f32 = 0.0;
 
@@ -1204,6 +1205,8 @@ pub const HairSettings = struct {
         const sampler: GridSampler = .init(self);
         for (self.sim_vertices.items) |*v| {
             if (v.inv_mass > 0.0) {
+                if (self.isGridTooSmall()) // Zolt (R20 UB30): Jolt indexes past the grid
+                    @panic("HairSettings.init: a vertex samples a grid that is smaller than 2 on X, Y or Z");
                 sampler.sample(Vec3.fromFloat3(v.position), struct {
                     density: []f32,
                     vertex: *const SVertex,
@@ -1261,11 +1264,24 @@ pub const HairSettings = struct {
         return max_dist_sq_hair_to_scalp;
     }
 
-    /// Zolt (R20 UB30): panics unless the grid size is at least 2 on X, Y and Z. Jolt's GridSampler subtracts 2 from the
-    /// size, which wraps below 2, and Init and the grid shaders then index past the grid.
-    pub fn checkGridSize(self: *const HairSettings, comptime function: []const u8) void {
-        if (self.grid_size.getX() < 2 or self.grid_size.getY() < 2 or self.grid_size.getZ() < 2)
-            @panic(function ++ ": the grid size must be at least 2 on X, Y and Z");
+    /// Zolt (R20 UB30): true when the grid size is below 2 on X, Y or Z. Jolt's GridSampler subtracts 2 from the size,
+    /// which then wraps, and every sample indexes past the grid.
+    pub fn isGridTooSmall(self: *const HairSettings) bool {
+        return self.grid_size.getX() < 2 or self.grid_size.getY() < 2 or self.grid_size.getZ() < 2;
+    }
+
+    /// Zolt (R20 UB30): true when the grid shaders of Hair.update sample a vertex. They skip the first vertex of each
+    /// strand and the vertices that InitCompute marks fixed (an inv mass of 0 or less). The padding vertices of a
+    /// strand shorter than mMaxVerticesPerStrand are not fixed.
+    pub fn gridShadersSampleAVertex(self: *const HairSettings) bool {
+        for (self.sim_strands.items) |strand| {
+            var v: u32 = 1;
+            while (v < self.max_vertices_per_strand) : (v += 1) {
+                if (v >= strand.vertexCount() or !(self.sim_vertices.items[strand.start_vtx + v].inv_mass <= 0.0))
+                    return true;
+            }
+        }
+        return false;
     }
 
     /// Must be called after Init to setup the compute buffers
@@ -1736,8 +1752,9 @@ test "HairSettings: init of a strand of 2 vertices, the smallest one" {
 }
 
 test "HairSettings: init with a grid of 2 cells per axis, the smallest one (R20 UB30)" {
-    // A GridSize of 2 is the smallest one that the grid sampler supports (it subtracts 2). Below 2 on X, Y or Z Zolt
-    // panics (UB30: Jolt indexes past the grid), which a test cannot catch. Every vertex samples a cell of the grid.
+    // A GridSize of 2 is the smallest one that the grid sampler supports (it subtracts 2). Below 2 on X, Y or Z a
+    // vertex that samples the grid panics (UB30: Jolt indexes past the grid), which a test cannot catch. Every vertex
+    // with an inv mass above 0 samples a cell of the grid.
     const allocator = testing.allocator;
     var settings: HairSettings = .{ .allocator = allocator };
     defer settings.deinit();

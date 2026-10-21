@@ -29,14 +29,22 @@
 //!   - UB21: a HairShaders that misses a shader (HairShaders.init without registerHairShaders). HairShaders keeps the
 //!     shader null, like Jolt (R14). Jolt's Update passes it to ComputeQueueCPU::SetShader, which calls CreateWrapper
 //!     on the null pointer. Zolt's update panics with a message. No test pins it: a test cannot catch a panic.
-//!   - UB30: settings with a GridSize below 2 on X, Y or Z (restored settings; HairSettings.init checks it too). The
-//!     grid shaders index past the grid in Jolt. Zolt's initCompute panics ("Hair.initCompute: the grid size must be at
-//!     least 2 on X, Y and Z").
+//!   - UB30: `update` with a GridSize below 2 on X, Y or Z when the grid shaders sample a vertex. They run when a
+//!     material needs the grid, and they sample each vertex that is not the first of its strand and not fixed (an inv
+//!     mass above 0, or a padding vertex of a short strand). Jolt indexes past the grid. Zolt's update panics
+//!     ("Hair.update: the grid shaders sample a grid that is smaller than 2 on X, Y or Z"). Without such a sample a
+//!     small grid is literal. HairSettings.init has the same rule.
 //!   - UB33: a call before its prerequisite. Jolt dereferences a null buffer. Zolt panics with a message:
-//!     `update` and `readBackGPUState` before `initCompute` ("Hair.update: call initCompute first"), or with an
-//!     override of the render positions without `setRenderPositionsCB` ("Hair.update: the render positions are
-//!     overridden, call setRenderPositionsCB first"); `lockReadBackBuffers` and `unlockReadBackBuffers` before the first
-//!     `readBackGPUState` ("Hair.lockReadBackBuffers: call readBackGPUState first"). No test pins these panics.
+//!     - `update` before `initCompute` ("Hair.update: call initCompute first"). An override of the render positions
+//!       without `setRenderPositionsCB` panics only when there are render vertices ("Hair.update: the render positions
+//!       are overridden, call setRenderPositionsCB first"). Without render vertices Jolt binds the null buffer and
+//!       dispatches no render vertex, and so does Zolt.
+//!     - The first `readBackGPUState` before `initCompute`, or with an override and no `setRenderPositionsCB` (the same
+//!       messages, "Hair.readBackGPUState: ..."). Jolt's first call always reads the render positions buffer. A later
+//!       call skips a null render positions buffer, like Jolt's CPU backend.
+//!     - `lockReadBackBuffers` and `unlockReadBackBuffers` before the first `readBackGPUState`
+//!       ("Hair.lockReadBackBuffers: call readBackGPUState first").
+//!     - No test pins these panics. A test pins the update of an override without render vertices.
 //! - Jolt's quirk (R20): mScalpJointMatricesCB is 64 times too large, its size counts bytes where it should count
 //!   matrices. Only memory is lost.
 //! - JPH_DEBUG_RENDERER (R2): `RenderStrandColor` (ERenderStrandColor) and `DrawSettings` are `void` without
@@ -337,9 +345,6 @@ pub const Hair = struct {
     pub fn initCompute(self: *Hair, compute_system: *ComputeSystem) Allocator.Error!void {
         const settings = self.getHairSettings();
 
-        // Zolt (R20 UB30): restored settings can have a grid that the grid shaders index past
-        settings.checkGridSize("Hair.initCompute");
-
         // Create compute buffers
         const num_vertices_padded: usize = settings.getNumVerticesPadded();
         const grid_size: usize = settings.neutral_density.items.len;
@@ -383,13 +388,20 @@ pub const Hair = struct {
         member.* = buffer;
     }
 
-    /// Zolt (R20 UB33): `function` needs the buffers of initCompute (the velocity and density buffer is the last one that
-    /// it always creates) and the render positions buffer. Jolt dereferences the null buffers.
+    /// Zolt (R20 UB33): `function` needs the buffers of initCompute. The velocity and density buffer is the last one
+    /// that initCompute always creates. Jolt dereferences the null buffers.
     fn requireComputeBuffers(self: *const Hair, comptime function: []const u8) void {
         if (self.velocity_and_density_cb.get() == null)
             @panic("Hair." ++ function ++ ": call initCompute first");
-        if (self.render_positions_cb.get() == null)
+    }
+
+    /// Zolt (R20 UB33): `function` needs the render positions buffer. initCompute creates it last, unless the render
+    /// positions are overridden: then setRenderPositionsCB sets it. Jolt dereferences the null buffer.
+    fn requireRenderPositionsBuffer(self: *const Hair, comptime function: []const u8) void {
+        if (self.render_positions_cb.get() != null) return;
+        if (self.render_positions_overridden)
             @panic("Hair." ++ function ++ ": the render positions are overridden, call setRenderPositionsCB first");
+        @panic("Hair." ++ function ++ ": call initCompute first");
     }
 
     /// Zolt (R20 UB33): `function` needs the read back buffers of readBackGPUState. Jolt maps a null buffer.
@@ -646,13 +658,23 @@ pub const Hair = struct {
     /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The step is then partly done; call
     /// `onTeleported` to reset the hair at the next update (see the file header).
     pub fn update(self: *Hair, delta_time: f32, joint_to_hair: Mat44, joint_matrices: ?[]const Mat44, system: *const PhysicsSystem, shaders: *const HairShaders, compute_system: *ComputeSystem, queue: *ComputeQueue) Allocator.Error!void {
-        self.requireComputeBuffers("update"); // Zolt (R20 UB33)
         const allocator = self.allocator;
         const settings = self.getHairSettings();
+
+        // Zolt (R20 UB33): Jolt dereferences the null buffers. Without render vertices it binds the null render
+        // positions buffer, which the CPU backend ignores, and dispatches no render vertex.
+        self.requireComputeBuffers("update");
+        if (settings.render_vertices.items.len != 0)
+            self.requireRenderPositionsBuffer("update");
 
         var ctx: UpdateContext = .{};
         defer ctx.deinit(allocator);
         try self.initializeContext(&ctx, delta_time, system);
+
+        // Zolt (R20 UB30): the grid shaders run when a material needs the grid. Every vertex that they sample indexes
+        // past a grid that is smaller than 2 on X, Y or Z in Jolt.
+        if (!ctx.global_pose_only and ctx.num_iterations > 0 and ctx.needs_grid and settings.isGridTooSmall() and settings.gridShadersSampleAVertex())
+            @panic("Hair.update: the grid shaders sample a grid that is smaller than 2 on X, Y or Z");
 
         if (joint_matrices != null and self.scalp_joint_matrices_cb.get() != null) {
             // Prepare for Skinning
@@ -1132,11 +1154,14 @@ pub const Hair = struct {
     /// Read back the GPU state so that the functions below can be used. For debugging purposes only, this is slow!
     /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The read back buffers are set together.
     pub fn readBackGPUState(self: *Hair, queue: *ComputeQueue) Allocator.Error!void {
-        self.requireComputeBuffers("readBackGPUState"); // Zolt (R20 UB33)
         const allocator = self.allocator;
         const settings = self.getHairSettings();
 
         if (self.positions_read_back_cb.get() == null) {
+            // Zolt (R20 UB33): Jolt dereferences the null buffers
+            self.requireComputeBuffers("readBackGPUState");
+            self.requireRenderPositionsBuffer("readBackGPUState");
+
             // Create read back buffers
             var scalp_vertices: Ref(ComputeBuffer) = .empty;
             errdefer scalp_vertices.deinit();
@@ -1170,7 +1195,10 @@ pub const Hair = struct {
             // Read back the vertices
             queue.scheduleReadback(self.positions_read_back_cb.get().?, self.positions_cb.get().?);
             queue.scheduleReadback(self.velocities_read_back_cb.get().?, self.velocities_cb.get().?);
-            queue.scheduleReadback(self.render_positions_read_back_cb.get().?, self.render_positions_cb.get().?);
+            // Zolt: the render positions buffer of an override is null after setRenderPositionsCB(null). Jolt passes
+            // the null buffer, which its CPU backend ignores.
+            if (self.render_positions_cb.get()) |b|
+                queue.scheduleReadback(self.render_positions_read_back_cb.get().?, b);
 
             // Read back the velocity and density
             queue.scheduleReadback(self.velocity_and_density_read_back_cb.get().?, self.velocity_and_density_cb.get().?);
@@ -1749,6 +1777,8 @@ const TestGroom = struct {
     scalp_inverse_bind_pose: bool = true,
     /// The size of the grid
     grid_size: UVec4 = .init(8, 8, 8, 0),
+    /// Every vertex is fixed (an inv mass of 0), not only the first vertex of each strand
+    fixed: bool = false,
 };
 
 /// A groom of `num_strands` strands of `num_vertices` vertices that hang down from a ring at y = 0, every strand
@@ -1779,7 +1809,7 @@ fn testSettings(allocator: Allocator, compute_system: *ComputeSystem, num_strand
                 position = vertices.items[vertices.items.len - 1].position;
                 position.x = std.math.nextAfter(f32, position.x, std.math.inf(f32));
             }
-            try vertices.append(allocator, .init(position, .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
+            try vertices.append(allocator, .init(position, .{ .inv_mass = if (i == 0 or groom.fixed) 0.0 else 1.0 }));
         }
         try strands.append(allocator, .init(first, first + count, 0));
     }
@@ -2727,6 +2757,124 @@ test "Hair: draw the render strands with a strand of 0 vertices at the end of th
         draw_settings.render_strand_color = color;
         try testing.expectEqual(@as(usize, 6 * 4), renderer.drawHair(&hair, draw_settings));
     }
+}
+
+test "Hair: a grid smaller than 2 that the grid shaders do not sample is literal (R20 UB30)" {
+    // The grid shaders skip the first vertex of each strand and the fixed vertices. A groom whose vertices are all
+    // fixed, with strands of one length (no padding vertices), never samples the grid. Then init, initCompute, update,
+    // the read back and the draw work with a grid smaller than 2 on X, Y or Z, as in Jolt. A sampled vertex panics
+    // (UB30: Jolt indexes past the grid), which a test cannot catch.
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    var compute = try TestCompute.init(allocator);
+    defer compute.deinit();
+
+    for ([_]UVec4{ .init(0, 0, 0, 0), .init(1, 1, 1, 0), .init(1, 2, 2, 0), .init(2, 2, 0, 0) }) |grid_size| {
+        var settings = try testSettings(allocator, compute.system.get().?, 4, 5, .{ .enable_collision = false }, .{ .grid_size = grid_size, .fixed = true });
+        defer settings.deinit();
+        const s = settings.get().?;
+        try testing.expect(s.isGridTooSmall() and !s.gridShadersSampleAVertex());
+        // The grid shaders run
+        try testing.expect(s.materials.items[0].needsGrid() and !s.materials.items[0].globalPoseOnly());
+        try testing.expectEqual(@as(usize, grid_size.getX() * grid_size.getY() * grid_size.getZ()), s.neutral_density.items.len);
+        for (s.neutral_density.items) |d| try testing.expectEqual(@as(f32, 0.0), d);
+
+        var hair: Hair = .init(allocator, s, RVec3.zero(), Quat.identity(), 0);
+        defer hair.deinit();
+        try hair.initCompute(compute.system.get().?);
+        for (0..2) |_|
+            try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, compute.system.get().?, compute.queue.get().?);
+        try hair.readBackGPUState(compute.queue.get().?);
+
+        // The fixed vertices stay where they are
+        for (s.sim_vertices.items, hair.getPositions().?) |v, p|
+            try testing.expectEqual(v.position, p);
+
+        if (Core.debug_renderer) {
+            var renderer: LineRenderer = undefined;
+            renderer.init();
+            defer renderer.deinit();
+            try testing.expectEqual(@as(usize, 4 * 4), renderer.drawHair(&hair, onlyDraw("draw_rods")));
+        }
+    }
+}
+
+test "Hair: gridShadersSampleAVertex skips the first vertices and the fixed vertices, not the padding (R20 UB30)" {
+    const allocator = testing.allocator;
+    var compute = try TestCompute.init(allocator);
+    defer compute.deinit();
+    var settings = try testSettings(allocator, compute.system.get().?, 2, 4, .{}, .{ .fixed = true });
+    defer settings.deinit();
+    const s: *HairSettings = @constCast(settings.get().?);
+    try testing.expect(!s.gridShadersSampleAVertex());
+    s.sim_vertices.items[0].inv_mass = 1.0; // The first vertex of a strand
+    try testing.expect(!s.gridShadersSampleAVertex());
+    s.sim_vertices.items[5].inv_mass = 1.0;
+    try testing.expect(s.gridShadersSampleAVertex());
+    s.sim_vertices.items[5].inv_mass = std.math.nan(f32); // InitCompute does not mark a NaN inv mass fixed
+    try testing.expect(s.gridShadersSampleAVertex());
+    s.sim_vertices.items[5].inv_mass = -1.0;
+    try testing.expect(!s.gridShadersSampleAVertex());
+    s.max_vertices_per_strand = 5; // A padding vertex
+    try testing.expect(s.gridShadersSampleAVertex());
+}
+
+test "Hair: update of an override without render vertices and without setRenderPositionsCB (R20 UB33)" {
+    // Jolt's Update binds the null render positions buffer, which ComputeQueueCPU::SetRWBuffer ignores, and dispatches
+    // no render vertex. Zolt does the same. Only the first read back needs the buffer (Jolt creates its read back
+    // buffer).
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    var compute = try TestCompute.init(allocator);
+    defer compute.deinit();
+
+    // Simulated strands without render strands
+    const s = try HairSettings.create(allocator);
+    var settings: RefConst(HairSettings) = .init(s);
+    defer settings.deinit();
+    try s.materials.append(allocator, .{ .enable_collision = false });
+    s.grid_size = .init(8, 8, 8, 0);
+    for (0..3) |strand| {
+        const first: u32 = @intCast(s.sim_vertices.items.len);
+        for (0..4) |i| {
+            const fi: f32 = @floatFromInt(i);
+            try s.sim_vertices.append(allocator, .init(.{ .x = 0.02 * @as(f32, @floatFromInt(strand)), .y = -0.02 * fi, .z = 0.001 * fi * fi }, .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
+        }
+        try s.sim_strands.append(allocator, .init(first, first + 4, 0));
+    }
+    _ = try s.init();
+    try s.initCompute(compute.system.get().?);
+    try testing.expectEqual(@as(usize, 0), s.render_vertices.items.len);
+
+    const Context = struct {
+        fn convert(context: ?*anyopaque, buffer: *ComputeBuffer, out_vertices: []Float3) void {
+            _ = .{ context, buffer };
+            testing.expectEqual(@as(usize, 0), out_vertices.len) catch @panic("render vertices");
+        }
+    };
+    var hair: Hair = .init(allocator, s, RVec3.zero(), Quat.identity(), 0);
+    defer hair.deinit();
+    hair.overrideRenderPositionsCB(.{ .function = Context.convert });
+    try hair.initCompute(compute.system.get().?);
+    try testing.expect(hair.getRenderPositionsCB() == null);
+    for (0..2) |_|
+        try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, compute.system.get().?, compute.queue.get().?);
+
+    // The first read back needs the buffer. A later read back skips a null buffer, like Jolt's CPU backend.
+    var render_positions = try compute.system.get().?.createComputeBuffer(.rw_buffer, 0, @sizeOf(Float3), null);
+    defer render_positions.deinit();
+    hair.setRenderPositionsCB(render_positions.get());
+    try hair.readBackGPUState(compute.queue.get().?);
+    hair.setRenderPositionsCB(null);
+    try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, compute.system.get().?, compute.queue.get().?);
+    try hair.readBackGPUState(compute.queue.get().?);
+    try hair.lockReadBackBuffers();
+    hair.unlockReadBackBuffers();
+    try testing.expectEqual(s.sim_vertices.items.len, hair.getPositions().?.len);
 }
 
 /// Check the markers of a density draw (draw_neutral_density, or draw_grid_density when `grid` is set) after the 12

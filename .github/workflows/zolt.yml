@@ -60,7 +60,9 @@ jobs:
     # Draw code is type checked only with the option (Docs/Zolt/RemainingFeaturesArchitecture.md R2, section 5)
     - name: Compile with the debug renderer
       run: zig build check -Ddebug_renderer=true
-    # Milestone M10 (R22) is reached: every UnitTests/ unit is complete or n/a and every TEST_CASE has its Zig test
+    # Milestone M10 (R22) is reached: every UnitTests/ unit is complete or n/a and every TEST_CASE has its Zig test.
+    # --check above runs the same rules. This step runs them again under their own name, so that an M10 gap shows as a
+    # failed step of its own.
     - name: Check milestone M10
       run: python3 tools/port_status.py --check-m10
 

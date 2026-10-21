@@ -44,7 +44,10 @@
 //!
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). Every Zolt class is
 //! ported, so every Blocker is supported and every scene runs against Zolt. A scene whose `blocked_by` is not supported
-//! (SimScenes.Blocker.isSupported: a class it needs is a stub again) fails (checkSupported). Add a scene in
+//! (SimScenes.Blocker.isSupported: a class it needs is a stub again) fails (checkSupported). A scene with a Phase 7
+//! blocker must create the objects of its classes, and a `.contacts` or `.ccd_hits` scene must reach contacts. One
+//! configuration of each scene also checks that every C++ object state and the final C++ state decode completely and
+//! are finite (Config.check_cpp_values): a scene that blows up is no test, even when both sides agree. Add a scene in
 //! SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping bodies, step
 //! listener calls, CCD bodies, active constraints, sweep counts): check it when you write a scene.
 //!
@@ -2521,11 +2524,15 @@ const Config = struct {
     sweeps: bool = false,
     /// Group D3: record the states for the run that draws, or draw and compare (see SimDraw)
     draw: ?*SimDraw = null,
+    /// Check the values of the C++ side (checkCppObjectValues, checkFinalCppState). A scene that blows up is no test:
+    /// both sides can end with the same NaNs, and Zolt's asserts would fire on NaNs that Jolt's release build ignores.
+    /// One configuration of each scene checks them.
+    check_cpp_values: bool = false,
 };
 
 /// Zolt with JobSystemSingleThreaded and thread pools with 0, 1, 3 and 7 workers, C++ with 0, 3 and 7 workers
 const configs = [_]Config{
-    .{ .zolt = .single_threaded, .cpp_threads = 0, .sweeps = true },
+    .{ .zolt = .single_threaded, .cpp_threads = 0, .sweeps = true, .check_cpp_values = true },
     .{ .zolt = .{ .thread_pool = 0 }, .cpp_threads = 3 },
     .{ .zolt = .{ .thread_pool = 1 }, .cpp_threads = 0 },
     .{ .zolt = .{ .thread_pool = 3 }, .cpp_threads = 7, .sweeps = true },
@@ -2605,6 +2612,46 @@ const Run = struct {
             return self.fail("{s}: {s}", .{ what, message });
         }
         try scanObjectState(self.jolt_objects.items, &self.stats.objects);
+        if (self.config.check_cpp_values)
+            try self.checkCppObjectValues(what);
+    }
+
+    /// The C++ object state decodes completely and stays finite (Config.check_cpp_values)
+    fn checkCppObjectValues(self: *Run, what: []const u8) !void {
+        var layout: ObjectStateLayout = .{ .allocator = self.allocator };
+        defer layout.deinit();
+        try layout.decode(self.jolt_objects.items);
+        if (!layout.complete)
+            return self.fail("{s}: the C++ object state does not decode (SimScenes.objectFieldLayout and WriteObjectState of SimulationReference.cpp differ)", .{what});
+        if (layout.firstNotFinite(self.jolt_objects.items)) |value| {
+            var buffer: [256]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buffer);
+            try writeObjectValueName(&w, value);
+            return self.fail("{s}: a C++ object value is not finite: {s}", .{ what, w.buffered() });
+        }
+    }
+
+    /// The final C++ state decodes completely and every float in it is finite (Config.check_cpp_values)
+    fn checkFinalCppState(self: *Run) !void {
+        try self.cw.saveState(self.allocator, .all, &self.jolt_state);
+        var layout: StateLayout = .{ .allocator = self.allocator, .bytes = self.jolt_state.items, .cpp = self.cw };
+        defer layout.deinit();
+        try layout.decode();
+        if (layout.truncated or layout.pos != self.jolt_state.items.len)
+            return self.fail("at the end: the C++ state does not decode completely ({d} of {d} bytes)", .{ layout.pos, self.jolt_state.items.len });
+        for (layout.fields.items) |*field| {
+            const finite = switch (field.kind) {
+                .f32 => std.math.isFinite(std.mem.bytesToValue(f32, self.jolt_state.items[field.offset..][0..4])),
+                .f64 => std.math.isFinite(std.mem.bytesToValue(f64, self.jolt_state.items[field.offset..][0..8])),
+                else => true,
+            };
+            if (!finite) {
+                var buffer: [256]u8 = undefined;
+                var w: std.Io.Writer = .fixed(&buffer);
+                try writeField(&w, field);
+                return self.fail("at the end: a value of the C++ state is not finite: {s}", .{w.buffered()});
+            }
+        }
     }
 
     /// Phase 7: compare the CharacterContactListener records since the last comparison in call order (the user thread
@@ -3117,6 +3164,8 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     for (all_states) |state|
         try run.compareStates(state, "at the end");
     try run.compareFilteredStates();
+    if (config.check_cpp_values)
+        try run.checkFinalCppState();
 
     run.stats.num_spawned_jobs = zw.counting_jobs.num_spawned_find_collisions.load(.monotonic);
     run.stats.num_large_island_deactivations = zw.num_large_island_deactivations.load(.monotonic);
@@ -7511,6 +7560,17 @@ fn checkPhase7Slot(entry: *const SceneEntry, what: []const u8, ported: bool, slo
     }
 }
 
+/// A scene with a Phase 7 blocker creates the objects of its classes: the blocker names what the scene is written for
+fn checkBlockerObjects(entry: *const SceneEntry, builder: *const SceneBuilder) !void {
+    switch (entry.blocked_by) {
+        .characters => try expectReached(entry, "characters", builder.characters.items.len > 0),
+        .character_virtuals => try expectReached(entry, "character virtuals", builder.character_virtuals.items.len > 0),
+        .ragdolls => try expectReached(entry, "ragdolls", builder.ragdolls.items.len > 0),
+        .wheeled_vehicles, .tracked_vehicles, .motorcycles => try expectReached(entry, "vehicles", builder.vehicles.items.len > 0),
+        else => {},
+    }
+}
+
 fn runEntry(entry: *const SceneEntry) !void {
     try checkSupported(entry);
 
@@ -7520,6 +7580,7 @@ fn runEntry(entry: *const SceneEntry) !void {
     try entry.build(&builder);
     try checkConstraintDescriptions(allocator, entry, &builder);
     try checkPhase7Slots(entry, &builder);
+    try checkBlockerObjects(entry, &builder);
     try checkPhase7Settings(allocator, entry, &builder);
     try checkSoftBodySettings(allocator, entry.name, &builder);
     try checkSoftBodyGroups(allocator, entry, &builder);
@@ -7551,7 +7612,8 @@ fn runEntry(entry: *const SceneEntry) !void {
     // The scene reaches what it is written for (SimScenes.Expect)
     const expect = entry.expect;
     const records = &stats[0].records;
-    if (expect.contacts) try expectReached(entry, "contacts", records[@intFromEnum(RecordKind.contact_added)] > 0);
+    if (expect.contacts or entry.blocked_by == .contacts or entry.blocked_by == .ccd_hits)
+        try expectReached(entry, "contacts", records[@intFromEnum(RecordKind.contact_added)] > 0);
     if (expect.removed) try expectReached(entry, "removed contacts", records[@intFromEnum(RecordKind.contact_removed)] > 0);
     if (expect.validated) try expectReached(entry, "OnContactValidate", records[@intFromEnum(RecordKind.contact_validate)] > 0);
     if (expect.sleeping) try expectReached(entry, "sleeping bodies", stats[0].updates_with_sleeping_bodies > 0);
