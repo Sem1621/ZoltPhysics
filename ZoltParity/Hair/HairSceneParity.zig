@@ -16,10 +16,13 @@
 //!   moves them with SetScalpToHead.
 //! - The operations: Hair::Update with delta times 0, 1/60, 1/90, odd values and values above mMaxDeltaTime, with the
 //!   joint matrices of the face animation (the hair follows the neck joint like Jolt's HairTest sample) or without;
-//!   SetPosition and SetRotation (the delta transform), OnTeleported, the movement and the velocities of a body.
+//!   SetPosition and SetRotation (the delta transform), OnTeleported, the movement and the velocities of a body. One
+//!   scene moves the hair away from every body and back: away, the materials that collide find no leaf shape, and
+//!   Update turns collision off for the whole hair.
 //! - The materials: the defaults, a global pose only material (alone: the ApplyGlobalPose path; with others), the grid
-//!   off (no grid velocity and no density force) and on through the density force only, LRA off, gravity factor
-//!   gradients, damping, friction, the velocity limits, the hair radius, another gravity.
+//!   off (no grid velocity and no density force; for one material, or for the whole hair) and on through the density
+//!   force only, LRA off, gravity factor gradients, damping, friction, the velocity limits, the hair radius, another
+//!   gravity.
 //! - After every operation the transcript holds the members of the hair (teleported, previous position and rotation)
 //!   and the bytes of every compute buffer of the hair, the iteration constant buffers included. After an update also
 //!   the data of ReadBackGPUState and LockReadBackBuffers: the positions, rotations, velocities, angular velocities,
@@ -523,8 +526,9 @@ fn zoltRun(allocator: Allocator, scene: *const Scene, t: *Transcript, coverage: 
                     for (0..o.u[2]) |j|
                         try joints.append(allocator, loadMat44(pool[o.u[0] + 16 * j ..][0..16]));
                 }
+                const was_teleported = hair.teleported;
                 try hair.update(o.f[0], loadMat44(pool[o.u[1]..][0..16]), if (o.u[0] != no_joints) joints.items else null, &physics_system, shaders.get().?, system, queue.get().?);
-                checkScene(&hair, t, coverage);
+                checkScene(&hair, was_teleported, t, coverage);
             },
             .set_position => hair.setPosition(loadR3(&o.d)),
             .set_rotation => hair.setRotation(loadQuat(&o.f)),
@@ -600,13 +604,17 @@ const Coverage = struct {
     scenes: u32 = 0,
     /// Updates with collision against at least one hull
     collision_updates: u32 = 0,
-    /// Updates that ran the grid
+    /// Updates with iterations that ran the grid
     grid_updates: u32 = 0,
+    /// Updates with iterations where no material needs the grid: the whole hair runs without the grid
+    grid_off_updates: u32 = 0,
+    /// Updates where a material collides but no leaf shape is in the bounds: Update turns collision off
+    no_shape_updates: u32 = 0,
     /// Updates of a global pose only hair
     global_pose_only_updates: u32 = 0,
     /// Updates that skinned the scalp
     skinned_updates: u32 = 0,
-    /// Updates that interpolated the roots to the skinned targets
+    /// Updates with iterations that interpolated the roots to the skinned targets (not teleported)
     interpolated_updates: u32 = 0,
     /// Scenes whose simulated strands all have the same number of vertices (no padding vertices)
     uniform_scenes: u32 = 0,
@@ -615,14 +623,22 @@ const Coverage = struct {
 /// After an update on the Zolt side: count the paths, and check that the scene stays away from Jolt's undefined
 /// behavior (R20). UB3: when a material collides, the collision buffers were written in this update and hold at least
 /// one hull (the first word of the shape indices is the number of faces of the first hull, 0 is the terminator).
-fn checkScene(hair: *Hair, t: *Transcript, coverage: *Coverage) void {
+/// `was_teleported` is the teleported member before the update.
+fn checkScene(hair: *Hair, was_teleported: bool, t: *Transcript, coverage: *Coverage) void {
+    // The sub step delta time is 0 exactly when the update has no iterations
+    const constants = hair.constants_cb.get().?.mapAs(HairStructs.HairUpdateContext, .read);
+    const iterates = constants[0].delta_time > 0.0;
+    hair.constants_cb.get().?.unmap();
+
     const materials = hair.materials_cb.get().?.mapAs(HairStructs.HairMaterial, .read);
     defer hair.materials_cb.get().?.unmap();
     var collides = false;
+    var enable_collision = false;
     var grid = false;
     var global_pose_only = true;
     for (materials, hair.getHairSettings().materials.items) |m, *m_in| {
         collides = collides or m.enable_collision != 0;
+        enable_collision = enable_collision or m_in.enable_collision;
         grid = grid or m_in.needsGrid();
         global_pose_only = global_pose_only and m_in.globalPoseOnly();
     }
@@ -632,11 +648,13 @@ fn checkScene(hair: *Hair, t: *Transcript, coverage: *Coverage) void {
         if (indices[0] == 0)
             t.collision_without_hull = true;
         coverage.collision_updates += 1;
+    } else if (enable_collision) coverage.no_shape_updates += 1;
+    if (!global_pose_only and iterates) {
+        if (grid) coverage.grid_updates += 1 else coverage.grid_off_updates += 1;
     }
-    if (grid and !global_pose_only) coverage.grid_updates += 1;
     if (global_pose_only) coverage.global_pose_only_updates += 1;
     if (hair.scalp_joint_matrices_cb.get() != null) coverage.skinned_updates += 1;
-    if (hair.target_positions_cb.get() != null) coverage.interpolated_updates += 1;
+    if (hair.target_positions_cb.get() != null and !was_teleported and !global_pose_only and iterates) coverage.interpolated_updates += 1;
 }
 
 /// Run a scene on both sides and compare the transcripts
@@ -818,6 +836,20 @@ fn addOps(allocator: Allocator, scene: *Scene, center: Vec3, body: u32) !void {
     try scene.update(allocator, 1.0 / 60.0);
 }
 
+/// Move the hair away from every body and back. Away, the materials that collide find no leaf shape, so Update turns
+/// collision off for the whole hair. The teleports put the strands back in their default pose after each move.
+fn addAwayOps(allocator: Allocator, scene: *Scene, center: Vec3) !void {
+    const c = RVec3.fromVec3(center);
+    try scene.setPosition(allocator, c.addVec3(Vec3.init(-3.0, 0.0, 0.0)));
+    try scene.op(allocator, .{ .kind = .on_teleported });
+    try scene.update(allocator, 1.0 / 60.0);
+    try scene.update(allocator, 1.0 / 90.0);
+    try scene.setPosition(allocator, c);
+    try scene.op(allocator, .{ .kind = .on_teleported });
+    try scene.update(allocator, 1.0 / 60.0);
+    try scene.update(allocator, 1.0 / 60.0);
+}
+
 fn checkStructSizes() !void {
     var sizes: [4]u32 = undefined;
     jolt.jolt_hs_struct_sizes(&sizes);
@@ -833,7 +865,7 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
     var rng: fw.Rng = .{ .state = 0x4a17_5ce1 };
     var coverage: Coverage = .{};
 
-    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, center: Vec3, rotation: Quat = .identity(), gravity: [3]f32 = .{ 0, -9.81, 0 }, optimize: bool = false, num_iterations_per_second: u32 = 360, min_vertices: u32 = 3, max_vertices: u32 = 16 };
+    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, center: Vec3, rotation: Quat = .identity(), gravity: [3]f32 = .{ 0, -9.81, 0 }, optimize: bool = false, num_iterations_per_second: u32 = 360, min_vertices: u32 = 3, max_vertices: u32 = 16, away: bool = false };
     const m3 = materials3();
     const setups = [_]Setup{
         .{ .name = "straight, 3 materials", .shape = .straight, .materials = &m3, .center = Vec3.zero() },
@@ -843,6 +875,8 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
         .{ .name = "other gravity, 180 iterations", .shape = .curly, .materials = &.{ withFraction(variantMaterial(3), 0.8), withFraction(variantMaterial(1), 0.3) }, .center = Vec3.init(0.5, -1.0, 0.5), .gravity = .{ 2.0, -15.0, 1.0 }, .num_iterations_per_second = 180 },
         .{ .name = "no collision", .shape = .straight, .materials = &.{.{ .enable_collision = false, .simulation_strands_fraction = 0.5 }}, .center = Vec3.zero(), .rotation = Quat.rotation(Vec3.axisX(), -0.3) },
         .{ .name = "uniform strands", .shape = .curly, .materials = &.{ withFraction(variantMaterial(2), 0.6), .{ .simulation_strands_fraction = 0.5 } }, .center = Vec3.init(0.3, 0.2, -0.4), .min_vertices = 10, .max_vertices = 10 },
+        .{ .name = "grid and LRA off for the whole hair", .shape = .curly, .materials = &.{ withFraction(variantMaterial(0), 0.6), withFraction(variantMaterial(0), 0.4) }, .center = Vec3.init(-0.7, 0.4, 1.1), .rotation = Quat.rotation(Vec3.axisY(), 0.8) },
+        .{ .name = "away from the bodies", .shape = .straight, .materials = &.{ withFraction(variantMaterial(1), 0.5), globalPoseOnlyMaterial(0.4) }, .center = Vec3.init(0.2, -0.3, 0.6), .away = true },
     };
     for (setups) |setup| {
         var scene = try Scene.init(allocator, setup.name);
@@ -858,11 +892,13 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
         scene.settings = try settingsBytes(allocator, null, setup.materials, &groom, .{ .num_iterations_per_second = setup.num_iterations_per_second });
         const body = try addBodies(allocator, &scene, &rng, c);
         try addOps(allocator, &scene, c, body);
+        if (setup.away) try addAwayOps(allocator, &scene, c);
         try runScene(allocator, &scene, &coverage);
     }
     try std.testing.expectEqual(@as(u32, setups.len), coverage.scenes);
-    // The paths of Update: collision against hulls, the grid, the global pose only path, strands without padding vertices
-    try std.testing.expect(coverage.collision_updates > 10 and coverage.grid_updates > 10 and coverage.global_pose_only_updates > 5 and coverage.uniform_scenes == 1);
+    // The paths of Update: collision against hulls, collision without a shape in the bounds, the grid on and off for the
+    // whole hair, the global pose only path, strands without padding vertices
+    try std.testing.expect(coverage.collision_updates > 10 and coverage.no_shape_updates >= 2 and coverage.grid_updates > 10 and coverage.grid_off_updates > 5 and coverage.global_pose_only_updates > 5 and coverage.uniform_scenes == 1);
 }
 
 /// The 3 materials of HairSettingsParity.materials3 (fractions below 1, a gravity preload, a global pose only material)
