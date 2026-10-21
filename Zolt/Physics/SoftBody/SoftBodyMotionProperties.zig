@@ -43,7 +43,9 @@
 //! - `clearCollidingShapesAndSensors` (Zolt) is the end of UpdateRigidBodyVelocities: it releases the leaf shapes. The
 //!   SoftBodyFinalize job of a poisoned update calls it too (R17).
 //! - JPH_DEBUG_RENDERER (DrawVertices, DrawVertexVelocities, the Draw*Constraints functions, DrawRods, DrawRodStates,
-//!   DrawPredictedBounds and the DrawConstraints helper): TODO(debug_renderer), group D4.
+//!   DrawPredictedBounds and the DrawConstraints helper): gated declarations (RemainingFeaturesArchitecture.md R2).
+//!   The template DrawConstraints takes the name of the end index field of the update group and a value with a `draw`
+//!   function (Jolt's two lambdas).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -90,6 +92,9 @@ const SoftBodyContactSettings = @import("SoftBodyContactListener.zig").SoftBodyC
 const SoftBodyContactListener = @import("SoftBodyContactListener.zig").SoftBodyContactListener;
 const SoftBodyValidateResult = @import("SoftBodyContactListener.zig").SoftBodyValidateResult;
 const SoftBodyManifold = @import("SoftBodyManifold.zig").SoftBodyManifold;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const SoftBodyConstraintColor = @import("../Body/BodyManager.zig").SoftBodyConstraintColor;
 
 /// This class contains the runtime information of a soft body.
 //
@@ -522,9 +527,199 @@ pub const SoftBodyMotionProperties = struct {
         self.base.setMassProperties(.all, &mp);
     }
 
-    // TODO(debug_renderer): DrawVertices, DrawVertexVelocities, DrawEdgeConstraints, DrawRods, DrawRodStates,
-    // DrawRodBendTwistConstraints, DrawBendConstraints, DrawVolumeConstraints, DrawSkinConstraints, DrawLRAConstraints,
-    // DrawPredictedBounds and the DrawConstraints helper (group D4)
+    // Draw the state of a soft body (JPH_DEBUG_RENDERER: gated declarations, `void` without -Ddebug_renderer)
+
+    pub const drawVertices = if (Core.debug_renderer) drawVerticesImpl else {};
+    fn drawVerticesImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44) void {
+        for (self.vertices.items) |*v|
+            renderer.drawMarker(center_of_mass_transform.mulVec3(v.position), if (v.inv_mass > 0.0) Color.green else Color.red, 0.05);
+    }
+
+    pub const drawVertexVelocities = if (Core.debug_renderer) drawVertexVelocitiesImpl else {};
+    fn drawVertexVelocitiesImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44) void {
+        for (self.vertices.items) |*v|
+            renderer.drawArrow(center_of_mass_transform.mulVec3(v.position), center_of_mass_transform.mulVec3(v.position.add(v.velocity)), Color.yellow, 0.01);
+    }
+
+    /// Helper function to draw constraints (JPH_DEBUG_RENDERER). `end_index_field` names the end index of the update
+    /// group (Jolt's inGetEndIndex), `drawer.draw(index, color)` draws constraint `index` (Jolt's inDrawConstraint).
+    fn drawConstraints(self: *const SoftBodyMotionProperties, constraint_color: SoftBodyConstraintColor, comptime end_index_field: []const u8, drawer: anytype, base_color_in: Color) void {
+        const update_groups = self.settings.get().?.update_groups.items;
+        var start: u32 = 0;
+        for (update_groups, 0..) |*group, i| {
+            const end: u32 = @field(group, end_index_field);
+
+            var base_color: Color = undefined;
+            if (constraint_color != .constraint_type)
+                base_color = Color.getDistinctColor(@intCast(@as(u32, @intCast(update_groups.len)) - @as(u32, @intCast(i)) - 1)) // Ensure that color 0 is always the last group
+            else
+                base_color = base_color_in;
+
+            var idx = start;
+            while (idx < end) : (idx += 1) {
+                const color = if (constraint_color == .constraint_order) base_color.mulScalar(@as(f32, @floatFromInt(idx - start)) / @as(f32, @floatFromInt(end - start))) else base_color;
+                drawer.draw(idx, color);
+            }
+
+            start = end;
+        }
+    }
+
+    /// The state that the draw lambdas capture ([this, inRenderer, &inCenterOfMassTransform])
+    const DrawContext = struct {
+        const RVec3 = @import("../../Math/Real.zig").RVec3;
+
+        self: *const SoftBodyMotionProperties,
+        renderer: *DebugRenderer,
+        transform: RMat44,
+
+        fn vertexPosition(c: DrawContext, index: u32) RVec3 {
+            return c.transform.mulVec3(c.self.vertices.items[index].position);
+        }
+    };
+
+    pub const drawEdgeConstraints = if (Core.debug_renderer) drawEdgeConstraintsImpl else {};
+    fn drawEdgeConstraintsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const e = &d.c.self.settings.get().?.edge_constraints.items[index];
+                d.c.renderer.drawLine(d.c.vertexPosition(e.vertex[0]), d.c.vertexPosition(e.vertex[1]), color);
+            }
+        };
+        self.drawConstraints(constraint_color, "edge_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.white);
+    }
+
+    pub const drawRods = if (Core.debug_renderer) drawRodsImpl else {};
+    fn drawRodsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const r = &d.c.self.settings.get().?.rod_stretch_shear_constraints.items[index];
+                d.c.renderer.drawLine(d.c.vertexPosition(r.vertex[0]), d.c.vertexPosition(r.vertex[1]), color);
+            }
+        };
+        self.drawConstraints(constraint_color, "rod_stretch_shear_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.white);
+    }
+
+    pub const drawRodStates = if (Core.debug_renderer) drawRodStatesImpl else {};
+    fn drawRodStatesImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const state = &d.c.self.rod_states.items[index];
+                const rod = &d.c.self.settings.get().?.rod_stretch_shear_constraints.items[index];
+
+                const x0 = d.c.vertexPosition(rod.vertex[0]);
+                const x1 = d.c.vertexPosition(rod.vertex[1]);
+
+                var rod_center = d.c.transform;
+                rod_center.setTranslation(x0.add(x1).mulScalar(0.5));
+                d.c.renderer.drawArrow(rod_center.getTranslation(), rod_center.getTranslation().addVec3(state.u.angular_velocity), color, 0.01 * rod.length);
+
+                const rod_frame = rod_center.mul(RMat44.rotationQuat(state.rotation));
+                d.c.renderer.drawCoordinateSystem(rod_frame, .{ .size = 0.3 * rod.length });
+            }
+        };
+        self.drawConstraints(constraint_color, "rod_stretch_shear_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.orange);
+    }
+
+    pub const drawRodBendTwistConstraints = if (Core.debug_renderer) drawRodBendTwistConstraintsImpl else {};
+    fn drawRodBendTwistConstraintsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const settings = d.c.self.settings.get().?;
+                const r1 = settings.rod_bend_twist_constraints.items[index].rod[0];
+                const r2 = settings.rod_bend_twist_constraints.items[index].rod[1];
+                const rod1 = &settings.rod_stretch_shear_constraints.items[r1];
+                const rod2 = &settings.rod_stretch_shear_constraints.items[r2];
+
+                const vertices = d.c.self.vertices.items;
+                const x0 = d.c.transform.mulVec3(vertices[rod1.vertex[0]].position.mulScalar(0.4).add(vertices[rod1.vertex[1]].position.mulScalar(0.6)));
+                const x1 = d.c.transform.mulVec3(vertices[rod2.vertex[0]].position.mulScalar(0.6).add(vertices[rod2.vertex[1]].position.mulScalar(0.4)));
+
+                d.c.renderer.drawLine(x0, x1, color);
+            }
+        };
+        self.drawConstraints(constraint_color, "rod_bend_twist_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.green);
+    }
+
+    pub const drawBendConstraints = if (Core.debug_renderer) drawBendConstraintsImpl else {};
+    fn drawBendConstraintsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const b = &d.c.self.settings.get().?.dihedral_bend_constraints.items[index];
+
+                const x0 = d.c.vertexPosition(b.vertex[0]);
+                const x1 = d.c.vertexPosition(b.vertex[1]);
+                const x2 = d.c.vertexPosition(b.vertex[2]);
+                const x3 = d.c.vertexPosition(b.vertex[3]);
+                const c_edge = x0.add(x1).mulScalar(0.5);
+                const c0 = x0.add(x1).add(x2).divScalar(3.0);
+                const c1 = x0.add(x1).add(x3).divScalar(3.0);
+
+                d.c.renderer.drawArrow(x0.mulScalar(0.9).add(x1.mulScalar(0.1)), x0.mulScalar(0.1).add(x1.mulScalar(0.9)), color, 0.01);
+                d.c.renderer.drawLine(c_edge, c_edge.mulScalar(0.1).add(c0.mulScalar(0.9)), color);
+                d.c.renderer.drawLine(c_edge, c_edge.mulScalar(0.1).add(c1.mulScalar(0.9)), color);
+            }
+        };
+        self.drawConstraints(constraint_color, "dihedral_bend_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.green);
+    }
+
+    pub const drawVolumeConstraints = if (Core.debug_renderer) drawVolumeConstraintsImpl else {};
+    fn drawVolumeConstraintsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const v = &d.c.self.settings.get().?.volume_constraints.items[index];
+
+                const x1 = d.c.vertexPosition(v.vertex[0]);
+                const x2 = d.c.vertexPosition(v.vertex[1]);
+                const x3 = d.c.vertexPosition(v.vertex[2]);
+                const x4 = d.c.vertexPosition(v.vertex[3]);
+
+                d.c.renderer.drawTriangle(x1, x3, x2, color, .{ .cast_shadow = .on });
+                d.c.renderer.drawTriangle(x2, x3, x4, color, .{ .cast_shadow = .on });
+                d.c.renderer.drawTriangle(x1, x4, x3, color, .{ .cast_shadow = .on });
+                d.c.renderer.drawTriangle(x1, x2, x4, color, .{ .cast_shadow = .on });
+            }
+        };
+        self.drawConstraints(constraint_color, "volume_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.yellow);
+    }
+
+    pub const drawSkinConstraints = if (Core.debug_renderer) drawSkinConstraintsImpl else {};
+    fn drawSkinConstraintsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const s = &d.c.self.settings.get().?.skinned_constraints.items[index];
+                const skin_state = &d.c.self.skin_state.items[s.vertex];
+                const skin_transform = d.c.self.skin_state_transform;
+                d.c.renderer.drawArrow(skin_transform.mulVec3(skin_state.position), skin_transform.mulVec3(skin_state.position.add(skin_state.normal.mulScalar(0.1))), color, 0.01);
+                d.c.renderer.drawLine(skin_transform.mulVec3(skin_state.position), d.c.vertexPosition(s.vertex), Color.blue);
+            }
+        };
+        self.drawConstraints(constraint_color, "skinned_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.orange);
+    }
+
+    pub const drawLRAConstraints = if (Core.debug_renderer) drawLRAConstraintsImpl else {};
+    fn drawLRAConstraintsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44, constraint_color: SoftBodyConstraintColor) void {
+        const Drawer = struct {
+            c: DrawContext,
+            fn draw(d: @This(), index: u32, color: Color) void {
+                const l = &d.c.self.settings.get().?.lra_constraints.items[index];
+                d.c.renderer.drawLine(d.c.vertexPosition(l.vertex[0]), d.c.vertexPosition(l.vertex[1]), color);
+            }
+        };
+        self.drawConstraints(constraint_color, "lra_end_index", Drawer{ .c = .{ .self = self, .renderer = renderer, .transform = center_of_mass_transform } }, Color.grey);
+    }
+
+    pub const drawPredictedBounds = if (Core.debug_renderer) drawPredictedBoundsImpl else {};
+    fn drawPredictedBoundsImpl(self: *const SoftBodyMotionProperties, renderer: *DebugRenderer, center_of_mass_transform: RMat44) void {
+        renderer.drawWireBoxMatrix(center_of_mass_transform, self.local_predicted_bounds, Color.red);
+    }
 
     /// Saving state for replay
     pub fn saveState(self: *const SoftBodyMotionProperties, stream: *StateRecorder) void {

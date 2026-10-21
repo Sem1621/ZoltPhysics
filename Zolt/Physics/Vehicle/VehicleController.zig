@@ -4,8 +4,8 @@
 //! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings): `rtti`. Jolt
 //!   adds no attributes, only the base class SerializableObject.
 //! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): an option-gated vtable entry
-//!   (`virtual.OptionalVirtual`, no slot without `-Ddebug_renderer`) with a gated dispatcher. Until group D4 ports every
-//!   override, `impl.draw` is a placeholder that panics (RemainingFeaturesArchitecture.md R2).
+//!   (`virtual.OptionalVirtual`, no slot without `-Ddebug_renderer`) with a gated dispatcher
+//!   (RemainingFeaturesArchitecture.md R2). Every controller implements it, like in Jolt.
 //! - CharacterVehicleArchitecture E2:
 //!   - `VehicleControllerSettings` is an abstract pattern A root with `ref_count` (RefTarget<VehicleControllerSettings>):
 //!     `saveBinaryState`, `restoreBinaryState` and `constructController` are pure virtual. The settings classes declare
@@ -253,16 +253,7 @@ pub const VehicleController = struct {
     }
 
     /// Abstract: every virtual function is pure virtual
-    pub const impl = struct {
-        /// Zolt placeholder (RemainingFeaturesArchitecture.md R2): Draw is pure virtual in Jolt. It stays here until
-        /// every controller implements it (group D4), so that all controllers compile with -Ddebug_renderer=true in the
-        /// meantime.
-        pub const draw = if (Core.debug_renderer) drawPlaceholder else {};
-        fn drawPlaceholder(self: *const VehicleController, renderer: *DebugRenderer) void {
-            _ = .{ self, renderer };
-            @panic("TODO(debug_renderer): Draw of this vehicle controller is not ported yet");
-        }
-    };
+    pub const impl = struct {};
 };
 
 /// A user controller (settings, controller and wheel classes) for the tests of the virtual functions
@@ -301,7 +292,7 @@ const TestControllerSettings = struct {
 };
 
 const TestController = struct {
-    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState };
+    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState, .draw };
 
     base: VehicleController,
     value: f32,
@@ -343,6 +334,11 @@ const TestController = struct {
 
     pub fn restoreState(self: *TestController, stream: *StateRecorder) void {
         stream.read(&self.value);
+    }
+
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestController, renderer: *DebugRenderer) void {
+        renderer.drawMarker(self.base.constraint.getVehicleBody().getPosition(), @import("../../Core/Color.zig").Color.white, self.value);
     }
 };
 

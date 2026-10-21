@@ -85,7 +85,8 @@ test "DebugRenderer: the constraint and vehicle controller draw hooks compile aw
     // VehicleController: Draw
     try expect((@FieldType(zolt.VehicleController.VTable, "draw") == void) == !on);
     try expect((@TypeOf(zolt.VehicleController.draw) == void) == !on);
-    try expect((@TypeOf(zolt.VehicleController.impl.draw) == void) == !on);
+    // Draw is pure virtual: every controller implements it (no placeholder in impl since group D4)
+    try expect(!@hasDecl(zolt.VehicleController.impl, "draw"));
 
     // Without the option the vtables keep their size from before Phase 9 (16 slots for Constraint, 2 more for
     // TwoBodyConstraint, 10 for VehicleController), the option adds one slot per draw function
