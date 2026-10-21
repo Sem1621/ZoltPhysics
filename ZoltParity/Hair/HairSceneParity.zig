@@ -766,6 +766,10 @@ fn compareTranscripts(scene: *const Scene, zolt_bytes: []const u8, jolt_bytes: [
         if (z_tag & 0xFFF00000 == tag_op) op = z_tag & 0xFFFFF;
         if (z_size != j_size) {
             std.debug.print("Hair scene {s}, operation {x}: {s} has {d} bytes in Zolt, {d} in Jolt (0x{x}: a null buffer)\n", .{ scene.name, op, tagName(&name_buffer, z_tag), z_size, j_size, null_size });
+            if (z_tag == tag_draw and z + 8 + z_size <= zolt_bytes.len and j + 8 + j_size <= jolt_bytes.len) {
+                // Report the first call that differs
+                try pr.compareLogs(scene.name, zolt_bytes[z + 8 ..][0..z_size], jolt_bytes[j + 8 ..][0..j_size]);
+            }
             return error.ParityMismatch;
         }
         z += 8;
