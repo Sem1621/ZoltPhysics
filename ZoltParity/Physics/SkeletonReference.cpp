@@ -538,4 +538,25 @@ void jolt_skel_mapper(const SkelMapperDesc *inDesc, SkelMapperResult *outResult)
 	outResult->mRefCounts[2] = skeleton2->GetRefCount();
 }
 
+// Group D4 (ZoltParity/Renderer/SkeletonDrawParity.zig): a pose for the draw parity. It gets the skeleton of inSkeleton,
+// the joint states inStates (7 floats per joint) and the root offset, then CalculateJointMatrices.
+// jolt_skel_draw_pose_destroy deletes it.
+SkeletonPose *jolt_skel_draw_pose_create(const SkelDesc *inSkeleton, const float *inStates, const Real *inRootOffset)
+{
+	SkelEnsureAllocator();
+	SkeletonPose *pose = new SkeletonPose;
+	pose->SetSkeleton(SkelMakeSkeleton(*inSkeleton, nullptr));
+	for (uint j = 0; j < pose->GetJointCount(); ++j)
+		SkelLoadState(inStates + 7 * j, pose->GetJoint(j));
+	pose->SetRootOffset(RVec3(inRootOffset[0], inRootOffset[1], inRootOffset[2]));
+	pose->CalculateJointMatrices();
+	return pose;
+}
+
+// Group D4: delete a pose of jolt_skel_draw_pose_create
+void jolt_skel_draw_pose_destroy(SkeletonPose *inPose)
+{
+	delete inPose;
+}
+
 } // extern "C"

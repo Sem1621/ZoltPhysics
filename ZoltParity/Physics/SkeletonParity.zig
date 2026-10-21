@@ -59,7 +59,7 @@ const SkeletonMapper = zolt.SkeletonMapper;
 const StreamInWrapper = zolt.StreamInWrapper;
 const StreamOutWrapper = zolt.StreamOutWrapper;
 
-const max_joints = 40;
+pub const max_joints = 40;
 const max_name = 8;
 const max_animated_joints = 12;
 const max_keyframes = 12;
@@ -82,7 +82,7 @@ const SkelJointDesc = extern struct {
 };
 
 /// Must match SkelDesc in SkeletonReference.cpp
-const SkelDesc = extern struct {
+pub const SkelDesc = extern struct {
     num_joints: u32,
     /// Call CalculateParentJointIndices after adding the joints
     calculate_parent_joint_indices: u32,
@@ -229,7 +229,7 @@ fn storeMat44(m: Mat44, out: *[16]f32) void {
     }
 }
 
-fn loadState(v: *const [7]f32, state: *SkeletalAnimation.JointState) void {
+pub fn loadState(v: *const [7]f32, state: *SkeletalAnimation.JointState) void {
     state.rotation = Quat.init(v[0], v[1], v[2], v[3]);
     state.translation = Vec3.init(v[4], v[5], v[6]);
 }
@@ -246,7 +246,7 @@ fn setName(out: *[max_name]u8, out_len: *u32, comptime fmt: []const u8, args: an
 // The Zolt side of the C functions
 
 /// The skeleton of a description (SkelMakeSkeleton), one reference owned by the caller
-fn makeSkeleton(allocator: Allocator, desc: *const SkelDesc, out_add_joint_results: ?*[max_joints]u32) !Ref(Skeleton) {
+pub fn makeSkeleton(allocator: Allocator, desc: *const SkelDesc, out_add_joint_results: ?*[max_joints]u32) !Ref(Skeleton) {
     var skeleton = Ref(Skeleton).init(try Skeleton.create(allocator));
     errdefer skeleton.deinit();
     const s = skeleton.get().?;
@@ -639,7 +639,7 @@ const AnimationMode = struct {
     huge_times: bool = false,
 };
 
-const Gen = struct {
+pub const Gen = struct {
     rng: fw.Rng,
 
     fn index(self: *Gen, n: usize) usize {
@@ -698,7 +698,7 @@ const Gen = struct {
         };
     }
 
-    fn state(self: *Gen) [7]f32 {
+    pub fn state(self: *Gen) [7]f32 {
         const q = self.quat();
         const t = self.vec3(-2, 2);
         return .{ q.getX(), q.getY(), q.getZ(), q.getW(), t.getX(), t.getY(), t.getZ() };
@@ -786,7 +786,7 @@ const Gen = struct {
     }
 
     /// An ordered skeleton with n joints named j0, j1, ...
-    fn tree(self: *Gen, n: usize) SkelDesc {
+    pub fn tree(self: *Gen, n: usize) SkelDesc {
         var parents: [max_joints]i32 = undefined;
         self.treeParents(n, &parents);
         var order: [max_joints]usize = undefined;

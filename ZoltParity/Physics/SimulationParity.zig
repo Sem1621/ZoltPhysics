@@ -340,6 +340,8 @@ const jolt = struct {
     extern fn jolt_sim_draw_begin() u32;
     extern fn jolt_sim_draw_end() void;
     extern fn jolt_sim_draw_take_log(out_bytes: [*]u8, capacity: u64) u64;
+    // Group D4: the draws after an update (SimDraw.postDraws)
+    extern fn jolt_sim_draw_world(world: *anyopaque, body_bits: u32, shape_color: u32, soft_body_constraint_color: u32, constraints: u32, rpm_meter: *const [4]f32, draw_size: f32) void;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -7700,8 +7702,16 @@ fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !voi
 // CCD (`renderer.flags.physics_system`) set, the C++ worlds with a ParityRenderer as DebugRenderer::sInstance and the
 // static flags set (jolt_sim_draw_begin). After every update the call logs of the update and of the operations before it
 // must match call for call, and the Zolt state must be the state of the same scene in the same configuration without
-// drawing (recorded by a run before): drawing changes nothing. The character scenes draw their contacts only: the
-// CharacterVirtual flags are group D4's.
+// drawing (recorded by a run before): drawing changes nothing.
+//
+// Group D4: every CharacterVirtual flag is set too (`renderer.flags.character_virtual`, the static flags of
+// CharacterVirtual), so the character scenes draw the constraints, the walk stairs and stick to floor sweeps and the
+// supporting volume. The scenes of `post_draw_scenes` also draw after every update (`SimDraw.postDraws`, before the logs
+// are compared): the vehicle scenes give every vehicle an RPM meter and a draw size that change with the update, then
+// draw the constraints the three ways (VehicleConstraint draws its controller: the wheeled, tracked and motorcycle
+// draws, the RPM meter, the status and wheel texts); the soft body scenes draw the bodies with the shapes and every soft
+// body flag of DrawSettings (all of them in even updates, one flag after the other in odd updates) in the three
+// ESoftBodyConstraintColors.
 
 /// The scenes that also run with drawing (contacts, CCD, constraints, characters)
 const draw_scenes = [_][]const u8{
@@ -7719,6 +7729,41 @@ const draw_scenes = [_][]const u8{
     "constraints_hinge_car",
     "character_ops",
     "character_virtual_ops",
+    // Group D4: the CharacterVirtual draws
+    "character_virtual_characters",
+    "character_virtual_stairs_slopes",
+    "character_virtual_platforms",
+    "character_virtual_far_from_origin",
+};
+
+/// Group D4: the draws after every update of a scene (`SimDraw.postDraws`)
+const PostDraws = struct {
+    /// BodyManager::Draw with the shapes and the soft body flags
+    bodies: bool = false,
+    /// The three constraint draws of the system (the vehicles)
+    constraints: bool = false,
+};
+
+/// Group D4: the scenes that also run with drawing and draw after every update (vehicles, soft bodies)
+const post_draw_scenes = [_]struct { name: []const u8, post: PostDraws }{
+    .{ .name = "vehicle_wheeled_ops", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_tracked_ops", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_motorcycle_ops", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_wheeled_driving", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_wheeled_in_air", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_tracked_terrains", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_motorcycle_turns", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_wheeled_far_from_origin", .post = .{ .constraints = true, .bodies = true } },
+    .{ .name = "soft_body_cube_on_floor", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_ops", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_cloth_lra", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_cloth_dihedral", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_pressure_sphere", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_rod_chain", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_skinned_back_stops", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_several_on_one_body", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_update_position_false", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_test_bend_constraint", .post = .{ .bodies = true } },
 };
 
 /// The draws of a run (see above). Mode `record_states` records the Zolt state after every update, mode `draw` draws and
@@ -7732,6 +7777,8 @@ const SimDraw = struct {
     jolt_log: std.ArrayList(u8) = .empty,
     /// The number of log bytes compared (the scene must draw something)
     num_log_bytes: usize = 0,
+    /// Group D4: the draws after every update
+    post: PostDraws = .{},
 
     fn deinit(self: *SimDraw) void {
         for (self.states.items) |s| self.allocator.free(s);
@@ -7747,6 +7794,7 @@ const SimDraw = struct {
         self.renderer.log.bytes.clearRetainingCapacity();
         self.renderer.base.flags.contact_constraint_manager = .{ .draw_contact_point = true, .draw_supporting_faces = true, .draw_contact_point_reduction = true, .draw_contact_manifolds = true };
         self.renderer.base.flags.physics_system.draw_motion_quality_linear_cast = true;
+        self.renderer.base.flags.character_virtual = .{ .draw_constraints = true, .draw_walk_stairs = true, .draw_stick_to_floor = true, .draw_supporting_volume = true };
         zw.system.setDebugRenderer(&self.renderer.base);
         std.debug.assert(jolt.jolt_sim_draw_begin() == 1);
     }
@@ -7759,6 +7807,9 @@ const SimDraw = struct {
         self.renderer.deinit();
     }
 
+    /// Group D4: the draws after an update (only with the option)
+    const postDraws = if (Core.debug_renderer) postDrawsImpl else {};
+
     /// After every update (Run.step, `run.zolt_state` holds the Zolt state): record the state, or compare it with the
     /// recorded one and compare the call logs since the last update
     fn afterUpdate(self: *SimDraw, run: *Run) !void {
@@ -7769,6 +7820,7 @@ const SimDraw = struct {
                 const without = self.states.items[run.update];
                 if (std.mem.indexOfDiff(u8, run.zolt_state.items, without)) |first|
                     return run.fail("the state with drawing differs from the state without drawing at byte {d} ({d} / {d} bytes)", .{ first, run.zolt_state.items.len, without.len });
+                self.postDraws(run);
                 self.jolt_log.clearRetainingCapacity();
                 const size = jolt.jolt_sim_draw_take_log(self.jolt_log.items.ptr, 0);
                 try self.jolt_log.resize(self.allocator, @intCast(size));
@@ -7785,8 +7837,55 @@ const SimDraw = struct {
     }
 };
 
+/// The bits of `ParityRenderer.BodyDrawBits` that postDraws uses
+const PostDrawBits = struct {
+    const Bits = ParityRenderer.BodyDrawBits;
+    const num_soft_body_flags = Bits.count - Bits.first_soft_body;
+    const all_soft_body: u32 = Bits.all & ~((@as(u32, 1) << Bits.first_soft_body) - 1);
+};
+
+/// Group D4 (see above): the draws after update `run.update` on both sides. The RPM meters and draw sizes change with
+/// the update; so do the soft body flags (all of them, or one) and the ESoftBodyConstraintColor.
+fn postDrawsImpl(self: *SimDraw, run: *Run) void {
+    if (!self.post.bodies and !self.post.constraints) return;
+    const u = run.update;
+    const rpm_meter = [4]f32{ 0.25 * @as(f32, @floatFromInt(u % 3)), 1.0 + 0.25 * @as(f32, @floatFromInt(u % 4)), -0.5, 0.5 + 0.125 * @as(f32, @floatFromInt(u % 5)) };
+    const draw_size: f32 = 0.5 + 0.25 * @as(f32, @floatFromInt(u % 4));
+    for (run.zw.phase7.vehicles.vehicles.items) |v| {
+        const constraint = v.get();
+        const controller = constraint.getControllerMut();
+        const position = Vec3.init(rpm_meter[0], rpm_meter[1], rpm_meter[2]);
+        switch (v.controller) {
+            .wheeled => zolt.virtual.downcast(zolt.WheeledVehicleController, controller).setRPMMeter(position, rpm_meter[3]),
+            .tracked => zolt.virtual.downcast(zolt.TrackedVehicleController, controller).setRPMMeter(position, rpm_meter[3]),
+            .motorcycle => zolt.virtual.downcast(zolt.MotorcycleController, controller).base.setRPMMeter(position, rpm_meter[3]),
+        }
+        constraint.base.setDrawConstraintSize(draw_size);
+    }
+
+    const body_bits: u32 = if (!self.post.bodies) 0 else ParityRenderer.BodyDrawBits.draw_shape | if (u % 2 == 0) PostDrawBits.all_soft_body else @as(u32, 1) << @intCast(ParityRenderer.BodyDrawBits.first_soft_body + (u / 2) % PostDrawBits.num_soft_body_flags);
+    const shape_color: u8 = @intCast(u % ParityRenderer.BodyDrawBits.num_shape_colors);
+    const soft_body_constraint_color: u8 = @intCast(u % ParityRenderer.BodyDrawBits.num_soft_body_constraint_colors);
+    const renderer = &self.renderer.base;
+    if (body_bits != 0) {
+        const settings = ParityRenderer.bodyDrawSettings(body_bits, shape_color, soft_body_constraint_color);
+        run.zw.system.drawBodies(&settings, renderer, .{});
+    }
+    if (self.post.constraints) {
+        run.zw.system.drawConstraints(renderer);
+        run.zw.system.drawConstraintLimits(renderer);
+        run.zw.system.drawConstraintReferenceFrame(renderer);
+    }
+    jolt.jolt_sim_draw_world(run.cw.handle, body_bits, shape_color, soft_body_constraint_color, @intFromBool(self.post.constraints), &rpm_meter, draw_size);
+}
+
 /// Run a scene of `draw_scenes` without drawing (recording the states), then with drawing
 fn runDrawScene(name: []const u8) !void {
+    return runDrawSceneWith(name, .{});
+}
+
+/// runDrawScene with the draws after every update of `post` (group D4)
+fn runDrawSceneWith(name: []const u8, post: PostDraws) !void {
     if (!Core.debug_renderer) return error.SkipZigTest;
     const entry = for (&SimScenes.scenes) |*e| {
         if (std.mem.eql(u8, e.name, name)) break e;
@@ -7799,7 +7898,7 @@ fn runDrawScene(name: []const u8) !void {
     defer builder.deinit();
     try entry.build(&builder);
 
-    var draw: SimDraw = .{ .allocator = allocator, .mode = .record_states };
+    var draw: SimDraw = .{ .allocator = allocator, .mode = .record_states, .post = post };
     defer draw.deinit();
     const config: Config = .{ .zolt = .{ .thread_pool = 0 }, .cpp_threads = 0, .draw = &draw };
     _ = try runScene(allocator, entry, &builder, config, null);
@@ -7823,6 +7922,19 @@ fn DrawSceneTest(comptime name: []const u8) type {
 comptime {
     for (draw_scenes) |name|
         _ = DrawSceneTest(name);
+}
+
+fn PostDrawSceneTest(comptime name: []const u8, comptime post: PostDraws) type {
+    return struct {
+        test "SimulationParity draws (after the updates)" {
+            try runDrawSceneWith(name, post);
+        }
+    };
+}
+
+comptime {
+    for (post_draw_scenes) |scene|
+        _ = PostDrawSceneTest(scene.name, scene.post);
 }
 
 /// One test per scene: `SceneTest("name", index)` (a blocked scene is skipped)

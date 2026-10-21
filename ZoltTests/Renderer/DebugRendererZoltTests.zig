@@ -16,6 +16,8 @@
 //! - The body, constraint and system draws (group D3): the declarations that compile away, BodyManager.draw with a body
 //!   filter, recordDebugOutput, the simulation draws that never change a result, and Zolt's defined behavior for a path
 //!   constraint drawn before its first update (Jolt reads uninitialized members there).
+//! - The character, vehicle, skeleton and soft body draws (group D4): the declarations and debug-only members that
+//!   compile away (with size pins), and the skeleton pose draw.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -1102,4 +1104,92 @@ test "DebugRenderer: a path constraint drawn before its first update draws its a
         } else false;
         try expect(found);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The character, vehicle, skeleton and soft body draws (group D4)
+
+test "DebugRenderer: the character, vehicle, skeleton and soft body draws compile away without -Ddebug_renderer" {
+    const on = zolt.Core.debug_renderer;
+
+    // SkeletonPose: DrawSettings, the options of Draw (the default offset) and Draw
+    try expect((zolt.SkeletonPose.DrawSettings == void) == !on);
+    try expect((zolt.SkeletonPose.DrawOptions == void) == !on);
+    try expect((@TypeOf(zolt.SkeletonPose.draw) == void) == !on);
+
+    // The vehicle controllers and the engine: Draw, SetRPMMeter, ConvertRPMToAngle, DrawRPM and the RPM meter members
+    inline for (.{ zolt.WheeledVehicleController, zolt.TrackedVehicleController, zolt.MotorcycleController }) |T|
+        try expect((@TypeOf(T.draw) == void) == !on);
+    inline for (.{ zolt.WheeledVehicleController, zolt.TrackedVehicleController }) |T| {
+        try expect((@TypeOf(T.setRPMMeter) == void) == !on);
+        try expect((@FieldType(T, "rpm_meter_position") == void) == !on);
+        try expect((@FieldType(T, "rpm_meter_size") == void) == !on);
+    }
+    try expect((@TypeOf(zolt.VehicleEngine.convertRPMToAngle) == void) == !on);
+    try expect((@TypeOf(zolt.VehicleEngine.drawRPM) == void) == !on);
+
+    // The soft bodies: the 11 draws of the motion properties, the shape draw and the skin state transform
+    inline for (.{ "drawVertices", "drawVertexVelocities", "drawEdgeConstraints", "drawRods", "drawRodStates", "drawRodBendTwistConstraints", "drawBendConstraints", "drawVolumeConstraints", "drawSkinConstraints", "drawLRAConstraints", "drawPredictedBounds" }) |name|
+        try expect((@TypeOf(@field(zolt.SoftBodyMotionProperties, name)) == void) == !on);
+    try expect((@TypeOf(zolt.SoftBodyShape.draw) == void) == !on);
+    try expect((@FieldType(zolt.SoftBodyMotionProperties, "skin_state_transform") == void) == !on);
+    try expect((zolt.BodyManager.DrawSettings == void) == !on);
+
+    // The classes with debug-only members (pins). The RPM meter position (a Vec3) and size of the controllers add 32
+    // bytes in both precisions. The skin state transform (an RMat44) of the soft body motion properties adds 64 bytes in
+    // single and 96 bytes in double precision.
+    try expectEqual(@as(usize, if (on) 352 else 320), @sizeOf(zolt.WheeledVehicleController));
+    try expectEqual(@as(usize, if (on) 352 else 320), @sizeOf(zolt.TrackedVehicleController));
+    if (zolt.Core.double_precision)
+        try expectEqual(@as(usize, if (on) 544 else 448), @sizeOf(zolt.SoftBodyMotionProperties))
+    else
+        try expectEqual(@as(usize, if (on) 496 else 432), @sizeOf(zolt.SoftBodyMotionProperties));
+}
+
+test "DebugRenderer: SkeletonPose.draw draws a bone per joint with a parent, a coordinate system and the name of every joint" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // Draw only exists with the option
+
+    const allocator = std.testing.allocator;
+    var skeleton = zolt.Ref(zolt.Skeleton).init(try zolt.Skeleton.create(allocator));
+    defer skeleton.deinit();
+    const s = skeleton.get().?;
+    _ = try s.addJoint("Root", .{});
+    _ = try s.addJointWithParentIndex("Spine", 0);
+    _ = try s.addJointWithParentIndex("Head", 1);
+
+    var pose = zolt.SkeletonPose.init(allocator);
+    defer pose.deinit();
+    try pose.setSkeleton(s);
+    pose.getJointsMut().items[1].translation = Vec3.init(0, 1, 0);
+    pose.getJointsMut().items[2].translation = Vec3.init(0, 0.5, 0);
+    pose.setRootOffset(RVec3.init(10, 0, 0));
+    pose.calculateJointMatrices();
+
+    var renderer: RecordingRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.base.deinit();
+
+    // Only the bones: two green lines, the second one from the spine to the head (root offset applied)
+    pose.draw(&.{ .draw_joints = true, .draw_joint_orientations = false, .draw_joint_names = false }, &renderer.base, .{});
+    try expectEqual(@as(usize, 2), renderer.lines.items.len);
+    try expect(renderer.lines.items[1].from.eql(RVec3.init(10, 1, 0)));
+    try expect(renderer.lines.items[1].to.eql(RVec3.init(10, 1.5, 0)));
+    try expect(renderer.lines.items[1].color.eql(Color.green));
+    renderer.clear();
+
+    // Only the names, at the joints moved by the offset of the draw
+    pose.draw(&.{ .draw_joints = false, .draw_joint_orientations = false, .draw_joint_names = true }, &renderer.base, .{ .offset = RMat44.translation(RVec3.init(0, 0, 3)) });
+    try expectEqual(@as(usize, 0), renderer.lines.items.len);
+    try expectEqual(@as(usize, 3), renderer.texts.items.len);
+    for (renderer.texts.items, [_][]const u8{ "Root", "Spine", "Head" }, [_]f32{ 0, 1, 1.5 }) |t, name, y| {
+        try expectEqualSlices(u8, name, t.string);
+        try expect(t.position.eql(RVec3.init(10, y, 3)));
+        try expectEqual(@as(f32, 0.05), t.height);
+    }
+    renderer.clear();
+
+    // The default settings: bones and coordinate systems (three arrows per joint), no names
+    pose.draw(&.{}, &renderer.base, .{});
+    try expectEqual(@as(usize, 0), renderer.texts.items.len);
+    try expect(renderer.lines.items.len > 2);
 }

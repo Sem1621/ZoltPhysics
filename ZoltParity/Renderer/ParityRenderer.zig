@@ -15,7 +15,8 @@
 //!     64..95    D2: shapes (64..69 used; the shapes come from a `ShapeContext`, see `runOpsWithShapes`)
 //!     96..127   D3: constraints and bodies (96..104 used; the objects come from a `PhysicsContext`, see
 //!               `runOpsWithContext`)
-//!     128..191  D4: characters, vehicles, skeletons, soft bodies
+//!     128..191  D4: characters, vehicles, skeletons, soft bodies (128 used: the skeleton poses of a `PhysicsContext`;
+//!               the characters, vehicles and soft bodies draw in the simulation scenes, SimulationParity.zig)
 //!     192..223  H3: hair
 //! - `compareLogs` reports the first record that differs, with its op and its bytes.
 //! - The renderers allocate with the allocator they get; a failed allocation of the log panics (test harness only).
@@ -407,7 +408,23 @@ pub const Op = enum(u8) {
     /// MotionProperties::SetIslandIndexInternal (the index that PhysicsSystem's island builder sets; EShapeColor::
     /// IslandColor reads it): u32 body (not static), u32 index
     set_island_index = 104,
+
+    // D4: skeletons (u32 pose is an index into the poses of the PhysicsContext)
+
+    /// SkeletonPose::Draw: u32 pose, u8 settings (`SkeletonDrawBits`), u8 with offset, then the Affine offset when it is
+    /// set (without it the default argument RMat44::sIdentity())
+    draw_skeleton_pose = 128,
     _,
+};
+
+/// The bits of the settings of the op `draw_skeleton_pose`: the booleans of SkeletonPose::DrawSettings in declaration
+/// order
+pub const SkeletonDrawBits = struct {
+    pub const draw_joints: u8 = 1;
+    pub const draw_joint_orientations: u8 = 2;
+    pub const draw_joint_names: u8 = 4;
+    /// Every flag
+    pub const all: u8 = 7;
 };
 
 /// The `what` of the ops `draw_constraint` and `draw_constraint_manager`
@@ -492,6 +509,8 @@ pub const PhysicsContext = struct {
     body_manager: ?*zolt.BodyManager = null,
     /// The bodies that the body ops index
     bodies: []const *zolt.Body = &.{},
+    /// The skeleton poses that the op `draw_skeleton_pose` indexes (D4)
+    poses: []const *const zolt.SkeletonPose = &.{},
     /// The results of the ops that compute numbers (update_sleep_state)
     results: std.ArrayList(u8) = .empty,
     /// Called before the op `draw_constraint` draws (the Zolt side only: the coverage of the conditional draws)
@@ -538,7 +557,7 @@ const ParityBodyDrawFilter = if (zolt.Core.debug_renderer) struct {
 } else void;
 
 /// The DrawSettings of the op `draw_bodies` (only with the option)
-fn bodyDrawSettings(bits: u32, shape_color: u8, soft_body_constraint_color: u8) zolt.BodyManager.DrawSettings {
+pub fn bodyDrawSettings(bits: u32, shape_color: u8, soft_body_constraint_color: u8) zolt.BodyManager.DrawSettings {
     const Bits = BodyDrawBits;
     const first = Bits.first_soft_body;
     return .{
@@ -1091,6 +1110,15 @@ pub const OpWriter = struct {
         try self.writeRaw(index);
     }
 
+    /// SkeletonPose::Draw of pose `pose` with the settings `bits` (SkeletonDrawBits), with `offset` or the default one
+    pub fn drawSkeletonPose(self: *OpWriter, pose: u32, bits: u8, offset: ?Affine) Allocator.Error!void {
+        try self.writeOp(.draw_skeleton_pose);
+        try self.writeRaw(pose);
+        try self.writeRaw(bits);
+        try self.writeRaw(@as(u8, @intFromBool(offset != null)));
+        if (offset) |o| try self.writeAffine(o);
+    }
+
     pub fn createBatchTriangles(self: *OpWriter, triangles: []const TriangleData) Allocator.Error!void {
         try self.writeOp(.create_batch_triangles);
         try self.writeRaw(@as(u32, @intCast(triangles.len)));
@@ -1464,7 +1492,7 @@ pub fn runOpsWithContext(allocator: Allocator, renderer: *DebugRenderer, ops: []
                 if (comptime !zolt.Core.debug_renderer) unreachable; // The shapes only draw with the option
                 try runShapeOp(op, &r, renderer, shapes orelse @panic("runOps: a shape op without a ShapeContext"));
             },
-            .draw_constraint, .set_draw_constraint_size, .step_constraint, .draw_constraint_manager, .draw_bodies, .update_sleep_state, .move_body, .activate_body, .set_island_index => {
+            .draw_constraint, .set_draw_constraint_size, .step_constraint, .draw_constraint_manager, .draw_bodies, .update_sleep_state, .move_body, .activate_body, .set_island_index, .draw_skeleton_pose => {
                 if (comptime !zolt.Core.debug_renderer) unreachable; // The constraints and bodies only draw with the option
                 try runPhysicsOp(op, &r, renderer, physics orelse @panic("runOps: a constraint or body op without a PhysicsContext"));
             },
@@ -1613,6 +1641,19 @@ fn runPhysicsOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *Physic
         .set_island_index => {
             const body = context.bodies[r.read(u32)];
             body.getMotionPropertiesMut().setIslandIndexInternal(r.read(u32));
+        },
+        .draw_skeleton_pose => {
+            const pose = context.poses[r.read(u32)];
+            const bits = r.read(u8);
+            const settings: zolt.SkeletonPose.DrawSettings = .{
+                .draw_joints = bits & SkeletonDrawBits.draw_joints != 0,
+                .draw_joint_orientations = bits & SkeletonDrawBits.draw_joint_orientations != 0,
+                .draw_joint_names = bits & SkeletonDrawBits.draw_joint_names != 0,
+            };
+            if (r.read(u8) != 0)
+                pose.draw(&settings, renderer, .{ .offset = r.readRMat44() })
+            else
+                pose.draw(&settings, renderer, .{});
         },
         else => unreachable,
     }

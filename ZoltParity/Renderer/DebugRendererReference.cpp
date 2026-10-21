@@ -8,6 +8,9 @@
 // constraints of a constraint draw world of ConstraintsReference.cpp (jolt_cs_draw_world_*) or on the bodies of a body
 // world.
 //
+// Group D4 (SkeletonDrawParity.zig): jolt_dr_run_skeleton_ops runs the ops on skeleton poses that
+// jolt_skel_draw_pose_create of SkeletonReference.cpp made.
+//
 // The functions exist in both renderer configurations. Without JPH_DEBUG_RENDERER they return null and
 // jolt_dr_available() returns 0: the parity layers skip then.
 
@@ -99,6 +102,40 @@ static std::vector<uint8> sStreamBytes(const std::stringstream &inStream)
 {
 	std::string s = inStream.str();
 	return std::vector<uint8>(s.begin(), s.end());
+}
+
+/// Run the ops on the objects of ioContext on the renderer of inKind (0: ParityRenderer, 1: SimpleParityRenderer, 2: a
+/// recorder): part 0 of the result is the log (the .jor bytes after the construction for the recorder), part 1 the
+/// results of the ops
+static JoltDRResult *DRRunPhysicsOps(ParityPhysicsContext &ioContext, const uint8 *inOps, uint64 inSize, int inKind)
+{
+	JoltDRResult *result = new JoltDRResult;
+	if (inKind == 0)
+	{
+		ParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		RunParityOps(renderer, inOps, size_t(inSize), nullptr, nullptr, nullptr, &ioContext);
+		result->mParts.push_back(renderer.mLog.mBytes);
+	}
+	else if (inKind == 1)
+	{
+		SimpleParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		RunParityOps(renderer, inOps, size_t(inSize), &renderer, nullptr, nullptr, &ioContext);
+		result->mParts.push_back(renderer.mLog.mBytes);
+	}
+	else
+	{
+		std::stringstream stream;
+		StreamOutWrapper wrapper(stream);
+		DebugRendererRecorder recorder(wrapper);
+		size_t construction_size = sStreamBytes(stream).size();
+		RunParityOps(recorder, inOps, size_t(inSize), nullptr, &recorder, nullptr, &ioContext);
+		std::vector<uint8> all = sStreamBytes(stream);
+		result->mParts.push_back(std::vector<uint8>(all.begin() + construction_size, all.end()));
+	}
+	result->mParts.push_back(ioContext.mResults);
+	return result;
 }
 
 #endif // JPH_DEBUG_RENDERER
@@ -403,35 +440,26 @@ JoltDRResult *jolt_dr_run_physics_ops(void *inConstraintWorld, uint32 inNumConst
 		context.mBodies = world->mBodies;
 	}
 
-	JoltDRResult *result = new JoltDRResult;
-	if (inKind == 0)
-	{
-		ParityRenderer renderer;
-		renderer.mLog.mBytes.clear();
-		RunParityOps(renderer, inOps, size_t(inSize), nullptr, nullptr, nullptr, &context);
-		result->mParts.push_back(renderer.mLog.mBytes);
-	}
-	else if (inKind == 1)
-	{
-		SimpleParityRenderer renderer;
-		renderer.mLog.mBytes.clear();
-		RunParityOps(renderer, inOps, size_t(inSize), &renderer, nullptr, nullptr, &context);
-		result->mParts.push_back(renderer.mLog.mBytes);
-	}
-	else
-	{
-		std::stringstream stream;
-		StreamOutWrapper wrapper(stream);
-		DebugRendererRecorder recorder(wrapper);
-		size_t construction_size = sStreamBytes(stream).size();
-		RunParityOps(recorder, inOps, size_t(inSize), nullptr, &recorder, nullptr, &context);
-		std::vector<uint8> all = sStreamBytes(stream);
-		result->mParts.push_back(std::vector<uint8>(all.begin() + construction_size, all.end()));
-	}
-	result->mParts.push_back(context.mResults);
-	return result;
+	return DRRunPhysicsOps(context, inOps, inSize, inKind);
 #else
 	(void)inConstraintWorld; (void)inNumConstraints; (void)inBodyWorld; (void)inOps; (void)inSize; (void)inKind;
+	return nullptr;
+#endif
+}
+
+// Group D4: run the ops on the skeleton poses inPoses (SkeletonPose *, made by jolt_skel_draw_pose_create) on the
+// renderer of inKind like jolt_dr_run_physics_ops. Part 0 is the log (the .jor bytes for the recorder), part 1 the results.
+JoltDRResult *jolt_dr_run_skeleton_ops(const void *const *inPoses, uint32 inNumPoses, const uint8 *inOps, uint64 inSize, int inKind)
+{
+#ifdef JPH_DEBUG_RENDERER
+	ParityInstallHooks();
+
+	ParityPhysicsContext context;
+	for (uint32 i = 0; i < inNumPoses; ++i)
+		context.mPoses.push_back(static_cast<const SkeletonPose *>(inPoses[i]));
+	return DRRunPhysicsOps(context, inOps, inSize, inKind);
+#else
+	(void)inPoses; (void)inNumPoses; (void)inOps; (void)inSize; (void)inKind;
 	return nullptr;
 #endif
 }
