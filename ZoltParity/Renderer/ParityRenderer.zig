@@ -13,7 +13,8 @@
 //!     1..15     D0: the virtual functions and the helpers that D0 found ported
 //!     16..63    D1: the remaining helpers of DebugRenderer (16..36 used)
 //!     64..95    D2: shapes (64..69 used; the shapes come from a `ShapeContext`, see `runOpsWithShapes`)
-//!     96..127   D3: constraints, bodies and the physics system
+//!     96..127   D3: constraints and bodies (96..103 used; the objects come from a `PhysicsContext`, see
+//!               `runOpsWithContext`)
 //!     128..191  D4: characters, vehicles, skeletons, soft bodies
 //!     192..223  H3: hair
 //! - `compareLogs` reports the first record that differs, with its op and its bytes.
@@ -380,7 +381,66 @@ pub const Op = enum(u8) {
     get_submerged_volume = 68,
     /// ConvexHullShape::DrawShrunkShape: u32 shape (a convex hull), Affine, Vec3 scale
     draw_shrunk_shape = 69,
+
+    // D3: constraints and bodies (u32 constraint / body is an index into the constraints / bodies of the PhysicsContext)
+    /// Constraint::DrawConstraint, DrawConstraintLimits or DrawConstraintReferenceFrame: u32 constraint, u8 what
+    /// (`ConstraintDraw`)
+    draw_constraint = 96,
+    /// Constraint::SetDrawConstraintSize: u32 constraint, f32 size
+    set_draw_constraint_size = 97,
+    /// The next frame of the scenario of a constraint (`PhysicsContext.step_constraint`): u32 constraint
+    step_constraint = 98,
+    /// ConstraintManager::DrawConstraints, DrawConstraintLimits or DrawConstraintReferenceFrame: u8 what
+    /// (`ConstraintDraw`)
+    draw_constraint_manager = 99,
+    /// BodyManager::Draw: u32 settings (`BodyDrawBits`), u8 shape color (EShapeColor), u8 soft body constraint color
+    /// (ESoftBodyConstraintColor), f32 time before sleep (PhysicsSettings), u8 filter (0: none, 1: the
+    /// ParityBodyDrawFilter, which skips the bodies whose index % 3 is 1)
+    draw_bodies = 100,
+    /// Body::UpdateSleepStateInternal: u32 body (not static), f32 delta time, f32 max movement, f32 time before sleep.
+    /// The result (u32 ECanSleep) is appended to the results of the PhysicsContext.
+    update_sleep_state = 101,
+    /// Body::SetPositionAndRotationInternal (resets the sleep timer): u32 body, RVec3 position, Quat (4 f32)
+    move_body = 102,
+    /// BodyManager::ActivateBodies (u8 1) or DeactivateBodies (u8 0) of one body: u32 body, u8 activate
+    activate_body = 103,
     _,
+};
+
+/// The `what` of the ops `draw_constraint` and `draw_constraint_manager`
+pub const ConstraintDraw = enum(u8) {
+    /// DrawConstraint
+    constraint = 0,
+    /// DrawConstraintLimits
+    limits = 1,
+    /// DrawConstraintReferenceFrame
+    reference_frame = 2,
+};
+
+/// The bits of the settings of the op `draw_bodies`: the booleans of BodyManager::DrawSettings in declaration order
+pub const BodyDrawBits = struct {
+    pub const draw_get_support_function: u32 = 1 << 0;
+    pub const draw_support_direction: u32 = 1 << 1;
+    pub const draw_get_supporting_face: u32 = 1 << 2;
+    pub const draw_shape: u32 = 1 << 3;
+    pub const draw_shape_wireframe: u32 = 1 << 4;
+    pub const draw_bounding_box: u32 = 1 << 5;
+    pub const draw_center_of_mass_transform: u32 = 1 << 6;
+    pub const draw_world_transform: u32 = 1 << 7;
+    pub const draw_velocity: u32 = 1 << 8;
+    pub const draw_mass_and_inertia: u32 = 1 << 9;
+    pub const draw_sleep_stats: u32 = 1 << 10;
+    /// The soft body flags (bits 11 to 21: vertices, vertex velocities, edge, bend, volume, skin and LRA constraints,
+    /// rods, rod states, rod bend twist constraints, predicted bounds)
+    pub const first_soft_body: u5 = 11;
+    /// The number of bits
+    pub const count = 22;
+    /// Every flag
+    pub const all: u32 = (1 << count) - 1;
+    /// The number of EShapeColor values
+    pub const num_shape_colors = 6;
+    /// The number of ESoftBodyConstraintColor values
+    pub const num_soft_body_constraint_colors = 3;
 };
 
 /// The bits of the op `set_shape_draw_flags`: Jolt's static draw flags that shapes read, Zolt's `renderer.flags`
@@ -415,6 +475,81 @@ pub const ShapeContext = struct {
         try self.results.appendSlice(self.allocator, std.mem.asBytes(&value));
     }
 };
+
+/// The constraints and bodies of the D3 ops (ParityPhysicsContext in ParityRenderer.h)
+pub const PhysicsContext = struct {
+    allocator: Allocator,
+    /// The constraints that the constraint ops index
+    constraints: []const *zolt.Constraint = &.{},
+    /// The op `step_constraint`: the next frame of the scenario of a constraint
+    step_constraint: ?StepConstraint = null,
+    /// The manager of the op `draw_constraint_manager`
+    constraint_manager: ?*zolt.ConstraintManager = null,
+    /// The manager of the ops `draw_bodies` and `activate_body`
+    body_manager: ?*zolt.BodyManager = null,
+    /// The bodies that the body ops index
+    bodies: []const *zolt.Body = &.{},
+    /// The results of the ops that compute numbers (update_sleep_state)
+    results: std.ArrayList(u8) = .empty,
+
+    pub const StepConstraint = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, index: u32) anyerror!void,
+    };
+
+    pub fn deinit(self: *PhysicsContext) void {
+        self.results.deinit(self.allocator);
+    }
+
+    fn writeResult(self: *PhysicsContext, value: anytype) Allocator.Error!void {
+        try self.results.appendSlice(self.allocator, std.mem.asBytes(&value));
+    }
+};
+
+/// The BodyDrawFilter of the op `draw_bodies` (ParityBodyDrawFilter in ParityRenderer.h): skips the bodies whose
+/// index % 3 is 1
+const ParityBodyDrawFilter = if (zolt.Core.debug_renderer) struct {
+    pub const overrides = .{.shouldDraw};
+
+    base: zolt.BodyDrawFilter = .init(@This()),
+
+    pub fn shouldDraw(self: *const @This(), body: *const zolt.Body) bool {
+        _ = self;
+        return body.getID().getIndex() % 3 != 1;
+    }
+} else void;
+
+/// The DrawSettings of the op `draw_bodies` (only with the option)
+fn bodyDrawSettings(bits: u32, shape_color: u8, soft_body_constraint_color: u8) zolt.BodyManager.DrawSettings {
+    const Bits = BodyDrawBits;
+    const first = Bits.first_soft_body;
+    return .{
+        .draw_get_support_function = bits & Bits.draw_get_support_function != 0,
+        .draw_support_direction = bits & Bits.draw_support_direction != 0,
+        .draw_get_supporting_face = bits & Bits.draw_get_supporting_face != 0,
+        .draw_shape = bits & Bits.draw_shape != 0,
+        .draw_shape_wireframe = bits & Bits.draw_shape_wireframe != 0,
+        .draw_shape_color = @enumFromInt(shape_color),
+        .draw_bounding_box = bits & Bits.draw_bounding_box != 0,
+        .draw_center_of_mass_transform = bits & Bits.draw_center_of_mass_transform != 0,
+        .draw_world_transform = bits & Bits.draw_world_transform != 0,
+        .draw_velocity = bits & Bits.draw_velocity != 0,
+        .draw_mass_and_inertia = bits & Bits.draw_mass_and_inertia != 0,
+        .draw_sleep_stats = bits & Bits.draw_sleep_stats != 0,
+        .draw_soft_body_vertices = bits & (@as(u32, 1) << first) != 0,
+        .draw_soft_body_vertex_velocities = bits & (@as(u32, 1) << (first + 1)) != 0,
+        .draw_soft_body_edge_constraints = bits & (@as(u32, 1) << (first + 2)) != 0,
+        .draw_soft_body_bend_constraints = bits & (@as(u32, 1) << (first + 3)) != 0,
+        .draw_soft_body_volume_constraints = bits & (@as(u32, 1) << (first + 4)) != 0,
+        .draw_soft_body_skin_constraints = bits & (@as(u32, 1) << (first + 5)) != 0,
+        .draw_soft_body_lra_constraints = bits & (@as(u32, 1) << (first + 6)) != 0,
+        .draw_soft_body_rods = bits & (@as(u32, 1) << (first + 7)) != 0,
+        .draw_soft_body_rod_states = bits & (@as(u32, 1) << (first + 8)) != 0,
+        .draw_soft_body_rod_bend_twist_constraints = bits & (@as(u32, 1) << (first + 9)) != 0,
+        .draw_soft_body_predicted_bounds = bits & (@as(u32, 1) << (first + 10)) != 0,
+        .draw_soft_body_constraint_color = @enumFromInt(soft_body_constraint_color),
+    };
+}
 
 /// The support function of the convex batch ops (ParitySupport in ParityRenderer.h): a box with rounded edges
 pub const Support = struct {
@@ -877,6 +1012,61 @@ pub const OpWriter = struct {
         try self.writeVec3(scale);
     }
 
+    pub fn drawConstraint(self: *OpWriter, constraint: u32, what: ConstraintDraw) Allocator.Error!void {
+        try self.writeOp(.draw_constraint);
+        try self.writeRaw(constraint);
+        try self.writeRaw(@intFromEnum(what));
+    }
+
+    pub fn setDrawConstraintSize(self: *OpWriter, constraint: u32, size: f32) Allocator.Error!void {
+        try self.writeOp(.set_draw_constraint_size);
+        try self.writeRaw(constraint);
+        try self.writeRaw(size);
+    }
+
+    pub fn stepConstraint(self: *OpWriter, constraint: u32) Allocator.Error!void {
+        try self.writeOp(.step_constraint);
+        try self.writeRaw(constraint);
+    }
+
+    pub fn drawConstraintManager(self: *OpWriter, what: ConstraintDraw) Allocator.Error!void {
+        try self.writeOp(.draw_constraint_manager);
+        try self.writeRaw(@intFromEnum(what));
+    }
+
+    pub fn drawBodies(self: *OpWriter, bits: u32, shape_color: u8, soft_body_constraint_color: u8, time_before_sleep: f32, use_filter: bool) Allocator.Error!void {
+        try self.writeOp(.draw_bodies);
+        try self.writeRaw(bits);
+        try self.writeRaw(shape_color);
+        try self.writeRaw(soft_body_constraint_color);
+        try self.writeRaw(time_before_sleep);
+        try self.writeRaw(@as(u8, @intFromBool(use_filter)));
+    }
+
+    pub fn updateSleepState(self: *OpWriter, body: u32, delta_time: f32, max_movement: f32, time_before_sleep: f32) Allocator.Error!void {
+        try self.writeOp(.update_sleep_state);
+        try self.writeRaw(body);
+        try self.writeRaw(delta_time);
+        try self.writeRaw(max_movement);
+        try self.writeRaw(time_before_sleep);
+    }
+
+    pub fn moveBody(self: *OpWriter, body: u32, position: RVec3, rotation: zolt.Quat) Allocator.Error!void {
+        try self.writeOp(.move_body);
+        try self.writeRaw(body);
+        try self.writeRVec3(position);
+        try self.writeRaw(rotation.getX());
+        try self.writeRaw(rotation.getY());
+        try self.writeRaw(rotation.getZ());
+        try self.writeRaw(rotation.getW());
+    }
+
+    pub fn activateBody(self: *OpWriter, body: u32, activate: bool) Allocator.Error!void {
+        try self.writeOp(.activate_body);
+        try self.writeRaw(body);
+        try self.writeRaw(@as(u8, @intFromBool(activate)));
+    }
+
     pub fn createBatchTriangles(self: *OpWriter, triangles: []const TriangleData) Allocator.Error!void {
         try self.writeOp(.create_batch_triangles);
         try self.writeRaw(@as(u32, @intCast(triangles.len)));
@@ -988,6 +1178,12 @@ pub fn runOps(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, s
 
 /// runOps with the shapes of the D2 ops (`shapes` must be set when the stream has them)
 pub fn runOpsWithShapes(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, simple: ?*DebugRendererSimple, recorder: ?*DebugRendererRecorder, shapes: ?*ShapeContext) !void {
+    return runOpsWithContext(allocator, renderer, ops, simple, recorder, shapes, null);
+}
+
+/// runOps with the shapes of the D2 ops and the constraints and bodies of the D3 ops (`shapes` / `physics` must be set
+/// when the stream has their ops)
+pub fn runOpsWithContext(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, simple: ?*DebugRendererSimple, recorder: ?*DebugRendererRecorder, shapes: ?*ShapeContext, physics: ?*PhysicsContext) !void {
     var r: OpReader = .{ .bytes = ops };
     var slots = [_]GeometryRef{.empty} ** num_geometry_slots;
     defer for (&slots) |*slot| slot.deinit();
@@ -1244,6 +1440,10 @@ pub fn runOpsWithShapes(allocator: Allocator, renderer: *DebugRenderer, ops: []c
                 if (comptime !zolt.Core.debug_renderer) unreachable; // The shapes only draw with the option
                 try runShapeOp(op, &r, renderer, shapes orelse @panic("runOps: a shape op without a ShapeContext"));
             },
+            .draw_constraint, .set_draw_constraint_size, .step_constraint, .draw_constraint_manager, .draw_bodies, .update_sleep_state, .move_body, .activate_body => {
+                if (comptime !zolt.Core.debug_renderer) unreachable; // The constraints and bodies only draw with the option
+                try runPhysicsOp(op, &r, renderer, physics orelse @panic("runOps: a constraint or body op without a PhysicsContext"));
+            },
             .create_batch_triangles => {
                 const triangles = try allocator.alloc(Triangle, r.read(u32));
                 defer allocator.free(triangles);
@@ -1320,6 +1520,67 @@ fn runShapeOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *ShapeCon
             const shape = context.shapes[r.read(u32)];
             const transform = r.readRMat44();
             shape.cast(zolt.ConvexHullShape).drawShrunkShape(renderer, transform, r.readVec3());
+        },
+        else => unreachable,
+    }
+}
+
+/// One op of D3 (only compiled with the option)
+fn runPhysicsOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *PhysicsContext) !void {
+    switch (op) {
+        .draw_constraint => {
+            const c = context.constraints[r.read(u32)];
+            switch (@as(ConstraintDraw, @enumFromInt(r.read(u8)))) {
+                .constraint => c.drawConstraint(renderer),
+                .limits => c.drawConstraintLimits(renderer),
+                .reference_frame => c.drawConstraintReferenceFrame(renderer),
+            }
+        },
+        .set_draw_constraint_size => {
+            const c = context.constraints[r.read(u32)];
+            c.setDrawConstraintSize(r.read(f32));
+        },
+        .step_constraint => {
+            const step = context.step_constraint orelse @panic("runOps: step_constraint without a step function");
+            try step.call(step.context, r.read(u32));
+        },
+        .draw_constraint_manager => {
+            const manager = context.constraint_manager orelse @panic("runOps: draw_constraint_manager without a ConstraintManager");
+            switch (@as(ConstraintDraw, @enumFromInt(r.read(u8)))) {
+                .constraint => manager.drawConstraints(renderer),
+                .limits => manager.drawConstraintLimits(renderer),
+                .reference_frame => manager.drawConstraintReferenceFrame(renderer),
+            }
+        },
+        .draw_bodies => {
+            const manager = context.body_manager orelse @panic("runOps: draw_bodies without a BodyManager");
+            const bits = r.read(u32);
+            const shape_color = r.read(u8);
+            const settings = bodyDrawSettings(bits, shape_color, r.read(u8));
+            var physics_settings: zolt.PhysicsSettings = .{};
+            physics_settings.time_before_sleep = r.read(f32);
+            const filter: ParityBodyDrawFilter = .{};
+            manager.draw(&settings, &physics_settings, renderer, .{ .body_filter = if (r.read(u8) != 0) &filter.base else null });
+        },
+        .update_sleep_state => {
+            const body = context.bodies[r.read(u32)];
+            const delta_time = r.read(f32);
+            const max_movement = r.read(f32);
+            const result = body.updateSleepStateInternal(delta_time, max_movement, r.read(f32));
+            try context.writeResult(@as(u32, @intFromEnum(result)));
+        },
+        .move_body => {
+            const body = context.bodies[r.read(u32)];
+            const position = r.readRVec3();
+            const x = r.read(f32);
+            const y = r.read(f32);
+            const z = r.read(f32);
+            body.setPositionAndRotationInternal(position, zolt.Quat.init(x, y, z, r.read(f32)), .{});
+        },
+        .activate_body => {
+            const manager = context.body_manager orelse @panic("runOps: activate_body without a BodyManager");
+            const id = context.bodies[r.read(u32)].getID();
+            if (r.read(u8) != 0) manager.activateBodies(&.{id}) else manager.deactivateBodies(&.{id});
         },
         else => unreachable,
     }

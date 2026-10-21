@@ -8,7 +8,7 @@
 //   batches and DrawGeometry (with its LOD selection) produce the lines.
 // - The op stream: the Zig side encodes the calls to make (random helper calls, ...) as bytes, RunParityOps executes
 //   them on any renderer. Every group adds its ops in its own range (see ParityRenderer.zig). The shape ops of D2 draw
-//   the shapes of a ParityShapeContext.
+//   the shapes of a ParityShapeContext, the ops of D3 the constraints and bodies of a ParityPhysicsContext.
 // - Reference files of other groups (shapes, constraints, ...) include this header to draw into a ParityRenderer.
 //
 // The log format (little endian, no padding; ParityRenderer.zig decodes it for the mismatch report):
@@ -37,10 +37,16 @@
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Body/BodyManager.h>
+#include <Jolt/Physics/Constraints/ConstraintManager.h>
+#include <Jolt/Physics/PhysicsSettings.h>
 #include <ZoltParity/ParityHooks.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -394,12 +400,67 @@ inline void ParitySetShapeDrawFlags(uint8 inFlags)
 	HeightFieldShape::sDrawTriangleOutlines = (inFlags & 16) != 0;
 }
 
+/// The constraints and bodies of the D3 ops and their results (PhysicsContext in ParityRenderer.zig)
+struct ParityPhysicsContext
+{
+	Array<Constraint *>				mConstraints;						///< The constraints that the constraint ops index
+	std::function<void(uint32)>		mStepConstraint;					///< The op step_constraint: the next frame of the scenario of a constraint
+	ConstraintManager *				mConstraintManager = nullptr;		///< The manager of the op draw_constraint_manager
+	BodyManager *					mBodyManager = nullptr;				///< The manager of the ops draw_bodies and activate_body
+	Array<Body *>					mBodies;							///< The bodies that the body ops index
+	std::vector<uint8>				mResults;							///< The results of the ops that compute numbers
+
+	template <class T>
+	void							WriteResult(const T &inValue)
+	{
+		const uint8 *p = reinterpret_cast<const uint8 *>(&inValue);
+		mResults.insert(mResults.end(), p, p + sizeof(T));
+	}
+};
+
+/// The context of a D3 op
+inline ParityPhysicsContext &ParityPhysics(ParityPhysicsContext *inPhysics)
+{
+	if (inPhysics == nullptr)
+	{
+		Trace("RunParityOps: a constraint or body op without its context");
+		abort();
+	}
+	return *inPhysics;
+}
+
+/// The BodyDrawFilter of the op draw_bodies: skips the bodies whose index % 3 is 1
+class ParityBodyDrawFilter final : public BodyDrawFilter
+{
+public:
+	virtual bool					ShouldDraw(const Body &inBody) const override	{ return inBody.GetID().GetIndex() % 3 != 1; }
+};
+
+/// The DrawSettings of the op draw_bodies: the bits are the booleans in declaration order (BodyDrawBits in
+/// ParityRenderer.zig)
+inline BodyManager::DrawSettings ParityBodyDrawSettings(uint32 inBits, uint8 inShapeColor, uint8 inSoftBodyConstraintColor)
+{
+	BodyManager::DrawSettings s;
+	bool *flags[] = {
+		&s.mDrawGetSupportFunction, &s.mDrawSupportDirection, &s.mDrawGetSupportingFace, &s.mDrawShape, &s.mDrawShapeWireframe,
+		&s.mDrawBoundingBox, &s.mDrawCenterOfMassTransform, &s.mDrawWorldTransform, &s.mDrawVelocity, &s.mDrawMassAndInertia,
+		&s.mDrawSleepStats, &s.mDrawSoftBodyVertices, &s.mDrawSoftBodyVertexVelocities, &s.mDrawSoftBodyEdgeConstraints,
+		&s.mDrawSoftBodyBendConstraints, &s.mDrawSoftBodyVolumeConstraints, &s.mDrawSoftBodySkinConstraints,
+		&s.mDrawSoftBodyLRAConstraints, &s.mDrawSoftBodyRods, &s.mDrawSoftBodyRodStates,
+		&s.mDrawSoftBodyRodBendTwistConstraints, &s.mDrawSoftBodyPredictedBounds };
+	for (uint i = 0; i < std::size(flags); ++i)
+		*flags[i] = (inBits & (1u << i)) != 0;
+	s.mDrawShapeColor = BodyManager::EShapeColor(inShapeColor);
+	s.mDrawSoftBodyConstraintColor = ESoftBodyConstraintColor(inSoftBodyConstraintColor);
+	return s;
+}
+
 /// Executes the op stream of ParityRenderer.zig on inRenderer (D0's ops 1 to 15: the virtual functions and the helpers of
 /// DebugRenderer that D0 found ported; D1's ops 16 to 36: the other helpers, NextFrame and the batch helpers; D2's ops 64
-/// to 69: the shapes of ioShapes). ioSimple and ioRecorder are the renderer as a DebugRendererSimple /
-/// DebugRendererRecorder (or null) for the ops that only they have. The shape ops change the static draw flags of the
-/// shapes: the caller resets them (ParitySetShapeDrawFlags(0)).
-inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder, ParityShapeContext *ioShapes = nullptr)
+/// to 69: the shapes of ioShapes; D3's ops 96 to 103: the constraints and bodies of ioPhysics). ioSimple and ioRecorder
+/// are the renderer as a DebugRendererSimple / DebugRendererRecorder (or null) for the ops that only they have. The shape
+/// ops change the static draw flags of the shapes: the caller resets them (ParitySetShapeDrawFlags(0)).
+inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder, ParityShapeContext *ioShapes = nullptr, ParityPhysicsContext *ioPhysics = nullptr)
 {
 	ParityOpReader r(inOps, inSize);
 	DebugRenderer::GeometryRef slots[cParityNumGeometrySlots];
@@ -878,6 +939,88 @@ inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t i
 				RMat44 transform = r.ReadRMat44();
 				Vec3 scale = r.ReadVec3();
 				static_cast<const ConvexHullShape *>(shape)->DrawShrunkShape(&ioRenderer, transform, scale);
+				break;
+			}
+
+		// D3: the constraints and bodies of ioPhysics
+
+		case 96: // Constraint::DrawConstraint (0), DrawConstraintLimits (1) or DrawConstraintReferenceFrame (2): u32 constraint, u8 what
+			{
+				const Constraint *c = ParityPhysics(ioPhysics).mConstraints[r.Read<uint32>()];
+				switch (r.Read<uint8>())
+				{
+				case 0:		c->DrawConstraint(&ioRenderer); break;
+				case 1:		c->DrawConstraintLimits(&ioRenderer); break;
+				default:	c->DrawConstraintReferenceFrame(&ioRenderer); break;
+				}
+				break;
+			}
+
+		case 97: // Constraint::SetDrawConstraintSize: u32 constraint, f32 size
+			{
+				Constraint *c = ParityPhysics(ioPhysics).mConstraints[r.Read<uint32>()];
+				c->SetDrawConstraintSize(r.Read<float>());
+				break;
+			}
+
+		case 98: // The next frame of the scenario of a constraint: u32 constraint
+			ParityPhysics(ioPhysics).mStepConstraint(r.Read<uint32>());
+			break;
+
+		case 99: // ConstraintManager::DrawConstraints (0), DrawConstraintLimits (1) or DrawConstraintReferenceFrame (2): u8 what
+			{
+				const ConstraintManager *manager = ParityPhysics(ioPhysics).mConstraintManager;
+				switch (r.Read<uint8>())
+				{
+				case 0:		manager->DrawConstraints(&ioRenderer); break;
+				case 1:		manager->DrawConstraintLimits(&ioRenderer); break;
+				default:	manager->DrawConstraintReferenceFrame(&ioRenderer); break;
+				}
+				break;
+			}
+
+		case 100: // BodyManager::Draw: u32 settings bits, u8 shape color, u8 soft body constraint color, f32 time before sleep, u8 filter
+			{
+				BodyManager *manager = ParityPhysics(ioPhysics).mBodyManager;
+				uint32 bits = r.Read<uint32>();
+				uint8 shape_color = r.Read<uint8>();
+				BodyManager::DrawSettings settings = ParityBodyDrawSettings(bits, shape_color, r.Read<uint8>());
+				PhysicsSettings physics_settings;
+				physics_settings.mTimeBeforeSleep = r.Read<float>();
+				ParityBodyDrawFilter filter;
+				manager->Draw(settings, physics_settings, &ioRenderer, r.Read<uint8>() != 0? &filter : nullptr);
+				break;
+			}
+
+		case 101: // Body::UpdateSleepStateInternal: u32 body, f32 delta time, f32 max movement, f32 time before sleep
+			{
+				Body *body = ParityPhysics(ioPhysics).mBodies[r.Read<uint32>()];
+				float delta_time = r.Read<float>();
+				float max_movement = r.Read<float>();
+				ECanSleep result = body->UpdateSleepStateInternal(delta_time, max_movement, r.Read<float>());
+				ioPhysics->WriteResult(uint32(result));
+				break;
+			}
+
+		case 102: // Body::SetPositionAndRotationInternal: u32 body, RVec3 position, Quat (4 floats)
+			{
+				Body *body = ParityPhysics(ioPhysics).mBodies[r.Read<uint32>()];
+				RVec3 position = r.ReadRVec3();
+				float x = r.Read<float>();
+				float y = r.Read<float>();
+				float z = r.Read<float>();
+				body->SetPositionAndRotationInternal(position, Quat(x, y, z, r.Read<float>()));
+				break;
+			}
+
+		case 103: // BodyManager::ActivateBodies (1) or DeactivateBodies (0) of one body: u32 body, u8 activate
+			{
+				ParityPhysicsContext &physics = ParityPhysics(ioPhysics);
+				BodyID id = physics.mBodies[r.Read<uint32>()]->GetID();
+				if (r.Read<uint8>() != 0)
+					physics.mBodyManager->ActivateBodies(&id, 1);
+				else
+					physics.mBodyManager->DeactivateBodies(&id, 1);
 				break;
 			}
 

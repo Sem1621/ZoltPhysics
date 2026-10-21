@@ -105,6 +105,9 @@ const jolt = struct {
     extern fn jolt_cs_run(world: *anyopaque, scenario: *const CSScenario, output: *CSOutput) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_cs_settings_resave(bytes: [*]const u8, size: u32, out_bytes: [*]u8, capacity: u32, out_error: [*]u8, error_capacity: u32) u32;
+    // The draw world of group D3 (DrawWorld)
+    extern fn jolt_cs_draw_world_create(scenarios: [*]const CSScenario, count: u32) *anyopaque;
+    extern fn jolt_cs_draw_world_destroy(world: *anyopaque) void;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3068,6 +3071,124 @@ pub fn makeDescriptionSettings(allocator: Allocator, d: *const CSSettings) !Ref(
         },
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The draw world of the debug renderer parity (group D3: ZoltParity/Renderer/PhysicsDrawParity.zig draws its
+// constraints; the C++ side is jolt_cs_draw_world_* in ConstraintsReference.cpp)
+
+/// Random scenarios of the generator in one BodyManager and one ConstraintManager, on both sides. The bodies of the
+/// scenarios are created in scenario order (body 1, body 2), then the constraints, which are added to the
+/// ConstraintManager in one call. `step` runs the next frame of the scenario of a constraint like jolt_cs_run, without
+/// records: the operations of the frame, SetupVelocityConstraint, WarmStartVelocityConstraint, the velocity steps and the
+/// position steps. After the last frame it applies the operations after the last frame once, then does nothing.
+/// The C++ world is allocated zero filled (jolt_cs_draw_world_create): a pulley with a static body reads members of
+/// IndependentAxisConstraintPart that Jolt never writes, and Zolt starts them at zero.
+pub const DrawWorld = struct {
+    allocator: Allocator,
+    world: World,
+    scenarios: []CSScenario,
+    /// Body 1 and body 2 of every scenario
+    bodies: [][2]*Body,
+    constraints: []*AnyConstraint,
+    /// The next frame of every scenario
+    frames: []u32,
+    constraint_manager: zolt.ConstraintManager = .empty,
+    /// The C++ side (jolt_cs_draw_world_create)
+    jolt_world: *anyopaque,
+
+    /// A world with the scenarios of `seeds` (each makes one scenario of every ported kind)
+    pub fn create(allocator: Allocator, seeds: []const u32) !*DrawWorld {
+        const n = seeds.len * ported_kinds.len;
+        const self = try allocator.create(DrawWorld);
+        errdefer allocator.destroy(self);
+        self.* = .{ .allocator = allocator, .world = .{ .allocator = allocator }, .scenarios = &.{}, .bodies = &.{}, .constraints = &.{}, .frames = &.{}, .jolt_world = undefined };
+        self.scenarios = try allocator.alloc(CSScenario, n);
+        errdefer allocator.free(self.scenarios);
+        for (seeds, 0..) |seed, i| {
+            for (ported_kinds, 0..) |kind, k| {
+                var g: Gen = .{ .rng = .{ .state = seed +% @as(u32, @intCast(k)) } };
+                self.scenarios[i * ported_kinds.len + k] = switch (kind) {
+                    inline else => |kk| g.scenario(kk),
+                };
+            }
+        }
+        self.frames = try allocator.alloc(u32, n);
+        errdefer allocator.free(self.frames);
+        @memset(self.frames, 0);
+        self.bodies = try allocator.alloc([2]*Body, n);
+        errdefer allocator.free(self.bodies);
+        self.constraints = try allocator.alloc(*AnyConstraint, n);
+        errdefer allocator.free(self.constraints);
+
+        try self.world.body_manager.init(allocator, io, @intCast(2 * n), 0, &self.world.layers.base);
+        errdefer self.world.body_manager.deinit();
+        for (self.scenarios, self.bodies) |*sc, *b| {
+            b[0] = if (sc.body[0].fixed_to_world != 0) Body.fixedToWorld() else try self.world.createBody(&sc.body[0]);
+            b[1] = try self.world.createBody(&sc.body[1]);
+        }
+        for (self.scenarios, self.bodies, self.constraints) |*sc, b, *c| {
+            var settings = try makeDescriptionSettings(allocator, &sc.settings);
+            defer settings.deinit();
+            const two_body_settings = virtual.downcast(TwoBodyConstraintSettings, settings.get().?);
+            const two_body = try two_body_settings.createConstraint(allocator, b[0], b[1]);
+            c.* = &two_body.base;
+            c.*.addRef();
+        }
+        try self.constraint_manager.init(allocator, io, &self.world.body_manager);
+        try self.constraint_manager.add(self.constraints);
+        self.jolt_world = jolt.jolt_cs_draw_world_create(self.scenarios.ptr, @intCast(n));
+        return self;
+    }
+
+    pub fn destroy(self: *DrawWorld) void {
+        const allocator = self.allocator;
+        jolt.jolt_cs_draw_world_destroy(self.jolt_world);
+        self.constraint_manager.deinit();
+        for (self.constraints) |c| c.release();
+        var i = self.bodies.len;
+        while (i > 0) {
+            i -= 1;
+            self.world.destroyBody(self.bodies[i][1]);
+            self.world.destroyBody(self.bodies[i][0]);
+        }
+        self.world.body_manager.deinit();
+        allocator.free(self.constraints);
+        allocator.free(self.bodies);
+        allocator.free(self.frames);
+        allocator.free(self.scenarios);
+        allocator.destroy(self);
+    }
+
+    /// The next frame of the scenario of constraint `index` (jolt_cs_draw_world_step)
+    pub fn step(self: *DrawWorld, index: u32) !void {
+        const sc = &self.scenarios[index];
+        const frame = self.frames[index];
+        if (frame > sc.num_frames) return;
+        self.frames[index] = frame + 1;
+        const base = self.constraints[index];
+        switch (@as(Kind, @enumFromInt(sc.settings.kind))) {
+            inline else => |kind| {
+                const K = Slot(kind);
+                if (comptime isStubSlot(K)) unreachable;
+                const c = virtual.downcast(K.Constraint, virtual.downcast(TwoBodyConstraint, base));
+                for (sc.ops[0..sc.num_ops]) |*op| {
+                    if (op.frame == frame) try applyOp(K, c, op, &sc.settings, self.allocator);
+                }
+            },
+        }
+        if (frame == sc.num_frames) return;
+        base.setupVelocityConstraint(sc.delta_time);
+        base.warmStartVelocityConstraint(sc.warm_start_ratio[frame]);
+        for (0..sc.num_velocity_steps) |_| _ = base.solveVelocityConstraint(sc.delta_time);
+        for (0..sc.num_position_steps) |_| _ = base.solvePositionConstraint(sc.delta_time, sc.baumgarte);
+    }
+
+    /// `step` as the step function of a ParityRenderer.PhysicsContext
+    pub fn stepCallback(context: *anyopaque, index: u32) anyerror!void {
+        const self: *DrawWorld = @ptrCast(@alignCast(context));
+        return self.step(index);
+    }
+};
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tests

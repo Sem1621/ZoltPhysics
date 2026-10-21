@@ -124,6 +124,12 @@ using namespace JPH;
 // allocator again: it is compatible (both free with free), and zero filling changes nothing that is defined.
 #include <ZoltParity/ParityHooks.h>
 
+// Group D3: the simulation-time draws into a ParityRenderer (jolt_sim_draw_*)
+#ifdef JPH_DEBUG_RENDERER
+	#include <Jolt/Physics/Constraints/ContactConstraintManager.h>
+	#include <ZoltParity/Renderer/ParityRenderer.h>
+#endif // JPH_DEBUG_RENDERER
+
 // The hooks (another reference file may have installed Jolt's allocator since) and the Factory that the shapes need
 // (same guard as BasicsReference.cpp, RegisterTypes() runs once for the whole parity binary)
 static void SimEnsureFactory()
@@ -5850,6 +5856,67 @@ uint32 jolt_sim_reference_has_asserts()
 #ifdef JPH_ENABLE_ASSERTS
 	return 1;
 #else
+	return 0;
+#endif
+}
+
+#ifdef JPH_DEBUG_RENDERER
+// Group D3: the renderer of jolt_sim_draw_begin (DebugRenderer::sInstance while it exists)
+static ZoltParity::ParityRenderer *sSimDrawRenderer = nullptr;
+
+// The static draw flags of the simulation: the contacts and the linear cast CCD
+static void SimSetDrawFlags(bool inDraw)
+{
+	ContactConstraintManager::sDrawContactPoint = inDraw;
+	ContactConstraintManager::sDrawSupportingFaces = inDraw;
+	ContactConstraintManager::sDrawContactPointReduction = inDraw;
+	ContactConstraintManager::sDrawContactManifolds = inDraw;
+	PhysicsSystem::sDrawMotionQualityLinearCast = inDraw;
+}
+#endif // JPH_DEBUG_RENDERER
+
+// Group D3 (SimDraw in SimulationParity.zig): from now on the worlds draw into a ParityRenderer (DebugRenderer::sInstance)
+// with every draw flag of the contacts and of the linear cast CCD set. Returns 0 without JPH_DEBUG_RENDERER.
+uint32 jolt_sim_draw_begin()
+{
+#ifdef JPH_DEBUG_RENDERER
+	SimEnsureFactory();
+	JPH_ASSERT(sSimDrawRenderer == nullptr);
+	sSimDrawRenderer = new ZoltParity::ParityRenderer;
+	sSimDrawRenderer->mLog.mBytes.clear();
+	SimSetDrawFlags(true);
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+// Group D3: stop drawing, destroy the renderer
+void jolt_sim_draw_end()
+{
+#ifdef JPH_DEBUG_RENDERER
+	SimSetDrawFlags(false);
+	delete sSimDrawRenderer;
+	sSimDrawRenderer = nullptr;
+#endif
+}
+
+// Group D3: the call log since the last call. Returns its size; when it fits in inCapacity the bytes are copied and the
+// log is cleared.
+uint64 jolt_sim_draw_take_log(uint8 *outBytes, uint64 inCapacity)
+{
+#ifdef JPH_DEBUG_RENDERER
+	std::vector<uint8> &log = sSimDrawRenderer->mLog.mBytes;
+	uint64 size = log.size();
+	if (size <= inCapacity)
+	{
+		if (size > 0)
+			memcpy(outBytes, log.data(), size_t(size));
+		log.clear();
+	}
+	return size;
+#else
+	(void)outBytes; (void)inCapacity;
 	return 0;
 #endif
 }
