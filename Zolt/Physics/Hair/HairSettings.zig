@@ -45,6 +45,8 @@
 //!   vertices there. That x[1] gives the rod length of the vertex. The Bishop frame of the vertex is then copied from
 //!   the vertex before it. Zolt keeps that x[1] and reads it after a recoverable assert (R8). The HairSettings parity
 //!   compares this path and counts the asserts.
+//! - getNeutralDensity outside the grid follows Jolt's release build: its assert is recoverable (R8), and it reads
+//!   another cell of the grid. Hair.draw gets there through Jolt's loop bound quirk (R20).
 //! - resample with any other strand of 0 or 1 vertices is literal: it reads the next vertex of the array with a
 //!   fraction of 0. A num_vertices_per_strand of 0 is literal too: the loop bound wraps, and resample appends vertices
 //!   until memory runs out.
@@ -1365,8 +1367,10 @@ pub const HairSettings = struct {
     }
 
     /// Sample the neutral density at a grid position
+    /// Zolt: the assert is recoverable (R8). Hair.draw's density loops let x pass GetX() (Jolt's quirk, R20), and Jolt's
+    /// release build then reads another cell of the grid.
     pub fn getNeutralDensity(self: *const HairSettings, x: u32, y: u32, z: u32) f32 {
-        if (Core.enable_asserts) std.debug.assert(x < self.grid_size.getX() and y < self.grid_size.getY() and z < self.grid_size.getZ());
+        if (Core.enable_asserts) Core.assertRecoverable(x < self.grid_size.getX() and y < self.grid_size.getY() and z < self.grid_size.getZ(), "inX < mGridSize.GetX() && inY < mGridSize.GetY() && inZ < mGridSize.GetZ()", @src());
         return self.neutral_density.items[x +% y *% self.grid_size.getX() +% z *% self.grid_size.getX() *% self.grid_size.getY()];
     }
 
@@ -1663,6 +1667,24 @@ test "HairSettings: init calculates the strand fractions, the rods, the Bishop f
     var total: f32 = 0;
     for (settings.neutral_density.items) |d| total += d;
     try testing.expectApproxEqAbs(@as(f32, 10.0), total, 1.0e-4);
+}
+
+test "HairSettings: getNeutralDensity outside the grid follows Jolt's release build" {
+    // Hair.draw's density loops let x run to GridSize.GetZ() (Jolt's quirk, R20). Jolt asserts on x >= GetX(), and its
+    // release build reads another cell of the grid. The assert is recoverable (R8).
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    settings.grid_size = .init(2, 3, 4, 0);
+    for (0..2 * 3 * 4) |i| try settings.neutral_density.append(allocator, @floatFromInt(i));
+    try testing.expectEqual(@as(f32, 1 + 2 * 2 + 3 * 2 * 3), settings.getNeutralDensity(1, 2, 3)); // Inside the grid
+
+    var expect_assert: IssueReporting.ExpectAssert = undefined;
+    expect_assert.init(2);
+    errdefer expect_assert.restore();
+    try testing.expectEqual(@as(f32, 2 + 1 * 2 + 2 * 2 * 3), settings.getNeutralDensity(2, 1, 2)); // The cell (0, 2, 2)
+    try testing.expectEqual(@as(f32, 3 + 2 * 2 + 1 * 2 * 3), settings.getNeutralDensity(3, 2, 1)); // The cell (1, 0, 2)
+    try expect_assert.finish();
 }
 
 test "HairSettings: init of a strand of 2 vertices, the smallest one" {
