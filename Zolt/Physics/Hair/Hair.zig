@@ -1336,6 +1336,9 @@ const TestGroom = struct {
     /// that is too short to change the float sum of the segment lengths
     tiny_last_segment: bool = false,
     padding: Vec3 = .replicate(0.1),
+    /// A skinned scalp: a disc of 8 triangles around the roots in the plane y = 0, skinned to the two joints of
+    /// sweepJoints
+    scalp: bool = false,
 };
 
 /// A groom of `num_strands` strands of `num_vertices` vertices that hang down from a ring at y = 0, every strand
@@ -1369,6 +1372,22 @@ fn testSettings(allocator: Allocator, compute_system: *ComputeSystem, num_strand
             try vertices.append(allocator, .init(position, .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
         }
         try strands.append(allocator, .init(first, first + count, 0));
+    }
+    if (groom.scalp) {
+        // The center and 8 vertices on a ring of radius 0.1, half a sector away from the roots
+        try settings.scalp_vertices.append(allocator, .{ .x = 0, .y = 0, .z = 0 });
+        for (0..8) |k| {
+            const angle = 6.2831855 * (@as(f32, @floatFromInt(k)) + 0.5) / 8.0;
+            try settings.scalp_vertices.append(allocator, .{ .x = 0.1 * @cos(angle), .y = 0.0, .z = 0.1 * @sin(angle) });
+        }
+        for (0..8) |k|
+            try settings.scalp_triangles.append(allocator, .init(0, @intCast(1 + k), @intCast(1 + (k + 1) % 8)));
+        try settings.scalp_inverse_bind_pose.appendSlice(allocator, &.{ Mat44.identity(), Mat44.identity() });
+        settings.scalp_num_skin_weights_per_vertex = 2;
+        for (0..settings.scalp_vertices.items.len) |v| {
+            const weight: f32 = if (v == 0) 1.0 else 0.25 * @as(f32, @floatFromInt(v % 4));
+            try settings.scalp_skin_weights.appendSlice(allocator, &.{ .{ .joint_idx = 0, .weight = weight }, .{ .joint_idx = 1, .weight = 1.0 - weight } });
+        }
     }
     try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
     _ = try settings.init();
@@ -1567,14 +1586,41 @@ const TestState = struct {
     }
 };
 
-/// The bodies of the sweeps: a hull below the strands, an inside out hull between them and a box
+/// The bodies of the sweeps: a hull below the strands, an inside out hull between them and a box. A fourth hull is
+/// outside the bounds of a hair at the origin and inside them once the hair moved to x = 0.1 (sweep_updates).
 fn addSweepBodies(world: *TestWorld) !void {
     _ = try world.addHullBox(Vec3.init(0.2, 0.05, 0.2), RVec3.init(0, -0.25, 0), .{});
     _ = try world.addHullBox(Vec3.init(0.03, 0.03, 0.03), RVec3.init(0.06, -0.1, 0), .{ .scale = Vec3.init(1, -1, 1) });
     _ = try world.addBody((try BoxShapeSettings.create(world.system.allocator, Vec3.replicate(0.02), .{})).asShapeSettings(), RVec3.init(-0.06, -0.1, 0), .{});
+    _ = try world.addHullBox(Vec3.init(0.03, 0.03, 0.03), RVec3.init(0.24, -0.1, 0), .{});
+}
+
+/// The updates of a sweep case. The second update needs more than the first: 6 iterations instead of 4 (two more
+/// iteration constant buffers), and the hair moves so that a third hull enters its bounds (larger collision buffers).
+/// With a scalp, the second update is the first one that interpolates the roots: it creates the two target buffers.
+const sweep_updates = [_]struct { delta_time: f32, x: f32 }{
+    .{ .delta_time = 1.0 / 90.0, .x = 0.0 },
+    .{ .delta_time = 1.0 / 60.0, .x = 0.1 },
+};
+
+/// The joint matrices of update `index` of a sweep case (the scalp of TestGroom has two joints)
+fn sweepJoints(index: usize) [2]Mat44 {
+    const f: f32 = @floatFromInt(index);
+    return .{ Mat44.translation(Vec3.init(0.01 * f, 0, 0)), Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.1 * f), Vec3.init(0, -0.005 * f, 0)) };
 }
 
 const SweepPhase = enum { none, init_compute, update };
+
+/// A case of the allocation failure sweeps
+const SweepCase = struct {
+    phase: SweepPhase = .none,
+    /// The update under test (phase update)
+    update_index: usize = 0,
+    /// The phase under test gets this many allocations, then every allocation fails
+    fail_after: usize = 0,
+    /// Call onTeleported before this update: the state that a failed update and its retry give
+    teleport_at: ?usize = null,
+};
 
 /// The result of a sweep case
 const SweepResult = struct {
@@ -1583,24 +1629,32 @@ const SweepResult = struct {
     state: TestState,
 };
 
+/// After a failed update: the buffers that update creates on the way are complete. The two target buffers are set
+/// together, and the list of iteration constant buffers has no empty entry.
+fn expectCompleteBuffers(hair: *const Hair) !void {
+    try testing.expectEqual(hair.target_positions_cb.get() == null, hair.target_global_pose_transforms_cb.get() == null);
+    for (hair.iteration_constants_cb.items) |b|
+        try testing.expect(b.get() != null);
+}
+
 /// One case of the allocation failure sweeps. Everything that the hair uses allocates from one failing allocator: the
 /// compute system with its buffers, the queue with its shader wrappers, the shaders, the settings and the hair. The
 /// phase under test gets `fail_after` allocations, then every allocation fails. After a failure the case recovers: it
-/// calls initCompute again, or calls onTeleported before the next update.
-fn sweepCase(world: *TestWorld, phase: SweepPhase, fail_after: usize, num_updates: u32) !SweepResult {
+/// calls initCompute again, or calls onTeleported and repeats the update.
+fn sweepCase(world: *TestWorld, groom: TestGroom, case: SweepCase) !SweepResult {
     var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
     const allocator = failing.allocator();
     var compute = try TestCompute.init(allocator);
     defer compute.deinit();
     const system = compute.system.get().?;
-    var settings = try testSettings(allocator, system, 8, 9, .{}, .{ .vertex_spread = 3 });
+    var settings = try testSettings(allocator, system, 8, 9, .{}, groom);
     defer settings.deinit();
     var hair: Hair = .init(allocator, settings.get().?, RVec3.zero(), Quat.identity(), 0);
     defer hair.deinit();
 
     var failed = false;
-    if (phase == .init_compute)
-        failing.fail_index = failing.alloc_index + fail_after;
+    if (case.phase == .init_compute)
+        failing.fail_index = failing.alloc_index + case.fail_after;
     hair.initCompute(system) catch |err| {
         try testing.expectEqual(error.OutOfMemory, err);
         failed = true;
@@ -1608,20 +1662,41 @@ fn sweepCase(world: *TestWorld, phase: SweepPhase, fail_after: usize, num_update
         try hair.initCompute(system); // Call it again
     };
     failing.fail_index = std.math.maxInt(usize);
+    try testing.expectEqual(groom.scalp, hair.scalp_joint_matrices_cb.get() != null);
 
-    for (0..num_updates) |i| {
-        if (phase == .update and i == num_updates - 1)
-            failing.fail_index = failing.alloc_index + fail_after;
-        hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, system, compute.queue.get().?) catch |err| {
+    for (sweep_updates, 0..) |u, i| {
+        hair.setPosition(RVec3.init(u.x, 0, 0));
+        if (case.teleport_at == i)
+            hair.onTeleported();
+        const joints = sweepJoints(i);
+        if (case.phase == .update and case.update_index == i)
+            failing.fail_index = failing.alloc_index + case.fail_after;
+        hair.update(u.delta_time, Mat44.identity(), &joints, &world.system, compute.shaders.get().?, system, compute.queue.get().?) catch |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             failed = true;
             failing.fail_index = std.math.maxInt(usize);
+            try expectCompleteBuffers(&hair);
 
             // The step is partly done: put the hair back in its default pose
             hair.onTeleported();
-            try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, system, compute.queue.get().?);
+            try hair.update(u.delta_time, Mat44.identity(), &joints, &world.system, compute.shaders.get().?, system, compute.queue.get().?);
         };
         failing.fail_index = std.math.maxInt(usize);
+
+        if (case.phase == .none and case.teleport_at == null) {
+            // Without a failure the second update grows the buffers of the first (see sweep_updates)
+            const num_iterations = [_]usize{ 4, 6 };
+            const num_hulls = [_]u64{ 2, 3 };
+            try testing.expectEqual(num_iterations[i], hair.iteration_constants_cb.items.len);
+            try testing.expectEqual(num_hulls[i], hair.collision_shapes_cb.get().?.getSize());
+            try testing.expectEqual(groom.scalp and i == 1, hair.target_positions_cb.get() != null);
+
+            // The strands stay finite
+            const positions = hair.positions_cb.get().?.mapAs(HairPosition, .read);
+            defer hair.positions_cb.get().?.unmap();
+            for (positions) |p|
+                try testing.expect(!Vec3.init(p.position.x, p.position.y, p.position.z).isNaN());
+        }
     }
     return .{ .failed = failed, .state = try .init(testing.allocator, &hair) };
 }
@@ -1632,24 +1707,43 @@ test "Hair: allocation failure sweeps of initCompute and update" {
     defer world.deinit();
     try addSweepBodies(&world);
 
-    // The states after 1 and 2 updates without a failure
-    var one = try sweepCase(&world, .none, 0, 1);
-    defer one.state.deinit(testing.allocator);
-    var two = try sweepCase(&world, .none, 0, 2);
-    defer two.state.deinit(testing.allocator);
+    // Without a scalp, and with a skinned scalp (initCompute creates the scalp buffers, the second update the two target
+    // buffers). The number of allocations of initCompute for each.
+    var init_compute_allocations: [2]usize = undefined;
+    for ([_]bool{ false, true }, &init_compute_allocations) |scalp, *num_allocations| {
+        const groom: TestGroom = .{ .vertex_spread = 3, .scalp = scalp };
 
-    for ([_]SweepPhase{ .init_compute, .update }) |phase| {
+        // The state without a failure
+        var expected = try sweepCase(&world, groom, .{});
+        defer expected.state.deinit(testing.allocator);
+
+        // initCompute: after a failure, calling it again gives the same state
         var fail_after: usize = 0;
         while (true) : (fail_after += 1) {
-            var result = try sweepCase(&world, phase, fail_after, 2);
+            var result = try sweepCase(&world, groom, .{ .phase = .init_compute, .fail_after = fail_after });
             defer result.state.deinit(testing.allocator);
-
-            // A failed update and a teleported update give the state of the first update, a teleport
-            try result.state.expectEqual(if (phase == .update and result.failed) &one.state else &two.state);
+            try result.state.expectEqual(&expected.state);
             if (!result.failed) break;
         }
-        try testing.expect(fail_after > 10); // initCompute and update allocate
+        num_allocations.* = fail_after;
+
+        // Every update: a failed update and its teleported retry give the state of a teleport before that update
+        for (0..sweep_updates.len) |update_index| {
+            var teleported = try sweepCase(&world, groom, .{ .teleport_at = update_index });
+            defer teleported.state.deinit(testing.allocator);
+            fail_after = 0;
+            while (true) : (fail_after += 1) {
+                var result = try sweepCase(&world, groom, .{ .phase = .update, .update_index = update_index, .fail_after = fail_after });
+                defer result.state.deinit(testing.allocator);
+                try result.state.expectEqual(if (result.failed) &teleported.state else &expected.state);
+                if (!result.failed) break;
+            }
+            try testing.expect(fail_after > 10);
+        }
     }
+
+    // The scalp branch of initCompute allocates
+    try testing.expect(init_compute_allocations[0] > 5 and init_compute_allocations[1] > init_compute_allocations[0]);
 }
 
 /// The render positions override of the read back sweeps: copies the read back buffer
