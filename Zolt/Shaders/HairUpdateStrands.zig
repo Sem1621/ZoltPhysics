@@ -10,8 +10,11 @@
 //!   `(&x)[inIndex]`, so Jolt's build reads the next float of JPH_HairMaterial, `mGridVelocityFactor.x`, and multiplies
 //!   it by a fraction of 0. Zolt reads that member too (`bendComplianceMultiplier`), pinned by a test. A one-off
 //!   dispatch on both sides gave the same bits for a finite and an infinite `mGridVelocityFactor.x`. Hair never gives a
-//!   vertex in the middle of a strand the fraction 1, unless the last segment of the strand has no length. The parity
-//!   does not generate it.
+//!   vertex in the middle of a strand the fraction 1, unless the last segment is too short to change the float sum of
+//!   the segment lengths (for example zero). The parity does not generate it.
+//! - Zolt does not panic there, because valid Hair data reaches this read. A step gradient (equal min and max
+//!   fractions) gives an infinite or NaN `mGridVelocityFactor.x`. Then the multiplier is NaN, and Jolt and Zolt both
+//!   skip the bend and twist constraint of that vertex.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");
@@ -204,7 +207,8 @@ test "HairUpdateStrands: a middle vertex with strand fraction 1 reads the grid v
     const std = @import("std");
 
     // The fraction 1 gives idx 3 and fraction 0, so the multiplier is `[3] * 1 + [4] * 0`. Index 4 is
-    // mGridVelocityFactor.x: when it is infinite, the multiplier is NaN and the bend twist constraint is skipped.
+    // mGridVelocityFactor.x: when it is infinite or NaN, the multiplier is NaN and the bend twist constraint is
+    // skipped. A step gradient (equal min and max fractions) gives such a factor.
     var material = std.mem.zeroes(HairMaterial);
     material.bend_compliance_multiplier = .init(1, 2, 3, 4);
     material.grid_velocity_factor = .init(5, 6, 7, 8);
@@ -217,12 +221,12 @@ test "HairUpdateStrands: a middle vertex with strand fraction 1 reads the grid v
     b.bind(std.mem.sliceAsBytes(&fractions));
     try std.testing.expectEqual(1.0, HairCommon.getVertexStrandFraction(b, 1));
 
-    // A strand of 3 vertices: vertex 1 has fraction 1. Run it with a finite and with an infinite factor.
+    // A strand of 3 vertices: vertex 1 has fraction 1. Run it with a finite, an infinite and a NaN factor.
     material.inertia_multiplier = 1;
     material.bend_compliance_inv_delta_time_sq = 1;
     const omega0 = ShaderQuat.quatDecompress(0);
-    var results: [2][2]HairPosition = undefined;
-    for (&results, [_]f32{ 0.5, std.math.inf(f32) }) |*result, factor| {
+    var results: [3][2]HairPosition = undefined;
+    for (&results, [_]f32{ 0.5, std.math.inf(f32), std.math.nan(f32) }) |*result, factor| {
         material.grid_velocity_factor.x = factor;
         var v0: HairPosition = .{ .position = .init(0, 0, 0), .rotation = .init(0, 0, 0, 1) };
         var v1: HairPosition = .{ .position = .init(0, 0, 1), .rotation = .init(0.6, 0, 0, 0.8) };
@@ -232,4 +236,6 @@ test "HairUpdateStrands: a middle vertex with strand fraction 1 reads the grid v
     try std.testing.expect(!results[0][0].rotation.eql(.init(0, 0, 0, 1))); // Applied
     try std.testing.expect(results[1][0].rotation.eql(.init(0, 0, 0, 1))); // Skipped: the multiplier is NaN
     try std.testing.expect(results[1][1].rotation.eql(.init(0.6, 0, 0, 0.8)));
+    try std.testing.expect(results[2][0].rotation.eql(.init(0, 0, 0, 1))); // Skipped: the multiplier is NaN
+    try std.testing.expect(results[2][1].rotation.eql(.init(0.6, 0, 0, 0.8)));
 }

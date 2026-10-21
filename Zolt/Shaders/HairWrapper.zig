@@ -59,3 +59,19 @@ test "registerHairShaders registers the 15 hair shaders by their Jolt names" {
         shader.deinit();
     }
 }
+
+test "registerHairShaders: allocation failures" {
+    // Zolt: every allocation can fail, also when the registry grows. The error must arrive and nothing may leak.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            const virtual = @import("../Core/Virtual.zig");
+            var system = try ComputeSystemCPU.create(allocator);
+            defer system.deinit();
+            try registerHairShaders(virtual.downcast(ComputeSystemCPU, system.get().?));
+            inline for (shaders) |Shader| {
+                var shader = try system.get().?.createComputeShader(Shader.name, 64, .{});
+                shader.deinit();
+            }
+        }
+    }.f, .{});
+}

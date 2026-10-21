@@ -13,7 +13,8 @@
 //! - Indices are valid and buffers have at least the elements the shader reads (UB3), at least one element each. Threads
 //!   past the end return before they read.
 //! - The group size is the shader's batch size, 1 or random. Some dispatches have an extra group (threads that return
-//!   early) or a second row in y (the shader runs twice for the same x, also on both sides).
+//!   early) or a second row in y (the shader runs twice for the same x, also on both sides). A layer can turn off the
+//!   second row (`dispatchRandomRows`).
 //! - The grid inputs never produce the UB11 grid positions: no NaN positions, a positive and finite grid scale, a grid
 //!   of at least 2 cells per axis. Infinite positions are fine: the clamp maps them into the grid.
 //! - HairGridAccumulate adds with atomics. Jolt's CPU backend runs the threads one at a time on the calling thread, in
@@ -61,6 +62,12 @@ pub fn initDispatcher(allocator: Allocator) !Dispatcher {
 
 /// Run `Shader` on both sides for `num_threads` threads in x (see the file header for the group sizes)
 pub fn dispatchRandom(dispatcher: *Dispatcher, checker: *fw.Checker, rng: *fw.Rng, comptime Shader: type, batch: u32, num_threads: u32, bindings: []const BindingDesc, compare: Compare) !void {
+    try dispatchRandomRows(dispatcher, checker, rng, Shader, batch, num_threads, bindings, compare, true);
+}
+
+/// `dispatchRandom` with a second row in y only when `second_row` is true. The second pass reads what the first pass
+/// wrote to the RW buffers. A layer turns it off when those results can break the input rules of a shader.
+pub fn dispatchRandomRows(dispatcher: *Dispatcher, checker: *fw.Checker, rng: *fw.Rng, comptime Shader: type, batch: u32, num_threads: u32, bindings: []const BindingDesc, compare: Compare, second_row: bool) !void {
     const group_size_x: u32 = switch (rng.next() % 4) {
         0, 1 => batch,
         2 => 1,
@@ -68,7 +75,7 @@ pub fn dispatchRandom(dispatcher: *Dispatcher, checker: *fw.Checker, rng: *fw.Rn
     };
     var num_groups_x = (num_threads + group_size_x - 1) / group_size_x;
     if (rng.next() % 4 == 0) num_groups_x += 1; // Threads past the end return early
-    const twice = rng.next() % 8 == 0;
+    const twice = rng.next() % 8 == 0 and second_row;
     const group_size_y: u32 = if (twice and rng.next() % 2 == 0) 2 else 1;
     const num_groups_y: u32 = if (twice and group_size_y == 1) 2 else 1;
     const found = try dispatcher.dispatchBoth(checker, Shader.name, .{ group_size_x, group_size_y, 1 }, .{ num_groups_x, num_groups_y, 1 }, bindings, compare);

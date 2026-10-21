@@ -13,8 +13,10 @@
 //!   compliance multipliers, which is undefined in Jolt (see Zolt/Shaders/HairUpdateStrands.zig).
 //! - `applyGrid` never sees a NaN position (UB11). HairIntegrate reads the positions of its buffer: in the rounds where
 //!   a material enables the grid, they come from `gridPosition`. HairUpdateVelocityIntegrate first applies the global
-//!   pose and the collision: in those rounds every input of that path is finite and of moderate size. Rounds without
-//!   the grid use special floats everywhere.
+//!   pose and the collision: in those rounds every input of that path is finite and of moderate size. Those rounds have
+//!   no second row in y: the second pass would read the positions that the first pass wrote, which are often NaN.
+//!   `expectNoNanGridPosition` checks the rule after each dispatch. Rounds without the grid use special floats
+//!   everywhere.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -323,6 +325,27 @@ fn cleanPosition(rng: *fw.Rng) float3 {
     return vector(rng, 5, true);
 }
 
+/// Checks the rule of UB11 after a dispatch of HairIntegrate or HairUpdateVelocityIntegrate: `applyGrid` never saw a
+/// NaN position. Both shaders write the position to gPreviousPositions just before they call `applyGrid`. So after the
+/// dispatch, `previous_positions` (Jolt's results) holds the position that `applyGrid` saw in the last pass. A second
+/// row in y runs a second pass on the positions of the first, and a NaN position stays NaN in both shaders.
+fn expectNoNanGridPosition(strands: Strands, previous_positions: []const HairPosition) !void {
+    var vtx = strands.num_strands; // The roots are not simulated
+    while (vtx < strands.num_vertices) : (vtx += 1) {
+        if ((strands.vertices_fixed[vtx >> 5] >> @intCast(vtx & 31)) & 1 != 0)
+            continue;
+        const strand = vtx % strands.num_strands;
+        const material = (strands.strand_material_index[strand >> 2] >> @intCast((strand & 3) << 3)) & 0xff;
+        if (strands.materials[material].enable_grid == 0)
+            continue;
+        const p = previous_positions[vtx].position;
+        if (std.math.isNan(p.x) or std.math.isNan(p.y) or std.math.isNan(p.z)) {
+            std.debug.print("applyGrid saw the NaN position {any} of vertex {d}\n", .{ p, vtx });
+            return error.NanGridPosition;
+        }
+    }
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 // The layers
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -423,7 +446,8 @@ test "HairShaderParity: HairIntegrate" {
         _ = arena_state.reset(.retain_capacity);
         const arena = arena_state.allocator();
 
-        // In a grid round the materials may enable the grid, so the positions are never NaN (UB11)
+        // In a grid round the materials may enable the grid, so the positions are never NaN and the dispatch has a
+        // single row in y (UB11)
         const grid_round = rng.next() % 4 != 0;
         const strands = try Strands.init(arena, &rng);
         setMaterials(&rng, strands, false, grid_round);
@@ -452,7 +476,8 @@ test "HairShaderParity: HairIntegrate" {
             .of("gPositions", .rw_buffer, HairPosition, positions),
             .of("gPreviousPositions", .rw_buffer, HairPosition, previous_positions),
         };
-        try C1a.dispatchRandom(&dispatcher, &checker, &rng, zolt.HairIntegrate, HairStructs.hair_per_vertex_batch, strands.numThreadsSkipRoots(), &bindings, .floats);
+        try C1a.dispatchRandomRows(&dispatcher, &checker, &rng, zolt.HairIntegrate, HairStructs.hair_per_vertex_batch, strands.numThreadsSkipRoots(), &bindings, .floats, !grid_round);
+        try expectNoNanGridPosition(strands, previous_positions);
     }
     try checker.finish();
 }
@@ -633,7 +658,7 @@ test "HairShaderParity: HairUpdateVelocityIntegrate" {
         const arena = arena_state.allocator();
 
         // In a grid round the materials may enable the grid, so every input of the position before applyGrid is
-        // finite (UB11). The other rounds use special floats everywhere.
+        // finite and the dispatch has a single row in y (UB11). The other rounds use special floats everywhere.
         const grid_round = rng.next() % 4 != 0;
         const clean = grid_round;
         const strands = try Strands.init(arena, &rng);
@@ -682,7 +707,8 @@ test "HairShaderParity: HairUpdateVelocityIntegrate" {
             .of("gPreviousPositions", .rw_buffer, HairPosition, previous_positions),
             .of("gPositions", .rw_buffer, HairPosition, positions),
         };
-        try C1a.dispatchRandom(&dispatcher, &checker, &rng, zolt.HairUpdateVelocityIntegrate, HairStructs.hair_per_vertex_batch, strands.numThreadsSkipRoots(), &bindings, .floats);
+        try C1a.dispatchRandomRows(&dispatcher, &checker, &rng, zolt.HairUpdateVelocityIntegrate, HairStructs.hair_per_vertex_batch, strands.numThreadsSkipRoots(), &bindings, .floats, !grid_round);
+        try expectNoNanGridPosition(strands, previous_positions);
     }
     try checker.finish();
 }
