@@ -143,13 +143,13 @@ fn calculateManifold(c: *PhysicsTestContext, body1: *const Body, body2: *const B
 
     var manifold: ContactManifold = .{};
     manifold.base_offset = base_offset;
-    zolt.manifoldBetweenTwoFaces(deepest.contact_point_on1, deepest.contact_point_on2, deepest.penetration_axis, physics_settings.speculative_contact_distance + physics_settings.manifold_tolerance, &deepest.shape1_face, &deepest.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+    zolt.manifoldBetweenTwoFaces(deepest.contact_point_on1, deepest.contact_point_on2, deepest.penetration_axis, physics_settings.speculative_contact_distance + physics_settings.manifold_tolerance, &deepest.shape1_face, &deepest.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, .{});
     manifold.sub_shape_id1 = deepest.sub_shape_id1;
     manifold.sub_shape_id2 = deepest.sub_shape_id2;
     manifold.penetration_depth = deepest.penetration_depth;
     manifold.world_space_normal = deepest.penetration_axis.normalized();
     if (manifold.relative_contact_points_on1.len > 4)
-        zolt.pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+        zolt.pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, .{});
     return manifold;
 }
 

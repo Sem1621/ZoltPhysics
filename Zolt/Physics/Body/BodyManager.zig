@@ -40,7 +40,9 @@
 //!   the update after restoring a saved state treats the contact cache like the update that failed.
 //! - Overloads: the const / non-const `GetBody`, `TryGetBody`, `GetBodies` are `getBody` / `getBodyMut`, `tryGetBody` /
 //!   `tryGetBodyMut`, `getBodies` / `getBodiesMut`. Pointer + count parameters are slices.
-//! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): gated declarations
+//!   (RemainingFeaturesArchitecture.md R2), `void` without `-Ddebug_renderer`. Jolt's default argument `inBodyFilter` is
+//!   `DrawOptions.body_filter`. Draw takes the body mutexes like Jolt. Its soft body section is group D4's.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -52,6 +54,15 @@ const Mutex = MutexFile.Mutex;
 const SharedMutex = MutexFile.SharedMutex;
 const MutexArray = @import("../../Core/MutexArray.zig").MutexArray;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const AABox = @import("../../Geometry/AABox.zig").AABox;
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const ShapeFunctions = @import("../Collision/Shape/Shape.zig").ShapeFunctions;
+const PhysicsSettings = @import("../PhysicsSettings.zig").PhysicsSettings;
+const MassProperties = @import("MassProperties.zig").MassProperties;
+const BodyDrawFilter = @import("BodyFilter.zig").BodyDrawFilter;
 const BroadPhaseLayerInterface = @import("../Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayerInterface;
 const BodyID = @import("BodyID.zig").BodyID;
 const Body = @import("Body.zig").Body;
@@ -76,6 +87,16 @@ const StateRecorderFilter = StateRecorderFile.StateRecorderFilter;
 const PhysicsLockFile = @import("../PhysicsLock.zig");
 const PhysicsLock = PhysicsLockFile.PhysicsLock;
 const UniqueLock = PhysicsLockFile.UniqueLock;
+
+/// Defines how to color soft body constraints (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+pub const SoftBodyConstraintColor = if (Core.debug_renderer) enum {
+    /// Draw different types of constraints in different colors
+    constraint_type,
+    /// Draw constraints in the same group in the same color, non-parallel group will be red
+    constraint_group,
+    /// Draw constraints in the same group in the same color, non-parallel group will be red, and order within each group will be indicated with gradient
+    constraint_order,
+} else void;
 
 /// Array of bodies (BodyVector = Array<Body *>): the slots of BodyManager.bodies, a body pointer or a freed index
 pub const BodyVector = []BodyManager.BodySlot;
@@ -1133,7 +1154,230 @@ pub const BodyManager = struct {
         }
     }
 
-    // TODO(debug_renderer): ESoftBodyConstraintColor, EShapeColor, DrawSettings, Draw
+    /// How to color the shapes (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    pub const ShapeColor = if (Core.debug_renderer) enum {
+        /// Random color per instance
+        instance_color,
+        /// Convex = green, scaled = yellow, compound = orange, mesh = red
+        shape_type_color,
+        /// Static = grey, keyframed = green, dynamic = random color per instance
+        motion_type_color,
+        /// Static = grey, keyframed = green, dynamic = yellow, sleeping = red
+        sleep_color,
+        /// Static = grey, active = random color per island, sleeping = light grey
+        island_color,
+        /// Color as defined by the PhysicsMaterial of the shape
+        material_color,
+    } else void;
+
+    /// Draw settings (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    ///
+    /// Note that there are several debug drawing features that are not exposed through this interface since they use information
+    /// that is only available deep inside the simulation update and are mostly there to facilitate debugging Jolt. These options
+    /// use DebugRenderer::sInstance to draw.
+    /// (Zolt: they draw into the renderer of the physics system, PhysicsSystem.setDebugRenderer, and their flags are the
+    /// fields of `DebugRenderer.flags`, RemainingFeaturesArchitecture.md R4.)
+    ///
+    /// E.g.:
+    /// * To draw contact information, use ContactConstraintManager::sDrawContactManifolds.
+    /// * To draw when continuous collision detection is used, use PhysicsSystem::sDrawMotionQualityLinearCast.
+    /// * To draw what's going on in a CharacterVirtual update, use CharacterVirtual::sDrawConstraints, CharacterVirtual::sDrawWalkStairs and CharacterVirtual::sDrawStickToFloor.
+    /// * To draw the volume of water that interacts with a shape, use Shape::sDrawSubmergedVolumes.
+    pub const DrawSettings = if (Core.debug_renderer) struct {
+        /// Draw the GetSupport() function, used for convex collision detection
+        draw_get_support_function: bool = false,
+        /// When drawing the support function, also draw which direction mapped to a specific support point
+        draw_support_direction: bool = false,
+        /// Draw the faces that were found colliding during collision detection
+        draw_get_supporting_face: bool = false,
+        /// Draw the shapes of all bodies
+        draw_shape: bool = true,
+        /// When mDrawShape is true and this is true, the shapes will be drawn in wireframe instead of solid.
+        draw_shape_wireframe: bool = false,
+        /// Coloring scheme to use for shapes
+        draw_shape_color: ShapeColor = .motion_type_color,
+        /// Draw a bounding box per body
+        draw_bounding_box: bool = false,
+        /// Draw the center of mass for each body
+        draw_center_of_mass_transform: bool = false,
+        /// Draw the world transform (which can be different than the center of mass) for each body
+        draw_world_transform: bool = false,
+        /// Draw the velocity vector for each body
+        draw_velocity: bool = false,
+        /// Draw the mass and inertia (as the box equivalent) for each body
+        draw_mass_and_inertia: bool = false,
+        /// Draw stats regarding the sleeping algorithm of each body
+        draw_sleep_stats: bool = false,
+        /// Draw the vertices of soft bodies
+        draw_soft_body_vertices: bool = false,
+        /// Draw the velocities of the vertices of soft bodies
+        draw_soft_body_vertex_velocities: bool = false,
+        /// Draw the edge constraints of soft bodies
+        draw_soft_body_edge_constraints: bool = false,
+        /// Draw the bend constraints of soft bodies
+        draw_soft_body_bend_constraints: bool = false,
+        /// Draw the volume constraints of soft bodies
+        draw_soft_body_volume_constraints: bool = false,
+        /// Draw the skin constraints of soft bodies
+        draw_soft_body_skin_constraints: bool = false,
+        /// Draw the LRA constraints of soft bodies
+        draw_soft_body_lra_constraints: bool = false,
+        /// Draw the rods of soft bodies
+        draw_soft_body_rods: bool = false,
+        /// Draw the rod states (orientation and angular velocity) of soft bodies
+        draw_soft_body_rod_states: bool = false,
+        /// Draw the rod bend twist constraints of soft bodies
+        draw_soft_body_rod_bend_twist_constraints: bool = false,
+        /// Draw the predicted bounds of soft bodies
+        draw_soft_body_predicted_bounds: bool = false,
+        /// Coloring scheme to use for soft body constraints
+        draw_soft_body_constraint_color: SoftBodyConstraintColor = .constraint_type,
+    } else void;
+
+    /// The optional parameters of draw (Jolt's default argument; JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    pub const DrawOptions = if (Core.debug_renderer) struct {
+        /// Only the bodies that pass the filter are drawn (null: every body)
+        body_filter: ?*const BodyDrawFilter = null,
+    } else void;
+
+    /// Draw the state of the bodies (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *BodyManager, draw_settings: *const DrawSettings, physics_settings: *const PhysicsSettings, renderer: *DebugRenderer, opts: DrawOptions) void {
+        self.lockAllBodies();
+        defer self.unlockAllBodies();
+
+        for (self.bodies[0..self.bodies_size.raw]) |slot| {
+            if (slot.isValidBodyPointer() and slot.getBody().isInBroadPhase() and (opts.body_filter == null or opts.body_filter.?.shouldDraw(slot.getBody()))) {
+                const body = slot.getBody();
+                std.debug.assert(self.bodies[body.getID().getIndex()] == slot);
+
+                const is_sensor = body.isSensor();
+
+                // Determine drawing mode
+                var color: Color = undefined;
+                if (is_sensor) {
+                    color = Color.yellow;
+                } else switch (draw_settings.draw_shape_color) {
+                    .instance_color => {
+                        // Each instance has own color
+                        color = Color.getDistinctColor(@intCast(body.id.getIndex()));
+                    },
+
+                    .shape_type_color => color = ShapeFunctions.get(body.getShape().getSubType()).color,
+
+                    .motion_type_color => {
+                        // Determine color based on motion type
+                        switch (body.motion_type) {
+                            .static => color = Color.grey,
+                            .kinematic => color = Color.green,
+                            .dynamic => color = Color.getDistinctColor(@intCast(body.id.getIndex())),
+                        }
+                    },
+
+                    .sleep_color => {
+                        // Determine color based on motion type
+                        switch (body.motion_type) {
+                            .static => color = Color.grey,
+                            .kinematic => color = if (body.isActive()) Color.green else Color.red,
+                            .dynamic => color = if (body.isActive()) Color.yellow else Color.red,
+                        }
+                    },
+
+                    .island_color => {
+                        // Determine color based on motion type
+                        switch (body.motion_type) {
+                            .static => color = Color.grey,
+                            .kinematic, .dynamic => {
+                                const idx = body.getMotionProperties().getIslandIndexInternal();
+                                color = if (idx != Body.inactive_index) Color.getDistinctColor(@intCast(idx)) else Color.light_grey;
+                            },
+                        }
+                    },
+
+                    .material_color => color = Color.white,
+                }
+
+                // Draw the results of GetSupportFunction
+                if (draw_settings.draw_get_support_function)
+                    body.getShape().drawGetSupportFunction(renderer, body.getCenterOfMassTransform(), Vec3.one(), color, draw_settings.draw_support_direction);
+
+                // Draw the results of GetSupportingFace
+                if (draw_settings.draw_get_supporting_face)
+                    body.getShape().drawGetSupportingFace(renderer, body.getCenterOfMassTransform(), Vec3.one());
+
+                // Draw the shape
+                if (draw_settings.draw_shape)
+                    body.getShape().draw(renderer, body.getCenterOfMassTransform(), Vec3.one(), color, draw_settings.draw_shape_color == .material_color, draw_settings.draw_shape_wireframe or is_sensor);
+
+                // Draw bounding box
+                if (draw_settings.draw_bounding_box)
+                    renderer.drawWireBox(body.bounds, color);
+
+                // Draw center of mass transform
+                if (draw_settings.draw_center_of_mass_transform)
+                    renderer.drawCoordinateSystem(body.getCenterOfMassTransform(), .{ .size = 0.2 });
+
+                // Draw world transform
+                if (draw_settings.draw_world_transform)
+                    renderer.drawCoordinateSystem(body.getWorldTransform(), .{ .size = 0.2 });
+
+                // Draw world space linear and angular velocity
+                if (draw_settings.draw_velocity) {
+                    const pos = body.getCenterOfMassPosition();
+                    renderer.drawArrow(pos, pos.addVec3(body.getLinearVelocity()), Color.green, 0.1);
+                    renderer.drawArrow(pos, pos.addVec3(body.getAngularVelocity()), Color.red, 0.1);
+                }
+
+                if (draw_settings.draw_mass_and_inertia and body.isDynamic()) {
+                    const mp = body.getMotionProperties();
+                    if (mp.getInverseMass() > 0.0 and !Vec3.equals(mp.getInverseInertiaDiagonal(), Vec3.zero()).testAnyXYZTrue()) {
+                        // Invert mass again
+                        const mass = 1.0 / mp.getInverseMass();
+
+                        // Invert diagonal again
+                        const diagonal = mp.getInverseInertiaDiagonal().reciprocal();
+
+                        // Determine how big of a box has the equivalent inertia
+                        const box_size = MassProperties.getEquivalentSolidBoxSize(mass, diagonal);
+
+                        // Draw box with equivalent inertia
+                        renderer.drawWireBoxMatrix(body.getCenterOfMassTransform().mulMat44(Mat44.rotationQuat(mp.getInertiaRotation())), AABox.init(box_size.mulScalar(-0.5), box_size.mulScalar(0.5)), Color.orange);
+
+                        // Draw mass
+                        // StringFormat("%.2f", ...): its buffer holds 1023 characters
+                        var text_buffer: [1023]u8 = undefined;
+                        var writer: std.Io.Writer = .fixed(&text_buffer);
+                        writer.print("{f}", .{StringTools.cppFixed(mass, 2)}) catch {};
+                        renderer.drawText3D(body.getCenterOfMassPosition(), writer.buffered(), .{ .color = Color.orange, .height = 0.2 });
+                    }
+                }
+
+                if (draw_settings.draw_sleep_stats and body.isDynamic() and body.isActive()) {
+                    const mp = body.getMotionProperties();
+
+                    // Draw stats to know which bodies could go to sleep
+                    // StringFormat("t: %.1f", ...): its buffer holds 1023 characters
+                    var text_buffer: [1023]u8 = undefined;
+                    var writer: std.Io.Writer = .fixed(&text_buffer);
+                    writer.print("t: {f}", .{StringTools.cppFixed(mp.sleep_test_timer, 1)}) catch {};
+                    const g_value = math.clamp(255.0 * mp.sleep_test_timer / physics_settings.time_before_sleep, 0.0, 255.0);
+                    // uint8(float): Clamp keeps NaN (a zero timer with a zero mTimeBeforeSleep), which Jolt's x86-64 build
+                    // converts with cvttss2si and truncates to 0 (porting guide section 8, rule 12)
+                    const g: u8 = if (std.math.isNan(g_value)) 0 else @intFromFloat(g_value);
+                    const sleep_color = Color.initRgb(0, 255 - g, g);
+                    renderer.drawText3D(body.getCenterOfMassPosition(), writer.buffered(), .{ .color = sleep_color, .height = 0.2 });
+                    for (0..3) |i| {
+                        const center = mp.sleep_test_spheres[i].getCenter();
+                        // JPH_IF_DOUBLE_PRECISION(GetSleepTestOffset() +)
+                        renderer.drawMarker(if (Core.double_precision) mp.getSleepTestOffset().addVec3(center) else center, sleep_color, mp.sleep_test_spheres[i].getRadius());
+                    }
+                }
+
+                // TODO(debug_renderer): the soft body section of Jolt's Draw (SoftBodyMotionProperties::DrawVertices,
+                // DrawVertexVelocities, DrawEdgeConstraints, ..., DrawPredictedBounds), group D4
+            }
+        }
+    }
 
     /// Lock the active body list, asserts when Activate/DeactivateBody is called. (JPH_ENABLE_ASSERTS: does nothing without asserts)
     pub fn setActiveBodiesLocked(self: *BodyManager, locked: bool) void {
