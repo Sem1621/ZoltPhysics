@@ -509,7 +509,8 @@ pub const StepListenerMode = enum(u32) {
 
 /// Constraint kinds (Phase 6): every Jolt two body constraint class. The C++ side creates every kind and applies every
 /// operation of `OpKind`; the Zolt side the kinds whose class is ported (`isPorted`, SimulationParity.zig's constraint
-/// slots). A scene that creates a kind whose Zolt class is still a stub declares it with its `Blocker` and is skipped.
+/// slots). A scene that creates a kind declares it with its `Blocker`. Every kind is ported; a scene whose kind is a
+/// stub again fails (SimulationParity's checkSupported).
 /// The description of each kind (`SimConstraint.i` / `r` / `f`) is listed per value.
 pub const ConstraintKind = enum(u32) {
     /// FixedConstraintSettings: i[0] space, i[1] auto detect point; r[0..3] point 1, r[3..6] point 2; f[0..3] axis X1,

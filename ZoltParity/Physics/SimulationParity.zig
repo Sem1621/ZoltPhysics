@@ -3154,8 +3154,8 @@ fn createScene(allocator: Allocator, builder: *const SceneBuilder) !void {
 // - `stateFields(sub_type: zolt.ConstraintSubType) ?[]const StateField`: the SaveState layout of the classes of the slot
 //   after Constraint::SaveState's `enabled` (for the state decoder, null: decoded as one block of bytes);
 // - `setConstraints(world, c: *TwoBodyConstraint, handle1: u32, handle2: u32) !void`: Gear / RackAndPinion only.
-// A slot whose classes are not ported yet is `StubSlot`: scenes with its kinds are skipped through their Blocker, an
-// operation of its range returns error.SceneNotSupported.
+// A slot whose classes are not ported yet is `StubSlot`: a scene with its kinds fails through its Blocker
+// (checkSupported), an operation of its range returns error.SceneNotSupported.
 
 /// The ConstraintState bits of a constraint (SimConstraintState of SimulationReference.cpp)
 fn constraintState(c: *const Constraint) u32 {
@@ -3932,8 +3932,8 @@ fn checkConstraintDescriptions(allocator: Allocator, entry: *const SceneEntry, b
 // - The vehicle slots: the callbacks (VehicleCallbacks, VehicleCombineFriction, VehicleTireMaxImpulse) add
 //   `VehicleRecords` to world.recorder; the custom friction uses the Math min helper (not @min). Wheel's contact members
 //   are zero-initialized in Zolt (the reference zero-fills its allocations, see the rules of the SimScenes header).
-// A slot whose classes are not ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes are skipped through
-// their Blocker, and a supported scene that creates its objects fails (checkPhase7Slots).
+// A slot whose classes are not ported yet is `Phase7StubSlot` (`is_stub`): the scenes of its classes fail through their
+// Blocker (checkSupported), and a supported scene that creates its objects fails (checkPhase7Slots).
 //
 // The interface changes of the foundation review (for a group that started on the earlier interface):
 // - TrackedVehicleSlot / MotorcycleSlot: `applyOp(world, op) !u32` is now `applyVehicleOp(world, op, vehicle) !void`
