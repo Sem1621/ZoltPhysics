@@ -504,6 +504,7 @@ pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstr
 pub const DeterminismLog = @import("Physics/DeterminismLog.zig");
 pub const Activation = @import("Physics/EActivation.zig").Activation;
 pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
+pub const Hair = @import("Physics/Hair/Hair.zig").Hair;
 pub const HairSettings = @import("Physics/Hair/HairSettings.zig").HairSettings;
 pub const HairShaders = @import("Physics/Hair/HairShaders.zig").HairShaders;
 pub const RegisterHair = @import("Physics/Hair/RegisterHair.zig");
@@ -893,6 +894,7 @@ const source_files = .{
     @import("Physics/DeterminismLog.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
+    @import("Physics/Hair/Hair.zig"),
     @import("Physics/Hair/HairSettings.zig"),
     @import("Physics/Hair/HairShaders.zig"),
     @import("Physics/Hair/RegisterHair.zig"),

@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 98.4%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
+**Library: 99.6%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -25,7 +25,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/Character` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2997 |
 | `Jolt/Physics/Collision` | 100% | 76 | 0 | 0 | 0 | 0 | 0 | 21948 |
 | `Jolt/Physics/Constraints` | 100% | 35 | 0 | 0 | 0 | 0 | 0 | 12068 |
-| `Jolt/Physics/Hair` | 51% | 3 | 0 | 0 | 1 | 0 | 0 | 2287 |
+| `Jolt/Physics/Hair` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 2287 |
 | `Jolt/Physics/Ragdoll` | 100% | 1 | 0 | 0 | 0 | 0 | 0 | 861 |
 | `Jolt/Physics/SoftBody` | 100% | 8 | 0 | 0 | 0 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
@@ -419,11 +419,11 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Physics/Hair — 51%</summary>
+<details><summary>Jolt/Physics/Hair — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
-| `Hair.cpp`, `Hair.h` | 1129 | ❌ todo |  |
+| `Hair.cpp`, `Hair.h` | 1129 | ✅ complete | `Zolt/Physics/Hair/Hair.zig` |
 | `HairSettings.cpp`, `HairSettings.h` | 1078 | ✅ complete | `Zolt/Physics/Hair/HairSettings.zig` |
 | `HairShaders.cpp`, `HairShaders.h` | 58 | ✅ complete | `Zolt/Physics/Hair/HairShaders.zig` |
 | `RegisterHair.cpp`, `RegisterHair.h` | 22 | ✅ complete | `Zolt/Physics/Hair/RegisterHair.zig` |
