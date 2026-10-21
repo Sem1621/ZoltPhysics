@@ -326,6 +326,10 @@ fn makeShapeSettings(allocator: Allocator, desc: *const Body, points: []const f3
 const Transcript = struct {
     allocator: Allocator,
     data: std.ArrayList(u8) = .empty,
+    /// A read back position was NaN (the scenes must avoid R20 UB11)
+    nan_position: bool = false,
+    /// An update collided without a hull in the bounds (the scenes must avoid R20 UB3)
+    collision_without_hull: bool = false,
 
     fn deinit(self: *Transcript) void {
         self.data.deinit(self.allocator);
@@ -403,7 +407,7 @@ fn dumpReadBack(t: *Transcript, hair: *Hair, queue: *ComputeQueue) !void {
     const num_vertices = settings.sim_vertices.items.len;
     for (hair.getPositions().?) |p| {
         // The scenes keep the strands finite, so no grid position is NaN (R20 UB11)
-        if (std.math.isNan(p.x) or std.math.isNan(p.y) or std.math.isNan(p.z)) return error.NaNPosition;
+        if (std.math.isNan(p.x) or std.math.isNan(p.y) or std.math.isNan(p.z)) t.nan_position = true;
     }
     try t.record(tag_read | 0, std.mem.sliceAsBytes(hair.getPositions().?));
     var floats: std.ArrayList(f32) = .empty;
@@ -504,7 +508,7 @@ fn zoltRun(allocator: Allocator, scene: *const Scene, t: *Transcript, coverage: 
                         try joints.append(allocator, loadMat44(pool[o.u[0] + 16 * j ..][0..16]));
                 }
                 try hair.update(o.f[0], loadMat44(pool[o.u[1]..][0..16]), if (o.u[0] != no_joints) joints.items else null, &physics_system, shaders.get().?, system, queue.get().?);
-                try checkScene(scene, &hair, coverage);
+                checkScene(&hair, t, coverage);
             },
             .set_position => hair.setPosition(loadR3(&o.d)),
             .set_rotation => hair.setRotation(loadQuat(&o.f)),
@@ -592,7 +596,7 @@ const Coverage = struct {
 /// After an update on the Zolt side: count the paths, and check that the scene stays away from Jolt's undefined
 /// behavior (R20). UB3: when a material collides, the collision buffers were written in this update and hold at least
 /// one hull (the first word of the shape indices is the number of faces of the first hull, 0 is the terminator).
-fn checkScene(scene: *const Scene, hair: *Hair, coverage: *Coverage) !void {
+fn checkScene(hair: *Hair, t: *Transcript, coverage: *Coverage) void {
     const materials = hair.materials_cb.get().?.mapAs(HairStructs.HairMaterial, .read);
     defer hair.materials_cb.get().?.unmap();
     var collides = false;
@@ -606,10 +610,8 @@ fn checkScene(scene: *const Scene, hair: *Hair, coverage: *Coverage) !void {
     if (collides) {
         const indices = hair.shape_indices_cb.get().?.mapAs(u32, .read);
         defer hair.shape_indices_cb.get().?.unmap();
-        if (indices[0] == 0) {
-            std.debug.print("Hair scene {s}: an update collides without a hull in the bounds (R20 UB3)\n", .{scene.name});
-            return error.ParityMismatch;
-        }
+        if (indices[0] == 0)
+            t.collision_without_hull = true;
         coverage.collision_updates += 1;
     }
     if (grid and !global_pose_only) coverage.grid_updates += 1;
@@ -633,6 +635,14 @@ fn runScene(allocator: Allocator, scene: *const Scene, coverage: *Coverage) !voi
     defer t.deinit();
     try zoltRun(allocator, scene, &t, coverage);
     try compareTranscripts(scene, t.data.items, jolt_buffer[0..jolt_size]);
+    if (t.collision_without_hull) {
+        std.debug.print("Hair scene {s}: an update collides without a hull in the bounds (R20 UB3)\n", .{scene.name});
+        return error.ParityMismatch;
+    }
+    if (t.nan_position) {
+        std.debug.print("Hair scene {s}: a read back position is NaN (R20 UB11)\n", .{scene.name});
+        return error.ParityMismatch;
+    }
 
     coverage.scenes += 1;
 }
