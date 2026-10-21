@@ -29,6 +29,14 @@
 //!   - UB21: a HairShaders that misses a shader (HairShaders.init without registerHairShaders). HairShaders keeps the
 //!     shader null, like Jolt (R14). Jolt's Update passes it to ComputeQueueCPU::SetShader, which calls CreateWrapper
 //!     on the null pointer. Zolt's update panics with a message. No test pins it: a test cannot catch a panic.
+//!   - UB30: settings with a GridSize below 2 on X, Y or Z (restored settings; HairSettings.init checks it too). The
+//!     grid shaders index past the grid in Jolt. Zolt's initCompute panics ("Hair.initCompute: the grid size must be at
+//!     least 2 on X, Y and Z").
+//!   - UB33: a call before its prerequisite. Jolt dereferences a null buffer. Zolt panics with a message:
+//!     `update` and `readBackGPUState` before `initCompute` ("Hair.update: call initCompute first"), or with an
+//!     override of the render positions without `setRenderPositionsCB` ("Hair.update: the render positions are
+//!     overridden, call setRenderPositionsCB first"); `lockReadBackBuffers` and `unlockReadBackBuffers` before the first
+//!     `readBackGPUState` ("Hair.lockReadBackBuffers: call readBackGPUState first"). No test pins these panics.
 //! - Jolt's quirk (R20): mScalpJointMatricesCB is 64 times too large, its size counts bytes where it should count
 //!   matrices. Only memory is lost.
 //! - JPH_DEBUG_RENDERER (R2): `RenderStrandColor` (ERenderStrandColor) and `DrawSettings` are `void` without
@@ -48,6 +56,10 @@
 //!       existed at the first read back): Jolt reads the null mScalpVertices. Zolt draws no skin points.
 //!     - UB24, a density draw when GridSize.GetX() is larger than GetZ(): the quirk lets z pass GetZ(), and these planes are
 //!       past the end of the grid. Jolt reads past the array. Zolt stops the z loop at GetZ().
+//!     - UB32, `draw_render_strands` with a render strand of 0 vertices at the end of the vertex array (a strand that is
+//!       not simulated): Jolt reads its first vertex past the render vertices and the render positions. Zolt skips the
+//!       strand: it draws nothing and does not change the color of the next strand. Inside the array such a strand is
+//!       literal: it reads the first vertex of the next strand and draws no line.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -325,6 +337,9 @@ pub const Hair = struct {
     pub fn initCompute(self: *Hair, compute_system: *ComputeSystem) Allocator.Error!void {
         const settings = self.getHairSettings();
 
+        // Zolt (R20 UB30): restored settings can have a grid that the grid shaders index past
+        settings.checkGridSize("Hair.initCompute");
+
         // Create compute buffers
         const num_vertices_padded: usize = settings.getNumVerticesPadded();
         const grid_size: usize = settings.neutral_density.items.len;
@@ -366,6 +381,21 @@ pub const Hair = struct {
     fn setBuffer(member: *Ref(ComputeBuffer), buffer: Ref(ComputeBuffer)) void {
         member.deinit();
         member.* = buffer;
+    }
+
+    /// Zolt (R20 UB33): `function` needs the buffers of initCompute (the velocity and density buffer is the last one that
+    /// it always creates) and the render positions buffer. Jolt dereferences the null buffers.
+    fn requireComputeBuffers(self: *const Hair, comptime function: []const u8) void {
+        if (self.velocity_and_density_cb.get() == null)
+            @panic("Hair." ++ function ++ ": call initCompute first");
+        if (self.render_positions_cb.get() == null)
+            @panic("Hair." ++ function ++ ": the render positions are overridden, call setRenderPositionsCB first");
+    }
+
+    /// Zolt (R20 UB33): `function` needs the read back buffers of readBackGPUState. Jolt maps a null buffer.
+    fn requireReadBackBuffers(self: *const Hair, comptime function: []const u8) void {
+        if (self.velocity_and_density_read_back_cb.get() == null)
+            @panic("Hair." ++ function ++ ": call readBackGPUState first");
     }
 
     /// Position and rotation of the hair in world space
@@ -616,6 +646,7 @@ pub const Hair = struct {
     /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The step is then partly done; call
     /// `onTeleported` to reset the hair at the next update (see the file header).
     pub fn update(self: *Hair, delta_time: f32, joint_to_hair: Mat44, joint_matrices: ?[]const Mat44, system: *const PhysicsSystem, shaders: *const HairShaders, compute_system: *ComputeSystem, queue: *ComputeQueue) Allocator.Error!void {
+        self.requireComputeBuffers("update"); // Zolt (R20 UB33)
         const allocator = self.allocator;
         const settings = self.getHairSettings();
 
@@ -1101,6 +1132,7 @@ pub const Hair = struct {
     /// Read back the GPU state so that the functions below can be used. For debugging purposes only, this is slow!
     /// Zolt: an allocation failure returns `error.OutOfMemory` (Jolt aborts). The read back buffers are set together.
     pub fn readBackGPUState(self: *Hair, queue: *ComputeQueue) Allocator.Error!void {
+        self.requireComputeBuffers("readBackGPUState"); // Zolt (R20 UB33)
         const allocator = self.allocator;
         const settings = self.getHairSettings();
 
@@ -1189,6 +1221,7 @@ pub const Hair = struct {
     /// Zolt: an allocation failure (the render positions of an override) returns `error.OutOfMemory` before a buffer is
     /// mapped (Jolt aborts).
     pub fn lockReadBackBuffers(self: *Hair) Allocator.Error!void {
+        self.requireReadBackBuffers("lockReadBackBuffers"); // Zolt (R20 UB33)
         const num_render_vertices = self.getHairSettings().render_vertices.items.len;
         if (self.render_positions_overridden and self.render_positions_owned == null)
             self.render_positions_owned = try self.allocator.alloc(Float3, num_render_vertices);
@@ -1204,6 +1237,7 @@ pub const Hair = struct {
     }
 
     pub fn unlockReadBackBuffers(self: *Hair) void {
+        self.requireReadBackBuffers("unlockReadBackBuffers"); // Zolt (R20 UB33)
         if (self.scalp_vertices_read_back_cb.get()) |b|
             b.unmap();
         self.velocity_and_density_read_back_cb.get().?.unmap();
@@ -1283,6 +1317,8 @@ pub const Hair = struct {
         const com = self.getWorldTransform();
 
         // Draw the render strands
+        // Zolt (R20 UB32): a render strand of 0 vertices at the end of the vertex array draws nothing and does not change
+        // the color of the next strand. Jolt reads its first vertex past the arrays.
         if (settings.draw_render_strands) render_strands: {
             // Calculate a map of sim vertex index to strand index
             // Zolt (R5): when the map cannot be allocated the render strands are dropped
@@ -1307,6 +1343,7 @@ pub const Hair = struct {
                 .per_render_strand => {
                     var color = Color.green;
                     for (hair_settings.render_strands.items) |strand| {
+                        if (strand.start_vtx >= hair_settings.render_vertices.items.len) continue; // Zolt (R20 UB32)
                         const strand_idx = sim_vertex_to_strand[hair_settings.render_vertices.items[strand.start_vtx].influences[0].vertex_index];
                         if (strand_idx >= settings.simulation_strand_begin and strand_idx < settings.simulation_strand_end) {
                             var x0 = com.mulVec3(Vec3.fromFloat3(render_positions[strand.start_vtx]));
@@ -1323,6 +1360,7 @@ pub const Hair = struct {
 
                 .per_simulated_strand => {
                     for (hair_settings.render_strands.items) |strand| {
+                        if (strand.start_vtx >= hair_settings.render_vertices.items.len) continue; // Zolt (R20 UB32)
                         const strand_idx = sim_vertex_to_strand[hair_settings.render_vertices.items[strand.start_vtx].influences[0].vertex_index];
                         if (strand_idx >= settings.simulation_strand_begin and strand_idx < settings.simulation_strand_end) {
                             const color = hashColor(strand_idx);
@@ -1339,6 +1377,7 @@ pub const Hair = struct {
 
                 .gravity_factor, .world_transform_influence, .grid_velocity_factor, .global_pose, .skin_global_pose => {
                     for (hair_settings.render_strands.items) |strand| {
+                        if (strand.start_vtx >= hair_settings.render_vertices.items.len) continue; // Zolt (R20 UB32)
                         const strand_idx = sim_vertex_to_strand[hair_settings.render_vertices.items[strand.start_vtx].influences[0].vertex_index];
                         const material = &hair_settings.materials.items[hair_settings.sim_strands.items[strand_idx].material_index];
 
@@ -2631,6 +2670,62 @@ test "Hair: draw the render strands in every color" {
     for (renderer.lines.items[0 .. strand.vertexCount() - 1], strand.start_vtx + 1..) |line, v| {
         const simulated_vtx = settings.render_vertices.items[v].influences[0].vertex_index;
         try testing.expect(line.color.eql(Color.greenRedGradient(sampler.sample(settings.sim_vertices.items[simulated_vtx].strand_fraction))));
+    }
+}
+
+test "Hair: draw the render strands with a strand of 0 vertices at the end of the vertex array (R20 UB32)" {
+    if (!Core.debug_renderer) return error.SkipZigTest; // Hair.draw only exists with the option
+
+    // Jolt reads the first vertex of that strand past the render vertices and the render positions. Zolt skips it.
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    var compute = try TestCompute.init(allocator);
+    defer compute.deinit();
+
+    // 6 strands of 5 vertices and a strand of 0 vertices at the end of the vertex array. A fraction of 0.1 simulates
+    // ceil(0.7) = 1 strand; the shuffle of the default seeded Mt19937 picks one of 5 vertices.
+    const s = try HairSettings.create(allocator);
+    var settings: RefConst(HairSettings) = .init(s);
+    defer settings.deinit();
+    try s.materials.append(allocator, .{ .simulation_strands_fraction = 0.1 });
+    s.grid_size = .init(8, 8, 8, 0);
+    var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+    defer vertices.deinit(allocator);
+    var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+    defer strands.deinit(allocator);
+    for (0..6) |strand| {
+        const first: u32 = @intCast(vertices.items.len);
+        for (0..5) |i| {
+            const position: Float3 = .{ .x = 0.02 * @as(f32, @floatFromInt(strand)), .y = -0.02 * @as(f32, @floatFromInt(i)), .z = 0.001 * @as(f32, @floatFromInt(i * i)) };
+            try vertices.append(allocator, .init(position, .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
+        }
+        try strands.append(allocator, .init(first, first + 5, 0));
+    }
+    const end: u32 = @intCast(vertices.items.len);
+    try strands.append(allocator, .init(end, end, 0));
+    try s.initRenderAndSimulationStrands(vertices.items, strands.items);
+    try testing.expectEqual(@as(usize, 1), s.sim_strands.items.len);
+    try testing.expectEqual(@as(u32, 5), s.sim_strands.items[0].vertexCount()); // Not the strand of 0 vertices
+    try testing.expectEqual(@as(usize, 7), s.render_strands.items.len);
+    _ = try s.init();
+    try s.initCompute(compute.system.get().?);
+
+    var hair: Hair = .init(allocator, s, RVec3.zero(), Quat.identity(), 0);
+    defer hair.deinit();
+    try hair.initCompute(compute.system.get().?);
+    try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, compute.system.get().?, compute.queue.get().?);
+    try hair.readBackGPUState(compute.queue.get().?);
+
+    // Every color draws the 4 segments of the 6 strands of 5 vertices
+    var renderer: LineRenderer = undefined;
+    renderer.init();
+    defer renderer.deinit();
+    for (std.enums.values(Hair.RenderStrandColor)) |color| {
+        var draw_settings = onlyDraw("draw_render_strands");
+        draw_settings.render_strand_color = color;
+        try testing.expectEqual(@as(usize, 6 * 4), renderer.drawHair(&hair, draw_settings));
     }
 }
 

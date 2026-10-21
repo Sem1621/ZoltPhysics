@@ -5,7 +5,7 @@
 Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. Percentages are
 weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
-that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
+that stay deferred or out of scope (see `DEFERRED` in the script); neither counts towards the percentage.
 
 **Library: 99.6%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
 

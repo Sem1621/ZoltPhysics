@@ -12,9 +12,10 @@
 //!   implementation's own override of `createTriangleBatch` is called already (C++ calls DebugRendererSimple's while its
 //!   constructor runs).
 //! - Allocation failure (R5): a batch that cannot be allocated or whose triangles cannot be copied is dropped: the
-//!   function returns an empty `Batch` and latches `out_of_memory`. `drawGeometry` draws nothing for an empty `Batch`
-//!   (the batch of an allocation failure, or ID 0 of DebugRendererPlayback) and for a geometry without LODs (Jolt
-//!   dereferences `mLODs.data()` there, Zolt defines it).
+//!   function returns an empty `Batch` and latches `out_of_memory`.
+//! - Zolt (UB34 of R20): `drawGeometry` draws nothing for an empty `Batch` (the batch of an allocation failure, ID 0 of
+//!   DebugRendererPlayback, or `Geometry.createWithBatch(allocator, .empty, ...)`) and for a geometry without LODs. Jolt
+//!   dereferences the null batch, or `mLODs.data()` of an empty list.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -156,7 +157,7 @@ pub const DebugRendererSimple = struct {
         pub fn drawGeometry(self: *DebugRendererSimple, model_matrix: RMat44, world_space_bounds: AABox, lod_scale_sq: f32, model_color: Color, geometry: *const Geometry, cull_mode: CullMode, cast_shadow: CastShadow, draw_mode: DrawMode) void {
             _ = cull_mode;
 
-            // Zolt: a geometry without LODs draws nothing (Jolt reads mLODs.data())
+            // Zolt (UB34): a geometry without LODs draws nothing (Jolt reads mLODs.data())
             if (geometry.lods.items.len == 0)
                 return;
 
@@ -165,7 +166,7 @@ pub const DebugRendererSimple = struct {
             if (self.camera_pos_set)
                 lod = geometry.getLOD(self.camera_pos.toVec3(), world_space_bounds, lod_scale_sq);
 
-            // Draw the batch (Zolt: an empty batch draws nothing)
+            // Draw the batch (Zolt, UB34: an empty batch draws nothing)
             const target = lod.triangle_batch.get() orelse return;
             const batch: *const BatchImpl = @alignCast(@fieldParentPtr("base", target));
             for (batch.triangles.items) |*triangle| {
@@ -338,11 +339,16 @@ test "DebugRendererSimple: allocation failures" {
             try std.testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
-        r.deinit();
+        defer r.deinit();
+        // The sweep ends only when no failure was injected: init must not swallow one (the renderer's latch included,
+        // R5)
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expect(!r.base.base.isOutOfMemory());
         break;
     }
 
-    // Drawing: the batch is dropped and the failure latched
+    // Drawing: the batch is dropped and the failure latched. Each call gets its own fail index: a failed allocation
+    // does not advance FailingAllocator's count, so both calls fail at the batch, then both at the triangles.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var r: LineRenderer = undefined;
     try r.init(failing.allocator());
@@ -355,6 +361,7 @@ test "DebugRendererSimple: allocation failures" {
         try std.testing.expect(batch.get() == null);
         try std.testing.expect(renderer.isOutOfMemory());
         renderer.out_of_memory.store(false, .monotonic);
+        failing.fail_index = failing.alloc_index + i; // The batch, then its triangle buffer
         const indexed = renderer.createTriangleBatchIndexed(&.{ t.v[0], t.v[1], t.v[2] }, &.{ 0, 1, 2 });
         try std.testing.expect(indexed.get() == null);
         try std.testing.expect(renderer.isOutOfMemory());

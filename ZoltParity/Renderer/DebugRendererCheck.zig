@@ -8,15 +8,10 @@
 //! `performance_test_<quality>_th1.jor` into its working directory and finds Assets/ from its own path). DrawBodies runs
 //! on the main thread, so the thread count does not change the bytes; the check uses one thread.
 //!
-//! Zolt's DebugRendererPlayback also reads every .jor that Jolt wrote (all frames must parse). Group D0 built the step
-//! before ZoltPerformanceTest could record (`zolt_records == false`: only the C++ side ran). Group D3 ported `-r` and
-//! BodyManager.draw and set `zolt_records`.
+//! Zolt's DebugRendererPlayback also reads every .jor that Jolt wrote (all frames must parse).
 
 const std = @import("std");
 const zolt = @import("zolt");
-
-/// True once ZoltPerformanceTest records with -r (group D3)
-const zolt_records = true;
 
 /// The number of updates of each recording
 const num_updates = 20;
@@ -70,15 +65,7 @@ pub fn main(init: std.process.Init) !u8 {
             continue;
         }
 
-        const zolt_bytes = try record(arena, io, zolt_exe, out_dir, scene.name, "zolt", scene.quality, jor_name);
-        if (!zolt_records) {
-            if (zolt_bytes != null) {
-                std.debug.print("debug-renderer-check: {s}: ZoltPerformanceTest records now, set zolt_records in ZoltParity/Renderer/DebugRendererCheck.zig\n", .{scene.name});
-                failed = true;
-            }
-            continue;
-        }
-        const z = zolt_bytes orelse {
+        const z = try record(arena, io, zolt_exe, out_dir, scene.name, "zolt", scene.quality, jor_name) orelse {
             std.debug.print("debug-renderer-check: {s}: ZoltPerformanceTest wrote no {s}\n", .{ scene.name, jor_name });
             failed = true;
             continue;
@@ -90,11 +77,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (failed) return 1;
 
-    if (zolt_records) {
-        std.debug.print("debug-renderer-check: the .jor bytes of the {d} scenes are equal\n", .{scenes.len});
-    } else {
-        std.debug.print("debug-renderer-check: the C++ PerformanceTest recorded the {d} scenes and Zolt's DebugRendererPlayback read them. The Zolt side is not ported yet: ZoltPerformanceTest -r and BodyManager.draw come with group D3.\n", .{scenes.len});
-    }
+    std.debug.print("debug-renderer-check: the .jor bytes of the {d} scenes are equal\n", .{scenes.len});
     return 0;
 }
 

@@ -5,6 +5,9 @@
 //! - One 16-byte aligned allocation of `size * stride` bytes, with the buffer's allocator.
 //! - Zolt (UB4 of R20): without data the memory is zero. Jolt's `Allocate` leaves it uninitialized (the parity reference
 //!   runs with zero-filling allocation hooks, so it is zero there too).
+//! - Zolt (UB28 of R20): `size * stride` bytes that do not fit in a `usize` fail with `error.OutOfMemory`. Jolt's
+//!   `size_t(mSize) * mStride` wraps: it allocates and copies the wrapped number of bytes, and a later access to the
+//!   `mSize` elements reads or writes past the allocation.
 //! - `CreateReadBackBuffer` returns the buffer itself with a new reference: the CPU can read the memory directly.
 
 const std = @import("std");
@@ -27,8 +30,8 @@ pub const ComputeBufferCPU = struct {
         const self = try allocator.create(ComputeBufferCPU);
         errdefer allocator.destroy(self);
 
-        // Zolt: a size that does not fit fails like an allocation (Jolt's `size_t(mSize) * mStride` wraps, then the
-        // memcpy overruns the allocation)
+        // Zolt (UB28): a size that does not fit fails like an allocation. Jolt's `size_t(mSize) * mStride` wraps: it
+        // allocates and copies the wrapped size, and later accesses to the `mSize` elements go past the allocation.
         const buffer_size = std.math.cast(usize, std.math.mul(u64, size, stride) catch return error.OutOfMemory) orelse return error.OutOfMemory;
         const memory = try allocator.alignedAlloc(u8, .@"16", buffer_size);
         if (data) |d|
@@ -100,7 +103,7 @@ test "ComputeBufferCPU: zero fill, data, read back buffer, map" {
     try testing.expectEqualSlices(u32, &data, buffer2.get().?.mapAs(u32, .read));
     buffer2.get().?.unmap();
 
-    // A size of more bytes than a u64 holds fails like an allocation (Jolt's `size_t(mSize) * mStride` wraps)
+    // A size of more bytes than a u64 holds fails like an allocation (UB28: Jolt's `size_t(mSize) * mStride` wraps)
     try testing.expectError(error.OutOfMemory, ComputeBufferCPU.create(allocator, .buffer, 1 << 62, 16, null));
     try testing.expectError(error.OutOfMemory, ComputeBufferCPU.create(allocator, .rw_buffer, std.math.maxInt(u64), 2, null));
 

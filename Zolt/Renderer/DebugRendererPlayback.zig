@@ -17,8 +17,8 @@
 //!   - on an error, what was read before stays, like in Jolt: the frames, batches and geometries;
 //!   - `drawFrame` skips a geometry ID that is not defined (Jolt reads `find()->second` of `end()` there). Jolt looks
 //!     the ID up only when it draws, so a later `parse` call can still define it;
-//!   - an unknown command is Jolt's `JPH_ASSERT(false)`: a panic with asserts, then Jolt's release behavior (the next
-//!     byte is read as a command).
+//!   - an unknown command is Jolt's `JPH_ASSERT(false)`, a recoverable assert (R8): it panics with asserts unless an
+//!     assert handler accepts it, then Jolt's release behavior follows (the next byte is read as a command).
 //! - A second batch with an ID that exists already is released (Jolt: `insert` keeps the first one). A second
 //!   geometry with an ID that exists already replaces the first one (Jolt: `operator []`).
 //! - The cast shadow, cull and draw modes are passed on as read, like Jolt (the enums accept every value).
@@ -223,8 +223,9 @@ pub const DebugRendererPlayback = struct {
                     if (streamEnded(stream)) return cutElements(&frame.geometries, i);
                 }
             } else {
-                // JPH_ASSERT(false): an unknown command. Jolt's release build reads the next byte as a command.
-                if (Core.enable_asserts) @panic("DebugRendererPlayback: unknown command in the stream");
+                // JPH_ASSERT(false): an unknown command. Jolt's release build reads the next byte as a command. The assert
+                // is recoverable (R8): the test of Jolt's release behavior expects it.
+                if (Core.enable_asserts) Core.assertFailed("false", @src());
             }
         }
     }
@@ -298,6 +299,7 @@ pub const DebugRendererPlayback = struct {
 };
 
 const Color = @import("../Core/Color.zig").Color;
+const IssueReporting = @import("../Core/IssueReporting.zig");
 const StreamOut = @import("../Core/StreamOut.zig").StreamOut;
 const StreamWrapper = @import("../Core/StreamWrapper.zig");
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
@@ -689,7 +691,10 @@ test "DebugRendererPlayback: UB7, unknown IDs and ID 0; Jolt's insert and operat
 }
 
 test "DebugRendererPlayback: an unknown command in Jolt's release build" {
-    if (Core.enable_asserts) return error.SkipZigTest; // JPH_ASSERT(false) panics with asserts
+    // JPH_ASSERT(false) once, then the next byte is read as a command
+    var expect_assert: IssueReporting.ExpectAssert = undefined;
+    expect_assert.init(1);
+    errdefer expect_assert.restore();
 
     const allocator = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -704,6 +709,7 @@ test "DebugRendererPlayback: an unknown command in Jolt's release build" {
     defer playback.deinit();
     try parseBytes(&playback, out.written());
     try std.testing.expectEqual(@as(u32, 2), playback.getNumFrames());
+    try expect_assert.finish();
 }
 
 test "DebugRendererPlayback: allocation failures" {

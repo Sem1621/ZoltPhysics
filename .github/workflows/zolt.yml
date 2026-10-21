@@ -54,14 +54,15 @@ jobs:
         version: ${{ env.ZIG_VERSION }}
     - name: Check formatting
       run: zig fmt --check Zolt ZoltTests ZoltParity ZoltPerformanceTest ZoltHelloWorld build.zig build.zig.zon
+    # --check also fails on an M10 gap and on a TODO(debug_renderer) marker (Phase 9 is done)
     - name: Check that Docs/Zolt/Progress.md is up to date, the port headers are valid and no declaration is pending
       run: python3 tools/port_status.py --check
     # Draw code is type checked only with the option (Docs/Zolt/RemainingFeaturesArchitecture.md R2, section 5)
     - name: Compile with the debug renderer
       run: zig build check -Ddebug_renderer=true
-    # Milestone M10 (R22): what is still missing. Informational until the Phase 9 audit makes it a check.
-    - name: Report the unit tests that M10 still misses
-      run: python3 tools/port_status.py --check-m10 || true
+    # Milestone M10 (R22) is reached: every UnitTests/ unit is complete or n/a and every TEST_CASE has its Zig test
+    - name: Check milestone M10
+      run: python3 tools/port_status.py --check-m10
 
   test:
     runs-on: ${{ matrix.os }}

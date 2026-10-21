@@ -150,3 +150,47 @@ test "HairShaders: Jolt's 15 shaders, a missing shader stays null" {
     try shaders.init(system.get().?);
     try testing.expect(shaders.grid_clear_cs.get().? != old);
 }
+
+test "HairShaders: allocation failures in init" {
+    // Fail each allocation of init in turn: init returns error.OutOfMemory, the shaders created before stay set (a
+    // prefix of the 15 fields), nothing leaks, and a second init with memory sets every shader
+    const testing = std.testing;
+    const ComputeSystemCPU = @import("../../Compute/CPU/ComputeSystemCPU.zig").ComputeSystemCPU;
+    const virtual = @import("../../Core/Virtual.zig");
+    const registerHairShaders = @import("../../Shaders/HairWrapper.zig").registerHairShaders;
+
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+        const allocator = failing.allocator();
+        var system = try ComputeSystemCPU.create(allocator);
+        defer system.deinit();
+        try registerHairShaders(virtual.downcast(ComputeSystemCPU, system.get().?));
+        var ref: Ref(HairShaders) = .init(try HairShaders.create(allocator));
+        defer ref.deinit();
+        const shaders = ref.get().?;
+
+        failing.fail_index = failing.alloc_index + fail_at;
+        shaders.init(system.get().?) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            var num_set: usize = 0;
+            inline for (HairShaders.shader_fields) |field| {
+                if (@field(shaders, field.member).get() != null) num_set += 1;
+            }
+            inline for (HairShaders.shader_fields, 0..) |field, f|
+                try testing.expectEqual(f < num_set, @field(shaders, field.member).get() != null);
+            try testing.expect(num_set < HairShaders.shader_fields.len);
+
+            failing.fail_index = std.math.maxInt(usize);
+            try shaders.init(system.get().?);
+            inline for (HairShaders.shader_fields) |field|
+                try testing.expect(@field(shaders, field.member).get() != null);
+            continue;
+        };
+        try testing.expect(!failing.has_induced_failure);
+        inline for (HairShaders.shader_fields) |field|
+            try testing.expect(@field(shaders, field.member).get() != null);
+        break;
+    }
+    try testing.expect(fail_at >= HairShaders.shader_fields.len); // At least one allocation per shader
+}

@@ -47,6 +47,9 @@
 //!     vertices in a group into the non-parallel group: Zolt does the same, after an `if (Core.enable_asserts)` assert.
 //!     Jolt's release build reads `groups[-1]` for a constraint with no vertex in a group and for a skinned constraint
 //!     on that vertex: Zolt panics with a message in every build (the assert does not come first).
+//!   - UB29: createCube with a grid size of 0. Jolt's `inGridSize - 1` wraps, and its volume constraint loops run about
+//!     2^96 times until memory runs out. Zolt panics ("SoftBodySharedSettings.createCube: the grid size is 0"). No test
+//!     pins it: a test cannot catch a panic. A grid size of 1 is literal: one vertex and no constraints.
 //!
 //! RemainingFeaturesArchitecture.md R19, the binary state with materials (group S2): `saveWithMaterials` /
 //! `restoreWithMaterials` (Jolt's SaveWithMaterials / sRestoreWithMaterials) write and read Jolt's bytes with the ID maps
@@ -2046,6 +2049,8 @@ pub const SoftBodySharedSettings = struct {
     /// @param grid_size Number of points along each axis
     /// @param grid_spacing Distance between points
     pub fn createCube(allocator: Allocator, grid_size: u32, grid_spacing: f32) Allocator.Error!Ref(SoftBodySharedSettings) {
+        // Zolt (UB29): Jolt's `inGridSize - 1` wraps for a grid size of 0, and its loops then run until memory runs out
+        if (grid_size == 0) @panic("SoftBodySharedSettings.createCube: the grid size is 0");
         const offset = Vec3.replicate(-0.5 * grid_spacing * @as(f32, @floatFromInt(grid_size - 1)));
 
         // Create settings
@@ -2719,6 +2724,19 @@ test "SoftBodySharedSettings: createCube" {
     try std.testing.expectEqual(@as(usize, 0), s.closest_kinematic.items.len); // Optimize frees it
     for (s.edge_constraints.items) |e| try std.testing.expectApproxEqAbs(@as(f32, 0.2), e.rest_length, 1.0e-6);
     for (s.volume_constraints.items) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.008), v.six_rest_volume, 1.0e-6);
+}
+
+test "SoftBodySharedSettings: createCube with a grid size of 1 (UB29)" {
+    // A grid size of 1 is literal: one vertex at the origin and no constraints. A grid size of 0 panics (UB29: Jolt's
+    // `inGridSize - 1` wraps), which a test cannot catch.
+    var cube = try SoftBodySharedSettings.createCube(std.testing.allocator, 1, 0.2);
+    defer cube.deinit();
+    const s = cube.get().?;
+    try std.testing.expectEqual(@as(usize, 1), s.vertices.items.len);
+    try std.testing.expect(Vec3.loadFloat3Unsafe(&s.vertices.items[0].position).eql(Vec3.zero()));
+    try std.testing.expectEqual(@as(usize, 0), s.faces.items.len);
+    try std.testing.expectEqual(@as(usize, 0), s.edge_constraints.items.len);
+    try std.testing.expectEqual(@as(usize, 0), s.volume_constraints.items.len);
 }
 
 test "SoftBodySharedSettings: cloth with dihedral bends and LRA, optimize" {

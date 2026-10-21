@@ -8,6 +8,9 @@
 //!   `out_of_memory` in the base class; `endFrame` writes what it has and then returns `error.OutOfMemory` (R5).
 //! - The geometry map is keyed by the geometry (Jolt: `UnorderedMap<GeometryRef, uint32>`, it holds a reference); it is
 //!   only searched, never iterated, so a std hash map gives Jolt's results.
+//! - Zolt (UB34 of R20): a LOD with an empty `Batch` records batch ID 0, which DebugRendererPlayback reads as an empty
+//!   batch (UB7). Jolt dereferences the null batch. An empty batch comes from the playback of ID 0, from
+//!   `Geometry.createWithBatch(allocator, .empty, ...)` or from an allocation failure (R5).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -221,7 +224,8 @@ pub const DebugRendererRecorder = struct {
             self.stream.write(@as(u32, @intCast(geometry.lods.items.len)));
             for (geometry.lods.items) |lod| {
                 self.stream.write(lod.distance);
-                // An empty batch only exists after an allocation failure (latched), Zolt writes ID 0 for it
+                // Zolt (UB34): an empty batch (playback ID 0, a user geometry, an allocation failure) records ID 0.
+                // Jolt dereferences the null batch.
                 const id: u32 = if (lod.triangle_batch.get()) |b| @as(*const BatchImpl, @alignCast(@fieldParentPtr("base", b))).id else 0;
                 self.stream.write(id);
             }
@@ -316,3 +320,183 @@ pub const DebugRendererRecorder = struct {
         return .init(&batch.base);
     }
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Zolt-only tests: the empty batch (UB34) and the allocation failures (R5)
+
+const Vec3 = @import("../Math/Vec3.zig").Vec3;
+const StreamWrapper = @import("../Core/StreamWrapper.zig");
+const DebugRendererPlayback = @import("DebugRendererPlayback.zig").DebugRendererPlayback;
+const GeometryRef = DebugRenderer.GeometryRef;
+
+/// A renderer that only keeps the batches alive (a playback needs one)
+const NullRenderer = struct {
+    pub const overrides = .{ .drawLine, .drawTriangle, .createTriangleBatch, .createTriangleBatchIndexed, .drawGeometry, .drawText3D };
+
+    const NullBatch = struct {
+        pub const overrides = .{};
+        base: BatchTarget,
+    };
+
+    base: DebugRenderer,
+
+    pub fn drawLine(self: *NullRenderer, from: RVec3, to: RVec3, color: Color) void {
+        _ = .{ self, from, to, color };
+    }
+    pub fn drawTriangle(self: *NullRenderer, v1: RVec3, v2: RVec3, v3: RVec3, color: Color, cast_shadow: CastShadow) void {
+        _ = .{ self, v1, v2, v3, color, cast_shadow };
+    }
+    pub fn createTriangleBatch(self: *NullRenderer, triangles: []const Triangle) Batch {
+        _ = triangles;
+        return self.newBatch();
+    }
+    pub fn createTriangleBatchIndexed(self: *NullRenderer, vertices: []const Vertex, indices: []const u32) Batch {
+        _ = .{ vertices, indices };
+        return self.newBatch();
+    }
+    pub fn drawGeometry(self: *NullRenderer, model_matrix: RMat44, world_space_bounds: AABox, lod_scale_sq: f32, model_color: Color, geometry: *const Geometry, cull_mode: CullMode, cast_shadow: CastShadow, draw_mode: DrawMode) void {
+        _ = .{ self, model_matrix, world_space_bounds, lod_scale_sq, model_color, geometry, cull_mode, cast_shadow, draw_mode };
+    }
+    pub fn drawText3D(self: *NullRenderer, position: RVec3, string: []const u8, color: Color, height: f32) void {
+        _ = .{ self, position, string, color, height };
+    }
+
+    fn newBatch(self: *NullRenderer) Batch {
+        const batch = self.base.allocator.create(NullBatch) catch {
+            self.base.setOutOfMemory();
+            return .empty;
+        };
+        batch.* = .{ .base = .init(NullBatch, self.base.allocator) };
+        return .init(&batch.base);
+    }
+};
+
+/// Parse `bytes` into `playback`
+fn parseBytes(playback: *DebugRendererPlayback, bytes: []const u8) DebugRendererPlayback.Error!void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var wrapper: StreamWrapper.StreamInWrapper = .init(&reader);
+    try playback.parse(wrapper.streamIn());
+}
+
+test "DebugRendererRecorder: a LOD with an empty batch records batch ID 0 (UB34)" {
+    // Jolt dereferences the null batch. Zolt writes ID 0, which the playback reads as an empty batch (UB7). A geometry
+    // without LODs records 0 LODs, like Jolt.
+    const allocator = std.testing.allocator;
+    const bounds = AABox.init(Vec3.zero(), Vec3.one());
+
+    // A user geometry with an empty batch and a geometry without LODs
+    var out1: std.Io.Writer.Allocating = .init(allocator);
+    defer out1.deinit();
+    {
+        var wrapper: StreamWrapper.StreamOutWrapper = .init(&out1.writer);
+        var recorder: DebugRendererRecorder = undefined;
+        try recorder.init(allocator, std.testing.io, wrapper.streamOut());
+        defer recorder.deinit();
+        var empty_batch = GeometryRef.init(try Geometry.createWithBatch(allocator, .empty, bounds));
+        defer empty_batch.deinit();
+        var no_lods = GeometryRef.init(try Geometry.create(allocator, bounds));
+        defer no_lods.deinit();
+        recorder.debugRenderer().drawGeometryAutoBounds(RMat44.identity(), Color.white, empty_batch.get().?, .{});
+        recorder.debugRenderer().drawGeometryAutoBounds(RMat44.identity(), Color.white, no_lods.get().?, .{});
+        try recorder.endFrame();
+    }
+
+    // Play the stream back into a second recorder: the playback makes an empty batch of ID 0, which the recorder
+    // records as ID 0 again
+    var out2: std.Io.Writer.Allocating = .init(allocator);
+    defer out2.deinit();
+    {
+        var wrapper: StreamWrapper.StreamOutWrapper = .init(&out2.writer);
+        var recorder: DebugRendererRecorder = undefined;
+        try recorder.init(allocator, std.testing.io, wrapper.streamOut());
+        defer recorder.deinit();
+        var playback = DebugRendererPlayback.init(allocator, recorder.debugRenderer());
+        defer playback.deinit();
+        try parseBytes(&playback, out1.written());
+        try std.testing.expectEqual(@as(u32, 1), playback.getNumFrames());
+        playback.drawFrame(0);
+        try recorder.endFrame();
+    }
+
+    // Both streams hold geometry 1 with one LOD of batch ID 0 (an empty batch) and geometry 2 without LODs
+    for ([_][]const u8{ out1.written(), out2.written() }) |bytes| {
+        var renderer: NullRenderer = .{ .base = .init(NullRenderer, allocator, std.testing.io) };
+        try renderer.base.initialize();
+        defer renderer.base.deinit();
+        var playback = DebugRendererPlayback.init(allocator, &renderer.base);
+        defer playback.deinit();
+        try parseBytes(&playback, bytes);
+        const geometry1 = playback.geometries.find(1).?.value.get().?;
+        try std.testing.expectEqual(@as(usize, 1), geometry1.lods.items.len);
+        try std.testing.expect(geometry1.lods.items[0].triangle_batch.get() == null);
+        try std.testing.expectEqual(@as(usize, 0), playback.geometries.find(2).?.value.get().?.lods.items.len);
+        try std.testing.expectEqual(@as(usize, 2), playback.frames.items[0].geometries.items.len);
+    }
+}
+
+/// The calls of the allocation failure sweep: the batches of `init`, a batch of each kind, a geometry, every draw call
+/// and two frames. Returns true when `endFrame` reported an allocation failure.
+fn recordWithFailures(allocator: Allocator, recorder: *DebugRendererRecorder) Allocator.Error!bool {
+    const r = recorder.debugRenderer();
+    const t = Triangle.init(Vec3.zero(), Vec3.axisX(), Vec3.axisY(), Color.white);
+    var batch = r.createTriangleBatch(&.{ t, t });
+    defer batch.deinit();
+    var indexed = r.createTriangleBatchIndexed(&.{ t.v[0], t.v[1], t.v[2] }, &.{ 0, 1, 2 });
+    defer indexed.deinit();
+
+    // The geometry belongs to the test (std.testing.allocator), its batches to the recorder
+    var geometry = GeometryRef.init(try Geometry.create(allocator, AABox.init(Vec3.zero(), Vec3.one())));
+    defer geometry.deinit();
+    try geometry.get().?.lods.append(allocator, .{ .triangle_batch = batch.clone(), .distance = 5 });
+    try geometry.get().?.lods.append(allocator, .{ .triangle_batch = indexed.clone(), .distance = 10 });
+
+    var failed = false;
+    r.drawLine(RVec3.zero(), RVec3.init(1, 2, 3), Color.red);
+    r.drawTriangle(RVec3.zero(), RVec3.init(1, 0, 0), RVec3.init(0, 1, 0), Color.green, .{ .cast_shadow = .on });
+    r.drawText3D(RVec3.init(1, 1, 1), "Hello", .{});
+    r.drawBox(AABox.init(Vec3.zero(), Vec3.one()), Color.blue, .{ .draw_mode = .wireframe });
+    recorder.endFrame() catch {
+        failed = true;
+    };
+    r.drawGeometryAutoBounds(RMat44.identity(), Color.white, geometry.get().?, .{});
+    r.drawText3D(RVec3.zero(), "World", .{});
+    recorder.endFrame() catch {
+        failed = true;
+    };
+    return failed;
+}
+
+test "DebugRendererRecorder: allocation failures" {
+    // Fail each allocation in turn: init returns error.OutOfMemory, or the draw call drops its primitive and endFrame
+    // reports the latch (R5). Nothing leaks, and the stream that the recorder wrote stays readable.
+    const allocator = std.testing.allocator;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var wrapper: StreamWrapper.StreamOutWrapper = .init(&out.writer);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var recorder: DebugRendererRecorder = undefined;
+        recorder.init(failing.allocator(), std.testing.io, wrapper.streamOut()) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        const failed = recordWithFailures(allocator, &recorder) catch |err| {
+            recorder.deinit();
+            return err;
+        };
+        recorder.deinit();
+        try std.testing.expectEqual(failing.has_induced_failure, failed);
+
+        var renderer: NullRenderer = .{ .base = .init(NullRenderer, allocator, std.testing.io) };
+        try renderer.base.initialize();
+        defer renderer.base.deinit();
+        var playback = DebugRendererPlayback.init(allocator, &renderer.base);
+        defer playback.deinit();
+        try parseBytes(&playback, out.written());
+        try std.testing.expectEqual(@as(u32, 2), playback.getNumFrames());
+        for (0..playback.getNumFrames()) |f| playback.drawFrame(@intCast(f));
+        if (!failing.has_induced_failure) break;
+    }
+    try std.testing.expect(fail_index > 0);
+}

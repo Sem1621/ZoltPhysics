@@ -42,11 +42,10 @@
 //! is reported as "state differs at byte 46837 ...: bodies[350] (id 0x0080015e) rotation.x zolt 0x3d6041ab jolt
 //! 0x3d604197" (update 59).
 //!
-//! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). A scene whose
-//! `blocked_by` is not supported yet (SimScenes.Blocker.isSupported; the constraint blockers follow
-//! ConstraintKind.isPorted) returns error.SkipZigTest: the build summary counts it as skipped. The test "SimScenes
-//! blocked scenes run on the C++ side" runs those scenes on the C++ side alone. Add a scene in SimScenes.zig (see its
-//! header). `verbose = true` prints what every scene did (activations, sleeping bodies, step listener calls, CCD bodies,
+//! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). Every Zolt class is
+//! ported, so every Blocker is supported and every scene runs against Zolt. A scene whose `blocked_by` is not supported
+//! (SimScenes.Blocker.isSupported: a class it needs is a stub again) fails (checkSupported). Add a scene in
+//! SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping bodies, step listener calls, CCD bodies,
 //! active constraints, sweep counts): check it when you write a scene.
 //!
 //! Both PhysicsSystems use BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp, Zolt's default since A1;
@@ -80,8 +79,8 @@
 //!
 //! Constraints (Phase 6, the recipe for a worker is in the SimScenes header): both worlds keep a reference to every
 //! created constraint (constraint handles). The Zolt side of each ConstraintKind and of the class operations is a slot
-//! per worker group (`FixedPointSlot`, `HingeSlot`, ...; `StubSlot` while the classes are not ported: their scenes are
-//! skipped through their Blocker, and a ported class with a stub slot fails with error.SceneNotSupported). Before a
+//! per worker group (`FixedPointSlot`, `HingeSlot`, ...; `StubSlot` while the classes were not ported; a ported class
+//! with a stub slot fails with error.SceneNotSupported). Before a
 //! scene runs, `checkConstraintDescriptions` compares the binary state of the settings that the slots make from the
 //! scene's descriptions with the C++ settings (SimMakeConstraintSettings), so a mismatch later is the library's, not the
 //! harness'. The state decoder names the fields of a constraint class (`stateFields` of its slot, e.g.
@@ -99,8 +98,7 @@
 //! Characters, ragdolls and vehicles (Phase 7, the recipe for a worker is in the SimScenes header): both worlds keep
 //! their characters, character virtuals, ragdolls and vehicles by handle. The Zolt side of each class group is a slot
 //! (`CharacterSlot`, `CharacterVirtualSlot`, `RagdollSlot`, `VehicleSlot`, `TrackedVehicleSlot`, `MotorcycleSlot`;
-//! `Phase7StubSlot` until the group is ported: the scenes of its Blocker are skipped, a supported scene with a stub slot
-//! fails in checkPhase7Slots). After every update (and after the D12 sweeps and every restore_cross) the object states
+//! `Phase7StubSlot` until the group was ported; a supported scene with a stub slot fails in checkPhase7Slots). After every update (and after the D12 sweeps and every restore_cross) the object states
 //! are compared (SimScenes.ObjectField: the SaveState bytes of the characters and character virtuals and the getters
 //! that the states do not hold), a mismatch is decoded to the field, the object handle, the item and the component
 //! (`describeObjectStateDifference`, the SaveState fields with the members of CharacterBase / CharacterVirtual /
@@ -111,21 +109,13 @@
 //! runs, checkPhase7Settings compares the binary state of the vehicle and ragdoll settings that the filled slots make
 //! with the C++ settings, the round trips (each side restores the other side's bytes and saves again) and the
 //! RagdollSettings tables. The test "SimulationParity CharacterID consumption" compares which constructions consume a
-//! CharacterID. Until the classes are ported the Phase 7 scenes run on the C++ side ("SimScenes blocked scenes run on
-//! the C++ side": the object states of the worlds with 0 and 3 threads are identical, decode completely and stay finite,
-//! the character records are identical in call order, the C++ settings round trips give the same bytes). With a
-//! reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene fails when its C++ side
+//! CharacterID. With a reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene fails when its C++ side
 //! hits a Jolt assert (the release_only scenes excepted). A release_only scene runs in every build: a handler counts
 //! Zolt's recoverable asserts and lets the code continue like Jolt's release build (RemainingFeaturesArchitecture.md
 //! R8). Every run must hit an assert, the same number in every configuration, and with -Dreference_asserts=true as many
 //! as the C++ side (checkReleaseAsserts).
 //!
-//! Proof that the Phase 7 checks bite: flipping a bit of the object state that the C++ world with 3 threads writes is
-//! reported as "scene character_ops, update 0: the C++ worlds with 0 and 3 threads differ: object state differs at byte
-//! 316 (3 threads 616 bytes, 0 threads 616 bytes): character_save_state (object handle 1, item 0) ground_state 3 threads
-//! 0x00000002 0 threads 0x00000003"; swapping its first two character records as "scene character_virtual_ops, update
-//! 0: character listener record 0 of 14 (call order) differs between the C++ worlds with 0 and 3 threads"
-//! (character_adjust_body_velocity against character_contact_validate); a Zolt object state field that the C++ side
+//! Proof that the Phase 7 checks bite: a Zolt object state field that the C++ side
 //! does not write as "object state differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more, starting with
 //! ragdoll_properties (object handle 0, item 0)"; a supported Blocker whose classes are stubs as "scene character_ops
 //! creates Character objects, whose Zolt classes are still stubs, but its blocker .characters is supported"; a ported
@@ -133,15 +123,9 @@
 //! still Phase7StubSlot" (and the test "SimulationParity Phase 7 slots follow the ported classes" fails).
 //! CharacterBaseParity.zig compares CharacterBase's SaveState bytes: writing the ground normal in place of the ground
 //! velocity fails it. The checks of the foundation review: a character state restore that does not check that every
-//! byte was read (the check before the review) is reported as "scene character_ops, update 27: restore_cross: a C++
-//! world does not restore the character states of the other one (a read failed or bytes are left)" on the C++ side and
-//! fails "SimulationParity restoring the character states reads every byte" on the Zolt side; an applyOp that ignores
-//! the character recorder fails "SimulationParity a character record that cannot be stored fails the operation"
-//! ("expected error.OutOfMemory, found 0"); a C++ round trip that changes the engine settings is reported as "scene
-//! vehicle_wheeled_ops, vehicle description 0, part engine, item 0: restoring the C++ bytes and saving them again
-//! changes them (restored true, byte 1 of 40)", one that changes the friction of a ragdoll part as "scene ragdoll_ops,
-//! ragdoll description 0: restoring the C++ RagdollSettings bytes and saving them again changes them (restored true,
-//! byte 170 of 1572)"; a copy of CharacterVirtualSettings that consumes an ID (default construction and assignment in
+//! byte was read (the check before the review) fails "SimulationParity restoring the character states reads every
+//! byte"; an applyOp that ignores the character recorder fails "SimulationParity a character record that cannot be
+//! stored fails the operation" ("expected error.OutOfMemory, found 0"); a copy of CharacterVirtualSettings that consumes an ID (default construction and assignment in
 //! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
 //! 3"). The Ragdoll group: computing the body 1 to body 2 rotation in Ragdoll.driveToPoseUsingMotorsWithVelocity the
 //! other way around (body 1 conjugated times body 2) is reported as "scene ragdoll_motors_animation, ... update 2: after
@@ -161,15 +145,13 @@
 //!
 //! Soft bodies (Phase 9, group SH; see "Soft bodies" in the SimScenes header): both worlds generate the shared settings
 //! of every SimSoftBodySettings with the same code (SoftBodySlot.makeSettings here, SimMakeSoftBodySettings in the .cpp).
-//! Before a scene runs, checkSoftBodySettings compares their SaveBinaryState bytes, for the blocked scenes too. A soft
-//! body gets a body handle. SoftBodySlot applies the soft body operations, SoftBodyListenerImpl records the callbacks of
+//! Before a scene runs, checkSoftBodySettings compares their SaveBinaryState bytes. A soft body gets a body handle. SoftBodySlot applies the soft body operations, SoftBodyListenerImpl records the callbacks of
 //! the soft body contact listener (RecordKind 70..73, compared sorted with the other records). The state decoder reads a
 //! soft body's SaveState with the array sizes of jolt_sim_soft_body_info ("soft_body.vertices[5].velocity.y"); the test
 //! "SimulationParity state decoder: soft bodies" checks it against the C++ getters, because Zolt's
 //! SoftBodyMotionProperties::SaveState is group S4's. The D12 sweeps give every update that starts from the snapshot the
-//! skin flags of the snapshot again (`SkinFlags`). Until Zolt simulates soft bodies (SimScenes.SoftBodyClasses) the
-//! soft body scenes run on the C++ side alone, and a supported scene that creates soft bodies fails
-//! (checkSoftBodyBlocker).
+//! skin flags of the snapshot again (`SkinFlags`). After every update the soft body listener records of the C++ side
+//! must agree with each other (checkSoftBodyRecords).
 //!
 //! Soft body scenes against Zolt (group S5): the Zolt side also counts the steps in which the CCD response changes a
 //! soft body (Expect.soft_body_ccd, SpawnCountingJobSystem), checks the update groups of the shared settings
@@ -2410,7 +2392,7 @@ fn writeObjectValue(w: *std.Io.Writer, value: *const ObjectValue, bytes: []const
 }
 
 /// The names of the two object states that `describeObjectStateDifference` compares: the checked one and the reference,
-/// whose layout decodes the bytes ("SimScenes blocked scenes run on the C++ side" compares two C++ worlds)
+/// whose layout decodes the bytes
 pub const ObjectStateSides = struct {
     checked: []const u8 = "zolt",
     reference: []const u8 = "jolt",
@@ -2707,6 +2689,7 @@ const Run = struct {
         }
         if (self.zolt_records.items.len != self.jolt_records.items.len)
             return self.fail("{d} listener records in zolt, {d} in jolt", .{ self.zolt_records.items.len, self.jolt_records.items.len });
+        try checkSoftBodyRecords(self.allocator, self.entry, self.update, self.jolt_records.items);
         self.stats.max_manifolds_per_body_pair = @max(self.stats.max_manifolds_per_body_pair, try maxManifoldsPerBodyPair(self.allocator, self.jolt_records.items));
     }
 
@@ -6862,8 +6845,7 @@ const SettingsBuffers = struct {
 /// make from the scene's vehicle and ragdoll descriptions is the C++ one, each side restores the other side's bytes and
 /// saves them unchanged (every round-tripping VehicleSettingsPart; RagdollSettings with the shapes and the group
 /// filter), and the tables of the RagdollSettings are the C++ ones. A mismatch is an error of the slot or of the
-/// library's binary state functions, reported before the simulation. The C++ round trips alone run in "SimScenes
-/// blocked scenes run on the C++ side" (checkCppSettingsRoundTrips).
+/// library's binary state functions, reported before the simulation.
 fn checkPhase7Settings(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !void {
     const desc = builder.desc();
     var buffers: SettingsBuffers = .{ .allocator = allocator };
@@ -6927,41 +6909,6 @@ fn checkPhase7Settings(allocator: Allocator, entry: *const SceneEntry, builder: 
                 std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: the RagdollSettings tables differ (Stabilize, GetBodyIndexToConstraintIndex, GetConstraintIndexToBodyIdxPair)\n  zolt {any}\n  jolt {any}\n", .{ entry.name, index, zolt_info.items, jolt_info.items });
                 return error.ParityMismatch;
             }
-        }
-    }
-}
-
-/// The C++ side of checkPhase7Settings ("SimScenes blocked scenes run on the C++ side"): every round-tripping part of
-/// the vehicle descriptions and the RagdollSettings of the ragdoll descriptions (with the shapes of world `cw`) come back
-/// unchanged from a C++ restore
-fn checkCppSettingsRoundTrips(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder, desc: *const SimSceneDesc, cw: CppWorld) !void {
-    var buffers: SettingsBuffers = .{ .allocator = allocator };
-    defer buffers.deinit();
-    for (builder.vehicles.items, 0..) |*v, i| {
-        const index: u32 = @intCast(i);
-        for (std.enums.values(VehicleSettingsPart)) |part| {
-            for (0..part.numItems(v)) |n| {
-                const item: u32 = @intCast(n);
-                if (!try CppWorld.vehicleSettingsPart(allocator, desc, index, part, item, null, &buffers.jolt)) {
-                    std.debug.print("SimulationParity: scene {s}, vehicle description {d}: no {t} {d}\n", .{ entry.name, index, part, item });
-                    return error.TestUnexpectedResult;
-                }
-                if (!part.roundTrips()) continue;
-                const restored = try CppWorld.vehicleSettingsPart(allocator, desc, index, part, item, buffers.jolt.items, &buffers.jolt_round_trip);
-                if (!restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.jolt.items)) {
-                    std.debug.print("SimulationParity: scene {s}, vehicle description {d}, part {t}, item {d}: restoring the C++ bytes and saving them again changes them (restored {}, byte {?d} of {d})\n", .{ entry.name, index, part, item, restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.jolt.items), buffers.jolt.items.len });
-                    return error.TestUnexpectedResult;
-                }
-            }
-        }
-    }
-    for (0..builder.ragdolls.items.len) |i| {
-        const index: u32 = @intCast(i);
-        try std.testing.expect(try cw.ragdollSettingsBytes(allocator, index, null, &buffers.jolt));
-        const restored = try cw.ragdollSettingsBytes(allocator, index, buffers.jolt.items, &buffers.jolt_round_trip);
-        if (!restored or !std.mem.eql(u8, buffers.jolt_round_trip.items, buffers.jolt.items)) {
-            std.debug.print("SimulationParity: scene {s}, ragdoll description {d}: restoring the C++ RagdollSettings bytes and saving them again changes them (restored {}, byte {?d} of {d})\n", .{ entry.name, index, restored, std.mem.indexOfDiff(u8, buffers.jolt_round_trip.items, buffers.jolt.items), buffers.jolt.items.len });
-            return error.TestUnexpectedResult;
         }
     }
 }
@@ -7439,8 +7386,7 @@ const SkinFlags = struct {
 
 /// Phase 9, before a scene runs: the SaveBinaryState bytes of every shared settings object that SoftBodySlot.makeSettings
 /// generates are the bytes of SimMakeSoftBodySettings (C++). A mismatch is an error of a generator or of
-/// SoftBodySharedSettings, reported before the simulation. The blocked scenes test runs it too (SoftBodySharedSettings
-/// is complete). The name only labels the message.
+/// SoftBodySharedSettings, reported before the simulation. The name only labels the message.
 fn checkSoftBodySettings(allocator: Allocator, name: []const u8, builder: *const SceneBuilder) !void {
     const desc = builder.desc();
     var jolt_bytes: std.ArrayList(u8) = .empty;
@@ -7480,10 +7426,10 @@ fn checkSoftBodyGroups(allocator: Allocator, entry: *const SceneEntry, builder: 
     try expectReached(entry, "a shared settings object with several parallel update groups and a non-parallel group with constraints", false);
 }
 
-/// The soft body listener records of one update agree with each other (a check of SimSoftBodyContactListener while the
-/// soft body scenes run on the C++ side alone): per soft body, the vertices with a contact of its soft_body_contact_added
-/// records are the vertices of its soft_body_contact_body records, and its sensor contacts are its
-/// soft_body_sensor_contact records (summed over the collision steps of the update)
+/// The soft body listener records of one update agree with each other (a check of SimSoftBodyContactListener, run on the
+/// C++ records after they are equal to Zolt's): per soft body, the vertices with a contact of its
+/// soft_body_contact_added records are the vertices of its soft_body_contact_body records, and its sensor contacts are
+/// its soft_body_sensor_contact records (summed over the collision steps of the update)
 fn checkSoftBodyRecords(allocator: Allocator, entry: *const SceneEntry, update: usize, records: []const SimRecord) !void {
     // Per soft body: vertices with a contact, sensor contacts (soft_body_contact_added); vertices of the body records,
     // sensor records
@@ -7517,12 +7463,12 @@ fn checkSoftBodyRecords(allocator: Allocator, entry: *const SceneEntry, update: 
     }
 }
 
-/// A supported scene that creates soft bodies needs Blocker.soft_bodies (until Zolt simulates soft bodies, a scene with
-/// another blocker would run them)
-fn checkSoftBodyBlocker(entry: *const SceneEntry, builder: *const SceneBuilder) !void {
-    if (builder.soft_bodies.items.len > 0 and !SimScenes.SoftBodyClasses.simulated()) {
-        std.debug.print("SimulationParity: scene {s} creates soft bodies, which Zolt cannot simulate yet, but its blocker .{t} is supported (declare Blocker.soft_bodies)\n", .{ entry.name, entry.blocked_by });
-        return error.TestUnexpectedResult;
+/// Every Zolt class is ported, so every scene runs against Zolt: a scene whose Blocker is not supported (a class that it
+/// needs is a stub again) fails instead of being skipped
+fn checkSupported(entry: *const SceneEntry) !void {
+    if (!entry.blocked_by.isSupported()) {
+        std.debug.print("SimulationParity: scene {s}: its blocker .{t} is not supported (a Zolt class that it needs is a stub), but every scene must run against Zolt\n", .{ entry.name, entry.blocked_by });
+        return error.SceneNotSupported;
     }
 }
 
@@ -7563,8 +7509,7 @@ fn checkPhase7Slot(entry: *const SceneEntry, what: []const u8, ported: bool, slo
 }
 
 fn runEntry(entry: *const SceneEntry) !void {
-    if (!entry.blocked_by.isSupported())
-        return error.SkipZigTest;
+    try checkSupported(entry);
 
     const allocator = std.testing.allocator;
     var builder: SceneBuilder = .init(allocator);
@@ -7573,7 +7518,6 @@ fn runEntry(entry: *const SceneEntry) !void {
     try checkConstraintDescriptions(allocator, entry, &builder);
     try checkPhase7Slots(entry, &builder);
     try checkPhase7Settings(allocator, entry, &builder);
-    try checkSoftBodyBlocker(entry, &builder);
     try checkSoftBodySettings(allocator, entry.name, &builder);
     try checkSoftBodyGroups(allocator, entry, &builder);
 
@@ -8150,7 +8094,8 @@ fn runDrawSceneWith(name: []const u8, post: PostDraws) !void {
     const entry = for (&SimScenes.scenes) |*e| {
         if (std.mem.eql(u8, e.name, name)) break e;
     } else return error.UnknownScene;
-    if (!entry.blocked_by.isSupported() or entry.blocked_by == .release_only)
+    try checkSupported(entry);
+    if (entry.blocked_by == .release_only)
         return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
@@ -8216,7 +8161,7 @@ comptime {
         _ = PostDrawSceneTest(scene.name, scene.post);
 }
 
-/// One test per scene: `SceneTest("name", index)` (a blocked scene is skipped)
+/// One test per scene: `SceneTest("name", index)`
 fn SceneTest(comptime name: []const u8, comptime index: usize) type {
     _ = name;
     return struct {
@@ -8233,207 +8178,6 @@ comptime {
 
 test {
     _ = SimScenes;
-}
-
-// The scenes of the later waves run on the C++ side already, with 0 and 3 worker threads in lockstep: their
-// descriptions build, Jolt is deterministic on them, and they reach what they are written for (contact callbacks,
-// active constraints, the expect_* checks, the Phase 7 Expect fields). When a wave lands only the Zolt side is new.
-// `restore_cross` restores the snapshot of the other world in each world (with the character states). Phase 7: the
-// object states of both worlds are identical after every update and decode completely, the character listener records
-// are identical in call order.
-test "SimScenes blocked scenes run on the C++ side" {
-    const allocator = std.testing.allocator;
-    var a_state: std.ArrayList(u8) = .empty;
-    defer a_state.deinit(allocator);
-    var b_state: std.ArrayList(u8) = .empty;
-    defer b_state.deinit(allocator);
-    var a_records: std.ArrayList(SimRecord) = .empty;
-    defer a_records.deinit(allocator);
-    var b_records: std.ArrayList(SimRecord) = .empty;
-    defer b_records.deinit(allocator);
-    var a_objects: std.ArrayList(u8) = .empty;
-    defer a_objects.deinit(allocator);
-    var b_objects: std.ArrayList(u8) = .empty;
-    defer b_objects.deinit(allocator);
-    var snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
-    defer for (&snapshots) |*s| {
-        s[0].deinit(allocator);
-        s[1].deinit(allocator);
-    };
-    var character_snapshots: [4][2]std.ArrayList(u8) = @splat(.{ .empty, .empty });
-    defer for (&character_snapshots) |*s| {
-        s[0].deinit(allocator);
-        s[1].deinit(allocator);
-    };
-
-    for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by.isSupported() or entry.blocked_by == .release_only) continue; // Supported (their own tests)
-        var builder: SceneBuilder = .init(allocator);
-        defer builder.deinit();
-        try entry.build(&builder);
-        const desc = builder.desc();
-        const asserts_before = jolt.jolt_sim_reference_assert_count();
-        const a = CppWorld.init(&desc, 0);
-        defer a.deinit();
-        const b = CppWorld.init(&desc, 3);
-        defer b.deinit();
-        try checkCppSettingsRoundTrips(allocator, entry, &builder, &desc, a);
-        // Phase 9: the generated soft body settings are Zolt's already (SoftBodySharedSettings is complete)
-        try checkSoftBodySettings(allocator, entry.name, &builder);
-
-        var delta_time = builder.delta_time;
-        var collision_steps = builder.collision_steps;
-        var records: [SimScenes.num_record_kinds]u32 = @splat(0);
-        var max_active_constraints: u32 = 0;
-        var objects: ObjectStats = .{};
-        var op_index: usize = 0;
-        for (0..builder.num_updates) |update| {
-            while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
-                const op = &builder.ops.items[op_index];
-                switch (@as(OpKind, @enumFromInt(op.kind))) {
-                    .set_update => {
-                        delta_time = op.f[0];
-                        collision_steps = op.count;
-                    },
-                    .snapshot => {
-                        const state = snapshotState(op);
-                        try a.saveState(allocator, state, &snapshots[op.index][0]);
-                        try b.saveState(allocator, state, &snapshots[op.index][1]);
-                        try a.saveCharacterStates(allocator, &character_snapshots[op.index][0]);
-                        try b.saveCharacterStates(allocator, &character_snapshots[op.index][1]);
-                    },
-                    .restore_cross => {
-                        try std.testing.expect(a.restoreState(snapshots[op.index][1].items));
-                        try std.testing.expect(b.restoreState(snapshots[op.index][0].items));
-                        if (!a.restoreCharacterStates(character_snapshots[op.index][1].items) or !b.restoreCharacterStates(character_snapshots[op.index][0].items)) {
-                            std.debug.print("SimulationParity: scene {s}, update {d}: restore_cross: a C++ world does not restore the character states of the other one (a read failed or bytes are left)\n", .{ entry.name, update });
-                            return error.TestUnexpectedResult;
-                        }
-                    },
-                    else => |kind| {
-                        const result = a.applyOp(op);
-                        try std.testing.expectEqual(result, b.applyOp(op));
-                        if (kind == .expect_body_state)
-                            try std.testing.expectEqual(op.index, result);
-                        if (kind == .expect_constraint_state)
-                            try std.testing.expectEqual(op.i[0], result);
-                        if (isPhase7Expectation(kind)) {
-                            if (result != op.count) {
-                                std.debug.print("SimulationParity: scene {s}, operation {d}: the scene expects {t} of object handle {d} to be {d}, it is {d}\n", .{ entry.name, op_index, kind, op.index, op.count, result });
-                                return error.TestUnexpectedResult;
-                            }
-                        }
-                    },
-                }
-            }
-            max_active_constraints = @max(max_active_constraints, a.numActiveConstraints());
-            try std.testing.expectEqual(a.numActiveConstraints(), b.numActiveConstraints());
-            try std.testing.expectEqual(a.update(delta_time, collision_steps), b.update(delta_time, collision_steps));
-            try a.saveState(allocator, .all, &a_state);
-            try b.saveState(allocator, .all, &b_state);
-            try std.testing.expectEqualSlices(u8, a_state.items, b_state.items);
-            a_records.clearRetainingCapacity();
-            b_records.clearRetainingCapacity();
-            try a.takeRecords(allocator, &a_records);
-            try b.takeRecords(allocator, &b_records);
-            std.sort.pdq(SimRecord, a_records.items, {}, SimRecord.lessThan);
-            std.sort.pdq(SimRecord, b_records.items, {}, SimRecord.lessThan);
-            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a_records.items), std.mem.sliceAsBytes(b_records.items));
-            for (a_records.items) |r| records[r.kind] += 1;
-            try checkSoftBodyRecords(allocator, entry, update, a_records.items);
-
-            // Phase 7: the object states, the character listener records in call order
-            try a.objectState(allocator, &a_objects);
-            try b.objectState(allocator, &b_objects);
-            if (try describeObjectStateDifference(allocator, b_objects.items, a_objects.items, .{ .checked = "3 threads", .reference = "0 threads" })) |message| {
-                defer allocator.free(message);
-                std.debug.print("SimulationParity: scene {s}, update {d}: the C++ worlds with 0 and 3 threads differ: {s}\n", .{ entry.name, update, message });
-                return error.TestUnexpectedResult;
-            }
-            try scanObjectState(a_objects.items, &objects);
-            a_records.clearRetainingCapacity();
-            b_records.clearRetainingCapacity();
-            try a.takeCharacterRecords(allocator, &a_records);
-            try b.takeCharacterRecords(allocator, &b_records);
-            for (a_records.items, 0..) |r, i| {
-                if (i >= b_records.items.len or !std.meta.eql(r, b_records.items[i])) {
-                    std.debug.print("SimulationParity: scene {s}, update {d}: character listener record {d} of {d} (call order) differs between the C++ worlds with 0 and 3 threads:\n  0 threads {f}\n  3 threads {f}\n", .{ entry.name, update, i, a_records.items.len, RecordText{ .record = r }, RecordText{ .record = if (i < b_records.items.len) b_records.items[i] else null } });
-                    return error.TestUnexpectedResult;
-                }
-            }
-            try std.testing.expectEqual(a_records.items.len, b_records.items.len);
-            for (a_records.items) |r| records[r.kind] += 1;
-
-            // The object state decodes completely and stays finite
-            var object_layout: ObjectStateLayout = .{ .allocator = allocator };
-            defer object_layout.deinit();
-            try object_layout.decode(a_objects.items);
-            if (!object_layout.complete) {
-                std.debug.print("SimulationParity: scene {s}, update {d}: the object state does not decode (SimScenes.objectFieldLayout and WriteObjectState of SimulationReference.cpp differ)\n", .{ entry.name, update });
-                return error.TestUnexpectedResult;
-            }
-            if (object_layout.firstNotFinite(a_objects.items)) |value| {
-                var buffer: [256]u8 = undefined;
-                var w: std.Io.Writer = .fixed(&buffer);
-                try writeObjectValueName(&w, value);
-                std.debug.print("SimulationParity: scene {s}, update {d}: an object value is not finite: {s}\n", .{ entry.name, update, w.buffered() });
-                return error.TestUnexpectedResult;
-            }
-        }
-
-        // The state decodes completely and stays finite (a scene that blows up is no test: Zolt's asserts would fire on
-        // the NaNs that Jolt's release build ignores)
-        var layout: StateLayout = .{ .allocator = allocator, .bytes = a_state.items, .cpp = a };
-        defer layout.deinit();
-        try layout.decode();
-        try std.testing.expect(!layout.truncated and layout.pos == a_state.items.len);
-        for (layout.fields.items) |*field| {
-            const finite = switch (field.kind) {
-                .f32 => std.math.isFinite(std.mem.bytesToValue(f32, a_state.items[field.offset..][0..4])),
-                .f64 => std.math.isFinite(std.mem.bytesToValue(f64, a_state.items[field.offset..][0..8])),
-                else => true,
-            };
-            if (!finite) {
-                std.debug.print("SimulationParity: scene {s} ends with a value that is not finite in ", .{entry.name});
-                var buffer: [256]u8 = undefined;
-                var w: std.Io.Writer = .fixed(&buffer);
-                try writeField(&w, field);
-                std.debug.print("{s}\n", .{w.buffered()});
-                return error.TestUnexpectedResult;
-            }
-        }
-
-        // What the scene is written for
-        if (entry.blocked_by == .contacts or entry.blocked_by == .ccd_hits or entry.expect.contacts)
-            try expectReached(entry, "contacts", records[@intFromEnum(RecordKind.contact_added)] > 0);
-        if (builder.constraints.items.len > 0)
-            try expectReached(entry, "constraints that are solved (every scene with constraints)", max_active_constraints > 0);
-        if (entry.expect.active_constraints > 0)
-            try expectReached(entry, "active constraints", max_active_constraints >= entry.expect.active_constraints);
-
-        if (verbose)
-            std.debug.print("{s} (C++ side): records {any}, max active constraints {d}, objects {any}\n", .{ entry.name, records, max_active_constraints, objects });
-        try checkReferenceAsserts(entry, asserts_before);
-
-        // Phase 7: a scene with a Phase 7 blocker creates the objects of its classes and reaches its Expect fields
-        switch (entry.blocked_by) {
-            .characters => try expectReached(entry, "characters", builder.characters.items.len > 0),
-            .character_virtuals => try expectReached(entry, "character virtuals", builder.character_virtuals.items.len > 0),
-            .ragdolls => try expectReached(entry, "ragdolls", builder.ragdolls.items.len > 0),
-            .wheeled_vehicles, .tracked_vehicles, .motorcycles => try expectReached(entry, "vehicles", builder.vehicles.items.len > 0),
-            .soft_bodies => try expectReached(entry, "soft bodies", builder.soft_bodies.items.len > 0),
-            else => {},
-        }
-        if (entry.expect.soft_body_records != 0)
-            try expectReached(entry, "the soft body listener callbacks of Expect.soft_body_records", recordsReach(&records, entry.expect.soft_body_records));
-        if (entry.expect.character_records != 0)
-            try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(&records, entry.expect.character_records));
-        if (entry.expect.ground_states != 0)
-            try expectReached(entry, "the ground states of Expect.ground_states", (objects.ground_states & entry.expect.ground_states) == entry.expect.ground_states);
-        if (entry.expect.wheel_contacts)
-            try expectReached(entry, "wheel contacts", objects.wheel_contacts);
-        try expectVehicleGears(entry, &objects);
-    }
 }
 
 /// Expect.vehicle_gears / vehicle_up_shifts / vehicle_down_shifts
@@ -9183,16 +8927,17 @@ test "SimScenes softBodyOpBits skips the other operations" {
 }
 
 test "SimScenes the soft body scenes use every soft body operation and record" {
-    // The soft body scenes run on the C++ side before Zolt simulates soft bodies.
-    // Together they use every soft body OpKind and expect every soft body RecordKind.
+    // Together the scenes with soft bodies use every soft body OpKind and expect every soft body RecordKind.
     const allocator = std.testing.allocator;
     var ops: u128 = 0;
     var records: u128 = 0;
+    var num_scenes: u32 = 0;
     for (&SimScenes.scenes) |*entry| {
-        if (entry.blocked_by != .soft_bodies) continue;
         var builder: SceneBuilder = .init(allocator);
         defer builder.deinit();
         try entry.build(&builder);
+        if (builder.soft_bodies.items.len == 0) continue;
+        num_scenes += 1;
         ops |= softBodyOpBits(builder.ops.items);
         records |= entry.expect.soft_body_records;
     }
@@ -9205,10 +8950,12 @@ test "SimScenes the soft body scenes use every soft body operation and record" {
     }
     for ([_]RecordKind{ .soft_body_contact_validate, .soft_body_contact_added, .soft_body_contact_body, .soft_body_sensor_contact }) |kind|
         try std.testing.expect(records & SimScenes.recordBit(kind) != 0);
+    // Groups SH and S5 wrote 23 soft body scenes
+    try std.testing.expect(num_scenes >= 23);
 }
 
 test "SimulationParity soft body creation, creation settings and skin flags" {
-    // The parts of the soft body harness that run before Zolt simulates soft bodies, in both worlds of soft_body_ops.
+    // The parts of the soft body harness that a scene run does not check, in both worlds of soft_body_ops.
     // The create operations and the listener operation of update 0 give the same results.
     // The GetSoftBodyCreationSettings round trip gives the same hash for every soft body.
     // SkinFlags puts the skin flags of a capture back.
