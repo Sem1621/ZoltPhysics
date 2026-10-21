@@ -42,8 +42,9 @@
 //! is reported as "state differs at byte 46837 ...: bodies[350] (id 0x0080015e) rotation.x zolt 0x3d6041ab jolt
 //! 0x3d604197" (update 59).
 //!
-//! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). Every Zolt class is
-//! ported, so every Blocker is supported and every scene runs against Zolt. A scene whose `blocked_by` is not supported
+//! Every scene is its own test (`SceneTest(name, index)`). Filter one with -Dtest-filter='.SceneTest("<scene>"[' (a
+//! plain scene name also selects every scene whose name contains it). Every Zolt class is ported, so every Blocker is
+//! supported and every scene runs against Zolt. A scene whose `blocked_by` is not supported
 //! (SimScenes.Blocker.isSupported: a class it needs is a stub again) fails (checkSupported). A scene with a Phase 7
 //! blocker must create the objects of its classes, and a `.contacts` or `.ccd_hits` scene must reach contacts. One
 //! configuration of each scene also checks that every C++ object state and the final C++ state decode completely and

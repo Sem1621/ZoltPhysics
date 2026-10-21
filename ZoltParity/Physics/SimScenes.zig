@@ -18,8 +18,9 @@
 //!    operation on a sleeping body), say so with `b.expectSleeping(handle)` / `b.expectAwake(handle)`: the driver
 //!    checks it on both sides, a comment alone becomes false unnoticed when the scene changes.
 //! 2. Add one entry to `scenes` with its name and builder. Every entry is its own test (`SceneTest("name", index)`,
-//!    run one with `zig build parity -Dtest-filter=name`). Its `.blocked_by` names what it needs (`.contacts`,
-//!    `.constraints`, `.hinge_constraints`, `.ccd_hits`, ...). Zolt ports every class, so every Blocker is supported
+//!    run one with `zig build parity -Dtest-filter='.SceneTest("name"['`; a plain `-Dtest-filter=name` also runs every
+//!    scene whose name contains it). Its `.blocked_by` names what it needs (`.contacts`, `.constraints`,
+//!    `.hinge_constraints`, `.ccd_hits`, ...). Zolt ports every class, so every Blocker is supported
 //!    (`Blocker.isSupported`) and the blockers are labels. A scene whose Blocker is not supported fails instead of being
 //!    skipped.
 //!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: Zolt's
@@ -203,7 +204,8 @@
 //!   - no character, character virtual, ragdoll or vehicle is created or destroyed between a snapshot and its
 //!     restore_cross (the restore reads the objects of the snapshot);
 //!   - the object layers of the tester and the queries are layers of `Layers` (the layer filters assert on others).
-//!   Check new scenes against Jolt's asserts: `zig build parity -Dreference_asserts=true -Dtest-filter=<scene name>`
+//!   Check new scenes against Jolt's asserts: `zig build parity -Dreference_asserts=true
+//!   -Dtest-filter='.SceneTest("<scene>"['`
 //!   (the reference library with JPH_ENABLE_ASSERTS: a failed assert is printed and counted, the simulation parity fails
 //!   a scene whose C++ side hit one; the Phase 7 scenes hit none).
 //!

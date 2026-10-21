@@ -954,7 +954,9 @@ settled:
     that a scene with a Phase 7 blocker creates the objects of its classes, and that a `.contacts` or `.ccd_hits`
     scene reaches contacts. A C++-only run over all 310 scenes found no scene that fails these checks.
   - A new scene is checked against Jolt's asserts by its name:
-    `zig build parity -Dreference_asserts=true -Dtest-filter=<scene name>`.
+    `zig build parity -Dreference_asserts=true -Dtest-filter='.SceneTest("<scene>"['`. The test of a scene is named
+    `SceneTest("<scene>"[0..n],index)`, so this filter selects that scene only. A plain scene name also selects every
+    scene whose name contains it, and the draw tests of the scene.
   - `DebugRendererCheck.zig` has no `zolt_records` gate any more (D3 ported the Zolt side).
 - Tooling and CI: `port_status.py --check` runs the M10 rules and fails on any `TODO(debug_renderer)` (R22). CI
   enforces M10 and has a `-Duse_llvm=false` test row (section 5). `tidy_registry.py` sorts the `c_files` list.

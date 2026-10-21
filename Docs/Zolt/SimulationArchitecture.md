@@ -1012,9 +1012,10 @@ QuadTree).
   - The thread matrix pairs Zolt single threaded and pools of 0, 1, 3 and 7 workers with C++
     pools of 0, 3 and 7 threads.
   - Until the Phase 9 audit, scenes that needed a later wave were marked blocked and were skipped
-    visibly (`error.SkipZigTest`). A C++-only test checked their C++ side. Since the audit, a scene
-    whose Blocker is not supported fails (`checkSupported`, RemainingFeaturesArchitecture.md
-    section 6).
+    visibly (`error.SkipZigTest`). A C++-only test checked their C++ side. Since the audit, every
+    Blocker is supported and is only a label. A scene whose Blocker is not supported (a class that
+    it needs is a stub again) fails with `error.SceneNotSupported` (`checkSupported`,
+    RemainingFeaturesArchitecture.md section 6). It is not skipped.
   - Every scene asserts that it reaches the edge cases it is meant to cover.
   - The C++ reference always uses the QuadTree (Jolt's `BROAD_PHASE` define). Gravity-only scenes
     do not depend on it; contact scenes need A1.

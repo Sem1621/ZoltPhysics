@@ -275,7 +275,7 @@ A group edits only its own region, slot, files and registry lines.
   - Prove that the tests bite: break one operation temporarily and see a test fail.
 - Jolt asserts on user input: Zolt asserts the same in safe builds. Scenes keep away from them, or are
   `release_only` to compare Jolt's release behavior.
-- Done criteria (CLAUDE.md's list, with more build modes):
+- Done criteria: the "Before finishing" list of CLAUDE.md, run in more build modes:
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
   - since Phase 9: `zig build check -Ddebug_renderer=true`, and `zig build parity-check` in both renderer
     configurations;

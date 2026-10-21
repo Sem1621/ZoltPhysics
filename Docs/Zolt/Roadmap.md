@@ -310,8 +310,10 @@ ReleaseFast, double precision, `-Duse_llvm=false` and `-Ddebug_renderer=true`. â
     buffer after every update;
   - the call log of every draw: the helpers, shapes, constraints, bodies, characters, vehicles, skeletons, soft bodies
     and hair; the recorder's `.jor` bytes; drawn scenes, whose state must equal the state without drawing;
-  - the release only tests and scenes, which count the asserts of both sides. Against an asserting reference
-    (`-Dreference_asserts=true`) the counts must be equal. Without it they check that each case reaches an assert.
+  - the release only tests and scenes, which follow Jolt's release build on inputs that Jolt asserts on. Only an
+    asserting reference (`-Dreference_asserts=true`) counts Jolt's asserts, and no CI row builds one: it is a manual
+    run. Then each case must hit as many asserts on both sides. Without it, a test only checks that its cases reach
+    Zolt's asserts.
 - The debug renderer changes no result. With `-Ddebug_renderer=true` ZoltPerformanceTest gives the same 5 hashes, also
   while it records every frame (`-r`). `zig build debug-renderer-check` finds its `.jor` bytes equal to those of the C++
   PerformanceTest for the 5 scenes. Zolt's CI checks both, in both precisions.
