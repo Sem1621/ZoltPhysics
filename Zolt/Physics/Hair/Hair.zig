@@ -29,11 +29,13 @@
 //!   - UB21: a HairShaders that misses a shader (HairShaders.init without registerHairShaders). HairShaders keeps the
 //!     shader null, like Jolt (R14). Jolt's Update passes it to ComputeQueueCPU::SetShader, which calls CreateWrapper
 //!     on the null pointer. Zolt's update panics with a message. No test pins it: a test cannot catch a panic.
-//!   - UB30: `update` with a GridSize below 2 on X, Y or Z when the grid shaders sample a vertex. They run when a
-//!     material needs the grid, and they sample each vertex that is not the first of its strand and not fixed (an inv
-//!     mass above 0, or a padding vertex of a short strand). Jolt indexes past the grid. Zolt's update panics
-//!     ("Hair.update: the grid shaders sample a grid that is smaller than 2 on X, Y or Z"). Without such a sample a
-//!     small grid is literal. HairSettings.init has the same rule.
+//!   - UB30: a grid shader samples a grid point past the end of the grid. HairGridAccumulate and ApplyGrid (of
+//!     HairIntegrate and HairUpdateVelocityIntegrate) sample the 8 points around a vertex. With a GridSize below 2 on
+//!     X, Y or Z a point can be past the end, and Jolt reads or writes past the grid buffers there. The shaders check
+//!     each point against `cNumGridPoints` and panic at the first one past the end, in every build mode
+//!     ("HairGridAccumulate: a vertex samples a grid point past the end of the grid", "ApplyGrid: ..."). Points inside
+//!     the grid are literal, so a grid of size 1 works when its points stay inside. HairSettings.init has the same
+//!     check.
 //!   - UB33: a call before its prerequisite. Jolt dereferences a null buffer. Zolt panics with a message:
 //!     - `update` before `initCompute` ("Hair.update: call initCompute first"). An override of the render positions
 //!       without `setRenderPositionsCB` panics only when there are render vertices ("Hair.update: the render positions
@@ -670,11 +672,6 @@ pub const Hair = struct {
         var ctx: UpdateContext = .{};
         defer ctx.deinit(allocator);
         try self.initializeContext(&ctx, delta_time, system);
-
-        // Zolt (R20 UB30): the grid shaders run when a material needs the grid. Every vertex that they sample indexes
-        // past a grid that is smaller than 2 on X, Y or Z in Jolt.
-        if (!ctx.global_pose_only and ctx.num_iterations > 0 and ctx.needs_grid and settings.isGridTooSmall() and settings.gridShadersSampleAVertex())
-            @panic("Hair.update: the grid shaders sample a grid that is smaller than 2 on X, Y or Z");
 
         if (joint_matrices != null and self.scalp_joint_matrices_cb.get() != null) {
             // Prepare for Skinning
@@ -2759,11 +2756,11 @@ test "Hair: draw the render strands with a strand of 0 vertices at the end of th
     }
 }
 
-test "Hair: a grid smaller than 2 that the grid shaders do not sample is literal (R20 UB30)" {
+test "Hair: a groom of fixed vertices works with grids of 0 and 1 cells on an axis (R20 UB30)" {
     // The grid shaders skip the first vertex of each strand and the fixed vertices. A groom whose vertices are all
-    // fixed, with strands of one length (no padding vertices), never samples the grid. Then init, initCompute, update,
-    // the read back and the draw work with a grid smaller than 2 on X, Y or Z, as in Jolt. A sampled vertex panics
-    // (UB30: Jolt indexes past the grid), which a test cannot catch.
+    // fixed, with strands of one length (no padding vertices), samples no grid point. Then init, initCompute, update,
+    // the read back and the draw work with any grid size, as in Jolt. With a sampled vertex a grid of 0 points would
+    // panic (UB30: Jolt reads past the grid), which a test cannot catch.
     const allocator = testing.allocator;
     var world: TestWorld = undefined;
     try world.init(allocator);
@@ -2775,7 +2772,6 @@ test "Hair: a grid smaller than 2 that the grid shaders do not sample is literal
         var settings = try testSettings(allocator, compute.system.get().?, 4, 5, .{ .enable_collision = false }, .{ .grid_size = grid_size, .fixed = true });
         defer settings.deinit();
         const s = settings.get().?;
-        try testing.expect(s.isGridTooSmall() and !s.gridShadersSampleAVertex());
         // The grid shaders run
         try testing.expect(s.materials.items[0].needsGrid() and !s.materials.items[0].globalPoseOnly());
         try testing.expectEqual(@as(usize, grid_size.getX() * grid_size.getY() * grid_size.getZ()), s.neutral_density.items.len);
@@ -2801,24 +2797,44 @@ test "Hair: a grid smaller than 2 that the grid shaders do not sample is literal
     }
 }
 
-test "Hair: gridShadersSampleAVertex skips the first vertices and the fixed vertices, not the padding (R20 UB30)" {
+test "Hair: update with a grid of 1 cell on X whose grid points stay inside the grid (R20 UB30)" {
+    // GridSize (1, 4, 8) has 32 points and the stride (1, 1, 4). On X the index is always 0, and the point at x + 1 is
+    // the point at y + 1. A vertex at the indices (0, y, z) samples the points up to y + 4 * z + 6, past the end only
+    // for y = 2 and z = 6. The groom is flat: z = 0 is the middle of the bounds, z index 3 or 4. So HairGridAccumulate
+    // and ApplyGrid sample inside the grid, as in Jolt, and do not panic.
     const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
     var compute = try TestCompute.init(allocator);
     defer compute.deinit();
-    var settings = try testSettings(allocator, compute.system.get().?, 2, 4, .{}, .{ .fixed = true });
+
+    var settings = try testSettings(allocator, compute.system.get().?, 6, 5, .{ .enable_collision = false }, .{ .grid_size = .init(1, 4, 8, 0), .flat = true });
     defer settings.deinit();
-    const s: *HairSettings = @constCast(settings.get().?);
-    try testing.expect(!s.gridShadersSampleAVertex());
-    s.sim_vertices.items[0].inv_mass = 1.0; // The first vertex of a strand
-    try testing.expect(!s.gridShadersSampleAVertex());
-    s.sim_vertices.items[5].inv_mass = 1.0;
-    try testing.expect(s.gridShadersSampleAVertex());
-    s.sim_vertices.items[5].inv_mass = std.math.nan(f32); // InitCompute does not mark a NaN inv mass fixed
-    try testing.expect(s.gridShadersSampleAVertex());
-    s.sim_vertices.items[5].inv_mass = -1.0;
-    try testing.expect(!s.gridShadersSampleAVertex());
-    s.max_vertices_per_strand = 5; // A padding vertex
-    try testing.expect(s.gridShadersSampleAVertex());
+    const s = settings.get().?;
+    try testing.expect(s.materials.items[0].needsGrid() and !s.materials.items[0].globalPoseOnly());
+    try testing.expectEqual(@as(usize, 32), s.neutral_density.items.len);
+    var neutral_total: f32 = 0.0;
+    for (s.neutral_density.items) |d| neutral_total += d;
+    try testing.expectApproxEqRel(@as(f32, 6 * 4), neutral_total, 1.0e-5); // 24 vertices of inv mass 1
+
+    var hair: Hair = .init(allocator, s, RVec3.zero(), Quat.identity(), 0);
+    defer hair.deinit();
+    try hair.initCompute(compute.system.get().?);
+    for (0..10) |_|
+        try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, compute.system.get().?, compute.queue.get().?);
+    try hair.readBackGPUState(compute.queue.get().?);
+
+    // The vertices stay near the plane z = 0, far from z index 6 (z = 0.05)
+    for (hair.getPositions().?) |p|
+        try testing.expect(@abs(p.z) < 0.01);
+
+    // The last HairGridAccumulate added the density of the 24 sampled vertices (fixed point, rounded per point)
+    try hair.lockReadBackBuffers();
+    defer hair.unlockReadBackBuffers();
+    var density_total: f32 = 0.0;
+    for (hair.getGridVelocityAndDensity().?) |g| density_total += g.w;
+    try testing.expectApproxEqAbs(@as(f32, 6 * 4), density_total, 0.1);
 }
 
 test "Hair: update of an override without render vertices and without setRenderPositionsCB (R20 UB33)" {

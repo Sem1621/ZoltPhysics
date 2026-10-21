@@ -40,12 +40,13 @@
 //!   - UB19: resample with a strand of 1 vertex at the end of the vertex array, or a strand of 0 vertices at its start
 //!     or end. Jolt reads past the vertex array. Zolt panics ("HairSettings.resample: a strand of 0 or 1 vertices reads
 //!     past the vertex array").
-//!   - UB30: a vertex samples a grid with a GridSize below 2 on X, Y or Z. Jolt's GridSampler subtracts 2 from the
-//!     size, which wraps, and every sample indexes past the grid. Init samples each vertex with an inv mass above 0.
-//!     Zolt panics there ("HairSettings.init: a vertex samples a grid that is smaller than 2 on X, Y or Z").
-//!     Hair.update panics where the grid shaders would sample (see Hair.zig). Without such a sample a small grid is
-//!     literal: Init, InitCompute, Hair.update and Hair.draw work (a groom whose vertices are all fixed, or no
-//!     simulated strands).
+//!   - UB30: Init samples a grid point past the end of mNeutralDensity. Init samples the 8 grid points around each
+//!     vertex with an inv mass above 0. With a GridSize below 2 on X, Y or Z a point can be past the end: on an axis
+//!     of size 1 the index is 0, and the point at index 1 is in the next row or slice. An axis of size 0 leaves no
+//!     grid point. Jolt writes past mNeutralDensity there. Zolt checks each point and panics at the first one past the
+//!     end, in every build mode ("HairSettings.init: a vertex samples a grid point past the end of the grid"). Points
+//!     inside the grid are literal, so a grid of size 1 works when its points stay inside. Hair's grid shaders have
+//!     the same check (see Hair.zig).
 //!   - UB31: InitRenderAndSimulationStrands with a simulated strand of 0 vertices at the end of mSimVertices, or at its
 //!     start (its last vertex index wraps, so the walk along the strand can pass the end). The search for the closest
 //!     simulated strand of the other strands of its material then can read past mSimVertices in Jolt. Zolt panics at a
@@ -663,7 +664,8 @@ pub const HairSettings = struct {
     }
 
     /// `mSimVertices[index].mPosition` in the closest strand search of initRenderAndSimulationStrands. Zolt (R20 UB31): an
-    /// index past the array panics (a simulated strand of 0 vertices at its end), where Jolt reads past the array.
+    /// index past the array panics, where Jolt reads past the array. A simulated strand of 0 vertices gets there: at the
+    /// end of the array, or at vertex 0 (its last vertex index wraps, so the walk can pass the end).
     fn closestSearchPosition(sim_vertices: []const SVertex, index: u32) Float3 {
         if (index >= sim_vertices.len)
             @panic("HairSettings.initRenderAndSimulationStrands: a simulated strand of 0 vertices reads past mSimVertices");
@@ -1205,13 +1207,15 @@ pub const HairSettings = struct {
         const sampler: GridSampler = .init(self);
         for (self.sim_vertices.items) |*v| {
             if (v.inv_mass > 0.0) {
-                if (self.isGridTooSmall()) // Zolt (R20 UB30): Jolt indexes past the grid
-                    @panic("HairSettings.init: a vertex samples a grid that is smaller than 2 on X, Y or Z");
                 sampler.sample(Vec3.fromFloat3(v.position), struct {
                     density: []f32,
                     vertex: *const SVertex,
 
                     fn call(c: @This(), index: u32, fraction: f32) void {
+                        // Zolt (R20 UB30): with a GridSize below 2 on X, Y or Z a grid point can be past the end of the
+                        // grid, and Jolt writes past mNeutralDensity
+                        if (index >= c.density.len)
+                            @panic("HairSettings.init: a vertex samples a grid point past the end of the grid");
                         c.density[index] += fraction / c.vertex.inv_mass;
                     }
                 }{ .density = self.neutral_density.items, .vertex = v });
@@ -1262,26 +1266,6 @@ pub const HairSettings = struct {
         }
 
         return max_dist_sq_hair_to_scalp;
-    }
-
-    /// Zolt (R20 UB30): true when the grid size is below 2 on X, Y or Z. Jolt's GridSampler subtracts 2 from the size,
-    /// which then wraps, and every sample indexes past the grid.
-    pub fn isGridTooSmall(self: *const HairSettings) bool {
-        return self.grid_size.getX() < 2 or self.grid_size.getY() < 2 or self.grid_size.getZ() < 2;
-    }
-
-    /// Zolt (R20 UB30): true when the grid shaders of Hair.update sample a vertex. They skip the first vertex of each
-    /// strand and the vertices that InitCompute marks fixed (an inv mass of 0 or less). The padding vertices of a
-    /// strand shorter than mMaxVerticesPerStrand are not fixed.
-    pub fn gridShadersSampleAVertex(self: *const HairSettings) bool {
-        for (self.sim_strands.items) |strand| {
-            var v: u32 = 1;
-            while (v < self.max_vertices_per_strand) : (v += 1) {
-                if (v >= strand.vertexCount() or !(self.sim_vertices.items[strand.start_vtx + v].inv_mass <= 0.0))
-                    return true;
-            }
-        }
-        return false;
     }
 
     /// Must be called after Init to setup the compute buffers
@@ -1751,10 +1735,9 @@ test "HairSettings: init of a strand of 2 vertices, the smallest one" {
     try testing.expectEqual(@as(u32, 2), settings.max_vertices_per_strand);
 }
 
-test "HairSettings: init with a grid of 2 cells per axis, the smallest one (R20 UB30)" {
-    // A GridSize of 2 is the smallest one that the grid sampler supports (it subtracts 2). Below 2 on X, Y or Z a
-    // vertex that samples the grid panics (UB30: Jolt indexes past the grid), which a test cannot catch. Every vertex
-    // with an inv mass above 0 samples a cell of the grid.
+test "HairSettings: init with a grid of 2 cells per axis (R20 UB30)" {
+    // With 2 or more cells on each axis every grid point that a vertex samples is inside the grid. Every vertex with an
+    // inv mass above 0 samples the 8 points around it.
     const allocator = testing.allocator;
     var settings: HairSettings = .{ .allocator = allocator };
     defer settings.deinit();
@@ -1766,6 +1749,31 @@ test "HairSettings: init with a grid of 2 cells per axis, the smallest one (R20 
     var total: f32 = 0.0;
     for (settings.neutral_density.items) |d| total += d;
     try testing.expectApproxEqRel(@as(f32, 9.0), total, 1.0e-5); // 9 vertices of inv mass 1, each sample sums to 1
+}
+
+test "HairSettings: init with a grid of 1 cell on X whose grid points stay inside the grid (R20 UB30)" {
+    // GridSize (1, 4, 4) has 16 points and the stride (1, 1, 4). On X the index is always 0, and the point at x + 1 is
+    // the point at y + 1. A vertex at the indices (0, y, z) samples the points up to y + 4 * z + 6. That is past the
+    // end only for y = 2 and z = 2: Init then panics, like Jolt writes past mNeutralDensity (not tested: a test cannot
+    // catch a panic). These vertices reach point 15, the last one, and Jolt's Init reads inside the grid.
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{});
+    settings.grid_size = .init(1, 4, 4, 0);
+    settings.simulation_bounds_padding = .zero();
+    // Two strands of 2 vertices. The fixed roots span the bounds (0, 0, 0) to (1, 4, 4), so the grid position of a
+    // vertex is its position, clamped to (0, 3, 3).
+    try settings.sim_vertices.appendSlice(allocator, &.{
+        .init(.{ .x = 0, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }),
+        .init(.{ .x = 0.5, .y = 1.5, .z = 3.0 }, .{}), // Indices (0, 1, 2), fraction (0, 0.5, 1): points 9 to 15
+        .init(.{ .x = 1, .y = 4, .z = 4 }, .{ .inv_mass = 0.0 }),
+        .init(.{ .x = 0.5, .y = 3.0, .z = 1.5 }, .{}), // Indices (0, 2, 1), fraction (0, 1, 0.5): points 6 to 12
+    });
+    try settings.sim_strands.appendSlice(allocator, &.{ .init(0, 2, 0), .init(2, 4, 0) });
+    _ = try settings.init();
+    try testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0.5, 0.5, 0 }, settings.neutral_density.items);
+    try testing.expectEqual(@as(f32, 2.0), settings.density_scale);
 }
 
 test "HairSettings: init of strands of 1 vertex after longer strands follows Jolt's release build" {
