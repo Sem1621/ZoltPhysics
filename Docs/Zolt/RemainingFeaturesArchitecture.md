@@ -48,7 +48,7 @@ has the final state.
   and 142 `TODO(debug_renderer)` markers in 53 files (138 after the prototype).
 - At the end of Phase 9, every file of the scope is complete and no `TODO(debug_renderer)` is left. `Core.zig` stays
   partial, as since Phase 2: it holds only the configuration values that the code needs, `debug_renderer` among them.
-- Stays deferred: the GPU compute backends (`Compute/DX12`, `VK`, `MTL`, 3589 lines, and the `.mm` files) and
+- Stays deferred: the GPU compute backends (`Compute/DX12`, `VK` and `MTL` with its `.mm` files, 3589 lines) and
   `Core/Profiler` (R21).
 
 **Milestone M10.** 100% of `UnitTests/` is ported and passes:
