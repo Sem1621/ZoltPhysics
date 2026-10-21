@@ -5864,7 +5864,7 @@ uint32 jolt_sim_reference_has_asserts()
 // Group D3: the renderer of jolt_sim_draw_begin (DebugRenderer::sInstance while it exists)
 static ZoltParity::ParityRenderer *sSimDrawRenderer = nullptr;
 
-// The static draw flags of the simulation: the contacts and the linear cast CCD
+// The static draw flags of the simulation: the contacts and the linear cast CCD, and (group D4) the CharacterVirtual draws
 static void SimSetDrawFlags(bool inDraw)
 {
 	ContactConstraintManager::sDrawContactPoint = inDraw;
@@ -5872,6 +5872,10 @@ static void SimSetDrawFlags(bool inDraw)
 	ContactConstraintManager::sDrawContactPointReduction = inDraw;
 	ContactConstraintManager::sDrawContactManifolds = inDraw;
 	PhysicsSystem::sDrawMotionQualityLinearCast = inDraw;
+	CharacterVirtual::sDrawConstraints = inDraw;
+	CharacterVirtual::sDrawWalkStairs = inDraw;
+	CharacterVirtual::sDrawStickToFloor = inDraw;
+	CharacterVirtual::sDrawSupportingVolume = inDraw;
 }
 #endif // JPH_DEBUG_RENDERER
 
@@ -5918,6 +5922,42 @@ uint64 jolt_sim_draw_take_log(uint8 *outBytes, uint64 inCapacity)
 #else
 	(void)outBytes; (void)inCapacity;
 	return 0;
+#endif
+}
+
+// Group D4 (SimDraw.postDraws in SimulationParity.zig): the draws after an update into the renderer of
+// jolt_sim_draw_begin. First every vehicle gets the RPM meter inRPMMeter (x, y, z, size) and the draw size inDrawSize
+// (when inRPMMeter is null, the vehicles keep their RPM meters and draw sizes: the defaults after update 0). Then with inBodyBits != 0 PhysicsSystem::DrawBodies with the DrawSettings of the bits (ParityBodyDrawSettings) and the
+// colors inShapeColor and inSoftBodyConstraintColor, and with inConstraints != 0 DrawConstraints, DrawConstraintLimits and
+// DrawConstraintReferenceFrame.
+void jolt_sim_draw_world(void *inWorld, uint32 inBodyBits, uint32 inShapeColor, uint32 inSoftBodyConstraintColor, uint32 inConstraints, const float *inRPMMeter, float inDrawSize)
+{
+#ifdef JPH_DEBUG_RENDERER
+	SimWorld *world = static_cast<SimWorld *>(inWorld);
+	if (inRPMMeter != nullptr)
+		for (SimVehicleData *v : world->mVehicles)
+		{
+			VehicleController *controller = v->mConstraint->GetController();
+			Vec3 position(inRPMMeter[0], inRPMMeter[1], inRPMMeter[2]);
+			if (v->mController == 1)
+				static_cast<TrackedVehicleController *>(controller)->SetRPMMeter(position, inRPMMeter[3]);
+			else
+				static_cast<WheeledVehicleController *>(controller)->SetRPMMeter(position, inRPMMeter[3]); // Wheeled and motorcycle
+			v->mConstraint->SetDrawConstraintSize(inDrawSize);
+		}
+	if (inBodyBits != 0)
+	{
+		BodyManager::DrawSettings settings = ZoltParity::ParityBodyDrawSettings(inBodyBits, uint8(inShapeColor), uint8(inSoftBodyConstraintColor));
+		world->mSystem.DrawBodies(settings, sSimDrawRenderer);
+	}
+	if (inConstraints != 0)
+	{
+		world->mSystem.DrawConstraints(sSimDrawRenderer);
+		world->mSystem.DrawConstraintLimits(sSimDrawRenderer);
+		world->mSystem.DrawConstraintReferenceFrame(sSimDrawRenderer);
+	}
+#else
+	(void)inWorld; (void)inBodyBits; (void)inShapeColor; (void)inSoftBodyConstraintColor; (void)inConstraints; (void)inRPMMeter; (void)inDrawSize;
 #endif
 }
 

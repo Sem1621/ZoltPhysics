@@ -2,7 +2,8 @@
 //! Status: complete
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(MotorcycleControllerSettings): `rtti` with
-//!   Jolt's attributes. JPH_DEBUG_RENDERER (`Draw`): TODO(debug_renderer).
+//!   Jolt's attributes. JPH_DEBUG_RENDERER (`Draw`): a gated declaration (RemainingFeaturesArchitecture.md R2); it
+//!   calls the wheeled controller's draw first, like Jolt.
 //! - CharacterVehicleArchitecture E2: `MotorcycleControllerSettings` embeds `base: WheeledVehicleControllerSettings`
 //!   (`rtti`, a class of `RegisterTypes.factory`, E3), `MotorcycleController`
 //!   embeds `base: WheeledVehicleController`: a level under the wheeled classes, built with their `initDerived`. Jolt's
@@ -33,6 +34,9 @@ const Trigonometry = @import("../../Math/Trigonometry.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const DeterminismLog = @import("../DeterminismLog.zig");
+const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const PhysicsSystem = @import("../PhysicsSystem.zig").PhysicsSystem;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
 const VehicleConstraint = @import("VehicleConstraint.zig").VehicleConstraint;
@@ -142,7 +146,7 @@ pub const MotorcycleControllerSettings = struct {
 
 /// Runtime controller class
 pub const MotorcycleController = struct {
-    pub const overrides = .{ .getSettings, .preCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState };
+    pub const overrides = .{ .getSettings, .preCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState, .draw };
 
     base: WheeledVehicleController,
 
@@ -483,7 +487,19 @@ pub const MotorcycleController = struct {
         stream.read(&self.target_lean);
     }
 
-    // TODO(debug_renderer): Draw
+    // See: VehicleController (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const MotorcycleController, renderer: *DebugRenderer) void {
+        self.base.draw(renderer);
+
+        // Draw current and desired lean angle
+        const constraint = self.base.base.constraint;
+        const body = constraint.getVehicleBody();
+        const center_of_mass = body.getCenterOfMassPosition();
+        const up = body.getRotation().mulVec3(constraint.getLocalUp());
+        renderer.drawArrow(center_of_mass, center_of_mass.addVec3(up), Color.yellow, 0.1);
+        renderer.drawArrow(center_of_mass, center_of_mass.addVec3(self.target_lean), Color.red, 0.1);
+    }
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

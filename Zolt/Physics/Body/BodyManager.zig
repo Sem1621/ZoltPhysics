@@ -42,7 +42,7 @@
 //!   `tryGetBodyMut`, `getBodies` / `getBodiesMut`. Pointer + count parameters are slices.
 //! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): gated declarations
 //!   (RemainingFeaturesArchitecture.md R2), `void` without `-Ddebug_renderer`. Jolt's default argument `inBodyFilter` is
-//!   `DrawOptions.body_filter`. Draw takes the body mutexes like Jolt. Its soft body section is group D4's.
+//!   `DrawOptions.body_filter`. Draw takes the body mutexes like Jolt.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1373,8 +1373,43 @@ pub const BodyManager = struct {
                     }
                 }
 
-                // TODO(debug_renderer): the soft body section of Jolt's Draw (SoftBodyMotionProperties::DrawVertices,
-                // DrawVertexVelocities, DrawEdgeConstraints, ..., DrawPredictedBounds), group D4
+                if (body.isSoftBody()) {
+                    const mp = SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties());
+                    const com = body.getCenterOfMassTransform();
+
+                    if (draw_settings.draw_soft_body_vertices)
+                        mp.drawVertices(renderer, com);
+
+                    if (draw_settings.draw_soft_body_vertex_velocities)
+                        mp.drawVertexVelocities(renderer, com);
+
+                    if (draw_settings.draw_soft_body_edge_constraints)
+                        mp.drawEdgeConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_rods)
+                        mp.drawRods(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_rod_states)
+                        mp.drawRodStates(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_rod_bend_twist_constraints)
+                        mp.drawRodBendTwistConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_bend_constraints)
+                        mp.drawBendConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_volume_constraints)
+                        mp.drawVolumeConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_skin_constraints)
+                        mp.drawSkinConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_lra_constraints)
+                        mp.drawLRAConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_predicted_bounds)
+                        mp.drawPredictedBounds(renderer, com);
+                }
             }
         }
     }

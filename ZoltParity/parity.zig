@@ -74,4 +74,5 @@ test {
     _ = @import("Renderer/ParityRenderer.zig");
     _ = @import("Renderer/PhysicsDrawParity.zig");
     _ = @import("Renderer/ShapeDrawParity.zig");
+    _ = @import("Renderer/SkeletonDrawParity.zig");
 }

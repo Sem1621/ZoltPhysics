@@ -340,6 +340,8 @@ const jolt = struct {
     extern fn jolt_sim_draw_begin() u32;
     extern fn jolt_sim_draw_end() void;
     extern fn jolt_sim_draw_take_log(out_bytes: [*]u8, capacity: u64) u64;
+    // Group D4: the draws after an update (SimDraw.postDraws)
+    extern fn jolt_sim_draw_world(world: *anyopaque, body_bits: u32, shape_color: u32, soft_body_constraint_color: u32, constraints: u32, rpm_meter: ?*const [4]f32, draw_size: f32) void;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -7700,8 +7702,22 @@ fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !voi
 // CCD (`renderer.flags.physics_system`) set, the C++ worlds with a ParityRenderer as DebugRenderer::sInstance and the
 // static flags set (jolt_sim_draw_begin). After every update the call logs of the update and of the operations before it
 // must match call for call, and the Zolt state must be the state of the same scene in the same configuration without
-// drawing (recorded by a run before): drawing changes nothing. The character scenes draw their contacts only: the
-// CharacterVirtual flags are group D4's.
+// drawing (recorded by a run before): drawing changes nothing.
+//
+// Group D4: every CharacterVirtual flag is set too (`renderer.flags.character_virtual`, the static flags of
+// CharacterVirtual), so the character scenes draw the constraints, the walk stairs and stick to floor sweeps and the
+// supporting volume. The scenes of `post_draw_scenes` also draw after every update (`SimDraw.postDraws`, before the logs
+// are compared): the vehicle scenes draw the constraints the three ways (VehicleConstraint draws its controller: the
+// wheeled, tracked and motorcycle draws, the RPM meter, the status and wheel texts), after update 0 with Jolt's default
+// RPM meter and draw size, then with an RPM meter and a draw size that change with the update; the soft body scenes draw
+// the bodies with the shapes and every soft body flag of DrawSettings (all of them in even updates, one flag after the
+// other in odd updates) in the three ESoftBodyConstraintColors. The conditional D4 draws must be reached: each scene of
+// `draw_scene_reaches` fails unless it reaches its branches of `DrawBranch` (the WalkStairs sweeps, StickToFloor, the
+// three parts of the RPM meter, the wheel speed line, the wheels with and without contact, the soft body constraint
+// kinds, the update groups after the first), and every branch is listed there. Proof that it bites: a ConstraintOrder
+// fraction divided by `end` instead of `end - start` fails soft_body_large_cloth only (update 2, a draw_line color); a
+// default RPM meter size of 0.6 fails the wheeled and motorcycle scenes at update 0; StickToFloor drawn on neither side
+// fails the 4 scenes that list stick_to_floor, while their logs match.
 
 /// The scenes that also run with drawing (contacts, CCD, constraints, characters)
 const draw_scenes = [_][]const u8{
@@ -7719,7 +7735,154 @@ const draw_scenes = [_][]const u8{
     "constraints_hinge_car",
     "character_ops",
     "character_virtual_ops",
+    // Group D4: the CharacterVirtual draws (every character virtual scene but perf_character_virtual)
+    "character_virtual_characters",
+    "character_virtual_stairs_slopes",
+    "character_virtual_platforms",
+    "character_virtual_far_from_origin",
+    "character_virtual_crowd",
+    "character_virtual_inner_body",
+    "character_virtual_contact_limits",
+    "character_virtual_penetration",
+    "character_virtual_set_shape",
+    "character_virtual_internal_edges",
+    "character_virtual_terrain",
+    "character_virtual_cross_restore",
+    "character_virtual_listener_none",
+    "character_virtual_listener_record",
+    "character_virtual_listener_modify",
+    "character_virtual_shapes",
 };
+
+/// Group D4: the draws after every update of a scene (`SimDraw.postDraws`)
+const PostDraws = struct {
+    /// BodyManager::Draw with the shapes and the soft body flags
+    bodies: bool = false,
+    /// The three constraint draws of the system (the vehicles)
+    constraints: bool = false,
+};
+
+/// Group D4: the scenes that also run with drawing and draw after every update (vehicles, soft bodies)
+const post_draw_scenes = [_]struct { name: []const u8, post: PostDraws }{
+    .{ .name = "vehicle_wheeled_ops", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_tracked_ops", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_motorcycle_ops", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_wheeled_driving", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_wheeled_in_air", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_tracked_terrains", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_motorcycle_turns", .post = .{ .constraints = true } },
+    .{ .name = "vehicle_wheeled_far_from_origin", .post = .{ .constraints = true, .bodies = true } },
+    .{ .name = "soft_body_cube_on_floor", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_ops", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_cloth_lra", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_cloth_dihedral", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_pressure_sphere", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_rod_chain", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_skinned_back_stops", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_several_on_one_body", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_update_position_false", .post = .{ .bodies = true } },
+    .{ .name = "soft_body_test_bend_constraint", .post = .{ .bodies = true } },
+    // The only scene with several parallel update groups and a non-parallel group with constraints: the constraints of
+    // the groups after the first (start > 0) in the ConstraintGroup and ConstraintOrder colors
+    .{ .name = "soft_body_large_cloth", .post = .{ .bodies = true } },
+};
+
+/// Group D4: the branches of the conditional D4 draws that the layer must reach. `SimDraw.reached` collects them: the
+/// CharacterVirtual branches from the Zolt call log of the update (`markCharacterArrows`), the vehicle and soft body
+/// branches before the draws of postDraws, with the conditions of the draw functions (`markPostDrawBranches`). A scene
+/// of `draw_scene_reaches` fails when it does not reach its branches, and every branch is listed there (checked at
+/// compile time).
+const DrawBranch = enum {
+    /// CharacterVirtual::WalkStairs: the sweep down finds a slope that is too steep (red arrows right after the white
+    /// arrow of the horizontal sweep)
+    walk_stairs_too_steep,
+    /// WalkStairs: the 2nd horizontal sweep to inStepForwardTest (cyan arrow)
+    walk_stairs_second_sweep,
+    /// WalkStairs: the 2nd sweep down finds a floor that is not too steep (cyan arrows right after the cyan arrow)
+    walk_stairs_second_sweep_down,
+    /// WalkStairs: the 2nd sweep down finds a slope that is too steep (red arrows right after the cyan arrow)
+    walk_stairs_second_sweep_down_too_steep,
+    /// CharacterVirtual::StickToFloor (orange arrow)
+    stick_to_floor,
+    /// VehicleEngine::DrawRPM: the RPM is below the shift down RPM (the red and dark red parts)
+    rpm_below_shift_down,
+    /// DrawRPM: the RPM is between the shift down and the shift up RPM (the orange and dark orange parts)
+    rpm_between_shifts,
+    /// DrawRPM: the RPM is above the shift up RPM (the green and dark green parts)
+    rpm_above_shift_up,
+    /// WheeledVehicleController::Draw: the wheel speed at the clutch (a transmission ratio that is not 0)
+    wheel_speed_line,
+    /// The wheeled and tracked Draw: a wheel with a contact (the contact lines and the slip text)
+    wheel_contact,
+    /// The wheeled and tracked Draw: a wheel without a contact (the 'no hit' text)
+    wheel_no_hit,
+    /// BodyManager::Draw of a soft body with skinned constraints (SoftBodyMotionProperties::DrawSkinConstraints)
+    soft_body_skin_constraints,
+    /// ... with LRA constraints (DrawLRAConstraints)
+    soft_body_lra_constraints,
+    /// ... with rods (DrawRods)
+    soft_body_rods,
+    /// ... with rods (DrawRodStates)
+    soft_body_rod_states,
+    /// ... with rod bend twist constraints (DrawRodBendTwistConstraints)
+    soft_body_rod_bend_twist_constraints,
+    /// ... with dihedral bend constraints (DrawBendConstraints)
+    soft_body_bend_constraints,
+    /// ... with volume constraints (DrawVolumeConstraints)
+    soft_body_volume_constraints,
+    /// DrawConstraints: drawn constraints in an update group after the first (start > 0), in ConstraintGroup colors
+    /// (the distinct color of the group)
+    soft_body_later_group_colors,
+    /// DrawConstraints: the same in ConstraintOrder colors (the fraction (idx - start) / (end - start))
+    soft_body_later_group_order,
+};
+
+/// Group D4: the branches of `DrawBranch` that a scene of `draw_scenes` or `post_draw_scenes` must reach (all that it
+/// reaches today; `verbose` prints them)
+const draw_scene_reaches = [_]struct { name: []const u8, reaches: []const DrawBranch }{
+    .{ .name = "character_virtual_ops", .reaches = &.{.stick_to_floor} },
+    .{ .name = "character_virtual_stairs_slopes", .reaches = &.{ .walk_stairs_too_steep, .walk_stairs_second_sweep, .walk_stairs_second_sweep_down, .stick_to_floor } },
+    .{ .name = "character_virtual_inner_body", .reaches = &.{ .walk_stairs_too_steep, .walk_stairs_second_sweep, .walk_stairs_second_sweep_down_too_steep, .stick_to_floor } },
+    .{ .name = "character_virtual_terrain", .reaches = &.{.stick_to_floor} },
+    .{ .name = "character_virtual_cross_restore", .reaches = &.{ .walk_stairs_too_steep, .walk_stairs_second_sweep, .walk_stairs_second_sweep_down } },
+    .{ .name = "character_virtual_listener_none", .reaches = &.{ .walk_stairs_too_steep, .walk_stairs_second_sweep, .walk_stairs_second_sweep_down_too_steep } },
+    .{ .name = "character_virtual_listener_record", .reaches = &.{ .walk_stairs_too_steep, .walk_stairs_second_sweep, .walk_stairs_second_sweep_down_too_steep } },
+    .{ .name = "character_virtual_listener_modify", .reaches = &.{ .walk_stairs_too_steep, .walk_stairs_second_sweep, .walk_stairs_second_sweep_down_too_steep } },
+    .{ .name = "vehicle_wheeled_ops", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .wheel_speed_line, .wheel_contact } },
+    .{ .name = "vehicle_tracked_ops", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .rpm_above_shift_up, .wheel_contact } },
+    .{ .name = "vehicle_motorcycle_ops", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .wheel_speed_line, .wheel_contact } },
+    .{ .name = "vehicle_wheeled_driving", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .rpm_above_shift_up, .wheel_speed_line, .wheel_contact, .wheel_no_hit } },
+    .{ .name = "vehicle_wheeled_in_air", .reaches = &.{ .rpm_below_shift_down, .wheel_speed_line, .wheel_contact, .wheel_no_hit } },
+    .{ .name = "vehicle_tracked_terrains", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .rpm_above_shift_up, .wheel_contact, .wheel_no_hit } },
+    .{ .name = "vehicle_motorcycle_turns", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .wheel_speed_line, .wheel_contact } },
+    .{ .name = "vehicle_wheeled_far_from_origin", .reaches = &.{ .rpm_below_shift_down, .rpm_between_shifts, .rpm_above_shift_up, .wheel_speed_line, .wheel_contact } },
+    .{ .name = "soft_body_cube_on_floor", .reaches = &.{.soft_body_volume_constraints} },
+    .{ .name = "soft_body_ops", .reaches = &.{ .soft_body_skin_constraints, .soft_body_lra_constraints, .soft_body_rods, .soft_body_rod_states, .soft_body_rod_bend_twist_constraints, .soft_body_bend_constraints, .soft_body_volume_constraints } },
+    .{ .name = "soft_body_cloth_lra", .reaches = &.{.soft_body_lra_constraints} },
+    .{ .name = "soft_body_cloth_dihedral", .reaches = &.{.soft_body_bend_constraints} },
+    .{ .name = "soft_body_rod_chain", .reaches = &.{ .soft_body_rods, .soft_body_rod_states, .soft_body_rod_bend_twist_constraints } },
+    .{ .name = "soft_body_skinned_back_stops", .reaches = &.{.soft_body_skin_constraints} },
+    .{ .name = "soft_body_several_on_one_body", .reaches = &.{.soft_body_volume_constraints} },
+    .{ .name = "soft_body_update_position_false", .reaches = &.{.soft_body_volume_constraints} },
+    .{ .name = "soft_body_test_bend_constraint", .reaches = &.{.soft_body_bend_constraints} },
+    .{ .name = "soft_body_large_cloth", .reaches = &.{ .soft_body_lra_constraints, .soft_body_bend_constraints, .soft_body_later_group_colors, .soft_body_later_group_order } },
+};
+
+comptime {
+    @setEvalBranchQuota(100000);
+    var listed: std.EnumSet(DrawBranch) = .initEmpty();
+    for (draw_scene_reaches) |r| {
+        for (r.reaches) |branch| listed.insert(branch);
+        const known = for (draw_scenes) |name| {
+            if (std.mem.eql(u8, name, r.name)) break true;
+        } else for (post_draw_scenes) |scene| {
+            if (std.mem.eql(u8, scene.name, r.name)) break true;
+        } else false;
+        if (!known) @compileError("draw_scene_reaches: " ++ r.name ++ " is not a scene of draw_scenes or post_draw_scenes");
+    }
+    var it = listed.complement().iterator();
+    if (it.next()) |branch| @compileError("draw_scene_reaches: no scene reaches the draw branch " ++ @tagName(branch));
+}
 
 /// The draws of a run (see above). Mode `record_states` records the Zolt state after every update, mode `draw` draws and
 /// compares.
@@ -7732,6 +7895,10 @@ const SimDraw = struct {
     jolt_log: std.ArrayList(u8) = .empty,
     /// The number of log bytes compared (the scene must draw something)
     num_log_bytes: usize = 0,
+    /// Group D4: the draws after every update
+    post: PostDraws = .{},
+    /// Group D4: the branches of the conditional draws that the run reached
+    reached: std.EnumSet(DrawBranch) = .initEmpty(),
 
     fn deinit(self: *SimDraw) void {
         for (self.states.items) |s| self.allocator.free(s);
@@ -7747,6 +7914,7 @@ const SimDraw = struct {
         self.renderer.log.bytes.clearRetainingCapacity();
         self.renderer.base.flags.contact_constraint_manager = .{ .draw_contact_point = true, .draw_supporting_faces = true, .draw_contact_point_reduction = true, .draw_contact_manifolds = true };
         self.renderer.base.flags.physics_system.draw_motion_quality_linear_cast = true;
+        self.renderer.base.flags.character_virtual = .{ .draw_constraints = true, .draw_walk_stairs = true, .draw_stick_to_floor = true, .draw_supporting_volume = true };
         zw.system.setDebugRenderer(&self.renderer.base);
         std.debug.assert(jolt.jolt_sim_draw_begin() == 1);
     }
@@ -7759,6 +7927,9 @@ const SimDraw = struct {
         self.renderer.deinit();
     }
 
+    /// Group D4: the draws after an update (only with the option)
+    const postDraws = if (Core.debug_renderer) postDrawsImpl else {};
+
     /// After every update (Run.step, `run.zolt_state` holds the Zolt state): record the state, or compare it with the
     /// recorded one and compare the call logs since the last update
     fn afterUpdate(self: *SimDraw, run: *Run) !void {
@@ -7769,6 +7940,8 @@ const SimDraw = struct {
                 const without = self.states.items[run.update];
                 if (std.mem.indexOfDiff(u8, run.zolt_state.items, without)) |first|
                     return run.fail("the state with drawing differs from the state without drawing at byte {d} ({d} / {d} bytes)", .{ first, run.zolt_state.items.len, without.len });
+                markCharacterArrows(self.renderer.log.bytes.items, &self.reached);
+                self.postDraws(run);
                 self.jolt_log.clearRetainingCapacity();
                 const size = jolt.jolt_sim_draw_take_log(self.jolt_log.items.ptr, 0);
                 try self.jolt_log.resize(self.allocator, @intCast(size));
@@ -7785,8 +7958,194 @@ const SimDraw = struct {
     }
 };
 
+/// The bits of `ParityRenderer.BodyDrawBits` that postDraws uses
+const PostDrawBits = struct {
+    const Bits = ParityRenderer.BodyDrawBits;
+    const num_soft_body_flags = Bits.count - Bits.first_soft_body;
+    const all_soft_body: u32 = Bits.all & ~((@as(u32, 1) << Bits.first_soft_body) - 1);
+};
+
+/// Group D4 (see above): the draws after update `run.update` on both sides. From update 1 on, the RPM meters and draw
+/// sizes change with the update (the draws after update 0 use the defaults: Jolt's mRPMMeterPosition, mRPMMeterSize and
+/// mDrawConstraintSize); so do the soft body flags (all of them, or one) and the ESoftBodyConstraintColor.
+fn postDrawsImpl(self: *SimDraw, run: *Run) void {
+    if (!self.post.bodies and !self.post.constraints) return;
+    const u = run.update;
+    const rpm_meter = [4]f32{ 0.25 * @as(f32, @floatFromInt(u % 3)), 1.0 + 0.25 * @as(f32, @floatFromInt(u % 4)), -0.5, 0.5 + 0.125 * @as(f32, @floatFromInt(u % 5)) };
+    const draw_size: f32 = 0.5 + 0.25 * @as(f32, @floatFromInt(u % 4));
+    const set_meters = u > 0;
+    if (set_meters) {
+        for (run.zw.phase7.vehicles.vehicles.items) |v| {
+            const constraint = v.get();
+            const controller = constraint.getControllerMut();
+            const position = Vec3.init(rpm_meter[0], rpm_meter[1], rpm_meter[2]);
+            switch (v.controller) {
+                .wheeled => zolt.virtual.downcast(zolt.WheeledVehicleController, controller).setRPMMeter(position, rpm_meter[3]),
+                .tracked => zolt.virtual.downcast(zolt.TrackedVehicleController, controller).setRPMMeter(position, rpm_meter[3]),
+                .motorcycle => zolt.virtual.downcast(zolt.MotorcycleController, controller).base.setRPMMeter(position, rpm_meter[3]),
+            }
+            constraint.base.setDrawConstraintSize(draw_size);
+        }
+    }
+
+    const body_bits: u32 = if (!self.post.bodies) 0 else ParityRenderer.BodyDrawBits.draw_shape | if (u % 2 == 0) PostDrawBits.all_soft_body else @as(u32, 1) << @intCast(ParityRenderer.BodyDrawBits.first_soft_body + (u / 2) % PostDrawBits.num_soft_body_flags);
+    const shape_color: u8 = @intCast(u % ParityRenderer.BodyDrawBits.num_shape_colors);
+    const soft_body_constraint_color: u8 = @intCast(u % ParityRenderer.BodyDrawBits.num_soft_body_constraint_colors);
+    const renderer = &self.renderer.base;
+    const settings = ParityRenderer.bodyDrawSettings(body_bits, shape_color, soft_body_constraint_color);
+    markPostDrawBranches(self, run, if (body_bits != 0) &settings else null);
+    if (body_bits != 0)
+        run.zw.system.drawBodies(&settings, renderer, .{});
+    if (self.post.constraints) {
+        run.zw.system.drawConstraints(renderer);
+        run.zw.system.drawConstraintLimits(renderer);
+        run.zw.system.drawConstraintReferenceFrame(renderer);
+    }
+    jolt.jolt_sim_draw_world(run.cw.handle, body_bits, shape_color, soft_body_constraint_color, @intFromBool(self.post.constraints), if (set_meters) &rpm_meter else null, draw_size);
+}
+
+/// Group D4: marks the vehicle and soft body branches of `DrawBranch` that the draws of postDrawsImpl reach (`settings`:
+/// the DrawSettings of BodyManager::Draw, null when it does not draw), with the conditions of the draw functions
+fn markPostDrawBranches(self: *SimDraw, run: *Run, settings: ?*const zolt.BodyManager.DrawSettings) void {
+    if (comptime !Core.debug_renderer) return;
+    const reached = &self.reached;
+    if (self.post.constraints) {
+        for (run.zw.phase7.vehicles.vehicles.items) |v| {
+            const constraint = v.get();
+            const controller = constraint.getControllerMut();
+            const engine: *const zolt.VehicleEngine, const transmission: *const zolt.VehicleTransmission = switch (v.controller) {
+                .wheeled, .motorcycle => blk: {
+                    const c = if (v.controller == .wheeled) zolt.virtual.downcast(zolt.WheeledVehicleController, controller) else &zolt.virtual.downcast(zolt.MotorcycleController, controller).base;
+                    // WheeledVehicleController::Draw: the wheel speed line
+                    if (c.transmission.getCurrentRatio() != 0.0) reached.insert(.wheel_speed_line);
+                    break :blk .{ &c.engine, &c.transmission };
+                },
+                .tracked => blk: {
+                    const c = zolt.virtual.downcast(zolt.TrackedVehicleController, controller);
+                    break :blk .{ &c.engine, &c.transmission };
+                },
+            };
+
+            // VehicleEngine::DrawRPM
+            const rpm = engine.getCurrentRPM();
+            const shift_down_rpm = transmission.base.shift_down_rpm;
+            const shift_up_rpm = transmission.base.shift_up_rpm;
+            if (rpm < shift_down_rpm) reached.insert(.rpm_below_shift_down);
+            if (rpm > shift_down_rpm and rpm < shift_up_rpm) reached.insert(.rpm_between_shifts);
+            if (rpm > shift_up_rpm) reached.insert(.rpm_above_shift_up);
+
+            for (constraint.getWheels()) |w|
+                reached.insert(if (w.hasContact()) .wheel_contact else .wheel_no_hit);
+        }
+    }
+
+    const s = settings orelse return;
+    for (run.zw.system.body_manager.getBodies()) |slot| {
+        if (!slot.isValidBodyPointer()) continue;
+        const body = slot.getBody();
+        if (!body.isInBroadPhase() or !body.isSoftBody()) continue;
+        const shared = zolt.SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties()).settings.get().?;
+        if (s.draw_soft_body_skin_constraints and shared.skinned_constraints.items.len > 0) reached.insert(.soft_body_skin_constraints);
+        if (s.draw_soft_body_lra_constraints and shared.lra_constraints.items.len > 0) reached.insert(.soft_body_lra_constraints);
+        if (s.draw_soft_body_rods and shared.rod_stretch_shear_constraints.items.len > 0) reached.insert(.soft_body_rods);
+        if (s.draw_soft_body_rod_states and shared.rod_stretch_shear_constraints.items.len > 0) reached.insert(.soft_body_rod_states);
+        if (s.draw_soft_body_rod_bend_twist_constraints and shared.rod_bend_twist_constraints.items.len > 0) reached.insert(.soft_body_rod_bend_twist_constraints);
+        if (s.draw_soft_body_bend_constraints and shared.dihedral_bend_constraints.items.len > 0) reached.insert(.soft_body_bend_constraints);
+        if (s.draw_soft_body_volume_constraints and shared.volume_constraints.items.len > 0) reached.insert(.soft_body_volume_constraints);
+
+        // SoftBodyMotionProperties::DrawConstraints: a drawn kind of constraint with constraints in a group after the first
+        if (s.draw_soft_body_constraint_color == .constraint_type) continue;
+        const kinds = .{
+            .{ s.draw_soft_body_edge_constraints, "edge_end_index" },
+            .{ s.draw_soft_body_rods or s.draw_soft_body_rod_states, "rod_stretch_shear_end_index" },
+            .{ s.draw_soft_body_rod_bend_twist_constraints, "rod_bend_twist_end_index" },
+            .{ s.draw_soft_body_bend_constraints, "dihedral_bend_end_index" },
+            .{ s.draw_soft_body_volume_constraints, "volume_end_index" },
+            .{ s.draw_soft_body_skin_constraints, "skinned_end_index" },
+            .{ s.draw_soft_body_lra_constraints, "lra_end_index" },
+        };
+        const groups = shared.update_groups.items;
+        inline for (kinds) |kind| {
+            if (kind[0]) {
+                for (1..groups.len) |i| {
+                    if (@field(groups[i], kind[1]) > @field(groups[i - 1], kind[1]))
+                        reached.insert(if (s.draw_soft_body_constraint_color == .constraint_order) .soft_body_later_group_order else .soft_body_later_group_colors);
+                }
+            }
+        }
+    }
+}
+
+/// Group D4: marks the CharacterVirtual branches of `DrawBranch` in a Zolt call log. DebugRenderer.drawArrow logs 3
+/// lines of one color that end in the same point; the 2 lines of the head have the length sqrt(2) * size. WalkStairs and
+/// StickToFloor draw arrows of size 0.01. No other draw of an update in the draw scenes does (the 0.01 arrows of the
+/// soft bodies come from postDraws, after the scan).
+fn markCharacterArrows(log: []const u8, reached: *std.EnumSet(DrawBranch)) void {
+    const Line = struct { from: [3]Real, to: [3]Real, color: u32 };
+    const white = Color.white.getUInt32();
+    const red = Color.red.getUInt32();
+    const cyan = Color.cyan.getUInt32();
+    const orange = Color.orange.getUInt32();
+    const head_length = @sqrt(2.0) * 0.01;
+
+    var window: [3]Line = undefined;
+    var num_lines: usize = 0; // The number of lines in a row at the end of the window
+    var previous_color: ?u32 = null; // The color of the last arrow, null after a record that is not a line
+    var lines_since_arrow: usize = 0; // The number of lines after the last arrow
+    var offset: usize = 0;
+    while (offset < log.len) {
+        const size = ParityRenderer.recordSize(log[offset..]) orelse return;
+        const record = log[offset..][0..size];
+        offset += size;
+        if (record[0] != @intFromEnum(ParityRenderer.LogOp.draw_line)) {
+            num_lines = 0;
+            previous_color = null;
+            continue;
+        }
+        const vec_size = 3 * @sizeOf(Real);
+        window[0] = window[1];
+        window[1] = window[2];
+        window[2] = .{
+            .from = std.mem.bytesToValue([3]Real, record[1..][0..vec_size]),
+            .to = std.mem.bytesToValue([3]Real, record[1 + vec_size ..][0..vec_size]),
+            .color = std.mem.readInt(u32, record[1 + 2 * vec_size ..][0..4], .little),
+        };
+        num_lines += 1;
+        lines_since_arrow += 1;
+        if (num_lines < 3 or (previous_color != null and lines_since_arrow < 3)) continue;
+
+        // An arrow of size 0.01: one color, one end point, the head lines of the right length
+        const base = window[0];
+        const is_arrow = for (window[1..]) |head| {
+            if (head.color != base.color or !std.mem.eql(Real, &head.to, &base.to)) break false;
+            var length_sq: f64 = 0;
+            for (head.from, head.to) |a, b| length_sq += (@as(f64, a) - b) * (@as(f64, a) - b);
+            if (@abs(@sqrt(length_sq) - head_length) > 0.01 * head_length) break false;
+        } else true;
+        if (!is_arrow) continue;
+
+        // The color of the arrow right before this one (no record in between)
+        const color = base.color;
+        const after: ?u32 = if (lines_since_arrow == 3) previous_color else null;
+        if (color == orange) reached.insert(.stick_to_floor);
+        if (color == cyan) reached.insert(.walk_stairs_second_sweep);
+        if (after) |p| {
+            if (p == white and color == red) reached.insert(.walk_stairs_too_steep);
+            if (p == cyan and color == cyan) reached.insert(.walk_stairs_second_sweep_down);
+            if (p == cyan and color == red) reached.insert(.walk_stairs_second_sweep_down_too_steep);
+        }
+        previous_color = color;
+        lines_since_arrow = 0;
+    }
+}
+
 /// Run a scene of `draw_scenes` without drawing (recording the states), then with drawing
 fn runDrawScene(name: []const u8) !void {
+    return runDrawSceneWith(name, .{});
+}
+
+/// runDrawScene with the draws after every update of `post` (group D4)
+fn runDrawSceneWith(name: []const u8, post: PostDraws) !void {
     if (!Core.debug_renderer) return error.SkipZigTest;
     const entry = for (&SimScenes.scenes) |*e| {
         if (std.mem.eql(u8, e.name, name)) break e;
@@ -7799,7 +8158,7 @@ fn runDrawScene(name: []const u8) !void {
     defer builder.deinit();
     try entry.build(&builder);
 
-    var draw: SimDraw = .{ .allocator = allocator, .mode = .record_states };
+    var draw: SimDraw = .{ .allocator = allocator, .mode = .record_states, .post = post };
     defer draw.deinit();
     const config: Config = .{ .zolt = .{ .thread_pool = 0 }, .cpp_threads = 0, .draw = &draw };
     _ = try runScene(allocator, entry, &builder, config, null);
@@ -7810,6 +8169,25 @@ fn runDrawScene(name: []const u8) !void {
         std.debug.print("SimulationParity: scene {s} draws nothing\n", .{name});
         return error.TestUnexpectedResult;
     }
+
+    // Group D4: the branches of the conditional draws that the scene must reach
+    if (verbose) {
+        var it = draw.reached.iterator();
+        std.debug.print("SimulationParity draws: scene {s} reaches", .{name});
+        while (it.next()) |branch| std.debug.print(" .{t},", .{branch});
+        std.debug.print("\n", .{});
+    }
+    var missed = false;
+    for (draw_scene_reaches) |r| {
+        if (!std.mem.eql(u8, r.name, name)) continue;
+        for (r.reaches) |branch| {
+            if (!draw.reached.contains(branch)) {
+                std.debug.print("SimulationParity: scene {s} does not reach the draw branch {t}\n", .{ name, branch });
+                missed = true;
+            }
+        }
+    }
+    if (missed) return error.TestUnexpectedResult;
 }
 
 fn DrawSceneTest(comptime name: []const u8) type {
@@ -7823,6 +8201,19 @@ fn DrawSceneTest(comptime name: []const u8) type {
 comptime {
     for (draw_scenes) |name|
         _ = DrawSceneTest(name);
+}
+
+fn PostDrawSceneTest(comptime name: []const u8, comptime post: PostDraws) type {
+    return struct {
+        test "SimulationParity draws (after the updates)" {
+            try runDrawSceneWith(name, post);
+        }
+    };
+}
+
+comptime {
+    for (post_draw_scenes) |scene|
+        _ = PostDrawSceneTest(scene.name, scene.post);
 }
 
 /// One test per scene: `SceneTest("name", index)` (a blocked scene is skipped)

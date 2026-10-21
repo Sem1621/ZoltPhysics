@@ -41,6 +41,7 @@
 #include <Jolt/Physics/Body/BodyManager.h>
 #include <Jolt/Physics/Constraints/ConstraintManager.h>
 #include <Jolt/Physics/PhysicsSettings.h>
+#include <Jolt/Skeleton/SkeletonPose.h>
 #include <ZoltParity/ParityHooks.h>
 
 #include <atomic>
@@ -400,7 +401,8 @@ inline void ParitySetShapeDrawFlags(uint8 inFlags)
 	HeightFieldShape::sDrawTriangleOutlines = (inFlags & 16) != 0;
 }
 
-/// The constraints and bodies of the D3 ops and their results (PhysicsContext in ParityRenderer.zig)
+/// The constraints and bodies of the D3 ops, the skeleton poses of the D4 op and their results (PhysicsContext in
+/// ParityRenderer.zig)
 struct ParityPhysicsContext
 {
 	Array<Constraint *>				mConstraints;						///< The constraints that the constraint ops index
@@ -408,6 +410,7 @@ struct ParityPhysicsContext
 	ConstraintManager *				mConstraintManager = nullptr;		///< The manager of the op draw_constraint_manager
 	BodyManager *					mBodyManager = nullptr;				///< The manager of the ops draw_bodies and activate_body
 	Array<Body *>					mBodies;							///< The bodies that the body ops index
+	Array<const SkeletonPose *>		mPoses;								///< The skeleton poses that the op draw_skeleton_pose indexes (D4)
 	std::vector<uint8>				mResults;							///< The results of the ops that compute numbers
 
 	template <class T>
@@ -457,7 +460,8 @@ inline BodyManager::DrawSettings ParityBodyDrawSettings(uint32 inBits, uint8 inS
 
 /// Executes the op stream of ParityRenderer.zig on inRenderer (D0's ops 1 to 15: the virtual functions and the helpers of
 /// DebugRenderer that D0 found ported; D1's ops 16 to 36: the other helpers, NextFrame and the batch helpers; D2's ops 64
-/// to 69: the shapes of ioShapes; D3's ops 96 to 104: the constraints and bodies of ioPhysics). ioSimple and ioRecorder
+/// to 69: the shapes of ioShapes; D3's ops 96 to 104: the constraints and bodies of ioPhysics; D4's op 128: the skeleton
+/// poses of ioPhysics). ioSimple and ioRecorder
 /// are the renderer as a DebugRendererSimple / DebugRendererRecorder (or null) for the ops that only they have. The shape
 /// ops change the static draw flags of the shapes: the caller resets them (ParitySetShapeDrawFlags(0)).
 inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder, ParityShapeContext *ioShapes = nullptr, ParityPhysicsContext *ioPhysics = nullptr)
@@ -1028,6 +1032,27 @@ inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t i
 			{
 				Body *body = ParityPhysics(ioPhysics).mBodies[r.Read<uint32>()];
 				body->GetMotionProperties()->SetIslandIndexInternal(r.Read<uint32>());
+				break;
+			}
+
+		// D4: the skeleton poses of ioPhysics
+
+		case 128: // SkeletonPose::Draw: u32 pose, u8 settings (the booleans of DrawSettings in declaration order), u8 with
+				  // offset, then the matrix offset when it is set (without it the default argument)
+			{
+				const SkeletonPose *pose = ParityPhysics(ioPhysics).mPoses[r.Read<uint32>()];
+				uint8 bits = r.Read<uint8>();
+				SkeletonPose::DrawSettings settings;
+				settings.mDrawJoints = (bits & 1) != 0;
+				settings.mDrawJointOrientations = (bits & 2) != 0;
+				settings.mDrawJointNames = (bits & 4) != 0;
+				if (r.Read<uint8>() != 0)
+				{
+					RMat44 offset = r.ReadRMat44();
+					pose->Draw(settings, &ioRenderer, offset);
+				}
+				else
+					pose->Draw(settings, &ioRenderer);
 				break;
 			}
 

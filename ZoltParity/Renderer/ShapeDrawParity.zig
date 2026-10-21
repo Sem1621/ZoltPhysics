@@ -26,6 +26,9 @@
 //!   so their draw cuts them in several blocks (2 x 2 and 3 x 3, partial last blocks, holes in every block and on the
 //!   block edges). Its mesh has no materials (the single color of the material colors). The catalogue of the sweep has
 //!   neither.
+//! - soft bodies (group D4): SoftBodyShape::Draw of the soft bodies of `PairwiseParity.makeSoftBodyCatalogue` (cloths and
+//!   closed spheres, single and double sided, with materials, a vertex radius and a rotation, one face and no faces):
+//!   the frames draw only them.
 //! Each layer builds its own catalogue: the cached geometry of a shape belongs to the renderer that created it.
 
 const std = @import("std");
@@ -59,8 +62,9 @@ fn requireDebugRenderer() !void {
 /// The renderer that runs the ops (the `kind` of jolt_dr_run_shape_ops)
 const Kind = enum(c_int) { parity_renderer = 0, simple = 1, recorder = 2 };
 
-/// The shapes that a layer draws: the catalogue of the pairwise sweep, or the large shapes of the draws
-const CatalogueKind = enum { sweep, large };
+/// The shapes that a layer draws: the catalogue of the pairwise sweep, the large shapes of the draws, or the catalogue of
+/// the soft body sweep (only its soft bodies are drawn)
+const CatalogueKind = enum { sweep, large, soft_body };
 
 /// The catalogue on both sides and the Zolt shapes for the ShapeContext
 const Catalogue = struct {
@@ -74,6 +78,7 @@ const Catalogue = struct {
         const description = switch (kind) {
             .sweep => try pw.makeCatalogue(allocator),
             .large => try pw.makeShapeDrawCatalogue(allocator),
+            .soft_body => try pw.makeSoftBodyCatalogue(allocator),
         };
         const built = try pw.Built.init(allocator, description, buffer);
         errdefer built.deinit();
@@ -121,6 +126,8 @@ const Generator = struct {
     gen: pw.Gen,
     cat: *const Catalogue,
     w: *pr.OpWriter,
+    /// The nodes that the ops draw
+    nodes: []const u32,
 
     fn color(self: *Generator) Color {
         return Color.fromUInt32(self.gen.rng.next());
@@ -148,7 +155,7 @@ const Generator = struct {
     }
 
     fn randomNode(self: *Generator) u32 {
-        return self.gen.index(self.cat.numShapes());
+        return self.nodes[self.gen.index(@intCast(self.nodes.len))];
     }
 
     fn draw(self: *Generator, n: u32, use_material_colors: bool, draw_wireframe: bool) !void {
@@ -204,8 +211,7 @@ const Generator = struct {
                 else => self.randomFlags(),
             };
             try self.w.setShapeDrawFlags(flags);
-            for (0..self.cat.numShapes()) |i| {
-                const n: u32 = @intCast(i);
+            for (self.nodes) |n| {
                 if (options.all_combinations) {
                     for ([_]bool{ false, true }) |use_material_colors| {
                         for ([_]bool{ false, true }) |draw_wireframe| try self.draw(n, use_material_colors, draw_wireframe);
@@ -230,7 +236,15 @@ const Generator = struct {
 
 /// The op stream of a layer
 fn makeOps(cat: *const Catalogue, w: *pr.OpWriter, seed: u32, options: GenOptions) !void {
-    var g: Generator = .{ .gen = .{ .rng = .{ .state = seed } }, .cat = cat, .w = w };
+    // The nodes to draw: every node, or only the soft bodies
+    var nodes: std.ArrayList(u32) = .empty;
+    defer nodes.deinit(allocator);
+    for (cat.shapes, 0..) |shape, i| {
+        if (options.catalogue != .soft_body or shape.getSubType() == .soft_body)
+            try nodes.append(allocator, @intCast(i));
+    }
+    try std.testing.expect(nodes.items.len > 0);
+    var g: Generator = .{ .gen = .{ .rng = .{ .state = seed } }, .cat = cat, .w = w, .nodes = nodes.items };
     try g.frames(options);
 }
 
@@ -321,6 +335,13 @@ test "Shape draw parity: DebugRendererSimple (call log)" {
 test "Shape draw parity: recorder (.jor bytes of shape frames)" {
     try requireDebugRenderer();
     try runLayer("shape draws: recorder", 0xd2000003, .recorder, .{ .frames = 3, .random_ops = 60, .end_frames = true });
+}
+
+test "Shape draw parity: SoftBodyShape::Draw of the soft bodies of the soft body sweep (call log)" {
+    try requireDebugRenderer();
+    try runLayer("shape draws: soft bodies", 0xd4000011, .parity_renderer, .{ .frames = 3, .random_ops = 40, .catalogue = .soft_body });
+    try runLayer("shape draws: soft bodies, DebugRendererSimple", 0xd4000012, .simple, .{ .frames = 2, .random_ops = 20, .catalogue = .soft_body });
+    try runLayer("shape draws: soft bodies, recorder", 0xd4000013, .recorder, .{ .frames = 2, .random_ops = 20, .end_frames = true, .catalogue = .soft_body });
 }
 
 test "Shape draw parity: height fields with several draw blocks and a mesh without materials (call log)" {

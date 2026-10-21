@@ -12,8 +12,7 @@
 //!   reinterpret_casts the buffer without constructing it.
 //! - A null entry in the material list gives `PhysicsMaterial.default` in `getMaterial` and `getTrianglesNext`, where
 //!   Jolt gives nullptr. The shared signatures cannot hold a null material (like MeshShape).
-//! - Draw (JPH_DEBUG_RENDERER) is ported by group D4. Until then `draw` is a gated placeholder that panics with
-//!   "TODO(debug_renderer)" (RemainingFeaturesArchitecture.md R2), so that Shape's Draw can be pure again (group D2).
+//! - Draw (JPH_DEBUG_RENDERER) is a gated declaration (RemainingFeaturesArchitecture.md R2).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -178,12 +177,18 @@ pub const SoftBodyShape = struct {
         };
     }
 
-    // See Shape::Draw (JPH_DEBUG_RENDERER). TODO(debug_renderer): the body is ported by group D4, this placeholder
-    // panics (R2).
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
     pub const draw = if (Core.debug_renderer) drawImpl else {};
     fn drawImpl(self: *const SoftBodyShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
-        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
-        @panic("TODO(debug_renderer): SoftBodyShape.draw is ported by group D4");
+        _ = .{ scale, use_material_colors, draw_wireframe };
+        const vertices = self.motion_properties.getVertices();
+        for (self.motion_properties.getFaces()) |*f| {
+            const x1 = center_of_mass_transform.mulVec3(vertices[f.vertex[0]].position);
+            const x2 = center_of_mass_transform.mulVec3(vertices[f.vertex[1]].position);
+            const x3 = center_of_mass_transform.mulVec3(vertices[f.vertex[2]].position);
+
+            renderer.drawTriangle(x1, x2, x3, color, .{ .cast_shadow = .on });
+        }
     }
 
     pub fn castRay(self: *const SoftBodyShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
