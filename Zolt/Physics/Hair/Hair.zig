@@ -1652,6 +1652,93 @@ test "Hair: allocation failure sweeps of initCompute and update" {
     }
 }
 
+/// The render positions override of the read back sweeps: copies the read back buffer
+fn copyRenderPositions(context: ?*anyopaque, buffer: *ComputeBuffer, out_vertices: []Float3) void {
+    _ = context;
+    @memcpy(out_vertices, buffer.mapAs(Float3, .read));
+    buffer.unmap();
+}
+
+/// The data of a locked hair: the bytes of its positions, rotations, velocities and render positions
+fn readBackState(allocator: Allocator, hair: *const Hair) !TestState {
+    var self: TestState = .{ .buffers = @splat(&.{}) };
+    errdefer self.deinit(allocator);
+    self.buffers[0] = try allocator.dupe(u8, std.mem.sliceAsBytes(hair.getPositions().?));
+    self.buffers[1] = try allocator.dupe(u8, std.mem.sliceAsBytes(hair.getRotations().?));
+    self.buffers[2] = try allocator.dupe(u8, std.mem.sliceAsBytes(hair.velocities.?));
+    self.buffers[3] = try allocator.dupe(u8, std.mem.sliceAsBytes(hair.getRenderPositions().?));
+    return self;
+}
+
+const ReadBackPhase = enum { none, read_back, lock };
+
+/// One case of the read back sweeps. Like sweepCase, everything allocates from one failing allocator. The hair overrides
+/// its render positions, so that lockReadBackBuffers allocates. After a failure the case calls the function again.
+fn readBackSweepCase(world: *TestWorld, phase: ReadBackPhase, fail_after: usize) !SweepResult {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    const allocator = failing.allocator();
+    var compute = try TestCompute.init(allocator);
+    defer compute.deinit();
+    const system = compute.system.get().?;
+    var settings = try testSettings(allocator, system, 8, 9, .{}, .{ .vertex_spread = 3 });
+    defer settings.deinit();
+    var hair: Hair = .init(allocator, settings.get().?, RVec3.zero(), Quat.identity(), 0);
+    defer hair.deinit();
+    hair.overrideRenderPositionsCB(.{ .function = copyRenderPositions });
+    var render_positions = try system.createComputeBuffer(.rw_buffer, settings.get().?.render_vertices.items.len, @sizeOf(Float3), null);
+    defer render_positions.deinit();
+    hair.setRenderPositionsCB(render_positions.get());
+    try hair.initCompute(system);
+    try hair.update(1.0 / 60.0, Mat44.identity(), null, &world.system, compute.shaders.get().?, system, compute.queue.get().?);
+
+    var failed = false;
+    if (phase == .read_back)
+        failing.fail_index = failing.alloc_index + fail_after;
+    hair.readBackGPUState(compute.queue.get().?) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        failed = true;
+        failing.fail_index = std.math.maxInt(usize);
+        try hair.readBackGPUState(compute.queue.get().?); // Call it again
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (phase == .lock)
+        failing.fail_index = failing.alloc_index + fail_after;
+    hair.lockReadBackBuffers() catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        failed = true;
+        failing.fail_index = std.math.maxInt(usize);
+        try hair.lockReadBackBuffers(); // Nothing was mapped: lock again
+    };
+    failing.fail_index = std.math.maxInt(usize);
+    defer hair.unlockReadBackBuffers();
+    return .{ .failed = failed, .state = try readBackState(testing.allocator, &hair) };
+}
+
+test "Hair: allocation failure sweeps of readBackGPUState and lockReadBackBuffers" {
+    var world: TestWorld = undefined;
+    try world.init(testing.allocator);
+    defer world.deinit();
+    try addSweepBodies(&world);
+
+    // The read back data without a failure
+    var expected = try readBackSweepCase(&world, .none, 0);
+    defer expected.state.deinit(testing.allocator);
+
+    // readBackGPUState allocates the positions, rotations and velocities, lockReadBackBuffers the render positions of the
+    // override. A failed call leaks nothing, and the call after it gives the same data.
+    for ([_]ReadBackPhase{ .read_back, .lock }, [_]usize{ 3, 1 }) |phase, num_allocations| {
+        var fail_after: usize = 0;
+        while (true) : (fail_after += 1) {
+            var result = try readBackSweepCase(&world, phase, fail_after);
+            defer result.state.deinit(testing.allocator);
+            try result.state.expectEqual(&expected.state);
+            if (!result.failed) break;
+        }
+        try testing.expectEqual(num_allocations, fail_after);
+    }
+}
+
 test "Hair: collision without a convex hull in the bounds (R20 UB3)" {
     // Jolt creates a collision shapes buffer of 0 elements and HairUpdateVelocity reads element 0. Zolt creates 1
     // zeroed element: the far away plane of HairCalculateCollisionPlanes then has no effect.
