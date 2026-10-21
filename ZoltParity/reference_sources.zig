@@ -12,6 +12,7 @@ pub const files = [_][]const u8{
     "Geometry/GJKEPAReference.cpp",
     "Geometry/PrimitivesReference.cpp",
     "Geometry/QueriesReference.cpp",
+    "Hair/HairSceneReference.cpp",
     "Hair/HairSettingsReference.cpp",
     "Hair/LibMShuffleReference.cpp",
     "Math/MathReference.cpp",

@@ -81,7 +81,7 @@ const num_buffers = buffer_fields.len;
 
 // The face of Assets/face.bin ----------------------------------------------------------------------------------------
 
-const Face = struct {
+pub const Face = struct {
     vertices: []Float3,
     triangles: []IndexedTriangleNoMaterial,
     inverse_bind_pose: []Mat44,
@@ -91,8 +91,10 @@ const Face = struct {
     frames: [3][]Mat44,
     /// The inverse of the neck transform of frame 0 (Jolt's HairTest: inv_neck_transform)
     inverse_neck: Mat44,
+    /// The index of the neck joint (Jolt's HairTest: mHeadJointIdx)
+    head_joint: u32,
 
-    fn deinit(self: *Face, allocator: Allocator) void {
+    pub fn deinit(self: *Face, allocator: Allocator) void {
         allocator.free(self.vertices);
         allocator.free(self.triangles);
         allocator.free(self.inverse_bind_pose);
@@ -103,7 +105,7 @@ const Face = struct {
 
 /// Read Assets/face.bin like Jolt's HairTest sample and make the mesh relative to the neck bind pose. Null when the
 /// asset is missing.
-fn loadFace(allocator: Allocator) !?Face {
+pub fn loadFace(allocator: Allocator) !?Face {
     const bytes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "Assets/face.bin", allocator, .limited(16 << 20)) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => |e| return e,
@@ -169,25 +171,26 @@ fn loadFace(allocator: Allocator) !?Face {
         .num_skin_weights_per_vertex = num_weights,
         .frames = frames,
         .inverse_neck = frames[0][head_joint].inversed(),
+        .head_joint = head_joint,
     };
 }
 
 // The inputs ---------------------------------------------------------------------------------------------------------
 
-const Groom = struct {
+pub const Groom = struct {
     vertices: std.ArrayList(SVertex) = .empty,
     strands: std.ArrayList(SStrand) = .empty,
 
-    fn deinit(self: *Groom, allocator: Allocator) void {
+    pub fn deinit(self: *Groom, allocator: Allocator) void {
         self.vertices.deinit(allocator);
         self.strands.deinit(allocator);
     }
 };
 
-const Shape = enum { straight, curly };
+pub const Shape = enum { straight, curly };
 
 /// How the strands get their material: random, or in blocks of strands (the first block material 0, ...)
-const MaterialOrder = union(enum) {
+pub const MaterialOrder = union(enum) {
     random: u32,
     blocks: []const u32,
 
@@ -208,7 +211,7 @@ const MaterialOrder = union(enum) {
 
 /// Strands on the scalp (or on a sphere without a scalp): `num_strands` strands of `min_vertices` to `max_vertices`
 /// vertices
-fn makeGroom(allocator: Allocator, rng: *fw.Rng, face: ?*const Face, shape: Shape, num_strands: u32, min_vertices: u32, max_vertices: u32, materials: MaterialOrder) !Groom {
+pub fn makeGroom(allocator: Allocator, rng: *fw.Rng, face: ?*const Face, shape: Shape, num_strands: u32, min_vertices: u32, max_vertices: u32, materials: MaterialOrder) !Groom {
     var groom: Groom = .{};
     errdefer groom.deinit(allocator);
     for (0..num_strands) |s| {
@@ -291,7 +294,7 @@ fn materials3(fractions: [3]f32) [3]Material {
 }
 
 /// The settings before the groom: the scalp (if any), the materials and the fields
-fn baseSettings(allocator: Allocator, face: ?*const Face, materials: []const Material) !HairSettings {
+pub fn baseSettings(allocator: Allocator, face: ?*const Face, materials: []const Material) !HairSettings {
     var settings: HairSettings = .{ .allocator = allocator };
     errdefer settings.deinit();
     if (face) |f| {
@@ -306,7 +309,7 @@ fn baseSettings(allocator: Allocator, face: ?*const Face, materials: []const Mat
     return settings;
 }
 
-fn saveState(allocator: Allocator, settings: *const HairSettings) ![]u8 {
+pub fn saveState(allocator: Allocator, settings: *const HairSettings) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     var wrapper = zolt.StreamOutWrapper.init(&out.writer);
