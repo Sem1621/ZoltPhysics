@@ -26,10 +26,9 @@
 //!     collision shapes buffer of 0 elements, and HairUpdateVelocity reads element 0. Zolt creates `max(n, 1)` zeroed
 //!     elements, like the planes and vertices buffers.
 //!   - UB4: the buffers that Hair creates without data are zero (ComputeBufferCPU). Jolt leaves them uninitialized.
-//!   - UB21 (proposed to the lead, R20 has no row for it yet): a HairShaders that misses a shader (HairShaders.init
-//!     without registerHairShaders). HairShaders keeps the shader null, like Jolt (R14). Jolt's Update passes it to
-//!     ComputeQueueCPU::SetShader, which calls CreateWrapper on the null pointer. Zolt's update panics with a message.
-//!     No test pins it: a test cannot catch a panic.
+//!   - UB21: a HairShaders that misses a shader (HairShaders.init without registerHairShaders). HairShaders keeps the
+//!     shader null, like Jolt (R14). Jolt's Update passes it to ComputeQueueCPU::SetShader, which calls CreateWrapper
+//!     on the null pointer. Zolt's update panics with a message. No test pins it: a test cannot catch a panic.
 //! - Jolt's quirk (R20): mScalpJointMatricesCB is 64 times too large, its size counts bytes where it should count
 //!   matrices. Only memory is lost.
 //! - JPH_DEBUG_RENDERER (R2): `RenderStrandColor` (ERenderStrandColor) and `DrawSettings` are `void` without
@@ -37,8 +36,8 @@
 //!   scopes of Draw are dropped.
 //!   - Jolt's quirk (R20): the density loops bound z by GridSize.GetX() and x by GetZ(). Zolt keeps it. When GetX() is
 //!     smaller than GetZ(), x passes GetX(): the assert of GetNeutralDensity fails in Jolt's debug build, and its release
-//!     build reads another cell. Zolt's assert there is recoverable (R8): a handler that accepts it gives Jolt's release
-//!     result.
+//!     build reads another cell. HairSettings.getNeutralDensity's assert is recoverable (R8): a handler that accepts it
+//!     gives Jolt's release result.
 //!   - Allocation failures (R5): when the render positions of an override or the map of the render strands cannot be
 //!     allocated, `draw` sets the renderer's `out_of_memory` latch. It then draws nothing, or everything but the render
 //!     strands.
@@ -1485,7 +1484,7 @@ pub const Hair = struct {
                 while (y < grid_size.getY()) : (y += 1) {
                     var x: u32 = 0;
                     while (x < grid_size.getZ()) : (x += 1) {
-                        const density = getNeutralDensity(hair_settings, x, y, z);
+                        const density = hair_settings.getNeutralDensity(x, y, z);
                         if (Core.enable_asserts) std.debug.assert(density >= 0.0);
                         if (density > 0.0) {
                             const pos = offset.add(Vec3.fromVec4(UVec4.init(x, y, z, 0).toFloat()).mul(scale));
@@ -1561,15 +1560,6 @@ pub const Hair = struct {
         return Color.fromUInt32(@as(u32, @truncate(HashCombine.hash(value))) | 0xff000000);
     }
 
-    /// HairSettings::GetNeutralDensity, its assert recoverable (R8). Jolt's quirk lets x run to GetZ(): when GetX() is
-    /// smaller than GetZ() the assert fails in Jolt's debug build, and its release build reads another cell of the grid.
-    /// Zolt follows the release build when an assert handler accepts the failure.
-    fn getNeutralDensity(settings: *const HairSettings, x: u32, y: u32, z: u32) f32 {
-        const grid_size = settings.grid_size;
-        if (Core.enable_asserts) Core.assertRecoverable(x < grid_size.getX() and y < grid_size.getY() and z < grid_size.getZ(), "HairSettings::GetNeutralDensity: the cell is outside the grid", @src());
-        return settings.neutral_density.items[x +% y *% grid_size.getX() +% z *% grid_size.getX() *% grid_size.getY()];
-    }
-
     /// RMat44(Vec4Arg inC1, Vec4Arg inC2, Vec4Arg inC3, RVec3Arg inC4) in both precisions
     fn rmat44FromColumns(c1: Vec4, c2: Vec4, c3: Vec4, c4: RVec3) RMat44 {
         return if (Core.double_precision) RMat44.init(c1, c2, c3, c4) else RMat44.fromColumnsTranslation(c1, c2, c3, c4);
@@ -1578,7 +1568,7 @@ pub const Hair = struct {
 
 /// The shader of a HairShaders member (Jolt binds it without a check)
 fn getShader(shader: Ref(ComputeShader)) *const ComputeShader {
-    // Zolt (proposed R20 UB21): Jolt passes a null shader to SetShader, which dereferences it
+    // Zolt (R20 UB21): Jolt passes a null shader to SetShader, which dereferences it
     return shader.get() orelse @panic("Hair.update: a hair shader is missing (register the shaders with registerHairShaders before HairShaders.init)");
 }
 
