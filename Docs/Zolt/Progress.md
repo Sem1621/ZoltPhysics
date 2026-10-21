@@ -7,7 +7,7 @@ weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). �
 that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files
 that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.
 
-**Library: 96.4%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
+**Library: 97.1%** of 90565 lines in scope · **Unit tests: 100.0%** of 18321 lines
 
 ## Library (Jolt/ → Zolt/)
 
@@ -30,7 +30,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `Jolt/Physics/SoftBody` | 100% | 8 | 0 | 0 | 0 | 0 | 0 | 3880 |
 | `Jolt/Physics/Vehicle` | 100% | 12 | 0 | 0 | 0 | 0 | 0 | 3942 |
 | `Jolt/Renderer` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 1754 |
-| `Jolt/Shaders` | 58% | 33 | 0 | 0 | 11 | 0 | 0 | 1563 |
+| `Jolt/Shaders` | 100% | 44 | 0 | 0 | 0 | 0 | 0 | 1563 |
 | `Jolt/Skeleton` | 100% | 4 | 0 | 0 | 0 | 0 | 0 | 780 |
 | `Jolt/TriangleSplitter` | 100% | 3 | 0 | 0 | 0 | 0 | 0 | 335 |
 
@@ -483,7 +483,7 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 
 </details>
 
-<details><summary>Jolt/Shaders — 58%</summary>
+<details><summary>Jolt/Shaders — 100%</summary>
 
 | C++ | Lines | Status | Zig |
 |-----|------:|--------|-----|
@@ -491,8 +491,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HairApplyDeltaTransformBindings.h` | 12 | ✅ complete | `Zolt/Shaders/HairApplyDeltaTransform.zig` |
 | `HairApplyGlobalPose.h`, `HairApplyGlobalPose.hlsl` | 49 | ✅ complete | `Zolt/Shaders/HairApplyGlobalPose.zig` |
 | `HairApplyGlobalPoseBindings.h` | 14 | ✅ complete | `Zolt/Shaders/HairApplyGlobalPose.zig` |
-| `HairCalculateCollisionPlanes.hlsl` | 100 | ❌ todo |  |
-| `HairCalculateCollisionPlanesBindings.h` | 11 | ❌ todo |  |
+| `HairCalculateCollisionPlanes.hlsl` | 100 | ✅ complete | `Zolt/Shaders/HairCalculateCollisionPlanes.zig` |
+| `HairCalculateCollisionPlanesBindings.h` | 11 | ✅ complete | `Zolt/Shaders/HairCalculateCollisionPlanes.zig` |
 | `HairCalculateRenderPositions.h`, `HairCalculateRenderPositions.hlsl` | 33 | ✅ complete | `Zolt/Shaders/HairCalculateRenderPositions.zig` |
 | `HairCalculateRenderPositionsBindings.h` | 13 | ✅ complete | `Zolt/Shaders/HairCalculateRenderPositions.zig` |
 | `HairCommon.h` | 46 | ✅ complete | `Zolt/Shaders/HairCommon.zig` |
@@ -502,8 +502,8 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HairGridClearBindings.h` | 7 | ✅ complete | `Zolt/Shaders/HairGridClear.zig` |
 | `HairGridNormalize.hlsl` | 23 | ✅ complete | `Zolt/Shaders/HairGridNormalize.zig` |
 | `HairGridNormalizeBindings.h` | 7 | ✅ complete | `Zolt/Shaders/HairGridNormalize.zig` |
-| `HairIntegrate.h`, `HairIntegrate.hlsl` | 102 | ❌ todo |  |
-| `HairIntegrateBindings.h` | 15 | ❌ todo |  |
+| `HairIntegrate.h`, `HairIntegrate.hlsl` | 102 | ✅ complete | `Zolt/Shaders/HairIntegrate.zig` |
+| `HairIntegrateBindings.h` | 15 | ✅ complete | `Zolt/Shaders/HairIntegrate.zig` |
 | `HairSkinRoots.hlsl` | 38 | ✅ complete | `Zolt/Shaders/HairSkinRoots.zig` |
 | `HairSkinRootsBindings.h` | 20 | ✅ complete | `Zolt/Shaders/HairSkinRoots.zig` |
 | `HairSkinVertices.hlsl` | 23 | ✅ complete | `Zolt/Shaders/HairSkinVertices.zig` |
@@ -513,13 +513,13 @@ that are postponed to a later phase (see `DEFERRED` in the script); neither coun
 | `HairTeleportBindings.h` | 10 | ✅ complete | `Zolt/Shaders/HairTeleport.zig` |
 | `HairUpdateRoots.hlsl` | 25 | ✅ complete | `Zolt/Shaders/HairUpdateRoots.zig` |
 | `HairUpdateRootsBindings.h` | 10 | ✅ complete | `Zolt/Shaders/HairUpdateRoots.zig` |
-| `HairUpdateStrands.hlsl` | 131 | ❌ todo |  |
-| `HairUpdateStrandsBindings.h` | 15 | ❌ todo |  |
-| `HairUpdateVelocity.h`, `HairUpdateVelocity.hlsl` | 88 | ❌ todo |  |
-| `HairUpdateVelocityBindings.h` | 18 | ❌ todo |  |
-| `HairUpdateVelocityIntegrate.hlsl` | 38 | ❌ todo |  |
-| `HairUpdateVelocityIntegrateBindings.h` | 19 | ❌ todo |  |
-| `HairWrapper.cpp`, `HairWrapper.h` | 127 | ❌ todo |  |
+| `HairUpdateStrands.hlsl` | 131 | ✅ complete | `Zolt/Shaders/HairUpdateStrands.zig` |
+| `HairUpdateStrandsBindings.h` | 15 | ✅ complete | `Zolt/Shaders/HairUpdateStrands.zig` |
+| `HairUpdateVelocity.h`, `HairUpdateVelocity.hlsl` | 88 | ✅ complete | `Zolt/Shaders/HairUpdateVelocity.zig` |
+| `HairUpdateVelocityBindings.h` | 18 | ✅ complete | `Zolt/Shaders/HairUpdateVelocity.zig` |
+| `HairUpdateVelocityIntegrate.hlsl` | 38 | ✅ complete | `Zolt/Shaders/HairUpdateVelocityIntegrate.zig` |
+| `HairUpdateVelocityIntegrateBindings.h` | 19 | ✅ complete | `Zolt/Shaders/HairUpdateVelocityIntegrate.zig` |
+| `HairWrapper.cpp`, `HairWrapper.h` | 127 | ✅ complete | `Zolt/Shaders/HairWrapper.zig` |
 | `ShaderCore.h` | 68 | ✅ complete | `Zolt/Shaders/ShaderCore.zig` |
 | `ShaderMat44.h` | 11 | ✅ complete | `Zolt/Shaders/ShaderMat44.zig` |
 | `ShaderMath.h` | 14 | ✅ complete | `Zolt/Shaders/ShaderMath.zig` |

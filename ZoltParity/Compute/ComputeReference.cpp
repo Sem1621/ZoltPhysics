@@ -19,6 +19,7 @@
 #include <Jolt/Compute/ComputeSystem.h>
 #include <Jolt/Compute/CPU/ComputeSystemCPU.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
+#include <Jolt/Physics/Hair/HairShaders.h>
 #include <Jolt/Shaders/HairWrapper.h>
 #include <Jolt/Shaders/HairStructs.h>
 #include <Jolt/Shaders/TestComputeBindings.h>
@@ -28,6 +29,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 
 JPH_DECLARE_REGISTER_SHADER(TestCompute)
 JPH_DECLARE_REGISTER_SHADER(TestCompute2)
@@ -123,6 +125,45 @@ uint32 jolt_compute_dispatch(const char *inName, const uint32 *inGroupSize, cons
 			readback->Unmap();
 		}
 	return 0;
+}
+
+/// A new ComputeSystemCPU with only the hair shaders (HairRegisterShaders). For each of inNames, outFound is 1 when the
+/// system creates the shader. Then HairShaders::Init on that system: outInitFound[i] is 1 when the i-th shader member
+/// of HairShaders (in declaration order) is set. Returns the number of members of HairShaders.
+uint32 jolt_compute_hair_shaders(const char *const *inNames, uint32 inNumNames, uint32 *outFound, uint32 *outInitFound)
+{
+	ParityInstallHooks();
+
+	ComputeSystemResult result = CreateComputeSystemCPU();
+	Ref<ComputeSystem> system = result.Get();
+	HairRegisterShaders(StaticCast<ComputeSystemCPU>(system.GetPtr()));
+
+	for (uint32 i = 0; i < inNumNames; ++i)
+		outFound[i] = system->CreateComputeShader(inNames[i], cHairPerVertexBatch).IsValid()? 1 : 0;
+
+	Ref<HairShaders> shaders = new HairShaders;
+	shaders->Init(system);
+	const Ref<ComputeShader> *members[] = {
+		&shaders->mTeleportCS,
+		&shaders->mApplyDeltaTransformCS,
+		&shaders->mSkinVerticesCS,
+		&shaders->mSkinRootsCS,
+		&shaders->mApplyGlobalPoseCS,
+		&shaders->mCalculateCollisionPlanesCS,
+		&shaders->mGridClearCS,
+		&shaders->mGridAccumulateCS,
+		&shaders->mGridNormalizeCS,
+		&shaders->mIntegrateCS,
+		&shaders->mUpdateRootsCS,
+		&shaders->mUpdateStrandsCS,
+		&shaders->mUpdateVelocityCS,
+		&shaders->mUpdateVelocityIntegrateCS,
+		&shaders->mCalculateRenderPositionsCS,
+	};
+	uint32 num_members = uint32(std::size(members));
+	for (uint32 i = 0; i < num_members; ++i)
+		outInitFound[i] = *members[i] != nullptr? 1 : 0;
+	return num_members;
 }
 
 /// The sizes and member offsets of the structs that C++ code and the shaders share (ShaderCore.h's C++ types), in the

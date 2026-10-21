@@ -1,8 +1,9 @@
 //! Parity of the hair shaders of group C1a with Jolt's CPU backend (Docs/Zolt/RemainingFeaturesArchitecture.md section
 //! 4, row "Compute dispatch"): HairTeleport, HairApplyDeltaTransform, HairSkinVertices, HairSkinRoots,
 //! HairApplyGlobalPose, HairUpdateRoots, HairCalculateRenderPositions, HairGridClear, HairGridAccumulate and
-//! HairGridNormalize. C++ side: ComputeReference.cpp (jolt_compute_dispatch; Jolt's system has every hair shader of
-//! HairRegisterShaders).
+//! HairGridNormalize. C++ side: ComputeReference.cpp (jolt_compute_dispatch). Both systems have every hair shader:
+//! Jolt's HairRegisterShaders and Zolt's registerHairShaders. HairShaderParity2.zig (group C1b) has the layers of the
+//! other five hair shaders and reuses the generators of this file.
 //!
 //! One layer per shader. Each round fills the buffers with random data, dispatches on both sides with
 //! `ComputeParity.Dispatcher` and compares the RW buffers: float buffers with `sameBits` (NaNs are equal), integer
@@ -50,32 +51,16 @@ const Vec4 = zolt.Vec4;
 const Quat = zolt.Quat;
 const Mat44 = zolt.Mat44;
 
-/// The shaders of this layer (HairWrapper.zig of group C1b registers all 15)
-const shaders = .{
-    zolt.HairTeleport,
-    zolt.HairApplyDeltaTransform,
-    zolt.HairSkinVertices,
-    zolt.HairSkinRoots,
-    zolt.HairApplyGlobalPose,
-    zolt.HairUpdateRoots,
-    zolt.HairCalculateRenderPositions,
-    zolt.HairGridClear,
-    zolt.HairGridAccumulate,
-    zolt.HairGridNormalize,
-};
-
-/// The dispatcher of ComputeParity with the shaders of this layer on the Zolt side
-fn initDispatcher(allocator: Allocator) !Dispatcher {
+/// The dispatcher of ComputeParity with the hair shaders on the Zolt side (registerHairShaders, like Jolt's system)
+pub fn initDispatcher(allocator: Allocator) !Dispatcher {
     var dispatcher: Dispatcher = try .init(allocator);
     errdefer dispatcher.deinit();
-    const cpu = zolt.virtual.downcast(zolt.ComputeSystemCPU, dispatcher.system.get().?);
-    inline for (shaders) |Shader|
-        try cpu.registerShader(Shader);
+    try zolt.registerHairShaders(zolt.virtual.downcast(zolt.ComputeSystemCPU, dispatcher.system.get().?));
     return dispatcher;
 }
 
 /// Run `Shader` on both sides for `num_threads` threads in x (see the file header for the group sizes)
-fn dispatchRandom(dispatcher: *Dispatcher, checker: *fw.Checker, rng: *fw.Rng, comptime Shader: type, batch: u32, num_threads: u32, bindings: []const BindingDesc, compare: Compare) !void {
+pub fn dispatchRandom(dispatcher: *Dispatcher, checker: *fw.Checker, rng: *fw.Rng, comptime Shader: type, batch: u32, num_threads: u32, bindings: []const BindingDesc, compare: Compare) !void {
     const group_size_x: u32 = switch (rng.next() % 4) {
         0, 1 => batch,
         2 => 1,
@@ -95,18 +80,18 @@ fn dispatchRandom(dispatcher: *Dispatcher, checker: *fw.Checker, rng: *fw.Rng, c
 //////////////////////////////////////////////////////////////////////////////////////////
 
 /// A float3 with components in [-range, range), one in eight components is special (ComputeParity.inputFloat)
-fn randomFloat3(rng: *fw.Rng, range: f32) float3 {
+pub fn randomFloat3(rng: *fw.Rng, range: f32) float3 {
     return .init(inputFloat(rng, range), inputFloat(rng, range), inputFloat(rng, range));
 }
 
 /// A random unit quaternion (Zolt's math, it is only an input)
-fn unitQuat(rng: *fw.Rng) Quat {
+pub fn unitQuat(rng: *fw.Rng) Quat {
     const q = Vec4.init(rng.float(-1, 1), rng.float(-1, 1), rng.float(-1, 1), rng.float(-1, 1));
     return Quat.fromVec4(if (q.lengthSq() > 1.0e-6) q.normalized() else Vec4.init(0, 0, 0, 1));
 }
 
 /// A rotation: mostly a unit quaternion, sometimes any float4 (zero included)
-fn randomRotation(rng: *fw.Rng) float4 {
+pub fn randomRotation(rng: *fw.Rng) float4 {
     return switch (rng.next() % 8) {
         0 => .init(inputFloat(rng, 2), inputFloat(rng, 2), inputFloat(rng, 2), inputFloat(rng, 2)),
         1 => .init(0, 0, 0, 0),
@@ -118,12 +103,12 @@ fn randomRotation(rng: *fw.Rng) float4 {
 }
 
 /// A compressed quaternion (JPH_QuatDecompress): any bit pattern or a compressed unit quaternion
-fn compressedQuat(rng: *fw.Rng) u32 {
+pub fn compressedQuat(rng: *fw.Rng) u32 {
     return if (rng.next() % 2 == 0) rng.next() else unitQuat(rng).compressUnitQuat();
 }
 
 /// A matrix: mostly a rotation and translation, sometimes any floats
-fn randomMat44(rng: *fw.Rng) hlsl.Mat44 {
+pub fn randomMat44(rng: *fw.Rng) hlsl.Mat44 {
     if (rng.next() % 4 == 0) {
         var m: hlsl.Mat44 = undefined;
         for (&m.c) |*c| c.* = .init(inputFloat(rng, 3), inputFloat(rng, 3), inputFloat(rng, 3), inputFloat(rng, 3));
@@ -138,20 +123,20 @@ fn randomMat44(rng: *fw.Rng) hlsl.Mat44 {
     return result;
 }
 
-fn randomPosition(rng: *fw.Rng) HairPosition {
+pub fn randomPosition(rng: *fw.Rng) HairPosition {
     return .{ .position = randomFloat3(rng, 5), .rotation = randomRotation(rng) };
 }
 
-fn randomVelocity(rng: *fw.Rng) HairVelocity {
+pub fn randomVelocity(rng: *fw.Rng) HairVelocity {
     return .{ .velocity = randomFloat3(rng, 5), .angular_velocity = randomFloat3(rng, 5) };
 }
 
-fn randomGlobalPoseTransform(rng: *fw.Rng) HairGlobalPoseTransform {
+pub fn randomGlobalPoseTransform(rng: *fw.Rng) HairGlobalPoseTransform {
     return .{ .position = randomFloat3(rng, 5), .rotation = randomRotation(rng) };
 }
 
 /// A gradient sampler (GradientSampler::ToFloat4: multiplier, offset, min, max): mostly a valid range in [0, 1]
-fn randomGradient(rng: *fw.Rng) float4 {
+pub fn randomGradient(rng: *fw.Rng) float4 {
     if (rng.next() % 4 == 0)
         return .init(inputFloat(rng, 2), inputFloat(rng, 2), inputFloat(rng, 2), inputFloat(rng, 2));
     const a = rng.float(0, 1);
@@ -160,7 +145,7 @@ fn randomGradient(rng: *fw.Rng) float4 {
 }
 
 /// Random bits, for the members that a shader must not read
-fn randomBits(comptime T: type, rng: *fw.Rng) T {
+pub fn randomBits(comptime T: type, rng: *fw.Rng) T {
     var value: T = undefined;
     const bytes = std.mem.asBytes(&value);
     var i: usize = 0;
@@ -173,7 +158,7 @@ fn randomBits(comptime T: type, rng: *fw.Rng) T {
 }
 
 /// A material with valid gradients for the members that the shaders of this layer read
-fn randomMaterial(rng: *fw.Rng) HairMaterial {
+pub fn randomMaterial(rng: *fw.Rng) HairMaterial {
     var m = randomBits(HairMaterial, rng);
     m.world_transform_influence = randomGradient(rng);
     m.global_pose = randomGradient(rng);
@@ -182,12 +167,12 @@ fn randomMaterial(rng: *fw.Rng) HairMaterial {
 }
 
 /// A context of random bits: the caller sets the members that the shader reads
-fn randomContext(rng: *fw.Rng) HairUpdateContext {
+pub fn randomContext(rng: *fw.Rng) HairUpdateContext {
     return randomBits(HairUpdateContext, rng);
 }
 
 /// An iteration fraction like Hair's (1 / (NumIterations - Iteration)), sometimes any value in [0, 1] or a special float
-fn randomIterationFraction(rng: *fw.Rng) f32 {
+pub fn randomIterationFraction(rng: *fw.Rng) f32 {
     return switch (rng.next() % 4) {
         0 => rng.float(0, 1),
         1 => specialFloat(rng, 2),
@@ -200,35 +185,35 @@ fn randomIterationFraction(rng: *fw.Rng) f32 {
 }
 
 /// Allocate `n` elements (at least one) and fill them with `generate(rng)`
-fn fill(arena: Allocator, comptime T: type, n: usize, rng: *fw.Rng, comptime generate: fn (*fw.Rng) T) ![]T {
+pub fn fill(arena: Allocator, comptime T: type, n: usize, rng: *fw.Rng, comptime generate: fn (*fw.Rng) T) ![]T {
     const items = try arena.alloc(T, @max(n, 1));
     for (items) |*item| item.* = generate(rng);
     return items;
 }
 
-fn garbagePosition(rng: *fw.Rng) HairPosition {
+pub fn garbagePosition(rng: *fw.Rng) HairPosition {
     return randomBits(HairPosition, rng);
 }
 
-fn garbageGlobalPoseTransform(rng: *fw.Rng) HairGlobalPoseTransform {
+pub fn garbageGlobalPoseTransform(rng: *fw.Rng) HairGlobalPoseTransform {
     return randomBits(HairGlobalPoseTransform, rng);
 }
 
-fn garbageFloat3(rng: *fw.Rng) float3 {
+pub fn garbageFloat3(rng: *fw.Rng) float3 {
     return randomBits(float3, rng);
 }
 
-fn garbageVelocity(rng: *fw.Rng) HairVelocity {
+pub fn garbageVelocity(rng: *fw.Rng) HairVelocity {
     return randomBits(HairVelocity, rng);
 }
 
-fn position5(rng: *fw.Rng) float3 {
+pub fn position5(rng: *fw.Rng) float3 {
     return randomFloat3(rng, 5);
 }
 
 /// The strand data of the per vertex shaders that skip the roots. Vertex `v` of strand `s` has index
 /// `v * num_strands + s`, like Hair's padded vertex arrays.
-const Strands = struct {
+pub const Strands = struct {
     num_strands: u32,
     num_vertices: u32,
     /// A bit per vertex
@@ -239,7 +224,7 @@ const Strands = struct {
     strand_material_index: []u32,
     materials: []HairMaterial,
 
-    fn init(arena: Allocator, rng: *fw.Rng) !Strands {
+    pub fn init(arena: Allocator, rng: *fw.Rng) !Strands {
         const num_strands = rng.intRange(u32, 1, 70);
         const vertices_per_strand = rng.intRange(u32, 1, 12);
         const num_vertices = num_strands * vertices_per_strand;
@@ -276,21 +261,21 @@ const Strands = struct {
     }
 
     /// Threads of a dispatch that skips the first vertex of each strand
-    fn numThreadsSkipRoots(self: Strands) u32 {
+    pub fn numThreadsSkipRoots(self: Strands) u32 {
         return self.num_vertices - self.num_strands;
     }
 };
 
 /// The gIterationContext binding: Hair binds it only for the shaders that read it. The other shaders get it in some
 /// rounds, and keep the zeroed block of the wrapper otherwise.
-fn iterationContextBinding(rng: *fw.Rng, iteration_context: []HairIterationContext, always: bool) BindingDesc {
+pub fn iterationContextBinding(rng: *fw.Rng, iteration_context: []HairIterationContext, always: bool) BindingDesc {
     iteration_context[0] = .{ .accumulated_delta_time = inputFloat(rng, 1), .iteration_fraction = randomIterationFraction(rng) };
     const binding = BindingDesc.of("gIterationContext", .constant_buffer, HairIterationContext, iteration_context);
     return if (always or rng.next() % 2 == 0) binding else binding.withFlags(BindingDesc.flag_null);
 }
 
 /// A read only binding: Hair binds RW buffers with setBuffer too (gPositions of HairGridAccumulate)
-fn readBinding(rng: *fw.Rng, name: [*:0]const u8, comptime T: type, items: []T) BindingDesc {
+pub fn readBinding(rng: *fw.Rng, name: [*:0]const u8, comptime T: type, items: []T) BindingDesc {
     const binding = BindingDesc.of(name, .buffer, T, items);
     return switch (rng.next() % 4) {
         0 => binding.withType(.rw_buffer),
@@ -299,7 +284,7 @@ fn readBinding(rng: *fw.Rng, name: [*:0]const u8, comptime T: type, items: []T) 
     };
 }
 
-const num_rounds = 200;
+pub const num_rounds = 200;
 
 //////////////////////////////////////////////////////////////////////////////////////////
 // The layers
@@ -611,7 +596,7 @@ test "HairShaderParity: HairCalculateRenderPositions" {
 }
 
 /// A grid position input: mostly inside the bounds, some outside (clamped), rarely infinite. Never NaN (UB11).
-fn gridPosition(rng: *fw.Rng, bounds_min: Vec3, bounds_size: Vec3) float3 {
+pub fn gridPosition(rng: *fw.Rng, bounds_min: Vec3, bounds_size: Vec3) float3 {
     var result: [3]f32 = undefined;
     for (&result, 0..) |*r, i| {
         r.* = switch (rng.next() % 16) {

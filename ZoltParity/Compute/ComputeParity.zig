@@ -186,13 +186,19 @@ pub const Dispatcher = struct {
 
         const zolt_found = try zoltDispatch(allocator, self.system.get().?, name, group_size, num_groups, zolt_bindings);
         const jolt_found = jolt_compute_dispatch(name.ptr, &group_size, &num_groups, jolt_bindings.ptr, @intCast(jolt_bindings.len)) == 0;
-        checker.check(.{ .shader = name, .what = "shader found" }, zolt_found, jolt_found);
+        if (zolt_found != jolt_found and checker.mismatches < 5)
+            std.debug.print("{s}: shader {s}\n", .{ checker.name, name });
+        checker.check(.{ .what = "shader found" }, zolt_found, jolt_found);
 
         for (bindings, zolt_bindings, jolt_bindings) |b, z, j| {
             if (b.kind != .rw_buffer or b.flags & BindingDesc.flag_null != 0) continue;
             const first_mismatch = firstMismatch(z.bytes(), j.bytes(), compare);
-            if (first_mismatch) |first|
-                checker.check(.{ .shader = name, .buffer = std.mem.span(b.name), .first_mismatching_byte = first, .mismatching_words = countMismatches(z.bytes(), j.bytes(), compare) }, false, true);
+            if (first_mismatch) |first| {
+                // The checker prints its input with {any}: the names first, as text
+                if (checker.mismatches < 5)
+                    std.debug.print("{s}: shader {s}, buffer {s}\n", .{ checker.name, name, std.mem.span(b.name) });
+                checker.check(.{ .first_mismatching_byte = first, .mismatching_words = countMismatches(z.bytes(), j.bytes(), compare) }, false, true);
+            }
             @memcpy(b.bytes(), j.bytes());
         }
         return jolt_found;
