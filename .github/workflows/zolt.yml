@@ -55,7 +55,7 @@ jobs:
     - name: Check formatting
       run: zig fmt --check Zolt ZoltTests ZoltParity ZoltPerformanceTest ZoltHelloWorld build.zig build.zig.zon
     # --check also fails on an M10 gap and on a TODO(debug_renderer) marker (Phase 9 is done)
-    - name: Check that Docs/Zolt/Progress.md is up to date, the port headers are valid and no declaration is pending
+    - name: Check Progress.md, the port headers, the declarations, M10 and that no TODO(debug_renderer) is left
       run: python3 tools/port_status.py --check
     # Draw code is type checked only with the option (Docs/Zolt/RemainingFeaturesArchitecture.md R2, section 5)
     - name: Compile with the debug renderer

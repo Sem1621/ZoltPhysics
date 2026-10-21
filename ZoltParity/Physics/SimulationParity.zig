@@ -45,8 +45,8 @@
 //! Every scene is its own test (`SceneTest(name, index)`, filter with -Dtest-filter=<scene name>). Every Zolt class is
 //! ported, so every Blocker is supported and every scene runs against Zolt. A scene whose `blocked_by` is not supported
 //! (SimScenes.Blocker.isSupported: a class it needs is a stub again) fails (checkSupported). Add a scene in
-//! SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping bodies, step listener calls, CCD bodies,
-//! active constraints, sweep counts): check it when you write a scene.
+//! SimScenes.zig (see its header). `verbose = true` prints what every scene did (activations, sleeping bodies, step
+//! listener calls, CCD bodies, active constraints, sweep counts): check it when you write a scene.
 //!
 //! Both PhysicsSystems use BroadPhaseQuadTree (the BROAD_PHASE define of PhysicsSystem.cpp, Zolt's default since A1;
 //! no comparison was ever loosened for the brute force broad phase that Zolt used before). The trees themselves are
@@ -98,9 +98,10 @@
 //! Characters, ragdolls and vehicles (Phase 7, the recipe for a worker is in the SimScenes header): both worlds keep
 //! their characters, character virtuals, ragdolls and vehicles by handle. The Zolt side of each class group is a slot
 //! (`CharacterSlot`, `CharacterVirtualSlot`, `RagdollSlot`, `VehicleSlot`, `TrackedVehicleSlot`, `MotorcycleSlot`;
-//! `Phase7StubSlot` until the group was ported; a supported scene with a stub slot fails in checkPhase7Slots). After every update (and after the D12 sweeps and every restore_cross) the object states
-//! are compared (SimScenes.ObjectField: the SaveState bytes of the characters and character virtuals and the getters
-//! that the states do not hold), a mismatch is decoded to the field, the object handle, the item and the component
+//! `Phase7StubSlot` until the group was ported; a supported scene with a stub slot fails in checkPhase7Slots). After
+//! every update (and after the D12 sweeps and every restore_cross) the object states are compared
+//! (SimScenes.ObjectField: the SaveState bytes of the characters and character virtuals and the getters that the states
+//! do not hold), a mismatch is decoded to the field, the object handle, the item and the component
 //! (`describeObjectStateDifference`, the SaveState fields with the members of CharacterBase / CharacterVirtual /
 //! CharacterContact::SaveState); the CharacterContactListener records (RecordKind 7..17) are compared in call order
 //! (they are the callbacks of the user thread's character operations; a record that cannot be stored fails the
@@ -109,30 +110,31 @@
 //! runs, checkPhase7Settings compares the binary state of the vehicle and ragdoll settings that the filled slots make
 //! with the C++ settings, the round trips (each side restores the other side's bytes and saves again) and the
 //! RagdollSettings tables. The test "SimulationParity CharacterID consumption" compares which constructions consume a
-//! CharacterID. With a reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene fails when its C++ side
-//! hits a Jolt assert (the release_only scenes excepted). A release_only scene runs in every build: a handler counts
-//! Zolt's recoverable asserts and lets the code continue like Jolt's release build (RemainingFeaturesArchitecture.md
-//! R8). Every run must hit an assert, the same number in every configuration, and with -Dreference_asserts=true as many
-//! as the C++ side (checkReleaseAsserts).
+//! CharacterID. With a reference built with JPH_ENABLE_ASSERTS (`zig build parity -Dreference_asserts=true`) a scene
+//! fails when its C++ side hits a Jolt assert (the release_only scenes excepted). A release_only scene runs in every
+//! build: a handler counts Zolt's recoverable asserts and lets the code continue like Jolt's release build
+//! (RemainingFeaturesArchitecture.md R8). Every run must hit an assert, the same number in every configuration, and
+//! with -Dreference_asserts=true as many as the C++ side (checkReleaseAsserts).
 //!
-//! Proof that the Phase 7 checks bite: a Zolt object state field that the C++ side
-//! does not write as "object state differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more, starting with
-//! ragdoll_properties (object handle 0, item 0)"; a supported Blocker whose classes are stubs as "scene character_ops
-//! creates Character objects, whose Zolt classes are still stubs, but its blocker .characters is supported"; a ported
-//! class (no `is_stub`) with a stub slot as "the Character classes are ported but their slot in SimulationParity.zig is
-//! still Phase7StubSlot" (and the test "SimulationParity Phase 7 slots follow the ported classes" fails).
-//! CharacterBaseParity.zig compares CharacterBase's SaveState bytes: writing the ground normal in place of the ground
-//! velocity fails it. The checks of the foundation review: a character state restore that does not check that every
-//! byte was read (the check before the review) fails "SimulationParity restoring the character states reads every
-//! byte"; an applyOp that ignores the character recorder fails "SimulationParity a character record that cannot be
-//! stored fails the operation" ("expected error.OutOfMemory, found 0"); a copy of CharacterVirtualSettings that consumes an ID (default construction and assignment in
-//! place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference occurs at index
-//! 3"). The Ragdoll group: computing the body 1 to body 2 rotation in Ragdoll.driveToPoseUsingMotorsWithVelocity the
-//! other way around (body 1 conjugated times body 2) is reported as "scene ragdoll_motors_animation, ... update 2: after
-//! the update, state f: state differs at byte 1667 ...: bodies[13] (id 0x0080000d) position.x zolt 0x394972b8 ... jolt
-//! 0x3945ee04" (and ragdoll_save_restore at update 1); finalizing the bodies of Ragdoll.addToPhysicsSystem with Activate
-//! whenever it does not lock as "scene ragdoll_add_activation, ... update 0: operation 18
-//! (ragdoll_add_to_physics_system on object handle / description 3) returned 1 in zolt and 0 in jolt" (and ragdoll_ops).
+//! Proof that the Phase 7 checks bite: a Zolt object state field that the C++ side does not write as "object state
+//! differs at byte 0 (zolt 20 bytes, jolt 0 bytes): zolt writes more, starting with ragdoll_properties (object handle
+//! 0, item 0)"; a supported Blocker whose classes are stubs as "scene character_ops creates Character objects, whose
+//! Zolt classes are still stubs, but its blocker .characters is supported"; a ported class (no `is_stub`) with a stub
+//! slot as "the Character classes are ported but their slot in SimulationParity.zig is still Phase7StubSlot" (and the
+//! test "SimulationParity Phase 7 slots follow the ported classes" fails). CharacterBaseParity.zig compares
+//! CharacterBase's SaveState bytes: writing the ground normal in place of the ground velocity fails it. The checks of
+//! the foundation review: a character state restore that does not check that every byte was read (the check before the
+//! review) fails "SimulationParity restoring the character states reads every byte"; an applyOp that ignores the
+//! character recorder fails "SimulationParity a character record that cannot be stored fails the operation" ("expected
+//! error.OutOfMemory, found 0"); a copy of CharacterVirtualSettings that consumes an ID (default construction and
+//! assignment in place of the copy constructor) fails "SimulationParity CharacterID consumption" ("first difference
+//! occurs at index 3"). The Ragdoll group: computing the body 1 to body 2 rotation in
+//! Ragdoll.driveToPoseUsingMotorsWithVelocity the other way around (body 1 conjugated times body 2) is reported as
+//! "scene ragdoll_motors_animation, ... update 2: after the update, state f: state differs at byte 1667 ...: bodies[13]
+//! (id 0x0080000d) position.x zolt 0x394972b8 ... jolt 0x3945ee04" (and ragdoll_save_restore at update 1); finalizing
+//! the bodies of Ragdoll.addToPhysicsSystem with Activate whenever it does not lock as "scene ragdoll_add_activation,
+//! ... update 0: operation 18 (ragdoll_add_to_physics_system on object handle / description 3) returned 1 in zolt and 0
+//! in jolt" (and ragdoll_ops).
 //!
 //! Proof that the vehicle scenes bite (VehicleSlot, the vehicle core group): multiplying WheelWV's lateral slip angle by
 //! 1.0001 is reported as "scene vehicle_wheeled_ops, ... update 11: ... state differs at byte 92 ...: bodies[2] (id
@@ -144,14 +146,15 @@
 //! wheel_speed_at_clutch".
 //!
 //! Soft bodies (Phase 9, group SH; see "Soft bodies" in the SimScenes header): both worlds generate the shared settings
-//! of every SimSoftBodySettings with the same code (SoftBodySlot.makeSettings here, SimMakeSoftBodySettings in the .cpp).
-//! Before a scene runs, checkSoftBodySettings compares their SaveBinaryState bytes. A soft body gets a body handle. SoftBodySlot applies the soft body operations, SoftBodyListenerImpl records the callbacks of
-//! the soft body contact listener (RecordKind 70..73, compared sorted with the other records). The state decoder reads a
-//! soft body's SaveState with the array sizes of jolt_sim_soft_body_info ("soft_body.vertices[5].velocity.y"); the test
+//! of every SimSoftBodySettings with the same code (SoftBodySlot.makeSettings here, SimMakeSoftBodySettings in the
+//! .cpp). Before a scene runs, checkSoftBodySettings compares their SaveBinaryState bytes. A soft body gets a body
+//! handle. SoftBodySlot applies the soft body operations, SoftBodyListenerImpl records the callbacks of the soft body
+//! contact listener (RecordKind 70..73, compared sorted with the other records). The state decoder reads a soft body's
+//! SaveState with the array sizes of jolt_sim_soft_body_info ("soft_body.vertices[5].velocity.y"); the test
 //! "SimulationParity state decoder: soft bodies" checks it against the C++ getters, because Zolt's
-//! SoftBodyMotionProperties::SaveState is group S4's. The D12 sweeps give every update that starts from the snapshot the
-//! skin flags of the snapshot again (`SkinFlags`). After every update the soft body listener records of the C++ side
-//! must agree with each other (checkSoftBodyRecords).
+//! SoftBodyMotionProperties::SaveState is group S4's. The D12 sweeps give every update that starts from the snapshot
+//! the skin flags of the snapshot again (`SkinFlags`). After every update the soft body listener records of the C++
+//! side must agree with each other (checkSoftBodyRecords).
 //!
 //! Soft body scenes against Zolt (group S5): the Zolt side also counts the steps in which the CCD response changes a
 //! soft body (Expect.soft_body_ccd, SpawnCountingJobSystem), checks the update groups of the shared settings
