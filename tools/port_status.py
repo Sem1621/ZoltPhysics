@@ -13,7 +13,8 @@ files without a header, and library files that are not registered in Zolt/zolt.z
 Usage:
     python3 tools/port_status.py            # print summary + lint warnings
     python3 tools/port_status.py --write    # also regenerate Docs/Zolt/Progress.md
-    python3 tools/port_status.py --check    # exit 1 if Progress.md is stale, lint fails or a declaration is pending (CI)
+    python3 tools/port_status.py --check    # exit 1 if Progress.md is stale, lint fails, a declaration is pending,
+                                            # M10 fails (the --check-m10 rules) or a TODO(debug_renderer) is left (CI)
     python3 tools/port_status.py --next     # list unported C++ units whose dependencies are all ported
     python3 tools/port_status.py --no-pending  # exit 1 while a serializable class is pending or not declared
     python3 tools/port_status.py --check-m10   # exit 1 until milestone M10: every UnitTests/ unit complete or n/a,
@@ -281,7 +282,7 @@ def render_markdown(lib_rows, test_rows, serialization):
     out.append("Status comes from the `//! Port of:` / `//! Status:` headers of the Zig files. Percentages are")
     out.append("weighted by non-blank C++ lines (complete = 100%, partial = 50%, stub = 10%). ➖ marks C++ files")
     out.append("that need no port because Zig covers them natively (see `NOT_APPLICABLE` in the script), ⏸ files")
-    out.append("that are postponed to a later phase (see `DEFERRED` in the script); neither counts towards the percentage.")
+    out.append("that stay deferred or out of scope (see `DEFERRED` in the script); neither counts towards the percentage.")
     out.append("")
 
     in_scope = [r for r in counted(lib_rows) if not deferred_reason(r["unit"])]
@@ -444,7 +445,7 @@ def print_next(lib_rows):
     for unit, unit_status_value in sorted(status.items()):
         if unit_status_value != "todo":
             continue
-        # Dependencies on deferred units (e.g. the debug renderer) don't block: that code is skipped for now
+        # Dependencies on deferred units (the GPU backends, the profiler) don't block: that code is skipped
         missing = sorted(d for d in deps[unit]
                          if status.get(d) not in ("complete", "partial", "n/a")
                          and d not in IMPLICIT_DEPENDENCIES and not deferred_reason(d))
@@ -517,11 +518,36 @@ def check_m10(test_rows):
     return not problems
 
 
+# Phase 9 ports every JPH_DEBUG_RENDERER block under the gates of RemainingFeaturesArchitecture.md R2, so no
+# `TODO(debug_renderer)` marker may come back (for example with an upstream sync). The marker is built from two parts
+# so that this file does not contain it.
+DEBUG_RENDERER_MARKER = "TODO(" + "debug_renderer)"
+MARKER_DIRS = ("Zolt", "ZoltTests", "ZoltParity", "ZoltPerformanceTest", "ZoltHelloWorld")
+MARKER_EXTENSIONS = (".zig", ".cpp", ".c", ".h")
+
+
+def debug_renderer_markers():
+    """The `TODO(debug_renderer)` markers left in the Zig port and its harnesses, as lint messages"""
+    found = []
+    paths = [os.path.join(ROOT, "build.zig")]
+    for base in MARKER_DIRS:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, base)):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            paths.extend(os.path.join(dirpath, name) for name in sorted(filenames) if name.endswith(MARKER_EXTENSIONS))
+    for path in paths:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line_no, line in enumerate(f, 1):
+                if DEBUG_RENDERER_MARKER in line:
+                    found.append(f"{rel(path)}:{line_no}: {DEBUG_RENDERER_MARKER} is left, port the code under the R2 gates")
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--write", action="store_true", help="regenerate Docs/Zolt/Progress.md")
     ap.add_argument("--check", action="store_true",
-                    help="fail if Progress.md is stale, lint finds problems or a serializable class is pending")
+                    help="fail if Progress.md is stale, lint finds problems, a serializable class is pending, M10 fails"
+                         " or a TODO(debug_renderer) marker is left")
     ap.add_argument("--next", action="store_true", help="list unported units whose dependencies are ported")
     ap.add_argument("--verbose", action="store_true", help="with --next: also list blocked units")
     ap.add_argument("--no-pending", action="store_true",
@@ -570,7 +596,13 @@ def main():
         undeclared = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_serializable.py"), "--check",
                                      "--complete"]).returncode != 0
         pending = not serialization_complete(serialization)
-        if stale or lint or untidy or undeclared or pending:
+        # Phase 9 is done (Docs/Zolt/RemainingFeaturesArchitecture.md section 1): M10 holds and every JPH_DEBUG_RENDERER
+        # block is ported, so a regression of either fails
+        m10 = not check_m10(test_rows)
+        markers = debug_renderer_markers()
+        for message in markers:
+            print(f"lint: {message}", file=sys.stderr)
+        if stale or lint or untidy or undeclared or pending or m10 or markers:
             sys.exit(1)
 
     if args.no_pending and not serialization_complete(serialization):
@@ -578,7 +610,7 @@ def main():
 
 
 def serialization_complete(serialization):
-    """True when every serializable class of Jolt (without Phase 9) has a complete declaration; prints the others"""
+    """True when every serializable class of Jolt has a complete declaration; prints the others"""
     left = [(c, s) for c, _, s in serialization if s != "declared"]
     for c, s in left:
         print(f"serialization: {c} is {'pending' if s == 'pending' else 'not declared'}", file=sys.stderr)

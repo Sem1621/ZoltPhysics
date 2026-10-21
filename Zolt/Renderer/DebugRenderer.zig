@@ -300,7 +300,10 @@ pub const DebugRenderer = struct {
         /// @param world_space_bounds World space bounds for this geometry (transform bounds by model space matrix)
         /// @param lod_scale_sq is the squared scale of the model matrix, it is multiplied with the LOD distances in the geometry to calculate the real LOD distance (so a number > 1 will force a higher LOD).
         /// @return The selected LOD.
+        /// Zolt (UB34 of R20): panics for a geometry without LODs (Jolt reads `mLODs.back()` of an empty list).
         pub fn getLOD(self: *const Geometry, camera_position: Vec3, world_space_bounds: AABox, lod_scale_sq: f32) *const LOD {
+            if (self.lods.items.len == 0)
+                @panic("DebugRenderer.Geometry.getLOD: the geometry has no LODs");
             const dist_sq = world_space_bounds.getSqDistanceTo(camera_position);
             for (self.lods.items) |*lod| {
                 if (dist_sq <= lod_scale_sq * math.square(lod.distance))

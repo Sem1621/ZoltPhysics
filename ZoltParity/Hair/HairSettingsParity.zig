@@ -23,6 +23,8 @@
 //!   and skips InitRenderAndSimulationStrands. Zolt's asserts are recoverable and counted (ParityHooks.ReleaseAsserts).
 //! - Resample of strands of 0 and 1 vertices inside the vertex array (literal, without an assert): only the resampled
 //!   groom is compared, its strands have rods of zero length.
+//! - Grids of 1 cell on one or two axes whose grid points stay inside the grid (R20 UB30). The random grids have at
+//!   least 2 cells per axis.
 //! - SkinScalpVertices and PrepareForScalpSkinning with frames of the face animation.
 //! - The small functions: Gradient::MakeStepDependent (std::pow, the pin of R13), GradientSampler,
 //!   Material::GetBendCompliance, NeedsGrid and GlobalPoseOnly on random inputs.
@@ -562,6 +564,53 @@ test "HairSettings parity: random grooms and settings" {
         const name = try std.fmt.allocPrint(allocator, "random {d}", .{round});
         defer allocator.free(name);
         try runCase(allocator, .{ .name = name, .state = state, .groom = &groom, .resample = resample });
+    }
+}
+
+test "HairSettings parity: grids of 1 cell on an axis whose grid points stay inside the grid (R20 UB30)" {
+    // Init samples the 8 grid points around each vertex with an inv mass above 0. On an axis of size 1 the index is 0,
+    // and the point at index 1 is in the next row or slice. Jolt stays inside mNeutralDensity as long as no point is
+    // past the end. Zolt panics only at a point past the end (UB30, not tested: a test cannot catch a panic). The fixed
+    // roots span the bounds from (0, 0, 0) to the grid size, without padding, so the grid position of a vertex is its
+    // position clamped to the grid. The simulated vertices reach the last grid point.
+    const allocator = std.testing.allocator;
+    const Strand = []const [3]f32;
+    const Setup = struct { name: []const u8, grid_size: [3]u32, strands: []const Strand };
+    const setups = [_]Setup{
+        // 16 points, stride (1, 1, 4): past the end only at the indices y = 2 and z = 2
+        .{ .name = "grid 1 x 4 x 4", .grid_size = .{ 1, 4, 4 }, .strands = &.{
+            &.{ .{ 0, 0, 0 }, .{ 0.5, 1.5, 3.0 }, .{ 0.5, 3.0, 1.5 }, .{ 0.25, 2.5, 0.75 } },
+            &.{ .{ 1, 4, 4 }, .{ 0.75, 0.25, 3.75 }, .{ 0.5, 1.0, 2.0 }, .{ 0.6, 0.6, 0.6 } },
+        } },
+        // 16 points, stride (1, 4, 4): past the end at the index z = 2
+        .{ .name = "grid 4 x 1 x 4", .grid_size = .{ 4, 1, 4 }, .strands = &.{
+            &.{ .{ 0, 0, 0 }, .{ 3.5, 0.5, 1.5 }, .{ 0.5, 0.25, 0.5 }, .{ 2.25, 0.75, 1.75 } },
+            &.{ .{ 4, 1, 4 }, .{ 4.0, 1.0, 1.0 }, .{ 1.5, 0.5, 0.25 } },
+        } },
+        // 6 points, stride (1, 1, 1): past the end at the indices z = 3 and z = 4
+        .{ .name = "grid 1 x 1 x 6", .grid_size = .{ 1, 1, 6 }, .strands = &.{
+            &.{ .{ 0, 0, 0 }, .{ 0.5, 0.5, 2.5 }, .{ 0.25, 0.75, 0.5 } },
+            &.{ .{ 1, 1, 6 }, .{ 0.75, 0.25, 1.25 }, .{ 0.5, 0.5, 2.0 } },
+        } },
+    };
+    for (setups) |setup| {
+        var settings = try baseSettings(allocator, null, &.{.{ .simulation_strands_fraction = 1.0 }});
+        defer settings.deinit();
+        settings.grid_size = UVec4.init(setup.grid_size[0], setup.grid_size[1], setup.grid_size[2], 0);
+        settings.simulation_bounds_padding = Vec3.zero();
+        const state = try saveState(allocator, &settings);
+        defer allocator.free(state);
+
+        // The first vertex of each strand is fixed
+        var groom: Groom = .{};
+        defer groom.deinit(allocator);
+        for (setup.strands) |strand| {
+            const first: u32 = @intCast(groom.vertices.items.len);
+            for (strand, 0..) |p, i|
+                try groom.vertices.append(allocator, .init(.{ .x = p[0], .y = p[1], .z = p[2] }, .{ .inv_mass = if (i == 0) 0.0 else 1.0 }));
+            try groom.strands.append(allocator, .init(first, @intCast(groom.vertices.items.len), 0));
+        }
+        try runCase(allocator, .{ .name = setup.name, .state = state, .groom = &groom });
     }
 }
 

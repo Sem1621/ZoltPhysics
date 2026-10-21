@@ -7,6 +7,9 @@
 //!   order of the additions is the order of the threads. Integer addition wraps, so the result does not depend on the
 //!   order anyway.
 //! - `uint3(grid_pos)` of a NaN grid position is undefined in Jolt (UB11 of R20, see HairCommon.zig).
+//! - A grid point past the end of the grid panics before the first addition (UB30 of R20, `checkGridPoints` of
+//!   HairCommon.zig). Jolt writes past the grid buffer there. It happens with a GridSize below 2 on X, Y or Z, or
+//!   with a grid of 2^32 or more points, whose size wraps.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");
@@ -70,6 +73,7 @@ pub fn main(b: *Bindings, tid: hlsl.uint3) void {
     const adr_100 = adr_000 +% 1;
     const adr_010 = adr_000 +% stride.y;
     const adr_110 = adr_010 +% 1;
+    HairCommon.checkGridPoints(c, adr_000, adr_100, adr_010, adr_110, name); // Zolt (R20 UB30): Jolt writes past the grid
     atomicAddVelocityAndDensity(b, adr_000, int4.fromFloat4(hlsl.round(velocity_and_density.mulScalar(a.x * a.y * a.z))));
     atomicAddVelocityAndDensity(b, adr_100, int4.fromFloat4(hlsl.round(velocity_and_density.mulScalar(ma.x * a.y * a.z))));
     atomicAddVelocityAndDensity(b, adr_010, int4.fromFloat4(hlsl.round(velocity_and_density.mulScalar(a.x * ma.y * a.z))));
@@ -91,6 +95,7 @@ test "HairGridAccumulate: a NaN position goes to the cells of index 0 (UB11)" {
     context.grid_size_min1 = .init(2, 2, 2);
     context.grid_scale = .init(1, 1, 1);
     context.grid_stride = .init(1, 3, 9);
+    context.num_grid_points = 27;
     const context_bytes: [@sizeOf(HairStructs.HairUpdateContext)]u8 align(16) = @bitCast(context);
     var fixed: [1]u32 align(16) = .{0};
     var positions: [2]HairPosition align(16) = .{

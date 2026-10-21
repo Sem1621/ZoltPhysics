@@ -1136,12 +1136,14 @@ pub const Shape = struct {
     pub const impl = struct {
         // Draw is pure (JPH_DEBUG_RENDERER): every concrete shape implements it
 
-        pub fn drawGetSupportFunction(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+        pub const drawGetSupportFunction = if (Core.debug_renderer) drawGetSupportFunctionImpl else {};
+        fn drawGetSupportFunctionImpl(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
             // Nothing (only relevant for convex shapes)
             _ = .{ self, renderer, center_of_mass_transform, scale, color, draw_support_direction };
         }
 
-        pub fn drawGetSupportingFace(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+        pub const drawGetSupportingFace = if (Core.debug_renderer) drawGetSupportingFaceImpl else {};
+        fn drawGetSupportingFaceImpl(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
             // Nothing (only relevant for convex shapes)
             _ = .{ self, renderer, center_of_mass_transform, scale };
         }

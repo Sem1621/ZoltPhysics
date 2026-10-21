@@ -44,6 +44,11 @@ test "DebugRenderer: the hooks compile away without -Ddebug_renderer" {
         try expect((@TypeOf(@field(zolt.Shape, name)) == void) == !on);
     }
     try expect((@TypeOf(zolt.BoxShape.draw) == void) == !on);
+    // Draw is pure virtual (no body in impl), the other two have Jolt's empty default bodies
+    try expect(!@hasDecl(zolt.Shape.impl, "draw"));
+    inline for (.{ "drawGetSupportFunction", "drawGetSupportingFace" }) |name| {
+        try expect((@TypeOf(@field(zolt.Shape.impl, name)) == void) == !on);
+    }
 
     // Without the option the void entries occupy no space: every shape vtable is exactly as large as before Phase 9
     comptime var fn_entries: usize = 0;

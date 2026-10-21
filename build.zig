@@ -6,6 +6,7 @@
 //!   zig build check        Compile everything without running (fast feedback / ZLS build-on-save)
 //!   zig build docs         Emit autodoc HTML into zig-out/docs
 //!   zig build parity       Compare Zolt bit for bit with the C++ Jolt library (compiled from Jolt/ with Zig's C++ compiler)
+//!   zig build parity-check Compile the parity tests and the C++ reference without running them
 //!   zig build performance-test -- <args>   Run ZoltPerformanceTest (the port of PerformanceTest/, see its -h)
 //!   zig build hello-world  Run ZoltHelloWorld (the port of HelloWorld/HelloWorld.cpp, milestone M5)
 //!   zig build hello-world-check  Run the C++ HelloWorld and its port, fail unless their stdout is identical (part of parity)

@@ -16,7 +16,8 @@
 //!   early) or a second row in y (the shader runs twice for the same x, also on both sides). A layer can turn off the
 //!   second row (`dispatchRandomRows`).
 //! - The grid inputs never produce the UB11 grid positions: no NaN positions, a positive and finite grid scale, a grid
-//!   of at least 2 cells per axis. Infinite positions are fine: the clamp maps them into the grid.
+//!   of at least 2 cells per axis. Infinite positions are fine: the clamp maps them into the grid. With 2 or more cells
+//!   per axis no grid point is past the end of the grid (UB30).
 //! - HairGridAccumulate adds with atomics. Jolt's CPU backend runs the threads one at a time on the calling thread, in
 //!   x order (ComputeQueueCPU::Dispatch is a plain loop), and so does Zolt's. The additions are integer additions that
 //!   wrap, so the grid does not depend on their order anyway. The grid layer checks this on the C++ side: the reversed

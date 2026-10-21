@@ -25,21 +25,38 @@
 //! - InitCompute: the padding vertices of short strands are zero (UB4 of R20: Jolt leaves them uninitialized; the
 //!   parity reference runs with zero filling allocation hooks).
 //! - Inputs where Jolt is undefined (R20; Zolt-only tests pin them):
-//!   - UB8: mSimulationStrandsFraction selects more strands than there are left on the last material run (a fraction
-//!     above 1, or a fraction that size_t cannot hold: NaN, negative, huge). Jolt reads past the index array. Zolt panics
-//!     ("HairSettings: mSimulationStrandsFraction selects more strands than there are"). The other runs are literal:
-//!     the simulated strands run into the next material.
-//!   - Init with a simulated strand of 0 vertices, or of 1 vertex that starts at vertex 0 or that no strand of 2 or more
-//!     vertices comes before (in the order of mSimStrands). Jolt reads past x or mSimVertices. Zolt panics
+//!   - UB8: on any material run, mSimulationStrandsFraction selects a number of strands, ceil(fraction * run size),
+//!     that is NaN, negative or more than the strands left from the start of the run (a fraction that size_t cannot
+//!     hold, or a fraction above 1 whose strands run past the last material). Jolt reads past the index array. Zolt
+//!     panics ("HairSettings: mSimulationStrandsFraction selects more strands than there are"). A run whose simulated
+//!     strands stay inside the index array is literal: they can run into the next material.
+//!   - UB19: Init with a simulated strand of 0 vertices, or of 1 vertex that starts at vertex 0 or that no strand of 2
+//!     or more vertices comes before (in the order of mSimStrands). Jolt reads past x or mSimVertices. Zolt panics
 //!     ("HairSettings.init: a simulated strand has no vertices", "HairSettings.init: a simulated strand of 1 vertex
-//!     starts at vertex 0 or comes before every longer strand"). (Not in the R20 table yet.)
-//!   - Init with a scalp on settings that already have skin points: Init twice, or Init after restoring the state of
-//!     an initialized groom. Jolt appends more skin points and reads mSimStrands past its end. Zolt panics before it
+//!     starts at vertex 0 or comes before every longer strand").
+//!   - UB20: Init with a scalp on settings that already have skin points: Init twice, or Init after restoring the state
+//!     of an initialized groom. Jolt appends more skin points and reads mSimStrands past its end. Zolt panics before it
 //!     finalizes the skin points ("HairSettings.init: the settings have more skin points than simulated strands").
-//!     (Not in the R20 table yet.)
-//!   - resample with a strand of 1 vertex at the end of the vertex array, or a strand of 0 vertices at its start or
-//!     end. Jolt reads past the vertex array. Zolt panics ("HairSettings.resample: a strand of 0 or 1 vertices reads
-//!     past the vertex array"). (Not in the R20 table yet.)
+//!   - UB19: resample with a strand of 1 vertex at the end of the vertex array, or a strand of 0 vertices at its start
+//!     or end. Jolt reads past the vertex array. Zolt panics ("HairSettings.resample: a strand of 0 or 1 vertices reads
+//!     past the vertex array").
+//!   - UB30: Init samples a grid point past the end of mNeutralDensity. Init samples the 8 grid points around each
+//!     vertex with an inv mass above 0. With a GridSize below 2 on X, Y or Z a point can be past the end: on an axis
+//!     of size 1 the index is 0, and the point at index 1 is in the next row or slice. An axis of size 0 leaves no
+//!     grid point. A grid of 2^32 or more points wraps its size, and then a point can be past the end with every
+//!     axis at 2 or more. Jolt writes past mNeutralDensity there. Zolt checks each point and panics at the first one
+//!     past the end, in every build mode ("HairSettings.init: a vertex samples a grid point past the end of the
+//!     grid"). Points inside the grid are literal, so a grid of size 1 works when its points stay inside. Hair's grid
+//!     shaders have the same check (see Hair.zig).
+//!   - UB31: InitRenderAndSimulationStrands with a simulated strand of 0 vertices at the end of mSimVertices, or at its
+//!     start (its last vertex index wraps, so the walk along the strand can pass the end). The search for the closest
+//!     simulated strand of the other strands of its material then can read past mSimVertices in Jolt. Zolt panics at a
+//!     read past the array ("HairSettings.initRenderAndSimulationStrands: a simulated strand of 0 vertices reads past
+//!     mSimVertices"). The reads inside the array are literal (Init then panics for the strand, UB19).
+//!   - UB33: InitCompute before Init (or after a change of the strands): a strand has more vertices than
+//!     mMaxVerticesPerStrand, and Jolt writes past the transposed vertex arrays. Zolt panics ("HairSettings.initCompute:
+//!     a strand has more vertices than max_vertices_per_strand (call init first)").
+//!   - No test pins these panics: a test cannot catch a panic.
 //! - Init with a strand of 1 vertex that a longer strand comes before follows Jolt's release build. Jolt reads x[1]
 //!   past the size of x (an assert of Jolt's Array). Its Array still holds the x[1] of the last strand of 2 or more
 //!   vertices there. That x[1] gives the rod length of the vertex. The Bishop frame of the vertex is then copied from
@@ -647,6 +664,15 @@ pub const HairSettings = struct {
         return self.ref_count.get();
     }
 
+    /// `mSimVertices[index].mPosition` in the closest strand search of initRenderAndSimulationStrands. Zolt (R20 UB31): an
+    /// index past the array panics, where Jolt reads past the array. A simulated strand of 0 vertices gets there: at the
+    /// end of the array, or at vertex 0 (its last vertex index wraps, so the walk can pass the end).
+    fn closestSearchPosition(sim_vertices: []const SVertex, index: u32) Float3 {
+        if (index >= sim_vertices.len)
+            @panic("HairSettings.initRenderAndSimulationStrands: a simulated strand of 0 vertices reads past mSimVertices");
+        return sim_vertices[index].position;
+    }
+
     /// Split the supplied render strands into render and simulation strands and calculate connections between them.
     /// When this function returns mSimVertices, mSimStrands, mRenderVertices and mRenderStrands are overwritten.
     /// @param vertices Vertices for the strands.
@@ -694,8 +720,8 @@ pub const HairSettings = struct {
             var random = Mt19937.init(Mt19937.default_seed);
             random.shuffleLibcxx(u32, indices_shuffle[begin_material..end_material]);
             const simulated = @ceil(@as(f64, self.materials.items[material_index].simulation_strands_fraction) * @as(f64, @floatFromInt(end_material - begin_material)));
-            // Zolt (R20 UB8): Jolt reads past the index array when the simulated strands run past the last material (a
-            // fraction above 1 on the last run, or a fraction that size_t cannot hold)
+            // Zolt (R20 UB8): Jolt reads past the index array when ceil(fraction * run size) is NaN, negative or more
+            // than the strands left from the start of this run (on any run)
             if (!(simulated >= 0.0 and simulated <= @as(f64, @floatFromInt(num_indices - begin_material))))
                 @panic("HairSettings: mSimulationStrandsFraction selects more strands than there are");
             const num_simulated: usize = @max(@as(usize, @intFromFloat(simulated)), 1);
@@ -737,8 +763,8 @@ pub const HairSettings = struct {
                         const v_max: u32 = sim_strand.end_vtx -% 1;
                         var v: u32 = sim_strand.start_vtx;
                         var v_next: u32 = math.min(v +% 1, v_max);
-                        var v_pos = Vec3.fromFloat3(self.sim_vertices.items[v].position);
-                        var v_next_pos = Vec3.fromFloat3(self.sim_vertices.items[v_next].position);
+                        var v_pos = Vec3.fromFloat3(closestSearchPosition(self.sim_vertices.items, v));
+                        var v_next_pos = Vec3.fromFloat3(closestSearchPosition(self.sim_vertices.items, v_next));
 
                         // Track total error when selecting this sim strand as parent for the render strand
                         var d_sq_total: f32 = 0.0;
@@ -757,7 +783,7 @@ pub const HairSettings = struct {
                                 v = v_next;
                                 v_next = math.min(v +% 1, v_max);
                                 v_pos = v_next_pos;
-                                v_next_pos = Vec3.fromFloat3(self.sim_vertices.items[v_next].position);
+                                v_next_pos = Vec3.fromFloat3(closestSearchPosition(self.sim_vertices.items, v_next));
 
                                 // Update distance to render vertex
                                 d_sq = d_sq_next;
@@ -1187,6 +1213,10 @@ pub const HairSettings = struct {
                     vertex: *const SVertex,
 
                     fn call(c: @This(), index: u32, fraction: f32) void {
+                        // Zolt (R20 UB30): with a GridSize below 2 on X, Y or Z a grid point can be past the end of the
+                        // grid, and Jolt writes past mNeutralDensity
+                        if (index >= c.density.len)
+                            @panic("HairSettings.init: a vertex samples a grid point past the end of the grid");
                         c.density[index] += fraction / c.vertex.inv_mass;
                     }
                 }{ .density = self.neutral_density.items, .vertex = v });
@@ -1244,6 +1274,12 @@ pub const HairSettings = struct {
     pub fn initCompute(self: *HairSettings, compute_system: *ComputeSystem) Allocator.Error!void {
         const allocator = self.allocator;
         const num_strands = self.sim_strands.items.len;
+
+        // Zolt (R20 UB33): before Init mMaxVerticesPerStrand is 0, and Jolt writes past the transposed vertex arrays
+        for (self.sim_strands.items) |strand| {
+            if (strand.vertexCount() > self.max_vertices_per_strand)
+                @panic("HairSettings.initCompute: a strand has more vertices than max_vertices_per_strand (call init first)");
+        }
 
         // Optional: We can attach the roots of the hairs to the scalp
         if (self.scalp_triangles.items.len != 0 and self.skin_points.items.len != 0) {
@@ -1610,8 +1646,9 @@ test "HairSettings: initRenderAndSimulationStrands simulates a fraction, appends
 }
 
 test "HairSettings: a simulation fraction of exactly 1 on the last material (next to R20 UB8)" {
-    // A fraction above 1 on the last material panics (Jolt reads past the index array). Exactly 1 simulates every
-    // strand, and a fraction above 1 on a material that is not the last runs into the next one (literal).
+    // A fraction that selects more strands than there are left from the start of its run panics (UB8: Jolt reads past
+    // the index array). Exactly 1 simulates every strand, and a fraction above 1 whose strands stay inside the index
+    // array runs into the next material (literal).
     const allocator = testing.allocator;
     var settings: HairSettings = .{ .allocator = allocator };
     defer settings.deinit();
@@ -1697,6 +1734,47 @@ test "HairSettings: init of a strand of 2 vertices, the smallest one" {
     try testGroom(allocator, 1, 2, 0, &settings.sim_vertices, &settings.sim_strands);
     _ = try settings.init();
     try testing.expectEqual(@as(u32, 2), settings.max_vertices_per_strand);
+}
+
+test "HairSettings: init with a grid of 2 cells per axis (R20 UB30)" {
+    // With 2 or more cells on each axis every grid point that a vertex samples is inside the grid. Every vertex with an
+    // inv mass above 0 samples the 8 points around it.
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{});
+    settings.grid_size = .init(2, 2, 2, 0);
+    try testGroom(allocator, 3, 4, 0, &settings.sim_vertices, &settings.sim_strands);
+    _ = try settings.init();
+    try testing.expectEqual(@as(usize, 8), settings.neutral_density.items.len);
+    var total: f32 = 0.0;
+    for (settings.neutral_density.items) |d| total += d;
+    try testing.expectApproxEqRel(@as(f32, 9.0), total, 1.0e-5); // 9 vertices of inv mass 1, each sample sums to 1
+}
+
+test "HairSettings: init with a grid of 1 cell on X whose grid points stay inside the grid (R20 UB30)" {
+    // GridSize (1, 4, 4) has 16 points and the stride (1, 1, 4). On X the index is always 0, and the point at x + 1 is
+    // the point at y + 1. A vertex at the indices (0, y, z) samples the points up to y + 4 * z + 6. That is past the
+    // end only for y = 2 and z = 2: Init then panics, like Jolt writes past mNeutralDensity (not tested: a test cannot
+    // catch a panic). These vertices reach point 15, the last one, and Jolt's Init reads inside the grid.
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{});
+    settings.grid_size = .init(1, 4, 4, 0);
+    settings.simulation_bounds_padding = .zero();
+    // Two strands of 2 vertices. The fixed roots span the bounds (0, 0, 0) to (1, 4, 4), so the grid position of a
+    // vertex is its position, clamped to (0, 3, 3).
+    try settings.sim_vertices.appendSlice(allocator, &.{
+        .init(.{ .x = 0, .y = 0, .z = 0 }, .{ .inv_mass = 0.0 }),
+        .init(.{ .x = 0.5, .y = 1.5, .z = 3.0 }, .{}), // Indices (0, 1, 2), fraction (0, 0.5, 1): points 9 to 15
+        .init(.{ .x = 1, .y = 4, .z = 4 }, .{ .inv_mass = 0.0 }),
+        .init(.{ .x = 0.5, .y = 3.0, .z = 1.5 }, .{}), // Indices (0, 2, 1), fraction (0, 1, 0.5): points 6 to 12
+    });
+    try settings.sim_strands.appendSlice(allocator, &.{ .init(0, 2, 0), .init(2, 4, 0) });
+    _ = try settings.init();
+    try testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0.5, 0.5, 0 }, settings.neutral_density.items);
+    try testing.expectEqual(@as(f32, 2.0), settings.density_scale);
 }
 
 test "HairSettings: init of strands of 1 vertex after longer strands follows Jolt's release build" {

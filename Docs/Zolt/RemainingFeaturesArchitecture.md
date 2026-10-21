@@ -23,10 +23,12 @@ renderer, the recorder, the recoverable asserts) comes from the Zig design propo
 compute and soft body seeds and the table of Zolt-defined behavior come from the fidelity proposal. Every critical flaw
 that the judges found was checked against the Jolt sources and fixed here (section 11).
 
-The synthesis prototype is the start of the foundation (section 10). It is in the tree: the build option, the void
-gates, the renderer interface and its recorder, the compute interfaces, the recoverable asserts and the reference build
-change. Filtered tests pass in both precisions and both renderer configurations, and a filtered parity passes in both
-renderer configurations.
+The synthesis prototype was the start of the foundation (section 10): the build option, the void gates, the renderer
+interface and its recorder, the compute interfaces, the recoverable asserts and the reference build change.
+
+Phase 9 is done. Every group of section 6 is merged, every file of the scope is complete and milestone M10 is reached.
+A completeness audit checked the merged phase against the Jolt sources ("Settled in the audit", section 6). Section 10
+has the final state.
 
 ## 1. Scope
 
@@ -42,9 +44,11 @@ renderer configurations.
 | Tests | `UnitTests/Geometry/GJKTests.cpp` (4 cases left) | itself | 248 |
 
 - The lines are `wc -l` of the files in the "Jolt files" column. Progress.md counts non-blank lines.
-- Zolt today: 5 soft body stubs, 2 complete soft body files, 6 partial files with soft body gaps, 142
-  `TODO(debug_renderer)` markers in 53 files (138 after this prototype).
-- Stays deferred: the GPU compute backends (`Compute/DX12`, `VK`, `MTL`, 3589 lines, and the `.mm` files) and
+- At the start of Phase 9, Zolt had 5 soft body stubs, 2 complete soft body files, 6 partial files with soft body gaps
+  and 142 `TODO(debug_renderer)` markers in 53 files (138 after the prototype).
+- At the end of Phase 9, every file of the scope is complete and no `TODO(debug_renderer)` is left. `Core.zig` stays
+  partial, as since Phase 2: it holds only the configuration values that the code needs, `debug_renderer` among them.
+- Stays deferred: the GPU compute backends (`Compute/DX12`, `VK` and `MTL` with its `.mm` files, 3589 lines) and
   `Core/Profiler` (R21).
 
 **Milestone M10.** 100% of `UnitTests/` is ported and passes:
@@ -57,8 +61,12 @@ renderer configurations.
 M10 needs 5 units: GJKTests, UnitTestFramework (ExpectAssert), ComputeTests, SoftBodyTests and
 LoggingSoftBodyContactListener. Hair and the debug renderer are Phase 9 scope, but no unit test needs them.
 
+M10 is reached (S5). Since the audit, `port_status.py --check` fails on an M10 gap, and CI runs every configuration of
+the list above (R22, section 5).
+
 **Phase 9 is done** when M10 holds, every file of the scope is complete, no `TODO(debug_renderer)` is left, and the full
-parity and the five determinism hashes pass in both renderer configurations.
+parity and the five determinism hashes pass in both renderer configurations. `port_status.py --check` fails on a
+`TODO(debug_renderer)` line.
 
 ## 2. Decisions
 
@@ -127,12 +135,15 @@ parity and the five determinism hashes pass in both renderer configurations.
   the option (section 5), so the draw code cannot rot.
 - `Zolt/Renderer/*.zig` always compile and are tested in both configurations. They are a library of types and helpers.
   Only the simulation hooks are gated.
-- Pure virtual draw functions keep a placeholder in the root's `impl` until their group has ported every override:
+- Pure virtual draw functions kept a placeholder in the root's `impl` until their group had ported every override:
   `Shape.impl.draw` until D2, `Constraint.impl.drawConstraint` until D3, `VehicleController.impl.draw` until D4. A
-  placeholder panics with "TODO(debug_renderer)". Then the group removes it, and `make` enforces Jolt's pure virtual
-  again. No test draws a shape, a constraint or a controller before its group ports it.
+  placeholder panicked with "TODO(debug_renderer)". Every placeholder is gone, and `make` enforces Jolt's pure virtual
+  functions again.
+- A default body of a virtual function under the define is a gated declaration too: `Shape.impl.drawGetSupportFunction`
+  and `drawGetSupportingFace` (settled in the audit). The test "DebugRenderer: the hooks compile away without
+  -Ddebug_renderer" checks that both are `void` without the option.
 - Zero cost when off is checked by a test: every shape vtable has the size of its non-void entries (prototype). D2, D3
-  and D4 add the same check for their vtables and `@sizeOf` pins of the classes with debug-only members (Constraint,
+  and D4 added the same check for their vtables and `@sizeOf` pins of the classes with debug-only members (Constraint,
   the cached shapes, SoftBodyMotionProperties, the wheeled and tracked controllers).
 - `getConfigurationString` adds "(Debug Renderer) " after "(Cross Platform Deterministic) " (prototype).
 
@@ -263,10 +274,11 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
 |---|---|
 | `PhysicsSystem.update`: errors == None | `TestOutOfContactConstraints` (prototype) |
 | PlaneShape and MeshShape `GetSubmergedVolume` "Not supported" | their inline tests (prototype) |
-| `PathConstraint.getConstraintSettings` | `PathConstraintTests.zig:277` |
-| `jobIntegrateVelocity` inner radius | `PhysicsSystemTests.zig:1438` and the scene `linear_cast_without_inner_radius` |
+| `PathConstraint.getConstraintSettings` | "TestPathConstraintFromPhysicsSystem (Jolt's release behavior)" |
+| `jobIntegrateVelocity` inner radius | "PhysicsSystem linear cast body without inner radius (Jolt's release behavior)" and the scene `linear_cast_without_inner_radius` |
 | SkeletonMapper "Should not be initialized yet", `Constraint.zig` step overrides | their inline tests |
-| the asserts behind `VehiclePartsParity.zig:1140`, `RagdollParity.zig:984`, `SkeletonParity.zig:1421`, `constraints_gear_kinematic_release` | those parity tests and scene |
+| the asserts that the release only parity tests reach | the parity tests "VehicleParts: VehicleDifferentialSettings CalculateTorqueRatio outside Jolt's asserts (release only)", "Ragdoll parity: RagdollSettings (release only)" and "Skeleton parity (release only): Sample at negative times and with NaN fractions, ...", and the scene `constraints_gear_kinematic_release` |
+| DebugRendererPlayback's unknown command (`JPH_ASSERT(false)` in `Parse`, settled in the audit) | "DebugRendererPlayback: an unknown command in Jolt's release build" |
 
 - Each unlocked test runs with `ExpectAssert(n)`, where n is the number of Jolt asserts. A conversion that would continue
   into a Zig safety check stays a panic, and its test stays skipped with the reason in a comment.
@@ -280,6 +292,10 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
   three asserts; MotionProperties' dynamic checks of `GetInverseMass`, `MultiplyWorldSpaceInverseInertiaByVector`,
   `ApplyLinearVelocityStep` and `ApplyAngularVelocityStep` (the kinematic gear and rack). None continues into a Zig safety
   check, so no test stays skipped.
+- Settled in the audit: one more site. DebugRendererPlayback's unknown command (`JPH_ASSERT(false)` in `Parse`) is a
+  recoverable assert. After it the parse reads the next byte as a command, like Jolt's release build. The test
+  "DebugRendererPlayback: an unknown command in Jolt's release build" runs in every build with `ExpectAssert(1)`. No
+  test of R8 stays skipped.
 - The parity tests of Jolt's release behavior count the asserts of both sides (`ZoltParity/ParityHooks.zig`
   `ReleaseAsserts`, Zolt's `IssueReporting.CountAsserts`). With `-Dreference_asserts=true` every case and every run of
   a release_only scene hits as many asserts on both sides. Without it they check that the cases reach an assert.
@@ -320,8 +336,9 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
   searched, so its order does not matter. `registerShader(comptime Shader)` is `JPH_REGISTER_SHADER(sys, X)`. A second
   registration overwrites the first, like Jolt. There is no global registry.
 - `createComputeShader` looks the name up. The group sizes come from the caller, not from the shader, like Jolt.
-- `ComputeBufferCPU` is one 16-byte aligned allocation of `size * stride` bytes. Zolt zero-fills it (UB4).
-  `createReadBackBuffer` returns the buffer itself with a new reference.
+- `ComputeBufferCPU` is one 16-byte aligned allocation of `size * stride` bytes. Zolt zero-fills it (UB4). A
+  `size * stride` that does not fit in a `usize` is `error.OutOfMemory` (UB28). `createReadBackBuffer` returns the
+  buffer itself with a new reference.
 - `ComputeQueueCPU`:
   - `setShader` asserts that no shader is pending and creates the shader's wrapper;
   - a bind of a null buffer is ignored; the buffer types are asserted (`ConstantBuffer` for `setConstantBuffer`; Upload,
@@ -454,7 +471,7 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
 | `atomic<bool> mNeedContactCallback`; `mNumSensors` (Jolt's TSAN copy) | `std.atomic.Value(bool)` and `std.atomic.Value(u32)`, Jolt's relaxed order is `.monotonic` |
 | `SoftBodyManifold` | `{ vertices: []const SoftBodyVertex, colliding_shapes: []const CollidingShape, colliding_sensors: []const CollidingSensor }`, built only by `updateSoftBodyState`, with Jolt's accessors (the CCD decode of `getContactBodyID`) |
 | `SoftBodyShape` | final pattern A shape: `base: Shape`, `motion_properties: *const SoftBodyMotionProperties`; `register` fills the dispatch table like `sRegister` (convex and sphere vs soft body, both directions, no construct function, DarkGreen). Soft body vs soft body, mesh, height field and compound stays unregistered |
-| `SoftBodyUpdateContext`, `SoftBodyContactListener` | complete. Contexts live in a `TempArray`, so nothing in them may be aligned above 16 |
+| `SoftBodyUpdateContext`, `SoftBodyContactListener` | complete. Contexts live in a `TempArray`, so nothing in them may be aligned above `rvector_alignment` (JPH_RVECTOR_ALIGNMENT: 16, or 32 in double precision), the alignment of TempAllocator blocks. A comptime assert checks it |
 
 - Mutable access follows the rename table: `getVertices` / `getVerticesMut`, `getVertex` / `getVertexMut`.
 - The delivery prototype parsed Jolt's `SaveBinaryState` bytes with exactly these layouts (`ZoltParity/Physics/
@@ -509,8 +526,10 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
 
 - The FailingJobSystem sweep of every soft body scene needs no special case: every failed creation must give the
   reference bytes. A FailingHeapAllocator test over a soft body scene (PhysicsSystemTests) covers the heap allocation.
-- `CustomUpdate` is literal: a single-threaded state machine with the locking interfaces. Its `SetPosition` on a body that
-  was never added does nothing, like Jolt.
+- `CustomUpdate` is literal: a single-threaded state machine with the locking interfaces. A body that was created but
+  never added has an ID, so its lock succeeds and `SetPosition` moves it. Only the broad phase notify and the activation
+  need a body in the broad phase. A body without an ID (`createSoftBodyWithoutID`) does not move. The test
+  "SoftBodyMotionProperties: customUpdate moves a soft body that was never added, not one without an ID" pins it.
 
 ### R18 CCD against a soft body face
 
@@ -530,9 +549,9 @@ try expect_assert.finish(); // ~ExpectAssert: CHECK(sCount == 0)
   - `mSettings` is the first `Ref` to a non-virtual RefTarget. The ReferenceCodec is generic over RTTI; it needs
     `createDefault`, `addRef` and `release`, which R15 gives. S0 adds a codec test.
 - `SoftBodyCreationSettings` is the 49th `RegisterTypes.factory_types` entry (Jolt's `types[]` order).
-- The S17 exclusions go: `phase9_classes` (the 13 classes), `gen_serializable.py` `EXCLUDED_DIRS` (SoftBody),
-  `port_status.py` `PHASE9_SERIALIZABLE` (SoftBody), the test at `RegisterTypes.zig:281`. S2 removes the PhysicsScene
-  cross-read, `EXCLUDED_ATTRIBUTES` and the `pickCount` special case.
+- The S17 exclusions are gone: `phase9_classes` (the 13 classes), `gen_serializable.py` `EXCLUDED_DIRS` (SoftBody),
+  `port_status.py` `PHASE9_SERIALIZABLE` (SoftBody) and the RegisterTypes test of the boundary (S0). S2 removed the
+  PhysicsScene cross-read, `EXCLUDED_ATTRIBUTES` and the `pickCount` special case.
 - Binary state is statement by statement Jolt (S11): `saveBinaryState`, `restoreBinaryState`, `saveWithMaterials`,
   `restoreWithMaterials` (an id at or above the map size creates new settings, no equality check), `saveWithChildren`,
   `restoreWithChildren`. Jolt's texts are `Result` values ("Failed to read settings id", "Error reading body creation
@@ -552,7 +571,6 @@ Jolt's quirks where Jolt's behavior is defined are reproduced:
 - the tie order of Jolt's `QuickSort` in the edge sort and the group size sort, and Dijkstra's heap ties
   (`BinaryHeap`); `std.sort` gave 30087 mismatches in the fidelity prototype;
 - `FromPhysicsSystem` stores a soft body's index of the wrong array;
-- `CustomUpdate`'s `SetPosition` on an unadded body does nothing;
 - `HairSettings.initRenderAndSimulationStrands` appends to the simulation arrays;
 - `mScalpJointMatricesCB` is 64 times too large (memory only);
 - Jolt's density loops of `Hair::Draw` bound z by `GetX()` and x by `GetZ()`. This is defined only when
@@ -573,7 +591,7 @@ tests pin them.
 | UB5 | a constant buffer larger than the shader's block | overwrites the members after the block | asserts, copies the block size |
 | UB6 | `SaveWithChildren` with a null `mSettings` and both maps | null dereference | panics with a message |
 | UB7 | playback of a batch or geometry ID that the stream does not define, or of a stream that ends inside a command | `find()->second` of `end()`; uninitialized locals, and frame elements that stay uninitialized | an unknown batch ID is `error.InvalidStream`, except ID 0, which is an empty batch; `drawFrame` skips an unknown geometry ID (Jolt looks it up only there); a cut stream is `error.InvalidStream` and keeps every frame Jolt keeps, each with the elements read in full |
-| UB8 | `mSimulationStrandsFraction > 1` on the last material run | reads past the index array | panics with a message (the other runs are defined: literal) |
+| UB8 | on any material run, `mSimulationStrandsFraction` selects ceil(fraction * run size) strands, and that is NaN, negative or more than the strands left from the start of the run (settled in the audit) | reads past the index array | panics with "HairSettings: mSimulationStrandsFraction selects more strands than there are". A run whose simulated strands stay inside the index array is literal: they can run into the next material |
 | UB9 | an allocation failure in a draw | abort | the primitive is dropped and latched (R5) |
 | UB10 | two threads draw the same uncached shape | a data race on the cache | a mutex: one cached geometry (R6) |
 | UB11 | `uint3(float3)` of NaN or of a value outside the `uint32` range (settled in C0) | the result depends on clang's vectorization at the call site: three scalar 64-bit conversions in HairGridAccumulate, a `cvttps2dq` pair for x and y in the `ApplyGrid` of HairIntegrate and HairUpdateVelocityIntegrate | the scalar conversion of porting guide rule 12 for every component (`uint3.fromFloat3`), pinned by a Zolt-only test. The dispatch parity and the hair scenes never produce such grid positions: no zero-size bounds axis without padding, no NaN positions, no diverging scenes |
@@ -593,15 +611,23 @@ tests pin them.
 | UB25 | `Hair.draw` before the first `readBackGPUState` (or before `initCompute`; settled in H3) | `LockReadBackBuffers` calls Map on the null `mVelocityAndDensityReadBackCB` | draws nothing. Pinned by a Hair.zig test. The parity draws only after an update and its read back |
 | UB26 | `Hair.draw` with `draw_skin_points` when the hair has skin points but no skinned scalp vertices (no scalp vertices buffer at the first read back, for example settings without an inverse bind pose; settled in H3) | `Draw` reads the null `mScalpVertices` for every selected skin point | draws no skin point: Jolt's result when the strand range selects none. Pinned by a Hair.zig test. The parity masks the skin points then |
 | UB27 | `SkeletonPose.draw` on a pose without a skeleton (settled in D4) | dereferences the null `mSkeleton` | panics with a message, like SkeletonPose's other functions that need the skeleton |
+| UB28 | `ComputeBufferCPU` whose `size * stride` bytes do not fit in a `usize` (settled in the audit) | `size_t(mSize) * mStride` wraps: it allocates and copies the wrapped number of bytes, and later accesses to the `mSize` elements read or write past the allocation | `create` returns `error.OutOfMemory`, like a failed allocation. Pinned by the ComputeBufferCPU inline test |
+| UB29 | `SoftBodySharedSettings.createCube` with a grid size of 0 (settled in the audit) | `inGridSize - 1` wraps, and the volume constraint loops run about 2^96 times until memory runs out | panics with "SoftBodySharedSettings.createCube: the grid size is 0". Not pinned by a test (a Zig test cannot catch a panic). A grid size of 1 is literal (one vertex, no constraints), pinned by an inline test |
+| UB30 | a vertex samples a hair grid point past the end of the grid (settled in the audit). `HairSettings.init` samples the 8 grid points around each simulated vertex with `mInvMass > 0`. HairGridAccumulate and `ApplyGrid` (of HairIntegrate and HairUpdateVelocityIntegrate) sample them around each vertex they do not skip. With a `GridSize` of 2 or more on each axis, and fewer than 2^32 points, every point is inside. On an axis of size 1 the index is 0, and the point at index 1 is in the next row or slice. That point can be past the end: for example GridSize (1, 4, 4) at the indices y = 2 and z = 2, or any GridSize (X, Y, 1). An axis of size 0 leaves no grid point | Init writes past `mNeutralDensity`; the shaders read or write past the grid buffers | each of the 8 points is checked against the grid size (`mNeutralDensity.size()` in Init, `cNumGridPoints` in the shaders). The first point past the end panics, in every build mode: "HairSettings.init: a vertex samples a grid point past the end of the grid", "HairGridAccumulate: ...", "ApplyGrid: ...". The check is explicit because the bounds check of a slice panics only in safe builds. Points inside the grid are literal, so a grid of size 1 works when its points stay inside. Pinned by inline tests (Init with the grids 2 x 2 x 2 and 1 x 4 x 4, `Hair.update` with the grid 1 x 4 x 8, grooms of fixed vertices with the grids 0 x 0 x 0, 1 x 1 x 1, 1 x 2 x 2 and 2 x 2 x 0) and a HairSettings parity case (the grids 1 x 4 x 4, 4 x 1 x 4 and 1 x 1 x 6, which reach their last point). The panics are not pinned |
+| UB31 | `HairSettings.initRenderAndSimulationStrands` with a simulated strand of 0 vertices that makes the closest strand search read past `mSimVertices` (settled in the audit). This happens when the strand is at the end of `mSimVertices`, or when it starts at vertex 0: its last vertex index, `mEndVtx - 1`, then wraps, and the walk along the strand can pass the end. Its material must also have a strand that is not simulated | the closest strand search reads `mSimVertices` past its end | panics at the read past the array: "HairSettings.initRenderAndSimulationStrands: a simulated strand of 0 vertices reads past mSimVertices". The reads inside the array stay literal (`init` then panics for the strand, UB19). Not pinned by a test |
+| UB32 | `Hair.draw` with `draw_render_strands` and a render strand of 0 vertices at the end of the vertex array (a strand that is not simulated; settled in the audit) | reads the first vertex of the strand past `mRenderVertices` and past the render positions | skips the strand: it draws nothing and does not change the color of the next strand. Inside the array such a strand is literal (it reads the first vertex of the next strand and draws no line). Pinned by a Hair.zig test |
+| UB33 | a Hair or HairSettings call before its prerequisite (settled in the audit): `Hair.update` before `initCompute`; `Hair.update` with render vertices and an override of the render positions without `setRenderPositionsCB`; the first `readBackGPUState` before `initCompute`, or with an override without `setRenderPositionsCB`; `lockReadBackBuffers` or `unlockReadBackBuffers` before the first `readBackGPUState`; `HairSettings.initCompute` before `init` | dereferences a null buffer; `InitCompute` writes past the transposed vertex arrays (`mMaxVerticesPerStrand` is 0) | panics with a message: "Hair.update: call initCompute first" (also after an `initCompute` that failed before its last buffer), "Hair.update: the render positions are overridden, call setRenderPositionsCB first", the same two messages for "Hair.readBackGPUState: ...", "Hair.lockReadBackBuffers: call readBackGPUState first" (and "Hair.unlockReadBackBuffers: ..."), "HairSettings.initCompute: a strand has more vertices than max_vertices_per_strand (call init first)". Two nearby cases are defined in Jolt and literal in Zolt. One is `update` of an override without render vertices and without `setRenderPositionsCB`: Jolt binds the null buffer, which ComputeQueueCPU::SetRWBuffer ignores, and dispatches no render vertex. The other is a later `readBackGPUState` after `setRenderPositionsCB(null)`: the CPU backend's ScheduleReadback does nothing. A Hair.zig test pins both. The panics are not pinned. UB25 stays: `draw` before the first read back draws nothing |
+| UB34 | a geometry without LODs, or a LOD with an empty `Batch` (playback ID 0, `Geometry.createWithBatch(allocator, .empty, ...)`, an allocation failure), drawn into DebugRendererSimple or DebugRendererRecorder; `Geometry.getLOD` of a geometry without LODs (settled in the audit) | DebugRendererSimple reads `mLODs.data()` and the null batch; the recorder reads the ID of the null batch; `mLODs.back()` of an empty list | DebugRendererSimple draws nothing; the recorder writes batch ID 0, which the playback reads as an empty batch (UB7), and 0 LODs for a geometry without LODs (Jolt's defined case); `getLOD` panics with "DebugRenderer.Geometry.getLOD: the geometry has no LODs". Pinned by the DebugRendererSimple and DebugRendererRecorder inline tests |
 
 ### R21 Port status and scope
 
-- `tools/port_status.py` (done in this commit):
+- `tools/port_status.py` (done in the prototype commit):
   - `DEFERRED` keeps only `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL` and `Jolt/Core/Profiler`;
   - `.hlsl` is a tracked extension. A shader `X.hlsl` is its own unit next to `XBindings.h`; one Zig file ports both.
     The 17 shaders count with their 766 lines;
   - `Core/IssueReporting` is no longer n/a: `Zolt/Core/IssueReporting.zig` ports it.
-- The Roadmap's deferred section lists only the GPU backends.
+- The Roadmap's deferred section lists the GPU backends and the profiler, and the application code that is out of
+  scope.
 - Stays deferred:
   - the GPU backends and the shader loader: they need platform GPU APIs, and GPU results are not bit exact with the CPU
     path; the pattern A interfaces leave room for them;
@@ -622,8 +648,13 @@ tests pin them.
 
 - `python3 tools/port_status.py --check-m10` (F0) maps every `TEST_CASE` of `UnitTests/**/*.cpp` to the Zig file of its
   unit and fails unless a `test "<name>"` exists there. Exceptions: the `2` suffix of duplicate names, and the names in
-  the file's `//! Not ported:` line. It also fails unless every `UnitTests/` unit is complete or n/a. CI runs it from the
-  audit on.
+  the file's `//! Not ported:` line. It also fails unless every `UnitTests/` unit is complete or n/a.
+- Since the audit, `python3 tools/port_status.py --check` runs the `--check-m10` rules too. It also fails on any
+  `TODO(debug_renderer)` in Zolt/, ZoltTests/, ZoltParity/, ZoltPerformanceTest/, ZoltHelloWorld/ and build.zig (`.zig`,
+  `.cpp`, `.c` and `.h` files).
+- CI runs both. The lint job runs `--check` and an enforced "Check milestone M10" step. The step repeats the M10 rules
+  under its own name, so an M10 gap shows as a failed step of its own. The test matrix has a row for M10's
+  `-Duse_llvm=false` (ubuntu, Debug). Every include row of the matrix sets every key.
 - The omissions inside ported cases stay, with their reasons: the profiler layer names, Jolt's read of an
   uninitialized hit in CollideShapeTests, `data() == nullptr` of STLLocalAllocator, EPA_TESTS_TRACE.
 
@@ -659,7 +690,7 @@ if (Core.debug_renderer) {
 
 Steps for every site:
 1. Port Jolt's block literally under the gate of R2. Keep Jolt's draw order, colors and texts (R7).
-2. Remove the `TODO(debug_renderer)` line and update the file header.
+2. Update the file header. Never leave a `TODO(debug_renderer)` line: `port_status.py --check` fails on one.
 3. Add the site to the call-log parity of section 4 (one entry per draw function).
 4. Run `zig build check` and `zig build check -Ddebug_renderer=true`, and the filtered parity with the option.
 
@@ -761,8 +792,9 @@ the commit message says which operation).
 - RecordKind 70..74: soft body validate (both IDs, the settings in and out); soft body added (per contact body the
   vertex count and an FNV hash of the local contact points and normals); the sensor contacts.
 - The state decoder learns each soft body's vertex, rod and skin counts from `jolt_sim_soft_body_info`.
-- `Blocker.soft_bodies` becomes supported once `SoftBodyMotionProperties.is_stub` and
-  `PhysicsSystem.soft_body_jobs_pending` are gone.
+- The soft body scenes have no blocker. Until the audit they had `blocked_by = .soft_bodies`, which became supported
+  when `SoftBodyMotionProperties.is_stub` and `PhysicsSystem.soft_body_jobs_pending` were gone. The audit removed the
+  gate (section 6).
 - **Unsaved state in the D12 sweeps.** Jolt's `SaveState` does not save `mSkinStatePreviousPositionValid`: `SkinVertices`
   sets it and `UpdateSoftBodyState` clears it, and it selects the skin interpolation factor. A sweep that restores the
   snapshot and repeats the update must put it back, like the existing `pending_invalid` contact cache flags of
@@ -779,17 +811,23 @@ the commit message says which operation).
 
 ## 5. Reference build change and CI
 
-Done in this commit (section 10), in `build.zig`:
+Done in the prototype commit (section 10), in `build.zig`:
 - the option `-Ddebug_renderer` (`zolt_options.debug_renderer`, also for the determinism log build);
 - `-DJPH_USE_CPU_COMPUTE` in `cpp_flags`, always;
 - `-DJPH_DEBUG_RENDERER` in `cpp_flags` with the option;
 - the 12 reference fixes (R1).
 
-F0 adds to `.github/workflows/zolt.yml`:
+F0 added to `.github/workflows/zolt.yml`:
 - `lint`: `zig build check -Ddebug_renderer=true`;
 - `test`: rows `ubuntu Debug debug_renderer=true` and `ubuntu ReleaseFast double debug_renderer=true`;
 - `parity`: a row `ReleaseFast debug_renderer=true` (it builds the second reference);
-- `determinism`: the 5 hashes once more with `-Ddebug_renderer=true` (and `-r` once D3 merged).
+- `determinism`: the 5 hashes once more with `-Ddebug_renderer=true`. Since D3 these rows also record every frame
+  (`-r`) and run the `.jor` check (`zig build debug-renderer-check`), in both precisions.
+
+The audit added:
+- `lint`: `port_status.py --check` with the M10 rules and the `TODO(debug_renderer)` check, and an enforced "Check
+  milestone M10" step (R22);
+- `test`: a row `ubuntu Debug use_llvm=false` (M10). Every include row sets every key of the matrix.
 
 The first parity build after the change recompiles the C++ library (about 5 minutes per configuration).
 
@@ -802,12 +840,13 @@ The first parity build after the change recompiles the C++ library (about 5 minu
   (`-Dtest-filter=SoftBody`, `Compute`, `Hair`, `DebugRenderer`, `soft_body`). Run one full parity before the merge.
   Delete the worktree's `.zig-cache` after the merge.
 - The registries (`zolt.zig`, `unit_tests.zig`, `parity.zig`, `reference_sources.zig`) merge with the union driver and
-  `tools/tidy_registry.py`.
+  `tools/tidy_registry.py`. Since the audit, `tidy_registry.py` also sorts and deduplicates the `c_files` list of
+  `reference_sources.zig`.
 - Every other shared file is edited only in the group's own region. A group that needs a change elsewhere reports it.
 
 | Group | Content | Owns | Shared (region) | After | Jolt lines |
 |---|---|---|---|---|---|
-| **F0** phase foundation (lead) | this commit; `ZoltParity/ParityHooks.h` (first hour); the remaining recoverable asserts and unlocked tests of R8; GJKTests; `port_status.py --check-m10`; the CI rows (section 5); the full parity once in both renderer configurations; the PortingGuide rows (HLSL types, LibM, shader files, gated declarations) | `build.zig`, `Core/Core.zig`, `Core/Virtual.zig`, `Core/IssueReporting.zig`, `tools/port_status.py`, `.github/`, `ZoltTests/UnitTestFramework.zig`, `ZoltTests/Geometry/GJKTests.zig`, `ZoltParity/ParityHooks.h`, `Docs/` | one line per converted assert (PathConstraint, PhysicsSystem `jobIntegrateVelocity`, SkeletonMapper, Constraint, the parity sites) | – | ~300 |
+| **F0** phase foundation (lead) | the prototype commit; `ZoltParity/ParityHooks.h` (first hour); the remaining recoverable asserts and unlocked tests of R8; GJKTests; `port_status.py --check-m10`; the CI rows (section 5); the full parity once in both renderer configurations; the PortingGuide rows (HLSL types, LibM, shader files, gated declarations) | `build.zig`, `Core/Core.zig`, `Core/Virtual.zig`, `Core/IssueReporting.zig`, `tools/port_status.py`, `.github/`, `ZoltTests/UnitTestFramework.zig`, `ZoltTests/Geometry/GJKTests.zig`, `ZoltParity/ParityHooks.h`, `Docs/` | one line per converted assert (PathConstraint, PhysicsSystem `jobIntegrateVelocity`, SkeletonMapper, Constraint, the parity sites) | – | ~300 |
 | **S0** soft body foundation | R15, R16, R19's declarations: every type and field, `SoftBodyVertex.zig`, the iterator constructor, the manifold, the shared settings' `saveBinaryState` / `restoreBinaryState`, `allocateSoftBody`, `createSoftBody*`, the `deleteBody` fix, the fallible `applySoftBodyCreationSettings`, the 13 RTTI declarations and factory entry 49, the S17 exclusions of the 13 classes; algorithm bodies are `@panic("Phase 9 S1")`-style stubs; `SoftBodyMotionProperties.is_stub` | `Physics/SoftBody/*.zig`, `Collision/CollideSoftBodyVertexIterator.zig` | `Body.zig`, `BodyManager.zig`, `BodyInterface.zig` (soft body functions); `RegisterTypes.zig` (factory); `ObjectStreamSchema.zig`, `gen_serializable.py`, `port_status.py` (`PHASE9_SERIALIZABLE`) | – | ~1100 |
 | **C0** compute core | R9 to R12 core: the CPU backend, `HLSLToCPP.zig`, `ShaderWrapper.zig`, `ShaderCore/Math/Vec3/Quat/Mat44/Plane`, `HairStructs`, `HairCommon`, TestCompute / TestCompute2 / TestComputeWrapper, ComputeTests (M10), the dispatch parity for them | `Zolt/Compute/**`, `Zolt/Shaders/{Shader*,HairStructs,HairCommon,TestCompute*}.zig`, `ZoltTests/Compute/`, `ZoltParity/Compute/` | – | – | ~1300 |
 | **S1** shared settings | R20's settings quirks: CreateConstraints, closest kinematic, rods, bends, volumes, skinned normals, Optimize, Clone, `createCube`; the SoftBodySettings layer | `SoftBodySharedSettings.zig` (algorithm region), `ZoltParity/Physics/SoftBodySettings*` | – | S0 | ~1235 |
@@ -826,7 +865,7 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | **D3** constraint, body and system draws | the 13 constraints, ConstraintManager, TwoBody, PathConstraintPath; BodyManager.draw (without its soft body section), DrawSettings, EShapeColor, ESoftBodyConstraintColor, BodyDrawFilter; the PhysicsSystem draw API and CCD draws; ContactConstraintManager and ManifoldBetweenTwoFaces; `recordDebugOutput`; PerformanceTest `-r`; the `.jor` check; then `Constraint.impl.drawConstraint` goes | the draw regions of those files | `PhysicsSystem.zig`, `BodyManager.zig` (draw regions) | D1, D2, S5 | ~920 |
 | **D4** character, vehicle, skeleton and soft body draws | CharacterVirtual, the vehicle controllers and engine, SkeletonPose; the SoftBodyMotionProperties draws, SoftBodyShape.draw, BodyManager.draw's soft body section; then `VehicleController.impl.draw` goes | those draw regions | `BodyManager.zig` (soft body draw section) | D1, D3, S4 | ~600 |
 | **H3** hair draw | `Hair.draw` and its DrawSettings | `Hair.zig` (draw region) | – | H2, D1 | ~315 |
-| **A** audit | a completeness audit against the Jolt headers; `--check-m10` and "no `TODO(debug_renderer)`" in `port_status.py --check`; Roadmap, Progress, this document's "settled" section; the final verification | `Docs/` | – | all | – |
+| **A** audit | a completeness audit against the Jolt sources (34 findings, each fixed or documented); `--check-m10` and "no `TODO(debug_renderer)`" in `port_status.py --check`; Roadmap, Progress, this document's "settled" sections; the final verification | `Docs/` | – | all | – |
 
 **Order (at most 3 groups at a time, the M10 path first).**
 
@@ -841,6 +880,8 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | 7 | D4 | H3 | – |
 | 8 | A | – | – |
 
+All eight waves are done: every group is merged, and the audit ended the phase.
+
 - Settled in wave 4:
   - D1 (R6): the cached helpers create their batches under the cache lock, so the cache lock is always taken before the
     recorder's lock. The final `drawGeometry` call runs after the cache lock is released, with its own reference to the
@@ -848,8 +889,10 @@ The first parity build after the change recompiles the C++ library (about 5 minu
   - D1 (R5): when a renderer returns an empty batch and latches, the cached helpers and
     `createTriangleGeometryForConvex` drop the geometry instead of caching one with an empty LOD. Callers (D2: the convex
     shapes, GJK and EPA draws) skip the draw when the geometry or batch is empty.
-  - S5: the soft body scenes keep `blocked_by = .soft_bodies`; the blocker reports them supported now that
-    `SoftBodyMotionProperties.is_stub` and `PhysicsSystem.soft_body_jobs_pending` are gone. The audit removes the gate.
+  - S5: the soft body scenes ran with `blocked_by = .soft_bodies` until the audit. The blocker reported them supported
+    once `SoftBodyMotionProperties.is_stub` and `PhysicsSystem.soft_body_jobs_pending` were gone. The audit removed the
+    gate: `Blocker.soft_bodies`, `SoftBodyClasses` and the 23 markers are gone, and the soft body scenes have no
+    blocker.
   - M10 is reached with S5: `python3 tools/port_status.py --check-m10` passes.
 - Settled in wave 5:
   - D2: the draw caches add a pointer only to MeshShape (88 to 96 bytes); the others fit it in padding. The C++
@@ -872,10 +915,11 @@ The first parity build after the change recompiles the C++ library (about 5 minu
     `-Dreference_asserts=true`. Jolt's hair draw flags are per-call `DrawSettings` members, not statics.
   - D4: every `TODO(debug_renderer)` is gone; the vehicle per-wheel texts go to the controller's renderer argument (R4).
 - Settled in wave 2: DebugRendererPlayback (UB7): a LOD batch ID 0 is `Batch.empty` unless the stream defined a
-  batch with ID 0; an unknown batch ID, a geometry ID that the stream never defines (checked at the end of `parse`,
-  because Jolt looks IDs up in `DrawFrame`) and a stream that ends inside a command are `error.InvalidStream`; a stream
-  that ends between commands is complete; the frames that Jolt replays with defined behavior stay after an error.
-  `TwoBodyConstraint.impl.drawConstraintReferenceFrame` is a placeholder until D3, like `Constraint.impl.drawConstraint`.
+  batch with ID 0. An unknown batch ID and a stream that ends inside a command are `error.InvalidStream`. `drawFrame`
+  skips a geometry ID that the stream did not define, because Jolt looks it up only there. A later `parse` can still
+  define it. A stream that ends between commands is complete; the frames that Jolt replays with defined behavior stay
+  after an error. `TwoBodyConstraint.impl.drawConstraintReferenceFrame` was a placeholder until D3, like
+  `Constraint.impl.drawConstraint`.
 - Settled in wave 1: S0 ported `initialize`, `calculateMassAndInertia`, `getVolume` and the trivial SoftBodyShape
   overrides, because R16's fallible creation needs them; the creation parity layer covers them. S4 does not port them
   again. `SoftBodyReference.cpp` is S0's file (C prefix `jolt_sb_`); S4 and SH add their parts in their own regions.
@@ -887,13 +931,47 @@ The first parity build after the change recompiles the C++ library (about 5 minu
   CreateConstraints with the Calculate* functions and Optimize with `createCube`; C0 into the backend with TestCompute
   and the shader helpers with TestCompute2; D1 into `initialize` with the helpers and the caches.
 
+**Settled in the audit.** The audit checked the merged phase against the Jolt sources. It confirmed 34 minor findings,
+and each one is fixed or documented. It found no result difference from Jolt in library code. These points were
+settled:
+- Library:
+  - UB28 to UB34 (R20) give Zolt one defined behavior for more inputs on which Jolt is undefined. The UB8 row now
+    covers every material run.
+  - R15 (the alignment of the soft body contexts) and R17 (`CustomUpdate` on a body that was never added) said the
+    wrong thing. The code was right; the text is fixed.
+  - `Shape.impl`'s two default draw bodies are gated declarations (R2).
+  - DebugRendererPlayback's unknown command is a recoverable assert (R8).
+- Tests: allocation failure sweeps for DebugRendererRecorder and for `HairShaders.init`. The DebugRendererSimple sweep
+  checks its success round and reaches the triangle buffer of the indexed batch. A test of
+  `TransformedConvexObject(AABox).getSupportingFace` replaces a stale TODO.
+- Harness:
+  - The soft body gate is gone (wave 4 above). Every Blocker is supported. A scene whose Blocker is not supported now
+    fails (`checkSupported` in SimulationParity.zig) instead of being skipped.
+  - The test "SimScenes blocked scenes run on the C++ side" is removed, with `checkCppSettingsRoundTrips` and
+    `checkSoftBodyBlocker`: no scene is blocked any more.
+  - Its checks moved into the scene tests. In its first configuration (`Config.check_cpp_values`), every scene test
+    checks that every C++ object state and the final C++ state decode completely and are finite. `runEntry` checks
+    that a scene with a Phase 7 blocker creates the objects of its classes, and that a `.contacts` or `.ccd_hits`
+    scene reaches contacts. A C++-only run over all 310 scenes found no scene that fails these checks.
+  - A new scene is checked against Jolt's asserts by its name:
+    `zig build parity -Dreference_asserts=true -Dtest-filter='.SceneTest("<scene>"['`. The test of a scene is named
+    `SceneTest("<scene>"[0..n],index)`, so this filter selects that scene only. A plain scene name also selects every
+    scene whose name contains it, and the draw tests of the scene.
+  - `DebugRendererCheck.zig` has no `zolt_records` gate any more (D3 ported the Zolt side).
+- Tooling and CI: `port_status.py --check` runs the M10 rules and fails on any `TODO(debug_renderer)` (R22). CI
+  enforces M10 and has a `-Duse_llvm=false` test row (section 5). `tidy_registry.py` sorts the `c_files` list.
+  Progress.md calls the deferred files "files that stay deferred or out of scope".
+- Docs: this document, the Roadmap (Phase 9 and M10), SimulationArchitecture D1, CollisionArchitecture,
+  SerializationArchitecture S17 and S18, CharacterVehicleArchitecture, the PortingGuide and CLAUDE.md describe the final
+  state.
+
 ## 7. Checklist for porters
 
 - File headers: `//! Port of:` (with the `.hlsl` and helper headers of a shader) and `//! Status:`. Keep Jolt's doc and
-  implementation comments. Remove the `TODO(debug_renderer)` lines you finish.
+  implementation comments. Never leave a `TODO(debug_renderer)` line: `port_status.py --check` fails on one.
 - Debug renderer code: the gates of R2 only. A draw function is a gated declaration. A debug-only member is `void`
   without the option. Never read a static flag from anywhere but `renderer.flags` (R4).
-- No new globals. The assert handler is the only one (R8).
+- No new globals. The assert handler is the only new one (R8).
 - Shaders: HLSLToCPP semantics (R11), never Zolt's `Vec3` / `Quat` operations.
 - Soft bodies: Zolt's `QuickSort` and `BinaryHeap`, never `std.sort`; Jolt's memory orders; the D5 rows of R17.
 - Libm and shuffle: `LibM.expf` / `powf` and `Mt19937.shuffleLibcxx`, never `std.math`.
@@ -903,10 +981,12 @@ The first parity build after the change recompiles the C++ library (about 5 minu
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`, and with `-Ddebug_renderer=true`
     for a group that touches a gate;
   - `zig build check` and `zig build check -Ddebug_renderer=true`;
+  - `zig build parity-check` in both renderer configurations: a filtered parity run compiles only the tests it runs;
   - `zig build parity` filtered during the work, full at the end; with `-Ddebug_renderer=true` too for D groups and for
     any file with a gate;
   - `zig fmt --check Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon`;
-  - `python3 tools/port_status.py --write`, then `--check`.
+  - `python3 tools/port_status.py --write`, then `--check` (it also runs the M10 rules and the `TODO(debug_renderer)`
+    check).
 - Delete the worktree's `.zig-cache` at the end.
 
 ## 8. Out of scope
@@ -953,19 +1033,40 @@ The first parity build after the change recompiles the C++ library (about 5 minu
   and the cross restore.
 - **A strictly serial foundation.** The track foundations (S0, C0, D0) start beside F0, so the critical path stays short.
 
-## 10. The foundation prototype
+## 10. The foundation prototype and the final state
 
-**The files (this commit).**
+**The final state (end of Phase 9).**
 
-| File | What it is |
+| Area | Zig files | Status |
+|---|---|---|
+| Soft body | the 8 files of `Zolt/Physics/SoftBody/` (12 Jolt files); the soft body parts of `Body`, `BodyManager`, `BodyInterface`, `PhysicsSystem` and `PhysicsScene`; `CollideSoftBodyVertexIterator.zig` | complete |
+| Compute | the 4 files of `Zolt/Compute/` and the 6 files of `Zolt/Compute/CPU/` | complete. The GPU backends stay deferred (R21) |
+| Shaders | the 27 files of `Zolt/Shaders/`: the 17 shaders, the 8 shared headers and the 2 wrappers | complete |
+| Hair | the 4 files of `Zolt/Physics/Hair/`; `Zolt/Math/LibM.zig` and the libc++ shuffle of `Core/Mt19937.zig` (R13) | complete |
+| Debug renderer | the 4 files of `Zolt/Renderer/`; the draw code of the 103 Jolt files with `JPH_DEBUG_RENDERER`, behind `-Ddebug_renderer` | complete. No `TODO(debug_renderer)` is left |
+| Asserts | `Zolt/Core/IssueReporting.zig` with `ExpectAssert` | complete |
+| Unit tests | GJKTests, UnitTestFramework, ComputeTests, SoftBodyTests, LoggingSoftBodyContactListener, the `ExpectAssert` part of PhysicsTests | complete. Every unit of `UnitTests/` is complete or n/a (M10) |
+| Schemas | the 13 soft body classes and the 10 hair classes | declared. With Phase 8's 81 classes, 104 classes are declared and none is pending (Progress.md) |
+
+- `python3 tools/port_status.py --check` and `--check-m10` pass. In Progress.md every Phase 9 directory is at 100%.
+  The library is at 99.6%, because `Core.zig` stays partial (section 1).
+- CI runs the tests in every M10 configuration, the full parity in both renderer configurations, the 5 determinism
+  hashes in both precisions and both renderer configurations (with `-r` when the option is on), and the `.jor` check
+  (section 5).
+- Every parity layer of section 4 is in the tree. Every scene of SimScenes runs against Zolt: every Blocker is supported
+  (section 6, "Settled in the audit").
+
+**The prototype (at the design commit).**
+
+| File | What it was |
 |---|---|
 | `build.zig` | the option `-Ddebug_renderer`; `-DJPH_USE_CPU_COMPUTE` always; `-DJPH_DEBUG_RENDERER` with the option (R1, R2) |
 | `Zolt/Core/Core.zig` | `debug_renderer` |
 | `Zolt/Core/Virtual.zig` | `OptionalVirtual`, void entries in `make`, `isVirtual` and `checkTopLevel`; a test of both configurations with a gated override that reads a void member |
 | `Zolt/Core/IssueReporting.zig` (complete) | the assert handler, `assertRecoverable`, `assertFailed`, `ExpectAssert`; tests (4 threads × 100 asserts) |
-| `Zolt/Renderer/DebugRenderer.zig` (partial) | the interface, the types, `DrawFlags`, the atomic latch, the box geometry of `initialize`, DrawWireBox (2), DrawMarker, DrawArrow, DrawBox (2), the 6-argument DrawGeometry |
+| `Zolt/Renderer/DebugRenderer.zig` (partial then, complete since D1) | the interface, the types, `DrawFlags`, the atomic latch, the box geometry of `initialize`, DrawWireBox (2), DrawMarker, DrawArrow, DrawBox (2), the 6-argument DrawGeometry |
 | `Zolt/Renderer/DebugRendererRecorder.zig` (complete) | Jolt's `.jor` stream |
-| `Zolt/Physics/Collision/Shape/Shape.zig`, `BoxShape.zig` | the three gated vtable entries, dispatchers and `impl` placeholders; `BoxShape.draw` as a gated declaration |
+| `Zolt/Physics/Collision/Shape/Shape.zig`, `BoxShape.zig` | the three gated vtable entries, dispatchers and `impl` placeholders (gone since D2); `BoxShape.draw` as a gated declaration |
 | `Zolt/Physics/Constraints/Constraint.zig` | `draw_constraint_size` (void without the option), the constructor copy, the `toConstraintSettings` copy, gated accessors |
 | `Zolt/ConfigurationString.zig` | "(Debug Renderer) " |
 | `Zolt/Compute/ComputeBuffer.zig`, `ComputeShader.zig`, `ComputeQueue.zig` (complete), `ComputeSystem.zig` (complete) | the pattern A interfaces, `ComputeSystem.rtti`, `createComputeSystem`; a test of IsKindOf, dispatch and destruction |
@@ -977,7 +1078,7 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | `tools/port_status.py`, `Docs/Zolt/Progress.md` | R21 |
 | `Docs/Zolt/PortingGuide.md` | the rows of `#ifdef JPH_DEBUG_RENDERER`, static members and `ExpectAssert` |
 
-**What it showed.**
+**What the prototype showed.**
 - Filtered tests (Virtual, IssueReporting, TestOutOfContactConstraints, DebugRenderer, ComputeSystem, the GetSubmergedVolume
   tests, getConfigurationString, TestPhysicsConstraintUserData) pass in Debug, double precision, with
   `-Ddebug_renderer=true` in both precisions, and in ReleaseFast with the option: 66 tests, 2 skipped without the option
@@ -1026,7 +1127,7 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 | "Every draw function compiles in both builds" fails for bodies that read void members | `refAllDeclsRecursive` in `zolt.zig` | R2: gated declarations (the Virtual test reads a void member) |
 | A serial foundation is a bottleneck | the group sizes | section 6: three track foundations in wave 1 |
 | The placeholder of `Shape.impl.draw` panics with the option | R2 | the placeholder goes with D2; no test draws earlier |
-| The reference fix list was wrong (VehiclePartsReference, ConvexHullShapeReference) | the fidelity build and this commit's parity run with the define | R1: the 12 files that need it |
+| The reference fix list was wrong (VehiclePartsReference, ConvexHullShapeReference) | the fidelity build and the design commit's parity run with the define | R1: the 12 files that need it |
 | The OOM latch of the delivery sketch was a plain bool | draws come from job threads | R5: an atomic |
 | The libm premise: the reference's `expf` is not glibc's | `nm` of the parity binary: `t expf` = `compiler_rt.exp.expf` | R1, R13: pin both functions in the reference |
 | `mSkinStatePreviousPositionValid` is not in `SaveState` | `SoftBodyMotionProperties.cpp:519, 917, 1229, 1446-1475` | section 4: the sweeps restore it |
@@ -1034,8 +1135,10 @@ The first parity build after the change recompiles the C++ library (about 5 minu
 ## 12. Open questions for the lead
 
 - CI cost: the `debug_renderer=true` parity row rebuilds the reference and reruns the full parity (30 to 40 minutes). If
-  that is too slow, run it nightly, or restrict it to the renderer, simulation and perf filters.
+  that is too slow, run it nightly, or restrict it to the renderer, simulation and perf filters. Settled: CI runs the
+  full row on every change (section 5).
 - Hair has no `.hair` groom asset in the repository (`Assets/download_hair.sh`). The parity uses procedural grooms. A
-  small real groom could be added for an end-to-end scene.
+  small real groom could be added for an end-to-end scene. Still open: the hair parity uses procedural grooms, on the
+  scalp of `Assets/face.bin` and without a scalp.
 - UB1 (a soft body without vertices) advances the state. A panic at creation would be simpler, but it rejects input that
-  Jolt accepts at creation.
+  Jolt accepts at creation. Settled: UB1 stays.

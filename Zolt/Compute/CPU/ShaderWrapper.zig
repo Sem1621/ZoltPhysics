@@ -17,8 +17,8 @@
 //!   - `create` is `sCreate`, the function that the registry of ComputeSystemCPU stores (ShaderWrapper.Create).
 //! - JPH_SHADER_WRAPPER_FUNCTION / JPH_REGISTER_SHADER(sys, X) is `ComputeSystemCPU.registerShader(X)`.
 //! - The other macros of WrapShaderBegin.h have no Zig counterpart: JPH_SHADER_CONSTANT is a `pub const` of the shader
-//!   file, JPH_SHADER_STRUCT_* are extern structs, JPH_IN / JPH_OUT / JPH_IN_OUT are value parameters and return
-//!   values (porting guide section 4).
+//!   file, JPH_SHADER_STRUCT_* are extern structs. JPH_IN is a value parameter, JPH_OUT is a return value and
+//!   JPH_IN_OUT is a pointer parameter (porting guide section 4).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

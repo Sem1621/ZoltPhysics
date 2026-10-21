@@ -56,8 +56,12 @@ Contents:
    compared bit for bit with the C++ library on many inputs.
 7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build test -Doptimize=ReleaseFast`
    (see section 10), `zig build parity` (also with
-   `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig fmt Zolt ZoltTests ZoltParity build.zig`,
-   then `python3 tools/port_status.py --write`.
+   `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig build parity-check` (a filtered parity run
+   compiles only the tests it runs),
+   `zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon`,
+   then `python3 tools/port_status.py --write` and `--check`.
+   A file with `JPH_DEBUG_RENDERER` code (section 7) also needs `zig build check -Ddebug_renderer=true`,
+   `zig build parity-check -Ddebug_renderer=true` and the filtered parity with `-Ddebug_renderer=true`.
 
 ## 3. Layout and naming
 
@@ -446,7 +450,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | members (and `thread_local` state) that only exist with `JPH_ENABLE_ASSERTS` | typed `void` without asserts: `cached_motion_type: if (Core.enable_asserts) MotionType else void = if (Core.enable_asserts) .static else {}`, so the compiler proves they cannot influence release results |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
-| `#ifdef JPH_DEBUG_RENDERER`                 | `Core.debug_renderer` (`-Ddebug_renderer`): members `if (Core.debug_renderer) T else void`, virtuals `virtual.OptionalVirtual(Core.debug_renderer, *const fn ...)`, functions and overrides `pub const draw = if (Core.debug_renderer) drawImpl else {};`, `JPH_IF_DEBUG_RENDERER(x)` at a call site `if (Core.debug_renderer) x else {}`. Rules and recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Code not ported yet keeps `// TODO(debug_renderer): ...` |
+| `#ifdef JPH_DEBUG_RENDERER`                 | `Core.debug_renderer` (`-Ddebug_renderer`): members `if (Core.debug_renderer) T else void`, virtuals `virtual.OptionalVirtual(Core.debug_renderer, *const fn ...)`, functions and overrides `pub const draw = if (Core.debug_renderer) drawImpl else {};`, `JPH_IF_DEBUG_RENDERER(x)` at a call site `if (Core.debug_renderer) x else {}`. Rules and recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Every `JPH_DEBUG_RENDERER` block is ported under these gates. `port_status.py --check` rejects `TODO(debug_renderer)` |
 | a function, override or accessor under `#ifdef JPH_DEBUG_RENDERER` | a gated declaration: `pub const draw = if (Core.debug_renderer) drawImpl else {};` with a private `fn drawImpl`. Without the option the body is never analyzed, so it may read members that are `void` then. List `.draw` in `overrides` in both configurations (`Virtual.zig` accepts a `void` entry). A dispatcher of a gated virtual is gated the same way |
 | a member or parameter under `#ifdef JPH_DEBUG_RENDERER` | a `void` member: `draw_constraint_size: if (Core.debug_renderer) f32 else void = if (Core.debug_renderer) 1.0 else {}`. A parameter of an internal function is a trailing `if (Core.debug_renderer) T else void` (callers pass `if (Core.debug_renderer) value else {}`); a parameter of a public function is a field of its options struct with a default, so `.{}` compiles in both configurations. Statements: `if (Core.debug_renderer) { ... }` |
 | `JPH_SHADER_NAME(X)`, `JPH_SHADER_BIND_BEGIN(X)` ... `JPH_SHADER_BIND_END`, `JPH_SHADER_FUNCTION_BEGIN(void, main, ...)` (the `WrapShader*.h` macros) | `pub const name = "X"`, `pub const Bindings = struct { ... }` (fields with the HLSL binding names: `hlsl.Constants(T)`, `hlsl.Buffer(T)`, `hlsl.RWBuffer(T)`), `pub fn main(b: *Bindings, tid: hlsl.uint3) void`; `JPH_REGISTER_SHADER(sys, X)` is `sys.registerShader(X)`. Recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) section 3 |
@@ -614,15 +618,16 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
 - `ExpectAssert` (tests that trigger asserts): the assert that the test expects must be a recoverable assert
   (`IssueReporting.assertRecoverable` / `assertFailed`); the test uses `ExpectAssert` of `Core/IssueReporting.zig`
   (re-exported by `ZoltTests/UnitTestFramework.zig`). Rules: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R8.
-- **The assert handler** (R8) is the library's one global, Jolt's `AssertFailed`. Only tests install a handler:
-  `ExpectAssert(n)` (n is the number of asserts Jolt hits; `init`, then `finish`, with `errdefer restore()`), or
-  `CountAsserts` when only the C++ side knows the number. Install and remove a handler on the test thread while no
-  physics update runs; asserts on job threads reach it. Library code never installs one. Only the asserts that a test
-  expects become recoverable (R8's list, the `JPH_ASSERT` rows of section 7). A test that expects one of them runs in
-  every build with such a handler. A parity test of Jolt's release behavior counts the asserts of both sides with
-  `ParityHooks.ReleaseAsserts` (`ZoltParity/ParityHooks.zig`); with `-Dreference_asserts=true` the counts must be equal.
-  Other tests of inputs that Jolt asserts on keep their `if (!Core.enable_asserts)` gate. A conversion that would
-  continue into a Zig safety check stays a panic, and its test stays skipped with the reason in a comment.
+- **The assert handler** (R8) is the one global that Phase 9 adds to the library, Jolt's `AssertFailed`. Only tests
+  install a handler: `ExpectAssert(n)` (n is the number of asserts Jolt hits; `init`, then `finish`, with
+  `errdefer restore()`), or `CountAsserts` when only the C++ side knows the number. Install and remove a handler on the
+  test thread while no physics update runs; asserts on job threads reach it. Library code never installs one. Only the
+  asserts that a test expects become recoverable (R8's list, the `JPH_ASSERT` rows of section 7). A test that expects
+  one of them runs in every build with such a handler. A parity test of Jolt's release behavior counts the asserts of
+  both sides with `ParityHooks.ReleaseAsserts` (`ZoltParity/ParityHooks.zig`); with `-Dreference_asserts=true` the
+  counts must be equal. Other tests of inputs that Jolt asserts on keep their `if (!Core.enable_asserts)` gate. A
+  conversion that would continue into a Zig safety check stays a panic, and its test stays skipped with the reason in a
+  comment.
 - Small tests of Zolt-specific code (helpers that have no Jolt counterpart) go inline in the
   source file as `test` blocks.
 - **Memory.** Tests allocate with `std.testing.allocator`, which reports leaks. Every path that allocates gets a

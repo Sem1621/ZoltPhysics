@@ -201,8 +201,8 @@ pub const PolygonConvexSupport = struct {
 };
 
 /// Axis aligned box around the origin, a convex object for the tests that has getSupport and getSupportingFace.
-/// Like AABox.getSupportingFace it fills the face with `resize` and writes the vertices through `items`.
-/// TODO(Geometry merge): also test TransformedConvexObject(AABox).getSupportingFace once AABox.zig is merged.
+/// Like AABox.getSupportingFace it fills the face with `resize` and writes the vertices through `items`. Unlike AABox
+/// (`resize(4)`) it keeps the vertices that are already in the array, which the tests of TransformedConvexObject need.
 const TestBox = struct {
     half_extent: Vec3,
 
@@ -359,4 +359,35 @@ test "AddConvexRadius / MinkowskiDifference / TransformedConvexObject" {
     try transformed_twice.getSupportingFace(Vec3.init(0, 1, 0), VertexArrayList.init(std.testing.allocator, &list));
     try std.testing.expectEqual(@as(usize, 4), list.items.len);
     try std.testing.expect(list.items[0].isClose(Vec3.init(12, 1, -2), .{ .max_dist_sq = 1.0e-10 }));
+}
+
+test "TransformedConvexObject(AABox).getSupportingFace" {
+    // AABox.getSupportingFace fills the face with resize(4), like Jolt's outVertices.resize(4): the arrays start empty
+    const AABox = @import("AABox.zig").AABox;
+    const box = AABox.init(Vec3.init(-1, -2, -3), Vec3.init(1, 2, 3));
+
+    // Rotate 90 degrees around Z and translate: local +X is world +Y
+    const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisZ(), 0.5 * math.pi), Vec3.init(10, 0, 0));
+    const transformed = TransformedConvexObject(AABox).init(transform, &box);
+
+    // World direction -Y is local -X: the face of the box at max X, transformed to world space
+    const direction = Vec3.init(0, -1, 0);
+    var local: StaticArray(Vec3, 32) = .empty;
+    try box.getSupportingFace(transform.multiply3x3Transposed(direction), &local);
+    var face: StaticArray(Vec3, 32) = .empty;
+    try transformed.getSupportingFace(direction, &face);
+    try std.testing.expectEqual(@as(u32, 4), face.len);
+    for (face.constSlice(), local.constSlice()) |v, l| {
+        try std.testing.expect(@abs(l.getX() - 1) < 1.0e-6); // The face at max X
+        try std.testing.expect(v.eql(transform.mulVec3(l)));
+        try std.testing.expect(@abs(v.getY() - 1) < 1.0e-5); // Local X = 1 is world Y = 1
+    }
+
+    // The same face in a VertexArrayList
+    var list: std.ArrayList(Vec3) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try transformed.getSupportingFace(direction, VertexArrayList.init(std.testing.allocator, &list));
+    try std.testing.expectEqual(@as(usize, 4), list.items.len);
+    for (list.items, face.constSlice()) |a, b|
+        try std.testing.expect(a.eql(b));
 }

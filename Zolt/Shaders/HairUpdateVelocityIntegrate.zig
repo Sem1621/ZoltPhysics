@@ -7,6 +7,7 @@
 //!   Zolt/Shaders/HairUpdateVelocity.zig. They read the buffers through this shader's bindings.
 //! - `uint3(grid_pos)` in `applyGrid` is undefined in Jolt for a NaN grid position (UB11 of R20, see
 //!   HairIntegrate.zig). Here the position has the global pose and the collision applied before it reaches the grid.
+//! - `applyGrid` panics at a grid point past the end of the grid (UB30 of R20, see HairIntegrate.zig).
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");

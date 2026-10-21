@@ -5,12 +5,15 @@
 //! `reference_sources.zig`, and links them into this test binary.
 //!
 //! Layout, mirroring Zolt/: `ZoltParity/<Dir>/<Dir>Parity.zig` (tests) + `ZoltParity/<Dir>/<Dir>Reference.cpp`
-//! (C ABI wrappers around Jolt). Shared helpers are in `ParityFramework.zig`. Register new test files below and
-//! new .cpp files in `reference_sources.zig` (both lists are merged with git's union driver, keep them sorted).
+//! (C ABI wrappers around Jolt). Shared helpers are in `ParityFramework.zig`. Register new test files below, new .cpp
+//! files in `files` of `reference_sources.zig` and new .c files in its `c_files` (these lists are merged with git's
+//! union driver, keep them sorted; `tools/tidy_registry.py` sorts them).
 //! `Physics/ShapeCoreUserTypes.zig` is not a test file: it is the `zolt_user_types` module of the parity build's own
 //! `zolt` instance (user shape registrations, see build.zig), imported by the tests as "parity_user_types".
 //! `Physics/SimScenes.zig` is not a test file either: it is the scene table of `Physics/SimulationParity.zig`, which
 //! also imports ZoltTests/Layers.zig as "test_layers" (see build.zig).
+//! `Renderer/DebugRendererCheck.zig` is not a test file: it is the root of the `debug-renderer-check` executable (see
+//! build.zig). The test files import the other helper files (`ObjectStream/StreamGenerator.zig`, ...) themselves.
 //!
 //! Run: zig build parity [-Ddouble_precision=true] [-Dtest-filter=Vec4]
 

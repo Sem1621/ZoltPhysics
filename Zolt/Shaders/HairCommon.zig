@@ -9,6 +9,7 @@
 //!   directly. Zolt passes the block: `gridPositionToIndexAndFraction(&b.gContext.value, position)`.
 //! - JPH_SHADER_BUFFER(JPH_uint) parameters are `hlsl.Buffer(u32)` bindings.
 //! - GridPositionToIndexAndFraction has two JPH_OUT parameters, so it returns `IndexAndFraction`.
+//! - `checkGridPoints` is Zolt's (R20 UB30). HairGridAccumulate and ApplyGrid call it before they index the grid.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const float3 = hlsl.float3;
@@ -73,4 +74,20 @@ pub fn gridPositionToIndexAndFraction(context: *const HairUpdateContext, positio
 /// GridIndexToBufferIndex
 pub fn gridIndexToBufferIndex(context: *const HairUpdateContext, index: uint3) u32 {
     return index.x +% index.y *% context.grid_stride.y +% index.z *% context.grid_stride.z;
+}
+
+/// Zolt (R20 UB30): panics when one of the 8 grid points around a vertex is past the end of the grid
+/// (`cNumGridPoints`), where Jolt reads or writes past the grid buffers. The 8 addresses are `adr_000`, `adr_100`,
+/// `adr_010`, `adr_110` and the same 4 plus `cGridStride.z`. With a GridSize of 2 or more on each axis, and fewer
+/// than 2^32 points, they are inside. On an axis of size 1 the index is 0, and the point at index 1 is in the next row
+/// or slice. That point can be past the end. An axis of size 0 leaves no grid point at all. `shader` names the caller
+/// in the message.
+/// The check is explicit: the bounds check of the buffer slices panics only in safe builds, and R20 gives an input
+/// where Jolt is undefined one behavior in every build mode.
+pub fn checkGridPoints(context: *const HairUpdateContext, adr_000: u32, adr_100: u32, adr_010: u32, adr_110: u32, comptime shader: []const u8) void {
+    const stride_z = context.grid_stride.z;
+    for ([_]u32{ adr_000, adr_100, adr_010, adr_110, adr_000 +% stride_z, adr_100 +% stride_z, adr_010 +% stride_z, adr_110 +% stride_z }) |address| {
+        if (address >= context.num_grid_points)
+            @panic(shader ++ ": a vertex samples a grid point past the end of the grid");
+    }
 }

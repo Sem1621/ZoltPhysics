@@ -18,12 +18,11 @@
 //!    operation on a sleeping body), say so with `b.expectSleeping(handle)` / `b.expectAwake(handle)`: the driver
 //!    checks it on both sides, a comment alone becomes false unnoticed when the scene changes.
 //! 2. Add one entry to `scenes` with its name and builder. Every entry is its own test (`SceneTest("name", index)`,
-//!    run one with `zig build parity -Dtest-filter=name`). A scene that Zolt cannot run yet gets
-//!    `.blocked_by = .contacts` (or `.constraints`, `.hinge_constraints`, `.ccd_hits`, ...): its test returns
-//!    error.SkipZigTest until `Blocker.isSupported` says so (flip it when the wave lands; the constraint blockers flip
-//!    themselves), so the build summary counts it as "skipped", never silently. Meanwhile the test "SimScenes blocked
-//!    scenes run on the C++ side" runs it on the C++ side with 0 and 3 worker threads and checks that it reaches what it
-//!    is written for (contact callbacks, active constraints, its expect_* operations).
+//!    run one with `zig build parity -Dtest-filter='.SceneTest("name"['`; a plain `-Dtest-filter=name` also runs every
+//!    scene whose name contains it). Its `.blocked_by` names what it needs (`.contacts`, `.constraints`,
+//!    `.hinge_constraints`, `.ccd_hits`, ...). Zolt ports every class, so every Blocker is supported
+//!    (`Blocker.isSupported`) and the blockers are labels. A scene whose Blocker is not supported fails instead of being
+//!    skipped.
 //!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: Zolt's
 //!    assert at that site is recoverable (RemainingFeaturesArchitecture.md R8), and SimulationParity runs the scene with
 //!    a handler that counts the asserts.
@@ -86,9 +85,7 @@
 //!   states, e.g. the constraints only).
 //! - **Blockers.** A scene declares the constraint kinds it needs with its `Blocker` (`.constraints` for Fixed / Point,
 //!   one per other kind, `.gear_constraints` / `.rack_and_pinion_constraints` include their hinges / slider). They are
-//!   supported as soon as the Zolt class is ported (`ConstraintKind.isPorted`: the settings no longer declare
-//!   `is_stub`), so nothing has to be flipped by hand; until then the scene is skipped and runs on the C++ side alone
-//!   ("SimScenes blocked scenes run on the C++ side": two C++ worlds in lockstep, its expectations, finite results). A
+//!   supported because every Zolt class is ported (`ConstraintKind.isPorted`: the settings do not declare `is_stub`). A
 //!   supported scene that creates a kind that is still a stub fails, and so does a ported class whose slot in
 //!   SimulationParity.zig is still `StubSlot` (error.SceneNotSupported).
 //! - **Expectations.** Every scene with constraints must have active constraints (they are solved);
@@ -139,7 +136,7 @@
 //!   `VehicleSettingsPart`) and of the ragdoll descriptions' RagdollSettings (with the shapes and the group filter), and
 //!   their round trips: each side restores the other side's bytes and saves again (RagdollSettings::
 //!   sRestoreFromBinaryState, the vehicle settings without wheels, the controller, wheel, engine, transmission, track,
-//!   differential and anti-roll bar settings; on the C++ side alone while the classes are stubs); the tables of the
+//!   differential and anti-roll bar settings); the tables of the
 //!   RagdollSettings (GetBodyIndexToConstraintIndex, GetConstraintIndexToBodyIdxPair, the result of Stabilize). After
 //!   every update, besides the PhysicsSystem state (which holds the ragdolls' bodies and constraints and the
 //!   VehicleConstraint state) and the sorted records (with the vehicle callbacks, RecordKind 18..20): the object state
@@ -173,12 +170,9 @@
 //!   (`VehicleCallbacks`, with a steering pre-step callback), `VehicleCombineFriction` and `VehicleTireMaxImpulse` are
 //!   functions of the description or of an operation.
 //! - **Blockers.** `.characters`, `.character_virtuals`, `.ragdolls`, `.wheeled_vehicles`, `.tracked_vehicles`,
-//!   `.motorcycles`: supported as soon as the Zolt classes of the group are ported (`Phase7Classes`: the settings and
-//!   testers no longer declare `is_stub`). Until then the scene runs on the C++ side alone ("SimScenes blocked scenes run
-//!   on the C++ side": two C++ worlds with 0 and 3 threads in lockstep with their object states and character records,
-//!   its expectations, finite and completely decoded object states, the settings round trips, no assert of an asserting
-//!   reference). A supported scene whose classes are still stubs, or whose slot in SimulationParity.zig is still
-//!   `Phase7StubSlot`, fails (checkPhase7Slots).
+//!   `.motorcycles`: supported because the Zolt classes of every group are ported (`Phase7Classes`: the settings and
+//!   testers do not declare `is_stub`). A supported scene whose classes are still stubs, or whose slot in
+//!   SimulationParity.zig is still `Phase7StubSlot`, fails (checkPhase7Slots).
 //! - **Rules.** Avoid what Jolt asserts or leaves undefined:
 //!   - Wheel leaves its contact members (mContactPosition, mContactPointVelocity, mContactNormal, mContactLongitudinal,
 //!     mContactLateral, mAxlePlaneConstant) uninitialized until the first contact, and VehicleConstraint::SaveState
@@ -210,15 +204,16 @@
 //!   - no character, character virtual, ragdoll or vehicle is created or destroyed between a snapshot and its
 //!     restore_cross (the restore reads the objects of the snapshot);
 //!   - the object layers of the tester and the queries are layers of `Layers` (the layer filters assert on others).
-//!   Check new scenes against Jolt's asserts: `zig build parity -Dreference_asserts=true -Dtest-filter="blocked scenes
-//!   run on the C++ side"` (the reference library with JPH_ENABLE_ASSERTS: a failed assert is printed and counted, the
-//!   simulation parity fails a scene whose C++ side hit one; the Phase 7 scenes hit none).
+//!   Check new scenes against Jolt's asserts: `zig build parity -Dreference_asserts=true
+//!   -Dtest-filter='.SceneTest("<scene>"['`
+//!   (the reference library with JPH_ENABLE_ASSERTS: a failed assert is printed and counted, the simulation parity fails
+//!   a scene whose C++ side hit one; the Phase 7 scenes hit none).
 //!
 //! ## Recipe for a Phase 7 worker (adding a class group to the simulation parity)
 //!
 //! 1. Port the classes of the group (CharacterBase.zig, the foundation's port, shows the pattern A layout of a
-//!    character); removing `is_stub` from the settings (and testers) makes the scenes with the group's Blocker run instead
-//!    of being skipped, and the test "SimulationParity Phase 7 slots follow the ported classes" fails until step 2.
+//!    character); removing `is_stub` from the settings (and testers) makes the group's Blocker supported, and the test
+//!    "SimulationParity Phase 7 slots follow the ported classes" fails until step 2.
 //! 2. SimulationParity.zig: replace `const XSlot = Phase7StubSlot;` of the group with a struct (the interface of each
 //!    slot is documented above Phase7StubSlot): `Storage` (the objects of the handles), `create` and `applyOp` /
 //!    `applyVehicleOp` (exactly ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp /
@@ -254,8 +249,8 @@
 //!   sphere, rod chain, skinned cloth, or explicit vertices, faces and tetrahedra from the float and integer pools) with
 //!   the VertexAttributes, the bend type and the Optimize call. The same generator runs on both sides
 //!   (SimMakeSoftBodySettings of SimulationReference.cpp, SoftBodySlot.makeSettings of SimulationParity.zig). Before a scene
-//!   runs, the SaveBinaryState bytes of every generated settings object must be equal (checkSoftBodySettings, also for
-//!   the blocked scenes). A `SimSoftBody` holds every member of SoftBodyCreationSettings with Jolt's defaults (test
+//!   runs, the SaveBinaryState bytes of every generated settings object must be equal (checkSoftBodySettings). A
+//!   `SimSoftBody` holds every member of SoftBodyCreationSettings with Jolt's defaults (test
 //!   "SimScenes soft body description defaults are Jolt's"). Its `settings` is the index of a SimSoftBodySettings: each
 //!   world generates every settings object once, and its soft bodies share it.
 //! - **Creation and handles.** `b.softBody(desc, .activate)` adds a description and creates the soft body
@@ -273,10 +268,8 @@
 //!   of each soft body from jolt_sim_soft_body_info. The records of the soft body contact listener (RecordKind 70..73)
 //!   come from the soft body jobs and are compared sorted, with the other records. `Expect.soft_body_records` names the
 //!   callbacks a scene must reach.
-//! - **Blocker.** `.soft_bodies` is supported as soon as Zolt simulates soft bodies: SoftBodyMotionProperties.is_stub
-//!   (group S4) and PhysicsSystem.soft_body_jobs_pending (group S5) are gone (`SoftBodyClasses.simulated`). Until then
-//!   the scenes run on the C++ side alone ("SimScenes blocked scenes run on the C++ side"), and their settings bytes are
-//!   compared with Zolt's. Both are gone: the soft body scenes run against Zolt.
+//! - **No blocker.** The soft body scenes run against Zolt (groups S4 and S5 ported the update and the soft body jobs),
+//!   so they have no `blocked_by`.
 //! - **Scenes** (group S5, the list of RemainingFeaturesArchitecture.md section 4): the 3 cases of SoftBodyTests
 //!   (`soft_body_test_*`), linear cast spheres against cubes and cloths in every listener mode (the CCD response
 //!   against a soft body face, `Expect.soft_body_ccd`), linear cast spheres against faces with fixed vertices of
@@ -323,8 +316,8 @@
 //!
 //! ## Recipe for a Phase 6 worker (adding a constraint class to the simulation parity)
 //!
-//! 1. Port the class (FixedConstraint.zig is the template); removing `is_stub` from its settings makes the scenes with
-//!    its Blocker run instead of being skipped.
+//! 1. Port the class (FixedConstraint.zig is the template); removing `is_stub` from its settings makes its Blocker
+//!    supported.
 //! 2. SimulationParity.zig: replace `const XSlot = StubSlot;` of the group with a struct like `FixedPointSlot`:
 //!    `makeSettings` (the members of the settings class from `i` / `r` / `f`, exactly SimMakeConstraintSettings of
 //!    SimulationReference.cpp), `applyOp` (the operations of the group's range, exactly ApplyConstraintOp of the .cpp,
@@ -518,7 +511,8 @@ pub const StepListenerMode = enum(u32) {
 
 /// Constraint kinds (Phase 6): every Jolt two body constraint class. The C++ side creates every kind and applies every
 /// operation of `OpKind`; the Zolt side the kinds whose class is ported (`isPorted`, SimulationParity.zig's constraint
-/// slots). A scene that creates a kind whose Zolt class is still a stub declares it with its `Blocker` and is skipped.
+/// slots). A scene that creates a kind declares it with its `Blocker`. Every kind is ported; a scene whose kind is a
+/// stub again fails (SimulationParity's checkSupported).
 /// The description of each kind (`SimConstraint.i` / `r` / `f`) is listed per value.
 pub const ConstraintKind = enum(u32) {
     /// FixedConstraintSettings: i[0] space, i[1] auto detect point; r[0..3] point 1, r[3..6] point 2; f[0..3] axis X1,
@@ -1331,15 +1325,6 @@ pub const SoftBodyListenerMode = enum(u32) {
 pub fn isSoftBodyOp(op: u32) bool {
     return op >= @intFromEnum(OpKind.create_soft_body) and op <= @intFromEnum(OpKind.set_soft_body_contact_listener);
 }
-
-/// Whether Zolt simulates soft bodies (Blocker.soft_bodies): group S4 removes SoftBodyMotionProperties.is_stub (the
-/// update of the motion properties), group S5 removes PhysicsSystem.soft_body_jobs_pending (the soft body jobs). The
-/// test uses @hasDecl, so it compiles before and after both groups.
-pub const SoftBodyClasses = struct {
-    pub fn simulated() bool {
-        return !@hasDecl(zolt.SoftBodyMotionProperties, "is_stub") and !@hasDecl(zolt.PhysicsSystem, "soft_body_jobs_pending");
-    }
-};
 
 /// The reserved OpKind ranges of the Phase 7 operations (see the file header): every worker group adds operations in
 /// its own range only. ZoltWorld.applyPhase7Op of SimulationParity.zig routes each range to its slot.
@@ -2645,7 +2630,8 @@ pub const Layers = struct {
 // -------------------------------------------------------------------------------------------------------------------
 // The scene table
 
-/// What a scene needs that Zolt cannot do yet
+/// What a scene needs. Zolt ports every class, so every Blocker is supported: the blockers are labels, and SimulationParity
+/// fails a scene whose Blocker is not supported.
 pub const Blocker = enum {
     none,
     /// Body pairs reach the narrow phase: ProcessBodyPair and the contact solver (A4, Wave B R2 / R3, supported)
@@ -2655,9 +2641,6 @@ pub const Blocker = enum {
     constraints,
     /// Linear cast bodies that hit something (Wave B R4, supported)
     ccd_hits,
-    /// Soft bodies (Phase 9): supported as soon as Zolt simulates them (`SoftBodyClasses.simulated`, nothing to flip by
-    /// hand)
-    soft_bodies,
     /// The scene violates a JPH_ASSERT that Jolt's release build (the reference library is built without asserts)
     /// ignores: it compares Jolt's release behavior. Zolt's assert at that site is recoverable (R8), the scene runs with a
     /// handler that counts the asserts
@@ -2696,7 +2679,7 @@ pub const Blocker = enum {
     /// VehicleConstraint with the motorcycle controller (a wheeled controller)
     motorcycles,
 
-    /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
+    /// True when Zolt can run the scenes with this blocker (the classes that it needs do not declare `is_stub`)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
             .characters => Phase7Classes.characters(),
@@ -2707,7 +2690,6 @@ pub const Blocker = enum {
             .motorcycles => Phase7Classes.motorcycles(),
             .none, .contacts, .ccd_hits, .constraints => true,
             .release_only => true,
-            .soft_bodies => SoftBodyClasses.simulated(),
             .distance_constraints => ConstraintKind.distance.isPorted(),
             .pulley_constraints => ConstraintKind.pulley.isPorted(),
             .hinge_constraints => ConstraintKind.hinge.isPorted(),
@@ -2799,7 +2781,7 @@ pub const Expect = struct {
     /// `update_activations` (in a scene without contacts they are the only activations from inside an update).
     active_constraints: u32 = 0,
 
-    // Phase 7 (also checked on the C++ side by "SimScenes blocked scenes run on the C++ side")
+    // Phase 7
     /// The CharacterContactListener records of the scene include each of these RecordKinds at least once (bit
     /// `1 << kind`, `recordBit`)
     character_records: u128 = 0,
@@ -2816,7 +2798,7 @@ pub const Expect = struct {
     vehicle_up_shifts: u32 = 0,
     vehicle_down_shifts: u32 = 0,
 
-    // Phase 9 (also checked on the C++ side by "SimScenes blocked scenes run on the C++ side")
+    // Phase 9
     /// The soft body contact listener records of the scene include each of these RecordKinds at least once (bit
     /// `1 << kind`, `recordBit`)
     soft_body_records: u128 = 0,
@@ -2993,7 +2975,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "ccd_infinite_mass_override", .build = buildInfiniteMassOverride, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_cube_slide_active_edges", .build = buildLinearCastCubeSlide(1), .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true } },
     .{ .name = "ccd_cube_slide_all_edges", .build = buildLinearCastCubeSlide(0), .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
-    // Later waves (blocked until Zolt has the parts, see Blocker)
+    // Later waves
     // Scenes of the ported PhysicsTests (Wave C)
     .{ .name = "physics_tests_restitution_1", .build = buildTestsRestitution(1), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "physics_tests_restitution_2", .build = buildTestsRestitution(2), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
@@ -3223,30 +3205,30 @@ pub const scenes = [_]SceneEntry{
     // ---- Soft bodies (Phase 9: the harness scenes of group SH, then the scene list of group S5) ----
     // The soft body scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`). DetermineCollidingShapes
     // gets the colliding bodies in the order of the broad phase layout. A vertex keeps the first of equal penetrations.
-    .{ .name = "soft_body_cube_on_floor", .build = buildSoftBodyCubeOnFloor, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
-    .{ .name = "soft_body_test_bend_constraint", .build = buildSoftBodyTestBendConstraint, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true },
-    .{ .name = "soft_body_test_apply_force", .build = buildSoftBodyTestApplyForce, .blocked_by = .soft_bodies, .sweep_stride = 40, .restore_broad_phase = true },
-    .{ .name = "soft_body_test_linear_cast_sphere", .build = buildSoftBodyTestLinearCastSphere, .blocked_by = .soft_bodies, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
-    .{ .name = "soft_body_ccd_cube_listener_modes", .build = buildSoftBodyCcdCube, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
-    .{ .name = "soft_body_ccd_cloth_listener_modes", .build = buildSoftBodyCcdCloth, .blocked_by = .soft_bodies, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
-    .{ .name = "soft_body_ccd_fixed_and_rotated", .build = buildSoftBodyCcdFixedAndRotated, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
-    .{ .name = "soft_body_cloth_lra", .build = buildSoftBodyClothLRA, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_cloth_dihedral", .build = buildSoftBodyClothDihedral, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true },
-    .{ .name = "soft_body_pressure_sphere", .build = buildSoftBodyPressureSphere, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_rod_chain", .build = buildSoftBodyRodChain, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_skinned_back_stops", .build = buildSoftBodySkinnedBackStops, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_sensor", .build = buildSoftBodySensor, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
-    .{ .name = "soft_body_sleep_and_wake", .build = buildSoftBodySleepAndWake, .blocked_by = .soft_bodies, .sweep_stride = 50, .restore_broad_phase = true, .expect = .{ .sleeping = true, .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_update_position_false", .build = buildSoftBodyUpdatePositionFalse, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_several_on_one_body", .build = buildSoftBodySeveralOnOneBody, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_save_restore", .build = buildSoftBodySaveRestore, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_collision_steps_2", .build = buildSoftBodyCollisionSteps2, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_cube_on_floor", .build = buildSoftBodyCubeOnFloor, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    .{ .name = "soft_body_test_bend_constraint", .build = buildSoftBodyTestBendConstraint, .sweep_stride = 30, .restore_broad_phase = true },
+    .{ .name = "soft_body_test_apply_force", .build = buildSoftBodyTestApplyForce, .sweep_stride = 40, .restore_broad_phase = true },
+    .{ .name = "soft_body_test_linear_cast_sphere", .build = buildSoftBodyTestLinearCastSphere, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_cube_listener_modes", .build = buildSoftBodyCcdCube, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_cloth_listener_modes", .build = buildSoftBodyCcdCloth, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_fixed_and_rotated", .build = buildSoftBodyCcdFixedAndRotated, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_cloth_lra", .build = buildSoftBodyClothLRA, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_cloth_dihedral", .build = buildSoftBodyClothDihedral, .sweep_stride = 25, .restore_broad_phase = true },
+    .{ .name = "soft_body_pressure_sphere", .build = buildSoftBodyPressureSphere, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_rod_chain", .build = buildSoftBodyRodChain, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_skinned_back_stops", .build = buildSoftBodySkinnedBackStops, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_sensor", .build = buildSoftBodySensor, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    .{ .name = "soft_body_sleep_and_wake", .build = buildSoftBodySleepAndWake, .sweep_stride = 50, .restore_broad_phase = true, .expect = .{ .sleeping = true, .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_update_position_false", .build = buildSoftBodyUpdatePositionFalse, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_several_on_one_body", .build = buildSoftBodySeveralOnOneBody, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_save_restore", .build = buildSoftBodySaveRestore, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_collision_steps_2", .build = buildSoftBodyCollisionSteps2, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
     // Creating the 30 x 30 cloth (CreateConstraints, Optimize) allocates thousands of times: no creation sweep
-    .{ .name = "soft_body_large_cloth", .build = buildSoftBodyLargeCloth, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .creation_sweep = false, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_groups = true } },
-    .{ .name = "soft_body_partial_batches", .build = buildSoftBodyPartialBatches, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_shapes", .build = buildSoftBodyShapes, .blocked_by = .soft_bodies, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
-    .{ .name = "soft_body_many_go_to_sleep", .build = buildSoftBodyManyGoToSleep, .blocked_by = .soft_bodies, .sweep_stride = soft_body_many_sleep_update, .restore_broad_phase = true, .expect = .{ .sleeping = true, .update_deactivations = soft_body_many_count } },
+    .{ .name = "soft_body_large_cloth", .build = buildSoftBodyLargeCloth, .sweep_stride = 25, .restore_broad_phase = true, .creation_sweep = false, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_groups = true } },
+    .{ .name = "soft_body_partial_batches", .build = buildSoftBodyPartialBatches, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_shapes", .build = buildSoftBodyShapes, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_many_go_to_sleep", .build = buildSoftBodyManyGoToSleep, .sweep_stride = soft_body_many_sleep_update, .restore_broad_phase = true, .expect = .{ .sleeping = true, .update_deactivations = soft_body_many_count } },
     // (append the soft body scenes here)
 };
 
@@ -12892,8 +12874,7 @@ fn buildGearKinematicRelease(b: *SceneBuilder) Allocator.Error!void {
 
 // -------------------------------------------------------------------------------------------------------------------
 // Characters, ragdolls and vehicles (Phase 7), one region per worker group (append a group's scenes at the end of its
-// region only). They run on the C++ side alone until the classes are ported ("SimScenes blocked scenes run on the C++
-// side"), see "Recipe for a Phase 7 worker" in the file header.
+// region only), see "Recipe for a Phase 7 worker" in the file header.
 
 /// i[3] of the operations with `lock`: the no-lock interfaces (inLockBodies = false)
 const no_lock = [_]u32{ 0, 0, 0, 1 };
@@ -16418,7 +16399,7 @@ fn buildVehicleMotorcycleFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
 
 // (append the vehicle scenes here)
 
-// ---- Soft bodies (Phase 9, Blocker.soft_bodies: the harness scenes of group SH, the scene list of group S5) ----
+// ---- Soft bodies (Phase 9: the harness scenes of group SH, the scene list of group S5) ----
 
 /// The smoke scene of the soft body harness: the cube of SoftBodyTests (sCreateCube(6, 0.2)) dropped rotated onto a
 /// floor with the recording soft body contact listener, and a box dropped onto the cube

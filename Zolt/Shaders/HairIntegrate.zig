@@ -11,6 +11,9 @@
 //! - `uint3(grid_pos)` in `applyGrid` is undefined in Jolt for a NaN grid position. Jolt's result depends on the call
 //!   site (UB11 of R20, see HLSLToCPP.zig and HairCommon.zig). Zolt uses the scalar conversion and the parity keeps NaN
 //!   positions away from this site.
+//! - A grid point past the end of the grid panics in `applyGrid` before the first read (UB30 of R20, `checkGridPoints`
+//!   of HairCommon.zig). Jolt reads past the grid buffers there. It happens with a GridSize below 2 on X, Y or Z, or
+//!   with a grid of 2^32 or more points, whose size wraps.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");
@@ -68,6 +71,7 @@ pub fn applyGrid(b: anytype, pos: HairPosition, vel: *HairVelocity, material: Ha
     const adr_100 = adr_000 +% 1;
     const adr_010 = adr_000 +% stride.y;
     const adr_110 = adr_010 +% 1;
+    HairCommon.checkGridPoints(c, adr_000, adr_100, adr_010, adr_110, "ApplyGrid"); // Zolt (R20 UB30): Jolt reads past the grid
     var velocity = b.gVelocityAndDensity.get(adr_000).xyz().mulScalar(a.x * a.y * a.z);
     velocity = velocity.add(b.gVelocityAndDensity.get(adr_100).xyz().mulScalar(ma.x * a.y * a.z));
     velocity = velocity.add(b.gVelocityAndDensity.get(adr_010).xyz().mulScalar(a.x * ma.y * a.z));
