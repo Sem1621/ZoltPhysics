@@ -11,10 +11,18 @@
 //!   where C++ converts it to that type, and the values are small and positive, so the results are the same.
 //! - The two constant blocks are `HairUpdateContext` (`gContext`) and `HairIterationContext` (`gIterationContext`). A
 //!   shader that includes HairStructs.h binds both, first (R12).
-//! - The C++ structs have no default member values. Zolt gives none either: buffers of them are zero-filled
-//!   (ComputeBufferCPU) or written completely by Hair.
+//! - The C++ structs have no default member values. Zolt gives none either, except HairSVertexInfluence: it also serves
+//!   as HairSettings::SVertexInfluence (see below). Buffers of these structs are zero-filled (ComputeBufferCPU) or
+//!   written completely by Hair.
+//! - HairSettings::SkinWeight, SkinPoint and SVertexInfluence derive from JPH_HairSkinWeight, JPH_HairSkinPoint and
+//!   JPH_HairSVertexInfluence without adding members, so in Zolt they are these structs (R14; `HairSettings.SkinWeight`
+//!   is an alias). The three carry the RTTI of the HairSettings class (JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL) with
+//!   `.renamed = true`: the Zig name is the name of the shader struct. HairSVertexInfluence has the default values of
+//!   the constructor of HairSettings::SVertexInfluence.
 
 const std = @import("std");
+const RTTI = @import("../Core/RTTI.zig").RTTI;
+const Float3 = @import("../Math/Float3.zig").Float3;
 const ShaderCore = @import("ShaderCore.zig");
 const JPH_float = ShaderCore.JPH_float;
 const JPH_float3 = ShaderCore.JPH_float3;
@@ -38,13 +46,38 @@ pub const hair_per_render_vertex_batch = 128;
 pub const hair_num_s_vertex_influences = 3;
 
 /// JPH_HairSkinWeight
+/// Also HairSettings::SkinWeight: how much a vertex is influenced by a joint
 pub const HairSkinWeight = extern struct {
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(HairSettings::SkinWeight)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "HairSettings::SkinWeight",
+        .kind = .non_virtual,
+        .renamed = true, // HairSettings::SkinWeight is this struct
+        .attributes = &.{
+            .attr("mJointIdx", .joint_idx),
+            .attr("mWeight", .weight),
+        },
+    });
+
     joint_idx: JPH_uint,
     weight: JPH_float,
 };
 
 /// JPH_HairSkinPoint
+/// Also HairSettings::SkinPoint: information about where a hair strand is attached to the scalp mesh
 pub const HairSkinPoint = extern struct {
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(HairSettings::SkinPoint)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "HairSettings::SkinPoint",
+        .kind = .non_virtual,
+        .renamed = true, // HairSettings::SkinPoint is this struct
+        .attributes = &.{
+            .attr("mTriangleIndex", .triangle_index),
+            .attr("mU", .u),
+            .attr("mV", .v),
+        },
+    });
+
     /// Index of triangle in mScalpVertices to which this skin point is attached
     triangle_index: JPH_uint,
     /// Barycentric u coordinate of skin point
@@ -62,13 +95,45 @@ pub const HairGlobalPoseTransform = extern struct {
 };
 
 /// JPH_HairSVertexInfluence
+/// Also HairSettings::SVertexInfluence: describes how a render vertex is influenced by a simulated vertex
 pub const HairSVertexInfluence = extern struct {
+    /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(HairSettings::SVertexInfluence)
+    pub const rtti = RTTI.declare(@This(), .{
+        .name = "HairSettings::SVertexInfluence",
+        .kind = .non_virtual,
+        .renamed = true, // HairSettings::SVertexInfluence is this struct
+        .attributes = &.{
+            .attr("mVertexIndex", .vertex_index),
+            .custom("mRelativePosition", RelativePositionAttribute), // A JPH_float3, which the stream sees as a Float3
+            .attr("mWeight", .weight),
+        },
+    });
+
+    /// HairSettings::cNoInfluence
+    pub const no_influence: u32 = ~@as(u32, 0);
+
+    // The defaults are those of the constructor of HairSettings::SVertexInfluence:
+    // SVertexInfluence() { mVertexIndex = cNoInfluence; mRelativePosition = JPH_float3(0, 0, 0); mWeight = 0.0f; }
+
     /// Index in mSimVertices that indicates to which simulated vertex this vertex is attached.
-    vertex_index: JPH_uint,
+    vertex_index: JPH_uint = no_influence,
     /// Position in local space from the simulated vertex to the render vertex
-    relative_position: JPH_float3,
+    relative_position: JPH_float3 = .{ .x = 0, .y = 0, .z = 0 },
     /// Influence weight, 0 = not attached, 1 = fully attached
-    weight: JPH_float,
+    weight: JPH_float = 0.0,
+
+    /// The attribute mRelativePosition: JPH_float3 is Float3 in C++ (ShaderCore.h), the same 12 bytes as `hlsl.float3`
+    const RelativePositionAttribute = struct {
+        pub const Member = Float3;
+
+        pub fn get(self: *const HairSVertexInfluence) Float3 {
+            return .{ .x = self.relative_position.x, .y = self.relative_position.y, .z = self.relative_position.z };
+        }
+
+        pub fn prepare(self: *HairSVertexInfluence) *Float3 {
+            return @ptrCast(&self.relative_position);
+        }
+    };
 };
 
 /// JPH_HairPosition
@@ -165,6 +230,7 @@ comptime {
     std.debug.assert(@sizeOf(HairCollisionShape) == 36);
     std.debug.assert(@sizeOf(HairUpdateContext) == 256);
     std.debug.assert(@sizeOf(HairIterationContext) == 8);
+    std.debug.assert(@sizeOf(Float3) == @sizeOf(JPH_float3) and @alignOf(Float3) == @alignOf(JPH_float3));
 
     // The members that the comment "the order was chosen to match the struct between C++ and HLSL" is about: HLSL packs
     // a constant buffer in 16 byte rows, so every float3 / uint3 starts a row and the scalar after it fills the row

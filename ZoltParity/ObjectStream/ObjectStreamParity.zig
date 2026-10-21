@@ -3,8 +3,9 @@
 //! ObjectStreamReference.cpp. The class model is ObjectStreamSchema.zig, the stream generator StreamGenerator.zig, the
 //! number words NumberWords.zig.
 //!
-//! The harness has no code for one class. It takes every class of the C++ Factory after RegisterTypes and the Zolt
-//! factory (`RegisterTypes.factory`). Phase 8 is done and the soft body classes are declared (Phase 9 group S0), so
+//! The harness has no code for one class. It takes every class of the C++ Factory after RegisterTypes and RegisterHair
+//! and the Zolt factory (`RegisterTypes.factory` with `RegisterHair.serializable_types`, ObjectStreamSchema.zig). Phase 8
+//! is done and the soft body classes (Phase 9 group S0) and the hair classes (Phase 9 group H1) are declared, so
 //! every class is declared in full. P1 fails when a class is missing, pending (`serialization_pending`, S18) or reaches
 //! a pending class. So the other layers compare every class, and a class that is not ready fails them too.
 //!
@@ -19,10 +20,11 @@
 //! - P6 number words: more than 10^5 words through C++'s ObjectStreamTextIn and Zolt's.
 //! - P7 assets: Human.tof, dead_pose1.tof and terrain2.bof read by both sides, written again in both formats, and the
 //!   SaveBinaryState bytes of the loaded objects. The same for random PhysicsScenes with soft bodies (P3's generator),
-//!   without the shapes (no asset has soft bodies).
-//! - P9 binary state: each side restores the SaveBinaryState bytes of those random scenes that the other side wrote
-//!   (PhysicsScene::sRestoreFromBinaryState) and writes the same bytes again. (The binary state parity of the other
-//!   layers, e.g. BodyInterfaceParity.zig, is P9 of SerializationArchitecture.md too.)
+//!   without the shapes (no asset has soft bodies), and for random HairSettings (no asset has hair).
+//! - P9 binary state: each side restores the SaveBinaryState bytes of those random scenes and hair settings that the
+//!   other side wrote (PhysicsScene::sRestoreFromBinaryState, HairSettings::RestoreBinaryState) and writes the same
+//!   bytes again. (The binary state parity of the other layers, e.g. BodyInterfaceParity.zig, is P9 of
+//!   SerializationArchitecture.md too.)
 //! - P8 the object of UnitTests/ObjectStream/ObjectStreamTest.cpp in both formats and both directions.
 //!
 //! Comparing bytes: both sides read a stream as the requested class and write the main object in both formats; the
@@ -31,9 +33,9 @@
 //!
 //! P3 and P4 go on with the next class after a mismatch, and list the classes that failed at the end.
 //!
-//! The C++ side of P2 to P7 reads with the Factory after RegisterTypes and with allocation hooks that zero every block
-//! and defer frees until the call returns. Every such call checks that its hooks were still installed at the end (-5
-//! otherwise, a harness error). Every C++ read starts with errno = 0 (D7).
+//! The C++ side of P2 to P7 reads with the Factory after RegisterTypes and RegisterHair and with allocation hooks that
+//! zero every block and defer frees until the call returns. Every such call checks that its hooks were still installed
+//! at the end (-5 otherwise, a harness error). Every C++ read starts with errno = 0 (D7).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -254,14 +256,14 @@ fn zoltSchema(allocator: Allocator, rtti: *const RTTI) ![]u8 {
     return line.toOwnedSlice();
 }
 
-test "ObjectStream P1: the schema of every class of the C++ Factory after RegisterTypes, and IsKindOf" {
+test "ObjectStream P1: the schema of every class of the C++ Factory after RegisterTypes and RegisterHair, and IsKindOf" {
     const allocator = std.testing.allocator;
     const schema = try schema_mod.get();
     var mismatches: usize = 0;
     var compared: usize = 0;
     for (schema.classes) |*c| {
         const rtti = c.zolt orelse {
-            std.debug.print("{s} is not in RegisterTypes.factory\n", .{c.name});
+            std.debug.print("{s} is not in the Zolt factory\n", .{c.name});
             mismatches += 1;
             continue;
         };
@@ -291,10 +293,10 @@ test "ObjectStream P1: the schema of every class of the C++ Factory after Regist
         }
     }
 
-    // Every class of the Zolt factory is a class of the C++ Factory after RegisterTypes
+    // Every class of the Zolt factory is a class of the C++ Factory after RegisterTypes and RegisterHair
     for (schema_mod.factory.getAllClasses()) |rtti| {
         if (schema.find(rtti.name) == null) {
-            std.debug.print("{s} is in the Zolt factory, not in the C++ Factory after RegisterTypes\n", .{rtti.name});
+            std.debug.print("{s} is in the Zolt factory, not in the C++ Factory after RegisterTypes and RegisterHair\n", .{rtti.name});
             mismatches += 1;
         }
     }
@@ -850,6 +852,77 @@ test "ObjectStream P7 / P9: the binary state of random PhysicsScenes with soft b
     try std.testing.expect(num_soft_bodies >= scene_streams / 4);
     try std.testing.expect(num_shared_settings_with_materials >= 20);
     try std.testing.expect(num_shared_settings_reused >= 5);
+}
+
+// P7 and P9 of random HairSettings (RegisterHair) ---------------------------------------------------------------------
+
+/// The random HairSettings streams of P7 / P9
+const hair_streams = 120;
+
+test "ObjectStream P7 / P9: the binary state of random HairSettings" {
+    const allocator = std.testing.allocator;
+    const schema = try schema_mod.get();
+    const class = schema.find("HairSettings") orelse return error.HarnessError;
+    _ = try readyClass(.{ .layer = "P7 hair", .class = "HairSettings" }, &schema.classes[class]);
+    var num_sim_vertices: usize = 0;
+    var num_render_vertices: usize = 0;
+    var num_materials: usize = 0;
+    for (0..hair_streams) |s| {
+        const f: gen.Format = if (s % 2 == 0) .text else .binary;
+        const seed = 0x4a17_5e77 ^ (@as(u64, s) << 8);
+        var prng: std.Random.DefaultPrng = .init(seed);
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        const g = try gen.Generator.init(arena.allocator(), schema, prng.random(), class);
+        const bytes = try gen.write(arena.allocator(), g.doc, f, prng.random());
+        var ctx: Context = .{ .layer = "P7 hair", .class = "HairSettings", .detail = @tagName(f), .seed = seed, .stream = bytes };
+
+        // Both libraries read the stream and write the same bytes (P3)
+        if (!try roundTrip(allocator, bytes, g.doc.request, ctx, .first)) {
+            ctx.report("neither library reads a generated stream (a generator error)");
+            return error.ParityMismatch;
+        }
+
+        // P7: SaveBinaryState of the settings that both sides read
+        var reader: std.Io.Reader = .fixed(bytes);
+        var in = try ObjectStreamIn.open(allocator, &reader, schema_mod.factory);
+        defer in.deinit();
+        const main = try in.read(zolt.HairSettings.rtti);
+        defer main.rtti.destructObject(main.instance, allocator);
+        const settings: *const zolt.HairSettings = @ptrCast(@alignCast(main.instance));
+        num_sim_vertices += settings.sim_vertices.items.len;
+        num_render_vertices += settings.render_vertices.items.len;
+        num_materials += settings.materials.items.len;
+        var zolt_state: std.Io.Writer.Allocating = .init(allocator);
+        defer zolt_state.deinit();
+        var wrapper = zolt.StreamOutWrapper.init(&zolt_state.writer);
+        settings.saveBinaryState(wrapper.streamOut());
+        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_asset_binary_state(bytes.ptr, bytes.len, "HairSettings")));
+        try expectSame(ctx, "SaveBinaryState", zolt_state.written(), cppResult(2));
+
+        // P9: each side restores the other side's binary state and saves it again
+        ctx.layer = "P9 hair";
+        ctx.stream = zolt_state.written();
+        const jolt_state = try allocator.dupe(u8, cppResult(2));
+        defer allocator.free(jolt_state);
+        try std.testing.expectEqual(@as(c_int, 0), try schema_mod.quarantined(schema_mod.jolt_os_hair_binary_resave(zolt_state.written().ptr, zolt_state.written().len)));
+        try expectSame(ctx, "Jolt restores Zolt's binary state and saves it again", cppResult(2), zolt_state.written());
+        var restored: zolt.HairSettings = .{ .allocator = allocator };
+        defer restored.deinit();
+        var state_reader: std.Io.Reader = .fixed(jolt_state);
+        var state_in = zolt.StreamInWrapper.init(&state_reader);
+        try restored.restoreBinaryState(state_in.streamIn());
+        var resaved: std.Io.Writer.Allocating = .init(allocator);
+        defer resaved.deinit();
+        var resaved_wrapper = zolt.StreamOutWrapper.init(&resaved.writer);
+        restored.saveBinaryState(resaved_wrapper.streamOut());
+        try expectSame(ctx, "Zolt restores Jolt's binary state and saves it again", resaved.written(), jolt_state);
+    }
+
+    // The layer must reach the arrays
+    try std.testing.expect(num_sim_vertices >= hair_streams / 2);
+    try std.testing.expect(num_render_vertices >= hair_streams / 2);
+    try std.testing.expect(num_materials >= hair_streams / 2);
 }
 
 test "ObjectStream P5: 2000 prefixes of Assets/terrain2.bof" {

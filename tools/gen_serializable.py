@@ -25,8 +25,10 @@ order) and the attributes (in order: the stream name, alias or not, enum or not,
 pending declaration is only checked for its name, kind and bases. port_status.py --check runs this check with
 `--complete`: Phase 8 is done, so a pending declaration fails CI.
 
-The Hair classes of Phase 9 (Physics/Hair) are skipped (S17). The SoftBody classes (Phase 9 group S0) and the
-attribute "mSoftBodies" of PhysicsScene (Phase 9 group S2) are checked.
+The SoftBody classes (Phase 9 group S0), the attribute "mSoftBodies" of PhysicsScene (Phase 9 group S2) and the Hair
+classes (Phase 9 group H1) are checked. HairSettings::SkinWeight, SkinPoint and SVertexInfluence derive from shader
+structs without adding members, so Zolt declares them on those structs in Zolt/Shaders/HairStructs.zig, with
+`.renamed = true` (RemainingFeaturesArchitecture.md R14).
 """
 import argparse
 import os
@@ -35,8 +37,10 @@ import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-# Phase 9 (SerializationArchitecture.md S17): the Hair classes come with group H1
-EXCLUDED_DIRS = ("Jolt/Physics/Hair/",)
+# The classes that are a shader struct in Zolt (RemainingFeaturesArchitecture.md R14): declared in this file, with
+# `.renamed = true` (the Zig name is the name of the shader struct)
+SHADER_STRUCT_CLASSES = ("HairSettings::SkinWeight", "HairSettings::SkinPoint", "HairSettings::SVertexInfluence")
+SHADER_STRUCT_FILE = "Zolt/Shaders/HairStructs.zig"
 
 # Classes that Jolt declares outside the class: Zolt declares them in this file (TypeDeclarations.zig)
 OUTSIDE_FILE = "Zolt/ObjectStream/TypeDeclarations.zig"
@@ -91,12 +95,14 @@ class JoltClass:
         self.declare = None
         if implement == "OUTSIDE_CLASS":
             self.zig = OUTSIDE_FILE
+        elif self.name in SHADER_STRUCT_CLASSES:
+            self.zig = SHADER_STRUCT_FILE
         else:
             self.zig = "Zolt/" + cpp[len("Jolt/"):-len(".cpp")] + ".zig"
 
 
 def jolt_classes():
-    """Every sCreateRTTI block of Jolt (without Phase 9), in file order"""
+    """Every sCreateRTTI block of Jolt, in file order"""
     block = re.compile(r"^JPH_IMPLEMENT_SERIALIZABLE_(\w+)\(([^)]*)\)\s*\n\{(.*?)^\}", re.S | re.M)
     declare = re.compile(r"JPH_DECLARE_SERIALIZABLE_(\w+)\(\s*JPH_EXPORT\s*,\s*(\w+)\s*\)")
     classes = []
@@ -105,8 +111,6 @@ def jolt_classes():
             if not name.endswith(".cpp"):
                 continue
             cpp = rel(os.path.join(dirpath, name))
-            if cpp.startswith(EXCLUDED_DIRS):
-                continue
             source = read(cpp)
             found = [JoltClass(cpp, m.group(2).strip(), m.group(1), m.group(3)) for m in block.finditer(source)]
             if not found:
@@ -234,8 +238,10 @@ def compare(jolt, decl):
     jolt_bases = [b.split("::")[-1] for b in jolt.bases]
     if decl.bases != jolt_bases:
         problems.append(f"{where}: bases {decl.bases}, Jolt's JPH_ADD_BASE_CLASS are {jolt_bases}")
-    if decl.renamed:
+    if decl.renamed and jolt.name not in SHADER_STRUCT_CLASSES:
         problems.append(f"{where}: `.renamed = true` (JPH_RENAME_CLASS is unused in Jolt)")
+    if jolt.name in SHADER_STRUCT_CLASSES and not decl.renamed:
+        problems.append(f"{where}: a shader struct needs `.renamed = true` (its Zig name is the shader struct's)")
     if decl.pending:
         return problems
     zolt_attributes = [(a[0], a[1]) for a in decl.attributes]

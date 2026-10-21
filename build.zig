@@ -279,6 +279,9 @@ pub fn build(b: *std.Build) void {
     jolt_cpp.root_module.addIncludePath(b.path("."));
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("Jolt"), .files = &jolt_sources.files, .flags = cpp_flags.items });
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.files, .flags = cpp_flags.items });
+    // The C files of the reference (the libm pin, Docs/Zolt/RemainingFeaturesArchitecture.md R13): C flags, no FP
+    // contraction like the C++ files
+    jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.c_files, .flags = &.{ "-std=c11", "-ffp-contract=off" } });
 
     // The parity tests run on their own instance of the library module too: its `zolt_user_types` registers the collide
     // / cast functions of the parity test shape (ZoltParity/Physics/ShapeCoreUserTypes.zig), which the C++ reference
