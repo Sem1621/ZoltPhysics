@@ -112,7 +112,7 @@ comments. Jolt's size is checked at compile time; it also holds with Zig's field
   `allocator.create`.
 - `BodyManager.deleteBody` frees it through `@fieldParentPtr("body", body)` when
   `motion_properties != null`.
-- Phase 9 adds `SoftBodyWithMotionPropertiesAndShape` the same way.
+- Phase 9 added `SoftBodyWithMotionPropertiesAndShape` the same way (RemainingFeaturesArchitecture.md R16).
 
 **Fixed to world.** `Body::sFixedToWorld` becomes a compile time constant in read-only memory. Its
 dummy shape is a static `EmptyShape`: `Shape.is_static` was added with this document, and it makes
@@ -145,6 +145,12 @@ dummy shape is a static `EmptyShape`: `Shape.is_static` was added with this docu
   `BodyManager.allocateSoftBody`) are not declared until Phase 9 and are listed under
   `//! Missing:`. No soft body can then exist, so every `@panic("soft bodies: Phase 9")` stub is
   unreachable from the public API, and Phase 9 only adds code.
+- Settled in Phase 9 ([RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R15 to R19):
+  - the soft body types are complete, and the stubs, their panics and the `//! Missing:` lines are gone;
+  - `BodyInterface.createSoftBody`, `createSoftBodyWithID`, `createSoftBodyWithoutID`, `createAndAddSoftBody` and
+    `BodyManager.allocateSoftBody` exist (R16);
+  - the four soft body jobs and the CCD response against a soft body face are ported (R17, R18);
+  - PhysicsScene saves, restores and creates soft bodies (R19).
 
 ### D2 BodyManager
 
@@ -1060,15 +1066,17 @@ DeterminismLog, PhysicsScene).**
   `saveWithChildren` returns `error.InvalidShape` without a shape (Jolt dereferences null).
 - PhysicsScene:
   - `createBodies` undoes everything on an allocation error.
-  - Soft bodies are rejected until Phase 9.
+  - Soft bodies were rejected until Phase 9. Since then PhysicsScene has Jolt's soft body parts (R19 of
+    RemainingFeaturesArchitecture.md).
   - Constraint parity waits for the Phase 6 constraint settings.
 - DeterminismLog: the unit tests run a second time with the log enabled. The text is checked by
   construction and with expected strings, not against Jolt's log: the C++ reference is built
   without `JPH_ENABLE_DETERMINISM_LOG`.
 
 **Wave B (ProcessBodyPair, the island solve, CCD hits).**
-- `PhysicsSystem.zig` has no REGION markers left. Only the soft body work of Phase 9 is missing:
-  the soft body jobs after the "no active soft bodies" path, and a CCD hit on a soft body face.
+- `PhysicsSystem.zig` has no REGION markers left. Only the soft body work of Phase 9 was missing:
+  the soft body jobs after the "no active soft bodies" path, and a CCD hit on a soft body face. Phase 9 ported
+  both (RemainingFeaturesArchitecture.md R17, R18).
 - ProcessBodyPair:
   - Its collectors are local structs (`overrides = .{.addHit}`).
   - It returns `Allocator.Error` from the InternalEdgeRemovingCollector's heap fallback (the

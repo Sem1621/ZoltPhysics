@@ -548,7 +548,7 @@ Skeleton:
 ```zig
 //! Port of: Jolt/Physics/Collision/Shape/XShape.h, Jolt/Physics/Collision/Shape/XShape.cpp
 //! Status: complete | partial
-//! Missing: <C++ functions not ported yet, e.g. JPH_DEBUG_RENDERER (Draw)>
+//! Missing: <C++ functions not ported yet>
 
 pub const XShapeSettings = struct {
     /// JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(XShapeSettings)
@@ -691,7 +691,7 @@ Variants:
   `CompoundShapeVisitors`, plus `ScaleHelpers`, `GetTrianglesContext`, `CollisionDispatch`,
   `TransformedShape` and `RegisterTypes.zig`.
 - A stub file with an empty `register` and `Status: stub` for every shape in the registration
-  order, including `SoftBodyShape`, whose file belongs to Phase 9.
+  order, including `SoftBodyShape`, whose file belongs to Phase 9 (complete since Phase 9 group S3).
 - The `zolt_user_types` module in `build.zig` and the guide updates (section 7).
 - `tools/port_status.py`: remove `Jolt/Core/Result` from `NOT_APPLICABLE`.
   (Done: the foundation is merged and the prototype removed.)
@@ -705,7 +705,8 @@ Variants:
   `CollideConvexVsTriangles`, `CollideSphereVsTriangles`, `CastConvexVsTriangles`,
   `CastSphereVsTriangles`, `CollideShapeVsShapePerLeaf`, `InternalEdgeRemovingCollector`.
   `CollideSoftBodyVertexIterator` / `CollideSoftBodyVerticesVsTriangles` may stay stubs until
-  Phase 9 (SoftBody).
+  Phase 9 (SoftBody). `CollideSoftBodyVerticesVsTriangles` was ported complete in Wave A, and
+  `CollideSoftBodyVertexIterator` is complete since Phase 9.
 - Filters and groups: `GroupFilter`, `GroupFilterTable`, `CollisionGroup`,
   `ObjectLayerPairFilterMask` / `Table`, `BroadPhaseLayerInterfaceMask` / `Table`,
   `ObjectVsBroadPhaseLayerFilterMask` / `Table`, and the `ContactListener` types.
@@ -802,7 +803,8 @@ needs only the `Body` pointer type from the F1 stub.
   binary through the guard `if (Factory::sInstance == nullptr)` (see `BasicsReference.cpp`).
 - **Shared test helpers:** `ZoltTests/Layers.zig` (port of `UnitTests/Layers.h`).
 - **`CollideSoftBodyVertexIterator`** has the operations shapes need for `CollideSoftBodyVertices`
-  (Status: partial until SoftBody, Phase 9).
+  (Status: partial until SoftBody, Phase 9). Settled in Phase 9: it is complete, with the constructor from soft body
+  vertices (RemainingFeaturesArchitecture.md R15).
 - **NarrowPhaseStats** follow Jolt's default (`JPH_TRACK_NARROWPHASE_STATS` off): a comptime switch.
 
 **Settled during Waves A and B:**

@@ -262,7 +262,9 @@ A group edits only its own region, slot, files and registry lines.
 - File headers:
   - `//! Port of: <C++ files>` and `//! Status: complete|partial|stub`.
   - Keep Jolt's doc and implementation comments.
-  - Deviations from Jolt go into the file header (`TODO(debug_renderer)` for `Draw*`).
+  - Deviations from Jolt go into the file header.
+  - Port `Draw*` under the gates of [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Never leave
+    a `TODO(debug_renderer)`: `port_status.py --check` fails on one.
   - A serializable class declares `pub const rtti` ([SerializationArchitecture.md](SerializationArchitecture.md)
     section 3).
 - Unit tests: port them with the same names and values. Add inline tests for allocation failure and for the asserts
@@ -276,6 +278,8 @@ A group edits only its own region, slot, files and registry lines.
 - Done criteria (CLAUDE.md):
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
   - `zig build parity` in Debug, double precision and ReleaseFast;
+  - for a file with a draw gate (since Phase 9): `zig build check -Ddebug_renderer=true` and the filtered parity with
+    `-Ddebug_renderer=true`;
   - `zig fmt --check`;
   - `python3 tools/port_status.py --write`.
 
