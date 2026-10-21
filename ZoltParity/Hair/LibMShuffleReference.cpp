@@ -68,6 +68,8 @@ void jolt_libm_powf(const float *inX, const float *inY, float *outZ, size_t inCo
 // the engine after the shuffle. Returns 0, or 1 when the counting engine shuffled differently than std::mt19937.
 int jolt_libcxx_shuffle(uint32 inCount, uint32 *outItems, uint64 *outDraws, uint32 *outNext)
 {
+	ParityInstallHooks(); // The counted copy below allocates through Jolt
+
 	for (uint32 i = 0; i < inCount; ++i)
 		outItems[i] = i;
 	std::mt19937 random;
@@ -102,6 +104,20 @@ void jolt_libcxx_uniform_int(int inType, int64 inA, int64 inB, uint32 inSeed, ui
 		default:	outValues[i] = int64(std::uniform_int_distribution<uint64_t>(uint64_t(inA), uint64_t(inB))(engine)); break;
 		}
 	*outDraws = engine.mDraws;
+}
+
+// The rule of ParityHooks.h for jolt_libcxx_shuffle, which allocates through Jolt: 1 when it installs the hooks again
+// after an older reference file installed Jolt's allocator (RegisterDefaultAllocator). The hooks stay installed.
+uint32 jolt_libcxx_shuffle_hooks_check()
+{
+	RegisterDefaultAllocator(); // What the older reference files call
+	uint32 items[3];
+	uint64 draws;
+	uint32 next[4];
+	jolt_libcxx_shuffle(3, items, &draws, next);
+	bool installed = ParityHooksInstalled();
+	ParityInstallHooks();
+	return installed? 1 : 0;
 }
 
 } // extern "C"

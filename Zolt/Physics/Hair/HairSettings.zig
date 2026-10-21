@@ -29,9 +29,25 @@
 //!     above 1, or a fraction that size_t cannot hold: NaN, negative, huge). Jolt reads past the index array. Zolt panics
 //!     ("HairSettings: mSimulationStrandsFraction selects more strands than there are"). The other runs are literal:
 //!     the simulated strands run into the next material.
-//!   - A simulated strand with fewer than 2 vertices in Init: Jolt reads x[1] past the rod arrays and mSimVertices
-//!     before the strand. Zolt panics ("HairSettings.init: a simulated strand needs at least 2 vertices"). (Not in the
-//!     R20 table yet.)
+//!   - Init with a simulated strand of 0 vertices, or of 1 vertex that starts at vertex 0 or that no strand of 2 or more
+//!     vertices comes before (in the order of mSimStrands). Jolt reads past x or mSimVertices. Zolt panics
+//!     ("HairSettings.init: a simulated strand has no vertices", "HairSettings.init: a simulated strand of 1 vertex
+//!     starts at vertex 0 or comes before every longer strand"). (Not in the R20 table yet.)
+//!   - Init with a scalp on settings that already have skin points: Init twice, or Init after restoring the state of
+//!     an initialized groom. Jolt appends more skin points and reads mSimStrands past its end. Zolt panics before it
+//!     finalizes the skin points ("HairSettings.init: the settings have more skin points than simulated strands").
+//!     (Not in the R20 table yet.)
+//!   - resample with a strand of 1 vertex at the end of the vertex array, or a strand of 0 vertices at its start or
+//!     end. Jolt reads past the vertex array. Zolt panics ("HairSettings.resample: a strand of 0 or 1 vertices reads
+//!     past the vertex array"). (Not in the R20 table yet.)
+//! - Init with a strand of 1 vertex that a longer strand comes before follows Jolt's release build. Jolt reads x[1]
+//!   past the size of x (an assert of Jolt's Array). Its Array still holds the x[1] of the last strand of 2 or more
+//!   vertices there. That x[1] gives the rod length of the vertex. The Bishop frame of the vertex is then copied from
+//!   the vertex before it. Zolt keeps that x[1] and reads it after a recoverable assert (R8). The HairSettings parity
+//!   compares this path and counts the asserts.
+//! - resample with any other strand of 0 or 1 vertices is literal: it reads the next vertex of the array with a
+//!   fraction of 0. A num_vertices_per_strand of 0 is literal too: the loop bound wraps, and resample appends vertices
+//!   until memory runs out.
 //! - Asserts on the input that Jolt's release build passes (rods of zero length, a strand of 256 or more vertices,
 //!   material index 256 or more, resample past the end of a strand) are `if (Core.enable_asserts)` asserts.
 
@@ -798,6 +814,11 @@ pub const HairSettings = struct {
         errdefer out_strands.deinit(allocator);
 
         for (strands) |strand| {
+            // Zolt: Jolt reads past the vertex array for a strand of 1 vertex at the end of the array and for a strand of
+            // 0 vertices at its start or end (see the header)
+            if (@as(usize, strand.start_vtx) + 1 >= vertices.len or strand.end_vtx == 0)
+                @panic("HairSettings.resample: a strand of 0 or 1 vertices reads past the vertex array");
+
             // Determine output strand
             var out_strand: SStrand = .{ .start_vtx = undefined, .end_vtx = undefined };
             out_strand.start_vtx = @intCast(out_vertices.items.len);
@@ -957,16 +978,21 @@ pub const HairSettings = struct {
         defer g.deinit(allocator);
         var bishop: std.ArrayList(Quat) = .empty;
         defer bishop.deinit(allocator);
+        // Zolt: x[1] of the last strand of 2 or more vertices. Jolt's Array keeps it when x shrinks, and a strand of 1
+        // vertex reads it (see the header).
+        var last_x1: ?Vec3 = null;
         self.max_vertices_per_strand = 0;
         for (self.sim_strands.items) |strand| {
             // Calculate max number of vertices per strand
             const vertex_count = strand.vertexCount();
             self.max_vertices_per_strand = math.max(self.max_vertices_per_strand, vertex_count);
 
-            // Zolt: Jolt reads x[1] past the rod arrays and mSimVertices before the strand for a strand of 0 or 1
-            // vertices
-            if (vertex_count < 2)
-                @panic("HairSettings.init: a simulated strand needs at least 2 vertices");
+            // Zolt: Jolt reads past its arrays for a strand of 0 vertices, and for a strand of 1 vertex that starts at
+            // vertex 0 or that no strand of 2 or more vertices comes before (see the header)
+            if (vertex_count == 0)
+                @panic("HairSettings.init: a simulated strand has no vertices");
+            if (vertex_count == 1 and (strand.start_vtx == 0 or last_x1 == null))
+                @panic("HairSettings.init: a simulated strand of 1 vertex starts at vertex 0 or comes before every longer strand");
 
             // Calculate strand fraction for each vertex
             const total_length = strand.measureLength(self.sim_vertices.items);
@@ -1053,7 +1079,12 @@ pub const HairSettings = struct {
             // Calculate the Bishop frame for the first rod in the strand
             {
                 const v1 = &self.sim_vertices.items[strand.start_vtx];
-                var tangent = x.items[1];
+                var tangent = if (vertex_count >= 2) x.items[1] else stale: {
+                    // Zolt: Jolt's x[1] is past the size of x (the assert of Array::operator[]). Its release build reads
+                    // the x[1] of the last strand of 2 or more vertices.
+                    if (Core.enable_asserts) Core.assertFailed("inIdx < mSize", @src());
+                    break :stale last_x1.?;
+                };
                 v1.length = tangent.length();
                 if (Core.enable_asserts) std.debug.assert(v1.length > 0.0); // Rods of zero length are not supported!
                 tangent = tangent.divScalar(v1.length);
@@ -1105,7 +1136,16 @@ pub const HairSettings = struct {
 
             // Copy Bishop frame to the last vertex
             self.sim_vertices.items[strand.end_vtx - 1].bishop = self.sim_vertices.items[strand.end_vtx - 2].bishop;
+
+            // Zolt: keep x[1] for a later strand of 1 vertex
+            if (vertex_count >= 2)
+                last_x1 = x.items[1];
         }
+
+        // Zolt: the skin points of an earlier Init (Init twice with a scalp, or Init after restoring the state of an
+        // initialized groom) make Jolt read mSimStrands past its end below (see the header)
+        if (self.skin_points.items.len > self.sim_strands.items.len)
+            @panic("HairSettings.init: the settings have more skin points than simulated strands (init called twice with a scalp?)");
 
         // Finalize skin points by calculating how to go from triangle frame to Bishop frame
         for (self.skin_points.items, 0..) |*sp, sp_index| {
@@ -1493,6 +1533,7 @@ fn truncToUint(value: f32) u32 {
 // Tests ---------------------------------------------------------------------------------------------------------------
 
 const testing = std.testing;
+const IssueReporting = @import("../../Core/IssueReporting.zig");
 
 /// A groom of `num_strands` straight strands of `num_vertices` vertices along -y, side by side in x, material
 /// `material_index`, the first vertex of each strand fixed
@@ -1625,8 +1666,8 @@ test "HairSettings: init calculates the strand fractions, the rods, the Bishop f
 }
 
 test "HairSettings: init of a strand of 2 vertices, the smallest one" {
-    // Jolt reads x[1] past the rod arrays for a strand of 0 or 1 vertices: Zolt panics. A strand of 2 vertices, the
-    // smallest one, is fine.
+    // A strand of 2 vertices is the smallest one that Jolt's debug build accepts. A strand of 0 vertices, or of 1 vertex
+    // that is the first one, makes Jolt read past its arrays: Zolt panics.
     const allocator = testing.allocator;
     var settings: HairSettings = .{ .allocator = allocator };
     defer settings.deinit();
@@ -1634,6 +1675,70 @@ test "HairSettings: init of a strand of 2 vertices, the smallest one" {
     try testGroom(allocator, 1, 2, 0, &settings.sim_vertices, &settings.sim_strands);
     _ = try settings.init();
     try testing.expectEqual(@as(u32, 2), settings.max_vertices_per_strand);
+}
+
+test "HairSettings: init of strands of 1 vertex after longer strands follows Jolt's release build" {
+    // Jolt reads x[1] past the size of x (an assert). Its Array still holds the x[1] of the last strand of 2 or more
+    // vertices. A strand of 1 vertex at vertex 0, or before every longer strand, panics (Jolt reads past its arrays).
+    const allocator = testing.allocator;
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{ .gravity_preload_factor = 1.0, .bend_compliance = 1.0e-3, .stretch_compliance = 1.0e-4 });
+    try testGroom(allocator, 1, 3, 0, &settings.sim_vertices, &settings.sim_strands); // Vertices 0 to 2
+    try testGroom(allocator, 1, 5, 0, &settings.sim_vertices, &settings.sim_strands); // Vertices 3 to 7
+    for (0..2) |i| {
+        try settings.sim_vertices.append(allocator, .init(.{ .x = 1, .y = @floatFromInt(i), .z = 0 }, .{}));
+        try settings.sim_strands.append(allocator, .init(@intCast(8 + i), @intCast(9 + i), 0));
+    }
+
+    var expect_assert: IssueReporting.ExpectAssert = undefined;
+    expect_assert.init(2); // One per strand of 1 vertex
+    errdefer expect_assert.restore();
+    _ = try settings.init();
+    try expect_assert.finish();
+    try testing.expectEqual(@as(u32, 5), settings.max_vertices_per_strand);
+
+    // The gravity preload makes x[1] depend on the strand: the rods of 1 vertex get the length of the strand of 5
+    // vertices
+    const v = settings.sim_vertices.items;
+    try testing.expect(v[3].length != v[0].length);
+    for ([_]usize{ 8, 9 }) |i| {
+        try testing.expectEqual(v[3].length, v[i].length);
+        try testing.expectEqual(@as(f32, 1.0), v[i].strand_fraction);
+        try testing.expectEqual(v[i - 1].bishop, v[i].bishop); // Copied from the vertex before
+    }
+    try testing.expectEqual(v[6].bishop, v[9].bishop);
+}
+
+test "HairSettings: init with a scalp makes one skin point per simulated strand (next to the second init)" {
+    // A second init with a scalp, or an init after restoring this state, would append more skin points: Jolt reads
+    // mSimStrands past its end, Zolt panics. Restored settings without their skin points initialize again.
+    const allocator = testing.allocator;
+    const StreamWrapper = @import("../../Core/StreamWrapper.zig");
+    var settings: HairSettings = .{ .allocator = allocator };
+    defer settings.deinit();
+    try settings.materials.append(allocator, .{});
+    try settings.scalp_vertices.appendSlice(allocator, &.{ .{ .x = -1, .y = 0, .z = -1 }, .{ .x = 1, .y = 0, .z = -1 }, .{ .x = 0, .y = 0, .z = 1 } });
+    try settings.scalp_triangles.append(allocator, .init(0, 2, 1));
+    try testGroom(allocator, 4, 3, 0, &settings.sim_vertices, &settings.sim_strands);
+    _ = try settings.init();
+    try testing.expectEqual(@as(usize, 4), settings.skin_points.items.len);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var out_wrapper = StreamWrapper.StreamOutWrapper.init(&out.writer);
+    settings.saveBinaryState(out_wrapper.streamOut());
+
+    var restored: HairSettings = .{ .allocator = allocator };
+    defer restored.deinit();
+    var reader: std.Io.Reader = .fixed(out.written());
+    var in_wrapper = StreamWrapper.StreamInWrapper.init(&reader);
+    try restored.restoreBinaryState(in_wrapper.streamIn());
+    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(settings.skin_points.items), std.mem.sliceAsBytes(restored.skin_points.items));
+
+    restored.skin_points.clearRetainingCapacity();
+    _ = try restored.init();
+    try testing.expectEqual(@as(usize, 4), restored.skin_points.items.len);
 }
 
 test "HairSettings: resample keeps the ends of the strands" {
@@ -1655,6 +1760,34 @@ test "HairSettings: resample keeps the ends of the strands" {
     try testing.expectEqual(last.position, vertices.items[3].position);
     try testing.expectEqual(@as(f32, 0.0), vertices.items[0].inv_mass);
     try testing.expectEqual(@as(f32, 1.0), vertices.items[1].inv_mass);
+}
+
+test "HairSettings: resample of strands of 0 and 1 vertices inside the vertex array (literal)" {
+    // Jolt reads the next vertex of the array with a fraction of 0. At the end of the array it would read past it:
+    // Zolt panics there.
+    const allocator = testing.allocator;
+    var vertices: std.ArrayList(HairSettings.SVertex) = .empty;
+    defer vertices.deinit(allocator);
+    var strands: std.ArrayList(HairSettings.SStrand) = .empty;
+    defer strands.deinit(allocator);
+    try testGroom(allocator, 1, 4, 0, &vertices, &strands); // Vertices 0 to 3
+    try vertices.append(allocator, .init(.{ .x = 1, .y = 2, .z = 3 }, .{ .inv_mass = 0.0 }));
+    try strands.append(allocator, .init(4, 5, 0)); // 1 vertex
+    try strands.append(allocator, .init(5, 5, 0)); // 0 vertices
+    try testGroom(allocator, 1, 3, 0, &vertices, &strands); // Vertices 5 to 7
+    const in = try allocator.dupe(HairSettings.SVertex, vertices.items);
+    defer allocator.free(in);
+
+    try HairSettings.resample(allocator, &vertices, &strands, 3);
+    try testing.expectEqual(@as(usize, 12), vertices.items.len);
+    const out = vertices.items;
+    // The strand of 1 vertex: 3 times its vertex
+    for (out[3..6]) |v| try testing.expectEqual(in[4].position, v.position);
+    // The strand of 0 vertices: the vertex after it twice, then the vertex before it
+    try testing.expectEqual(in[5].position, out[6].position);
+    try testing.expectEqual(in[5].position, out[7].position);
+    try testing.expectEqual(in[4].position, out[8].position);
+    try testing.expectEqual(@as(u32, 6), strands.items[2].start_vtx);
 }
 
 test "HairSettings: saveBinaryState / restoreBinaryState round trip" {

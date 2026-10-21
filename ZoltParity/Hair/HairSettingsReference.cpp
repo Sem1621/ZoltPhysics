@@ -81,9 +81,10 @@ const uint8 *jolt_hair_result(int inIndex, size_t *outSize)
 // Runs a groom through HairSettings:
 // 1. RestoreBinaryState(inState): the settings before the groom (scalp, materials, fields);
 // 2. if inResample > 0: HairSettings::sResample(groom, inResample), the resampled groom in slot 16 (vertices) and 17
-//    (strands);
+//    (strands); with inFlags bit 3 the run ends here;
 // 3. unless inFlags bit 2: InitRenderAndSimulationStrands(groom), twice with inFlags bit 0; the state in slot 0;
-// 4. Init: the state in slot 1 and *outMaxDistSq; with inFlags bit 1 Init runs twice (settings without a scalp only);
+// 4. Init: the state in slot 1 and *outMaxDistSq; with inFlags bit 1 Init runs twice (settings without a scalp only:
+//    with a scalp the second Init reads mSimStrands past its end);
 // 5. InitCompute with Jolt's CPU compute system: buffer i in slot 2 + i, outBufferPresent[i] = 1 when it exists.
 // Returns 0.
 int jolt_hair_settings_run(const uint8 *inState, size_t inStateSize, const HairSettings::SVertex *inVertices, uint32 inNumVertices, const HairSettings::SStrand *inStrands, uint32 inNumStrands, uint32 inResample, uint32 inFlags, float *outMaxDistSq, int *outBufferPresent)
@@ -103,6 +104,8 @@ int jolt_hair_settings_run(const uint8 *inState, size_t inStateSize, const HairS
 		sResults[16] = std::string((const char *)vertices.data(), vertices.size() * sizeof(HairSettings::SVertex));
 		sResults[17] = std::string((const char *)strands.data(), strands.size() * sizeof(HairSettings::SStrand));
 	}
+	if (inFlags & 8)
+		return 0;
 
 	if ((inFlags & 4) == 0)
 	{
@@ -130,6 +133,16 @@ int jolt_hair_settings_run(const uint8 *inState, size_t inStateSize, const HairS
 			buffer->Unmap();
 		}
 	}
+	return 0;
+}
+
+// RestoreBinaryState of inState into new settings, then SaveBinaryState: the bytes in slot 18. The other slots stay.
+// Returns 0.
+int jolt_hair_resave(const uint8 *inState, size_t inStateSize)
+{
+	ParityInstallHooks();
+	Ref<HairSettings> settings = RestoreState(inState, inStateSize);
+	sResults[18] = SaveState(*settings);
 	return 0;
 }
 

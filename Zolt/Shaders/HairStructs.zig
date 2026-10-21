@@ -11,8 +11,9 @@
 //!   where C++ converts it to that type, and the values are small and positive, so the results are the same.
 //! - The two constant blocks are `HairUpdateContext` (`gContext`) and `HairIterationContext` (`gIterationContext`). A
 //!   shader that includes HairStructs.h binds both, first (R12).
-//! - The C++ structs have no default member values. Zolt gives none either: buffers of them are zero-filled
-//!   (ComputeBufferCPU) or written completely by Hair.
+//! - The C++ structs have no default member values. Zolt gives none either, except HairSVertexInfluence: it also serves
+//!   as HairSettings::SVertexInfluence (see below). Buffers of these structs are zero-filled (ComputeBufferCPU) or
+//!   written completely by Hair.
 //! - HairSettings::SkinWeight, SkinPoint and SVertexInfluence derive from JPH_HairSkinWeight, JPH_HairSkinPoint and
 //!   JPH_HairSVertexInfluence without adding members, so in Zolt they are these structs (R14; `HairSettings.SkinWeight`
 //!   is an alias). The three carry the RTTI of the HairSettings class (JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL) with

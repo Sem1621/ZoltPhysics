@@ -9,11 +9,20 @@
 //!   on the scalp, a few roots off the surface, 3 materials with simulation fractions below 1 (one with a gravity
 //!   preload, which runs the Gauss-Seidel solve of Init, one that only uses the global pose), random grooms with random
 //!   settings, an empty groom.
+//! - Scalps with the skin weights or the inverse bind pose removed: InitCompute then expects the skinned scalp vertices
+//!   from outside (no scalp vertex and skin weight buffers). An empty groom on the scalp (no skin points).
 //! - Per case: the SaveBinaryState bytes after InitRenderAndSimulationStrands and after Init, Init's result, the bytes of
 //!   the 14 compute buffers of InitCompute (with the CPU compute system) and, when the groom is resampled, the
 //!   resampled groom. Jolt's quirks are reproduced and compared too: InitRenderAndSimulationStrands appends (called
 //!   twice), Init twice without a scalp (the neutral density accumulates), a fraction above 1 on a material that is not
 //!   the last (the simulated strands run into the next material).
+//! - Per case, the state after Init on the other side: Zolt restores and saves Jolt's bytes, Jolt restores and saves
+//!   Zolt's. The skin points, the bounds with their W lanes and the neutral density go through RestoreBinaryState.
+//! - Jolt's release build on inputs that Jolt asserts on: simulated strands of 1 vertex after longer strands (Init reads
+//!   the x[1] of the last longer strand). The settings hold the simulated strands directly, so the case restores them
+//!   and skips InitRenderAndSimulationStrands. Zolt's asserts are recoverable and counted (ParityHooks.ReleaseAsserts).
+//! - Resample of strands of 0 and 1 vertices inside the vertex array (literal, without an assert): only the resampled
+//!   groom is compared, its strands have rods of zero length.
 //! - SkinScalpVertices and PrepareForScalpSkinning with frames of the face animation.
 //! - The small functions: Gradient::MakeStepDependent (std::pow, the pin of R13), GradientSampler,
 //!   Material::GetBendCompliance, NeedsGrid and GlobalPoseOnly on random inputs.
@@ -26,6 +35,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
+const ParityHooks = @import("../ParityHooks.zig");
 
 const HairSettings = zolt.HairSettings;
 const SVertex = HairSettings.SVertex;
@@ -44,6 +54,7 @@ const trigonometry = zolt.trigonometry;
 
 extern fn jolt_hair_result(index: c_int, size: *usize) [*]const u8;
 extern fn jolt_hair_settings_run(state: [*]const u8, state_size: usize, vertices: [*]const SVertex, num_vertices: u32, strands: [*]const SStrand, num_strands: u32, resample: u32, flags: u32, max_dist_sq: *f32, buffer_present: *[num_buffers]c_int) c_int;
+extern fn jolt_hair_resave(state: [*]const u8, state_size: usize) c_int;
 extern fn jolt_hair_skin_scalp(state: [*]const u8, state_size: usize, joint_to_hair: *const [16]f32, joint_matrices: [*]const f32, num_joints: u32) c_int;
 extern fn jolt_hair_gradient(gradient: *const [4]f32, time_ratio: f32, fraction: f32, start: u32, end: u32, vertex: u32, multiplier: *const [4]f32, compliance: f32, density_force: f32, enable_collision: c_int, values: *[13]f32) void;
 
@@ -57,6 +68,7 @@ fn cppResult(index: c_int) []const u8 {
 const init_render_twice: u32 = 1;
 const init_twice: u32 = 2;
 const skip_init_render: u32 = 4;
+const resample_only: u32 = 8;
 
 /// The compute buffers of InitCompute, in the order of HairSettingsReference.cpp
 const buffer_fields = [_][]const u8{
@@ -242,6 +254,24 @@ fn makeGroom(allocator: Allocator, rng: *fw.Rng, face: ?*const Face, shape: Shap
     return groom;
 }
 
+/// Cut strand s of the groom to `keep(s, number of strands)` vertices (null: all of them). The vertices of the cut strands
+/// are removed.
+fn cutStrands(allocator: Allocator, groom: *Groom, keep: *const fn (strand: usize, num_strands: usize) ?u32) !void {
+    var vertices: std.ArrayList(SVertex) = .empty;
+    errdefer vertices.deinit(allocator);
+    const num_strands = groom.strands.items.len;
+    for (groom.strands.items, 0..) |*strand, s| {
+        const count = strand.vertexCount();
+        const new_count = if (keep(s, num_strands)) |k| @min(k, count) else count;
+        const first: u32 = @intCast(vertices.items.len);
+        try vertices.appendSlice(allocator, groom.vertices.items[strand.start_vtx..][0..new_count]);
+        strand.start_vtx = first;
+        strand.end_vtx = first + new_count;
+    }
+    groom.vertices.deinit(allocator);
+    groom.vertices = vertices;
+}
+
 /// The 3 materials of the grooms: simulation fractions below 1, a gravity preload, a material that only uses the
 /// global pose
 fn materials3(fractions: [3]f32) [3]Material {
@@ -353,6 +383,7 @@ fn runCase(allocator: Allocator, case: Case) !void {
         try expectSameBytes(case.name, "the resampled vertices", std.mem.sliceAsBytes(vertices.items), cppResult(16));
         try expectSameBytes(case.name, "the resampled strands", std.mem.sliceAsBytes(strands.items), cppResult(17));
     }
+    if (case.flags & resample_only != 0) return;
 
     if (case.flags & skip_init_render == 0) {
         try settings.initRenderAndSimulationStrands(vertices.items, strands.items);
@@ -366,7 +397,9 @@ fn runCase(allocator: Allocator, case: Case) !void {
     var max_dist_sq = try settings.init();
     if (case.flags & init_twice != 0)
         max_dist_sq = try settings.init();
-    const state_b = try saveState(allocator, &settings);
+    const zolt_state_b = try saveState(allocator, &settings);
+    defer allocator.free(zolt_state_b);
+    const state_b = try allocator.dupe(u8, zolt_state_b);
     defer allocator.free(state_b);
     joltBoundsW(&settings, state_b);
     try expectSameBytes(case.name, "SaveBinaryState after Init", state_b, cppResult(1));
@@ -390,6 +423,21 @@ fn runCase(allocator: Allocator, case: Case) !void {
             try expectSameBytes(case.name, "InitCompute " ++ field, bytes, cppResult(2 + i));
         }
     }
+
+    // The state after Init on the other side: Zolt restores and saves Jolt's bytes, Jolt restores and saves Zolt's.
+    // RestoreBinaryState reads the bounds as a raw AABox, so the W lanes go through unchanged.
+    {
+        var restored: HairSettings = .{ .allocator = allocator };
+        defer restored.deinit();
+        var jolt_reader: std.Io.Reader = .fixed(cppResult(1));
+        var jolt_in = zolt.StreamInWrapper.init(&jolt_reader);
+        try restored.restoreBinaryState(jolt_in.streamIn());
+        const resaved = try saveState(allocator, &restored);
+        defer allocator.free(resaved);
+        try expectSameBytes(case.name, "Jolt's state after Init, restored and saved by Zolt", resaved, cppResult(1));
+    }
+    try std.testing.expectEqual(@as(c_int, 0), jolt_hair_resave(zolt_state_b.ptr, zolt_state_b.len));
+    try expectSameBytes(case.name, "Zolt's state after Init, restored and saved by Jolt", cppResult(18), zolt_state_b);
 }
 
 // The layer --------------------------------------------------------------------------------------------------------
@@ -400,7 +448,10 @@ test "HairSettings parity: grooms on the scalp of Assets/face.bin" {
     defer face.deinit(allocator);
     var rng: fw.Rng = .{ .state = 0x3a1f_0c55 };
 
-    const Setup = struct { name: []const u8, shape: Shape, num_strands: u32, min_vertices: u32, max_vertices: u32, fractions: [3]f32, resample: u32 = 0, flags: u32 = 0, blocks: ?[]const u32 = null };
+    // What the scalp keeps: everything, or no skin weights or no inverse bind pose (the skinned scalp vertices then come
+    // from outside, InitCompute makes no scalp vertex and skin weight buffers)
+    const Scalp = enum { skinned, no_skin_weights, no_inverse_bind_pose };
+    const Setup = struct { name: []const u8, shape: Shape, num_strands: u32, min_vertices: u32, max_vertices: u32, fractions: [3]f32, resample: u32 = 0, flags: u32 = 0, blocks: ?[]const u32 = null, scalp: Scalp = .skinned };
     const setups = [_]Setup{
         .{ .name = "face straight", .shape = .straight, .num_strands = 300, .min_vertices = 8, .max_vertices = 24, .fractions = .{ 0.1, 0.5, 0.3 } },
         .{ .name = "face curly", .shape = .curly, .num_strands = 200, .min_vertices = 12, .max_vertices = 30, .fractions = .{ 0.25, 0.05, 0.75 } },
@@ -411,11 +462,19 @@ test "HairSettings parity: grooms on the scalp of Assets/face.bin" {
         // literal). Material 0 (30 strands) simulates 45 strands. Material 1 (40 strands from position 30) simulates 48.
         // Material 2 (50 strands from position 70) simulates 25.
         .{ .name = "face fraction above 1 before the last material", .shape = .straight, .num_strands = 120, .min_vertices = 6, .max_vertices = 10, .fractions = .{ 1.5, 1.2, 0.5 }, .blocks = &.{ 30, 40, 50 } },
+        .{ .name = "face skinned outside (no skin weights)", .shape = .curly, .num_strands = 90, .min_vertices = 4, .max_vertices = 14, .fractions = .{ 0.3, 0.6, 0.2 }, .scalp = .no_skin_weights },
+        .{ .name = "face skinned outside (no inverse bind pose)", .shape = .straight, .num_strands = 70, .min_vertices = 3, .max_vertices = 9, .fractions = .{ 0.5, 0.25, 0.4 }, .scalp = .no_inverse_bind_pose },
+        .{ .name = "face empty groom", .shape = .straight, .num_strands = 0, .min_vertices = 2, .max_vertices = 2, .fractions = .{ 0.1, 0.1, 0.1 } },
     };
     for (setups) |setup| {
         const materials = materials3(setup.fractions);
         var settings = try baseSettings(allocator, &face, &materials);
         defer settings.deinit();
+        switch (setup.scalp) {
+            .skinned => {},
+            .no_skin_weights => settings.scalp_skin_weights.clearRetainingCapacity(),
+            .no_inverse_bind_pose => settings.scalp_inverse_bind_pose.clearRetainingCapacity(),
+        }
         settings.grid_size = UVec4.init(16, 24, 20, 0);
         const state = try saveState(allocator, &settings);
         defer allocator.free(state);
@@ -500,6 +559,73 @@ test "HairSettings parity: random grooms and settings" {
         const name = try std.fmt.allocPrint(allocator, "random {d}", .{round});
         defer allocator.free(name);
         try runCase(allocator, .{ .name = name, .state = state, .groom = &groom, .resample = resample });
+    }
+}
+
+test "HairSettings parity: simulated strands of 1 vertex after longer strands (Jolt's release build)" {
+    // Init reads x[1] past the size of x for a strand of 1 vertex (an assert of Jolt's Array). Jolt's release build reads
+    // the x[1] of the last strand of 2 or more vertices. The settings hold the simulated strands directly: the first one
+    // is longer, and no strand of 1 vertex starts at vertex 0 (there Jolt is undefined and Zolt panics). Zolt's asserts
+    // are recoverable and counted, with -Dreference_asserts=true Jolt's too.
+    const allocator = std.testing.allocator;
+    var face_or_null = try loadFace(allocator);
+    defer if (face_or_null) |*f| f.deinit(allocator);
+    var rng: fw.Rng = .{ .state = 0x51e6_1e00 };
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("HairSettings parity, strands of 1 vertex");
+    defer asserts.deinit();
+    for (0..4) |round| {
+        const face: ?*const Face = if (face_or_null != null and round % 2 == 0) &face_or_null.? else null;
+        const materials = materials3(.{ 1.0, 1.0, 1.0 });
+        var settings = try baseSettings(allocator, face, &materials);
+        defer settings.deinit();
+        var groom = try makeGroom(allocator, &rng, face, if (round < 2) .straight else .curly, 60, 2, 12, .{ .random = 3 });
+        defer groom.deinit(allocator);
+        // Single strands and pairs of strands of 1 vertex, never the first strand
+        try cutStrands(allocator, &groom, struct {
+            fn keep(s: usize, _: usize) ?u32 {
+                return if (s != 0 and (s % 5 == 2 or s % 9 == 4 or s % 9 == 5)) 1 else null;
+            }
+        }.keep);
+        try settings.sim_vertices.appendSlice(allocator, groom.vertices.items);
+        try settings.sim_strands.appendSlice(allocator, groom.strands.items);
+        const state = try saveState(allocator, &settings);
+        defer allocator.free(state);
+
+        const name = try std.fmt.allocPrint(allocator, "strands of 1 vertex {d}", .{round});
+        defer allocator.free(name);
+        var no_groom: Groom = .{};
+        asserts.begin();
+        try runCase(allocator, .{ .name = name, .state = state, .groom = &no_groom, .flags = skip_init_render });
+        asserts.end(round);
+    }
+    try asserts.finish();
+}
+
+test "HairSettings parity: resample of strands of 0 and 1 vertices inside the vertex array" {
+    // Jolt reads the next vertex of the array with a fraction of 0, without an assert. Only the resampled groom is
+    // compared: its strands of 0 and 1 vertices become rods of zero length. A strand of 0 or 1 vertices at the end of
+    // the array, or of 0 vertices at its start, makes Jolt read past the array (Zolt panics): the first and the last
+    // strand keep their vertices.
+    const allocator = std.testing.allocator;
+    var rng: fw.Rng = .{ .state = 0x0e5a_3b1e };
+    for ([_]u32{ 2, 5, 12 }) |num_vertices| {
+        const materials = materials3(.{ 0.5, 0.5, 0.5 });
+        var settings = try baseSettings(allocator, null, &materials);
+        defer settings.deinit();
+        const state = try saveState(allocator, &settings);
+        defer allocator.free(state);
+        var groom = try makeGroom(allocator, &rng, null, .curly, 40, 2, 10, .{ .random = 3 });
+        defer groom.deinit(allocator);
+        try cutStrands(allocator, &groom, struct {
+            fn keep(s: usize, n: usize) ?u32 {
+                if (s == 0 or s == n - 1) return null;
+                return if (s % 6 == 1 or s % 13 == 2) 0 else if (s % 4 == 3) 1 else null;
+            }
+        }.keep);
+        const name = try std.fmt.allocPrint(allocator, "resample strands of 0 and 1 vertices to {d}", .{num_vertices});
+        defer allocator.free(name);
+        try runCase(allocator, .{ .name = name, .state = state, .groom = &groom, .resample = num_vertices, .flags = resample_only });
     }
 }
 

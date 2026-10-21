@@ -28,6 +28,7 @@ extern fn jolt_libm_expf(x: [*]const f32, y: [*]f32, count: usize) void;
 extern fn jolt_libm_powf(x: [*]const f32, y: [*]const f32, z: [*]f32, count: usize) void;
 extern fn jolt_libcxx_shuffle(count: u32, items: [*]u32, draws: *u64, next: *[4]u32) c_int;
 extern fn jolt_libcxx_uniform_int(int_type: c_int, a: i64, b: i64, seed: u32, count: u32, values: [*]i64, draws: *u64) void;
+extern fn jolt_libcxx_shuffle_hooks_check() u32;
 
 fn bits(f: f32) u32 {
     return @bitCast(f);
@@ -302,6 +303,12 @@ test "Shuffle parity: libc++ std::shuffle of 0 to 2000 items, the order and the 
         checker.check(n, counted_next, next);
     }
     try checker.finish();
+}
+
+test "Shuffle parity: the shuffle reference installs the hooks of ParityHooks.h again" {
+    // jolt_libcxx_shuffle allocates through Jolt: it calls ParityInstallHooks() first (R1), also after an older
+    // reference file installed Jolt's allocator
+    try std.testing.expectEqual(@as(u32, 1), jolt_libcxx_shuffle_hooks_check());
 }
 
 test "Shuffle parity: libc++ std::uniform_int_distribution of 4 integer types" {
