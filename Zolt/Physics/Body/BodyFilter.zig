@@ -8,11 +8,13 @@
 //! - `IgnoreMultipleBodiesFilter` owns its `Array<BodyID>`: `init(allocator)` / `deinit()`, and `reserve` /
 //!   `ignoreBody` return `Allocator.Error`.
 //! - `IgnoreSingleBodyFilterChained` keeps Jolt's `const BodyFilter &` as a `*const BodyFilter`.
-//! - `BodyDrawFilter` (JPH_DEBUG_RENDERER) is not ported yet: TODO(debug_renderer).
+//! - `BodyDrawFilter` (JPH_DEBUG_RENDERER) is a gated declaration (RemainingFeaturesArchitecture.md R2): `void` without
+//!   `-Ddebug_renderer`. It is a pattern A class like BodyFilter: `BodyDrawFilter{}` draws every body.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const virtual = @import("../../Core/Virtual.zig");
+const Core = @import("../../Core/Core.zig");
 const BodyID = @import("BodyID.zig").BodyID;
 const Body = @import("Body.zig").Body;
 
@@ -148,7 +150,44 @@ pub const IgnoreSingleBodyFilterChained = struct {
     }
 };
 
-// TODO(debug_renderer): BodyDrawFilter (class function to filter out bodies for debug rendering)
+/// Class function to filter out bodies for debug rendering, returns true if body should be rendered
+/// (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+pub const BodyDrawFilter = if (Core.debug_renderer) BodyDrawFilterClass else void;
+
+/// The class of BodyDrawFilter (only analyzed with -Ddebug_renderer). Jolt's virtual destructor is not ported: filters
+/// are never destroyed through a base pointer, like BodyFilter.
+const BodyDrawFilterClass = struct {
+    /// One entry per C++ virtual function
+    pub const VTable = struct {
+        /// Filter function. Returns true if inBody should be rendered
+        shouldDraw: *const fn (self: *const BodyDrawFilterClass, body: *const Body) bool,
+    };
+
+    vtable: *const VTable = vtableFor(BodyDrawFilterClass),
+
+    /// Constructor, called by derived filters with their most derived type
+    pub fn init(comptime T: type) BodyDrawFilterClass {
+        return .{ .vtable = vtableFor(T) };
+    }
+
+    /// The vtable of filter class T
+    pub fn vtableFor(comptime T: type) *const VTable {
+        return virtual.vtablePtr(VTable, T);
+    }
+
+    /// Filter function. Returns true if inBody should be rendered
+    pub fn shouldDraw(self: *const BodyDrawFilterClass, body: *const Body) bool {
+        return self.vtable.shouldDraw(self, body);
+    }
+
+    /// Implementation of the virtual function: draw every body
+    pub const impl = struct {
+        pub fn shouldDraw(self: *const BodyDrawFilterClass, body: *const Body) bool {
+            _ = .{ self, body };
+            return true;
+        }
+    };
+};
 
 test "BodyFilter: default, ignore single, ignore multiple, chained" {
     const testing = std.testing;

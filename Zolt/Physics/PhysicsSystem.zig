@@ -74,10 +74,13 @@
 //!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`,
 //!   `optimizeBroadPhase`).
 //! - JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER
-//!   (sDrawMotionQualityLinearCast, DrawBodies, DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame):
-//!   TODO(debug_renderer). The renderer that the simulation draws into is `debug_renderer` (Jolt's
-//!   `DebugRenderer::sInstance`, RemainingFeaturesArchitecture.md R4): `void` without `-Ddebug_renderer`, set it with
-//!   `setDebugRenderer` between updates.
+//!   (RemainingFeaturesArchitecture.md R2, R4): DrawBodies, DrawConstraints, DrawConstraintLimits and
+//!   DrawConstraintReferenceFrame are gated declarations; Jolt's default argument `inBodyFilter` is an options struct.
+//!   The renderer that the simulation draws into is `debug_renderer` (Jolt's `DebugRenderer::sInstance`): `void`
+//!   without `-Ddebug_renderer`, set it with `setDebugRenderer` between updates. The static flag
+//!   sDrawMotionQualityLinearCast is `debug_renderer.flags.physics_system.draw_motion_quality_linear_cast` (the CCD
+//!   draws). The contact draws of ProcessBodyPair get the renderer through the debug options of manifoldBetweenTwoFaces
+//!   and pruneContactPoints. Without a renderer nothing is drawn (Jolt dereferences a null sInstance when a flag is set).
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
@@ -504,6 +507,37 @@ pub const PhysicsSystem = struct {
     pub const setDebugRenderer = if (Core.debug_renderer) setDebugRendererImpl else {};
     fn setDebugRendererImpl(self: *Self, renderer: ?*DebugRenderer) void {
         self.debug_renderer = renderer;
+    }
+
+    /// Draw the state of the bodies (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawBodies = if (Core.debug_renderer) drawBodiesImpl else {};
+    fn drawBodiesImpl(self: *Self, settings: *const BodyManager.DrawSettings, renderer: *DebugRenderer, opts: BodyManager.DrawOptions) void {
+        self.body_manager.draw(settings, &self.physics_settings, renderer, opts);
+    }
+
+    /// Draw the constraints only (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawConstraints = if (Core.debug_renderer) drawConstraintsImpl else {};
+    fn drawConstraintsImpl(self: *Self, renderer: *DebugRenderer) void {
+        self.constraint_manager.drawConstraints(renderer);
+    }
+
+    /// Draw the constraint limits only (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *Self, renderer: *DebugRenderer) void {
+        self.constraint_manager.drawConstraintLimits(renderer);
+    }
+
+    /// Draw the constraint reference frames only (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameImpl else {};
+    fn drawConstraintReferenceFrameImpl(self: *Self, renderer: *DebugRenderer) void {
+        self.constraint_manager.drawConstraintReferenceFrame(renderer);
+    }
+
+    /// The options of manifoldBetweenTwoFaces and pruneContactPoints in the physics update: Jolt's `inCenterOfMass`
+    /// and DebugRenderer::sInstance with -Ddebug_renderer, nothing without it
+    fn manifoldOptions(self: *const Self, center_of_mass: RVec3) ManifoldBetweenTwoFacesFile.Options {
+        if (!Core.debug_renderer) return .{};
+        return .{ .debug = .{ .center_of_mass = center_of_mass, .renderer = self.debug_renderer } };
     }
 
     /// Set the function that combines the friction of two bodies and returns it
@@ -1937,11 +1971,11 @@ pub const PhysicsSystem = struct {
 
                         // Determine contact points
                         const settings_ps = &collector.system.physics_settings;
-                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2);
+                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2, collector.system.manifoldOptions(collector.body1.getCenterOfMassPosition()));
 
                         // Prune if we have more than 32 points (this means we could run out of space in the next iteration)
                         if (manifold.base.relative_contact_points_on1.len > 32)
-                            pruneContactPoints(manifold.first_world_space_normal, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2);
+                            pruneContactPoints(manifold.first_world_space_normal, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base.base_offset));
                     }
                 };
                 var collector: ReductionCollideShapeCollector = .{ .system = self, .body1 = body1, .body2 = body2 };
@@ -1959,7 +1993,7 @@ pub const PhysicsSystem = struct {
 
                     // If we still have too many points, prune them now
                     if (manifold.relative_contact_points_on1.len > 4)
-                        pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                        pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, self.manifoldOptions(manifold.base_offset));
 
                     // Actually add the contact points to the manager
                     self.contact_manager.addContactConstraint(contact_allocator, &link_and_activate_bodies, body_pair_handle, body1, body2, manifold);
@@ -2014,7 +2048,7 @@ pub const PhysicsSystem = struct {
                         var manifold: ContactManifold = .{};
                         manifold.base_offset = collector.body1.getCenterOfMassPosition();
                         const settings_ps = &collector.system.physics_settings;
-                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base_offset));
 
                         // Calculate normal
                         manifold.world_space_normal = result.penetration_axis.normalized();
@@ -2024,7 +2058,7 @@ pub const PhysicsSystem = struct {
 
                         // Prune if we have more than 4 points
                         if (manifold.relative_contact_points_on1.len > 4)
-                            pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                            pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base_offset));
 
                         // Set other properties
                         manifold.sub_shape_id1 = result.sub_shape_id1;
@@ -2453,7 +2487,17 @@ pub const PhysicsSystem = struct {
             const broadphase_layer_filter = self.getDefaultBroadPhaseLayerFilter(body.getObjectLayer());
             const object_layer_filter = self.getDefaultLayerFilter(body.getObjectLayer());
 
-            // TODO(debug_renderer): Draw start and end shape of cast (sDrawMotionQualityLinearCast)
+            // Draw start and end shape of cast (JPH_DEBUG_RENDERER)
+            if (Core.debug_renderer) {
+                if (self.debug_renderer) |renderer| {
+                    if (renderer.flags.physics_system.draw_motion_quality_linear_cast) {
+                        const com = body.getCenterOfMassTransform();
+                        body.getShape().draw(renderer, com, Vec3.one(), Color.green, false, true);
+                        renderer.drawArrow(com.getTranslation(), com.getTranslation().addVec3(ccd_body.delta_position), Color.green, 0.1);
+                        body.getShape().draw(renderer, com.postTranslated(ccd_body.delta_position), Vec3.one(), Color.red, false, true);
+                    }
+                }
+            }
 
             // Create a collector that will find the maximum distance allowed to travel while not penetrating more than 'max penetration'
             const CCDNarrowPhaseCollector = struct {
@@ -2690,7 +2734,7 @@ pub const PhysicsSystem = struct {
                 // Determine contact manifold
                 var manifold: ContactManifold = .{};
                 manifold.base_offset = shape_cast.center_of_mass_start.getTranslation();
-                manifoldBetweenTwoFaces(cast_shape_result.base.contact_point_on1, cast_shape_result.base.contact_point_on2, cast_shape_result.base.penetration_axis, self.physics_settings.manifold_tolerance, &cast_shape_result.base.shape1_face, &cast_shape_result.base.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                manifoldBetweenTwoFaces(cast_shape_result.base.contact_point_on1, cast_shape_result.base.contact_point_on2, cast_shape_result.base.penetration_axis, self.physics_settings.manifold_tolerance, &cast_shape_result.base.shape1_face, &cast_shape_result.base.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, self.manifoldOptions(manifold.base_offset));
                 manifold.sub_shape_id1 = cast_shape_result.base.sub_shape_id1;
                 manifold.sub_shape_id2 = cast_shape_result.base.sub_shape_id2;
                 manifold.penetration_depth = cast_shape_result.base.penetration_depth;
@@ -2981,8 +3025,26 @@ pub const PhysicsSystem = struct {
                         }
                     }
 
-                    // TODO(debug_renderer): Draw the collision location, the location + slop, the contact normal and the
-                    // post contact velocities (sDrawMotionQualityLinearCast)
+                    if (Core.debug_renderer) {
+                        if (self.debug_renderer) |renderer| {
+                            if (renderer.flags.physics_system.draw_motion_quality_linear_cast) {
+                                // Draw the collision location
+                                const collision_transform = body1.getCenterOfMassTransform().postTranslated(ccd_body.delta_position.mulScalar(ccd_body.fraction));
+                                body1.getShape().draw(renderer, collision_transform, Vec3.one(), Color.yellow, false, true);
+
+                                // Draw the collision location + slop
+                                const collision_transform_plus_slop = body1.getCenterOfMassTransform().postTranslated(ccd_body.delta_position.mulScalar(ccd_body.fraction_plus_slop));
+                                body1.getShape().draw(renderer, collision_transform_plus_slop, Vec3.one(), Color.orange, false, true);
+
+                                // Draw contact normal
+                                renderer.drawArrow(ccd_body.contact_point_on2, ccd_body.contact_point_on2.subVec3(ccd_body.contact_normal), Color.yellow, 0.1);
+
+                                // Draw post contact velocity
+                                renderer.drawArrow(collision_transform.getTranslation(), collision_transform.getTranslation().addVec3(body1.getLinearVelocity()), Color.orange, 0.1);
+                                renderer.drawArrow(collision_transform.getTranslation(), collision_transform.getTranslation().addVec3(body1.getAngularVelocity()), Color.purple, 0.1);
+                            }
+                        }
+                    }
                 }
             }
 

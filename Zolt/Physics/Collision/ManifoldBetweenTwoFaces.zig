@@ -3,9 +3,11 @@
 //!
 //! The free functions `PruneContactPoints` / `ManifoldBetweenTwoFaces` are `pruneContactPoints` /
 //! `manifoldBetweenTwoFaces`, the `ContactPoints &` in/out parameters are `*ContactPoints`.
-//! JPH_DEBUG_RENDERER (the drawing behind ContactConstraintManager::sDrawContactPointReduction / sDrawContactPoint /
-//! sDrawSupportingFaces and the `inCenterOfMass` parameter that only exists for it) is not ported yet:
-//! TODO(debug_renderer). ManifoldBetweenTwoFaces.cpp includes ContactConstraintManager.h only for these flags.
+//! JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4): the `inCenterOfMass` parameter that only exists with the
+//! define is `opts.debug.center_of_mass`, a field of the trailing options struct, so `.{}` compiles in both
+//! configurations. `opts.debug.renderer` is Jolt's `DebugRenderer::sInstance`. Its flags are Jolt's
+//! ContactConstraintManager::sDrawContactPointReduction, sDrawContactPoint and sDrawSupportingFaces (the reason why
+//! ManifoldBetweenTwoFaces.cpp includes ContactConstraintManager.h).
 
 const std = @import("std");
 const Core = @import("../../Core/Core.zig");
@@ -13,18 +15,37 @@ const StaticArray = @import("../../Core/StaticArray.zig").StaticArray;
 const ClipPoly = @import("../../Geometry/ClipPoly.zig");
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const RealFile = @import("../../Math/Real.zig");
+const RVec3 = RealFile.RVec3;
+const RMat44 = RealFile.RMat44;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Shape = @import("Shape/Shape.zig").Shape;
 const ContactPoints = @import("ContactListener.zig").ContactPoints;
 
 /// The supporting face of a shape (ConvexShape::SupportingFace, inherited from Shape)
 const SupportingFace = Shape.SupportingFace;
 
+/// The debug parameter of pruneContactPoints and manifoldBetweenTwoFaces (JPH_DEBUG_RENDERER)
+pub const Debug = struct {
+    /// Center of mass position of body 1 (Jolt's inCenterOfMass)
+    center_of_mass: RVec3 = RVec3.zero(),
+    /// The renderer that Jolt finds in DebugRenderer::sInstance, null draws nothing. Its flags select what is drawn.
+    renderer: ?*DebugRenderer = null,
+};
+
+/// Optional parameters of pruneContactPoints and manifoldBetweenTwoFaces: `.debug` is `void` without `-Ddebug_renderer`,
+/// so `.{}` compiles in both configurations
+pub const Options = struct {
+    debug: if (Core.debug_renderer) Debug else void = if (Core.debug_renderer) .{} else {},
+};
+
 /// Remove contact points if there are > 4 (no more than 4 are needed for a stable solution)
 /// @param penetration_axis is the world space penetration axis (must be normalized)
 /// @param contact_points_on1 The contact points on shape 1 relative to inCenterOfMass
 /// @param contact_points_on2 The contact points on shape 2 relative to inCenterOfMass
 /// On output contact_points_on1/2 are reduced to 4 or less points
-pub fn pruneContactPoints(penetration_axis: Vec3, contact_points_on1: *ContactPoints, contact_points_on2: *ContactPoints) void {
+pub fn pruneContactPoints(penetration_axis: Vec3, contact_points_on1: *ContactPoints, contact_points_on2: *ContactPoints, opts: Options) void {
     // Makes no sense to call this with 4 or less points
     std.debug.assert(contact_points_on1.len > 4);
 
@@ -121,7 +142,23 @@ pub fn pruneContactPoints(penetration_axis: Vec3, contact_points_on1: *ContactPo
         points_to_keep_on_2.append(contact_points_on2.get(point4));
     }
 
-    // TODO(debug_renderer): Draw input polygon, primary axis and the contact points we kept (ContactConstraintManager::sDrawContactPointReduction)
+    if (Core.debug_renderer) {
+        if (opts.debug.renderer) |renderer| {
+            if (renderer.flags.contact_constraint_manager.draw_contact_point_reduction) {
+                const center_of_mass = opts.debug.center_of_mass;
+
+                // Draw input polygon
+                renderer.drawWirePolygon(RMat44.translation(center_of_mass), contact_points_on1.constSlice(), Color.orange, .{ .arrow_size = 0.05 });
+
+                // Draw primary axis
+                renderer.drawArrow(center_of_mass.addVec3(contact_points_on1.get(point1)), center_of_mass.addVec3(contact_points_on1.get(point2)), Color.red, 0.05);
+
+                // Draw contact points we kept
+                for (points_to_keep_on_1.constSlice()) |p|
+                    renderer.drawMarker(center_of_mass.addVec3(p), Color.green, 0.1);
+            }
+        }
+    }
 
     // Copy the points back to the input buffer
     contact_points_on1.assign(&points_to_keep_on_1);
@@ -137,10 +174,24 @@ pub fn pruneContactPoints(penetration_axis: Vec3, contact_points_on1: *ContactPo
 /// @param shape2_face The supporting faces on shape 2 relative to inCenterOfMass
 /// @param out_contact_points1 Returns the contact points between the two shapes for shape 1 relative to inCenterOfMass (any existing points in the output array are left as is)
 /// @param out_contact_points2 Returns the contact points between the two shapes for shape 2 relative to inCenterOfMass (any existing points in the output array are left as is)
-pub fn manifoldBetweenTwoFaces(contact_point1: Vec3, contact_point2: Vec3, penetration_axis_in: Vec3, max_contact_distance: f32, shape1_face_in: *const SupportingFace, shape2_face_in: *const SupportingFace, out_contact_points1: *ContactPoints, out_contact_points2: *ContactPoints) void {
+pub fn manifoldBetweenTwoFaces(contact_point1: Vec3, contact_point2: Vec3, penetration_axis_in: Vec3, max_contact_distance: f32, shape1_face_in: *const SupportingFace, shape2_face_in: *const SupportingFace, out_contact_points1: *ContactPoints, out_contact_points2: *ContactPoints, opts: Options) void {
     std.debug.assert(max_contact_distance > 0.0);
 
-    // TODO(debug_renderer): Draw contact points and the contact normal (ContactConstraintManager::sDrawContactPoint)
+    if (Core.debug_renderer) {
+        if (opts.debug.renderer) |renderer| {
+            if (renderer.flags.contact_constraint_manager.draw_contact_point) {
+                const cp1 = opts.debug.center_of_mass.addVec3(contact_point1);
+                const cp2 = opts.debug.center_of_mass.addVec3(contact_point2);
+
+                // Draw contact points
+                renderer.drawMarker(cp1, Color.red, 0.1);
+                renderer.drawMarker(cp2, Color.green, 0.1);
+
+                // Draw contact normal
+                renderer.drawArrow(cp1, cp1.addVec3(penetration_axis_in.normalized()), Color.red, 0.05);
+            }
+        }
+    }
 
     // Remember size before adding new points, to check at the end if we added some
     const old_size = out_contact_points1.len;
@@ -210,8 +261,35 @@ pub fn manifoldBetweenTwoFaces(contact_point1: Vec3, contact_point2: Vec3, penet
             }
         }
 
-        // TODO(debug_renderer): Draw the clipped poly, the supporting faces, the plane normal and the contact points that remain
-        // after the distance check (ContactConstraintManager::sDrawSupportingFaces)
+        if (Core.debug_renderer) {
+            if (opts.debug.renderer) |renderer| {
+                if (renderer.flags.contact_constraint_manager.draw_supporting_faces) {
+                    const center_of_mass = opts.debug.center_of_mass;
+                    const com = RMat44.translation(center_of_mass);
+
+                    // Draw clipped poly
+                    renderer.drawWirePolygon(com, clipped_face.constSlice(), Color.orange, .{});
+
+                    // Draw supporting faces
+                    renderer.drawWirePolygon(com, shape1_face_in.constSlice(), Color.red, .{ .arrow_size = 0.05 });
+                    renderer.drawWirePolygon(com, shape2_face_in.constSlice(), Color.green, .{ .arrow_size = 0.05 });
+
+                    // Draw normal
+                    const plane_normal_len = plane_normal.length();
+                    if (plane_normal_len > 0.0) {
+                        const plane_origin_ws = center_of_mass.addVec3(plane_origin);
+                        renderer.drawArrow(plane_origin_ws, plane_origin_ws.addVec3(plane_normal.divScalar(plane_normal_len)), Color.yellow, 0.05);
+                    }
+
+                    // Draw contact points that remain after distance check
+                    var p = old_size;
+                    while (p < out_contact_points1.len) : (p += 1) {
+                        renderer.drawMarker(center_of_mass.addVec3(out_contact_points1.get(p)), Color.yellow, 0.1);
+                        renderer.drawMarker(center_of_mass.addVec3(out_contact_points2.get(p)), Color.orange, 0.1);
+                    }
+                }
+            }
+        }
     }
 
     // If the clipping result is empty, use the contact point itself
@@ -237,7 +315,7 @@ test "manifoldBetweenTwoFaces: two overlapping quads give the clipped polygon pr
     const face2 = face(&.{ Vec3.init(-0.5, -0.1, -0.5), Vec3.init(0.5, -0.1, -0.5), Vec3.init(0.5, -0.1, 0.5), Vec3.init(-0.5, -0.1, 0.5) });
     var points1: ContactPoints = .empty;
     var points2: ContactPoints = .empty;
-    manifoldBetweenTwoFaces(Vec3.init(0, 0, 0), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.05, &face1, &face2, &points1, &points2);
+    manifoldBetweenTwoFaces(Vec3.init(0, 0, 0), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.05, &face1, &face2, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 4), points1.len);
     try testing.expectEqual(@as(u32, 4), points2.len);
     for (points1.constSlice(), points2.constSlice()) |p1, p2| {
@@ -257,7 +335,7 @@ test "manifoldBetweenTwoFaces: points too far in front of face 1, edges, swapped
     var points2: ContactPoints = .empty;
     points1.append(Vec3.init(9, 9, 9)); // Existing points are kept
     points2.append(Vec3.init(9, 9, 9));
-    manifoldBetweenTwoFaces(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, 1, 0), 0.25, &face1, &far, &points1, &points2);
+    manifoldBetweenTwoFaces(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, 1, 0), 0.25, &face1, &far, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 2), points1.len);
     try testing.expect(points1.get(0).eql(Vec3.init(9, 9, 9)));
     try testing.expect(points1.get(1).eql(Vec3.init(1, 2, 3)) and points2.get(1).eql(Vec3.init(4, 5, 6)));
@@ -265,14 +343,14 @@ test "manifoldBetweenTwoFaces: points too far in front of face 1, edges, swapped
     // With a max contact distance of 1 the points are accepted
     points1.clear();
     points2.clear();
-    manifoldBetweenTwoFaces(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, 1, 0), 1.0, &face1, &far, &points1, &points2);
+    manifoldBetweenTwoFaces(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, 1, 0), 1.0, &face1, &far, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 3), points1.len);
 
     // Face 2 is an edge: the faces are swapped (face 1 is clipped against the edge, the axis negated)
     const edge = face(&.{ Vec3.init(-2, -0.1, 0.25), Vec3.init(2, -0.1, 0.25) });
     points1.clear();
     points2.clear();
-    manifoldBetweenTwoFaces(Vec3.zero(), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.5, &face1, &edge, &points1, &points2);
+    manifoldBetweenTwoFaces(Vec3.zero(), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.5, &face1, &edge, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 2), points1.len);
     for (points1.constSlice(), points2.constSlice()) |p1, p2| {
         try testing.expectApproxEqAbs(@as(f32, 0.0), p1.getY(), 1.0e-6); // On face 1
@@ -284,14 +362,14 @@ test "manifoldBetweenTwoFaces: points too far in front of face 1, edges, swapped
     const point = face(&.{Vec3.init(0, -0.1, 0)});
     points1.clear();
     points2.clear();
-    manifoldBetweenTwoFaces(Vec3.zero(), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.5, &face1, &point, &points1, &points2);
+    manifoldBetweenTwoFaces(Vec3.zero(), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.5, &face1, &point, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 1), points1.len);
 
     // Penetration axis perpendicular to the plane normal of face 1: the contact points themselves
     const square2 = face(&.{ Vec3.init(-0.5, -0.1, -0.5), Vec3.init(0.5, -0.1, -0.5), Vec3.init(0.5, -0.1, 0.5) });
     points1.clear();
     points2.clear();
-    manifoldBetweenTwoFaces(Vec3.zero(), Vec3.init(0, -0.1, 0), Vec3.init(1, 0, 0), 0.5, &face1, &square2, &points1, &points2);
+    manifoldBetweenTwoFaces(Vec3.zero(), Vec3.init(0, -0.1, 0), Vec3.init(1, 0, 0), 0.5, &face1, &square2, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 1), points1.len);
 }
 
@@ -306,7 +384,7 @@ test "pruneContactPoints: reduces to at most 4 points that form a polygon" {
         points2.append(p.add(Vec3.init(0, if (i == 6) -0.2 else -0.1, 0)));
     }
     const original1 = points1;
-    pruneContactPoints(Vec3.init(0, 1, 0), &points1, &points2);
+    pruneContactPoints(Vec3.init(0, 1, 0), &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 4), points1.len);
     try testing.expectEqual(@as(u32, 4), points2.len);
     // The point furthest from the center (index 3) wins the heuristic, it is the first point
@@ -328,7 +406,7 @@ test "pruneContactPoints: reduces to at most 4 points that form a polygon" {
         points1.append(p);
         points2.append(p);
     }
-    pruneContactPoints(Vec3.init(0, 1, 0), &points1, &points2);
+    pruneContactPoints(Vec3.init(0, 1, 0), &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 2), points1.len);
     try testing.expect(points1.get(0).eql(Vec3.init(5, 0, 0))); // Furthest from the center of mass
     try testing.expect(points1.get(1).eql(Vec3.init(0, 0, 0))); // Furthest from the first point
@@ -342,6 +420,6 @@ test "pruneContactPoints: reduces to at most 4 points that form a polygon" {
         points1.append(p);
         points2.append(p);
     }
-    pruneContactPoints(Vec3.init(0, 1, 0), &points1, &points2);
+    pruneContactPoints(Vec3.init(0, 1, 0), &points1, &points2, .{});
     try testing.expect(points1.len <= 4 and points1.len >= 2);
 }

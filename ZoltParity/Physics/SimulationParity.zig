@@ -195,6 +195,7 @@ const std = @import("std");
 const zolt = @import("zolt");
 const TestLayers = @import("test_layers");
 const SimScenes = @import("SimScenes.zig");
+const ParityRenderer = @import("../Renderer/ParityRenderer.zig");
 
 const Allocator = std.mem.Allocator;
 const Core = zolt.Core;
@@ -335,6 +336,10 @@ const jolt = struct {
     extern fn jolt_sim_soft_body_settings_bytes(desc: *const SimSceneDesc, index: u32, out_bytes: [*]u8, capacity: u32) u32;
     extern fn jolt_sim_soft_body_info(world: *anyopaque, body_id: u32, out_counts: *[3]u32) u32;
     extern fn jolt_sim_soft_body_values(world: *anyopaque, body_id: u32, out_values: [*]f32, capacity: u32) u32;
+    // Group D3: the simulation-time draws (SimDraw)
+    extern fn jolt_sim_draw_begin() u32;
+    extern fn jolt_sim_draw_end() void;
+    extern fn jolt_sim_draw_take_log(out_bytes: [*]u8, capacity: u64) u64;
     // ConstraintsReference.cpp (the constraint parity of Phase 6): the descriptions of SimScenes use its layout
     extern fn jolt_cs_struct_sizes(out_sizes: *[12]u32) void;
     extern fn jolt_cs_settings_save(settings: *const CSSettings, out_bytes: [*]u8, capacity: u32) u32;
@@ -2527,6 +2532,8 @@ const Config = struct {
     cpp_threads: u32,
     /// Run the D12 sweeps (every temp allocation and every createJob fails once) in this configuration
     sweeps: bool = false,
+    /// Group D3: record the states for the run that draws, or draw and compare (see SimDraw)
+    draw: ?*SimDraw = null,
 };
 
 /// Zolt with JobSystemSingleThreaded and thread pools with 0, 1, 3 and 7 workers, C++ with 0, 3 and 7 workers
@@ -2787,6 +2794,7 @@ const Run = struct {
         if (zolt_errors != jolt_errors)
             return self.fail("update errors zolt 0x{x} jolt 0x{x}", .{ zolt_errors, jolt_errors });
         try self.compareStates(.all, "after the update");
+        if (self.config.draw) |d| try d.afterUpdate(self);
         try self.countCCDManifolds();
         try self.compareRecords();
         try self.compareObjectStates("after the update");
@@ -3099,6 +3107,8 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     defer zw.destroy();
     const cw = CppWorld.init(&desc, config.cpp_threads);
     defer cw.deinit();
+    if (config.draw) |d| try d.begin(zw);
+    defer if (config.draw) |d| d.end(zw);
 
     var run: Run = .{ .allocator = allocator, .entry = entry, .config = config, .builder = builder, .desc = &desc, .zw = zw, .cw = cw, .asserts = asserts };
     defer run.deinit();
@@ -7679,6 +7689,140 @@ fn expectReached(entry: *const SceneEntry, what: []const u8, reached: bool) !voi
         std.debug.print("SimulationParity: scene {s} does not reach what it is written for: {s}\n", .{ entry.name, what });
         return error.TestUnexpectedResult;
     }
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Simulation-time draws (group D3, only with -Ddebug_renderer=true)
+//
+// The scenes of `draw_scenes` run once more with drawing on: Zolt and C++ each with a JobSystemThreadPool without
+// workers (one thread on each side, so the draws come in the same order), the Zolt system with a ParityRenderer as its
+// debug renderer and every draw flag of the contacts (`renderer.flags.contact_constraint_manager`) and of the linear cast
+// CCD (`renderer.flags.physics_system`) set, the C++ worlds with a ParityRenderer as DebugRenderer::sInstance and the
+// static flags set (jolt_sim_draw_begin). After every update the call logs of the update and of the operations before it
+// must match call for call, and the Zolt state must be the state of the same scene in the same configuration without
+// drawing (recorded by a run before): drawing changes nothing. The character scenes draw their contacts only: the
+// CharacterVirtual flags are group D4's.
+
+/// The scenes that also run with drawing (contacts, CCD, constraints, characters)
+const draw_scenes = [_][]const u8{
+    "contacts_pyramid",
+    "contacts_shapes_on_floor",
+    "contacts_mesh_ground",
+    "contacts_height_field_ground",
+    "contacts_without_manifold_reduction",
+    "contacts_many_manifolds",
+    "contacts_sensors",
+    "ccd_bullet_hits_wall",
+    "ccd_bodies_hit_each_other",
+    "ccd_terrain",
+    "constraints_ragdoll_pile",
+    "constraints_hinge_car",
+    "character_ops",
+    "character_virtual_ops",
+};
+
+/// The draws of a run (see above). Mode `record_states` records the Zolt state after every update, mode `draw` draws and
+/// compares.
+const SimDraw = struct {
+    allocator: Allocator,
+    mode: enum { record_states, draw },
+    /// The Zolt state after every update of the run without drawing
+    states: std.ArrayList([]u8) = .empty,
+    renderer: if (Core.debug_renderer) ParityRenderer.ParityRenderer else void = undefined,
+    jolt_log: std.ArrayList(u8) = .empty,
+    /// The number of log bytes compared (the scene must draw something)
+    num_log_bytes: usize = 0,
+
+    fn deinit(self: *SimDraw) void {
+        for (self.states.items) |s| self.allocator.free(s);
+        self.states.deinit(self.allocator);
+        self.jolt_log.deinit(self.allocator);
+    }
+
+    /// Mode `draw`: the renderers and the flags of both sides
+    fn begin(self: *SimDraw, zw: *ZoltWorld) !void {
+        if (comptime !Core.debug_renderer) unreachable;
+        if (self.mode != .draw) return;
+        try self.renderer.init(self.allocator);
+        self.renderer.log.bytes.clearRetainingCapacity();
+        self.renderer.base.flags.contact_constraint_manager = .{ .draw_contact_point = true, .draw_supporting_faces = true, .draw_contact_point_reduction = true, .draw_contact_manifolds = true };
+        self.renderer.base.flags.physics_system.draw_motion_quality_linear_cast = true;
+        zw.system.setDebugRenderer(&self.renderer.base);
+        std.debug.assert(jolt.jolt_sim_draw_begin() == 1);
+    }
+
+    fn end(self: *SimDraw, zw: *ZoltWorld) void {
+        if (comptime !Core.debug_renderer) unreachable;
+        if (self.mode != .draw) return;
+        zw.system.setDebugRenderer(null);
+        jolt.jolt_sim_draw_end();
+        self.renderer.deinit();
+    }
+
+    /// After every update (Run.step, `run.zolt_state` holds the Zolt state): record the state, or compare it with the
+    /// recorded one and compare the call logs since the last update
+    fn afterUpdate(self: *SimDraw, run: *Run) !void {
+        if (comptime !Core.debug_renderer) unreachable;
+        switch (self.mode) {
+            .record_states => try self.states.append(self.allocator, try self.allocator.dupe(u8, run.zolt_state.items)),
+            .draw => {
+                const without = self.states.items[run.update];
+                if (std.mem.indexOfDiff(u8, run.zolt_state.items, without)) |first|
+                    return run.fail("the state with drawing differs from the state without drawing at byte {d} ({d} / {d} bytes)", .{ first, run.zolt_state.items.len, without.len });
+                self.jolt_log.clearRetainingCapacity();
+                const size = jolt.jolt_sim_draw_take_log(self.jolt_log.items.ptr, 0);
+                try self.jolt_log.resize(self.allocator, @intCast(size));
+                std.debug.assert(jolt.jolt_sim_draw_take_log(self.jolt_log.items.ptr, size) == size);
+                const zolt_log = &self.renderer.log.bytes;
+                ParityRenderer.compareLogs("simulation draws", zolt_log.items, self.jolt_log.items) catch |err| {
+                    _ = run.fail("the draw call logs of the update differ (see above)", .{}) catch {};
+                    return err;
+                };
+                self.num_log_bytes += zolt_log.items.len;
+                zolt_log.clearRetainingCapacity();
+            },
+        }
+    }
+};
+
+/// Run a scene of `draw_scenes` without drawing (recording the states), then with drawing
+fn runDrawScene(name: []const u8) !void {
+    if (!Core.debug_renderer) return error.SkipZigTest;
+    const entry = for (&SimScenes.scenes) |*e| {
+        if (std.mem.eql(u8, e.name, name)) break e;
+    } else return error.UnknownScene;
+    if (!entry.blocked_by.isSupported() or entry.blocked_by == .release_only)
+        return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var builder: SceneBuilder = .init(allocator);
+    defer builder.deinit();
+    try entry.build(&builder);
+
+    var draw: SimDraw = .{ .allocator = allocator, .mode = .record_states };
+    defer draw.deinit();
+    const config: Config = .{ .zolt = .{ .thread_pool = 0 }, .cpp_threads = 0, .draw = &draw };
+    _ = try runScene(allocator, entry, &builder, config, null);
+    try std.testing.expectEqual(@as(usize, builder.num_updates), draw.states.items.len);
+    draw.mode = .draw;
+    _ = try runScene(allocator, entry, &builder, config, null);
+    if (draw.num_log_bytes == 0) {
+        std.debug.print("SimulationParity: scene {s} draws nothing\n", .{name});
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn DrawSceneTest(comptime name: []const u8) type {
+    return struct {
+        test "SimulationParity draws" {
+            try runDrawScene(name);
+        }
+    };
+}
+
+comptime {
+    for (draw_scenes) |name|
+        _ = DrawSceneTest(name);
 }
 
 /// One test per scene: `SceneTest("name", index)` (a blocked scene is skipped)

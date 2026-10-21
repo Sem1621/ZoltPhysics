@@ -4,7 +4,8 @@
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(VehicleConstraintSettings): `rtti` with
 //!   Jolt's attributes. The binary state does not write the class of each wheel (E6). An object stream does, so it reads
 //!   settings with wheels back.
-//! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`DrawConstraint`, `DrawConstraintLimits`): gated declarations (RemainingFeaturesArchitecture.md
+//!   R2). DrawConstraint draws the controller (`VehicleController.draw`).
 //! - CharacterVehicleArchitecture E2 and the porter template of FixedConstraint.zig:
 //!   - `VehicleConstraintSettings` embeds `base: ConstraintSettings` (`rtti`, overrides, `create` / `createDefault`
 //!     for `RegisterTypes.factory`, E3). Its wheels are `Ref(WheelSettings)`, its controller a
@@ -60,6 +61,7 @@ const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Trigonometry = @import("../../Math/Trigonometry.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const Quat = @import("../../Math/Quat.zig").Quat;
@@ -289,7 +291,7 @@ pub const VehicleConstraintSettings = struct {
 /// Note that when driving over rubble, you may see the wheel jump up and down quite quickly because one frame a collision is found and the next frame not.
 /// To alleviate this, it may be needed to smooth the motion of the visual mesh for the wheel.
 pub const VehicleConstraint = struct {
-    pub const overrides = .{ .getSubType, .isActive, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .buildIslands, .buildIslandSplits, .saveState, .restoreState, .getConstraintSettings };
+    pub const overrides = .{ .getSubType, .isActive, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .buildIslands, .buildIslandSplits, .drawConstraint, .drawConstraintLimits, .saveState, .restoreState, .getConstraintSettings };
 
     /// Callback function to combine the friction of a tire with the friction of the body it is colliding with.
     /// On input ioLongitudinalFriction and ioLateralFriction contain the friction of the tire, on output they should contain the combined friction with inBody2.
@@ -1195,7 +1197,17 @@ pub const VehicleConstraint = struct {
         return impulse;
     }
 
-    // TODO(debug_renderer): DrawConstraint (mController->Draw), DrawConstraintLimits
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const VehicleConstraint, renderer: *DebugRenderer) void {
+        self.controller.draw(renderer);
+    }
+
+    // See Constraint::DrawConstraintLimits (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *const VehicleConstraint, renderer: *DebugRenderer) void {
+        _ = .{ self, renderer };
+    }
 
     pub fn saveState(self: *const VehicleConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(&self.base, stream);

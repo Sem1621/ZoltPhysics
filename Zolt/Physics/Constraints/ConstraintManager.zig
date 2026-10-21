@@ -14,8 +14,8 @@
 //!   `out_active_constraints: []*Constraint` plus the returned count. The static `sXxx` functions drop the `s`.
 //! - `sWarmStartVelocityConstraints<ConstraintCallback>` takes `callback: anytype`, a pointer to a CalculateSolverSteps
 //!   or DummyCalculateSolverSteps (or anything with `call(comptime Type, *const Type)`, Jolt's `operator ()`).
-//! - JPH_DEBUG_RENDERER (`DrawConstraints`, `DrawConstraintLimits`, `DrawConstraintReferenceFrame`):
-//!   TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`DrawConstraints`, `DrawConstraintLimits`, `DrawConstraintReferenceFrame`): gated declarations
+//!   (RemainingFeaturesArchitecture.md R2). They lock the constraint list like Jolt.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -33,6 +33,7 @@ const StateRecorderFilter = StateRecorderFile.StateRecorderFilter;
 const BodyManager = @import("../Body/BodyManager.zig").BodyManager;
 const IslandBuilder = @import("../IslandBuilder.zig").IslandBuilder;
 const Constraint = @import("Constraint.zig").Constraint;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 
 /// A list of constraints
 pub const Constraints = std.ArrayList(Ref(Constraint));
@@ -233,7 +234,35 @@ pub const ConstraintManager = struct {
         return any_impulse_applied;
     }
 
-    // TODO(debug_renderer): DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame
+    /// Draw all constraints (JPH_DEBUG_RENDERER)
+    pub const drawConstraints = if (Core.debug_renderer) drawConstraintsImpl else {};
+    fn drawConstraintsImpl(self: *const ConstraintManager, renderer: *DebugRenderer) void {
+        var lock: UniqueLock(Mutex) = .init(&self.mutableFields().constraints_mutex, self.io, self.lock_context, .constraints_list);
+        defer lock.deinit();
+
+        for (self.constraints.items) |c|
+            c.get().?.drawConstraint(renderer);
+    }
+
+    /// Draw all constraint limits (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *const ConstraintManager, renderer: *DebugRenderer) void {
+        var lock: UniqueLock(Mutex) = .init(&self.mutableFields().constraints_mutex, self.io, self.lock_context, .constraints_list);
+        defer lock.deinit();
+
+        for (self.constraints.items) |c|
+            c.get().?.drawConstraintLimits(renderer);
+    }
+
+    /// Draw all constraint reference frames (JPH_DEBUG_RENDERER)
+    pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameImpl else {};
+    fn drawConstraintReferenceFrameImpl(self: *const ConstraintManager, renderer: *DebugRenderer) void {
+        var lock: UniqueLock(Mutex) = .init(&self.mutableFields().constraints_mutex, self.io, self.lock_context, .constraints_list);
+        defer lock.deinit();
+
+        for (self.constraints.items) |c|
+            c.get().?.drawConstraintReferenceFrame(renderer);
+    }
 
     /// Save state of constraints
     /// Zolt: Allocator.Error from the temporary array of the filtered path (nothing is written then)

@@ -18,6 +18,9 @@ const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const Body = @import("../Body/Body.zig").Body;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
@@ -84,7 +87,7 @@ pub const TestConstraintSettings = struct {
 
 /// A two body constraint that records the calls of the solver
 pub const TestConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .resetWarmStart, .setupVelocityConstraint, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .resetWarmStart, .setupVelocityConstraint, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -106,6 +109,13 @@ pub const TestConstraint = struct {
 
     pub fn asConstraint(self: *TestConstraint) *Constraint {
         return &self.base.base;
+    }
+
+    /// Draws a line between the centers of mass of the two bodies (JPH_DEBUG_RENDERER: Constraint::DrawConstraint is
+    /// pure virtual)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const TestConstraint, renderer: *DebugRenderer) void {
+        renderer.drawLine(self.base.body1.getCenterOfMassPosition(), self.base.body2.getCenterOfMassPosition(), Color.white);
     }
 
     pub fn getSubType(self: *const TestConstraint) ConstraintSubType {

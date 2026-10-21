@@ -3,7 +3,7 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PointConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint): a gated declaration (RemainingFeaturesArchitecture.md R2).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -12,6 +12,9 @@ const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const RVec3 = @import("../../Math/Real.zig").RVec3;
 const Body = @import("../Body/Body.zig").Body;
@@ -120,7 +123,7 @@ pub const PointConstraintSettings = struct {
 
 /// A point constraint constrains 2 bodies on a single point (removing 3 degrees of freedom)
 pub const PointConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -245,7 +248,13 @@ pub const PointConstraint = struct {
         return self.point_constraint_part.solvePositionConstraint(self.base.body1, self.base.body2, baumgarte);
     }
 
-    // TODO(debug_renderer): DrawConstraint
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const PointConstraint, renderer: *DebugRenderer) void {
+        // Draw constraint
+        renderer.drawMarker(self.base.body1.getCenterOfMassTransform().mulVec3(self.local_space_position1), Color.red, 0.1);
+        renderer.drawMarker(self.base.body2.getCenterOfMassTransform().mulVec3(self.local_space_position2), Color.green, 0.1);
+    }
 
     pub fn saveState(self: *const PointConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState

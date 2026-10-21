@@ -8,15 +8,15 @@
 //! `performance_test_<quality>_th1.jor` into its working directory and finds Assets/ from its own path). DrawBodies runs
 //! on the main thread, so the thread count does not change the bytes; the check uses one thread.
 //!
-//! Group D0 built the step before ZoltPerformanceTest could record: `-r` and BodyManager.draw come with group D3. Until
-//! then (`zolt_records == false`) the check runs the C++ side, lets Zolt's DebugRendererPlayback read every .jor that
-//! Jolt wrote (all frames must parse) and reports that the Zolt side is not ported yet. Group D3 sets `zolt_records`.
+//! Zolt's DebugRendererPlayback also reads every .jor that Jolt wrote (all frames must parse). Group D0 built the step
+//! before ZoltPerformanceTest could record (`zolt_records == false`: only the C++ side ran). Group D3 ported `-r` and
+//! BodyManager.draw and set `zolt_records`.
 
 const std = @import("std");
 const zolt = @import("zolt");
 
 /// True once ZoltPerformanceTest records with -r (group D3)
-const zolt_records = false;
+const zolt_records = true;
 
 /// The number of updates of each recording
 const num_updates = 20;

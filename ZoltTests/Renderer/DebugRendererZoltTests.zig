@@ -13,6 +13,9 @@
 //! - The shape draws (group D2): the draw caches (R6), allocation failures in every draw path that allocates (R5), the
 //!   buoyancy draw of a body, and Zolt's defined behavior for a null entry of a mesh's material list (Jolt dereferences
 //!   null there).
+//! - The body, constraint and system draws (group D3): the declarations that compile away, BodyManager.draw with a body
+//!   filter, recordDebugOutput, the simulation draws that never change a result, and Zolt's defined behavior for a path
+//!   constraint drawn before its first update (Jolt reads uninitialized members there).
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -71,6 +74,10 @@ test "DebugRenderer: the constraint and vehicle controller draw hooks compile aw
     inline for (.{ "drawConstraint", "drawConstraintLimits", "drawConstraintReferenceFrame" }) |name| {
         try expect((@FieldType(zolt.Constraint.VTable, name) == void) == !on);
         try expect((@TypeOf(@field(zolt.Constraint, name)) == void) == !on);
+    }
+    // DrawConstraint is pure virtual (no body in impl), the other two have Jolt's empty default bodies
+    try expect(!@hasDecl(zolt.Constraint.impl, "drawConstraint"));
+    inline for (.{ "drawConstraintLimits", "drawConstraintReferenceFrame" }) |name| {
         try expect((@TypeOf(@field(zolt.Constraint.impl, name)) == void) == !on);
     }
     try expect((@TypeOf(zolt.TwoBodyConstraint.impl.drawConstraintReferenceFrame) == void) == !on);
@@ -881,4 +888,217 @@ test "DebugRenderer: Body.applyBuoyancyImpulse draws the submerged volume, the c
     try expect(text.position.eql(center_of_buoyancy));
     try expect(text.color.eql(Color.white));
     try expectEqual(@as(f32, 0.5), text.height);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Group D3: the constraint, body and system draws
+
+test "DebugRenderer: the body, constraint and system draws compile away without -Ddebug_renderer" {
+    const on = zolt.Core.debug_renderer;
+
+    // Types and functions that only exist with the option (JPH_DEBUG_RENDERER declarations)
+    try expect((zolt.BodyDrawFilter == void) == !on);
+    try expect((zolt.SoftBodyConstraintColor == void) == !on);
+    try expect((zolt.BodyManager.DrawSettings == void) == !on);
+    try expect((zolt.BodyManager.ShapeColor == void) == !on);
+    try expect((zolt.BodyManager.DrawOptions == void) == !on);
+    try expect((@TypeOf(zolt.BodyManager.draw) == void) == !on);
+    inline for (.{ "drawBodies", "drawConstraints", "drawConstraintLimits", "drawConstraintReferenceFrame" }) |name|
+        try expect((@TypeOf(@field(zolt.PhysicsSystem, name)) == void) == !on);
+    inline for (.{ "drawConstraints", "drawConstraintLimits", "drawConstraintReferenceFrame" }) |name|
+        try expect((@TypeOf(@field(zolt.ConstraintManager, name)) == void) == !on);
+    try expect((@TypeOf(zolt.PathConstraintPath.drawPath) == void) == !on);
+    try expect((@TypeOf(zolt.ContactConstraintManager.ContactConstraint(.dynamic, .dynamic).draw) == void) == !on);
+    try expect((@FieldType(PhysicsTestContext, "debug_output") == void) == !on);
+    try expect((@TypeOf(PhysicsTestContext.recordDebugOutput) == void) == !on);
+
+    // The debug parameter of the manifold functions (Jolt's inCenterOfMass) takes no space without the option
+    const ManifoldOptions = @typeInfo(@TypeOf(zolt.manifoldBetweenTwoFaces)).@"fn".params[8].type.?;
+    try expect((@sizeOf(ManifoldOptions) == 0) == !on);
+
+    // Every concrete constraint overrides DrawConstraint, the ones with limits DrawConstraintLimits
+    inline for (.{ zolt.FixedConstraint, zolt.PointConstraint, zolt.DistanceConstraint, zolt.HingeConstraint, zolt.SliderConstraint, zolt.ConeConstraint, zolt.SwingTwistConstraint, zolt.SixDOFConstraint, zolt.PathConstraint, zolt.GearConstraint, zolt.RackAndPinionConstraint, zolt.PulleyConstraint, zolt.VehicleConstraint }) |T|
+        try expect((@TypeOf(T.drawConstraint) == void) == !on);
+    inline for (.{ zolt.HingeConstraint, zolt.SliderConstraint, zolt.ConeConstraint, zolt.SwingTwistConstraint, zolt.SixDOFConstraint, zolt.VehicleConstraint }) |T|
+        try expect((@TypeOf(T.drawConstraintLimits) == void) == !on);
+
+    // The class with a debug-only member: Constraint (mDrawConstraintSize, 48 bytes before Phase 9)
+    try expectEqual(@as(usize, if (on) 56 else 48), @sizeOf(zolt.Constraint));
+}
+
+/// A body draw filter that rejects one body
+const RejectOneFilter = if (zolt.Core.debug_renderer) struct {
+    pub const overrides = .{.shouldDraw};
+
+    base: zolt.BodyDrawFilter = .init(@This()),
+    rejected: zolt.BodyID,
+
+    pub fn shouldDraw(self: *const @This(), body: *const zolt.Body) bool {
+        return !body.getID().eql(self.rejected);
+    }
+} else void;
+
+test "DebugRenderer: BodyManager.draw draws every body in the broad phase that passes the filter" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // BodyManager.draw only exists with the option
+
+    const allocator = std.testing.allocator;
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    const floor = try c.createFloor();
+    _ = try c.createBox(RVec3.init(0, 2, 0), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.5), .{});
+    _ = try c.createBox(RVec3.init(3, 2, 0), Quat.identity(), .kinematic, .discrete, Layers.moving, Vec3.replicate(0.5), .{});
+    // A body that is not in the broad phase is not drawn
+    var settings = zolt.BodyCreationSettings.initWithShape((try zolt.BoxShape.create(allocator, Vec3.one(), .{})).asShape(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+    defer settings.deinit();
+    const not_added = (try c.getBodyInterface().createBody(&settings)).?;
+    defer c.getBodyInterface().destroyBody(not_added.getID());
+
+    var renderer: CountingRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.base.deinit();
+
+    // The default settings draw the shapes: one box geometry per body
+    var draw_settings: zolt.BodyManager.DrawSettings = .{};
+    c.system.drawBodies(&draw_settings, &renderer.base, .{});
+    try expectEqual(@as(u32, 3), renderer.num_geometry_draws.load(.monotonic));
+
+    // The filter rejects the floor
+    const filter: RejectOneFilter = .{ .rejected = floor.getID() };
+    c.system.drawBodies(&draw_settings, &renderer.base, .{ .body_filter = &filter.base });
+    try expectEqual(@as(u32, 5), renderer.num_geometry_draws.load(.monotonic));
+
+    // Every flag (and every shape color) draws more, the bodies do not change
+    var state_before: zolt.StateRecorderImpl = .init(allocator);
+    defer state_before.deinit();
+    try c.system.saveState(state_before.recorder(), .{});
+    draw_settings = .{ .draw_get_support_function = true, .draw_support_direction = true, .draw_get_supporting_face = true, .draw_shape_wireframe = true, .draw_bounding_box = true, .draw_center_of_mass_transform = true, .draw_world_transform = true, .draw_velocity = true, .draw_mass_and_inertia = true, .draw_sleep_stats = true };
+    inline for (@typeInfo(zolt.BodyManager.ShapeColor).@"enum".fields) |f| {
+        draw_settings.draw_shape_color = @enumFromInt(f.value);
+        const lines_before = renderer.num_lines.load(.monotonic);
+        c.system.drawBodies(&draw_settings, &renderer.base, .{});
+        try expect(renderer.num_lines.load(.monotonic) > lines_before);
+    }
+    var state_after: zolt.StateRecorderImpl = .init(allocator);
+    defer state_after.deinit();
+    try c.system.saveState(state_after.recorder(), .{});
+    try expectEqualSlices(u8, state_before.getData(), state_after.getData());
+}
+
+test "DebugRenderer: recordDebugOutput records a frame per step that Zolt's playback reads (PhysicsTestContext)" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // RecordDebugOutput only exists with the option
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/test.jor", .{&tmp.sub_path});
+    defer allocator.free(path);
+
+    const num_steps = 5;
+    {
+        var c: PhysicsTestContext = undefined;
+        try c.init(allocator, .{});
+        defer c.deinit();
+        try c.recordDebugOutput(path);
+        try expect(c.system.debug_renderer != null);
+        _ = try c.createFloor();
+        const box = try c.createBox(RVec3.init(0, 2, 0), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.5), .{});
+        var distance = zolt.DistanceConstraintSettings.init(allocator);
+        defer distance.asSettings().deinit();
+        _ = try c.createConstraint(zolt.DistanceConstraint, zolt.Body.fixedToWorld(), box, &distance.base);
+        for (0..num_steps) |_| _ = try c.simulateSingleStep();
+    }
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .unlimited);
+    defer allocator.free(bytes);
+    var renderer: CountingRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.base.deinit();
+    var playback = zolt.DebugRendererPlayback.init(allocator, &renderer.base);
+    defer playback.deinit();
+    var reader: std.Io.Reader = .fixed(bytes);
+    var wrapper: zolt.StreamInWrapper = .init(&reader);
+    try playback.parse(wrapper.streamIn());
+    try expectEqual(@as(u32, num_steps), playback.getNumFrames());
+    for (0..num_steps) |f| playback.drawFrame(@intCast(f));
+    try expect(renderer.num_geometry_draws.load(.monotonic) >= 2 * num_steps); // The floor and the box in every frame
+    try expectEqual(@as(u32, num_steps), renderer.num_texts.load(.monotonic)); // The length of the distance constraint
+}
+
+test "DebugRenderer: the simulation draws contacts and linear casts into the renderer of the system and gives the same state" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // The flags only exist with the option
+
+    const allocator = std.testing.allocator;
+    var states: [2]zolt.StateRecorderImpl = .{ .init(allocator), .init(allocator) };
+    defer for (&states) |*s| s.deinit();
+    var renderer: CountingRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.base.deinit();
+    renderer.base.flags.contact_constraint_manager = .{ .draw_contact_point = true, .draw_supporting_faces = true, .draw_contact_point_reduction = true, .draw_contact_manifolds = true };
+    renderer.base.flags.physics_system.draw_motion_quality_linear_cast = true;
+
+    for (&states, [_]bool{ false, true }) |*state, draw| {
+        var c: PhysicsTestContext = undefined;
+        try c.init(allocator, .{});
+        defer c.deinit();
+        if (draw) c.system.setDebugRenderer(&renderer.base);
+        _ = try c.createFloor();
+        // A box resting on the floor (contacts, manifold reduction) and a fast sphere that needs a linear cast
+        _ = try c.createBox(RVec3.init(0, 0.49, 0), Quat.rotation(Vec3.axisY(), 0.3), .dynamic, .discrete, Layers.moving, Vec3.init(2, 0.5, 2), .{});
+        const sphere = try c.createSphere(RVec3.init(5, 10, 0), 0.2, .dynamic, .linear_cast, Layers.moving, .{});
+        c.getBodyInterface().setLinearVelocity(sphere.getID(), Vec3.init(0, -500, 0));
+        for (0..10) |_| _ = try c.simulateSingleStep();
+        try c.system.saveState(state.recorder(), .{});
+    }
+
+    // Drawing never changes a result
+    try expectEqualSlices(u8, states[0].getData(), states[1].getData());
+    try expect(renderer.num_lines.load(.monotonic) > 0);
+    try expect(renderer.num_geometry_draws.load(.monotonic) > 0); // The shape of the linear cast
+}
+
+test "DebugRenderer: a path constraint drawn before its first update draws its anchors at the centers of mass" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // DrawConstraint only exists with the option
+
+    // Jolt's DrawConstraint reads mR1, mR2 and the path axes, which only SetupVelocityConstraint writes: uninitialized
+    // memory in Jolt, zero in Zolt (see PathConstraint.zig). Checked at compile time: an undefined default does not
+    // compile here.
+    inline for (.{ "r1", "r2", "path_tangent", "path_normal", "path_binormal" }) |name| {
+        const default = comptime std.meta.fieldInfo(zolt.PathConstraint, @field(std.meta.FieldEnum(zolt.PathConstraint), name)).defaultValue().?;
+        if (comptime !default.eql(Vec3.zero())) @compileError("PathConstraint: " ++ name ++ " does not start at zero");
+    }
+
+    const allocator = std.testing.allocator;
+    var c: PhysicsTestContext = undefined;
+    try c.init(allocator, .{});
+    defer c.deinit();
+    const body1 = try c.createBox(RVec3.init(1, 2, 3), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.5), .{});
+    const body2 = try c.createBox(RVec3.init(4, 2, 3), Quat.identity(), .dynamic, .discrete, Layers.moving, Vec3.replicate(0.5), .{});
+    const hermite = try zolt.PathConstraintPathHermite.create(allocator);
+    var path = zolt.RefConst(zolt.PathConstraintPath).init(hermite.asPath());
+    defer path.deinit();
+    try hermite.addPoint(Vec3.zero(), Vec3.axisX(), Vec3.axisY());
+    try hermite.addPoint(Vec3.init(3, 0, 0), Vec3.axisX(), Vec3.axisY());
+    var settings = zolt.PathConstraintSettings.init(allocator);
+    defer settings.asSettings().deinit();
+    settings.path.set(path.get());
+    const constraint = try c.createConstraint(zolt.PathConstraint, body1, body2, settings.asTwoBodySettingsConst());
+
+    var renderer: RecordingRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.base.deinit();
+    constraint.asConstraint().drawConstraint(&renderer.base);
+
+    // The path fraction is written at x1, the center of mass of body 1 plus a zero r1
+    const x1 = body1.getCenterOfMassPosition();
+    try expectEqual(@as(usize, 1), renderer.texts.items.len);
+    try expect(renderer.texts.items[0].position.eql(x1));
+
+    // The tangent (blue), normal (red) and binormal (green) arrows have no length: their base lines start and end at x1
+    for ([_]Color{ Color.blue, Color.red, Color.green }) |color| {
+        const found = for (renderer.lines.items) |l| {
+            if (l.color.eql(color) and l.from.eql(x1) and l.to.eql(x1)) break true;
+        } else false;
+        try expect(found);
+    }
 }

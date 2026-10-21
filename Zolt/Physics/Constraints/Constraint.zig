@@ -24,9 +24,8 @@
 //!   `void` without `-Ddebug_renderer`. With it the constructor copies it from the settings and `ToConstraintSettings`
 //!   copies it back, like Jolt: this changes `GetConstraintSettings`, so the parity reference gets the define too.
 //!   `DrawConstraint`, `DrawConstraintLimits` and `DrawConstraintReferenceFrame` are option-gated vtable entries
-//!   (`virtual.OptionalVirtual`, no slot without the option) with gated dispatchers. `DrawConstraint` is pure virtual in
-//!   Jolt: until group D3 ports every override, `impl.drawConstraint` is a placeholder that panics (R2). The other two
-//!   have Jolt's empty default bodies.
+//!   (`virtual.OptionalVirtual`, no slot without the option) with gated dispatchers. `DrawConstraint` is pure virtual, like
+//!   Jolt's: every concrete constraint overrides it. The other two have Jolt's empty default bodies.
 //!   ConstraintSettings keeps its public `mDrawConstraintSize` in every build (it is serialized).
 //! - The protected copy constructor and assignment of ConstraintSettings (they do not copy the reference count) are
 //!   `initCopy`, used by the copy functions of derived settings.
@@ -562,15 +561,6 @@ pub const Constraint = struct {
 
         pub fn isActive(self: *const Constraint) bool {
             return self.enabled;
-        }
-
-        /// Zolt placeholder (RemainingFeaturesArchitecture.md R2): DrawConstraint is pure virtual in Jolt. It stays here
-        /// until every constraint implements it (group D3), so that all constraints compile with -Ddebug_renderer=true in
-        /// the meantime.
-        pub const drawConstraint = if (Core.debug_renderer) drawConstraintPlaceholder else {};
-        fn drawConstraintPlaceholder(self: *const Constraint, renderer: *DebugRenderer) void {
-            _ = .{ self, renderer };
-            @panic("TODO(debug_renderer): DrawConstraint of this constraint is not ported yet");
         }
 
         pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};

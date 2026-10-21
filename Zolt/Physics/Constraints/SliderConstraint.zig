@@ -3,7 +3,7 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SliderConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): gated declarations (RemainingFeaturesArchitecture.md R2).
 //!
 //! - The const and non-const overloads `GetMotorSettings()` / `GetLimitsSpringSettings()` are `getMotorSettings` /
 //!   `getLimitsSpringSettings` (`*const`) and `getMotorSettingsMut` / `getLimitsSpringSettingsMut` (`*`).
@@ -25,6 +25,10 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const isVelocityMotor = MotorSettingsFile.isVelocityMotor;
+const isPositionMotor = MotorSettingsFile.isPositionMotor;
 const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -209,7 +213,7 @@ pub const SliderConstraintSettings = struct {
 
 /// A slider constraint allows movement in only 1 axis (and no rotation). Also known as a prismatic constraint.
 pub const SliderConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .drawConstraintLimits, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -666,7 +670,56 @@ pub const SliderConstraint = struct {
         return pos or rot or limit;
     }
 
-    // TODO(debug_renderer): DrawConstraint, DrawConstraintLimits
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const SliderConstraint, renderer: *DebugRenderer) void {
+        const transform1 = self.base.body1.getCenterOfMassTransform();
+        const transform2 = self.base.body2.getCenterOfMassTransform();
+
+        // Transform the local positions into world space
+        const slider_axis = transform1.multiply3x3(self.local_space_slider_axis1);
+        const position1 = transform1.mulVec3(self.local_space_position1);
+        const position2 = transform2.mulVec3(self.local_space_position2);
+
+        // Draw constraint
+        renderer.drawMarker(position1, Color.red, 0.1);
+        renderer.drawMarker(position2, Color.green, 0.1);
+        renderer.drawLine(position1, position2, Color.green);
+
+        // Draw motor
+        if (isPositionMotor(self.motor_state))
+            renderer.drawMarker(position1.addVec3(slider_axis.mulScalar(self.target_position)), Color.yellow, 1.0);
+
+        if (isVelocityMotor(self.motor_state)) {
+            const cur_vel = slider_axis.mulScalar(self.base.body2.getLinearVelocity().sub(self.base.body1.getLinearVelocity()).dot(slider_axis));
+            renderer.drawLine(position2, position2.addVec3(cur_vel), Color.blue);
+            renderer.drawArrow(position2.addVec3(cur_vel), position2.addVec3(slider_axis.mulScalar(self.target_velocity)), Color.red, 0.1);
+        }
+    }
+
+    // See Constraint::DrawConstraintLimits (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *const SliderConstraint, renderer: *DebugRenderer) void {
+        if (self.has_limits) {
+            const transform1 = self.base.body1.getCenterOfMassTransform();
+            const transform2 = self.base.body2.getCenterOfMassTransform();
+
+            // Transform the local positions into world space
+            const slider_axis = transform1.multiply3x3(self.local_space_slider_axis1);
+            const position1 = transform1.mulVec3(self.local_space_position1);
+            const position2 = transform2.mulVec3(self.local_space_position2);
+
+            // Calculate the limits in world space
+            const limits_min = position1.addVec3(slider_axis.mulScalar(self.limits_min));
+            const limits_max = position1.addVec3(slider_axis.mulScalar(self.limits_max));
+
+            renderer.drawLine(limits_min, position1, Color.white);
+            renderer.drawLine(position2, limits_max, Color.white);
+
+            renderer.drawMarker(limits_min, Color.white, 0.1);
+            renderer.drawMarker(limits_max, Color.white, 0.1);
+        }
+    }
 
     pub fn saveState(self: *const SliderConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState
