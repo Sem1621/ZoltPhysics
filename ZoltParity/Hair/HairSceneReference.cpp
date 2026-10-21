@@ -83,7 +83,7 @@ struct HSHairDesc
 	double			mPosition[3];
 	float			mRotation[4];
 	uint32			mObjectLayer;
-	uint32			mPadding;
+	uint32			mExternalScalp;			///< 1: before Init, SetScalpVerticesCB and SetScalpTrianglesCB with buffers of the scalp of the settings
 };
 
 /// An operation (Op in HairSceneParity.zig)
@@ -116,6 +116,7 @@ enum class HSOpKind : uint32
 	SetRotation,			///< Hair::SetRotation(mF[0..3])
 	OnTeleported,			///< Hair::OnTeleported()
 	MoveBody,				///< body mU[0]: BodyInterface::SetPositionRotationAndVelocity(mD, mF[0..3], mF[4..6], mF[7..9])
+	SetScalpToHead,			///< Hair::SetScalpToHead with the 16 floats at pool index mU[0]
 };
 
 // Tags of the transcript (must match HairSceneParity.zig)
@@ -395,6 +396,12 @@ uint32 jolt_hs_run(const HSWorldDesc *inWorld, const HSBodyDesc *inBodies, const
 
 	// The hair
 	HSHair hair(settings, HSLoadR3(inHair->mPosition), HSLoadQuat(inHair->mRotation), ObjectLayer(inHair->mObjectLayer));
+	if (inHair->mExternalScalp != 0)
+	{
+		// The scalp vertices and triangles come from outside (Hair skips skinning the scalp)
+		hair.SetScalpVerticesCB(compute_system->CreateComputeBuffer(ComputeBuffer::EType::Buffer, settings->mScalpVertices.size(), sizeof(Float3), settings->mScalpVertices.data()).Get());
+		hair.SetScalpTrianglesCB(compute_system->CreateComputeBuffer(ComputeBuffer::EType::Buffer, settings->mScalpTriangles.size() * 3, sizeof(uint32), settings->mScalpTriangles.data()).Get());
+	}
 	hair.Init(compute_system);
 	t.Record(cHSTagOp | 0xFFFFF, nullptr, 0);
 	hair.Dump(t);
@@ -429,6 +436,10 @@ uint32 jolt_hs_run(const HSWorldDesc *inWorld, const HSBodyDesc *inBodies, const
 
 		case HSOpKind::MoveBody:
 			bi.SetPositionRotationAndVelocity(bodies[op.mU[0]], HSLoadR3(op.mD), HSLoadQuat(op.mF), HSLoad3(op.mF + 4), HSLoad3(op.mF + 7));
+			break;
+
+		case HSOpKind::SetScalpToHead:
+			hair.SetScalpToHead(HSLoadMat44(inPool + op.mU[0]));
 			break;
 		}
 

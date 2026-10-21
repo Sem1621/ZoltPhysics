@@ -12,6 +12,8 @@
 //!   of different lengths, several materials with a simulation fraction below 1, the scalp of Assets/face.bin with its
 //!   skin or without a scalp. The Zig side runs InitRenderAndSimulationStrands and Init, both sides restore the
 //!   SaveBinaryState bytes and run InitCompute.
+//! - One face scene gives the scalp vertices and triangles from outside (SetScalpVerticesCB, SetScalpTrianglesCB) and
+//!   moves them with SetScalpToHead.
 //! - The operations: Hair::Update with delta times 0, 1/60, 1/90, odd values and values above mMaxDeltaTime, with the
 //!   joint matrices of the face animation (the hair follows the neck joint like Jolt's HairTest sample) or without;
 //!   SetPosition and SetRotation (the delta transform), OnTeleported, the movement and the velocities of a body.
@@ -120,7 +122,8 @@ const HairDesc = extern struct {
     position: [3]f64 = .{ 0, 0, 0 },
     rotation: [4]f32 = .{ 0, 0, 0, 1 },
     object_layer: u32 = Layers.moving,
-    padding: u32 = 0,
+    /// 1: before initCompute, setScalpVerticesCB and setScalpTrianglesCB with buffers of the scalp of the settings
+    external_scalp: u32 = 0,
 };
 
 /// HSOpKind of HairSceneReference.cpp
@@ -135,6 +138,8 @@ const OpKind = enum(u32) {
     on_teleported,
     /// body u[0]: BodyInterface.setPositionRotationAndVelocity(d, f[0..3], f[4..6], f[7..9])
     move_body,
+    /// Hair.setScalpToHead with the 16 floats at pool index u[0]
+    set_scalp_to_head,
 };
 
 const no_joints: u32 = 0xFFFFFFFF;
@@ -492,6 +497,15 @@ fn zoltRun(allocator: Allocator, scene: *const Scene, t: *Transcript, coverage: 
     // The hair
     var hair: Hair = .init(allocator, settings.get().?, loadR3(&scene.hair.position), loadQuat(&scene.hair.rotation), @intCast(scene.hair.object_layer));
     defer hair.deinit();
+    if (scene.hair.external_scalp != 0) {
+        // The scalp vertices and triangles come from outside (Hair skips skinning the scalp)
+        var vertices = try system.createComputeBuffer(.buffer, settings_ptr.scalp_vertices.items.len, @sizeOf(Float3), std.mem.sliceAsBytes(settings_ptr.scalp_vertices.items));
+        defer vertices.deinit();
+        hair.setScalpVerticesCB(vertices.get());
+        var triangles = try system.createComputeBuffer(.buffer, settings_ptr.scalp_triangles.items.len * 3, @sizeOf(u32), std.mem.sliceAsBytes(settings_ptr.scalp_triangles.items));
+        defer triangles.deinit();
+        hair.setScalpTrianglesCB(triangles.get());
+    }
     try hair.initCompute(system);
     try t.record(tag_op | after_init, &.{});
     try dumpHair(t, &hair);
@@ -514,6 +528,7 @@ fn zoltRun(allocator: Allocator, scene: *const Scene, t: *Transcript, coverage: 
             .set_rotation => hair.setRotation(loadQuat(&o.f)),
             .on_teleported => hair.onTeleported(),
             .move_body => bi.setPositionRotationAndVelocity(bodies.items[o.u[0]], loadR3(&o.d), loadQuat(o.f[0..4]), load3(o.f[4..7]), load3(o.f[7..10])),
+            .set_scalp_to_head => hair.setScalpToHead(loadMat44(pool[o.u[0]..][0..16])),
         }
 
         try t.record(tag_op | @as(u32, @intCast(op_index)), &.{});
@@ -871,7 +886,7 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
     var rng: fw.Rng = .{ .state = 0x6f1e_3a2d };
     var coverage: Coverage = .{};
 
-    const Scalp = enum { skinned, no_inverse_bind_pose };
+    const Scalp = enum { skinned, no_inverse_bind_pose, external };
     const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, scalp: Scalp = .skinned, follow: bool = true };
     const m3 = materials3();
     const setups = [_]Setup{
@@ -880,6 +895,7 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
         .{ .name = "face, global pose only", .shape = .curly, .materials = &.{globalPoseOnlyMaterial(0.5)} },
         .{ .name = "face, the hair stays", .shape = .straight, .materials = &.{ withFraction(variantMaterial(1), 0.5), withFraction(variantMaterial(3), 0.5) }, .follow = false },
         .{ .name = "face without inverse bind pose (no skinning)", .shape = .straight, .materials = &.{withFraction(variantMaterial(2), 0.5)}, .scalp = .no_inverse_bind_pose },
+        .{ .name = "face with the scalp from outside", .shape = .curly, .materials = &.{ withFraction(variantMaterial(0), 0.5), withFraction(variantMaterial(2), 0.4) }, .scalp = .external },
     };
     for (setups) |setup| {
         var scene = try Scene.init(allocator, setup.name);
@@ -896,13 +912,19 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
         defer groom.deinit(allocator);
         var settings = try HairSettingsParity.baseSettings(allocator, &face, setup.materials);
         defer settings.deinit();
-        if (setup.scalp == .no_inverse_bind_pose) settings.scalp_inverse_bind_pose.clearRetainingCapacity();
+        if (setup.scalp != .skinned) settings.scalp_inverse_bind_pose.clearRetainingCapacity();
+        scene.hair.external_scalp = @intFromBool(setup.scalp == .external);
         settings.grid_size = .init(10, 12, 9, 0);
         try settings.initRenderAndSimulationStrands(groom.vertices.items, groom.strands.items);
         _ = try settings.init();
         scene.settings = try HairSettingsParity.saveState(allocator, &settings);
 
         const body = try addBodies(allocator, &scene, &rng, neck_position);
+        if (setup.scalp == .external) {
+            // The transform from the scalp mesh to the head: a small rotation and offset
+            const scalp_to_head = Mat44.rotationTranslation(Quat.rotation(Vec3.init(0.2, 1.0, -0.3).normalized(), 0.05), Vec3.init(0.002, -0.001, 0.003));
+            try scene.op(allocator, .{ .kind = .set_scalp_to_head, .u = .{ try scene.addMatrix(allocator, scalp_to_head), 0, 0 } });
+        }
 
         // The first update at frame 0 (Jolt's HairTest: Update(0.0f, inv_neck_transform, frame 0)), then the frames
         try scene.updateWithFrame(allocator, &face, face.frames[0], 0.0, false);
@@ -913,6 +935,8 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
                 try scene.moveBody(allocator, body, RVec3.fromVec3(neck_position.add(Vec3.init(0.1, -0.15, 0.08))), Quat.rotation(Vec3.axisX(), 0.4), Vec3.init(0.1, 0.3, -0.2), Vec3.init(1.0, 0.0, 0.0));
             if (i == 3)
                 try scene.op(allocator, .{ .kind = .on_teleported });
+            if (i == 4 and setup.scalp == .external)
+                try scene.op(allocator, .{ .kind = .set_scalp_to_head, .u = .{ scene.identity, 0, 0 } });
             try scene.updateWithFrame(allocator, &face, face.frames[f], dt, setup.follow);
         }
         try scene.updateWithFrame(allocator, &face, face.frames[2], 0.0, setup.follow);
