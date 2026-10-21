@@ -4,6 +4,12 @@
 //! Like Jolt, CalculateConstraintProperties uses the motion properties of every body that is not static, so a kinematic
 //! body trips the dynamic body assert of `getInverseMass` when asserts are on (Jolt's JPH_ASSERT in GetInverseMass);
 //! without asserts its inverse mass and inertia count like Jolt's release build.
+//!
+//! Zolt (defined where Jolt is undefined): CalculateConstraintProperties does not write mR1xN1 when body 1 is static and
+//! mRatioR2xN2 when body 2 is static, but SolveVelocityConstraint multiplies them with the angular velocity of their
+//! body (zero for a static body). Jolt leaves the members uninitialized, so a NaN or an infinity in that memory makes the
+//! velocity of the other body NaN. Zolt's members start at zero: the product is 0, like Jolt's with the zero-filled
+//! allocations of the parity reference. Pinned by "IndependentAxisConstraintPart: the members of a static body are zero".
 
 const std = @import("std");
 const Core = @import("../../../Core/Core.zig");
@@ -48,10 +54,11 @@ const StateRecorder = @import("../../StateRecorder.zig").StateRecorder;
 /// b = velocity bias.\n
 /// \f$\beta\f$ = baumgarte constant.
 pub const IndependentAxisConstraintPart = struct {
-    r1_x_n1: Vec3 = undefined,
-    inv_i1_r1_x_n1: Vec3 = undefined,
-    ratio_r2_x_n2: Vec3 = undefined,
-    inv_i2_ratio_r2_x_n2: Vec3 = undefined,
+    // Zolt: zero, Jolt leaves them uninitialized (see the file comment)
+    r1_x_n1: Vec3 = .zero(),
+    inv_i1_r1_x_n1: Vec3 = .zero(),
+    ratio_r2_x_n2: Vec3 = .zero(),
+    inv_i2_ratio_r2_x_n2: Vec3 = .zero(),
     effective_mass: f32 = 0.0,
     total_lambda: f32 = 0.0,
 
@@ -254,8 +261,8 @@ test "IndependentAxisConstraintPart for every combination of motion types" {
         const before1 = TestContext.BodySnapshot.take(body1);
         const before2 = TestContext.BodySnapshot.take(body2);
 
-        // Zero the members that a static body leaves uninitialized: they are multiplied with its zero velocity
-        var part: IndependentAxisConstraintPart = std.mem.zeroes(IndependentAxisConstraintPart);
+        // The members that a static body leaves unset start at zero: they are multiplied with its zero velocity
+        var part: IndependentAxisConstraintPart = .{};
         part.calculateConstraintProperties(body1, body2, r1, n1, r2, n2, ratio);
         const any_moving = !body1.isStatic() or !body2.isStatic();
         try testing.expectEqual(any_moving, part.isActive());
@@ -302,5 +309,43 @@ test "IndependentAxisConstraintPart for every combination of motion types" {
         part.deactivate();
         try testing.expect(!part.isActive());
         try testing.expectEqual(@as(f32, 0.0), part.getTotalLambda());
+    }
+}
+
+test "IndependentAxisConstraintPart: the members of a static body are zero" {
+    const testing = std.testing;
+
+    // Jolt leaves them uninitialized. Checked at compile time: an undefined default does not compile here.
+    comptime {
+        const fresh: IndependentAxisConstraintPart = .{};
+        for ([_]Vec3{ fresh.r1_x_n1, fresh.inv_i1_r1_x_n1, fresh.ratio_r2_x_n2, fresh.inv_i2_ratio_r2_x_n2 }) |v| {
+            if (!v.eql(Vec3.zero())) @compileError("IndependentAxisConstraintPart: a member of a static body does not start at zero");
+        }
+    }
+
+    var context: TestContext.ConstraintPartTestContext = undefined;
+    try context.init(testing.allocator, testing.io);
+    defer context.deinit();
+
+    const r1 = Vec3.init(0.3, -0.5, 0.8);
+    const r2 = Vec3.init(-0.4, 0.6, 0.2);
+    const n1 = Vec3.init(1, 2, -0.5).normalized();
+    const n2 = Vec3.init(-0.5, 1, 1).normalized();
+    for ([_]TestContext.MotionTypePair{ .{ .dynamic, .static }, .{ .static, .dynamic } }) |pair| {
+        const bodies = try context.createBodyPair(pair);
+        defer context.destroyBodies(&bodies);
+        const dynamic_body = if (bodies[0].isDynamic()) bodies[0] else bodies[1];
+
+        // A pulley between a dynamic and a static body: the solve reads the unset members of the static body
+        var part: IndependentAxisConstraintPart = .{};
+        part.calculateConstraintProperties(bodies[0], bodies[1], r1, n1, r2, n2, 1.5);
+        try testing.expect(part.isActive());
+        if (pair[1] == .static) {
+            try testing.expect(part.ratio_r2_x_n2.eql(Vec3.zero()) and part.inv_i2_ratio_r2_x_n2.eql(Vec3.zero()));
+        } else {
+            try testing.expect(part.r1_x_n1.eql(Vec3.zero()) and part.inv_i1_r1_x_n1.eql(Vec3.zero()));
+        }
+        try testing.expect(part.solveVelocityConstraint(bodies[0], bodies[1], n1, n2, 1.5, -math.flt_max, math.flt_max));
+        try testing.expect(!dynamic_body.getLinearVelocity().isNaN() and !dynamic_body.getAngularVelocity().isNaN());
     }
 }
