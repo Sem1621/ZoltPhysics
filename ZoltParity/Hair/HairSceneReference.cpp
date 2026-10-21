@@ -14,6 +14,10 @@
 // - The libm pin (LibMReference.c) gives std::exp and std::pow the generic algorithm of LibM.zig (R13).
 // - The transcript is a list of records: a tag (uint32), the number of bytes (uint32, 0xFFFFFFFF for a null buffer) and
 //   the bytes.
+// - With JPH_DEBUG_RENDERER (`-Ddebug_renderer=true`, group H3) the operations Draw and Record call Hair::Draw with the
+//   DrawSettings of the operation: Draw into a new ParityRenderer of ZoltParity/Renderer/ParityRenderer.h (the record is
+//   its call log), Record into a new DebugRendererRecorder followed by EndFrame (the record is the .jor bytes after the
+//   construction). The hair does not change, so these operations write no dump of the hair.
 //
 // The structs below must match the extern structs in HairSceneParity.zig. Booleans are passed as uint32. All C
 // functions have the prefix jolt_hs_.
@@ -40,6 +44,11 @@
 #include <Jolt/Physics/Hair/Hair.h>
 #include <Jolt/Physics/Hair/HairSettings.h>
 #include <Jolt/Physics/Hair/HairShaders.h>
+
+#ifdef JPH_DEBUG_RENDERER
+	#include <Jolt/Renderer/DebugRendererRecorder.h>
+	#include <ZoltParity/Renderer/ParityRenderer.h>
+#endif
 
 #include <cstring>
 #include <iterator>
@@ -117,6 +126,8 @@ enum class HSOpKind : uint32
 	OnTeleported,			///< Hair::OnTeleported()
 	MoveBody,				///< body mU[0]: BodyInterface::SetPositionRotationAndVelocity(mD, mF[0..3], mF[4..6], mF[7..9])
 	SetScalpToHead,			///< Hair::SetScalpToHead with the 16 floats at pool index mU[0]
+	Draw,					///< Hair::Draw into a ParityRenderer: the settings mU[0] (see HSDrawSettings), the simulation strands [mU[1], mU[2])
+	Record,					///< Hair::Draw into a DebugRendererRecorder, then EndFrame: the settings as for Draw
 };
 
 // Tags of the transcript (must match HairSceneParity.zig)
@@ -124,6 +135,7 @@ static constexpr uint32 cHSTagOp = 0x45000000;		///< | the operation index (0xFF
 static constexpr uint32 cHSTagMember = 0x45100000;	///< | the member (see HSDump)
 static constexpr uint32 cHSTagBuffer = 0x45200000;	///< | the buffer (see HSDump)
 static constexpr uint32 cHSTagRead = 0x45300000;	///< | the read back array (see HSDump)
+static constexpr uint32 cHSTagDraw = 0x45400000;	///< the call log of a Draw operation (| 1: the .jor bytes of a Record operation)
 
 /// The transcript: the records, in order
 class HSTranscript
@@ -278,6 +290,41 @@ static Mat44 HSLoadMat44(const float *inM)
 	return Mat44(Vec4(inM[0], inM[1], inM[2], inM[3]), Vec4(inM[4], inM[5], inM[6], inM[7]), Vec4(inM[8], inM[9], inM[10], inM[11]), Vec4(inM[12], inM[13], inM[14], inM[15]));
 }
 
+#ifdef JPH_DEBUG_RENDERER
+
+/// The DrawSettings of a Draw or Record operation (drawSettings in HairSceneParity.zig): the booleans of
+/// Hair::DrawSettings in declaration order are the bits 0 to 10 of mU[0], the ERenderStrandColor is bits 16 to 18, the
+/// simulation strands are [mU[1], mU[2])
+static Hair::DrawSettings HSDrawSettings(const HSOp &inOp)
+{
+	uint32 bits = inOp.mU[0];
+	Hair::DrawSettings settings;
+	settings.mSimulationStrandBegin = inOp.mU[1];
+	settings.mSimulationStrandEnd = inOp.mU[2];
+	settings.mDrawRods = (bits & (1 << 0)) != 0;
+	settings.mDrawUnloadedRods = (bits & (1 << 1)) != 0;
+	settings.mDrawVertexVelocity = (bits & (1 << 2)) != 0;
+	settings.mDrawAngularVelocity = (bits & (1 << 3)) != 0;
+	settings.mDrawOrientations = (bits & (1 << 4)) != 0;
+	settings.mDrawNeutralDensity = (bits & (1 << 5)) != 0;
+	settings.mDrawGridDensity = (bits & (1 << 6)) != 0;
+	settings.mDrawGridVelocity = (bits & (1 << 7)) != 0;
+	settings.mDrawSkinPoints = (bits & (1 << 8)) != 0;
+	settings.mDrawRenderStrands = (bits & (1 << 9)) != 0;
+	settings.mDrawInitialGravity = (bits & (1 << 10)) != 0;
+	settings.mRenderStrandColor = Hair::ERenderStrandColor((bits >> 16) & 7);
+	return settings;
+}
+
+/// The bytes written to a string stream so far
+static std::vector<uint8> HSStreamBytes(const std::stringstream &inStream)
+{
+	std::string s = inStream.str();
+	return std::vector<uint8>(s.begin(), s.end());
+}
+
+#endif // JPH_DEBUG_RENDERER
+
 // MakeShapeSettings of HairSceneParity.zig
 static Ref<ShapeSettings> HSMakeShapeSettings(const HSBodyDesc &inDesc, const float *inPoints)
 {
@@ -338,6 +385,16 @@ void jolt_hs_struct_sizes(uint32 *outSizes)
 	outSizes[1] = sizeof(HSBodyDesc);
 	outSizes[2] = sizeof(HSHairDesc);
 	outSizes[3] = sizeof(HSOp);
+}
+
+/// 1 when the reference is built with JPH_DEBUG_RENDERER: the operations Draw and Record exist
+uint32 jolt_hs_draw_available()
+{
+#ifdef JPH_DEBUG_RENDERER
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 /// Runs a scene (see the file header) and writes the transcript to outTranscript. Returns its size, 0xFFFFFFFF when it
@@ -441,6 +498,37 @@ uint32 jolt_hs_run(const HSWorldDesc *inWorld, const HSBodyDesc *inBodies, const
 		case HSOpKind::SetScalpToHead:
 			hair.SetScalpToHead(HSLoadMat44(inPool + op.mU[0]));
 			break;
+
+		case HSOpKind::Draw:
+		case HSOpKind::Record:
+		#ifdef JPH_DEBUG_RENDERER
+			{
+				// The hair does not change: the record of the draw replaces the dump
+				t.Record(cHSTagOp | op_index, nullptr, 0);
+				Hair::DrawSettings settings = HSDrawSettings(op);
+				if (HSOpKind(op.mKind) == HSOpKind::Draw)
+				{
+					ZoltParity::ParityRenderer renderer;
+					renderer.mLog.mBytes.clear();
+					hair.Draw(settings, &renderer);
+					t.Record(cHSTagDraw, renderer.mLog.mBytes.data(), renderer.mLog.mBytes.size());
+				}
+				else
+				{
+					std::stringstream stream;
+					StreamOutWrapper wrapper(stream);
+					DebugRendererRecorder recorder(wrapper);
+					size_t construction_size = HSStreamBytes(stream).size();
+					hair.Draw(settings, &recorder);
+					recorder.EndFrame();
+					std::vector<uint8> all = HSStreamBytes(stream);
+					t.Record(cHSTagDraw | 1, all.data() + construction_size, all.size() - construction_size);
+				}
+			}
+			continue;
+		#else
+			return 0xFFFFFFFF; // The Zig side only generates these operations with the debug renderer
+		#endif
 		}
 
 		t.Record(cHSTagOp | op_index, nullptr, 0);

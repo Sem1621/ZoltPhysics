@@ -32,6 +32,22 @@
 //!   position is NaN (UB11); the gradients are never steps and no last segment is too short to change the strand
 //!   length (UB16). The reference zero-fills its allocations (UB4).
 //! - The layer runs in both precisions: the hair position and the previous position are RVec3.
+//!
+//! The hair draws (group H3, only with -Ddebug_renderer=true, R2):
+//! - The operations `draw` and `record` call Hair.draw (Hair::Draw) on both sides with the DrawSettings of the
+//!   operation: `draw` into a new ParityRenderer of ZoltParity/Renderer (the transcript holds its call log, compared call
+//!   for call), `record` into a new DebugRendererRecorder followed by endFrame (the transcript holds the .jor bytes after
+//!   the construction). They follow an update, so the read back data exist. They do not change the hair, so they write
+//!   no dump.
+//! - The scenes draw with the defaults, each setting alone, the render strands in each color, every combination of the
+//!   three grid settings, everything, and random sets with random ranges of simulation strands. Their own test adds
+//!   grids that show Jolt's loop bound quirk (R20: z runs to GridSize.GetX(), x to GetZ()) and a far away hair.
+//! - The draws avoid Jolt's undefined behavior: no density draw when GridSize.GetX() > GetZ() (the planes z >= GetZ()
+//!   are past the grid), no skin points when the hair has no skinned scalp vertices (Jolt reads a null pointer), no draw
+//!   before the first read back.
+//! - When GetX() < GetZ() the neutral density draw fails the assert of GetNeutralDensity (x >= GetX()), and Jolt's
+//!   release build continues. Zolt's assert there is recoverable (R8): every scene runs with a counting handler
+//!   (ParityHooks.ReleaseAsserts), and with -Dreference_asserts=true both sides must count as many asserts.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -39,6 +55,8 @@ const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
 const TestLayers = @import("test_layers");
 const HairSettingsParity = @import("HairSettingsParity.zig");
+const ParityHooks = @import("../ParityHooks.zig");
+const pr = @import("../Renderer/ParityRenderer.zig");
 
 const Hair = zolt.Hair;
 const HairSettings = zolt.HairSettings;
@@ -73,6 +91,7 @@ const io = std.testing.io;
 
 const jolt = struct {
     extern fn jolt_hs_struct_sizes(out: *[4]u32) void;
+    extern fn jolt_hs_draw_available() u32;
     extern fn jolt_hs_run(world: *const World, bodies: [*]const Body, points: [*]const f32, settings: [*]const u8, settings_size: u32, hair: *const HairDesc, ops: [*]const Op, num_ops: u32, pool: [*]const f32, out: [*]u8, capacity: u32) u32;
 };
 
@@ -143,6 +162,39 @@ const OpKind = enum(u32) {
     move_body,
     /// Hair.setScalpToHead with the 16 floats at pool index u[0]
     set_scalp_to_head,
+    /// Hair.draw into a ParityRenderer: the settings u[0] (DrawBits), the simulation strands [u[1], u[2]) (only with the
+    /// debug renderer)
+    draw,
+    /// Hair.draw into a DebugRendererRecorder, then endFrame: the settings as for `draw`
+    record,
+};
+
+/// The bits of the settings of the operations `draw` and `record` (HSDrawSettings of HairSceneReference.cpp): the
+/// booleans of Hair.DrawSettings in declaration order, then the render strand color at bit 16
+const DrawBits = struct {
+    const rods: u32 = 1 << 0;
+    const unloaded_rods: u32 = 1 << 1;
+    const vertex_velocity: u32 = 1 << 2;
+    const angular_velocity: u32 = 1 << 3;
+    const orientations: u32 = 1 << 4;
+    const neutral_density: u32 = 1 << 5;
+    const grid_density: u32 = 1 << 6;
+    const grid_velocity: u32 = 1 << 7;
+    const skin_points: u32 = 1 << 8;
+    const render_strands: u32 = 1 << 9;
+    const initial_gravity: u32 = 1 << 10;
+    const num_flags = 11;
+    const all_flags: u32 = (1 << num_flags) - 1;
+    /// The draw settings that read the grid
+    const density: u32 = neutral_density | grid_density | grid_velocity;
+    /// Jolt's defaults
+    const defaults: u32 = rods | initial_gravity;
+    const color_shift = 16;
+    const num_colors = 7;
+
+    fn color(c: u32) u32 {
+        return c << color_shift;
+    }
 };
 
 const no_joints: u32 = 0xFFFFFFFF;
@@ -160,6 +212,8 @@ const tag_op: u32 = 0x45000000;
 const tag_member: u32 = 0x45100000;
 const tag_buffer: u32 = 0x45200000;
 const tag_read: u32 = 0x45300000;
+/// The call log of a draw operation (| 1: the .jor bytes of a record operation)
+const tag_draw: u32 = 0x45400000;
 const after_init: u32 = 0xFFFFF;
 const null_size: u32 = 0xFFFFFFFF;
 
@@ -268,12 +322,90 @@ const Scene = struct {
         try self.op(allocator, .{ .kind = .set_rotation, .f = .{ rotation.getX(), rotation.getY(), rotation.getZ(), rotation.getW() } ++ @as([8]f32, @splat(0)) });
     }
 
+    /// A draw or record operation (DrawBits), simulation strands [begin, end)
+    fn draw(self: *Scene, allocator: Allocator, kind: OpKind, bits: u32, begin: u32, end: u32) !void {
+        try self.op(allocator, .{ .kind = kind, .u = .{ bits, begin, end } });
+    }
+
+    /// With the debug renderer: draw with the defaults, each setting alone, the render strands in each color, every
+    /// combination of the grid settings and everything, then `num_random` random sets with random ranges of simulation
+    /// strands. The settings that `options` excludes are left out.
+    fn addDraws(self: *Scene, allocator: Allocator, rng: *fw.Rng, options: DrawOptions, num_random: u32) !void {
+        if (!zolt.Core.debug_renderer) return;
+        const all = std.math.maxInt(u32);
+        try self.addDraw(allocator, options, DrawBits.defaults, 0, all);
+        for (0..DrawBits.num_flags) |i|
+            try self.addDraw(allocator, options, @as(u32, 1) << @intCast(i), 0, all);
+        for (0..DrawBits.num_colors) |c|
+            try self.addDraw(allocator, options, DrawBits.render_strands | DrawBits.color(@intCast(c)), 0, all);
+        for ([_]u32{ DrawBits.neutral_density | DrawBits.grid_density, DrawBits.neutral_density | DrawBits.grid_velocity, DrawBits.grid_density | DrawBits.grid_velocity, DrawBits.density }) |bits|
+            try self.addDraw(allocator, options, bits, 0, all);
+        try self.addDraw(allocator, options, DrawBits.all_flags | DrawBits.color(rng.next() % DrawBits.num_colors), 0, all);
+        try self.addRandomDraws(allocator, rng, options, num_random);
+    }
+
+    /// With the debug renderer: `num_random` random draws with random ranges of simulation strands
+    fn addRandomDraws(self: *Scene, allocator: Allocator, rng: *fw.Rng, options: DrawOptions, num_random: u32) !void {
+        if (!zolt.Core.debug_renderer) return;
+        const n = options.num_strands;
+        for (0..num_random) |_| {
+            const bits = (rng.next() & DrawBits.all_flags) | DrawBits.color(rng.next() % DrawBits.num_colors);
+            const begin = rng.next() % (n + 1);
+            const end = if (rng.next() % 3 == 0) std.math.maxInt(u32) else begin + rng.next() % (n + 2 - begin);
+            try self.addDraw(allocator, options, bits, begin, end);
+        }
+    }
+
+    /// A draw without the settings that `options` excludes (none when nothing is left)
+    fn addDraw(self: *Scene, allocator: Allocator, options: DrawOptions, bits: u32, begin: u32, end: u32) !void {
+        const b = options.mask(bits);
+        if (b & DrawBits.all_flags == 0 and bits & DrawBits.all_flags != 0) return;
+        try self.draw(allocator, .draw, b, begin, end);
+    }
+
+    /// With the debug renderer: a record operation with everything that `options` allows
+    fn addRecord(self: *Scene, allocator: Allocator, rng: *fw.Rng, options: DrawOptions) !void {
+        if (!zolt.Core.debug_renderer) return;
+        try self.draw(allocator, .record, options.mask(DrawBits.all_flags | DrawBits.color(rng.next() % DrawBits.num_colors)), 0, std.math.maxInt(u32));
+    }
+
     fn moveBody(self: *Scene, allocator: Allocator, body: u32, position: RVec3, rotation: Quat, linear_velocity: Vec3, angular_velocity: Vec3) !void {
         try self.op(allocator, .{ .kind = .move_body, .u = .{ body, 0, 0 }, .d = .{ position.getX(), position.getY(), position.getZ() }, .f = .{
             rotation.getX(),         rotation.getY(),         rotation.getZ(),        rotation.getW(),
             linear_velocity.getX(),  linear_velocity.getY(),  linear_velocity.getZ(), angular_velocity.getX(),
             angular_velocity.getY(), angular_velocity.getZ(), 0,                      0,
         } });
+    }
+};
+
+/// What the draws of a scene may draw: the generator avoids Jolt's undefined behavior
+const DrawOptions = struct {
+    /// The density draws: false when GridSize.GetX() > GetZ() (the quirk lets z pass GetZ(), past the grid)
+    density: bool,
+    /// The skin points: false when the hair has skin points but no skinned scalp vertices (Jolt reads a null pointer)
+    skin_points: bool = true,
+    /// The number of simulated strands (for the random ranges)
+    num_strands: u32,
+
+    /// `bits` without the settings that these options exclude
+    fn mask(self: DrawOptions, bits: u32) u32 {
+        var b = bits;
+        if (!self.density) b &= ~DrawBits.density;
+        if (!self.skin_points) b &= ~DrawBits.skin_points;
+        return b;
+    }
+
+    /// The options for the settings bytes of a scene
+    fn init(settings_bytes: []const u8, opts: struct { skin_points: bool = true }) !DrawOptions {
+        const allocator = std.testing.allocator;
+        const settings = try HairSettings.create(allocator);
+        var ref: RefConst(HairSettings) = .init(settings);
+        defer ref.deinit();
+        var reader: std.Io.Reader = .fixed(settings_bytes);
+        var in = zolt.StreamInWrapper.init(&reader);
+        try settings.restoreBinaryState(in.streamIn());
+        const g = settings.grid_size;
+        return .{ .density = g.getX() <= g.getZ(), .skin_points = opts.skin_points, .num_strands = @intCast(settings.sim_strands.items.len) };
     }
 };
 
@@ -535,12 +667,70 @@ fn zoltRun(allocator: Allocator, scene: *const Scene, t: *Transcript, coverage: 
             .on_teleported => hair.onTeleported(),
             .move_body => bi.setPositionRotationAndVelocity(bodies.items[o.u[0]], loadR3(&o.d), loadQuat(o.f[0..4]), load3(o.f[4..7]), load3(o.f[7..10])),
             .set_scalp_to_head => hair.setScalpToHead(loadMat44(pool[o.u[0]..][0..16])),
+            .draw, .record => {
+                // The hair does not change: the record of the draw replaces the dump
+                try t.record(tag_op | @as(u32, @intCast(op_index)), &.{});
+                if (zolt.Core.debug_renderer) try zoltDraw(allocator, &hair, o, t, coverage) else return error.ParityMismatch;
+                continue;
+            },
         }
 
         try t.record(tag_op | @as(u32, @intCast(op_index)), &.{});
         try dumpHair(t, &hair);
         if (o.kind == .update)
             try dumpReadBack(t, &hair, queue.get().?);
+    }
+}
+
+/// The Hair.DrawSettings of a draw or record operation (HSDrawSettings of HairSceneReference.cpp, only with the debug
+/// renderer)
+fn drawSettings(o: *const Op) Hair.DrawSettings {
+    const bits = o.u[0];
+    return .{
+        .simulation_strand_begin = o.u[1],
+        .simulation_strand_end = o.u[2],
+        .draw_rods = bits & DrawBits.rods != 0,
+        .draw_unloaded_rods = bits & DrawBits.unloaded_rods != 0,
+        .draw_vertex_velocity = bits & DrawBits.vertex_velocity != 0,
+        .draw_angular_velocity = bits & DrawBits.angular_velocity != 0,
+        .draw_orientations = bits & DrawBits.orientations != 0,
+        .draw_neutral_density = bits & DrawBits.neutral_density != 0,
+        .draw_grid_density = bits & DrawBits.grid_density != 0,
+        .draw_grid_velocity = bits & DrawBits.grid_velocity != 0,
+        .draw_skin_points = bits & DrawBits.skin_points != 0,
+        .draw_render_strands = bits & DrawBits.render_strands != 0,
+        .draw_initial_gravity = bits & DrawBits.initial_gravity != 0,
+        .render_strand_color = @enumFromInt((bits >> DrawBits.color_shift) & 7),
+    };
+}
+
+/// A draw or record operation on the Zolt side (only with the debug renderer)
+fn zoltDraw(allocator: Allocator, hair: *Hair, o: *const Op, t: *Transcript, coverage: *Coverage) !void {
+    const settings = drawSettings(o);
+    switch (o.kind) {
+        .draw => {
+            var renderer: pr.ParityRenderer = undefined;
+            try renderer.init(allocator);
+            defer renderer.deinit();
+            renderer.log.bytes.clearRetainingCapacity();
+            hair.draw(&settings, &renderer.base);
+            try t.record(tag_draw, renderer.log.bytes.items);
+            coverage.countDraw(o.u[0], renderer.log.bytes.items, hair);
+        },
+        .record => {
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            defer out.deinit();
+            var wrapper: zolt.StreamOutWrapper = .init(&out.writer);
+            var recorder: zolt.DebugRendererRecorder = undefined;
+            try recorder.init(allocator, io, wrapper.streamOut());
+            defer recorder.deinit();
+            const construction_len = out.written().len;
+            hair.draw(&settings, recorder.debugRenderer());
+            try recorder.endFrame();
+            try t.record(tag_draw | 1, out.written()[construction_len..]);
+            coverage.record_ops += 1;
+        },
+        else => unreachable,
     }
 }
 
@@ -552,6 +742,7 @@ fn tagName(buffer: []u8, tag: u32) []const u8 {
         tag_member => if (index < member_names.len) member_names[index] else "member",
         tag_buffer => if (index < buffer_names.len) buffer_names[index] else if (index == 100) "number of iteration constant buffers" else std.fmt.bufPrint(buffer, "iteration constants {d}", .{index - 101}) catch "iteration constants",
         tag_read => if (index < read_names.len) read_names[index] else "read back",
+        tag_draw => if (index == 0) "draw call log" else ".jor bytes",
         else => "unknown",
     };
 }
@@ -583,6 +774,11 @@ fn compareTranscripts(scene: *const Scene, zolt_bytes: []const u8, jolt_bytes: [
         const z_data = zolt_bytes[z..][0..z_size];
         const j_data = jolt_bytes[j..][0..j_size];
         if (!std.mem.eql(u8, z_data, j_data)) {
+            if (z_tag == tag_draw) {
+                // Report the first call that differs
+                std.debug.print("Hair scene {s}, operation {x}: the draw call logs differ\n", .{ scene.name, op });
+                try pr.compareLogs(scene.name, z_data, j_data);
+            }
             const at = std.mem.indexOfDiff(u8, z_data, j_data).?;
             const word = at & ~@as(usize, 3);
             const z_word = std.mem.readInt(u32, z_data[word..][0..4], .little);
@@ -618,6 +814,55 @@ const Coverage = struct {
     interpolated_updates: u32 = 0,
     /// Scenes whose simulated strands all have the same number of vertices (no padding vertices)
     uniform_scenes: u32 = 0,
+
+    /// The draws (with the debug renderer)
+    draw_ops: u32 = 0,
+    record_ops: u32 = 0,
+    /// The lines of the draws of a single setting (DrawBits order)
+    setting_lines: [DrawBits.num_flags]u64 = @splat(0),
+    /// The lines of the draws of the render strands alone, per color
+    color_lines: [DrawBits.num_colors]u64 = @splat(0),
+    /// Draws of a density on a grid narrower in x than in z, with lines: Jolt's loop bound quirk shows
+    quirk_draws: u32 = 0,
+    /// Calls other than drawLine in the draw logs (Hair::Draw draws lines only)
+    other_calls: u32 = 0,
+
+    /// Count a draw operation with the bits `bits` and the call log `log`
+    fn countDraw(self: *Coverage, bits: u32, log: []const u8, hair: *const Hair) void {
+        self.draw_ops += 1;
+        var num_lines: u64 = 0;
+        var offset: usize = 0;
+        while (offset < log.len) {
+            const size = pr.recordSize(log[offset..]) orelse {
+                self.other_calls += 1;
+                break;
+            };
+            if (log[offset] == @intFromEnum(pr.LogOp.draw_line)) num_lines += 1 else self.other_calls += 1;
+            offset += size;
+        }
+        const flags = bits & DrawBits.all_flags;
+        if (@popCount(flags) == 1) self.setting_lines[@ctz(flags)] += num_lines;
+        if (flags == DrawBits.render_strands) self.color_lines[bits >> DrawBits.color_shift] += num_lines;
+        const g = hair.getHairSettings().grid_size;
+        if (flags & DrawBits.density != 0 and g.getX() < g.getZ() and num_lines > 0) self.quirk_draws += 1;
+    }
+
+    /// With the debug renderer: every setting and every color drew lines (the skin points only when `skin_points`, the
+    /// densities only when `density`), Jolt's loop bound quirk showed when `quirk`, and the logs hold lines only
+    fn expectDraws(self: *const Coverage, opts: struct { skin_points: bool = true, density: bool = true, quirk: bool = false }) !void {
+        if (!zolt.Core.debug_renderer) return;
+        for (self.setting_lines, 0..) |lines, i| {
+            const flag = @as(u32, 1) << @intCast(i);
+            if (lines == 0 and (flag != DrawBits.skin_points or opts.skin_points) and (flag & DrawBits.density == 0 or opts.density)) {
+                std.debug.print("Hair scenes: the draw setting with bit {d} drew no line\n", .{i});
+                return error.TestUnexpectedResult;
+            }
+        }
+        for (self.color_lines) |lines|
+            try std.testing.expect(lines > 0);
+        try std.testing.expectEqual(@as(u32, 0), self.other_calls);
+        if (opts.quirk) try std.testing.expect(self.quirk_draws > 0);
+    }
 };
 
 /// After an update on the Zolt side: count the paths, and check that the scene stays away from Jolt's undefined
@@ -657,11 +902,14 @@ fn checkScene(hair: *Hair, was_teleported: bool, t: *Transcript, coverage: *Cove
     if (hair.target_positions_cb.get() != null and !was_teleported and !global_pose_only and iterates) coverage.interpolated_updates += 1;
 }
 
-/// Run a scene on both sides and compare the transcripts
-fn runScene(allocator: Allocator, scene: *const Scene, coverage: *Coverage) !void {
+/// Run a scene on both sides and compare the transcripts. `asserts` counts the asserts of both sides: the neutral
+/// density draw of a grid narrower in x than in z fails an assert, and Jolt's release build continues (see the file
+/// header).
+fn runScene(allocator: Allocator, scene: *const Scene, coverage: *Coverage, asserts: *ParityHooks.ReleaseAsserts) !void {
     const capacity: u32 = 256 << 20;
     const jolt_buffer = try allocator.alloc(u8, capacity);
     defer allocator.free(jolt_buffer);
+    asserts.begin();
     const jolt_size = jolt.jolt_hs_run(&scene.world, scene.bodies.items.ptr, scene.points.items.ptr, scene.settings.ptr, @intCast(scene.settings.len), &scene.hair, scene.ops.items.ptr, @intCast(scene.ops.items.len), scene.pool.items.ptr, jolt_buffer.ptr, capacity);
     if (jolt_size == null_size) {
         std.debug.print("Hair scene {s}: the C++ side failed (transcript overflow, settings or a body)\n", .{scene.name});
@@ -671,6 +919,7 @@ fn runScene(allocator: Allocator, scene: *const Scene, coverage: *Coverage) !voi
     var t: Transcript = .{ .allocator = allocator };
     defer t.deinit();
     try zoltRun(allocator, scene, &t, coverage);
+    asserts.end(coverage.scenes);
     try compareTranscripts(scene, t.data.items, jolt_buffer[0..jolt_size]);
     if (t.collision_without_hull) {
         std.debug.print("Hair scene {s}: an update collides without a hull in the bounds (R20 UB3)\n", .{scene.name});
@@ -850,7 +1099,14 @@ fn addAwayOps(allocator: Allocator, scene: *Scene, center: Vec3) !void {
     try scene.update(allocator, 1.0 / 60.0);
 }
 
+/// The scenes of a test hit as many asserts on both sides (when both sides count them)
+fn expectAsserts(asserts: *ParityHooks.ReleaseAsserts) !void {
+    asserts.deinit();
+    try std.testing.expectEqual(@as(u32, 0), asserts.mismatches);
+}
+
 fn checkStructSizes() !void {
+    try std.testing.expectEqual(@as(u32, @intFromBool(zolt.Core.debug_renderer)), jolt.jolt_hs_draw_available()); // Both sides follow -Ddebug_renderer
     var sizes: [4]u32 = undefined;
     jolt.jolt_hs_struct_sizes(&sizes);
     try std.testing.expectEqual(@as(u32, @sizeOf(World)), sizes[0]);
@@ -864,6 +1120,9 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
     try checkStructSizes();
     var rng: fw.Rng = .{ .state = 0x4a17_5ce1 };
     var coverage: Coverage = .{};
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("Hair scenes parity: grooms without a scalp among hulls");
+    defer asserts.deinit();
 
     const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, center: Vec3, rotation: Quat = .identity(), gravity: [3]f32 = .{ 0, -9.81, 0 }, optimize: bool = false, num_iterations_per_second: u32 = 360, min_vertices: u32 = 3, max_vertices: u32 = 16, away: bool = false };
     const m3 = materials3();
@@ -893,9 +1152,13 @@ test "Hair scenes parity: grooms without a scalp among hulls" {
         const body = try addBodies(allocator, &scene, &rng, c);
         try addOps(allocator, &scene, c, body);
         if (setup.away) try addAwayOps(allocator, &scene, c);
-        try runScene(allocator, &scene, &coverage);
+        try scene.addDraws(allocator, &rng, try .init(scene.settings, .{}), 3);
+        try runScene(allocator, &scene, &coverage, &asserts);
     }
     try std.testing.expectEqual(@as(u32, setups.len), coverage.scenes);
+    try expectAsserts(&asserts);
+    // The grids are wider in x than in z: no density draw (see the file header), no skin points without a scalp
+    try coverage.expectDraws(.{ .skin_points = false, .density = false });
     // The paths of Update: collision against hulls, collision without a shape in the bounds, the grid on and off for the
     // whole hair, the global pose only path, strands without padding vertices
     try std.testing.expect(coverage.collision_updates > 10 and coverage.no_shape_updates >= 2 and coverage.grid_updates > 10 and coverage.grid_off_updates > 5 and coverage.global_pose_only_updates > 5 and coverage.uniform_scenes == 1);
@@ -926,6 +1189,9 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
     defer face.deinit(allocator);
     var rng: fw.Rng = .{ .state = 0x6f1e_3a2d };
     var coverage: Coverage = .{};
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("Hair scenes parity: grooms on the skinned scalp of Assets/face.bin");
+    defer asserts.deinit();
 
     const Scalp = enum { skinned, no_inverse_bind_pose, external };
     const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, scalp: Scalp = .skinned, follow: bool = true, min_vertices: u32 = 4, max_vertices: u32 = 14 };
@@ -983,9 +1249,15 @@ test "Hair scenes parity: grooms on the skinned scalp of Assets/face.bin" {
         }
         try scene.updateWithFrame(allocator, &face, face.frames[2], 0.0, setup.follow);
         try scene.update(allocator, 1.0 / 60.0); // Without joint matrices: the scalp keeps its last skin
-        try runScene(allocator, &scene, &coverage);
+
+        // Without the inverse bind pose the hair has skin points but no skinned scalp vertices
+        try scene.addDraws(allocator, &rng, try .init(scene.settings, .{ .skin_points = setup.scalp != .no_inverse_bind_pose }), 3);
+        try runScene(allocator, &scene, &coverage, &asserts);
     }
     try std.testing.expectEqual(@as(u32, setups.len), coverage.scenes);
+    try expectAsserts(&asserts);
+    // The grids are wider in x than in z: no density draw (see the file header)
+    try coverage.expectDraws(.{ .density = false });
     // The paths of Update: skinning, the interpolation of the roots, collision, the global pose only path, strands without
     // padding vertices
     try std.testing.expect(coverage.skinned_updates > 10 and coverage.interpolated_updates > 10 and coverage.collision_updates > 10 and coverage.global_pose_only_updates > 5 and coverage.uniform_scenes == 1);
@@ -997,6 +1269,9 @@ test "Hair scenes parity: random scenes" {
     defer if (face_or_null) |*f| f.deinit(allocator);
     var rng: fw.Rng = .{ .state = 0x2c0f_fee5 };
     var coverage: Coverage = .{};
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("Hair scenes parity: random scenes");
+    defer asserts.deinit();
     const num_scenes = 8;
     for (0..num_scenes) |round| {
         const face: ?*const Face = if (face_or_null != null and round % 2 == 1) &face_or_null.? else null;
@@ -1042,8 +1317,106 @@ test "Hair scenes parity: random scenes" {
             for (0..3) |_|
                 try scene.update(allocator, rng.float(0.0, 0.06));
         }
-        try runScene(allocator, &scene, &coverage);
+        try scene.addRandomDraws(allocator, &rng, try .init(scene.settings, .{}), 6);
+        try runScene(allocator, &scene, &coverage, &asserts);
     }
+    try expectAsserts(&asserts);
     try std.testing.expectEqual(@as(u32, num_scenes), coverage.scenes);
     try std.testing.expect(coverage.collision_updates > 10 and coverage.grid_updates > 10);
+}
+
+test "Hair scenes parity: draws (call logs and .jor bytes)" {
+    if (!zolt.Core.debug_renderer) return error.SkipZigTest; // Hair.draw only exists with the option
+    const allocator = std.testing.allocator;
+    try checkStructSizes();
+    var face_or_null = try HairSettingsParity.loadFace(allocator);
+    defer if (face_or_null) |*f| f.deinit(allocator);
+    var rng: fw.Rng = .{ .state = 0x4d72_a3b1 };
+    var coverage: Coverage = .{};
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("Hair scenes parity: draws");
+    defer asserts.deinit();
+
+    // The grids show Jolt's loop bound quirk (z runs to GetX(), x to GetZ()): a cube, x and z the same, a grid narrower
+    // in x than in z (the neutral density fails the assert of GetNeutralDensity, Jolt's release build continues) and a
+    // grid wider in x than in z (no density draw: the planes z >= GetZ() are past the grid in Jolt)
+    const Scalp = enum { none, skinned, no_inverse_bind_pose, external };
+    const Setup = struct { name: []const u8, shape: HairSettingsParity.Shape, materials: []const Material, grid_size: UVec4, center: Vec3 = .zero(), rotation: Quat = .identity(), scalp: Scalp = .none, record: bool = false };
+    const m3 = materials3();
+    const setups = [_]Setup{
+        .{ .name = "draw, cube grid", .shape = .straight, .materials = &m3, .grid_size = .init(8, 8, 8, 0), .record = true },
+        .{ .name = "draw, a grid narrower in x than in z", .shape = .curly, .materials = &.{ withFraction(variantMaterial(2), 0.6), withFraction(variantMaterial(1), 0.5) }, .grid_size = .init(6, 9, 12, 0), .rotation = Quat.rotation(Vec3.axisZ(), 0.3), .record = true },
+        .{ .name = "draw, a grid wider in x than in z", .shape = .curly, .materials = &.{withFraction(variantMaterial(3), 0.7)}, .grid_size = .init(12, 9, 6, 0) },
+        .{ .name = "draw, x and z the same", .shape = .straight, .materials = &.{ withFraction(variantMaterial(0), 0.5), globalPoseOnlyMaterial(0.5) }, .grid_size = .init(10, 6, 10, 0) },
+        .{ .name = "draw, a hair far away", .shape = .curly, .materials = &.{withFraction(variantMaterial(2), 0.8)}, .grid_size = .init(7, 8, 9, 0), .center = Vec3.init(100, 50, -200), .rotation = Quat.rotation(Vec3.init(1, 2, 3).normalized(), 1.1) },
+        .{ .name = "draw, face", .shape = .straight, .materials = &m3, .grid_size = .init(8, 10, 12, 0), .scalp = .skinned, .record = true },
+        .{ .name = "draw, face with the scalp from outside", .shape = .curly, .materials = &.{ withFraction(variantMaterial(0), 0.5), withFraction(variantMaterial(2), 0.4) }, .grid_size = .init(9, 9, 9, 0), .scalp = .external },
+        .{ .name = "draw, face without inverse bind pose", .shape = .straight, .materials = &.{withFraction(variantMaterial(2), 0.5)}, .grid_size = .init(10, 11, 12, 0), .scalp = .no_inverse_bind_pose },
+    };
+    var num_scenes: u32 = 0;
+    for (setups) |setup| {
+        var scene = try Scene.init(allocator, setup.name);
+        defer scene.deinit(allocator);
+        if (setup.scalp == .none) {
+            const c = setup.center;
+            scene.hair.position = .{ c.getX(), c.getY(), c.getZ() };
+            scene.hair.rotation = .{ setup.rotation.getX(), setup.rotation.getY(), setup.rotation.getZ(), setup.rotation.getW() };
+            var groom = try HairSettingsParity.makeGroom(allocator, &rng, null, setup.shape, 30, 3, 12, .{ .random = @intCast(setup.materials.len) });
+            defer groom.deinit(allocator);
+            scene.settings = try settingsBytes(allocator, null, setup.materials, &groom, .{ .grid_size = setup.grid_size });
+            const options: DrawOptions = try .init(scene.settings, .{});
+            _ = try addBodies(allocator, &scene, &rng, c);
+
+            // Draw after updates, after a move without an update (the world transform changed, the read back data did
+            // not), and record a frame
+            const rc = RVec3.fromVec3(c);
+            for ([_]f32{ 1.0 / 60.0, 1.0 / 60.0, 1.0 / 90.0 }) |dt| try scene.update(allocator, dt);
+            try scene.addDraws(allocator, &rng, options, 4);
+            try scene.setPosition(allocator, rc.addVec3(Vec3.init(0.02, -0.01, 0.015)));
+            try scene.setRotation(allocator, setup.rotation.mul(Quat.rotation(Vec3.axisY(), 0.2)));
+            try scene.addDraw(allocator, options, DrawBits.all_flags, 0, std.math.maxInt(u32));
+            try scene.addRandomDraws(allocator, &rng, options, 3);
+            try scene.update(allocator, 0.0123);
+            if (setup.record) try scene.addRecord(allocator, &rng, options);
+            try scene.update(allocator, 1.0 / 60.0);
+            try scene.addRandomDraws(allocator, &rng, options, 4);
+        } else {
+            const face = if (face_or_null) |*f| f else continue;
+
+            // The hair follows the neck joint (see the face test)
+            const neck = face.frames[0][face.head_joint];
+            const neck_position = neck.getTranslation();
+            const neck_rotation = neck.getQuaternion();
+            scene.hair.position = .{ neck_position.getX(), neck_position.getY(), neck_position.getZ() };
+            scene.hair.rotation = .{ neck_rotation.getX(), neck_rotation.getY(), neck_rotation.getZ(), neck_rotation.getW() };
+            var groom = try HairSettingsParity.makeGroom(allocator, &rng, face, setup.shape, 40, 4, 12, .{ .random = @intCast(setup.materials.len) });
+            defer groom.deinit(allocator);
+            var settings = try HairSettingsParity.baseSettings(allocator, face, setup.materials);
+            defer settings.deinit();
+            if (setup.scalp != .skinned) settings.scalp_inverse_bind_pose.clearRetainingCapacity();
+            scene.hair.external_scalp = @intFromBool(setup.scalp == .external);
+            settings.grid_size = setup.grid_size;
+            try settings.initRenderAndSimulationStrands(groom.vertices.items, groom.strands.items);
+            _ = try settings.init();
+            scene.settings = try HairSettingsParity.saveState(allocator, &settings);
+            const options: DrawOptions = try .init(scene.settings, .{ .skin_points = setup.scalp != .no_inverse_bind_pose });
+            _ = try addBodies(allocator, &scene, &rng, neck_position);
+
+            try scene.updateWithFrame(allocator, face, face.frames[0], 0.0, false);
+            try scene.updateWithFrame(allocator, face, face.frames[1], 1.0 / 60.0, true);
+            try scene.updateWithFrame(allocator, face, face.frames[2], 1.0 / 90.0, true);
+            try scene.addDraws(allocator, &rng, options, 4);
+            if (setup.record) try scene.addRecord(allocator, &rng, options);
+            try scene.updateWithFrame(allocator, face, face.frames[1], 0.0123, true);
+            try scene.addRandomDraws(allocator, &rng, options, 4);
+        }
+        try runScene(allocator, &scene, &coverage, &asserts);
+        num_scenes += 1;
+    }
+    try std.testing.expectEqual(num_scenes, coverage.scenes);
+    try std.testing.expect(coverage.record_ops >= 2);
+    // Every setting and color drew, the quirk showed, and the neutral density draws hit Jolt's assert (when Zolt checks
+    // its asserts)
+    try coverage.expectDraws(.{ .skin_points = face_or_null != null, .quirk = true });
+    try asserts.finish();
 }
