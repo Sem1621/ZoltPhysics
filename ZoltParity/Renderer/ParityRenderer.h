@@ -457,7 +457,7 @@ inline BodyManager::DrawSettings ParityBodyDrawSettings(uint32 inBits, uint8 inS
 
 /// Executes the op stream of ParityRenderer.zig on inRenderer (D0's ops 1 to 15: the virtual functions and the helpers of
 /// DebugRenderer that D0 found ported; D1's ops 16 to 36: the other helpers, NextFrame and the batch helpers; D2's ops 64
-/// to 69: the shapes of ioShapes; D3's ops 96 to 103: the constraints and bodies of ioPhysics). ioSimple and ioRecorder
+/// to 69: the shapes of ioShapes; D3's ops 96 to 104: the constraints and bodies of ioPhysics). ioSimple and ioRecorder
 /// are the renderer as a DebugRendererSimple / DebugRendererRecorder (or null) for the ops that only they have. The shape
 /// ops change the static draw flags of the shapes: the caller resets them (ParitySetShapeDrawFlags(0)).
 inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder, ParityShapeContext *ioShapes = nullptr, ParityPhysicsContext *ioPhysics = nullptr)
@@ -1021,6 +1021,13 @@ inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t i
 					physics.mBodyManager->ActivateBodies(&id, 1);
 				else
 					physics.mBodyManager->DeactivateBodies(&id, 1);
+				break;
+			}
+
+		case 104: // MotionProperties::SetIslandIndexInternal: u32 body (not static), u32 index
+			{
+				Body *body = ParityPhysics(ioPhysics).mBodies[r.Read<uint32>()];
+				body->GetMotionProperties()->SetIslandIndexInternal(r.Read<uint32>());
 				break;
 			}
 

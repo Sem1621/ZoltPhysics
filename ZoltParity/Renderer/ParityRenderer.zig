@@ -13,7 +13,7 @@
 //!     1..15     D0: the virtual functions and the helpers that D0 found ported
 //!     16..63    D1: the remaining helpers of DebugRenderer (16..36 used)
 //!     64..95    D2: shapes (64..69 used; the shapes come from a `ShapeContext`, see `runOpsWithShapes`)
-//!     96..127   D3: constraints and bodies (96..103 used; the objects come from a `PhysicsContext`, see
+//!     96..127   D3: constraints and bodies (96..104 used; the objects come from a `PhysicsContext`, see
 //!               `runOpsWithContext`)
 //!     128..191  D4: characters, vehicles, skeletons, soft bodies
 //!     192..223  H3: hair
@@ -404,6 +404,9 @@ pub const Op = enum(u8) {
     move_body = 102,
     /// BodyManager::ActivateBodies (u8 1) or DeactivateBodies (u8 0) of one body: u32 body, u8 activate
     activate_body = 103,
+    /// MotionProperties::SetIslandIndexInternal (the index that PhysicsSystem's island builder sets; EShapeColor::
+    /// IslandColor reads it): u32 body (not static), u32 index
+    set_island_index = 104,
     _,
 };
 
@@ -491,10 +494,25 @@ pub const PhysicsContext = struct {
     bodies: []const *zolt.Body = &.{},
     /// The results of the ops that compute numbers (update_sleep_state)
     results: std.ArrayList(u8) = .empty,
+    /// Called before the op `draw_constraint` draws (the Zolt side only: the coverage of the conditional draws)
+    on_draw_constraint: ?OnDrawConstraint = null,
+    /// Called before the op `draw_bodies` draws (the Zolt side only: the coverage of the conditional draws)
+    on_draw_bodies: ?OnDrawBodies = null,
 
     pub const StepConstraint = struct {
         context: *anyopaque,
         call: *const fn (context: *anyopaque, index: u32) anyerror!void,
+    };
+
+    pub const OnDrawConstraint = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, constraint: *zolt.Constraint, what: ConstraintDraw) void,
+    };
+
+    pub const OnDrawBodies = struct {
+        context: *anyopaque,
+        /// `filter`: the ParityBodyDrawFilter is used
+        call: *const fn (context: *anyopaque, settings: *const zolt.BodyManager.DrawSettings, filter: bool) void,
     };
 
     pub fn deinit(self: *PhysicsContext) void {
@@ -1067,6 +1085,12 @@ pub const OpWriter = struct {
         try self.writeRaw(@as(u8, @intFromBool(activate)));
     }
 
+    pub fn setIslandIndex(self: *OpWriter, body: u32, index: u32) Allocator.Error!void {
+        try self.writeOp(.set_island_index);
+        try self.writeRaw(body);
+        try self.writeRaw(index);
+    }
+
     pub fn createBatchTriangles(self: *OpWriter, triangles: []const TriangleData) Allocator.Error!void {
         try self.writeOp(.create_batch_triangles);
         try self.writeRaw(@as(u32, @intCast(triangles.len)));
@@ -1440,7 +1464,7 @@ pub fn runOpsWithContext(allocator: Allocator, renderer: *DebugRenderer, ops: []
                 if (comptime !zolt.Core.debug_renderer) unreachable; // The shapes only draw with the option
                 try runShapeOp(op, &r, renderer, shapes orelse @panic("runOps: a shape op without a ShapeContext"));
             },
-            .draw_constraint, .set_draw_constraint_size, .step_constraint, .draw_constraint_manager, .draw_bodies, .update_sleep_state, .move_body, .activate_body => {
+            .draw_constraint, .set_draw_constraint_size, .step_constraint, .draw_constraint_manager, .draw_bodies, .update_sleep_state, .move_body, .activate_body, .set_island_index => {
                 if (comptime !zolt.Core.debug_renderer) unreachable; // The constraints and bodies only draw with the option
                 try runPhysicsOp(op, &r, renderer, physics orelse @panic("runOps: a constraint or body op without a PhysicsContext"));
             },
@@ -1530,7 +1554,9 @@ fn runPhysicsOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *Physic
     switch (op) {
         .draw_constraint => {
             const c = context.constraints[r.read(u32)];
-            switch (@as(ConstraintDraw, @enumFromInt(r.read(u8)))) {
+            const what: ConstraintDraw = @enumFromInt(r.read(u8));
+            if (context.on_draw_constraint) |on_draw| on_draw.call(on_draw.context, c, what);
+            switch (what) {
                 .constraint => c.drawConstraint(renderer),
                 .limits => c.drawConstraintLimits(renderer),
                 .reference_frame => c.drawConstraintReferenceFrame(renderer),
@@ -1560,7 +1586,9 @@ fn runPhysicsOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *Physic
             var physics_settings: zolt.PhysicsSettings = .{};
             physics_settings.time_before_sleep = r.read(f32);
             const filter: ParityBodyDrawFilter = .{};
-            manager.draw(&settings, &physics_settings, renderer, .{ .body_filter = if (r.read(u8) != 0) &filter.base else null });
+            const use_filter = r.read(u8) != 0;
+            if (context.on_draw_bodies) |on_draw| on_draw.call(on_draw.context, &settings, use_filter);
+            manager.draw(&settings, &physics_settings, renderer, .{ .body_filter = if (use_filter) &filter.base else null });
         },
         .update_sleep_state => {
             const body = context.bodies[r.read(u32)];
@@ -1581,6 +1609,10 @@ fn runPhysicsOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *Physic
             const manager = context.body_manager orelse @panic("runOps: activate_body without a BodyManager");
             const id = context.bodies[r.read(u32)].getID();
             if (r.read(u8) != 0) manager.activateBodies(&.{id}) else manager.deactivateBodies(&.{id});
+        },
+        .set_island_index => {
+            const body = context.bodies[r.read(u32)];
+            body.getMotionPropertiesMut().setIslandIndexInternal(r.read(u32));
         },
         else => unreachable,
     }

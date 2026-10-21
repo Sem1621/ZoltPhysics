@@ -159,7 +159,9 @@ jobs:
             record: ''
           # The debug renderer does not change results: the same hashes with the option (Zolt) and with
           # JPH_DEBUG_RENDERER (the C++ oracle), also while every frame is recorded (-r, the tests with -t=max).
-          # Docs/Zolt/RemainingFeaturesArchitecture.md section 5.
+          # Docs/Zolt/RemainingFeaturesArchitecture.md section 5. Both precisions: the .jor check below compares the
+          # recorded bytes, and double precision writes RVec3 and RMat44 with doubles (section 4: every layer runs in
+          # single and double precision).
           - double_precision: false
             debug_renderer: true
             pyramid_hash: '0x74d0118836ac0892'
@@ -167,6 +169,14 @@ jobs:
             high_speed_hash: '0x58d8d892536f4021'
             character_virtual_hash: '0xc1d4e05b164b1221'
             ragdoll_hash: '0x3be6ea76c07a2ac8'
+            record: '-r'
+          - double_precision: true
+            debug_renderer: true
+            pyramid_hash: '0xf07f04597a102a82'
+            convex_vs_mesh_hash: '0x3729e7890b93a289'
+            high_speed_hash: '0x183f48cb94739ce'
+            character_virtual_hash: '0xa0b16727aa16fdb0'
+            ragdoll_hash: '0x8dd6bc501859a228'
             record: '-r'
     steps:
     - name: Checkout Code

@@ -1,24 +1,34 @@
 //! Parity tests of the constraint and body draws (Docs/Zolt/RemainingFeaturesArchitecture.md section 4, "Draw call
 //! log", group D3). C ABI wrappers: `jolt_dr_run_physics_ops` and `jolt_dr_body_world_*` in
 //! ZoltParity/Renderer/DebugRendererReference.cpp, the constraint world `jolt_cs_draw_world_*` in
-//! ZoltParity/Physics/ConstraintsReference.cpp (`DrawWorld` in ConstraintsParity.zig). The ops (96 to 103) are in
+//! ZoltParity/Physics/ConstraintsReference.cpp (`DrawWorld` in ConstraintsParity.zig). The ops (96 to 104) are in
 //! ParityRenderer.zig and ParityRenderer.h.
 //!
 //! The layers (they exist only with -Ddebug_renderer=true, without the option they skip):
 //! - constraints: a DrawWorld with 3 random scenarios of every constraint kind (the generator of ConstraintsParity:
-//!   random bodies, settings, draw sizes, operations and solver steps; far from the origin too in double precision). In
-//!   every frame every scenario runs its next frame (its operations and solver steps), then each constraint is drawn
-//!   with DrawConstraint, DrawConstraintLimits and DrawConstraintReferenceFrame, the ConstraintManager draws all of them
-//!   the three ways, BodyManager::Draw draws the bodies of the scenarios and some draw sizes change (0.001 to 4). The
-//!   frames go past the last frame of every scenario.
+//!   random bodies, settings, draw sizes, operations and solver steps; far from the origin too in double precision) and
+//!   the forced scenarios of ConstraintsParity (a SixDOF constraint with the pyramid swing type and rotation motors, a
+//!   path constraint with a velocity motor). In every frame every scenario runs its next frame (its operations and solver
+//!   steps), then each constraint is drawn with DrawConstraint, DrawConstraintLimits and DrawConstraintReferenceFrame,
+//!   the ConstraintManager draws all of them the three ways, BodyManager::Draw draws the bodies of the scenarios and some
+//!   draw sizes change (0.001 to 4). The frames go past the last frame of every scenario.
 //! - bodies: a BodyManager with two bodies per shape of the pairwise catalogue (PairwiseParity.makeCatalogue): every
 //!   motion type (static only for the shapes that must be static), sensors, restricted DOFs, the three ways to get the
 //!   mass and inertia (provided for shapes without mass), some active and some asleep. Every frame draws with all flags
 //!   in every EShapeColor, with each flag alone, and with random flag sets, times before sleep (zero too) and
 //!   ESoftBodyConstraintColors, with and without a BodyDrawFilter. Between the frames bodies move, update their sleep
-//!   state (the ECanSleep results are compared too) and activate or deactivate.
+//!   state (the ECanSleep results are compared too), activate or deactivate and get island indices (the island builder
+//!   of PhysicsSystem sets them; EShapeColor::IslandColor reads them).
 //! - DebugRendererSimple: a few frames of both on a DebugRendererSimple that logs its lines.
+//! - DebugRendererRecorder: a few frames of both on Jolt's and Zolt's recorder, with EndFrame after each frame. The .jor
+//!   bytes after the construction must be equal. In double precision too: the .jor check of the performance test scenes
+//!   (DebugRendererCheck.zig) draws only bodies.
 //! The call logs must match call for call.
+//!
+//! The coverage of the conditional draws: the constraint and body layers fail when a branch of a draw function was never
+//! reached (`DrawCoverage`): the motor, limit, swing type and length branches of the constraints' DrawConstraint and
+//! DrawConstraintLimits, and the island color of a body with and without an island index. The branches are evaluated on
+//! the Zolt side before each draw; the logs match call for call, so Jolt takes the same branches.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -38,6 +48,7 @@ const Real = zolt.Real;
 const RVec3 = zolt.RVec3;
 const Shape = zolt.Shape;
 const Vec3 = zolt.Vec3;
+const virtual = zolt.virtual;
 const BodyDrawBits = pr.BodyDrawBits;
 const JoltResult = pr.JoltResult;
 
@@ -59,7 +70,7 @@ fn requireDebugRenderer() !void {
 }
 
 /// The renderer that runs the ops (the `kind` of jolt_dr_run_physics_ops)
-const Kind = enum(c_int) { parity_renderer = 0, simple = 1 };
+const Kind = enum(c_int) { parity_renderer = 0, simple = 1, recorder = 2 };
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The body world
@@ -283,7 +294,7 @@ const Generator = struct {
 /// because some draws read members that SetupVelocityConstraint computes and that Jolt leaves uninitialized before
 /// (PathConstraint's mR1, mR2 and path frame; Zolt starts them at zero, see PathConstraint.zig). The parity never draws
 /// a constraint before its first step.
-fn makeConstraintOps(w: *pr.OpWriter, num_constraints: u32, seed: u32, frames: u32) !void {
+fn makeConstraintOps(w: *pr.OpWriter, num_constraints: u32, seed: u32, frames: u32, end_frames: bool) !void {
     var g: Generator = .{ .gen = .{ .rng = .{ .state = seed } }, .w = w };
     for (0..frames) |_| {
         for (0..num_constraints) |i| try w.stepConstraint(@intCast(i));
@@ -303,12 +314,13 @@ fn makeConstraintOps(w: *pr.OpWriter, num_constraints: u32, seed: u32, frames: u
             const c = g.gen.index(num_constraints);
             try w.drawConstraint(c, @enumFromInt(g.gen.index(3)));
         }
+        if (end_frames) try w.endFrame();
     }
 }
 
 /// The ops of the body layer: the body draws of every frame, and between the frames the bodies move, update their sleep
-/// state and activate or deactivate
-fn makeBodyOps(w: *pr.OpWriter, world: *const BodyWorld, seed: u32, frames: u32, random_draws: u32) !void {
+/// state, activate or deactivate and get island indices
+fn makeBodyOps(w: *pr.OpWriter, world: *const BodyWorld, seed: u32, frames: u32, random_draws: u32, end_frames: bool) !void {
     var g: Generator = .{ .gen = .{ .rng = .{ .state = seed } }, .w = w };
     // The positions of the bodies as the ops move them
     const positions = try allocator.alloc(RVec3, world.descs.len);
@@ -317,6 +329,7 @@ fn makeBodyOps(w: *pr.OpWriter, world: *const BodyWorld, seed: u32, frames: u32,
 
     for (0..frames) |frame| {
         try g.bodyDraws(frame, random_draws);
+        if (end_frames) try w.endFrame();
         for (world.descs, positions, 0..) |*d, *p, i| {
             if (d.motion_type == 0) continue; // Static bodies have no sleep state
             const b: u32 = @intCast(i);
@@ -334,9 +347,169 @@ fn makeBodyOps(w: *pr.OpWriter, world: *const BodyWorld, seed: u32, frames: u32,
             }
             try w.updateSleepState(b, g.gen.float(0.01, 0.4), g.gen.float(0.01, 1), g.gen.float(0.2, 1));
             if (g.gen.chance(10)) try w.activateBody(b, g.gen.chance(50));
+            // An island index (also above the 32 distinct colors) or none (DeactivateBodies resets it too)
+            if (g.gen.chance(40)) try w.setIslandIndex(b, if (g.gen.chance(20)) Body.inactive_index else @intCast(g.gen.index(70)));
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The coverage of the conditional draws
+
+/// The branches of the draw functions that a layer must reach (each at least once). They are evaluated on the Zolt side
+/// before each draw (`PhysicsContext.on_draw_constraint` / `on_draw_bodies`) with the conditions of the draw function.
+const DrawCoverage = struct {
+    names: [40][]const u8 = undefined,
+    hits: [40]u32 = @splat(0),
+    count: usize = 0,
+
+    fn hit(self: *DrawCoverage, comptime name: []const u8, condition: bool) void {
+        for (self.names[0..self.count], 0..) |n, k| {
+            if (std.mem.eql(u8, n, name)) {
+                if (condition) self.hits[k] += 1;
+                return;
+            }
+        }
+        self.names[self.count] = name;
+        self.hits[self.count] = @intFromBool(condition);
+        self.count += 1;
+    }
+
+    fn expectAllReached(self: *const DrawCoverage, layer: []const u8) !void {
+        var ok = true;
+        for (self.names[0..self.count], self.hits[0..self.count]) |n, h| {
+            if (h == 0) {
+                std.debug.print("{s}: the draw branch '{s}' was never reached\n", .{ layer, n });
+                ok = false;
+            }
+        }
+        if (!ok) return error.CoverageNotReached;
+    }
+
+    /// The branches of DrawConstraint / DrawConstraintLimits of `c` (DrawConstraintReferenceFrame has none)
+    fn constraintDraw(self: *DrawCoverage, c: *zolt.Constraint, what: pr.ConstraintDraw) void {
+        const two_body = virtual.downcast(zolt.TwoBodyConstraint, c);
+        switch (what) {
+            .constraint => switch (c.getSubType()) {
+                .distance => {
+                    // DistanceConstraint::DrawConstraint: the length against the min and max distance
+                    const d = virtual.downcast(zolt.DistanceConstraint, two_body);
+                    const len = d.world_space_position2.sub(d.world_space_position1).toVec3().length();
+                    self.hit("Distance: shorter than the min distance", len < d.min_distance);
+                    self.hit("Distance: longer than the max distance", !(len < d.min_distance) and len > d.max_distance);
+                    self.hit("Distance: between the min and max distance", !(len < d.min_distance) and !(len > d.max_distance));
+                },
+                .pulley => {
+                    // PulleyConstraint::DrawConstraint: the color of the length
+                    const p = virtual.downcast(zolt.PulleyConstraint, two_body);
+                    const length = p.getCurrentLength();
+                    self.hit("Pulley: shorter than the min length (yellow)", length < p.min_length);
+                    self.hit("Pulley: longer than the max length (red)", !(length < p.min_length) and length > p.max_length);
+                    self.hit("Pulley: between the min and max length (green)", !(length < p.min_length) and !(length > p.max_length));
+                },
+                .slider => {
+                    const sl = virtual.downcast(zolt.SliderConstraint, two_body);
+                    self.hit("Slider: position motor marker", zolt.isPositionMotor(sl.motor_state));
+                    self.hit("Slider: velocity motor arrow", zolt.isVelocityMotor(sl.motor_state));
+                    self.hit("Slider: motor off", sl.motor_state == .off);
+                },
+                .swing_twist => {
+                    const st = virtual.downcast(zolt.SwingTwistConstraint, two_body);
+                    self.hit("SwingTwist: velocity motor arrow", zolt.isVelocityMotor(st.swing_motor_state) or zolt.isVelocityMotor(st.twist_motor_state));
+                    self.hit("SwingTwist: position motor swing and twist", zolt.isPositionMotor(st.swing_motor_state) or zolt.isPositionMotor(st.twist_motor_state));
+                    self.hit("SwingTwist: motors off", st.swing_motor_state == .off and st.twist_motor_state == .off);
+                },
+                .six_dof => {
+                    // SixDOFConstraint::DrawConstraint (IsRotationConstrained and IsRotationFullyConstrained are private)
+                    const sd = virtual.downcast(zolt.SixDOFConstraint, two_body);
+                    const rotation_constrained = (sd.free_axis & 0b111000) != 0b111000;
+                    const rotation_fully_constrained = (sd.fixed_axis & 0b111000) == 0b111000;
+                    const swing_twist = (rotation_constrained or sd.rotation_position_motor_active != 0) and !rotation_fully_constrained;
+                    self.hit("SixDOF: current swing and twist", swing_twist);
+                    self.hit("SixDOF: no current swing and twist", !swing_twist);
+                    const rotation_x = @intFromEnum(zolt.SixDOFConstraint.Axis.rotation_x);
+                    self.hit("SixDOF: target twist (rotation X position motor)", zolt.isPositionMotor(sd.motor_state[rotation_x]));
+                    self.hit("SixDOF: target swing (rotation Y or Z position motor)", zolt.isPositionMotor(sd.motor_state[rotation_x + 1]) or zolt.isPositionMotor(sd.motor_state[rotation_x + 2]));
+                    var velocity_motor = false;
+                    var target_angular_velocity = Vec3.zero();
+                    for (0..3) |i| {
+                        if (zolt.isVelocityMotor(sd.motor_state[rotation_x + i])) {
+                            velocity_motor = true;
+                            target_angular_velocity.setComponent(@intCast(i), sd.target_angular_velocity.getComponent(@intCast(i)));
+                        }
+                    }
+                    self.hit("SixDOF: rotation velocity motor", velocity_motor);
+                    self.hit("SixDOF: target angular velocity arrow", !target_angular_velocity.eql(Vec3.zero()));
+                },
+                .path => {
+                    const pc = virtual.downcast(zolt.PathConstraint, two_body);
+                    const has_path = pc.path.get() != null;
+                    self.hit("Path: no path", !has_path);
+                    self.hit("Path: position motor target marker", has_path and zolt.isPositionMotor(pc.position_motor_state));
+                    self.hit("Path: velocity motor arrow", has_path and zolt.isVelocityMotor(pc.position_motor_state));
+                },
+                else => {},
+            },
+            .limits => switch (c.getSubType()) {
+                .hinge => {
+                    const h = virtual.downcast(zolt.HingeConstraint, two_body);
+                    self.hit("Hinge: limits pie", h.has_limits and h.limits_max > h.limits_min);
+                    self.hit("Hinge: no limits pie", !(h.has_limits and h.limits_max > h.limits_min));
+                },
+                .slider => {
+                    const sl = virtual.downcast(zolt.SliderConstraint, two_body);
+                    self.hit("Slider: limits", sl.has_limits);
+                    self.hit("Slider: no limits", !sl.has_limits);
+                },
+                .swing_twist => {
+                    const st = virtual.downcast(zolt.SwingTwistConstraint, two_body);
+                    self.hit("SwingTwist: swing pyramid limits", st.swing_twist_constraint_part.getSwingType() == .pyramid);
+                    self.hit("SwingTwist: swing cone limits", st.swing_twist_constraint_part.getSwingType() == .cone);
+                },
+                .six_dof => {
+                    const sd = virtual.downcast(zolt.SixDOFConstraint, two_body);
+                    self.hit("SixDOF: swing pyramid limits", sd.swing_twist_constraint_part.getSwingType() == .pyramid);
+                    self.hit("SixDOF: swing cone limits", sd.swing_twist_constraint_part.getSwingType() == .cone);
+                },
+                else => {},
+            },
+            .reference_frame => {},
+        }
+    }
+
+    fn onDrawConstraint(context: *anyopaque, c: *zolt.Constraint, what: pr.ConstraintDraw) void {
+        const self: *DrawCoverage = @ptrCast(@alignCast(context));
+        self.constraintDraw(c, what);
+    }
+
+    /// The island color branch of BodyManager::Draw (`bodies`: the bodies of the layer, the ParityBodyDrawFilter skips
+    /// the bodies whose index % 3 is 1). The color is used by the shape, the bounding box and the support function.
+    fn bodyDraw(self: *DrawCoverage, bodies: []const *Body, settings: *const BodyManager.DrawSettings, filter: bool) void {
+        if (comptime !zolt.Core.debug_renderer) return;
+        const uses_color = settings.draw_shape or settings.draw_bounding_box or settings.draw_get_support_function;
+        if (settings.draw_shape_color != .island_color or !uses_color) return;
+        var with_index = false;
+        var without_index = false;
+        for (bodies) |body| {
+            if (!body.isInBroadPhase() or body.isSensor() or body.isStatic()) continue;
+            if (filter and body.getID().getIndex() % 3 == 1) continue;
+            if (body.getMotionProperties().getIslandIndexInternal() != Body.inactive_index) with_index = true else without_index = true;
+        }
+        self.hit("BodyManager: island color of a body with an island index", with_index);
+        self.hit("BodyManager: island color of a body without an island index (light grey)", without_index);
+    }
+
+    /// `bodyDraw` with the bodies of a BodyWorld
+    const BodyContext = struct {
+        coverage: *DrawCoverage,
+        bodies: []const *Body,
+
+        fn onDrawBodies(context: *anyopaque, settings: *const BodyManager.DrawSettings, filter: bool) void {
+            const self: *BodyContext = @ptrCast(@alignCast(context));
+            self.coverage.bodyDraw(self.bodies, settings, filter);
+        }
+    };
+};
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The layers
@@ -354,8 +527,17 @@ fn compareResults(name: []const u8, zolt_results: []const u8, jolt_results: []co
     return error.ParityMismatch;
 }
 
+/// Compare the .jor bytes of the recorders (after the construction)
+fn compareBytes(name: []const u8, zolt_bytes: []const u8, jolt_bytes: []const u8) !void {
+    if (std.mem.eql(u8, zolt_bytes, jolt_bytes))
+        return;
+    const index = std.mem.indexOfDiff(u8, zolt_bytes, jolt_bytes).?;
+    std.debug.print("{s}: the .jor bytes differ at byte {d} of {d} (zolt) / {d} (jolt)\n  zolt: {x}\n  jolt: {x}\n", .{ name, index, zolt_bytes.len, jolt_bytes.len, zolt_bytes[index..@min(index + 64, zolt_bytes.len)], jolt_bytes[index..@min(index + 64, jolt_bytes.len)] });
+    return error.ParityMismatch;
+}
+
 /// Run the ops on Zolt's and Jolt's renderer of `kind` with the objects of `context` / the C++ worlds, compare the logs
-/// and the results. `context.results` holds the Zolt results afterwards.
+/// (the .jor bytes for the recorder) and the results. `context.results` holds the Zolt results afterwards.
 fn runLayer(name: []const u8, ops: []const u8, kind: Kind, context: *pr.PhysicsContext, jolt_constraint_world: ?*anyopaque, jolt_body_world: ?*anyopaque) !void {
     // Jolt first: both sides start from the same state, the ops change it (steps, moves, sleep states)
     const result: JoltResult = .{ .handle = jolt.jolt_dr_run_physics_ops(jolt_constraint_world, @intCast(context.constraints.len), jolt_body_world, ops.ptr, ops.len, @intFromEnum(kind)).? };
@@ -378,59 +560,104 @@ fn runLayer(name: []const u8, ops: []const u8, kind: Kind, context: *pr.PhysicsC
             try pr.runOpsWithContext(allocator, renderer.base.debugRenderer(), ops, &renderer.base, null, null, context);
             try pr.compareLogs(name, renderer.log.bytes.items, result.part(0));
         },
+        .recorder => {
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            defer out.deinit();
+            var wrapper: zolt.StreamOutWrapper = .init(&out.writer);
+            var recorder: zolt.DebugRendererRecorder = undefined;
+            try recorder.init(allocator, io, wrapper.streamOut());
+            defer recorder.deinit();
+            const construction_len = out.written().len;
+            try pr.runOpsWithContext(allocator, recorder.debugRenderer(), ops, null, &recorder, null, context);
+            try compareBytes(name, out.written()[construction_len..], result.part(0));
+        },
     }
     try compareResults(name, context.results.items, result.part(1));
 }
 
-/// The constraint layer: a DrawWorld of `seeds`, `frames` frames of makeConstraintOps
-fn runConstraintLayer(name: []const u8, seed: u32, kind: Kind, num_seeds: u32, frames: u32) !void {
+/// Options of the constraint and body layers
+const LayerOptions = struct {
+    /// Number of frames
+    frames: u32,
+    /// The constraint layer: the number of seeds (each makes a scenario of every kind)
+    num_seeds: u32 = 1,
+    /// The constraint layer: the forced scenarios of ConstraintsParity (`DrawWorld.Options.forced_draws`)
+    forced_draws: bool = true,
+    /// The body layer: random BodyManager::Draw calls per frame
+    random_draws: u32 = 4,
+    /// EndFrame after each frame (the recorder)
+    end_frames: bool = false,
+    /// Fail when a branch of a draw function was never reached (`DrawCoverage`)
+    coverage: bool = false,
+};
+
+/// The constraint layer: a DrawWorld of `options.num_seeds` seeds from `seed`, `options.frames` frames of
+/// makeConstraintOps
+fn runConstraintLayer(name: []const u8, seed: u32, kind: Kind, options: LayerOptions) !void {
     var seeds: [8]u32 = undefined;
-    for (seeds[0..num_seeds], 0..) |*s, i| s.* = seed +% @as(u32, @intCast(1000 * i));
-    const world = try cs.DrawWorld.create(allocator, seeds[0..num_seeds]);
+    for (seeds[0..options.num_seeds], 0..) |*s, i| s.* = seed +% @as(u32, @intCast(1000 * i));
+    const world = try cs.DrawWorld.create(allocator, seeds[0..options.num_seeds], .{ .forced_draws = options.forced_draws });
     defer world.destroy();
 
     var w: pr.OpWriter = .{ .allocator = allocator };
     defer w.deinit();
-    try makeConstraintOps(&w, @intCast(world.constraints.len), seed, frames);
+    try makeConstraintOps(&w, @intCast(world.constraints.len), seed, options.frames, options.end_frames);
 
+    var coverage: DrawCoverage = .{};
     var context: pr.PhysicsContext = .{
         .allocator = allocator,
         .constraints = world.constraints,
         .step_constraint = .{ .context = world, .call = cs.DrawWorld.stepCallback },
         .constraint_manager = &world.constraint_manager,
         .body_manager = &world.world.body_manager,
+        .on_draw_constraint = if (options.coverage) .{ .context = &coverage, .call = DrawCoverage.onDrawConstraint } else null,
     };
     defer context.deinit();
     try runLayer(name, w.bytes.items, kind, &context, world.jolt_world, null);
+    if (options.coverage) try coverage.expectAllReached(name);
 }
 
-/// The body layer: a BodyWorld, `frames` frames of makeBodyOps
-fn runBodyLayer(name: []const u8, seed: u32, kind: Kind, frames: u32, random_draws: u32) !void {
+/// The body layer: a BodyWorld, `options.frames` frames of makeBodyOps
+fn runBodyLayer(name: []const u8, seed: u32, kind: Kind, options: LayerOptions) !void {
     try std.testing.expectEqual(@as(u32, @sizeOf(DRBodyDesc)), jolt.jolt_dr_body_desc_size());
     const world = try BodyWorld.create();
     defer world.destroy();
 
     var w: pr.OpWriter = .{ .allocator = allocator };
     defer w.deinit();
-    try makeBodyOps(&w, world, seed, frames, random_draws);
+    try makeBodyOps(&w, world, seed, options.frames, options.random_draws, options.end_frames);
 
-    var context: pr.PhysicsContext = .{ .allocator = allocator, .body_manager = &world.body_manager, .bodies = world.bodies };
+    var coverage: DrawCoverage = .{};
+    var body_context: DrawCoverage.BodyContext = .{ .coverage = &coverage, .bodies = world.bodies };
+    var context: pr.PhysicsContext = .{
+        .allocator = allocator,
+        .body_manager = &world.body_manager,
+        .bodies = world.bodies,
+        .on_draw_bodies = if (options.coverage) .{ .context = &body_context, .call = DrawCoverage.BodyContext.onDrawBodies } else null,
+    };
     defer context.deinit();
     try runLayer(name, w.bytes.items, kind, &context, null, world.jolt_world);
+    if (options.coverage) try coverage.expectAllReached(name);
 }
 
 test "Physics draw parity: constraints of every kind, the three draws, draw sizes, frames (call log)" {
     try requireDebugRenderer();
-    try runConstraintLayer("constraint draws", 0xd3000001, .parity_renderer, 3, 6);
+    try runConstraintLayer("constraint draws", 0xd3000001, .parity_renderer, .{ .frames = 6, .num_seeds = 3, .coverage = true });
 }
 
 test "Physics draw parity: BodyManager::Draw of catalogue bodies, every flag and color, with a filter (call log)" {
     try requireDebugRenderer();
-    try runBodyLayer("body draws", 0xd3000002, .parity_renderer, 3, 12);
+    try runBodyLayer("body draws", 0xd3000002, .parity_renderer, .{ .frames = 3, .random_draws = 12, .coverage = true });
 }
 
 test "Physics draw parity: DebugRendererSimple (call log)" {
     try requireDebugRenderer();
-    try runConstraintLayer("constraint draws: DebugRendererSimple", 0xd3000003, .simple, 1, 3);
-    try runBodyLayer("body draws: DebugRendererSimple", 0xd3000004, .simple, 1, 4);
+    try runConstraintLayer("constraint draws: DebugRendererSimple", 0xd3000003, .simple, .{ .frames = 3 });
+    try runBodyLayer("body draws: DebugRendererSimple", 0xd3000004, .simple, .{ .frames = 1 });
+}
+
+test "Physics draw parity: DebugRendererRecorder (.jor bytes of constraint and body frames)" {
+    try requireDebugRenderer();
+    try runConstraintLayer("constraint draws: recorder", 0xd3000005, .recorder, .{ .frames = 4, .end_frames = true });
+    try runBodyLayer("body draws: recorder", 0xd3000006, .recorder, .{ .frames = 2, .end_frames = true });
 }

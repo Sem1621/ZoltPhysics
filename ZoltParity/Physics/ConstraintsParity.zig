@@ -100,6 +100,7 @@ const scenario_iterations = 3000;
 /// The C++ reference functions, see ConstraintsReference.cpp
 const jolt = struct {
     extern fn jolt_cs_struct_sizes(out: *[12]u32) void;
+    extern fn jolt_cs_hooks_installed() u32;
     extern fn jolt_cs_world_create() *anyopaque;
     extern fn jolt_cs_world_destroy(world: *anyopaque) void;
     extern fn jolt_cs_run(world: *anyopaque, scenario: *const CSScenario, output: *CSOutput) void;
@@ -3081,7 +3082,7 @@ pub fn makeDescriptionSettings(allocator: Allocator, d: *const CSSettings) !Ref(
 /// ConstraintManager in one call. `step` runs the next frame of the scenario of a constraint like jolt_cs_run, without
 /// records: the operations of the frame, SetupVelocityConstraint, WarmStartVelocityConstraint, the velocity steps and the
 /// position steps. After the last frame it applies the operations after the last frame once, then does nothing.
-/// The C++ world is allocated zero filled (jolt_cs_draw_world_create): a pulley with a static body reads members of
+/// The C++ side allocates zero filled blocks (CSEnsureFactory): a pulley with a static body reads members of
 /// IndependentAxisConstraintPart that Jolt never writes, and Zolt starts them at zero.
 pub const DrawWorld = struct {
     allocator: Allocator,
@@ -3096,9 +3097,16 @@ pub const DrawWorld = struct {
     /// The C++ side (jolt_cs_draw_world_create)
     jolt_world: *anyopaque,
 
+    pub const Options = struct {
+        /// Add the scenarios of `forcedDrawScenarios` (of the first seed) after the random ones
+        forced_draws: bool = false,
+    };
+
     /// A world with the scenarios of `seeds` (each makes one scenario of every ported kind)
-    pub fn create(allocator: Allocator, seeds: []const u32) !*DrawWorld {
-        const n = seeds.len * ported_kinds.len;
+    pub fn create(allocator: Allocator, seeds: []const u32, options: Options) !*DrawWorld {
+        const forced_scenarios = forcedDrawScenarios(seeds[0]);
+        const forced: []const CSScenario = if (options.forced_draws) &forced_scenarios else &.{};
+        const n = seeds.len * ported_kinds.len + forced.len;
         const self = try allocator.create(DrawWorld);
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .world = .{ .allocator = allocator }, .scenarios = &.{}, .bodies = &.{}, .constraints = &.{}, .frames = &.{}, .jolt_world = undefined };
@@ -3112,6 +3120,7 @@ pub const DrawWorld = struct {
                 };
             }
         }
+        @memcpy(self.scenarios[seeds.len * ported_kinds.len ..], forced);
         self.frames = try allocator.alloc(u32, n);
         errdefer allocator.free(self.frames);
         @memset(self.frames, 0);
@@ -3189,6 +3198,143 @@ pub const DrawWorld = struct {
         return self.step(index);
     }
 };
+
+/// The extra scenarios of a draw world (`DrawWorld.Options.forced_draws`). Each conditional draw of the constraints'
+/// DrawConstraint and DrawConstraintLimits is reached by one of them, in single and in double precision (the random
+/// scenarios differ per precision; PhysicsDrawParity.zig checks the coverage of the draws). Each is a scenario of the
+/// generator (the first seed from `seed` on that fits) with kind operations added. The operations before frame 0 come
+/// after the operations of the generator for that frame and the solver sees them. The operations after the last frame
+/// come last; the solver never sees them, only the draws of the later frames.
+/// - SixDOF, pyramid: before frame 0 rotation limits that differ per axis (the order of the pyramid limits matters),
+///   position motors on rotation X and Y, a velocity motor on rotation Z and a target angular velocity (the current and
+///   the target swing and twist, the target angular velocity); after the last frame fixed rotation limits (no current
+///   swing and twist).
+/// - SixDOF, cone: the swing cone.
+/// - Path: before frame 0 a position and velocity motor and a target velocity (the target marker and the velocity
+///   arrow); after the last frame SetPath(nullptr) (nothing drawn).
+/// - SwingTwist, pyramid: before frame 0 a position and velocity motor on the swing (the target angular velocity and the
+///   target swing and twist); after the last frame both motors off.
+/// - SwingTwist, cone: the swing cone.
+/// - Hinge: before frame 0 SetLimits(-1, 1) (the limits pie); after the last frame SetLimits(-pi, pi) (no limits).
+/// - Slider: before frame 0 a position and velocity motor and SetLimits(-1, 1) (the target marker, the velocity arrow,
+///   the limits); after the last frame the motor off and SetLimits(-FLT_MAX, FLT_MAX) (no limits).
+/// - Distance, three times: after the last frame SetDistance(1000, 2000) (shorter than the min distance), (0, 0) (longer
+///   than the max distance) or (0, 1000) (between).
+/// - Pulley, three times: after the last frame SetLength(1000, 2000) (shorter than the min length: yellow), (0, 0)
+///   (longer than the max length: red) or (0, 1000) (between: green).
+/// The motor settings of the generator are valid (MotorSettings::IsValid), as the motor state setters assert.
+fn forcedDrawScenarios(seed: u32) [13]CSScenario {
+    const Axis = zolt.SixDOFConstraintSettings.Axis;
+    const off: u32 = @intFromEnum(zolt.MotorState.off);
+    const position: u32 = @intFromEnum(zolt.MotorState.position);
+    const velocity: u32 = @intFromEnum(zolt.MotorState.velocity);
+    const position_and_velocity: u32 = @intFromEnum(zolt.MotorState.position_and_velocity);
+    var result: [13]CSScenario = undefined;
+
+    const six_dof = &result[0];
+    six_dof.* = firstScenario(.six_dof, seed, 6, isPyramid);
+    addFrame0Op(six_dof, kindOpF(17, &.{ -0.5, -0.3, -0.7, 0.6, 0.4, 0.9 })); // SetRotationLimits
+    addFrame0Op(six_dof, kindOpI(20, &.{ @intFromEnum(Axis.rotation_x), position })); // SetMotorState
+    addFrame0Op(six_dof, kindOpI(20, &.{ @intFromEnum(Axis.rotation_y), position }));
+    addFrame0Op(six_dof, kindOpI(20, &.{ @intFromEnum(Axis.rotation_z), velocity }));
+    addFrame0Op(six_dof, kindOpF(22, &.{ 0.5, -1.0, 2.0 })); // SetTargetAngularVelocityCS
+    addLastFrameOp(six_dof, kindOpF(17, &.{ 0, 0, 0, 0, 0, 0 })); // SetRotationLimits: fixed
+
+    result[1] = firstScenario(.six_dof, seed, 0, isCone);
+
+    const path = &result[2];
+    path.* = firstScenario(.path, seed, 3, anyScenario);
+    addFrame0Op(path, kindOpI(18, &.{position_and_velocity})); // SetPositionMotorState
+    addFrame0Op(path, kindOpF(19, &.{1.5})); // SetTargetVelocity
+    addLastFrameOp(path, kindOpI(16, &.{0})); // SetPath(nullptr)
+
+    const swing_twist = &result[3];
+    swing_twist.* = firstScenario(.swing_twist, seed, 3, isPyramid);
+    addFrame0Op(swing_twist, kindOpI(21, &.{position_and_velocity})); // SetSwingMotorState
+    addLastFrameOp(swing_twist, kindOpI(21, &.{off}));
+    addLastFrameOp(swing_twist, kindOpI(22, &.{off})); // SetTwistMotorState
+
+    result[4] = firstScenario(.swing_twist, seed, 0, isCone);
+
+    const hinge = &result[5];
+    hinge.* = firstScenario(.hinge, seed, 2, anyScenario);
+    addFrame0Op(hinge, kindOpF(21, &.{ -1.0, 1.0 })); // SetLimits
+    addLastFrameOp(hinge, kindOpF(21, &.{ -std.math.pi, std.math.pi }));
+
+    const slider = &result[6];
+    slider.* = firstScenario(.slider, seed, 4, anyScenario);
+    addFrame0Op(slider, kindOpI(17, &.{position_and_velocity})); // SetMotorState
+    addFrame0Op(slider, kindOpF(20, &.{ -1.0, 1.0 })); // SetLimits
+    addLastFrameOp(slider, kindOpI(17, &.{off}));
+    addLastFrameOp(slider, kindOpF(20, &.{ -math.flt_max, math.flt_max }));
+
+    for ([3][2]f32{ .{ 1000.0, 2000.0 }, .{ 0.0, 0.0 }, .{ 0.0, 1000.0 } }, 0..) |range, k| {
+        const distance = &result[7 + k];
+        distance.* = firstScenario(.distance, seed +% @as(u32, @intCast(k)), 1, anyScenario);
+        addLastFrameOp(distance, kindOpF(16, &range)); // SetDistance
+        const pulley = &result[10 + k];
+        pulley.* = firstScenario(.pulley, seed +% @as(u32, @intCast(k)), 1, anyScenario);
+        addLastFrameOp(pulley, kindOpF(16, &range)); // SetLength
+    }
+    return result;
+}
+
+/// A kind operation with the floats `f`
+fn kindOpF(op: u32, f: []const f32) CSOp {
+    var result: CSOp = .{ .op = op, .frame = 0 };
+    @memcpy(result.f[0..f.len], f);
+    return result;
+}
+
+/// A kind operation with the integers `i`
+fn kindOpI(op: u32, i: []const u32) CSOp {
+    var result: CSOp = .{ .op = op, .frame = 0 };
+    @memcpy(result.i[0..i.len], i);
+    return result;
+}
+
+/// The first scenario of `kind` of the seeds `seed`, `seed + 1`, ... with room for `num_ops` more operations that
+/// `accept` accepts
+fn firstScenario(comptime kind: Kind, seed: u32, num_ops: u32, comptime accept: fn (sc: *const CSScenario) bool) CSScenario {
+    var s = seed;
+    while (true) : (s +%= 1) {
+        var g: Gen = .{ .rng = .{ .state = s } };
+        const sc = g.scenario(kind);
+        if (sc.num_ops + num_ops <= max_ops and accept(&sc)) return sc;
+    }
+}
+
+fn anyScenario(sc: *const CSScenario) bool {
+    _ = sc;
+    return true;
+}
+
+/// SixDOF and SwingTwist: I[1] is the swing type, 0 is ESwingType::Cone, 1 is ESwingType::Pyramid
+fn isPyramid(sc: *const CSScenario) bool {
+    return sc.settings.i[1] == 1;
+}
+
+fn isCone(sc: *const CSScenario) bool {
+    return sc.settings.i[1] == 0;
+}
+
+/// Adds `op` before frame 0, after the operations of the scenario for frame 0 (the list stays in frame order)
+fn addFrame0Op(sc: *CSScenario, op: CSOp) void {
+    std.debug.assert(sc.num_ops < max_ops and op.frame == 0);
+    var k: usize = 0;
+    while (k < sc.num_ops and sc.ops[k].frame == 0) k += 1;
+    std.mem.copyBackwards(CSOp, sc.ops[k + 1 .. sc.num_ops + 1], sc.ops[k..sc.num_ops]);
+    sc.ops[k] = op;
+    sc.num_ops += 1;
+}
+
+/// Adds `op` after the last frame, after the operations of the scenario there (the last ones of the list)
+fn addLastFrameOp(sc: *CSScenario, op: CSOp) void {
+    std.debug.assert(sc.num_ops < max_ops);
+    sc.ops[sc.num_ops] = op;
+    sc.ops[sc.num_ops].frame = sc.num_frames;
+    sc.num_ops += 1;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tests
@@ -3463,6 +3609,15 @@ test "Constraint parity: descriptions for the other parity files" {
         const d: CSSettings = .{ .kind = kind };
         try std.testing.expectError(error.UnknownKind, makeDescriptionSettings(allocator, &d));
     }
+}
+
+// The C++ side allocates zero filled blocks: CSEnsureFactory installs the hooks of ZoltParity/ParityHooks.h, never Jolt's
+// allocator (RegisterDefaultAllocator), which does not zero-fill. The generator makes pulleys with a static body:
+// IndependentAxisConstraintPart then reads members that Jolt never writes (mR1xN1 / mRatioR2xN2 of the static body,
+// multiplied with its zero angular velocity). Zolt starts them at zero. With Jolt's allocator a reused block that holds
+// a NaN or an infinity there would make the velocity of the pulley's dynamic body NaN.
+test "Constraint parity: the C++ side allocates zero filled blocks" {
+    try std.testing.expectEqual(@as(u32, 1), jolt.jolt_cs_hooks_installed());
 }
 
 test "Constraint parity: struct layout" {

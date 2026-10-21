@@ -19,9 +19,10 @@
 // every kind; the Zolt side fills its slots as the classes are ported.
 //
 // jolt_cs_draw_world_* is the C++ side of DrawWorld in ConstraintsParity.zig (group D3, the debug renderer parity):
-// random scenarios in one BodyManager and one ConstraintManager, stepped frame by frame without records. Its allocations
-// are zero filled (ParityHooks.h): a pulley with a static body reads members that Jolt never writes (see
-// jolt_cs_draw_world_create).
+// random scenarios in one BodyManager and one ConstraintManager, stepped frame by frame without records.
+//
+// Every allocation through Jolt is zero filled (the hooks of ParityHooks.h, installed by CSEnsureFactory): a pulley with
+// a static body reads members that Jolt never writes (see CSEnsureFactory).
 //
 // jolt_cs_settings_save writes the binary state of the settings of a description, jolt_cs_settings_resave restores
 // settings from bytes (ConstraintSettings::sRestoreFromBinaryState) and saves them again (the cross language round
@@ -157,11 +158,15 @@ enum ECSOp : uint32
 
 static constexpr uint32 cFirstKindOp = 16;
 
-// The allocator hooks and the Factory, created once for the whole parity binary (the same guard as the other wrapper
-// files, so that RegisterTypes() runs only once)
+// The allocation hooks of ParityHooks.h (zero-filled blocks) and the Factory, created once for the whole parity binary
+// (the same guard as the other wrapper files, so that RegisterTypes() runs only once). Every function of this file that
+// allocates through Jolt calls it first. The blocks must be zero filled: the generator makes pulleys with a static body,
+// and IndependentAxisConstraintPart::SolveVelocityConstraint reads members that Jolt never writes for a static body
+// (mR1xN1, mRatioR2xN2) and multiplies them with its zero angular velocity. A NaN or an infinity in a reused block would
+// make the velocity of the pulley's dynamic body NaN. Zolt starts these members at zero.
 static void CSEnsureFactory()
 {
-	RegisterDefaultAllocator();
+	ParityInstallHooks();
 	if (Factory::sInstance == nullptr)
 	{
 		Factory::sInstance = new Factory();
@@ -1212,6 +1217,14 @@ void jolt_cs_struct_sizes(uint32 *outSizes)
 	outSizes[11] = offsetof(CSOutput, mNumR);
 }
 
+// 1 when the allocation hooks of ParityHooks.h are installed after CSEnsureFactory, which every function of this file
+// that allocates through Jolt calls first
+uint32 jolt_cs_hooks_installed()
+{
+	CSEnsureFactory();
+	return ParityHooksInstalled()? 1 : 0;
+}
+
 void *jolt_cs_world_create()
 {
 	CSEnsureFactory();
@@ -1314,17 +1327,10 @@ uint32 jolt_cs_settings_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBy
 }
 
 // The draw world of group D3 (DrawWorld.create in ConstraintsParity.zig): the bodies of the scenarios in scenario order,
-// then the constraints, added to the ConstraintManager in one call.
-// The world is allocated with the zero-filling hooks of ParityHooks.h, not with Jolt's allocator of CSEnsureFactory.
-// IndependentAxisConstraintPart::CalculateConstraintProperties does not write mR1xN1 when body 1 is static and
-// mRatioR2xN2 when body 2 is static, but SolveVelocityConstraint multiplies both with the angular velocity of their body
-// (zero for a static body). Uninitialized memory that holds a NaN or an infinity (an all-ones word of a reused block)
-// makes the velocity of the pulley's dynamic body NaN in the first velocity step. Zero-filled, the product is 0, and
-// Zolt's part starts with zero members.
+// then the constraints, added to the ConstraintManager in one call. Its blocks are zero filled (CSEnsureFactory).
 void *jolt_cs_draw_world_create(const CSScenario *inScenarios, uint32 inCount)
 {
 	CSEnsureFactory();
-	ParityInstallHooks(); // After CSEnsureFactory, which installs Jolt's allocator
 	CSDrawWorld *world = new CSDrawWorld;
 	world->mScenarios.assign(inScenarios, inScenarios + inCount);
 	world->mFrames.resize(inCount, 0);
