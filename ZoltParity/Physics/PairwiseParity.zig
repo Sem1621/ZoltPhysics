@@ -1765,6 +1765,48 @@ pub fn makeSoftBodyCatalogue(allocator: Allocator) !Catalogue {
     return cat;
 }
 
+/// A height field with more than 64 samples for the shape draw parity: the draw cuts it in blocks of 64 x 64 samples. It
+/// gets no-collision samples in every draw block and on the edges between the blocks too.
+fn addDrawHeightField(cat: *Catalogue, gen: *Gen, sample_count: u32, block_size: u32, with_materials: bool) !NodeDesc {
+    std.debug.assert(sample_count > 64 and sample_count % block_size == 0);
+    var desc = try addHeightField(cat, gen, sample_count, block_size, with_materials);
+    const samples = cat.floats.items[desc.first..][0 .. sample_count * sample_count];
+    const holes = [_][2]u32{ .{ 7, 5 }, .{ 30, 50 }, .{ 63, 12 }, .{ 64, 12 }, .{ 20, 63 }, .{ 21, 64 } };
+    var by: u32 = 0;
+    while (by < sample_count) : (by += 64) {
+        var bx: u32 = 0;
+        while (bx < sample_count) : (bx += 64) {
+            for (holes) |h| {
+                const x = bx + h[0];
+                const y = by + h[1];
+                if (x < sample_count and y < sample_count) samples[y * sample_count + x] = HeightFieldShapeConstants.no_collision_value;
+            }
+        }
+    }
+    desc.user_data = 80 + sample_count;
+    return desc;
+}
+
+/// The catalogue of the shape draw parity of large shapes (ZoltParity/Renderer/ShapeDrawParity.zig): height fields with
+/// several draw blocks (with and without materials) and a mesh without materials. The sweep catalogue has neither.
+pub fn makeShapeDrawCatalogue(allocator: Allocator) !Catalogue {
+    var cat: Catalogue = .{ .allocator = allocator };
+    errdefer cat.deinit();
+    var gen: Gen = .{ .rng = .{ .state = 0xd2d2a11 } };
+
+    // 2 x 2 draw blocks (the last ones 7 samples wide) and 3 x 3 draw blocks
+    _ = try cat.entry("height field (72 samples, materials, block size 4)", 4, try addDrawHeightField(&cat, &gen, 72, 4, true));
+    _ = try cat.entry("height field (136 samples, block size 8)", 4, try addDrawHeightField(&cat, &gen, 136, 8, false));
+
+    // A mesh with an empty material list (every material index is 0)
+    var plain = try addMesh(&cat, &gen, false);
+    for (cat.triangles.items[plain.first2..][0..plain.count2]) |*t| t.material_index = 0;
+    plain.num_materials = 0;
+    plain.user_data = 36;
+    _ = try cat.entry("mesh (grid, no materials)", 4, plain);
+    return cat;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Comparison of the streams
 

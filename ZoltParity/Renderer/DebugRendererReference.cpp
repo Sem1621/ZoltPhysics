@@ -12,6 +12,7 @@
 
 #ifdef JPH_DEBUG_RENDERER
 	#include <Jolt/Core/StreamWrapper.h>
+	#include <Jolt/Physics/Body/Body.h>
 	#include <Jolt/Renderer/DebugRendererPlayback.h>
 	#include <ZoltParity/Renderer/ParityRenderer.h>
 	#include <sstream>
@@ -209,6 +210,53 @@ JoltDRResult *jolt_dr_playback(const uint8 *inStream, uint64 inSize)
 	return result;
 #else
 	(void)inStream; (void)inSize;
+	return nullptr;
+#endif
+}
+
+/// Body::ApplyBuoyancyImpulse (inKind 0) or Body::GetSubmergedVolume (inKind 1) of a body of BodyReference.cpp
+/// (jolt_body_ptr), drawn into a ParityRenderer with Shape::sDrawSubmergedVolumes set (group D2). inF holds the surface
+/// normal and the other arguments of ApplyBuoyancyImpulse in the layout of BodyOp in BodyParity.zig. Parts: [0] the log
+/// of the call, [1] its results (u32 applied, or 5 floats: total volume, submerged volume, relative center of
+/// buoyancy).
+JoltDRResult *jolt_dr_body_buoyancy(void *inBody, const Real *inSurfacePosition, const float *inF, int inKind)
+{
+#ifdef JPH_DEBUG_RENDERER
+	ParityInstallHooks();
+
+	Body &body = *static_cast<Body *>(inBody);
+	RVec3 surface_position(inSurfacePosition[0], inSurfacePosition[1], inSurfacePosition[2]);
+	Vec3 surface_normal(inF[0], inF[1], inF[2]);
+	JoltDRResult *result = new JoltDRResult;
+	ParitySetShapeDrawFlags(1); // Shape::sDrawSubmergedVolumes
+	{
+		ParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		std::vector<uint8> values;
+		if (inKind == 0)
+		{
+			uint32 applied = body.ApplyBuoyancyImpulse(surface_position, surface_normal, inF[3], inF[4], inF[5], Vec3(inF[6], inF[7], inF[8]), Vec3(inF[9], inF[10], inF[11]), inF[12])? 1 : 0;
+			values.resize(sizeof(applied));
+			memcpy(values.data(), &applied, sizeof(applied));
+		}
+		else
+		{
+			float out[5];
+			Vec3 center_of_buoyancy;
+			body.GetSubmergedVolume(surface_position, surface_normal, out[0], out[1], center_of_buoyancy);
+			out[2] = center_of_buoyancy.GetX();
+			out[3] = center_of_buoyancy.GetY();
+			out[4] = center_of_buoyancy.GetZ();
+			values.resize(sizeof(out));
+			memcpy(values.data(), out, sizeof(out));
+		}
+		result->mParts.push_back(renderer.mLog.mBytes);
+		result->mParts.push_back(std::move(values));
+	}
+	ParitySetShapeDrawFlags(0);
+	return result;
+#else
+	(void)inBody; (void)inSurfacePosition; (void)inF; (void)inKind;
 	return nullptr;
 #endif
 }

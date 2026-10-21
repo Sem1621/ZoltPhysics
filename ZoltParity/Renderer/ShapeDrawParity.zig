@@ -21,7 +21,11 @@
 //! The layers (they exist only with -Ddebug_renderer=true, without the option they skip):
 //! - call log: the ops on a ParityRenderer of each side, the logs must match call for call (batch contents included);
 //! - DebugRendererSimple: the same on a DebugRendererSimple of each side that logs its lines;
-//! - recorder: a few shape frames on Jolt's and Zolt's DebugRendererRecorder, the .jor bytes must match.
+//! - recorder: a few shape frames on Jolt's and Zolt's DebugRendererRecorder, the .jor bytes must match;
+//! - large shapes: the call log of `PairwiseParity.makeShapeDrawCatalogue`. Its height fields have more than 64 samples,
+//!   so their draw cuts them in several blocks (2 x 2 and 3 x 3, partial last blocks, holes in every block and on the
+//!   block edges). Its mesh has no materials (the single color of the material colors). The catalogue of the sweep has
+//!   neither.
 //! Each layer builds its own catalogue: the cached geometry of a shape belongs to the renderer that created it.
 
 const std = @import("std");
@@ -55,16 +59,23 @@ fn requireDebugRenderer() !void {
 /// The renderer that runs the ops (the `kind` of jolt_dr_run_shape_ops)
 const Kind = enum(c_int) { parity_renderer = 0, simple = 1, recorder = 2 };
 
+/// The shapes that a layer draws: the catalogue of the pairwise sweep, or the large shapes of the draws
+const CatalogueKind = enum { sweep, large };
+
 /// The catalogue on both sides and the Zolt shapes for the ShapeContext
 const Catalogue = struct {
     buffer: []u32,
     built: *pw.Built,
     shapes: []*const Shape,
 
-    fn init() !Catalogue {
+    fn init(kind: CatalogueKind) !Catalogue {
         const buffer = try allocator.alloc(u32, pw.stream_capacity);
         errdefer allocator.free(buffer);
-        const built = try pw.Built.init(allocator, try pw.makeCatalogue(allocator), buffer);
+        const description = switch (kind) {
+            .sweep => try pw.makeCatalogue(allocator),
+            .large => try pw.makeShapeDrawCatalogue(allocator),
+        };
+        const built = try pw.Built.init(allocator, description, buffer);
         errdefer built.deinit();
         const shapes = try allocator.alloc(*const Shape, built.shapes.items.len);
         for (shapes, 0..) |*s, i| s.* = built.shape(@intCast(i));
@@ -101,6 +112,8 @@ const GenOptions = struct {
     all_combinations: bool = true,
     /// EndFrame at the end of each frame (the recorder)
     end_frames: bool = false,
+    /// The shapes
+    catalogue: CatalogueKind = .sweep,
 };
 
 /// Writes the shape ops
@@ -252,7 +265,7 @@ fn compareBytes(name: []const u8, zolt_bytes: []const u8, jolt_bytes: []const u8
 
 /// Run one layer: the ops on Zolt's and Jolt's renderer of `kind`, compare the logs (.jor bytes) and the results
 fn runLayer(name: []const u8, seed: u32, kind: Kind, options: GenOptions) !void {
-    var cat = try Catalogue.init();
+    var cat = try Catalogue.init(options.catalogue);
     defer cat.deinit();
     var w: pr.OpWriter = .{ .allocator = allocator };
     defer w.deinit();
@@ -308,4 +321,9 @@ test "Shape draw parity: DebugRendererSimple (call log)" {
 test "Shape draw parity: recorder (.jor bytes of shape frames)" {
     try requireDebugRenderer();
     try runLayer("shape draws: recorder", 0xd2000003, .recorder, .{ .frames = 3, .random_ops = 60, .end_frames = true });
+}
+
+test "Shape draw parity: height fields with several draw blocks and a mesh without materials (call log)" {
+    try requireDebugRenderer();
+    try runLayer("shape draws: large shapes", 0xd2000004, .parity_renderer, .{ .frames = 3, .random_ops = 30, .catalogue = .large });
 }
