@@ -658,12 +658,6 @@ pub const HairSettings = struct {
         return self.ref_count.get();
     }
 
-    /// Split the supplied render strands into render and simulation strands and calculate connections between them.
-    /// When this function returns mSimVertices, mSimStrands, mRenderVertices and mRenderStrands are overwritten.
-    /// @param vertices Vertices for the strands.
-    /// @param strands The strands that this instance should have.
-    /// Zolt: Jolt's function appends to mSimVertices and mSimStrands (R20, reproduced). An allocation failure returns
-    /// `error.OutOfMemory`; the four arrays may then hold part of the result.
     /// `mSimVertices[index].mPosition` in the closest strand search of initRenderAndSimulationStrands. Zolt (R20 UB31): an
     /// index past the array panics (a simulated strand of 0 vertices at its end), where Jolt reads past the array.
     fn closestSearchPosition(sim_vertices: []const SVertex, index: u32) Float3 {
@@ -672,6 +666,12 @@ pub const HairSettings = struct {
         return sim_vertices[index].position;
     }
 
+    /// Split the supplied render strands into render and simulation strands and calculate connections between them.
+    /// When this function returns mSimVertices, mSimStrands, mRenderVertices and mRenderStrands are overwritten.
+    /// @param vertices Vertices for the strands.
+    /// @param strands The strands that this instance should have.
+    /// Zolt: Jolt's function appends to mSimVertices and mSimStrands (R20, reproduced). An allocation failure returns
+    /// `error.OutOfMemory`; the four arrays may then hold part of the result.
     pub fn initRenderAndSimulationStrands(self: *HairSettings, vertices: []const SVertex, strands: []const SStrand) Allocator.Error!void {
         const allocator = self.allocator;
 
