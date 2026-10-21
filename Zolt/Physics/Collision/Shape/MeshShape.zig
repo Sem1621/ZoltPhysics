@@ -45,7 +45,8 @@
 //!   allocated with the shape's allocator in `initFromSettings` and `restoreBinaryState` and freed in `destruct`. It is
 //!   null for a shape that was neither, which then draws nothing. Draw locks it with the renderer's io (UB10). When an
 //!   allocation fails while drawing (R5) the geometry is not cached and not drawn, the triangle outlines are still
-//!   drawn. A null entry of the material list draws with the color of the default material (Jolt dereferences null).
+//!   drawn. A null entry of the material list draws with the color of the default material: Jolt dereferences null
+//!   there (undefined behavior), a Zolt-only test in ZoltTests/Renderer/DebugRendererZoltTests.zig pins it.
 //!   GetSubmergedVolume ignores its debug options, like Jolt ignores `inBaseOffset`.
 
 const std = @import("std");

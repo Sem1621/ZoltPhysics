@@ -67,8 +67,9 @@
 //!   `-Ddebug_renderer`) with a mutex, allocated with the shape's allocator in `initFromSettings`, `restoreBinaryState`
 //!   and `clone` and freed in `destruct`. It is null for a shape that was none of these, which then draws nothing.
 //!   Draw builds the geometry under the lock and takes each geometry under the lock with its own reference, the draw
-//!   call runs after the lock is released (UB10). `clone` shares the geometry like Jolt and reads it without the lock
-//!   (it has no io): do not clone a height field while another thread draws it. `setHeights` clears the geometry, like
+//!   call runs after the lock is released (UB10). `clone` shares the geometry like Jolt and reads it without the lock:
+//!   it has no io, and user-facing functions never take one. So do not clone a height field while another thread draws
+//!   it. Jolt races there too (Clone copies mGeometry while Draw appends to it). `setHeights` clears the geometry, like
 //!   Jolt (`setMaterials` does not, like Jolt). When an allocation fails while drawing (R5) the geometry is not cached
 //!   and not drawn, the triangle outlines are still drawn. Draw allocates the triangle array once for all blocks
 //!   (Jolt allocates one per block).
