@@ -26,8 +26,10 @@
 //!     collision shapes buffer of 0 elements, and HairUpdateVelocity reads element 0. Zolt creates `max(n, 1)` zeroed
 //!     elements, like the planes and vertices buffers.
 //!   - UB4: the buffers that Hair creates without data are zero (ComputeBufferCPU). Jolt leaves them uninitialized.
-//!   - A HairShaders that misses a shader (HairShaders.init without registerHairShaders): Jolt binds a null shader and
-//!     crashes. Zolt panics with a message.
+//!   - UB21 (proposed to the lead, R20 has no row for it yet): a HairShaders that misses a shader (HairShaders.init
+//!     without registerHairShaders). HairShaders keeps the shader null, like Jolt (R14). Jolt's Update passes it to
+//!     ComputeQueueCPU::SetShader, which calls CreateWrapper on the null pointer. Zolt's update panics with a message.
+//!     No test pins it: a test cannot catch a panic.
 //! - Jolt's quirk (R20): mScalpJointMatricesCB is 64 times too large, its size counts bytes where it should count
 //!   matrices. Only memory is lost.
 //! - JPH_DEBUG_RENDERER (ERenderStrandColor, DrawSettings, Draw): TODO(debug_renderer), group H3. Until then `draw` is a
@@ -1203,7 +1205,7 @@ pub const Hair = struct {
 
 /// The shader of a HairShaders member (Jolt binds it without a check)
 fn getShader(shader: Ref(ComputeShader)) *const ComputeShader {
-    // Zolt: Jolt binds a null shader and crashes
+    // Zolt (proposed R20 UB21): Jolt passes a null shader to SetShader, which dereferences it
     return shader.get() orelse @panic("Hair.update: a hair shader is missing (register the shaders with registerHairShaders before HairShaders.init)");
 }
 
