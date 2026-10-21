@@ -7,11 +7,17 @@
 //!   `num_points` entries and outlive the calculator, like in Jolt (Jolt's ConvexShape uses JPH_STACK_ALLOC, Zolt a
 //!   fixed array).
 //! - The out parameters of the tetrahedron helpers and `GetResult` become returned structs (`VolumeAndCenter`,
-//!   `SubmergedVolumeResult`). The helpers are static (they are only non-static with JPH_DEBUG_RENDERER, which draws
-//!   the intersection: TODO(debug_renderer), including the `inBaseOffset` constructor parameter and `mBaseOffset`).
+//!   `SubmergedVolumeResult`).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4): the `inBaseOffset` constructor parameter is the
+//!   trailing `debug` parameter of `init` (`void` without `-Ddebug_renderer`, the `.debug` of the options of
+//!   Shape.getSubmergedVolume). It also holds the renderer that Jolt reads from DebugRenderer::sInstance. The helpers
+//!   that draw the intersection between a tetrahedron and the surface are methods, like Jolt's non-static helpers with
+//!   the option.
 
 const std = @import("std");
 const Core = @import("../../../Core/Core.zig");
+const Color = @import("../../../Core/Color.zig").Color;
+const SubmergedVolumeDebug = @import("Shape.zig").Shape.SubmergedVolumeDebug;
 const StridedPtrConst = @import("../../../Core/StridedPtr.zig").StridedPtrConst;
 const Plane = @import("../../../Geometry/Plane.zig").Plane;
 const math = @import("../../../Math/Math.zig");
@@ -58,7 +64,9 @@ pub const PolyhedronSubmergedVolumeCalculator = struct {
     submerged_volume: f32 = 0.0,
     center_of_buoyancy: Vec3 = Vec3.zero(),
 
-    // TODO(debug_renderer): RVec3 mBaseOffset (Base offset used for drawing)
+    // Base offset used for drawing (mBaseOffset) and the renderer that draws (Jolt's DebugRenderer::sInstance),
+    // JPH_DEBUG_RENDERER
+    debug: if (Core.debug_renderer) SubmergedVolumeDebug else void = if (Core.debug_renderer) .{} else {},
 
     // Calculate submerged volume * 6 and center of mass * 4 for a tetrahedron with 4 vertices submerged
     // v1 .. v4 are submerged
@@ -85,13 +93,23 @@ pub const PolyhedronSubmergedVolumeCalculator = struct {
     // Calculate submerged volume * 6 and center of mass * 4 for a tetrahedron with 1 vertex submerged
     // v1 is submerged, v2 .. v4 are not
     // d1 .. d4 are the distances from the points to the plane
-    fn tetrahedronVolume1(v1_in: Vec3, d1: f32, v2_in: Vec3, d2: f32, v3_in: Vec3, d3: f32, v4_in: Vec3, d4: f32) VolumeAndCenter {
+    fn tetrahedronVolume1(self: *const PolyhedronSubmergedVolumeCalculator, v1_in: Vec3, d1: f32, v2_in: Vec3, d2: f32, v3_in: Vec3, d3: f32, v4_in: Vec3, d4: f32) VolumeAndCenter {
         // A tetrahedron with 1 point submerged is cut along 3 edges forming a new tetrahedron
         const v2 = getPlaneIntersection(v1_in, d1, v2_in, d2);
         const v3 = getPlaneIntersection(v1_in, d1, v3_in, d3);
         const v4 = getPlaneIntersection(v1_in, d1, v4_in, d4);
 
-        // TODO(debug_renderer): Draw intersection between tetrahedron and surface (Shape::sDrawSubmergedVolumes)
+        if (Core.debug_renderer) {
+            // Draw intersection between tetrahedron and surface
+            if (self.debug.submergedVolumeRenderer()) |renderer| {
+                const v2w = self.debug.base_offset.addVec3(v2);
+                const v3w = self.debug.base_offset.addVec3(v3);
+                const v4w = self.debug.base_offset.addVec3(v4);
+
+                renderer.drawTriangle(v4w, v3w, v2w, Color.green, .{});
+                renderer.drawWireTriangle(v4w, v3w, v2w, Color.white);
+            }
+        }
 
         return tetrahedronVolume4(v1_in, v2, v3, v4);
     }
@@ -99,14 +117,27 @@ pub const PolyhedronSubmergedVolumeCalculator = struct {
     // Calculate submerged volume * 6 and center of mass * 4 for a tetrahedron with 2 vertices submerged
     // v1, v2 are submerged, v3, v4 are not
     // d1 .. d4 are the distances from the points to the plane
-    fn tetrahedronVolume2(v1: Vec3, d1: f32, v2: Vec3, d2: f32, v3: Vec3, d3: f32, v4: Vec3, d4: f32) VolumeAndCenter {
+    fn tetrahedronVolume2(self: *const PolyhedronSubmergedVolumeCalculator, v1: Vec3, d1: f32, v2: Vec3, d2: f32, v3: Vec3, d3: f32, v4: Vec3, d4: f32) VolumeAndCenter {
         // A tetrahedron with 2 points submerged is cut along 4 edges forming a quad
         const c = getPlaneIntersection(v1, d1, v3, d3);
         const d = getPlaneIntersection(v1, d1, v4, d4);
         const e = getPlaneIntersection(v2, d2, v4, d4);
         const f = getPlaneIntersection(v2, d2, v3, d3);
 
-        // TODO(debug_renderer): Draw intersection between tetrahedron and surface (Shape::sDrawSubmergedVolumes)
+        if (Core.debug_renderer) {
+            // Draw intersection between tetrahedron and surface
+            if (self.debug.submergedVolumeRenderer()) |renderer| {
+                const cw = self.debug.base_offset.addVec3(c);
+                const dw = self.debug.base_offset.addVec3(d);
+                const ew = self.debug.base_offset.addVec3(e);
+                const fw = self.debug.base_offset.addVec3(f);
+
+                renderer.drawTriangle(cw, ew, dw, Color.green, .{});
+                renderer.drawTriangle(cw, fw, ew, Color.green, .{});
+                renderer.drawWireTriangle(cw, ew, dw, Color.white);
+                renderer.drawWireTriangle(cw, fw, ew, Color.white);
+            }
+        }
 
         // We pick point c as reference (which is on the cut off surface)
         // This leaves us with three tetrahedrons to sum up (any faces that are in the same plane as c will have zero volume)
@@ -125,13 +156,23 @@ pub const PolyhedronSubmergedVolumeCalculator = struct {
     // Calculate submerged volume * 6 and center of mass * 4 for a tetrahedron with 3 vertices submerged
     // v1, v2, v3 are submerged, v4 is not
     // d1 .. d4 are the distances from the points to the plane
-    fn tetrahedronVolume3(v1_in: Vec3, d1: f32, v2_in: Vec3, d2: f32, v3_in: Vec3, d3: f32, v4_in: Vec3, d4: f32) VolumeAndCenter {
+    fn tetrahedronVolume3(self: *const PolyhedronSubmergedVolumeCalculator, v1_in: Vec3, d1: f32, v2_in: Vec3, d2: f32, v3_in: Vec3, d3: f32, v4_in: Vec3, d4: f32) VolumeAndCenter {
         // A tetrahedron with 1 point above the surface is cut along 3 edges forming a new tetrahedron
         const v1 = getPlaneIntersection(v1_in, d1, v4_in, d4);
         const v2 = getPlaneIntersection(v2_in, d2, v4_in, d4);
         const v3 = getPlaneIntersection(v3_in, d3, v4_in, d4);
 
-        // TODO(debug_renderer): Draw intersection between tetrahedron and surface (Shape::sDrawSubmergedVolumes)
+        if (Core.debug_renderer) {
+            // Draw intersection between tetrahedron and surface
+            if (self.debug.submergedVolumeRenderer()) |renderer| {
+                const v1w = self.debug.base_offset.addVec3(v1);
+                const v2w = self.debug.base_offset.addVec3(v2);
+                const v3w = self.debug.base_offset.addVec3(v3);
+
+                renderer.drawTriangle(v3w, v2w, v1w, Color.green, .{});
+                renderer.drawWireTriangle(v3w, v2w, v1w, Color.white);
+            }
+        }
 
         // We first calculate the part that is above the surface
         const dry = tetrahedronVolume4(v1, v2, v3, v4_in);
@@ -154,9 +195,10 @@ pub const PolyhedronSubmergedVolumeCalculator = struct {
     /// @param num_points The amount of points
     /// @param surface The plane that forms the fluid surface (normal should point up)
     /// @param buffer A temporary buffer of Point's that should have num_points entries and should stay alive while this class is alive
-    pub fn init(transform: Mat44, points: StridedPtrConst(Vec3), num_points: u32, surface: Plane, buffer: []Point) PolyhedronSubmergedVolumeCalculator {
+    /// @param debug The offset to transform transform to world space (in double precision mode this can be used to shift the whole operation closer to the origin) and the renderer. Only used for debug drawing (JPH_DEBUG_RENDERER, `void` without the option).
+    pub fn init(transform: Mat44, points: StridedPtrConst(Vec3), num_points: u32, surface: Plane, buffer: []Point, debug: if (Core.debug_renderer) SubmergedVolumeDebug else void) PolyhedronSubmergedVolumeCalculator {
         std.debug.assert(buffer.len >= num_points);
-        var self: PolyhedronSubmergedVolumeCalculator = .{ .points = buffer[0..num_points] };
+        var self: PolyhedronSubmergedVolumeCalculator = .{ .points = buffer[0..num_points], .debug = debug };
 
         // Convert the points to world space and determine the distance to the surface
         var reference_dist: f32 = math.flt_max;
@@ -214,25 +256,25 @@ pub const PolyhedronSubmergedVolumeCalculator = struct {
         // Jolt's default case (should not be possible: volume 0, center zero) cannot happen for a 3 bit code
         const r: VolumeAndCenter = switch (code) {
             // One point submerged
-            0b000 => tetrahedronVolume1(ref.position, ref.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface),
+            0b000 => self.tetrahedronVolume1(ref.position, ref.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface),
 
             // Two points submerged
-            0b001 => tetrahedronVolume2(ref.position, ref.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface),
+            0b001 => self.tetrahedronVolume2(ref.position, ref.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface),
 
             // Two points submerged
-            0b010 => tetrahedronVolume2(ref.position, ref.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface),
+            0b010 => self.tetrahedronVolume2(ref.position, ref.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface),
 
             // Two points submerged
-            0b100 => tetrahedronVolume2(ref.position, ref.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface),
+            0b100 => self.tetrahedronVolume2(ref.position, ref.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface),
 
             // Three points submerged
-            0b011 => tetrahedronVolume3(ref.position, ref.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface),
+            0b011 => self.tetrahedronVolume3(ref.position, ref.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface),
 
             // Three points submerged
-            0b101 => tetrahedronVolume3(ref.position, ref.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface),
+            0b101 => self.tetrahedronVolume3(ref.position, ref.distance_to_surface, p1.position, p1.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface),
 
             // Three points submerged
-            0b110 => tetrahedronVolume3(ref.position, ref.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface),
+            0b110 => self.tetrahedronVolume3(ref.position, ref.distance_to_surface, p3.position, p3.distance_to_surface, p2.position, p2.distance_to_surface, p1.position, p1.distance_to_surface),
 
             // Four points submerged
             0b111 => tetrahedronVolume4(ref.position, p3.position, p2.position, p1.position),
@@ -265,7 +307,7 @@ const test_faces = [_][4]u32{ .{ 0, 2, 3, 1 }, .{ 4, 6, 2, 0 }, .{ 4, 5, 7, 6 },
 
 fn testCube(transform: Mat44, surface: Plane) PolyhedronSubmergedVolumeCalculator.SubmergedVolumeResult {
     var buffer: [8]PolyhedronSubmergedVolumeCalculator.Point = undefined;
-    var calc = PolyhedronSubmergedVolumeCalculator.init(transform, .init(&test_points[0], .{}), 8, surface, &buffer);
+    var calc = PolyhedronSubmergedVolumeCalculator.init(transform, .init(&test_points[0], .{}), 8, surface, &buffer, if (Core.debug_renderer) .{} else {});
     if (calc.areAllAbove()) return .{ .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
     const reference_point_bit = @as(u32, 1) << @intCast(calc.getReferencePointIdx());
     for (test_faces) |f| {
@@ -284,9 +326,9 @@ test "PolyhedronSubmergedVolumeCalculator: cube cut by planes" {
     // All above / all below
     {
         var buffer: [8]PolyhedronSubmergedVolumeCalculator.Point = undefined;
-        const above = PolyhedronSubmergedVolumeCalculator.init(scale, .init(&test_points[0], .{}), 8, Plane.fromPointAndNormal(Vec3.init(0, -1, 0), Vec3.axisY()), &buffer);
+        const above = PolyhedronSubmergedVolumeCalculator.init(scale, .init(&test_points[0], .{}), 8, Plane.fromPointAndNormal(Vec3.init(0, -1, 0), Vec3.axisY()), &buffer, if (Core.debug_renderer) .{} else {});
         try testing.expect(above.areAllAbove() and !above.areAllBelow());
-        const below = PolyhedronSubmergedVolumeCalculator.init(scale, .init(&test_points[0], .{}), 8, Plane.fromPointAndNormal(Vec3.init(0, 1, 0), Vec3.axisY()), &buffer);
+        const below = PolyhedronSubmergedVolumeCalculator.init(scale, .init(&test_points[0], .{}), 8, Plane.fromPointAndNormal(Vec3.init(0, 1, 0), Vec3.axisY()), &buffer, if (Core.debug_renderer) .{} else {});
         try testing.expect(!below.areAllAbove() and below.areAllBelow());
         try testing.expectEqual(@as(u32, 0), below.getReferencePointIdx()); // All points are below, the first lowest point is the reference
         try testing.expectEqual(@as(f32, -0.5), buffer[0].position.getX());
@@ -316,7 +358,7 @@ test "PolyhedronSubmergedVolumeCalculator: cube cut by planes" {
     var padded: [8]Padded = undefined;
     for (&padded, test_points) |*p, v| p.* = .{ .position = v, .other = 7 };
     var buffer: [8]PolyhedronSubmergedVolumeCalculator.Point = undefined;
-    const strided = PolyhedronSubmergedVolumeCalculator.init(scale, .init(&padded[0].position, .{ .stride = @sizeOf(Padded) }), 8, Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()), &buffer);
+    const strided = PolyhedronSubmergedVolumeCalculator.init(scale, .init(&padded[0].position, .{ .stride = @sizeOf(Padded) }), 8, Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()), &buffer, if (Core.debug_renderer) .{} else {});
     try testing.expect(!strided.areAllAbove() and !strided.areAllBelow());
     try testing.expect(buffer[7].position.eql(Vec3.replicate(0.5)) and buffer[7].above_surface);
 }

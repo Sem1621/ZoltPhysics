@@ -11,14 +11,16 @@
 //! - `sRegister` is `register` (D4): the collide / cast functions with a scaled shape on either side forward to the
 //!   inner shape with the scale applied (`collideScaledVsShape`, `collideShapeVsScaled`, `castScaledVsShape`,
 //!   `castShapeVsScaled`, private like in Jolt).
-//! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace and the `inBaseOffset` parameter of
-//!   GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): Draw, DrawGetSupportFunction and DrawGetSupportingFace
+//!   are gated declarations that pass the call on to the inner shape, GetSubmergedVolume passes its debug options on.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
@@ -136,7 +138,7 @@ pub const ScaledShape = struct {
     pub const shape_sub_type: ShapeSubType = .scaled;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSubShapeTransformedShape, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSubShapeTransformedShape, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .draw, .drawGetSupportFunction, .drawGetSupportingFace, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: DecoratedShape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the destructor chain
@@ -260,11 +262,27 @@ pub const ScaledShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const ScaledShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        return self.innerShape().getSubmergedVolume(center_of_mass_transform, scale.mul(self.scale), surface);
+    pub fn getSubmergedVolume(self: *const ScaledShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        return self.innerShape().getSubmergedVolume(center_of_mass_transform, scale.mul(self.scale), surface, opts);
     }
 
-    // TODO(debug_renderer): Draw, DrawGetSupportFunction, DrawGetSupportingFace (pass the call on with inScale * mScale)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const ScaledShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        self.innerShape().draw(renderer, center_of_mass_transform, scale.mul(self.scale), color, use_material_colors, draw_wireframe);
+    }
+
+    // See Shape::DrawGetSupportFunction (JPH_DEBUG_RENDERER)
+    pub const drawGetSupportFunction = if (Core.debug_renderer) drawGetSupportFunctionImpl else {};
+    fn drawGetSupportFunctionImpl(self: *const ScaledShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+        self.innerShape().drawGetSupportFunction(renderer, center_of_mass_transform, scale.mul(self.scale), color, draw_support_direction);
+    }
+
+    // See Shape::DrawGetSupportingFace (JPH_DEBUG_RENDERER)
+    pub const drawGetSupportingFace = if (Core.debug_renderer) drawGetSupportingFaceImpl else {};
+    fn drawGetSupportingFaceImpl(self: *const ScaledShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+        self.innerShape().drawGetSupportingFace(renderer, center_of_mass_transform, scale.mul(self.scale));
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const ScaledShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -819,8 +837,8 @@ test "ScaledShape: submerged volume, soft body vertices, collect and transform s
 
     // Submerged volume: the inner shape with the combined scale
     const surface = Plane.fromPointAndNormal(Vec3.init(0, 2.5, 0), Vec3.axisY());
-    const v = shape.getSubmergedVolume(transform, Vec3.replicate(2), surface);
-    const expected_v = box.asShape().getSubmergedVolume(transform, Vec3.replicate(2).mul(scale), surface);
+    const v = shape.getSubmergedVolume(transform, Vec3.replicate(2), surface, .{});
+    const expected_v = box.asShape().getSubmergedVolume(transform, Vec3.replicate(2).mul(scale), surface, .{});
     try testing.expectEqual(expected_v.total_volume, v.total_volume);
     try testing.expectEqual(expected_v.submerged_volume, v.submerged_volume);
     try expect(v.center_of_buoyancy.eql(expected_v.center_of_buoyancy));

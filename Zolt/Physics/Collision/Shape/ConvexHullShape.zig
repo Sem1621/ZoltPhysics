@@ -21,8 +21,13 @@
 //!   face, not at the last vertex of the first face. This is ported as is (for a hull of 3 points the edge from the
 //!   last vertex back to the first one is not tested, see the inline test).
 //! - GetStats reports Zolt's struct sizes (they differ from C++, see CollisionArchitecture.md section 8).
-//! - JPH_DEBUG_RENDERER (Draw, DrawShrunkShape, sDrawFaceOutlines, mGeometry, the drawing of the center of buoyancy and
-//!   the `inBaseOffset` parameter of GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4, R6): `draw` and `drawShrunkShape` are gated
+//!   declarations. sDrawFaceOutlines is `renderer.flags.convex_hull_shape.draw_face_outlines`. Jolt's `mutable mGeometry`
+//!   that Draw writes is a heap side block (`draw_cache`, `void` without `-Ddebug_renderer`) with a mutex, allocated with
+//!   the shape's allocator in `initFromSettings` and `restoreBinaryState` and freed in `destruct`. It is null for a shape
+//!   that was neither, which then draws nothing. Draw locks it with the renderer's io (UB10). When an allocation fails
+//!   while drawing (R5) the geometry is not cached and not drawn, the face outlines are still drawn. GetSubmergedVolume
+//!   draws the center of buoyancy into `opts.debug.renderer` (Jolt's DebugRenderer::sInstance).
 //!
 //! Signatures that differ from C++:
 //! - The two settings constructors `(const Vec3 *inPoints, int inNumPoints, ...)` and `(const Array<Vec3> &, ...)`
@@ -38,6 +43,10 @@ const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
 const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const virtual = @import("../../../Core/Virtual.zig");
+const Mutex = @import("../../../Core/Mutex.zig").Mutex;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -167,7 +176,7 @@ pub const ConvexHullShape = struct {
     pub const shape_sub_type: ShapeSubType = .convex_hull;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .restoreBinaryState };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .restoreBinaryState };
 
     /// Maximum amount of points supported in a convex hull. Note that while constructing a hull, interior points are discarded so you can provide more points.
     /// The ConvexHullShapeSettings::Create function will return an error when too many points are provided.
@@ -221,7 +230,26 @@ pub const ConvexHullShape = struct {
     /// Radius of the biggest sphere that fits entirely in the convex hull
     inner_radius: f32 = math.flt_max,
 
-    // TODO(debug_renderer): mutable DebugRenderer::GeometryRef mGeometry
+    /// The draw cache (JPH_DEBUG_RENDERER, R6): Jolt's `mutable DebugRenderer::GeometryRef mGeometry`
+    draw_cache: if (Core.debug_renderer) ?*DrawCache else void = if (Core.debug_renderer) null else {},
+
+    // static bool sDrawFaceOutlines (Draw the outlines of the faces of the convex hull when drawing the shape,
+    // JPH_DEBUG_RENDERER) is `renderer.flags.convex_hull_shape.draw_face_outlines` (R4)
+
+    /// Zolt (R6): the members that Jolt's const Draw writes, in a heap block behind a mutex
+    pub const DrawCache = struct {
+        mutex: Mutex = .{},
+        geometry: DebugRenderer.GeometryRef = .empty,
+    };
+
+    /// Zolt (R6): allocate the draw cache in a fallible construction path (once)
+    fn createDrawCache(self: *ConvexHullShape) Allocator.Error!void {
+        if (self.draw_cache == null) {
+            const cache = try self.base.base.allocator.create(DrawCache);
+            cache.* = .{};
+            self.draw_cache = cache;
+        }
+    }
 
     // ---------------------------------------------------------------------------------------------------------------
     // Construction (C++ constructors)
@@ -235,6 +263,7 @@ pub const ConvexHullShape = struct {
     /// On the stack: `var shape = ConvexHullShape.initDefault(allocator); try shape.initFromSettings(...)`, then
     /// `asShape().setEmbedded()` and finally `asShapeMut().deinit()` (frees the arrays).
     pub fn initFromSettings(self: *ConvexHullShape, settings: *const ConvexHullShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         self.base.initFromSettings(&settings.base, result);
         self.convex_radius = settings.max_convex_radius;
 
@@ -525,13 +554,19 @@ pub const ConvexHullShape = struct {
         result.set(.init(self.asShapeMut()));
     }
 
-    /// ~ConvexHullShape (frees the arrays)
+    /// ~ConvexHullShape (frees the arrays and the draw cache)
     pub fn destruct(self: *ConvexHullShape) void {
         const allocator = self.base.base.allocator;
         self.points.deinit(allocator);
         self.faces.deinit(allocator);
         self.planes.deinit(allocator);
         self.vertex_idx.deinit(allocator);
+        if (Core.debug_renderer) {
+            if (self.draw_cache) |cache| {
+                cache.geometry.deinit();
+                allocator.destroy(cache);
+            }
+        }
     }
 
     /// Upcasts (implicit in C++)
@@ -823,7 +858,7 @@ pub const ConvexHullShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const ConvexHullShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const ConvexHullShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
         // Trivially calculate total volume
         const abs_scale = scale.abs();
         const total_volume = self.volume * abs_scale.getX() * abs_scale.getY() * abs_scale.getZ();
@@ -834,14 +869,17 @@ pub const ConvexHullShape = struct {
         // Convert the points to world space and determine the distance to the surface
         const num_points: u32 = @intCast(self.points.items.len);
         var buffer: [max_points_in_hull]PolyhedronSubmergedVolumeCalculator.Point = undefined; // JPH_STACK_ALLOC(num_points * sizeof(Point)), at most max_points_in_hull points
-        var submerged_vol_calc = PolyhedronSubmergedVolumeCalculator.init(center_of_mass_transform.mul(Mat44.scaleVec3(scale)), .init(&self.points.items[0].position, .{ .stride = @sizeOf(Point) }), num_points, surface, buffer[0..num_points]);
+        var submerged_vol_calc = PolyhedronSubmergedVolumeCalculator.init(center_of_mass_transform.mul(Mat44.scaleVec3(scale)), .init(&self.points.items[0].position, .{ .stride = @sizeOf(Point) }), num_points, surface, buffer[0..num_points], opts.debug);
 
+        var out: Shape.SubmergedVolume = .{ .total_volume = total_volume, .submerged_volume = undefined, .center_of_buoyancy = undefined };
         if (submerged_vol_calc.areAllAbove()) {
             // We're above the water
-            return .{ .total_volume = total_volume, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
+            out.submerged_volume = 0.0;
+            out.center_of_buoyancy = Vec3.zero();
         } else if (submerged_vol_calc.areAllBelow()) {
             // We're fully submerged
-            return .{ .total_volume = total_volume, .submerged_volume = total_volume, .center_of_buoyancy = center_of_mass_transform.getTranslation() };
+            out.submerged_volume = total_volume;
+            out.center_of_buoyancy = center_of_mass_transform.getTranslation();
         } else {
             // Calculate submerged volume
             const reference_point_idx = submerged_vol_calc.getReferencePointIdx();
@@ -880,14 +918,122 @@ pub const ConvexHullShape = struct {
 
             // Get the results
             const r = submerged_vol_calc.getResult();
+            out.submerged_volume = r.submerged_volume;
+            out.center_of_buoyancy = r.center_of_buoyancy;
+        }
 
-            // TODO(debug_renderer): Draw center of buoyancy (sDrawSubmergedVolumes)
+        if (Core.debug_renderer) {
+            // Draw center of buoyancy
+            if (opts.debug.submergedVolumeRenderer()) |renderer|
+                renderer.drawWireSphere(opts.debug.base_offset.addVec3(out.center_of_buoyancy), 0.05, Color.red, .{ .level = 1 });
+        }
 
-            return .{ .total_volume = total_volume, .submerged_volume = r.submerged_volume, .center_of_buoyancy = r.center_of_buoyancy };
+        return out;
+    }
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const ConvexHullShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const cache = self.draw_cache orelse return; // Zolt: a shape that was not constructed from settings or restored
+
+        // Zolt (R6): the cache lock, the draw below runs with its own reference to the geometry
+        var geometry: DebugRenderer.GeometryRef = blk: {
+            cache.mutex.lock(renderer.io);
+            defer cache.mutex.unlock(renderer.io);
+
+            if (cache.geometry.get() == null)
+                cache.geometry = self.createDrawGeometry(renderer);
+            break :blk cache.geometry.clone();
+        };
+        defer geometry.deinit();
+
+        // Test if the shape is scaled inside out
+        const cull_mode: DebugRenderer.CullMode = if (ScaleHelpers.isInsideOut(scale)) .cull_front_face else .cull_back_face;
+
+        // Determine the draw mode
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+
+        // Draw the geometry
+        const c = if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color;
+        const transform = center_of_mass_transform.preScaled(scale);
+        if (geometry.get()) |g| // Zolt (R5): empty when the renderer could not create it
+            renderer.drawGeometryAutoBounds(transform, c, g, .{ .cull_mode = cull_mode, .cast_shadow = .on, .draw_mode = draw_mode });
+
+        // Draw the outline if requested
+        if (renderer.flags.convex_hull_shape.draw_face_outlines) {
+            for (self.faces.items) |f| {
+                const vertices = self.vertex_idx.items[f.first_vertex..][0..f.num_vertices];
+
+                // Draw edges of face
+                renderer.drawLine(transform.mulVec3(self.points.items[vertices[vertices.len - 1]].position), transform.mulVec3(self.points.items[vertices[0]].position), Color.grey);
+                for (1..vertices.len) |v|
+                    renderer.drawLine(transform.mulVec3(self.points.items[vertices[v - 1]].position), transform.mulVec3(self.points.items[vertices[v]].position), Color.grey);
+            }
         }
     }
 
-    // TODO(debug_renderer): Draw, DrawShrunkShape and sDrawFaceOutlines (JPH_DEBUG_RENDERER)
+    /// The geometry of Draw (the body of Jolt's `if (mGeometry == nullptr)`), empty when an allocation failed (R5)
+    fn createDrawGeometry(self: *const ConvexHullShape, renderer: *DebugRenderer) DebugRenderer.GeometryRef {
+        const allocator = renderer.allocator;
+        var triangles: std.ArrayList(DebugRenderer.Triangle) = .empty;
+        defer triangles.deinit(allocator);
+        for (self.faces.items) |f| {
+            const vertices = self.vertex_idx.items[f.first_vertex..][0..f.num_vertices];
+
+            // Draw first triangle of polygon
+            const v0 = self.points.items[vertices[0]].position;
+            const v1 = self.points.items[vertices[1]].position;
+            const v2 = self.points.items[vertices[2]].position;
+            const uv_direction = v1.sub(v0).normalized();
+            triangles.append(allocator, .initUV(v0, v1, v2, Color.white, v0, uv_direction)) catch {
+                renderer.setOutOfMemory();
+                return .empty;
+            };
+
+            // Draw any other triangles in this polygon
+            for (3..vertices.len) |v| {
+                triangles.append(allocator, .initUV(v0, self.points.items[vertices[v - 1]].position, self.points.items[vertices[v]].position, Color.white, v0, uv_direction)) catch {
+                    renderer.setOutOfMemory();
+                    return .empty;
+                };
+            }
+        }
+        const batch = renderer.createTriangleBatch(triangles.items);
+        if (batch.get() == null and renderer.isOutOfMemory())
+            return .empty; // The renderer could not create the batch
+        return .init(DebugRenderer.Geometry.createWithBatch(allocator, batch, self.getLocalBounds()) catch {
+            renderer.setOutOfMemory();
+            return .empty;
+        });
+    }
+
+    /// Debugging helper draw function that draws how all points are moved when a shape is shrunk by the convex radius
+    /// (JPH_DEBUG_RENDERER)
+    pub const drawShrunkShape = if (Core.debug_renderer) drawShrunkShapeImpl else {};
+    fn drawShrunkShapeImpl(self: *const ConvexHullShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+        // Get the shrunk points
+        var buffer: ConvexShape.SupportBuffer = .{};
+        const support: ?*const HullNoConvex = if (self.convex_radius > 0.0) virtual.downcast(HullNoConvex, self.getSupportFunction(.exclude_convex_radius, &buffer, scale)) else null;
+
+        const transform = center_of_mass_transform.mulMat44(Mat44.scaleVec3(scale));
+
+        for (self.points.items, 0..) |*point, p| {
+            const position = transform.mulVec3(point.position);
+            const shrunk_point = if (support) |s| transform.mulVec3(s.getPointsConst().constSlice()[p]) else position;
+
+            // Draw difference between shrunk position and position
+            renderer.drawLine(position, shrunk_point, Color.green);
+
+            // Draw face normals that are contributing
+            for (0..@intCast(point.num_faces)) |i|
+                renderer.drawLine(position, position.addVec3(self.planes.items[@intCast(point.faces[i])].getNormal().mulScalar(0.1)), Color.yellow);
+
+            // Draw point index (ConvertToString of an int, which never needs more than 11 characters)
+            var text_buffer: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&text_buffer, "{d}", .{@as(i32, @intCast(p))}) catch unreachable;
+            renderer.drawText3D(position, text, .{ .color = Color.white, .height = 0.1 });
+        }
+    }
 
     /// The result of castRayHelper (Jolt's return value and the outMinFraction / outMaxFraction out parameters, which Jolt
     /// leaves unset on one of the paths that return false)
@@ -1247,6 +1393,7 @@ pub const ConvexHullShape = struct {
 
     // See: Shape::RestoreBinaryState
     pub fn restoreBinaryState(self: *ConvexHullShape, stream: StreamIn) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         try ConvexShape.impl.restoreBinaryState(&self.base, stream);
 
         const allocator = self.base.base.allocator;
@@ -1938,16 +2085,16 @@ test "ConvexHullShape: GetSubmergedVolume" {
         const total = 8.0 * @abs(scale.getX() * scale.getY() * scale.getZ());
 
         // Fully above / below the surface
-        const above = shape.getSubmergedVolume(Mat44.translation(Vec3.init(0, 10, 0)), scale, surface);
+        const above = shape.getSubmergedVolume(Mat44.translation(Vec3.init(0, 10, 0)), scale, surface, .{});
         try testing.expectApproxEqRel(total, above.total_volume, 1.0e-5);
         try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
         try testing.expect(above.center_of_buoyancy.eql(Vec3.zero()));
-        const below = shape.getSubmergedVolume(Mat44.translation(Vec3.init(1, -10, 2)), scale, surface);
+        const below = shape.getSubmergedVolume(Mat44.translation(Vec3.init(1, -10, 2)), scale, surface, .{});
         try testing.expectEqual(below.total_volume, below.submerged_volume);
         try testing.expect(below.center_of_buoyancy.eql(Vec3.init(1, -10, 2)));
 
         // Half submerged: the center of buoyancy is in the middle of the lower half (inside out scales give the same result)
-        const half = shape.getSubmergedVolume(transform, scale, surface);
+        const half = shape.getSubmergedVolume(transform, scale, surface, .{});
         try testing.expectApproxEqRel(total, half.total_volume, 1.0e-5);
         try testing.expectApproxEqRel(0.5 * total, half.submerged_volume, 1.0e-4);
         try testing.expect(half.center_of_buoyancy.isClose(Vec3.init(0, 5 - 0.5 * @abs(scale.getY()), 0), .{ .max_dist_sq = 1.0e-8 }));
@@ -2158,7 +2305,7 @@ test "ConvexHullShape: every creation path that allocates reports out of memory"
         };
         defer restored.deinit();
         try testing.expect(restored.isValid());
-        try testing.expectEqual(@as(usize, 5), fail_index);
+        try testing.expectEqual(@as(usize, if (Core.debug_renderer) 6 else 5), fail_index); // The draw cache is one more
         break;
     }
 }

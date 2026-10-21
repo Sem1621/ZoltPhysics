@@ -1521,7 +1521,7 @@ test "Decorated parity: GetSubmergedVolume" {
         const plane = arr4(Plane.fromPointAndNormal(vec3(gen.vec(-5, 5)), normal).normal_and_constant);
         var jolt_values: [5]f32 = undefined;
         jolt.jolt_decorated_submerged_volume(&desc, &transform, &scale, &plane, &jolt_values);
-        const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)));
+        const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)), .{});
         const zolt_values = [_]f32{ r.total_volume, r.submerged_volume } ++ arr3(r.center_of_buoyancy);
         checker.check(.{ desc, scale, transform, plane }, zolt_values, jolt_values);
     }

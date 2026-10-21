@@ -293,8 +293,7 @@ pub const BoxShape = struct {
     pub const draw = if (Core.debug_renderer) drawImpl else {};
     fn drawImpl(self: *const BoxShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
         const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
-        const matrix = if (Core.double_precision) center_of_mass_transform.mulMat44(Mat44.scaleVec3(scale.abs())) else center_of_mass_transform.mul(Mat44.scaleVec3(scale.abs()));
-        renderer.drawBoxMatrix(matrix, self.getLocalBounds(), if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{ .cast_shadow = .on, .draw_mode = draw_mode });
+        renderer.drawBoxMatrix(center_of_mass_transform.mulMat44(Mat44.scaleVec3(scale.abs())), self.getLocalBounds(), if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{ .cast_shadow = .on, .draw_mode = draw_mode });
     }
 
     // See Shape::CastRay
@@ -714,7 +713,7 @@ test "BoxShape: GetTrianglesStart / Next, GetSubmergedVolume" {
     }
 
     // GetSubmergedVolume is ConvexShape's
-    const half = box.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    const half = box.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()), .{});
     try testing.expectEqual(@as(f32, 48.0), half.total_volume);
     try testing.expectApproxEqAbs(@as(f32, 24.0), half.submerged_volume, 1.0e-5);
 }

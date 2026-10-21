@@ -551,7 +551,7 @@ fn applyOp(world: *World, id: u32, op: *const BodyOp) !BodyOpResult {
         .move_kinematic => body.moveKinematic(loadR3(r[0..3]), loadQuat(f[0..4]), f[4]),
         .set_position_and_rotation => body.setPositionAndRotationInternal(loadR3(r[0..3]), loadQuat(f[0..4]), .{ .reset_sleep_timer = i[0] != 0 }),
         .update_sleep_state => result.i[0] = @intFromEnum(body.updateSleepStateInternal(f[0], f[1], f[2])),
-        .apply_buoyancy_impulse => result.i[0] = @intFromBool(body.applyBuoyancyImpulse(loadR3(r[0..3]), load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12])),
+        .apply_buoyancy_impulse => result.i[0] = @intFromBool(body.applyBuoyancyImpulse(loadR3(r[0..3]), load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12], .{})),
         .world_space_surface_normal => store3(body.getWorldSpaceSurfaceNormal(.{ .value = i[0] }, loadR3(r[0..3])), of[0..3]),
         .point_velocity => {
             store3(body.getPointVelocity(loadR3(r[0..3])), of[0..3]);
@@ -583,7 +583,7 @@ fn applyOp(world: *World, id: u32, op: *const BodyOp) !BodyOpResult {
             mp.subAngularVelocityStep(load3(f[9..12]));
         },
         .submerged_volume => {
-            const volume = body.getSubmergedVolume(loadR3(r[0..3]), load3(f[0..3]));
+            const volume = body.getSubmergedVolume(loadR3(r[0..3]), load3(f[0..3]), .{});
             of[0] = volume.total_volume;
             of[1] = volume.submerged_volume;
             store3(volume.relative_center_of_buoyancy, of[2..5]);
@@ -968,7 +968,7 @@ const Coverage = struct {
     /// Body::ApplyBuoyancyImpulse up to its branches
     fn recordBuoyancy(self: *Coverage, body: *const Body, o: *const BodyOp) void {
         const f = &o.f;
-        const volume = body.getSubmergedVolume(loadR3(o.r[0..3]), load3(f[0..3]));
+        const volume = body.getSubmergedVolume(loadR3(o.r[0..3]), load3(f[0..3]), .{});
         if (!(volume.submerged_volume > 0.0)) {
             self.buoyancy_not_submerged += 1;
             return;

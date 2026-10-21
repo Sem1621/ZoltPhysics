@@ -29,7 +29,7 @@
 //!   initialized (Jolt leaves the Vec4s uninitialized; they are always written before they are read).
 //! - The helpers registered in CollisionDispatch drop the `s` (`collideCompoundVsShape`, `collideShapeVsCompound`,
 //!   `castShapeVsCompound`).
-//! - JPH_DEBUG_RENDERER: MutableCompoundShape has no draw code of its own (CompoundShape's Draw is TODO(debug_renderer)).
+//! - JPH_DEBUG_RENDERER: MutableCompoundShape has no draw code of its own, it draws with CompoundShape's draw functions.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

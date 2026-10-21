@@ -38,6 +38,9 @@ struct JoltDRResult
 
 using namespace ZoltParity;
 
+/// The shape of a catalogue of PairwiseReference.cpp
+extern "C" const Shape *pw_catalogue_shape(void *inCatalogue, uint32 inIndex);
+
 /// The bytes written to a string stream so far
 static std::vector<uint8> sStreamBytes(const std::stringstream &inStream)
 {
@@ -121,6 +124,55 @@ JoltDRResult *jolt_dr_record_ops(const uint8 *inOps, uint64 inSize)
 	return result;
 #else
 	(void)inOps; (void)inSize;
+	return nullptr;
+#endif
+}
+
+/// Run the ops with the shapes of a PairwiseReference.cpp catalogue (D2's shape ops) on a ParityRenderer (inKind 0), a
+/// SimpleParityRenderer (inKind 1) or a DebugRendererRecorder (inKind 2). Parts: [0] the log of the ops (the .jor bytes
+/// after the construction for the recorder), [1] the results of the shape ops. The static draw flags of the shapes are
+/// reset afterwards.
+JoltDRResult *jolt_dr_run_shape_ops(void *inCatalogue, uint32 inNumShapes, const uint8 *inOps, uint64 inSize, int inKind)
+{
+#ifdef JPH_DEBUG_RENDERER
+	ParityInstallHooks();
+
+	Array<const Shape *> shapes;
+	for (uint32 i = 0; i < inNumShapes; ++i)
+		shapes.push_back(pw_catalogue_shape(inCatalogue, i));
+	ParityShapeContext context { shapes.data(), inNumShapes, { } };
+
+	JoltDRResult *result = new JoltDRResult;
+	ParitySetShapeDrawFlags(0);
+	if (inKind == 0)
+	{
+		ParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		RunParityOps(renderer, inOps, size_t(inSize), nullptr, nullptr, &context);
+		result->mParts.push_back(renderer.mLog.mBytes);
+	}
+	else if (inKind == 1)
+	{
+		SimpleParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		RunParityOps(renderer, inOps, size_t(inSize), &renderer, nullptr, &context);
+		result->mParts.push_back(renderer.mLog.mBytes);
+	}
+	else
+	{
+		std::stringstream stream;
+		StreamOutWrapper wrapper(stream);
+		DebugRendererRecorder recorder(wrapper);
+		size_t construction_size = sStreamBytes(stream).size();
+		RunParityOps(recorder, inOps, size_t(inSize), nullptr, &recorder, &context);
+		std::vector<uint8> all = sStreamBytes(stream);
+		result->mParts.push_back(std::vector<uint8>(all.begin() + construction_size, all.end()));
+	}
+	ParitySetShapeDrawFlags(0);
+	result->mParts.push_back(context.mResults);
+	return result;
+#else
+	(void)inCatalogue; (void)inNumShapes; (void)inOps; (void)inSize; (void)inKind;
 	return nullptr;
 #endif
 }

@@ -157,7 +157,7 @@ fn creatorArr(c: SubShapeIDCreator) [2]u32 {
 pub const ParityShape = struct {
     /// Both sub types are this class (C++: `Shape(EShapeType::User1, inSubType)`)
     pub const shape_type: ShapeType = .user1;
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .saveSubShapeState, .getStats, .getVolume, .makeScaleValid };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .saveSubShapeState, .getStats, .getVolume, .draw, .makeScaleValid };
 
     base: Shape,
     half_extent: Vec3,
@@ -230,8 +230,14 @@ pub const ParityShape = struct {
         out_vertices.append(center_of_mass_transform.mulVec3(direction));
     }
 
-    pub fn getSubmergedVolume(self: *const ParityShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
+    // See Shape::Draw (JPH_DEBUG_RENDERER). Parity shapes are never drawn (like the C++ shape).
+    pub const draw = if (zolt.Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const ParityShape, renderer: *zolt.DebugRenderer, center_of_mass_transform: zolt.RMat44, scale: Vec3, color: zolt.Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+    }
+
+    pub fn getSubmergedVolume(self: *const ParityShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ self, center_of_mass_transform, scale, surface, opts };
         return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
     }
 

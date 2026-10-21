@@ -68,4 +68,5 @@ test {
     _ = @import("Physics/VehiclePartsParity.zig");
     _ = @import("Renderer/DebugRendererParity.zig");
     _ = @import("Renderer/ParityRenderer.zig");
+    _ = @import("Renderer/ShapeDrawParity.zig");
 }

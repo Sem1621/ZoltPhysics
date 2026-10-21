@@ -10,12 +10,16 @@
 //! binary state (a restored EmptyShape has its center of mass at the origin).
 //!
 //! The lambdas `collide_empty` / `cast_empty` of EmptyShape::sRegister are the functions `collideEmpty` / `castEmpty`.
-//! JPH_DEBUG_RENDERER (Draw) is not ported yet: TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): `draw` is a gated declaration, `void` without
+//! `-Ddebug_renderer`. GetSubmergedVolume ignores its debug options, like Jolt ignores `inBaseOffset`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
 const Plane = @import("../../../Geometry/Plane.zig").Plane;
 const Float3 = @import("../../../Math/Float3.zig").Float3;
@@ -119,7 +123,7 @@ pub const EmptyShape = struct {
     pub const shape_sub_type: ShapeSubType = .empty;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .isValidScale };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .isValidScale };
 
     base: Shape,
     center_of_mass: Vec3 = Vec3.zero(),
@@ -213,12 +217,17 @@ pub const EmptyShape = struct {
         return Vec3.zero();
     }
 
-    pub fn getSubmergedVolume(self: *const EmptyShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
+    pub fn getSubmergedVolume(self: *const EmptyShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ self, center_of_mass_transform, scale, surface, opts };
         return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER, draws a marker at the center of mass)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const EmptyShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, use_material_colors, draw_wireframe };
+        renderer.drawMarker(center_of_mass_transform.getTranslation(), color, @abs(scale.getX()) * 0.1);
+    }
 
     pub fn castRay(self: *const EmptyShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
         _ = .{ self, ray, sub_shape_id_creator, hit };
@@ -401,7 +410,7 @@ test "EmptyShape: properties and queries (collides with nothing)" {
     var face: Shape.SupportingFace = .empty;
     shape.getSupportingFace(.empty, Vec3.axisX(), Vec3.one(), transform, &face);
     try testing.expectEqual(@as(u32, 0), face.len); // Shape's version
-    const submerged = shape.getSubmergedVolume(transform, Vec3.one(), Plane.init(Vec3.axisY(), 100.0));
+    const submerged = shape.getSubmergedVolume(transform, Vec3.one(), Plane.init(Vec3.axisY(), 100.0), .{});
     try testing.expectEqual(@as(f32, 0.0), submerged.total_volume);
     try testing.expectEqual(@as(f32, 0.0), submerged.submerged_volume);
     try testing.expect(submerged.center_of_buoyancy.eql(Vec3.zero()));

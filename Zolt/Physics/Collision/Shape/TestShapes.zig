@@ -16,6 +16,8 @@
 //! - `TestSphereShape` (User2): a sphere; uses `Shape.collidePointUsingRayCast` and a uniform scale.
 //! - `TestCompoundShape` (User3): two child shapes at offsets (1 sub shape ID bit), owns its children.
 //! - `TestMaterial`: a material class registered through `serializable_types`.
+//! - Draw (JPH_DEBUG_RENDERER, a gated declaration): the box draws a box, the sphere a unit sphere scaled by its
+//!   radius, the compound draws its children.
 //!
 //! Registered collision functions: box vs box, sphere vs box (and the reversed box vs sphere through
 //! CollisionDispatch.reversedCollideShape / reversedCastShape), compound vs any and any vs compound (recursing through
@@ -24,6 +26,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Ref = @import("../../../Core/Reference.zig").Ref;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
@@ -38,9 +41,11 @@ const Float3 = @import("../../../Math/Float3.zig").Float3;
 const Mat44 = @import("../../../Math/Mat44.zig").Mat44;
 const Quat = @import("../../../Math/Quat.zig").Quat;
 const RVec3 = @import("../../../Math/Real.zig").RVec3;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const Vec3 = @import("../../../Math/Vec3.zig").Vec3;
 const MassProperties = @import("../../Body/MassProperties.zig").MassProperties;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const PhysicsMaterial = @import("../PhysicsMaterial.zig").PhysicsMaterial;
 const RayCastFile = @import("../RayCast.zig");
 const RayCast = RayCastFile.RayCast;
@@ -235,7 +240,7 @@ pub const TestCompoundShapeSettings = struct {
 /// A box around its center of mass (User1)
 pub const TestBoxShape = struct {
     pub const shape_sub_type: ShapeSubType = .user1;
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
 
     base: Shape,
     half_extent: Vec3 = Vec3.one(),
@@ -337,12 +342,24 @@ pub const TestBoxShape = struct {
         for (out_vertices.slice()) |*v| v.* = center_of_mass_transform.mulVec3(v.*);
     }
 
-    pub fn getSubmergedVolume(self: *const TestBoxShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const TestBoxShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = opts;
         const total_volume = self.getVolume() * @abs(scale.getX() * scale.getY() * scale.getZ());
         const center = center_of_mass_transform.getTranslation();
         if (surface.signedDistance(center) < 0.0)
             return .{ .total_volume = total_volume, .submerged_volume = total_volume, .center_of_buoyancy = center };
         return .{ .total_volume = total_volume, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
+    }
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER): a box in the material color or `color`
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestBoxShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const draw_color = if (use_material_colors) (self.material.get() orelse PhysicsMaterial.default).getDebugColor() else color;
+        const transform = center_of_mass_transform.preScaled(scale);
+        if (draw_wireframe)
+            renderer.drawWireBoxMatrix(transform, self.localBox(), draw_color)
+        else
+            renderer.drawBoxMatrix(transform, self.localBox(), draw_color, .{});
     }
 
     pub fn castRay(self: *const TestBoxShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -433,7 +450,7 @@ pub const TestBoxShape = struct {
 /// A sphere (User2), only valid with a uniform scale
 pub const TestSphereShape = struct {
     pub const shape_sub_type: ShapeSubType = .user2;
-    pub const overrides = .{ .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: Shape,
     radius: f32 = 1.0,
@@ -494,13 +511,25 @@ pub const TestSphereShape = struct {
         return local_surface_position.normalizedOr(Vec3.axisY());
     }
 
-    pub fn getSubmergedVolume(self: *const TestSphereShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const TestSphereShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = opts;
         const scaled_radius = self.radius * @abs(scale.getX());
         const total_volume = (4.0 / 3.0 * math.pi) * math.cubed(scaled_radius);
         const distance = surface.signedDistance(center_of_mass_transform.getTranslation());
         if (distance >= scaled_radius)
             return .{ .total_volume = total_volume, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
         return .{ .total_volume = total_volume, .submerged_volume = total_volume, .center_of_buoyancy = center_of_mass_transform.getTranslation() };
+    }
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER): a unit sphere scaled by the radius
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestSphereShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const draw_color = if (use_material_colors) PhysicsMaterial.default.getDebugColor() else color;
+        const transform = center_of_mass_transform.preScaled(scale.mulScalar(self.radius));
+        if (draw_wireframe)
+            renderer.drawWireUnitSphere(transform, draw_color, .{})
+        else
+            renderer.drawUnitSphere(transform, draw_color, .{});
     }
 
     pub fn castRay(self: *const TestSphereShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -584,7 +613,7 @@ pub const TestSphereShape = struct {
 /// Two child shapes at offsets (User3), the sub shape ID of a child is its index (1 bit)
 pub const TestCompoundShape = struct {
     pub const shape_sub_type: ShapeSubType = .user3;
-    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getLeafShape, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubShapeUserData, .getSubShapeTransformedShape, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveSubShapeState, .restoreSubShapeState, .getStats, .getStatsRecursive, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getLeafShape, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubShapeUserData, .getSubShapeTransformedShape, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveSubShapeState, .restoreSubShapeState, .getStats, .getStatsRecursive, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     pub const num_bits: u32 = 1;
 
@@ -716,10 +745,10 @@ pub const TestCompoundShape = struct {
         return .{ .transformed_shape = ts, .remainder = c.remainder };
     }
 
-    pub fn getSubmergedVolume(self: *const TestCompoundShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const TestCompoundShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
         var result: Shape.SubmergedVolume = .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
         for (0..self.children.len) |i| {
-            const r = self.child(@intCast(i)).getSubmergedVolume(self.childTransform(@intCast(i), center_of_mass_transform, scale), scale, surface);
+            const r = self.child(@intCast(i)).getSubmergedVolume(self.childTransform(@intCast(i), center_of_mass_transform, scale), scale, surface, opts);
             result.total_volume += r.total_volume;
             result.submerged_volume += r.submerged_volume;
             result.center_of_buoyancy = result.center_of_buoyancy.add(r.center_of_buoyancy.mulScalar(r.submerged_volume));
@@ -727,6 +756,13 @@ pub const TestCompoundShape = struct {
         if (result.submerged_volume > 0.0)
             result.center_of_buoyancy = result.center_of_buoyancy.divScalar(result.submerged_volume);
         return result;
+    }
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER): draws the children
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestCompoundShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        for (0..self.children.len) |i|
+            self.child(@intCast(i)).draw(renderer, center_of_mass_transform.preTranslated(scale.mul(self.children[i].position)), scale, color, use_material_colors, draw_wireframe);
     }
 
     pub fn castRay(self: *const TestCompoundShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {

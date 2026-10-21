@@ -1269,7 +1269,7 @@ test "Capsules parity: GetSubmergedVolume" {
         jolt.jolt_capsules_submerged_volume(&desc, &transform, &scale, &plane, &jolt_values);
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();
-        const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)));
+        const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)), .{});
         const zolt_values = [_]f32{ r.total_volume, r.submerged_volume } ++ arr3(r.center_of_buoyancy);
         checker.check(.{ desc, scale, transform, plane }, zolt_values, jolt_values);
     }

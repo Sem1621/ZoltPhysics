@@ -290,9 +290,15 @@ const TestDecoratedShapeSettings = struct {
 /// shape, everything else comes from DecoratedShape.impl and Shape.impl
 const TestDecoratedShape = struct {
     pub const shape_sub_type: ShapeSubType = .user4;
-    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
 
     base: DecoratedShape,
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER): a test shape, draws nothing
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestDecoratedShape, renderer: *@import("../../../Renderer/DebugRenderer.zig").DebugRenderer, center_of_mass_transform: @import("../../../Math/Real.zig").RMat44, scale: Vec3, color: @import("../../../Core/Color.zig").Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+    }
 
     pub fn initDefault(allocator: Allocator) TestDecoratedShape {
         return .{ .base = .init(TestDecoratedShape, allocator, shape_sub_type, null) };
@@ -349,8 +355,8 @@ const TestDecoratedShape = struct {
         return self.inner().getSurfaceNormal(sub_shape_id, local_surface_position);
     }
 
-    pub fn getSubmergedVolume(self: *const TestDecoratedShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        return self.inner().getSubmergedVolume(center_of_mass_transform, scale, surface);
+    pub fn getSubmergedVolume(self: *const TestDecoratedShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        return self.inner().getSubmergedVolume(center_of_mass_transform, scale, surface, opts);
     }
 
     pub fn castRay(self: *const TestDecoratedShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {

@@ -8,12 +8,19 @@
 //!   returns a SphereShape (built with `SphereShape(radius, material)`, so with the default density and user data), offset
 //!   with a RotatedTranslatedShape when its center is not at the origin.
 //! - The support class `TaperedCapsule` is constructed in the caller's SupportBuffer (D9).
-//! - JPH_DEBUG_RENDERER (Draw and the `mutable mGeometry` it caches) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R6): `draw` is a gated declaration. Jolt's
+//!   `mutable mGeometry` that Draw writes is a heap side block (`draw_cache`, `void` without `-Ddebug_renderer`) with a
+//!   mutex, allocated with the shape's allocator in `initFromSettings` and `restoreBinaryState` and freed in `destruct`.
+//!   It is null for a shape that was neither, which then draws nothing. Draw locks it with the renderer's io (UB10). When
+//!   the renderer could not create the geometry (out of memory, R5) nothing is cached and nothing is drawn.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const Mutex = @import("../../../Core/Mutex.zig").Mutex;
 const Color = @import("../../../Core/Color.zig").Color;
 const Ref = @import("../../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
@@ -158,7 +165,7 @@ pub const TaperedCapsuleShape = struct {
     pub const shape_sub_type: ShapeSubType = .tapered_capsule;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .draw, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: ConvexShape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the destructor chain
@@ -171,8 +178,33 @@ pub const TaperedCapsuleShape = struct {
     sin_alpha: f32 = 0.0,
     tan_alpha: f32 = 0.0,
 
-    // TODO(debug_renderer): mutable DebugRenderer::GeometryRef mGeometry (JPH_DEBUG_RENDERER, a cache written by Draw:
-    // needs a Rule M solution when the debug renderer is ported)
+    /// The draw cache (JPH_DEBUG_RENDERER, R6): Jolt's `mutable DebugRenderer::GeometryRef mGeometry`
+    draw_cache: if (Core.debug_renderer) ?*DrawCache else void = if (Core.debug_renderer) null else {},
+
+    /// Zolt (R6): the members that Jolt's const Draw writes, in a heap block behind a mutex
+    pub const DrawCache = struct {
+        mutex: Mutex = .{},
+        geometry: DebugRenderer.GeometryRef = .empty,
+    };
+
+    /// Zolt (R6): allocate the draw cache in a fallible construction path (once)
+    fn createDrawCache(self: *TaperedCapsuleShape) Allocator.Error!void {
+        if (self.draw_cache == null) {
+            const cache = try self.asShape().allocator.create(DrawCache);
+            cache.* = .{};
+            self.draw_cache = cache;
+        }
+    }
+
+    /// ~TaperedCapsuleShape: frees the draw cache (JPH_DEBUG_RENDERER)
+    pub fn destruct(self: *TaperedCapsuleShape) void {
+        if (Core.debug_renderer) {
+            if (self.draw_cache) |cache| {
+                cache.geometry.deinit();
+                self.asShape().allocator.destroy(cache);
+            }
+        }
+    }
 
     // ---------------------------------------------------------------------------------------------------------------
     // Construction (C++ constructors)
@@ -185,6 +217,7 @@ pub const TaperedCapsuleShape = struct {
     /// TaperedCapsuleShape(const TaperedCapsuleShapeSettings &inSettings, ShapeResult &outResult): C++ member initializers first, then the body
     pub fn initFromSettings(self: *TaperedCapsuleShape, settings: *const TaperedCapsuleShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
         _ = allocator;
+        if (Core.debug_renderer) try self.createDrawCache();
         self.base.initFromSettings(&settings.base, result);
         self.top_radius = settings.top_radius;
         self.bottom_radius = settings.bottom_radius;
@@ -465,7 +498,47 @@ pub const TaperedCapsuleShape = struct {
         }
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TaperedCapsuleShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const cache = self.draw_cache orelse return; // Zolt: a shape that was not constructed from settings or restored
+
+        // Zolt (R6): the cache lock, the draw below runs with its own reference to the geometry
+        var geometry: DebugRenderer.GeometryRef = blk: {
+            cache.mutex.lock(renderer.io);
+            defer cache.mutex.unlock(renderer.io);
+
+            if (cache.geometry.get() == null) {
+                var buffer: ConvexShape.SupportBuffer = .{};
+                const support = self.getSupportFunction(.include_convex_radius, &buffer, Vec3.one());
+                cache.geometry = renderer.createTriangleGeometryForConvex(.init(support, supportOf));
+            }
+            break :blk cache.geometry.clone();
+        };
+        defer geometry.deinit();
+        const g = geometry.get() orelse return; // Zolt (R5): the renderer could not create the geometry, nothing to draw
+
+        // Preserve flip along y axis but make sure we're not inside out
+        const s = if (ScaleHelpers.isInsideOut(scale)) scale.flipSign(-1, 1, 1) else scale;
+        const world_transform = center_of_mass_transform.mulMat44(Mat44.scaleVec3(s));
+
+        // C++ `Shape::GetWorldSpaceBounds(inCenterOfMassTransform, inScale)`: the qualified call is Shape's version in single
+        // precision, the non virtual DMat44 overload (which calls the virtual version with the rotation) in double precision
+        const bounds = if (Core.double_precision) self.asShape().getWorldSpaceBoundsDMat44(center_of_mass_transform, scale) else Shape.impl.getWorldSpaceBounds(self.asShape(), center_of_mass_transform, scale);
+
+        const lod_scale_sq = math.square(math.max(self.top_radius, self.bottom_radius));
+
+        const c = if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color;
+
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+
+        renderer.drawGeometry(world_transform, bounds, lod_scale_sq, c, g, .{ .cull_mode = .cull_back_face, .cast_shadow = .on, .draw_mode = draw_mode });
+    }
+
+    // The support function of the draw geometry (Jolt's lambda)
+    fn supportOf(support: *const ConvexShape.Support, direction: Vec3) Vec3 {
+        return support.getSupport(direction);
+    }
 
     // See Shape::SaveBinaryState: C++ `ConvexShape::SaveBinaryState(inStream)` is the explicit base call
     pub fn saveBinaryState(self: *const TaperedCapsuleShape, stream: StreamOut) void {
@@ -507,6 +580,7 @@ pub const TaperedCapsuleShape = struct {
 
     // See: Shape::RestoreBinaryState
     pub fn restoreBinaryState(self: *TaperedCapsuleShape, stream: StreamIn) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         try ConvexShape.impl.restoreBinaryState(&self.base, stream);
 
         stream.read(&self.center_of_mass);
@@ -688,7 +762,7 @@ test "TaperedCapsuleShape: settings, Jolt's error texts, spheres when one sphere
 
     // Out of memory while creating the shape (tapered capsule, sphere or offset sphere) is returned and not cached
     const oom_cases = [_]struct { half_height: f32, top_radius: f32, sub_type: ShapeSubType, allocations: usize }{
-        .{ .half_height = 1.0, .top_radius = 0.5, .sub_type = .tapered_capsule, .allocations = 1 },
+        .{ .half_height = 1.0, .top_radius = 0.5, .sub_type = .tapered_capsule, .allocations = if (Core.debug_renderer) 2 else 1 }, // + the draw cache
         .{ .half_height = 0.0, .top_radius = 0.5, .sub_type = .sphere, .allocations = 1 },
         .{ .half_height = 1.0, .top_radius = 5.0, .sub_type = .rotated_translated, .allocations = 2 },
     };
@@ -871,7 +945,7 @@ test "TaperedCapsuleShape: GetTrianglesStart / Next and GetSubmergedVolume are C
     try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, 128, &vertices, null));
 
     // Bounding box based
-    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()), .{});
     try testing.expectEqual(@as(f32, 22.0), half.total_volume);
     try testing.expectApproxEqAbs(@as(f32, 11.0), half.submerged_volume, 1.0e-4);
 }

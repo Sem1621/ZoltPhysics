@@ -520,7 +520,7 @@ fn putCreator(r: *CallRecord, c: SubShapeIDCreator) void {
 /// A box around its center of mass that records the calls it receives (User3)
 const CompositeChild = struct {
     pub const shape_sub_type: ShapeSubType = .user3;
-    pub const overrides = .{ .mustBeStatic, .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSubShapeUserData, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .isValidScale, .makeScaleValid };
+    pub const overrides = .{ .mustBeStatic, .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSubShapeUserData, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .draw, .isValidScale, .makeScaleValid };
 
     base: Shape,
     half_extent: Vec3 = Vec3.one(),
@@ -657,7 +657,14 @@ const CompositeChild = struct {
         out_vertices.append(center_of_mass_transform.mulVec3(direction));
     }
 
-    pub fn getSubmergedVolume(self: *const CompositeChild, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    // See Shape::Draw (JPH_DEBUG_RENDERER). Parity shapes are never drawn (like the C++ shape).
+    pub const draw = if (zolt.Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const CompositeChild, renderer: *zolt.DebugRenderer, center_of_mass_transform: zolt.RMat44, scale: Vec3, color: zolt.Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+    }
+
+    pub fn getSubmergedVolume(self: *const CompositeChild, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = opts;
         const r = self.newRecord(.submerged_volume);
         put16(r, 0, center_of_mass_transform);
         put3(r, 16, scale);
@@ -1020,7 +1027,7 @@ const ParityDecoratedShapeSettings = struct {
 /// A decorator (User6) that implements the pure virtual functions of Shape by passing them on to the inner shape
 const ParityDecoratedShape = struct {
     pub const shape_sub_type: ShapeSubType = .user6;
-    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume, .draw };
 
     base: DecoratedShape,
 
@@ -1056,8 +1063,14 @@ const ParityDecoratedShape = struct {
         return self.inner().getSurfaceNormal(sub_shape_id, local_surface_position);
     }
 
-    pub fn getSubmergedVolume(self: *const ParityDecoratedShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        return self.inner().getSubmergedVolume(center_of_mass_transform, scale, surface);
+    // See Shape::Draw (JPH_DEBUG_RENDERER). Parity shapes are never drawn (like the C++ shape).
+    pub const draw = if (zolt.Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const ParityDecoratedShape, renderer: *zolt.DebugRenderer, center_of_mass_transform: zolt.RMat44, scale: Vec3, color: zolt.Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+    }
+
+    pub fn getSubmergedVolume(self: *const ParityDecoratedShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        return self.inner().getSubmergedVolume(center_of_mass_transform, scale, surface, opts);
     }
 
     pub fn castRay(self: *const ParityDecoratedShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -1305,7 +1318,7 @@ fn zoltCompound(allocator: Allocator, desc: *const CompoundDesc, q: *const Compo
         }
     }
 
-    const submerged = shape.getSubmergedVolume(transform, scale, .init(vec3(q.surface[0..3].*), q.surface[3]));
+    const submerged = shape.getSubmergedVolume(transform, scale, .init(vec3(q.surface[0..3].*), q.surface[3]), .{});
     out.submerged = .{ submerged.total_volume, submerged.submerged_volume } ++ arr3(submerged.center_of_buoyancy);
 
     const vertices: CollideSoftBodyVertexIterator = .{};

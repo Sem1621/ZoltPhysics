@@ -24,12 +24,15 @@
 //!   `applyBodyCreationSettings` takes an allocator (it may create the shape from its settings) and returns
 //!   `CreateBodyError` before changing anything when there is no shape.
 //! - The BodyAccess checks are `BodyAccess.assertPositionAccess(.read)` etc. (only evaluated with asserts).
-//! - JPH_DEBUG_RENDERER (the draw call in ApplyBuoyancyImpulse, the debug position in GetSubmergedVolume):
-//!   TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4): `getSubmergedVolume`, `applyBuoyancyImpulse` and
+//!   `applyBuoyancyImpulseWithVolumes` take `BuoyancyOptions`, whose `debug_renderer` (`void` without the option) is
+//!   Jolt's DebugRenderer::sInstance. Shape::sDrawSubmergedVolumes is `renderer.flags.shape.draw_submerged_volumes`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const Quat = @import("../../Math/Quat.zig").Quat;
@@ -65,6 +68,7 @@ const CreateBodyError = BodyCreationSettingsFile.CreateBodyError;
 const SoftBodyCreationSettings = @import("../SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
 const SoftBodyMotionProperties = @import("../SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 
 /// A rigid body that can be simulated using the physics system
 ///
@@ -104,6 +108,13 @@ pub const Body = struct {
         submerged_volume: f32,
         /// The center of mass of the submerged volume relative to the center of mass of the body
         relative_center_of_buoyancy: Vec3,
+    };
+
+    /// Zolt: the trailing options of getSubmergedVolume and the applyBuoyancyImpulse functions
+    pub const BuoyancyOptions = struct {
+        /// The renderer that draws the submerged volume when `renderer.flags.shape.draw_submerged_volumes` is set
+        /// (JPH_DEBUG_RENDERER, Jolt's DebugRenderer::sInstance; `void` without the option). Null draws nothing.
+        debug_renderer: if (Core.debug_renderer) ?*DebugRenderer else void = if (Core.debug_renderer) null else {},
     };
 
     // 16 byte aligned
@@ -576,14 +587,13 @@ pub const Body = struct {
     /// @param surface_position Position of the fluid surface in world space
     /// @param surface_normal Normal of the fluid surface (should point up)
     /// @return The total volume of the shape, the submerged volume of the shape and the center of mass of the submerged volume relative to the center of mass of the body
-    pub fn getSubmergedVolume(self: *const Body, surface_position: RVec3, surface_normal: Vec3) SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const Body, surface_position: RVec3, surface_normal: Vec3, opts: BuoyancyOptions) SubmergedVolume {
         // For GetSubmergedVolume we transform the surface relative to the body position for increased precision
         const rotation = Mat44.rotationQuat(self.rotation);
         const surface_relative_to_body = Plane.fromPointAndNormalRVec3(surface_position.sub(self.position), surface_normal);
 
         // Calculate amount of volume that is submerged and what the center of buoyancy is
-        // TODO(debug_renderer): JPH_IF_DEBUG_RENDERER(, mPosition) (the base offset for drawing)
-        const result = self.getShape().getSubmergedVolume(rotation, Vec3.one(), surface_relative_to_body);
+        const result = self.getShape().getSubmergedVolume(rotation, Vec3.one(), surface_relative_to_body, .{ .debug = if (Core.debug_renderer) .{ .base_offset = self.position, .renderer = opts.debug_renderer } else {} });
         return .{ .total_volume = result.total_volume, .submerged_volume = result.submerged_volume, .relative_center_of_buoyancy = result.center_of_buoyancy };
     }
 
@@ -598,10 +608,10 @@ pub const Body = struct {
     /// @param gravity The gravity vector (pointing down)
     /// @param delta_time Delta time of the next simulation step (in s)
     /// @return true if an impulse was applied, false if the body was not in the fluid
-    pub fn applyBuoyancyImpulse(self: *Body, surface_position: RVec3, surface_normal: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32) bool {
-        const volume = self.getSubmergedVolume(surface_position, surface_normal);
+    pub fn applyBuoyancyImpulse(self: *Body, surface_position: RVec3, surface_normal: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32, opts: BuoyancyOptions) bool {
+        const volume = self.getSubmergedVolume(surface_position, surface_normal, opts);
 
-        return self.applyBuoyancyImpulseWithVolumes(volume.total_volume, volume.submerged_volume, volume.relative_center_of_buoyancy, buoyancy, linear_drag, angular_drag, fluid_velocity, gravity, delta_time);
+        return self.applyBuoyancyImpulseWithVolumes(volume.total_volume, volume.submerged_volume, volume.relative_center_of_buoyancy, buoyancy, linear_drag, angular_drag, fluid_velocity, gravity, delta_time, opts);
     }
 
     /// Applies an impulse to the body that simulates fluid buoyancy and drag. (ApplyBuoyancyImpulse(inTotalVolume, inSubmergedVolume, ...))
@@ -616,7 +626,7 @@ pub const Body = struct {
     /// @param gravity The gravity vector (pointing down)
     /// @param delta_time Delta time of the next simulation step (in s)
     /// @return true if an impulse was applied, false if the body was not in the fluid
-    pub fn applyBuoyancyImpulseWithVolumes(self: *Body, total_volume: f32, submerged_volume: f32, relative_center_of_buoyancy: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32) bool {
+    pub fn applyBuoyancyImpulseWithVolumes(self: *Body, total_volume: f32, submerged_volume: f32, relative_center_of_buoyancy: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32, opts: BuoyancyOptions) bool {
         std.debug.assert(self.isRigidBody()); // Only implemented for rigid bodies currently
 
         // We follow the approach from 'Game Programming Gems 6' 2.5 Exact Buoyancy for Polyhedra
@@ -624,7 +634,21 @@ pub const Body = struct {
 
         // If we're not submerged, there's no point in doing the rest of the calculations
         if (submerged_volume > 0.0) {
-            // TODO(debug_renderer): draw the submerged volume properties (Shape::sDrawSubmergedVolumes)
+            if (Core.debug_renderer) {
+                // Draw submerged volume properties
+                if (opts.debug_renderer) |renderer| {
+                    if (renderer.flags.shape.draw_submerged_volumes) {
+                        const center_of_buoyancy = self.position.addVec3(relative_center_of_buoyancy);
+                        renderer.drawMarker(center_of_buoyancy, Color.white, 2.0);
+
+                        // StringFormat("%.3f / %.3f", ...): its buffer holds 1023 characters
+                        var text_buffer: [1023]u8 = undefined;
+                        var writer: std.Io.Writer = .fixed(&text_buffer);
+                        writer.print("{f} / {f}", .{ StringTools.cppFixed(submerged_volume, 3), StringTools.cppFixed(total_volume, 3) }) catch {};
+                        renderer.drawText3D(center_of_buoyancy, writer.buffered(), .{});
+                    }
+                }
+            }
 
             const mp = self.motion_properties.?;
 
