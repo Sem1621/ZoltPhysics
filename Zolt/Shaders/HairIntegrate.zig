@@ -12,7 +12,8 @@
 //!   site (UB11 of R20, see HLSLToCPP.zig and HairCommon.zig). Zolt uses the scalar conversion and the parity keeps NaN
 //!   positions away from this site.
 //! - A grid point past the end of the grid panics in `applyGrid` before the first read (UB30 of R20, `checkGridPoints`
-//!   of HairCommon.zig). Jolt reads past the grid buffers there. It happens with a GridSize below 2 on X, Y or Z.
+//!   of HairCommon.zig). Jolt reads past the grid buffers there. It happens with a GridSize below 2 on X, Y or Z, or
+//!   with a grid of 2^32 or more points, whose size wraps.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");

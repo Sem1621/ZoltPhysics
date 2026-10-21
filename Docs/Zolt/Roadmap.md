@@ -312,8 +312,8 @@ ReleaseFast, double precision, `-Duse_llvm=false` and `-Ddebug_renderer=true`. â
     and hair; the recorder's `.jor` bytes; drawn scenes, whose state must equal the state without drawing;
   - the release only tests and scenes, which follow Jolt's release build on inputs that Jolt asserts on. Only an
     asserting reference (`-Dreference_asserts=true`) counts Jolt's asserts, and no CI row builds one: it is a manual
-    run. Then each case must hit as many asserts on both sides. Without it, a test only checks that its cases reach
-    Zolt's asserts.
+    run. Then each case must hit as many asserts on both sides. Without it, a release only test checks (in Debug and
+    ReleaseSafe) that its cases hit Zolt's asserts, and a release only scene checks that each run hits at least one.
 - The debug renderer changes no result. With `-Ddebug_renderer=true` ZoltPerformanceTest gives the same 5 hashes, also
   while it records every frame (`-r`). `zig build debug-renderer-check` finds its `.jor` bytes equal to those of the C++
   PerformanceTest for the 5 scenes. Zolt's CI checks both, in both precisions.

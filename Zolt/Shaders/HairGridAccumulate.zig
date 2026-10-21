@@ -8,7 +8,8 @@
 //!   order anyway.
 //! - `uint3(grid_pos)` of a NaN grid position is undefined in Jolt (UB11 of R20, see HairCommon.zig).
 //! - A grid point past the end of the grid panics before the first addition (UB30 of R20, `checkGridPoints` of
-//!   HairCommon.zig). Jolt writes past the grid buffer there. It happens with a GridSize below 2 on X, Y or Z.
+//!   HairCommon.zig). Jolt writes past the grid buffer there. It happens with a GridSize below 2 on X, Y or Z, or
+//!   with a grid of 2^32 or more points, whose size wraps.
 
 const hlsl = @import("../Compute/CPU/HLSLToCPP.zig");
 const ShaderCore = @import("ShaderCore.zig");

@@ -43,10 +43,11 @@
 //!   - UB30: Init samples a grid point past the end of mNeutralDensity. Init samples the 8 grid points around each
 //!     vertex with an inv mass above 0. With a GridSize below 2 on X, Y or Z a point can be past the end: on an axis
 //!     of size 1 the index is 0, and the point at index 1 is in the next row or slice. An axis of size 0 leaves no
-//!     grid point. Jolt writes past mNeutralDensity there. Zolt checks each point and panics at the first one past the
-//!     end, in every build mode ("HairSettings.init: a vertex samples a grid point past the end of the grid"). Points
-//!     inside the grid are literal, so a grid of size 1 works when its points stay inside. Hair's grid shaders have
-//!     the same check (see Hair.zig).
+//!     grid point. A grid of 2^32 or more points wraps its size, and then a point can be past the end with every
+//!     axis at 2 or more. Jolt writes past mNeutralDensity there. Zolt checks each point and panics at the first one
+//!     past the end, in every build mode ("HairSettings.init: a vertex samples a grid point past the end of the
+//!     grid"). Points inside the grid are literal, so a grid of size 1 works when its points stay inside. Hair's grid
+//!     shaders have the same check (see Hair.zig).
 //!   - UB31: InitRenderAndSimulationStrands with a simulated strand of 0 vertices at the end of mSimVertices, or at its
 //!     start (its last vertex index wraps, so the walk along the strand can pass the end). The search for the closest
 //!     simulated strand of the other strands of its material then can read past mSimVertices in Jolt. Zolt panics at a

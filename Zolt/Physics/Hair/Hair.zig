@@ -31,11 +31,11 @@
 //!     on the null pointer. Zolt's update panics with a message. No test pins it: a test cannot catch a panic.
 //!   - UB30: a grid shader samples a grid point past the end of the grid. HairGridAccumulate and ApplyGrid (of
 //!     HairIntegrate and HairUpdateVelocityIntegrate) sample the 8 points around a vertex. With a GridSize below 2 on
-//!     X, Y or Z a point can be past the end, and Jolt reads or writes past the grid buffers there. The shaders check
-//!     each point against `cNumGridPoints` and panic at the first one past the end, in every build mode
-//!     ("HairGridAccumulate: a vertex samples a grid point past the end of the grid", "ApplyGrid: ..."). Points inside
-//!     the grid are literal, so a grid of size 1 works when its points stay inside. HairSettings.init has the same
-//!     check.
+//!     X, Y or Z, or with a grid of 2^32 or more points (whose size wraps), a point can be past the end, and Jolt
+//!     reads or writes past the grid buffers there. The shaders check each point against `cNumGridPoints` and panic
+//!     at the first one past the end, in every build mode ("HairGridAccumulate: a vertex samples a grid point past
+//!     the end of the grid", "ApplyGrid: ..."). Points inside the grid are literal, so a grid of size 1 works when
+//!     its points stay inside. HairSettings.init has the same check.
 //!   - UB33: a call before its prerequisite. Jolt dereferences a null buffer. Zolt panics with a message:
 //!     - `update` before `initCompute` ("Hair.update: call initCompute first"). An override of the render positions
 //!       without `setRenderPositionsCB` panics only when there are render vertices ("Hair.update: the render positions
@@ -2759,8 +2759,8 @@ test "Hair: draw the render strands with a strand of 0 vertices at the end of th
 test "Hair: a groom of fixed vertices works with grids of 0 and 1 cells on an axis (R20 UB30)" {
     // The grid shaders skip the first vertex of each strand and the fixed vertices. A groom whose vertices are all
     // fixed, with strands of one length (no padding vertices), samples no grid point. Then init, initCompute, update,
-    // the read back and the draw work with any grid size, as in Jolt. With a sampled vertex a grid of 0 points would
-    // panic (UB30: Jolt reads past the grid), which a test cannot catch.
+    // the read back and the draw work with any grid size, as in Jolt. With a sampled vertex every grid of this test
+    // would panic (UB30: Jolt reads past the grid), which a test cannot catch.
     const allocator = testing.allocator;
     var world: TestWorld = undefined;
     try world.init(allocator);
