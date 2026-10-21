@@ -66,7 +66,7 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
-    name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }}
+    name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} use_llvm=${{ matrix.use_llvm }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,28 +74,42 @@ jobs:
         optimize: [ Debug ]
         double_precision: [ false, true ]
         debug_renderer: [ false ]
+        use_llvm: [ true ]
+        # Every row below sets every key: a row that changes a value of the matrix is a new combination with only its
+        # own keys
         include:
           - os: ubuntu-latest
             optimize: ReleaseFast
             double_precision: false
             debug_renderer: false
+            use_llvm: true
           - os: ubuntu-latest
             optimize: ReleaseFast
             double_precision: true
             debug_renderer: false
+            use_llvm: true
           - os: ubuntu-latest
             optimize: ReleaseSafe
             double_precision: false
             debug_renderer: false
+            use_llvm: true
           # The debug renderer hooks compiled in (Docs/Zolt/RemainingFeaturesArchitecture.md R2, section 5)
           - os: ubuntu-latest
             optimize: Debug
             double_precision: false
             debug_renderer: true
+            use_llvm: true
           - os: ubuntu-latest
             optimize: ReleaseFast
             double_precision: true
             debug_renderer: true
+            use_llvm: true
+          # Zig's self-hosted x86_64 backend (milestone M10, Docs/Zolt/RemainingFeaturesArchitecture.md section 1)
+          - os: ubuntu-latest
+            optimize: Debug
+            double_precision: false
+            debug_renderer: false
+            use_llvm: false
     steps:
     - name: Checkout Code
       uses: actions/checkout@v5
@@ -104,7 +118,7 @@ jobs:
       with:
         version: ${{ env.ZIG_VERSION }}
     - name: Test
-      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }}
+      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }}
 
   parity:
     runs-on: ubuntu-latest
