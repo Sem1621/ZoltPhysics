@@ -17,7 +17,7 @@
 //!               `runOpsWithContext`)
 //!     128..191  D4: characters, vehicles, skeletons, soft bodies (128 used: the skeleton poses of a `PhysicsContext`;
 //!               the characters, vehicles and soft bodies draw in the simulation scenes, SimulationParity.zig)
-//!     192..223  H3: hair
+//!     H3 adds no ops: the hair draws run in ZoltParity/Hair/HairSceneParity.zig (its ops `draw` and `record`)
 //! - `compareLogs` reports the first record that differs, with its op and its bytes.
 //! - The renderers allocate with the allocator they get; a failed allocation of the log panics (test harness only).
 

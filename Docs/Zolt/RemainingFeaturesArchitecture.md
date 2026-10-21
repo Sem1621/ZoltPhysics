@@ -555,7 +555,9 @@ Jolt's quirks where Jolt's behavior is defined are reproduced:
 - `CustomUpdate`'s `SetPosition` on an unadded body does nothing;
 - `HairSettings.initRenderAndSimulationStrands` appends to the simulation arrays;
 - `mScalpJointMatricesCB` is 64 times too large (memory only);
-- Jolt's density loops of `Hair::Draw` bound z by `GetX()` and x by `GetZ()`;
+- Jolt's density loops of `Hair::Draw` bound z by `GetX()` and x by `GetZ()`. This is defined only when
+  `GetX() <= GetZ()`. When `GetX() < GetZ()`, x passes `GetX()`: `GetNeutralDensity` asserts in Jolt's debug build
+  (recoverable, R8), and the release build reads another cell of the grid (UB24 is the case `GetX() > GetZ()`);
 - the vehicle per-wheel texts (R4 notes the renderer);
 - the recorder's stale batch IDs across recorders (the shape caches outlive a recorder in both).
 
@@ -587,6 +589,10 @@ tests pin them.
 | UB21 | `Hair.update` with a HairShaders that misses a shader (`HairShaders.init` on a compute system without `registerHairShaders`; settled in H2) | `HairShaders::Init` stores null, and `ComputeQueueCPU::SetShader` calls `CreateWrapper()` on it: a null dereference | panics with "Hair.update: a hair shader is missing (register the shaders with registerHairShaders before HairShaders.init)". Not pinned by a test (a Zig test cannot catch a panic) |
 | UB22 | IndependentAxisConstraintPart with a static (or fixed to world) body, e.g. a PulleyConstraint (settled in D3) | `CalculateConstraintProperties` writes `mR1xN1` / `mInvI1_R1xN1` only for a non-static body 1 and `mRatioR2xN2` / `mInvI2_RatioR2xN2` only for a non-static body 2; `SolveVelocityConstraint` multiplies the unset members by the static body's zero angular velocity, so a NaN or an infinity in that memory gives a NaN velocity | the four members start at zero, Jolt's result on zero-filled memory. Pinned by an inline test. Like UB4, the parity generates this input with a zero-filling C++ side (the constraint reference now installs the ParityHooks.h hooks) |
 | UB23 | a PathConstraint drawn before its first `SetupVelocityConstraint` (a new constraint, or one that is never active; settled in D3) | `DrawConstraint` reads `mR1`, `mR2` and the three path axes that only `CalculateConstraintProperties` writes | they start at zero: the anchors are drawn at the centers of mass and the arrows have zero length. Pinned by a DebugRendererZoltTests test; the draw parity steps every scenario before drawing it |
+| UB24 | a density draw of `Hair.draw` (neutral density, grid density or grid velocity) with GridSize `GetX() > GetZ()` (settled in H3) | the quirk lets z run to `GetX()`: the planes z >= `GetZ()` read past `mNeutralDensity` and past the read back grid | the z loop stops at `GetZ()`. Pinned by the Hair.zig density draw test (8 x 6 x 4 grid). The hair draw parity draws no density when `GetX() > GetZ()` |
+| UB25 | `Hair.draw` before the first `readBackGPUState` (or before `initCompute`; settled in H3) | `LockReadBackBuffers` calls Map on the null `mVelocityAndDensityReadBackCB` | draws nothing. Pinned by a Hair.zig test. The parity draws only after an update and its read back |
+| UB26 | `Hair.draw` with `draw_skin_points` when the hair has skin points but no skinned scalp vertices (no scalp vertices buffer at the first read back, for example settings without an inverse bind pose; settled in H3) | `Draw` reads the null `mScalpVertices` for every selected skin point | draws no skin point: Jolt's result when the strand range selects none. Pinned by a Hair.zig test. The parity masks the skin points then |
+| UB27 | `SkeletonPose.draw` on a pose without a skeleton (settled in D4) | dereferences the null `mSkeleton` | panics with a message, like SkeletonPose's other functions that need the skeleton |
 
 ### R21 Port status and scope
 
@@ -737,7 +743,7 @@ the commit message says which operation).
 | LibM and shuffle | H1 | `expf` on a 2^20 sample in CI (all 2^32 opt-in), `powf` on [0, 1] × the hair exponents and random pairs, the pin probe (R13); shuffle sequences and engine draw counts for n ≤ 2000 |
 | HairSettings | H1 | procedural grooms (straight, curly, several materials with a simulation fraction below 1) on `Assets/face.bin`'s scalp and without a scalp: the SaveBinaryState bytes after `initRenderAndSimulationStrands` and `init`, the `initCompute` buffer bytes; P1 to P7 with a RegisterHair factory |
 | Hair scenes | H2 | a PhysicsSystem with kinematic hull compounds, scaled and inside-out hulls; uniform strands; dt 0, 1/60, 1/90, odd values and above `mMaxDeltaTime`; teleport, rotation, a global-pose-only material, grid on and off, LRA off. After each update: the read-back positions, velocities, grid and render positions, bit for bit. The C++ side runs with the zero-filling hooks; scenes avoid UB3 |
-| Draw call log | D0 to D4, H3 | a `ParityRenderer` on both sides logs every virtual call with all arguments, including what `.jor` files drop (world space bounds, LOD scale, batch contents). One op range per group: helpers, shapes (the PairwiseParity catalogue with every argument combination and flag), constraints (the ConstraintsParity catalogue), bodies, characters, vehicles, skeleton, soft body, hair |
+| Draw call log | D0 to D4, H3 | a `ParityRenderer` on both sides logs every virtual call with all arguments, including what `.jor` files drop (world space bounds, LOD scale, batch contents). One op range per group: helpers, shapes (the PairwiseParity catalogue with every argument combination and flag), constraints (the ConstraintsParity catalogue), bodies, characters, vehicles, skeleton, soft body. The hair draws run in the hair scenes instead (the ops `draw` and `record` of HairSceneParity.zig): a draw needs a full scene |
 | `.jor` bytes | D3 | `zig build debug-renderer-check -Ddebug_renderer=true`: `jolt-performance-test -r -i=20` against `performance-test -r -i=20` for the 5 scenes, byte for byte (DrawBodies runs on the main thread, so any thread count works) |
 | Simulation-time draws | D3 | selected SimScenes single-threaded with every flag on and the call log on both sides; the state bytes must equal those of the same scene without drawing |
 | Text | D0 | `%.0f` to `%.3f` against snprintf (R7) |
@@ -860,6 +866,11 @@ The first parity build after the change recompiles the C++ library (about 5 minu
   - D3: a filtered parity run analyzes only the tests it runs. `zig build parity-check` compiles every parity test and
     the C++ reference without running them; groups run it in both renderer configurations before they report.
   - H2: "uniform strands" means strands with the same number of vertices (no padding vertices); two scenes cover it.
+- Settled in wave 7:
+  - H3: one more recoverable assert site (R8): `HairSettings.getNeutralDensity` (reached by `Hair.draw`'s density
+    loops, the quirk of R20), tested with `ExpectAssert` and counted by the hair draw parity against
+    `-Dreference_asserts=true`. Jolt's hair draw flags are per-call `DrawSettings` members, not statics.
+  - D4: every `TODO(debug_renderer)` is gone; the vehicle per-wheel texts go to the controller's renderer argument (R4).
 - Settled in wave 2: DebugRendererPlayback (UB7): a LOD batch ID 0 is `Batch.empty` unless the stream defined a
   batch with ID 0; an unknown batch ID, a geometry ID that the stream never defines (checked at the end of `parse`,
   because Jolt looks IDs up in `DrawFrame`) and a stream that ends inside a command are `error.InvalidStream`; a stream

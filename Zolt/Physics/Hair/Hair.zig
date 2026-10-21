@@ -41,12 +41,12 @@
 //!   - Allocation failures (R5): when the render positions of an override or the map of the render strands cannot be
 //!     allocated, `draw` sets the renderer's `out_of_memory` latch. It then draws nothing, or everything but the render
 //!     strands.
-//!   - Inputs where Jolt is undefined (proposed to the lead, R20 has no rows for them yet; Zolt-only tests pin them):
-//!     - a draw before the first `readBackGPUState` (or before `initCompute`): Jolt calls Map on a null read back
+//!   - Inputs where Jolt is undefined (RemainingFeaturesArchitecture R20; Zolt-only tests pin them):
+//!     - UB25, a draw before the first `readBackGPUState` (or before `initCompute`): Jolt calls Map on a null read back
 //!       buffer. Zolt draws nothing.
-//!     - `draw_skin_points` without skinned scalp vertices (the settings have skin points, but no scalp vertices buffer
+//!     - UB26, `draw_skin_points` without skinned scalp vertices (the settings have skin points, but no scalp vertices buffer
 //!       existed at the first read back): Jolt reads the null mScalpVertices. Zolt draws no skin points.
-//!     - a density draw when GridSize.GetX() is larger than GetZ(): the quirk lets z pass GetZ(), and these planes are
+//!     - UB24, a density draw when GridSize.GetX() is larger than GetZ(): the quirk lets z pass GetZ(), and these planes are
 //!       past the end of the grid. Jolt reads past the array. Zolt stops the z loop at GetZ().
 
 const std = @import("std");
@@ -1256,7 +1256,7 @@ pub const Hair = struct {
 
     /// Debug functionality to draw the hair and its simulation properties (JPH_DEBUG_RENDERER)
     /// Zolt: the map of the render strands (Jolt: an Array) uses the hair's allocator and is freed before returning.
-    /// Zolt (proposed to the lead, R20 has no row for it yet): before the first `readBackGPUState` (or `initCompute`)
+    /// Zolt (UB25 of R20): before the first `readBackGPUState` (or `initCompute`)
     /// it draws nothing. Jolt maps a null read back buffer there.
     pub const draw = if (Core.debug_renderer) drawImpl else {};
     fn drawImpl(self: *Hair, settings: *const DrawSettings, renderer: *DebugRenderer) void {
@@ -1478,7 +1478,7 @@ pub const Hair = struct {
             const marker_size = 0.5 * scale.reduceMin();
             var z: u32 = 0;
             while (z < grid_size.getX()) : (z += 1) {
-                // Zolt (proposed to the lead): z >= GetZ() is past the grid, Jolt reads past the array there
+                // Zolt (UB24 of R20): z >= GetZ() is past the grid, Jolt reads past the array there
                 if (z >= grid_size.getZ()) break;
                 var y: u32 = 0;
                 while (y < grid_size.getY()) : (y += 1) {
@@ -1502,7 +1502,7 @@ pub const Hair = struct {
             const marker_size = 0.5 * scale.reduceMin();
             var z: u32 = 0;
             while (z < grid_size.getX()) : (z += 1) {
-                // Zolt (proposed to the lead): z >= GetZ() is past the grid, Jolt reads past the array there
+                // Zolt (UB24 of R20): z >= GetZ() is past the grid, Jolt reads past the array there
                 if (z >= grid_size.getZ()) break;
                 var y: u32 = 0;
                 while (y < grid_size.getY()) : (y += 1) {
@@ -1524,7 +1524,7 @@ pub const Hair = struct {
         }
 
         if (settings.draw_skin_points) skin_points: {
-            // Zolt (proposed to the lead): without skinned scalp vertices (no scalp vertices buffer at the read back) no
+            // Zolt (UB26 of R20): without skinned scalp vertices (no scalp vertices buffer at the read back) no
             // skin point is drawn. Jolt reads the null mScalpVertices.
             const scalp = scalp_vertices orelse break :skin_points;
             var i: u32 = 0;
@@ -2500,7 +2500,7 @@ test "Hair: the draw declarations compile away without -Ddebug_renderer" {
     try testing.expectEqual(!Core.debug_renderer, Hair.RenderStrandColor == void);
 }
 
-test "Hair: draw before initCompute and before the first read back draws nothing (proposed R20 row)" {
+test "Hair: draw before initCompute and before the first read back draws nothing (UB25)" {
     if (!Core.debug_renderer) return error.SkipZigTest; // Hair.draw only exists with the option
 
     // Jolt maps a null read back buffer in LockReadBackBuffers. Zolt draws nothing.
@@ -2724,7 +2724,7 @@ test "Hair: draw the densities with Jolt's loop bounds (R20 quirk)" {
     }
 }
 
-test "Hair: draw the skin points without skinned scalp vertices (proposed R20 row)" {
+test "Hair: draw the skin points without skinned scalp vertices (UB26)" {
     if (!Core.debug_renderer) return error.SkipZigTest; // Hair.draw only exists with the option
 
     // The settings have a scalp and skin points but no inverse bind pose: the hair does not skin the scalp and has no
