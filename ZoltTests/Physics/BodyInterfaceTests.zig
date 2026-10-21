@@ -95,7 +95,7 @@ test "BodyInterface: getters return Jolt's defaults for invalid and destroyed bo
         var shape = bi.getShape(id);
         defer shape.deinit();
         try expect(shape.get() == null);
-        try expect(!bi.applyBuoyancyImpulse(id, RVec3.zero(), Vec3.axisY(), 1, 0, 0, Vec3.zero(), Vec3.init(0, -10, 0), 0.1));
+        try expect(!bi.applyBuoyancyImpulse(id, RVec3.zero(), Vec3.axisY(), 1, 0, 0, Vec3.zero(), Vec3.init(0, -10, 0), 0.1, .{}));
 
         // Setters on a body that cannot be locked do nothing
         bi.setPosition(id, RVec3.init(5, 5, 5), .activate);

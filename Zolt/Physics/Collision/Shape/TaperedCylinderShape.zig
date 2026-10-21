@@ -13,12 +13,16 @@
 //!   `ScaledTaperedCylinder` struct (out parameters).
 //! - The file static helpers sCalculateSideNormalXZ / sCalculateSideNormal are `calculateSideNormalXZ` /
 //!   `calculateSideNormal`.
-//! JPH_DEBUG_RENDERER (Draw) is not ported yet: TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): `draw` is a gated declaration, `void` without
+//! `-Ddebug_renderer`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Ref = @import("../../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -161,7 +165,7 @@ pub const TaperedCylinderShape = struct {
     pub const shape_sub_type: ShapeSubType = .tapered_cylinder;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .draw, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: ConvexShape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the destructor chain
@@ -708,7 +712,16 @@ pub const TaperedCylinderShape = struct {
         return total_num_triangles;
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TaperedCylinderShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        // Preserve flip along y axis but make sure we're not inside out
+        const s = if (ScaleHelpers.isInsideOut(scale)) scale.flipSign(-1, 1, 1) else scale;
+        const world_transform = center_of_mass_transform.mulMat44(Mat44.scaleVec3(s));
+
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+        renderer.drawTaperedCylinder(world_transform, self.top, self.bottom, self.top_radius, self.bottom_radius, if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{ .cast_shadow = .on, .draw_mode = draw_mode });
+    }
 
     // See Shape::SaveBinaryState: C++ `ConvexShape::SaveBinaryState(inStream)` is the explicit base call
     pub fn saveBinaryState(self: *const TaperedCylinderShape, stream: StreamOut) void {
@@ -1231,10 +1244,10 @@ test "TaperedCylinderShape: GetSubmergedVolume (ConvexShape's)" {
     const cylinder = shape.cast(TaperedCylinderShape);
     // The bounding box (half extent 1), centered around the center of mass
     try testing.expectApproxEqAbs(@as(f32, 2.0), cylinder.top - cylinder.bottom, 1.0e-6);
-    const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.init(0, -1.1, 0), Vec3.axisY()));
+    const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.init(0, -1.1, 0), Vec3.axisY()), .{});
     try testing.expectApproxEqAbs(@as(f32, 8.0), above.total_volume, 1.0e-5);
     try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
-    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    const half = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()), .{});
     try testing.expectApproxEqAbs(@as(f32, 4.0), half.submerged_volume, 1.0e-5);
 }
 

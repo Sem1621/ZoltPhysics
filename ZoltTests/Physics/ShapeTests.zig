@@ -646,14 +646,14 @@ test "TestGetSubmergedVolume" {
     // Plane pointing positive Y
     // Entirely above the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, -0.001, 0), Vec3.axisY()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, -0.001, 0), Vec3.axisY()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 0.0, .{});
     }
 
     // Entirely below the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 12.001, 0), Vec3.axisY()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 12.001, 0), Vec3.axisY()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 0), .{});
@@ -661,7 +661,7 @@ test "TestGetSubmergedVolume" {
 
     // Halfway through
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 6.0, 0), Vec3.axisY()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 6.0, 0), Vec3.axisY()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 6.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 3, 0), .{});
@@ -670,14 +670,14 @@ test "TestGetSubmergedVolume" {
     // Plane pointing negative Y
     // Entirely above the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(-4, 12.001, 0), Vec3.axisY().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(-4, 12.001, 0), Vec3.axisY().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 0.0, .{});
     }
 
     // Entirely below the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, -0.001, 0), Vec3.axisY().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, -0.001, 0), Vec3.axisY().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 0), .{});
@@ -685,7 +685,7 @@ test "TestGetSubmergedVolume" {
 
     // Halfway through
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 6.0, 0), Vec3.axisY().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 6.0, 0), Vec3.axisY().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 6.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 9, 0), .{});
@@ -694,14 +694,14 @@ test "TestGetSubmergedVolume" {
     // Plane pointing positive X
     // Entirely above the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(-2.001, 0, 0), Vec3.axisX()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(-2.001, 0, 0), Vec3.axisX()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 0.0, .{});
     }
 
     // Entirely below the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(2.001, 0, 0), Vec3.axisX()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(2.001, 0, 0), Vec3.axisX()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 0), .{});
@@ -709,7 +709,7 @@ test "TestGetSubmergedVolume" {
 
     // Halfway through
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisX()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisX()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 2.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(-1, 6, 0), .{});
@@ -718,14 +718,14 @@ test "TestGetSubmergedVolume" {
     // Plane pointing negative X
     // Entirely above the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(2.001, 0, 0), Vec3.axisX().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(2.001, 0, 0), Vec3.axisX().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 0.0, .{});
     }
 
     // Entirely below the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(-2.001, 0, 0), Vec3.axisX().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(-2.001, 0, 0), Vec3.axisX().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 0), .{});
@@ -733,7 +733,7 @@ test "TestGetSubmergedVolume" {
 
     // Halfway through
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisX().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisX().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 2.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(1, 6, 0), .{});
@@ -742,14 +742,14 @@ test "TestGetSubmergedVolume" {
     // Plane pointing positive Z
     // Entirely above the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, -12.001), Vec3.axisZ()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, -12.001), Vec3.axisZ()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 0.0, .{});
     }
 
     // Entirely below the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 12.001), Vec3.axisZ()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 12.001), Vec3.axisZ()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 0), .{});
@@ -757,7 +757,7 @@ test "TestGetSubmergedVolume" {
 
     // Halfway through
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisZ()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisZ()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 12.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, -6), .{});
@@ -766,14 +766,14 @@ test "TestGetSubmergedVolume" {
     // Plane pointing negative Z
     // Entirely above the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 12.001), Vec3.axisZ().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 12.001), Vec3.axisZ().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 0.0, .{});
     }
 
     // Entirely below the plane
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, -12.001), Vec3.axisZ().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, -12.001), Vec3.axisZ().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 0), .{});
@@ -781,7 +781,7 @@ test "TestGetSubmergedVolume" {
 
     // Halfway through
     {
-        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisZ().negate()));
+        const r = box.getSubmergedVolume(translation, scale, Plane.fromPointAndNormal(Vec3.init(0, 0, 0), Vec3.axisZ().negate()), .{});
         try fw.checkApproxEqual(r.total_volume, 4.0 * 12.0 * 24.0, .{});
         try fw.checkApproxEqual(r.submerged_volume, 4.0 * 12.0 * 12.0, .{});
         try fw.checkApproxEqual(r.center_of_buoyancy, Vec3.init(0, 6, 6), .{});

@@ -12,13 +12,16 @@
 //!   `sCollideSphereVsTriangle`, `sCastConvexVsTriangle`, `sCastSphereVsTriangle`) keep their names without `s` and
 //!   drive the triangle algorithms (CollideConvexVsTriangles, CollideSphereVsTriangles, CastConvexVsTriangles,
 //!   CastSphereVsTriangles) with all edges active.
-//! - JPH_DEBUG_RENDERER (Draw and the `inBaseOffset` parameter of GetSubmergedVolume) is not ported yet:
-//!   TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): `draw` is a gated declaration, `void` without
+//!   `-Ddebug_renderer`. GetSubmergedVolume ignores its debug options, like Jolt ignores `inBaseOffset`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
@@ -140,7 +143,7 @@ pub const TriangleShape = struct {
     pub const shape_sub_type: ShapeSubType = .triangle;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: ConvexShape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the destructor chain
@@ -323,14 +326,28 @@ pub const TriangleShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const TriangleShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
+    pub fn getSubmergedVolume(self: *const TriangleShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ self, center_of_mass_transform, scale, surface, opts };
 
         // A triangle has no volume
         return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TriangleShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        var v1 = center_of_mass_transform.mulVec3(scale.mul(self.v1));
+        var v2 = center_of_mass_transform.mulVec3(scale.mul(self.v2));
+        const v3 = center_of_mass_transform.mulVec3(scale.mul(self.v3));
+
+        if (ScaleHelpers.isInsideOut(scale))
+            std.mem.swap(@TypeOf(v1), &v1, &v2);
+
+        if (draw_wireframe)
+            renderer.drawWireTriangle(v1, v2, v3, if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color)
+        else
+            renderer.drawTriangle(v1, v2, v3, if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{});
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const TriangleShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -892,7 +909,7 @@ test "TriangleShape: GetSubmergedVolume (a triangle has no volume)" {
     triangle.asShape().setEmbedded();
     defer triangle.asShapeMut().deinit();
 
-    const r = triangle.asShape().getSubmergedVolume(Mat44.translation(Vec3.init(1, 2, 3)), Vec3.one(), Plane.fromPointAndNormal(Vec3.init(0, 10, 0), Vec3.axisY()));
+    const r = triangle.asShape().getSubmergedVolume(Mat44.translation(Vec3.init(1, 2, 3)), Vec3.one(), Plane.fromPointAndNormal(Vec3.init(0, 10, 0), Vec3.axisY()), .{});
     try testing.expectEqual(@as(f32, 0.0), r.total_volume);
     try testing.expectEqual(@as(f32, 0.0), r.submerged_volume);
     try testing.expect(r.center_of_buoyancy.eql(Vec3.zero()));

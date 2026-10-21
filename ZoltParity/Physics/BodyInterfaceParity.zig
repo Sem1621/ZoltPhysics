@@ -761,7 +761,7 @@ const World = struct {
             .add_impulse => b.addImpulse(id, load3(f[0..3])),
             .add_impulse_at_position => b.addImpulseAtPosition(id, load3(f[0..3]), loadR3(r[0..3])),
             .add_angular_impulse => b.addAngularImpulse(id, load3(f[0..3])),
-            .apply_buoyancy_impulse => out.i[0] = @intFromBool(b.applyBuoyancyImpulse(id, loadR3(r[0..3]), load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12])),
+            .apply_buoyancy_impulse => out.i[0] = @intFromBool(b.applyBuoyancyImpulse(id, loadR3(r[0..3]), load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12], .{})),
             .get_body_type => out.i[0] = @intFromEnum(b.getBodyType(id)),
             .set_motion_type => b.setMotionType(id, @enumFromInt(i[2]), activation),
             .get_motion_type => out.i[0] = @intFromEnum(b.getMotionType(id)),

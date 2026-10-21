@@ -12,19 +12,23 @@
 //!   reinterpret_casts the buffer without constructing it.
 //! - A null entry in the material list gives `PhysicsMaterial.default` in `getMaterial` and `getTrianglesNext`, where
 //!   Jolt gives nullptr. The shared signatures cannot hold a null material (like MeshShape).
-//! - Draw (JPH_DEBUG_RENDERER) is ported by group D4.
+//! - Draw (JPH_DEBUG_RENDERER) is ported by group D4. Until then `draw` is a gated placeholder that panics with
+//!   "TODO(debug_renderer)" (RemainingFeaturesArchitecture.md R2), so that Shape's Draw can be pure again (group D2).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Color = @import("../../Core/Color.zig").Color;
+const Core = @import("../../Core/Core.zig");
 const AABox = @import("../../Geometry/AABox.zig").AABox;
 const Plane = @import("../../Geometry/Plane.zig").Plane;
 const RayTriangle = @import("../../Geometry/RayTriangle.zig");
 const Float3 = @import("../../Math/Float3.zig").Float3;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const RMat44 = @import("../../Math/Real.zig").RMat44;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const MassProperties = @import("../Body/MassProperties.zig").MassProperties;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const ShapeFile = @import("../Collision/Shape/Shape.zig");
 const Shape = ShapeFile.Shape;
 const ShapeSubType = ShapeFile.ShapeSubType;
@@ -63,7 +67,7 @@ pub const SoftBodyShape = struct {
     pub const shape_sub_type: ShapeSubType = .soft_body;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .mustBeStatic, .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
+    pub const overrides = .{ .mustBeStatic, .getCenterOfMass, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
 
     base: Shape,
     /// The motion properties of the soft body (Jolt: mSoftBodyMotionProperties, set by BodyManager)
@@ -165,8 +169,8 @@ pub const SoftBodyShape = struct {
             out_vertices.append(center_of_mass_transform.mulVec3(scale.mul(vertices[i].position)));
     }
 
-    pub fn getSubmergedVolume(self: *const SoftBodyShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ center_of_mass_transform, scale, surface };
+    pub fn getSubmergedVolume(self: *const SoftBodyShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ center_of_mass_transform, scale, surface, opts };
         return .{
             .submerged_volume = 0.0,
             .total_volume = self.motion_properties.getVolume(),
@@ -174,7 +178,13 @@ pub const SoftBodyShape = struct {
         };
     }
 
-    // TODO(debug_renderer): Draw (group D4)
+    // See Shape::Draw (JPH_DEBUG_RENDERER). TODO(debug_renderer): the body is ported by group D4, this placeholder
+    // panics (R2).
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const SoftBodyShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+        @panic("TODO(debug_renderer): SoftBodyShape.draw is ported by group D4");
+    }
 
     pub fn castRay(self: *const SoftBodyShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
         const num_triangle_bits = self.getSubShapeIDBits();
@@ -526,7 +536,7 @@ test "SoftBodyShape: the shape of a soft body" {
     try expectEqual(@as(f32, 1.0 / 6.0), s.getVolume());
 
     // A soft body is not submerged: the total volume is its volume, the rest is zero
-    const submerged = s.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 0.5));
+    const submerged = s.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 0.5), .{});
     try expectEqual(@as(f32, 1.0 / 6.0), submerged.total_volume);
     try expectEqual(@as(f32, 0.0), submerged.submerged_volume);
     try testing.expect(submerged.center_of_buoyancy.eql(Vec3.zero()));

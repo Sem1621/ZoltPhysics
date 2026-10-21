@@ -6,12 +6,16 @@
 //! caller's SupportBuffer (D9), the static `sUnitCylinderTriangles` is a comptime table (`unit_cylinder_triangles`, D10).
 //! CylinderShape only overrides the single hit CastRay (`using ConvexShape::CastRay`): the collector version is
 //! ConvexShape's, which calls the analytic CastRay through the vtable. GetSubmergedVolume is ConvexShape's.
-//! JPH_DEBUG_RENDERER (Draw) is not ported yet: TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): `draw` is a gated declaration, `void` without
+//! `-Ddebug_renderer`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -170,7 +174,7 @@ pub const CylinderShape = struct {
     pub const shape_sub_type: ShapeSubType = .cylinder;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .castRay, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .draw, .castRay, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: ConvexShape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the destructor chain
@@ -383,7 +387,12 @@ pub const CylinderShape = struct {
         }
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const CylinderShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+        renderer.drawCylinder(center_of_mass_transform.mulMat44(Mat44.scaleVec3(scale.abs())), self.half_height, self.radius, if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{ .cast_shadow = .on, .draw_mode = draw_mode });
+    }
 
     // See Shape::CastRay (the collector version is ConvexShape's, `using ConvexShape::CastRay`)
     pub fn castRay(self: *const CylinderShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -925,7 +934,7 @@ test "CylinderShape: GetTrianglesStart / Next, GetSubmergedVolume" {
     }
 
     // GetSubmergedVolume is ConvexShape's (bounding box based)
-    const half = cylinder.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()));
+    const half = cylinder.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.fromPointAndNormal(Vec3.zero(), Vec3.axisY()), .{});
     try testing.expectEqual(@as(f32, 4.0), half.total_volume);
     try testing.expectApproxEqAbs(@as(f32, 2.0), half.submerged_volume, 1.0e-5);
 }

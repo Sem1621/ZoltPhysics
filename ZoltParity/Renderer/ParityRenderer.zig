@@ -12,7 +12,7 @@
 //!   them on any renderer. Each group adds its ops in its own range of `Op`:
 //!     1..15     D0: the virtual functions and the helpers that D0 found ported
 //!     16..63    D1: the remaining helpers of DebugRenderer (16..36 used)
-//!     64..95    D2: shapes
+//!     64..95    D2: shapes (64..69 used; the shapes come from a `ShapeContext`, see `runOpsWithShapes`)
 //!     96..127   D3: constraints, bodies and the physics system
 //!     128..191  D4: characters, vehicles, skeletons, soft bodies
 //!     192..223  H3: hair
@@ -363,7 +363,57 @@ pub const Op = enum(u8) {
     /// Triangles made with both Triangle constructors, then CreateTriangleBatch and release: u32 count, per triangle u8 kind
     /// (1: with UVs), Vec3 v1, v2, v3, Color [, Vec3 UV origin, Vec3 UV direction]
     create_batch_triangles = 36,
+
+    // D2: shapes (u32 shape is an index into the shapes of the ShapeContext)
+
+    /// Shape::Draw: u32 shape, Affine, Vec3 scale, Color, u8 use material colors, u8 draw wireframe
+    draw_shape = 64,
+    /// Shape::DrawGetSupportFunction: u32 shape, Affine, Vec3 scale, Color, u8 draw support direction
+    draw_get_support_function = 65,
+    /// Shape::DrawGetSupportingFace: u32 shape, Affine, Vec3 scale
+    draw_get_supporting_face = 66,
+    /// The static draw flags that the shapes read (`ShapeDrawFlags`): u8 bits
+    set_shape_draw_flags = 67,
+    /// Shape::GetSubmergedVolume, which draws into the renderer: u32 shape, Vec3 columns 0..2, Vec3 translation (a Mat44),
+    /// Vec3 scale, Vec3 plane normal, f32 plane constant, RVec3 base offset. The results (total volume, submerged volume,
+    /// center of buoyancy: 5 f32) are appended to the results of the ShapeContext.
+    get_submerged_volume = 68,
+    /// ConvexHullShape::DrawShrunkShape: u32 shape (a convex hull), Affine, Vec3 scale
+    draw_shrunk_shape = 69,
     _,
+};
+
+/// The bits of the op `set_shape_draw_flags`: Jolt's static draw flags that shapes read, Zolt's `renderer.flags`
+pub const ShapeDrawFlags = struct {
+    /// Shape::sDrawSubmergedVolumes
+    pub const draw_submerged_volumes: u8 = 1;
+    /// ConvexHullShape::sDrawFaceOutlines
+    pub const convex_hull_face_outlines: u8 = 2;
+    /// MeshShape::sDrawTriangleGroups
+    pub const mesh_triangle_groups: u8 = 4;
+    /// MeshShape::sDrawTriangleOutlines
+    pub const mesh_triangle_outlines: u8 = 8;
+    /// HeightFieldShape::sDrawTriangleOutlines
+    pub const height_field_triangle_outlines: u8 = 16;
+    /// Every flag
+    pub const all: u8 = 31;
+};
+
+/// The shapes of the D2 ops (ParityShapeContext in ParityRenderer.h)
+pub const ShapeContext = struct {
+    allocator: Allocator,
+    /// The shapes that the ops index
+    shapes: []const *const zolt.Shape,
+    /// The results of the ops that compute numbers (get_submerged_volume)
+    results: std.ArrayList(u8) = .empty,
+
+    pub fn deinit(self: *ShapeContext) void {
+        self.results.deinit(self.allocator);
+    }
+
+    fn writeResult(self: *ShapeContext, value: anytype) Allocator.Error!void {
+        try self.results.appendSlice(self.allocator, std.mem.asBytes(&value));
+    }
 };
 
 /// The support function of the convex batch ops (ParitySupport in ParityRenderer.h): a box with rounded edges
@@ -778,6 +828,55 @@ pub const OpWriter = struct {
         try self.writeRaw(slot);
     }
 
+    pub fn drawShape(self: *OpWriter, shape: u32, transform: Affine, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) Allocator.Error!void {
+        try self.writeOp(.draw_shape);
+        try self.writeRaw(shape);
+        try self.writeAffine(transform);
+        try self.writeVec3(scale);
+        try self.writeColor(color);
+        try self.writeRaw(@as(u8, @intFromBool(use_material_colors)));
+        try self.writeRaw(@as(u8, @intFromBool(draw_wireframe)));
+    }
+
+    pub fn drawGetSupportFunction(self: *OpWriter, shape: u32, transform: Affine, scale: Vec3, color: Color, draw_support_direction: bool) Allocator.Error!void {
+        try self.writeOp(.draw_get_support_function);
+        try self.writeRaw(shape);
+        try self.writeAffine(transform);
+        try self.writeVec3(scale);
+        try self.writeColor(color);
+        try self.writeRaw(@as(u8, @intFromBool(draw_support_direction)));
+    }
+
+    pub fn drawGetSupportingFace(self: *OpWriter, shape: u32, transform: Affine, scale: Vec3) Allocator.Error!void {
+        try self.writeOp(.draw_get_supporting_face);
+        try self.writeRaw(shape);
+        try self.writeAffine(transform);
+        try self.writeVec3(scale);
+    }
+
+    pub fn setShapeDrawFlags(self: *OpWriter, flags: u8) Allocator.Error!void {
+        try self.writeOp(.set_shape_draw_flags);
+        try self.writeRaw(flags);
+    }
+
+    pub fn getSubmergedVolume(self: *OpWriter, shape: u32, columns: [3]Vec3, translation: Vec3, scale: Vec3, plane_normal: Vec3, plane_constant: f32, base_offset: RVec3) Allocator.Error!void {
+        try self.writeOp(.get_submerged_volume);
+        try self.writeRaw(shape);
+        for (columns) |c| try self.writeVec3(c);
+        try self.writeVec3(translation);
+        try self.writeVec3(scale);
+        try self.writeVec3(plane_normal);
+        try self.writeRaw(plane_constant);
+        try self.writeRVec3(base_offset);
+    }
+
+    pub fn drawShrunkShape(self: *OpWriter, shape: u32, transform: Affine, scale: Vec3) Allocator.Error!void {
+        try self.writeOp(.draw_shrunk_shape);
+        try self.writeRaw(shape);
+        try self.writeAffine(transform);
+        try self.writeVec3(scale);
+    }
+
     pub fn createBatchTriangles(self: *OpWriter, triangles: []const TriangleData) Allocator.Error!void {
         try self.writeOp(.create_batch_triangles);
         try self.writeRaw(@as(u32, @intCast(triangles.len)));
@@ -884,6 +983,11 @@ const OpReader = struct {
 /// Executes the op stream on `renderer` (RunParityOps in ParityRenderer.h). `simple` and `recorder` are the renderer as
 /// a DebugRendererSimple / DebugRendererRecorder (or null) for the ops that only they have.
 pub fn runOps(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, simple: ?*DebugRendererSimple, recorder: ?*DebugRendererRecorder) !void {
+    return runOpsWithShapes(allocator, renderer, ops, simple, recorder, null);
+}
+
+/// runOps with the shapes of the D2 ops (`shapes` must be set when the stream has them)
+pub fn runOpsWithShapes(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, simple: ?*DebugRendererSimple, recorder: ?*DebugRendererRecorder, shapes: ?*ShapeContext) !void {
     var r: OpReader = .{ .bytes = ops };
     var slots = [_]GeometryRef{.empty} ** num_geometry_slots;
     defer for (&slots) |*slot| slot.deinit();
@@ -1136,6 +1240,10 @@ pub fn runOps(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, s
                 defer geometry.deinit();
                 slots[slot].set(geometry.get());
             },
+            .draw_shape, .draw_get_support_function, .draw_get_supporting_face, .set_shape_draw_flags, .get_submerged_volume, .draw_shrunk_shape => {
+                if (comptime !zolt.Core.debug_renderer) unreachable; // The shapes only draw with the option
+                try runShapeOp(op, &r, renderer, shapes orelse @panic("runOps: a shape op without a ShapeContext"));
+            },
             .create_batch_triangles => {
                 const triangles = try allocator.alloc(Triangle, r.read(u32));
                 defer allocator.free(triangles);
@@ -1157,6 +1265,63 @@ pub fn runOps(allocator: Allocator, renderer: *DebugRenderer, ops: []const u8, s
             },
             _ => std.debug.panic("runOps: unknown op {d}", .{@intFromEnum(op)}),
         }
+    }
+}
+
+/// One op of D2 (only compiled with the option)
+fn runShapeOp(op: Op, r: *OpReader, renderer: *DebugRenderer, context: *ShapeContext) !void {
+    switch (op) {
+        .draw_shape => {
+            const shape = context.shapes[r.read(u32)];
+            const transform = r.readRMat44();
+            const scale = r.readVec3();
+            const color = r.readColor();
+            const use_material_colors = r.read(u8) != 0;
+            shape.draw(renderer, transform, scale, color, use_material_colors, r.read(u8) != 0);
+        },
+        .draw_get_support_function => {
+            const shape = context.shapes[r.read(u32)];
+            const transform = r.readRMat44();
+            const scale = r.readVec3();
+            const color = r.readColor();
+            shape.drawGetSupportFunction(renderer, transform, scale, color, r.read(u8) != 0);
+        },
+        .draw_get_supporting_face => {
+            const shape = context.shapes[r.read(u32)];
+            const transform = r.readRMat44();
+            shape.drawGetSupportingFace(renderer, transform, r.readVec3());
+        },
+        .set_shape_draw_flags => {
+            const flags = r.read(u8);
+            renderer.flags.shape.draw_submerged_volumes = flags & ShapeDrawFlags.draw_submerged_volumes != 0;
+            renderer.flags.convex_hull_shape.draw_face_outlines = flags & ShapeDrawFlags.convex_hull_face_outlines != 0;
+            renderer.flags.mesh_shape.draw_triangle_groups = flags & ShapeDrawFlags.mesh_triangle_groups != 0;
+            renderer.flags.mesh_shape.draw_triangle_outlines = flags & ShapeDrawFlags.mesh_triangle_outlines != 0;
+            renderer.flags.height_field_shape.draw_triangle_outlines = flags & ShapeDrawFlags.height_field_triangle_outlines != 0;
+        },
+        .get_submerged_volume => {
+            const shape = context.shapes[r.read(u32)];
+            var columns: [3]Vec3 = undefined;
+            for (&columns) |*c| c.* = r.readVec3();
+            const t = r.readVec3();
+            const transform = Mat44.init(Vec4.fromVec3W(columns[0], 0), Vec4.fromVec3W(columns[1], 0), Vec4.fromVec3W(columns[2], 0), Vec4.fromVec3W(t, 1));
+            const scale = r.readVec3();
+            const normal = r.readVec3();
+            const plane = zolt.Plane.init(normal, r.read(f32));
+            const base_offset = r.readRVec3();
+            const v = shape.getSubmergedVolume(transform, scale, plane, .{ .debug = .{ .base_offset = base_offset, .renderer = renderer } });
+            try context.writeResult(v.total_volume);
+            try context.writeResult(v.submerged_volume);
+            try context.writeResult(v.center_of_buoyancy.getX());
+            try context.writeResult(v.center_of_buoyancy.getY());
+            try context.writeResult(v.center_of_buoyancy.getZ());
+        },
+        .draw_shrunk_shape => {
+            const shape = context.shapes[r.read(u32)];
+            const transform = r.readRMat44();
+            shape.cast(zolt.ConvexHullShape).drawShrunkShape(renderer, transform, r.readVec3());
+        },
+        else => unreachable,
     }
 }
 

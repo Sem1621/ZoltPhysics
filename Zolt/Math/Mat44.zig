@@ -270,6 +270,9 @@ pub const Mat44 = extern struct {
     /// `RMat44 * RVec3`: same as `mulVec3`, the spelling that works in single and double precision (see DMat44.mulRVec3)
     pub const mulRVec3 = mulVec3;
 
+    /// `RMat44 * Mat44`: same as `mul`, the spelling that works in single and double precision (see DMat44.mulMat44)
+    pub const mulMat44 = mul;
+
     /// Multiply vector by matrix (operator * (Vec4Arg))
     pub fn mulVec4(self: Mat44, v: Vec4) Vec4 {
         // Per component: col[0][r] * v.x + col[1][r] * v.y + col[2][r] * v.z + col[3][r] * v.w

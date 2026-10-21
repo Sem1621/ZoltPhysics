@@ -942,12 +942,12 @@ pub const BodyInterface = struct {
     }
 
     /// @see Body::ApplyBuoyancyImpulse
-    pub fn applyBuoyancyImpulse(self: *BodyInterface, body_id: BodyID, surface_position: RVec3, surface_normal: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32) bool {
+    pub fn applyBuoyancyImpulse(self: *BodyInterface, body_id: BodyID, surface_position: RVec3, surface_normal: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32, opts: Body.BuoyancyOptions) bool {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
         defer lock.deinit();
         if (lock.succeeded()) {
             const body = lock.getBody();
-            if (body.isDynamic() and body.applyBuoyancyImpulse(surface_position, surface_normal, buoyancy, linear_drag, angular_drag, fluid_velocity, gravity, delta_time)) {
+            if (body.isDynamic() and body.applyBuoyancyImpulse(surface_position, surface_normal, buoyancy, linear_drag, angular_drag, fluid_velocity, gravity, delta_time, opts)) {
                 self.activateBodyInternal(body);
                 return true;
             }

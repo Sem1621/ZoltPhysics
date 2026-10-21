@@ -43,9 +43,10 @@
 //!   calls a null `mConstruct`): an invalid value or a type without constructor is "Failed to read type id".
 //! - JPH_DEBUG_RENDERER: Draw, DrawGetSupportFunction and DrawGetSupportingFace are option-gated vtable entries
 //!   (`virtual.OptionalVirtual(Core.debug_renderer, ...)`, `void` without `-Ddebug_renderer`;
-//!   RemainingFeaturesArchitecture.md R2). `Shape.impl.draw` is a temporary placeholder until every shape implements
-//!   Draw (group D2), then it is removed and Draw is pure again. sDrawSubmergedVolumes and the inBaseOffset parameter of
-//!   GetSubmergedVolume are not ported yet: TODO(debug_renderer).
+//!   RemainingFeaturesArchitecture.md R2). Draw is pure: every concrete shape implements it. sDrawSubmergedVolumes is
+//!   `renderer.flags.shape.draw_submerged_volumes` (R4). The inBaseOffset parameter of GetSubmergedVolume and the
+//!   renderer it draws with (Jolt's sInstance) are the `debug` field of its trailing options
+//!   (`SubmergedVolumeOptions`, `void` without the option).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -399,7 +400,7 @@ pub const Shape = struct {
         /// Get the direct child sub shape and its transform for a sub shape ID.
         getSubShapeTransformedShape: *const fn (self: *const Shape, sub_shape_id: SubShapeID, position_com: Vec3, rotation: Quat, scale: Vec3) SubShapeTransformedShape,
         /// Gets the properties needed to do buoyancy calculations for a body using this shape
-        getSubmergedVolume: *const fn (self: *const Shape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) SubmergedVolume,
+        getSubmergedVolume: *const fn (self: *const Shape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: SubmergedVolumeOptions) SubmergedVolume,
         /// Draw the shape at a particular location with a particular color (debugging purposes) (JPH_DEBUG_RENDERER)
         draw: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void),
         /// Draw the results of the GetSupportFunction with the convex radius added back on to show any errors introduced by this process (only relevant for convex shapes) (JPH_DEBUG_RENDERER)
@@ -484,6 +485,30 @@ pub const Shape = struct {
         center_of_buoyancy: Vec3,
     };
 
+    /// The parameters of getSubmergedVolume that only exist with JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md
+    /// R2, R4). Jolt draws into DebugRenderer::sInstance, Zolt into `renderer`.
+    pub const SubmergedVolumeDebug = struct {
+        /// The offset to transform center_of_mass_transform to world space (in double precision mode this can be used to shift the whole operation closer to the origin). Only used for debug drawing.
+        base_offset: RVec3 = RVec3.zero(),
+        /// The renderer that draws the intersection between the water and the shape, the center of buoyancy and the
+        /// submerged volume when `renderer.flags.shape.draw_submerged_volumes` is set (Shape::sDrawSubmergedVolumes).
+        /// Null draws nothing.
+        renderer: ?*DebugRenderer = null,
+
+        /// Zolt: the renderer to draw the submerged volume with, null when there is none or Shape::sDrawSubmergedVolumes
+        /// (`renderer.flags.shape.draw_submerged_volumes`) is off
+        pub fn submergedVolumeRenderer(self: SubmergedVolumeDebug) ?*DebugRenderer {
+            const renderer = self.renderer orelse return null;
+            return if (renderer.flags.shape.draw_submerged_volumes) renderer else null;
+        }
+    };
+
+    /// Optional parameters of getSubmergedVolume: `.debug` is `void` without `-Ddebug_renderer`, so `.{}` compiles in
+    /// both configurations
+    pub const SubmergedVolumeOptions = struct {
+        debug: if (Core.debug_renderer) SubmergedVolumeDebug else void = if (Core.debug_renderer) .{} else {},
+    };
+
     /// Class that holds information about the shape that can be used for logging / data collection purposes
     pub const Stats = struct {
         /// Amount of memory used by this shape (size in bytes)
@@ -505,7 +530,9 @@ pub const Shape = struct {
     pub const MaterialToIDMap = ObjectToIDMap(PhysicsMaterial);
     pub const IDToMaterialMap = IDToObjectMap(PhysicsMaterial);
 
-    // TODO(debug_renderer): static bool sDrawSubmergedVolumes (Debug helper which draws the intersection between water and the shapes, the center of buoyancy and the submerged volume)
+    // static bool sDrawSubmergedVolumes (Debug helper which draws the intersection between water and the shapes, the
+    // center of buoyancy and the submerged volume, JPH_DEBUG_RENDERER) is `renderer.flags.shape.draw_submerged_volumes`
+    // (RemainingFeaturesArchitecture.md R4)
 
     vtable: *const VTable,
     /// Reference count (RefTarget<Shape>)
@@ -708,9 +735,10 @@ pub const Shape = struct {
     /// @param center_of_mass_transform Transform that takes this shape (centered around center of mass) to world space (or a desired other space)
     /// @param scale Scale in local space of the shape (scales relative to its center of mass)
     /// @param surface The surface plane of the liquid relative to center_of_mass_transform
+    /// @param opts.debug The base offset and the renderer of the debug drawing (JPH_DEBUG_RENDERER, `void` without the option)
     /// @return The total volume of the shape, the submerged volume of the shape and the world space center of mass of the submerged volume
-    pub fn getSubmergedVolume(self: *const Shape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) SubmergedVolume {
-        return self.vtable.getSubmergedVolume(self, center_of_mass_transform, scale, surface);
+    pub fn getSubmergedVolume(self: *const Shape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: SubmergedVolumeOptions) SubmergedVolume {
+        return self.vtable.getSubmergedVolume(self, center_of_mass_transform, scale, surface, opts);
     }
 
     /// Draw the shape at a particular location with a particular color (debugging purposes). Only with
@@ -1106,12 +1134,7 @@ pub const Shape = struct {
     /// Implementations of the virtual functions in Shape (C++ Shape::Foo bodies). C++'s explicit base calls
     /// (`Shape::SaveBinaryState(inStream)`) are `Shape.impl.saveBinaryState(self.asShape(), stream)`.
     pub const impl = struct {
-        /// Zolt placeholder (RemainingFeaturesArchitecture.md R2): Draw is pure in Jolt. It stays here until every shape
-        /// implements Draw (group D2), so that all shapes compile with `-Ddebug_renderer=true` in the meantime.
-        pub fn draw(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
-            _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
-            @panic("TODO(debug_renderer): Draw of this shape is not ported yet");
-        }
+        // Draw is pure (JPH_DEBUG_RENDERER): every concrete shape implements it
 
         pub fn drawGetSupportFunction(self: *const Shape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
             // Nothing (only relevant for convex shapes)
@@ -1353,10 +1376,10 @@ test "Shape: virtual dispatch and the default implementations (box)" {
     try expect(sub_ts.transformed_shape.getShapeScale().eql(scale));
     try expect(sub_ts.transformed_shape.body_id.isInvalid() and sub_ts.transformed_shape.sub_shape_id_creator.getID().isEmpty());
 
-    const below = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), -1.0));
+    const below = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), -1.0), .{});
     try testing.expectEqual(@as(f32, 48.0), below.total_volume);
     try testing.expectEqual(@as(f32, 48.0), below.submerged_volume);
-    const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 1.0));
+    const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 1.0), .{});
     try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
 
     // Ray casts, both versions
@@ -1503,7 +1526,7 @@ test "Shape: overrides of the sphere and the compound, collidePointUsingRayCast"
     defer sub_ts.transformed_shape.deinit();
     try expect(sub_ts.transformed_shape.shape.get() == box.asShape());
     try expect(sub_ts.transformed_shape.shape_position_com.eql(RVec3.init(11, 0, 0)));
-    const volume = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), -10.0));
+    const volume = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), -10.0), .{});
     try testing.expectEqual(sphere.asShape().getVolume() + 8.0, volume.total_volume);
     var hit: RayCastResult = .{};
     try expect(shape.castRay(.init(Vec3.init(10, 0, 0), Vec3.init(-20, 0, 0)), .{}, &hit));

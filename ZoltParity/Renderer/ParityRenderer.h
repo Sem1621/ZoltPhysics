@@ -7,7 +7,8 @@
 // - SimpleParityRenderer is a JPH::DebugRendererSimple that logs DrawLine and DrawText3D. Simple's own DrawTriangle,
 //   batches and DrawGeometry (with its LOD selection) produce the lines.
 // - The op stream: the Zig side encodes the calls to make (random helper calls, ...) as bytes, RunParityOps executes
-//   them on any renderer. Every group adds its ops in its own range (see ParityRenderer.zig).
+//   them on any renderer. Every group adds its ops in its own range (see ParityRenderer.zig). The shape ops of D2 draw
+//   the shapes of a ParityShapeContext.
 // - Reference files of other groups (shapes, constraints, ...) include this header to draw into a ParityRenderer.
 //
 // The log format (little endian, no padding; ParityRenderer.zig decodes it for the mismatch report):
@@ -33,6 +34,9 @@
 #include <Jolt/Renderer/DebugRendererRecorder.h>
 #include <Jolt/Renderer/DebugRendererSimple.h>
 #include <Jolt/Geometry/OrientedBox.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <ZoltParity/ParityHooks.h>
 
 #include <atomic>
@@ -354,11 +358,48 @@ inline ParitySupport ParityReadSupport(ParityOpReader &ioReader)
 	return support;
 }
 
+/// The shapes of the shape ops (D2) and their results (ShapeContext in ParityRenderer.zig)
+struct ParityShapeContext
+{
+	const Shape *const *			mShapes;
+	uint32							mNumShapes;
+	std::vector<uint8>				mResults;							///< The results of the ops that compute numbers
+
+	template <class T>
+	void							WriteResult(const T &inValue)
+	{
+		const uint8 *p = reinterpret_cast<const uint8 *>(&inValue);
+		mResults.insert(mResults.end(), p, p + sizeof(T));
+	}
+};
+
+/// The shape of a shape op
+inline const Shape *ParityShape(const ParityShapeContext *inShapes, uint32 inIndex)
+{
+	if (inShapes == nullptr || inIndex >= inShapes->mNumShapes)
+	{
+		Trace("RunParityOps: a shape op without its shape");
+		abort();
+	}
+	return inShapes->mShapes[inIndex];
+}
+
+/// The bits of the op set_shape_draw_flags (ShapeDrawFlags in ParityRenderer.zig)
+inline void ParitySetShapeDrawFlags(uint8 inFlags)
+{
+	Shape::sDrawSubmergedVolumes = (inFlags & 1) != 0;
+	ConvexHullShape::sDrawFaceOutlines = (inFlags & 2) != 0;
+	MeshShape::sDrawTriangleGroups = (inFlags & 4) != 0;
+	MeshShape::sDrawTriangleOutlines = (inFlags & 8) != 0;
+	HeightFieldShape::sDrawTriangleOutlines = (inFlags & 16) != 0;
+}
+
 /// Executes the op stream of ParityRenderer.zig on inRenderer (D0's ops 1 to 15: the virtual functions and the helpers of
-/// DebugRenderer that D0 found ported; D1's ops 16 to 36: the other helpers, NextFrame and the batch helpers). ioSimple
-/// and ioRecorder are the renderer as a DebugRendererSimple / DebugRendererRecorder (or null) for the ops that only they
-/// have.
-inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder)
+/// DebugRenderer that D0 found ported; D1's ops 16 to 36: the other helpers, NextFrame and the batch helpers; D2's ops 64
+/// to 69: the shapes of ioShapes). ioSimple and ioRecorder are the renderer as a DebugRendererSimple /
+/// DebugRendererRecorder (or null) for the ops that only they have. The shape ops change the static draw flags of the
+/// shapes: the caller resets them (ParitySetShapeDrawFlags(0)).
+inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t inSize, DebugRendererSimple *ioSimple, DebugRendererRecorder *ioRecorder, ParityShapeContext *ioShapes = nullptr)
 {
 	ParityOpReader r(inOps, inSize);
 	DebugRenderer::GeometryRef slots[cParityNumGeometrySlots];
@@ -766,6 +807,77 @@ inline void RunParityOps(DebugRenderer &ioRenderer, const uint8 *inOps, size_t i
 					}
 				}
 				DebugRenderer::Batch batch = ioRenderer.CreateTriangleBatch(triangles);
+				break;
+			}
+
+		// D2: the shapes of ioShapes
+
+		case 64: // Shape::Draw: u32 shape, matrix, Vec3 scale, Color, u8 use material colors, u8 draw wireframe
+			{
+				const Shape *shape = ParityShape(ioShapes, r.Read<uint32>());
+				RMat44 transform = r.ReadRMat44();
+				Vec3 scale = r.ReadVec3();
+				Color color = r.ReadColor();
+				bool use_material_colors = r.Read<uint8>() != 0;
+				bool draw_wireframe = r.Read<uint8>() != 0;
+				shape->Draw(&ioRenderer, transform, scale, color, use_material_colors, draw_wireframe);
+				break;
+			}
+
+		case 65: // Shape::DrawGetSupportFunction: u32 shape, matrix, Vec3 scale, Color, u8 draw support direction
+			{
+				const Shape *shape = ParityShape(ioShapes, r.Read<uint32>());
+				RMat44 transform = r.ReadRMat44();
+				Vec3 scale = r.ReadVec3();
+				Color color = r.ReadColor();
+				bool draw_support_direction = r.Read<uint8>() != 0;
+				shape->DrawGetSupportFunction(&ioRenderer, transform, scale, color, draw_support_direction);
+				break;
+			}
+
+		case 66: // Shape::DrawGetSupportingFace: u32 shape, matrix, Vec3 scale
+			{
+				const Shape *shape = ParityShape(ioShapes, r.Read<uint32>());
+				RMat44 transform = r.ReadRMat44();
+				Vec3 scale = r.ReadVec3();
+				shape->DrawGetSupportingFace(&ioRenderer, transform, scale);
+				break;
+			}
+
+		case 67: // The static draw flags of the shapes: u8 bits
+			ParitySetShapeDrawFlags(r.Read<uint8>());
+			break;
+
+		case 68: // Shape::GetSubmergedVolume (draws into DebugRenderer::sInstance, which is ioRenderer): u32 shape, Vec3 columns
+				 // 0..2, Vec3 translation, Vec3 scale, Vec3 plane normal, f32 plane constant, RVec3 base offset
+			{
+				const Shape *shape = ParityShape(ioShapes, r.Read<uint32>());
+				Vec3 c0 = r.ReadVec3();
+				Vec3 c1 = r.ReadVec3();
+				Vec3 c2 = r.ReadVec3();
+				Vec3 t = r.ReadVec3();
+				Vec3 scale = r.ReadVec3();
+				Vec3 normal = r.ReadVec3();
+				float constant = r.Read<float>();
+				RVec3 base_offset = r.ReadRVec3();
+				JPH_ASSERT(DebugRenderer::sInstance == &ioRenderer);
+				float total_volume, submerged_volume;
+				Vec3 center_of_buoyancy;
+				shape->GetSubmergedVolume(Mat44(Vec4(c0, 0), Vec4(c1, 0), Vec4(c2, 0), Vec4(t, 1)), scale, Plane(normal, constant), total_volume, submerged_volume, center_of_buoyancy, base_offset);
+				ioShapes->WriteResult(total_volume);
+				ioShapes->WriteResult(submerged_volume);
+				ioShapes->WriteResult(center_of_buoyancy.GetX());
+				ioShapes->WriteResult(center_of_buoyancy.GetY());
+				ioShapes->WriteResult(center_of_buoyancy.GetZ());
+				break;
+			}
+
+		case 69: // ConvexHullShape::DrawShrunkShape: u32 shape (a convex hull), matrix, Vec3 scale
+			{
+				const Shape *shape = ParityShape(ioShapes, r.Read<uint32>());
+				RMat44 transform = r.ReadRMat44();
+				Vec3 scale = r.ReadVec3();
+				static_cast<const ConvexHullShape *>(shape)->DrawShrunkShape(&ioRenderer, transform, scale);
 				break;
 			}
 

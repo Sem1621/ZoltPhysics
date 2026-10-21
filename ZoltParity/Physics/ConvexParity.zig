@@ -245,7 +245,7 @@ const CastInput = extern struct {
 /// GetTrianglesStart / Next and GetSubmergedVolume are ConvexShape's.
 const ParityConvexShape = struct {
     pub const shape_sub_type: ShapeSubType = .user_convex1;
-    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .getStats, .getVolume };
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .getStats, .getVolume, .draw };
 
     base: ConvexShape,
     half_extent: Vec3,
@@ -255,6 +255,12 @@ const ParityConvexShape = struct {
         const self = try allocator.create(ParityConvexShape);
         self.* = .{ .base = .init(ParityConvexShape, allocator, shape_sub_type, null), .half_extent = half_extent, .convex_radius = convex_radius };
         return self;
+    }
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER). Parity shapes are never drawn (like the C++ shape).
+    pub const draw = if (zolt.Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const ParityConvexShape, renderer: *zolt.DebugRenderer, center_of_mass_transform: zolt.RMat44, scale: Vec3, color: zolt.Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
     }
 
     pub fn getLocalBounds(self: *const ParityConvexShape) AABox {
@@ -991,7 +997,7 @@ test "Convex parity: GetSubmergedVolume" {
         jolt.jolt_convex_shape_submerged_volume(&desc, &transform, &scale, &plane, &jolt_values);
         var shape = (try createShape(allocator, desc, null)).?;
         defer shape.deinit();
-        const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)));
+        const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)), .{});
         const zolt_values = [_]f32{ r.total_volume, r.submerged_volume } ++ arr3(r.center_of_buoyancy);
         checker.check(.{ desc, scale, transform, plane }, zolt_values, jolt_values);
     }

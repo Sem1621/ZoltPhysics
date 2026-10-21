@@ -7,13 +7,17 @@
 //!   in header order, the C++ constructors are `initDefault` (default constructor), `initFromSettings` (D3, Jolt's
 //!   error texts), `init` (stack / member shapes) and `create` (`new SphereShape`).
 //! - The support classes `SphereNoConvex` / `SphereWithConvex` are constructed in the caller's SupportBuffer (D9).
-//! - JPH_DEBUG_RENDERER (Draw, the drawing of the submerged volume and the `inBaseOffset` parameter of
-//!   GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): `draw` is a gated declaration. GetSubmergedVolume draws
+//!   the intersection with the water and the center of buoyancy into `opts.debug.renderer` (Jolt's
+//!   DebugRenderer::sInstance) at `opts.debug.base_offset` (Jolt's `inBaseOffset`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Color = @import("../../../Core/Color.zig").Color;
+const Core = @import("../../../Core/Core.zig");
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
@@ -114,7 +118,7 @@ pub const SphereShape = struct {
     pub const shape_sub_type: ShapeSubType = .sphere;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: ConvexShape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the destructor chain
@@ -254,37 +258,55 @@ pub const SphereShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const SphereShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const SphereShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
         const scaled_radius = self.getScaledRadius(scale);
-        const total_volume = (@as(f32, 4.0) / 3.0 * math.pi) * math.cubed(scaled_radius);
+        var out: Shape.SubmergedVolume = .{ .total_volume = (@as(f32, 4.0) / 3.0 * math.pi) * math.cubed(scaled_radius), .submerged_volume = undefined, .center_of_buoyancy = undefined };
 
         const distance_to_surface = surface.signedDistance(center_of_mass_transform.getTranslation());
         if (distance_to_surface >= scaled_radius) {
             // Above surface
-            return .{ .total_volume = total_volume, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
+            out.submerged_volume = 0.0;
+            out.center_of_buoyancy = Vec3.zero();
         } else if (distance_to_surface <= -scaled_radius) {
             // Under surface
-            return .{ .total_volume = total_volume, .submerged_volume = total_volume, .center_of_buoyancy = center_of_mass_transform.getTranslation() };
+            out.submerged_volume = out.total_volume;
+            out.center_of_buoyancy = center_of_mass_transform.getTranslation();
         } else {
             // Intersecting surface
 
             // Calculate submerged volume, see: https://en.wikipedia.org/wiki/Spherical_cap
             const h = scaled_radius - distance_to_surface;
-            const submerged_volume = (math.pi / 3.0) * math.square(h) * (3.0 * scaled_radius - h);
+            out.submerged_volume = (math.pi / 3.0) * math.square(h) * (3.0 * scaled_radius - h);
 
             // Calculate center of buoyancy, see: http://mathworld.wolfram.com/SphericalCap.html (eq 10)
             const z = (@as(f32, 3.0) / 4.0) * math.square(2.0 * scaled_radius - h) / (3.0 * scaled_radius - h);
-            const center_of_buoyancy = center_of_mass_transform.getTranslation().sub(surface.getNormal().mulScalar(z)); // Negative normal since we want the portion under the water
+            out.center_of_buoyancy = center_of_mass_transform.getTranslation().sub(surface.getNormal().mulScalar(z)); // Negative normal since we want the portion under the water
 
-            // TODO(debug_renderer): Draw intersection between sphere and water plane (sDrawSubmergedVolumes)
-
-            return .{ .total_volume = total_volume, .submerged_volume = submerged_volume, .center_of_buoyancy = center_of_buoyancy };
+            if (Core.debug_renderer) {
+                // Draw intersection between sphere and water plane
+                if (opts.debug.submergedVolumeRenderer()) |renderer| {
+                    const circle_center = center_of_mass_transform.getTranslation().sub(surface.getNormal().mulScalar(distance_to_surface));
+                    const circle_radius = @sqrt(math.square(scaled_radius) - math.square(distance_to_surface));
+                    renderer.drawPie(opts.debug.base_offset.addVec3(circle_center), circle_radius, surface.getNormal(), surface.getNormal().getNormalizedPerpendicular(), -math.pi, math.pi, Color.green, .{ .cast_shadow = .off });
+                }
+            }
         }
 
-        // TODO(debug_renderer): Draw center of buoyancy (sDrawSubmergedVolumes)
+        if (Core.debug_renderer) {
+            // Draw center of buoyancy
+            if (opts.debug.submergedVolumeRenderer()) |renderer|
+                renderer.drawWireSphere(opts.debug.base_offset.addVec3(out.center_of_buoyancy), 0.05, Color.red, .{ .level = 1 });
+        }
+
+        return out;
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const SphereShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+        renderer.drawUnitSphere(center_of_mass_transform.mulMat44(Mat44.scale(self.radius * scale.abs().getX())), if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color, .{ .cast_shadow = .on, .draw_mode = draw_mode });
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const SphereShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -664,13 +686,13 @@ test "SphereShape: GetSubmergedVolume (spherical cap)" {
     const scale = Vec3.replicate(2.0);
     const total = 4.0 / 3.0 * math.pi * 8.0;
 
-    const above = shape.getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, -0.1, 0), Vec3.axisY()));
+    const above = shape.getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, -0.1, 0), Vec3.axisY()), .{});
     try testing.expectApproxEqRel(total, above.total_volume, 1.0e-6);
     try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
-    const below = shape.getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 4.1, 0), Vec3.axisY()));
+    const below = shape.getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 4.1, 0), Vec3.axisY()), .{});
     try testing.expectEqual(below.total_volume, below.submerged_volume);
     try testing.expect(below.center_of_buoyancy.eql(Vec3.init(1, 2, 3)));
-    const half = shape.getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 2, 0), Vec3.axisY()));
+    const half = shape.getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 2, 0), Vec3.axisY()), .{});
     try testing.expectApproxEqRel(0.5 * total, half.submerged_volume, 1.0e-6);
     try testing.expect(half.center_of_buoyancy.isClose(Vec3.init(1, 2 - 0.75, 3), .{ .max_dist_sq = 1.0e-10 })); // 3/8 r below the center
 }

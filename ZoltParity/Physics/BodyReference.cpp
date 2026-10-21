@@ -677,4 +677,11 @@ void jolt_body_bcs_mass_properties(const BodyDesc *inDesc, float *outMP)
 	BStoreMat44(mp.mInertia, outMP + 1);
 }
 
+// The body with ID inID, for the buoyancy draws of ZoltParity/Renderer/DebugRendererReference.cpp (jolt_dr_body_buoyancy)
+Body *jolt_body_ptr(void *inWorld, uint32 inID)
+{
+	BodyManager &bm = static_cast<BodyWorld *>(inWorld)->mBodyManager;
+	return &bm.GetBody(BodyID(inID));
+}
+
 } // extern "C"

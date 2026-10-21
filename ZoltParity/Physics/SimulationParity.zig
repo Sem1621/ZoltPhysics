@@ -1287,7 +1287,7 @@ const ZoltWorld = struct {
                 return 0;
             },
             .apply_buoyancy_impulse => {
-                const applied = bi.applyBuoyancyImpulse(id, r, load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12]);
+                const applied = bi.applyBuoyancyImpulse(id, r, load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12], .{});
                 return (@as(u32, @intFromBool(applied)) << 2) | @as(u32, @intFromBool(bi.isActive(id))) | (@as(u32, @intFromBool(bi.isAdded(id))) << 1);
             },
             .expect_body_state => {}, // Changes nothing, the driver checks the result

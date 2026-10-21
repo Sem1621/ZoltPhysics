@@ -26,7 +26,11 @@
 //! some inputs reach (buoyancy not submerged / no relative velocity / drag clamps, the inertia fallback of
 //! GetBodyCreationSettings, rotation steps at the 1.0e-6 threshold, the sleep test result, sequence number wraparound)
 //! and requires each of them `min_hits` times.
-//! C ABI wrappers: ZoltParity/Physics/BodyReference.cpp.
+//! - With -Ddebug_renderer=true: the buoyancy draws (group D2). ApplyBuoyancyImpulse and GetSubmergedVolume of random
+//!   bodies (far positions too) with Shape::sDrawSubmergedVolumes set draw into a ParityRenderer on both sides, and the
+//!   call logs must match (ZoltParity/Renderer/ParityRenderer.zig).
+//! C ABI wrappers: ZoltParity/Physics/BodyReference.cpp, and `jolt_dr_body_buoyancy` in
+//! ZoltParity/Renderer/DebugRendererReference.cpp for the draws.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -551,7 +555,7 @@ fn applyOp(world: *World, id: u32, op: *const BodyOp) !BodyOpResult {
         .move_kinematic => body.moveKinematic(loadR3(r[0..3]), loadQuat(f[0..4]), f[4]),
         .set_position_and_rotation => body.setPositionAndRotationInternal(loadR3(r[0..3]), loadQuat(f[0..4]), .{ .reset_sleep_timer = i[0] != 0 }),
         .update_sleep_state => result.i[0] = @intFromEnum(body.updateSleepStateInternal(f[0], f[1], f[2])),
-        .apply_buoyancy_impulse => result.i[0] = @intFromBool(body.applyBuoyancyImpulse(loadR3(r[0..3]), load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12])),
+        .apply_buoyancy_impulse => result.i[0] = @intFromBool(body.applyBuoyancyImpulse(loadR3(r[0..3]), load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12], .{})),
         .world_space_surface_normal => store3(body.getWorldSpaceSurfaceNormal(.{ .value = i[0] }, loadR3(r[0..3])), of[0..3]),
         .point_velocity => {
             store3(body.getPointVelocity(loadR3(r[0..3])), of[0..3]);
@@ -583,7 +587,7 @@ fn applyOp(world: *World, id: u32, op: *const BodyOp) !BodyOpResult {
             mp.subAngularVelocityStep(load3(f[9..12]));
         },
         .submerged_volume => {
-            const volume = body.getSubmergedVolume(loadR3(r[0..3]), load3(f[0..3]));
+            const volume = body.getSubmergedVolume(loadR3(r[0..3]), load3(f[0..3]), .{});
             of[0] = volume.total_volume;
             of[1] = volume.submerged_volume;
             store3(volume.relative_center_of_buoyancy, of[2..5]);
@@ -968,7 +972,7 @@ const Coverage = struct {
     /// Body::ApplyBuoyancyImpulse up to its branches
     fn recordBuoyancy(self: *Coverage, body: *const Body, o: *const BodyOp) void {
         const f = &o.f;
-        const volume = body.getSubmergedVolume(loadR3(o.r[0..3]), load3(f[0..3]));
+        const volume = body.getSubmergedVolume(loadR3(o.r[0..3]), load3(f[0..3]), .{});
         if (!(volume.submerged_volume > 0.0)) {
             self.buoyancy_not_submerged += 1;
             return;
@@ -1278,4 +1282,94 @@ test "BodyManager sequence: IDs, active body order, mutex masks and state" {
     }
     try std.testing.expect(num_out_of_bodies > 0 and num_custom > 0 and num_restores > 0 and num_wrapped > 0);
     try finishAll(&.{ &check, &check_ids, &check_masks });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The buoyancy draws (JPH_DEBUG_RENDERER, group D2)
+
+const pr = @import("../Renderer/ParityRenderer.zig");
+
+const jolt_draw = struct {
+    extern fn jolt_dr_available() c_int;
+    extern fn jolt_body_ptr(world: *anyopaque, id: u32) *anyopaque;
+    extern fn jolt_dr_body_buoyancy(body: *anyopaque, surface_position: *const [6]Real, f: *const [24]f32, kind: c_int) ?*anyopaque;
+};
+
+/// ApplyBuoyancyImpulse (kind 0) or GetSubmergedVolume (kind 1) of op `o` on Zolt's body, drawn into a ParityRenderer
+/// with Shape::sDrawSubmergedVolumes set: the log goes to `log`, the results to `values` (jolt_dr_body_buoyancy)
+fn zoltBuoyancyDraw(allocator: Allocator, body: *Body, o: *const BodyOp, kind: c_int, log: *std.ArrayList(u8), values: *[5]f32) !u32 {
+    var renderer: pr.ParityRenderer = undefined;
+    try renderer.init(allocator);
+    defer renderer.deinit();
+    renderer.log.bytes.clearRetainingCapacity();
+    renderer.base.flags.shape.draw_submerged_volumes = true;
+    const f = &o.f;
+    const surface_position = loadR3(o.r[0..3]);
+    var applied: u32 = 0;
+    if (kind == 0) {
+        applied = @intFromBool(body.applyBuoyancyImpulse(surface_position, load3(f[0..3]), f[3], f[4], f[5], load3(f[6..9]), load3(f[9..12]), f[12], .{ .debug_renderer = &renderer.base }));
+    } else {
+        const volume = body.getSubmergedVolume(surface_position, load3(f[0..3]), .{ .debug_renderer = &renderer.base });
+        values[0] = volume.total_volume;
+        values[1] = volume.submerged_volume;
+        store3(volume.relative_center_of_buoyancy, values[2..5]);
+    }
+    try log.appendSlice(allocator, renderer.log.bytes.items);
+    return applied;
+}
+
+test "Body and MotionProperties: the buoyancy draws (call log)" {
+    if (!Core.debug_renderer) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(c_int, 1), jolt_draw.jolt_dr_available()); // Both sides follow -Ddebug_renderer
+
+    const allocator = std.testing.allocator;
+    var world: World = undefined;
+    try world.init(allocator, 64, 8);
+    defer world.deinit();
+
+    var gen: Gen = .{ .rng = .{ .state = 0xd2b0a7c5 } };
+    var check: Checker = .{ .name = "Body buoyancy draw" };
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(allocator);
+    var num_drawn = [2]u32{ 0, 0 };
+    for (0..400) |n| {
+        const desc = gen.bodyDesc();
+        const zolt_id = try world.createBody(&desc, BodyID.invalid_body_id, true);
+        const jolt_id = jolt.jolt_body_world_create_body(world.jolt_world, &desc, BodyID.invalid_body_id, 1);
+        try std.testing.expectEqual(jolt_id, zolt_id);
+        defer {
+            world.destroyBody(zolt_id);
+            jolt.jolt_body_world_destroy_body(world.jolt_world, jolt_id);
+        }
+
+        for (0..8) |_| {
+            const body = world.body_manager.getBodyMut(.init(zolt_id));
+            const o = while (true) {
+                const candidate = gen.op(body);
+                const kind: BodyOpKind = @enumFromInt(candidate.kind);
+                if (kind == .apply_buoyancy_impulse or kind == .submerged_volume) break candidate;
+            };
+            const kind: c_int = if (o.kind == @intFromEnum(BodyOpKind.apply_buoyancy_impulse)) 0 else 1;
+
+            log.clearRetainingCapacity();
+            var zolt_values: [5]f32 = @splat(0);
+            const applied = try zoltBuoyancyDraw(allocator, body, &o, kind, &log, &zolt_values);
+            const result: pr.JoltResult = .{ .handle = jolt_draw.jolt_dr_body_buoyancy(jolt_draw.jolt_body_ptr(world.jolt_world, jolt_id), &o.r, &o.f, kind).? };
+            defer result.deinit();
+
+            try pr.compareLogs("Body buoyancy draw", log.items, result.part(0));
+            if (kind == 0) {
+                check.check(.{ n, o.kind }, applied, result.partU32(1));
+            } else {
+                var jolt_values: [5]f32 = undefined;
+                @memcpy(std.mem.asBytes(&jolt_values), result.part(1));
+                check.check(.{ n, o.kind }, zolt_values, jolt_values);
+            }
+            try checkBody(&world, &check, zolt_id, .{ n, o.kind });
+            if (log.items.len > 0) num_drawn[@intCast(kind)] += 1;
+        }
+    }
+    // Enough draws of both: the submerged volume of the shapes, and the marker and the text of ApplyBuoyancyImpulse
+    try std.testing.expect(num_drawn[0] >= 100 and num_drawn[1] >= 100);
+    try check.finish();
 }

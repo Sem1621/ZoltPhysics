@@ -22,7 +22,8 @@
 //! - The fields that Jolt leaves uninitialized (`PlaneShapeSettings() = default` / `PlaneShape()`: the plane, and the
 //!   half extent of the shape) get defined values: the plane `(0, 0, 0), 0` (an invalid plane, Create() reports
 //!   "Plane normal needs to be normalized!") and a half extent of 0.
-//! - JPH_DEBUG_RENDERER (Draw) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): `draw` is a gated declaration, `void` without
+//!   `-Ddebug_renderer`. GetSubmergedVolume ignores its debug options, like Jolt ignores `inBaseOffset`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -30,6 +31,8 @@ const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const IssueReporting = @import("../../../Core/IssueReporting.zig");
 const Color = @import("../../../Core/Color.zig").Color;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -160,7 +163,7 @@ pub const PlaneShape = struct {
     pub const shape_sub_type: ShapeSubType = .plane;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getSubmergedVolume, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
+    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getSubmergedVolume, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
 
     base: Shape,
     /// Every field has a valid default: a half constructed shape (error in initFromSettings) is destroyed through the
@@ -354,7 +357,36 @@ pub const PlaneShape = struct {
             out_vertices.append(com.mulVec3(v));
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const PlaneShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        // Get the vertices of the plane
+        var local_vertices = self.getVertices();
+
+        // Reverse if scale is inside out
+        if (ScaleHelpers.isInsideOut(scale)) {
+            std.mem.swap(Vec3, &local_vertices[0], &local_vertices[3]);
+            std.mem.swap(Vec3, &local_vertices[1], &local_vertices[2]);
+        }
+
+        // Transform them to world space
+        const com = center_of_mass_transform.preScaled(scale);
+        var vertices: [4]RVec3 = undefined;
+        for (0..4) |i|
+            vertices[i] = com.mulVec3(local_vertices[i]);
+
+        // Determine the color
+        const c = if (use_material_colors) self.getMaterial(.empty).getDebugColor() else color;
+
+        // Draw the plane
+        if (draw_wireframe) {
+            renderer.drawWireTriangle(vertices[0], vertices[1], vertices[2], c);
+            renderer.drawWireTriangle(vertices[0], vertices[2], vertices[3], c);
+        } else {
+            renderer.drawTriangle(vertices[0], vertices[1], vertices[2], c, .{ .cast_shadow = .on });
+            renderer.drawTriangle(vertices[0], vertices[2], vertices[3], c, .{ .cast_shadow = .on });
+        }
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const PlaneShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -500,8 +532,8 @@ pub const PlaneShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const PlaneShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
+    pub fn getSubmergedVolume(self: *const PlaneShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ self, center_of_mass_transform, scale, surface, opts };
         IssueReporting.assertFailed("Not supported", @src());
 
         // Jolt's release build leaves the out parameters untouched, Zolt returns zeros (see the file comment)
@@ -1079,7 +1111,7 @@ test "PlaneShape: GetSubmergedVolume is not supported (release builds return zer
     var expect_assert: IssueReporting.ExpectAssert = undefined;
     expect_assert.init(1);
     errdefer expect_assert.restore();
-    const r = plane.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), test_plane);
+    const r = plane.asShape().getSubmergedVolume(Mat44.identity(), Vec3.one(), test_plane, .{});
     try expect_assert.finish();
     try testing.expectEqual(@as(f32, 0.0), r.total_volume);
     try testing.expectEqual(@as(f32, 0.0), r.submerged_volume);

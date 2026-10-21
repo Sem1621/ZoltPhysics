@@ -38,13 +38,24 @@
 //!   triangle (ValidationContext, IsDegenerate) before it reaches its check "Vertex index %u is beyond vertex list",
 //!   which is undefined behavior for an index beyond the vertex list. Zolt reports Jolt's error text in Jolt's loop
 //!   order for such a mesh; for every mesh that Jolt handles defined the result is the same.
-//! - JPH_DEBUG_RENDERER (Draw, sDrawTriangleGroups, sDrawTriangleOutlines and the cached debug geometry) is not ported
-//!   yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4, R6): `draw` is a gated declaration.
+//!   sDrawTriangleGroups and sDrawTriangleOutlines are `renderer.flags.mesh_shape.draw_triangle_groups` /
+//!   `draw_triangle_outlines`. Jolt's mutable members that Draw writes (`mGeometry`, `mCachedTrianglesColoredPerGroup`,
+//!   `mCachedUseMaterialColors`) are a heap side block (`draw_cache`, `void` without `-Ddebug_renderer`) with a mutex,
+//!   allocated with the shape's allocator in `initFromSettings` and `restoreBinaryState` and freed in `destruct`. It is
+//!   null for a shape that was neither, which then draws nothing. Draw locks it with the renderer's io (UB10). When an
+//!   allocation fails while drawing (R5) the geometry is not cached and not drawn, the triangle outlines are still
+//!   drawn. A null entry of the material list draws with the color of the default material: Jolt dereferences null
+//!   there (undefined behavior), a Zolt-only test in ZoltTests/Renderer/DebugRendererZoltTests.zig pins it.
+//!   GetSubmergedVolume ignores its debug options, like Jolt ignores `inBaseOffset`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const Mutex = @import("../../../Core/Mutex.zig").Mutex;
 const IssueReporting = @import("../../../Core/IssueReporting.zig");
 const ByteBuffer = @import("../../../Core/ByteBuffer.zig").ByteBuffer;
 const Color = @import("../../../Core/Color.zig").Color;
@@ -339,7 +350,7 @@ pub const MeshShape = struct {
     pub const shape_sub_type: ShapeSubType = .mesh;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getSubmergedVolume, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
+    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getSubmergedVolume, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
 
     /// How many bits to reserve to encode the triangle index
     pub const num_triangle_bits = 3;
@@ -366,7 +377,32 @@ pub const MeshShape = struct {
     /// Resulting packed data structure (allocated with the shape's allocator)
     tree: ByteBuffer = .empty,
 
-    // TODO(debug_renderer): mGeometry, mCachedTrianglesColoredPerGroup, mCachedUseMaterialColors (JPH_DEBUG_RENDERER)
+    /// The draw cache (JPH_DEBUG_RENDERER, R6): Jolt's mutable mGeometry, mCachedTrianglesColoredPerGroup and
+    /// mCachedUseMaterialColors
+    draw_cache: if (Core.debug_renderer) ?*DrawCache else void = if (Core.debug_renderer) null else {},
+
+    // Settings (static bool sDrawTriangleGroups, sDrawTriangleOutlines, JPH_DEBUG_RENDERER) are
+    // `renderer.flags.mesh_shape.draw_triangle_groups` and `draw_triangle_outlines` (R4)
+
+    /// Zolt (R6): the members that Jolt's const Draw writes, in a heap block behind a mutex
+    pub const DrawCache = struct {
+        mutex: Mutex = .{},
+        /// Debug rendering data
+        geometry: DebugRenderer.GeometryRef = .empty,
+        /// This is used to regenerate the triangle batch if the drawing settings change
+        cached_triangles_colored_per_group: bool = false,
+        /// This is used to regenerate the triangle batch if the drawing settings change
+        cached_use_material_colors: bool = false,
+    };
+
+    /// Zolt (R6): allocate the draw cache in a fallible construction path (once)
+    fn createDrawCache(self: *MeshShape) Allocator.Error!void {
+        if (self.draw_cache == null) {
+            const cache = try self.base.allocator.create(DrawCache);
+            cache.* = .{};
+            self.draw_cache = cache;
+        }
+    }
 
     // ---------------------------------------------------------------------------------------------------------------
     // Construction (C++ constructors)
@@ -380,6 +416,7 @@ pub const MeshShape = struct {
     /// The temporary data of the build (active edges, splitter, tree builder) is allocated with `allocator`, the
     /// materials and the tree (the buffer of the conversion) with the shape's allocator.
     pub fn initFromSettings(self: *MeshShape, settings: *const MeshShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         self.base.initFromSettings(&settings.base);
         const vertices = settings.triangle_vertices.items;
         const triangles = settings.indexed_triangles.items;
@@ -508,12 +545,18 @@ pub const MeshShape = struct {
         result.set(.init(self.asShapeMut()));
     }
 
-    /// ~MeshShape: releases the materials and frees the tree
+    /// ~MeshShape: releases the materials, frees the tree and the draw cache
     pub fn destruct(self: *MeshShape) void {
         const allocator = self.base.allocator;
         for (self.materials.items) |*m| m.deinit();
         self.materials.deinit(allocator);
         self.tree.deinit(allocator);
+        if (Core.debug_renderer) {
+            if (self.draw_cache) |cache| {
+                cache.geometry.deinit();
+                allocator.destroy(cache);
+            }
+        }
     }
 
     /// Upcasts (implicit in C++)
@@ -877,7 +920,177 @@ pub const MeshShape = struct {
             v.* = transform.mulVec3(v.*);
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const MeshShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        const cache = self.draw_cache orelse return; // Zolt: a shape that was not constructed from settings or restored
+
+        // Zolt (R6): the cache lock, the draw below runs with its own reference to the geometry
+        var geometry: DebugRenderer.GeometryRef = blk: {
+            cache.mutex.lock(renderer.io);
+            defer cache.mutex.unlock(renderer.io);
+
+            // Reset the batch if we switch coloring mode
+            const draw_triangle_groups = renderer.flags.mesh_shape.draw_triangle_groups;
+            if (cache.cached_triangles_colored_per_group != draw_triangle_groups or cache.cached_use_material_colors != use_material_colors) {
+                cache.geometry.deinit();
+                cache.cached_triangles_colored_per_group = draw_triangle_groups;
+                cache.cached_use_material_colors = use_material_colors;
+            }
+
+            if (cache.geometry.get() == null)
+                cache.geometry = self.createDrawGeometry(renderer, cache.cached_use_material_colors, cache.cached_triangles_colored_per_group);
+            break :blk cache.geometry.clone();
+        };
+        defer geometry.deinit();
+
+        // Test if the shape is scaled inside out
+        const cull_mode: DebugRenderer.CullMode = if (ScaleHelpers.isInsideOut(scale)) .cull_front_face else .cull_back_face;
+
+        // Determine the draw mode
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+
+        // Draw the geometry
+        if (geometry.get()) |g| // Zolt (R5): empty when the renderer could not create it
+            renderer.drawGeometryAutoBounds(center_of_mass_transform.mulMat44(Mat44.scaleVec3(scale)), color, g, .{ .cull_mode = cull_mode, .cast_shadow = .on, .draw_mode = draw_mode });
+
+        if (renderer.flags.mesh_shape.draw_triangle_outlines) {
+            const Visitor = struct {
+                renderer: *DebugRenderer,
+                transform: RMat44,
+
+                pub fn shouldAbort(v: *const @This()) bool {
+                    _ = v;
+                    return false;
+                }
+
+                pub fn shouldVisitNode(v: *const @This(), stack_top: i32) bool {
+                    _ = .{ v, stack_top };
+                    return true;
+                }
+
+                pub fn visitNodes(v: *const @This(), bounds_min_x: Vec4, bounds_min_y: Vec4, bounds_min_z: Vec4, bounds_max_x: Vec4, bounds_max_y: Vec4, bounds_max_z: Vec4, properties: *UVec4, stack_top: i32) i32 {
+                    _ = .{ v, stack_top };
+                    const valid = UVec4.bitOr(UVec4.bitOr(Vec4.less(bounds_min_x, bounds_max_x), Vec4.less(bounds_min_y, bounds_max_y)), Vec4.less(bounds_min_z, bounds_max_z));
+                    return countAndSortTrues(valid, properties);
+                }
+
+                pub fn visitTriangles(v: *@This(), context: *const TriangleCodec.DecodingContext, triangles: *const anyopaque, num_triangles: u32, triangle_block_id: u32) void {
+                    _ = triangle_block_id;
+
+                    // Decode vertices and flags
+                    std.debug.assert(num_triangles <= max_triangles_per_leaf);
+                    var vertices: [max_triangles_per_leaf * 3]Vec3 = undefined;
+                    var flags: [max_triangles_per_leaf]u8 = undefined;
+                    context.unpackWithFlags(triangles, num_triangles, &vertices, &flags);
+
+                    // Loop through triangles
+                    for (0..num_triangles) |t| {
+                        const vtx = vertices[3 * t ..][0..3];
+
+                        // Loop through edges
+                        for (0..3) |edge_idx| {
+                            const v1 = v.transform.mulVec3(vtx[edge_idx]);
+                            const v2 = v.transform.mulVec3(vtx[(edge_idx + 1) % 3]);
+
+                            // Draw active edge as a green arrow, other edges as grey
+                            if (flags[t] & (@as(u32, 1) << @intCast(edge_idx + flags_active_edge_shift)) != 0)
+                                v.renderer.drawArrow(v1, v2, Color.green, 0.01)
+                            else
+                                v.renderer.drawLine(v1, v2, Color.grey);
+                        }
+                    }
+                }
+            };
+
+            var visitor: Visitor = .{ .renderer = renderer, .transform = center_of_mass_transform.preScaled(scale) };
+            self.walkTree(&visitor);
+        }
+    }
+
+    /// The geometry of Draw (the body of Jolt's `if (mGeometry == nullptr)`), empty when an allocation failed (R5)
+    fn createDrawGeometry(self: *const MeshShape, renderer: *DebugRenderer, use_material_colors: bool, draw_triangle_groups: bool) DebugRenderer.GeometryRef {
+        const allocator = renderer.allocator;
+
+        const Visitor = struct {
+            triangles: *std.ArrayList(DebugRenderer.Triangle),
+            allocator: Allocator,
+            materials: []const RefConst(PhysicsMaterial),
+            use_material_colors: bool,
+            draw_triangle_groups: bool,
+            color_idx: i32 = 0,
+            /// Zolt (R5): an allocation failed, stop the walk
+            out_of_memory: bool = false,
+
+            pub fn shouldAbort(v: *const @This()) bool {
+                return v.out_of_memory;
+            }
+
+            pub fn shouldVisitNode(v: *const @This(), stack_top: i32) bool {
+                _ = .{ v, stack_top };
+                return true;
+            }
+
+            pub fn visitNodes(v: *const @This(), bounds_min_x: Vec4, bounds_min_y: Vec4, bounds_min_z: Vec4, bounds_max_x: Vec4, bounds_max_y: Vec4, bounds_max_z: Vec4, properties: *UVec4, stack_top: i32) i32 {
+                _ = .{ v, stack_top };
+                const valid = UVec4.bitOr(UVec4.bitOr(Vec4.less(bounds_min_x, bounds_max_x), Vec4.less(bounds_min_y, bounds_max_y)), Vec4.less(bounds_min_z, bounds_max_z));
+                return countAndSortTrues(valid, properties);
+            }
+
+            pub fn visitTriangles(v: *@This(), context: *const TriangleCodec.DecodingContext, triangles: *const anyopaque, num_triangles: u32, triangle_block_id: u32) void {
+                _ = triangle_block_id;
+                std.debug.assert(num_triangles <= max_triangles_per_leaf);
+                var vertices: [max_triangles_per_leaf * 3]Vec3 = undefined;
+                context.unpack(triangles, num_triangles, &vertices);
+
+                if (v.draw_triangle_groups or !v.use_material_colors or v.materials.len == 0) {
+                    // Single color for mesh
+                    const color = if (v.draw_triangle_groups) blk: {
+                        const c = Color.getDistinctColor(v.color_idx);
+                        v.color_idx += 1;
+                        break :blk c;
+                    } else if (v.use_material_colors) PhysicsMaterial.default.getDebugColor() else Color.white;
+                    for (0..num_triangles) |t| {
+                        const vtx = vertices[3 * t ..][0..3];
+                        v.triangles.append(v.allocator, .init(vtx[0], vtx[1], vtx[2], color)) catch {
+                            v.out_of_memory = true;
+                            return;
+                        };
+                    }
+                } else {
+                    // Per triangle color
+                    var flags: [max_triangles_per_leaf]u8 = undefined;
+                    TriangleCodec.DecodingContext.getFlags(triangles, num_triangles, &flags);
+
+                    for (0..num_triangles) |t| {
+                        const vtx = vertices[3 * t ..][0..3];
+                        const material = v.materials[flags[t] & flags_material_mask].get() orelse PhysicsMaterial.default; // Zolt: see the file header
+                        v.triangles.append(v.allocator, .init(vtx[0], vtx[1], vtx[2], material.getDebugColor())) catch {
+                            v.out_of_memory = true;
+                            return;
+                        };
+                    }
+                }
+            }
+        };
+
+        var triangles: std.ArrayList(DebugRenderer.Triangle) = .empty;
+        defer triangles.deinit(allocator);
+        var visitor: Visitor = .{ .triangles = &triangles, .allocator = allocator, .materials = self.materials.items, .use_material_colors = use_material_colors, .draw_triangle_groups = draw_triangle_groups };
+        self.walkTree(&visitor);
+        if (visitor.out_of_memory) {
+            renderer.setOutOfMemory();
+            return .empty;
+        }
+
+        const batch = renderer.createTriangleBatch(triangles.items);
+        if (batch.get() == null and renderer.isOutOfMemory())
+            return .empty; // The renderer could not create the batch
+        return .init(DebugRenderer.Geometry.createWithBatch(allocator, batch, self.getLocalBounds()) catch {
+            renderer.setOutOfMemory();
+            return .empty;
+        });
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const MeshShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -1185,8 +1398,8 @@ pub const MeshShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const MeshShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
+    pub fn getSubmergedVolume(self: *const MeshShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ self, center_of_mass_transform, scale, surface, opts };
         IssueReporting.assertFailed("Not supported", @src());
 
         // Jolt leaves the out parameters untouched
@@ -1254,6 +1467,7 @@ pub const MeshShape = struct {
 
     // See: Shape::RestoreBinaryState
     pub fn restoreBinaryState(self: *MeshShape, stream: StreamIn) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         try Shape.impl.restoreBinaryState(&self.base, stream);
 
         // inStream.Read(static_cast<ByteBufferVector &>(mTree)) (the Array<> overload, the buffer stays cache line aligned)
@@ -2189,7 +2403,7 @@ test "MeshShape: GetSubmergedVolume is not supported" {
     var expect_assert: IssueReporting.ExpectAssert = undefined;
     expect_assert.init(1);
     errdefer expect_assert.restore();
-    const v = result.getPtr().?.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 0.0));
+    const v = result.getPtr().?.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 0.0), .{});
     try expect_assert.finish();
     try testing.expectEqual(@as(f32, 0.0), v.total_volume);
     try testing.expectEqual(@as(f32, 0.0), v.submerged_volume);
@@ -2271,14 +2485,15 @@ test "MeshShape: every creation path that allocates reports out of memory" {
     defer buffer.deinit();
     var out = StreamWrapper.StreamOutWrapper.init(&buffer.writer);
     shape.saveBinaryState(out.streamOut());
-    for (0..2) |fail_index| {
+    const num_restore_allocations: usize = if (Core.debug_renderer) 3 else 2; // The shape, the draw cache and the tree
+    for (0..num_restore_allocations) |fail_index| {
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         var reader: std.Io.Reader = .fixed(buffer.written());
         var in = StreamWrapper.StreamInWrapper.init(&reader);
         try testing.expectError(error.OutOfMemory, Shape.restoreFromBinaryState(failing.allocator(), in.streamIn()));
     }
     {
-        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = num_restore_allocations });
         var reader: std.Io.Reader = .fixed(buffer.written());
         var in = StreamWrapper.StreamInWrapper.init(&reader);
         var r = try Shape.restoreFromBinaryState(failing.allocator(), in.streamIn());

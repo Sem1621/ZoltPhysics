@@ -15,14 +15,16 @@
 //!   - The constructors and the restore set them like in Jolt.
 //! - `sRegister` is `register` (D4): the collide / cast functions with a rotated translated shape on either side (and
 //!   on both sides) forward to the inner shape with the rotation applied, private like in Jolt.
-//! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace and the `inBaseOffset` parameter of
-//!   GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): Draw, DrawGetSupportFunction and DrawGetSupportingFace
+//!   are gated declarations that pass the call on to the inner shape, GetSubmergedVolume passes its debug options on.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
 const Color = @import("../../../Core/Color.zig").Color;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
 const AABox = @import("../../../Geometry/AABox.zig").AABox;
@@ -148,7 +150,7 @@ pub const RotatedTranslatedShape = struct {
     pub const shape_sub_type: ShapeSubType = .rotated_translated;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSubShapeTransformedShape, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
+    pub const overrides = .{ .getCenterOfMass, .getLocalBounds, .getWorldSpaceBounds, .getInnerRadius, .getMassProperties, .getSubShapeTransformedShape, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .draw, .drawGetSupportFunction, .drawGetSupportingFace, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .collectTransformedShapes, .transformShape, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .getStats, .getVolume, .isValidScale, .makeScaleValid, .restoreBinaryState };
 
     base: DecoratedShape,
     /// If rotation is close to identity (put here because it falls in padding bytes)
@@ -299,16 +301,31 @@ pub const RotatedTranslatedShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const RotatedTranslatedShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(self: *const RotatedTranslatedShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
         // Get center of mass transform of child
         const transform = center_of_mass_transform.mul(Mat44.rotationQuat(self.rotation));
 
         // Recurse to child
-        return self.innerShape().getSubmergedVolume(transform, self.transformScale(scale), surface);
+        return self.innerShape().getSubmergedVolume(transform, self.transformScale(scale), surface, opts);
     }
 
-    // TODO(debug_renderer): Draw, DrawGetSupportFunction, DrawGetSupportingFace (pass the call on with
-    // inCenterOfMassTransform * Mat44::sRotation(mRotation) and TransformScale(inScale))
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const RotatedTranslatedShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        self.innerShape().draw(renderer, center_of_mass_transform.mulMat44(Mat44.rotationQuat(self.rotation)), self.transformScale(scale), color, use_material_colors, draw_wireframe);
+    }
+
+    // See Shape::DrawGetSupportFunction (JPH_DEBUG_RENDERER)
+    pub const drawGetSupportFunction = if (Core.debug_renderer) drawGetSupportFunctionImpl else {};
+    fn drawGetSupportFunctionImpl(self: *const RotatedTranslatedShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+        self.innerShape().drawGetSupportFunction(renderer, center_of_mass_transform.mulMat44(Mat44.rotationQuat(self.rotation)), self.transformScale(scale), color, draw_support_direction);
+    }
+
+    // See Shape::DrawGetSupportingFace (JPH_DEBUG_RENDERER)
+    pub const drawGetSupportingFace = if (Core.debug_renderer) drawGetSupportingFaceImpl else {};
+    fn drawGetSupportingFaceImpl(self: *const RotatedTranslatedShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+        self.innerShape().drawGetSupportingFace(renderer, center_of_mass_transform.mulMat44(Mat44.rotationQuat(self.rotation)), self.transformScale(scale));
+    }
 
     // See Shape::CastRay
     pub fn castRay(self: *const RotatedTranslatedShape, ray: RayCast, sub_shape_id_creator: SubShapeIDCreator, hit: *RayCastResult) bool {
@@ -980,8 +997,8 @@ test "RotatedTranslatedShape: submerged volume, soft body vertices, collect and 
 
     // Submerged volume: the child transform
     const surface = Plane.fromPointAndNormal(Vec3.init(0, 2.5, 0), Vec3.axisY());
-    const v = shape.getSubmergedVolume(transform, Vec3.replicate(2), surface);
-    const expected_v = box.asShape().getSubmergedVolume(transform.mul(r), Vec3.replicate(2), surface);
+    const v = shape.getSubmergedVolume(transform, Vec3.replicate(2), surface, .{});
+    const expected_v = box.asShape().getSubmergedVolume(transform.mul(r), Vec3.replicate(2), surface, .{});
     try testing.expectEqual(expected_v.total_volume, v.total_volume);
     try testing.expectEqual(expected_v.submerged_volume, v.submerged_volume);
     try expect(v.center_of_buoyancy.eql(expected_v.center_of_buoyancy));

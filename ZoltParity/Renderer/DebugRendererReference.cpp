@@ -12,6 +12,7 @@
 
 #ifdef JPH_DEBUG_RENDERER
 	#include <Jolt/Core/StreamWrapper.h>
+	#include <Jolt/Physics/Body/Body.h>
 	#include <Jolt/Renderer/DebugRendererPlayback.h>
 	#include <ZoltParity/Renderer/ParityRenderer.h>
 	#include <sstream>
@@ -37,6 +38,9 @@ struct JoltDRResult
 #ifdef JPH_DEBUG_RENDERER
 
 using namespace ZoltParity;
+
+/// The shape of a catalogue of PairwiseReference.cpp
+extern "C" const Shape *pw_catalogue_shape(void *inCatalogue, uint32 inIndex);
 
 /// The bytes written to a string stream so far
 static std::vector<uint8> sStreamBytes(const std::stringstream &inStream)
@@ -125,6 +129,55 @@ JoltDRResult *jolt_dr_record_ops(const uint8 *inOps, uint64 inSize)
 #endif
 }
 
+/// Run the ops with the shapes of a PairwiseReference.cpp catalogue (D2's shape ops) on a ParityRenderer (inKind 0), a
+/// SimpleParityRenderer (inKind 1) or a DebugRendererRecorder (inKind 2). Parts: [0] the log of the ops (the .jor bytes
+/// after the construction for the recorder), [1] the results of the shape ops. The static draw flags of the shapes are
+/// reset afterwards.
+JoltDRResult *jolt_dr_run_shape_ops(void *inCatalogue, uint32 inNumShapes, const uint8 *inOps, uint64 inSize, int inKind)
+{
+#ifdef JPH_DEBUG_RENDERER
+	ParityInstallHooks();
+
+	Array<const Shape *> shapes;
+	for (uint32 i = 0; i < inNumShapes; ++i)
+		shapes.push_back(pw_catalogue_shape(inCatalogue, i));
+	ParityShapeContext context { shapes.data(), inNumShapes, { } };
+
+	JoltDRResult *result = new JoltDRResult;
+	ParitySetShapeDrawFlags(0);
+	if (inKind == 0)
+	{
+		ParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		RunParityOps(renderer, inOps, size_t(inSize), nullptr, nullptr, &context);
+		result->mParts.push_back(renderer.mLog.mBytes);
+	}
+	else if (inKind == 1)
+	{
+		SimpleParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		RunParityOps(renderer, inOps, size_t(inSize), &renderer, nullptr, &context);
+		result->mParts.push_back(renderer.mLog.mBytes);
+	}
+	else
+	{
+		std::stringstream stream;
+		StreamOutWrapper wrapper(stream);
+		DebugRendererRecorder recorder(wrapper);
+		size_t construction_size = sStreamBytes(stream).size();
+		RunParityOps(recorder, inOps, size_t(inSize), nullptr, &recorder, &context);
+		std::vector<uint8> all = sStreamBytes(stream);
+		result->mParts.push_back(std::vector<uint8>(all.begin() + construction_size, all.end()));
+	}
+	ParitySetShapeDrawFlags(0);
+	result->mParts.push_back(context.mResults);
+	return result;
+#else
+	(void)inCatalogue; (void)inNumShapes; (void)inOps; (void)inSize; (void)inKind;
+	return nullptr;
+#endif
+}
+
 /// Play a .jor stream back into a ParityRenderer: Parse, then DrawFrame of every frame with a marker (the frame number)
 /// before each. Parts: [0] the log of the constructor, [1] the log of the playback, [2] the next batch id after the
 /// constructor (u32), [3] the number of frames (u32).
@@ -157,6 +210,53 @@ JoltDRResult *jolt_dr_playback(const uint8 *inStream, uint64 inSize)
 	return result;
 #else
 	(void)inStream; (void)inSize;
+	return nullptr;
+#endif
+}
+
+/// Body::ApplyBuoyancyImpulse (inKind 0) or Body::GetSubmergedVolume (inKind 1) of a body of BodyReference.cpp
+/// (jolt_body_ptr), drawn into a ParityRenderer with Shape::sDrawSubmergedVolumes set (group D2). inF holds the surface
+/// normal and the other arguments of ApplyBuoyancyImpulse in the layout of BodyOp in BodyParity.zig. Parts: [0] the log
+/// of the call, [1] its results (u32 applied, or 5 floats: total volume, submerged volume, relative center of
+/// buoyancy).
+JoltDRResult *jolt_dr_body_buoyancy(void *inBody, const Real *inSurfacePosition, const float *inF, int inKind)
+{
+#ifdef JPH_DEBUG_RENDERER
+	ParityInstallHooks();
+
+	Body &body = *static_cast<Body *>(inBody);
+	RVec3 surface_position(inSurfacePosition[0], inSurfacePosition[1], inSurfacePosition[2]);
+	Vec3 surface_normal(inF[0], inF[1], inF[2]);
+	JoltDRResult *result = new JoltDRResult;
+	ParitySetShapeDrawFlags(1); // Shape::sDrawSubmergedVolumes
+	{
+		ParityRenderer renderer;
+		renderer.mLog.mBytes.clear();
+		std::vector<uint8> values;
+		if (inKind == 0)
+		{
+			uint32 applied = body.ApplyBuoyancyImpulse(surface_position, surface_normal, inF[3], inF[4], inF[5], Vec3(inF[6], inF[7], inF[8]), Vec3(inF[9], inF[10], inF[11]), inF[12])? 1 : 0;
+			values.resize(sizeof(applied));
+			memcpy(values.data(), &applied, sizeof(applied));
+		}
+		else
+		{
+			float out[5];
+			Vec3 center_of_buoyancy;
+			body.GetSubmergedVolume(surface_position, surface_normal, out[0], out[1], center_of_buoyancy);
+			out[2] = center_of_buoyancy.GetX();
+			out[3] = center_of_buoyancy.GetY();
+			out[4] = center_of_buoyancy.GetZ();
+			values.resize(sizeof(out));
+			memcpy(values.data(), out, sizeof(out));
+		}
+		result->mParts.push_back(renderer.mLog.mBytes);
+		result->mParts.push_back(std::move(values));
+	}
+	ParitySetShapeDrawFlags(0);
+	return result;
+#else
+	(void)inBody; (void)inSurfacePosition; (void)inF; (void)inKind;
 	return nullptr;
 #endif
 }
