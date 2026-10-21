@@ -3,7 +3,8 @@
 //!
 //! JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(PathConstraintPath): `rtti`. Jolt adds no
 //! attributes, only the base class: `mIsLooping` is not in the object stream (the binary state has it).
-//! JPH_DEBUG_RENDERER (DrawPath with its helpers sTransformPathPoint / sDrawPathSegment): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawPath with its helpers sTransformPathPoint / sDrawPathSegment): a gated declaration and two
+//! private helpers (RemainingFeaturesArchitecture.md R2).
 //!
 //! Pattern A RefTarget root like GroupFilter (Docs/Zolt/CollisionArchitecture.md, D1, D2, D7 and D8): the vtable, the
 //! atomic reference count, the allocator that frees the most derived object (and the memory it owns) and Jolt's data.
@@ -36,6 +37,11 @@ const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const StreamUtils = @import("../../Core/StreamUtils.zig");
 const virtual = @import("../../Core/Virtual.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const RMat44 = @import("../../Math/Real.zig").RMat44;
+const RVec3 = @import("../../Math/Real.zig").RVec3;
 
 /// The path for a path constraint. It allows attaching two bodies to each other while giving the second body the freedom to move along a path relative to the first.
 pub const PathConstraintPath = struct {
@@ -168,7 +174,51 @@ pub const PathConstraintPath = struct {
         return self.is_looping;
     }
 
-    // TODO(debug_renderer): DrawPath (Draw the path relative to inBaseTransform. Used for debug purposes.)
+    /// Draw the path relative to inBaseTransform. Used for debug purposes. (JPH_DEBUG_RENDERER)
+    pub const drawPath = if (Core.debug_renderer) drawPathImpl else {};
+    fn drawPathImpl(self: *const PathConstraintPath, renderer: *DebugRenderer, base_transform: RMat44) void {
+        // Calculate first point
+        const first = self.getPointOnPath(0.0);
+        var first_normal = first.normal;
+        var first_binormal = first.binormal;
+        const first_pos = transformPathPoint(base_transform, first.position, &first_normal, &first_binormal);
+
+        const t_max = self.getPathMaxFraction();
+
+        // Draw the segments
+        var prev_pos = first_pos;
+        var t: f32 = 0.1;
+        while (t < t_max) : (t += 0.1) {
+            const point = self.getPointOnPath(t);
+            var normal = point.normal;
+            var binormal = point.binormal;
+            const pos = transformPathPoint(base_transform, point.position, &normal, &binormal);
+            drawPathSegment(renderer, prev_pos, pos, normal, binormal);
+            prev_pos = pos;
+        }
+
+        // Draw last point
+        const last = self.getPointOnPath(t_max);
+        var normal = last.normal;
+        var binormal = last.binormal;
+        const pos = transformPathPoint(base_transform, last.position, &normal, &binormal);
+        drawPathSegment(renderer, prev_pos, pos, normal, binormal);
+    }
+
+    // Helper function to transform the results of GetPointOnPath to world space (sTransformPathPoint, JPH_DEBUG_RENDERER)
+    inline fn transformPathPoint(transform: RMat44, position: Vec3, normal: *Vec3, binormal: *Vec3) RVec3 {
+        const out_position = transform.mulVec3(position);
+        normal.* = transform.multiply3x3(normal.*);
+        binormal.* = transform.multiply3x3(binormal.*);
+        return out_position;
+    }
+
+    // Helper function to draw a path segment (sDrawPathSegment, JPH_DEBUG_RENDERER)
+    inline fn drawPathSegment(renderer: *DebugRenderer, prev_position: RVec3, position: RVec3, normal: Vec3, binormal: Vec3) void {
+        renderer.drawLine(prev_position, position, Color.white);
+        renderer.drawArrow(position, position.addVec3(normal.mulScalar(0.1)), Color.red, 0.02);
+        renderer.drawArrow(position, position.addVec3(binormal.mulScalar(0.1)), Color.green, 0.02);
+    }
 
     /// Saves the contents of the path in binary form to inStream.
     pub fn saveBinaryState(self: *const PathConstraintPath, stream: StreamOut) void {

@@ -12,9 +12,8 @@
 //!   solver only writes dynamic bodies.
 //! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(TwoBodyConstraintSettings): `rtti`. Jolt
 //!   adds no attributes, only the base class.
-//! - JPH_DEBUG_RENDERER (`DrawConstraintReferenceFrame`, an override of Constraint's): a gated declaration in `impl`.
-//!   Its body needs DebugRenderer.DrawCoordinateSystem (group D1), so it is a placeholder that panics until group D3
-//!   ports it (TODO(debug_renderer)).
+//! - JPH_DEBUG_RENDERER (`DrawConstraintReferenceFrame`, an override of Constraint's): a gated declaration in `impl`
+//!   (RemainingFeaturesArchitecture.md R2).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -147,12 +146,13 @@ pub const TwoBodyConstraint = struct {
             return Constraint.impl.isActive(&self.base) and (self.body1.isActive() or self.body2.isActive()) and (self.body2.isDynamic() or self.body1.isDynamic());
         }
 
-        /// Zolt placeholder (JPH_DEBUG_RENDERER, RemainingFeaturesArchitecture.md R2): Jolt draws the two constraint
-        /// frames with DrawCoordinateSystem (group D1). Group D3 ports it.
-        pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFramePlaceholder else {};
-        fn drawConstraintReferenceFramePlaceholder(self: *const TwoBodyConstraint, renderer: *DebugRenderer) void {
-            _ = .{ self, renderer };
-            @panic("TODO(debug_renderer): TwoBodyConstraint.drawConstraintReferenceFrame is not ported yet");
+        // See Constraint::DrawConstraintReferenceFrame (JPH_DEBUG_RENDERER)
+        pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameImpl else {};
+        fn drawConstraintReferenceFrameImpl(self: *const TwoBodyConstraint, renderer: *DebugRenderer) void {
+            const transform1 = self.body1.getCenterOfMassTransform().mulMat44(self.getConstraintToBody1Matrix());
+            const transform2 = self.body2.getCenterOfMassTransform().mulMat44(self.getConstraintToBody2Matrix());
+            renderer.drawCoordinateSystem(transform1, .{ .size = 1.1 * self.base.draw_constraint_size });
+            renderer.drawCoordinateSystem(transform2, .{ .size = self.base.draw_constraint_size });
         }
 
         /// Link bodies that are connected by this constraint in the island builder

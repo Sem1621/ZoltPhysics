@@ -3,7 +3,7 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(GearConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint): a gated declaration (RemainingFeaturesArchitecture.md R2).
 //!
 //! - `mGear1Constraint` / `mGear2Constraint` (`RefConst<Constraint>`) are `RefConst(Constraint)` members that the
 //!   destructor (`destruct`, run by the generated destructor chain) releases. `SetConstraints(const Constraint *, const
@@ -26,6 +26,8 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const Body = @import("../Body/Body.zig").Body;
@@ -149,7 +151,7 @@ pub const GearConstraintSettings = struct {
 /// A gear constraint constrains the rotation of body1 to the rotation of body 2 using a gear.
 /// Note that this constraint needs to be used in conjunction with a two hinge constraints.
 pub const GearConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -297,7 +299,16 @@ pub const GearConstraint = struct {
         return self.gear_constraint_part.solvePositionConstraint(self.base.body1, self.base.body2, err, baumgarte);
     }
 
-    // TODO(debug_renderer): DrawConstraint
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const GearConstraint, renderer: *DebugRenderer) void {
+        const transform1 = self.base.body1.getCenterOfMassTransform();
+        const transform2 = self.base.body2.getCenterOfMassTransform();
+
+        // Draw constraint axis
+        renderer.drawArrow(transform1.getTranslation(), transform1.mulVec3(self.local_space_hinge_axis1), Color.green, 0.01);
+        renderer.drawArrow(transform2.getTranslation(), transform2.mulVec3(self.local_space_hinge_axis2), Color.blue, 0.01);
+    }
 
     pub fn saveState(self: *const GearConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState

@@ -3,7 +3,7 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SwingTwistConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): gated declarations (RemainingFeaturesArchitecture.md R2).
 //!
 //! - The non-const overloads `MotorSettings &GetSwingMotorSettings()` / `GetTwistMotorSettings()` are
 //!   `getSwingMotorSettingsMut` / `getTwistMotorSettingsMut` (guide section 4).
@@ -24,6 +24,10 @@ const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const RMat44 = @import("../../Math/Real.zig").RMat44;
+const isVelocityMotor = MotorSettingsFile.isVelocityMotor;
 const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -210,7 +214,7 @@ pub const SwingTwistConstraintSettings = struct {
 ///
 /// @see SwingTwistConstraintSettings for a description of the limits
 pub const SwingTwistConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .drawConstraintLimits, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -632,7 +636,53 @@ pub const SwingTwistConstraint = struct {
         return impulse;
     }
 
-    // TODO(debug_renderer): DrawConstraint, DrawConstraintLimits
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const SwingTwistConstraint, renderer: *DebugRenderer) void {
+        const draw_constraint_size = self.base.base.draw_constraint_size;
+
+        // Get constraint properties in world space
+        const transform1 = self.base.body1.getCenterOfMassTransform();
+        const position1 = transform1.mulVec3(self.local_space_position1);
+        const rotation1 = self.base.body1.getRotation().mul(self.constraint_to_body1);
+        const rotation2 = self.base.body2.getRotation().mul(self.constraint_to_body2);
+
+        // Draw constraint orientation
+        renderer.drawCoordinateSystem(RMat44.rotationTranslation(rotation1, position1), .{ .size = draw_constraint_size });
+
+        // Draw current swing and twist
+        const q = self.getRotationInConstraintSpace();
+        const q_swing_twist = q.getSwingTwist();
+        renderer.drawLine(position1, position1.addVec3(rotation1.mul(q_swing_twist.twist).rotateAxisY().mulScalar(draw_constraint_size)), Color.white);
+        renderer.drawLine(position1, position1.addVec3(rotation1.mul(q_swing_twist.swing).rotateAxisX().mulScalar(draw_constraint_size)), Color.white);
+
+        if (isVelocityMotor(self.swing_motor_state) or isVelocityMotor(self.twist_motor_state)) {
+            // Draw target angular velocity
+            renderer.drawArrow(position1, position1.addVec3(rotation2.mulVec3(self.target_angular_velocity)), Color.red, 0.1);
+        }
+        if (isPositionMotor(self.swing_motor_state) or isPositionMotor(self.twist_motor_state)) {
+            // Draw motor swing and twist
+            const swing_twist = self.target_orientation.getSwingTwist();
+            renderer.drawLine(position1, position1.addVec3(rotation1.mul(swing_twist.twist).rotateAxisY().mulScalar(draw_constraint_size)), Color.yellow);
+            renderer.drawLine(position1, position1.addVec3(rotation1.mul(swing_twist.swing).rotateAxisX().mulScalar(draw_constraint_size)), Color.cyan);
+        }
+    }
+
+    // See Constraint::DrawConstraintLimits (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *const SwingTwistConstraint, renderer: *DebugRenderer) void {
+        const draw_constraint_size = self.base.base.draw_constraint_size;
+
+        // Get matrix that transforms from constraint space to world space
+        const constraint_to_world = RMat44.rotationTranslation(self.base.body1.getRotation().mul(self.constraint_to_body1), self.base.body1.getCenterOfMassTransform().mulVec3(self.local_space_position1));
+
+        // Draw limits
+        if (self.swing_twist_constraint_part.getSwingType() == .pyramid)
+            renderer.drawSwingPyramidLimits(constraint_to_world, -self.plane_half_cone_angle, self.plane_half_cone_angle, -self.normal_half_cone_angle, self.normal_half_cone_angle, draw_constraint_size, Color.green, .{ .cast_shadow = .off })
+        else
+            renderer.drawSwingConeLimits(constraint_to_world, self.plane_half_cone_angle, self.normal_half_cone_angle, draw_constraint_size, Color.green, .{ .cast_shadow = .off });
+        renderer.drawPie(constraint_to_world.getTranslation(), draw_constraint_size, constraint_to_world.getAxisX(), constraint_to_world.getAxisY(), self.twist_min_angle, self.twist_max_angle, Color.purple, .{ .cast_shadow = .off });
+    }
 
     pub fn saveState(self: *const SwingTwistConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState
