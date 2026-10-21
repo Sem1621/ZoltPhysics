@@ -18,6 +18,7 @@ test {
     _ = @import("AABBTree/AABBTreeParity.zig");
     _ = @import("Compute/ComputeParity.zig");
     _ = @import("Compute/HairShaderParity.zig");
+    _ = @import("Compute/HairShaderParity2.zig");
     _ = @import("Compute/HLSLToCPPParity.zig");
     _ = @import("Compute/ShaderHelpersParity.zig");
     _ = @import("Core/ConcurrencyParity.zig");
