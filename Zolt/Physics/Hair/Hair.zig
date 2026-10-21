@@ -1256,6 +1256,7 @@ pub const Hair = struct {
     } else void;
 
     /// Debug functionality to draw the hair and its simulation properties (JPH_DEBUG_RENDERER)
+    /// Zolt: the map of the render strands (Jolt: an Array) uses the hair's allocator and is freed before returning.
     /// Zolt (proposed to the lead, R20 has no row for it yet): before the first `readBackGPUState` (or `initCompute`)
     /// it draws nothing. Jolt maps a null read back buffer there.
     pub const draw = if (Core.debug_renderer) drawImpl else {};
