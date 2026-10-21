@@ -5926,24 +5926,25 @@ uint64 jolt_sim_draw_take_log(uint8 *outBytes, uint64 inCapacity)
 }
 
 // Group D4 (SimDraw.postDraws in SimulationParity.zig): the draws after an update into the renderer of
-// jolt_sim_draw_begin. First every vehicle gets the RPM meter inRPMMeter (x, y, z, size) and the draw size inDrawSize.
-// Then with inBodyBits != 0 PhysicsSystem::DrawBodies with the DrawSettings of the bits (ParityBodyDrawSettings) and the
+// jolt_sim_draw_begin. First every vehicle gets the RPM meter inRPMMeter (x, y, z, size) and the draw size inDrawSize
+// (when inRPMMeter is null, the vehicles keep their RPM meters and draw sizes: the defaults after update 0). Then with inBodyBits != 0 PhysicsSystem::DrawBodies with the DrawSettings of the bits (ParityBodyDrawSettings) and the
 // colors inShapeColor and inSoftBodyConstraintColor, and with inConstraints != 0 DrawConstraints, DrawConstraintLimits and
 // DrawConstraintReferenceFrame.
 void jolt_sim_draw_world(void *inWorld, uint32 inBodyBits, uint32 inShapeColor, uint32 inSoftBodyConstraintColor, uint32 inConstraints, const float *inRPMMeter, float inDrawSize)
 {
 #ifdef JPH_DEBUG_RENDERER
 	SimWorld *world = static_cast<SimWorld *>(inWorld);
-	for (SimVehicleData *v : world->mVehicles)
-	{
-		VehicleController *controller = v->mConstraint->GetController();
-		Vec3 position(inRPMMeter[0], inRPMMeter[1], inRPMMeter[2]);
-		if (v->mController == 1)
-			static_cast<TrackedVehicleController *>(controller)->SetRPMMeter(position, inRPMMeter[3]);
-		else
-			static_cast<WheeledVehicleController *>(controller)->SetRPMMeter(position, inRPMMeter[3]); // Wheeled and motorcycle
-		v->mConstraint->SetDrawConstraintSize(inDrawSize);
-	}
+	if (inRPMMeter != nullptr)
+		for (SimVehicleData *v : world->mVehicles)
+		{
+			VehicleController *controller = v->mConstraint->GetController();
+			Vec3 position(inRPMMeter[0], inRPMMeter[1], inRPMMeter[2]);
+			if (v->mController == 1)
+				static_cast<TrackedVehicleController *>(controller)->SetRPMMeter(position, inRPMMeter[3]);
+			else
+				static_cast<WheeledVehicleController *>(controller)->SetRPMMeter(position, inRPMMeter[3]); // Wheeled and motorcycle
+			v->mConstraint->SetDrawConstraintSize(inDrawSize);
+		}
 	if (inBodyBits != 0)
 	{
 		BodyManager::DrawSettings settings = ZoltParity::ParityBodyDrawSettings(inBodyBits, uint8(inShapeColor), uint8(inSoftBodyConstraintColor));
