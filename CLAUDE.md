@@ -13,9 +13,9 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 | `ZoltTests/`         | Port of all of `UnitTests/` (milestone M10), root: `ZoltTests/unit_tests.zig` |
 | `ZoltParity/`        | Bit-for-bit comparison of Zolt with the C++ library (`zig build parity`) |
 | `ZoltHelloWorld/`    | Port of `HelloWorld/HelloWorld.cpp` (milestone M5)                      |
-| `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestones M6, M8 and M9); `-r` records Jolt's `.jor` debug renderer stream |
+| `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestones M6, M8 and M9); `-r` (with `-Ddebug_renderer=true`) records Jolt's `.jor` debug renderer stream |
 | `Docs/Zolt/`         | Porting docs: **read `PortingGuide.md` before writing any Zig code**  |
-| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`, `tidy_registry.py`, `install_zig.sh`) |
+| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`, `gen_jolt_sources.py`, `tidy_registry.py`, `install_zig.sh`) |
 
 ## Commands
 
@@ -63,8 +63,10 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   `EFoo::Bar` → `Foo.bar`. Operators become methods (`add`, `sub`, `mul`, `mulScalar`, `eql`, ...).
 - Keep Jolt's doc comments and implementation comments.
 - Explicit `std.mem.Allocator` everywhere, no globals. Blocking sync primitives need `std.Io`.
-  The one global is the assert handler of `Core/IssueReporting.zig`, Jolt's `AssertFailed`
-  (RemainingFeaturesArchitecture.md R8).
+  The exceptions are Jolt's own globals: the static member variables that must stay global
+  (`sFoo` → `pub var foo`), the DeterminismLog writer (only with `-Ddeterminism_log=true`) and the
+  assert handler of `Core/IssueReporting.zig` (Jolt's `AssertFailed`). The handler is the one global
+  that Phase 9 adds (RemainingFeaturesArchitecture.md R8).
 - `JPH_DEBUG_RENDERER` code is ported under the `-Ddebug_renderer` gates
   (RemainingFeaturesArchitecture.md R2). Never leave a `TODO(debug_renderer)`.
 - Port the matching Jolt unit tests with the same names and values, and add parity tests

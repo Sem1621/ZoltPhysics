@@ -771,7 +771,7 @@ The first parity build after the change recompiles the C++ library (about 4 minu
 - An integer that Jolt declares with JPH_ADD_ENUM_ATTRIBUTE needs `.enumAttr`. `.attr` compiles (S5), so check a user
   class by hand. `tools/gen_serializable.py --check` and P1 check Jolt's classes.
 - Parity: P1 and P2 for every class, P3 and P4 through the generic harness. A bite proof.
-- Done criteria (CLAUDE.md):
+- Done criteria of Phase 8 (since Phase 9, CLAUDE.md adds the debug renderer configuration):
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
   - `zig build parity` in Debug and double precision, filtered to `ObjectStream` and the area's binary state tests during
     the work; the full parity at the end of F1, F2 and G7 (30 to 40 minutes);
@@ -814,13 +814,16 @@ Phase 9 ported the SoftBody and Hair items of this list (S17).
 | `Zolt/Core/LinearCurve.zig`, `Zolt/ConfigurationString.zig` | complete |
 | the declarations of the 81 classes, in 64 Zig files | complete: none pending, none missing (Progress.md, section Serialization) |
 | `Zolt/RegisterTypes.zig` | `factory_types` (48 types) and `factory` |
-| `Zolt/Physics/PhysicsScene.zig` | partial: `mSoftBodies` is Phase 9 (S17). Complete since Phase 9 |
+| `Zolt/Physics/PhysicsScene.zig` | partial: `mSoftBodies` is Phase 9 (S17) |
 | `ZoltTests/ObjectStream/ObjectStreamTest.zig` | the port of ObjectStreamTest.cpp (both tests) |
 | `ZoltTests/ObjectStream/ObjectStreamZoltTests.zig`, `ObjectStreamSweeps.zig` | the pins of S16 and the sweeps Z1 to Z4 |
 | `ZoltParity/ObjectStream/*` | P1 to P8 |
 | `ZoltParity/Physics/PerfRagdollParity.zig` + `PerfRagdollReference.cpp` | P10 (`perf_ragdoll`) |
 | `ZoltPerformanceTest/RagdollScene.zig` | the port of PerformanceTest/RagdollScene.h (M9) |
 | `tools/gen_serializable.py` | `--write` (pending declarations) and `--check [--complete]` |
+
+Phase 9 changed three rows (S17, S18). The declarations cover 104 classes, `factory_types` has Jolt's 49 types, and
+`PhysicsScene.zig` is complete.
 
 M9 is reached. ZoltPerformanceTest gives Jolt's Ragdoll hashes with `-q=LinearCast` and `-t=max`, `-t=1` and `-t=2`:
 `0x3be6ea76c07a2ac8` in single precision and `0x8dd6bc501859a228` in double precision. Zolt's CI checks the six runs,

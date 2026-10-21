@@ -618,15 +618,16 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
 - `ExpectAssert` (tests that trigger asserts): the assert that the test expects must be a recoverable assert
   (`IssueReporting.assertRecoverable` / `assertFailed`); the test uses `ExpectAssert` of `Core/IssueReporting.zig`
   (re-exported by `ZoltTests/UnitTestFramework.zig`). Rules: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R8.
-- **The assert handler** (R8) is the library's one global, Jolt's `AssertFailed`. Only tests install a handler:
-  `ExpectAssert(n)` (n is the number of asserts Jolt hits; `init`, then `finish`, with `errdefer restore()`), or
-  `CountAsserts` when only the C++ side knows the number. Install and remove a handler on the test thread while no
-  physics update runs; asserts on job threads reach it. Library code never installs one. Only the asserts that a test
-  expects become recoverable (R8's list, the `JPH_ASSERT` rows of section 7). A test that expects one of them runs in
-  every build with such a handler. A parity test of Jolt's release behavior counts the asserts of both sides with
-  `ParityHooks.ReleaseAsserts` (`ZoltParity/ParityHooks.zig`); with `-Dreference_asserts=true` the counts must be equal.
-  Other tests of inputs that Jolt asserts on keep their `if (!Core.enable_asserts)` gate. A conversion that would
-  continue into a Zig safety check stays a panic, and its test stays skipped with the reason in a comment.
+- **The assert handler** (R8) is the one global that Phase 9 adds to the library, Jolt's `AssertFailed`. Only tests
+  install a handler: `ExpectAssert(n)` (n is the number of asserts Jolt hits; `init`, then `finish`, with
+  `errdefer restore()`), or `CountAsserts` when only the C++ side knows the number. Install and remove a handler on the
+  test thread while no physics update runs; asserts on job threads reach it. Library code never installs one. Only the
+  asserts that a test expects become recoverable (R8's list, the `JPH_ASSERT` rows of section 7). A test that expects
+  one of them runs in every build with such a handler. A parity test of Jolt's release behavior counts the asserts of
+  both sides with `ParityHooks.ReleaseAsserts` (`ZoltParity/ParityHooks.zig`); with `-Dreference_asserts=true` the
+  counts must be equal. Other tests of inputs that Jolt asserts on keep their `if (!Core.enable_asserts)` gate. A
+  conversion that would continue into a Zig safety check stays a panic, and its test stays skipped with the reason in a
+  comment.
 - Small tests of Zolt-specific code (helpers that have no Jolt counterpart) go inline in the
   source file as `test` blocks.
 - **Memory.** Tests allocate with `std.testing.allocator`, which reports leaks. Every path that allocates gets a

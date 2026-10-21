@@ -969,7 +969,7 @@ settled:
   implementation comments. Never leave a `TODO(debug_renderer)` line: `port_status.py --check` fails on one.
 - Debug renderer code: the gates of R2 only. A draw function is a gated declaration. A debug-only member is `void`
   without the option. Never read a static flag from anywhere but `renderer.flags` (R4).
-- No new globals. The assert handler is the only one (R8).
+- No new globals. The assert handler is the only new one (R8).
 - Shaders: HLSLToCPP semantics (R11), never Zolt's `Vec3` / `Quat` operations.
 - Soft bodies: Zolt's `QuickSort` and `BinaryHeap`, never `std.sort`; Jolt's memory orders; the D5 rows of R17.
 - Libm and shuffle: `LibM.expf` / `powf` and `Mt19937.shuffleLibcxx`, never `std.math`.

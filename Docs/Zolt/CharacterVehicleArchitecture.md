@@ -275,13 +275,14 @@ A group edits only its own region, slot, files and registry lines.
   - Prove that the tests bite: break one operation temporarily and see a test fail.
 - Jolt asserts on user input: Zolt asserts the same in safe builds. Scenes keep away from them, or are
   `release_only` to compare Jolt's release behavior.
-- Done criteria (CLAUDE.md):
+- Done criteria (CLAUDE.md's list, with more build modes):
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
-  - `zig build parity` in Debug, double precision and ReleaseFast;
-  - for a file with a draw gate (since Phase 9): `zig build check -Ddebug_renderer=true` and the filtered parity with
-    `-Ddebug_renderer=true`;
+  - since Phase 9: `zig build check -Ddebug_renderer=true`, and `zig build parity-check` in both renderer
+    configurations;
+  - `zig build parity` in Debug, double precision and ReleaseFast. For a file with a draw gate (since Phase 9), also
+    the filtered parity with `-Ddebug_renderer=true`;
   - `zig fmt --check`;
-  - `python3 tools/port_status.py --write`.
+  - `python3 tools/port_status.py --write`, then `--check`.
 
 ## 6. Settled in the Phase 7 groups
 

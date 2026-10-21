@@ -1011,8 +1011,10 @@ QuadTree).
     collision step: SaveState cannot run inside an update.
   - The thread matrix pairs Zolt single threaded and pools of 0, 1, 3 and 7 workers with C++
     pools of 0, 3 and 7 threads.
-  - Scenes that need a later wave are marked blocked and are skipped visibly
-    (`error.SkipZigTest`). Their C++ side is already checked on its own.
+  - Until the Phase 9 audit, scenes that needed a later wave were marked blocked and were skipped
+    visibly (`error.SkipZigTest`). A C++-only test checked their C++ side. Since the audit, a scene
+    whose Blocker is not supported fails (`checkSupported`, RemainingFeaturesArchitecture.md
+    section 6).
   - Every scene asserts that it reaches the edge cases it is meant to cover.
   - The C++ reference always uses the QuadTree (Jolt's `BROAD_PHASE` define). Gravity-only scenes
     do not depend on it; contact scenes need A1.
