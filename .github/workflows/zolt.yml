@@ -129,10 +129,9 @@ jobs:
 
   parity:
     # Per push and pull request: one row (ReleaseFast, single precision, no debug renderer). The other rows run in
-    # parity-nightly. The C++ reference is the same in every row of one precision and renderer configuration (it is always
-    # built ReleaseFast). setup-zig keeps the Zig cache between runs, which holds the C++ objects: the cache key names the
-    # row, and the size limit fits the reference build and the parity test binary. Zig's cache is keyed on the content of
-    # every input, so a stale cache can only cost time, never change a result.
+    # parity-nightly. setup-zig keeps the Zig cache between runs, and the cache holds the objects of the C++ reference.
+    # The cache key names the row. The size limit leaves room for the reference and the parity test binary. Zig keys
+    # its cache on the content of every input, so a stale cache only costs time and never changes a result.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Parity with C++ Jolt ReleaseFast double_precision=false debug_renderer=false
@@ -149,10 +148,10 @@ jobs:
       run: zig build parity --summary all -Doptimize=ReleaseFast -Ddouble_precision=false -Ddebug_renderer=false
 
   parity-nightly:
-    # The other parity rows: every night on master and on a manual run (workflow_dispatch also runs the parity job, so a
-    # manual run covers all 5 rows). Each row takes about as long as the per push row, so this saves about 4 parity runs per
-    # push. No Zig cache: the rows run once a day, and their caches would push the cache of the per push row out of the
-    # repository's cache quota.
+    # The other parity rows: every night on master and on a manual run. A manual run also runs the parity job, so it
+    # covers all 5 rows. Each row takes about as long as the per push row: this saves about 4 parity runs per push.
+    # No Zig cache: these rows run once a day, and their caches would push the cache of the per push row out of the
+    # cache quota of the repository.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Parity with C++ Jolt ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }}
