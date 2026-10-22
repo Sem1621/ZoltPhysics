@@ -554,6 +554,10 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   `MotionProperties.index_in_active_bodies`, the body pair queue slots of the contact manager, the QuadTree node
   bounds (loaded per lane into a `Vec4`, which gives the bits of Jolt's vector load). Every other atomic keeps Jolt's
   memory order.
+- **Jolt's barrier race is fixed, not ported.** Jolt's `BarrierImpl::AddJob` / `AddJobs` count a job after they
+  set the barrier on it. A job that finishes in between lets `Wait()` return early, which the soft body step can
+  hit. Zolt counts first and releases the count of a job that is already done (scheduling only, see
+  `Core/JobSystemWithBarrier.zig`).
 - `std::thread` → `std.Thread.spawn(.{}, func, .{args})` + `join()`; `std::this_thread::yield()` →
   `std.Thread.yield()`; cache line padding → `align(std.atomic.cache_line)` / `Core.cache_line_size`.
   Zig reorders the fields of a (non-extern) struct, so `alignas(JPH_CACHE_LINE_SIZE)` on one member
