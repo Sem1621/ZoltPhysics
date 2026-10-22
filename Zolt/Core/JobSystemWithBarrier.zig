@@ -13,15 +13,24 @@
 //! - Jolt aligns mJobReadIndex and mJobWriteIndex to cache lines (mNumToAcquire shares the cache line of
 //!   mJobWriteIndex). Zig reorders struct fields, so they are grouped in cache line aligned structs that occupy whole
 //!   cache lines: `read_state.job_read_index`, `write_state.job_write_index` and `write_state.num_to_acquire`.
-//!
-//! Note (inherited from Jolt): a job that is added to a barrier while another thread waits on it must not be able to
-//! finish before addJob / addJobs has returned, unless another job in the barrier (besides the one calling addJob)
-//! stays pending until then. addJob sets the barrier on the job before it increments num_to_acquire, so a job that
-//! finishes in between releases the semaphore before it is counted, and wait() can return while jobs are still
-//! running. Create such jobs with a dependency and remove it after adding them (PhysicsSystem guarantees this through
-//! jobs that depend on each other).
+//! - Deviation from Jolt (a race of Jolt's barrier): addJob / addJobs increment num_to_acquire before they set the
+//!   barrier on the job, and decrement it again when the job is already done (setBarrier fails). Jolt sets the barrier
+//!   first and counts the job after it. A job that finishes in between (on another thread) then releases the semaphore
+//!   before it is counted, and when no other job of the barrier is pending, wait() spends that release on the count of
+//!   the job that adds and returns while that job still runs (and still reads the handles it adds). PhysicsSystem's
+//!   jobSoftBodyPrepare is such a job: it adds its collide jobs (no dependency, queued when created) after creating
+//!   them, and in the last step no other job of the barrier waits for it. A test of Jolt's JobSystemThreadPool with
+//!   that job graph crashed in AddJobs on the freed handles of the previous iteration while the main thread already
+//!   waited in the next one (ZoltParity/Physics/SimulationParity.zig, "Hangs"). Counting first, a release never comes
+//!   before its count. Only the scheduling changes, no result. The decrement relies on the contract that Jolt's code
+//!   relies on too: jobs are added by the thread that waits (before it waits) or by jobs of the same barrier, which are
+//!   counted until they finish, so a waiting thread cannot see a count that is only the one of a done job. The test
+//!   "JobSystemWithBarrier a job that finishes while it is added" fails with Jolt's order.
+//! - Tests only (`builtin.is_test`): `BarrierImpl.after_set_barrier` is called right after the barrier was set on a
+//!   job, the moment at which another thread can finish the job.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Core = @import("Core.zig");
 const JobSystem = @import("JobSystem.zig").JobSystem;
 const Semaphore = @import("Semaphore.zig").Semaphore;
@@ -142,6 +151,9 @@ pub const JobSystemWithBarrier = struct {
         /// Semaphore used by finishing jobs to signal the barrier that they're done
         semaphore: Semaphore = .{},
 
+        /// Tests only: called by addJob / addJobs right after the barrier was set on a job (see the header)
+        after_set_barrier: if (builtin.is_test) ?*const fn (barrier: *BarrierImpl, job: *Job) void else void = if (builtin.is_test) null else {},
+
         /// Jobs queue for the barrier
         const max_jobs: u32 = 2048;
         comptime {
@@ -204,11 +216,15 @@ pub const JobSystemWithBarrier = struct {
         fn addJob(self: *BarrierImpl, job_handle: *const JobHandle) void {
             var release_semaphore = false;
 
-            // Set the barrier on the job, this returns true if the barrier was successfully set (otherwise the job is already done and we don't need to add it to our list)
+            // Zolt: count the job before its barrier is set, so that it cannot release the semaphore before it is counted (see the header)
             const job = job_handle.getPtr().?;
+            _ = self.write_state.num_to_acquire.fetchAdd(1, .seq_cst);
+
+            // Set the barrier on the job, this returns true if the barrier was successfully set (otherwise the job is already done and we don't need to add it to our list)
             if (job.setBarrier(&self.base)) {
+                if (builtin.is_test) if (self.after_set_barrier) |hook| hook(self, job);
+
                 // If the job can be executed we want to release the semaphore an extra time to allow the waiting thread to start executing it
-                _ = self.write_state.num_to_acquire.fetchAdd(1, .seq_cst);
                 if (job.canBeExecuted()) {
                     release_semaphore = true;
                     _ = self.write_state.num_to_acquire.fetchAdd(1, .seq_cst);
@@ -216,6 +232,9 @@ pub const JobSystemWithBarrier = struct {
 
                 // Add the job to our job list
                 self.appendJob(job);
+            } else {
+                // Zolt: the job is done, it is not counted
+                _ = self.write_state.num_to_acquire.fetchSub(1, .seq_cst);
             }
 
             // Notify waiting thread that a new executable job is available
@@ -228,11 +247,15 @@ pub const JobSystemWithBarrier = struct {
             var release_semaphore = false;
 
             for (handles) |*handle| {
-                // Set the barrier on the job, this returns true if the barrier was successfully set (otherwise the job is already done and we don't need to add it to our list)
+                // Zolt: count the job before its barrier is set, so that it cannot release the semaphore before it is counted (see the header)
                 const job = handle.getPtr().?;
+                _ = self.write_state.num_to_acquire.fetchAdd(1, .seq_cst);
+
+                // Set the barrier on the job, this returns true if the barrier was successfully set (otherwise the job is already done and we don't need to add it to our list)
                 if (job.setBarrier(&self.base)) {
+                    if (builtin.is_test) if (self.after_set_barrier) |hook| hook(self, job);
+
                     // If the job can be executed we want to release the semaphore an extra time to allow the waiting thread to start executing it
-                    _ = self.write_state.num_to_acquire.fetchAdd(1, .seq_cst);
                     if (!release_semaphore and job.canBeExecuted()) {
                         release_semaphore = true;
                         _ = self.write_state.num_to_acquire.fetchAdd(1, .seq_cst);
@@ -240,6 +263,9 @@ pub const JobSystemWithBarrier = struct {
 
                     // Add the job to our job list
                     self.appendJob(job);
+                } else {
+                    // Zolt: the job is done, it is not counted
+                    _ = self.write_state.num_to_acquire.fetchSub(1, .seq_cst);
                 }
             }
 
@@ -562,5 +588,72 @@ test "JobSystemWithBarrier finished jobs and many jobs" {
         try std.testing.expectEqual(@as(u32, @intCast(1 + (round + 1) * max_jobs)), value);
     }
     try std.testing.expectEqual(@as(u32, 10 * max_jobs), barrier_impl.read_state.job_read_index.load(.seq_cst));
+    job_system.destroyBarrier(barrier);
+}
+
+test "JobSystemWithBarrier a job that finishes while it is added" {
+    // The race of Jolt's AddJob / AddJobs (see the header): the job is finished (by another thread in a real job system,
+    // here by the hook) right after its barrier is set. `pending` is the job that adds in PhysicsSystem's
+    // jobSoftBodyPrepare: counted, not done. A waiting thread that took every release at that moment (wait() acquires
+    // getValue() releases and subtracts them from num_to_acquire) must still wait for it. With Jolt's order
+    // num_to_acquire does not count the finished job yet, and wait() would return while `pending` still runs.
+    var test_system: TestJobSystem = try .init(std.testing.allocator, std.testing.io, 8, 1);
+    defer test_system.deinit();
+    const job_system = test_system.jobSystem();
+
+    const Hook = struct {
+        var num_calls: u32 = 0;
+        var still_waits = false;
+
+        fn finishJob(barrier: *JobSystemWithBarrier.BarrierImpl, job: *Job) void {
+            num_calls += 1;
+            _ = job.execute(); // Releases the semaphore of the barrier
+            still_waits = barrier.write_state.num_to_acquire.load(.seq_cst) - barrier.semaphore.getValue() > 0;
+        }
+
+        fn nothing() void {}
+    };
+
+    for ([_]bool{ false, true }) |use_add_jobs| {
+        const barrier = job_system.createBarrier().?;
+        const barrier_impl = JobSystemWithBarrier.BarrierImpl.fromBarrier(barrier);
+        var pending = try job_system.createJob("Pending", Color.red, .init(Hook.nothing, .{}), .{ .num_dependencies = 1 });
+        defer pending.deinit();
+        barrier.addJob(&pending);
+        var finishing = try job_system.createJob("Finishing", Color.red, .init(Hook.nothing, .{}), .{});
+        defer finishing.deinit();
+
+        Hook.num_calls = 0;
+        Hook.still_waits = false;
+        barrier_impl.after_set_barrier = Hook.finishJob;
+        if (use_add_jobs) barrier.addJobs((&finishing)[0..1]) else barrier.addJob(&finishing);
+        barrier_impl.after_set_barrier = null;
+        try std.testing.expectEqual(@as(u32, 1), Hook.num_calls);
+        try std.testing.expect(finishing.isDone());
+        try std.testing.expect(Hook.still_waits);
+
+        // Both jobs are counted, the finished job is not executable: no extra count
+        try std.testing.expectEqual(@as(i32, 2), barrier_impl.write_state.num_to_acquire.load(.seq_cst));
+
+        // The barrier waits for both (the waiting thread executes `pending`)
+        pending.removeDependency(.{});
+        job_system.waitForJobs(barrier);
+        try std.testing.expect(pending.isDone());
+        try std.testing.expect(barrier_impl.isEmpty());
+        try std.testing.expectEqual(@as(i32, 0), barrier_impl.write_state.num_to_acquire.load(.seq_cst));
+        try std.testing.expectEqual(@as(i32, 0), barrier_impl.semaphore.getValue());
+        job_system.destroyBarrier(barrier);
+    }
+
+    // A job that is already done is not counted (the count taken before setBarrier is given back)
+    const barrier = job_system.createBarrier().?;
+    const barrier_impl = JobSystemWithBarrier.BarrierImpl.fromBarrier(barrier);
+    var done = try job_system.createJob("Done", Color.red, .init(Hook.nothing, .{}), .{});
+    defer done.deinit();
+    _ = done.getPtr().?.execute();
+    barrier.addJobs((&done)[0..1]);
+    try std.testing.expect(barrier_impl.isEmpty());
+    try std.testing.expectEqual(@as(i32, 0), barrier_impl.write_state.num_to_acquire.load(.seq_cst));
+    job_system.waitForJobs(barrier);
     job_system.destroyBarrier(barrier);
 }

@@ -193,16 +193,16 @@
 //! SimWorld creates the JobSystemThreadPool and calls Update, ParityHooks.h only replaces the allocation (zero filled),
 //! Trace and AssertFailed functions. The jobs, the queue and the barrier are Jolt's (Core/JobSystemThreadPool.cpp,
 //! Core/JobSystemWithBarrier.cpp, the same in upstream Jolt). A race of Jolt's barrier needs the same conditions (a soft
-//! body step, a thread preempted at the wrong moment); it is the one that the header of Zolt's
-//! Core/JobSystemWithBarrier.zig notes. BarrierImpl::AddJob / AddJobs set the barrier on a job before they count it
-//! (mNumToAcquire), so a job that finishes in between releases the semaphore before it is counted, and when no other job
-//! of the barrier is pending, Wait returns while the job that adds is still running. JobSoftBodyPrepare adds its collide
+//! body step, a thread preempted at the wrong moment): BarrierImpl::AddJob / AddJobs set the barrier on a job before
+//! they count it (mNumToAcquire), so a job that finishes in between releases the semaphore before it is counted, and
+//! when no other job of the barrier is pending, Wait returns while the job that adds is still running. JobSoftBodyPrepare adds its collide
 //! jobs (no dependency, queued when created) after creating them, and in the last step no other job of the barrier waits
 //! for it. A test of Jolt's JobSystemThreadPool with that job graph (a prepare job in the barrier creates and adds the
 //! finalize, simulate and collide jobs) crashed twice in 14 runs of 1.5 to 6 million iterations: a worker in AddJobs read
 //! the freed handles of the previous iteration while the main thread already waited in the next BarrierImpl::Wait. That
-//! a hang follows such an early return was not shown. The fix belongs in Jolt (Jolt/ is not changed here) and in Zolt's
-//! port. When the watchdog fires, run the scene with a larger -Dupdate_timeout and attach a debugger to the hung process
+//! a hang follows such an early return was not shown. Zolt's port counts the job first (a deviation, see the header of
+//! Zolt/Core/JobSystemWithBarrier.zig); the C++ side keeps Jolt's race until Jolt fixes it (Jolt/ is not changed here).
+//! When the watchdog fires, run the scene with a larger -Dupdate_timeout and attach a debugger to the hung process
 //! before it aborts. The test "SimulationParity the update watchdog reports a hung update" puts the C++ side into the
 //! state of the hang (jolt_sim_test_barrier_hang: the main thread in BarrierImpl::Wait, every worker idle) for longer
 //! than a short timeout. Proof that the abort path bites: a 10 minute jolt_sim_test_barrier_hang in the C++ update 30 of
