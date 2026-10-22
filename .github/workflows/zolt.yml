@@ -187,6 +187,34 @@ jobs:
     - name: Compare with the C++ library (includes hello-world-check, milestone M5)
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }}
 
+  job-profile:
+    # The measurement tooling (-Djob_profile, Zolt/Core/JobProfiler.zig): the tests of the job system, the profiler and
+    # ZoltPerformanceTest with the option, then one short profiled run (-p) whose Chrome trace must be valid JSON with
+    # the physics jobs in it
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Job profiler
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Test with the job profiler
+      run: zig build test --summary all -Djob_profile=true -Dtest-filter=Job -Dtest-filter=profiler -Dtest-filter=PerformanceTest -Dtest-filter="-p writes"
+    - name: Profile a short Pyramid run
+      run: zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -q=LinearCast -t=2 -s=Pyramid -i=60 -p -phase_times
+    - name: Check the Chrome trace
+      run: |
+        python3 - <<'PY'
+        import json
+        events = [e for e in json.load(open("Pyramid_linearcast_th2.json"))["traceEvents"] if e["ph"] == "X"]
+        names = {e["name"] for e in events}
+        assert {"FindCollisions", "SolveVelocityConstraints"} <= names, names
+        print(len(events), "events")
+        PY
+
   determinism:
     if: github.event_name != 'schedule'
     # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
