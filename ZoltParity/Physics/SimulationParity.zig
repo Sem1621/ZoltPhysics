@@ -7821,12 +7821,15 @@ const max_spawn_observations = 10;
 /// Expect.spawned_jobs when no configuration of the thread matrix spawned a FindCollisions job from inside a job: a job
 /// spawns another one when it finishes while the others still find body pairs, which depends on the scheduling (on a
 /// loaded machine the workers can run the jobs one after the other, then none spawns: contacts_many_bodies in
-/// ReleaseFast next to other builds). The scene runs again on the Zolt side alone (no comparison) with 3 and 7 workers,
+/// ReleaseFast next to other builds). The scene runs again on the Zolt side alone (no comparison) with 7 and 15 workers,
 /// up to max_spawn_observations times, until a job spawns one: the scene reaches the path, the scheduling decides when.
+/// More workers than cores make the jobs progress unevenly, which is what spawns: contacts_many_bodies on 4 cores in
+/// ReleaseFast spawned in 0 of 20 runs with 3 workers, in 18 to 20 of 20 with 7 and in 20 of 20 with 15 (about 56
+/// spawns per run). With 3 and 7 workers a CI run once saw no spawn in all its configurations and observations.
 fn observeSpawnedJobs(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !bool {
     const desc = builder.desc();
     for (0..max_spawn_observations) |attempt| {
-        const job_kind: JobKind = .{ .thread_pool = if (attempt % 2 == 0) 3 else 7 };
+        const job_kind: JobKind = .{ .thread_pool = if (attempt % 2 == 0) 7 else 15 };
         var watchdog: UpdateWatchdog = .{ .scene = entry.name };
         watchdog.setContext("zolt {any} (observeSpawnedJobs)", .{job_kind});
         try watchdog.start();
