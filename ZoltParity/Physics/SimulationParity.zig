@@ -200,7 +200,7 @@
 //! for it. A test of Jolt's JobSystemThreadPool with that job graph (a prepare job in the barrier creates and adds the
 //! finalize, simulate and collide jobs) crashed twice in 14 runs of 1.5 to 6 million iterations: a worker in AddJobs read
 //! the freed handles of the previous iteration while the main thread already waited in the next BarrierImpl::Wait. That
-//! a hang follows such an early return was not shown. Zolt's port counts the job first (a deviation, see the header of
+//! a hang follows such an early return was not shown. Zolt's port counts the job first (the fix in the header of
 //! Zolt/Core/JobSystemWithBarrier.zig); the C++ side keeps Jolt's race until Jolt fixes it (Jolt/ is not changed here).
 //! When the watchdog fires, run the scene with a larger -Dupdate_timeout and attach a debugger to the hung process
 //! before it aborts. The test "SimulationParity the update watchdog reports a hung update" puts the C++ side into the
