@@ -599,7 +599,8 @@ test "JobSystemThreadPool jobs creating jobs" {
 
     // Each job creates two jobs until max_depth is reached (a binary tree of 2^max_depth - 1 jobs), the new jobs are added
     // to the barrier while it is being waited on. They are created with a dependency that is removed after adding them,
-    // so that they cannot finish before addJobs has returned (see the note in JobSystemWithBarrier.zig).
+    // so that they cannot finish before addJobs has returned. Jolt needs that; Zolt counts a job before it sets the
+    // barrier on it (see the top of JobSystemWithBarrier.zig, whose tests add jobs that finish while they are added).
     const Context = struct {
         job_system: JobSystem,
         barrier: *Barrier,
