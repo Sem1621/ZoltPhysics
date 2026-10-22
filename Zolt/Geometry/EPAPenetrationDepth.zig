@@ -58,12 +58,14 @@ pub const EPAPenetrationDepth = struct {
     /// Tolerance as passed to the GJK algorithm, used for asserting (only exists when Core.enable_asserts, JPH_ENABLE_ASSERTS).
     gjk_tolerance: if (Core.enable_asserts) f32 else void = if (Core.enable_asserts) 0.0 else {},
 
-    /// A list of support points for the EPA algorithm
+    /// A list of support points for the EPA algorithm.
+    /// No defaults: a by-value default would zero-fill the 6 KB of arrays. Construct in place with
+    /// `var points: SupportPoints = undefined; points.y.clear();`.
     const SupportPoints = struct {
         /// List of support points
-        y: Points = .empty,
-        p: [max_points]Vec3 = undefined,
-        q: [max_points]Vec3 = undefined,
+        y: Points,
+        p: [max_points]Vec3,
+        q: [max_points]Vec3,
 
         /// Result of `add`: the new support point (w) and its index (Jolt's outIndex)
         const Added = struct {
@@ -160,7 +162,8 @@ pub const EPAPenetrationDepth = struct {
         if (Core.enable_asserts) std.debug.assert(tolerance >= math.flt_epsilon);
 
         // Fetch the simplex from GJK algorithm
-        var support_points: SupportPoints = .{};
+        var support_points: SupportPoints = undefined;
+        support_points.y.clear();
         support_points.y.len = self.gjk.getClosestPointsSimplex(&support_points.y.buffer, &support_points.p, &support_points.q);
 
         // Fill up the amount of support points to 4
@@ -205,13 +208,14 @@ pub const EPAPenetrationDepth = struct {
 
         // Create hull out of the initial points
         std.debug.assert(support_points.y.len >= 3);
-        var hull = EPAConvexHullBuilder.init(&support_points.y);
+        var hull: EPAConvexHullBuilder = undefined;
+        hull.init(&support_points.y);
         hull.initialize(0, 1, 2);
         var i: u32 = 3;
         while (i < support_points.y.len) : (i += 1) {
             const facing = hull.findFacingTriangle(support_points.y.get(i));
             if (facing.triangle) |t| {
-                var new_triangles: EPAConvexHullBuilder.NewTriangles = .empty;
+                var new_triangles: EPAConvexHullBuilder.NewTriangles = .init();
                 if (!hull.addPoint(t, i, math.flt_max, &new_triangles)) {
                     // We can't recover from a failure to add a point to the hull because the old triangles have been unlinked already.
                     // Assume no collision. This can happen if the shapes touch in 1 point (or plane) in which case the hull is degenerate.
@@ -250,7 +254,7 @@ pub const EPAPenetrationDepth = struct {
             const new_index = added.index;
 
             // Add the point to the hull, if we fail we terminate and report no collision
-            var new_triangles: EPAConvexHullBuilder.NewTriangles = .empty;
+            var new_triangles: EPAConvexHullBuilder.NewTriangles = .init();
             if (!t.isFacing(w) or !hull.addPoint(t, new_index, math.flt_max, &new_triangles))
                 return false;
 
@@ -326,7 +330,7 @@ pub const EPAPenetrationDepth = struct {
                 }
 
                 // Add point to hull
-                var new_triangles: EPAConvexHullBuilder.NewTriangles = .empty;
+                var new_triangles: EPAConvexHullBuilder.NewTriangles = .init();
                 if (!hull.addPoint(t, new_index, closest_dist_sq, &new_triangles)) {
                     break :main;
                 }

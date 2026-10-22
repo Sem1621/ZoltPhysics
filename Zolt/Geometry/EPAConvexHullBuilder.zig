@@ -221,6 +221,8 @@ pub const EPAConvexHullBuilder = struct {
 
     /// Factory that creates triangles in a fixed size buffer
     /// NonCopyable in Jolt: the free list points into the buffer.
+    /// Construct in place with `init`: the fields have no defaults because a by-value default would zero-fill the
+    /// 24 KB buffer.
     pub const TriangleFactory = struct {
         /// Struct that stores both a triangle or a next pointer in case the triangle is unused
         const Block = extern union {
@@ -229,11 +231,17 @@ pub const EPAConvexHullBuilder = struct {
         };
 
         /// Storage for triangles
-        triangles: [max_triangles]Block = undefined,
+        triangles: [max_triangles]Block,
         /// List of free triangles
-        next_free: ?*Block = null,
+        next_free: ?*Block,
         /// High water mark for used triangles (if next_free == null we can take one from here)
-        high_watermark: u32 = 0,
+        high_watermark: u32,
+
+        /// Constructor, in place: only the header is set, the storage stays undefined
+        pub fn init(self: *TriangleFactory) void {
+            self.next_free = null;
+            self.high_watermark = 0;
+        }
 
         /// Return all triangles to the free pool
         pub fn clear(self: *TriangleFactory) void {
@@ -284,8 +292,9 @@ pub const EPAConvexHullBuilder = struct {
 
     /// Specialized triangles list that keeps them sorted on closest distance to origin
     pub const TriangleQueue = struct {
-        /// The triangles (Jolt's base class `Triangles`), a binary heap
-        triangles: Triangles = .empty,
+        /// The triangles (Jolt's base class `Triangles`), a binary heap. No default: a by-value `.empty` would
+        /// zero-fill the buffer.
+        triangles: Triangles,
 
         /// Function to sort triangles on closest distance to origin
         pub fn triangleSorter(context: void, t1: *Triangle, t2: *Triangle) bool {
@@ -334,16 +343,19 @@ pub const EPAConvexHullBuilder = struct {
     };
 
     /// Factory to create new triangles and remove old ones
-    factory: TriangleFactory = .{},
+    factory: TriangleFactory,
     /// List of positions (some of them are part of the hull)
     positions: *const Points,
     /// List of triangles that are part of the hull that still need to be checked (if !removed)
-    triangle_queue: TriangleQueue = .{},
+    triangle_queue: TriangleQueue,
 
-    /// Constructor. `positions` must outlive the builder (Jolt keeps a `const Points &`); points can be added to it
-    /// while the hull is built.
-    pub fn init(positions: *const Points) EPAConvexHullBuilder {
-        return .{ .positions = positions };
+    /// Constructor, in place: `var hull: EPAConvexHullBuilder = undefined; hull.init(&points);`. A by-value result
+    /// would zero-fill the 26 KB of buffers. `positions` must outlive the builder (Jolt keeps a `const Points &`);
+    /// points can be added to it while the hull is built.
+    pub fn init(self: *EPAConvexHullBuilder, positions: *const Points) void {
+        self.factory.init();
+        self.positions = positions;
+        self.triangle_queue.triangles.clear();
     }
 
     /// Initialize the hull with 3 points
@@ -408,7 +420,7 @@ pub const EPAConvexHullBuilder = struct {
         const pos = self.positions.get(idx);
 
         // Find edge of convex hull of triangles that are not facing the new vertex w
-        var edges: Edges = .empty;
+        var edges: Edges = .init();
         if (!self.findEdge(facing_triangle, pos, &edges))
             return false;
 
@@ -630,13 +642,14 @@ test "EPAConvexHullBuilder.Triangle" {
 
 test "EPAConvexHullBuilder hull around the origin" {
     // Tetrahedron around the origin
-    var points: EPAConvexHullBuilder.Points = .empty;
+    var points: EPAConvexHullBuilder.Points = .init();
     points.append(Vec3.init(1, 0, -1));
     points.append(Vec3.init(0, 1, -1));
     points.append(Vec3.init(-1, -1, -1));
     points.append(Vec3.init(0, 0, 2));
 
-    var hull = EPAConvexHullBuilder.init(&points);
+    var hull: EPAConvexHullBuilder = undefined;
+    hull.init(&points);
     hull.initialize(0, 1, 2);
     try std.testing.expect(hull.hasNextTriangle());
 
@@ -645,7 +658,7 @@ test "EPAConvexHullBuilder hull around the origin" {
     const t = facing.triangle.?;
     try std.testing.expectApproxEqAbs(@as(f32, 9.0), facing.best_dist_sq, 1.0e-5);
     try std.testing.expect(t.normal.getZ() > 0);
-    var new_triangles: EPAConvexHullBuilder.NewTriangles = .empty;
+    var new_triangles: EPAConvexHullBuilder.NewTriangles = .init();
     try std.testing.expect(hull.addPoint(t, 3, math.flt_max, &new_triangles));
     try std.testing.expectEqual(@as(u32, 3), new_triangles.len);
     try std.testing.expect(t.removed);
@@ -680,7 +693,8 @@ test "EPAConvexHullBuilder hull around the origin" {
 
 test "EPAConvexHullBuilder.TriangleFactory" {
     const positions = [_]Vec3{ Vec3.init(1, 0, 0), Vec3.init(0, 1, 0), Vec3.init(0, 0, 1) };
-    var factory: EPAConvexHullBuilder.TriangleFactory = .{};
+    var factory: EPAConvexHullBuilder.TriangleFactory = undefined;
+    factory.init();
 
     // The buffer runs full
     var first: ?*EPAConvexHullBuilder.Triangle = null;
