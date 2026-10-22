@@ -7,6 +7,10 @@ on:
 # Builds and deploys doxygen documentation
 jobs:
   build:
+    # Zolt: only upstream Jolt publishes its C++ API docs to GitHub Pages. In the ZoltPhysics fork the deploy step has
+    # no write access (the push of gh-pages failed with a 403 on every push to master), and the port's docs are
+    # Docs/Zolt and `zig build docs`.
+    if: github.repository == 'jrouwe/JoltPhysics'
     runs-on: ubuntu-latest
 
     steps:
