@@ -5,7 +5,7 @@
 //! job threads goes. With `-Djob_profile=true` the job system records, per thread, when each job starts and ends and
 //! when the thread waits for work (idle):
 //! - `Job.execute` records the job body (Core/JobSystem.zig), under the name of the job (Jolt's job names, such as
-//!   "Integrate" or "FindCollisions").
+//!   "FindCollisions" or "SolveVelocityConstraints").
 //! - `JobSystemThreadPool` records the time a worker thread waits for jobs, `JobSystemWithBarrier` the time a thread
 //!   waits for a barrier.
 //!
@@ -106,12 +106,12 @@ pub const JobProfiler = struct {
 
     /// The ring buffer and the totals of one thread
     pub const Thread = struct {
-        /// The thread that owns this entry (0: free, a thread id is never 0). Its own cache line: other threads read
-        /// it to find their entry.
+        /// The thread that owns this entry (0: free, a thread id is never 0). Other threads read it to find their
+        /// entry, so it does not share a cache line with the fields below, which the owner writes.
         owner: std.atomic.Value(std.Thread.Id) align(Core.cache_line_size) = .init(0),
 
         /// Ring buffer of events, `num_events % buffer.len` is the next one to write
-        buffer: []Event = &.{},
+        buffer: []Event align(Core.cache_line_size) = &.{},
 
         /// Number of events recorded, including the overwritten ones
         num_events: u64 = 0,
@@ -378,9 +378,6 @@ pub const JobProfiler = struct {
         }
     };
 };
-
-/// A pointer to the profiler for the hooks: `?*JobProfiler` with `-Djob_profile=true`, `void` without it
-pub const Hook = if (Core.job_profile) ?*JobProfiler else void;
 
 test "JobProfiler: events of one thread, wraparound and totals" {
     var profiler: JobProfiler = .empty;

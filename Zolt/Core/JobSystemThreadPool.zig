@@ -307,7 +307,7 @@ pub const JobSystemThreadPool = struct {
     }
 
     /// Zolt: the timeline of the jobs and the idle time of this pool (`-Djob_profile=true` only, `void` without it, see
-    /// the top of this file). Read it only while no job runs.
+    /// the top of this file). Read the events after `stop` and `setNumThreads(0)`.
     pub const getJobProfiler = if (Core.job_profile) getJobProfilerImpl else {};
     fn getJobProfilerImpl(self: *JobSystemThreadPool) *JobProfiler {
         return &self.base.profiler;
@@ -861,7 +861,6 @@ test "JobSystemThreadPool job profiler hooks cost nothing without -Djob_profile"
     try std.testing.expect(@FieldType(JobSystem.VTable, "getJobProfiler") == void);
     try std.testing.expectEqual(@as(usize, 8 * @sizeOf(usize)), @sizeOf(JobSystem.VTable));
     try std.testing.expect(@TypeOf(JobSystemThreadPool.getJobProfiler) == void);
-    try std.testing.expect(@import("JobProfiler.zig").Hook == void);
 
     var pool: JobSystemThreadPool = .empty;
     try pool.init(std.testing.allocator, std.testing.io, 64, 1, .{ .num_threads = 0 });
