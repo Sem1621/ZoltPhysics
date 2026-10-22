@@ -1,11 +1,17 @@
 //! Port of: Jolt/Physics/PhysicsSystem.h, Jolt/Physics/PhysicsSystem.cpp
-//! Status: partial
-//! Missing: the soft body work of Phase 9: the soft body jobs beyond the "no active soft bodies" path of
-//! JobSoftBodyPrepare (JobSoftBodyCollide, JobSoftBodySimulate, JobSoftBodyFinalize) and the response of a CCD body
-//! against a soft body face in JobResolveCCDContacts (SoftBodyShape::GetFaceIndex, SoftBodyMotionProperties::GetFace /
-//! GetVertex). Every stub panics where Jolt would do work it cannot do yet, so a result is never silently wrong: no soft
-//! body can be created before Phase 9, everything else (contacts, the island solve with and without the
-//! LargeIslandSplitter, sleeping, continuous collision detection) runs Jolt's code end to end.
+//! Status: complete
+//!
+//! Soft bodies (RemainingFeaturesArchitecture.md R17, R18):
+//! - JobSoftBodyPrepare, JobSoftBodyCollide, JobSoftBodySimulate and JobSoftBodyFinalize are literal ports at the lambda
+//!   positions. Prepare sorts the active soft bodies by BodyID (QuickSort), keeps the contexts in
+//!   `PhysicsUpdateContext.soft_body_update_contexts` (a TempArray) and creates Finalize, then N Simulate jobs, then N
+//!   Collide jobs (N = GetMaxConcurrency). The Collide jobs start at creation. Jolt's memory orders.
+//! - The D5 rows of R17 (SimulationArchitecture D5): an allocation failure in Prepare or in DetermineCollidingShapes is
+//!   latched; a soft body job that Prepare cannot create is not an error, Prepare does its work (see jobSoftBodyPrepare).
+//!   A poisoned Finalize skips its updates, but always clears the colliding shapes and sensors and frees the contexts.
+//! - The response of a CCD body against a soft body face in JobResolveCCDContacts is literal: the face of the sub shape
+//!   ID, the vertex masses, the barycentric velocity, the impulses on body 1 and on the 3 vertices (getVertexMut: the
+//!   resolve job is serial), MarkCCDContact and RequestContactCallback with a soft body contact listener only.
 //!
 //! Continuous collision detection (Wave B R4):
 //! - JobFindCCDContacts is a literal port: the ShapeCastSettings, the CCDNarrowPhaseCollector (OnContactValidate through
@@ -38,15 +44,16 @@
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
 //!   order. Every C++ lambda is an inline `struct { fn call(...) }.call` closure at the lambda's position whose captures
 //!   are the lambda's captures (`[&context, &step]` -> `.{ context, step }`). Jobs created inside jobs
-//!   (TrySpawnJobFindCollisions, the FindCCDContacts jobs) are added to the barrier, as in Jolt.
+//!   (TrySpawnJobFindCollisions, the FindCCDContacts jobs, the soft body jobs of JobSoftBodyPrepare) are added to the
+//!   barrier, as in Jolt.
 //! - Start gate (D4): the first step's root jobs get one dependency (Jolt: 0) that `kickStep` (the kick of StartNextStep)
 //!   removes after the whole graph exists, so a failing createJob while building has no side effect.
 //! - Out of memory (D5): `update` returns `error{OutOfMemory}!PhysicsUpdateError`. A failure while building the jobs (or
 //!   in the allocations before) changes nothing. Inside a job an allocation failure sets the latch of the context; a
 //!   poisoned job skips its work and allocations but always does its frees, its commits and its dependency bookkeeping,
 //!   and the protocol jobs (BroadPhasePrepare, UpdateBroadPhaseFinalize, FindCollisions, PostIntegrateVelocity,
-//!   ResolveCCDContacts, ContactRemovedCallbacks, StartNextStep, SoftBodyPrepare) follow D5's table. A job that cannot be
-//!   created from inside a job is not an error. Temp memory is `TempArray`, freed at Jolt's positions.
+//!   ResolveCCDContacts, ContactRemovedCallbacks, StartNextStep, SoftBodyPrepare, SoftBodyFinalize) follow D5's table. A
+//!   job that cannot be created from inside a job is not an error. Temp memory is `TempArray`, freed at Jolt's positions.
 //! - Debug grants (BodyAccess.Grant, GrantActiveBodiesAccess) end before a job kicks other jobs: JobFindCollisions and
 //!   JobSoftBodyPrepare remove their dependencies after the scope of their grants (Jolt: inside it). With
 //!   JobSystemSingleThreaded the kicked jobs run inside the call and their grants assert that no grant is active on the
@@ -67,8 +74,13 @@
 //!   `getActiveBodies`, `getConstraints`, `addConstraint(s)`, `addStepListener`, `saveState`, `restoreState`,
 //!   `optimizeBroadPhase`).
 //! - JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER
-//!   (sDrawMotionQualityLinearCast, DrawBodies, DrawConstraints, DrawConstraintLimits, DrawConstraintReferenceFrame):
-//!   TODO(debug_renderer).
+//!   (RemainingFeaturesArchitecture.md R2, R4): DrawBodies, DrawConstraints, DrawConstraintLimits and
+//!   DrawConstraintReferenceFrame are gated declarations; Jolt's default argument `inBodyFilter` is an options struct.
+//!   The renderer that the simulation draws into is `debug_renderer` (Jolt's `DebugRenderer::sInstance`): `void`
+//!   without `-Ddebug_renderer`, set it with `setDebugRenderer` between updates. The static flag
+//!   sDrawMotionQualityLinearCast is `debug_renderer.flags.physics_system.draw_motion_quality_linear_cast` (the CCD
+//!   draws). The contact draws of ProcessBodyPair get the renderer through the debug options of manifoldBetweenTwoFaces
+//!   and pruneContactPoints. Without a renderer nothing is drawn (Jolt dereferences a null sInstance when a flag is set).
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
@@ -77,6 +89,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Core = @import("../Core/Core.zig");
+const IssueReporting = @import("../Core/IssueReporting.zig");
 const DeterminismLog = @import("DeterminismLog.zig");
 const math = @import("../Math/Math.zig");
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
@@ -85,8 +98,11 @@ const Mat44 = @import("../Math/Mat44.zig").Mat44;
 const RealFile = @import("../Math/Real.zig");
 const RVec3 = RealFile.RVec3;
 const AABox = @import("../Geometry/AABox.zig").AABox;
+const Plane = @import("../Geometry/Plane.zig").Plane;
+const ClosestPoint = @import("../Geometry/ClosestPoint.zig");
 const RayAABoxFile = @import("../Geometry/RayAABox.zig");
 const Color = @import("../Core/Color.zig").Color;
+const DebugRenderer = @import("../Renderer/DebugRenderer.zig").DebugRenderer;
 const Mutex = @import("../Core/Mutex.zig").Mutex;
 const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
 const quickSort = @import("../Core/QuickSort.zig").quickSort;
@@ -164,6 +180,9 @@ const ContactConstraintManager = @import("Constraints/ContactConstraintManager.z
 const SoftBodyContactListenerFile = @import("SoftBody/SoftBodyContactListener.zig");
 const SoftBodyContactListener = SoftBodyContactListenerFile.SoftBodyContactListener;
 const SoftBodyContactSettings = SoftBodyContactListenerFile.SoftBodyContactSettings;
+const SoftBodyMotionProperties = @import("SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
+const SoftBodyShape = @import("SoftBody/SoftBodyShape.zig").SoftBodyShape;
+const SoftBodyUpdateContext = @import("SoftBody/SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
 const ContactConstraintPart = @import("Constraints/ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart;
 const StateRecorderFile = @import("StateRecorder.zig");
 const StateRecorder = StateRecorderFile.StateRecorder;
@@ -366,6 +385,11 @@ pub const PhysicsSystem = struct {
     /// Previous frame's delta time of one sub step to allow scaling previous frame's constraint impulses
     previous_step_delta_time: f32 = 0.0,
 
+    /// Zolt (RemainingFeaturesArchitecture.md R4): the renderer that the simulation draws into, Jolt's
+    /// `DebugRenderer::sInstance` (the CCD draws, the contact point and manifold draws). Only with -Ddebug_renderer
+    /// (`void` otherwise). Null draws nothing.
+    debug_renderer: if (Core.debug_renderer) ?*DebugRenderer else void = if (Core.debug_renderer) null else {},
+
     /// Not initialized (Jolt's constructor), call init
     pub const empty: PhysicsSystem = .{};
 
@@ -474,6 +498,46 @@ pub const PhysicsSystem = struct {
 
     pub fn getSoftBodyContactListener(self: *const Self) ?SoftBodyContactListener {
         return self.soft_body_contact_listener;
+    }
+
+    /// Zolt (RemainingFeaturesArchitecture.md R4): set the renderer that the simulation draws into (Jolt's
+    /// `DebugRenderer::sInstance`, set by the constructor of a renderer). The draw flags are the fields of
+    /// `renderer.flags`. Set the renderer and its flags between updates: the simulation reads them from its job threads.
+    /// Only with -Ddebug_renderer (a `void` declaration otherwise).
+    pub const setDebugRenderer = if (Core.debug_renderer) setDebugRendererImpl else {};
+    fn setDebugRendererImpl(self: *Self, renderer: ?*DebugRenderer) void {
+        self.debug_renderer = renderer;
+    }
+
+    /// Draw the state of the bodies (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawBodies = if (Core.debug_renderer) drawBodiesImpl else {};
+    fn drawBodiesImpl(self: *Self, settings: *const BodyManager.DrawSettings, renderer: *DebugRenderer, opts: BodyManager.DrawOptions) void {
+        self.body_manager.draw(settings, &self.physics_settings, renderer, opts);
+    }
+
+    /// Draw the constraints only (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawConstraints = if (Core.debug_renderer) drawConstraintsImpl else {};
+    fn drawConstraintsImpl(self: *Self, renderer: *DebugRenderer) void {
+        self.constraint_manager.drawConstraints(renderer);
+    }
+
+    /// Draw the constraint limits only (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *Self, renderer: *DebugRenderer) void {
+        self.constraint_manager.drawConstraintLimits(renderer);
+    }
+
+    /// Draw the constraint reference frames only (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameImpl else {};
+    fn drawConstraintReferenceFrameImpl(self: *Self, renderer: *DebugRenderer) void {
+        self.constraint_manager.drawConstraintReferenceFrame(renderer);
+    }
+
+    /// The options of manifoldBetweenTwoFaces and pruneContactPoints in the physics update: Jolt's `inCenterOfMass`
+    /// and DebugRenderer::sInstance with -Ddebug_renderer, nothing without it
+    fn manifoldOptions(self: *const Self, center_of_mass: RVec3) ManifoldBetweenTwoFacesFile.Options {
+        if (!Core.debug_renderer) return .{};
+        return .{ .debug = .{ .center_of_mass = center_of_mass, .renderer = self.debug_renderer } };
     }
 
     /// Set the function that combines the friction of two bodies and returns it
@@ -956,7 +1020,7 @@ pub const PhysicsSystem = struct {
 
         // Return any errors
         const errors = PhysicsUpdateError.fromInt(context.errors.load(.acquire));
-        if (Core.enable_asserts) std.debug.assert(errors.isNone()); // An error occurred during the physics update, see EPhysicsUpdateError for more information
+        if (Core.enable_asserts) IssueReporting.assertRecoverable(errors.isNone(), "An error occurred during the physics update, see EPhysicsUpdateError for more information", @src());
         return errors;
     }
 
@@ -1907,11 +1971,11 @@ pub const PhysicsSystem = struct {
 
                         // Determine contact points
                         const settings_ps = &collector.system.physics_settings;
-                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2);
+                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2, collector.system.manifoldOptions(collector.body1.getCenterOfMassPosition()));
 
                         // Prune if we have more than 32 points (this means we could run out of space in the next iteration)
                         if (manifold.base.relative_contact_points_on1.len > 32)
-                            pruneContactPoints(manifold.first_world_space_normal, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2);
+                            pruneContactPoints(manifold.first_world_space_normal, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base.base_offset));
                     }
                 };
                 var collector: ReductionCollideShapeCollector = .{ .system = self, .body1 = body1, .body2 = body2 };
@@ -1929,7 +1993,7 @@ pub const PhysicsSystem = struct {
 
                     // If we still have too many points, prune them now
                     if (manifold.relative_contact_points_on1.len > 4)
-                        pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                        pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, self.manifoldOptions(manifold.base_offset));
 
                     // Actually add the contact points to the manager
                     self.contact_manager.addContactConstraint(contact_allocator, &link_and_activate_bodies, body_pair_handle, body1, body2, manifold);
@@ -1984,7 +2048,7 @@ pub const PhysicsSystem = struct {
                         var manifold: ContactManifold = .{};
                         manifold.base_offset = collector.body1.getCenterOfMassPosition();
                         const settings_ps = &collector.system.physics_settings;
-                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                        manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base_offset));
 
                         // Calculate normal
                         manifold.world_space_normal = result.penetration_axis.normalized();
@@ -1994,7 +2058,7 @@ pub const PhysicsSystem = struct {
 
                         // Prune if we have more than 4 points
                         if (manifold.relative_contact_points_on1.len > 4)
-                            pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                            pruneContactPoints(manifold.world_space_normal, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base_offset));
 
                         // Set other properties
                         manifold.sub_shape_id1 = result.sub_shape_id1;
@@ -2286,7 +2350,7 @@ pub const PhysicsSystem = struct {
                             // Determine inner radius (the smallest sphere that fits into the shape)
                             const inner_radius = body.getShape().getInnerRadius();
                             // (Zolt: a mesh / height field / mirrored ScaledShape reaches this with a zero or negative inner radius, Jolt's release build continues: no UB in ReleaseFast)
-                            if (Core.enable_asserts) std.debug.assert(inner_radius > 0.0); // The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.
+                            if (Core.enable_asserts) Core.assertRecoverable(inner_radius > 0.0, "The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.", @src());
 
                             // Measure translation in this step and check if it above the threshold to perform a linear cast
                             const linear_cast_threshold_sq = math.square(self.physics_settings.linear_cast_threshold * inner_radius);
@@ -2423,7 +2487,17 @@ pub const PhysicsSystem = struct {
             const broadphase_layer_filter = self.getDefaultBroadPhaseLayerFilter(body.getObjectLayer());
             const object_layer_filter = self.getDefaultLayerFilter(body.getObjectLayer());
 
-            // TODO(debug_renderer): Draw start and end shape of cast (sDrawMotionQualityLinearCast)
+            // Draw start and end shape of cast (JPH_DEBUG_RENDERER)
+            if (Core.debug_renderer) {
+                if (self.debug_renderer) |renderer| {
+                    if (renderer.flags.physics_system.draw_motion_quality_linear_cast) {
+                        const com = body.getCenterOfMassTransform();
+                        body.getShape().draw(renderer, com, Vec3.one(), Color.green, false, true);
+                        renderer.drawArrow(com.getTranslation(), com.getTranslation().addVec3(ccd_body.delta_position), Color.green, 0.1);
+                        body.getShape().draw(renderer, com.postTranslated(ccd_body.delta_position), Vec3.one(), Color.red, false, true);
+                    }
+                }
+            }
 
             // Create a collector that will find the maximum distance allowed to travel while not penetrating more than 'max penetration'
             const CCDNarrowPhaseCollector = struct {
@@ -2660,7 +2734,7 @@ pub const PhysicsSystem = struct {
                 // Determine contact manifold
                 var manifold: ContactManifold = .{};
                 manifold.base_offset = shape_cast.center_of_mass_start.getTranslation();
-                manifoldBetweenTwoFaces(cast_shape_result.base.contact_point_on1, cast_shape_result.base.contact_point_on2, cast_shape_result.base.penetration_axis, self.physics_settings.manifold_tolerance, &cast_shape_result.base.shape1_face, &cast_shape_result.base.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2);
+                manifoldBetweenTwoFaces(cast_shape_result.base.contact_point_on1, cast_shape_result.base.contact_point_on2, cast_shape_result.base.penetration_axis, self.physics_settings.manifold_tolerance, &cast_shape_result.base.shape1_face, &cast_shape_result.base.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, self.manifoldOptions(manifold.base_offset));
                 manifold.sub_shape_id1 = cast_shape_result.base.sub_shape_id1;
                 manifold.sub_shape_id2 = cast_shape_result.base.sub_shape_id2;
                 manifold.penetration_depth = cast_shape_result.base.penetration_depth;
@@ -2873,11 +2947,71 @@ pub const PhysicsSystem = struct {
                             inline else => |type2| solveCCDContact(type2, body1, inv_m1, inv_i1, r1_plus_u, body2, r2, ccd_body.contact_normal, normal_velocity_bias, friction_direction, contact_settings),
                         }
                     } else {
-                        // Phase 9: the response against a face of the soft body (SoftBodyShape::GetFaceIndex,
-                        // SoftBodyMotionProperties::GetFace / GetVertex, the barycentric velocity of the face, the
-                        // impulse on body 1 and the 3 vertices, MarkCCDContact and RequestContactCallback). No soft body
-                        // can be created before Phase 9, so this is unreachable.
-                        @panic("PhysicsSystem.jobResolveCCDContacts: soft bodies: Phase 9");
+                        // (Zolt: the resolve job is serial and body 2 is mutable, so the vertices are written through
+                        // getVertexMut, RemainingFeaturesArchitecture.md R18)
+                        const soft_mp = SoftBodyMotionProperties.fromBase(body2.getMotionPropertiesMut());
+                        const soft_shape = body2.getShape().cast(SoftBodyShape);
+
+                        // Convert the sub shape ID of the soft body to a face
+                        const face_idx = soft_shape.getFaceIndex(ccd_body.sub_shape_id2);
+                        const face = soft_mp.getFace(face_idx);
+
+                        // Get vertices of the face
+                        const vtx0 = soft_mp.getVertexMut(face.vertex[0]);
+                        const vtx1 = soft_mp.getVertexMut(face.vertex[1]);
+                        const vtx2 = soft_mp.getVertexMut(face.vertex[2]);
+
+                        // Inverse mass of the face
+                        const vtx0_mass: f32 = if (vtx0.inv_mass > 0.0) 1.0 / vtx0.inv_mass else 1.0e10;
+                        const vtx1_mass: f32 = if (vtx1.inv_mass > 0.0) 1.0 / vtx1.inv_mass else 1.0e10;
+                        const vtx2_mass: f32 = if (vtx2.inv_mass > 0.0) 1.0 / vtx2.inv_mass else 1.0e10;
+                        const inv_m2 = 1.0 / (vtx0_mass + vtx1_mass + vtx2_mass);
+
+                        // Calculate barycentric coordinates of the contact point on the soft body's face
+                        const inv_body2_transform = body2.getInverseCenterOfMassTransform();
+                        const local_contact = toVec3(inv_body2_transform.mulRVec3(ccd_body.contact_point_on2));
+                        const bary = ClosestPoint.getBaryCentricCoordinatesTriangle(vtx0.position.sub(local_contact), vtx1.position.sub(local_contact), vtx2.position.sub(local_contact));
+                        const u = bary.u;
+                        const v = bary.v;
+                        const w = bary.w;
+
+                        // Calculate contact point velocity for the face
+                        const v2 = inv_body2_transform.multiply3x3Transposed(vtx0.velocity.mulScalar(u).add(vtx1.velocity.mulScalar(v)).add(vtx2.velocity.mulScalar(w)));
+                        const normal_velocity = v2.sub(v1).dot(ccd_body.contact_normal);
+
+                        // Calculate velocity bias due to restitution
+                        var normal_velocity_bias: f32 = undefined;
+                        if (contact_settings.combined_restitution > 0.0 and normal_velocity < -self.physics_settings.min_velocity_for_restitution)
+                            normal_velocity_bias = contact_settings.combined_restitution * normal_velocity
+                        else
+                            normal_velocity_bias = 0.0;
+
+                        // Calculate resulting velocity change (the math here is similar to AxisConstraintPart but without an inertia term for body 2 as we treat it as a point mass)
+                        const r1_plus_u_x_n = r1_plus_u.cross(ccd_body.contact_normal);
+                        const invi1_r1_plus_u_x_n = inv_i1.multiply3x3(r1_plus_u_x_n);
+                        const jv = r1_plus_u_x_n.dot(body_mp.getAngularVelocity()) - normal_velocity - normal_velocity_bias;
+                        const inv_effective_mass = inv_m1 + inv_m2 + invi1_r1_plus_u_x_n.dot(r1_plus_u_x_n);
+                        const lambda = jv / inv_effective_mass;
+                        body_mp.subLinearVelocityStep(ccd_body.contact_normal.mulScalar(lambda * inv_m1));
+                        body_mp.clampLinearVelocity();
+                        body_mp.subAngularVelocityStep(invi1_r1_plus_u_x_n.mulScalar(lambda));
+                        body_mp.clampAngularVelocity();
+                        const delta_v2 = inv_body2_transform.multiply3x3(ccd_body.contact_normal.mulScalar(lambda));
+                        vtx0.velocity = vtx0.velocity.add(delta_v2.mulScalar(vtx0.inv_mass));
+                        vtx1.velocity = vtx1.velocity.add(delta_v2.mulScalar(vtx1.inv_mass));
+                        vtx2.velocity = vtx2.velocity.add(delta_v2.mulScalar(vtx2.inv_mass));
+
+                        // If there's a contact listener, we need to flag this vertex as having had collision and force a contact callback.
+                        // Note that during the soft body update that follows this, it is likely that a new collision will be found and that this will be overwritten.
+                        if (self.soft_body_contact_listener != null) {
+                            const body_id = ccd_body.body_id1;
+                            const local_normal = inv_body2_transform.multiply3x3(ccd_body.contact_normal);
+                            const contact_plane = Plane.fromPointAndNormal(local_contact, local_normal);
+                            vtx0.markCCDContact(body_id, contact_plane);
+                            vtx1.markCCDContact(body_id, contact_plane);
+                            vtx2.markCCDContact(body_id, contact_plane);
+                            soft_mp.requestContactCallback();
+                        }
                     }
 
                     // Activate the 2nd body if it is not already active
@@ -2891,8 +3025,26 @@ pub const PhysicsSystem = struct {
                         }
                     }
 
-                    // TODO(debug_renderer): Draw the collision location, the location + slop, the contact normal and the
-                    // post contact velocities (sDrawMotionQualityLinearCast)
+                    if (Core.debug_renderer) {
+                        if (self.debug_renderer) |renderer| {
+                            if (renderer.flags.physics_system.draw_motion_quality_linear_cast) {
+                                // Draw the collision location
+                                const collision_transform = body1.getCenterOfMassTransform().postTranslated(ccd_body.delta_position.mulScalar(ccd_body.fraction));
+                                body1.getShape().draw(renderer, collision_transform, Vec3.one(), Color.yellow, false, true);
+
+                                // Draw the collision location + slop
+                                const collision_transform_plus_slop = body1.getCenterOfMassTransform().postTranslated(ccd_body.delta_position.mulScalar(ccd_body.fraction_plus_slop));
+                                body1.getShape().draw(renderer, collision_transform_plus_slop, Vec3.one(), Color.orange, false, true);
+
+                                // Draw contact normal
+                                renderer.drawArrow(ccd_body.contact_point_on2, ccd_body.contact_point_on2.subVec3(ccd_body.contact_normal), Color.yellow, 0.1);
+
+                                // Draw post contact velocity
+                                renderer.drawArrow(collision_transform.getTranslation(), collision_transform.getTranslation().addVec3(body1.getLinearVelocity()), Color.orange, 0.1);
+                                renderer.drawArrow(collision_transform.getTranslation(), collision_transform.getTranslation().addVec3(body1.getAngularVelocity()), Color.purple, 0.1);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -3123,10 +3275,18 @@ pub const PhysicsSystem = struct {
         }
     }
 
-    /// Zolt (D5): a protocol job. Its "no active soft bodies" path kicks StartNextStep; once poisoned the list of active
-    /// soft bodies stays empty.
+    /// Zolt (D5, RemainingFeaturesArchitecture.md R17): a protocol job. It takes the "no active soft bodies" path (kick
+    /// StartNextStep) once poisoned, and when it cannot copy the active bodies or allocate the contexts (the error is
+    /// latched). A job that it cannot create is not an error, it does the work of that job itself:
+    /// - no Finalize job: it runs the whole update inline (`softBodyUpdateInline`), then kicks StartNextStep;
+    /// - a missing Simulate job: it removes one Finalize dependency for it; the handle stays invalid and the Collide jobs
+    ///   skip it;
+    /// - no Simulate job at all: it creates no Collide job, collides and simulates inline, then removes the Finalize
+    ///   dependencies (a running Collide job could fill the colliding shapes while the inline simulation reads them);
+    /// - a missing Collide job: after the creations it runs the collide claim loop itself, then removes the dependencies
+    ///   of the missing Collide jobs from every Simulate job.
     fn jobSoftBodyPrepare(self: *Self, context: *PhysicsUpdateContext, step: *Step) void {
-        {
+        const has_active_soft_bodies = blk: {
             // Reading soft body positions
             var grant: BodyAccess.Grant = .init(.none, .read);
             defer grant.deinit();
@@ -3137,22 +3297,277 @@ pub const PhysicsSystem = struct {
             if (!context.isOutOfMemory())
                 self.body_manager.getActiveBodies(self.allocator, .soft_body, &active_bodies) catch context.setOutOfMemory();
 
-            if (active_bodies.items.len != 0) {
-                // Phase 9: sort the active soft bodies, allocate and initialize the SoftBodyUpdateContexts and (after
-                // this scope) create the SoftBodyFinalize / SoftBodySimulate / SoftBodyCollide jobs and return (no soft
-                // body can be created before Phase 9)
-                @panic("PhysicsSystem.jobSoftBodyPrepare: soft bodies: Phase 9");
-            }
-        }
+            // Quit if there are no active soft bodies
+            if (active_bodies.items.len == 0)
+                break :blk false;
 
-        // Quit if there are no active soft bodies
+            // Sort to get a deterministic update order
+            quickSort(BodyID, active_bodies.items, {}, struct {
+                fn lessThan(_: void, id1: BodyID, id2: BodyID) bool {
+                    return id1.lessThan(id2);
+                }
+            }.lessThan);
+
+            // Allocate soft body contexts
+            context.soft_body_update_contexts = TempArray(SoftBodyUpdateContext).alloc(context.temp_allocator, active_bodies.items.len) catch {
+                // Zolt (R17): latch the error and take the "no active soft bodies" path
+                context.setOutOfMemory();
+                break :blk false;
+            };
+
+            // Initialize soft body contexts
+            for (context.soft_body_update_contexts.items, active_bodies.items) |*sb_ctx, body_id| {
+                sb_ctx.* = .{};
+                const body = self.body_manager.getBodyMut(body_id);
+                const mp = SoftBodyMotionProperties.fromBase(body.getMotionPropertiesMut());
+                mp.initializeUpdateContext(context.step_delta_time, body, self, sb_ctx);
+            }
+            break :blk true;
+        };
+
         // (Zolt: the kick happens after the scope of the grant, Jolt kicks inside it, see jobFindCollisions)
-        {
+        if (!has_active_soft_bodies) {
             // Kick the next step
             if (step.start_next_step.isValid())
                 step.start_next_step.removeDependency(.{});
             return;
         }
+
+        // We're ready to collide the first soft body
+        context.soft_body_to_collide.store(0, .release);
+
+        // Determine number of jobs to spawn
+        const num_soft_body_jobs = context.getMaxConcurrency();
+
+        // Create finalize job
+        step.soft_body_finalize = context.job_system.createJob("SoftBodyFinalize", color_soft_body_finalize, .init(struct {
+            fn call(c: *PhysicsUpdateContext, s: *Step) void {
+                // Zolt (R17): a protocol job, it always frees the contexts
+                c.physics_system.jobSoftBodyFinalize(c);
+
+                // Kick the next step
+                if (s.start_next_step.isValid())
+                    s.start_next_step.removeDependency(.{});
+            }
+        }.call, .{ context, step }), .{ .num_dependencies = num_soft_body_jobs }) catch {
+            // Zolt (R17): not an error, do the work of all soft body jobs here
+            self.softBodyUpdateInline(context);
+
+            // Kick the next step
+            if (step.start_next_step.isValid())
+                step.start_next_step.removeDependency(.{});
+            return;
+        }; // depends on: soft body simulate
+        context.barrier.addJob(&step.soft_body_finalize);
+
+        // Create simulate jobs
+        PhysicsUpdateContext.resizeHandles(&step.soft_body_simulate, num_soft_body_jobs);
+        var num_simulate_jobs: u32 = 0;
+        for (step.soft_body_simulate.slice(), 0..) |*h, i| {
+            h.* = context.job_system.createJob("SoftBodySimulate", color_soft_body_simulate, .init(struct {
+                fn call(s: *Step, thread_index: u32) void {
+                    s.context.physics_system.jobSoftBodySimulate(s.context, thread_index);
+
+                    s.soft_body_finalize.removeDependency(.{});
+                }
+            }.call, .{ step, @as(u32, @intCast(i)) }), .{ .num_dependencies = num_soft_body_jobs }) catch continue; // depends on: soft body collide (Zolt (R17): the handle of a job that cannot be created stays invalid)
+            num_simulate_jobs += 1;
+        }
+        if (num_simulate_jobs == 0) {
+            // Zolt (R17): no Simulate job could be created. Create no Collide job, collide and simulate here, then let
+            // Finalize run.
+            self.jobSoftBodyCollide(context);
+            self.jobSoftBodySimulate(context, 0);
+            step.soft_body_finalize.removeDependency(.{ .count = @intCast(num_soft_body_jobs) });
+            return;
+        }
+        if (num_simulate_jobs < num_soft_body_jobs) {
+            // Zolt (R17): the Simulate jobs that could not be created do not keep Finalize waiting
+            step.soft_body_finalize.removeDependency(.{ .count = @intCast(num_soft_body_jobs - num_simulate_jobs) });
+        }
+        addValidJobs(context.barrier, step.soft_body_simulate.constSlice());
+
+        // Create collision jobs
+        PhysicsUpdateContext.resizeHandles(&step.soft_body_collide, num_soft_body_jobs);
+        var num_missing_collide_jobs: u32 = 0;
+        for (step.soft_body_collide.slice()) |*h| {
+            h.* = context.job_system.createJob("SoftBodyCollide", color_soft_body_collide, .init(struct {
+                fn call(c: *PhysicsUpdateContext, s: *Step) void {
+                    c.physics_system.jobSoftBodyCollide(c);
+
+                    for (s.soft_body_simulate.constSlice()) |*sh| {
+                        if (sh.isValid()) // Zolt (R17): skip the Simulate jobs that could not be created
+                            sh.removeDependency(.{});
+                    }
+                }
+            }.call, .{ context, step }), .{}) catch {
+                // Zolt (R17): not an error, collide below
+                num_missing_collide_jobs += 1;
+                continue;
+            }; // depends on: nothing
+        }
+        addValidJobs(context.barrier, step.soft_body_collide.constSlice());
+
+        if (num_missing_collide_jobs > 0) {
+            // Zolt (R17): take the soft bodies that the missing Collide jobs would have taken, then release the Simulate
+            // jobs from the dependencies of the missing Collide jobs
+            self.jobSoftBodyCollide(context);
+            for (step.soft_body_simulate.constSlice()) |*h| {
+                if (h.isValid())
+                    h.removeDependency(.{ .count = @intCast(num_missing_collide_jobs) });
+            }
+        }
+    }
+
+    /// Zolt (R17): add the jobs of `handles` to the barrier, without the handles of the jobs that could not be created
+    fn addValidJobs(barrier: *JobSystem.Barrier, handles: []const JobHandle) void {
+        for (handles) |*h| {
+            if (!h.isValid()) {
+                for (handles) |*valid| {
+                    if (valid.isValid())
+                        barrier.addJob(valid);
+                }
+                return;
+            }
+        }
+        barrier.addJobs(handles);
+    }
+
+    /// Zolt (R17): the SoftBodyFinalize job could not be created. Do the work of the Collide, Simulate and Finalize jobs
+    /// here, each under the grants of the job it replaces.
+    fn softBodyUpdateInline(self: *Self, context: *PhysicsUpdateContext) void {
+        self.jobSoftBodyCollide(context);
+        self.jobSoftBodySimulate(context, 0);
+        self.jobSoftBodyFinalize(context);
+    }
+
+    /// Zolt (R17): checks the out of memory latch before every claim. When determineCollidingShapes cannot allocate, the
+    /// error is latched and the claims stop; SoftBodyFinalize clears the partial colliding lists.
+    fn jobSoftBodyCollide(self: *const Self, context: *PhysicsUpdateContext) void {
+        // Reading rigid body positions and velocities
+        var grant: BodyAccess.Grant = .init(.read, .read);
+        defer grant.deinit();
+
+        while (!context.isOutOfMemory()) {
+            // Fetch the next soft body
+            const sb_idx = context.soft_body_to_collide.fetchAdd(1, .acquire);
+            if (sb_idx >= context.getNumSoftBodies())
+                break;
+
+            // Do a broadphase check
+            const sb_ctx = &context.soft_body_update_contexts.items[sb_idx];
+            sb_ctx.motion_properties.determineCollidingShapes(sb_ctx, self, self.getBodyLockInterfaceNoLock()) catch context.setOutOfMemory();
+        }
+    }
+
+    /// Zolt (R17): checks the out of memory latch at entry only, never inside parallelUpdate: the other Simulate jobs wait
+    /// for the batches that this one claimed. A poisoned Simulate job does nothing (its closure still removes its Finalize
+    /// dependency). Simulate never allocates.
+    fn jobSoftBodySimulate(self: *const Self, context: *PhysicsUpdateContext, thread_index: u32) void {
+        // Updating velocities of soft bodies, allow the contact listener to read the soft body state
+        var grant: BodyAccess.Grant = .init(.read_write, .read);
+        defer grant.deinit();
+
+        if (context.isOutOfMemory())
+            return;
+
+        // Calculate at which body we start to distribute the workload across the threads
+        const num_soft_bodies = context.getNumSoftBodies();
+        const start_idx = thread_index * num_soft_bodies / context.getMaxConcurrency();
+
+        // Keep running partial updates until everything has been updated
+        const did_work = @intFromEnum(SoftBodyMotionProperties.Status.did_work);
+        var status: u32 = undefined;
+        while (true) {
+            // Reset status
+            status = 0;
+
+            // Update all soft bodies
+            var i: u32 = 0;
+            while (i < num_soft_bodies) : (i += 1) {
+                // Fetch the soft body context
+                const sb_ctx = &context.soft_body_update_contexts.items[(start_idx + i) % num_soft_bodies];
+
+                // To avoid trashing the cache too much, we prefer to stick to one soft body until we cannot progress it any further
+                var sb_status: u32 = undefined;
+                while (true) {
+                    sb_status = @intFromEnum(sb_ctx.motion_properties.parallelUpdate(sb_ctx, &self.physics_settings));
+                    status |= sb_status;
+                    if (sb_status != did_work)
+                        break;
+                }
+            }
+
+            // If we didn't perform any work, yield the thread so that something else can run
+            if ((status & did_work) == 0)
+                std.Thread.yield() catch {};
+
+            if (status == @intFromEnum(SoftBodyMotionProperties.Status.done))
+                break;
+        }
+    }
+
+    /// Zolt (R17): a protocol job. When poisoned it skips the velocity, position, bounds and sleep updates (the contexts
+    /// may not be done). It always clears the colliding shapes and sensors of every context (they hold shape references)
+    /// and frees the contexts at Jolt's position.
+    fn jobSoftBodyFinalize(self: *Self, context: *PhysicsUpdateContext) void {
+        // Updating rigid body velocities and soft body positions / velocities
+        var grant: BodyAccess.Grant = .init(.read_write, .read_write);
+        defer grant.deinit();
+
+        // Can activate and deactivate bodies
+        var grant_active: BodyManager.GrantActiveBodiesAccess = .init(true, true);
+        defer grant_active.deinit();
+
+        if (context.isOutOfMemory()) {
+            // Zolt (R17): release what the Collide jobs collected
+            for (context.soft_body_update_contexts.items) |*sb_ctx|
+                sb_ctx.motion_properties.clearCollidingShapesAndSensors();
+        } else {
+            const bodies_batch = 64;
+            var bodies_to_update_bounds: [bodies_batch]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
+            var num_bodies_to_update_bounds: usize = 0;
+            var bodies_to_put_to_sleep: [bodies_batch]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
+            var num_bodies_to_put_to_sleep: usize = 0;
+
+            for (context.soft_body_update_contexts.items) |*sb_ctx| {
+                // Apply the rigid body velocity deltas
+                sb_ctx.motion_properties.updateRigidBodyVelocities(sb_ctx, self.getBodyInterfaceNoLockMut());
+
+                // Update the position
+                sb_ctx.body.setPositionAndRotationInternal(sb_ctx.body.getPosition().addVec3(sb_ctx.delta_position), sb_ctx.body.getRotation(), .{ .reset_sleep_timer = false });
+
+                const id = sb_ctx.body.getID();
+                bodies_to_update_bounds[num_bodies_to_update_bounds] = id;
+                num_bodies_to_update_bounds += 1;
+                if (num_bodies_to_update_bounds == bodies_batch) {
+                    // Buffer full, flush now
+                    self.getBroadPhase().notifyBodiesAABBChanged(bodies_to_update_bounds[0..num_bodies_to_update_bounds], .{ .take_lock = false });
+                    num_bodies_to_update_bounds = 0;
+                }
+
+                if (sb_ctx.can_sleep == .can_sleep) {
+                    // This body should go to sleep
+                    bodies_to_put_to_sleep[num_bodies_to_put_to_sleep] = id;
+                    num_bodies_to_put_to_sleep += 1;
+                    if (num_bodies_to_put_to_sleep == bodies_batch) {
+                        self.body_manager.deactivateBodies(bodies_to_put_to_sleep[0..num_bodies_to_put_to_sleep]);
+                        num_bodies_to_put_to_sleep = 0;
+                    }
+                }
+            }
+
+            // Notify change bounds on requested bodies
+            if (num_bodies_to_update_bounds > 0)
+                self.getBroadPhase().notifyBodiesAABBChanged(bodies_to_update_bounds[0..num_bodies_to_update_bounds], .{ .take_lock = false });
+
+            // Notify bodies to go to sleep
+            if (num_bodies_to_put_to_sleep > 0)
+                self.body_manager.deactivateBodies(bodies_to_put_to_sleep[0..num_bodies_to_put_to_sleep]);
+        }
+
+        // Free soft body contexts
+        context.soft_body_update_contexts.free(context.temp_allocator);
     }
 
     // -----------------------------------------------------------------------------------------------------------------

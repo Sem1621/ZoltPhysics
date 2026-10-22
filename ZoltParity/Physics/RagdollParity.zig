@@ -26,13 +26,15 @@
 //!   sides, or the same restored settings (Jolt does not check the stream after the part count, the group filter ID of
 //!   a part, the has-constraint flag and the additional constraint count, so some truncations restore settings with
 //!   fewer parts, a last part without group filter or constraint, or no additional constraints).
-//! Release only (`-Doptimize=ReleaseFast`, Jolt asserts in its debug build and so does Zolt in safe builds): Stabilize of
-//! an inertia tensor with NaNs (it returns false), CalculateConstraintPriorities on skeletons whose parents come after
-//! their children and with a base priority that overflows.
+//! Release only (Jolt asserts on these inputs in its debug build, its release build continues): Stabilize of an inertia
+//! tensor with NaNs (it returns false), CalculateConstraintPriorities on skeletons whose parents come after their
+//! children and with a base priority that overflows. They run in every build: Zolt's asserts at these sites are
+//! recoverable, and the asserts of both sides are counted per case (R8, ParityHooks.ReleaseAsserts).
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
+const ParityHooks = @import("../ParityHooks.zig");
 const ConstraintsParity = @import("ConstraintsParity.zig");
 
 const Checker = fw.Checker;
@@ -896,8 +898,10 @@ fn checkResave(allocator: Allocator, checker: *Checker, case: usize, what: []con
     }
 }
 
-/// Run `num_cases` random cases (release_only: with the cases where Jolt asserts in its debug build)
-fn runCases(seed: u32, num_cases: usize, release_only: bool) !Stats {
+/// Run `num_cases` random cases (`asserts`: with the cases where Jolt asserts in its debug build, the asserts of both
+/// sides counted, R8)
+fn runCases(seed: u32, num_cases: usize, asserts: ?*ParityHooks.ReleaseAsserts) !Stats {
+    const release_only = asserts != null;
     const allocator = std.testing.allocator;
     var g: Gen = .{ .rng = .{ .state = seed } };
     var stats: Stats = .{};
@@ -916,6 +920,7 @@ fn runCases(seed: u32, num_cases: usize, release_only: bool) !Stats {
         countPriorityBranches(&desc, &stats);
 
         // Both sides build the settings, apply the operations and save them
+        if (asserts) |a| a.begin();
         var jolt_result = std.mem.zeroes(Result);
         const jolt_size = jolt.jolt_rp_run(&tables, &desc, &jolt_result, jolt_bytes.ptr, bytes_capacity);
         try std.testing.expect(jolt_size <= bytes_capacity);
@@ -923,6 +928,7 @@ fn runCases(seed: u32, num_cases: usize, release_only: bool) !Stats {
         var zolt_bytes: std.ArrayList(u8) = .empty;
         defer zolt_bytes.deinit(allocator);
         try zoltRun(allocator, &tables, &desc, &zolt_result, &zolt_bytes);
+        if (asserts) |a| a.end(case);
         checkResult(&run_checker, case, "run", &zolt_result, &jolt_result);
         if (!std.mem.eql(u8, zolt_bytes.items, jolt_bytes[0..jolt_size])) {
             if (bytes_checker.mismatches < 5)
@@ -967,7 +973,7 @@ fn runCases(seed: u32, num_cases: usize, release_only: bool) !Stats {
 }
 
 test "Ragdoll parity: RagdollSettings" {
-    const stats = try runCases(0x5a3c1e07, 400, false);
+    const stats = try runCases(0x5a3c1e07, 400, null);
 
     // The cases reach what they are written for
     try std.testing.expect(stats.stabilize_true > 50);
@@ -981,8 +987,12 @@ test "Ragdoll parity: RagdollSettings" {
 }
 
 test "Ragdoll parity: RagdollSettings (release only)" {
-    if (Core.enable_asserts) return error.SkipZigTest;
-    const stats = try runCases(0x0badcafe, 200, true);
+    // Jolt asserts on these cases, Zolt's asserts are recoverable and counted on both sides (R8)
+    var asserts: ParityHooks.ReleaseAsserts = undefined;
+    asserts.init("RagdollSettings release only");
+    defer asserts.deinit();
+    const stats = try runCases(0x0badcafe, 200, &asserts);
+    try asserts.finish();
     // The cases reach the branches that Jolt asserts on: a NaN inertia that Stabilize cannot decompose,
     // CalculateConstraintPriorities with an overflowing base priority and of an unordered skeleton
     try std.testing.expect(stats.stabilize_false > 5);

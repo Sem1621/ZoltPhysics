@@ -1953,7 +1953,7 @@ test "Compounds parity: GetSubmergedVolume and CollideSoftBodyVertices" {
         const plane = arr4(Plane.fromPointAndNormal(vec3(gen.vec(-5, 5)), normal).normal_and_constant);
         var jolt_values: [5]f32 = undefined;
         jolt.jolt_compounds_submerged_volume(&desc, &transform, &scale, &plane, &jolt_values);
-        const r = shape.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)));
+        const r = shape.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)), .{});
         const zolt_values = [_]f32{ r.total_volume, r.submerged_volume } ++ arr3(r.center_of_buoyancy);
         volumes.check(.{ desc.kind, desc.num_sub_shapes, scale, transform, plane }, zolt_values, jolt_values);
 

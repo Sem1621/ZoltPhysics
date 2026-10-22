@@ -3,7 +3,9 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_ABSTRACT / JPH_IMPLEMENT_SERIALIZABLE_ABSTRACT(VehicleControllerSettings): `rtti`. Jolt
 //!   adds no attributes, only the base class SerializableObject.
-//! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`VehicleController::Draw`, pure virtual): an option-gated vtable entry
+//!   (`virtual.OptionalVirtual`, no slot without `-Ddebug_renderer`) with a gated dispatcher
+//!   (RemainingFeaturesArchitecture.md R2). Every controller implements it, like in Jolt.
 //! - CharacterVehicleArchitecture E2:
 //!   - `VehicleControllerSettings` is an abstract pattern A root with `ref_count` (RefTarget<VehicleControllerSettings>):
 //!     `saveBinaryState`, `restoreBinaryState` and `constructController` are pure virtual. The settings classes declare
@@ -25,6 +27,8 @@ const Allocator = std.mem.Allocator;
 const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const SerializableObject = @import("../../ObjectStream/SerializableObject.zig").SerializableObject;
 const virtual = @import("../../Core/Virtual.zig");
+const Core = @import("../../Core/Core.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const ReferenceFile = @import("../../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
 const RefCount = ReferenceFile.RefCount;
@@ -166,7 +170,8 @@ pub const VehicleController = struct {
         saveState: *const fn (self: *const VehicleController, stream: *StateRecorder) void,
         restoreState: *const fn (self: *VehicleController, stream: *StateRecorder) void,
 
-        // TODO(debug_renderer): Draw (pure virtual, JPH_DEBUG_RENDERER)
+        // Drawing interface (JPH_DEBUG_RENDERER: no slot without -Ddebug_renderer)
+        draw: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const VehicleController, renderer: *DebugRenderer) void),
     };
 
     vtable: *const VTable,
@@ -241,6 +246,12 @@ pub const VehicleController = struct {
         self.vtable.restoreState(self, stream);
     }
 
+    // Drawing interface (JPH_DEBUG_RENDERER only: a gated dispatcher, `void` without -Ddebug_renderer)
+    pub const draw = if (Core.debug_renderer) drawDispatch else {};
+    fn drawDispatch(self: *const VehicleController, renderer: *DebugRenderer) void {
+        self.vtable.draw(self, renderer);
+    }
+
     /// Abstract: every virtual function is pure virtual
     pub const impl = struct {};
 };
@@ -281,7 +292,7 @@ const TestControllerSettings = struct {
 };
 
 const TestController = struct {
-    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState };
+    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState, .draw };
 
     base: VehicleController,
     value: f32,
@@ -323,6 +334,11 @@ const TestController = struct {
 
     pub fn restoreState(self: *TestController, stream: *StateRecorder) void {
         stream.read(&self.value);
+    }
+
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestController, renderer: *DebugRenderer) void {
+        renderer.drawMarker(self.base.constraint.getVehicleBody().getPosition(), @import("../../Core/Color.zig").Color.white, self.value);
     }
 };
 

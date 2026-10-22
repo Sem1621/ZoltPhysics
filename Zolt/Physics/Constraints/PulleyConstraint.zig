@@ -3,7 +3,8 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PulleyConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint): a gated declaration (RemainingFeaturesArchitecture.md R2), the text through
+//! StringTools.cppFixed (R7).
 //!
 //! - `SetLength` asserts `inMinLength >= 0.0f && inMinLength <= inMaxLength`, which user input can violate: the
 //!   assert only runs with `Core.enable_asserts`, ReleaseFast keeps Jolt's release behavior. The constructor does not
@@ -23,6 +24,9 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const RVec3 = @import("../../Math/Real.zig").RVec3;
 const Body = @import("../Body/Body.zig").Body;
@@ -165,7 +169,7 @@ pub const PulleyConstraintSettings = struct {
 
 /// A pulley constraint.
 pub const PulleyConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -364,7 +368,30 @@ pub const PulleyConstraint = struct {
         return false;
     }
 
-    // TODO(debug_renderer): DrawConstraint
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const PulleyConstraint, renderer: *DebugRenderer) void {
+        // Color according to length vs min/max length
+        const current_length = self.getCurrentLength();
+        var color = Color.green;
+        if (current_length < self.min_length) {
+            color = Color.yellow;
+        } else if (current_length > self.max_length) {
+            color = Color.red;
+        }
+
+        // Draw constraint
+        renderer.drawLine(self.world_space_position1, self.fixed_position1, color);
+        renderer.drawLine(self.fixed_position1, self.fixed_position2, color);
+        renderer.drawLine(self.fixed_position2, self.world_space_position2, color);
+
+        // Draw current length
+        // StringFormat("%.2f", ...): its buffer holds 1023 characters
+        var text_buffer: [1023]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&text_buffer);
+        writer.print("{f}", .{StringTools.cppFixed(current_length, 2)}) catch {};
+        renderer.drawText3D(self.fixed_position1.add(self.fixed_position2).mulScalar(0.5), writer.buffered(), .{});
+    }
 
     pub fn saveState(self: *const PulleyConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState

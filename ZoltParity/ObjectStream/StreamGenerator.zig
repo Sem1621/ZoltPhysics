@@ -227,11 +227,6 @@ pub const Generator = struct {
 
     /// A count that the array accepts (C++ probe): 0 to 3 elements, or the size of a C array
     fn pickCount(self: *Generator, a: *const Attribute) !usize {
-        // Phase 9 classes are never created (PhysicsScene.mSoftBodies stays empty)
-        if (a.element == .value and schema_mod.isPhase9(a.class_name)) {
-            if (a.counts & 1 == 0) return error.HarnessError;
-            return 0;
-        }
         const small = a.counts & 0xf;
         if (small != 0) {
             while (true) {
@@ -444,7 +439,7 @@ pub const Generator = struct {
             .abstract_object => {
                 var abstract: std.ArrayList(usize) = .empty;
                 for (self.schema.classes, 0..) |c, i| {
-                    if (c.abstract and !c.phase9 and self.findDeclaration(c.name) == null) try abstract.append(self.arena, i);
+                    if (c.abstract and self.findDeclaration(c.name) == null) try abstract.append(self.arena, i);
                 }
                 if (abstract.items.len == 0) return false;
                 const c = &self.schema.classes[abstract.items[r.uintLessThan(usize, abstract.items.len)]];
@@ -595,7 +590,7 @@ pub const Generator = struct {
         const index = self.schema.find(class) orelse return true; // A primitive name, an unknown class
         for (self.schema.classes[index].attributes) |a| {
             if (a.depth >= 2) return false;
-            // An attribute that was not probed (an abstract or Phase 9 class) can be a Ref too
+            // An attribute that was not probed (of an abstract class) can be a Ref too
             if (a.element == .reference or a.element == .unknown) return false;
             if (a.element == .value and !std.mem.eql(u8, a.class_name, class) and !self.skippable(a.class_name)) return false;
         }
@@ -964,7 +959,6 @@ fn testSchema(arena: Allocator, classes: []const TestClass) !Schema {
         .abstract = false,
         .bases = t.bases,
         .attributes = try arena.dupe(Attribute, t.attributes),
-        .phase9 = false,
         .outside = false,
         .primitive = false,
         .zolt = zolt.RTTI.of(zolt.SpringSettings), // Any RTTI: the class is declared and ready

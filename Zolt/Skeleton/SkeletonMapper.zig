@@ -214,7 +214,7 @@ pub const SkeletonMapper = struct {
     /// @param neutral_pose2 Neutral pose of the target skeleton (model space), inNeutralPose1 and inNeutralPose2 must match as closely as possible, preferably the position of the mappable joints should be identical.
     /// @param opts.can_map_joint Function that checks if joints in skeleton 1 and skeleton 2 are equal.
     pub fn initialize(self: *SkeletonMapper, skeleton1: *const Skeleton, neutral_pose1: []const Mat44, skeleton2: *const Skeleton, neutral_pose2: []const Mat44, opts: struct { can_map_joint: CanMapJoint = .default }) Allocator.Error!void {
-        if (Core.enable_asserts) std.debug.assert(self.mappings.items.len == 0 and self.chains.items.len == 0 and self.unmapped.items.len == 0); // Should not be initialized yet
+        if (Core.enable_asserts) Core.assertRecoverable(self.mappings.items.len == 0 and self.chains.items.len == 0 and self.unmapped.items.len == 0, "Should not be initialized yet", @src());
 
         const allocator = self.allocator;
 
@@ -233,7 +233,7 @@ pub const SkeletonMapper = struct {
         // Count joints
         const n1 = skeleton1.getJointCount();
         const n2 = skeleton2.getJointCount();
-        if (Core.enable_asserts) std.debug.assert(n1 <= n2); // Skeleton 1 should be the low detail skeleton!
+        if (Core.enable_asserts) Core.assertRecoverable(n1 <= n2, "Skeleton 1 should be the low detail skeleton!", @src());
 
         // Keep track of mapped joints (initialize to false)
         const mapped1 = try allocator.alloc(bool, n1);
@@ -344,7 +344,7 @@ pub const SkeletonMapper = struct {
     /// @param locked_translations An array of bools the size of inSkeleton2->GetJointCount(), for each joint indicating if the joint is locked.
     /// @param neutral_pose2 Neutral pose to take reference translations from
     pub fn lockTranslations(self: *SkeletonMapper, skeleton2: *const Skeleton, locked_translations: []const bool, neutral_pose2: []const Mat44) Allocator.Error!void {
-        if (Core.enable_asserts) std.debug.assert(skeleton2.areJointsCorrectlyOrdered());
+        if (Core.enable_asserts) Core.assertRecoverable(skeleton2.areJointsCorrectlyOrdered(), "inSkeleton2->AreJointsCorrectlyOrdered()", @src());
 
         const n = skeleton2.getJointCount();
 
@@ -379,7 +379,7 @@ pub const SkeletonMapper = struct {
     pub fn lockAllTranslations(self: *SkeletonMapper, skeleton2: *const Skeleton, neutral_pose2: []const Mat44) Allocator.Error!void {
         if (self.mappings.items.len == 0)
             @panic("Call Initialize first!"); // Jolt asserts, its release build reads mMappings[0] of an empty array
-        if (Core.enable_asserts) std.debug.assert(skeleton2.areJointsCorrectlyOrdered());
+        if (Core.enable_asserts) Core.assertRecoverable(skeleton2.areJointsCorrectlyOrdered(), "inSkeleton2->AreJointsCorrectlyOrdered()", @src());
 
         // The first mapping is the top most one (remember that joints should be ordered so that parents go before children).
         // Because we created the mappings from the lowest joint first, this should contain the first mappable joint.
@@ -457,7 +457,7 @@ pub const SkeletonMapper = struct {
         // All unmapped joints take the local pose and convert it to model space
         for (self.unmapped.items) |*u| {
             if (u.parent_joint_idx >= 0) {
-                if (Core.enable_asserts) std.debug.assert(u.parent_joint_idx < u.joint_idx); // Joints must be ordered: parents first
+                if (Core.enable_asserts) Core.assertRecoverable(u.parent_joint_idx < u.joint_idx, "Joints must be ordered: parents first", @src());
                 out_pose2_model_space[@intCast(u.joint_idx)] = out_pose2_model_space[@intCast(u.parent_joint_idx)].mul(pose2_local_space[@intCast(u.joint_idx)]);
             } else out_pose2_model_space[@intCast(u.joint_idx)] = pose2_local_space[@intCast(u.joint_idx)];
         }
@@ -933,11 +933,16 @@ fn initializeTwiceOutOfMemory(allocator: Allocator) !void {
     const first = MapperState.of(&mapper);
 
     // Jolt's release build appends a second initialization (its chain search also runs over the first mappings); when an
-    // allocation fails, Zolt removes what the second call added
+    // allocation fails, Zolt removes what the second call added. Jolt asserts "Should not be initialized yet" first.
+    var expect_assert: @import("../Core/IssueReporting.zig").ExpectAssert = undefined;
+    expect_assert.init(1);
+    errdefer expect_assert.restore();
     mapper.initialize(&s.skeleton1, &s.poses.pose1, &s.skeleton2, &s.poses.pose2, .{}) catch |err| {
+        try expect_assert.finish();
         try first.expectEqual(&MapperState.of(&mapper));
         return err;
     };
+    try expect_assert.finish();
     try testing.expectEqual(2 * first.num_mappings, mapper.getMappings().len);
     try testing.expectEqual(2 * first.num_chains, mapper.getChains().len);
     try testing.expectEqual(2 * first.num_unmapped, mapper.getUnmapped().len);
@@ -948,8 +953,7 @@ fn initializeTwiceOutOfMemory(allocator: Allocator) !void {
     try first.expectEqual(&first_part);
 }
 
-test "SkeletonMapper: out of memory in a second initialize (release only)" {
-    if (Core.enable_asserts) return error.SkipZigTest; // Jolt asserts "Should not be initialized yet"
+test "SkeletonMapper: out of memory in a second initialize (Jolt's release behavior)" {
     try testing.checkAllAllocationFailures(testing.allocator, initializeTwiceOutOfMemory, .{});
 }
 

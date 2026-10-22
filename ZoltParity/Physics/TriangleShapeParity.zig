@@ -396,7 +396,7 @@ fn zoltProperties(shape: *Shape, input: *const PropertiesInput) PropertiesOutput
     var face: Shape.SupportingFace = .empty;
     shape.getSupportingFace(.empty, vec3(input.direction), scale, transform, &face);
     storeFace(&face, &o.face_count, &o.face);
-    const submerged = shape.getSubmergedVolume(transform, scale, .fromVec4(vec4(input.plane)));
+    const submerged = shape.getSubmergedVolume(transform, scale, .fromVec4(vec4(input.plane)), .{});
     o.submerged = [_]f32{ submerged.total_volume, submerged.submerged_volume } ++ arr3(submerged.center_of_buoyancy);
     var id: SubShapeID = .empty;
     id.setValue(input.sub_shape_id);

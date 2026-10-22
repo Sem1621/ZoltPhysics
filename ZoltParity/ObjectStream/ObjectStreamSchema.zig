@@ -26,6 +26,9 @@ pub extern fn jolt_os_default_write(name: [*:0]const u8) c_int;
 pub extern fn jolt_os_resave(data: [*]const u8, size: usize, name: [*:0]const u8) c_int;
 pub extern fn jolt_os_read_word(word: [*]const u8, size: usize, word_type: c_int, bits: *u64) c_int;
 pub extern fn jolt_os_asset_binary_state(data: [*]const u8, size: usize, name: [*:0]const u8) c_int;
+pub extern fn jolt_os_scene_binary_state(data: [*]const u8, size: usize, save_shapes: c_int, save_group_filter: c_int) c_int;
+pub extern fn jolt_os_scene_binary_resave(data: [*]const u8, size: usize, save_shapes: c_int, save_group_filter: c_int) c_int;
+pub extern fn jolt_os_hair_binary_resave(data: [*]const u8, size: usize) c_int;
 pub extern fn jolt_os_unit_test_write(binary: c_int) c_int;
 pub extern fn jolt_os_unit_test_resave(data: [*]const u8, size: usize, binary: c_int, ref_count: *u32, casts_ok: *c_int) c_int;
 pub extern fn jolt_os_quarantine_check() c_int;
@@ -47,25 +50,6 @@ pub fn quarantined(result: c_int) error{HarnessError}!c_int {
     return result;
 }
 
-/// Phase 9 (S17): SoftBodyCreationSettings, SoftBodySharedSettings and its 11 nested classes. P1 skips them and drops
-/// the attributes of other classes whose class is one of them (PhysicsScene.mSoftBodies); classes that reach them are
-/// compared by cross-reading. Phase 9 removes this list.
-pub const phase9_classes = [_][]const u8{
-    "SoftBodyCreationSettings",
-    "SoftBodySharedSettings",
-    "SoftBodySharedSettings::Vertex",
-    "SoftBodySharedSettings::Face",
-    "SoftBodySharedSettings::Edge",
-    "SoftBodySharedSettings::RodStretchShear",
-    "SoftBodySharedSettings::RodBendTwist",
-    "SoftBodySharedSettings::DihedralBend",
-    "SoftBodySharedSettings::Volume",
-    "SoftBodySharedSettings::InvBind",
-    "SoftBodySharedSettings::SkinWeight",
-    "SoftBodySharedSettings::Skinned",
-    "SoftBodySharedSettings::LRA",
-};
-
 /// JPH_IMPLEMENT_SERIALIZABLE_OUTSIDE_CLASS: CreateObject uses the global new, which the allocation hooks of the C++ side
 /// do not zero, so P2 skips their defaults. The defaults of Plane, IndexedTriangleNoMaterial and IndexedTriangle are
 /// compared inside PlaneShapeSettings and MeshShapeSettings. No Jolt class holds an AABox, a Triangle or a default
@@ -82,14 +66,20 @@ fn contains(list: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-pub fn isPhase9(name: []const u8) bool {
-    return contains(&phase9_classes, name);
-}
-
 // The Zolt side ------------------------------------------------------------------------------------------------------
 
-/// The Zolt factory that P1 to P7 compare with the C++ Factory after RegisterTypes: `RegisterTypes.factory` (S8).
-pub const factory: *const Factory = &zolt.RegisterTypes.factory;
+/// The Zolt factory that P1 to P7 compare with the C++ Factory after RegisterTypes and RegisterHair:
+/// `RegisterTypes.factory` (S8) with `RegisterHair.serializable_types` (RemainingFeaturesArchitecture.md R14), the
+/// factory of an application that adds them to its `zolt_user_types`.
+pub const factory: *const Factory = &factory_with_hair;
+
+const factory_with_hair: Factory = .init(zolt.RegisterTypes.factory_types ++ zolt.RegisterTypes.user_serializable_types ++ hair_types);
+
+const hair_types: []const type = blk: {
+    var list: []const type = &.{};
+    for (zolt.RegisterHair.serializable_types) |T| list = list ++ &[_]type{T};
+    break :blk list;
+};
 
 /// True when T declares its RTTI (`pub const rtti = RTTI.declare(...)`)
 pub fn isSerializable(comptime T: type) bool {
@@ -124,11 +114,11 @@ pub const zolt_classes: []const ZoltClass = blk: {
         if (@TypeOf(@field(zolt, d.name)) != type) continue;
         const T = @field(zolt, d.name);
         if (!isSerializable(T)) continue;
-        list = addClass(list, T);
+        list = addClass(list, T, d.name);
         for (declsOf(T)) |nd| {
             if (@TypeOf(@field(T, nd.name)) != type) continue;
             const N = @field(T, nd.name);
-            if (isSerializable(N)) list = addClass(list, N);
+            if (isSerializable(N)) list = addClass(list, N, d.name ++ "." ++ nd.name);
         }
     }
     break :blk list;
@@ -142,8 +132,10 @@ fn declsOf(comptime T: type) []const std.builtin.Type.Declaration {
 }
 
 /// Add T, unless its RTTI is already there or is the RTTI of another class (a user class that declares the RTTI of its
-/// parent, S3): the Zig type name must end in the RTTI name ("::" is ".")
-fn addClass(comptime list: []const ZoltClass, comptime T: type) []const ZoltClass {
+/// parent, S3): the Zig type name must end in the RTTI name ("::" is "."), or the path under which the module exports
+/// the class must be the RTTI name (`HairSettings.SkinWeight` is an alias of a shader struct that carries the RTTI of
+/// HairSettings::SkinWeight, RemainingFeaturesArchitecture.md R14)
+fn addClass(comptime list: []const ZoltClass, comptime T: type, comptime path: []const u8) []const ZoltClass {
     for (list) |c| {
         if (c.rtti == T.rtti) return list;
     }
@@ -157,7 +149,7 @@ fn addClass(comptime list: []const ZoltClass, comptime T: type) []const ZoltClas
         } else dotted = dotted ++ name[i .. i + 1];
     }
     const full = @typeName(T);
-    if (!(std.mem.eql(u8, full, dotted) or std.mem.endsWith(u8, full, "." ++ dotted))) return list;
+    if (!(std.mem.eql(u8, full, dotted) or std.mem.endsWith(u8, full, "." ++ dotted) or std.mem.eql(u8, path, dotted))) return list;
     return list ++ &[_]ZoltClass{.{ .rtti = T.rtti, .pending = @hasDecl(T, "serialization_pending"), .enums = enumAttributes(T) }};
 }
 
@@ -289,25 +281,22 @@ pub const Class = struct {
     abstract: bool,
     bases: []const []const u8,
     attributes: []Attribute,
-    phase9: bool,
     outside: bool,
     primitive: bool,
     /// The class in the Zolt factory
     zolt: ?*const RTTI = null,
     /// Zolt: the first pending class that this class reaches, null when none
     waits_for: ?*const RTTI = null,
-    /// The C++ class reaches a Phase 9 class (PhysicsScene.mSoftBodies): bytes are compared by cross-reading (S17)
-    cross: bool = false,
 
-    /// Zolt declares the class and everything it reaches: every layer compares it. Phase 8 is done, so every class
-    /// but the Phase 9 classes is ready (P1 fails otherwise).
+    /// Zolt declares the class and everything it reaches: every layer compares it. Phase 8 is done and the soft body
+    /// classes are declared, so every class is ready (P1 fails otherwise).
     pub fn ready(self: *const Class) bool {
-        return self.zolt != null and self.waits_for == null and !self.phase9;
+        return self.zolt != null and self.waits_for == null;
     }
 
     /// A class whose objects the generators create and whose defaults P2 compares
     pub fn creatable(self: *const Class) bool {
-        return !self.abstract and !self.phase9 and !self.outside and !self.primitive;
+        return !self.abstract and !self.outside and !self.primitive;
     }
 };
 
@@ -362,7 +351,7 @@ fn build(arena: Allocator) !Schema {
 
     for (classes) |*c| {
         // How the attributes store their data (every class with objects, also the outside classes as by value members)
-        if (!c.abstract and !c.phase9 and !c.primitive) {
+        if (!c.abstract and !c.primitive) {
             for (c.attributes, 0..) |*a, index| {
                 var element: c_int = 0;
                 var counts: u64 = 0;
@@ -390,29 +379,7 @@ fn build(arena: Allocator) !Schema {
             }
         }
     }
-
-    // Classes that reach a Phase 9 class through their bases and attribute classes (C++)
-    for (classes, 0..) |*c, i| c.cross = reachesPhase9(&schema, i, 0);
     return schema;
-}
-
-fn reachesPhase9(schema: *const Schema, index: usize, depth: u32) bool {
-    const c = &schema.classes[index];
-    if (c.phase9) return true;
-    if (depth > 32) return false;
-    for (c.bases) |b| {
-        if (schema.find(b)) |j| {
-            if (reachesPhase9(schema, j, depth + 1)) return true;
-        }
-    }
-    for (c.attributes) |a| {
-        if (a.primitive) |p| {
-            if (schema.find(p)) |j| {
-                if (j != index and reachesPhase9(schema, j, depth + 1)) return true;
-            }
-        }
-    }
-    return false;
 }
 
 /// Parse "name hash abstract|creatable bases=[a,b] attributes=[n:type(primitive);...]"
@@ -443,7 +410,6 @@ fn parseLine(arena: Allocator, name: [:0]const u8, line: []const u8) !Class {
         .abstract = abstract,
         .bases = bases.items,
         .attributes = attributes.items,
-        .phase9 = isPhase9(name),
         .outside = contains(&outside_classes, name),
         .primitive = contains(&primitive_names, name),
     };

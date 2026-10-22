@@ -262,7 +262,9 @@ A group edits only its own region, slot, files and registry lines.
 - File headers:
   - `//! Port of: <C++ files>` and `//! Status: complete|partial|stub`.
   - Keep Jolt's doc and implementation comments.
-  - Deviations from Jolt go into the file header (`TODO(debug_renderer)` for `Draw*`).
+  - Deviations from Jolt go into the file header.
+  - Port `Draw*` under the gates of [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Never leave
+    a `TODO(debug_renderer)`: `port_status.py --check` fails on one.
   - A serializable class declares `pub const rtti` ([SerializationArchitecture.md](SerializationArchitecture.md)
     section 3).
 - Unit tests: port them with the same names and values. Add inline tests for allocation failure and for the asserts
@@ -273,11 +275,14 @@ A group edits only its own region, slot, files and registry lines.
   - Prove that the tests bite: break one operation temporarily and see a test fail.
 - Jolt asserts on user input: Zolt asserts the same in safe builds. Scenes keep away from them, or are
   `release_only` to compare Jolt's release behavior.
-- Done criteria (CLAUDE.md):
+- Done criteria: the "Before finishing" list of CLAUDE.md, run in more build modes:
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
-  - `zig build parity` in Debug, double precision and ReleaseFast;
+  - since Phase 9: `zig build check -Ddebug_renderer=true`, and `zig build parity-check` in both renderer
+    configurations;
+  - `zig build parity` in Debug, double precision and ReleaseFast. For a file with a draw gate (since Phase 9), also
+    the filtered parity with `-Ddebug_renderer=true`;
   - `zig fmt --check`;
-  - `python3 tools/port_status.py --write`.
+  - `python3 tools/port_status.py --write`, then `--check`.
 
 ## 6. Settled in the Phase 7 groups
 

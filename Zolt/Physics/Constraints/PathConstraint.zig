@@ -3,7 +3,12 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(PathConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint): a gated declaration (RemainingFeaturesArchitecture.md R2), the text through
+//! StringTools.cppFixed (R7). Zolt (defined where Jolt is undefined): DrawConstraint reads mR1, mR2, mPathTangent,
+//! mPathNormal and mPathBinormal, which only SetupVelocityConstraint writes. Jolt leaves them uninitialized, so a path
+//! constraint drawn before its first update (or one that is never active) draws garbage. Zolt's members start at zero:
+//! the anchors are drawn at the centers of mass and the three arrows have no length, like Jolt's with the zero-filled
+//! allocations of the parity reference. Pinned by "DebugRenderer: a path constraint drawn before its first update".
 //!
 //! - The settings own a reference to their path (`path: RefConst(PathConstraintPath)`, Jolt's
 //!   `RefConst<PathConstraintPath> mPath`): `destruct` releases it, `initCopy` adds one. The constraint holds its own
@@ -38,6 +43,11 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const isVelocityMotor = MotorSettingsFile.isVelocityMotor;
+const isPositionMotor = MotorSettingsFile.isPositionMotor;
 const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -264,7 +274,7 @@ const MotorSettingsBytes = extern struct {
 
 /// Path constraint, used to constrain the degrees of freedom between two bodies to a path
 pub const PathConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .isActive, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .isActive, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     pub const Vec2 = Vector(2);
 
@@ -293,18 +303,19 @@ pub const PathConstraint = struct {
     // RUN TIME PROPERTIES FOLLOW
 
     // Positions where the point constraint acts on in world space
-    r1: Vec3 = undefined,
-    r2: Vec3 = undefined,
+    // (Zolt: r1, r2 and the three path axes start at zero, Jolt leaves them uninitialized; see the file comment)
+    r1: Vec3 = .zero(),
+    r2: Vec3 = .zero(),
 
     // X2 + R2 - X1 - R1
     u: Vec3 = undefined,
 
     // World space path tangent
-    path_tangent: Vec3 = undefined,
+    path_tangent: Vec3 = .zero(),
 
     // Normals to the path tangent
-    path_normal: Vec3 = undefined,
-    path_binormal: Vec3 = undefined,
+    path_normal: Vec3 = .zero(),
+    path_binormal: Vec3 = .zero(),
 
     // Inverse of initial rotation from body 1 to body 2 in body 1 space (only used when rotation constraint type is FullyConstrained)
     inv_initial_orientation: Quat = undefined,
@@ -516,7 +527,41 @@ pub const PathConstraint = struct {
         return pos or limit or rot;
     }
 
-    // TODO(debug_renderer): DrawConstraint
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const PathConstraint, renderer: *DebugRenderer) void {
+        if (self.path.get()) |path| {
+            // Draw the path in world space
+            const path_to_world = self.base.body1.getCenterOfMassTransform().mulMat44(self.path_to_body1);
+            path.drawPath(renderer, path_to_world);
+
+            // Draw anchor point of both bodies in world space
+            const x1 = self.base.body1.getCenterOfMassPosition().addVec3(self.r1);
+            const x2 = self.base.body2.getCenterOfMassPosition().addVec3(self.r2);
+            renderer.drawMarker(x1, Color.yellow, 0.1);
+            renderer.drawMarker(x2, Color.yellow, 0.1);
+            renderer.drawArrow(x1, x1.addVec3(self.path_tangent), Color.blue, 0.1);
+            renderer.drawArrow(x1, x1.addVec3(self.path_normal), Color.red, 0.1);
+            renderer.drawArrow(x1, x1.addVec3(self.path_binormal), Color.green, 0.1);
+            // StringFormat("%.1f", ...): its buffer holds 1023 characters
+            var text_buffer: [1023]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&text_buffer);
+            writer.print("{f}", .{StringTools.cppFixed(self.path_fraction, 1)}) catch {};
+            renderer.drawText3D(x1, writer.buffered(), .{});
+
+            // Draw motor
+            if (isPositionMotor(self.position_motor_state)) {
+                // Draw target marker
+                const point = path.getPointOnPath(self.target_path_fraction);
+                renderer.drawMarker(path_to_world.mulVec3(point.position), Color.yellow, 1.0);
+            }
+
+            if (isVelocityMotor(self.position_motor_state)) {
+                const position = self.base.body2.getCenterOfMassPosition().addVec3(self.r2);
+                renderer.drawArrow(position, position.addVec3(self.path_tangent.mulScalar(self.target_velocity)), Color.red, 0.1);
+            }
+        }
+    }
 
     pub fn saveState(self: *const PathConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState
@@ -560,7 +605,7 @@ pub const PathConstraint = struct {
 
     pub fn getConstraintSettings(self: *const PathConstraint) Allocator.Error!Ref(ConstraintSettings) {
         _ = self;
-        if (Core.enable_asserts) std.debug.assert(false); // Not implemented yet
+        if (Core.enable_asserts) Core.assertFailed("Not implemented yet", @src());
         return .empty;
     }
 
@@ -1036,9 +1081,13 @@ test "PathConstraint: virtual dispatch, the path frames, setters, solver, settin
     try testing.expect(attachment.getAxisZ().isClose(path_to_world.multiply3x3(point.normal), .{ .max_dist_sq = 1.0e-10 }));
 
     // GetConstraintSettings is not implemented in Jolt (it asserts and returns nullptr)
-    if (!Core.enable_asserts) {
+    {
+        var expect_assert: @import("../../Core/IssueReporting.zig").ExpectAssert = undefined;
+        expect_assert.init(1);
+        errdefer expect_assert.restore();
         var copy = try base.getConstraintSettings();
         defer copy.deinit();
+        try expect_assert.finish();
         try testing.expect(copy.get() == null);
     }
 

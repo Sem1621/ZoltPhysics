@@ -3,8 +3,11 @@
 //!
 //! - JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(TrackedVehicleControllerSettings,
 //!   WheelSettingsTV): `rtti` with Jolt's attributes. `mTracks` is the C array `[2]VehicleTrackSettings`: a stream must
-//!   have exactly 2 tracks. JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`, `mRPMMeterPosition`, `mRPMMeterSize`):
-//!   TODO(debug_renderer).
+//!   have exactly 2 tracks.
+//! - JPH_DEBUG_RENDERER (`Draw`, `SetRPMMeter`): gated declarations (RemainingFeaturesArchitecture.md R2).
+//!   `mRPMMeterPosition` and `mRPMMeterSize` are `void` without `-Ddebug_renderer`. Draw writes the per-track and
+//!   per-wheel texts into its renderer, where Jolt uses `DebugRenderer::sInstance` (R4: there is one renderer, so it is
+//!   the same).
 //! - CharacterVehicleArchitecture E2:
 //!   - `WheelSettingsTV` embeds `base: WheelSettings` and overrides its binary state; `WheelTV` embeds `base: Wheel`.
 //!   - `TrackedVehicleControllerSettings` embeds `base: VehicleControllerSettings` (`rtti`, a class of
@@ -39,6 +42,13 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Vec4 = @import("../../Math/Vec4.zig").Vec4;
+const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const DMat44 = @import("../../Math/DMat44.zig").DMat44;
+const RMat44 = @import("../../Math/Real.zig").RMat44;
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const PhysicsSystem = @import("../PhysicsSystem.zig").PhysicsSystem;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
 const VehicleConstraint = @import("VehicleConstraint.zig").VehicleConstraint;
@@ -315,7 +325,7 @@ pub const TrackedVehicleControllerSettings = struct {
 
 /// Runtime controller class for vehicle with tank tracks
 pub const TrackedVehicleController = struct {
-    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState };
+    pub const overrides = .{ .getSettings, .constructWheel, .allowSleep, .preCollide, .postCollide, .solveLongitudinalAndLateralConstraints, .saveState, .restoreState, .draw };
 
     base: VehicleController,
 
@@ -339,7 +349,12 @@ pub const TrackedVehicleController = struct {
     /// Tracks of the vehicle
     tracks: VehicleTracks = .{ .{}, .{} },
 
-    // TODO(debug_renderer): mRPMMeterPosition, mRPMMeterSize
+    // Debug settings (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+
+    /// Position (in local space of the body) of the RPM meter when drawing the constraint
+    rpm_meter_position: if (Core.debug_renderer) Vec3 else void = if (Core.debug_renderer) Vec3.init(0, 1, 0) else {},
+    /// Size of the RPM meter when drawing the constraint
+    rpm_meter_size: if (Core.debug_renderer) f32 else void = if (Core.debug_renderer) 0.5 else {},
 
     /// Constructor of the base part of a class T derived from TrackedVehicleController. On failure nothing is left
     /// allocated.
@@ -494,7 +509,12 @@ pub const TrackedVehicleController = struct {
         return &self.tracks;
     }
 
-    // TODO(debug_renderer): SetRPMMeter
+    /// Debug drawing of RPM meter (JPH_DEBUG_RENDERER)
+    pub const setRPMMeter = if (Core.debug_renderer) setRPMMeterImpl else {};
+    fn setRPMMeterImpl(self: *TrackedVehicleController, position: Vec3, size: f32) void {
+        self.rpm_meter_position = position;
+        self.rpm_meter_size = size;
+    }
 
     // See: VehicleController
     pub fn getSettings(self: *const TrackedVehicleController) Allocator.Error!Ref(VehicleControllerSettings) {
@@ -756,7 +776,100 @@ pub const TrackedVehicleController = struct {
         return impulse;
     }
 
-    // TODO(debug_renderer): Draw
+    // See: VehicleController (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TrackedVehicleController, renderer: *DebugRenderer) void {
+        const constraint = self.base.constraint;
+        const constraint_size = constraint.base.getDrawConstraintSize();
+
+        // Draw RPM
+        const body = constraint.getVehicleBody();
+        const rpm_meter_up = body.getRotation().mulVec3(constraint.getLocalUp());
+        const rpm_meter_pos = body.getPosition().addVec3(body.getRotation().mulVec3(self.rpm_meter_position));
+        const rpm_meter_fwd = body.getRotation().mulVec3(constraint.getLocalForward());
+        self.engine.drawRPM(renderer, rpm_meter_pos, rpm_meter_fwd, rpm_meter_up, self.rpm_meter_size, self.transmission.base.shift_down_rpm, self.transmission.base.shift_up_rpm);
+
+        // Draw current vehicle state
+        // StringFormat("Forward: %.1f, LRatio: %.1f, RRatio: %.1f, Brake: %.1f\nGear: %d, Clutch: %.1f, EngineRPM: %.0f, V: %.1f km/h",
+        // ...): its buffer holds 1023 characters
+        var status_buffer: [1023]u8 = undefined;
+        var status: std.Io.Writer = .fixed(&status_buffer);
+        status.print("Forward: {f}, LRatio: {f}, RRatio: {f}, Brake: {f}\nGear: {d}, Clutch: {f}, EngineRPM: {f}, V: {f} km/h", .{
+            StringTools.cppFixed(self.forward_input, 1),
+            StringTools.cppFixed(self.left_ratio, 1),
+            StringTools.cppFixed(self.right_ratio, 1),
+            StringTools.cppFixed(self.brake_input, 1),
+            self.transmission.getCurrentGear(),
+            StringTools.cppFixed(self.transmission.getClutchFriction(), 1),
+            StringTools.cppFixed(self.engine.getCurrentRPM(), 0),
+            StringTools.cppFixed(@as(f64, body.getLinearVelocity().length()) * 3.6, 1),
+        }) catch {};
+        renderer.drawText3D(body.getPosition(), status.buffered(), .{ .color = Color.white, .height = constraint_size });
+
+        for (&self.tracks) |*t| {
+            const w = virtual.downcast(WheelTV, constraint.getWheels()[t.base.driven_wheel]);
+            const settings = w.base.getSettings();
+
+            // Calculate where the suspension attaches to the body in world space
+            const ws_position = body.getCenterOfMassPosition().addVec3(body.getRotation().mulVec3(settings.position.sub(body.getShape().getCenterOfMass())));
+
+            // Jolt draws this text into DebugRenderer::sInstance (R4: the renderer of this draw)
+            var text_buffer: [1023]u8 = undefined;
+            var text: std.Io.Writer = .fixed(&text_buffer);
+            text.print("W: {f}", .{StringTools.cppFixed(t.angular_velocity, 1)}) catch {};
+            renderer.drawText3D(ws_position, text.buffered(), .{ .color = Color.white, .height = constraint_size });
+        }
+
+        const body_transform = body.getWorldTransform();
+
+        for (constraint.getWheels()) |w_base| {
+            const w = virtual.downcast(WheelTV, w_base);
+            const settings = w.base.getSettings();
+
+            // Calculate where the suspension attaches to the body in world space
+            const ws_position = body_transform.mulVec3(settings.position);
+            const ws_direction = body_transform.multiply3x3(settings.suspension_direction);
+
+            // Draw suspension
+            const min_suspension_pos = ws_position.addVec3(ws_direction.mulScalar(settings.suspension_min_length));
+            const max_suspension_pos = ws_position.addVec3(ws_direction.mulScalar(settings.suspension_max_length));
+            renderer.drawLine(ws_position, min_suspension_pos, Color.red);
+            renderer.drawLine(min_suspension_pos, max_suspension_pos, Color.green);
+
+            // Draw current length
+            const wheel_pos = ws_position.addVec3(ws_direction.mulScalar(w.base.getSuspensionLength()));
+            renderer.drawMarker(wheel_pos, if (w.base.getSuspensionLength() < settings.suspension_min_length) Color.red else Color.green, constraint_size);
+
+            // Draw wheel basis
+            const basis = constraint.getWheelLocalBasis(&w.base);
+            const wheel_forward = body_transform.multiply3x3(basis.forward);
+            const wheel_up = body_transform.multiply3x3(basis.up);
+            const wheel_right = body_transform.multiply3x3(basis.right);
+            const steering_axis = body_transform.multiply3x3(settings.steering_axis);
+            renderer.drawLine(wheel_pos, wheel_pos.addVec3(wheel_forward), Color.red);
+            renderer.drawLine(wheel_pos, wheel_pos.addVec3(wheel_up), Color.green);
+            renderer.drawLine(wheel_pos, wheel_pos.addVec3(wheel_right), Color.blue);
+            renderer.drawLine(wheel_pos, wheel_pos.addVec3(steering_axis), Color.yellow);
+
+            // Draw wheel
+            var wheel_transform = rmat44FromColumns(Vec4.fromVec3W(wheel_up, 0.0), Vec4.fromVec3W(wheel_right, 0.0), Vec4.fromVec3W(wheel_forward, 0.0), wheel_pos);
+            wheel_transform.setRotation(wheel_transform.getRotation().mul(Mat44.rotationY(-w.base.getRotationAngle())));
+            renderer.drawCylinder(wheel_transform, settings.width * 0.5, settings.radius, if (w.base.getSuspensionLength() <= settings.suspension_min_length) Color.red else Color.green, .{ .cast_shadow = .off, .draw_mode = .wireframe });
+
+            if (w.base.hasContact()) {
+                // Draw contact
+                renderer.drawLine(w.base.getContactPosition(), w.base.getContactPosition().addVec3(w.base.getContactNormal()), Color.yellow);
+                renderer.drawLine(w.base.getContactPosition(), w.base.getContactPosition().addVec3(w.base.getContactLongitudinal()), Color.red);
+                renderer.drawLine(w.base.getContactPosition(), w.base.getContactPosition().addVec3(w.base.getContactLateral()), Color.blue);
+
+                // Jolt draws this text into DebugRenderer::sInstance (R4: the renderer of this draw)
+                var text_buffer: [1023]u8 = undefined;
+                var text: std.Io.Writer = .fixed(&text_buffer);
+                text.print("S: {f}", .{StringTools.cppFixed(w.base.getSuspensionLength(), 2)}) catch {};
+                renderer.drawText3D(w.base.getContactPosition(), text.buffered(), .{ .color = Color.white, .height = constraint_size });
+            }
+        }
+    }
 
     pub fn saveState(self: *const TrackedVehicleController, stream: *StateRecorder) void {
         stream.write(self.forward_input);
@@ -790,6 +903,11 @@ pub const TrackedVehicleController = struct {
 // controller functions on a tank driving over a floor (forward, steering with the track ratios, turning on the spot,
 // braking, sleeping), the settings and state round trips and allocation failure. The bit exact comparison with Jolt is
 // the simulation parity (ZoltParity/Physics/SimScenes.zig, the vehicle scenes) and VehiclePartsParity.zig.
+
+/// RMat44(Vec4Arg inC1, Vec4Arg inC2, Vec4Arg inC3, RVec3Arg inC4) in both precisions (JPH_DEBUG_RENDERER)
+fn rmat44FromColumns(c1: Vec4, c2: Vec4, c3: Vec4, c4: RVec3) RMat44 {
+    return if (Core.double_precision) DMat44.init(c1, c2, c3, c4) else Mat44.fromColumnsTranslation(c1, c2, c3, c4);
+}
 
 const testing = std.testing;
 const TempAllocatorImpl = @import("../../Core/TempAllocator.zig").TempAllocatorImpl;

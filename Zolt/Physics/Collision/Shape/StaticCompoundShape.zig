@@ -32,7 +32,7 @@
 //!   (`collideCompoundVsShape`, `collideShapeVsCompound`, `castShapeVsCompound`).
 //! - The assert in sPartition (`start == end`) can be violated by NaN bounds, after which Jolt's release build
 //!   continues: guarded with `Core.enable_asserts` (porting guide section 7).
-//! - JPH_DEBUG_RENDERER: StaticCompoundShape has no draw code of its own (CompoundShape's Draw is TODO(debug_renderer)).
+//! - JPH_DEBUG_RENDERER: StaticCompoundShape has no draw code of its own, it draws with CompoundShape's draw functions.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

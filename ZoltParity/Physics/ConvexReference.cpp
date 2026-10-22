@@ -113,6 +113,9 @@ public:
 	virtual void			CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const CollideSoftBodyVertexIterator &inVertices, uint inNumVertices, int inCollidingShapeIndex) const override { }
 	virtual Stats			GetStats() const override									{ return Stats(sizeof(*this), 0); }
 	virtual float			GetVolume() const override									{ return GetLocalBounds().GetVolume(); }
+#ifdef JPH_DEBUG_RENDERER
+	virtual void			Draw(DebugRenderer *, RMat44Arg, Vec3Arg, ColorArg, bool, bool) const override { } // Parity shapes are never drawn
+#endif // JPH_DEBUG_RENDERER
 
 private:
 	// The box including the convex radius (rounded edges)
@@ -563,7 +566,7 @@ void jolt_convex_shape_submerged_volume(const ShapeDesc *inDesc, const float *in
 	Ref<Shape> shape = CreateShape(*inDesc);
 	float total_volume, submerged_volume;
 	Vec3 center_of_buoyancy;
-	shape->GetSubmergedVolume(LoadMat44(inTransform), Load3(inScale), Plane(Load4(inPlane)), total_volume, submerged_volume, center_of_buoyancy);
+	shape->GetSubmergedVolume(LoadMat44(inTransform), Load3(inScale), Plane(Load4(inPlane)), total_volume, submerged_volume, center_of_buoyancy JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	outValues[0] = total_volume;
 	outValues[1] = submerged_volume;
 	Store3(center_of_buoyancy, outValues + 2);

@@ -3,6 +3,8 @@
 
 pub const files = [_][]const u8{
     "AABBTree/AABBTreeReference.cpp",
+    "Compute/ComputeReference.cpp",
+    "Compute/ShaderHelpersReference.cpp",
     "Core/ConcurrencyReference.cpp",
     "Core/ContainersReference.cpp",
     "Core/CoreReference.cpp",
@@ -10,8 +12,12 @@ pub const files = [_][]const u8{
     "Geometry/GJKEPAReference.cpp",
     "Geometry/PrimitivesReference.cpp",
     "Geometry/QueriesReference.cpp",
+    "Hair/HairSceneReference.cpp",
+    "Hair/HairSettingsReference.cpp",
+    "Hair/LibMShuffleReference.cpp",
     "Math/MathReference.cpp",
     "ObjectStream/ObjectStreamReference.cpp",
+    "ParityHooks.cpp",
     "Physics/BasicsReference.cpp",
     "Physics/BodyInterfaceReference.cpp",
     "Physics/BodyReference.cpp",
@@ -41,7 +47,17 @@ pub const files = [_][]const u8{
     "Physics/ShapeCoreReference.cpp",
     "Physics/SimulationReference.cpp",
     "Physics/SkeletonReference.cpp",
+    "Physics/SoftBodyReference.cpp",
+    "Physics/SoftBodySettingsReference.cpp",
+    "Physics/SoftBodyUpdateReference.cpp",
     "Physics/TriangleShapeReference.cpp",
     "Physics/TrianglesReference.cpp",
     "Physics/VehiclePartsReference.cpp",
+    "Renderer/DebugRendererReference.cpp",
+};
+
+/// C files (relative to ZoltParity/), compiled as C11 with -ffp-contract=off: the libm pin of the reference
+/// (Docs/Zolt/RemainingFeaturesArchitecture.md R13)
+pub const c_files = [_][]const u8{
+    "Hair/LibMReference.c",
 };

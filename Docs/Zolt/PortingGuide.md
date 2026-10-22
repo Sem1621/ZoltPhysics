@@ -56,8 +56,12 @@ Contents:
    compared bit for bit with the C++ library on many inputs.
 7. Run `zig build test`, `zig build test -Ddouble_precision=true`, `zig build test -Doptimize=ReleaseFast`
    (see section 10), `zig build parity` (also with
-   `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig fmt Zolt ZoltTests ZoltParity build.zig`,
-   then `python3 tools/port_status.py --write`.
+   `-Ddouble_precision=true` when the file touches `Real` / `RVec3`), `zig build parity-check` (a filtered parity run
+   compiles only the tests it runs),
+   `zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon`,
+   then `python3 tools/port_status.py --write` and `--check`.
+   A file with `JPH_DEBUG_RENDERER` code (section 7) also needs `zig build check -Ddebug_renderer=true`,
+   `zig build parity-check -Ddebug_renderer=true` and the filtered parity with `-Ddebug_renderer=true`.
 
 ## 3. Layout and naming
 
@@ -66,6 +70,7 @@ Contents:
 | C++                                    | Zig                                                |
 |----------------------------------------|----------------------------------------------------|
 | `Jolt/<Dir>/<Name>.h/.inl/.cpp`        | `Zolt/<Dir>/<Name>.zig` (one file)                 |
+| `Jolt/Shaders/<Name>.hlsl` + `<Name>Bindings.h` (+ the helper header `<Name>.h`) | `Zolt/Shaders/<Name>.zig` (one file, its `//! Port of:` lists all of them). Shared shader headers (`ShaderCore.h`, `ShaderMath.h`, `HairStructs.h`, ...) are files of their own. See [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R12 |
 | `UnitTests/<Dir>/<Name>Test(s).cpp`    | `ZoltTests/<Dir>/<Name>Test(s).zig`                |
 | `#include <Jolt/Math/Vec3.h>`          | `const Vec3 = @import("../Math/Vec3.zig").Vec3;`   |
 | `namespace JPH`                        | the `zolt` module; public API re-exported flat in `Zolt/zolt.zig` |
@@ -83,7 +88,7 @@ Inside the library always import by relative path, never through `zolt.zig`.
 | member function `GetFoo()`            | camelCase                             | `GetLinearVelocity` → `getLinearVelocity`     |
 | static function `sFoo()`              | drop `s`, camelCase                   | `Vec3::sZero()` → `Vec3.zero()`               |
 | member variable `mFoo`                | snake_case, drop `m`                  | `mLinearVelocity` → `linear_velocity`         |
-| static member variable `sFoo`         | snake_case `pub var`                  | `sDrawConstraints` → `draw_constraints`       |
+| static member variable `sFoo`         | snake_case `pub var` (debug draw flags: RemainingFeaturesArchitecture.md R4) | `CharacterID::sNextID` → `CharacterID.next_id`; `MeshShape::sDrawTriangleGroups` → `renderer.flags.mesh_shape.draw_triangle_groups` |
 | constant `cFoo` / `constexpr`         | snake_case `const`                    | `cLargeFloat` → `large_float`                 |
 | parameter `inFoo`, `outFoo`, `ioFoo`  | snake_case, drop prefix (output containers that stay parameters keep `out_`: `out_vertices`; `io_` may stay when the plain name clashes with a local) | `inVelocity` → `velocity`                     |
 | macro constant `JPH_FOO`              | snake_case `const`                    | `JPH_PI` → `math.pi`                          |
@@ -348,6 +353,9 @@ Copies (`clone` / `assign`) are bitwise: values that own memory must be duplicat
   error texts built with `%g`) must use `StringTools.cppFloat` (`{f}`), never Zig's `{d}`:
   `std::ostream` prints floats with precision 6 and `%g` rules, which `{d}` (shortest round trip)
   does not. `writeFloatPrecision` is the `%.*g` variant. NaN prints as `nan` / `-nan` like glibc.
+- Text that Jolt formats with printf's fixed notation (`StringFormat("%.2f", value)`, the draw texts) uses
+  `StringTools.cppFixed(value, 2)` (`{f}`) or `writeFloatFixed`: the exact decimal expansion rounded half to even, like
+  glibc ([RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R7).
 
 ## 6. Polymorphism (virtual functions)
 
@@ -437,11 +445,15 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `JPH_ASSERT(x)` / `JPH_ASSERT(x, "msg")`    | `std.debug.assert(x)` (keep the message as a comment)       |
 | `JPH_ASSERT(false)` on a path that release builds can reach and handle (e.g. "too many iterations", then `return false`) | `if (Core.enable_asserts) @panic("msg");` followed by the release behavior: `assert(false)` is undefined behavior in ReleaseFast |
 | `JPH_ASSERT(cond)` that valid or degenerate input can violate, after which Jolt's release build just continues (e.g. near-zero vectors in EPA, degenerate hulls, an empty mesh) | `if (Core.enable_asserts) std.debug.assert(cond);` so that ReleaseFast keeps Jolt's release behavior instead of undefined behavior; comment why |
+| one of the two rows above, when a test expects the assert to fail (Jolt's `ExpectAssert`, or a test of Jolt's release behavior) | a recoverable assert, one line at its site: `if (Core.enable_asserts) Core.assertRecoverable(cond, "msg", @src());` or `if (Core.enable_asserts) Core.assertFailed("msg", @src());` (the message is Jolt's, else the C++ expression). It asks the installed assert handler: without one it panics as before, with one that returns false the code continues like Jolt's release build. Convert only an assert that a test expects, and only when the code after it has no Zig safety check that Jolt's release build passes; otherwise it stays a panic and the test stays skipped with the reason. See [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R8 |
 | `JPH_IF_ENABLE_ASSERTS(x)`                  | `if (Core.enable_asserts) { x }`                            |
 | members (and `thread_local` state) that only exist with `JPH_ENABLE_ASSERTS` | typed `void` without asserts: `cached_motion_type: if (Core.enable_asserts) MotionType else void = if (Core.enable_asserts) .static else {}`, so the compiler proves they cannot influence release results |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
-| `#ifdef JPH_DEBUG_RENDERER`                 | not ported yet: leave `// TODO(debug_renderer): ...` where code is skipped |
+| `#ifdef JPH_DEBUG_RENDERER`                 | `Core.debug_renderer` (`-Ddebug_renderer`): members `if (Core.debug_renderer) T else void`, virtuals `virtual.OptionalVirtual(Core.debug_renderer, *const fn ...)`, functions and overrides `pub const draw = if (Core.debug_renderer) drawImpl else {};`, `JPH_IF_DEBUG_RENDERER(x)` at a call site `if (Core.debug_renderer) x else {}`. Rules and recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Every `JPH_DEBUG_RENDERER` block is ported under these gates. `port_status.py --check` rejects `TODO(debug_renderer)` |
+| a function, override or accessor under `#ifdef JPH_DEBUG_RENDERER` | a gated declaration: `pub const draw = if (Core.debug_renderer) drawImpl else {};` with a private `fn drawImpl`. Without the option the body is never analyzed, so it may read members that are `void` then. List `.draw` in `overrides` in both configurations (`Virtual.zig` accepts a `void` entry). A dispatcher of a gated virtual is gated the same way |
+| a member or parameter under `#ifdef JPH_DEBUG_RENDERER` | a `void` member: `draw_constraint_size: if (Core.debug_renderer) f32 else void = if (Core.debug_renderer) 1.0 else {}`. A parameter of an internal function is a trailing `if (Core.debug_renderer) T else void` (callers pass `if (Core.debug_renderer) value else {}`); a parameter of a public function is a field of its options struct with a default, so `.{}` compiles in both configurations. Statements: `if (Core.debug_renderer) { ... }` |
+| `JPH_SHADER_NAME(X)`, `JPH_SHADER_BIND_BEGIN(X)` ... `JPH_SHADER_BIND_END`, `JPH_SHADER_FUNCTION_BEGIN(void, main, ...)` (the `WrapShader*.h` macros) | `pub const name = "X"`, `pub const Bindings = struct { ... }` (fields with the HLSL binding names: `hlsl.Constants(T)`, `hlsl.Buffer(T)`, `hlsl.RWBuffer(T)`), `pub fn main(b: *Bindings, tid: hlsl.uint3) void`; `JPH_REGISTER_SHADER(sys, X)` is `sys.registerShader(X)`. Recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) section 3 |
 | developer debug switches that are commented out in Jolt (`JPH_GJK_DEBUG`, `JPH_EPA_PENETRATION_DEPTH_DEBUG`, `JPH_EPA_CONVEX_BUILDER_DRAW`, `JPH_EPA_CONVEX_BUILDER_VALIDATE`, `JPH_CONVEX_BUILDER_DEBUG`, `JPH_CONVEX_BUILDER_DUMP_SHAPE`, `JPH_CONVEX_BUILDER_2D_DEBUG`, ...) | not ported: list them in a `//! Not ported: ...` header line. They do not affect the Status (a file without them is `complete`) |
 | `#ifdef JPH_CPU_BIG_ENDIAN`                 | `if (builtin.cpu.arch.endian() == .big)` (comptime); port both branches |
 | `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped for now (a profiler may come later)                 |
@@ -521,6 +533,21 @@ results are reproducible as long as the code follows these rules:
     what Jolt's x86-64 build computes: `(int)f` is `cvttss2si` to i32 (`0x80000000` for NaN / out of
     range), `(uint)f` is a 64-bit `cvttss2si` truncated to 32 bits (see `HeightFieldShape.zig`,
     `Vec4.toInt`). Plain `@intFromFloat` is only for values that are in range by construction.
+13. **Shaders** (`Jolt/Shaders`, run by the CPU compute backend) use the types of `Compute/CPU/HLSLToCPP.zig`:
+    `hlsl.float2`, `float3`, `float4`, `uint3`, `uint4`, `int3`, `int4` (`Quat` and `Plane` are `float4`, `Mat44` is 4
+    `float4` columns). They are extern structs of scalars with HLSL's layout (`float3` is 12 bytes), never Zolt's
+    `Vec3` / `Quat` / `Mat44` or `@Vector`: the operation order differs. `dot` is left to right, `normalize` divides
+    by `length`, `min` / `max` are `std::min` / `std::max` per component, unary minus flips the sign bit, integer
+    arithmetic wraps (`+%`, `*%`). Shader helpers are the HLSL reimplementations (`JPH_QuatMulVec3`, ...). Review a
+    shader port line by line against the HLSL text. See [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md)
+    R11.
+14. **The C library.** Where Jolt calls `std::exp` / `std::pow` on floats (only Hair), use `LibM.expf` / `LibM.powf`
+    (`Math/LibM.zig`, the generic algorithm of musl, glibc and ARM's optimized-routines), never `std.math.exp`,
+    `std.math.pow` or `@exp`. Jolt's result depends on the C library; the parity reference pins both functions
+    (R13).
+15. **`std::shuffle` and `uniform_int_distribution`** (HairSettings) are `Mt19937.shuffleLibcxx(T, items)` and
+    `Mt19937.uniformIntLibcxx`: libc++'s algorithms, the standard library of the parity reference (R13). Never
+    `std.Random.shuffle`.
 
 ## 9. Threading
 
@@ -588,8 +615,19 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   expected value first); `CHECK_APPROX_EQUAL(a, b, tol)` → `try checkApproxEqual(a, b, .{ .tolerance = tol })`
   from `ZoltTests/UnitTestFramework.zig`.
 - Keep the exact input values and expected values of the C++ test.
-- `ExpectAssert` (tests that trigger asserts) cannot be ported: Zig asserts panic. Skip those
-  checks with a comment `// Not ported: relies on ExpectAssert`.
+- `ExpectAssert` (tests that trigger asserts): the assert that the test expects must be a recoverable assert
+  (`IssueReporting.assertRecoverable` / `assertFailed`); the test uses `ExpectAssert` of `Core/IssueReporting.zig`
+  (re-exported by `ZoltTests/UnitTestFramework.zig`). Rules: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R8.
+- **The assert handler** (R8) is the one global that Phase 9 adds to the library, Jolt's `AssertFailed`. Only tests
+  install a handler: `ExpectAssert(n)` (n is the number of asserts Jolt hits; `init`, then `finish`, with
+  `errdefer restore()`), or `CountAsserts` when only the C++ side knows the number. Install and remove a handler on the
+  test thread while no physics update runs; asserts on job threads reach it. Library code never installs one. Only the
+  asserts that a test expects become recoverable (R8's list, the `JPH_ASSERT` rows of section 7). A test that expects
+  one of them runs in every build with such a handler. A parity test of Jolt's release behavior counts the asserts of
+  both sides with `ParityHooks.ReleaseAsserts` (`ZoltParity/ParityHooks.zig`); with `-Dreference_asserts=true` the
+  counts must be equal. Other tests of inputs that Jolt asserts on keep their `if (!Core.enable_asserts)` gate. A
+  conversion that would continue into a Zig safety check stays a panic, and its test stays skipped with the reason in a
+  comment.
 - Small tests of Zolt-specific code (helpers that have no Jolt counterpart) go inline in the
   source file as `test` blocks.
 - **Memory.** Tests allocate with `std.testing.allocator`, which reports leaks. Every path that allocates gets a
@@ -625,7 +663,11 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   `ZoltParity/<Dir>/<Name>Parity.zig` holds the tests and `ZoltParity/<Dir>/<Name>Reference.cpp` the
   C ABI wrappers around Jolt (one pair per ported area, e.g. `Geometry/QueriesParity.zig`); shared helpers (input generator, bit comparison, `Checker`) are in
   `ZoltParity/ParityFramework.zig`. Register test files in `ZoltParity/parity.zig` and .cpp files in
-  `ZoltParity/reference_sources.zig`. For each ported function, call both implementations on ~100k
+  `ZoltParity/reference_sources.zig`. A new reference file includes `ZoltParity/ParityHooks.h` and calls
+  `ParityInstallHooks()` at the start of every exported function that allocates through Jolt; it never calls
+  `RegisterDefaultAllocator()`. The hooks zero-fill Jolt's allocations, print Jolt's `Trace` and count Jolt's asserts
+  (with `-Dreference_asserts=true`). A filtered parity run links only the reference objects that its tests use, so a
+  file cannot rely on the hooks of another file. For each ported function, call both implementations on ~100k
   generated inputs (random values mixed with special values) and require identical bits (NaN
   payloads excepted). For containers and algorithms with an observable order (hash table iteration,
   sorting with equal keys, heaps), compare the order. A parity mismatch is always a porting bug
@@ -687,6 +729,9 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `Hash<T>{}(v)`                     | `HashCombine.hash(v)`                  | functor template → comptime dispatch     |
 | `HashBytes(data, size, seed)`      | `hashBytes(data)` / `hashBytesSeeded(data, seed)` | default argument            |
 | `std::mt19937`                     | `Mt19937`                              | std type, see Core/Mt19937.zig          |
+| `std::shuffle(begin, end, engine)` | `Mt19937.shuffleLibcxx(T, items)`      | libc++'s algorithm (section 8, rule 15) |
+| `std::exp(float)` / `std::pow(float, float)` | `LibM.expf` / `LibM.powf`    | C library (section 8, rule 14)          |
+| `AssertFailed = MyHandler`         | `IssueReporting.setAssertHandler(&handler)` (returns the previous one) | global function pointer → pattern A interface (R8) |
 | `JPH_PI`                           | `math.pi`                              |                                         |
 | `Matrix<R, C>` / `Vector<R>` template params | `Matrix(r, c).row_count` / `.col_count`, `Vector(n).row_count` | comptime decls usable by generic code |
 | `Matrix::operator()(row, col)` (also Mat44, DynMatrix) | `get(row, col)` / `set(row, col, v)` | operator overload            |

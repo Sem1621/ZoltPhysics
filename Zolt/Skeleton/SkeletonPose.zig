@@ -1,7 +1,8 @@
 //! Port of: Jolt/Skeleton/SkeletonPose.h, Jolt/Skeleton/SkeletonPose.cpp
 //! Status: complete
 //!
-//! JPH_DEBUG_RENDERER (DrawSettings, Draw): TODO(debug_renderer). JPH_OVERRIDE_NEW_DELETE: dropped.
+//! JPH_DEBUG_RENDERER (DrawSettings, Draw): gated declarations (RemainingFeaturesArchitecture.md R2), `void` without
+//! `-Ddebug_renderer`. Jolt's default argument `inOffset` is `DrawOptions.offset`. JPH_OVERRIDE_NEW_DELETE: dropped.
 //!
 //! CharacterVehicleArchitecture E2: a value struct that owns its arrays. `init(allocator)` stores the allocator that
 //! allocates the joint arrays, `deinit` releases the skeleton and frees them. Jolt's implicit copy constructor (a copy
@@ -22,6 +23,9 @@ const Core = @import("../Core/Core.zig");
 const RefConst = @import("../Core/Reference.zig").RefConst;
 const Mat44 = @import("../Math/Mat44.zig").Mat44;
 const RVec3 = @import("../Math/Real.zig").RVec3;
+const RMat44 = @import("../Math/Real.zig").RMat44;
+const Color = @import("../Core/Color.zig").Color;
+const DebugRenderer = @import("../Renderer/DebugRenderer.zig").DebugRenderer;
 const Skeleton = @import("Skeleton.zig").Skeleton;
 const SkeletalAnimation = @import("SkeletalAnimation.zig").SkeletalAnimation;
 
@@ -168,7 +172,7 @@ pub const SkeletonPose = struct {
 
             const parent = self.skeletonOfJoints().getJoint(i).parent_joint_index;
             if (parent >= 0) {
-                if (Core.enable_asserts) std.debug.assert(parent < @as(i32, @intCast(i))); // Joints must be ordered: parents first
+                if (Core.enable_asserts) Core.assertRecoverable(parent < @as(i32, @intCast(i)), "Joints must be ordered: parents first", @src());
                 matrices[i] = matrices[@intCast(parent)].mul(matrices[i]);
             }
         }
@@ -196,8 +200,42 @@ pub const SkeletonPose = struct {
             out_matrices[i] = joint.toMatrix();
     }
 
-    // TODO(debug_renderer): DrawSettings (mDrawJoints, mDrawJointOrientations, mDrawJointNames) and Draw(inDrawSettings,
-    // inRenderer, inOffset) (JPH_DEBUG_RENDERER)
+    /// Draw settings (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    pub const DrawSettings = if (Core.debug_renderer) struct {
+        draw_joints: bool = true,
+        draw_joint_orientations: bool = true,
+        draw_joint_names: bool = false,
+    } else void;
+
+    /// The optional parameters of draw (Jolt's default argument; JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    pub const DrawOptions = if (Core.debug_renderer) struct {
+        offset: RMat44 = RMat44.identity(),
+    } else void;
+
+    /// Draw current pose (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const SkeletonPose, draw_settings: *const DrawSettings, renderer: *DebugRenderer, opts: DrawOptions) void {
+        const offset = opts.offset.mul(RMat44.translation(self.root_offset));
+
+        const skeleton = self.skeleton.get() orelse @panic("SkeletonPose.draw: no skeleton (Jolt dereferences a null pointer)");
+        const joints = skeleton.getJoints();
+
+        for (0..skeleton.getJointCount()) |b| {
+            const joint_transform = offset.mulMat44(self.joint_matrices.items[b]);
+
+            if (draw_settings.draw_joints) {
+                const parent = joints[b].parent_joint_index;
+                if (parent >= 0)
+                    renderer.drawLine(offset.mulVec3(self.joint_matrices.items[@intCast(parent)].getTranslation()), joint_transform.getTranslation(), Color.green);
+            }
+
+            if (draw_settings.draw_joint_orientations)
+                renderer.drawCoordinateSystem(joint_transform, .{ .size = 0.05 });
+
+            if (draw_settings.draw_joint_names)
+                renderer.drawText3D(joint_transform.getTranslation(), joints[b].name, .{ .color = Color.white, .height = 0.05 });
+        }
+    }
 
     /// The skeleton of a pose that has joint states (Jolt dereferences mSkeleton without a check)
     fn skeletonOfJoints(self: *const SkeletonPose) *const Skeleton {

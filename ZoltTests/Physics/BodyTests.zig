@@ -444,16 +444,16 @@ test "Body sleep state and buoyancy" {
 
     // Half submerged in water: the buoyancy pushes up
     body.setPositionAndRotationInternal(RVec3.zero(), Quat.identity(), .{});
-    const volume = body.getSubmergedVolume(RVec3.zero(), Vec3.axisY());
+    const volume = body.getSubmergedVolume(RVec3.zero(), Vec3.axisY(), .{});
     try checkApproxEqual(volume.total_volume, 8.0, .{ .tolerance = 1.0e-4 });
     try checkApproxEqual(volume.submerged_volume, 4.0, .{ .tolerance = 1.0e-4 });
     try checkApproxEqual(volume.relative_center_of_buoyancy, Vec3.init(0, -0.25, 0), .{ .tolerance = 1.0e-5 });
-    try expect(body.applyBuoyancyImpulse(RVec3.zero(), Vec3.axisY(), 2.0, 0.5, 0.01, Vec3.zero(), Vec3.init(0, -10, 0), 1.0 / 60.0));
+    try expect(body.applyBuoyancyImpulse(RVec3.zero(), Vec3.axisY(), 2.0, 0.5, 0.01, Vec3.zero(), Vec3.init(0, -10, 0), 1.0 / 60.0, .{}));
     try expect(body.getLinearVelocity().getY() > 0);
 
     // Out of the water: nothing happens
     body.resetMotion();
-    try expect(!body.applyBuoyancyImpulse(RVec3.init(0, -10, 0), Vec3.axisY(), 2.0, 0.5, 0.01, Vec3.zero(), Vec3.init(0, -10, 0), 1.0 / 60.0));
+    try expect(!body.applyBuoyancyImpulse(RVec3.init(0, -10, 0), Vec3.axisY(), 2.0, 0.5, 0.01, Vec3.zero(), Vec3.init(0, -10, 0), 1.0 / 60.0, .{}));
     try expect(body.getLinearVelocity().eql(Vec3.zero()));
 }
 

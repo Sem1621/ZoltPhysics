@@ -9,8 +9,12 @@ test {
     _ = @import("LoggingBodyActivationListener.zig");
     _ = @import("LoggingCharacterContactListener.zig");
     _ = @import("LoggingContactListener.zig");
+    _ = @import("LoggingSoftBodyContactListener.zig");
     _ = @import("PhysicsTestContext.zig");
     _ = @import("UnitTestFramework.zig");
+
+    // Compute
+    _ = @import("Compute/ComputeTests.zig");
 
     // Core
     _ = @import("Core/BinaryHeapTest.zig");
@@ -103,9 +107,13 @@ test {
     _ = @import("Physics/ShapeTests.zig");
     _ = @import("Physics/SixDOFConstraintTests.zig");
     _ = @import("Physics/SliderConstraintTests.zig");
+    _ = @import("Physics/SoftBodyTests.zig");
     _ = @import("Physics/SubShapeIDTest.zig");
     _ = @import("Physics/SwingTwistConstraintTests.zig");
     _ = @import("Physics/TaperedCylinderShapeTests.zig");
     _ = @import("Physics/TransformedShapeTests.zig");
     _ = @import("Physics/WheeledVehicleTests.zig");
+
+    // Renderer
+    _ = @import("Renderer/DebugRendererZoltTests.zig");
 }

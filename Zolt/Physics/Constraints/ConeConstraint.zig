@@ -3,7 +3,7 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConeConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint, DrawConstraintLimits): gated declarations (RemainingFeaturesArchitecture.md R2).
 //!
 //! - `SetHalfConeAngle` asserts that the angle is in [0, pi] (user input): the assert only runs with
 //!   `Core.enable_asserts`, ReleaseFast keeps Jolt's release behavior (it stores the cosine of any angle).
@@ -18,6 +18,8 @@ const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const trigonometry = @import("../../Math/Trigonometry.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Vec4 = @import("../../Math/Vec4.zig").Vec4;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const RVec3 = @import("../../Math/Real.zig").RVec3;
@@ -165,7 +167,7 @@ pub const ConeConstraintSettings = struct {
 ///
 /// Note that this is the exact same equation as used in AngleConstraintPart if we use t2 x t1 as the world space axis
 pub const ConeConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .drawConstraintLimits, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -329,7 +331,36 @@ pub const ConeConstraint = struct {
         return pos or rot;
     }
 
-    // TODO(debug_renderer): DrawConstraint, DrawConstraintLimits
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const ConeConstraint, renderer: *DebugRenderer) void {
+        const transform1 = self.base.body1.getCenterOfMassTransform();
+        const transform2 = self.base.body2.getCenterOfMassTransform();
+        const draw_constraint_size = self.base.base.draw_constraint_size;
+
+        const p1 = transform1.mulVec3(self.local_space_position1);
+        const p2 = transform2.mulVec3(self.local_space_position2);
+
+        // Draw constraint
+        renderer.drawMarker(p1, Color.red, 0.1);
+        renderer.drawMarker(p2, Color.green, 0.1);
+
+        // Draw twist axis
+        renderer.drawLine(p1, p1.addVec3(transform1.multiply3x3(self.local_space_twist_axis1).mulScalar(draw_constraint_size)), Color.red);
+        renderer.drawLine(p2, p2.addVec3(transform2.multiply3x3(self.local_space_twist_axis2).mulScalar(draw_constraint_size)), Color.green);
+    }
+
+    // See Constraint::DrawConstraintLimits (JPH_DEBUG_RENDERER)
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+    fn drawConstraintLimitsImpl(self: *const ConeConstraint, renderer: *DebugRenderer) void {
+        // Get constraint properties in world space
+        const transform1 = self.base.body1.getCenterOfMassTransform();
+        const position1 = transform1.mulVec3(self.local_space_position1);
+        const twist_axis1 = transform1.multiply3x3(self.local_space_twist_axis1);
+        const normal_axis1 = transform1.multiply3x3(self.local_space_twist_axis1.getNormalizedPerpendicular());
+
+        renderer.drawOpenCone(position1, twist_axis1, normal_axis1, trigonometry.acos(self.cos_half_cone_angle), self.base.base.draw_constraint_size * self.cos_half_cone_angle, Color.purple, .{ .cast_shadow = .off });
+    }
 
     pub fn saveState(self: *const ConeConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState

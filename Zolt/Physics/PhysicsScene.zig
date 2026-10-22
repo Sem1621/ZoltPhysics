@@ -1,8 +1,5 @@
 //! Port of: Jolt/Physics/PhysicsScene.h, Jolt/Physics/PhysicsScene.cpp
-//! Status: partial
-//! Missing: the soft bodies of Phase 9 (AddSoftBody, GetNumSoftBodies, GetSoftBodies, mSoftBodies and their part of
-//! CreateBodies, SaveBinaryState, sRestoreFromBinaryState and FromPhysicsSystem: SoftBodyCreationSettings has no binary
-//! state and no soft body can be created before Phase 9)
+//! Status: complete
 //!
 //! SimulationArchitecture D6 / D8:
 //! - A RefTarget (`ref_count`, `addRef` / `release`) that keeps its allocator: `create(allocator)` is `new
@@ -14,8 +11,10 @@
 //!   classes of `RegisterTypes.factory`: Jolt's settings classes and the user's. An unknown type gives Jolt's "Failed
 //!   to create instance of type". So does a class that is not a TwoBodyConstraintSettings, such as ConstraintSettings
 //!   itself (Jolt's StaticCast does not check the class; SerializationArchitecture.md D8).
-//! - Soft bodies (Phase 9): `saveBinaryState` writes Jolt's soft body count (always 0), `restoreFromBinaryState`
-//!   reports the Zolt error "Soft bodies are not supported" for a stream that contains soft bodies.
+//! - Soft bodies (RemainingFeaturesArchitecture.md R19): `soft_bodies` is Jolt's third attribute. `saveBinaryState`
+//!   always saves the shared settings and materials of the soft bodies, like Jolt (a soft body without shared settings
+//!   panics there, R20 UB6). `fromPhysicsSystem` keeps Jolt's index quirk (R20): a soft body gets the index that the
+//!   next rigid body will have in `bodies`, the index of the wrong array.
 //! - Errors (Zolt): functions that allocate return `Allocator.Error`. Where Jolt dereferences the null shape of a body
 //!   without one (`FixInvalidScales`, `SaveBinaryState` with shapes, `CreateBodies`), Zolt returns `error.InvalidShape`
 //!   (`CreateBodyError`, like BodyInterface.createBody). `createBodies` is all or nothing for these errors: the bodies
@@ -25,11 +24,9 @@
 //!   ConnectedConstraint without settings in `fromPhysicsSystem`, like Jolt's AddConstraint(nullptr, ...);
 //!   `createBodies` and `saveBinaryState` panic on it where Jolt dereferences the null pointer.
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL: `rtti` of PhysicsScene and
-//!   ConnectedConstraint (SerializationArchitecture.md S17). PhysicsScene declares "mBodies" and "mConstraints", not
-//!   Jolt's "mSoftBodies" (Phase 9). A scene without soft bodies (Assets/terrain2.bof) is read exactly. A stream with
-//!   soft bodies fails to read: the skip of a soft body reads the identifier of its Ref "mSettings" as class data
-//!   (S15). Zolt writes a scene without "mSoftBodies". "mSettings" is declared as Jolt's
-//!   `TwoBodyConstraintSettings` (`.attrAs`): a link accepts only objects of that class.
+//!   ConnectedConstraint (SerializationArchitecture.md S17, RemainingFeaturesArchitecture.md R19): Jolt's "mBodies",
+//!   "mConstraints" and "mSoftBodies". "mSettings" is declared as Jolt's `TwoBodyConstraintSettings` (`.attrAs`): a
+//!   link accepts only objects of that class.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -57,6 +54,7 @@ const TwoBodyConstraintFile = @import("Constraints/TwoBodyConstraint.zig");
 const TwoBodyConstraint = TwoBodyConstraintFile.TwoBodyConstraint;
 const TwoBodyConstraintSettings = TwoBodyConstraintFile.TwoBodyConstraintSettings;
 const PhysicsSystem = @import("PhysicsSystem.zig").PhysicsSystem;
+const SoftBodyCreationSettings = @import("SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
 
 /// Contains the creation settings of a set of bodies
 pub const PhysicsScene = struct {
@@ -67,7 +65,7 @@ pub const PhysicsScene = struct {
         .attributes = &.{
             .attr("mBodies", .bodies),
             .attr("mConstraints", .constraints),
-            // Jolt's third attribute "mSoftBodies" comes with the soft bodies in Phase 9 (SerializationArchitecture.md S17)
+            .attr("mSoftBodies", .soft_bodies),
         },
     });
 
@@ -129,6 +127,9 @@ pub const PhysicsScene = struct {
     /// Constraints that are part of this scene
     constraints: std.ArrayList(ConnectedConstraint) = .empty,
 
+    /// Soft bodies that are part of this scene
+    soft_bodies: std.ArrayList(SoftBodyCreationSettings) = .empty,
+
     /// Constructor of a scene that is not on the heap (`deinit` it)
     pub fn init(allocator: Allocator) PhysicsScene {
         return .{ .allocator = allocator };
@@ -144,7 +145,7 @@ pub const PhysicsScene = struct {
     /// new PhysicsScene (RTTI create)
     pub const createDefault = create;
 
-    /// Destructor: releases the references of the bodies and constraints and frees the arrays
+    /// Destructor: releases the references of the bodies, constraints and soft bodies and frees the arrays
     pub fn deinit(self: *PhysicsScene) void {
         self.ref_count.assertUnreferenced();
         self.destruct();
@@ -155,6 +156,8 @@ pub const PhysicsScene = struct {
         self.bodies.deinit(self.allocator);
         for (self.constraints.items) |*c| c.deinit();
         self.constraints.deinit(self.allocator);
+        for (self.soft_bodies.items) |*b| b.deinit();
+        self.soft_bodies.deinit(self.allocator);
     }
 
     /// Add a reference to this object
@@ -196,6 +199,12 @@ pub const PhysicsScene = struct {
         self.constraints.appendAssumeCapacity(.init(constraint, body1, body2));
     }
 
+    /// Add a soft body to the scene (a copy that holds references to the shared settings and the group filter)
+    pub fn addSoftBody(self: *PhysicsScene, soft_body: *const SoftBodyCreationSettings) Allocator.Error!void {
+        try self.soft_bodies.ensureUnusedCapacity(self.allocator, 1);
+        self.soft_bodies.appendAssumeCapacity(soft_body.clone());
+    }
+
     /// Get number of bodies in this scene
     pub fn getNumBodies(self: *const PhysicsScene) usize {
         return self.bodies.items.len;
@@ -226,6 +235,21 @@ pub const PhysicsScene = struct {
         return &self.constraints;
     }
 
+    /// Get number of bodies in this scene
+    pub fn getNumSoftBodies(self: *const PhysicsScene) usize {
+        return self.soft_bodies.items.len;
+    }
+
+    /// Access to the soft body settings for this scene
+    pub fn getSoftBodies(self: *const PhysicsScene) []const SoftBodyCreationSettings {
+        return self.soft_bodies.items;
+    }
+
+    /// Access to the soft body settings for this scene (the non-const overload: the array, allocated with `allocator`)
+    pub fn getSoftBodiesMut(self: *PhysicsScene) *std.ArrayList(SoftBodyCreationSettings) {
+        return &self.soft_bodies;
+    }
+
     /// Instantiate all bodies, returns false if not all bodies could be created
     /// (Zolt: `error.InvalidShape` for a body without a shape and `error.OutOfMemory`; the bodies and constraints that
     /// were created are then removed and destroyed again)
@@ -234,12 +258,12 @@ pub const PhysicsScene = struct {
 
         var body_ids: BodyIDVector = .empty;
         defer body_ids.deinit(self.allocator);
-        try body_ids.ensureTotalCapacity(self.allocator, self.bodies.items.len);
+        try body_ids.ensureTotalCapacity(self.allocator, self.bodies.items.len + self.soft_bodies.items.len);
 
         // Zolt: everything that the rest of the function allocates, so that it can only fail before a body is added
         var temp_body_ids: BodyIDVector = .empty;
         defer temp_body_ids.deinit(self.allocator);
-        try temp_body_ids.ensureTotalCapacity(self.allocator, self.bodies.items.len);
+        try temp_body_ids.ensureTotalCapacity(self.allocator, self.bodies.items.len + self.soft_bodies.items.len);
         var added_constraints: std.ArrayList(*Constraint) = .empty;
         defer added_constraints.deinit(self.allocator);
         try added_constraints.ensureTotalCapacity(self.allocator, self.constraints.items.len);
@@ -262,7 +286,11 @@ pub const PhysicsScene = struct {
             body_ids.appendAssumeCapacity(body.getID());
         }
 
-        // Create soft bodies (Phase 9: a scene has none)
+        // Create soft bodies
+        for (self.soft_bodies.items) |*b| {
+            const body = (try bi.createSoftBody(b)) orelse break;
+            body_ids.appendAssumeCapacity(body.getID());
+        }
 
         // Batch add bodies
         temp_body_ids.appendSliceAssumeCapacity(body_ids.items); // Body ID's get shuffled by AddBodiesPrepare
@@ -271,7 +299,7 @@ pub const PhysicsScene = struct {
         bodies_added = true;
 
         // If not all bodies are created, creating constraints will be unreliable
-        if (body_ids.items.len != self.bodies.items.len)
+        if (body_ids.items.len != self.bodies.items.len + self.soft_bodies.items.len)
             return false;
 
         // Create constraints
@@ -322,7 +350,7 @@ pub const PhysicsScene = struct {
     /// @param save_shapes If the shapes should be saved as well (these could be shared between physics scenes, in which case the calling application may want to write custom code to restore them)
     /// @param save_group_filter If the group filter should be saved as well (these could be shared)
     /// (Zolt: the maps are allocated with the scene's allocator; `error.InvalidShape` when a body without a shape is
-    /// saved with its shape)
+    /// saved with its shape; a soft body without shared settings panics, R20 UB6)
     pub fn saveBinaryState(self: *const PhysicsScene, stream: StreamOut, save_shapes: bool, save_group_filter: bool) CreateBodyError!void {
         var shape_to_id: BodyCreationSettings.ShapeToIDMap = .empty;
         defer shape_to_id.deinit(self.allocator);
@@ -330,7 +358,8 @@ pub const PhysicsScene = struct {
         defer material_to_id.deinit(self.allocator);
         var group_filter_to_id: BodyCreationSettings.GroupFilterToIDMap = .empty;
         defer group_filter_to_id.deinit(self.allocator);
-        // (SoftBodyCreationSettings::SharedSettingsToIDMap settings_to_id: Phase 9)
+        var settings_to_id: SoftBodyCreationSettings.SharedSettingsToIDMap = .empty;
+        defer settings_to_id.deinit(self.allocator);
 
         // Save bodies
         stream.write(@as(u32, @intCast(self.bodies.items.len)));
@@ -346,8 +375,10 @@ pub const PhysicsScene = struct {
             stream.write(cc.body2);
         }
 
-        // Save soft bodies (Phase 9: a scene has none)
-        stream.write(@as(u32, 0));
+        // Save soft bodies
+        stream.write(@as(u32, @intCast(self.soft_bodies.items.len)));
+        for (self.soft_bodies.items) |*b|
+            try b.saveWithChildren(self.allocator, stream, &settings_to_id, &material_to_id, if (save_group_filter) &group_filter_to_id else null);
     }
 
     /// Restore a saved scene from inStream (Jolt: sRestoreFromBinaryState; the result holds a reference to the new
@@ -366,7 +397,8 @@ pub const PhysicsScene = struct {
         defer releaseList(allocator, &id_to_material);
         var id_to_group_filter: BodyCreationSettings.IDToGroupFilterMap = .empty;
         defer releaseList(allocator, &id_to_group_filter);
-        // (SoftBodyCreationSettings::IDToSharedSettingsMap id_to_settings: Phase 9)
+        var id_to_settings: SoftBodyCreationSettings.IDToSharedSettingsMap = .empty;
+        defer releaseList(allocator, &id_to_settings);
 
         // Reserve some memory to avoid frequent reallocations
         try id_to_shape.ensureTotalCapacity(allocator, 1024);
@@ -414,12 +446,19 @@ pub const PhysicsScene = struct {
             s.constraints.appendAssumeCapacity(cc);
         }
 
-        // Read soft bodies (Phase 9: SoftBodyCreationSettings has no binary state yet)
+        // Read soft bodies (Jolt resizes the array to the length that is read, then restores the elements in place)
         len = 0;
         stream.read(&len);
-        if (len != 0) {
-            result.setError("Soft bodies are not supported");
-            return result;
+        try s.soft_bodies.ensureTotalCapacity(allocator, len);
+        for (0..len) |_| {
+            // Read creation settings
+            var sbcs_result = try SoftBodyCreationSettings.restoreWithChildren(allocator, stream, &id_to_settings, &id_to_material, &id_to_group_filter);
+            defer sbcs_result.deinit();
+            if (sbcs_result.hasError()) {
+                result.setError(sbcs_result.getError());
+                return result;
+            }
+            s.soft_bodies.appendAssumeCapacity(sbcs_result.get().clone());
         }
 
         result.set(scene.clone());
@@ -448,7 +487,7 @@ pub const PhysicsScene = struct {
             var lock: BodyLockRead = .init(bli, id);
             defer lock.deinit();
             if (lock.succeeded()) {
-                // Store location of body
+                // Store location of body (Jolt's quirk, R20: for a soft body this is the index of the next rigid body)
                 (try body_id_to_idx.getOrPutValue(self.allocator, id, 0)).* = @intCast(self.bodies.items.len);
 
                 const body = lock.getBody();
@@ -458,7 +497,11 @@ pub const PhysicsScene = struct {
                     var settings = body.getBodyCreationSettings();
                     defer settings.deinit();
                     try self.addBody(&settings);
-                } else @panic("soft bodies: Phase 9"); // AddSoftBody(body.GetSoftBodyCreationSettings()), no soft body can exist yet
+                } else {
+                    var settings = body.getSoftBodyCreationSettings();
+                    defer settings.deinit();
+                    try self.addSoftBody(&settings);
+                }
             }
         }
 
@@ -530,6 +573,7 @@ const GroupFilterTable = @import("Collision/GroupFilterTable.zig").GroupFilterTa
 const TestConstraints = @import("Constraints/TestConstraints.zig");
 const TestConstraint = TestConstraints.TestConstraint;
 const TestConstraintSettings = TestConstraints.TestConstraintSettings;
+const SoftBodySharedSettings = @import("SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
 
 /// A physics system with one object layer (in place: it must not move)
 const TestSystem = struct {
@@ -559,7 +603,8 @@ const TestSystem = struct {
 };
 
 /// A static box, a dynamic sphere from shape settings and a kinematic body that shares the box shape (and a group
-/// filter with the sphere), with a constraint between body 1 and 2 and one between the world and body 1
+/// filter with the sphere), with a constraint between body 1 and 2 and one between the world and body 1, and two soft
+/// bodies that share a cube (with the material of the box) and the group filter
 fn buildScene(allocator: Allocator, scene: *PhysicsScene) !void {
     const material = try PhysicsMaterialSimple.create(allocator, "Ice", Color.white);
     var material_ref = RefConst(PhysicsMaterial).init(material.material());
@@ -601,6 +646,21 @@ fn buildScene(allocator: Allocator, scene: *PhysicsScene) !void {
     defer c2_ref.deinit();
     c2.value = -1;
     try scene.addConstraint(&c2.base, PhysicsScene.fixed_to_world, 1);
+
+    var cube = try SoftBodySharedSettings.createCube(allocator, 2, 0.5);
+    defer cube.deinit();
+    try cube.get().?.materials.ensureUnusedCapacity(allocator, 1);
+    cube.get().?.materials.appendAssumeCapacity(material_ref.clone());
+    var soft: SoftBodyCreationSettings = .init(cube.get().?, RVec3.init(0, 10, 0), Quat.identity(), 0);
+    defer soft.deinit();
+    soft.collision_group = .init(filter.asGroupFilter(), 2, 3);
+    soft.pressure = 10;
+    soft.user_data = 7;
+    try scene.addSoftBody(&soft);
+    soft.position = RVec3.init(5, 10, 0);
+    soft.collision_group.setGroupFilter(null);
+    soft.faces_double_sided = true;
+    try scene.addSoftBody(&soft);
 }
 
 /// The shape of the settings when they hold one (Jolt's private mShapePtr)
@@ -634,6 +694,9 @@ test "PhysicsScene: addBody, addConstraint, createBodies and fromPhysicsSystem" 
     try testing.expectEqual(@as(usize, 2), scene.getNumConstraints());
     try testing.expectEqual(@as(u64, 42), scene.getBodies()[2].user_data);
     try testing.expectEqual(PhysicsScene.fixed_to_world, scene.getConstraints()[1].body1);
+    try testing.expectEqual(@as(usize, 2), scene.getNumSoftBodies());
+    try testing.expect(scene.getSoftBodies()[1].faces_double_sided);
+    try testing.expectEqual(@as(usize, 2), scene.getSoftBodiesMut().items.len);
 
     var ts: TestSystem = undefined;
     try ts.init(allocator, 16);
@@ -641,8 +704,9 @@ test "PhysicsScene: addBody, addConstraint, createBodies and fromPhysicsSystem" 
     try testing.expect(try scene.createBodies(&ts.system));
 
     // The bodies are added and the non-static ones are active
-    try testing.expectEqual(@as(u32, 3), ts.system.getNumBodies());
+    try testing.expectEqual(@as(u32, 5), ts.system.getNumBodies());
     try testing.expectEqual(@as(u32, 2), ts.system.getNumActiveBodies(.rigid_body));
+    try testing.expectEqual(@as(u32, 2), ts.system.getNumActiveBodies(.soft_body));
     var constraints = try ts.system.getConstraints(allocator);
     defer {
         for (constraints.items) |*c| c.deinit();
@@ -676,6 +740,17 @@ test "PhysicsScene: addBody, addConstraint, createBodies and fromPhysicsSystem" 
     try testing.expectEqual(@as(u32, 1), copy.getConstraints()[1].body2);
     try testing.expectEqual(@as(f32, -1), virtual.downcast(TestConstraintSettings, copy.getConstraints()[1].getSettings().?).value);
 
+    // The soft bodies (the settings as Body.getSoftBodyCreationSettings makes them): the same shared settings
+    try testing.expectEqual(@as(usize, 2), copy.getNumSoftBodies());
+    for (copy.getSoftBodies(), scene.getSoftBodies()) |*b, *original| {
+        try testing.expect(b.settings.get().? == original.settings.get().?);
+        try testing.expect(b.position.eql(original.position));
+        try testing.expect(b.collision_group.eql(&original.collision_group));
+        try testing.expectEqual(original.user_data, b.user_data);
+        try testing.expectEqual(original.pressure, b.pressure);
+        try testing.expectEqual(original.faces_double_sided, b.faces_double_sided);
+    }
+
     // A body without a shape (Jolt dereferences null): error.InvalidShape, nothing is left in the system
     var broken: PhysicsScene = .init(allocator);
     defer broken.deinit();
@@ -697,16 +772,70 @@ test "PhysicsScene: createBodies out of bodies" {
     defer scene.deinit();
     try buildScene(allocator, &scene);
 
-    // Room for 2 of the 3 bodies: they are added, the constraints are not created, the result is false
+    // Room for 2 of the 3 bodies: they are added, the soft bodies are not, the constraints are not created, the
+    // result is false
     var ts: TestSystem = undefined;
     try ts.init(allocator, 2);
     defer ts.deinit();
     try testing.expect(!try scene.createBodies(&ts.system));
     try testing.expectEqual(@as(u32, 2), ts.system.getNumBodies());
     try testing.expectEqual(@as(u32, 1), ts.system.getNumActiveBodies(.rigid_body));
+    try testing.expectEqual(@as(u32, 0), ts.system.getNumActiveBodies(.soft_body));
     var constraints = try ts.system.getConstraints(allocator);
     defer constraints.deinit(allocator);
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
+
+    // Room for the 3 bodies and 1 of the 2 soft bodies
+    var ts2: TestSystem = undefined;
+    try ts2.init(allocator, 4);
+    defer ts2.deinit();
+    try testing.expect(!try scene.createBodies(&ts2.system));
+    try testing.expectEqual(@as(u32, 4), ts2.system.getNumBodies());
+    try testing.expectEqual(@as(u32, 1), ts2.system.getNumActiveBodies(.soft_body));
+    var constraints2 = try ts2.system.getConstraints(allocator);
+    defer constraints2.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), constraints2.items.len);
+}
+
+test "PhysicsScene: fromPhysicsSystem stores the index of the wrong array for a soft body (Jolt's quirk)" {
+    const allocator = testing.allocator;
+    var ts: TestSystem = undefined;
+    try ts.init(allocator, 16);
+    defer ts.deinit();
+    const bi = ts.system.getBodyInterfaceMut();
+
+    // A rigid body, a soft body and a rigid body, in this ID order
+    const box = try BoxShape.create(allocator, Vec3.replicate(1), .{});
+    var box_ref = RefConst(Shape).init(box.asShape());
+    defer box_ref.deinit();
+    var rigid: BodyCreationSettings = .initWithShape(box.asShape(), RVec3.zero(), Quat.identity(), .dynamic, 0);
+    defer rigid.deinit();
+    var cube = try SoftBodySharedSettings.createCube(allocator, 2, 0.5);
+    defer cube.deinit();
+    var soft: SoftBodyCreationSettings = .init(cube.get().?, RVec3.init(0, 5, 0), Quat.identity(), 0);
+    defer soft.deinit();
+    const a = (try bi.createBody(&rigid)).?.getID();
+    const s = (try bi.createSoftBody(&soft)).?.getID();
+    const b = (try bi.createBody(&rigid)).?.getID();
+
+    // A constraint between the soft body and the second rigid body
+    const settings = try TestConstraintSettings.create(allocator);
+    var settings_ref = Ref(ConstraintSettings).init(settings.asSettings());
+    defer settings_ref.deinit();
+    const c = try bi.createConstraint(&settings.base, s, b);
+    var c_ref = Ref(Constraint).init(&c.base);
+    defer c_ref.deinit();
+    try ts.system.addConstraint(&c.base);
+    _ = a;
+
+    // Jolt stores mBodies.size() for every body: the soft body gets index 1, the index of the second rigid body
+    var scene: PhysicsScene = .init(allocator);
+    defer scene.deinit();
+    try scene.fromPhysicsSystem(&ts.system);
+    try testing.expectEqual(@as(usize, 2), scene.getNumBodies());
+    try testing.expectEqual(@as(usize, 1), scene.getNumSoftBodies());
+    try testing.expectEqual(@as(u32, 1), scene.getConstraints()[0].body1);
+    try testing.expectEqual(@as(u32, 1), scene.getConstraints()[0].body2);
 }
 
 fn createBodiesOutOfMemory(allocator: Allocator) !void {
@@ -790,6 +919,23 @@ test "PhysicsScene: saveBinaryState / restoreFromBinaryState" {
                 try testing.expectEqual(o.base.base.constraint_priority, s.base.base.constraint_priority);
             }
 
+            // The soft bodies always save their shared settings and materials: shared, and the material map is the
+            // one of the shapes
+            try testing.expectEqual(@as(usize, 2), restored.getNumSoftBodies());
+            const soft = restored.getSoftBodies();
+            const shared = soft[0].settings.get().?;
+            try testing.expect(shared == soft[1].settings.get().?);
+            try testing.expect(shared != scene.getSoftBodies()[0].settings.get().?);
+            try testing.expectEqual(@as(u64, 7), soft[0].user_data);
+            try testing.expect(soft[1].faces_double_sided and !soft[0].faces_double_sided);
+            try testing.expectEqualStrings("Ice", shared.materials.items[1].get().?.getDebugName());
+            if (save_shapes)
+                try testing.expect(shared.materials.items[1].get().? == shapePtr(&restored.getBodies()[0]).?.getMaterial(.empty));
+            try testing.expect((soft[0].collision_group.getGroupFilter() != null) == save_group_filter);
+            if (save_group_filter)
+                try testing.expect(soft[0].collision_group.getGroupFilter() == restored.getBodies()[1].collision_group.getGroupFilter());
+            try testing.expect(soft[1].collision_group.getGroupFilter() == null);
+
             // Saving the restored scene gives the same bytes
             var out2: std.Io.Writer.Allocating = .init(allocator);
             defer out2.deinit();
@@ -808,21 +954,33 @@ test "PhysicsScene: restoreFromBinaryState errors" {
     const bytes = try saveScene(&scene, &out, true, true);
 
     // Truncated streams: an error with one of Jolt's texts or a scene with fewer parts (Jolt checks the EOF only while
-    // reading a body or a constraint), nothing leaks
+    // reading a body, a constraint or a soft body), nothing leaks
     for (0..bytes.len) |len| {
         var result = try restoreScene(allocator, bytes[0..len]);
         defer result.deinit();
-        try testing.expect(result.hasError() or result.getPtr().?.getNumConstraints() < 2 or len >= bytes.len - 12); // The body indices of the last constraint and the soft body count
+        try testing.expect(result.hasError() or result.getPtr().?.getNumConstraints() < 2 or result.getPtr().?.getNumSoftBodies() < 2 or len >= bytes.len - 4); // The group filter ID of the last soft body
     }
 
-    // The soft bodies of Phase 9
-    const with_soft_bodies = try allocator.dupe(u8, bytes);
-    defer allocator.free(with_soft_bodies);
-    std.mem.writeInt(u32, with_soft_bodies[bytes.len - 4 ..][0..4], 1, .little);
+    // The soft bodies start after the soft body count: the same scene without soft bodies tells where
+    var no_soft_bodies: PhysicsScene = .init(allocator);
+    defer no_soft_bodies.deinit();
+    try buildScene(allocator, &no_soft_bodies);
+    for (no_soft_bodies.soft_bodies.items) |*b| b.deinit();
+    no_soft_bodies.soft_bodies.clearRetainingCapacity();
+    var out_no_soft: std.Io.Writer.Allocating = .init(allocator);
+    defer out_no_soft.deinit();
+    const soft_bodies_start = (try saveScene(&no_soft_bodies, &out_no_soft, true, true)).len;
+    try testing.expectEqualSlices(u8, out_no_soft.written()[0 .. soft_bodies_start - 4], bytes[0 .. soft_bodies_start - 4]);
+    const sbcs_size = 3 * @sizeOf(@import("../Math/Real.zig").Real) + 16 + 8 + @sizeOf(@import("Collision/ObjectLayer.zig").ObjectLayer) + 8 + 4 + 7 * 4 + 4;
     {
-        var result = try restoreScene(allocator, with_soft_bodies);
+        var result = try restoreScene(allocator, bytes[0 .. soft_bodies_start + sbcs_size - 1]);
         defer result.deinit();
-        try testing.expectEqualStrings("Soft bodies are not supported", result.getError());
+        try testing.expectEqualStrings("Error reading body creation settings", result.getError());
+    }
+    {
+        var result = try restoreScene(allocator, bytes[0 .. soft_bodies_start + sbcs_size + 2]);
+        defer result.deinit();
+        try testing.expectEqualStrings("Failed to read settings id", result.getError());
     }
 
     // Constraint settings of a type that is not registered
@@ -938,7 +1096,8 @@ const ObjectStreamIn = @import("../ObjectStream/ObjectStreamIn.zig").ObjectStrea
 const ObjectStreamOut = @import("../ObjectStream/ObjectStreamOut.zig").ObjectStreamOut;
 const StreamType = @import("../ObjectStream/ObjectStream.zig").StreamType;
 
-/// Two bodies that share shape settings (one with a group filter), a constraint between them and one to the world
+/// Two bodies that share shape settings (one with a group filter), a constraint between them and one to the world, and
+/// two soft bodies that share their shared settings (one with the group filter)
 fn buildStreamScene(allocator: Allocator, scene: *PhysicsScene) !void {
     const sphere = try SphereShapeSettings.create(allocator, 0.5, .{});
     var sphere_ref = Ref(ShapeSettings).init(sphere.asShapeSettings());
@@ -962,6 +1121,19 @@ fn buildStreamScene(allocator: Allocator, scene: *PhysicsScene) !void {
     defer c_ref.deinit();
     try scene.addConstraint(&c.base, 0, 1);
     try scene.addConstraint(&c.base, PhysicsScene.fixed_to_world, 1);
+
+    var shared = Ref(SoftBodySharedSettings).init(try SoftBodySharedSettings.create(allocator));
+    defer shared.deinit();
+    try shared.get().?.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 0 }, .{}));
+    try shared.get().?.vertices.append(allocator, .init(.{ .x = 1, .y = 0, .z = 0 }, .{ .inv_mass = 0.5 }));
+    try shared.get().?.edge_constraints.append(allocator, .init(0, 1, .{ .compliance = 0.25 }));
+    var soft: SoftBodyCreationSettings = .init(shared.get().?, RVec3.init(0, 2, 0), Quat.identity(), 1);
+    defer soft.deinit();
+    soft.collision_group = .init(filter.asGroupFilter(), 3, 1);
+    try scene.addSoftBody(&soft);
+    soft.collision_group.setGroupFilter(null);
+    soft.pressure = 4;
+    try scene.addSoftBody(&soft);
 }
 
 /// sWriteObject of `scene` with the stream's `allocator`. The bytes are allocated with testing.allocator (free them
@@ -979,7 +1151,7 @@ fn readScene(allocator: Allocator, bytes: []const u8) ObjectStreamIn.Error!Ref(P
     return ObjectStreamIn.sReadObjectRef(PhysicsScene, allocator, &reader, .{});
 }
 
-test "PhysicsScene: object stream with shared shape settings, a group filter and constraints" {
+test "PhysicsScene: object stream with shared shape settings, a group filter, constraints and soft bodies" {
     const allocator = testing.allocator;
     var scene: PhysicsScene = .init(allocator);
     defer scene.deinit();
@@ -1022,6 +1194,19 @@ test "PhysicsScene: object stream with shared shape settings, a group filter and
             try testing.expectEqual(original.body2, c.body2);
         }
 
+        // The soft bodies share one new shared settings object, the filter is the one of the bodies
+        const soft = s.getSoftBodies();
+        try testing.expectEqual(@as(usize, 2), soft.len);
+        const shared = soft[0].settings.get().?;
+        try testing.expect(shared == soft[1].settings.get().?);
+        try testing.expect(shared != scene.getSoftBodies()[0].settings.get().?);
+        try testing.expectEqual(@as(u32, 2), shared.getRefCount());
+        try testing.expectEqual(@as(usize, 2), shared.vertices.items.len);
+        try testing.expectEqual(@as(f32, 0.25), shared.edge_constraints.items[0].compliance);
+        try testing.expect(soft[0].collision_group.getGroupFilter().? == bodies[0].collision_group.getGroupFilter().?);
+        try testing.expect(soft[1].collision_group.getGroupFilter() == null);
+        try testing.expectEqual(@as(f32, 4), soft[1].pressure);
+
         // The same bytes again
         const again = try writeScene(allocator, s, stream_type);
         defer allocator.free(again);
@@ -1029,7 +1214,7 @@ test "PhysicsScene: object stream with shared shape settings, a group filter and
     }
 }
 
-test "PhysicsScene: object stream links, soft bodies (S17)" {
+test "PhysicsScene: object stream links, Jolt's soft body scene" {
     const allocator = testing.allocator;
 
     // "mSettings" is declared as TwoBodyConstraintSettings: a link to other constraint settings becomes null
@@ -1058,7 +1243,7 @@ test "PhysicsScene: object stream links, soft bodies (S17)" {
     }
 
     // Jolt declares the soft body classes also for a scene without soft bodies (S11). Jolt writes such a scene as the
-    // stream below up to its soft body count, which is 0. The empty mSoftBodies array is skipped: the scene is read.
+    // stream below up to its soft body count, which is 0. The empty mSoftBodies array is read: no soft body.
     const soft_body_count = "object PhysicsScene 00000001\n  0\n  0\n  ";
     const count_at = std.mem.indexOf(u8, jolt_soft_body_scene, soft_body_count).? + soft_body_count.len;
     try testing.expectEqualStrings("1", jolt_soft_body_scene[count_at..][0..1]);
@@ -1068,12 +1253,41 @@ test "PhysicsScene: object stream links, soft bodies (S17)" {
         var read = try readScene(allocator, no_soft_bodies);
         defer read.deinit();
         try testing.expectEqual(@as(usize, 0), read.get().?.getNumBodies());
+        try testing.expectEqual(@as(usize, 0), read.get().?.getNumSoftBodies());
     }
 
-    // With a soft body, the Ref "mSettings" is skipped as class data of SoftBodySharedSettings (S15). Its identifier
-    // 00000002 is read as the number of vertices. The words of the soft body that follow are read as vertices and
-    // faces, until a word is not a number. So the stream is misread and cannot be read.
-    try testing.expectError(error.InvalidObjectStream, readScene(allocator, jolt_soft_body_scene));
+    // Jolt's scene with a soft body is read (it failed while Zolt did not declare "mSoftBodies", S17)
+    var read = try readScene(allocator, jolt_soft_body_scene);
+    defer read.deinit();
+    const s = read.get().?;
+    try testing.expectEqual(@as(usize, 1), s.getNumSoftBodies());
+    const soft = &s.getSoftBodies()[0];
+    try testing.expect(soft.position.eql(RVec3.init(0, 2, 0)));
+    try testing.expectEqual(@as(@import("Collision/ObjectLayer.zig").ObjectLayer, 1), soft.object_layer);
+    const shared = soft.settings.get().?;
+    try testing.expectEqual(@as(usize, 2), shared.vertices.items.len);
+    try testing.expectEqual(@as(f32, 1), shared.vertices.items[1].position.x);
+    try testing.expectEqual(@as(usize, 1), shared.edge_constraints.items.len);
+    try testing.expectEqual(@as(u32, 1), shared.edge_constraints.items[0].vertex[1]);
+    try testing.expectEqual(@as(usize, 1), shared.materials.items.len);
+    try testing.expectEqualStrings("Default", shared.materials.items[0].get().?.getDebugName());
+
+    // Written again as text: Jolt's bytes. Jolt's lines end with "\r\n", some with a space before it. The text above has
+    // "\n" only. The position is a dvec3 in double precision.
+    if (@import("../Math/Real.zig").Real == f32) {
+        const again = try writeScene(allocator, s, .text);
+        defer allocator.free(again);
+        var stripped: std.ArrayList(u8) = .empty;
+        defer stripped.deinit(allocator);
+        var lines = std.mem.splitScalar(u8, again, '\n');
+        var first = true;
+        while (lines.next()) |line| {
+            if (!first) try stripped.append(allocator, '\n');
+            first = false;
+            try stripped.appendSlice(allocator, std.mem.trimEnd(u8, line, " \r"));
+        }
+        try testing.expectEqualStrings(jolt_soft_body_scene, std.mem.trimEnd(u8, stripped.items, "\n"));
+    }
 }
 
 /// The text stream that Jolt writes for a PhysicsScene with one soft body (with "\n" line ends, without the space at

@@ -1,7 +1,13 @@
 //! Port of: Jolt/Physics/Body/BodyManager.h, Jolt/Physics/Body/BodyManager.cpp
-//! Status: partial
-//! Missing: AllocateSoftBody (Phase 9, SimulationArchitecture D1: no soft body can be created before Phase 9)
+//! Status: complete
 //! Not ported: ReportSimulationStats (JPH_TRACK_SIMULATION_STATS + JPH_PROFILE_ENABLED, dropped with the profiler)
+//!
+//! RemainingFeaturesArchitecture.md R16: `allocateSoftBody` is one allocation, like Jolt's `new
+//! SoftBodyWithMotionPropertiesAndShape`: the body, its SoftBodyMotionProperties and its embedded SoftBodyShape. It
+//! returns `CreateBodyError` (out of memory: the half built soft body is deleted again). `deleteBody` deletes a soft
+//! body like Jolt's destructor chain: it releases the body's shape reference, deinits the motion properties (Jolt's
+//! `~SoftBodyMotionProperties`: the arrays, the shared settings, the leaf shapes), checks that the embedded shape has no
+//! reference left and releases the collision group.
 //!
 //! SimulationArchitecture D2 / D3:
 //! - Initialized in place (`var bm: BodyManager = .empty; try bm.init(allocator, io, ...)`), because the lock
@@ -34,7 +40,9 @@
 //!   the update after restoring a saved state treats the contact cache like the update that failed.
 //! - Overloads: the const / non-const `GetBody`, `TryGetBody`, `GetBodies` are `getBody` / `getBodyMut`, `tryGetBody` /
 //!   `tryGetBodyMut`, `getBodies` / `getBodiesMut`. Pointer + count parameters are slices.
-//! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): gated declarations
+//!   (RemainingFeaturesArchitecture.md R2), `void` without `-Ddebug_renderer`. Jolt's default argument `inBodyFilter` is
+//!   `DrawOptions.body_filter`. Draw takes the body mutexes like Jolt.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -46,6 +54,15 @@ const Mutex = MutexFile.Mutex;
 const SharedMutex = MutexFile.SharedMutex;
 const MutexArray = @import("../../Core/MutexArray.zig").MutexArray;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const AABox = @import("../../Geometry/AABox.zig").AABox;
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
+const ShapeFunctions = @import("../Collision/Shape/Shape.zig").ShapeFunctions;
+const PhysicsSettings = @import("../PhysicsSettings.zig").PhysicsSettings;
+const MassProperties = @import("MassProperties.zig").MassProperties;
+const BodyDrawFilter = @import("BodyFilter.zig").BodyDrawFilter;
 const BroadPhaseLayerInterface = @import("../Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayerInterface;
 const BodyID = @import("BodyID.zig").BodyID;
 const Body = @import("Body.zig").Body;
@@ -62,12 +79,24 @@ const CreateBodyError = BodyCreationSettingsFile.CreateBodyError;
 const BodyActivationListener = @import("BodyActivationListener.zig").BodyActivationListener;
 const SoftBodyMotionProperties = @import("../SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
 const SoftBodyShape = @import("../SoftBody/SoftBodyShape.zig").SoftBodyShape;
+const SoftBodyCreationSettings = @import("../SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
+const SoftBodySharedSettings = @import("../SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
 const StateRecorderFile = @import("../StateRecorder.zig");
 const StateRecorder = StateRecorderFile.StateRecorder;
 const StateRecorderFilter = StateRecorderFile.StateRecorderFilter;
 const PhysicsLockFile = @import("../PhysicsLock.zig");
 const PhysicsLock = PhysicsLockFile.PhysicsLock;
 const UniqueLock = PhysicsLockFile.UniqueLock;
+
+/// Defines how to color soft body constraints (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+pub const SoftBodyConstraintColor = if (Core.debug_renderer) enum {
+    /// Draw different types of constraints in different colors
+    constraint_type,
+    /// Draw constraints in the same group in the same color, non-parallel group will be red
+    constraint_group,
+    /// Draw constraints in the same group in the same color, non-parallel group will be red, and order within each group will be indicated with gradient
+    constraint_order,
+} else void;
 
 /// Array of bodies (BodyVector = Array<Body *>): the slots of BodyManager.bodies, a body pointer or a freed index
 pub const BodyVector = []BodyManager.BodySlot;
@@ -81,11 +110,17 @@ pub const BodyWithMotionProperties = struct {
     motion_properties: MotionProperties = .{},
 };
 
-/// Helper class that combines a soft body its motion properties and shape (the members are Phase 9 stubs)
+/// Helper class that combines a soft body its motion properties and shape
 pub const SoftBodyWithMotionPropertiesAndShape = struct {
     body: Body = .{},
-    motion_properties: SoftBodyMotionProperties = .{},
-    shape: SoftBodyShape = .{},
+    motion_properties: SoftBodyMotionProperties,
+    shape: SoftBodyShape,
+
+    /// Constructor: the motion properties allocate with `allocator` (the body manager's). The shape is marked embedded
+    /// by BodyManager.allocateSoftBody, once it points to the motion properties.
+    pub fn init(allocator: Allocator) SoftBodyWithMotionPropertiesAndShape {
+        return .{ .motion_properties = .{ .allocator = allocator }, .shape = .init(allocator) };
+    }
 };
 
 /// Class that contains all bodies
@@ -385,6 +420,26 @@ pub const BodyManager = struct {
         errdefer self.deleteBody(body);
         body.body_type = .rigid_body;
         try body.applyBodyCreationSettings(self.allocator, body_creation_settings, self.broad_phase_layer_interface.?);
+
+        return body;
+    }
+
+    /// Create a soft body using creation settings. The returned body will not be part of the body manager yet.
+    /// Zolt: `error.OutOfMemory` when the soft body or its arrays cannot be allocated, nothing is left behind then.
+    pub fn allocateSoftBody(self: *const BodyManager, soft_body_creation_settings: *const SoftBodyCreationSettings) CreateBodyError!*Body {
+        // Fill in basic properties
+        const bmp = try self.allocator.create(SoftBodyWithMotionPropertiesAndShape);
+        bmp.* = .init(self.allocator);
+        const mp = &bmp.motion_properties;
+        const shape = &bmp.shape;
+        const body = &bmp.body;
+        shape.motion_properties = mp;
+        shape.asShape().setEmbedded(); // Jolt: the constructor of SoftBodyWithMotionPropertiesAndShape
+        body.body_type = .soft_body;
+        body.motion_properties = &mp.base;
+        body.shape = .init(shape.asShape());
+        errdefer self.deleteBody(body);
+        try body.applySoftBodyCreationSettings(soft_body_creation_settings, self.broad_phase_layer_interface.?);
 
         return body;
     }
@@ -1099,7 +1154,265 @@ pub const BodyManager = struct {
         }
     }
 
-    // TODO(debug_renderer): ESoftBodyConstraintColor, EShapeColor, DrawSettings, Draw
+    /// How to color the shapes (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    pub const ShapeColor = if (Core.debug_renderer) enum {
+        /// Random color per instance
+        instance_color,
+        /// Convex = green, scaled = yellow, compound = orange, mesh = red
+        shape_type_color,
+        /// Static = grey, keyframed = green, dynamic = random color per instance
+        motion_type_color,
+        /// Static = grey, keyframed = green, dynamic = yellow, sleeping = red
+        sleep_color,
+        /// Static = grey, active = random color per island, sleeping = light grey
+        island_color,
+        /// Color as defined by the PhysicsMaterial of the shape
+        material_color,
+    } else void;
+
+    /// Draw settings (JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    ///
+    /// Note that there are several debug drawing features that are not exposed through this interface since they use information
+    /// that is only available deep inside the simulation update and are mostly there to facilitate debugging Jolt. These options
+    /// use DebugRenderer::sInstance to draw.
+    /// (Zolt: they draw into the renderer of the physics system, PhysicsSystem.setDebugRenderer, and their flags are the
+    /// fields of `DebugRenderer.flags`, RemainingFeaturesArchitecture.md R4.)
+    ///
+    /// E.g.:
+    /// * To draw contact information, use ContactConstraintManager::sDrawContactManifolds.
+    /// * To draw when continuous collision detection is used, use PhysicsSystem::sDrawMotionQualityLinearCast.
+    /// * To draw what's going on in a CharacterVirtual update, use CharacterVirtual::sDrawConstraints, CharacterVirtual::sDrawWalkStairs and CharacterVirtual::sDrawStickToFloor.
+    /// * To draw the volume of water that interacts with a shape, use Shape::sDrawSubmergedVolumes.
+    pub const DrawSettings = if (Core.debug_renderer) struct {
+        /// Draw the GetSupport() function, used for convex collision detection
+        draw_get_support_function: bool = false,
+        /// When drawing the support function, also draw which direction mapped to a specific support point
+        draw_support_direction: bool = false,
+        /// Draw the faces that were found colliding during collision detection
+        draw_get_supporting_face: bool = false,
+        /// Draw the shapes of all bodies
+        draw_shape: bool = true,
+        /// When mDrawShape is true and this is true, the shapes will be drawn in wireframe instead of solid.
+        draw_shape_wireframe: bool = false,
+        /// Coloring scheme to use for shapes
+        draw_shape_color: ShapeColor = .motion_type_color,
+        /// Draw a bounding box per body
+        draw_bounding_box: bool = false,
+        /// Draw the center of mass for each body
+        draw_center_of_mass_transform: bool = false,
+        /// Draw the world transform (which can be different than the center of mass) for each body
+        draw_world_transform: bool = false,
+        /// Draw the velocity vector for each body
+        draw_velocity: bool = false,
+        /// Draw the mass and inertia (as the box equivalent) for each body
+        draw_mass_and_inertia: bool = false,
+        /// Draw stats regarding the sleeping algorithm of each body
+        draw_sleep_stats: bool = false,
+        /// Draw the vertices of soft bodies
+        draw_soft_body_vertices: bool = false,
+        /// Draw the velocities of the vertices of soft bodies
+        draw_soft_body_vertex_velocities: bool = false,
+        /// Draw the edge constraints of soft bodies
+        draw_soft_body_edge_constraints: bool = false,
+        /// Draw the bend constraints of soft bodies
+        draw_soft_body_bend_constraints: bool = false,
+        /// Draw the volume constraints of soft bodies
+        draw_soft_body_volume_constraints: bool = false,
+        /// Draw the skin constraints of soft bodies
+        draw_soft_body_skin_constraints: bool = false,
+        /// Draw the LRA constraints of soft bodies
+        draw_soft_body_lra_constraints: bool = false,
+        /// Draw the rods of soft bodies
+        draw_soft_body_rods: bool = false,
+        /// Draw the rod states (orientation and angular velocity) of soft bodies
+        draw_soft_body_rod_states: bool = false,
+        /// Draw the rod bend twist constraints of soft bodies
+        draw_soft_body_rod_bend_twist_constraints: bool = false,
+        /// Draw the predicted bounds of soft bodies
+        draw_soft_body_predicted_bounds: bool = false,
+        /// Coloring scheme to use for soft body constraints
+        draw_soft_body_constraint_color: SoftBodyConstraintColor = .constraint_type,
+    } else void;
+
+    /// The optional parameters of draw (Jolt's default argument; JPH_DEBUG_RENDERER: `void` without -Ddebug_renderer)
+    pub const DrawOptions = if (Core.debug_renderer) struct {
+        /// Only the bodies that pass the filter are drawn (null: every body)
+        body_filter: ?*const BodyDrawFilter = null,
+    } else void;
+
+    /// Draw the state of the bodies (debugging purposes) (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *BodyManager, draw_settings: *const DrawSettings, physics_settings: *const PhysicsSettings, renderer: *DebugRenderer, opts: DrawOptions) void {
+        self.lockAllBodies();
+        defer self.unlockAllBodies();
+
+        for (self.bodies[0..self.bodies_size.raw]) |slot| {
+            if (slot.isValidBodyPointer() and slot.getBody().isInBroadPhase() and (opts.body_filter == null or opts.body_filter.?.shouldDraw(slot.getBody()))) {
+                const body = slot.getBody();
+                std.debug.assert(self.bodies[body.getID().getIndex()] == slot);
+
+                const is_sensor = body.isSensor();
+
+                // Determine drawing mode
+                var color: Color = undefined;
+                if (is_sensor) {
+                    color = Color.yellow;
+                } else switch (draw_settings.draw_shape_color) {
+                    .instance_color => {
+                        // Each instance has own color
+                        color = Color.getDistinctColor(@intCast(body.id.getIndex()));
+                    },
+
+                    .shape_type_color => color = ShapeFunctions.get(body.getShape().getSubType()).color,
+
+                    .motion_type_color => {
+                        // Determine color based on motion type
+                        switch (body.motion_type) {
+                            .static => color = Color.grey,
+                            .kinematic => color = Color.green,
+                            .dynamic => color = Color.getDistinctColor(@intCast(body.id.getIndex())),
+                        }
+                    },
+
+                    .sleep_color => {
+                        // Determine color based on motion type
+                        switch (body.motion_type) {
+                            .static => color = Color.grey,
+                            .kinematic => color = if (body.isActive()) Color.green else Color.red,
+                            .dynamic => color = if (body.isActive()) Color.yellow else Color.red,
+                        }
+                    },
+
+                    .island_color => {
+                        // Determine color based on motion type
+                        switch (body.motion_type) {
+                            .static => color = Color.grey,
+                            .kinematic, .dynamic => {
+                                const idx = body.getMotionProperties().getIslandIndexInternal();
+                                color = if (idx != Body.inactive_index) Color.getDistinctColor(@intCast(idx)) else Color.light_grey;
+                            },
+                        }
+                    },
+
+                    .material_color => color = Color.white,
+                }
+
+                // Draw the results of GetSupportFunction
+                if (draw_settings.draw_get_support_function)
+                    body.getShape().drawGetSupportFunction(renderer, body.getCenterOfMassTransform(), Vec3.one(), color, draw_settings.draw_support_direction);
+
+                // Draw the results of GetSupportingFace
+                if (draw_settings.draw_get_supporting_face)
+                    body.getShape().drawGetSupportingFace(renderer, body.getCenterOfMassTransform(), Vec3.one());
+
+                // Draw the shape
+                if (draw_settings.draw_shape)
+                    body.getShape().draw(renderer, body.getCenterOfMassTransform(), Vec3.one(), color, draw_settings.draw_shape_color == .material_color, draw_settings.draw_shape_wireframe or is_sensor);
+
+                // Draw bounding box
+                if (draw_settings.draw_bounding_box)
+                    renderer.drawWireBox(body.bounds, color);
+
+                // Draw center of mass transform
+                if (draw_settings.draw_center_of_mass_transform)
+                    renderer.drawCoordinateSystem(body.getCenterOfMassTransform(), .{ .size = 0.2 });
+
+                // Draw world transform
+                if (draw_settings.draw_world_transform)
+                    renderer.drawCoordinateSystem(body.getWorldTransform(), .{ .size = 0.2 });
+
+                // Draw world space linear and angular velocity
+                if (draw_settings.draw_velocity) {
+                    const pos = body.getCenterOfMassPosition();
+                    renderer.drawArrow(pos, pos.addVec3(body.getLinearVelocity()), Color.green, 0.1);
+                    renderer.drawArrow(pos, pos.addVec3(body.getAngularVelocity()), Color.red, 0.1);
+                }
+
+                if (draw_settings.draw_mass_and_inertia and body.isDynamic()) {
+                    const mp = body.getMotionProperties();
+                    if (mp.getInverseMass() > 0.0 and !Vec3.equals(mp.getInverseInertiaDiagonal(), Vec3.zero()).testAnyXYZTrue()) {
+                        // Invert mass again
+                        const mass = 1.0 / mp.getInverseMass();
+
+                        // Invert diagonal again
+                        const diagonal = mp.getInverseInertiaDiagonal().reciprocal();
+
+                        // Determine how big of a box has the equivalent inertia
+                        const box_size = MassProperties.getEquivalentSolidBoxSize(mass, diagonal);
+
+                        // Draw box with equivalent inertia
+                        renderer.drawWireBoxMatrix(body.getCenterOfMassTransform().mulMat44(Mat44.rotationQuat(mp.getInertiaRotation())), AABox.init(box_size.mulScalar(-0.5), box_size.mulScalar(0.5)), Color.orange);
+
+                        // Draw mass
+                        // StringFormat("%.2f", ...): its buffer holds 1023 characters
+                        var text_buffer: [1023]u8 = undefined;
+                        var writer: std.Io.Writer = .fixed(&text_buffer);
+                        writer.print("{f}", .{StringTools.cppFixed(mass, 2)}) catch {};
+                        renderer.drawText3D(body.getCenterOfMassPosition(), writer.buffered(), .{ .color = Color.orange, .height = 0.2 });
+                    }
+                }
+
+                if (draw_settings.draw_sleep_stats and body.isDynamic() and body.isActive()) {
+                    const mp = body.getMotionProperties();
+
+                    // Draw stats to know which bodies could go to sleep
+                    // StringFormat("t: %.1f", ...): its buffer holds 1023 characters
+                    var text_buffer: [1023]u8 = undefined;
+                    var writer: std.Io.Writer = .fixed(&text_buffer);
+                    writer.print("t: {f}", .{StringTools.cppFixed(mp.sleep_test_timer, 1)}) catch {};
+                    const g_value = math.clamp(255.0 * mp.sleep_test_timer / physics_settings.time_before_sleep, 0.0, 255.0);
+                    // uint8(float): Clamp keeps NaN (a zero timer with a zero mTimeBeforeSleep), which Jolt's x86-64 build
+                    // converts with cvttss2si and truncates to 0 (porting guide section 8, rule 12)
+                    const g: u8 = if (std.math.isNan(g_value)) 0 else @intFromFloat(g_value);
+                    const sleep_color = Color.initRgb(0, 255 - g, g);
+                    renderer.drawText3D(body.getCenterOfMassPosition(), writer.buffered(), .{ .color = sleep_color, .height = 0.2 });
+                    for (0..3) |i| {
+                        const center = mp.sleep_test_spheres[i].getCenter();
+                        // JPH_IF_DOUBLE_PRECISION(GetSleepTestOffset() +)
+                        renderer.drawMarker(if (Core.double_precision) mp.getSleepTestOffset().addVec3(center) else center, sleep_color, mp.sleep_test_spheres[i].getRadius());
+                    }
+                }
+
+                if (body.isSoftBody()) {
+                    const mp = SoftBodyMotionProperties.fromBaseConst(body.getMotionProperties());
+                    const com = body.getCenterOfMassTransform();
+
+                    if (draw_settings.draw_soft_body_vertices)
+                        mp.drawVertices(renderer, com);
+
+                    if (draw_settings.draw_soft_body_vertex_velocities)
+                        mp.drawVertexVelocities(renderer, com);
+
+                    if (draw_settings.draw_soft_body_edge_constraints)
+                        mp.drawEdgeConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_rods)
+                        mp.drawRods(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_rod_states)
+                        mp.drawRodStates(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_rod_bend_twist_constraints)
+                        mp.drawRodBendTwistConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_bend_constraints)
+                        mp.drawBendConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_volume_constraints)
+                        mp.drawVolumeConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_skin_constraints)
+                        mp.drawSkinConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_lra_constraints)
+                        mp.drawLRAConstraints(renderer, com, draw_settings.draw_soft_body_constraint_color);
+
+                    if (draw_settings.draw_soft_body_predicted_bounds)
+                        mp.drawPredictedBounds(renderer, com);
+                }
+            }
+        }
+    }
 
     /// Lock the active body list, asserts when Activate/DeactivateBody is called. (JPH_ENABLE_ASSERTS: does nothing without asserts)
     pub fn setActiveBodiesLocked(self: *BodyManager, locked: bool) void {
@@ -1271,8 +1584,10 @@ pub const BodyManager = struct {
             if (Core.enable_asserts) body.motion_properties = null;
             if (body.isSoftBody()) {
                 body.shape.deinit(); // Release the shape to avoid assertion on shape destruction because of embedded object with refcount > 0
-                body.collision_group.deinit();
                 const soft_body: *SoftBodyWithMotionPropertiesAndShape = @fieldParentPtr("body", body);
+                soft_body.motion_properties.deinit(); // ~SoftBodyMotionProperties
+                soft_body.shape.asShapeMut().deinit(); // ~SoftBodyShape: asserts that no reference to the embedded shape is left
+                body.collision_group.deinit();
                 self.allocator.destroy(soft_body);
             } else {
                 body.shape.deinit();
@@ -1342,4 +1657,132 @@ test "BodyManager: the contact cache flags of an update that runs out of memory 
     for (bodies) |b|
         try expect(!b.isCollisionCacheInvalid());
     try std.testing.expectEqual(@as(usize, 0), bm.bodies_cache_invalid.items.len);
+}
+
+/// Shared settings that `SoftBodyMotionProperties.initialize` accepts: 3 vertices, a face, a rod, a skinned vertex and
+/// one hand-made update group. Reference count 0: the creation settings hold it.
+fn testSoftBodySettings(allocator: Allocator) Allocator.Error!*SoftBodySharedSettings {
+    const s = try SoftBodySharedSettings.create(allocator);
+    errdefer {
+        s.deinit();
+        allocator.destroy(s);
+    }
+    try s.vertices.append(allocator, .init(.{ .x = 1, .y = 0, .z = 0 }, .{}));
+    try s.vertices.append(allocator, .init(.{ .x = 0, .y = 1, .z = 0 }, .{ .inv_mass = 0.5 }));
+    try s.vertices.append(allocator, .init(.{ .x = 0, .y = 0, .z = 1 }, .{ .inv_mass = 2.0 }));
+    try s.addFace(.init(0, 1, 2, .{}));
+    try s.rod_stretch_shear_constraints.append(allocator, .init(0, 1, .{}));
+    try s.skinned_constraints.append(allocator, .init(2, 0.5, 0.25, 1.0));
+    try s.update_groups.append(allocator, .{ .edge_end_index = 0, .lra_end_index = 0, .rod_stretch_shear_end_index = 1, .rod_bend_twist_end_index = 0, .dihedral_bend_end_index = 0, .volume_end_index = 0, .skinned_end_index = 1 });
+    return s;
+}
+
+/// One broad phase layer for every object layer
+const TestSoftBodyLayers = struct {
+    const ObjectLayer = @import("../Collision/ObjectLayer.zig").ObjectLayer;
+    const BroadPhaseLayer = @import("../Collision/BroadPhase/BroadPhaseLayer.zig").BroadPhaseLayer;
+    pub const overrides = .{ .getNumBroadPhaseLayers, .getBroadPhaseLayer };
+    base: BroadPhaseLayerInterface = .init(@This()),
+    pub fn getNumBroadPhaseLayers(_: *const @This()) u32 {
+        return 1;
+    }
+    pub fn getBroadPhaseLayer(_: *const @This(), _: ObjectLayer) BroadPhaseLayer {
+        return .init(0);
+    }
+};
+
+test "BodyManager: allocateSoftBody is one allocation, deleteBody releases everything (R16)" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+    const expectEqual = std.testing.expectEqual;
+    const Quat = @import("../../Math/Quat.zig").Quat;
+    const RVec3 = @import("../../Math/Real.zig").RVec3;
+    const RefCount = @import("../../Core/Reference.zig").RefCount;
+    const GroupFilterTable = @import("../Collision/GroupFilterTable.zig").GroupFilterTable;
+
+    const layers: TestSoftBodyLayers = .{};
+    var bm: BodyManager = .empty;
+    try bm.init(allocator, std.testing.io, 4, 0, &layers.base);
+    defer bm.deinit();
+
+    const shared = try testSoftBodySettings(allocator);
+    const filter = try GroupFilterTable.create(allocator, .{ .num_sub_groups = 2 });
+    var settings: SoftBodyCreationSettings = .init(shared, RVec3.init(1, 2, 3), Quat.rotation(Vec3.axisY(), 0.5), 0);
+    defer settings.deinit();
+    settings.collision_group = .init(&filter.base, 1, 0);
+    settings.user_data = 42;
+    settings.friction = 0.75;
+    settings.vertex_radius = 0.01;
+    try expectEqual(@as(u32, 1), shared.getRefCount());
+    try expectEqual(@as(u32, 1), filter.base.getRefCount());
+
+    // The body, the motion properties and the shape are one object
+    const body = try bm.allocateSoftBody(&settings);
+    try expect(body.isSoftBody() and body.isDynamic());
+    const soft_body: *SoftBodyWithMotionPropertiesAndShape = @fieldParentPtr("body", body);
+    try expect(body.getMotionPropertiesUnchecked().? == &soft_body.motion_properties.base);
+    try expect(body.getShape() == soft_body.shape.asShape());
+    try expect(soft_body.shape.motion_properties == &soft_body.motion_properties);
+    try expectEqual(@as(u32, RefCount.embedded + 1), body.getShape().getRefCount());
+    try expectEqual(@as(u32, 2), shared.getRefCount()); // The motion properties hold the shared settings
+    try expectEqual(@as(u32, 2), filter.base.getRefCount()); // The body holds the group filter
+    try expectEqual(@as(u64, 42), body.getUserData());
+    try expectEqual(@as(f32, 0.75), body.getFriction());
+    try expect(body.getRotation().eql(Quat.identity())); // mMakeRotationIdentity: the rotation is in the vertices
+    try expect(body.getPosition().eql(RVec3.init(1, 2, 3)));
+    try expectEqual(@as(usize, 3), soft_body.motion_properties.getVertices().len);
+    try expectEqual(@as(f32, 0.01), soft_body.motion_properties.getVertexRadius());
+
+    // GetSoftBodyCreationSettings: the shared settings and the group filter of the body
+    var back = body.getSoftBodyCreationSettings();
+    try expect(back.settings.get() == shared and back.collision_group.group_filter.get() == &filter.base);
+    try expectEqual(@as(u64, 42), back.user_data);
+    back.deinit();
+
+    // A second ApplySoftBodyCreationSettings resizes the arrays and leaks nothing
+    const other = try testSoftBodySettings(allocator);
+    try other.vertices.append(allocator, .init(.{ .x = 3, .y = 0, .z = 0 }, .{}));
+    var other_settings: SoftBodyCreationSettings = .init(other, RVec3.zero(), Quat.identity(), 0);
+    defer other_settings.deinit();
+    try body.applySoftBodyCreationSettings(&other_settings, &layers.base);
+    try expectEqual(@as(usize, 4), soft_body.motion_properties.getVertices().len);
+    try expectEqual(@as(u32, 1), shared.getRefCount());
+    try expectEqual(@as(u32, 2), other.getRefCount());
+    try expectEqual(@as(u32, 1), filter.base.getRefCount()); // The other settings have no group filter
+
+    // Destroy through the body manager: the references are released, nothing leaks (testing allocator)
+    try expect(bm.addBody(body));
+    bm.destroyBodies(&.{body.getID()});
+    try expectEqual(@as(u32, 1), other.getRefCount());
+
+    // freeBody of a soft body without an ID, and a soft body that is still alive when the manager is destroyed
+    bm.freeBody(try bm.allocateSoftBody(&settings));
+    try expectEqual(@as(u32, 1), shared.getRefCount());
+    try expectEqual(@as(u32, 1), filter.base.getRefCount());
+    try expect(bm.addBody(try bm.allocateSoftBody(&settings)));
+    try expectEqual(@as(u32, 2), shared.getRefCount());
+}
+
+test "BodyManager: allocateSoftBody and deleteBody out of memory leak nothing" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            const Quat = @import("../../Math/Quat.zig").Quat;
+            const RVec3 = @import("../../Math/Real.zig").RVec3;
+            const layers: TestSoftBodyLayers = .{};
+            var bm: BodyManager = .empty;
+            try bm.init(allocator, std.testing.io, 2, 0, &layers.base);
+            defer bm.deinit();
+            var settings: SoftBodyCreationSettings = .init(try testSoftBodySettings(allocator), RVec3.zero(), Quat.identity(), 0);
+            defer settings.deinit();
+            const body = try bm.allocateSoftBody(&settings);
+            if (!bm.addBody(body)) {
+                bm.freeBody(body);
+                return error.TestUnexpectedResult;
+            }
+            // A second ApplySoftBodyCreationSettings with the same sizes does not allocate (the body is not in the
+            // broad phase); the soft body is destroyed with the manager
+            try body.applySoftBodyCreationSettings(&settings, &layers.base);
+            try std.testing.expectEqual(@as(usize, 3), SoftBodyMotionProperties.fromBaseConst(body.getMotionPropertiesUnchecked().?).getVertices().len);
+        }
+    }.f, .{});
 }

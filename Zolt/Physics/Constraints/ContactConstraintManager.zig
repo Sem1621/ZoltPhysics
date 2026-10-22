@@ -47,8 +47,11 @@
 //!   CalculateSolverSteps or a DummyCalculateSolverSteps): `callback.call(MotionProperties, mp)`.
 //! - The private nested types of Jolt are `pub` (the tests and the parity tests read them); they are internal.
 //!
-//! JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER (sDrawContactPoint, sDrawSupportingFaces,
-//! sDrawContactPointReduction, sDrawContactManifolds, ContactConstraint::Draw): TODO(debug_renderer).
+//! JPH_DET_LOG: `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (D11). JPH_DEBUG_RENDERER
+//! (RemainingFeaturesArchitecture.md R2, R4): the static flags sDrawContactPoint, sDrawSupportingFaces,
+//! sDrawContactPointReduction and sDrawContactManifolds are `DebugRenderer.flags.contact_constraint_manager`.
+//! `ContactConstraint.draw` is a gated declaration. The manifold draws use the renderer of the physics system of the
+//! update (`update_context.physics_system.debug_renderer`, Jolt's DebugRenderer::sInstance).
 //! JPH_TRACK_SIMULATION_STATS follows MotionProperties' comptime switch `track_simulation_stats` (off). JPH_PROFILE is
 //! dropped.
 
@@ -60,6 +63,8 @@ const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Float3 = @import("../../Math/Float3.zig").Float3;
 const Vector = @import("../../Math/Vector.zig").Vector;
 const RealFile = @import("../../Math/Real.zig");
@@ -999,8 +1004,51 @@ pub const ContactConstraintManager = struct {
                 }
             }
 
-            // TODO(debug_renderer): Draw(DebugRenderer *, const ManifoldCache &, ColorArg): draw the state of the
-            // contact constraint (the cached contact points, the normal and the tangents)
+            /// Draw the state of the contact constraint (JPH_DEBUG_RENDERER)
+            pub const draw = if (Core.debug_renderer) drawImpl else {};
+            fn drawImpl(self: *const Self, renderer: *DebugRenderer, manifold_cache: *const ManifoldCache, manifold_color: Color) void {
+                const num_contact_points = self.base.num_contact_points;
+                if (num_contact_points == 0)
+                    return;
+
+                const cached_manifold = manifold_cache.fromHandle(self.base.cached_manifold_handle).getValueConst();
+                const cached_contact_points = cached_manifold.getContactPointsConst();
+
+                // Get body transforms
+                const transform_body1 = self.base.body1.getCenterOfMassTransform();
+                const transform_body2 = self.base.body2.getCenterOfMassTransform();
+
+                var prev_point = transform_body1.mulVec3(Vec3.loadFloat3Unsafe(&cached_contact_points[num_contact_points - 1].position1));
+                for (0..num_contact_points) |i| {
+                    const wcp = &self.getContactPointsConst()[i];
+                    const ccp = &cached_contact_points[i];
+
+                    // Test if any lambda from the previous frame was transferred
+                    const radius: f32 = if (wcp.non_penetration_constraint.getTotalLambda() == 0.0 and
+                        self.friction_constraint1.getTotalLambda() == 0.0 and
+                        self.friction_constraint2.getTotalLambda() == 0.0 and
+                        self.angular_friction_constraint.getTotalLambda() == 0.0) 0.1 else 0.2;
+
+                    const next_point = transform_body1.mulVec3(Vec3.loadFloat3Unsafe(&ccp.position1));
+                    renderer.drawMarker(next_point, Color.cyan, radius);
+                    renderer.drawMarker(transform_body2.mulVec3(Vec3.loadFloat3Unsafe(&ccp.position2)), Color.purple, radius);
+
+                    // Draw edge
+                    renderer.drawArrow(prev_point, next_point, manifold_color, 0.05);
+                    prev_point = next_point;
+                }
+
+                // Draw normal
+                const wp = transform_body1.mulVec3(Vec3.loadFloat3Unsafe(&cached_contact_points[0].position1));
+                renderer.drawArrow(wp, wp.addVec3(self.base.getWorldSpaceNormal()), Color.red, 0.05);
+
+                // Get tangents
+                const t = self.base.getTangents();
+
+                // Draw tangents
+                renderer.drawLine(wp, wp.addVec3(t.tangent1), Color.green);
+                renderer.drawLine(wp, wp.addVec3(t.tangent2), Color.blue);
+            }
         };
     }
 
@@ -1390,7 +1438,13 @@ pub const ContactConstraintManager = struct {
                 constraint.angular_friction_constraint.setTotalLambda(output_cm.angular_friction_lambda);
                 constraint.calculateFrictionConstraintProperties(body1, body2, constraint.base.inv_mass1, constraint.base.inv_mass2, inv_i1, inv_i2, &ws_contacts, world_space_normal, t.tangent1, t.tangent2, &settings);
 
-                // TODO(debug_renderer): Draw the manifold (if sDrawContactManifolds: constraint->Draw(DebugRenderer::sInstance, *mWriteCache, Color::sYellow))
+                // Draw the manifold (JPH_DEBUG_RENDERER)
+                if (Core.debug_renderer) {
+                    if (context.physics_system.debug_renderer) |renderer| {
+                        if (renderer.flags.contact_constraint_manager.draw_contact_manifolds)
+                            constraint.draw(renderer, write_cache, Color.yellow);
+                    }
+                }
             }
 
             // Mark contact as persisted so that we won't fire OnContactRemoved callbacks
@@ -1660,7 +1714,13 @@ pub const ContactConstraintManager = struct {
             }
             constraint.calculateFrictionConstraintProperties(body1, body2, constraint.base.inv_mass1, constraint.base.inv_mass2, inv_i1, inv_i2, &ws_contacts, manifold.world_space_normal, t.tangent1, t.tangent2, &settings);
 
-            // TODO(debug_renderer): Draw the manifold (if sDrawContactManifolds: constraint->Draw(DebugRenderer::sInstance, *mWriteCache, Color::sOrange))
+            // Draw the manifold (JPH_DEBUG_RENDERER)
+            if (Core.debug_renderer) {
+                if (context.physics_system.debug_renderer) |renderer| {
+                    if (renderer.flags.contact_constraint_manager.draw_contact_manifolds)
+                        constraint.draw(renderer, self.write_cache.?, Color.orange);
+                }
+            }
         } else {
             // Store the contact manifold in the cache
             for (0..num_contact_points) |i| {
@@ -2353,8 +2413,9 @@ pub const ContactConstraintManager = struct {
         self.write_cache = null;
     }
 
-    // TODO(debug_renderer): Drawing properties (static bool sDrawContactPoint, sDrawSupportingFaces,
-    // sDrawContactPointReduction, sDrawContactManifolds)
+    // Drawing properties (JPH_DEBUG_RENDERER): Jolt's static sDrawContactPoint, sDrawSupportingFaces,
+    // sDrawContactPointReduction and sDrawContactManifolds are the fields of `DebugRenderer.flags.contact_constraint_manager`
+    // (RemainingFeaturesArchitecture.md R4)
 
     /// Saving state for replay
     /// (Zolt: Allocator.Error from the sorted arrays)

@@ -3,7 +3,8 @@
 //!
 //! Follows the porter template in FixedConstraint.zig. JPH_DECLARE_SERIALIZABLE_VIRTUAL /
 //! JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings): `rtti` with Jolt's attributes.
-//! JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! JPH_DEBUG_RENDERER (DrawConstraint): a gated declaration (RemainingFeaturesArchitecture.md R2), the text through
+//! StringTools.cppFixed (R7).
 //!
 //! - The const and non-const overloads of `GetLimitsSpringSettings` are `getLimitsSpringSettings` (`*const`) and
 //!   `getLimitsSpringSettingsMut` (`*`, guide section 4), like HingeConstraint / SliderConstraint.
@@ -23,6 +24,9 @@ const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Color = @import("../../Core/Color.zig").Color;
+const StringTools = @import("../../Core/StringTools.zig");
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const RVec3 = @import("../../Math/Real.zig").RVec3;
 const Body = @import("../Body/Body.zig").Body;
@@ -151,7 +155,7 @@ pub const DistanceConstraintSettings = struct {
 
 /// This constraint is a stiff spring that holds 2 points at a fixed distance from each other
 pub const DistanceConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -346,7 +350,33 @@ pub const DistanceConstraint = struct {
         return false;
     }
 
-    // TODO(debug_renderer): DrawConstraint
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const DistanceConstraint, renderer: *DebugRenderer) void {
+        // Draw constraint
+        const delta = self.world_space_position2.sub(self.world_space_position1).toVec3();
+        const len = delta.length();
+        if (len < self.min_distance) {
+            const real_end_pos = self.world_space_position1.addVec3(if (len > 0.0) delta.mulScalar(self.min_distance).divScalar(len) else Vec3.init(0, len, 0));
+            renderer.drawLine(self.world_space_position1, self.world_space_position2, Color.green);
+            renderer.drawLine(self.world_space_position2, real_end_pos, Color.yellow);
+        } else if (len > self.max_distance) {
+            const real_end_pos = self.world_space_position1.addVec3(if (len > 0.0) delta.mulScalar(self.max_distance).divScalar(len) else Vec3.init(0, len, 0));
+            renderer.drawLine(self.world_space_position1, real_end_pos, Color.green);
+            renderer.drawLine(real_end_pos, self.world_space_position2, Color.red);
+        } else renderer.drawLine(self.world_space_position1, self.world_space_position2, Color.green);
+
+        // Draw constraint end points
+        renderer.drawMarker(self.world_space_position1, Color.white, 0.1);
+        renderer.drawMarker(self.world_space_position2, Color.white, 0.1);
+
+        // Draw current length
+        // StringFormat("%.2f", ...): its buffer holds 1023 characters
+        var text_buffer: [1023]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&text_buffer);
+        writer.print("{f}", .{StringTools.cppFixed(len, 2)}) catch {};
+        renderer.drawText3D(self.world_space_position1.add(self.world_space_position2).mulScalar(0.5), writer.buffered(), .{});
+    }
 
     pub fn saveState(self: *const DistanceConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState

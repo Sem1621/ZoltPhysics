@@ -4,9 +4,10 @@
 //! The string is built at compile time from the Zig target and the build options, using Jolt's vocabulary.
 //! Zolt doesn't use intrinsics: the instruction sets listed are the target features that the compiler may use
 //! for @Vector code. Some of Jolt's flags never apply to Zolt: FMADD (never used, see the guide's floating point
-//! rules), FP exceptions, debug renderer, profiler, C++ RTTI / exceptions and shared library. Zolt always follows
+//! rules), FP exceptions, profiler, C++ RTTI / exceptions and shared library. Zolt always follows
 //! JPH_CROSS_PLATFORM_DETERMINISTIC. It always has the ObjectStream too, like Jolt's default build (JPH_OBJECT_STREAM,
-//! SerializationArchitecture.md S1).
+//! SerializationArchitecture.md S1). "(Debug Renderer) " follows `-Ddebug_renderer` (JPH_DEBUG_RENDERER,
+//! RemainingFeaturesArchitecture.md R1).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,6 +24,7 @@ const configuration_string: [:0]const u8 = (if (Core.double_precision) "Double" 
     "with instructions: " ++
     instructions_string ++
     "(Cross Platform Deterministic) " ++
+    (if (Core.debug_renderer) "(Debug Renderer) " else "") ++
     (if (Core.object_layer_bits == 32) "(32-bit ObjectLayer) " else "(16-bit ObjectLayer) ") ++
     (if (Core.enable_asserts) "(Assertions) " else "") ++
     "(ObjectStream) " ++
@@ -77,6 +79,7 @@ test "getConfigurationString" {
     try std.testing.expect(std.mem.indexOf(u8, s, "(Cross Platform Deterministic) ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, if (Core.object_layer_bits == 32) "(32-bit ObjectLayer) " else "(16-bit ObjectLayer) ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "(ObjectStream) ") != null);
+    try std.testing.expect((std.mem.indexOf(u8, s, "(Cross Platform Deterministic) (Debug Renderer) ") != null) == Core.debug_renderer);
     if (builtin.mode == .Debug)
         try std.testing.expect(std.mem.endsWith(u8, s, "(ObjectStream) (Debug) "));
     if (builtin.cpu.arch == .x86_64)

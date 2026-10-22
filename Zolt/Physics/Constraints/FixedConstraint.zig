@@ -2,7 +2,7 @@
 //! Status: complete
 //!
 //! JPH_DECLARE_SERIALIZABLE_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(FixedConstraintSettings): `rtti` with Jolt's
-//! attributes. JPH_DEBUG_RENDERER (DrawConstraint): TODO(debug_renderer).
+//! attributes. JPH_DEBUG_RENDERER (DrawConstraint): a gated declaration (RemainingFeaturesArchitecture.md R2).
 //!
 //! # Porter template: a Phase 6 constraint file
 //!
@@ -47,8 +47,9 @@
 //! - `pub const overrides = .{ ... }`: every C++ `override` of the class in header order (`getSubType`,
 //!   `notifyShapeChanged`, `setupVelocityConstraint`, `resetWarmStart`, `warmStartVelocityConstraint`,
 //!   `solveVelocityConstraint`, `solvePositionConstraint`, `saveState`, `restoreState`, `isActive` (PathConstraint),
-//!   `getConstraintSettings`, `getConstraintToBody1Matrix`, `getConstraintToBody2Matrix`; `drawConstraint*` are
-//!   TODO(debug_renderer)). The class is `final`, so its own non-virtual helpers may be called statically.
+//!   `getConstraintSettings`, `getConstraintToBody1Matrix`, `getConstraintToBody2Matrix`; the JPH_DEBUG_RENDERER
+//!   overrides `drawConstraint` / `drawConstraintLimits` after `solvePositionConstraint`, as gated declarations that are
+//!   listed in both configurations). The class is `final`, so its own non-virtual helpers may be called statically.
 //! - Constructor: `init(allocator, body1, body2, settings: *const XConstraintSettings) X` builds the base with
 //!   `.base = .init(X, allocator, body1, body2, &settings.base)` (TwoBodyConstraint makes the vtable of the most derived
 //!   class) and then runs the C++ constructor body statement by statement (the world / local space conversions with
@@ -99,6 +100,9 @@ const Ref = @import("../../Core/Reference.zig").Ref;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Quat = @import("../../Math/Quat.zig").Quat;
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
 const RealFile = @import("../../Math/Real.zig");
@@ -233,7 +237,7 @@ pub const FixedConstraintSettings = struct {
 /// A fixed constraint welds two bodies together removing all degrees of freedom between them.
 /// This variant uses Euler angles for the rotation constraint.
 pub const FixedConstraint = struct {
-    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
+    pub const overrides = .{ .getSubType, .notifyShapeChanged, .setupVelocityConstraint, .resetWarmStart, .warmStartVelocityConstraint, .solveVelocityConstraint, .solvePositionConstraint, .drawConstraint, .saveState, .restoreState, .getConstraintSettings, .getConstraintToBody1Matrix, .getConstraintToBody2Matrix };
 
     base: TwoBodyConstraint,
 
@@ -383,7 +387,19 @@ pub const FixedConstraint = struct {
         return rot or pos;
     }
 
-    // TODO(debug_renderer): DrawConstraint
+    // See Constraint::DrawConstraint (JPH_DEBUG_RENDERER)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintImpl else {};
+    fn drawConstraintImpl(self: *const FixedConstraint, renderer: *DebugRenderer) void {
+        const com1 = self.base.body1.getCenterOfMassTransform();
+        const com2 = self.base.body2.getCenterOfMassTransform();
+
+        const anchor1 = com1.mulVec3(self.local_space_position1);
+        const anchor2 = com2.mulVec3(self.local_space_position2);
+
+        // Draw constraint
+        renderer.drawLine(com1.getTranslation(), anchor1, Color.green);
+        renderer.drawLine(com2.getTranslation(), anchor2, Color.blue);
+    }
 
     pub fn saveState(self: *const FixedConstraint, stream: *StateRecorder) void {
         Constraint.impl.saveState(self.asConstraintConst(), stream); // TwoBodyConstraint::SaveState

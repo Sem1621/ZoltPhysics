@@ -18,14 +18,14 @@
 //!    operation on a sleeping body), say so with `b.expectSleeping(handle)` / `b.expectAwake(handle)`: the driver
 //!    checks it on both sides, a comment alone becomes false unnoticed when the scene changes.
 //! 2. Add one entry to `scenes` with its name and builder. Every entry is its own test (`SceneTest("name", index)`,
-//!    run one with `zig build parity -Dtest-filter=name`). A scene that Zolt cannot run yet gets
-//!    `.blocked_by = .contacts` (or `.constraints`, `.hinge_constraints`, `.ccd_hits`, ...): its test returns
-//!    error.SkipZigTest until `Blocker.isSupported` says so (flip it when the wave lands; the constraint blockers flip
-//!    themselves), so the build summary counts it as "skipped", never silently. Meanwhile the test "SimScenes blocked
-//!    scenes run on the C++ side" runs it on the C++ side with 0 and 3 worker threads and checks that it reaches what it
-//!    is written for (contact callbacks, active constraints, its expect_* operations).
-//!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: it runs
-//!    without Zolt's asserts only (ReleaseFast).
+//!    run one with `zig build parity -Dtest-filter='.SceneTest("name"['`; a plain `-Dtest-filter=name` also runs every
+//!    scene whose name contains it). Its `.blocked_by` names what it needs (`.contacts`, `.constraints`,
+//!    `.hinge_constraints`, `.ccd_hits`, ...). Zolt ports every class, so every Blocker is supported
+//!    (`Blocker.isSupported`) and the blockers are labels. A scene whose Blocker is not supported fails instead of being
+//!    skipped.
+//!    `.blocked_by = .release_only` marks a scene that violates a JPH_ASSERT that Jolt's release build ignores: Zolt's
+//!    assert at that site is recoverable (RemainingFeaturesArchitecture.md R8), and SimulationParity runs the scene with
+//!    a handler that counts the asserts.
 //! 3. A scene with contacts needs nothing else (the C++ side and the Zolt side create every shape kind of `ShapeKind`,
 //!    and the contact listener records are compared already). A new shape kind is a new `ShapeKind` value plus its
 //!    creation in `SimulationReference.cpp` (MakeShape) and `SimulationParity.zig` (makeShapeSettings). Constraints:
@@ -85,9 +85,7 @@
 //!   states, e.g. the constraints only).
 //! - **Blockers.** A scene declares the constraint kinds it needs with its `Blocker` (`.constraints` for Fixed / Point,
 //!   one per other kind, `.gear_constraints` / `.rack_and_pinion_constraints` include their hinges / slider). They are
-//!   supported as soon as the Zolt class is ported (`ConstraintKind.isPorted`: the settings no longer declare
-//!   `is_stub`), so nothing has to be flipped by hand; until then the scene is skipped and runs on the C++ side alone
-//!   ("SimScenes blocked scenes run on the C++ side": two C++ worlds in lockstep, its expectations, finite results). A
+//!   supported because every Zolt class is ported (`ConstraintKind.isPorted`: the settings do not declare `is_stub`). A
 //!   supported scene that creates a kind that is still a stub fails, and so does a ported class whose slot in
 //!   SimulationParity.zig is still `StubSlot` (error.SceneNotSupported).
 //! - **Expectations.** Every scene with constraints must have active constraints (they are solved);
@@ -138,7 +136,7 @@
 //!   `VehicleSettingsPart`) and of the ragdoll descriptions' RagdollSettings (with the shapes and the group filter), and
 //!   their round trips: each side restores the other side's bytes and saves again (RagdollSettings::
 //!   sRestoreFromBinaryState, the vehicle settings without wheels, the controller, wheel, engine, transmission, track,
-//!   differential and anti-roll bar settings; on the C++ side alone while the classes are stubs); the tables of the
+//!   differential and anti-roll bar settings); the tables of the
 //!   RagdollSettings (GetBodyIndexToConstraintIndex, GetConstraintIndexToBodyIdxPair, the result of Stabilize). After
 //!   every update, besides the PhysicsSystem state (which holds the ragdolls' bodies and constraints and the
 //!   VehicleConstraint state) and the sorted records (with the vehicle callbacks, RecordKind 18..20): the object state
@@ -172,16 +170,13 @@
 //!   (`VehicleCallbacks`, with a steering pre-step callback), `VehicleCombineFriction` and `VehicleTireMaxImpulse` are
 //!   functions of the description or of an operation.
 //! - **Blockers.** `.characters`, `.character_virtuals`, `.ragdolls`, `.wheeled_vehicles`, `.tracked_vehicles`,
-//!   `.motorcycles`: supported as soon as the Zolt classes of the group are ported (`Phase7Classes`: the settings and
-//!   testers no longer declare `is_stub`). Until then the scene runs on the C++ side alone ("SimScenes blocked scenes run
-//!   on the C++ side": two C++ worlds with 0 and 3 threads in lockstep with their object states and character records,
-//!   its expectations, finite and completely decoded object states, the settings round trips, no assert of an asserting
-//!   reference). A supported scene whose classes are still stubs, or whose slot in SimulationParity.zig is still
-//!   `Phase7StubSlot`, fails (checkPhase7Slots).
+//!   `.motorcycles`: supported because the Zolt classes of every group are ported (`Phase7Classes`: the settings and
+//!   testers do not declare `is_stub`). A supported scene whose classes are still stubs, or whose slot in
+//!   SimulationParity.zig is still `Phase7StubSlot`, fails (checkPhase7Slots).
 //! - **Rules.** Avoid what Jolt asserts or leaves undefined:
 //!   - Wheel leaves its contact members (mContactPosition, mContactPointVelocity, mContactNormal, mContactLongitudinal,
 //!     mContactLateral, mAxlePlaneConstant) uninitialized until the first contact, and VehicleConstraint::SaveState
-//!     writes some of them: the reference zero-fills every allocation (SimInstallHooks of SimulationReference.cpp) and
+//!     writes some of them: the reference zero-fills every allocation (ZoltParity/ParityHooks.h) and
 //!     Zolt zero-initializes these members (a documented deviation), so a vehicle may start in the air
 //!     (vehicle_wheeled_in_air);
 //!   - the body of a vehicle stays in the system while the vehicle exists, vehicles do not drive on each other (their
@@ -209,15 +204,16 @@
 //!   - no character, character virtual, ragdoll or vehicle is created or destroyed between a snapshot and its
 //!     restore_cross (the restore reads the objects of the snapshot);
 //!   - the object layers of the tester and the queries are layers of `Layers` (the layer filters assert on others).
-//!   Check new scenes against Jolt's asserts: `zig build parity -Dreference_asserts=true -Dtest-filter="blocked scenes
-//!   run on the C++ side"` (the reference library with JPH_ENABLE_ASSERTS: a failed assert is printed and counted, the
-//!   simulation parity fails a scene whose C++ side hit one; the Phase 7 scenes hit none).
+//!   Check new scenes against Jolt's asserts: `zig build parity -Dreference_asserts=true
+//!   -Dtest-filter='.SceneTest("<scene>"['`
+//!   (the reference library with JPH_ENABLE_ASSERTS: a failed assert is printed and counted, the simulation parity fails
+//!   a scene whose C++ side hit one; the Phase 7 scenes hit none).
 //!
 //! ## Recipe for a Phase 7 worker (adding a class group to the simulation parity)
 //!
 //! 1. Port the classes of the group (CharacterBase.zig, the foundation's port, shows the pattern A layout of a
-//!    character); removing `is_stub` from the settings (and testers) makes the scenes with the group's Blocker run instead
-//!    of being skipped, and the test "SimulationParity Phase 7 slots follow the ported classes" fails until step 2.
+//!    character); removing `is_stub` from the settings (and testers) makes the group's Blocker supported, and the test
+//!    "SimulationParity Phase 7 slots follow the ported classes" fails until step 2.
 //! 2. SimulationParity.zig: replace `const XSlot = Phase7StubSlot;` of the group with a struct (the interface of each
 //!    slot is documented above Phase7StubSlot): `Storage` (the objects of the handles), `create` and `applyOp` /
 //!    `applyVehicleOp` (exactly ApplyCharacterOp / ApplyCharacterVirtualOp / ApplyRagdollOp / ApplyVehicleOp /
@@ -244,27 +240,84 @@
 //! 5. Prove the scenes bite (break one operation of the class, a scene must fail), check new scenes against an asserting
 //!    reference (see the rules above) and run the parity in Debug, ReleaseFast and double precision.
 //!
+//! # Soft bodies (Phase 9)
+//!
+//! Soft bodies can be described, created and driven by every public setter and action on both sides
+//! (RemainingFeaturesArchitecture.md section 4, "Soft bodies in SimulationParity"). Group SH built the harness, group S5
+//! writes the scene list.
+//! - **Descriptions.** A `SimSoftBodySettings` is a generator of shared settings (`SoftBodySettingsKind`: cube, cloth,
+//!   sphere, rod chain, skinned cloth, or explicit vertices, faces and tetrahedra from the float and integer pools) with
+//!   the VertexAttributes, the bend type and the Optimize call. The same generator runs on both sides
+//!   (SimMakeSoftBodySettings of SimulationReference.cpp, SoftBodySlot.makeSettings of SimulationParity.zig). Before a scene
+//!   runs, the SaveBinaryState bytes of every generated settings object must be equal (checkSoftBodySettings). A
+//!   `SimSoftBody` holds every member of SoftBodyCreationSettings with Jolt's defaults (test
+//!   "SimScenes soft body description defaults are Jolt's"). Its `settings` is the index of a SimSoftBodySettings: each
+//!   world generates every settings object once, and its soft bodies share it.
+//! - **Creation and handles.** `b.softBody(desc, .activate)` adds a description and creates the soft body
+//!   (create_soft_body: CreateSoftBody + AddBody). `b.createAndAddSoftBody` and `b.createSoftBodyNoAdd` are the other two
+//!   ways. A soft body gets the next body handle, so the body operations work on it too.
+//! - **Operations.** `b.softBodyOp(kind, handle, .{ .i, .f })` (OpKind 56..68): the vertex position, velocity and inverse
+//!   mass, the setters of SoftBodyMotionProperties, SkinVertices with joint matrices from the float pool
+//!   (`b.addJointMatrices`), CustomUpdate and the GetSoftBodyCreationSettings round trip. They run between the updates on
+//!   the user thread and reach the body through the no-lock interface (CustomUpdate locks the bodies it collides with).
+//!   They return a hash of the soft body afterwards (see OpKind), so a soft body that is not in the system (CustomUpdate)
+//!   is compared too. `b.softBodyListener(mode)` (set_soft_body_contact_listener) installs the soft body contact
+//!   listener of a `SoftBodyListenerMode`.
+//! - **What is compared.** The PhysicsSystem state holds the soft bodies in the broad phase: SoftBodyMotionProperties::
+//!   SaveState writes the vertices, the rod states, the skin states and the bounds. The state decoder learns the counts
+//!   of each soft body from jolt_sim_soft_body_info. The records of the soft body contact listener (RecordKind 70..73)
+//!   come from the soft body jobs and are compared sorted, with the other records. `Expect.soft_body_records` names the
+//!   callbacks a scene must reach.
+//! - **No blocker.** The soft body scenes run against Zolt (groups S4 and S5 ported the update and the soft body jobs),
+//!   so they have no `blocked_by`.
+//! - **Scenes** (group S5, the list of RemainingFeaturesArchitecture.md section 4): the 3 cases of SoftBodyTests
+//!   (`soft_body_test_*`), linear cast spheres against cubes and cloths in every listener mode (the CCD response
+//!   against a soft body face, `Expect.soft_body_ccd`), linear cast spheres against faces with fixed vertices of
+//!   rotated cloths (MakeRotationIdentity false), cloths with LRA, dihedral bends and fixed corners, pressure spheres,
+//!   rod chains, skinned cloths with back stops, sensors, sleeping and waking through ProcessBodyPair, UpdatePosition
+//!   false, several soft bodies on one dynamic body (the BodyID order of SoftBodyFinalize), save and cross restore, 2
+//!   collision steps, a 30 x 30 cloth (4 parallel constraint groups and a non-parallel group of 308 edges,
+//!   `Expect.soft_body_groups`), vertex counts around 64, every kind of rigid shape, and 70 soft bodies that go to
+//!   sleep in the same update (the batches of SoftBodyFinalize, `Expect.update_deactivations`).
+//! - **D12 sweeps.** Jolt's SaveState does not hold mSkinStatePreviousPositionValid. SkinVertices sets it, the update
+//!   clears it, and it selects the skin interpolation factor. Every update that starts from the snapshot of a sweep gets
+//!   the value of the snapshot again, like the InvalidateContactCache flags (SimulationParity.zig, `SkinFlags`). The
+//!   soft body scenes set `restore_broad_phase`. DetermineCollidingShapes gets the bodies in the order of the broad
+//!   phase layout, and a vertex keeps the first of equal penetrations.
+//! - **Rules.** Avoid what Jolt asserts or leaves undefined:
+//!   - a soft body needs optimized settings (`optimize`; Jolt asserts in ParallelApplyConstraints, Zolt panics: R20
+//!     UB2) and at least one vertex (UB1: Jolt hangs); settings without Optimize are only compared;
+//!   - the explicit faces use material 0, no face uses a vertex twice, no constraint uses a vertex twice, no two vertices
+//!     of a generator share a position (the S1 generator rules);
+//!   - SkinVertices needs skinned settings and a joint matrix for every joint of the inverse bind matrices; the
+//!     vertex radius is never negative; a vertex index is below the number of vertices;
+//!   - every soft body operation acts on a soft body handle; CustomUpdate is for a soft body that is not in the system
+//!     (create_soft_body_no_add). Its SetPosition moves the body, like Jolt. It notifies no broad phase and activates
+//!     nothing, because the body is not in the broad phase;
+//!   - no soft body is created or destroyed between a snapshot and its restore_cross.
+//!
 //! ## Reserved numbers
 //!
-//! OpKind: 0..52 body and system operations, 53..99 reserved for operations of later phases that are not constraint
-//! operations, 100..102 driver operations, 200..399 constraint operations in ranges of 20 (`ConstraintOpRange`):
-//! 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279 Hinge, 280..299 Slider, 300..319
-//! Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion, 380..399 spare; 400..599 the
-//! Phase 7 operations (`Phase7OpRange`): 400..429 Character (424..429 free), 430..489 CharacterVirtual (471..489 free),
-//! 490..519 Ragdoll (511..519 free), 520..569 the vehicle core group (564..569 free), 570..579 TrackedVehicleController
-//! (576..579 free), 580..589 MotorcycleController (587..589 free), 590..599 spare. RecordKind: 0..6 bodies, steps and
-//! contacts, 7..17 the CharacterContactListener (call order), 18..20 the vehicle callbacks; blocks for new kinds: 21..29
-//! Character, 30..39 CharacterVirtual (call order), 40..49 Ragdoll, 50..59 vehicle core, 60..69 vehicle variants, 70..79
-//! later phases (`num_record_kinds` = 80). ObjectField: 1..9 Character, 10..19 CharacterVirtual, 20..29 Ragdoll, 30..49
-//! vehicles, new fields in the group's block. ConstraintKind: 0..11 (the order of the Phase 6 plan, not
-//! EConstraintSubType: `subType()` maps them), new kinds from 12. Blocker: one value per kind or class group. `Expect`
-//! fields are named, not numbered. The scene table and the builders have one region per worker group, marked "(append
-//! the ... scenes here)".
+//! OpKind: 0..52 body and system operations, 53..69 the soft body operations (Phase 9), 70..99 reserved for operations
+//! of later phases that are not constraint operations, 100..102 driver operations, 200..399 constraint operations in
+//! ranges of 20 (`ConstraintOpRange`): 200..219 generic, 220..239 Fixed / Point, 240..259 Distance / Pulley, 260..279
+//! Hinge, 280..299 Slider, 300..319 Cone / SwingTwist, 320..339 SixDOF, 340..359 Path, 360..379 Gear / RackAndPinion,
+//! 380..399 spare; 400..599 the Phase 7 operations (`Phase7OpRange`): 400..429 Character (424..429 free), 430..489
+//! CharacterVirtual (471..489 free), 490..519 Ragdoll (511..519 free), 520..569 the vehicle core group (564..569 free),
+//! 570..579 TrackedVehicleController (576..579 free), 580..589 MotorcycleController (587..589 free), 590..599 spare.
+//! RecordKind: 0..6 bodies, steps and contacts, 7..17 the CharacterContactListener (call order), 18..20 the vehicle
+//! callbacks; blocks for new kinds: 21..29 Character, 30..39 CharacterVirtual (call order), 40..49 Ragdoll, 50..59
+//! vehicle core, 60..69 vehicle variants, 70..74 the soft body contact listener (74 free), 75..79 later phases
+//! (`num_record_kinds` = 80). ObjectField: 1..9 Character, 10..19 CharacterVirtual, 20..29 Ragdoll, 30..49 vehicles,
+//! new fields in the group's block. ConstraintKind: 0..11 (the order of the Phase 6 plan, not EConstraintSubType:
+//! `subType()` maps them), new kinds from 12. Blocker: one value per kind or class group. `Expect` fields are named,
+//! not numbered. The scene table and the builders have one region per worker group, marked "(append the ... scenes
+//! here)".
 //!
 //! ## Recipe for a Phase 6 worker (adding a constraint class to the simulation parity)
 //!
-//! 1. Port the class (FixedConstraint.zig is the template); removing `is_stub` from its settings makes the scenes with
-//!    its Blocker run instead of being skipped.
+//! 1. Port the class (FixedConstraint.zig is the template); removing `is_stub` from its settings makes its Blocker
+//!    supported.
 //! 2. SimulationParity.zig: replace `const XSlot = StubSlot;` of the group with a struct like `FixedPointSlot`:
 //!    `makeSettings` (the members of the settings class from `i` / `r` / `f`, exactly SimMakeConstraintSettings of
 //!    SimulationReference.cpp), `applyOp` (the operations of the group's range, exactly ApplyConstraintOp of the .cpp,
@@ -458,7 +511,8 @@ pub const StepListenerMode = enum(u32) {
 
 /// Constraint kinds (Phase 6): every Jolt two body constraint class. The C++ side creates every kind and applies every
 /// operation of `OpKind`; the Zolt side the kinds whose class is ported (`isPorted`, SimulationParity.zig's constraint
-/// slots). A scene that creates a kind whose Zolt class is still a stub declares it with its `Blocker` and is skipped.
+/// slots). A scene that creates a kind declares it with its `Blocker`. Every kind is ported; a scene whose kind is a
+/// stub again fails (SimulationParity's checkSupported).
 /// The description of each kind (`SimConstraint.i` / `r` / `f`) is listed per value.
 pub const ConstraintKind = enum(u32) {
     /// FixedConstraintSettings: i[0] space, i[1] auto detect point; r[0..3] point 1, r[3..6] point 2; f[0..3] axis X1,
@@ -1154,6 +1208,124 @@ pub fn characterIdSequence(first: u32) [character_id_sequence_len]u32 {
     return .{ first, first + 1, first, first + 1, first, first + 2, first, first + 2, first, first + 3 };
 }
 
+// -------------------------------------------------------------------------------------------------------------------
+// The soft body descriptions (Phase 9, see "Soft bodies" in the file header; must match SimulationReference.cpp, checked
+// by the test "SimScenes soft body struct layout matches SimulationReference.cpp")
+
+/// The generators of shared settings (`SimSoftBodySettings.kind`). Both sides run the same code: SimMakeSoftBodySettings
+/// of SimulationReference.cpp and makeSoftBodySettings of SimulationParity.zig. CreateConstraints gets one
+/// VertexAttributes (for every vertex) and the bend type of the description, Optimize runs when `optimize` is set.
+pub const SoftBodySettingsKind = enum(u32) {
+    /// SoftBodySharedSettings::sCreateCube(count_x, spacing). It creates its own constraints and optimizes, the vertex
+    /// attributes, the bend type and `optimize` are not used.
+    cube = 0,
+    /// A cloth of count_x * count_z vertices `spacing` apart in the XZ plane, centered on the origin, two faces per quad
+    /// (SoftBodyCreator::CreateCloth of Samples/Utils/SoftBodyCreator.cpp); `kinematic` gives vertices inverse mass 0:
+    /// 1 the four corners, 2 the first and the last row (z = 0 and z = count_z - 1). CreateConstraints, Optimize.
+    cloth = 1,
+    /// A sphere of radius `spacing` with count_x theta and count_z phi segments (SoftBodyCreator::CreateSphere).
+    /// CreateConstraints, Optimize.
+    sphere = 2,
+    /// A helix of count_x vertices with radius `spacing` and height `height` that makes two turns, connected by Cosserat
+    /// rods (the helix of SoftBodyCosseratRodConstraintTest): rod stretch shear constraints between the vertices
+    /// (compliance `compliance`), rod bend twist constraints between the rods (compliance `shear_compliance`);
+    /// `kinematic` != 0 gives the first vertex inverse mass 0. CalculateRodProperties, Optimize.
+    rod_chain = 3,
+    /// The cloth (with its Optimize) and count_extra joints along Z (SoftBodySkinnedConstraintTest): joint j is at the
+    /// bind pose Mat44::sTranslation(0, 0, z of row 0 + j * the spacing of the joints), an inverse bind matrix per joint
+    /// (Mat44::Inversed), a skinned constraint per vertex with max distance `skin_max_distance` (0 for a vertex with
+    /// inverse mass 0), back stop `back_stop_distance` and `back_stop_radius`, the weights of the two closest joints
+    /// (normalized, or the closest joint alone at distance 0). CalculateSkinnedConstraintNormals, Optimize.
+    skinned_cloth = 4,
+    /// count_x vertices at floats[floats..] (7 floats each: position, velocity, inverse mass), count_z faces at
+    /// uints[uints..] (3 vertex indices each, material 0), count_extra volume tetrahedra after them (4 vertex indices
+    /// each, compliance `compliance`). CreateConstraints (with faces), CalculateVolumeConstraintVolumes (with
+    /// tetrahedra), Optimize.
+    explicit = 5,
+};
+
+/// The description of shared settings (a generator, `SoftBodySettingsKind`)
+pub const SimSoftBodySettings = extern struct {
+    /// SoftBodySettingsKind
+    kind: u32,
+    /// cube: grid size; cloth, skinned cloth: vertices along X; sphere: theta segments; rod chain, explicit: vertices
+    count_x: u32 = 0,
+    /// cloth, skinned cloth: vertices along Z; sphere: phi segments; explicit: faces
+    count_z: u32 = 0,
+    /// skinned cloth: joints; explicit: volume tetrahedra
+    count_extra: u32 = 0,
+    /// cube, cloth, skinned cloth: the distance between the vertices; sphere, rod chain: the radius
+    spacing: f32 = 0.1,
+    /// rod chain: the height of the helix
+    height: f32 = 1.0,
+    /// The VertexAttributes of CreateConstraints (Jolt's defaults)
+    compliance: f32 = 0.0,
+    shear_compliance: f32 = 0.0,
+    bend_compliance: f32 = std.math.floatMax(f32),
+    /// ELRAType: 0 none, 1 Euclidean distance, 2 geodesic distance
+    lra_type: u32 = 0,
+    lra_max_distance_multiplier: f32 = 1.0,
+    /// EBendType of CreateConstraints: 0 none, 1 distance (Jolt's default), 2 dihedral
+    bend_type: u32 = 1,
+    /// Call Optimize (a soft body needs optimized settings, the others are only compared)
+    optimize: u32 = 1,
+    /// The vertices with inverse mass 0, see SoftBodySettingsKind
+    kinematic: u32 = 0,
+    /// skinned cloth: Skinned::mMaxDistance of the dynamic vertices, mBackStopDistance, mBackStopRadius (Jolt's defaults
+    /// for the back stop)
+    skin_max_distance: f32 = std.math.floatMax(f32),
+    back_stop_distance: f32 = std.math.floatMax(f32),
+    back_stop_radius: f32 = 40.0,
+    /// explicit: the offset of the vertices in `floats`, of the faces and the tetrahedra in `uints`
+    floats: u32 = 0,
+    uints: u32 = 0,
+};
+
+/// Jolt's SoftBodyCreationSettings (the defaults are Jolt's; booleans as u32)
+pub const SimSoftBody = extern struct {
+    user_data: u64 = 0,
+    position: [3]Real = @splat(0),
+    rotation: [4]f32 = .{ 0, 0, 0, 1 },
+    /// Index of the shared settings (a SimSoftBodySettings)
+    settings: u32 = 0,
+    object_layer: u32 = Layers.unused1,
+    /// CollisionGroup without a group filter
+    collision_group_id: u32 = std.math.maxInt(u32),
+    collision_sub_group_id: u32 = std.math.maxInt(u32),
+    num_iterations: u32 = 5,
+    linear_damping: f32 = 0.1,
+    max_linear_velocity: f32 = 500.0,
+    restitution: f32 = 0.0,
+    friction: f32 = 0.2,
+    pressure: f32 = 0.0,
+    gravity_factor: f32 = 1.0,
+    vertex_radius: f32 = 0.0,
+    update_position: u32 = 1,
+    make_rotation_identity: u32 = 1,
+    allow_sleeping: u32 = 1,
+    faces_double_sided: u32 = 0,
+};
+
+/// The soft body contact listener of a world (set_soft_body_contact_listener). Every mode but `none` records the
+/// callbacks (RecordKind 70..73) first; then OnSoftBodyContactValidate acts (the same code on both sides).
+pub const SoftBodyListenerMode = enum(u32) {
+    /// No listener (SetSoftBodyContactListener(nullptr)): sensors are ignored
+    none = 0,
+    /// AcceptContact
+    accept = 1,
+    /// RejectContact
+    reject = 2,
+    /// mIsSensor = true, AcceptContact: the contacts of the soft body become sensor contacts
+    sensor = 3,
+    /// mInvMassScale1 = 0.5, mInvMassScale2 = 2, mInvInertiaScale2 = 1.5, AcceptContact
+    mass_scales = 4,
+};
+
+/// True for the soft body operations (OpKind 53..69)
+pub fn isSoftBodyOp(op: u32) bool {
+    return op >= @intFromEnum(OpKind.create_soft_body) and op <= @intFromEnum(OpKind.set_soft_body_contact_listener);
+}
+
 /// The reserved OpKind ranges of the Phase 7 operations (see the file header): every worker group adds operations in
 /// its own range only. ZoltWorld.applyPhase7Op of SimulationParity.zig routes each range to its slot.
 pub const Phase7OpRange = enum(u32) {
@@ -1306,7 +1478,54 @@ pub const OpKind = enum(u32) {
     were_bodies_in_contact = 51,
     /// Body::SetCollideKinematicVsNonDynamic(count != 0) under a BodyLockWrite (BodyInterface has no setter)
     set_collide_kinematic_vs_non_dynamic = 52,
-    // 53..99: reserved for operations of later phases that are not constraint operations
+
+    // ---- Soft bodies (Phase 9, 53..69, see "Soft bodies" in the file header) ----
+    /// BodyInterface::CreateSoftBody(soft_bodies[index]) + AddBody(activation); returns the BodyID (invalid when out of
+    /// bodies). The soft body gets the next body handle (also for the other two create operations).
+    create_soft_body = 53,
+    /// CreateAndAddSoftBody(soft_bodies[index], activation); returns the BodyID
+    create_and_add_soft_body = 54,
+    /// CreateSoftBody(soft_bodies[index]) without adding it (for soft_body_custom_update); returns the BodyID
+    create_soft_body_no_add = 55,
+    // The soft body operations 56..67 act on the SoftBodyMotionProperties of body handle `body` and return the FNV-1a
+    // hash (`hashBytes`) of the soft body afterwards: of its Body::SaveState bytes, then of GetNumIterations,
+    // GetPressure, GetUpdatePosition, GetFacesDoubleSided, GetEnableSkinConstraints, GetSkinnedMaxDistanceMultiplier and
+    // GetVertexRadius (booleans as u32), then of the inverse mass of every vertex (the values that the state does not
+    // hold; SimHashSoftBody of SimulationReference.cpp, hashSoftBody of SimulationParity.zig)
+    /// GetVertex(i[0]).mPosition = f[0..3] (local space)
+    soft_body_set_vertex_position = 56,
+    /// GetVertex(i[0]).mVelocity = f[0..3]
+    soft_body_set_vertex_velocity = 57,
+    /// GetVertex(i[0]).mInvMass = f[0]
+    soft_body_set_vertex_inv_mass = 58,
+    /// SetPressure(f[0])
+    soft_body_set_pressure = 59,
+    /// SetNumIterations(i[0])
+    soft_body_set_num_iterations = 60,
+    /// SetUpdatePosition(i[0] != 0)
+    soft_body_set_update_position = 61,
+    /// SetFacesDoubleSided(i[0] != 0)
+    soft_body_set_faces_double_sided = 62,
+    /// SetVertexRadius(f[0]) (f[0] >= 0)
+    soft_body_set_vertex_radius = 63,
+    /// SetEnableSkinConstraints(i[0] != 0)
+    soft_body_set_enable_skin_constraints = 64,
+    /// SetSkinnedMaxDistanceMultiplier(f[0])
+    soft_body_set_skinned_max_distance_multiplier = 65,
+    /// SkinVertices(Body::GetCenterOfMassTransform(), the i[1] joint matrices at floats[i[0]..] (16 floats each, column
+    /// major, relative to the center of mass, `SceneBuilder.addJointMatrices`), hard skin all i[2] != 0, the world's
+    /// TempAllocator)
+    soft_body_skin_vertices = 66,
+    /// CustomUpdate(delta time f[0], the body, the system)
+    soft_body_custom_update = 67,
+    /// Body::GetSoftBodyCreationSettings; returns the FNV-1a hash of the settings (instead of the hash of the soft body):
+    /// the SoftBodyCreationSettings::SaveBinaryState bytes (every member but mSettings and the group filter), whether
+    /// mCollisionGroup has a group filter (u32), the index of mSettings among the settings objects of the world
+    /// (invalid_handle: none of them), then the SaveBinaryState bytes of mSettings
+    soft_body_creation_settings_hash = 68,
+    /// PhysicsSystem::SetSoftBodyContactListener of SoftBodyListenerMode `index` (none: nullptr); returns 0
+    set_soft_body_contact_listener = 69,
+    // 70..99: reserved for operations of later phases that are not constraint operations
 
     /// Driver: the following updates use delta time f[0] and `count` collision steps
     set_update = 100,
@@ -1908,6 +2127,12 @@ pub const SimSceneDesc = extern struct {
     num_vehicle_anti_roll_bars: u32,
     uints: [*]const u32,
     num_uints: u32,
+
+    // Phase 9: the descriptions of the shared settings and of the soft bodies (created by their operations)
+    soft_body_settings: [*]const SimSoftBodySettings,
+    num_soft_body_settings: u32,
+    soft_bodies: [*]const SimSoftBody,
+    num_soft_bodies: u32,
 };
 
 /// What the contact listener does besides recording the callbacks
@@ -2060,7 +2285,26 @@ pub const RecordKind = enum(u32) {
 
     // Reserved blocks for new kinds of the Phase 7 groups (see "Reserved numbers" in the file header): 21..29
     // Character, 30..39 CharacterVirtual (compared in call order like 7..17: added to the character recorder), 40..49
-    // Ragdoll, 50..59 the vehicle core group, 60..69 the vehicle variants group, 70..79 later phases.
+    // Ragdoll, 50..59 the vehicle core group, 60..69 the vehicle variants group, 75..79 later phases.
+
+    // Phase 9: the SoftBodyContactListener callbacks of SoftBodyListenerMode, called from the soft body jobs: compared
+    // sorted (SimSoftBodyContactListener of SimulationReference.cpp, SoftBodyListenerImpl of SimulationParity.zig)
+    /// OnSoftBodyContactValidate: ids[0] soft body ID, ids[1] other body ID, ids[2] the result (0 AcceptContact, 1
+    /// RejectContact); data[0..4] the SoftBodyContactSettings as passed in (mInvMassScale1, mInvMassScale2,
+    /// mInvInertiaScale2 as bits, mIsSensor as 0 / 1), data[4..8] the same after the callback
+    soft_body_contact_validate = 70,
+    /// OnSoftBodyContactAdded: ids[0] soft body ID, ids[1] the number of vertices of the manifold, ids[2] the number of
+    /// vertices with a contact (HasContact), ids[3] GetNumSensorContacts; data[0] the FNV-1a hash of HasContact of every
+    /// vertex (a u32 each)
+    soft_body_contact_added = 71,
+    /// OnSoftBodyContactAdded, one record per body that vertices have a contact with (GetContactBodyID, CCD contacts
+    /// included): ids[0] soft body ID, ids[1] the body ID, ids[2] the number of these vertices; data[0] the FNV-1a hash
+    /// of GetLocalContactPoint and GetContactNormal (3 floats each) of these vertices in vertex order
+    soft_body_contact_body = 72,
+    /// OnSoftBodyContactAdded, one record per sensor contact: ids[0] soft body ID, ids[1] GetSensorContactBodyID(i) (the
+    /// order of the sensors depends on the broad phase, so the index is not recorded)
+    soft_body_sensor_contact = 73,
+    // 74: free for a soft body record
 
     /// True for the records of the character virtuals (the CharacterContactListener and the CharacterVirtual block:
     /// compared in call order, they come from the character recorder)
@@ -2386,7 +2630,8 @@ pub const Layers = struct {
 // -------------------------------------------------------------------------------------------------------------------
 // The scene table
 
-/// What a scene needs that Zolt cannot do yet
+/// What a scene needs. Zolt ports every class, so every Blocker is supported: the blockers are labels, and SimulationParity
+/// fails a scene whose Blocker is not supported.
 pub const Blocker = enum {
     none,
     /// Body pairs reach the narrow phase: ProcessBodyPair and the contact solver (A4, Wave B R2 / R3, supported)
@@ -2396,10 +2641,9 @@ pub const Blocker = enum {
     constraints,
     /// Linear cast bodies that hit something (Wave B R4, supported)
     ccd_hits,
-    /// Soft bodies (Phase 9)
-    soft_bodies,
     /// The scene violates a JPH_ASSERT that Jolt's release build (the reference library is built without asserts)
-    /// ignores: it compares Jolt's release behavior and runs only without Zolt's asserts (ReleaseFast)
+    /// ignores: it compares Jolt's release behavior. Zolt's assert at that site is recoverable (R8), the scene runs with a
+    /// handler that counts the asserts
     release_only,
 
     // Phase 6, one blocker per constraint kind: supported as soon as the Zolt class is ported (ConstraintKind.isPorted,
@@ -2435,7 +2679,7 @@ pub const Blocker = enum {
     /// VehicleConstraint with the motorcycle controller (a wheeled controller)
     motorcycles,
 
-    /// True when Zolt can run the scenes with this blocker (flip when the wave lands)
+    /// True when Zolt can run the scenes with this blocker (the classes that it needs do not declare `is_stub`)
     pub fn isSupported(self: Blocker) bool {
         return switch (self) {
             .characters => Phase7Classes.characters(),
@@ -2445,8 +2689,7 @@ pub const Blocker = enum {
             .tracked_vehicles => Phase7Classes.trackedVehicles(),
             .motorcycles => Phase7Classes.motorcycles(),
             .none, .contacts, .ccd_hits, .constraints => true,
-            .release_only => !zolt.Core.enable_asserts,
-            .soft_bodies => false,
+            .release_only => true,
             .distance_constraints => ConstraintKind.distance.isPorted(),
             .pulley_constraints => ConstraintKind.pulley.isPorted(),
             .hinge_constraints => ConstraintKind.hinge.isPorted(),
@@ -2538,7 +2781,7 @@ pub const Expect = struct {
     /// `update_activations` (in a scene without contacts they are the only activations from inside an update).
     active_constraints: u32 = 0,
 
-    // Phase 7 (also checked on the C++ side by "SimScenes blocked scenes run on the C++ side")
+    // Phase 7
     /// The CharacterContactListener records of the scene include each of these RecordKinds at least once (bit
     /// `1 << kind`, `recordBit`)
     character_records: u128 = 0,
@@ -2554,6 +2797,22 @@ pub const Expect = struct {
     /// two consecutive updates of a vehicle
     vehicle_up_shifts: u32 = 0,
     vehicle_down_shifts: u32 = 0,
+
+    // Phase 9
+    /// The soft body contact listener records of the scene include each of these RecordKinds at least once (bit
+    /// `1 << kind`, `recordBit`)
+    soft_body_records: u128 = 0,
+    /// A linear cast body hits a soft body face and JobResolveCCDContacts takes its soft body branch (Zolt side: a
+    /// ResolveCCDContacts job changes the vertex velocities or the CCD contact marks of a soft body, in some
+    /// configuration). `ccd_hits` does not see these hits: Jolt adds no CCD manifold for a soft body.
+    soft_body_ccd: bool = false,
+    /// A shared settings object of the scene has at least 2 parallel update groups and a non-parallel group with
+    /// constraints (Zolt side: SoftBodySharedSettings.update_groups after Optimize)
+    soft_body_groups: bool = false,
+    /// At least this many bodies are deactivated from inside one update (OnBodyDeactivated during
+    /// PhysicsSystem::Update, Zolt side, not by the operations before it). More than 64 soft bodies that go to sleep in
+    /// one update fill the batch of JobSoftBodyFinalize.
+    update_deactivations: u32 = 0,
 };
 
 /// The bit of a transmission gear (-8 .. 23) in `Expect.vehicle_gears`
@@ -2716,7 +2975,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "ccd_infinite_mass_override", .build = buildInfiniteMassOverride, .blocked_by = .ccd_hits, .sweep_stride = 3, .expect = .{ .contacts = true, .ccd_hits = true } },
     .{ .name = "ccd_cube_slide_active_edges", .build = buildLinearCastCubeSlide(1), .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true } },
     .{ .name = "ccd_cube_slide_all_edges", .build = buildLinearCastCubeSlide(0), .blocked_by = .ccd_hits, .sweep_stride = 1, .expect = .{ .contacts = true, .ccd_hits = true } },
-    // Later waves (blocked until Zolt has the parts, see Blocker)
+    // Later waves
     // Scenes of the ported PhysicsTests (Wave C)
     .{ .name = "physics_tests_restitution_1", .build = buildTestsRestitution(1), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "physics_tests_restitution_2", .build = buildTestsRestitution(2), .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
@@ -2943,6 +3202,34 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "vehicle_motorcycle_lean_integration_slope", .build = buildVehicleMotorcycleLeanIntegrationSlope, .blocked_by = .motorcycles, .sweep_stride = 0, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     .{ .name = "vehicle_motorcycle_far_from_origin", .build = buildVehicleMotorcycleFarFromOrigin, .blocked_by = .motorcycles, .sweep_stride = 25, .expect = .{ .wheel_contacts = true, .active_constraints = 2 } },
     // (append the vehicle scenes here)
+    // ---- Soft bodies (Phase 9: the harness scenes of group SH, then the scene list of group S5) ----
+    // The soft body scenes restore the broad phase after their D12 sweeps (`restore_broad_phase`). DetermineCollidingShapes
+    // gets the colliding bodies in the order of the broad phase layout. A vertex keeps the first of equal penetrations.
+    .{ .name = "soft_body_cube_on_floor", .build = buildSoftBodyCubeOnFloor, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_ops", .build = buildSoftBodyOps, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    .{ .name = "soft_body_test_bend_constraint", .build = buildSoftBodyTestBendConstraint, .sweep_stride = 30, .restore_broad_phase = true },
+    .{ .name = "soft_body_test_apply_force", .build = buildSoftBodyTestApplyForce, .sweep_stride = 40, .restore_broad_phase = true },
+    .{ .name = "soft_body_test_linear_cast_sphere", .build = buildSoftBodyTestLinearCastSphere, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_cube_listener_modes", .build = buildSoftBodyCcdCube, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_cloth_listener_modes", .build = buildSoftBodyCcdCloth, .sweep_stride = 32, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_ccd_fixed_and_rotated", .build = buildSoftBodyCcdFixedAndRotated, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_ccd = true } },
+    .{ .name = "soft_body_cloth_lra", .build = buildSoftBodyClothLRA, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_cloth_dihedral", .build = buildSoftBodyClothDihedral, .sweep_stride = 25, .restore_broad_phase = true },
+    .{ .name = "soft_body_pressure_sphere", .build = buildSoftBodyPressureSphere, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_rod_chain", .build = buildSoftBodyRodChain, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_skinned_back_stops", .build = buildSoftBodySkinnedBackStops, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_sensor", .build = buildSoftBodySensor, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records | recordBit(.soft_body_sensor_contact) } },
+    .{ .name = "soft_body_sleep_and_wake", .build = buildSoftBodySleepAndWake, .sweep_stride = 50, .restore_broad_phase = true, .expect = .{ .sleeping = true, .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_update_position_false", .build = buildSoftBodyUpdatePositionFalse, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_several_on_one_body", .build = buildSoftBodySeveralOnOneBody, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_save_restore", .build = buildSoftBodySaveRestore, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_collision_steps_2", .build = buildSoftBodyCollisionSteps2, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    // Creating the 30 x 30 cloth (CreateConstraints, Optimize) allocates thousands of times: no creation sweep
+    .{ .name = "soft_body_large_cloth", .build = buildSoftBodyLargeCloth, .sweep_stride = 25, .restore_broad_phase = true, .creation_sweep = false, .expect = .{ .soft_body_records = soft_body_contact_records, .soft_body_groups = true } },
+    .{ .name = "soft_body_partial_batches", .build = buildSoftBodyPartialBatches, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_shapes", .build = buildSoftBodyShapes, .sweep_stride = 25, .restore_broad_phase = true, .expect = .{ .soft_body_records = soft_body_contact_records } },
+    .{ .name = "soft_body_many_go_to_sleep", .build = buildSoftBodyManyGoToSleep, .sweep_stride = soft_body_many_sleep_update, .restore_broad_phase = true, .expect = .{ .sleeping = true, .update_deactivations = soft_body_many_count } },
+    // (append the soft body scenes here)
 };
 
 /// Expect.ground_states: every EGroundState
@@ -2955,6 +3242,9 @@ const character_body_records = recordBit(.character_contact_validate) | recordBi
 const character_vs_character_records = recordBit(.character_vs_character_contact_validate) | recordBit(.character_vs_character_contact_added) | recordBit(.character_vs_character_contact_persisted) | recordBit(.character_vs_character_contact_removed) | recordBit(.character_vs_character_contact_solve);
 /// The CharacterContactListener callbacks of the body contacts that every character on a floor gets (no OnContactRemoved)
 const character_body_contact_records = recordBit(.character_contact_validate) | recordBit(.character_contact_added) | recordBit(.character_contact_persisted) | recordBit(.character_contact_solve) | recordBit(.character_adjust_body_velocity);
+
+/// Expect.soft_body_records: the callbacks of the soft body contact listener of a soft body that touches a body
+const soft_body_contact_records = recordBit(.soft_body_contact_validate) | recordBit(.soft_body_contact_added) | recordBit(.soft_body_contact_body);
 
 /// A built scene: the description plus the operations and the update parameters (the memory is owned by the builder)
 pub const SceneBuilder = struct {
@@ -2994,6 +3284,9 @@ pub const SceneBuilder = struct {
     vehicle_differentials: std.ArrayList(SimVehicleDifferential) = .empty,
     vehicle_anti_roll_bars: std.ArrayList(SimVehicleAntiRollBar) = .empty,
     uints: std.ArrayList(u32) = .empty,
+    // Phase 9
+    soft_body_settings: std.ArrayList(SimSoftBodySettings) = .empty,
+    soft_bodies: std.ArrayList(SimSoftBody) = .empty,
 
     /// The update before which the next operations run
     current_update: u32 = 0,
@@ -3035,6 +3328,8 @@ pub const SceneBuilder = struct {
         self.vehicle_differentials.deinit(self.allocator);
         self.vehicle_anti_roll_bars.deinit(self.allocator);
         self.uints.deinit(self.allocator);
+        self.soft_body_settings.deinit(self.allocator);
+        self.soft_bodies.deinit(self.allocator);
     }
 
     /// The C ABI description (valid until the builder changes)
@@ -3087,6 +3382,10 @@ pub const SceneBuilder = struct {
             .num_vehicle_anti_roll_bars = @intCast(self.vehicle_anti_roll_bars.items.len),
             .uints = self.uints.items.ptr,
             .num_uints = @intCast(self.uints.items.len),
+            .soft_body_settings = self.soft_body_settings.items.ptr,
+            .num_soft_body_settings = @intCast(self.soft_body_settings.items.len),
+            .soft_bodies = self.soft_bodies.items.ptr,
+            .num_soft_bodies = @intCast(self.soft_bodies.items.len),
         };
     }
 
@@ -3532,6 +3831,79 @@ pub const SceneBuilder = struct {
     /// Check: the ConstraintState bits of vehicle handle `handle` | IsActive(vehicle body) << 2 at this point
     pub fn expectVehicleConstraintState(self: *SceneBuilder, handle: u32, state: u32, body_active: bool) Allocator.Error!void {
         return self.objectOp(.vehicle_expect_constraint_state, handle, .{ .count = state | (@as(u32, @intFromBool(body_active)) << 2) });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Soft bodies (Phase 9)
+
+    /// Add the description of shared settings (a generator), returns its index
+    pub fn softBodySettings(self: *SceneBuilder, desc_value: SimSoftBodySettings) Allocator.Error!u32 {
+        try self.soft_body_settings.append(self.allocator, desc_value);
+        return @intCast(self.soft_body_settings.items.len - 1);
+    }
+
+    /// Add explicit shared settings (SoftBodySettingsKind.explicit): the vertices (position, velocity, inverse mass), the
+    /// faces and the volume tetrahedra go to the pools; the other members of `desc_value` (vertex attributes, bend type,
+    /// optimize) are used as they are. Returns the index of the description.
+    pub fn explicitSoftBodySettings(self: *SceneBuilder, desc_value: SimSoftBodySettings, vertices: []const [7]f32, faces: []const [3]u32, volumes: []const [4]u32) Allocator.Error!u32 {
+        var d = desc_value;
+        d.kind = @intFromEnum(SoftBodySettingsKind.explicit);
+        d.count_x = @intCast(vertices.len);
+        d.count_z = @intCast(faces.len);
+        d.count_extra = @intCast(volumes.len);
+        d.floats = @intCast(self.floats.items.len);
+        for (vertices) |v| try self.floats.appendSlice(self.allocator, &v);
+        d.uints = @intCast(self.uints.items.len);
+        for (faces) |f| try self.uints.appendSlice(self.allocator, &f);
+        for (volumes) |v| try self.uints.appendSlice(self.allocator, &v);
+        return self.softBodySettings(d);
+    }
+
+    /// Add a soft body description, returns its index
+    pub fn addSoftBodyDesc(self: *SceneBuilder, desc_value: SimSoftBody) Allocator.Error!u32 {
+        std.debug.assert(desc_value.settings < self.soft_body_settings.items.len);
+        try self.soft_bodies.append(self.allocator, desc_value);
+        return @intCast(self.soft_bodies.items.len - 1);
+    }
+
+    /// CreateSoftBody + AddBody of description `desc_index` (create_soft_body), returns the body handle
+    pub fn createSoftBody(self: *SceneBuilder, desc_index: u32, activation: Activation) Allocator.Error!u32 {
+        return self.createWith(.create_soft_body, desc_index, activation);
+    }
+
+    /// CreateAndAddSoftBody of description `desc_index`, returns the body handle
+    pub fn createAndAddSoftBody(self: *SceneBuilder, desc_index: u32, activation: Activation) Allocator.Error!u32 {
+        return self.createWith(.create_and_add_soft_body, desc_index, activation);
+    }
+
+    /// CreateSoftBody of description `desc_index` without adding it (for soft_body_custom_update), returns the body
+    /// handle
+    pub fn createSoftBodyNoAdd(self: *SceneBuilder, desc_index: u32) Allocator.Error!u32 {
+        return self.createWith(.create_soft_body_no_add, desc_index, .dont_activate);
+    }
+
+    /// Add a soft body description and create the soft body (create_soft_body), returns the body handle
+    pub fn softBody(self: *SceneBuilder, desc_value: SimSoftBody, activation: Activation) Allocator.Error!u32 {
+        return self.createSoftBody(try self.addSoftBodyDesc(desc_value), activation);
+    }
+
+    /// A soft body operation (OpKind 56..68) on body handle `handle`
+    pub fn softBodyOp(self: *SceneBuilder, kind: OpKind, handle: u32, args: struct { i: []const u32 = &.{}, f: []const f32 = &.{} }) Allocator.Error!void {
+        std.debug.assert(isSoftBodyOp(@intFromEnum(kind)) and @intFromEnum(kind) >= @intFromEnum(OpKind.soft_body_set_vertex_position) and kind != .set_soft_body_contact_listener);
+        return self.op(kind, handle, .{ .i = args.i, .f = args.f });
+    }
+
+    /// Install the soft body contact listener of `mode` (set_soft_body_contact_listener)
+    pub fn softBodyListener(self: *SceneBuilder, mode: SoftBodyListenerMode) Allocator.Error!void {
+        return self.sysOp(.set_soft_body_contact_listener, .{ .index = @intFromEnum(mode) });
+    }
+
+    /// Add joint matrices (16 floats each, column major, relative to the center of mass of the soft body) to the float
+    /// pool, returns their offset (soft_body_skin_vertices)
+    pub fn addJointMatrices(self: *SceneBuilder, matrices: []const [16]f32) Allocator.Error!u32 {
+        const offset: u32 = @intCast(self.floats.items.len);
+        for (matrices) |m| try self.floats.appendSlice(self.allocator, &m);
+        return offset;
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -12502,8 +12874,7 @@ fn buildGearKinematicRelease(b: *SceneBuilder) Allocator.Error!void {
 
 // -------------------------------------------------------------------------------------------------------------------
 // Characters, ragdolls and vehicles (Phase 7), one region per worker group (append a group's scenes at the end of its
-// region only). They run on the C++ side alone until the classes are ported ("SimScenes blocked scenes run on the C++
-// side"), see "Recipe for a Phase 7 worker" in the file header.
+// region only), see "Recipe for a Phase 7 worker" in the file header.
 
 /// i[3] of the operations with `lock`: the no-lock interfaces (inLockBodies = false)
 const no_lock = [_]u32{ 0, 0, 0, 1 };
@@ -16027,6 +16398,637 @@ fn buildVehicleMotorcycleFarFromOrigin(b: *SceneBuilder) Allocator.Error!void {
 }
 
 // (append the vehicle scenes here)
+
+// ---- Soft bodies (Phase 9: the harness scenes of group SH, the scene list of group S5) ----
+
+/// The smoke scene of the soft body harness: the cube of SoftBodyTests (sCreateCube(6, 0.2)) dropped rotated onto a
+/// floor with the recording soft body contact listener, and a box dropped onto the cube
+fn buildSoftBodyCubeOnFloor(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 90;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.15, 0.15, 0.15 }, 0.02);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 6, .spacing = 0.2 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 0, 1, 0 }, .rotation = axisAngle(normalize3(.{ 1, 1, 0 }), 0.3), .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0.1, 2, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// A 4 x 4 matrix (column major) in f64, for the joint matrices that the scene builder computes
+const Mat4 = [16]f64;
+
+fn mat4Translation(x: f64, y: f64, z: f64) Mat4 {
+    return .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1 };
+}
+
+fn mat4RotationX(angle: f64) Mat4 {
+    const c = @cos(angle);
+    const s = @sin(angle);
+    return .{ 1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1 };
+}
+
+fn mat4Mul(a: Mat4, m: Mat4) Mat4 {
+    var r: Mat4 = undefined;
+    for (0..4) |col| {
+        for (0..4) |row| {
+            var sum: f64 = 0;
+            for (0..4) |k| sum += a[k * 4 + row] * m[col * 4 + k];
+            r[col * 4 + row] = sum;
+        }
+    }
+    return r;
+}
+
+/// The joint matrices of a skinned cloth at time `t` (the pose of SoftBodySkinnedConstraintTest), relative to the center
+/// of mass of the soft body: joint 0 at Z `z0`, every next joint `step` further along Z and rotated around X by an angle
+/// that grows with `t`
+fn skinnedClothPose(comptime num_joints: usize, z0: f64, step: f64, t: f64) [num_joints][16]f32 {
+    var m = mat4Translation(0, 0, z0);
+    var result: [num_joints][16]f32 = undefined;
+    for (0..num_joints) |i| {
+        if (i > 0) {
+            const amplitude = 0.25 * @min(t, 2.0);
+            const angle = amplitude * @sin(0.25 * std.math.pi * @as(f64, @floatFromInt(i)) + 2.0 * t);
+            m = mat4Mul(m, mat4Mul(mat4RotationX(angle), mat4Translation(0, 0, step)));
+        }
+        for (&result[i], m) |*r, v| r.* = @floatCast(v);
+    }
+    return result;
+}
+
+/// Every soft body operation and listener record (the C++ side runs it until Zolt simulates soft bodies). Soft bodies of
+/// every generator kind on a floor: a rotated cube; a cloth with fixed corners, LRA and dihedral bends that hangs through
+/// a sensor, with a box falling onto it; a skinned cloth whose joints move; a rod chain with a fixed end; an explicit
+/// tetrahedron with a volume constraint and a collision group; a pressurized sphere that is not in the system and moves by
+/// CustomUpdate. Every update skins the cloth (hard at first). The vertex and motion property setters, the listener in
+/// every mode, 2 collision steps, the GetSoftBodyCreationSettings round trip, a snapshot and its cross restore.
+fn buildSoftBodyOps(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 20, 0);
+    const sensor_box = try b.box(.{ 0.6, 0.6, 0.6 }, 0);
+    const box = try b.box(.{ 0.15, 0.15, 0.15 }, 0.02);
+    _ = try b.body(.{ .position = .{ 3, 1, 0 }, .shape = sensor_box, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 5, .spacing = 0.2 });
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 9, .count_z = 9, .spacing = 0.15, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .lra_type = 1, .lra_max_distance_multiplier = 1.05, .bend_type = 2, .kinematic = 1 });
+    const skinned = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 6, .count_z = 7, .count_extra = 3, .spacing = 0.2, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3, .back_stop_distance = 0.05, .back_stop_radius = 10 });
+    const sphere = try b.softBodySettings(.{ .kind = @intFromEnum(K.sphere), .count_x = 6, .count_z = 8, .spacing = 0.4, .compliance = 1.0e-4, .shear_compliance = 1.0e-4, .bend_compliance = 1.0e-3 });
+    const rods = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 10, .spacing = 0.2, .height = 1, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const tetrahedron = try b.explicitSoftBodySettings(.{ .kind = @intFromEnum(K.explicit), .compliance = 1.0e-4, .bend_type = 0 }, &.{
+        .{ 0, 0, 0, 0, 0, 0, 1 },
+        .{ 0.4, 0, 0, 0, 0, 0, 1 },
+        .{ 0, 0, 0.4, 0, 0, 0, 1 },
+        .{ 0, 0.4, 0, 0.5, 0, 0, 0.5 },
+    }, &.{ .{ 0, 1, 2 }, .{ 0, 3, 1 }, .{ 0, 2, 3 }, .{ 1, 3, 2 } }, &.{.{ 0, 1, 2, 3 }});
+    // Settings that are only compared with the C++ ones (not optimized: no soft body may use them)
+    _ = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 4, .count_z = 5, .spacing = 0.3, .lra_type = 2, .bend_type = 0, .kinematic = 2, .optimize = 0 });
+
+    try b.softBodyListener(.accept);
+    const c = try b.softBody(.{ .settings = cube, .position = .{ 0, 1, 0 }, .rotation = axisAngle(normalize3(.{ 0.6, 0.8, 0 }), 0.4), .user_data = 5, .object_layer = Layers.moving }, .activate);
+    const cl = try b.createAndAddSoftBody(try b.addSoftBodyDesc(.{ .settings = cloth, .position = .{ 3, 1.3, 0 }, .object_layer = Layers.moving, .update_position = 0, .faces_double_sided = 1 }), .activate);
+    const sk = try b.createAndAddSoftBody(try b.addSoftBodyDesc(.{ .settings = skinned, .position = .{ -3, 1.5, 0 }, .object_layer = Layers.moving }), .activate);
+    const sp = try b.createSoftBodyNoAdd(try b.addSoftBodyDesc(.{ .settings = sphere, .position = .{ 0, 2.5, 3 }, .pressure = 1000, .object_layer = Layers.moving }));
+    const rc = try b.softBody(.{ .settings = rods, .position = .{ -3, 2.5, 3 }, .num_iterations = 8, .object_layer = Layers.moving }, .activate);
+    const te = try b.softBody(.{ .settings = tetrahedron, .position = .{ 3, 1, 3 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.7), .make_rotation_identity = 0, .restitution = 0.3, .friction = 0.6, .linear_damping = 0.2, .gravity_factor = 0.8, .vertex_radius = 0.01, .max_linear_velocity = 100, .allow_sleeping = 0, .collision_group_id = 3, .collision_sub_group_id = 1, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3.2, 2, 0.1 }, .shape = box, .object_layer = Layers.moving }, .activate);
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        // The skinned cloth follows its joints (the first call skins every vertex hard), the sphere moves by CustomUpdate
+        const pose = skinnedClothPose(3, -0.6, 0.6, @as(f64, @floatFromInt(u)) / 60.0);
+        try b.softBodyOp(.soft_body_skin_vertices, sk, .{ .i = &.{ try b.addJointMatrices(&pose), 3, @intFromBool(u == 0) } });
+        try b.softBodyOp(.soft_body_custom_update, sp, .{ .f = &.{1.0 / 60.0} });
+        switch (u) {
+            5 => {
+                try b.softBodyOp(.soft_body_set_vertex_position, c, .{ .i = &.{3}, .f = &.{ -0.35, -0.45, -0.4 } });
+                try b.softBodyOp(.soft_body_set_vertex_velocity, c, .{ .i = &.{10}, .f = &.{ 0, 2, 0.5 } });
+                try b.softBodyOp(.soft_body_set_vertex_inv_mass, c, .{ .i = &.{0}, .f = &.{0.5} });
+            },
+            8 => {
+                try b.softBodyOp(.soft_body_set_pressure, sp, .{ .f = &.{1500} });
+                try b.softBodyOp(.soft_body_set_num_iterations, c, .{ .i = &.{7} });
+                try b.softBodyOp(.soft_body_set_vertex_radius, te, .{ .f = &.{0.02} });
+            },
+            10 => try b.softBodyListener(.mass_scales),
+            14 => try b.softBodyListener(.sensor),
+            16 => try b.softBodyListener(.reject),
+            18 => try b.softBodyListener(.accept),
+            20 => {
+                try b.softBodyOp(.soft_body_set_faces_double_sided, cl, .{ .i = &.{0} });
+                try b.softBodyOp(.soft_body_set_update_position, cl, .{ .i = &.{1} });
+            },
+            22 => try b.softBodyOp(.soft_body_set_enable_skin_constraints, sk, .{ .i = &.{0} }),
+            25 => try b.softBodyOp(.soft_body_set_skinned_max_distance_multiplier, sk, .{ .f = &.{0.5} }),
+            28 => try b.softBodyOp(.soft_body_set_enable_skin_constraints, sk, .{ .i = &.{1} }),
+            30 => try b.sysOp(.snapshot, .{ .index = 0 }),
+            35 => try b.sysOp(.set_update, .{ .f = &.{1.0 / 60.0}, .count = 2 }),
+            40 => for ([_]u32{ c, cl, sk, sp, rc, te }) |handle|
+                try b.softBodyOp(.soft_body_creation_settings_hash, handle, .{}),
+            45 => try b.sysOp(.restore_cross, .{ .index = 0 }),
+            50 => try b.softBodyListener(.none),
+            else => {},
+        }
+    }
+}
+
+/// TestBendConstraint of SoftBodyTests: two triangles with a shared edge, three locked vertices and a free vertex x3, an
+/// edge constraint per edge and a dihedral bend constraint, one soft body for each of the 6 values of x3 of the test
+/// (x3 = (0, 0, -1) lies on x2, like in the test). Every 15 updates (0.25 s) vertex 3 is perturbed by rotating it around
+/// X by 0, 90, 180 and 270 degrees, and the bend constraint brings it back.
+fn buildSoftBodyTestBendConstraint(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 60;
+    const x3_values = [_][3]f32{
+        .{ 0, 0, 1 }, // forming flat plane
+        .{ 0, 0, -1 }, // overlapping
+        .{ 0, 1, 0 }, // 90 degrees concave
+        .{ 0, -1, 0 }, // 90 degrees convex
+        .{ 0, 1, 1 }, // 45 degrees concave
+        .{ 0, -1, -1 }, // 135 degrees convex
+    };
+    var handles: [x3_values.len]u32 = undefined;
+    for (x3_values, &handles, 0..) |x3, *handle, i| {
+        const settings = try b.explicitSoftBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.explicit), .shear_compliance = std.math.floatMax(f32), .bend_compliance = 0, .bend_type = 2 }, &.{
+            .{ -1, 0, 0, 0, 0, 0, 0 },
+            .{ 1, 0, 0, 0, 0, 0, 0 },
+            .{ 0, 0, -1, 0, 0, 0, 0 },
+            .{ x3[0], x3[1], x3[2], 0, 0, 0, 1 },
+        }, &.{ .{ 0, 1, 2 }, .{ 0, 3, 1 } }, &.{});
+        handle.* = try b.softBody(.{ .settings = settings, .position = .{ 4 * real(i), 0, 0 }, .gravity_factor = 0, .allow_sleeping = 0, .update_position = 0, .object_layer = Layers.moving }, .activate);
+    }
+    for ([_]f64{ 0, 90, 180, 270 }, 0..) |angle, a| {
+        b.at(@intCast(15 * a));
+        const c = @cos(angle * std.math.pi / 180.0);
+        const s = @sin(angle * std.math.pi / 180.0);
+        for (x3_values, handles) |x3, handle| {
+            // 0.5 * (Mat44::sRotationX(DegreesToRadians(angle)) * x3)
+            const y: f32 = @floatCast(0.5 * (c * x3[1] - s * x3[2]));
+            const z: f32 = @floatCast(0.5 * (s * x3[1] + c * x3[2]));
+            try b.softBodyOp(.soft_body_set_vertex_position, handle, .{ .i = &.{3}, .f = &.{ 0.5 * x3[0], y, z } });
+        }
+    }
+}
+
+/// TestApplyForce of SoftBodyTests: the cube of the test (sCreateCube(6, 0.2), 216 kg, no gravity, no damping) and a
+/// rigid box of the same size and mass, the same force on both every update
+fn buildSoftBodyTestApplyForce(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 120;
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 6, .spacing = 0.2 });
+    const soft_body = try b.softBody(.{ .settings = cube, .gravity_factor = 0, .linear_damping = 0, .object_layer = Layers.moving }, .activate);
+    const box = try b.box(.{ 0.5, 0.5, 0.5 }, 0.05);
+    const rigid_body = try b.body(.{ .position = .{ 0, 2, 0 }, .shape = box, .gravity_factor = 0, .linear_damping = 0, .override_mass_properties = 1, .mass = 216, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |u| {
+        b.at(@intCast(u));
+        try b.op(.add_force, soft_body, .{ .f = &.{ 10000, 0, 0 } });
+        try b.op(.add_force, rigid_body, .{ .f = &.{ 10000, 0, 0 } });
+    }
+}
+
+/// A sphere (radius 1, 200 kg, no damping) that moves 5 m in one update towards a soft body target at `target_position`
+/// from 2 m along the direction `-direction`, with motion quality `motion_quality` (0 discrete, 1 linear cast)
+fn shootSphere(b: *SceneBuilder, sphere: u32, target_position: [3]Real, direction: [3]f32, motion_quality: u32) Allocator.Error!u32 {
+    const speed: f32 = 5.0 * 60.0;
+    return b.body(.{
+        .position = .{ target_position[0] - 2 * direction[0], target_position[1] - 2 * direction[1], target_position[2] - 2 * direction[2] },
+        .shape = sphere,
+        .motion_quality = motion_quality,
+        .override_mass_properties = 1,
+        .mass = 200,
+        .linear_velocity = .{ speed * direction[0], speed * direction[1], speed * direction[2] },
+        .linear_damping = 0,
+        .object_layer = Layers.moving,
+    }, .activate);
+}
+
+/// TestLinearCastSphereVsSoftBody of SoftBodyTests: a sphere that tunnels through the cube of the test in one update, for
+/// each listener of the test (accepting, none, rejecting) with linear cast and discrete motion quality. The six pairs are
+/// 10 m apart and start 6 updates apart, each with its listener. The linear cast sphere stops at the cube (the CCD
+/// response against a soft body face) unless the listener rejects the contact.
+fn buildSoftBodyTestLinearCastSphere(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 36;
+    b.gravity = .{ 0, 0, 0 };
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 6, .spacing = 0.2 });
+    const sphere = try b.sphere(1.0);
+    for ([_]SoftBodyListenerMode{ .accept, .accept, .none, .none, .reject, .reject }, 0..) |mode, i| {
+        b.at(@intCast(6 * i));
+        try b.softBodyListener(mode);
+        const position: [3]Real = .{ 0, 0, 10 * real(i) };
+        _ = try b.softBody(.{ .settings = cube, .position = position, .object_layer = Layers.moving }, .activate);
+        _ = try shootSphere(b, sphere, position, .{ -1, 0, 0 }, @intFromBool(i % 2 == 0));
+    }
+}
+
+/// Linear cast and discrete spheres against soft body cubes in every listener mode (the CCD response against a soft body
+/// face, OnSoftBodyContactValidate from JobFindCCDContacts with its mass scales and sensor flag). The cubes of the
+/// accepting and the sensor listener sleep when they are hit (dont_activate): the CCD response or ProcessBodyPair wakes
+/// them.
+fn buildSoftBodyCcdCube(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 5, .spacing = 0.25 });
+    const sphere = try b.sphere(0.6);
+    const modes = [_]SoftBodyListenerMode{ .none, .accept, .reject, .sensor, .mass_scales };
+    for (0..2 * modes.len) |i| {
+        b.at(@intCast(4 * i));
+        try b.softBodyListener(modes[i / 2]);
+        const position: [3]Real = .{ 0, 0, 8 * real(i) };
+        _ = try b.softBody(.{ .settings = cube, .position = position, .rotation = axisAngle(.{ 0, 1, 0 }, 0.2 * @as(f64, @floatFromInt(i))), .friction = 0.4, .restitution = 0.3, .object_layer = Layers.moving }, if ((i / 2) % 2 == 1) .dont_activate else .activate);
+        _ = try shootSphere(b, sphere, position, .{ -1, 0, 0 }, @intFromBool(i % 2 == 0));
+    }
+}
+
+/// Linear cast spheres against horizontal cloths with fixed corners in every listener mode: from above (front faces) and
+/// from below, where only a double sided cloth stops them
+fn buildSoftBodyCcdCloth(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cloth), .count_x = 11, .count_z = 11, .spacing = 0.15, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .kinematic = 1 });
+    const sphere = try b.sphere(0.3);
+    const modes = [_]SoftBodyListenerMode{ .none, .accept, .reject, .sensor, .mass_scales };
+    for (0..2 * modes.len) |i| {
+        b.at(@intCast(4 * i));
+        try b.softBodyListener(modes[i / 2]);
+        const from_below = i % 2 == 1;
+        const position: [3]Real = .{ 4 * real(i), 3, 0 };
+        _ = try b.softBody(.{ .settings = cloth, .position = position, .faces_double_sided = @intFromBool(from_below and i % 4 == 1), .object_layer = Layers.moving }, .activate);
+        _ = try shootSphere(b, sphere, position, if (from_below) .{ 0, 1, 0 } else .{ 0, -1, 0 }, 1);
+    }
+}
+
+/// A linear cast sphere of mass `mass` (no damping) that starts 0.35 m in front of the point `target` of a soft body
+/// face with the normal `normal` and moves towards it with 20 m/s (one update moves it 0.33 m)
+fn shootSphereAtFace(b: *SceneBuilder, sphere: u32, target: [3]Real, normal: [3]f32, mass: f32) Allocator.Error!u32 {
+    const distance: f32 = 0.35;
+    const speed: f32 = 20.0;
+    return b.body(.{
+        .position = .{ target[0] + real(distance * normal[0]), target[1] + real(distance * normal[1]), target[2] + real(distance * normal[2]) },
+        .shape = sphere,
+        .motion_quality = 1,
+        .override_mass_properties = 1,
+        .mass = mass,
+        .linear_velocity = .{ -speed * normal[0], -speed * normal[1], -speed * normal[2] },
+        .linear_damping = 0,
+        .object_layer = Layers.moving,
+    }, .activate);
+}
+
+/// Linear cast spheres against cloths with fixed rows (inverse mass 0) that keep their rotation (MakeRotationIdentity
+/// false: the inverse transform of the CCD response rotates). A light sphere hits a face with a fixed vertex and two
+/// free vertices that move (the barycentric velocity of the face). A heavy sphere hits a face whose 3 vertices are
+/// fixed (the mass 1e10 of a fixed vertex: the inverse mass 1 / 3e10 of the face is visible next to the inverse mass
+/// 1e-5 of the sphere). The spheres hit at update 0 with the accepting listener (a fixed vertex keeps its CCD contact
+/// mark until OnSoftBodyContactAdded, so the records hash the local contact plane) and at update 25 without a listener.
+/// Both are sweep updates.
+fn buildSoftBodyCcdFixedAndRotated(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    b.gravity = .{ 0, 0, 0 };
+    const n = 7;
+    const spacing: f32 = 0.2;
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cloth), .count_x = n, .count_z = n, .spacing = spacing, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .kinematic = 2 });
+    const sphere = try b.sphere(0.15);
+    // The two faces of the quad x = 2, z = 0 (SoftBodySettingsKind.cloth, row z = 0 is fixed): face (2, 9, 10) has the
+    // fixed vertex 2 and the free vertices 9 and 10; face (2, 10, 3) has the fixed vertices 2 and 3, and the operations
+    // fix vertex 10. The spheres aim at the centroids (local X and Z).
+    const offset = -0.5 * spacing * @as(f32, n - 1);
+    const centroids = [2][2]f32{
+        .{ offset + spacing * 7.0 / 3.0, offset + spacing * 2.0 / 3.0 },
+        .{ offset + spacing * 8.0 / 3.0, offset + spacing * 1.0 / 3.0 },
+    };
+    for ([_]SoftBodyListenerMode{ .accept, .none }, 0..) |mode, wave| {
+        b.at(@intCast(25 * wave));
+        try b.softBodyListener(mode);
+        for (centroids, 0..) |centroid, k| {
+            const i = 2 * wave + k;
+            const position: [3]Real = .{ 3 * real(i), 2, 0 };
+            const rotation = axisAngle(normalize3(.{ 1, 0.4, -0.3 }), 0.5 + 0.35 * @as(f64, @floatFromInt(i)));
+            const handle = try b.softBody(.{ .settings = cloth, .position = position, .rotation = rotation, .make_rotation_identity = 0, .object_layer = Layers.moving }, .activate);
+            if (k == 0) {
+                // Local velocities of the free vertices
+                try b.softBodyOp(.soft_body_set_vertex_velocity, handle, .{ .i = &.{9}, .f = &.{ 0.6, -0.4, 0.3 } });
+                try b.softBodyOp(.soft_body_set_vertex_velocity, handle, .{ .i = &.{10}, .f = &.{ -0.3, 0.5, 0.2 } });
+            } else {
+                try b.softBodyOp(.soft_body_set_vertex_inv_mass, handle, .{ .i = &.{10}, .f = &.{0} });
+            }
+            const local = quatRotate(rotation, .{ centroid[0], 0, centroid[1] });
+            const normal = quatRotate(rotation, .{ 0, 1, 0 });
+            const target: [3]Real = .{ position[0] + real(local[0]), position[1] + real(local[1]), position[2] + real(local[2]) };
+            _ = try shootSphereAtFace(b, sphere, target, normal, if (k == 0) 0.5 else 1.0e5);
+        }
+    }
+}
+
+/// A cloth with fixed corners and LRA constraints (Euclidean and geodesic) that sags onto a sphere
+fn buildSoftBodyClothLRA(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const ball = try b.sphere(0.5);
+    const euclidean = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 15, .count_z = 15, .spacing = 0.1, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-4, .lra_type = 1, .lra_max_distance_multiplier = 1.03, .kinematic = 1 });
+    const geodesic = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 15, .count_z = 15, .spacing = 0.1, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-4, .lra_type = 2, .lra_max_distance_multiplier = 1.05, .kinematic = 2 });
+    try b.softBodyListener(.accept);
+    for ([_]u32{ euclidean, geodesic }, 0..) |settings, i| {
+        const x = 4 * real(i);
+        _ = try b.body(.{ .position = .{ x, 0.5, 0 }, .shape = ball, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.softBody(.{ .settings = settings, .position = .{ x, 1.2, 0 }, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Free cloths with dihedral bends, distance bends and no bends draped over a box, without a soft body contact listener
+fn buildSoftBodyClothDihedral(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const block = try b.box(.{ 0.3, 0.5, 1.0 }, 0.05);
+    for ([_]u32{ 2, 1, 0 }, 0..) |bend_type, i| {
+        const x = 4 * real(i);
+        const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 12, .count_z = 12, .spacing = 0.1, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .bend_type = bend_type });
+        _ = try b.body(.{ .position = .{ x, 0.5, 0 }, .shape = block, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.softBody(.{ .settings = cloth, .position = .{ x, 1.3, 0.1 }, .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .friction = 0.5, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+/// Pressurized spheres on a floor, a box falls onto one of them; the pressure changes and the listener scales the masses
+fn buildSoftBodyPressureSphere(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.25, 0.25, 0.25 }, 0.05);
+    const sphere = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.sphere), .count_x = 8, .count_z = 10, .spacing = 0.5, .compliance = 1.0e-4, .shear_compliance = 1.0e-4, .bend_compliance = 1.0e-3 });
+    try b.softBodyListener(.accept);
+    const inflated = try b.softBody(.{ .settings = sphere, .position = .{ 0, 0.8, 0 }, .pressure = 2000, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = sphere, .position = .{ 3, 0.8, 0 }, .pressure = 0, .object_layer = Layers.moving }, .activate);
+    b.at(15);
+    _ = try b.body(.{ .position = .{ 0.1, 2.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    b.at(30);
+    try b.softBodyListener(.mass_scales);
+    b.at(45);
+    try b.softBodyOp(.soft_body_set_pressure, inflated, .{ .f = &.{500} });
+}
+
+/// Cosserat rod chains with a fixed end (and one without) that swing into a static capsule and a dynamic sphere
+fn buildSoftBodyRodChain(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const capsule = try b.capsule(0.5, 0.15);
+    const ball = try b.sphere(0.25);
+    const fixed = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 16, .spacing = 0.3, .height = 1.5, .compliance = 1.0e-5, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const free = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 12, .spacing = 0.25, .height = 1.0, .compliance = 1.0e-4, .shear_compliance = 1.0e-3 });
+    try b.softBodyListener(.accept);
+    _ = try b.body(.{ .position = .{ 0.2, 1.0, 0 }, .rotation = axisAngle(.{ 1, 0, 0 }, 0.5 * std.math.pi), .shape = capsule, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    _ = try b.softBody(.{ .settings = fixed, .position = .{ 0, 2.5, 0 }, .num_iterations = 6, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = free, .position = .{ 3, 2, 0 }, .rotation = axisAngle(normalize3(.{ 1, 0, 1 }), 0.8), .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3, 0.25, 0 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+}
+
+/// Skinned cloths whose joints move (SkinVertices every update), with back stops and without, and a ball that falls onto
+/// the first one
+fn buildSoftBodySkinnedBackStops(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 75;
+    _ = try addFloor(b, 10, 0);
+    const ball = try b.sphere(0.2);
+    const back_stop = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 8, .count_z = 9, .count_extra = 4, .spacing = 0.15, .compliance = 1.0e-4, .shear_compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.2, .back_stop_distance = 0.02, .back_stop_radius = 0.5 });
+    const no_back_stop = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 8, .count_z = 9, .count_extra = 4, .spacing = 0.15, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3 });
+    try b.softBodyListener(.accept);
+    const skinned = [_]u32{
+        try b.softBody(.{ .settings = back_stop, .position = .{ 0, 1, 0 }, .object_layer = Layers.moving }, .activate),
+        try b.softBody(.{ .settings = no_back_stop, .position = .{ 3, 1, 0 }, .faces_double_sided = 1, .object_layer = Layers.moving }, .activate),
+    };
+    _ = try b.body(.{ .position = .{ 0.05, 2, 0.1 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const pose = skinnedClothPose(4, -0.6, 0.4, @as(f64, @floatFromInt(u)) / 60.0);
+        const joints = try b.addJointMatrices(&pose);
+        for (skinned) |handle|
+            try b.softBodyOp(.soft_body_skin_vertices, handle, .{ .i = &.{ joints, 4, @intFromBool(u == 0) } });
+        if (u == 40)
+            try b.softBodyOp(.soft_body_set_skinned_max_distance_multiplier, skinned[0], .{ .f = &.{2.0} });
+    }
+}
+
+/// Soft bodies that fall through a static sensor and a moving kinematic sensor onto a floor, with the listener in the
+/// modes that record the sensor contacts (accept), turn the contacts into sensor contacts (sensor) and ignore the
+/// sensors (none)
+fn buildSoftBodySensor(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const sensor_box = try b.box(.{ 0.8, 0.4, 0.8 }, 0);
+    const sensor_ball = try b.sphere(0.5);
+    _ = try b.body(.{ .position = .{ 0, 1.2, 0 }, .shape = sensor_box, .motion_type = 0, .is_sensor = 1, .object_layer = Layers.sensor }, .dont_activate);
+    _ = try b.body(.{ .position = .{ 2, 0.6, -2 }, .shape = sensor_ball, .motion_type = 1, .is_sensor = 1, .linear_velocity = .{ 0, 0, 2 }, .object_layer = Layers.sensor }, .activate);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.15 });
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 8, .count_z = 8, .spacing = 0.1, .compliance = 1.0e-4 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 0, 2.2, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 2, 0.4, 0 }, .object_layer = Layers.moving }, .activate);
+    b.at(25);
+    try b.softBodyListener(.sensor);
+    b.at(35);
+    try b.softBodyListener(.none);
+    b.at(45);
+    try b.softBodyListener(.accept);
+}
+
+/// Soft bodies that fall asleep on a floor; a box that falls onto one wakes it through ProcessBodyPair (the soft body is
+/// body 2 of the pair), ActivateBody wakes the other one
+fn buildSoftBodySleepAndWake(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 200;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 4, .spacing = 0.2 });
+    try b.softBodyListener(.accept);
+    const hit = try b.softBody(.{ .settings = cube, .position = .{ 0, 0.4, 0 }, .object_layer = Layers.moving }, .activate);
+    const woken = try b.softBody(.{ .settings = cube, .position = .{ 3, 0.4, 0 }, .object_layer = Layers.moving }, .activate);
+    b.at(150);
+    try b.expectSleeping(hit);
+    try b.expectSleeping(woken);
+    _ = try b.body(.{ .position = .{ 0.05, 1.5, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    try b.op(.activate_body, woken, .{});
+    b.at(185);
+    try b.expectAwake(hit);
+}
+
+/// Soft bodies with UpdatePosition false: a cloth that falls onto a sphere and a cube that falls onto the floor keep
+/// their body position (the vertices move); the cube switches UpdatePosition on later
+fn buildSoftBodyUpdatePositionFalse(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const ball = try b.sphere(0.4);
+    _ = try b.body(.{ .position = .{ 0, 0.4, 0 }, .shape = ball, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 10, .count_z = 10, .spacing = 0.12, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3 });
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.2 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.2, 0 }, .update_position = 0, .object_layer = Layers.moving }, .activate);
+    const c = try b.softBody(.{ .settings = cube, .position = .{ 3, 1, 0 }, .rotation = axisAngle(normalize3(.{ 1, 0, 1 }), 0.3), .update_position = 0, .object_layer = Layers.moving }, .activate);
+    b.at(40);
+    try b.softBodyOp(.soft_body_set_update_position, c, .{ .i = &.{1} });
+}
+
+/// Several soft bodies on one dynamic platform: SoftBodyFinalize adds their velocity changes to the platform in BodyID
+/// order. The soft bodies are activated in another order than their IDs, so JobSoftBodyPrepare must sort them.
+fn buildSoftBodySeveralOnOneBody(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const platform = try b.box(.{ 1.5, 0.1, 1.5 }, 0.05);
+    _ = try b.body(.{ .position = .{ 0, 0.1, 0 }, .shape = platform, .friction = 0.6, .object_layer = Layers.moving }, .activate);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 4, .spacing = 0.15 });
+    try b.softBodyListener(.mass_scales);
+    var handles: [4]u32 = undefined;
+    for (&handles, 0..) |*handle, i| {
+        const x = -0.8 + 0.55 * real(i);
+        handle.* = try b.softBody(.{ .settings = cube, .position = .{ x, 0.6 + 0.1 * real(i), 0.2 * real(i % 2) }, .rotation = axisAngle(normalize3(.{ 1, 1, 0 }), 0.2 * @as(f64, @floatFromInt(i))), .object_layer = Layers.moving }, .dont_activate);
+    }
+    for ([_]usize{ 3, 1, 0, 2 }) |i|
+        try b.op(.activate_body, handles[i], .{});
+    b.at(30);
+    try b.softBodyListener(.accept);
+}
+
+/// Save and cross restore with soft bodies of every kind (vertices, rod states, skin states): a snapshot of the full
+/// state and one of the bodies only
+fn buildSoftBodySaveRestore(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    const state_bodies: u32 = 2; // EStateRecorderState::Bodies
+    b.num_updates = 60;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.2 });
+    const rods = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 10, .spacing = 0.2, .height = 1, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const skinned = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 6, .count_z = 7, .count_extra = 3, .spacing = 0.2, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3, .back_stop_distance = 0.05, .back_stop_radius = 10 });
+    try b.softBodyListener(.accept);
+    const c = try b.softBody(.{ .settings = cube, .position = .{ 0, 1, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = rods, .position = .{ 3, 2.5, 0 }, .object_layer = Layers.moving }, .activate);
+    const sk = try b.softBody(.{ .settings = skinned, .position = .{ -3, 1.5, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0.1, 2, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const pose = skinnedClothPose(3, -0.6, 0.6, @as(f64, @floatFromInt(u)) / 60.0);
+        try b.softBodyOp(.soft_body_skin_vertices, sk, .{ .i = &.{ try b.addJointMatrices(&pose), 3, @intFromBool(u == 0) } });
+        switch (u) {
+            12 => try b.sysOp(.snapshot, .{ .index = 0 }),
+            18 => try b.softBodyOp(.soft_body_set_vertex_velocity, c, .{ .i = &.{5}, .f = &.{ 0, 3, 0 } }),
+            25 => try b.sysOp(.restore_cross, .{ .index = 0 }),
+            35 => try b.sysOp(.snapshot, .{ .index = 1, .i = &.{state_bodies} }),
+            42 => try b.sysOp(.restore_cross, .{ .index = 1 }),
+            else => {},
+        }
+    }
+}
+
+/// Soft bodies with 2 collision steps per update: a skinned cloth (SkinVertices before every update, the skin flag
+/// restore of the sweeps), a cube and a rod chain
+fn buildSoftBodyCollisionSteps2(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 50;
+    b.collision_steps = 2;
+    _ = try addFloor(b, 10, 0);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 5, .spacing = 0.15 });
+    const rods = try b.softBodySettings(.{ .kind = @intFromEnum(K.rod_chain), .count_x = 8, .spacing = 0.2, .height = 0.8, .shear_compliance = 1.0e-4, .kinematic = 1 });
+    const skinned = try b.softBodySettings(.{ .kind = @intFromEnum(K.skinned_cloth), .count_x = 6, .count_z = 7, .count_extra = 3, .spacing = 0.2, .compliance = 1.0e-4, .kinematic = 2, .skin_max_distance = 0.3, .back_stop_distance = 0.05, .back_stop_radius = 10 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 0, 1, 0 }, .rotation = axisAngle(normalize3(.{ 0, 1, 1 }), 0.4), .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = rods, .position = .{ 3, 2, 0 }, .object_layer = Layers.moving }, .activate);
+    const sk = try b.softBody(.{ .settings = skinned, .position = .{ -3, 1.5, 0 }, .object_layer = Layers.moving }, .activate);
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        const pose = skinnedClothPose(3, -0.6, 0.6, @as(f64, @floatFromInt(u)) / 60.0);
+        try b.softBodyOp(.soft_body_skin_vertices, sk, .{ .i = &.{ try b.addJointMatrices(&pose), 3, @intFromBool(u == 0) } });
+    }
+}
+
+/// A 30 x 30 cloth (900 vertices: several parallel constraint groups, a non-empty non-parallel group and a partial last
+/// vertex batch) with fixed corners, LRA and dihedral bends, with a box falling onto it
+fn buildSoftBodyLargeCloth(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = 40;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.15, 0.15, 0.15 }, 0.05);
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cloth), .count_x = 30, .count_z = 30, .spacing = 0.05, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3, .lra_type = 1, .lra_max_distance_multiplier = 1.03, .bend_type = 2, .kinematic = 1 });
+    try b.softBodyListener(.accept);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.5, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 0.1, 2.2, -0.05 }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// Soft bodies whose vertex counts are just below, at and just above a multiple of the collision batch (64): 63, 64, 65,
+/// 125 vertices, on a floor with a box
+fn buildSoftBodyPartialBatches(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 50;
+    _ = try addFloor(b, 10, 0);
+    const box = try b.box(.{ 0.2, 0.2, 0.2 }, 0.05);
+    const settings = [_]u32{
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 9, .count_z = 7, .spacing = 0.1, .compliance = 1.0e-4 }),
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.15 }),
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 13, .count_z = 5, .spacing = 0.1, .compliance = 1.0e-4, .bend_type = 2, .bend_compliance = 1.0e-3 }),
+        try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 5, .spacing = 0.12 }),
+    };
+    try b.softBodyListener(.accept);
+    for (settings, 0..) |s, i|
+        _ = try b.softBody(.{ .settings = s, .position = .{ 2 * real(i), 0.8, 0 }, .rotation = axisAngle(.{ 0, 0, 1 }, 0.25), .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 2, 1.6, 0 }, .shape = box, .object_layer = Layers.moving }, .activate);
+}
+
+/// Cloths and cubes that fall onto every kind of shape: a static compound, a mesh, a height field, a convex hull, a
+/// scaled and a rotated translated shape, a kinematic box that moves under a cloth and dynamic shapes they push
+fn buildSoftBodyShapes(b: *SceneBuilder) Allocator.Error!void {
+    const K = SoftBodySettingsKind;
+    b.num_updates = 60;
+    _ = try addFloor(b, 15, 0);
+    const box = try b.box(.{ 0.3, 0.3, 0.3 }, 0.05);
+    const ball = try b.sphere(0.3);
+    const compound = try b.compound(.static_compound, &.{
+        .{ .shape = box, .position = .{ -0.3, 0.3, 0 } },
+        .{ .shape = ball, .position = .{ 0.4, 0.3, 0 } },
+    });
+    const mesh = try b.mesh(&.{
+        .{ -1, 0.2, -1, -1, 0.4, 1, 1, 0.2, 1 },
+        .{ -1, 0.2, -1, 1, 0.2, 1, 1, 0.6, -1 },
+    });
+    var samples: [16]f32 = undefined;
+    for (&samples, 0..) |*s, i| s.* = 0.1 * @as(f32, @floatFromInt((i * 7) % 5));
+    const height_field = try b.heightField(&samples, 4, .{ -1, 0.1, -1 }, .{ 0.67, 1, 0.67 });
+    const hull = try b.convexHull(&.{ .{ -0.4, 0, -0.4 }, .{ 0.4, 0, -0.4 }, .{ 0, 0, 0.5 }, .{ 0, 0.6, 0 } }, 0.05);
+    const scaled = try b.scaled(box, .{ 1.5, 0.5, 1.5 });
+    const rotated = try b.rotatedTranslated(box, .{ 0, 0.3, 0 }, axisAngle(.{ 0, 1, 0 }, 0.6));
+    const cloth = try b.softBodySettings(.{ .kind = @intFromEnum(K.cloth), .count_x = 9, .count_z = 9, .spacing = 0.15, .compliance = 1.0e-5, .shear_compliance = 1.0e-5, .bend_compliance = 1.0e-3 });
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(K.cube), .count_x = 4, .spacing = 0.15 });
+    try b.softBodyListener(.accept);
+    const statics = [_]u32{ compound, mesh, height_field, hull, scaled, rotated };
+    for (statics, 0..) |shape, i| {
+        const x = 3 * real(i) - 7.5;
+        _ = try b.body(.{ .position = .{ x, 0, 0 }, .shape = shape, .motion_type = 0, .object_layer = Layers.non_moving }, .dont_activate);
+        _ = try b.softBody(.{ .settings = if (i % 2 == 0) cloth else cube, .position = .{ x, 1.5, 0.05 }, .object_layer = Layers.moving }, .activate);
+    }
+    // A kinematic box that moves under a cloth and a dynamic ball that a cube falls onto
+    _ = try b.body(.{ .position = .{ -1, 0.5, 3 }, .shape = box, .motion_type = 1, .linear_velocity = .{ 1, 0, 0 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = cloth, .position = .{ 0, 1.2, 3 }, .object_layer = Layers.moving }, .activate);
+    _ = try b.body(.{ .position = .{ 3, 0.3, 3 }, .shape = ball, .object_layer = Layers.moving }, .activate);
+    _ = try b.softBody(.{ .settings = cube, .position = .{ 3, 1.2, 3 }, .object_layer = Layers.moving }, .activate);
+}
+
+/// The number of soft bodies of soft_body_many_go_to_sleep and the update in which they all go to sleep (its sweep
+/// stride: the sweep runs that update)
+const soft_body_many_count = 70;
+const soft_body_many_sleep_update = 31;
+
+/// More soft bodies than a batch of JobSoftBodyFinalize (64): small cubes (sCreateCube(2, 0.2), 8 vertices) on a floor.
+/// Every update notifies the bounds of more than 64 soft bodies, and they all go to sleep in the same update (a sweep
+/// update), so the deactivation batch is flushed inside the loop too.
+fn buildSoftBodyManyGoToSleep(b: *SceneBuilder) Allocator.Error!void {
+    b.num_updates = soft_body_many_sleep_update + 5;
+    _ = try addFloor(b, 10, 0);
+    const cube = try b.softBodySettings(.{ .kind = @intFromEnum(SoftBodySettingsKind.cube), .count_x = 2, .spacing = 0.2 });
+    for (0..soft_body_many_count) |i| {
+        const x = 0.5 * real(i % 10) - 2.25;
+        const z = 0.5 * real(i / 10) - 1.75;
+        _ = try b.softBody(.{ .settings = cube, .position = .{ x, 0.11, z }, .object_layer = Layers.moving }, .activate);
+    }
+}
+
+// (append the soft body scenes here)
 
 /// The scene of the test "SimulationParity object state decoder": a character, a character virtual on the floor (an
 /// active contact after its first update), a ragdoll and a car (every object state field but the tracked and the

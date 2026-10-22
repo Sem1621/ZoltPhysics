@@ -1,6 +1,6 @@
 # Zolt Roadmap
 
-The plan for porting Jolt Physics (~87k lines of C++ in scope) to Zig 0.16. Phases follow the
+The plan for porting Jolt Physics (~91k lines of C++ in scope) to Zig 0.16. Phases follow the
 `#include` dependency graph, so every phase can be compiled and tested on its own. Per-file status
 lives in [Progress.md](Progress.md) (generated); `python3 tools/port_status.py --next` lists the
 files whose dependencies are already ported.
@@ -98,7 +98,7 @@ Five groups, in dependency order:
 - AABB tree: TriangleSplitter (+ Binning, Mean), AABBTreeBuilder, AABBTreeToBuffer,
   NodeCodecQuadTreeHalfFloat, TriangleCodecIndexed8BitPackSOA4Flags (used by MeshShape).
 **Milestone M3:** `UnitTests/Geometry` passes. ✅ Reached, except the four `TestGJKRay*Shape` cases of
-`GJKTests`, which need the convex shapes and are ported with Phase 4. Every Geometry function has parity
+`GJKTests`, which needed the convex shapes. Phase 9 ported them (group F0). Every Geometry function has parity
 tests against the C++ library (bit exact, both precisions), including GJK/EPA results on separated,
 touching and penetrating pairs, the complete face lists of the 3D hull builder and the AABB tree buffers
 byte for byte.
@@ -164,7 +164,7 @@ and velocities as the C++ version (step by step, bit for bit). ✅ Reached:
 exceeded:
 - The Pyramid, **ConvexVsMesh** and **HighSpeed** hashes of `determinism_check.yml` all match, in both
   precisions, with `-t=max`, `-t=1` and `-t=2`. No library fix was needed. Zolt's CI checks them.
-- Every Phase 5 file is ported, apart from the soft body parts of Phase 9.
+- Every Phase 5 file is ported, apart from the soft body parts, which Phase 9 ported.
 - The simulation parity compares Zolt with the C++ PhysicsSystem after every update over about 120
   scenes (gravity, contacts, CCD, the ported unit test cases, HelloWorld, the PerformanceTest scenes).
   It runs in a thread matrix and with failure sweeps.
@@ -269,19 +269,77 @@ Design, groups and harness plan: [SerializationArchitecture.md](SerializationArc
   that could not be destroyed, a main object of a derived class freed with the wrong size (D17), missing compile
   checks, and a harness and a CI check that let a pending class pass. Each was fixed or documented.
 - Phase 9 boundary: the SoftBody and Hair schemas (SoftBodyCreationSettings, SoftBodySharedSettings with its 11
-  nested classes, the 10 Hair classes) and `PhysicsScene.mSoftBodies`. A scene stream with soft bodies fails to
-  read until then.
+  nested classes, the 10 Hair classes) and `PhysicsScene.mSoftBodies` came with Phase 9. Until then a scene stream
+  with soft bodies failed to read.
 - Settled points, the Jolt bugs that are reproduced on purpose and the harness rules:
   [SerializationArchitecture.md](SerializationArchitecture.md), sections 11 and 12.
 
-### Phase 9: Remaining features
-SoftBody (with its ObjectStream schemas and `PhysicsScene.mSoftBodies`), Hair (CPU path, with its schemas),
-debug renderer interface (`Jolt/Renderer`, behind a build option), remaining unit tests (all of `UnitTests/`
-ported).
-**Milestone M10:** 100% of `UnitTests/` ported and passing.
+### Phase 9: Remaining features ✅
+SoftBody (with its ObjectStream schemas and `PhysicsScene.mSoftBodies`), the compute interfaces and the CPU compute
+backend with the shaders as Zig (`Jolt/Compute`, `Jolt/Compute/CPU`, `Jolt/Shaders`), Hair (CPU path, with its
+schemas), the debug renderer (`Jolt/Renderer` and the `JPH_DEBUG_RENDERER` code, behind `-Ddebug_renderer`),
+recoverable asserts with `ExpectAssert`, and the remaining unit tests (all of `UnitTests/` ported).
+Design, decisions (R1 to R22), groups and harness plan: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md).
+**Milestone M10:** 100% of `UnitTests/` ported and passing (`port_status.py --check-m10`), in Debug, ReleaseSafe,
+ReleaseFast, double precision, `-Duse_llvm=false` and `-Ddebug_renderer=true`. ✅ Reached:
+- Every file of the phase is complete:
+  - SoftBody: the 12 files of `Jolt/Physics/SoftBody` (8 Zig files), the soft body parts of Body, BodyManager,
+    BodyInterface, PhysicsSystem (the four soft body jobs, the CCD response against a soft body face) and
+    PhysicsScene, the 13 soft body schemas and `PhysicsScene.mSoftBodies`;
+  - the compute interfaces and the CPU backend (`Zolt/Compute`, `Zolt/Compute/CPU`) with the HLSL emulation;
+  - the 17 shaders of `Jolt/Shaders` as Zig, with their shared headers and wrappers (`Zolt/Shaders`);
+  - Hair on the CPU backend with its 10 schemas, `LibM.expf` and `powf`, and libc++'s `std::shuffle`;
+  - the debug renderer (`Zolt/Renderer`: the interface with every helper, the recorder, DebugRendererSimple and the
+    playback) and every draw site of the 103 Jolt files with `JPH_DEBUG_RENDERER`. The draw code exists only with
+    `-Ddebug_renderer=true`. Without it every hook is `void`, so drawing cannot change a result;
+  - recoverable asserts with `ExpectAssert` (R8): the asserts that tests expect let the code continue on Jolt's release
+    path, so these tests run in every build;
+  - the remaining unit tests: the four ray cases of GJKTests, ComputeTests, SoftBodyTests with
+    LoggingSoftBodyContactListener, and the `ExpectAssert` part of TestOutOfContactConstraints.
+- Every one of the 590 `TEST_CASE`s of `UnitTests/` has a Zig test of the same name, except the three GPU cases of
+  ComputeTests. `port_status.py --check` fails on an M10 gap and on any `TODO(debug_renderer)`. CI runs the tests in
+  every M10 configuration.
+- The parity layers compare Zolt with the C++ library built with `JPH_USE_CPU_COMPUTE`, in both precisions and in both
+  renderer configurations (the second reference has `JPH_DEBUG_RENDERER`):
+  - the soft body settings, the SoftBodyShape queries in the pairwise sweep, and the soft body update without a
+    PhysicsSystem;
+  - 23 soft body scenes in the simulation parity (310 scenes in all), bit exact in the thread matrix with the D12
+    sweeps;
+  - every shader, dispatch by dispatch on random buffers, against Jolt's CPU backend;
+  - `expf` and `powf`, the shuffle, the hair settings, and the hair scenes, which compare every compute and read back
+    buffer after every update;
+  - the call log of every draw: the helpers, shapes, constraints, bodies, characters, vehicles, skeletons, soft bodies
+    and hair; the recorder's `.jor` bytes; drawn scenes, whose state must equal the state without drawing;
+  - the release only tests and scenes, which follow Jolt's release build on inputs that Jolt asserts on. Only an
+    asserting reference (`-Dreference_asserts=true`) counts Jolt's asserts, and no CI row builds one: it is a manual
+    run. Then each case must hit as many asserts on both sides. Without it, a release only test checks (in Debug and
+    ReleaseSafe) that its cases hit Zolt's asserts, and a release only scene checks that each run hits at least one.
+- The debug renderer changes no result. With `-Ddebug_renderer=true` ZoltPerformanceTest gives the same 5 hashes, also
+  while it records every frame (`-r`). `zig build debug-renderer-check` finds its `.jor` bytes equal to those of the C++
+  PerformanceTest for the 5 scenes. Zolt's CI checks both, in both precisions.
+- The parity and the reviews found Jolt bugs and undefined behavior:
+  - the pulley solver reads uninitialized memory: IndependentAxisConstraintPart with a static body (UB22). Zolt starts
+    those members at zero, which is Jolt's result on zero-filled memory;
+  - `uint3(float3)` of NaN or of a value outside the `uint32` range depends on clang's vectorization at the call site
+    (UB11). Zolt uses the scalar conversion for every component;
+  - where Jolt is undefined, Zolt has one defined behavior, pinned by Zolt-only tests: UB1 to UB34 of R20. For
+    example, a soft body without vertices makes Jolt's soft body job spin forever (UB1);
+  - Jolt's quirks where it is defined are reproduced (R20): CreateConstraints adds the last shared edge of a closed mesh
+    twice, FromPhysicsSystem stores a soft body's index of the wrong array, and the density loops of `Hair::Draw` swap
+    their bounds.
+- The reference's `expf` was the older algorithm of Zig's `compiler_rt`, not glibc's. The reference now pins `expf`
+  and `powf` (R1, R13), and Zolt's hair results do not depend on the C library.
+- Each group was reviewed before its merge. Three major findings were fixed: the `uint3(float3)` conversion (C0), the
+  D5 rows with several failed job creations (S5) and the allocation failure sweeps of the hair update (H2). A last
+  audit of the merged phase against the Jolt sources confirmed 34 minor findings. Each was fixed or documented.
+- Deferred: only the GPU compute backends and the Profiler (see below).
+- Settled points, the Jolt quirks that are reproduced on purpose and the harness rules:
+  [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md), R20 and section 6.
 
 ### Deferred / out of scope for now
-- `Jolt/Compute`, `Jolt/Shaders`: GPU compute backends (DX12/Vulkan/Metal), only used for GPU hair.
+- `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).
+  Zolt runs hair on the CPU backend (RemainingFeaturesArchitecture.md R21).
+- `Jolt/Core/Profiler`: developer tooling, compiled out in the Distribution configuration.
 - Samples, JoltViewer, TestFramework: application code; a Zig sample app may come later.
 - A C API (`zolt.h`) for use from other languages.
 

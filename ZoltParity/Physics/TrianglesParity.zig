@@ -524,9 +524,9 @@ fn zoltManifold(input: *const ManifoldInput) ManifoldOutput {
         points2.append(vec3At(&input.existing2, i));
     }
     const axis = vec3(input.penetration_axis);
-    manifoldBetweenTwoFaces(vec3(input.contact_point1), vec3(input.contact_point2), axis, input.max_contact_distance, &face1, &face2, &points1, &points2);
+    manifoldBetweenTwoFaces(vec3(input.contact_point1), vec3(input.contact_point2), axis, input.max_contact_distance, &face1, &face2, &points1, &points2, .{});
     if (input.prune != 0 and points1.len > 4)
-        pruneContactPoints(axis.normalized(), &points1, &points2);
+        pruneContactPoints(axis.normalized(), &points1, &points2, .{});
     return storePoints(&points1, &points2);
 }
 
@@ -537,7 +537,7 @@ fn zoltPrune(axis: P, count: u32, points1_in: []const f32, points2_in: []const f
         points1.append(vec3At(points1_in, i));
         points2.append(vec3At(points2_in, i));
     }
-    pruneContactPoints(vec3(axis), &points1, &points2);
+    pruneContactPoints(vec3(axis), &points1, &points2, .{});
     return storePoints(&points1, &points2);
 }
 

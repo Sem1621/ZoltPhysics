@@ -17,6 +17,19 @@ pub const AABBTreeToBuffer = @import("AABBTree/AABBTreeToBuffer.zig").AABBTreeTo
 pub const NodeCodecQuadTreeHalfFloat = @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig").NodeCodecQuadTreeHalfFloat;
 pub const TriangleCodecIndexed8BitPackSOA4Flags = @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig").TriangleCodecIndexed8BitPackSOA4Flags;
 
+// Compute
+pub const ComputeBuffer = @import("Compute/ComputeBuffer.zig").ComputeBuffer;
+pub const ComputeQueue = @import("Compute/ComputeQueue.zig").ComputeQueue;
+pub const ComputeShader = @import("Compute/ComputeShader.zig").ComputeShader;
+pub const ComputeSystem = @import("Compute/ComputeSystem.zig").ComputeSystem;
+pub const createComputeSystem = @import("Compute/ComputeSystem.zig").createComputeSystem;
+pub const ComputeBufferCPU = @import("Compute/CPU/ComputeBufferCPU.zig").ComputeBufferCPU;
+pub const ComputeQueueCPU = @import("Compute/CPU/ComputeQueueCPU.zig").ComputeQueueCPU;
+pub const ComputeShaderCPU = @import("Compute/CPU/ComputeShaderCPU.zig").ComputeShaderCPU;
+pub const ComputeSystemCPU = @import("Compute/CPU/ComputeSystemCPU.zig").ComputeSystemCPU;
+pub const HLSLToCPP = @import("Compute/CPU/HLSLToCPP.zig");
+pub const ShaderWrapper = @import("Compute/CPU/ShaderWrapper.zig").ShaderWrapper;
+
 // Core
 pub const atomicMax = @import("Core/Atomics.zig").atomicMax;
 pub const atomicMin = @import("Core/Atomics.zig").atomicMin;
@@ -34,6 +47,9 @@ pub const HashCombine = @import("Core/HashCombine.zig");
 pub const HashTable = @import("Core/HashTable.zig").HashTable;
 pub const HashTableOptions = @import("Core/HashTable.zig").HashTableOptions;
 pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
+pub const AssertHandler = @import("Core/IssueReporting.zig").AssertHandler;
+pub const ExpectAssert = @import("Core/IssueReporting.zig").ExpectAssert;
+pub const IssueReporting = @import("Core/IssueReporting.zig");
 pub const FailingJobSystem = @import("Core/JobSystem.zig").FailingJobSystem;
 pub const JobHandle = @import("Core/JobSystem.zig").JobSystem.JobHandle;
 pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
@@ -76,6 +92,8 @@ pub const StreamOutWrapper = @import("Core/StreamWrapper.zig").StreamOutWrapper;
 pub const StridedPtr = @import("Core/StridedPtr.zig").StridedPtr;
 pub const StridedPtrConst = @import("Core/StridedPtr.zig").StridedPtrConst;
 pub const convertToString = @import("Core/StringTools.zig").convertToString;
+pub const CppFixed = @import("Core/StringTools.zig").CppFixed;
+pub const cppFixed = @import("Core/StringTools.zig").cppFixed;
 pub const CppFloat = @import("Core/StringTools.zig").CppFloat;
 pub const cppFloat = @import("Core/StringTools.zig").cppFloat;
 pub const nibbleToBinary = @import("Core/StringTools.zig").nibbleToBinary;
@@ -84,6 +102,7 @@ pub const stringReplace = @import("Core/StringTools.zig").stringReplace;
 pub const stringToVector = @import("Core/StringTools.zig").stringToVector;
 pub const toLower = @import("Core/StringTools.zig").toLower;
 pub const vectorToString = @import("Core/StringTools.zig").vectorToString;
+pub const writeFloatFixed = @import("Core/StringTools.zig").writeFloatFixed;
 pub const writeFloatGeneral = @import("Core/StringTools.zig").writeFloatGeneral;
 pub const writeFloatPrecision = @import("Core/StringTools.zig").writeFloatPrecision;
 pub const FailingTempAllocator = @import("Core/TempAllocator.zig").FailingTempAllocator;
@@ -177,6 +196,7 @@ pub const Float4 = @import("Math/Float4.zig").Float4;
 pub const gaussianElimination = @import("Math/GaussianElimination.zig").gaussianElimination;
 pub const half_float = @import("Math/HalfFloat.zig");
 pub const HalfFloat = @import("Math/HalfFloat.zig").HalfFloat;
+pub const LibM = @import("Math/LibM.zig");
 pub const Mat44 = @import("Math/Mat44.zig").Mat44;
 pub const math = @import("Math/Math.zig");
 pub const Matrix = @import("Math/Matrix.zig").Matrix;
@@ -210,6 +230,7 @@ pub const BodyActivationListener = @import("Physics/Body/BodyActivationListener.
 pub const BodyCreationSettings = @import("Physics/Body/BodyCreationSettings.zig").BodyCreationSettings;
 pub const CreateBodyError = @import("Physics/Body/BodyCreationSettings.zig").CreateBodyError;
 pub const OverrideMassProperties = @import("Physics/Body/BodyCreationSettings.zig").OverrideMassProperties;
+pub const BodyDrawFilter = @import("Physics/Body/BodyFilter.zig").BodyDrawFilter;
 pub const BodyFilter = @import("Physics/Body/BodyFilter.zig").BodyFilter;
 pub const IgnoreMultipleBodiesFilter = @import("Physics/Body/BodyFilter.zig").IgnoreMultipleBodiesFilter;
 pub const IgnoreSingleBodyFilter = @import("Physics/Body/BodyFilter.zig").IgnoreSingleBodyFilter;
@@ -227,6 +248,7 @@ pub const BodyIDVector = @import("Physics/Body/BodyManager.zig").BodyIDVector;
 pub const BodyManager = @import("Physics/Body/BodyManager.zig").BodyManager;
 pub const BodyVector = @import("Physics/Body/BodyManager.zig").BodyVector;
 pub const BodyWithMotionProperties = @import("Physics/Body/BodyManager.zig").BodyWithMotionProperties;
+pub const SoftBodyConstraintColor = @import("Physics/Body/BodyManager.zig").SoftBodyConstraintColor;
 pub const BodyPair = @import("Physics/Body/BodyPair.zig").BodyPair;
 pub const body_type_count = @import("Physics/Body/BodyType.zig").body_type_count;
 pub const BodyType = @import("Physics/Body/BodyType.zig").BodyType;
@@ -482,6 +504,10 @@ pub const TwoBodyConstraintSettings = @import("Physics/Constraints/TwoBodyConstr
 pub const DeterminismLog = @import("Physics/DeterminismLog.zig");
 pub const Activation = @import("Physics/EActivation.zig").Activation;
 pub const PhysicsUpdateError = @import("Physics/EPhysicsUpdateError.zig").PhysicsUpdateError;
+pub const Hair = @import("Physics/Hair/Hair.zig").Hair;
+pub const HairSettings = @import("Physics/Hair/HairSettings.zig").HairSettings;
+pub const HairShaders = @import("Physics/Hair/HairShaders.zig").HairShaders;
+pub const RegisterHair = @import("Physics/Hair/RegisterHair.zig");
 pub const IslandBuilder = @import("Physics/IslandBuilder.zig").IslandBuilder;
 pub const LargeIslandSplitter = @import("Physics/LargeIslandSplitter.zig").LargeIslandSplitter;
 pub const PhysicsLock = @import("Physics/PhysicsLock.zig").PhysicsLock;
@@ -506,6 +532,7 @@ pub const SoftBodyManifold = @import("Physics/SoftBody/SoftBodyManifold.zig").So
 pub const SoftBodyMotionProperties = @import("Physics/SoftBody/SoftBodyMotionProperties.zig").SoftBodyMotionProperties;
 pub const SoftBodySharedSettings = @import("Physics/SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
 pub const SoftBodyUpdateContext = @import("Physics/SoftBody/SoftBodyUpdateContext.zig").SoftBodyUpdateContext;
+pub const SoftBodyVertex = @import("Physics/SoftBody/SoftBodyVertex.zig").SoftBodyVertex;
 pub const StateRecorder = @import("Physics/StateRecorder.zig").StateRecorder;
 pub const StateRecorderFilter = @import("Physics/StateRecorder.zig").StateRecorderFilter;
 pub const StateRecorderState = @import("Physics/StateRecorder.zig").StateRecorderState;
@@ -556,6 +583,42 @@ pub const test_shapes = if (@import("builtin").is_test) @import("Physics/Collisi
 /// build.zig for the inline tests (only in test builds)
 pub const test_constraints = if (@import("builtin").is_test) @import("Physics/Constraints/TestConstraints.zig") else struct {};
 
+// Renderer
+pub const DebugRenderer = @import("Renderer/DebugRenderer.zig").DebugRenderer;
+pub const DebugRendererPlayback = @import("Renderer/DebugRendererPlayback.zig").DebugRendererPlayback;
+pub const DebugRendererRecorder = @import("Renderer/DebugRendererRecorder.zig").DebugRendererRecorder;
+pub const DebugRendererSimple = @import("Renderer/DebugRendererSimple.zig").DebugRendererSimple;
+
+// Shaders (the namespaces of the shader files, Docs/Zolt/RemainingFeaturesArchitecture.md R12)
+pub const HairApplyDeltaTransform = @import("Shaders/HairApplyDeltaTransform.zig");
+pub const HairApplyGlobalPose = @import("Shaders/HairApplyGlobalPose.zig");
+pub const HairCalculateCollisionPlanes = @import("Shaders/HairCalculateCollisionPlanes.zig");
+pub const HairCalculateRenderPositions = @import("Shaders/HairCalculateRenderPositions.zig");
+pub const HairCommon = @import("Shaders/HairCommon.zig");
+pub const HairGridAccumulate = @import("Shaders/HairGridAccumulate.zig");
+pub const HairGridClear = @import("Shaders/HairGridClear.zig");
+pub const HairGridNormalize = @import("Shaders/HairGridNormalize.zig");
+pub const HairIntegrate = @import("Shaders/HairIntegrate.zig");
+pub const HairSkinRoots = @import("Shaders/HairSkinRoots.zig");
+pub const HairSkinVertices = @import("Shaders/HairSkinVertices.zig");
+pub const HairStructs = @import("Shaders/HairStructs.zig");
+pub const HairTeleport = @import("Shaders/HairTeleport.zig");
+pub const HairUpdateRoots = @import("Shaders/HairUpdateRoots.zig");
+pub const HairUpdateStrands = @import("Shaders/HairUpdateStrands.zig");
+pub const HairUpdateVelocity = @import("Shaders/HairUpdateVelocity.zig");
+pub const HairUpdateVelocityIntegrate = @import("Shaders/HairUpdateVelocityIntegrate.zig");
+pub const registerHairShaders = @import("Shaders/HairWrapper.zig").registerHairShaders;
+pub const ShaderCore = @import("Shaders/ShaderCore.zig");
+pub const ShaderMat44 = @import("Shaders/ShaderMat44.zig");
+pub const ShaderMath = @import("Shaders/ShaderMath.zig");
+pub const ShaderPlane = @import("Shaders/ShaderPlane.zig");
+pub const ShaderQuat = @import("Shaders/ShaderQuat.zig");
+pub const ShaderVec3 = @import("Shaders/ShaderVec3.zig");
+pub const TestCompute = @import("Shaders/TestCompute.zig");
+pub const TestCompute2 = @import("Shaders/TestCompute2.zig");
+pub const registerTestCompute = @import("Shaders/TestComputeWrapper.zig").registerTestCompute;
+pub const registerTestCompute2 = @import("Shaders/TestComputeWrapper.zig").registerTestCompute2;
+
 // Skeleton
 pub const SkeletalAnimation = @import("Skeleton/SkeletalAnimation.zig").SkeletalAnimation;
 pub const Skeleton = @import("Skeleton/Skeleton.zig").Skeleton;
@@ -574,6 +637,16 @@ const source_files = .{
     @import("AABBTree/AABBTreeToBuffer.zig"),
     @import("AABBTree/NodeCodec/NodeCodecQuadTreeHalfFloat.zig"),
     @import("AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig"),
+    @import("Compute/ComputeBuffer.zig"),
+    @import("Compute/ComputeQueue.zig"),
+    @import("Compute/ComputeShader.zig"),
+    @import("Compute/ComputeSystem.zig"),
+    @import("Compute/CPU/ComputeBufferCPU.zig"),
+    @import("Compute/CPU/ComputeQueueCPU.zig"),
+    @import("Compute/CPU/ComputeShaderCPU.zig"),
+    @import("Compute/CPU/ComputeSystemCPU.zig"),
+    @import("Compute/CPU/HLSLToCPP.zig"),
+    @import("Compute/CPU/ShaderWrapper.zig"),
     @import("ConfigurationString.zig"),
     @import("Core/Atomics.zig"),
     @import("Core/BinaryHeap.zig"),
@@ -587,6 +660,7 @@ const source_files = .{
     @import("Core/HashCombine.zig"),
     @import("Core/HashTable.zig"),
     @import("Core/InsertionSort.zig"),
+    @import("Core/IssueReporting.zig"),
     @import("Core/JobSystem.zig"),
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),
@@ -655,6 +729,7 @@ const source_files = .{
     @import("Math/Float4.zig"),
     @import("Math/GaussianElimination.zig"),
     @import("Math/HalfFloat.zig"),
+    @import("Math/LibM.zig"),
     @import("Math/Mat44.zig"),
     @import("Math/Math.zig"),
     @import("Math/Matrix.zig"),
@@ -819,6 +894,10 @@ const source_files = .{
     @import("Physics/DeterminismLog.zig"),
     @import("Physics/EActivation.zig"),
     @import("Physics/EPhysicsUpdateError.zig"),
+    @import("Physics/Hair/Hair.zig"),
+    @import("Physics/Hair/HairSettings.zig"),
+    @import("Physics/Hair/HairShaders.zig"),
+    @import("Physics/Hair/RegisterHair.zig"),
     @import("Physics/IslandBuilder.zig"),
     @import("Physics/LargeIslandSplitter.zig"),
     @import("Physics/PhysicsLock.zig"),
@@ -835,6 +914,7 @@ const source_files = .{
     @import("Physics/SoftBody/SoftBodyShape.zig"),
     @import("Physics/SoftBody/SoftBodySharedSettings.zig"),
     @import("Physics/SoftBody/SoftBodyUpdateContext.zig"),
+    @import("Physics/SoftBody/SoftBodyVertex.zig"),
     @import("Physics/StateRecorder.zig"),
     @import("Physics/StateRecorderImpl.zig"),
     @import("Physics/Vehicle/MotorcycleController.zig"),
@@ -850,6 +930,37 @@ const source_files = .{
     @import("Physics/Vehicle/Wheel.zig"),
     @import("Physics/Vehicle/WheeledVehicleController.zig"),
     @import("RegisterTypes.zig"),
+    @import("Renderer/DebugRenderer.zig"),
+    @import("Renderer/DebugRendererPlayback.zig"),
+    @import("Renderer/DebugRendererRecorder.zig"),
+    @import("Renderer/DebugRendererSimple.zig"),
+    @import("Shaders/HairApplyDeltaTransform.zig"),
+    @import("Shaders/HairApplyGlobalPose.zig"),
+    @import("Shaders/HairCalculateCollisionPlanes.zig"),
+    @import("Shaders/HairCalculateRenderPositions.zig"),
+    @import("Shaders/HairCommon.zig"),
+    @import("Shaders/HairGridAccumulate.zig"),
+    @import("Shaders/HairGridClear.zig"),
+    @import("Shaders/HairGridNormalize.zig"),
+    @import("Shaders/HairIntegrate.zig"),
+    @import("Shaders/HairSkinRoots.zig"),
+    @import("Shaders/HairSkinVertices.zig"),
+    @import("Shaders/HairStructs.zig"),
+    @import("Shaders/HairTeleport.zig"),
+    @import("Shaders/HairUpdateRoots.zig"),
+    @import("Shaders/HairUpdateStrands.zig"),
+    @import("Shaders/HairUpdateVelocity.zig"),
+    @import("Shaders/HairUpdateVelocityIntegrate.zig"),
+    @import("Shaders/HairWrapper.zig"),
+    @import("Shaders/ShaderCore.zig"),
+    @import("Shaders/ShaderMat44.zig"),
+    @import("Shaders/ShaderMath.zig"),
+    @import("Shaders/ShaderPlane.zig"),
+    @import("Shaders/ShaderQuat.zig"),
+    @import("Shaders/ShaderVec3.zig"),
+    @import("Shaders/TestCompute.zig"),
+    @import("Shaders/TestCompute2.zig"),
+    @import("Shaders/TestComputeWrapper.zig"),
     @import("Skeleton/SkeletalAnimation.zig"),
     @import("Skeleton/Skeleton.zig"),
     @import("Skeleton/SkeletonMapper.zig"),

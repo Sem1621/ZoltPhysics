@@ -20,9 +20,13 @@
 //!   `RegisterTypes.factory`. An unknown hash gives Jolt's "Failed to create instance of type".
 //! - `ConstraintSpace` is an `enum(i32)` that accepts every value: Jolt's binary state writes the enum as its
 //!   underlying int and reads back any value (a value other than world space means local space).
-//! - JPH_DEBUG_RENDERER (`mDrawConstraintSize`, `DrawConstraint`, `DrawConstraintLimits`,
-//!   `DrawConstraintReferenceFrame`, `Get/SetDrawConstraintSize`): TODO(debug_renderer). ConstraintSettings keeps its
-//!   public `mDrawConstraintSize` (it is serialized).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R1, R2): `draw_constraint_size` (mDrawConstraintSize) is
+//!   `void` without `-Ddebug_renderer`. With it the constructor copies it from the settings and `ToConstraintSettings`
+//!   copies it back, like Jolt: this changes `GetConstraintSettings`, so the parity reference gets the define too.
+//!   `DrawConstraint`, `DrawConstraintLimits` and `DrawConstraintReferenceFrame` are option-gated vtable entries
+//!   (`virtual.OptionalVirtual`, no slot without the option) with gated dispatchers. `DrawConstraint` is pure virtual, like
+//!   Jolt's: every concrete constraint overrides it. The other two have Jolt's empty default bodies.
+//!   ConstraintSettings keeps its public `mDrawConstraintSize` in every build (it is serialized).
 //! - The protected copy constructor and assignment of ConstraintSettings (they do not copy the reference count) are
 //!   `initCopy`, used by the copy functions of derived settings.
 
@@ -39,6 +43,7 @@ const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const StreamUtils = @import("../../Core/StreamUtils.zig");
 const Core = @import("../../Core/Core.zig");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const BodyManager = @import("../Body/BodyManager.zig").BodyManager;
 const IslandBuilder = @import("../IslandBuilder.zig").IslandBuilder;
@@ -292,7 +297,10 @@ pub const Constraint = struct {
         /// Link bodies that are connected by this constraint in the same split. Returns the split index.
         buildIslandSplits: *const fn (self: *const Constraint, splitter: *LargeIslandSplitter) u32,
 
-        // TODO(debug_renderer): DrawConstraint (pure virtual), DrawConstraintLimits, DrawConstraintReferenceFrame
+        // Drawing interface (JPH_DEBUG_RENDERER: no slot without -Ddebug_renderer)
+        drawConstraint: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Constraint, renderer: *DebugRenderer) void),
+        drawConstraintLimits: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Constraint, renderer: *DebugRenderer) void),
+        drawConstraintReferenceFrame: virtual.OptionalVirtual(Core.debug_renderer, *const fn (self: *const Constraint, renderer: *DebugRenderer) void),
 
         /// Saving state for replay
         saveState: *const fn (self: *const Constraint, stream: *StateRecorder) void,
@@ -311,7 +319,8 @@ pub const Constraint = struct {
     /// Frees this constraint (heap constraints) and the memory it owns
     allocator: Allocator,
 
-    // TODO(debug_renderer): mDrawConstraintSize (Size of constraint when drawing it through the debug renderer)
+    /// Size of constraint when drawing it through the debug renderer (JPH_DEBUG_RENDERER only, `void` without it)
+    draw_constraint_size: if (Core.debug_renderer) f32 else void = if (Core.debug_renderer) 1.0 else {},
 
     /// Index in the mConstraints list of the ConstraintManager for easy finding (private in Jolt, ConstraintManager is a friend)
     constraint_index: u32 = invalid_constraint_index,
@@ -340,8 +349,8 @@ pub const Constraint = struct {
     pub fn initWithVTable(vtable: *const VTable, allocator: Allocator, settings: *const ConstraintSettings) Constraint {
         // An object stream or a binary state can hold any uint32 here.
         // Jolt asserts only with JPH_ENABLE_ASSERTS. Its release build keeps the low 8 bits (uint8).
-        if (Core.enable_asserts) std.debug.assert(settings.num_velocity_steps_override < 256);
-        if (Core.enable_asserts) std.debug.assert(settings.num_position_steps_override < 256);
+        if (Core.enable_asserts) Core.assertRecoverable(settings.num_velocity_steps_override < 256, "inSettings.mNumVelocityStepsOverride < 256", @src());
+        if (Core.enable_asserts) Core.assertRecoverable(settings.num_position_steps_override < 256, "inSettings.mNumPositionStepsOverride < 256", @src());
         return .{
             .vtable = vtable,
             .allocator = allocator,
@@ -350,6 +359,7 @@ pub const Constraint = struct {
             .num_position_steps_override = @truncate(settings.num_position_steps_override),
             .enabled = settings.enabled,
             .user_data = settings.user_data,
+            .draw_constraint_size = if (Core.debug_renderer) settings.draw_constraint_size else {},
         };
     }
 
@@ -408,7 +418,7 @@ pub const Constraint = struct {
 
     /// Used only when the constraint is active. Override for the number of solver velocity iterations to run, 0 means use the default in PhysicsSettings::mNumVelocitySteps. The number of iterations to use is the max of all contacts and constraints in the island.
     pub fn setNumVelocityStepsOverride(self: *Constraint, n: u32) void {
-        if (Core.enable_asserts) std.debug.assert(n < 256); // Jolt's release build keeps the low 8 bits
+        if (Core.enable_asserts) Core.assertRecoverable(n < 256, "inN < 256", @src()); // Jolt's release build keeps the low 8 bits
         self.num_velocity_steps_override = @truncate(n);
     }
 
@@ -418,7 +428,7 @@ pub const Constraint = struct {
 
     /// Used only when the constraint is active. Override for the number of solver position iterations to run, 0 means use the default in PhysicsSettings::mNumPositionSteps. The number of iterations to use is the max of all contacts and constraints in the island.
     pub fn setNumPositionStepsOverride(self: *Constraint, n: u32) void {
-        if (Core.enable_asserts) std.debug.assert(n < 256); // Jolt's release build keeps the low 8 bits
+        if (Core.enable_asserts) Core.assertRecoverable(n < 256, "inN < 256", @src()); // Jolt's release build keeps the low 8 bits
         self.num_position_steps_override = @truncate(n);
     }
 
@@ -446,6 +456,34 @@ pub const Constraint = struct {
 
     pub fn setUserData(self: *Constraint, user_data: u64) void {
         self.user_data = user_data;
+    }
+
+    // Drawing interface (JPH_DEBUG_RENDERER only: gated dispatchers, `void` without -Ddebug_renderer)
+    pub const drawConstraint = if (Core.debug_renderer) drawConstraintDispatch else {};
+    fn drawConstraintDispatch(self: *const Constraint, renderer: *DebugRenderer) void {
+        self.vtable.drawConstraint(self, renderer);
+    }
+
+    pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsDispatch else {};
+    fn drawConstraintLimitsDispatch(self: *const Constraint, renderer: *DebugRenderer) void {
+        self.vtable.drawConstraintLimits(self, renderer);
+    }
+
+    pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameDispatch else {};
+    fn drawConstraintReferenceFrameDispatch(self: *const Constraint, renderer: *DebugRenderer) void {
+        self.vtable.drawConstraintReferenceFrame(self, renderer);
+    }
+
+    /// Size of constraint when drawing it through the debug renderer (JPH_DEBUG_RENDERER only: a gated declaration,
+    /// RemainingFeaturesArchitecture.md R2)
+    pub const getDrawConstraintSize = if (Core.debug_renderer) getDrawConstraintSizeImpl else {};
+    fn getDrawConstraintSizeImpl(self: *const Constraint) f32 {
+        return self.draw_constraint_size;
+    }
+
+    pub const setDrawConstraintSize = if (Core.debug_renderer) setDrawConstraintSizeImpl else {};
+    fn setDrawConstraintSizeImpl(self: *Constraint, size: f32) void {
+        self.draw_constraint_size = size;
     }
 
     /// Notify the constraint that the shape of a body has changed (see VTable.notifyShapeChanged)
@@ -511,7 +549,7 @@ pub const Constraint = struct {
         out_settings.num_velocity_steps_override = self.num_velocity_steps_override;
         out_settings.num_position_steps_override = self.num_position_steps_override;
         out_settings.user_data = self.user_data;
-        // TODO(debug_renderer): outSettings.mDrawConstraintSize = mDrawConstraintSize;
+        if (Core.debug_renderer) out_settings.draw_constraint_size = self.draw_constraint_size; // JPH_IF_DEBUG_RENDERER
     }
 
     /// The bodies of the virtual functions of Constraint that have a default implementation
@@ -523,6 +561,16 @@ pub const Constraint = struct {
 
         pub fn isActive(self: *const Constraint) bool {
             return self.enabled;
+        }
+
+        pub const drawConstraintLimits = if (Core.debug_renderer) drawConstraintLimitsImpl else {};
+        fn drawConstraintLimitsImpl(self: *const Constraint, renderer: *DebugRenderer) void {
+            _ = .{ self, renderer };
+        }
+
+        pub const drawConstraintReferenceFrame = if (Core.debug_renderer) drawConstraintReferenceFrameImpl else {};
+        fn drawConstraintReferenceFrameImpl(self: *const Constraint, renderer: *DebugRenderer) void {
+            _ = .{ self, renderer };
         }
 
         pub fn saveState(self: *const Constraint, stream: *StateRecorder) void {
@@ -565,11 +613,13 @@ test "ConstraintSettings: creatable like Jolt's JPH_IMPLEMENT_SERIALIZABLE_VIRTU
     try testing.expect(!restored.getPtr().?.enabled);
 }
 
-test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in builds without asserts" {
+test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in its release build" {
     // An object stream or a binary state can hold any uint32 in the settings.
     // Jolt asserts only with JPH_ENABLE_ASSERTS. Its release build keeps the low 8 bits.
-    if (Core.enable_asserts) return error.SkipZigTest;
     const testing = std.testing;
+    var expect_assert: @import("../../Core/IssueReporting.zig").ExpectAssert = undefined;
+    expect_assert.init(4); // The two of the constructor, one per setter
+    errdefer expect_assert.restore();
 
     var velocity_steps: u32 = 300;
     var position_steps: u32 = 513;
@@ -586,6 +636,7 @@ test "Constraint: step overrides of 256 or more truncate like Jolt's uint8 in bu
 
     constraint.setNumVelocityStepsOverride(velocity_steps + 1);
     constraint.setNumPositionStepsOverride(position_steps + 1);
+    try expect_assert.finish();
     try testing.expectEqual(@as(u32, 45), constraint.getNumVelocityStepsOverride());
     try testing.expectEqual(@as(u32, 2), constraint.getNumPositionStepsOverride());
 }

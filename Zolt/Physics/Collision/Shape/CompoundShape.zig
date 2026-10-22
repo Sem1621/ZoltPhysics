@@ -36,13 +36,17 @@
 //! - The asserts that queries with a scale the compound cannot represent (a non uniform scale on a rotated sub shape)
 //!   or a stale sub shape ID can violate (GetLocalTransformNoScale, GetSubShapeIndexFromID) are guarded with
 //!   `Core.enable_asserts`: Jolt's release build continues (porting guide section 7).
-//! - JPH_DEBUG_RENDERER (Draw, DrawGetSupportFunction, DrawGetSupportingFace and the draw of the center of buoyancy in
-//!   GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): Draw, DrawGetSupportFunction and DrawGetSupportingFace
+//!   are gated declarations in `impl` that draw every sub shape. GetSubmergedVolume passes its debug options on to the
+//!   sub shapes and draws the center of buoyancy into `opts.debug.renderer`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const Color = @import("../../../Core/Color.zig").Color;
 const ReferenceFile = @import("../../../Core/Reference.zig");
 const Ref = ReferenceFile.Ref;
 const RefConst = ReferenceFile.RefConst;
@@ -615,7 +619,7 @@ pub const CompoundShape = struct {
         }
 
         // See Shape::GetSubmergedVolume
-        pub fn getSubmergedVolume(self: *const CompoundShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+        pub fn getSubmergedVolume(self: *const CompoundShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
             var out: Shape.SubmergedVolume = .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
 
             for (self.sub_shapes.items) |*shape| {
@@ -623,7 +627,7 @@ pub const CompoundShape = struct {
                 const transform = center_of_mass_transform.mul(shape.getLocalTransformNoScale(scale));
 
                 // Recurse to child
-                const child = shape.shape.get().?.getSubmergedVolume(transform, shape.transformScale(scale), surface);
+                const child = shape.shape.get().?.getSubmergedVolume(transform, shape.transformScale(scale), surface, opts);
 
                 // Accumulate volumes
                 out.total_volume += child.total_volume;
@@ -636,12 +640,41 @@ pub const CompoundShape = struct {
             if (out.submerged_volume > 0.0)
                 out.center_of_buoyancy = out.center_of_buoyancy.divScalar(out.submerged_volume);
 
-            // TODO(debug_renderer): draw the center of buoyancy when sDrawSubmergedVolumes is set
+            if (Core.debug_renderer) {
+                // Draw center of buoyancy
+                if (opts.debug.submergedVolumeRenderer()) |renderer|
+                    renderer.drawWireSphere(opts.debug.base_offset.addVec3(out.center_of_buoyancy), 0.05, Color.red, .{ .level = 1 });
+            }
 
             return out;
         }
 
-        // TODO(debug_renderer): Draw, DrawGetSupportFunction, DrawGetSupportingFace
+        // See Shape::Draw (JPH_DEBUG_RENDERER)
+        pub const draw = if (Core.debug_renderer) drawImpl else {};
+        fn drawImpl(self: *const CompoundShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+            for (self.sub_shapes.items) |*shape| {
+                const transform = shape.getLocalTransformNoScale(scale);
+                shape.shape.get().?.draw(renderer, center_of_mass_transform.mulMat44(transform), shape.transformScale(scale), color, use_material_colors, draw_wireframe);
+            }
+        }
+
+        // See Shape::DrawGetSupportFunction (JPH_DEBUG_RENDERER)
+        pub const drawGetSupportFunction = if (Core.debug_renderer) drawGetSupportFunctionImpl else {};
+        fn drawGetSupportFunctionImpl(self: *const CompoundShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+            for (self.sub_shapes.items) |*shape| {
+                const transform = shape.getLocalTransformNoScale(scale);
+                shape.shape.get().?.drawGetSupportFunction(renderer, center_of_mass_transform.mulMat44(transform), shape.transformScale(scale), color, draw_support_direction);
+            }
+        }
+
+        // See Shape::DrawGetSupportingFace (JPH_DEBUG_RENDERER)
+        pub const drawGetSupportingFace = if (Core.debug_renderer) drawGetSupportingFaceImpl else {};
+        fn drawGetSupportingFaceImpl(self: *const CompoundShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+            for (self.sub_shapes.items) |*shape| {
+                const transform = shape.getLocalTransformNoScale(scale);
+                shape.shape.get().?.drawGetSupportingFace(renderer, center_of_mass_transform.mulMat44(transform), shape.transformScale(scale));
+            }
+        }
 
         // See: Shape::CollideSoftBodyVertices
         pub fn collideSoftBodyVertices(self: *const CompoundShape, center_of_mass_transform: Mat44, scale: Vec3, vertices: *const CollideSoftBodyVertexIterator, num_vertices: u32, colliding_shape_index: i32) void {
@@ -1311,9 +1344,15 @@ test "CompoundShape: construction, center of mass, inner radius, bounds and mass
 
 /// A shape that needs 31 sub shape ID bits (User5): the compound that holds 4 of them is too deep
 const DeepShape = struct {
-    pub const overrides = .{ .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
+    pub const overrides = .{ .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .getStats, .getVolume };
 
     base: Shape,
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER): a test shape, draws nothing
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const DeepShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+    }
 
     fn init(allocator: Allocator) DeepShape {
         return .{ .base = .init(Shape.vtableFor(DeepShape), allocator, .user1, .user5) };
@@ -1343,7 +1382,7 @@ const DeepShape = struct {
         return Vec3.axisY();
     }
 
-    pub fn getSubmergedVolume(_: *const DeepShape, _: Mat44, _: Vec3, _: Plane) Shape.SubmergedVolume {
+    pub fn getSubmergedVolume(_: *const DeepShape, _: Mat44, _: Vec3, _: Plane, _: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
         return .{ .total_volume = 0, .submerged_volume = 0, .center_of_buoyancy = Vec3.zero() };
     }
 
@@ -1496,12 +1535,12 @@ test "CompoundShape: the overrides of Shape pass the calls on to the sub shapes"
     // getSubmergedVolume: the sum of the children, the center of buoyancy weighted by the submerged volume
     {
         const surface = Plane.init(Vec3.axisY(), 0.0);
-        const v = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), surface);
+        const v = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), surface, .{});
         var expected_total: f32 = 0.0;
         var expected_submerged: f32 = 0.0;
         var expected_center = Vec3.zero();
         for (c.getSubShapes()) |*s| {
-            const child = s.shape.get().?.getSubmergedVolume(s.getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface);
+            const child = s.shape.get().?.getSubmergedVolume(s.getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface, .{});
             expected_total += child.total_volume;
             expected_submerged += child.submerged_volume;
             expected_center = expected_center.add(child.center_of_buoyancy.mulScalar(child.submerged_volume));
@@ -1510,7 +1549,7 @@ test "CompoundShape: the overrides of Shape pass the calls on to the sub shapes"
         try testing.expectEqual(expected_submerged, v.submerged_volume);
         try expect(v.submerged_volume > 0.0 and v.submerged_volume < v.total_volume);
         try expect(v.center_of_buoyancy.eql(expected_center.divScalar(expected_submerged)));
-        const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 100.0));
+        const above = shape.getSubmergedVolume(Mat44.identity(), Vec3.one(), Plane.init(Vec3.axisY(), 100.0), .{});
         try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
         try expect(above.center_of_buoyancy.eql(Vec3.zero()));
     }
@@ -1534,17 +1573,17 @@ test "CompoundShape: the overrides of Shape pass the calls on to the sub shapes"
         // getSubmergedVolume: the surface goes through the center of mass of the inner compound, so that child is
         // partially submerged and its center of buoyancy is weighted by its submerged volume (not its total volume)
         const surface = Plane.fromPointAndNormal(oc.getSubShape(1).getPositionCOM(), Vec3.axisY());
-        const v = nested.getSubmergedVolume(Mat44.identity(), Vec3.one(), surface);
+        const v = nested.getSubmergedVolume(Mat44.identity(), Vec3.one(), surface, .{});
         var expected_submerged: f32 = 0.0;
         var expected_center = Vec3.zero();
         var total_weighted_center = Vec3.zero();
         for (oc.getSubShapes()) |*s| {
-            const child = s.shape.get().?.getSubmergedVolume(s.getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface);
+            const child = s.shape.get().?.getSubmergedVolume(s.getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface, .{});
             expected_submerged += child.submerged_volume;
             expected_center = expected_center.add(child.center_of_buoyancy.mulScalar(child.submerged_volume));
             total_weighted_center = total_weighted_center.add(child.center_of_buoyancy.mulScalar(child.total_volume));
         }
-        const inner = shape.getSubmergedVolume(oc.getSubShape(1).getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface);
+        const inner = shape.getSubmergedVolume(oc.getSubShape(1).getLocalTransformNoScale(Vec3.one()), Vec3.one(), surface, .{});
         try expect(inner.submerged_volume > 0.0 and inner.submerged_volume < inner.total_volume);
         try testing.expectEqual(expected_submerged, v.submerged_volume);
         try expect(v.center_of_buoyancy.eql(expected_center.divScalar(expected_submerged)));

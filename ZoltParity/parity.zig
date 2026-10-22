@@ -5,17 +5,25 @@
 //! `reference_sources.zig`, and links them into this test binary.
 //!
 //! Layout, mirroring Zolt/: `ZoltParity/<Dir>/<Dir>Parity.zig` (tests) + `ZoltParity/<Dir>/<Dir>Reference.cpp`
-//! (C ABI wrappers around Jolt). Shared helpers are in `ParityFramework.zig`. Register new test files below and
-//! new .cpp files in `reference_sources.zig` (both lists are merged with git's union driver, keep them sorted).
+//! (C ABI wrappers around Jolt). Shared helpers are in `ParityFramework.zig`. Register new test files below, new .cpp
+//! files in `files` of `reference_sources.zig` and new .c files in its `c_files` (these lists are merged with git's
+//! union driver, keep them sorted; `tools/tidy_registry.py` sorts them).
 //! `Physics/ShapeCoreUserTypes.zig` is not a test file: it is the `zolt_user_types` module of the parity build's own
 //! `zolt` instance (user shape registrations, see build.zig), imported by the tests as "parity_user_types".
 //! `Physics/SimScenes.zig` is not a test file either: it is the scene table of `Physics/SimulationParity.zig`, which
 //! also imports ZoltTests/Layers.zig as "test_layers" (see build.zig).
+//! `Renderer/DebugRendererCheck.zig` is not a test file: it is the root of the `debug-renderer-check` executable (see
+//! build.zig). The test files import the other helper files (`ObjectStream/StreamGenerator.zig`, ...) themselves.
 //!
 //! Run: zig build parity [-Ddouble_precision=true] [-Dtest-filter=Vec4]
 
 test {
     _ = @import("AABBTree/AABBTreeParity.zig");
+    _ = @import("Compute/ComputeParity.zig");
+    _ = @import("Compute/HairShaderParity.zig");
+    _ = @import("Compute/HairShaderParity2.zig");
+    _ = @import("Compute/HLSLToCPPParity.zig");
+    _ = @import("Compute/ShaderHelpersParity.zig");
     _ = @import("Core/ConcurrencyParity.zig");
     _ = @import("Core/ContainersParity.zig");
     _ = @import("Core/CoreParity.zig");
@@ -23,9 +31,13 @@ test {
     _ = @import("Geometry/GJKEPAParity.zig");
     _ = @import("Geometry/PrimitivesParity.zig");
     _ = @import("Geometry/QueriesParity.zig");
+    _ = @import("Hair/HairSceneParity.zig");
+    _ = @import("Hair/HairSettingsParity.zig");
+    _ = @import("Hair/LibMParity.zig");
     _ = @import("Math/MathParity.zig");
     _ = @import("ObjectStream/ObjectStreamParity.zig");
     _ = @import("ParityFramework.zig");
+    _ = @import("ParityHooks.zig");
     _ = @import("Physics/BasicsParity.zig");
     _ = @import("Physics/BodyInterfaceParity.zig");
     _ = @import("Physics/BodyParity.zig");
@@ -55,7 +67,15 @@ test {
     _ = @import("Physics/ShapeCoreParity.zig");
     _ = @import("Physics/SimulationParity.zig");
     _ = @import("Physics/SkeletonParity.zig");
+    _ = @import("Physics/SoftBodyParity.zig");
+    _ = @import("Physics/SoftBodySettingsParity.zig");
+    _ = @import("Physics/SoftBodyUpdateParity.zig");
     _ = @import("Physics/TriangleShapeParity.zig");
     _ = @import("Physics/TrianglesParity.zig");
     _ = @import("Physics/VehiclePartsParity.zig");
+    _ = @import("Renderer/DebugRendererParity.zig");
+    _ = @import("Renderer/ParityRenderer.zig");
+    _ = @import("Renderer/PhysicsDrawParity.zig");
+    _ = @import("Renderer/ShapeDrawParity.zig");
+    _ = @import("Renderer/SkeletonDrawParity.zig");
 }

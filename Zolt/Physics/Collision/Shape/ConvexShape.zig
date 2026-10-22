@@ -28,12 +28,20 @@
 //! - The constructors `ConvexShape(EShapeSubType)` / `ConvexShape(EShapeSubType, const PhysicsMaterial *)` are
 //!   `init(T, allocator, sub_type, material)` (with the most derived type `T`, for the vtable), the settings constructor
 //!   is `initFromSettings` (D3).
-//! - JPH_DEBUG_RENDERER (DrawGetSupportFunction, DrawGetSupportingFace and the `inBaseOffset` parameter of
-//!   GetSubmergedVolume) is not ported yet: TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2): DrawGetSupportFunction and DrawGetSupportingFace are
+//!   gated declarations in `impl`. The `inBaseOffset` parameter of GetSubmergedVolume is `opts.debug`. They draw into
+//!   the renderer they get. An allocation that fails while drawing drops what it would draw and latches the renderer's
+//!   out of memory flag (R5): DrawGetSupportFunction skips the geometry when the renderer could not create it,
+//!   DrawGetSupportingFace draws nothing when its map of faces cannot grow. The map of DrawGetSupportingFace is Zolt's
+//!   port of Jolt's UnorderedMap with Jolt's hash of the face, so the faces come in Jolt's order and get Jolt's colors.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
+const Color = @import("../../../Core/Color.zig").Color;
+const UnorderedMap = @import("../../../Core/UnorderedMap.zig").UnorderedMap;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
 const PlacementBuffer = @import("../../../Core/PlacementBuffer.zig").PlacementBuffer;
 const RefConst = @import("../../../Core/Reference.zig").RefConst;
 const StaticArray = @import("../../../Core/StaticArray.zig").StaticArray;
@@ -430,7 +438,7 @@ pub const ConvexShape = struct {
         }
 
         // See Shape::GetSubmergedVolume
-        pub fn getSubmergedVolume(self: *const ConvexShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
+        pub fn getSubmergedVolume(self: *const ConvexShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
             // Calculate total volume
             const abs_scale = scale.abs();
             const extent = self.base.getLocalBounds().getExtent().mul(abs_scale); // Virtual call (C++ unqualified GetLocalBounds)
@@ -459,7 +467,7 @@ pub const ConvexShape = struct {
             };
 
             var buffer: [8]PolyhedronSubmergedVolumeCalculator.Point = undefined; // JPH_STACK_ALLOC(8 * sizeof(Point))
-            var submerged_vol_calc = PolyhedronSubmergedVolumeCalculator.init(center_of_mass_transform.mul(Mat44.scaleVec3(extent)), .init(&points[0], .{}), 8, surface, &buffer);
+            var submerged_vol_calc = PolyhedronSubmergedVolumeCalculator.init(center_of_mass_transform.mul(Mat44.scaleVec3(extent)), .init(&points[0], .{}), 8, surface, &buffer, opts.debug);
 
             if (submerged_vol_calc.areAllAbove()) {
                 // We're above the water
@@ -484,7 +492,104 @@ pub const ConvexShape = struct {
             }
         }
 
-        // TODO(debug_renderer): DrawGetSupportFunction, DrawGetSupportingFace (JPH_DEBUG_RENDERER)
+        // See Shape::DrawGetSupportFunction (JPH_DEBUG_RENDERER)
+        pub const drawGetSupportFunction = if (Core.debug_renderer) drawGetSupportFunctionImpl else {};
+        fn drawGetSupportFunctionImpl(self: *const ConvexShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, draw_support_direction: bool) void {
+            // Get the support function with convex radius
+            var buffer: SupportBuffer = .{};
+            const support = self.getSupportFunction(.exclude_convex_radius, &buffer, scale);
+            const add_convex = AddConvexRadius(Support).init(support, support.getConvexRadius());
+
+            // Draw the shape
+            var geometry = renderer.createTriangleGeometryForConvex(.init(&add_convex, addConvexRadiusSupport));
+            defer geometry.deinit();
+            if (geometry.get()) |g| { // Zolt (R5): empty when the renderer could not create it, nothing to draw then
+                const bounds = g.bounds.transformedRMat44(center_of_mass_transform);
+                const lod_scale_sq = g.bounds.getExtent().lengthSq();
+                renderer.drawGeometry(center_of_mass_transform, bounds, lod_scale_sq, color, g, .{});
+            }
+
+            if (draw_support_direction) {
+                // Iterate on all directions and draw the support point and an arrow in the direction that was sampled to test if the support points make sense
+                for (Vec3.unit_sphere.constSlice()) |v| {
+                    const direction = v.mulScalar(0.05);
+                    const pos = add_convex.getSupport(direction);
+                    const from = center_of_mass_transform.mulVec3(pos);
+                    const to = center_of_mass_transform.mulVec3(pos.add(direction));
+                    renderer.drawMarker(from, Color.white, 0.001);
+                    renderer.drawArrow(from, to, Color.white, 0.001);
+                }
+            }
+        }
+
+        // The support function of drawGetSupportFunction (Jolt's lambda)
+        fn addConvexRadiusSupport(add_convex: *const AddConvexRadius(Support), direction: Vec3) Vec3 {
+            return add_convex.getSupport(direction);
+        }
+
+        // See Shape::DrawGetSupportingFace (JPH_DEBUG_RENDERER)
+        pub const drawGetSupportingFace = if (Core.debug_renderer) drawGetSupportingFaceImpl else {};
+        fn drawGetSupportingFaceImpl(self: *const ConvexShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3) void {
+            const allocator = renderer.allocator;
+
+            // Sample directions and map which faces belong to which directions
+            const FaceToDirection = UnorderedMap(Shape.SupportingFace, std.ArrayList(Vec3), .{});
+            var faces: FaceToDirection = .empty;
+            defer {
+                var it = faces.iterator();
+                while (it.next()) |ftd| ftd.value.deinit(allocator);
+                faces.deinit(allocator);
+            }
+            for (Vec3.unit_sphere.constSlice()) |v| {
+                const direction = v.mulScalar(0.05);
+
+                var face: Shape.SupportingFace = .{};
+                self.base.getSupportingFace(.empty, direction, scale, Mat44.identity(), &face); // Virtual call
+
+                if (!face.isEmpty()) {
+                    if (Core.enable_asserts) std.debug.assert(face.len >= 2); // The GetSupportingFace function should either return nothing or at least an edge
+                    const directions = faces.getOrPutValue(allocator, face, .empty) catch {
+                        renderer.setOutOfMemory(); // Zolt (R5): drop the drawing
+                        return;
+                    };
+                    directions.append(allocator, direction) catch {
+                        renderer.setOutOfMemory();
+                        return;
+                    };
+                }
+            }
+
+            // Draw each face in a unique color and draw corresponding directions
+            var color_it: i32 = 0;
+            var it = faces.constIterator();
+            while (it.next()) |ftd| {
+                const color = Color.getDistinctColor(color_it);
+                color_it += 1;
+
+                // Create copy of face (key in map is read only)
+                var face = ftd.key;
+
+                // Displace the face a little bit forward so it is easier to see
+                const f = ftd.key.constSlice();
+                const normal = if (f.len >= 3) f[2].sub(f[1]).cross(f[0].sub(f[1])).normalizedOr(Vec3.zero()) else Vec3.zero();
+                const displacement = normal.mulScalar(0.001);
+
+                // Transform face to world space and calculate center of mass
+                var com_ls = Vec3.zero();
+                for (face.slice()) |*v| {
+                    v.* = center_of_mass_transform.multiply3x3(v.add(displacement));
+                    com_ls = com_ls.add(v.*);
+                }
+                const com = center_of_mass_transform.getTranslation().addVec3(com_ls.divScalar(@floatFromInt(face.len)));
+
+                // Draw the polygon and directions
+                renderer.drawWirePolygon(RMat44.translation(center_of_mass_transform.getTranslation()), face.constSlice(), color, .{ .arrow_size = if (face.len >= 3) 0.001 else 0.0 });
+                if (face.len >= 3)
+                    renderer.drawArrow(com, com.addVec3(center_of_mass_transform.multiply3x3(normal)), color, 0.01);
+                for (ftd.value.items) |v|
+                    renderer.drawArrow(com, com.addVec3(center_of_mass_transform.multiply3x3(v.negate())), color, 0.001);
+            }
+        }
 
         // See Shape::SaveBinaryState
         pub fn saveBinaryState(self: *const ConvexShape, stream: StreamOut) void {
@@ -738,7 +843,6 @@ pub const ConvexShape = struct {
 
 const testing = std.testing;
 const StreamWrapper = @import("../../../Core/StreamWrapper.zig");
-const Color = @import("../../../Core/Color.zig").Color;
 const RVec3 = @import("../../../Math/Real.zig").RVec3;
 const MassProperties = @import("../../Body/MassProperties.zig").MassProperties;
 const BackFaceMode = @import("../BackFaceMode.zig").BackFaceMode;
@@ -759,11 +863,17 @@ const BoxShapeSettings = BoxShapeFile.BoxShapeSettings;
 /// ConvexShape's (GJK based) versions.
 const TestConvexBox = struct {
     pub const shape_sub_type: ShapeSubType = .user_convex1;
-    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .getStats, .getVolume };
+    pub const overrides = .{ .getLocalBounds, .getInnerRadius, .getMassProperties, .getSurfaceNormal, .getSupportingFace, .getSupportFunction, .collideSoftBodyVertices, .getStats, .getVolume, .draw };
 
     base: ConvexShape,
     half_extent: Vec3,
     convex_radius: f32,
+
+    // See Shape::Draw (JPH_DEBUG_RENDERER): a test shape, draws nothing
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const TestConvexBox, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        _ = .{ self, renderer, center_of_mass_transform, scale, color, use_material_colors, draw_wireframe };
+    }
 
     fn init(allocator: Allocator, half_extent: Vec3, convex_radius: f32, material: ?*const PhysicsMaterial) TestConvexBox {
         return .{ .base = .init(TestConvexBox, allocator, shape_sub_type, material), .half_extent = half_extent, .convex_radius = convex_radius };
@@ -1075,17 +1185,17 @@ test "ConvexShape: GetSubmergedVolume of the bounding box" {
     const transform = Mat44.rotationTranslation(Quat.rotation(Vec3.axisY(), 0.3), Vec3.init(1, 2, 3));
     const scale = Vec3.init(1, -1, 2);
 
-    const above = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, -10, 0), Vec3.axisY()));
+    const above = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, -10, 0), Vec3.axisY()), .{});
     try testing.expectEqual(@as(f32, 8.0 * 1.0 * 2.0 * 6.0), above.total_volume);
     try testing.expectEqual(@as(f32, 0.0), above.submerged_volume);
     try testing.expect(above.center_of_buoyancy.eql(Vec3.zero()));
 
-    const below = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 10, 0), Vec3.axisY()));
+    const below = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(0, 10, 0), Vec3.axisY()), .{});
     try testing.expectEqual(below.total_volume, below.submerged_volume);
     try testing.expect(below.center_of_buoyancy.eql(transform.getTranslation()));
 
     // The plane through the center of mass cuts the box in half
-    const half = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(1, 2, 3), Vec3.axisY()));
+    const half = shape.asShape().getSubmergedVolume(transform, scale, Plane.fromPointAndNormal(Vec3.init(1, 2, 3), Vec3.axisY()), .{});
     try testing.expectApproxEqAbs(0.5 * half.total_volume, half.submerged_volume, 1.0e-4);
     try testing.expectApproxEqAbs(@as(f32, 1.0), half.center_of_buoyancy.getY(), 1.0e-5);
 }

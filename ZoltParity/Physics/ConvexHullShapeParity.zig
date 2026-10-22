@@ -1413,7 +1413,7 @@ test "ConvexHullShape parity: GetSubmergedVolume" {
             const plane = arr4(Plane.fromPointAndNormal(vec3(surface_point), normal).normal_and_constant);
             var jolt_values: [5]f32 = undefined;
             jolt.jolt_chs_submerged_volume(pair.jolt.?, &transform, &scale, &plane, &jolt_values);
-            const r = pair.shape().getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)));
+            const r = pair.shape().getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(plane)), .{});
             const zolt_values = [_]f32{ r.total_volume, r.submerged_volume } ++ arr3(r.center_of_buoyancy);
             checker.check(.{ input.num_points, scale, transform, plane }, zolt_values, jolt_values);
         }

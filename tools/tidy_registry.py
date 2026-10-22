@@ -2,9 +2,9 @@
 """Sort and deduplicate the registry lists of the port.
 
 `Zolt/zolt.zig` (re-exports and `source_files`), `ZoltTests/unit_tests.zig` (test imports),
-`ZoltParity/parity.zig` (parity test imports) and `ZoltParity/reference_sources.zig` (C++ wrapper files)
-are the only files that parallel ports both modify. Git merges them with the `union` driver (see
-.gitattributes), which keeps every added line but can duplicate lines and break the ordering.
+`ZoltParity/parity.zig` (parity test imports) and `ZoltParity/reference_sources.zig` (the C++ wrapper files in
+`files`, the C files in `c_files`) are the only files that parallel ports both modify. Git merges them with the
+`union` driver (see .gitattributes), which keeps every added line but can duplicate lines and break the ordering.
 Run this after merging branches:
 
     python3 tools/tidy_registry.py          # rewrite the files in place
@@ -20,7 +20,8 @@ import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 FILES = ["Zolt/zolt.zig", "ZoltTests/unit_tests.zig", "ZoltParity/parity.zig", "ZoltParity/reference_sources.zig"]
-REGISTRY_LINE = re.compile(r'^\s*(?:(?:pub const \w+ = )?(?:_ = )?@import\("([^"]+)"\)|"([^"]+\.cpp)",)')
+# An import line, or a quoted .cpp or .c path of reference_sources.zig
+REGISTRY_LINE = re.compile(r'^\s*(?:(?:pub const \w+ = )?(?:_ = )?@import\("([^"]+)"\)|"([^"]+\.(?:cpp|c))",)')
 
 
 def sort_key(line):

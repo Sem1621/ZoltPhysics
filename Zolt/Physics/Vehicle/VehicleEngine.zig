@@ -4,7 +4,8 @@
 //! - JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(VehicleEngineSettings): `rtti` with
 //!   Jolt's attributes. Jolt does not declare `mInertia` and `mAngularDamping`, so the object stream keeps their
 //!   defaults.
-//! - JPH_DEBUG_RENDERER (`ConvertRPMToAngle`, `DrawRPM`): TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (`ConvertRPMToAngle`, `DrawRPM`): gated declarations (RemainingFeaturesArchitecture.md R2),
+//!   `void` without `-Ddebug_renderer`.
 //! - `VehicleEngine : VehicleEngineSettings` (non-virtual inheritance) embeds its parent as `base`
 //!   (CharacterVehicleArchitecture E2).
 //! - The settings own a LinearCurve (`mNormalizedTorque`), so like LinearCurve the functions that allocate take the
@@ -22,6 +23,11 @@ const LinearCurve = @import("../../Core/LinearCurve.zig").LinearCurve;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../Core/StreamOut.zig").StreamOut;
 const math = @import("../../Math/Math.zig");
+const Core = @import("../../Core/Core.zig");
+const Color = @import("../../Core/Color.zig").Color;
+const Vec3 = @import("../../Math/Vec3.zig").Vec3;
+const RVec3 = @import("../../Math/Real.zig").RVec3;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
 
 /// Generic properties for a vehicle engine
@@ -168,7 +174,57 @@ pub const VehicleEngine = struct {
         self.clampRPM();
     }
 
-    // TODO(debug_renderer): ConvertRPMToAngle, DrawRPM (JPH_DEBUG_RENDERER)
+    // Function that converts RPM to an angle in radians for debugging purposes (JPH_DEBUG_RENDERER)
+    pub const convertRPMToAngle = if (Core.debug_renderer) convertRPMToAngleImpl else {};
+    fn convertRPMToAngleImpl(self: *const VehicleEngine, rpm: f32) f32 {
+        return (-0.75 + 1.5 * rpm / self.base.max_rpm) * math.pi;
+    }
+
+    /// Debug draw a RPM meter (JPH_DEBUG_RENDERER)
+    pub const drawRPM = if (Core.debug_renderer) drawRPMImpl else {};
+    fn drawRPMImpl(self: *const VehicleEngine, renderer: *DebugRenderer, position: RVec3, forward: Vec3, up: Vec3, size: f32, shift_down_rpm: f32, shift_up_rpm: f32) void {
+        // Function to draw part of a pie
+        const Pie = struct {
+            engine: *const VehicleEngine,
+            renderer: *DebugRenderer,
+            size: f32,
+            position: RVec3,
+            forward: Vec3,
+            up: Vec3,
+
+            fn draw(p: @This(), min_rpm: f32, max_rpm: f32, color: Color) void {
+                p.renderer.drawPie(p.position, p.size, p.forward, p.up, p.engine.convertRPMToAngle(min_rpm), p.engine.convertRPMToAngle(max_rpm), color, .{ .cast_shadow = .off });
+            }
+        };
+        const draw_pie: Pie = .{ .engine = self, .renderer = renderer, .size = size, .position = position, .forward = forward, .up = up };
+
+        // Draw segment under min RPM
+        draw_pie.draw(0, self.base.min_rpm, Color.grey);
+
+        // Draw segment until inShiftDownRPM
+        if (self.current_rpm < shift_down_rpm) {
+            draw_pie.draw(self.base.min_rpm, self.current_rpm, Color.red);
+            draw_pie.draw(self.current_rpm, shift_down_rpm, Color.dark_red);
+        } else {
+            draw_pie.draw(self.base.min_rpm, shift_down_rpm, Color.red);
+        }
+
+        // Draw segment between inShiftDownRPM and inShiftUpRPM
+        if (self.current_rpm > shift_down_rpm and self.current_rpm < shift_up_rpm) {
+            draw_pie.draw(shift_down_rpm, self.current_rpm, Color.orange);
+            draw_pie.draw(self.current_rpm, shift_up_rpm, Color.dark_orange);
+        } else {
+            draw_pie.draw(shift_down_rpm, shift_up_rpm, if (self.current_rpm <= shift_down_rpm) Color.dark_orange else Color.orange);
+        }
+
+        // Draw segment above inShiftUpRPM
+        if (self.current_rpm > shift_up_rpm) {
+            draw_pie.draw(shift_up_rpm, self.current_rpm, Color.green);
+            draw_pie.draw(self.current_rpm, self.base.max_rpm, Color.dark_green);
+        } else {
+            draw_pie.draw(shift_up_rpm, self.base.max_rpm, Color.dark_green);
+        }
+    }
 
     /// If the engine is idle we allow the vehicle to sleep
     pub fn allowSleep(self: *const VehicleEngine) bool {

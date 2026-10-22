@@ -112,7 +112,7 @@ comments. Jolt's size is checked at compile time; it also holds with Zig's field
   `allocator.create`.
 - `BodyManager.deleteBody` frees it through `@fieldParentPtr("body", body)` when
   `motion_properties != null`.
-- Phase 9 adds `SoftBodyWithMotionPropertiesAndShape` the same way.
+- Phase 9 added `SoftBodyWithMotionPropertiesAndShape` the same way (RemainingFeaturesArchitecture.md R16).
 
 **Fixed to world.** `Body::sFixedToWorld` becomes a compile time constant in read-only memory. Its
 dummy shape is a static `EmptyShape`: `Shape.is_static` was added with this document, and it makes
@@ -145,6 +145,12 @@ dummy shape is a static `EmptyShape`: `Shape.is_static` was added with this docu
   `BodyManager.allocateSoftBody`) are not declared until Phase 9 and are listed under
   `//! Missing:`. No soft body can then exist, so every `@panic("soft bodies: Phase 9")` stub is
   unreachable from the public API, and Phase 9 only adds code.
+- Settled in Phase 9 ([RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R15 to R19):
+  - the soft body types are complete, and the stubs, their panics and the `//! Missing:` lines are gone;
+  - `BodyInterface.createSoftBody`, `createSoftBodyWithID`, `createSoftBodyWithoutID`, `createAndAddSoftBody` and
+    `BodyManager.allocateSoftBody` exist (R16);
+  - the four soft body jobs and the CCD response against a soft body face are ported (R17, R18);
+  - PhysicsScene saves, restores and creates soft bodies (R19).
 
 ### D2 BodyManager
 
@@ -386,6 +392,7 @@ the latch itself:
 | ContactRemovedCallbacks | discards the write cache instead of swapping (D10) |
 | StartNextStep | always runs `resetIslands`, the splitter reset and the kick; skips `prepareContactConstraints` |
 | SoftBodyPrepare | the active soft body list stays empty, so its "nothing to do" path kicks StartNextStep |
+| SoftBodyFinalize | skips the velocity, position, bounds and sleep updates; always clears the colliding shapes and sensors of every context and frees the contexts (see the soft body rows below) |
 
 **Where to check the latch.** Only at job entry, or before a claim (an atomic batch counter, a
 queue read, an island claim). Never check it between a claim and its completion. In particular,
@@ -431,8 +438,32 @@ result:
 - When no FindCCDContacts job could be created at all, PostIntegrateVelocity does the work itself,
   because the created jobs take bodies until `next_ccd_body` runs out.
 
-**Heap allocation inside a job.** `BroadPhase.updatePrepare` is the one heap allocation inside a
-job (QuadTree's `new NodeID[]`, D9). It is latched:
+**Soft body jobs (Phase 9, RemainingFeaturesArchitecture.md R17).** JobSoftBodyPrepare creates the
+other soft body jobs inside a job: Finalize, then N Simulate jobs, then N Collide jobs (N =
+`getMaxConcurrency()`). The Collide jobs start at creation. The rows:
+
+| Event | Handling |
+|---|---|
+| Prepare cannot copy the active bodies or allocate the contexts | latch, take the "no active soft bodies" path (kick StartNextStep). Error (allocation) |
+| Finalize cannot be created (it is the first) | Prepare runs the whole update inline: the collide claim loop, the simulate loop (`parallelUpdate` over all contexts until every one is Done), the finalize body, each under the grants of the job it replaces. Then it kicks StartNextStep. Not an error |
+| Simulate job k cannot be created | remove one Finalize dependency for it. Its handle stays invalid; Collide jobs skip invalid handles. Not an error while one Simulate job exists: each one loops until every context is Done |
+| no Simulate job could be created | create **no** Collide job. Prepare runs the collide claim loop, then the simulate loop, inline, then removes the N Finalize dependencies. Not an error. (A Collide job that started could still be filling `colliding_shapes` while an inline simulate reads it: a race) |
+| Collide job k cannot be created | after the creations, Prepare runs the collide claim loop itself under the Collide grant (Read, Read), until `soft_body_to_collide` runs out. Then it removes the dependencies of the missing Collide jobs from every Simulate job. Not an error |
+| `determineCollidingShapes` cannot allocate (in a Collide job or in Prepare's inline loop) | latch and stop claiming; partial colliding lists are fine. Error (allocation) |
+| Simulate (job or inline loop) | checks the latch at entry only, never inside `parallelUpdate`: other Simulate jobs wait for claimed batches. A poisoned Simulate only removes its Finalize dependency. Simulate never allocates |
+| Finalize when poisoned | skips `updateRigidBodyVelocities`, the position update and the bounds and sleep batches (the contexts may not be Done). Always clears every context's colliding shapes and sensors (shape references) and frees the contexts at Jolt's position (LIFO) |
+
+- The FailingJobSystem and FailingTempAllocator sweeps of the soft body scenes need no special
+  case: every failed creation must give the reference bytes. A FailingHeapAllocator test over a soft
+  body scene (PhysicsSystemTests) covers the heap allocation of `determineCollidingShapes`.
+- FailingJobSystem fails one call, so with N > 1 its sweeps never miss several Simulate or Collide
+  jobs in one step. The test "several soft body jobs missing in one step" (PhysicsSystemTests, N = 4)
+  fails the soft body jobs by name: no Simulate job, no Collide job, some of each. A wrong
+  dependency count hangs it.
+
+**Heap allocation inside a job.** `BroadPhase.updatePrepare` is a heap allocation inside a job
+(QuadTree's `new NodeID[]`, D9). `determineCollidingShapes` of the soft body Collide jobs is
+another one (Phase 9, the rows above). They are latched:
 
 ```zig
                     if (!c.isOutOfMemory())
@@ -980,8 +1011,11 @@ QuadTree).
     collision step: SaveState cannot run inside an update.
   - The thread matrix pairs Zolt single threaded and pools of 0, 1, 3 and 7 workers with C++
     pools of 0, 3 and 7 threads.
-  - Scenes that need a later wave are marked blocked and are skipped visibly
-    (`error.SkipZigTest`). Their C++ side is already checked on its own.
+  - Until the Phase 9 audit, scenes that needed a later wave were marked blocked and were skipped
+    visibly (`error.SkipZigTest`). A C++-only test checked their C++ side. Since the audit, every
+    Blocker is supported and is only a label. A scene whose Blocker is not supported (a class that
+    it needs is a stub again) fails with `error.SceneNotSupported` (`checkSupported`,
+    RemainingFeaturesArchitecture.md section 6). It is not skipped.
   - Every scene asserts that it reaches the edge cases it is meant to cover.
   - The C++ reference always uses the QuadTree (Jolt's `BROAD_PHASE` define). Gravity-only scenes
     do not depend on it; contact scenes need A1.
@@ -1035,15 +1069,17 @@ DeterminismLog, PhysicsScene).**
   `saveWithChildren` returns `error.InvalidShape` without a shape (Jolt dereferences null).
 - PhysicsScene:
   - `createBodies` undoes everything on an allocation error.
-  - Soft bodies are rejected until Phase 9.
+  - Soft bodies were rejected until Phase 9. Since then PhysicsScene has Jolt's soft body parts (R19 of
+    RemainingFeaturesArchitecture.md).
   - Constraint parity waits for the Phase 6 constraint settings.
 - DeterminismLog: the unit tests run a second time with the log enabled. The text is checked by
   construction and with expected strings, not against Jolt's log: the C++ reference is built
   without `JPH_ENABLE_DETERMINISM_LOG`.
 
 **Wave B (ProcessBodyPair, the island solve, CCD hits).**
-- `PhysicsSystem.zig` has no REGION markers left. Only the soft body work of Phase 9 is missing:
-  the soft body jobs after the "no active soft bodies" path, and a CCD hit on a soft body face.
+- `PhysicsSystem.zig` has no REGION markers left. Only the soft body work of Phase 9 was missing:
+  the soft body jobs after the "no active soft bodies" path, and a CCD hit on a soft body face. Phase 9 ported
+  both (RemainingFeaturesArchitecture.md R17, R18).
 - ProcessBodyPair:
   - Its collectors are local structs (`overrides = .{.addHit}`).
   - It returns `Allocator.Error` from the InternalEdgeRemovingCollector's heap fallback (the
@@ -1145,7 +1181,7 @@ test or a parity case:
   Jolt's debug build, without them it returns an empty `Ref` like the release build.
   `PhysicsScene.fromPhysicsSystem` then adds the constraint without settings, and `createBodies` /
   `saveBinaryState` panic where Jolt dereferences the null pointer. The test of this behavior runs
-  only without asserts.
+  in every build: the assert is recoverable and the test expects it (RemainingFeaturesArchitecture.md R8).
 - `PathConstraintSettings::RestoreBinaryState` ignores a failed path restore and keeps reading.
   `GetIndexAndT` maps fractions outside the int range or NaN to `INT_MIN`. Negative fractions on a
   looping path extrapolate instead of wrapping.
@@ -1175,8 +1211,9 @@ asserts the same and finds them. The generators avoid them instead of changing l
   perpendicular to the allowed ones (NaN), and SwingTwist's "swing parts should turn on / off
   together" assert with an axis aligned swing motor axis masked by AllowedDOFs. Both are compared in
   ReleaseFast only, where Jolt release and Zolt agree bit for bit, NaNs included.
-- Gear / RackAndPinion with a body that is not dynamic (Jolt asserts; compared in ReleaseFast
-  only), and Gear ratios that diverge.
+- Gear / RackAndPinion with a body that is not dynamic (Jolt asserts; the release_only scene
+  constraints_gear_kinematic_release compares it with recoverable asserts, RemainingFeaturesArchitecture.md
+  R8), and Gear ratios that diverge.
 - A Gear / RackAndPinion that references a hinge or slider in another island: SolvePositionConstraint
   reads bodies that a parallel job may be moving, so the result depends on thread timing, in Jolt
   too.

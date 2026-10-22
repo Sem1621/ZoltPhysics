@@ -327,7 +327,7 @@ void jolt_triangle_shape_properties(const ShapeDesc *inDesc, const PropertiesInp
 	StoreFace(face, o.mFaceCount, o.mFace);
 	float total_volume, submerged_volume;
 	Vec3 center_of_buoyancy;
-	shape->GetSubmergedVolume(transform, scale, Plane(Load4(inInput->mPlane)), total_volume, submerged_volume, center_of_buoyancy);
+	shape->GetSubmergedVolume(transform, scale, Plane(Load4(inInput->mPlane)), total_volume, submerged_volume, center_of_buoyancy JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	o.mSubmerged[0] = total_volume;
 	o.mSubmerged[1] = submerged_volume;
 	Store3(center_of_buoyancy, o.mSubmerged + 2);

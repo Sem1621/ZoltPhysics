@@ -1,8 +1,7 @@
 //! Port of: PerformanceTest/PerformanceTest.cpp
 //! Status: complete
-//! Not ported: -r (JPH_DEBUG_RENDERER, DebugRendererRecorder: TODO(debug_renderer); like a Jolt build without the debug
-//! renderer the argument is ignored), the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are
-//! compiled out as in Jolt's Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
+//! Not ported: the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are compiled out as in Jolt's
+//! Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
 //!
 //! Milestone M6 (SimulationArchitecture section 3): `zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast
 //! -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892` must print Jolt's published hash (determinism_check.yml), in
@@ -31,6 +30,13 @@
 //! - The scenes are PerformanceTestScene interfaces (`unique_ptr<PerformanceTestScene>`: the interface owns the scene).
 //! - `thread::hardware_concurrency()` is `std.Thread.getCpuCount()` (0 when it fails), `atoi` is C's atoi.
 //! - `std::chrono::high_resolution_clock` is the monotonic clock of `std.Io` (`Clock.awake`).
+//! - `-r` (JPH_DEBUG_RENDERER, `-Ddebug_renderer=true`; without the option the argument is ignored, like a Jolt build
+//!   without the debug renderer): every update draws the bodies into a DebugRendererRecorder that writes
+//!   `performance_test_<tag>.jor`, and ends the frame. The recorder is the renderer of the physics system
+//!   (`setDebugRenderer`, where Jolt's recorder constructor sets DebugRenderer::sInstance, RemainingFeaturesArchitecture.md
+//!   R4). Jolt constructs the recorder without `-r` too, writing into a file that is not open. No draw flag is set then,
+//!   so nothing is drawn: Zolt only creates the recorder with `-r`. `zig build debug-renderer-check
+//!   -Ddebug_renderer=true` compares the .jor bytes with the C++ PerformanceTest.
 //! - `std::filesystem::path` operations of the asset search are emulated on strings (`parentPath`, `appendPath`), the
 //!   `ofstream` / `ifstream` of the per frame timings and the state files are `OutputFile` / `InputFile` (a file that
 //!   could not be opened ignores writes and reads nothing, like a failed stream).
@@ -284,6 +290,7 @@ pub fn main(init: std.process.Init) !u8 {
     var max_iterations: u32 = 500;
     var disable_sleep = false;
     var enable_profiler = false;
+    var enable_debug_renderer = false; // JPH_DEBUG_RENDERER
     var enable_per_frame_recording = false;
     var record_state = false;
     var validate_state = false;
@@ -338,9 +345,9 @@ pub fn main(init: std.process.Init) !u8 {
             disable_sleep = true;
         } else if (std.mem.eql(u8, arg, "-p")) {
             enable_profiler = true;
-        }
-        // TODO(debug_renderer): -r (JPH_DEBUG_RENDERER)
-        else if (std.mem.eql(u8, arg, "-f")) {
+        } else if (zolt.Core.debug_renderer and std.mem.eql(u8, arg, "-r")) { // JPH_DEBUG_RENDERER
+            enable_debug_renderer = true;
+        } else if (std.mem.eql(u8, arg, "-f")) {
             enable_per_frame_recording = true;
         } else if (std.mem.eql(u8, arg, "-rs")) {
             record_state = true;
@@ -504,7 +511,25 @@ pub fn main(init: std.process.Init) !u8 {
                 const tag = try std.mem.concat(allocator, u8, &.{ motion_quality_lower, "_th", num_threads_str });
                 defer allocator.free(tag);
 
-                // TODO(debug_renderer): open the renderer output performance_test_<tag>.jor (-r)
+                // Open renderer output (JPH_DEBUG_RENDERER)
+                var renderer_file: OutputFile = .{};
+                defer renderer_file.close();
+                var discard_buffer: [64]u8 = undefined;
+                var discarding: std.Io.Writer.Discarding = .init(&discard_buffer); // A file that is not open ignores writes
+                var renderer_stream: zolt.StreamOutWrapper = undefined;
+                var renderer: if (zolt.Core.debug_renderer) zolt.DebugRendererRecorder else void = undefined;
+                if (zolt.Core.debug_renderer and enable_debug_renderer) {
+                    const name = try std.mem.concat(allocator, u8, &.{ "performance_test_", tag, ".jor" });
+                    defer allocator.free(name);
+                    renderer_file.open(io, name);
+                    renderer_stream = .init(renderer_file.writer() orelse &discarding.writer);
+                    try renderer.init(allocator, io, renderer_stream.streamOut());
+                    physics_system.setDebugRenderer(renderer.debugRenderer());
+                }
+                defer if (zolt.Core.debug_renderer and enable_debug_renderer) {
+                    physics_system.setDebugRenderer(null);
+                    renderer.deinit();
+                };
 
                 // Open per frame timing output
                 var per_frame_file: OutputFile = .{};
@@ -551,7 +576,14 @@ pub fn main(init: std.process.Init) !u8 {
                     const duration = clock_start.durationTo(clock_end).toNanoseconds();
                     total_duration += duration;
 
-                    // TODO(debug_renderer): DrawBodies and EndFrame (-r)
+                    if (zolt.Core.debug_renderer and enable_debug_renderer) {
+                        // Draw the state of the world
+                        const settings: zolt.BodyManager.DrawSettings = .{};
+                        physics_system.drawBodies(&settings, renderer.debugRenderer(), .{});
+
+                        // Mark end of frame
+                        try renderer.endFrame();
+                    }
 
                     // Record time taken this iteration
                     if (enable_per_frame_recording) {

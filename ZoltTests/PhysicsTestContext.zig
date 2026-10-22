@@ -1,6 +1,5 @@
 //! Port of: UnitTests/PhysicsTestContext.h, UnitTests/PhysicsTestContext.cpp
 //! Status: complete
-//! Not ported: RecordDebugOutput (JPH_DEBUG_RENDERER: TODO(debug_renderer))
 //!
 //! Helper class used in test cases for creating and manipulating physics objects (SimulationArchitecture D12).
 //! - Initialized in place (the physics system and the job system must not move): `var c: PhysicsTestContext = undefined;
@@ -13,6 +12,12 @@
 //! - `CreateBody(const ShapeSettings *, ...)` is `createBodyWithShapeSettings`, `CreateConstraint<T>` is
 //!   `createConstraint(T, ...)`, `Simulate(time, function<void()>)` takes `pre_step_callback: anytype` (any value with
 //!   a `call()` method, or `{}` for none).
+//! - JPH_DEBUG_RENDERER (`-Ddebug_renderer=true`, RemainingFeaturesArchitecture.md R2, R4): `recordDebugOutput(path)`
+//!   is a gated declaration. It opens the file and a DebugRendererRecorder that becomes the renderer of the physics
+//!   system (`setDebugRenderer`, where Jolt's recorder constructor sets DebugRenderer::sInstance). Then
+//!   `simulateSingleStep` draws the bodies and the constraints and ends the frame, like Jolt. A file that cannot be
+//!   opened records nothing, like Jolt. A second call ends the first recording (Jolt leaks it). The file, its writer
+//!   and the recorder live in one heap block (`debug_output`): the recorder must not move.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -41,6 +46,9 @@ const TempAllocator = zolt.TempAllocator;
 const TempAllocatorImpl = zolt.TempAllocatorImpl;
 const JobSystem = zolt.JobSystem;
 const JobSystemThreadPool = zolt.JobSystemThreadPool;
+const BodyManager = zolt.BodyManager;
+const DebugRendererRecorder = zolt.DebugRendererRecorder;
+const StreamOutWrapper = zolt.StreamOutWrapper;
 
 pub const io = std.testing.io;
 
@@ -65,6 +73,17 @@ pub const PhysicsTestContext = struct {
     system: PhysicsSystem,
     delta_time: f32,
     collision_steps: u32,
+    /// The output of recordDebugOutput (Jolt's mStream, mStreamWrapper and mDebugRenderer; JPH_DEBUG_RENDERER only)
+    debug_output: if (Core.debug_renderer) ?*DebugOutput else void = if (Core.debug_renderer) null else {},
+
+    /// The file, its writer and the recorder of recordDebugOutput (JPH_DEBUG_RENDERER)
+    const DebugOutput = struct {
+        file: std.Io.File,
+        file_writer: std.Io.File.Writer,
+        buffer: [4096]u8,
+        stream: StreamOutWrapper,
+        recorder: DebugRendererRecorder,
+    };
 
     /// Constructor (in place)
     pub fn init(self: *PhysicsTestContext, allocator: Allocator, opts: Options) !void {
@@ -89,6 +108,7 @@ pub const PhysicsTestContext = struct {
 
     /// Destructor
     pub fn deinit(self: *PhysicsTestContext) void {
+        if (Core.debug_renderer) self.endDebugOutput();
         self.system.deinit();
         self.job_system.deinit();
         self.temp_allocator.deinit();
@@ -172,7 +192,14 @@ pub const PhysicsTestContext = struct {
     pub fn simulateSingleStep(self: *PhysicsTestContext) !PhysicsUpdateError {
         const errors = try self.system.update(self.delta_time, self.collision_steps, self.temp_allocator.tempAllocator(), self.job_system.jobSystem());
         if (!self.temp_allocator.isEmpty()) return error.TestUnexpectedResult;
-        // TODO(debug_renderer): DrawBodies / DrawConstraints / EndFrame of the debug renderer
+        if (Core.debug_renderer) {
+            if (self.debug_output) |output| {
+                const settings: BodyManager.DrawSettings = .{};
+                self.system.drawBodies(&settings, output.recorder.debugRenderer(), .{});
+                self.system.drawConstraints(output.recorder.debugRenderer());
+                try output.recorder.endFrame();
+            }
+        }
         return errors;
     }
 
@@ -251,5 +278,31 @@ pub const PhysicsTestContext = struct {
         return self.job_system.jobSystem();
     }
 
-    // TODO(debug_renderer): RecordDebugOutput
+    /// Write the debug output to a file to be able to replay it with JoltViewer (JPH_DEBUG_RENDERER)
+    pub const recordDebugOutput = if (Core.debug_renderer) recordDebugOutputImpl else {};
+    fn recordDebugOutputImpl(self: *PhysicsTestContext, file_name: []const u8) !void {
+        self.endDebugOutput();
+
+        const file = std.Io.Dir.cwd().createFile(io, file_name, .{}) catch return; // Jolt: nothing is recorded
+        errdefer file.close(io);
+        const output = try self.allocator.create(DebugOutput);
+        errdefer self.allocator.destroy(output);
+        output.file = file;
+        output.file_writer = file.writer(io, &output.buffer);
+        output.stream = .init(&output.file_writer.interface);
+        try output.recorder.init(self.allocator, io, output.stream.streamOut());
+        self.debug_output = output;
+        self.system.setDebugRenderer(output.recorder.debugRenderer());
+    }
+
+    /// End the recording of recordDebugOutput: Jolt's `delete` of mDebugRenderer, mStreamWrapper and mStream
+    fn endDebugOutput(self: *PhysicsTestContext) void {
+        const output = self.debug_output orelse return;
+        self.system.setDebugRenderer(null);
+        output.recorder.deinit();
+        output.file_writer.interface.flush() catch {};
+        output.file.close(io);
+        self.allocator.destroy(output);
+        self.debug_output = null;
+    }
 };

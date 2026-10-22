@@ -577,7 +577,7 @@ fn zoltProperties(shape: *const Shape, in: *const PropertiesInput, s: *Stream) v
     s.b(shape.isValidScale(scale));
     s.v3(shape.makeScaleValid(scale));
     if (in.submerged != 0) {
-        const v = shape.getSubmergedVolume(transform, scale, Plane.fromVec4(vec4(in.surface_plane)));
+        const v = shape.getSubmergedVolume(transform, scale, Plane.fromVec4(vec4(in.surface_plane)), .{});
         s.u(marker_submerged);
         s.f(v.total_volume);
         s.f(v.submerged_volume);

@@ -1064,7 +1064,7 @@ test "PlaneEmpty parity: GetSubmergedVolume (EmptyShape) and GetTrianglesStart /
             jolt.jolt_plane_empty_submerged_volume(&desc, &transform, &scale, &surface, &jolt_values);
             var shape = (try createShape(allocator, desc, null)).?;
             defer shape.deinit();
-            const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(surface)));
+            const r = shape.get().?.getSubmergedVolume(mat44(transform), vec3(scale), .fromVec4(vec4(surface)), .{});
             const zolt_values = [_]f32{ r.total_volume, r.submerged_volume } ++ arr3(r.center_of_buoyancy);
             submerged.check(.{ desc, scale, transform, surface }, zolt_values, jolt_values);
         }

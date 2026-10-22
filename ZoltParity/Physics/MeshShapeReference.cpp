@@ -461,7 +461,7 @@ uint32 jolt_mesh_properties(void *inHandle, const PropertiesInput *inInput, uint
 		// Not supported: Jolt asserts and leaves the out parameters untouched
 		float total_volume = 0.0f, submerged_volume = 0.0f;
 		Vec3 center_of_buoyancy = Vec3::sZero();
-		shape->GetSubmergedVolume(transform, scale, Plane(Load4(inInput->mSurfacePlane)), total_volume, submerged_volume, center_of_buoyancy);
+		shape->GetSubmergedVolume(transform, scale, Plane(Load4(inInput->mSurfacePlane)), total_volume, submerged_volume, center_of_buoyancy JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 		s.U(cMarkerSubmerged);
 		s.F(total_volume);
 		s.F(submerged_volume);

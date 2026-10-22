@@ -201,6 +201,9 @@ public:
 	virtual MassProperties	GetMassProperties() const override									{ MassProperties p; p.SetMassAndInertiaOfSolidBox(2.0f * mHalfExtent, mDensity); return p; }
 	virtual Stats			GetStats() const override											{ return Stats(sizeof(*this), 3); }
 	virtual float			GetVolume() const override											{ return 8.0f * mHalfExtent.GetX() * mHalfExtent.GetY() * mHalfExtent.GetZ(); }
+#ifdef JPH_DEBUG_RENDERER
+	virtual void			Draw(DebugRenderer *, RMat44Arg, Vec3Arg, ColorArg, bool, bool) const override { } // Parity shapes are never drawn
+#endif // JPH_DEBUG_RENDERER
 	virtual int				GetTrianglesNext(GetTrianglesContext &ioContext, int inMaxTrianglesRequested, Float3 *outTriangleVertices, const PhysicsMaterial **outMaterials = nullptr) const override { return 0; }
 	virtual void			GetTrianglesStart(GetTrianglesContext &ioContext, const AABox &inBox, Vec3Arg inPositionCOM, QuatArg inRotation, Vec3Arg inScale) const override { }
 
@@ -233,7 +236,7 @@ public:
 		outVertices.push_back(inCenterOfMassTransform * inDirection);
 	}
 
-	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy) const override
+	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy JPH_IF_DEBUG_RENDERER(, RVec3Arg inBaseOffset)) const override
 	{
 		CallRecord &r = NewCall(CallSubmergedVolume, mIndex);
 		Put16(r, 0, inCenterOfMassTransform);
@@ -628,7 +631,7 @@ public:
 	virtual float			GetInnerRadius() const override										{ return mInnerShape->GetInnerRadius(); }
 	virtual MassProperties	GetMassProperties() const override									{ return mInnerShape->GetMassProperties(); }
 	virtual Vec3			GetSurfaceNormal(const SubShapeID &inSubShapeID, Vec3Arg inLocalSurfacePosition) const override { return mInnerShape->GetSurfaceNormal(inSubShapeID, inLocalSurfacePosition); }
-	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy) const override { mInnerShape->GetSubmergedVolume(inCenterOfMassTransform, inScale, inSurface, outTotalVolume, outSubmergedVolume, outCenterOfBuoyancy); }
+	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy JPH_IF_DEBUG_RENDERER(, RVec3Arg inBaseOffset)) const override { mInnerShape->GetSubmergedVolume(inCenterOfMassTransform, inScale, inSurface, outTotalVolume, outSubmergedVolume, outCenterOfBuoyancy JPH_IF_DEBUG_RENDERER(, inBaseOffset)); }
 	virtual bool			CastRay(const RayCast &inRay, const SubShapeIDCreator &inSubShapeIDCreator, RayCastResult &ioHit) const override { return mInnerShape->CastRay(inRay, inSubShapeIDCreator, ioHit); }
 	virtual void			CastRay(const RayCast &inRay, const RayCastSettings &inRayCastSettings, const SubShapeIDCreator &inSubShapeIDCreator, CastRayCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override { mInnerShape->CastRay(inRay, inRayCastSettings, inSubShapeIDCreator, ioCollector, inShapeFilter); }
 	virtual void			CollidePoint(Vec3Arg inPoint, const SubShapeIDCreator &inSubShapeIDCreator, CollidePointCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override { mInnerShape->CollidePoint(inPoint, inSubShapeIDCreator, ioCollector, inShapeFilter); }
@@ -637,6 +640,9 @@ public:
 	virtual int				GetTrianglesNext(GetTrianglesContext &ioContext, int inMaxTrianglesRequested, Float3 *outTriangleVertices, const PhysicsMaterial **outMaterials = nullptr) const override { return mInnerShape->GetTrianglesNext(ioContext, inMaxTrianglesRequested, outTriangleVertices, outMaterials); }
 	virtual Stats			GetStats() const override											{ return Stats(sizeof(*this), 1); }
 	virtual float			GetVolume() const override											{ return mInnerShape->GetVolume(); }
+#ifdef JPH_DEBUG_RENDERER
+	virtual void			Draw(DebugRenderer *, RMat44Arg, Vec3Arg, ColorArg, bool, bool) const override { } // Parity shapes are never drawn
+#endif // JPH_DEBUG_RENDERER
 };
 
 DecoratedShapeSettings::ShapeResult ParityDecoratedShapeSettings::Create() const
@@ -698,7 +704,7 @@ public:
 	virtual MassProperties	GetMassProperties() const override									{ return MassProperties(); }
 	virtual const PhysicsMaterial *GetMaterial(const SubShapeID &inSubShapeID) const override	{ return PhysicsMaterial::sDefault; }
 	virtual Vec3			GetSurfaceNormal(const SubShapeID &inSubShapeID, Vec3Arg inLocalSurfacePosition) const override { return inLocalSurfacePosition.NormalizedOr(Vec3::sAxisY()); }
-	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy) const override { outTotalVolume = outSubmergedVolume = 0.0f; outCenterOfBuoyancy = Vec3::sZero(); }
+	virtual void			GetSubmergedVolume(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const Plane &inSurface, float &outTotalVolume, float &outSubmergedVolume, Vec3 &outCenterOfBuoyancy JPH_IF_DEBUG_RENDERER(, RVec3Arg inBaseOffset)) const override { outTotalVolume = outSubmergedVolume = 0.0f; outCenterOfBuoyancy = Vec3::sZero(); }
 	virtual bool			CastRay(const RayCast &inRay, const SubShapeIDCreator &inSubShapeIDCreator, RayCastResult &ioHit) const override { return false; }
 	virtual void			CastRay(const RayCast &inRay, const RayCastSettings &inRayCastSettings, const SubShapeIDCreator &inSubShapeIDCreator, CastRayCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override { }
 	virtual void			CollidePoint(Vec3Arg inPoint, const SubShapeIDCreator &inSubShapeIDCreator, CollidePointCollector &ioCollector, const ShapeFilter &inShapeFilter = { }) const override { }
@@ -707,6 +713,9 @@ public:
 	virtual int				GetTrianglesNext(GetTrianglesContext &ioContext, int inMaxTrianglesRequested, Float3 *outTriangleVertices, const PhysicsMaterial **outMaterials = nullptr) const override { return 0; }
 	virtual Stats			GetStats() const override											{ return Stats(sizeof(*this), 0); }
 	virtual float			GetVolume() const override											{ return 1.0f; }
+#ifdef JPH_DEBUG_RENDERER
+	virtual void			Draw(DebugRenderer *, RMat44Arg, Vec3Arg, ColorArg, bool, bool) const override { } // Parity shapes are never drawn
+#endif // JPH_DEBUG_RENDERER
 
 	Vec3					mHalfExtent;
 	Vec3					mCenterOfMass;
@@ -1507,7 +1516,7 @@ void jolt_composite_compound(const CompoundDesc *inDesc, const CompoundQueries *
 
 	float total, submerged;
 	Vec3 center;
-	compound.GetSubmergedVolume(transform, scale, LoadPlane(q.mSurface), total, submerged, center);
+	compound.GetSubmergedVolume(transform, scale, LoadPlane(q.mSurface), total, submerged, center JPH_IF_DEBUG_RENDERER(, RVec3::sZero()));
 	outOutput->mSubmerged[0] = total;
 	outOutput->mSubmerged[1] = submerged;
 	Store3(center, outOutput->mSubmerged + 2);

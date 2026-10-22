@@ -61,13 +61,24 @@
 //!   - Settings with more than one material and no material indices read beyond the material indices
 //!     (StoreMaterialIndices), CalculateBitsPerSampleForError reads beyond the samples when the sample count is not a
 //!     multiple of the block size: an index out of bounds in Zolt's safe builds.
-//! - JPH_DEBUG_RENDERER (Draw, sDrawTriangleOutlines and the cached debug geometry) is not ported yet:
-//!   TODO(debug_renderer).
+//! - JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4, R6): `draw` is a gated declaration.
+//!   sDrawTriangleOutlines is `renderer.flags.height_field_shape.draw_triangle_outlines`. Jolt's mutable members that
+//!   Draw writes (`mGeometry`, `mCachedUseMaterialColors`) are a heap side block (`draw_cache`, `void` without
+//!   `-Ddebug_renderer`) with a mutex, allocated with the shape's allocator in `initFromSettings`, `restoreBinaryState`
+//!   and `clone` and freed in `destruct`. It is null for a shape that was none of these, which then draws nothing.
+//!   Draw builds the geometry under the lock and takes each geometry under the lock with its own reference, the draw
+//!   call runs after the lock is released (UB10). `clone` shares the geometry like Jolt and reads it without the lock:
+//!   it has no io, and user-facing functions never take one. So do not clone a height field while another thread draws
+//!   it. Jolt races there too (Clone copies mGeometry while Draw appends to it). `setHeights` clears the geometry, like
+//!   Jolt (`setMaterials` does not, like Jolt). When an allocation fails while drawing (R5) the geometry is not cached
+//!   and not drawn, the triangle outlines are still drawn. Draw allocates the triangle array once for all blocks
+//!   (Jolt allocates one per block).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../../Core/RTTI.zig").RTTI;
 const Core = @import("../../../Core/Core.zig");
+const Mutex = @import("../../../Core/Mutex.zig").Mutex;
 const Color = @import("../../../Core/Color.zig").Color;
 const StreamIn = @import("../../../Core/StreamIn.zig").StreamIn;
 const StreamOut = @import("../../../Core/StreamOut.zig").StreamOut;
@@ -85,11 +96,13 @@ const rayTriangle = @import("../../../Geometry/RayTriangle.zig").rayTriangle;
 const math = @import("../../../Math/Math.zig");
 const Float3 = @import("../../../Math/Float3.zig").Float3;
 const Mat44 = @import("../../../Math/Mat44.zig").Mat44;
+const RMat44 = @import("../../../Math/Real.zig").RMat44;
 const Quat = @import("../../../Math/Quat.zig").Quat;
 const UVec4 = @import("../../../Math/UVec4.zig").UVec4;
 const Vec3 = @import("../../../Math/Vec3.zig").Vec3;
 const Vec4 = @import("../../../Math/Vec4.zig").Vec4;
 const MassProperties = @import("../../Body/MassProperties.zig").MassProperties;
+const DebugRenderer = @import("../../../Renderer/DebugRenderer.zig").DebugRenderer;
 const ShapeFile = @import("Shape.zig");
 const Shape = ShapeFile.Shape;
 const ShapeFunctions = ShapeFile.ShapeFunctions;
@@ -488,7 +501,7 @@ pub const HeightFieldShape = struct {
     pub const shape_sub_type: ShapeSubType = .height_field;
 
     /// The virtual functions this class overrides (C++ `override`, header order), checked by the vtable builder
-    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
+    pub const overrides = .{ .mustBeStatic, .getLocalBounds, .getSubShapeIDBitsRecursive, .getInnerRadius, .getMassProperties, .getMaterial, .getSurfaceNormal, .getSupportingFace, .getSubmergedVolume, .draw, .castRay, .castRayCollector, .collidePoint, .collideSoftBodyVertices, .getTrianglesStart, .getTrianglesNext, .saveBinaryState, .saveMaterialState, .restoreMaterialState, .getStats, .getVolume, .restoreBinaryState };
 
     /// A block of 2x2 ranges used to form a hierarchical grid, ordered left top, right top, left bottom, right bottom
     pub const RangeBlock = extern struct {
@@ -573,7 +586,42 @@ pub const HeightFieldShape = struct {
     /// Number of bits per material index
     num_bits_per_material_index: u32 = 0,
 
-    // TODO(debug_renderer): mGeometry, mCachedUseMaterialColors (temporary rendering data), sDrawTriangleOutlines
+    /// Temporary rendering data (JPH_DEBUG_RENDERER, R6): Jolt's mutable mGeometry and mCachedUseMaterialColors
+    draw_cache: if (Core.debug_renderer) ?*DrawCache else void = if (Core.debug_renderer) null else {},
+
+    // Settings (static bool sDrawTriangleOutlines, JPH_DEBUG_RENDERER) is
+    // `renderer.flags.height_field_shape.draw_triangle_outlines` (R4)
+
+    /// Zolt (R6): the members that Jolt's const Draw writes, in a heap block behind a mutex
+    pub const DrawCache = struct {
+        mutex: Mutex = .{},
+        /// Temporary rendering data (the list is allocated with the shape's allocator)
+        geometry: std.ArrayList(DebugRenderer.GeometryRef) = .empty,
+        /// This is used to regenerate the triangle batch if the drawing settings change
+        cached_use_material_colors: bool = false,
+
+        /// mGeometry.clear()
+        fn clearGeometry(cache: *DrawCache) void {
+            for (cache.geometry.items) |*g| g.deinit();
+            cache.geometry.clearRetainingCapacity();
+        }
+
+        /// Zolt: a reference to geometry `index` taken under the lock, empty past the end of the list
+        fn geometryAt(cache: *DrawCache, io: std.Io, index: usize) DebugRenderer.GeometryRef {
+            cache.mutex.lock(io);
+            defer cache.mutex.unlock(io);
+            return if (index < cache.geometry.items.len) cache.geometry.items[index].clone() else .empty;
+        }
+    };
+
+    /// Zolt (R6): allocate the draw cache in a fallible construction path (once)
+    fn createDrawCache(self: *HeightFieldShape) Allocator.Error!void {
+        if (self.draw_cache == null) {
+            const cache = try self.base.allocator.create(DrawCache);
+            cache.* = .{};
+            self.draw_cache = cache;
+        }
+    }
 
     /// Result of getSubShapeCoordinates (Jolt's out parameters)
     pub const SubShapeCoordinates = struct {
@@ -641,6 +689,7 @@ pub const HeightFieldShape = struct {
     /// HeightFieldShape(const HeightFieldShapeSettings &inSettings, ShapeResult &outResult). `allocator` is used for the
     /// temporary data of the construction, the shape's own arrays use the shape's allocator.
     pub fn initFromSettings(self: *HeightFieldShape, settings: *const HeightFieldShapeSettings, result: *ShapeResult, allocator: Allocator) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         self.base.initFromSettings(&settings.base);
         self.offset = settings.offset;
         self.scale = settings.scale;
@@ -939,7 +988,7 @@ pub const HeightFieldShape = struct {
         result.set(.init(self.asShapeMut()));
     }
 
-    /// ~HeightFieldShape: frees the buffers and releases the materials
+    /// ~HeightFieldShape: frees the buffers, releases the materials and frees the draw cache
     pub fn destruct(self: *HeightFieldShape) void {
         const allocator = self.base.allocator;
         if (self.buffer) |data|
@@ -947,6 +996,13 @@ pub const HeightFieldShape = struct {
         clearMaterials(&self.materials);
         self.materials.deinit(allocator);
         self.material_indices.deinit(allocator);
+        if (Core.debug_renderer) {
+            if (self.draw_cache) |cache| {
+                cache.clearGeometry();
+                cache.geometry.deinit(allocator);
+                allocator.destroy(cache);
+            }
+        }
     }
 
     /// Upcasts (implicit in C++)
@@ -965,6 +1021,7 @@ pub const HeightFieldShape = struct {
         const result = try allocator.create(HeightFieldShape);
         result.* = .initDefault(allocator);
         errdefer result.asShapeMut().destroy();
+        if (Core.debug_renderer) try result.createDrawCache();
         result.asShapeMut().setUserData(self.base.getUserData());
 
         result.offset = self.offset;
@@ -987,7 +1044,16 @@ pub const HeightFieldShape = struct {
         try result.material_indices.appendSlice(allocator, self.material_indices.items);
         result.num_bits_per_material_index = self.num_bits_per_material_index;
 
-        // TODO(debug_renderer): clone->mGeometry = mGeometry; clone->mCachedUseMaterialColors = mCachedUseMaterialColors;
+        if (Core.debug_renderer) {
+            // Zolt: read without the lock (clone has no io), see the file header
+            if (self.draw_cache) |cache| {
+                const result_cache = result.draw_cache.?;
+                try result_cache.geometry.ensureTotalCapacity(allocator, cache.geometry.items.len);
+                for (cache.geometry.items) |g|
+                    result_cache.geometry.appendAssumeCapacity(g.clone());
+                result_cache.cached_use_material_colors = cache.cached_use_material_colors;
+            }
+        }
 
         return result;
     }
@@ -1773,7 +1839,11 @@ pub const HeightFieldShape = struct {
                 self.max_sample = @max(self.max_sample, self.range_blocks[0].max[i]);
             };
 
-        // TODO(debug_renderer): Invalidate temporary rendering data (mGeometry.clear())
+        if (Core.debug_renderer) {
+            // Invalidate temporary rendering data (setHeights has exclusive access, no lock needed)
+            if (self.draw_cache) |cache|
+                cache.clearGeometry();
+        }
 
         // Out of memory in the active edge calculation (Jolt aborts). It is reported only now so that the heights, the
         // range block hierarchy and the min/max sample are consistent: calculateActiveEdges allocates its normals
@@ -2158,15 +2228,186 @@ pub const HeightFieldShape = struct {
     }
 
     // See Shape::GetSubmergedVolume
-    pub fn getSubmergedVolume(self: *const HeightFieldShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane) Shape.SubmergedVolume {
-        _ = .{ self, center_of_mass_transform, scale, surface };
+    pub fn getSubmergedVolume(self: *const HeightFieldShape, center_of_mass_transform: Mat44, scale: Vec3, surface: Plane, opts: Shape.SubmergedVolumeOptions) Shape.SubmergedVolume {
+        _ = .{ self, center_of_mass_transform, scale, surface, opts };
         if (Core.enable_asserts) @panic("Not supported");
 
         // Jolt leaves the out parameters untouched
         return .{ .total_volume = 0.0, .submerged_volume = 0.0, .center_of_buoyancy = Vec3.zero() };
     }
 
-    // TODO(debug_renderer): Draw (JPH_DEBUG_RENDERER)
+    // See Shape::Draw (JPH_DEBUG_RENDERER)
+    pub const draw = if (Core.debug_renderer) drawImpl else {};
+    fn drawImpl(self: *const HeightFieldShape, renderer: *DebugRenderer, center_of_mass_transform: RMat44, scale: Vec3, color: Color, use_material_colors: bool, draw_wireframe: bool) void {
+        // Don't draw anything if we don't have any collision
+        if (self.height_samples_size == 0)
+            return;
+
+        const cache = self.draw_cache orelse return; // Zolt: a shape that was not constructed from settings, restored or cloned
+
+        {
+            // Zolt (R6): the cache lock
+            cache.mutex.lock(renderer.io);
+            defer cache.mutex.unlock(renderer.io);
+
+            // Reset the batch if we switch coloring mode
+            if (cache.cached_use_material_colors != use_material_colors) {
+                cache.clearGeometry();
+                cache.cached_use_material_colors = use_material_colors;
+            }
+
+            if (cache.geometry.items.len == 0) {
+                self.createDrawGeometry(renderer, cache, use_material_colors) catch {
+                    // Zolt (R5): do not cache a partial geometry, try again in the next draw
+                    cache.clearGeometry();
+                    renderer.setOutOfMemory();
+                };
+            }
+        }
+
+        // Get transform including scale
+        const transform = center_of_mass_transform.preScaled(scale);
+
+        // Test if the shape is scaled inside out
+        const cull_mode: DebugRenderer.CullMode = if (ScaleHelpers.isInsideOut(scale)) .cull_front_face else .cull_back_face;
+
+        // Determine the draw mode
+        const draw_mode: DebugRenderer.DrawMode = if (draw_wireframe) .wireframe else .solid;
+
+        // Draw the geometry (Zolt (R6): each geometry is taken under the lock with its own reference)
+        var index: usize = 0;
+        while (true) : (index += 1) {
+            var b = cache.geometryAt(renderer.io, index);
+            defer b.deinit();
+            const geometry = b.get() orelse break;
+            renderer.drawGeometryAutoBounds(transform, color, geometry, .{ .cull_mode = cull_mode, .cast_shadow = .on, .draw_mode = draw_mode });
+        }
+
+        if (renderer.flags.height_field_shape.draw_triangle_outlines) {
+            const Visitor = struct {
+                shape: *const HeightFieldShape,
+                renderer: *DebugRenderer,
+                transform: RMat44,
+
+                pub fn shouldAbort(v: *const @This()) bool {
+                    _ = v;
+                    return false;
+                }
+
+                pub fn shouldVisitRangeBlock(v: *const @This(), stack_top: i32) bool {
+                    _ = .{ v, stack_top };
+                    return true;
+                }
+
+                pub fn visitRangeBlock(v: *const @This(), bounds_min_x: Vec4, bounds_min_y: Vec4, bounds_min_z: Vec4, bounds_max_x: Vec4, bounds_max_y: Vec4, bounds_max_z: Vec4, properties: *UVec4, stack_top: i32) i32 {
+                    _ = .{ v, bounds_min_x, bounds_min_z, bounds_max_x, bounds_max_z, stack_top };
+                    const valid = Vec4.lessOrEqual(bounds_min_y, bounds_max_y);
+                    return countAndSortTrues(valid, properties);
+                }
+
+                pub fn visitTriangle(v: *const @This(), x: u32, y: u32, triangle: u32, v0: Vec3, v1_in: Vec3, v2_in: Vec3) void {
+                    // Determine active edges
+                    const active_edges = v.shape.getEdgeFlags(x, y, triangle);
+
+                    // Loop through edges
+                    const vtx = [_]Vec3{ v0, v1_in, v2_in };
+                    for (0..3) |edge_idx| {
+                        const v1 = v.transform.mulVec3(vtx[edge_idx]);
+                        const v2 = v.transform.mulVec3(vtx[(edge_idx + 1) % 3]);
+
+                        // Draw active edge as a green arrow, other edges as grey
+                        if (active_edges & (@as(u8, 1) << @intCast(edge_idx)) != 0)
+                            v.renderer.drawArrow(v1, v2, Color.green, 0.01)
+                        else
+                            v.renderer.drawLine(v1, v2, Color.grey);
+                    }
+                }
+            };
+
+            var visitor: Visitor = .{ .shape = self, .renderer = renderer, .transform = center_of_mass_transform.preScaled(scale) };
+            self.walkHeightField(&visitor);
+        }
+    }
+
+    /// The geometry of Draw (the body of Jolt's `if (mGeometry.empty())`), called under the cache lock
+    fn createDrawGeometry(self: *const HeightFieldShape, renderer: *DebugRenderer, cache: *DrawCache, use_material_colors: bool) Allocator.Error!void {
+        // Divide terrain in triangle batches of max 64x64x2 triangles to allow better culling of the terrain
+        const block_size: u32 = @min(self.sample_count, 64);
+
+        // Zolt: one triangle array for all blocks
+        const triangles = try renderer.allocator.alloc(DebugRenderer.Triangle, block_size * block_size * 2);
+        defer renderer.allocator.free(triangles);
+
+        var by: u32 = 0;
+        while (by < self.sample_count) : (by += block_size) {
+            var bx: u32 = 0;
+            while (bx < self.sample_count) : (bx += block_size) {
+                // Create vertices for a block
+                var num_triangles: usize = 0;
+                var y = by;
+                const max_y = @min(by + block_size, self.sample_count - 1);
+                while (y < max_y) : (y += 1) {
+                    var x = bx;
+                    const max_x = @min(bx + block_size, self.sample_count - 1);
+                    while (x < max_x) : (x += 1) {
+                        if (!self.isNoCollision(x, y) and !self.isNoCollision(x + 1, y + 1)) {
+                            const x1y1 = self.getPosition(x, y);
+                            const x2y2 = self.getPosition(x + 1, y + 1);
+                            const tri_color = if (use_material_colors) self.getMaterialAt(x, y).getDebugColor() else Color.white;
+
+                            if (!self.isNoCollision(x, y + 1)) {
+                                const x1y2 = self.getPosition(x, y + 1);
+
+                                const out_tri = &triangles[num_triangles];
+                                x1y1.storeFloat3(&out_tri.v[0].position);
+                                x1y2.storeFloat3(&out_tri.v[1].position);
+                                x2y2.storeFloat3(&out_tri.v[2].position);
+
+                                const normal = x2y2.sub(x1y2).cross(x1y1.sub(x1y2)).normalized();
+                                for (&out_tri.v) |*v| {
+                                    v.color = tri_color;
+                                    v.uv = .init(0, 0);
+                                    normal.storeFloat3(&v.normal);
+                                }
+
+                                num_triangles += 1;
+                            }
+
+                            if (!self.isNoCollision(x + 1, y)) {
+                                const x2y1 = self.getPosition(x + 1, y);
+
+                                const out_tri = &triangles[num_triangles];
+                                x1y1.storeFloat3(&out_tri.v[0].position);
+                                x2y2.storeFloat3(&out_tri.v[1].position);
+                                x2y1.storeFloat3(&out_tri.v[2].position);
+
+                                const normal = x1y1.sub(x2y1).cross(x2y2.sub(x2y1)).normalized();
+                                for (&out_tri.v) |*v| {
+                                    v.color = tri_color;
+                                    v.uv = .init(0, 0);
+                                    normal.storeFloat3(&v.normal);
+                                }
+
+                                num_triangles += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Create batch (the triangles actually written)
+                if (num_triangles > 0) {
+                    const block_triangles = triangles[0..num_triangles];
+                    const batch = renderer.createTriangleBatch(block_triangles);
+                    if (batch.get() == null and renderer.isOutOfMemory())
+                        return error.OutOfMemory; // The renderer could not create the batch
+                    const vertices = @as([*]const DebugRenderer.Vertex, @ptrCast(block_triangles.ptr))[0 .. 3 * num_triangles];
+                    var geometry: DebugRenderer.GeometryRef = .init(try DebugRenderer.Geometry.createWithBatch(renderer.allocator, batch, DebugRenderer.calculateBounds(vertices)));
+                    errdefer geometry.deinit();
+                    try cache.geometry.append(self.base.allocator, geometry);
+                }
+            }
+        }
+    }
 
     /// Visit the entire height field using a visitor pattern
     /// Note: Used to be inlined but this triggers a bug in MSVC where it will not free the memory allocated by alloca which causes a stack overflow when WalkHeightField is called in a loop (clang does it correct)
@@ -2654,6 +2895,7 @@ pub const HeightFieldShape = struct {
 
     // See: Shape::RestoreBinaryState
     pub fn restoreBinaryState(self: *HeightFieldShape, stream: StreamIn) Allocator.Error!void {
+        if (Core.debug_renderer) try self.createDrawCache();
         try Shape.impl.restoreBinaryState(&self.base, stream);
 
         stream.read(&self.offset);

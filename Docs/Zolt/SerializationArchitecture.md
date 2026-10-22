@@ -4,7 +4,7 @@ This is the binding design for Phase 8:
 - `Jolt/Core/RTTI`, `Jolt/Core/Factory` and `Jolt/Core/StreamUtils`;
 - `Jolt/ObjectStream` (text and binary streams);
 - the serializable declarations of every class outside SoftBody and Hair (`JPH_DECLARE_SERIALIZABLE_*` /
-  `JPH_IMPLEMENT_SERIALIZABLE_*`; the rest is Phase 9, S17);
+  `JPH_IMPLEMENT_SERIALIZABLE_*`; Phase 9 declared the rest, S17);
 - `UnitTests/ObjectStream/ObjectStreamTest.cpp`;
 - milestone M9.
 
@@ -37,8 +37,8 @@ Phase 8 is done. The groups of section 4 are merged, all 81 classes are declared
 - The 81 declarations: 6 TypeDeclarations classes, SerializableObject, LinearCurve (2), bodies and collision (7), the
   scene (2), shapes (22), constraints (19), vehicles (13), skeleton and ragdoll (9).
 - Zolt declares them in 64 Zig files.
-- Before Phase 8 the declarations were `// TODO(serialization)` comments: 111 lines in 65 Zolt files. One line is left,
-  in `SoftBodyCreationSettings.zig` (Phase 9).
+- Before Phase 8 the declarations were `// TODO(serialization)` comments: 111 lines in 65 Zolt files. One line was left,
+  in `SoftBodyCreationSettings.zig`. Phase 9 replaced it with the declaration (S17).
 
 **Milestone M9.** ZoltPerformanceTest runs `PerformanceTest/RagdollScene.h`. It reproduces the hashes of
 `determinism_check.yml` with `-q=LinearCast -t=max -s=Ragdoll`:
@@ -231,8 +231,8 @@ another type, defaults of missing attributes, and the `vec3` to `DVec3` conversi
   nothing depends on it.
 - There is no global, no `sInstance`, no run time `Register` and no `Clear`.
 - `RegisterTypes.zig` gets:
-  - `factory_types`: the types of `RegisterTypes.cpp`, in that order. Jolt has 49; Zolt has 48, without
-    SoftBodyCreationSettings (Phase 9);
+  - `factory_types`: the types of `RegisterTypes.cpp`, in that order. Jolt has 49. Zolt had 48 in Phase 8, without
+    SoftBodyCreationSettings; Phase 9 added it as the 49th (S17);
   - `factory = Factory.init(factory_types ++ user_types.serializable_types)`.
 - Tests and applications build their own factory when they need other classes:
   `Factory.init(RegisterTypes.factory_types ++ &[_]type{MyClass})`. This is Jolt's
@@ -428,6 +428,15 @@ and D17 about the class that the caller requests.
 - P1 has an explicit exclusion list of the 13 SoftBody classes (`phase9_classes` in `ObjectStreamSchema.zig`).
   `tools/gen_serializable.py` skips the SoftBody and Hair directories and PhysicsScene's "mSoftBodies". Phase 9 removes
   these exclusions.
+- Settled in Phase 9 ([RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R14, R19): the boundary is
+  gone.
+  - The 13 SoftBody classes and the 10 Hair classes are declared, and so are `RegisterHair` and the RTTIs of
+    ComputeSystem and ComputeSystemCPU. The RTTIs of the GPU compute systems stay deferred with their backends.
+  - `RegisterTypes.factory_types` has Jolt's 49 types: SoftBodyCreationSettings is the 49th.
+  - PhysicsScene declares `mSoftBodies` as its third attribute. A stream with soft bodies reads like Jolt's.
+  - The exclusions are gone: `phase9_classes`, the SoftBody and Hair directories and "mSoftBodies" of
+    `gen_serializable.py`, `PHASE9_SERIALIZABLE` of `port_status.py`.
+  - P7 compares a PhysicsScene directly, soft bodies included. The cross-read and its NUL rule (section 12) are gone.
 
 ### S18 Pending declarations during the phase
 
@@ -438,7 +447,8 @@ and D17 about the class that the caller requests.
 - This kept the `rtti` vtable entry non-null from the start, and every group depended only on the foundation.
 - The final check is permanent:
   - `python3 tools/port_status.py --check` (the lint step of CI) runs `tools/gen_serializable.py --check --complete`. It
-    fails on any pending or undeclared class. `--no-pending` remains as a flag of its own.
+    fails on any pending or undeclared class. `--no-pending` remains as a flag of its own. Since Phase 9 it covers 104
+    classes: these 81, the 13 SoftBody classes and the 10 Hair classes (S17).
   - P1 fails for a missing or pending class and for a class that reaches a pending one. P2 to P7 fail instead of
     skipping such a class.
 
@@ -761,7 +771,7 @@ The first parity build after the change recompiles the C++ library (about 4 minu
 - An integer that Jolt declares with JPH_ADD_ENUM_ATTRIBUTE needs `.enumAttr`. `.attr` compiles (S5), so check a user
   class by hand. `tools/gen_serializable.py --check` and P1 check Jolt's classes.
 - Parity: P1 and P2 for every class, P3 and P4 through the generic harness. A bite proof.
-- Done criteria (CLAUDE.md):
+- Done criteria of Phase 8 (since Phase 9, CLAUDE.md adds the debug renderer configuration):
   - `zig build test` in Debug, double precision, ReleaseFast and `-Duse_llvm=false`;
   - `zig build parity` in Debug and double precision, filtered to `ObjectStream` and the area's binary state tests during
     the work; the full parity at the end of F1, F2 and G7 (30 to 40 minutes);
@@ -770,6 +780,8 @@ The first parity build after the change recompiles the C++ library (about 4 minu
 - Delete the worktree's `.zig-cache` at the end.
 
 ## 8. Out of scope (Phase 9)
+
+Phase 9 ported the SoftBody and Hair items of this list (S17).
 
 - SoftBody: SoftBodyCreationSettings, SoftBodySharedSettings and its nested classes, their physics, and
   `PhysicsScene.mSoftBodies` (S17).
@@ -800,15 +812,17 @@ The first parity build after the change recompiles the C++ library (about 4 minu
 | `Zolt/Core/RTTI.zig`, `Factory.zig`, `Lifetime.zig` (Zolt addition), `StreamUtils.zig` | complete |
 | the 14 `Zolt/ObjectStream/*.zig` files | complete |
 | `Zolt/Core/LinearCurve.zig`, `Zolt/ConfigurationString.zig` | complete |
-| the declarations of the 81 classes, in 64 Zig files | complete: none pending, none missing (Progress.md, section Serialization) |
-| `Zolt/RegisterTypes.zig` | `factory_types` (48 types) and `factory` |
-| `Zolt/Physics/PhysicsScene.zig` | partial: `mSoftBodies` is Phase 9 (S17) |
+| the declarations of the 81 classes, in 64 Zig files | complete: none pending, none missing (Progress.md, section Serialization). 104 classes since Phase 9 (S17, S18) |
+| `Zolt/RegisterTypes.zig` | `factory_types` (48 types) and `factory`. Jolt's 49 types since Phase 9 (S17) |
+| `Zolt/Physics/PhysicsScene.zig` | partial: `mSoftBodies` is Phase 9 (S17). Complete since Phase 9 |
 | `ZoltTests/ObjectStream/ObjectStreamTest.zig` | the port of ObjectStreamTest.cpp (both tests) |
 | `ZoltTests/ObjectStream/ObjectStreamZoltTests.zig`, `ObjectStreamSweeps.zig` | the pins of S16 and the sweeps Z1 to Z4 |
 | `ZoltParity/ObjectStream/*` | P1 to P8 |
 | `ZoltParity/Physics/PerfRagdollParity.zig` + `PerfRagdollReference.cpp` | P10 (`perf_ragdoll`) |
 | `ZoltPerformanceTest/RagdollScene.zig` | the port of PerformanceTest/RagdollScene.h (M9) |
 | `tools/gen_serializable.py` | `--write` (pending declarations) and `--check [--complete]` |
+
+Phase 9 changed the three rows that say "since Phase 9" (S17, S18).
 
 M9 is reached. ZoltPerformanceTest gives Jolt's Ragdoll hashes with `-q=LinearCast` and `-t=max`, `-t=1` and `-t=2`:
 `0x3be6ea76c07a2ac8` in single precision and `0x8dd6bc501859a228` in double precision. Zolt's CI checks the six runs,
@@ -862,7 +876,7 @@ The lead settled the open questions of the synthesis:
 Reviews and tests of the groups found bugs and doc errors. Most were fixed before their group merged, the others before
 the phase ended (see "Bugs found on the way"). After the last merge, a completeness audit checked the whole phase
 against the Jolt sources. It confirmed 37 findings, and each one was fixed or documented. These points were settled on
-the way. They add to section 11 and bind later phases that change these classes (Phase 9 adds the SoftBody and Hair
+the way. They add to section 11 and bind later phases that change these classes (Phase 9 added the SoftBody and Hair
 schemas). The file headers have the details.
 
 | Jolt behavior | Decision |
@@ -908,11 +922,11 @@ schemas). The file headers have the details.
 - **P1 while classes were pending.** P1 compared a pending class by its header only. A class that only the attributes
   of pending classes reach was reported as such, not as missing, and P2 to P7 skipped such classes. The audit made the
   rule strict (S18).
-- **The NUL rule of the cross-read.** A PhysicsScene is compared by cross-reading (S17). Jolt's binary reader cuts a
-  string at its first NUL, also in Jolt's own bytes (S15). So when Jolt's text has a NUL byte and the direct binary
-  comparison fails, the binary bytes must equal what Jolt writes after reading its own binary bytes. Text, and binary
-  without a NUL, keep the direct comparison. P4 found the case after G1 to G3 merged: a PhysicsMaterialSimple debug
-  name with a NUL.
+- **The NUL rule of the cross-read.** Until Phase 9 a PhysicsScene was compared by cross-reading (S17). Jolt's binary
+  reader cuts a string at its first NUL, also in Jolt's own bytes (S15). So when Jolt's text has a NUL byte and the
+  direct binary comparison fails, the binary bytes must equal what Jolt writes after reading its own binary bytes.
+  Text, and binary without a NUL, keep the direct comparison. P4 found the case after G1 to G3 merged: a
+  PhysicsMaterialSimple debug name with a NUL.
 - **perf_ragdoll (P10).** Both sides run the scene code itself:
   - The C++ side includes `PerformanceTest/Layers.h`, `PerformanceTestScene.h` and `RagdollScene.h` in the namespace
     `PerfRagdoll`. PerformanceTest's Layers.h defines the same class names as UnitTests/Layers.h, which other references
@@ -925,5 +939,5 @@ schemas). The file headers have the details.
   in the repository root for the sweeps Z2 to Z4.
 - **The inline hash test.** ZoltPerformanceTest's inline hash test has a Ragdoll row of 5 updates. Its values come from
   the oracle (`zig build jolt-performance-test -- -q=LinearCast -t=1 -s=Ragdoll -i=5`).
-- **The final check.** `tools/gen_serializable.py` skips PhysicsScene's "mSoftBodies" (S17). `port_status.py --check`
-  fails on a pending or undeclared class (S18).
+- **The final check.** `tools/gen_serializable.py` skipped PhysicsScene's "mSoftBodies" until Phase 9 (S17).
+  `port_status.py --check` fails on a pending or undeclared class (S18).

@@ -1,7 +1,5 @@
 //! Port of: Jolt/Physics/Body/BodyInterface.h, Jolt/Physics/Body/BodyInterface.cpp
-//! Status: partial
-//! Missing: CreateSoftBody, CreateSoftBodyWithID, CreateSoftBodyWithoutID, CreateAndAddSoftBody (Phase 9, they need
-//! BodyManager.AllocateSoftBody, SimulationArchitecture D1)
+//! Status: complete
 //!
 //! SimulationArchitecture D6:
 //! - Initialized by PhysicsSystem.init (`BodyInterface.init(lock_interface, body_manager, broad_phase)`), it holds
@@ -13,11 +11,12 @@
 //!   (`.{ .activation = .dont_activate }`). Out parameters (`GetPositionAndRotation`,
 //!   `GetLinearAndAngularVelocity`) return structs.
 //! - Errors (Zolt): body creation returns `CreateBodyError` (allocation, a settings object without shape) and keeps
-//!   Jolt's null / invalid ID for "out of bodies". `addBody` and `addBodiesPrepare` return `Allocator.Error` (the
-//!   broad phase allocates in AddBodiesPrepare); on error the body was not added, and `createAndAddBody` destroys the
-//!   body it created. The functions that flag the contact cache invalid (`setShape`, `notifyShapeChanged`,
-//!   `setUseManifoldReduction`, `invalidateContactCache`) return the `Allocator.Error` of
-//!   BodyManager.invalidateContactCacheForBody. They flag the contact cache before they change the body (Jolt: after,
+//!   Jolt's null / invalid ID for "out of bodies". The soft body functions follow the same rules
+//!   (RemainingFeaturesArchitecture.md R16), only allocation can fail there. `addBody` and `addBodiesPrepare` return
+//!   `Allocator.Error` (the broad phase allocates in AddBodiesPrepare); on error the body was not added, and
+//!   `createAndAddBody` / `createAndAddSoftBody` destroy the body they created. The functions that flag the contact
+//!   cache invalid (`setShape`, `notifyShapeChanged`, `setUseManifoldReduction`, `invalidateContactCache`) return the
+//!   `Allocator.Error` of BodyManager.invalidateContactCacheForBody. They flag the contact cache before they change the body (Jolt: after,
 //!   the result is the same), so a failed call changed nothing and can be repeated. `activateBodiesInAABox` collects
 //!   the bodies in an AllHitCollisionCollector (Allocator.Error, nothing was activated). `createConstraint` allocates
 //!   the constraint with the body manager's allocator (Jolt: `new`), its reference count is 0 like Jolt's.
@@ -60,6 +59,7 @@ const MotionQuality = @import("MotionQuality.zig").MotionQuality;
 const BodyCreationSettingsFile = @import("BodyCreationSettings.zig");
 const BodyCreationSettings = BodyCreationSettingsFile.BodyCreationSettings;
 const CreateBodyError = BodyCreationSettingsFile.CreateBodyError;
+const SoftBodyCreationSettings = @import("../SoftBody/SoftBodyCreationSettings.zig").SoftBodyCreationSettings;
 const BodyManager = @import("BodyManager.zig").BodyManager;
 const BodyLockInterface = @import("BodyLockInterface.zig").BodyLockInterface;
 const BodyLockFile = @import("BodyLock.zig");
@@ -106,6 +106,17 @@ pub const BodyInterface = struct {
         return body;
     }
 
+    /// Create a soft body
+    /// @return Created body or null when out of bodies
+    pub fn createSoftBody(self: *BodyInterface, settings: *const SoftBodyCreationSettings) CreateBodyError!?*Body {
+        const body = try self.body_manager.allocateSoftBody(settings);
+        if (!self.body_manager.addBody(body)) {
+            self.body_manager.freeBody(body);
+            return null;
+        }
+        return body;
+    }
+
     /// Create a rigid body with specified ID. This function can be used if a simulation is to run in sync between clients or if a simulation needs to be restored exactly.
     /// The ID created on the server can be replicated to the client and used to create a deterministic simulation.
     /// @return Created body or null when the body ID is invalid or a body of the same ID already exists.
@@ -118,11 +129,26 @@ pub const BodyInterface = struct {
         return body;
     }
 
+    /// Create a soft body with specified ID. See comments at CreateBodyWithID.
+    pub fn createSoftBodyWithID(self: *BodyInterface, body_id: BodyID, settings: *const SoftBodyCreationSettings) CreateBodyError!?*Body {
+        const body = try self.body_manager.allocateSoftBody(settings);
+        if (!self.body_manager.addBodyWithCustomID(body, body_id)) {
+            self.body_manager.freeBody(body);
+            return null;
+        }
+        return body;
+    }
+
     /// Advanced use only. Creates a rigid body without specifying an ID. This body cannot be added to the physics system until it has been assigned a body ID.
     /// This can be used to decouple allocation from registering the body. A call to CreateBodyWithoutID followed by AssignBodyID is equivalent to calling CreateBodyWithID.
     /// @return Created body
     pub fn createBodyWithoutID(self: *const BodyInterface, settings: *const BodyCreationSettings) CreateBodyError!*Body {
         return self.body_manager.allocateBody(settings);
+    }
+
+    /// Advanced use only. Creates a body without specifying an ID. See comments at CreateBodyWithoutID.
+    pub fn createSoftBodyWithoutID(self: *const BodyInterface, settings: *const SoftBodyCreationSettings) CreateBodyError!*Body {
+        return self.body_manager.allocateSoftBody(settings);
     }
 
     /// Advanced use only. Destroy a body previously created with CreateBodyWithoutID that hasn't gotten an ID yet through the AssignBodyID function,
@@ -221,6 +247,17 @@ pub const BodyInterface = struct {
     /// (Zolt: on an error nothing is left behind, a created body is destroyed again)
     pub fn createAndAddBody(self: *BodyInterface, settings: *const BodyCreationSettings, activation_mode: Activation) CreateBodyError!BodyID {
         const b = (try self.createBody(settings)) orelse return .invalid; // Out of bodies
+        const id = b.getID();
+        errdefer self.destroyBody(id);
+        try self.addBody(id, activation_mode);
+        return id;
+    }
+
+    /// Combines CreateSoftBody and AddBody
+    /// @return Created body ID or an invalid ID when out of bodies
+    /// (Zolt: on an error nothing is left behind, a created body is destroyed again)
+    pub fn createAndAddSoftBody(self: *BodyInterface, settings: *const SoftBodyCreationSettings, activation_mode: Activation) CreateBodyError!BodyID {
+        const b = (try self.createSoftBody(settings)) orelse return .invalid; // Out of bodies
         const id = b.getID();
         errdefer self.destroyBody(id);
         try self.addBody(id, activation_mode);
@@ -905,12 +942,12 @@ pub const BodyInterface = struct {
     }
 
     /// @see Body::ApplyBuoyancyImpulse
-    pub fn applyBuoyancyImpulse(self: *BodyInterface, body_id: BodyID, surface_position: RVec3, surface_normal: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32) bool {
+    pub fn applyBuoyancyImpulse(self: *BodyInterface, body_id: BodyID, surface_position: RVec3, surface_normal: Vec3, buoyancy: f32, linear_drag: f32, angular_drag: f32, fluid_velocity: Vec3, gravity: Vec3, delta_time: f32, opts: Body.BuoyancyOptions) bool {
         var lock: BodyLockWrite = .init(self.body_lock_interface, body_id);
         defer lock.deinit();
         if (lock.succeeded()) {
             const body = lock.getBody();
-            if (body.isDynamic() and body.applyBuoyancyImpulse(surface_position, surface_normal, buoyancy, linear_drag, angular_drag, fluid_velocity, gravity, delta_time)) {
+            if (body.isDynamic() and body.applyBuoyancyImpulse(surface_position, surface_normal, buoyancy, linear_drag, angular_drag, fluid_velocity, gravity, delta_time, opts)) {
                 self.activateBodyInternal(body);
                 return true;
             }
@@ -1208,3 +1245,119 @@ pub const BodyInterface = struct {
             try self.body_manager.invalidateContactCacheForBody(lock.getBody());
     }
 };
+
+/// A physics system for the soft body tests (in place: it must not move)
+const TestSoftBodyWorld = struct {
+    const PhysicsSystem = @import("../PhysicsSystem.zig").PhysicsSystem;
+    const BroadPhaseLayerInterfaceTable = @import("../Collision/BroadPhase/BroadPhaseLayerInterfaceTable.zig").BroadPhaseLayerInterfaceTable;
+    const ObjectVsBroadPhaseLayerFilterTable = @import("../Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.zig").ObjectVsBroadPhaseLayerFilterTable;
+    const ObjectLayerPairFilterTable = @import("../Collision/ObjectLayerPairFilterTable.zig").ObjectLayerPairFilterTable;
+
+    layer_interface: BroadPhaseLayerInterfaceTable,
+    pair_filter: ObjectLayerPairFilterTable,
+    ovb_filter: ObjectVsBroadPhaseLayerFilterTable,
+    system: PhysicsSystem,
+
+    fn init(self: *TestSoftBodyWorld, allocator: Allocator, max_bodies: u32) !void {
+        self.layer_interface = try .init(allocator, 1, 1);
+        errdefer self.layer_interface.deinit();
+        self.layer_interface.mapObjectToBroadPhaseLayer(0, .init(0));
+        self.pair_filter = try .init(allocator, 1);
+        errdefer self.pair_filter.deinit();
+        self.pair_filter.enableCollision(0, 0);
+        self.ovb_filter = try .init(allocator, &self.layer_interface.base, 1, &self.pair_filter.base, 1);
+        errdefer self.ovb_filter.deinit();
+        self.system = .empty;
+        try self.system.init(allocator, std.testing.io, max_bodies, 0, 64, 64, &self.layer_interface.base, &self.ovb_filter.base, &self.pair_filter.base, .{});
+    }
+
+    fn deinit(self: *TestSoftBodyWorld) void {
+        self.system.deinit();
+        self.ovb_filter.deinit();
+        self.pair_filter.deinit();
+        self.layer_interface.deinit();
+    }
+
+    /// Shared settings that SoftBodyMotionProperties.initialize accepts (one hand-made update group), reference count 0
+    fn sharedSettings(allocator: Allocator) !*@import("../SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings {
+        const SoftBodySharedSettings = @import("../SoftBody/SoftBodySharedSettings.zig").SoftBodySharedSettings;
+        const s = try SoftBodySharedSettings.create(allocator);
+        errdefer {
+            s.deinit();
+            allocator.destroy(s);
+        }
+        try s.vertices.append(allocator, .init(.{ .x = -1, .y = 0, .z = 0 }, .{}));
+        try s.vertices.append(allocator, .init(.{ .x = 1, .y = 0, .z = 0 }, .{}));
+        try s.vertices.append(allocator, .init(.{ .x = 0, .y = 1, .z = 1 }, .{}));
+        try s.addFace(.init(0, 1, 2, .{}));
+        try s.update_groups.append(allocator, std.mem.zeroes(SoftBodySharedSettings.UpdateGroup));
+        return s;
+    }
+};
+
+test "BodyInterface: createSoftBody, createSoftBodyWithID, createSoftBodyWithoutID and createAndAddSoftBody (R16)" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+    const expectEqual = std.testing.expectEqual;
+
+    var world: TestSoftBodyWorld = undefined;
+    try world.init(allocator, 4);
+    defer world.deinit();
+    const bi = world.system.getBodyInterfaceMut();
+
+    var settings: SoftBodyCreationSettings = .init(try TestSoftBodyWorld.sharedSettings(allocator), RVec3.init(0, 5, 0), Quat.identity(), 0);
+    defer settings.deinit();
+
+    // CreateSoftBody: an ID, not in the broad phase yet
+    const a = (try bi.createSoftBody(&settings)).?;
+    try expect(a.isSoftBody() and !a.getID().isInvalid());
+    try expect(!bi.isAdded(a.getID()));
+
+    // CreateSoftBodyWithID: the requested ID, null when it is taken
+    const id = BodyID.init(3);
+    const b = (try bi.createSoftBodyWithID(id, &settings)).?;
+    try expect(b.getID().eql(id));
+    try expect((try bi.createSoftBodyWithID(id, &settings)) == null);
+
+    // CreateSoftBodyWithoutID: no ID until AssignBodyID
+    const c = try bi.createSoftBodyWithoutID(&settings);
+    try expect(c.getID().isInvalid());
+    try expect(bi.assignBodyID(c));
+
+    // CreateAndAddSoftBody: added and active
+    const d = try bi.createAndAddSoftBody(&settings, .activate);
+    try expect(bi.isAdded(d) and bi.isActive(d));
+    const stats = world.system.body_manager.getBodyStats();
+    try expectEqual(@as(u32, 4), stats.num_soft_bodies);
+    try expectEqual(@as(u32, 1), stats.num_active_soft_bodies);
+
+    // Out of bodies: null and an invalid ID, nothing is left behind
+    try expect((try bi.createSoftBody(&settings)) == null);
+    try expect((try bi.createAndAddSoftBody(&settings, .activate)).isInvalid());
+    const without_id = try bi.createSoftBodyWithoutID(&settings);
+    try expect(!bi.assignBodyID(without_id));
+    bi.destroyBodyWithoutID(without_id);
+
+    // Remove and destroy, the last soft bodies go with the system
+    bi.removeBody(d);
+    bi.destroyBody(d);
+    bi.destroyBody(a.getID());
+    try expectEqual(@as(u32, 2), world.system.getNumBodies());
+}
+
+test "BodyInterface: out of memory in createAndAddSoftBody" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(allocator: Allocator) !void {
+            var world: TestSoftBodyWorld = undefined;
+            try world.init(allocator, 2);
+            defer world.deinit();
+            var settings: SoftBodyCreationSettings = .init(try TestSoftBodyWorld.sharedSettings(allocator), RVec3.zero(), Quat.identity(), 0);
+            defer settings.deinit();
+            const bi = world.system.getBodyInterfaceMut();
+            const id = try bi.createAndAddSoftBody(&settings, .activate);
+            try std.testing.expect(bi.isAdded(id));
+            // On error the body was destroyed again: only the bodies that were added are left
+            try std.testing.expectEqual(@as(u32, 1), world.system.getNumBodies());
+        }
+    }.f, .{});
+}

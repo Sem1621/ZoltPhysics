@@ -31,16 +31,17 @@
 //!   their children) are compared for Initialize and MapReverse.
 //! - Reference counts (GetRefCount, CharacterVehicleArchitecture E2): every skeleton, animation and mapper the C
 //!   functions make, the restored objects, the skeletons of a pose around SetSkeleton and a copy of the pose.
-//! - Release only (Jolt asserts on the input, Zolt checks the same asserts in safe builds, so these run with
-//!   `-Doptimize=ReleaseFast`): Sample at negative times and at times near the end of the float range, whose
-//!   differences overflow to a NaN fraction (the runs count that they reach negative wrapped times and NaN fractions),
-//!   SkeletonPose with parents after their children, Initialize twice (Jolt's release build appends), Initialize with
-//!   more joints in skeleton 1 than in skeleton 2, Map / LockTranslations / LockAllTranslations on skeletons in a random
-//!   joint order.
+//! - Release only (Jolt asserts on the input, its release build continues): Sample at negative times and at times near
+//!   the end of the float range, whose differences overflow to a NaN fraction (the runs count that they reach negative
+//!   wrapped times and NaN fractions), SkeletonPose with parents after their children, Initialize twice (Jolt's release
+//!   build appends), Initialize with more joints in skeleton 1 than in skeleton 2, Map / LockTranslations /
+//!   LockAllTranslations on skeletons in a random joint order. They run in every build: Zolt's asserts are recoverable,
+//!   and the asserts of both sides are counted per case (R8, ParityHooks.ReleaseAsserts).
 
 const std = @import("std");
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
+const ParityHooks = @import("../ParityHooks.zig");
 
 const Checker = fw.Checker;
 const Allocator = std.mem.Allocator;
@@ -58,7 +59,7 @@ const SkeletonMapper = zolt.SkeletonMapper;
 const StreamInWrapper = zolt.StreamInWrapper;
 const StreamOutWrapper = zolt.StreamOutWrapper;
 
-const max_joints = 40;
+pub const max_joints = 40;
 const max_name = 8;
 const max_animated_joints = 12;
 const max_keyframes = 12;
@@ -81,7 +82,7 @@ const SkelJointDesc = extern struct {
 };
 
 /// Must match SkelDesc in SkeletonReference.cpp
-const SkelDesc = extern struct {
+pub const SkelDesc = extern struct {
     num_joints: u32,
     /// Call CalculateParentJointIndices after adding the joints
     calculate_parent_joint_indices: u32,
@@ -228,7 +229,7 @@ fn storeMat44(m: Mat44, out: *[16]f32) void {
     }
 }
 
-fn loadState(v: *const [7]f32, state: *SkeletalAnimation.JointState) void {
+pub fn loadState(v: *const [7]f32, state: *SkeletalAnimation.JointState) void {
     state.rotation = Quat.init(v[0], v[1], v[2], v[3]);
     state.translation = Vec3.init(v[4], v[5], v[6]);
 }
@@ -245,7 +246,7 @@ fn setName(out: *[max_name]u8, out_len: *u32, comptime fmt: []const u8, args: an
 // The Zolt side of the C functions
 
 /// The skeleton of a description (SkelMakeSkeleton), one reference owned by the caller
-fn makeSkeleton(allocator: Allocator, desc: *const SkelDesc, out_add_joint_results: ?*[max_joints]u32) !Ref(Skeleton) {
+pub fn makeSkeleton(allocator: Allocator, desc: *const SkelDesc, out_add_joint_results: ?*[max_joints]u32) !Ref(Skeleton) {
     var skeleton = Ref(Skeleton).init(try Skeleton.create(allocator));
     errdefer skeleton.deinit();
     const s = skeleton.get().?;
@@ -638,7 +639,7 @@ const AnimationMode = struct {
     huge_times: bool = false,
 };
 
-const Gen = struct {
+pub const Gen = struct {
     rng: fw.Rng,
 
     fn index(self: *Gen, n: usize) usize {
@@ -697,7 +698,7 @@ const Gen = struct {
         };
     }
 
-    fn state(self: *Gen) [7]f32 {
+    pub fn state(self: *Gen) [7]f32 {
         const q = self.quat();
         const t = self.vec3(-2, 2);
         return .{ q.getX(), q.getY(), q.getZ(), q.getW(), t.getX(), t.getY(), t.getZ() };
@@ -785,7 +786,7 @@ const Gen = struct {
     }
 
     /// An ordered skeleton with n joints named j0, j1, ...
-    fn tree(self: *Gen, n: usize) SkelDesc {
+    pub fn tree(self: *Gen, n: usize) SkelDesc {
         var parents: [max_joints]i32 = undefined;
         self.treeParents(n, &parents);
         var order: [max_joints]usize = undefined;
@@ -994,8 +995,9 @@ fn classifySample(aj: *const SkelAnimatedJoint, t: f32) SampleKind {
     return .{ .between = (t - s1) / (s2 - s1) };
 }
 
-/// Sample + ScaleJoints + SaveBinaryState of random animations on both sides
-fn runAnimations(seed: u32, num_cases: usize, mode: AnimationMode) !void {
+/// Sample + ScaleJoints + SaveBinaryState of random animations on both sides (`asserts`: the release only modes, the
+/// asserts of both sides counted per case, R8)
+fn runAnimations(seed: u32, num_cases: usize, mode: AnimationMode, asserts: ?*ParityHooks.ReleaseAsserts) !void {
     const allocator = std.testing.allocator;
     var sample_checker: Checker = .{ .name = "SkeletalAnimation::Sample (and ScaleJoints)" };
     var duration_checker: Checker = .{ .name = "SkeletalAnimation::GetDuration, IsLooping, GetRefCount" };
@@ -1034,10 +1036,12 @@ fn runAnimations(seed: u32, num_cases: usize, mode: AnimationMode) !void {
 
         zolt_run.* = std.mem.zeroes(AnimationRun);
         jolt_run.* = std.mem.zeroes(AnimationRun);
+        if (asserts) |a| a.begin();
         const zolt_bytes = try zoltAnimation(allocator, &skeleton, &anim, initial[0..skeleton.num_joints], times[0..num_times], scale, zolt_run);
         defer allocator.free(zolt_bytes);
         const jolt_bytes = try joltAnimation(allocator, &skeleton, &anim, initial[0..skeleton.num_joints], times[0..num_times], scale, jolt_run);
         defer allocator.free(jolt_bytes);
+        if (asserts) |a| a.end(iteration);
 
         // The states after every sample, the first difference is printed
         const num_states = 2 * num_times * skeleton.num_joints;
@@ -1112,11 +1116,11 @@ fn runAnimations(seed: u32, num_cases: usize, mode: AnimationMode) !void {
 }
 
 test "SkeletalAnimation parity: Sample, GetDuration, ScaleJoints, SaveBinaryState" {
-    try runAnimations(0x5E1E7003, 4000, .{});
+    try runAnimations(0x5E1E7003, 4000, .{}, null);
 }
 
 test "SkeletalAnimation parity: Sample of unsorted keyframes" {
-    try runAnimations(0x5E1E700D, 1500, .{ .unsorted = true });
+    try runAnimations(0x5E1E700D, 1500, .{ .unsorted = true }, null);
 }
 
 test "SkeletalAnimation parity: sRestoreFromBinaryState" {
@@ -1168,8 +1172,10 @@ test "SkeletalAnimation parity: sRestoreFromBinaryState" {
     try std.testing.expect(num_partial_floats > 1000);
 }
 
-/// SkeletonPose on both sides: `unordered` allows parents after their children (release only)
-fn runPoses(seed: u32, num_cases: usize, unordered: bool) !void {
+/// SkeletonPose on both sides: `asserts` (release only) allows parents after their children, the asserts of both sides
+/// counted per case (R8)
+fn runPoses(seed: u32, num_cases: usize, asserts: ?*ParityHooks.ReleaseAsserts) !void {
+    const unordered = asserts != null;
     const allocator = std.testing.allocator;
     var checker: Checker = .{ .name = "SkeletonPose: SetSkeleton, CalculateJointMatrices, CalculateLocalSpaceJointMatrices, CalculateJointStates, root offset" };
     var g: Gen = .{ .rng = .{ .state = seed } };
@@ -1190,8 +1196,10 @@ fn runPoses(seed: u32, num_cases: usize, unordered: bool) !void {
 
         zolt_result = std.mem.zeroes(SkelPoseResult);
         jolt_result = std.mem.zeroes(SkelPoseResult);
+        if (asserts) |a| a.begin();
         try zoltPose(allocator, &skeleton1, &skeleton2, &states, &matrices, &root_offset, &zolt_result);
         jolt.jolt_skel_pose(&skeleton1, &skeleton2, @ptrCast(&states), @ptrCast(&matrices), &root_offset, &jolt_result);
+        if (asserts) |a| a.end(iteration);
         checkFields(&checker, iteration, zolt_result, jolt_result);
 
         if (unordered) {
@@ -1205,7 +1213,7 @@ fn runPoses(seed: u32, num_cases: usize, unordered: bool) !void {
 }
 
 test "SkeletonPose parity" {
-    try runPoses(0x5E1E7005, 3000, false);
+    try runPoses(0x5E1E7005, 3000, null);
 }
 
 /// What mapperDesc generates
@@ -1346,7 +1354,8 @@ fn mapperDesc(g: *Gen, desc: *SkelMapperDesc, mode: MapperMode) void {
     }
 }
 
-fn runMappers(seed: u32, num_cases: usize, mode: MapperMode) !void {
+/// `asserts`: the release only modes, the asserts of both sides counted per case (R8)
+fn runMappers(seed: u32, num_cases: usize, mode: MapperMode, asserts: ?*ParityHooks.ReleaseAsserts) !void {
     const allocator = std.testing.allocator;
     var checker: Checker = .{ .name = "SkeletonMapper: Initialize, LockTranslations, LockAllTranslations, GetChains, Map, MapReverse, GetMappedJointIdx, IsJointTranslationLocked, GetRefCount" };
     var g: Gen = .{ .rng = .{ .state = seed } };
@@ -1373,8 +1382,10 @@ fn runMappers(seed: u32, num_cases: usize, mode: MapperMode) !void {
         mapperDesc(&g, desc, mode);
         zolt_result.* = std.mem.zeroes(SkelMapperResult);
         jolt_result.* = std.mem.zeroes(SkelMapperResult);
+        if (asserts) |a| a.begin();
         try zoltMapper(allocator, desc, zolt_result);
         jolt.jolt_skel_mapper(desc, jolt_result);
+        if (asserts) |a| a.end(iteration);
         checkFields(&checker, iteration, zolt_result.*, jolt_result.*);
 
         if (jolt_result.num_chains > 0) num_chains += 1;
@@ -1409,19 +1420,44 @@ fn runMappers(seed: u32, num_cases: usize, mode: MapperMode) !void {
 }
 
 test "SkeletonMapper parity" {
-    try runMappers(0x5E1E7006, 3000, .{});
+    try runMappers(0x5E1E7006, 3000, .{}, null);
 }
 
 test "SkeletonMapper parity: Initialize and MapReverse with parents after their children" {
-    try runMappers(0x5E1E7007, 1000, .{ .unordered = true });
+    try runMappers(0x5E1E7007, 1000, .{ .unordered = true }, null);
 }
 
 test "Skeleton parity (release only): Sample at negative times and with NaN fractions, SkeletonPose with parents after their children, SkeletonMapper initialized twice, with a larger skeleton 1, with parents after their children" {
-    // Jolt asserts on these inputs, Zolt checks the same asserts in safe builds; Jolt's release build continues
-    if (zolt.Core.enable_asserts) return error.SkipZigTest;
-    try runAnimations(0x5E1E7008, 1500, .{ .negative_times = true });
-    try runAnimations(0x5E1E7009, 1500, .{ .huge_times = true });
-    try runPoses(0x5E1E700A, 1500, true);
-    try runMappers(0x5E1E700B, 1500, .{ .release_only = true });
-    try runMappers(0x5E1E700C, 1500, .{ .unordered = true, .release_only = true });
+    // Jolt asserts on these inputs and its release build continues. Zolt's asserts are recoverable and counted on both
+    // sides, per case (R8). Each run has its own count, so a mismatch names the run and the case, and every run must
+    // reach an assert.
+    var negative_times: ParityHooks.ReleaseAsserts = undefined;
+    negative_times.init("SkeletalAnimation release only (negative times)");
+    defer negative_times.deinit();
+    try runAnimations(0x5E1E7008, 1500, .{ .negative_times = true }, &negative_times);
+    try negative_times.finish();
+
+    var huge_times: ParityHooks.ReleaseAsserts = undefined;
+    huge_times.init("SkeletalAnimation release only (NaN fractions)");
+    defer huge_times.deinit();
+    try runAnimations(0x5E1E7009, 1500, .{ .huge_times = true }, &huge_times);
+    try huge_times.finish();
+
+    var poses: ParityHooks.ReleaseAsserts = undefined;
+    poses.init("SkeletonPose release only (parents after their children)");
+    defer poses.deinit();
+    try runPoses(0x5E1E700A, 1500, &poses);
+    try poses.finish();
+
+    var mappers: ParityHooks.ReleaseAsserts = undefined;
+    mappers.init("SkeletonMapper release only");
+    defer mappers.deinit();
+    try runMappers(0x5E1E700B, 1500, .{ .release_only = true }, &mappers);
+    try mappers.finish();
+
+    var unordered_mappers: ParityHooks.ReleaseAsserts = undefined;
+    unordered_mappers.init("SkeletonMapper release only (parents after their children)");
+    defer unordered_mappers.deinit();
+    try runMappers(0x5E1E700C, 1500, .{ .unordered = true, .release_only = true }, &unordered_mappers);
+    try unordered_mappers.finish();
 }

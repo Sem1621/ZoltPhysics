@@ -1,7 +1,13 @@
 //! Port of: Jolt/Physics/Character/CharacterVirtual.h, Jolt/Physics/Character/CharacterVirtual.cpp
 //! Status: complete
-//! Not ported: JPH_DEBUG_RENDERER (sDrawConstraints, sDrawWalkStairs, sDrawStickToFloor, sDrawSupportingVolume and the
-//! drawing in Update, MoveShape, SolveConstraints, WalkStairs and StickToFloor: TODO(debug_renderer))
+//!
+//! JPH_DEBUG_RENDERER (RemainingFeaturesArchitecture.md R2, R4): the drawing in Update, MoveShape, SolveConstraints,
+//! WalkStairs and StickToFloor is `if (Core.debug_renderer)` statements. It draws into the renderer of the system
+//! (`PhysicsSystem.debug_renderer`, Jolt's `DebugRenderer::sInstance`). The static flags sDrawConstraints,
+//! sDrawWalkStairs, sDrawStickToFloor and sDrawSupportingVolume are the fields of that renderer's
+//! `flags.character_virtual`. Jolt dereferences a null sInstance when a flag is set without a renderer; Zolt draws
+//! nothing then. The `inDrawConstraints` parameter of MoveShape and SolveConstraints is a trailing parameter that is
+//! `void` without the option.
 //!
 //! Docs/Zolt/CharacterVehicleArchitecture.md E2 / E5:
 //! - `CharacterVirtualSettings` (a CharacterBaseSettings) and `CharacterVirtual` (a CharacterBase) are pattern A levels
@@ -90,6 +96,8 @@ const physics_settings = @import("../PhysicsSettings.zig");
 const DeterminismLog = @import("../DeterminismLog.zig");
 const StateRecorder = @import("../StateRecorder.zig").StateRecorder;
 const PhysicsSystem = @import("../PhysicsSystem.zig").PhysicsSystem;
+const Color = @import("../../Core/Color.zig").Color;
+const DebugRenderer = @import("../../Renderer/DebugRenderer.zig").DebugRenderer;
 const Body = @import("../Body/Body.zig").Body;
 const BodyID = @import("../Body/BodyID.zig").BodyID;
 const MotionType = @import("../Body/MotionType.zig").MotionType;
@@ -1306,7 +1314,13 @@ pub const CharacterVirtual = struct {
         if (delta_time <= 0.0)
             return;
 
-        // TODO(debug_renderer): draw the supporting volume pre movement (sDrawSupportingVolume)
+        if (Core.debug_renderer) {
+            // Draw supporting volume pre movement
+            if (self.base.system.debug_renderer) |renderer| {
+                if (renderer.flags.character_virtual.draw_supporting_volume)
+                    renderer.drawPlane(self.position.subVec3(self.base.supporting_volume.getNormal().mulScalar(self.base.supporting_volume.getConstant())), self.base.supporting_volume.getNormal(), Color.blue, 1.0);
+            }
+        }
 
         try self.startTrackingContactChanges();
         defer self.finishTrackingContactChanges();
@@ -1315,7 +1329,7 @@ pub const CharacterVirtual = struct {
         self.last_delta_time = delta_time;
 
         // Slide the shape through the world
-        try self.moveShape(&self.position, self.linear_velocity, delta_time, &self.active_contacts, filters, temp_allocator);
+        try self.moveShape(&self.position, self.linear_velocity, delta_time, &self.active_contacts, filters, temp_allocator, if (Core.debug_renderer) self.drawFlag(.draw_constraints) else {});
 
         // Determine the object that we're standing on
         try self.updateSupportingContact(false, temp_allocator);
@@ -1392,7 +1406,11 @@ pub const CharacterVirtual = struct {
         }
         const up_position = self.position.addVec3(up);
 
-        // TODO(debug_renderer): draw sweep up (sDrawWalkStairs)
+        if (Core.debug_renderer) {
+            // Draw sweep up
+            if (self.drawFlag(.draw_walk_stairs))
+                self.base.system.debug_renderer.?.drawArrow(self.position, up_position, Color.white, 0.01);
+        }
 
         // Collect normals of steep slopes that we would like to walk stairs on.
         // We need to do this before calling MoveShape because it will update mActiveContacts.
@@ -1412,7 +1430,7 @@ pub const CharacterVirtual = struct {
 
         // Horizontal movement
         var new_position = up_position;
-        try self.moveShape(&new_position, character_velocity, delta_time, null, filters, temp_allocator);
+        try self.moveShape(&new_position, character_velocity, delta_time, null, filters, temp_allocator, if (Core.debug_renderer) false else {});
         const horizontal_movement = new_position.sub(up_position).toVec3();
         const horizontal_movement_sq = horizontal_movement.lengthSq();
         if (horizontal_movement_sq < 1.0e-8)
@@ -1440,7 +1458,11 @@ pub const CharacterVirtual = struct {
         if (!made_progress)
             return false;
 
-        // TODO(debug_renderer): draw horizontal sweep (sDrawWalkStairs)
+        if (Core.debug_renderer) {
+            // Draw horizontal sweep
+            if (self.drawFlag(.draw_walk_stairs))
+                self.base.system.debug_renderer.?.drawArrow(up_position, new_position, Color.white, 0.01);
+        }
 
         // Move down towards the floor.
         // Note that we travel the same amount down as we traveled up with the specified extra
@@ -1452,7 +1474,16 @@ pub const CharacterVirtual = struct {
         var surface_normal = contact.surface_normal;
         var too_steep = self.base.isSlopeTooSteep(surface_normal);
 
-        // TODO(debug_renderer): draw sweep down (sDrawWalkStairs)
+        if (Core.debug_renderer) {
+            // Draw sweep down
+            if (self.drawFlag(.draw_walk_stairs)) {
+                const renderer = self.base.system.debug_renderer.?;
+                const color = if (too_steep) Color.red else Color.white;
+                renderer.drawArrow(new_position, final_position, color, 0.01);
+                renderer.drawArrow(contact.position, contact.position.addVec3(contact.surface_normal), color, 0.01);
+                self.currentShape().draw(renderer, self.getCenterOfMassTransformAt(final_position, self.rotation, self.currentShape()), Vec3.one(), color, false, true);
+            }
+        }
 
         // Test for floor that will support the character
         if (too_steep) {
@@ -1464,12 +1495,16 @@ pub const CharacterVirtual = struct {
             // In order to judge if the floor is flat further along the sweep, we test again for a floor at inStepForwardTest
             // and check if the normal is valid there.
             var test_position = up_position;
-            try self.moveShape(&test_position, step_forward_test.divScalar(delta_time), delta_time, null, filters, temp_allocator);
+            try self.moveShape(&test_position, step_forward_test.divScalar(delta_time), delta_time, null, filters, temp_allocator, if (Core.debug_renderer) false else {});
             const test_horizontal_movement_sq = test_position.sub(up_position).toVec3().lengthSq();
             if (test_horizontal_movement_sq <= horizontal_movement_sq + 1.0e-8)
                 return false; // We didn't move any further than in the previous test
 
-            // TODO(debug_renderer): draw 2nd sweep horizontal (sDrawWalkStairs)
+            if (Core.debug_renderer) {
+                // Draw 2nd sweep horizontal
+                if (self.drawFlag(.draw_walk_stairs))
+                    self.base.system.debug_renderer.?.drawArrow(up_position, test_position, Color.cyan, 0.01);
+            }
 
             // Then sweep down
             var test_contact: CharacterContact = .{};
@@ -1479,7 +1514,17 @@ pub const CharacterVirtual = struct {
             surface_normal = test_contact.surface_normal;
             too_steep = self.base.isSlopeTooSteep(surface_normal);
 
-            // TODO(debug_renderer): draw 2nd sweep down (sDrawWalkStairs)
+            if (Core.debug_renderer) {
+                // Draw 2nd sweep down
+                if (self.drawFlag(.draw_walk_stairs)) {
+                    const renderer = self.base.system.debug_renderer.?;
+                    const debug_pos = test_position.addVec3(down.mulScalar(test_contact.fraction));
+                    const color = if (too_steep) Color.red else Color.cyan;
+                    renderer.drawArrow(test_position, debug_pos, color, 0.01);
+                    renderer.drawArrow(test_contact.position, test_contact.position.addVec3(test_contact.surface_normal), color, 0.01);
+                    self.currentShape().draw(renderer, self.getCenterOfMassTransformAt(debug_pos, self.rotation, self.currentShape()), Vec3.one(), color, false, true);
+                }
+            }
 
             if (too_steep)
                 return false;
@@ -1525,7 +1570,14 @@ pub const CharacterVirtual = struct {
         // Calculate new position
         const new_position = self.position.addVec3(step_down.mulScalar(contact.fraction));
 
-        // TODO(debug_renderer): draw sweep down (sDrawStickToFloor)
+        if (Core.debug_renderer) {
+            // Draw sweep down
+            if (self.drawFlag(.draw_stick_to_floor)) {
+                const renderer = self.base.system.debug_renderer.?;
+                renderer.drawArrow(self.position, new_position, Color.orange, 0.01);
+                self.currentShape().draw(renderer, self.getCenterOfMassTransformAt(new_position, self.rotation, self.currentShape()), Vec3.one(), Color.orange, false, true);
+            }
+        }
 
         // Move the character to the new location
         try self.moveToContact(new_position, &contact, filters, temp_allocator);
@@ -2127,7 +2179,8 @@ pub const CharacterVirtual = struct {
     }
 
     // Move the shape from position and try to displace it by velocity * delta_time, this will try to slide the shape along the world geometry
-    fn moveShape(self: *CharacterVirtual, position: *RVec3, velocity: Vec3, delta_time: f32, out_active_contacts: ?*ContactList, filters: Filters, temp_allocator: TempAllocator) Allocator.Error!void {
+    // (JPH_DEBUG_RENDERER: `draw_constraints` is `void` without the option, Jolt's default argument is false)
+    fn moveShape(self: *CharacterVirtual, position: *RVec3, velocity: Vec3, delta_time: f32, out_active_contacts: ?*ContactList, filters: Filters, temp_allocator: TempAllocator, draw_constraints_in: if (Core.debug_renderer) bool else void) Allocator.Error!void {
         if (DeterminismLog.enabled) DeterminismLog.log(.{ "CharacterVirtual::MoveShape: pos: ", position.*, " vel: ", velocity, " dt: ", delta_time });
 
         const movement_direction = velocity.normalizedOr(Vec3.zero());
@@ -2160,10 +2213,27 @@ pub const CharacterVirtual = struct {
             defer constraints.free(temp_allocator);
             self.determineConstraints(contacts.items(), delta_time, &constraints);
 
-            // TODO(debug_renderer): draw the constraints of iteration 0 (sDrawConstraints)
+            const draw_constraints = if (Core.debug_renderer) draw_constraints_in and iteration == 0 else {};
+            if (Core.debug_renderer) {
+                if (draw_constraints) {
+                    const renderer = self.base.system.debug_renderer.?;
+                    for (constraints.items()) |*c| {
+                        // Draw contact point
+                        renderer.drawMarker(c.contact.position, Color.yellow, 0.05);
+                        const dist_to_plane = c.plane.getNormal().mulScalar(-c.plane.getConstant());
+
+                        // Draw arrow towards surface that we're hitting
+                        renderer.drawArrow(c.contact.position, c.contact.position.subVec3(dist_to_plane), Color.yellow, 0.05);
+
+                        // Draw plane around the player position indicating the space that we can move
+                        renderer.drawPlane(self.position.addVec3(dist_to_plane), c.plane.getNormal(), Color.cyan, 1.0);
+                        renderer.drawArrow(self.position.addVec3(dist_to_plane), self.position.addVec3(dist_to_plane).addVec3(c.contact.surface_normal), Color.red, 0.05);
+                    }
+                }
+            }
 
             // Solve the displacement using these constraints
-            const solved = try self.solveConstraints(velocity, delta_time, time_remaining, &constraints, &ignored_contacts, temp_allocator);
+            const solved = try self.solveConstraints(velocity, delta_time, time_remaining, &constraints, &ignored_contacts, temp_allocator, draw_constraints);
             var displacement = solved.displacement;
             var time_simulated = solved.time_simulated;
 
@@ -2345,7 +2415,8 @@ pub const CharacterVirtual = struct {
     };
 
     // Use the constraints to solve the displacement of the character. This will slide the character on the planes around the origin for as far as possible.
-    fn solveConstraints(self: *CharacterVirtual, velocity_in: Vec3, delta_time: f32, time_remaining_in: f32, constraints: *TempList(Constraint), ignored_contacts: *TempList(CharacterContactKey), temp_allocator: TempAllocator) Allocator.Error!SolveResult {
+    // (JPH_DEBUG_RENDERER: `draw_constraints` is `void` without the option, Jolt's default argument is false)
+    fn solveConstraints(self: *CharacterVirtual, velocity_in: Vec3, delta_time: f32, time_remaining_in: f32, constraints: *TempList(Constraint), ignored_contacts: *TempList(CharacterContactKey), temp_allocator: TempAllocator, draw_constraints: if (Core.debug_renderer) bool else void) Allocator.Error!SolveResult {
         var time_remaining = time_remaining_in;
 
         // If there are no constraints we can immediately move to our target
@@ -2530,7 +2601,27 @@ pub const CharacterVirtual = struct {
                     listener.onContactSolve(self, c.base.body_b, c.base.sub_shape_id_b, c.position, c.contact_normal, c.linear_velocity, c.material, velocity, &new_velocity);
             }
 
-            // TODO(debug_renderer): draw the constraint planes and the velocities (inDrawConstraints)
+            if (Core.debug_renderer) {
+                if (draw_constraints) {
+                    const renderer = self.base.system.debug_renderer.?;
+
+                    // Calculate where to draw
+                    const offset = self.position.addVec3(Vec3.init(0, 0, 2.5 * @as(f32, @floatFromInt(iteration + 1))));
+
+                    // Draw constraint plane
+                    renderer.drawPlane(offset, constraint.plane.getNormal(), Color.cyan, 1.0);
+
+                    // Draw 2nd constraint plane
+                    if (other_constraint) |oc|
+                        renderer.drawPlane(offset, oc.plane.getNormal(), Color.blue, 1.0);
+
+                    // Draw starting velocity
+                    renderer.drawArrow(offset, offset.addVec3(velocity), Color.green, 0.05);
+
+                    // Draw resulting velocity
+                    renderer.drawArrow(offset, offset.addVec3(new_velocity), Color.red, 0.05);
+                }
+            }
 
             // Update the velocity
             velocity = new_velocity;
@@ -2955,7 +3046,7 @@ pub const CharacterVirtual = struct {
                 var ignored_contacts: TempList(CharacterContactKey) = .{};
                 try ignored_contacts.reserve(temp_allocator, contacts.len);
                 defer ignored_contacts.free(temp_allocator);
-                const solved = try self.solveConstraints(self.base.up.negate(), 1.0, 1.0, &constraints, &ignored_contacts, temp_allocator);
+                const solved = try self.solveConstraints(self.base.up.negate(), 1.0, 1.0, &constraints, &ignored_contacts, temp_allocator, if (Core.debug_renderer) false else {});
 
                 // If we're blocked then we're supported, otherwise we're sliding
                 const min_required_displacement_sq = math.square(0.6 * self.last_delta_time);
@@ -3007,6 +3098,14 @@ pub const CharacterVirtual = struct {
 
         // Ensure that the rigid body ends up at the new position
         self.updateInnerBodyTransform();
+    }
+
+    /// A static draw flag of CharacterVirtual (JPH_DEBUG_RENDERER, R4): the flag of the renderer of the system, false
+    /// without a renderer (Jolt dereferences a null DebugRenderer::sInstance then)
+    const drawFlag = if (Core.debug_renderer) drawFlagImpl else {};
+    fn drawFlagImpl(self: *const CharacterVirtual, comptime flag: enum { draw_constraints, draw_walk_stairs, draw_stick_to_floor }) bool {
+        const renderer = self.base.system.debug_renderer orelse return false;
+        return @field(renderer.flags.character_virtual, @tagName(flag));
     }
 
     // This function returns the actual center of mass of the shape, not corrected for the character padding

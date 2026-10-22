@@ -273,9 +273,8 @@ test "TestPathConstraintMomentum" {
 test "TestPathConstraintFromPhysicsSystem (Jolt's release behavior)" {
     // PathConstraint::GetConstraintSettings is not implemented in Jolt: it asserts and returns nullptr. Jolt's release
     // build continues, PhysicsScene::FromPhysicsSystem adds the constraint with null settings (AddConstraint(nullptr,
-    // ...)) and the body indices. Zolt's ReleaseFast build does the same instead of unwrapping the empty Ref.
-    if (Core.enable_asserts) return error.SkipZigTest;
-
+    // ...)) and the body indices. Zolt does the same instead of unwrapping the empty Ref. With asserts the test expects
+    // the assert of each of the two constraints (RemainingFeaturesArchitecture.md R8).
     const allocator = std.testing.allocator;
     var c: PhysicsTestContext = undefined;
     try c.init(allocator, .{});
@@ -293,7 +292,11 @@ test "TestPathConstraintFromPhysicsSystem (Jolt's release behavior)" {
 
     var scene: PhysicsScene = .init(allocator);
     defer scene.deinit();
+    var expect_assert: fw.ExpectAssert = undefined;
+    expect_assert.init(2); // Jolt asserts "Not implemented yet" once per constraint
+    errdefer expect_assert.restore();
     try scene.fromPhysicsSystem(&c.system);
+    try expect_assert.finish();
     try std.testing.expectEqual(@as(usize, 2), scene.getNumBodies());
     try std.testing.expectEqual(@as(usize, 2), scene.getNumConstraints());
     const constraints = scene.getConstraints();

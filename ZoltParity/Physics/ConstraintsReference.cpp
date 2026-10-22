@@ -18,6 +18,12 @@
 // The kind of a constraint is its EConstraintSubType value (ConstraintKind in ConstraintsParity.zig). This file covers
 // every kind; the Zolt side fills its slots as the classes are ported.
 //
+// jolt_cs_draw_world_* is the C++ side of DrawWorld in ConstraintsParity.zig (group D3, the debug renderer parity):
+// random scenarios in one BodyManager and one ConstraintManager, stepped frame by frame without records.
+//
+// Every allocation through Jolt is zero filled (the hooks of ParityHooks.h, installed by CSEnsureFactory): a pulley with
+// a static body reads members that Jolt never writes (see CSEnsureFactory).
+//
 // jolt_cs_settings_save writes the binary state of the settings of a description, jolt_cs_settings_resave restores
 // settings from bytes (ConstraintSettings::sRestoreFromBinaryState) and saves them again (the cross language round
 // trip). The structs below must match the extern structs of ConstraintsParity.zig (checked by jolt_cs_struct_sizes).
@@ -46,6 +52,8 @@
 #include <Jolt/Physics/Constraints/RackAndPinionConstraint.h>
 #include <Jolt/Physics/Constraints/GearConstraint.h>
 #include <Jolt/Physics/Constraints/PulleyConstraint.h>
+#include <Jolt/Physics/Constraints/ConstraintManager.h>
+#include <ZoltParity/ParityHooks.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -150,11 +158,15 @@ enum ECSOp : uint32
 
 static constexpr uint32 cFirstKindOp = 16;
 
-// The allocator hooks and the Factory, created once for the whole parity binary (the same guard as the other wrapper
-// files, so that RegisterTypes() runs only once)
+// The allocation hooks of ParityHooks.h (zero-filled blocks) and the Factory, created once for the whole parity binary
+// (the same guard as the other wrapper files, so that RegisterTypes() runs only once). Every function of this file that
+// allocates through Jolt calls it first. The blocks must be zero filled: the generator makes pulleys with a static body,
+// and IndependentAxisConstraintPart::SolveVelocityConstraint reads members that Jolt never writes for a static body
+// (mR1xN1, mRatioR2xN2) and multiplies them with its zero angular velocity. A NaN or an infinity in a reused block would
+// make the velocity of the pulley's dynamic body NaN. Zolt starts these members at zero.
 static void CSEnsureFactory()
 {
-	RegisterDefaultAllocator();
+	ParityInstallHooks();
 	if (Factory::sInstance == nullptr)
 	{
 		Factory::sInstance = new Factory();
@@ -1150,6 +1162,18 @@ static void CSApplyOp(TwoBodyConstraint &ioC, const CSOp &inOp, const CSSettings
 	}
 }
 
+// The draw world of group D3 (DrawWorld in ConstraintsParity.zig)
+struct CSDrawWorld
+{
+	CSLayers					mLayers;
+	BodyManager					mBodyManager;
+	ConstraintManager			mConstraintManager { JPH_IF_ENABLE_ASSERTS(&mBodyManager) };
+	Array<CSScenario>			mScenarios;
+	Array<Body *>				mBodies;					///< Body 1 and body 2 of every scenario
+	Array<Ref<Constraint>>		mConstraints;
+	Array<uint32>				mFrames;					///< The next frame of every scenario
+};
+
 static void CSApplyOps(Rec &ioRec, TwoBodyConstraint &ioC, const CSScenario &inScenario, uint32 inFrame)
 {
 	for (uint32 o = 0; o < inScenario.mNumOps; ++o)
@@ -1191,6 +1215,14 @@ void jolt_cs_struct_sizes(uint32 *outSizes)
 	outSizes[9] = offsetof(CSScenario, mSettings);
 	outSizes[10] = offsetof(CSScenario, mOps);
 	outSizes[11] = offsetof(CSOutput, mNumR);
+}
+
+// 1 when the allocation hooks of ParityHooks.h are installed after CSEnsureFactory, which every function of this file
+// that allocates through Jolt calls first
+uint32 jolt_cs_hooks_installed()
+{
+	CSEnsureFactory();
+	return ParityHooksInstalled()? 1 : 0;
 }
 
 void *jolt_cs_world_create()
@@ -1292,6 +1324,81 @@ uint32 jolt_cs_settings_resave(const uint8 *inBytes, uint32 inSize, uint8 *outBy
 	if (size <= inCapacity)
 		memcpy(outBytes, data.data(), size);
 	return size;
+}
+
+// The draw world of group D3 (DrawWorld.create in ConstraintsParity.zig): the bodies of the scenarios in scenario order,
+// then the constraints, added to the ConstraintManager in one call. Its blocks are zero filled (CSEnsureFactory).
+void *jolt_cs_draw_world_create(const CSScenario *inScenarios, uint32 inCount)
+{
+	CSEnsureFactory();
+	CSDrawWorld *world = new CSDrawWorld;
+	world->mScenarios.assign(inScenarios, inScenarios + inCount);
+	world->mFrames.resize(inCount, 0);
+	world->mBodyManager.Init(2 * inCount, 0, world->mLayers);
+	for (const CSScenario &sc : world->mScenarios)
+	{
+		world->mBodies.push_back(sc.mBody[0].mFixedToWorld != 0? &Body::sFixedToWorld : CSCreateBody(world->mBodyManager, sc.mBody[0]));
+		world->mBodies.push_back(CSCreateBody(world->mBodyManager, sc.mBody[1]));
+	}
+	for (uint32 i = 0; i < inCount; ++i)
+	{
+		Ref<TwoBodyConstraintSettings> settings = CSMakeSettings(world->mScenarios[i].mSettings);
+		world->mConstraints.push_back(settings->Create(*world->mBodies[2 * i], *world->mBodies[2 * i + 1]));
+	}
+	Array<Constraint *> constraints;
+	for (Constraint *c : world->mConstraints)
+		constraints.push_back(c);
+	world->mConstraintManager.Add(constraints.data(), int(constraints.size()));
+	return world;
+}
+
+void jolt_cs_draw_world_destroy(void *inWorld)
+{
+	CSDrawWorld *world = static_cast<CSDrawWorld *>(inWorld);
+	for (size_t i = world->mBodies.size(); i > 0; i -= 2)
+	{
+		CSDestroyBody(world->mBodyManager, world->mBodies[i - 1]);
+		CSDestroyBody(world->mBodyManager, world->mBodies[i - 2]);
+	}
+	delete world;
+}
+
+Constraint *jolt_cs_draw_world_constraint(void *inWorld, uint32 inIndex)
+{
+	return static_cast<CSDrawWorld *>(inWorld)->mConstraints[inIndex];
+}
+
+ConstraintManager *jolt_cs_draw_world_constraint_manager(void *inWorld)
+{
+	return &static_cast<CSDrawWorld *>(inWorld)->mConstraintManager;
+}
+
+BodyManager *jolt_cs_draw_world_body_manager(void *inWorld)
+{
+	return &static_cast<CSDrawWorld *>(inWorld)->mBodyManager;
+}
+
+// The next frame of the scenario of constraint inIndex (DrawWorld.step in ConstraintsParity.zig)
+void jolt_cs_draw_world_step(void *inWorld, uint32 inIndex)
+{
+	CSDrawWorld *world = static_cast<CSDrawWorld *>(inWorld);
+	const CSScenario &sc = world->mScenarios[inIndex];
+	uint32 frame = world->mFrames[inIndex];
+	if (frame > sc.mNumFrames)
+		return;
+	world->mFrames[inIndex] = frame + 1;
+	TwoBodyConstraint &c = static_cast<TwoBodyConstraint &>(*world->mConstraints[inIndex]);
+	for (uint32 o = 0; o < sc.mNumOps; ++o)
+		if (sc.mOps[o].mFrame == frame)
+			CSApplyOp(c, sc.mOps[o], sc.mSettings);
+	if (frame == sc.mNumFrames)
+		return;
+	c.SetupVelocityConstraint(sc.mDeltaTime);
+	c.WarmStartVelocityConstraint(sc.mWarmStartRatio[frame]);
+	for (uint32 v = 0; v < sc.mNumVelocitySteps; ++v)
+		c.SolveVelocityConstraint(sc.mDeltaTime);
+	for (uint32 p = 0; p < sc.mNumPositionSteps; ++p)
+		c.SolvePositionConstraint(sc.mDeltaTime, sc.mBaumgarte);
 }
 
 } // extern "C"

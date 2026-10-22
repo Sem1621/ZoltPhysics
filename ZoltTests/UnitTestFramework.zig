@@ -1,6 +1,9 @@
 //! Port of: UnitTests/UnitTestFramework.h, UnitTests/UnitTestFramework.cpp
-//! Status: partial
-//! Missing: ExpectAssert (Zig asserts panic, tests that rely on it are skipped)
+//! Status: complete
+//!
+//! ExpectAssert lives in the library (Zolt/Core/IssueReporting.zig, so the inline tests can use it too) and is
+//! re-exported here. It covers the asserts that Jolt's release build continues after (RemainingFeaturesArchitecture.md
+//! R8); an invariant assert (`std.debug.assert`) still panics.
 //!
 //! Helpers shared by the ported unit tests. Import with:
 //!     const fw = @import("../UnitTestFramework.zig");
@@ -32,6 +35,9 @@ pub const UniformFloatDistribution = struct {
 
 pub const expect = std.testing.expect;
 pub const expectEqual = std.testing.expectEqual;
+
+/// Helper class that expects a number of asserts to fail (see Zolt/Core/IssueReporting.zig for the usage)
+pub const ExpectAssert = zolt.ExpectAssert;
 
 pub const ApproxOptions = struct { tolerance: f64 = 1.0e-6 };
 
