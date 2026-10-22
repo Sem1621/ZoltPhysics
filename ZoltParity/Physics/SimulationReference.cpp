@@ -102,6 +102,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
@@ -111,6 +112,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 using namespace JPH;
 
@@ -5833,6 +5835,29 @@ uint32 jolt_sim_zero_filling_check()
 		AlignedFree(aligned);
 	}
 	return ok;
+}
+
+// For the test of the update watchdog (UpdateWatchdog of SimulationParity.zig): the state of the hang that the watchdog
+// reports. A JobSystemThreadPool with inNumThreads (> 0) workers gets a barrier with one job that still has a
+// dependency, and the calling thread waits in JobSystemWithBarrier::BarrierImpl::Wait while every worker waits on its
+// semaphore (no worker has a job to run). After inMilliseconds another thread removes the dependency, a worker runs the
+// job and the wait returns. Returns 1 when the job ran.
+uint32 jolt_sim_test_barrier_hang(uint32 inNumThreads, uint32 inMilliseconds)
+{
+	SimEnsureFactory();
+	JobSystemThreadPool job_system(cMaxPhysicsJobs, cMaxPhysicsBarriers, int(inNumThreads));
+	std::atomic<uint32> ran { 0 };
+	JobHandle job = job_system.CreateJob("Hang", Color::sRed, [&ran]() { ran = 1; }, 1);
+	JobSystem::Barrier *barrier = job_system.CreateBarrier();
+	barrier->AddJob(job);
+	std::thread release([job, inMilliseconds]() {
+		std::this_thread::sleep_for(std::chrono::milliseconds(inMilliseconds));
+		job.RemoveDependency();
+	});
+	job_system.WaitForJobs(barrier);
+	release.join();
+	job_system.DestroyBarrier(barrier);
+	return ran.load();
 }
 
 // The number of Jolt asserts that failed in this process (ParityAssertFailed; always 0 without JPH_ENABLE_ASSERTS)
