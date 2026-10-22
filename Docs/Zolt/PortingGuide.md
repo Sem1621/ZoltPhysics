@@ -674,7 +674,9 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   unless Jolt's own ISA paths disagree (see section 8, rule 11). Higher level code (collision
   queries, simulation steps) is compared the same way. Simulation parity (`ZoltParity/Physics/SimulationParity.zig`)
   compares the `saveState(.all)` bytes after every step and the listener callbacks as sorted records
-  ([SimulationArchitecture.md](SimulationArchitecture.md) D12).
+  ([SimulationArchitecture.md](SimulationArchitecture.md) D12). An update of either side that hangs aborts the parity
+  process after `-Dupdate_timeout` seconds (default 300) with the scene and the update (the update watchdog, "Hangs" in
+  the SimulationParity header).
 - Parity inputs must reach every branch (degenerate, touching, parallel, coplanar, empty, full,
   iteration limits) and compare every output, including values Jolt writes only on some paths
   (pre-fill both sides with the same sentinel). Prove that a new parity test bites: break one

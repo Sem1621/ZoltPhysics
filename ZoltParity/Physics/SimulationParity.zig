@@ -178,11 +178,45 @@
 //! - the in-loop flush of SoftBodyFinalize's sleep batch deactivates one body less: soft_body_many_go_to_sleep, update
 //!   31, bodies[64] is_active.
 //!
+//! Hangs (the update watchdog, `UpdateWatchdog`): a PhysicsSystem::Update call of either side that runs longer than
+//! -Dupdate_timeout seconds (default 300; 0 turns it off, e.g. under a debugger) aborts the parity process with the
+//! scene, the configuration, the update and the side, instead of stalling CI: "SimulationParity watchdog: scene
+//! soft_body_shapes, zolt .{ .thread_pool = 3 }, jolt 7 threads, update 30: the C++ PhysicsSystem::Update has not
+//! returned after 300000 ms". The main thread is inside the update and cannot fail the test, so the watchdog thread
+//! aborts; the build summary names the test that crashed. runScene and observeSpawnedJobs watch every update, and
+//! runEntry checks that every update of both sides was watched (RunStats.num_watched_updates).
+//! Why: a filtered ReleaseSafe parity run with the soft body scenes, on a machine that ran a second parity build, hung
+//! for 50 minutes in update 30 of soft_body_shapes (C++ with 7 workers) without using CPU: the main thread in
+//! JobSystemWithBarrier::BarrierImpl::Wait, every worker of both sides waiting on its semaphore, so the barrier waited for
+//! a job that no thread ran. The hang did not come back: 50 runs each of soft_body_shapes in ReleaseSafe and ReleaseFast
+//! next to CPU hogs and a second parity build passed. The harness adds no job and no synchronization to an update:
+//! SimWorld creates the JobSystemThreadPool and calls Update, ParityHooks.h only replaces the allocation (zero filled),
+//! Trace and AssertFailed functions. The jobs, the queue and the barrier are Jolt's (Core/JobSystemThreadPool.cpp,
+//! Core/JobSystemWithBarrier.cpp, the same in upstream Jolt). A race of Jolt's barrier needs the same conditions (a soft
+//! body step, a thread preempted at the wrong moment); it is the one that the header of Zolt's
+//! Core/JobSystemWithBarrier.zig notes. BarrierImpl::AddJob / AddJobs set the barrier on a job before they count it
+//! (mNumToAcquire), so a job that finishes in between releases the semaphore before it is counted, and when no other job
+//! of the barrier is pending, Wait returns while the job that adds is still running. JobSoftBodyPrepare adds its collide
+//! jobs (no dependency, queued when created) after creating them, and in the last step no other job of the barrier waits
+//! for it. A test of Jolt's JobSystemThreadPool with that job graph (a prepare job in the barrier creates and adds the
+//! finalize, simulate and collide jobs) crashed twice in 14 runs of 1.5 to 6 million iterations: a worker in AddJobs read
+//! the freed handles of the previous iteration while the main thread already waited in the next BarrierImpl::Wait. That
+//! a hang follows such an early return was not shown. The fix belongs in Jolt (Jolt/ is not changed here) and in Zolt's
+//! port. When the watchdog fires, run the scene with a larger -Dupdate_timeout and attach a debugger to the hung process
+//! before it aborts. The test "SimulationParity the update watchdog reports a hung update" puts the C++ side into the
+//! state of the hang (jolt_sim_test_barrier_hang: the main thread in BarrierImpl::Wait, every worker idle) for longer
+//! than a short timeout. Proof that the abort path bites: a 10 minute jolt_sim_test_barrier_hang in the C++ update 30 of
+//! soft_body_shapes makes `zig build parity -Dupdate_timeout=5 -Dtest-filter=soft_body_shapes` report
+//! "'...SceneTest("soft_body_shapes"...).test.SimulationParity scene' terminated with signal ABRT" with "SimulationParity
+//! watchdog: scene soft_body_shapes, zolt .{ .single_threaded = void }, jolt 0 threads, update 30: the C++
+//! PhysicsSystem::Update has not returned after 5903 ms" after 6 seconds.
+//!
 //! C ABI wrappers: ZoltParity/Physics/SimulationReference.cpp.
 
 const std = @import("std");
 const zolt = @import("zolt");
 const TestLayers = @import("test_layers");
+const parity_options = @import("parity_options");
 const SimScenes = @import("SimScenes.zig");
 const ParityRenderer = @import("../Renderer/ParityRenderer.zig");
 
@@ -315,6 +349,7 @@ const jolt = struct {
     extern fn jolt_sim_ragdoll_settings_info(world: *anyopaque, index: u32, out_values: [*]u32, capacity: u32) u32;
     extern fn jolt_sim_character_id_sequence(world: *anyopaque, first_id: u32, out_values: *[SimScenes.character_id_sequence_len]u32) void;
     extern fn jolt_sim_zero_filling_check() u32;
+    extern fn jolt_sim_test_barrier_hang(num_threads: u32, milliseconds: u32) u32;
     extern fn jolt_sim_reference_assert_count() u32;
     extern fn jolt_sim_reference_has_asserts() u32;
     extern fn jolt_sim_test_assert_hook(out_before: *u32, out_after: *u32) void;
@@ -916,6 +951,8 @@ const ZoltWorld = struct {
     phase7: Phase7Storage = .{},
     /// Phase 9: the shared settings of the soft body descriptions and the soft body contact listener
     soft_body: SoftBodyStorage = .{},
+    /// The watchdog that `update` arms (null: none)
+    watchdog: ?*UpdateWatchdog = null,
 
     fn create(allocator: Allocator, desc: *const SimSceneDesc, job_kind: JobKind) !*ZoltWorld {
         const self = try allocator.create(ZoltWorld);
@@ -1450,6 +1487,8 @@ const ZoltWorld = struct {
     }
 
     fn update(self: *ZoltWorld, delta_time: f32, collision_steps: u32, temp_allocator: TempAllocator, job_system: JobSystem) !u32 {
+        if (self.watchdog) |w| w.enter(.zolt);
+        defer if (self.watchdog) |w| w.leave();
         const errors = try self.system.update(delta_time, collision_steps, temp_allocator, job_system);
         return errors.toInt();
     }
@@ -1700,6 +1739,8 @@ const BroadPhaseSnapshot = struct {
 
 const CppWorld = struct {
     handle: *anyopaque,
+    /// The watchdog that `update` arms (null: none)
+    watchdog: ?*UpdateWatchdog = null,
 
     fn init(desc: *const SimSceneDesc, num_threads: u32) CppWorld {
         return .{ .handle = jolt.jolt_sim_create(desc, num_threads) };
@@ -1714,6 +1755,8 @@ const CppWorld = struct {
     }
 
     fn update(self: CppWorld, delta_time: f32, collision_steps: u32) u32 {
+        if (self.watchdog) |w| w.enter(.cpp);
+        defer if (self.watchdog) |w| w.leave();
         return jolt.jolt_sim_update(self.handle, delta_time, collision_steps);
     }
 
@@ -2549,6 +2592,105 @@ const all_states = [_]StateRecorderState{
     .all,
 };
 
+/// The side of a PhysicsSystem::Update that an UpdateWatchdog watches
+const UpdateSide = enum(u8) {
+    zolt,
+    cpp,
+
+    fn text(side: UpdateSide) []const u8 {
+        return switch (side) {
+            .zolt => "Zolt",
+            .cpp => "C++",
+        };
+    }
+};
+
+/// The update watchdog of a scene run (see "Hangs" in the header): a thread that aborts the parity process with the
+/// scene, the configuration, the update and the side when one PhysicsSystem::Update call does not return within
+/// `timeout`. ZoltWorld.update and CppWorld.update arm it while they run (`enter` / `leave`) when their world has one.
+const UpdateWatchdog = struct {
+    /// The scene and the configuration (`setContext`), for the report
+    scene: []const u8,
+    context_buffer: [128]u8 = undefined,
+    context_len: usize = 0,
+    /// The longest update; zero: no thread, nothing is watched
+    timeout: std.Io.Duration = .fromSeconds(parity_options.update_timeout),
+    /// What the thread does with the report of an update that timed out (a test replaces it)
+    on_timeout: *const fn (watchdog: *UpdateWatchdog, report: []const u8) void = abortWithReport,
+    /// The update of the scene (the driver sets it before the operations of the update)
+    update: std.atomic.Value(u32) = .init(0),
+    /// The side whose update runs and when it started (nanoseconds of the awake clock, 0: no update runs)
+    side: std.atomic.Value(UpdateSide) = .init(.zolt),
+    started: std.atomic.Value(i64) = .init(0),
+    /// Number of updates per side (`enter` calls, for RunStats.num_watched_updates)
+    num_updates: [2]u32 = @splat(0),
+    stop_event: std.Io.Event = .unset,
+    thread: ?std.Thread = null,
+
+    fn setContext(self: *UpdateWatchdog, comptime fmt: []const u8, args: anytype) void {
+        const context: []const u8 = std.fmt.bufPrint(&self.context_buffer, fmt, args) catch &self.context_buffer;
+        self.context_len = context.len;
+    }
+
+    fn start(self: *UpdateWatchdog) !void {
+        if (self.timeout.nanoseconds > 0)
+            self.thread = try std.Thread.spawn(.{}, watch, .{self});
+    }
+
+    /// Stop and join the thread (again: nothing happens)
+    fn stop(self: *UpdateWatchdog) void {
+        self.stop_event.set(io);
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+
+    /// An update of `side` starts
+    fn enter(self: *UpdateWatchdog, side: UpdateSide) void {
+        self.num_updates[@intFromEnum(side)] += 1;
+        self.side.store(side, .monotonic);
+        self.started.store(now(), .release);
+    }
+
+    /// The update returned
+    fn leave(self: *UpdateWatchdog) void {
+        self.started.store(0, .release);
+    }
+
+    fn now() i64 {
+        return @max(1, @as(i64, @intCast(std.Io.Clock.awake.now(io).nanoseconds)));
+    }
+
+    /// The thread: checks the running update every quarter of the timeout (at most every second), reports it once
+    fn watch(self: *UpdateWatchdog) void {
+        const poll: std.Io.Duration = .fromNanoseconds(std.math.clamp(@divTrunc(self.timeout.nanoseconds, 4), std.time.ns_per_ms, std.time.ns_per_s));
+        var reported: i64 = 0;
+        while (true) {
+            self.stop_event.waitTimeout(io, .{ .duration = .{ .raw = poll, .clock = .awake } }) catch {};
+            if (self.stop_event.isSet()) return;
+            const started = self.started.load(.acquire);
+            if (started == 0 or started == reported) continue;
+            const elapsed_ns = now() - started;
+            if (elapsed_ns < self.timeout.nanoseconds) continue;
+            reported = started;
+            var buffer: [512]u8 = undefined;
+            const report: []const u8 = std.fmt.bufPrint(&buffer, "SimulationParity watchdog: scene {s}, {s}, update {d}: the {s} PhysicsSystem::Update has not returned after {d} ms (see \"Hangs\" in the SimulationParity header)", .{
+                self.scene,
+                self.context_buffer[0..self.context_len],
+                self.update.load(.monotonic),
+                self.side.load(.monotonic).text(),
+                @divTrunc(elapsed_ns, std.time.ns_per_ms),
+            }) catch &buffer;
+            self.on_timeout(self, report);
+        }
+    }
+
+    /// The main thread is stuck in the update and cannot fail the test: print the report and abort the process
+    fn abortWithReport(_: *UpdateWatchdog, report: []const u8) void {
+        std.debug.print("{s}\nAborting the parity process (-Dupdate_timeout=<seconds> sets the timeout, 0 turns the watchdog off)\n", .{report});
+        std.process.abort();
+    }
+};
+
 /// The EStateRecorderState of a `snapshot` operation (i[0], 0: All)
 fn snapshotState(op: *const SimOp) StateRecorderState {
     return if (op.i[0] == 0) .all else .fromInt(@intCast(op.i[0]));
@@ -3092,6 +3234,8 @@ const RunStats = struct {
     /// (0 without -Dreference_asserts=true)
     num_zolt_asserts: u32 = 0,
     num_jolt_asserts: u32 = 0,
+    /// The updates that the update watchdog watched, per UpdateSide (also in the sweeps)
+    num_watched_updates: [2]u32 = @splat(0),
 };
 
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
@@ -3139,10 +3283,16 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     const zolt_asserts_before = if (asserts) |a| a.get() else 0;
     const jolt_asserts_before = jolt.jolt_sim_reference_assert_count();
     const desc = builder.desc();
+    var watchdog: UpdateWatchdog = .{ .scene = entry.name };
+    watchdog.setContext("zolt {any}, jolt {d} threads", .{ config.zolt, config.cpp_threads });
+    try watchdog.start();
+    defer watchdog.stop();
     const zw = try ZoltWorld.create(allocator, &desc, config.zolt);
     defer zw.destroy();
-    const cw = CppWorld.init(&desc, config.cpp_threads);
+    zw.watchdog = &watchdog;
+    var cw = CppWorld.init(&desc, config.cpp_threads);
     defer cw.deinit();
+    cw.watchdog = &watchdog;
     if (config.draw) |d| try d.begin(zw);
     defer if (config.draw) |d| d.end(zw);
 
@@ -3156,6 +3306,7 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     var collision_steps = builder.collision_steps;
     var op_index: usize = 0;
     while (run.update < builder.num_updates) : (run.update += 1) {
+        watchdog.update.store(run.update, .monotonic);
         try run.applyOps(&op_index, &delta_time, &collision_steps);
         try run.step(delta_time, collision_steps);
     }
@@ -3173,6 +3324,7 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     run.stats.num_soft_body_ccd_responses = zw.counting_jobs.num_soft_body_ccd_responses.load(.monotonic);
     if (asserts) |a| run.stats.num_zolt_asserts = a.get() - zolt_asserts_before - run.uncompared_asserts;
     run.stats.num_jolt_asserts = jolt.jolt_sim_reference_assert_count() - jolt_asserts_before;
+    run.stats.num_watched_updates = watchdog.num_updates;
     return run.stats;
 }
 
@@ -7624,7 +7776,7 @@ fn runEntry(entry: *const SceneEntry) !void {
         num_spawned_jobs += s.num_spawned_jobs;
         num_large_island_deactivations += s.num_large_island_deactivations;
     }
-    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0 or try observeSpawnedJobs(allocator, &builder));
+    if (expect.spawned_jobs) try expectReached(entry, "FindCollisions jobs spawned from inside jobs", num_spawned_jobs > 0 or try observeSpawnedJobs(allocator, entry, &builder));
     if (expect.large_island) try expectReached(entry, "a large island", num_large_island_deactivations > 0);
     if (expect.full_manifolds) {
         try std.testing.expectEqual(@as(u32, 1), builder.collision_steps); // The records of an update are the manifolds of one step
@@ -7654,6 +7806,9 @@ fn runEntry(entry: *const SceneEntry) !void {
             try std.testing.expect(s.num_temp_failures > 0);
             try std.testing.expect(s.num_job_failures > 0);
         }
+        // The update watchdog watched every update of both sides
+        try std.testing.expect(s.num_watched_updates[@intFromEnum(UpdateSide.zolt)] >= builder.num_updates);
+        try std.testing.expect(s.num_watched_updates[@intFromEnum(UpdateSide.cpp)] >= builder.num_updates);
     }
 
     if (entry.creation_sweep)
@@ -7668,15 +7823,22 @@ const max_spawn_observations = 10;
 /// loaded machine the workers can run the jobs one after the other, then none spawns: contacts_many_bodies in
 /// ReleaseFast next to other builds). The scene runs again on the Zolt side alone (no comparison) with 3 and 7 workers,
 /// up to max_spawn_observations times, until a job spawns one: the scene reaches the path, the scheduling decides when.
-fn observeSpawnedJobs(allocator: Allocator, builder: *const SceneBuilder) !bool {
+fn observeSpawnedJobs(allocator: Allocator, entry: *const SceneEntry, builder: *const SceneBuilder) !bool {
     const desc = builder.desc();
     for (0..max_spawn_observations) |attempt| {
-        const zw = try ZoltWorld.create(allocator, &desc, .{ .thread_pool = if (attempt % 2 == 0) 3 else 7 });
+        const job_kind: JobKind = .{ .thread_pool = if (attempt % 2 == 0) 3 else 7 };
+        var watchdog: UpdateWatchdog = .{ .scene = entry.name };
+        watchdog.setContext("zolt {any} (observeSpawnedJobs)", .{job_kind});
+        try watchdog.start();
+        defer watchdog.stop();
+        const zw = try ZoltWorld.create(allocator, &desc, job_kind);
         defer zw.destroy();
+        zw.watchdog = &watchdog;
         var delta_time = builder.delta_time;
         var collision_steps = builder.collision_steps;
         var op_index: usize = 0;
         for (0..builder.num_updates) |update| {
+            watchdog.update.store(@intCast(update), .monotonic);
             while (op_index < builder.ops.items.len and builder.ops.items[op_index].update == update) : (op_index += 1) {
                 const op = &builder.ops.items[op_index];
                 switch (@as(OpKind, @enumFromInt(op.kind))) {
@@ -8666,6 +8828,36 @@ test "SimulationParity the reference zero-fills its allocations" {
     // The allocation hooks of the parity process (ZoltParity/ParityHooks.h): Jolt's members that are
     // never initialized (Wheel's contact members before the first contact) are 0, as Zolt zero-initializes them
     try std.testing.expectEqual(@as(u32, 1), jolt.jolt_sim_zero_filling_check());
+}
+
+test "SimulationParity the update watchdog reports a hung update" {
+    // The state of the hang of soft_body_shapes (see "Hangs" in the header) for 1.5 s: the C++ side waits in
+    // BarrierImpl::Wait for a job that none of its 7 workers runs. The watchdog with a 100 ms timeout reports it once
+    // (here to the test instead of aborting), with the scene, the configuration, the update and the side.
+    const Reports = struct {
+        var buffer: [512]u8 = undefined;
+        var len: usize = 0;
+        var count: u32 = 0;
+
+        fn record(_: *UpdateWatchdog, report: []const u8) void {
+            len = @min(report.len, buffer.len);
+            @memcpy(buffer[0..len], report[0..len]);
+            count += 1;
+        }
+    };
+    var watchdog: UpdateWatchdog = .{ .scene = "soft_body_shapes", .timeout = .fromMilliseconds(100), .on_timeout = Reports.record };
+    watchdog.setContext("zolt {any}, jolt {d} threads", .{ configs[3].zolt, configs[3].cpp_threads });
+    try watchdog.start();
+    defer watchdog.stop();
+    watchdog.update.store(30, .monotonic);
+    watchdog.enter(.cpp);
+    const ran = jolt.jolt_sim_test_barrier_hang(7, 1500);
+    watchdog.leave();
+    try std.testing.expectEqual(@as(u32, 1), ran);
+    watchdog.stop(); // Joins the thread: its report is complete
+    try std.testing.expectEqual(@as(u32, 1), Reports.count);
+    try std.testing.expectStringStartsWith(Reports.buffer[0..Reports.len], "SimulationParity watchdog: scene soft_body_shapes, zolt .{ .thread_pool = 3 }, jolt 7 threads, update 30: the C++ PhysicsSystem::Update has not returned after ");
+    try std.testing.expectEqual([2]u32{ 0, 1 }, watchdog.num_updates);
 }
 
 test "SimulationParity Phase 7 record helpers" {

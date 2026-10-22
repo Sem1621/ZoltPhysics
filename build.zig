@@ -27,6 +27,8 @@
 //!   -Dreference_asserts=true    Build the C++ reference of `zig build parity` with JPH_ENABLE_ASSERTS: the simulation
 //!                               parity fails a scene whose C++ side hits a Jolt assert. The release_only scenes and
 //!                               the release only parity tests compare the counts of both sides instead (R8).
+//!   -Dupdate_timeout=<seconds>  The simulation parity aborts the parity process when one PhysicsSystem::Update of either
+//!                               side runs longer (the update watchdog, default 300; 0: off, e.g. under a debugger)
 //!   -Duse_llvm=true|false       Use the LLVM backend (default: true). Zig 0.16's self-hosted x86_64 backend,
 //!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
 const std = @import("std");
@@ -338,6 +340,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The update watchdog of the simulation parity (ZoltParity/Physics/SimulationParity.zig, "Hangs" in its header). The
+    // parity tests import it as "parity_options".
+    const update_timeout = b.option(u32, "update_timeout", "Seconds that one PhysicsSystem::Update of the simulation parity may run before the parity process aborts (default 300, 0: no watchdog)") orelse 300;
+    const parity_options = b.addOptions();
+    parity_options.addOption(u32, "update_timeout", update_timeout);
+
     const parity_tests = b.addTest(.{
         .name = "zolt-parity",
         .root_module = b.createModule(.{
@@ -350,6 +358,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "test_layers", .module = parity_layers_module },
                 .{ .name = "objectstream_test", .module = parity_objectstream_test_module },
                 .{ .name = "perf_ragdoll_scene", .module = parity_perf_ragdoll_module },
+                .{ .name = "parity_options", .module = parity_options.createModule() },
             },
         }),
         .filters = test_filters,
