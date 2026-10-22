@@ -493,7 +493,8 @@ fn zoltCast(allocator: Allocator, input: *const CastTrianglesInput) !HitsOutput 
                 for (in.triangles[0..in.num_triangles]) |*t|
                     caster.cast(vec3At(&t.v, 0), vec3At(&t.v, 1), vec3At(&t.v, 2), @intCast(t.active_edges), makeID(t.sub_shape_id2));
             } else {
-                var caster = CastConvexVsTriangles.init(q.shape_cast, q.settings, vec3(in.scale2), mat44(in.transform2), makeCreator(in.creator1), collector);
+                var caster: CastConvexVsTriangles = undefined;
+                caster.init(q.shape_cast, q.settings, vec3(in.scale2), mat44(in.transform2), makeCreator(in.creator1), collector);
                 for (in.triangles[0..in.num_triangles]) |*t|
                     caster.cast(vec3At(&t.v, 0), vec3At(&t.v, 1), vec3At(&t.v, 2), @intCast(t.active_edges), makeID(t.sub_shape_id2));
             }

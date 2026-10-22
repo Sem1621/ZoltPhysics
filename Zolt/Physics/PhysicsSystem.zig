@@ -2602,7 +2602,7 @@ pub const PhysicsSystem = struct {
                                 collector.ccd_body.sub_shape_id2 = result.base.sub_shape_id2;
                                 collector.ccd_body.fraction = fraction;
                                 collector.ccd_body.fraction_plus_slop = fraction_plus_slop;
-                                collector.result.* = result.*;
+                                collector.result.assign(result); // Copies only the used face vertices
 
                                 // Result was assuming body 2 is not moving, but it is, so we need to correct for it
                                 const movement2 = calculateBodyMotion(body2, collector.delta_time).mulScalar(fraction);

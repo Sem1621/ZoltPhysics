@@ -65,6 +65,20 @@ pub const CollideShapeResult = struct {
         self.shape2_face.clear();
     }
 
+    /// Copy assignment (operator =): copies only the used face vertices, a struct copy would copy the whole faces
+    pub fn assign(self: *CollideShapeResult, other: *const CollideShapeResult) void {
+        if (self == other) return;
+        self.contact_point_on1 = other.contact_point_on1;
+        self.contact_point_on2 = other.contact_point_on2;
+        self.penetration_axis = other.penetration_axis;
+        self.penetration_depth = other.penetration_depth;
+        self.sub_shape_id1 = other.sub_shape_id1;
+        self.sub_shape_id2 = other.sub_shape_id2;
+        self.body_id2 = other.body_id2;
+        self.shape1_face.assign(&other.shape1_face);
+        self.shape2_face.assign(&other.shape2_face);
+    }
+
     /// Function required by the CollisionCollector. A smaller fraction is considered to be a 'better hit'. We use -penetration depth to get the hit with the biggest penetration depth
     pub fn getEarlyOutFraction(self: *const CollideShapeResult) f32 {
         return -self.penetration_depth;
@@ -164,6 +178,19 @@ test "CollideShapeResult.reversed and the settings defaults" {
     try std.testing.expectEqual(@as(u32, 1), d.shape1_face.len);
     try std.testing.expectEqual(@as(u32, 0), d.shape2_face.len);
     try expect(d.shape1_face.get(0).eql(Vec3.init(7, 8, 9)));
+
+    // Assignment copies every member and the used face vertices
+    var a: CollideShapeResult = undefined;
+    a.assign(&r);
+    try expect(a.contact_point_on1.eql(r.contact_point_on1) and a.contact_point_on2.eql(r.contact_point_on2));
+    try expect(a.penetration_axis.eql(r.penetration_axis));
+    try std.testing.expectEqual(r.penetration_depth, a.penetration_depth);
+    try expect(a.sub_shape_id1.eql(r.sub_shape_id1) and a.sub_shape_id2.eql(r.sub_shape_id2) and a.body_id2.eql(r.body_id2));
+    try expect(a.shape1_face.eql(&r.shape1_face) and a.shape2_face.eql(&r.shape2_face));
+    a.assign(&a); // Self assignment keeps the result
+    try expect(a.shape1_face.eql(&r.shape1_face));
+    a.assign(&d);
+    try expect(a.shape1_face.eql(&d.shape1_face) and a.shape2_face.isEmpty());
 
     const settings: CollideShapeSettings = .{};
     try expect(settings.active_edge_mode == .collide_only_with_active and settings.collect_faces_mode == .no_faces);

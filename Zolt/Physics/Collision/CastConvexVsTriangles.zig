@@ -43,32 +43,33 @@ pub const CastConvexVsTriangles = struct {
     collector: *CastShapeCollector,
 
     /// Buffer that holds the support function of the cast shape
-    support_buffer: ConvexShape.SupportBuffer = .{},
+    support_buffer: ConvexShape.SupportBuffer,
     /// Support function of the cast shape
-    support: ?*const ConvexShape.Support = null,
+    support: ?*const ConvexShape.Support,
     /// Sign of the scale, -1 if object is inside out, 1 if not
     scale_sign: f32,
 
-    /// Constructor
+    /// Constructor, in place: `var caster: CastConvexVsTriangles = undefined; caster.init(...);`. A by-value result
+    /// would copy the 4 KB support buffer, and `support` points into that buffer after the first triangle.
     /// @param shape_cast The shape to cast against the triangles and its start and direction
     /// @param shape_cast_settings Settings for performing the cast
     /// @param scale Local space scale for the shape to cast against (scales relative to its center of mass).
     /// @param center_of_mass_transform2 Is the center of mass transform of shape 2 (excluding scale), this is used to provide a transform to the shape cast result so that local quantities can be transformed into world space.
     /// @param sub_shape_id_creator1 Class that tracks the current sub shape ID for the casting shape
     /// @param collector The collector that receives the results.
-    pub fn init(shape_cast: *const ShapeCast, shape_cast_settings: *const ShapeCastSettings, scale: Vec3, center_of_mass_transform2: Mat44, sub_shape_id_creator1: SubShapeIDCreator, collector: *CastShapeCollector) CastConvexVsTriangles {
+    pub fn init(self: *CastConvexVsTriangles, shape_cast: *const ShapeCast, shape_cast_settings: *const ShapeCastSettings, scale: Vec3, center_of_mass_transform2: Mat44, sub_shape_id_creator1: SubShapeIDCreator, collector: *CastShapeCollector) void {
         std.debug.assert(shape_cast.shape.getType() == .convex);
 
-        return .{
-            .shape_cast = shape_cast,
-            .shape_cast_settings = shape_cast_settings,
-            .center_of_mass_transform2 = center_of_mass_transform2,
-            .scale = scale,
-            .sub_shape_id_creator1 = sub_shape_id_creator1,
-            .collector = collector,
-            // Determine if shape is inside out or not
-            .scale_sign = if (ScaleHelpers.isInsideOut(scale)) -1.0 else 1.0,
-        };
+        self.shape_cast = shape_cast;
+        self.shape_cast_settings = shape_cast_settings;
+        self.center_of_mass_transform2 = center_of_mass_transform2;
+        self.scale = scale;
+        self.sub_shape_id_creator1 = sub_shape_id_creator1;
+        self.collector = collector;
+        self.support = null;
+
+        // Determine if shape is inside out or not
+        self.scale_sign = if (ScaleHelpers.isInsideOut(scale)) -1.0 else 1.0;
     }
 
     /// Cast convex object with a single triangle
@@ -191,7 +192,8 @@ test "CastConvexVsTriangles: box cast onto a triangle, back faces, faces, initia
     // Box 2 above the triangle (local space of the triangles), moving 4 down: hits at fraction (2 - 0.5) / 4
     const shape_cast = ShapeCast.init(box.asShape(), Vec3.one(), Mat44.translation(Vec3.init(0, 2, 0)), Vec3.init(0, -4, 0));
     const creator = SubShapeIDCreator.pushID(.{}, 1, 2);
-    var caster = CastConvexVsTriangles.init(&shape_cast, &settings, Vec3.one(), transform2, creator, &hits.base);
+    var caster: CastConvexVsTriangles = undefined;
+    caster.init(&shape_cast, &settings, Vec3.one(), transform2, creator, &hits.base);
     caster.cast(v0, v1, v2, 0b111, .{ .value = 8 });
     try hits.checkError();
     try testing.expectEqual(@as(usize, 1), hits.hits.items.len);
@@ -223,7 +225,8 @@ test "CastConvexVsTriangles: box cast onto a triangle, back faces, faces, initia
     // Inside out scale: the reversed triangle is front facing, the face winding is swapped back
     hits.reset();
     settings.back_face_mode_triangles = .ignore_back_faces;
-    var inside_out = CastConvexVsTriangles.init(&shape_cast, &settings, Vec3.init(1, 1, -1), transform2, creator, &hits.base);
+    var inside_out: CastConvexVsTriangles = undefined;
+    inside_out.init(&shape_cast, &settings, Vec3.init(1, 1, -1), transform2, creator, &hits.base);
     const m = Vec3.init(1, 1, -1);
     inside_out.cast(v0.mul(m), v2.mul(m), v1.mul(m), 0b111, .{});
     try hits.checkError();
@@ -235,7 +238,8 @@ test "CastConvexVsTriangles: box cast onto a triangle, back faces, faces, initia
     settings.return_deepest_point = true;
     settings.use_shrunken_shape_and_convex_radius = true;
     const overlapping = ShapeCast.init(box.asShape(), Vec3.one(), Mat44.translation(Vec3.init(0, 0.25, 0)), Vec3.init(0, -1, 0));
-    var overlap_caster = CastConvexVsTriangles.init(&overlapping, &settings, Vec3.one(), transform2, creator, &hits.base);
+    var overlap_caster: CastConvexVsTriangles = undefined;
+    overlap_caster.init(&overlapping, &settings, Vec3.one(), transform2, creator, &hits.base);
     overlap_caster.cast(v0, v1, v2, 0b111, .{});
     try testing.expectEqual(@as(usize, 1), hits.hits.items.len);
     try testing.expectEqual(@as(f32, 0.0), hits.hits.items[0].fraction);
@@ -244,7 +248,8 @@ test "CastConvexVsTriangles: box cast onto a triangle, back faces, faces, initia
     // Missing the triangle
     hits.reset();
     const miss = ShapeCast.init(box.asShape(), Vec3.one(), Mat44.translation(Vec3.init(20, 2, 0)), Vec3.init(0, -4, 0));
-    var miss_caster = CastConvexVsTriangles.init(&miss, &settings, Vec3.one(), transform2, creator, &hits.base);
+    var miss_caster: CastConvexVsTriangles = undefined;
+    miss_caster.init(&miss, &settings, Vec3.one(), transform2, creator, &hits.base);
     miss_caster.cast(v0, v1, v2, 0b111, .{});
     try testing.expectEqual(@as(usize, 0), hits.hits.items.len);
 
@@ -252,7 +257,8 @@ test "CastConvexVsTriangles: box cast onto a triangle, back faces, faces, initia
     hits.reset();
     settings.return_deepest_point = false;
     const side = ShapeCast.init(box.asShape(), Vec3.one(), Mat44.translation(Vec3.init(5, -0.25, 3)), Vec3.init(-4, 0, 0));
-    var side_caster = CastConvexVsTriangles.init(&side, &settings, Vec3.one(), transform2, creator, &hits.base);
+    var side_caster: CastConvexVsTriangles = undefined;
+    side_caster.init(&side, &settings, Vec3.one(), transform2, creator, &hits.base);
     side_caster.cast(v0, v1, v2, 0b000, .{});
     settings.active_edge_mode = .collide_with_all;
     side_caster.cast(v0, v1, v2, 0b000, .{});

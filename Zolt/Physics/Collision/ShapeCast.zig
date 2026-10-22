@@ -202,6 +202,13 @@ pub const ShapeCastResult = struct {
         return .{ .base = .initDefault() };
     }
 
+    /// Copy assignment (operator =): copies only the used face vertices, a struct copy would copy the whole faces
+    pub fn assign(self: *ShapeCastResult, other: *const ShapeCastResult) void {
+        self.base.assign(&other.base);
+        self.fraction = other.fraction;
+        self.is_back_face_hit = other.is_back_face_hit;
+    }
+
     /// Function required by the CollisionCollector. A smaller fraction is considered to be a 'better hit'. For rays/cast shapes we can just use the collision fraction. The fraction and penetration depth are combined in such a way that deeper hits at fraction 0 go first.
     pub fn getEarlyOutFraction(self: *const ShapeCastResult) f32 {
         return if (self.fraction > 0.0) self.fraction else -self.base.penetration_depth;
@@ -329,4 +336,12 @@ test "ShapeCastSettings and ShapeCastResult" {
     try expect(reversed.base.shape1_face.get(1).eql(Vec3.init(2, 3, 3)));
     try testing.expectEqual(@as(u32, 1), reversed.base.shape2_face.len);
     try expect(reversed.base.shape2_face.get(0).eql(Vec3.init(0, 1, 1)));
+
+    // Assignment copies every member and the used face vertices
+    var copy: ShapeCastResult = .initDefault();
+    copy.assign(&reversed);
+    try expect(copy.base.contact_point_on1.eql(reversed.base.contact_point_on1) and copy.base.penetration_axis.eql(reversed.base.penetration_axis));
+    try expect(copy.base.sub_shape_id1.eql(reversed.base.sub_shape_id1) and copy.base.body_id2.eql(reversed.base.body_id2));
+    try expect(copy.fraction == reversed.fraction and copy.is_back_face_hit == reversed.is_back_face_hit);
+    try expect(copy.base.shape1_face.eql(&reversed.base.shape1_face) and copy.base.shape2_face.eql(&reversed.base.shape2_face));
 }

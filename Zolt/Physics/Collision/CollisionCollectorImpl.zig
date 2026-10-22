@@ -38,6 +38,20 @@ fn defaultResult(comptime R: type) R {
     return if (@hasDecl(R, "initDefault")) R.initDefault() else .{};
 }
 
+/// Store a copy of `result` in `dst` (C++ copy assignment). `dst_valid` tells if `dst` holds a result that must be
+/// released first. Results with faces have an `assign` that copies only the used face vertices, a struct copy would
+/// copy the whole faces.
+fn storeResult(comptime R: type, dst: *R, dst_valid: bool, result: *const R) void {
+    if (comptime @hasDecl(R, "assign")) {
+        comptime std.debug.assert(!@hasDecl(R, "deinit") and !@hasDecl(R, "clone")); // assign does not handle references
+        dst.assign(result); // `result` may be `dst`
+    } else {
+        const copy = copyResult(R, result); // Copy first: `result` may be the stored hit
+        if (dst_valid) releaseResult(R, dst);
+        dst.* = copy;
+    }
+}
+
 /// Release a stored result (C++ destructor)
 fn releaseResult(comptime R: type, result: *R) void {
     if (@hasDecl(R, "deinit")) result.deinit();
@@ -133,12 +147,12 @@ pub fn AllHitCollisionCollector(comptime CollectorType: type) type {
             if (self.alloc_error.err != null)
                 return;
 
-            var hit = copyResult(ResultType, result);
-            self.hits.append(self.allocator, hit) catch |err| {
-                releaseResult(ResultType, &hit);
+            const hit = self.hits.addOne(self.allocator) catch |err| {
                 self.alloc_error.set(err);
                 self.base.forceEarlyOut();
+                return;
             };
+            storeResult(ResultType, hit, false, result);
         }
 
         /// Order hits on closest first
@@ -205,9 +219,7 @@ pub fn ClosestHitCollisionCollector(comptime CollectorType: type) type {
                 self.base.updateEarlyOutFraction(early_out);
 
                 // Store hit
-                const copy = copyResult(ResultType, result); // Copy first: `result` may be the stored hit
-                if (self.had_hit) releaseResult(ResultType, &self.hit);
-                self.hit = copy;
+                storeResult(ResultType, &self.hit, self.had_hit, result);
                 self.had_hit = true;
             }
         }
@@ -295,21 +307,17 @@ pub fn ClosestHitPerBodyCollisionCollector(comptime CollectorType: type) type {
 
                 if (!self.had_hit) {
                     // First time we have a hit we append it to the array
-                    var hit = copyResult(ResultType, result);
-                    self.hits.append(self.allocator, hit) catch |err| {
+                    const hit = self.hits.addOne(self.allocator) catch |err| {
                         // had_hit stays false, so onBodyEnd does not restore the early out fraction: the query stops
-                        releaseResult(ResultType, &hit);
                         self.alloc_error.set(err);
                         self.base.forceEarlyOut();
                         return;
                     };
+                    storeResult(ResultType, hit, false, result);
                     self.had_hit = true;
                 } else {
                     // Closer hits will override the previous one
-                    const back = &self.hits.items[self.hits.items.len - 1];
-                    const copy = copyResult(ResultType, result); // Copy first: `result` may be the stored hit
-                    releaseResult(ResultType, back);
-                    back.* = copy;
+                    storeResult(ResultType, &self.hits.items[self.hits.items.len - 1], true, result);
                 }
             }
         }
@@ -394,9 +402,7 @@ pub fn AnyHitCollisionCollector(comptime CollectorType: type) type {
             self.base.forceEarlyOut();
 
             // Store hit
-            const copy = copyResult(ResultType, result); // Copy first: `result` may be the stored hit
-            if (self.had_hit) releaseResult(ResultType, &self.hit);
-            self.hit = copy;
+            storeResult(ResultType, &self.hit, self.had_hit, result);
             self.had_hit = true;
         }
 

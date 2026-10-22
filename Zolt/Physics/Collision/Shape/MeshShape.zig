@@ -1610,7 +1610,8 @@ pub const MeshShape = struct {
         const mesh = shape.cast(MeshShape);
 
         // In place: the helper keeps a pointer into its support buffer after the first triangle
-        var visitor: Visitor = .{ .base = .init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector) };
+        var visitor: Visitor = undefined;
+        visitor.base.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         visitor.inv_direction.set(shape_cast.direction);
         visitor.box_center = shape_cast.shape_world_bounds.getCenter();
         visitor.box_extent = shape_cast.shape_world_bounds.getExtent().add(Vec3.replicate(shape_cast_settings.extra_convex_radius));

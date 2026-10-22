@@ -543,7 +543,7 @@ pub const ConvexShape = struct {
             for (Vec3.unit_sphere.constSlice()) |v| {
                 const direction = v.mulScalar(0.05);
 
-                var face: Shape.SupportingFace = .{};
+                var face: Shape.SupportingFace = .init();
                 self.base.getSupportingFace(.empty, direction, scale, Mat44.identity(), &face); // Virtual call
 
                 if (!face.isEmpty()) {
