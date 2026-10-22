@@ -81,7 +81,8 @@ pub const CastSphereVsTriangles = struct {
         const contact_normal_world = self.center_of_mass_transform2.multiply3x3(contact_normal);
 
         // Its a hit, store the sub shape id's
-        const result = ShapeCastResult.init(fraction, contact_point_a, contact_point_b, contact_normal_world, back_facing, self.sub_shape_id_creator1.getID(), sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
+        var result: ShapeCastResult = undefined;
+        result.init(fraction, contact_point_a, contact_point_b, contact_normal_world, back_facing, self.sub_shape_id_creator1.getID(), sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
 
         // Note: We don't gather faces here because that's only useful if both shapes have a face. Since the sphere always has only 1 contact point, the manifold is always a point.
 

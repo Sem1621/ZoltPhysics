@@ -354,7 +354,8 @@ pub fn collideParity(shape1: *const Shape, shape2: *const Shape, scale1: Vec3, s
         if (-depth < collector.getEarlyOutFraction()) {
             const contact1 = center_of_mass_transform1.getTranslation();
             const contact2 = center_of_mass_transform2.mulVec3(scale2.mul(p2.half_extent));
-            var result = CollideShapeResult.init(contact1, contact2, contact2.sub(contact1), depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+            var result: CollideShapeResult = undefined;
+            result.init(contact1, contact2, contact2.sub(contact1), depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
             result.shape1_face.append(center_of_mass_transform1.mulVec3(scale1.mul(p1.half_extent)));
             result.shape1_face.append(center_of_mass_transform1.mulVec3(scale1.mul(p1.half_extent.negate())));
             result.shape2_face.append(center_of_mass_transform2.mulVec3(scale2.mul(p2.center_of_mass)));
@@ -386,7 +387,8 @@ pub fn castParity(shape_cast: *const ShapeCast, shape_cast_settings: *const Shap
         if (fraction < collector.getEarlyOutFraction()) {
             const contact1 = center_of_mass_transform2.mulVec3(shape_cast.getPointOnRay(fraction));
             const contact2 = center_of_mass_transform2.mulVec3(shape_cast.center_of_mass_start.getTranslation().add(scale.mul(p2.half_extent)));
-            var result = ShapeCastResult.init(fraction, contact1, contact2, center_of_mass_transform2.multiply3x3(shape_cast.direction), i == 1, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+            var result: ShapeCastResult = undefined;
+            result.init(fraction, contact1, contact2, center_of_mass_transform2.multiply3x3(shape_cast.direction), i == 1, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
             result.base.shape1_face.append(contact1);
             result.base.shape1_face.append(Vec3.replicate(-0.0)); // Its reversed copy -0 - fraction * world direction shows the sign of zero components of the world direction
             result.base.shape2_face.append(center_of_mass_transform2.mulVec3(p2.center_of_mass));

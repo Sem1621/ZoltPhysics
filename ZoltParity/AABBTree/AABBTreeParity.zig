@@ -544,7 +544,8 @@ fn zoltWalk(allocator: std.mem.Allocator, input: *const Input, rays: []const [7]
     {
         s.add(marker_all_visitor);
         var visitor: AllVisitor = .{ .stream = s };
-        var ctx: NodeCodec.DecodingContext = .init(header);
+        var ctx: NodeCodec.DecodingContext = undefined;
+        ctx.init(header);
         ctx.walkTree(buffer_start, &triangle_ctx, &visitor);
         s.add(marker_walk_done);
         s.add(@intFromBool(ctx.isDoneWalking()));
@@ -555,7 +556,8 @@ fn zoltWalk(allocator: std.mem.Allocator, input: *const Input, rays: []const [7]
         s.add(marker_ray_visitor);
         const direction = Vec3.init(ray[3], ray[4], ray[5]);
         var visitor: RayVisitor = .{ .stream = s, .ray_origin = .init(ray[0], ray[1], ray[2]), .ray_direction = direction, .ray_inv_direction = .init(direction), .fraction = ray[6] };
-        var ctx: NodeCodec.DecodingContext = .init(header);
+        var ctx: NodeCodec.DecodingContext = undefined;
+        ctx.init(header);
         ctx.walkTree(buffer_start, &triangle_ctx, &visitor);
         s.add(marker_walk_done);
         s.add(@intFromBool(ctx.isDoneWalking()));
@@ -575,7 +577,8 @@ fn zoltWalk(allocator: std.mem.Allocator, input: *const Input, rays: []const [7]
     for (boxes, max_triangles) |box, max| {
         s.add(marker_box_visitor);
         var visitor: BoxVisitor = .{ .stream = s, .box = .init(.init(box[0], box[1], box[2]), .init(box[3], box[4], box[5])), .max_triangles = @intCast(max) };
-        var ctx: NodeCodec.DecodingContext = .init(header);
+        var ctx: NodeCodec.DecodingContext = undefined;
+        ctx.init(header);
         while (true) {
             visitor.num_triangles_found = 0;
             visitor.should_abort = false;

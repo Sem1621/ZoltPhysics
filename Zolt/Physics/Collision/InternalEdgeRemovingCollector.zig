@@ -339,7 +339,8 @@ const CollideConvexVsTriangles = @import("CollideConvexVsTriangles.zig").Collide
 
 /// A hit against a triangle of shape 2
 fn triangleHit(face: [3]Vec3, contact_point: Vec3, penetration_axis: Vec3, penetration_depth: f32, sub_shape_id1: u32, sub_shape_id2: u32) CollideShapeResult {
-    var r = CollideShapeResult.init(contact_point, contact_point, penetration_axis, penetration_depth, .{ .value = sub_shape_id1 }, .{ .value = sub_shape_id2 }, .invalid);
+    var r: CollideShapeResult = undefined;
+    r.init(contact_point, contact_point, penetration_axis, penetration_depth, .{ .value = sub_shape_id1 }, .{ .value = sub_shape_id2 }, .invalid);
     for (face) |v| r.shape2_face.append(v);
     return r;
 }

@@ -910,7 +910,8 @@ pub fn collideBoxVsBox(shape1: *const Shape, shape2: *const Shape, scale1: Vec3,
     penetration_axis.setComponent(axis, if (b2.getCenter().getComponent(axis) >= b1.getCenter().getComponent(axis)) 1.0 else -1.0);
     const on1 = b1.getClosestPoint(b2.getCenter());
     const on2 = on1.sub(penetration_axis.mulScalar(depth));
-    const result = CollideShapeResult.init(on1, on2, penetration_axis, depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+    var result: CollideShapeResult = undefined;
+    result.init(on1, on2, penetration_axis, depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
     if (-result.penetration_depth < collector.getEarlyOutFraction())
         collector.addHit(&result);
 }
@@ -928,7 +929,8 @@ pub fn collideSphereVsBox(shape1: *const Shape, shape2: *const Shape, scale1: Ve
     if (distance_sq >= radius * radius) return;
     const distance = @sqrt(distance_sq);
     const axis = delta.normalizedOr(Vec3.axisY());
-    var result = CollideShapeResult.init(center.add(axis.mulScalar(radius)), closest, axis, radius - distance, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+    var result: CollideShapeResult = undefined;
+    result.init(center.add(axis.mulScalar(radius)), closest, axis, radius - distance, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
     if (collide_shape_settings.collect_faces_mode == .collect_faces) {
         result.shape1_face.append(result.contact_point_on1);
         shape2.getSupportingFace(.empty, center_of_mass_transform2.multiply3x3Transposed(axis.negate()), scale2, center_of_mass_transform2, &result.shape2_face);
@@ -951,7 +953,8 @@ pub fn castSphereVsBox(shape_cast: *const ShapeCast, shape_cast_settings: *const
     const center = shape_cast.getPointOnRay(fraction);
     const normal = shape.getSurfaceNormal(.empty, center.div(scale));
     const contact_on2 = center.sub(normal.mulScalar(radius));
-    var result = ShapeCastResult.init(fraction, center_of_mass_transform2.mulVec3(contact_on2), center_of_mass_transform2.mulVec3(contact_on2), center_of_mass_transform2.multiply3x3(normal.negate()), false, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+    var result: ShapeCastResult = undefined;
+    result.init(fraction, center_of_mass_transform2.mulVec3(contact_on2), center_of_mass_transform2.mulVec3(contact_on2), center_of_mass_transform2.multiply3x3(normal.negate()), false, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
     if (shape_cast_settings.collect_faces_mode == .collect_faces)
         shape.getSupportingFace(.empty, normal, scale, center_of_mass_transform2, &result.base.shape2_face);
     collector.addHit(&result);

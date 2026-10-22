@@ -181,7 +181,8 @@ pub fn reversedCollideShape(shape1: *const Shape, shape2: *const Shape, scale1: 
 
         pub fn addHit(self: *@This(), result: *const CollideShapeResult) void {
             // Add the reversed hit
-            const reversed = result.reversed();
+            var reversed: CollideShapeResult = undefined;
+            result.reversed(&reversed);
             self.collector.addHit(&reversed);
 
             // If our chained collector updated its early out fraction, we need to follow
@@ -211,7 +212,8 @@ pub fn reversedCastShape(shape_cast: *const ShapeCast, shape_cast_settings: *con
 
         pub fn addHit(self: *@This(), result: *const ShapeCastResult) void {
             // Add the reversed hit
-            const reversed = result.reversed(self.world_direction);
+            var reversed: ShapeCastResult = undefined;
+            result.reversed(self.world_direction, &reversed);
             self.collector.addHit(&reversed);
 
             // If our chained collector updated its early out fraction, we need to follow
@@ -358,7 +360,8 @@ test "CollisionDispatch: collide through the table, reversed collisions are the 
     defer reversed.deinit();
     collideShapeVsShape(box.asShape(), sphere.asShape(), Vec3.one(), Vec3.one(), t_box, t_sphere, creator2, creator1, &settings, &reversed.base, &filter.base);
     try expect(reversed.hadHit());
-    const expected = forward.hit.reversed();
+    var expected: CollideShapeResult = undefined;
+    forward.hit.reversed(&expected);
     try expect(reversed.hit.contact_point_on1.eql(expected.contact_point_on1) and reversed.hit.contact_point_on2.eql(expected.contact_point_on2));
     try expect(reversed.hit.penetration_axis.eql(expected.penetration_axis));
     try testing.expectEqual(expected.penetration_depth, reversed.hit.penetration_depth);

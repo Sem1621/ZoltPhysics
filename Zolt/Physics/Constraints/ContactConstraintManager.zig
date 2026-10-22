@@ -1362,7 +1362,7 @@ pub const ContactConstraintManager = struct {
             // Call contact listener to update settings
             if (self.contact_listener) |listener| {
                 // Convert constraint to manifold structure for callback
-                var manifold: ContactManifold = .{};
+                var manifold: ContactManifold = .init();
                 manifold.world_space_normal = world_space_normal;
                 manifold.sub_shape_id1 = input_key.getSubShapeID1();
                 manifold.sub_shape_id2 = input_key.getSubShapeID2();
@@ -1802,7 +1802,7 @@ pub const ContactConstraintManager = struct {
         if (body2_in.getID().lessThan(body1_in.getID())) {
             body1 = body2_in;
             body2 = body1_in;
-            temp = manifold_in.swapShapes();
+            manifold_in.swapShapes(&temp);
             manifold = &temp;
         } else {
             body1 = body1_in;
@@ -1847,7 +1847,7 @@ pub const ContactConstraintManager = struct {
             if (body2_in.getID().lessThan(body1_in.getID())) {
                 body1 = body2_in;
                 body2 = body1_in;
-                temp = manifold_in.swapShapes();
+                manifold_in.swapShapes(&temp);
                 manifold = &temp;
                 swapped = true;
             } else {

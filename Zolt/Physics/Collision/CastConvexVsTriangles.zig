@@ -128,7 +128,8 @@ pub const CastConvexVsTriangles = struct {
             const contact_normal_world = self.center_of_mass_transform2.multiply3x3(contact_normal);
 
             // Its a hit, store the sub shape id's
-            var result = ShapeCastResult.init(fraction, contact_point_a, contact_point_b, contact_normal_world, back_facing, self.sub_shape_id_creator1.getID(), sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
+            var result: ShapeCastResult = undefined;
+            result.init(fraction, contact_point_a, contact_point_b, contact_normal_world, back_facing, self.sub_shape_id_creator1.getID(), sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
 
             // Early out if this hit is deeper than the collector's early out value
             if (fraction == 0.0 and -result.base.penetration_depth >= self.collector.getEarlyOutFraction())

@@ -173,8 +173,9 @@ pub const ShapeCastSettings = struct {
 
 /// Result of a shape cast test
 pub const ShapeCastResult = struct {
-    /// C++ base class (passed as `&result.base` where Jolt passes it as a CollideShapeResult)
-    base: CollideShapeResult = .{},
+    /// C++ base class (passed as `&result.base` where Jolt passes it as a CollideShapeResult).
+    /// No default: a default would zero-fill the faces, use `init` or `initDefault()`.
+    base: CollideShapeResult,
     /// This is the fraction where the shape hit the other shape: CenterOfMassOnHit = Start + value * (End - Start)
     fraction: f32 = undefined,
     /// True if the shape was hit from the back side
@@ -189,12 +190,16 @@ pub const ShapeCastResult = struct {
     /// @param sub_shape_id1 Sub shape id for shape 1
     /// @param sub_shape_id2 Sub shape id for shape 2
     /// @param body_id2 BodyID that was hit
-    pub fn init(fraction: f32, contact_point1: Vec3, contact_point2: Vec3, contact_normal_or_penetration_depth: Vec3, back_face_hit: bool, sub_shape_id1: SubShapeID, sub_shape_id2: SubShapeID, body_id2: BodyID) ShapeCastResult {
-        return .{
-            .base = .init(contact_point1, contact_point2, contact_normal_or_penetration_depth, contact_point2.sub(contact_point1).length(), sub_shape_id1, sub_shape_id2, body_id2),
-            .fraction = fraction,
-            .is_back_face_hit = back_face_hit,
-        };
+    /// Constructs in place: `var result: ShapeCastResult = undefined; result.init(...);`
+    pub fn init(self: *ShapeCastResult, fraction: f32, contact_point1: Vec3, contact_point2: Vec3, contact_normal_or_penetration_depth: Vec3, back_face_hit: bool, sub_shape_id1: SubShapeID, sub_shape_id2: SubShapeID, body_id2: BodyID) void {
+        self.base.init(contact_point1, contact_point2, contact_normal_or_penetration_depth, contact_point2.sub(contact_point1).length(), sub_shape_id1, sub_shape_id2, body_id2);
+        self.fraction = fraction;
+        self.is_back_face_hit = back_face_hit;
+    }
+
+    /// Default constructor: the IDs are empty / invalid, the faces are empty and the other members are undefined
+    pub fn initDefault() ShapeCastResult {
+        return .{ .base = .initDefault() };
     }
 
     /// Function required by the CollisionCollector. A smaller fraction is considered to be a 'better hit'. For rays/cast shapes we can just use the collision fraction. The fraction and penetration depth are combined in such a way that deeper hits at fraction 0 go first.
@@ -204,11 +209,14 @@ pub const ShapeCastResult = struct {
 
     /// Reverses the hit result, swapping contact point 1 with contact point 2 etc.
     /// @param world_space_cast_direction Direction of the shape cast in world space
-    pub fn reversed(self: *const ShapeCastResult, world_space_cast_direction: Vec3) ShapeCastResult {
+    /// Writes the result to `out` (not `self`); a by-value result would zero-fill and copy the faces.
+    pub fn reversed(self: *const ShapeCastResult, world_space_cast_direction: Vec3, out: *ShapeCastResult) void {
+        std.debug.assert(out != self);
+        const result = out;
+
         // Calculate by how much to shift the contact points
         const delta = world_space_cast_direction.mulScalar(self.fraction);
 
-        var result: ShapeCastResult = .{};
         result.base.contact_point_on2 = self.base.contact_point_on1.sub(delta);
         result.base.contact_point_on1 = self.base.contact_point_on2.sub(delta);
         result.base.penetration_axis = self.base.penetration_axis.negate();
@@ -220,14 +228,12 @@ pub const ShapeCastResult = struct {
         result.is_back_face_hit = self.is_back_face_hit;
 
         result.base.shape2_face.resize(self.base.shape1_face.len);
-        for (self.base.shape1_face.constSlice(), result.base.shape2_face.slice()) |v, *out|
-            out.* = v.sub(delta);
+        for (self.base.shape1_face.constSlice(), result.base.shape2_face.slice()) |v, *out_v|
+            out_v.* = v.sub(delta);
 
         result.base.shape1_face.resize(self.base.shape2_face.len);
-        for (self.base.shape2_face.constSlice(), result.base.shape1_face.slice()) |v, *out|
-            out.* = v.sub(delta);
-
-        return result;
+        for (self.base.shape2_face.constSlice(), result.base.shape1_face.slice()) |v, *out_v|
+            out_v.* = v.sub(delta);
     }
 };
 
@@ -299,7 +305,8 @@ test "ShapeCastSettings and ShapeCastResult" {
     try expect(settings.back_face_mode_triangles == .collide_with_back_faces and settings.back_face_mode_convex == .collide_with_back_faces);
 
     // The penetration depth is the distance between the contact points; deeper hits at fraction 0 go first
-    var result = ShapeCastResult.init(0.5, Vec3.init(1, 0, 0), Vec3.init(1, 3, 4), Vec3.axisY(), true, .{ .value = 1 }, .{ .value = 2 }, .init(3));
+    var result: ShapeCastResult = undefined;
+    result.init(0.5, Vec3.init(1, 0, 0), Vec3.init(1, 3, 4), Vec3.axisY(), true, .{ .value = 1 }, .{ .value = 2 }, .init(3));
     try testing.expectEqual(@as(f32, 5.0), result.base.penetration_depth);
     try testing.expectEqual(@as(f32, 0.5), result.getEarlyOutFraction());
     result.fraction = 0.0;
@@ -310,7 +317,9 @@ test "ShapeCastSettings and ShapeCastResult" {
     result.base.shape1_face.append(Vec3.init(1, 1, 1));
     result.base.shape2_face.append(Vec3.init(2, 2, 2));
     result.base.shape2_face.append(Vec3.init(3, 3, 3));
-    const reversed = result.reversed(Vec3.init(2, 0, 0));
+    var reversed: ShapeCastResult = .initDefault();
+    reversed.base.shape1_face.append(Vec3.init(9, 9, 9)); // Replaced by the reversed faces
+    result.reversed(Vec3.init(2, 0, 0), &reversed);
     try expect(reversed.base.contact_point_on1.eql(Vec3.init(0, 3, 4)) and reversed.base.contact_point_on2.eql(Vec3.init(0, 0, 0)));
     try expect(reversed.base.penetration_axis.eql(Vec3.axisY().negate()));
     try testing.expectEqual(result.base.penetration_depth, reversed.base.penetration_depth);

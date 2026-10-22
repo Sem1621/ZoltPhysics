@@ -131,7 +131,8 @@ const CSR = extern struct {
     face2: [32]P,
 
     fn toResult(self: *const CSR) CollideShapeResult {
-        var r = CollideShapeResult.init(vec3(self.contact_point_on1), vec3(self.contact_point_on2), vec3(self.penetration_axis), self.penetration_depth, .{ .value = self.sub_shape_id1 }, .{ .value = self.sub_shape_id2 }, .{ .id = self.body_id2 });
+        var r: CollideShapeResult = undefined;
+        r.init(vec3(self.contact_point_on1), vec3(self.contact_point_on2), vec3(self.penetration_axis), self.penetration_depth, .{ .value = self.sub_shape_id1 }, .{ .value = self.sub_shape_id2 }, .{ .id = self.body_id2 });
         for (self.face1[0..self.face1_count]) |v| r.shape1_face.append(vec3(v));
         for (self.face2[0..self.face2_count]) |v| r.shape2_face.append(vec3(v));
         return r;
@@ -770,7 +771,8 @@ test "CollideShapeResult.reversed parity" {
         var j: Result = .{ .csr = std.mem.zeroes(CSR), .early_out = undefined };
         jolt.jolt_collide_shape_result_reversed(&in, &j.csr, &j.early_out);
         const r = in.toResult();
-        const rev = r.reversed();
+        var rev: CollideShapeResult = undefined;
+        r.reversed(&rev);
         const z: Result = .{ .csr = .fromResult(&rev), .early_out = .{ r.getEarlyOutFraction(), rev.getEarlyOutFraction() } };
         reversed.check(in, z, j);
     }
@@ -816,7 +818,7 @@ test "Default values and constants parity" {
         var ray2: RayCastResult = .{ .body_id = .init(5), .fraction = 0.5, .sub_shape_id2 = .{ .value = 7 } };
         ray2.reset();
         const point: CollidePointResult = .{};
-        const shape: CollideShapeResult = .{};
+        const shape: CollideShapeResult = .initDefault();
         const pair: SubShapeIDPair = .{};
         const creator: SubShapeIDCreator = .{};
         const z_ids = [18]u32{

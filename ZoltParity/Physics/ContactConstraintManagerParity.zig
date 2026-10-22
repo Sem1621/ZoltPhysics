@@ -373,7 +373,7 @@ const Layers = struct {
 };
 
 fn loadManifold(desc: *const CCMManifold) ContactManifold {
-    var m: ContactManifold = .{};
+    var m: ContactManifold = .init();
     m.base_offset = loadR3(&desc.base_offset);
     m.world_space_normal = load3(&desc.normal);
     m.penetration_depth = desc.penetration_depth;
@@ -589,7 +589,7 @@ const World = struct {
     }
 
     fn validate(self: *World, id1: u32, id2: u32, base_offset: *const [3]Real) u32 {
-        const result: CollideShapeResult = .{};
+        const result: CollideShapeResult = .initDefault();
         return @intCast(@intFromEnum(self.manager.validateContactPoint(self.getBody(id1), self.getBody(id2), loadR3(base_offset), &result)));
     }
 

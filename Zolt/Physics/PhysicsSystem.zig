@@ -962,7 +962,7 @@ pub const PhysicsSystem = struct {
         // Build the list of jobs to wait for
         const barrier = context.barrier;
         {
-            var handles: StaticArray(JobHandle, @intCast(physics_settings_file.max_physics_jobs)) = .empty;
+            var handles: StaticArray(JobHandle, @intCast(physics_settings_file.max_physics_jobs)) = .init();
             defer for (handles.slice()) |*h| h.deinit();
             for (context.steps.items) |*step| {
                 if (step.broad_phase_prepare.isValid())
@@ -1883,6 +1883,19 @@ pub const PhysicsSystem = struct {
                 const MyManifold = struct {
                     base: ContactManifold,
                     first_world_space_normal: Vec3,
+
+                    /// Constructor, in place with empty contact point arrays (a by-value manifold would zero-fill
+                    /// and copy its 2 KB of contact points)
+                    fn init(m: *@This(), base_offset: RVec3, world_space_normal: Vec3, result: *const CollideShapeResult) void {
+                        m.base.base_offset = base_offset;
+                        m.base.world_space_normal = world_space_normal;
+                        m.base.penetration_depth = result.penetration_depth;
+                        m.base.sub_shape_id1 = result.sub_shape_id1;
+                        m.base.sub_shape_id2 = result.sub_shape_id2;
+                        m.base.relative_contact_points_on1.clear();
+                        m.base.relative_contact_points_on2.clear();
+                        m.first_world_space_normal = world_space_normal;
+                    }
                 };
 
                 // A temporary structure that allows us to keep track of the all manifolds between this body pair
@@ -1961,10 +1974,10 @@ pub const PhysicsSystem = struct {
                                     return;
 
                                 // Replace the manifold
-                                collector.manifolds.at(manifold_index).* = .{ .base = .{ .base_offset = collector.body1.getCenterOfMassPosition(), .world_space_normal = world_space_normal, .penetration_depth = result.penetration_depth, .sub_shape_id1 = result.sub_shape_id1, .sub_shape_id2 = result.sub_shape_id2 }, .first_world_space_normal = world_space_normal };
+                                collector.manifolds.at(manifold_index).init(collector.body1.getCenterOfMassPosition(), world_space_normal, result);
                             } else {
                                 // Not full, create new manifold
-                                collector.manifolds.append(.{ .base = .{ .base_offset = collector.body1.getCenterOfMassPosition(), .world_space_normal = world_space_normal, .penetration_depth = result.penetration_depth, .sub_shape_id1 = result.sub_shape_id1, .sub_shape_id2 = result.sub_shape_id2 }, .first_world_space_normal = world_space_normal });
+                                collector.manifolds.addOne().init(collector.body1.getCenterOfMassPosition(), world_space_normal, result);
                                 manifold_index = collector.manifolds.len - 1;
                             }
                         }
@@ -2046,7 +2059,7 @@ pub const PhysicsSystem = struct {
                         }
 
                         // Determine contact points
-                        var manifold: ContactManifold = .{};
+                        var manifold: ContactManifold = .init();
                         manifold.base_offset = collector.body1.getCenterOfMassPosition();
                         const settings_ps = &collector.system.physics_settings;
                         manifoldBetweenTwoFaces(result.contact_point_on1, result.contact_point_on2, result.penetration_axis, settings_ps.speculative_contact_distance + settings_ps.manifold_tolerance, &result.shape1_face, &result.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base_offset));
@@ -2611,7 +2624,7 @@ pub const PhysicsSystem = struct {
             };
 
             // Narrowphase collector
-            var cast_shape_result: ShapeCastResult = .{};
+            var cast_shape_result: ShapeCastResult = .initDefault();
             var np_collector: CCDNarrowPhaseCollector = .{
                 .body_manager = &self.body_manager,
                 .contact_constraint_manager = &self.contact_manager,
@@ -2733,7 +2746,7 @@ pub const PhysicsSystem = struct {
                 const body2 = self.body_manager.getBody(ccd_body.body_id2);
 
                 // Determine contact manifold
-                var manifold: ContactManifold = .{};
+                var manifold: ContactManifold = .init();
                 manifold.base_offset = shape_cast.center_of_mass_start.getTranslation();
                 manifoldBetweenTwoFaces(cast_shape_result.base.contact_point_on1, cast_shape_result.base.contact_point_on2, cast_shape_result.base.penetration_axis, self.physics_settings.manifold_tolerance, &cast_shape_result.base.shape1_face, &cast_shape_result.base.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, self.manifoldOptions(manifold.base_offset));
                 manifold.sub_shape_id1 = cast_shape_result.base.sub_shape_id1;

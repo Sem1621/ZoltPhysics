@@ -3,8 +3,9 @@
 //!
 //! - `ContactManifold` and `ContactSettings` are value types. Members that Jolt leaves uninitialized (the vectors and
 //!   the depth of a manifold, the combined friction / restitution and the sensor flag of the settings) default to
-//!   `undefined`; the sub shape IDs default to empty and the contact point arrays to empty, like their C++ default
-//!   constructors.
+//!   `undefined`; the sub shape IDs default to empty, like their C++ default constructors. The contact point arrays
+//!   have no default: a default would zero-fill their 2 KB. Jolt's default constructor is `init()`, a literal that
+//!   names the arrays with `.init()`, which does not fill them.
 //! - `ContactListener` is an interface (porting guide pattern B, Docs/Zolt/CollisionArchitecture.md D7): a type
 //!   erased `ptr: *anyopaque` (the callbacks are non-const in Jolt) and a vtable with a nullable entry per callback.
 //!   Every callback has a default (empty) implementation in Jolt, so `ContactListener.init(&my_listener)` only wires
@@ -45,21 +46,27 @@ pub const ContactManifold = struct {
     sub_shape_id1: SubShapeID = .empty,
     sub_shape_id2: SubShapeID = .empty,
     /// Contact points on the surface of shape 1 relative to mBaseOffset.
-    relative_contact_points_on1: ContactPoints = .empty,
+    relative_contact_points_on1: ContactPoints,
     /// Contact points on the surface of shape 2 relative to mBaseOffset. If there's no penetration, this will be the same as mRelativeContactPointsOn1. If there is penetration they will be different.
-    relative_contact_points_on2: ContactPoints = .empty,
+    relative_contact_points_on2: ContactPoints,
 
-    /// Swaps shape 1 and 2
-    pub fn swapShapes(self: *const ContactManifold) ContactManifold {
-        return .{
-            .base_offset = self.base_offset,
-            .world_space_normal = self.world_space_normal.negate(),
-            .penetration_depth = self.penetration_depth,
-            .sub_shape_id1 = self.sub_shape_id2,
-            .sub_shape_id2 = self.sub_shape_id1,
-            .relative_contact_points_on1 = self.relative_contact_points_on2,
-            .relative_contact_points_on2 = self.relative_contact_points_on1,
-        };
+    /// Default constructor: the sub shape IDs are empty, the contact point arrays are empty and the other members are
+    /// undefined. The literal names the arrays, so their buffers are not filled.
+    pub fn init() ContactManifold {
+        return .{ .relative_contact_points_on1 = .init(), .relative_contact_points_on2 = .init() };
+    }
+
+    /// Swaps shape 1 and 2. Writes the result to `out` (not `self`) and copies only the used contact points, like
+    /// Jolt's StaticArray copy constructor.
+    pub fn swapShapes(self: *const ContactManifold, out: *ContactManifold) void {
+        std.debug.assert(out != self);
+        out.base_offset = self.base_offset;
+        out.world_space_normal = self.world_space_normal.negate();
+        out.penetration_depth = self.penetration_depth;
+        out.sub_shape_id1 = self.sub_shape_id2;
+        out.sub_shape_id2 = self.sub_shape_id1;
+        out.relative_contact_points_on1.assign(&self.relative_contact_points_on2);
+        out.relative_contact_points_on2.assign(&self.relative_contact_points_on1);
     }
 
     /// Access to the world space contact positions
@@ -248,11 +255,10 @@ pub const ContactListener = struct {
 test "ContactManifold: SwapShapes, world space contact points" {
     const expect = std.testing.expect;
 
-    var manifold: ContactManifold = .{
-        .base_offset = RVec3.init(1, 2, 3),
-        .world_space_normal = Vec3.init(0, 1, -0.0),
-        .penetration_depth = 0.25,
-    };
+    var manifold: ContactManifold = .init();
+    manifold.base_offset = RVec3.init(1, 2, 3);
+    manifold.world_space_normal = Vec3.init(0, 1, -0.0);
+    manifold.penetration_depth = 0.25;
     manifold.sub_shape_id1.setValue(5);
     manifold.sub_shape_id2.setValue(7);
     manifold.relative_contact_points_on1.append(Vec3.init(1, 0, 0));
@@ -262,7 +268,8 @@ test "ContactManifold: SwapShapes, world space contact points" {
     try expect(manifold.getWorldSpaceContactPointOn1(1).eql(RVec3.init(1, 3, 3)));
     try expect(manifold.getWorldSpaceContactPointOn2(0).eql(RVec3.init(1, 2, 4)));
 
-    const swapped = manifold.swapShapes();
+    var swapped: ContactManifold = undefined;
+    manifold.swapShapes(&swapped);
     try expect(swapped.base_offset.eql(manifold.base_offset));
     try expect(swapped.world_space_normal.eql(Vec3.init(0, -1, 0)));
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(swapped.world_space_normal.getZ()))); // 0 - (-0) = +0
@@ -275,9 +282,15 @@ test "ContactManifold: SwapShapes, world space contact points" {
     try expect(swapped.getWorldSpaceContactPointOn2(1).eql(RVec3.init(1, 3, 3)));
 
     // Defaults
-    const empty: ContactManifold = .{};
+    var empty: ContactManifold = .init();
     try expect(empty.sub_shape_id1.eql(SubShapeID.empty) and empty.sub_shape_id2.eql(SubShapeID.empty));
     try expect(empty.relative_contact_points_on1.isEmpty() and empty.relative_contact_points_on2.isEmpty());
+
+    // Swapping into a manifold that was in use replaces all of it
+    manifold.swapShapes(&empty);
+    try std.testing.expectEqual(@as(u32, 1), empty.relative_contact_points_on1.len);
+    try std.testing.expectEqual(@as(u32, 2), empty.relative_contact_points_on2.len);
+    try std.testing.expectEqual(@as(u32, 7), empty.sub_shape_id1.getValue());
 }
 
 test "ContactSettings, ValidateResult" {
@@ -302,8 +315,12 @@ test "ContactListener: default callbacks and an implementation" {
 
     const body1: Body = .{ .id = .init(1) };
     const body2: Body = .{ .id = .init(2) };
-    var manifold: ContactManifold = .{ .base_offset = RVec3.zero(), .world_space_normal = Vec3.init(0, 1, 0), .penetration_depth = 0.1 };
-    const result = CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.init(0, -1, 0), 0.1, .empty, .empty, .init(2));
+    var manifold: ContactManifold = .init();
+    manifold.base_offset = RVec3.zero();
+    manifold.world_space_normal = Vec3.init(0, 1, 0);
+    manifold.penetration_depth = 0.1;
+    var result: CollideShapeResult = undefined;
+    result.init(Vec3.zero(), Vec3.zero(), Vec3.init(0, -1, 0), 0.1, .empty, .empty, .init(2));
     const pair = SubShapeIDPair.init(.init(1), .empty, .init(2), .empty);
 
     // An implementation without callbacks behaves like Jolt's ContactListener base class

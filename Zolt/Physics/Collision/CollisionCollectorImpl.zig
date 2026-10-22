@@ -32,6 +32,12 @@ fn copyResult(comptime R: type, result: *const R) R {
     return if (@hasDecl(R, "clone")) result.clone() else result.*;
 }
 
+/// Default constructed result (C++ `ResultType mHit;`). Results with faces have an `initDefault()` that does not fill
+/// the face buffers, `.{}` would.
+fn defaultResult(comptime R: type) R {
+    return if (@hasDecl(R, "initDefault")) R.initDefault() else .{};
+}
+
 /// Release a stored result (C++ destructor)
 fn releaseResult(comptime R: type, result: *R) void {
     if (@hasDecl(R, "deinit")) result.deinit();
@@ -164,7 +170,7 @@ pub fn ClosestHitCollisionCollector(comptime CollectorType: type) type {
         pub const overrides = .{ .reset, .addHit };
 
         base: CollectorType,
-        hit: ResultType = .{},
+        hit: ResultType,
         had_hit: bool = false,
 
         /// Constructor
@@ -174,7 +180,7 @@ pub fn ClosestHitCollisionCollector(comptime CollectorType: type) type {
 
         /// Constructor for classes that derive from this collector (T is the most derived class)
         pub fn initDerived(comptime T: type) Self {
-            return .{ .base = .init(T) };
+            return .{ .base = .init(T), .hit = defaultResult(ResultType) };
         }
 
         /// Destructor (releases a stored reference)
@@ -351,7 +357,7 @@ pub fn AnyHitCollisionCollector(comptime CollectorType: type) type {
         pub const overrides = .{ .reset, .addHit };
 
         base: CollectorType,
-        hit: ResultType = .{},
+        hit: ResultType,
         had_hit: bool = false,
 
         /// Constructor
@@ -361,7 +367,7 @@ pub fn AnyHitCollisionCollector(comptime CollectorType: type) type {
 
         /// Constructor for classes that derive from this collector (T is the most derived class)
         pub fn initDerived(comptime T: type) Self {
-            return .{ .base = .init(T) };
+            return .{ .base = .init(T), .hit = defaultResult(ResultType) };
         }
 
         /// Destructor (releases a stored reference)
@@ -421,6 +427,12 @@ const TransformedShapeCollector = ShapeFile.TransformedShapeCollector;
 const TransformedShape = @import("TransformedShape.zig").TransformedShape;
 const TestBoxShape = @import("Shape/TestShapes.zig").TestBoxShape;
 
+fn shapeHit(depth: f32, body_id2: BodyID) CollideShapeResult {
+    var r: CollideShapeResult = undefined;
+    r.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), depth, .empty, .empty, body_id2);
+    return r;
+}
+
 fn rayHit(body: u32, fraction: f32) RayCastResult {
     return .{ .body_id = .init(body), .fraction = fraction, .sub_shape_id2 = .{ .value = body } };
 }
@@ -472,7 +484,7 @@ test "ClosestHitCollisionCollector: keeps the closest hit and lowers the early o
     // Collide shape results order on -penetration depth
     var deepest = ClosestHitCollisionCollector(CollideShapeCollector).init();
     defer deepest.deinit();
-    for ([_]f32{ 0.1, 0.3, 0.2 }) |depth| deepest.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), depth, .empty, .empty, .invalid));
+    for ([_]f32{ 0.1, 0.3, 0.2 }) |depth| deepest.base.addHit(&shapeHit(depth, .invalid));
     try testing.expectEqual(@as(f32, 0.3), deepest.hit.penetration_depth);
     try testing.expectEqual(@as(f32, -0.3), deepest.base.getEarlyOutFraction());
 }
@@ -610,10 +622,10 @@ test "Collectors: out of memory in addHit is latched, forces an early out and is
     var per_body2 = ClosestHitPerBodyCollisionCollector(CollideShapeCollector).init(failing4.allocator());
     defer per_body2.deinit();
     per_body2.base.onBody(&body);
-    per_body2.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), 0.5, .empty, .empty, .init(3)));
+    per_body2.base.addHit(&shapeHit(0.5, .init(3)));
     try testing.expect(per_body2.base.shouldEarlyOut());
-    per_body2.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), 0.25, .empty, .empty, .init(3)));
-    per_body2.base.addHit(&CollideShapeResult.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), 0.75, .empty, .empty, .init(3)));
+    per_body2.base.addHit(&shapeHit(0.25, .init(3)));
+    per_body2.base.addHit(&shapeHit(0.75, .init(3)));
     try testing.expect(per_body2.base.shouldEarlyOut());
     try testing.expectEqual(-math.flt_max, per_body2.base.getEarlyOutFraction());
     per_body2.base.onBodyEnd();

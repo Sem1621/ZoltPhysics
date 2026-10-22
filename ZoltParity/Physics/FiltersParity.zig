@@ -98,6 +98,8 @@ const CM = extern struct {
             .penetration_depth = self.penetration_depth,
             .sub_shape_id1 = .{ .value = self.sub_shape_id1 },
             .sub_shape_id2 = .{ .value = self.sub_shape_id2 },
+            .relative_contact_points_on1 = .init(),
+            .relative_contact_points_on2 = .init(),
         };
         for (self.points1[0..self.count1]) |p| m.relative_contact_points_on1.append(vec3(p));
         for (self.points2[0..self.count2]) |p| m.relative_contact_points_on2.append(vec3(p));
@@ -830,7 +832,9 @@ test "ContactManifold parity" {
         jolt.jolt_contact_manifold(&in, &j_swapped, @ptrCast(&j_world1), @ptrCast(&j_world2));
 
         const manifold = in.toManifold();
-        const z_swapped = CM.fromManifold(&manifold.swapShapes());
+        var swapped: ContactManifold = undefined;
+        manifold.swapShapes(&swapped);
+        const z_swapped = CM.fromManifold(&swapped);
         swap.check(.{ in.world_space_normal, in.count1, in.count2 }, z_swapped, j_swapped);
 
         var z_world1: Points = std.mem.zeroes(Points);

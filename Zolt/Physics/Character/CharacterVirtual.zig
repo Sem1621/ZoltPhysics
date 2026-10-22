@@ -2829,7 +2829,7 @@ pub const CharacterVirtual = struct {
         var corrected = false;
         if (ts.shape.get() != null) { // If body B has been removed between CastShape and GetTransformedShape, TransformedShape will be empty
             // Fetch the face we're colliding with
-            var face: Shape.SupportingFace = .{};
+            var face: Shape.SupportingFace = .init();
             ts.getSupportingFace(out_contact.base.sub_shape_id_b, out_contact.contact_normal.negate(), base_offset, &face);
 
             if (face.len >= 2) {

@@ -1148,7 +1148,7 @@ fn zoltEstimate(world: *ZoltWorld, in: *const NpqEstimateInput, s: *Stream) !voi
     defer for (bodies) |body| bi.destroyBody(body.getID());
 
     // The manifold
-    var manifold: ContactManifold = .{};
+    var manifold: ContactManifold = .init();
     manifold.base_offset = rvec3(in.base_offset);
     manifold.world_space_normal = vec3(in.normal);
     manifold.penetration_depth = in.penetration_depth;
