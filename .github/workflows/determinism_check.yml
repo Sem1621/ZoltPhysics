@@ -21,17 +21,39 @@ env:
   UBUNTU_GCC_LOONGARCH_VERSION: loongarch64-linux-gnu-g++-14
   SDE_VERSION: '10.8.0-2026-03-15'
 
+# Zolt: these jobs build and test the C++ code only. They run when an upstream directory changes, not on a change
+# to the Zig port (Zolt/, ZoltTests/, ...): .github/workflows/zolt.yml covers that. Keep this filter when syncing with
+# upstream. Like upstream's paths-ignore, a change to Markdown files alone does not run them.
 on:
   push:
     branches: [ master ]
-    paths-ignore:
-      - 'Docs/**'
-      - '**.md'
+    paths:
+      - 'Jolt/**'
+      - 'UnitTests/**'
+      - 'Samples/**'
+      - 'TestFramework/**'
+      - 'JoltViewer/**'
+      - 'PerformanceTest/**'
+      - 'HelloWorld/**'
+      - 'Build/**'
+      - 'Assets/**'
+      - '.github/workflows/determinism_check.yml'
+      - '!**.md'
   pull_request:
     branches: [ master ]
-    paths-ignore:
-      - 'Docs/**'
-      - '**.md'
+    paths:
+      - 'Jolt/**'
+      - 'UnitTests/**'
+      - 'Samples/**'
+      - 'TestFramework/**'
+      - 'JoltViewer/**'
+      - 'PerformanceTest/**'
+      - 'HelloWorld/**'
+      - 'Build/**'
+      - 'Assets/**'
+      - '.github/workflows/determinism_check.yml'
+      - '!**.md'
+  workflow_dispatch:
 
 jobs:
   linux_clang:

@@ -1,8 +1,18 @@
 name: Doxygen Action
 
+# Zolt: runs only when an input of the Doxyfile changes (the C++ code and the upstream docs), not on a change to the Zig
+# port. Keep this filter when syncing with upstream.
 on:
   push:
     branches: [ master ]
+    paths:
+      - 'Jolt/**'
+      - 'Docs/*'
+      - 'Build/README.md'
+      - 'Doxyfile'
+      - 'doxygen-awesome.css'
+      - '.github/workflows/doxygen.yml'
+  workflow_dispatch:
 
 # Builds and deploys doxygen documentation
 jobs:

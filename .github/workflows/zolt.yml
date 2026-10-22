@@ -37,12 +37,16 @@ on:
       - 'Docs/Zolt/**'
       - '.github/workflows/zolt.yml'
   workflow_dispatch:
+  # The parity rows that do not run per push (job parity-nightly)
+  schedule:
+    - cron: '17 3 * * *'
 
 env:
   ZIG_VERSION: 0.16.0
 
 jobs:
   lint:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Format and port status
     steps:
@@ -67,6 +71,7 @@ jobs:
       run: python3 tools/port_status.py --check-m10
 
   test:
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} use_llvm=${{ matrix.use_llvm }}
     strategy:
@@ -123,6 +128,32 @@ jobs:
       run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }}
 
   parity:
+    # Per push and pull request: one row (ReleaseFast, single precision, no debug renderer). The other rows run in
+    # parity-nightly. The C++ reference is the same in every row of one precision and renderer configuration (it is always
+    # built ReleaseFast). setup-zig keeps the Zig cache between runs, which holds the C++ objects: the cache key names the
+    # row, and the size limit fits the reference build and the parity test binary. Zig's cache is keyed on the content of
+    # every input, so a stale cache can only cost time, never change a result.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Parity with C++ Jolt ReleaseFast double_precision=false debug_renderer=false
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+        cache-key: parity-ReleaseFast-false-false
+        cache-size-limit: 4096
+    - name: Compare with the C++ library (includes hello-world-check, milestone M5)
+      run: zig build parity --summary all -Doptimize=ReleaseFast -Ddouble_precision=false -Ddebug_renderer=false
+
+  parity-nightly:
+    # The other parity rows: every night on master and on a manual run (workflow_dispatch also runs the parity job, so a
+    # manual run covers all 5 rows). Each row takes about as long as the per push row, so this saves about 4 parity runs per
+    # push. No Zig cache: the rows run once a day, and their caches would push the cache of the per push row out of the
+    # repository's cache quota.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Parity with C++ Jolt ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }}
     strategy:
@@ -131,10 +162,16 @@ jobs:
         # ReleaseSafe checks Zolt's asserts. The inputs for which Jolt's own asserts would fire (failing / degenerate
         # decompositions, non-finite inertia, ...) run in both: the asserts that these tests expect are recoverable
         # (Docs/Zolt/RemainingFeaturesArchitecture.md R8), ReleaseFast has no asserts.
-        optimize: [ ReleaseSafe, ReleaseFast ]
-        double_precision: [ false, true ]
-        debug_renderer: [ false ]
         include:
+          - optimize: ReleaseSafe
+            double_precision: false
+            debug_renderer: false
+          - optimize: ReleaseSafe
+            double_precision: true
+            debug_renderer: false
+          - optimize: ReleaseFast
+            double_precision: true
+            debug_renderer: false
           # The debug renderer hooks in Zolt and JPH_DEBUG_RENDERER in the C++ reference (a second reference build)
           - optimize: ReleaseFast
             double_precision: false
@@ -146,10 +183,12 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ env.ZIG_VERSION }}
+        use-cache: false
     - name: Compare with the C++ library (includes hello-world-check, milestone M5)
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }}
 
   determinism:
+    if: github.event_name != 'schedule'
     # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
     # arguments), and the hash does not depend on the thread count
     runs-on: ubuntu-latest
