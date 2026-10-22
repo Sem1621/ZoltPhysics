@@ -1897,7 +1897,8 @@ pub const PhysicsSystem = struct {
                     body1: *const Body,
                     body2: *const Body,
                     validate_body_pair: bool = true,
-                    manifolds: Manifolds = .empty,
+                    /// No default: a by-value `.empty` default would zero-fill 68 KB per body pair, use `.init()`
+                    manifolds: Manifolds,
 
                     pub fn addHit(collector: *@This(), result: *const CollideShapeResult) void {
                         // The first body should be the one with the highest motion type
@@ -1978,7 +1979,7 @@ pub const PhysicsSystem = struct {
                             pruneContactPoints(manifold.first_world_space_normal, &manifold.base.relative_contact_points_on1, &manifold.base.relative_contact_points_on2, collector.system.manifoldOptions(manifold.base.base_offset));
                     }
                 };
-                var collector: ReductionCollideShapeCollector = .{ .system = self, .body1 = body1, .body2 = body2 };
+                var collector: ReductionCollideShapeCollector = .{ .system = self, .body1 = body1, .body2 = body2, .manifolds = .init() };
 
                 // Perform collision detection between the two shapes
                 try self.sim_collide_body_vs_body.call(self.allocator, body1, body2, transform1, transform2, &settings, &collector.base, shape_filter.getFilter());
