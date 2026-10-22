@@ -24,6 +24,11 @@
 //!   occupies whole cache lines: `tail_state.tail`.
 //! - A single threaded build (builtin.single_threaded) starts no worker threads, the jobs are then executed by the
 //!   barriers like with `num_threads = 0`.
+//! - Zolt: with `-Djob_profile=true` the pool records a timeline of its jobs (Core/JobProfiler.zig) in
+//!   `base.profiler`. `init` allocates one ring buffer per worker thread and a few for other threads. `setNumThreads`
+//!   keeps the profiler and its events when it has enough ring buffers, so `setNumThreads(0)` stops the workers before
+//!   the events are read; more threads need a new profiler (the old events are dropped). A worker records the time it
+//!   waits for jobs as idle time. `getJobProfiler` returns the profiler.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -31,6 +36,7 @@ const Core = @import("Core.zig");
 const Color = @import("Color.zig").Color;
 const FixedSizeFreeList = @import("FixedSizeFreeList.zig").FixedSizeFreeList;
 const JobSystem = @import("JobSystem.zig").JobSystem;
+const JobProfiler = @import("JobProfiler.zig").JobProfiler;
 const JobSystemWithBarrier = @import("JobSystemWithBarrier.zig").JobSystemWithBarrier;
 const sleepUncancelable = @import("JobSystemWithBarrier.zig").sleepUncancelable;
 const Semaphore = @import("Semaphore.zig").Semaphore;
@@ -300,6 +306,13 @@ pub const JobSystemThreadPool = struct {
         self.jobs.destructObjectPtr(job);
     }
 
+    /// Zolt: the timeline of the jobs and the idle time of this pool (`-Djob_profile=true` only, `void` without it, see
+    /// the top of this file). Read it only while no job runs.
+    pub const getJobProfiler = if (Core.job_profile) getJobProfilerImpl else {};
+    fn getJobProfilerImpl(self: *JobSystemThreadPool) *JobProfiler {
+        return &self.base.profiler;
+    }
+
     /// Start the worker threads
     fn startThreads(self: *JobSystemThreadPool, num_threads_in: i32) Error!void {
         var num_threads = num_threads_in;
@@ -307,6 +320,17 @@ pub const JobSystemThreadPool = struct {
         // Auto detect number of threads
         if (num_threads < 0)
             num_threads = @as(i32, @intCast(std.Thread.getCpuCount() catch 1)) - 1;
+
+        // Zolt: one ring buffer per worker thread and a few for the other threads (-Djob_profile=true, see the top of
+        // this file)
+        if (Core.job_profile) {
+            const profiler = &self.base.profiler;
+            const num_workers: u32 = if (builtin.single_threaded) 0 else @intCast(@max(num_threads, 0));
+            if (!profiler.isInitialized() or profiler.num_workers < num_workers) {
+                profiler.deinit();
+                try profiler.init(self.allocator, self.io, .{ .num_workers = num_workers });
+            }
+        }
 
         // Zolt: a single threaded build can't start threads, the barriers execute the jobs
         if (builtin.single_threaded)
@@ -382,11 +406,17 @@ pub const JobSystemThreadPool = struct {
         // Call the thread init function
         self.thread_init_function.call(thread_index);
 
+        // Zolt: this thread records into the ring buffer of its index (-Djob_profile=true)
+        const profiler = if (Core.job_profile) self.getJobProfiler() else {};
+        if (Core.job_profile) profiler.registerThread(@intCast(thread_index));
+
         const head = &self.heads[@intCast(thread_index)];
 
         while (!self.quit.load(.seq_cst)) {
             // Wait for jobs
+            const idle_start = if (Core.job_profile) JobProfiler.begin(profiler) else {};
             self.semaphore.acquire(self.io, .{});
+            if (Core.job_profile) JobProfiler.end(profiler, .idle, "Idle: wait for jobs", idle_start);
 
             // Loop over the queue
             while (head.load(.seq_cst) != self.tail_state.tail.load(.seq_cst)) {
@@ -822,4 +852,107 @@ test "JobSystemThreadPool InitExitFunction" {
     function.call(3);
     JobSystemThreadPool.InitExitFunction.noop.call(2);
     try std.testing.expectEqual([4]i32{ 0, 101, 0, 103 }, values);
+}
+
+test "JobSystemThreadPool job profiler hooks cost nothing without -Djob_profile" {
+    // Without the option no hook exists: no profiler field, no vtable entry, no getJobProfiler (Core/JobProfiler.zig)
+    if (Core.job_profile) return error.SkipZigTest;
+    try std.testing.expect(@FieldType(JobSystemWithBarrier, "profiler") == void);
+    try std.testing.expect(@FieldType(JobSystem.VTable, "getJobProfiler") == void);
+    try std.testing.expectEqual(@as(usize, 8 * @sizeOf(usize)), @sizeOf(JobSystem.VTable));
+    try std.testing.expect(@TypeOf(JobSystemThreadPool.getJobProfiler) == void);
+    try std.testing.expect(@import("JobProfiler.zig").Hook == void);
+
+    var pool: JobSystemThreadPool = .empty;
+    try pool.init(std.testing.allocator, std.testing.io, 64, 1, .{ .num_threads = 0 });
+    defer pool.deinit();
+    try std.testing.expectEqual(@as(?*JobProfiler, null), pool.jobSystem().getJobProfiler());
+}
+
+test "JobSystemThreadPool job profiler records the jobs and the idle time (-Djob_profile)" {
+    if (!Core.job_profile) return error.SkipZigTest;
+
+    const Count = struct {
+        /// Number of recorded jobs with this name on all threads (the ring buffers are large enough to keep them)
+        fn jobs(profiler: *JobProfiler, name: []const u8) !u64 {
+            var n: u64 = 0;
+            for (profiler.usedThreads(), 0..) |*thread, index| {
+                const parts = thread.events();
+                for ([_][]const JobProfiler.Event{ parts.first, parts.second }) |part| {
+                    for (part) |event| {
+                        try std.testing.expectEqual(@as(u32, @intCast(index)), event.thread_index);
+                        try std.testing.expect(event.end_ns >= event.start_ns);
+                        if (event.kind == .job and std.mem.eql(u8, event.name, name))
+                            n += 1;
+                    }
+                }
+            }
+            return n;
+        }
+    };
+
+    // max_jobs is larger than the number of jobs + queue_length (see "JobSystemThreadPool runs many jobs")
+    var pool: JobSystemThreadPool = .empty;
+    try pool.init(std.testing.allocator, std.testing.io, 4096, 2, .{ .num_threads = 0 });
+    defer pool.deinit();
+    const job_system = pool.jobSystem();
+    const profiler = pool.getJobProfiler();
+    try std.testing.expectEqual(profiler, job_system.getJobProfiler().?);
+
+    // Without worker threads the thread that waits for the barrier runs every job: one ring buffer, "Thread 0"
+    try std.testing.expectEqual(@as(u32, 0), profiler.num_workers);
+    try runJobsThroughBarrier(job_system, 200);
+    try std.testing.expectEqual(@as(usize, 1), profiler.usedThreads().len);
+    try std.testing.expectEqual(@as(u64, 200), profiler.usedThreads()[0].num_jobs);
+    try std.testing.expectEqual(@as(u64, 200), try Count.jobs(profiler, "Barrier"));
+
+    // reset clears the events, the thread keeps its ring buffer
+    profiler.reset();
+    try std.testing.expectEqual(@as(u64, 0), try Count.jobs(profiler, "Barrier"));
+    try std.testing.expectEqual(@as(usize, 1), profiler.usedThreads().len);
+
+    if (builtin.single_threaded) return;
+
+    // More worker threads than ring buffers for workers: setNumThreads makes a new profiler (the old events are dropped)
+    try pool.setNumThreads(2);
+    try std.testing.expectEqual(@as(u32, 2), profiler.num_workers);
+    try runJobsThroughBarrier(job_system, 1000);
+
+    // Stop the recording and the workers before reading (a worker records its wait when it wakes up, at any time).
+    // setNumThreads(0) keeps the profiler, it has enough ring buffers.
+    profiler.stop();
+    try pool.setNumThreads(0);
+    try std.testing.expectEqual(@as(u32, 2), profiler.num_workers);
+
+    // Every job is recorded once, on the thread that ran it
+    try std.testing.expectEqual(@as(u64, 1000), try Count.jobs(profiler, "Barrier"));
+    var num_jobs: u64 = 0;
+    var num_waits: u64 = 0;
+    for (profiler.usedThreads()) |*thread| {
+        num_jobs += thread.num_jobs;
+        num_waits += thread.num_events - thread.num_jobs;
+    }
+    try std.testing.expectEqual(@as(u64, 1000), num_jobs);
+    try std.testing.expectEqual(@as(u64, 0), profiler.num_dropped.load(.monotonic));
+
+    // The trace is valid JSON with one complete event per job and per wait
+    var trace: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer trace.deinit();
+    try profiler.writeChromeTrace(&trace.writer, "JobSystemThreadPool test");
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, trace.written(), .{});
+    defer parsed.deinit();
+    var num_job_events: u64 = 0;
+    var num_idle_events: u64 = 0;
+    for (parsed.value.object.get("traceEvents").?.array.items) |event| {
+        if (!std.mem.eql(u8, event.object.get("ph").?.string, "X")) continue;
+        if (std.mem.eql(u8, event.object.get("cat").?.string, "job")) num_job_events += 1 else num_idle_events += 1;
+    }
+    try std.testing.expectEqual(@as(u64, 1000), num_job_events);
+    try std.testing.expectEqual(num_waits, num_idle_events);
+
+    // The summary names the threads
+    var summary: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer summary.deinit();
+    try profiler.writeSummary(&summary.writer);
+    try std.testing.expect(std.mem.indexOf(u8, summary.written(), ", Worker 1: busy ") != null);
 }

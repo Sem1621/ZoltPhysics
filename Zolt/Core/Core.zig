@@ -29,6 +29,10 @@ pub const determinism_log: bool = options.determinism_log;
 /// cannot change a result. The parity reference gets the define with the option (R1).
 pub const debug_renderer: bool = options.debug_renderer;
 
+/// Record a timeline of the jobs and of the idle time of the job threads (Zolt, no Jolt option; see
+/// Core/JobProfiler.zig), set with `-Djob_profile=true`. Without it every hook is `void`. Results do not change.
+pub const job_profile: bool = options.job_profile;
+
 /// Cache line size, used to avoid false sharing (JPH_CACHE_LINE_SIZE)
 pub const cache_line_size = 64;
 
