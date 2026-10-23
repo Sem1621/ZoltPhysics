@@ -384,8 +384,9 @@ What was done:
     copies more than 256 bytes from read-only data, or runs `std.mem.swap`. Library code that LLVM inlined into the
     test program counts too (the per-step code of CharacterVirtual is inlined into the scene update). A few sites
     that do not run per body pair are allowed by function name, kind and size: system, constraint and body creation,
-    teardown, and one 7 KB copy per update (the steps of `PhysicsUpdateContext`). It sees only the code that
-    ZoltPerformanceTest links. It also fails when the scan proves nothing: a binary that is not x86-64, too few
+    teardown, debug drawing (only with `-Ddebug_renderer`), and one 7 KB copy per update (the steps of
+    `PhysicsUpdateContext`). It sees only the code that ZoltPerformanceTest links. It passes with the default options,
+    with `-Ddouble_precision=true` and with `-Ddebug_renderer=true`. CI checks the default options. It also fails when the scan proves nothing: a binary that is not x86-64, too few
     library functions, no `PhysicsSystem.update`, or no allowed site.
   - `zig build perf-budget` (`tools/perf_budget.py`) counts the instructions of the physics updates of short single
     threaded runs with callgrind, in ZoltPerformanceTest and in the C++ PerformanceTest. It fails when Zolt/C++ of a

@@ -26,11 +26,11 @@ The check also fails when the scan cannot prove anything: when the binary is not
 code only), when it finds fewer than MIN_FUNCS library functions or not SENTINEL (a stripped binary, or names that
 changed), or when no ALLOW entry matches (the scanner no longer sees the calls).
 
-ALLOW lists the sites that may stay: constraint, body and system creation, teardown, and one copy per update. An
-entry is a regular expression on a function name (the function itself or a function of its inline chain), the kinds
-of access (fill, copy, copy from read-only data) and the largest size. It never names an address, so it survives code
-changes. The script prints the allowed sites, and offenders as `function: size, call site`. Only the code that
-ZoltPerformanceTest links is checked.
+ALLOW lists the sites that may stay: constraint, body and system creation, teardown, debug drawing, and one copy per
+update. An entry is a regular expression on a function name (the function itself or a function of its inline
+chain), the kinds of access (fill, copy, copy from read-only data) and the largest size. It never names an address,
+so it survives code changes. The script prints the allowed sites, and offenders as `function: size, call site`. Only
+the code that ZoltPerformanceTest links is checked.
 
 How to fix an offender: construct the value in place (`var x: T = undefined;` and then `x.clear()` or
 `x.init(...)`), give no field default to a large field, and do not return a large value by value
@@ -68,8 +68,9 @@ ALLOW = [
      {"fill"}, 0x260, "PathConstraint creation"),
     (r"^Core\.Virtual\.Thunk\(Physics\.Constraints\.SwingTwistConstraint\.SwingTwistConstraintSettings,"
      r"\.createConstraint\)\.", {"fill", "copy"}, 0x3c0, "SwingTwistConstraint creation"),
+    # (0x750 bytes with -Ddebug_renderer)
     (r"^Core\.Virtual\.Thunk\(Physics\.Constraints\.SixDOFConstraint\.SixDOFConstraintSettings,\.createConstraint\)\.",
-     {"copy"}, 0x740, "SixDOFConstraint creation"),
+     {"copy"}, 0x750, "SixDOFConstraint creation"),
     # Body creation copies the default Body (0x140 bytes, 0x180 in double precision)
     (r"^Physics\.Body\.BodyManager\.BodyManager\.allocateBody$", {"rodata"}, 0x180, "body creation"),
     # Once per update: the default PhysicsUpdateContext.Step (Jolt's mSteps.resize runs the Step constructor). About
@@ -84,6 +85,9 @@ ALLOW = [
     (r"^Core\.JobSystemWithBarrier\.JobSystemWithBarrier\.init$", {"fill"}, 0x4001, "JobSystemWithBarrier creation"),
     # A random generator (std::mt19937) is created by value when a scene or hair settings are set up
     (r"^Core\.Mt19937\.init$", {"copy"}, 0x9c4, "Mt19937 creation"),
+    # Debug drawing (only with -Ddebug_renderer, not timed). ConvexShape keys its supporting face cache with a
+    # StaticArray(Vec3, 32).
+    (r"[.,]draw\w*(\)\.call\d+)?$", {"fill", "copy", "rodata"}, 0x1000, "debug drawing"),
 ]
 
 FUNC_RE = re.compile(r"^([0-9a-f]+) <(.+)>:$")
