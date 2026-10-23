@@ -266,7 +266,8 @@ jobs:
   codegen:
     # The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). The library code of ZoltPerformanceTest (ReleaseFast,
     # x86-64-v3) must not fill or copy a large buffer and must not use std.mem.swap (tools/check_codegen.py). Bit exact
-    # results cannot show such a slowdown. The runner has objdump. The check reads x86-64 code only.
+    # results cannot show such a slowdown. It must also hold no FMA instruction, and with -Dfma only FMA instructions
+    # of Jolt's 8 JPH_USE_FMADD sites (Phase 11). The runner has objdump. The check reads x86-64 code only.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Codegen check

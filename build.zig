@@ -14,7 +14,8 @@
 //!   zig build debug-renderer-check -Ddebug_renderer=true   Record the determinism scenes with the C++ PerformanceTest and
 //!                          ZoltPerformanceTest (-r), fail unless the .jor bytes are equal
 //!   zig build codegen-check  Build ZoltPerformanceTest (ReleaseFast, x86-64-v3) and fail when the library code fills or
-//!                          copies a large buffer or swaps byte by byte (tools/check_codegen.py)
+//!                          copies a large buffer, swaps byte by byte or holds an FMA instruction (with -Dfma: one that
+//!                          does not come from Jolt's 8 JPH_USE_FMADD sites) (tools/check_codegen.py)
 //!   zig build perf-budget [-- <scene>...]  Count the instructions of the physics updates of ZoltPerformanceTest and
 //!                          the C++ PerformanceTest with valgrind, fail when Zolt is over its budget (tools/perf_budget.py)
 //!
@@ -543,7 +544,7 @@ pub fn build(b: *std.Build) void {
     // JPH_USE_FMADD sites may fuse
     if (fma) run_codegen_check.addArg("--fma");
     run_codegen_check.addArtifactArg(bench_performance_test);
-    const codegen_check_step = b.step("codegen-check", "Fail when the library code of ZoltPerformanceTest (ReleaseFast) fills or copies a large buffer or swaps byte by byte");
+    const codegen_check_step = b.step("codegen-check", "Fail when the library code of ZoltPerformanceTest (ReleaseFast) fills or copies a large buffer, swaps byte by byte or holds an FMA instruction (with -Dfma: one that does not come from Jolt's 8 JPH_USE_FMADD sites)");
     codegen_check_step.dependOn(&run_codegen_check.step);
 
     // `zig build perf-budget`: tools/perf_budget.py counts the instructions of the physics updates of short runs with

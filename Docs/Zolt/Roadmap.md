@@ -483,7 +483,8 @@ built the same way (CLAUDE.md lists them). It needs no `-Djolt_compat`. Rules:
   steps that build the C++ reference fail with `-Dfma=true`. On aarch64 Zolt's `@mulAdd` fuses like x86-64's FMA3, so a
   macOS arm64 CI row checks the C++ FMA hashes of the short runs.
 - `zig build codegen-check` fails on an FMA instruction in the library without `-Dfma`, and with `-Dfma` on one that
-  does not come from the 8 sites.
+  does not come from the 8 sites (the innermost function of its inline chain must be a site; `FMA_CALLERS` in
+  `tools/check_codegen.py` names the callers where LLVM drops the debug location of a site's FMA).
 - The 8 sites are mostly about precision. Ragdoll (many quaternion products) runs about 8% faster with them, in C++
   and in Zolt alike. The other scenes do not change beyond the noise.
 

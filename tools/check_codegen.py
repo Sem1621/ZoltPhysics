@@ -19,7 +19,8 @@ function of its inline chain starts with one of PREFIXES). The check fails when 
    `mem.swap` that LLVM did not inline. Use `Core.swap`;
 4. holds a fused multiply-add instruction (vfmadd*, vfmsub*, vfnmadd*, vfnmsub*). Without -Dfma Zolt has none: Jolt
    built with CROSS_PLATFORM_DETERMINISTIC never fuses. With -Dfma (`--fma`) only Jolt's 8 JPH_USE_FMADD sites may
-   fuse: every FMA instruction must come from one of FMA_SITES (by its inline chain), and at least one must exist.
+   fuse: every FMA instruction must come from one of FMA_SITES (the innermost function of its inline chain), and at
+   least one must exist. FMA_CALLERS lists the callers of a site where LLVM drops the debug location of the FMA.
 Without debug line info, the check of inlined library code and of the inlined `std.mem.swap` is skipped, and the
 script says so. The size comes from the last constant moved into %rdx (or %rcx for `rep`) before the call in the same
 function. The source of a copy comes from %rsi. The scan is linear, so it can be fooled by branches, but in practice
@@ -62,9 +63,19 @@ SENTINEL = "Physics.PhysicsSystem.PhysicsSystem.update"
 # The scanner reads x86-64 code only
 FORMAT = "elf64-x86-64"
 # The functions of Jolt's 8 JPH_USE_FMADD sites (Zolt/Core/Core.zig use_fmadd): with --fma, every FMA instruction of
-# the library must come from one of them (the function itself or a function of its inline chain)
-FMA_SITES = re.compile(r"^Math\.(Vec3|Vec4|DVec3|Quat|Math)\.(\w+\.)?"
-                       r"(fusedMultiplyAdd|differenceOfProducts|crossPrecise|mul|multiplyImaginary)$")
+# the library must come from one of them. Only the innermost function of the inline chain of the instruction counts
+# (the function that holds the @mulAdd), not its callers: an FMA of another function that LLVM inlined into a site
+# fails. Vec3 and Vec4 differenceOfProducts fuse in fusedMultiplyAdd, Vec3.crossPrecise in Vec3.differenceOfProducts.
+FMA_SITES = re.compile(r"^Math\.(Vec4\.Vec4\.(fusedMultiplyAdd|differenceOfProducts)"
+                       r"|Vec3\.Vec3\.(fusedMultiplyAdd|differenceOfProducts)|DVec3\.DVec3\.fusedMultiplyAdd"
+                       r"|Math\.differenceOfProducts|Quat\.Quat\.(mul|multiplyImaginary))$")
+# The callers of a site where LLVM moves the FMA of the inlined site and drops its debug location (line 0): the
+# instruction then has no inline chain and belongs to the caller. With --fma an FMA whose innermost function is one of
+# these passes too. The triangle decoder (Jolt's sFusedMultiplyAdd in DecodingContext) loses all 9 FMAs of
+# DecodingContext.unpack this way (Zig 0.16.0, x86-64-v3).
+FMA_CALLERS = re.compile(r"^AABBTree\.TriangleCodec\.TriangleCodecIndexed8BitPackSOA4Flags\."
+                         r"TriangleCodecIndexed8BitPackSOA4Flags\.DecodingContext\."
+                         r"(unpackVertex|unpackBlock|unpack|unpackWithFlags|testRay|getTriangle)$")
 
 # The sites that may stay: (regular expression on a function name, what it may do, largest size in bytes, why).
 # "fill" is a memset, "copy" a memcpy / memmove, "rodata" a copy from read-only data. The name is the function that
@@ -383,13 +394,15 @@ def problems(result):
 
 
 def fma_offenders(result, fma):
-    """The FMA instructions that are not allowed: all of them without -Dfma, else those outside FMA_SITES"""
+    """The FMA instructions that are not allowed: all of them without -Dfma, else those whose innermost function is
+    not in FMA_SITES or FMA_CALLERS"""
     if not fma:
         return [(f, site, mnemonic) for f, _, site, mnemonic in result.fma]
     if not result.line_info:
         # Without the inline chains the site of an inlined FMA is unknown
         return []
-    return [(f, site, mnemonic) for f, names, site, mnemonic in result.fma if not any(FMA_SITES.match(n) for n in names)]
+    return [(f, site, mnemonic) for f, names, site, mnemonic in result.fma
+            if not FMA_SITES.match(names[0]) and not FMA_CALLERS.match(names[0])]
 
 
 def check(binary, fma=False):
@@ -435,8 +448,11 @@ def check(binary, fma=False):
         return 1
     bad_fma = fma_offenders(result, fma)
     if fma:
+        lost = sum(bool(FMA_CALLERS.match(names[0]) and not FMA_SITES.match(names[0])) for _, names, _, _ in result.fma)
         print(f"codegen-check: {len(result.fma)} FMA instructions in the library code (-Dfma), "
               f"{len(result.fma) - len(bad_fma)} of them from Jolt's JPH_USE_FMADD sites"
+              + (f" ({lost} of them without debug location in a caller of a site, FMA_CALLERS)"
+                 if lost and result.line_info else "")
               + ("" if result.line_info else " (no debug line info: their sites are not checked)"))
     if bad_fma:
         print(f"codegen-check FAILED: {len(bad_fma)} FMA instructions in library code"
@@ -538,6 +554,38 @@ Physics.Body.Body.updateRotation():
  1000509:\tvfnmadd231ps %xmm2,%xmm1,%xmm0
 """
 
+# FMA instructions for --fma: only the innermost function of the inline chain counts
+SELF_TEST_FMA_LISTING = """
+zolt:     file format elf64-x86-64
+
+0000000001000000 <Physics.Body.Body.integrate>:
+Math.Vec4.Vec4.mul():
+/z/Zolt/Math/Vec4.zig:272
+inlined by /z/Zolt/Physics/Body/Body.zig:301 (Physics.Body.Body.integrate)
+ 1000000:\tvfmadd132ps %xmm2,%xmm1,%xmm0
+Physics.Body.Body.helper():
+/z/Zolt/Physics/Body/Body.zig:10
+inlined by /z/Zolt/Math/Quat.zig:340 (Math.Quat.Quat.mul)
+inlined by /z/Zolt/Physics/Body/Body.zig:303 (Physics.Body.Body.integrate)
+ 1000005:\tvfmadd231ps %xmm2,%xmm1,%xmm0
+Math.Vec3.Vec3.fusedMultiplyAdd():
+/z/Zolt/Math/Vec3.zig:171
+inlined by /z/Zolt/Math/Vec3.zig:503 (Math.Vec3.Vec3.differenceOfProducts)
+inlined by /z/Zolt/Math/Vec3.zig:524 (Math.Vec3.Vec3.crossPrecise)
+inlined by /z/Zolt/Physics/Body/Body.zig:304 (Physics.Body.Body.integrate)
+ 100000a:\tvfmsub213ps %xmm2,%xmm1,%xmm0
+Math.Math.differenceOfProducts():
+/z/Zolt/Math/Math.zig:60
+inlined by /z/Zolt/Physics/Body/Body.zig:305 (Physics.Body.Body.integrate)
+ 100000f:\tvfnmadd231ss %xmm2,%xmm1,%xmm0
+
+0000000001000100 <AABBTree.TriangleCodec.TriangleCodecIndexed8BitPackSOA4Flags.TriangleCodecIndexed8BitPackSOA4Flags.DecodingContext.unpack>:
+AABBTree.TriangleCodec.TriangleCodecIndexed8BitPackSOA4Flags.TriangleCodecIndexed8BitPackSOA4Flags.DecodingContext.unpack():
+/z/Zolt/AABBTree/TriangleCodec/TriangleCodecIndexed8BitPackSOA4Flags.zig:505 (discriminator 2)
+ 1000100:\tvmovaps (%r15),%xmm8
+ 1000105:\tvfmadd213ps %xmm8,%xmm9,%xmm2
+"""
+
 
 def self_test():
     std_swap = {"/z/lib/std/mem.zig": (2, 5)}
@@ -564,6 +612,20 @@ def self_test():
                                                                     ("updateRotation", "vfnmadd231ps")], r.fma
     assert len(fma_offenders(r, False)) == 2
     assert [m for _, _, m in fma_offenders(r, True)] == ["vfnmadd231ps"], fma_offenders(r, True)
+    # With -Dfma, an FMA inlined from the componentwise Vec4.mul and one of a helper that LLVM inlined into Quat.mul
+    # fail. One of Vec3.fusedMultiplyAdd (through differenceOfProducts and crossPrecise), one of the scalar
+    # differenceOfProducts and one without debug location in the triangle decoder (FMA_CALLERS) pass.
+    rf = scan(SELF_TEST_FMA_LISTING.splitlines(), [], [], lambda p: None)
+    assert len(rf.fma) == 5 and len(fma_offenders(rf, False)) == 5, rf.fma
+    assert [m for _, _, m in fma_offenders(rf, True)] == ["vfmadd132ps", "vfmadd231ps"], fma_offenders(rf, True)
+    # FMA_SITES names exactly the functions of Jolt's 8 sites, not the componentwise products
+    site_funcs = [f"Math.{t}.{t}.fusedMultiplyAdd" for t in ("Vec4", "Vec3", "DVec3")] + \
+        [f"Math.{t}.{t}.differenceOfProducts" for t in ("Vec4", "Vec3")] + \
+        ["Math.Math.differenceOfProducts", "Math.Quat.Quat.mul", "Math.Quat.Quat.multiplyImaginary"]
+    assert all(FMA_SITES.match(n) for n in site_funcs), site_funcs
+    others = [f"Math.{t}.{t}.mul" for t in ("Vec4", "Vec3", "DVec3", "Mat44")] + \
+        ["Math.Math.mul", "Math.DVec3.DVec3.differenceOfProducts", "Math.Vec3.Vec3.crossPrecise"]
+    assert not any(FMA_SITES.match(n) or FMA_CALLERS.match(n) for n in others), others
     assert len(r.funcs) == 4 and r.hosts == {"PerformanceTest.main", "PerformanceTestScene.updateTestThunk"}
     assert r.line_info and r.format == FORMAT
     # A scan that proves nothing fails: too few library functions and no SENTINEL here
