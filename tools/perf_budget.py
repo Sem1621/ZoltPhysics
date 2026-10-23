@@ -28,10 +28,11 @@ Measured on top of Phase 11 WS, the SIMD contact solver (d60324b; Zig 0.16.0, va
     Ragdoll              15   1,681,867,165  (Zolt only)               1.85e9
 
 The budgets are the measurement plus about 10%. Before Phase 10 the ratios were 17 (ConvexVsMesh) and 5.4 (Pyramid).
-After Phase 10 (W3, 4035b3c) Pyramid was 0.983; the SIMD contact solver of Phase 11 made it 0.960. SCENES keeps the
-measured counts too. Re-measure and update the budgets and the counts after a Zig, LLVM or valgrind upgrade, after a
-Jolt upgrade, and after a change that makes Zolt faster on purpose. A change that gives up speed on purpose updates
-them in the same commit and says why. The callgrind runs take about 30 seconds on 4 cores (they run in parallel).
+After Phase 10 (W3, 4035b3c) Pyramid was 0.983; the SIMD contact solver of Phase 11 made it 0.960 (its contact solve
+went from 1,144M to 1,027M instructions, SimulationArchitecture.md section 10). SCENES keeps the measured counts too.
+Re-measure and update the budgets and the counts after a Zig, LLVM or valgrind upgrade, after a Jolt upgrade, and after
+a change that makes Zolt faster on purpose. A change that gives up speed on purpose updates them in the same commit and
+says why. The callgrind runs take about 30 seconds on 4 cores (they run in parallel).
 The budgets are for the default build options (single precision, no debug renderer).
 """
 import collections

@@ -1283,9 +1283,14 @@ change), and not `-Dsimd_contact_solver=false`. That build option (default true,
 is an A/B switch: both settings give the same bits. The warm start and storeAppliedImpulses stay scalar.
 
 **Cost.** Pyramid (-t=1, 60 steps): 4,280,522,043 instructions before, 4,180,344,176 with the SIMD
-solver. Wall clock (steps/s, -t=1) went from about 55 to about 72 on a noisy machine. The scalar solver
+solver. The contact solve went from 1,144,037,329 instructions (26.7%) to 1,026,578,521 (24.6%):
+solveGroup 744M, the sorting and group building around it 148M, and the scalar solver 134M (contacts
+with a static or kinematic body, short tails, non parallel batches, islands that are not split). The
+`isDynamic` checks of the sorting loop add about 15M more (callgrind counts them in Body.zig). Wall
+clock (steps/s, -t=1) went from about 55 to about 72 on a noisy machine. The scalar solver
 waits on the dependency chain from one contact point to the next; 8 lanes fill that time. The other
-scenes of perf-budget change by less than 0.02%. About a fifth of the kernel's instructions are
+scenes of perf-budget change by less than 0.02%. HighSpeed and Ragdoll do not use the SIMD path: their
+contact solve keeps its count. About a fifth of the kernel's instructions are
 transposes and another sixth are register spills (12 velocity vectors stay live). Transposing the
 constant constraint data once per step instead of once per iteration would remove most of the
 transposes but needs a buffer per step; it is not done.
