@@ -40,6 +40,9 @@
 //!   error, PostIntegrateVelocity does the work itself when none could be created: the results do not change), the heap
 //!   runs out at every allocation inside the jobs, the broad phase cast of FindCCDContacts runs out of memory,
 //!   checkAllAllocationFailures on creating the scene; save and restore with the CCD manifolds in the contact cache.
+//! - The CCD wake batch (UB35 of RemainingFeaturesArchitecture.md R20): a bullet resolved after JobResolveCCDContacts
+//!   activated a full batch of 64 woken boxes hits a box of that batch. Jolt reads past its table there, Zolt finds no
+//!   CCD body.
 //!
 //! The constraint scene (Phase 6 foundation: FixedConstraint and PointConstraint in islands): a chain on point
 //! constraints swinging into a stack (constraints and contacts in one island), a box welded to a kinematic body, a
@@ -2789,6 +2792,82 @@ test "PhysicsSystem CCD: out of memory creating the scene" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Ctx.build, .{});
+}
+
+test "PhysicsSystem CCD: a bullet resolved after a full activation batch hits a body of that batch" {
+    // The layout of the `ccd_wake_batch` parity scene (buildCCDWakeBatch in ZoltParity/Physics/SimScenes.zig) plus one
+    // bullet: 70 sleeping boxes, each hit by its own bullet in update 1. JobResolveCCDContacts activates a full batch of
+    // 64 boxes while it still resolves the CCD bodies. The extra bullet hits box 0 later than every other bullet hits its
+    // box, so it is resolved last, after box 0 was activated by the first batch. Box 0 then has an active index past the
+    // active body to CCD body table. Jolt reads past the table there (RemainingFeaturesArchitecture.md R20, UB35). Zolt
+    // finds no CCD body for box 0, so the extra bullet does its collision response like a bullet that hits a box.
+    const allocator = std.testing.allocator;
+    const num_boxes = 70; // More than the batch of 64 bodies of JobResolveCCDContacts
+    const WakeScene = struct {
+        broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+        object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+        object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+        system: PhysicsSystem = .empty,
+    };
+    const scene = try allocator.create(WakeScene);
+    defer allocator.destroy(scene);
+    scene.* = .{};
+    try scene.system.init(allocator, io, 1024, 0, 4096, 2048, &scene.broad_phase_layer_interface.base, &scene.object_vs_broad_phase_layer_filter.base, &scene.object_layer_pair_filter.base, .{});
+    defer scene.system.deinit();
+    scene.system.setGravity(Vec3.zero());
+    const bi = scene.system.getBodyInterfaceMut();
+
+    var box_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.init(0.5, 0.5, 0.5), .{ .convex_radius = 0.05 })).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+    defer box_settings.deinit();
+    var bullet_settings = BodyCreationSettings.initWithSettings((try SphereShapeSettings.create(allocator, 0.25, .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+    defer bullet_settings.deinit();
+    bullet_settings.motion_quality = .linear_cast;
+    bullet_settings.linear_velocity = Vec3.init(150, 0, 0);
+
+    // The bullets move 2.5 m per step: after update 0 they are 0.75 m (plus up to 0.1 m) before their box
+    var boxes: [num_boxes]BodyID = undefined;
+    for (&boxes, 0..) |*box, i| {
+        const y = 2.5 * f(@intCast(i / 10));
+        const z = 2.5 * f(@intCast(i % 10));
+        box_settings.position = RVec3.init(4.0 + 0.01 * f(@intCast((i * 7) % 11)), y, z);
+        box.* = try bi.createAndAddBody(&box_settings, .dont_activate);
+        bullet_settings.position = RVec3.init(0, y, z);
+        _ = try bi.createAndAddBody(&bullet_settings, .activate);
+    }
+
+    // The extra bullet: behind the bullet of box 0 and a little higher, it hits box 0 at a larger fraction than every
+    // other hit of update 1. Box 0 is at the smallest distance, so its own bullet is in the first batch.
+    bullet_settings.position = RVec3.init(-0.4, 0.4, 0);
+    const extra_bullet = try bi.createAndAddBody(&bullet_settings, .activate);
+    const num_wake_bullets = num_boxes + 1;
+    try expectEqual(@as(u32, num_wake_bullets), scene.system.getNumActiveBodies(.rigid_body));
+
+    var temp: TempAllocatorImpl = try .init(allocator, 4 * 1024 * 1024);
+    defer temp.deinit();
+    var jobs = try JobSystemSingleThreaded.init(allocator, io, @intCast(zolt.physics_settings.max_physics_jobs));
+    defer jobs.deinit();
+
+    // Update 0: no hits yet
+    try expect((try scene.system.update(1.0 / 60.0, 1, temp.tempAllocator(), jobs.jobSystem())).isNone());
+    for (boxes) |box| try expect(!bi.isActive(box));
+
+    // Update 1: every bullet hits its box, the extra bullet hits box 0 too
+    try expect((try scene.system.update(1.0 / 60.0, 1, temp.tempAllocator(), jobs.jobSystem())).isNone());
+    try expect(temp.isEmpty());
+    for (boxes) |box| try expect(bi.isActive(box));
+
+    // Box 0 was activated by the first batch: its active index is past the table of update 1 (which has one entry per
+    // bullet) and inside the first batch of 64
+    const box0_index = scene.system.body_manager.getBody(boxes[0]).getMotionProperties().getIndexInActiveBodiesInternal();
+    try expect(box0_index >= num_wake_bullets and box0_index < num_wake_bullets + 64);
+
+    // The extra bullet did its collision response: it lost speed, and box 0 moves
+    try expect(bi.getLinearVelocity(extra_bullet).getX() < 150.0);
+    try expect(bi.getLinearVelocity(boxes[0]).getX() > 0.0);
+
+    // The simulation goes on
+    for (0..4) |_| try expect((try scene.system.update(1.0 / 60.0, 1, temp.tempAllocator(), jobs.jobSystem())).isNone());
+    try expect(temp.isEmpty());
 }
 
 // -------------------------------------------------------------------------------------------------------------------

@@ -1100,8 +1100,11 @@ DeterminismLog, PhysicsScene).**
     which already moved in IntegrateVelocity. This is reproduced, and a scene covers it.
 - A latent Jolt bug is kept out of every scene. JobResolveCCDContacts activates woken bodies in
   batches of 64 while it still loops over the CCD bodies. A later CCD body that hit a body of an
-  earlier batch then reads past `mActiveBodyToCCDBody`: Jolt asserts in debug, Zolt asserts in safe
-  builds. The SimScenes header states the rule for scene authors.
+  earlier batch then reads past `mActiveBodyToCCDBody`: Jolt asserts in debug and reads out of
+  bounds in release. Zolt's `getCCDBody` returns null there in every build mode (UB35 of
+  RemainingFeaturesArchitecture.md R20): the body was asleep during FindCCDContacts, so it has no
+  CCD body. A Zolt-only test in PhysicsSystemTests.zig covers it. The SimScenes header states the
+  rule for scene authors.
 - Simulation parity now runs 36 contact scenes and 18 CCD scenes bit exact, besides the gravity
   scenes. They cover stacks and pyramids with and without the LargeIslandSplitter, every shape type,
   sensors, listeners that modify or reject contacts, FindCollisions jobs spawned inside jobs,
