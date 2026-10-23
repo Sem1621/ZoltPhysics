@@ -18,20 +18,21 @@ PhysicsSystem.update into main, or a name changed), and the count proves nothing
 Two scenes are Zolt only. Valgrind 3.22 stops the C++ binary with SIGILL at a VEX vmovq that it does not know: in
 the Ragdoll scene, and in BodyInterface::AddImpulse after the first character contact of CharacterVirtual.
 
-Measured on top of Phase 10 W3 (4035b3c; Zig 0.16.0, valgrind 3.22.0, x86-64-v3):
+Measured on top of Phase 11 WS, the SIMD contact solver (d60324b; Zig 0.16.0, valgrind 3.22.0, x86-64-v3):
 
     Scene             Steps   Zolt Ir        C++ Ir         Zolt/C++   Budget
-    ConvexVsMesh        200   1,980,847,565  2,038,825,594  0.972      1.07
-    Pyramid              60   4,280,522,043  4,354,343,582  0.983      1.08
-    HighSpeed            60   1,998,814,903  2,041,903,413  0.979      1.08
-    CharacterVirtual     60     578,779,034  (Zolt only)               0.64e9
-    Ragdoll              15   1,681,813,228  (Zolt only)               1.85e9
+    ConvexVsMesh        200   1,981,091,844  2,038,825,594  0.972      1.07
+    Pyramid              60   4,180,344,176  4,354,343,582  0.960      1.06
+    HighSpeed            60   1,999,039,429  2,041,903,413  0.979      1.08
+    CharacterVirtual     60     578,784,382  (Zolt only)               0.64e9
+    Ragdoll              15   1,681,867,165  (Zolt only)               1.85e9
 
-The budgets are the measurement plus about 10%. Before Phase 10 the ratios were 17 (ConvexVsMesh) and 5.4
-(Pyramid). SCENES keeps the measured counts too. Re-measure and update the budgets and the counts after a Zig, LLVM or
-valgrind upgrade, after a Jolt upgrade, and after a change that makes Zolt faster on purpose. A change that gives up
-speed on purpose updates them in the same commit and says why. The callgrind runs take about 30 seconds on 4 cores
-(they run in parallel). The budgets are for the default build options (single precision, no debug renderer).
+The budgets are the measurement plus about 10%. Before Phase 10 the ratios were 17 (ConvexVsMesh) and 5.4 (Pyramid).
+After Phase 10 (W3, 4035b3c) Pyramid was 0.983; the SIMD contact solver of Phase 11 made it 0.960. SCENES keeps the
+measured counts too. Re-measure and update the budgets and the counts after a Zig, LLVM or valgrind upgrade, after a
+Jolt upgrade, and after a change that makes Zolt faster on purpose. A change that gives up speed on purpose updates
+them in the same commit and says why. The callgrind runs take about 30 seconds on 4 cores (they run in parallel).
+The budgets are for the default build options (single precision, no debug renderer).
 """
 import collections
 import concurrent.futures
@@ -50,11 +51,11 @@ Scene = collections.namedtuple("Scene", [
     "zolt_ir", "jolt_ir",  # The measured counts (None: not run)
 ])
 SCENES = [
-    Scene("ConvexVsMesh", "LinearCast", 200, 1.07, None, 1_980_847_565, 2_038_825_594),
-    Scene("Pyramid", "LinearCast", 60, 1.08, None, 4_280_522_043, 4_354_343_582),
-    Scene("HighSpeed", "LinearCast", 60, 1.08, None, 1_998_814_903, 2_041_903_413),
-    Scene("CharacterVirtual", "Discrete", 60, None, 0.64e9, 578_779_034, None),
-    Scene("Ragdoll", "LinearCast", 15, None, 1.85e9, 1_681_813_228, None),
+    Scene("ConvexVsMesh", "LinearCast", 200, 1.07, None, 1_981_091_844, 2_038_825_594),
+    Scene("Pyramid", "LinearCast", 60, 1.06, None, 4_180_344_176, 4_354_343_582),
+    Scene("HighSpeed", "LinearCast", 60, 1.08, None, 1_999_039_429, 2_041_903_413),
+    Scene("CharacterVirtual", "Discrete", 60, None, 0.64e9, 578_784_382, None),
+    Scene("Ragdoll", "LinearCast", 15, None, 1.85e9, 1_681_867_165, None),
 ]
 # A count below this part of its measurement fails: callgrind did not find the toggle functions
 MIN_PART = 0.5
