@@ -91,9 +91,37 @@ pub const Vec3 = extern struct {
         return .{ .value = @splat(v) };
     }
 
-    /// Load 3 floats from memory (reads 32 bits extra which it doesn't use in Jolt, Zolt only reads 3 floats)
+    /// Load 3 floats from memory (reads 32 bits extra which it doesn't use)
+    /// Zolt: one unaligned 16 byte load, like Jolt. The 4 bytes after the Float3 must belong to the same object.
+    /// Use it on a struct member that `canLoadFloat3Unsafe` accepts (check that with a comptime assert at the struct),
+    /// or on an array with one spare element at the end. Use `loadFloat3Safe` anywhere else.
     pub fn loadFloat3Unsafe(v: *const Float3) Vec3 {
+        if (@inComptime()) return init(v.x, v.y, v.z); // Comptime memory has no bytes past the Float3
+        const p: *align(1) const Type = @ptrCast(v);
+        return fromType(p.*);
+    }
+
+    /// Zolt: `loadFloat3Unsafe` that reads only the 3 floats, for a Float3 that may end an allocation (for example a
+    /// local variable). Gives the same bits.
+    pub fn loadFloat3Safe(v: *const Float3) Vec3 {
         return init(v.x, v.y, v.z);
+    }
+
+    /// Zolt: true when `loadFloat3Unsafe` can read the Float3 member at `path` of a `T`. `path` is a field name or a
+    /// dotted path of nested fields. The member can also be an array of Float3. The 4 bytes after it must still be
+    /// part of `T`.
+    pub fn canLoadFloat3Unsafe(comptime T: type, comptime path: []const u8) bool {
+        return comptime result: {
+            var offset: usize = 0;
+            var U = T;
+            var it = std.mem.splitScalar(u8, path, '.');
+            while (it.next()) |name| {
+                offset += @offsetOf(U, name);
+                U = @FieldType(U, name);
+            }
+            const is_float3 = U == Float3 or (@typeInfo(U) == .array and @typeInfo(U).array.child == Float3);
+            break :result is_float3 and offset + @sizeOf(U) + @sizeOf(f32) <= @sizeOf(T);
+        };
     }
 
     /// Return the minimum value of each of the components (returns v2 when not v1 < v2, like _mm_min_ps)
@@ -469,9 +497,13 @@ pub const Vec3 = extern struct {
 
     /// Cross product
     pub fn cross(self: Vec3, other: Vec3) Vec3 {
-        const a = self.value;
-        const b = other.value;
-        return init(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+        // Zolt: Jolt's SSE version. Each lane computes the same two products and the same difference as the scalar
+        // version, so the bits are the same.
+        const yzxx = @Vector(4, i32){ 1, 2, 0, 0 }; // Assure Z and W are the same
+        const t1 = @shuffle(f32, other.value, undefined, yzxx) * self.value;
+        const t2 = @shuffle(f32, self.value, undefined, yzxx) * other.value;
+        const t3 = t1 - t2;
+        return .{ .value = @shuffle(f32, t3, undefined, yzxx) };
     }
 
     /// Cross product, more precise when FMA instructions are available (identical to `cross` in Zolt)
@@ -678,4 +710,53 @@ test "Vec3.unit_sphere is sUnitSphere: the compile time table equals a run time 
     try std.testing.expectEqual(runtime.len, Vec3.unit_sphere.len);
     for (runtime.constSlice(), Vec3.unit_sphere.constSlice()) |a, b|
         try std.testing.expectEqual(@as(u128, @bitCast(a.value)), @as(u128, @bitCast(b.value)));
+}
+
+test "loadFloat3Unsafe gives the bits of loadFloat3Safe and keeps W = Z" {
+    var prng = std.Random.DefaultPrng.init(0xf3);
+    const random = prng.random();
+    for (0..1000) |_| {
+        // Random bits, NaN patterns included, and a guard float that must be ignored
+        var words: [4]u32 = undefined;
+        for (&words) |*w| w.* = random.int(u32);
+        const f3: *const Float3 = @ptrCast(&words);
+        const unsafe_load: [4]u32 = @bitCast(Vec3.loadFloat3Unsafe(f3).value);
+        const safe_load: [4]u32 = @bitCast(Vec3.loadFloat3Safe(f3).value);
+        try std.testing.expectEqual(safe_load, unsafe_load);
+        try std.testing.expectEqual([4]u32{ words[0], words[1], words[2], words[2] }, unsafe_load);
+    }
+}
+
+/// The scalar cross product that Zolt used before (Jolt's version without SSE or NEON), the reference for `cross`
+fn crossReference(self: Vec3, other: Vec3) Vec3 {
+    const a = self.value;
+    const b = other.value;
+    return Vec3.init(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+}
+
+test "cross gives the bits of the scalar cross product" {
+    var prng = std.Random.DefaultPrng.init(0xc5);
+    const random = prng.random();
+    for (0..10000) |i| {
+        // Values of very different sizes, including zeros and denormals
+        var c: [6]f32 = undefined;
+        for (&c) |*f| f.* = switch (i % 3) {
+            0 => random.float(f32) * 2 - 1,
+            1 => (random.float(f32) * 2 - 1) * std.math.pow(f32, 2, @floatFromInt(random.intRangeAtMost(i32, -140, 120))),
+            else => if (random.boolean()) 0 else @bitCast(random.int(u32) & 0x807fffff),
+        };
+        const a = Vec3.init(c[0], c[1], c[2]);
+        const b = Vec3.init(c[3], c[4], c[5]);
+        try std.testing.expectEqual(@as(u128, @bitCast(crossReference(a, b).value)), @as(u128, @bitCast(a.cross(b).value)));
+    }
+}
+
+test "canLoadFloat3Unsafe" {
+    const S = extern struct { a: Float3, b: [2]Float3, c: f32, d: Float3 };
+    const Outer = extern struct { s: S, e: u32 };
+    try std.testing.expect(Vec3.canLoadFloat3Unsafe(S, "a"));
+    try std.testing.expect(Vec3.canLoadFloat3Unsafe(S, "b"));
+    try std.testing.expect(!Vec3.canLoadFloat3Unsafe(S, "c")); // Not a Float3
+    try std.testing.expect(!Vec3.canLoadFloat3Unsafe(S, "d")); // Last member
+    try std.testing.expect(Vec3.canLoadFloat3Unsafe(Outer, "s.d"));
 }

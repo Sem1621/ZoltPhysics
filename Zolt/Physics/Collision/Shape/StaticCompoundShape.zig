@@ -491,8 +491,8 @@ pub const StaticCompoundShape = struct {
 
             if (start < end) {
                 // Swap the two elements
-                std.mem.swap(u32, &body_idx[@intCast(start)], &body_idx[@intCast(end - 1)]);
-                std.mem.swap(AABox, &bounds[@intCast(start)], &bounds[@intCast(end - 1)]);
+                Core.swap(u32, &body_idx[@intCast(start)], &body_idx[@intCast(end - 1)]);
+                Core.swap(AABox, &bounds[@intCast(start)], &bounds[@intCast(end - 1)]);
                 start += 1;
                 end -= 1;
             }

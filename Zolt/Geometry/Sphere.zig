@@ -13,6 +13,10 @@ pub const Sphere = extern struct {
     center: Float3,
     radius: f32,
 
+    comptime {
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(Sphere, "center")); // Zolt: read through loadFloat3Unsafe
+    }
+
     /// Constructor (Sphere(Vec3Arg inCenter, float inRadius))
     pub fn init(center: Vec3, radius: f32) Sphere {
         var result: Sphere = .{ .center = undefined, .radius = radius };

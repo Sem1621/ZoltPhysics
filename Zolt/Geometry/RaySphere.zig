@@ -5,6 +5,7 @@
 //! `RaySphereMinMax{ .num_intersections, .min_fraction, .max_fraction }`.
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const math = @import("../Math/Math.zig");
 const findRoot = @import("../Math/FindRoot.zig").findRoot;
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
@@ -29,7 +30,7 @@ pub fn raySphere(ray_origin: Vec3, ray_direction: Vec3, sphere_center: Vec3, sph
     var fraction1 = roots.x1;
     var fraction2 = roots.x2;
     if (fraction1 > fraction2)
-        std.mem.swap(f32, &fraction1, &fraction2);
+        Core.swap(f32, &fraction1, &fraction2);
 
     // Test solution with lowest fraction, this will be the ray entering the sphere
     if (fraction1 >= 0.0)
@@ -90,7 +91,7 @@ pub fn raySphereMinMax(ray_origin: Vec3, ray_direction: Vec3, sphere_center: Vec
             var fraction1 = roots.x1;
             var fraction2 = roots.x2;
             if (fraction1 > fraction2)
-                std.mem.swap(f32, &fraction1, &fraction2);
+                Core.swap(f32, &fraction1, &fraction2);
 
             return .{ .num_intersections = 2, .min_fraction = fraction1, .max_fraction = fraction2 };
         },

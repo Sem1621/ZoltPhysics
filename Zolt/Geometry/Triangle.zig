@@ -16,6 +16,7 @@ pub const Triangle = extern struct {
 
     comptime {
         std.debug.assert(@sizeOf(Triangle) == 11 * @sizeOf(u32));
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(Triangle, "v")); // Zolt: v[0..3] are read through loadFloat3Unsafe
     }
 
     /// Optional arguments of the constructors

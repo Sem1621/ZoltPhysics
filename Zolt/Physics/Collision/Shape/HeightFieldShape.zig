@@ -2219,7 +2219,7 @@ pub const HeightFieldShape = struct {
 
         // Flip triangle if scaled inside out
         if (ScaleHelpers.isInsideOut(scale))
-            std.mem.swap(Vec3, &vertices[1], &vertices[2]);
+            Core.swap(Vec3, &vertices[1], &vertices[2]);
 
         // Transform to world space
         const transform = center_of_mass_transform.preScaled(scale);

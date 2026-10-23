@@ -295,8 +295,8 @@ pub const TaperedCylinderShape = struct {
 
         // Negative Y-scale flips the top and bottom
         if (out.bottom > out.top) {
-            std.mem.swap(f32, &out.top, &out.bottom);
-            std.mem.swap(f32, &out.top_radius, &out.bottom_radius);
+            Core.swap(f32, &out.top, &out.bottom);
+            Core.swap(f32, &out.top_radius, &out.bottom_radius);
         }
 
         return out;

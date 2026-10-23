@@ -8,6 +8,7 @@
 //! overload without a comparator.
 
 const std = @import("std");
+const Core = @import("Core.zig");
 const insertionSort = @import("InsertionSort.zig").insertionSort;
 
 /// Helper function for QuickSort, will move the pivot element to `middle` (all arguments are indices into items)
@@ -24,13 +25,13 @@ fn quickSortMedianOfThree(
     std.debug.assert(first != middle and middle != last);
 
     if (lessThan(context, items[middle], items[first]))
-        std.mem.swap(T, &items[first], &items[middle]);
+        Core.swap(T, &items[first], &items[middle]);
 
     if (lessThan(context, items[last], items[first]))
-        std.mem.swap(T, &items[first], &items[last]);
+        Core.swap(T, &items[first], &items[last]);
 
     if (lessThan(context, items[last], items[middle]))
-        std.mem.swap(T, &items[middle], &items[last]);
+        Core.swap(T, &items[middle], &items[last]);
 }
 
 /// Helper function for QuickSort using the Ninther method, will move the pivot element to `middle` (all arguments are indices into items)
@@ -109,7 +110,7 @@ pub fn quickSort(
                 break;
 
             // Swap the elements
-            std.mem.swap(T, &items[i], &items[j]);
+            Core.swap(T, &items[i], &items[j]);
 
             // Note that the first while loop in this function should
             // have been do i++ while (...) but since we cannot decrement

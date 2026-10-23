@@ -288,7 +288,7 @@ pub const SkeletonMapper = struct {
                 and cur_chain.items.len > 2 // It should have joints between the mapped joints
                 and cur_chain.items.len > chain2.items.len) // And it should be the longest so far
                 {
-                    std.mem.swap(std.ArrayList(i32), &chain2, &cur_chain);
+                    Core.swap(std.ArrayList(i32), &chain2, &cur_chain);
                     chain2_m = m2;
                 }
             }

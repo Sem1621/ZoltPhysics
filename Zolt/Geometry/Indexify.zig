@@ -4,6 +4,7 @@
 //! The pointer ranges of the C++ implementation (`uint32 *ioVertexIndices` + count) are slices.
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const math = @import("../Math/Math.zig");
 const Float3 = @import("../Math/Float3.zig").Float3;
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
@@ -102,7 +103,7 @@ fn indexifyVerticesRecursively(triangles: []const Triangle, vertex_indices: []u3
         } else if (distance_to_split_plane > vertex_weld_distance) {
             // Vertex is on the wrong side, swap with the last vertex
             v_end -= 1;
-            std.mem.swap(u32, &vertex_indices[v_read], &vertex_indices[v_end]);
+            Core.swap(u32, &vertex_indices[v_read], &vertex_indices[v_end]);
         } else {
             // Vertex is too close to the split plane, it goes on both sides
             scratch_buffer[scratch] = vertex_indices[v_read];

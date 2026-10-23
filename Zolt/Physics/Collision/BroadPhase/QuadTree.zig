@@ -7,14 +7,20 @@
 //! FindCollidingPairs and every query walk the tree with Jolt's code, in Jolt's order, with Jolt's atomics.
 //! - Node bounds are `[4]std.atomic.Value(f32)` per axis (Jolt: `atomic<float>`). The setters and getters keep
 //!   Jolt's implicit `seq_cst` operations, EncapsulateChildBounds widens them with Jolt's AtomicMin / AtomicMax
-//!   (compare-exchange). The tree walks load each lane with `.monotonic` into a Vec4 (Jolt: an unsynchronized 16 byte
-//!   vector load that races with the atomic stores of other threads, not annotated for TSAN in Jolt; the same bits
-//!   without undefined behavior, rule 3). The 4 child IDs that Jolt loads the same way (`UVec4::sLoadInt4Aligned` on
-//!   the `AtomicNodeID`s) are loaded per lane with `.acquire`: a node is constructed with plain stores
+//!   (compare-exchange). The tree walks read the 4 bounds of one axis and the 4 child IDs like Jolt: with one aligned
+//!   16 byte vector load each (`Vec4::sLoadFloat4Aligned`, `UVec4::sLoadInt4Aligned`). This load races with the
+//!   atomic stores of other threads (Jolt does not annotate it for TSAN). Zolt does the load with x86-64 inline asm
+//!   (`Node.vectorLoad`). The compiler cannot see into inline asm, so it is not a data race in Zig's memory model
+//!   (rule 3). The hardware reads each aligned 4 byte lane atomically, which is all that Jolt relies on.
+//!   The child ID load must have acquire order. A node is constructed with plain stores
 //!   (FixedSizeFreeList.constructObject copies it in) and published by the `seq_cst` compare-exchange of TryInsertLeaf /
-//!   TryCreateNewRoot (or the `seq_cst` root stores), so the acquire load of the ID that leads to a node orders its
-//!   construction before the walk reads it (with `.monotonic` that is a data race, which TSAN reports). The bits are
-//!   the same (on x86 it is the same instruction). Every other atomic keeps Jolt's (default `seq_cst`) memory order.
+//!   TryCreateNewRoot (or the `seq_cst` root stores). The acquire load of the ID that leads to a node orders its
+//!   construction before the walk reads it. x86 does not reorder a load with later loads, so the asm only needs a
+//!   `memory` clobber, which stops the compiler from moving loads above it.
+//!   Other CPUs, the self-hosted backend (its assembler does not take these operands) and TSAN builds load per lane
+//!   instead: the bounds with `.monotonic`, the child IDs with `.acquire` (with `.monotonic` that is a data race,
+//!   which TSAN reports). All paths load the same bits. Every other atomic keeps Jolt's (default `seq_cst`) memory
+//!   order.
 //! - Nodes come from a `NodeAllocator` (Jolt's `QuadTree::Allocator`, a FixedSizeFreeList of 128 byte nodes) whose
 //!   pages must all be committed (`reserveAllPages`, BroadPhaseQuadTree does it in initBroadPhase), so AllocateNode
 //!   never needs memory: AddBodiesFinalize, AddBodiesAbort and UpdateFinalize cannot fail. Running out of nodes stays
@@ -325,19 +331,59 @@ pub const QuadTree = struct {
             return changed;
         }
 
-        /// Zolt: the 4 child bounds of one axis as a Vec4, each lane loaded with .monotonic (Jolt:
-        /// `Vec4::sLoadFloat4Aligned((const Float4 *)&mBoundsMinX)`, a racy vector load, see the file comment)
-        fn loadBounds(bounds: *const [4]std.atomic.Value(f32)) Vec4 {
+        /// The arrays of child bounds, one per axis
+        pub const BoundsArray = enum { bounds_min_x, bounds_min_y, bounds_min_z, bounds_max_x, bounds_max_y, bounds_max_z };
+
+        /// Zolt: the 4 child bounds of one axis as a Vec4 (Jolt: `Vec4::sLoadFloat4Aligned((const Float4 *)&mBoundsMinX)`,
+        /// a racy vector load). One vector load on x86-64, else each lane loaded with .monotonic (see the file comment).
+        fn loadBounds(self: *const Node, comptime array: BoundsArray) Vec4 {
+            if (comptime use_vector_load)
+                return .{ .value = self.vectorLoad(@Vector(4, f32), @offsetOf(Node, @tagName(array)), false) };
+            const bounds = &@field(self, @tagName(array));
             return .init(bounds[0].load(.monotonic), bounds[1].load(.monotonic), bounds[2].load(.monotonic), bounds[3].load(.monotonic));
         }
 
-        /// Zolt: the 4 child IDs, each lane loaded with .acquire (Jolt: `UVec4::sLoadInt4Aligned((const uint32 *)&mChildNodeID[0])`).
+        /// Zolt: the 4 child IDs with acquire order (Jolt: `UVec4::sLoadInt4Aligned((const uint32 *)&mChildNodeID[0])`).
         /// A child node is constructed with plain stores (FixedSizeFreeList.constructObject) and then published by the
         /// seq_cst compare-exchange of TryInsertLeaf / TryCreateNewRoot: the acquire makes its construction visible
-        /// before the walk reads its bounds and child IDs (see the file comment)
+        /// before the walk reads its bounds and child IDs. One vector load on x86-64, else each lane loaded with
+        /// .acquire (see the file comment).
         fn loadChildIDs(self: *const Node) UVec4 {
+            if (comptime use_vector_load)
+                return .{ .value = self.vectorLoad(@Vector(4, u32), @offsetOf(Node, "child_node_id"), true) };
             return .init(self.child_node_id[0].id.load(.acquire), self.child_node_id[1].id.load(.acquire), self.child_node_id[2].id.load(.acquire), self.child_node_id[3].id.load(.acquire));
         }
+
+        /// Zolt: load the 16 bytes at `offset` in the node with one aligned vector load ((v)movaps / (v)movdqa).
+        /// Other threads may store to these bytes at the same time. That is not a data race in Zig's memory model,
+        /// because the load is inline asm, which the compiler treats as an opaque instruction. On x86 an aligned
+        /// 4 byte lane is read atomically, so each lane holds a value that some store wrote, as with Jolt's load.
+        /// With `acquire` the asm also clobbers memory: the compiler cannot move later loads above it, and x86
+        /// does not reorder loads with later loads, so the load has acquire order.
+        inline fn vectorLoad(self: *const Node, comptime T: type, comptime offset: usize, comptime acquire: bool) T {
+            // Nodes are cache line aligned and every array is at a multiple of 16 bytes (the aligned load faults otherwise)
+            comptime std.debug.assert(offset % 16 == 0);
+            std.debug.assert(std.mem.isAligned(@intFromPtr(self), 16));
+            const code = comptime code: {
+                const has_avx = std.Target.x86.featureSetHas(builtin.cpu.features, .avx);
+                const mnemonic = if (T == @Vector(4, f32)) (if (has_avx) "vmovaps" else "movaps") else (if (has_avx) "vmovdqa" else "movdqa");
+                break :code std.fmt.comptimePrint("{s} {d}(%[node]), %[result]", .{ mnemonic, offset });
+            };
+            if (acquire) {
+                return asm volatile (code
+                    : [result] "=x" (-> T),
+                    : [node] "r" (self),
+                    : .{ .memory = true });
+            }
+            return asm volatile (code
+                : [result] "=x" (-> T),
+                : [node] "r" (self),
+            );
+        }
+
+        /// Zolt: use `vectorLoad` in the tree walks. It needs x86-64 and the LLVM backend (the assembler of the
+        /// self-hosted backend does not take the memory operand). TSAN builds load per lane, so TSAN sees atomics.
+        const use_vector_load = builtin.cpu.arch == .x86_64 and builtin.zig_backend == .stage2_llvm and !builtin.sanitize_thread;
     };
 
     comptime {
@@ -788,8 +834,8 @@ pub const QuadTree = struct {
 
             if (start < end) {
                 // Swap the two elements
-                std.mem.swap(NodeID, &node_ids[start], &node_ids[end - 1]);
-                std.mem.swap(Vec3, &node_centers[start], &node_centers[end - 1]);
+                Core.swap(NodeID, &node_ids[start], &node_ids[end - 1]);
+                Core.swap(Vec3, &node_centers[start], &node_centers[end - 1]);
                 start += 1;
                 end -= 1;
             }
@@ -1345,12 +1391,12 @@ pub const QuadTree = struct {
                 std.debug.assert(std.mem.isAligned(@intFromPtr(node), Core.cache_line_size));
 
                 // Load bounds of 4 children
-                const bounds_minx = Node.loadBounds(&node.bounds_min_x);
-                const bounds_miny = Node.loadBounds(&node.bounds_min_y);
-                const bounds_minz = Node.loadBounds(&node.bounds_min_z);
-                const bounds_maxx = Node.loadBounds(&node.bounds_max_x);
-                const bounds_maxy = Node.loadBounds(&node.bounds_max_y);
-                const bounds_maxz = Node.loadBounds(&node.bounds_max_z);
+                const bounds_minx = node.loadBounds(.bounds_min_x);
+                const bounds_miny = node.loadBounds(.bounds_min_y);
+                const bounds_minz = node.loadBounds(.bounds_min_z);
+                const bounds_maxx = node.loadBounds(.bounds_max_x);
+                const bounds_maxy = node.loadBounds(.bounds_max_y);
+                const bounds_maxz = node.loadBounds(.bounds_max_z);
 
                 // Load ids for 4 children
                 var child_ids = node.loadChildIDs();
@@ -1666,12 +1712,12 @@ pub const QuadTree = struct {
                     std.debug.assert(std.mem.isAligned(@intFromPtr(node), Core.cache_line_size));
 
                     // Get bounds of 4 children
-                    const bounds_minx = Node.loadBounds(&node.bounds_min_x);
-                    const bounds_miny = Node.loadBounds(&node.bounds_min_y);
-                    const bounds_minz = Node.loadBounds(&node.bounds_min_z);
-                    const bounds_maxx = Node.loadBounds(&node.bounds_max_x);
-                    const bounds_maxy = Node.loadBounds(&node.bounds_max_y);
-                    const bounds_maxz = Node.loadBounds(&node.bounds_max_z);
+                    const bounds_minx = node.loadBounds(.bounds_min_x);
+                    const bounds_miny = node.loadBounds(.bounds_min_y);
+                    const bounds_minz = node.loadBounds(.bounds_min_z);
+                    const bounds_maxx = node.loadBounds(.bounds_max_x);
+                    const bounds_maxy = node.loadBounds(.bounds_max_y);
+                    const bounds_maxz = node.loadBounds(.bounds_max_z);
 
                     // Test overlap
                     const overlap = AABox4.aabox4VsBox(bounds1, bounds_minx, bounds_miny, bounds_minz, bounds_maxx, bounds_maxy, bounds_maxz);
@@ -1836,7 +1882,7 @@ test "QuadTree NodeID and Node layout" {
     try std.testing.expect(atomic.eqlBodyID(.init(0x00800005)));
 
     // A new node: invalid bounds (no query can enter it), invalid children, no parent
-    var n: QuadTree.Node = .init(true);
+    var n: QuadTree.Node align(64) = .init(true); // Aligned like the nodes of the allocator (loadBounds)
     try std.testing.expect(!n.getNodeBounds().isValid());
     try std.testing.expectEqual(@as(u32, 1), n.is_changed.load(.monotonic));
     try std.testing.expectEqual(invalid_node_index, n.parent_node_index.load(.monotonic));
@@ -1851,8 +1897,27 @@ test "QuadTree NodeID and Node layout" {
     try std.testing.expect(n.getChildBounds(2).max.eql(Vec3.init(1, 2, 4)));
     n.invalidateChildBounds(2);
     try std.testing.expect(!n.getChildBounds(2).isValid());
-    try std.testing.expect(QuadTree.Node.loadBounds(&n.bounds_min_x).eql(Vec4.replicate(large_float)));
+    try std.testing.expect(n.loadBounds(.bounds_min_x).eql(Vec4.replicate(large_float)));
     try std.testing.expectEqual(@as(usize, 124), @sizeOf(QuadTree.Node));
+}
+
+test "QuadTree node loads give the same bits as per lane loads" {
+    var prng = std.Random.DefaultPrng.init(0x9d);
+    const random = prng.random();
+    var node: QuadTree.Node align(64) = undefined; // Aligned like the nodes of the allocator
+    const n = &node;
+    for (0..100) |_| {
+        // Random bits, including NaN patterns: the loads must not change any bit
+        const words: *[31]u32 = @ptrCast(n);
+        for (words) |*w| w.* = random.int(u32);
+        inline for (std.meta.fields(QuadTree.Node.BoundsArray)) |field| {
+            const array = &@field(n, field.name);
+            const loaded: [4]u32 = @bitCast(n.loadBounds(@enumFromInt(field.value)).value);
+            for (0..4) |i| try std.testing.expectEqual(@as(u32, @bitCast(array[i].load(.monotonic))), loaded[i]);
+        }
+        const ids: [4]u32 = n.loadChildIDs().value;
+        for (0..4) |i| try std.testing.expectEqual(n.child_node_id[i].id.load(.acquire), ids[i]);
+    }
 }
 
 test "QuadTree partition" {

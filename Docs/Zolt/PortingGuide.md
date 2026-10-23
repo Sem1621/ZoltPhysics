@@ -166,6 +166,11 @@ both types) when porting code needs them.
   `extern struct` when layout matters: SIMD types, data that is hashed/streamed as bytes,
   data shared with GPU code. Uninitialized C++ values (`Vec3 v;`) become `var v: Vec3 = undefined;`.
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
+- **`loadFloat3Unsafe` reads 16 bytes**, like Jolt's `sLoadFloat3Unsafe`. The 4 bytes after the `Float3`
+  must belong to the same object. A `Vec3` / `Quat.loadFloat3Unsafe` call may read a struct member that a
+  comptime `std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "member"))` at the struct covers (see
+  `Sphere.zig`), or an array with one spare element at the end. Anywhere else (a local variable, the
+  last element of an array or a buffer) use `loadFloat3Safe`. Both give the same bits.
 - **Bit flags.** Public bit flag enums (`EAllowedDOFs`, `EStateRecorderState`, `EPhysicsUpdateError`) become
   `packed struct(uN)` with one `bool` per bit in Jolt's bit order. Jolt's named combinations become decls
   (`AllowedDOFs.all`, `AllowedDOFs.plane_2d`, `StateRecorderState.all`), and a comptime block checks the bits against
@@ -579,8 +584,8 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   for ThreadSanitizer) become `.monotonic` atomics: the atomic load or store compiles to the same instruction on x86
   and ARM and removes the undefined behavior. Examples: `BodyManager.bodies_size` (`mBodies.size()`),
   `MotionProperties.index_in_active_bodies`, the body pair queue slots of the contact manager, the QuadTree node
-  bounds (loaded per lane into a `Vec4`, which gives the bits of Jolt's vector load). Every other atomic keeps Jolt's
-  memory order.
+  bounds where the walks do not use the inline asm vector load (SimulationArchitecture D9). Every other atomic keeps
+  Jolt's memory order.
 - **Jolt's barrier race is fixed, not ported.** Jolt's `BarrierImpl::AddJob` / `AddJobs` count a job after they
   set the barrier on it. A job that finishes in between lets `Wait()` return early, which the soft body step can
   hit. Zolt counts first and releases the count of a job that is already done (scheduling only, see
@@ -710,8 +715,12 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
 - `usingnamespace` and `async` are gone. `std.BoundedArray` is gone.
 - Zig 0.16's self-hosted x86_64 backend (Zig's default for Debug builds) miscompiles some `@Vector`
   code, e.g. `@bitCast(@Vector(4, bool))` to `u4` returns garbage. `build.zig` therefore defaults to
-  LLVM (`-Duse_llvm=false` opts out for faster Debug compiles). Avoid bitcasting bool vectors to
-  integers; build masks with shifts instead (see `UVec4.getTrues`).
+  LLVM (`-Duse_llvm=false` opts out for faster Debug compiles). Bitcast bool vectors to integers
+  only when `builtin.zig_backend == .stage2_llvm` and the CPU is little endian, and build the mask
+  with shifts otherwise. Copy the gate `UVec4.use_bool_bit_cast` (see `UVec4.getTrues`).
+- LLVM intrinsics (`extern fn @"llvm.x86..."`) and inline asm with memory operands also need
+  `builtin.zig_backend == .stage2_llvm`. Keep a portable fallback, and test that it gives the same
+  bits (see `UVec4.shiftComponents4Minus` and `QuadTree.Node.vectorLoad`).
 - Integer arithmetic that wraps on purpose (hashes, counters) must use `+%`, `-%`, `*%`;
   plain operators are overflow-checked in Debug/ReleaseSafe.
 - `std.math.nan(f32)` is a quiet NaN like `numeric_limits<float>::quiet_NaN()`.

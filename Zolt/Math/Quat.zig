@@ -579,7 +579,8 @@ pub const Quat = extern struct {
         return fromVec4(self.value.mulScalar(scale0).add(destination.value.mulScalar(scale1))).normalized();
     }
 
-    /// Load 3 floats from memory (X, Y and Z component and then calculates W) reads 32 bits extra which it doesn't use (Zolt only reads 3 floats)
+    /// Load 3 floats from memory (X, Y and Z component and then calculates W) reads 32 bits extra which it doesn't use
+    /// (Zolt: see Vec3.loadFloat3Unsafe for where it may be used)
     pub fn loadFloat3Unsafe(v: *const Float3) Quat {
         const xyz = Vec3.loadFloat3Unsafe(v);
         const w = @sqrt(math.max(1.0 - xyz.lengthSq(), 0.0)); // It is possible that the length of v is a fraction above 1, and we don't want to introduce NaN's in that case so we clamp to 0

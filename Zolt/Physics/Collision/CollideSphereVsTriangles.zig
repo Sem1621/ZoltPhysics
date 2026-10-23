@@ -6,6 +6,7 @@
 //! the `Mat44Arg` / `Vec3Arg` members are copies. Unlike CollideConvexVsTriangles it holds no pointers into itself.
 
 const std = @import("std");
+const Core = @import("../../Core/Core.zig");
 const ClosestPoint = @import("../../Geometry/ClosestPoint.zig");
 const math = @import("../../Math/Math.zig");
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -168,7 +169,7 @@ pub const CollideSphereVsTriangles = struct {
 
             // When inside out, we need to swap the triangle winding
             if (self.scale_sign2 < 0.0)
-                std.mem.swap(Vec3, &result.shape2_face.buffer[1], &result.shape2_face.buffer[2]);
+                Core.swap(Vec3, &result.shape2_face.buffer[1], &result.shape2_face.buffer[2]);
         }
 
         // Notify the collector

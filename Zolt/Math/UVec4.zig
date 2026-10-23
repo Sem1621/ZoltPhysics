@@ -2,6 +2,7 @@
 //! Status: complete
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Swizzle = @import("Swizzle.zig").Swizzle;
 const Vec4 = @import("Vec4.zig").Vec4;
 
@@ -252,15 +253,21 @@ pub const UVec4 = extern struct {
 
     /// Count the number of components that are true (true is when highest bit of component is set)
     pub fn countTrues(self: UVec4) u32 {
+        if (comptime use_bool_bit_cast) return @popCount(self.getTrues()); // CountBits(_mm_movemask_ps)
         return @reduce(.Add, self.value >> @splat(31));
     }
 
     /// Store if X is true in bit 0, Y in bit 1, Z in bit 2 and W in bit 3 (true is when highest bit of component is set)
     pub fn getTrues(self: UVec4) u32 {
-        // Note: not implemented as @bitCast(@Vector(4, bool)) -> u4, the Zig 0.16 self-hosted x86_64 backend miscompiles that
+        // _mm_movemask_ps: LLVM turns the bit cast of the sign bits into one (v)movmskps
+        if (comptime use_bool_bit_cast) return @as(u4, @bitCast(self.toBools()));
         const v = self.value >> @splat(31);
         return v[0] | (v[1] << 1) | (v[2] << 2) | (v[3] << 3);
     }
+
+    /// Zolt: getTrues and countTrues bit cast a @Vector(4, bool) to a u4. Only with the LLVM backend: the Zig 0.16
+    /// self-hosted x86_64 backend miscompiles that bit cast. The bit order is that of a little endian CPU.
+    const use_bool_bit_cast = builtin.zig_backend == .stage2_llvm and builtin.cpu.arch.endian() == .little;
 
     /// Shift all components by count bits to the left (filling with zeros from the left)
     pub fn logicalShiftLeft(self: UVec4, comptime count: u5) UVec4 {
@@ -280,12 +287,22 @@ pub const UVec4 = extern struct {
 
     /// Takes the lower 4 16 bits and expands them to X, Y, Z and W
     pub fn expand4Uint16Lo(self: UVec4) UVec4 {
+        if (comptime builtin.cpu.arch.endian() == .little) {
+            // Interleave with zeros (_mm_unpacklo_epi16), LLVM emits one vpmovzxwd
+            const halves: @Vector(8, u16) = @bitCast(self.value);
+            return .{ .value = @bitCast(@shuffle(u16, halves, @as(@Vector(8, u16), @splat(0)), @Vector(8, i32){ 0, -1, 1, -1, 2, -1, 3, -1 })) };
+        }
         const v = self.value;
         return init(v[0] & 0xffff, (v[0] >> 16) & 0xffff, v[1] & 0xffff, (v[1] >> 16) & 0xffff);
     }
 
     /// Takes the upper 4 16 bits and expands them to X, Y, Z and W
     pub fn expand4Uint16Hi(self: UVec4) UVec4 {
+        if (comptime builtin.cpu.arch.endian() == .little) {
+            // Interleave with zeros (_mm_unpackhi_epi16), LLVM emits one vpunpckhwd
+            const halves: @Vector(8, u16) = @bitCast(self.value);
+            return .{ .value = @bitCast(@shuffle(u16, halves, @as(@Vector(8, u16), @splat(0)), @Vector(8, i32){ 4, -1, 5, -1, 6, -1, 7, -1 })) };
+        }
         const v = self.value;
         return init(v[2] & 0xffff, (v[2] >> 16) & 0xffff, v[3] & 0xffff, (v[3] >> 16) & 0xffff);
     }
@@ -314,12 +331,39 @@ pub const UVec4 = extern struct {
     /// when count = 3 the resulting vector is (Y, Z, W, 0)
     pub fn shiftComponents4Minus(self: UVec4, count: u32) UVec4 {
         std.debug.assert(count <= 4);
+        if (comptime use_pshufb) {
+            // _mm_shuffle_epi8 with a byte shuffle from the table (a table index of 0xff gives a zero byte)
+            const bytes: @Vector(16, u8) = @bitCast(self.value);
+            return .{ .value = @bitCast(@"llvm.x86.ssse3.pshuf.b.128"(bytes, @bitCast(four_minus_x_shuffle[count]))) };
+        }
+        return self.shiftComponents4MinusFallback(count);
+    }
+
+    /// Zolt: shiftComponents4Minus without pshufb (Jolt's version without SSE4.1 or NEON)
+    fn shiftComponents4MinusFallback(self: UVec4, count: u32) UVec4 {
         const components: [4]u32 = self.value;
         var result = [4]u32{ 0, 0, 0, 0 };
         for (0..count) |i|
             result[i] = components[i + 4 - count];
         return .{ .value = result };
     }
+
+    /// Zolt: use pshufb (SSSE3) in shiftComponents4Minus, like Jolt with JPH_USE_SSE4_1. It is an LLVM intrinsic, so
+    /// it needs the LLVM backend.
+    const use_pshufb = (builtin.cpu.arch == .x86 or builtin.cpu.arch == .x86_64) and builtin.zig_backend == .stage2_llvm and
+        std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3);
+
+    /// _mm_shuffle_epi8 (pshufb), only referenced when `use_pshufb`
+    extern fn @"llvm.x86.ssse3.pshuf.b.128"(@Vector(16, u8), @Vector(16, u8)) @Vector(16, u8);
+
+    /// The byte shuffles of shiftComponents4Minus for count 0 .. 4 (sFourMinusXShuffle)
+    const four_minus_x_shuffle: [5]Type align(16) = .{
+        .{ 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff },
+        .{ 0x0f0e0d0c, 0xffffffff, 0xffffffff, 0xffffffff },
+        .{ 0x0b0a0908, 0x0f0e0d0c, 0xffffffff, 0xffffffff },
+        .{ 0x07060504, 0x0b0a0908, 0x0f0e0d0c, 0xffffffff },
+        .{ 0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c },
+    };
 
     pub fn format(self: UVec4, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{d}, {d}, {d}, {d}", .{ self.value[0], self.value[1], self.value[2], self.value[3] });
@@ -341,3 +385,57 @@ pub const UVec4 = extern struct {
         return init(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff);
     }
 };
+
+test "expand4Uint16Lo/Hi equal the scalar version" {
+    var prng = std.Random.DefaultPrng.init(0x16);
+    const random = prng.random();
+    for (0..10000) |_| {
+        const v = UVec4.init(random.int(u32), random.int(u32), random.int(u32), random.int(u32));
+        const c = v.value;
+        try std.testing.expect(v.expand4Uint16Lo().eql(UVec4.init(c[0] & 0xffff, c[0] >> 16, c[1] & 0xffff, c[1] >> 16)));
+        try std.testing.expect(v.expand4Uint16Hi().eql(UVec4.init(c[2] & 0xffff, c[2] >> 16, c[3] & 0xffff, c[3] >> 16)));
+    }
+}
+
+/// The getTrues and countTrues that Zolt used before, the reference for the tests
+fn getTruesReference(self: UVec4) u32 {
+    const v = self.value >> @splat(31);
+    return v[0] | (v[1] << 1) | (v[2] << 2) | (v[3] << 3);
+}
+
+fn countTruesReference(self: UVec4) u32 {
+    return @reduce(.Add, self.value >> @splat(31));
+}
+
+test "getTrues and countTrues equal the shift versions" {
+    var prng = std.Random.DefaultPrng.init(0x7e);
+    const random = prng.random();
+    for (0..10000) |_| {
+        const v = UVec4.init(random.int(u32), random.int(u32), random.int(u32), random.int(u32));
+        try std.testing.expectEqual(getTruesReference(v), v.getTrues());
+        try std.testing.expectEqual(countTruesReference(v), v.countTrues());
+    }
+    for (0..16) |bits| {
+        const b: u32 = @intCast(bits);
+        const v = UVec4.init((b & 1) << 31, (b >> 1 & 1) << 31, (b >> 2 & 1) << 31, (b >> 3 & 1) << 31);
+        try std.testing.expectEqual(b, v.getTrues());
+        try std.testing.expectEqual(@as(u32, @popCount(b)), v.countTrues());
+    }
+}
+
+test "shiftComponents4Minus equals the fallback for count 0 .. 4" {
+    var prng = std.Random.DefaultPrng.init(0x4d);
+    const random = prng.random();
+    for (0..1000) |_| {
+        const v = UVec4.init(random.int(u32), random.int(u32), random.int(u32), random.int(u32));
+        for (0..5) |count| {
+            const c: u32 = @intCast(count);
+            const result = v.shiftComponents4Minus(c);
+            try std.testing.expect(result.eql(v.shiftComponents4MinusFallback(c)));
+
+            // Lane i < count is lane i + 4 - count of the input, the other lanes are zero
+            const components: [4]u32 = v.value;
+            for (0..4) |i| try std.testing.expectEqual(if (i < count) components[i + 4 - count] else 0, result.getComponent(@intCast(i)));
+        }
+    }
+}

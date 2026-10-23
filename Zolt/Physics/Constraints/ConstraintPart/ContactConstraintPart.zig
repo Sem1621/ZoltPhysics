@@ -257,6 +257,19 @@ comptime {
     std.debug.assert(@sizeOf(ContactConstraintPart(.static, .static)) == 3 * @sizeOf(f32));
 }
 
+// Zolt: Vec3.loadFloat3Unsafe reads 4 bytes past each Float3 member. `bias` makes sure that they are part of the struct.
+comptime {
+    for ([_]MotionType{ .static, .kinematic, .dynamic }) |type1| {
+        for ([_]MotionType{ .static, .kinematic, .dynamic }) |type2| {
+            const T = ContactConstraintPart(type1, type2);
+            if (type1 != .static) std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "base1.r1_plus_u_x_axis"));
+            if (type1 == .dynamic) std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "base1.inv_i1_r1_plus_u_x_axis"));
+            if (type2 != .static) std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "base2.r2_x_axis"));
+            if (type2 == .dynamic) std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "base2.inv_i2_r2_x_axis"));
+        }
+    }
+}
+
 const TestContext = @import("ConstraintPartTestContext.zig");
 
 /// The velocities and mass properties that the contact constraint manager reads from the motion properties of a body

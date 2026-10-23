@@ -671,11 +671,11 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
 
         /// Swap the contents of two hash tables
         pub fn swap(self: *Self, other: *Self) void {
-            std.mem.swap(?[*]KeyValue, &self.data, &other.data);
-            std.mem.swap(?[*]u8, &self.control, &other.control);
-            std.mem.swap(u32, &self.size, &other.size);
-            std.mem.swap(u32, &self.max_size, &other.max_size);
-            std.mem.swap(u32, &self.load_left, &other.load_left);
+            Core.swap(?[*]KeyValue, &self.data, &other.data);
+            Core.swap(?[*]u8, &self.control, &other.control);
+            Core.swap(u32, &self.size, &other.size);
+            Core.swap(u32, &self.max_size, &other.max_size);
+            Core.swap(u32, &self.load_left, &other.load_left);
         }
 
         /// In place re-hashing of all elements in the table. Removes all bucket_deleted elements
@@ -751,7 +751,7 @@ pub fn HashTable(comptime Key: type, comptime KeyValue: type, comptime HashTable
                             // There's an element in the bucket we want to move to, swap them
                             std.debug.assert(control[dst] == bucket_deleted);
                             self.setControlValue(dst, src_control);
-                            std.mem.swap(KeyValue, &data[src], &data[dst]);
+                            Core.swap(KeyValue, &data[src], &data[dst]);
                             // Iterate again with the same source bucket
                         }
                     }

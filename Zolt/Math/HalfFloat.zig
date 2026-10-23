@@ -3,11 +3,17 @@
 //!
 //! The `HalfFloatConversion` namespace of Jolt is this file (re-exported as `zolt.half_float`), so
 //! `HalfFloatConversion::FromFloat<HalfFloatConversion::ROUND_TO_NEAREST>(v)` becomes
-//! `half_float.fromFloat(.round_to_nearest, v)`. Zolt always uses the portable fallback
-//! implementations (no F16C / NEON), which give bit identical results.
+//! `half_float.fromFloat(.round_to_nearest, v)`. `toFloat` uses F16C (one vcvtph2ps) when the target has it, like
+//! Jolt with JPH_USE_F16C. Other targets and `fromFloat` use the portable fallback (no NEON path). Both give bit
+//! identical results, except that F16C turns a signaling NaN into a quiet NaN. Jolt's x86-64-v3 build does the same.
 
+const std = @import("std");
+const builtin = @import("builtin");
 const UVec4 = @import("UVec4.zig").UVec4;
 const Vec4 = @import("Vec4.zig").Vec4;
+
+/// The target converts half floats to floats in hardware (JPH_USE_F16C)
+const use_f16c = (builtin.cpu.arch == .x86 or builtin.cpu.arch == .x86_64) and std.Target.x86.featureSetHas(builtin.cpu.features, .f16c);
 
 pub const HalfFloat = u16;
 
@@ -156,5 +162,42 @@ pub fn toFloatFallback(half_floats: UVec4) Vec4 {
 
 /// Convert 4 half floats (lower 64 bits) to floats
 pub fn toFloat(half_floats: UVec4) Vec4 {
+    if (comptime use_f16c) {
+        // _mm_cvtph_ps: LLVM turns the widening of 4 f16 lanes into one vcvtph2ps
+        const halves: @Vector(8, f16) = @bitCast(half_floats.value);
+        const lower = @shuffle(f16, halves, undefined, @Vector(4, i32){ 0, 1, 2, 3 });
+        return .{ .value = @floatCast(lower) };
+    }
     return toFloatFallback(half_floats);
+}
+
+fn isSignalingNaN(h: HalfFloat) bool {
+    return (h & half_flt_exponent_and_mantissa_mask) > half_flt_inf and (h & (1 << (half_flt_mantissa_bits - 1))) == 0;
+}
+
+test "toFloat equals toFloatFallback for all 65536 half floats" {
+    // With F16C, toFloat is the hardware conversion and this compares it with the fallback. Without F16C both are the
+    // fallback, and the check against the compiler's f16 conversion below still tests the fallback.
+    var v: u32 = 0;
+    while (v < 0x10000) : (v += 4) {
+        // The upper 64 bits must be ignored
+        const half_floats = UVec4.init(v | ((v + 1) << 16), (v + 2) | ((v + 3) << 16), 0xffffffff, 0x7c017c01);
+        const result = toFloat(half_floats).reinterpretAsInt();
+        const fallback = toFloatFallback(half_floats).reinterpretAsInt();
+        inline for (0..4) |i| {
+            const h: HalfFloat = @intCast(v + i);
+            if (isSignalingNaN(h)) {
+                // F16C sets the quiet bit of a signaling NaN, the fallback keeps it. The payload is the same.
+                const quiet_bit: u32 = 1 << (float_mantissa_bits - 1);
+                try std.testing.expectEqual(fallback.value[i] | quiet_bit, result.value[i] | quiet_bit);
+                try std.testing.expect(std.math.isNan(@as(f32, @bitCast(result.value[i]))));
+            } else {
+                try std.testing.expectEqual(fallback.value[i], result.value[i]);
+
+                // The compiler's f16 -> f32 conversion (F16C or compiler-rt) gives the same bits
+                const native: f32 = @floatCast(@as(f16, @bitCast(h)));
+                try std.testing.expectEqual(@as(u32, @bitCast(native)), fallback.value[i]);
+            }
+        }
+    }
 }
