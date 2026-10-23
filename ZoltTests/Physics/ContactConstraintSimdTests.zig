@@ -14,11 +14,13 @@
 //!   zeros, tiny values and small integers, so that the sign of a zero reaches the lambdas (Vec3.dot's `+ 0.0`,
 //!   math.max of -0.0) and tiny lambdas meet the FLT_MIN of the friction clamp.
 //! - The dispatcher: a batch whose contacts share dynamic bodies (like the non parallel split) must take the scalar
-//!   path. The test proves that it would notice otherwise: the SIMD solver gives other bits for such a batch.
+//!   path. The test proves that it would notice otherwise: the SIMD solver gives other bits for such a batch. With the
+//!   determinism log even a parallel batch must take the scalar path (a test that the determinism log binary runs).
 //! - Bite proofs (each one fails these tests): another association in the jacobian sum, a velocity step without the
 //!   lane mask, the friction clamp without FLT_MIN, a point mask with `<=`, Vec3.dot without `+ 0.0`, and math.max
 //!   that returns `b` for equal values. `@max` instead of math.max is not visible on x86-64 with finite inputs (LLVM
-//!   emits the same maxps there, only NaN differs), it stays forbidden.
+//!   emits the same maxps there, only NaN differs), it stays forbidden. Without `!DeterminismLog.enabled` in
+//!   ContactConstraintSimd.enabled the determinism log test fails.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -469,11 +471,19 @@ test "ContactConstraintSimd: the SIMD solver gives the bits of the scalar solver
     }
 }
 
-test "ContactConstraintSimd: solveBatch solves a non parallel batch with the scalar solver" {
+/// Solve batches whose contacts share dynamic bodies with solveBatch(`parallel`) and with the scalar solver, and fail
+/// unless the bits are equal. Also fail unless the SIMD solver gives other bits for some of these batches, so that
+/// the comparison shows which solver solveBatch used.
+fn expectScalarSolveBatch(comptime parallel: bool) !void {
     const allocator = std.testing.allocator;
 
     // The contacts share 4 dynamic bodies. The scalar solver solves them one after the other, the SIMD solver would
     // read the same old velocities in several lanes: the bits differ for some seeds.
+    const solveBatch = struct {
+        fn solve(manager: *ContactConstraintManager, constraint_offsets: []const u32) bool {
+            return ContactConstraintSimd.solveBatch(manager, constraint_offsets, parallel);
+        }
+    }.solve;
     var num_simd_differences: u32 = 0;
     var seed: u32 = 1;
     while (seed <= 100) : (seed += 1) {
@@ -483,12 +493,7 @@ test "ContactConstraintSimd: solveBatch solves a non parallel batch with the sca
             defer scalar.destroy();
             const batch = try Scene.create(allocator, seed, num_constraints, .shared, .physical);
             defer batch.destroy();
-            const solveNonParallel = struct {
-                fn solve(manager: *ContactConstraintManager, constraint_offsets: []const u32) bool {
-                    return ContactConstraintSimd.solveBatch(manager, constraint_offsets, false);
-                }
-            }.solve;
-            _ = try solveAndCompare(scalar, batch, solveNonParallel, seed, 4, false);
+            _ = try solveAndCompare(scalar, batch, solveBatch, seed, 4, false);
         }
 
         if (ContactConstraintSimd.supported) {
@@ -502,6 +507,20 @@ test "ContactConstraintSimd: solveBatch solves a non parallel batch with the sca
     }
     if (ContactConstraintSimd.supported)
         try expect(num_simd_differences > 0);
+}
+
+test "ContactConstraintSimd: solveBatch solves a non parallel batch with the scalar solver" {
+    try expectScalarSolveBatch(false);
+}
+
+test "DeterminismLog: solveBatch solves a parallel batch with the scalar solver when the log is on" {
+    // The SIMD solver solves the contacts of a batch in another order (the others first, then the dynamic vs dynamic
+    // ones by their number of points). So the ApplyLinearVelocityStep and ApplyAngularVelocityStep lines of the log
+    // would not be in Jolt's order. "DeterminismLog" in the name: the unit test binary with the log runs this test
+    // without a filter (build.zig).
+    if (!Core.determinism_log) return error.SkipZigTest; // Needs -Ddeterminism_log=true (build.zig runs it)
+    try expect(!ContactConstraintSimd.enabled);
+    try expectScalarSolveBatch(true);
 }
 
 test "ContactConstraintSimd: solveBatch uses the SIMD solver for a parallel batch when it is enabled" {
