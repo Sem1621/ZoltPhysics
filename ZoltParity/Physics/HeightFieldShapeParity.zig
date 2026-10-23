@@ -26,8 +26,10 @@
 //! copies from a null buffer), the walking queries on height fields whose empty range blocks collapse to a valid box
 //! (`walksOutside`: Jolt then walks blocks outside the height field) and a negative or zero Y scale in the settings
 //! (same effect), CalculateBitsPerSampleForError with a sample count that is not a multiple of the block size (reads
-//! beyond the samples). GetTrianglesNext is compared for at most `max_calls` calls: with a block that has more
-//! triangles than requested, Jolt returns the same triangles forever.
+//! beyond the samples). GetTrianglesNext is compared for at most `max_calls` calls. With a block that has more
+//! triangles than requested, Jolt returns the same triangles forever (UB37 of RemainingFeaturesArchitecture.md R20):
+//! there the calls are compared up to the first call that repeats the call before it, and Zolt's walk must finish
+//! and return the triangles of Jolt's walk with a buffer that never fills.
 //!
 //! C ABI wrappers: ZoltParity/Physics/HeightFieldShapeReference.cpp.
 
@@ -1716,6 +1718,7 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
 
     var inputs = try heightFields(allocator, &gen, 80);
     defer freeHeightFields(allocator, &inputs);
+    var repeated_walks: usize = 0;
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
@@ -1742,6 +1745,14 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
             @memset(jolt_counts, -1);
             const jolt_calls = jolt.jolt_hf_triangles(pair.jolt, &box, &position, &rotation, &scale, max_requested, with_materials, max_calls, max_triangles, jolt_counts.ptr, jolt_vertices.ptr, jolt_materials.ptr);
 
+            // UB37: the first call of Jolt that returns the same triangles as the call before it (Jolt then repeats
+            // them forever). Zolt continues inside the block from this call on.
+            const repeat = firstRepeatedCall(jolt_counts[0..@intCast(jolt_calls)], jolt_vertices, jolt_materials, max_triangles);
+            var jolt_compared: usize = 0; // The triangles of Jolt's calls before the repeated call
+            for (jolt_counts[0..repeat]) |count| jolt_compared += @intCast(count);
+            jolt_compared = @min(jolt_compared, max_triangles);
+            if (repeat < jolt_calls) repeated_walks += 1;
+
             var context: Shape.GetTrianglesContext = .{};
             hf.asShape().getTrianglesStart(&context, AABox.init(vec3(box[0..3].*), vec3(box[3..6].*)), vec3(position), quat(rotation), vec3(scale));
             const triangles = try allocator.alloc(Float3, 3 * @as(usize, @intCast(max_requested)));
@@ -1750,9 +1761,11 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
             defer allocator.free(materials);
             var zolt_calls: c_int = 0;
             var total: usize = 0;
+            var finished = false;
             while (true) {
                 const count = hf.asShape().getTrianglesNext(&context, @intCast(max_requested), triangles, if (with_materials != 0) materials else null);
-                checker.check(.{ input_index, k, zolt_calls }, @as(c_int, @intCast(count)), jolt_counts[@intCast(zolt_calls)]);
+                if (zolt_calls < repeat)
+                    checker.check(.{ input_index, k, zolt_calls }, @as(c_int, @intCast(count)), jolt_counts[@intCast(zolt_calls)]);
                 zolt_calls += 1;
                 var i: usize = 0;
                 while (i < count and total < max_triangles) : ({
@@ -1765,13 +1778,74 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
                     }
                     zolt_materials[total] = if (with_materials != 0) table.indexOf(materials[i]) else unknown_material;
                 }
+                finished = count == 0;
                 if (count == 0 or zolt_calls == max_calls or total >= max_triangles) break;
             }
-            checker.check(.{ input_index, k, "calls" }, zolt_calls, jolt_calls);
-            for (0..total) |t| checker.check(.{ input_index, k, t, box, position, rotation, scale }, .{ zolt_vertices[9 * t ..][0..9].*, zolt_materials[t] }, .{ jolt_vertices[9 * t ..][0..9].*, jolt_materials[t] });
+            if (repeat == jolt_calls) {
+                // Jolt's walk finishes (or stops at the limits of the comparison): every call and every triangle as in Jolt
+                checker.check(.{ input_index, k, "calls" }, zolt_calls, jolt_calls);
+                for (0..total) |t| checker.check(.{ input_index, k, t, box, position, rotation, scale }, .{ zolt_vertices[9 * t ..][0..9].*, zolt_materials[t] }, .{ jolt_vertices[9 * t ..][0..9].*, jolt_materials[t] });
+            } else {
+                // The triangles of the calls before the repeated call as in Jolt
+                for (0..@min(total, jolt_compared)) |t| checker.check(.{ input_index, k, t, box, position, rotation, scale }, .{ zolt_vertices[9 * t ..][0..9].*, zolt_materials[t] }, .{ jolt_vertices[9 * t ..][0..9].*, jolt_materials[t] });
+
+                // Zolt's walk finishes and returns the triangles of Jolt's walk with a buffer that never fills
+                checker.check(.{ input_index, k, "finished" }, finished, true);
+                const all_calls = jolt.jolt_hf_triangles(pair.jolt, &box, &position, &rotation, &scale, max_triangles, with_materials, 2, max_triangles, jolt_counts.ptr, jolt_vertices.ptr, jolt_materials.ptr);
+                checker.check(.{ input_index, k, "one call" }, all_calls == 2 and jolt_counts[1] == 0, true);
+                const jolt_set = try triangleSet(allocator, jolt_vertices, jolt_materials, @intCast(jolt_counts[0]));
+                defer allocator.free(jolt_set);
+                const zolt_set = try triangleSet(allocator, zolt_vertices, zolt_materials, total);
+                defer allocator.free(zolt_set);
+                checker.check(.{ input_index, k, "set size" }, zolt_set.len, jolt_set.len);
+                if (zolt_set.len == jolt_set.len)
+                    for (zolt_set, jolt_set, 0..) |z, j, t| checker.check(.{ input_index, k, "set", t }, z, j);
+            }
         }
     }
+    // The generator reaches walks that Jolt repeats forever (UB37)
+    checker.check("walks that Jolt repeats", repeated_walks > 0, true);
     try finishAll(&.{ &create_checker, &checker });
+}
+
+/// UB37: the index of the first call that returns the same triangles (and materials) as the call before it, or
+/// `counts.len` when there is none. Jolt repeats such a call forever. Calls whose triangles are not all stored (beyond
+/// `max_triangles`) are not compared.
+fn firstRepeatedCall(counts: []const c_int, vertices: []const f32, materials: []const u32, max_triangles: usize) usize {
+    var start: usize = 0; // The first triangle of call c - 1
+    for (1..counts.len) |c| {
+        const previous: usize = @intCast(counts[c - 1]);
+        const count: usize = @intCast(counts[c]);
+        const next = start + previous;
+        if (count > 0 and count == previous and next + count <= max_triangles and
+            std.mem.eql(u32, @ptrCast(vertices[9 * start ..][0 .. 9 * count]), @ptrCast(vertices[9 * next ..][0 .. 9 * count])) and
+            std.mem.eql(u32, materials[start..][0..count], materials[next..][0..count]))
+            return c;
+        start = next;
+    }
+    return counts.len;
+}
+
+/// The distinct triangles of a walk (the 9 vertex coordinates as bits and the material), sorted
+fn triangleSet(allocator: Allocator, vertices: []const f32, materials: []const u32, count: usize) ![][10]u32 {
+    const set = try allocator.alloc([10]u32, count);
+    errdefer allocator.free(set);
+    for (set, 0..) |*t, i| {
+        for (0..9) |v| t[v] = @bitCast(vertices[9 * i + v]);
+        t[9] = materials[i];
+    }
+    std.mem.sortUnstable([10]u32, set, {}, struct {
+        fn lessThan(_: void, a: [10]u32, b: [10]u32) bool {
+            return std.mem.order(u32, &a, &b) == .lt;
+        }
+    }.lessThan);
+    var n: usize = 0;
+    for (set) |t| {
+        if (n > 0 and std.mem.eql(u32, &set[n - 1], &t)) continue;
+        set[n] = t;
+        n += 1;
+    }
+    return allocator.realloc(set, n);
 }
 
 test "HeightFieldShape parity: CollideSoftBodyVertices" {
