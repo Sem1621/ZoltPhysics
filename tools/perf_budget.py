@@ -27,7 +27,8 @@ Measured on top of Phase 10 W3 (4035b3c; Zig 0.16.0, valgrind 3.22.0, x86-64-v3)
 The budgets are the measurement plus about 10%. Before Phase 10 the ratios were 17 (ConvexVsMesh) and 5.4
 (Pyramid). Re-measure and update the budgets after a Zig, LLVM or valgrind upgrade, and after a change that makes
 Zolt faster on purpose. A change that gives up speed on purpose updates them in the same commit and says why. The
-callgrind runs take about 30 seconds on 4 cores (they run in parallel).
+callgrind runs take about 30 seconds on 4 cores (they run in parallel). The budgets are for the default build options
+(single precision, no debug renderer).
 """
 import concurrent.futures
 import os

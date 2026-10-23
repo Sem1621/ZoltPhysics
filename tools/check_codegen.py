@@ -56,8 +56,8 @@ ALLOW = [
      r"\.createConstraint\)\.", {"fill", "copy"}, 0x3c0, "SwingTwistConstraint creation"),
     (r"^Core\.Virtual\.Thunk\(Physics\.Constraints\.SixDOFConstraint\.SixDOFConstraintSettings,\.createConstraint\)\.",
      {"copy"}, 0x740, "SixDOFConstraint creation"),
-    # Body creation copies the default Body
-    (r"^Physics\.Body\.BodyManager\.BodyManager\.allocateBody$", {"rodata"}, 0x140, "body creation"),
+    # Body creation copies the default Body (0x140 bytes, 0x180 in double precision)
+    (r"^Physics\.Body\.BodyManager\.BodyManager\.allocateBody$", {"rodata"}, 0x180, "body creation"),
     # Once per update: the default PhysicsUpdateContext.Step (Jolt's mSteps.resize runs the Step constructor). About
     # 0.01% of the instructions of an update.
     (r"^Physics\.PhysicsSystem\.PhysicsSystem\.update$", {"rodata"}, 0x1ca8, "the steps of an update"),
