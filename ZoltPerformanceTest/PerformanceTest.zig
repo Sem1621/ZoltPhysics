@@ -610,8 +610,9 @@ pub fn main(init: std.process.Init) !u8 {
                     // Zolt: -phase_times splits the measurement here
                     const clock_physics = if (enable_phase_times) std.Io.Clock.awake.now(io) else clock_start;
 
-                    // Do a physics step
-                    _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+                    // Do a physics step. Zolt: never inlined, so that the binary has the symbol
+                    // Physics.PhysicsSystem.PhysicsSystem.update, which `zig build perf-budget` counts with callgrind
+                    _ = try @call(.never_inline, PhysicsSystem.update, .{ &physics_system, delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem() });
 
                     // Stop measuring
                     const clock_end = std.Io.Clock.awake.now(io);

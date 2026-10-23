@@ -13,6 +13,10 @@
 //!   zig build jolt-performance-test -- <args>   Run the C++ PerformanceTest built like the parity reference (the M9 oracle)
 //!   zig build debug-renderer-check -Ddebug_renderer=true   Record the determinism scenes with the C++ PerformanceTest and
 //!                          ZoltPerformanceTest (-r), fail unless the .jor bytes are equal
+//!   zig build codegen-check  Build ZoltPerformanceTest (ReleaseFast, x86-64-v3) and fail when the library code fills or
+//!                          copies a large buffer or swaps byte by byte (tools/check_codegen.py)
+//!   zig build perf-budget [-- <scene>...]  Count the instructions of the physics updates of ZoltPerformanceTest and
+//!                          the C++ PerformanceTest with valgrind, fail when Zolt is over its budget (tools/perf_budget.py)
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
@@ -477,4 +481,57 @@ pub fn build(b: *std.Build) void {
     run_debug_renderer_check.stdio = .inherit;
     const debug_renderer_check_step = b.step("debug-renderer-check", "Fail unless the C++ PerformanceTest and ZoltPerformanceTest record the same .jor bytes (needs -Ddebug_renderer=true)");
     debug_renderer_check_step.dependOn(&run_debug_renderer_check.step);
+
+    // The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). Bit exactness cannot see a lost speedup, so two steps
+    // check the machine code and the instruction counts. Both use ZoltPerformanceTest built like the benchmarks:
+    // ReleaseFast with LLVM for the target of the C++ reference (x86-64-v3 on x86_64), whatever -Doptimize says.
+    const bench_user_types_module = b.createModule(.{
+        .root_source_file = user_types_source,
+        .target = reference_target,
+        .optimize = .ReleaseFast,
+    });
+    const zolt_bench = b.createModule(.{
+        .root_source_file = b.path("Zolt/zolt.zig"),
+        .target = reference_target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "zolt_options", .module = options_module },
+            .{ .name = "zolt_user_types", .module = bench_user_types_module },
+        },
+    });
+    const bench_performance_test = b.addExecutable(.{
+        .name = "ZoltPerformanceTestBench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("ZoltPerformanceTest/PerformanceTest.zig"),
+            .target = reference_target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zolt", .module = zolt_bench },
+            },
+        }),
+        .use_llvm = true,
+    });
+
+    // `zig build codegen-check`: tools/check_codegen.py reads `objdump -d -l --inlines` of the binary. It fails when
+    // library code (also where LLVM inlined it into the test program) calls memset / memcpy with a large constant
+    // size, copies a large constant from read-only data, or swaps with std.mem.swap, unless an allow-list entry of the
+    // script covers it. It needs GNU objdump and fails on a binary that is not x86-64: it reads x86-64 code only.
+    const run_codegen_check = b.addSystemCommand(&.{"python3"});
+    run_codegen_check.addFileArg(b.path("tools/check_codegen.py"));
+    run_codegen_check.addArtifactArg(bench_performance_test);
+    const codegen_check_step = b.step("codegen-check", "Fail when the library code of ZoltPerformanceTest (ReleaseFast) fills or copies a large buffer or swaps byte by byte");
+    codegen_check_step.dependOn(&run_codegen_check.step);
+
+    // `zig build perf-budget`: tools/perf_budget.py counts the instructions of the physics updates of short runs with
+    // valgrind (callgrind) in ZoltPerformanceTest and the C++ PerformanceTest of `jolt-performance-test`, and fails when
+    // Zolt is over the budget of the script. It needs valgrind and takes a few minutes.
+    const run_perf_budget = b.addSystemCommand(&.{"python3"});
+    run_perf_budget.addFileArg(b.path("tools/perf_budget.py"));
+    run_perf_budget.addArtifactArg(bench_performance_test);
+    run_perf_budget.addArtifactArg(jolt_performance_test);
+    run_perf_budget.setCwd(b.path(".")); // The Ragdoll scene reads Assets/
+    run_perf_budget.stdio = .inherit;
+    if (b.args) |args| run_perf_budget.addArgs(args); // Only these scenes: `zig build perf-budget -- Pyramid`
+    const perf_budget_step = b.step("perf-budget", "Fail when the physics updates of ZoltPerformanceTest take more instructions than their budget (needs valgrind)");
+    perf_budget_step.dependOn(&run_perf_budget.step);
 }
