@@ -2,6 +2,7 @@
 //! Status: complete
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Swizzle = @import("Swizzle.zig").Swizzle;
 const Vec4 = @import("Vec4.zig").Vec4;
 
@@ -280,12 +281,22 @@ pub const UVec4 = extern struct {
 
     /// Takes the lower 4 16 bits and expands them to X, Y, Z and W
     pub fn expand4Uint16Lo(self: UVec4) UVec4 {
+        if (comptime builtin.cpu.arch.endian() == .little) {
+            // Interleave with zeros (_mm_unpacklo_epi16), LLVM emits one vpmovzxwd
+            const halves: @Vector(8, u16) = @bitCast(self.value);
+            return .{ .value = @bitCast(@shuffle(u16, halves, @as(@Vector(8, u16), @splat(0)), @Vector(8, i32){ 0, -1, 1, -1, 2, -1, 3, -1 })) };
+        }
         const v = self.value;
         return init(v[0] & 0xffff, (v[0] >> 16) & 0xffff, v[1] & 0xffff, (v[1] >> 16) & 0xffff);
     }
 
     /// Takes the upper 4 16 bits and expands them to X, Y, Z and W
     pub fn expand4Uint16Hi(self: UVec4) UVec4 {
+        if (comptime builtin.cpu.arch.endian() == .little) {
+            // Interleave with zeros (_mm_unpackhi_epi16), LLVM emits one vpunpckhwd
+            const halves: @Vector(8, u16) = @bitCast(self.value);
+            return .{ .value = @bitCast(@shuffle(u16, halves, @as(@Vector(8, u16), @splat(0)), @Vector(8, i32){ 4, -1, 5, -1, 6, -1, 7, -1 })) };
+        }
         const v = self.value;
         return init(v[2] & 0xffff, (v[2] >> 16) & 0xffff, v[3] & 0xffff, (v[3] >> 16) & 0xffff);
     }
@@ -341,3 +352,14 @@ pub const UVec4 = extern struct {
         return init(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff);
     }
 };
+
+test "expand4Uint16Lo/Hi equal the scalar version" {
+    var prng = std.Random.DefaultPrng.init(0x16);
+    const random = prng.random();
+    for (0..10000) |_| {
+        const v = UVec4.init(random.int(u32), random.int(u32), random.int(u32), random.int(u32));
+        const c = v.value;
+        try std.testing.expect(v.expand4Uint16Lo().eql(UVec4.init(c[0] & 0xffff, c[0] >> 16, c[1] & 0xffff, c[1] >> 16)));
+        try std.testing.expect(v.expand4Uint16Hi().eql(UVec4.init(c[2] & 0xffff, c[2] >> 16, c[3] & 0xffff, c[3] >> 16)));
+    }
+}

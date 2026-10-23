@@ -12,10 +12,11 @@ const UVec4 = zolt.UVec4;
 const Vec4 = zolt.Vec4;
 
 // In Jolt, TestHalfFloatToFloat and TestFloatToHalfFloat only exist when JPH_USE_F16C or JPH_USE_NEON
-// is defined and compare the hardware intrinsics with the fallback version. Zolt always uses the
-// fallback, so these tests compare `toFloat` / `fromFloat` with the fallback (trivially equal) and
-// additionally compare with the f16 conversions of the Zig compiler (F16C or compiler-rt), which
-// play the role of the hardware intrinsics. Zig only has round to nearest conversions.
+// is defined and compare the hardware intrinsics with the fallback version. Zolt's `toFloat` uses F16C
+// when the target has it, `fromFloat` always uses the fallback. So these tests always run. They compare
+// `toFloat` / `fromFloat` with the fallback (trivially equal without F16C) and also with the f16
+// conversions of the Zig compiler (F16C or compiler-rt), which play the role of the hardware
+// intrinsics. Zig only has round to nearest conversions.
 
 test "TestHalfFloatToFloat" {
     // Check all half float values, 4 at a time, skip NaN's and INF
