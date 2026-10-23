@@ -1477,9 +1477,36 @@ test "TrackedVehicleController settings that do not fit the wheels are InvalidSe
         switch (case) {
             0 => {}, // The tank fits its 8 wheels
             1 => _ = tracks[1].wheels.pop(), // Wheel 7 is in no track (it is still the driven wheel of track 1)
-            2 => tracks[0].wheels.items[1] = 8, // A track wheel outside the 8 wheels
+            2 => try tracks[0].wheels.append(allocator, 8), // A track wheel outside the 8 wheels (every wheel stays in a track)
             else => tracks[1].driven_wheel = 8, // A driven wheel outside the 8 wheels
         }
+        if (case == 0) {
+            const constraint = try VehicleConstraint.create(allocator, body, &settings);
+            var constraint_ref = Ref(Constraint).init(constraint.asConstraint());
+            constraint_ref.deinit();
+        } else try testing.expectError(error.InvalidSettings, VehicleConstraint.create(allocator, body, &settings));
+    }
+}
+
+test "VehicleConstraint anti-roll bar wheels outside the wheels are InvalidSettings (UB38)" {
+    // Jolt reads mWheels[mLeftWheel] and mWheels[mRightWheel] of every anti-roll bar in every step. Zolt refuses an index
+    // outside the wheels when the constraint is created, and nothing is left allocated.
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    const body = try addTankBody(&world, allocator, RVec3.init(0, 0.95, 0));
+
+    for (0..5) |case| {
+        var settings = try makeTankSettings(allocator);
+        defer settings.asSettings().deinit();
+        try settings.addAntiRollBar(switch (case) {
+            0 => .{ .left_wheel = 0, .right_wheel = 7 }, // The first and the last of the 8 wheels
+            1 => .{ .left_wheel = 0, .right_wheel = 8 },
+            2 => .{ .left_wheel = 8, .right_wheel = 0 },
+            3 => .{ .left_wheel = -1, .right_wheel = 1 },
+            else => .{ .left_wheel = 1, .right_wheel = -1 },
+        });
         if (case == 0) {
             const constraint = try VehicleConstraint.create(allocator, body, &settings);
             var constraint_ref = Ref(Constraint).init(constraint.asConstraint());

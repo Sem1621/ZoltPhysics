@@ -20,7 +20,9 @@
 //!     (`new VehicleConstraint`, reference count 0) or `init(self, ...)` for an embedded constraint (`setEmbedded`,
 //!     `deinit`), never moved afterwards.
 //! - Allocation: `create` / `init` return `Allocator.Error` and leave nothing behind on failure (the anti-roll bars, the
-//!   controller, every wheel and the scratch buffer are freed again, CharacterVehicleArchitecture E2).
+//!   controller, every wheel and the scratch buffer are freed again, CharacterVehicleArchitecture E2). They also return
+//!   `error.InvalidSettings` for an anti-roll bar wheel or controller settings that do not fit the wheels
+//!   (RemainingFeaturesArchitecture.md R20, UB38). Jolt reads outside its arrays in every step for those.
 //!   `getConstraintSettings` returns `Allocator.Error` (it creates the settings, their wheel array and the controller
 //!   settings). The functions of the physics update cannot report an allocation failure (`onStep` runs in a step
 //!   listener job, `buildIslands` in the BuildIslandsFromConstraints job), so:
@@ -434,8 +436,8 @@ pub const VehicleConstraint = struct {
     /// comment)
     body_ids_scratch: []BodyID = &.{},
 
-    /// Zolt: the errors of creating a vehicle constraint. InvalidSettings: controller settings that do not fit the wheels
-    /// (VehicleControllerSettings.checkWheels, RemainingFeaturesArchitecture.md R20 UB38).
+    /// Zolt: the errors of creating a vehicle constraint. InvalidSettings: controller settings or anti-roll bars that do
+    /// not fit the wheels (VehicleControllerSettings.checkWheels, RemainingFeaturesArchitecture.md R20 UB38).
     pub const CreateError = Allocator.Error || error{InvalidSettings};
 
     /// Constructor (in place: the controller keeps a pointer to the constraint). On failure nothing is left allocated.
@@ -447,6 +449,14 @@ pub const VehicleConstraint = struct {
             .up = settings.up,
             .world_up = settings.up,
         };
+
+        // Zolt (UB38): the wheels of an anti-roll bar must be wheels of the vehicle. Jolt reads outside mWheels in every
+        // step for another index.
+        for (settings.anti_roll_bars.items) |r| {
+            if (!isWheelIndex(r.left_wheel, settings.wheels.items.len) or !isWheelIndex(r.right_wheel, settings.wheels.items.len))
+                return error.InvalidSettings;
+        }
+
         self.anti_roll_bars = try settings.anti_roll_bars.clone(allocator);
         errdefer self.anti_roll_bars.deinit(allocator);
 
@@ -483,6 +493,11 @@ pub const VehicleConstraint = struct {
 
         // Use the body ID as a seed for the step counter so that not all vehicles will update at the same time
         self.current_step = @truncate(HashCombine.hash64(vehicle_body.getID().getIndex()));
+    }
+
+    /// Zolt (UB38): `index` is the index of one of `num_wheels` wheels
+    fn isWheelIndex(index: i32, num_wheels: usize) bool {
+        return index >= 0 and @as(usize, @intCast(index)) < num_wheels;
     }
 
     /// new VehicleConstraint(inVehicleBody, inSettings) (reference count 0)
