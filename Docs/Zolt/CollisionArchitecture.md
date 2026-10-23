@@ -844,8 +844,10 @@ needs only the `Body` pointer type from the F1 stub.
 - Two HeightFieldShape bugs got guards in Phase 10 (RemainingFeaturesArchitecture.md R20). GetTrianglesNext
   never finishes in Jolt when one leaf block has more triangles than requested; Zolt continues inside the
   block when a restart would return nothing new (UB37). Jolt skips empty range blocks only through
-  inside-out Y bounds, which collapse for a flat height field far from the origin; Zolt makes such bounds
-  inside out (UB36). Both keep Jolt's results wherever Jolt finishes and stays in bounds.
+  inside-out Y bounds, which collapse for a flat height field far from the origin. Jolt then walks the
+  empty blocks outside the height field; Zolt makes the bounds of those blocks inside out (UB36). An empty
+  block inside the height field keeps Jolt's bounds, because the visit order of tied blocks depends on
+  them. Both guards keep Jolt's results wherever Jolt finishes and stays in bounds.
 - Two more Jolt debug asserts that queries reach with valid input (found by the pairwise sweep,
   `ZoltParity/Physics/PairwiseParity.zig`): a ClosestHit collector whose early out fraction was set
   before the query asserts when a shape adds a hit without checking the early out (e.g.
