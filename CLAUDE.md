@@ -37,6 +37,7 @@ zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Rag
 zig build performance-test -Doptimize=ReleaseFast -- -s=Pyramid -t=1 -phase_times  # also print the time of the scene and the physics updates
 zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyramid -t=2 -p  # job timeline: <scene>_<tag>.json (Chrome trace) + busy/idle per thread
 zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
+zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
 zig build debug-renderer-check -Ddebug_renderer=true  # the .jor bytes of PerformanceTest -r and ZoltPerformanceTest -r must be equal
 zig build codegen-check                     # fail on a large fill or copy or a std.mem.swap in the library code (ReleaseFast, x86-64)
