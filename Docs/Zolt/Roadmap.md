@@ -341,7 +341,7 @@ After Phase 9 Zolt was bit exact, but 1.4 to 14 times slower than C++ Jolt. A be
 read-only analysis found the cause: hidden zero-fills of large stack buffers. This was a bug of the port, not of Jolt.
 Phase 10 removed the fills, closed the rest of the codegen gap, fixed memory-safety bugs, and added measurement tools
 and a regression guard. Zolt may now diverge from Jolt, but every change of this phase is class A:
-- **Class A:** results stay bit exact. The 839 parity tests and Jolt's 5 hashes verify the change.
+- **Class A:** results stay bit exact. The 840 parity tests and Jolt's 5 hashes verify the change.
 - **Class B:** results stay deterministic but change. The change needs new golden hashes (see the policy below).
 - **Class C:** not about speed: bugs, safety, API.
 
@@ -413,16 +413,17 @@ Instructions of the physics updates (callgrind, `-t=1`, ReleaseFast, x86-64-v3, 
 | CharacterVirtual | 60 | not measured | 0.58e9 | valgrind stops | | |
 | Ragdoll | 15 | 67.7e9 (with the setup) | 1.68e9 | valgrind stops | | |
 
-Steps per second (ReleaseFast, x86-64-v3, the same hashes on both sides). The "before" columns are the benchmark at
-the start of the phase.
+Steps per second (ReleaseFast, x86-64-v3, 4 cores, the same hashes on every run). The three binaries ran one after the
+other on a quiet machine: Zolt before Phase 10, Zolt after Phase 10 and the C++ PerformanceTest. Runs vary by a few
+percent, so a small difference either way is noise.
 
-| Scene | C++ 1 thread | Zolt 1 thread before | Zolt 1 thread after | C++ 4 threads | Zolt 4 threads before | Zolt 4 threads after |
+| Scene | Zolt 1 thread before | Zolt 1 thread after | C++ 1 thread | Zolt 4 threads before | Zolt 4 threads after | C++ 4 threads |
 |---|---|---|---|---|---|---|
-| Ragdoll | 48.6 | 3.45 | TBD (lead) | 96.5 | 12.5 | TBD (lead) |
-| ConvexVsMesh | 233 | 25.6 | TBD (lead) | 428 | 94 | TBD (lead) |
-| HighSpeed | 160 | 69.9 | TBD (lead) | 211 | 147 | TBD (lead) |
-| CharacterVirtual | 432 | 252 | TBD (lead) | 415 | 317 | TBD (lead) |
-| Pyramid | 59.5 | 41.9 | TBD (lead) | 95 | 80 | TBD (lead) |
+| Ragdoll | 3.46 | 48.2 | 50.2 | 13.0 | 93.4 | 95.4 |
+| ConvexVsMesh | 28.4 | 244.6 | 229.5 | 98.1 | 359.4 | 389.5 |
+| HighSpeed | 64.6 | 138.8 | 143.9 | 144.7 | 218.9 | 207.0 |
+| CharacterVirtual | 240.0 | 397.8 | 398.4 | 307.5 | 437.1 | 437.0 |
+| Pyramid | 38.6 | 54.5 | 57.7 | 81.7 | 87.7 | 92.3 |
 
 **Policy for work that changes results (class B).**
 - Class A work comes first and keeps the full oracle. Only bit exact parity can prove a class A change correct.
