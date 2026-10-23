@@ -165,6 +165,22 @@ both types) when porting code needs them.
 - Plain data that Jolt copies by value (Vec3, AABox, BodyID, ...) is a `struct`. Use
   `extern struct` when layout matters: SIMD types, data that is hashed/streamed as bytes,
   data shared with GPU code. Uninitialized C++ values (`Vec3 v;`) become `var v: Vec3 = undefined;`.
+- **Large values.** A value with comptime-known fields (`.empty`, `.{}`, a field default) is one constant in Zig
+  0.16. Its `undefined` bytes are part of that constant, so storing it writes the whole object: a `memset` or a copy
+  from read-only data. Only a plain `var x: T = undefined;` costs nothing. Jolt's constructors set only the headers
+  (`StaticArray()` sets only `mSize`). Before Phase 10 such fills were 80-96% of Zolt's instructions in some scenes.
+  So for a `StaticArray` and for any value over 256 bytes:
+  - give the field no default, and do not use `.empty` or `.{}`;
+  - build it in place: `var x: T = undefined;` and then `x.clear()` or `x.init(...)`, a literal that names the
+    buffer (`StaticArray.init()`, which only sets `len`), or `fn init(self: *T, ...)`. A default constructed
+    `StaticArray<Vec3, N> a;` becomes `var a: StaticArray(Vec3, N) = .init();`;
+  - do not return it by value from a function that fills it, and do not copy it whole: copy the used elements
+    (`assign`), and add an element in place (`addOne`);
+  - swap with `Core.swap`, not `std.mem.swap`, which swaps byte by byte.
+
+  `zig build codegen-check` fails on a large fill, a large copy from read-only data or a `std.mem.swap` in the
+  library code of ZoltPerformanceTest. `zig build perf-budget` compares the instruction counts with C++
+  ([Roadmap.md](Roadmap.md), Phase 10).
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
 - **`loadFloat3Unsafe` reads 16 bytes**, like Jolt's `sLoadFloat3Unsafe`. The 4 bytes after the `Float3`
   must belong to the same object. A `Vec3` / `Quat.loadFloat3Unsafe` call may read a struct member that a
@@ -276,7 +292,7 @@ Phase 5 adds no exception, only these patterns ([SimulationArchitecture.md](Simu
 | C++ (Jolt)                       | Zig                                                                   |
 |----------------------------------|-----------------------------------------------------------------------|
 | `Array<T>`                       | `std.ArrayList(T)` (unmanaged in 0.16: pass the allocator to every mutating call) |
-| `StaticArray<T, N>`              | port of `Core/StaticArray.h` (std has no BoundedArray anymore)        |
+| `StaticArray<T, N>`              | port of `Core/StaticArray.h` (std has no BoundedArray anymore). The default constructor is `.init()`, not `.empty` (see "Large values") |
 | `UnorderedMap`, `UnorderedSet`, `HashTable` | port of Jolt's `Core/HashTable.h` when iteration order can affect results, otherwise `std.HashMapUnmanaged`: `UnorderedMap(Key, Value, .{})`, `UnorderedSet(Key, .{})`, the `Hash` / `KeyEqual` template arguments become `HashTableOptions(Key){ .hash, .key_equal }` |
 | `QuickSort`, `InsertionSort`     | ports of `Core/QuickSort.h` / `Core/InsertionSort.h` (std::sort / std.sort orders differ, which breaks determinism for equal keys) |
 | `String`, `string_view`          | `[]const u8` (owned strings: `[]u8` + allocator)                      |
@@ -754,6 +770,7 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `HashBytes(data, size, seed)`      | `hashBytes(data)` / `hashBytesSeeded(data, seed)` | default argument            |
 | `std::mt19937`                     | `Mt19937`                              | std type, see Core/Mt19937.zig          |
 | `std::shuffle(begin, end, engine)` | `Mt19937.shuffleLibcxx(T, items)`      | libc++'s algorithm (section 8, rule 15) |
+| `std::swap(a, b)`                  | `Core.swap(T, &a, &b)`                 | `std.mem.swap` swaps byte by byte (section 5, "Large values") |
 | `std::exp(float)` / `std::pow(float, float)` | `LibM.expf` / `LibM.powf`    | C library (section 8, rule 14)          |
 | `AssertFailed = MyHandler`         | `IssueReporting.setAssertHandler(&handler)` (returns the previous one) | global function pointer → pattern A interface (R8) |
 | `JPH_PI`                           | `math.pi`                              |                                         |

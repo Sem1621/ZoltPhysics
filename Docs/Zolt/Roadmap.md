@@ -336,6 +336,112 @@ ReleaseFast, double precision, `-Duse_llvm=false` and `-Ddebug_renderer=true`. â
 - Settled points, the Jolt quirks that are reproduced on purpose and the harness rules:
   [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md), R20 and section 6.
 
+### Phase 10: performance and divergence âœ…
+After Phase 9 Zolt was bit exact, but 1.4 to 14 times slower than C++ Jolt. A benchmark, callgrind profiles and a
+read-only analysis found the cause: hidden zero-fills of large stack buffers. This was a bug of the port, not of Jolt.
+Phase 10 removed the fills, closed the rest of the codegen gap, fixed memory-safety bugs, and added measurement tools
+and a regression guard. Zolt may now diverge from Jolt, but every change of this phase is class A:
+- **Class A:** results stay bit exact. The 839 parity tests and Jolt's 5 hashes verify the change.
+- **Class B:** results stay deterministic but change. The change needs new golden hashes (see the policy below).
+- **Class C:** not about speed: bugs, safety, API.
+
+What was done:
+- **W1, hidden zero-fills.** In Zig 0.16 a value with comptime-known fields (`.empty`, `.{}`, a field default) is one
+  constant. Storing it fills its `undefined` bytes too. ProcessBodyPair filled 68,624 bytes per body pair, EPA filled
+  its 24 KB triangle factory per run, and the contact manifolds, collide results and clip buffers were filled or
+  copied whole. They are now built in place, like Jolt's constructors: `StaticArray.init()` (sets only `len`),
+  `addOne`, `assign` (copies only the used elements) and `fn init(self: *T, ...)`. memset fell from 80-96% of
+  Zolt's instructions to below 0.3%.
+- **W2, codegen.** `Core.swap` replaces `std.mem.swap`, which swaps byte by byte. Half floats decode with F16C. The
+  QuadTree walks load the node bounds and child IDs with one vector load (inline asm on x86-64,
+  [SimulationArchitecture.md](SimulationArchitecture.md) D9). `loadFloat3Unsafe` is one 16 byte load like Jolt's, and
+  `Vec3.canLoadFloat3Unsafe` checks each struct it reads. `UVec4.shiftComponents4Minus` uses Jolt's pshufb table, and
+  `Vec3.cross`, `Mat44.rotationQuat` and `UVec4.getTrues` use Jolt's SIMD forms. Each change has a test that compares
+  its bits with the old code. The asm and intrinsic paths need the LLVM backend and keep a portable fallback.
+- **W3, memory safety.** Jolt undefined behavior that valid input reaches now has a defined guard: UB35 (a body woken
+  during the CCD resolve has no CCD body), UB36 (empty height field blocks outside the grid) and UB37
+  (GetTrianglesNext no longer repeats a block forever). Settings that make Jolt index out of bounds fail at creation
+  with `error.InvalidSettings`: UB38 (vehicle wheels, tracks, differentials and anti-roll bars) and UB39 (paths with
+  too few points). The rule is in [PortingGuide.md](PortingGuide.md) section 7, the rows in
+  [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R20.
+  **API change:** `TwoBodyConstraintSettings.createConstraint` returns `TwoBodyConstraintSettings.CreateError`
+  (`OutOfMemory` or `InvalidSettings`). The error sets of `BodyInterface.createConstraint`,
+  `RagdollSettings.createRagdoll` and `PhysicsScene.createBodies` grow with it. `VehicleConstraint.create` returns
+  `VehicleConstraint.CreateError` (the same two errors), and `PathConstraint.setPath` returns
+  `error{InvalidSettings}!void`.
+- **W5, measurement.** `-Djob_profile=true` records a timeline of the jobs and the idle time of every job thread, and
+  `ZoltPerformanceTest -p` writes it as a Chrome trace. `-phase_times` times the scene updates and the physics updates
+  apart. The vtable thunks have readable names: `Core.Virtual.Thunk(<class>,.<method>).callN`.
+- **W6, CI cost.** The upstream C++ workflows run only when upstream files change. One parity row runs per push, the
+  other four every night.
+- **W4, regression guard.** All parity tests and hashes passed while 80-96% of the instructions were spurious fills.
+  Bit exactness cannot see speed, so three layers guard it. CI runs both steps.
+  - The rule "Large values" in [PortingGuide.md](PortingGuide.md) section 5: no `.empty`, `.{}` or field default for
+    a StaticArray or a value over 256 bytes, build such values in place, and use `Core.swap`.
+  - `zig build codegen-check` (`tools/check_codegen.py`) reads `objdump -d -l` of ZoltPerformanceTest (ReleaseFast,
+    x86-64-v3). It fails when library code calls memset or memcpy with a constant size over 512 bytes, copies more
+    than 256 bytes from read-only data, or runs `std.mem.swap`. A few sites that do not run per body pair are allowed
+    by function name, kind and size: constraint and body creation, teardown, and one 7 KB copy per update (the steps
+    of `PhysicsUpdateContext`). It sees only the code that ZoltPerformanceTest links.
+  - `zig build perf-budget` (`tools/perf_budget.py`) counts the instructions of the physics updates of short single
+    threaded runs with callgrind, in ZoltPerformanceTest and in the C++ PerformanceTest. It fails when Zolt/C++ of a
+    scene is over its budget (the measurement plus about 10%). Ragdoll and CharacterVirtual have absolute Zolt-only
+    budgets: valgrind 3.22 stops the C++ binary at an AVX instruction it does not know.
+  - Self-tests: with `.{}` put back for the EPA edges in `addPoint` and for the reduction manifolds, and with one
+    `std.mem.swap` in BinaryHeap, codegen-check names `addPoint` (2,056 bytes), `processBodyPair` (68,624 bytes) and
+    the swap. perf-budget then fails every scene: ConvexVsMesh runs 17.4 times the C++ instructions, Pyramid 4.0
+    times, HighSpeed 2.7 times, and Ragdoll 66.6e9 instructions instead of 1.68e9. The hashes stay equal.
+
+Instructions of the physics updates (callgrind, `-t=1`, ReleaseFast, x86-64-v3, `zig build perf-budget`). The
+"before" counts come from the analysis at the start of the phase.
+
+| Scene | Steps | Zolt before | Zolt after | C++ | Zolt/C++ before | Zolt/C++ after |
+|---|---|---|---|---|---|---|
+| ConvexVsMesh | 200 | 36.5e9 | 1.98e9 | 2.04e9 | 17 | 0.97 |
+| Pyramid | 60 | 23.8e9 | 4.28e9 | 4.35e9 | 5.4 | 0.98 |
+| HighSpeed | 60 | not measured | 2.00e9 | 2.04e9 | | 0.98 |
+| CharacterVirtual | 60 | not measured | 0.58e9 | valgrind stops | | |
+| Ragdoll | 15 | 67.7e9 (with the setup) | 1.68e9 | valgrind stops | | |
+
+Steps per second (ReleaseFast, x86-64-v3, the same hashes on both sides). The "before" columns are the benchmark at
+the start of the phase.
+
+| Scene | C++ 1 thread | Zolt 1 thread before | Zolt 1 thread after | C++ 4 threads | Zolt 4 threads before | Zolt 4 threads after |
+|---|---|---|---|---|---|---|
+| Ragdoll | 48.6 | 3.45 | TBD (lead) | 96.5 | 12.5 | TBD (lead) |
+| ConvexVsMesh | 233 | 25.6 | TBD (lead) | 428 | 94 | TBD (lead) |
+| HighSpeed | 160 | 69.9 | TBD (lead) | 211 | 147 | TBD (lead) |
+| CharacterVirtual | 432 | 252 | TBD (lead) | 415 | 317 | TBD (lead) |
+| Pyramid | 59.5 | 41.9 | TBD (lead) | 95 | 80 | TBD (lead) |
+
+**Policy for work that changes results (class B).**
+- Class A work comes first and keeps the full oracle. Only bit exact parity can prove a class A change correct.
+- `-Djolt_compat` (default false) comes with the first class B change. A local class B change is written as
+  `if (Core.jolt_compat) <Jolt's code> else <new code>`. A change that touches all math (FMA) goes through one helper
+  switch, never through copies of each kernel.
+- CI runs `zig build parity -Djolt_compat=true` and Jolt's 5 hashes with the option on. They keep guarding later
+  class A work and the syncs with upstream Jolt.
+- Zolt owns golden tests for the new behavior, without C++: a state hash per update for each SimScenes scene, a
+  multi-threaded run against a single threaded run, and Zolt's own PerformanceTest hashes with `jolt_compat=false`.
+  A class B change updates them in the same commit and says why.
+- Cross-platform hash rows come before the first class B change: macOS arm64, Windows, aarch64 Linux and x86-64
+  `-Dcpu=baseline` must print the same hashes (Jolt's hashes with the option on). Today only Ubuntu x86-64 checks
+  them. These rows also hash the portable fallbacks of the W2 paths. A speedup that depends on the ISA and changes
+  results must be an explicit build option, never automatic feature detection.
+- The C++ emulation layers stay: LibM, `shuffleLibcxx`, `cppFloat` and HLSLToCPP.
+- The ratio budgets of `perf-budget` compare the `jolt_compat=true` build with C++. Builds with the option off get
+  absolute budgets.
+
+**Later (not in Phase 10).**
+- Tier 1b (class A, beyond Jolt; measure with the job profiler first): SIMD contact solving inside the splits of
+  large islands, a cached AABB prefilter for characters, island scheduling, spinning in the thread pool.
+- Tier 2 (class B, behind `-Djolt_compat`): box-box SAT instead of EPA, an FMA math mode (first measure the upper
+  bound with Jolt built without CROSS_PLATFORM_DETERMINISTIC), graph-colored batches of small islands, 8-wide trees.
+- Class C: four Jolt bugs that Zolt reproduces (the gear Jacobian, CCD double motion, a duplicate soft body edge, the
+  ray against a 3-point hull), a complete SaveState, settings round trips, errors instead of panics for data-driven
+  input, an optional API facade.
+- Not planned: rsqrt / rcp approximations.
+
 ### Deferred / out of scope for now
 - `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).
   Zolt runs hair on the CPU backend (RemainingFeaturesArchitecture.md R21).
@@ -344,7 +450,7 @@ ReleaseFast, double precision, `-Duse_llvm=false` and `-Ddebug_renderer=true`. â
 - A C API (`zolt.h`) for use from other languages.
 
 ### After the port
-Idiomatic API layer, performance work (compare with C++ using PerformanceTest), SIMD tuning
+Idiomatic API layer, more performance work (Phase 10 lists what comes next), SIMD tuning
 with `@Vector` widths, allocation strategy, and documentation.
 
 ## Syncing with upstream Jolt
