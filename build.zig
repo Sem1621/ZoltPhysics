@@ -539,6 +539,9 @@ pub fn build(b: *std.Build) void {
     // script covers it. It needs GNU objdump and fails on a binary that is not x86-64: it reads x86-64 code only.
     const run_codegen_check = b.addSystemCommand(&.{"python3"});
     run_codegen_check.addFileArg(b.path("tools/check_codegen.py"));
+    // It also fails on an FMA instruction in the library: without -Dfma there is none, with -Dfma only Jolt's 8
+    // JPH_USE_FMADD sites may fuse
+    if (fma) run_codegen_check.addArg("--fma");
     run_codegen_check.addArtifactArg(bench_performance_test);
     const codegen_check_step = b.step("codegen-check", "Fail when the library code of ZoltPerformanceTest (ReleaseFast) fills or copies a large buffer or swaps byte by byte");
     codegen_check_step.dependOn(&run_codegen_check.step);

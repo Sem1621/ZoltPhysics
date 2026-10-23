@@ -5,7 +5,7 @@ Zolt once spent 80-96% of its instructions in hidden zero-fills of large stack b
 hash passed (Docs/Zolt/Roadmap.md, Phase 10). Bit exactness cannot see such a bug, so this script reads the machine
 code instead. `zig build codegen-check` builds ZoltPerformanceTest with ReleaseFast for x86-64-v3 and runs:
 
-    python3 tools/check_codegen.py <ZoltPerformanceTest binary>
+    python3 tools/check_codegen.py [--fma] <ZoltPerformanceTest binary>
     python3 tools/check_codegen.py --self-test     # check the parser on a small made-up listing
 
 It reads `objdump -d -l --inlines` of the binary and checks the code of the library: the functions whose names start
@@ -16,7 +16,10 @@ function of its inline chain starts with one of PREFIXES). The check fails when 
 2. copies more than 256 bytes (RODATA_LIMIT) from read-only data, such as an `__anon_*` image: the comptime value of
    `.empty`, `.{}` or a field default of a large struct;
 3. runs the byte loop of `std.mem.swap` (instructions whose debug line is in std/mem.zig `swap`), or calls a
-   `mem.swap` that LLVM did not inline. Use `Core.swap`.
+   `mem.swap` that LLVM did not inline. Use `Core.swap`;
+4. holds a fused multiply-add instruction (vfmadd*, vfmsub*, vfnmadd*, vfnmsub*). Without -Dfma Zolt has none: Jolt
+   built with CROSS_PLATFORM_DETERMINISTIC never fuses. With -Dfma (`--fma`) only Jolt's 8 JPH_USE_FMADD sites may
+   fuse: every FMA instruction must come from one of FMA_SITES (by its inline chain), and at least one must exist.
 Without debug line info, the check of inlined library code and of the inlined `std.mem.swap` is skipped, and the
 script says so. The size comes from the last constant moved into %rdx (or %rcx for `rep`) before the call in the same
 function. The source of a copy comes from %rsi. The scan is linear, so it can be fooled by branches, but in practice
@@ -58,6 +61,10 @@ MIN_FUNCS = 600
 SENTINEL = "Physics.PhysicsSystem.PhysicsSystem.update"
 # The scanner reads x86-64 code only
 FORMAT = "elf64-x86-64"
+# The functions of Jolt's 8 JPH_USE_FMADD sites (Zolt/Core/Core.zig use_fmadd): with --fma, every FMA instruction of
+# the library must come from one of them (the function itself or a function of its inline chain)
+FMA_SITES = re.compile(r"^Math\.(Vec3|Vec4|DVec3|Quat|Math)\.(\w+\.)?"
+                       r"(fusedMultiplyAdd|differenceOfProducts|crossPrecise|mul|multiplyImaginary)$")
 
 # The sites that may stay: (regular expression on a function name, what it may do, largest size in bytes, why).
 # "fill" is a memset, "copy" a memcpy / memmove, "rodata" a copy from read-only data. The name is the function that
@@ -102,6 +109,7 @@ MEM_FUNC_RE = re.compile(r"mem(set|cpy|move)")
 REP_RE = re.compile(r"^rep\w*\s+(stos|movs)([bwlqd]?)\s*(?:%(\w+),)?")
 IMM_RE = re.compile(r"^\$0x([0-9a-f]+)$")
 COMMENT_ADDR_RE = re.compile(r"#\s*([0-9a-f]+)")
+FMA_RE = re.compile(r"^vfn?m(add|sub)")
 BYTE_STORE_RE = re.compile(r"^mov[b]?\s+%(?:[abcd]l|[sd]il|[sb]pl|r\d+b),.*\(")
 # Instructions that write %rdx / %rcx without naming them as the last operand
 IMPLICIT_RDX = re.compile(r"^(cqto|cltd|cwtd|cqo|cdq|rdtsc|rdtscp|rdpid|cpuid|mul|div|idiv|xgetbv)\b")
@@ -207,6 +215,7 @@ class Scan:
         self.funcs = set()  # The library functions (the names that start with one of PREFIXES)
         self.hosts = set()  # The other functions that hold inlined library code
         self.line_info = False
+        self.fma = []  # The FMA instructions of the library code: (function, names of its inline chain, site, mnemonic)
 
 
 def scan(lines, ro_ranges, syms, swap_range_of):
@@ -303,6 +312,8 @@ def scan(lines, ro_ranges, syms, swap_range_of):
                 s = swaps.setdefault(owner, [0, 0, own, address])
                 s[0] += 1
                 s[1] += bool(BYTE_STORE_RE.match(text))
+        if lib_names and FMA_RE.match(text):
+            result.fma.append((owner, names, site, text.split()[0]))
         m = CALL_RE.match(text)
         if m:
             if lib_names:
@@ -371,7 +382,17 @@ def problems(result):
     return found
 
 
-def check(binary):
+def fma_offenders(result, fma):
+    """The FMA instructions that are not allowed: all of them without -Dfma, else those outside FMA_SITES"""
+    if not fma:
+        return [(f, site, mnemonic) for f, _, site, mnemonic in result.fma]
+    if not result.line_info:
+        # Without the inline chains the site of an inlined FMA is unknown
+        return []
+    return [(f, site, mnemonic) for f, names, site, mnemonic in result.fma if not any(FMA_SITES.match(n) for n in names)]
+
+
+def check(binary, fma=False):
     objdump = os.environ.get("OBJDUMP", "objdump")
     nm = os.environ.get("NM", "nm")
     cache = {}
@@ -404,11 +425,26 @@ def check(binary):
         if pattern not in used:
             print(f"  note: the allow-list entry for {why} matched nothing")
     failed = problems(result)
+    if fma and not result.fma:
+        failed.append("--fma: the library has no FMA instruction, so Jolt's JPH_USE_FMADD sites did not fuse "
+                      "(was the binary built with -Dfma=true?)")
     if failed:
         print("codegen-check FAILED: the scan proves nothing:")
         for p in failed:
             print("  " + p)
         return 1
+    bad_fma = fma_offenders(result, fma)
+    if fma:
+        print(f"codegen-check: {len(result.fma)} FMA instructions in the library code (-Dfma), "
+              f"{len(result.fma) - len(bad_fma)} of them from Jolt's JPH_USE_FMADD sites"
+              + ("" if result.line_info else " (no debug line info: their sites are not checked)"))
+    if bad_fma:
+        print(f"codegen-check FAILED: {len(bad_fma)} FMA instructions in library code"
+              + (" outside Jolt's JPH_USE_FMADD sites:" if fma else " (none may exist without -Dfma):"))
+        for f, site, mnemonic in bad_fma[:20]:
+            print(f"  {f}: {mnemonic}, {site}")
+        print("Never use @mulAdd outside Jolt's 8 JPH_USE_FMADD sites, and only behind Core.use_fmadd "
+              "(Docs/Zolt/PortingGuide.md). Zig does not contract a * b + c by itself.")
     if result.offenders:
         print(f"codegen-check FAILED: {len(result.offenders)} large fills, copies or byte swaps in library code:")
         for f, size, what, site, _ in result.offenders:
@@ -416,6 +452,8 @@ def check(binary):
             print(f"  {f}: {size_text}, {site}")
         print("Construct large values in place and use Core.swap (Docs/Zolt/PortingGuide.md, \"Large values\"). "
               "Only setup-time code may go into ALLOW in tools/check_codegen.py.")
+        return 1
+    if bad_fma:
         return 1
     print("codegen-check passed")
     return 0
@@ -487,6 +525,17 @@ inlined by /z/Zolt/Physics/Character.zig:1710 (Physics.Character.CharacterVirtua
 inlined by /z/Zolt/Physics/Character.zig:1701 (Physics.Character.CharacterVirtual.CharacterVirtual.extendedUpdate)
 inlined by /z/ZoltPerformanceTest/PerformanceTestScene.zig:107 (PerformanceTestScene.updateTestThunk)
  100040f:\tmov    %dl,(%rax)
+
+0000000001000500 <Physics.Body.Body.updateRotation>:
+/z/Zolt/Physics/Body/Body.zig:300
+ 1000500:\tvmulps %xmm1,%xmm0,%xmm0
+Math.Quat.Quat.mul():
+/z/Zolt/Math/Quat.zig:354
+inlined by /z/Zolt/Physics/Body/Body.zig:301 (Physics.Body.Body.updateRotation)
+ 1000504:\tvfmadd213ps %xmm2,%xmm1,%xmm0
+Physics.Body.Body.updateRotation():
+/z/Zolt/Physics/Body/Body.zig:302
+ 1000509:\tvfnmadd231ps %xmm2,%xmm1,%xmm0
 """
 
 
@@ -510,7 +559,12 @@ def self_test():
     # Allowed by the function name of the inline chain, not by the function that holds the code
     allowed_sites = [(f.rsplit(".", 1)[-1], s) for f, s, _, _, _, _ in r.allowed_sites]
     assert allowed_sites == [("deinit", 0x500), ("init", 0x4001)], allowed_sites
-    assert len(r.funcs) == 3 and r.hosts == {"PerformanceTest.main", "PerformanceTestScene.updateTestThunk"}
+    # Two FMA instructions in the library: without -Dfma both fail, with -Dfma only the one outside Quat.mul fails
+    assert [(f.rsplit(".", 1)[-1], m) for f, _, _, m in r.fma] == [("updateRotation", "vfmadd213ps"),
+                                                                    ("updateRotation", "vfnmadd231ps")], r.fma
+    assert len(fma_offenders(r, False)) == 2
+    assert [m for _, _, m in fma_offenders(r, True)] == ["vfnmadd231ps"], fma_offenders(r, True)
+    assert len(r.funcs) == 4 and r.hosts == {"PerformanceTest.main", "PerformanceTestScene.updateTestThunk"}
     assert r.line_info and r.format == FORMAT
     # A scan that proves nothing fails: too few library functions and no SENTINEL here
     assert len(problems(r)) == 1 and SENTINEL in problems(r)[0], problems(r)
@@ -529,7 +583,11 @@ def self_test():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    if len(sys.argv) != 2:
+    argv = sys.argv[1:]
+    use_fma = argv[:1] == ["--fma"]
+    if use_fma:
+        argv = argv[1:]
+    if len(argv) != 1:
         print(__doc__)
         sys.exit(2)
-    sys.exit(check(sys.argv[1]))
+    sys.exit(check(argv[0], use_fma))

@@ -428,8 +428,9 @@ percent, so a small difference either way is noise.
 **Policy for work that changes results (class B).**
 - Class A work comes first and keeps the full oracle. Only bit exact parity can prove a class A change correct.
 - `-Djolt_compat` (default false) comes with the first class B change. A local class B change is written as
-  `if (Core.jolt_compat) <Jolt's code> else <new code>`. A change that touches all math (FMA) goes through one helper
-  switch, never through copies of each kernel.
+  `if (Core.jolt_compat) <Jolt's code> else <new code>`. A change that touches all math goes through one helper
+  switch, never through copies of each kernel. (FMA mode needs no `-Djolt_compat`: it follows Jolt's own
+  `JPH_USE_FMADD` option, so the C++ library is its oracle. See Phase 11.)
 - CI runs `zig build parity -Djolt_compat=true` and Jolt's 5 hashes with the option on. They keep guarding later
   class A work and the syncs with upstream Jolt.
 - Zolt owns golden tests for the new behavior, without C++: a state hash per update for each SimScenes scene, a
@@ -445,13 +446,50 @@ percent, so a small difference either way is noise.
 
 **Later (not in Phase 10).**
 - Tier 1b (class A, beyond Jolt; measure with the job profiler first): SIMD contact solving inside the splits of
-  large islands, a cached AABB prefilter for characters, island scheduling, spinning in the thread pool.
-- Tier 2 (class B, behind `-Djolt_compat`): box-box SAT instead of EPA, an FMA math mode (first measure the upper
-  bound with Jolt built without CROSS_PLATFORM_DETERMINISTIC), graph-colored batches of small islands, 8-wide trees.
+  large islands (done in Phase 11), a cached AABB prefilter for characters, island scheduling, spinning in the
+  thread pool.
+- Tier 2 (class B, behind `-Djolt_compat`): box-box SAT instead of EPA, graph-colored batches of small islands,
+  8-wide trees. (The FMA math mode came in Phase 11 as `-Dfma`, with Jolt's own sites and a C++ oracle.)
 - Class C: four Jolt bugs that Zolt reproduces (the gear Jacobian, CCD double motion, a duplicate soft body edge, the
   ray against a 3-point hull), a complete SaveState, settings round trips, errors instead of panics for data-driven
   input, an optional API facade.
 - Not planned: rsqrt / rcp approximations.
+
+### Phase 11: SIMD contact solver and FMA mode ✅
+Phase 11 did the next two items of the Phase 10 analysis.
+
+**SIMD contact solver (class A, on by default).** `Zolt/Physics/Constraints/ContactConstraintSimd.zig` solves the
+contacts of a batch of a parallel split 8 at a time, one contact per lane of `@Vector(8, f32)`. In a parallel split
+no dynamic body appears twice, so the contacts of a batch do not share a velocity, and each lane runs the operations of
+the scalar solver in the same order. Results do not change: the parity suite and Jolt's hashes prove it, and a
+Zolt-only test compares the SIMD and the scalar solver bit for bit on random batches. The non-parallel split, the
+islands that are not split, and contacts with a static or kinematic body stay scalar. `-Dsimd_contact_solver=false`
+turns it off for A/B tests (same bits). The design and the exactness rules are in
+[SimulationArchitecture.md](SimulationArchitecture.md) section 10. Pyramid's physics updates run 2.3% fewer
+instructions (4.28e9 to 4.18e9, 0.96 of C++), and the contact solve goes from 26.7% to 24.6% of them. Wall clock gains
+more, because 8 lanes fill the wait on the dependency chain from one contact point to the next. Scenes without large
+islands do not change.
+
+**FMA mode `-Dfma=true` (off by default).** Jolt has 8 fused multiply-add sites behind `JPH_USE_FMADD`: Vec4, Vec3 and
+DVec3 `sFusedMultiplyAdd`, the scalar, Vec4 and Vec3 `DifferenceOfProducts` (and so `Vec3::CrossPrecise`),
+`Quat::operator*` and `Quat::sMultiplyImaginary`. With `-Dfma=true` Zolt uses `@mulAdd` at exactly these sites
+(`if (Core.use_fmadd) ...`), and the C++ reference of the parity tests is built with `-DJPH_USE_FMADD`. Jolt's
+`CROSS_PLATFORM_DETERMINISTIC` only stops the automatic define, so the reference fuses exactly these sites. So FMA
+mode has a C++ oracle too: the parity suite proves it bit for bit, and its 5 hashes come from the C++ PerformanceTest
+built the same way (CLAUDE.md lists them). It needs no `-Djolt_compat`. Rules:
+- FMA mode needs hardware FMA (x86-64 with FMA3, such as `-Dcpu=x86_64_v3`, or aarch64): Zig's software fma is not
+  correctly rounded, so `Core.zig` stops the build on a CPU without it.
+- Only x86-64 can be the oracle: NEON's `vmlaq_f32` does not fuse under `-ffp-contract=off`. On another target the
+  steps that build the C++ reference fail with `-Dfma=true`. On aarch64 Zolt's `@mulAdd` fuses like x86-64's FMA3, so a
+  macOS arm64 CI row checks the C++ FMA hashes of the short runs.
+- `zig build codegen-check` fails on an FMA instruction in the library without `-Dfma`, and with `-Dfma` on one that
+  does not come from the 8 sites.
+- The 8 sites are mostly about precision: the measured speed gain of Jolt's FMADD build was 0-6%, within noise.
+
+Wall clock (steps/s, ReleaseFast, x86-64-v3, 4 cores; the same binaries ran interleaved in two rounds; the best of the
+two runs is shown). Phase 10 is Zolt before Phase 11. "SIMD off" is `-Dsimd_contact_solver=false`.
+
+WALLCLOCK_TABLE
 
 ### Deferred / out of scope for now
 - `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).

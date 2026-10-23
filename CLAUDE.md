@@ -48,7 +48,8 @@ zig build test -Djob_profile=true           # tests with the job profiler compil
 zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
 zig build debug-renderer-check -Ddebug_renderer=true  # the .jor bytes of PerformanceTest -r and ZoltPerformanceTest -r must be equal
-zig build codegen-check                     # fail on a large fill or copy or a std.mem.swap in the library code (ReleaseFast, x86-64)
+zig build codegen-check                     # fail on a large fill or copy, a std.mem.swap or an FMA instruction in the library code (ReleaseFast, x86-64)
+zig build codegen-check -Dfma=true          # the same, but FMA instructions must come from Jolt's 8 JPH_USE_FMADD sites
 zig build perf-budget                       # callgrind instructions of the physics updates vs C++, fail over budget (needs valgrind)
 zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon  # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
@@ -107,4 +108,6 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   backends and the profiler stay deferred.
 - Phase 10 made Zolt about as fast as C++ in instructions without changing a result (class A). Work that changes
   results follows the `-Djolt_compat` policy in the Roadmap's Phase 10 section.
+- Phase 11 added the SIMD contact solver (class A, on by default) and the FMA mode `-Dfma` (Jolt's 8
+  `JPH_USE_FMADD` sites, with a C++ oracle; off by default).
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).

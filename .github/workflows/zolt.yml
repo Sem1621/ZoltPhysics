@@ -281,6 +281,8 @@ jobs:
       run: python3 tools/check_codegen.py --self-test
     - name: Check the machine code
       run: zig build codegen-check
+    - name: Check the machine code of FMA mode (only Jolt's 8 JPH_USE_FMADD sites fuse)
+      run: zig build codegen-check -Dfma=true
 
   perf-budget:
     # The instruction budget of Phase 10 (tools/perf_budget.py). Callgrind counts the instructions of the physics
