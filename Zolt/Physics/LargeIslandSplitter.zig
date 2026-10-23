@@ -810,7 +810,8 @@ fn testSplits(parallel: []const [2]u32, non_parallel: [2]u32, num_iterations: i3
     return splits;
 }
 
-/// Fetch a batch and compare it with `expected` (constraints begin / end, contacts begin / end), null: waiting
+/// Fetch a batch and compare it with `expected` (constraints begin / end, contacts begin / end), null: waiting.
+/// The batch must be parallel unless it is the non parallel split (contacts and constraints at the end of the buffer).
 fn expectFetch(splits: *LargeIslandSplitter.Splits, expected: ?[4]u32, first_iteration: bool) !void {
     var batch: LargeIslandSplitter.Splits.SplitBatch = undefined;
     const status = splits.fetchNextBatch(&batch);
@@ -818,6 +819,8 @@ fn expectFetch(splits: *LargeIslandSplitter.Splits, expected: ?[4]u32, first_ite
         try std.testing.expectEqual(LargeIslandSplitter.Status.batch_retrieved, status);
         try std.testing.expectEqual(e, [4]u32{ batch.constraints_begin, batch.constraints_end, batch.contacts_begin, batch.contacts_end });
         try std.testing.expectEqual(first_iteration, batch.first_iteration);
+        const non_parallel = &splits.splits[LargeIslandSplitter.non_parallel_split_idx];
+        try std.testing.expectEqual(!(e[0] == non_parallel.constraint_buffer_begin and e[2] == non_parallel.contact_buffer_begin), batch.parallel);
     } else try std.testing.expectEqual(LargeIslandSplitter.Status.waiting_for_batch, status);
 }
 
