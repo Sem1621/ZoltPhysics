@@ -220,6 +220,45 @@ jobs:
         print("Phase times:", phases[0])
         PY
 
+  codegen:
+    # The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). The library code of ZoltPerformanceTest (ReleaseFast,
+    # x86-64-v3) must not fill or copy a large buffer and must not use std.mem.swap (tools/check_codegen.py). Bit exact
+    # results cannot show such a slowdown. The runner has objdump.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Codegen check
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Self-test of the scanner
+      run: python3 tools/check_codegen.py --self-test
+    - name: Check the machine code
+      run: zig build codegen-check
+
+  perf-budget:
+    # The instruction budget of Phase 10 (tools/perf_budget.py). Callgrind counts the instructions of the physics
+    # updates of short single threaded runs of ZoltPerformanceTest and of the C++ PerformanceTest. Zolt/C++ must stay
+    # within the budget of each scene. The 8 callgrind runs took 27 seconds on a 4 core machine, plus the build (the
+    # C++ library takes about 5 minutes the first time).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Instruction budget
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Install valgrind
+      run: sudo apt-get update && sudo apt-get install -y valgrind
+    - name: Count the instructions
+      run: zig build perf-budget
+
   determinism:
     if: github.event_name != 'schedule'
     # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
