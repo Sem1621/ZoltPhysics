@@ -1128,11 +1128,12 @@ DeterminismLog, PhysicsScene).**
   - `Trace` goes to stdout through a custom `std_options.logFn`.
   - The `perf_*` simulation parity scenes (Pyramid 50, ConvexVsMesh 80, HighSpeed 20 updates) find a
     hash mismatch at its first differing field.
-- Performance (information, not a bit exactness issue): ConvexVsMesh runs 4 to 9 times slower than
-  the C++ build. Most of the time is a memset of ProcessBodyPair's local
+- Performance (information, not a bit exactness issue): ConvexVsMesh ran 4 to 9 times slower than
+  the C++ build. Most of the time was a memset of ProcessBodyPair's local
   `StaticArray(MyManifold, 32)` (about 70 KB) per body pair, plus smaller ones in
-  `CollideShapeResult.init` and ClipPoly. Pyramid and HighSpeed are 1.2 to 2 times slower. A later
-  performance pass should avoid zero-filling these `undefined` buffers.
+  `CollideShapeResult.init` and ClipPoly. Pyramid and HighSpeed were 1.2 to 2 times slower. Phase 10
+  removed these fills: big buffers are now constructed in place and only their headers are set, like
+  Jolt's constructors.
 
 ## 9. Phase 6: constraints
 
