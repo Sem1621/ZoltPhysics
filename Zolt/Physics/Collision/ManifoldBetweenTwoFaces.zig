@@ -60,8 +60,8 @@ pub fn pruneContactPoints(penetration_axis: Vec3, contact_points_on1: *ContactPo
     // Neither of those two terms should ever become zero, so we clamp against this minimum value
     const min_distance_sq: f32 = 1.0e-6; // 1 mm
 
-    var projected: ContactPoints = .empty;
-    var penetration_depth_sq: StaticArray(f32, 64) = .empty;
+    var projected: ContactPoints = .init();
+    var penetration_depth_sq: StaticArray(f32, 64) = .init();
     for (0..contact_points_on1.len) |i| {
         // Project contact points on the plane through inCenterOfMass with normal penetration_axis and center around the center of mass of body 1
         // (note that since all points are relative to inCenterOfMass we can project onto the plane through the origin)
@@ -224,7 +224,7 @@ pub fn manifoldBetweenTwoFaces(contact_point1: Vec3, contact_point2: Vec3, penet
         const first_edge = shape1_face.get(1).sub(plane_origin);
 
         var plane_normal: Vec3 = undefined;
-        var clipped_face: SupportingFace = .empty;
+        var clipped_face: SupportingFace = .init();
         if (shape1_face.len >= 3) {
             // Clip the polygon of face 2 against that of 1
             try ClipPoly.clipPolyVsPoly(shape2_face.constSlice(), shape1_face.constSlice(), penetration_axis, &clipped_face);
@@ -313,8 +313,8 @@ test "manifoldBetweenTwoFaces: two overlapping quads give the clipped polygon pr
     // the faces penetrate by 0.1.
     const face1 = face(&.{ Vec3.init(-1, 0, -1), Vec3.init(-1, 0, 1), Vec3.init(1, 0, 1), Vec3.init(1, 0, -1) });
     const face2 = face(&.{ Vec3.init(-0.5, -0.1, -0.5), Vec3.init(0.5, -0.1, -0.5), Vec3.init(0.5, -0.1, 0.5), Vec3.init(-0.5, -0.1, 0.5) });
-    var points1: ContactPoints = .empty;
-    var points2: ContactPoints = .empty;
+    var points1: ContactPoints = .init();
+    var points2: ContactPoints = .init();
     manifoldBetweenTwoFaces(Vec3.init(0, 0, 0), Vec3.init(0, -0.1, 0), Vec3.init(0, 1, 0), 0.05, &face1, &face2, &points1, &points2, .{});
     try testing.expectEqual(@as(u32, 4), points1.len);
     try testing.expectEqual(@as(u32, 4), points2.len);
@@ -331,8 +331,8 @@ test "manifoldBetweenTwoFaces: points too far in front of face 1, edges, swapped
 
     // Face 2 is 0.5 above face 1 (separated along +y) and the max contact distance is 0.25: fall back to the contact points
     const far = face(&.{ Vec3.init(-0.5, 0.5, -0.5), Vec3.init(0.5, 0.5, -0.5), Vec3.init(0.5, 0.5, 0.5) });
-    var points1: ContactPoints = .empty;
-    var points2: ContactPoints = .empty;
+    var points1: ContactPoints = .init();
+    var points2: ContactPoints = .init();
     points1.append(Vec3.init(9, 9, 9)); // Existing points are kept
     points2.append(Vec3.init(9, 9, 9));
     manifoldBetweenTwoFaces(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, 1, 0), 0.25, &face1, &far, &points1, &points2, .{});
@@ -375,8 +375,8 @@ test "manifoldBetweenTwoFaces: points too far in front of face 1, edges, swapped
 
 test "pruneContactPoints: reduces to at most 4 points that form a polygon" {
     // 8 points on a circle with equal penetration: the reduction keeps 4 points, the first one is the deepest / furthest
-    var points1: ContactPoints = .empty;
-    var points2: ContactPoints = .empty;
+    var points1: ContactPoints = .init();
+    var points2: ContactPoints = .init();
     for (0..8) |i| {
         const angle = @as(f32, @floatFromInt(i)) * (2.0 * math.pi / 8.0);
         const p = Vec3.init(@cos(angle), 0, @sin(angle)).mulScalar(if (i == 3) 3.0 else 1.0);

@@ -562,10 +562,12 @@ test "ShapeCore parity: ShapeCastResult" {
         var jolt_faces: [192]f32 = @splat(0);
         jolt.jolt_shape_cast_result(fraction, &contact1, &contact2, &axis, @intFromBool(back_face), ids[0], ids[1], ids[2], @ptrCast(&faces[0]), counts[0], @ptrCast(&faces[1]), counts[1], &direction, &jolt_values, &jolt_ints, &jolt_faces);
 
-        var r = ShapeCastResult.init(fraction, vec3(contact1), vec3(contact2), vec3(axis), back_face, .{ .value = ids[0] }, .{ .value = ids[1] }, .{ .id = ids[2] });
+        var r: ShapeCastResult = undefined;
+        r.init(fraction, vec3(contact1), vec3(contact2), vec3(axis), back_face, .{ .value = ids[0] }, .{ .value = ids[1] }, .{ .id = ids[2] });
         for (faces[0][0..counts[0]]) |v| r.base.shape1_face.append(vec3(v));
         for (faces[1][0..counts[1]]) |v| r.base.shape2_face.append(vec3(v));
-        const rev = r.reversed(vec3(direction));
+        var rev: ShapeCastResult = undefined;
+        r.reversed(vec3(direction), &rev);
         const zolt_values = [2]f32{ r.base.penetration_depth, r.getEarlyOutFraction() } ++ arr3(rev.base.contact_point_on1) ++ arr3(rev.base.contact_point_on2) ++ arr3(rev.base.penetration_axis) ++ [3]f32{ rev.base.penetration_depth, rev.fraction, rev.getEarlyOutFraction() };
         const zolt_ints = [6]u32{ rev.base.sub_shape_id1.getValue(), rev.base.sub_shape_id2.getValue(), rev.base.body_id2.getIndexAndSequenceNumber(), @intFromBool(rev.is_back_face_hit), rev.base.shape1_face.len, rev.base.shape2_face.len };
         var zolt_faces: [192]f32 = @splat(0);
@@ -1022,7 +1024,9 @@ const MakeCollide = struct {
     bodies: []const u32,
     depths: []const f32,
     fn at(self: MakeCollide, i: usize) CollideShapeResult {
-        return .init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), self.depths[i], .{ .value = @intCast(i) }, .empty, .{ .id = self.bodies[i] });
+        var r: CollideShapeResult = undefined;
+        r.init(Vec3.zero(), Vec3.zero(), Vec3.axisX(), self.depths[i], .{ .value = @intCast(i) }, .empty, .{ .id = self.bodies[i] });
+        return r;
     }
 };
 
@@ -1035,7 +1039,9 @@ const MakeCast = struct {
     fractions: []const f32,
     depths: []const f32,
     fn at(self: MakeCast, i: usize) ShapeCastResult {
-        return .init(self.fractions[i], Vec3.zero(), Vec3.init(0, 0, self.depths[i]), Vec3.axisX(), false, .{ .value = @intCast(i) }, .empty, .{ .id = self.bodies[i] });
+        var r: ShapeCastResult = undefined;
+        r.init(self.fractions[i], Vec3.zero(), Vec3.init(0, 0, self.depths[i]), Vec3.axisX(), false, .{ .value = @intCast(i) }, .empty, .{ .id = self.bodies[i] });
+        return r;
     }
 };
 

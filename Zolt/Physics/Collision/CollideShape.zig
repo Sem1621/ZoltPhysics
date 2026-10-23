@@ -1,14 +1,18 @@
 //! Port of: Jolt/Physics/Collision/CollideShape.h
 //! Status: complete
 //!
-//! - `CollideShapeResult()` (the default constructor) is `.{}`: the vectors and the penetration depth are
+//! - `CollideShapeResult()` (the default constructor) is `initDefault()`: the vectors and the penetration depth are
 //!   uninitialized like in C++ (`undefined`), the IDs are invalid / empty and the faces empty. The member wise
-//!   constructor is `init`. ShapeCastResult (ShapeCast.zig) embeds it as `base`, because Jolt passes a ShapeCastResult
+//!   constructor `init` constructs in place (`var result: CollideShapeResult = undefined; result.init(...);`). The
+//!   faces have no default, because a default would zero-fill their 1 KB; `initDefault()` returns a literal that names
+//!   them with `.init()`, which does not fill them. `reversed` writes to an out parameter, so only the used face
+//!   vertices are copied. ShapeCastResult (ShapeCast.zig) embeds it as `base`, because Jolt passes a ShapeCastResult
 //!   where a `const CollideShapeResult &` is expected (D12).
 //! - `CollideShapeSettings : CollideSettingsBase` is flattened (a value type that is never passed as its base, D12):
 //!   CollideShapeSettings repeats the fields of CollideSettingsBase first, `virtual.checkPrefix` keeps them in sync.
 //!   ShapeCastSettings does the same.
 
+const std = @import("std");
 const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const StaticArray = @import("../../Core/StaticArray.zig").StaticArray;
 const virtual = @import("../../Core/Virtual.zig");
@@ -38,21 +42,41 @@ pub const CollideShapeResult = struct {
     /// BodyID to which shape 2 belongs to
     body_id2: BodyID = .invalid,
     /// Colliding face on shape 1 (optional result, in world space or relative to base offset)
-    shape1_face: Face = .{},
+    shape1_face: Face,
     /// Colliding face on shape 2 (optional result, in world space or relative to base offset)
-    shape2_face: Face = .{},
+    shape2_face: Face,
 
-    /// Constructor
-    pub fn init(contact_point_on1: Vec3, contact_point_on2: Vec3, penetration_axis: Vec3, penetration_depth: f32, sub_shape_id1: SubShapeID, sub_shape_id2: SubShapeID, body_id2: BodyID) CollideShapeResult {
-        return .{
-            .contact_point_on1 = contact_point_on1,
-            .contact_point_on2 = contact_point_on2,
-            .penetration_axis = penetration_axis,
-            .penetration_depth = penetration_depth,
-            .sub_shape_id1 = sub_shape_id1,
-            .sub_shape_id2 = sub_shape_id2,
-            .body_id2 = body_id2,
-        };
+    /// Default constructor: the IDs are empty / invalid, the faces are empty and the other members are undefined.
+    /// The literal names the faces, so their buffers are not filled.
+    pub fn initDefault() CollideShapeResult {
+        return .{ .shape1_face = .init(), .shape2_face = .init() };
+    }
+
+    /// Constructor, in place
+    pub fn init(self: *CollideShapeResult, contact_point_on1: Vec3, contact_point_on2: Vec3, penetration_axis: Vec3, penetration_depth: f32, sub_shape_id1: SubShapeID, sub_shape_id2: SubShapeID, body_id2: BodyID) void {
+        self.contact_point_on1 = contact_point_on1;
+        self.contact_point_on2 = contact_point_on2;
+        self.penetration_axis = penetration_axis;
+        self.penetration_depth = penetration_depth;
+        self.sub_shape_id1 = sub_shape_id1;
+        self.sub_shape_id2 = sub_shape_id2;
+        self.body_id2 = body_id2;
+        self.shape1_face.clear();
+        self.shape2_face.clear();
+    }
+
+    /// Copy assignment (operator =): copies only the used face vertices, a struct copy would copy the whole faces
+    pub fn assign(self: *CollideShapeResult, other: *const CollideShapeResult) void {
+        if (self == other) return;
+        self.contact_point_on1 = other.contact_point_on1;
+        self.contact_point_on2 = other.contact_point_on2;
+        self.penetration_axis = other.penetration_axis;
+        self.penetration_depth = other.penetration_depth;
+        self.sub_shape_id1 = other.sub_shape_id1;
+        self.sub_shape_id2 = other.sub_shape_id2;
+        self.body_id2 = other.body_id2;
+        self.shape1_face.assign(&other.shape1_face);
+        self.shape2_face.assign(&other.shape2_face);
     }
 
     /// Function required by the CollisionCollector. A smaller fraction is considered to be a 'better hit'. We use -penetration depth to get the hit with the biggest penetration depth
@@ -61,18 +85,18 @@ pub const CollideShapeResult = struct {
     }
 
     /// Reverses the hit result, swapping contact point 1 with contact point 2 etc.
-    pub fn reversed(self: *const CollideShapeResult) CollideShapeResult {
-        var result: CollideShapeResult = .{};
-        result.contact_point_on2 = self.contact_point_on1;
-        result.contact_point_on1 = self.contact_point_on2;
-        result.penetration_axis = self.penetration_axis.negate();
-        result.penetration_depth = self.penetration_depth;
-        result.sub_shape_id2 = self.sub_shape_id1;
-        result.sub_shape_id1 = self.sub_shape_id2;
-        result.body_id2 = self.body_id2;
-        result.shape2_face = self.shape1_face;
-        result.shape1_face = self.shape2_face;
-        return result;
+    /// Writes the result to `out` (not `self`) and copies only the used face vertices.
+    pub fn reversed(self: *const CollideShapeResult, out: *CollideShapeResult) void {
+        std.debug.assert(out != self);
+        out.contact_point_on2 = self.contact_point_on1;
+        out.contact_point_on1 = self.contact_point_on2;
+        out.penetration_axis = self.penetration_axis.negate();
+        out.penetration_depth = self.penetration_depth;
+        out.sub_shape_id2 = self.sub_shape_id1;
+        out.sub_shape_id1 = self.sub_shape_id2;
+        out.body_id2 = self.body_id2;
+        out.shape2_face.assign(&self.shape1_face);
+        out.shape1_face.assign(&self.shape2_face);
     }
 };
 
@@ -125,14 +149,15 @@ pub const CollideShapeSettings = struct {
 };
 
 test "CollideShapeResult.reversed and the settings defaults" {
-    const std = @import("std");
     const expect = std.testing.expect;
 
-    var r = CollideShapeResult.init(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, -1, 0), 0.25, .{ .value = 1 }, .{ .value = 2 }, .init(9));
+    var r: CollideShapeResult = undefined;
+    r.init(Vec3.init(1, 2, 3), Vec3.init(4, 5, 6), Vec3.init(0, -1, 0), 0.25, .{ .value = 1 }, .{ .value = 2 }, .init(9));
     r.shape1_face.append(Vec3.init(7, 8, 9));
     try std.testing.expectEqual(@as(f32, -0.25), r.getEarlyOutFraction());
 
-    const rev = r.reversed();
+    var rev: CollideShapeResult = undefined;
+    r.reversed(&rev);
     try expect(rev.contact_point_on1.eql(r.contact_point_on2) and rev.contact_point_on2.eql(r.contact_point_on1));
     try expect(rev.penetration_axis.eql(Vec3.init(0, 1, 0)));
     try std.testing.expectEqual(r.penetration_depth, rev.penetration_depth);
@@ -140,6 +165,32 @@ test "CollideShapeResult.reversed and the settings defaults" {
     try expect(rev.body_id2.eql(r.body_id2));
     try std.testing.expectEqual(@as(u32, 0), rev.shape1_face.len);
     try std.testing.expectEqual(@as(u32, 1), rev.shape2_face.len);
+    try expect(rev.shape2_face.get(0).eql(Vec3.init(7, 8, 9)));
+
+    // The default constructor
+    var d: CollideShapeResult = .initDefault();
+    try expect(d.sub_shape_id1.eql(SubShapeID.empty) and d.sub_shape_id2.eql(SubShapeID.empty));
+    try expect(d.body_id2.eql(BodyID.invalid));
+    try expect(d.shape1_face.isEmpty() and d.shape2_face.isEmpty());
+
+    // Reversing into a result that was in use replaces its faces
+    rev.reversed(&d);
+    try std.testing.expectEqual(@as(u32, 1), d.shape1_face.len);
+    try std.testing.expectEqual(@as(u32, 0), d.shape2_face.len);
+    try expect(d.shape1_face.get(0).eql(Vec3.init(7, 8, 9)));
+
+    // Assignment copies every member and the used face vertices
+    var a: CollideShapeResult = undefined;
+    a.assign(&r);
+    try expect(a.contact_point_on1.eql(r.contact_point_on1) and a.contact_point_on2.eql(r.contact_point_on2));
+    try expect(a.penetration_axis.eql(r.penetration_axis));
+    try std.testing.expectEqual(r.penetration_depth, a.penetration_depth);
+    try expect(a.sub_shape_id1.eql(r.sub_shape_id1) and a.sub_shape_id2.eql(r.sub_shape_id2) and a.body_id2.eql(r.body_id2));
+    try expect(a.shape1_face.eql(&r.shape1_face) and a.shape2_face.eql(&r.shape2_face));
+    a.assign(&a); // Self assignment keeps the result
+    try expect(a.shape1_face.eql(&r.shape1_face));
+    a.assign(&d);
+    try expect(a.shape1_face.eql(&d.shape1_face) and a.shape2_face.isEmpty());
 
     const settings: CollideShapeSettings = .{};
     try expect(settings.active_edge_mode == .collide_only_with_active and settings.collect_faces_mode == .no_faces);

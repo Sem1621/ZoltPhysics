@@ -141,7 +141,7 @@ fn calculateManifold(c: *PhysicsTestContext, body1: *const Body, body2: *const B
             deepest = hit;
     }
 
-    var manifold: ContactManifold = .{};
+    var manifold: ContactManifold = .init();
     manifold.base_offset = base_offset;
     zolt.manifoldBetweenTwoFaces(deepest.contact_point_on1, deepest.contact_point_on2, deepest.penetration_axis, physics_settings.speculative_contact_distance + physics_settings.manifold_tolerance, &deepest.shape1_face, &deepest.shape2_face, &manifold.relative_contact_points_on1, &manifold.relative_contact_points_on2, .{});
     manifold.sub_shape_id1 = deepest.sub_shape_id1;
@@ -258,7 +258,7 @@ test "estimateCollisionResponse: single contact point without friction uses one 
     const sphere2 = try c.createSphere(RVec3.init(2, 0, 0), 1.0, .dynamic, .discrete, Layers.moving, .{});
     sphere2.setLinearVelocity(Vec3.init(-1, 0, 0));
 
-    var manifold: ContactManifold = .{};
+    var manifold: ContactManifold = .init();
     manifold.base_offset = sphere1.getCenterOfMassPosition();
     manifold.world_space_normal = Vec3.init(1, 0, 0);
     manifold.penetration_depth = 0.0;

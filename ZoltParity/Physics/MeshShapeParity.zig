@@ -1481,7 +1481,8 @@ fn collectSubShapeIDs(allocator: Allocator, mesh: *const MeshShape) !std.ArrayLi
     const items = mesh.tree.vector.items;
     const header: *const NodeCodec.Header = @ptrCast(@alignCast(items.ptr));
     var collector: BlockCollector = .{ .allocator = allocator, .block_id_bits = NodeCodec.DecodingContext.triangleBlockIDBits(header) };
-    var ctx = NodeCodec.DecodingContext.init(header);
+    var ctx: NodeCodec.DecodingContext = undefined;
+    ctx.init(header);
     const dummy: u8 = 0;
     ctx.walkTree(items.ptr, &dummy, &collector);
     return collector.ids;

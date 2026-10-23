@@ -2635,7 +2635,9 @@ pub const HeightFieldShape = struct {
         std.debug.assert(shape.getSubType() == .height_field);
         const height_field = shape.cast(HeightFieldShape);
 
-        var visitor: Visitor = .{ .base = .init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector) };
+        // In place: the helper keeps a pointer into its support buffer after the first triangle
+        var visitor: Visitor = undefined;
+        visitor.base.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         visitor.shape2 = height_field;
         visitor.inv_direction.set(shape_cast.direction);
         visitor.box_center = shape_cast.shape_world_bounds.getCenter();

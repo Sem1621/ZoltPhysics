@@ -375,7 +375,7 @@ const Harness = struct {
 /// A manifold between body 1 above body 2 (normal from body 1 to body 2 is -Y) with `num_points` points around
 /// `center` in the XZ plane, body 1's points `penetration` below body 2's (negative: a speculative contact)
 fn makeManifold(base_offset: RVec3, center: RVec3, num_points: u32, penetration: f32, sub_shape_id1: u32, sub_shape_id2: u32) ContactManifold {
-    var m: ContactManifold = .{};
+    var m: ContactManifold = .init();
     m.base_offset = base_offset;
     m.world_space_normal = Vec3.init(0, -1, 0);
     m.penetration_depth = penetration;
@@ -459,7 +459,7 @@ test "ContactConstraintManager: combine functions, listener and validate" {
 
     // Without a listener every contact is accepted
     try expect(h.manager.getContactListener() == null);
-    const result: zolt.CollideShapeResult = .{};
+    const result: zolt.CollideShapeResult = .initDefault();
     try expectEqual(zolt.ValidateResult.accept_all_contacts_for_this_body_pair, h.manager.validateContactPoint(b1, b2, RVec3.zero(), &result));
 
     // A listener decides
@@ -502,7 +502,8 @@ fn checkMotionTypePair(allocator: Allocator, type1: MotionType, type2: MotionTyp
     const any_dynamic = type1 == .dynamic or type2 == .dynamic;
 
     const manifold = makeManifold(top.getCenterOfMassPosition(), RVec3.init(0.1, 0.0, -0.2), num_points, 0.01, 3, 5);
-    const swapped = manifold.swapShapes();
+    var swapped: ContactManifold = undefined;
+    manifold.swapShapes(&swapped);
     try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 0.0);
     if (swap)
         h.processPair(&h.contact_allocator, bottom, top, (&swapped)[0..1], true)
@@ -953,7 +954,9 @@ test "ContactConstraintManager: CCD contacts" {
     // Frame 1: the CCD contact is new, a second report in the same update is persisted
     try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 0.0);
     {
-        const m = makeManifold(a.getCenterOfMassPosition(), RVec3.init(0, 0, 0), 1, 0.0, 7, 0).swapShapes(); // In the order (b, a)
+        const unswapped = makeManifold(a.getCenterOfMassPosition(), RVec3.init(0, 0, 0), 1, 0.0, 7, 0);
+        var m: ContactManifold = undefined;
+        unswapped.swapShapes(&m); // In the order (b, a)
         var settings: ContactSettings = .{};
         h.manager.onCCDContactAdded(&h.contact_allocator, b, a, &m, &settings); // b has the higher ID, the bodies are swapped
         try expectEqual(@sqrt(@as(f32, 0.4) * 0.9), settings.combined_friction);

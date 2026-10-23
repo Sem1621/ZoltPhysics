@@ -202,8 +202,9 @@ pub const InternalEdgeRemovingCollector = struct {
         if (triangle_normal.dot(contact_normal) > 0.999848 * contact_normal_len * triangle_normal_len) // cos(1 degree)
             return self.chainAndVoid(result);
 
-        // Delayed processing
-        self.delayed_results.append(self.delayed_results_allocator.allocator(), result.*) catch |err| self.setAllocationError(err);
+        // Delayed processing (assign copies only the used face vertices)
+        const delayed = self.delayed_results.addOne(self.delayed_results_allocator.allocator()) catch |err| return self.setAllocationError(err);
+        delayed.assign(result);
     }
 
     /// After all hits have been added, call this function to process the delayed results
@@ -339,7 +340,8 @@ const CollideConvexVsTriangles = @import("CollideConvexVsTriangles.zig").Collide
 
 /// A hit against a triangle of shape 2
 fn triangleHit(face: [3]Vec3, contact_point: Vec3, penetration_axis: Vec3, penetration_depth: f32, sub_shape_id1: u32, sub_shape_id2: u32) CollideShapeResult {
-    var r = CollideShapeResult.init(contact_point, contact_point, penetration_axis, penetration_depth, .{ .value = sub_shape_id1 }, .{ .value = sub_shape_id2 }, .invalid);
+    var r: CollideShapeResult = undefined;
+    r.init(contact_point, contact_point, penetration_axis, penetration_depth, .{ .value = sub_shape_id1 }, .{ .value = sub_shape_id2 }, .invalid);
     for (face) |v| r.shape2_face.append(v);
     return r;
 }

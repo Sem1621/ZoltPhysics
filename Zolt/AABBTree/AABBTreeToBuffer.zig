@@ -489,7 +489,8 @@ fn checkBuffer(allocator: std.mem.Allocator, buffer: *const TestBuffer, mesh: *c
     // Collect all triangles
     var collect: CollectVisitor = .{ .allocator = allocator };
     defer collect.deinit();
-    var node_ctx: TestNodeCodec.DecodingContext = .init(buffer.getNodeHeader());
+    var node_ctx: TestNodeCodec.DecodingContext = undefined;
+    node_ctx.init(buffer.getNodeHeader());
     node_ctx.walkTree(buffer_start, &triangle_ctx, &collect);
     try std.testing.expect(node_ctx.isDoneWalking());
     try std.testing.expectEqual(mesh.triangles.items.len, collect.triangles.items.len);
@@ -536,7 +537,8 @@ fn checkBuffer(allocator: std.mem.Allocator, buffer: *const TestBuffer, mesh: *c
         const direction = Vec3.init(0.1, -10, -0.2);
 
         var ray: RayCastVisitor = .{ .ray_origin = origin, .ray_direction = direction, .ray_inv_direction = .init(direction) };
-        var ray_ctx: TestNodeCodec.DecodingContext = .init(buffer.getNodeHeader());
+        var ray_ctx: TestNodeCodec.DecodingContext = undefined;
+        ray_ctx.init(buffer.getNodeHeader());
         ray_ctx.walkTree(buffer_start, &triangle_ctx, &ray);
 
         var brute_force: f32 = math.flt_max;
@@ -644,7 +646,8 @@ test "AABBTreeToBuffer root leaf and abort" {
 
     // A budget of 3 triangles: the walk aborts every time it finds a second block of 2 triangles
     var visitor: BudgetVisitor = .{ .budget = 3 };
-    var ctx: TestNodeCodec.DecodingContext = .init(buffer2.getNodeHeader());
+    var ctx: TestNodeCodec.DecodingContext = undefined;
+    ctx.init(buffer2.getNodeHeader());
     var num_walks: u32 = 0;
     while (true) {
         visitor.num_found = 0;

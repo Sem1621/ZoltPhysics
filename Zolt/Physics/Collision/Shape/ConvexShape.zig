@@ -543,7 +543,7 @@ pub const ConvexShape = struct {
             for (Vec3.unit_sphere.constSlice()) |v| {
                 const direction = v.mulScalar(0.05);
 
-                var face: Shape.SupportingFace = .{};
+                var face: Shape.SupportingFace = .init();
                 self.base.getSupportingFace(.empty, direction, scale, Mat44.identity(), &face); // Virtual call
 
                 if (!face.isEmpty()) {
@@ -751,7 +751,8 @@ pub const ConvexShape = struct {
         const penetration_axis_world = center_of_mass_transform1.multiply3x3(penetration_axis);
 
         // Create collision result
-        var result = CollideShapeResult.init(point1, point2, penetration_axis_world, penetration_depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+        var result: CollideShapeResult = undefined;
+        result.init(point1, point2, penetration_axis_world, penetration_depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
 
         // Gather faces
         if (collide_shape_settings.collect_faces_mode == .collect_faces) {
@@ -802,7 +803,8 @@ pub const ConvexShape = struct {
             contact_point_b = center_of_mass_transform2.mulVec3(contact_point_b);
             const contact_normal_world = center_of_mass_transform2.multiply3x3(contact_normal);
 
-            var result = ShapeCastResult.init(fraction, contact_point_a, contact_point_b, contact_normal_world, false, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+            var result: ShapeCastResult = undefined;
+            result.init(fraction, contact_point_a, contact_point_b, contact_normal_world, false, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
 
             // Early out if this hit is deeper than the collector's early out value
             if (fraction == 0.0 and -result.base.penetration_depth >= collector.getEarlyOutFraction())

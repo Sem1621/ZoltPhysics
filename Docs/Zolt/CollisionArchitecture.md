@@ -365,14 +365,18 @@ forgotten check fails in tests.
 
 ```zig
 pub fn addHit(self: *Self, result: *const ResultType) void {
-    var hit = copyResult(ResultType, result);
-    self.hits.append(self.allocator, hit) catch |err| {
-        releaseResult(ResultType, &hit);
+    const hit = self.hits.addOne(self.allocator) catch |err| {
         self.alloc_error.set(err);
         self.base.forceEarlyOut();
+        return;
     };
+    storeResult(ResultType, hit, false, result);
 }
 ```
+
+`storeResult` uses the result's `assign()` when it has one. `CollideShapeResult` and
+`ShapeCastResult` have one: it copies only the used face vertices. Other results are copied, and
+the result that the slot held before, if any, is released with `releaseResult`.
 
 For `ClosestHitPerBody`, `had_hit` stays false when storing the first hit of a body fails.
 `onBodyEnd` only restores the early out fraction after a hit (Jolt line 147), so the forced early

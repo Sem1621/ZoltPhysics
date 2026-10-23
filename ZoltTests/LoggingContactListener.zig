@@ -93,7 +93,7 @@ pub const LoggingContactListener = struct {
         self.log_mutex.lock(io);
         defer self.log_mutex.unlock(io);
         self.check(contract);
-        self.append(.{ .type = .validate, .body1 = body1.getID(), .body2 = body2.getID(), .manifold = .{} });
+        self.append(.{ .type = .validate, .body1 = body1.getID(), .body2 = body2.getID(), .manifold = .init() });
         return .accept_contact;
     }
 
@@ -137,7 +137,7 @@ pub const LoggingContactListener = struct {
         self.check(sub_shape_pair.getBody1ID().lessThan(sub_shape_pair.getBody2ID()));
 
         self.check(self.existing_contacts.remove(key(sub_shape_pair.*))); // Validate that OnContactAdded was called
-        var manifold: ContactManifold = .{};
+        var manifold: ContactManifold = .init();
         manifold.sub_shape_id1 = sub_shape_pair.getSubShapeID1();
         manifold.sub_shape_id2 = sub_shape_pair.getSubShapeID2();
         self.append(.{ .type = .remove, .body1 = sub_shape_pair.getBody1ID(), .body2 = sub_shape_pair.getBody2ID(), .manifold = manifold });

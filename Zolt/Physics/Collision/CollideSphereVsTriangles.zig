@@ -153,7 +153,8 @@ pub const CollideSphereVsTriangles = struct {
         const penetration_axis_world = self.transform2.multiply3x3(penetration_axis);
 
         // Create collision result
-        var result = CollideShapeResult.init(point1, point2, penetration_axis_world, penetration_depth, self.sub_shape_id1, sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
+        var result: CollideShapeResult = undefined;
+        result.init(point1, point2, penetration_axis_world, penetration_depth, self.sub_shape_id1, sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
 
         // Gather faces
         if (settings.collect_faces_mode == .collect_faces) {
