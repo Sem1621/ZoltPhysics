@@ -509,9 +509,10 @@ PerformanceTest built with `-DJPH_USE_FMADD`. Every run printed its expected has
 The SIMD contact solver makes Pyramid 34% faster on 1 thread and 13% faster on 4 threads, 33% and 13% faster than
 C++. Ragdoll and ConvexVsMesh use it too, later in the run: Ragdoll from about step 24 (the ragdolls of a pile touch
 and form a large island), ConvexVsMesh from about step 324. Then about half of their parallel batches go through the
-SIMD kernel. Their differences to "SIMD off" (Ragdoll -6% on 1 thread, ConvexVsMesh +6% on 4 threads) are within the
-run-to-run variation, so this table does not show whether they are real. An instruction count over the steps after
-the large islands form would (perf-budget's 15 Ragdoll and 200 ConvexVsMesh steps end before). HighSpeed and
+SIMD kernel. Their groups are small (Ragdoll has about 9 dynamic-vs-dynamic contacts per batch), so the SIMD path
+breaks even there: callgrind counts 0.25% more instructions with it for 80 Ragdoll steps (12.95e9 vs 12.92e9) and
+0.15% more for 500 ConvexVsMesh steps (10.06e9 vs 10.04e9). Their wall-clock differences to "SIMD off" (Ragdoll -6% on
+1 thread, ConvexVsMesh +6% on 4 threads) are within the run-to-run variation. HighSpeed and
 CharacterVirtual have no large islands: Phase 10 and "SIMD off" run the same code for them, so their differences are
 noise.
 
