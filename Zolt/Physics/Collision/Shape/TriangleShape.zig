@@ -544,7 +544,6 @@ pub const TriangleShape = struct {
         const shape = shape_in.cast(TriangleShape);
 
         var caster: CastConvexVsTriangles = undefined;
-
         caster.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         caster.cast(shape.v1, shape.v2, shape.v3, 0b111, sub_shape_id_creator2.getID());
     }
