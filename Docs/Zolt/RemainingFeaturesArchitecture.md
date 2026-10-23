@@ -831,6 +831,10 @@ The audit added:
 
 The first parity build after the change recompiles the C++ library (about 5 minutes per configuration).
 
+Since Phase 10 (W6) only the parity row ReleaseFast, single precision, without the debug renderer runs per push and
+pull request (job `parity`). The other four rows, also `ReleaseFast debug_renderer=true`, run nightly and on a manual
+run (job `parity-nightly`).
+
 ## 6. Groups and order
 
 **Rules for every group.**
@@ -1052,7 +1056,7 @@ settled:
   The library is at 99.6%, because `Core.zig` stays partial (section 1).
 - CI runs the tests in every M10 configuration, the full parity in both renderer configurations, the 5 determinism
   hashes in both precisions and both renderer configurations (with `-r` when the option is on), and the `.jor` check
-  (section 5).
+  (section 5). Since Phase 10 four of the five parity rows run nightly (section 5).
 - Every parity layer of section 4 is in the tree. Every scene of SimScenes runs against Zolt: every Blocker is supported
   (section 6, "Settled in the audit").
 
@@ -1135,8 +1139,9 @@ settled:
 ## 12. Open questions for the lead
 
 - CI cost: the `debug_renderer=true` parity row rebuilds the reference and reruns the full parity (30 to 40 minutes). If
-  that is too slow, run it nightly, or restrict it to the renderer, simulation and perf filters. Settled: CI runs the
-  full row on every change (section 5).
+  that is too slow, run it nightly, or restrict it to the renderer, simulation and perf filters. Settled in Phase 9: CI
+  ran the full row on every change (section 5). Since Phase 10 (W6) it runs nightly and on a manual run. Per push and
+  pull request CI runs one parity row: ReleaseFast, single precision, without the debug renderer.
 - Hair has no `.hair` groom asset in the repository (`Assets/download_hair.sh`). The parity uses procedural grooms. A
   small real groom could be added for an end-to-end scene. Still open: the hair parity uses procedural grooms, on the
   scalp of `Assets/face.bin` and without a scalp.

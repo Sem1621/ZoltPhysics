@@ -188,8 +188,8 @@ jobs:
 
   job-profile:
     # The measurement tooling (-Djob_profile, Zolt/Core/JobProfiler.zig): the tests of the job system, the profiler and
-    # ZoltPerformanceTest with the option, then one short profiled run (-p) whose Chrome trace must be valid JSON with
-    # the physics jobs in it
+    # ZoltPerformanceTest with the option, then one short profiled run (-p -phase_times). Its Chrome trace must be valid
+    # JSON with the physics jobs and both kinds of waits. Its output must have the summary and the phase times.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Job profiler
@@ -203,15 +203,21 @@ jobs:
     - name: Test with the job profiler
       run: zig build test --summary all -Djob_profile=true -Dtest-filter=Job -Dtest-filter=profiler -Dtest-filter=PerformanceTest -Dtest-filter="-p writes"
     - name: Profile a short Pyramid run
-      run: zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -q=LinearCast -t=2 -s=Pyramid -i=60 -p -phase_times
-    - name: Check the Chrome trace
+      shell: bash # With pipefail: a failed run fails the step
+      run: zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -q=LinearCast -t=2 -s=Pyramid -i=60 -p -phase_times | tee run.txt
+    - name: Check the Chrome trace and the output
       run: |
         python3 - <<'PY'
-        import json
+        import json, re
         events = [e for e in json.load(open("Pyramid_linearcast_th2.json"))["traceEvents"] if e["ph"] == "X"]
         names = {e["name"] for e in events}
-        assert {"FindCollisions", "SolveVelocityConstraints"} <= names, names
+        assert {"FindCollisions", "SolveVelocityConstraints", "Idle: wait for jobs", "Idle: wait for barrier"} <= names, names
         print(len(events), "events")
+        output = open("run.txt").read()
+        assert re.search(r"^Job profile: wall [0-9.]+ ms, Worker 0: busy .*, Thread 0: busy ", output, re.M), output
+        phases = re.findall(r"^Phase times: scene update ([0-9.]+) ms, physics update ([0-9.]+) ms$", output, re.M)
+        assert len(phases) == 1 and float(phases[0][1]) > 0, output
+        print("Phase times:", phases[0])
         PY
 
   determinism:

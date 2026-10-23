@@ -23,8 +23,9 @@
 //!   overwritten ones.
 //! - Times are nanoseconds since `init` or the last `reset`, read from the monotonic clock of `std.Io`
 //!   (`Clock.awake`). A wait that started before a `reset` is recorded from time 0.
-//! - Call `reset` only while no job runs, e.g. between two PhysicsSystem.update calls. A waiting worker thread does
-//!   not write until the next job wakes it up.
+//! - Call `reset` only when no thread can record: on a new job system before its first job, or after the worker
+//!   threads are stopped (`JobSystemThreadPool.setNumThreads(0)`). Between two PhysicsSystem.update calls is too
+//!   early: a worker thread can wake up at any time to record the end of a wait, also after the update returned.
 //! - `stop` ends the recording. Read the events (`Thread.events`, `writeChromeTrace`, `writeSummary`) after `stop`,
 //!   once no thread can still be in the middle of recording: stop the worker threads first
 //!   (`JobSystemThreadPool.setNumThreads(0)` keeps the profiler). A worker thread can wake up at any time to record
@@ -196,7 +197,8 @@ pub const JobProfiler = struct {
         return self.threads.len != 0;
     }
 
-    /// Clear all events and totals and start the time at 0. The threads keep their ring buffers.
+    /// Clear all events and totals and start the time at 0. The threads keep their ring buffers. Call it only when no
+    /// thread can record (see the top of this file).
     pub fn reset(self: *JobProfiler) void {
         if (!self.isInitialized())
             return;

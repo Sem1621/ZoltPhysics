@@ -888,6 +888,19 @@ test "JobSystemThreadPool job profiler records the jobs and the idle time (-Djob
             }
             return n;
         }
+
+        /// Number of recorded waits with this name on entry `index` of the threads
+        fn waits(profiler: *JobProfiler, index: usize, name: []const u8) u64 {
+            var n: u64 = 0;
+            const parts = profiler.usedThreads()[index].events();
+            for ([_][]const JobProfiler.Event{ parts.first, parts.second }) |part| {
+                for (part) |event| {
+                    if (event.kind == .idle and std.mem.eql(u8, event.name, name))
+                        n += 1;
+                }
+            }
+            return n;
+        }
     };
 
     // max_jobs is larger than the number of jobs + queue_length (see "JobSystemThreadPool runs many jobs")
@@ -904,6 +917,10 @@ test "JobSystemThreadPool job profiler records the jobs and the idle time (-Djob
     try std.testing.expectEqual(@as(usize, 1), profiler.usedThreads().len);
     try std.testing.expectEqual(@as(u64, 200), profiler.usedThreads()[0].num_jobs);
     try std.testing.expectEqual(@as(u64, 200), try Count.jobs(profiler, "Barrier"));
+
+    // The thread waits for the barrier at least once: BarrierImpl.wait acquires the semaphore until it has the count of
+    // every added job (the hook in BarrierImpl.wait)
+    try std.testing.expect(Count.waits(profiler, 0, "Idle: wait for barrier") > 0);
 
     // reset clears the events, the thread keeps its ring buffer
     profiler.reset();
@@ -933,6 +950,15 @@ test "JobSystemThreadPool job profiler records the jobs and the idle time (-Djob
     }
     try std.testing.expectEqual(@as(u64, 1000), num_jobs);
     try std.testing.expectEqual(@as(u64, 0), profiler.num_dropped.load(.monotonic));
+
+    // A worker thread runs a job only after it woke up from a wait for jobs (the hook in threadMain). The thread that
+    // waits for the barrier takes the first entry after the workers, and it waits at least once.
+    try std.testing.expectEqual(@as(usize, profiler.num_workers + 1), profiler.usedThreads().len);
+    for (0..profiler.num_workers) |index| {
+        if (profiler.usedThreads()[index].num_jobs > 0)
+            try std.testing.expect(Count.waits(profiler, index, "Idle: wait for jobs") > 0);
+    }
+    try std.testing.expect(Count.waits(profiler, profiler.num_workers, "Idle: wait for barrier") > 0);
 
     // The trace is valid JSON with one complete event per job and per wait
     var trace: std.Io.Writer.Allocating = .init(std.testing.allocator);

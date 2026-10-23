@@ -916,13 +916,27 @@ test "-p writes the job timeline of a run (-Djob_profile)" {
     defer parsed.deinit();
     var num_find_collisions: usize = 0;
     var num_solve_velocity: usize = 0;
+    var num_worker_jobs: usize = 0; // Jobs of "Worker 0" (tid 0)
+    var num_worker_waits: usize = 0; // "Idle: wait for jobs" of "Worker 0"
+    var num_barrier_waits: usize = 0; // "Idle: wait for barrier" of "Thread 0", the thread that calls update (tid 1)
     for (parsed.value.object.get("traceEvents").?.array.items) |event| {
         const name = event.object.get("name").?.string;
         if (std.mem.eql(u8, name, "FindCollisions")) num_find_collisions += 1;
         if (std.mem.eql(u8, name, "SolveVelocityConstraints")) num_solve_velocity += 1;
+        if (!std.mem.eql(u8, event.object.get("ph").?.string, "X")) continue;
+        const tid = event.object.get("tid").?.integer;
+        if (tid == 0 and std.mem.eql(u8, event.object.get("cat").?.string, "job")) num_worker_jobs += 1;
+        if (tid == 0 and std.mem.eql(u8, name, "Idle: wait for jobs")) num_worker_waits += 1;
+        if (tid == 1 and std.mem.eql(u8, name, "Idle: wait for barrier")) num_barrier_waits += 1;
     }
     try std.testing.expect(num_find_collisions >= 10); // At least one per update
     try std.testing.expect(num_solve_velocity >= 10);
+
+    // The idle spans: the worker runs a job only after it woke up from a wait for jobs, and every update waits at
+    // least once for its barrier
+    if (num_worker_jobs > 0)
+        try std.testing.expect(num_worker_waits > 0);
+    try std.testing.expect(num_barrier_waits >= 10);
 
     try std.testing.expect(std.mem.startsWith(u8, summary.written(), "Job profile: wall "));
     try std.testing.expect(std.mem.indexOf(u8, summary.written(), ", Worker 0: busy ") != null);

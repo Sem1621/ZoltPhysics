@@ -8,6 +8,7 @@ on:
     paths:
       - 'Jolt/**'
       - 'Docs/*'
+      - 'Docs/Images/**'
       - 'Build/README.md'
       - 'Doxyfile'
       - 'doxygen-awesome.css'
