@@ -156,6 +156,10 @@ pub const LargeIslandSplitter = struct {
             contacts_begin: u32,
             contacts_end: u32,
             first_iteration: bool,
+            /// Zolt addition: true when the batch comes from a parallel split (split index below non_parallel_split_idx).
+            /// No dynamic body appears twice in a parallel split, so the contacts of the batch can be solved in any order
+            /// (ContactConstraintSimd.zig).
+            parallel: bool,
         };
 
         pub fn getNumSplits(self: *const Splits) u32 {
@@ -235,6 +239,7 @@ pub const LargeIslandSplitter = struct {
                         .contacts_begin = split.contact_buffer_begin,
                         .contacts_end = split.contact_buffer_end,
                         .first_iteration = iteration == 0,
+                        .parallel = false,
                     };
                     return .batch_retrieved;
                 } else {
@@ -275,6 +280,7 @@ pub const LargeIslandSplitter = struct {
             }
 
             batch.first_iteration = iteration == 0;
+            batch.parallel = true;
             out_batch.* = batch;
             return .batch_retrieved;
         }
@@ -361,6 +367,10 @@ pub const LargeIslandSplitter = struct {
         /// contact_and_constraint_indices)
         contacts: []u32,
         first_iteration: bool,
+        /// Zolt addition: true when the batch comes from a parallel split (split index below non_parallel_split_idx). No
+        /// dynamic body appears twice in a parallel split, so the contacts of the batch can be solved in any order, for
+        /// example 8 at a time by ContactConstraintSimd.zig. The non parallel split shares bodies between its contacts.
+        parallel: bool,
     };
 
     /// Cached number of active bodies
@@ -689,6 +699,7 @@ pub const LargeIslandSplitter = struct {
                         .constraints = indices[batch.constraints_begin..batch.constraints_end],
                         .contacts = indices[batch.contacts_begin..batch.contacts_end],
                         .first_iteration = batch.first_iteration,
+                        .parallel = batch.parallel,
                     };
                     return .batch_retrieved;
                 },
