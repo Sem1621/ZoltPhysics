@@ -479,6 +479,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | members (and `thread_local` state) that only exist with `JPH_ENABLE_ASSERTS` | typed `void` without asserts: `cached_motion_type: if (Core.enable_asserts) MotionType else void = if (Core.enable_asserts) .static else {}`, so the compiler proves they cannot influence release results |
 | `JPH_IF_DEBUG(x)` / `#ifdef JPH_DEBUG`      | `if (builtin.mode == .Debug)`                               |
 | `#ifdef JPH_DOUBLE_PRECISION`               | `if (Core.double_precision)` (comptime known)               |
+| `#ifdef JPH_USE_FMADD`                      | `if (Core.use_fmadd) <Jolt's branch> else <the other branch>` (`-Dfma`). Only Jolt's 8 sites have it, see section 8, rule 2 |
 | `#ifdef JPH_DEBUG_RENDERER`                 | `Core.debug_renderer` (`-Ddebug_renderer`): members `if (Core.debug_renderer) T else void`, virtuals `virtual.OptionalVirtual(Core.debug_renderer, *const fn ...)`, functions and overrides `pub const draw = if (Core.debug_renderer) drawImpl else {};`, `JPH_IF_DEBUG_RENDERER(x)` at a call site `if (Core.debug_renderer) x else {}`. Rules and recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R2. Every `JPH_DEBUG_RENDERER` block is ported under these gates. `port_status.py --check` rejects `TODO(debug_renderer)` |
 | a function, override or accessor under `#ifdef JPH_DEBUG_RENDERER` | a gated declaration: `pub const draw = if (Core.debug_renderer) drawImpl else {};` with a private `fn drawImpl`. Without the option the body is never analyzed, so it may read members that are `void` then. List `.draw` in `overrides` in both configurations (`Virtual.zig` accepts a `void` entry). A dispatcher of a gated virtual is gated the same way |
 | a member or parameter under `#ifdef JPH_DEBUG_RENDERER` | a `void` member: `draw_constraint_size: if (Core.debug_renderer) f32 else void = if (Core.debug_renderer) 1.0 else {}`. A parameter of an internal function is a trailing `if (Core.debug_renderer) T else void` (callers pass `if (Core.debug_renderer) value else {}`); a parameter of a public function is a field of its options struct with a default, so `.{}` compiles in both configurations. Statements: `if (Core.debug_renderer) { ... }` |
@@ -534,8 +535,16 @@ results are reproducible as long as the code follows these rules:
 1. **Keep the operation order.** Never reassociate, factor or "simplify" floating point
    expressions. Translate the C++ expression tree literally: `(a * b + c) * d` must stay
    `a.mul(b).add(c).mul(d)`. Watch C++ precedence and left-to-right evaluation in long chains.
-2. **No FMA.** Never use `@mulAdd`; `sFusedMultiplyAdd` / `DifferenceOfProducts` are plain
-   `a * b + c` / `a * b - c * d` in deterministic mode.
+2. **No FMA, except Jolt's 8 `JPH_USE_FMADD` sites, which use `@mulAdd` behind `Core.use_fmadd`
+   (`-Dfma=true`).** Never use `@mulAdd` anywhere else. The 8 sites are Vec4, Vec3 and DVec3
+   `fusedMultiplyAdd`, the scalar, Vec4 and Vec3 `differenceOfProducts` (and so `Vec3.crossPrecise`),
+   `Quat.mul` and `Quat.multiplyImaginary`. Each is `if (Core.use_fmadd) <Jolt's FMADD branch> else
+   <the plain code>`: `@mulAdd` exactly where Jolt calls an FMA intrinsic or `std::fma`, with Jolt's
+   negations (vector `0 - x`, scalar `-x`). Without the option they are plain `a * b + c` /
+   `a * b - c * d`. With it, results change: the C++ reference gets `-DJPH_USE_FMADD`, so the parity
+   proves this mode too (only on x86-64: NEON's `vmlaq_f32` does not fuse under `-ffp-contract=off`).
+   FMA mode needs hardware FMA (Zig's software fma is not correctly rounded), so `Core.zig` stops the
+   build on a CPU without it.
 3. **Vector negation is `0 - x`**, which maps -0 to +0 (`Vec3`/`Vec4`/`DVec3` `negate()`, Jolt's
    `operator-()` in deterministic mode). Scalar negation in the C++ (`-a * b`, `-s`) is a real sign
    flip: keep it as `-x` in Zig.
