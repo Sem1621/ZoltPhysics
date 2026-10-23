@@ -325,12 +325,39 @@ pub const UVec4 = extern struct {
     /// when count = 3 the resulting vector is (Y, Z, W, 0)
     pub fn shiftComponents4Minus(self: UVec4, count: u32) UVec4 {
         std.debug.assert(count <= 4);
+        if (comptime use_pshufb) {
+            // _mm_shuffle_epi8 with a byte shuffle from the table (a table index of 0xff gives a zero byte)
+            const bytes: @Vector(16, u8) = @bitCast(self.value);
+            return .{ .value = @bitCast(@"llvm.x86.ssse3.pshuf.b.128"(bytes, @bitCast(four_minus_x_shuffle[count]))) };
+        }
+        return self.shiftComponents4MinusFallback(count);
+    }
+
+    /// Zolt: shiftComponents4Minus without pshufb (Jolt's version without SSE4.1 or NEON)
+    fn shiftComponents4MinusFallback(self: UVec4, count: u32) UVec4 {
         const components: [4]u32 = self.value;
         var result = [4]u32{ 0, 0, 0, 0 };
         for (0..count) |i|
             result[i] = components[i + 4 - count];
         return .{ .value = result };
     }
+
+    /// Zolt: use pshufb (SSSE3) in shiftComponents4Minus, like Jolt with JPH_USE_SSE4_1. It is an LLVM intrinsic, so
+    /// it needs the LLVM backend.
+    const use_pshufb = (builtin.cpu.arch == .x86 or builtin.cpu.arch == .x86_64) and builtin.zig_backend == .stage2_llvm and
+        std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3);
+
+    /// _mm_shuffle_epi8 (pshufb), only referenced when `use_pshufb`
+    extern fn @"llvm.x86.ssse3.pshuf.b.128"(@Vector(16, u8), @Vector(16, u8)) @Vector(16, u8);
+
+    /// The byte shuffles of shiftComponents4Minus for count 0 .. 4 (sFourMinusXShuffle)
+    const four_minus_x_shuffle: [5]Type align(16) = .{
+        .{ 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff },
+        .{ 0x0f0e0d0c, 0xffffffff, 0xffffffff, 0xffffffff },
+        .{ 0x0b0a0908, 0x0f0e0d0c, 0xffffffff, 0xffffffff },
+        .{ 0x07060504, 0x0b0a0908, 0x0f0e0d0c, 0xffffffff },
+        .{ 0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c },
+    };
 
     pub fn format(self: UVec4, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{d}, {d}, {d}, {d}", .{ self.value[0], self.value[1], self.value[2], self.value[3] });
@@ -361,5 +388,22 @@ test "expand4Uint16Lo/Hi equal the scalar version" {
         const c = v.value;
         try std.testing.expect(v.expand4Uint16Lo().eql(UVec4.init(c[0] & 0xffff, c[0] >> 16, c[1] & 0xffff, c[1] >> 16)));
         try std.testing.expect(v.expand4Uint16Hi().eql(UVec4.init(c[2] & 0xffff, c[2] >> 16, c[3] & 0xffff, c[3] >> 16)));
+    }
+}
+
+test "shiftComponents4Minus equals the fallback for count 0 .. 4" {
+    var prng = std.Random.DefaultPrng.init(0x4d);
+    const random = prng.random();
+    for (0..1000) |_| {
+        const v = UVec4.init(random.int(u32), random.int(u32), random.int(u32), random.int(u32));
+        for (0..5) |count| {
+            const c: u32 = @intCast(count);
+            const result = v.shiftComponents4Minus(c);
+            try std.testing.expect(result.eql(v.shiftComponents4MinusFallback(c)));
+
+            // Lane i < count is lane i + 4 - count of the input, the other lanes are zero
+            const components: [4]u32 = v.value;
+            for (0..4) |i| try std.testing.expectEqual(if (i < count) components[i + 4 - count] else 0, result.getComponent(@intCast(i)));
+        }
     }
 }
