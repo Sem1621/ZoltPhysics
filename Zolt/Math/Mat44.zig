@@ -119,7 +119,9 @@ pub const Mat44 = extern struct {
         const plus = two_xyzw * zxyw + two_yzxw * wwww; // 2 * (xz + yw, xy + zw, yz + xw, ww)
         var minus = two_yzxw * xyzw - two_zxyw * wwww; // 2 * (xy - zw, yz - xw, xz - yw, 0)
 
-        // Jolt sets W to 0 here (a workaround for a compiler that fuses the multiply and subtract)
+        // Workaround for compiler changing _mm_sub_ps(_mm_mul_ps(...), ...) into a fused multiply sub instruction, resulting in w not being 0
+        // There doesn't appear to be a reliable way to turn this off in Clang
+        // Zolt: Zig does not fuse them. The shuffle sets W to 0 like Jolt's _mm_insert_ps.
         minus = @shuffle(f32, minus, @as(V, @splat(0.0)), @Vector(4, i32){ 0, 1, 2, ~@as(i32, 0) });
 
         const col0 = @shuffle(f32, @shuffle(f32, plus, diagonal, @Vector(4, i32){ ~@as(i32, 0), 1, 2, 3 }), minus, @Vector(4, i32){ 0, 1, ~@as(i32, 2), ~@as(i32, 3) }); // (1 - 2 y^2 - 2 z^2, 2 xy + 2 zw, 2 xz - 2 yw, 0)

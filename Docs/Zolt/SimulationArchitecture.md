@@ -902,7 +902,7 @@ QuadTree).
 | P2 solved Rule M with mutable receivers on queries and BodyManager getters | `mutable_fields` blocks. `collideAABox`, `getNumBodies`, `lockAllBodies`, `getActiveBodies` and `saveState` keep `*const` receivers (D2, D3, D9) |
 | P3 had no start gate, so a `createJob` failure panicked with every lock held | The start gate with `kickStep` (D4). Test "createJob fails at every job" in single and multi threaded mode: build failures change nothing, spawn failures change no result |
 | P3's D10 used the pre-v5 cache layout (56 bytes against its own `== 60` assert) | The v5.6.1 layout with comptime size checks (D10) |
-| P3 read QuadTree bounds with a racy 16-byte vector load by default | Per-lane `.monotonic` atomic loads by default, with identical bits (D9) |
+| P3 read QuadTree bounds with a racy 16-byte vector load by default | Per-lane `.monotonic` atomic loads by default, with identical bits (D9). Phase 10: x86-64 (LLVM, no TSAN) uses an inline asm vector load, which is not a data race in Zig's model. Other builds load per lane (D9) |
 | The settings virtual `create` clashed with the constructor `create(allocator, ...)` | It is renamed `createConstraint(allocator, body1, body2)` (D8). The prototype's settings use it |
 | `fixedToWorld()` was read-only, but its shape was reference counted (any `RefConst` on it faulted); P3 had no shape at all | `Shape.is_static` and `EmptyShape.initStatic`: Jolt's dummy EmptyShape, never counted. Tests in EmptyShape.zig and the prototype (D1) |
 | P1 moved the frees of skipped jobs into a hand-maintained tail list | TempArray is empty on failure, and frees stay unconditional at Jolt's positions, so LIFO holds by construction. Every failing update asserts `temp.isEmpty()` (D5) |
