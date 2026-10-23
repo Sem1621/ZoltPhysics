@@ -51,7 +51,8 @@ code:
    - `BodyManager.bodies_size`;
    - `MotionProperties.index_in_active_bodies`;
    - the body pair queue slots;
-   - the QuadTree node bounds, loaded per lane.
+   - the QuadTree node bounds, loaded per lane where the walks do not use the inline asm vector
+     load (D9).
 4. **Two error channels** (CollisionArchitecture section 0):
    - Jolt's soft errors stay values: `PhysicsUpdateError`, `bool` returns, null pointers, invalid
      IDs.
@@ -631,9 +632,16 @@ the tree unchanged. A zeroed `UpdateState` makes `updateFinalize` a no-op
 **QuadTree port.**
 - Port QuadTree literally, including the partition code and the double-buffered root swap.
 - Node bounds are `[4]std.atomic.Value(f32)` per axis. `NotifyBodiesAABBChanged` widens them with
-  compare-exchange. Readers load them per lane with `.monotonic` into a Vec4, which gives the same
-  bits as Jolt's vector load without the race. A racy vector load is only an option after
-  measurement.
+  compare-exchange.
+- The tree walks read the 4 bounds of one axis and the 4 child IDs with one aligned 16 byte load,
+  like Jolt. On x86-64 (LLVM backend) the load is inline asm (`QuadTree.Node.vectorLoad`). The
+  compiler cannot see into inline asm, so the race with the atomic stores is not undefined behavior
+  in Zig. The CPU reads each aligned 4 byte lane atomically, which is all that Jolt relies on.
+- The child ID load needs acquire order. Its asm clobbers memory, and x86 does not reorder loads
+  with later loads, so that is enough.
+- Other CPUs, the self-hosted backend and TSAN builds load per lane: the bounds with `.monotonic`,
+  the child IDs with `.acquire`. All paths give the same bits. Phase 10 measured the per lane
+  loads: about 5% of the instructions of ConvexVsMesh.
 - The pair order of `findCollidingPairs` may vary between runs. Determinism comes from
   `findCollidingPairsCanCollide` plus the contact sorts.
 - `frameSync` discards the old tree under the old query lock (lock type `.broad_phase_query`).
@@ -944,8 +952,8 @@ QuadTree).
 - **QuadTree pre-commit.** Accepted. About 170 bytes per max body is what Jolt itself uses once the
   tree is full (the allocator holds twice the estimated node count for the rebuild in `Update`),
   and it keeps Finalize and Abort free of errors. The `initBroadPhase` doc comment states the cost.
-- **Per-lane bound loads.** Kept. PerformanceTest measures them after M6; a racy vector load needs
-  that measurement first.
+- **Per-lane bound loads.** Measured in Phase 10: they cost about 5% of ConvexVsMesh. The walks now
+  use one inline asm vector load on x86-64 and keep the per lane loads elsewhere (D9).
 - **Poisoned contact cache.** A4 confirms `finalizeContactCacheAfterOutOfMemory` against Jolt's
   restore path with the FailingTempAllocator sweep on a scene with contacts (D10).
 - **Snapshot on failure.** No internal snapshot. The contract of D5 stands: after
