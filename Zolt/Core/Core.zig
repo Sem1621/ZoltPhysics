@@ -33,6 +33,11 @@ pub const debug_renderer: bool = options.debug_renderer;
 /// Core/JobProfiler.zig), set with `-Djob_profile=true`. Without it every hook is `void`. Results do not change.
 pub const job_profile: bool = options.job_profile;
 
+/// Solve the contacts of a batch of a parallel split 8 at a time with SIMD (Zolt, no Jolt option; see
+/// Physics/Constraints/ContactConstraintSimd.zig), on by default, off with `-Dsimd_contact_solver=false` for A/B tests.
+/// Results do not change.
+pub const simd_contact_solver: bool = options.simd_contact_solver;
+
 /// Cache line size, used to avoid false sharing (JPH_CACHE_LINE_SIZE)
 pub const cache_line_size = 64;
 

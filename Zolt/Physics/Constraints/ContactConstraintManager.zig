@@ -1237,7 +1237,7 @@ pub const ContactConstraintManager = struct {
     }
 
     /// The constraint at an offset in the constraint buffer
-    fn getConstraintBase(self: *const ContactConstraintManager, constraint_offset: u32) *ContactConstraintBase {
+    pub fn getConstraintBase(self: *const ContactConstraintManager, constraint_offset: u32) *ContactConstraintBase {
         return @ptrCast(@alignCast(self.constraints.items.ptr + constraint_offset));
     }
 
@@ -2121,7 +2121,7 @@ pub const ContactConstraintManager = struct {
     }
 
     /// Internal helper function to solve a single velocity constraint. Templated to the motion type to reduce the amount of branches and calculations.
-    fn solveVelocityConstraint(comptime type1: MotionType, comptime type2: MotionType, constraint_base: *ContactConstraintBase, motion_properties1: ?*MotionProperties, motion_properties2: ?*MotionProperties) bool {
+    pub fn solveVelocityConstraint(comptime type1: MotionType, comptime type2: MotionType, constraint_base: *ContactConstraintBase, motion_properties1: ?*MotionProperties, motion_properties2: ?*MotionProperties) bool {
         const constraint = ContactConstraint(type1, type2).fromBase(constraint_base);
 
         var any_impulse_applied = false;

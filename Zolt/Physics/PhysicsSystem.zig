@@ -177,6 +177,7 @@ const ConstraintManagerFile = @import("Constraints/ConstraintManager.zig");
 const ConstraintManager = ConstraintManagerFile.ConstraintManager;
 const Constraints = ConstraintManagerFile.Constraints;
 const ContactConstraintManager = @import("Constraints/ContactConstraintManager.zig").ContactConstraintManager;
+const ContactConstraintSimd = @import("Constraints/ContactConstraintSimd.zig");
 const SoftBodyContactListenerFile = @import("SoftBody/SoftBodyContactListener.zig");
 const SoftBodyContactListener = SoftBodyContactListenerFile.SoftBodyContactListener;
 const SoftBodyContactSettings = SoftBodyContactListenerFile.SoftBodyContactSettings;
@@ -2166,7 +2167,8 @@ pub const PhysicsSystem = struct {
                         } else {
                             // Solve velocity constraints
                             _ = ConstraintManager.solveVelocityConstraints(active_constraints, batch.constraints, delta_time);
-                            _ = self.contact_manager.solveVelocityConstraints(batch.contacts);
+                            // (Zolt: the contacts of a parallel split are solved 8 at a time, see ContactConstraintSimd.zig)
+                            _ = ContactConstraintSimd.solveBatch(&self.contact_manager, batch.contacts, batch.parallel);
                         }
 
                         // Mark the batch as processed

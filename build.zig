@@ -38,6 +38,9 @@
 //!   -Djob_profile=true          Record a timeline of the jobs and the idle time of every job thread
 //!                               (Zolt/Core/JobProfiler.zig, `ZoltPerformanceTest -p`). Off by default: then every hook
 //!                               is `void` and costs nothing. Results do not change.
+//!   -Dsimd_contact_solver=false Solve the contacts of the parallel splits one at a time, like Jolt (the default true
+//!                               solves 8 at a time with SIMD, Zolt/Physics/Constraints/ContactConstraintSimd.zig).
+//!                               Results do not change: an A/B switch.
 const std = @import("std");
 const jolt_sources = @import("ZoltParity/jolt_sources.zig");
 const parity_reference_sources = @import("ZoltParity/reference_sources.zig");
@@ -51,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const determinism_log = b.option(bool, "determinism_log", "Log the simulation state to find determinism issues (JPH_ENABLE_DETERMINISM_LOG)") orelse false;
     const debug_renderer = b.option(bool, "debug_renderer", "Compile the debug renderer hooks into the library and the C++ reference (JPH_DEBUG_RENDERER)") orelse false;
     const job_profile = b.option(bool, "job_profile", "Record a timeline of the jobs and the idle time of the job threads (Zolt/Core/JobProfiler.zig)") orelse false;
+    const simd_contact_solver = b.option(bool, "simd_contact_solver", "Solve the contacts of the parallel splits 8 at a time with SIMD (default true, results do not change)") orelse true;
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
     // Zig 0.16's self-hosted x86_64 backend (the default for Debug builds) miscompiles some vector operations
     // (e.g. @bitCast of @Vector(4, bool)), so default to LLVM. Use -Duse_llvm=false for faster Debug compiles.
@@ -67,6 +71,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "determinism_log", determinism_log);
     options.addOption(bool, "debug_renderer", debug_renderer);
     options.addOption(bool, "job_profile", job_profile);
+    options.addOption(bool, "simd_contact_solver", simd_contact_solver);
     const options_module = options.createModule();
 
     // User shape registrations, default material and serializable classes (Zolt/RegisterTypes.zig): an empty module by
@@ -166,6 +171,7 @@ pub fn build(b: *std.Build) void {
         det_log_options.addOption(bool, "determinism_log", true);
         det_log_options.addOption(bool, "debug_renderer", debug_renderer);
         det_log_options.addOption(bool, "job_profile", job_profile);
+        det_log_options.addOption(bool, "simd_contact_solver", simd_contact_solver);
         const zolt_det_log = b.createModule(.{
             .root_source_file = b.path("Zolt/zolt.zig"),
             .target = target,
