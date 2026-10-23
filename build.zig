@@ -20,6 +20,10 @@
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
+//!   -Dfma=true                  JPH_USE_FMADD: Jolt's 8 fused multiply add sites use @mulAdd (Core.use_fmadd). Results
+//!                               change. Zolt needs a CPU with FMA (x86-64: -Dcpu=x86_64_v3 or native; aarch64). The C++
+//!                               reference gets -DJPH_USE_FMADD. It is only an oracle on x86-64: on another host the steps
+//!                               that build it fail (NEON's vmlaq_f32 does not fuse under -ffp-contract=off).
 //!   -Dobject_layer_bits=16|32   JPH_OBJECT_LAYER_BITS
 //!   -Ddeterminism_log=true      JPH_ENABLE_DETERMINISM_LOG: Zolt/Physics/DeterminismLog.zig exists at run time (the
 //!                               `test` step always also runs the DeterminismLog unit tests with it enabled)
@@ -50,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const double_precision = b.option(bool, "double_precision", "Use f64 for world space positions (JPH_DOUBLE_PRECISION)") orelse false;
+    const fma = b.option(bool, "fma", "Use Jolt's JPH_USE_FMADD fused multiply-add sites (needs a CPU with FMA; results change, the C++ reference gets -DJPH_USE_FMADD)") orelse false;
     const object_layer_bits = b.option(u8, "object_layer_bits", "Number of bits in ObjectLayer, 16 or 32 (JPH_OBJECT_LAYER_BITS)") orelse 16;
     const determinism_log = b.option(bool, "determinism_log", "Log the simulation state to find determinism issues (JPH_ENABLE_DETERMINISM_LOG)") orelse false;
     const debug_renderer = b.option(bool, "debug_renderer", "Compile the debug renderer hooks into the library and the C++ reference (JPH_DEBUG_RENDERER)") orelse false;
@@ -67,6 +72,7 @@ pub fn build(b: *std.Build) void {
     // Compile time configuration, available in the library as @import("zolt_options")
     const options = b.addOptions();
     options.addOption(bool, "double_precision", double_precision);
+    options.addOption(bool, "fma", fma);
     options.addOption(u8, "object_layer_bits", object_layer_bits);
     options.addOption(bool, "determinism_log", determinism_log);
     options.addOption(bool, "debug_renderer", debug_renderer);
@@ -167,6 +173,7 @@ pub fn build(b: *std.Build) void {
     if (!determinism_log) {
         const det_log_options = b.addOptions();
         det_log_options.addOption(bool, "double_precision", double_precision);
+        det_log_options.addOption(bool, "fma", fma);
         det_log_options.addOption(u8, "object_layer_bits", object_layer_bits);
         det_log_options.addOption(bool, "determinism_log", true);
         det_log_options.addOption(bool, "debug_renderer", debug_renderer);
@@ -274,6 +281,10 @@ pub fn build(b: *std.Build) void {
     // configuration string), so Zolt and every C++ translation unit (Jolt, the references, HelloWorld, PerformanceTest)
     // must agree on it.
     if (debug_renderer) cpp_flags.append(b.allocator, "-DJPH_DEBUG_RENDERER") catch @panic("OOM");
+    // JPH_USE_FMADD follows -Dfma (Zolt's Core.use_fmadd). Core.h only defines it by itself without
+    // JPH_CROSS_PLATFORM_DETERMINISTIC. Set on the command line, it fuses exactly Jolt's 8 sites (the SSE/AVX FMA
+    // intrinsics and std::fma); -ffp-contract=off keeps every other expression unfused. It is not a JPH_VERSION_ID bit.
+    if (fma) cpp_flags.append(b.allocator, "-DJPH_USE_FMADD") catch @panic("OOM");
 
     // On x86_64 the reference is pinned to x86-64-v3 (SSE4.2/AVX/AVX2/F16C/LZCNT/TZCNT, no AVX-512), which
     // matches the default ISA options of Jolt's CMake build, so parity results don't depend on the host CPU.
@@ -295,6 +306,10 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = .off,
         }),
     });
+    // With -Dfma=true only an x86-64 build of the reference fuses like Zolt: NEON's vmlaq_f32 does not fuse under
+    // -ffp-contract=off. So on another target every step that builds the reference fails with this message.
+    if (fma and reference_target.result.cpu.arch != .x86_64)
+        jolt_cpp.step.dependOn(&b.addFail("-Dfma=true: the C++ reference is only an FMA oracle on x86-64 (NEON's vmlaq_f32 does not fuse under -ffp-contract=off), so the parity, hello-world-check, jolt-performance-test, debug-renderer-check and perf-budget steps need an x86-64 target").step);
     jolt_cpp.root_module.addIncludePath(b.path("."));
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("Jolt"), .files = &jolt_sources.files, .flags = cpp_flags.items });
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.files, .flags = cpp_flags.items });

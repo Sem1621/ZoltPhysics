@@ -184,9 +184,14 @@ pub const DVec3 = extern struct {
         return fromBools(v1.value >= v2.value);
     }
 
-    /// Calculates mul1 * mul2 + add. Never fused in Zolt, to stay cross platform deterministic.
+    /// Calculates mul1 * mul2 + add. Fused only with `-Dfma=true` (Core.use_fmadd, JPH_USE_FMADD: Jolt's
+    /// _mm256_fmadd_pd). Without it the multiply and the add round separately, to stay cross platform deterministic.
     pub fn fusedMultiplyAdd(mul1: DVec3, mul2: DVec3, add_v: DVec3) DVec3 {
-        return mul1.mul(mul2).add(add_v);
+        if (Core.use_fmadd) {
+            return .{ .value = @mulAdd(Type, mul1.value, mul2.value, add_v.value) };
+        } else {
+            return mul1.mul(mul2).add(add_v);
+        }
     }
 
     /// Component wise select, returns not_set when highest bit of control = 0 and set when highest bit of control = 1

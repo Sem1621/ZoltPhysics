@@ -164,9 +164,14 @@ pub const Vec3 = extern struct {
         return UVec4.fromBools(v1.value >= v2.value);
     }
 
-    /// Calculates mul1 * mul2 + add. Never fused in Zolt, to stay cross platform deterministic.
+    /// Calculates mul1 * mul2 + add. Fused only with `-Dfma=true` (Core.use_fmadd, JPH_USE_FMADD: Jolt's _mm_fmadd_ps).
+    /// Without it the multiply and the add round separately, to stay cross platform deterministic.
     pub fn fusedMultiplyAdd(mul1: Vec3, mul2: Vec3, add_v: Vec3) Vec3 {
-        return .{ .value = mul1.value * mul2.value + add_v.value };
+        if (Core.use_fmadd) {
+            return .{ .value = @mulAdd(Type, mul1.value, mul2.value, add_v.value) };
+        } else {
+            return .{ .value = mul1.value * mul2.value + add_v.value };
+        }
     }
 
     /// Component wise select, returns not_set when highest bit of control = 0 and set when highest bit of control = 1
@@ -490,9 +495,17 @@ pub const Vec3 = extern struct {
         return one().div(self);
     }
 
-    /// Calculates a * b - c * d. Never fused in Zolt, see math.differenceOfProducts.
+    /// Calculates a * b - c * d with more precision when FMA instructions are available. See math.differenceOfProducts.
     pub fn differenceOfProducts(a: Vec3, b: Vec3, c: Vec3, d: Vec3) Vec3 {
-        return a.mul(b).sub(c.mul(d));
+        if (Core.use_fmadd) {
+            // Jolt's -inC and -cd are vector negations: 0 - x (negate)
+            const cd = c.mul(d);
+            const err = fusedMultiplyAdd(c.negate(), d, cd);
+            const dop = fusedMultiplyAdd(a, b, cd.negate());
+            return dop.add(err);
+        } else {
+            return a.mul(b).sub(c.mul(d));
+        }
     }
 
     /// Cross product
@@ -506,7 +519,7 @@ pub const Vec3 = extern struct {
         return .{ .value = @shuffle(f32, t3, undefined, yzxx) };
     }
 
-    /// Cross product, more precise when FMA instructions are available (identical to `cross` in Zolt)
+    /// Cross product (more precise version when FMA is available: `-Dfma=true`, else the bits of `cross`)
     pub fn crossPrecise(self: Vec3, other: Vec3) Vec3 {
         return differenceOfProducts(self, other.swizzle(.y, .z, .x), self.swizzle(.y, .z, .x), other).swizzle(.y, .z, .x);
     }

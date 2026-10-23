@@ -850,7 +850,10 @@ test "TestDifferenceOfProducts" {
     try fw.expectEqual(103.16904449462891, expected[1]);
     try fw.expectEqual(36.836944580078125, expected[2]);
     try fw.expectEqual(118.01546478271484, expected[3]);
-    // JPH_USE_FMADD is never defined in Zolt (FMA is not used, see PortingGuide section 8), so only the #else branch applies:
-    // CHECK(result == Vec4(float(expected[0]), float(expected[1]), float(expected[2]), float(expected[3])));
-    try fw.expect(result.eql(Vec4.init(-128.0, 64.0, 0.0, 64.0))); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.
+    // JPH_USE_FMADD is Core.use_fmadd (-Dfma=true)
+    if (zolt.Core.use_fmadd) {
+        try fw.expect(result.eql(Vec4.init(@floatCast(expected[0]), @floatCast(expected[1]), @floatCast(expected[2]), @floatCast(expected[3]))));
+    } else {
+        try fw.expect(result.eql(Vec4.init(-128.0, 64.0, 0.0, 64.0))); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.
+    }
 }
