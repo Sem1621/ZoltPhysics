@@ -60,8 +60,9 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
 - **Bit exact port.** Zolt must produce the same results as Jolt built with
   `CROSS_PLATFORM_DETERMINISTIC=ON`. Never reorder floating point operations, never use FMA
   (`@mulAdd`), `std.math` trig or `@min`/`@max` on floats (use `Math/Math.zig` helpers).
-- **No hidden fills.** No field default, `.empty` or `.{}` for a StaticArray or a value over 256 bytes: build it in
-  place and use `Core.swap` (PortingGuide.md, "Large values"). `zig build codegen-check` checks it.
+- **No hidden fills.** In code that runs per step, body, contact or query, no field default, `.empty` or `.{}` for a
+  value over 256 bytes: build it in place. Use `Core.swap`, not `std.mem.swap` (PortingGuide.md, "Large values").
+  `zig build codegen-check` checks it.
 - One Zig file per Jolt header (`.h` + `.inl` + `.cpp` merged), same directory and name.
   Every file starts with `//! Port of: <C++ files>` and `//! Status: complete|partial|stub`.
 - Register new files in `source_files` in `Zolt/zolt.zig` (re-export public types there) and

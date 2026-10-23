@@ -169,18 +169,25 @@ both types) when porting code needs them.
   0.16. Its `undefined` bytes are part of that constant, so storing it writes the whole object: a `memset` or a copy
   from read-only data. Only a plain `var x: T = undefined;` costs nothing. Jolt's constructors set only the headers
   (`StaticArray()` sets only `mSize`). Before Phase 10 such fills were 80-96% of Zolt's instructions in some scenes.
-  So for a `StaticArray` and for any value over 256 bytes:
+  So for a value over 256 bytes (a large `StaticArray` too) in code that runs per step, per body, per contact or
+  per query:
   - give the field no default, and do not use `.empty` or `.{}`;
   - build it in place: `var x: T = undefined;` and then `x.clear()` or `x.init(...)`, a literal that names the
     buffer (`StaticArray.init()`, which only sets `len`), or `fn init(self: *T, ...)`. A default constructed
-    `StaticArray<Vec3, N> a;` becomes `var a: StaticArray(Vec3, N) = .init();`;
+    `StaticArray<Vec3, N> a;` becomes `var a: StaticArray(Vec3, N) = .init();`. An in-place init must set every
+    field that had a default (headers, flags, counters, base fields). Only the large buffers stay undefined;
   - do not return it by value from a function that fills it, and do not copy it whole: copy the used elements
-    (`assign`), and add an element in place (`addOne`);
-  - swap with `Core.swap`, not `std.mem.swap`, which swaps byte by byte.
+    (`assign`), and add an element in place (`addOne`).
+
+  Swap with `Core.swap`, not `std.mem.swap`, which swaps byte by byte. This holds for all library code. A small
+  value (`StaticArray(Vec3, 4)`) may use `.empty`: its fill is cheap. Setup code may use `.empty` too: the creation
+  and teardown of a system, a shape or a constraint, such as `var pool: JobSystemThreadPool = .empty;` (see
+  Allocation). For a `StaticArray`, `.init()` is the better default everywhere.
 
   `zig build codegen-check` fails on a large fill, a large copy from read-only data or a `std.mem.swap` in the
-  library code of ZoltPerformanceTest. `zig build perf-budget` compares the instruction counts with C++
-  ([Roadmap.md](Roadmap.md), Phase 10).
+  library code of ZoltPerformanceTest, also where LLVM inlined it into the test program. The setup sites that may
+  stay are listed in `ALLOW` in `tools/check_codegen.py`. `zig build perf-budget` compares the instruction counts
+  with C++ ([Roadmap.md](Roadmap.md), Phase 10).
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
 - **`loadFloat3Unsafe` reads 16 bytes**, like Jolt's `sLoadFloat3Unsafe`. The 4 bytes after the `Float3`
   must belong to the same object. A `Vec3` / `Quat.loadFloat3Unsafe` call may read a struct member that a
@@ -211,7 +218,8 @@ both types) when porting code needs them.
 - Types that hand out pointers to themselves during construction (worker threads, jobs that store
   the job system) cannot be returned by value. They have a default constructed `pub const empty`
   and initialize in place: `var pool: JobSystemThreadPool = .empty; try pool.init(allocator, io, ...)`
-  (Jolt's default constructor + `Init`). Document that they must not be moved after `init`.
+  (Jolt's default constructor + `Init`). Document that they must not be moved after `init`. The `.empty` fills
+  the whole object (8,640 bytes for the pool), which is fine at setup ("Large values").
 - `TempAllocator` is ported as its own type (it is a stack allocator with LIFO semantics), and
   additionally exposes a `std.mem.Allocator` interface for use with std containers.
 - Jolt's typed temp blocks (`T *p = (T *)inTempAllocator->Allocate(n * sizeof(T))` ... `inTempAllocator->Free(p,

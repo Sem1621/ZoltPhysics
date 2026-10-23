@@ -223,7 +223,7 @@ jobs:
   codegen:
     # The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). The library code of ZoltPerformanceTest (ReleaseFast,
     # x86-64-v3) must not fill or copy a large buffer and must not use std.mem.swap (tools/check_codegen.py). Bit exact
-    # results cannot show such a slowdown. The runner has objdump.
+    # results cannot show such a slowdown. The runner has objdump. The check reads x86-64 code only.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Codegen check
@@ -254,6 +254,8 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ env.ZIG_VERSION }}
+    - name: Self-test of the verdicts
+      run: python3 tools/perf_budget.py --self-test
     - name: Install valgrind
       run: sudo apt-get update && sudo apt-get install -y valgrind
     - name: Count the instructions

@@ -376,21 +376,30 @@ What was done:
   other four every night.
 - **W4, regression guard.** All parity tests and hashes passed while 80-96% of the instructions were spurious fills.
   Bit exactness cannot see speed, so three layers guard it. CI runs both steps.
-  - The rule "Large values" in [PortingGuide.md](PortingGuide.md) section 5: no `.empty`, `.{}` or field default for
-    a StaticArray or a value over 256 bytes, build such values in place, and use `Core.swap`.
-  - `zig build codegen-check` (`tools/check_codegen.py`) reads `objdump -d -l` of ZoltPerformanceTest (ReleaseFast,
-    x86-64-v3). It fails when library code calls memset or memcpy with a constant size over 512 bytes, copies more
-    than 256 bytes from read-only data, or runs `std.mem.swap`. A few sites that do not run per body pair are allowed
-    by function name, kind and size: constraint and body creation, teardown, and one 7 KB copy per update (the steps
-    of `PhysicsUpdateContext`). It sees only the code that ZoltPerformanceTest links.
+  - The rule "Large values" in [PortingGuide.md](PortingGuide.md) section 5: in code that runs per step, body,
+    contact or query, no `.empty`, `.{}` or field default for a value over 256 bytes. Build such values in place, and
+    use `Core.swap`.
+  - `zig build codegen-check` (`tools/check_codegen.py`) reads `objdump -d -l --inlines` of ZoltPerformanceTest
+    (ReleaseFast, x86-64-v3). It fails when library code calls memset or memcpy with a constant size over 512 bytes,
+    copies more than 256 bytes from read-only data, or runs `std.mem.swap`. Library code that LLVM inlined into the
+    test program counts too (the per-step code of CharacterVirtual is inlined into the scene update). A few sites
+    that do not run per body pair are allowed by function name, kind and size: system, constraint and body creation,
+    teardown, and one 7 KB copy per update (the steps of `PhysicsUpdateContext`). It sees only the code that
+    ZoltPerformanceTest links. It also fails when the scan proves nothing: a binary that is not x86-64, too few
+    library functions, no `PhysicsSystem.update`, or no allowed site.
   - `zig build perf-budget` (`tools/perf_budget.py`) counts the instructions of the physics updates of short single
     threaded runs with callgrind, in ZoltPerformanceTest and in the C++ PerformanceTest. It fails when Zolt/C++ of a
     scene is over its budget (the measurement plus about 10%). Ragdoll and CharacterVirtual have absolute Zolt-only
-    budgets: valgrind 3.22 stops the C++ binary at an AVX instruction it does not know.
+    budgets: valgrind 3.22 stops the C++ binary at an AVX instruction it does not know. A count below half of its
+    measurement fails too: then callgrind did not find the function to count (ZoltPerformanceTest calls
+    `PhysicsSystem.update` with `@call(.never_inline, ...)` so that the symbol exists).
   - Self-tests: with `.{}` put back for the EPA edges in `addPoint` and for the reduction manifolds, and with one
     `std.mem.swap` in BinaryHeap, codegen-check names `addPoint` (2,056 bytes), `processBodyPair` (68,624 bytes) and
     the swap. perf-budget then fails every scene: ConvexVsMesh runs 17.4 times the C++ instructions, Pyramid 4.0
-    times, HighSpeed 2.7 times, and Ragdoll 66.6e9 instructions instead of 1.68e9. The hashes stay equal.
+    times, HighSpeed 2.7 times, and Ragdoll 66.6e9 instructions instead of 1.68e9. The hashes stay equal. A
+    1,024 byte `.empty` put into `CharacterVirtual.extendedUpdate`, which LLVM inlines into the scene update, makes
+    codegen-check name `extendedUpdate`. perf-budget fails with "COUNT TOO LOW" on a binary without the
+    `PhysicsSystem.update` symbol. Both scripts have a `--self-test`, which CI runs.
 
 Instructions of the physics updates (callgrind, `-t=1`, ReleaseFast, x86-64-v3, `zig build perf-budget`). The
 "before" counts come from the analysis at the start of the phase.

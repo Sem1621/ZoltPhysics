@@ -512,9 +512,10 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
 
-    // `zig build codegen-check`: tools/check_codegen.py reads `objdump -d -l` of the binary. It fails when a function of
-    // the library calls memset / memcpy with a large constant size, copies a large constant from read-only data, or
-    // swaps with std.mem.swap, unless an allow-list entry of the script covers it (x86-64 only, needs objdump).
+    // `zig build codegen-check`: tools/check_codegen.py reads `objdump -d -l --inlines` of the binary. It fails when
+    // library code (also where LLVM inlined it into the test program) calls memset / memcpy with a large constant
+    // size, copies a large constant from read-only data, or swaps with std.mem.swap, unless an allow-list entry of the
+    // script covers it. It needs GNU objdump and fails on a binary that is not x86-64: it reads x86-64 code only.
     const run_codegen_check = b.addSystemCommand(&.{"python3"});
     run_codegen_check.addFileArg(b.path("tools/check_codegen.py"));
     run_codegen_check.addArtifactArg(bench_performance_test);
