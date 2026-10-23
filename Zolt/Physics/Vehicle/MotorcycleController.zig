@@ -1020,3 +1020,22 @@ test "MotorcycleController creation, settings and controller settings out of mem
     };
     try testing.checkAllAllocationFailures(testing.allocator, S.run, .{body});
 }
+
+test "MotorcycleController differential wheels outside the wheels are InvalidSettings (UB38)" {
+    // The check of WheeledVehicleControllerSettings, which MotorcycleControllerSettings derives from: a differential
+    // drives wheel -1 (no wheel) or a wheel of the vehicle. Jolt reads outside mWheels for another index.
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    const body = try addMotorcycleBody(&world, allocator, RVec3.init(0, 0.9, 0), Quat.identity());
+
+    for ([_][2]i32{ .{ -1, 2 }, .{ -2, 1 }, .{ 2, -1 } }) |wheels| {
+        var settings = try makeMotorcycleSettings(allocator, 0.0);
+        defer settings.asSettings().deinit();
+        const differential = &virtual.downcast(MotorcycleControllerSettings, settings.controller.ptr.?).base.differentials.items[0];
+        differential.left_wheel = wheels[0];
+        differential.right_wheel = wheels[1];
+        try testing.expectError(error.InvalidSettings, VehicleConstraint.create(allocator, body, &settings));
+    }
+}

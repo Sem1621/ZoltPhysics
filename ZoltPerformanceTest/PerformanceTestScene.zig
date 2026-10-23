@@ -8,7 +8,8 @@
 //! `destroy` is the virtual destructor plus `delete` (every scene is created on the heap with its `create`).
 //!
 //! Functions that allocate return `Error` (out of memory, or a body whose shape could not be created: Jolt crashes on
-//! both). StopTest is one of them, because RagdollScene's Ragdoll.removeFromPhysicsSystem allocates.
+//! both; or constraint settings that Jolt cannot use). StopTest is one of them, because RagdollScene's
+//! Ragdoll.removeFromPhysicsSystem allocates.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -20,7 +21,7 @@ const TempAllocator = zolt.TempAllocator;
 /// Base class for a test scene to test performance
 pub const PerformanceTestScene = struct {
     /// The errors of the scene functions (Zolt: Jolt crashes when it runs out of memory)
-    pub const Error = zolt.CreateBodyError;
+    pub const Error = zolt.CreateBodyError || zolt.TwoBodyConstraintSettings.CreateError;
 
     ptr: *anyopaque,
     vtable: *const VTable,

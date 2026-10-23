@@ -1202,8 +1202,9 @@ test or a parity case:
   like the C++ parity build; a C++ build with garbage there would differ only in those bytes.
 
 **Jolt undefined behavior that Zolt does not reproduce.** A 1-point open path indexes
-`mPoints[-1]` and an empty path indexes out of bounds: Zolt's safe builds panic, ReleaseFast stays
-undefined as in C++. A null path dereference is an explicit `@panic` with a message.
+`mPoints[-1]` and an empty path indexes out of bounds. Zolt refuses such a path in every build mode:
+`createConstraint` and `setPath` return `error.InvalidSettings` (RemainingFeaturesArchitecture.md
+R20, UB39). A null path dereference is an explicit `@panic` with a message.
 
 **Degenerate cases that the harnesses keep away from.** The C++ reference library is built without
 `JPH_ASSERT`, so it cannot prove that a scene respects Jolt's debug asserts; Zolt's Debug build

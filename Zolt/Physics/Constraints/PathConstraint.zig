@@ -26,6 +26,9 @@
 //!   settings, like Jolt's release build). Where Jolt dereferences a null path (SaveBinaryState of settings
 //!   without a path, the solver functions called directly on a constraint without a path, which the ConstraintManager
 //!   never does: it is not active), Zolt panics with a message.
+//! - A path that is not valid (`PathConstraintPath.isValid`: an open Hermite path with fewer than 2 points or a looping
+//!   one without points) makes Jolt index outside its points. Zolt refuses it: `createConstraint`, `create`, `init` and
+//!   `setPath` return `error.InvalidSettings` and change nothing (RemainingFeaturesArchitecture.md R20, UB39).
 //! - The asserts on user input (a motor state other than Off with invalid motor settings, a target path fraction
 //!   outside the path, a path fraction inside the path while the limits are active after a SetPath or RestoreState
 //!   between the solver calls) only run with `Core.enable_asserts`, so ReleaseFast keeps Jolt's release behavior.
@@ -211,7 +214,7 @@ pub const PathConstraintSettings = struct {
     }
 
     /// Create an instance of this constraint
-    pub fn createConstraint(self: *const PathConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const PathConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try PathConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }
@@ -337,8 +340,8 @@ pub const PathConstraint = struct {
     /// Constraint part that removes all rotational freedom
     rotation_constraint_part: RotationEulerConstraintPart = .{},
 
-    /// Construct point constraint
-    pub fn init(allocator: Allocator, body1: *Body, body2: *Body, settings: *const PathConstraintSettings) PathConstraint {
+    /// Construct point constraint (Zolt: error.InvalidSettings for a path that is not valid, see setPath)
+    pub fn init(allocator: Allocator, body1: *Body, body2: *Body, settings: *const PathConstraintSettings) error{InvalidSettings}!PathConstraint {
         var self: PathConstraint = .{
             .base = .init(PathConstraint, allocator, body1, body2, &settings.base),
             .rotation_constraint_type = settings.rotation_constraint_type,
@@ -349,15 +352,16 @@ pub const PathConstraint = struct {
         // Calculate transform that takes us from the path start to center of mass space of body 1
         self.path_to_body1 = Mat44.rotationTranslation(settings.path_rotation, settings.path_position.sub(body1.getShape().getCenterOfMass()));
 
-        self.setPath(settings.path.get(), settings.path_fraction);
+        try self.setPath(settings.path.get(), settings.path_fraction);
 
         return self;
     }
 
     /// new PathConstraint(inBody1, inBody2, inSettings) (reference count 0)
-    pub fn create(allocator: Allocator, body1: *Body, body2: *Body, settings: *const PathConstraintSettings) Allocator.Error!*PathConstraint {
+    pub fn create(allocator: Allocator, body1: *Body, body2: *Body, settings: *const PathConstraintSettings) TwoBodyConstraintSettings.CreateError!*PathConstraint {
         const self = try allocator.create(PathConstraint);
-        self.* = .init(allocator, body1, body2, settings);
+        errdefer allocator.destroy(self);
+        self.* = try .init(allocator, body1, body2, settings);
         return self;
     }
 
@@ -619,7 +623,10 @@ pub const PathConstraint = struct {
     }
 
     /// Update the path for this constraint
-    pub fn setPath(self: *PathConstraint, path: ?*const PathConstraintPath, path_fraction: f32) void {
+    /// (Zolt, UB39 of RemainingFeaturesArchitecture.md R20: error.InvalidSettings for a path that is not valid, for
+    /// example an open path with fewer than 2 points. The constraint is not changed then.)
+    pub fn setPath(self: *PathConstraint, path: ?*const PathConstraintPath, path_fraction: f32) error{InvalidSettings}!void {
+        if (path) |p| if (!p.isValid()) return error.InvalidSettings;
         self.path.set(path);
         self.path_fraction = path_fraction;
 
@@ -1190,22 +1197,71 @@ test "PathConstraint: virtual dispatch, the path frames, setters, solver, settin
 
     // SetPath: another path at another fraction, then no path (the constraint is not active without a path)
     const other = try testPath(allocator, 6, true);
-    c.setPath(other.asPath(), 4.5);
+    try c.setPath(other.asPath(), 4.5);
     try testing.expectEqual(@as(u32, 1), path.base.getRefCount());
     try testing.expectEqual(@as(u32, 1), other.base.getRefCount());
     try testing.expect(c.getPath() == other.asPathConst());
     try testing.expectEqual(@as(f32, 4.5), c.getPathFraction());
     c.setTargetPathFraction(-20.0); // Any fraction on a looping path
     try testing.expect(base.isActive());
-    c.setPath(null, 0.0);
+    try c.setPath(null, 0.0);
     try testing.expect(c.getPath() == null);
     try testing.expect(!base.isActive());
 
     // A disabled constraint is not active (TwoBodyConstraint::IsActive)
-    c.setPath(path.asPath(), 1.0);
+    try c.setPath(path.asPath(), 1.0);
     try testing.expect(base.isActive());
     base.setEnabled(false);
     try testing.expect(!base.isActive());
+}
+
+test "PathConstraint: a path that is not valid is InvalidSettings (UB39)" {
+    // An open path with fewer than 2 points, or a looping path without points: Jolt's GetIndexAndT and GetClosestPoint
+    // index outside mPoints, and a looping path divides by 0. createConstraint and setPath refuse such a path.
+    const allocator = testing.allocator;
+    var context: TestContext.ConstraintPartTestContext = undefined;
+    try context.init(allocator, testing.io);
+    defer context.deinit();
+    const bodies = try context.createBodyPair(.{ .dynamic, .dynamic });
+    defer context.destroyBodies(&bodies);
+
+    // A constraint on the smallest open path that is valid: 2 points
+    var settings = PathConstraintSettings.init(allocator);
+    defer settings.asSettings().deinit();
+    const valid = try testPath(allocator, 2, false);
+    try testing.expect(valid.asPathConst().isValid());
+    settings.path.set(valid.asPath());
+    var constraint = Ref(Constraint).init(&(try settings.asTwoBodySettingsConst().createConstraint(allocator, bodies[0], bodies[1])).base);
+    defer constraint.deinit();
+    const c = virtual.downcast(PathConstraint, virtual.downcast(TwoBodyConstraint, constraint.get().?));
+
+    // The smallest looping path that is valid has 1 point
+    const one_looping = try PathConstraintPathHermite.create(allocator);
+    var one_looping_ref = RefConst(PathConstraintPath).init(one_looping.asPath());
+    defer one_looping_ref.deinit();
+    one_looping.base.setIsLooping(true);
+    try one_looping.addPoint(Vec3.zero(), Vec3.axisX(), Vec3.axisY());
+    try testing.expect(one_looping.asPathConst().isValid());
+
+    for ([_]struct { num: u32, looping: bool }{ .{ .num = 0, .looping = false }, .{ .num = 1, .looping = false }, .{ .num = 0, .looping = true } }) |case| {
+        const path = try PathConstraintPathHermite.create(allocator);
+        var path_ref = RefConst(PathConstraintPath).init(path.asPath());
+        defer path_ref.deinit();
+        path.base.setIsLooping(case.looping);
+        for (0..case.num) |_| try path.addPoint(Vec3.zero(), Vec3.axisX(), Vec3.axisY());
+        try testing.expect(!path.asPathConst().isValid());
+
+        // createConstraint fails and leaves nothing allocated
+        var invalid_settings = PathConstraintSettings.init(allocator);
+        defer invalid_settings.asSettings().deinit();
+        invalid_settings.path.set(path.asPath());
+        try testing.expectError(error.InvalidSettings, invalid_settings.asTwoBodySettingsConst().createConstraint(allocator, bodies[0], bodies[1]));
+
+        // setPath fails and keeps the current path and fraction
+        try testing.expectError(error.InvalidSettings, c.setPath(path.asPath(), 0.5));
+        try testing.expect(c.getPath() == valid.asPathConst());
+        try testing.expectEqual(@as(f32, 0.0), c.getPathFraction());
+    }
 }
 
 test "PathConstraint: the rotation constraint types, the motor states, the limits" {
@@ -1229,7 +1285,7 @@ test "PathConstraint: the rotation constraint types, the motor states, the limit
             settings.path_fraction = 1.5;
             settings.rotation_constraint_type = rotation_type;
             settings.max_friction_force = 1.0;
-            var c = PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
+            var c = try PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
             defer c.asConstraint().deinit();
             const base = c.asConstraint();
             c.setPositionMotorState(motor_state);
@@ -1270,7 +1326,7 @@ test "PathConstraint: the rotation constraint types, the motor states, the limit
         var settings = PathConstraintSettings.init(allocator);
         defer settings.asSettings().deinit();
         settings.path.set(path.get());
-        var c = PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
+        var c = try PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
         defer c.asConstraint().deinit();
         const base = c.asConstraint();
         base.setupVelocityConstraint(1.0 / 60.0);
@@ -1289,7 +1345,7 @@ test "PathConstraint: the rotation constraint types, the motor states, the limit
         defer settings.asSettings().deinit();
         settings.path.set(path.get());
         settings.path_fraction = 3.0;
-        var c = PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
+        var c = try PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
         defer c.asConstraint().deinit();
         const base = c.asConstraint();
         base.setupVelocityConstraint(1.0 / 60.0);
@@ -1319,7 +1375,7 @@ test "PathConstraint: the position motor on a looping path takes the short way a
         defer settings.asSettings().deinit();
         settings.path.set(path.get());
         settings.path_fraction = 0.5;
-        var c = PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
+        var c = try PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
         defer c.asConstraint().deinit();
         c.setTargetPathFraction(case.target);
         try testing.expectEqual(case.expected, c.calculateConstraintValue());
@@ -1334,7 +1390,7 @@ test "PathConstraint: the position motor on a looping path takes the short way a
     defer settings.asSettings().deinit();
     settings.path.set(open.get());
     settings.path_fraction = 0.5;
-    var c = PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
+    var c = try PathConstraint.init(allocator, Body.fixedToWorld(), body, &settings);
     defer c.asConstraint().deinit();
     c.setTargetPathFraction(2.75);
     try testing.expectEqual(@as(f32, -2.25), c.calculateConstraintValue());
@@ -1356,7 +1412,7 @@ test "PathConstraint: out of memory" {
             var constraint = Ref(Constraint).init(&(try two_body_settings.createConstraint(allocator, bodies[0], bodies[1])).base);
             defer constraint.deinit();
             const c = virtual.downcast(PathConstraint, virtual.downcast(TwoBodyConstraint, constraint.get().?));
-            c.setPath((try testPath(allocator, 3, true)).asPath(), 1.0);
+            try c.setPath((try testPath(allocator, 3, true)).asPath(), 1.0);
         }
     };
     try testing.checkAllAllocationFailures(testing.allocator, S.run, .{});

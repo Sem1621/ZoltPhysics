@@ -434,8 +434,12 @@ pub const VehicleConstraint = struct {
     /// comment)
     body_ids_scratch: []BodyID = &.{},
 
+    /// Zolt: the errors of creating a vehicle constraint. InvalidSettings: controller settings that do not fit the wheels
+    /// (VehicleControllerSettings.checkWheels, RemainingFeaturesArchitecture.md R20 UB38).
+    pub const CreateError = Allocator.Error || error{InvalidSettings};
+
     /// Constructor (in place: the controller keeps a pointer to the constraint). On failure nothing is left allocated.
-    pub fn init(self: *VehicleConstraint, allocator: Allocator, vehicle_body: *Body, settings: *const VehicleConstraintSettings) Allocator.Error!void {
+    pub fn init(self: *VehicleConstraint, allocator: Allocator, vehicle_body: *Body, settings: *const VehicleConstraintSettings) CreateError!void {
         self.* = .{
             .base = .init(VehicleConstraint, allocator, &settings.base),
             .body = vehicle_body,
@@ -458,6 +462,7 @@ pub const VehicleConstraint = struct {
 
         // Construct our controller class
         const controller_settings = settings.controller.ptr orelse @panic("VehicleConstraint: the settings have no controller (Jolt dereferences mController)");
+        try controller_settings.checkWheels(settings.wheels.items.len); // Zolt (UB38): settings that do not fit the wheels
         self.controller = try controller_settings.constructController(allocator, self);
         errdefer self.controller.destroy();
 
@@ -481,7 +486,7 @@ pub const VehicleConstraint = struct {
     }
 
     /// new VehicleConstraint(inVehicleBody, inSettings) (reference count 0)
-    pub fn create(allocator: Allocator, vehicle_body: *Body, settings: *const VehicleConstraintSettings) Allocator.Error!*VehicleConstraint {
+    pub fn create(allocator: Allocator, vehicle_body: *Body, settings: *const VehicleConstraintSettings) CreateError!*VehicleConstraint {
         const self = try allocator.create(VehicleConstraint);
         errdefer allocator.destroy(self);
         try self.init(allocator, vehicle_body, settings);

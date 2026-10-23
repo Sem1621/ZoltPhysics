@@ -21,6 +21,9 @@
 //!   `solveLongitudinalAndLateralConstraints`) cannot report an allocation failure (step listener and solver jobs), so a
 //!   controller allocates the memory they need when it is constructed (see WheeledVehicleController.zig).
 //! - The protected virtual functions are `pub` (VehicleConstraint is a friend of the controller in Jolt).
+//! - Zolt addition: the virtual `checkWheels(num_wheels)` of the settings (default: accept). VehicleConstraint calls it
+//!   before it constructs the controller and fails with `error.InvalidSettings` for settings that make Jolt read
+//!   outside its arrays (RemainingFeaturesArchitecture.md R20, UB38).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -67,6 +70,11 @@ pub const VehicleControllerSettings = struct {
 
         /// Create an instance of the vehicle controller class (`allocator` frees the controller: its `destroy`)
         constructController: *const fn (self: *const VehicleControllerSettings, allocator: Allocator, constraint: *VehicleConstraint) Allocator.Error!*VehicleController,
+
+        /// Zolt: check that the settings fit a vehicle with `num_wheels` wheels. VehicleConstraint calls it before it
+        /// constructs the controller. Jolt has no such check: settings that do not fit make it read outside its arrays
+        /// (RemainingFeaturesArchitecture.md R20, UB38). The default accepts any number of wheels.
+        checkWheels: *const fn (self: *const VehicleControllerSettings, num_wheels: usize) error{InvalidSettings}!void,
     };
 
     vtable: *const VTable,
@@ -128,13 +136,22 @@ pub const VehicleControllerSettings = struct {
         return self.vtable.constructController(self, allocator, constraint);
     }
 
+    /// Zolt: check that the settings fit a vehicle with `num_wheels` wheels (see VTable.checkWheels)
+    pub fn checkWheels(self: *const VehicleControllerSettings, num_wheels: usize) error{InvalidSettings}!void {
+        return self.vtable.checkWheels(self, num_wheels);
+    }
+
     /// GetRTTI()->GetHash() of the most derived class
     pub fn getRTTIHash(self: *const VehicleControllerSettings) u32 {
         return self.vtable.rtti.hash;
     }
 
-    /// Abstract: every virtual function is pure virtual
-    pub const impl = struct {};
+    /// The bodies of the virtual functions that are not pure virtual: the Zolt addition checkWheels
+    pub const impl = struct {
+        pub fn checkWheels(self: *const VehicleControllerSettings, num_wheels: usize) error{InvalidSettings}!void {
+            _ = .{ self, num_wheels };
+        }
+    };
 };
 
 /// Runtime data for interface that controls acceleration / deceleration of the vehicle

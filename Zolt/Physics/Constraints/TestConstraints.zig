@@ -68,7 +68,7 @@ pub const TestConstraintSettings = struct {
         return &self.base.base;
     }
 
-    pub fn createConstraint(self: *const TestConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const TestConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try allocator.create(TestConstraint);
         constraint.* = .{ .base = .init(TestConstraint, allocator, body1, body2, &self.base), .value = self.value };
         return &constraint.base;

@@ -125,7 +125,7 @@ pub const RackAndPinionConstraintSettings = struct {
 
     /// Create an instance of this constraint.
     /// Body1 should be the pinion (gear) and body 2 the rack (slider).
-    pub fn createConstraint(self: *const RackAndPinionConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const RackAndPinionConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try RackAndPinionConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }
@@ -398,7 +398,7 @@ fn testRestoreSettings(allocator: Allocator, bytes: []const u8) Allocator.Error!
 
 /// A hinge from the world to `body` around `axis` at its center of mass (world space, the current rotation of the body
 /// is angle 0), one reference owned by the caller
-fn testCreateHinge(allocator: Allocator, body: *Body, axis: Vec3) Allocator.Error!Ref(Constraint) {
+fn testCreateHinge(allocator: Allocator, body: *Body, axis: Vec3) TwoBodyConstraintSettings.CreateError!Ref(Constraint) {
     var settings = HingeConstraintSettings.init(allocator);
     defer settings.asSettings().deinit();
     settings.point1 = body.getCenterOfMassPosition();
@@ -412,7 +412,7 @@ fn testCreateHinge(allocator: Allocator, body: *Body, axis: Vec3) Allocator.Erro
 
 /// A slider from the world to `body` along `axis` at its center of mass (world space, the current position of the body
 /// is position 0), one reference owned by the caller
-fn testCreateSlider(allocator: Allocator, body: *Body, axis: Vec3) Allocator.Error!Ref(Constraint) {
+fn testCreateSlider(allocator: Allocator, body: *Body, axis: Vec3) TwoBodyConstraintSettings.CreateError!Ref(Constraint) {
     var settings = SliderConstraintSettings.init(allocator);
     defer settings.asSettings().deinit();
     settings.point1 = body.getCenterOfMassPosition();

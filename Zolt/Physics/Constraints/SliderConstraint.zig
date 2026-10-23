@@ -174,7 +174,7 @@ pub const SliderConstraintSettings = struct {
 
     /// Create an instance of this constraint.
     /// Note that the rotation constraint will be solved from body 1. This means that if body 1 and body 2 have different masses / inertias (kinematic body = infinite mass / inertia), body 1 should be the heaviest body.
-    pub fn createConstraint(self: *const SliderConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const SliderConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try SliderConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }
