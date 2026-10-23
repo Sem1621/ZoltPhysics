@@ -309,7 +309,7 @@ pub fn build(b: *std.Build) void {
     // With -Dfma=true only an x86-64 build of the reference fuses like Zolt: NEON's vmlaq_f32 does not fuse under
     // -ffp-contract=off. So on another target every step that builds the reference fails with this message.
     if (fma and reference_target.result.cpu.arch != .x86_64)
-        jolt_cpp.step.dependOn(&b.addFail("-Dfma=true: the C++ reference is only an FMA oracle on x86-64 (NEON's vmlaq_f32 does not fuse under -ffp-contract=off), so the parity, hello-world-check, jolt-performance-test, debug-renderer-check and perf-budget steps need an x86-64 target").step);
+        jolt_cpp.step.dependOn(&b.addFail("-Dfma=true: the C++ reference is only an FMA oracle on x86-64 (NEON's vmlaq_f32 does not fuse under -ffp-contract=off), so the parity, parity-check, hello-world-check, jolt-performance-test, debug-renderer-check and perf-budget steps need an x86-64 target").step);
     jolt_cpp.root_module.addIncludePath(b.path("."));
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("Jolt"), .files = &jolt_sources.files, .flags = cpp_flags.items });
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.files, .flags = cpp_flags.items });
