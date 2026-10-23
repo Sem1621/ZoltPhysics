@@ -253,15 +253,21 @@ pub const UVec4 = extern struct {
 
     /// Count the number of components that are true (true is when highest bit of component is set)
     pub fn countTrues(self: UVec4) u32 {
+        if (comptime use_bool_bit_cast) return @popCount(self.getTrues()); // CountBits(_mm_movemask_ps)
         return @reduce(.Add, self.value >> @splat(31));
     }
 
     /// Store if X is true in bit 0, Y in bit 1, Z in bit 2 and W in bit 3 (true is when highest bit of component is set)
     pub fn getTrues(self: UVec4) u32 {
-        // Note: not implemented as @bitCast(@Vector(4, bool)) -> u4, the Zig 0.16 self-hosted x86_64 backend miscompiles that
+        // _mm_movemask_ps: LLVM turns the bit cast of the sign bits into one (v)movmskps
+        if (comptime use_bool_bit_cast) return @as(u4, @bitCast(self.toBools()));
         const v = self.value >> @splat(31);
         return v[0] | (v[1] << 1) | (v[2] << 2) | (v[3] << 3);
     }
+
+    /// Zolt: getTrues and countTrues bit cast a @Vector(4, bool) to a u4. Only with the LLVM backend: the Zig 0.16
+    /// self-hosted x86_64 backend miscompiles that bit cast. The bit order is that of a little endian CPU.
+    const use_bool_bit_cast = builtin.zig_backend == .stage2_llvm and builtin.cpu.arch.endian() == .little;
 
     /// Shift all components by count bits to the left (filling with zeros from the left)
     pub fn logicalShiftLeft(self: UVec4, comptime count: u5) UVec4 {
@@ -388,6 +394,32 @@ test "expand4Uint16Lo/Hi equal the scalar version" {
         const c = v.value;
         try std.testing.expect(v.expand4Uint16Lo().eql(UVec4.init(c[0] & 0xffff, c[0] >> 16, c[1] & 0xffff, c[1] >> 16)));
         try std.testing.expect(v.expand4Uint16Hi().eql(UVec4.init(c[2] & 0xffff, c[2] >> 16, c[3] & 0xffff, c[3] >> 16)));
+    }
+}
+
+/// The getTrues and countTrues that Zolt used before, the reference for the tests
+fn getTruesReference(self: UVec4) u32 {
+    const v = self.value >> @splat(31);
+    return v[0] | (v[1] << 1) | (v[2] << 2) | (v[3] << 3);
+}
+
+fn countTruesReference(self: UVec4) u32 {
+    return @reduce(.Add, self.value >> @splat(31));
+}
+
+test "getTrues and countTrues equal the shift versions" {
+    var prng = std.Random.DefaultPrng.init(0x7e);
+    const random = prng.random();
+    for (0..10000) |_| {
+        const v = UVec4.init(random.int(u32), random.int(u32), random.int(u32), random.int(u32));
+        try std.testing.expectEqual(getTruesReference(v), v.getTrues());
+        try std.testing.expectEqual(countTruesReference(v), v.countTrues());
+    }
+    for (0..16) |bits| {
+        const b: u32 = @intCast(bits);
+        const v = UVec4.init((b & 1) << 31, (b >> 1 & 1) << 31, (b >> 2 & 1) << 31, (b >> 3 & 1) << 31);
+        try std.testing.expectEqual(b, v.getTrues());
+        try std.testing.expectEqual(@as(u32, @popCount(b)), v.countTrues());
     }
 }
 

@@ -497,9 +497,13 @@ pub const Vec3 = extern struct {
 
     /// Cross product
     pub fn cross(self: Vec3, other: Vec3) Vec3 {
-        const a = self.value;
-        const b = other.value;
-        return init(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+        // Zolt: Jolt's SSE version. Each lane computes the same two products and the same difference as the scalar
+        // version, so the bits are the same.
+        const yzxx = @Vector(4, i32){ 1, 2, 0, 0 }; // Assure Z and W are the same
+        const t1 = @shuffle(f32, other.value, undefined, yzxx) * self.value;
+        const t2 = @shuffle(f32, self.value, undefined, yzxx) * other.value;
+        const t3 = t1 - t2;
+        return .{ .value = @shuffle(f32, t3, undefined, yzxx) };
     }
 
     /// Cross product, more precise when FMA instructions are available (identical to `cross` in Zolt)
@@ -720,6 +724,30 @@ test "loadFloat3Unsafe gives the bits of loadFloat3Safe and keeps W = Z" {
         const safe_load: [4]u32 = @bitCast(Vec3.loadFloat3Safe(f3).value);
         try std.testing.expectEqual(safe_load, unsafe_load);
         try std.testing.expectEqual([4]u32{ words[0], words[1], words[2], words[2] }, unsafe_load);
+    }
+}
+
+/// The scalar cross product that Zolt used before (Jolt's version without SSE or NEON), the reference for `cross`
+fn crossReference(self: Vec3, other: Vec3) Vec3 {
+    const a = self.value;
+    const b = other.value;
+    return Vec3.init(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+}
+
+test "cross gives the bits of the scalar cross product" {
+    var prng = std.Random.DefaultPrng.init(0xc5);
+    const random = prng.random();
+    for (0..10000) |i| {
+        // Values of very different sizes, including zeros and denormals
+        var c: [6]f32 = undefined;
+        for (&c) |*f| f.* = switch (i % 3) {
+            0 => random.float(f32) * 2 - 1,
+            1 => (random.float(f32) * 2 - 1) * std.math.pow(f32, 2, @floatFromInt(random.intRangeAtMost(i32, -140, 120))),
+            else => if (random.boolean()) 0 else @bitCast(random.int(u32) & 0x807fffff),
+        };
+        const a = Vec3.init(c[0], c[1], c[2]);
+        const b = Vec3.init(c[3], c[4], c[5]);
+        try std.testing.expectEqual(@as(u128, @bitCast(crossReference(a, b).value)), @as(u128, @bitCast(a.cross(b).value)));
     }
 }
 

@@ -106,27 +106,28 @@ pub const Mat44 = extern struct {
         std.debug.assert(quat.isNormalized(.{}));
 
         // See: https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation section 'Quaternion-derived rotation matrix'
-        const x = quat.getX();
-        const y = quat.getY();
-        const z = quat.getZ();
-        const w = quat.getW();
+        // Zolt: Jolt's SSE4.1 version, the blends are shuffles. Jolt's scalar version gives the same values.
+        const V = @Vector(4, f32);
+        const xyzw = quat.value.value;
+        const two_xyzw = xyzw + xyzw;
+        const yzxw = @shuffle(f32, xyzw, undefined, @Vector(4, i32){ 1, 2, 0, 3 });
+        const two_yzxw = yzxw + yzxw;
+        const zxyw = @shuffle(f32, xyzw, undefined, @Vector(4, i32){ 2, 0, 1, 3 });
+        const two_zxyw = zxyw + zxyw;
+        const wwww: V = @splat(xyzw[3]);
+        const diagonal = (@as(V, @splat(1.0)) - two_yzxw * yzxw) - two_zxyw * zxyw; // (1 - 2 y^2 - 2 z^2, 1 - 2 x^2 - 2 z^2, 1 - 2 x^2 - 2 y^2, 1 - 4 w^2)
+        const plus = two_xyzw * zxyw + two_yzxw * wwww; // 2 * (xz + yw, xy + zw, yz + xw, ww)
+        var minus = two_yzxw * xyzw - two_zxyw * wwww; // 2 * (xy - zw, yz - xw, xz - yw, 0)
 
-        const tx = x + x; // Note: Using x + x instead of 2.0f * x to force this function to return the same value as the SSE4.1 version across platforms.
-        const ty = y + y;
-        const tz = z + z;
+        // Jolt sets W to 0 here (a workaround for a compiler that fuses the multiply and subtract)
+        minus = @shuffle(f32, minus, @as(V, @splat(0.0)), @Vector(4, i32){ 0, 1, 2, ~@as(i32, 0) });
 
-        const xx = tx * x;
-        const yy = ty * y;
-        const zz = tz * z;
-        const xy = tx * y;
-        const xz = tx * z;
-        const xw = tx * w;
-        const yz = ty * z;
-        const yw = ty * w;
-        const zw = tz * w;
+        const col0 = @shuffle(f32, @shuffle(f32, plus, diagonal, @Vector(4, i32){ ~@as(i32, 0), 1, 2, 3 }), minus, @Vector(4, i32){ 0, 1, ~@as(i32, 2), ~@as(i32, 3) }); // (1 - 2 y^2 - 2 z^2, 2 xy + 2 zw, 2 xz - 2 yw, 0)
+        const col1 = @shuffle(f32, @shuffle(f32, diagonal, minus, @Vector(4, i32){ ~@as(i32, 0), 1, 2, ~@as(i32, 3) }), plus, @Vector(4, i32){ 0, 1, ~@as(i32, 2), 3 }); // (2 xy - 2 zw, 1 - 2 x^2 - 2 z^2, 2 yz + 2 xw, 0)
+        const col2 = @shuffle(f32, @shuffle(f32, minus, plus, @Vector(4, i32){ ~@as(i32, 0), 1, 2, 3 }), diagonal, @Vector(4, i32){ 0, 1, ~@as(i32, 2), 3 }); // (2 xz + 2 yw, 2 yz - 2 xw, 1 - 2 x^2 - 2 y^2, 0)
+        const col3 = Vec4.init(0, 0, 0, 1);
 
-        return init(Vec4.init((1.0 - yy) - zz, xy + zw, xz - yw, 0.0), // Note: Added extra brackets to force this function to return the same value as the SSE4.1 version across platforms.
-            Vec4.init(xy - zw, (1.0 - zz) - xx, yz + xw, 0.0), Vec4.init(xz + yw, yz - xw, (1.0 - xx) - yy, 0.0), Vec4.init(0.0, 0.0, 0.0, 1.0));
+        return init(.{ .value = col0 }, .{ .value = col1 }, .{ .value = col2 }, col3);
     }
 
     /// Get matrix that translates
@@ -765,3 +766,53 @@ pub const Mat44 = extern struct {
         return @shuffle(f32, a, b, @Vector(4, i32){ a0, a1, ~b0, ~b1 });
     }
 };
+
+/// The rotationQuat that Zolt used before (Jolt's version without SSE4.1), the reference for the test
+fn rotationQuatReference(quat: Quat) Mat44 {
+    const x = quat.getX();
+    const y = quat.getY();
+    const z = quat.getZ();
+    const w = quat.getW();
+
+    const tx = x + x; // Note: Using x + x instead of 2.0f * x to force this function to return the same value as the SSE4.1 version across platforms.
+    const ty = y + y;
+    const tz = z + z;
+
+    const xx = tx * x;
+    const yy = ty * y;
+    const zz = tz * z;
+    const xy = tx * y;
+    const xz = tx * z;
+    const xw = tx * w;
+    const yz = ty * z;
+    const yw = ty * w;
+    const zw = tz * w;
+
+    return Mat44.init(Vec4.init((1.0 - yy) - zz, xy + zw, xz - yw, 0.0), // Note: Added extra brackets to force this function to return the same value as the SSE4.1 version across platforms.
+        Vec4.init(xy - zw, (1.0 - zz) - xx, yz + xw, 0.0), Vec4.init(xz + yw, yz - xw, (1.0 - xx) - yy, 0.0), Vec4.init(0.0, 0.0, 0.0, 1.0));
+}
+
+test "rotationQuat gives the bits of the scalar version" {
+    var prng = std.Random.DefaultPrng.init(0x9a);
+    const random = prng.random();
+    var n: u32 = 0;
+    while (n < 10000) {
+        const q = Quat.init(random.float(f32) * 2 - 1, random.float(f32) * 2 - 1, random.float(f32) * 2 - 1, random.float(f32) * 2 - 1);
+        if (q.lengthSq() < 1.0e-6) continue;
+        const qn = q.normalized();
+        if (!qn.isNormalized(.{})) continue;
+        n += 1;
+        const expected = rotationQuatReference(qn);
+        const actual = Mat44.rotationQuat(qn);
+        for (0..4) |c|
+            try std.testing.expectEqual(@as(u128, @bitCast(expected.col[c].value)), @as(u128, @bitCast(actual.col[c].value)));
+    }
+
+    // Axis aligned and identity rotations
+    for ([_]Quat{ Quat.identity(), Quat.init(1, 0, 0, 0), Quat.init(0, 1, 0, 0), Quat.init(0, 0, 1, 0), Quat.init(0, 0, 0, -1) }) |q| {
+        const expected = rotationQuatReference(q);
+        const actual = Mat44.rotationQuat(q);
+        for (0..4) |c|
+            try std.testing.expectEqual(@as(u128, @bitCast(expected.col[c].value)), @as(u128, @bitCast(actual.col[c].value)));
+    }
+}
