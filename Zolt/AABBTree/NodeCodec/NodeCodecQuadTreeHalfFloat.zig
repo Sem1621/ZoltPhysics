@@ -43,6 +43,8 @@ pub const NodeCodecQuadTreeHalfFloat = struct {
 
         comptime {
             std.debug.assert(@sizeOf(Header) == 32);
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Header, "root_bounds_min")); // Zolt: MeshShape reads them through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Header, "root_bounds_max"));
         }
     };
 

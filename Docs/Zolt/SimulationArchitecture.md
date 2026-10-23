@@ -663,8 +663,10 @@ checks:
 - Flexible contact points use `getRequiredExtraSize`.
 - `LockFreeHashMap.findMut` (F1) replaces Jolt's `const_cast` when setting the manifold flags. Do
   not widen Rule M.
-- `sLoadFloat3Unsafe` is Zolt's `Vec3.loadFloat3Unsafe`, which reads the three floats and never
-  past the end of the array. The x, y and z bits are identical.
+- `sLoadFloat3Unsafe` is Zolt's `Vec3.loadFloat3Unsafe`. Like Jolt it is one 16 byte load that
+  reads 4 bytes past the Float3. Each struct that is read this way checks at comptime that these
+  bytes are part of the struct (`Vec3.canLoadFloat3Unsafe`). `Vec3.loadFloat3Safe` reads only the
+  three floats. The x, y and z bits are identical.
 
 **Update data.**
 - The ManifoldCache is double buffered.

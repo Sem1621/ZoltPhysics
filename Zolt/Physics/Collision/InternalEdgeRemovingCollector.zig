@@ -61,11 +61,15 @@ pub const InternalEdgeRemovingCollector = struct {
     // This algorithm tests a convex shape (shape 1) against a set of polygons (shape 2).
     // This assumption doesn't hold if the shape we're testing is a compound shape, so we must also
     // store the sub shape ID and ignore voided features that belong to another sub shape ID.
-    const Voided = struct {
-        /// Feature that is voided (of shape 2). Read with Vec3::sLoadFloat3Unsafe so must not be the last member (in Jolt; Zolt's loadFloat3Unsafe reads 3 floats).
+    const Voided = extern struct {
+        /// Feature that is voided (of shape 2). Read with Vec3::sLoadFloat3Unsafe so must not be the last member.
         feature: Float3,
         /// Sub shape ID of the shape that is colliding against the feature (of shape 1).
         sub_shape_id: SubShapeID,
+
+        comptime {
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Voided, "feature"));
+        }
     };
 
     base: CollideShapeCollector,

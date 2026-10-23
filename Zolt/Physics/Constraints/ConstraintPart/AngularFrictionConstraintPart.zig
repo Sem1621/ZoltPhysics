@@ -192,6 +192,17 @@ comptime {
     std.debug.assert(@sizeOf(AngularFrictionConstraintPart(.static, .static)) == 3 * @sizeOf(f32));
 }
 
+// Zolt: Vec3.loadFloat3Unsafe reads 4 bytes past each Float3 member. `bias` makes sure that they are part of the struct.
+comptime {
+    for ([_]MotionType{ .static, .kinematic, .dynamic }) |type1| {
+        for ([_]MotionType{ .static, .kinematic, .dynamic }) |type2| {
+            const T = AngularFrictionConstraintPart(type1, type2);
+            if (type1 == .dynamic) std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "base1.inv_i1_axis"));
+            if (type2 == .dynamic) std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "base2.inv_i2_axis"));
+        }
+    }
+}
+
 const TestContext = @import("ConstraintPartTestContext.zig");
 
 fn testAngularFrictionConstraintPart(comptime type1: MotionType, comptime type2: MotionType, context: *TestContext.ConstraintPartTestContext) !void {

@@ -91,9 +91,37 @@ pub const Vec3 = extern struct {
         return .{ .value = @splat(v) };
     }
 
-    /// Load 3 floats from memory (reads 32 bits extra which it doesn't use in Jolt, Zolt only reads 3 floats)
+    /// Load 3 floats from memory (reads 32 bits extra which it doesn't use)
+    /// Zolt: one unaligned 16 byte load, like Jolt. The 4 bytes after the Float3 must belong to the same object.
+    /// Use it on a struct member that `canLoadFloat3Unsafe` accepts (check that with a comptime assert at the struct),
+    /// or on an array with one spare element at the end. Use `loadFloat3Safe` anywhere else.
     pub fn loadFloat3Unsafe(v: *const Float3) Vec3 {
+        if (@inComptime()) return init(v.x, v.y, v.z); // Comptime memory has no bytes past the Float3
+        const p: *align(1) const Type = @ptrCast(v);
+        return fromType(p.*);
+    }
+
+    /// Zolt: `loadFloat3Unsafe` that reads only the 3 floats, for a Float3 that may end an allocation (for example a
+    /// local variable). Gives the same bits.
+    pub fn loadFloat3Safe(v: *const Float3) Vec3 {
         return init(v.x, v.y, v.z);
+    }
+
+    /// Zolt: true when `loadFloat3Unsafe` can read the Float3 member at `path` of a `T`. `path` is a field name or a
+    /// dotted path of nested fields. The member can also be an array of Float3. The 4 bytes after it must still be
+    /// part of `T`.
+    pub fn canLoadFloat3Unsafe(comptime T: type, comptime path: []const u8) bool {
+        return comptime result: {
+            var offset: usize = 0;
+            var U = T;
+            var it = std.mem.splitScalar(u8, path, '.');
+            while (it.next()) |name| {
+                offset += @offsetOf(U, name);
+                U = @FieldType(U, name);
+            }
+            const is_float3 = U == Float3 or (@typeInfo(U) == .array and @typeInfo(U).array.child == Float3);
+            break :result is_float3 and offset + @sizeOf(U) + @sizeOf(f32) <= @sizeOf(T);
+        };
     }
 
     /// Return the minimum value of each of the components (returns v2 when not v1 < v2, like _mm_min_ps)
@@ -678,4 +706,29 @@ test "Vec3.unit_sphere is sUnitSphere: the compile time table equals a run time 
     try std.testing.expectEqual(runtime.len, Vec3.unit_sphere.len);
     for (runtime.constSlice(), Vec3.unit_sphere.constSlice()) |a, b|
         try std.testing.expectEqual(@as(u128, @bitCast(a.value)), @as(u128, @bitCast(b.value)));
+}
+
+test "loadFloat3Unsafe gives the bits of loadFloat3Safe and keeps W = Z" {
+    var prng = std.Random.DefaultPrng.init(0xf3);
+    const random = prng.random();
+    for (0..1000) |_| {
+        // Random bits, NaN patterns included, and a guard float that must be ignored
+        var words: [4]u32 = undefined;
+        for (&words) |*w| w.* = random.int(u32);
+        const f3: *const Float3 = @ptrCast(&words);
+        const unsafe_load: [4]u32 = @bitCast(Vec3.loadFloat3Unsafe(f3).value);
+        const safe_load: [4]u32 = @bitCast(Vec3.loadFloat3Safe(f3).value);
+        try std.testing.expectEqual(safe_load, unsafe_load);
+        try std.testing.expectEqual([4]u32{ words[0], words[1], words[2], words[2] }, unsafe_load);
+    }
+}
+
+test "canLoadFloat3Unsafe" {
+    const S = extern struct { a: Float3, b: [2]Float3, c: f32, d: Float3 };
+    const Outer = extern struct { s: S, e: u32 };
+    try std.testing.expect(Vec3.canLoadFloat3Unsafe(S, "a"));
+    try std.testing.expect(Vec3.canLoadFloat3Unsafe(S, "b"));
+    try std.testing.expect(!Vec3.canLoadFloat3Unsafe(S, "c")); // Not a Float3
+    try std.testing.expect(!Vec3.canLoadFloat3Unsafe(S, "d")); // Last member
+    try std.testing.expect(Vec3.canLoadFloat3Unsafe(Outer, "s.d"));
 }

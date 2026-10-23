@@ -212,7 +212,7 @@ pub const CompoundShape = struct {
         shape: RefConst(Shape) = .empty,
         /// Note: Position of center of mass of sub shape!
         position_com: Float3 = .{ .x = 0, .y = 0, .z = 0 },
-        /// Note: X, Y, Z of rotation quaternion (Jolt reads 4 bytes beyond this, Zolt only reads the 3 floats)
+        /// Note: X, Y, Z of rotation quaternion - note we read 4 bytes beyond this so make sure there's something there
         rotation: Float3 = .{ .x = 0, .y = 0, .z = 0 },
         /// User data value (put here because it falls in padding bytes)
         user_data: u32 = 0,
@@ -222,6 +222,8 @@ pub const CompoundShape = struct {
 
         comptime {
             std.debug.assert(@sizeOf(SubShape) == if (@sizeOf(usize) == 8) 40 else 36); // Compiler added unexpected padding
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(SubShape, "position_com")); // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(SubShape, "rotation"));
         }
 
         /// Copy (the copy constructor), adds a reference to the shape

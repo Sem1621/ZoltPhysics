@@ -71,6 +71,7 @@ pub const TransformedShape = struct {
     comptime {
         if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(TransformedShape) == if (Core.double_precision) 96 else 64); // Not properly packed
         std.debug.assert(@alignOf(TransformedShape) == @max(Core.vector_alignment, RealFile.rvector_alignment)); // Not properly aligned
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(TransformedShape, "shape_scale")); // Zolt: read through loadFloat3Unsafe
     }
 
     /// Use the context from Shape

@@ -132,6 +132,8 @@ pub const DebugRenderer = struct {
 
         comptime {
             std.debug.assert(@sizeOf(Vertex) == 36); // The recorder writes the C++ bytes
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Vertex, "position")); // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Vertex, "normal"));
         }
     };
 

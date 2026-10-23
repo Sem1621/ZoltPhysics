@@ -342,6 +342,14 @@ pub const AxisConstraintPart = struct {
     pub fn restoreState(self: *AxisConstraintPart, stream: *StateRecorder) void {
         stream.read(&self.total_lambda);
     }
+
+    // Zolt: Vec3.loadFloat3Unsafe reads 4 bytes past each Float3 member, they must be part of the struct
+    comptime {
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(AxisConstraintPart, "r1_plus_u_x_axis"));
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(AxisConstraintPart, "r2_x_axis"));
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(AxisConstraintPart, "inv_i1_r1_plus_u_x_axis"));
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(AxisConstraintPart, "inv_i2_r2_x_axis"));
+    }
 };
 
 const TestContext = @import("ConstraintPartTestContext.zig");

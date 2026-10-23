@@ -1902,9 +1902,9 @@ fn validScale(gen: *Gen, desc: *const CompoundDesc) P {
     for (desc.sub_shapes[0..desc.num_sub_shapes]) |*sub| {
         const rotation = quat(sub.rotation);
         const identity = rotation.isClose(Quat.identity(), .{}) or rotation.isClose(Quat.identity().negate(), .{});
-        var stored: Float3 = undefined; // The rotation as SubShape stores it
-        rotation.storeFloat3(&stored);
-        if (!identity and !ScaleHelpers.isUniformScale(vec3(s)) and !ScaleHelpers.canScaleBeRotated(Quat.loadFloat3Unsafe(&stored), vec3(s)))
+        var stored: extern struct { rotation: Float3, guard: f32 = 0 } = .{ .rotation = undefined }; // The rotation as SubShape stores it, with the 4 bytes that loadFloat3Unsafe reads after it
+        rotation.storeFloat3(&stored.rotation);
+        if (!identity and !ScaleHelpers.isUniformScale(vec3(s)) and !ScaleHelpers.canScaleBeRotated(Quat.loadFloat3Unsafe(&stored.rotation), vec3(s)))
             return gen.uniformScale();
     }
     return s;

@@ -203,6 +203,7 @@ pub const SoftBodySharedSettings = struct {
 
         comptime {
             std.debug.assert(@sizeOf(Vertex) == 28);
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Vertex, "position")); // Zolt: read through loadFloat3Unsafe
         }
 
         /// Constructor Vertex(inPosition, inVelocity = Float3(0, 0, 0), inInvMass = 1)

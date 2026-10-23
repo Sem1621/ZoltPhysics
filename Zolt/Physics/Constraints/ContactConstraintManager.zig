@@ -186,6 +186,8 @@ pub const ContactConstraintManager = struct {
         comptime {
             std.debug.assert(@sizeOf(CachedContactPoint) == 28); // Unexpected size
             std.debug.assert(@alignOf(CachedContactPoint) == 4); // Assuming 4 byte aligned
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedContactPoint, "position1")); // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedContactPoint, "position2"));
         }
     };
 
@@ -255,6 +257,7 @@ pub const ContactConstraintManager = struct {
         comptime {
             std.debug.assert(@sizeOf(CachedManifold) == 60); // This structure is expect to not contain any waste due to alignment
             std.debug.assert(@alignOf(CachedManifold) == 4); // Assuming 4 byte aligned
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedManifold, "contact_normal")); // Zolt: read through loadFloat3Unsafe
         }
     };
 
@@ -295,6 +298,8 @@ pub const ContactConstraintManager = struct {
         comptime {
             std.debug.assert(@sizeOf(CachedBodyPair) == 28); // Unexpected size
             std.debug.assert(@alignOf(CachedBodyPair) == 4); // Assuming 4 byte aligned
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedBodyPair, "delta_position")); // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedBodyPair, "delta_rotation"));
         }
     };
 
@@ -922,6 +927,10 @@ pub const ContactConstraintManager = struct {
         comptime {
             if (@sizeOf(usize) == 8)
                 std.debug.assert(@sizeOf(ContactConstraintBase) == 88);
+            // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(ContactConstraintBase, "world_space_normal"));
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(ContactConstraintBase, "world_space_tangent1"));
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(ContactConstraintBase, "world_space_tangent2"));
         }
     };
 
