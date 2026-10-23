@@ -534,7 +534,7 @@ pub const MeshShape = struct {
         };
 
         // Move data to this class
-        std.mem.swap(ByteBuffer, &self.tree, buffer.getBufferMut());
+        Core.swap(ByteBuffer, &self.tree, buffer.getBufferMut());
 
         // Check if we're not exceeding the amount of sub shape id bits
         if (self.getSubShapeIDBitsRecursive() > SubShapeID.max_bits) {
@@ -911,7 +911,7 @@ pub const MeshShape = struct {
 
         // Flip triangle if scaled inside out
         if (ScaleHelpers.isInsideOut(scale))
-            std.mem.swap(Vec3, &out_vertices.buffer[1], &out_vertices.buffer[2]);
+            Core.swap(Vec3, &out_vertices.buffer[1], &out_vertices.buffer[2]);
 
         // Calculate transform with scale
         const transform = center_of_mass_transform.preScaled(scale);

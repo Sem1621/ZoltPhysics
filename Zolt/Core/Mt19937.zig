@@ -16,6 +16,7 @@
 //! bits).
 
 const std = @import("std");
+const Core = @import("Core.zig");
 
 const Mt19937 = @This();
 
@@ -172,7 +173,7 @@ pub fn shuffleLibcxx(self: *Mt19937, comptime T: type, items: []T) void {
         }) {
             const i: isize = self.uniformIntLibcxx(isize, 0, d);
             if (i != 0)
-                std.mem.swap(T, &items[first], &items[first + @as(usize, @intCast(i))]);
+                Core.swap(T, &items[first], &items[first + @as(usize, @intCast(i))]);
         }
     }
 }

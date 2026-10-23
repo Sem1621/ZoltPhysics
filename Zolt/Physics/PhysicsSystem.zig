@@ -1841,7 +1841,7 @@ pub const PhysicsSystem = struct {
         // Ensure that body1 id < body2 id when motion types are the same.
         if (@intFromEnum(body1.getMotionType()) < @intFromEnum(body2.getMotionType()) or
             (body1.getMotionType() == body2.getMotionType() and body_pair.body_b.lessThan(body_pair.body_a)))
-            std.mem.swap(*Body, &body1, &body2);
+            Core.swap(*Body, &body1, &body2);
 
         // Check if the contact points from the previous frame are reusable and if so copy them
         var pair_handled = false;

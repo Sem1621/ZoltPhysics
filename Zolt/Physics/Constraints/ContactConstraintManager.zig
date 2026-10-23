@@ -1891,8 +1891,8 @@ pub const ContactConstraintManager = struct {
 
             // If we swapped body1 and body2 we need to swap the mass scales back
             if (swapped) {
-                std.mem.swap(f32, &settings.inv_mass_scale1, &settings.inv_mass_scale2);
-                std.mem.swap(f32, &settings.inv_inertia_scale1, &settings.inv_inertia_scale2);
+                Core.swap(f32, &settings.inv_mass_scale1, &settings.inv_mass_scale2);
+                Core.swap(f32, &settings.inv_inertia_scale1, &settings.inv_inertia_scale2);
                 // Note we do not need to negate the relative surface velocity as it is not applied by the CCD collision constraint
             }
         }

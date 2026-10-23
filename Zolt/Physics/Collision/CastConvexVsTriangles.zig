@@ -11,6 +11,7 @@
 //! - `cast` is non-const in Jolt (it creates the support function): `self: *CastConvexVsTriangles`.
 
 const std = @import("std");
+const Core = @import("../../Core/Core.zig");
 const ConvexSupport = @import("../../Geometry/ConvexSupport.zig");
 const TriangleConvexSupport = ConvexSupport.TriangleConvexSupport;
 const EPAPenetrationDepth = @import("../../Geometry/EPAPenetrationDepth.zig").EPAPenetrationDepth;
@@ -151,7 +152,7 @@ pub const CastConvexVsTriangles = struct {
 
                 // When inside out, we need to swap the triangle winding
                 if (self.scale_sign < 0.0)
-                    std.mem.swap(Vec3, &result.base.shape2_face.buffer[1], &result.base.shape2_face.buffer[2]);
+                    Core.swap(Vec3, &result.base.shape2_face.buffer[1], &result.base.shape2_face.buffer[2]);
             }
 
             var track: if (track_narrowphase_stats) TrackNarrowPhaseCollector else void = undefined;

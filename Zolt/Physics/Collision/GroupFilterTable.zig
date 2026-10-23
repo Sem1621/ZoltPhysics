@@ -17,6 +17,7 @@
 //! with `createDefault` and reads the table into `table`, with the stream's allocator (the filter's allocator).
 
 const std = @import("std");
+const Core = @import("../../Core/Core.zig");
 const Allocator = std.mem.Allocator;
 const RTTI = @import("../../Core/RTTI.zig").RTTI;
 const StreamIn = @import("../../Core/StreamIn.zig").StreamIn;
@@ -79,7 +80,7 @@ pub const GroupFilterTable = struct {
 
         // We store the lower left half only, so swap the inputs when trying to access the top right half
         if (sub_group1 > sub_group2)
-            std.mem.swap(SubGroupID, &sub_group1, &sub_group2);
+            Core.swap(SubGroupID, &sub_group1, &sub_group2);
 
         std.debug.assert(sub_group2 < self.num_sub_groups);
 

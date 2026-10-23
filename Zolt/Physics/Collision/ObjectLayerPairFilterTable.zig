@@ -10,6 +10,7 @@
 //! the table).
 
 const std = @import("std");
+const Core = @import("../../Core/Core.zig");
 const Allocator = std.mem.Allocator;
 const ObjectLayer = @import("ObjectLayer.zig").ObjectLayer;
 const ObjectLayerPairFilter = @import("ObjectLayer.zig").ObjectLayerPairFilter;
@@ -34,7 +35,7 @@ pub const ObjectLayerPairFilterTable = struct {
 
         // We store the lower left half only, so swap the inputs when trying to access the top right half
         if (layer1 > layer2)
-            std.mem.swap(ObjectLayer, &layer1, &layer2);
+            Core.swap(ObjectLayer, &layer1, &layer2);
 
         std.debug.assert(layer2 < self.num_object_layers);
 

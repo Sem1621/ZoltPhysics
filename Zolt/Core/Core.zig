@@ -61,6 +61,48 @@ pub const assertRecoverable = @import("IssueReporting.zig").assertRecoverable;
 /// JPH_ASSERT(false, message) on a path that Jolt's release build continues on (see `assertRecoverable`)
 pub const assertFailed = @import("IssueReporting.zig").assertFailed;
 
+/// Swap the values behind `a` and `b` (std::swap). Use this instead of `std.mem.swap`. In Zig 0.16 `std.mem.swap`
+/// swaps byte by byte. That costs more instructions, and a value that is read back right after the byte stores stalls
+/// the store forwarding. This version copies the whole value through a temporary. `a` and `b` may be the same pointer.
+pub inline fn swap(comptime T: type, a: *T, b: *T) void {
+    const tmp = a.*;
+    a.* = b.*;
+    b.* = tmp;
+}
+
 test "configuration" {
     try std.testing.expect(object_layer_bits == 16 or object_layer_bits == 32);
+}
+
+test "swap gives the same result as std.mem.swap" {
+    // No padding bytes, so the bytes compare equal
+    const S = extern struct { a: u32, b: f32, c: [3]u16, d: u16, e: u64 };
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    for (0..1000) |_| {
+        // Scalars, a vector, an array and a struct
+        inline for (.{ u8, u32, i64, f32, f64, usize, @Vector(4, f32), [7]u8, S }) |T| {
+            var a: T = undefined;
+            var b: T = undefined;
+            random.bytes(std.mem.asBytes(&a));
+            random.bytes(std.mem.asBytes(&b));
+            var a_ref = a;
+            var b_ref = b;
+            swap(T, &a, &b);
+            std.mem.swap(T, &a_ref, &b_ref);
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&a_ref), std.mem.asBytes(&a));
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&b_ref), std.mem.asBytes(&b));
+        }
+
+        // Two elements of the same array, also the same element twice
+        var items: [8]u32 = undefined;
+        random.bytes(std.mem.asBytes(&items));
+        var items_ref = items;
+        const i = random.uintLessThan(usize, items.len);
+        const j = random.uintLessThan(usize, items.len);
+        swap(u32, &items[i], &items[j]);
+        if (i != j)
+            std.mem.swap(u32, &items_ref[i], &items_ref[j]);
+        try std.testing.expectEqualSlices(u32, &items_ref, &items);
+    }
 }

@@ -119,7 +119,7 @@ pub const ConvexHullBuilder2D = struct {
         // Start with the initial indices in counter clockwise order
         const z = self.positionAt(idx2).sub(self.positionAt(idx1)).cross(self.positionAt(idx3).sub(self.positionAt(idx1))).getZ();
         if (z < 0.0)
-            std.mem.swap(i32, &idx1, &idx2);
+            Core.swap(i32, &idx1, &idx2);
 
         // Create and link edges
         const edges = try self.createInitialEdges(idx1, idx2, idx3);

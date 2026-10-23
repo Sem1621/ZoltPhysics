@@ -5,6 +5,7 @@
 //! `pred(context, a, b)` returns true if a is less or equal than b.
 
 const std = @import("std");
+const Core = @import("Core.zig");
 
 /// Push a new element into a binary max-heap.
 /// items[0 .. len - 1] must be a a valid heap. Element len - 1 will be inserted into the heap. The heap will be items[0 .. len] after this call.
@@ -29,7 +30,7 @@ pub fn binaryHeapPush(
 
         // Sort them so that the parent is larger than the child
         if (pred(context, items[parent], items[current])) {
-            std.mem.swap(T, &items[parent], &items[current]);
+            Core.swap(T, &items[parent], &items[current]);
             current = parent;
         } else {
             // When there's no change, we're done
@@ -52,7 +53,7 @@ pub fn binaryHeapPop(
     std.debug.assert(items.len > 0);
 
     // Begin by moving the highest element to the end, this is the popped element
-    std.mem.swap(T, &items[items.len - 1], &items[0]);
+    Core.swap(T, &items[items.len - 1], &items[0]);
 
     // New heap size
     const count = items.len - 1;
@@ -86,6 +87,6 @@ pub fn binaryHeapPop(
             break;
 
         // Swap element
-        std.mem.swap(T, &items[prev_largest], &items[largest]);
+        Core.swap(T, &items[prev_largest], &items[largest]);
     }
 }

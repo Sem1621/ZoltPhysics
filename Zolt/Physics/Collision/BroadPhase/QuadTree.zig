@@ -788,8 +788,8 @@ pub const QuadTree = struct {
 
             if (start < end) {
                 // Swap the two elements
-                std.mem.swap(NodeID, &node_ids[start], &node_ids[end - 1]);
-                std.mem.swap(Vec3, &node_centers[start], &node_centers[end - 1]);
+                Core.swap(NodeID, &node_ids[start], &node_ids[end - 1]);
+                Core.swap(Vec3, &node_centers[start], &node_centers[end - 1]);
                 start += 1;
                 end -= 1;
             }

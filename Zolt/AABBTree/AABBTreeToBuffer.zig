@@ -20,6 +20,7 @@
 //! `error.NodeMemoryEstimateIncorrect`, the error Jolt reports for a wrong estimate.
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const Float3 = @import("../Math/Float3.zig").Float3;
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
 const ByteBuffer = @import("../Core/ByteBuffer.zig").ByteBuffer;
@@ -168,7 +169,7 @@ pub fn AABBTreeToBuffer(comptime TriangleCodec: type, comptime NodeCodec: type) 
                     if (to_estimate_triangles.items.len == 0)
                         break
                     else
-                        std.mem.swap(std.ArrayList(*const Node), &to_estimate, &to_estimate_triangles);
+                        Core.swap(std.ArrayList(*const Node), &to_estimate, &to_estimate_triangles);
                 }
             }
 
@@ -270,7 +271,7 @@ pub fn AABBTreeToBuffer(comptime TriangleCodec: type, comptime NodeCodec: type) 
                 if (to_process_triangles.items.len == 0)
                     break
                 else
-                    std.mem.swap(std.ArrayList(*NodeData), &to_process, &to_process_triangles);
+                    Core.swap(std.ArrayList(*NodeData), &to_process, &to_process_triangles);
             }
 
             // Assert that our reservation was correct (we don't know if we swapped the arrays or not)
@@ -602,7 +603,7 @@ test "AABBTreeToBuffer root leaf and abort" {
     const size = buffer.getBuffer().vector.items.len;
     var tree: ByteBuffer = .empty;
     defer tree.deinit(allocator);
-    std.mem.swap(ByteBuffer, &tree, buffer.getBufferMut());
+    Core.swap(ByteBuffer, &tree, buffer.getBufferMut());
     try std.testing.expectEqual(size, tree.vector.items.len);
     try std.testing.expectEqual(@as(usize, 0), buffer.getBuffer().vector.items.len);
 

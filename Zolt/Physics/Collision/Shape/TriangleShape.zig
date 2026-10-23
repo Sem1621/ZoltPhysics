@@ -341,7 +341,7 @@ pub const TriangleShape = struct {
         const v3 = center_of_mass_transform.mulVec3(scale.mul(self.v3));
 
         if (ScaleHelpers.isInsideOut(scale))
-            std.mem.swap(@TypeOf(v1), &v1, &v2);
+            Core.swap(@TypeOf(v1), &v1, &v2);
 
         if (draw_wireframe)
             renderer.drawWireTriangle(v1, v2, v3, if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color)

@@ -346,8 +346,8 @@ pub const PlaneShape = struct {
 
         // Reverse if scale is inside out
         if (ScaleHelpers.isInsideOut(scale)) {
-            std.mem.swap(Vec3, &vertices[0], &vertices[3]);
-            std.mem.swap(Vec3, &vertices[1], &vertices[2]);
+            Core.swap(Vec3, &vertices[0], &vertices[3]);
+            Core.swap(Vec3, &vertices[1], &vertices[2]);
         }
 
         // Transform them to world space
@@ -365,8 +365,8 @@ pub const PlaneShape = struct {
 
         // Reverse if scale is inside out
         if (ScaleHelpers.isInsideOut(scale)) {
-            std.mem.swap(Vec3, &local_vertices[0], &local_vertices[3]);
-            std.mem.swap(Vec3, &local_vertices[1], &local_vertices[2]);
+            Core.swap(Vec3, &local_vertices[0], &local_vertices[3]);
+            Core.swap(Vec3, &local_vertices[1], &local_vertices[2]);
         }
 
         // Transform them to world space
@@ -488,8 +488,8 @@ pub const PlaneShape = struct {
 
         // Reverse if scale is inside out
         if (ScaleHelpers.isInsideOut(scale)) {
-            std.mem.swap(Vec3, &vertices[0], &vertices[3]);
-            std.mem.swap(Vec3, &vertices[1], &vertices[2]);
+            Core.swap(Vec3, &vertices[0], &vertices[3]);
+            Core.swap(Vec3, &vertices[1], &vertices[2]);
         }
 
         // Transform them to world space
