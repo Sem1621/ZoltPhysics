@@ -37,7 +37,6 @@ const Vec3 = @import("../../Math/Vec3.zig").Vec3;
 const MotionProperties = @import("../Body/MotionProperties.zig").MotionProperties;
 const DeterminismLog = @import("../DeterminismLog.zig");
 const ContactConstraintManager = @import("ContactConstraintManager.zig").ContactConstraintManager;
-const ContactConstraintBase = ContactConstraintManager.ContactConstraintBase;
 const ContactConstraintPart = @import("ConstraintPart/ContactConstraintPart.zig").ContactConstraintPart;
 const AngularFrictionConstraintPart = @import("ConstraintPart/AngularFrictionConstraintPart.zig").AngularFrictionConstraintPart;
 
@@ -564,6 +563,10 @@ fn solveGroup(g: *const Group, num: u32) bool {
 /// may appear in two of the constraints. The dynamic vs dynamic constraints are solved 8 at a time, the others with the
 /// scalar solver. Returns true when any impulse was applied.
 pub fn solveVelocityConstraints(manager: *ContactConstraintManager, constraint_offsets: []const u32) bool {
+    // Too few constraints for a group
+    if (constraint_offsets.len < min_lanes)
+        return manager.solveVelocityConstraints(constraint_offsets);
+
     var any_impulse_applied = false;
 
     var remaining = constraint_offsets;
@@ -622,9 +625,10 @@ pub fn solveVelocityConstraints(manager: *ContactConstraintManager, constraint_o
             }
             any_impulse_applied = solveGroup(&group, num) or any_impulse_applied;
         } else {
-            for (0..num) |i| {
-                const constraint: *ContactConstraintBase = @ptrCast(@alignCast(group.constraints[i]));
-                any_impulse_applied = ContactConstraintManager.solveVelocityConstraint(.dynamic, .dynamic, constraint, group.motion_properties1[i], group.motion_properties2[i]) or any_impulse_applied;
+            // (Zolt: through solveVelocityConstraints, so that its only call of solveVelocityConstraint stays inlined)
+            for (group.constraints[0..num]) |constraint| {
+                const constraint_offset: u32 = @intCast(constraint - manager.constraints.items.ptr);
+                any_impulse_applied = manager.solveVelocityConstraints(&.{constraint_offset}) or any_impulse_applied;
             }
         }
     }

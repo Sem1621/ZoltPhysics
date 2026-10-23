@@ -2121,7 +2121,7 @@ pub const ContactConstraintManager = struct {
     }
 
     /// Internal helper function to solve a single velocity constraint. Templated to the motion type to reduce the amount of branches and calculations.
-    pub fn solveVelocityConstraint(comptime type1: MotionType, comptime type2: MotionType, constraint_base: *ContactConstraintBase, motion_properties1: ?*MotionProperties, motion_properties2: ?*MotionProperties) bool {
+    fn solveVelocityConstraint(comptime type1: MotionType, comptime type2: MotionType, constraint_base: *ContactConstraintBase, motion_properties1: ?*MotionProperties, motion_properties2: ?*MotionProperties) bool {
         const constraint = ContactConstraint(type1, type2).fromBase(constraint_base);
 
         var any_impulse_applied = false;
