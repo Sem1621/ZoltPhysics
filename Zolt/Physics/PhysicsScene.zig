@@ -251,9 +251,10 @@ pub const PhysicsScene = struct {
     }
 
     /// Instantiate all bodies, returns false if not all bodies could be created
-    /// (Zolt: `error.InvalidShape` for a body without a shape and `error.OutOfMemory`; the bodies and constraints that
-    /// were created are then removed and destroyed again)
-    pub fn createBodies(self: *const PhysicsScene, system: *PhysicsSystem) CreateBodyError!bool {
+    /// (Zolt: `error.InvalidShape` for a body without a shape, `error.InvalidSettings` for constraint settings that Jolt
+    /// cannot use (TwoBodyConstraintSettings.CreateError) and `error.OutOfMemory`; the bodies and constraints that were
+    /// created are then removed and destroyed again)
+    pub fn createBodies(self: *const PhysicsScene, system: *PhysicsSystem) (CreateBodyError || TwoBodyConstraintSettings.CreateError)!bool {
         const bi = system.getBodyInterfaceMut();
 
         var body_ids: BodyIDVector = .empty;

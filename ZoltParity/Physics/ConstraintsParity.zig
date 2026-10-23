@@ -1298,7 +1298,7 @@ const PathKind = struct {
             16 => {
                 var path: Ref(zolt.PathConstraintPath) = if (op.i[0] != 0) try makePath(allocator, d) else .empty;
                 defer path.deinit();
-                c.setPath(path.get(), op.f[0]);
+                try c.setPath(path.get(), op.f[0]);
             },
             17 => c.setMaxFrictionForce(op.f[0]),
             18 => c.setPositionMotorState(@enumFromInt(@as(i32, @bitCast(op.i[0])))),

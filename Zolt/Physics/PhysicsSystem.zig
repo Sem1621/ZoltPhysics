@@ -2460,7 +2460,12 @@ pub const PhysicsSystem = struct {
             return null;
 
         // Check if the active body has a corresponding CCD body
-        std.debug.assert(active_index < step.active_body_to_ccd_body.items.len); // Ensure that the body has a mapping to CCD body
+        // (Zolt, UB35 of RemainingFeaturesArchitecture.md R20: Jolt asserts that the body has a mapping to a CCD body and
+        // reads past mActiveBodyToCCDBody when it has none. JobResolveCCDContacts activates the bodies it wakes up in
+        // batches of 64 while it still loops over the CCD bodies. Such a body gets an active index past the table. It
+        // was asleep during FindCCDContacts, so it has no CCD body.)
+        if (active_index >= step.active_body_to_ccd_body.items.len)
+            return null;
         const ccd_index = step.active_body_to_ccd_body.items[active_index];
         if (ccd_index < 0)
             return null;

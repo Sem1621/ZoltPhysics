@@ -779,12 +779,13 @@ pub const RagdollSettings = struct {
     /// Create ragdoll instance from these settings
     /// @return Newly created ragdoll or null when out of bodies
     /// (Zolt: the ragdoll has reference count 0 like Jolt's `new`, put it in a `Ref`. It, its arrays and its constraints
-    /// are allocated with the settings' allocator. `error.InvalidShape` for a part without a shape, error.OutOfMemory:
-    /// the bodies and constraints that were created are destroyed again. The ragdoll holds a reference to these
+    /// are allocated with the settings' allocator. `error.InvalidShape` for a part without a shape, `error.InvalidSettings`
+    /// for constraint settings that Jolt cannot use (TwoBodyConstraintSettings.CreateError), error.OutOfMemory: the bodies
+    /// and constraints that were created are destroyed again. The ragdoll holds a reference to these
     /// settings. As in Jolt, a null result releases it again (`delete r`), so settings that nobody else references are
     /// destroyed. An error does the same, unless it is the allocation of the ragdoll itself. Hold a reference to keep
     /// the settings.)
-    pub fn createRagdoll(self: *const RagdollSettings, collision_group: CollisionGroup.GroupID, user_data: u64, system: *PhysicsSystem) CreateBodyError!?*Ragdoll {
+    pub fn createRagdoll(self: *const RagdollSettings, collision_group: CollisionGroup.GroupID, user_data: u64, system: *PhysicsSystem) (CreateBodyError || TwoBodyConstraintSettings.CreateError)!?*Ragdoll {
         // Zolt: `r.destroy()` can destroy these settings, so nothing reads `self` after it (the deferred free of
         // `bodies` uses this copy of the allocator)
         const allocator = self.allocator;

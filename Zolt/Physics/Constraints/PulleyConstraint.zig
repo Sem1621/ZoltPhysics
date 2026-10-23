@@ -147,7 +147,7 @@ pub const PulleyConstraintSettings = struct {
     }
 
     /// Create an instance of this constraint
-    pub fn createConstraint(self: *const PulleyConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const PulleyConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try PulleyConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }

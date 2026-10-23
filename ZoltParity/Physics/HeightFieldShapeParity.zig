@@ -26,8 +26,13 @@
 //! copies from a null buffer), the walking queries on height fields whose empty range blocks collapse to a valid box
 //! (`walksOutside`: Jolt then walks blocks outside the height field) and a negative or zero Y scale in the settings
 //! (same effect), CalculateBitsPerSampleForError with a sample count that is not a multiple of the block size (reads
-//! beyond the samples). GetTrianglesNext is compared for at most `max_calls` calls: with a block that has more
-//! triangles than requested, Jolt returns the same triangles forever.
+//! beyond the samples). Collapsed fields with a power of 2 number of blocks stay in the height field and are compared.
+//! An empty block inside such a grid keeps Jolt's bounds (UB36): `emptyBlockHeightField` has one, the cast layer
+//! casts onto the tied blocks next to it, and the walking layers check that they compare such a field
+//! (`emptyBlockInside`). GetTrianglesNext is compared for at most `max_calls` calls. With a block that has more
+//! triangles than requested, Jolt returns the same triangles forever (UB37 of RemainingFeaturesArchitecture.md R20):
+//! there the calls are compared up to the first call that repeats the call before it, and Zolt's walk must finish
+//! and return the triangles of Jolt's walk with a buffer that never fills.
 //!
 //! C ABI wrappers: ZoltParity/Physics/HeightFieldShapeReference.cpp.
 
@@ -855,7 +860,27 @@ fn heightFields(allocator: Allocator, gen: *Gen, num_random: usize) !std.ArrayLi
         const input = try gen.heightField(allocator, .{});
         try list.append(allocator, input);
     }
+    try list.append(allocator, try emptyBlockHeightField(allocator)); // Last, so the random inputs stay the same
     return list;
+}
+
+/// UB36: a flat height field far from the origin (every sample is 100) with a patch of holes that empties range block
+/// (0, 1). 16 samples with block size 4 make 4 blocks per row (a power of 2), so Jolt stays in the height field. Jolt
+/// gives the empty block the collapsed bounds [100, 100] and visits it. The cast and ray visitors sort the blocks by
+/// distance, and that order is not stable for ties, so Zolt must keep these bounds.
+fn emptyBlockHeightField(allocator: Allocator) !HFInput {
+    var input: HFInput = .{};
+    errdefer input.deinit(allocator);
+    input.desc.sample_count = 16;
+    input.desc.block_size = 4;
+    try input.samples.resize(allocator, 16 * 16);
+    for (input.samples.items, 0..) |*h, i| {
+        const x = i % 16;
+        const y = i / 16;
+        h.* = if (x <= 4 and y >= 4 and y <= 8) no_collision_value else 100.0;
+    }
+    input.finish();
+    return input;
 }
 
 fn freeHeightFields(allocator: Allocator, list: *std.ArrayList(HFInput)) void {
@@ -1077,17 +1102,46 @@ fn zoltCast(allocator: Allocator, height_field: *const Shape, input: *const Cast
     return o;
 }
 
-/// Jolt walks blocks outside the height field (it reads beyond its range block grid and height samples, undefined
-/// behavior; JPH_ASSERT and Zolt's safe builds assert) when the bounds of an empty range block (min 0xffff, max 0)
-/// collapse to a valid box: offset.y + scale.y * 65535 == offset.y in float (a flat height field far from the origin)
-/// while the number of blocks is not a power of 2 (only then the walker reaches blocks outside the height field).
-/// The queries that walk the height field are not compared for these.
-fn walksOutside(hf: *const HeightFieldShape) bool {
+/// The bounds of an empty range block (min 0xffff, max 0) collapse to a valid box: offset.y + scale.y * 65535 <=
+/// offset.y in float (a flat height field far from the origin)
+fn collapsedEmptyBounds(hf: *const HeightFieldShape) bool {
     const oy = Vec4.replicate(hf.offset.getY());
     const sy = Vec4.replicate(hf.scale.getY());
     const empty_min_y = oy.add(sy.mul(Vec4.replicate(65535.0)));
     const empty_max_y = oy.add(sy.mul(Vec4.replicate(0.0)));
-    return empty_min_y.getX() <= empty_max_y.getX() and !math.isPowerOf2(hf.sample_count / hf.block_size);
+    return empty_min_y.getX() <= empty_max_y.getX();
+}
+
+/// Jolt walks blocks outside the height field (it reads beyond its range block grid and height samples, undefined
+/// behavior; JPH_ASSERT asserts) when the bounds of an empty range block collapse (`collapsedEmptyBounds`) while the
+/// number of blocks is not a power of 2 (only then the walker reaches blocks outside the height field). The queries
+/// that walk the height field are not compared for these.
+fn walksOutside(hf: *const HeightFieldShape) bool {
+    return collapsedEmptyBounds(hf) and !math.isPowerOf2(hf.sample_count / hf.block_size);
+}
+
+/// UB36 coverage: the bounds of an empty range block collapse and a block inside the height field is empty (all the
+/// samples of its range are holes). Jolt is defined there: it visits the block and finds no triangles. Zolt's guard
+/// must leave such a block alone, so the walking queries compare these height fields.
+fn emptyBlockInside(hf: *const HeightFieldShape) bool {
+    if (hf.height_samples_size == 0 or !collapsedEmptyBounds(hf)) return false;
+    const count = hf.sample_count;
+    const block_size = hf.block_size;
+    var block_y: u32 = 0;
+    while (block_y < count) : (block_y += block_size) {
+        var block_x: u32 = 0;
+        while (block_x < count) : (block_x += block_size) {
+            // The range of a block includes the first samples of the next block
+            var empty = true;
+            for (block_y..@min(block_y + block_size + 1, count)) |y| {
+                for (block_x..@min(block_x + block_size + 1, count)) |x| {
+                    if (!hf.isNoCollision(@intCast(x), @intCast(y))) empty = false;
+                }
+            }
+            if (empty) return true;
+        }
+    }
+    return false;
 }
 
 /// A random point on (near) the surface of the height field, in its local space
@@ -1481,10 +1535,12 @@ test "HeightFieldShape parity: CastRay (single hit and collectors) and CollidePo
 
     var inputs = try heightFields(allocator, &gen, 100);
     defer freeHeightFields(allocator, &inputs);
+    var empty_block_inputs: usize = 0;
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
+        if (emptyBlockInside(pair.hf())) empty_block_inputs += 1;
         const hf = pair.hf();
         const bounds = hf.asShape().getLocalBounds();
         const height = @max(bounds.getSize().getY(), 1.0);
@@ -1549,6 +1605,8 @@ test "HeightFieldShape parity: CastRay (single hit and collectors) and CollidePo
             point_checker.check(.{ input_index, point }, @as(u32, @intCast(collector.hits.items.len)), jolt_hits);
         }
     }
+    // UB36: the walks are compared on a height field with an empty block inside a collapsed grid
+    checker.check("height fields with an empty block inside a collapsed grid", empty_block_inputs > 0, true);
     try finishAll(&.{ &create_checker, &checker, &point_checker });
 }
 
@@ -1575,10 +1633,12 @@ test "HeightFieldShape parity: collide sphere / box vs height field (and reverse
 
     var inputs = try heightFields(allocator, &gen, 60);
     defer freeHeightFields(allocator, &inputs);
+    var empty_block_inputs: usize = 0;
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
+        if (emptyBlockInside(pair.hf())) empty_block_inputs += 1;
         const hf = pair.hf();
         for (0..60) |k| {
             const convex = gen.convex();
@@ -1621,6 +1681,8 @@ test "HeightFieldShape parity: collide sphere / box vs height field (and reverse
             for (0..@min(zolt_out.num_hits, max_hits)) |h| checker.check(.{ input_index, k, h, collide_input }, zolt_out.hits[h], jolt_out.hits[h]);
         }
     }
+    // UB36: the walks are compared on a height field with an empty block inside a collapsed grid
+    checker.check("height fields with an empty block inside a collapsed grid", empty_block_inputs > 0, true);
     try finishAll(&.{ &create_checker, &checker });
 }
 
@@ -1634,10 +1696,12 @@ test "HeightFieldShape parity: cast sphere / box vs height field (and the height
 
     var inputs = try heightFields(allocator, &gen, 60);
     defer freeHeightFields(allocator, &inputs);
+    var empty_block_inputs: usize = 0;
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
+        if (emptyBlockInside(pair.hf())) empty_block_inputs += 1;
         const hf = pair.hf();
         for (0..50) |k| {
             const convex = gen.convex();
@@ -1690,6 +1754,51 @@ test "HeightFieldShape parity: cast sphere / box vs height field (and the height
             for (0..@min(zolt_out.num_hits, max_hits)) |h| checker.check(.{ input_index, k, h, cast_input }, zolt_out.hits[h], jolt_out.hits[h]);
         }
     }
+
+    // UB36: a sphere cast down onto tied blocks next to the empty block of `emptyBlockHeightField`, with each collector.
+    // Inside-out bounds for the empty block swap the tied blocks: the closest hit is another triangle at the same
+    // fraction, and all hits come in another order.
+    {
+        var input = try emptyBlockHeightField(allocator);
+        defer input.deinit(allocator);
+        var pair = (try build(allocator, &table, &input, &create_checker)) orelse return error.TestUnexpectedResult;
+        defer pair.deinit();
+        const defaults: ShapeCastSettings = .{};
+        for (0..3) |collector| {
+            const cast_input: CastInput = .{
+                .convex = .{ .kind = 0, .radius = 1.5 },
+                .height_field_cast = 0,
+                .scale1 = .{ 1, 1, 1 },
+                .start = arr16(Mat44.translation(Vec3.init(4, 105, 3))),
+                .direction = .{ 0, -10, 0 },
+                .scale2 = .{ 1, 1, 1 },
+                .transform2 = arr16(Mat44.identity()),
+                .creator1 = .{ 0, 0 },
+                .creator2 = .{ 0, 0 },
+                .collision_tolerance = defaults.collision_tolerance,
+                .penetration_tolerance = defaults.penetration_tolerance,
+                .extra_convex_radius = 0.0,
+                .active_edge_mode = 0,
+                .back_face_mode_triangles = 0,
+                .back_face_mode_convex = 0,
+                .use_shrunken_shape = 0,
+                .return_deepest_point = 0,
+                .collect_faces = 0,
+                .active_edge_movement_direction = .{ 0, 0, 0 },
+                .early_out = math.flt_max,
+                .body_id = 1,
+                .collector = @intCast(collector),
+            };
+            var jolt_out = std.mem.zeroes(HitsOutput);
+            jolt.jolt_hf_cast(pair.jolt, &cast_input, &jolt_out);
+            const zolt_out = try zoltCast(allocator, pair.shape(), &cast_input);
+            checker.check(.{ "empty block", collector }, zolt_out.num_hits, jolt_out.num_hits);
+            for (0..@min(zolt_out.num_hits, max_hits)) |h| checker.check(.{ "empty block", collector, h }, zolt_out.hits[h], jolt_out.hits[h]);
+        }
+    }
+
+    // UB36: the walks are compared on a height field with an empty block inside a collapsed grid
+    checker.check("height fields with an empty block inside a collapsed grid", empty_block_inputs > 0, true);
     try finishAll(&.{ &create_checker, &checker });
 }
 
@@ -1716,10 +1825,13 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
 
     var inputs = try heightFields(allocator, &gen, 80);
     defer freeHeightFields(allocator, &inputs);
+    var repeated_walks: usize = 0;
+    var empty_block_inputs: usize = 0;
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
+        if (emptyBlockInside(pair.hf())) empty_block_inputs += 1;
         const hf = pair.hf();
         for (0..6) |k| {
             const scale: P = if (gen.oneIn(3)) .{ 1, 1, 1 } else gen.hfScale();
@@ -1742,6 +1854,14 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
             @memset(jolt_counts, -1);
             const jolt_calls = jolt.jolt_hf_triangles(pair.jolt, &box, &position, &rotation, &scale, max_requested, with_materials, max_calls, max_triangles, jolt_counts.ptr, jolt_vertices.ptr, jolt_materials.ptr);
 
+            // UB37: the first call of Jolt that returns the same triangles as the call before it (Jolt then repeats
+            // them forever). Zolt continues inside the block from this call on.
+            const repeat = firstRepeatedCall(jolt_counts[0..@intCast(jolt_calls)], jolt_vertices, jolt_materials, max_triangles);
+            var jolt_compared: usize = 0; // The triangles of Jolt's calls before the repeated call
+            for (jolt_counts[0..repeat]) |count| jolt_compared += @intCast(count);
+            jolt_compared = @min(jolt_compared, max_triangles);
+            if (repeat < jolt_calls) repeated_walks += 1;
+
             var context: Shape.GetTrianglesContext = .{};
             hf.asShape().getTrianglesStart(&context, AABox.init(vec3(box[0..3].*), vec3(box[3..6].*)), vec3(position), quat(rotation), vec3(scale));
             const triangles = try allocator.alloc(Float3, 3 * @as(usize, @intCast(max_requested)));
@@ -1750,9 +1870,11 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
             defer allocator.free(materials);
             var zolt_calls: c_int = 0;
             var total: usize = 0;
+            var finished = false;
             while (true) {
                 const count = hf.asShape().getTrianglesNext(&context, @intCast(max_requested), triangles, if (with_materials != 0) materials else null);
-                checker.check(.{ input_index, k, zolt_calls }, @as(c_int, @intCast(count)), jolt_counts[@intCast(zolt_calls)]);
+                if (zolt_calls < repeat)
+                    checker.check(.{ input_index, k, zolt_calls }, @as(c_int, @intCast(count)), jolt_counts[@intCast(zolt_calls)]);
                 zolt_calls += 1;
                 var i: usize = 0;
                 while (i < count and total < max_triangles) : ({
@@ -1765,13 +1887,76 @@ test "HeightFieldShape parity: GetTrianglesStart / Next" {
                     }
                     zolt_materials[total] = if (with_materials != 0) table.indexOf(materials[i]) else unknown_material;
                 }
+                finished = count == 0;
                 if (count == 0 or zolt_calls == max_calls or total >= max_triangles) break;
             }
-            checker.check(.{ input_index, k, "calls" }, zolt_calls, jolt_calls);
-            for (0..total) |t| checker.check(.{ input_index, k, t, box, position, rotation, scale }, .{ zolt_vertices[9 * t ..][0..9].*, zolt_materials[t] }, .{ jolt_vertices[9 * t ..][0..9].*, jolt_materials[t] });
+            if (repeat == jolt_calls) {
+                // Jolt's walk finishes (or stops at the limits of the comparison): every call and every triangle as in Jolt
+                checker.check(.{ input_index, k, "calls" }, zolt_calls, jolt_calls);
+                for (0..total) |t| checker.check(.{ input_index, k, t, box, position, rotation, scale }, .{ zolt_vertices[9 * t ..][0..9].*, zolt_materials[t] }, .{ jolt_vertices[9 * t ..][0..9].*, jolt_materials[t] });
+            } else {
+                // The triangles of the calls before the repeated call as in Jolt
+                for (0..@min(total, jolt_compared)) |t| checker.check(.{ input_index, k, t, box, position, rotation, scale }, .{ zolt_vertices[9 * t ..][0..9].*, zolt_materials[t] }, .{ jolt_vertices[9 * t ..][0..9].*, jolt_materials[t] });
+
+                // Zolt's walk finishes and returns the triangles of Jolt's walk with a buffer that never fills
+                checker.check(.{ input_index, k, "finished" }, finished, true);
+                const all_calls = jolt.jolt_hf_triangles(pair.jolt, &box, &position, &rotation, &scale, max_triangles, with_materials, 2, max_triangles, jolt_counts.ptr, jolt_vertices.ptr, jolt_materials.ptr);
+                checker.check(.{ input_index, k, "one call" }, all_calls == 2 and jolt_counts[1] == 0, true);
+                const jolt_set = try triangleSet(allocator, jolt_vertices, jolt_materials, @intCast(jolt_counts[0]));
+                defer allocator.free(jolt_set);
+                const zolt_set = try triangleSet(allocator, zolt_vertices, zolt_materials, total);
+                defer allocator.free(zolt_set);
+                checker.check(.{ input_index, k, "set size" }, zolt_set.len, jolt_set.len);
+                if (zolt_set.len == jolt_set.len)
+                    for (zolt_set, jolt_set, 0..) |z, j, t| checker.check(.{ input_index, k, "set", t }, z, j);
+            }
         }
     }
+    // The generator reaches walks that Jolt repeats forever (UB37)
+    checker.check("walks that Jolt repeats", repeated_walks > 0, true);
+    // UB36: the walks are compared on a height field with an empty block inside a collapsed grid
+    checker.check("height fields with an empty block inside a collapsed grid", empty_block_inputs > 0, true);
     try finishAll(&.{ &create_checker, &checker });
+}
+
+/// UB37: the index of the first call that returns the same triangles (and materials) as the call before it, or
+/// `counts.len` when there is none. Jolt repeats such a call forever. Calls whose triangles are not all stored (beyond
+/// `max_triangles`) are not compared.
+fn firstRepeatedCall(counts: []const c_int, vertices: []const f32, materials: []const u32, max_triangles: usize) usize {
+    var start: usize = 0; // The first triangle of call c - 1
+    for (1..counts.len) |c| {
+        const previous: usize = @intCast(counts[c - 1]);
+        const count: usize = @intCast(counts[c]);
+        const next = start + previous;
+        if (count > 0 and count == previous and next + count <= max_triangles and
+            std.mem.eql(u32, @ptrCast(vertices[9 * start ..][0 .. 9 * count]), @ptrCast(vertices[9 * next ..][0 .. 9 * count])) and
+            std.mem.eql(u32, materials[start..][0..count], materials[next..][0..count]))
+            return c;
+        start = next;
+    }
+    return counts.len;
+}
+
+/// The distinct triangles of a walk (the 9 vertex coordinates as bits and the material), sorted
+fn triangleSet(allocator: Allocator, vertices: []const f32, materials: []const u32, count: usize) ![][10]u32 {
+    const set = try allocator.alloc([10]u32, count);
+    errdefer allocator.free(set);
+    for (set, 0..) |*t, i| {
+        for (0..9) |v| t[v] = @bitCast(vertices[9 * i + v]);
+        t[9] = materials[i];
+    }
+    std.mem.sortUnstable([10]u32, set, {}, struct {
+        fn lessThan(_: void, a: [10]u32, b: [10]u32) bool {
+            return std.mem.order(u32, &a, &b) == .lt;
+        }
+    }.lessThan);
+    var n: usize = 0;
+    for (set) |t| {
+        if (n > 0 and std.mem.eql(u32, &set[n - 1], &t)) continue;
+        set[n] = t;
+        n += 1;
+    }
+    return allocator.realloc(set, n);
 }
 
 test "HeightFieldShape parity: CollideSoftBodyVertices" {
@@ -1785,10 +1970,12 @@ test "HeightFieldShape parity: CollideSoftBodyVertices" {
 
     var inputs = try heightFields(allocator, &gen, 60);
     defer freeHeightFields(allocator, &inputs);
+    var empty_block_inputs: usize = 0;
     for (inputs.items, 0..) |*input, input_index| {
         var pair = (try build(allocator, &table, input, &create_checker)) orelse continue;
         defer pair.deinit();
         if (walksOutside(pair.hf())) continue;
+        if (emptyBlockInside(pair.hf())) empty_block_inputs += 1;
         const hf = pair.hf();
         for (0..6) |_| {
             const scale: P = if (gen.oneIn(2)) .{ 1, 1, 1 } else gen.hfScale();
@@ -1827,6 +2014,8 @@ test "HeightFieldShape parity: CollideSoftBodyVertices" {
             checker.check(.{ input_index, scale, positions }, .{ zolt_penetrations, zolt_plane_values, zolt_index_values }, .{ jolt_penetrations, jolt_planes, jolt_indices });
         }
     }
+    // UB36: the walks are compared on a height field with an empty block inside a collapsed grid
+    checker.check("height fields with an empty block inside a collapsed grid", empty_block_inputs > 0, true);
     try finishAll(&.{ &create_checker, &checker });
 }
 

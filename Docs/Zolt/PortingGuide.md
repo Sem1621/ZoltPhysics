@@ -472,6 +472,15 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `JPH_MAKE_HASHABLE(T, a, b)`                | `pub fn getHash(self: T) u64 { return HashCombine.hashCombineArgs(.{ a, b }); }` |
 | a lambda passed to `JobSystem::CreateJob`   | an inline closure at the lambda's position, see below       |
 
+**Undefined behavior in Jolt.** Jolt undefined behavior that valid input can reach gets a defined guard in every build
+mode; invalid input gets an error at creation.
+- A guard keeps Jolt's result wherever Jolt is defined. So no parity test and no hash changes.
+- `std.debug.assert` and the bounds check of a slice are not guards: ReleaseFast removes both.
+- The error is `error.InvalidSettings` from the function that creates the object, for example `VehicleConstraint.create`
+  or `TwoBodyConstraintSettings.createConstraint`. A failed creation leaves nothing allocated.
+- Add a row to the UB table of [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R20 and pin the
+  case with a Zolt-only test. The parity generators never produce such input, because Jolt has no result to compare.
+
 **Lambdas passed to the job system** (`PhysicsSystem::Update`, [SimulationArchitecture.md](SimulationArchitecture.md)
 D4) become inline closures at the lambda's position: `.init(struct { fn call(...) void { ... } }.call, .{ captures })`.
 The captures map 1:1 to the argument tuple (`[&context, &step]` → `.{ context, step }`, `[&step, i]` → `.{ step, i }`,

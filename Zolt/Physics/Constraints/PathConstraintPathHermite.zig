@@ -25,6 +25,10 @@
 //! - The asserts that user input can violate (a looping path whose first and last point are the same, a normal that is
 //!   not normalized because the normals of the path are degenerate) only run with `Core.enable_asserts`, so ReleaseFast
 //!   keeps Jolt's release behavior.
+//! - An open path with fewer than 2 points or a looping path without points makes Jolt index outside mPoints (and a
+//!   looping path divides by 0). The Zolt override `isValid` is false for such a path, and PathConstraint refuses it
+//!   with `error.InvalidSettings` (RemainingFeaturesArchitecture.md R20, UB39). The path functions themselves stay
+//!   literal.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -205,7 +209,7 @@ pub const PathConstraintPathHermite = struct {
         .attributes = &.{.attr("mPoints", .points)},
     });
 
-    pub const overrides = .{ .getPathMaxFraction, .getClosestPoint, .getPointOnPath, .saveBinaryState, .restoreBinaryState };
+    pub const overrides = .{ .getPathMaxFraction, .getClosestPoint, .getPointOnPath, .saveBinaryState, .restoreBinaryState, .isValid };
 
     pub const Point = extern struct {
         /// JPH_DECLARE_SERIALIZABLE_NON_VIRTUAL / JPH_IMPLEMENT_SERIALIZABLE_NON_VIRTUAL(PathConstraintPathHermite::Point)
@@ -370,6 +374,12 @@ pub const PathConstraintPathHermite = struct {
         out.normal = out.tangent.cross(out.binormal);
         if (Core.enable_asserts) std.debug.assert(out.normal.isNormalized(.{}));
         return out;
+    }
+
+    /// See: PathConstraintPath.isValid (Zolt, UB39). An open path needs 2 points and a looping path 1. With fewer,
+    /// Jolt's GetIndexAndT and GetClosestPoint index outside mPoints, and a looping path divides by 0.
+    pub fn isValid(self: *const PathConstraintPathHermite) bool {
+        return self.points.items.len >= @as(usize, if (self.base.isLooping()) 1 else 2);
     }
 
     /// Adds a point to the path
