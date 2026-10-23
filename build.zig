@@ -31,6 +31,9 @@
 //!                               side runs longer (the update watchdog, default 300; 0: off, e.g. under a debugger)
 //!   -Duse_llvm=true|false       Use the LLVM backend (default: true). Zig 0.16's self-hosted x86_64 backend,
 //!                               which Zig uses by default for Debug builds, miscompiles some @Vector code.
+//!   -Djob_profile=true          Record a timeline of the jobs and the idle time of every job thread
+//!                               (Zolt/Core/JobProfiler.zig, `ZoltPerformanceTest -p`). Off by default: then every hook
+//!                               is `void` and costs nothing. Results do not change.
 const std = @import("std");
 const jolt_sources = @import("ZoltParity/jolt_sources.zig");
 const parity_reference_sources = @import("ZoltParity/reference_sources.zig");
@@ -43,6 +46,7 @@ pub fn build(b: *std.Build) void {
     const object_layer_bits = b.option(u8, "object_layer_bits", "Number of bits in ObjectLayer, 16 or 32 (JPH_OBJECT_LAYER_BITS)") orelse 16;
     const determinism_log = b.option(bool, "determinism_log", "Log the simulation state to find determinism issues (JPH_ENABLE_DETERMINISM_LOG)") orelse false;
     const debug_renderer = b.option(bool, "debug_renderer", "Compile the debug renderer hooks into the library and the C++ reference (JPH_DEBUG_RENDERER)") orelse false;
+    const job_profile = b.option(bool, "job_profile", "Record a timeline of the jobs and the idle time of the job threads (Zolt/Core/JobProfiler.zig)") orelse false;
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
     // Zig 0.16's self-hosted x86_64 backend (the default for Debug builds) miscompiles some vector operations
     // (e.g. @bitCast of @Vector(4, bool)), so default to LLVM. Use -Duse_llvm=false for faster Debug compiles.
@@ -58,6 +62,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(u8, "object_layer_bits", object_layer_bits);
     options.addOption(bool, "determinism_log", determinism_log);
     options.addOption(bool, "debug_renderer", debug_renderer);
+    options.addOption(bool, "job_profile", job_profile);
     const options_module = options.createModule();
 
     // User shape registrations, default material and serializable classes (Zolt/RegisterTypes.zig): an empty module by
@@ -156,6 +161,7 @@ pub fn build(b: *std.Build) void {
         det_log_options.addOption(u8, "object_layer_bits", object_layer_bits);
         det_log_options.addOption(bool, "determinism_log", true);
         det_log_options.addOption(bool, "debug_renderer", debug_renderer);
+        det_log_options.addOption(bool, "job_profile", job_profile);
         const zolt_det_log = b.createModule(.{
             .root_source_file = b.path("Zolt/zolt.zig"),
             .target = target,

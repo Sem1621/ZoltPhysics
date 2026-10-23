@@ -50,6 +50,7 @@ pub const insertionSort = @import("Core/InsertionSort.zig").insertionSort;
 pub const AssertHandler = @import("Core/IssueReporting.zig").AssertHandler;
 pub const ExpectAssert = @import("Core/IssueReporting.zig").ExpectAssert;
 pub const IssueReporting = @import("Core/IssueReporting.zig");
+pub const JobProfiler = @import("Core/JobProfiler.zig").JobProfiler;
 pub const FailingJobSystem = @import("Core/JobSystem.zig").FailingJobSystem;
 pub const JobHandle = @import("Core/JobSystem.zig").JobSystem.JobHandle;
 pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
@@ -661,6 +662,7 @@ const source_files = .{
     @import("Core/HashTable.zig"),
     @import("Core/InsertionSort.zig"),
     @import("Core/IssueReporting.zig"),
+    @import("Core/JobProfiler.zig"),
     @import("Core/JobSystem.zig"),
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),

@@ -34,6 +34,9 @@ zig build parity -Dreference_asserts=true -Dtest-filter='.SceneTest("<scene>"[' 
 zig build hello-world-check                 # C++ HelloWorld and its port must print the same bytes
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Ragdoll -validate_hash=0x3be6ea76c07a2ac8  # M9 (double: 0x8dd6bc501859a228)
+zig build performance-test -Doptimize=ReleaseFast -- -s=Pyramid -t=1 -phase_times  # also print the time of the scene and the physics updates
+zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyramid -t=2 -p  # job timeline: <scene>_<tag>.json (Chrome trace) + busy/idle per thread
+zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
 zig build debug-renderer-check -Ddebug_renderer=true  # the .jor bytes of PerformanceTest -r and ZoltPerformanceTest -r must be equal
 zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon  # format (CI checks this)

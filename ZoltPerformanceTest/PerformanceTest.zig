@@ -1,7 +1,7 @@
 //! Port of: PerformanceTest/PerformanceTest.cpp
 //! Status: complete
-//! Not ported: the profiler (-p is parsed, JPH_PROFILE_START / NEXTFRAME / DUMP / END are compiled out as in Jolt's
-//! Distribution build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
+//! Not ported: Jolt's profiler (JPH_PROFILE_START / NEXTFRAME / DUMP / END are compiled out as in Jolt's Distribution
+//! build), JPH_TRACK_NARROWPHASE_STATS and the Android entry point.
 //!
 //! Milestone M6 (SimulationArchitecture section 3): `zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast
 //! -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892` must print Jolt's published hash (determinism_check.yml), in
@@ -41,6 +41,13 @@
 //!   `ofstream` / `ifstream` of the per frame timings and the state files are `OutputFile` / `InputFile` (a file that
 //!   could not be opened ignores writes and reads nothing, like a failed stream).
 //! - JPH_DET_LOG is `if (DeterminismLog.enabled) DeterminismLog.log(.{ ... })` (build option `-Ddeterminism_log`).
+//! - `-p` (Zolt, in place of Jolt's profile dumps): with `-Djob_profile=true` the thread pool records the jobs and the
+//!   idle time of every run (Zolt/Core/JobProfiler.zig, from the first update to the last). After the stat line of a
+//!   run, `-p` writes the timeline as a Chrome trace `<scene>_<tag>.json` in the current directory (e.g.
+//!   `Ragdoll_linearcast_th4.json`, open it in chrome://tracing or https://ui.perfetto.dev) and prints one line with
+//!   the wall time and the busy and idle time of each thread. Without the option `-p` prints a note.
+//! - `-phase_times` (Zolt): after the stat line of a run, print the total time of the scene updates (UpdateTest) and of
+//!   the physics updates (PhysicsSystem::Update), in milliseconds. The hash does not change.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -259,6 +266,24 @@ fn validateState(allocator: Allocator, physics_system: *PhysicsSystem, data: []c
     return validator.num_mismatches != 0 or validator.isFailed();
 }
 
+/// Zolt, -p with -Djob_profile=true (see the file header): stop the job profiler of the run and the worker threads
+/// (a worker can still record the end of a wait), write the Chrome trace into the file `name` in `dir` and the summary
+/// line to `summary`
+fn writeJobProfile(io: std.Io, job_system: *JobSystemThreadPool, dir: std.Io.Dir, name: []const u8, process_name: []const u8, summary: *std.Io.Writer) !void {
+    const profiler = job_system.getJobProfiler();
+    profiler.stop();
+    try job_system.setNumThreads(0);
+
+    const file = try dir.createFile(io, name, .{});
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var file_writer = file.writer(io, &buffer);
+    try profiler.writeChromeTrace(&file_writer.interface, process_name);
+    try file_writer.interface.flush();
+
+    try profiler.writeSummary(summary);
+}
+
 /// The helper of main that creates the default scene: a RagdollScene(4, 10, 0.6f) (Jolt: with JPH_OBJECT_STREAM, which
 /// Zolt always has, SerializationArchitecture S1)
 fn createRagdollScene(allocator: Allocator, io: std.Io) Allocator.Error!PerformanceTestScene {
@@ -290,6 +315,7 @@ pub fn main(init: std.process.Init) !u8 {
     var max_iterations: u32 = 500;
     var disable_sleep = false;
     var enable_profiler = false;
+    var enable_phase_times = false; // Zolt: -phase_times
     var enable_debug_renderer = false; // JPH_DEBUG_RENDERER
     var enable_per_frame_recording = false;
     var record_state = false;
@@ -345,6 +371,8 @@ pub fn main(init: std.process.Init) !u8 {
             disable_sleep = true;
         } else if (std.mem.eql(u8, arg, "-p")) {
             enable_profiler = true;
+        } else if (std.mem.eql(u8, arg, "-phase_times")) {
+            enable_phase_times = true;
         } else if (zolt.Core.debug_renderer and std.mem.eql(u8, arg, "-r")) { // JPH_DEBUG_RENDERER
             enable_debug_renderer = true;
         } else if (std.mem.eql(u8, arg, "-f")) {
@@ -367,6 +395,7 @@ pub fn main(init: std.process.Init) !u8 {
                 "-t=<num threads>: Test only with N threads (default is to iterate over 1 .. num hardware threads)\n" ++
                 "-t=max: Test with the number of threads available on the system\n" ++
                 "-p: Write out profiles\n" ++
+                "-phase_times: Print the time of the scene and the physics updates (Zolt)\n" ++
                 "-r: Record debug renderer output for JoltViewer\n" ++
                 "-f: Record per frame timings\n" ++
                 "-no_sleep: Disable sleeping\n" ++
@@ -435,6 +464,9 @@ pub fn main(init: std.process.Init) !u8 {
     const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
 
     // Start profiling this program (JPH_PROFILE_START: compiled out)
+    // Zolt: -p writes the job timeline of every run, which needs a build with -Djob_profile=true (see the file header)
+    if (enable_profiler and !zolt.Core.job_profile)
+        log.info("-p: this build has no job profiler, build with -Djob_profile=true", .{});
 
     // Start the determinism log
     if (DeterminismLog.enabled) try DeterminismLog.open(io);
@@ -556,6 +588,13 @@ pub fn main(init: std.process.Init) !u8 {
 
                 var total_duration: i96 = 0;
 
+                // Zolt: -phase_times, the total time of the scene updates and of the physics updates
+                var scene_update_duration: i96 = 0;
+                var physics_update_duration: i96 = 0;
+
+                // Zolt: the job timeline of this run starts now (-Djob_profile=true)
+                if (zolt.Core.job_profile) job_system.getJobProfiler().reset();
+
                 // Step the world for a fixed amount of iterations
                 var iterations: u32 = 0;
                 while (iterations < max_iterations) : (iterations += 1) {
@@ -568,6 +607,9 @@ pub fn main(init: std.process.Init) !u8 {
                     // Update the test
                     try s.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
 
+                    // Zolt: -phase_times splits the measurement here
+                    const clock_physics = if (enable_phase_times) std.Io.Clock.awake.now(io) else clock_start;
+
                     // Do a physics step
                     _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
 
@@ -575,6 +617,10 @@ pub fn main(init: std.process.Init) !u8 {
                     const clock_end = std.Io.Clock.awake.now(io);
                     const duration = clock_start.durationTo(clock_end).toNanoseconds();
                     total_duration += duration;
+                    if (enable_phase_times) {
+                        scene_update_duration += clock_start.durationTo(clock_physics).toNanoseconds();
+                        physics_update_duration += clock_physics.durationTo(clock_end).toNanoseconds();
+                    }
 
                     if (zolt.Core.debug_renderer and enable_debug_renderer) {
                         // Draw the state of the world
@@ -637,6 +683,9 @@ pub fn main(init: std.process.Init) !u8 {
                     }
                 }
 
+                // Zolt: the job timeline of this run ends here (-Djob_profile=true)
+                if (zolt.Core.job_profile) job_system.getJobProfiler().stop();
+
                 // Calculate hash of all positions and rotations of the bodies
                 var hash: u64 = HashCombine.hashBytes(&.{}); // Ensure we start with the proper seed
                 const bi = physics_system.getBodyInterfaceNoLock();
@@ -662,6 +711,27 @@ pub fn main(init: std.process.Init) !u8 {
 
                 // Trace stat line
                 log.info("{s}, {d}, {f}, {s}", .{ motion_quality_str, num_threads + 1, PrintfFloat{ .value = @as(f64, @floatFromInt(max_iterations)) / (1.0e-9 * @as(f64, @floatFromInt(total_duration))) }, hash_str });
+
+                // Zolt: -phase_times
+                if (enable_phase_times)
+                    log.info("Phase times: scene update {d:.3} ms, physics update {d:.3} ms", .{ 1.0e-6 * @as(f64, @floatFromInt(scene_update_duration)), 1.0e-6 * @as(f64, @floatFromInt(physics_update_duration)) });
+
+                // Zolt: -p writes the job timeline of this run (-Djob_profile=true, see the file header)
+                if (zolt.Core.job_profile and enable_profiler) {
+                    const name = try std.mem.concat(allocator, u8, &.{ s.getName(), "_", tag, ".json" });
+                    defer allocator.free(name);
+                    const process_name = try std.mem.concat(allocator, u8, &.{ "ZoltPerformanceTest ", s.getName(), " ", tag });
+                    defer allocator.free(process_name);
+                    var summary: std.Io.Writer.Allocating = .init(allocator);
+                    defer summary.deinit();
+                    if (writeJobProfile(io, &job_system, std.Io.Dir.cwd(), name, process_name, &summary.writer)) {
+                        // The summary has one entry per thread: it can be longer than a Trace line (1023 characters)
+                        try summary.writer.writeByte('\n');
+                        std.Io.File.stdout().writeStreamingAll(io, summary.written()) catch {};
+                    } else |err| {
+                        log.info("-p: could not write {s}: {t}", .{ name, err });
+                    }
+                }
 
                 // Check hash code
                 if (validate_hash) |expected| {
@@ -758,6 +828,14 @@ fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, n
         try std.testing.expect(temp_allocator.isEmpty());
     }
 
+    const hash = try hashForTest(&physics_system, scene);
+    try scene.stopTest(&physics_system);
+    return hash;
+}
+
+/// Zolt test helper: the hash of main (the positions and rotations of all bodies, then the scene's own state)
+fn hashForTest(physics_system: *PhysicsSystem, scene: PerformanceTestScene) !u64 {
+    const allocator = std.testing.allocator;
     var hash: u64 = HashCombine.hashBytes(&.{});
     const bi = physics_system.getBodyInterfaceNoLock();
     var body_ids: BodyIDVector = .empty;
@@ -770,7 +848,6 @@ fn runSceneForTest(scene: PerformanceTestScene, motion_quality: MotionQuality, n
         hash = HashCombine.hashBytesSeeded(std.mem.asBytes(&rot), hash);
     }
     scene.updateHash(&hash);
-    try scene.stopTest(&physics_system);
     return hash;
 }
 
@@ -789,6 +866,81 @@ test "PerformanceTest scenes give Jolt's hashes after a few updates" {
     try std.testing.expectEqual(@as(u64, if (dp) 0x4ca08591ebc72ba2 else 0xcb05430a62f9c7f), try runSceneForTest((try CharacterVirtualScene.create(allocator)).scene(), .discrete, 10));
     // The oracle: zig build jolt-performance-test [-Ddouble_precision=true] -- -q=LinearCast -t=1 -s=Ragdoll -i=5
     try std.testing.expectEqual(@as(u64, if (dp) 0x5430d55461b5bdc6 else 0x47fe0db54d0cdb27), try runSceneForTest(try createRagdollScene(allocator, std.testing.io), .linear_cast, 5));
+}
+
+test "-p writes the job timeline of a run (-Djob_profile)" {
+    // Zolt test of -p (see the file header): 10 updates of the Pyramid scene on a pool with a worker thread. The trace
+    // is valid JSON and holds the physics jobs under Jolt's job names, the summary names both threads, and the hash is
+    // the one of "PerformanceTest scenes give Jolt's hashes after a few updates" (recording changes no result).
+    if (!zolt.Core.job_profile) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const scene = (try PyramidScene.create(allocator)).scene();
+    defer scene.destroy();
+    try std.testing.expect(try scene.load(""));
+
+    var temp_allocator = try TempAllocatorImpl.init(allocator, scene.getTempAllocatorSizeMB() * 1024 * 1024);
+    defer temp_allocator.deinit();
+    const broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init();
+    const object_vs_broadphase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{};
+    const object_vs_object_layer_filter: LayersFile.ObjectLayerPairFilterImpl = .{};
+    var job_system: JobSystemThreadPool = .empty;
+    try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = 1 });
+    defer job_system.deinit();
+    var physics_system: PhysicsSystem = .empty;
+    try physics_system.init(allocator, io, scene.getMaxBodies(), 0, scene.getMaxBodyPairs(), scene.getMaxContactConstraints(), &broad_phase_layer_interface.base, &object_vs_broadphase_layer_filter.base, &object_vs_object_layer_filter.base, .{});
+    defer physics_system.deinit();
+    try scene.startTest(&physics_system, .linear_cast);
+    defer scene.stopTest(&physics_system) catch unreachable; // PyramidScene has no StopTest
+    try physics_system.optimizeBroadPhase();
+
+    job_system.getJobProfiler().reset();
+    for (0..10) |_| {
+        try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
+        _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
+    }
+    const dp = zolt.Core.double_precision;
+    try std.testing.expectEqual(@as(u64, if (dp) 0x874b972e6c896604 else 0x8ae6dee69e292017), try hashForTest(&physics_system, scene));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var summary: std.Io.Writer.Allocating = .init(allocator);
+    defer summary.deinit();
+    try writeJobProfile(io, &job_system, tmp.dir, "Pyramid_linearcast_th2.json", "ZoltPerformanceTest Pyramid linearcast_th2", &summary.writer);
+    try std.testing.expect(!job_system.getJobProfiler().isRecording());
+    try std.testing.expectEqual(@as(i32, 1), job_system.getMaxConcurrency()); // The worker threads are stopped
+
+    const trace = try tmp.dir.readFileAlloc(io, "Pyramid_linearcast_th2.json", allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(trace);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trace, .{});
+    defer parsed.deinit();
+    var num_find_collisions: usize = 0;
+    var num_solve_velocity: usize = 0;
+    var num_worker_jobs: usize = 0; // Jobs of "Worker 0" (tid 0)
+    var num_worker_waits: usize = 0; // "Idle: wait for jobs" of "Worker 0"
+    var num_barrier_waits: usize = 0; // "Idle: wait for barrier" of "Thread 0", the thread that calls update (tid 1)
+    for (parsed.value.object.get("traceEvents").?.array.items) |event| {
+        const name = event.object.get("name").?.string;
+        if (std.mem.eql(u8, name, "FindCollisions")) num_find_collisions += 1;
+        if (std.mem.eql(u8, name, "SolveVelocityConstraints")) num_solve_velocity += 1;
+        if (!std.mem.eql(u8, event.object.get("ph").?.string, "X")) continue;
+        const tid = event.object.get("tid").?.integer;
+        if (tid == 0 and std.mem.eql(u8, event.object.get("cat").?.string, "job")) num_worker_jobs += 1;
+        if (tid == 0 and std.mem.eql(u8, name, "Idle: wait for jobs")) num_worker_waits += 1;
+        if (tid == 1 and std.mem.eql(u8, name, "Idle: wait for barrier")) num_barrier_waits += 1;
+    }
+    try std.testing.expect(num_find_collisions >= 10); // At least one per update
+    try std.testing.expect(num_solve_velocity >= 10);
+
+    // The idle spans: the worker runs a job only after it woke up from a wait for jobs, and every update waits at
+    // least once for its barrier
+    if (num_worker_jobs > 0)
+        try std.testing.expect(num_worker_waits > 0);
+    try std.testing.expect(num_barrier_waits >= 10);
+
+    try std.testing.expect(std.mem.startsWith(u8, summary.written(), "Job profile: wall "));
+    try std.testing.expect(std.mem.indexOf(u8, summary.written(), ", Worker 0: busy ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary.written(), ", Thread 0: busy ") != null);
 }
 
 test "validateState: -vs fails on a state that differs or ends early" {
