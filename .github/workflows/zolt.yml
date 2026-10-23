@@ -311,7 +311,8 @@ jobs:
     if: github.event_name != 'schedule'
     # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
     # arguments), and the hash does not depend on the thread count. FMA mode (-Dfma=true) has its own hashes, printed by
-    # the C++ PerformanceTest built with -DJPH_USE_FMADD (the oracle step below checks them too).
+    # the C++ PerformanceTest built with -DJPH_USE_FMADD. Of these, the oracle step below checks only the Ragdoll hash
+    # with C++ again: the other four are checked against ZoltPerformanceTest only.
     runs-on: ubuntu-latest
     name: Determinism check double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} fma=${{ matrix.fma }}
     strategy:

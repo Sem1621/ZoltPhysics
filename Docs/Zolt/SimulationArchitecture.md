@@ -1289,8 +1289,9 @@ with a static or kinematic body, short tails, non parallel batches, islands that
 `isDynamic` checks of the sorting loop add about 15M more (callgrind counts them in Body.zig). Wall
 clock (steps/s, -t=1) went from about 55 to about 72 on a noisy machine. The scalar solver
 waits on the dependency chain from one contact point to the next; 8 lanes fill that time. The other
-scenes of perf-budget change by less than 0.02%. HighSpeed and Ragdoll do not use the SIMD path: their
-contact solve keeps its count. About a fifth of the kernel's instructions are
-transposes and another sixth are register spills (12 velocity vectors stay live). Transposing the
-constant constraint data once per step instead of once per iteration would remove most of the
-transposes but needs a buffer per step; it is not done.
+scenes of perf-budget change by less than 0.02%. HighSpeed and Ragdoll do not use the SIMD path in these
+short runs: their contact solve keeps its count. (Ragdoll runs 15 steps here. In the 500-step runs its
+ragdolls form large islands from about step 24, and ConvexVsMesh from about step 324: then they use
+it.) About a fifth of the kernel's instructions are transposes and another sixth are register spills
+(12 velocity vectors stay live). Transposing the constant constraint data once per step instead of once
+per iteration would remove most of the transposes but needs a buffer per step; it is not done.

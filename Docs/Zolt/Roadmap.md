@@ -507,8 +507,13 @@ PerformanceTest built with `-DJPH_USE_FMADD`. Every run printed its expected has
 | Pyramid | 4 | 94.5 | 92.7 | 94.2 | 106.4 | 92.4 | 106.5 |
 
 The SIMD contact solver makes Pyramid 34% faster on 1 thread and 13% faster on 4 threads, 33% and 13% faster than
-C++. The other scenes have no large islands, so it does not change them (their differences are noise: Phase 10 and
-"SIMD off" run the same code).
+C++. Ragdoll and ConvexVsMesh use it too, later in the run: Ragdoll from about step 24 (the ragdolls of a pile touch
+and form a large island), ConvexVsMesh from about step 324. Then about half of their parallel batches go through the
+SIMD kernel. Their differences to "SIMD off" (Ragdoll -6% on 1 thread, ConvexVsMesh +6% on 4 threads) are within the
+run-to-run variation, so this table does not show whether they are real. An instruction count over the steps after
+the large islands form would (perf-budget's 15 Ragdoll and 200 ConvexVsMesh steps end before). HighSpeed and
+CharacterVirtual have no large islands: Phase 10 and "SIMD off" run the same code for them, so their differences are
+noise.
 
 ### Deferred / out of scope for now
 - `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).
