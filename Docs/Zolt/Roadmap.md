@@ -484,12 +484,30 @@ built the same way (CLAUDE.md lists them). It needs no `-Djolt_compat`. Rules:
   macOS arm64 CI row checks the C++ FMA hashes of the short runs.
 - `zig build codegen-check` fails on an FMA instruction in the library without `-Dfma`, and with `-Dfma` on one that
   does not come from the 8 sites.
-- The 8 sites are mostly about precision: the measured speed gain of Jolt's FMADD build was 0-6%, within noise.
+- The 8 sites are mostly about precision. Ragdoll (many quaternion products) runs about 8% faster with them, in C++
+  and in Zolt alike. The other scenes do not change beyond the noise.
 
-Wall clock (steps/s, ReleaseFast, x86-64-v3, 4 cores; the same binaries ran interleaved in two rounds; the best of the
-two runs is shown). Phase 10 is Zolt before Phase 11. "SIMD off" is `-Dsimd_contact_solver=false`.
+Wall clock (steps/s, ReleaseFast, x86-64-v3, 4 cores). The six binaries ran interleaved in 5 rounds on a quiet
+machine; the table shows the median. Runs vary by 5-10%, so only differences beyond that are real. Phase 10 is Zolt
+before Phase 11, "SIMD off" is `-Dsimd_contact_solver=false`, and the FMA columns are `-Dfma=true` and the C++
+PerformanceTest built with `-DJPH_USE_FMADD`. Every run printed its expected hash.
 
-WALLCLOCK_TABLE
+| Scene | Threads | C++ | C++ FMA | Zolt Phase 10 | Zolt Phase 11 | SIMD off | Zolt FMA |
+|---|---|---|---|---|---|---|---|
+| Ragdoll | 1 | 49.7 | 53.6 | 48.4 | 45.1 | 48.1 | 52.6 |
+| Ragdoll | 4 | 98.5 | 106.2 | 94.3 | 95.4 | 96.2 | 105.4 |
+| ConvexVsMesh | 1 | 240.3 | 234.1 | 238.6 | 237.1 | 240.9 | 234.7 |
+| ConvexVsMesh | 4 | 419.0 | 422.4 | 408.0 | 400.6 | 378.0 | 390.6 |
+| HighSpeed | 1 | 164.4 | 163.5 | 152.3 | 159.7 | 149.4 | 154.1 |
+| HighSpeed | 4 | 217.2 | 211.1 | 215.9 | 211.7 | 214.6 | 214.8 |
+| CharacterVirtual | 1 | 451.3 | 451.2 | 429.2 | 410.1 | 408.7 | 416.6 |
+| CharacterVirtual | 4 | 459.8 | 468.2 | 438.9 | 427.0 | 415.8 | 412.4 |
+| Pyramid | 1 | 57.4 | 56.8 | 56.9 | 76.5 | 56.9 | 74.2 |
+| Pyramid | 4 | 94.5 | 92.7 | 94.2 | 106.4 | 92.4 | 106.5 |
+
+The SIMD contact solver makes Pyramid 34% faster on 1 thread and 13% faster on 4 threads, 33% and 13% faster than
+C++. The other scenes have no large islands, so it does not change them (their differences are noise: Phase 10 and
+"SIMD off" run the same code).
 
 ### Deferred / out of scope for now
 - `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).
