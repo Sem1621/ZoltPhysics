@@ -580,7 +580,9 @@ Jolt's quirks where Jolt's behavior is defined are reproduced:
 - the recorder's stale batch IDs across recorders (the shape caches outlive a recorder in both).
 
 Where Jolt is undefined, Zolt has one defined behavior. The parity generators never produce these inputs. Zolt-only
-tests pin them.
+tests pin them. Since Phase 10 the rule of PortingGuide.md section 7 applies: undefined behavior that valid input can
+reach gets a defined guard in every build mode (UB35 to UB37), and invalid input gets an error at creation (UB38,
+UB39).
 
 | # | Input | Jolt | Zolt |
 |---|---|---|---|
