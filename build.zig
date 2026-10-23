@@ -22,8 +22,8 @@
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
 //!   -Dfma=true                  JPH_USE_FMADD: Jolt's 8 fused multiply add sites use @mulAdd (Core.use_fmadd). Results
 //!                               change. Zolt needs a CPU with FMA (x86-64: -Dcpu=x86_64_v3 or native; aarch64). The C++
-//!                               reference gets -DJPH_USE_FMADD. It is only an oracle on x86-64: on another host the steps
-//!                               that build it fail (NEON's vmlaq_f32 does not fuse under -ffp-contract=off).
+//!                               reference gets -DJPH_USE_FMADD. It is only an oracle on x86-64: for another target the
+//!                               steps that build it fail (NEON's vmlaq_f32 does not fuse under -ffp-contract=off).
 //!   -Dobject_layer_bits=16|32   JPH_OBJECT_LAYER_BITS
 //!   -Ddeterminism_log=true      JPH_ENABLE_DETERMINISM_LOG: Zolt/Physics/DeterminismLog.zig exists at run time (the
 //!                               `test` step always also runs the DeterminismLog unit tests with it enabled)
