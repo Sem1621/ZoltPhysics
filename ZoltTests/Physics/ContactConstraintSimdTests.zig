@@ -13,14 +13,18 @@
 //! - Physical batches calculate the parts like the manager does. Edge batches write every member directly with signed
 //!   zeros, tiny values and small integers, so that the sign of a zero reaches the lambdas (Vec3.dot's `+ 0.0`,
 //!   math.max of -0.0) and tiny lambdas meet the FLT_MIN of the friction clamp.
+//! - Huge batches are edge batches with lambdas and velocities of up to 3e19. The squares of the friction lambdas
+//!   overflow to +inf: the scale-back runs with total_lambda_sq = +inf, or not at all when the square of the limit is
+//!   +inf too. They are solved for one iteration only, so that no inf - inf makes a NaN.
 //! - The dispatcher: a batch whose contacts share dynamic bodies (like the non parallel split) must take the scalar
 //!   path. The test proves that it would notice otherwise: the SIMD solver gives other bits for such a batch. With the
 //!   determinism log even a parallel batch must take the scalar path (a test that the determinism log binary runs).
 //! - Bite proofs (each one fails these tests): another association in the jacobian sum, a velocity step without the
-//!   lane mask, the friction clamp without FLT_MIN, a point mask with `<=`, Vec3.dot without `+ 0.0`, and math.max
-//!   that returns `b` for equal values. `@max` instead of math.max is not visible on x86-64 with finite inputs (LLVM
-//!   emits the same maxps there, only NaN differs), it stays forbidden. Without `!DeterminismLog.enabled` in
-//!   ContactConstraintSimd.enabled the determinism log test fails.
+//!   lane mask, the friction clamp without FLT_MIN, a point mask with `<=`, Vec3.dot without `+ 0.0`, math.max
+//!   that returns `b` for equal values, and the friction scale-back test in f64 (only the huge batches see it). `@max`
+//!   instead of math.max is not visible on x86-64 with finite inputs (LLVM emits the same maxps there, only NaN
+//!   differs), it stays forbidden. Without `!DeterminismLog.enabled` in ContactConstraintSimd.enabled the determinism
+//!   log test fails.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -49,8 +53,14 @@ const Random = struct {
     /// The values of `edge`: the edge cases, or mostly signed zeros (`Values.zeros`)
     edge_values: []const f32 = &edge_cases,
 
+    /// `edgeOrHuge` gives a value of `huge_values` (`Values.huge`)
+    huge: bool = false,
+
     const edge_cases = [_]f32{ 0.0, -0.0, 1.0e-20, -1.0e-20, 1.0e-30, -1.0e-30, 1.0, -1.0, 2.0, -0.5 };
     const signed_zeros = [_]f32{ 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 1.0, -1.0 };
+
+    /// Huge values and some small ones. The square of 3e19 overflows to +inf, the square of 1e18 does not.
+    const huge_values = [_]f32{ 1.0e18, -1.0e18, 3.0e19, -3.0e19, 0.0, -0.0, 1.0, -0.5 };
 
     fn int(self: *Random, n: u32) u32 {
         return self.rng.next() % n;
@@ -95,6 +105,16 @@ const Random = struct {
 
     fn edgeVec3(self: *Random) Vec3 {
         return Vec3.init(self.edge(), self.edge(), self.edge());
+    }
+
+    /// A lambda or a velocity component of an edge batch: an edge value, or with `huge` a value of `huge_values`
+    fn edgeOrHuge(self: *Random) f32 {
+        if (self.huge) return huge_values[self.int(huge_values.len)];
+        return self.edge();
+    }
+
+    fn edgeOrHugeVec3(self: *Random) Vec3 {
+        return Vec3.init(self.edgeOrHuge(), self.edgeOrHuge(), self.edgeOrHuge());
     }
 
     fn edgeFloat3(self: *Random) Float3 {
@@ -165,6 +185,9 @@ const Values = enum {
     edge,
     /// Like `edge` with mostly +0.0 and -0.0: the signs of zero reach the lambdas through every operation
     zeros,
+    /// Like `edge` with huge lambdas and velocities (`Random.huge_values`): the squares of the friction lambdas and of
+    /// their limit overflow to +inf. Solve these for one iteration only: a second one could make inf - inf, a NaN.
+    huge,
 };
 
 /// A batch of contact constraints in a constraint buffer, with the bodies it uses
@@ -179,7 +202,7 @@ const Scene = struct {
 
     /// Build a scene: `num_constraints` contacts, `seed` decides everything else
     fn create(allocator: Allocator, seed: u32, num_constraints: u32, sharing: Sharing, values: Values) !*Scene {
-        var random: Random = .{ .rng = Mt19937.init(seed), .edge_values = if (values == .zeros) &Random.signed_zeros else &Random.edge_cases };
+        var random: Random = .{ .rng = Mt19937.init(seed), .edge_values = if (values == .zeros) &Random.signed_zeros else &Random.edge_cases, .huge = values == .huge };
 
         const self = try allocator.create(Scene);
         errdefer allocator.destroy(self);
@@ -196,8 +219,8 @@ const Scene = struct {
         for (self.bodies, self.motion_properties, 0..) |*body, *mp, i| {
             const motion_type: MotionType = if (i < num_dynamic) .dynamic else if (i < num_dynamic + num_other / 2) .kinematic else .static;
             mp.* = .{
-                .linear_velocity = if (values == .physical) random.vec3(10.0) else random.edgeVec3(),
-                .angular_velocity = if (values == .physical) random.vec3(10.0) else random.edgeVec3(),
+                .linear_velocity = if (values == .physical) random.vec3(10.0) else random.edgeOrHugeVec3(),
+                .angular_velocity = if (values == .physical) random.vec3(10.0) else random.edgeOrHugeVec3(),
                 .allowed_dofs = random.allowedDOFs(),
             };
             if (Core.enable_asserts) mp.cached_motion_type = motion_type;
@@ -358,7 +381,7 @@ const Scene = struct {
             if (num_points > 1) {
                 const part = &constraint.angular_friction_constraint;
                 part.base1.base.effective_mass = random.edgeMass();
-                part.base1.base.total_lambda = random.edge();
+                part.base1.base.total_lambda = random.edgeOrHuge();
                 if (comptime type1 == .dynamic) part.base1.inv_i1_axis = random.edgeFloat3();
                 if (comptime type2 == .dynamic) part.base2.inv_i2_axis = random.edgeFloat3();
                 part.bias = random.edge();
@@ -380,7 +403,7 @@ const Scene = struct {
     fn writeEdgePart(part: anytype, random: *Random) void {
         const Part = @TypeOf(part.*);
         part.base1.effective_mass = random.edgeMass();
-        part.base1.total_lambda = random.edge();
+        part.base1.total_lambda = random.edgeOrHuge();
         if (comptime Part.motion_type1 != .static) part.base1.r1_plus_u_x_axis = random.edgeFloat3();
         if (comptime Part.motion_type1 == .dynamic) part.base1.inv_i1_r1_plus_u_x_axis = random.edgeFloat3();
         if (comptime Part.motion_type2 != .static) part.base2.r2_x_axis = random.edgeFloat3();
@@ -390,6 +413,51 @@ const Scene = struct {
 
     fn constraintOffsets(self: *const Scene) []const u32 {
         return self.offsets;
+    }
+
+    /// A velocity of a body is NaN
+    fn hasNaNVelocity(self: *const Scene) bool {
+        for (self.motion_properties) |*mp|
+            if (mp.linear_velocity.isNaN() or mp.angular_velocity.isNaN()) return true;
+        return false;
+    }
+};
+
+/// How often the friction lambdas of the dynamic vs dynamic contacts of `Values.huge` batches overflow
+const FrictionOverflow = struct {
+    /// total_lambda_sq is +inf and the square of the limit is not: the scale-back gives scale = max / sqrt(+inf) = 0
+    scaled_to_zero: u32 = 0,
+    /// total_lambda_sq and the square of the limit are +inf: no scale-back, the huge lambdas stay
+    both_infinite: u32 = 0,
+
+    /// Count the contacts of a scene before it is solved, with the operations of the scalar solver. In a parallel batch
+    /// every contact sees the velocities of the scene.
+    fn add(self: *FrictionOverflow, scene: *const Scene) void {
+        const Constraint = ContactConstraintManager.ContactConstraint(.dynamic, .dynamic);
+        const inf = std.math.inf(f32);
+        for (scene.offsets) |offset| {
+            const constraint: *const Constraint = @ptrCast(@alignCast(scene.buffer.ptr + offset));
+            const body1 = constraint.base.body1;
+            const body2 = constraint.base.body2;
+            if (!body1.isDynamic() or !body2.isDynamic()) continue;
+            if (!constraint.friction_constraint1.isActive() and !constraint.friction_constraint2.isActive()) continue;
+
+            const mp1 = body1.motion_properties.?;
+            const mp2 = body2.motion_properties.?;
+            const t = constraint.base.getTangents();
+            const lambda1 = constraint.friction_constraint1.solveVelocityConstraintGetTotalLambda(mp1.linear_velocity, mp1.angular_velocity, mp2.linear_velocity, mp2.angular_velocity, t.tangent1);
+            const lambda2 = constraint.friction_constraint2.solveVelocityConstraintGetTotalLambda(mp1.linear_velocity, mp1.angular_velocity, mp2.linear_velocity, mp2.angular_velocity, t.tangent2);
+            var max_linear_lambda: f32 = 0.0;
+            for (constraint.getContactPointsConst()[0..constraint.base.num_contact_points]) |*wcp|
+                max_linear_lambda += wcp.non_penetration_constraint.getTotalLambda();
+            max_linear_lambda *= constraint.base.combined_friction;
+
+            if (math.square(lambda1) + math.square(lambda2) != inf) continue;
+            if (math.square(max_linear_lambda) + math.flt_min == inf)
+                self.both_infinite += 1
+            else
+                self.scaled_to_zero += 1;
+        }
     }
 };
 
@@ -469,6 +537,30 @@ test "ContactConstraintSimd: the SIMD solver gives the bits of the scalar solver
             _ = try solveAndCompare(scalar, simd, ContactConstraintSimd.solveVelocityConstraints, seed, 4, false);
         }
     }
+}
+
+test "ContactConstraintSimd: the SIMD solver gives the bits of the scalar solver (huge values)" {
+    if (!ContactConstraintSimd.supported) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // Lambdas and velocities of up to 3e19 (Values.huge): both overflow cases of the friction scale-back must happen
+    var overflow: FrictionOverflow = .{};
+    var seed: u32 = 1;
+    while (seed <= 400) : (seed += 1) {
+        const num_constraints: u32 = 1 + seed % 24;
+        const scalar = try Scene.create(allocator, seed, num_constraints, .parallel, .huge);
+        defer scalar.destroy();
+        const simd = try Scene.create(allocator, seed, num_constraints, .parallel, .huge);
+        defer simd.destroy();
+        overflow.add(scalar);
+        try expectSameBits(scalar, simd, seed, 0, true);
+        _ = try solveAndCompare(scalar, simd, ContactConstraintSimd.solveVelocityConstraints, seed, 1, false);
+
+        // One iteration makes no inf - inf: the bits of a NaN could depend on the order of the operands
+        try expect(!scalar.hasNaNVelocity());
+    }
+    try expect(overflow.scaled_to_zero > 0);
+    try expect(overflow.both_infinite > 0);
 }
 
 /// Solve batches whose contacts share dynamic bodies with solveBatch(`parallel`) and with the scalar solver, and fail
