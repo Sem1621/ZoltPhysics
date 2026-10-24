@@ -22,13 +22,19 @@ pub fn StaticArray(comptime T: type, comptime N: u32) type {
         /// Storage, only the first `len` elements are initialized
         buffer: [N]T = undefined,
 
-        /// Empty array
+        /// Empty array. A comptime value: storing it fills the whole buffer, so use `init()` for big arrays.
         pub const empty: Self = .{};
+
+        /// Default constructor (StaticArray()): an empty array. Only `len` is set, the buffer stays undefined.
+        /// Unlike `.empty` and `.{}`, this does not fill the buffer.
+        pub fn init() Self {
+            return .{ .len = 0, .buffer = undefined };
+        }
 
         /// Constructor from initializer list
         pub fn fromSlice(items: []const T) Self {
             std.debug.assert(items.len <= N);
-            var result: Self = .{};
+            var result: Self = .init();
             @memcpy(result.buffer[0..items.len], items);
             result.len = @intCast(items.len);
             return result;
@@ -63,6 +69,14 @@ pub fn StaticArray(comptime T: type, comptime N: u32) type {
             std.debug.assert(self.len < N);
             self.buffer[self.len] = element;
             self.len += 1;
+        }
+
+        /// Add an element to the back of the array and return a pointer to it (emplace_back without a constructor).
+        /// The new element is undefined: the caller sets its fields in place, so no temporary is copied.
+        pub fn addOne(self: *Self) *T {
+            std.debug.assert(self.len < N);
+            self.len += 1;
+            return &self.buffer[self.len - 1];
         }
 
         /// Remove element from the back of the array and return it (pop_back)
@@ -186,4 +200,43 @@ test "StaticArray" {
     try std.testing.expectEqual(@as(u32, 4), a.len);
     a.clear();
     try std.testing.expect(a.isEmpty());
+}
+
+test "StaticArray init and addOne" {
+    const Pair = struct { a: u32, b: f32 };
+    const Array = StaticArray(Pair, 4);
+
+    var a: Array = .init();
+    try std.testing.expect(a.isEmpty());
+    try std.testing.expectEqual(@as(u32, 0), a.len);
+
+    // addOne returns the new last element, the caller fills it in place
+    const p0 = a.addOne();
+    p0.* = .{ .a = 1, .b = 2.0 };
+    try std.testing.expectEqual(@as(u32, 1), a.len);
+    try std.testing.expectEqual(&a.buffer[0], p0);
+
+    const p1 = a.addOne();
+    p1.a = 3;
+    p1.b = 4.0;
+    try std.testing.expectEqual(@as(u32, 2), a.len);
+    try std.testing.expectEqual(&a.buffer[1], p1);
+    try std.testing.expectEqual(a.back(), p1);
+    try std.testing.expectEqual(Pair{ .a = 1, .b = 2.0 }, a.get(0));
+    try std.testing.expectEqual(Pair{ .a = 3, .b = 4.0 }, a.get(1));
+
+    // Fill to capacity
+    _ = a.addOne();
+    _ = a.addOne();
+    try std.testing.expectEqual(Array.capacity, a.len);
+
+    // init() of an array that was in use gives an empty array again
+    a = .init();
+    try std.testing.expect(a.isEmpty());
+    a.append(.{ .a = 5, .b = 6.0 });
+    try std.testing.expectEqual(@as(u32, 5), a.get(0).a);
+
+    // fromSlice copies only the given elements
+    const b = StaticArray(u32, 8).fromSlice(&.{ 9, 8, 7 });
+    try std.testing.expectEqualSlices(u32, &.{ 9, 8, 7 }, b.constSlice());
 }

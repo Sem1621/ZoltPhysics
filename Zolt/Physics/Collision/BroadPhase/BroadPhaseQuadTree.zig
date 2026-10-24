@@ -619,7 +619,7 @@ pub const BroadPhaseQuadTree = struct {
                 self.tracking[index].object_layer.store(body.getObjectLayer(), .seq_cst);
 
                 // Move the body to the end, layer didn't change
-                std.mem.swap(BodyID, body_id, &body_ids[number - 1]);
+                Core.swap(BodyID, body_id, &body_ids[number - 1]);
                 number -= 1;
             }
         }

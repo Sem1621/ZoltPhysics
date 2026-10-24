@@ -186,6 +186,8 @@ pub const ContactConstraintManager = struct {
         comptime {
             std.debug.assert(@sizeOf(CachedContactPoint) == 28); // Unexpected size
             std.debug.assert(@alignOf(CachedContactPoint) == 4); // Assuming 4 byte aligned
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedContactPoint, "position1")); // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedContactPoint, "position2"));
         }
     };
 
@@ -255,6 +257,7 @@ pub const ContactConstraintManager = struct {
         comptime {
             std.debug.assert(@sizeOf(CachedManifold) == 60); // This structure is expect to not contain any waste due to alignment
             std.debug.assert(@alignOf(CachedManifold) == 4); // Assuming 4 byte aligned
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedManifold, "contact_normal")); // Zolt: read through loadFloat3Unsafe
         }
     };
 
@@ -295,6 +298,8 @@ pub const ContactConstraintManager = struct {
         comptime {
             std.debug.assert(@sizeOf(CachedBodyPair) == 28); // Unexpected size
             std.debug.assert(@alignOf(CachedBodyPair) == 4); // Assuming 4 byte aligned
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedBodyPair, "delta_position")); // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(CachedBodyPair, "delta_rotation"));
         }
     };
 
@@ -922,6 +927,10 @@ pub const ContactConstraintManager = struct {
         comptime {
             if (@sizeOf(usize) == 8)
                 std.debug.assert(@sizeOf(ContactConstraintBase) == 88);
+            // Zolt: read through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(ContactConstraintBase, "world_space_normal"));
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(ContactConstraintBase, "world_space_tangent1"));
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(ContactConstraintBase, "world_space_tangent2"));
         }
     };
 
@@ -1362,7 +1371,7 @@ pub const ContactConstraintManager = struct {
             // Call contact listener to update settings
             if (self.contact_listener) |listener| {
                 // Convert constraint to manifold structure for callback
-                var manifold: ContactManifold = .{};
+                var manifold: ContactManifold = .init();
                 manifold.world_space_normal = world_space_normal;
                 manifold.sub_shape_id1 = input_key.getSubShapeID1();
                 manifold.sub_shape_id2 = input_key.getSubShapeID2();
@@ -1802,7 +1811,7 @@ pub const ContactConstraintManager = struct {
         if (body2_in.getID().lessThan(body1_in.getID())) {
             body1 = body2_in;
             body2 = body1_in;
-            temp = manifold_in.swapShapes();
+            manifold_in.swapShapes(&temp);
             manifold = &temp;
         } else {
             body1 = body1_in;
@@ -1847,7 +1856,7 @@ pub const ContactConstraintManager = struct {
             if (body2_in.getID().lessThan(body1_in.getID())) {
                 body1 = body2_in;
                 body2 = body1_in;
-                temp = manifold_in.swapShapes();
+                manifold_in.swapShapes(&temp);
                 manifold = &temp;
                 swapped = true;
             } else {
@@ -1891,8 +1900,8 @@ pub const ContactConstraintManager = struct {
 
             // If we swapped body1 and body2 we need to swap the mass scales back
             if (swapped) {
-                std.mem.swap(f32, &settings.inv_mass_scale1, &settings.inv_mass_scale2);
-                std.mem.swap(f32, &settings.inv_inertia_scale1, &settings.inv_inertia_scale2);
+                Core.swap(f32, &settings.inv_mass_scale1, &settings.inv_mass_scale2);
+                Core.swap(f32, &settings.inv_inertia_scale1, &settings.inv_inertia_scale2);
                 // Note we do not need to negate the relative surface velocity as it is not applied by the CCD collision constraint
             }
         }

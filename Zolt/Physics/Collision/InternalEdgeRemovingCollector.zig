@@ -61,11 +61,15 @@ pub const InternalEdgeRemovingCollector = struct {
     // This algorithm tests a convex shape (shape 1) against a set of polygons (shape 2).
     // This assumption doesn't hold if the shape we're testing is a compound shape, so we must also
     // store the sub shape ID and ignore voided features that belong to another sub shape ID.
-    const Voided = struct {
-        /// Feature that is voided (of shape 2). Read with Vec3::sLoadFloat3Unsafe so must not be the last member (in Jolt; Zolt's loadFloat3Unsafe reads 3 floats).
+    const Voided = extern struct {
+        /// Feature that is voided (of shape 2). Read with Vec3::sLoadFloat3Unsafe so must not be the last member.
         feature: Float3,
         /// Sub shape ID of the shape that is colliding against the feature (of shape 1).
         sub_shape_id: SubShapeID,
+
+        comptime {
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Voided, "feature"));
+        }
     };
 
     base: CollideShapeCollector,
@@ -202,8 +206,9 @@ pub const InternalEdgeRemovingCollector = struct {
         if (triangle_normal.dot(contact_normal) > 0.999848 * contact_normal_len * triangle_normal_len) // cos(1 degree)
             return self.chainAndVoid(result);
 
-        // Delayed processing
-        self.delayed_results.append(self.delayed_results_allocator.allocator(), result.*) catch |err| self.setAllocationError(err);
+        // Delayed processing (assign copies only the used face vertices)
+        const delayed = self.delayed_results.addOne(self.delayed_results_allocator.allocator()) catch |err| return self.setAllocationError(err);
+        delayed.assign(result);
     }
 
     /// After all hits have been added, call this function to process the delayed results
@@ -339,7 +344,8 @@ const CollideConvexVsTriangles = @import("CollideConvexVsTriangles.zig").Collide
 
 /// A hit against a triangle of shape 2
 fn triangleHit(face: [3]Vec3, contact_point: Vec3, penetration_axis: Vec3, penetration_depth: f32, sub_shape_id1: u32, sub_shape_id2: u32) CollideShapeResult {
-    var r = CollideShapeResult.init(contact_point, contact_point, penetration_axis, penetration_depth, .{ .value = sub_shape_id1 }, .{ .value = sub_shape_id2 }, .invalid);
+    var r: CollideShapeResult = undefined;
+    r.init(contact_point, contact_point, penetration_axis, penetration_depth, .{ .value = sub_shape_id1 }, .{ .value = sub_shape_id2 }, .invalid);
     for (face) |v| r.shape2_face.append(v);
     return r;
 }

@@ -33,6 +33,10 @@
 //!     impulses is the Zolt field `WheelWV.max_lateral_friction_impulse` (one value per wheel, written in the first loop
 //!     and read in the second, like the array entries).
 //! - `TireMaxImpulseCallback` (std::function) is a function pointer + context with `init` and `call`.
+//! - A differential wheel index other than -1 that is outside the wheels makes Jolt read outside mWheels. Zolt refuses
+//!   such settings: `checkWheels` returns `error.InvalidSettings` and VehicleConstraint.create fails
+//!   (RemainingFeaturesArchitecture.md R20, UB38). Differentials changed later through `getDifferentialsMut` or
+//!   `setDifferentials` must keep the rule.
 //! - Jolt behavior reproduced (CharacterVehicleArchitecture, "Settled in the foundation review"):
 //!   `GetWheelSpeedAtClutch` divides by the number of driven wheels without a guard (0 / 0 without driven wheels).
 //! - Jolt's asserts on the settings in the constructors and the sum of the torque ratios in PostCollide are user input
@@ -314,7 +318,7 @@ pub const WheeledVehicleControllerSettings = struct {
         },
     });
 
-    pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
+    pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState, .checkWheels };
 
     base: VehicleControllerSettings,
 
@@ -374,6 +378,15 @@ pub const WheeledVehicleControllerSettings = struct {
     pub fn constructController(self: *const WheeledVehicleControllerSettings, allocator: Allocator, constraint: *VehicleConstraint) Allocator.Error!*VehicleController {
         const controller = try WheeledVehicleController.create(allocator, self, constraint);
         return &controller.base;
+    }
+
+    /// See: VehicleControllerSettings.checkWheels (Zolt, UB38). The wheels that a differential drives must be -1 (no
+    /// wheel) or a wheel of the vehicle. Jolt reads outside mWheels for another index.
+    pub fn checkWheels(self: *const WheeledVehicleControllerSettings, num_wheels: usize) error{InvalidSettings}!void {
+        for (self.differentials.items) |d| {
+            for ([_]i32{ d.left_wheel, d.right_wheel }) |w|
+                if (w < -1 or (w >= 0 and @as(usize, @intCast(w)) >= num_wheels)) return error.InvalidSettings;
+        }
     }
 
     pub fn saveBinaryState(self: *const WheeledVehicleControllerSettings, stream: StreamOut) void {
@@ -1487,4 +1500,18 @@ test "WheeledVehicleController TireMaxImpulseCallback default and with a context
     callback.call(1, &longitudinal, &lateral, 10.0, 0.5, 0.25, 0.1, 0.2, 1.0 / 60.0);
     try testing.expectEqual(@as(f32, 10.0), longitudinal);
     try testing.expectEqual(@as(f32, 5.0), lateral);
+}
+
+test "WheeledVehicleControllerSettings checkWheels: the wheels of a differential (UB38)" {
+    // A differential drives wheel -1 (no wheel) or a wheel of the vehicle. Jolt reads outside mWheels for another index.
+    var settings = try WheeledVehicleControllerSettings.init(testing.allocator);
+    defer settings.base.deinit();
+    try settings.base.checkWheels(0); // No differential
+    try settings.differentials.append(testing.allocator, .{ .left_wheel = 0, .right_wheel = 3 });
+    try settings.base.checkWheels(4);
+    try testing.expectError(error.InvalidSettings, settings.base.checkWheels(3));
+    settings.differentials.items[0] = .{ .left_wheel = -1, .right_wheel = -1 };
+    try settings.base.checkWheels(0);
+    settings.differentials.items[0].left_wheel = -2;
+    try testing.expectError(error.InvalidSettings, settings.base.checkWheels(4));
 }

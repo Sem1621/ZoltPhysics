@@ -155,7 +155,7 @@ pub const TriangleSplitter = struct {
             if (start < end) {
                 // Swap the two elements
                 end -= 1;
-                std.mem.swap(u32, &sorted_idx[start], &sorted_idx[end]);
+                Core.swap(u32, &sorted_idx[start], &sorted_idx[end]);
                 start += 1;
             }
         }

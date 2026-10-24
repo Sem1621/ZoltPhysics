@@ -1312,12 +1312,13 @@ fn storeTriangle(record_type: c_int, t: *const Triangle) HullRecord {
 
 /// Zolt version of jolt_epa_hull
 fn zoltHull(points_in: []const P, closest_dist_sq: []const f32, pop_every: u32, out_records: []HullRecord) usize {
-    var points: EPAConvexHullBuilder.Points = .empty;
+    var points: EPAConvexHullBuilder.Points = .init();
     for (points_in) |p|
         points.append(vec3(p));
 
     var num_records: usize = 0;
-    var hull = EPAConvexHullBuilder.init(&points);
+    var hull: EPAConvexHullBuilder = undefined;
+    hull.init(&points);
     hull.initialize(0, 1, 2);
     var i: u32 = 3;
     while (i < points.len) : (i += 1) {
@@ -1329,7 +1330,7 @@ fn zoltHull(points_in: []const P, closest_dist_sq: []const f32, pop_every: u32, 
         num_records += 1;
 
         if (facing.triangle) |t| {
-            var new_triangles: EPAConvexHullBuilder.NewTriangles = .empty;
+            var new_triangles: EPAConvexHullBuilder.NewTriangles = .init();
             const ok = hull.addPoint(t, i, closest_dist_sq[i], &new_triangles);
             var add_record = std.mem.zeroes(HullRecord);
             add_record.type = 1;

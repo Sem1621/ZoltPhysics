@@ -6,6 +6,7 @@
 //! the `Mat44Arg` / `Vec3Arg` members are copies. Unlike CollideConvexVsTriangles it holds no pointers into itself.
 
 const std = @import("std");
+const Core = @import("../../Core/Core.zig");
 const ClosestPoint = @import("../../Geometry/ClosestPoint.zig");
 const math = @import("../../Math/Math.zig");
 const Mat44 = @import("../../Math/Mat44.zig").Mat44;
@@ -153,7 +154,8 @@ pub const CollideSphereVsTriangles = struct {
         const penetration_axis_world = self.transform2.multiply3x3(penetration_axis);
 
         // Create collision result
-        var result = CollideShapeResult.init(point1, point2, penetration_axis_world, penetration_depth, self.sub_shape_id1, sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
+        var result: CollideShapeResult = undefined;
+        result.init(point1, point2, penetration_axis_world, penetration_depth, self.sub_shape_id1, sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
 
         // Gather faces
         if (settings.collect_faces_mode == .collect_faces) {
@@ -167,7 +169,7 @@ pub const CollideSphereVsTriangles = struct {
 
             // When inside out, we need to swap the triangle winding
             if (self.scale_sign2 < 0.0)
-                std.mem.swap(Vec3, &result.shape2_face.buffer[1], &result.shape2_face.buffer[2]);
+                Core.swap(Vec3, &result.shape2_face.buffer[1], &result.shape2_face.buffer[2]);
         }
 
         // Notify the collector

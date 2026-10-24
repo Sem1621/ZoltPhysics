@@ -361,7 +361,8 @@ fn addCastHit(result: *const ShapeCastResult, out: *HitsOutput) void {
 }
 
 fn loadHit(h: *const HitOutput) CollideShapeResult {
-    var r = CollideShapeResult.init(vec3(h.point1), vec3(h.point2), vec3(h.axis), h.depth, makeID(h.id1), makeID(h.id2), .init(h.body_id));
+    var r: CollideShapeResult = undefined;
+    r.init(vec3(h.point1), vec3(h.point2), vec3(h.axis), h.depth, makeID(h.id1), makeID(h.id2), .init(h.body_id));
     for (0..h.face1_count) |i| r.shape1_face.append(vec3At(&h.face1, i));
     for (0..h.face2_count) |i| r.shape2_face.append(vec3At(&h.face2, i));
     return r;
@@ -492,7 +493,8 @@ fn zoltCast(allocator: Allocator, input: *const CastTrianglesInput) !HitsOutput 
                 for (in.triangles[0..in.num_triangles]) |*t|
                     caster.cast(vec3At(&t.v, 0), vec3At(&t.v, 1), vec3At(&t.v, 2), @intCast(t.active_edges), makeID(t.sub_shape_id2));
             } else {
-                var caster = CastConvexVsTriangles.init(q.shape_cast, q.settings, vec3(in.scale2), mat44(in.transform2), makeCreator(in.creator1), collector);
+                var caster: CastConvexVsTriangles = undefined;
+                caster.init(q.shape_cast, q.settings, vec3(in.scale2), mat44(in.transform2), makeCreator(in.creator1), collector);
                 for (in.triangles[0..in.num_triangles]) |*t|
                     caster.cast(vec3At(&t.v, 0), vec3At(&t.v, 1), vec3At(&t.v, 2), @intCast(t.active_edges), makeID(t.sub_shape_id2));
             }

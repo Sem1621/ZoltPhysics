@@ -183,7 +183,7 @@ pub const SwingTwistConstraintSettings = struct {
     }
 
     /// Create an instance of this constraint
-    pub fn createConstraint(self: *const SwingTwistConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const SwingTwistConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try SwingTwistConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }

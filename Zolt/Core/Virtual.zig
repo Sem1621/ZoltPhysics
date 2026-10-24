@@ -287,7 +287,10 @@ fn entry(comptime FnPtr: type, comptime T: type, comptime name: []const u8) FnPt
         @compileError(@typeName(T) ++ " must implement the pure virtual function " ++ @typeName(Root) ++ "." ++ name);
     const func = if (@hasDecl(L, "overrides")) @field(L, name) else @field(L.impl, name);
     checkSignature(FnPtr, L, @typeName(L) ++ "." ++ name ++ " (in the vtable of " ++ @typeName(T) ++ ")", @TypeOf(func));
-    return thunk(FnPtr, L, func);
+    const Named = Thunk(L, @field(Method(name), name));
+    if (@TypeOf(Named.call) != FnPtr)
+        @compileError(@typeName(L) ++ "." ++ name ++ ": the nearest class that introduces " ++ name ++ " is " ++ @typeName(IntroducerOf(L, name)) ++ ", not " ++ @typeName(Root) ++ " (a virtual function that hides another one of the same name is not supported)");
+    return Named.call;
 }
 
 /// Readable compile errors when an implementation does not have the signature of the virtual function
@@ -311,72 +314,96 @@ fn checkSignature(comptime FnPtr: type, comptime L: type, comptime where: []cons
         @compileError(where ++ " must return " ++ @typeName(expected.return_type.?));
 }
 
-/// A function of type `FnPtr` that downcasts its first parameter to the class `L` and calls `func`
-fn thunk(comptime FnPtr: type, comptime L: type, comptime func: anytype) FnPtr {
+/// The name of a virtual function as a value: an enum with one field, so that a `Thunk` type is named
+/// `Thunk(<class>,.<name>)`
+fn Method(comptime name: []const u8) type {
+    return @Enum(u0, .exhaustive, &.{name}, &.{0});
+}
+
+/// The class that introduces virtual function `name` for the class `L`: the nearest class from `L` up whose own
+/// VTable has the entry `name`
+fn IntroducerOf(comptime L: type, comptime name: []const u8) type {
+    var X = L;
+    while (!introduces(X, name)) {
+        if (!@hasField(X, "base")) @compileError(@typeName(L) ++ " and its parent classes do not introduce the virtual function " ++ name);
+        X = Parent(X);
+    }
+    return X;
+}
+
+/// The thunk of the virtual function `method` (a `Method` value) that class `L` implements. `call` is the vtable
+/// entry: it downcasts its first parameter to `L` and calls the implementation. Zig names this type
+/// `Thunk(<L>,.<method>)`, so the thunk shows up in profiles and in `nm` as
+/// `Core.Virtual.Thunk(<L>,.<method>).call<N>` (N is the number of parameters, including self). One type per pair of
+/// class and virtual function, shared by every vtable that uses it.
+fn Thunk(comptime L: type, comptime method: anytype) type {
+    const name = @tagName(method);
+    const FnPtr = @FieldType(IntroducerOf(L, name).VTable, name);
+    const func = if (@hasDecl(L, "overrides")) @field(L, name) else @field(L.impl, name);
     const info = FnInfo(FnPtr);
     const P = info.params;
     const R = info.return_type.?;
     const S = P[0].type.?;
-    const C = struct {
+    return struct {
+        /// The vtable entry: the thunk with the number of parameters of the virtual function
+        pub const call: FnPtr = switch (P.len) {
+            1 => &call1,
+            2 => &call2,
+            3 => &call3,
+            4 => &call4,
+            5 => &call5,
+            6 => &call6,
+            7 => &call7,
+            8 => &call8,
+            9 => &call9,
+            10 => &call10,
+            11 => &call11,
+            12 => &call12,
+            else => @compileError("virtual functions with more than 12 parameters (including self) are not supported, add a thunk to Virtual.zig"),
+        };
+
         fn self(s: S) PtrLike(S, L) {
             return downcast(L, s);
         }
         fn t(comptime i: usize) type {
             return P[i].type.?;
         }
-    };
-    const Thunks = struct {
-        fn f1(s: S) R {
-            return func(C.self(s));
+        fn call1(s: S) R {
+            return func(self(s));
         }
-        fn f2(s: S, a1: C.t(1)) R {
-            return func(C.self(s), a1);
+        fn call2(s: S, a1: t(1)) R {
+            return func(self(s), a1);
         }
-        fn f3(s: S, a1: C.t(1), a2: C.t(2)) R {
-            return func(C.self(s), a1, a2);
+        fn call3(s: S, a1: t(1), a2: t(2)) R {
+            return func(self(s), a1, a2);
         }
-        fn f4(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3)) R {
-            return func(C.self(s), a1, a2, a3);
+        fn call4(s: S, a1: t(1), a2: t(2), a3: t(3)) R {
+            return func(self(s), a1, a2, a3);
         }
-        fn f5(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4)) R {
-            return func(C.self(s), a1, a2, a3, a4);
+        fn call5(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4)) R {
+            return func(self(s), a1, a2, a3, a4);
         }
-        fn f6(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5);
+        fn call6(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5)) R {
+            return func(self(s), a1, a2, a3, a4, a5);
         }
-        fn f7(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5), a6: C.t(6)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5, a6);
+        fn call7(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5), a6: t(6)) R {
+            return func(self(s), a1, a2, a3, a4, a5, a6);
         }
-        fn f8(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5), a6: C.t(6), a7: C.t(7)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5, a6, a7);
+        fn call8(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5), a6: t(6), a7: t(7)) R {
+            return func(self(s), a1, a2, a3, a4, a5, a6, a7);
         }
-        fn f9(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5), a6: C.t(6), a7: C.t(7), a8: C.t(8)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5, a6, a7, a8);
+        fn call9(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5), a6: t(6), a7: t(7), a8: t(8)) R {
+            return func(self(s), a1, a2, a3, a4, a5, a6, a7, a8);
         }
-        fn f10(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5), a6: C.t(6), a7: C.t(7), a8: C.t(8), a9: C.t(9)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5, a6, a7, a8, a9);
+        fn call10(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5), a6: t(6), a7: t(7), a8: t(8), a9: t(9)) R {
+            return func(self(s), a1, a2, a3, a4, a5, a6, a7, a8, a9);
         }
-        fn f11(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5), a6: C.t(6), a7: C.t(7), a8: C.t(8), a9: C.t(9), a10: C.t(10)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+        fn call11(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5), a6: t(6), a7: t(7), a8: t(8), a9: t(9), a10: t(10)) R {
+            return func(self(s), a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
         }
-        fn f12(s: S, a1: C.t(1), a2: C.t(2), a3: C.t(3), a4: C.t(4), a5: C.t(5), a6: C.t(6), a7: C.t(7), a8: C.t(8), a9: C.t(9), a10: C.t(10), a11: C.t(11)) R {
-            return func(C.self(s), a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+        fn call12(s: S, a1: t(1), a2: t(2), a3: t(3), a4: t(4), a5: t(5), a6: t(6), a7: t(7), a8: t(8), a9: t(9), a10: t(10), a11: t(11)) R {
+            return func(self(s), a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
         }
-    };
-    return switch (P.len) {
-        1 => &Thunks.f1,
-        2 => &Thunks.f2,
-        3 => &Thunks.f3,
-        4 => &Thunks.f4,
-        5 => &Thunks.f5,
-        6 => &Thunks.f6,
-        7 => &Thunks.f7,
-        8 => &Thunks.f8,
-        9 => &Thunks.f9,
-        10 => &Thunks.f10,
-        11 => &Thunks.f11,
-        12 => &Thunks.f12,
-        else => @compileError("virtual functions with more than 12 parameters (including self) are not supported, add a thunk to Virtual.zig"),
     };
 }
 
@@ -699,4 +726,41 @@ test "Virtual: option-gated virtual functions (OptionalVirtual)" {
             try std.testing.expect(@TypeOf(Root.draw) == void);
         }
     }
+}
+
+test "Virtual: thunks are named after the class and the virtual function" {
+    // Profiles and `nm` show a vtable entry as Core.Virtual.Thunk(<class>,.<virtual function>).call<N>
+    const Root = struct {
+        const Self = @This();
+        pub const VTable = struct {
+            area: *const fn (self: *const Self, scale: f32) f32,
+        };
+        vtable: *const VTable,
+
+        pub fn area(self: *const Self, scale: f32) f32 {
+            return self.vtable.area(self, scale);
+        }
+        pub const impl = struct {};
+    };
+    const Square = struct {
+        const Self = @This();
+        pub const overrides = .{.area};
+        base: Root,
+        side: f32,
+
+        pub fn area(self: *const Self, scale: f32) f32 {
+            return self.side * self.side * scale;
+        }
+    };
+
+    const square: Square = .{ .base = .{ .vtable = vtablePtr(Root.VTable, Square) }, .side = 3 };
+    try std.testing.expectEqual(@as(f32, 18), square.base.area(2));
+
+    // The vtable entry is the `call` of the named thunk type, one type per class and virtual function
+    const Named = Thunk(Square, @field(Method("area"), "area"));
+    try std.testing.expect(vtablePtr(Root.VTable, Square).area == Named.call);
+    try std.testing.expect(Named == Thunk(Square, @field(Method("area"), "area")));
+    const name = @typeName(Named);
+    try std.testing.expect(std.mem.startsWith(u8, name, "Core.Virtual.Thunk("));
+    try std.testing.expect(std.mem.endsWith(u8, name, ".Square,.area)"));
 }

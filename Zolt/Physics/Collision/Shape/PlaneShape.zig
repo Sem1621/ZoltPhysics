@@ -346,8 +346,8 @@ pub const PlaneShape = struct {
 
         // Reverse if scale is inside out
         if (ScaleHelpers.isInsideOut(scale)) {
-            std.mem.swap(Vec3, &vertices[0], &vertices[3]);
-            std.mem.swap(Vec3, &vertices[1], &vertices[2]);
+            Core.swap(Vec3, &vertices[0], &vertices[3]);
+            Core.swap(Vec3, &vertices[1], &vertices[2]);
         }
 
         // Transform them to world space
@@ -365,8 +365,8 @@ pub const PlaneShape = struct {
 
         // Reverse if scale is inside out
         if (ScaleHelpers.isInsideOut(scale)) {
-            std.mem.swap(Vec3, &local_vertices[0], &local_vertices[3]);
-            std.mem.swap(Vec3, &local_vertices[1], &local_vertices[2]);
+            Core.swap(Vec3, &local_vertices[0], &local_vertices[3]);
+            Core.swap(Vec3, &local_vertices[1], &local_vertices[2]);
         }
 
         // Transform them to world space
@@ -488,8 +488,8 @@ pub const PlaneShape = struct {
 
         // Reverse if scale is inside out
         if (ScaleHelpers.isInsideOut(scale)) {
-            std.mem.swap(Vec3, &vertices[0], &vertices[3]);
-            std.mem.swap(Vec3, &vertices[1], &vertices[2]);
+            Core.swap(Vec3, &vertices[0], &vertices[3]);
+            Core.swap(Vec3, &vertices[1], &vertices[2]);
         }
 
         // Transform them to world space
@@ -633,7 +633,8 @@ pub const PlaneShape = struct {
             const penetration_axis_world = center_of_mass_transform1.multiply3x3(normal.negate());
 
             // Create collision result
-            var result = CollideShapeResult.init(point1, point2, penetration_axis_world, penetration_depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+            var result: CollideShapeResult = undefined;
+            result.init(point1, point2, penetration_axis_world, penetration_depth, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
 
             // Gather faces
             if (collide_shape_settings.collect_faces_mode == .collect_faces) {
@@ -724,7 +725,8 @@ pub const PlaneShape = struct {
         // Create cast result
         const penetration_axis_world = com_hit.multiply3x3(normal.negate());
         const back_facing = dot > 0.0;
-        var result = ShapeCastResult.init(fraction, point1, point2, penetration_axis_world, back_facing, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
+        var result: ShapeCastResult = undefined;
+        result.init(fraction, point1, point2, penetration_axis_world, back_facing, sub_shape_id_creator1.getID(), sub_shape_id_creator2.getID(), TransformedShape.getBodyID(collector.getContext()));
 
         // Gather faces
         if (shape_cast_settings.collect_faces_mode == .collect_faces) {

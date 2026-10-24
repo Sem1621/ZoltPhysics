@@ -64,7 +64,8 @@ pub fn clipPolyVsPoly(polygon_to_clip: []const Vec3, clipping_polygon: []const V
     std.debug.assert(polygon_to_clip.len >= 2);
     std.debug.assert(clipping_polygon.len >= 3);
 
-    var tmp_vertices: [2]VertexArray.Temporary(@TypeOf(clipped_polygon)) = .{ .empty, .empty };
+    var tmp_vertices: [2]VertexArray.Temporary(@TypeOf(clipped_polygon)) = undefined;
+    for (&tmp_vertices) |*tmp| VertexArray.initTemporary(clipped_polygon, tmp);
     defer for (&tmp_vertices) |*tmp| VertexArray.deinitTemporary(clipped_polygon, tmp);
     var tmp_vertices_idx: usize = 0;
 
@@ -149,7 +150,8 @@ pub fn clipPolyVsEdge(polygon_to_clip: []const Vec3, edge_vertex1: Vec3, edge_ve
 pub fn clipPolyVsAABox(polygon_to_clip: []const Vec3, aabox: AABox, clipped_polygon: anytype) VertexArray.Error(@TypeOf(clipped_polygon))!void {
     std.debug.assert(polygon_to_clip.len >= 2);
 
-    var tmp_vertices: [2]VertexArray.Temporary(@TypeOf(clipped_polygon)) = .{ .empty, .empty };
+    var tmp_vertices: [2]VertexArray.Temporary(@TypeOf(clipped_polygon)) = undefined;
+    for (&tmp_vertices) |*tmp| VertexArray.initTemporary(clipped_polygon, tmp);
     defer for (&tmp_vertices) |*tmp| VertexArray.deinitTemporary(clipped_polygon, tmp);
     var tmp_vertices_idx: usize = 0;
 

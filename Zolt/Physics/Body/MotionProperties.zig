@@ -158,6 +158,12 @@ pub const MotionProperties = struct {
     /// JPH_TRACK_SIMULATION_STATS
     simulation_stats: if (track_simulation_stats) SimulationStats else void = if (track_simulation_stats) .{} else {},
 
+    // Zolt: `force` and `torque` are read through Vec3.loadFloat3Unsafe, which reads 4 bytes past them
+    comptime {
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(MotionProperties, "force"));
+        std.debug.assert(Vec3.canLoadFloat3Unsafe(MotionProperties, "torque"));
+    }
+
     /// Motion quality, or how well it detects collisions when it has a high velocity
     pub fn getMotionQuality(self: *const MotionProperties) MotionQuality {
         return self.motion_quality;

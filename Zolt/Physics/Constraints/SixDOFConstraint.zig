@@ -217,7 +217,7 @@ pub const SixDOFConstraintSettings = struct {
     }
 
     /// Create an instance of this constraint
-    pub fn createConstraint(self: *const SixDOFConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const SixDOFConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try SixDOFConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }

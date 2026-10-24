@@ -203,6 +203,7 @@ pub const SoftBodySharedSettings = struct {
 
         comptime {
             std.debug.assert(@sizeOf(Vertex) == 28);
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Vertex, "position")); // Zolt: read through loadFloat3Unsafe
         }
 
         /// Constructor Vertex(inPosition, inVelocity = Float3(0, 0, 0), inInvMass = 1)
@@ -1007,7 +1008,7 @@ pub const SoftBodySharedSettings = struct {
                     var tangent2 = self.vertexPosition(r2.vertex[1]).sub(self.vertexPosition(r2.vertex[0]));
                     if (tangent1.dot(tangent2) < 0.0) {
                         // Edge is oriented in the opposite direction of the previous edge, flip it
-                        std.mem.swap(u32, &r2.vertex[0], &r2.vertex[1]);
+                        Core.swap(u32, &r2.vertex[0], &r2.vertex[1]);
                         tangent2 = tangent2.negate();
                     }
                     r2.length = tangent2.length();
@@ -1464,7 +1465,7 @@ pub const SoftBodySharedSettings = struct {
                 const s2 = s >> 1;
                 var i: usize = 1;
                 while (i < s2) : (i += 2)
-                    std.mem.swap(u32, &items[i], &items[s - i]);
+                    Core.swap(u32, &items[i], &items[s - i]);
             }
 
             // Sort the dihedral bend constraints
@@ -1521,13 +1522,13 @@ pub const SoftBodySharedSettings = struct {
 
         // Nothing fails from here on. temp_x.swap(mX): the temp arrays get the old constraints, the constraint arrays
         // get the reserved memory.
-        std.mem.swap(std.ArrayList(Edge), &temp_edges, &self.edge_constraints);
-        std.mem.swap(std.ArrayList(LRA), &temp_lra, &self.lra_constraints);
-        std.mem.swap(std.ArrayList(RodStretchShear), &temp_rod_stretch_shear, &self.rod_stretch_shear_constraints);
-        std.mem.swap(std.ArrayList(RodBendTwist), &temp_rod_bend_twist, &self.rod_bend_twist_constraints);
-        std.mem.swap(std.ArrayList(DihedralBend), &temp_dihedral_bend, &self.dihedral_bend_constraints);
-        std.mem.swap(std.ArrayList(Volume), &temp_volume, &self.volume_constraints);
-        std.mem.swap(std.ArrayList(Skinned), &temp_skinned, &self.skinned_constraints);
+        Core.swap(std.ArrayList(Edge), &temp_edges, &self.edge_constraints);
+        Core.swap(std.ArrayList(LRA), &temp_lra, &self.lra_constraints);
+        Core.swap(std.ArrayList(RodStretchShear), &temp_rod_stretch_shear, &self.rod_stretch_shear_constraints);
+        Core.swap(std.ArrayList(RodBendTwist), &temp_rod_bend_twist, &self.rod_bend_twist_constraints);
+        Core.swap(std.ArrayList(DihedralBend), &temp_dihedral_bend, &self.dihedral_bend_constraints);
+        Core.swap(std.ArrayList(Volume), &temp_volume, &self.volume_constraints);
+        Core.swap(std.ArrayList(Skinned), &temp_skinned, &self.skinned_constraints);
 
         // Finalize update groups
         for (groups) |group| {
@@ -1617,7 +1618,7 @@ pub const SoftBodySharedSettings = struct {
             if (!found)
                 try connectivity[v1].append(allocator, .{ .vertex = v2, .count = 1 });
 
-            std.mem.swap(u32, &v1, &v2);
+            Core.swap(u32, &v1, &v2);
         }
     }
 
@@ -2034,7 +2035,7 @@ pub const SoftBodySharedSettings = struct {
             result.setError(mlresult.getError());
             return result;
         }
-        std.mem.swap(PhysicsMaterialList, &s.materials, &materials); // settings->mMaterials = mlresult.Get(), the defer releases the old list
+        Core.swap(PhysicsMaterialList, &s.materials, &materials); // settings->mMaterials = mlresult.Get(), the defer releases the old list
 
         // Add the settings to the map
         try settings_map.ensureUnusedCapacity(allocator, 1);

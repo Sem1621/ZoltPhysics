@@ -29,9 +29,15 @@
 //!   dependencies from more than 32 handles at once (PhysicsUpdateContext::cMaxConcurrency).
 //! - Zolt test helper (no C++ counterpart): `FailingJobSystem` fails the n-th `createJob` of a wrapped job system, for
 //!   the createJob sweeps of the tests (Docs/Zolt/SimulationArchitecture.md D12).
+//! - Zolt (no C++ counterpart): with `-Djob_profile=true` (`Core.job_profile`) the interface has one more entry,
+//!   `getJobProfiler`, and `Job.execute` records the job body in that profiler (Core/JobProfiler.zig). An implementation
+//!   may declare `pub fn getJobProfiler(self: *T) ?*JobProfiler`; without it the jobs are not recorded. Without the
+//!   option the entry is `void` and the hook generates no code.
 
 const std = @import("std");
+const Core = @import("Core.zig");
 const Color = @import("Color.zig").Color;
+const JobProfiler = @import("JobProfiler.zig").JobProfiler;
 const Reference = @import("Reference.zig");
 const Ref = Reference.Ref;
 const RefCount = Reference.RefCount;
@@ -128,6 +134,9 @@ pub const JobSystem = struct {
 
         /// Frees a job
         freeJob: *const fn (ptr: *anyopaque, job: *Job) void,
+
+        /// Zolt: the profiler that records the jobs (`-Djob_profile=true` only, see the top of this file)
+        getJobProfiler: if (Core.job_profile) *const fn (ptr: *anyopaque) ?*JobProfiler else void,
     };
 
     /// Wrap any `*T` that implements the job system functions:
@@ -140,6 +149,10 @@ pub const JobSystem = struct {
     /// pub fn queueJob(self: *T, job: *Job) void
     /// pub fn queueJobs(self: *T, jobs: []const *Job) void
     /// pub fn freeJob(self: *T, job: *Job) void
+    /// ```
+    /// and optionally (Zolt, used with `-Djob_profile=true`):
+    /// ```zig
+    /// pub fn getJobProfiler(self: *T) ?*JobProfiler
     /// ```
     pub fn init(impl: anytype) JobSystem {
         const T = @typeInfo(@TypeOf(impl)).pointer.child;
@@ -176,6 +189,10 @@ pub const JobSystem = struct {
                 const self: *T = @ptrCast(@alignCast(ptr));
                 self.freeJob(job);
             }
+            fn getJobProfilerThunk(ptr: *anyopaque) ?*JobProfiler {
+                const self: *T = @ptrCast(@alignCast(ptr));
+                return if (@hasDecl(T, "getJobProfiler")) self.getJobProfiler() else null;
+            }
             const vtable: VTable = .{
                 .getMaxConcurrency = getMaxConcurrencyThunk,
                 .createJob = createJobThunk,
@@ -185,6 +202,7 @@ pub const JobSystem = struct {
                 .queueJob = queueJobThunk,
                 .queueJobs = queueJobsThunk,
                 .freeJob = freeJobThunk,
+                .getJobProfiler = if (Core.job_profile) getJobProfilerThunk else {},
             };
         };
         return .{ .ptr = impl, .vtable = &gen.vtable };
@@ -229,6 +247,12 @@ pub const JobSystem = struct {
     /// Frees a job (protected in C++)
     fn freeJob(self: JobSystem, job: *Job) void {
         self.vtable.freeJob(self.ptr, job);
+    }
+
+    /// Zolt: the profiler that records the jobs of this job system, null without one (always null without
+    /// `-Djob_profile=true`)
+    pub fn getJobProfiler(self: JobSystem) ?*JobProfiler {
+        return if (Core.job_profile) self.vtable.getJobProfiler(self.ptr) else null;
     }
 
     /// Main function of the job (function<void()>)
@@ -281,7 +305,7 @@ pub const JobSystem = struct {
 
     /// A class that contains information for a single unit of work (protected in C++, used by job system implementations)
     pub const Job = struct {
-        /// Name of the job (only used by the profiler in Jolt, see the top of this file)
+        /// Name of the job (only used by the profiler in Jolt and by Zolt's JobProfiler, see the top of this file)
         job_name: []const u8,
 
         /// Color of the job in the profiler
@@ -382,7 +406,11 @@ pub const JobSystem = struct {
                 return state; // state is the current value when the exchange fails
 
             // Run the job function
+            // Zolt: -Djob_profile=true records the job body in the profiler of the job system (Core/JobProfiler.zig)
+            const profiler = if (Core.job_profile) self.job_system.getJobProfiler() else {};
+            const job_start = if (Core.job_profile) JobProfiler.begin(profiler) else {};
             self.job_function.call();
+            if (Core.job_profile) JobProfiler.end(profiler, .job, self.job_name, job_start);
 
             // Fetch the barrier pointer and exchange it for the done state, so we're sure that no barrier gets set after we want to call the callback
             var barrier = self.barrier.load(.monotonic);

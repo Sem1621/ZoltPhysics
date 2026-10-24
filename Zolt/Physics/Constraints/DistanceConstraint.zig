@@ -135,7 +135,7 @@ pub const DistanceConstraintSettings = struct {
     }
 
     /// Create an instance of this constraint
-    pub fn createConstraint(self: *const DistanceConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const DistanceConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint = try DistanceConstraint.create(allocator, body1, body2, self);
         return constraint.asTwoBodyConstraint();
     }

@@ -27,9 +27,11 @@
 //! - Jolt's asserts on the settings in the constructor and on the track ratios (`SetDriverInput`, `SetLeftRatio`,
 //!   `SetRightRatio`: a ratio of 0 divides by zero in PostCollide) are user input checks, evaluated in safe builds only
 //!   (`if (Core.enable_asserts)`).
-//! - A wheel that is in no track keeps `mTrackIndex = -1` and Jolt indexes `mTracks[-1]` (undefined behavior); Zolt's
-//!   safe builds panic in the index cast, ReleaseFast stays undefined as in C++. Wheel indices of a track and a driven
-//!   wheel outside the wheels are out of bounds the same way.
+//! - A wheel that is in no track keeps `mTrackIndex = -1` and Jolt indexes `mTracks[-1]` (undefined behavior). Wheel
+//!   indices of a track and a driven wheel outside the wheels are out of bounds the same way. Zolt refuses such
+//!   settings: `checkWheels` returns `error.InvalidSettings` and VehicleConstraint.create fails
+//!   (RemainingFeaturesArchitecture.md R20, UB38). Tracks changed later through `getTracksMut` must keep the rule;
+//!   otherwise safe builds panic in the index cast and ReleaseFast stays undefined, as in C++.
 //! - `VehicleTrackSettings::mDrivenWheel` is 0 by default in Zolt (uninitialized in Jolt, see VehicleTrack.zig).
 
 const std = @import("std");
@@ -229,7 +231,7 @@ pub const TrackedVehicleControllerSettings = struct {
         },
     });
 
-    pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState };
+    pub const overrides = .{ .constructController, .saveBinaryState, .restoreBinaryState, .checkWheels };
 
     base: VehicleControllerSettings,
 
@@ -300,6 +302,25 @@ pub const TrackedVehicleControllerSettings = struct {
     pub fn constructController(self: *const TrackedVehicleControllerSettings, allocator: Allocator, constraint: *VehicleConstraint) Allocator.Error!*VehicleController {
         const controller = try TrackedVehicleController.create(allocator, self, constraint);
         return &controller.base;
+    }
+
+    /// See: VehicleControllerSettings.checkWheels (Zolt, UB38). Every wheel must be in a track, and the wheels and the
+    /// driven wheel of a track must be wheels of the vehicle. Jolt indexes mTracks[-1] for a wheel in no track and
+    /// reads past mWheels for an index outside the wheels.
+    pub fn checkWheels(self: *const TrackedVehicleControllerSettings, num_wheels: usize) error{InvalidSettings}!void {
+        for (&self.tracks) |*t| {
+            if (t.driven_wheel >= num_wheels)
+                return error.InvalidSettings;
+            for (t.wheels.items) |w|
+                if (w >= num_wheels) return error.InvalidSettings;
+        }
+        for (0..num_wheels) |w| {
+            const in_track = for (&self.tracks) |*t| {
+                if (std.mem.indexOfScalar(u32, t.wheels.items, @intCast(w)) != null) break true;
+            } else false;
+            if (!in_track)
+                return error.InvalidSettings;
+        }
     }
 
     pub fn saveBinaryState(self: *const TrackedVehicleControllerSettings, stream: StreamOut) void {
@@ -1438,4 +1459,58 @@ test "TrackedVehicleController creation, settings and controller settings out of
         }
     };
     try testing.checkAllAllocationFailures(testing.allocator, S.run, .{body});
+}
+
+test "TrackedVehicleController settings that do not fit the wheels are InvalidSettings (UB38)" {
+    // Jolt indexes mTracks[-1] for a wheel in no track, and reads past mWheels for a track wheel or a driven wheel
+    // outside the wheels. Zolt refuses such settings when the constraint is created, and nothing is left allocated.
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    const body = try addTankBody(&world, allocator, RVec3.init(0, 0.95, 0));
+
+    for (0..4) |case| {
+        var settings = try makeTankSettings(allocator);
+        defer settings.asSettings().deinit();
+        const tracks = &virtual.downcast(TrackedVehicleControllerSettings, settings.controller.ptr.?).tracks;
+        switch (case) {
+            0 => {}, // The tank fits its 8 wheels
+            1 => _ = tracks[1].wheels.pop(), // Wheel 7 is in no track (it is still the driven wheel of track 1)
+            2 => try tracks[0].wheels.append(allocator, 8), // A track wheel outside the 8 wheels (every wheel stays in a track)
+            else => tracks[1].driven_wheel = 8, // A driven wheel outside the 8 wheels
+        }
+        if (case == 0) {
+            const constraint = try VehicleConstraint.create(allocator, body, &settings);
+            var constraint_ref = Ref(Constraint).init(constraint.asConstraint());
+            constraint_ref.deinit();
+        } else try testing.expectError(error.InvalidSettings, VehicleConstraint.create(allocator, body, &settings));
+    }
+}
+
+test "VehicleConstraint anti-roll bar wheels outside the wheels are InvalidSettings (UB38)" {
+    // Jolt reads mWheels[mLeftWheel] and mWheels[mRightWheel] of every anti-roll bar in every step. Zolt refuses an index
+    // outside the wheels when the constraint is created, and nothing is left allocated.
+    const allocator = testing.allocator;
+    var world: TestWorld = undefined;
+    try world.init(allocator);
+    defer world.deinit();
+    const body = try addTankBody(&world, allocator, RVec3.init(0, 0.95, 0));
+
+    for (0..5) |case| {
+        var settings = try makeTankSettings(allocator);
+        defer settings.asSettings().deinit();
+        try settings.addAntiRollBar(switch (case) {
+            0 => .{ .left_wheel = 0, .right_wheel = 7 }, // The first and the last of the 8 wheels
+            1 => .{ .left_wheel = 0, .right_wheel = 8 },
+            2 => .{ .left_wheel = 8, .right_wheel = 0 },
+            3 => .{ .left_wheel = -1, .right_wheel = 1 },
+            else => .{ .left_wheel = 1, .right_wheel = -1 },
+        });
+        if (case == 0) {
+            const constraint = try VehicleConstraint.create(allocator, body, &settings);
+            var constraint_ref = Ref(Constraint).init(constraint.asConstraint());
+            constraint_ref.deinit();
+        } else try testing.expectError(error.InvalidSettings, VehicleConstraint.create(allocator, body, &settings));
+    }
 }

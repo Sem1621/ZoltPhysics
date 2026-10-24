@@ -534,7 +534,7 @@ pub const MeshShape = struct {
         };
 
         // Move data to this class
-        std.mem.swap(ByteBuffer, &self.tree, buffer.getBufferMut());
+        Core.swap(ByteBuffer, &self.tree, buffer.getBufferMut());
 
         // Check if we're not exceeding the amount of sub shape id bits
         if (self.getSubShapeIDBitsRecursive() > SubShapeID.max_bits) {
@@ -753,7 +753,8 @@ pub const MeshShape = struct {
     /// `shouldVisitNode`, `visitNodes` and `visitTriangles`)
     fn walkTree(self: *const MeshShape, visitor: anytype) void {
         const header = getNodeHeader(&self.tree);
-        var node_ctx = NodeCodec.DecodingContext.init(header);
+        var node_ctx: NodeCodec.DecodingContext = undefined;
+        node_ctx.init(header);
 
         const triangle_ctx = TriangleCodec.DecodingContext.init(getTriangleHeader(&self.tree));
         const buffer_start = self.tree.vector.items.ptr;
@@ -910,7 +911,7 @@ pub const MeshShape = struct {
 
         // Flip triangle if scaled inside out
         if (ScaleHelpers.isInsideOut(scale))
-            std.mem.swap(Vec3, &out_vertices.buffer[1], &out_vertices.buffer[2]);
+            Core.swap(Vec3, &out_vertices.buffer[1], &out_vertices.buffer[2]);
 
         // Calculate transform with scale
         const transform = center_of_mass_transform.preScaled(scale);
@@ -1273,15 +1274,17 @@ pub const MeshShape = struct {
         should_abort: bool = false,
         is_inside_out: bool,
 
-        fn init(shape: *const MeshShape, box: AABox, position_com: Vec3, rotation: Quat, scale: Vec3) MSGetTrianglesContext {
-            return .{
-                .decode_ctx = .init(getNodeHeader(&shape.tree)),
+        /// Constructor, in place (the decoding context holds a 512 B stack)
+        fn init(self: *MSGetTrianglesContext, shape: *const MeshShape, box: AABox, position_com: Vec3, rotation: Quat, scale: Vec3) void {
+            self.* = .{
+                .decode_ctx = undefined,
                 .shape = shape,
                 .local_box = .fromAABox(Mat44.inverseRotationTranslation(rotation, position_com), box),
                 .mesh_scale = scale,
                 .local_to_world = Mat44.rotationTranslation(rotation, position_com).mul(Mat44.scaleVec3(scale)),
                 .is_inside_out = ScaleHelpers.isInsideOut(scale),
             };
+            self.decode_ctx.init(getNodeHeader(&shape.tree));
         }
 
         pub fn shouldAbort(self: *const MSGetTrianglesContext) bool {
@@ -1368,7 +1371,7 @@ pub const MeshShape = struct {
 
     // See Shape::GetTrianglesStart
     pub fn getTrianglesStart(self: *const MeshShape, context: *Shape.GetTrianglesContext, box: AABox, position_com: Vec3, rotation: Quat, scale: Vec3) void {
-        context.emplace(MSGetTrianglesContext).* = .init(self, box, position_com, rotation, scale);
+        context.emplace(MSGetTrianglesContext).init(self, box, position_com, rotation, scale);
     }
 
     // See Shape::GetTrianglesNext
@@ -1607,7 +1610,8 @@ pub const MeshShape = struct {
         const mesh = shape.cast(MeshShape);
 
         // In place: the helper keeps a pointer into its support buffer after the first triangle
-        var visitor: Visitor = .{ .base = .init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector) };
+        var visitor: Visitor = undefined;
+        visitor.base.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         visitor.inv_direction.set(shape_cast.direction);
         visitor.box_center = shape_cast.shape_world_bounds.getCenter();
         visitor.box_extent = shape_cast.shape_world_bounds.getExtent().add(Vec3.replicate(shape_cast_settings.extra_convex_radius));

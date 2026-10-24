@@ -341,7 +341,7 @@ pub const TriangleShape = struct {
         const v3 = center_of_mass_transform.mulVec3(scale.mul(self.v3));
 
         if (ScaleHelpers.isInsideOut(scale))
-            std.mem.swap(@TypeOf(v1), &v1, &v2);
+            Core.swap(@TypeOf(v1), &v1, &v2);
 
         if (draw_wireframe)
             renderer.drawWireTriangle(v1, v2, v3, if (use_material_colors) self.base.getConvexMaterial().getDebugColor() else color)
@@ -543,7 +543,8 @@ pub const TriangleShape = struct {
         std.debug.assert(shape_in.getSubType() == .triangle);
         const shape = shape_in.cast(TriangleShape);
 
-        var caster = CastConvexVsTriangles.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
+        var caster: CastConvexVsTriangles = undefined;
+        caster.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         caster.cast(shape.v1, shape.v2, shape.v3, 0b111, sub_shape_id_creator2.getID());
     }
 

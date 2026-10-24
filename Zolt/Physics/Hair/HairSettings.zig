@@ -908,8 +908,8 @@ pub const HairSettings = struct {
             var dist_sq0: f32 = if (child0) |c| c.bounds.getSqDistanceTo(point) else math.flt_max;
             var dist_sq1: f32 = if (child1) |c| c.bounds.getSqDistanceTo(point) else math.flt_max;
             if (dist_sq1 < dist_sq0) {
-                std.mem.swap(?*const AABBTreeBuilder.Node, &child0, &child1);
-                std.mem.swap(f32, &dist_sq0, &dist_sq1);
+                Core.swap(?*const AABBTreeBuilder.Node, &child0, &child1);
+                Core.swap(f32, &dist_sq0, &dist_sq1);
             }
 
             // Visit in order of closeness

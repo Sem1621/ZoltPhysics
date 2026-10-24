@@ -3861,7 +3861,7 @@ const PathSlot = struct {
             .path_set_path => {
                 var path: Ref(zolt.PathConstraintPath) = if (i[0] != 0) try makePath(world.allocator, &world.desc.constraints[i[1]]) else .empty;
                 defer path.deinit();
-                (try castConstraint(zolt.PathConstraint, c, .path)).setPath(path.get(), f[0]);
+                try (try castConstraint(zolt.PathConstraint, c, .path)).setPath(path.get(), f[0]);
             },
             .path_set_max_friction_force => (try castConstraint(zolt.PathConstraint, c, .path)).setMaxFrictionForce(f[0]),
             .path_set_position_motor_state => (try castConstraint(zolt.PathConstraint, c, .path)).setPositionMotorState(@enumFromInt(@as(i32, @bitCast(i[0])))),

@@ -5,7 +5,9 @@
 //! - `TwoBodyConstraintSettings` extends ConstraintSettings.VTable with Jolt's pure virtual
 //!   `TwoBodyConstraintSettings::Create(Body &, Body &)`, renamed `createConstraint(allocator, body1, body2)` because
 //!   `create(allocator, ...)` is the porting guide's `new XSettings`. A concrete settings class lists it in its
-//!   `overrides`. It returns the new constraint with reference count 0, like Jolt's `new`.
+//!   `overrides`. It returns the new constraint with reference count 0, like Jolt's `new`. Zolt: it returns
+//!   `CreateError`, which adds `error.InvalidSettings` to out of memory: a PathConstraint whose path is not valid
+//!   (RemainingFeaturesArchitecture.md R20, UB39).
 //! - `TwoBodyConstraint` extends Constraint.VTable with the two matrix functions and keeps its bodies of `GetType`,
 //!   `IsActive`, `BuildIslands` and `BuildIslandSplits` in `impl` (it is abstract).
 //! - The bodies are `*Body` like Jolt's `Body *`, also when a body is `Body.fixedToWorld()` (read-only memory): the
@@ -48,8 +50,12 @@ pub const TwoBodyConstraintSettings = struct {
         /// Create an instance of this constraint
         /// You can use Body.fixedToWorld() for body1 if you want to attach body2 to the world
         /// (Jolt: Create, renamed: `create(allocator, ...)` is the constructor `new XSettings`)
-        createConstraint: *const fn (self: *const TwoBodyConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint,
+        createConstraint: *const fn (self: *const TwoBodyConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) CreateError!*TwoBodyConstraint,
     };
+
+    /// Zolt: the errors of createConstraint. InvalidSettings: settings that Jolt cannot use, a PathConstraint with a path
+    /// that is not valid (RemainingFeaturesArchitecture.md R20, UB39).
+    pub const CreateError = Allocator.Error || error{InvalidSettings};
 
     base: ConstraintSettings,
 
@@ -68,7 +74,7 @@ pub const TwoBodyConstraintSettings = struct {
     }
 
     /// Create an instance of this constraint (virtual dispatcher, see VTable.createConstraint)
-    pub fn createConstraint(self: *const TwoBodyConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) Allocator.Error!*TwoBodyConstraint {
+    pub fn createConstraint(self: *const TwoBodyConstraintSettings, allocator: Allocator, body1: *Body, body2: *Body) CreateError!*TwoBodyConstraint {
         return self.getVTable().createConstraint(self, allocator, body1, body2);
     }
 

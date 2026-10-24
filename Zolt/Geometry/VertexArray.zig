@@ -12,7 +12,7 @@
 //! Such a function returns `VertexArray.Error(@TypeOf(out))!void`. For a StaticArray this error set is empty, so
 //! callers can always `try` the call, also from a function that does not return an error union:
 //! ```
-//! var face: StaticArray(Vec3, 32) = .empty;
+//! var face: StaticArray(Vec3, 32) = .init();
 //! try box.getSupportingFace(direction, &face); // never fails
 //!
 //! var list: std.ArrayList(Vec3) = .empty;
@@ -20,7 +20,7 @@
 //! try box.getSupportingFace(direction, VertexArrayList.init(allocator, &list)); // can fail with error.OutOfMemory
 //! ```
 //! Generic code that forwards a vertex array declares the same return type and uses the helpers below
-//! (`items`, `len`, `append`, `resize`, `clear`, `Temporary`) instead of the methods of the array.
+//! (`items`, `len`, `append`, `resize`, `clear`, `Temporary`, `initTemporary`) instead of the methods of the array.
 //! Read only vertex arrays (Jolt's `const VERTEX_ARRAY &`) are plain `[]const Vec3` slices.
 
 const std = @import("std");
@@ -102,12 +102,21 @@ pub fn resize(array: anytype, new_len: usize) Error(@TypeOf(array))!void {
 
 /// Storage of a temporary vertex array of the same kind as the vertex array type `T` (Jolt: a local `VERTEX_ARRAY`):
 /// a `StaticArray(Vec3, N)` for a `*StaticArray(Vec3, N)`, a `std.ArrayList(Vec3)` for a VertexArrayList.
-/// Initialize it with `.empty`, use it through `temporary(like, &storage)` and free it with `deinitTemporary`.
+/// Initialize it with `initTemporary`, use it through `temporary(like, &storage)` and free it with `deinitTemporary`.
 pub fn Temporary(comptime T: type) type {
     return switch (kind(T)) {
         .static_array => @typeInfo(T).pointer.child,
         .array_list => std.ArrayList(Vec3),
     };
+}
+
+/// Initialize the temporary `storage` for a vertex array like `like` as an empty array, in place. Unlike `.empty`, this
+/// does not fill the buffer of a StaticArray.
+pub fn initTemporary(like: anytype, storage: *Temporary(@TypeOf(like))) void {
+    switch (comptime kind(@TypeOf(like))) {
+        .static_array => storage.clear(),
+        .array_list => storage.* = .empty,
+    }
 }
 
 /// A vertex array of the same type as `like` that refers to the temporary `storage`
@@ -127,7 +136,7 @@ pub fn deinitTemporary(like: anytype, storage: *Temporary(@TypeOf(like))) void {
 }
 
 test "VertexArray with StaticArray" {
-    var array: StaticArray(Vec3, 4) = .empty;
+    var array: StaticArray(Vec3, 4) = .init();
     const out = &array;
     try append(out, Vec3.init(1, 2, 3));
     try append(out, Vec3.init(4, 5, 6));
@@ -139,8 +148,10 @@ test "VertexArray with StaticArray" {
     try std.testing.expectEqual(@as(usize, 0), len(out));
     try std.testing.expect(Error(@TypeOf(out)) == error{});
 
-    var storage: Temporary(@TypeOf(out)) = .empty;
+    var storage: Temporary(@TypeOf(out)) = undefined;
+    initTemporary(out, &storage);
     defer deinitTemporary(out, &storage);
+    try std.testing.expectEqual(@as(u32, 0), storage.len);
     const tmp = temporary(out, &storage);
     try append(tmp, Vec3.init(7, 8, 9));
     try std.testing.expectEqual(@as(u32, 1), storage.len);
@@ -160,8 +171,10 @@ test "VertexArray with std.ArrayList" {
     clear(out);
     try std.testing.expectEqual(@as(usize, 0), len(out));
 
-    var storage: Temporary(@TypeOf(out)) = .empty;
+    var storage: Temporary(@TypeOf(out)) = undefined;
+    initTemporary(out, &storage);
     defer deinitTemporary(out, &storage);
+    try std.testing.expectEqual(@as(usize, 0), storage.items.len);
     const tmp = temporary(out, &storage);
     try append(tmp, Vec3.init(7, 8, 9));
     try std.testing.expectEqual(@as(usize, 1), storage.items.len);

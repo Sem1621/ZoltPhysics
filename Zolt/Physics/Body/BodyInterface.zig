@@ -365,8 +365,9 @@ pub const BodyInterface = struct {
     }
 
     /// Create a two body constraint
-    /// (Zolt: allocated with the body manager's allocator, reference count 0 like Jolt's `new`)
-    pub fn createConstraint(self: *BodyInterface, settings: *const TwoBodyConstraintSettings, body_id1: BodyID, body_id2: BodyID) Allocator.Error!*TwoBodyConstraint {
+    /// (Zolt: allocated with the body manager's allocator, reference count 0 like Jolt's `new`. error.InvalidSettings:
+    /// see TwoBodyConstraintSettings.CreateError)
+    pub fn createConstraint(self: *BodyInterface, settings: *const TwoBodyConstraintSettings, body_id1: BodyID, body_id2: BodyID) TwoBodyConstraintSettings.CreateError!*TwoBodyConstraint {
         const constraint_bodies = [_]BodyID{ body_id1, body_id2 };
         var lock: BodyLockMultiWrite = .init(self.body_lock_interface, &constraint_bodies);
         defer lock.deinit();

@@ -11,6 +11,7 @@
 //! - `collide` is non-const in Jolt (it creates the support functions): `self: *CollideConvexVsTriangles`.
 
 const std = @import("std");
+const Core = @import("../../Core/Core.zig");
 const AABox = @import("../../Geometry/AABox.zig").AABox;
 const ConvexSupport = @import("../../Geometry/ConvexSupport.zig");
 const AddConvexRadius = ConvexSupport.AddConvexRadius;
@@ -205,7 +206,8 @@ pub const CollideConvexVsTriangles = struct {
         const penetration_axis_world = self.transform1.multiply3x3(penetration_axis);
 
         // Create collision result
-        var result = CollideShapeResult.init(point1, point2, penetration_axis_world, penetration_depth, self.sub_shape_id1, sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
+        var result: CollideShapeResult = undefined;
+        result.init(point1, point2, penetration_axis_world, penetration_depth, self.sub_shape_id1, sub_shape_id2, TransformedShape.getBodyID(self.collector.getContext()));
 
         // Gather faces
         if (settings.collect_faces_mode == .collect_faces) {
@@ -220,7 +222,7 @@ pub const CollideConvexVsTriangles = struct {
 
             // When inside out, we need to swap the triangle winding
             if (self.scale_sign2 < 0.0)
-                std.mem.swap(Vec3, &result.shape2_face.buffer[1], &result.shape2_face.buffer[2]);
+                Core.swap(Vec3, &result.shape2_face.buffer[1], &result.shape2_face.buffer[2]);
         }
 
         // Notify the collector

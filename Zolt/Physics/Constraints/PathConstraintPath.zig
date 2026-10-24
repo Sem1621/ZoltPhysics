@@ -18,6 +18,8 @@
 //!   .binormal }` (PortingGuide section 4).
 //! - The protected copy constructor (it does not copy the reference count) is `initCopy`, used by the copy functions of
 //!   derived paths (`PathConstraintPathHermite.clone`).
+//! - Zolt addition: the virtual `isValid` (default true). PathConstraint refuses a path that is not valid with
+//!   `error.InvalidSettings` (RemainingFeaturesArchitecture.md R20, UB39).
 //! - SaveBinaryState writes Jolt's RTTI hash of the most derived class (the `rtti` vtable data entry).
 //!   sRestoreFromBinaryState (StreamUtils::RestoreObject) finds the class in `RegisterTypes.factory`. Restoring
 //!   allocates, so it returns `Allocator.Error!PathResult`. Jolt's errors ("Failed to read type hash", ...) are values
@@ -94,6 +96,11 @@ pub const PathConstraintPath = struct {
 
         /// This function should not be called directly, it is used by sRestoreFromBinaryState (protected in Jolt).
         restoreBinaryState: *const fn (self: *PathConstraintPath, stream: StreamIn) Allocator.Error!void,
+
+        /// Zolt: false when the functions above would read outside the data of the path. Jolt has no such check
+        /// (RemainingFeaturesArchitecture.md R20, UB39). PathConstraint refuses a path that is not valid. The default is
+        /// true.
+        isValid: *const fn (self: *const PathConstraintPath) bool,
     };
 
     vtable: *const VTable,
@@ -163,6 +170,11 @@ pub const PathConstraintPath = struct {
     /// Given the fraction along the path, get the point, tangent and normal, see VTable.getPointOnPath
     pub fn getPointOnPath(self: *const PathConstraintPath, fraction: f32) PointOnPath {
         return self.vtable.getPointOnPath(self, fraction);
+    }
+
+    /// Zolt: false when using the path would read outside its data, see VTable.isValid
+    pub fn isValid(self: *const PathConstraintPath) bool {
+        return self.vtable.isValid(self);
     }
 
     /// If the path is looping or not. If a path is looping, the first and last point are automatically connected to each other. They should not be the same points.
@@ -251,6 +263,11 @@ pub const PathConstraintPath = struct {
         pub fn restoreBinaryState(self: *PathConstraintPath, stream: StreamIn) Allocator.Error!void {
             // Type hash read by sRestoreFromBinaryState
             stream.read(&self.is_looping);
+        }
+
+        pub fn isValid(self: *const PathConstraintPath) bool {
+            _ = self;
+            return true;
         }
     };
 };

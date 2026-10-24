@@ -55,9 +55,10 @@
 //! sSolveCCDContact, JobResolveCCDContacts). Rules: a linear cast shape needs an inner radius (no mesh, height field,
 //! plane or mirrored ScaledShape), no body may move faster than its max linear velocity (500 m/s by default), and a CCD
 //! body that is resolved after JobResolveCCDContacts activated a full batch of 64 woken up bodies must not have hit one
-//! of the bodies of that batch (sGetCCDBody then reads past mActiveBodyToCCDBody, Zolt asserts in safe builds). More
-//! than 64 sleeping bodies may be woken up by CCD hits in one collision step when each of them is hit by one CCD body
-//! only (`ccd_wake_batch`).
+//! of the bodies of that batch (sGetCCDBody then reads past mActiveBodyToCCDBody; Zolt finds no CCD body there, UB35 of
+//! RemainingFeaturesArchitecture.md R20, a Zolt-only test in PhysicsSystemTests.zig covers it). More than 64 sleeping
+//! bodies may be woken up by CCD hits in one collision step when each of them is hit by one CCD body only
+//! (`ccd_wake_batch`).
 //!
 //! # Constraint scenes (Phase 6)
 //!

@@ -165,7 +165,35 @@ both types) when porting code needs them.
 - Plain data that Jolt copies by value (Vec3, AABox, BodyID, ...) is a `struct`. Use
   `extern struct` when layout matters: SIMD types, data that is hashed/streamed as bytes,
   data shared with GPU code. Uninitialized C++ values (`Vec3 v;`) become `var v: Vec3 = undefined;`.
+- **Large values.** A value with comptime-known fields (`.empty`, `.{}`, a field default) is one constant in Zig
+  0.16. Its `undefined` bytes are part of that constant, so storing it writes the whole object: a `memset` or a copy
+  from read-only data. Only a plain `var x: T = undefined;` costs nothing. Jolt's constructors set only the headers
+  (`StaticArray()` sets only `mSize`). Before Phase 10 such fills were 80-96% of Zolt's instructions in some scenes.
+  So for a value over 256 bytes (a large `StaticArray` too) in code that runs per step, per body, per contact or
+  per query:
+  - give the field no default, and do not use `.empty` or `.{}`;
+  - build it in place: `var x: T = undefined;` and then `x.clear()` or `x.init(...)`, a literal that names the
+    buffer (`StaticArray.init()`, which only sets `len`), or `fn init(self: *T, ...)`. A default constructed
+    `StaticArray<Vec3, N> a;` becomes `var a: StaticArray(Vec3, N) = .init();`. An in-place init must set every
+    field that had a default (headers, flags, counters, base fields). Only the large buffers stay undefined;
+  - do not return it by value from a function that fills it, and do not copy it whole: copy the used elements
+    (`assign`), and add an element in place (`addOne`).
+
+  Swap with `Core.swap`, not `std.mem.swap`, which swaps byte by byte. This holds for all library code. A small
+  value (`StaticArray(Vec3, 4)`) may use `.empty`: its fill is cheap. Setup code may use `.empty` too: the creation
+  and teardown of a system, a shape or a constraint, such as `var pool: JobSystemThreadPool = .empty;` (see
+  Allocation). For a `StaticArray`, `.init()` is the better default everywhere.
+
+  `zig build codegen-check` fails on a large fill, a large copy from read-only data or a `std.mem.swap` in the
+  library code of ZoltPerformanceTest, also where LLVM inlined it into the test program. The setup sites that may
+  stay are listed in `ALLOW` in `tools/check_codegen.py`. `zig build perf-budget` compares the instruction counts
+  with C++ ([Roadmap.md](Roadmap.md), Phase 10).
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
+- **`loadFloat3Unsafe` reads 16 bytes**, like Jolt's `sLoadFloat3Unsafe`. The 4 bytes after the `Float3`
+  must belong to the same object. A `Vec3` / `Quat.loadFloat3Unsafe` call may read a struct member that a
+  comptime `std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "member"))` at the struct covers (see
+  `Sphere.zig`), or an array with one spare element at the end. Anywhere else (a local variable, the
+  last element of an array or a buffer) use `loadFloat3Safe`. Both give the same bits.
 - **Bit flags.** Public bit flag enums (`EAllowedDOFs`, `EStateRecorderState`, `EPhysicsUpdateError`) become
   `packed struct(uN)` with one `bool` per bit in Jolt's bit order. Jolt's named combinations become decls
   (`AllowedDOFs.all`, `AllowedDOFs.plane_2d`, `StateRecorderState.all`), and a comptime block checks the bits against
@@ -190,7 +218,8 @@ both types) when porting code needs them.
 - Types that hand out pointers to themselves during construction (worker threads, jobs that store
   the job system) cannot be returned by value. They have a default constructed `pub const empty`
   and initialize in place: `var pool: JobSystemThreadPool = .empty; try pool.init(allocator, io, ...)`
-  (Jolt's default constructor + `Init`). Document that they must not be moved after `init`.
+  (Jolt's default constructor + `Init`). Document that they must not be moved after `init`. The `.empty` fills
+  the whole object (8,640 bytes for the pool), which is fine at setup ("Large values").
 - `TempAllocator` is ported as its own type (it is a stack allocator with LIFO semantics), and
   additionally exposes a `std.mem.Allocator` interface for use with std containers.
 - Jolt's typed temp blocks (`T *p = (T *)inTempAllocator->Allocate(n * sizeof(T))` ... `inTempAllocator->Free(p,
@@ -271,7 +300,7 @@ Phase 5 adds no exception, only these patterns ([SimulationArchitecture.md](Simu
 | C++ (Jolt)                       | Zig                                                                   |
 |----------------------------------|-----------------------------------------------------------------------|
 | `Array<T>`                       | `std.ArrayList(T)` (unmanaged in 0.16: pass the allocator to every mutating call) |
-| `StaticArray<T, N>`              | port of `Core/StaticArray.h` (std has no BoundedArray anymore)        |
+| `StaticArray<T, N>`              | port of `Core/StaticArray.h` (std has no BoundedArray anymore). The default constructor is `.init()`, not `.empty` (see "Large values") |
 | `UnorderedMap`, `UnorderedSet`, `HashTable` | port of Jolt's `Core/HashTable.h` when iteration order can affect results, otherwise `std.HashMapUnmanaged`: `UnorderedMap(Key, Value, .{})`, `UnorderedSet(Key, .{})`, the `Hash` / `KeyEqual` template arguments become `HashTableOptions(Key){ .hash, .key_equal }` |
 | `QuickSort`, `InsertionSort`     | ports of `Core/QuickSort.h` / `Core/InsertionSort.h` (std::sort / std.sort orders differ, which breaks determinism for equal keys) |
 | `String`, `string_view`          | `[]const u8` (owned strings: `[]u8` + allocator)                      |
@@ -456,7 +485,7 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `JPH_SHADER_NAME(X)`, `JPH_SHADER_BIND_BEGIN(X)` ... `JPH_SHADER_BIND_END`, `JPH_SHADER_FUNCTION_BEGIN(void, main, ...)` (the `WrapShader*.h` macros) | `pub const name = "X"`, `pub const Bindings = struct { ... }` (fields with the HLSL binding names: `hlsl.Constants(T)`, `hlsl.Buffer(T)`, `hlsl.RWBuffer(T)`), `pub fn main(b: *Bindings, tid: hlsl.uint3) void`; `JPH_REGISTER_SHADER(sys, X)` is `sys.registerShader(X)`. Recipe: [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) section 3 |
 | developer debug switches that are commented out in Jolt (`JPH_GJK_DEBUG`, `JPH_EPA_PENETRATION_DEPTH_DEBUG`, `JPH_EPA_CONVEX_BUILDER_DRAW`, `JPH_EPA_CONVEX_BUILDER_VALIDATE`, `JPH_CONVEX_BUILDER_DEBUG`, `JPH_CONVEX_BUILDER_DUMP_SHAPE`, `JPH_CONVEX_BUILDER_2D_DEBUG`, ...) | not ported: list them in a `//! Not ported: ...` header line. They do not affect the Status (a file without them is `complete`) |
 | `#ifdef JPH_CPU_BIG_ENDIAN`                 | `if (builtin.cpu.arch.endian() == .big)` (comptime); port both branches |
-| `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped for now (a profiler may come later)                 |
+| `JPH_PROFILE(...)`, `JPH_PROFILE_FUNCTION()`| dropped. Zolt has its own job timeline instead: `-Djob_profile=true` records every job and the idle time of every job thread (Core/JobProfiler.zig, the hooks are `void` without the option), `ZoltPerformanceTest -p` writes it as a Chrome trace |
 | `JPH_DET_LOG(a << b)`                       | `if (DeterminismLog.enabled) DeterminismLog.log(.{ a, b });` (Jolt's text: floats as hex bits, BodyIDs as 8 hex digits; `DeterminismLog.enabled` is the build option `-Ddeterminism_log`, off by default) |
 | `JPH_NAMESPACE_BEGIN/END`, `JPH_EXPORT`, `JPH_SUPPRESS_WARNINGS*` | dropped                               |
 | `JPH_DECLARE_SERIALIZABLE_*` + `JPH_IMPLEMENT_SERIALIZABLE_*` (the `sCreateRTTI` body) | `pub const rtti = RTTI.declare(@This(), .{ .name, .kind, .bases, .attributes })`, the first declaration of the struct. The kind comes from the IMPLEMENT macro. Recipe and rules: [SerializationArchitecture.md](SerializationArchitecture.md) sections 2 and 3 |
@@ -466,6 +495,15 @@ the atomic integer Jolt stores it in. Example: `JobSystem.Barrier` (a `Job` keep
 | `static_assert`                             | `comptime { std.debug.assert(...); }` or `@compileError`    |
 | `JPH_MAKE_HASHABLE(T, a, b)`                | `pub fn getHash(self: T) u64 { return HashCombine.hashCombineArgs(.{ a, b }); }` |
 | a lambda passed to `JobSystem::CreateJob`   | an inline closure at the lambda's position, see below       |
+
+**Undefined behavior in Jolt.** Jolt undefined behavior that valid input can reach gets a defined guard in every build
+mode; invalid input gets an error at creation.
+- A guard keeps Jolt's result wherever Jolt is defined. So no parity test and no hash changes.
+- `std.debug.assert` and the bounds check of a slice are not guards: ReleaseFast removes both.
+- The error is `error.InvalidSettings` from the function that creates the object, for example `VehicleConstraint.create`
+  or `TwoBodyConstraintSettings.createConstraint`. A failed creation leaves nothing allocated.
+- Add a row to the UB table of [RemainingFeaturesArchitecture.md](RemainingFeaturesArchitecture.md) R20 and pin the
+  case with a Zolt-only test. The parity generators never produce such input, because Jolt has no result to compare.
 
 **Lambdas passed to the job system** (`PhysicsSystem::Update`, [SimulationArchitecture.md](SimulationArchitecture.md)
 D4) become inline closures at the lambda's position: `.init(struct { fn call(...) void { ... } }.call, .{ captures })`.
@@ -579,8 +617,8 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   for ThreadSanitizer) become `.monotonic` atomics: the atomic load or store compiles to the same instruction on x86
   and ARM and removes the undefined behavior. Examples: `BodyManager.bodies_size` (`mBodies.size()`),
   `MotionProperties.index_in_active_bodies`, the body pair queue slots of the contact manager, the QuadTree node
-  bounds (loaded per lane into a `Vec4`, which gives the bits of Jolt's vector load). Every other atomic keeps Jolt's
-  memory order.
+  bounds where the walks do not use the inline asm vector load (SimulationArchitecture D9). Every other atomic keeps
+  Jolt's memory order.
 - **Jolt's barrier race is fixed, not ported.** Jolt's `BarrierImpl::AddJob` / `AddJobs` count a job after they
   set the barrier on it. A job that finishes in between lets `Wait()` return early, which the soft body step can
   hit. Zolt counts first and releases the count of a job that is already done (scheduling only, see
@@ -710,8 +748,12 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
 - `usingnamespace` and `async` are gone. `std.BoundedArray` is gone.
 - Zig 0.16's self-hosted x86_64 backend (Zig's default for Debug builds) miscompiles some `@Vector`
   code, e.g. `@bitCast(@Vector(4, bool))` to `u4` returns garbage. `build.zig` therefore defaults to
-  LLVM (`-Duse_llvm=false` opts out for faster Debug compiles). Avoid bitcasting bool vectors to
-  integers; build masks with shifts instead (see `UVec4.getTrues`).
+  LLVM (`-Duse_llvm=false` opts out for faster Debug compiles). Bitcast bool vectors to integers
+  only when `builtin.zig_backend == .stage2_llvm` and the CPU is little endian, and build the mask
+  with shifts otherwise. Copy the gate `UVec4.use_bool_bit_cast` (see `UVec4.getTrues`).
+- LLVM intrinsics (`extern fn @"llvm.x86..."`) and inline asm with memory operands also need
+  `builtin.zig_backend == .stage2_llvm`. Keep a portable fallback, and test that it gives the same
+  bits (see `UVec4.shiftComponents4Minus` and `QuadTree.Node.vectorLoad`).
 - Integer arithmetic that wraps on purpose (hashes, counters) must use `+%`, `-%`, `*%`;
   plain operators are overflow-checked in Debug/ReleaseSafe.
 - `std.math.nan(f32)` is a quiet NaN like `numeric_limits<float>::quiet_NaN()`.
@@ -736,6 +778,7 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `HashBytes(data, size, seed)`      | `hashBytes(data)` / `hashBytesSeeded(data, seed)` | default argument            |
 | `std::mt19937`                     | `Mt19937`                              | std type, see Core/Mt19937.zig          |
 | `std::shuffle(begin, end, engine)` | `Mt19937.shuffleLibcxx(T, items)`      | libc++'s algorithm (section 8, rule 15) |
+| `std::swap(a, b)`                  | `Core.swap(T, &a, &b)`                 | `std.mem.swap` swaps byte by byte (section 5, "Large values") |
 | `std::exp(float)` / `std::pow(float, float)` | `LibM.expf` / `LibM.powf`    | C library (section 8, rule 14)          |
 | `AssertFailed = MyHandler`         | `IssueReporting.setAssertHandler(&handler)` (returns the previous one) | global function pointer → pattern A interface (R8) |
 | `JPH_PI`                           | `math.pi`                              |                                         |

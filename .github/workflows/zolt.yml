@@ -37,12 +37,16 @@ on:
       - 'Docs/Zolt/**'
       - '.github/workflows/zolt.yml'
   workflow_dispatch:
+  # The parity rows that do not run per push (job parity-nightly)
+  schedule:
+    - cron: '17 3 * * *'
 
 env:
   ZIG_VERSION: 0.16.0
 
 jobs:
   lint:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Format and port status
     steps:
@@ -67,6 +71,7 @@ jobs:
       run: python3 tools/port_status.py --check-m10
 
   test:
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} use_llvm=${{ matrix.use_llvm }}
     strategy:
@@ -123,6 +128,31 @@ jobs:
       run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }}
 
   parity:
+    # Per push and pull request: one row (ReleaseFast, single precision, no debug renderer). The other rows run in
+    # parity-nightly. setup-zig keeps the Zig cache between runs, and the cache holds the objects of the C++ reference.
+    # The cache key names the row. The size limit leaves room for the reference and the parity test binary. Zig keys
+    # its cache on the content of every input, so a stale cache only costs time and never changes a result.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Parity with C++ Jolt ReleaseFast double_precision=false debug_renderer=false
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+        cache-key: parity-ReleaseFast-false-false
+        cache-size-limit: 4096
+    - name: Compare with the C++ library (includes hello-world-check, milestone M5)
+      run: zig build parity --summary all -Doptimize=ReleaseFast -Ddouble_precision=false -Ddebug_renderer=false
+
+  parity-nightly:
+    # The other parity rows: every night on master and on a manual run. A manual run also runs the parity job, so it
+    # covers all 5 rows. Each row takes about as long as the per push row: this saves about 4 parity runs per push.
+    # No Zig cache: these rows run once a day, and their caches would push the cache of the per push row out of the
+    # cache quota of the repository.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Parity with C++ Jolt ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }}
     strategy:
@@ -131,10 +161,16 @@ jobs:
         # ReleaseSafe checks Zolt's asserts. The inputs for which Jolt's own asserts would fire (failing / degenerate
         # decompositions, non-finite inertia, ...) run in both: the asserts that these tests expect are recoverable
         # (Docs/Zolt/RemainingFeaturesArchitecture.md R8), ReleaseFast has no asserts.
-        optimize: [ ReleaseSafe, ReleaseFast ]
-        double_precision: [ false, true ]
-        debug_renderer: [ false ]
         include:
+          - optimize: ReleaseSafe
+            double_precision: false
+            debug_renderer: false
+          - optimize: ReleaseSafe
+            double_precision: true
+            debug_renderer: false
+          - optimize: ReleaseFast
+            double_precision: true
+            debug_renderer: false
           # The debug renderer hooks in Zolt and JPH_DEBUG_RENDERER in the C++ reference (a second reference build)
           - optimize: ReleaseFast
             double_precision: false
@@ -146,10 +182,87 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ env.ZIG_VERSION }}
+        use-cache: false
     - name: Compare with the C++ library (includes hello-world-check, milestone M5)
       run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }}
 
+  job-profile:
+    # The measurement tooling (-Djob_profile, Zolt/Core/JobProfiler.zig): the tests of the job system, the profiler and
+    # ZoltPerformanceTest with the option, then one short profiled run (-p -phase_times). Its Chrome trace must be valid
+    # JSON with the physics jobs and both kinds of waits. Its output must have the summary and the phase times.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Job profiler
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Test with the job profiler
+      run: zig build test --summary all -Djob_profile=true -Dtest-filter=Job -Dtest-filter=profiler -Dtest-filter=PerformanceTest -Dtest-filter="-p writes"
+    - name: Profile a short Pyramid run
+      shell: bash # With pipefail: a failed run fails the step
+      run: zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -q=LinearCast -t=2 -s=Pyramid -i=60 -p -phase_times | tee run.txt
+    - name: Check the Chrome trace and the output
+      run: |
+        python3 - <<'PY'
+        import json, re
+        events = [e for e in json.load(open("Pyramid_linearcast_th2.json"))["traceEvents"] if e["ph"] == "X"]
+        names = {e["name"] for e in events}
+        assert {"FindCollisions", "SolveVelocityConstraints", "Idle: wait for jobs", "Idle: wait for barrier"} <= names, names
+        print(len(events), "events")
+        output = open("run.txt").read()
+        assert re.search(r"^Job profile: wall [0-9.]+ ms, Worker 0: busy .*, Thread 0: busy ", output, re.M), output
+        phases = re.findall(r"^Phase times: scene update ([0-9.]+) ms, physics update ([0-9.]+) ms$", output, re.M)
+        assert len(phases) == 1 and float(phases[0][1]) > 0, output
+        print("Phase times:", phases[0])
+        PY
+
+  codegen:
+    # The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). The library code of ZoltPerformanceTest (ReleaseFast,
+    # x86-64-v3) must not fill or copy a large buffer and must not use std.mem.swap (tools/check_codegen.py). Bit exact
+    # results cannot show such a slowdown. The runner has objdump. The check reads x86-64 code only.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Codegen check
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Self-test of the scanner
+      run: python3 tools/check_codegen.py --self-test
+    - name: Check the machine code
+      run: zig build codegen-check
+
+  perf-budget:
+    # The instruction budget of Phase 10 (tools/perf_budget.py). Callgrind counts the instructions of the physics
+    # updates of short single threaded runs of ZoltPerformanceTest and of the C++ PerformanceTest. Zolt/C++ must stay
+    # within the budget of each scene. The 8 callgrind runs took 27 seconds on a 4 core machine, plus the build (the
+    # C++ library takes about 5 minutes the first time).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    name: Instruction budget
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v5
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    - name: Self-test of the verdicts
+      run: python3 tools/perf_budget.py --self-test
+    - name: Install valgrind
+      run: sudo apt-get update && sudo apt-get install -y valgrind
+    - name: Count the instructions
+      run: zig build perf-budget
+
   determinism:
+    if: github.event_name != 'schedule'
     # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
     # arguments), and the hash does not depend on the thread count
     runs-on: ubuntu-latest

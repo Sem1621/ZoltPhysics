@@ -379,7 +379,7 @@ pub const ConvexHullBuilder = struct {
 
         // Ensure the planes are facing outwards
         if (max_dist < 0.0)
-            std.mem.swap(i32, &idx2, &idx3);
+            Core.swap(i32, &idx2, &idx3);
 
         // Create tetrahedron
         const t1 = try self.createTriangle(idx1, idx2, idx4);
@@ -455,7 +455,7 @@ pub const ConvexHullBuilder = struct {
                     }
 
                     // Swap it to the end
-                    std.mem.swap(Coplanar, &self.coplanar_list.items[best_idx], &self.coplanar_list.items[self.coplanar_list.items.len - 1]);
+                    Core.swap(Coplanar, &self.coplanar_list.items[best_idx], &self.coplanar_list.items[self.coplanar_list.items.len - 1]);
 
                     // Remove it
                     furthest_point_idx = self.coplanar_list.pop().?.position_idx;

@@ -20,6 +20,7 @@
 //! `error.NodeMemoryEstimateIncorrect`, the error Jolt reports for a wrong estimate.
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const Float3 = @import("../Math/Float3.zig").Float3;
 const Vec3 = @import("../Math/Vec3.zig").Vec3;
 const ByteBuffer = @import("../Core/ByteBuffer.zig").ByteBuffer;
@@ -168,7 +169,7 @@ pub fn AABBTreeToBuffer(comptime TriangleCodec: type, comptime NodeCodec: type) 
                     if (to_estimate_triangles.items.len == 0)
                         break
                     else
-                        std.mem.swap(std.ArrayList(*const Node), &to_estimate, &to_estimate_triangles);
+                        Core.swap(std.ArrayList(*const Node), &to_estimate, &to_estimate_triangles);
                 }
             }
 
@@ -270,7 +271,7 @@ pub fn AABBTreeToBuffer(comptime TriangleCodec: type, comptime NodeCodec: type) 
                 if (to_process_triangles.items.len == 0)
                     break
                 else
-                    std.mem.swap(std.ArrayList(*NodeData), &to_process, &to_process_triangles);
+                    Core.swap(std.ArrayList(*NodeData), &to_process, &to_process_triangles);
             }
 
             // Assert that our reservation was correct (we don't know if we swapped the arrays or not)
@@ -489,7 +490,8 @@ fn checkBuffer(allocator: std.mem.Allocator, buffer: *const TestBuffer, mesh: *c
     // Collect all triangles
     var collect: CollectVisitor = .{ .allocator = allocator };
     defer collect.deinit();
-    var node_ctx: TestNodeCodec.DecodingContext = .init(buffer.getNodeHeader());
+    var node_ctx: TestNodeCodec.DecodingContext = undefined;
+    node_ctx.init(buffer.getNodeHeader());
     node_ctx.walkTree(buffer_start, &triangle_ctx, &collect);
     try std.testing.expect(node_ctx.isDoneWalking());
     try std.testing.expectEqual(mesh.triangles.items.len, collect.triangles.items.len);
@@ -536,7 +538,8 @@ fn checkBuffer(allocator: std.mem.Allocator, buffer: *const TestBuffer, mesh: *c
         const direction = Vec3.init(0.1, -10, -0.2);
 
         var ray: RayCastVisitor = .{ .ray_origin = origin, .ray_direction = direction, .ray_inv_direction = .init(direction) };
-        var ray_ctx: TestNodeCodec.DecodingContext = .init(buffer.getNodeHeader());
+        var ray_ctx: TestNodeCodec.DecodingContext = undefined;
+        ray_ctx.init(buffer.getNodeHeader());
         ray_ctx.walkTree(buffer_start, &triangle_ctx, &ray);
 
         var brute_force: f32 = math.flt_max;
@@ -600,7 +603,7 @@ test "AABBTreeToBuffer root leaf and abort" {
     const size = buffer.getBuffer().vector.items.len;
     var tree: ByteBuffer = .empty;
     defer tree.deinit(allocator);
-    std.mem.swap(ByteBuffer, &tree, buffer.getBufferMut());
+    Core.swap(ByteBuffer, &tree, buffer.getBufferMut());
     try std.testing.expectEqual(size, tree.vector.items.len);
     try std.testing.expectEqual(@as(usize, 0), buffer.getBuffer().vector.items.len);
 
@@ -644,7 +647,8 @@ test "AABBTreeToBuffer root leaf and abort" {
 
     // A budget of 3 triangles: the walk aborts every time it finds a second block of 2 triangles
     var visitor: BudgetVisitor = .{ .budget = 3 };
-    var ctx: TestNodeCodec.DecodingContext = .init(buffer2.getNodeHeader());
+    var ctx: TestNodeCodec.DecodingContext = undefined;
+    ctx.init(buffer2.getNodeHeader());
     var num_walks: u32 = 0;
     while (true) {
         visitor.num_found = 0;

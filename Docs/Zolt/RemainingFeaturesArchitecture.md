@@ -580,7 +580,9 @@ Jolt's quirks where Jolt's behavior is defined are reproduced:
 - the recorder's stale batch IDs across recorders (the shape caches outlive a recorder in both).
 
 Where Jolt is undefined, Zolt has one defined behavior. The parity generators never produce these inputs. Zolt-only
-tests pin them.
+tests pin them. Since Phase 10 the rule of PortingGuide.md section 7 applies: undefined behavior that valid input can
+reach gets a defined guard in every build mode (UB35 to UB37), and invalid input gets an error at creation (UB38,
+UB39).
 
 | # | Input | Jolt | Zolt |
 |---|---|---|---|
@@ -618,6 +620,11 @@ tests pin them.
 | UB32 | `Hair.draw` with `draw_render_strands` and a render strand of 0 vertices at the end of the vertex array (a strand that is not simulated; settled in the audit) | reads the first vertex of the strand past `mRenderVertices` and past the render positions | skips the strand: it draws nothing and does not change the color of the next strand. Inside the array such a strand is literal (it reads the first vertex of the next strand and draws no line). Pinned by a Hair.zig test |
 | UB33 | a Hair or HairSettings call before its prerequisite (settled in the audit): `Hair.update` before `initCompute`; `Hair.update` with render vertices and an override of the render positions without `setRenderPositionsCB`; the first `readBackGPUState` before `initCompute`, or with an override without `setRenderPositionsCB`; `lockReadBackBuffers` or `unlockReadBackBuffers` before the first `readBackGPUState`; `HairSettings.initCompute` before `init` | dereferences a null buffer; `InitCompute` writes past the transposed vertex arrays (`mMaxVerticesPerStrand` is 0) | panics with a message: "Hair.update: call initCompute first" (also after an `initCompute` that failed before its last buffer), "Hair.update: the render positions are overridden, call setRenderPositionsCB first", the same two messages for "Hair.readBackGPUState: ...", "Hair.lockReadBackBuffers: call readBackGPUState first" (and "Hair.unlockReadBackBuffers: ..."), "HairSettings.initCompute: a strand has more vertices than max_vertices_per_strand (call init first)". Two nearby cases are defined in Jolt and literal in Zolt. One is `update` of an override without render vertices and without `setRenderPositionsCB`: Jolt binds the null buffer, which ComputeQueueCPU::SetRWBuffer ignores, and dispatches no render vertex. The other is a later `readBackGPUState` after `setRenderPositionsCB(null)`: the CPU backend's ScheduleReadback does nothing. A Hair.zig test pins both. The panics are not pinned. UB25 stays: `draw` before the first read back draws nothing |
 | UB34 | a geometry without LODs, or a LOD with an empty `Batch` (playback ID 0, `Geometry.createWithBatch(allocator, .empty, ...)`, an allocation failure), drawn into DebugRendererSimple or DebugRendererRecorder; `Geometry.getLOD` of a geometry without LODs (settled in the audit) | DebugRendererSimple reads `mLODs.data()` and the null batch; the recorder reads the ID of the null batch; `mLODs.back()` of an empty list | DebugRendererSimple draws nothing; the recorder writes batch ID 0, which the playback reads as an empty batch (UB7), and 0 LODs for a geometry without LODs (Jolt's defined case); `getLOD` panics with "DebugRenderer.Geometry.getLOD: the geometry has no LODs". Pinned by the DebugRendererSimple and DebugRendererRecorder inline tests |
+| UB35 | JobResolveCCDContacts activates the bodies it wakes up in batches of 64 while it still loops over the CCD bodies. A later CCD body hits a body of such a batch (settled in Phase 10, W3). Valid input reaches it: more than 64 sleeping bodies hit by CCD bodies in one step | `sGetCCDBody` asserts, then reads past `mActiveBodyToCCDBody` with the new active index. The release build can write through the garbage index | `getCCDBody` returns null when the active index is past the table, in every build mode. The body was asleep during FindCCDContacts, so it has no CCD body. Every index that Jolt handles behaves the same, so no parity test or hash changes. Pinned by a PhysicsSystemTests test (70 sleeping boxes and one extra bullet). CI runs it in Debug and ReleaseSafe, where the test fails without the guard (the assert in `getCCDBody`) |
+| UB36 | a HeightFieldShape whose empty range blocks (min 0xffff, max 0) get Y bounds that are not inside out: a flat height field far from the origin, where offset.y + scale.y * 65535 rounds to offset.y, or a scale.y <= 0 in the settings. The number of blocks is not a power of 2 (settled in Phase 10, W3) | the walks (queries, collision, GetTriangles) can visit the empty blocks outside the height field and read beyond the grid and the samples | the walker makes the Y bounds of an empty range block that starts outside the height field inside out when they are not, in every build mode. Only such blocks reach Jolt's undefined behavior. An empty block inside the height field keeps Jolt's collapsed bounds: Jolt visits it and finds no triangles. Skipping it would change results, because the cast and ray visitors sort the blocks by distance and that sort is not stable for ties (another closest triangle at the same fraction, another order of all hits). Pinned by the HeightFieldShape tests "a flat height field far from the origin walks only its own blocks" (it asserted in getBlockOffsetAndScale before) and "an empty block inside a flat height field far from the origin keeps Jolt's bounds (UB36)". The parity keeps the height fields that walk outside out (`walksOutside`). It compares collapsed height fields with a power of 2 number of blocks, among them one with an empty block inside (`emptyBlockHeightField`, with a cast onto the tied blocks next to it), and checks that every walking layer compares such a height field |
+| UB37 | GetTrianglesNext when one block has more triangles than requested (block size 5 or more with 32 triangles requested; settled in Phase 10, W3) | the call restarts the block in which the previous call stopped and returns its first triangles again, forever | when a call could not return more triangles than the previous calls returned from that block, it continues after them (the context keeps the index of the triangle at which the walk stopped). Every other call restarts the block like Jolt, with Jolt's duplicates, so Zolt differs only in the calls in which Jolt returns nothing new. Pinned by the HeightFieldShape GetTriangles test (block size 8, 4 calls of 32 triangles each return a block of 128 once). The parity compares the calls up to the first repeated call of Jolt, then checks that Zolt's walk finishes with the triangles of Jolt's walk with a large buffer |
+| UB38 | vehicle settings that do not fit the wheels of the VehicleConstraintSettings (settled in Phase 10, W3): a tracked wheel in no track, a track wheel or a driven wheel outside the wheels, a differential wheel other than -1 outside the wheels, an anti-roll bar wheel outside the wheels | indexes `mTracks[-1]` or reads outside `mWheels` in every step | `VehicleConstraint.create` returns `error.InvalidSettings` and leaves nothing allocated. VehicleConstraint checks the anti-roll bars itself, before it allocates anything. The controller check is the Zolt virtual `VehicleControllerSettings.checkWheels(num_wheels)` (default: accept), which VehicleConstraint calls before it constructs the controller. TrackedVehicleControllerSettings and WheeledVehicleControllerSettings override it (MotorcycleControllerSettings inherits the wheeled check). Changes through the writable getters after creation must keep the rule. Pinned by the TrackedVehicleController, MotorcycleController and WheeledVehicleController tests "... (UB38)" and the anti-roll bar test "VehicleConstraint anti-roll bar wheels outside the wheels are InvalidSettings (UB38)" in TrackedVehicleController.zig |
+| UB39 | a PathConstraint with an open Hermite path of fewer than 2 points, or a looping one without points (settled in Phase 10, W3) | GetIndexAndT and GetClosestPoint index outside `mPoints` (index -1 or -2); a looping path divides by 0 | the Zolt virtual `PathConstraintPath.isValid` (default true) is false for such a path. `TwoBodyConstraintSettings.createConstraint` (and `PathConstraint.create` / `init`) and `PathConstraint.setPath` return `error.InvalidSettings` and change nothing. For that, `createConstraint` returns `TwoBodyConstraintSettings.CreateError` (out of memory or invalid settings), and so do `BodyInterface.createConstraint`, `RagdollSettings.createRagdoll` and `PhysicsScene.createBodies`. A looping path with 1 point stays valid: Jolt's release build is defined there (its debug build asserts). Pinned by the PathConstraint test "a path that is not valid is InvalidSettings (UB39)" |
 
 ### R21 Port status and scope
 
@@ -830,6 +837,10 @@ The audit added:
 - `test`: a row `ubuntu Debug use_llvm=false` (M10). Every include row sets every key of the matrix.
 
 The first parity build after the change recompiles the C++ library (about 5 minutes per configuration).
+
+Since Phase 10 (W6) only the parity row ReleaseFast, single precision, without the debug renderer runs per push and
+pull request (job `parity`). The other four rows, also `ReleaseFast debug_renderer=true`, run nightly and on a manual
+run (job `parity-nightly`).
 
 ## 6. Groups and order
 
@@ -1052,7 +1063,7 @@ settled:
   The library is at 99.6%, because `Core.zig` stays partial (section 1).
 - CI runs the tests in every M10 configuration, the full parity in both renderer configurations, the 5 determinism
   hashes in both precisions and both renderer configurations (with `-r` when the option is on), and the `.jor` check
-  (section 5).
+  (section 5). Since Phase 10 four of the five parity rows run nightly (section 5).
 - Every parity layer of section 4 is in the tree. Every scene of SimScenes runs against Zolt: every Blocker is supported
   (section 6, "Settled in the audit").
 
@@ -1135,8 +1146,9 @@ settled:
 ## 12. Open questions for the lead
 
 - CI cost: the `debug_renderer=true` parity row rebuilds the reference and reruns the full parity (30 to 40 minutes). If
-  that is too slow, run it nightly, or restrict it to the renderer, simulation and perf filters. Settled: CI runs the
-  full row on every change (section 5).
+  that is too slow, run it nightly, or restrict it to the renderer, simulation and perf filters. Settled in Phase 9: CI
+  ran the full row on every change (section 5). Since Phase 10 (W6) it runs nightly and on a manual run. Per push and
+  pull request CI runs one parity row: ReleaseFast, single precision, without the debug renderer.
 - Hair has no `.hair` groom asset in the repository (`Assets/download_hair.sh`). The parity uses procedural grooms. A
   small real groom could be added for an end-to-end scene. Still open: the hair parity uses procedural grooms, on the
   scalp of `Assets/face.bin` and without a scalp.

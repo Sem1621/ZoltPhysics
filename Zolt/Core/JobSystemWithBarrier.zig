@@ -33,6 +33,9 @@
 //!     release.
 //! - `test_hook` (test builds only) lets the tests at the end of this file finish a job in the middle of addJob /
 //!   addJobs, before and after the barrier is set on it.
+//! - Zolt: with `-Djob_profile=true` the job system owns a JobProfiler (`profiler`, Core/JobProfiler.zig) and `wait`
+//!   records the time a thread waits for the barrier as idle time. The embedding job system initializes the profiler
+//!   (JobSystemThreadPool does) and hands it to its jobs with `getJobProfiler`. Without the option the field is `void`.
 //!
 //! Note (inherited from Jolt): jobs are added to the barrier while it is being waited on by jobs of that barrier.
 //! A thread that is not a job of the barrier can only add jobs while another job of the barrier stays pending until
@@ -42,6 +45,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Core = @import("Core.zig");
 const JobSystem = @import("JobSystem.zig").JobSystem;
+const JobProfiler = @import("JobProfiler.zig").JobProfiler;
 const Semaphore = @import("Semaphore.zig").Semaphore;
 const Color = @import("Color.zig").Color;
 const math = @import("../Math/Math.zig");
@@ -74,6 +78,9 @@ pub const JobSystemWithBarrier = struct {
     /// List of the actual barriers (we keep them constructed all the time since constructing a semaphore/mutex is not cheap)
     barriers: ?[*]BarrierImpl = null,
 
+    /// Zolt: the timeline of the jobs and the idle time (`-Djob_profile=true` only, see the top of this file)
+    profiler: if (Core.job_profile) JobProfiler else void = if (Core.job_profile) .empty else {},
+
     /// Not initialized (default constructor), deinit does nothing
     pub const empty: JobSystemWithBarrier = .{};
 
@@ -102,6 +109,7 @@ pub const JobSystemWithBarrier = struct {
                 barrier.deinit();
             self.allocator.free(barriers);
         }
+        if (Core.job_profile) self.profiler.deinit();
         self.* = .empty;
     }
 
@@ -132,10 +140,8 @@ pub const JobSystemWithBarrier = struct {
 
     /// Wait for a set of jobs to be finished, note that only 1 thread can be waiting on a barrier at a time
     pub fn waitForJobs(self: *JobSystemWithBarrier, barrier: *Barrier) void {
-        _ = self;
-
         // Let our barrier implementation wait for the jobs
-        BarrierImpl.fromBarrier(barrier).wait();
+        BarrierImpl.fromBarrier(barrier).wait(if (Core.job_profile) &self.profiler else {});
     }
 
     const BarrierImpl = struct {
@@ -331,7 +337,8 @@ pub const JobSystemWithBarrier = struct {
         }
 
         /// Wait for all jobs in this job barrier, while waiting, execute jobs that are part of this barrier on the current thread
-        fn wait(self: *BarrierImpl) void {
+        /// Zolt: `profiler` records the waiting time (`-Djob_profile=true` only, `void` without it)
+        fn wait(self: *BarrierImpl, profiler: if (Core.job_profile) *JobProfiler else void) void {
             while (self.write_state.num_to_acquire.load(.seq_cst) > 0) {
                 {
                     // Go through all jobs
@@ -375,7 +382,9 @@ pub const JobSystemWithBarrier = struct {
                 // Note that using GetValue is inherently unsafe since we can read a stale value, but this is not an issue here as this is the only
                 // place where we acquire the semaphore. Other threads only release it, so we can only read a value that is lower or equal to the actual value.
                 const num_to_acquire = @max(1, self.semaphore.getValue());
+                const idle_start = if (Core.job_profile) JobProfiler.begin(profiler) else {};
                 self.semaphore.acquire(self.io, .{ .number = @intCast(num_to_acquire) });
+                if (Core.job_profile) JobProfiler.end(profiler, .idle, "Idle: wait for barrier", idle_start);
                 _ = self.write_state.num_to_acquire.fetchSub(num_to_acquire, .seq_cst);
             }
 

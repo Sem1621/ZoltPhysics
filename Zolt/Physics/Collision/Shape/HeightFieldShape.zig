@@ -49,15 +49,20 @@
 //!   shift `1 << mBitsPerSample` of an invalid number of bits per sample uses the x86 shift count (mod 32), and `clone`
 //!   of a height field without collision (no buffers) does not copy from a null buffer (the clone has no collision
 //!   either).
-//! - Jolt behaviors that are kept as they are (found while comparing with Jolt, see the tests):
-//!   - GetTrianglesNext restarts the block in which the output buffer became full, so triangles can be returned more
-//!     than once, and a block with more triangles than requested (block size 5 or more with 32 triangles requested)
-//!     is returned again and again: the walk never finishes.
-//!   - An empty range block (min 0xffff, max 0) is skipped because its Y bounds are inside out. When
+//! - Two guards where valid input reaches undefined behavior or a hang in Jolt (RemainingFeaturesArchitecture.md R20):
+//!   - UB36: an empty range block (min 0xffff, max 0) is skipped because its Y bounds are inside out. When
 //!     offset.y + scale.y * 65535 == offset.y in float (a flat height field far from the origin) these bounds collapse
-//!     to a valid box and the walker visits blocks outside the height field when the number of blocks is not a power
-//!     of 2: Jolt reads beyond its grid and samples (undefined behavior), Zolt's safe builds assert like JPH_ASSERT.
-//!     The same happens for a negative or zero scale.y in the settings.
+//!     to a valid box. Jolt then visits blocks outside the height field when the number of blocks is not a power of 2,
+//!     and reads beyond its grid and samples. The same happens for a negative or zero scale.y in the settings. The
+//!     walker makes the Y bounds of an empty block that starts outside the height field inside out when they are not,
+//!     in every build mode. An empty block inside the height field keeps Jolt's bounds: Jolt visits it and finds no
+//!     triangles, and the visit order of the other blocks depends on its bounds.
+//!   - UB37: GetTrianglesNext restarts the block in which the output buffer became full, so triangles can be returned
+//!     more than once (kept, like Jolt). A block with more triangles than requested (block size 5 or more with 32
+//!     triangles requested) is returned again and again in Jolt: the walk never finishes. Zolt continues after the
+//!     triangles that the previous calls returned when a restart would return nothing new. The other calls return
+//!     Jolt's triangles.
+//! - Jolt behaviors that are kept as they are (found while comparing with Jolt, see the tests):
 //!   - Settings with more than one material and no material indices read beyond the material indices
 //!     (StoreMaterialIndices), CalculateBitsPerSampleForError reads beyond the samples when the sample count is not a
 //!     multiple of the block size: an index out of bounds in Zolt's safe builds.
@@ -2219,7 +2224,7 @@ pub const HeightFieldShape = struct {
 
         // Flip triangle if scaled inside out
         if (ScaleHelpers.isInsideOut(scale))
-            std.mem.swap(Vec3, &vertices[1], &vertices[2]);
+            Core.swap(Vec3, &vertices[1], &vertices[2]);
 
         // Transform to world space
         const transform = center_of_mass_transform.preScaled(scale);
@@ -2635,7 +2640,9 @@ pub const HeightFieldShape = struct {
         std.debug.assert(shape.getSubType() == .height_field);
         const height_field = shape.cast(HeightFieldShape);
 
-        var visitor: Visitor = .{ .base = .init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector) };
+        // In place: the helper keeps a pointer into its support buffer after the first triangle
+        var visitor: Visitor = undefined;
+        visitor.base.init(shape_cast, shape_cast_settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         visitor.shape2 = height_field;
         visitor.inv_direction.set(shape_cast.direction);
         visitor.box_center = shape_cast.shape_world_bounds.getCenter();
@@ -2716,6 +2723,11 @@ pub const HeightFieldShape = struct {
         const ctx = context.get(HSGetTrianglesContext);
         if (ctx.decode_ctx.isDoneWalking())
             return 0;
+
+        // Zolt (UB37): Jolt restarts the block in which the previous call stopped. When this call cannot take more
+        // triangles than the previous calls returned from that block, Jolt returns the same triangles again, forever.
+        // Continue after them instead. Every other call restarts the block like Jolt.
+        ctx.decode_ctx.skip_triangles = if (max_triangles_requested <= ctx.decode_ctx.abort_triangle) ctx.decode_ctx.abort_triangle else 0;
 
         // Store parameters on context
         ctx.max_triangles_requested = max_triangles_requested;
@@ -2952,6 +2964,12 @@ pub const HeightFieldShape = struct {
         shape: *const HeightFieldShape,
         top: i32 = 0,
         properties_stack: [stack_size]u32 = undefined,
+        /// Zolt (UB37, only for the walk of HSGetTrianglesContext): the number of triangles of the block at the top of the
+        /// stack that the next walk skips
+        skip_triangles: u32 = 0,
+        /// Zolt (UB37, only for the walk of HSGetTrianglesContext): the index of the triangle in its block at which the
+        /// last walk stopped
+        abort_triangle: u32 = 0,
 
         fn init(shape: *const HeightFieldShape) DecodingContext {
             var ctx: DecodingContext = .{ .shape = shape };
@@ -2971,6 +2989,12 @@ pub const HeightFieldShape = struct {
             if (shape.height_samples_size == 0)
                 return;
 
+            // Zolt (UB37): GetTrianglesNext can continue inside the block in which the previous call stopped. The other
+            // walks start at the root and never continue, so they do not count the triangles.
+            const resumable = std.meta.Child(@TypeOf(visitor)) == HSGetTrianglesContext;
+            var skip_triangles: u32 = if (resumable) self.skip_triangles else 0;
+            if (resumable) self.skip_triangles = 0;
+
             // Assert that an inside-out bounding box does not collide
             if (Core.enable_asserts) {
                 var dummy = UVec4.replicate(0);
@@ -2980,6 +3004,7 @@ pub const HeightFieldShape = struct {
             // Precalculate values relating to sample count
             const sample_count = shape.sample_count;
             const sample_count_min_1 = UVec4.replicate(sample_count - 1);
+            const sample_count_float = Vec4.replicate(@floatFromInt(sample_count)); // Zolt: for the UB36 guard
 
             // Precalculate values relating to block size
             const block_size = shape.block_size;
@@ -3140,6 +3165,7 @@ pub const HeightFieldShape = struct {
                     const num_results = visitor.visitRangeBlock(transposed_min.getColumn4(0), transposed_min.getColumn4(1), transposed_min.getColumn4(2), transposed_max.getColumn4(0), transposed_max.getColumn4(1), transposed_max.getColumn4(2), &colliding_blocks, self.top);
 
                     // Loop through the results backwards (closest first)
+                    var triangle_index: u32 = 0; // Zolt (UB37): the index of the next triangle in this block
                     var result = num_results - 1;
                     while (result >= 0) {
                         // Calculate the min and max of this block
@@ -3188,12 +3214,21 @@ pub const HeightFieldShape = struct {
                                             v2 = start_vertex[1];
                                         }
 
+                                        // Zolt (UB37): skip the triangles of this block that the previous calls returned
+                                        if (resumable and triangle_index < skip_triangles) {
+                                            triangle_index += 1;
+                                            continue;
+                                        }
+
                                         // Call visitor
                                         visitor.visitTriangle(v_x, v_y, @intCast(t), v0, v1, v2);
 
                                         // Check if we're done
-                                        if (visitor.shouldAbort())
+                                        if (visitor.shouldAbort()) {
+                                            if (resumable) self.abort_triangle = triangle_index;
                                             return;
+                                        }
+                                        if (resumable) triangle_index += 1;
                                     }
                                 }
                             }
@@ -3204,6 +3239,9 @@ pub const HeightFieldShape = struct {
                         while (result >= 0 and !visitor.shouldVisitRangeBlock(self.top + result))
                             result -= 1;
                     }
+
+                    // Zolt (UB37): only the first block of a walk continues where the previous walk stopped
+                    skip_triangles = 0;
                 } else {
                     // Visit child grid
                     const stride = @min(@as(u32, 1) << @intCast(level), max_stride); // At the most detailed level we store a non-power of 2 number of blocks
@@ -3212,20 +3250,35 @@ pub const HeightFieldShape = struct {
                     // Decode min/max height
                     std.debug.assert(offset < shape.range_blocks_size);
                     const block = UVec4.loadInt4Aligned(@ptrCast(&shape.range_blocks[offset]));
-                    const bounds_miny = oy.add(sy.mul(block.expand4Uint16Lo().toFloat()));
-                    const bounds_maxy = oy.add(sy.mul(block.expand4Uint16Hi().toFloat()));
+                    const block_min = block.expand4Uint16Lo().toFloat();
+                    const block_max = block.expand4Uint16Hi().toFloat();
+                    var bounds_miny = oy.add(sy.mul(block_min));
+                    var bounds_maxy = oy.add(sy.mul(block_max));
 
                     // Calculate size of one cell at this grid level
                     const internal_cell_size = UVec4.replicate(block_size << @intCast(max_level - level - 1)); // subtract 1 from level because we have an internal grid of 2x2
 
                     // Calculate min/max x and z
                     const two_x = UVec4.replicate(2 * x); // multiply by two because we have an internal grid of 2x2
-                    const bounds_minx = ox.add(sx.mul(internal_cell_size.mul(two_x.add(UVec4.init(0, 1, 0, 1))).toFloat()));
+                    const start_x = internal_cell_size.mul(two_x.add(UVec4.init(0, 1, 0, 1))).toFloat(); // Zolt: kept for the UB36 guard
+                    const bounds_minx = ox.add(sx.mul(start_x));
                     const bounds_maxx = ox.add(sx.mul(UVec4.min(internal_cell_size.mul(two_x.add(UVec4.init(1, 2, 1, 2))), sample_count_min_1).toFloat()));
 
                     const two_y = UVec4.replicate(2 * y);
-                    const bounds_minz = oz.add(sz.mul(internal_cell_size.mul(two_y.add(UVec4.init(0, 0, 1, 1))).toFloat()));
+                    const start_z = internal_cell_size.mul(two_y.add(UVec4.init(0, 0, 1, 1))).toFloat(); // Zolt: kept for the UB36 guard
+                    const bounds_minz = oz.add(sz.mul(start_z));
                     const bounds_maxz = oz.add(sz.mul(UVec4.min(internal_cell_size.mul(two_y.add(UVec4.init(1, 1, 2, 2))), sample_count_min_1).toFloat()));
+
+                    // Zolt (UB36): the visitors skip an empty range block (min 0xffff, max 0) because its Y bounds are
+                    // inside out. They are not when oy + sy * 65535 rounds to oy (a flat height field far from the
+                    // origin) or when sy <= 0. Jolt then visits the empty blocks too. For a block that starts outside
+                    // the height field (the number of blocks is not a power of 2) it reads beyond the grid and the
+                    // samples. Make the Y bounds of such a block inside out. An empty block inside the height field
+                    // keeps Jolt's bounds, Jolt is defined there. The starts are exact integers in float.
+                    const outside = UVec4.bitOr(Vec4.greaterOrEqual(start_x, sample_count_float), Vec4.greaterOrEqual(start_z, sample_count_float));
+                    const collapsed_outside = UVec4.bitAnd(UVec4.bitAnd(Vec4.greater(block_min, block_max), Vec4.lessOrEqual(bounds_miny, bounds_maxy)), outside);
+                    bounds_miny = Vec4.select(bounds_miny, Vec4.replicate(math.large_float), collapsed_outside);
+                    bounds_maxy = Vec4.select(bounds_maxy, Vec4.replicate(-math.large_float), collapsed_outside);
 
                     // Calculate properties of child blocks
                     var properties = UVec4.replicate(((level + 1) << level_shift) + (y << (num_bits_xy + 1)) + (x << 1)).add(UVec4.init(0, 1, 1 << num_bits_xy, (1 << num_bits_xy) + 1));
@@ -3623,19 +3676,140 @@ test "HeightFieldShape: GetTrianglesStart / Next returns every triangle and cont
         try testing.expect(seen[(y * 16 + x) * 2] and seen[(y * 16 + x) * 2 + 1]);
     };
 
-    // Jolt's limitation: when one block has more triangles than requested (block size 8: 128 triangles), every call
-    // returns the first triangles of that block again and the walk never finishes
+    // UB37: a block with more triangles than requested (block size 8: 128 triangles, 32 requested). Jolt returns the
+    // first 32 triangles of the block again and again, the walk never finishes. Zolt continues inside the block.
     settings.asShapeSettings().clearCachedResult();
     settings.block_size = 8;
     var result8 = try settings.asShapeSettings().createShape(allocator);
     defer result8.deinit();
     const shape8 = result8.getPtr().?;
+
+    // A box over block (0, 0) only: 4 calls return its 128 triangles, each one once, then the walk is done
+    shape8.getTrianglesStart(&context, AABox.init(Vec3.init(0.5, -100, 0.5), Vec3.init(7.5, 100, 7.5)), Vec3.zero(), Quat.identity(), Vec3.one());
+    var seen8 = [_]u8{0} ** (16 * 16 * 2);
+    var counts: [5]u32 = undefined;
+    for (&counts) |*count| {
+        count.* = shape8.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null);
+        for (0..count.*) |t| {
+            const v0 = Vec3.fromFloat3(vertices[3 * t]);
+            const v2 = Vec3.fromFloat3(vertices[3 * t + 2]);
+            const x: usize = @intFromFloat(v0.getX());
+            const y: usize = @intFromFloat(v0.getZ());
+            try testing.expect(x < 8 and y < 8);
+            seen8[(y * 16 + x) * 2 + @intFromBool(v2.getZ() <= v0.getZ())] += 1;
+        }
+    }
+    try testing.expectEqualSlices(u32, &.{ 32, 32, 32, 32, 0 }, &counts);
+    for (0..8) |y| for (0..8) |x| {
+        try testing.expectEqual(@as(u8, 1), seen8[(y * 16 + x) * 2]);
+        try testing.expectEqual(@as(u8, 1), seen8[(y * 16 + x) * 2 + 1]);
+    };
+
+    // The whole height field: the walk finishes and returns every triangle. A block that starts in a partly filled
+    // buffer is restarted like in Jolt, so some triangles come twice.
     shape8.getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
-    try testing.expectEqual(@as(u32, 32), shape8.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null));
-    const first = try allocator.dupe(Float3, vertices[0 .. 3 * 32]);
-    defer allocator.free(first);
-    try testing.expectEqual(@as(u32, 32), shape8.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null));
-    try testing.expectEqualSlices(Float3, first, vertices[0 .. 3 * 32]);
+    @memset(&seen8, 0);
+    total = 0;
+    var calls: u32 = 0;
+    while (true) : (calls += 1) {
+        try testing.expect(calls < 100);
+        const count = shape8.getTrianglesNext(&context, 32, vertices[0 .. 3 * 32], null);
+        if (count == 0) break;
+        total += count;
+        for (0..count) |t| {
+            const v0 = Vec3.fromFloat3(vertices[3 * t]);
+            const v2 = Vec3.fromFloat3(vertices[3 * t + 2]);
+            const x: usize = @intFromFloat(v0.getX());
+            const y: usize = @intFromFloat(v0.getZ());
+            seen8[(y * 16 + x) * 2 + @intFromBool(v2.getZ() <= v0.getZ())] += 1;
+        }
+    }
+    try testing.expect(total >= 2 * 15 * 15 and total < 2 * 2 * 15 * 15);
+    for (0..15) |y| for (0..15) |x| {
+        try testing.expect(seen8[(y * 16 + x) * 2] >= 1 and seen8[(y * 16 + x) * 2 + 1] >= 1);
+    };
+}
+
+test "HeightFieldShape: a flat height field far from the origin walks only its own blocks" {
+    // UB36: every sample is 100, so offset.y + scale.y * 65535 rounds to offset.y and the Y bounds of an empty range
+    // block are not inside out. 12 samples with block size 4 make 3 blocks per row, the range blocks of a 4th block are
+    // empty. Jolt walks them and reads beyond the grid and the samples. Zolt skips them.
+    const allocator = testing.allocator;
+    const n = 12;
+    const samples = try allocator.alloc(f32, n * n);
+    defer allocator.free(samples);
+    @memset(samples, 100.0);
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.zero(), Vec3.one(), n, .{});
+    defer settings.deinit();
+    settings.block_size = 4;
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    const hf = shape.cast(HeightFieldShape);
+    try testing.expectEqual(hf.offset.getY(), hf.offset.getY() + hf.scale.getY() * 65535.0);
+
+    // Every triangle once, all at height 100
+    var context: Shape.GetTrianglesContext = .{};
+    shape.getTrianglesStart(&context, AABox.biggest(), Vec3.zero(), Quat.identity(), Vec3.one());
+    const vertices = try allocator.alloc(Float3, 3 * 1000);
+    defer allocator.free(vertices);
+    try testing.expectEqual(@as(u32, 2 * 11 * 11), shape.getTrianglesNext(&context, 1000, vertices, null));
+    for (vertices[0 .. 3 * 2 * 11 * 11]) |v| try testing.expectEqual(@as(f32, 100.0), v.y);
+    try testing.expectEqual(@as(u32, 0), shape.getTrianglesNext(&context, 1000, vertices, null));
+
+    // A ray down onto the surface hits it at height 100
+    var hit: RayCastResult = .{};
+    try testing.expect(shape.castRay(.init(Vec3.init(10.5, 200, 10.5), Vec3.init(0, -200, 0)), .{}, &hit));
+    try testing.expectEqual(@as(f32, 0.5), hit.fraction);
+}
+
+test "HeightFieldShape: an empty block inside a flat height field far from the origin keeps Jolt's bounds (UB36)" {
+    // Every sample is 100 except a patch of holes that empties range block (0, 1). 16 samples with block size 4 make 4
+    // blocks per row (a power of 2), so Jolt stays in the height field. Jolt gives the empty block the bounds
+    // [100, 100] and visits it. The cast visitor then sorts the blocks by distance, and that order is not stable for
+    // ties: with inside-out bounds for the empty block the tied blocks swap. The values below are Jolt's (see the
+    // HeightFieldShape parity).
+    const allocator = testing.allocator;
+    const n = 16;
+    const samples = try allocator.alloc(f32, n * n);
+    defer allocator.free(samples);
+    for (samples, 0..) |*h, i| {
+        const x = i % n;
+        const y = i / n;
+        h.* = if (x <= 4 and y >= 4 and y <= 8) no_collision_value else 100.0;
+    }
+    var settings = try HeightFieldShapeSettings.init(allocator, samples, Vec3.zero(), Vec3.one(), n, .{});
+    defer settings.deinit();
+    settings.block_size = 4;
+    var result = try settings.asShapeSettings().createShape(allocator);
+    defer result.deinit();
+    const shape = result.getPtr().?;
+    const hf = shape.cast(HeightFieldShape);
+    try testing.expectEqual(hf.offset.getY(), hf.offset.getY() + hf.scale.getY() * 65535.0);
+    try testing.expectEqual(@as(u32, 4), hf.getNumBlocks());
+
+    var sphere = SphereShape.init(allocator, 1.5, .{});
+    sphere.asShape().setEmbedded();
+    defer sphere.asShapeMut().deinit();
+    const shape_cast = ShapeCast.init(sphere.asShape(), Vec3.one(), Mat44.translation(Vec3.init(4, 105, 3)), Vec3.init(0, -10, 0));
+
+    // The closest hit is Jolt's triangle (an inside-out empty block gives 0xfffffe46 at the same fraction)
+    var closest = CollisionCollectorImpl.ClosestHitCollisionCollector(CastShapeCollector).init();
+    defer closest.deinit();
+    CollisionDispatch.castShapeVsShapeWorldSpace(&shape_cast, &.{}, shape, Vec3.one(), &.{}, Mat44.identity(), .{}, .{}, &closest.base);
+    try testing.expect(closest.hadHit());
+    try testing.expectEqual(@as(u32, 0xfffffe48), closest.hit.base.sub_shape_id2.getValue());
+    try testing.expectEqual(@as(f32, 0.35), closest.hit.fraction);
+
+    // All hits in Jolt's order: the third hit is at (4, 3) (an inside-out empty block gives (3, 3))
+    var all = AllHitCollisionCollector(CastShapeCollector).init(allocator);
+    defer all.deinit();
+    CollisionDispatch.castShapeVsShapeWorldSpace(&shape_cast, &.{}, shape, Vec3.one(), &.{}, Mat44.identity(), .{}, .{}, &all.base);
+    try all.checkError();
+    try testing.expectEqual(@as(usize, 20), all.hits.items.len);
+    const third = all.hits.items[2].base.contact_point_on2;
+    try testing.expectApproxEqAbs(@as(f32, 4), third.getX(), 1.0e-3);
+    try testing.expectApproxEqAbs(@as(f32, 3), third.getZ(), 1.0e-3);
 }
 
 test "HeightFieldShape: collide and cast through CollisionDispatch, CollideSoftBodyVertices, registration" {

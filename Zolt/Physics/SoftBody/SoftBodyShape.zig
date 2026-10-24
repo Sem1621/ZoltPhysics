@@ -394,7 +394,8 @@ pub const SoftBodyShape = struct {
         var settings = shape_cast_settings.*;
         if (shape.motion_properties.getFacesDoubleSided())
             settings.back_face_mode_triangles = .collide_with_back_faces;
-        var caster = CastConvexVsTriangles.init(shape_cast, &settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
+        var caster: CastConvexVsTriangles = undefined;
+        caster.init(shape_cast, &settings, scale, center_of_mass_transform2, sub_shape_id_creator1, collector);
         for (faces, 0..) |*f, f_idx| {
             const x1 = vertices[f.vertex[0]].position;
             const x2 = vertices[f.vertex[1]].position;

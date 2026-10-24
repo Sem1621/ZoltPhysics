@@ -43,6 +43,8 @@ pub const NodeCodecQuadTreeHalfFloat = struct {
 
         comptime {
             std.debug.assert(@sizeOf(Header) == 32);
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Header, "root_bounds_min")); // Zolt: MeshShape reads them through loadFloat3Unsafe
+            std.debug.assert(Vec3.canLoadFloat3Unsafe(Header, "root_bounds_max"));
         }
     };
 
@@ -270,9 +272,10 @@ pub const NodeCodecQuadTreeHalfFloat = struct {
     }
 
     /// This class decodes and decompresses quad tree nodes
+    /// No field defaults: construct in place with `init` (a by-value result would copy the 512 B stack).
     pub const DecodingContext = struct {
-        node_stack: [stack_size]u32 = undefined,
-        top: i32 = 0,
+        node_stack: [stack_size]u32,
+        top: i32,
 
         /// Get the amount of bits needed to store an ID to a triangle block
         pub fn triangleBlockIDBits(header: *const Header) u32 {
@@ -284,14 +287,12 @@ pub const NodeCodecQuadTreeHalfFloat = struct {
             return buffer_start + (triangle_block_id << offset_non_significant_bits);
         }
 
-        /// Constructor
-        pub fn init(header: *const Header) DecodingContext {
-            var result: DecodingContext = .{};
+        /// Constructor, in place: `var ctx: DecodingContext = undefined; ctx.init(header);`
+        pub fn init(self: *DecodingContext, header: *const Header) void {
+            self.top = 0;
 
             // Start with the root node on the stack
-            result.node_stack[0] = header.root_properties;
-
-            return result;
+            self.node_stack[0] = header.root_properties;
         }
 
         /// Walk the node tree calling the Visitor::VisitNodes for each node encountered and Visitor::VisitTriangles for each triangle encountered
@@ -371,7 +372,8 @@ test "NodeCodecQuadTreeHalfFloat unpack bounds" {
     // Decoding helpers
     const header: Codec.Header = .{ .root_bounds_min = .init(0, 0, 0), .root_bounds_max = .init(1, 1, 1), .root_properties = 0x12345678, .block_id_bits = 7 };
     try std.testing.expectEqual(@as(u32, 7), Codec.DecodingContext.triangleBlockIDBits(&header));
-    const ctx: Codec.DecodingContext = .init(&header);
+    var ctx: Codec.DecodingContext = undefined;
+    ctx.init(&header);
     try std.testing.expectEqual(@as(u32, 0x12345678), ctx.node_stack[0]);
     try std.testing.expect(!ctx.isDoneWalking());
     const buffer = [_]u8{0} ** 64;

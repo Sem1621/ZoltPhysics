@@ -365,14 +365,18 @@ forgotten check fails in tests.
 
 ```zig
 pub fn addHit(self: *Self, result: *const ResultType) void {
-    var hit = copyResult(ResultType, result);
-    self.hits.append(self.allocator, hit) catch |err| {
-        releaseResult(ResultType, &hit);
+    const hit = self.hits.addOne(self.allocator) catch |err| {
         self.alloc_error.set(err);
         self.base.forceEarlyOut();
+        return;
     };
+    storeResult(ResultType, hit, false, result);
 }
 ```
+
+`storeResult` uses the result's `assign()` when it has one. `CollideShapeResult` and
+`ShapeCastResult` have one: it copies only the used face vertices. Other results are copied, and
+the result that the slot held before, if any, is released with `releaseResult`.
 
 For `ClosestHitPerBody`, `had_hit` stays false when storing the first hit of a body fails.
 `onBodyEnd` only restores the early out fraction after a hit (Jolt line 147), so the forced early
@@ -833,12 +837,17 @@ needs only the `Body` pointer type from the F1 stub.
   function checks the early out fraction. Likewise only collide queries assert with an early out fraction
   set on a ClosestHit collector before the query (PlaneShape::sCollideConvexVsPlane again).
 - Jolt bugs reproduced on purpose (parity confirms the same bits; report upstream rather than fix):
-  HeightFieldShape::GetTrianglesNext never finishes when one leaf block has more triangles than
-  requested; HeightFieldShape skips empty range blocks only through inside-out Y bounds, which collapse
-  for a flat height field far from the origin; ConvexHullShape's CastRayHelper uses
+  ConvexHullShape's CastRayHelper uses
   `mPoints[*end_vtx]` (probably meant `*(end_vtx - 1)`), so hulls of exactly 3 points miss an edge;
   TaperedCylinderShapeSettings drops density and user data in its equal-radii shortcut; ScaledShape's
   MakeScaleValid can return a scale below `ScaleHelpers::cMinScale`.
+- Two HeightFieldShape bugs got guards in Phase 10 (RemainingFeaturesArchitecture.md R20). GetTrianglesNext
+  never finishes in Jolt when one leaf block has more triangles than requested; Zolt continues inside the
+  block when a restart would return nothing new (UB37). Jolt skips empty range blocks only through
+  inside-out Y bounds, which collapse for a flat height field far from the origin. Jolt then walks the
+  empty blocks outside the height field; Zolt makes the bounds of those blocks inside out (UB36). An empty
+  block inside the height field keeps Jolt's bounds, because the visit order of tied blocks depends on
+  them. Both guards keep Jolt's results wherever Jolt finishes and stays in bounds.
 - Two more Jolt debug asserts that queries reach with valid input (found by the pairwise sweep,
   `ZoltParity/Physics/PairwiseParity.zig`): a ClosestHit collector whose early out fraction was set
   before the query asserts when a shape adds a hit without checking the early out (e.g.

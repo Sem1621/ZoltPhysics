@@ -51,7 +51,8 @@ code:
    - `BodyManager.bodies_size`;
    - `MotionProperties.index_in_active_bodies`;
    - the body pair queue slots;
-   - the QuadTree node bounds, loaded per lane.
+   - the QuadTree node bounds, loaded per lane where the walks do not use the inline asm vector
+     load (D9).
 4. **Two error channels** (CollisionArchitecture section 0):
    - Jolt's soft errors stay values: `PhysicsUpdateError`, `bool` returns, null pointers, invalid
      IDs.
@@ -631,9 +632,16 @@ the tree unchanged. A zeroed `UpdateState` makes `updateFinalize` a no-op
 **QuadTree port.**
 - Port QuadTree literally, including the partition code and the double-buffered root swap.
 - Node bounds are `[4]std.atomic.Value(f32)` per axis. `NotifyBodiesAABBChanged` widens them with
-  compare-exchange. Readers load them per lane with `.monotonic` into a Vec4, which gives the same
-  bits as Jolt's vector load without the race. A racy vector load is only an option after
-  measurement.
+  compare-exchange.
+- The tree walks read the 4 bounds of one axis and the 4 child IDs with one aligned 16 byte load,
+  like Jolt. On x86-64 (LLVM backend) the load is inline asm (`QuadTree.Node.vectorLoad`). The
+  compiler cannot see into inline asm, so the race with the atomic stores is not undefined behavior
+  in Zig. The CPU reads each aligned 4 byte lane atomically, which is all that Jolt relies on.
+- The child ID load needs acquire order. Its asm clobbers memory, and x86 does not reorder loads
+  with later loads, so that is enough.
+- Other CPUs, the self-hosted backend and TSAN builds load per lane: the bounds with `.monotonic`,
+  the child IDs with `.acquire`. All paths give the same bits. Phase 10 measured the per lane
+  loads: about 5% of the instructions of ConvexVsMesh.
 - The pair order of `findCollidingPairs` may vary between runs. Determinism comes from
   `findCollidingPairsCanCollide` plus the contact sorts.
 - `frameSync` discards the old tree under the old query lock (lock type `.broad_phase_query`).
@@ -655,8 +663,10 @@ checks:
 - Flexible contact points use `getRequiredExtraSize`.
 - `LockFreeHashMap.findMut` (F1) replaces Jolt's `const_cast` when setting the manifold flags. Do
   not widen Rule M.
-- `sLoadFloat3Unsafe` is Zolt's `Vec3.loadFloat3Unsafe`, which reads the three floats and never
-  past the end of the array. The x, y and z bits are identical.
+- `sLoadFloat3Unsafe` is Zolt's `Vec3.loadFloat3Unsafe`. Like Jolt it is one 16 byte load that
+  reads 4 bytes past the Float3. Each struct that is read this way checks at comptime that these
+  bytes are part of the struct (`Vec3.canLoadFloat3Unsafe`). `Vec3.loadFloat3Safe` reads only the
+  three floats. The x, y and z bits are identical.
 
 **Update data.**
 - The ManifoldCache is double buffered.
@@ -892,7 +902,7 @@ QuadTree).
 | P2 solved Rule M with mutable receivers on queries and BodyManager getters | `mutable_fields` blocks. `collideAABox`, `getNumBodies`, `lockAllBodies`, `getActiveBodies` and `saveState` keep `*const` receivers (D2, D3, D9) |
 | P3 had no start gate, so a `createJob` failure panicked with every lock held | The start gate with `kickStep` (D4). Test "createJob fails at every job" in single and multi threaded mode: build failures change nothing, spawn failures change no result |
 | P3's D10 used the pre-v5 cache layout (56 bytes against its own `== 60` assert) | The v5.6.1 layout with comptime size checks (D10) |
-| P3 read QuadTree bounds with a racy 16-byte vector load by default | Per-lane `.monotonic` atomic loads by default, with identical bits (D9) |
+| P3 read QuadTree bounds with a racy 16-byte vector load by default | Per-lane `.monotonic` atomic loads by default, with identical bits (D9). Phase 10: x86-64 (LLVM, no TSAN) uses an inline asm vector load, which is not a data race in Zig's model. Other builds load per lane (D9) |
 | The settings virtual `create` clashed with the constructor `create(allocator, ...)` | It is renamed `createConstraint(allocator, body1, body2)` (D8). The prototype's settings use it |
 | `fixedToWorld()` was read-only, but its shape was reference counted (any `RefConst` on it faulted); P3 had no shape at all | `Shape.is_static` and `EmptyShape.initStatic`: Jolt's dummy EmptyShape, never counted. Tests in EmptyShape.zig and the prototype (D1) |
 | P1 moved the frees of skipped jobs into a hand-maintained tail list | TempArray is empty on failure, and frees stay unconditional at Jolt's positions, so LIFO holds by construction. Every failing update asserts `temp.isEmpty()` (D5) |
@@ -944,8 +954,8 @@ QuadTree).
 - **QuadTree pre-commit.** Accepted. About 170 bytes per max body is what Jolt itself uses once the
   tree is full (the allocator holds twice the estimated node count for the rebuild in `Update`),
   and it keeps Finalize and Abort free of errors. The `initBroadPhase` doc comment states the cost.
-- **Per-lane bound loads.** Kept. PerformanceTest measures them after M6; a racy vector load needs
-  that measurement first.
+- **Per-lane bound loads.** Measured in Phase 10: they cost about 5% of ConvexVsMesh. The walks now
+  use one inline asm vector load on x86-64 and keep the per lane loads elsewhere (D9).
 - **Poisoned contact cache.** A4 confirms `finalizeContactCacheAfterOutOfMemory` against Jolt's
   restore path with the FailingTempAllocator sweep on a scene with contacts (D10).
 - **Snapshot on failure.** No internal snapshot. The contract of D5 stands: after
@@ -1100,8 +1110,11 @@ DeterminismLog, PhysicsScene).**
     which already moved in IntegrateVelocity. This is reproduced, and a scene covers it.
 - A latent Jolt bug is kept out of every scene. JobResolveCCDContacts activates woken bodies in
   batches of 64 while it still loops over the CCD bodies. A later CCD body that hit a body of an
-  earlier batch then reads past `mActiveBodyToCCDBody`: Jolt asserts in debug, Zolt asserts in safe
-  builds. The SimScenes header states the rule for scene authors.
+  earlier batch then reads past `mActiveBodyToCCDBody`: Jolt asserts in debug and reads out of
+  bounds in release. Zolt's `getCCDBody` returns null there in every build mode (UB35 of
+  RemainingFeaturesArchitecture.md R20): the body was asleep during FindCCDContacts, so it has no
+  CCD body. A Zolt-only test in PhysicsSystemTests.zig covers it. The SimScenes header states the
+  rule for scene authors.
 - Simulation parity now runs 36 contact scenes and 18 CCD scenes bit exact, besides the gravity
   scenes. They cover stacks and pyramids with and without the LargeIslandSplitter, every shape type,
   sensors, listeners that modify or reject contacts, FindCollisions jobs spawned inside jobs,
@@ -1128,11 +1141,12 @@ DeterminismLog, PhysicsScene).**
   - `Trace` goes to stdout through a custom `std_options.logFn`.
   - The `perf_*` simulation parity scenes (Pyramid 50, ConvexVsMesh 80, HighSpeed 20 updates) find a
     hash mismatch at its first differing field.
-- Performance (information, not a bit exactness issue): ConvexVsMesh runs 4 to 9 times slower than
-  the C++ build. Most of the time is a memset of ProcessBodyPair's local
+- Performance (information, not a bit exactness issue): ConvexVsMesh ran 4 to 9 times slower than
+  the C++ build. Most of the time was a memset of ProcessBodyPair's local
   `StaticArray(MyManifold, 32)` (about 70 KB) per body pair, plus smaller ones in
-  `CollideShapeResult.init` and ClipPoly. Pyramid and HighSpeed are 1.2 to 2 times slower. A later
-  performance pass should avoid zero-filling these `undefined` buffers.
+  `CollideShapeResult.init` and ClipPoly. Pyramid and HighSpeed were 1.2 to 2 times slower. Phase 10
+  removed these fills: big buffers are now constructed in place and only their headers are set, like
+  Jolt's constructors.
 
 ## 9. Phase 6: constraints
 
@@ -1198,8 +1212,9 @@ test or a parity case:
   like the C++ parity build; a C++ build with garbage there would differ only in those bytes.
 
 **Jolt undefined behavior that Zolt does not reproduce.** A 1-point open path indexes
-`mPoints[-1]` and an empty path indexes out of bounds: Zolt's safe builds panic, ReleaseFast stays
-undefined as in C++. A null path dereference is an explicit `@panic` with a message.
+`mPoints[-1]` and an empty path indexes out of bounds. Zolt refuses such a path in every build mode:
+`createConstraint` and `setPath` return `error.InvalidSettings` (RemainingFeaturesArchitecture.md
+R20, UB39). A null path dereference is an explicit `@panic` with a message.
 
 **Degenerate cases that the harnesses keep away from.** The C++ reference library is built without
 `JPH_ASSERT`, so it cannot prove that a scene respects Jolt's debug asserts; Zolt's Debug build
