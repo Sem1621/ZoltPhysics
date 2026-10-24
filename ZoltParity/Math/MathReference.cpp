@@ -35,6 +35,9 @@ extern "C"
 // Math/Trigonometry.h
 float jolt_acos_approximate(float inX)				{ return ACosApproximate(inX); }
 
+// Math/Math.h
+float jolt_difference_of_products(float inA, float inB, float inC, float inD) { return DifferenceOfProducts(inA, inB, inC, inD); }
+
 // Math/Vec4.h
 void jolt_vec4_sincos(const float *inV, float *outSin, float *outCos)
 {
@@ -59,10 +62,15 @@ uint32 jolt_vec4_compress_unit_vector(const float *inV) { return Load4(inV).Comp
 void jolt_vec4_decompress_unit_vector(uint32 inValue, float *outV) { Store4(Vec4::sDecompressUnitVector(inValue), outV); }
 void jolt_vec4_to_int(const float *inV, uint32 *outV) { Load4(inV).ToInt().StoreInt4(outV); }
 void jolt_uvec4_to_float(const uint32 *inV, float *outV) { Store4(UVec4::sLoadInt4(inV).ToFloat(), outV); }
+void jolt_vec4_fused_multiply_add(const float *inMul1, const float *inMul2, const float *inAdd, float *outV) { Store4(Vec4::sFusedMultiplyAdd(Load4(inMul1), Load4(inMul2), Load4(inAdd)), outV); }
+void jolt_vec4_difference_of_products(const float *inA, const float *inB, const float *inC, const float *inD, float *outV) { Store4(Vec4::sDifferenceOfProducts(Load4(inA), Load4(inB), Load4(inC), Load4(inD)), outV); }
 
 // Math/Vec3.h
 void jolt_vec3_normalized(const float *inV, float *outV) { Store3(Load3(inV).Normalized(), outV); }
 void jolt_vec3_cross(const float *inA, const float *inB, float *outV) { Store3(Load3(inA).Cross(Load3(inB)), outV); }
+void jolt_vec3_cross_precise(const float *inA, const float *inB, float *outV) { Store3(Load3(inA).CrossPrecise(Load3(inB)), outV); }
+void jolt_vec3_fused_multiply_add(const float *inMul1, const float *inMul2, const float *inAdd, float *outV) { Store3(Vec3::sFusedMultiplyAdd(Load3(inMul1), Load3(inMul2), Load3(inAdd)), outV); }
+void jolt_vec3_difference_of_products(const float *inA, const float *inB, const float *inC, const float *inD, float *outV) { Store3(Vec3::sDifferenceOfProducts(Load3(inA), Load3(inB), Load3(inC), Load3(inD)), outV); }
 float jolt_vec3_dot(const float *inA, const float *inB) { return Load3(inA).Dot(Load3(inB)); }
 float jolt_vec3_length(const float *inV)			{ return Load3(inV).Length(); }
 void jolt_vec3_normalized_perpendicular(const float *inV, float *outV) { Store3(Load3(inV).GetNormalizedPerpendicular(), outV); }
@@ -183,6 +191,7 @@ void jolt_dvec3_get_sign(const double *inA, double *outV) { StoreD3(LoadD3(inA).
 void jolt_dvec3_min(const double *inA, const double *inB, double *outV) { StoreD3(DVec3::sMin(LoadD3(inA), LoadD3(inB)), outV); }
 void jolt_dvec3_max(const double *inA, const double *inB, double *outV) { StoreD3(DVec3::sMax(LoadD3(inA), LoadD3(inB)), outV); }
 void jolt_dvec3_cross(const double *inA, const double *inB, double *outV) { StoreD3(LoadD3(inA).Cross(LoadD3(inB)), outV); }
+void jolt_dvec3_fused_multiply_add(const double *inMul1, const double *inMul2, const double *inAdd, double *outV) { StoreD3(DVec3::sFusedMultiplyAdd(LoadD3(inMul1), LoadD3(inMul2), LoadD3(inAdd)), outV); }
 double jolt_dvec3_dot(const double *inA, const double *inB) { return LoadD3(inA).Dot(LoadD3(inB)); }
 double jolt_dvec3_length_sq(const double *inA) { return LoadD3(inA).LengthSq(); }
 double jolt_dvec3_length(const double *inA) { return LoadD3(inA).Length(); }

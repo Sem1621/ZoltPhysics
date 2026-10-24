@@ -2,6 +2,7 @@
 //! Status: complete
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const math = @import("Math.zig");
 const cppFloat = @import("../Core/StringTools.zig").cppFloat;
 const Swizzle = @import("Swizzle.zig").Swizzle;
@@ -113,9 +114,14 @@ pub const Vec4 = extern struct {
         return UVec4.fromBools(v1.value >= v2.value);
     }
 
-    /// Calculates mul1 * mul2 + add. Never fused in Zolt, to stay cross platform deterministic.
+    /// Calculates mul1 * mul2 + add. Fused only with `-Dfma=true` (Core.use_fmadd, JPH_USE_FMADD: Jolt's _mm_fmadd_ps).
+    /// Without it the multiply and the add round separately, to stay cross platform deterministic.
     pub fn fusedMultiplyAdd(mul1: Vec4, mul2: Vec4, add_v: Vec4) Vec4 {
-        return .{ .value = mul1.value * mul2.value + add_v.value };
+        if (Core.use_fmadd) {
+            return .{ .value = @mulAdd(Type, mul1.value, mul2.value, add_v.value) };
+        } else {
+            return .{ .value = mul1.value * mul2.value + add_v.value };
+        }
     }
 
     /// Component wise select, returns not_set when highest bit of control = 0 and set when highest bit of control = 1
@@ -372,9 +378,17 @@ pub const Vec4 = extern struct {
         return one().div(self);
     }
 
-    /// Calculates a * b - c * d. Never fused in Zolt, see math.differenceOfProducts.
+    /// Calculates a * b - c * d with more precision when FMA instructions are available. See math.differenceOfProducts.
     pub fn differenceOfProducts(a: Vec4, b: Vec4, c: Vec4, d: Vec4) Vec4 {
-        return a.mul(b).sub(c.mul(d));
+        if (Core.use_fmadd) {
+            // Jolt's -inC and -cd are vector negations: 0 - x (negate)
+            const cd = c.mul(d);
+            const err = fusedMultiplyAdd(c.negate(), d, cd);
+            const dop = fusedMultiplyAdd(a, b, cd.negate());
+            return dop.add(err);
+        } else {
+            return a.mul(b).sub(c.mul(d));
+        }
     }
 
     /// Dot product, returns the dot product in X, Y, Z and W components
