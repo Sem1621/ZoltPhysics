@@ -124,8 +124,17 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: ${{ env.ZIG_VERSION }}
+    # Windows: --test-timeout 10m. On Windows Zig 0.16 creates the child ends of the stdio pipes as inheritable and
+    # calls CreateProcessW with bInheritHandles, without a lock (lib/std/Io/Threaded.zig, processSpawnWindows). A
+    # process that the build runner spawns on another thread at the same time (a test binary or the compiler) can
+    # inherit the stdout pipe of a test binary. That pipe then reaches EOF only when both have exited. After the last
+    # test the build runner waits for that EOF with its response timeout, 60 s by default. A short binary next to a long
+    # one then failed with "test runner failed to respond for 1m" (zolt-unit-tests-determinism-log runs in 24 ms,
+    # zolt-unit-tests in up to 3 min). --test-timeout raises the response timeout to its value. It also limits every
+    # test to it. The longest test binary takes about 3 min on Windows Debug. Linux and macOS spawn with close-on-exec
+    # pipes and keep Zig's defaults.
     - name: Test
-      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }}
+      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }} ${{ runner.os == 'Windows' && '--test-timeout 10m' || '' }}
 
   parity:
     # Per push and pull request: one row (ReleaseFast, single precision, no debug renderer). The other rows run in
