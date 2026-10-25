@@ -134,8 +134,12 @@ test "TestDifferenceOfProducts" {
     const result = math.differenceOfProducts(a, b, c, d);
     const expected = @as(f64, a) * @as(f64, b) - @as(f64, c) * @as(f64, d);
     try expectEqual(@as(f64, -75.165603637695312), expected);
-    // Zolt never uses fused multiply add instructions (JPH_USE_FMADD is not compatible with JPH_CROSS_PLATFORM_DETERMINISTIC)
-    try expectEqual(@as(f32, -128.0), result); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.
+    // JPH_USE_FMADD is Core.use_fmadd (-Dfma=true)
+    if (zolt.Core.use_fmadd) {
+        try expectEqual(@as(f32, @floatCast(expected)), result);
+    } else {
+        try expectEqual(@as(f32, -128.0), result); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.
+    }
 }
 
 test "TestMulRSqrtApproximate" {

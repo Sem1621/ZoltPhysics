@@ -2,6 +2,7 @@
 //! Status: complete
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 const math = @import("Math.zig");
 const trigonometry = @import("Trigonometry.zig");
 const Float3 = @import("Float3.zig").Float3;
@@ -347,10 +348,25 @@ pub const Quat = extern struct {
         const zxyy = @shuffle(f32, xyzw, undefined, @Vector(4, i32){ 2, 0, 1, 1 });
         const yzxz = @shuffle(f32, xyzw, undefined, @Vector(4, i32){ 1, 2, 0, 2 });
 
-        // Negate last (logical) component (a true negation like the scalar -(ax+by), not 0 - x)
-        const m3 = Vec4.bitXor(.{ .value = abca * wwwx + bcab * zxyy }, Vec4.init(0.0, 0.0, 0.0, -0.0));
+        if (Core.use_fmadd) {
+            // Jolt's SSE path with JPH_USE_FMADD (-Dfma=true): @mulAdd where it calls _mm_fmadd_ps / _mm_fnmadd_ps
+            const m2 = bcab * zxyy;
+            const m3_sum = @mulAdd(@Vector(4, f32), abca, wwwx, m2);
 
-        return fromVec4(.{ .value = m3.value + (dddd * xyzw - cabc * yzxz) });
+            // Negate last (logical) component.
+            const m3 = Vec4.bitXor(.{ .value = m3_sum }, Vec4.init(0.0, 0.0, 0.0, -0.0)).value;
+
+            const m5 = @mulAdd(@Vector(4, f32), -cabc, yzxz, m3); // _mm_fnmadd_ps: -(cabc * yzxz) + m3, -cabc is a sign flip
+            const m7 = @mulAdd(@Vector(4, f32), dddd, xyzw, m5);
+
+            // [(aw+bz)+(dx-cy),(bw+cx)+(dy-az),(cw+ay)+(dz-bx),-(ax+by)+(dw-cz)]
+            return fromVec4(.{ .value = m7 });
+        } else {
+            // Negate last (logical) component (a true negation like the scalar -(ax+by), not 0 - x)
+            const m3 = Vec4.bitXor(.{ .value = abca * wwwx + bcab * zxyy }, Vec4.init(0.0, 0.0, 0.0, -0.0));
+
+            return fromVec4(.{ .value = m3.value + (dddd * xyzw - cabc * yzxz) });
+        }
     }
 
     /// Multiply quaternion with float (operator * (float), float * Quat)
@@ -403,8 +419,12 @@ pub const Quat = extern struct {
         const zxyy = @shuffle(f32, xyzw, undefined, @Vector(4, i32){ 2, 0, 1, 1 });
         const yzxz = @shuffle(f32, xyzw, undefined, @Vector(4, i32){ 1, 2, 0, 2 });
 
+        // Jolt's SSE path fuses the first sum with JPH_USE_FMADD (-Dfma=true, _mm_fmadd_ps)
+        const m2 = bcab * zxyy;
+        const m3_sum = if (Core.use_fmadd) @mulAdd(@Vector(4, f32), abca, wwwx, m2) else abca * wwwx + m2;
+
         // Negate last (logical) component (a true negation like the scalar -(ax+by), not 0 - x)
-        const m3 = Vec4.bitXor(.{ .value = abca * wwwx + bcab * zxyy }, Vec4.init(0.0, 0.0, 0.0, -0.0));
+        const m3 = Vec4.bitXor(.{ .value = m3_sum }, Vec4.init(0.0, 0.0, 0.0, -0.0));
 
         return fromVec4(.{ .value = m3.value - cabc * yzxz });
     }

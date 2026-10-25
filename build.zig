@@ -14,12 +14,17 @@
 //!   zig build debug-renderer-check -Ddebug_renderer=true   Record the determinism scenes with the C++ PerformanceTest and
 //!                          ZoltPerformanceTest (-r), fail unless the .jor bytes are equal
 //!   zig build codegen-check  Build ZoltPerformanceTest (ReleaseFast, x86-64-v3) and fail when the library code fills or
-//!                          copies a large buffer or swaps byte by byte (tools/check_codegen.py)
+//!                          copies a large buffer, swaps byte by byte or holds an FMA instruction (with -Dfma: one that
+//!                          does not come from Jolt's 8 JPH_USE_FMADD sites) (tools/check_codegen.py)
 //!   zig build perf-budget [-- <scene>...]  Count the instructions of the physics updates of ZoltPerformanceTest and
 //!                          the C++ PerformanceTest with valgrind, fail when Zolt is over its budget (tools/perf_budget.py)
 //!
 //! Options (mirror the Jolt CMake options that change semantics):
 //!   -Ddouble_precision=true     JPH_DOUBLE_PRECISION: Real = f64, RVec3 = DVec3, RMat44 = DMat44
+//!   -Dfma=true                  JPH_USE_FMADD: Jolt's 8 fused multiply add sites use @mulAdd (Core.use_fmadd). Results
+//!                               change. Zolt needs a CPU with FMA (x86-64: -Dcpu=x86_64_v3 or native; aarch64). The C++
+//!                               reference gets -DJPH_USE_FMADD. It is only an oracle on x86-64: for another target the
+//!                               steps that build it fail (NEON's vmlaq_f32 does not fuse under -ffp-contract=off).
 //!   -Dobject_layer_bits=16|32   JPH_OBJECT_LAYER_BITS
 //!   -Ddeterminism_log=true      JPH_ENABLE_DETERMINISM_LOG: Zolt/Physics/DeterminismLog.zig exists at run time (the
 //!                               `test` step always also runs the DeterminismLog unit tests with it enabled)
@@ -38,6 +43,9 @@
 //!   -Djob_profile=true          Record a timeline of the jobs and the idle time of every job thread
 //!                               (Zolt/Core/JobProfiler.zig, `ZoltPerformanceTest -p`). Off by default: then every hook
 //!                               is `void` and costs nothing. Results do not change.
+//!   -Dsimd_contact_solver=false Solve the contacts of the parallel splits one at a time, like Jolt (the default true
+//!                               solves 8 at a time with SIMD, Zolt/Physics/Constraints/ContactConstraintSimd.zig).
+//!                               Results do not change: an A/B switch.
 const std = @import("std");
 const jolt_sources = @import("ZoltParity/jolt_sources.zig");
 const parity_reference_sources = @import("ZoltParity/reference_sources.zig");
@@ -47,10 +55,12 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const double_precision = b.option(bool, "double_precision", "Use f64 for world space positions (JPH_DOUBLE_PRECISION)") orelse false;
+    const fma = b.option(bool, "fma", "Use Jolt's JPH_USE_FMADD fused multiply-add sites (needs a CPU with FMA; results change, the C++ reference gets -DJPH_USE_FMADD)") orelse false;
     const object_layer_bits = b.option(u8, "object_layer_bits", "Number of bits in ObjectLayer, 16 or 32 (JPH_OBJECT_LAYER_BITS)") orelse 16;
     const determinism_log = b.option(bool, "determinism_log", "Log the simulation state to find determinism issues (JPH_ENABLE_DETERMINISM_LOG)") orelse false;
     const debug_renderer = b.option(bool, "debug_renderer", "Compile the debug renderer hooks into the library and the C++ reference (JPH_DEBUG_RENDERER)") orelse false;
     const job_profile = b.option(bool, "job_profile", "Record a timeline of the jobs and the idle time of the job threads (Zolt/Core/JobProfiler.zig)") orelse false;
+    const simd_contact_solver = b.option(bool, "simd_contact_solver", "Solve the contacts of the parallel splits 8 at a time with SIMD (default true, results do not change)") orelse true;
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
     // Zig 0.16's self-hosted x86_64 backend (the default for Debug builds) miscompiles some vector operations
     // (e.g. @bitCast of @Vector(4, bool)), so default to LLVM. Use -Duse_llvm=false for faster Debug compiles.
@@ -63,10 +73,12 @@ pub fn build(b: *std.Build) void {
     // Compile time configuration, available in the library as @import("zolt_options")
     const options = b.addOptions();
     options.addOption(bool, "double_precision", double_precision);
+    options.addOption(bool, "fma", fma);
     options.addOption(u8, "object_layer_bits", object_layer_bits);
     options.addOption(bool, "determinism_log", determinism_log);
     options.addOption(bool, "debug_renderer", debug_renderer);
     options.addOption(bool, "job_profile", job_profile);
+    options.addOption(bool, "simd_contact_solver", simd_contact_solver);
     const options_module = options.createModule();
 
     // User shape registrations, default material and serializable classes (Zolt/RegisterTypes.zig): an empty module by
@@ -162,10 +174,12 @@ pub fn build(b: *std.Build) void {
     if (!determinism_log) {
         const det_log_options = b.addOptions();
         det_log_options.addOption(bool, "double_precision", double_precision);
+        det_log_options.addOption(bool, "fma", fma);
         det_log_options.addOption(u8, "object_layer_bits", object_layer_bits);
         det_log_options.addOption(bool, "determinism_log", true);
         det_log_options.addOption(bool, "debug_renderer", debug_renderer);
         det_log_options.addOption(bool, "job_profile", job_profile);
+        det_log_options.addOption(bool, "simd_contact_solver", simd_contact_solver);
         const zolt_det_log = b.createModule(.{
             .root_source_file = b.path("Zolt/zolt.zig"),
             .target = target,
@@ -268,6 +282,10 @@ pub fn build(b: *std.Build) void {
     // configuration string), so Zolt and every C++ translation unit (Jolt, the references, HelloWorld, PerformanceTest)
     // must agree on it.
     if (debug_renderer) cpp_flags.append(b.allocator, "-DJPH_DEBUG_RENDERER") catch @panic("OOM");
+    // JPH_USE_FMADD follows -Dfma (Zolt's Core.use_fmadd). Core.h only defines it by itself without
+    // JPH_CROSS_PLATFORM_DETERMINISTIC. Set on the command line, it fuses exactly Jolt's 8 sites (the SSE/AVX FMA
+    // intrinsics and std::fma); -ffp-contract=off keeps every other expression unfused. It is not a JPH_VERSION_ID bit.
+    if (fma) cpp_flags.append(b.allocator, "-DJPH_USE_FMADD") catch @panic("OOM");
 
     // On x86_64 the reference is pinned to x86-64-v3 (SSE4.2/AVX/AVX2/F16C/LZCNT/TZCNT, no AVX-512), which
     // matches the default ISA options of Jolt's CMake build, so parity results don't depend on the host CPU.
@@ -289,6 +307,10 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = .off,
         }),
     });
+    // With -Dfma=true only an x86-64 build of the reference fuses like Zolt: NEON's vmlaq_f32 does not fuse under
+    // -ffp-contract=off. So on another target every step that builds the reference fails with this message.
+    if (fma and reference_target.result.cpu.arch != .x86_64)
+        jolt_cpp.step.dependOn(&b.addFail("-Dfma=true: the C++ reference is only an FMA oracle on x86-64 (NEON's vmlaq_f32 does not fuse under -ffp-contract=off), so the parity, parity-check, hello-world-check, jolt-performance-test, debug-renderer-check and perf-budget steps need an x86-64 target").step);
     jolt_cpp.root_module.addIncludePath(b.path("."));
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("Jolt"), .files = &jolt_sources.files, .flags = cpp_flags.items });
     jolt_cpp.root_module.addCSourceFiles(.{ .root = b.path("ZoltParity"), .files = &parity_reference_sources.files, .flags = cpp_flags.items });
@@ -518,8 +540,11 @@ pub fn build(b: *std.Build) void {
     // script covers it. It needs GNU objdump and fails on a binary that is not x86-64: it reads x86-64 code only.
     const run_codegen_check = b.addSystemCommand(&.{"python3"});
     run_codegen_check.addFileArg(b.path("tools/check_codegen.py"));
+    // It also fails on an FMA instruction in the library: without -Dfma there is none, with -Dfma only Jolt's 8
+    // JPH_USE_FMADD sites may fuse
+    if (fma) run_codegen_check.addArg("--fma");
     run_codegen_check.addArtifactArg(bench_performance_test);
-    const codegen_check_step = b.step("codegen-check", "Fail when the library code of ZoltPerformanceTest (ReleaseFast) fills or copies a large buffer or swaps byte by byte");
+    const codegen_check_step = b.step("codegen-check", "Fail when the library code of ZoltPerformanceTest (ReleaseFast) fills or copies a large buffer, swaps byte by byte or holds an FMA instruction (with -Dfma: one that does not come from Jolt's 8 JPH_USE_FMADD sites)");
     codegen_check_step.dependOn(&run_codegen_check.step);
 
     // `zig build perf-budget`: tools/perf_budget.py counts the instructions of the physics updates of short runs with

@@ -1238,3 +1238,60 @@ inside the speculative contact distance) falls asleep and is woken by an impulse
 C++ Jolt with 0 worker threads has one contact cache body pair more (199) than with 3 or 7 threads
 (198), while the body states are still equal. This reproduces with two C++ worlds alone. The cause
 was not found; the scene spaces the plates 0.6 apart.
+
+## 10. Phase 11: SIMD contact solver
+
+`Zolt/Physics/Constraints/ContactConstraintSimd.zig` solves the contacts of a batch of a parallel split
+8 at a time. It is a Zolt addition with no Jolt counterpart. Results do not change (Roadmap Phase 10,
+class A).
+
+**Why the lanes are independent.** The LargeIslandSplitter puts a constraint or contact into a parallel
+split only when none of its dynamic bodies is already in that split. So in a batch of a parallel split
+no dynamic body appears twice. A contact reads and writes only its own lambdas and the velocities of
+its own two bodies. A kinematic body is only read, a static body is not read. The order in which the
+contacts of the batch are solved does not change a bit. `Batch.parallel` marks these batches. The non
+parallel split and the islands that are not split share bodies between contacts: they stay scalar.
+
+**The kernel.** Lane i of every `@Vector(8, f32)` holds a value of constraint i. The constraint data
+is read with transposed 16 byte loads, the velocities through `getLinearVelocity` /
+`getAngularVelocity`. Only dynamic vs dynamic contacts use the lanes; the others, and a tail of fewer
+than 4 constraints, use ContactConstraintManager.solveVelocityConstraints. The constraints are sorted
+by their number of contact points first, so the lanes of a group mostly do the same work. A group of
+fewer than 8 constraints fills the free lanes with copies of lane 0. A point past the number of points
+of a lane reads point 0 of that lane again.
+
+**Exactness rules.** Each lane runs the operations of the scalar `solveVelocityConstraint` in the same
+order with the same association:
+- Vec3.dot is the products and then `(x + y) + (z + 0.0)`, like Vec3.reduceSum. The `+ 0.0` matters
+  for -0.0.
+- `math.max(a, b)` is `@select(f32, a < b, b, a)`, `math.clamp` is built from it and from math.min.
+  Never `@max`. `-x` of a scalar is fneg. mulRSqrtApproximate is `a / @sqrt(b)` (IEEE exact).
+- No FMA: Zig does not contract floating point operations. The objdump of the x86-64-v3 benchmark
+  binary has no vfmadd in the kernel (checked when the kernel was written).
+- A branch becomes a lane mask. A lane that does not take the branch keeps its old values with
+  `@select`, not with arithmetic on a zero (`v - axis * 0` can turn -0.0 into +0.0).
+- Velocities are written back with `applyLinearVelocityStep` / `applyAngularVelocityStep`, only for
+  the lanes that applied an impulse, like `setVelocities`.
+
+ZoltTests/Physics/ContactConstraintSimdTests.zig compares the SIMD and the scalar solver bit for bit
+on random batches (physical values, edge values, signed zeros). Its header lists the bite proofs.
+
+**Gates.** `PhysicsSystem.jobSolveVelocityConstraints` calls `ContactConstraintSimd.solveBatch`. It
+uses the SIMD path only when `ContactConstraintSimd.enabled`: the LLVM backend (Zig 0.16's self-hosted
+backend miscompiles some @Vector code), not `-Ddeterminism_log=true` (the order of the log lines would
+change), and not `-Dsimd_contact_solver=false`. That build option (default true, `Core.simd_contact_solver`)
+is an A/B switch: both settings give the same bits. The warm start and storeAppliedImpulses stay scalar.
+
+**Cost.** Pyramid (-t=1, 60 steps): 4,280,522,043 instructions before, 4,180,344,176 with the SIMD
+solver. The contact solve went from 1,144,037,329 instructions (26.7%) to 1,026,578,521 (24.6%):
+solveGroup 744M, the sorting and group building around it 148M, and the scalar solver 134M (contacts
+with a static or kinematic body, short tails, non parallel batches, islands that are not split). The
+`isDynamic` checks of the sorting loop add about 15M more (callgrind counts them in Body.zig). Wall
+clock (steps/s, -t=1) went from about 55 to about 72 on a noisy machine. The scalar solver
+waits on the dependency chain from one contact point to the next; 8 lanes fill that time. The other
+scenes of perf-budget change by less than 0.02%. HighSpeed and Ragdoll do not use the SIMD path in these
+short runs: their contact solve keeps its count. (Ragdoll runs 15 steps here. In the 500-step runs its
+ragdolls form large islands from about step 24, and ConvexVsMesh from about step 324: then they use
+it.) About a fifth of the kernel's instructions are transposes and another sixth are register spills
+(12 velocity vectors stay live). Transposing the constant constraint data once per step instead of once
+per iteration would remove most of the transposes but needs a buffer per step; it is not done.

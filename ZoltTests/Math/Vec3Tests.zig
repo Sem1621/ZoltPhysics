@@ -440,7 +440,10 @@ test "TestDifferenceOfProducts" {
     const result = Vec3.differenceOfProducts(a, b, c, d);
     const expected = DVec3.fromVec3(a).mul(DVec3.fromVec3(b)).sub(DVec3.fromVec3(c).mul(DVec3.fromVec3(d)));
     try fw.expect(expected.eql(DVec3.init(-75.165603637695312, 103.16904449462891, 36.836944580078125)));
-    // JPH_USE_FMADD is never defined in Zolt (FMA is not used, see PortingGuide section 8), so only the #else branch applies:
-    // CHECK(result == Vec3(expected));
-    try fw.expect(result.eql(Vec3.init(-128.0, 64.0, 0.0))); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.
+    // JPH_USE_FMADD is Core.use_fmadd (-Dfma=true)
+    if (zolt.Core.use_fmadd) {
+        try fw.expect(result.eql(expected.toVec3()));
+    } else {
+        try fw.expect(result.eql(Vec3.init(-128.0, 64.0, 0.0))); // The products are in the order of 10^9, so the subtraction causes a large loss of precision and we get a very different result. This is expected when fused multiply add instructions are not available.
+    }
 }

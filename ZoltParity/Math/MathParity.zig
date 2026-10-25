@@ -22,6 +22,13 @@ const Vec4 = zolt.Vec4;
 /// The C++ reference functions, see MathReference.cpp
 const jolt = struct {
     extern fn jolt_acos_approximate(x: f32) f32;
+    extern fn jolt_difference_of_products(a: f32, b: f32, c: f32, d: f32) f32;
+    extern fn jolt_vec4_fused_multiply_add(mul1: *const [4]f32, mul2: *const [4]f32, add: *const [4]f32, out: *[4]f32) void;
+    extern fn jolt_vec4_difference_of_products(a: *const [4]f32, b: *const [4]f32, c: *const [4]f32, d: *const [4]f32, out: *[4]f32) void;
+    extern fn jolt_vec3_cross_precise(a: *const [3]f32, b: *const [3]f32, out: *[3]f32) void;
+    extern fn jolt_vec3_fused_multiply_add(mul1: *const [3]f32, mul2: *const [3]f32, add: *const [3]f32, out: *[3]f32) void;
+    extern fn jolt_vec3_difference_of_products(a: *const [3]f32, b: *const [3]f32, c: *const [3]f32, d: *const [3]f32, out: *[3]f32) void;
+    extern fn jolt_dvec3_fused_multiply_add(mul1: *const [3]f64, mul2: *const [3]f64, add: *const [3]f64, out: *[3]f64) void;
     extern fn jolt_vec4_sincos(v: *const [4]f32, out_sin: *[4]f32, out_cos: *[4]f32) void;
     extern fn jolt_vec4_tan(v: *const [4]f32, out: *[4]f32) void;
     extern fn jolt_vec4_asin(v: *const [4]f32, out: *[4]f32) void;
@@ -698,6 +705,182 @@ test "Quat rotation / mul / mulVec3 / inverseRotate / multiplyImaginary / rotate
         rotate_axis_z.check(a, arr3(quat(a).rotateAxisZ()), expected3);
     }
     try finishAll(&.{ &rotation, &mul, &mul_vec3, &inverse_rotate, &multiply_imaginary, &rotate_axis_x, &rotate_axis_y, &rotate_axis_z });
+}
+
+/// Counts the inputs for which one of Jolt's JPH_USE_FMADD sites gives other bits than its unfused formula. With
+/// `-Dfma=true` (Core.use_fmadd) at least one input must differ: then the parity checks of the site compare fused results.
+/// Without the option no input may differ.
+const FusedCount = struct {
+    name: []const u8,
+    differ: usize = 0,
+
+    fn count(self: *FusedCount, result: anytype, unfused: @TypeOf(result)) void {
+        if (!fw.sameValue(result, unfused)) self.differ += 1;
+    }
+
+    fn finish(self: *const FusedCount) !void {
+        if (zolt.Core.use_fmadd and self.differ == 0) {
+            std.debug.print("{s}: no input gives other bits than the unfused formula, so the fused path is not tested\n", .{self.name});
+            return error.NotFused;
+        }
+        if (!zolt.Core.use_fmadd and self.differ != 0) {
+            std.debug.print("{s}: {d} inputs give other bits than the unfused formula without -Dfma=true\n", .{ self.name, self.differ });
+            return error.Fused;
+        }
+    }
+};
+
+/// Inputs of mul1 * mul2 + add: often the add cancels the product, then the fused result is the rounding error of the
+/// product and the unfused result is 0 or close to it
+fn fusedMultiplyAddInput(rng: *Rng) [3]f32 {
+    const a = rng.float(-1000, 1000);
+    const b = rng.float(-1000, 1000);
+    const c = switch (rng.next() % 3) {
+        0 => -(a * b),
+        1 => -(a * b) * rng.float(0.99, 1.01),
+        else => rng.float(-1.0e6, 1.0e6),
+    };
+    return .{ a, b, c };
+}
+
+/// Inputs of a * b - c * d: often c * d almost cancels a * b (the case that the Kahan form of JPH_USE_FMADD makes
+/// precise)
+fn differenceOfProductsInput(rng: *Rng) [4]f32 {
+    const a = rng.float(-1.0e5, 1.0e5);
+    const b = rng.float(-1.0e5, 1.0e5);
+    const c = rng.float(-1.0e5, 1.0e5);
+    const d = if (rng.next() % 2 == 0 and c != 0) (a * b) / c else rng.float(-1.0e5, 1.0e5);
+    return .{ a, b, c, d };
+}
+
+/// Quat.mul without JPH_USE_FMADD: Jolt's SSE path, every lane computed with scalars in the same order
+fn unfusedQuatMul(lhs: [4]f32, rhs: [4]f32) [4]f32 {
+    const a = lhs[0];
+    const b = lhs[1];
+    const c = lhs[2];
+    const d = lhs[3];
+    const x = rhs[0];
+    const y = rhs[1];
+    const z = rhs[2];
+    const w = rhs[3];
+    return .{ (a * w + b * z) + (d * x - c * y), (b * w + c * x) + (d * y - a * z), (c * w + a * y) + (d * z - b * x), -(a * x + b * y) + (d * w - c * z) };
+}
+
+/// Quat.multiplyImaginary without JPH_USE_FMADD, like unfusedQuatMul
+fn unfusedMultiplyImaginary(lhs: [3]f32, rhs: [4]f32) [4]f32 {
+    const a = lhs[0];
+    const b = lhs[1];
+    const c = lhs[2];
+    const x = rhs[0];
+    const y = rhs[1];
+    const z = rhs[2];
+    const w = rhs[3];
+    return .{ (a * w + b * z) - c * y, (b * w + c * x) - a * z, (c * w + a * y) - b * x, -(a * x + b * y) - c * z };
+}
+
+test "JPH_USE_FMADD sites: fusedMultiplyAdd / differenceOfProducts / crossPrecise / Quat mul / multiplyImaginary" {
+    // The 8 sites of Jolt that fuse with JPH_USE_FMADD: Zolt with -Dfma=true against the C++ library with
+    // -DJPH_USE_FMADD, and without the option against the plain C++ library. The inputs make fused and unfused rounding
+    // differ, and FusedCount proves that they do.
+    var rng: Rng = .{};
+    var vec4_fma: Checker = .{ .name = "Vec4.fusedMultiplyAdd" };
+    var vec3_fma: Checker = .{ .name = "Vec3.fusedMultiplyAdd" };
+    var dvec3_fma: Checker = .{ .name = "DVec3.fusedMultiplyAdd" };
+    var dop: Checker = .{ .name = "math.differenceOfProducts" };
+    var vec4_dop: Checker = .{ .name = "Vec4.differenceOfProducts" };
+    var vec3_dop: Checker = .{ .name = "Vec3.differenceOfProducts" };
+    var cross_precise: Checker = .{ .name = "Vec3.crossPrecise" };
+    var quat_mul: Checker = .{ .name = "Quat.mul" };
+    var multiply_imaginary: Checker = .{ .name = "Quat.multiplyImaginary" };
+    var vec4_fma_count: FusedCount = .{ .name = "Vec4.fusedMultiplyAdd" };
+    var vec3_fma_count: FusedCount = .{ .name = "Vec3.fusedMultiplyAdd" };
+    var dvec3_fma_count: FusedCount = .{ .name = "DVec3.fusedMultiplyAdd" };
+    var dop_count: FusedCount = .{ .name = "math.differenceOfProducts" };
+    var vec4_dop_count: FusedCount = .{ .name = "Vec4.differenceOfProducts" };
+    var vec3_dop_count: FusedCount = .{ .name = "Vec3.differenceOfProducts" };
+    var cross_precise_count: FusedCount = .{ .name = "Vec3.crossPrecise" };
+    var quat_mul_count: FusedCount = .{ .name = "Quat.mul" };
+    var multiply_imaginary_count: FusedCount = .{ .name = "Quat.multiplyImaginary" };
+    for (0..iterations) |_| {
+        var expected4: [4]f32 = undefined;
+        var expected3: [3]f32 = undefined;
+        var expected_d3: [3]f64 = undefined;
+
+        // fusedMultiplyAdd: one input per component
+        var m: [3][4]f32 = undefined;
+        for (0..4) |i| {
+            const in = fusedMultiplyAddInput(&rng);
+            for (0..3) |j| m[j][i] = in[j];
+        }
+        jolt.jolt_vec4_fused_multiply_add(&m[0], &m[1], &m[2], &expected4);
+        const vec4_result = arr4(Vec4.fusedMultiplyAdd(vec4(m[0]), vec4(m[1]), vec4(m[2])));
+        vec4_fma.check(m, vec4_result, expected4);
+        vec4_fma_count.count(vec4_result, arr4(vec4(m[0]).mul(vec4(m[1])).add(vec4(m[2]))));
+
+        const m3 = [3][3]f32{ m[0][0..3].*, m[1][0..3].*, m[2][0..3].* };
+        jolt.jolt_vec3_fused_multiply_add(&m3[0], &m3[1], &m3[2], &expected3);
+        const vec3_result = arr3(Vec3.fusedMultiplyAdd(vec3(m3[0]), vec3(m3[1]), vec3(m3[2])));
+        vec3_fma.check(m3, vec3_result, expected3);
+        vec3_fma_count.count(vec3_result, arr3(vec3(m3[0]).mul(vec3(m3[1])).add(vec3(m3[2]))));
+
+        // DVec3: products of doubles with a full mantissa
+        var md: [3][3]f64 = undefined;
+        for (0..3) |i| {
+            md[0][i] = rng.double(-1000, 1000);
+            md[1][i] = rng.double(-1000, 1000);
+            md[2][i] = if (rng.next() % 2 == 0) -(md[0][i] * md[1][i]) else rng.double(-1.0e6, 1.0e6);
+        }
+        jolt.jolt_dvec3_fused_multiply_add(&md[0], &md[1], &md[2], &expected_d3);
+        const dvec3_result = arrD3(DVec3.fusedMultiplyAdd(dvec3(md[0]), dvec3(md[1]), dvec3(md[2])));
+        dvec3_fma.check(md, dvec3_result, expected_d3);
+        dvec3_fma_count.count(dvec3_result, arrD3(dvec3(md[0]).mul(dvec3(md[1])).add(dvec3(md[2]))));
+
+        // differenceOfProducts: one input per component
+        var d: [4][4]f32 = undefined;
+        for (0..4) |i| {
+            const in = differenceOfProductsInput(&rng);
+            for (0..4) |j| d[j][i] = in[j];
+        }
+        const scalar_result = zolt.math.differenceOfProducts(d[0][0], d[1][0], d[2][0], d[3][0]);
+        dop.check(.{ d[0][0], d[1][0], d[2][0], d[3][0] }, scalar_result, jolt.jolt_difference_of_products(d[0][0], d[1][0], d[2][0], d[3][0]));
+        dop_count.count(scalar_result, d[0][0] * d[1][0] - d[2][0] * d[3][0]);
+
+        jolt.jolt_vec4_difference_of_products(&d[0], &d[1], &d[2], &d[3], &expected4);
+        const vec4_dop_result = arr4(Vec4.differenceOfProducts(vec4(d[0]), vec4(d[1]), vec4(d[2]), vec4(d[3])));
+        vec4_dop.check(d, vec4_dop_result, expected4);
+        vec4_dop_count.count(vec4_dop_result, arr4(vec4(d[0]).mul(vec4(d[1])).sub(vec4(d[2]).mul(vec4(d[3])))));
+
+        const d3 = [4][3]f32{ d[0][0..3].*, d[1][0..3].*, d[2][0..3].*, d[3][0..3].* };
+        jolt.jolt_vec3_difference_of_products(&d3[0], &d3[1], &d3[2], &d3[3], &expected3);
+        const vec3_dop_result = arr3(Vec3.differenceOfProducts(vec3(d3[0]), vec3(d3[1]), vec3(d3[2]), vec3(d3[3])));
+        vec3_dop.check(d3, vec3_dop_result, expected3);
+        vec3_dop_count.count(vec3_dop_result, arr3(vec3(d3[0]).mul(vec3(d3[1])).sub(vec3(d3[2]).mul(vec3(d3[3])))));
+
+        // crossPrecise: almost parallel vectors (the products cancel) and random vectors. Without FMA it is cross.
+        const a = rng.array(3, -1000, 1000);
+        const b: [3]f32 = if (rng.next() % 2 == 0) .{ a[0] * rng.float(0.999, 1.001), a[1] * rng.float(0.999, 1.001), a[2] * rng.float(0.999, 1.001) } else rng.array(3, -1000, 1000);
+        jolt.jolt_vec3_cross_precise(&a, &b, &expected3);
+        const cross_result = arr3(vec3(a).crossPrecise(vec3(b)));
+        cross_precise.check(.{ a, b }, cross_result, expected3);
+        cross_precise_count.count(cross_result, arr3(vec3(a).cross(vec3(b))));
+
+        // Quaternion products of unit quaternions and of arbitrary quaternions
+        const q = if (rng.next() % 2 == 0) rng.unitQuat() else rng.array(4, -10, 10);
+        const r = if (rng.next() % 2 == 0) rng.unitQuat() else rng.array(4, -10, 10);
+        jolt.jolt_quat_mul(&q, &r, &expected4);
+        const quat_result = arrQ(quat(q).mul(quat(r)));
+        quat_mul.check(.{ q, r }, quat_result, expected4);
+        quat_mul_count.count(quat_result, unfusedQuatMul(q, r));
+
+        const v = rng.array(3, -10, 10);
+        jolt.jolt_quat_multiply_imaginary(&v, &r, &expected4);
+        const imaginary_result = arrQ(Quat.multiplyImaginary(vec3(v), quat(r)));
+        multiply_imaginary.check(.{ v, r }, imaginary_result, expected4);
+        multiply_imaginary_count.count(imaginary_result, unfusedMultiplyImaginary(v, r));
+    }
+    try finishAll(&.{ &vec4_fma, &vec3_fma, &dvec3_fma, &dop, &vec4_dop, &vec3_dop, &cross_precise, &quat_mul, &multiply_imaginary });
+    for ([_]*const FusedCount{ &vec4_fma_count, &vec3_fma_count, &dvec3_fma_count, &dop_count, &vec4_dop_count, &vec3_dop_count, &cross_precise_count, &quat_mul_count, &multiply_imaginary_count }) |c|
+        try c.finish();
 }
 
 test "Quat inversed / conjugated / normalized / getAxisAngle / getSwingTwist / getTwist / getRotationAngle / Euler angles" {
