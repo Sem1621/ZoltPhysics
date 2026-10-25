@@ -15,7 +15,7 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 | `ZoltHelloWorld/`    | Port of `HelloWorld/HelloWorld.cpp` (milestone M5)                      |
 | `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestones M6, M8 and M9); `-r` records Jolt's `.jor` debug renderer stream, only in a build with `-Ddebug_renderer=true` (without it `-r` is ignored) |
 | `Docs/Zolt/`         | Porting docs: **read `PortingGuide.md` before writing any Zig code**  |
-| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`, `gen_jolt_sources.py`, `tidy_registry.py`, `install_zig.sh`) |
+| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`, `gen_jolt_sources.py`, `tidy_registry.py`, `install_zig.sh`) and measurement tools (`check_codegen.py`, `perf_budget.py`, `job_trace_stats.py`) |
 
 ## Commands
 
@@ -44,6 +44,7 @@ zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=Discrete -t=m
 zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=LinearCast -t=max -s=Ragdoll -validate_hash=0x8b740018b592628a  # (double: 0xf232ce5d50669b41)
 zig build performance-test -Doptimize=ReleaseFast -- -s=Pyramid -t=1 -phase_times  # also print the time of the scene and the physics updates
 zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyramid -t=2 -p  # job timeline: <scene>_<tag>.json (Chrome trace) + busy/idle per thread
+python3 tools/job_trace_stats.py Pyramid_linearcast_th2.json  # busy / wait / idle per thread, idle spans by length, wakeups, island preparation
 zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
 zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)

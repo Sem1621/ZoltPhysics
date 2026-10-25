@@ -232,7 +232,9 @@ jobs:
   job-profile:
     # The measurement tooling (-Djob_profile, Zolt/Core/JobProfiler.zig): the tests of the job system, the profiler and
     # ZoltPerformanceTest with the option, then one short profiled run (-p -phase_times). Its Chrome trace must be valid
-    # JSON with the physics jobs and both kinds of waits. Its output must have the summary and the phase times.
+    # JSON with the physics jobs, both kinds of idle waits and the spans inside the solve jobs (the waits for split
+    # island batches, the preparation of an island, the final batch). Its output must have the summary and the phase
+    # times, and tools/job_trace_stats.py must read the trace.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Job profiler
@@ -255,6 +257,7 @@ jobs:
         events = [e for e in json.load(open("Pyramid_linearcast_th2.json"))["traceEvents"] if e["ph"] == "X"]
         names = {e["name"] for e in events}
         assert {"FindCollisions", "SolveVelocityConstraints", "Idle: wait for jobs", "Idle: wait for barrier"} <= names, names
+        assert {"Wait: split island batches", "Prepare island (split)", "Final batch: bounds and sleep"} <= names, names
         print(len(events), "events")
         output = open("run.txt").read()
         assert re.search(r"^Job profile: wall [0-9.]+ ms, Worker 0: busy .*, Thread 0: busy ", output, re.M), output
@@ -262,6 +265,10 @@ jobs:
         assert len(phases) == 1 and float(phases[0][1]) > 0, output
         print("Phase times:", phases[0])
         PY
+    - name: Statistics of the trace
+      run: |
+        python3 tools/job_trace_stats.py --self-test
+        python3 tools/job_trace_stats.py Pyramid_linearcast_th2.json --steps 60
 
   codegen:
     # The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). The library code of ZoltPerformanceTest (ReleaseFast,

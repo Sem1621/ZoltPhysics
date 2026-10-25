@@ -84,6 +84,11 @@
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
+//! - Zolt (`-Djob_profile=true` only, Core/JobProfiler.zig): the solve jobs record the time they yield while other jobs
+//!   hold the batches of a split island as `wait` spans ("Wait: split island batches"), JobSoftBodySimulate its yields
+//!   after a pass without work ("Wait: soft bodies"). `part` spans mark the preparation of an island in JobSolveVelocityConstraints
+//!   ("Prepare island", "Prepare island (split)") and the bounds and sleep update of a split island's final batch
+//!   ("Final batch: bounds and sleep"). Without the option these hooks generate no code.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -107,6 +112,7 @@ const Mutex = @import("../Core/Mutex.zig").Mutex;
 const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
 const quickSort = @import("../Core/QuickSort.zig").quickSort;
 const JobSystemFile = @import("../Core/JobSystem.zig");
+const JobProfiler = @import("../Core/JobProfiler.zig").JobProfiler;
 const JobSystem = JobSystemFile.JobSystem;
 const JobHandle = JobSystem.JobHandle;
 const TempAllocatorFile = @import("../Core/TempAllocator.zig");
@@ -2149,6 +2155,11 @@ pub const PhysicsSystem = struct {
         // Only the first step to correct for the delta time difference in the previous update
         const warm_start_impulse_ratio: f32 = if (self.physics_settings.constraint_warm_start) (if (step.is_first) context.warm_start_impulse_ratio else 1.0) else 0.0;
 
+        // Zolt: -Djob_profile=true records the yields of this job as one wait span until it gets a batch (see the top of
+        // this file)
+        var wait_span: if (Core.job_profile) JobProfiler.WaitSpan else void = if (Core.job_profile) .{ .profiler = context.job_system.getJobProfiler(), .name = "Wait: split island batches" } else {};
+        defer if (Core.job_profile) wait_span.done();
+
         var check_islands = true;
         var check_split_islands = self.physics_settings.use_large_island_splitter;
         while (true) {
@@ -2157,6 +2168,7 @@ pub const PhysicsSystem = struct {
                 var batch: LargeIslandSplitter.Batch = undefined;
                 switch (self.large_island_splitter.fetchNextBatch(&batch)) {
                     .batch_retrieved => {
+                        if (Core.job_profile) wait_span.done();
                         const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
                         if (batch.first_iteration) {
@@ -2228,6 +2240,7 @@ pub const PhysicsSystem = struct {
                 }
 
                 const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
+                const prepare_start = if (Core.job_profile) JobProfiler.begin(wait_span.profiler) else {};
 
                 // Convert indices to offsets so that we lose one indirection in the solver. We couldn't do this earlier as we need constraint indices to build islands.
                 self.contact_manager.constraintIdxToConstraintOffset(contacts);
@@ -2245,6 +2258,7 @@ pub const PhysicsSystem = struct {
                     !self.large_island_splitter.splitIsland(island_idx, &self.island_builder, &self.body_manager, &self.contact_manager, active_constraints, &steps_calculator))
                 {
                     is_large_island = false;
+                    if (Core.job_profile) JobProfiler.end(wait_span.profiler, .part, "Prepare island", prepare_start);
 
                     // We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
                     ConstraintManager.warmStartVelocityConstraints(active_constraints, constraints, warm_start_impulse_ratio, &steps_calculator);
@@ -2266,6 +2280,7 @@ pub const PhysicsSystem = struct {
                     // Save back the lambdas in the contact cache for the warm start of the next physics update
                     self.contact_manager.storeAppliedImpulses(contacts);
                 }
+                if (Core.job_profile and is_large_island) JobProfiler.end(wait_span.profiler, .part, "Prepare island (split)", prepare_start);
 
                 if (track_simulation_stats) {
                     const num_ticks = getProcessorTickCount() -% start_tick;
@@ -2277,6 +2292,7 @@ pub const PhysicsSystem = struct {
                 }
             } else if (check_split_islands) {
                 // If there are split islands, but we didn't do any work, give up a time slice
+                if (Core.job_profile) wait_span.waiting();
                 std.Thread.yield() catch {};
             } else {
                 // No more work
@@ -3201,6 +3217,11 @@ pub const PhysicsSystem = struct {
         var bodies_to_sleep: BodiesToSleep = .init(&self.body_manager, &bodies_to_sleep_buffer);
         defer bodies_to_sleep.deinit();
 
+        // Zolt: -Djob_profile=true records the yields of this job as one wait span until it gets a batch (see the top of
+        // this file)
+        var wait_span: if (Core.job_profile) JobProfiler.WaitSpan else void = if (Core.job_profile) .{ .profiler = context.job_system.getJobProfiler(), .name = "Wait: split island batches" } else {};
+        defer if (Core.job_profile) wait_span.done();
+
         var check_islands = true;
         var check_split_islands = self.physics_settings.use_large_island_splitter;
         while (true) {
@@ -3209,6 +3230,7 @@ pub const PhysicsSystem = struct {
                 var batch: LargeIslandSplitter.Batch = undefined;
                 switch (self.large_island_splitter.fetchNextBatch(&batch)) {
                     .batch_retrieved => {
+                        if (Core.job_profile) wait_span.done();
                         const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
                         // Solve the batch
@@ -3221,8 +3243,11 @@ pub const PhysicsSystem = struct {
                         self.large_island_splitter.markBatchProcessed(batch.split_island_index, batch.constraints, batch.contacts, &last_iteration, &final_batch);
 
                         // The final batch will update all bounds and check sleeping
-                        if (final_batch)
+                        if (final_batch) {
+                            const bounds_start = if (Core.job_profile) JobProfiler.begin(wait_span.profiler) else {};
                             self.checkSleepAndUpdateBounds(self.large_island_splitter.getIslandIndex(batch.split_island_index), context, step, &bodies_to_sleep);
+                            if (Core.job_profile) JobProfiler.end(wait_span.profiler, .part, "Final batch: bounds and sleep", bounds_start);
+                        }
 
                         if (track_simulation_stats) {
                             const num_ticks = getProcessorTickCount() -% start_tick;
@@ -3288,6 +3313,7 @@ pub const PhysicsSystem = struct {
                 }
             } else if (check_split_islands) {
                 // If there are split islands, but we didn't do any work, give up a time slice
+                if (Core.job_profile) wait_span.waiting();
                 std.Thread.yield() catch {};
             } else {
                 // No more work
@@ -3496,6 +3522,10 @@ pub const PhysicsSystem = struct {
         const num_soft_bodies = context.getNumSoftBodies();
         const start_idx = thread_index * num_soft_bodies / context.getMaxConcurrency();
 
+        // Zolt: -Djob_profile=true records each yield after a pass without work as a wait span (see the top of this file)
+        var wait_span: if (Core.job_profile) JobProfiler.WaitSpan else void = if (Core.job_profile) .{ .profiler = context.job_system.getJobProfiler(), .name = "Wait: soft bodies" } else {};
+        defer if (Core.job_profile) wait_span.done();
+
         // Keep running partial updates until everything has been updated
         const did_work = @intFromEnum(SoftBodyMotionProperties.Status.did_work);
         var status: u32 = undefined;
@@ -3520,8 +3550,11 @@ pub const PhysicsSystem = struct {
             }
 
             // If we didn't perform any work, yield the thread so that something else can run
-            if ((status & did_work) == 0)
+            if ((status & did_work) == 0) {
+                if (Core.job_profile) wait_span.waiting();
                 std.Thread.yield() catch {};
+                if (Core.job_profile) wait_span.done();
+            }
 
             if (status == @intFromEnum(SoftBodyMotionProperties.Status.done))
                 break;
