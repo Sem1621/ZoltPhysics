@@ -1237,7 +1237,7 @@ pub const ContactConstraintManager = struct {
     }
 
     /// The constraint at an offset in the constraint buffer
-    fn getConstraintBase(self: *const ContactConstraintManager, constraint_offset: u32) *ContactConstraintBase {
+    pub fn getConstraintBase(self: *const ContactConstraintManager, constraint_offset: u32) *ContactConstraintBase {
         return @ptrCast(@alignCast(self.constraints.items.ptr + constraint_offset));
     }
 

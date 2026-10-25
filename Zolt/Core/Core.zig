@@ -6,6 +6,7 @@
 //! configuration values that ported code depends on are kept here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const options = @import("zolt_options");
 
 /// Version of Jolt that this port tracks (JPH_VERSION_MAJOR / MINOR / PATCH)
@@ -15,6 +16,25 @@ pub const version_patch = 1;
 
 /// Use f64 for world space positions (JPH_DOUBLE_PRECISION), set with `-Ddouble_precision=true`
 pub const double_precision: bool = options.double_precision;
+
+/// Use Jolt's fused multiply add sites (JPH_USE_FMADD), set with `-Dfma=true`. Off by default. Jolt has 8 such sites:
+/// Vec4, Vec3 and DVec3 `fusedMultiplyAdd`, the scalar, Vec4 and Vec3 `differenceOfProducts` (and so
+/// Vec3.crossPrecise), Quat.mul and Quat.multiplyImaginary. With the option they use @mulAdd where Jolt calls an FMA
+/// intrinsic or std::fma. No other code may use @mulAdd. Results change: the C++ reference of the parity tests gets
+/// -DJPH_USE_FMADD, so the parity proves this mode too. It needs a CPU with FMA (see the check below), because Zig's
+/// software fma is not correctly rounded.
+pub const use_fmadd: bool = options.fma;
+
+comptime {
+    if (use_fmadd) {
+        switch (builtin.cpu.arch) {
+            .x86, .x86_64 => if (!std.Target.x86.featureSetHas(builtin.cpu.features, .fma))
+                @compileError("-Dfma=true needs a CPU with FMA (x86-64: -Dcpu=x86_64_v3 or native)"),
+            .aarch64, .aarch64_be => {}, // Every aarch64 CPU has FMA
+            else => @compileError("-Dfma=true needs a CPU with FMA (x86-64: -Dcpu=x86_64_v3 or native; aarch64)"),
+        }
+    }
+}
 
 /// Number of bits in an ObjectLayer (JPH_OBJECT_LAYER_BITS), set with `-Dobject_layer_bits=16|32`
 pub const object_layer_bits: u8 = options.object_layer_bits;
@@ -32,6 +52,11 @@ pub const debug_renderer: bool = options.debug_renderer;
 /// Record a timeline of the jobs and of the idle time of the job threads (Zolt, no Jolt option; see
 /// Core/JobProfiler.zig), set with `-Djob_profile=true`. Without it every hook is `void`. Results do not change.
 pub const job_profile: bool = options.job_profile;
+
+/// Solve the contacts of a batch of a parallel split 8 at a time with SIMD (Zolt, no Jolt option; see
+/// Physics/Constraints/ContactConstraintSimd.zig), on by default, off with `-Dsimd_contact_solver=false` for A/B tests.
+/// Results do not change.
+pub const simd_contact_solver: bool = options.simd_contact_solver;
 
 /// Cache line size, used to avoid false sharing (JPH_CACHE_LINE_SIZE)
 pub const cache_line_size = 64;

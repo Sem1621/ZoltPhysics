@@ -73,7 +73,7 @@ jobs:
   test:
     if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
-    name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} use_llvm=${{ matrix.use_llvm }}
+    name: Test ${{ matrix.os }} ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} use_llvm=${{ matrix.use_llvm }} fma=${{ matrix.fma }}
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +82,7 @@ jobs:
         double_precision: [ false, true ]
         debug_renderer: [ false ]
         use_llvm: [ true ]
+        fma: [ false ]
         # Every row below sets every key: a row that changes a value of the matrix is a new combination with only its
         # own keys
         include:
@@ -90,33 +91,66 @@ jobs:
             double_precision: false
             debug_renderer: false
             use_llvm: true
+            fma: false
           - os: ubuntu-latest
             optimize: ReleaseFast
             double_precision: true
             debug_renderer: false
             use_llvm: true
+            fma: false
           - os: ubuntu-latest
             optimize: ReleaseSafe
             double_precision: false
             debug_renderer: false
             use_llvm: true
+            fma: false
           # The debug renderer hooks compiled in (Docs/Zolt/RemainingFeaturesArchitecture.md R2, section 5)
           - os: ubuntu-latest
             optimize: Debug
             double_precision: false
             debug_renderer: true
             use_llvm: true
+            fma: false
           - os: ubuntu-latest
             optimize: ReleaseFast
             double_precision: true
             debug_renderer: true
             use_llvm: true
+            fma: false
           # Zig's self-hosted x86_64 backend (milestone M10, Docs/Zolt/RemainingFeaturesArchitecture.md section 1)
           - os: ubuntu-latest
             optimize: Debug
             double_precision: false
             debug_renderer: false
             use_llvm: false
+            fma: false
+          # FMA mode (-Dfma=true, Jolt's JPH_USE_FMADD sites): the runners' native CPUs have FMA. The short run hashes of
+          # ZoltPerformanceTest come from the C++ FMA build on x86-64. On macOS (arm64) they prove that aarch64 gives the
+          # same bits.
+          - os: ubuntu-latest
+            optimize: Debug
+            double_precision: false
+            debug_renderer: false
+            use_llvm: true
+            fma: true
+          - os: ubuntu-latest
+            optimize: Debug
+            double_precision: true
+            debug_renderer: false
+            use_llvm: true
+            fma: true
+          - os: macos-latest
+            optimize: Debug
+            double_precision: false
+            debug_renderer: false
+            use_llvm: true
+            fma: true
+          - os: windows-latest
+            optimize: Debug
+            double_precision: false
+            debug_renderer: false
+            use_llvm: true
+            fma: true
     steps:
     - name: Checkout Code
       uses: actions/checkout@v5
@@ -134,7 +168,7 @@ jobs:
     # test to it. The longest test binary takes about 3 min on Windows Debug. Linux and macOS spawn with close-on-exec
     # pipes and keep Zig's defaults.
     - name: Test
-      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }} ${{ runner.os == 'Windows' && '--test-timeout 10m' || '' }}
+      run: zig build test --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Duse_llvm=${{ matrix.use_llvm }} -Dfma=${{ matrix.fma }} ${{ runner.os == 'Windows' && '--test-timeout 10m' || '' }}
 
   parity:
     # Per push and pull request: one row (ReleaseFast, single precision, no debug renderer). The other rows run in
@@ -158,12 +192,12 @@ jobs:
 
   parity-nightly:
     # The other parity rows: every night on master and on a manual run. A manual run also runs the parity job, so it
-    # covers all 5 rows. Each row takes about as long as the per push row: this saves about 4 parity runs per push.
+    # covers all 6 rows. Each row takes about as long as the per push row: this saves about 5 parity runs per push.
     # No Zig cache: these rows run once a day, and their caches would push the cache of the per push row out of the
     # cache quota of the repository.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    name: Parity with C++ Jolt ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }}
+    name: Parity with C++ Jolt ${{ matrix.optimize }} double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} fma=${{ matrix.fma }}
     strategy:
       fail-fast: false
       matrix:
@@ -174,16 +208,25 @@ jobs:
           - optimize: ReleaseSafe
             double_precision: false
             debug_renderer: false
+            fma: false
           - optimize: ReleaseSafe
             double_precision: true
             debug_renderer: false
+            fma: false
           - optimize: ReleaseFast
             double_precision: true
             debug_renderer: false
+            fma: false
           # The debug renderer hooks in Zolt and JPH_DEBUG_RENDERER in the C++ reference (a second reference build)
           - optimize: ReleaseFast
             double_precision: false
             debug_renderer: true
+            fma: false
+          # FMA mode: Jolt's JPH_USE_FMADD sites in Zolt (-Dfma=true) and -DJPH_USE_FMADD in the C++ reference (x86-64)
+          - optimize: ReleaseFast
+            double_precision: false
+            debug_renderer: false
+            fma: true
     steps:
     - name: Checkout Code
       uses: actions/checkout@v5
@@ -193,7 +236,7 @@ jobs:
         version: ${{ env.ZIG_VERSION }}
         use-cache: false
     - name: Compare with the C++ library (includes hello-world-check, milestone M5)
-      run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }}
+      run: zig build parity --summary all -Doptimize=${{ matrix.optimize }} -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }}
 
   job-profile:
     # The measurement tooling (-Djob_profile, Zolt/Core/JobProfiler.zig): the tests of the job system, the profiler and
@@ -232,7 +275,8 @@ jobs:
   codegen:
     # The regression guard of Phase 10 (Docs/Zolt/Roadmap.md). The library code of ZoltPerformanceTest (ReleaseFast,
     # x86-64-v3) must not fill or copy a large buffer and must not use std.mem.swap (tools/check_codegen.py). Bit exact
-    # results cannot show such a slowdown. The runner has objdump. The check reads x86-64 code only.
+    # results cannot show such a slowdown. It must also hold no FMA instruction, and with -Dfma only FMA instructions
+    # of Jolt's 8 JPH_USE_FMADD sites (Phase 11). The runner has objdump. The check reads x86-64 code only.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     name: Codegen check
@@ -247,6 +291,8 @@ jobs:
       run: python3 tools/check_codegen.py --self-test
     - name: Check the machine code
       run: zig build codegen-check
+    - name: Check the machine code of FMA mode (only Jolt's 8 JPH_USE_FMADD sites fuse)
+      run: zig build codegen-check -Dfma=true
 
   perf-budget:
     # The instruction budget of Phase 10 (tools/perf_budget.py). Callgrind counts the instructions of the physics
@@ -273,9 +319,11 @@ jobs:
   determinism:
     if: github.event_name != 'schedule'
     # Milestones M6, M8 and M9: ZoltPerformanceTest reproduces the hashes that Jolt publishes in determinism_check.yml (same
-    # arguments), and the hash does not depend on the thread count
+    # arguments), and the hash does not depend on the thread count. FMA mode (-Dfma=true) has its own hashes, printed by
+    # the C++ PerformanceTest built with -DJPH_USE_FMADD. Of these, the oracle step below checks only the Ragdoll hash
+    # with C++ again: the other four are checked against ZoltPerformanceTest only.
     runs-on: ubuntu-latest
-    name: Determinism check double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }}
+    name: Determinism check double_precision=${{ matrix.double_precision }} debug_renderer=${{ matrix.debug_renderer }} fma=${{ matrix.fma }}
     strategy:
       fail-fast: false
       matrix:
@@ -288,6 +336,7 @@ jobs:
             character_virtual_hash: '0xc1d4e05b164b1221'
             ragdoll_hash: '0x3be6ea76c07a2ac8'
             record: ''
+            fma: false
           - double_precision: true
             debug_renderer: false
             pyramid_hash: '0xf07f04597a102a82'
@@ -296,6 +345,7 @@ jobs:
             character_virtual_hash: '0xa0b16727aa16fdb0'
             ragdoll_hash: '0x8dd6bc501859a228'
             record: ''
+            fma: false
           # The debug renderer does not change results: the same hashes with the option (Zolt) and with
           # JPH_DEBUG_RENDERER (the C++ oracle), also while every frame is recorded (-r, the tests with -t=max).
           # Docs/Zolt/RemainingFeaturesArchitecture.md section 5. Both precisions: the .jor check below compares the
@@ -309,6 +359,7 @@ jobs:
             character_virtual_hash: '0xc1d4e05b164b1221'
             ragdoll_hash: '0x3be6ea76c07a2ac8'
             record: '-r'
+            fma: false
           - double_precision: true
             debug_renderer: true
             pyramid_hash: '0xf07f04597a102a82'
@@ -317,6 +368,27 @@ jobs:
             character_virtual_hash: '0xa0b16727aa16fdb0'
             ragdoll_hash: '0x8dd6bc501859a228'
             record: '-r'
+            fma: false
+          # FMA mode: the hashes of the C++ PerformanceTest built with -DJPH_USE_FMADD (zig build jolt-performance-test
+          # -Dfma=true, ReleaseFast, x86-64-v3). The runner's native CPU has FMA.
+          - double_precision: false
+            debug_renderer: false
+            pyramid_hash: '0x15e7c300ecfa3b4'
+            convex_vs_mesh_hash: '0x5b7ed223785d6130'
+            high_speed_hash: '0xacff49547589e8e9'
+            character_virtual_hash: '0x48302c0925f8956c'
+            ragdoll_hash: '0x8b740018b592628a'
+            record: ''
+            fma: true
+          - double_precision: true
+            debug_renderer: false
+            pyramid_hash: '0xdce038bbb20ea75a'
+            convex_vs_mesh_hash: '0x744454371a9af0a2'
+            high_speed_hash: '0xadd0251b91bd97f9'
+            character_virtual_hash: '0xef57277f30cd67e5'
+            ragdoll_hash: '0xf232ce5d50669b41'
+            record: ''
+            fma: true
     steps:
     - name: Checkout Code
       uses: actions/checkout@v5
@@ -325,35 +397,35 @@ jobs:
       with:
         version: ${{ env.ZIG_VERSION }}
     - name: Build
-      run: zig build -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }}
+      run: zig build -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }}
     # Milestone M9: the oracle. The C++ PerformanceTest, built like the parity reference (with JPH_OBJECT_STREAM), must
     # give Jolt's published Ragdoll hash. Then the toolchain of the parity reference is exact for the Ragdoll scene.
     - name: Jolt oracle Ragdoll (C++ PerformanceTest)
-      run: zig build jolt-performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=max -s=Ragdoll ${{ matrix.record }} -validate_hash=${{ matrix.ragdoll_hash }}
+      run: zig build jolt-performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=max -s=Ragdoll ${{ matrix.record }} -validate_hash=${{ matrix.ragdoll_hash }}
     - name: Test ConvexVsMesh
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=max -s=ConvexVsMesh ${{ matrix.record }} -validate_hash=${{ matrix.convex_vs_mesh_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=max -s=ConvexVsMesh ${{ matrix.record }} -validate_hash=${{ matrix.convex_vs_mesh_hash }}
     - name: Test HighSpeed
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=max -s=HighSpeed ${{ matrix.record }} -validate_hash=${{ matrix.high_speed_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=max -s=HighSpeed ${{ matrix.record }} -validate_hash=${{ matrix.high_speed_hash }}
     - name: Test Pyramid
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=max -s=Pyramid ${{ matrix.record }} -validate_hash=${{ matrix.pyramid_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=max -s=Pyramid ${{ matrix.record }} -validate_hash=${{ matrix.pyramid_hash }}
     - name: Test Pyramid with 1 thread
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=1 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=1 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
     - name: Test Pyramid with 2 threads
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=2 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=2 -s=Pyramid -validate_hash=${{ matrix.pyramid_hash }}
     - name: Test CharacterVirtual
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=Discrete -t=max -s=CharacterVirtual ${{ matrix.record }} -validate_hash=${{ matrix.character_virtual_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=Discrete -t=max -s=CharacterVirtual ${{ matrix.record }} -validate_hash=${{ matrix.character_virtual_hash }}
     - name: Test CharacterVirtual with 1 thread
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=Discrete -t=1 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=Discrete -t=1 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
     - name: Test CharacterVirtual with 2 threads
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=Discrete -t=2 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=Discrete -t=2 -s=CharacterVirtual -validate_hash=${{ matrix.character_virtual_hash }}
     # Milestone M9: the Ragdoll scene loads its assets through ObjectStreamIn
     - name: Test Ragdoll
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=max -s=Ragdoll ${{ matrix.record }} -validate_hash=${{ matrix.ragdoll_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=max -s=Ragdoll ${{ matrix.record }} -validate_hash=${{ matrix.ragdoll_hash }}
     - name: Test Ragdoll with 1 thread
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=1 -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=1 -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}
     - name: Test Ragdoll with 2 threads
-      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -- -q=LinearCast -t=2 -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}
+      run: zig build performance-test -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=${{ matrix.debug_renderer }} -Dfma=${{ matrix.fma }} -- -q=LinearCast -t=2 -s=Ragdoll -validate_hash=${{ matrix.ragdoll_hash }}
     # Group D3: ZoltPerformanceTest -r writes the .jor bytes of the C++ PerformanceTest -r (the 5 scenes, 20 updates)
     - name: Debug renderer .jor check
       if: matrix.debug_renderer
-      run: zig build debug-renderer-check -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=true
+      run: zig build debug-renderer-check -Doptimize=ReleaseFast -Ddouble_precision=${{ matrix.double_precision }} -Ddebug_renderer=true -Dfma=${{ matrix.fma }}

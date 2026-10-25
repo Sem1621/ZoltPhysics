@@ -469,6 +469,7 @@ pub const SpringPart = @import("Physics/Constraints/ConstraintPart/SpringPart.zi
 pub const SwingTwistConstraintPart = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingTwistConstraintPart;
 pub const SwingType = @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig").SwingType;
 pub const ContactConstraintManager = @import("Physics/Constraints/ContactConstraintManager.zig").ContactConstraintManager;
+pub const ContactConstraintSimd = @import("Physics/Constraints/ContactConstraintSimd.zig");
 pub const DistanceConstraint = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraint;
 pub const DistanceConstraintSettings = @import("Physics/Constraints/DistanceConstraint.zig").DistanceConstraintSettings;
 pub const FixedConstraint = @import("Physics/Constraints/FixedConstraint.zig").FixedConstraint;
@@ -876,6 +877,7 @@ const source_files = .{
     @import("Physics/Constraints/ConstraintPart/SpringPart.zig"),
     @import("Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.zig"),
     @import("Physics/Constraints/ContactConstraintManager.zig"),
+    @import("Physics/Constraints/ContactConstraintSimd.zig"),
     @import("Physics/Constraints/DistanceConstraint.zig"),
     @import("Physics/Constraints/FixedConstraint.zig"),
     @import("Physics/Constraints/GearConstraint.zig"),

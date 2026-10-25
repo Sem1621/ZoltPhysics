@@ -1961,6 +1961,16 @@ test "RotationQuatConstraintPart parity" {
         var input: CPInput = .{ .body = undefined };
         const pair = gen.motionTypes(.all);
         gen.bodies(&input, pair);
+        // A body with some but not all rotation axes locked makes K nearly singular: its rounded determinant is not
+        // zero, so the effective mass and the position steps can overflow, and Jolt asserts that the rotation of
+        // Body::SubRotationStep / AddRotationStep is not NaN. Seen with -Dfma=true, where the rounding of the quaternion
+        // products differs. Builds with asserts lock all or none of the rotation axes of a body. All locked axes give
+        // an inverse inertia of zero, so K stays exactly singular there and the part deactivates.
+        if (Core.enable_asserts) {
+            for (&input.body) |*body| {
+                if (body.allowed_dofs & 0b111000 != 0) body.allowed_dofs |= 0b111000;
+            }
+        }
         const f = &input.f;
         storeQuat(gen.quat(), f[0..4]);
         f[4] = gen.lambda();

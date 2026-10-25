@@ -76,6 +76,7 @@ test {
     _ = @import("Physics/ConeConstraintTests.zig");
     _ = @import("Physics/ConstraintManagerTests.zig");
     _ = @import("Physics/ContactConstraintManagerTests.zig");
+    _ = @import("Physics/ContactConstraintSimdTests.zig");
     _ = @import("Physics/ContactListenerTests.zig");
     _ = @import("Physics/ConvexVsTrianglesTest.zig");
     _ = @import("Physics/DeterminismLogTests.zig");

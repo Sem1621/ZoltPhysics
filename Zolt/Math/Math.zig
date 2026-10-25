@@ -5,6 +5,7 @@
 //! (see Docs/Zolt/PortingGuide.md, "Floating point determinism").
 
 const std = @import("std");
+const Core = @import("../Core/Core.zig");
 
 /// The constant pi (JPH_PI)
 pub const pi: f32 = 3.14159265358979323846;
@@ -50,10 +51,18 @@ pub fn centerAngleAroundZero(v_in: f32) f32 {
 }
 
 /// Calculates a * b - c * d with higher accuracy when fused multiply add instructions are available.
-/// Zolt never uses FMA (it would break cross platform determinism), so this is the plain formula.
-/// See: https://pharr.org/matt/blog/2019/11/03/difference-of-floats
+/// If a * b and c * d are large, the subtraction can cause a large loss of precision when the result is small.
+/// See: https://pharr.org/matt/blog/2019/11/03/difference-of-floats (or search for Kahan's algorithm)
+/// Zolt uses FMA here only with `-Dfma=true` (Core.use_fmadd, JPH_USE_FMADD). Without it this is the plain formula.
 pub fn differenceOfProducts(a: f32, b: f32, c: f32, d: f32) f32 {
-    return a * b - c * d;
+    if (Core.use_fmadd) {
+        const cd = c * d;
+        const err = @mulAdd(f32, -c, d, cd);
+        const dop = @mulAdd(f32, a, b, -cd);
+        return dop + err;
+    } else {
+        return a * b - c * d;
+    }
 }
 
 /// C++ `std::min(a, b)`: returns `a` unless `b < a`. Use this instead of `@min` for floats when porting

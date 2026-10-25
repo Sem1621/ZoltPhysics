@@ -23,6 +23,7 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 zig build test                              # all tests (library inline tests + ported unit tests)
 zig build test -Ddouble_precision=true      # same with JPH_DOUBLE_PRECISION semantics
 zig build test -Ddebug_renderer=true        # same with JPH_DEBUG_RENDERER: the draw code is compiled in
+zig build test -Dfma=true                   # same with JPH_USE_FMADD: Jolt's 8 FMA sites fuse (needs a CPU with FMA)
 zig build test -Dtest-filter=TestVec3Cross  # run matching tests only
 zig build check                             # compile only (fast)
 zig build check -Ddebug_renderer=true       # compile the draw code too (it is type checked only with the option)
@@ -30,16 +31,25 @@ zig build parity-check                      # compile every parity test and the 
 zig build parity-check -Ddebug_renderer=true  # the same with the draw code and a C++ reference with JPH_DEBUG_RENDERER
 zig build parity                            # compare with the C++ Jolt library bit for bit (first build ~4 min)
 zig build parity -Ddebug_renderer=true      # the same with the draw code (files with JPH_DEBUG_RENDERER code)
+zig build parity -Dfma=true                 # FMA mode vs a C++ reference with -DJPH_USE_FMADD (x86-64 hosts only)
 zig build parity -Dreference_asserts=true -Dtest-filter='.SceneTest("<scene>"['  # a new scene vs an asserting Jolt build
 zig build hello-world-check                 # C++ HelloWorld and its port must print the same bytes
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x74d0118836ac0892
 zig build performance-test -Doptimize=ReleaseFast -- -q=LinearCast -t=max -s=Ragdoll -validate_hash=0x3be6ea76c07a2ac8  # M9 (double: 0x8dd6bc501859a228)
+# FMA mode: the hashes of the C++ PerformanceTest built with -DJPH_USE_FMADD (zig build jolt-performance-test -Dfma=true)
+zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=LinearCast -t=max -s=Pyramid -validate_hash=0x15e7c300ecfa3b4  # (double: 0xdce038bbb20ea75a)
+zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=LinearCast -t=max -s=ConvexVsMesh -validate_hash=0x5b7ed223785d6130  # (double: 0x744454371a9af0a2)
+zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=LinearCast -t=max -s=HighSpeed -validate_hash=0xacff49547589e8e9  # (double: 0xadd0251b91bd97f9)
+zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=Discrete -t=max -s=CharacterVirtual -validate_hash=0x48302c0925f8956c  # (double: 0xef57277f30cd67e5)
+zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=LinearCast -t=max -s=Ragdoll -validate_hash=0x8b740018b592628a  # (double: 0xf232ce5d50669b41)
 zig build performance-test -Doptimize=ReleaseFast -- -s=Pyramid -t=1 -phase_times  # also print the time of the scene and the physics updates
 zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyramid -t=2 -p  # job timeline: <scene>_<tag>.json (Chrome trace) + busy/idle per thread
 zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
+zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
 zig build debug-renderer-check -Ddebug_renderer=true  # the .jor bytes of PerformanceTest -r and ZoltPerformanceTest -r must be equal
-zig build codegen-check                     # fail on a large fill or copy or a std.mem.swap in the library code (ReleaseFast, x86-64)
+zig build codegen-check                     # fail on a large fill or copy, a std.mem.swap or an FMA instruction in the library code (ReleaseFast, x86-64)
+zig build codegen-check -Dfma=true          # the same, but FMA instructions must come from Jolt's 8 JPH_USE_FMADD sites
 zig build perf-budget                       # callgrind instructions of the physics updates vs C++, fail over budget (needs valgrind)
 zig fmt Zolt ZoltTests ZoltParity ZoltHelloWorld ZoltPerformanceTest build.zig build.zig.zon  # format (CI checks this)
 python3 tools/strip_isa.py -D JPH_CROSS_PLATFORM_DETERMINISTIC Jolt/Math/Vec3.inl   # C++ without SIMD branches
@@ -59,7 +69,8 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
 
 - **Bit exact port.** Zolt must produce the same results as Jolt built with
   `CROSS_PLATFORM_DETERMINISTIC=ON`. Never reorder floating point operations, never use FMA
-  (`@mulAdd`), `std.math` trig or `@min`/`@max` on floats (use `Math/Math.zig` helpers).
+  (`@mulAdd`), except Jolt's 8 `JPH_USE_FMADD` sites, which use `@mulAdd` behind `Core.use_fmadd`
+  (`-Dfma=true`). Never use `std.math` trig or `@min`/`@max` on floats (use `Math/Math.zig` helpers).
 - **No hidden fills.** In code that runs per step, body, contact or query, no field default, `.empty` or `.{}` for a
   value over 256 bytes: build it in place. Use `Core.swap`, not `std.mem.swap` (PortingGuide.md, "Large values").
   `zig build codegen-check` checks it.
@@ -97,4 +108,6 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   backends and the profiler stay deferred.
 - Phase 10 made Zolt about as fast as C++ in instructions without changing a result (class A). Work that changes
   results follows the `-Djolt_compat` policy in the Roadmap's Phase 10 section.
+- Phase 11 added the SIMD contact solver (class A, on by default) and the FMA mode `-Dfma` (Jolt's 8
+  `JPH_USE_FMADD` sites, with a C++ oracle; off by default).
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).

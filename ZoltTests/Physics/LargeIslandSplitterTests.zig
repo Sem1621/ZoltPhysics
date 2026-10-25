@@ -468,6 +468,8 @@ const BatchRecord = struct {
     first_iteration: bool,
     last_iteration: bool,
     final_batch: bool,
+    /// Zolt: the batch comes from a parallel split (Batch.parallel)
+    parallel: bool,
 };
 
 /// Offset of a slice of contact_and_constraint_indices (Jolt's pointers)
@@ -494,6 +496,7 @@ fn runBatches(allocator: Allocator, splitter: *LargeIslandSplitter, out: *std.Ar
                     .first_iteration = batch.first_iteration,
                     .last_iteration = last_iteration,
                     .final_batch = final_batch,
+                    .parallel = batch.parallel,
                 });
             },
 
@@ -525,6 +528,7 @@ fn expectedBatches(allocator: Allocator, splitter: *const LargeIslandSplitter, o
                     .first_iteration = iteration == 0,
                     .last_iteration = iteration == splits.num_iterations - 1,
                     .final_batch = false,
+                    .parallel = k != splits.num_splits,
                 };
                 if (k == splits.num_splits) {
                     if (split.getNumItems() > 0) {
@@ -697,9 +701,9 @@ test "LargeIslandSplitter a chain splits into two parallel splits" {
     defer actual.deinit(allocator);
     try runBatches(allocator, &splitter, &actual);
     try expectEqual(@as(usize, 11 * 8), actual.items.len);
-    try expectEqual(BatchRecord{ .split_island_index = 0, .constraints_begin = 0, .constraints_end = 0, .contacts_begin = 0, .contacts_end = 16, .first_iteration = true, .last_iteration = false, .final_batch = false }, actual.items[0]);
-    try expectEqual(BatchRecord{ .split_island_index = 0, .constraints_begin = 0, .constraints_end = 0, .contacts_begin = 64, .contacts_end = 80, .first_iteration = true, .last_iteration = false, .final_batch = false }, actual.items[4]);
-    try expectEqual(BatchRecord{ .split_island_index = 0, .constraints_begin = 0, .constraints_end = 0, .contacts_begin = 112, .contacts_end = 128, .first_iteration = false, .last_iteration = true, .final_batch = true }, actual.items[11 * 8 - 1]);
+    try expectEqual(BatchRecord{ .split_island_index = 0, .constraints_begin = 0, .constraints_end = 0, .contacts_begin = 0, .contacts_end = 16, .first_iteration = true, .last_iteration = false, .final_batch = false, .parallel = true }, actual.items[0]);
+    try expectEqual(BatchRecord{ .split_island_index = 0, .constraints_begin = 0, .constraints_end = 0, .contacts_begin = 64, .contacts_end = 80, .first_iteration = true, .last_iteration = false, .final_batch = false, .parallel = true }, actual.items[4]);
+    try expectEqual(BatchRecord{ .split_island_index = 0, .constraints_begin = 0, .constraints_end = 0, .contacts_begin = 112, .contacts_end = 128, .first_iteration = false, .last_iteration = true, .final_batch = true, .parallel = true }, actual.items[11 * 8 - 1]);
     splitter.prepareForSolvePositions();
     actual.clearRetainingCapacity();
     try runBatches(allocator, &splitter, &actual);

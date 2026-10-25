@@ -852,21 +852,32 @@ fn hashForTest(physics_system: *PhysicsSystem, scene: PerformanceTestScene) !u64
     return hash;
 }
 
+/// Zolt test helper: the expected hash of a short run for the build configuration (precision and `-Dfma`)
+fn expectedHash(hashes: struct { single: u64, double: u64, fma_single: u64, fma_double: u64 }) u64 {
+    if (zolt.Core.use_fmadd)
+        return if (zolt.Core.double_precision) hashes.fma_double else hashes.fma_single;
+    return if (zolt.Core.double_precision) hashes.double else hashes.single;
+}
+
+/// The hash of 10 Pyramid updates (-s=Pyramid -q=LinearCast -i=10)
+const pyramid_10_hash = expectedHash(.{ .single = 0x8ae6dee69e292017, .double = 0x874b972e6c896604, .fma_single = 0x9f808de3408d1062, .fma_double = 0x91ac195620392756 });
+
 test "PerformanceTest scenes give Jolt's hashes after a few updates" {
     // The scenes of the determinism check (the published hashes of 500 updates are checked by the determinism CI job,
     // .github/workflows/zolt.yml), a few updates each, in Debug and on every platform of the test CI job. The expected
     // values are the hashes that the C++ PerformanceTest prints with the same arguments (-s=<scene> -q=<quality>
-    // -i=<updates>), built from Jolt/ with CROSS_PLATFORM_DETERMINISTIC. The testing allocator also checks that the
-    // scenes release all their shapes and settings (for Ragdoll also the objects read from the assets).
+    // -i=<updates> -t=1), built from Jolt/ with CROSS_PLATFORM_DETERMINISTIC. The FMA values (-Dfma=true) come from the
+    // C++ PerformanceTest built with -DJPH_USE_FMADD: `zig build jolt-performance-test -Dfma=true
+    // [-Ddouble_precision=true] -- <arguments>` on x86-64. The testing allocator also checks that the scenes release all
+    // their shapes and settings (for Ragdoll also the objects read from the assets).
     const allocator = std.testing.allocator;
-    const dp = zolt.Core.double_precision;
-    try std.testing.expectEqual(@as(u64, if (dp) 0x874b972e6c896604 else 0x8ae6dee69e292017), try runSceneForTest((try PyramidScene.create(allocator)).scene(), .linear_cast, 10));
-    try std.testing.expectEqual(@as(u64, if (dp) 0x6b13f19597ad79f4 else 0xbb1738ab6ae53857), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .discrete, 100));
-    try std.testing.expectEqual(@as(u64, if (dp) 0x2b4f1c7cf1a90e26 else 0x93894e4298eed8e1), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
-    try std.testing.expectEqual(@as(u64, if (dp) 0x5109b031ac53c66e else 0x375628eabc094b31), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
-    try std.testing.expectEqual(@as(u64, if (dp) 0x4ca08591ebc72ba2 else 0xcb05430a62f9c7f), try runSceneForTest((try CharacterVirtualScene.create(allocator)).scene(), .discrete, 10));
-    // The oracle: zig build jolt-performance-test [-Ddouble_precision=true] -- -q=LinearCast -t=1 -s=Ragdoll -i=5
-    try std.testing.expectEqual(@as(u64, if (dp) 0x5430d55461b5bdc6 else 0x47fe0db54d0cdb27), try runSceneForTest(try createRagdollScene(allocator, std.testing.io), .linear_cast, 5));
+    try std.testing.expectEqual(pyramid_10_hash, try runSceneForTest((try PyramidScene.create(allocator)).scene(), .linear_cast, 10));
+    try std.testing.expectEqual(expectedHash(.{ .single = 0xbb1738ab6ae53857, .double = 0x6b13f19597ad79f4, .fma_single = 0x70e604414d2e1e4d, .fma_double = 0x4268bcdd690ddb82 }), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .discrete, 100));
+    try std.testing.expectEqual(expectedHash(.{ .single = 0x93894e4298eed8e1, .double = 0x2b4f1c7cf1a90e26, .fma_single = 0x6e88572db42e4ae, .fma_double = 0x1225a83f46d8569c }), try runSceneForTest((try ConvexVsMeshScene.create(allocator)).scene(), .linear_cast, 100));
+    try std.testing.expectEqual(expectedHash(.{ .single = 0x375628eabc094b31, .double = 0x5109b031ac53c66e, .fma_single = 0x31a8309d7d9e58c4, .fma_double = 0xd41c440313b462d6 }), try runSceneForTest((try HighSpeedScene.create(allocator)).scene(), .linear_cast, 10));
+    try std.testing.expectEqual(expectedHash(.{ .single = 0xcb05430a62f9c7f, .double = 0x4ca08591ebc72ba2, .fma_single = 0xcb05430a62f9c7f, .fma_double = 0x4ca08591ebc72ba2 }), try runSceneForTest((try CharacterVirtualScene.create(allocator)).scene(), .discrete, 10));
+    // The oracle: zig build jolt-performance-test [-Ddouble_precision=true] [-Dfma=true] -- -q=LinearCast -t=1 -s=Ragdoll -i=5
+    try std.testing.expectEqual(expectedHash(.{ .single = 0x47fe0db54d0cdb27, .double = 0x5430d55461b5bdc6, .fma_single = 0x7e335dcf00f4ed8f, .fma_double = 0x349cd7565e3a2c1d }), try runSceneForTest(try createRagdollScene(allocator, std.testing.io), .linear_cast, 5));
 }
 
 test "-p writes the job timeline of a run (-Djob_profile)" {
@@ -900,8 +911,7 @@ test "-p writes the job timeline of a run (-Djob_profile)" {
         try scene.updateTest(&physics_system, temp_allocator.tempAllocator(), delta_time);
         _ = try physics_system.update(delta_time, 1, temp_allocator.tempAllocator(), job_system.jobSystem());
     }
-    const dp = zolt.Core.double_precision;
-    try std.testing.expectEqual(@as(u64, if (dp) 0x874b972e6c896604 else 0x8ae6dee69e292017), try hashForTest(&physics_system, scene));
+    try std.testing.expectEqual(pyramid_10_hash, try hashForTest(&physics_system, scene));
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
