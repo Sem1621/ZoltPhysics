@@ -595,6 +595,18 @@ results are reproducible as long as the code follows these rules:
 15. **`std::shuffle` and `uniform_int_distribution`** (HairSettings) are `Mt19937.shuffleLibcxx(T, items)` and
     `Mt19937.uniformIntLibcxx`: libc++'s algorithms, the standard library of the parity reference (R13). Never
     `std.Random.shuffle`.
+16. **Hoisting out of a loop (class A speed work, Roadmap Phase 12).** A value may be computed once instead of per
+    iteration only when it is the same function of the same bits (an unchanged input, compared bit for bit: the
+    center of mass transform of CharacterBoundsCache.zig). A computation that mixes a per iteration value t with
+    values that do not depend on it may be split ("replayed") only when (a) every operation that involves t runs in
+    Jolt's order and association, (b) the result feeds only operations whose answers depend on real values (add, sub,
+    mul, the select based Vec3 min / max, comparisons, abs; never a division, a reciprocal or a sign bit test), and
+    (c) every hoisted value and every intermediate value of t is checked finite, falling back to Jolt's code
+    otherwise. Then the result equals Jolt's as real numbers: the only bits that can differ are the signs of zeros,
+    because a hoisted `t * 0` term (a RotatedTranslatedShape product) can be +0 where Jolt's is -0. Such a value is a
+    decision input, never a stored or returned result. The proof goes into the header of the file (see
+    CharacterBoundsCache.zig) and a test compares the replay with Jolt's function as real numbers with the same NaN
+    pattern, plus the decisions at their flips.
 
 ## 9. Threading
 

@@ -72,9 +72,12 @@
 //!   `refreshBoundsCache` stores them at the end of the construction, in UpdateInnerBodyTransform (SetPosition,
 //!   SetRotation, SetShapeOffset, Update, MoveToContact), on every exit of SetShape and at the end of RestoreState.
 //!   The loops of CharacterVsCharacterCollisionSimple read the transform of the other character from its cache when the
-//!   cache matches the character's current members bit for bit, and run Jolt's code otherwise (a stale cache, an
-//!   unsupported shape or rotation). The cache holds one reference to the shape it was stored for, so a cached shape's
-//!   reference count is one higher than in Jolt until the next refresh or the destructor.
+//!   cache matches the character's current members bit for bit, and replay the world space bounds of its shape from
+//!   the cached parts that do not depend on the base offset (equal to Jolt's bounds as real numbers, which is all that
+//!   the reject decision reads; the proof is in the header of CharacterBoundsCache.zig). They run Jolt's code otherwise
+//!   (a stale cache, an unsupported shape or rotation, a translation that is not finite). The cache holds one reference
+//!   to the shape it was stored for, so a cached shape's reference count is one higher than in Jolt until the next
+//!   refresh or the destructor.
 //! - `CharacterVsCharacterCollisionSimple.stats` (test builds only, `void` otherwise) counts what the caches decided.
 
 const std = @import("std");
@@ -732,7 +735,7 @@ pub const CharacterVsCharacterCollisionSimple = struct {
 
                 // Check if the bounding boxes of the characters overlap
                 const shape2 = c.getShape().?;
-                var bounds2 = shape2.getWorldSpaceBounds(transform2, Vec3.one());
+                var bounds2 = self.worldSpaceBounds(cache, shape2, transform2);
                 bounds2.expandBy(Vec3.replicate(settings.max_separation_distance));
                 if (!bounds1.overlaps(bounds2)) {
                     self.count(cache, .rejected);
@@ -778,7 +781,7 @@ pub const CharacterVsCharacterCollisionSimple = struct {
 
                 // Sweep bounding box of the character against the bounding box of the other character to see if they can collide
                 const shape2 = c.getShape().?;
-                var bounds2 = shape2.getWorldSpaceBounds(transform2, Vec3.one());
+                var bounds2 = self.worldSpaceBounds(cache, shape2, transform2);
                 bounds2.expandBy(extents.add(Vec3.replicate(c.getCharacterPadding())));
                 if (!rayAABoxHitsDirection(origin, direction, bounds2.min, bounds2.max)) {
                     self.count(cache, .rejected);
@@ -815,6 +818,19 @@ pub const CharacterVsCharacterCollisionSimple = struct {
         return if (cache) |cached| cached.center_of_mass_transform else c.getCenterOfMassTransform();
     }
 
+    /// Zolt (Phase 12): `shape2.GetWorldSpaceBounds(transform2, Vec3::sOne())` as real numbers: replayed by the bounds
+    /// cache of character 2 when it has one and the translations are finite (CharacterBoundsCache.zig), Jolt's function
+    /// otherwise. The loops use the box only in ExpandBy and in the overlap / ray tests, whose answers depend only on the
+    /// real values.
+    inline fn worldSpaceBounds(self: *const CharacterVsCharacterCollisionSimple, cache: ?*const CharacterBoundsCache, shape2: *const Shape, transform2: Mat44) AABox {
+        if (cache) |cached| {
+            if (cached.replay.bounds(transform2.getTranslation())) |bounds|
+                return bounds;
+            self.countNoCache(.non_finite);
+        }
+        return shape2.getWorldSpaceBounds(transform2, Vec3.one());
+    }
+
     /// Zolt (Phase 12, test builds): count a decision that the bounds cache of the other character made
     inline fn count(self: *const CharacterVsCharacterCollisionSimple, cache: ?*const CharacterBoundsCache, comptime what: enum { rejected, accepted }) void {
         if (builtin.is_test) {
@@ -824,8 +840,8 @@ pub const CharacterVsCharacterCollisionSimple = struct {
         }
     }
 
-    /// Zolt (Phase 12, test builds): count a pair for which Jolt's code ran
-    inline fn countNoCache(self: *const CharacterVsCharacterCollisionSimple, comptime what: enum { stale, unsupported }) void {
+    /// Zolt (Phase 12, test builds): count a pair for which (part of) Jolt's code ran
+    inline fn countNoCache(self: *const CharacterVsCharacterCollisionSimple, comptime what: enum { stale, unsupported, non_finite }) void {
         if (builtin.is_test) {
             if (self.stats) |s| @field(s, @tagName(what)) += 1;
         }

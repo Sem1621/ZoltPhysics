@@ -69,6 +69,7 @@ test {
     _ = @import("Physics/BroadPhaseQuadTreeTests.zig");
     _ = @import("Physics/BroadPhaseTests.zig");
     _ = @import("Physics/CastShapeTests.zig");
+    _ = @import("Physics/CharacterBoundsCacheTests.zig");
     _ = @import("Physics/CharacterVirtualTests.zig");
     _ = @import("Physics/CollidePointTests.zig");
     _ = @import("Physics/CollideShapeTests.zig");
