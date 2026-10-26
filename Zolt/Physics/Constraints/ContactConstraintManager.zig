@@ -31,6 +31,13 @@
 //! - Zolt addition `finalizeContactCacheAfterOutOfMemory` (D10 "Out of memory"): a poisoned ContactRemovedCallbacks
 //!   job discards the incomplete write cache instead of swapping it in.
 //!
+//! Differences with the C++ version (Phase 12, class A), Zolt additions for the large islands of PhysicsSystem:
+//! - `constraintIdxToConstraintOffsetAndSort` is ConstraintIdxToConstraintOffset followed by SortContacts in about
+//!   linear time (Core/KeySort.zig on copies of the sort keys, scratch of the caller) with exactly Jolt's order; when
+//!   two sort keys are equal it runs Jolt's two functions, which are unchanged.
+//! - `getUnusedConstraintBuffer`: the end of the constraint buffer behind the last constraint of the step, scratch for
+//!   those sorts while the SolveVelocityConstraints jobs run.
+//!
 //! Signatures:
 //! - Jolt's constructor `ContactConstraintManager(const PhysicsSettings &)` and `Init` are one in place `init` that
 //!   takes the allocator of the caches (porting guide: constructor + Init). The manager (and so the PhysicsSystem
@@ -72,6 +79,7 @@ const Real = RealFile.Real;
 const RVec3 = RealFile.RVec3;
 const RMat44 = RealFile.RMat44;
 const quickSort = @import("../../Core/QuickSort.zig").quickSort;
+const KeySort = @import("../../Core/KeySort.zig");
 const prefetchL1 = @import("../../Core/Prefetch.zig").prefetchL1;
 const LockFreeHashMapFile = @import("../../Core/LockFreeHashMap.zig");
 const LFHMAllocator = LockFreeHashMapFile.LFHMAllocator;
@@ -1999,6 +2007,62 @@ pub const ContactConstraintManager = struct {
                 return false;
             }
         }.lessThan);
+    }
+
+    /// Zolt addition (Phase 12, class A): an element of `constraintIdxToConstraintOffsetAndSort`
+    pub const SortRecord = struct {
+        /// A copy of the sort key of the constraint
+        key: u64,
+        /// The offset of the constraint in mConstraints (the value that SortContacts sorts)
+        constraint_offset: u32,
+    };
+
+    /// Zolt addition (Phase 12, class A): `constraintIdxToConstraintOffset` followed by `sortContacts`, with exactly the
+    /// same result, in about linear time and without a read of two constraints per comparison. `records` (at least
+    /// `constraint_idx.len` elements) and `buckets` (`KeySort.bucketMemory(constraint_idx.len)` elements) are scratch
+    /// memory of the caller.
+    ///
+    /// Why the result is the same (Core/KeySort.zig): the key of a contact is the sort key of its constraint. Jolt's
+    /// comparator compares the sort keys first and returns `lhs.sort_key < rhs.sort_key` when they differ. So when the
+    /// sort keys of the island are pairwise distinct (a sort key is a 64-bit hash of the two bodies and sub shapes),
+    /// Jolt's comparator is `lhs.sort_key < rhs.sort_key` on these contacts (also for a contact against itself: then it
+    /// continues with the bodies, which are the same, and returns false), and Jolt's QuickSort gives the one order with
+    /// increasing sort keys, which is the order of KeySort.sortByDistinctKeys. When two sort keys are equal (Jolt then
+    /// orders by the body IDs, and QuickSort is not stable for full ties), this runs Jolt's two functions on the
+    /// untouched indices instead. Nothing writes a constraint during the sort, so the keys are the values that Jolt's
+    /// comparator reads.
+    pub fn constraintIdxToConstraintOffsetAndSort(self: *const ContactConstraintManager, constraint_idx: []u32, records: []SortRecord, buckets: []u32) void {
+        std.debug.assert(records.len >= constraint_idx.len);
+        const sort_records = records[0..constraint_idx.len];
+        for (constraint_idx, sort_records) |idx, *record| {
+            const constraint_offset = self.constraint_idx_to_offset.items[idx];
+            record.* = .{ .key = self.getConstraintBase(constraint_offset).sort_key, .constraint_offset = constraint_offset };
+        }
+
+        // (The sort keys are hashes: their top bits spread them over the buckets of KeySort, no range to compute)
+        if (KeySort.sortByDistinctKeys(SortRecord, sort_records, buckets, .all)) {
+            for (constraint_idx, sort_records) |*offset, record|
+                offset.* = record.constraint_offset;
+        } else {
+            // Equal sort keys: Jolt's functions
+            self.constraintIdxToConstraintOffset(constraint_idx);
+            self.sortContacts(constraint_idx);
+        }
+    }
+
+    /// Zolt addition (Phase 12, class A): the end of the constraint buffer that holds no constraint, PhysicsSystem's
+    /// scratch memory for the sorts of the large islands (claimSortScratch). Empty when no buffer is allocated or when
+    /// this step had more constraints than fit. Only free between the last AddContactConstraint of a step (the end of
+    /// the FindCollisions jobs) and RecycleConstraintBuffer / FinishConstraintBuffer.
+    pub fn getUnusedConstraintBuffer(self: *const ContactConstraintManager) []align(8) u8 {
+        const num_constraints_and_next_constraint_offset = self.num_constraints_and_next_constraint_offset.load(.monotonic);
+        // (More constraints than fit: the offset also counts the constraints that were not stored)
+        if (@as(u32, @truncate(num_constraints_and_next_constraint_offset)) > self.max_constraints)
+            return &.{};
+        const start = std.mem.alignForward(usize, @intCast(num_constraints_and_next_constraint_offset >> 32), 8);
+        if (start >= self.constraints.items.len)
+            return &.{};
+        return @alignCast(self.constraints.items[start..]);
     }
 
     /// Get the affected bodies for a given constraint

@@ -2212,6 +2212,94 @@ test "PhysicsSystem large island: the LargeIslandSplitter path" {
     try expect(!std.mem.eql(u8, ref_states.items, states.items));
 }
 
+test "PhysicsSystem large island: claimSortScratch and releaseSortScratch" {
+    // Zolt addition (Phase 12, class A): the scratch of the sorts of the large islands comes from two regions of memory
+    // that exist anyway (the body pair buffer and the unused end of the contact constraint buffer). The islands of a
+    // step take consecutive parts of the first region with room, the last part is given back.
+    const SortScratch = PhysicsSystem.SortScratch;
+    var memory0: [1024]u64 = undefined; // 8 KB
+    var memory1: [4096]u64 = undefined; // 32 KB
+    const regions: [2][]align(8) u8 = .{ std.mem.sliceAsBytes(&memory0), std.mem.sliceAsBytes(&memory1) };
+    var used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+
+    // 200 records: 3200 bytes of records and 128 u32 buckets
+    const size: u32 = @intCast(SortScratch.bytesFor(200));
+    try expectEqual(@as(usize, 200 * 16 + zolt.KeySort.bucketMemory(200) * 4), size);
+    try expectEqual(@as(usize, 3712), size);
+    const s1 = PhysicsSystem.claimSortScratch(regions, &used, 200).?;
+    const s2 = PhysicsSystem.claimSortScratch(regions, &used, 200).?;
+    const s3 = PhysicsSystem.claimSortScratch(regions, &used, 200).?; // Region 0 has 768 bytes left
+    try expect(s1.region == 0 and s1.start == 0 and s1.size == size);
+    try expect(s2.region == 0 and s2.start == size);
+    try expect(s3.region == 1 and s3.start == 0);
+    try expectEqual(@as(u32, 2 * size), used[0].load(.monotonic));
+
+    // The records and the buckets lie inside the part, the records first
+    for ([_]SortScratch{ s1, s2, s3 }) |s| {
+        const begin = @intFromPtr(regions[s.region].ptr) + s.start;
+        const records = s.records(zolt.ContactConstraintManager.SortRecord, 200);
+        const buckets = s.buckets(200);
+        try expectEqual(begin, @intFromPtr(records.ptr));
+        try expectEqual(begin + 200 * 16, @intFromPtr(buckets.ptr));
+        try expectEqual(zolt.KeySort.bucketMemory(200), buckets.len);
+        try expect(@intFromPtr(buckets.ptr + buckets.len) <= begin + s.size);
+        // Fewer records than claimed: the same memory, the buckets of the smaller number
+        try expectEqual(@as(usize, 100), s.records(zolt.ConstraintManager.SortRecord, 100).len);
+        try expectEqual(zolt.KeySort.bucketMemory(100), s.buckets(100).len);
+    }
+
+    // Only the last part goes back: s1 stays used until s2 is given back
+    PhysicsSystem.releaseSortScratch(&used, s1);
+    try expectEqual(@as(u32, 2 * size), used[0].load(.monotonic));
+    PhysicsSystem.releaseSortScratch(&used, s2);
+    try expectEqual(@as(u32, size), used[0].load(.monotonic));
+    const s4 = PhysicsSystem.claimSortScratch(regions, &used, 200).?;
+    try expect(s4.region == 0 and s4.start == size);
+    PhysicsSystem.releaseSortScratch(&used, s4);
+    PhysicsSystem.releaseSortScratch(&used, s3);
+    try expectEqual(@as(u32, 0), used[1].load(.monotonic));
+
+    // Too large for both regions, or no region: null (the island takes Jolt's path)
+    try expect(PhysicsSystem.claimSortScratch(regions, &used, 5000) == null);
+    var no_used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+    try expect(PhysicsSystem.claimSortScratch(.{ &.{}, &.{} }, &no_used, 200) == null);
+    try expect(PhysicsSystem.claimSortScratch(.{ &.{}, regions[1] }, &no_used, 200).?.region == 1);
+}
+
+test "PhysicsSystem large island: claimSortScratch from several threads gives parts that do not overlap" {
+    // Zolt addition (Phase 12, class A): the SolveVelocityConstraints jobs claim their scratch at the same time
+    var memory: [2][2048]u64 = undefined;
+    const regions: [2][]align(8) u8 = .{ std.mem.sliceAsBytes(&memory[0]), std.mem.sliceAsBytes(&memory[1]) };
+    var used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+    var failures: std.atomic.Value(u32) = .init(0);
+    var claims: std.atomic.Value(u32) = .init(0);
+    const Worker = struct {
+        fn run(r: [2][]align(8) u8, u: *[2]std.atomic.Value(u32), num_failures: *std.atomic.Value(u32), num_claims: *std.atomic.Value(u32), thread: u64) void {
+            for (0..2000) |round| {
+                const num_records = 20 + (thread * 7 + round) % 100;
+                const scratch = PhysicsSystem.claimSortScratch(r, u, num_records) orelse continue;
+                defer PhysicsSystem.releaseSortScratch(u, scratch);
+                _ = num_claims.fetchAdd(1, .monotonic);
+                // Fill the part with this thread's mark and check that nobody else wrote into it
+                const words: []u64 = @alignCast(std.mem.bytesAsSlice(u64, r[scratch.region][scratch.start..][0..scratch.size]));
+                const mark = (thread << 32) | round;
+                @memset(words, mark);
+                std.atomic.spinLoopHint();
+                for (words) |w| {
+                    if (w != mark) _ = num_failures.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Worker.run, .{ regions, &used, &failures, &claims, @as(u64, i) });
+    for (threads) |t| t.join();
+    try expectEqual(@as(u32, 0), failures.load(.monotonic));
+    // (A part that was not the last one when it was given back stays used, like within a step: the regions fill up)
+    try expect(claims.load(.monotonic) >= 100);
+    for (regions, &used) |region, *u| try expect(u.load(.monotonic) <= region.len);
+}
+
 // -------------------------------------------------------------------------------------------------------------------
 // CCD scenes (Wave B R4: JobFindCCDContacts, sSolveCCDContact, JobResolveCCDContacts)
 

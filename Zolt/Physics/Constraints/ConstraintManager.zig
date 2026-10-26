@@ -16,11 +16,17 @@
 //!   or DummyCalculateSolverSteps (or anything with `call(comptime Type, *const Type)`, Jolt's `operator ()`).
 //! - JPH_DEBUG_RENDERER (`DrawConstraints`, `DrawConstraintLimits`, `DrawConstraintReferenceFrame`): gated declarations
 //!   (RemainingFeaturesArchitecture.md R2). They lock the constraint list like Jolt.
+//!
+//! Differences with the C++ version (Phase 12, class A): the Zolt addition `sortConstraintsWithRecords` is
+//! SortConstraints in about linear time (Core/KeySort.zig on the key `priority << 32 | mConstraintIndex`, scratch of
+//! the caller) with exactly Jolt's order; when two keys are equal it runs Jolt's SortConstraints, which is unchanged.
+//! PhysicsSystem uses it for the large islands.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Core = @import("../../Core/Core.zig");
 const zolt_sort = @import("../../Core/QuickSort.zig");
+const KeySort = @import("../../Core/KeySort.zig");
 const Ref = @import("../../Core/Reference.zig").Ref;
 const Mutex = @import("../../Core/Mutex.zig").Mutex;
 const PhysicsLockFile = @import("../PhysicsLock.zig");
@@ -190,6 +196,45 @@ pub const ConstraintManager = struct {
                 return lhs.constraint_index < rhs.constraint_index;
             }
         }.lessThan);
+    }
+
+    /// Zolt addition (Phase 12, class A): an element of `sortConstraintsWithRecords`
+    pub const SortRecord = struct {
+        /// The priority of the constraint in the upper 32 bits, its mConstraintIndex in the lower 32 bits
+        key: u64,
+        /// The index of the constraint in the active constraints (the value that sortConstraints sorts)
+        constraint_idx: u32,
+    };
+
+    /// Zolt addition (Phase 12, class A): `sortConstraints` with exactly the same result, in about linear time and
+    /// without a read of two constraints per comparison. `records` (at least `constraint_idx.len` elements) and
+    /// `buckets` (`KeySort.bucketMemory(constraint_idx.len)` elements) are scratch memory of the caller.
+    ///
+    /// Why the result is the same (Core/KeySort.zig): the key of a constraint is p * 2^32 + i with p = its priority and
+    /// i = its mConstraintIndex (both u32). Jolt's comparator is exactly `key_l < key_r`: if p_l < p_r, then key_l <=
+    /// p_l * 2^32 + (2^32 - 1) < p_r * 2^32 <= key_r, true like Jolt's `p_l < p_r`; if p_l > p_r, key_l > key_r, false
+    /// like Jolt; if p_l == p_r, key_l < key_r exactly when i_l < i_r, Jolt's second comparison. So when the keys are
+    /// pairwise distinct (always, unless two active constraints have the same mConstraintIndex), Jolt's QuickSort gives
+    /// the one order with increasing keys, which is the order of KeySort.sortByDistinctKeys. When two keys are equal
+    /// (ties, where QuickSort is not stable), this runs Jolt's sortConstraints on the untouched indices instead.
+    /// Nothing changes a constraint during the sort, so the keys are the values that Jolt's comparator reads.
+    pub fn sortConstraintsWithRecords(active_constraints: []const *Constraint, constraint_idx: []u32, records: []SortRecord, buckets: []u32) void {
+        std.debug.assert(records.len >= constraint_idx.len);
+        const sort_records = records[0..constraint_idx.len];
+        var range: KeySort.KeyRange = .empty;
+        for (constraint_idx, sort_records) |idx, *record| {
+            const constraint = active_constraints[idx];
+            record.* = .{ .key = (@as(u64, constraint.getConstraintPriority()) << 32) | constraint.constraint_index, .constraint_idx = idx };
+            range.add(record.key);
+        }
+
+        if (KeySort.sortByDistinctKeys(SortRecord, sort_records, buckets, range)) {
+            for (constraint_idx, sort_records) |*idx, record|
+                idx.* = record.constraint_idx;
+        } else {
+            // Equal keys: Jolt's sort
+            sortConstraints(active_constraints, constraint_idx);
+        }
     }
 
     /// Prior to solving the velocity constraints, you must call SetupVelocityConstraints once to precalculate values that are independent of velocity

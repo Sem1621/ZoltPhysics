@@ -92,8 +92,8 @@ ALLOW = [
     # Body creation copies the default Body (0x140 bytes, 0x180 in double precision)
     (r"^Physics\.Body\.BodyManager\.BodyManager\.allocateBody$", {"rodata"}, 0x180, "body creation"),
     # Once per update: the default PhysicsUpdateContext.Step (Jolt's mSteps.resize runs the Step constructor). About
-    # 0.01% of the instructions of an update.
-    (r"^Physics\.PhysicsSystem\.PhysicsSystem\.update$", {"rodata"}, 0x1ca8, "the steps of an update"),
+    # 0.01% of the instructions of an update. (Phase 12: 8 bytes more for Step.sort_scratch_used.)
+    (r"^Physics\.PhysicsSystem\.PhysicsSystem\.update$", {"rodata"}, 0x1cb0, "the steps of an update"),
     # Construction and teardown set the members to their default values
     (r"^Physics\.PhysicsSystem\.PhysicsSystem\.(init|deinit)$", {"rodata"}, 0x500, "PhysicsSystem init and deinit"),
     (r"^Physics\.Constraints\.ContactConstraintManager\.ContactConstraintManager\.(init|deinit)$", {"rodata"}, 0x128,

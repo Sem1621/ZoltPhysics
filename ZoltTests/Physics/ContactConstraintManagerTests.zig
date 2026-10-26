@@ -1173,6 +1173,101 @@ test "ContactConstraintManager: SortContacts orders on the sort key and the body
     try expect(h.temp.isEmpty());
 }
 
+test "ContactConstraintManager: constraintIdxToConstraintOffsetAndSort gives the order of ConstraintIdxToConstraintOffset + SortContacts" {
+    // Zolt addition (Phase 12, class A): PhysicsSystem sorts the contacts of a large island with
+    // constraintIdxToConstraintOffsetAndSort (KeySort on the sort keys, Jolt's two functions when two sort keys are
+    // equal). Random islands out of 2495 contacts, with sort keys that are hashes, dense or clustered (one bucket of
+    // KeySort gets many), equal sort keys with different bodies (Jolt then orders on the body IDs) and, only without
+    // asserts (Jolt's comparator asserts that a full tie is a hash collision), fully equal keys of the same body pair
+    // (QuickSort, which is not stable, decides).
+    const allocator = std.testing.allocator;
+    const num_boxes = 100;
+    const floor_manifolds = 20; // Per box against the floor: body 1 is the floor for all of them
+    const box_manifolds = 5; // Between box i and box i + 1: body 1 differs too
+    const num_constraints = num_boxes * floor_manifolds + (num_boxes - 1) * box_manifolds;
+    var h: Harness = undefined;
+    try h.init(allocator, .{ .max_bodies = num_boxes + 1, .max_body_pairs = 2 * num_boxes, .max_contact_constraints = num_constraints, .listener = false });
+    defer h.deinit();
+
+    const floor = try h.createBox(.static, RVec3.init(0, -1, 0), .{ .half_extent = Vec3.init(500, 1, 500) });
+    var boxes: [num_boxes]*Body = undefined;
+    for (&boxes, 0..) |*b, i|
+        b.* = try h.createBox(.dynamic, RVec3.init(@as(f32, @floatFromInt(i)) * 3.0, 0.99, 0), .{});
+    try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 0.0);
+    {
+        var manifolds: [floor_manifolds]ContactManifold = undefined;
+        for (boxes, 0..) |b, i| {
+            const center = b.getCenterOfMassPosition().add(RVec3.init(0, -1, 0));
+            for (&manifolds, 0..) |*m, s|
+                m.* = makeManifold(b.getCenterOfMassPosition(), center, 1, 0.01, @intCast(s), 0);
+            h.processPair(&h.contact_allocator, floor, b, &manifolds, false);
+            if (i + 1 < num_boxes) {
+                for (manifolds[0..box_manifolds], 0..) |*m, s|
+                    m.* = makeManifold(b.getCenterOfMassPosition(), center, 1, 0.01, @intCast(s), @intCast(s + 1));
+                h.processPair(&h.contact_allocator, b, boxes[i + 1], manifolds[0..box_manifolds], false);
+            }
+        }
+    }
+    try expectEqual(@as(u32, num_constraints), h.manager.getNumConstraints());
+
+    // The rank of each constraint among the constraints of its body pair (they were added one pair after the other)
+    var rank_in_pair: [num_constraints]u64 = undefined;
+    for (&rank_in_pair, 0..) |*rank, i| {
+        const c = h.constraint(@intCast(i));
+        const same_pair = i > 0 and h.constraint(@intCast(i - 1)).body1 == c.body1 and h.constraint(@intCast(i - 1)).body2 == c.body2;
+        rank.* = if (same_pair) rank_in_pair[i - 1] + 1 else 0;
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x50f7);
+    const random = prng.random();
+    var island: [num_constraints]u32 = undefined;
+    var expected: [num_constraints]u32 = undefined;
+    var actual: [num_constraints]u32 = undefined;
+    const records = try allocator.alloc(CCM.SortRecord, num_constraints);
+    defer allocator.free(records);
+    const buckets = try allocator.alloc(u32, zolt.KeySort.bucketMemory(num_constraints));
+    defer allocator.free(buckets);
+
+    const KeyKind = enum { hash, dense, clustered, top_bits_equal, equal_keys_other_pairs, full_ties, all_equal };
+    var num_checked: usize = 0;
+    for (std.enums.values(KeyKind)) |kind| {
+        // Full ties of one body pair trip Jolt's assert in SortContacts
+        if (Core.enable_asserts and (kind == .full_ties or kind == .all_equal))
+            continue;
+        for ([_]usize{ 0, 1, 2, 3, 7, 8, 9, 16, 17, 33, 64, 100, 257, 1000, num_constraints }) |n| {
+            for (0..3) |_| {
+                for (0..num_constraints) |i| {
+                    h.constraint(@intCast(i)).sort_key = switch (kind) {
+                        .hash => random.int(u64),
+                        .dense => i,
+                        .clustered => (random.uintLessThan(u64, 4) << 60) | i,
+                        .top_bits_equal => 0xabcd_0000_0000_0000 | random.uintLessThan(u64, 1 << 40),
+                        .equal_keys_other_pairs => (random.uintLessThan(u64, 4) << 32) | rank_in_pair[i],
+                        .full_ties => random.uintLessThan(u64, 8),
+                        .all_equal => 42,
+                    };
+                }
+                for (&island, 0..) |*idx, i| idx.* = @intCast(i);
+                random.shuffle(u32, &island);
+
+                @memcpy(expected[0..n], island[0..n]);
+                h.manager.constraintIdxToConstraintOffset(expected[0..n]);
+                h.manager.sortContacts(expected[0..n]);
+
+                // Records and buckets of exactly the size the island needs
+                @memcpy(actual[0..n], island[0..n]);
+                h.manager.constraintIdxToConstraintOffsetAndSort(actual[0..n], records[0..n], buckets[0..zolt.KeySort.bucketMemory(n)]);
+                try expectEqualSlices(u32, expected[0..n], actual[0..n]);
+                num_checked += 1;
+            }
+        }
+    }
+    try expect(num_checked >= 5 * 15 * 3);
+
+    h.endStep();
+    try expect(h.temp.isEmpty());
+}
+
 /// A filter that only saves / restores the contacts of one body
 const BodyFilter = struct {
     pub const overrides = .{ .shouldSaveContact, .shouldRestoreContact };
