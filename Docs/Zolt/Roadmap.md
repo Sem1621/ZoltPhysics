@@ -448,7 +448,7 @@ percent, so a small difference either way is noise.
 - Tier 1b (class A, beyond Jolt; measure with the job profiler first): SIMD contact solving inside the splits of
   large islands (done in Phase 11), a cached AABB prefilter for characters (done in Phase 12 as exact bounds caches),
   island scheduling (Phase 12: the large island sorts; the parallel final batch is a Phase 13 candidate), spinning in
-  the thread pool (measured in Phase 12, not worth it).
+  the thread pool (measured in Phase 12: not worth it in general, a candidate for ConvexVsMesh).
 - Tier 2 (class B, behind `-Djolt_compat`): box-box SAT instead of EPA, graph-colored batches of small islands,
   8-wide trees. (The FMA math mode came in Phase 11 as `-Dfma`, with Jolt's own sites and a C++ oracle.)
 - Class C: four Jolt bugs that Zolt reproduces (the gear Jacobian, CCD double motion, a duplicate soft body edge, the
@@ -532,8 +532,8 @@ candidate had a rule decided before the measurement:
 | Item | Rule | Measured | Decision |
 |---|---|---|---|
 | Character prefilter | its work >= 10% of CharacterVirtual's instructions | the character vs character loops: 65.5% | done |
-| Spin before the futex sleep, padded queue heads | idle spans < 50 us >= 3% of the thread time at 4 threads | 0.1-2.4% (8.7-20 wakeups per worker and step) | not done |
-| Island preparation | its span >= 3% of a step at 4 threads | Pyramid 11.3%, ConvexVsMesh 4.3%, Ragdoll 4.2% | done |
+| Spin before the futex sleep, padded queue heads | idle spans < 50 us >= 3% of the thread time at 4 threads, or >= 20 wakeups per worker and step | 0.6-2.0% in four scenes, 3.9% in ConvexVsMesh; 8.7-10.6 wakeups at 4 threads, 17.9-20.0 at 2 | not done, see below |
+| Island preparation | its span >= 3% of a step at 4 threads | Pyramid 11.1%, ConvexVsMesh 3.9%, Ragdoll 4.0% | done |
 | Sort comparator codegen | Zolt >= 1.2x C++ instructions | 1.09x (sortContacts, Pyramid) | not done |
 | Ragdoll: SIMD solver threshold | SIMD off >= 3% faster on 1 thread | 0.995x; Ragdoll at 0.99 of C++ already | not done |
 
@@ -567,8 +567,8 @@ checked that the sorted keys are strictly increasing, and on equal keys Jolt's f
 (the body pair buffer of the update, then the unused end of the contact constraint buffer), claimed per island without
 a lock: no allocation, no temp memory, the D5 and D12 protocols are unchanged. SplitIsland collects its step overrides
 in four integers. In Pyramid the preparation went from 83.9e6 to 52.6e6 instructions (callgrind's estimated cycles
--29.7%), the whole update -0.77%; at 4 threads a split island's preparation went from 980 to 597 us (10.9% to 6.6% of
-the wall time).
+-29.7%), the whole update -0.77%; at 4 threads the preparation of the split islands went from 721 to 377 us per step
+(11.1% to 5.8% of the wall time).
 
 Instructions of the measured parts (callgrind, `-t=1`, `zig build perf-budget`):
 
@@ -600,19 +600,29 @@ CharacterVirtual runs 30% faster on 1 thread and 27% on 4 threads (it barely sca
 thread), now 12-24% ahead of C++. Pyramid gains 8% on 1 thread and 3% on 4 threads. The other scenes do not change
 beyond the noise.
 
-Job profiles of the measured step (`-t=4`, the median of 3 runs; percent of the thread time or of the wall time):
+Job profiles (`-t=4`, 500 steps, the median of 3 interleaved runs of Phase 11 and Phase 12; idle, wait and the short
+idle spans in percent of the thread time, the parts in percent of the wall time; Phase 12 unless two values are given):
 
-| Scene | Idle | Wait | Idle spans < 50 us | Wakeups per worker and step | Island preparation (Phase 11 / 12) | Final batch |
+| Scene | Idle | Wait (Phase 11 / 12) | Idle spans < 50 us | Wakeups per worker and step | Island preparation (Phase 11 / 12) | Final batch |
 |---|---|---|---|---|---|---|
-| Pyramid | 2.9% | 14.9% | 0.28% | 8.7 | 10.9% / 6.6% | 1.1% |
-| ConvexVsMesh | 5.4% | 0.2% | 2.39% | 8.7 | 4.4% / 3.5% | 5.5% |
-| Ragdoll | 2.3% | 0.8% | 0.41% | 10.5 | 4.1% / 3.5% | 8.2% |
-| HighSpeed | 14.0% | 0% | 0.89% | 10.0 | - | - |
-| CharacterVirtual | 67.0% | 0% | 1.32% | 8.9 | - | - |
+| Pyramid | 3.3% | 12.0% / 8.6% | 0.63% | 8.7 | 11.1% / 5.8% | 1.7% |
+| ConvexVsMesh | 5.9% | 0% | 3.74% | 8.9 | 3.9% / 2.8% | 5.5% |
+| Ragdoll | 2.3% | 0.7% / 0.9% | 0.73% | 10.6 | 4.0% / 3.2% | 8.7% |
+| HighSpeed | 12.8% | 0% | 1.30% | 10.0 | - | - |
+| CharacterVirtual | 64.1% | 0% | 2.40% | 8.9 | - | - |
+
+The first measurement used traces that had lost their oldest events (32K events per thread, each thread from a
+different time on: Pyramid and ConvexVsMesh kept only the last 169 and 247 of 500 steps), which put the short idle
+spans of ConvexVsMesh at 2.4%. The final review found it; `-p` now keeps 256K events per thread, the trace records the
+events a thread lost and `tools/job_trace_stats.py` counts only the time in which every thread has all its events.
+With complete traces ConvexVsMesh crosses the spin rule (3.9% in Phase 11) and HighSpeed at 2 threads reaches 20.0
+wakeups. The spin stays not done: its keep rule asks for >= 3% more steps per second in two scenes at 4 threads, and a
+spin can save at most the time of the short idle spans, at most 2.4% of the thread time in every other scene. It is a
+candidate for ConvexVsMesh alone (below).
 
 **Open, Phase 13 candidates.**
 - The final batch of a split island updates the bounds and the sleep state of all its bodies on one thread (5.5%
-  of the wall time in ConvexVsMesh and 8.2% in Ragdoll at 4 threads). The per body part is order independent and
+  of the wall time in ConvexVsMesh and 8.7% in Ragdoll at 4 threads). The per body part is order independent and
   could run in chunks in the jobs that wait, with putToSleep and notifyBodiesAABBChanged kept serial. The batch
   protocol of the LargeIslandSplitter needs a bounds phase for that. A design that keeps Jolt's results (from the
   Phase 12 review): leave every Split entry as it is until the island is done, because a job that polls can still read
@@ -624,7 +634,8 @@ Job profiles of the measured step (`-t=4`, the median of 3 runs; percent of the 
   `items_processed` and the AND of CanSleep in padding bytes of Splits (its layout stays); the job that completes the
   last chunk runs putToSleep in the island's order, then notifyBodiesAABBChanged, then stores the final status.
 - ConvexVsMesh runs at C++ speed on 1 thread but at 0.93-0.95 of it on 2 and 4 threads, and HighSpeed at 0.92 on 1
-  thread (its instructions are at 0.98): not explained yet.
+  thread (its instructions are at 0.98): not explained yet. ConvexVsMesh is the one scene whose idle spans under 50 us
+  reach 3.7% of the thread time at 4 threads: a bounded spin before the futex sleep could win back part of that gap.
 - CharacterVirtual: the loops still take about 155e6 of the 374e6 instructions (the key compares and the replays);
   a generation stamp per character or a SIMD test of several characters at once could cut that, keeping Jolt's visit
   order.
