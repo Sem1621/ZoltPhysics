@@ -29,6 +29,10 @@
 //! - The LargeIslandSplitter path: a pyramid of 136 boxes is one island above the splitting threshold; it is solved in
 //!   splits (bit identical with thread pools, different from the solve without the splitter) and goes to sleep from
 //!   the final batch of the split island.
+//! - The sorts of the large islands (Phase 12, class A): the same pyramid sorts its island in the body pair buffer, in
+//!   the unused end of the contact constraint buffer (a small max_in_flight_body_pairs, also with thread pools) and
+//!   with Jolt's functions (both too small: max_contact_constraints is the largest number of contact constraints of
+//!   an update), with bit identical states; PhysicsSystem's test-only counters show which way each island took.
 //!
 //! The CCD scene (Wave B R4: JobFindCCDContacts, sSolveCCDContact, JobResolveCCDContacts): 32 linear cast bullets
 //! fired at the thin walls of a container (one rejected by OnContactValidate and one turned into a sensor contact go
@@ -98,6 +102,7 @@ const SoftBodyCreationSettings = zolt.SoftBodyCreationSettings;
 const SoftBodyMotionProperties = zolt.SoftBodyMotionProperties;
 const Constraint = zolt.Constraint;
 const PhysicsSystem = zolt.PhysicsSystem;
+const LargeIslandSplitter = zolt.LargeIslandSplitter;
 const PhysicsStepListenerContext = zolt.PhysicsStepListenerContext;
 const BroadPhase = zolt.BroadPhase;
 const BroadPhaseBruteForce = zolt.BroadPhaseBruteForce;
@@ -2106,27 +2111,55 @@ const SplitIslandSleepListener = struct {
     }
 };
 
+/// Counts the contact constraints that an update adds: OnContactAdded / OnContactPersisted come once per manifold that
+/// AddContactConstraint or GetContactsFromCache turns into a contact constraint (the pyramid has no sensors)
+const ContactConstraintCounter = struct {
+    num_constraints: std.atomic.Value(u32) = .init(0),
+
+    pub fn onContactAdded(self: *ContactConstraintCounter, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+        _ = .{ body1, body2, manifold, settings };
+        _ = self.num_constraints.fetchAdd(1, .monotonic);
+    }
+
+    pub fn onContactPersisted(self: *ContactConstraintCounter, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+        _ = .{ body1, body2, manifold, settings };
+        _ = self.num_constraints.fetchAdd(1, .monotonic);
+    }
+};
+
 /// A pyramid of boxes with a base of 16 (136 bodies, about 256 contacts in one island)
 const PyramidScene = struct {
     const base = 16;
     const num_boxes = base * (base + 1) / 2;
+
+    const Options = struct {
+        use_large_island_splitter: bool = true,
+        /// PhysicsSettings.max_in_flight_body_pairs: the size of the body pair buffer (region 0 of the sort scratch of
+        /// the large islands, PhysicsSystem.sortScratchRegions)
+        max_in_flight_body_pairs: i32 = 16384,
+        /// The size of the contact constraint buffer (its unused end is region 1)
+        max_contact_constraints: u32 = 2048,
+    };
 
     broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
     object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
     object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
     system: PhysicsSystem = .empty,
     listener: SplitIslandSleepListener = undefined,
+    contact_counter: ContactConstraintCounter = .{},
 
-    fn init(self: *PyramidScene, allocator: Allocator, use_large_island_splitter: bool) !void {
+    fn init(self: *PyramidScene, allocator: Allocator, opts: Options) !void {
         self.* = .{};
-        try self.system.init(allocator, io, 1024, 0, 4096, 2048, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
+        try self.system.init(allocator, io, 1024, 0, 4096, opts.max_contact_constraints, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
         errdefer self.system.deinit();
         var settings = self.system.getPhysicsSettings().*;
         settings.time_before_sleep = 0.25;
-        settings.use_large_island_splitter = use_large_island_splitter;
+        settings.use_large_island_splitter = opts.use_large_island_splitter;
+        settings.max_in_flight_body_pairs = opts.max_in_flight_body_pairs;
         self.system.setPhysicsSettings(&settings);
         self.listener = .{ .system = &self.system };
         self.system.setBodyActivationListener(.init(&self.listener));
+        self.system.setContactListener(.init(&self.contact_counter));
         const bi = self.system.getBodyInterfaceMut();
 
         const floor_shape = try BoxShape.create(allocator, Vec3.init(30, 1, 30), .{ .convex_radius = 0.0 });
@@ -2149,8 +2182,17 @@ const PyramidScene = struct {
     }
 };
 
-/// Runs the pyramid until it is asleep, returns the state after every update
-fn runPyramid(allocator: Allocator, kind: JobSystemKind, use_large_island_splitter: bool, states: *std.ArrayList(u8), offsets: *std.ArrayList(usize)) !SplitIslandSleepListener {
+/// What a run of the pyramid saw
+const PyramidRun = struct {
+    listener: SplitIslandSleepListener,
+    /// PhysicsSystem.large_island_sorts: the large islands sorted in region 0, in region 1 and with Jolt's functions
+    sorts: [3]u32,
+    /// The largest number of contact constraints of an update
+    max_num_constraints: u32,
+};
+
+/// Runs the pyramid until it is asleep, records the state after every update
+fn runPyramid(allocator: Allocator, kind: JobSystemKind, opts: PyramidScene.Options, states: *std.ArrayList(u8), offsets: *std.ArrayList(usize)) !PyramidRun {
     var jobs: AnyJobSystem = .{};
     try jobs.init(allocator, kind);
     defer jobs.deinit();
@@ -2158,22 +2200,24 @@ fn runPyramid(allocator: Allocator, kind: JobSystemKind, use_large_island_splitt
     defer temp.deinit();
     const scene = try allocator.create(PyramidScene);
     defer allocator.destroy(scene);
-    try scene.init(allocator, use_large_island_splitter);
+    try scene.init(allocator, opts);
     defer scene.deinit();
 
     var recorder = StateRecorderImpl.init(allocator);
     defer recorder.deinit();
+    var max_num_constraints: u32 = 0;
     for (0..60) |_| {
         const errors = try scene.system.update(delta_time, 1, temp.tempAllocator(), jobs.jobSystem());
         try expect(errors.isNone());
         try expect(temp.isEmpty());
+        max_num_constraints = @max(max_num_constraints, scene.contact_counter.num_constraints.swap(0, .monotonic));
         recorder.clear();
         try scene.system.saveState(recorder.recorder(), .{});
         try offsets.append(allocator, states.items.len);
         try states.appendSlice(allocator, recorder.getData());
     }
     try expectEqual(@as(u32, 0), scene.system.getNumActiveBodies(.rigid_body)); // The pyramid is asleep
-    return scene.listener;
+    return .{ .listener = scene.listener, .sorts = scene.system.large_island_sorts.counts(), .max_num_constraints = max_num_constraints };
 }
 
 test "PhysicsSystem large island: the LargeIslandSplitter path" {
@@ -2185,7 +2229,7 @@ test "PhysicsSystem large island: the LargeIslandSplitter path" {
     defer ref_states.deinit(allocator);
     var ref_offsets: std.ArrayList(usize) = .empty;
     defer ref_offsets.deinit(allocator);
-    const ref = try runPyramid(allocator, .single_threaded, true, &ref_states, &ref_offsets);
+    const ref = (try runPyramid(allocator, .single_threaded, .{}, &ref_states, &ref_offsets)).listener;
     try expectEqual(@as(u32, PyramidScene.num_boxes), ref.num_deactivated.load(.monotonic));
     try expectEqual(@as(u32, PyramidScene.num_boxes), ref.num_deactivated_from_split_island.load(.monotonic));
 
@@ -2195,7 +2239,7 @@ test "PhysicsSystem large island: the LargeIslandSplitter path" {
         defer states.deinit(allocator);
         var offsets: std.ArrayList(usize) = .empty;
         defer offsets.deinit(allocator);
-        const listener = try runPyramid(allocator, kind, true, &states, &offsets);
+        const listener = (try runPyramid(allocator, kind, .{}, &states, &offsets)).listener;
         try expectEqual(@as(u32, PyramidScene.num_boxes), listener.num_deactivated_from_split_island.load(.monotonic));
         try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
         try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
@@ -2206,10 +2250,151 @@ test "PhysicsSystem large island: the LargeIslandSplitter path" {
     defer states.deinit(allocator);
     var offsets: std.ArrayList(usize) = .empty;
     defer offsets.deinit(allocator);
-    const without = try runPyramid(allocator, .{ .thread_pool = 3 }, false, &states, &offsets);
+    const without = (try runPyramid(allocator, .{ .thread_pool = 3 }, .{ .use_large_island_splitter = false }, &states, &offsets)).listener;
     try expectEqual(@as(u32, PyramidScene.num_boxes), without.num_deactivated.load(.monotonic));
     try expectEqual(@as(u32, 0), without.num_deactivated_from_split_island.load(.monotonic));
     try expect(!std.mem.eql(u8, ref_states.items, states.items));
+}
+
+test "PhysicsSystem large island: sorts in the body pair buffer, in the unused end of the contact constraint buffer and with Jolt's functions give the same states" {
+    // Zolt addition (Phase 12, class A): sortLargeIsland takes the scratch for the records of a large island from the
+    // body pair buffer (region 0), else from the end of the contact constraint buffer behind the last constraint of the
+    // step (region 1), else it sorts with Jolt's functions. The three ways must give bit identical states, and region 1
+    // must not overlap a contact constraint of the step: the solve reads them while the records are written.
+    const allocator = std.testing.allocator;
+
+    // Default settings: the body pair buffer (16384 * 8 bytes) holds the records of the island
+    var ref_states: std.ArrayList(u8) = .empty;
+    defer ref_states.deinit(allocator);
+    var ref_offsets: std.ArrayList(usize) = .empty;
+    defer ref_offsets.deinit(allocator);
+    const ref = try runPyramid(allocator, .single_threaded, .{}, &ref_states, &ref_offsets);
+    const num_large_islands = ref.sorts[0];
+    try expect(num_large_islands >= 10); // One per update until the pyramid is asleep
+    try expectEqual([3]u32{ num_large_islands, 0, 0 }, ref.sorts);
+    // The island needs more than the body pair buffer of the next run, the constraints of an update fit
+    const min_records = LargeIslandSplitter.large_island_treshold;
+    try expect(PhysicsSystem.SortScratch.bytesFor(min_records) > 64 * @sizeOf(zolt.PhysicsUpdateContext.BodyPairSlot));
+    try expect(ref.max_num_constraints >= min_records and ref.max_num_constraints < 2048);
+
+    // A body pair buffer of 64 pairs (512 bytes) is too small for any large island: region 1, also with thread pools
+    // (the FindCollisions jobs process the pairs that do not fit in their queue at once, in another order: the same
+    // states)
+    for ([_]JobSystemKind{ .single_threaded, .{ .thread_pool = 0 }, .{ .thread_pool = 1 }, .{ .thread_pool = 3 }, .{ .thread_pool = 7 } }) |kind| {
+        var states: std.ArrayList(u8) = .empty;
+        defer states.deinit(allocator);
+        var offsets: std.ArrayList(usize) = .empty;
+        defer offsets.deinit(allocator);
+        const run = try runPyramid(allocator, kind, .{ .max_in_flight_body_pairs = 64 }, &states, &offsets);
+        try expectEqual([3]u32{ 0, num_large_islands, 0 }, run.sorts);
+        try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+        try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+    }
+
+    // Also a contact constraint buffer that is full up to its unused end in the updates with the most constraints
+    // (count == max_contact_constraints: no constraint is lost, the end behind the last one is smaller than the records
+    // of the island): Jolt's functions there (in every update of this pyramid, which keeps its number of contacts),
+    // region 1 in an update with fewer constraints
+    {
+        var states: std.ArrayList(u8) = .empty;
+        defer states.deinit(allocator);
+        var offsets: std.ArrayList(usize) = .empty;
+        defer offsets.deinit(allocator);
+        const run = try runPyramid(allocator, .single_threaded, .{ .max_in_flight_body_pairs = 64, .max_contact_constraints = ref.max_num_constraints }, &states, &offsets);
+        try expectEqual(ref.max_num_constraints, run.max_num_constraints);
+        try expect(run.sorts[0] == 0 and run.sorts[2] > 0);
+        try expectEqual(num_large_islands, run.sorts[1] + run.sorts[2]);
+        try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+        try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+    }
+}
+
+test "PhysicsSystem large island: claimSortScratch and releaseSortScratch" {
+    // Zolt addition (Phase 12, class A): the scratch of the sorts of the large islands comes from two regions of memory
+    // that exist anyway (the body pair buffer and the unused end of the contact constraint buffer). The islands of a
+    // step take consecutive parts of the first region with room, the last part is given back.
+    const SortScratch = PhysicsSystem.SortScratch;
+    var memory0: [1024]u64 = undefined; // 8 KB
+    var memory1: [4096]u64 = undefined; // 32 KB
+    const regions: [2][]align(8) u8 = .{ std.mem.sliceAsBytes(&memory0), std.mem.sliceAsBytes(&memory1) };
+    var used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+
+    // 200 records: 3200 bytes of records and 128 u32 buckets
+    const size: u32 = @intCast(SortScratch.bytesFor(200));
+    try expectEqual(@as(usize, 200 * 16 + zolt.KeySort.bucketMemory(200) * 4), size);
+    try expectEqual(@as(usize, 3712), size);
+    const s1 = PhysicsSystem.claimSortScratch(regions, &used, 200).?;
+    const s2 = PhysicsSystem.claimSortScratch(regions, &used, 200).?;
+    const s3 = PhysicsSystem.claimSortScratch(regions, &used, 200).?; // Region 0 has 768 bytes left
+    try expect(s1.region == 0 and s1.start == 0 and s1.size == size);
+    try expect(s2.region == 0 and s2.start == size);
+    try expect(s3.region == 1 and s3.start == 0);
+    try expectEqual(@as(u32, 2 * size), used[0].load(.monotonic));
+
+    // The records and the buckets lie inside the part, the records first
+    for ([_]SortScratch{ s1, s2, s3 }) |s| {
+        const begin = @intFromPtr(regions[s.region].ptr) + s.start;
+        const records = s.records(zolt.ContactConstraintManager.SortRecord, 200);
+        const buckets = s.buckets(200);
+        try expectEqual(begin, @intFromPtr(records.ptr));
+        try expectEqual(begin + 200 * 16, @intFromPtr(buckets.ptr));
+        try expectEqual(zolt.KeySort.bucketMemory(200), buckets.len);
+        try expect(@intFromPtr(buckets.ptr + buckets.len) <= begin + s.size);
+        // Fewer records than claimed: the same memory, the buckets of the smaller number
+        try expectEqual(@as(usize, 100), s.records(zolt.ConstraintManager.SortRecord, 100).len);
+        try expectEqual(zolt.KeySort.bucketMemory(100), s.buckets(100).len);
+    }
+
+    // Only the last part goes back: s1 stays used until s2 is given back
+    PhysicsSystem.releaseSortScratch(&used, s1);
+    try expectEqual(@as(u32, 2 * size), used[0].load(.monotonic));
+    PhysicsSystem.releaseSortScratch(&used, s2);
+    try expectEqual(@as(u32, size), used[0].load(.monotonic));
+    const s4 = PhysicsSystem.claimSortScratch(regions, &used, 200).?;
+    try expect(s4.region == 0 and s4.start == size);
+    PhysicsSystem.releaseSortScratch(&used, s4);
+    PhysicsSystem.releaseSortScratch(&used, s3);
+    try expectEqual(@as(u32, 0), used[1].load(.monotonic));
+
+    // Too large for both regions, or no region: null (the island takes Jolt's path)
+    try expect(PhysicsSystem.claimSortScratch(regions, &used, 5000) == null);
+    var no_used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+    try expect(PhysicsSystem.claimSortScratch(.{ &.{}, &.{} }, &no_used, 200) == null);
+    try expect(PhysicsSystem.claimSortScratch(.{ &.{}, regions[1] }, &no_used, 200).?.region == 1);
+}
+
+test "PhysicsSystem large island: claimSortScratch from several threads gives parts that do not overlap" {
+    // Zolt addition (Phase 12, class A): the SolveVelocityConstraints jobs claim their scratch at the same time
+    var memory: [2][2048]u64 = undefined;
+    const regions: [2][]align(8) u8 = .{ std.mem.sliceAsBytes(&memory[0]), std.mem.sliceAsBytes(&memory[1]) };
+    var used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+    var failures: std.atomic.Value(u32) = .init(0);
+    var claims: std.atomic.Value(u32) = .init(0);
+    const Worker = struct {
+        fn run(r: [2][]align(8) u8, u: *[2]std.atomic.Value(u32), num_failures: *std.atomic.Value(u32), num_claims: *std.atomic.Value(u32), thread: u64) void {
+            for (0..2000) |round| {
+                const num_records = 20 + (thread * 7 + round) % 100;
+                const scratch = PhysicsSystem.claimSortScratch(r, u, num_records) orelse continue;
+                defer PhysicsSystem.releaseSortScratch(u, scratch);
+                _ = num_claims.fetchAdd(1, .monotonic);
+                // Fill the part with this thread's mark and check that nobody else wrote into it
+                const words: []u64 = @alignCast(std.mem.bytesAsSlice(u64, r[scratch.region][scratch.start..][0..scratch.size]));
+                const mark = (thread << 32) | round;
+                @memset(words, mark);
+                std.atomic.spinLoopHint();
+                for (words) |w| {
+                    if (w != mark) _ = num_failures.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Worker.run, .{ regions, &used, &failures, &claims, @as(u64, i) });
+    for (threads) |t| t.join();
+    try expectEqual(@as(u32, 0), failures.load(.monotonic));
+    // (A part that was not the last one when it was given back stays used, like within a step: the regions fill up)
+    try expect(claims.load(.monotonic) >= 100);
+    for (regions, &used) |region, *u| try expect(u.load(.monotonic) <= region.len);
 }
 
 // -------------------------------------------------------------------------------------------------------------------

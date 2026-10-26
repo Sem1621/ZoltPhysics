@@ -2818,6 +2818,12 @@ pub const Expect = struct {
     /// PhysicsSystem::Update, Zolt side, not by the operations before it). More than 64 soft bodies that go to sleep in
     /// one update fill the batch of JobSoftBodyFinalize.
     update_deactivations: u32 = 0,
+
+    // Phase 12
+    /// The large islands sort their records in region 1 of PhysicsSystem.sortScratchRegions (the unused end of the
+    /// contact constraint buffer), never in region 0 (the body pair buffer) and never with Jolt's functions, in every
+    /// configuration (Zolt side: the test-only counters PhysicsSystem.large_island_sorts, also in the sweeps)
+    sorts_in_region1: bool = false,
 };
 
 /// The bit of a transmission gear (-8 .. 23) in `Expect.vehicle_gears`
@@ -2910,6 +2916,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "contacts_sensor", .build = buildSensor, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "contacts_large_pyramid_splitter", .build = buildLargePyramid, .blocked_by = .contacts, .sweep_stride = 45, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
     .{ .name = "contacts_large_pyramid_collapse", .build = buildLargePyramidWithoutSplitter, .blocked_by = .contacts, .sweep_stride = 30, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_large_pyramid_small_body_pair_buffer", .build = buildLargePyramidSmallBodyPairBuffer, .blocked_by = .contacts, .sweep_stride = 45, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .sorts_in_region1 = true } },
     .{ .name = "contacts_shapes_on_floor", .build = buildShapesOnFloor, .blocked_by = .contacts, .expect = .{ .contacts = true, .sleeping = true } },
     .{ .name = "contacts_shape_stacks", .build = buildShapeStacks, .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_mesh_ground", .build = buildMeshGround, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
@@ -5122,6 +5129,15 @@ fn buildLargePyramid(b: *SceneBuilder) Allocator.Error!void {
             _ = try b.body(.{ .position = .{ px, 0.5 + real(y), 3 }, .shape = box, .object_layer = Layers.moving }, .activate);
         }
     }
+}
+
+/// Phase 12 (class A): the large pyramid with a body pair buffer of 64 pairs (PhysicsSettings::mMaxInFlightBodyPairs):
+/// the FindCollisions jobs process the pairs that do not fit in their queue at once, and the buffer (512 bytes) is too
+/// small for the sort records of a large island, so Zolt sorts them in the unused end of the contact constraint buffer
+/// (PhysicsSystem.sortScratchRegions, region 1) while the solve jobs of the step read and write its constraints
+fn buildLargePyramidSmallBodyPairBuffer(b: *SceneBuilder) Allocator.Error!void {
+    try buildLargePyramid(b);
+    b.settings.max_in_flight_body_pairs = 64;
 }
 
 /// The same large pyramid without the LargeIslandSplitter and with 2 collision steps, a ball knocks it over
