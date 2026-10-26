@@ -359,7 +359,9 @@ pub const JobProfiler = struct {
     }
 
     /// Write the events in the Chrome trace event format (JSON, the "traceEvents" array of complete events "X", times
-    /// in microseconds). `process_name` names the process in the viewer.
+    /// in microseconds). `process_name` names the process in the viewer. The metadata event that names a thread also
+    /// holds, when its ring buffer was full, the number of its oldest events that are not in the trace
+    /// ("overwritten", read by tools/job_trace_stats.py).
     pub fn writeChromeTrace(self: *JobProfiler, writer: *std.Io.Writer, process_name: []const u8) std.Io.Writer.Error!void {
         try writer.writeAll("{\"traceEvents\":[\n");
         try writer.writeAll("{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":1,\"tid\":0,\"args\":{\"name\":");
@@ -367,7 +369,11 @@ pub const JobProfiler = struct {
         try writer.writeAll("}}");
         var name_buffer: [32]u8 = undefined;
         for (self.usedThreads(), 0..) |*thread, index| {
-            try writer.print(",\n{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{d},\"args\":{{\"name\":\"{s}\"}}}}", .{ index, self.threadName(index, &name_buffer) });
+            try writer.print(",\n{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{d},\"args\":{{\"name\":\"{s}\"", .{ index, self.threadName(index, &name_buffer) });
+            const num_overwritten = thread.numOverwritten();
+            if (num_overwritten != 0)
+                try writer.print(",\"overwritten\":{d}", .{num_overwritten});
+            try writer.writeAll("}}");
             try writer.print(",\n{{\"name\":\"thread_sort_index\",\"ph\":\"M\",\"pid\":1,\"tid\":{d},\"args\":{{\"sort_index\":{d}}}}}", .{ index, index });
             const parts = thread.events();
             for ([_][]const Event{ parts.first, parts.second }) |part| {
@@ -566,6 +572,8 @@ test "JobProfiler: Chrome trace is valid JSON, summary line" {
     try std.testing.expectEqual(@as(usize, 5), events.len);
     try std.testing.expectEqualStrings("Test \"process\"", events[0].object.get("args").?.object.get("name").?.string);
     try std.testing.expectEqualStrings("Worker 0", events[1].object.get("args").?.object.get("name").?.string);
+    // The ring of 2 events lost the oldest of the 3
+    try std.testing.expectEqual(@as(i64, 1), events[1].object.get("args").?.object.get("overwritten").?.integer);
     try std.testing.expectEqualStrings("Idle", events[3].object.get("name").?.string);
     try std.testing.expectEqualStrings("idle", events[3].object.get("cat").?.string);
     const last = events[4].object;
