@@ -46,7 +46,8 @@
 //!   Their records come from memory that exists anyway and is free while the SolveVelocityConstraints jobs run
 //!   (`sortScratchRegions`: the body pair buffer, then the unused end of the contact constraint buffer), claimed per
 //!   island without a lock (`claimSortScratch` / `releaseSortScratch`, `Step.sort_scratch_used`): no allocation, no
-//!   temp memory. An island without room there, and every smaller island, takes Jolt's three calls.
+//!   temp memory. An island without room there, and every smaller island, takes Jolt's three calls. Only in test
+//!   builds, `large_island_sorts` counts which of these three ways the large islands took (`void` otherwise).
 //!
 //! SimulationArchitecture D4 / D5 / D6 / D7:
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
@@ -405,6 +406,24 @@ pub const PhysicsSystem = struct {
     /// `DebugRenderer::sInstance` (the CCD draws, the contact point and manifold draws). Only with -Ddebug_renderer
     /// (`void` otherwise). Null draws nothing.
     debug_renderer: if (Core.debug_renderer) ?*DebugRenderer else void = if (Core.debug_renderer) null else {},
+
+    /// Zolt addition (Phase 12, class A), only in test builds (`void` otherwise): how the large islands were sorted
+    /// since `init` (sortLargeIsland). The tests check with it that each of the three ways runs.
+    large_island_sorts: if (builtin.is_test) LargeIslandSorts else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 12, class A), tests only: the counts of `large_island_sorts`
+    pub const LargeIslandSorts = struct {
+        /// Islands sorted with records in region 0 (the body pair buffer) and 1 (the unused end of the contact
+        /// constraint buffer) of `sortScratchRegions`
+        in_region: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) },
+        /// Islands sorted with Jolt's functions because no region had room for their records
+        jolt: std.atomic.Value(u32) = .init(0),
+
+        /// The counts: region 0, region 1, Jolt's functions
+        pub fn counts(self: *const LargeIslandSorts) [3]u32 {
+            return .{ self.in_region[0].load(.monotonic), self.in_region[1].load(.monotonic), self.jolt.load(.monotonic) };
+        }
+    };
 
     /// Not initialized (Jolt's constructor), call init
     pub const empty: PhysicsSystem = .{};
@@ -2249,8 +2268,12 @@ pub const PhysicsSystem = struct {
     /// records: the island then takes Jolt's path. Never inlined, so that the code of the job stays as it was for the
     /// other islands.
     fn sortLargeIsland(self: *Self, context: *PhysicsUpdateContext, step: *Step, contacts: []u32, constraints: []u32, active_constraints: []const *Constraint) bool {
-        const scratch = claimSortScratch(self.sortScratchRegions(context), &step.sort_scratch_used, @max(contacts.len, constraints.len)) orelse return false;
+        const scratch = claimSortScratch(self.sortScratchRegions(context), &step.sort_scratch_used, @max(contacts.len, constraints.len)) orelse {
+            if (builtin.is_test) _ = self.large_island_sorts.jolt.fetchAdd(1, .monotonic);
+            return false;
+        };
         defer releaseSortScratch(&step.sort_scratch_used, scratch);
+        if (builtin.is_test) _ = self.large_island_sorts.in_region[scratch.region].fetchAdd(1, .monotonic);
 
         // Sort constraints to give a deterministic simulation
         ConstraintManager.sortConstraintsWithRecords(active_constraints, constraints, scratch.constraintRecords(constraints.len), scratch.buckets(constraints.len));

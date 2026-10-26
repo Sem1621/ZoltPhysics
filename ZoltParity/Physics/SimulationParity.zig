@@ -3236,6 +3236,9 @@ const RunStats = struct {
     num_jolt_asserts: u32 = 0,
     /// The updates that the update watchdog watched, per UpdateSide (also in the sweeps)
     num_watched_updates: [2]u32 = @splat(0),
+    /// Phase 12: the large islands sorted in region 0, in region 1 and with Jolt's functions (Zolt side, the test-only
+    /// counters PhysicsSystem.large_island_sorts, also in the sweeps; Expect.sorts_in_region1)
+    large_island_sorts: [3]u32 = @splat(0),
 };
 
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
@@ -3325,6 +3328,7 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     if (asserts) |a| run.stats.num_zolt_asserts = a.get() - zolt_asserts_before - run.uncompared_asserts;
     run.stats.num_jolt_asserts = jolt.jolt_sim_reference_assert_count() - jolt_asserts_before;
     run.stats.num_watched_updates = watchdog.num_updates;
+    run.stats.large_island_sorts = zw.system.large_island_sorts.counts();
     return run.stats;
 }
 
@@ -7798,6 +7802,10 @@ fn runEntry(entry: *const SceneEntry) !void {
     for (stats) |s| num_soft_body_ccd_responses += s.num_soft_body_ccd_responses;
     if (expect.soft_body_ccd) try expectReached(entry, "the CCD response against a soft body face", num_soft_body_ccd_responses > 0);
     if (expect.update_deactivations > 0) try expectReached(entry, "bodies deactivated from inside one update", stats[0].max_update_deactivations >= expect.update_deactivations);
+    if (expect.sorts_in_region1) {
+        for (stats) |s|
+            try expectReached(entry, "large islands sorted in region 1 only (PhysicsSystem.large_island_sorts)", s.large_island_sorts[0] == 0 and s.large_island_sorts[1] > 0 and s.large_island_sorts[2] == 0);
+    }
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);

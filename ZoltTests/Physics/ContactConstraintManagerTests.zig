@@ -1268,6 +1268,113 @@ test "ContactConstraintManager: constraintIdxToConstraintOffsetAndSort gives the
     try expect(h.temp.isEmpty());
 }
 
+test "ContactConstraintManager: getUnusedConstraintBuffer is the end of the constraint buffer behind the last constraint" {
+    // Zolt addition (Phase 12, class A): PhysicsSystem writes the sort records of its large islands into this memory
+    // while the SolveVelocityConstraints jobs read and write the contact constraints of the step (region 1 of
+    // PhysicsSystem.sortScratchRegions). It must start on 8 bytes behind the last byte of the last constraint, reach to
+    // the end of the buffer, and be empty when the step tried to add more constraints than fit.
+    const allocator = std.testing.allocator;
+    const max_constraints = 6;
+    var h: Harness = undefined;
+    try h.init(allocator, .{ .max_contact_constraints = max_constraints, .listener = false });
+    defer h.deinit();
+    const buffer_size = max_constraints * CCM.max_constraint_size;
+
+    // The floor has the lowest body ID: it is body 1 of its constraints (static vs dynamic)
+    const floor = try h.createBox(.static, RVec3.init(0, -1, 0), .{ .half_extent = Vec3.init(50, 1, 50) });
+    var boxes: [4]*Body = undefined;
+    for (&boxes, 0..) |*b, i|
+        b.* = try h.createBox(.dynamic, RVec3.init(@as(f32, @floatFromInt(i)) * 3.0, 0.99, 0), .{});
+
+    // The size of a constraint in the buffer (createConstraint)
+    const Size = struct {
+        fn of(comptime type1: MotionType, comptime type2: MotionType, num_points: u32) usize {
+            const C = CCM.ContactConstraint(type1, type2);
+            return std.mem.alignForward(usize, @sizeOf(C) + (num_points - 1) * @sizeOf(C.ContactPoint), @alignOf(C));
+        }
+    };
+    try expectEqual(@as(usize, CCM.max_constraint_size), Size.of(.dynamic, .dynamic, 4));
+
+    // Checks the unused end against the end of the constraints, and that writing all of it changes no constraint byte
+    const Check = struct {
+        fn unused(manager: *const CCM, constraints_end: usize, size: usize) !void {
+            const buffer = manager.constraints.items;
+            try expectEqual(size, buffer.len);
+            const unused_part = manager.getUnusedConstraintBuffer();
+            const start = std.mem.alignForward(usize, constraints_end, 8);
+            if (start >= size) {
+                try expectEqual(@as(usize, 0), unused_part.len);
+                return;
+            }
+            try expectEqual(@intFromPtr(buffer.ptr) + start, @intFromPtr(unused_part.ptr));
+            try expectEqual(size - start, unused_part.len);
+            var before: [max_constraints * CCM.max_constraint_size]u8 = undefined;
+            @memcpy(before[0..constraints_end], buffer[0..constraints_end]);
+            @memset(unused_part, 0xa5);
+            try expectEqualSlices(u8, before[0..constraints_end], buffer[0..constraints_end]);
+        }
+    };
+
+    try h.beginStep(h.temp.tempAllocator(), 1.0 / 60.0, 0.0);
+    try Check.unused(&h.manager, 0, buffer_size); // No constraint: all of it
+
+    // Constraints of 1 to 4 points, static vs dynamic and dynamic vs dynamic: after each one the unused end starts
+    // behind it
+    const Pair = struct { body1: *Body, body2: *Body, num_points: u32 };
+    const pairs = [_]Pair{
+        .{ .body1 = floor, .body2 = boxes[0], .num_points = 1 },
+        .{ .body1 = boxes[0], .body2 = boxes[1], .num_points = 3 },
+        .{ .body1 = floor, .body2 = boxes[1], .num_points = 4 },
+        .{ .body1 = boxes[1], .body2 = boxes[2], .num_points = 2 },
+        .{ .body1 = floor, .body2 = boxes[2], .num_points = 3 },
+        .{ .body1 = boxes[2], .body2 = boxes[3], .num_points = 1 },
+    };
+    var constraints_end: usize = 0;
+    for (pairs, 0..) |pair, i| {
+        const center = pair.body2.getCenterOfMassPosition().add(RVec3.init(0, -1, 0));
+        const manifold = makeManifold(pair.body2.getCenterOfMassPosition(), center, pair.num_points, 0.01, @intCast(i), 0);
+        h.processPair(&h.contact_allocator, pair.body1, pair.body2, &.{manifold}, false);
+        try expectEqual(@as(u32, @intCast(i + 1)), h.manager.getNumConstraints());
+        constraints_end += if (pair.body1 == floor) Size.of(.static, .dynamic, pair.num_points) else Size.of(.dynamic, .dynamic, pair.num_points);
+        try Check.unused(&h.manager, constraints_end, buffer_size);
+    }
+    // All constraints of the step were stored (the count is max_constraints): the rest of the buffer is unused
+    try expect(constraints_end < buffer_size);
+    try expect(h.manager.getUnusedConstraintBuffer().len > 0);
+
+    // One constraint more than fits: the count and the next offset grew, nothing was stored; the end is not known to be
+    // free (Jolt's offset counts the constraints that were not stored), so it is empty
+    {
+        const manifold = makeManifold(boxes[3].getCenterOfMassPosition(), boxes[3].getCenterOfMassPosition().add(RVec3.init(0, -1, 0)), 1, 0.01, 9, 0);
+        h.processPair(&h.contact_allocator, floor, boxes[3], &.{manifold}, false);
+    }
+    try expectEqual(@as(u32, max_constraints), h.manager.getNumConstraints());
+    try expect(h.contact_allocator.errors.contact_constraints_full);
+    try expectEqual(@as(usize, 0), h.manager.getUnusedConstraintBuffer().len);
+
+    // The next step: 6 constraints of the largest size fill the buffer, nothing is unused
+    try h.nextStep();
+    try Check.unused(&h.manager, 0, buffer_size);
+    constraints_end = 0;
+    var num_added: u32 = 0;
+    for (0..boxes.len) |a| {
+        for (a + 1..boxes.len) |b| {
+            const center = boxes[b].getCenterOfMassPosition().add(RVec3.init(0, -1, 0));
+            const manifold = makeManifold(boxes[b].getCenterOfMassPosition(), center, 4, 0.01, @intCast(b), @intCast(a));
+            h.processPair(&h.contact_allocator, boxes[a], boxes[b], &.{manifold}, false);
+            num_added += 1;
+            constraints_end += CCM.max_constraint_size;
+            try expectEqual(num_added, h.manager.getNumConstraints());
+            try Check.unused(&h.manager, constraints_end, buffer_size);
+        }
+    }
+    try expectEqual(@as(usize, buffer_size), constraints_end);
+    try expectEqual(@as(usize, 0), h.manager.getUnusedConstraintBuffer().len);
+
+    h.endStep();
+    try expect(h.temp.isEmpty());
+}
+
 /// A filter that only saves / restores the contacts of one body
 const BodyFilter = struct {
     pub const overrides = .{ .shouldSaveContact, .shouldRestoreContact };
