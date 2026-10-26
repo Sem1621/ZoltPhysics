@@ -17,7 +17,8 @@
 //!   CharacterID::sNextCharacterID()`, the copy (`initCopy`, `assign`) does not. `GetCharacterVirtualSettings` returns a
 //!   value that consumes one too (the caller `deinit`s it: it holds references to the shapes).
 //! - `new CharacterVirtual(settings, position, rotation, user data, system)` is `CharacterVirtual.create(...)` (reference
-//!   count 0 like `new`, the last `release` of a `Ref(CharacterBase)` destroys it), an embedded character `init(...)`.
+//!   count 0 like `new`, the last `release` of a `Ref(CharacterBase)` destroys it), an embedded character `init(...)`
+//!   (or `initInPlace`, which `create` uses so that the character is not copied into its allocation).
 //!   Jolt's constructor without user data is the same call with `user_data = 0`. A failed creation (out of memory while
 //!   creating or adding the inner body) leaves nothing behind: no inner body, no references. When CreateBody /
 //!   CreateBodyWithID returns null (the system is full, the override ID is taken) the character has no inner body, as in
@@ -1022,7 +1023,14 @@ pub const CharacterVirtual = struct {
     /// @param user_data Application specific value (Jolt's constructor without user data passes 0)
     /// @param system Physics system that this character will be added to
     pub fn init(allocator: Allocator, settings: *const CharacterVirtualSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) Allocator.Error!CharacterVirtual {
-        var self: CharacterVirtual = .{
+        var self: CharacterVirtual = undefined;
+        try self.initInPlace(allocator, settings, position, rotation, user_data, system);
+        return self;
+    }
+
+    /// `init` in place (Zolt: `create` builds the character in its allocation, without copying it there)
+    pub fn initInPlace(self: *CharacterVirtual, allocator: Allocator, settings: *const CharacterVirtualSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) Allocator.Error!void {
+        self.* = .{
             .base = .init(CharacterVirtual, allocator, &settings.base, system),
             .id = settings.id,
             .back_face_mode = settings.back_face_mode,
@@ -1077,7 +1085,6 @@ pub const CharacterVirtual = struct {
 
         // Zolt: nothing can fail after this (the cache holds a reference to the shape)
         self.refreshBoundsCache();
-        return self;
     }
 
     /// new CharacterVirtual(settings, position, rotation, user data, system): reference count 0, the last release of a
@@ -1085,7 +1092,7 @@ pub const CharacterVirtual = struct {
     pub fn create(allocator: Allocator, settings: *const CharacterVirtualSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) Allocator.Error!*CharacterVirtual {
         const self = try allocator.create(CharacterVirtual);
         errdefer allocator.destroy(self);
-        self.* = try .init(allocator, settings, position, rotation, user_data, system);
+        try self.initInPlace(allocator, settings, position, rotation, user_data, system);
         return self;
     }
 
