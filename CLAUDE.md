@@ -111,4 +111,6 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   results follows the `-Djolt_compat` policy in the Roadmap's Phase 10 section.
 - Phase 11 added the SIMD contact solver (class A, on by default) and the FMA mode `-Dfma` (Jolt's 8
   `JPH_USE_FMADD` sites, with a C++ oracle; off by default).
+- Phase 12 measured first (job profiler spans, `tools/job_trace_stats.py`) and added two class A speedups: exact bounds
+  caches for the character vs character test (CharacterBoundsCache.zig) and the large island sorts (Core/KeySort.zig).
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).

@@ -617,6 +617,16 @@ results are reproducible as long as the code follows these rules:
     result. The proof goes into the header of the file (see CharacterBoundsCache.zig). Tests compare the replay with
     Jolt's function as real numbers with the same NaN pattern, show that the decisions read no sign of a zero (inputs
     that differ only there), compare the decisions at their flips, and run the fallback paths end to end.
+17. **Another sort algorithm (class A speed work, Roadmap Phase 12).** Jolt's QuickSort is not stable, so on equal
+    elements its result depends on its exact steps: a different sort may replace it only where the sorted order is
+    unique, and the code must prove that at run time. Core/KeySort.zig sorts records by a 64-bit key that the caller
+    builds so that Jolt's comparator compares the keys whenever they differ (ConstraintManager: `priority << 32 |
+    constraint_index`, exactly Jolt's comparator; ContactConstraintManager: the sort key). `sortByDistinctKeys` returns
+    true only after it has checked that the sorted keys are strictly increasing; then the input keys were pairwise
+    distinct, Jolt's comparator is a strict total order on them, and every correct sort gives that one order. On equal
+    keys it returns false and the caller runs Jolt's functions on the untouched input. Scratch memory for such a sort
+    must exist already (no new allocation point in a job: D5, D12). Tests compare the permutation with Jolt's sort on
+    random inputs with distinct keys, clustered keys, equal keys of different elements and full ties.
 
 ## 9. Threading
 
