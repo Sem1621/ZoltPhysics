@@ -13,19 +13,34 @@
 //! - T2: the reject decisions of the loops (ExpandBy + Overlaps, ExpandBy + RayAABoxHits) on the replayed box equal the
 //!   decisions on Jolt's box at the translation where they flip and 1 to 3 ulp around it on each axis and side, with
 //!   separations / paddings 0, a denormal, tiny, 0.02, huge, inf and NaN, and cast directions with zero, -0, tiny,
-//!   huge and NaN components.
+//!   huge and NaN components. Fact 5 of the proof directly: the decisions on two boxes that differ only in the signs of
+//!   zeros are equal, with query boxes, separations, origins, directions (also infinite and NaN), extents and paddings
+//!   full of zeros of both signs.
 //! - T3: end to end, the hits of CharacterVsCharacterCollisionSimple equal those of an oracle that is Jolt's loop copied
-//!   into this file, bit for bit (user data order, contact points, axes, depths, faces, fractions), on random crowds of
-//!   supported and unsupported shapes, near the origin and far from it, for CollideCharacter and CastCharacter.
+//!   into this file, bit for bit (user data order, contact points, axes, depths, faces, fractions), and so do the
+//!   accept decisions (every user data the loop sets, also for pairs without a hit), on random crowds of supported and
+//!   unsupported shapes, near the origin and far from it, for CollideCharacter and CastCharacter. The fallback for a
+//!   translation that is not finite (`non_finite`: T infinite, or the OffsetCenterOfMass addition overflowing) runs
+//!   Jolt's GetWorldSpaceBounds and gives the oracle's decisions.
 //! - T4: staleness. Direct writes to position, rotation, shape offset and character padding, CharacterBase.setUp and
 //!   base.shape.set make the cache stale (the stale counter rises, the hits equal the oracle), the refresh points make
 //!   it valid again. An attempted address reuse: the shapes come from a FixedBufferAllocator, which hands out the
 //!   address of a freed last block again. The pin keeps the old shape alive, so a new shape cannot get its address.
 //! - T5: a MutableCompoundShape changed in place is counted unsupported and gives the oracle's hits.
-//! - Bite proofs (each one makes a test of this file fail; tried and reverted): dropping `up` from the key (T4 setUp),
-//!   re-associating the replayed tail of AABox::Transformed (`T + ((v0 + v1) + v2)`, T1), removing the finite guard of
-//!   `Replay.bounds` (T1: the NaN pattern of an overflowing OffsetCenterOfMass + RotatedTranslated chain, and the
-//!   infinite translations), and removing the pin (`pin.set` replaced by nothing, T4 address reuse).
+//! - Bite proofs (each one makes a test of this file fail; tried and reverted):
+//!   - `up` dropped from the key: T4 setUp.
+//!   - The replayed tail of AABox::Transformed re-associated, as `T + ((v0 + v1) + v2)` and as `(T + (v0 + v1)) + v2`:
+//!     each fails both T1 replay tests and the T2 flip test.
+//!   - The finite guard of `Replay.bounds` removed: T1 (the NaN pattern of the infinite translations, and the
+//!     overflowing OffsetCenterOfMass + RotatedTranslated chain) and the T3 non_finite test (its counter).
+//!   - No pin, the key keeping the shape address without a reference (a raw `?*const Shape` in place of `pin`): T4
+//!     address reuse fails at the queries after the reuse, where the big box has the small box's address (the other
+//!     character rejects it: its decisions and its hits differ from the oracle's). Removing only `pin.set` is a
+//!     different bite: the stored shape is then null, every read is stale, and T4 fails earlier, at `Find.valid`.
+//!   - `AABox.overlaps`, or the slab test of `rayAABoxHitsDirection`, ordering -0 below +0: the T2 fact 5 test fails,
+//!     the T2 flip test passes (its boxes never differ in the sign of a zero).
+//!   - The non_finite fallback running GetWorldSpaceBounds on the cached transform without the base offset (the
+//!     decisions of the collide differ), or not counting `non_finite`: the T3 non_finite test.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -404,8 +419,10 @@ test "CharacterBoundsCache T1: replayed bounds equal GetWorldSpaceBounds as real
     try expect(counts.compared > 50000);
     try expect(counts.null_results > 1000);
     // (`counts.other_bits`: the hoisted `T * 0` of a RotatedTranslatedShape can be +0 where Jolt's is -0, and so a zero
-    // of the box could have the other sign. The final additions of T absorb it: these inputs give none, the comparison
-    // is as real numbers anyway.)
+    // of the box could have the other sign. The final additions of T absorb it: these inputs give none, and neither did
+    // a search over flat boxes (one half extent 0) behind RotatedTranslatedShapes with the exact rotations of quaternions
+    // with components +-1 and +-0 and translations of +-0. The comparison is as real numbers anyway, and the T2 fact 5
+    // test shows that the decisions do not read the sign of a zero.)
 }
 
 test "CharacterBoundsCache T1: an overflowing OffsetCenterOfMass translation in front of a rotation takes Jolt's code" {
@@ -487,7 +504,9 @@ const Crowd = struct {
     }
 };
 
-/// The bytes of the hits that a collector received (with the user data that was set for each)
+/// The bytes of the hits that a collector received (with the user data that was set for each), and every user data that
+/// the loop set: the characters that passed the bounds test, in order (the accept decisions, also those without a hit),
+/// then the reset to 0
 fn HitRecorder(comptime Collector: type, comptime Result: type) type {
     return struct {
         const Self = @This();
@@ -496,16 +515,21 @@ fn HitRecorder(comptime Collector: type, comptime Result: type) type {
         base: Collector = .init(Self),
         user_data: u64 = 0,
         bytes: std.ArrayList(u8) = .empty,
+        decisions: std.ArrayList(u64) = .empty,
         num_hits: u32 = 0,
         max_hits: u32 = std.math.maxInt(u32),
         failed: bool = false,
 
         fn deinit(self: *Self) void {
             self.bytes.deinit(allocator);
+            self.decisions.deinit(allocator);
         }
 
         pub fn setUserData(self: *Self, user_data: u64) void {
             self.user_data = user_data;
+            self.decisions.append(allocator, user_data) catch {
+                self.failed = true;
+            };
         }
 
         pub fn addHit(self: *Self, result: *const Result) void {
@@ -650,32 +674,40 @@ fn expectCollideEqualsOracle(crowd: *Crowd, character: *const CharacterVirtual, 
     defer oracle_hits.deinit();
     crowd.simple.collideCharacter(character, transform, &settings, base_offset, &simple_hits.base);
     oracleCollideCharacter(crowd.simple.characters.items, character, transform, &settings, base_offset, &oracle_hits.base);
-    try expect(!simple_hits.failed and !oracle_hits.failed);
-    try expectEqual(oracle_hits.num_hits, simple_hits.num_hits);
-    try expect(std.mem.eql(u8, oracle_hits.bytes.items, simple_hits.bytes.items));
-    try expectEqual(oracle_hits.user_data, simple_hits.user_data); // Reset to 0
+    try expectRecordersEqual(CollideRecorder, &oracle_hits, &simple_hits);
+    try expectEqual(@as(u64, 0), simple_hits.user_data); // Reset to 0
     return simple_hits.num_hits;
 }
 
 /// The hits of CastCharacter of the Simple and of the oracle are equal bit for bit (the base offset of
 /// ValidateMovement: the start position); returns the number of hits
 fn expectCastEqualsOracle(crowd: *Crowd, character: *const CharacterVirtual, direction: Vec3, extra_convex_radius: f32, max_hits: u32) !u32 {
+    return expectCastEqualsOracleAt(crowd, character, direction, extra_convex_radius, max_hits, character.getCenterOfMassTransform().getTranslation());
+}
+
+/// `expectCastEqualsOracle` with another base offset
+fn expectCastEqualsOracleAt(crowd: *Crowd, character: *const CharacterVirtual, direction: Vec3, extra_convex_radius: f32, max_hits: u32, base_offset: RVec3) !u32 {
     var settings: ShapeCastSettings = .{};
     settings.extra_convex_radius = extra_convex_radius;
     settings.use_shrunken_shape_and_convex_radius = true;
     settings.return_deepest_point = false;
     const start = character.getCenterOfMassTransform();
-    const base_offset = start.getTranslation();
     var simple_hits: CastRecorder = .{ .max_hits = max_hits };
     defer simple_hits.deinit();
     var oracle_hits: CastRecorder = .{ .max_hits = max_hits };
     defer oracle_hits.deinit();
     crowd.simple.castCharacter(character, start, direction, &settings, base_offset, &simple_hits.base);
     oracleCastCharacter(crowd.simple.characters.items, character, start, direction, &settings, base_offset, &oracle_hits.base);
-    try expect(!simple_hits.failed and !oracle_hits.failed);
-    try expectEqual(oracle_hits.num_hits, simple_hits.num_hits);
-    try expect(std.mem.eql(u8, oracle_hits.bytes.items, simple_hits.bytes.items));
+    try expectRecordersEqual(CastRecorder, &oracle_hits, &simple_hits);
     return simple_hits.num_hits;
+}
+
+/// The Simple accepted the same characters as the oracle (in the same order) and got the same hits, bit for bit
+fn expectRecordersEqual(comptime Recorder: type, oracle: *const Recorder, simple: *const Recorder) !void {
+    try expect(!simple.failed and !oracle.failed);
+    try expect(std.mem.eql(u64, oracle.decisions.items, simple.decisions.items));
+    try expectEqual(oracle.num_hits, simple.num_hits);
+    try expect(std.mem.eql(u8, oracle.bytes.items, simple.bytes.items));
 }
 
 /// The position of the crowds: the origin, and far from it (around 1e9 in double precision)
@@ -838,6 +870,61 @@ test "CharacterBoundsCache T2: reject decisions at the flip and 1 to 3 ulp aroun
     try expect(num_flips > 1000); // The tests cross the flip of the overlap test
 }
 
+/// The components of the fact 5 test: zeros of both signs (more often), a denormal, ordinary values
+const zero_rich_values = [_]f32{ 0, -0.0, 0, -0.0, 0, -0.0, 1.0e-45, -1.0e-45, 0.25, -0.25, 1, -1 };
+
+fn zeroRichVec3(random: *Random, values: []const f32) Vec3 {
+    return Vec3.init(values[random.index(values.len)], values[random.index(values.len)], values[random.index(values.len)]);
+}
+
+/// `v` with the sign of the zero components flipped where `mask` has a bit (other components unchanged)
+fn flipZeroSigns(v: Vec3, mask: usize) Vec3 {
+    var r = v;
+    for (0..3) |i| {
+        const x = v.getComponent(@intCast(i));
+        if (x == 0 and (mask >> @intCast(i)) & 1 != 0)
+            r.setComponent(@intCast(i), -x);
+    }
+    return r;
+}
+
+test "CharacterBoundsCache T2: the decisions read no sign of a zero in the box (proof fact 5)" {
+    // The replayed box equals Jolt's as real numbers, but a zero in it can have the other sign. Fact 5 of the proof in
+    // CharacterBoundsCache.zig: ExpandBy + Overlaps and ExpandBy + RayAABoxHits give the same answer for two boxes that
+    // differ only there. The boxes, the query boxes, the separations, origins, directions, extents and paddings are full
+    // of zeros of both signs (and the directions have infinite and NaN components), so that a decision that read a sign
+    // bit would differ.
+    var random = Random.init(0xfac75);
+    const separations = [_]f32{ 0, -0.0, 0, 1.0e-45, 0.25 };
+    const directions = [_]f32{ 0, -0.0, 1.0e-45, 1, -1, inf, -inf, nan };
+    var num_differing_boxes: u32 = 0;
+    var num_collide = [2]u32{ 0, 0 }; // Decisions false / true on boxes that differ
+    var num_cast = [2]u32{ 0, 0 };
+    for (0..200000) |_| {
+        const box = AABox.init(zeroRichVec3(&random, &zero_rich_values), zeroRichVec3(&random, &zero_rich_values));
+        const other = AABox.init(flipZeroSigns(box.min, random.index(8)), flipZeroSigns(box.max, random.index(8)));
+        if (boxBitsEqual(box, other)) continue;
+        num_differing_boxes += 1;
+
+        const bounds1 = AABox.init(zeroRichVec3(&random, &zero_rich_values), zeroRichVec3(&random, &zero_rich_values));
+        const separation = separations[random.index(separations.len)];
+        const collide = collideDecision(bounds1, box, separation);
+        try expectEqual(collide, collideDecision(bounds1, other, separation));
+        num_collide[@intFromBool(collide)] += 1;
+
+        const origin = zeroRichVec3(&random, &zero_rich_values);
+        const direction = zeroRichVec3(&random, &directions);
+        const extents = zeroRichVec3(&random, &[_]f32{ 0, -0.0, 0.25 });
+        const padding = separations[random.index(separations.len)];
+        const cast = castDecision(origin, direction, extents, padding, box);
+        try expectEqual(cast, castDecision(origin, direction, extents, padding, other));
+        num_cast[@intFromBool(cast)] += 1;
+    }
+    try expect(num_differing_boxes > 100000);
+    for ([_][2]u32{ num_collide, num_cast }) |n|
+        try expect(n[0] > 10000 and n[1] > 10000); // Both answers occur
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // T3: end to end
 
@@ -877,7 +964,7 @@ test "CharacterBoundsCache T3: the hits of the Simple equal Jolt's loop on rando
     var shape_list: std.ArrayList(*const Shape) = .empty;
     defer shape_list.deinit(allocator);
     try shape_list.appendSlice(allocator, supported.items);
-    try shape_list.appendSlice(allocator, unsupported.items[1..4]); // Two OffsetCenterOfMass levels too many, compounds
+    try shape_list.appendSlice(allocator, unsupported.items[1..4]); // 3 OffsetCenterOfMass levels (max_addends is 2), the two compounds
 
     var num_collide_hits: u32 = 0;
     var num_cast_hits: u32 = 0;
@@ -910,6 +997,85 @@ test "CharacterBoundsCache T3: the hits of the Simple equal Jolt's loop on rando
     try expect(total.accepted > 1000);
     try expect(total.unsupported > 1000);
     try expectEqual(@as(u64, 0), total.stale); // Every character is refreshed
+}
+
+test "CharacterBoundsCache T3: a translation that is not finite runs Jolt's GetWorldSpaceBounds (the non_finite fallback)" {
+    // Two ways to a translation that is not finite (Replay.bounds returns null, the loop counts `non_finite` and runs
+    // Jolt's GetWorldSpaceBounds on transform2): the center of mass minus the base offset overflows (T is infinite), or
+    // T is finite and the OffsetCenterOfMassShape addition overflows. Jolt's boxes are then infinite in x (a capsule) or
+    // NaN in x (a RotatedTranslatedShape multiplies T by 0). Jolt's code rejects all these pairs: on x (an infinite box),
+    // or on z, where they are far. The plain capsule `fa` lies where its box would overlap the query if the fallback
+    // dropped the base offset; its collision would then return at the oriented box test of CollideConvexVsConvex
+    // (an infinite translation), and the accepted pair shows in the decisions.
+    var context: PhysicsTestContext = undefined;
+    try context.init(allocator, .{});
+    defer context.deinit();
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const capsule = try shapes.capsule(0.5, 0.3);
+    const character_shape = try shapes.rotatedTranslated(capsule, Vec3.init(0, 0.8, 0), Quat.identity());
+    // Its center of mass is 2e38 behind its position: at a position of 2e38 it is at the origin, and T + 2e38 overflows
+    // when T > 1.4e38
+    const offset_shape = try shapes.offsetCenterOfMass(capsule, Vec3.init(-2.0e38, 0, 0));
+    const huge: Real = 1.75e38;
+
+    // Collide: q and n query with the base offset (-1.75e38, 0, 0), so their transform1 is at x = 1.75e38
+    {
+        var crowd: Crowd = undefined;
+        crowd.init(&context);
+        defer crowd.deinit();
+        const q = try crowd.add(character_shape, RVec3.zero(), Quat.identity(), .{});
+        const n = try crowd.add(character_shape, RVec3.init(0, 0, 0.5), Quat.identity(), .{});
+        // T = 3.5e38 is infinite: Jolt's box is [inf, inf] in x, rejected on x
+        _ = try crowd.add(capsule, RVec3.init(huge, 0, 0), Quat.identity(), .{});
+        // T = 3.5e38 is infinite: Jolt's box is NaN in x, rejected on z
+        _ = try crowd.add(character_shape, RVec3.init(huge, 0, 50), Quat.identity(), .{});
+        // T = 1.75e38 is finite, T + 2e38 is not: Jolt's box is [inf, inf] in x, rejected on x
+        _ = try crowd.add(offset_shape, RVec3.init(2.0e38, 0, 0), Quat.identity(), .{});
+        for (crowd.characters.items) |c|
+            try expectEqual(CharacterBoundsCache.Find.valid, c.bounds_cache.find(&c.boundsCacheKey()));
+        var num_hits: u32 = 0;
+        for ([_]*CharacterVirtual{ q, n }) |c| {
+            for ([_]f32{ 0, 0.1 }) |separation| {
+                const before = crowd.stats;
+                num_hits += try expectCollideEqualsOracle(&crowd, c, separation, RVec3.init(-huge, 0, 0), std.math.maxInt(u32));
+                try expectEqual(before.non_finite + 3, crowd.stats.non_finite);
+                try expectEqual(before.accepted + 1, crowd.stats.accepted); // The other one of q and n
+                try expectEqual(before.rejected + 3, crowd.stats.rejected);
+                // With the base offset 0 every translation is finite
+                num_hits += try expectCollideEqualsOracle(&crowd, c, separation, RVec3.zero(), std.math.maxInt(u32));
+                try expectEqual(before.non_finite + 3, crowd.stats.non_finite);
+            }
+        }
+        try expect(num_hits > 0); // q and n touch
+    }
+
+    // Cast (and collide) with the base offset of ValidateMovement, the start position: q2 and m are at x = -1.75e38,
+    // the others at 1.75e38 and 2e38 with z = 50. Every direction has z <= 0: the slab test rejects them on z.
+    {
+        var crowd: Crowd = undefined;
+        crowd.init(&context);
+        defer crowd.deinit();
+        const q2 = try crowd.add(character_shape, RVec3.init(-huge, 0, 0), Quat.identity(), .{});
+        const m = try crowd.add(character_shape, RVec3.init(-huge, 0, 0.5), Quat.identity(), .{});
+        _ = try crowd.add(capsule, RVec3.init(huge, 0, 50), Quat.identity(), .{});
+        _ = try crowd.add(character_shape, RVec3.init(huge, 0, 50), Quat.identity(), .{});
+        // T = 1.75e38 (the center of mass is at the origin), T + 2e38 overflows
+        _ = try crowd.add(offset_shape, RVec3.init(2.0e38, 0, 50), Quat.identity(), .{});
+        var num_hits: u32 = 0;
+        for ([_]*CharacterVirtual{ q2, m }) |c| {
+            const start = c.getCenterOfMassTransform().getTranslation();
+            for ([_]Vec3{ Vec3.init(0, 0, -0.6), Vec3.init(-0.3, 0.1, -0.8), Vec3.init(0, -1, 0), Vec3.zero() }) |direction| {
+                const non_finite_before = crowd.stats.non_finite;
+                num_hits += try expectCastEqualsOracleAt(&crowd, c, direction, 0, std.math.maxInt(u32), start);
+                try expectEqual(non_finite_before + 3, crowd.stats.non_finite);
+            }
+            const non_finite_before = crowd.stats.non_finite;
+            num_hits += try expectCollideEqualsOracle(&crowd, c, 0.1, start, std.math.maxInt(u32));
+            try expectEqual(non_finite_before + 3, crowd.stats.non_finite);
+        }
+        try expect(num_hits > 0); // m casts into q2, q2 and m touch
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
