@@ -18,9 +18,10 @@
 //!   (RemainingFeaturesArchitecture.md R2). They lock the constraint list like Jolt.
 //!
 //! Differences with the C++ version (Phase 12, class A): the Zolt addition `sortConstraintsWithRecords` is
-//! SortConstraints in about linear time (Core/KeySort.zig on the key `priority << 32 | mConstraintIndex`, scratch of
-//! the caller) with exactly Jolt's order; when two keys are equal it runs Jolt's SortConstraints, which is unchanged.
-//! PhysicsSystem uses it for the large islands.
+//! SortConstraints with exactly Jolt's order (Core/KeySort.zig on the key `priority << 32 | mConstraintIndex`, scratch
+//! of the caller), in about linear time when the constraints of the island share one priority (with several
+//! priorities each priority is one bucket of KeySort, sorted with QuickSort on the records); when two keys are equal
+//! it runs Jolt's SortConstraints, which is unchanged. PhysicsSystem uses it for the large islands.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -206,9 +207,10 @@ pub const ConstraintManager = struct {
         constraint_idx: u32,
     };
 
-    /// Zolt addition (Phase 12, class A): `sortConstraints` with exactly the same result, in about linear time and
-    /// without a read of two constraints per comparison. `records` (at least `constraint_idx.len` elements) and
-    /// `buckets` (`KeySort.bucketMemory(constraint_idx.len)` elements) are scratch memory of the caller.
+    /// Zolt addition (Phase 12, class A): `sortConstraints` with exactly the same result, without a read of two
+    /// constraints per comparison, in about linear time when the constraints share one priority (KeySort puts each
+    /// priority of several into one bucket and sorts it with QuickSort). `records` (at least `constraint_idx.len`
+    /// elements) and `buckets` (`KeySort.bucketMemory(constraint_idx.len)` elements) are scratch memory of the caller.
     ///
     /// Why the result is the same (Core/KeySort.zig): the key of a constraint is p * 2^32 + i with p = its priority and
     /// i = its mConstraintIndex (both u32). Jolt's comparator is exactly `key_l < key_r`: if p_l < p_r, then key_l <=

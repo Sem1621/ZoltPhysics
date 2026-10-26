@@ -16,11 +16,14 @@
 //!
 //! The algorithm: one pass of an MSD radix sort on the top bits of `key - min_key` into about n / 2 buckets (an in
 //! place permutation, "American flag sort"), then an insertion sort of each bucket, or Jolt's QuickSort for a bucket of
-//! more than 16 records. Keys that are hashes spread evenly over the buckets; dense keys (a priority and an index) too,
-//! because the buckets cover the range of the keys, not all 64 bits. Clustered keys only make some buckets larger, and
-//! those take QuickSort: no quadratic case. The checks: inside a bucket the insertion sort sees every equal pair (the
-//! later one stops at the earlier one), QuickSort's buckets are checked after the sort, and every bucket's first key
-//! must be larger than the last key before it.
+//! more than 16 records. Keys that are hashes spread evenly over the buckets; dense keys (one priority and an index)
+//! too, because the buckets cover the range of the keys, not all 64 bits. Clustered keys only make some buckets
+//! larger, and those take QuickSort: no quadratic case, but no linear time either. A known limit of that kind:
+//! constraint keys with two or more priorities (`priority << 32 | index`) span a range of at least 2^32, so all keys of
+//! one priority (their indices span far less than the range divided by the number of buckets) fall into one bucket,
+//! which QuickSort sorts. The checks: inside a bucket the insertion sort sees every equal pair (the later one stops at
+//! the earlier one), QuickSort's buckets are checked after the sort, and every bucket's first key must be larger than
+//! the last key before it.
 //!
 //! Memory: the records and `bucketMemory(n)` u32 for the buckets, scratch of the caller. Nothing allocates.
 
@@ -214,15 +217,18 @@ test "KeySort: distinct keys give the increasing order, equal keys return false"
     var seen: [3000]bool = undefined;
     var buckets: [2 * 1024]u32 = undefined;
 
-    // Hash like keys, dense keys (a priority and an index), an arithmetic sequence, single bits plus an index
+    // Hash like keys, constraint keys with three priorities (each priority falls into one bucket, which QuickSort
+    // sorts), constraint keys with one priority (dense: they spread over the buckets), an arithmetic sequence, single
+    // bits plus an index
     const sizes = [_]usize{ 0, 1, 2, 3, 7, 8, 9, 31, 32, 33, 100, 1000, 3000 };
-    for (0..4) |kind| {
+    for (0..5) |kind| {
         for (sizes) |n| {
             for (input[0..n], 0..) |*r, i| {
                 r.key = switch (kind) {
                     0 => random.int(u64),
                     1 => (@as(u64, random.uintLessThan(u32, 3)) << 32) | @as(u64, @intCast(i)),
-                    2 => 1000 + @as(u64, @intCast(i)) * 3,
+                    2 => (@as(u64, 7) << 32) | @as(u64, @intCast(i)),
+                    3 => 1000 + @as(u64, @intCast(i)) * 3,
                     else => (@as(u64, 1) << @intCast(i % 38)) | (@as(u64, @intCast(i)) << 38),
                 };
             }
