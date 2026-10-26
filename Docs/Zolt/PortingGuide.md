@@ -595,6 +595,28 @@ results are reproducible as long as the code follows these rules:
 15. **`std::shuffle` and `uniform_int_distribution`** (HairSettings) are `Mt19937.shuffleLibcxx(T, items)` and
     `Mt19937.uniformIntLibcxx`: libc++'s algorithms, the standard library of the parity reference (R13). Never
     `std.Random.shuffle`.
+16. **Hoisting out of a loop (class A speed work, Roadmap Phase 12).** A value may be computed once instead of per
+    iteration only when it is the same function of the same bits (an unchanged input, compared bit for bit: the
+    center of mass transform of CharacterBoundsCache.zig). A computation that mixes a per iteration value t with
+    values that do not depend on it may be split ("replayed") only when all of these hold:
+    (a) every operation that combines t (or a value computed from t) with a hoisted value runs in Jolt's order and
+    association. The one exception is a product of t with a constant exact zero, such as the `T * 0` terms of a
+    RotatedTranslatedShape product (`r + T * 0` in the rotation columns, `((c0 * 0 + c1 * 0) + c2 * 0) + T * 1` in
+    the translation): it may be dropped (`r + 0`, `T`) when t and the values it is multiplied with are finite, because
+    such a term is then +-0;
+    (b) the result feeds only operations whose answers depend on real values (add, sub, mul, the select based Vec3
+    min / max, comparisons, abs; never a division, a reciprocal or a sign bit test);
+    (c) every hoisted value is checked finite, and so is every value of t that a dropped term multiplies. In
+    CharacterBoundsCache.zig that is the last translation of the OffsetCenterOfMassShape chain: its addends are
+    finite, so a finite last translation implies finite earlier ones. Otherwise the code falls back to Jolt's;
+    (d) values computed from t after the last check may overflow to +-inf, but only where no NaN can arise: they get
+    only finite hoisted values added, and two of them are combined only by the select based min / max, so there is no
+    `inf - inf` and no `inf * 0`.
+    Then the result equals Jolt's as real numbers: the only bits that can differ are the signs of zeros, because a
+    dropped `t * 0` term can be +0 where Jolt's is -0. Such a value is a decision input, never a stored or returned
+    result. The proof goes into the header of the file (see CharacterBoundsCache.zig). Tests compare the replay with
+    Jolt's function as real numbers with the same NaN pattern, show that the decisions read no sign of a zero (inputs
+    that differ only there), compare the decisions at their flips, and run the fallback paths end to end.
 
 ## 9. Threading
 

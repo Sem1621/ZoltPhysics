@@ -263,6 +263,7 @@ pub const Character = @import("Physics/Character/Character.zig").Character;
 pub const CharacterSettings = @import("Physics/Character/Character.zig").CharacterSettings;
 pub const CharacterBase = @import("Physics/Character/CharacterBase.zig").CharacterBase;
 pub const CharacterBaseSettings = @import("Physics/Character/CharacterBase.zig").CharacterBaseSettings;
+pub const CharacterBoundsCache = @import("Physics/Character/CharacterBoundsCache.zig").CharacterBoundsCache;
 pub const CharacterID = @import("Physics/Character/CharacterID.zig").CharacterID;
 pub const CharacterContact = @import("Physics/Character/CharacterVirtual.zig").CharacterContact;
 pub const CharacterContactKey = @import("Physics/Character/CharacterVirtual.zig").CharacterContactKey;
@@ -778,6 +779,7 @@ const source_files = .{
     @import("Physics/Body/MotionType.zig"),
     @import("Physics/Character/Character.zig"),
     @import("Physics/Character/CharacterBase.zig"),
+    @import("Physics/Character/CharacterBoundsCache.zig"),
     @import("Physics/Character/CharacterID.zig"),
     @import("Physics/Character/CharacterVirtual.zig"),
     @import("Physics/Collision/AABoxCast.zig"),
