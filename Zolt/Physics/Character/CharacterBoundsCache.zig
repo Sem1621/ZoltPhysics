@@ -5,9 +5,10 @@
 //! CharacterVsCharacterCollisionSimple::CollideCharacter and CastCharacter (Jolt/Physics/Character/CharacterVirtual.cpp)
 //! loop over all characters of the collision group. For every other character they build its center of mass transform
 //! and its world space bounds, and the bounds test then rejects almost every pair. With 100 characters these loops took
-//! 65% of the instructions of PerformanceTest's CharacterVirtual scene, though the other characters do not move while a
-//! character queries them. This cache keeps that center of mass transform with every character, and the parts of its
-//! world space bounds that do not depend on the base offset of the query (`Replay`).
+//! 65% of the instructions of the physics updates and the character updates (UpdateTest) of PerformanceTest's
+//! CharacterVirtual scene, though the other characters do not move while a character queries them. This cache keeps
+//! that center of mass transform with every character, and the parts of its world space bounds that do not depend on
+//! the base offset of the query (`Replay`).
 //!
 //! - **Owner and readers.** A CharacterVirtual owns its cache (`CharacterVirtual.bounds_cache`) and is the only one
 //!   that writes it (`CharacterVirtual.refreshBoundsCache`). The loops of CharacterVsCharacterCollisionSimple read the
@@ -19,13 +20,16 @@
 //!   the public fields, CharacterBase.setUp, `base.shape.set`, the in place position of MoveShape before its
 //!   UpdateInnerBodyTransform, an error between a write and a refresh) makes the cache stale, and the loop runs Jolt's
 //!   code for that pair. So the refresh points only decide how often the cache hits, never a result.
-//! - **Shape.** The cache holds a reference to the shape of its key (`pin`), so that the address cannot be freed and
-//!   reused by another shape while the key compares it. A shape is only cached when the values it contributes cannot
-//!   change after its creation (`supportedShape`): the convex shapes sphere, box, capsule, tapered capsule, cylinder,
-//!   tapered cylinder and convex hull, and RotatedTranslatedShape, ScaledShape and OffsetCenterOfMassShape around them
-//!   (at most `max_decorator_depth` levels). Everything else is unsupported and takes Jolt's code: compounds (a
-//!   MutableCompoundShape changes in place), meshes, height fields, triangles, planes, empty shapes, soft body shapes and
-//!   user shapes. A null shape is never cached.
+//! - **Shape.** The cache holds a reference to the shape of its stored key (`pin`), so that the address cannot be freed
+//!   and reused by another shape while the key compares it. Every stored key holds it, whatever the shape (a supported
+//!   or an unsupported one, see `store`), for as long as it is the stored key: the reference count of a character's
+//!   shape (Shape.getRefCount) is one higher than in Jolt, and after a direct write to `base.shape` the old shape stays
+//!   alive until the next refresh point or the destructor. The values are only cached when the shape cannot change
+//!   them after its creation (`CharacterBoundsCache.supportedShape`): the convex shapes sphere, box, capsule, tapered
+//!   capsule, cylinder, tapered cylinder and convex hull, and RotatedTranslatedShape, ScaledShape and
+//!   OffsetCenterOfMassShape around them (at most `max_decorator_depth` levels). Everything else is unsupported and
+//!   takes Jolt's code: compounds (a MutableCompoundShape changes in place), meshes, height fields, triangles, planes,
+//!   empty shapes, soft body shapes and user shapes. A null shape is never cached (and holds no reference).
 //! - **Refresh points.** The end of the construction, UpdateInnerBodyTransform (SetPosition, SetRotation,
 //!   SetShapeOffset, Update, MoveToContact), SetShape (on every exit) and RestoreState (also on its error path). A
 //!   refresh with an unchanged key does nothing. `deinit` releases the reference (the destructor of the character).
@@ -75,8 +79,9 @@
 //! - **Counters.** In test builds the loops count what the caches decided (`Stats`, through the optional
 //!   `CharacterVsCharacterCollisionSimple.stats` pointer); in other builds the counters are `void`.
 //! - **Tests.** ZoltTests/Physics/CharacterBoundsCacheTests.zig (the replay against GetWorldSpaceBounds, the decisions
-//!   at their flips, the Simple against an oracle copy of Jolt's loops, staleness, the pin, MutableCompoundShape) and
-//!   the SimulationParity scenes character_virtual_vs_character_changes and
+//!   at their flips and on boxes that differ only in the signs of zeros (fact 5), the Simple against an oracle copy of
+//!   Jolt's loops (the hits and the accept decisions, also through the `non_finite` fallback), staleness, the pin,
+//!   MutableCompoundShape) and the SimulationParity scenes character_virtual_vs_character_changes and
 //!   character_virtual_vs_character_changes_far.
 
 const std = @import("std");
@@ -158,23 +163,6 @@ pub const State = enum(u8) {
     /// The key and the values are stored
     valid,
 };
-
-/// A shape whose center of mass (and bounds) cannot change after its creation, see the file header
-pub fn supportedShape(shape: *const Shape) bool {
-    var s = shape;
-    var depth: u32 = 0;
-    while (true) : (depth += 1) {
-        switch (s.getSubType()) {
-            .sphere, .box, .capsule, .tapered_capsule, .cylinder, .tapered_cylinder, .convex_hull => return true,
-            .rotated_translated, .scaled, .offset_center_of_mass => {
-                if (depth == max_decorator_depth)
-                    return false;
-                s = innerShape(s) orelse return false;
-            },
-            else => return false,
-        }
-    }
-}
 
 /// The inner shape of a decorated shape
 fn innerShape(shape: *const Shape) ?*const Shape {
@@ -371,7 +359,6 @@ pub const CharacterBoundsCache = struct {
     pub const Stats = StatsType;
     pub const Key = KeyType;
     pub const Replay = ReplayType;
-    pub const supported_shape = supportedShape;
 
     /// See State
     state: State = .empty,
@@ -404,6 +391,23 @@ pub const CharacterBoundsCache = struct {
         return self.state == .empty or !self.storedKey().eql(key);
     }
 
+    /// A shape whose center of mass (and bounds) cannot change after its creation, see the file header
+    pub fn supportedShape(shape: *const Shape) bool {
+        var s = shape;
+        var depth: u32 = 0;
+        while (true) : (depth += 1) {
+            switch (s.getSubType()) {
+                .sphere, .box, .capsule, .tapered_capsule, .cylinder, .tapered_cylinder, .convex_hull => return true,
+                .rotated_translated, .scaled, .offset_center_of_mass => {
+                    if (depth == max_decorator_depth)
+                        return false;
+                    s = innerShape(s) orelse return false;
+                },
+                else => return false,
+            }
+        }
+    }
+
     /// Does the key support caching: a supported shape and a normalized rotation (Mat44::sRotation asserts on others)
     pub fn supports(key: *const Key) bool {
         const shape = key.shape orelse return false;
@@ -411,7 +415,7 @@ pub const CharacterBoundsCache = struct {
     }
 
     /// Store `key` with its center of mass transform (GetCenterOfMassTransform() of the character for the key; null when
-    /// `supports(key)` is false)
+    /// `supports(key)` is false). The pin takes a reference to the shape of every stored key, also an unsupported one.
     pub fn store(self: *CharacterBoundsCache, key: *const Key, center_of_mass_transform: ?RMat44) void {
         self.position = key.position;
         self.rotation = key.rotation;

@@ -380,7 +380,7 @@ test "CharacterBoundsCache T1: replayed bounds equal GetWorldSpaceBounds as real
 
     var counts: ReplayCounts = .{};
     for (supported.items) |shape| {
-        try expect(CharacterBoundsCache.supported_shape(shape));
+        try expect(CharacterBoundsCache.supportedShape(shape));
         for (rotations) |rotation| {
             var replay: Replay = undefined;
             try expect(replay.build(shape, Mat44.rotationQuat(rotation)));
@@ -438,7 +438,7 @@ test "CharacterBoundsCache T1: unsupported shapes and values build no replay" {
     const capsule = try shapes.capsule(0.5, 0.3);
     const non_uniform = try shapes.scaled(capsule, Vec3.init(1, 2, 1));
     var replay: Replay = undefined;
-    try expect(CharacterBoundsCache.supported_shape(non_uniform));
+    try expect(CharacterBoundsCache.supportedShape(non_uniform));
     try expect(!replay.build(non_uniform, Mat44.identity()));
     const huge = try shapes.scaled(try shapes.box(Vec3.replicate(1), 0.05), Vec3.init(1.0e30, 1.0e30, 1.0e30));
     try expect(replay.build(huge, Mat44.identity()));
