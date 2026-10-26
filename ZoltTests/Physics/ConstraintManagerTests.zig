@@ -175,6 +175,79 @@ test "ConstraintManager active constraints and sorting" {
     try std.testing.expectEqualSlices(u32, &.{ 1, 2, 4, 3, 5, 0 }, &idx);
 }
 
+test "ConstraintManager sortConstraintsWithRecords gives the order of SortConstraints" {
+    // Zolt addition (Phase 12, class A): PhysicsSystem sorts the constraints of a large island with
+    // sortConstraintsWithRecords (KeySort on priority << 32 | mConstraintIndex, Jolt's SortConstraints when two keys
+    // are equal). Random islands out of 2000 constraints with distinct keys (small and large priorities and indices)
+    // and with ties: equal indices with equal and different priorities, full ties (QuickSort, which is not stable,
+    // decides), all keys equal. The constraints are not in the manager, so the test can give them any mConstraintIndex
+    // (also ones that the manager never gives two active constraints).
+    const allocator = std.testing.allocator;
+    var c: Context = undefined;
+    try c.init(allocator);
+    defer c.deinit();
+    const a = try c.createBody(.dynamic, .activate);
+    const b = try c.createBody(.dynamic, .activate);
+
+    const num_constraints = 2000;
+    var refs: std.ArrayList(Ref(Constraint)) = .empty;
+    defer {
+        for (refs.items) |*r| r.deinit();
+        refs.deinit(allocator);
+    }
+    try refs.ensureTotalCapacity(allocator, num_constraints);
+    var ptrs: [num_constraints]*Constraint = undefined;
+    for (&ptrs) |*p| {
+        refs.appendAssumeCapacity(try c.createConstraint(a, b));
+        p.* = refs.items[refs.items.len - 1].get().?;
+    }
+    defer for (ptrs) |p| {
+        p.constraint_index = Constraint.invalid_constraint_index;
+    };
+
+    var prng = std.Random.DefaultPrng.init(0xc0de);
+    const random = prng.random();
+    var permutation: [num_constraints]u32 = undefined;
+    var island: [num_constraints]u32 = undefined;
+    var expected: [num_constraints]u32 = undefined;
+    var actual: [num_constraints]u32 = undefined;
+    const records = try allocator.alloc(ConstraintManager.SortRecord, num_constraints);
+    defer allocator.free(records);
+    const buckets = try allocator.alloc(u32, zolt.KeySort.bucketMemory(num_constraints));
+    defer allocator.free(buckets);
+
+    const KeyKind = enum { few_priorities, large_values, equal_indices, full_ties, all_equal };
+    for (std.enums.values(KeyKind)) |kind| {
+        for ([_]usize{ 0, 1, 2, 3, 7, 8, 9, 16, 17, 33, 64, 100, 257, 1000, num_constraints }) |n| {
+            for (0..3) |_| {
+                for (&permutation, 0..) |*p, i| p.* = @intCast(i);
+                random.shuffle(u32, &permutation);
+                for (ptrs, permutation) |p, unique| {
+                    const priority: u32, const index: u32 = switch (kind) {
+                        .few_priorities => .{ random.uintLessThan(u32, 3), unique },
+                        .large_values => .{ if (random.boolean()) std.math.maxInt(u32) - random.uintLessThan(u32, 2) else random.int(u32), std.math.maxInt(u32) - 1 - unique * 1000 },
+                        .equal_indices => .{ random.uintLessThan(u32, 2), random.uintLessThan(u32, num_constraints / 4) },
+                        .full_ties => .{ 1, random.uintLessThan(u32, 8) },
+                        .all_equal => .{ 0, 5 },
+                    };
+                    p.setConstraintPriority(priority);
+                    p.constraint_index = index;
+                }
+                for (&island, 0..) |*idx, i| idx.* = @intCast(i);
+                random.shuffle(u32, &island);
+
+                @memcpy(expected[0..n], island[0..n]);
+                ConstraintManager.sortConstraints(&ptrs, expected[0..n]);
+
+                // Records and buckets of exactly the size the island needs
+                @memcpy(actual[0..n], island[0..n]);
+                ConstraintManager.sortConstraintsWithRecords(&ptrs, actual[0..n], records[0..n], buckets[0..zolt.KeySort.bucketMemory(n)]);
+                try std.testing.expectEqualSlices(u32, expected[0..n], actual[0..n]);
+            }
+        }
+    }
+}
+
 test "ConstraintManager solver loops solve every constraint and OR the results" {
     const allocator = std.testing.allocator;
     var c: Context = undefined;

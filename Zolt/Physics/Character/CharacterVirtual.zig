@@ -17,7 +17,8 @@
 //!   CharacterID::sNextCharacterID()`, the copy (`initCopy`, `assign`) does not. `GetCharacterVirtualSettings` returns a
 //!   value that consumes one too (the caller `deinit`s it: it holds references to the shapes).
 //! - `new CharacterVirtual(settings, position, rotation, user data, system)` is `CharacterVirtual.create(...)` (reference
-//!   count 0 like `new`, the last `release` of a `Ref(CharacterBase)` destroys it), an embedded character `init(...)`.
+//!   count 0 like `new`, the last `release` of a `Ref(CharacterBase)` destroys it), an embedded character `init(...)`
+//!   (or `initInPlace`, which `create` uses so that the character is not copied into its allocation).
 //!   Jolt's constructor without user data is the same call with `user_data = 0`. A failed creation (out of memory while
 //!   creating or adding the inner body) leaves nothing behind: no inner body, no references. When CreateBody /
 //!   CreateBodyWithID returns null (the system is full, the override ID is taken) the character has no inner body, as in
@@ -65,8 +66,25 @@
 //!   release behavior is Jolt's. One exception: an untracked active contact in FinishTrackingContactChanges is a panic
 //!   in safe builds (Jolt asserts) and is skipped in ReleaseFast / ReleaseSmall, where Jolt writes through an end()
 //!   iterator.
+//!
+//! Differences with the C++ version (Roadmap Phase 12, class A: no result changes):
+//! - Every character has a bounds cache (`bounds_cache`, CharacterBoundsCache.zig): the members that its center of mass
+//!   transform is a function of (position, rotation, shape, shape offset, up, character padding) and that transform.
+//!   `refreshBoundsCache` stores them at the end of the construction, in UpdateInnerBodyTransform (SetPosition,
+//!   SetRotation, SetShapeOffset, Update, MoveToContact), on every exit of SetShape and at the end of RestoreState.
+//!   The loops of CharacterVsCharacterCollisionSimple read the transform of the other character from its cache when the
+//!   cache matches the character's current members bit for bit, and replay the world space bounds of its shape from
+//!   the cached parts that do not depend on the base offset (equal to Jolt's bounds as real numbers, which is all that
+//!   the reject decision reads; the proof is in the header of CharacterBoundsCache.zig). They run Jolt's code otherwise
+//!   (a stale cache, an unsupported shape or rotation, a translation that is not finite). The cache holds one reference
+//!   to the shape of its stored key, whatever the shape (also an unsupported one), for as long as that is its key: the
+//!   reference count of a shape (Shape.getRefCount) is higher than in Jolt by the number of characters whose cache
+//!   holds it (one for a character's own shape, 100 for a shape that 100 characters share), and after a direct write
+//!   to `base.shape` the old shape stays alive until the next refresh point or the destructor.
+//! - `CharacterVsCharacterCollisionSimple.stats` (test builds only, `void` otherwise) counts what the caches decided.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Core = @import("../../Core/Core.zig");
 const virtual = @import("../../Core/Virtual.zig");
@@ -139,6 +157,7 @@ const CharacterBaseFile = @import("CharacterBase.zig");
 const CharacterBase = CharacterBaseFile.CharacterBase;
 const CharacterBaseSettings = CharacterBaseFile.CharacterBaseSettings;
 const CharacterID = @import("CharacterID.zig").CharacterID;
+const CharacterBoundsCache = @import("CharacterBoundsCache.zig").CharacterBoundsCache;
 
 /// Contains the configuration of a character
 pub const CharacterVirtualSettings = struct {
@@ -663,6 +682,10 @@ pub const CharacterVsCharacterCollisionSimple = struct {
     /// The list of characters to check collision against
     characters: std.ArrayList(*CharacterVirtual) = .empty,
 
+    /// Zolt (Phase 12, test builds only): counts what the bounds caches of the other characters decided in the loops of
+    /// CollideCharacter and CastCharacter (CharacterBoundsCache.zig); `void` in other builds
+    stats: if (builtin.is_test) ?*CharacterBoundsCache.Stats else void = if (builtin.is_test) null else {},
+
     pub fn init(allocator: Allocator) CharacterVsCharacterCollisionSimple {
         return .{ .allocator = allocator };
     }
@@ -706,17 +729,22 @@ pub const CharacterVsCharacterCollisionSimple = struct {
         for (self.characters.items) |c| {
             if (c != character and !collector.shouldEarlyOut()) {
                 // Make shape 2 relative to inBaseOffset
-                const transform2 = c.getCenterOfMassTransform().postTranslatedRVec3(base_offset.negate()).toMat44();
+                // (Zolt: with the center of mass transform of the bounds cache of character 2, CharacterBoundsCache.zig)
+                const cache = self.findBoundsCache(c);
+                const transform2 = centerOfMassTransform(c, cache).postTranslatedRVec3(base_offset.negate()).toMat44();
 
                 // We need to add the padding of character 2 so that we will detect collision with its outer shell
                 settings.max_separation_distance = collide_shape_settings.max_separation_distance + c.getCharacterPadding();
 
                 // Check if the bounding boxes of the characters overlap
                 const shape2 = c.getShape().?;
-                var bounds2 = shape2.getWorldSpaceBounds(transform2, Vec3.one());
+                var bounds2 = self.worldSpaceBounds(cache, shape2, transform2);
                 bounds2.expandBy(Vec3.replicate(settings.max_separation_distance));
-                if (!bounds1.overlaps(bounds2))
+                if (!bounds1.overlaps(bounds2)) {
+                    self.count(cache, .rejected);
                     continue;
+                }
+                self.count(cache, .accepted);
 
                 // Collector needs to know which character we're colliding with
                 collector.setUserData(@intFromPtr(c));
@@ -747,17 +775,22 @@ pub const CharacterVsCharacterCollisionSimple = struct {
         for (self.characters.items) |c| {
             if (c != character and !collector.shouldEarlyOut()) {
                 // Make shape 2 relative to inBaseOffset
-                const transform2 = c.getCenterOfMassTransform().postTranslatedRVec3(base_offset.negate()).toMat44();
+                // (Zolt: with the center of mass transform of the bounds cache of character 2, CharacterBoundsCache.zig)
+                const cache = self.findBoundsCache(c);
+                const transform2 = centerOfMassTransform(c, cache).postTranslatedRVec3(base_offset.negate()).toMat44();
 
                 // We need to add the padding of character 2 so that we will detect collision with its outer shell
                 cast_settings.extra_convex_radius = shape_cast_settings.extra_convex_radius + c.getCharacterPadding();
 
                 // Sweep bounding box of the character against the bounding box of the other character to see if they can collide
                 const shape2 = c.getShape().?;
-                var bounds2 = shape2.getWorldSpaceBounds(transform2, Vec3.one());
+                var bounds2 = self.worldSpaceBounds(cache, shape2, transform2);
                 bounds2.expandBy(extents.add(Vec3.replicate(c.getCharacterPadding())));
-                if (!rayAABoxHitsDirection(origin, direction, bounds2.min, bounds2.max))
+                if (!rayAABoxHitsDirection(origin, direction, bounds2.min, bounds2.max)) {
+                    self.count(cache, .rejected);
                     continue;
+                }
+                self.count(cache, .accepted);
 
                 // Collector needs to know which character we're colliding with
                 collector.setUserData(@intFromPtr(c));
@@ -769,6 +802,52 @@ pub const CharacterVsCharacterCollisionSimple = struct {
 
         // Reset the user data
         collector.setUserData(0);
+    }
+
+    /// Zolt (Phase 12): the bounds cache of character `c` when it matches the current members of `c` and holds values
+    /// (null: Jolt's code runs for this pair; test builds count why)
+    inline fn findBoundsCache(self: *const CharacterVsCharacterCollisionSimple, c: *const CharacterVirtual) ?*const CharacterBoundsCache {
+        const key = c.boundsCacheKey();
+        switch (c.bounds_cache.find(&key)) {
+            .valid => return &c.bounds_cache,
+            .stale => self.countNoCache(.stale),
+            .unsupported => self.countNoCache(.unsupported),
+        }
+        return null;
+    }
+
+    /// Zolt (Phase 12): GetCenterOfMassTransform() of character `c`, from its bounds cache when it has one (the same bits)
+    inline fn centerOfMassTransform(c: *const CharacterVirtual, cache: ?*const CharacterBoundsCache) RMat44 {
+        return if (cache) |cached| cached.center_of_mass_transform else c.getCenterOfMassTransform();
+    }
+
+    /// Zolt (Phase 12): `shape2.GetWorldSpaceBounds(transform2, Vec3::sOne())` as real numbers: replayed by the bounds
+    /// cache of character 2 when it has one and the translations are finite (CharacterBoundsCache.zig), Jolt's function
+    /// otherwise. The loops use the box only in ExpandBy and in the overlap / ray tests, whose answers depend only on the
+    /// real values.
+    inline fn worldSpaceBounds(self: *const CharacterVsCharacterCollisionSimple, cache: ?*const CharacterBoundsCache, shape2: *const Shape, transform2: Mat44) AABox {
+        if (cache) |cached| {
+            if (cached.replay.bounds(transform2.getTranslation())) |bounds|
+                return bounds;
+            self.countNoCache(.non_finite);
+        }
+        return shape2.getWorldSpaceBounds(transform2, Vec3.one());
+    }
+
+    /// Zolt (Phase 12, test builds): count a decision that the bounds cache of the other character made
+    inline fn count(self: *const CharacterVsCharacterCollisionSimple, cache: ?*const CharacterBoundsCache, comptime what: enum { rejected, accepted }) void {
+        if (builtin.is_test) {
+            if (cache != null) {
+                if (self.stats) |s| @field(s, @tagName(what)) += 1;
+            }
+        }
+    }
+
+    /// Zolt (Phase 12, test builds): count a pair for which (part of) Jolt's code ran
+    inline fn countNoCache(self: *const CharacterVsCharacterCollisionSimple, comptime what: enum { stale, unsupported, non_finite }) void {
+        if (builtin.is_test) {
+            if (self.stats) |s| @field(s, @tagName(what)) += 1;
+        }
     }
 };
 
@@ -925,6 +1004,10 @@ pub const CharacterVirtual = struct {
     // The inner rigid body that proxies the character in the world
     inner_body_id: BodyID = .invalid,
 
+    /// Zolt (Phase 12): what CharacterVsCharacterCollisionSimple needs of this character when another character queries
+    /// it, refreshed by `refreshBoundsCache` (CharacterBoundsCache.zig)
+    bounds_cache: CharacterBoundsCache = .{},
+
     pub const ContactList = std.ArrayList(CharacterContact);
 
     // View from a contact listener perspective on which contacts have been added/removed
@@ -942,7 +1025,14 @@ pub const CharacterVirtual = struct {
     /// @param user_data Application specific value (Jolt's constructor without user data passes 0)
     /// @param system Physics system that this character will be added to
     pub fn init(allocator: Allocator, settings: *const CharacterVirtualSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) Allocator.Error!CharacterVirtual {
-        var self: CharacterVirtual = .{
+        var self: CharacterVirtual = undefined;
+        try self.initInPlace(allocator, settings, position, rotation, user_data, system);
+        return self;
+    }
+
+    /// `init` in place (Zolt: `create` builds the character in its allocation, without copying it there)
+    pub fn initInPlace(self: *CharacterVirtual, allocator: Allocator, settings: *const CharacterVirtualSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) Allocator.Error!void {
+        self.* = .{
             .base = .init(CharacterVirtual, allocator, &settings.base, system),
             .id = settings.id,
             .back_face_mode = settings.back_face_mode,
@@ -995,7 +1085,8 @@ pub const CharacterVirtual = struct {
             }
         }
 
-        return self;
+        // Zolt: nothing can fail after this (the cache holds a reference to the shape)
+        self.refreshBoundsCache();
     }
 
     /// new CharacterVirtual(settings, position, rotation, user data, system): reference count 0, the last release of a
@@ -1003,7 +1094,7 @@ pub const CharacterVirtual = struct {
     pub fn create(allocator: Allocator, settings: *const CharacterVirtualSettings, position: RVec3, rotation: Quat, user_data: u64, system: *PhysicsSystem) Allocator.Error!*CharacterVirtual {
         const self = try allocator.create(CharacterVirtual);
         errdefer allocator.destroy(self);
-        self.* = try .init(allocator, settings, position, rotation, user_data, system);
+        try self.initInPlace(allocator, settings, position, rotation, user_data, system);
         return self;
     }
 
@@ -1016,6 +1107,7 @@ pub const CharacterVirtual = struct {
         }
         self.listener_contacts.deinit(self.base.allocator);
         self.active_contacts.deinit(self.base.allocator);
+        self.bounds_cache.deinit();
     }
 
     /// The CharacterBase part (for Ref / RefConst and the virtual functions)
@@ -1744,6 +1836,7 @@ pub const CharacterVirtual = struct {
     /// @return Returns true if the switch succeeded.
     pub fn setShape(self: *CharacterVirtual, new_shape: ?*const Shape, max_penetration_depth: f32, broad_phase_layer_filter: *const BroadPhaseLayerFilter, object_layer_filter: *const ObjectLayerFilter, body_filter: *const BodyFilter, shape_filter: ?*ShapeFilter, temp_allocator: TempAllocator) Allocator.Error!bool {
         const filters: Filters = .{ .broad_phase_layer_filter = broad_phase_layer_filter, .object_layer_filter = object_layer_filter, .body_filter = body_filter, .shape_filter = shape_filter };
+        defer self.refreshBoundsCache(); // Zolt: on every exit, also when the shape did not change or on an error
 
         if (self.base.shape.get() == null) { // Jolt also checks mSystem == nullptr, which Zolt's non-optional pointer cannot be
             // It hasn't been initialized yet
@@ -1891,6 +1984,7 @@ pub const CharacterVirtual = struct {
     /// rotation and velocity are restored then, and the active contacts are unchanged, except that a validating restore
     /// has already removed the contacts without collision like Jolt does before it reads them)
     pub fn restoreState(self: *CharacterVirtual, stream: *StateRecorder) Allocator.Error!void {
+        defer self.refreshBoundsCache(); // Zolt: the position and the rotation are restored, also on the error path
         try CharacterBase.impl.restoreState(&self.base, stream);
 
         stream.read(&self.position);
@@ -3120,9 +3214,26 @@ pub const CharacterVirtual = struct {
     }
 
     // Move the inner rigid body to the current position
+    // (Zolt: also refreshes the bounds cache, at the end of SetPosition, SetRotation, SetShapeOffset, Update and
+    // MoveToContact)
     fn updateInnerBodyTransform(self: *CharacterVirtual) void {
+        self.refreshBoundsCache();
         if (!self.inner_body_id.isInvalid())
             self.base.system.getBodyInterfaceMut().setPositionAndRotation(self.inner_body_id, self.getInnerBodyPosition(), self.rotation, .dont_activate);
+    }
+
+    /// Zolt (Phase 12): the members that the bounds cache is a function of (CharacterBoundsCache.zig)
+    pub fn boundsCacheKey(self: *const CharacterVirtual) CharacterBoundsCache.Key {
+        return .{ .position = self.position, .rotation = self.rotation, .shape = self.base.shape.get(), .shape_offset = self.shape_offset, .up = self.base.up, .character_padding = self.character_padding };
+    }
+
+    /// Zolt (Phase 12): store the current members and the values the other characters' queries need in the bounds
+    /// cache (nothing to do when the key did not change)
+    pub fn refreshBoundsCache(self: *CharacterVirtual) void {
+        const key = self.boundsCacheKey();
+        if (!self.bounds_cache.needsRefresh(&key))
+            return;
+        self.bounds_cache.store(&key, if (CharacterBoundsCache.supports(&key)) self.getCenterOfMassTransform() else null);
     }
 };
 

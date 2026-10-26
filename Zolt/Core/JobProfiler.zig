@@ -8,6 +8,10 @@
 //!   "FindCollisions" or "SolveVelocityConstraints").
 //! - `JobSystemThreadPool` records the time a worker thread waits for jobs, `JobSystemWithBarrier` the time a thread
 //!   waits for a barrier.
+//! - Inside a job, PhysicsSystem records two more kinds of spans, both part of the job's time: `wait`, the time a solve
+//!   job yields while other jobs hold the batches of a split island (or a soft body job finds no work), and `part`, a
+//!   named part of a job (the preparation of an island, the bounds and sleep update of a split island's final batch).
+//!   They show the time a job spends without doing its own work, which the busy time of a thread includes.
 //!
 //! Without the option `Core.job_profile` is false: the profiler fields of the job systems are `void` and the hooks
 //! generate no code, like the debug renderer gates (Docs/Zolt/RemainingFeaturesArchitecture.md R2).
@@ -85,6 +89,12 @@ pub const JobProfiler = struct {
 
         /// The thread waited for work
         idle,
+
+        /// A job waited for work that other jobs hold (inside a job: the job's time includes it)
+        wait,
+
+        /// A named part of a job (inside a job: the job's time includes it)
+        part,
     };
 
     /// A span of time on one thread
@@ -124,6 +134,9 @@ pub const JobProfiler = struct {
         /// Total time spent waiting for work
         idle_ns: u64 = 0,
 
+        /// Total time that jobs spent waiting for work that other jobs hold (`wait` spans, part of `busy_ns`)
+        wait_ns: u64 = 0,
+
         /// The events in the order they were recorded: `first` holds the older ones (only after the buffer wrapped
         /// around), `second` the newer ones
         pub fn events(self: *const Thread) struct { first: []const Event, second: []const Event } {
@@ -147,6 +160,8 @@ pub const JobProfiler = struct {
                     self.busy_ns += duration;
                 },
                 .idle => self.idle_ns += duration,
+                .wait => self.wait_ns += duration,
+                .part => {},
             }
             self.buffer[@intCast(self.num_events % self.buffer.len)] = event;
             self.num_events += 1;
@@ -157,6 +172,7 @@ pub const JobProfiler = struct {
             self.num_jobs = 0;
             self.busy_ns = 0;
             self.idle_ns = 0;
+            self.wait_ns = 0;
         }
     };
 
@@ -300,6 +316,32 @@ pub const JobProfiler = struct {
         });
     }
 
+    /// A `wait` span that stays open over repeated waits, such as the yield loop of a solve job: `waiting` opens it on
+    /// its first call, `done` records it and closes it. A null profiler records nothing.
+    pub const WaitSpan = struct {
+        /// The profiler to record in
+        profiler: ?*JobProfiler,
+
+        /// Name of the span
+        name: []const u8,
+
+        /// Clock value of the first `waiting` call of the open span, null when no span is open
+        start: ?u64 = null,
+
+        /// The job waits: open the span unless it is open
+        pub fn waiting(self: *WaitSpan) void {
+            if (self.start == null)
+                self.start = begin(self.profiler);
+        }
+
+        /// The wait is over: record the open span
+        pub fn done(self: *WaitSpan) void {
+            const start = self.start orelse return;
+            self.start = null;
+            end(self.profiler, .wait, self.name, start);
+        }
+    };
+
     /// The entries that a thread has used: all worker threads, then the other threads that recorded
     pub fn usedThreads(self: *JobProfiler) []Thread {
         if (!self.isInitialized())
@@ -317,7 +359,9 @@ pub const JobProfiler = struct {
     }
 
     /// Write the events in the Chrome trace event format (JSON, the "traceEvents" array of complete events "X", times
-    /// in microseconds). `process_name` names the process in the viewer.
+    /// in microseconds). `process_name` names the process in the viewer. The metadata event that names a thread also
+    /// holds, when its ring buffer was full, the number of its oldest events that are not in the trace
+    /// ("overwritten", read by tools/job_trace_stats.py).
     pub fn writeChromeTrace(self: *JobProfiler, writer: *std.Io.Writer, process_name: []const u8) std.Io.Writer.Error!void {
         try writer.writeAll("{\"traceEvents\":[\n");
         try writer.writeAll("{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":1,\"tid\":0,\"args\":{\"name\":");
@@ -325,7 +369,11 @@ pub const JobProfiler = struct {
         try writer.writeAll("}}");
         var name_buffer: [32]u8 = undefined;
         for (self.usedThreads(), 0..) |*thread, index| {
-            try writer.print(",\n{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{d},\"args\":{{\"name\":\"{s}\"}}}}", .{ index, self.threadName(index, &name_buffer) });
+            try writer.print(",\n{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{d},\"args\":{{\"name\":\"{s}\"", .{ index, self.threadName(index, &name_buffer) });
+            const num_overwritten = thread.numOverwritten();
+            if (num_overwritten != 0)
+                try writer.print(",\"overwritten\":{d}", .{num_overwritten});
+            try writer.writeAll("}}");
             try writer.print(",\n{{\"name\":\"thread_sort_index\",\"ph\":\"M\",\"pid\":1,\"tid\":{d},\"args\":{{\"sort_index\":{d}}}}}", .{ index, index });
             const parts = thread.events();
             for ([_][]const Event{ parts.first, parts.second }) |part| {
@@ -345,12 +393,15 @@ pub const JobProfiler = struct {
     }
 
     /// Write one line with the totals: the time from time 0 to `stop` (wall), then per thread the time in jobs (busy),
-    /// the time waiting for work (idle) and the number of jobs
+    /// the time waiting for work (idle), the number of jobs and, when a job of the thread waited inside the job, the
+    /// time of those waits (wait, part of busy)
     pub fn writeSummary(self: *JobProfiler, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("Job profile: wall {f} ms", .{Milliseconds{ .ns = self.wallTime() }});
         var name_buffer: [32]u8 = undefined;
         for (self.usedThreads(), 0..) |*thread, index| {
             try writer.print(", {s}: busy {f} ms idle {f} ms jobs {d}", .{ self.threadName(index, &name_buffer), Milliseconds{ .ns = thread.busy_ns }, Milliseconds{ .ns = thread.idle_ns }, thread.num_jobs });
+            if (thread.wait_ns != 0)
+                try writer.print(" wait {f} ms", .{Milliseconds{ .ns = thread.wait_ns }});
         }
         var num_overwritten: u64 = 0;
         for (self.usedThreads()) |*thread|
@@ -521,6 +572,8 @@ test "JobProfiler: Chrome trace is valid JSON, summary line" {
     try std.testing.expectEqual(@as(usize, 5), events.len);
     try std.testing.expectEqualStrings("Test \"process\"", events[0].object.get("args").?.object.get("name").?.string);
     try std.testing.expectEqualStrings("Worker 0", events[1].object.get("args").?.object.get("name").?.string);
+    // The ring of 2 events lost the oldest of the 3
+    try std.testing.expectEqual(@as(i64, 1), events[1].object.get("args").?.object.get("overwritten").?.integer);
     try std.testing.expectEqualStrings("Idle", events[3].object.get("name").?.string);
     try std.testing.expectEqualStrings("idle", events[3].object.get("cat").?.string);
     const last = events[4].object;
@@ -534,6 +587,57 @@ test "JobProfiler: Chrome trace is valid JSON, summary line" {
     try profiler.writeSummary(&summary.writer);
     try std.testing.expect(std.mem.startsWith(u8, summary.written(), "Job profile: wall "));
     try std.testing.expect(std.mem.indexOf(u8, summary.written(), ", Worker 0: busy 1.230 ms idle 0.001 ms jobs 2, 1 oldest events not in the trace") != null);
+}
+
+test "JobProfiler: wait and part spans inside a job, WaitSpan" {
+    var profiler: JobProfiler = .empty;
+    try profiler.init(std.testing.allocator, std.testing.io, .{ .num_workers = 1, .num_other_threads = 0, .capacity = 16 });
+    defer profiler.deinit();
+    profiler.registerThread(0);
+    const thread = profiler.currentThread().?;
+
+    // A job of 10 us with a wait of 4 us and a part of 2 us inside: only the wait has its own total
+    thread.record(.{ .name = "Wait", .start_ns = 2000, .end_ns = 6000, .thread_index = 0, .kind = .wait });
+    thread.record(.{ .name = "Part", .start_ns = 7000, .end_ns = 9000, .thread_index = 0, .kind = .part });
+    thread.record(.{ .name = "Job", .start_ns = 0, .end_ns = 10_000, .thread_index = 0, .kind = .job });
+    try std.testing.expectEqual(@as(u64, 1), thread.num_jobs);
+    try std.testing.expectEqual(@as(u64, 10_000), thread.busy_ns);
+    try std.testing.expectEqual(@as(u64, 4000), thread.wait_ns);
+    try std.testing.expectEqual(@as(u64, 0), thread.idle_ns);
+
+    var summary: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer summary.deinit();
+    try profiler.writeSummary(&summary.writer);
+    try std.testing.expect(std.mem.indexOf(u8, summary.written(), ", Worker 0: busy 0.010 ms idle 0.000 ms jobs 1 wait 0.004 ms") != null);
+
+    var trace: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer trace.deinit();
+    try profiler.writeChromeTrace(&trace.writer, "Test");
+    try std.testing.expect(std.mem.indexOf(u8, trace.written(), "\"name\":\"Wait\",\"cat\":\"wait\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace.written(), "\"name\":\"Part\",\"cat\":\"part\"") != null);
+
+    // A WaitSpan records one span over repeated waits, and nothing when it is not open
+    profiler.reset();
+    var span: JobProfiler.WaitSpan = .{ .profiler = &profiler, .name = "Yield" };
+    span.done(); // Not open: nothing
+    try std.testing.expectEqual(@as(u64, 0), thread.num_events);
+    span.waiting();
+    const first_start = span.start.?;
+    span.waiting(); // Still the same span
+    try std.testing.expectEqual(first_start, span.start.?);
+    span.done();
+    try std.testing.expectEqual(@as(?u64, null), span.start);
+    try std.testing.expectEqual(@as(u64, 1), thread.num_events);
+    const event = thread.events().second[0];
+    try std.testing.expectEqualStrings("Yield", event.name);
+    try std.testing.expectEqual(JobProfiler.Kind.wait, event.kind);
+    try std.testing.expectEqual(@as(u64, 0), thread.num_jobs);
+
+    // Without a profiler a WaitSpan does nothing
+    var no_profiler: JobProfiler.WaitSpan = .{ .profiler = null, .name = "Nothing" };
+    no_profiler.waiting();
+    no_profiler.done();
+    try std.testing.expectEqual(@as(u64, 1), thread.num_events);
 }
 
 test "JobProfiler: not initialized records nothing" {

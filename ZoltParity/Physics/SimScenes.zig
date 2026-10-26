@@ -2791,6 +2791,10 @@ pub const Expect = struct {
     ground_states: u32 = 0,
     /// Some wheel of a vehicle has a contact after some update
     wheel_contacts: bool = false,
+    /// Phase 12, Zolt side: the bounds caches of the character virtuals (Zolt/Physics/Character/CharacterBoundsCache.zig)
+    /// decide pairs of CharacterVsCharacterCollisionSimple's loops in every way: the counters of the collision groups
+    /// (CharacterBoundsCache.Stats, test builds) show rejected, accepted, stale and unsupported pairs
+    character_bounds_cache: bool = false,
     /// The vehicles reach each of these transmission gears (bit `gear + 8`, `gearBit`) after some update (from the
     /// vehicle_transmission field of the object state)
     vehicle_gears: u32 = 0,
@@ -2814,6 +2818,12 @@ pub const Expect = struct {
     /// PhysicsSystem::Update, Zolt side, not by the operations before it). More than 64 soft bodies that go to sleep in
     /// one update fill the batch of JobSoftBodyFinalize.
     update_deactivations: u32 = 0,
+
+    // Phase 12
+    /// The large islands sort their records in region 1 of PhysicsSystem.sortScratchRegions (the unused end of the
+    /// contact constraint buffer), never in region 0 (the body pair buffer) and never with Jolt's functions, in every
+    /// configuration (Zolt side: the test-only counters PhysicsSystem.large_island_sorts, also in the sweeps)
+    sorts_in_region1: bool = false,
 };
 
 /// The bit of a transmission gear (-8 .. 23) in `Expect.vehicle_gears`
@@ -2906,6 +2916,7 @@ pub const scenes = [_]SceneEntry{
     .{ .name = "contacts_sensor", .build = buildSensor, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
     .{ .name = "contacts_large_pyramid_splitter", .build = buildLargePyramid, .blocked_by = .contacts, .sweep_stride = 45, .expect = .{ .contacts = true, .sleeping = true, .large_island = true } },
     .{ .name = "contacts_large_pyramid_collapse", .build = buildLargePyramidWithoutSplitter, .blocked_by = .contacts, .sweep_stride = 30, .expect = .{ .contacts = true, .removed = true } },
+    .{ .name = "contacts_large_pyramid_small_body_pair_buffer", .build = buildLargePyramidSmallBodyPairBuffer, .blocked_by = .contacts, .sweep_stride = 45, .expect = .{ .contacts = true, .sleeping = true, .large_island = true, .sorts_in_region1 = true } },
     .{ .name = "contacts_shapes_on_floor", .build = buildShapesOnFloor, .blocked_by = .contacts, .expect = .{ .contacts = true, .sleeping = true } },
     .{ .name = "contacts_shape_stacks", .build = buildShapeStacks, .blocked_by = .contacts, .expect = .{ .contacts = true } },
     .{ .name = "contacts_mesh_ground", .build = buildMeshGround, .blocked_by = .contacts, .expect = .{ .contacts = true, .removed = true } },
@@ -3161,6 +3172,9 @@ pub const scenes = [_]SceneEntry{
     // PerformanceTest's CharacterVirtualScene (milestone M8), exactly as ZoltPerformanceTest sets it up
     .{ .name = "perf_character_virtual", .build = buildPerfCharacterVirtual, .blocked_by = .character_virtuals, .sweep_stride = 0, .creation_sweep = false, .expect = .{ .contacts = true, .character_records = character_body_contact_records, .ground_states = groundStateBit(GroundState.on_ground) } },
     .{ .name = "character_virtual_shapes", .build = buildCharacterVirtualShapes, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_records, .ground_states = groundStateBit(GroundState.on_ground) } },
+    // Phase 12: the bounds caches of CharacterVsCharacterCollisionSimple (CharacterBoundsCache.zig)
+    .{ .name = "character_virtual_vs_character_changes", .build = buildCharacterVirtualVsCharacterChanges, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground), .character_bounds_cache = true } },
+    .{ .name = "character_virtual_vs_character_changes_far", .build = buildCharacterVirtualVsCharacterChangesFar, .blocked_by = .character_virtuals, .sweep_stride = 30, .restore_broad_phase = true, .expect = .{ .character_records = character_body_contact_records | character_vs_character_records, .ground_states = groundStateBit(GroundState.on_ground), .character_bounds_cache = true } },
     // (append the CharacterVirtual scenes here)
     // ---- Ragdoll ----
     .{ .name = "ragdoll_ops", .build = buildRagdollOps, .blocked_by = .ragdolls, .sweep_stride = 30, .expect = .{ .contacts = true, .active_constraints = 10 } },
@@ -5115,6 +5129,15 @@ fn buildLargePyramid(b: *SceneBuilder) Allocator.Error!void {
             _ = try b.body(.{ .position = .{ px, 0.5 + real(y), 3 }, .shape = box, .object_layer = Layers.moving }, .activate);
         }
     }
+}
+
+/// Phase 12 (class A): the large pyramid with a body pair buffer of 64 pairs (PhysicsSettings::mMaxInFlightBodyPairs):
+/// the FindCollisions jobs process the pairs that do not fit in their queue at once, and the buffer (512 bytes) is too
+/// small for the sort records of a large island, so Zolt sorts them in the unused end of the contact constraint buffer
+/// (PhysicsSystem.sortScratchRegions, region 1) while the solve jobs of the step read and write its constraints
+fn buildLargePyramidSmallBodyPairBuffer(b: *SceneBuilder) Allocator.Error!void {
+    try buildLargePyramid(b);
+    b.settings.max_in_flight_body_pairs = 64;
 }
 
 /// The same large pyramid without the LargeIslandSplitter and with 2 collision steps, a ball knocks it over
@@ -14428,6 +14451,97 @@ fn buildCharacterVirtualShapes(b: *SceneBuilder) Allocator.Error!void {
             else => {},
         }
     }
+}
+
+/// The bounds caches of CharacterVsCharacterCollisionSimple (Phase 12, Zolt/Physics/Character/CharacterBoundsCache.zig):
+/// six characters of one collision group around `o`, with every kind of shape the caches replay or reject: a
+/// RotatedTranslatedShape capsule (character 0), a sphere and a box with shape offsets (1 and 2, character 2 with a
+/// larger character padding), a ScaledShape of a turned RotatedTranslatedShape box (3), an OffsetCenterOfMassShape
+/// capsule (4, only queried by the others: sCorrectFractionForCharacterPadding asserts on an OffsetCenterOfMassShape)
+/// and a StaticCompoundShape (5, not supported by the caches). The walkers meet in the middle and walk back from update
+/// 45. Between the updates: SetRotation, SetUp (stale caches until the next update of the character), SetShapeOffset,
+/// SetShape from a supported to an unsupported shape and back, teleports (SetPosition), Remove / Add of the collision
+/// group, and CheckCollision with base offset 0 and with a base offset.
+fn buildCharacterVirtualVsCharacterChangesAt(b: *SceneBuilder, o: [3]Real) Allocator.Error!void {
+    const shapes = try CharacterShapes.add(b);
+    try addBystander(b);
+    b.num_updates = 90;
+    const floor = try b.box(.{ 20, 1, 20 }, 0);
+    _ = try b.body(.{ .position = .{ o[0], o[1] - 1, o[2] }, .shape = floor, .motion_type = 0, .friction = 0.5, .object_layer = Layers.non_moving }, .dont_activate);
+
+    const sphere = try b.sphere(0.4);
+    const box = try b.box(.{ 0.3, 0.6, 0.3 }, 0.05);
+    const scaled_box = try b.scaled(try b.rotatedTranslated(try b.box(.{ 0.25, 0.5, 0.25 }, 0.05), .{ 0, 0.5, 0 }, axisAngle(.{ 0, 1, 0 }, 0.5)), .{ 1.2, 1.4, 0.8 });
+    const offset_capsule = try b.offsetCenterOfMass(try b.capsule(0.5, 0.3), .{ 0, 0.2, -0.1 });
+    const compound = try b.compound(.static_compound, &.{
+        .{ .shape = try b.capsule(0.45, 0.3), .position = .{ 0, 1.05, 0 } },
+        .{ .shape = try b.box(.{ 0.3, 0.15, 0.3 }, 0.05), .position = .{ 0, 0.15, 0 }, .rotation = axisAngle(.{ 0, 1, 0 }, std.math.pi / 4.0) },
+    });
+
+    const at = struct {
+        fn f(origin: [3]Real, x: Real, y: Real, z: Real) [3]Real {
+            return .{ origin[0] + x, origin[1] + y, origin[2] + z };
+        }
+    }.f;
+    const cv0 = try b.characterVirtual(.{ .base = .{ .shape = shapes.standing }, .position = at(o, -2.5, 0, 0), .collision_group = 0 });
+    const cv1 = try b.characterVirtual(.{ .base = .{ .shape = sphere }, .shape_offset = .{ 0, 0.45, 0 }, .position = at(o, 2.5, 0, 0.2), .collision_group = 0 });
+    const cv2 = try b.characterVirtual(.{ .base = .{ .shape = box }, .shape_offset = .{ 0, 0.65, 0 }, .position = at(o, 0.2, 0, -2.5), .character_padding = 0.05, .collision_group = 0 });
+    const cv3 = try b.characterVirtual(.{ .base = .{ .shape = scaled_box }, .position = at(o, -0.3, 0, 2.5), .rotation = axisAngle(.{ 0, 1, 0 }, 0.3), .collision_group = 0 });
+    const cv4 = try b.characterVirtual(.{ .base = .{ .shape = offset_capsule }, .shape_offset = .{ 0, 0.85, 0 }, .position = o, .collision_group = 0 });
+    const cv5 = try b.characterVirtual(.{ .base = .{ .shape = compound }, .position = at(o, 3, 0, 3), .collision_group = 0 });
+    const walkers = [_]u32{ cv0, cv1, cv2, cv3, cv5 };
+    const inputs = [_][3]f32{ .{ 2.5, 0, 0 }, .{ -2.5, 0, 0 }, .{ 0, 0, 2.5 }, .{ 0, 0, -2.5 }, .{ -1.5, 0, -1.5 } };
+
+    for (0..b.num_updates) |update| {
+        const u: u32 = @intCast(update);
+        b.at(u);
+        switch (u) {
+            10 => {
+                try b.objectOp(.cv_set_rotation, cv4, .{ .f = &axisAngle(.{ 0, 1, 0 }, 0.8) });
+                try b.objectOp(.cv_set_rotation, cv1, .{ .f = &axisAngle(.{ 1, 0, 0 }, 0.2) });
+            },
+            15 => try b.objectOp(.cv_set_up, cv2, .{ .f = &.{ 0.1, 0.995, 0 } }),
+            20 => {
+                try b.objectOp(.cv_set_up, cv2, .{ .f = &.{ 0, 1, 0 } });
+                try b.objectOp(.cv_set_shape_offset, cv1, .{ .f = &.{ 0, 0.5, 0.05 } });
+            },
+            25 => try b.characterVirtualQuery(.cv_set_shape, cv0, cv_query, .{ .f = &.{flt_max}, .i3 = compound }),
+            30 => try b.objectOp(.cv_set_position, cv4, .{ .r = at(o, -0.4, 0, 0.1) }),
+            35 => try b.objectOp(.cv_remove_from_collision_group, cv5, .{ .i = &.{0} }),
+            // Character 0 touches character 4 here: its cache stays stale until the SetRotation of update 45
+            38 => try b.objectOp(.cv_set_up, cv4, .{ .f = &.{ 0.1, 0.995, 0 } }),
+            40 => try b.characterVirtualQuery(.cv_set_shape, cv0, cv_query, .{ .f = &.{flt_max}, .i3 = shapes.standing }),
+            45 => {
+                // The position is the base offset of cv_check_collision: 0 here, and a base offset next
+                try b.characterVirtualQuery(.cv_check_collision, cv0, cv_query, .{ .r = .{ 0, 0, 0 }, .f = &.{ 0, 0, 0, 1, 1, 0, 0, 0.1 }, .i3 = shapes.standing });
+                try b.characterVirtualQuery(.cv_check_collision, cv0, cv_query, .{ .r = at(o, 0.2, 0, 0), .f = &.{ 0, 0, 0, 1, 1, 0, 0, 0.3 }, .i3 = shapes.big });
+                try b.objectOp(.cv_set_rotation, cv4, .{ .f = &axisAngle(.{ 0, 0, 1 }, 0.25) });
+            },
+            50 => try b.objectOp(.cv_add_to_collision_group, cv5, .{ .i = &.{0} }),
+            55 => try b.characterVirtualQuery(.cv_set_shape, cv2, cv_query, .{ .f = &.{0.05}, .i3 = sphere }),
+            60 => try b.characterVirtualQuery(.cv_set_shape, cv3, cv_query, .{ .f = &.{flt_max}, .i3 = compound }),
+            65 => {
+                try b.objectOp(.cv_set_position, cv4, .{ .r = at(o, 0.3, 0, -0.3) });
+                try b.objectOp(.cv_set_shape_offset, cv4, .{ .f = &.{ 0, 0.9, 0 } });
+            },
+            70 => try b.objectOp(.cv_set_up, cv4, .{ .f = &.{ 0, 1, 0 } }), // Stale to the end
+            75 => try b.characterVirtualQuery(.cv_set_shape, cv3, cv_query, .{ .f = &.{flt_max}, .i3 = scaled_box }),
+            else => {},
+        }
+        const direction: f32 = if (u < 45) 1 else -1;
+        for (walkers, inputs, 0..) |h, input, i|
+            try stepCharacterVirtual(b, h, .{ direction * input[0], 0, direction * input[2] }, 0, if (i % 2 == 0) .{} else null, cv_query);
+    }
+}
+
+fn buildCharacterVirtualVsCharacterChanges(b: *SceneBuilder) Allocator.Error!void {
+    return buildCharacterVirtualVsCharacterChangesAt(b, .{ 0, 0, 0 });
+}
+
+/// `character_virtual_vs_character_changes` far from the origin (1e9 m in double precision): the caches with large
+/// positions, the base offset of cv_check_collision far from the characters
+fn buildCharacterVirtualVsCharacterChangesFar(b: *SceneBuilder) Allocator.Error!void {
+    return buildCharacterVirtualVsCharacterChangesAt(b, if (zolt.Core.double_precision) .{ 1.0e9, 200, -1.0e9 } else .{ 5000, 200, -12000 });
 }
 
 // (append the CharacterVirtual scenes here)

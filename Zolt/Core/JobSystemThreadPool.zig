@@ -25,7 +25,8 @@
 //! - A single threaded build (builtin.single_threaded) starts no worker threads, the jobs are then executed by the
 //!   barriers like with `num_threads = 0`.
 //! - Zolt: with `-Djob_profile=true` the pool records a timeline of its jobs (Core/JobProfiler.zig) in
-//!   `base.profiler`. `init` allocates one ring buffer per worker thread and a few for other threads. `setNumThreads`
+//!   `base.profiler`. `init` allocates one ring buffer per worker thread and a few for other threads, of
+//!   `opts.profile_capacity` events each (JobProfiler.default_capacity unless the caller asks for more). `setNumThreads`
 //!   keeps the profiler and its events when it has enough ring buffers, so `setNumThreads(0)` stops the workers before
 //!   the events are read; more threads need a new profiler (the old events are dropped). A worker records the time it
 //!   waits for jobs as idle time. `getJobProfiler` returns the profiler.
@@ -58,6 +59,9 @@ pub const JobSystemThreadPool = struct {
 
     /// Allocator for the jobs, the thread list and the heads
     allocator: std.mem.Allocator = undefined,
+
+    /// Zolt: number of events per thread of the job profiler (`-Djob_profile=true` only, see the top of this file)
+    profile_capacity: if (Core.job_profile) u32 else void = if (Core.job_profile) JobProfiler.default_capacity else {},
 
     /// Io used to wait for and wake up the worker threads
     io: std.Io = undefined,
@@ -182,10 +186,12 @@ pub const JobSystemThreadPool = struct {
     /// max_jobs: Max number of jobs that can be allocated at any time (a power of 2)
     /// max_barriers: Max number of barriers that can be allocated at any time
     /// opts.num_threads: Number of threads to start (the number of concurrent jobs is 1 more because the main thread will also run jobs while waiting for a barrier to complete). Use -1 to auto detect the amount of CPU's.
-    pub fn init(self: *JobSystemThreadPool, allocator: std.mem.Allocator, io: std.Io, max_jobs: u32, max_barriers: u32, opts: struct { num_threads: i32 = -1 }) Error!void {
+    /// opts.profile_capacity: Zolt, number of events per thread of the job profiler (`-Djob_profile=true` only)
+    pub fn init(self: *JobSystemThreadPool, allocator: std.mem.Allocator, io: std.Io, max_jobs: u32, max_barriers: u32, opts: struct { num_threads: i32 = -1, profile_capacity: u32 = JobProfiler.default_capacity }) Error!void {
         std.debug.assert(self.base.barriers == null); // Already initialized?
         self.allocator = allocator;
         self.io = io;
+        if (Core.job_profile) self.profile_capacity = opts.profile_capacity;
 
         self.base = try .init(allocator, io, max_barriers);
         errdefer self.base.deinit();
@@ -328,7 +334,7 @@ pub const JobSystemThreadPool = struct {
             const num_workers: u32 = if (builtin.single_threaded) 0 else @intCast(@max(num_threads, 0));
             if (!profiler.isInitialized() or profiler.num_workers < num_workers) {
                 profiler.deinit();
-                try profiler.init(self.allocator, self.io, .{ .num_workers = num_workers });
+                try profiler.init(self.allocator, self.io, .{ .num_workers = num_workers, .capacity = self.profile_capacity });
             }
         }
 

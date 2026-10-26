@@ -3230,12 +3230,17 @@ const RunStats = struct {
     max_active_constraints: u32 = 0,
     /// Phase 7: what the object states after the updates show (Expect.ground_states, Expect.wheel_contacts)
     objects: ObjectStats = .{},
+    /// Phase 12: the counters of the bounds caches of the character virtuals (Zolt side, Expect.character_bounds_cache)
+    character_bounds: zolt.CharacterBoundsCache.Stats = .{},
     /// R8, release_only scenes: the Zolt asserts of the run (the D12 sweeps not counted) and the C++ asserts of the run
     /// (0 without -Dreference_asserts=true)
     num_zolt_asserts: u32 = 0,
     num_jolt_asserts: u32 = 0,
     /// The updates that the update watchdog watched, per UpdateSide (also in the sweeps)
     num_watched_updates: [2]u32 = @splat(0),
+    /// Phase 12: the large islands sorted in region 0, in region 1 and with Jolt's functions (Zolt side, the test-only
+    /// counters PhysicsSystem.large_island_sorts, also in the sweeps; Expect.sorts_in_region1)
+    large_island_sorts: [3]u32 = @splat(0),
 };
 
 /// The `expect_*` operations of Phase 7: they change nothing, the driver fails unless they return `op.count`
@@ -3322,9 +3327,11 @@ fn runScene(allocator: Allocator, entry: *const SceneEntry, builder: *const Scen
     run.stats.num_spawned_jobs = zw.counting_jobs.num_spawned_find_collisions.load(.monotonic);
     run.stats.num_large_island_deactivations = zw.num_large_island_deactivations.load(.monotonic);
     run.stats.num_soft_body_ccd_responses = zw.counting_jobs.num_soft_body_ccd_responses.load(.monotonic);
+    run.stats.character_bounds = zw.phase7.character_virtuals.bounds_stats;
     if (asserts) |a| run.stats.num_zolt_asserts = a.get() - zolt_asserts_before - run.uncompared_asserts;
     run.stats.num_jolt_asserts = jolt.jolt_sim_reference_assert_count() - jolt_asserts_before;
     run.stats.num_watched_updates = watchdog.num_updates;
+    run.stats.large_island_sorts = zw.system.large_island_sorts.counts();
     return run.stats;
 }
 
@@ -4615,6 +4622,8 @@ const CharacterVirtualSlot = struct {
         /// The CharacterVsCharacterCollisionSimple objects (`collision_group`), initialized by the first creation
         groups: [SimScenes.num_character_collision_groups]CharacterVsCharacterCollisionSimple = undefined,
         groups_initialized: bool = false,
+        /// Phase 12: what the bounds caches decided in the loops of the groups (Expect.character_bounds_cache)
+        bounds_stats: zolt.CharacterBoundsCache.Stats = .{},
         /// CharacterListenerMode.record / modify
         record_listener: SimCharacterContactListener = .{},
         modify_listener: SimCharacterContactListener = .{ .modify = true },
@@ -4885,7 +4894,10 @@ const CharacterVirtualSlot = struct {
     fn getGroup(world: *ZoltWorld, index: u32) *CharacterVsCharacterCollisionSimple {
         const storage = &world.phase7.character_virtuals;
         if (!storage.groups_initialized) {
-            for (&storage.groups) |*g| g.* = .init(world.allocator);
+            for (&storage.groups) |*g| {
+                g.* = .init(world.allocator);
+                g.stats = &storage.bounds_stats; // The counters of the bounds caches (test builds)
+            }
             storage.groups_initialized = true;
         }
         return &storage.groups[index];
@@ -7792,12 +7804,21 @@ fn runEntry(entry: *const SceneEntry) !void {
     if (expect.character_records != 0) try expectReached(entry, "the character listener callbacks of Expect.character_records", recordsReach(records, expect.character_records));
     if (expect.ground_states != 0) try expectReached(entry, "the ground states of Expect.ground_states", (stats[0].objects.ground_states & expect.ground_states) == expect.ground_states);
     if (expect.wheel_contacts) try expectReached(entry, "wheel contacts", stats[0].objects.wheel_contacts);
+    if (expect.character_bounds_cache) {
+        const b = stats[0].character_bounds;
+        if (verbose) std.debug.print("{s}: character bounds caches {any}\n", .{ entry.name, b });
+        try expectReached(entry, "pairs rejected, accepted, stale and unsupported by the character bounds caches", b.rejected > 0 and b.accepted > 0 and b.stale > 0 and b.unsupported > 0);
+    }
     try expectVehicleGears(entry, &stats[0].objects);
     if (expect.soft_body_records != 0) try expectReached(entry, "the soft body listener callbacks of Expect.soft_body_records", recordsReach(records, expect.soft_body_records));
     var num_soft_body_ccd_responses: u32 = 0;
     for (stats) |s| num_soft_body_ccd_responses += s.num_soft_body_ccd_responses;
     if (expect.soft_body_ccd) try expectReached(entry, "the CCD response against a soft body face", num_soft_body_ccd_responses > 0);
     if (expect.update_deactivations > 0) try expectReached(entry, "bodies deactivated from inside one update", stats[0].max_update_deactivations >= expect.update_deactivations);
+    if (expect.sorts_in_region1) {
+        for (stats) |s|
+            try expectReached(entry, "large islands sorted in region 1 only (PhysicsSystem.large_island_sorts)", s.large_island_sorts[0] == 0 and s.large_island_sorts[1] > 0 and s.large_island_sorts[2] == 0);
+    }
     for (configs, stats) |config, s| {
         try std.testing.expectEqual(stats[0].max_active_constraints, s.max_active_constraints);
         try std.testing.expectEqual(stats[0].num_expectations, s.num_expectations);

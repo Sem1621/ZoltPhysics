@@ -7,6 +7,10 @@
 //! `calculator.call(MotionProperties, mp)` on either `CalculateSolverSteps` or `DummyCalculateSolverSteps`. `Type`
 //! needs `getNumVelocityStepsOverride()` and `getNumPositionStepsOverride()` returning `u32` (MotionProperties,
 //! Constraint).
+//!
+//! Differences with the C++ version: the Zolt addition `Overrides` + `apply` (Phase 12, class A) collects the overrides
+//! of many objects in four integers and gives the calculator the state that `call` on each of them gives (the max of
+//! the counts, the default flag when an override is 0). LargeIslandSplitter.splitIsland uses it in its loops.
 
 const std = @import("std");
 const PhysicsSettings = @import("../PhysicsSettings.zig").PhysicsSettings;
@@ -36,6 +40,39 @@ pub const CalculateSolverSteps = struct {
         const num_position_steps: u32 = object.getNumPositionStepsOverride();
         self.num_position_steps = @max(self.num_position_steps, num_position_steps);
         self.apply_default_position = self.apply_default_position or num_position_steps == 0;
+    }
+
+    /// Zolt addition (Phase 12, class A): the effect of many `call`s, collected in four integers (the largest and the
+    /// smallest override of each kind) for the loops of LargeIslandSplitter.splitIsland, where the four fields of the
+    /// calculator did not stay in registers. `apply` then gives the calculator the state that these `call`s give, in
+    /// any order: `call` takes the max of the step counts (associative and commutative) and sets the flag when an
+    /// override is 0, which is when the smallest override is 0. Without an object the smallest stays maxInt(u32) and
+    /// nothing changes.
+    pub const Overrides = struct {
+        max_velocity_steps: u32 = 0,
+        min_velocity_steps: u32 = std.math.maxInt(u32),
+        max_position_steps: u32 = 0,
+        min_position_steps: u32 = std.math.maxInt(u32),
+
+        /// The overrides of a body or constraint (what `call` reads)
+        pub fn add(self: *Overrides, comptime Type: type, object: *const Type) void {
+            const num_velocity_steps: u32 = object.getNumVelocityStepsOverride();
+            self.max_velocity_steps = @max(self.max_velocity_steps, num_velocity_steps);
+            self.min_velocity_steps = @min(self.min_velocity_steps, num_velocity_steps);
+
+            const num_position_steps: u32 = object.getNumPositionStepsOverride();
+            self.max_position_steps = @max(self.max_position_steps, num_position_steps);
+            self.min_position_steps = @min(self.min_position_steps, num_position_steps);
+        }
+    };
+
+    /// Zolt addition (Phase 12, class A): `call` for every object of `overrides` (see Overrides)
+    pub fn apply(self: *CalculateSolverSteps, overrides: Overrides) void {
+        self.num_velocity_steps = @max(self.num_velocity_steps, overrides.max_velocity_steps);
+        self.apply_default_velocity = self.apply_default_velocity or overrides.min_velocity_steps == 0;
+
+        self.num_position_steps = @max(self.num_position_steps, overrides.max_position_steps);
+        self.apply_default_position = self.apply_default_position or overrides.min_position_steps == 0;
     }
 
     /// Must be called after all bodies/constraints have been processed
@@ -117,6 +154,41 @@ test "CalculateSolverSteps combines overrides with the defaults" {
     // The dummy accepts the same calls
     const dummy: DummyCalculateSolverSteps = .{};
     dummy.call(TestStepsObject, &.{ .velocity_steps = 1, .position_steps = 1 });
+}
+
+test "CalculateSolverSteps.Overrides + apply gives the state of call on every object" {
+    // Zolt addition (Phase 12, class A)
+    const testing = std.testing;
+    const settings: PhysicsSettings = .{ .num_velocity_steps = 10, .num_position_steps = 2 };
+    var prng = std.Random.DefaultPrng.init(12);
+    const random = prng.random();
+    for (0..500) |round| {
+        // Start from a calculator that already saw objects (the contacts of the island before the loops of splitIsland)
+        var with_call = CalculateSolverSteps.init(&settings);
+        for (0..round % 3) |_|
+            with_call.call(TestStepsObject, &.{ .velocity_steps = random.uintLessThan(u32, 4), .position_steps = random.uintLessThan(u32, 4) });
+        var with_overrides = with_call;
+
+        var overrides: CalculateSolverSteps.Overrides = .{};
+        for (0..random.uintLessThan(usize, 20)) |_| {
+            // Mostly no override (0), sometimes the largest u32
+            const object: TestStepsObject = .{
+                .velocity_steps = if (random.uintLessThan(u32, 4) == 0) random.uintLessThan(u32, 300) else if (round == 7) std.math.maxInt(u32) else 0,
+                .position_steps = if (random.uintLessThan(u32, 3) == 0) random.uintLessThan(u32, 300) else 0,
+            };
+            with_call.call(TestStepsObject, &object);
+            overrides.add(TestStepsObject, &object);
+        }
+        with_overrides.apply(overrides);
+        try testing.expectEqual(with_call.num_velocity_steps, with_overrides.num_velocity_steps);
+        try testing.expectEqual(with_call.num_position_steps, with_overrides.num_position_steps);
+        try testing.expectEqual(with_call.apply_default_velocity, with_overrides.apply_default_velocity);
+        try testing.expectEqual(with_call.apply_default_position, with_overrides.apply_default_position);
+        with_call.finalize();
+        with_overrides.finalize();
+        try testing.expectEqual(with_call.getNumVelocitySteps(), with_overrides.getNumVelocitySteps());
+        try testing.expectEqual(with_call.getNumPositionSteps(), with_overrides.getNumPositionSteps());
+    }
 }
 
 test "CalculateSolverSteps with MotionProperties" {

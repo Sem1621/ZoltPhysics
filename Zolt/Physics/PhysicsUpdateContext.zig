@@ -13,6 +13,8 @@
 //! - `mCCDBodies` + `mCCDBodiesCapacity` and `mActiveBodyToCCDBody` + `mNumActiveBodyToCCDBody` are TempArrays (the
 //!   capacity is the length), `mSoftBodyUpdateContexts` + `mNumSoftBodies` too.
 //! - Zolt addition (D5): the out of memory latch `out_of_memory` with `setOutOfMemory` / `isOutOfMemory`.
+//! - Zolt addition (Phase 12, class A): `Step.sort_scratch_used`, the bytes of the scratch regions that the sorts of
+//!   the large islands of the step use (PhysicsSystem.claimSortScratch).
 //! - The constructor `PhysicsUpdateContext(TempAllocator &)` is the struct literal in PhysicsSystem.update; the
 //!   destructor is `deinit` (it releases the job handles of the steps and frees the steps).
 
@@ -167,6 +169,9 @@ pub const PhysicsUpdateContext = struct {
         solve_velocity_constraints_next_island: std.atomic.Value(u32) = .init(0),
         /// Next island that needs to be processed for the solve position constraints step (doesn't need own cache line since velocity jobs don't run at same time)
         solve_position_constraints_next_island: std.atomic.Value(u32) = .init(0),
+        /// Zolt addition (Phase 12, class A): the bytes of the two scratch regions that the sorts of the large islands of
+        /// this step use (PhysicsSystem.sortScratchRegions, claimSortScratch)
+        sort_scratch_used: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) },
 
         /// Next active body index to take when integrating velocities
         integrate_velocity_read_idx: std.atomic.Value(u32) = .init(0),

@@ -39,6 +39,15 @@
 //!   of the split islands. Nothing in it allocates; its closure checks the out of memory latch at job entry only
 //!   (SimulationArchitecture section 8), so a job that entered keeps claiming and splitting islands and the batch
 //!   protocol of the LargeIslandSplitter is never left halfway.
+//! - Differences with the C++ version (Phase 12, class A): an island with at least LargeIslandSplitter's
+//!   cLargeIslandTreshold contacts and constraints converts and sorts in `sortLargeIsland` (never inlined), with
+//!   exactly Jolt's order: ConstraintManager.sortConstraintsWithRecords and
+//!   ContactConstraintManager.constraintIdxToConstraintOffsetAndSort (Core/KeySort.zig, Jolt's QuickSort on ties).
+//!   Their records come from memory that exists anyway and is free while the SolveVelocityConstraints jobs run
+//!   (`sortScratchRegions`: the body pair buffer, then the unused end of the contact constraint buffer), claimed per
+//!   island without a lock (`claimSortScratch` / `releaseSortScratch`, `Step.sort_scratch_used`): no allocation, no
+//!   temp memory. An island without room there, and every smaller island, takes Jolt's three calls. Only in test
+//!   builds, `large_island_sorts` counts which of these three ways the large islands took (`void` otherwise).
 //!
 //! SimulationArchitecture D4 / D5 / D6 / D7:
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
@@ -84,6 +93,11 @@
 //!   JPH_TRACK_SIMULATION_STATS (GatherIslandStats, the tick counters) follows MotionProperties'
 //!   comptime switch `track_simulation_stats` (off). JPH_TRACK_BROADPHASE_STATS (ReportBroadphaseStats) and
 //!   ReportSimulationStats are not ported with the profiler. JPH_PROFILE is dropped.
+//! - Zolt (`-Djob_profile=true` only, Core/JobProfiler.zig): the solve jobs record the time they yield while other jobs
+//!   hold the batches of a split island as `wait` spans ("Wait: split island batches"), JobSoftBodySimulate its yields
+//!   after a pass without work ("Wait: soft bodies"). `part` spans mark the preparation of an island in JobSolveVelocityConstraints
+//!   ("Prepare island", "Prepare island (split)") and the bounds and sleep update of a split island's final batch
+//!   ("Final batch: bounds and sleep"). Without the option these hooks generate no code.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -107,6 +121,7 @@ const Mutex = @import("../Core/Mutex.zig").Mutex;
 const StaticArray = @import("../Core/StaticArray.zig").StaticArray;
 const quickSort = @import("../Core/QuickSort.zig").quickSort;
 const JobSystemFile = @import("../Core/JobSystem.zig");
+const JobProfiler = @import("../Core/JobProfiler.zig").JobProfiler;
 const JobSystem = JobSystemFile.JobSystem;
 const JobHandle = JobSystem.JobHandle;
 const TempAllocatorFile = @import("../Core/TempAllocator.zig");
@@ -196,6 +211,7 @@ const PhysicsStepListenerContext = PhysicsStepListenerFile.PhysicsStepListenerCo
 const PhysicsUpdateContext = @import("PhysicsUpdateContext.zig").PhysicsUpdateContext;
 const IslandBuilder = @import("IslandBuilder.zig").IslandBuilder;
 const LargeIslandSplitter = @import("LargeIslandSplitter.zig").LargeIslandSplitter;
+const KeySort = @import("../Core/KeySort.zig");
 const CalculateSolverStepsFile = @import("Constraints/CalculateSolverSteps.zig");
 const CalculateSolverSteps = CalculateSolverStepsFile.CalculateSolverSteps;
 const DummyCalculateSolverSteps = CalculateSolverStepsFile.DummyCalculateSolverSteps;
@@ -390,6 +406,24 @@ pub const PhysicsSystem = struct {
     /// `DebugRenderer::sInstance` (the CCD draws, the contact point and manifold draws). Only with -Ddebug_renderer
     /// (`void` otherwise). Null draws nothing.
     debug_renderer: if (Core.debug_renderer) ?*DebugRenderer else void = if (Core.debug_renderer) null else {},
+
+    /// Zolt addition (Phase 12, class A), only in test builds (`void` otherwise): how the large islands were sorted
+    /// since `init` (sortLargeIsland). The tests check with it that each of the three ways runs.
+    large_island_sorts: if (builtin.is_test) LargeIslandSorts else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 12, class A), tests only: the counts of `large_island_sorts`
+    pub const LargeIslandSorts = struct {
+        /// Islands sorted with records in region 0 (the body pair buffer) and 1 (the unused end of the contact
+        /// constraint buffer) of `sortScratchRegions`
+        in_region: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) },
+        /// Islands sorted with Jolt's functions because no region had room for their records
+        jolt: std.atomic.Value(u32) = .init(0),
+
+        /// The counts: region 0, region 1, Jolt's functions
+        pub fn counts(self: *const LargeIslandSorts) [3]u32 {
+            return .{ self.in_region[0].load(.monotonic), self.in_region[1].load(.monotonic), self.jolt.load(.monotonic) };
+        }
+    };
 
     /// Not initialized (Jolt's constructor), call init
     pub const empty: PhysicsSystem = .{};
@@ -2134,6 +2168,121 @@ pub const PhysicsSystem = struct {
         }
     }
 
+    /// Zolt addition (Phase 12, class A): scratch memory for the sorts of one large island
+    /// (ConstraintManager.sortConstraintsWithRecords, ContactConstraintManager.constraintIdxToConstraintOffsetAndSort):
+    /// `num_records` records of 16 bytes followed by the buckets of KeySort, in one of the two regions of
+    /// `sortScratchRegions`
+    pub const SortScratch = struct {
+        /// The region it lies in (an index into `sortScratchRegions` and `Step.sort_scratch_used`)
+        region: u32,
+        /// Its first byte in the region
+        start: u32,
+        /// Its size in bytes
+        size: u32,
+        /// Its memory
+        memory: [*]align(8) u8,
+        /// The number of records it holds
+        num_records: usize,
+
+        const record_size = 16;
+
+        comptime {
+            for ([_]type{ ConstraintManager.SortRecord, ContactConstraintManager.SortRecord }) |Record| {
+                std.debug.assert(@sizeOf(Record) == record_size);
+                std.debug.assert(@alignOf(Record) <= 8);
+            }
+        }
+
+        /// The number of bytes for `num_records` records and their buckets (a multiple of 8)
+        pub fn bytesFor(num_records: usize) usize {
+            return std.mem.alignForward(usize, num_records * record_size + KeySort.bucketMemory(num_records) * @sizeOf(u32), 8);
+        }
+
+        /// The records (`n` <= num_records)
+        pub fn records(self: SortScratch, comptime Record: type, n: usize) []Record {
+            std.debug.assert(n <= self.num_records);
+            const ptr: [*]Record = @ptrCast(self.memory);
+            return ptr[0..n];
+        }
+
+        /// The buckets for `n` records
+        pub fn buckets(self: SortScratch, n: usize) []u32 {
+            std.debug.assert(n <= self.num_records);
+            const ptr: [*]u32 = @ptrCast(@alignCast(self.memory + self.num_records * record_size));
+            return ptr[0..KeySort.bucketMemory(n)];
+        }
+
+        fn constraintRecords(self: SortScratch, n: usize) []ConstraintManager.SortRecord {
+            return self.records(ConstraintManager.SortRecord, n);
+        }
+
+        fn contactRecords(self: SortScratch, n: usize) []ContactConstraintManager.SortRecord {
+            return self.records(ContactConstraintManager.SortRecord, n);
+        }
+    };
+
+    /// Zolt addition (Phase 12, class A): the memory that the sorts of the large islands of a step may use as scratch.
+    /// It exists anyway and nothing else uses it while the SolveVelocityConstraints jobs run, so the sorts allocate
+    /// nothing (D5: the jobs do not allocate, and the D12 allocation failure sweeps see Jolt's allocations) and take no
+    /// temp memory beyond Jolt's:
+    /// - 0: the body pair buffer of the update (`context.body_pairs`, Jolt's mBodyPairs, `max_in_flight_body_pairs` * 8
+    ///   bytes). Only the FindCollisions jobs of a step use it, and the next step's start after this step. It comes
+    ///   first because those jobs just wrote it: it is in the cache.
+    /// - 1: the end of the contact constraint buffer behind the last constraint of the step (larger, unless the buffer
+    ///   is nearly full). Constraints are only added by the FindCollisions jobs (ProcessBodyPair); the next step's are
+    ///   added after RecycleConstraintBuffer.
+    /// The SolveVelocityConstraints jobs run after every FindCollisions job of their step: they depend on
+    /// FinalizeIslands, which depends on all of them (also on the ones that were never spawned).
+    fn sortScratchRegions(self: *const Self, context: *const PhysicsUpdateContext) [2][]align(8) u8 {
+        return .{ std.mem.sliceAsBytes(context.body_pairs.items), self.contact_manager.getUnusedConstraintBuffer() };
+    }
+
+    /// Zolt addition (Phase 12, class A): take scratch for `num_records` sort records from the first of `regions` that
+    /// has room (null when none has: the island then takes Jolt's path). `used` counts the bytes in use per region;
+    /// the islands of a step take consecutive parts of a region, `releaseSortScratch` gives a part back when it is the
+    /// last one.
+    pub fn claimSortScratch(regions: [2][]align(8) u8, used: *[2]std.atomic.Value(u32), num_records: usize) ?SortScratch {
+        const size = SortScratch.bytesFor(num_records);
+        for (regions, used, 0..) |region, *region_used, i| {
+            if (region.len > std.math.maxInt(u32))
+                continue; // (Not reachable: the contact constraint buffer is at most 4 GB)
+            var start = region_used.load(.monotonic);
+            while (size <= region.len - start) {
+                start = region_used.cmpxchgWeak(start, start + @as(u32, @intCast(size)), .acquire, .monotonic) orelse
+                    return .{ .region = @intCast(i), .start = start, .size = @intCast(size), .memory = @alignCast(region.ptr + start), .num_records = num_records };
+            }
+        }
+        return null;
+    }
+
+    /// Zolt addition (Phase 12, class A): give back the scratch of `claimSortScratch`. Only the last part of a region
+    /// can be given back; a part that another island claimed after this one stays used until the end of the step.
+    pub fn releaseSortScratch(used: *[2]std.atomic.Value(u32), scratch: SortScratch) void {
+        _ = used[scratch.region].cmpxchgStrong(scratch.start + scratch.size, scratch.start, .release, .monotonic);
+    }
+
+    /// Zolt addition (Phase 12, class A): ConstraintIdxToConstraintOffset and the two sorts of a large island in
+    /// jobSolveVelocityConstraints, with the same results: the sorts take records in memory that is free at this point
+    /// instead of the indices and offsets (see claimSortScratch, sortConstraintsWithRecords and
+    /// constraintIdxToConstraintOffsetAndSort). Returns false and changes nothing when there is no scratch for the
+    /// records: the island then takes Jolt's path. Never inlined, so that the code of the job stays as it was for the
+    /// other islands.
+    fn sortLargeIsland(self: *Self, context: *PhysicsUpdateContext, step: *Step, contacts: []u32, constraints: []u32, active_constraints: []const *Constraint) bool {
+        const scratch = claimSortScratch(self.sortScratchRegions(context), &step.sort_scratch_used, @max(contacts.len, constraints.len)) orelse {
+            if (builtin.is_test) _ = self.large_island_sorts.jolt.fetchAdd(1, .monotonic);
+            return false;
+        };
+        defer releaseSortScratch(&step.sort_scratch_used, scratch);
+        if (builtin.is_test) _ = self.large_island_sorts.in_region[scratch.region].fetchAdd(1, .monotonic);
+
+        // Sort constraints to give a deterministic simulation
+        ConstraintManager.sortConstraintsWithRecords(active_constraints, constraints, scratch.constraintRecords(constraints.len), scratch.buckets(constraints.len));
+
+        // Convert indices to offsets and sort contacts to give a deterministic simulation
+        self.contact_manager.constraintIdxToConstraintOffsetAndSort(contacts, scratch.contactRecords(contacts.len), scratch.buckets(contacts.len));
+        return true;
+    }
+
     /// (Zolt D5 and SimulationArchitecture section 8: the closure checks the out of memory latch at job entry only. A job
     /// that has entered claims and splits islands until none are left even when the update got poisoned meanwhile,
     /// otherwise `next_split_island` never reaches the number of large islands and the jobs in the batch loop wait
@@ -2149,6 +2298,11 @@ pub const PhysicsSystem = struct {
         // Only the first step to correct for the delta time difference in the previous update
         const warm_start_impulse_ratio: f32 = if (self.physics_settings.constraint_warm_start) (if (step.is_first) context.warm_start_impulse_ratio else 1.0) else 0.0;
 
+        // Zolt: -Djob_profile=true records the yields of this job as one wait span until it gets a batch (see the top of
+        // this file)
+        var wait_span: if (Core.job_profile) JobProfiler.WaitSpan else void = if (Core.job_profile) .{ .profiler = context.job_system.getJobProfiler(), .name = "Wait: split island batches" } else {};
+        defer if (Core.job_profile) wait_span.done();
+
         var check_islands = true;
         var check_split_islands = self.physics_settings.use_large_island_splitter;
         while (true) {
@@ -2157,6 +2311,7 @@ pub const PhysicsSystem = struct {
                 var batch: LargeIslandSplitter.Batch = undefined;
                 switch (self.large_island_splitter.fetchNextBatch(&batch)) {
                     .batch_retrieved => {
+                        if (Core.job_profile) wait_span.done();
                         const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
                         if (batch.first_iteration) {
@@ -2228,15 +2383,22 @@ pub const PhysicsSystem = struct {
                 }
 
                 const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
+                const prepare_start = if (Core.job_profile) JobProfiler.begin(wait_span.profiler) else {};
 
-                // Convert indices to offsets so that we lose one indirection in the solver. We couldn't do this earlier as we need constraint indices to build islands.
-                self.contact_manager.constraintIdxToConstraintOffset(contacts);
+                // Zolt (Phase 12, class A): a large island converts and sorts with records (sortLargeIsland), with the
+                // same results; the other islands and a large island without scratch memory take Jolt's path
+                if (contacts.len + constraints.len < LargeIslandSplitter.large_island_treshold or
+                    !@call(.never_inline, sortLargeIsland, .{ self, context, step, contacts, constraints, active_constraints }))
+                {
+                    // Convert indices to offsets so that we lose one indirection in the solver. We couldn't do this earlier as we need constraint indices to build islands.
+                    self.contact_manager.constraintIdxToConstraintOffset(contacts);
 
-                // Sort constraints to give a deterministic simulation
-                ConstraintManager.sortConstraints(active_constraints, constraints);
+                    // Sort constraints to give a deterministic simulation
+                    ConstraintManager.sortConstraints(active_constraints, constraints);
 
-                // Sort contacts to give a deterministic simulation
-                self.contact_manager.sortContacts(contacts);
+                    // Sort contacts to give a deterministic simulation
+                    self.contact_manager.sortContacts(contacts);
+                }
 
                 // Split up large islands
                 var is_large_island = true;
@@ -2245,6 +2407,7 @@ pub const PhysicsSystem = struct {
                     !self.large_island_splitter.splitIsland(island_idx, &self.island_builder, &self.body_manager, &self.contact_manager, active_constraints, &steps_calculator))
                 {
                     is_large_island = false;
+                    if (Core.job_profile) JobProfiler.end(wait_span.profiler, .part, "Prepare island", prepare_start);
 
                     // We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
                     ConstraintManager.warmStartVelocityConstraints(active_constraints, constraints, warm_start_impulse_ratio, &steps_calculator);
@@ -2266,6 +2429,7 @@ pub const PhysicsSystem = struct {
                     // Save back the lambdas in the contact cache for the warm start of the next physics update
                     self.contact_manager.storeAppliedImpulses(contacts);
                 }
+                if (Core.job_profile and is_large_island) JobProfiler.end(wait_span.profiler, .part, "Prepare island (split)", prepare_start);
 
                 if (track_simulation_stats) {
                     const num_ticks = getProcessorTickCount() -% start_tick;
@@ -2277,6 +2441,7 @@ pub const PhysicsSystem = struct {
                 }
             } else if (check_split_islands) {
                 // If there are split islands, but we didn't do any work, give up a time slice
+                if (Core.job_profile) wait_span.waiting();
                 std.Thread.yield() catch {};
             } else {
                 // No more work
@@ -3201,6 +3366,11 @@ pub const PhysicsSystem = struct {
         var bodies_to_sleep: BodiesToSleep = .init(&self.body_manager, &bodies_to_sleep_buffer);
         defer bodies_to_sleep.deinit();
 
+        // Zolt: -Djob_profile=true records the yields of this job as one wait span until it gets a batch (see the top of
+        // this file)
+        var wait_span: if (Core.job_profile) JobProfiler.WaitSpan else void = if (Core.job_profile) .{ .profiler = context.job_system.getJobProfiler(), .name = "Wait: split island batches" } else {};
+        defer if (Core.job_profile) wait_span.done();
+
         var check_islands = true;
         var check_split_islands = self.physics_settings.use_large_island_splitter;
         while (true) {
@@ -3209,6 +3379,7 @@ pub const PhysicsSystem = struct {
                 var batch: LargeIslandSplitter.Batch = undefined;
                 switch (self.large_island_splitter.fetchNextBatch(&batch)) {
                     .batch_retrieved => {
+                        if (Core.job_profile) wait_span.done();
                         const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
                         // Solve the batch
@@ -3221,8 +3392,11 @@ pub const PhysicsSystem = struct {
                         self.large_island_splitter.markBatchProcessed(batch.split_island_index, batch.constraints, batch.contacts, &last_iteration, &final_batch);
 
                         // The final batch will update all bounds and check sleeping
-                        if (final_batch)
+                        if (final_batch) {
+                            const bounds_start = if (Core.job_profile) JobProfiler.begin(wait_span.profiler) else {};
                             self.checkSleepAndUpdateBounds(self.large_island_splitter.getIslandIndex(batch.split_island_index), context, step, &bodies_to_sleep);
+                            if (Core.job_profile) JobProfiler.end(wait_span.profiler, .part, "Final batch: bounds and sleep", bounds_start);
+                        }
 
                         if (track_simulation_stats) {
                             const num_ticks = getProcessorTickCount() -% start_tick;
@@ -3288,6 +3462,7 @@ pub const PhysicsSystem = struct {
                 }
             } else if (check_split_islands) {
                 // If there are split islands, but we didn't do any work, give up a time slice
+                if (Core.job_profile) wait_span.waiting();
                 std.Thread.yield() catch {};
             } else {
                 // No more work
@@ -3496,6 +3671,10 @@ pub const PhysicsSystem = struct {
         const num_soft_bodies = context.getNumSoftBodies();
         const start_idx = thread_index * num_soft_bodies / context.getMaxConcurrency();
 
+        // Zolt: -Djob_profile=true records each yield after a pass without work as a wait span (see the top of this file)
+        var wait_span: if (Core.job_profile) JobProfiler.WaitSpan else void = if (Core.job_profile) .{ .profiler = context.job_system.getJobProfiler(), .name = "Wait: soft bodies" } else {};
+        defer if (Core.job_profile) wait_span.done();
+
         // Keep running partial updates until everything has been updated
         const did_work = @intFromEnum(SoftBodyMotionProperties.Status.did_work);
         var status: u32 = undefined;
@@ -3520,8 +3699,11 @@ pub const PhysicsSystem = struct {
             }
 
             // If we didn't perform any work, yield the thread so that something else can run
-            if ((status & did_work) == 0)
+            if ((status & did_work) == 0) {
+                if (Core.job_profile) wait_span.waiting();
                 std.Thread.yield() catch {};
+                if (Core.job_profile) wait_span.done();
+            }
 
             if (status == @intFromEnum(SoftBodyMotionProperties.Status.done))
                 break;

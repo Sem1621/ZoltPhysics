@@ -57,6 +57,7 @@ pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
 pub const JobSystemSingleThreaded = @import("Core/JobSystemSingleThreaded.zig").JobSystemSingleThreaded;
 pub const JobSystemThreadPool = @import("Core/JobSystemThreadPool.zig").JobSystemThreadPool;
 pub const JobSystemWithBarrier = @import("Core/JobSystemWithBarrier.zig").JobSystemWithBarrier;
+pub const KeySort = @import("Core/KeySort.zig");
 pub const Lifetime = @import("Core/Lifetime.zig");
 pub const LinearCurve = @import("Core/LinearCurve.zig").LinearCurve;
 pub const LFHMAllocator = @import("Core/LockFreeHashMap.zig").LFHMAllocator;
@@ -263,6 +264,7 @@ pub const Character = @import("Physics/Character/Character.zig").Character;
 pub const CharacterSettings = @import("Physics/Character/Character.zig").CharacterSettings;
 pub const CharacterBase = @import("Physics/Character/CharacterBase.zig").CharacterBase;
 pub const CharacterBaseSettings = @import("Physics/Character/CharacterBase.zig").CharacterBaseSettings;
+pub const CharacterBoundsCache = @import("Physics/Character/CharacterBoundsCache.zig").CharacterBoundsCache;
 pub const CharacterID = @import("Physics/Character/CharacterID.zig").CharacterID;
 pub const CharacterContact = @import("Physics/Character/CharacterVirtual.zig").CharacterContact;
 pub const CharacterContactKey = @import("Physics/Character/CharacterVirtual.zig").CharacterContactKey;
@@ -668,6 +670,7 @@ const source_files = .{
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),
     @import("Core/JobSystemWithBarrier.zig"),
+    @import("Core/KeySort.zig"),
     @import("Core/Lifetime.zig"),
     @import("Core/LinearCurve.zig"),
     @import("Core/LockFreeHashMap.zig"),
@@ -778,6 +781,7 @@ const source_files = .{
     @import("Physics/Body/MotionType.zig"),
     @import("Physics/Character/Character.zig"),
     @import("Physics/Character/CharacterBase.zig"),
+    @import("Physics/Character/CharacterBoundsCache.zig"),
     @import("Physics/Character/CharacterID.zig"),
     @import("Physics/Character/CharacterVirtual.zig"),
     @import("Physics/Collision/AABoxCast.zig"),

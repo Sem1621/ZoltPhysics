@@ -45,7 +45,9 @@
 //!   idle time of every run (Zolt/Core/JobProfiler.zig, from the first update to the last). After the stat line of a
 //!   run, `-p` writes the timeline as a Chrome trace `<scene>_<tag>.json` in the current directory (e.g.
 //!   `Ragdoll_linearcast_th4.json`, open it in chrome://tracing or https://ui.perfetto.dev) and prints one line with
-//!   the wall time and the busy and idle time of each thread. Without the option `-p` prints a note.
+//!   the wall time and the busy and idle time of each thread. Without the option `-p` prints a note. With `-p` each
+//!   thread keeps up to `profile_capacity` events (about 10 MB per thread), enough for the default 500 steps; a longer
+//!   run loses its oldest events, which the trace and tools/job_trace_stats.py report.
 //! - `-phase_times` (Zolt): after the stat line of a run, print the total time of the scene updates (UpdateTest) and of
 //!   the physics updates (PhysicsSystem::Update), in milliseconds. The hash does not change.
 
@@ -79,6 +81,9 @@ const log = std.log;
 
 /// Time step for physics
 const delta_time: f32 = 1.0 / 60.0;
+
+/// Zolt: events per thread of the job profiler with `-p` (Core/JobProfiler.zig, 40 bytes each)
+const profile_capacity: u32 = 256 * 1024;
 
 /// Jolt's `Trace = TraceImpl`: every log message of the program and the library goes to stdout (Trace has no levels)
 pub const std_options: std.Options = .{
@@ -503,7 +508,11 @@ pub fn main(init: std.process.Init) !u8 {
             for (thread_permutations.items) |num_threads| {
                 // Create job system with desired number of threads
                 var job_system: JobSystemThreadPool = .empty;
-                try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{ .num_threads = @bitCast(num_threads) });
+                try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{
+                    .num_threads = @bitCast(num_threads),
+                    // Zolt: with -p the trace holds the whole run of 500 steps (about 200 events per step and thread)
+                    .profile_capacity = if (enable_profiler) profile_capacity else zolt.JobProfiler.default_capacity,
+                });
                 defer job_system.deinit();
 
                 // Create physics system
