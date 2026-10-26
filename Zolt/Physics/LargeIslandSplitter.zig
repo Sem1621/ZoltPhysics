@@ -18,6 +18,11 @@
 //!   sets `num_active_bodies` back to 0 when the allocation of the split masks failed (Reset only does that when it
 //!   frees the split masks), so the splitter is in Jolt's constructed state again.
 //!
+//! Differences with the C++ version (Phase 12, class A): the loops of SplitIsland collect the step overrides of the
+//! dynamic bodies of the contacts and of the constraints in a `CalculateSolverSteps.Overrides` (four integers that stay
+//! in registers) and apply it to ioStepsCalculator before Finalize, instead of calling the calculator per object. The
+//! calculator ends in the same state (CalculateSolverSteps.Overrides).
+//!
 //! Out parameters and pointers:
 //! - `Splits::FetchNextBatch` / `LargeIslandSplitter::FetchNextBatch` write their out parameters into an out struct
 //!   (`Splits.SplitBatch` with offsets relative to `contact_and_constraint_indices`, `Batch` with slices of it), only when
@@ -524,6 +529,11 @@ pub const LargeIslandSplitter = struct {
         var num_contacts_in_split: [num_splits]u32 = @splat(0);
         var num_constraints_in_split: [num_splits]u32 = @splat(0);
 
+        // Zolt (Phase 12, class A): the loops collect the step overrides of the bodies and constraints that Jolt passes to
+        // ioStepsCalculator in `overrides` (four integers that stay in registers) and apply them before Finalize, with
+        // the same result (CalculateSolverSteps.Overrides)
+        var overrides: CalculateSolverSteps.Overrides = .{};
+
         // Get space to store split indices
         var offset = self.contact_and_constraints_next_free.fetchAdd(island_size, .monotonic);
         const contact_split_idx = self.contact_and_constraints_split_idx.items[offset..][0..num_contacts_in_island];
@@ -539,9 +549,9 @@ pub const LargeIslandSplitter = struct {
             cur_contact_split_idx.* = split;
 
             if (body1.isDynamic())
-                steps_calculator.call(MotionProperties, body1.getMotionPropertiesUnchecked().?);
+                overrides.add(MotionProperties, body1.getMotionPropertiesUnchecked().?);
             if (body2.isDynamic())
-                steps_calculator.call(MotionProperties, body2.getMotionPropertiesUnchecked().?);
+                overrides.add(MotionProperties, body2.getMotionPropertiesUnchecked().?);
         }
 
         // Assign the constraints to a split
@@ -551,9 +561,10 @@ pub const LargeIslandSplitter = struct {
             num_constraints_in_split[split] += 1;
             cur_constraint_split_idx.* = split;
 
-            steps_calculator.call(Constraint, constraint);
+            overrides.add(Constraint, constraint);
         }
 
+        steps_calculator.apply(overrides);
         steps_calculator.finalize();
 
         // Start with 0 splits
