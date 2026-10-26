@@ -57,6 +57,7 @@ pub const JobSystem = @import("Core/JobSystem.zig").JobSystem;
 pub const JobSystemSingleThreaded = @import("Core/JobSystemSingleThreaded.zig").JobSystemSingleThreaded;
 pub const JobSystemThreadPool = @import("Core/JobSystemThreadPool.zig").JobSystemThreadPool;
 pub const JobSystemWithBarrier = @import("Core/JobSystemWithBarrier.zig").JobSystemWithBarrier;
+pub const KeySort = @import("Core/KeySort.zig");
 pub const Lifetime = @import("Core/Lifetime.zig");
 pub const LinearCurve = @import("Core/LinearCurve.zig").LinearCurve;
 pub const LFHMAllocator = @import("Core/LockFreeHashMap.zig").LFHMAllocator;
@@ -668,6 +669,7 @@ const source_files = .{
     @import("Core/JobSystemSingleThreaded.zig"),
     @import("Core/JobSystemThreadPool.zig"),
     @import("Core/JobSystemWithBarrier.zig"),
+    @import("Core/KeySort.zig"),
     @import("Core/Lifetime.zig"),
     @import("Core/LinearCurve.zig"),
     @import("Core/LockFreeHashMap.zig"),
