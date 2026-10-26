@@ -551,8 +551,10 @@ how often it hits. The replayed box equals Jolt's as real numbers (only the sign
 ExpandBy, Overlaps and RayAABoxHits, so every accept and reject is Jolt's (PortingGuide section 8, rule 16).
 CharacterVirtual's instructions went from 578.8e6 to 373.9e6 (-35.4%; -6.0% from the cached transform alone). The new
 SimulationParity scenes `character_virtual_vs_character_changes` and `_far` change the key, the shape and the group
-between updates and check that every path of the cache ran. One visible difference: the reference count of a
-character's shape is one higher than in Jolt. A cached rotation matrix in RotatedTranslatedShape was measured and not
+between updates and check that the cache rejected, accepted, found stale and found unsupported pairs (the fallback
+for a translation that is not finite is covered by CharacterBoundsCacheTests). One visible difference: every
+character's cache holds a reference to its shape, so a shape's reference count is higher than in Jolt by the number
+of characters that use it. A cached rotation matrix in RotatedTranslatedShape was measured and not
 kept (+0.6% CharacterVirtual, +1.1% Ragdoll instructions).
 
 **Large island sorts.** JobSolveVelocityConstraints converts the contact indices of an island to offsets and sorts
@@ -611,9 +613,16 @@ Job profiles of the measured step (`-t=4`, the median of 3 runs; percent of the 
 **Open, Phase 13 candidates.**
 - The final batch of a split island updates the bounds and the sleep state of all its bodies on one thread (5.5%
   of the wall time in ConvexVsMesh and 8.2% in Ragdoll at 4 threads). The per body part is order independent and
-  could run in chunks in the jobs that wait, with putToSleep and notifyBodiesAABBChanged kept serial; the batch
-  protocol of the LargeIslandSplitter needs a bounds phase in its status word for that (a design is in the Phase 12
-  notes of the large island sorts).
+  could run in chunks in the jobs that wait, with putToSleep and notifyBodiesAABBChanged kept serial. The batch
+  protocol of the LargeIslandSplitter needs a bounds phase for that. A design that keeps Jolt's results (from the
+  Phase 12 review): leave every Split entry as it is until the island is done, because a job that polls can still read
+  the split ranges that an older status word names (fetchNextBatch reads `splits[split]` before its fetchAdd); encode
+  the bounds phase in the status word itself (the iteration of the last batch, so that the pollers keep polling, a
+  split value outside 0-31, and the item field as the counter of claimed chunks) and test for it in fetchNextBatch
+  before any read of `splits`, so that every fetchAdd, also a stray one of a poller that passed the pre-check, claims
+  a chunk or gets "wait"; chunks of a fixed number of bodies, a function of the body count only; the done counter in
+  `items_processed` and the AND of CanSleep in padding bytes of Splits (its layout stays); the job that completes the
+  last chunk runs putToSleep in the island's order, then notifyBodiesAABBChanged, then stores the final status.
 - ConvexVsMesh runs at C++ speed on 1 thread but at 0.93-0.95 of it on 2 and 4 threads, and HighSpeed at 0.92 on 1
   thread (its instructions are at 0.98): not explained yet.
 - CharacterVirtual: the loops still take about 155e6 of the 374e6 instructions (the key compares and the replays);

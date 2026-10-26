@@ -78,8 +78,9 @@
 //!   the reject decision reads; the proof is in the header of CharacterBoundsCache.zig). They run Jolt's code otherwise
 //!   (a stale cache, an unsupported shape or rotation, a translation that is not finite). The cache holds one reference
 //!   to the shape of its stored key, whatever the shape (also an unsupported one), for as long as that is its key: the
-//!   reference count of every character's shape (Shape.getRefCount) is one higher than in Jolt, and after a direct
-//!   write to `base.shape` the old shape stays alive until the next refresh point or the destructor.
+//!   reference count of a shape (Shape.getRefCount) is higher than in Jolt by the number of characters whose cache
+//!   holds it (one for a character's own shape, 100 for a shape that 100 characters share), and after a direct write
+//!   to `base.shape` the old shape stays alive until the next refresh point or the destructor.
 //! - `CharacterVsCharacterCollisionSimple.stats` (test builds only, `void` otherwise) counts what the caches decided.
 
 const std = @import("std");

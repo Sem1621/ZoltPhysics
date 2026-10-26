@@ -19,9 +19,11 @@
 //! more than 16 records. Keys that are hashes spread evenly over the buckets; dense keys (one priority and an index)
 //! too, because the buckets cover the range of the keys, not all 64 bits. Clustered keys only make some buckets
 //! larger, and those take QuickSort: no quadratic case, but no linear time either. A known limit of that kind:
-//! constraint keys with two or more priorities (`priority << 32 | index`) span a range of at least 2^32, so all keys of
-//! one priority (their indices span far less than the range divided by the number of buckets) fall into one bucket,
-//! which QuickSort sorts. The checks: inside a bucket the insertion sort sees every equal pair (the later one stops at
+//! constraint keys with two or more priorities (`priority << 32 | index`) span a range of about 2^32 or more, while
+//! the indices of one priority span far less than the range divided by the number of buckets: the keys of one priority
+//! fall into one bucket or two neighboring ones (the buckets start at the smallest key, not at a multiple of 2^32), and
+//! priorities close in value can share a bucket. QuickSort sorts those buckets. The checks: inside a bucket the
+//! insertion sort sees every equal pair (the later one stops at
 //! the earlier one), QuickSort's buckets are checked after the sort, and every bucket's first key must be larger than
 //! the last key before it.
 //!

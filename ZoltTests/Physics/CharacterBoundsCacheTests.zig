@@ -1,5 +1,5 @@
 //! Zolt addition, no Jolt file: tests of the bounds cache of CharacterVirtual (Zolt/Physics/Character/
-//! CharacterBoundsCache.zig, Roadmap Phase 12 item G1). Jolt has no such cache: CharacterVsCharacterCollisionSimple
+//! CharacterBoundsCache.zig, Roadmap Phase 12, "Character bounds caches"). Jolt has no such cache: CharacterVsCharacterCollisionSimple
 //! computes the center of mass transform and the world bounds of every other character for every query.
 //! Status: complete
 //!

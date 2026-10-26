@@ -22,9 +22,10 @@
 //!   code for that pair. So the refresh points only decide how often the cache hits, never a result.
 //! - **Shape.** The cache holds a reference to the shape of its stored key (`pin`), so that the address cannot be freed
 //!   and reused by another shape while the key compares it. Every stored key holds it, whatever the shape (a supported
-//!   or an unsupported one, see `store`), for as long as it is the stored key: the reference count of a character's
-//!   shape (Shape.getRefCount) is one higher than in Jolt, and after a direct write to `base.shape` the old shape stays
-//!   alive until the next refresh point or the destructor. The values are only cached when the shape cannot change
+//!   or an unsupported one, see `store`), for as long as it is the stored key: the reference count of a shape
+//!   (Shape.getRefCount) is higher than in Jolt by the number of character caches that hold it (each character has its
+//!   own cache, so a shape that N characters share counts N more), and after a direct write to `base.shape` the old
+//!   shape stays alive until the next refresh point or the destructor. The values are only cached when the shape cannot change
 //!   them after its creation (`CharacterBoundsCache.supportedShape`): the convex shapes sphere, box, capsule, tapered
 //!   capsule, cylinder, tapered cylinder and convex hull, and RotatedTranslatedShape, ScaledShape and
 //!   OffsetCenterOfMassShape around them (at most `max_decorator_depth` levels). Everything else is unsupported and

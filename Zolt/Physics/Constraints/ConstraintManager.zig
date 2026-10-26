@@ -20,7 +20,8 @@
 //! Differences with the C++ version (Phase 12, class A): the Zolt addition `sortConstraintsWithRecords` is
 //! SortConstraints with exactly Jolt's order (Core/KeySort.zig on the key `priority << 32 | mConstraintIndex`, scratch
 //! of the caller), in about linear time when the constraints of the island share one priority (with several
-//! priorities each priority is one bucket of KeySort, sorted with QuickSort on the records); when two keys are equal
+//! priorities the keys of a priority fill one or two buckets of KeySort, sorted with QuickSort on the records); when
+//! two keys are equal
 //! it runs Jolt's SortConstraints, which is unchanged. PhysicsSystem uses it for the large islands.
 
 const std = @import("std");
@@ -208,8 +209,9 @@ pub const ConstraintManager = struct {
     };
 
     /// Zolt addition (Phase 12, class A): `sortConstraints` with exactly the same result, without a read of two
-    /// constraints per comparison, in about linear time when the constraints share one priority (KeySort puts each
-    /// priority of several into one bucket and sorts it with QuickSort). `records` (at least `constraint_idx.len`
+    /// constraints per comparison, in about linear time when the constraints share one priority (with several
+    /// priorities KeySort puts the keys of a priority into one or two buckets and sorts those with QuickSort). `records`
+    /// (at least `constraint_idx.len`
     /// elements) and `buckets` (`KeySort.bucketMemory(constraint_idx.len)` elements) are scratch memory of the caller.
     ///
     /// Why the result is the same (Core/KeySort.zig): the key of a constraint is p * 2^32 + i with p = its priority and
