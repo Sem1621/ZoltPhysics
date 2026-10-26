@@ -97,7 +97,9 @@
 //!   hold the batches of a split island as `wait` spans ("Wait: split island batches"), JobSoftBodySimulate its yields
 //!   after a pass without work ("Wait: soft bodies"). `part` spans mark the preparation of an island in JobSolveVelocityConstraints
 //!   ("Prepare island", "Prepare island (split)") and the bounds and sleep update of a split island's final batch
-//!   ("Final batch: bounds and sleep"). Without the option these hooks generate no code.
+//!   ("Final batch: bounds and sleep", inside it "Final batch: bodies", "Final batch: put to sleep" and "Final batch:
+//!   broad phase"; checkSleepAndUpdateBounds gets the profiler only for a final batch, spans per small island would
+//!   fill the ring buffers). Without the option these hooks generate no code.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -3304,9 +3306,12 @@ pub const PhysicsSystem = struct {
     };
 
     /// Called at the end of JobSolveVelocityConstraints to check if bodies need to go to sleep and to update their bounding box in the broadphase
-    fn checkSleepAndUpdateBounds(self: *Self, island_index: u32, context: *const PhysicsUpdateContext, step: *const Step, bodies_to_sleep: *BodiesToSleep) void {
+    /// Zolt: `parts` (-Djob_profile=true only) records the parts as spans, non-null only for the final batch of a split island.
+    fn checkSleepAndUpdateBounds(self: *Self, island_index: u32, context: *const PhysicsUpdateContext, step: *const Step, bodies_to_sleep: *BodiesToSleep, parts: if (Core.job_profile) ?*JobProfiler else void) void {
         // Get the bodies that belong to this island
         const bodies = self.island_builder.getBodiesInIsland(island_index);
+
+        const bodies_start = if (Core.job_profile) JobProfiler.begin(parts) else {};
 
         // Only check sleeping in the last step
         // Also resets force and torque used during the apply gravity phase
@@ -3331,21 +3336,28 @@ pub const PhysicsSystem = struct {
                 mp.resetForce();
                 mp.resetTorque();
             }
+            if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: bodies", bodies_start);
 
             // If all bodies indicate they can sleep we can deactivate them
-            if (all_can_sleep == @intFromEnum(CanSleep.can_sleep))
+            if (all_can_sleep == @intFromEnum(CanSleep.can_sleep)) {
+                const sleep_start = if (Core.job_profile) JobProfiler.begin(parts) else {};
                 bodies_to_sleep.putToSleep(bodies);
+                if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: put to sleep", sleep_start);
+            }
         } else {
             // Update bounding box only for all other steps
             for (bodies) |body_id| {
                 const body = self.body_manager.getBodyMut(body_id);
                 body.calculateWorldSpaceBoundsInternal();
             }
+            if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: bodies", bodies_start);
         }
 
         // Notify broadphase of changed objects
         // Note: Shuffles the BodyID's around!!!
+        const broad_phase_start = if (Core.job_profile) JobProfiler.begin(parts) else {};
         self.getBroadPhase().notifyBodiesAABBChanged(bodies, .{ .take_lock = false });
+        if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: broad phase", broad_phase_start);
     }
 
     fn jobSolvePositionConstraints(self: *Self, context: *PhysicsUpdateContext, step: *Step) void {
@@ -3394,7 +3406,7 @@ pub const PhysicsSystem = struct {
                         // The final batch will update all bounds and check sleeping
                         if (final_batch) {
                             const bounds_start = if (Core.job_profile) JobProfiler.begin(wait_span.profiler) else {};
-                            self.checkSleepAndUpdateBounds(self.large_island_splitter.getIslandIndex(batch.split_island_index), context, step, &bodies_to_sleep);
+                            self.checkSleepAndUpdateBounds(self.large_island_splitter.getIslandIndex(batch.split_island_index), context, step, &bodies_to_sleep, if (Core.job_profile) wait_span.profiler else {});
                             if (Core.job_profile) JobProfiler.end(wait_span.profiler, .part, "Final batch: bounds and sleep", bounds_start);
                         }
 
@@ -3454,7 +3466,7 @@ pub const PhysicsSystem = struct {
                 }
 
                 // After solving we will update all bounds and check sleeping
-                self.checkSleepAndUpdateBounds(island_idx, context, step, &bodies_to_sleep);
+                self.checkSleepAndUpdateBounds(island_idx, context, step, &bodies_to_sleep, if (Core.job_profile) null else {});
 
                 if (track_simulation_stats) {
                     // Accumulate time spent in updating bounding box
