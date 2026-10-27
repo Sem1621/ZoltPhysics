@@ -47,7 +47,7 @@ zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyram
 python3 tools/job_trace_stats.py Pyramid_linearcast_th2.json  # busy / wait / idle per thread, idle spans by length, wakeups, island preparation
 python3 tools/job_trace_stats.py Pyramid_linearcast_th4.json --by-job --under "Final batch: bounds and sleep"  # busy per job; the others' idle + wait under a span
 python3 tools/wall_rounds.py cpp=<C++ PerformanceTest> zolt=zig-out/bin/ZoltPerformanceTest  # steps/s: 7 interleaved rounds, medians, ratios, same hashes
-python3 tools/perf_budget.py --cache-sim --jobs <Zolt> <C++> ConvexVsMesh  # callgrind cache and branch simulation, CEst, per job, Zolt vs C++
+python3 tools/perf_budget.py --cache-sim --jobs <Zolt> <C++> ConvexVsMesh  # callgrind cache and branch simulation (fixed cache geometry), CEst, per job, Zolt vs C++
 zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
 zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
@@ -116,4 +116,7 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   `JPH_USE_FMADD` sites, with a C++ oracle; off by default).
 - Phase 12 measured first (job profiler spans, `tools/job_trace_stats.py`) and added two class A speedups: exact bounds
   caches for the character vs character test (CharacterBoundsCache.zig) and the large island sorts (Core/KeySort.zig).
+- Phase 13 measured the rest (`perf_budget.py --cache-sim`, `wall_rounds.py`) and kept three class A changes: hot
+  atomics on their own cache lines (PortingGuide section 9), rigid bodies in 64 KB pages (BodyManager's BodyPool) and
+  SIMD contact groups planned once per step (ContactConstraintSimd.planBatch).
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).

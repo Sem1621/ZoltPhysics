@@ -5,7 +5,8 @@ Bit exactness cannot see a lost speedup, and wall time is too noisy for CI. So t
 
     python3 tools/perf_budget.py <ZoltPerformanceTest> <JoltPerformanceTest> [scene ...]
     python3 tools/perf_budget.py --self-test     # check the verdicts on made-up counts
-    python3 tools/perf_budget.py --cache-sim [--keep DIR] [--jobs] [--steps SCENE=N ...] <Zolt> <Jolt> [scene ...]
+    python3 tools/perf_budget.py --cache-sim [--keep DIR] [--jobs] [--steps SCENE=N ...] [--host-caches]
+                                 <Zolt> <Jolt> [scene ...]
 
 The --cache-sim mode measures instead of judging (Phase 13): callgrind with its cache and branch simulation, both
 sides, the events of the collected part (Ir, cache misses, branch mispredictions) and an estimate of the cycles
@@ -13,6 +14,9 @@ sides, the events of the collected part (Ir, cache misses, branch mispredictions
 inclusive Ir and CEst of each PhysicsSystem job (Zolt's jobX paired with Jolt's JobX), --keep keeps the callgrind
 files (with --dump-instr=yes, for callgrind_annotate per line), --steps changes the number of steps of a scene (e.g.
 Ragdoll=80 or ConvexVsMesh=500, where the large islands form). It gives no verdict and exits 0 when the runs worked.
+The simulated caches have a fixed geometry, CACHE_GEOMETRY (the machine of the first Phase 13 measurements: I1 32 KB,
+D1 48 KB, LL 264 MB), because callgrind otherwise takes the geometry of the host, and a cloud machine can change its
+host between two runs: the cache events of two hosts do not compare. --host-caches uses the host's geometry instead.
 
 `zig build perf-budget` builds ZoltPerformanceTest with ReleaseFast for x86-64-v3 and the C++ PerformanceTest of
 `zig build jolt-performance-test`, and runs this script from the repository root (the Ragdoll scene reads Assets/).
@@ -83,6 +87,9 @@ COLLECTED_RE = re.compile(r"^==\d+== Collected : (\d+)(?: \d+)*$", re.M)
 
 # The events of callgrind with --cache-sim=yes --branch-sim=yes, and the estimate of the cycles of callgrind_annotate
 EVENTS = ["Ir", "Dr", "Dw", "I1mr", "D1mr", "D1mw", "ILmr", "DLmr", "DLmw", "Bc", "Bcm", "Bi", "Bim"]
+# The simulated caches of --cache-sim (size, associativity, line size): the 4 core Xeon of the first Phase 13
+# measurements, so that cache events compare across hosts
+CACHE_GEOMETRY = ["--I1=32768,8,64", "--D1=49152,12,64", "--LL=276824064,33,64"]
 
 
 def cycle_estimate(e):
@@ -293,6 +300,11 @@ def self_test():
     e = {"Ir": 1000, "Bcm": 2, "Bim": 1, "I1mr": 3, "D1mr": 4, "D1mw": 5, "ILmr": 1, "DLmr": 2, "DLmw": 3}
     assert cycle_estimate(e) == 1000 + 10 * 3 + 10 * 12 + 100 * 6, cycle_estimate(e)
     assert cycle_estimate({"Ir": 7}) == 7
+    # valgrind takes a cache only if its number of sets is a power of two
+    for g in CACHE_GEOMETRY:
+        size, assoc, line = (int(v) for v in g.split("=")[1].split(","))
+        sets = size // (assoc * line)
+        assert sets * assoc * line == size and sets & (sets - 1) == 0, g
     with tempfile.TemporaryDirectory(prefix="perf-budget-test-") as d:
         path = os.path.join(d, "t.out")
         with open(path, "w") as f:
@@ -386,9 +398,10 @@ def cache_report(scenes, events, jobs):
     return lines
 
 
-def cache_sim(zolt, jolt, scenes, keep, with_jobs):
+def cache_sim(zolt, jolt, scenes, keep, with_jobs, host_caches=False):
     """The --cache-sim mode: measure both sides, no verdict"""
-    extra = ["--cache-sim=yes", "--branch-sim=yes"] + (["--dump-instr=yes"] if keep or with_jobs else [])
+    extra = ["--cache-sim=yes", "--branch-sim=yes"] + ([] if host_caches else CACHE_GEOMETRY)
+    extra += ["--dump-instr=yes"] if keep or with_jobs else []
     start = time.time()
     out_dir = keep or tempfile.mkdtemp(prefix="perf-budget-cache-")
     os.makedirs(out_dir, exist_ok=True)
@@ -433,11 +446,13 @@ def main(args):
     if args == ["--self-test"]:
         return self_test()
     # The options of the --cache-sim mode
-    mode_cache, keep, with_jobs, steps, rest = False, None, False, {}, []
+    mode_cache, keep, with_jobs, host_caches, steps, rest = False, None, False, False, {}, []
     it = iter(args)
     for a in it:
         if a == "--cache-sim":
             mode_cache = True
+        elif a == "--host-caches":
+            host_caches = True
         elif a == "--keep":
             keep = os.path.abspath(next(it, ""))
         elif a == "--jobs":
@@ -450,8 +465,8 @@ def main(args):
             steps[scene] = int(n)
         else:
             rest.append(a)
-    if (keep or with_jobs or steps) and not mode_cache:
-        print("perf-budget: --keep, --jobs and --steps are options of --cache-sim")
+    if (keep or with_jobs or steps or host_caches) and not mode_cache:
+        print("perf-budget: --keep, --jobs, --steps and --host-caches are options of --cache-sim")
         return 2
     args = rest
     if len(args) < 2:
@@ -468,7 +483,7 @@ def main(args):
         return 1
     scenes = [s._replace(steps=steps.get(s.name, s.steps)) for s in SCENES if not only or s.name in only]
     if mode_cache:
-        return cache_sim(zolt, jolt, scenes, keep, with_jobs)
+        return cache_sim(zolt, jolt, scenes, keep, with_jobs, host_caches)
     start = time.time()
     with tempfile.TemporaryDirectory(prefix="perf-budget-") as out_dir:
         jobs = {}
