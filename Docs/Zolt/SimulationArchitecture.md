@@ -1341,3 +1341,54 @@ ragdolls form large islands from about step 24, and ConvexVsMesh from about step
 it.) About a fifth of the kernel's instructions are transposes and another sixth are register spills
 (12 velocity vectors stay live). Transposing the constant constraint data once per step instead of once
 per iteration would remove most of the transposes but needs a buffer per step; it is not done.
+
+**The plan of a batch (Phase 13, class A).** The sorting into groups ran in every velocity iteration
+(162M instructions in 60 Pyramid steps, 3.9%), though the groups depend only on the batch's contacts.
+Now each batch of a parallel split with 4 to 64 contacts (`ContactConstraintSimd.plans`) is planned once
+per step:
+- At its warm start (after the warm start itself, which stays in Jolt's order) `planBatch` permutes the
+  batch's own slice of the splitter's contact indices to [the dynamic vs dynamic contacts with 1 to 4
+  points in group order][the others in their original order] and writes `0x8000_0000 | <number of the
+  first>` into the batch's plan word. The word is the entry of `contact_and_constraints_split_idx` at the
+  batch's first contact (`LargeIslandSplitter.batchPlanWord`): splitIsland needs those entries only while
+  it splits, and it writes split indices (below 32, no marker) into every entry of its island before the
+  island's first batch.
+- Every velocity iteration of the batch calls `solvePlanned` with the word: the groups of 8 come straight
+  from the planned prefix, a tail under 4 and the other contacts go through one call of the scalar
+  solver. A word without the marker (or with a count above the batch size) makes it run the unplanned
+  `solveVelocityConstraints`, with the same bits; PhysicsSystem asserts that the word holds a plan.
+- The warm start of a batch always runs before its velocity iterations of the same step: the status of a
+  split island moves to iteration 1 only after every batch of iteration 0 was marked processed, and the
+  contacts of a batch depend only on its split and first item (the item counter restarts at 0 and grows
+  by 16). The plan reaches the jobs of later iterations through the release/acquire chain that carries the
+  warm start's lambdas. Each collision step prepares, splits and resets the splitter again, and
+  splitIsland rewrites both buffers of its island first, so no plan and no permutation survives into
+  another step. With 0 velocity steps nothing reads the plan.
+- The permuted order changes no bit in any phase that visits it: in a batch of a parallel split no dynamic
+  body appears twice, a contact writes only its own lambdas, the velocities and (position iterations) the
+  positions and rotations of its dynamic bodies, and (storeAppliedImpulses) its own cached manifold;
+  kinematic and static bodies are only read. Nothing else reads the splitter's contact indices after
+  splitIsland. The header of ContactConstraintSimd.zig has the proof phase by phase, the header of
+  LargeIslandSplitter.zig the rules for changes to the splitter (no reader of the split indices after
+  splitIsland, batch contacts a function of split and first item).
+- Gates: comptime off with `-Dsimd_contact_solver=false`, `-Ddeterminism_log=true` and the self-hosted
+  backend (nothing is permuted then). planBatch and solvePlanned are never inlined, so the solve job's code
+  for islands that are not split stays as it was.
+- Tests: ContactConstraintSimdTests compares Jolt's order with the scalar solver against planned batches
+  of 4 to 64 contacts bit for bit after the warm start, every velocity iteration, storeAppliedImpulses and
+  the position iterations (constraints, velocities, positions, rotations, cached manifolds), checks the
+  plan, that planBatch writes nothing outside the batch and the fallback of words without a plan.
+  PhysicsSystemTests runs a pyramid with and without plans (1 and 2 collision steps, 0, 1 and the
+  default number of velocity steps, a single threaded job system and a pool of 3 workers) and a pile on a
+  kinematic platform (a kinematic sweeper, point constraints, step overrides, contact settings changed by
+  a listener, 1 and 3 collision steps, single threaded and a pool of 7 workers), and compares the states
+  after every update.
+  Test-only counters (`PhysicsSystem.simd_plans`) count the planned batches and their velocity iterations
+  by the plan word, like solvePlanned decides: the iterations that found their plan must match the
+  velocity steps, and none may run without it. So a velocity iteration without its plan fails the tests
+  also without asserts.
+
+Pyramid (60 steps, callgrind): 4,148,175,876 to 4,046,679,602 instructions (-2.45%). Ragdoll (15 steps,
+no split island) +0.001%, ConvexVsMesh (200 steps) -0.003%. planBatch places each contact once at a
+counted position: a first version copied the buckets back with loops that LLVM turned into 5 memcpy calls
+per batch (221,226 more instructions in Pyramid).

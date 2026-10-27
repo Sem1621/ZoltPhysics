@@ -48,6 +48,17 @@
 //!   island without a lock (`claimSortScratch` / `releaseSortScratch`, `Step.sort_scratch_used`): no allocation, no
 //!   temp memory. An island without room there, and every smaller island, takes Jolt's three calls. Only in test
 //!   builds, `large_island_sorts` counts which of these three ways the large islands took (`void` otherwise).
+//! - Differences with the C++ version (Phase 13, class A): the contacts of a batch of a parallel split (Zolt's SIMD
+//!   contact solver, ContactConstraintSimd.zig) are grouped once per step instead of once per velocity iteration. When
+//!   `ContactConstraintSimd.plans(batch.parallel, batch.contacts.len)` (comptime false without the SIMD solver), the
+//!   warm start of the batch runs in Jolt's order and then `planBatch` permutes the batch's own slice of the splitter's
+//!   contact indices to the order of its SIMD groups and writes the plan word (`LargeIslandSplitter.batchPlanWord`).
+//!   The velocity iterations of the batch call `solvePlanned` with that word (asserted to hold a plan when asserts are
+//!   on; without one it solves like before), storeAppliedImpulses and the position iterations visit the permuted
+//!   order. The order of the contacts of such a batch does not change a bit ("The plan of a batch" in
+//!   ContactConstraintSimd.zig has the proof for every phase). Only in test builds, `simd_plans` counts the planned
+//!   batches and their velocity iterations with and without a plan in the word, and can turn the plans off (`void`
+//!   otherwise).
 //!
 //! SimulationArchitecture D4 / D5 / D6 / D7:
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
@@ -412,6 +423,31 @@ pub const PhysicsSystem = struct {
     /// Zolt addition (Phase 12, class A), only in test builds (`void` otherwise): how the large islands were sorted
     /// since `init` (sortLargeIsland). The tests check with it that each of the three ways runs.
     large_island_sorts: if (builtin.is_test) LargeIslandSorts else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 13, class A), only in test builds (`void` otherwise): the SIMD plans of the batches of the
+    /// parallel splits since `init` (ContactConstraintSimd.planBatch), and a switch that turns them off. The tests check
+    /// with it that the planned path runs in an update and gives the bits of the path without plans.
+    simd_plans: if (builtin.is_test) SimdPlans else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 13, class A), tests only: the counts and the switch of `simd_plans`
+    pub const SimdPlans = struct {
+        /// Batches whose warm start planned their groups
+        planned: std.atomic.Value(u32) = .init(0),
+        /// Velocity iterations of a planned batch that found the plan in its plan word (solvePlanned solved the
+        /// planned groups)
+        solved: std.atomic.Value(u32) = .init(0),
+        /// Velocity iterations of a planned batch whose plan word held no plan (solvePlanned took its fallback, with
+        /// the same bits). Must stay 0: with asserts off, this and `solved` are what shows that the plans were used.
+        unplanned: std.atomic.Value(u32) = .init(0),
+        /// False: no batch is planned, the batches of the parallel splits take ContactConstraintSimd.solveBatch (set it
+        /// only between updates)
+        enabled: bool = true,
+
+        /// The counts: planned, solved, unplanned
+        pub fn counts(self: *const SimdPlans) [3]u32 {
+            return .{ self.planned.load(.monotonic), self.solved.load(.monotonic), self.unplanned.load(.monotonic) };
+        }
+    };
 
     /// Zolt addition (Phase 12, class A), tests only: the counts of `large_island_sorts`
     pub const LargeIslandSorts = struct {
@@ -2319,16 +2355,38 @@ pub const PhysicsSystem = struct {
                         if (Core.job_profile) wait_span.done();
                         const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
+                        // (Zolt, Phase 13, class A: the SIMD groups of a batch of a parallel split are planned once per
+                        // step at its warm start, see "The plan of a batch" in ContactConstraintSimd.zig. Comptime false
+                        // when the SIMD solver is off; the tests can turn the plans off with simd_plans.enabled.)
+                        const plan = ContactConstraintSimd.plans(batch.parallel, batch.contacts.len) and (!builtin.is_test or self.simd_plans.enabled);
                         if (batch.first_iteration) {
                             // Iteration 0 is used to warm start the batch (we added 1 to the number of iterations in LargeIslandSplitter::SplitIsland)
                             var dummy: DummyCalculateSolverSteps = .{};
                             ConstraintManager.warmStartVelocityConstraints(active_constraints, batch.constraints, warm_start_impulse_ratio, &dummy);
                             self.contact_manager.warmStartVelocityConstraints(batch.contacts, warm_start_impulse_ratio, &dummy);
+
+                            // (Zolt: permute the batch's contacts to the order of its groups, the plan goes into a word of
+                            // the splitter)
+                            if (plan) {
+                                ContactConstraintSimd.planBatch(&self.contact_manager, batch.contacts, self.large_island_splitter.batchPlanWord(batch.contacts));
+                                if (builtin.is_test) _ = self.simd_plans.planned.fetchAdd(1, .monotonic);
+                            }
                         } else {
                             // Solve velocity constraints
                             _ = ConstraintManager.solveVelocityConstraints(active_constraints, batch.constraints, delta_time);
-                            // (Zolt: the contacts of a parallel split are solved 8 at a time, see ContactConstraintSimd.zig)
-                            _ = ContactConstraintSimd.solveBatch(&self.contact_manager, batch.contacts, batch.parallel);
+                            // (Zolt: the contacts of a parallel split are solved 8 at a time, see ContactConstraintSimd.zig,
+                            // in the groups that the warm start of the batch planned)
+                            if (plan) {
+                                const plan_word = self.large_island_splitter.batchPlanWord(batch.contacts).*;
+                                if (Core.enable_asserts) std.debug.assert(ContactConstraintSimd.plannedCount(plan_word, batch.contacts.len) != null); // The warm start of this batch planned it in this step
+                                if (builtin.is_test) {
+                                    // (Count by the word, like solvePlanned decides, so that an iteration without its
+                                    // plan shows also without asserts)
+                                    const counter = if (ContactConstraintSimd.plannedCount(plan_word, batch.contacts.len) != null) &self.simd_plans.solved else &self.simd_plans.unplanned;
+                                    _ = counter.fetchAdd(1, .monotonic);
+                                }
+                                _ = ContactConstraintSimd.solvePlanned(&self.contact_manager, batch.contacts, plan_word);
+                            } else _ = ContactConstraintSimd.solveBatch(&self.contact_manager, batch.contacts, batch.parallel);
                         }
 
                         // Mark the batch as processed

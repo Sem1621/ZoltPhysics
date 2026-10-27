@@ -25,22 +25,57 @@
 //!   instead of math.max is not visible on x86-64 with finite inputs (LLVM emits the same maxps there, only NaN
 //!   differs), it stays forbidden. Without `!DeterminismLog.enabled` in ContactConstraintSimd.enabled the determinism
 //!   log test fails.
+//!
+//! The plan of a batch (Phase 13, ContactConstraintSimd.planBatch / solvePlanned, "The plan of a batch" in its header):
+//! - Random batches of 4 to 64 contacts of a parallel split (every size that PhysicsSystem plans: full groups, tails
+//!   under 4 and padded tails, contacts with static and kinematic bodies, 0 to 4 contact points; physical, edge, signed
+//!   zero and huge values) are solved twice: in Jolt's order with ContactConstraintManager's scalar solver, and like
+//!   PhysicsSystem solves a planned batch (warm start, planBatch, solvePlanned in every velocity iteration,
+//!   storeAppliedImpulses and the position iterations in the planned order). The scenes have body transforms and
+//!   inertias and a write cache with a manifold per constraint. After every phase every velocity, constraint byte, body
+//!   position and rotation and cached manifold byte must be equal. The plan itself is checked (the order, the marker,
+//!   the count) and the words around the batch must stay untouched.
+//! - plannedCount finds a plan only behind the marker; solvePlanned with a word without a plan (split indices, a count
+//!   above the batch, other high bits) on a batch that starts with a kinematic contact gives the scalar bits.
+//! - PhysicsSystemTests ("the SIMD plans ...") runs a pyramid and a pile on a kinematic platform (with constraints,
+//!   step overrides and 7 workers) with and without plans and checks that the planned path ran: the test-only counters
+//!   PhysicsSystem.simd_plans count the velocity iterations of the planned batches by their plan word, like
+//!   solvePlanned decides, so an iteration without its plan shows also without asserts.
+//! - Bite proofs (each one fails these tests): planBatch writing count + 1 (the plan check fails; the pyramid tests
+//!   crash: a contact with the static floor goes into a SIMD lane); plannedCount without the marker check (a split index
+//!   taken as a plan: the plannedCount and plan tests fail, and without its plannedCount check the fallback test hits
+//!   the MotionProperties assert of a kinematic body that a SIMD lane writes); planBatch placing the others one slot
+//!   further (across the batch end: the index check panics, without safety checks the guard words change); `plans`
+//!   without the `parallel` condition (the gates test and the pyramid and pile comparisons fail: the non parallel split
+//!   shares bodies); a warm start that does not plan (the assert in PhysicsSystem fires with asserts on, the counters
+//!   fail in every build mode, ReleaseFast too).
 
 const std = @import("std");
 const zolt = @import("zolt");
 
 const AllowedDOFs = zolt.AllowedDOFs;
 const Body = zolt.Body;
+const BodyID = zolt.BodyID;
 const ContactConstraintManager = zolt.ContactConstraintManager;
 const ContactConstraintSimd = zolt.ContactConstraintSimd;
 const Core = zolt.Core;
+const DummyCalculateSolverSteps = zolt.DummyCalculateSolverSteps;
 const Float3 = zolt.Float3;
+const LargeIslandSplitter = zolt.LargeIslandSplitter;
 const Mat44 = zolt.Mat44;
 const MotionProperties = zolt.MotionProperties;
 const MotionType = zolt.MotionType;
 const Mt19937 = zolt.Mt19937;
+const PhysicsSettings = zolt.PhysicsSettings;
+const Quat = zolt.Quat;
+const RVec3 = zolt.RVec3;
+const SubShapeID = zolt.SubShapeID;
+const SubShapeIDPair = zolt.SubShapeIDPair;
 const Vec3 = zolt.Vec3;
 const math = zolt.math;
+
+const ManifoldCache = ContactConstraintManager.ManifoldCache;
+const CachedManifold = ContactConstraintManager.CachedManifold;
 
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
@@ -155,6 +190,16 @@ const Random = struct {
         return r.mul(Mat44.scaleVec3(d)).mul(r.transposed3x3());
     }
 
+    /// A rotation (a unit quaternion)
+    fn rotation(self: *Random) Quat {
+        return Quat.rotation(self.unitVec3(), self.float(0.0, 6.0));
+    }
+
+    /// A Float3 with components in [-scale, scale)
+    fn float3(self: *Random, scale: f32) Float3 {
+        return .{ .x = self.float(-scale, scale), .y = self.float(-scale, scale), .z = self.float(-scale, scale) };
+    }
+
     fn allowedDOFs(self: *Random) AllowedDOFs {
         if (self.chance(70)) return .all;
         var dofs: AllowedDOFs = .all;
@@ -199,6 +244,11 @@ const Scene = struct {
     offsets: []u32,
     sizes: []u32,
     manager: ContactConstraintManager,
+    /// What the position solve reads (Jolt's defaults)
+    settings: PhysicsSettings,
+    /// The write cache of the manager: a manifold per constraint, which storeAppliedImpulses writes and the position
+    /// solve reads
+    cache: ManifoldCache,
 
     /// Build a scene: `num_constraints` contacts, `seed` decides everything else
     fn create(allocator: Allocator, seed: u32, num_constraints: u32, sharing: Sharing, values: Values) !*Scene {
@@ -278,12 +328,54 @@ const Scene = struct {
             offset += constraint_size.*;
         }
 
+        // What the warm start, storeAppliedImpulses and the position solve read besides the velocities and the
+        // constraints, from a random stream of its own (the velocities and constraints above stay those of the seed)
+        var extra: Random = .{ .rng = Mt19937.init(seed ^ 0x5eed_c0de) };
+        for (self.bodies, self.motion_properties) |*body, *mp| {
+            body.body_type = .rigid_body;
+            body.position = RVec3.init(extra.float(-2.0, 2.0), extra.float(-2.0, 2.0), extra.float(-2.0, 2.0));
+            body.rotation = extra.rotation();
+            mp.inv_inertia_diagonal = Vec3.init(
+                if (extra.chance(15)) 0.0 else extra.float(0.0, 3.0),
+                if (extra.chance(15)) 0.0 else extra.float(0.0, 3.0),
+                if (extra.chance(15)) 0.0 else extra.float(0.0, 3.0),
+            );
+            mp.inertia_rotation = extra.rotation();
+        }
+        self.settings = .{};
+        self.cache = .{};
+        const manifold_size: u32 = @sizeOf(ContactConstraintManager.MKeyValue) + @as(u32, @intCast(CachedManifold.getRequiredExtraSize(ContactConstraintManager.max_contact_points)));
+        const max_constraints = @max(num_constraints, 4); // Like ContactConstraintManager.init: the map needs 4 buckets
+        try self.cache.init(allocator, 4, max_constraints, max_constraints * manifold_size + ManifoldCache.allocator_block_size);
+        errdefer self.cache.deinit(allocator);
+        var contact_allocator = self.cache.getContactAllocator();
+        for (self.offsets, 0..) |constraint_offset, i| {
+            const base: *ContactConstraintManager.ContactConstraintBase = @ptrCast(@alignCast(self.buffer.ptr + constraint_offset));
+            var sub_shape_id: SubShapeID = .empty;
+            sub_shape_id.setValue(@intCast(i));
+            const key: SubShapeIDPair = .init(BodyID.init(0), sub_shape_id, BodyID.init(1), .empty);
+            const kv = self.cache.createManifold(&contact_allocator, key, key.getHash(), @intCast(base.num_contact_points)) orelse return error.OutOfMemory;
+            base.cached_manifold_handle = self.cache.toHandle(kv);
+            const manifold = kv.getValue();
+            manifold.contact_normal = extra.float3(1.0);
+            manifold.friction_lambda.f32s = .{ extra.value(5.0), extra.value(5.0) };
+            manifold.angular_friction_lambda = extra.value(5.0);
+            for (manifold.getContactPoints()[0..base.num_contact_points]) |*point| {
+                point.position1 = extra.float3(1.0);
+                point.position2 = extra.float3(1.0);
+                point.non_penetration_lambda = extra.value(5.0);
+            }
+        }
+
         self.manager = .empty;
         self.manager.constraints = .{ .items = self.buffer };
+        self.manager.physics_settings = &self.settings;
+        self.manager.write_cache = &self.cache;
         return self;
     }
 
     fn destroy(self: *Scene) void {
+        self.cache.deinit(self.allocator);
         self.manager.constraints = .empty;
         self.allocator.free(self.sizes);
         self.allocator.free(self.offsets);
@@ -612,6 +704,7 @@ test "DeterminismLog: solveBatch solves a parallel batch with the scalar solver 
     // without a filter (build.zig).
     if (!Core.determinism_log) return error.SkipZigTest; // Needs -Ddeterminism_log=true (build.zig runs it)
     try expect(!ContactConstraintSimd.enabled);
+    try expect(!ContactConstraintSimd.plans(true, 16)); // No batch is planned (permuted) either
     try expectScalarSolveBatch(true);
 }
 
@@ -649,4 +742,281 @@ test "ContactConstraintSimd: the gates" {
     try expectEqual(@import("builtin").zig_backend == .stage2_llvm, ContactConstraintSimd.supported);
     try expectEqual(ContactConstraintSimd.supported and Core.simd_contact_solver and !Core.determinism_log, ContactConstraintSimd.enabled);
     try expectEqual(@as(usize, 8), ContactConstraintSimd.lanes);
+
+    // The plans (Phase 13): only the batches of a parallel split that can fill a group, only with the SIMD solver.
+    // Without it nothing is ever permuted.
+    for (0..ContactConstraintSimd.max_chunk + 2) |n| {
+        try expect(!ContactConstraintSimd.plans(false, n));
+        try expectEqual(ContactConstraintSimd.enabled and n >= ContactConstraintSimd.min_lanes and n <= ContactConstraintSimd.max_chunk, ContactConstraintSimd.plans(true, n));
+    }
+    try expectEqual(@as(usize, 64), ContactConstraintSimd.max_chunk);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The plan of a batch (Phase 13): planBatch at the warm start, solvePlanned in the velocity iterations
+
+/// Fail unless the two copies of a scene have the same bits in everything that the solve phases write: the velocities
+/// and the constraints (expectSameBits), the positions and rotations of the bodies and the manifolds of the write cache
+fn expectSameState(a: *const Scene, b: *const Scene, seed: u32, phase: []const u8, iteration: usize) !void {
+    expectSameBits(a, b, seed, iteration, true) catch |err| {
+        std.debug.print("  (after {s})\n", .{phase});
+        return err;
+    };
+    for (a.bodies, b.bodies, 0..) |*body_a, *body_b, i| {
+        if (!std.mem.eql(u8, std.mem.asBytes(&body_a.position), std.mem.asBytes(&body_b.position)) or
+            !std.mem.eql(u8, std.mem.asBytes(&body_a.rotation), std.mem.asBytes(&body_b.rotation)))
+        {
+            std.debug.print("seed {d} {s} {d}: position or rotation of body {d} differs\n", .{ seed, phase, iteration, i });
+            return error.TestExpectedEqual;
+        }
+    }
+    for (a.offsets, 0..) |offset, i| {
+        const base_a = a.manager.getConstraintBase(offset);
+        const base_b = b.manager.getConstraintBase(offset);
+        const size: usize = @intCast(CachedManifold.getRequiredTotalSize(@intCast(base_a.num_contact_points)));
+        const manifold_a: [*]const u8 = @ptrCast(a.cache.fromHandle(base_a.cached_manifold_handle).getValueConst());
+        const manifold_b: [*]const u8 = @ptrCast(b.cache.fromHandle(base_b.cached_manifold_handle).getValueConst());
+        if (!std.mem.eql(u8, manifold_a[0..size], manifold_b[0..size])) {
+            std.debug.print("seed {d} {s} {d}: cached manifold of constraint {d} differs\n", .{ seed, phase, iteration, i });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+/// The number of contact points of the constraint at `offset` when it goes into a SIMD lane (dynamic vs dynamic, 1
+/// to 4 points), null otherwise
+fn laneContactPoints(scene: *const Scene, offset: u32) ?u32 {
+    const base = scene.manager.getConstraintBase(offset);
+    if (!base.body1.isDynamic() or !base.body2.isDynamic())
+        return null;
+    if (base.num_contact_points < 1 or base.num_contact_points > ContactConstraintManager.max_contact_points)
+        return null;
+    return base.num_contact_points;
+}
+
+/// Fail unless planBatch planned `original` into `batch` and `plan_word`: [the lane constraints, most contact points
+/// first, then in their original order][the others in their original order], the marker and the number of lane
+/// constraints. Returns that number.
+fn expectPlan(scene: *const Scene, original: []const u32, batch: []const u32, plan_word: u32) !u32 {
+    var expected: [ContactConstraintSimd.max_chunk]u32 = undefined;
+    var num: u32 = 0;
+    var points: u32 = ContactConstraintManager.max_contact_points;
+    while (points >= 1) : (points -= 1) {
+        for (original) |offset| {
+            if (laneContactPoints(scene, offset) == points) {
+                expected[num] = offset;
+                num += 1;
+            }
+        }
+    }
+    const num_lanes = num;
+    for (original) |offset| {
+        if (laneContactPoints(scene, offset) == null) {
+            expected[num] = offset;
+            num += 1;
+        }
+    }
+    try std.testing.expectEqualSlices(u32, expected[0..num], batch);
+    try expectEqual(ContactConstraintSimd.plan_marker | num_lanes, plan_word);
+    try expectEqual(@as(?u32, num_lanes), ContactConstraintSimd.plannedCount(plan_word, batch.len));
+    return num_lanes;
+}
+
+/// The phases of the solve of a batch of a parallel split that runPlannedBatch compares
+const Phases = struct {
+    /// The warm start (before planBatch and in Jolt's order, like PhysicsSystem)
+    warm_start: bool = true,
+    velocity_iterations: usize,
+    /// storeAppliedImpulses after the velocity iterations
+    store: bool = true,
+    /// The position iterations (they need normalized normals: physical scenes)
+    position_iterations: usize = 0,
+};
+
+/// The kinds of plans that the random batches made
+const PlanCoverage = struct {
+    batches: u32 = 0,
+    /// The plan has a full group of 8
+    full_groups: u32 = 0,
+    /// The lane constraints end with 1 to 3 that the scalar solver solves
+    tails_under_min_lanes: u32 = 0,
+    /// The lane constraints end with 4 to 7 in a padded group
+    tails_padded: u32 = 0,
+    /// Contacts with a static or kinematic body, or without 1 to 4 points, after the lane constraints
+    others: u32 = 0,
+
+    fn add(self: *PlanCoverage, num_lanes: u32, num_contacts: usize) void {
+        self.batches += 1;
+        if (num_lanes >= ContactConstraintSimd.lanes) self.full_groups += 1;
+        const tail = num_lanes % ContactConstraintSimd.lanes;
+        if (tail > 0 and tail < ContactConstraintSimd.min_lanes) self.tails_under_min_lanes += 1;
+        if (tail >= ContactConstraintSimd.min_lanes) self.tails_padded += 1;
+        if (num_lanes < num_contacts) self.others += 1;
+    }
+
+    fn expectAll(self: *const PlanCoverage) !void {
+        try expect(self.full_groups > 0 and self.tails_under_min_lanes > 0 and self.tails_padded > 0 and self.others > 0);
+    }
+};
+
+/// Solve the batch of `jolt` in Jolt's order with the scalar solver (ContactConstraintManager) and the same batch of
+/// `planned` like PhysicsSystem solves a planned batch of a parallel split: the warm start, planBatch, solvePlanned in
+/// every velocity iteration, storeAppliedImpulses and the position iterations in the planned order. Compare the bits
+/// after every phase, the plan, and that planBatch writes nothing outside the batch.
+fn runPlannedBatch(jolt: *Scene, planned: *Scene, seed: u32, phases: Phases, coverage: *PlanCoverage) !void {
+    const original = jolt.constraintOffsets();
+    std.debug.assert(original.len >= ContactConstraintSimd.min_lanes and original.len <= ContactConstraintSimd.max_chunk); // A size that PhysicsSystem plans
+
+    // The batch of the planned scene, a slice of a larger buffer like a batch of the splitter
+    const guard = 4;
+    const sentinel: u32 = 0xdead_beef;
+    var buffer: [ContactConstraintSimd.max_chunk + 2 * guard]u32 = @splat(sentinel);
+    const batch = buffer[guard..][0..original.len];
+    @memcpy(batch, original);
+    var dummy: DummyCalculateSolverSteps = .{};
+
+    if (phases.warm_start) {
+        const warm_start_impulse_ratio = 0.5 + @as(f32, @floatFromInt(seed % 5)) * 0.25;
+        jolt.manager.warmStartVelocityConstraints(original, warm_start_impulse_ratio, &dummy);
+        planned.manager.warmStartVelocityConstraints(batch, warm_start_impulse_ratio, &dummy);
+        try expectSameState(jolt, planned, seed, "warm start", 0);
+    }
+
+    // The word holds a split index before, like the entry of contact_and_constraints_split_idx that holds the plan
+    var plan_word: u32 = seed % LargeIslandSplitter.num_splits;
+    try expectEqual(@as(?u32, null), ContactConstraintSimd.plannedCount(plan_word, batch.len));
+    ContactConstraintSimd.planBatch(&planned.manager, batch, &plan_word);
+    for (buffer[0..guard]) |word| try expectEqual(sentinel, word);
+    for (buffer[guard + batch.len ..]) |word| try expectEqual(sentinel, word);
+    coverage.add(try expectPlan(planned, original, batch, plan_word), batch.len);
+
+    for (0..phases.velocity_iterations) |iteration| {
+        const applied_jolt = jolt.manager.solveVelocityConstraints(original);
+        const applied_planned = ContactConstraintSimd.solvePlanned(&planned.manager, batch, plan_word);
+        try expectSameState(jolt, planned, seed, "velocity iteration", iteration);
+        try expectEqual(applied_jolt, applied_planned);
+    }
+
+    if (phases.store) {
+        jolt.manager.storeAppliedImpulses(original);
+        planned.manager.storeAppliedImpulses(batch);
+        try expectSameState(jolt, planned, seed, "storeAppliedImpulses", 0);
+    }
+
+    for (0..phases.position_iterations) |iteration| {
+        const applied_jolt = jolt.manager.solvePositionConstraints(original);
+        const applied_planned = planned.manager.solvePositionConstraints(batch);
+        try expectSameState(jolt, planned, seed, "position iteration", iteration);
+        try expectEqual(applied_jolt, applied_planned);
+    }
+}
+
+/// runPlannedBatch for batches of 4 to 64 contacts (every size that PhysicsSystem plans) built from `seeds`
+fn runPlannedBatches(values: Values, num_seeds: u32, phases: Phases) !void {
+    const allocator = std.testing.allocator;
+    var coverage: PlanCoverage = .{};
+    var seed: u32 = 1;
+    while (seed <= num_seeds) : (seed += 1) {
+        const num_constraints = ContactConstraintSimd.min_lanes + seed % (ContactConstraintSimd.max_chunk - ContactConstraintSimd.min_lanes + 1);
+        const jolt = try Scene.create(allocator, seed, num_constraints, .parallel, values);
+        defer jolt.destroy();
+        const planned = try Scene.create(allocator, seed, num_constraints, .parallel, values);
+        defer planned.destroy();
+        try expectSameState(jolt, planned, seed, "creation", 0);
+        try runPlannedBatch(jolt, planned, seed, phases, &coverage);
+    }
+    try coverage.expectAll();
+}
+
+test "ContactConstraintSimd: a planned batch gives the bits of Jolt's order with the scalar solver (warm start, velocity and position iterations, stored impulses)" {
+    if (!ContactConstraintSimd.supported) return error.SkipZigTest;
+    try runPlannedBatches(.physical, 300, .{ .velocity_iterations = 6, .position_iterations = 3 });
+}
+
+test "ContactConstraintSimd: a planned batch gives the bits of Jolt's order with the scalar solver (signed zeros, tiny and huge values)" {
+    if (!ContactConstraintSimd.supported) return error.SkipZigTest;
+
+    // The edge values have normals that are not normalized: no position iterations (calculateConstraintProperties
+    // asserts a normalized axis). The huge values are solved for one velocity iteration without a warm start (see
+    // Values.huge).
+    try runPlannedBatches(.edge, 200, .{ .velocity_iterations = 4 });
+    try runPlannedBatches(.zeros, 200, .{ .velocity_iterations = 4 });
+    try runPlannedBatches(.huge, 200, .{ .warm_start = false, .velocity_iterations = 1 });
+}
+
+test "ContactConstraintSimd: plannedCount finds a plan only behind the marker" {
+    const plannedCount = ContactConstraintSimd.plannedCount;
+    const marker = ContactConstraintSimd.plan_marker;
+
+    // splitIsland writes split indices into the words: none of them is a plan
+    for (0..LargeIslandSplitter.num_splits) |split|
+        try expectEqual(@as(?u32, null), plannedCount(@intCast(split), 16));
+    try expectEqual(@as(?u32, 0), plannedCount(marker, 16));
+    try expectEqual(@as(?u32, 9), plannedCount(marker | 9, 16));
+    try expectEqual(@as(?u32, 16), plannedCount(marker | 16, 16));
+    try expectEqual(@as(?u32, null), plannedCount(marker | 17, 16)); // More planned contacts than the batch has
+    try expectEqual(@as(?u32, null), plannedCount(0x4000_0000 | 8, 16)); // Other bits in the marker half
+    try expectEqual(@as(?u32, null), plannedCount(0xc000_0000 | 8, 16));
+    try expectEqual(@as(?u32, null), plannedCount(0x8001_0008, 16));
+    try expectEqual(@as(?u32, null), plannedCount(0x0001_0008, 16));
+}
+
+test "ContactConstraintSimd: solvePlanned without a plan in its word solves like solveVelocityConstraints" {
+    if (!ContactConstraintSimd.supported) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // Batches in an order that planBatch never makes: a kinematic vs dynamic contact first, then the lane constraints,
+    // then the others. A word without a plan must give the bits of the scalar solver; taken as a plan of 4 or 8 lane
+    // constraints, the kinematic contact would go into a SIMD lane (another layout) and give other bits.
+    const words = [_]u32{ 0, 4, 8, LargeIslandSplitter.non_parallel_split_idx, ContactConstraintSimd.plan_marker | 65, 0x4000_0008, 0xffff_0008, 0x0001_0008 };
+    var num_batches: u32 = 0;
+    var seed: u32 = 1;
+    while (seed <= 60) : (seed += 1) {
+        const num_constraints = 8 + seed % 24;
+        for (words) |word| {
+            const jolt = try Scene.create(allocator, seed, num_constraints, .parallel, .physical);
+            defer jolt.destroy();
+            const fallback = try Scene.create(allocator, seed, num_constraints, .parallel, .physical);
+            defer fallback.destroy();
+
+            // The order: the first kinematic vs dynamic contact, the lane constraints, the others
+            var batch: [ContactConstraintSimd.max_chunk]u32 = undefined;
+            var num: usize = 0;
+            for (jolt.offsets) |offset| {
+                const base = jolt.manager.getConstraintBase(offset);
+                if (base.body1.isKinematic() != base.body2.isKinematic()) {
+                    batch[0] = offset;
+                    num = 1;
+                    break;
+                }
+            }
+            if (num == 0)
+                continue; // No kinematic contact in this scene
+            for (jolt.offsets) |offset| {
+                if (offset != batch[0] and laneContactPoints(jolt, offset) != null) {
+                    batch[num] = offset;
+                    num += 1;
+                }
+            }
+            if (num < 1 + ContactConstraintSimd.lanes)
+                continue; // Too few lane constraints behind it for a group
+            for (jolt.offsets) |offset| {
+                if (offset != batch[0] and laneContactPoints(jolt, offset) == null) {
+                    batch[num] = offset;
+                    num += 1;
+                }
+            }
+            try expectEqual(jolt.offsets.len, num);
+            try expectEqual(@as(?u32, null), ContactConstraintSimd.plannedCount(word, num));
+            num_batches += 1;
+
+            for (0..4) |iteration| {
+                const applied_jolt = jolt.manager.solveVelocityConstraints(batch[0..num]);
+                const applied_fallback = ContactConstraintSimd.solvePlanned(&fallback.manager, batch[0..num], word);
+                try expectSameState(jolt, fallback, seed, "velocity iteration without a plan", iteration);
+                try expectEqual(applied_jolt, applied_fallback);
+            }
+        }
+    }
+    try expect(num_batches >= 100);
 }
