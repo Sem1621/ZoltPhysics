@@ -109,11 +109,14 @@ comments. Jolt's size is checked at compile time; it also holds with Zig's field
   ```
 
 **Allocation.**
-- `BodyWithMotionProperties { body: Body, motion_properties: MotionProperties }` is one
-  `allocator.create`.
-- `BodyManager.deleteBody` frees it through `@fieldParentPtr("body", body)` when
-  `motion_properties != null`.
-- Phase 9 added `SoftBodyWithMotionPropertiesAndShape` the same way (RemainingFeaturesArchitecture.md R16).
+- `BodyWithMotionProperties { body: Body, motion_properties: MotionProperties }` is one object. Since
+  Phase 13 it is a 64 byte aligned slot in a 64 KB page of the body pool (D2, "Body memory"), never
+  an `allocator.create`.
+- `BodyManager.deleteBody` finds it through `@fieldParentPtr("body", body)` when
+  `motion_properties != null` and returns the slot to its page (`BodyPool.destroy`, which needs no
+  pool: any BodyManager can destroy any body, as in Jolt).
+- Phase 9 added `SoftBodyWithMotionPropertiesAndShape` (RemainingFeaturesArchitecture.md R16), found
+  the same way. Soft bodies and static bodies (a plain `Body`) stay one `allocator.create` each.
 
 **Fixed to world.** `Body::sFixedToWorld` becomes a compile time constant in read-only memory. Its
 dummy shape is a static `EmptyShape`: `Shape.is_static` was added with this document, and it makes
@@ -193,6 +196,28 @@ The number of body mutexes is Jolt's:
 **IDs.** ID allocation is literal: a LIFO free list in the freed slots, `+%=` on the `u8` sequence
 numbers, and `addBodyWithCustomID`'s O(N) unlink. The prototype test "BodyManager ID allocation
 like Jolt" pins the sequence.
+
+**Body memory (Phase 13, class A).** The rigid bodies with motion properties live in pages that
+describe themselves. A page is 64 KB, aligned to 64 KB, allocated from the allocator of the
+BodyManager that creates the body (the pool in `mutable_fields` allocates a page when all its pages
+are full). Its first 64 bytes are a header: a magic number, a spin lock, the number of bodies in the
+page, the first slot that was never used, a LIFO free list, whether its BodyManager still exists,
+and the page's allocator. Then come 64 byte aligned slots of exactly
+`@sizeOf(BodyWithMotionProperties)`: 204 of 320 bytes, 170 of 384 bytes in double precision. The
+page of a body is its address with the low 16 bits cleared, so `BodyPool.destroy` needs no pool, and
+the ownership is Jolt's (whose static `sDeleteBody` frees every body with the global allocator): a
+body that UnassignBodyID(s) hands out can be assigned to another PhysicsSystem and destroyed there,
+also after its own PhysicsSystem is gone. (A static body without motion properties or a soft body is
+not in a page: it is freed with the allocator of the PhysicsSystem that destroys it, so such a move
+needs both systems to use the same allocator.) A page is freed once its BodyManager is gone and it
+holds no body: by the pool's deinit, or by the destroy of its last body, with the page's allocator
+(which must stay valid until then). Body creation allocates once per page and when the page table
+grows, so `allocateBody` can fail there (out of memory, the pool is unchanged), not per body. The
+pool mutex guards the page table (reserved at init for the pages of `max_bodies`, it grows only
+beyond) and the choice of a page for a new body; a page's contents change only under its spin lock
+(the doc comment of `BodyPool` in BodyManager.zig has the proof that create, deinit and destroys on
+other threads do not race, and that exactly one party frees a page). Only addresses change: nothing
+orders, hashes or iterates bodies by address.
 
 **Active bodies.**
 - `active_bodies: [body_type_count][]BodyID` is preallocated.
@@ -473,8 +498,14 @@ other soft body jobs inside a job: Finalize, then N Simulate jobs, then N Collid
   dependency count hangs it.
 
 **Heap allocation inside a job.** `BroadPhase.updatePrepare` is a heap allocation inside a job
-(QuadTree's `new NodeID[]`, D9). `determineCollidingShapes` of the soft body Collide jobs is
-another one (Phase 9, the rows above). They are latched:
+(QuadTree's `new NodeID[]`, D9). Since Phase 13 the quad tree keeps that array and BuildTree's
+centers from one update to the next, so the job allocates them only when they are shorter than the
+tree's number of bodies (the first update of a tree, the first one whose BuildTree needs the
+centers, and growth); the walk stack's heap fallback stays as in Jolt. The tests that sweep these
+failures free the arrays first (`BroadPhaseQuadTree.releaseUpdateScratch`), so that the update
+allocates at Jolt's points.
+`determineCollidingShapes` of the soft body Collide jobs is another one (Phase 9, the rows above).
+They are latched:
 
 ```zig
                     if (!c.isOutOfMemory())
@@ -620,7 +651,9 @@ A concrete settings class lists it in `overrides`:
 - `addBodiesPrepare(bodies) Allocator.Error!AddState`: `new LayerState[mNumLayers]`
   (BroadPhaseQuadTree.cpp:168) and `BuildTree`'s `new Vec3[]` (QuadTree.cpp:544).
 - `updatePrepare() Allocator.Error!UpdateState`: `new NodeID[mNumBodies]` (QuadTree.cpp:300) and
-  the STLLocalAllocator stack with its heap fallback (:304).
+  the STLLocalAllocator stack with its heap fallback (:304). Phase 13 (class A): every tree keeps
+  the node IDs and BuildTree's centers of its updates and only grows them, at Jolt's allocation
+  points; `releaseUpdateScratch` frees them (the header of QuadTree.zig).
 
 On error, the function frees what it built (arrays, and nodes back to the free list) and leaves
 the tree unchanged. A zeroed `UpdateState` makes `updateFinalize` a no-op

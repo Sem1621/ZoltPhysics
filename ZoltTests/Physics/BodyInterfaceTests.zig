@@ -11,6 +11,8 @@
 //! - Several threads use the locking interface at the same time: every thread works on its own bodies and all of them
 //!   on a shared body, the results equal a single threaded run (repeated).
 //! - Allocation failures of createAndAddBody (shape creation, the broad phase) and activateBodiesInAABox.
+//! - A body moves to another PhysicsSystem with another allocator (UnassignBodyID, AssignBodyID) and outlives the first
+//!   one, as in Jolt (Phase 13: its page belongs to the first system, the header of BodyManager.zig).
 //! The values are compared bit for bit with Jolt in ZoltParity/Physics/BodyInterfaceParity.zig.
 
 const std = @import("std");
@@ -324,4 +326,53 @@ fn createAndActivate(allocator: Allocator) !void {
 
 test "BodyInterface: out of memory in createAndAddBody and activateBodiesInAABox" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, createAndActivate, .{});
+}
+
+test "BodyInterface: a body moves to another PhysicsSystem with another allocator and outlives the first one" {
+    // Jolt: UnassignBodyID hands the body to the caller ("caller assumes ownership"), AssignBodyID gives it an ID in
+    // another PhysicsSystem, which simulates it and destroys it, also after the first PhysicsSystem is gone (sDeleteBody
+    // is static). Zolt (Phase 13): the body stays in its slot in a page of the first system, and its destroy frees the
+    // page (the page's last body) with the first system's allocator (the header of BodyManager.zig).
+    var allocator_a: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    var allocator_b: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    var b: PhysicsTestContext = undefined;
+    try b.init(allocator_b.allocator(), .{});
+    defer b.deinit();
+    var a: PhysicsTestContext = undefined;
+    try a.init(allocator_a.allocator(), .{});
+    var a_alive = true;
+    defer if (a_alive) a.deinit();
+
+    // A sphere falls in A for a step
+    const body = try a.createSphere(RVec3.init(0, 10, 0), 0.5, .dynamic, .discrete, Layers.moving, .{});
+    _ = try a.simulateSingleStep();
+    const position_a = body.getPosition();
+    try expect(position_a.getY() < 10);
+
+    // Removed from A and unassigned (UnassignBodyID), assigned in B (AssignBodyID) and added to B
+    const bi_a = a.getBodyInterface();
+    const id_a = body.getID();
+    bi_a.removeBody(id_a);
+    try expect(bi_a.unassignBodyID(id_a) == body);
+    try expectEqual(@as(u32, 0), a.getSystem().getNumBodies());
+    const bi_b = b.getBodyInterface();
+    try expect(bi_b.assignBodyID(body));
+    try bi_b.addBody(body.getID(), .activate);
+    try expectEqual(@as(u32, 1), b.getSystem().getNumBodies());
+
+    // A is gone, its allocator still holds the body's page (and the body's shape): the body falls on in B
+    a.deinit();
+    a_alive = false;
+    try expect(allocator_a.allocated_bytes - allocator_a.freed_bytes >= 64 * 1024);
+    for (0..10) |_| _ = try b.simulateSingleStep();
+    try expect(body.getPosition().getY() < position_a.getY());
+    try expect(bi_b.isActive(body.getID()));
+
+    // B destroys it: everything of A goes back to A's allocator, B's allocator frees none of it
+    const freed_b = allocator_b.freed_bytes;
+    bi_b.removeBody(body.getID());
+    bi_b.destroyBody(body.getID());
+    try expectEqual(allocator_a.allocated_bytes, allocator_a.freed_bytes);
+    try expectEqual(freed_b, allocator_b.freed_bytes);
+    try expectEqual(@as(u32, 0), b.getSystem().getNumBodies());
 }

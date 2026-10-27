@@ -170,6 +170,9 @@ pub const BodyInterface = struct {
     }
 
     /// Advanced use only. See UnassignBodyIDs. Unassigns the ID of a single body.
+    /// Zolt (Phase 13): the body can move to another PhysicsSystem as described at UnassignBodyIDs. A static body without
+    /// motion properties or a soft body is freed with the allocator of the PhysicsSystem that destroys it, so such a move
+    /// needs both systems to use the same allocator.
     pub fn unassignBodyID(self: *BodyInterface, body_id: BodyID) *Body {
         var body: [1]*Body = undefined;
         self.body_manager.removeBodies((&body_id)[0..1], &body);
@@ -180,6 +183,12 @@ pub const BodyInterface = struct {
     /// The body can be destroyed through DestroyBodyWithoutID. This can be used to decouple deallocation. A call to UnassignBodyIDs followed by calls to DestroyBodyWithoutID is equivalent to calling DestroyBodies.
     /// @param body_ids A list of body IDs
     /// @param out_bodies If not null on input, this will contain a list of body pointers corresponding to inBodyIDs that can be destroyed afterwards (caller assumes ownership over these).
+    /// Zolt (Phase 13): as in Jolt, the bodies can be assigned to another PhysicsSystem or destroyed through it, also after
+    /// this one is gone. A body with motion properties lives in a page of the PhysicsSystem that created it, and that
+    /// system's allocator frees the page: it must stay valid until the body is destroyed (the header of BodyManager.zig).
+    /// A static body without motion properties (created without `allow_dynamic_or_kinematic`) or a soft body is freed
+    /// with the allocator of the PhysicsSystem that destroys it, so such a move needs both systems to use the same
+    /// allocator.
     pub fn unassignBodyIDs(self: *BodyInterface, body_ids: []const BodyID, out_bodies: ?[]*Body) void {
         self.body_manager.removeBodies(body_ids, out_bodies);
     }

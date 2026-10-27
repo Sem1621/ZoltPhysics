@@ -31,8 +31,11 @@
 //!   call logs must match (ZoltParity/Renderer/ParityRenderer.zig).
 //! C ABI wrappers: ZoltParity/Physics/BodyReference.cpp, and `jolt_dr_body_buoyancy` in
 //! ZoltParity/Renderer/DebugRendererReference.cpp for the draws.
+//! Zolt only: "BodyManager body pool: the C allocator aligns the pages to 64 KB" (Phase 13) runs here because this
+//! binary links libc and the unit tests do not.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zolt = @import("zolt");
 const fw = @import("../ParityFramework.zig");
 
@@ -1372,4 +1375,69 @@ test "Body and MotionProperties: the buoyancy draws (call log)" {
     // Enough draws of both: the submerged volume of the shapes, and the marker and the text of ApplyBuoyancyImpulse
     try std.testing.expect(num_drawn[0] >= 100 and num_drawn[1] >= 100);
     try check.finish();
+}
+
+test "BodyManager body pool: the C allocator aligns the pages to 64 KB (Zolt only)" {
+    // Zolt only (Phase 13, the body pool of BodyManager.zig), here because the parity binary links libc (the unit tests
+    // do not): the pool's pages are 64 KB aligned to 64 KB from the BodyManager's allocator, and the C allocator gets them
+    // from posix_memalign. 16 blocks straight from it, then the pages of 3 pages of bodies (the first slot of a page
+    // starts 64 bytes after a 64 KB boundary). One body then moves to a BodyManager with another allocator, outlives
+    // the first one and is destroyed by the second: its destroy frees its page with the C allocator.
+    if (!builtin.link_libc) return error.SkipZigTest;
+    const c_allocator = std.heap.c_allocator;
+    const page_size = 64 * 1024;
+    const body_size = @sizeOf(zolt.BodyWithMotionProperties);
+    const slots_per_page = (page_size - 64) / body_size;
+
+    var blocks: [16][]align(page_size) u8 = undefined;
+    var num_blocks: usize = 0;
+    defer for (blocks[0..num_blocks]) |block| c_allocator.free(block);
+    for (&blocks) |*block| {
+        block.* = try c_allocator.alignedAlloc(u8, comptime .fromByteUnits(page_size), page_size);
+        num_blocks += 1;
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(block.ptr) % page_size);
+        block.*[0] = 1;
+        block.*[page_size - 1] = 1;
+    }
+
+    var layers: ParityLayers = .{};
+    var other: BodyManager = .empty;
+    try other.init(std.testing.allocator, io, 4, 0, &layers.base);
+    defer other.deinit();
+    var bm: BodyManager = .empty;
+    try bm.init(c_allocator, io, 4, 0, &layers.base);
+    var bm_alive = true;
+    defer if (bm_alive) bm.deinit();
+
+    const sphere = try SphereShapeSettings.create(std.testing.allocator, 1, .{});
+    var settings = BodyCreationSettings.initWithSettings(sphere.asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, 0);
+    defer settings.deinit();
+
+    const num_bodies = 2 * slots_per_page + 1;
+    const bodies = try std.testing.allocator.alloc(*Body, num_bodies);
+    defer std.testing.allocator.free(bodies);
+    var num_created: usize = 0;
+    defer for (bodies[0..num_created]) |b| bm.freeBody(b);
+    for (bodies, 0..) |*b, i| {
+        b.* = try bm.allocateBody(&settings);
+        num_created += 1;
+        const first: *zolt.BodyWithMotionProperties = @fieldParentPtr("body", bodies[i - i % slots_per_page]);
+        const this: *zolt.BodyWithMotionProperties = @fieldParentPtr("body", b.*);
+        try std.testing.expectEqual(@as(usize, 0), (@intFromPtr(first) - 64) % page_size);
+        try std.testing.expectEqual(@intFromPtr(first) + (i % slots_per_page) * body_size, @intFromPtr(this));
+    }
+    try std.testing.expectEqual(@as(u32, 3), bm.getBodyPoolStats().num_pages);
+
+    // The last body (the only one of the third page) moves to `other`, the others are freed, `bm` is deinitialized:
+    // the third page stays until `other` destroys its body
+    const moved = bodies[num_bodies - 1];
+    num_created -= 1;
+    try std.testing.expect(other.addBody(moved));
+    for (bodies[0..num_created]) |b| bm.freeBody(b);
+    num_created = 0;
+    bm.deinit();
+    bm_alive = false;
+    moved.setUserData(7);
+    try std.testing.expect(other.getBody(moved.getID()) == moved);
+    other.destroyBodies(&.{moved.getID()});
 }

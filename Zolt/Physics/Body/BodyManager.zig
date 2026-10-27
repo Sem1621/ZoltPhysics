@@ -43,6 +43,39 @@
 //! - JPH_DEBUG_RENDERER (`Draw`, `DrawSettings`, `EShapeColor`, `ESoftBodyConstraintColor`): gated declarations
 //!   (RemainingFeaturesArchitecture.md R2), `void` without `-Ddebug_renderer`. Jolt's default argument `inBodyFilter` is
 //!   `DrawOptions.body_filter`. Draw takes the body mutexes like Jolt.
+//!
+//! Differences with the C++ version (Roadmap Phase 13, class A: memory placement only, no result changes):
+//! - The rigid bodies with motion properties (BodyWithMotionProperties: dynamic and kinematic bodies, and static ones
+//!   created with `allow_dynamic_or_kinematic`) live in 64 KB pages (`BodyPool`) instead of one `new
+//!   BodyWithMotionProperties` each. A page is allocated, aligned to 64 KB, from the allocator of the BodyManager that
+//!   creates the body, when its bodies need it. Its first 64 bytes are a header (a magic number, a spin lock, the
+//!   number of bodies in the page, the first slot that was never used, a free list, whether its BodyManager still
+//!   exists, the allocator of the page), then come (64 KB - 64) / @sizeOf(BodyWithMotionProperties) slots: 204 of 320
+//!   bytes, 170 of 384 bytes in double precision, each one starting a cache line. The pages make the bodies' memory
+//!   independent of the user's allocator: Zig's SmpAllocator puts every body in a 512 byte slot, so a scene's bodies
+//!   take 1.6 times their size in cache lines and pages (5000 bodies: 2.56 MB against a 2 MB L2), and every 8th body
+//!   has the 4 KB offset of another one. (Phase 13's prototype X1 measured the pool together with the update arrays that
+//!   QuadTree.zig keeps: HighSpeed and ConvexVsMesh 2-8% more steps per second; the two parts were not measured apart.)
+//!   Freed slots are reused, the last one freed first. Static bodies (a Body without motion properties) and soft bodies
+//!   are allocated as before. Only where the bodies live changes: no result depends on a body's address (Jolt orders
+//!   and hashes bodies by BodyID; the one use of a body address as data, BodySlot's freed bit, needs only an even
+//!   address).
+//! - Ownership is Jolt's: its `sDeleteBody` is static and frees every body with the global allocator, so any
+//!   BodyManager can destroy any body, and a body that UnassignBodyID(s) hands out ("caller assumes ownership") can be
+//!   assigned to another PhysicsSystem or destroyed through it, also after its own PhysicsSystem is gone. Here a page
+//!   describes itself: the page of a body is the body's address with the low 16 bits cleared, so the destroy needs no
+//!   pool (`BodyPool.destroy`), whatever BodyManager runs it.
+//! - Memory behavior that differs from Jolt: a page is freed when its BodyManager is gone and its last body is
+//!   destroyed (by the BodyManager's deinit, or by the destroy of the page's last body when a body outlives its
+//!   BodyManager), with the page's allocator, which must stay valid until then. A page stays allocated while its
+//!   BodyManager exists, also when it holds no body, and while it holds a body that is never destroyed (Jolt leaks that
+//!   body). The allocation failures of body creation happen once per page (204 or 170 bodies) instead of once per body,
+//!   and when the page table grows: init reserves it for the pages of max_bodies (8 bytes per page), it grows only for
+//!   bodies beyond (CreateBodyWithoutID can create more than max_bodies). allocateBody then returns error.OutOfMemory
+//!   and the pool is unchanged.
+//! - A static body or a soft body that is moved to another PhysicsSystem is freed with that system's allocator (Zolt's
+//!   explicit allocators, also before Phase 13): the two systems must use the same allocator for such a move.
+//! - `getBodyPoolStats` and `isBodyInPool` (Zolt only) tell the pool's state, for tests and diagnostics.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -209,6 +242,263 @@ pub const BodyManager = struct {
         active_bodies_mutex: Mutex = .{},
         /// Mutex that protects the mBodiesCacheInvalid array
         bodies_cache_invalid_mutex: Mutex = .{},
+        /// Zolt (Phase 13): the pages of the rigid bodies with motion properties (allocateBody has a `*const` receiver
+        /// like Jolt's)
+        body_pool: BodyPool = .{},
+    };
+
+    /// Zolt (Phase 13, class A: memory placement only): the memory of the rigid bodies with motion properties, in pages
+    /// that describe themselves. Jolt allocates every BodyWithMotionProperties with `new` (glibc packs them 336 bytes
+    /// apart). Zig's SmpAllocator rounds the 320 bytes up to its 512 byte size class: a scene's bodies then take 1.6 times
+    /// the memory and the pages, and every 8th body has the 4 KB offset and the L1 sets of another one. The pool hands out
+    /// slots of exactly @sizeOf(BodyWithMotionProperties), 64 byte aligned (5 cache lines per body, 6 in double
+    /// precision), from pages of 64 KB that it allocates, aligned to 64 KB, from the BodyManager's allocator when the
+    /// bodies need them.
+    ///
+    /// A page describes itself: its first 64 bytes are a `Page` header, and the page of a body is the body's address with
+    /// the low 16 bits cleared. So any BodyManager can destroy any body, also after the BodyManager that created it is
+    /// gone, as in Jolt, whose static sDeleteBody frees every body with the global allocator: `destroy` needs no pool, it
+    /// puts the slot on the free list of its page. The header also holds the page's allocator and whether the BodyManager
+    /// of the page still exists (`owner_alive`). A page is freed once its BodyManager is gone and it holds no body: by the
+    /// pool's deinit, or by the destroy of its last body.
+    ///
+    /// `create` takes a slot of the current page (the page that handed out the last slot): a freed slot first, the last
+    /// one freed first, then a slot that was never used. When the current page is full it takes the next page that has a
+    /// free slot (it reads one counter per page), and allocates a new page when all pages are full. The page table is
+    /// reserved at init for the pages of max_bodies and grows only beyond (CreateBodyWithoutID can create more bodies).
+    ///
+    /// Threads: bodies are created (allocateBody, no lock in Jolt) and destroyed (destroyBodies under the bodies mutex,
+    /// freeBody without it, also through another BodyManager) from several threads. The pool mutex protects the page
+    /// table and the choice of a page for create. The contents of a page (`live`, `next_unused`, `free_list`,
+    /// `owner_alive`) change only under the page lock, a spin lock that is held for a few instructions. Lock order: the
+    /// pool mutex, then one page lock. Nothing is locked inside a page lock, and the allocator is not called inside one (a
+    /// page is freed after its lock was released). Why there is no race:
+    /// - create against a destroy on the same page (through any BodyManager): both change the free list and `live` only
+    ///   under the page lock. Only the creates of the page's own pool make `live` larger, and they run one at a time
+    ///   under the pool mutex. So the `live` that create reads without the page lock is never smaller than the count
+    ///   when it then locks the page: a page that looked like it had a free slot has one. While create runs, its
+    ///   BodyManager exists (its deinit must not run at the same time as its other functions, as in Jolt), so
+    ///   `owner_alive` is true and no destroy frees the page.
+    /// - deinit against a destroy on the same page: deinit sets `owner_alive` to false under the page lock and frees the
+    ///   page when `live` is 0. destroy decrements `live` under the page lock and frees the page when it reaches 0 while
+    ///   `owner_alive` is false. `owner_alive` turns false once, and after that `live` only decreases (only the owner
+    ///   creates bodies), so the condition (no owner and no body) becomes true in exactly one critical section and stays
+    ///   true. Each party checks it right after its own change in that section, so exactly one party frees the page:
+    ///   deinit when the page held no body any more (then no destroy of it can follow), otherwise the destroy that takes
+    ///   `live` to 0 (deinit saw a body, and every destroy before it saw a body left or the owner alive).
+    /// - two destroys on the same page: the page lock orders them, and only the one that takes `live` to 0 can free the
+    ///   page; no body of the page is left to destroy after it.
+    /// - the party that frees the page uses it last: every other use happened in an earlier critical section of the
+    ///   page lock, which the lock's release and acquire order before the free, and nothing can reach the page any more
+    ///   (it holds no body, and no pool has it). A thread that waits for a page lock is the owner (create, deinit, the
+    ///   stats) or the destroy of a body that is still counted in `live`, so the page is not freed while it waits.
+    const BodyPool = struct {
+        /// Size and alignment of a page
+        const page_size = 64 * 1024;
+        /// The page header takes the first cache line of a page
+        const header_size = Core.cache_line_size;
+        /// Every slot starts a cache line
+        const slot_alignment = Core.cache_line_size;
+
+        const Slot = BodyWithMotionProperties;
+
+        /// Number of slots of a page: 204 of 320 bytes, 170 of 384 bytes in double precision
+        const slots_per_page: u32 = (page_size - header_size) / @sizeOf(Slot);
+
+        /// The first 8 bytes of a page that a pool allocated ("ZoltBody"; destroy asserts them)
+        const page_magic: u64 = 0x5a6f_6c74_426f_6479;
+
+        /// A free slot holds the link of its page's free list
+        const FreeSlot = extern struct { next: ?*FreeSlot };
+
+        /// The header at the start of a page
+        const Page = extern struct {
+            /// `page_magic` while the page is allocated
+            magic: u64,
+            /// The page lock (a spin lock)
+            lock: std.atomic.Value(u32),
+            /// Number of slots that hold a body. Changed under the page lock, create reads it without the lock.
+            live: std.atomic.Value(u32),
+            /// First slot that was never handed out
+            next_unused: u32,
+            /// False once the BodyManager that allocated the page was deinitialized
+            owner_alive: bool,
+            /// Freed slots, the last one freed first
+            free_list: ?*FreeSlot,
+            /// The allocator of the page (the one of its BodyManager), it frees the page
+            allocator_ptr: *anyopaque,
+            allocator_vtable: *const Allocator.VTable,
+
+            /// The page that holds a slot (of any pool)
+            fn ofSlot(slot: *Slot) *Page {
+                const page: *Page = @ptrFromInt(@intFromPtr(slot) & ~@as(usize, page_size - 1));
+                std.debug.assert(page.magic == page_magic); // The body is a slot of a page
+                std.debug.assert((@intFromPtr(slot) - @intFromPtr(page.slots())) % @sizeOf(Slot) == 0);
+                return page;
+            }
+
+            /// The slots after the header
+            fn slots(page: *Page) *align(slot_alignment) [slots_per_page]Slot {
+                return @ptrFromInt(@intFromPtr(page) + header_size);
+            }
+
+            fn acquire(page: *Page) void {
+                while (page.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+                    while (page.lock.load(.monotonic) != 0)
+                        std.atomic.spinLoopHint();
+                }
+            }
+
+            fn release(page: *Page) void {
+                page.lock.store(0, .release);
+            }
+
+            /// A slot for a body (not initialized): a freed slot, else one that was never used. The page must have a free
+            /// slot.
+            fn take(page: *Page) *Slot {
+                page.acquire();
+                defer page.release();
+
+                const live = page.live.load(.monotonic);
+                std.debug.assert(live < slots_per_page and page.owner_alive);
+                page.live.store(live + 1, .monotonic);
+                if (page.free_list) |freed| {
+                    page.free_list = freed.next;
+                    return @ptrCast(@alignCast(freed));
+                }
+                const slot = &page.slots()[page.next_unused];
+                page.next_unused += 1;
+                return slot;
+            }
+
+            /// Gives the page back to its allocator (no pool has it and it holds no body)
+            fn free(page: *Page) void {
+                const allocator: Allocator = .{ .ptr = page.allocator_ptr, .vtable = page.allocator_vtable };
+                page.magic = 0;
+                const memory: []align(page_size) u8 = @as([*]align(page_size) u8, @ptrCast(@alignCast(page)))[0..page_size];
+                allocator.free(memory);
+            }
+        };
+
+        comptime {
+            // The slots have no padding: a body takes exactly the bytes of BodyWithMotionProperties and starts a cache
+            // line. 320 bytes in single precision, 384 in double precision; asserts (MotionProperties' cached types) and
+            // the debug renderer do not change the size.
+            std.debug.assert(@sizeOf(Slot) % slot_alignment == 0 and @alignOf(Slot) <= slot_alignment);
+            std.debug.assert(@sizeOf(Page) <= header_size and header_size % slot_alignment == 0);
+            std.debug.assert(@sizeOf(FreeSlot) <= @sizeOf(Slot) and @alignOf(FreeSlot) <= slot_alignment);
+            std.debug.assert(slots_per_page > 0);
+        }
+
+        /// The pages that this pool allocated, `pages.len` entries are allocated (at init the pages of max_bodies)
+        pages: []*Page = &.{},
+        num_pages: u32 = 0,
+        /// The page that create takes slots from first
+        current: u32 = 0,
+        /// Protects the page table and `current` (a plain lock without PhysicsLock's lock order checks: only page locks
+        /// and the allocator are used inside it)
+        mutex: Mutex = .{},
+
+        /// Number of pages for a number of bodies
+        fn pagesFor(num_bodies: u32) u32 {
+            return num_bodies / slots_per_page + @intFromBool(num_bodies % slots_per_page != 0);
+        }
+
+        /// Reserves the page table for the pages of max_bodies (the pages come with the bodies)
+        fn init(self: *BodyPool, allocator: Allocator, max_bodies: u32) Allocator.Error!void {
+            std.debug.assert(self.pages.len == 0);
+            self.pages = try allocator.alloc(*Page, pagesFor(max_bodies));
+        }
+
+        /// The BodyManager is deinitialized, after it destroyed its bodies: frees the pages that hold no body. A page that
+        /// still holds bodies (unassigned, or moved to another BodyManager) is freed by the destroy of its last body.
+        fn deinit(self: *BodyPool, allocator: Allocator) void {
+            for (self.pages[0..self.num_pages]) |page| {
+                page.acquire();
+                page.owner_alive = false;
+                const unused = page.live.load(.monotonic) == 0;
+                page.release();
+                if (unused)
+                    page.free();
+            }
+            allocator.free(self.pages);
+            self.* = .{};
+        }
+
+        /// A slot for a body (not initialized). Error: a new page or a larger page table could not be allocated, the pool
+        /// is unchanged.
+        fn create(self: *BodyPool, allocator: Allocator, io: std.Io) Allocator.Error!*Slot {
+            self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+
+            // The current page, else the next page that has a free slot
+            var index = self.current;
+            for (0..self.num_pages) |_| {
+                const page = self.pages[index];
+                if (page.live.load(.monotonic) < slots_per_page) {
+                    self.current = index;
+                    return page.take();
+                }
+                index += 1;
+                if (index == self.num_pages)
+                    index = 0;
+            }
+
+            // All pages are full: a new page
+            const page = try self.addPage(allocator);
+            self.current = self.num_pages - 1;
+            return page.take();
+        }
+
+        /// Allocates a page and puts it in the page table, which grows when it is full
+        fn addPage(self: *BodyPool, allocator: Allocator) Allocator.Error!*Page {
+            const memory = try allocator.alignedAlloc(u8, comptime .fromByteUnits(page_size), page_size);
+            errdefer allocator.free(memory);
+            if (self.num_pages == self.pages.len) {
+                // Beyond the pages of max_bodies
+                const pages = try allocator.alloc(*Page, @max(2 * self.pages.len, 1));
+                @memcpy(pages[0..self.num_pages], self.pages);
+                allocator.free(self.pages);
+                self.pages = pages;
+            }
+            const page: *Page = @ptrCast(memory.ptr);
+            page.* = .{ .magic = page_magic, .lock = .init(0), .live = .init(0), .next_unused = 0, .owner_alive = true, .free_list = null, .allocator_ptr = allocator.ptr, .allocator_vtable = allocator.vtable };
+            self.pages[self.num_pages] = page;
+            self.num_pages += 1;
+            return page;
+        }
+
+        /// Returns the slot of a body to its page, whatever BodyManager created the body and whether it still exists. The
+        /// destroy of the last body of a page whose BodyManager is gone frees the page.
+        fn destroy(slot: *Slot) void {
+            const page = Page.ofSlot(slot);
+            slot.* = undefined; // Safe builds poison the slot, like the allocator poisons freed memory
+            const freed: *FreeSlot = @ptrCast(@alignCast(slot));
+
+            page.acquire();
+            freed.* = .{ .next = page.free_list };
+            page.free_list = freed;
+            const live = page.live.load(.monotonic) - 1;
+            page.live.store(live, .monotonic);
+            const unused = live == 0 and !page.owner_alive;
+            page.release();
+            if (unused)
+                page.free(); // The last body of a page whose BodyManager is gone
+        }
+    };
+
+    /// Zolt (Phase 13): the state of the body pool (BodyPool), for tests and diagnostics
+    pub const BodyPoolStats = struct {
+        /// Number of pages that the pool allocated
+        num_pages: u32,
+        /// Number of entries of the page table (reserved at init for the pages of max_bodies)
+        page_table_len: u32,
+        /// Number of slots in the pages
+        num_slots: u32,
+        /// Number of slots that hold a body (also the bodies that were moved to another BodyManager)
+        num_used: u32,
+        /// Number of slots on the free lists of the pages
+        num_free: u32,
     };
 
     /// Allocates the bodies and the arrays (set at init)
@@ -314,7 +604,14 @@ pub const BodyManager = struct {
 
         // Allocate space for sequence numbers
         self.body_sequence_numbers = try allocator.alloc(u8, max_bodies);
+        errdefer {
+            allocator.free(self.body_sequence_numbers);
+            self.body_sequence_numbers = &.{};
+        }
         @memset(self.body_sequence_numbers, 0);
+
+        // Zolt (Phase 13): the page table of the body pool (the pages come with the bodies)
+        try mutable_fields.body_pool.init(allocator, max_bodies);
 
         // Keep layer interface
         self.broad_phase_layer_interface = layer_interface;
@@ -342,6 +639,7 @@ pub const BodyManager = struct {
         self.allocator.free(self.body_sequence_numbers);
         self.allocator.free(self.bodies);
         self.body_mutexes.deinit(self.allocator);
+        mutable_fields.body_pool.deinit(self.allocator); // Zolt (Phase 13): after the bodies were deleted, frees the empty pages
         self.allocator.destroy(mutable_fields);
         self.* = .empty;
     }
@@ -403,13 +701,49 @@ pub const BodyManager = struct {
         return stats;
     }
 
+    /// Zolt (Phase 13): the state of the body pool (slow, walks the free lists)
+    pub fn getBodyPoolStats(self: *const BodyManager) BodyPoolStats {
+        const pool = &self.mutableFields().body_pool;
+        pool.mutex.lock(self.io);
+        defer pool.mutex.unlock(self.io);
+
+        var stats: BodyPoolStats = .{ .num_pages = pool.num_pages, .page_table_len = @intCast(pool.pages.len), .num_slots = pool.num_pages * BodyPool.slots_per_page, .num_used = 0, .num_free = 0 };
+        for (pool.pages[0..pool.num_pages]) |page| {
+            page.acquire();
+            defer page.release();
+            stats.num_used += page.live.load(.monotonic);
+            var free = page.free_list;
+            while (free) |f| : (free = f.next)
+                stats.num_free += 1;
+        }
+        return stats;
+    }
+
+    /// Zolt (Phase 13): true when the body's memory is a slot of a page of this BodyManager's body pool (a rigid body with
+    /// motion properties that this BodyManager created), false for a body of another BodyManager, a body without motion
+    /// properties and a soft body
+    pub fn isBodyInPool(self: *const BodyManager, body: *const Body) bool {
+        const pool = &self.mutableFields().body_pool;
+        pool.mutex.lock(self.io);
+        defer pool.mutex.unlock(self.io);
+
+        // Only compares addresses: the memory around a body that is not in a page is not read
+        const page_address = @intFromPtr(body) & ~@as(usize, BodyPool.page_size - 1);
+        for (pool.pages[0..pool.num_pages]) |page| {
+            if (@intFromPtr(page) == page_address)
+                return true;
+        }
+        return false;
+    }
+
     /// Create a body using creation settings. The returned body will not be part of the body manager yet.
     /// Zolt: `error.InvalidShape` when the settings have no (valid) shape (Jolt crashes), the body is freed on error.
     pub fn allocateBody(self: *const BodyManager, body_creation_settings: *const BodyCreationSettings) CreateBodyError!*Body {
         // Fill in basic properties
         var body: *Body = undefined;
         if (body_creation_settings.hasMassProperties()) {
-            const bmp = try self.allocator.create(BodyWithMotionProperties);
+            // Zolt (Phase 13): a slot of a page of the body pool
+            const bmp = try self.mutableFields().body_pool.create(self.allocator, self.io);
             bmp.* = .{};
             body = &bmp.body;
             body.motion_properties = &bmp.motion_properties;
@@ -1593,7 +1927,8 @@ pub const BodyManager = struct {
                 body.shape.deinit();
                 body.collision_group.deinit();
                 const bmp: *BodyWithMotionProperties = @fieldParentPtr("body", body);
-                self.allocator.destroy(bmp);
+                // Zolt (Phase 13): back to its page, whatever BodyManager created the body (Jolt's static sDeleteBody)
+                BodyPool.destroy(bmp);
             }
         } else {
             body.shape.deinit();
