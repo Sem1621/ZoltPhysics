@@ -92,11 +92,14 @@ ALLOW = [
     # Body creation copies the default Body (0x140 bytes, 0x180 in double precision)
     (r"^Physics\.Body\.BodyManager\.BodyManager\.allocateBody$", {"rodata"}, 0x180, "body creation"),
     # Once per update: the default PhysicsUpdateContext.Step (Jolt's mSteps.resize runs the Step constructor). About
-    # 0.01% of the instructions of an update. (Phase 12: 8 bytes more for Step.sort_scratch_used.)
-    (r"^Physics\.PhysicsSystem\.PhysicsSystem\.update$", {"rodata"}, 0x1cb0, "the steps of an update"),
-    # Construction and teardown set the members to their default values
-    (r"^Physics\.PhysicsSystem\.PhysicsSystem\.(init|deinit)$", {"rodata"}, 0x500, "PhysicsSystem init and deinit"),
-    (r"^Physics\.Constraints\.ContactConstraintManager\.ContactConstraintManager\.(init|deinit)$", {"rodata"}, 0x128,
+    # 0.01% of the instructions of an update. (Phase 12: 8 bytes more for Step.sort_scratch_used. Phase 13: 64 bytes
+    # more, the padding in front of the six padded atomics and the body pair queues of Step, Step.padded_atomics.)
+    (r"^Physics\.PhysicsSystem\.PhysicsSystem\.update$", {"rodata"}, 0x1cf0, "the steps of an update"),
+    # Construction and teardown set the members to their default values. (Phase 13: the constraint counter of the
+    # ContactConstraintManager fills a cache line and makes both structs 64 byte aligned: 0x500 -> 0x580 and
+    # 0x128 -> 0x180 bytes.)
+    (r"^Physics\.PhysicsSystem\.PhysicsSystem\.(init|deinit)$", {"rodata"}, 0x580, "PhysicsSystem init and deinit"),
+    (r"^Physics\.Constraints\.ContactConstraintManager\.ContactConstraintManager\.(init|deinit)$", {"rodata"}, 0x180,
      "ContactConstraintManager init and deinit"),
     (r"^Core\.JobSystemThreadPool\.JobSystemThreadPool\.deinit$", {"rodata"}, 0x21c0, "JobSystemThreadPool teardown"),
     # Job system creation: the job list of each barrier

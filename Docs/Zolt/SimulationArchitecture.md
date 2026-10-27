@@ -289,6 +289,16 @@ const PaddedAtomicU32 = extern struct {
 };
 ```
 
+- Zig reorders the fields of `Step`, so the six padded atomics and the body pair queues behind them
+  (Jolt's `mBodyPairQueues`) are the fields of one extern struct `PaddedAtomics` in Jolt's order,
+  behind 60 bytes of padding (`step.padded_atomics.active_body_read_idx.value`,
+  `step.bodyPairQueues()`; Phase 13, class A, layout only). Every atomic, including the write and
+  read index of each queue, then has at least 60 bytes of padding on both sides, wherever Zig places
+  the struct. The number of queues in use is `step.num_body_pair_queues`, outside the struct. Jolt
+  pads only behind each atomic and relies on its declaration order. The padding in front makes `Step`
+  64 bytes larger than Jolt's (7,408 instead of 7,344 bytes), so an update needs 64 bytes of temp
+  memory per collision step more than Jolt (see D12).
+
 **Builder.** `buildJobs` transliterates the "Build Jobs" block of `PhysicsSystem::Update`
 statement by statement:
 - Every lambda becomes an inline closure at the lambda's position.
@@ -741,7 +751,10 @@ parameters.
 - Compare the listener callbacks as sorted records.
 - Thread matrix: Zig `JobSystemSingleThreaded` and pools of 0, 1, 3 and 7 workers against C++ with
   0 and N threads. Run Debug and ReleaseFast, single and double precision.
-- Optionally check that Zolt's temp memory use is at most Jolt's.
+- Optionally check that Zolt's temp memory use is at most Jolt's. One known exception (Phase 13, D4):
+  each `Step` is 64 bytes larger than Jolt's, so an update needs 64 * collision_steps bytes more. A
+  `TempAllocatorImpl` sized at Jolt's exact peak can then make `update` return `error.OutOfMemory`
+  where Jolt succeeds (`TempAllocatorImplWithMallocFallback` takes the bytes from the heap).
 
 **Mandatory per scene test:**
 - A FailingTempAllocator sweep (every allocation fails once; `temp.isEmpty()`; recovery through

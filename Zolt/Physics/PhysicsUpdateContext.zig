@@ -6,7 +6,7 @@
 //!   `Array<Step, STLTempAllocator<Step>>`, resized once and never reallocated), the first temp allocation of the update
 //!   and the last one freed. The job closures capture pointers to the context and the steps.
 //! - Temp memory is only rvector_alignment aligned, so the padded atomics of Step are extern structs with explicit
-//!   padding (`PaddedAtomicU32`, `BodyPairQueue`) instead of `align(Core.cache_line_size)`.
+//!   padding (`PaddedAtomicU32` in `PaddedAtomics`, `BodyPairQueue`) instead of `align(Core.cache_line_size)`.
 //! - `mBodyPairs` is `body_pairs: TempArray(BodyPairSlot)`: Jolt writes and reads a plain BodyPair while other jobs may
 //!   read the slot before their compare-exchange fails (TSAN suppressed in Jolt); Zolt stores the 8 bytes as one
 //!   `.monotonic` atomic (`storeBodyPair` / `loadBodyPair`), which is defined and has the same bits.
@@ -17,6 +17,27 @@
 //!   the large islands of the step use (PhysicsSystem.claimSortScratch).
 //! - The constructor `PhysicsUpdateContext(TempAllocator &)` is the struct literal in PhysicsSystem.update; the
 //!   destructor is `deinit` (it releases the job handles of the steps and frees the steps).
+//!
+//! Difference with the C++ version (Phase 13, class A, layout only): the six padded atomics of Step (Jolt's
+//! mDetermineActiveConstraintReadIdx + mPadding1 ... mActiveBodyReadIdx + mPadding6) and the body pair queues behind
+//! them (Jolt's mBodyPairQueues) are the fields of one extern struct `PaddedAtomics`, in Jolt's order, behind 60 bytes
+//! of padding (`step.padded_atomics.active_body_read_idx.value`, `step.bodyPairQueues()`). Jolt declares them one after
+//! the other, so each one after the first has only the previous one's padding in front of it, and mActiveBodyReadIdx,
+//! the last of the six, sits between mPadding5 and mPadding6. Zig reorders the fields of Step: with six separate padded
+//! fields it put active_body_read_idx (a compare-exchange per batch of 16 active bodies in the FindCollisions jobs)
+//! first, right behind max_body_pairs_per_queue, which the FindCollisions jobs read for every body pair they queue or
+//! take, active_find_collision_jobs and the other unpadded counters. With the six in an extern struct and the queues
+//! (a StaticArray) a separate field of Step, it put the queues there instead: the write index of queue 0, an atomic add
+//! for every body pair that FindCollisions job 0 queues, 8 bytes behind max_body_pairs_per_queue. In the extern struct
+//! every atomic, including the write and read index of each queue, has at least 60 bytes of padding on both sides, so
+//! whatever Zig places around the struct, a cache line that holds an atomic holds nothing but the atomic and padding (no
+//! job writes the padding). The number of queues in use (Jolt: mBodyPairQueues.size(), which shares the cache line of
+//! the write index of queue 0) is `Step.num_body_pair_queues`, outside the struct. Simulation results do not change,
+//! but the 60 bytes in front (64 with the alignment of Step) make Step larger than Jolt's: 7,408 bytes instead of 7,344,
+//! in both precisions. An update needs 64 * collision_steps bytes more temp memory than Jolt, so a TempAllocatorImpl
+//! sized at Jolt's exact peak can make `PhysicsSystem.update` return error.OutOfMemory where Jolt succeeds (a
+//! TempAllocatorImplWithMallocFallback takes those bytes from the heap instead). The test "PhysicsUpdateContext: no
+//! field of a step shares a cache line with a padded atomic" checks the layout.
 
 const std = @import("std");
 const Core = @import("../Core/Core.zig");
@@ -61,8 +82,6 @@ pub const PhysicsUpdateContext = struct {
         padding2: [Core.cache_line_size - @sizeOf(u32)]u8 = undefined,
     };
 
-    pub const BodyPairQueues = StaticArray(BodyPairQueue, max_concurrency);
-
     /// A mask that has as many bits as we can have concurrent jobs
     pub const JobMask = u32;
 
@@ -76,6 +95,30 @@ pub const PhysicsUpdateContext = struct {
     pub const PaddedAtomicU32 = extern struct {
         value: std.atomic.Value(u32) = .init(0),
         padding: [Core.cache_line_size - @sizeOf(u32)]u8 = undefined,
+    };
+
+    /// Zolt (Phase 13, class A, layout only): the six padded atomics of Step in Jolt's order, followed by the body pair
+    /// queues (Jolt: mPadding6, then mBodyPairQueues), behind as much padding as Jolt puts behind each atomic. Every
+    /// atomic then has at least 60 bytes of padding on both sides, which keeps the cache line of the atomic free of other
+    /// data wherever Zig places this struct in Step (see the top of this file).
+    pub const PaddedAtomics = extern struct {
+        /// Zolt: padding to avoid sharing cache line with the field that Zig places in front of this struct
+        padding_before: [Core.cache_line_size - @sizeOf(u32)]u8 = undefined,
+        /// Next constraint for determine active constraints
+        determine_active_constraint_read_idx: PaddedAtomicU32 = .{},
+        /// Number of constraints in the mActiveConstraints array
+        num_active_constraints: PaddedAtomicU32 = .{},
+        /// Next constraint for setting up velocity constraints
+        setup_velocity_constraints_read_idx: PaddedAtomicU32 = .{},
+        /// Next step listener to call
+        step_listener_read_idx: PaddedAtomicU32 = .{},
+        /// Next body to apply gravity to
+        apply_gravity_read_idx: PaddedAtomicU32 = .{},
+        /// Index of fist active body that has not yet been processed by the broadphase
+        active_body_read_idx: PaddedAtomicU32 = .{},
+        /// Queues in which to put body pairs that need to be tested by the narrowphase (Jolt: mBodyPairQueues, a
+        /// StaticArray; the first Step.num_body_pair_queues are in use, see Step.bodyPairQueues)
+        body_pair_queues: [max_concurrency]BodyPairQueue = undefined,
     };
 
     /// A slot of the body pair queues (Jolt: BodyPair), see the file comment
@@ -138,21 +181,14 @@ pub const PhysicsUpdateContext = struct {
         /// Number of bodies that were active at the start of the physics update step. Only these bodies will receive gravity (they are the first N in the active body list).
         num_active_bodies_at_step_start: u32 = undefined,
 
-        /// Next constraint for determine active constraints
-        determine_active_constraint_read_idx: PaddedAtomicU32 = .{},
-        /// Number of constraints in the mActiveConstraints array
-        num_active_constraints: PaddedAtomicU32 = .{},
-        /// Next constraint for setting up velocity constraints
-        setup_velocity_constraints_read_idx: PaddedAtomicU32 = .{},
-        /// Next step listener to call
-        step_listener_read_idx: PaddedAtomicU32 = .{},
-        /// Next body to apply gravity to
-        apply_gravity_read_idx: PaddedAtomicU32 = .{},
-        /// Index of fist active body that has not yet been processed by the broadphase
-        active_body_read_idx: PaddedAtomicU32 = .{},
+        /// Zolt (Phase 13): Jolt's mDetermineActiveConstraintReadIdx, mNumActiveConstraints,
+        /// mSetupVelocityConstraintsReadIdx, mStepListenerReadIdx, mApplyGravityReadIdx and mActiveBodyReadIdx with their
+        /// paddings and the elements of mBodyPairQueues, in one extern struct (see the top of this file)
+        padded_atomics: PaddedAtomics = .{},
 
-        /// Queues in which to put body pairs that need to be tested by the narrowphase
-        body_pair_queues: BodyPairQueues = .empty,
+        /// Zolt (Phase 13): the number of body pair queues in use (Jolt: mBodyPairQueues.size()), kept off the cache line
+        /// of the first queue
+        num_body_pair_queues: u32 = 0,
 
         /// Amount of body pairs that we can queue per queue
         max_body_pairs_per_queue: u32 = undefined,
@@ -229,6 +265,11 @@ pub const PhysicsUpdateContext = struct {
         soft_body_finalize: JobHandle = .empty,
         /// Job that kicks the next step (empty for the last step)
         start_next_step: JobHandle = .empty,
+
+        /// Queues in which to put body pairs that need to be tested by the narrowphase (Jolt: mBodyPairQueues)
+        pub fn bodyPairQueues(self: *Step) []BodyPairQueue {
+            return self.padded_atomics.body_pair_queues[0..self.num_body_pair_queues];
+        }
 
         /// ~Step: releases the job handles
         pub fn deinit(self: *Step) void {
@@ -351,6 +392,13 @@ pub const PhysicsUpdateContext = struct {
 test "PhysicsUpdateContext: padded atomics and body pair slots" {
     // The padding keeps each atomic on its own cache line sized block, also in temp memory
     try std.testing.expectEqual(@as(usize, Core.cache_line_size), @sizeOf(PhysicsUpdateContext.PaddedAtomicU32));
+    // Zolt (Phase 13): the six padded atomics of a step and then the body pair queues follow each other in Jolt's order
+    // behind 60 bytes of padding
+    const PaddedAtomics = PhysicsUpdateContext.PaddedAtomics;
+    const queues_size = PhysicsUpdateContext.max_concurrency * 2 * Core.cache_line_size;
+    try std.testing.expectEqual(@as(usize, Core.cache_line_size - @sizeOf(u32) + 6 * Core.cache_line_size + queues_size), @sizeOf(PaddedAtomics));
+    inline for (.{ "determine_active_constraint_read_idx", "num_active_constraints", "setup_velocity_constraints_read_idx", "step_listener_read_idx", "apply_gravity_read_idx", "active_body_read_idx", "body_pair_queues" }, 0..) |name, i|
+        try std.testing.expectEqual(@as(usize, Core.cache_line_size - @sizeOf(u32) + i * Core.cache_line_size), @offsetOf(PaddedAtomics, name));
     try std.testing.expectEqual(@as(usize, 2 * Core.cache_line_size), @sizeOf(PhysicsUpdateContext.BodyPairQueue));
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(PhysicsUpdateContext.BodyPairQueue, "write_idx"));
     try std.testing.expectEqual(@as(usize, Core.cache_line_size), @offsetOf(PhysicsUpdateContext.BodyPairQueue, "read_idx"));
@@ -362,4 +410,119 @@ test "PhysicsUpdateContext: padded atomics and body pair slots" {
     PhysicsUpdateContext.storeBodyPair(&slot, pair);
     const loaded = PhysicsUpdateContext.loadBodyPair(&slot);
     try std.testing.expect(loaded.eql(pair));
+}
+
+/// Zolt (Phase 13): a range of bytes of a struct that holds data (a field, or the atomic of a padded atomic)
+const DataRange = struct {
+    begin: usize,
+    end: usize,
+    name: []const u8,
+    is_atomic: bool,
+};
+
+/// Zolt (Phase 13): true for the extern structs that hold padded atomics and nothing else: their `std.atomic.Value(u32)`
+/// fields are the atomics, all other fields are padding
+fn isPaddedAtomicType(comptime T: type) bool {
+    return T == PhysicsUpdateContext.PaddedAtomicU32 or T == PhysicsUpdateContext.BodyPairQueue;
+}
+
+/// Zolt (Phase 13): true when a value of type `T` holds padded atomics: a padded atomic type, an array of them or a
+/// struct with such a field (`PaddedAtomics`, also a StaticArray of `BodyPairQueue` like Jolt's mBodyPairQueues)
+fn holdsPaddedAtomics(comptime T: type) bool {
+    if (isPaddedAtomicType(T))
+        return true;
+    return switch (@typeInfo(T)) {
+        .array => |info| holdsPaddedAtomics(info.child),
+        .@"struct" => |info| for (info.fields) |field| {
+            if (holdsPaddedAtomics(field.type))
+                break true;
+        } else false,
+        else => false,
+    };
+}
+
+/// Zolt (Phase 13): `ranges` followed by the bytes of a `T` at byte `begin` that hold data. A padded atomic holds data
+/// only in its atomics. In a struct that holds padded atomics, a byte array whose name starts with "padding"
+/// (`PaddedAtomics.padding_before`) holds none; its other fields are walked the same way. Fields of size 0 hold none.
+fn appendDataRanges(comptime ranges: []const DataRange, comptime T: type, comptime begin: usize, comptime name: []const u8) []const DataRange {
+    comptime {
+        if (!holdsPaddedAtomics(T)) {
+            if (@sizeOf(T) == 0)
+                return ranges;
+            return ranges ++ [_]DataRange{.{ .begin = begin, .end = begin + @sizeOf(T), .name = name, .is_atomic = false }};
+        }
+        var result = ranges;
+        switch (@typeInfo(T)) {
+            .array => |info| for (0..info.len) |i| {
+                result = appendDataRanges(result, info.child, begin + i * @sizeOf(info.child), name ++ std.fmt.comptimePrint("[{d}]", .{i}));
+            },
+            .@"struct" => |info| for (info.fields) |field| {
+                const field_begin = begin + @offsetOf(T, field.name);
+                const field_name = name ++ "." ++ field.name;
+                if (isPaddedAtomicType(T)) {
+                    if (field.type == std.atomic.Value(u32))
+                        result = result ++ [_]DataRange{.{ .begin = field_begin, .end = field_begin + @sizeOf(u32), .name = field_name, .is_atomic = true }};
+                } else if (!(std.mem.startsWith(u8, field.name, "padding") and field.type == [@sizeOf(field.type)]u8)) {
+                    result = appendDataRanges(result, field.type, field_begin, field_name);
+                }
+            },
+            else => unreachable,
+        }
+        return result;
+    }
+}
+
+/// Zolt (Phase 13): the bytes of the struct `T` that hold data (see appendDataRanges)
+fn dataRanges(comptime T: type) []const DataRange {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var ranges: []const DataRange = &.{};
+        for (@typeInfo(T).@"struct".fields) |field|
+            ranges = appendDataRanges(ranges, field.type, @offsetOf(T, field.name), field.name);
+        const result = ranges[0..ranges.len].*;
+        return &result;
+    }
+}
+
+/// Zolt (Phase 13): the number of padded atomics in the struct `T` (those of `PaddedAtomicU32` and `BodyPairQueue`, also
+/// inside other fields). Fails when a byte of data other than the atomic (another field of `T`, or another padded
+/// atomic) can share a cache line with one of them, wherever the `T` is. The atomic is 4 bytes and 4 byte aligned, and
+/// so is any cache line start relative to it: a cache line that holds the atomic at byte `a` starts at a - 60, a - 56,
+/// ... or a, so the cache lines that can hold it cover the bytes a - 60 to a + 63. Jolt's spacing of its padded atomics
+/// passes too: the previous atomic ends at a - 60, the next one starts at a + 64. (Jolt's mBodyPairQueues does not:
+/// its size, a StaticArray's mSize, sits right in front of the write index of queue 0.)
+fn expectPaddedAtomicsIsolated(comptime T: type) !usize {
+    const line = Core.cache_line_size;
+    const ranges = comptime dataRanges(T);
+    var num_atomics: usize = 0;
+    var shared: usize = 0;
+    for (ranges) |atomic| {
+        if (!atomic.is_atomic)
+            continue;
+        num_atomics += 1;
+        for (ranges) |other| {
+            if (other.begin != atomic.begin and other.begin < atomic.begin + line and other.end + (line - @sizeOf(u32)) > atomic.begin) {
+                std.debug.print("{s}.{s} (bytes {d}..{d}) can share a cache line with the atomic of {s} (byte {d})\n", .{ @typeName(T), other.name, other.begin, other.end, atomic.name, atomic.begin });
+                shared += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), shared);
+    return num_atomics;
+}
+
+// Zolt (Phase 13): Zig orders the fields of Step itself, so whatever it puts around the padded atomics, the cache line of
+// each atomic must hold nothing but the atomic and padding (see the top of this file). Step is the only user of
+// PaddedAtomics (the context itself has none).
+// Bite proofs: with the queues as a StaticArray field of Step (the layout of the first version of PaddedAtomics) this
+// test fails with 12 reports, all at the write index of queue 0: the queue count, max_body_pairs_per_queue,
+// active_find_collision_jobs, num_body_pairs, the 7 other unpadded counters and the end of setup_velocity_constraints.
+// With `padding_before` of size 0 it fails with 12 reports at determine_active_constraint_read_idx (num_body_pair_queues,
+// max_body_pairs_per_queue, the 9 other unpadded counters and the end of setup_velocity_constraints, which Zig places in
+// front of `padded_atomics`). With BodyPairQueue.padding1 of size 0 it fails with 64 reports: the write and read index
+// of each queue.
+test "PhysicsUpdateContext: no field of a step shares a cache line with a padded atomic" {
+    // The six padded atomics and the write and read index of every body pair queue
+    try std.testing.expectEqual(@as(usize, 6 + 2 * PhysicsUpdateContext.max_concurrency), try expectPaddedAtomicsIsolated(PhysicsUpdateContext.Step));
+    try std.testing.expectEqual(@as(usize, 0), try expectPaddedAtomicsIsolated(PhysicsUpdateContext));
 }

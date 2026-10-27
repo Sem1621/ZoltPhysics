@@ -680,6 +680,30 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
       padding: [Core.cache_line_size - @sizeOf(u32)]u8 = undefined,
   };
   ```
+  Jolt declares its padded atomics one after the other, so each one after the first has the previous one's padding in
+  front of it. Zig reorders the fields of `Step`, so the six padded atomics and the body pair queues behind them
+  (`BodyPairQueue`, two padded atomics each) are the fields of one extern struct `PaddedAtomics`, in Jolt's order, behind
+  `Core.cache_line_size - @sizeOf(u32)` bytes of padding (next rule). The number of queues in use is a separate field of
+  `Step` (`num_body_pair_queues`, `step.bodyPairQueues()`). The padding in front makes `Step` 64 bytes larger than
+  Jolt's: an update needs 64 * collision_steps bytes more temp memory than Jolt, and a `TempAllocatorImpl` sized at
+  Jolt's exact peak can make `update` return `error.OutOfMemory` where Jolt succeeds
+  ([SimulationArchitecture.md](SimulationArchitecture.md) D4, D12).
+- **A hot atomic does not rely on field order for its cache line (Phase 13, class A, layout only).** Where Jolt keeps an
+  atomic that several threads write during a step (an add or a compare-exchange per body pair, contact or batch) off the
+  cache lines of data that other threads read in their hot loops, with padding or only by its declaration order, Zolt
+  does that explicitly: Zig reorders the fields of a plain struct, so the neighbours of the atomic are not Jolt's. Two
+  such sites were found: the contact constraint counter shared a cache line with the object store pointer of a contact
+  cache, which every FindCollisions job reads per body pair, and the first padded atomic of `Step` in Zig's order came
+  right behind `max_body_pairs_per_queue`. A partial fix moves the problem: with only the six padded atomics grouped,
+  Zig put the body pair queues there, and the write index of queue 0 (an add per body pair that FindCollisions job 0
+  queues) landed 8 bytes behind `max_body_pairs_per_queue`, so the queues belong to the group too. On the Phase 13
+  prototype, which kept these atomics off the hot data with another layout, removing both sites made ConvexVsMesh,
+  Pyramid and Ragdoll 7-15% faster at 4 threads (wall clock, 7 interleaved rounds). Use a wrapper struct whose atomic is
+  `align(Core.cache_line_size)` and whose size is a multiple of the cache line (`ConstraintCounter` in
+  ContactConstraintManager.zig), or, in memory that is not cache line aligned, an extern struct that gives every atomic
+  at least `Core.cache_line_size - @sizeOf(u32)` bytes of padding on both sides (`PaddedAtomics`). A test walks
+  `@typeInfo` of the struct, including arrays and nested structs of padded atomics (the queues), and checks that no other
+  data can have a byte in the atomic's cache line (ContactConstraintManager.zig, PhysicsUpdateContext.zig).
 - Debug-only `thread_local` state (PhysicsLock's table of held locks) is a `threadlocal var` typed `void` without
   asserts: `threadlocal var locks: if (Core.enable_asserts) [4]LockData else void = ...`. It is the only kind of
   per-thread state allowed.
@@ -873,6 +897,9 @@ Names that cannot be ported mechanically. Add to this table whenever you pick a 
 | `Job::mReferenceCount`             | `ref_count: RefCount`                  | same as RefTarget (reference counting)  |
 | `JobSystemWithBarrier::BarrierImpl` `mJobReadIndex` / `mJobWriteIndex`, `mNumToAcquire` | `read_state.job_read_index` / `write_state.job_write_index`, `write_state.num_to_acquire` | grouped in cache line aligned structs (field reordering) |
 | `JobSystemThreadPool::mTail`       | `tail_state.tail`                      | cache line aligned struct (field reordering) |
+| `ContactConstraintManager::mNumConstraintsAndNextConstraintOffset` | `num_constraints_and_next_constraint_offset.value` (`ConstraintCounter`) | cache line aligned struct (field reordering) |
+| `PhysicsUpdateContext::Step` `mDetermineActiveConstraintReadIdx`, `mNumActiveConstraints`, `mSetupVelocityConstraintsReadIdx`, `mStepListenerReadIdx`, `mApplyGravityReadIdx`, `mActiveBodyReadIdx` (+ `mPadding1` ... `mPadding6`) | `padded_atomics.determine_active_constraint_read_idx.value`, ..., `padded_atomics.active_body_read_idx.value` (`PaddedAtomics` of `PaddedAtomicU32`) | grouped in an extern struct with padding in front (field reordering; temp memory is not cache line aligned) |
+| `PhysicsUpdateContext::Step::mBodyPairQueues` (`StaticArray<BodyPairQueue, cMaxConcurrency>`): `[i]`, `size()`, `resize(n)` | `bodyPairQueues()[i]` (the elements are `padded_atomics.body_pair_queues`), `num_body_pair_queues`, `num_body_pair_queues = n` + `q.* = .{}` per queue | elements behind the six padded atomics in the same extern struct, the size outside it (field reordering) |
 | `HashTable<..., Hash, KeyEqual>`, `UnorderedMap<Key, Value, Hash, KeyEqual>`, `UnorderedSet<Key, Hash, KeyEqual>` | `HashTable(Key, KeyValue, Detail, options)`, `UnorderedMap(Key, Value, options)`, `UnorderedSet(Key, options)` with `options: HashTableOptions(Key)` (`.{}` = `Hash<Key>` / `std::equal_to`) | functor template parameters |
 | `HashTable::clear()` / `ClearAndKeepMemory()` | `clearAndFree(allocator)` / `clearRetainingCapacity()` | std names; `clear` frees the buckets (iteration order depends on the bucket count) |
 | `HashTable::size()` / `empty()` / `reserve(n)` | `count()` / `isEmpty()` / `ensureTotalCapacity(allocator, n)` | std hash map names |

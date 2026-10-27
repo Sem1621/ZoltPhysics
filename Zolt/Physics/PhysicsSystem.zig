@@ -1215,8 +1215,11 @@ pub const PhysicsSystem = struct {
             }.call, .{ context, step }), .{ .num_dependencies = previous_step_dependency_count });
 
             // This job will find all collisions
-            step.body_pair_queues.resize(max_concurrency);
-            for (step.body_pair_queues.slice()) |*q|
+            // (Jolt: step.mBodyPairQueues.resize(max_concurrency); Zolt: the queues are in step.padded_atomics, see
+            // PhysicsUpdateContext)
+            std.debug.assert(max_concurrency <= PhysicsUpdateContext.max_concurrency);
+            step.num_body_pair_queues = max_concurrency;
+            for (step.bodyPairQueues()) |*q|
                 q.* = .{};
             step.max_body_pairs_per_queue = @as(u32, @intCast(self.physics_settings.max_in_flight_body_pairs)) / max_concurrency;
             step.active_find_collision_jobs.store(~@as(JobMask, 0) >> @intCast(@bitSizeOf(JobMask) - num_find_collisions_jobs), .release);
@@ -1533,7 +1536,7 @@ pub const PhysicsSystem = struct {
         const batch_size: u32 = @intCast(self.physics_settings.step_listeners_batch_size);
         while (true) {
             // Get the start of a new batch
-            const batch = step.step_listener_read_idx.value.fetchAdd(batch_size, .seq_cst);
+            const batch = step.padded_atomics.step_listener_read_idx.value.fetchAdd(batch_size, .seq_cst);
             if (batch >= self.step_listeners.items.len)
                 break;
 
@@ -1554,7 +1557,7 @@ pub const PhysicsSystem = struct {
 
         while (true) {
             // Atomically fetch a batch of constraints
-            const constraint_idx = step.determine_active_constraint_read_idx.value.fetchAdd(determine_active_constraints_batch_size, .seq_cst);
+            const constraint_idx = step.padded_atomics.determine_active_constraint_read_idx.value.fetchAdd(determine_active_constraints_batch_size, .seq_cst);
             if (constraint_idx >= num_constraints)
                 break;
 
@@ -1566,7 +1569,7 @@ pub const PhysicsSystem = struct {
 
             // Copy the block of active constraints to the global list of active constraints
             if (num_active_constraints > 0) {
-                const active_constraint_idx = step.num_active_constraints.value.fetchAdd(num_active_constraints, .seq_cst);
+                const active_constraint_idx = step.padded_atomics.num_active_constraints.value.fetchAdd(num_active_constraints, .seq_cst);
                 @memcpy(step.context.active_constraints.items[active_constraint_idx..][0..num_active_constraints], active_constraints[0..num_active_constraints]);
             }
         }
@@ -1590,7 +1593,7 @@ pub const PhysicsSystem = struct {
         // Update velocities from forces
         while (true) {
             // Atomically fetch a batch of bodies
-            var active_body_idx = step.apply_gravity_read_idx.value.fetchAdd(apply_gravity_batch_size, .seq_cst);
+            var active_body_idx = step.padded_atomics.apply_gravity_read_idx.value.fetchAdd(apply_gravity_batch_size, .seq_cst);
             if (active_body_idx >= num_active_bodies_at_step_start)
                 break;
 
@@ -1621,11 +1624,11 @@ pub const PhysicsSystem = struct {
         var grant: BodyAccess.Grant = .init(.none, .read);
         defer grant.deinit();
 
-        const num_constraints = step.num_active_constraints.value.load(.seq_cst);
+        const num_constraints = step.padded_atomics.num_active_constraints.value.load(.seq_cst);
 
         while (true) {
             // Atomically fetch a batch of constraints
-            const constraint_idx = step.setup_velocity_constraints_read_idx.value.fetchAdd(setup_velocity_constraints_batch_size, .seq_cst);
+            const constraint_idx = step.padded_atomics.setup_velocity_constraints_read_idx.value.fetchAdd(setup_velocity_constraints_batch_size, .seq_cst);
             if (constraint_idx >= num_constraints)
                 break;
 
@@ -1642,7 +1645,7 @@ pub const PhysicsSystem = struct {
         var grant_active: BodyManager.GrantActiveBodiesAccess = .init(true, false);
         defer grant_active.deinit();
 
-        const num_active_constraints = step.num_active_constraints.value.load(.seq_cst);
+        const num_active_constraints = step.padded_atomics.num_active_constraints.value.load(.seq_cst);
 
         // Prepare the island builder
         try self.island_builder.prepareNonContactConstraints(num_active_constraints, context.temp_allocator);
@@ -1656,17 +1659,17 @@ pub const PhysicsSystem = struct {
     /// jobs do the work)
     fn trySpawnJobFindCollisions(self: *const Self, step: *Step) void {
         // Get how many jobs we can spawn and check if we can spawn more
-        const max_jobs: u32 = step.body_pair_queues.len;
+        const max_jobs: u32 = step.num_body_pair_queues;
         if (@popCount(step.active_find_collision_jobs.load(.monotonic)) >= max_jobs)
             return;
 
         // Count how many body pairs we have waiting
         var num_body_pairs: u32 = 0;
-        for (step.body_pair_queues.constSlice()) |*queue|
+        for (step.bodyPairQueues()) |*queue|
             num_body_pairs +%= queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
 
         // Count how many active bodies we have waiting
-        const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body) -% step.active_body_read_idx.value.load(.seq_cst);
+        const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body) -% step.padded_atomics.active_body_read_idx.value.load(.seq_cst);
 
         // Calculate how many jobs we would like
         const desired_num_jobs = @min((num_body_pairs +% (narrow_phase_batch_size - 1)) / narrow_phase_batch_size +% (num_active_bodies +% (active_bodies_batch_size - 1)) / active_bodies_batch_size, max_jobs);
@@ -1741,7 +1744,7 @@ pub const PhysicsSystem = struct {
 
             // Determine initial queue to read pairs from if no broadphase work can be done
             // (always start looking at results from the next job)
-            var read_queue_idx = (job_index + 1) % step.body_pair_queues.len;
+            var read_queue_idx = (job_index + 1) % step.num_body_pair_queues;
 
             // Allocate space to temporarily store a batch of active bodies
             var active_bodies: [active_bodies_batch_size]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
@@ -1751,12 +1754,12 @@ pub const PhysicsSystem = struct {
                 const poisoned = context.isOutOfMemory();
 
                 // Check if there are active bodies to be processed
-                const active_bodies_read_idx = step.active_body_read_idx.value.load(.seq_cst);
+                const active_bodies_read_idx = step.padded_atomics.active_body_read_idx.value.load(.seq_cst);
                 const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body);
                 if (!poisoned and active_bodies_read_idx < num_active_bodies) {
                     // Take a batch of active bodies
                     const active_bodies_read_idx_end = @min(num_active_bodies, active_bodies_read_idx + active_bodies_batch_size);
-                    if (step.active_body_read_idx.value.cmpxchgStrong(active_bodies_read_idx, active_bodies_read_idx_end, .seq_cst, .seq_cst) == null) {
+                    if (step.padded_atomics.active_body_read_idx.value.cmpxchgStrong(active_bodies_read_idx, active_bodies_read_idx_end, .seq_cst, .seq_cst) == null) {
                         // Callback when a new body pair is found
                         const MyBodyPairCallback = struct {
                             pub const overrides = .{.addHit};
@@ -1769,7 +1772,7 @@ pub const PhysicsSystem = struct {
                             // Callback function when a body pair is found
                             pub fn addHit(cb: *@This(), pair: *const BodyPair) void {
                                 // Check if we have space in our write queue
-                                const queue = &cb.step.body_pair_queues.slice()[cb.job_index];
+                                const queue = &cb.step.bodyPairQueues()[cb.job_index];
                                 const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
                                 if (body_pairs_in_queue >= cb.step.max_body_pairs_per_queue) {
                                     // Buffer full, process the pair now
@@ -1791,7 +1794,7 @@ pub const PhysicsSystem = struct {
                         self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base) catch context.setOutOfMemory();
 
                         // Check if we have enough pairs in the buffer to start a new job
-                        const queue = &step.body_pair_queues.slice()[job_index];
+                        const queue = &step.bodyPairQueues()[job_index];
                         const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
                         if (body_pairs_in_queue >= narrow_phase_batch_size)
                             self.trySpawnJobFindCollisions(step);
@@ -1800,7 +1803,7 @@ pub const PhysicsSystem = struct {
                     // Lockless loop to get the next body pair from the pairs buffer
                     const first_read_queue_idx = read_queue_idx;
                     while (true) {
-                        const queue = &step.body_pair_queues.slice()[read_queue_idx];
+                        const queue = &step.bodyPairQueues()[read_queue_idx];
 
                         // Get the next pair to process
                         const pair_idx = queue.read_idx.load(.seq_cst);
@@ -1808,7 +1811,7 @@ pub const PhysicsSystem = struct {
                         // If the pair hasn't been written yet (Zolt D5: a poisoned job treats every queue as empty)
                         if (poisoned or pair_idx >= queue.write_idx.load(.seq_cst)) {
                             // Go to the next queue
-                            read_queue_idx = (read_queue_idx + 1) % step.body_pair_queues.len;
+                            read_queue_idx = (read_queue_idx + 1) % step.num_body_pair_queues;
 
                             // If we're back at the first queue, we've looked at all of them and found nothing
                             if (read_queue_idx == first_read_queue_idx) {
