@@ -662,7 +662,8 @@ changes are kept, all class A: the parity suite and Jolt's hashes are unchanged,
   span has three parts ("Final batch: bodies", "Final batch: put to sleep", "Final batch: broad phase").
 - `tools/wall_rounds.py` runs several PerformanceTest binaries in interleaved rounds and fails when two runs of a
   scene print different hashes. A variant is judged by its paired per-round ratio to the base: the median, the
-  quartiles, the rounds it wins, and a sign test.
+  quartiles, the rounds it wins, and a two-sided sign test. `--json` writes every run, `--report FILE [--ref NAME]`
+  prints the tables of such a file again (all the wall clock numbers of this section come from it).
 
 | Item | Rule | Measured | Decision |
 |---|---|---|---|
@@ -671,7 +672,7 @@ changes are kept, all class A: the parity suite and Jolt's hashes are unchanged,
 | L: MotionProperties in Jolt's field order | CEst -0.3% in one scene, no scene +0.1% | best -0.2992% (ConvexVsMesh; 5 of 6 stack paddings miss -0.3%) | not done |
 | C: character key compares | >= 10% of CharacterVirtual's instructions, and a SIMD compare saves >= 5% | 13.4% (26.1% of CEst); the prototypes save 3.5% and 4.3% | not done |
 | X: HighSpeed, 1 thread, 0.93 of C++ | a cause worth >= 3% of the scene's time gets a fix | heap layout of the benchmark's allocator: an estimated 3.6% to over 10% | X1 done |
-| X: ConvexVsMesh, 2 and 4 threads, 0.95 of C++ | one job >= 3% of the gap over C++ in CEst, or >= 10% busy growth with a Zolt-only false sharing site | no job over +0.3% CEst; FindCollisions busy +105% from 1 to 4 threads, two Zolt-only sharing sites | X2 done |
+| X: ConvexVsMesh, 2 and 4 threads, 0.95 of C++ | one job >= 3% of the gap over C++ in CEst, or >= 10% busy growth with a Zolt-only false sharing site | largest job excess 5.9e6 CEst (SolveVelocityConstraints, +0.28%), 1% of the gap; FindCollisions busy +105% from 1 to 4 threads, two Zolt-only sharing sites | X2 done |
 | P: spin before the futex sleep | ConvexVsMesh at 4 threads >= 3% more steps/s than the same build without the spin, no scene -3% | +0.9% to +2.1% (spins of 10, 30 and 100 us) | not done |
 
 F: Jolt's markBatchProcessed publishes "all done" before the final batch's bounds update, so the other solve jobs go
@@ -683,13 +684,18 @@ scene's L1 data misses, 7 cache lines per pair), not instructions, so a SIMD com
 After the implementation each kept change had a keep rule, measured on the final code in 15 interleaved rounds against
 the Phase 12 base (paired per-round ratio; a row below 0.97 failed): X2 >= +3% at 4 threads in ConvexVsMesh, Pyramid
 or Ragdoll: ConvexVsMesh 1.099 (12 of 15 rounds), Pyramid 1.075, Ragdoll 1.042; X1 >= +3% in HighSpeed on 1 thread:
-1.071 (15 of 15); S >= 1.5% fewer Pyramid instructions and Pyramid not slower: -2.45%, 1 thread 1.020 (12 of 15). Rows
-under 1 in a 15 round run (X1 Pyramid at 2 and 4 threads, S ConvexVsMesh and HighSpeed at 4 threads) were measured
-again in 30 rounds of two variants each and came out between 0.993 and 1.035.
+1.071 (15 of 15); S >= 1.5% fewer Pyramid instructions and Pyramid not slower: -2.45%, 1 thread 1.020 (12 of 15). Three
+rows were below 0.97 in those 15 rounds, none with a significant sign test: X1 Pyramid at 4 threads 0.925 (4 of 15), S
+ConvexVsMesh 0.965 (5 of 15) and S HighSpeed 0.969 (7 of 15) at 4 threads. They were measured again in 30 rounds of two
+variants each, together with X1 Pyramid at 2 threads (0.764 in an earlier 7 round run), and came out between 0.993 and
+1.035, so no change failed. The other rows under 1 were between 0.978 and 0.999; the only one with a significant sign
+test is X2 Ragdoll on 1 thread, 0.989 (3 of 15 rounds, p = 0.035).
 
-**Hot atomics on their own cache lines (X2).** On one thread ConvexVsMesh ran at C++ speed: per job Zolt's single
-threaded work is at most 0.3% over Jolt's in CEst (0.988 of C++ for the whole update), with the same atomics per step
-and no extra syscalls or futex calls. At 4 threads it used 5.7% more CPU time. Zig reorders the fields of plain
+**Hot atomics on their own cache lines (X2).** On one thread ConvexVsMesh ran at C++ speed: Zolt's single threaded
+work is 0.988 of Jolt's in CEst for the whole update, the largest excess of one job is 5.9e6 CEst in 500 steps
+(SolveVelocityConstraints, +0.28%; in relative terms the small jobs ApplyGravity +1.5%, IntegrateVelocity +1.2% and
+FindCCDContacts +2.8%), every atomic site runs as often as Jolt's (58.9K atomics per step in Zolt, 62.4K in Jolt), and
+there are no extra syscalls or futex calls. At 4 threads it used 5.7% more CPU time. Zig reorders the fields of plain
 structs, so Jolt's declaration order no longer kept two atomics that every FindCollisions job writes away from data
 that the same jobs read: the contact constraint counter (a lock xadd per new contact constraint, 2,552 per step)
 shared a cache line with the object store of the contact cache, which every find reads, and
@@ -735,7 +741,7 @@ Instructions of the measured parts (callgrind, `-t=1`, `zig build perf-budget`):
 | Ragdoll | 15 | 1.682e9 | 1.681e9 | valgrind stops | |
 
 X1 and X2 change where data lives, not the instructions (HighSpeed and ConvexVsMesh +0.02%); they show in the wall
-clock only.
+clock only. Pyramid's ratio budget went from 1.05 to 1.02, the measurement plus about 10% again.
 
 Steps per second (ReleaseFast, x86-64-v3, 4 cores; the median of 15 interleaved rounds of C++, Zolt Phase 12 and Zolt
 Phase 13; the same hashes on every run; the ratios are the medians of the paired per-round ratios, with the rounds

@@ -46,7 +46,9 @@ zig build performance-test -Doptimize=ReleaseFast -- -s=Pyramid -t=1 -phase_time
 zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyramid -t=2 -p  # job timeline: <scene>_<tag>.json (Chrome trace) + busy/idle per thread
 python3 tools/job_trace_stats.py Pyramid_linearcast_th2.json  # busy / wait / idle per thread, idle spans by length, wakeups, island preparation
 python3 tools/job_trace_stats.py Pyramid_linearcast_th4.json --by-job --under "Final batch: bounds and sleep"  # busy per job; the others' idle + wait under a span
-python3 tools/wall_rounds.py cpp=<C++ PerformanceTest> zolt=zig-out/bin/ZoltPerformanceTest  # steps/s: 7 interleaved rounds, medians, ratios, same hashes
+zig build -Doptimize=ReleaseFast -Dcpu=x86_64_v3 -p <dir>  # a Zolt PerformanceTest built like the C++ reference (a plain `zig build` installs a Debug build)
+python3 tools/wall_rounds.py --json runs.json cpp=<C++ PerformanceTest> zolt=<dir>/bin/ZoltPerformanceTest  # steps/s: 7 interleaved rounds, medians, paired per-round ratios, same hashes
+python3 tools/wall_rounds.py --report runs.json --ref zolt  # the tables of an earlier run again, ratios to another variant
 python3 tools/perf_budget.py --cache-sim --jobs <Zolt> <C++> ConvexVsMesh  # callgrind cache and branch simulation (fixed cache geometry), CEst, per job, Zolt vs C++
 zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
 zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)

@@ -50,13 +50,14 @@
 //!   BodyWithMotionProperties` each. A page is allocated, aligned to 64 KB, from the allocator of the BodyManager that
 //!   creates the body, when its bodies need it. Its first 64 bytes are a header (a magic number, a spin lock, the
 //!   number of bodies in the page, the first slot that was never used, a free list, whether its BodyManager still
-//!   exists, the allocator of the page), then come (64 KB - 64) / @sizeOf(BodyWithMotionProperties) slots: 204 of 320
-//!   bytes, 170 of 384 bytes in double precision, each one starting a cache line. The pages make the bodies' memory
+//!   exists, the allocator of the page), then come (64 KB - 64) / @sizeOf(BodyWithMotionProperties) slots: on 64-bit
+//!   targets 204 of 320 bytes, 170 of 384 bytes in double precision, each one starting a cache line. The pages make the bodies' memory
 //!   independent of the user's allocator: Zig's SmpAllocator puts every body in a 512 byte slot, so a scene's bodies
 //!   take 1.6 times their size in cache lines and pages (5000 bodies: 2.56 MB against a 2 MB L2), and every 8th body
 //!   has the 4 KB offset of another one. (Phase 13's prototype X1 measured the pool together with the update arrays that
 //!   QuadTree.zig keeps: HighSpeed and ConvexVsMesh 2-8% more steps per second; the two parts were not measured apart.)
-//!   Freed slots are reused, the last one freed first. Static bodies (a Body without motion properties) and soft bodies
+//!   Freed slots are reused: create takes a slot of the page that handed out the last slot (within a page the last one
+//!   freed first), then of the next page that has a free slot. Static bodies (a Body without motion properties) and soft bodies
 //!   are allocated as before. Only where the bodies live changes: no result depends on a body's address (Jolt orders
 //!   and hashes bodies by BodyID; the one use of a body address as data, BodySlot's freed bit, needs only an even
 //!   address).
@@ -302,7 +303,7 @@ pub const BodyManager = struct {
 
         const Slot = BodyWithMotionProperties;
 
-        /// Number of slots of a page: 204 of 320 bytes, 170 of 384 bytes in double precision
+        /// Number of slots of a page: 204 of 320 bytes, 170 of 384 bytes in double precision (64-bit targets)
         const slots_per_page: u32 = (page_size - header_size) / @sizeOf(Slot);
 
         /// The first 8 bytes of a page that a pool allocated ("ZoltBody"; destroy asserts them)
@@ -381,10 +382,12 @@ pub const BodyManager = struct {
         };
 
         comptime {
-            // The slots have no padding: a body takes exactly the bytes of BodyWithMotionProperties and starts a cache
-            // line. 320 bytes in single precision, 384 in double precision; asserts (MotionProperties' cached types) and
-            // the debug renderer do not change the size.
-            std.debug.assert(@sizeOf(Slot) % slot_alignment == 0 and @alignOf(Slot) <= slot_alignment);
+            // On 64-bit targets the slots have no padding: a body takes exactly the bytes of BodyWithMotionProperties
+            // and starts a cache line. 320 bytes in single precision, 384 in double precision; asserts (MotionProperties'
+            // cached types) and the debug renderer do not change the size. (Like Body's size assert, this one holds for
+            // 64-bit targets only; elsewhere the slots are @sizeOf(BodyWithMotionProperties) apart.)
+            if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Slot) % slot_alignment == 0);
+            std.debug.assert(@alignOf(Slot) <= slot_alignment);
             std.debug.assert(@sizeOf(Page) <= header_size and header_size % slot_alignment == 0);
             std.debug.assert(@sizeOf(FreeSlot) <= @sizeOf(Slot) and @alignOf(FreeSlot) <= slot_alignment);
             std.debug.assert(slots_per_page > 0);

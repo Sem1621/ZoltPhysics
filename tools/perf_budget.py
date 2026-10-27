@@ -35,7 +35,7 @@ Measured on top of Phase 13, hot atomics on their own cache lines, the body pool
 
     Scene             Steps   Zolt Ir        C++ Ir         Zolt/C++   Budget
     ConvexVsMesh        200   1,981,096,615  2,038,825,594  0.972      1.07
-    Pyramid              60   4,047,171,149  4,354,343,582  0.929      1.05
+    Pyramid              60   4,047,171,149  4,354,343,582  0.929      1.02
     HighSpeed            60   1,998,964,036  2,041,903,417  0.979      1.08
     CharacterVirtual     60     373,923,976  (Zolt only)               0.41e9
     Ragdoll              15   1,681,319,639  (Zolt only)               1.85e9
@@ -43,8 +43,8 @@ Measured on top of Phase 13, hot atomics on their own cache lines, the body pool
 The budgets are the measurement plus about 10%. Before Phase 10 the ratios were 17 (ConvexVsMesh) and 5.4 (Pyramid).
 After Phase 10 (W3, 4035b3c) Pyramid was 0.983; the SIMD contact solver of Phase 11 made it 0.960 (its contact solve
 went from 1,144M to 1,027M instructions, SimulationArchitecture.md section 10), the large island sorts of Phase 12
-0.953, the SIMD plans of Phase 13 0.929. Phase 12's character bounds caches took CharacterVirtual from 578,784,382 to
-373,906,184 (Roadmap Phase 12).
+0.953, the SIMD plans of Phase 13 0.929 (its budget went from 1.05 to 1.02). Phase 12's character bounds caches took
+CharacterVirtual from 578,784,382 to 373,906,184 (Roadmap Phase 12).
 SCENES keeps the measured counts too. Re-measure and update the budgets and the counts after a Zig, LLVM or valgrind
 upgrade, after a Jolt upgrade, and after a change that makes Zolt faster on purpose. A change that gives up speed on
 purpose updates them in the same commit and says why. The callgrind runs take about 30 seconds on 4 cores (they run in
@@ -69,7 +69,7 @@ Scene = collections.namedtuple("Scene", [
 ])
 SCENES = [
     Scene("ConvexVsMesh", "LinearCast", 200, 1.07, None, 1_981_096_615, 2_038_825_594),
-    Scene("Pyramid", "LinearCast", 60, 1.05, None, 4_047_171_149, 4_354_343_582),
+    Scene("Pyramid", "LinearCast", 60, 1.02, None, 4_047_171_149, 4_354_343_582),
     Scene("HighSpeed", "LinearCast", 60, 1.08, None, 1_998_964_036, 2_041_903_417),
     Scene("CharacterVirtual", "Discrete", 60, None, 0.41e9, 373_923_976, None),
     Scene("Ragdoll", "LinearCast", 15, None, 1.85e9, 1_681_319_639, None),

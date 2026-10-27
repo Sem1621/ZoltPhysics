@@ -717,7 +717,7 @@ test "BodyManager init with the number of mutexes from the CPU count" {
 // The body pool (Roadmap Phase 13, class A: memory placement only, see the header of BodyManager.zig). The rigid bodies
 // with motion properties live in 64 KB pages, aligned to 64 KB, from the allocator of the BodyManager that creates them:
 // a 64 byte header, then 64 byte aligned slots of exactly @sizeOf(BodyWithMotionProperties). Freed slots are reused,
-// the last one freed first. A body finds its page from its address, so any BodyManager destroys any body, also after the
+// within a page the last one freed first. A body finds its page from its address, so any BodyManager destroys any body, also after the
 // BodyManager that created it is gone (Jolt's ownership); a page is freed when its BodyManager is gone and its last body
 // is destroyed.
 //

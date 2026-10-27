@@ -422,7 +422,8 @@ const Lane = struct {
 };
 
 /// solveVelocityConstraints sorts at most this many constraints at a time, planBatch plans batches of at most this many
-/// (a batch of the LargeIslandSplitter has at most 16)
+/// (a batch of a parallel split of the LargeIslandSplitter has at most 16 items; the non-parallel split comes as one
+/// batch of any size, which the scalar solver solves)
 pub const max_chunk = 64;
 
 /// Up to 8 dynamic vs dynamic contact constraints

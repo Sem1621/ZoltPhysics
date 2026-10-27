@@ -27,8 +27,9 @@ Phase 12):
 
 Times come from the trace (microseconds). When the ring buffer of a thread was full, the trace lacks its oldest events
 (JobProfiler writes their number as "overwritten" in the thread's metadata). The statistics then cover only the time
-from the newest first event of those threads on, where every thread has all its events: spans that start earlier are
-cut at that time and not counted as spans, and the steps are the FinalizeIslands jobs in that time (`--steps` would
+from the latest of the earliest ends of those threads' remaining events on, where every thread has all its events: a
+thread records an event when it ends, so every overwritten event ended before that time, also the wait and part spans
+inside a job that is still in the trace. Spans that start earlier are cut at that time and not counted as spans, and the steps are the FinalizeIslands jobs in that time (`--steps` would
 count the whole run). The script says so in its output. It only reads the file and needs only the standard library.
 """
 
@@ -81,11 +82,14 @@ def analyze(trace, steps=None, under=None):
     if not spans:
         raise ValueError("the trace has no spans")
     first = {}
+    first_end = {}
     for e in spans:
         first[e["tid"]] = min(first.get(e["tid"], e["ts"]), e["ts"])
-    # Threads that lost their oldest events: count from the newest first event of those threads on
+        first_end[e["tid"]] = min(first_end.get(e["tid"], e["ts"] + e["dur"]), e["ts"] + e["dur"])
+    # Threads that lost their oldest events: a thread records an event when it ends, so it lost only events that ended
+    # before the earliest end of its remaining ones. Count from the latest such end of those threads on.
     lossy = sorted(tid for tid, n in overwritten.items() if n and tid in first)
-    start = max(first[tid] for tid in lossy) if lossy else min(first.values())
+    start = max(first_end[tid] for tid in lossy) if lossy else min(first.values())
     end = max(e["ts"] + e["dur"] for e in spans)
     if end <= start:
         raise ValueError("no time is left after the overwritten events")
@@ -257,18 +261,30 @@ def self_test():
     assert overlap([(0.0, 2.0), (4.0, 8.0), (9.0, 10.0)], 1.0, 5.0) == 2.0
     assert overlap([(0.0, 2.0)], 3.0, 5.0) == 0.0 and overlap([], 0.0, 1.0) == 0.0
 
-    # Worker 0 lost its oldest events: its first event left is at 13 us, so only the time from 13 us on counts
-    lossy = {"traceEvents": [dict(e, args={"name": "Worker 0", "overwritten": 2}) if e.get("tid") == 0 and e["ph"] == "M" else e
-                             for e in trace["traceEvents"] if not (e.get("tid") == 0 and e["ph"] == "X" and e["ts"] < 13.0)]}
+    # Worker 0 lost its 2 oldest events (by end: FinalizeIslands and the idle span up to 13 us). Its earliest end left
+    # is that of the prepare part at 18 us, so only the time from 18 us on counts: the job that started at 13 us is
+    # cut, and so is the prepare part
+    def lose(n):
+        """The trace with the n events of Worker 0 that ended first overwritten"""
+        ends = sorted(e["ts"] + e["dur"] for e in trace["traceEvents"] if e.get("tid") == 0 and e["ph"] == "X")
+        return {"traceEvents": [dict(e, args={"name": "Worker 0", "overwritten": n}) if e.get("tid") == 0 and e["ph"] == "M" else e
+                                for e in trace["traceEvents"] if not (e.get("tid") == 0 and e["ph"] == "X" and e["ts"] + e["dur"] <= ends[n - 1])]}
+    lossy = lose(2)
     s = analyze(lossy, steps=4)
-    assert s["wall_us"] == 587.0, s
+    assert s["wall_us"] == 582.0, s
     w, other = s["threads"]
-    assert (w["busy"], w["wait"], w["idle"], w["jobs"], w["idle_spans"]) == (50.0, 7.0, 37.0, 1, 1), w
-    assert (other["idle"], other["idle_spans"]) == (587.0, 0), other  # the barrier wait started before 13 us: cut, not a span
+    assert (w["busy"], w["wait"], w["idle"], w["jobs"], w["idle_spans"]) == (45.0, 7.0, 37.0, 0, 1), w
+    assert s["parts"] == {}, s["parts"]
+    assert (other["idle"], other["idle_spans"]) == (582.0, 0), other  # the barrier wait started before 18 us: cut, not a span
     assert s["overwritten"] == {"Worker 0": 2} and s["steps_ignored"] and s["num_steps"] == 0, s
     assert s["wakeups_per_worker_per_step"] is None, s  # no FinalizeIslands in the counted time
     text = report(s)
     assert "Note: the ring buffers of Worker 0 were full (2 oldest events not in the trace)" in text and "--steps counts the whole run" in text, text
+    # Worker 0 also lost the prepare part and the wait inside the job it kept: the counted time starts at the end of
+    # that job (63 us), so the lost wait does not show up as busy time
+    s = analyze(lose(4))
+    w = s["threads"][0]
+    assert s["wall_us"] == 537.0 and (w["busy"], w["wait"], w["idle"], w["jobs"], w["idle_spans"]) == (0.0, 0.0, 37.0, 0, 1), (s["wall_us"], w)
     try:
         analyze({"traceEvents": []})
         raise AssertionError("an empty trace must fail")
