@@ -765,20 +765,20 @@ that Phase 13 won):
 | Pyramid | 2 | 68.4 | 85.9 | 83.5 | 1.061 (8/15) | 1.20 |
 | Pyramid | 4 | 90.1 | 107.3 | 110.0 | 1.008 (8/15) | 1.19 |
 
-On 1 thread HighSpeed gains 9.2% (all 15 rounds) and runs at 1.02 of C++ instead of 0.94; Ragdoll gains 3.9% and
-Pyramid 5.2%. At 2 and 4 threads single runs vary by 20-50% on this machine, and 15 rounds do not separate a few
-percent there. A second run of 30 rounds with only Phase 12 and Phase 13 at 4 threads gives: Pyramid 1.092 (25 of 30
-rounds), Ragdoll 1.065 (26), HighSpeed 1.052 (23), ConvexVsMesh 1.046 (20; 1.073 in the 15 rounds above),
-CharacterVirtual 0.998 (15). ConvexVsMesh at 4 threads went from 0.90 to 0.99 of C++ in the rounds above.
-CharacterVirtual and Pyramid stay 19-38% ahead of C++.
+On 1 thread HighSpeed gains 9.2% (all 15 rounds) and runs at 1.02 of C++ instead of 0.94; Ragdoll gains 3.9% and Pyramid
+5.2%. At 2 and 4 threads single runs vary by 13-58% on this machine ((max - min) / median, the spread column of
+`tools/wall_rounds.py`), and 15 rounds do not separate a few percent there. A second run of 30 rounds with only Phase 12
+and Phase 13 at 4 threads gives: Pyramid 1.092 (25 of 30 rounds), Ragdoll 1.065 (26), HighSpeed 1.052 (23), ConvexVsMesh
+1.046 (20; 1.073 in the 15 rounds above), CharacterVirtual 0.998 (15). ConvexVsMesh at 4 threads went from 0.90 to 0.99
+of C++ in the rounds above. CharacterVirtual and Pyramid stay 19-38% ahead of C++.
 
 The machine changed during Phase 13: the cloud VM moved to another host CPU (now a 2.8 GHz Xeon with a 32 KB L1d, 1 MB
 L2 per core and a 33 MB L3; before 2.3 GHz, 48 KB, 2 MB and 260 MB), and its wall clock got noisier (single runs at 2
-and 4 threads vary by up to 50%). Only numbers measured in the same rounds compare: this table does not compare with
-Phase 12's.
+and 4 threads vary by up to about 60%). Only numbers measured in the same rounds compare: this table does not compare
+with Phase 12's.
 
 Job profiles (`-t=4`, 500 steps, the median of 3 interleaved runs of Phase 12 and Phase 13; idle, wait and the short
-idle spans in percent of the thread time, the final batch in percent of the wall time):
+idle spans in percent of the thread time, the island preparation and the final batch in percent of the wall time):
 
 | Scene | Wall time (500 steps, profiled) | Idle | Wait | Idle spans < 50 us | Wakeups per worker and step | Island preparation (split) | Final batch |
 |---|---|---|---|---|---|---|---|

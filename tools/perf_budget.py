@@ -86,7 +86,7 @@ SIDE_NAMES = {"zolt": "Zolt", "jolt": "C++"}
 
 COLLECTED_RE = re.compile(r"^==\d+== Collected : (\d+)(?: \d+)*$", re.M)
 
-# The events of callgrind with --cache-sim=yes --branch-sim=yes, and the estimate of the cycles of callgrind_annotate
+# The events of callgrind with --cache-sim=yes --branch-sim=yes (cycle_estimate derives KCachegrind's CEst from them)
 EVENTS = ["Ir", "Dr", "Dw", "I1mr", "D1mr", "D1mw", "ILmr", "DLmr", "DLmw", "Bc", "Bcm", "Bi", "Bim"]
 # The simulated caches of --cache-sim (size, associativity, line size): the 4 core Xeon of the first Phase 13
 # measurements, so that cache events compare across hosts

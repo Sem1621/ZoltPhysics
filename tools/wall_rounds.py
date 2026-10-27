@@ -6,24 +6,24 @@
     python3 tools/wall_rounds.py --report FILE [--ref NAME]   # the tables of an earlier --json FILE, without running
     python3 tools/wall_rounds.py --self-test
 
-Wall clock is noisy, so a speedup is measured as the median of several rounds, and every round runs every variant
-once per scene and thread count, one after the other (the variants in a different order each round), so a slow minute
-of the machine hits all variants alike. A variant is a name, a binary (ZoltPerformanceTest, or the C++ PerformanceTest
-of `zig build jolt-performance-test`) and extra arguments after commas, e.g. `spin30=<dir>/bin/ZoltPerformanceTest,
--spin_us=30`. Build the Zolt binaries like the C++ reference, e.g. `zig build -Doptimize=ReleaseFast -Dcpu=x86_64_v3
--p <dir>` (a plain `zig build` installs a Debug build). The defaults: 7 rounds, 1, 2 and 4 threads, the five scenes of
-Jolt's PerformanceTest (LinearCast, and Discrete for CharacterVirtual as in Jolt's hash of that scene), 500 steps (the
-binaries' own default).
+Wall clock is noisy, so a speedup is measured as the median of several rounds, and every round runs every variant once
+per scene and thread count, one after the other (the variants in a different order each round), so a slow minute of the
+machine hits all variants alike. A variant is a name, a binary (ZoltPerformanceTest, or the C++ PerformanceTest of
+`zig build jolt-performance-test`) and extra arguments after commas, e.g. `nosleep=<dir>/bin/ZoltPerformanceTest,-no_sleep`
+(only options the binary knows: PerformanceTest ignores unknown ones without a message). Build the Zolt binaries like
+the C++ reference, e.g. `zig build -Doptimize=ReleaseFast -Dcpu=x86_64_v3 -p <dir>` (a plain `zig build` installs a
+Debug build). The defaults: 7 rounds, 1, 2 and 4 threads, the five scenes of Jolt's PerformanceTest (LinearCast, and
+Discrete for CharacterVirtual as in Jolt's hash of that scene), 500 steps (the binaries' own default).
 
-The first table has per scene and thread count the median steps per second of every variant, the ratio of its median
-to the first variant's, the spread of its rounds ((max - min) / median) and the median CPU time (user + system) of a
-run, the cost of a spin. The second table pairs the runs of a round: per variant after the first, the median of the
-per-round ratios to the first variant, their quartiles, the rounds the variant won, and the p value of a two-sided sign
-test (ties left out). Phase 13 judged its changes by these paired ratios: a slow minute of the machine hits both runs of
-a pair alike. The script fails when a run fails or when two runs of one scene print different hashes: all variants must
-compute the same bits at every thread count (class A). `--json` writes every run (with its round), and `--report` prints
-the tables of such a file again (`--ref NAME`: the ratios to that variant instead of the first). Run it on a quiet
-machine. It needs only the standard library.
+The first table has per scene and thread count the median steps per second of every variant, the ratio of its median to
+the first variant's, the spread of its rounds ((max - min) / median) and the median CPU time (user + system) of a run
+(what busy waiting costs, for example). The second table pairs the runs of a round: per variant after the first, the
+median of the per-round ratios to the first variant, their quartiles, the rounds the variant won, and the p value of a
+two-sided sign test (ties left out). Phase 13 judged its changes by these paired ratios: a slow minute of the machine
+hits both runs of a pair alike. The script fails when a run fails or when two runs of one scene print different hashes:
+all variants must compute the same bits at every thread count (class A). `--json` writes every run (with its round), and
+`--report` prints the tables of such a file again (`--ref NAME`: the ratios to that variant instead of the first). Run
+it on a quiet machine. It needs only the standard library.
 """
 
 import json
