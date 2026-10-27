@@ -17,7 +17,9 @@
 //!   max body. AddBodiesFinalize / AddBodiesAbort / UpdateFinalize then never allocate; running out of nodes is Jolt's
 //!   abort (`@panic("QuadTree: Out of nodes!")`).
 //! - Errors (D9): `addBodiesPrepare` (`new LayerState[]` and BuildTree's `new Vec3[]`) and `updatePrepare`
-//!   (`new NodeID[]`, BuildTree, the node stack) return Allocator.Error and leave the broad phase unchanged: a failing
+//!   (`new NodeID[]`, BuildTree, the node stack; since Phase 13 the trees keep the node IDs and BuildTree's centers
+//!   between updates and allocate them only when they grow, `releaseUpdateScratch` frees them, see QuadTree.zig)
+//!   return Allocator.Error and leave the broad phase unchanged: a failing
 //!   AddBodiesPrepare aborts the layers it prepared (ioBodies stays sorted), a failing UpdatePrepare restores
 //!   `next_layer_to_update` and the tree. A zeroed UpdateState is a no-op in updateFinalize. Four Jolt functions that
 //!   allocate return Allocator.Error too (BroadPhase.zig): `optimize` (UpdatePrepare with a full rebuild: the layers
@@ -231,6 +233,17 @@ pub const BroadPhaseQuadTree = struct {
 
         for (self.layers) |*layer|
             layer.discardOldTree();
+    }
+
+    /// Zolt (Phase 13): frees the temporary arrays that the trees keep between updates (QuadTree.releaseUpdateScratch),
+    /// so that the next updates allocate them where Jolt does (the allocation failure tests). It takes the update lock
+    /// (lockModifications), so it waits for an update that runs: do not call it while holding that lock.
+    pub fn releaseUpdateScratch(self: *BroadPhaseQuadTree) void {
+        self.lockModifications();
+        defer self.unlockModifications();
+
+        for (self.layers) |*layer|
+            layer.releaseUpdateScratch();
     }
 
     /// Should be called after many objects have been inserted to make the broadphase more efficient, usually done on startup only

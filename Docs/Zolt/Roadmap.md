@@ -447,8 +447,9 @@ percent, so a small difference either way is noise.
 **Later (not in Phase 10).**
 - Tier 1b (class A, beyond Jolt; measure with the job profiler first): SIMD contact solving inside the splits of
   large islands (done in Phase 11), a cached AABB prefilter for characters (done in Phase 12 as exact bounds caches),
-  island scheduling (Phase 12: the large island sorts; the parallel final batch is a Phase 13 candidate), spinning in
-  the thread pool (measured in Phase 12: not worth it in general, a candidate for ConvexVsMesh).
+  island scheduling (Phase 12: the large island sorts; Phase 13 measured the parallel final batch: not worth it),
+  spinning in the thread pool (measured in Phases 12 and 13: not worth it). Phase 13 added SIMD plans per step, hot
+  atomics on their own cache lines and a body pool.
 - Tier 2 (class B, behind `-Djolt_compat`): box-box SAT instead of EPA, graph-colored batches of small islands,
   8-wide trees. (The FMA math mode came in Phase 11 as `-Dfma`, with Jolt's own sites and a C++ oracle.)
 - Class C: four Jolt bugs that Zolt reproduces (the gear Jacobian, CCD double motion, a duplicate soft body edge, the
@@ -643,6 +644,165 @@ candidate for ConvexVsMesh alone (below).
   one (about 490k extra L1 misses per 60 Pyramid steps).
 - Building the SIMD groups of the contact solver once per step instead of once per iteration (Pyramid: about 300e6
   instructions of grouping and transposes).
+
+Phase 13 measured each of these; its decision table says what became of them.
+
+### Phase 13: class A speed, measured first (cache lines, body pool, SIMD plans) ✅
+Phase 13 measured the candidates that Phase 12 left open and the two gaps to C++ that Phase 12 could not explain
+(HighSpeed on 1 thread, ConvexVsMesh on 2 and 4 threads). Each item had a rule fixed before its measurement. Three
+changes are kept, all class A: the parity suite and Jolt's hashes are unchanged, at every thread count.
+
+**Measure first.** New tools:
+- `tools/perf_budget.py --cache-sim` runs callgrind with its cache and branch simulation on both sides and estimates
+  cycles: CEst = Ir + 10 per L1 miss and branch misprediction + 100 per LL miss. The simulated caches have a fixed
+  geometry, so that the numbers of two hosts compare. `--jobs` splits Ir and CEst by PhysicsSystem job (Zolt's jobX
+  next to Jolt's JobX, attributed through the inline chains of addr2line).
+- `tools/job_trace_stats.py --under NAME` adds up the idle and wait time of the other threads while one thread runs a
+  span: the most that running the span in parallel could save. `--by-job` prints busy time per job. The final batch
+  span has three parts ("Final batch: bodies", "Final batch: put to sleep", "Final batch: broad phase").
+- `tools/wall_rounds.py` runs several PerformanceTest binaries in interleaved rounds and fails when two runs of a
+  scene print different hashes. A variant is judged by its paired per-round ratio to the base: the median, the
+  quartiles, the rounds it wins, and a two-sided sign test. `--json` writes every run, `--report FILE [--ref NAME]`
+  prints the tables of such a file again (all the wall clock numbers of this section come from it).
+
+| Item | Rule | Measured | Decision |
+|---|---|---|---|
+| F: final batch of a split island in parallel | the other threads' idle + wait under the final batch >= 2% of the thread time at 4 threads in ConvexVsMesh or Ragdoll | 0.02% / 0.29% | not done |
+| S: SIMD groups once per step | the grouping >= 2.5% of Pyramid's instructions, and a prototype saves >= 1.5% | 3.9% (162e6); the prototype saves 2.63% | done |
+| L: MotionProperties in Jolt's field order | CEst -0.3% in one scene, no scene +0.1% | best -0.2992% (ConvexVsMesh; 5 of 6 stack paddings miss -0.3%) | not done |
+| C: character key compares | >= 10% of CharacterVirtual's instructions, and a SIMD compare saves >= 5% | 13.4% (26.1% of CEst); the prototypes save 3.5% and 4.3% | not done |
+| X: HighSpeed, 1 thread, 0.93 of C++ | a cause worth >= 3% of the scene's time gets a fix | heap layout of the benchmark's allocator: an estimated 3.6% to over 10% | X1 done |
+| X: ConvexVsMesh, 2 and 4 threads, 0.95 of C++ | one job >= 3% of the gap over C++ in CEst, or >= 10% busy growth with a Zolt-only false sharing site | largest job excess 5.9e6 CEst (SolveVelocityConstraints, +0.28%), 1% of the gap; FindCollisions busy +105% from 1 to 4 threads, two Zolt-only sharing sites | X2 done |
+| P: spin before the futex sleep | ConvexVsMesh at 4 threads >= 3% more steps/s than the same build without the spin, no scene -3% | +0.9% to +2.1% (spins of 10, 30 and 100 us) | not done |
+
+F: Jolt's markBatchProcessed publishes "all done" before the final batch's bounds update, so the other solve jobs go
+on with other islands and the final batch is rarely the tail of a step. L missed its rule by 0.0008 points; the cause
+it targets is real (Zig's layout puts motion quality, allow sleeping, the allowed DOFs and the step overrides on a
+third cache line, about 490k extra L1 misses per 60 Pyramid steps). C: the key compare costs L1 misses (69% of the
+scene's L1 data misses, 7 cache lines per pair), not instructions, so a SIMD compare cannot remove its cost.
+
+After the implementation each kept change had a keep rule, measured on the final code in 15 interleaved rounds against
+the Phase 12 base (paired per-round ratio; a row below 0.97 failed): X2 >= +3% at 4 threads in ConvexVsMesh, Pyramid
+or Ragdoll: ConvexVsMesh 1.099 (12 of 15 rounds), Pyramid 1.075, Ragdoll 1.042; X1 >= +3% in HighSpeed on 1 thread:
+1.071 (15 of 15); S >= 1.5% fewer Pyramid instructions and Pyramid not slower: -2.45%, 1 thread 1.020 (12 of 15). Three
+rows were below 0.97 in those 15 rounds, none with a significant sign test: X1 Pyramid at 4 threads 0.925 (4 of 15), S
+ConvexVsMesh 0.965 (5 of 15) and S HighSpeed 0.969 (7 of 15) at 4 threads. They were measured again in 30 rounds of two
+variants each, together with X1 Pyramid at 2 threads (0.764 in an earlier 7 round run), and came out between 0.993 and
+1.035, so no change failed. The other rows under 1 were between 0.978 and 0.999; the only one with a significant sign
+test is X2 Ragdoll on 1 thread, 0.989 (3 of 15 rounds, p = 0.035).
+
+**Hot atomics on their own cache lines (X2).** On one thread ConvexVsMesh ran at C++ speed: Zolt's single threaded
+work is 0.988 of Jolt's in CEst for the whole update, the largest excess of one job is 5.9e6 CEst in 500 steps
+(SolveVelocityConstraints, +0.28%; in relative terms the small jobs ApplyGravity +1.5%, IntegrateVelocity +1.2% and
+FindCCDContacts +2.8%), every atomic site runs as often as Jolt's (58.9K atomics per step in Zolt, 62.4K in Jolt), and
+there are no extra syscalls or futex calls. At 4 threads it used 5.7% more CPU time. Zig reorders the fields of plain
+structs, so Jolt's declaration order no longer kept two atomics that every FindCollisions job writes away from data
+that the same jobs read: the contact constraint counter (a lock xadd per new contact constraint, 2,552 per step)
+shared a cache line with the object store of the contact cache, which every find reads, and
+`Step.active_body_read_idx` sat next to `max_body_pairs_per_queue`. Now the counter is a
+`ContactConstraintManager.ConstraintCounter` that fills whole cache lines, and the six padded atomics of Step are one
+extern struct in Jolt's order, padded on both sides, in front of the body pair queues. A test walks all 70 atomics of
+Step and checks that no other data shares their cache lines. Step is 64 bytes larger than Jolt's, so an update needs
+64 bytes of temp memory more per collision step (SimulationArchitecture D4). PortingGuide section 9 has the rule: a hot
+atomic that several threads write does not rely on field order for its cache line.
+
+**Rigid bodies in 64 KB pages (X1).** HighSpeed on 1 thread runs fewer instructions than C++ (0.979) and a lower CEst,
+and every expensive instruction class (divisions, square roots, conversions, shuffles, atomics) is equal or cheaper in
+Zolt; the code layout differed in nothing that matters. The gap was memory. ZoltPerformanceTest allocates with Zig's
+SmpAllocator, which puts the 320 byte BodyWithMotionProperties in a 512 byte slot: the 5,000 bodies took 2.56 MB
+instead of glibc's 1.68 MB, beyond a 2 MB L2 (simulated L2 read misses +48%, DTLB misses 2.1 times). It also maps
+every block over 32 KB directly, so QuadTree's update arrays cost an mmap, a munmap and about 20 page faults per step.
+Now BodyManager allocates these bodies in 64 KB pages, 64 KB aligned, with 204 slots of 320 bytes (170 of 384 in double
+precision) behind a 64 byte header. The header makes a page self describing: any BodyManager can free any rigid body,
+also after the BodyManager that created it is gone, as in Jolt (BodyManager::sDeleteBody is static, and a body that
+UnassignBodyID handed out can go to another PhysicsSystem). The quad tree keeps its update arrays between updates. A
+harness-only variant that links glibc (X1c, the C++ benchmark's own allocator) gained as much in HighSpeed (+8.9% on 1
+thread). X1 is kept in the library because it helps every program that uses a general purpose allocator, and
+ZoltPerformanceTest keeps Zig's default allocator.
+
+**SIMD contact groups planned once per step (S).** The SIMD contact solver of Phase 11 sorted the contacts of a batch
+of a parallel split into groups of 8 in every velocity iteration (162e6 instructions, 3.9% of 60 Pyramid steps), but
+the groups depend only on the batch's contacts. Now the warm start of a batch plans them once per step: it permutes the
+batch's own slice of the splitter's contact indices (the dynamic contacts with 1 to 4 points in group order, then the
+others in their original order) and stores the number of planned contacts in an entry of
+`contact_and_constraints_split_idx` that splitIsland no longer reads. The velocity iterations solve from the plan.
+Every phase that visits the new order writes only the contact's own data and the state of its dynamic bodies, which no
+other contact of a parallel batch touches (SimulationArchitecture section 10). Pyramid: 4.148e9 to 4.047e9
+instructions (-2.45%).
+
+Instructions of the measured parts (callgrind, `-t=1`, `zig build perf-budget`):
+
+| Scene | Steps | Phase 12 | Phase 13 | C++ | Zolt/C++ |
+|---|---|---|---|---|---|
+| ConvexVsMesh | 200 | 1.981e9 | 1.981e9 | 2.039e9 | 0.972 |
+| Pyramid | 60 | 4.148e9 | 4.047e9 | 4.354e9 | 0.929 |
+| HighSpeed | 60 | 1.999e9 | 1.999e9 | 2.042e9 | 0.979 |
+| CharacterVirtual | 60 | 0.374e9 | 0.374e9 | valgrind stops | |
+| Ragdoll | 15 | 1.682e9 | 1.681e9 | valgrind stops | |
+
+X1 and X2 change where data lives, not the instructions (HighSpeed and ConvexVsMesh +0.02%); they show in the wall
+clock only. Pyramid's ratio budget went from 1.05 to 1.02, the measurement plus about 10% again.
+
+Steps per second (ReleaseFast, x86-64-v3, 4 cores; the median of 15 interleaved rounds of C++, Zolt Phase 12 and Zolt
+Phase 13; the same hashes on every run; the ratios are the medians of the paired per-round ratios, with the rounds
+that Phase 13 won):
+
+| Scene | Threads | C++ | Zolt Phase 12 | Zolt Phase 13 | Phase 13 / Phase 12 | Phase 13 / C++ |
+|---|---|---|---|---|---|---|
+| Ragdoll | 1 | 39.1 | 38.8 | 40.4 | 1.039 (12/15) | 1.02 |
+| Ragdoll | 2 | 53.3 | 53.9 | 59.0 | 1.091 (14/15) | 1.07 |
+| Ragdoll | 4 | 94.7 | 87.3 | 91.5 | 1.008 (8/15) | 0.98 |
+| ConvexVsMesh | 1 | 216.8 | 218.4 | 219.7 | 1.008 (9/15) | 1.02 |
+| ConvexVsMesh | 2 | 272.0 | 272.1 | 276.0 | 1.003 (8/15) | 1.10 |
+| ConvexVsMesh | 4 | 409.2 | 365.5 | 405.0 | 1.073 (12/15) | 0.99 |
+| HighSpeed | 1 | 151.7 | 143.5 | 157.8 | 1.092 (15/15) | 1.02 |
+| HighSpeed | 2 | 173.0 | 169.9 | 176.2 | 0.988 (7/15) | 0.96 |
+| HighSpeed | 4 | 226.8 | 232.6 | 244.4 | 1.058 (11/15) | 1.08 |
+| CharacterVirtual | 1 | 347.5 | 448.9 | 459.2 | 1.018 (9/15) | 1.32 |
+| CharacterVirtual | 2 | 371.6 | 471.0 | 484.3 | 1.034 (10/15) | 1.30 |
+| CharacterVirtual | 4 | 369.8 | 497.1 | 510.9 | 1.045 (11/15) | 1.38 |
+| Pyramid | 1 | 57.7 | 71.3 | 75.4 | 1.052 (11/15) | 1.29 |
+| Pyramid | 2 | 68.4 | 85.9 | 83.5 | 1.061 (8/15) | 1.20 |
+| Pyramid | 4 | 90.1 | 107.3 | 110.0 | 1.008 (8/15) | 1.19 |
+
+On 1 thread HighSpeed gains 9.2% (all 15 rounds) and runs at 1.02 of C++ instead of 0.94; Ragdoll gains 3.9% and Pyramid
+5.2%. At 2 and 4 threads single runs vary by 13-58% on this machine ((max - min) / median, the spread column of
+`tools/wall_rounds.py`), and 15 rounds do not separate a few percent there. A second run of 30 rounds with only Phase 12
+and Phase 13 at 4 threads gives: Pyramid 1.092 (25 of 30 rounds), Ragdoll 1.065 (26), HighSpeed 1.052 (23), ConvexVsMesh
+1.046 (20; 1.073 in the 15 rounds above), CharacterVirtual 0.998 (15). ConvexVsMesh at 4 threads went from 0.90 to 0.99
+of C++ in the rounds above. CharacterVirtual and Pyramid stay 19-38% ahead of C++.
+
+The machine changed during Phase 13: the cloud VM moved to another host CPU (now a 2.8 GHz Xeon with a 32 KB L1d, 1 MB
+L2 per core and a 33 MB L3; before 2.3 GHz, 48 KB, 2 MB and 260 MB), and its wall clock got noisier (single runs at 2
+and 4 threads vary by up to about 60%). Only numbers measured in the same rounds compare: this table does not compare
+with Phase 12's.
+
+Job profiles (`-t=4`, 500 steps, the median of 3 interleaved runs of Phase 12 and Phase 13; idle, wait and the short
+idle spans in percent of the thread time, the island preparation and the final batch in percent of the wall time):
+
+| Scene | Wall time (500 steps, profiled) | Idle | Wait | Idle spans < 50 us | Wakeups per worker and step | Island preparation (split) | Final batch |
+|---|---|---|---|---|---|---|---|
+| Pyramid | 5.51 s / 4.94 s | 4.6% / 4.1% | 13.1% / 13.4% | 0.27% / 0.29% | 8.7 / 8.7 | 6.7% / 6.8% | 1.9% / 1.8% |
+| ConvexVsMesh | 1.60 s / 1.37 s | 7.9% / 8.9% | 0.1% / 0.4% | 1.41% / 1.84% | 8.9 / 8.9 | 3.2% / 3.2% | 5.2% / 5.6% |
+| Ragdoll | 6.30 s / 6.01 s | 4.0% / 3.6% | 1.3% / 1.3% | 0.32% / 0.33% | 10.6 / 10.6 | 4.2% / 3.9% | 8.5% / 8.5% |
+| HighSpeed | 2.42 s / 2.28 s | 19.6% / 18.1% | 0% / 0% | 0.67% / 0.73% | 10.0 / 10.0 | - | - |
+| CharacterVirtual | 1.17 s / 1.16 s | 66.0% / 66.7% | 0% / 0% | 1.15% / 1.00% | 8.9 / 9.0 | - | - |
+
+The jobs do less work in the same schedule: the shares of idle, wait, wakeups and the island preparation stay about
+the same, the wall time drops (ConvexVsMesh -14%, Pyramid -10%, HighSpeed -5.5%, Ragdoll -4.5%). In ConvexVsMesh
+FindCollisions takes 55.0% of the thread time instead of 57.2%, in Pyramid 25.8% instead of 28.5%.
+
+**Open, Phase 14 candidates.**
+- The gathers and scatters of the SIMD contact solver (between the contact constraints and the 8 lanes) are 8.1% of
+  Pyramid's instructions (11.5% of CEst). Keeping a planned batch in lane order for the whole step would remove most
+  of them.
+- CharacterVirtual: the key compare misses the L1 cache (7 lines per pair). Packing what the compare reads into one
+  cache line per character, and transforming only the pairs that pass the bounds test, attack the misses.
+- MotionProperties in Jolt's field order (L) is worth about 0.3% of CEst; it could go together with other layout work.
+- Store forwarding failures (struct copies of ShapeCast and of the body bounds) cost an estimated 1.0-1.4% of
+  HighSpeed on 1 thread.
+- The spin before the futex sleep was measured before X2. After it the idle spans under 50 us are 1.8% of the thread
+  time in ConvexVsMesh at 4 threads and at most 1.0% in the other scenes: still below what a spin would need.
 
 ### Deferred / out of scope for now
 - `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).

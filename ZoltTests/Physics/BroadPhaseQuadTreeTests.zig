@@ -15,7 +15,12 @@
 //!   addBodiesPrepare, updatePrepare, optimize and notifyBodiesLayerChanged, which must leave the broad phase
 //!   unchanged (a dump of every tree and of the tracking is compared);
 //! - a ray along bodies that were added one by one: the walk stack grows on the heap (Jolt's "Stack full!"), and
-//!   castAABoxNoLock returns error.OutOfMemory when it cannot.
+//!   castAABoxNoLock returns error.OutOfMemory when it cannot;
+//! - the scratch arrays that the trees keep between updates (Phase 13): no heap allocation in an update of the same
+//!   size, growth with more bodies, releaseUpdateScratch (which waits for an update that holds the update lock), and a
+//!   failing heap while they grow (the tree stays unchanged).
+//!   The out of memory tests of updatePrepare and optimize free them before every attempt (releaseUpdateScratch), so
+//!   that the updates allocate at Jolt's points.
 //! The PhysicsSystem tests with the QuadTree (the default broad phase) are in PhysicsSystemTests.zig, the walk stacks of
 //! a hand built deep tree (FindCollidingPairs and the casts out of memory) in QuadTree.zig.
 
@@ -1067,12 +1072,14 @@ test "BroadPhaseQuadTree updatePrepare and optimize out of heap memory leave the
     }
     f.c.bp().notifyBodiesAABBChanged(f.ids[0..40], .{});
 
-    // updatePrepare: the node IDs, BuildTree's centers
+    // updatePrepare: the node IDs, BuildTree's centers (Zolt, Phase 13: the trees keep them between updates, freed
+    // before every attempt so that the update allocates them at Jolt's points)
     var num_failures: usize = 0;
     for (0..20) |k| {
         f.c.bp().frameSync();
         const before = try dumpTrees(allocator, f.c.quad_tree);
         defer allocator.free(before);
+        f.c.quad_tree.releaseUpdateScratch(); // Takes the update lock: before lockModifications
         f.c.bp().lockModifications();
         f.failAfter(k);
         const result = f.c.bp().updatePrepare();
@@ -1094,6 +1101,7 @@ test "BroadPhaseQuadTree updatePrepare and optimize out of heap memory leave the
     // optimize: the layers before the failing one are optimized, the broad phase stays valid
     num_failures = 0;
     for (0..40) |k| {
+        f.c.quad_tree.releaseUpdateScratch(); // Zolt (Phase 13): the scratch arrays of the rebuilds like Jolt
         f.failAfter(k);
         const result = f.c.bp().optimize();
         f.noFailures();
@@ -1142,4 +1150,223 @@ test "BroadPhaseQuadTree notifyBodiesLayerChanged out of heap memory leaves ever
         }
     } else return error.TestUnexpectedResult;
     try expect(num_failures >= 2);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The scratch arrays of updatePrepare (Roadmap Phase 13, class A: memory placement only, see the header of QuadTree.zig):
+// every tree keeps the node IDs and BuildTree's centers from one update to the next and only grows them.
+//
+// Bite proofs (each change made the named tests fail, then it was reverted):
+// - the arrays freed at the end of every updatePrepare (Jolt's behavior): both tests (the arrays are empty after an
+//   update: "expected 100, found 0");
+// - the centers grown to the number of node IDs instead of the tree's bodies: "updates keep the scratch arrays ..."
+//   ("expected 100, found 4": BuildTree got the 4 roots of the batches);
+// - the old array not freed when it grows: both tests (the testing allocator reports the leaks);
+// - deinit without releaseUpdateScratch: both tests (leaks);
+// - BroadPhaseQuadTree.releaseUpdateScratch without the update lock: "releaseUpdateScratch waits for ..." (the other
+//   thread freed the arrays while the update held the lock).
+
+/// Moves bodies that are in the broad phase by `offset` and tells the broad phase: their bounds widen, their trees
+/// become dirty
+fn moveBodies(c: *Context, ids: []BodyID, offset: Vec3) void {
+    for (ids) |id| {
+        const b = c.bodyMut(id);
+        b.setPositionAndRotationInternal(b.getPosition().addVec3(offset), b.getRotation(), .{});
+    }
+    c.bp().notifyBodiesAABBChanged(ids, .{});
+}
+
+test "BroadPhaseQuadTree updates keep the scratch arrays: no heap allocation in an update of the same size, growth with more bodies" {
+    const allocator = std.testing.allocator;
+    var heap: std.testing.FailingAllocator = .init(allocator, .{}); // Counts the allocations of the broad phase
+    var c: Context = undefined;
+    try c.init(allocator, heap.allocator(), 256);
+    defer c.deinit();
+    var settings = BodyCreationSettings.initWithShape((try SphereShape.create(allocator, 0.5, .{})).asShape(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+    defer settings.deinit();
+    var ids: [150]BodyID = undefined;
+    for (&ids, 0..) |*id, i| {
+        settings.position = RVec3.init(@floatFromInt(i % 10 * 2), 0, @floatFromInt(i / 10 * 2));
+        id.* = try c.createBody(&settings, false);
+    }
+    const tree = &c.quad_tree.layers[BroadPhaseLayers.moving.getValue()];
+    try expectEqual(@as(usize, 0), tree.update_node_ids.len);
+
+    // 100 bodies added in 4 batches: the first update allocates the node IDs and the centers, both for all bodies of
+    // the tree (the nodes of the batches are unchanged, so BuildTree gets only their 4 roots)
+    for (0..4) |i| try c.add(ids[i * 25 ..][0..25]);
+    try expect(tree.isDirty());
+    var allocations = heap.allocations;
+    try c.update();
+    try expect(!tree.isDirty());
+    try expectEqual(@as(usize, 2), heap.allocations - allocations);
+    try expectEqual(@as(usize, 100), tree.update_node_ids.len);
+    try expectEqual(@as(usize, 100), tree.update_centers.len);
+
+    // Updates of the same size allocate and free nothing
+    for (0..3) |_| {
+        moveBodies(&c, ids[0..100], Vec3.init(0.5, 0, 0));
+        try expect(tree.isDirty());
+        allocations = heap.allocations;
+        const deallocations = heap.deallocations;
+        try c.update();
+        try expect(!tree.isDirty());
+        try expectEqual(allocations, heap.allocations);
+        try expectEqual(deallocations, heap.deallocations);
+    }
+
+    // 50 more bodies: the next update replaces both arrays (the old ones are freed) with arrays for 150 bodies, the
+    // updates after it allocate nothing again
+    try c.add(ids[100..150]);
+    moveBodies(&c, ids[0..150], Vec3.init(0, 0.5, 0));
+    allocations = heap.allocations;
+    var deallocations = heap.deallocations;
+    try c.update();
+    try expectEqual(@as(usize, 2), heap.allocations - allocations);
+    try expectEqual(@as(usize, 2), heap.deallocations - deallocations);
+    try expectEqual(@as(usize, 150), tree.update_node_ids.len);
+    try expectEqual(@as(usize, 150), tree.update_centers.len);
+    moveBodies(&c, ids[0..150], Vec3.init(0, 0.5, 0));
+    allocations = heap.allocations;
+    try c.update();
+    try expectEqual(allocations, heap.allocations);
+
+    // Fewer bodies: the arrays keep their size, no allocation
+    c.bp().removeBodies(ids[0..50]);
+    moveBodies(&c, ids[50..150], Vec3.init(0, 0, 0.5));
+    allocations = heap.allocations;
+    try c.update();
+    try expectEqual(allocations, heap.allocations);
+    try expectEqual(@as(usize, 150), tree.update_node_ids.len);
+    try expectEqual(@as(usize, 100), try validate(allocator, &c));
+
+    // releaseUpdateScratch frees them: the next update allocates them again, where Jolt does, for the tree's bodies
+    deallocations = heap.deallocations;
+    c.quad_tree.releaseUpdateScratch();
+    try expectEqual(@as(usize, 2), heap.deallocations - deallocations);
+    try expectEqual(@as(usize, 0), tree.update_node_ids.len + tree.update_centers.len);
+    moveBodies(&c, ids[50..150], Vec3.init(0, 0, 0.5));
+    allocations = heap.allocations;
+    try c.update();
+    try expectEqual(@as(usize, 2), heap.allocations - allocations);
+    try expectEqual(@as(usize, 100), tree.update_node_ids.len);
+    try expectEqual(@as(usize, 100), tree.update_centers.len);
+    try expectEqual(@as(usize, 100), try validate(allocator, &c));
+}
+
+test "BroadPhaseQuadTree releaseUpdateScratch waits for an update that holds the update lock" {
+    const allocator = std.testing.allocator;
+    var c: Context = undefined;
+    try c.init(allocator, allocator, 64);
+    defer c.deinit();
+    var settings = BodyCreationSettings.initWithShape((try SphereShape.create(allocator, 0.5, .{})).asShape(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+    defer settings.deinit();
+    var ids: [20]BodyID = undefined;
+    for (&ids, 0..) |*id, i| {
+        settings.position = RVec3.init(@floatFromInt(i % 5 * 2), 0, @floatFromInt(i / 5 * 2));
+        id.* = try c.createBody(&settings, false);
+    }
+    const tree = &c.quad_tree.layers[BroadPhaseLayers.moving.getValue()];
+
+    // All bodies in one batch: the first update finds the tree as one unchanged node, it gets the node IDs but
+    // BuildTree needs no centers; the next update, after every body moved, gets the centers
+    try c.add(&ids);
+    try c.update();
+    try expectEqual(@as(usize, 20), tree.update_node_ids.len);
+    try expectEqual(@as(usize, 0), tree.update_centers.len);
+    moveBodies(&c, &ids, Vec3.init(0.5, 0, 0));
+    try c.update();
+    try expectEqual(@as(usize, 20), tree.update_centers.len);
+
+    // An update holds the update lock from before updatePrepare to after updateFinalize. Another thread that calls
+    // releaseUpdateScratch then waits until the update unlocks.
+    const Releaser = struct {
+        fn run(quad_tree: *BroadPhaseQuadTree, started: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
+            started.store(true, .release);
+            quad_tree.releaseUpdateScratch();
+            done.store(true, .release);
+        }
+    };
+    moveBodies(&c, &ids, Vec3.init(0.5, 0, 0));
+    c.bp().frameSync();
+    c.bp().lockModifications();
+    const state = c.bp().updatePrepare();
+    var started: std.atomic.Value(bool) = .init(false);
+    var done: std.atomic.Value(bool) = .init(false);
+    const thread = std.Thread.spawn(.{}, Releaser.run, .{ c.quad_tree, &started, &done }) catch |err| {
+        if (state) |s| c.bp().updateFinalize(&s) else |_| {}
+        c.bp().unlockModifications();
+        return err;
+    };
+    while (!started.load(.acquire)) std.Thread.yield() catch {};
+    for (0..1000) |_| std.Thread.yield() catch {};
+    const released_during_update = done.load(.acquire);
+    const node_ids_during_update = tree.update_node_ids.len;
+    if (state) |s| c.bp().updateFinalize(&s) else |_| {}
+    c.bp().unlockModifications();
+    thread.join();
+
+    _ = try state;
+    try expect(!released_during_update);
+    try expectEqual(@as(usize, 20), node_ids_during_update);
+    try expect(done.load(.acquire));
+    try expectEqual(@as(usize, 0), tree.update_node_ids.len + tree.update_centers.len);
+    try expectEqual(@as(u32, 20), try validate(allocator, &c));
+}
+
+test "BroadPhaseQuadTree out of heap memory while the scratch arrays of an update grow leaves the tree unchanged" {
+    const allocator = std.testing.allocator;
+    var f: FailingContext = undefined;
+    try f.init(allocator);
+    defer f.deinit();
+
+    // Every tree with bodies gets its arrays (an update rebuilds one dirty tree)
+    for (0..2 * BroadPhaseLayers.num_layers) |_| try f.c.update();
+    for (f.c.quad_tree.layers) |*tree| try expect(!tree.isDirty());
+
+    // More bodies in the trees, every body moves: the arrays of the trees that got bodies are too short
+    var ids = f.ids[40..60].*;
+    try f.c.add(&ids);
+    moveBodies(&f.c, &f.ids, Vec3.init(0.5, 0, 0));
+
+    // Fail every allocation of every update in turn: the tree stays unchanged (the arrays may be freed), then the update
+    // works
+    var num_failures: usize = 0;
+    var num_grown: usize = 0;
+    for (0..2 * BroadPhaseLayers.num_layers) |_| {
+        var k: usize = 0;
+        const state = while (true) : (k += 1) {
+            f.c.bp().frameSync();
+            const before = try dumpTrees(allocator, f.c.quad_tree);
+            defer allocator.free(before);
+            f.c.bp().lockModifications();
+            f.failAfter(k);
+            const result = f.c.bp().updatePrepare();
+            f.noFailures();
+            if (result) |s| break s else |err| {
+                f.c.bp().unlockModifications();
+                try expectEqual(error.OutOfMemory, err);
+                num_failures += 1;
+                try expectSameDump(allocator, before, f.c.quad_tree);
+                _ = try validate(allocator, &f.c);
+            }
+        };
+        f.c.bp().updateFinalize(&state);
+        f.c.bp().unlockModifications();
+        if (state.data[0] == null) break; // Nothing was dirty anymore
+        if (k == 2) num_grown += 1; // Both arrays grew
+    } else return error.TestUnexpectedResult;
+    try expect(num_grown >= 1);
+    try expect(num_failures >= 2);
+    try expectEqual(@as(u32, 60), try validate(allocator, &f.c));
+
+    // The arrays of every tree now hold its bodies: the next updates allocate nothing
+    for (f.c.quad_tree.layers) |*tree| {
+        if (tree.hasBodies()) try expect(tree.update_node_ids.len >= tree.tree_state.num_bodies.load(.monotonic));
+    }
+    moveBodies(&f.c, &f.ids, Vec3.init(0.5, 0, 0));
+    const allocations = f.failing.allocations;
+    for (0..2 * BroadPhaseLayers.num_layers) |_| try f.c.update();
+    try expectEqual(allocations, f.failing.allocations);
+    for (f.c.quad_tree.layers) |*tree| try expect(!tree.isDirty());
 }

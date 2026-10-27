@@ -109,11 +109,14 @@ comments. Jolt's size is checked at compile time; it also holds with Zig's field
   ```
 
 **Allocation.**
-- `BodyWithMotionProperties { body: Body, motion_properties: MotionProperties }` is one
-  `allocator.create`.
-- `BodyManager.deleteBody` frees it through `@fieldParentPtr("body", body)` when
-  `motion_properties != null`.
-- Phase 9 added `SoftBodyWithMotionPropertiesAndShape` the same way (RemainingFeaturesArchitecture.md R16).
+- `BodyWithMotionProperties { body: Body, motion_properties: MotionProperties }` is one object. Since
+  Phase 13 it is a 64 byte aligned slot in a 64 KB page of the body pool (D2, "Body memory"), never
+  an `allocator.create`.
+- `BodyManager.deleteBody` finds it through `@fieldParentPtr("body", body)` when
+  `motion_properties != null` and returns the slot to its page (`BodyPool.destroy`, which needs no
+  pool: any BodyManager can destroy any body, as in Jolt).
+- Phase 9 added `SoftBodyWithMotionPropertiesAndShape` (RemainingFeaturesArchitecture.md R16), found
+  the same way. Soft bodies and static bodies (a plain `Body`) stay one `allocator.create` each.
 
 **Fixed to world.** `Body::sFixedToWorld` becomes a compile time constant in read-only memory. Its
 dummy shape is a static `EmptyShape`: `Shape.is_static` was added with this document, and it makes
@@ -193,6 +196,28 @@ The number of body mutexes is Jolt's:
 **IDs.** ID allocation is literal: a LIFO free list in the freed slots, `+%=` on the `u8` sequence
 numbers, and `addBodyWithCustomID`'s O(N) unlink. The prototype test "BodyManager ID allocation
 like Jolt" pins the sequence.
+
+**Body memory (Phase 13, class A).** The rigid bodies with motion properties live in pages that
+describe themselves. A page is 64 KB, aligned to 64 KB, allocated from the allocator of the
+BodyManager that creates the body (the pool in `mutable_fields` allocates a page when all its pages
+are full). Its first 64 bytes are a header: a magic number, a spin lock, the number of bodies in the
+page, the first slot that was never used, a LIFO free list, whether its BodyManager still exists,
+and the page's allocator. Then come 64 byte aligned slots of exactly
+`@sizeOf(BodyWithMotionProperties)`: 204 of 320 bytes, 170 of 384 bytes in double precision. The
+page of a body is its address with the low 16 bits cleared, so `BodyPool.destroy` needs no pool, and
+the ownership is Jolt's (whose static `sDeleteBody` frees every body with the global allocator): a
+body that UnassignBodyID(s) hands out can be assigned to another PhysicsSystem and destroyed there,
+also after its own PhysicsSystem is gone. (A static body without motion properties or a soft body is
+not in a page: it is freed with the allocator of the PhysicsSystem that destroys it, so such a move
+needs both systems to use the same allocator.) A page is freed once its BodyManager is gone and it
+holds no body: by the pool's deinit, or by the destroy of its last body, with the page's allocator
+(which must stay valid until then). Body creation allocates once per page and when the page table
+grows, so `allocateBody` can fail there (out of memory, the pool is unchanged), not per body. The
+pool mutex guards the page table (reserved at init for the pages of `max_bodies`, it grows only
+beyond) and the choice of a page for a new body; a page's contents change only under its spin lock
+(the doc comment of `BodyPool` in BodyManager.zig has the proof that create, deinit and destroys on
+other threads do not race, and that exactly one party frees a page). Only addresses change: nothing
+orders, hashes or iterates bodies by address.
 
 **Active bodies.**
 - `active_bodies: [body_type_count][]BodyID` is preallocated.
@@ -288,6 +313,16 @@ const PaddedAtomicU32 = extern struct {
     padding: [Core.cache_line_size - @sizeOf(u32)]u8 = undefined,
 };
 ```
+
+- Zig reorders the fields of `Step`, so the six padded atomics and the body pair queues behind them
+  (Jolt's `mBodyPairQueues`) are the fields of one extern struct `PaddedAtomics` in Jolt's order,
+  behind 60 bytes of padding (`step.padded_atomics.active_body_read_idx.value`,
+  `step.bodyPairQueues()`; Phase 13, class A, layout only). Every atomic, including the write and
+  read index of each queue, then has at least 60 bytes of padding on both sides, wherever Zig places
+  the struct. The number of queues in use is `step.num_body_pair_queues`, outside the struct. Jolt
+  pads only behind each atomic and relies on its declaration order. The padding in front makes `Step`
+  64 bytes larger than Jolt's (7,408 instead of 7,344 bytes), so an update needs 64 bytes of temp
+  memory per collision step more than Jolt (see D12).
 
 **Builder.** `buildJobs` transliterates the "Build Jobs" block of `PhysicsSystem::Update`
 statement by statement:
@@ -463,8 +498,14 @@ other soft body jobs inside a job: Finalize, then N Simulate jobs, then N Collid
   dependency count hangs it.
 
 **Heap allocation inside a job.** `BroadPhase.updatePrepare` is a heap allocation inside a job
-(QuadTree's `new NodeID[]`, D9). `determineCollidingShapes` of the soft body Collide jobs is
-another one (Phase 9, the rows above). They are latched:
+(QuadTree's `new NodeID[]`, D9). Since Phase 13 the quad tree keeps that array and BuildTree's
+centers from one update to the next, so the job allocates them only when they are shorter than the
+tree's number of bodies (the first update of a tree, the first one whose BuildTree needs the
+centers, and growth); the walk stack's heap fallback stays as in Jolt. The tests that sweep these
+failures free the arrays first (`BroadPhaseQuadTree.releaseUpdateScratch`), so that the update
+allocates at Jolt's points.
+`determineCollidingShapes` of the soft body Collide jobs is another one (Phase 9, the rows above).
+They are latched:
 
 ```zig
                     if (!c.isOutOfMemory())
@@ -610,7 +651,9 @@ A concrete settings class lists it in `overrides`:
 - `addBodiesPrepare(bodies) Allocator.Error!AddState`: `new LayerState[mNumLayers]`
   (BroadPhaseQuadTree.cpp:168) and `BuildTree`'s `new Vec3[]` (QuadTree.cpp:544).
 - `updatePrepare() Allocator.Error!UpdateState`: `new NodeID[mNumBodies]` (QuadTree.cpp:300) and
-  the STLLocalAllocator stack with its heap fallback (:304).
+  the STLLocalAllocator stack with its heap fallback (:304). Phase 13 (class A): every tree keeps
+  the node IDs and BuildTree's centers of its updates and only grows them, at Jolt's allocation
+  points; `releaseUpdateScratch` frees them (the header of QuadTree.zig).
 
 On error, the function frees what it built (arrays, and nodes back to the free list) and leaves
 the tree unchanged. A zeroed `UpdateState` makes `updateFinalize` a no-op
@@ -741,7 +784,10 @@ parameters.
 - Compare the listener callbacks as sorted records.
 - Thread matrix: Zig `JobSystemSingleThreaded` and pools of 0, 1, 3 and 7 workers against C++ with
   0 and N threads. Run Debug and ReleaseFast, single and double precision.
-- Optionally check that Zolt's temp memory use is at most Jolt's.
+- Optionally check that Zolt's temp memory use is at most Jolt's. One known exception (Phase 13, D4):
+  each `Step` is 64 bytes larger than Jolt's, so an update needs 64 * collision_steps bytes more. A
+  `TempAllocatorImpl` sized at Jolt's exact peak can then make `update` return `error.OutOfMemory`
+  where Jolt succeeds (`TempAllocatorImplWithMallocFallback` takes the bytes from the heap).
 
 **Mandatory per scene test:**
 - A FailingTempAllocator sweep (every allocation fails once; `temp.isEmpty()`; recovery through
@@ -1295,3 +1341,54 @@ ragdolls form large islands from about step 24, and ConvexVsMesh from about step
 it.) About a fifth of the kernel's instructions are transposes and another sixth are register spills
 (12 velocity vectors stay live). Transposing the constant constraint data once per step instead of once
 per iteration would remove most of the transposes but needs a buffer per step; it is not done.
+
+**The plan of a batch (Phase 13, class A).** The sorting into groups ran in every velocity iteration
+(162M instructions in 60 Pyramid steps, 3.9%), though the groups depend only on the batch's contacts.
+Now each batch of a parallel split with 4 to 64 contacts (`ContactConstraintSimd.plans`) is planned once
+per step:
+- At its warm start (after the warm start itself, which stays in Jolt's order) `planBatch` permutes the
+  batch's own slice of the splitter's contact indices to [the dynamic vs dynamic contacts with 1 to 4
+  points in group order][the others in their original order] and writes `0x8000_0000 | <number of the
+  first>` into the batch's plan word. The word is the entry of `contact_and_constraints_split_idx` at the
+  batch's first contact (`LargeIslandSplitter.batchPlanWord`): splitIsland needs those entries only while
+  it splits, and it writes split indices (below 32, no marker) into every entry of its island before the
+  island's first batch.
+- Every velocity iteration of the batch calls `solvePlanned` with the word: the groups of 8 come straight
+  from the planned prefix, a tail under 4 and the other contacts go through one call of the scalar
+  solver. A word without the marker (or with a count above the batch size) makes it run the unplanned
+  `solveVelocityConstraints`, with the same bits; PhysicsSystem asserts that the word holds a plan.
+- The warm start of a batch always runs before its velocity iterations of the same step: the status of a
+  split island moves to iteration 1 only after every batch of iteration 0 was marked processed, and the
+  contacts of a batch depend only on its split and first item (the item counter restarts at 0 and grows
+  by 16). The plan reaches the jobs of later iterations through the release/acquire chain that carries the
+  warm start's lambdas. Each collision step prepares, splits and resets the splitter again, and
+  splitIsland rewrites both buffers of its island first, so no plan and no permutation survives into
+  another step. With 0 velocity steps nothing reads the plan.
+- The permuted order changes no bit in any phase that visits it: in a batch of a parallel split no dynamic
+  body appears twice, a contact writes only its own lambdas, the velocities and (position iterations) the
+  positions and rotations of its dynamic bodies, and (storeAppliedImpulses) its own cached manifold;
+  kinematic and static bodies are only read. Nothing else reads the splitter's contact indices after
+  splitIsland. The header of ContactConstraintSimd.zig has the proof phase by phase, the header of
+  LargeIslandSplitter.zig the rules for changes to the splitter (no reader of the split indices after
+  splitIsland, batch contacts a function of split and first item).
+- Gates: comptime off with `-Dsimd_contact_solver=false`, `-Ddeterminism_log=true` and the self-hosted
+  backend (nothing is permuted then). planBatch and solvePlanned are never inlined, so the solve job's code
+  for islands that are not split stays as it was.
+- Tests: ContactConstraintSimdTests compares Jolt's order with the scalar solver against planned batches
+  of 4 to 64 contacts bit for bit after the warm start, every velocity iteration, storeAppliedImpulses and
+  the position iterations (constraints, velocities, positions, rotations, cached manifolds), checks the
+  plan, that planBatch writes nothing outside the batch and the fallback of words without a plan.
+  PhysicsSystemTests runs a pyramid with and without plans (1 and 2 collision steps, 0, 1 and the
+  default number of velocity steps, a single threaded job system and a pool of 3 workers) and a pile on a
+  kinematic platform (a kinematic sweeper, point constraints, step overrides, contact settings changed by
+  a listener, 1 and 3 collision steps, single threaded and a pool of 7 workers), and compares the states
+  after every update.
+  Test-only counters (`PhysicsSystem.simd_plans`) count the planned batches and their velocity iterations
+  by the plan word, like solvePlanned decides: the iterations that found their plan must match the
+  velocity steps, and none may run without it. So a velocity iteration without its plan fails the tests
+  also without asserts.
+
+Pyramid (60 steps, callgrind): 4,148,175,876 to 4,046,679,602 instructions (-2.45%). Ragdoll (15 steps,
+no split island) +0.001%, ConvexVsMesh (200 steps) -0.003%. planBatch places each contact once at a
+counted position: a first version copied the buckets back with loops that LLVM turned into 5 memcpy calls
+per batch (221,226 more instructions in Pyramid).

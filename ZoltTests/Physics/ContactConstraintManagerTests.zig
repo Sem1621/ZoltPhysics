@@ -881,7 +881,7 @@ test "ContactConstraintManager: contact constraints full and cache full soft err
         try expect(h.contact_allocator.errors.contact_constraints_full);
         try expect(!h.contact_allocator.errors.manifold_cache_full);
         try expectEqual(@as(u32, 6), h.contact_allocator.num_manifolds);
-        try expectEqual(@as(u64, 6), h.manager.num_constraints_and_next_constraint_offset.load(.monotonic) & 0xffffffff);
+        try expectEqual(@as(u64, 6), h.manager.num_constraints_and_next_constraint_offset.value.load(.monotonic) & 0xffffffff);
         try h.solve(10, 2);
         h.endStep();
         for (boxes, 0..) |b, i|

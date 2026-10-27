@@ -595,7 +595,7 @@ const World = struct {
 
     fn dumpConstraints(self: *World, with_impulses: bool, rec: Rec) void {
         const m = &self.manager;
-        const counter = m.num_constraints_and_next_constraint_offset.load(.monotonic);
+        const counter = m.num_constraints_and_next_constraint_offset.value.load(.monotonic);
         rec.u(@truncate(counter));
         rec.u(@truncate(counter >> 32));
         const num_constraints = m.getNumConstraints();

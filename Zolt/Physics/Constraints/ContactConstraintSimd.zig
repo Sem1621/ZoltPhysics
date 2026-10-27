@@ -24,10 +24,74 @@
 //!   the lanes that applied an impulse, like ContactConstraintManager's setVelocities.
 //! - Contacts with a static or kinematic body and a group of fewer than `min_lanes` constraints use the scalar solver.
 //!
-//! Gates: PhysicsSystem calls `solveBatch`, which uses this solver only when `enabled` and only for the batches of a
-//! parallel split (LargeIslandSplitter.Batch.parallel). `enabled` needs the LLVM backend (the self-hosted backend of
-//! Zig 0.16 miscompiles some @Vector code), is off with `-Ddeterminism_log=true` (the order of the log lines would
-//! change) and with `-Dsimd_contact_solver=false` (the A/B switch). The warm start and storeAppliedImpulses stay scalar.
+//! Gates: PhysicsSystem calls `solveBatch` (or `solvePlanned`, below), which uses this solver only when `enabled` and
+//! only for the batches of a parallel split (LargeIslandSplitter.Batch.parallel). `enabled` needs the LLVM backend (the
+//! self-hosted backend of Zig 0.16 miscompiles some @Vector code), is off with `-Ddeterminism_log=true` (the order of the
+//! log lines would change) and with `-Dsimd_contact_solver=false` (the A/B switch). The warm start and
+//! storeAppliedImpulses stay scalar.
+//!
+//! The plan of a batch (Phase 13, class A). solveVelocityConstraints sorts the contacts of a batch into groups in every
+//! velocity iteration, about 4% of Pyramid's instructions. The groups depend only on the batch's contacts, so they are
+//! planned once per step:
+//! - When `plans(batch.parallel, batch.contacts.len)` (a batch of a parallel split with min_lanes to max_chunk contacts),
+//!   PhysicsSystem warm starts the batch in Jolt's order and then calls `planBatch`. It permutes the batch's own slice of
+//!   the splitter's contact indices to [the dynamic vs dynamic constraints with 1 to 4 points in the group order of
+//!   solveVelocityConstraints][the others in their original order] and writes `plan_marker | <number of the first>` to
+//!   the batch's plan word (LargeIslandSplitter.batchPlanWord: an entry of contact_and_constraints_split_idx that
+//!   splitIsland no longer needs). Each velocity iteration calls `solvePlanned`, which builds the groups of 8 straight
+//!   from that prefix (the same groups as solveVelocityConstraints, which the bits do not depend on anyway) and solves a
+//!   tail under min_lanes and the others with one call of the scalar solver.
+//! - The plan word checks itself: splitIsland writes split indices (below 32) into these words, a plan has 0x8000 in
+//!   its high 16 bits and a count no larger than the batch (`plannedCount`). A word without a plan makes solvePlanned run
+//!   solveVelocityConstraints on the slice, with the same bits (any order of a parallel batch gives the same bits).
+//!   PhysicsSystem asserts (with asserts on) that the word holds a plan.
+//!
+//! Why the warm start of a batch always comes before its velocity iterations, within one step:
+//! - A split island's status starts at iteration 0 (startFirstBatch, the last statement of splitIsland). The status moves
+//!   to the next split only in the markBatchProcessed that completes every item of the split, and to the next iteration
+//!   only after the non parallel split. So a batch of iteration i >= 1 is fetched only after every batch of iteration 0
+//!   (warm start and plan) was processed and marked.
+//! - The contacts of a batch are a function of its split and its first item: the item counter restarts at 0 for every
+//!   split and iteration and grows by batch_size in fetchAdd (a fetchAdd on a status that changed after the pre-check
+//!   claims item 0, 16, ... of the new split). So iteration i solves exactly the slice that iteration 0 planned, in every
+//!   iteration and also in the position iterations, and no two batches share a plan word (their first contacts differ,
+//!   a batch without contacts is not planned).
+//! - Visibility: the permutation and the plan reach the job of a later iteration through the chain that carries the
+//!   lambdas of the warm start: the acq_rel fetchAdd of items_processed, the release store of the status, the acquire
+//!   fetchAdd of the status. The position iterations start after every SolveVelocityConstraints job ended (job
+//!   dependencies).
+//! - 0 velocity steps (num_iterations 1): the warm start plans and no velocity iteration reads the plan;
+//!   storeAppliedImpulses and the position iterations visit the permuted order (below).
+//! - Several collision steps, islands split again in every step: each step prepares the splitter, splits every large
+//!   island again and resets the splitter. splitIsland rewrites its island's whole range of both buffers (the split
+//!   indices, then the contact and constraint indices from the island builder) before startFirstBatch, so no plan and no
+//!   permutation of an earlier step survives, also when the temp allocator hands out the same memory again.
+//!
+//! Why the permuted order changes no bit, phase by phase. No dynamic body appears twice in a batch of a parallel split:
+//! createConstraint activates the dynamic bodies of a contact before it links them, so assignSplit masks every one of
+//! them (the same property lets Jolt solve the batches of a split on several threads at once). So:
+//! - Warm start: runs before planBatch, in Jolt's order. (It would be order free too, like the velocity iterations.)
+//! - Velocity iterations, SIMD and scalar: a contact reads and writes its own lambdas and the velocities of its dynamic
+//!   bodies, reads a kinematic body, does not read a static body. The "any impulse applied" result is an OR that the
+//!   batch path ignores. A lane gives the bits of the scalar solver whatever the other lanes hold (see above).
+//! - storeAppliedImpulses (after the last velocity iteration): writes the lambdas of a constraint into its own cached
+//!   manifold (cached_manifold_handle: one manifold per constraint, created under its unique SubShapeIDPair key) and
+//!   nothing else.
+//! - Position iterations: a contact recomputes the properties of its own contact points and moves and rotates its
+//!   dynamic bodies (comptime `type == .dynamic`); kinematic and static bodies and the cached manifolds are only read.
+//! - Nothing else depends on the order: after splitIsland, contact_and_constraint_indices is read only through the batch
+//!   slices of fetchNextBatch (the phases above, and markBatchProcessed, which reads only their lengths). No listener
+//!   runs in the solve phases, the bounds and sleep update of the final batch iterates the island's bodies, the debug
+//!   renderer (-Ddebug_renderer) and the StateRecorder read the constraint buffer and the caches, never the splitter.
+//!   The determinism log turns this file off.
+//!
+//! Gates of the plan: `plans` is comptime false when `enabled` is (-Dsimd_contact_solver=false,
+//! -Ddeterminism_log=true, the self-hosted backend), so then nothing is ever permuted. planBatch and solvePlanned are
+//! never inlined: the code of the solve job stays as it was for the islands that are not split (callgrind, Ragdoll 15
+//! steps without a split island: +0.001% instructions; inlining solvePlanned gave +0.008% there and -0.1% in Pyramid).
+//! Pyramid (60 steps): -2.45% instructions (4,148,175,876 to 4,046,679,602). planBatch places each constraint once at
+//! a counted position: its first version copied buckets back with loops that LLVM turned into 5 memcpy calls per batch
+//! (221,226 more instructions in Pyramid).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -357,8 +421,10 @@ const Lane = struct {
     motion_properties2: *MotionProperties,
 };
 
-/// solveVelocityConstraints sorts at most this many constraints at a time (a batch of the LargeIslandSplitter has 16)
-const max_chunk = 64;
+/// solveVelocityConstraints sorts at most this many constraints at a time, planBatch plans batches of at most this many
+/// (a batch of a parallel split of the LargeIslandSplitter has at most 16 items; the non-parallel split comes as one
+/// batch of any size, which the scalar solver solves)
+pub const max_chunk = 64;
 
 /// Up to 8 dynamic vs dynamic contact constraints
 const Group = struct {
@@ -642,4 +708,126 @@ pub fn solveBatch(manager: *ContactConstraintManager, constraint_offsets: []cons
     if (enabled and parallel)
         return solveVelocityConstraints(manager, constraint_offsets);
     return manager.solveVelocityConstraints(constraint_offsets);
+}
+
+/// Zolt (Phase 13, class A): the marker in the high 16 bits of a plan word (see "The plan of a batch" at the top of
+/// this file). LargeIslandSplitter.splitIsland writes split indices (below 32) into the words that hold the plans, so a
+/// word without the marker holds no plan.
+pub const plan_marker: u32 = 0x8000_0000;
+
+/// The bits of a plan word that hold the marker, the others hold the number of planned dynamic vs dynamic contacts
+pub const plan_marker_mask: u32 = 0xffff_0000;
+
+/// Zolt (Phase 13, class A): true when the warm start of a batch plans its groups and its velocity iterations solve
+/// them with solvePlanned: the solver is enabled and the batch of `num_contacts` contacts comes from a parallel split
+/// and can fill a group (min_lanes to max_chunk contacts). Comptime false when the solver is not enabled
+/// (-Dsimd_contact_solver=false, -Ddeterminism_log=true, the self-hosted backend): then nothing is ever permuted.
+pub inline fn plans(parallel: bool, num_contacts: usize) bool {
+    return enabled and parallel and num_contacts >= min_lanes and num_contacts <= max_chunk;
+}
+
+/// The number of planned dynamic vs dynamic contacts that the plan word of a batch of `num_contacts` contacts holds,
+/// null when the word holds no plan (no marker, or a count above the number of contacts)
+pub fn plannedCount(plan_word: u32, num_contacts: usize) ?u32 {
+    if (plan_word & plan_marker_mask != plan_marker)
+        return null;
+    const count = plan_word & ~plan_marker_mask;
+    return if (count <= num_contacts) count else null;
+}
+
+/// Zolt (Phase 13, class A): plan the groups of a batch of a parallel split once per step, at its warm start (see "The
+/// plan of a batch" at the top of this file). Permutes the batch's own contact offsets in place to [the dynamic vs
+/// dynamic constraints in the group order of solveVelocityConstraints: most contact points first, then the original
+/// order][the other constraints in their original order] and writes `plan_marker | <number of dynamic vs dynamic
+/// constraints>` to `plan_word`. Never inlined, so that the code of the solve job stays as it was for the batches and
+/// islands without a plan.
+pub noinline fn planBatch(manager: *const ContactConstraintManager, constraint_offsets: []u32, plan_word: *u32) void {
+    std.debug.assert(constraint_offsets.len >= min_lanes and constraint_offsets.len <= max_chunk);
+
+    // The bucket of each constraint: the buckets of solveVelocityConstraints (by number of contact points) and the
+    // others. A key holds the bucket in its high half and the constraint offset in its low half.
+    const others = ContactConstraintManager.max_contact_points;
+    var keys: [max_chunk]u64 = undefined;
+    var bucket_sizes: [others + 1]u32 = @splat(0);
+    for (constraint_offsets, keys[0..constraint_offsets.len]) |constraint_offset, *key| {
+        const constraint = manager.getConstraintBase(constraint_offset);
+        const points: u32 = constraint.num_contact_points -% 1;
+        const bucket = if (constraint.body1.isDynamic() and constraint.body2.isDynamic() and points < others) points else others;
+        bucket_sizes[bucket] += 1;
+        key.* = @as(u64, bucket) << 32 | constraint_offset;
+    }
+
+    // The first position of each bucket: most contact points first, so that the tail has the fewest, the others last
+    var next: [others + 1]u32 = undefined;
+    var num_dynamic: u32 = 0;
+    var bucket: u32 = others;
+    while (bucket > 0) {
+        bucket -= 1;
+        next[bucket] = num_dynamic;
+        num_dynamic += bucket_sizes[bucket];
+    }
+    next[others] = num_dynamic;
+
+    // Each constraint to the next position of its bucket, so a bucket keeps the original order (one store per
+    // constraint, no copy loop that LLVM turns into memcpy calls)
+    for (keys[0..constraint_offsets.len]) |key| {
+        const b: u32 = @intCast(key >> 32);
+        constraint_offsets[next[b]] = @truncate(key);
+        next[b] += 1;
+    }
+
+    plan_word.* = plan_marker | num_dynamic;
+}
+
+/// Lane `l` of a group: the dynamic vs dynamic constraint at `constraint_offset`
+inline fn setLane(manager: *const ContactConstraintManager, group: *Group, l: usize, constraint_offset: u32) void {
+    const constraint = manager.getConstraintBase(constraint_offset);
+    group.constraints[l] = @ptrCast(constraint);
+    group.motion_properties1[l] = constraint.body1.getMotionPropertiesUncheckedMut().?;
+    group.motion_properties2[l] = constraint.body2.getMotionPropertiesUncheckedMut().?;
+    group.num_contact_points[l] = constraint.num_contact_points;
+}
+
+/// Zolt (Phase 13, class A): solveVelocityConstraints for a batch that planBatch planned in this step (its contact
+/// offsets in the planned order, `plan_word` the word that planBatch wrote): the groups of 8 are built straight from
+/// the planned dynamic vs dynamic constraints, the rest goes through the scalar solver in one call. A `plan_word`
+/// without a plan (plannedCount is null) takes solveVelocityConstraints, which gives the same bits. Returns true when
+/// any impulse was applied. Never inlined (see planBatch).
+pub noinline fn solvePlanned(manager: *ContactConstraintManager, constraint_offsets: []const u32, plan_word: u32) bool {
+    const num_dynamic = plannedCount(plan_word, constraint_offsets.len) orelse return solveVelocityConstraints(manager, constraint_offsets);
+
+    var any_impulse_applied = false;
+
+    // Full groups
+    var group: Group = undefined;
+    var i: u32 = 0;
+    while (num_dynamic - i >= lanes) : (i += lanes) {
+        inline for (0..lanes) |l|
+            setLane(manager, &group, l, constraint_offsets[i + l]);
+        any_impulse_applied = solveGroup(&group, lanes) or any_impulse_applied;
+    }
+
+    // The tail when it can fill a group
+    const num = num_dynamic - i;
+    if (num >= min_lanes) {
+        for (0..num) |l|
+            setLane(manager, &group, l, constraint_offsets[i + l]);
+
+        // Fill the free lanes with copies of lane 0
+        for (num..lanes) |l| {
+            group.constraints[l] = group.constraints[0];
+            group.motion_properties1[l] = group.motion_properties1[0];
+            group.motion_properties2[l] = group.motion_properties2[0];
+            group.num_contact_points[l] = group.num_contact_points[0];
+        }
+        any_impulse_applied = solveGroup(&group, num) or any_impulse_applied;
+        i = num_dynamic;
+    }
+
+    // The scalar solver: a tail of fewer than min_lanes dynamic vs dynamic constraints, then the contacts with a static
+    // or kinematic body
+    if (i < constraint_offsets.len)
+        any_impulse_applied = manager.solveVelocityConstraints(constraint_offsets[i..]) or any_impulse_applied;
+
+    return any_impulse_applied;
 }

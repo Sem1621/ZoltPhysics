@@ -33,6 +33,12 @@
 //!   the unused end of the contact constraint buffer (a small max_in_flight_body_pairs, also with thread pools) and
 //!   with Jolt's functions (both too small: max_contact_constraints is the largest number of contact constraints of
 //!   an update), with bit identical states; PhysicsSystem's test-only counters show which way each island took.
+//! - The SIMD plans of the batches of the parallel splits (Phase 13, class A): the same pyramid with and without the
+//!   plans (1 and 2 collision steps; 0, 1 and the default number of velocity steps; single threaded and a pool of 3
+//!   workers), and a pile on a kinematic platform with a kinematic sweeper, point constraints, step overrides and a
+//!   listener that changes contact settings (1 and 3 collision steps, single threaded and a pool of 7 workers): bit
+//!   identical states after every update. PhysicsSystem's test-only counters (`simd_plans`), which count by the plan
+//!   word, show that every velocity iteration of a planned batch found its plan.
 //!
 //! The CCD scene (Wave B R4: JobFindCCDContacts, sSolveCCDContact, JobResolveCCDContacts): 32 linear cast bullets
 //! fired at the thin walls of a container (one rejected by OnContactValidate and one turned into a sensor contact go
@@ -1011,6 +1017,13 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhase.castAABoxNoLock)
     try outOfHeapMemoryInCCDCast(.{ .thread_pool = 3 });
 }
 
+/// Zolt (Phase 13): the quad tree keeps the node IDs and BuildTree's centers of updatePrepare between updates; free them
+/// so that the next update allocates them where Jolt does (the sweeps below fail these allocations)
+fn releaseBroadPhaseScratch(system: *PhysicsSystem) void {
+    const quad_tree: *zolt.BroadPhaseQuadTree = @alignCast(@fieldParentPtr("base", system.broad_phase.?));
+    quad_tree.releaseUpdateScratch();
+}
+
 test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePrepare)" {
     // The default broad phase allocates the node IDs and BuildTree's centers in the UpdateBroadPhasePrepare job
     var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
@@ -1033,6 +1046,7 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePr
 
     // Reference: count the heap allocations of one update (the first step rebuilds the tree of the moving bodies, the
     // second step cannot update it again before the next FrameSync discards its old tree)
+    releaseBroadPhaseScratch(&scene.system);
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
@@ -1044,6 +1058,7 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePr
     for (0..num_allocations) |i| {
         snapshot.rewind();
         try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        releaseBroadPhaseScratch(&scene.system);
         heap.fail_index.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
         heap.fail_index.store(std.math.maxInt(u32), .monotonic);
@@ -2023,7 +2038,8 @@ fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void
     // error.OutOfMemory, the temp allocator is empty and the system recovers through restoreState. With manifold
     // reduction the manifolds of the large box are not added; without it NonReductionCollideShapeCollector adds the
     // contacts forwarded before the failure to the contact constraints and the cache at once, the update fails the same
-    // way.
+    // way. (Zolt, Phase 13: the quad tree keeps its arrays between updates; releaseBroadPhaseScratch frees them before
+    // the reference update and before every swept update, so that the update allocates them at Jolt's points.)
     var without_collector = opts;
     without_collector.enhanced_internal_edge_removal = false;
     try expect(try countHeapAllocationsOfUpdate(opts) > try countHeapAllocationsOfUpdate(without_collector)); // The collector allocates
@@ -2045,6 +2061,7 @@ fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void
     var snapshot = StateRecorderImpl.init(std.testing.allocator);
     defer snapshot.deinit();
     try scene.system.saveState(snapshot.recorder(), .{});
+    releaseBroadPhaseScratch(&scene.system);
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
@@ -2055,6 +2072,7 @@ fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void
     for (0..num_allocations) |i| {
         snapshot.rewind();
         try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
+        releaseBroadPhaseScratch(&scene.system);
         heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
         heap.fail_from.store(std.math.maxInt(u32), .monotonic);
@@ -2139,6 +2157,14 @@ const PyramidScene = struct {
         max_in_flight_body_pairs: i32 = 16384,
         /// The size of the contact constraint buffer (its unused end is region 1)
         max_contact_constraints: u32 = 2048,
+        /// PhysicsSettings.num_velocity_steps, null: the default
+        num_velocity_steps: ?u32 = null,
+        /// PhysicsSystem.simd_plans.enabled: the SIMD plans of the batches of the parallel splits (Phase 13)
+        simd_plans: bool = true,
+        /// The collision steps of an update
+        collision_steps: u32 = 1,
+        /// The pyramid must be asleep after the updates of runPyramid
+        expect_asleep: bool = true,
     };
 
     broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
@@ -2156,7 +2182,9 @@ const PyramidScene = struct {
         settings.time_before_sleep = 0.25;
         settings.use_large_island_splitter = opts.use_large_island_splitter;
         settings.max_in_flight_body_pairs = opts.max_in_flight_body_pairs;
+        if (opts.num_velocity_steps) |n| settings.num_velocity_steps = n;
         self.system.setPhysicsSettings(&settings);
+        self.system.simd_plans.enabled = opts.simd_plans;
         self.listener = .{ .system = &self.system };
         self.system.setBodyActivationListener(.init(&self.listener));
         self.system.setContactListener(.init(&self.contact_counter));
@@ -2189,6 +2217,9 @@ const PyramidRun = struct {
     sorts: [3]u32,
     /// The largest number of contact constraints of an update
     max_num_constraints: u32,
+    /// PhysicsSystem.simd_plans.counts(): the batches that were planned, their velocity iterations that found the plan
+    /// in their plan word and those that did not
+    simd_plans: [3]u32,
 };
 
 /// Runs the pyramid until it is asleep, records the state after every update
@@ -2207,7 +2238,7 @@ fn runPyramid(allocator: Allocator, kind: JobSystemKind, opts: PyramidScene.Opti
     defer recorder.deinit();
     var max_num_constraints: u32 = 0;
     for (0..60) |_| {
-        const errors = try scene.system.update(delta_time, 1, temp.tempAllocator(), jobs.jobSystem());
+        const errors = try scene.system.update(delta_time, opts.collision_steps, temp.tempAllocator(), jobs.jobSystem());
         try expect(errors.isNone());
         try expect(temp.isEmpty());
         max_num_constraints = @max(max_num_constraints, scene.contact_counter.num_constraints.swap(0, .monotonic));
@@ -2216,8 +2247,14 @@ fn runPyramid(allocator: Allocator, kind: JobSystemKind, opts: PyramidScene.Opti
         try offsets.append(allocator, states.items.len);
         try states.appendSlice(allocator, recorder.getData());
     }
-    try expectEqual(@as(u32, 0), scene.system.getNumActiveBodies(.rigid_body)); // The pyramid is asleep
-    return .{ .listener = scene.listener, .sorts = scene.system.large_island_sorts.counts(), .max_num_constraints = max_num_constraints };
+    if (opts.expect_asleep)
+        try expectEqual(@as(u32, 0), scene.system.getNumActiveBodies(.rigid_body)); // The pyramid is asleep
+    return .{
+        .listener = scene.listener,
+        .sorts = scene.system.large_island_sorts.counts(),
+        .max_num_constraints = max_num_constraints,
+        .simd_plans = scene.system.simd_plans.counts(),
+    };
 }
 
 test "PhysicsSystem large island: the LargeIslandSplitter path" {
@@ -2306,6 +2343,237 @@ test "PhysicsSystem large island: sorts in the body pair buffer, in the unused e
         try expectEqual(num_large_islands, run.sorts[1] + run.sorts[2]);
         try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
         try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+    }
+}
+
+test "PhysicsSystem large island: the SIMD plans of the parallel batches give the states of the path without plans" {
+    // Zolt addition (Phase 13, class A): the warm start of a batch of a parallel split permutes the batch's contacts to
+    // the order of its SIMD groups and stores the plan in a word of the splitter (ContactConstraintSimd.planBatch), the
+    // velocity iterations of the batch build their groups from it (solvePlanned), the position iterations and
+    // storeAppliedImpulses visit the permuted order. The states after every update must be the bits of the path
+    // without plans (PhysicsSystem.simd_plans.enabled = false), in the configurations that change how a batch's warm
+    // start and velocity iterations meet: 1 and 2 collision steps per update (the splitter is prepared, split and reset
+    // per step, its buffers come from the temp allocator again and can hold the plans of the step before), 0 and 1
+    // velocity steps, one and several threads. The counters prove that the planned path ran: they count by the plan
+    // word, like solvePlanned decides, so every velocity iteration of a planned batch found its plan (solved == planned
+    // * velocity steps, unplanned == 0) also without asserts, and nothing is planned without the SIMD solver.
+    const allocator = std.testing.allocator;
+    const Config = struct { collision_steps: u32 = 1, num_velocity_steps: ?u32 = null };
+    for ([_]Config{ .{}, .{ .collision_steps = 2 }, .{ .num_velocity_steps = 0 }, .{ .num_velocity_steps = 1 } }) |config| {
+        const velocity_steps = config.num_velocity_steps orelse (zolt.PhysicsSettings{}).num_velocity_steps;
+        const expect_asleep = config.num_velocity_steps == null;
+        var ref_states: std.ArrayList(u8) = .empty;
+        defer ref_states.deinit(allocator);
+        var ref_offsets: std.ArrayList(usize) = .empty;
+        defer ref_offsets.deinit(allocator);
+        const ref = try runPyramid(allocator, .single_threaded, .{ .simd_plans = false, .collision_steps = config.collision_steps, .num_velocity_steps = config.num_velocity_steps, .expect_asleep = expect_asleep }, &ref_states, &ref_offsets);
+        try expectEqual([3]u32{ 0, 0, 0 }, ref.simd_plans);
+
+        var num_planned: ?u32 = null;
+        for ([_]JobSystemKind{ .single_threaded, .{ .thread_pool = 3 } }) |kind| {
+            var states: std.ArrayList(u8) = .empty;
+            defer states.deinit(allocator);
+            var offsets: std.ArrayList(usize) = .empty;
+            defer offsets.deinit(allocator);
+            const run = try runPyramid(allocator, kind, .{ .collision_steps = config.collision_steps, .num_velocity_steps = config.num_velocity_steps, .expect_asleep = expect_asleep }, &states, &offsets);
+            try std.testing.expectEqualSlices(usize, ref_offsets.items, offsets.items);
+            try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+
+            // The batches and their plans do not depend on the threads
+            const planned = run.simd_plans[0];
+            if (num_planned) |n| try expectEqual(n, planned) else num_planned = planned;
+            if (zolt.ContactConstraintSimd.enabled)
+                try expect(planned >= 10) // A few batches per step until the pyramid is asleep
+            else
+                try expectEqual(@as(u32, 0), planned);
+            try expectEqual(planned * velocity_steps, run.simd_plans[1]);
+            try expectEqual(@as(u32, 0), run.simd_plans[2]);
+        }
+    }
+}
+
+/// A pile of boxes, spheres and capsules on a kinematic platform that moves and turns, a kinematic sweeper that moves
+/// through the pile, point constraints between some bodies and the bodies below them, step overrides on some bodies and
+/// a contact listener that changes the mass and inertia scales, the friction and the surface velocity of some contacts.
+/// Its large islands give batches of parallel splits with all of that (Phase 13, the SIMD plans).
+const PileScene = struct {
+    const size = 7;
+    const num_layers = 5;
+    const num_bodies = size * size * num_layers;
+    /// The velocity steps of every 37th body with `Options.overrides` (every 41st gets 4 position steps)
+    const override_velocity_steps = 13;
+
+    const Options = struct {
+        /// PhysicsSystem.simd_plans.enabled
+        simd_plans: bool,
+        collision_steps: u32,
+        num_velocity_steps: u32,
+        num_position_steps: u32,
+        /// Step overrides on some bodies
+        overrides: bool,
+    };
+
+    /// Changes the settings of some contacts, a function of the two bodies
+    const Listener = struct {
+        pub fn onContactAdded(self: *Listener, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+            _ = .{ self, manifold };
+            const k = body1.getID().getIndex() *% 7 +% body2.getID().getIndex();
+            if (k % 3 == 0) {
+                settings.inv_mass_scale1 = 0.5;
+                settings.inv_inertia_scale1 = 0.75;
+            }
+            if (k % 5 == 0) settings.combined_friction = 0.0;
+            if (k % 7 == 0) settings.relative_linear_surface_velocity = Vec3.init(0.1, 0, 0);
+        }
+
+        pub fn onContactPersisted(self: *Listener, body1: *const Body, body2: *const Body, manifold: *const zolt.ContactManifold, settings: *zolt.ContactSettings) void {
+            self.onContactAdded(body1, body2, manifold, settings);
+        }
+    };
+
+    broad_phase_layer_interface: LayersFile.BPLayerInterfaceImpl = .init(),
+    object_vs_broad_phase_layer_filter: LayersFile.ObjectVsBroadPhaseLayerFilterImpl = .{},
+    object_layer_pair_filter: LayersFile.ObjectLayerPairFilterImpl = .{},
+    system: PhysicsSystem = .empty,
+    listener: Listener = .{},
+
+    fn init(self: *PileScene, allocator: Allocator, opts: Options) !void {
+        self.* = .{};
+        try self.system.init(allocator, io, 2048, 0, 16384, 8192, &self.broad_phase_layer_interface.base, &self.object_vs_broad_phase_layer_filter.base, &self.object_layer_pair_filter.base, .{});
+        errdefer self.system.deinit();
+        var settings = self.system.getPhysicsSettings().*;
+        settings.num_velocity_steps = opts.num_velocity_steps;
+        settings.num_position_steps = opts.num_position_steps;
+        self.system.setPhysicsSettings(&settings);
+        self.system.simd_plans.enabled = opts.simd_plans;
+        self.system.setContactListener(.init(&self.listener));
+        const bi = self.system.getBodyInterfaceMut();
+
+        const floor_shape = try BoxShape.create(allocator, Vec3.init(40, 1, 40), .{ .convex_radius = 0.0 });
+        var floor_settings = BodyCreationSettings.initWithShape(floor_shape.asShape(), RVec3.init(0, -6, 0), Quat.identity(), .static, Layers.non_moving);
+        defer floor_settings.deinit();
+        _ = try bi.createAndAddBody(&floor_settings, .dont_activate);
+
+        // The platform under the pile and the sweeper that moves through it
+        var kinematic_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.init(6, 0.5, 6), .{})).asShapeSettings(), RVec3.init(0, -0.5, 0), Quat.identity(), .kinematic, Layers.moving);
+        defer kinematic_settings.deinit();
+        kinematic_settings.linear_velocity = Vec3.init(0.2, 0.05, -0.1);
+        kinematic_settings.angular_velocity = Vec3.init(0, 0.15, 0);
+        _ = try bi.createAndAddBody(&kinematic_settings, .activate);
+        kinematic_settings.setShapeSettings((try BoxShapeSettings.create(allocator, Vec3.init(0.3, 3.0, 0.3), .{})).asShapeSettings());
+        kinematic_settings.position = RVec3.init(-4.2, 2.5, 0.3); // It reaches the pile after about 25 updates
+        kinematic_settings.linear_velocity = Vec3.init(1.0, 0, 0);
+        kinematic_settings.angular_velocity = Vec3.init(0, 0.3, 0);
+        _ = try bi.createAndAddBody(&kinematic_settings, .activate);
+
+        var box_settings = BodyCreationSettings.initWithSettings((try BoxShapeSettings.create(allocator, Vec3.init(0.45, 0.4, 0.5), .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer box_settings.deinit();
+        var sphere_settings = BodyCreationSettings.initWithSettings((try SphereShapeSettings.create(allocator, 0.45, .{})).asShapeSettings(), RVec3.zero(), Quat.identity(), .dynamic, Layers.moving);
+        defer sphere_settings.deinit();
+        var capsule_settings = BodyCreationSettings.initWithSettings((try zolt.CapsuleShapeSettings.create(allocator, 0.3, 0.3, .{})).asShapeSettings(), RVec3.zero(), Quat.rotation(Vec3.axisZ(), 1.5707963), .dynamic, Layers.moving);
+        defer capsule_settings.deinit();
+        var point = zolt.PointConstraintSettings.init(allocator);
+        defer point.asSettings().deinit();
+
+        var ids: [num_bodies]BodyID = undefined;
+        var i: u32 = 0;
+        for (0..num_layers) |y| {
+            for (0..size) |z| {
+                for (0..size) |x| {
+                    const position = RVec3.init(f(@intCast(x)) - 3.0 + 0.02 * f(@intCast(y)), 0.45 + f(@intCast(y)) * 0.92, f(@intCast(z)) * 1.05 - 3.0);
+                    const body_settings = switch (i % 5) {
+                        0, 1, 3 => &box_settings,
+                        2 => &sphere_settings,
+                        else => &capsule_settings,
+                    };
+                    body_settings.position = position;
+                    body_settings.num_velocity_steps_override = if (opts.overrides and i % 37 == 5) override_velocity_steps else 0;
+                    body_settings.num_position_steps_override = if (opts.overrides and i % 41 == 7) 4 else 0;
+                    ids[i] = try bi.createAndAddBody(body_settings, .activate);
+
+                    // A point constraint to the body below
+                    if (y > 0 and i % 6 == 0) {
+                        point.point1 = RVec3.init(position.getX(), position.getY() - 0.46, position.getZ());
+                        point.point2 = point.point1;
+                        const constraint = try bi.createConstraint(&point.base, ids[i - size * size], ids[i]);
+                        var ref = Ref(Constraint).init(&constraint.base); // Freed when addConstraint fails
+                        defer ref.deinit();
+                        try self.system.addConstraint(&constraint.base);
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    fn deinit(self: *PileScene) void {
+        self.system.deinit();
+    }
+};
+
+/// Runs the pile for 60 updates, records the state after every update, returns PhysicsSystem.simd_plans.counts()
+fn runPile(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Options, states: *std.ArrayList(u8)) ![3]u32 {
+    var jobs: AnyJobSystem = .{};
+    try jobs.init(allocator, kind);
+    defer jobs.deinit();
+    var temp: TempAllocatorImpl = try .init(allocator, 32 * 1024 * 1024);
+    defer temp.deinit();
+    const scene = try allocator.create(PileScene);
+    defer allocator.destroy(scene);
+    try scene.init(allocator, opts);
+    defer scene.deinit();
+
+    var recorder = StateRecorderImpl.init(allocator);
+    defer recorder.deinit();
+    for (0..60) |_| {
+        const errors = try scene.system.update(delta_time, opts.collision_steps, temp.tempAllocator(), jobs.jobSystem());
+        try expect(errors.isNone());
+        try expect(temp.isEmpty());
+        recorder.clear();
+        try scene.system.saveState(recorder.recorder(), .{});
+        try states.appendSlice(allocator, recorder.getData());
+    }
+    return scene.system.simd_plans.counts();
+}
+
+test "PhysicsSystem large island: the SIMD plans give the states of the path without plans with kinematic contacts, constraints, step overrides and 7 workers" {
+    // Zolt addition (Phase 13, class A): the pyramid has only dynamic boxes on a static floor. The pile adds what else
+    // the batches of a parallel split hold: contacts with a kinematic body (the scalar part of solvePlanned, and the
+    // permuted order in storeAppliedImpulses and the position iterations), batches with constraints and contacts,
+    // contact settings that a listener changed, islands with overridden velocity and position steps, 3 collision steps
+    // and a pool of 7 workers. The states after every update must be the bits of the path without plans, every velocity
+    // iteration of a planned batch must find its plan (unplanned == 0), and the planned iterations must match the
+    // velocity steps of the islands (the default, up to 13 with the overrides).
+    const allocator = std.testing.allocator;
+    const Config = struct { collision_steps: u32, num_velocity_steps: u32, num_position_steps: u32, overrides: bool };
+    for ([_]Config{
+        .{ .collision_steps = 1, .num_velocity_steps = 10, .num_position_steps = 2, .overrides = true },
+        .{ .collision_steps = 3, .num_velocity_steps = 4, .num_position_steps = 1, .overrides = false },
+        .{ .collision_steps = 1, .num_velocity_steps = 0, .num_position_steps = 2, .overrides = false },
+    }) |config| {
+        var opts: PileScene.Options = .{ .simd_plans = false, .collision_steps = config.collision_steps, .num_velocity_steps = config.num_velocity_steps, .num_position_steps = config.num_position_steps, .overrides = config.overrides };
+        var ref_states: std.ArrayList(u8) = .empty;
+        defer ref_states.deinit(allocator);
+        try expectEqual([3]u32{ 0, 0, 0 }, try runPile(allocator, .single_threaded, opts, &ref_states));
+
+        // The velocity steps of an island: the default, with an override in the island the larger of the two
+        const min_steps = if (config.overrides) @min(config.num_velocity_steps, PileScene.override_velocity_steps) else config.num_velocity_steps;
+        const max_steps = if (config.overrides) @max(config.num_velocity_steps, PileScene.override_velocity_steps) else config.num_velocity_steps;
+        opts.simd_plans = true;
+        for ([_]JobSystemKind{ .single_threaded, .{ .thread_pool = 7 } }) |kind| {
+            var states: std.ArrayList(u8) = .empty;
+            defer states.deinit(allocator);
+            const counts = try runPile(allocator, kind, opts, &states);
+            try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+
+            const planned = counts[0];
+            if (zolt.ContactConstraintSimd.enabled)
+                try expect(planned >= 10)
+            else
+                try expectEqual(@as(u32, 0), planned);
+            try expect(counts[1] >= planned * min_steps and counts[1] <= planned * max_steps);
+            try expectEqual(@as(u32, 0), counts[2]);
+        }
     }
 }
 
@@ -2890,6 +3158,7 @@ fn ccdOutOfHeapMemory(kind: JobSystemKind) !void {
     const scene = fx.scene;
 
     try fx.restore();
+    releaseBroadPhaseScratch(&scene.system); // Zolt (Phase 13): the update allocates the quad tree's arrays like Jolt
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
@@ -2898,6 +3167,7 @@ fn ccdOutOfHeapMemory(kind: JobSystemKind) !void {
 
     for (0..num_allocations) |i| {
         try fx.restore();
+        releaseBroadPhaseScratch(&scene.system);
         heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem()));
         heap.fail_from.store(std.math.maxInt(u32), .monotonic);

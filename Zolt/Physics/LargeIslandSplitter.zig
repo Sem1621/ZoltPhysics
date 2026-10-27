@@ -23,6 +23,21 @@
 //! in registers) and apply it to ioStepsCalculator before Finalize, instead of calling the calculator per object. The
 //! calculator ends in the same state (CalculateSolverSteps.Overrides).
 //!
+//! Zolt addition (Phase 13, class A): the SIMD plans of the batches of the parallel splits (ContactConstraintSimd.zig,
+//! "The plan of a batch") live in `contact_and_constraints_split_idx`. Its entries are needed only inside splitIsland:
+//! they hold the split index of each contact and constraint of the island between the assignment loops and the loops
+//! that sort the contacts and constraints into the splits, and nothing reads them afterwards. So after splitIsland the
+//! entry at the index of a batch's first contact in `contact_and_constraint_indices` (`batchPlanWord`) belongs to that
+//! batch: its warm start writes the plan there, its velocity iterations read it. A plan carries a marker that no split
+//! index has, so a word that splitIsland wrote is never taken for a plan. Rules for changes to this file:
+//! - Add no reader of `contact_and_constraints_split_idx` after splitIsland (or keep the split indices elsewhere).
+//! - The contacts of a batch must stay a function of its split and its first item (the item counter of the status
+//!   restarts at 0 for every split and iteration and grows by batch_size): the velocity iterations of a batch must see
+//!   the slice that its warm start planned. A future bounds phase or another batch layout has to keep that, or plan
+//!   per batch layout.
+//! - splitIsland must keep writing every entry of its island's range before startFirstBatch: the buffer comes from
+//!   the temp allocator and can hold the plans of the previous collision step.
+//!
 //! Out parameters and pointers:
 //! - `Splits::FetchNextBatch` / `LargeIslandSplitter::FetchNextBatch` write their out parameters into an out struct
 //!   (`Splits.SplitBatch` with offsets relative to `contact_and_constraint_indices`, `Batch` with slices of it), only when
@@ -730,6 +745,17 @@ pub const LargeIslandSplitter = struct {
         splits.markBatchProcessed(num_items_processed, out_last_iteration, out_final_batch);
     }
 
+    /// Zolt addition (Phase 13, class A): the word that holds the SIMD plan of the batch whose contacts are `contacts`
+    /// (ContactConstraintSimd.planBatch, not empty): the entry of contact_and_constraints_split_idx at the index of the
+    /// batch's first contact in contact_and_constraint_indices. splitIsland writes the entries of its island before the
+    /// island's first batch and nothing reads them afterwards (see the top of this file).
+    pub fn batchPlanWord(self: *LargeIslandSplitter, contacts: []const u32) *u32 {
+        const indices = self.contact_and_constraint_indices.items;
+        std.debug.assert(contacts.len > 0 and @intFromPtr(contacts.ptr) >= @intFromPtr(indices.ptr) and @intFromPtr(contacts.ptr + contacts.len) <= @intFromPtr(indices.ptr + indices.len));
+        const index = (@intFromPtr(contacts.ptr) - @intFromPtr(indices.ptr)) / @sizeOf(u32);
+        return &self.contact_and_constraints_split_idx.items[index];
+    }
+
     /// Get the island index of the island that was split for a particular split island index
     pub fn getIslandIndex(self: *const LargeIslandSplitter, split_island_index: u32) u32 {
         std.debug.assert(split_island_index < self.num_split_islands);
@@ -842,6 +868,21 @@ fn expectMark(splits: *LargeIslandSplitter.Splits, n: u32, last_iteration: bool,
     splits.markBatchProcessed(n, &last, &final);
     try std.testing.expectEqual(last_iteration, last);
     try std.testing.expectEqual(final_batch, final);
+}
+
+test "LargeIslandSplitter.batchPlanWord is the split index entry of the batch's first contact" {
+    var indices: [40]u32 = undefined;
+    var split_idx: [40]u32 = undefined;
+    var splitter: LargeIslandSplitter = .empty;
+    splitter.contact_and_constraint_indices = .{ .items = &indices };
+    splitter.contact_and_constraints_split_idx = .{ .items = &split_idx };
+    defer {
+        splitter.contact_and_constraint_indices = .empty;
+        splitter.contact_and_constraints_split_idx = .empty;
+    }
+    try std.testing.expectEqual(&split_idx[0], splitter.batchPlanWord(indices[0..16]));
+    try std.testing.expectEqual(&split_idx[16], splitter.batchPlanWord(indices[16..32]));
+    try std.testing.expectEqual(&split_idx[37], splitter.batchPlanWord(indices[37..40]));
 }
 
 test "LargeIslandSplitter.Splits status bits" {

@@ -15,7 +15,7 @@ JoltPhysics: the C++ sources stay in place as the reference, the Zig port lives 
 | `ZoltHelloWorld/`    | Port of `HelloWorld/HelloWorld.cpp` (milestone M5)                      |
 | `ZoltPerformanceTest/` | Port of `PerformanceTest/` with Jolt's determinism hashes (milestones M6, M8 and M9); `-r` records Jolt's `.jor` debug renderer stream, only in a build with `-Ddebug_renderer=true` (without it `-r` is ignored) |
 | `Docs/Zolt/`         | Porting docs: **read `PortingGuide.md` before writing any Zig code**  |
-| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`, `gen_jolt_sources.py`, `tidy_registry.py`, `install_zig.sh`) and measurement tools (`check_codegen.py`, `perf_budget.py`, `job_trace_stats.py`) |
+| `tools/`             | Porting helpers (`strip_isa.py`, `port_status.py`, `gen_serializable.py`, `gen_jolt_sources.py`, `tidy_registry.py`, `install_zig.sh`) and measurement tools (`check_codegen.py`, `perf_budget.py`, `job_trace_stats.py`, `wall_rounds.py`) |
 
 ## Commands
 
@@ -45,6 +45,11 @@ zig build performance-test -Doptimize=ReleaseFast -Dfma=true -- -q=LinearCast -t
 zig build performance-test -Doptimize=ReleaseFast -- -s=Pyramid -t=1 -phase_times  # also print the time of the scene and the physics updates
 zig build performance-test -Doptimize=ReleaseFast -Djob_profile=true -- -s=Pyramid -t=2 -p  # job timeline: <scene>_<tag>.json (Chrome trace) + busy/idle per thread
 python3 tools/job_trace_stats.py Pyramid_linearcast_th2.json  # busy / wait / idle per thread, idle spans by length, wakeups, island preparation
+python3 tools/job_trace_stats.py Pyramid_linearcast_th4.json --by-job --under "Final batch: bounds and sleep"  # busy per job; the others' idle + wait under a span
+zig build -Doptimize=ReleaseFast -Dcpu=x86_64_v3 -p <dir>  # a Zolt PerformanceTest built like the C++ reference (a plain `zig build` installs a Debug build)
+python3 tools/wall_rounds.py --json runs.json cpp=<C++ PerformanceTest> zolt=<dir>/bin/ZoltPerformanceTest  # steps/s: 7 interleaved rounds, medians, paired per-round ratios, same hashes
+python3 tools/wall_rounds.py --report runs.json --ref zolt  # the tables of an earlier run again, ratios to another variant
+python3 tools/perf_budget.py --cache-sim --jobs <Zolt> <C++> ConvexVsMesh  # callgrind cache and branch simulation (fixed cache geometry), CEst, per job, Zolt vs C++
 zig build test -Djob_profile=true           # tests with the job profiler compiled in (Zolt/Core/JobProfiler.zig, off by default: zero cost)
 zig build test -Dsimd_contact_solver=false  # contacts of the parallel splits one at a time (A/B switch of the SIMD contact solver, same bits)
 zig build jolt-performance-test -- <args>   # the C++ PerformanceTest, built like the parity reference (the oracle)
@@ -113,4 +118,7 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   `JPH_USE_FMADD` sites, with a C++ oracle; off by default).
 - Phase 12 measured first (job profiler spans, `tools/job_trace_stats.py`) and added two class A speedups: exact bounds
   caches for the character vs character test (CharacterBoundsCache.zig) and the large island sorts (Core/KeySort.zig).
+- Phase 13 measured the rest (`perf_budget.py --cache-sim`, `wall_rounds.py`) and kept three class A changes: hot
+  atomics on their own cache lines (PortingGuide section 9), rigid bodies in 64 KB pages (BodyManager's BodyPool) and
+  SIMD contact groups planned once per step (ContactConstraintSimd.planBatch).
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).

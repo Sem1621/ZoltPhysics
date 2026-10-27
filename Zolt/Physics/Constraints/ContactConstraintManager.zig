@@ -38,6 +38,16 @@
 //! - `getUnusedConstraintBuffer`: the end of the constraint buffer behind the last constraint of the step, scratch for
 //!   those sorts while the SolveVelocityConstraints jobs run.
 //!
+//! Difference with the C++ version (Phase 13, class A, layout only): `num_constraints_and_next_constraint_offset`
+//! (mNumConstraintsAndNextConstraintOffset) is a `ConstraintCounter`, whose atomic is cache line aligned and fills whole
+//! cache lines, so no other field shares its cache line. Every FindCollisions job adds to it (a lock xadd) for every
+//! new contact constraint. Zig reorders struct fields, and the counter had landed in the cache line of
+//! `cache[0].lfhm_allocator.object_store`, which the FindCollisions jobs read for every body pair (cache[0] is the
+//! read cache in one step and the write cache in the next). Jolt declares the two 64 byte caches first, so its counter
+//! line holds only members that are read around the add. Results do not change; the manager (and the PhysicsSystem
+//! that embeds it) is now 64 byte aligned. The test "ContactConstraintManager: the constraint counter has its own cache
+//! line" walks the fields.
+//!
 //! Signatures:
 //! - Jolt's constructor `ContactConstraintManager(const PhysicsSettings &)` and `Init` are one in place `init` that
 //!   takes the allocator of the caches (porting guide: constructor + Init). The manager (and so the PhysicsSystem
@@ -1084,6 +1094,17 @@ pub const ContactConstraintManager = struct {
             std.debug.assert(max_constraint_size == 504);
     }
 
+    /// Zolt (Phase 13, class A, layout only): mNumConstraintsAndNextConstraintOffset in a struct that is aligned to and
+    /// fills whole cache lines, so that no other field shares the cache line of the atomic (see the top of this file)
+    pub const ConstraintCounter = struct {
+        /// Lower 32 bits: number of constraints, upper 32 bits next constraint offset
+        value: std.atomic.Value(u64) align(Core.cache_line_size) = .init(0),
+    };
+
+    comptime {
+        std.debug.assert(@alignOf(ConstraintCounter) == Core.cache_line_size and @sizeOf(ConstraintCounter) % Core.cache_line_size == 0);
+    }
+
     /// The main physics settings instance (Jolt: const PhysicsSettings &)
     physics_settings: *const PhysicsSettings = undefined,
 
@@ -1106,8 +1127,9 @@ pub const ContactConstraintManager = struct {
 
     max_constraints: u32 = 0,
 
-    /// Lower 32 bits: number of constraints, upper 32 bits next constraint offset
-    num_constraints_and_next_constraint_offset: std.atomic.Value(u64) = .init(0),
+    /// Lower 32 bits: number of constraints, upper 32 bits next constraint offset (Zolt: in `.value`, on its own cache
+    /// line, see the top of this file)
+    num_constraints_and_next_constraint_offset: ConstraintCounter = .{},
 
     /// Context used for this physics update
     update_context: ?*PhysicsUpdateContext = null,
@@ -1258,7 +1280,7 @@ pub const ContactConstraintManager = struct {
         std.debug.assert(constraint_size <= max_constraint_size);
 
         // Reserve space for constraint
-        const constraint_idx_and_constraint_offset = self.num_constraints_and_next_constraint_offset.fetchAdd((@as(u64, constraint_size) << 32) + 1, .monotonic);
+        const constraint_idx_and_constraint_offset = self.num_constraints_and_next_constraint_offset.value.fetchAdd((@as(u64, constraint_size) << 32) + 1, .monotonic);
         const constraint_idx: u32 = @truncate(constraint_idx_and_constraint_offset);
         if (constraint_idx >= self.max_constraints)
             return null;
@@ -1975,7 +1997,7 @@ pub const ContactConstraintManager = struct {
 
     /// Get the number of contact constraints that were found
     pub fn getNumConstraints(self: *const ContactConstraintManager) u32 {
-        return @min(@as(u32, @truncate(self.num_constraints_and_next_constraint_offset.load(.monotonic))), self.max_constraints);
+        return @min(@as(u32, @truncate(self.num_constraints_and_next_constraint_offset.value.load(.monotonic))), self.max_constraints);
     }
 
     /// Update constraint indices to constraint offsets
@@ -2055,7 +2077,7 @@ pub const ContactConstraintManager = struct {
     /// this step had more constraints than fit. Only free between the last AddContactConstraint of a step (the end of
     /// the FindCollisions jobs) and RecycleConstraintBuffer / FinishConstraintBuffer.
     pub fn getUnusedConstraintBuffer(self: *const ContactConstraintManager) []align(8) u8 {
-        const num_constraints_and_next_constraint_offset = self.num_constraints_and_next_constraint_offset.load(.monotonic);
+        const num_constraints_and_next_constraint_offset = self.num_constraints_and_next_constraint_offset.value.load(.monotonic);
         // (More constraints than fit: the offset also counts the constraints that were not stored)
         if (@as(u32, @truncate(num_constraints_and_next_constraint_offset)) > self.max_constraints)
             return &.{};
@@ -2463,7 +2485,7 @@ pub const ContactConstraintManager = struct {
     /// Recycle the constraint buffer. Should be called between collision simulation steps.
     pub fn recycleConstraintBuffer(self: *ContactConstraintManager) void {
         // Reset constraint array
-        self.num_constraints_and_next_constraint_offset.store(0, .seq_cst);
+        self.num_constraints_and_next_constraint_offset.value.store(0, .seq_cst);
 
         // Store read / write cache
         self.read_cache = &self.cache[self.cache_write_idx ^ 1];
@@ -2478,7 +2500,7 @@ pub const ContactConstraintManager = struct {
             self.constraint_idx_to_offset.free(context.temp_allocator);
             self.constraints.free(context.temp_allocator);
         }
-        self.num_constraints_and_next_constraint_offset.store(0, .seq_cst);
+        self.num_constraints_and_next_constraint_offset.value.store(0, .seq_cst);
 
         // Reset update context
         self.update_context = null;
@@ -2529,4 +2551,30 @@ test "ContactConstraintManager layout" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(CCM.ContactConstraintBase, "sort_key"));
     try std.testing.expectEqual(@as(usize, 28), @offsetOf(CCM.CachedManifold, "flags"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(CCM.CachedManifold, "contact_points"));
+}
+
+// Zolt (Phase 13): the cache line of the constraint counter, which every FindCollisions job writes, holds no byte of any
+// other field of the manager, whatever order Zig gives the fields (see the top of this file). The manager is cache line
+// aligned, so offsets in it are offsets in cache lines.
+// Bite proofs: without `align(Core.cache_line_size)` on `ConstraintCounter.value` the comptime check next to
+// ConstraintCounter stops the build; without that check as well, this test fails: `constraints`,
+// `constraint_idx_to_offset`, `update_context` and `cache` (cache[0] starts with its object store pointer) share the
+// counter's line.
+test "ContactConstraintManager: the constraint counter has its own cache line" {
+    const CCM = ContactConstraintManager;
+    const line = Core.cache_line_size;
+    const counter_name = "num_constraints_and_next_constraint_offset";
+    const counter = @offsetOf(CCM, counter_name) + @offsetOf(CCM.ConstraintCounter, "value");
+    const line_begin = counter / line * line;
+    var shared: usize = 0;
+    inline for (@typeInfo(CCM).@"struct".fields) |field| {
+        const begin = @offsetOf(CCM, field.name);
+        const end = begin + @sizeOf(field.type);
+        if (comptime !std.mem.eql(u8, field.name, counter_name) and end > begin and begin < line_begin + line and end > line_begin) {
+            std.debug.print("ContactConstraintManager.{s} (bytes {d}..{d}) shares the cache line {d}..{d} of the constraint counter\n", .{ field.name, begin, end, line_begin, line_begin + line });
+            shared += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), shared);
+    try std.testing.expectEqual(@as(usize, 0), @alignOf(CCM) % line);
 }

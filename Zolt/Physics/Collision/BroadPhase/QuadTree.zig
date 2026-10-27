@@ -25,9 +25,9 @@
 //!   pages must all be committed (`reserveAllPages`, BroadPhaseQuadTree does it in initBroadPhase), so AllocateNode
 //!   never needs memory: AddBodiesFinalize, AddBodiesAbort and UpdateFinalize cannot fail. Running out of nodes stays
 //!   Jolt's abort: `@panic("QuadTree: Out of nodes!")`.
-//! - Heap memory (Jolt's global allocator) is the `allocator` passed to `init`: Jolt's `new NodeID[]` (UpdatePrepare),
-//!   `new Vec3[]` (BuildTree) and the heap fallback of the walk stacks (`Array<..., STLLocalAllocator<..., cStackSize>>`,
-//!   Zolt's STLLocalAllocator). Errors:
+//! - Heap memory (Jolt's global allocator) is the `allocator` passed to `init`: Jolt's `new NodeID[]` (UpdatePrepare,
+//!   kept between updates since Phase 13, see below), `new Vec3[]` (BuildTree) and the heap fallback of the walk stacks
+//!   (`Array<..., STLLocalAllocator<..., cStackSize>>`, Zolt's STLLocalAllocator). Errors:
 //!   - `updatePrepare` and `addBodiesPrepare` return Allocator.Error and leave the tree unchanged: the nodes that were
 //!     batched to be freed are in use again (`FixedSizeFreeList.cancelBatch`), `is_dirty` is restored, and BuildTree
 //!     fails before it changes anything.
@@ -59,6 +59,26 @@
 //!   tree points to the latch (`triggered_report`, `void` without asserts) in the `mutable_fields` of its
 //!   BroadPhaseQuadTree, so the warning is reported once per broad phase instead of once per process (a tree without a
 //!   broad phase does not report it).
+//!
+//! Differences with the C++ version (Roadmap Phase 13, class A: memory placement only, no result changes):
+//! - UpdatePrepare's `new NodeID[mNumBodies]` and the `new Vec3[]` of the BuildTree that it calls are arrays that the
+//!   tree keeps from one update to the next (`update_node_ids`, `update_centers`, 4 + 16 bytes per body of the tree).
+//!   They grow (to the tree's number of bodies, the old array is freed first) at Jolt's two allocation points when they
+//!   are too short, and are freed in deinit. Jolt allocates and frees both in every update. With an allocator that
+//!   maps large blocks directly, as Zig's SmpAllocator does for blocks over 32 KB (the centers of more than 2048
+//!   bodies, the node IDs of more than 8192), that costs an mmap, a munmap and a page fault per 4 KB page in every
+//!   update (HighSpeed: an 80 KB block of centers, 20 page faults per step before Phase 13). The arrays are written
+//!   before they are read in every update, so their old contents never matter.
+//! - Memory behavior that differs from Jolt: an update allocates an array only when it is shorter than the tree's
+//!   number of bodies. For the node IDs that is the first update of the tree and an update with more bodies than every
+//!   update before. For the centers it is the first update whose BuildTree needs them (more than one node ID: an update
+//!   that finds the tree as one unchanged node, such as the first one after the tree got all its bodies in one batch,
+//!   does not) and growth after that. The walk stack still falls back to the heap like Jolt's. The arrays stay
+//!   allocated between updates (at the tree's largest number of bodies so far), and the centers array is sized for all
+//!   bodies of the tree instead of the node IDs that BuildTree gets. `releaseUpdateScratch` (Zolt only, also on
+//!   BroadPhaseQuadTree) frees them: the next update then allocates at Jolt's points again, which the allocation
+//!   failure tests use. AddBodiesPrepare still allocates BuildTree's centers per call like Jolt (it can run on any
+//!   thread, concurrently with an update).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -477,6 +497,13 @@ pub const QuadTree = struct {
     /// mNumBodies, mRootNode, mRootNodeIndex and mIsDirty
     tree_state: TreeState = .{},
 
+    /// Zolt (Phase 13): the temporary arrays of updatePrepare, Jolt's `new NodeID[mNumBodies]` and BuildTree's
+    /// `new Vec3[inNumber]`, kept from one update to the next and only grown (to the number of bodies of the tree),
+    /// freed in deinit and releaseUpdateScratch. Only updatePrepare uses them, which runs for one tree at a time with
+    /// the update lock held (BroadPhaseQuadTree.lockModifications).
+    update_node_ids: []NodeID = &.{},
+    update_centers: []Vec3 = &.{},
+
     /// Zolt: the latch of sQuadTreePerformanceWarning (Jolt: a function `static atomic<bool>`, only with asserts),
     /// shared by the trees of a BroadPhaseQuadTree, which sets it after init (null: the warning is not reported)
     triggered_report: if (Core.enable_asserts) ?*std.atomic.Value(bool) else void = if (Core.enable_asserts) null else {},
@@ -590,6 +617,9 @@ pub const QuadTree = struct {
         // Now free all nodes
         node_allocator.destructObjectBatch(&free_batch);
 
+        // Zolt (Phase 13): the temporary arrays of updatePrepare
+        self.releaseUpdateScratch();
+
         self.* = .empty;
     }
 
@@ -684,9 +714,9 @@ pub const QuadTree = struct {
             self.validateTree(bodies, tracking, root_node.index.load(.seq_cst), self.tree_state.num_bodies.load(.seq_cst));
 
         // Create space for all body ID's
+        // Zolt (Phase 13): in the array that the tree keeps (update_node_ids), it allocates only when it grows
         const num_bodies = self.tree_state.num_bodies.load(.seq_cst);
-        const node_ids: []NodeID = if (num_bodies > 0) try self.allocator.alloc(NodeID, num_bodies) else &.{};
-        defer self.allocator.free(node_ids); // Delete temporary data
+        const node_ids: []NodeID = if (num_bodies > 0) try self.growUpdateScratch(NodeID, &self.update_node_ids, num_bodies) else &.{};
         var cur_node_id: usize = 0;
 
         // Collect all bodies
@@ -755,8 +785,13 @@ pub const QuadTree = struct {
             // vs the quality of the built tree.
             const max_depth_mark_changed = 5;
 
+            // Zolt (Phase 13): BuildTree's centers are the array that the tree keeps (update_centers). It grows here,
+            // where BuildTree would allocate them (BuildTree allocates nothing for a single node), to the number of
+            // bodies of the tree (at least num_node_ids), so that it rarely grows again.
+            const centers: ?[]Vec3 = if (num_node_ids > 1) try self.growUpdateScratch(Vec3, &self.update_centers, num_bodies) else null;
+
             // Build new tree
-            const result = try self.buildTree(bodies, tracking, node_ids[0..num_node_ids], max_depth_mark_changed, null);
+            const result = try self.buildTree(bodies, tracking, node_ids[0..num_node_ids], max_depth_mark_changed, centers);
             const root_bounds = result.bounds;
             root_node_id = result.root;
 
@@ -776,6 +811,27 @@ pub const QuadTree = struct {
         }
 
         return .{ .root_node_id = root_node_id };
+    }
+
+    /// Zolt (Phase 13): the first `len` entries of a temporary array of updatePrepare, which is replaced by a new one
+    /// of `len` entries when it is shorter (its contents are not kept). On error the array is empty.
+    fn growUpdateScratch(self: *QuadTree, comptime T: type, scratch: *[]T, len: usize) Allocator.Error![]T {
+        if (scratch.len < len) {
+            self.allocator.free(scratch.*);
+            scratch.* = &.{};
+            scratch.* = try self.allocator.alloc(T, len);
+        }
+        return scratch.*[0..len];
+    }
+
+    /// Zolt (Phase 13): frees the temporary arrays that updatePrepare keeps between updates (update_node_ids,
+    /// update_centers). The next updatePrepare then allocates them where Jolt allocates them, which the allocation
+    /// failure tests use. Not while an update of the tree runs.
+    pub fn releaseUpdateScratch(self: *QuadTree) void {
+        if (self.update_node_ids.len > 0) self.allocator.free(self.update_node_ids);
+        if (self.update_centers.len > 0) self.allocator.free(self.update_centers);
+        self.update_node_ids = &.{};
+        self.update_centers = &.{};
     }
 
     /// Swap the new tree in (see updatePrepare)

@@ -48,6 +48,17 @@
 //!   island without a lock (`claimSortScratch` / `releaseSortScratch`, `Step.sort_scratch_used`): no allocation, no
 //!   temp memory. An island without room there, and every smaller island, takes Jolt's three calls. Only in test
 //!   builds, `large_island_sorts` counts which of these three ways the large islands took (`void` otherwise).
+//! - Differences with the C++ version (Phase 13, class A): the contacts of a batch of a parallel split (Zolt's SIMD
+//!   contact solver, ContactConstraintSimd.zig) are grouped once per step instead of once per velocity iteration. When
+//!   `ContactConstraintSimd.plans(batch.parallel, batch.contacts.len)` (comptime false without the SIMD solver), the
+//!   warm start of the batch runs in Jolt's order and then `planBatch` permutes the batch's own slice of the splitter's
+//!   contact indices to the order of its SIMD groups and writes the plan word (`LargeIslandSplitter.batchPlanWord`).
+//!   The velocity iterations of the batch call `solvePlanned` with that word (asserted to hold a plan when asserts are
+//!   on; without one it solves like before), storeAppliedImpulses and the position iterations visit the permuted
+//!   order. The order of the contacts of such a batch does not change a bit ("The plan of a batch" in
+//!   ContactConstraintSimd.zig has the proof for every phase). Only in test builds, `simd_plans` counts the planned
+//!   batches and their velocity iterations with and without a plan in the word, and can turn the plans off (`void`
+//!   otherwise).
 //!
 //! SimulationArchitecture D4 / D5 / D6 / D7:
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
@@ -97,7 +108,9 @@
 //!   hold the batches of a split island as `wait` spans ("Wait: split island batches"), JobSoftBodySimulate its yields
 //!   after a pass without work ("Wait: soft bodies"). `part` spans mark the preparation of an island in JobSolveVelocityConstraints
 //!   ("Prepare island", "Prepare island (split)") and the bounds and sleep update of a split island's final batch
-//!   ("Final batch: bounds and sleep"). Without the option these hooks generate no code.
+//!   ("Final batch: bounds and sleep", inside it "Final batch: bodies", "Final batch: put to sleep" and "Final batch:
+//!   broad phase"; checkSleepAndUpdateBounds gets the profiler only for a final batch, spans per small island would
+//!   fill the ring buffers). Without the option these hooks generate no code.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -410,6 +423,31 @@ pub const PhysicsSystem = struct {
     /// Zolt addition (Phase 12, class A), only in test builds (`void` otherwise): how the large islands were sorted
     /// since `init` (sortLargeIsland). The tests check with it that each of the three ways runs.
     large_island_sorts: if (builtin.is_test) LargeIslandSorts else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 13, class A), only in test builds (`void` otherwise): the SIMD plans of the batches of the
+    /// parallel splits since `init` (ContactConstraintSimd.planBatch), and a switch that turns them off. The tests check
+    /// with it that the planned path runs in an update and gives the bits of the path without plans.
+    simd_plans: if (builtin.is_test) SimdPlans else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 13, class A), tests only: the counts and the switch of `simd_plans`
+    pub const SimdPlans = struct {
+        /// Batches whose warm start planned their groups
+        planned: std.atomic.Value(u32) = .init(0),
+        /// Velocity iterations of a planned batch that found the plan in its plan word (solvePlanned solved the
+        /// planned groups)
+        solved: std.atomic.Value(u32) = .init(0),
+        /// Velocity iterations of a planned batch whose plan word held no plan (solvePlanned took its fallback, with
+        /// the same bits). Must stay 0: with asserts off, this and `solved` are what shows that the plans were used.
+        unplanned: std.atomic.Value(u32) = .init(0),
+        /// False: no batch is planned, the batches of the parallel splits take ContactConstraintSimd.solveBatch (set it
+        /// only between updates)
+        enabled: bool = true,
+
+        /// The counts: planned, solved, unplanned
+        pub fn counts(self: *const SimdPlans) [3]u32 {
+            return .{ self.planned.load(.monotonic), self.solved.load(.monotonic), self.unplanned.load(.monotonic) };
+        }
+    };
 
     /// Zolt addition (Phase 12, class A), tests only: the counts of `large_island_sorts`
     pub const LargeIslandSorts = struct {
@@ -1213,8 +1251,11 @@ pub const PhysicsSystem = struct {
             }.call, .{ context, step }), .{ .num_dependencies = previous_step_dependency_count });
 
             // This job will find all collisions
-            step.body_pair_queues.resize(max_concurrency);
-            for (step.body_pair_queues.slice()) |*q|
+            // (Jolt: step.mBodyPairQueues.resize(max_concurrency); Zolt: the queues are in step.padded_atomics, see
+            // PhysicsUpdateContext)
+            std.debug.assert(max_concurrency <= PhysicsUpdateContext.max_concurrency);
+            step.num_body_pair_queues = max_concurrency;
+            for (step.bodyPairQueues()) |*q|
                 q.* = .{};
             step.max_body_pairs_per_queue = @as(u32, @intCast(self.physics_settings.max_in_flight_body_pairs)) / max_concurrency;
             step.active_find_collision_jobs.store(~@as(JobMask, 0) >> @intCast(@bitSizeOf(JobMask) - num_find_collisions_jobs), .release);
@@ -1531,7 +1572,7 @@ pub const PhysicsSystem = struct {
         const batch_size: u32 = @intCast(self.physics_settings.step_listeners_batch_size);
         while (true) {
             // Get the start of a new batch
-            const batch = step.step_listener_read_idx.value.fetchAdd(batch_size, .seq_cst);
+            const batch = step.padded_atomics.step_listener_read_idx.value.fetchAdd(batch_size, .seq_cst);
             if (batch >= self.step_listeners.items.len)
                 break;
 
@@ -1552,7 +1593,7 @@ pub const PhysicsSystem = struct {
 
         while (true) {
             // Atomically fetch a batch of constraints
-            const constraint_idx = step.determine_active_constraint_read_idx.value.fetchAdd(determine_active_constraints_batch_size, .seq_cst);
+            const constraint_idx = step.padded_atomics.determine_active_constraint_read_idx.value.fetchAdd(determine_active_constraints_batch_size, .seq_cst);
             if (constraint_idx >= num_constraints)
                 break;
 
@@ -1564,7 +1605,7 @@ pub const PhysicsSystem = struct {
 
             // Copy the block of active constraints to the global list of active constraints
             if (num_active_constraints > 0) {
-                const active_constraint_idx = step.num_active_constraints.value.fetchAdd(num_active_constraints, .seq_cst);
+                const active_constraint_idx = step.padded_atomics.num_active_constraints.value.fetchAdd(num_active_constraints, .seq_cst);
                 @memcpy(step.context.active_constraints.items[active_constraint_idx..][0..num_active_constraints], active_constraints[0..num_active_constraints]);
             }
         }
@@ -1588,7 +1629,7 @@ pub const PhysicsSystem = struct {
         // Update velocities from forces
         while (true) {
             // Atomically fetch a batch of bodies
-            var active_body_idx = step.apply_gravity_read_idx.value.fetchAdd(apply_gravity_batch_size, .seq_cst);
+            var active_body_idx = step.padded_atomics.apply_gravity_read_idx.value.fetchAdd(apply_gravity_batch_size, .seq_cst);
             if (active_body_idx >= num_active_bodies_at_step_start)
                 break;
 
@@ -1619,11 +1660,11 @@ pub const PhysicsSystem = struct {
         var grant: BodyAccess.Grant = .init(.none, .read);
         defer grant.deinit();
 
-        const num_constraints = step.num_active_constraints.value.load(.seq_cst);
+        const num_constraints = step.padded_atomics.num_active_constraints.value.load(.seq_cst);
 
         while (true) {
             // Atomically fetch a batch of constraints
-            const constraint_idx = step.setup_velocity_constraints_read_idx.value.fetchAdd(setup_velocity_constraints_batch_size, .seq_cst);
+            const constraint_idx = step.padded_atomics.setup_velocity_constraints_read_idx.value.fetchAdd(setup_velocity_constraints_batch_size, .seq_cst);
             if (constraint_idx >= num_constraints)
                 break;
 
@@ -1640,7 +1681,7 @@ pub const PhysicsSystem = struct {
         var grant_active: BodyManager.GrantActiveBodiesAccess = .init(true, false);
         defer grant_active.deinit();
 
-        const num_active_constraints = step.num_active_constraints.value.load(.seq_cst);
+        const num_active_constraints = step.padded_atomics.num_active_constraints.value.load(.seq_cst);
 
         // Prepare the island builder
         try self.island_builder.prepareNonContactConstraints(num_active_constraints, context.temp_allocator);
@@ -1654,17 +1695,17 @@ pub const PhysicsSystem = struct {
     /// jobs do the work)
     fn trySpawnJobFindCollisions(self: *const Self, step: *Step) void {
         // Get how many jobs we can spawn and check if we can spawn more
-        const max_jobs: u32 = step.body_pair_queues.len;
+        const max_jobs: u32 = step.num_body_pair_queues;
         if (@popCount(step.active_find_collision_jobs.load(.monotonic)) >= max_jobs)
             return;
 
         // Count how many body pairs we have waiting
         var num_body_pairs: u32 = 0;
-        for (step.body_pair_queues.constSlice()) |*queue|
+        for (step.bodyPairQueues()) |*queue|
             num_body_pairs +%= queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
 
         // Count how many active bodies we have waiting
-        const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body) -% step.active_body_read_idx.value.load(.seq_cst);
+        const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body) -% step.padded_atomics.active_body_read_idx.value.load(.seq_cst);
 
         // Calculate how many jobs we would like
         const desired_num_jobs = @min((num_body_pairs +% (narrow_phase_batch_size - 1)) / narrow_phase_batch_size +% (num_active_bodies +% (active_bodies_batch_size - 1)) / active_bodies_batch_size, max_jobs);
@@ -1739,7 +1780,7 @@ pub const PhysicsSystem = struct {
 
             // Determine initial queue to read pairs from if no broadphase work can be done
             // (always start looking at results from the next job)
-            var read_queue_idx = (job_index + 1) % step.body_pair_queues.len;
+            var read_queue_idx = (job_index + 1) % step.num_body_pair_queues;
 
             // Allocate space to temporarily store a batch of active bodies
             var active_bodies: [active_bodies_batch_size]BodyID = undefined; // JPH_STACK_ALLOC with a fixed size
@@ -1749,12 +1790,12 @@ pub const PhysicsSystem = struct {
                 const poisoned = context.isOutOfMemory();
 
                 // Check if there are active bodies to be processed
-                const active_bodies_read_idx = step.active_body_read_idx.value.load(.seq_cst);
+                const active_bodies_read_idx = step.padded_atomics.active_body_read_idx.value.load(.seq_cst);
                 const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body);
                 if (!poisoned and active_bodies_read_idx < num_active_bodies) {
                     // Take a batch of active bodies
                     const active_bodies_read_idx_end = @min(num_active_bodies, active_bodies_read_idx + active_bodies_batch_size);
-                    if (step.active_body_read_idx.value.cmpxchgStrong(active_bodies_read_idx, active_bodies_read_idx_end, .seq_cst, .seq_cst) == null) {
+                    if (step.padded_atomics.active_body_read_idx.value.cmpxchgStrong(active_bodies_read_idx, active_bodies_read_idx_end, .seq_cst, .seq_cst) == null) {
                         // Callback when a new body pair is found
                         const MyBodyPairCallback = struct {
                             pub const overrides = .{.addHit};
@@ -1767,7 +1808,7 @@ pub const PhysicsSystem = struct {
                             // Callback function when a body pair is found
                             pub fn addHit(cb: *@This(), pair: *const BodyPair) void {
                                 // Check if we have space in our write queue
-                                const queue = &cb.step.body_pair_queues.slice()[cb.job_index];
+                                const queue = &cb.step.bodyPairQueues()[cb.job_index];
                                 const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
                                 if (body_pairs_in_queue >= cb.step.max_body_pairs_per_queue) {
                                     // Buffer full, process the pair now
@@ -1789,7 +1830,7 @@ pub const PhysicsSystem = struct {
                         self.getBroadPhase().findCollidingPairs(active_bodies[0..batch_size], self.physics_settings.speculative_contact_distance, self.object_vs_broad_phase_layer_filter, self.object_layer_pair_filter, &add_pair.base) catch context.setOutOfMemory();
 
                         // Check if we have enough pairs in the buffer to start a new job
-                        const queue = &step.body_pair_queues.slice()[job_index];
+                        const queue = &step.bodyPairQueues()[job_index];
                         const body_pairs_in_queue = queue.write_idx.load(.seq_cst) -% queue.read_idx.load(.seq_cst);
                         if (body_pairs_in_queue >= narrow_phase_batch_size)
                             self.trySpawnJobFindCollisions(step);
@@ -1798,7 +1839,7 @@ pub const PhysicsSystem = struct {
                     // Lockless loop to get the next body pair from the pairs buffer
                     const first_read_queue_idx = read_queue_idx;
                     while (true) {
-                        const queue = &step.body_pair_queues.slice()[read_queue_idx];
+                        const queue = &step.bodyPairQueues()[read_queue_idx];
 
                         // Get the next pair to process
                         const pair_idx = queue.read_idx.load(.seq_cst);
@@ -1806,7 +1847,7 @@ pub const PhysicsSystem = struct {
                         // If the pair hasn't been written yet (Zolt D5: a poisoned job treats every queue as empty)
                         if (poisoned or pair_idx >= queue.write_idx.load(.seq_cst)) {
                             // Go to the next queue
-                            read_queue_idx = (read_queue_idx + 1) % step.body_pair_queues.len;
+                            read_queue_idx = (read_queue_idx + 1) % step.num_body_pair_queues;
 
                             // If we're back at the first queue, we've looked at all of them and found nothing
                             if (read_queue_idx == first_read_queue_idx) {
@@ -2314,16 +2355,38 @@ pub const PhysicsSystem = struct {
                         if (Core.job_profile) wait_span.done();
                         const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
+                        // (Zolt, Phase 13, class A: the SIMD groups of a batch of a parallel split are planned once per
+                        // step at its warm start, see "The plan of a batch" in ContactConstraintSimd.zig. Comptime false
+                        // when the SIMD solver is off; the tests can turn the plans off with simd_plans.enabled.)
+                        const plan = ContactConstraintSimd.plans(batch.parallel, batch.contacts.len) and (!builtin.is_test or self.simd_plans.enabled);
                         if (batch.first_iteration) {
                             // Iteration 0 is used to warm start the batch (we added 1 to the number of iterations in LargeIslandSplitter::SplitIsland)
                             var dummy: DummyCalculateSolverSteps = .{};
                             ConstraintManager.warmStartVelocityConstraints(active_constraints, batch.constraints, warm_start_impulse_ratio, &dummy);
                             self.contact_manager.warmStartVelocityConstraints(batch.contacts, warm_start_impulse_ratio, &dummy);
+
+                            // (Zolt: permute the batch's contacts to the order of its groups, the plan goes into a word of
+                            // the splitter)
+                            if (plan) {
+                                ContactConstraintSimd.planBatch(&self.contact_manager, batch.contacts, self.large_island_splitter.batchPlanWord(batch.contacts));
+                                if (builtin.is_test) _ = self.simd_plans.planned.fetchAdd(1, .monotonic);
+                            }
                         } else {
                             // Solve velocity constraints
                             _ = ConstraintManager.solveVelocityConstraints(active_constraints, batch.constraints, delta_time);
-                            // (Zolt: the contacts of a parallel split are solved 8 at a time, see ContactConstraintSimd.zig)
-                            _ = ContactConstraintSimd.solveBatch(&self.contact_manager, batch.contacts, batch.parallel);
+                            // (Zolt: the contacts of a parallel split are solved 8 at a time, see ContactConstraintSimd.zig,
+                            // in the groups that the warm start of the batch planned)
+                            if (plan) {
+                                const plan_word = self.large_island_splitter.batchPlanWord(batch.contacts).*;
+                                if (Core.enable_asserts) std.debug.assert(ContactConstraintSimd.plannedCount(plan_word, batch.contacts.len) != null); // The warm start of this batch planned it in this step
+                                if (builtin.is_test) {
+                                    // (Count by the word, like solvePlanned decides, so that an iteration without its
+                                    // plan shows also without asserts)
+                                    const counter = if (ContactConstraintSimd.plannedCount(plan_word, batch.contacts.len) != null) &self.simd_plans.solved else &self.simd_plans.unplanned;
+                                    _ = counter.fetchAdd(1, .monotonic);
+                                }
+                                _ = ContactConstraintSimd.solvePlanned(&self.contact_manager, batch.contacts, plan_word);
+                            } else _ = ContactConstraintSimd.solveBatch(&self.contact_manager, batch.contacts, batch.parallel);
                         }
 
                         // Mark the batch as processed
@@ -3304,9 +3367,12 @@ pub const PhysicsSystem = struct {
     };
 
     /// Called at the end of JobSolveVelocityConstraints to check if bodies need to go to sleep and to update their bounding box in the broadphase
-    fn checkSleepAndUpdateBounds(self: *Self, island_index: u32, context: *const PhysicsUpdateContext, step: *const Step, bodies_to_sleep: *BodiesToSleep) void {
+    /// Zolt: `parts` (-Djob_profile=true only) records the parts as spans, non-null only for the final batch of a split island.
+    fn checkSleepAndUpdateBounds(self: *Self, island_index: u32, context: *const PhysicsUpdateContext, step: *const Step, bodies_to_sleep: *BodiesToSleep, parts: if (Core.job_profile) ?*JobProfiler else void) void {
         // Get the bodies that belong to this island
         const bodies = self.island_builder.getBodiesInIsland(island_index);
+
+        const bodies_start = if (Core.job_profile) JobProfiler.begin(parts) else {};
 
         // Only check sleeping in the last step
         // Also resets force and torque used during the apply gravity phase
@@ -3331,21 +3397,28 @@ pub const PhysicsSystem = struct {
                 mp.resetForce();
                 mp.resetTorque();
             }
+            if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: bodies", bodies_start);
 
             // If all bodies indicate they can sleep we can deactivate them
-            if (all_can_sleep == @intFromEnum(CanSleep.can_sleep))
+            if (all_can_sleep == @intFromEnum(CanSleep.can_sleep)) {
+                const sleep_start = if (Core.job_profile) JobProfiler.begin(parts) else {};
                 bodies_to_sleep.putToSleep(bodies);
+                if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: put to sleep", sleep_start);
+            }
         } else {
             // Update bounding box only for all other steps
             for (bodies) |body_id| {
                 const body = self.body_manager.getBodyMut(body_id);
                 body.calculateWorldSpaceBoundsInternal();
             }
+            if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: bodies", bodies_start);
         }
 
         // Notify broadphase of changed objects
         // Note: Shuffles the BodyID's around!!!
+        const broad_phase_start = if (Core.job_profile) JobProfiler.begin(parts) else {};
         self.getBroadPhase().notifyBodiesAABBChanged(bodies, .{ .take_lock = false });
+        if (Core.job_profile) JobProfiler.end(parts, .part, "Final batch: broad phase", broad_phase_start);
     }
 
     fn jobSolvePositionConstraints(self: *Self, context: *PhysicsUpdateContext, step: *Step) void {
@@ -3394,7 +3467,7 @@ pub const PhysicsSystem = struct {
                         // The final batch will update all bounds and check sleeping
                         if (final_batch) {
                             const bounds_start = if (Core.job_profile) JobProfiler.begin(wait_span.profiler) else {};
-                            self.checkSleepAndUpdateBounds(self.large_island_splitter.getIslandIndex(batch.split_island_index), context, step, &bodies_to_sleep);
+                            self.checkSleepAndUpdateBounds(self.large_island_splitter.getIslandIndex(batch.split_island_index), context, step, &bodies_to_sleep, if (Core.job_profile) wait_span.profiler else {});
                             if (Core.job_profile) JobProfiler.end(wait_span.profiler, .part, "Final batch: bounds and sleep", bounds_start);
                         }
 
@@ -3454,7 +3527,7 @@ pub const PhysicsSystem = struct {
                 }
 
                 // After solving we will update all bounds and check sleeping
-                self.checkSleepAndUpdateBounds(island_idx, context, step, &bodies_to_sleep);
+                self.checkSleepAndUpdateBounds(island_idx, context, step, &bodies_to_sleep, if (Core.job_profile) null else {});
 
                 if (track_simulation_stats) {
                     // Accumulate time spent in updating bounding box
