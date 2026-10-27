@@ -771,8 +771,10 @@ fn pageOf(body: *Body) usize {
 const BodyPoolStats = BodyManager.BodyPoolStats;
 
 /// An allocator whose blocks are aligned to exactly the alignment that is asked for, never to twice that: every block
-/// starts `alignment` bytes into a block of the inner allocator that is aligned to twice the alignment. A pool whose
-/// pages are less aligned than it assumes then finds the wrong page of a body.
+/// starts at an odd multiple of the alignment, one or two alignments into a block of the inner allocator (the byte
+/// before it says which). The inner allocator is asked for the same alignment only: Zig 0.16's page allocator cannot
+/// always map a block aligned above its allocation granularity (64 KB on Windows). A pool whose pages are less aligned
+/// than it assumes then finds the wrong page of a body.
 const MisaligningAllocator = struct {
     inner: Allocator,
 
@@ -780,21 +782,23 @@ const MisaligningAllocator = struct {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = free } };
     }
 
-    fn doubled(alignment: std.mem.Alignment) std.mem.Alignment {
-        return .fromByteUnits(2 * alignment.toByteUnits());
-    }
-
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *MisaligningAllocator = @ptrCast(@alignCast(ctx));
-        const offset = alignment.toByteUnits();
-        const block = self.inner.rawAlloc(len + offset, doubled(alignment), ret_addr) orelse return null;
-        return block + offset;
+        const a = alignment.toByteUnits();
+        const block = self.inner.rawAlloc(len + 2 * a, alignment, ret_addr) orelse return null;
+        // block + a is an odd multiple of a when the block is aligned to 2 * a, block + 2 * a otherwise
+        const multiples: u8 = if (@intFromPtr(block) % (2 * a) == 0) 1 else 2;
+        const memory = block + multiples * a;
+        std.debug.assert(@intFromPtr(memory) % (2 * a) == a);
+        (memory - 1)[0] = multiples;
+        return memory;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *MisaligningAllocator = @ptrCast(@alignCast(ctx));
-        const offset = alignment.toByteUnits();
-        self.inner.rawFree((memory.ptr - offset)[0 .. memory.len + offset], doubled(alignment), ret_addr);
+        const a = alignment.toByteUnits();
+        const offset = (memory.ptr - 1)[0] * a;
+        self.inner.rawFree((memory.ptr - offset)[0 .. memory.len + 2 * a], alignment, ret_addr);
     }
 };
 
