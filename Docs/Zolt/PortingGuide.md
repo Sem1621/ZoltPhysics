@@ -704,6 +704,24 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   at least `Core.cache_line_size - @sizeOf(u32)` bytes of padding on both sides (`PaddedAtomics`). A test walks
   `@typeInfo` of the struct, including arrays and nested structs of padded atomics (the queues), and checks that no other
   data can have a byte in the atomic's cache line (ContactConstraintManager.zig, PhysicsUpdateContext.zig).
+- **A new hot atomic of Zolt goes where it changes no layout (Phase 14).** The bump counter of the SIMD LaneGroups (an
+  add per planned batch from every SolveVelocityConstraints job, ContactConstraintSimd.zig "LaneGroups") is the first
+  field of the heap block that it hands out: a `BlockHeader` whose atomic is `align(Core.cache_line_size)` and which
+  fills one cache line, followed by the LaneGroups. The block is cache line aligned, so the counter shares its line with
+  nothing, and it is reset in jobFinalizeIslands (one store per step). Two other places were rejected: a 64 byte
+  aligned field of PhysicsSystem (the prototype: callgrind showed data side rises of up to 0.2% in scenes that never use
+  the counter, and a layout-only build with just the unused field reproduced them; every new field of PhysicsSystem
+  makes Zig order its 8 byte aligned fields differently, see the next rule) and a seventh padded atomic in
+  `Step.padded_atomics` (64 bytes more per Step in temp memory: every later temp allocation of the update moves, an
+  update would need 128 instead of 64 * collision_steps bytes more temp memory than Jolt, and the per-update copy of the
+  default Step grows past its codegen-check allow-list size of 0x1cf0).
+- **Zig orders the fields of a struct by alignment, and the order of equally aligned fields is not the declaration
+  order in a large struct.** In PhysicsSystem (28 fields) one more 8 byte aligned field moved most of the 8 byte aligned
+  fields to other offsets. Where a Zolt addition must not move the data of other code, put it into the free bytes at the
+  end of a smaller struct whose fields keep their order (ContactConstraintManager.simd_lanes, 14 fields: the new field
+  lands behind the last field of its alignment) and check the offsets in a test ("ContactConstraintManager: simd_lanes
+  takes free bytes at the end"); dump the offsets before and after with a small program that prints `@offsetOf` of
+  every field.
 - Debug-only `thread_local` state (PhysicsLock's table of held locks) is a `threadlocal var` typed `void` without
   asserts: `threadlocal var locks: if (Core.enable_asserts) [4]LockData else void = ...`. It is the only kind of
   per-thread state allowed.

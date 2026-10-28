@@ -515,6 +515,26 @@ They are latched:
                         };
 ```
 
+**An optional heap allocation before the jobs (Phase 14, class A).** The SIMD LaneGroups of the planned batches
+(section 10, "LaneGroups") live in one heap block that is kept between updates
+(`ContactConstraintManager.simd_lanes`). `update` grows it before it builds the jobs (`growSimdLanes`: one allocation,
+then the free of the old block), only when the steps of the previous update asked for more LaneGroups than it holds.
+The jobs never allocate it (the warm starts only claim from it with an atomic add). A growth whose allocation fails is
+**not** an error (Jolt has no such allocation): the old block stays (or none), and the batches that find no room
+gather from the contact constraints with the same bits. The block holds no state: an update that fails afterwards
+changes nothing that a restore would have to undo. Tests: "the SIMD LaneGroups give the states of the gather path with
+little room, failed growths, a release and no warm start" (PhysicsSystemTests) fails the growths with an allocator
+that fails only the LaneGroups blocks (all of them, and all but the first).
+- Only the failure of the growth itself is silent. The block is heap memory that Jolt does not have, from the
+  allocator given to `PhysicsSystem.init` (the one of all the system's heap allocations), and it stays allocated
+  between updates: 6.1 MB in Pyramid, under twice the most LaneGroups that a step claimed, or the bound of the first
+  growth (section 10, "LaneGroups").
+  Under a bounded allocator (a fixed buffer, or a budget sized for Jolt's heap footprint) it can make a later heap
+  allocation fail that Jolt makes too (updatePrepare, the InternalEdgeRemovingCollector of ProcessBodyPair, a body
+  created between updates): that call returns `error.OutOfMemory` where Jolt succeeds. `PhysicsSystem.releaseSimdLanes`
+  returns the block between updates (the next update gathers and records its demand, the one after it grows the block
+  again); a build with `-Dsimd_contact_solver=false` has no LaneGroups.
+
 **Contract after `error.OutOfMemory` from a job.**
 - The state is mid-step but memory safe. No lock is held, nothing leaked, and the temp allocator
   is empty.
@@ -792,6 +812,15 @@ parameters.
 **Mandatory per scene test:**
 - A FailingTempAllocator sweep (every allocation fails once; `temp.isEmpty()`; recovery through
   `restoreState`).
+- (Phase 14) The heap sweeps (FailingHeapAllocator) expect every heap allocation of an update to make it return
+  `error.OutOfMemory`. The growth of the SIMD LaneGroups (D5, "An optional heap allocation before the jobs") is the one
+  heap allocation of `update` whose failure is silent, so it must not fall in a counted or swept update. It can: the
+  ContactScene of the ProcessBodyPair sweeps without manifold reduction has a large island (a bound of 102 LaneGroups,
+  though none of its batches is planned), and its block grows in the warm-up updates. Every heap sweep therefore frees
+  the block before the counted update and before every swept update (`PhysicsSystem.releaseSimdLanes`, next to
+  `releaseBroadPhaseScratch`; such an update has no block, so it only records its demand) and checks that no growth
+  happens in them (`simd_plans.lanes.growths`). A sweep may instead skip the LaneGroups blocks (64 byte aligned, a
+  header and a whole number of LaneGroups, see `LaneGroupsFailingAllocator` in PhysicsSystemTests).
 - A FailingJobSystem sweep for files that create jobs.
 - `checkAllAllocationFailures` on creation.
 - A ReleaseFast run.
@@ -1145,6 +1174,9 @@ DeterminismLog, PhysicsScene).**
     the contacts added before the error stay.
   - A single failed allocation of a growing STLLocalAllocator array is absorbed by its retry, so
     heap sweeps need a "heap runs out from allocation n on" mode (`FailingHeapAllocator.fail_from`).
+- (Phase 14) The heap allocations of an update are these three inside jobs and, outside the jobs, the growth of the
+  SIMD LaneGroups in `update` before the jobs are built (D5, "An optional heap allocation before the jobs"), the only
+  one whose failure is not an error.
 - JobSolveVelocityConstraints checks the latch only at job entry (section 8, Wave A rule) and never
   allocates. `applied_impulse |= x` is `applied_impulse = x or applied_impulse`, so the contacts
   are always solved.
@@ -1340,7 +1372,8 @@ short runs: their contact solve keeps its count. (Ragdoll runs 15 steps here. In
 ragdolls form large islands from about step 24, and ConvexVsMesh from about step 324: then they use
 it.) About a fifth of the kernel's instructions are transposes and another sixth are register spills
 (12 velocity vectors stay live). Transposing the constant constraint data once per step instead of once
-per iteration would remove most of the transposes but needs a buffer per step; it is not done.
+per iteration would remove most of the transposes but needs a buffer per step. Phase 14 does it for the planned
+batches ("LaneGroups (Phase 14, class A)" below).
 
 **The plan of a batch (Phase 13, class A).** The sorting into groups ran in every velocity iteration
 (162M instructions in 60 Pyramid steps, 3.9%), though the groups depend only on the batch's contacts.
@@ -1392,3 +1425,64 @@ Pyramid (60 steps, callgrind): 4,148,175,876 to 4,046,679,602 instructions (-2.4
 no split island) +0.001%, ConvexVsMesh (200 steps) -0.003%. planBatch places each contact once at a
 counted position: a first version copied the buckets back with loops that LLVM turned into 5 memcpy calls
 per batch (221,226 more instructions in Pyramid).
+
+**LaneGroups (Phase 14, class A).** solveGroup gathered the step constant data of its 8 lanes from the contact
+constraints in every velocity iteration (the transposes, the address math of the contact points, the reads of the bodies
+and motion properties) and scattered the lambdas back. A planned batch now does that once per step: its warm start
+(after planBatch) builds `LaneGroup`s, the operands of the kernel in lane order (3,840 bytes per group, 480 bytes per
+lane), and every velocity iteration runs the same kernel (`solveGroupFrom`) with `LaneSource` instead of
+`GatherSource`.
+- Memory: one heap block, `ContactConstraintManager.simd_lanes` (`SimdLanes`: a pointer and two counts in free bytes at
+  the end of the manager, PortingGuide.md section 9): a 64 byte header whose first field is the bump counter of the step
+  on its own cache line, then the LaneGroups. It is kept between updates and freed by `deinit` or
+  `PhysicsSystem.releaseSimdLanes`. `update` grows it before the jobs (D5, "An optional heap allocation before the
+  jobs"): to the most LaneGroups that a step of the previous update claimed (the counter counts the claims that found
+  no room too) and at least to twice its size; without a block the demand is `laneGroupBound` over the split islands.
+  Growths in the benchmark scenes (-t=1): Pyramid 2 (798, then 1,596 LaneGroups: 6.1 MB, for at most 1,011 claimed in
+  a step), Ragdoll 80 steps 6 (15 to 480: 1.8 MB, the ragdolls pile up during the run), ConvexVsMesh 500 steps 2 (32,
+  64), the others 0. A failed growth is silent: the batches that find no room gather. The bound of the first growth
+  does not know the batches (splitIsland builds them later): an island whose parallel batches all have fewer than 4
+  contacts claims nothing, and its first block stays unused until `releaseSimdLanes` or `deinit` (the ContactScene
+  without manifold reduction of PhysicsSystemTests: a bound of 102 LaneGroups, 391,744 bytes, no claim).
+- Claim: the warm start of a planned batch whose split island has velocity steps adds `numLaneGroups(planned count)`
+  to the counter (one monotonic fetchAdd). When they fit, `buildLanes` fills them and the batch's lane word gets
+  `laneWord(first)` (marker 0x4c in the high 8 bits, the first group in the low 24); otherwise `no_lanes` and the batch
+  gathers as before. The lane word is the entry of `contact_and_constraints_split_idx` after the plan word
+  (`LargeIslandSplitter.batchLaneWord`): a batch with a plan has at least 4 contacts. jobFinalizeIslands resets the
+  counter before the steps' first batch starts (after recording the previous step's claims).
+- Velocity iterations: the job checks the marker (`hasLanes`); `solvePlannedLanes` decodes the word (`laneGroups`:
+  marker, plan word, the groups lie in the block) and solves the groups from their LaneGroups and the rest (a tail
+  under 4, the contacts with a static or kinematic body) with the scalar solver. A word that fails these checks asserts
+  with asserts on and gathers (`solvePlanned`) otherwise, with the same bits, so a malformed word is never undefined
+  behavior. The checks cannot tell whether the named groups were built for this batch in this step: the words are
+  trusted because only the batch's planned warm start writes the marker (a marked word that names other groups is not
+  reachable).
+- Write back: in the job that ran the batch's last velocity iteration, before storeAppliedImpulses, `writeBackLanes`
+  copies the lambdas of the real lanes and points (never a padded lane or point) to the constraints.
+- Why no bit changes (the header of ContactConstraintSimd.zig has the full argument): the build copies bits, in the
+  groups and lanes of solvePlanned; between the build and the write back only the batch's own iterations write its
+  lambdas, and the step constant fields were written by FindCollisions before the warm start; the slots where the
+  block differs from the constraints (points past a lane's count, padded lanes) never reach a result; nothing reads the
+  lambdas between the last iteration and the write back. With 0 velocity steps no LaneGroups are built.
+- Gates: as the plans. buildLanes, solvePlannedLanes and writeBackLanes are never inlined.
+- Tests: ContactConstraintSimdTests runs the random planned batches of its harness also with LaneGroups (built after
+  the warm start between the groups of other batches, which must stay untouched, and written back after every
+  iteration) and compares them with Jolt's order and the scalar solver bit for bit after every phase; it also checks
+  the decoding of lane words and that `laneGroupBound` bounds the LaneGroups of random islands.
+  PhysicsSystemTests runs the kinematic platform pile with and without LaneGroups (warm start on and off): a capacity of
+  3 groups (some batches laned, some gathering in one step), every growth failing, all but the first growth failing,
+  `releaseSimdLanes` between updates; the states must be equal after every update and no step may claim more than its
+  bound. The pyramid, step override and 0 velocity step tests of the plans run with LaneGroups on.
+
+Cost (callgrind, -t=1, perf_budget's cache geometry; the median of the paired deltas over 3 environment paddings; the
+data side cycle estimate DCEst is Ir + 10 (D1mr + D1mw + Bcm + Bim) + 100 (DLmr + DLmw)). Pyramid (60 steps):
+4,047,171,149 to 3,769,125,044 instructions (-6.87%), DCEst -5.92%; the solve job -24.9% instructions, -18.0% DCEst
+(D1 read misses -6.0M, write misses +4.0M: the LaneGroups are written once per step). Ragdoll (80 steps, large islands
+from about step 24): -0.46% instructions, DCEst -0.43%. ConvexVsMesh (500 steps): -0.08% instructions, DCEst +0.011%
+(its solve job -0.49% instructions and -0.057% DCEst with 477K more D1 read and 163K more write misses; FindCollisions
+keeps its instructions, its branch simulation adds 0.03%). Ragdoll 15 steps, ConvexVsMesh 200 steps, HighSpeed and
+CharacterVirtual (no LaneGroups in these runs: the block never grows): -0.022% to 0% in instructions and DCEst (the
+solve job's own code: 0.005% to 0.47% fewer instructions). In no scene does a job with 1% or more of the scene rise
+above +0.1% DCEst, and the jobs that this change does not touch keep their instructions exactly. A threshold
+(LaneGroups only for islands with many planned groups) is not used: ConvexVsMesh 500, the scene with the fewest
+LaneGroups per step (at most 37), still gains in its solve job, and without LaneGroups that job is the base.

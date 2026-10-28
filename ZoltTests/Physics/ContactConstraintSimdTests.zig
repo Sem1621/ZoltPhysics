@@ -831,6 +831,9 @@ const Phases = struct {
     store: bool = true,
     /// The position iterations (they need normalized normals: physical scenes)
     position_iterations: usize = 0,
+    /// (Phase 14) Solve the velocity iterations from LaneGroups (buildLanes, solvePlannedLanes) and write their lambdas
+    /// back after every iteration (writeBackLanes), so that every iteration can be compared
+    lanes: bool = false,
 };
 
 /// The kinds of plans that the random batches made
@@ -890,12 +893,46 @@ fn runPlannedBatch(jolt: *Scene, planned: *Scene, seed: u32, phases: Phases, cov
     for (buffer[guard + batch.len ..]) |word| try expectEqual(sentinel, word);
     coverage.add(try expectPlan(planned, original, batch, plan_word), batch.len);
 
+    // (Phase 14) The LaneGroups of the batch in the manager's block, between groups of other batches (`before` and
+    // `after` of them, filled with a pattern that must stay), named by a lane word like PhysicsSystem's claim
+    const num_dynamic = ContactConstraintSimd.plannedCount(plan_word, batch.len).?;
+    const num_groups = ContactConstraintSimd.numLaneGroups(num_dynamic);
+    const before: u32 = seed % 3;
+    const after = 1;
+    const simd_lanes = &planned.manager.simd_lanes;
+    try simd_lanes.replace(std.testing.allocator, before + num_groups + after);
+    defer simd_lanes.free(std.testing.allocator);
+    const all_groups = simd_lanes.groups();
+    try expectEqual(@as(usize, before + num_groups + after), all_groups.len);
+    @memset(std.mem.sliceAsBytes(all_groups), 0x5a);
+    var lane_word = ContactConstraintSimd.no_lanes;
+    if (phases.lanes and num_groups > 0) { // (PhysicsSystem builds no LaneGroups for a batch that fills no group)
+        lane_word = ContactConstraintSimd.laneWord(before);
+        const batch_lanes = ContactConstraintSimd.laneGroups(lane_word, plan_word, batch.len, all_groups).?;
+        try expectEqual(num_dynamic, batch_lanes.num_dynamic);
+        try expectEqual(@as([*]ContactConstraintSimd.LaneGroup, all_groups[before..].ptr), batch_lanes.groups.ptr);
+        try expectEqual(@as(usize, num_groups), batch_lanes.groups.len);
+        ContactConstraintSimd.buildLanes(&planned.manager, batch, num_dynamic, batch_lanes.groups);
+        try expectSameState(jolt, planned, seed, "buildLanes", 0);
+    }
+    const lanes = ContactConstraintSimd.hasLanes(lane_word);
+    try expectEqual(phases.lanes and num_groups > 0, lanes);
+
     for (0..phases.velocity_iterations) |iteration| {
         const applied_jolt = jolt.manager.solveVelocityConstraints(original);
-        const applied_planned = ContactConstraintSimd.solvePlanned(&planned.manager, batch, plan_word);
+        const applied_planned = if (lanes) ContactConstraintSimd.solvePlannedLanes(&planned.manager, batch, plan_word, lane_word) else ContactConstraintSimd.solvePlanned(&planned.manager, batch, plan_word);
+        if (lanes) {
+            ContactConstraintSimd.writeBackLanes(&planned.manager, batch, plan_word, lane_word);
+            for (buffer[0..guard]) |word| try expectEqual(sentinel, word);
+            for (buffer[guard + batch.len ..]) |word| try expectEqual(sentinel, word);
+        }
         try expectSameState(jolt, planned, seed, "velocity iteration", iteration);
         try expectEqual(applied_jolt, applied_planned);
     }
+
+    // The groups of the other batches are untouched
+    for (std.mem.sliceAsBytes(all_groups[0..before])) |byte| try expectEqual(@as(u8, 0x5a), byte);
+    for (std.mem.sliceAsBytes(all_groups[before + num_groups ..])) |byte| try expectEqual(@as(u8, 0x5a), byte);
 
     if (phases.store) {
         jolt.manager.storeAppliedImpulses(original);
@@ -942,6 +979,101 @@ test "ContactConstraintSimd: a planned batch gives the bits of Jolt's order with
     try runPlannedBatches(.edge, 200, .{ .velocity_iterations = 4 });
     try runPlannedBatches(.zeros, 200, .{ .velocity_iterations = 4 });
     try runPlannedBatches(.huge, 200, .{ .warm_start = false, .velocity_iterations = 1 });
+}
+
+test "ContactConstraintSimd: a planned batch with LaneGroups gives the bits of Jolt's order with the scalar solver" {
+    // Phase 14: buildLanes after the warm start and planBatch (into groups between the groups of other batches, named by
+    // a lane word), solvePlannedLanes in every velocity iteration and writeBackLanes after it: the bits of Jolt's order
+    // after every phase (also the lambdas: the write back covers every lane and point that the SIMD solver changed, and
+    // only those), nothing written outside the batch's groups
+    if (!ContactConstraintSimd.supported) return error.SkipZigTest;
+    try runPlannedBatches(.physical, 300, .{ .velocity_iterations = 6, .position_iterations = 3, .lanes = true });
+    try runPlannedBatches(.edge, 200, .{ .velocity_iterations = 4, .lanes = true });
+    try runPlannedBatches(.zeros, 200, .{ .velocity_iterations = 4, .lanes = true });
+    try runPlannedBatches(.huge, 200, .{ .warm_start = false, .velocity_iterations = 1, .lanes = true });
+}
+
+test "ContactConstraintSimd: a lane word names LaneGroups only behind its marker and only when they fit" {
+    // Phase 14: the word after a batch's plan word holds its lane word. splitIsland writes split indices there and a plan
+    // word is never there in a correct run; neither is taken for a lane word.
+    const laneGroups = ContactConstraintSimd.laneGroups;
+    const LaneGroup = ContactConstraintSimd.LaneGroup;
+    const allocator = std.testing.allocator;
+    const groups = try allocator.alignedAlloc(LaneGroup, .fromByteUnits(64), 10);
+    defer allocator.free(groups);
+    const plan = ContactConstraintSimd.plan_marker | 12; // 12 planned contacts: 2 groups
+
+    // No marker: the batch gathers (also the split indices and no_lanes)
+    for (0..LargeIslandSplitter.num_splits) |split|
+        try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(@intCast(split), plan, 16, groups));
+    try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(ContactConstraintSimd.no_lanes, plan, 16, groups));
+    try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(plan, plan, 16, groups));
+    try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(0x4d00_0003, plan, 16, groups));
+
+    // The marker: the groups from the word's index on
+    for ([_]u32{ 0, 3, 8 }) |first| {
+        const lanes = laneGroups(ContactConstraintSimd.laneWord(first), plan, 16, groups).?;
+        try expectEqual(@as(u32, 12), lanes.num_dynamic);
+        try expectEqual(@as([*]LaneGroup, groups[first..].ptr), lanes.groups.ptr);
+        try expectEqual(@as(usize, 2), lanes.groups.len);
+    }
+    try expectEqual(ContactConstraintSimd.lane_marker | 5, ContactConstraintSimd.laneWord(5));
+    try expectEqual(ContactConstraintSimd.lane_marker | (ContactConstraintSimd.max_lane_groups - 1), ContactConstraintSimd.laneWord(ContactConstraintSimd.max_lane_groups - 1));
+
+    // Not reachable in a correct run (they assert with asserts on): the groups do not fit, or no plan in the plan word.
+    // Without asserts the batch gathers.
+    if (!std.debug.runtime_safety) {
+        try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(ContactConstraintSimd.laneWord(9), plan, 16, groups));
+        try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(ContactConstraintSimd.laneWord(11), plan, 16, groups));
+        try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(ContactConstraintSimd.laneWord(0), 7, 16, groups));
+        try expectEqual(@as(?ContactConstraintSimd.BatchLanes, null), laneGroups(ContactConstraintSimd.laneWord(0), ContactConstraintSimd.plan_marker | 3, 16, groups));
+    }
+}
+
+test "ContactConstraintSimd: laneGroupBound is an upper bound on the LaneGroups of the batches of an island" {
+    // Phase 14: the bound that PhysicsSystem sizes its LaneGroups by. Batches of a parallel split: chunks of 16 items
+    // (contacts and constraints), planned with 4 to 16 contacts, numLaneGroups of their planned contacts. Random
+    // islands: the split sizes, the contacts per split and the planned share of the contacts vary.
+    const numLaneGroups = ContactConstraintSimd.numLaneGroups;
+    var prng = std.Random.DefaultPrng.init(0x7a17);
+    const random = prng.random();
+    for (0..2000) |_| {
+        var num_contacts: u32 = 0;
+        var num_items: u32 = 0;
+        var num_groups: u64 = 0;
+        const num_parallel = random.intRangeAtMost(u32, 0, LargeIslandSplitter.non_parallel_split_idx);
+        for (0..num_parallel) |_| {
+            const split_contacts = random.intRangeAtMost(u32, 0, 200);
+            const split_constraints = if (random.boolean()) random.intRangeAtMost(u32, 0, 40) else 0;
+            num_contacts += split_contacts;
+            num_items += split_contacts + split_constraints;
+
+            // A batch takes the constraints first, then the contacts (fetchNextBatch)
+            var item: u32 = 0;
+            while (item < split_contacts + split_constraints) : (item += 16) {
+                const end = @min(item + 16, split_contacts + split_constraints);
+                const contacts = end -| @max(item, split_constraints);
+                if (contacts < ContactConstraintSimd.min_lanes)
+                    continue; // Not planned
+                const planned = if (random.boolean()) contacts else random.intRangeAtMost(u32, 0, contacts);
+                num_groups += numLaneGroups(planned);
+            }
+        }
+
+        // The non parallel split: contacts and constraints that are never planned
+        const non_parallel_contacts = random.intRangeAtMost(u32, 0, 100);
+        num_contacts += non_parallel_contacts;
+        num_items += non_parallel_contacts + random.intRangeAtMost(u32, 0, 20);
+
+        try expect(num_groups <= ContactConstraintSimd.laneGroupBound(num_contacts, LargeIslandSplitter.maxParallelBatches(num_items)));
+    }
+
+    // Reached: 16 contacts in 4 splits of 4 (4 padded groups), 4 contacts, 31 splits of 4 contacts; fewer than 4
+    // contacts plan nothing
+    try expectEqual(@as(u64, 4), ContactConstraintSimd.laneGroupBound(16, LargeIslandSplitter.maxParallelBatches(16)));
+    try expectEqual(@as(u64, 1), ContactConstraintSimd.laneGroupBound(4, LargeIslandSplitter.maxParallelBatches(4)));
+    try expectEqual(@as(u64, 31), ContactConstraintSimd.laneGroupBound(31 * 4, LargeIslandSplitter.maxParallelBatches(31 * 4)));
+    try expectEqual(@as(u64, 0), ContactConstraintSimd.laneGroupBound(3, LargeIslandSplitter.maxParallelBatches(200)));
 }
 
 test "ContactConstraintSimd: plannedCount finds a plan only behind the marker" {

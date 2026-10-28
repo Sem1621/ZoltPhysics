@@ -950,9 +950,11 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhase.updatePrepare)" 
     try scene.system.saveState(snapshot.recorder(), .{});
 
     // Reference: count the heap allocations of one update (one block per step in the UpdateBroadPhasePrepare job)
+    const growths = releaseSimdLanes(&scene.system); // (Zolt, Phase 14)
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expectEqual(growths, simdLaneGrowths(&scene.system));
     try expectEqual(@as(u32, collision_steps), num_allocations);
     var reference = StateRecorderImpl.init(std.testing.allocator);
     defer reference.deinit();
@@ -962,9 +964,11 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhase.updatePrepare)" 
         snapshot.rewind();
         try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
         const num_prepared = broad_phase.num_prepared;
+        const swept_growths = releaseSimdLanes(&scene.system);
         heap.fail_index.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
         heap.fail_index.store(std.math.maxInt(u32), .monotonic);
+        try expectEqual(swept_growths, simdLaneGrowths(&scene.system));
         try expectEqual(num_prepared + @as(u32, @intCast(i)), broad_phase.num_prepared); // The steps before the failure finalized their block
         try expect(temp.isEmpty());
         try expectRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
@@ -1024,6 +1028,21 @@ fn releaseBroadPhaseScratch(system: *PhysicsSystem) void {
     quad_tree.releaseUpdateScratch();
 }
 
+/// Zolt (Phase 14): the growth of the SIMD LaneGroups in `update` (before the jobs) is the one heap allocation of an
+/// update whose failure is silent (SimulationArchitecture.md D5, D12), so it must not fall in an update that a heap sweep
+/// counts or fails (the ContactScene without manifold reduction has a large island: its LaneGroups grow in the warm-up
+/// updates). Free them before such an update: it has no block, so it grows none and only records its demand. Returns
+/// the growths so far, which the update must not change (simdLaneGrowths).
+fn releaseSimdLanes(system: *PhysicsSystem) u32 {
+    system.releaseSimdLanes();
+    return simdLaneGrowths(system);
+}
+
+/// Zolt (Phase 14): the growths of the SIMD LaneGroups since `init`, also those whose allocation failed
+fn simdLaneGrowths(system: *const PhysicsSystem) u32 {
+    return system.simd_plans.lanes.growths + system.simd_plans.lanes.failed_growths;
+}
+
 test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePrepare)" {
     // The default broad phase allocates the node IDs and BuildTree's centers in the UpdateBroadPhasePrepare job
     var heap: FailingHeapAllocator = .{ .inner = std.testing.allocator };
@@ -1047,9 +1066,11 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePr
     // Reference: count the heap allocations of one update (the first step rebuilds the tree of the moving bodies, the
     // second step cannot update it again before the next FrameSync discards its old tree)
     releaseBroadPhaseScratch(&scene.system);
+    const growths = releaseSimdLanes(&scene.system); // (Zolt, Phase 14)
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expectEqual(growths, simdLaneGrowths(&scene.system));
     try expect(num_allocations >= 2); // The node IDs and the centers
     var reference = StateRecorderImpl.init(std.testing.allocator);
     defer reference.deinit();
@@ -1059,9 +1080,11 @@ test "PhysicsSystem out of heap memory inside a job (BroadPhaseQuadTree.updatePr
         snapshot.rewind();
         try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
         releaseBroadPhaseScratch(&scene.system);
+        const swept_growths = releaseSimdLanes(&scene.system);
         heap.fail_index.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
         heap.fail_index.store(std.math.maxInt(u32), .monotonic);
+        try expectEqual(swept_growths, simdLaneGrowths(&scene.system));
         try expect(temp.isEmpty());
         try expectRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
     }
@@ -2025,9 +2048,12 @@ fn countHeapAllocationsOfUpdate(opts: ContactScene.Options) !u32 {
     try scene.init(heap.allocator(), opts);
     defer scene.deinit();
     for (0..3) |_| _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
+    const growths = releaseSimdLanes(&scene.system); // (Zolt, Phase 14)
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
-    return heap.num_allocations.load(.monotonic) - before;
+    const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expectEqual(growths, simdLaneGrowths(&scene.system));
+    return num_allocations;
 }
 
 fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void {
@@ -2039,7 +2065,10 @@ fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void
     // reduction the manifolds of the large box are not added; without it NonReductionCollideShapeCollector adds the
     // contacts forwarded before the failure to the contact constraints and the cache at once, the update fails the same
     // way. (Zolt, Phase 13: the quad tree keeps its arrays between updates; releaseBroadPhaseScratch frees them before
-    // the reference update and before every swept update, so that the update allocates them at Jolt's points.)
+    // the reference update and before every swept update, so that the update allocates them at Jolt's points. Phase 14:
+    // without manifold reduction the scene has a large island, whose SIMD LaneGroups grow in the warm-up updates;
+    // releaseSimdLanes frees them at the same points, so that no growth, a heap allocation whose failure is silent,
+    // falls in a counted or swept update.)
     var without_collector = opts;
     without_collector.enhanced_internal_edge_removal = false;
     try expect(try countHeapAllocationsOfUpdate(opts) > try countHeapAllocationsOfUpdate(without_collector)); // The collector allocates
@@ -2062,9 +2091,11 @@ fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void
     defer snapshot.deinit();
     try scene.system.saveState(snapshot.recorder(), .{});
     releaseBroadPhaseScratch(&scene.system);
+    const growths = releaseSimdLanes(&scene.system); // (Zolt, Phase 14)
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expectEqual(growths, simdLaneGrowths(&scene.system));
     var reference = StateRecorderImpl.init(std.testing.allocator);
     defer reference.deinit();
     try scene.system.saveState(reference.recorder(), .{});
@@ -2073,9 +2104,11 @@ fn contactOutOfHeapMemory(kind: JobSystemKind, opts: ContactScene.Options) !void
         snapshot.rewind();
         try expect(try scene.system.restoreState(snapshot.recorder(), .{}));
         releaseBroadPhaseScratch(&scene.system);
+        const swept_growths = releaseSimdLanes(&scene.system);
         heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
         heap.fail_from.store(std.math.maxInt(u32), .monotonic);
+        try expectEqual(swept_growths, simdLaneGrowths(&scene.system));
         try expect(temp.isEmpty());
         try expectContactRecovery(scene, &snapshot, &reference, &temp, jobs.jobSystem());
     }
@@ -2161,6 +2194,8 @@ const PyramidScene = struct {
         num_velocity_steps: ?u32 = null,
         /// PhysicsSystem.simd_plans.enabled: the SIMD plans of the batches of the parallel splits (Phase 13)
         simd_plans: bool = true,
+        /// PhysicsSystem.simd_plans.lanes.enabled: the LaneGroups of the planned batches (Phase 14)
+        simd_lanes: bool = true,
         /// The collision steps of an update
         collision_steps: u32 = 1,
         /// The pyramid must be asleep after the updates of runPyramid
@@ -2185,6 +2220,7 @@ const PyramidScene = struct {
         if (opts.num_velocity_steps) |n| settings.num_velocity_steps = n;
         self.system.setPhysicsSettings(&settings);
         self.system.simd_plans.enabled = opts.simd_plans;
+        self.system.simd_plans.lanes.enabled = opts.simd_lanes;
         self.listener = .{ .system = &self.system };
         self.system.setBodyActivationListener(.init(&self.listener));
         self.system.setContactListener(.init(&self.contact_counter));
@@ -2220,6 +2256,8 @@ const PyramidRun = struct {
     /// PhysicsSystem.simd_plans.counts(): the batches that were planned, their velocity iterations that found the plan
     /// in their plan word and those that did not
     simd_plans: [3]u32,
+    /// PhysicsSystem.simd_plans.lanes.laned: the planned batches that used LaneGroups (Phase 14)
+    simd_lanes: u32,
 };
 
 /// Runs the pyramid until it is asleep, records the state after every update
@@ -2254,6 +2292,7 @@ fn runPyramid(allocator: Allocator, kind: JobSystemKind, opts: PyramidScene.Opti
         .sorts = scene.system.large_island_sorts.counts(),
         .max_num_constraints = max_num_constraints,
         .simd_plans = scene.system.simd_plans.counts(),
+        .simd_lanes = scene.system.simd_plans.lanes.laned.load(.monotonic),
     };
 }
 
@@ -2388,6 +2427,22 @@ test "PhysicsSystem large island: the SIMD plans of the parallel batches give th
                 try expectEqual(@as(u32, 0), planned);
             try expectEqual(planned * velocity_steps, run.simd_plans[1]);
             try expectEqual(@as(u32, 0), run.simd_plans[2]);
+
+            // (Phase 14) The LaneGroups run from the second update on, when there are velocity steps
+            if (zolt.ContactConstraintSimd.enabled and velocity_steps > 0)
+                try expect(run.simd_lanes > 0)
+            else
+                try expectEqual(@as(u32, 0), run.simd_lanes);
+
+            // Planned without LaneGroups: the same states
+            var gather_states: std.ArrayList(u8) = .empty;
+            defer gather_states.deinit(allocator);
+            var gather_offsets: std.ArrayList(usize) = .empty;
+            defer gather_offsets.deinit(allocator);
+            const gather = try runPyramid(allocator, kind, .{ .simd_lanes = false, .collision_steps = config.collision_steps, .num_velocity_steps = config.num_velocity_steps, .expect_asleep = expect_asleep }, &gather_states, &gather_offsets);
+            try expectEqual(@as(u32, 0), gather.simd_lanes);
+            try expectEqual(run.simd_plans, gather.simd_plans);
+            try std.testing.expectEqualSlices(u8, ref_states.items, gather_states.items);
         }
     }
 }
@@ -2406,6 +2461,12 @@ const PileScene = struct {
     const Options = struct {
         /// PhysicsSystem.simd_plans.enabled
         simd_plans: bool,
+        /// PhysicsSystem.simd_plans.lanes.enabled: the SIMD LaneGroups of the planned batches (Phase 14)
+        simd_lanes: bool = true,
+        /// PhysicsSystem.simd_plans.lanes.max_capacity: the most LaneGroups that a growth allocates (Phase 14)
+        lanes_max_capacity: u32 = zolt.ContactConstraintSimd.max_lane_groups,
+        /// PhysicsSettings.constraint_warm_start
+        warm_start: bool = true,
         collision_steps: u32,
         num_velocity_steps: u32,
         num_position_steps: u32,
@@ -2444,8 +2505,11 @@ const PileScene = struct {
         var settings = self.system.getPhysicsSettings().*;
         settings.num_velocity_steps = opts.num_velocity_steps;
         settings.num_position_steps = opts.num_position_steps;
+        settings.constraint_warm_start = opts.warm_start;
         self.system.setPhysicsSettings(&settings);
         self.system.simd_plans.enabled = opts.simd_plans;
+        self.system.simd_plans.lanes.enabled = opts.simd_lanes;
+        self.system.simd_plans.lanes.max_capacity = opts.lanes_max_capacity;
         self.system.setContactListener(.init(&self.listener));
         const bi = self.system.getBodyInterfaceMut();
 
@@ -2511,8 +2575,26 @@ const PileScene = struct {
     }
 };
 
-/// Runs the pile for 60 updates, records the state after every update, returns PhysicsSystem.simd_plans.counts()
-fn runPile(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Options, states: *std.ArrayList(u8)) ![3]u32 {
+/// Runs the pile for 60 updates, records the state after every update, returns PhysicsSystem.simd_plans.counts() and
+/// PhysicsSystem.simd_plans.lanes.laned
+fn runPile(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Options, states: *std.ArrayList(u8)) ![4]u32 {
+    return runPileWith(allocator, kind, opts, states, .{});
+}
+
+/// What runPileWith does besides the updates (Phase 14, the SIMD LaneGroups)
+const PileRun = struct {
+    /// The allocator of the scene and its PhysicsSystem (null: the allocator of runPileWith)
+    system_allocator: ?Allocator = null,
+    /// Call PhysicsSystem.releaseSimdLanes after these updates (0 based)
+    release_lanes_after: []const usize = &.{},
+    /// Per update: the planned batches that used LaneGroups and those whose claim found no room in it
+    per_update: ?*[60][2]u32 = null,
+    /// PhysicsSystem.simd_plans.lanes.counts() after the last update
+    lanes_counts: ?*[5]u32 = null,
+};
+
+/// runPile with the extras of `run`. Every step must claim at most the LaneGroups that laneGroupBound allows.
+fn runPileWith(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Options, states: *std.ArrayList(u8), run: PileRun) ![4]u32 {
     var jobs: AnyJobSystem = .{};
     try jobs.init(allocator, kind);
     defer jobs.deinit();
@@ -2520,20 +2602,166 @@ fn runPile(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Options, s
     defer temp.deinit();
     const scene = try allocator.create(PileScene);
     defer allocator.destroy(scene);
-    try scene.init(allocator, opts);
+    try scene.init(run.system_allocator orelse allocator, opts);
     defer scene.deinit();
 
     var recorder = StateRecorderImpl.init(allocator);
     defer recorder.deinit();
-    for (0..60) |_| {
+    const lanes = &scene.system.simd_plans.lanes;
+    for (0..60) |i| {
+        const before = [2]u32{ lanes.laned.load(.monotonic), lanes.no_room.load(.monotonic) };
         const errors = try scene.system.update(delta_time, opts.collision_steps, temp.tempAllocator(), jobs.jobSystem());
         try expect(errors.isNone());
         try expect(temp.isEmpty());
+        if (run.per_update) |per_update|
+            per_update[i] = .{ lanes.laned.load(.monotonic) - before[0], lanes.no_room.load(.monotonic) - before[1] };
+        if (std.mem.indexOfScalar(usize, run.release_lanes_after, i) != null) {
+            scene.system.releaseSimdLanes();
+            try expect(scene.system.contact_manager.simd_lanes.block == null);
+            try expectEqual(@as(u32, 0), scene.system.contact_manager.simd_lanes.capacity);
+        }
         recorder.clear();
         try scene.system.saveState(recorder.recorder(), .{});
         try states.appendSlice(allocator, recorder.getData());
     }
-    return scene.system.simd_plans.counts();
+    try expectEqual(@as(u32, 0), lanes.over_bound);
+    if (run.lanes_counts) |counts| counts.* = lanes.counts();
+    const counts = scene.system.simd_plans.counts();
+    return .{ counts[0], counts[1], counts[2], lanes.laned.load(.monotonic) };
+}
+
+/// An allocator whose allocations of SIMD LaneGroups (the 64 byte aligned blocks of PhysicsSystem's growths, a header
+/// and a whole number of LaneGroups) fail from the `fail_from`-th on (0 based); everything else goes to `inner`
+const LaneGroupsFailingAllocator = struct {
+    inner: Allocator,
+    fail_from: u32,
+    /// The allocations of LaneGroups, and those of them that failed
+    num_lane_allocations: u32 = 0,
+    num_failed: u32 = 0,
+
+    fn allocator(self: *LaneGroupsFailingAllocator) Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn isLaneBlock(len: usize, alignment: std.mem.Alignment) bool {
+        const SimdLanes = zolt.ContactConstraintSimd.SimdLanes;
+        const header = @sizeOf(SimdLanes.BlockHeader);
+        return alignment.toByteUnits() == zolt.Core.cache_line_size and len > header and (len - header) % @sizeOf(zolt.ContactConstraintSimd.LaneGroup) == 0;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LaneGroupsFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (isLaneBlock(len, alignment)) {
+            // (Only update allocates LaneGroups, on the thread that calls it)
+            self.num_lane_allocations += 1;
+            if (self.num_lane_allocations > self.fail_from) {
+                self.num_failed += 1;
+                return null;
+            }
+        }
+        return self.inner.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LaneGroupsFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.inner.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LaneGroupsFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.inner.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LaneGroupsFailingAllocator = @ptrCast(@alignCast(ctx));
+        self.inner.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "PhysicsSystem large island: the SIMD LaneGroups give the states of the gather path with little room, failed growths, a release and no warm start" {
+    // Zolt addition (Phase 14, class A): a batch whose LaneGroups do not fit gathers from the contact constraints, so do
+    // all batches while there is no block (a failed growth keeps the old block or none, silently: Jolt has no such
+    // allocation). The states after every update must be the bits of the gather path (simd_plans.lanes.enabled =
+    // false) in each case, also when lanes and gathers mix in one step and on a pool of threads, where the claim order
+    // (and so which batches find room) differs from run to run. The pile has kinematic contacts, constraints, step
+    // overrides and 2 collision steps per update; also without the warm start.
+    if (!zolt.ContactConstraintSimd.enabled) return error.SkipZigTest; // (The other large island tests check that nothing claims LaneGroups then)
+    const allocator = std.testing.allocator;
+    for ([_]bool{ true, false }) |warm_start| {
+        const opts: PileScene.Options = .{ .simd_plans = true, .simd_lanes = false, .warm_start = warm_start, .collision_steps = 2, .num_velocity_steps = 6, .num_position_steps = 2, .overrides = true };
+        var ref_states: std.ArrayList(u8) = .empty;
+        defer ref_states.deinit(allocator);
+        try expectEqual(@as(u32, 0), (try runPile(allocator, .single_threaded, opts, &ref_states))[3]);
+        var lanes_opts = opts;
+        lanes_opts.simd_lanes = true;
+
+        // Room enough: LaneGroups from the second update on, the growths double
+        var counts: [5]u32 = undefined;
+        {
+            var states: std.ArrayList(u8) = .empty;
+            defer states.deinit(allocator);
+            const laned = (try runPileWith(allocator, .single_threaded, lanes_opts, &states, .{ .lanes_counts = &counts }))[3];
+            try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+            try expect(laned > 0);
+            try expectEqual(laned, counts[0]);
+            try expect(counts[3] >= 1); // Growths
+            try expectEqual(@as(u32, 0), counts[4]); // Failed growths
+        }
+        try expect(counts[3] >= 2); // (So that the second growth below can fail)
+
+        for ([_]JobSystemKind{ .single_threaded, .{ .thread_pool = 3 } }) |kind| {
+            // Room for 3 LaneGroups: in the same update some planned batches use LaneGroups and some gather
+            {
+                var small_opts = lanes_opts;
+                small_opts.lanes_max_capacity = 3;
+                var states: std.ArrayList(u8) = .empty;
+                defer states.deinit(allocator);
+                var per_update: [60][2]u32 = undefined;
+                _ = try runPileWith(allocator, kind, small_opts, &states, .{ .per_update = &per_update, .lanes_counts = &counts });
+                try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+                var mixed: usize = 0;
+                for (per_update) |update| {
+                    if (update[0] > 0 and update[1] > 0) mixed += 1;
+                }
+                try expect(mixed >= 10);
+                try expectEqual(@as(u32, 1), counts[3]); // One growth, to 3 LaneGroups
+            }
+
+            // Every growth fails: no LaneGroups, the same states, nothing leaks (std.testing.allocator)
+            for ([_]u32{ 0, 1 }) |fail_from| {
+                var failing: LaneGroupsFailingAllocator = .{ .inner = allocator, .fail_from = fail_from };
+                var states: std.ArrayList(u8) = .empty;
+                defer states.deinit(allocator);
+                const laned = (try runPileWith(allocator, kind, lanes_opts, &states, .{ .system_allocator = failing.allocator(), .lanes_counts = &counts }))[3];
+                try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+                try expectEqual(failing.num_failed, counts[4]); // The allocator failed the growths of the system, nothing else
+                try expect(counts[4] >= 1);
+                if (fail_from == 0) {
+                    // No block ever
+                    try expectEqual(@as(u32, 0), laned);
+                    try expectEqual(@as(u32, 0), counts[3]);
+                } else {
+                    // The first growth succeeded, the later ones failed: the first block stays
+                    try expect(laned > 0);
+                    try expectEqual(@as(u32, 1), counts[3]);
+                }
+            }
+
+            // releaseSimdLanes between updates: the next update gathers, the one after it grows again
+            {
+                var states: std.ArrayList(u8) = .empty;
+                defer states.deinit(allocator);
+                var per_update: [60][2]u32 = undefined;
+                _ = try runPileWith(allocator, kind, lanes_opts, &states, .{ .release_lanes_after = &.{ 19, 39 }, .per_update = &per_update, .lanes_counts = &counts });
+                try std.testing.expectEqualSlices(u8, ref_states.items, states.items);
+                for ([_]usize{ 20, 40 }) |i| {
+                    try expectEqual(@as(u32, 0), per_update[i][0]); // No block in the update after the release
+                    try expect(per_update[i + 1][0] > 0); // Grown again
+                }
+                try expect(counts[3] >= 3);
+            }
+        }
+    }
 }
 
 test "PhysicsSystem large island: the SIMD plans give the states of the path without plans with kinematic contacts, constraints, step overrides and 7 workers" {
@@ -2554,7 +2782,7 @@ test "PhysicsSystem large island: the SIMD plans give the states of the path wit
         var opts: PileScene.Options = .{ .simd_plans = false, .collision_steps = config.collision_steps, .num_velocity_steps = config.num_velocity_steps, .num_position_steps = config.num_position_steps, .overrides = config.overrides };
         var ref_states: std.ArrayList(u8) = .empty;
         defer ref_states.deinit(allocator);
-        try expectEqual([3]u32{ 0, 0, 0 }, try runPile(allocator, .single_threaded, opts, &ref_states));
+        try expectEqual([4]u32{ 0, 0, 0, 0 }, try runPile(allocator, .single_threaded, opts, &ref_states));
 
         // The velocity steps of an island: the default, with an override in the island the larger of the two
         const min_steps = if (config.overrides) @min(config.num_velocity_steps, PileScene.override_velocity_steps) else config.num_velocity_steps;
@@ -2573,6 +2801,19 @@ test "PhysicsSystem large island: the SIMD plans give the states of the path wit
                 try expectEqual(@as(u32, 0), planned);
             try expect(counts[1] >= planned * min_steps and counts[1] <= planned * max_steps);
             try expectEqual(@as(u32, 0), counts[2]);
+
+            // (Phase 14) The LaneGroups ran when there are velocity steps; without them: the same states
+            if (zolt.ContactConstraintSimd.enabled and config.num_velocity_steps > 0)
+                try expect(counts[3] > 0)
+            else
+                try expectEqual(@as(u32, 0), counts[3]);
+            var gather_opts = opts;
+            gather_opts.simd_lanes = false;
+            var gather_states: std.ArrayList(u8) = .empty;
+            defer gather_states.deinit(allocator);
+            const gather_counts = try runPile(allocator, kind, gather_opts, &gather_states);
+            try expectEqual(@as(u32, 0), gather_counts[3]);
+            try std.testing.expectEqualSlices(u8, ref_states.items, gather_states.items);
         }
     }
 }
@@ -3159,18 +3400,22 @@ fn ccdOutOfHeapMemory(kind: JobSystemKind) !void {
 
     try fx.restore();
     releaseBroadPhaseScratch(&scene.system); // Zolt (Phase 13): the update allocates the quad tree's arrays like Jolt
+    const growths = releaseSimdLanes(&scene.system); // (Zolt, Phase 14)
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expectEqual(growths, simdLaneGrowths(&scene.system));
     try expect(num_allocations > 0);
     try expectCCDState(scene, &fx.reference);
 
     for (0..num_allocations) |i| {
         try fx.restore();
         releaseBroadPhaseScratch(&scene.system);
+        const swept_growths = releaseSimdLanes(&scene.system);
         heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, fx.temp.tempAllocator(), fx.jobs.jobSystem()));
         heap.fail_from.store(std.math.maxInt(u32), .monotonic);
+        try expectEqual(swept_growths, simdLaneGrowths(&scene.system));
         try expect(fx.temp.isEmpty());
         try expectCCDRecovery(scene, &fx.snapshot, &fx.reference, &fx.temp, fx.jobs.jobSystem());
     }
@@ -4188,9 +4433,11 @@ fn softBodyOutOfHeapMemory(kind: JobSystemKind) !void {
 
     // Reference: count the heap allocations of one update. The SoftBodyCollide jobs allocate the leaf shape lists of the
     // floor, the compound, the sensor and the box in every step.
+    const growths = releaseSimdLanes(&scene.system); // (Zolt, Phase 14)
     const before = heap.num_allocations.load(.monotonic);
     _ = try scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem());
     const num_allocations = heap.num_allocations.load(.monotonic) - before;
+    try expectEqual(growths, simdLaneGrowths(&scene.system));
     try expect(num_allocations >= collision_steps * 4);
     try scene.expectNoCollidingShapes();
     var reference = StateRecorderImpl.init(std.testing.allocator);
@@ -4201,9 +4448,11 @@ fn softBodyOutOfHeapMemory(kind: JobSystemKind) !void {
     // jobs do nothing, Finalize releases the colliding shapes and frees the contexts (R17)
     for (0..num_allocations) |i| {
         try scene.restore(&snapshot);
+        const swept_growths = releaseSimdLanes(&scene.system);
         heap.fail_from.store(heap.num_allocations.load(.monotonic) + @as(u32, @intCast(i)), .monotonic);
         try std.testing.expectError(error.OutOfMemory, scene.system.update(delta_time, collision_steps, temp.tempAllocator(), jobs.jobSystem()));
         heap.fail_from.store(std.math.maxInt(u32), .monotonic);
+        try expectEqual(swept_growths, simdLaneGrowths(&scene.system));
         try expect(temp.isEmpty());
         try scene.expectNoCollidingShapes();
         try scene.expectRecovery(&snapshot, &reference, &temp, jobs.jobSystem());

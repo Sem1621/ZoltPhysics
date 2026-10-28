@@ -92,6 +92,55 @@
 //! Pyramid (60 steps): -2.45% instructions (4,148,175,876 to 4,046,679,602). planBatch places each constraint once at
 //! a counted position: its first version copied buckets back with loops that LLVM turned into 5 memcpy calls per batch
 //! (221,226 more instructions in Pyramid).
+//!
+//! LaneGroups (Phase 14, class A). solveGroup gathered the step constant data of its lanes from the contact constraints
+//! in every velocity iteration (the transposed loads, the address math of the contact points, setLane's reads of the
+//! bodies and motion properties) and scattered the lambdas back: 7% of Pyramid's instructions. A planned batch now
+//! keeps that data in lane order for the whole step, in `LaneGroup`s (3,840 bytes on 64 bit targets, 480 per lane):
+//! - Memory: one heap block, kept between updates (`SimdLanes`, ContactConstraintManager.simd_lanes): a 64 byte header
+//!   with the bump counter of the step on its own cache line, then the LaneGroups. PhysicsSystem grows it before the jobs
+//!   of an update, never in a job (SimulationArchitecture.md D5): to what the steps of the previous update asked for and
+//!   at least to twice its size (the first time to `laneGroupBound`). A failed growth keeps the old block or none.
+//! - Claim: at the warm start of a planned batch whose split island has velocity steps, after planBatch, PhysicsSystem
+//!   adds numLaneGroups(the planned count) to the counter. When the groups fit, `buildLanes` fills them and the batch's
+//!   lane word (LargeIslandSplitter.batchLaneWord, the entry after the plan word) gets `laneWord(first)`, otherwise
+//!   `no_lanes`. Lanes or gather is decided once per batch and step.
+//! - Velocity iterations: `laneGroups` decodes the lane word (the marker 0x4c in its high 8 bits, the plan word, the
+//!   groups lie in the block) and `solvePlannedLanes` solves the groups from their LaneGroups (`solveGroupFrom` with
+//!   `LaneSource`: the kernel of solveGroup, only the operands come from the block), the scalar rest from the
+//!   constraints. A word without the marker gathers (solvePlanned). A word with the marker whose plan word holds no plan
+//!   or whose groups do not lie in the block asserts with asserts on and gathers otherwise (not reachable).
+//! - Write back: after the batch's last velocity iteration, in the job that marked it processed and before
+//!   storeAppliedImpulses, `writeBackLanes` copies the lambdas of the lanes below each group's count and of the points
+//!   below each lane's count to the constraints.
+//!
+//! Why the LaneGroups change no bit:
+//! - Build: buildLanes copies bits (the loads and transposes of the gather path, then vector stores) with no arithmetic,
+//!   so NaN payloads and signed zeros stay. Its groups and lanes are those of solvePlanned: the same planned order, tail
+//!   rule (min_lanes) and padding (copies of lane 0).
+//! - The block stays current for the whole step: FindCollisions writes the step constant fields of the constraints
+//!   before the warm start, and between the build and the write back only the batch's own kernel writes the lambdas of
+//!   its contacts (a contact is in one batch, the iterations of a batch follow each other, see "Why the warm start of a
+//!   batch always comes before its velocity iterations"). By induction over the iterations every slot of the block holds
+//!   the bits that the gather path reads. The velocities stay in the motion properties, read and written as before.
+//! - The slots that differ never leave their lane. A point at or past a lane's count holds the build time copy of the
+//!   lane's point 0 where the gather path reads point 0's current value: its point mask keeps the max lambdas
+//!   (@select), applies no impulse and keeps the slot's own lambda, and it is never written back. A padded lane (at or
+//!   past `num`) is a copy of lane 0: masked out of the velocity write back and of the result, never written back (the
+//!   gather path wrote lane 0's own value into lane 0's constraint again).
+//! - Write back: once the last iteration is marked, no other job reads these lambdas before storeAppliedImpulses in
+//!   the same job; the position iterations start after every SolveVelocityConstraints job and read no lambda. So
+//!   storeAppliedImpulses, the contact cache, the debug renderer and the StateRecorder see the bits of the gather path.
+//! - 0 velocity steps: no LaneGroups (the warm start is the batch's last iteration, nothing would read them).
+//! - Visibility: the block and the lane word reach the jobs of the later iterations through the chain that carries the
+//!   plan (the acq_rel fetchAdd of items_processed, the release store and the acquire fetchAdd of the status).
+//! - Across steps: jobFinalizeIslands resets the counter after the previous step's solve jobs ended and before this
+//!   step's start, every planned warm start writes its lane word, and splitIsland rewrites the words of its island
+//!   before startFirstBatch. Which groups a batch gets depends on the claim order (the threads), which only selects
+//!   memory; a batch that finds no room gathers, with the same bits.
+//! Gates: as the plans (comptime off without `enabled`). buildLanes, solvePlannedLanes and writeBackLanes are never
+//! inlined. Callgrind (-t=1): Pyramid (60 steps) -6.87% instructions, -5.92% data side cycle estimate; Ragdoll (80
+//! steps) -0.46% and -0.43%; the other benchmark scenes change by less than 0.1% (SimulationArchitecture.md section 10).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -471,15 +520,213 @@ inline fn toVec3s(v: Vec3x8) [lanes]Vec3 {
     return result;
 }
 
+/// Zolt (Phase 14, class A): where the solver kernel reads the step constant data and the lambdas of its lanes and
+/// writes the lambdas back. GatherSource: from the contact constraints of a Group (transposed loads, scattered stores,
+/// the path of Phase 11). LaneSource: from a LaneGroup that holds them in lane order. Both give the kernel the same
+/// bits: the LaneGroup holds bit copies of what GatherSource would load (see "LaneGroups" at the top of this file).
+const GatherSource = struct {
+    g: *const Group,
+
+    /// The contact point `p` of every lane (a lane with fewer points gets its point 0 when `masked`)
+    const PointRef = struct {
+        ptrs: [lanes][*]u8,
+        extra: usize,
+    };
+
+    inline fn motionProperties1(s: GatherSource) *const [lanes]*MotionProperties {
+        return &s.g.motion_properties1;
+    }
+
+    inline fn motionProperties2(s: GatherSource) *const [lanes]*MotionProperties {
+        return &s.g.motion_properties2;
+    }
+
+    inline fn numContactPoints(s: GatherSource) *const [lanes]u32 {
+        return &s.g.num_contact_points;
+    }
+
+    inline fn point(s: GatherSource, p: u32, comptime masked: bool) PointRef {
+        return .{
+            .ptrs = if (masked) contactPoints(s.g, p) else s.g.constraints,
+            .extra = if (masked) 0 else off_points + p * @sizeOf(ContactPoint),
+        };
+    }
+
+    inline fn pointLambda(_: GatherSource, r: *const PointRef) V {
+        return load1(&r.ptrs, r.extra, off_point_lambda);
+    }
+
+    inline fn pointDistance(_: GatherSource, r: *const PointRef) V {
+        return load1(&r.ptrs, r.extra, off_point_distance);
+    }
+
+    inline fn pointPart(_: GatherSource, r: *const PointRef) PartX8 {
+        return .load(&r.ptrs, r.extra);
+    }
+
+    inline fn storePointLambda(_: GatherSource, r: *const PointRef, lambda: V) void {
+        store1(&r.ptrs, r.extra, off_point_lambda, lambda);
+    }
+
+    inline fn combinedFriction(s: GatherSource) V {
+        return load4(&s.g.constraints, 0, off_tangent2)[3]; // tangent2, combined_friction
+    }
+
+    inline fn inverseMasses(s: GatherSource) [2]V {
+        const mass_group = load4(&s.g.constraints, 0, off_inv_mass1); // inv_mass1, inv_inertia_scale1, inv_mass2, inv_inertia_scale2
+        return .{ mass_group[0], mass_group[2] };
+    }
+
+    inline fn frictionPart(s: GatherSource, comptime which: u1) PartX8 {
+        return .load(&s.g.constraints, if (which == 0) off_friction1 else off_friction2);
+    }
+
+    inline fn storeFrictionLambda(s: GatherSource, comptime which: u1, lambda: V) void {
+        store1(&s.g.constraints, if (which == 0) off_friction1 else off_friction2, off_part_lambda, lambda);
+    }
+
+    inline fn tangent1(s: GatherSource) Vec3x8 {
+        return .fromGroup(load4(&s.g.constraints, 0, off_tangent1));
+    }
+
+    inline fn tangent2(s: GatherSource) Vec3x8 {
+        return .fromGroup(load4(&s.g.constraints, 0, off_tangent2));
+    }
+
+    inline fn normal(s: GatherSource) Vec3x8 {
+        return .fromGroup(load4(&s.g.constraints, 0, off_normal));
+    }
+
+    inline fn angularPart(s: GatherSource) AngularPartX8 {
+        return .load(&s.g.constraints, off_angular);
+    }
+
+    inline fn storeAngularLambda(s: GatherSource, lambda: V) void {
+        store1(&s.g.constraints, off_angular, off_angular_lambda, lambda);
+    }
+};
+
+/// Zolt (Phase 14, class A): contact point `p` of the 8 lanes of a LaneGroup
+const PointX8 = struct {
+    non_penetration_constraint: PartX8,
+    distance_to_friction_center: V,
+};
+
+/// Zolt (Phase 14, class A): the step constant data and the lambdas of a planned group of 8 dynamic vs dynamic contact
+/// constraints in lane order (lane i of every vector belongs to constraint i), and the motion properties and point
+/// counts of the lanes (see "LaneGroups" at the top of this file). Built once per step at the warm start of a planned
+/// batch (buildLanes), read and updated in its velocity iterations (solvePlannedLanes); the lambdas go back to the
+/// constraints after its last velocity iteration (writeBackLanes). The velocities stay in the motion properties.
+/// 3,840 bytes on 64 bit targets: 480 bytes per lane.
+/// - Point p of a lane with fewer points holds a copy of the lane's point 0 (what contactPoints gathers); its lambda is
+///   never written back. Points from the group's largest number of points on are not written.
+/// - Lanes from `num` on (a tail group) are copies of lane 0 and are never written back.
+pub const LaneGroup = struct {
+    friction_constraint1: PartX8,
+    friction_constraint2: PartX8,
+    angular_friction_constraint: AngularPartX8,
+    points: [ContactConstraintManager.max_contact_points]PointX8,
+    ws_normal: Vec3x8,
+    tangent1: Vec3x8,
+    tangent2: Vec3x8,
+    combined_friction: V,
+    inv_mass1: V,
+    inv_mass2: V,
+    motion_properties1: [lanes]*MotionProperties,
+    motion_properties2: [lanes]*MotionProperties,
+    num_contact_points: [lanes]u32,
+
+    comptime {
+        // 480 bytes per lane on 64 bit targets, in both precisions (only f32 parts and pointers: 8 bytes less per lane
+        // with 4 byte pointers)
+        if (@sizeOf(usize) == 8)
+            std.debug.assert(@sizeOf(LaneGroup) == lanes * 480);
+    }
+};
+
+const LaneSource = struct {
+    b: *LaneGroup,
+
+    const PointRef = *PointX8;
+
+    inline fn motionProperties1(s: LaneSource) *const [lanes]*MotionProperties {
+        return &s.b.motion_properties1;
+    }
+
+    inline fn motionProperties2(s: LaneSource) *const [lanes]*MotionProperties {
+        return &s.b.motion_properties2;
+    }
+
+    inline fn numContactPoints(s: LaneSource) *const [lanes]u32 {
+        return &s.b.num_contact_points;
+    }
+
+    inline fn point(s: LaneSource, p: u32, comptime masked: bool) PointRef {
+        _ = masked;
+        return &s.b.points[p];
+    }
+
+    inline fn pointLambda(_: LaneSource, r: *const PointRef) V {
+        return r.*.non_penetration_constraint.total_lambda;
+    }
+
+    inline fn pointDistance(_: LaneSource, r: *const PointRef) V {
+        return r.*.distance_to_friction_center;
+    }
+
+    inline fn pointPart(_: LaneSource, r: *const PointRef) PartX8 {
+        return r.*.non_penetration_constraint;
+    }
+
+    inline fn storePointLambda(_: LaneSource, r: *const PointRef, lambda: V) void {
+        r.*.non_penetration_constraint.total_lambda = lambda;
+    }
+
+    inline fn combinedFriction(s: LaneSource) V {
+        return s.b.combined_friction;
+    }
+
+    inline fn inverseMasses(s: LaneSource) [2]V {
+        return .{ s.b.inv_mass1, s.b.inv_mass2 };
+    }
+
+    inline fn frictionPart(s: LaneSource, comptime which: u1) PartX8 {
+        return if (which == 0) s.b.friction_constraint1 else s.b.friction_constraint2;
+    }
+
+    inline fn storeFrictionLambda(s: LaneSource, comptime which: u1, lambda: V) void {
+        if (which == 0) s.b.friction_constraint1.total_lambda = lambda else s.b.friction_constraint2.total_lambda = lambda;
+    }
+
+    inline fn tangent1(s: LaneSource) Vec3x8 {
+        return s.b.tangent1;
+    }
+
+    inline fn tangent2(s: LaneSource) Vec3x8 {
+        return s.b.tangent2;
+    }
+
+    inline fn normal(s: LaneSource) Vec3x8 {
+        return s.b.ws_normal;
+    }
+
+    inline fn angularPart(s: LaneSource) AngularPartX8 {
+        return s.b.angular_friction_constraint;
+    }
+
+    inline fn storeAngularLambda(s: LaneSource, lambda: V) void {
+        s.b.angular_friction_constraint.total_lambda = lambda;
+    }
+};
+
 /// Add the lambda of contact point `p` to the max impulses (the loop at the start of solveVelocityConstraint).
 /// `masked`: lanes with fewer points skip the point.
-inline fn addMaxLambda(g: *const Group, p: u32, comptime masked: bool, max_linear_lambda: *V, max_angular_lambda: *V) void {
-    const points = if (masked) contactPoints(g, p) else g.constraints;
-    const extra: usize = if (masked) 0 else off_points + p * @sizeOf(ContactPoint);
-    const lambda = load1(&points, extra, off_point_lambda);
-    const distance_to_friction_center = load1(&points, extra, off_point_distance);
+inline fn addMaxLambda(comptime Source: type, src: Source, p: u32, comptime masked: bool, max_linear_lambda: *V, max_angular_lambda: *V) void {
+    const r = src.point(p, masked);
+    const lambda = src.pointLambda(&r);
+    const distance_to_friction_center = src.pointDistance(&r);
     if (masked) {
-        const point_active = @as(U, @splat(p)) < @as(U, g.num_contact_points);
+        const point_active = @as(U, @splat(p)) < @as(U, src.numContactPoints().*);
         max_linear_lambda.* = @select(f32, point_active, max_linear_lambda.* + lambda, max_linear_lambda.*);
         max_angular_lambda.* = @select(f32, point_active, max_angular_lambda.* + distance_to_friction_center * lambda, max_angular_lambda.*);
     } else {
@@ -490,10 +737,9 @@ inline fn addMaxLambda(g: *const Group, p: u32, comptime masked: bool, max_linea
 
 /// Solve the non-penetration constraint of contact point `p`. `masked`: lanes with fewer points skip the point.
 /// Returns the lanes that applied an impulse.
-inline fn solveContactPoint(g: *const Group, p: u32, comptime masked: bool, v: *Velocities, ws_normal: Vec3x8, inv_mass1: V, inv_mass2: V) M {
-    const points = if (masked) contactPoints(g, p) else g.constraints;
-    const extra: usize = if (masked) 0 else off_points + p * @sizeOf(ContactPoint);
-    var non_penetration_constraint: PartX8 = .load(&points, extra);
+inline fn solveContactPoint(comptime Source: type, src: Source, p: u32, comptime masked: bool, v: *Velocities, ws_normal: Vec3x8, inv_mass1: V, inv_mass2: V) M {
+    const r = src.point(p, masked);
+    var non_penetration_constraint: PartX8 = src.pointPart(&r);
 
     // Calculate impulse
     var total_lambda = non_penetration_constraint.solveVelocityConstraintGetTotalLambda(v, ws_normal);
@@ -502,30 +748,41 @@ inline fn solveContactPoint(g: *const Group, p: u32, comptime masked: bool, v: *
     total_lambda = max(total_lambda, zero);
 
     // Apply impulse
-    const point_active = if (masked) @as(U, @splat(p)) < @as(U, g.num_contact_points) else undefined;
+    const point_active = if (masked) @as(U, @splat(p)) < @as(U, src.numContactPoints().*) else undefined;
     const applied = non_penetration_constraint.solveVelocityConstraintApplyLambda(v, inv_mass1, inv_mass2, ws_normal, total_lambda, !masked, point_active);
-    store1(&points, extra, off_point_lambda, non_penetration_constraint.total_lambda);
+    src.storePointLambda(&r, non_penetration_constraint.total_lambda);
     return applied;
 }
 
 /// ContactConstraintManager.solveVelocityConstraint for the dynamic vs dynamic constraints of a group. Lanes `num`
 /// and up are copies of lane 0. Returns true when a lane below `num` applied an impulse.
 fn solveGroup(g: *const Group, num: u32) bool {
-    const c = &g.constraints;
+    return solveGroupFrom(GatherSource, .{ .g = g }, num);
+}
+
+/// Zolt (Phase 14, class A): solveGroup for a LaneGroup
+fn solveGroupLanes(b: *LaneGroup, num: u32) bool {
+    return solveGroupFrom(LaneSource, .{ .b = b }, num);
+}
+
+/// The kernel of solveGroup with the step constant data and the lambdas from `src` (GatherSource or LaneSource)
+inline fn solveGroupFrom(comptime Source: type, src: Source, num: u32) bool {
+    const motion_properties1 = src.motionProperties1();
+    const motion_properties2 = src.motionProperties2();
 
     // Get velocities
     var v: Velocities = .{
-        .linear_velocity1 = loadVelocities(&g.motion_properties1, false),
-        .angular_velocity1 = loadVelocities(&g.motion_properties1, true),
-        .linear_velocity2 = loadVelocities(&g.motion_properties2, false),
-        .angular_velocity2 = loadVelocities(&g.motion_properties2, true),
+        .linear_velocity1 = loadVelocities(motion_properties1, false),
+        .angular_velocity1 = loadVelocities(motion_properties1, true),
+        .linear_velocity2 = loadVelocities(motion_properties2, false),
+        .angular_velocity2 = loadVelocities(motion_properties2, true),
     };
 
     var any_impulse_applied = false_mask;
 
     // The number of contact points of the lanes. Points below min_points exist in every lane.
-    const min_points = @reduce(.Min, @as(U, g.num_contact_points));
-    const max_points = @reduce(.Max, @as(U, g.num_contact_points));
+    const min_points = @reduce(.Min, @as(U, src.numContactPoints().*));
+    const max_points = @reduce(.Max, @as(U, src.numContactPoints().*));
 
     // Calculate max impulse that can be applied. Note that we're using the non-penetration impulse from the previous iteration here.
     // We do this because non-penetration is more important so is solved last (the last things that are solved in an iterative solver
@@ -536,27 +793,27 @@ fn solveGroup(g: *const Group, num: u32) bool {
     {
         var p: u32 = 0;
         while (p < min_points) : (p += 1)
-            addMaxLambda(g, p, false, &max_linear_lambda, &max_angular_lambda);
+            addMaxLambda(Source, src, p, false, &max_linear_lambda, &max_angular_lambda);
         while (p < max_points) : (p += 1)
-            addMaxLambda(g, p, true, &max_linear_lambda, &max_angular_lambda);
-        const tangent2_group = load4(c, 0, off_tangent2); // tangent2, combined_friction
-        max_linear_lambda *= tangent2_group[3];
-        max_angular_lambda *= tangent2_group[3];
+            addMaxLambda(Source, src, p, true, &max_linear_lambda, &max_angular_lambda);
+        const combined_friction = src.combinedFriction();
+        max_linear_lambda *= combined_friction;
+        max_angular_lambda *= combined_friction;
     }
 
-    const mass_group = load4(c, 0, off_inv_mass1); // inv_mass1, inv_inertia_scale1, inv_mass2, inv_inertia_scale2
-    const inv_mass1 = mass_group[0];
-    const inv_mass2 = mass_group[2];
+    const inv_masses = src.inverseMasses();
+    const inv_mass1 = inv_masses[0];
+    const inv_mass2 = inv_masses[1];
 
     // First apply friction constraint (non-penetration is more important than friction)
     {
-        var friction_constraint1: PartX8 = .load(c, off_friction1);
-        var friction_constraint2: PartX8 = .load(c, off_friction2);
+        var friction_constraint1: PartX8 = src.frictionPart(0);
+        var friction_constraint2: PartX8 = src.frictionPart(1);
         const linear_friction_active = (friction_constraint1.effective_mass != zero) | (friction_constraint2.effective_mass != zero);
         if (@reduce(.Or, linear_friction_active)) {
             // Calculate tangents
-            const tangent1: Vec3x8 = .fromGroup(load4(c, 0, off_tangent1));
-            const tangent2: Vec3x8 = .fromGroup(load4(c, 0, off_tangent2));
+            const tangent1: Vec3x8 = src.tangent1();
+            const tangent2: Vec3x8 = src.tangent2();
 
             // Calculate impulse to stop motion in tangential direction
             var lambda1 = friction_constraint1.solveVelocityConstraintGetTotalLambda(&v, tangent1);
@@ -579,20 +836,20 @@ fn solveGroup(g: *const Group, num: u32) bool {
                 any_impulse_applied |= friction_constraint1.solveVelocityConstraintApplyLambda(&v, inv_mass1, inv_mass2, tangent1, lambda1, false, linear_friction_active);
                 any_impulse_applied |= friction_constraint2.solveVelocityConstraintApplyLambda(&v, inv_mass1, inv_mass2, tangent2, lambda2, false, linear_friction_active);
             }
-            store1(c, off_friction1, off_part_lambda, friction_constraint1.total_lambda);
-            store1(c, off_friction2, off_part_lambda, friction_constraint2.total_lambda);
+            src.storeFrictionLambda(0, friction_constraint1.total_lambda);
+            src.storeFrictionLambda(1, friction_constraint2.total_lambda);
         }
     }
 
-    const ws_normal: Vec3x8 = .fromGroup(load4(c, 0, off_normal));
+    const ws_normal: Vec3x8 = src.normal();
 
     // Apply angular friction
     {
-        var angular_friction_constraint: AngularPartX8 = .load(c, off_angular);
+        var angular_friction_constraint: AngularPartX8 = src.angularPart();
         const angular_friction_active = angular_friction_constraint.effective_mass != zero;
         if (@reduce(.Or, angular_friction_active)) {
             any_impulse_applied |= angular_friction_constraint.solveVelocityConstraint(&v, ws_normal, -max_angular_lambda, max_angular_lambda, angular_friction_active);
-            store1(c, off_angular, off_angular_lambda, angular_friction_constraint.total_lambda);
+            src.storeAngularLambda(angular_friction_constraint.total_lambda);
         }
     }
 
@@ -600,9 +857,9 @@ fn solveGroup(g: *const Group, num: u32) bool {
     {
         var p: u32 = 0;
         while (p < min_points) : (p += 1)
-            any_impulse_applied |= solveContactPoint(g, p, false, &v, ws_normal, inv_mass1, inv_mass2);
+            any_impulse_applied |= solveContactPoint(Source, src, p, false, &v, ws_normal, inv_mass1, inv_mass2);
         while (p < max_points) : (p += 1)
-            any_impulse_applied |= solveContactPoint(g, p, true, &v, ws_normal, inv_mass1, inv_mass2);
+            any_impulse_applied |= solveContactPoint(Source, src, p, true, &v, ws_normal, inv_mass1, inv_mass2);
     }
 
     // Apply changed velocities (ContactConstraintManager.setVelocities)
@@ -616,10 +873,10 @@ fn solveGroup(g: *const Group, num: u32) bool {
     const angular_velocity2 = toVec3s(v.angular_velocity2);
     inline for (0..lanes) |i| {
         if (write_back & (1 << i) != 0) {
-            g.motion_properties1[i].applyLinearVelocityStep(linear_velocity1[i]);
-            g.motion_properties1[i].applyAngularVelocityStep(angular_velocity1[i]);
-            g.motion_properties2[i].applyLinearVelocityStep(linear_velocity2[i]);
-            g.motion_properties2[i].applyAngularVelocityStep(angular_velocity2[i]);
+            motion_properties1[i].applyLinearVelocityStep(linear_velocity1[i]);
+            motion_properties1[i].applyAngularVelocityStep(angular_velocity1[i]);
+            motion_properties2[i].applyLinearVelocityStep(linear_velocity2[i]);
+            motion_properties2[i].applyAngularVelocityStep(angular_velocity2[i]);
         }
     }
     return true;
@@ -830,4 +1087,283 @@ pub noinline fn solvePlanned(manager: *ContactConstraintManager, constraint_offs
         any_impulse_applied = manager.solveVelocityConstraints(constraint_offsets[i..]) or any_impulse_applied;
 
     return any_impulse_applied;
+}
+
+/// Zolt (Phase 14, class A): the number of LaneGroups of a batch with `num_dynamic` planned dynamic vs dynamic contacts:
+/// its full groups and a tail of min_lanes or more (the groups of solvePlanned), floor((num_dynamic + lanes - min_lanes)
+/// / lanes)
+pub fn numLaneGroups(num_dynamic: u32) u32 {
+    return num_dynamic / lanes + @intFromBool(num_dynamic % lanes >= min_lanes);
+}
+
+/// Zolt (Phase 14, class A): an upper bound on the LaneGroups that the planned batches of an island claim in a step:
+/// `num_contacts` contacts in the island and at most `max_batches` batches in its parallel splits
+/// (LargeIslandSplitter.maxParallelBatches). A planned batch has at least min_lanes contacts, and d planned contacts
+/// take numLaneGroups(d) = floor((d + lanes - min_lanes) / lanes) groups. The contacts of the batches are disjoint, so
+/// the island claims at most floor((num_contacts + (lanes - min_lanes) * b) / lanes) groups with b =
+/// min(max_batches, num_contacts / min_lanes) planned batches.
+pub fn laneGroupBound(num_contacts: u32, max_batches: u32) u64 {
+    const batches: u64 = @min(max_batches, num_contacts / min_lanes);
+    return (@as(u64, num_contacts) + (lanes - min_lanes) * batches) / lanes;
+}
+
+comptime {
+    // numLaneGroups is floor((d + lanes - min_lanes) / lanes), which laneGroupBound adds up
+    for (0..max_chunk + 1) |d|
+        std.debug.assert(numLaneGroups(d) == (d + lanes - min_lanes) / lanes);
+}
+
+/// Zolt (Phase 14, class A): the marker in the high 8 bits of a lane word (see "LaneGroups" at the top of this file).
+/// LargeIslandSplitter.splitIsland writes split indices (below 32) into the words that hold the lane words and a plan
+/// word has 0x80 in its high 8 bits, so neither is taken for a lane word.
+pub const lane_marker: u32 = 0x4c00_0000;
+
+/// The bits of a lane word that hold the marker, the others hold the index of the batch's first LaneGroup
+pub const lane_marker_mask: u32 = 0xff00_0000;
+
+/// The index of a first LaneGroup is below this (24 bits): PhysicsSystem never holds more LaneGroups
+pub const max_lane_groups: u32 = 1 << 24;
+
+/// The lane word of a batch whose velocity iterations gather from the constraints (no marker)
+pub const no_lanes: u32 = 0;
+
+/// The lane word of a batch whose LaneGroups start at `first`
+pub fn laneWord(first: u32) u32 {
+    std.debug.assert(first < max_lane_groups);
+    return lane_marker | first;
+}
+
+/// Zolt (Phase 14, class A): the heap memory of the LaneGroups of the planned batches of a step, kept between updates
+/// (ContactConstraintManager.simd_lanes; PhysicsSystem grows it, claims from it and records the demand, see
+/// "LaneGroups" at the top of this file). One block: a BlockHeader, then `capacity` LaneGroups. 16 bytes.
+pub const SimdLanes = struct {
+    /// The block (null: none, every planned batch gathers)
+    block: ?*BlockHeader = null,
+    /// The number of LaneGroups of the block (at most max_lane_groups)
+    capacity: u32 = 0,
+    /// The most LaneGroups that a step asked for since the last growth check: the claims of a step that had a block
+    /// (the counter counts them also past the capacity), the bound of a step without one (laneGroupBound). See
+    /// PhysicsSystem.growSimdLanes.
+    demand: u32 = 0,
+
+    /// The start of the block: the bump counter on its own cache line (PortingGuide section 9: an add per planned batch
+    /// from every SolveVelocityConstraints job). The LaneGroups follow, cache line aligned.
+    pub const BlockHeader = struct {
+        /// The LaneGroups claimed in the current step (also past the capacity: then the claim failed)
+        claimed: std.atomic.Value(u32) align(Core.cache_line_size) = .init(0),
+
+        comptime {
+            std.debug.assert(@sizeOf(BlockHeader) == Core.cache_line_size);
+        }
+    };
+
+    /// The bytes of a block of `capacity` LaneGroups
+    pub fn blockSize(capacity: u32) usize {
+        return @sizeOf(BlockHeader) + @as(usize, capacity) * @sizeOf(LaneGroup);
+    }
+
+    /// The LaneGroups of the block (none without a block)
+    pub fn groups(self: *const SimdLanes) []LaneGroup {
+        const block = self.block orelse return &.{};
+        const first: [*]LaneGroup = @ptrCast(@alignCast(@as([*]u8, @ptrCast(block)) + @sizeOf(BlockHeader)));
+        return first[0..self.capacity];
+    }
+
+    /// Replace the block with a new one of `capacity` LaneGroups (its counter at 0). The new block is allocated before
+    /// the old one is freed: on error.OutOfMemory nothing changes.
+    pub fn replace(self: *SimdLanes, allocator: std.mem.Allocator, capacity: u32) std.mem.Allocator.Error!void {
+        std.debug.assert(capacity > 0 and capacity <= max_lane_groups);
+        const memory = try allocator.alignedAlloc(u8, .fromByteUnits(Core.cache_line_size), blockSize(capacity));
+        self.free(allocator);
+        const block: *BlockHeader = @ptrCast(memory.ptr);
+        block.* = .{};
+        self.block = block;
+        self.capacity = capacity;
+    }
+
+    /// Free the block (between updates only); the demand is kept
+    pub fn free(self: *SimdLanes, allocator: std.mem.Allocator) void {
+        if (self.block) |block| {
+            const memory: [*]align(Core.cache_line_size) u8 = @ptrCast(block);
+            allocator.free(memory[0..blockSize(self.capacity)]);
+        }
+        self.block = null;
+        self.capacity = 0;
+    }
+
+    comptime {
+        // ContactConstraintManager keeps it in the free bytes at its end (16 bytes, 8 byte aligned on 64 bit targets)
+        if (@sizeOf(usize) == 8)
+            std.debug.assert(@sizeOf(SimdLanes) == 16 and @alignOf(SimdLanes) == 8);
+    }
+};
+
+/// The LaneGroups of a planned batch (laneGroups)
+pub const BatchLanes = struct {
+    /// The number of planned dynamic vs dynamic contacts (plannedCount of the plan word)
+    num_dynamic: u32,
+    /// Its numLaneGroups(num_dynamic) LaneGroups
+    groups: []LaneGroup,
+};
+
+/// Zolt (Phase 14, class A): the LaneGroups that the lane word of a planned batch of `num_contacts` contacts names in
+/// `groups` (all the LaneGroups of the step), with the batch's plan word. Null when the word has no marker (the batch
+/// gathers). Also null, never in a correct run, when the plan word holds no plan or the named groups do not lie in
+/// `groups`: that asserts in builds with asserts, and the batch gathers otherwise (with the same bits, as long as all
+/// its velocity iterations decide alike, which they do: they read the same two words and the same `groups`, which do
+/// not change during an update).
+pub fn laneGroups(lane_word: u32, plan_word: u32, num_contacts: usize, groups: []LaneGroup) ?BatchLanes {
+    if (lane_word & lane_marker_mask != lane_marker)
+        return null;
+    const num_dynamic = plannedCount(plan_word, num_contacts) orelse {
+        if (Core.enable_asserts) std.debug.assert(false); // A lane word is only written after planBatch
+        return null;
+    };
+    const num_groups = numLaneGroups(num_dynamic);
+    const first = lane_word & ~lane_marker_mask;
+    if (num_groups == 0 or first > groups.len or num_groups > groups.len - first) {
+        if (Core.enable_asserts) std.debug.assert(false); // The claim of the LaneGroups checked that they fit
+        return null;
+    }
+    return .{ .num_dynamic = num_dynamic, .groups = groups[first..][0..num_groups] };
+}
+
+/// Copy the step constant data and the lambdas of a group into its LaneGroup (in place, field by field, with no
+/// arithmetic: the bits, NaN payloads and signed zeros included). Points from the group's largest number of points on
+/// are not written.
+fn buildLaneGroup(g: *const Group, b: *LaneGroup) void {
+    const c = &g.constraints;
+    b.motion_properties1 = g.motion_properties1;
+    b.motion_properties2 = g.motion_properties2;
+    b.num_contact_points = g.num_contact_points;
+    const tangent2_group = load4(c, 0, off_tangent2); // tangent2, combined_friction
+    b.tangent2 = .fromGroup(tangent2_group);
+    b.combined_friction = tangent2_group[3];
+    b.tangent1 = .fromGroup(load4(c, 0, off_tangent1));
+    b.ws_normal = .fromGroup(load4(c, 0, off_normal));
+    const mass_group = load4(c, 0, off_inv_mass1); // inv_mass1, inv_inertia_scale1, inv_mass2, inv_inertia_scale2
+    b.inv_mass1 = mass_group[0];
+    b.inv_mass2 = mass_group[2];
+    b.friction_constraint1 = .load(c, off_friction1);
+    b.friction_constraint2 = .load(c, off_friction2);
+    b.angular_friction_constraint = .load(c, off_angular);
+    const max_points = @reduce(.Max, @as(U, g.num_contact_points));
+    var p: u32 = 0;
+    while (p < max_points) : (p += 1) {
+        const points = contactPoints(g, p);
+        b.points[p].non_penetration_constraint = .load(&points, 0);
+        b.points[p].distance_to_friction_center = load1(&points, 0, off_point_distance);
+    }
+}
+
+/// Zolt (Phase 14, class A): build the LaneGroups of a batch that planBatch planned in this step, after its warm start
+/// (see "LaneGroups" at the top of this file): `constraint_offsets` in the planned order, `num_dynamic` the planned
+/// count of its plan word, `groups` numLaneGroups(num_dynamic) LaneGroups. The groups and their lanes are those of
+/// solvePlanned (the same tail rule and the same padding). Never inlined.
+pub noinline fn buildLanes(manager: *const ContactConstraintManager, constraint_offsets: []const u32, num_dynamic: u32, groups: []LaneGroup) void {
+    std.debug.assert(num_dynamic <= constraint_offsets.len and groups.len == numLaneGroups(num_dynamic));
+    var group: Group = undefined;
+    var i: u32 = 0;
+    var k: usize = 0;
+    while (num_dynamic - i >= lanes) : ({
+        i += lanes;
+        k += 1;
+    }) {
+        inline for (0..lanes) |l|
+            setLane(manager, &group, l, constraint_offsets[i + l]);
+        buildLaneGroup(&group, &groups[k]);
+    }
+    const num = num_dynamic - i;
+    if (num >= min_lanes) {
+        for (0..num) |l|
+            setLane(manager, &group, l, constraint_offsets[i + l]);
+
+        // Fill the free lanes with copies of lane 0
+        for (num..lanes) |l| {
+            group.constraints[l] = group.constraints[0];
+            group.motion_properties1[l] = group.motion_properties1[0];
+            group.motion_properties2[l] = group.motion_properties2[0];
+            group.num_contact_points[l] = group.num_contact_points[0];
+        }
+        buildLaneGroup(&group, &groups[k]);
+    }
+}
+
+/// Zolt (Phase 14, class A): true when a lane word has the marker of laneWord: the batch's warm start built LaneGroups
+/// (solvePlannedLanes and writeBackLanes check the rest of the word)
+pub inline fn hasLanes(lane_word: u32) bool {
+    return lane_word & lane_marker_mask == lane_marker;
+}
+
+/// Zolt (Phase 14, class A): solvePlanned for a batch whose lane word has the marker (hasLanes): the groups read and
+/// write the LaneGroups that the word names in `manager.simd_lanes` (laneGroups), the scalar rest (a tail under
+/// min_lanes, then the contacts with a static or kinematic body) reads and writes the constraints. A word that names no
+/// LaneGroups (not in a correct run, laneGroups asserts with asserts on) takes solvePlanned, with the same bits. Returns
+/// true when any impulse was applied. Never inlined.
+pub noinline fn solvePlannedLanes(manager: *ContactConstraintManager, constraint_offsets: []const u32, plan_word: u32, lane_word: u32) bool {
+    const batch_lanes = laneGroups(lane_word, plan_word, constraint_offsets.len, manager.simd_lanes.groups()) orelse
+        return solvePlanned(manager, constraint_offsets, plan_word);
+    return solveLanes(manager, constraint_offsets, batch_lanes);
+}
+
+/// The groups of a batch from its LaneGroups, the rest with the scalar solver (solvePlannedLanes)
+inline fn solveLanes(manager: *ContactConstraintManager, constraint_offsets: []const u32, batch_lanes: BatchLanes) bool {
+    const num_dynamic = batch_lanes.num_dynamic;
+    const groups = batch_lanes.groups;
+    std.debug.assert(num_dynamic <= constraint_offsets.len and groups.len == numLaneGroups(num_dynamic));
+
+    var any_impulse_applied = false;
+
+    // Full groups
+    var i: u32 = 0;
+    var k: usize = 0;
+    while (num_dynamic - i >= lanes) : ({
+        i += lanes;
+        k += 1;
+    })
+        any_impulse_applied = solveGroupLanes(&groups[k], lanes) or any_impulse_applied;
+
+    // The tail when it can fill a group
+    const num = num_dynamic - i;
+    if (num >= min_lanes) {
+        any_impulse_applied = solveGroupLanes(&groups[k], num) or any_impulse_applied;
+        i = num_dynamic;
+    }
+
+    // The scalar solver: a tail of fewer than min_lanes dynamic vs dynamic constraints, then the contacts with a static
+    // or kinematic body
+    if (i < constraint_offsets.len)
+        any_impulse_applied = manager.solveVelocityConstraints(constraint_offsets[i..]) or any_impulse_applied;
+
+    return any_impulse_applied;
+}
+
+/// Zolt (Phase 14, class A): after the last velocity iteration of a batch, before storeAppliedImpulses: copy the
+/// lambdas of the LaneGroups that the batch's lane word names (laneGroups, nothing when it names none) back to its
+/// constraints. Never inlined.
+pub noinline fn writeBackLanes(manager: *const ContactConstraintManager, constraint_offsets: []const u32, plan_word: u32, lane_word: u32) void {
+    const batch_lanes = laneGroups(lane_word, plan_word, constraint_offsets.len, manager.simd_lanes.groups()) orelse return;
+    writeBack(manager, constraint_offsets, batch_lanes);
+}
+
+/// The lambdas of the LaneGroups of a batch to its constraints (writeBackLanes): only the lanes below a group's number
+/// of constraints (never a padded lane) and the points below a lane's number of points
+inline fn writeBack(manager: *const ContactConstraintManager, constraint_offsets: []const u32, batch_lanes: BatchLanes) void {
+    const num_dynamic = batch_lanes.num_dynamic;
+    const groups = batch_lanes.groups;
+    std.debug.assert(num_dynamic <= constraint_offsets.len and groups.len == numLaneGroups(num_dynamic));
+    var i: u32 = 0;
+    for (groups) |*b| {
+        const num = @min(num_dynamic - i, lanes);
+        inline for (0..lanes) |l| if (l < num) {
+            const constraint = Constraint.fromBase(manager.getConstraintBase(constraint_offsets[i + l]));
+            constraint.friction_constraint1.base1.total_lambda = b.friction_constraint1.total_lambda[l];
+            constraint.friction_constraint2.base1.total_lambda = b.friction_constraint2.total_lambda[l];
+            constraint.angular_friction_constraint.base1.base.total_lambda = b.angular_friction_constraint.total_lambda[l];
+            const points = constraint.getContactPoints();
+            for (0..b.num_contact_points[l]) |p|
+                points[p].non_penetration_constraint.base1.total_lambda = b.points[p].non_penetration_constraint.total_lambda[l];
+        };
+        i += num;
+    }
 }
