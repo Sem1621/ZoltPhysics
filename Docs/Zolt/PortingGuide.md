@@ -189,6 +189,32 @@ both types) when porting code needs them.
   stay are listed in `ALLOW` in `tools/check_codegen.py`. `zig build perf-budget` compares the instruction counts
   with C++ ([Roadmap.md](Roadmap.md), Phase 10).
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
+- **Line pinned layouts (class A speed work, Roadmap Phase 14, layout only).** Where a hot loop reads a few members of
+  many objects that do not stay in the L1 cache between two visits, each cache line that one visit touches is a miss,
+  so the cost is the number of distinct lines per object, not the instructions. CharacterVsCharacterCollisionSimple
+  reads 9 lines of every other character per query in Phase 13's layout, 6 in single precision after Phase 14
+  (CharacterBoundsCache.zig, Layout). Zig's auto layout of a plain struct does not keep declared neighbours together,
+  so such a layout is built and pinned explicitly:
+  - The members that the loop reads go into an extern struct with a fixed field order, one per precision when RVec3
+    changes their sizes (`SingleLayout`, `DoubleLayout`), with comptime asserts on their offsets.
+  - The owner holds that block `align(64)`. Zig's auto layout puts the most aligned field first, so an `align(64)`
+    field moves to offset 0 and the owner becomes 64 byte aligned. `allocator.create`, a struct field and a stack
+    variable honour that; temp memory (16 / 32 byte aligned blocks, section 9) cannot hold such an owner.
+  - The owner's other members follow the block in Zig's order, so the size of the block decides where they land.
+    Padding in the block (`reserved`) picks the size so that the members read together share lines (CharacterVirtual's
+    rotation, position and shape offset in one line, the block's tail on the line of CharacterBase.up).
+  - The owner pins the offsets of every member that the loop reads in a comptime block next to the list of what the
+    loop reads and in which lines, guarded by `@sizeOf(usize) == 8` and per precision. A test counts the lines per
+    case (CharacterBoundsCacheTests, "the cache lines that a rejected pair reads"), and another one checks the
+    alignment of created, embedded and stack objects at run time.
+  - The gain depends on what the loop reads: in CharacterBoundsCache the replay head of a sphere or a capsule fits in
+    the line after the key, a tapered capsule or a transformed tail (box, cylinder, convex hull) reads one line more,
+    and OffsetCenterOfMassShape addends one or two more.
+  - Re-tuning: a pinned assert fails when a member is added or moved, or when a compiler orders the fields
+    differently. Print the offsets (`@offsetOf` in a test), list the lines that the loop reads, move the padding or
+    the field order of the block until the line count is back, update the asserts and the line count test, and
+    measure the L1 misses per iteration with callgrind at the fixed geometry of `perf_budget.py --cache-sim` and at a
+    32 KB L1 (`--D1=32768,8,64`).
 - **`loadFloat3Unsafe` reads 16 bytes**, like Jolt's `sLoadFloat3Unsafe`. The 4 bytes after the `Float3`
   must belong to the same object. A `Vec3` / `Quat.loadFloat3Unsafe` call may read a struct member that a
   comptime `std.debug.assert(Vec3.canLoadFloat3Unsafe(T, "member"))` at the struct covers (see
@@ -617,6 +643,14 @@ results are reproducible as long as the code follows these rules:
     result. The proof goes into the header of the file (see CharacterBoundsCache.zig). Tests compare the replay with
     Jolt's function as real numbers with the same NaN pattern, show that the decisions read no sign of a zero (inputs
     that differ only there), compare the decisions at their flips, and run the fallback paths end to end.
+    Phase 14 adds partial evaluation: a decision that reads only part of a Jolt value may compute just that part (the
+    translation of CharacterVsCharacterCollisionSimple's `transform2`, `CharacterBoundsCache.translation2`) when it
+    does the same operations on the same operands in the same order, so that its bits are Jolt's: `t + (0 - b)`
+    stays `add(negate)`, never `sub` (the sign of a zero sum differs), and a double precision sum is rounded to float
+    once, after the addition, as Jolt's ToMat44 does. A lane that can differ from Jolt's (the W of a Vec3 when an input's
+    W is not its Z) may only feed a guard whose fallback is Jolt's exact code. The full value is built with Jolt's code
+    wherever Jolt's value is used. A test compares the bits of every lane with Jolt's expression (signed zeros, values
+    far from the origin, overflows, infinities, NaNs).
 17. **Another sort algorithm (class A speed work, Roadmap Phase 12).** Jolt's QuickSort is not stable, so on equal
     elements its result depends on its exact steps: a different sort may replace it only where the sorted order is
     unique, and the code must prove that at run time. Core/KeySort.zig sorts records by a 64-bit key that the caller
